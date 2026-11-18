@@ -64,6 +64,9 @@ set -euo pipefail
 # ---------------------------------------------------------------------------
 
 REPO_ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
+# The udev rules every node that runs a dnv agent carries (layout.md,
+# Directory tree): the helper carries their texts as this checkout holds them.
+UDEV_SRC="$REPO_ROOT/deploy/udev"
 BIN_DIR="$REPO_ROOT/integtest/bin"
 DEPLOY_DIR="$REPO_ROOT/deploy"
 
@@ -598,6 +601,22 @@ cn_addr() { printf '%s:%s' "${CN_IP[$1]}" "$CN_GRPC_PORT"; }
 # verbs of the roles a guest does not have are never called there.
 # ---------------------------------------------------------------------------
 
+# udev_rules_source prints the helper's copy of the udev rules: one
+# UDEV_RULES entry per file of $UDEV_SRC, keyed by its name, holding its
+# text, which install_udev_rules writes on a node guest. It fails when
+# $UDEV_SRC holds no rule file.
+udev_rules_source() {
+	local f
+	printf 'declare -A UDEV_RULES=()\n'
+	for f in "$UDEV_SRC"/*.rules; do
+		[ -f "$f" ] || {
+			echo "udev_rules_source: no rule file in $UDEV_SRC" >&2
+			return 1
+		}
+		printf 'UDEV_RULES[%q]=%q\n' "${f##*/}" "$(cat "$f")"
+	done
+}
+
 helper_source() {
 	cat <<EOF
 #!/usr/bin/env bash
@@ -613,7 +632,7 @@ NVMET="$NVMET"
 NQN_PREFIX="$NQN_PREFIX"
 NQN_CSI="$NQN_CSI"
 DM_PREFIX="dnv"
-UDEV_RULE=/etc/udev/rules.d/63-dnv-md.rules
+UDEV_DIR=/etc/udev/rules.d
 ETCD_NAME="$ETCD_NAME"
 TRSVCID_MIN="$TRSVCID_MIN"
 TRSVCID_MAX="$TRSVCID_MAX"
@@ -622,6 +641,7 @@ SMOKE_IMAGE_REF="$SMOKE_IMAGE_REF"
 IMAGE_REF="$IMAGE_REF"
 DISC_NQN=nqn.2014-08.org.nvmexpress.discovery
 EOF
+	udev_rules_source || return 1
 	cat <<'HELPER_EOF'
 
 # --- the guest's facts and work directory --------------------------------------
@@ -1123,33 +1143,41 @@ md_names() {
 	return 0
 }
 
-# --- the md assembly mask -----------------------------------------------------------
+# --- the udev rules of deploy/udev/ ----------------------------------------------------
 
-install_udev_rule() {
-	local want
-	want=$(
-		cat <<'RULE_EOF'
-ACTION=="add|change", SUBSYSTEM=="block", ENV{ID_FS_TYPE}=="linux_raid_member", \
-  IMPORT{program}="/sbin/mdadm --examine --export $devnode"
-ENV{MD_NAME}=="dnv-*|*:dnv-*", ENV{SYSTEMD_READY}="0"
-RULE_EOF
-	)
-	if [ -s "$UDEV_RULE" ] && [ "$(cat "$UDEV_RULE" 2>/dev/null)" = "$want" ]; then
-		udevadm control --reload >/dev/null 2>&1
-		echo present
-		return 0
-	fi
-	printf '%s\n' "$want" >"$UDEV_RULE" || {
-		echo "install_udev_rule: writing $UDEV_RULE failed" >&2
+# install_udev_rules writes the udev rules every node that runs a dnv agent
+# carries, the files of deploy/udev/ whose texts this helper carries
+# (UDEV_RULES), into $UDEV_DIR, each only when its text differs and then by
+# a rename, and reloads udev (architecture.md, Components: invocation
+# reference). It prints "installed" when it wrote a file, "present" when
+# every file was already right.
+install_udev_rules() {
+	local name word=present
+	[ "${#UDEV_RULES[@]}" -gt 0 ] || {
+		echo "install_udev_rules: the helper carries no udev rule" >&2
 		return 1
 	}
+	for name in "${!UDEV_RULES[@]}"; do
+		[ "$(cat "$UDEV_DIR/$name" 2>/dev/null)" = "${UDEV_RULES[$name]}" ] &&
+			continue
+		if ! printf '%s\n' "${UDEV_RULES[$name]}" >"$UDEV_DIR/.$name.tmp" ||
+			! mv -f "$UDEV_DIR/.$name.tmp" "$UDEV_DIR/$name"; then
+			rm -f "$UDEV_DIR/.$name.tmp"
+			echo "install_udev_rules: writing $UDEV_DIR/$name failed" >&2
+			return 1
+		fi
+		word=installed
+	done
 	udevadm control --reload >/dev/null 2>&1
-	echo installed
+	echo "$word"
 	return 0
 }
 
-remove_udev_rule() {
-	rm -f "$UDEV_RULE"
+remove_udev_rules() {
+	local name
+	for name in "${!UDEV_RULES[@]}"; do
+		rm -f "$UDEV_DIR/$name" "$UDEV_DIR/.$name.tmp"
+	done
 	udevadm control --reload >/dev/null 2>&1
 	echo removed
 	return 0
@@ -1185,8 +1213,8 @@ dn_up() {
 		echo "dn_up: mkdir $dir failed" >&2
 		return 1
 	}
-	install_udev_rule >/dev/null || {
-		echo "dn_up: installing the md assembly mask failed" >&2
+	install_udev_rules >/dev/null || {
+		echo "dn_up: installing the udev rules of deploy/udev failed" >&2
 		return 1
 	}
 	if [ ! -f "$backing" ]; then
@@ -1227,7 +1255,8 @@ dn_up() {
 }
 
 # dn_cleanup takes a disk-node guest back: the agent, stray arrays, the
-# nvmet objects, the dm devices top-down, the loop device, the mask, $WORK.
+# nvmet objects, the dm devices top-down, the loop device, the udev rules,
+# $WORK.
 dn_cleanup() { # [extra host nqn…]
 	kill_agents dn >/dev/null
 	resume_suspended
@@ -1246,7 +1275,7 @@ dn_cleanup() { # [extra host nqn…]
 	ports_sweep
 	resume_suspended
 	loop_teardown
-	remove_udev_rule >/dev/null
+	remove_udev_rules >/dev/null
 	rm -rf "$WORK"
 	echo cleaned
 	return 0
@@ -1262,8 +1291,8 @@ dn_residue() {
 
 # --- the controller node ------------------------------------------------------------
 
-# cn_up starts the one cn agent of this guest, the md assembly mask before
-# it, and is idempotent. <ip> <grpc_port> <trsvcid>
+# cn_up starts the one cn agent of this guest, the udev rules of deploy/udev/
+# before it, and is idempotent. <ip> <grpc_port> <trsvcid>
 cn_up() {
 	local ip=$1 gport=$2 svcid=$3
 	local dir="$WORK/cn" store="$WORK/cn/store" log="$WORK/cn/agent.log" pid pat
@@ -1271,8 +1300,8 @@ cn_up() {
 		echo "cn_up: mkdir $dir failed" >&2
 		return 1
 	}
-	install_udev_rule >/dev/null || {
-		echo "cn_up: installing the md assembly mask failed" >&2
+	install_udev_rules >/dev/null || {
+		echo "cn_up: installing the udev rules of deploy/udev failed" >&2
 		return 1
 	}
 	pat="[-]-grpc-address $ip:$gport "
@@ -1299,7 +1328,7 @@ cn_up() {
 
 # cn_cleanup takes a controller-node guest back: the agent, the driver's and
 # dnv's host-facing subsystems, the dm stack top-down, the arrays, the leg
-# connections, the port, the mask, $WORK.
+# connections, the port, the udev rules, $WORK.
 cn_cleanup() { # [extra host nqn…]
 	local kind
 	kill_agents cn >/dev/null
@@ -1317,7 +1346,7 @@ cn_cleanup() { # [extra host nqn…]
 	resume_suspended
 	hosts_drop "$@"
 	ports_sweep
-	remove_udev_rule >/dev/null
+	remove_udev_rules >/dev/null
 	rm -rf "$WORK"
 	echo cleaned
 	return 0

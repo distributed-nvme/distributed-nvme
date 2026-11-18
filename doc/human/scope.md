@@ -649,6 +649,30 @@ Measured times are in [the introduction](introduction.md#status-and-limits-of-01
   has gone. State: accepted; a requirement, which
   [the introduction](introduction.md#requirements) names. Not seen in the
   lab.
+- **What a host wrote in a clone's source reaches the controller node.**
+  The primary reads a clone's source over an NVMe-oF connection, as a
+  device that carries none of dnv's names, so dnv's udev rules do not reach
+  it, nor the partitions the kernel finds on it from the source's partition
+  table. The system's own udev rules then act on what a host wrote at the
+  start of the source volume, or at the start of a partition in it:
+  - A bcache superblock. bcache is a Linux block cache, and the
+    bcache-tools package adds a udev rule that takes any device whose start
+    holds a bcache superblock. That rule takes the device or the partition
+    on the controller node, and the clone cannot read its source.
+  - A file system or a partition table. The system adds links under
+    `/dev/disk/by-uuid`, `by-label`, `by-partuuid` and `by-partlabel` from
+    it, so a look-up on the node by a label or a uuid that the host's data
+    also carries can lead to the host's device while the clone runs. A
+    host volume made from the same cloud image as the node carries the
+    node's own labels and uuids. A btrfs file system is also made known to
+    the kernel.
+
+  An md superblock or an LVM label there does no harm on a node prepared
+  as [the operations doc](operations.md#install-the-udev-rules-on-a-node)
+  says, and a controller node prepared that way mounts its own file
+  systems by device path, never by a label or a uuid. State: accepted. dnv
+  needs no bcache-tools, and a node without the package, or without its
+  udev rule, does not have the bcache case. Not seen in the lab.
 - **A clone build that keeps failing may start no failover.** Some ways of
   failing mark the primary unhealthy and others do not. The clone's
   namespaces stay inaccessible and the host waits, with no time limit,
@@ -778,14 +802,6 @@ Measured times are in [the introduction](introduction.md#status-and-limits-of-01
   make the snapshot. The snapshot then waits until a syncup comes for
   another reason. State: accepted; only an operator's own step makes it,
   and `blockdev --setrw` by hand ends it. Not seen in the lab.
-- **An old md superblock at the end of a new side can fail the leg.** The
-  end of a new side is never zeroed. A host of an earlier pool may have
-  written an md superblock of a format that sits at the end of a device,
-  and mdadm then refuses the new leg as a member of another array, so the
-  group reports an error. State: accepted. The failure is rare and shows
-  as an error. A host of a running pool can write the same at any time, so
-  zeroing the end of each new side would close only half of it. Not seen
-  in the lab.
 - **A disk node that stays healthy but cannot serve a new leg can still
   get the group's next repair.** When the worker gives up a repair because
   its new leg failed, it cancels the repair and creates the next one in
@@ -1076,8 +1092,10 @@ tutorials are [dnv on one machine](tutorial_all_in_one.md) and
 [dnv under Kubernetes on one machine](tutorial_csi.md). "Operations doc"
 names [the operations doc](operations.md), the procedures an operator
 follows by hand, which holds the forced-start guide, the steps for a pool
-made before the stripe bound and a planned restart of an agent so far, and
-gets the others as they are written. Every row with no tool
+made before the stripe bound and for a new volume refused for a thin id
+that holds data, a planned restart of an agent, a slow leg and the install
+of the udev rules on a node so far, and gets the others as they are
+written. Every row with no tool
 or no doc carries its note. Section 6.1 and the tables give some short
 steps; the section "Steps known today" below gives the longer ones.
 
@@ -1086,7 +1104,7 @@ steps; the section "Steps known today" below gives the longer ones.
 | Action | Tool today | Doc today | State |
 |---|---|---|---|
 | Add a disk node or a controller node | `dnvctl dn create`, `dnvctl cn create` | the tutorials | done |
-| Prepare a node: a udev rule on every node that keeps md's own assembly off dnv's arrays, the network and the firewall | none | the tutorials, in part | procedure to write, in the operations doc. Fix decided: a node check, a subcommand of `dnv-agent`, reports what a node lacks and how to fix it; files for nodes, with the udev rules, will ship with the programs. |
+| Prepare a node: the udev rules on every node that keep the system's own md assembly, LVM and bcache off dnv's devices, the LVM and md settings that go with them, the network and the firewall | the udev rules ship in `deploy/udev/` with the programs | the operations doc, for the udev rules and the two settings; the tutorials, for the udev rules | procedure written for the udev rules and the two settings; procedure to write for the network and the firewall. Fix decided: a node check, a subcommand of `dnv-agent`, reports what a node lacks and how to fix it. |
 | Disable a node | `dnvctl dn set-disabled`, `dnvctl cn set-disabled` | none | procedure to write, one line: when to disable |
 | Remove a node | `dnvctl dn delete`, `dnvctl cn delete`. Refused while a side or a cntlr is on it. | the teardown of the tutorials | procedure to write: drain first, check the leftovers. Fix decided: the delete asks the agent. |
 | Replace a dead disk node | leg repair moves its RAID1 legs; `dnvctl retired-leg delete` frees the retired ones | none | procedure to write. Fix later: a forced node delete. |

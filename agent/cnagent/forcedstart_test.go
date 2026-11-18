@@ -89,8 +89,8 @@ func (f *repFix) arrayName() string {
 // forced is the forced assembly of the data group's array from member with
 // one superblock update.
 func (f *repFix) forced(member, update string) string {
-	return "cmd mdadm --assemble " + f.mdDev + " --name " + f.arrayName() +
-		" --run --force --update=" + update + " " + member
+	return "cmd mdadm --assemble " + f.mdDev + " --metadata=1.2 --name " +
+		f.arrayName() + " --run --force --update=" + update + " " + member
 }
 
 // legUuid is the identity of the array member's superblock names.
@@ -121,7 +121,7 @@ func (f *repFix) assertNewIdentity(t *testing.T, old string) {
 }
 
 func zeroOf(member string) string {
-	return "cmd mdadm --zero-superblock " + member
+	return "cmd mdadm --zero-superblock --metadata=1.2 " + member
 }
 
 // examineOf is the read of member's superblock area (Md.ReadMember), the
@@ -238,8 +238,8 @@ func TestForcedStartFromANamedLeg(t *testing.T) {
 		f.forced(f.leg2, mdUpdateUuid),
 		f.add(f.leg1))
 	assertNoCall(t, f.node, zeroOf(f.leg2))
-	assertNoCall(t, f.node, "cmd mdadm --assemble "+f.mdDev+" --name "+
-		f.arrayName()+" /dev/")
+	assertNoCall(t, f.node, "cmd mdadm --assemble "+f.mdDev+
+		" --metadata=1.2 --name "+f.arrayName()+" /dev/")
 	assertOk(t, info.GetGrpIdToMdRaid()[testDataGrp], "grp data")
 	assertOk(t, info.GetSliceIdToDmPool()[testSlice], "pool")
 	if members := f.members(); len(members) != 2 {
@@ -1078,8 +1078,8 @@ func TestForcedStartActsOnlyOnADeliveredMark(t *testing.T) {
 	}
 	// md refuses the assembly of a group without a mark, as it does in the
 	// case the mark is for.
-	plain := "cmd mdadm --assemble " + f.mdDev + " --name " + f.arrayName() +
-		" /dev/"
+	plain := "cmd mdadm --assemble " + f.mdDev + " --metadata=1.2 --name " +
+		f.arrayName() + " /dev/"
 	f.node.mu.Lock()
 	f.node.failCmdAlways[plain] = "mdadm: " + f.mdDev + " assembled from " +
 		"1 drive - need all 2 to start it (use --run to insist)."
@@ -1202,14 +1202,21 @@ func TestForcedStartRefusesAStartedRepairsBadLeg(t *testing.T) {
 // naming leg 2 zeroes the repair's new leg alone and starts the array from
 // leg 2, and the bad leg, which the finish retires with its data kept, is
 // neither zeroed nor added, keeping its superblock while it serves, and is
-// not waited for while it is dead.
+// not waited for while it is dead. A new leg the primary that started the
+// repair had added carries the array's superblock, half copied, and is
+// zeroed; a new leg whose add never landed reads blank, and counts as zeroed
+// with no zero run, since a zero named for the 1.2 format fails on a member
+// with no superblock (Md.ZeroSuperblock). The record names the new leg
+// zeroed either way.
 func TestForcedStartBesideAStartedRepair(t *testing.T) {
 	for _, tc := range []struct {
-		name string
-		dead bool
+		name  string
+		dead  bool
+		blank bool
 	}{
-		{"the bad leg serving", false},
-		{"the bad leg dead", true},
+		{"the bad leg serving", false, false},
+		{"the bad leg dead", true, false},
+		{"the new leg blank", false, true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			f := downFix(t, repairReq(3, pb.RepStage_REP_STAGE_STARTED, false,
@@ -1217,17 +1224,38 @@ func TestForcedStartBesideAStartedRepair(t *testing.T) {
 			if !f.node.hasSuperblock(f.leg1) {
 				t.Fatalf("the fixture's bad leg carries no superblock")
 			}
+			// The standby fixture never adds the new leg.
+			if f.node.hasSuperblock(f.newLegDev) {
+				t.Fatalf("the fixture's new leg carries a superblock")
+			}
+			if !tc.blank {
+				f.node.setSuperblock(f.newLegDev, fakeSuperblock{
+					role: "Active device 0", recovery: "1024 sectors"})
+				f.node.sameArrayAs(f.newLegDev, f.leg2)
+			}
 			if tc.dead {
 				f.badLegDead()
 			}
+			logs := captureLogs(t)
 			info := f.syncup(t, withMark(
 				repairReq(4, pb.RepStage_REP_STAGE_STARTED, false,
 					repOpts{noSubsys: true}), testDataLeg2))
-			assertOrder(t, f.node,
-				examineOf(f.leg2),
-				zeroOf(f.newLegDev),
-				f.forced(f.leg2, mdUpdateUuid),
-				f.add(f.newLegDev))
+			if tc.blank {
+				assertNoCall(t, f.node, "--zero-superblock")
+				assertOrder(t, f.node,
+					examineOf(f.leg2),
+					examineOf(f.newLegDev),
+					f.forced(f.leg2, mdUpdateUuid),
+					f.add(f.newLegDev))
+			} else {
+				assertOrder(t, f.node,
+					examineOf(f.leg2),
+					zeroOf(f.newLegDev),
+					f.forced(f.leg2, mdUpdateUuid),
+					f.add(f.newLegDev))
+			}
+			assertForcedRecord(t, logs, testDataLeg2, mdUpdateUuid,
+				repNewLeg)
 			assertNoCall(t, f.node, zeroOf(f.leg1))
 			assertNoCall(t, f.node, zeroOf(f.leg2))
 			assertNoCall(t, f.node, f.add(f.leg1))
@@ -1243,8 +1271,11 @@ func TestForcedStartBesideAStartedRepair(t *testing.T) {
 // assembly: a zero that fails, or that did not answer, ends the pass for
 // the group before any assembly. The read after it names the forced start
 // (forcedStartNamed), and the re-send on that round tries again from the
-// first step: a zero the kernel completed while its run was killed is
-// answered again as done, and the start goes through.
+// first step: a member a refused zero left as it was is zeroed again, and a
+// member whose killed zero the kernel completed reads blank, which the pass
+// counts as zeroed with no zero run, since a zero named for the 1.2 format
+// fails on a member with no superblock (Md.ZeroSuperblock); the start goes
+// through and its record names the member zeroed either way.
 func TestForcedStartZeroEndsThePass(t *testing.T) {
 	for _, tc := range []struct {
 		name string
@@ -1278,14 +1309,26 @@ func TestForcedStartZeroEndsThePass(t *testing.T) {
 			}
 			f.node.forgetTraces()
 			f.node.Reset()
+			logs := captureLogs(t)
 			f.forcedStartResent(t, held, testDataLeg2, "named")
-			assertOrder(t, f.node,
-				zeroOf(f.leg1),
-				f.forced(f.leg2, mdUpdateUuid),
-				f.add(f.leg1))
-			if !tracedCall(f.node, "named", zeroOf(f.leg1)) {
-				t.Fatalf("the zero did not run under the round's trace id")
+			if tc.reached {
+				assertNoCall(t, f.node, "--zero-superblock")
+				assertOrder(t, f.node,
+					examineOf(f.leg1),
+					f.forced(f.leg2, mdUpdateUuid),
+					f.add(f.leg1))
+			} else {
+				assertOrder(t, f.node,
+					zeroOf(f.leg1),
+					f.forced(f.leg2, mdUpdateUuid),
+					f.add(f.leg1))
+				if !tracedCall(f.node, "named", zeroOf(f.leg1)) {
+					t.Fatalf("the zero did not run under the round's " +
+						"trace id")
+				}
 			}
+			assertForcedRecord(t, logs, testDataLeg2, mdUpdateUuid,
+				testDataLeg)
 			assertOk(t, probedCntlrInfo(t, f.srv).
 				GetGrpIdToMdRaid()[testDataGrp], "grp data after the re-send")
 			f.assertForcedStartUnnamed(t, 4, "after the start", "named")
@@ -1429,8 +1472,10 @@ func TestForcedStartFallsBackToForceNoBbl(t *testing.T) {
 		f.node.Reset()
 		f.forcedStartResent(t, withForcedMark(quietReq(4), testDataLeg2),
 			testDataLeg2, "named")
+		// The first pass zeroed leg 1, which reads blank now and counts as
+		// zeroed with no zero run.
+		assertNoCall(t, f.node, "--zero-superblock")
 		assertOrder(t, f.node,
-			zeroOf(f.leg1),
 			f.forced(f.leg2, mdUpdateUuid),
 			f.add(f.leg1))
 		assertNoCall(t, f.node, "--update="+mdUpdateForceNoBbl)

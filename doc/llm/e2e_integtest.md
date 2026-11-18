@@ -179,11 +179,13 @@ run's start cleanup would remove, a copy that never fails the run. That copy is
 what `integtest/round_counts.sh` reads: the worker's failed check rounds by
 cause, the check streams it failed to open or to send a round on, its health
 changes to unreachable and its late observations with the largest age, as no
-stage of the suite counts missed rounds. Every node guest carries the suite's
-md assembly mask while its agents run, installed before an agent starts: on a
-controller node the stock udev rule would otherwise race the agent for an array
-it is creating, and on a disk node it would assemble the superblocks the
-controller node writes there (Known limits). The suite computes the NQNs the
+stage of the suite counts missed rounds. Every node guest carries the udev
+rules of `deploy/udev/` (`architecture.md`, Components: invocation reference)
+while its agents run, installed before an agent starts from the texts the
+guest's helper carries: on a controller node the stock udev rule would
+otherwise race the agent for an array it is creating, and on a disk node it
+would assemble the superblocks the controller node writes there (Known
+limits). The suite computes the NQNs the
 agents mint, mirroring `common/name_fmt.go`, and never mints one; it renders
 ids from dnvctl's decimal strings, never through shell arithmetic, as a cluster
 id can exceed the shell's signed range; each namespace has an explicit uuid, so
@@ -1105,7 +1107,7 @@ left, its disk counts then giving the same free extents (`architecture.md`,
 Live-state reporting); the worker's log of the case holds no disagreement
 between a disk node's own free count and its record (`dnv-worker.md`
 RW13); no node guest holds a dnv dm device, nvmet subsystem or md array,
-the last proving on a disk node that its mask held; and the space guard
+the last proving on a disk node that its udev rules held; and the space guard
 holds — each backing file's allocation, which bounds what its disk node
 zeroes and what is written into its sides, since both allocate, the run's
 allocation within the case's run cap (E2E5), and every node's and the
@@ -1146,7 +1148,7 @@ legs),
 every module either loaded or built in, dm-flakey among them for the
 read-only level, and the nvmet tree, native multipath on a
 disk node too, where a migration destination reads ANA through it, md support
-and a stock md assembly rule the mask can switch off (`architecture.md`,
+and a stock md assembly rule the md mask can switch off (`architecture.md`,
 Components: invocation reference), hole punching, memory and free space, none
 of this run's ports listening, and no conflicting nvmet port, as a configfs
 port does not listen until a subsystem is linked and an agent would adopt and
@@ -1218,7 +1220,7 @@ and does not finish while a reading still shows either. On a disk-node guest
 every dnv md array goes before any dm
 device, as an array assembled from the controller node's superblocks pins the
 device under it (Known limits), each loop device's header is zeroed before it
-is detached, and the mask goes once no device exposes a dnv superblock. The
+is detached, and the udev rules go once no device exposes a dnv superblock. The
 control plane goes by recorded pids, the pattern sweep as fallback (E2E8), and
 a best-effort filesystem trim on every guest closes.
 
@@ -1326,11 +1328,11 @@ the connect attempted.
   operator's abort then meets a repair the worker is already aborting.
 * **A disk node holds the controller node's md superblocks**
   (`architecture.md`, Components: invocation reference), as the primary's
-  per-CN linear maps the side itself, and an unmasked disk-node guest's stock
-  incremental assembly builds degraded, read-only arrays from them that pin the
-  suite's devices, the side or that linear, which of the two is not
-  established. Hence the mask on both roles, the disk-node md stop before any
-  dm removal and the disk-node md residue check.
+  per-CN linear maps the side itself, and on a disk-node guest without the
+  udev rules the stock incremental assembly builds degraded, read-only arrays
+  from them that pin the suite's devices, the side or that linear, which of
+  the two is not established. Hence the rules on both roles, the disk-node md
+  stop before any dm removal and the disk-node md residue check.
 * **A migration's pieces are tested only while they land during the slowed
   copy.** The bucket holds the leg's copy to about a minute, a suite choice,
   and the worker reads the bitmap a few check rounds after the cutover, so

@@ -164,6 +164,8 @@ The vocabulary of dnv in alphabetical order, one entry per term, with synonyms s
 
 **dm kind** — The role letter plus hex digit in every dnv dm-device name that says which agent role and which device kind it is (`DmKind`, `ParseDmName`): `d` kinds for the dn role, `c` kinds for the cn role. A sweep attributes a device by it, and a name that does not decode exactly is not a dnv name (see `architecture.md`, dm-device kinds).
 
+**dm udev rule** — The udev rule of `deploy/udev/` every node running a dnv agent carries so that the system's own rules never probe, link by content, scan for LVM or register with bcache a dm device whose name carries the dnv prefix; it keeps the device's `/dev/mapper` link, and systemd reads such a device as not ready (see `architecture.md`, Components: invocation reference).
+
 **dm-error, reload target** — The permanent error device every dnv stack reloads a path onto to take it out of service: per thin device on a controller node, where parked ns-devs point (`CnErrorName`), and per cntlr on a side, where a standby's dm-linear points (`DnErrorName`). A reload onto it fails IO instead of replaying it.
 
 **dnv** — The project: a distributed NVMe-oF block storage system that aggregates the raw disks of disk nodes into storage pools, runs the volume logic on controller nodes, and exports virtual volumes to hosts with native NVMe multipath and ANA.
@@ -356,7 +358,9 @@ The vocabulary of dnv in alphabetical order, one entry per term, with synonyms s
 
 **low water mark** — The pool-usage fraction above which auto-grow fires (`low_water_mark_pct`); a mark that cannot be reached disables auto-grow for the pool.
 
-**md assembly mask, md udev mask** — The udev rule every node running a dnv agent carries so that only the agent assembles dnv md arrays: ordered before the stock incremental-assembly rule, it marks a device whose array name carries the dnv prefix not ready, and the stock rule skips it (see `architecture.md`, Components: invocation reference). The cn, end-to-end and csi suites install it for their run.
+**md array rule** — The udev rule of `deploy/udev/` every node running a dnv agent carries so that no stock rule acts on what a host wrote at the start of a dnv md array: ordered after the stock rule that names and probes an array and links it by what it found, it gives an array whose name carries the dnv prefix, and each of its partitions, a file system type no stock rule matches and takes those links by content away (see `architecture.md`, Components: invocation reference).
+
+**md assembly mask, md udev mask** — The udev rule of `deploy/udev/` every node running a dnv agent carries so that only the agent assembles dnv md arrays: ordered before the stock incremental-assembly rule, it reads a device's md superblock in the version-1.2 format dnv writes and marks a device whose array name carries the dnv prefix not ready, and the stock rule skips it (see `architecture.md`, Components: invocation reference). The dn, cn, end-to-end and csi suites install it, with the other rules of `deploy/udev/`, for their run.
 
 **md check** — md's own "check" of one group's array, which the sp worker asks the primary for, one group at a time per pool, on a schedule a cluster setting sets: md reads every member, rewrites from another member a sector one member cannot read, and records a bad-block range on a member whose rewrite fails; leg repair replaces such a leg from a leg clean of ranges (see `architecture.md`, The md check).
 

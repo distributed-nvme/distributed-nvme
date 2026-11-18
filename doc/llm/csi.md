@@ -446,7 +446,8 @@ own copies of the deployment verbs: etcd, the gateway, the worker and the
 cdc on the control-plane guest as the login user, one dn agent per
 disk-node guest over a sparse loop device, one cn agent per controller-node
 guest, each guest its own location, and a cluster with every node
-registered; the controller and disk nodes carry the md assembly mask, and the
+registered; the controller and disk nodes carry the udev rules of
+`deploy/udev/` (`architecture.md`, Components: invocation reference), and the
 hosts the mask of nvme-cli's autoconnector, for the run. The stack
 listens on a port block of its own, bound by no other suite. The suite never
 builds a pool: the driver does, one per volume, so a RAID1 pool of one slice
@@ -550,8 +551,8 @@ namespace and the driver's namespace are deleted and waited for, the
 driver's cluster-wide objects and the storage class with them; then the
 hosts' connections of the driver's and dnv's and the discovery connections
 to the suite's cdc go, with the hosts' mask of nvme-cli's autoconnector, then
-the controller nodes' and the disk nodes' devices, exports, agents and md
-assembly masks, with the controller nodes' nvmet entries of the two hosts that
+the controller nodes' and the disk nodes' devices, exports, agents and udev
+rules, with the controller nodes' nvmet entries of the two hosts that
 attaches made, then the control plane's processes, the imported images and the
 work directories, holder first. Cleanup runs at the start of every run and, on
 success only, at its end; a failing run leaves everything in place and dumps

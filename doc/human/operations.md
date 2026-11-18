@@ -973,3 +973,111 @@ the probe times and the counters, and that no check round carries them.
 The cn suite's slow leg stage, which delays one disk node's traffic with
 tc netem and reads a higher write time on its legs while their rows stay
 ok, is written and has not yet run in the lab.
+
+## Install the udev rules on a node
+
+Words: **udev** is the Linux service that acts when a block device
+appears or changes. Its rules read the device and can, for example,
+assemble an md array from it, scan it for LVM, or register it as a bcache
+device. dnv ships three rule files in the folder `deploy/udev/` of the
+release:
+
+- `58-dnv-dm.rules` keeps the system's rules off every device mapper
+  device of dnv, whose name starts with `dnv-`. Such a device holds what
+  hosts wrote, and the node must never read that as a file system, an LVM
+  volume, an md array or a cache. The device keeps its name under
+  `/dev/mapper`, which dnv uses. systemd shows such a device as not ready.
+  That does no harm: dnv mounts nothing on it and waits for no systemd
+  device unit.
+- `63-dnv-md.rules` keeps the system's md assembly off the members of
+  dnv's RAID1 arrays, so that only dnv assembles them. It reads the md
+  superblock of version 1.2, the only one dnv writes, so a superblock of
+  another version that a host wrote at the end of a device does not hide
+  dnv's.
+- `63-zz-dnv-md-array.rules` keeps the system's rules off what a host
+  wrote at the start of one of dnv's RAID1 arrays: an md superblock, an
+  LVM label, a bcache superblock, a file system or a partition table. It
+  also takes away the links under `/dev/disk/by-uuid` and
+  `/dev/disk/by-label` that the system makes from a host's file system on
+  such an array, so that no such link leads there. A clone's source, which
+  carries no dnv name, still gets these links (step 6).
+
+Two settings go with the rules. They cover devices that carry no dnv name,
+such as a leg's NVMe device before dnv writes its superblock there:
+lvm2 must read only the node's own physical volumes, and md must assemble
+by itself only the arrays that `/etc/mdadm/mdadm.conf` lists.
+
+When: on every disk node and every controller node, before its first dnv
+agent starts, and again when a new release changes a file of
+`deploy/udev/`. The rules need systemd 253 or newer; `systemctl --version`
+prints it. An older udev skips the lines of `63-zz-dnv-md-array.rules`
+that take the links away, with an error in the system log, and keeps the
+rest.
+
+What dnv does alone: nothing. No agent installs or checks the rules or
+the settings.
+
+Safe steps, before the node's first dnv agent starts:
+
+1. In the unpacked release folder, which holds `deploy/`, copy the rules
+   and reload udev:
+
+   ```
+   sudo install -m 0644 deploy/udev/*.rules /etc/udev/rules.d/
+   sudo udevadm control --reload
+   ```
+
+2. Check that udev takes the files:
+
+   ```
+   sudo udevadm verify /etc/udev/rules.d/58-dnv-dm.rules /etc/udev/rules.d/63-dnv-md.rules /etc/udev/rules.d/63-zz-dnv-md-array.rules
+   ```
+
+   It must report every file as a success.
+3. lvm2. In the `devices` section of `/etc/lvm/lvm.conf`, set a global
+   filter that accepts the node's own physical volumes and rejects every
+   other device. For a node whose only physical volume is `/dev/vda3`:
+   `global_filter = [ "a|^/dev/vda3$|", "r|.*|" ]`. For a node with none:
+   `global_filter = [ "r|.*|" ]`. lvm2's devices file, which lists the
+   devices LVM may use, does the same job. Then `sudo pvs` must list the
+   node's own physical volumes and nothing else.
+4. md. `sudo mdadm --detail --scan` prints one ARRAY line for each md
+   array that runs on the node; before the node's first dnv agent starts,
+   each one is the node's own. Add those lines to `/etc/mdadm/mdadm.conf`,
+   and add the line `AUTO -all` after them. With it md assembles by itself only the arrays
+   the file lists. An array of the node's own that the file does not list
+   no longer comes up at boot.
+5. Write the new settings into the initial RAM disk, which also holds a
+   copy of them: `sudo update-initramfs -u` on Debian and Ubuntu.
+6. On a controller node, mount the node's own file systems by device
+   path, such as `/dev/vda1`, or by entries in `/etc/fstab` that name no
+   label and no uuid a tenant could copy. The system makes links by label
+   and uuid from a host's file system on a clone's source, which no rule of
+   dnv's reaches ([the scope page](scope.md), section 6.1), and a host
+   volume made from the same cloud image as the node carries the node's own
+   labels and uuids. Check the file with `sudo findmnt --verify` before the
+   next boot.
+
+To remove the rules from a node that runs no dnv agent any more: delete
+the three files from `/etc/udev/rules.d/` and run
+`sudo udevadm control --reload`. A device mapper device made while the
+rules were in place keeps their marks until it is removed, because the
+device mapper's own rules carry them over from udev's record of the
+device.
+
+Steps that can lose data: none of the steps writes to a device. Step 4
+can keep an array of the node's own from coming up at the next boot if
+its ARRAY line is missing; add the line and run step 5 again. Step 6 can
+keep the node from booting if an entry names a wrong device; that is what
+`findmnt --verify` is for.
+
+Stop and ask for help when `udevadm verify` refuses a file, or when
+`sudo pvs` lists anything but the node's own physical volumes.
+
+Tested: the disk node, controller node, e2e and csi suites install the
+rules from `deploy/udev/` the same way for their runs. The controller node
+suite plants a host's md superblock, LVM volume, bcache superblock and file
+system at the start of a RAID1 array and an md superblock of version 1.0 at the end
+of its legs, and checks that the system made nothing of them on either
+controller node, through a failover. No test checks the lvm2, md and
+mount settings of steps 3, 4 and 6.

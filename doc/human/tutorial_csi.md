@@ -453,11 +453,11 @@ rm -f etcd.log gateway.log worker.log cdc.log dn0.log dn1.log dn2.log dn3.log cn
 rm -f etcd.pid gateway.pid worker.pid cdc.pid dn0.pid dn1.pid dn2.pid dn3.pid cn0.pid
 ```
 
-The udev rule and the unit. The nvme-stas files were not changed here, so
+The udev rules and the unit. The nvme-stas files were not changed here, so
 there is nothing to put back.
 
 ```
-sudo rm -f /etc/udev/rules.d/63-dnv-md.rules
+sudo rm -f /etc/udev/rules.d/58-dnv-dm.rules /etc/udev/rules.d/63-dnv-md.rules /etc/udev/rules.d/63-zz-dnv-md-array.rules
 sudo udevadm control --reload
 sudo systemctl unmask nvmf-connect@.service nvmf-connect.target
 ```

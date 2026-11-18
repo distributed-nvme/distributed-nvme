@@ -770,7 +770,7 @@ func testRepairBadLegLateWhileArrayAbsent(t *testing.T, stage pb.RepStage) {
 		role: "Active device 1", events: 10, arrayState: "AA"})
 	nqn1 := legNqn(f.srv, testDataLeg)
 	f.node.setAnaState(nqn1, testIp, testSvcId, "non-optimized")
-	start := "mdadm --assemble " + f.mdDev + " "
+	start := "mdadm --assemble " + f.mdDev + " --metadata=1.2 "
 	lone := "cmd " + start + "--name " +
 		f.srv.nf.CnMdArrayName(testSp, 0, 0, false) + " " + f.leg2
 	both := "cmd " + start + "--name " +

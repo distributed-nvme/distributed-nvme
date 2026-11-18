@@ -132,25 +132,29 @@ func TestForcedStartRefusesAMemberThatIsNotRead(t *testing.T) {
 	f.assertForcedStartUnnamed(t, 4, "after the start", "named")
 }
 
-// TestForcedStartProvesEachZero pins CN12's read back of each zero: mdadm
-// answers a zero whose read of the member fails with success and writes
-// nothing, so a member that still shows a superblock after its zero, or
-// whose read back fails, is the group's error, and no assembly follows. The
-// read after it names the forced start, whose dry run reads no zero
-// (forcedStartNamed), and the re-send on that round zeroes again and, the
-// zero proven this time, starts the array.
+// TestForcedStartProvesEachZero pins CN12's read back of each zero: a zero
+// that answered success proves nothing by itself, so a member that still
+// shows a superblock after its zero, as a write that never reached the leg
+// leaves it, or whose read back fails, is the group's error, and no assembly
+// follows. The read after it names the forced start, whose dry run reads no
+// zero (forcedStartNamed), and the re-send on that round starts the array:
+// it zeroes again a member that still shows a superblock, the zero proven
+// this time, and counts as zeroed with no zero run a member the first zero
+// did leave blank.
 func TestForcedStartProvesEachZero(t *testing.T) {
 	for _, tc := range []struct {
 		name string
 		set  func(f *repFix)
 		want string
+		// blank says the first zero left the member blank.
+		blank bool
 	}{
 		{"no effect", func(f *repFix) {
 			f.node.zeroNoEffect[f.leg1] = true
-		}, "still carries a superblock"},
+		}, "still carries a superblock", false},
 		{"read back fails", func(f *repFix) {
 			f.node.killCmdNth["readsb "+f.leg1+" off=4096"] = 2
-		}, "the zero of leg 0x7 is not proven"},
+		}, "the zero of leg 0x7 is not proven", true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			f := downNoRepair(t)
@@ -172,10 +176,17 @@ func TestForcedStartProvesEachZero(t *testing.T) {
 			f.node.forgetTraces()
 			f.node.Reset()
 			f.forcedStartResent(t, held, testDataLeg2, "named")
-			assertOrder(t, f.node,
-				zeroOf(f.leg1),
-				f.forced(f.leg2, mdUpdateUuid),
-				f.add(f.leg1))
+			if tc.blank {
+				assertNoCall(t, f.node, "--zero-superblock")
+				assertOrder(t, f.node,
+					f.forced(f.leg2, mdUpdateUuid),
+					f.add(f.leg1))
+			} else {
+				assertOrder(t, f.node,
+					zeroOf(f.leg1),
+					f.forced(f.leg2, mdUpdateUuid),
+					f.add(f.leg1))
+			}
 			f.assertForcedStartUnnamed(t, 4, "after the start", "named")
 		})
 	}

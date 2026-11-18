@@ -425,8 +425,8 @@ func TestALoneSurvivorIsNamedOnceItsPeerServes(t *testing.T) {
 	if rowResend(t, f.srv, held, round) == nil {
 		t.Fatalf("the round that names the array brought no re-send")
 	}
-	both := "cmd mdadm --assemble " + f.mdDev + " --name " + f.arrayName() +
-		" " + f.leg1 + " " + f.leg2
+	both := "cmd mdadm --assemble " + f.mdDev + " --metadata=1.2 --name " +
+		f.arrayName() + " " + f.leg1 + " " + f.leg2
 	if got := f.node.callsMatching("cmd mdadm --assemble"); len(got) != 1 ||
 		got[0] != both {
 		t.Fatalf("the re-send ran %q, want exactly %q", got, both)

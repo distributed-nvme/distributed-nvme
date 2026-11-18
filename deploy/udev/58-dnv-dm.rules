@@ -1,0 +1,16 @@
+# dnv: the device mapper devices of dnv's agents, whose names start "dnv-",
+# carry tenants' data: no rule of the system may probe them, link them by
+# content, scan them for LVM or register them with bcache. 55-dm.rules has
+# set the device's name before this file. The /dev/mapper link stays: the
+# agents use it. systemd reads such a device as not ready; nothing of dnv
+# waits for its device unit. Install on every node that runs a dnv agent
+# (architecture.md, Components: invocation reference).
+SUBSYSTEM!="block", GOTO="dnv_dm_end"
+KERNEL!="dm-[0-9]*", GOTO="dnv_dm_end"
+ACTION!="add|change", GOTO="dnv_dm_end"
+ENV{DM_NAME}!="dnv-*", GOTO="dnv_dm_end"
+ENV{DM_UDEV_DISABLE_DISK_RULES_FLAG}="1"
+ENV{DM_UDEV_DISABLE_OTHER_RULES_FLAG}="1"
+ENV{UDEV_DISABLE_PERSISTENT_STORAGE_RULES_FLAG}="1"
+OPTIONS:="nowatch"
+LABEL="dnv_dm_end"

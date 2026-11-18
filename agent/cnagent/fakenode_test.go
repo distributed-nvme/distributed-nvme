@@ -164,8 +164,9 @@ type fakeNode struct {
 	// foreign.
 	bblRefused map[string]bool
 	// zeroNoEffect are the members whose `mdadm --zero-superblock` answers
-	// success and writes nothing, as mdadm answers a zero whose read of the
-	// member fails (cnagent.md CN12).
+	// success with the superblock left in place, as a write that never
+	// reached the leg leaves it: only the agent's own read back tells
+	// (cnagent.md CN12, the forced start).
 	zeroNoEffect      map[string]bool
 	refusedLeaves     bool
 	refusedLeavesAlso []string
@@ -2770,9 +2771,28 @@ func (f *fakeNode) dmStatus(name string) (string, int) {
 // ---------------------------------------------------------------------------
 
 func (f *fakeNode) cmdMdadm(args []string) (string, int) {
+	// mdadm 4.5 takes the superblock format in its create, assemble and misc
+	// modes only, and never as the first option (cnagent_integtest.md, Lab
+	// facts).
+	for i, arg := range args {
+		if !strings.HasPrefix(arg, "--metadata") {
+			continue
+		}
+		switch {
+		case i == 0:
+			f.dispatchStderr = "mdadm: --metadata does not set the mode, " +
+				"and so cannot be the first option."
+			return "", 2
+		case contains(args, "--add") || contains(args, "--fail") ||
+			contains(args, "--remove"):
+			f.dispatchStderr = "mdadm: :option --metadata not valid in " +
+				"manage mode"
+			return "", 2
+		}
+	}
 	switch {
 	case contains(args, "--zero-superblock"):
-		return f.mdZeroSuperblock(args[len(args)-1])
+		return f.mdZeroSuperblock(args)
 	case contains(args, "--create"):
 		return f.mdCreate(args)
 	case contains(args, "--assemble"):
@@ -3361,10 +3381,15 @@ func (f *fakeNode) readSuperblockArea(
 }
 
 // mdZeroSuperblock is `mdadm --zero-superblock`: refused for a member an
-// array holds, whatever the array's state, with mdadm's own exit status 2;
-// a device with no superblock answers success, as mdadm does; otherwise the
-// superblock and everything it said go.
-func (f *fakeNode) mdZeroSuperblock(dev string) (string, int) {
+// array holds, whatever the array's state, with mdadm's own exit status 2. A
+// device with no superblock fails with mdadm's words and exit status 2 when
+// the zero names the 1.2 format, as Md.ZeroSuperblock's does, and answers
+// success with no format named, as the lab's mdadm 4.5 answers both
+// (cnagent_integtest.md, Lab facts). A zeroNoEffect member answers success
+// with its superblock left; otherwise the superblock and everything it said
+// go.
+func (f *fakeNode) mdZeroSuperblock(args []string) (string, int) {
+	dev := args[len(args)-1]
 	for _, array := range f.arrays {
 		if contains(array.members, dev) {
 			f.dispatchStderr = "mdadm: Couldn't open " + dev +
@@ -3373,13 +3398,15 @@ func (f *fakeNode) mdZeroSuperblock(dev string) (string, int) {
 		}
 	}
 	if !f.superblocks[dev] {
+		if contains(args, "--metadata=1.2") {
+			f.dispatchStderr = "mdadm: No super block found on " + dev +
+				" (Expected magic a92b4efc, got 00000000)"
+			return "", 2
+		}
 		f.dispatchStderr = "mdadm: Unrecognised md component device - " + dev
 		return "", 0
 	}
 	if f.zeroNoEffect[dev] {
-		// mdadm's read of the member failed, which it takes for no
-		// superblock: success, and nothing written.
-		f.dispatchStderr = "mdadm: Unrecognised md component device - " + dev
 		return "", 0
 	}
 	delete(f.superblocks, dev)

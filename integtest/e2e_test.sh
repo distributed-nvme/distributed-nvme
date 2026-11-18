@@ -84,16 +84,17 @@
 #     host0's connects are nvme-stas's on purpose — that case starts stas with
 #     the autoconnector still masked, and stops it and hands host0 back
 #     before its ending.
-#  7. The `63-dnv-md.rules` mask goes on the CN VMs AND on the DN VMs. md runs
-#     only on a CN, but the md SUPERBLOCK that CN writes travels down the side
-#     export and lands on the DN's own storage, so a `linux_raid_member` shows
-#     up on the DN — on the side dm device and, at the same offset, on the
-#     per-CN linear that maps the side 1:1. Unmasked, the stock incremental
-#     rule (`mdadm -I`, which on that path WILL assemble a degraded array
-#     read-only) assembles it on the DN, and the array holds whichever of the
-#     two udev probed first; either way the side cannot be removed (a pinned
-#     linear holds it open too) and dn_cleanup grinds past CLEANUP_TIMEOUT.
-#     An unmasked DN VM collects dozens of stray arrays in a default-shape run.
+#  7. The udev rules of deploy/udev/ go on the CN VMs AND on the DN VMs. md
+#     runs only on a CN, but the md SUPERBLOCK that CN writes travels down the
+#     side export and lands on the DN's own storage — on the side dm device
+#     and, at the same offset, on the per-CN linear that maps the side 1:1.
+#     Without the rules udev probes them as a `linux_raid_member`, and the
+#     stock incremental rule (`mdadm -I`, which on that path WILL assemble a
+#     degraded array read-only) assembles it on the DN, and the array holds
+#     whichever of the two udev probed first; either way the side cannot be
+#     removed (a pinned linear holds it open too) and dn_cleanup grinds past
+#     CLEANUP_TIMEOUT. A DN VM without them collects dozens of stray arrays in
+#     a default-shape run.
 #  8. NEVER run this suite while any other dnv suite runs anywhere in the lab
 #     (E2E9). It occupies all ten guests.
 #  9. NEVER edit this file while it is running: bash re-seeks the script by
@@ -109,6 +110,9 @@ set -euo pipefail
 # ---------------------------------------------------------------------------
 
 REPO_ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
+# The udev rules every node that runs a dnv agent carries (layout.md,
+# Directory tree): the helpers carry their texts as this checkout holds them.
+UDEV_SRC="$REPO_ROOT/deploy/udev"
 BIN_DIR="$REPO_ROOT/integtest/bin"
 
 # The five shipped binaries `make build` produces (Makefile CMDS = cmd/*).
@@ -2915,11 +2919,12 @@ NQN_IT="$NQN_IT"
 # creates is dnv-<cluster16>-<node16>-<kind2>-…, where kind2 is the role letter
 # 'c' or 'd' followed by one hex digit, a DmKind (common/name_fmt.go).
 DM_PREFIX="dnv"
-# The md assembly mask of install_udev_rule (cnagent_test.sh), by the same path.
-# BOTH node roles install it here (rule 7, install_udev_rule), and the verbs
-# that do live in the shared node body. This preamble is shared by all four
-# roles, so a host and a cp helper define the name and never use it.
-UDEV_RULE=/etc/udev/rules.d/63-dnv-md.rules
+# Where install_udev_rules writes the udev rules of deploy/udev/, whose texts
+# udev_rules_source puts into every helper after this preamble. BOTH node
+# roles install them (rule 7, install_udev_rules), and the verbs that do live
+# in the shared node body. This preamble is shared by all four roles, so a
+# host and a cp helper define the name and never use it.
+UDEV_DIR=/etc/udev/rules.d
 ETCD_NAME="$ETCD_NAME"
 CN_PORT_ID="$CN_PORT_ID"
 MAX_DNS_PER_VM="$MAX_DNS_PER_VM"
@@ -3209,12 +3214,12 @@ HELPER_COMMON_EOF
 #      ports/1 unguarded, though in the same order (ana_groups 3 and 2
 #      first). A DN sweeps every id up to MAX_DNS_PER_VM (ports_sweep), a CN
 #      drops CN_PORT_ID.
-#   d. install_udev_rule / remove_udev_rule are HERE and not in the cn body.
+#   d. install_udev_rules / remove_udev_rules are HERE and not in the cn body.
 #      cnagent_test.sh runs both roles on one VM, so the question never arose;
-#      here the roles are on different guests and both need the mask — the CN
-#      because it assembles arrays, the DN because the CN's superblocks land on
-#      it (rule 7). It also writes only when the content differs, because dn_up
-#      calls it once per instance. See its own comment.
+#      here the roles are on different guests and both need the udev rules —
+#      the CN because it assembles arrays, the DN because the CN's superblocks
+#      land on it (rule 7). It also writes only when the content differs,
+#      because dn_up calls it once per instance. See its own comment.
 helper_node_source() {
 	cat <<'HELPER_NODE_EOF'
 
@@ -3603,17 +3608,18 @@ nvmet_tree() {
 # part that fails: `mdadm --stop` works on an inactive array on these guests.
 # It is the name read that does.
 #
-# THE MASK NEEDS NO CHANGE, but it is TWO rules and
+# THE MD MASK NEEDS NO CHANGE, but it is TWO rules and
 # only the first is scoped. The first — ACTION=="add|change",
 # SUBSYSTEM=="block", ENV{ID_FS_TYPE}=="linux_raid_member" — IMPORTs MD_NAME
-# from `mdadm --examine --export` on the MEMBER's devnode, the event whose
-# assembly it then suppresses. The second, ENV{MD_NAME}=="dnv-*|*:dnv-*",
+# from `mdadm --examine --export --metadata=1.2` on the MEMBER's devnode, the
+# event whose assembly it then suppresses. The second, ENV{MD_NAME}=="dnv-*|*:dnv-*",
 # ENV{SYSTEMD_READY}="0", carries no subsystem and no fs-type match at all;
 # what keeps it off an ARRAY device is the file name. 63-dnv-md.rules sorts
 # ahead of 63-md-raid-arrays.rules, which is what sets MD_NAME on an array, so
 # on the array's own event the property is not there yet to match — with the
-# rule installed, the array's db holds MD_NAME and no SYSTEMD_READY, and the
-# member holds ID_FS_TYPE=linux_raid_member, MD_NAME and SYSTEMD_READY=0.
+# rules installed, the array's db holds MD_NAME, the md array rule's
+# ID_FS_TYPE and no SYSTEMD_READY, and a member's NVMe device holds
+# ID_FS_TYPE=linux_raid_member, MD_NAME and SYSTEMD_READY=0.
 # Should a later event ever carry MD_NAME in from the db and
 # make it match there, it is still not this function's problem: SYSTEMD_READY
 # is a systemd readiness flag and 64-md-raid-assembly.rules reads it to skip
@@ -3622,8 +3628,8 @@ nvmet_tree() {
 #
 # WHAT IT MATCHES, because it runs on DN VMs too (dn_cleanup) where no dnv
 # array is ever supposed to exist: an MD_NAME of `dnv-…` or `<homehost>:dnv-…`,
-# and nothing else. That is the SAME pair of patterns install_udev_rule
-# writes into the mask (ENV{MD_NAME}=="dnv-*|*:dnv-*"), against the same udev
+# and nothing else. That is the SAME pair of patterns the md mask of
+# deploy/udev/ matches (ENV{MD_NAME}=="dnv-*|*:dnv-*"), against the same udev
 # property — one reading of "the name" at both ends. It is
 # the dnv prefix of the name the cn agent gives every array it creates
 # (common.NameFmt.CnMdArrayName, or CnCloneMdArrayName for a clone meta
@@ -3702,89 +3708,98 @@ mdstat() {
 	return 0
 }
 
-# --- the md assembly mask ----------------------------------------------------
+# --- the udev rules of deploy/udev/ ------------------------------------------
 #
-# install_udev_rule masks the stock incremental md assembly for dnv arrays, so
-# the agent is the only assembler. install_udev_rule (cnagent_test.sh) writes the
-# same rule, verbatim: the stock 64-md-raid-assembly.rules skips a device whose
-# SYSTEMD_READY is 0, and this file is 63-, so it runs first and sets it. It is
-# scoped by MD_NAME, so it suppresses ONLY arrays a dnv cn agent minted and
-# leaves the guest's own arrays — a root filesystem raid above all — assembling
-# normally.
+# install_udev_rules writes the udev rules every node that runs a dnv agent
+# carries — the files of deploy/udev/, whose texts the driver puts into this
+# helper (UDEV_RULES, udev_rules_source) — into $UDEV_DIR, and reloads udev
+# (architecture.md, Components: invocation reference). The dm rule
+# (58-dnv-dm.rules) keeps the system's disk, LVM, bcache and
+# persistent-storage rules off every dnv dm device; the md mask
+# (63-dnv-md.rules) marks a device whose 1.2 superblock carries a dnv array
+# name not ready, which the stock 64-md-raid-assembly.rules skips, leaving the
+# agent the only assembler; the md array rule (63-zz-dnv-md-array.rules) gives
+# a dnv array a file system type no stock rule matches, so nothing a host
+# wrote at its start is assembled, scanned or registered. All three key on
+# dnv's names, so a guest's own arrays and devices keep their stock handling.
 #
-# IT GOES ON BOTH NODE ROLES, which is why it lives in the shared body and not
-# in helper_cn_source (rule 7):
+# THEY GO ON BOTH NODE ROLES, which is why they live in the shared body and
+# not in helper_cn_source (rule 7):
 #
 #   - on a CN because that is where md RUNS, and the stock rule would race the
 #     agent for an array it is in the middle of creating;
 #   - on a DN because that is where the md METADATA ends up. The cn writes each
-#     leg's superblock through the side's nvme-tcp export, so it physically
-#     lands on the DN's local storage and the DN's own udev sees a
-#     linux_raid_member. On TWO devices, and the lab evidence does not say
-#     which one it took: the nvmet namespace exports the per-CN linear
-#     (DevicePath in ensureCnExports (agent/dnagent/syncup_side.go)), which
-#     ensureDmLinear builds over the side at offset 0 for its whole length, so
-#     the superblock sits
-#     at the same offset in the kind-d1 linear and in the kind-d4 side and udev
-#     probes both. `mdadm -I` assembles it there — degraded, auto-read-only,
-#     over one of the DN's own dm devices — and that array holds that device
-#     open. Either way the side stays: a pinned kind-d1 linear holds the kind-d4
-#     side open in its turn, so dn_cleanup's dm_remove_kind runs past its bound
-#     whichever of the two it is. A DN VM with no rule file in
-#     /etc/udev/rules.d carries dozens of such arrays, and its cleanup times
-#     out.
+#     leg's superblock through the side's nvme-tcp export, so it lands on the
+#     DN's local storage, at the same offset in the per-CN linear (kind d1),
+#     which ensureCnExports (agent/dnagent/syncup_side.go) exports and
+#     ensureDmLinear builds over the side at offset 0 for its whole length, and
+#     in the side (kind d4). The dm rule keeps blkid off both, so udev never
+#     sees a linux_raid_member there; and a migration destination's NVMe
+#     connection to its source, no dm device, carries the leg's superblock
+#     too, which the md mask covers. Without them `mdadm -I` assembles such a
+#     superblock — degraded, auto-read-only, over one of the DN's own devices
+#     — and the array pins it, so dn_cleanup's dm_remove_kind runs past its
+#     bound. A DN VM with no rule file in /etc/udev/rules.d carries dozens of
+#     such arrays, and its cleanup times out.
 #
-# The DN does not get a BROADER mask, although it owns no dnv array and could
-# in principle take one: a rule that masked every linux_raid_member would also
-# mask the guest's own root array, and one that suppressed dm's udev rules
-# outright would take the /dev/disk/by-id symlinks and the blkid properties
-# with it. The narrow rule is exactly as wide as the damage.
-#
-# THE WRITE IS CONDITIONAL AND THE RELOAD IS NOT, and the asymmetry is the
+# THE WRITES ARE CONDITIONAL AND THE RELOAD IS NOT, and the asymmetry is the
 # point. dn_up calls this once per instance — DNS_PER_VM times on each DN VM
 # — and systemd-udevd watches the rules directories, so an unconditional
-# `cat >` would truncate and rewrite a watched file that many times during
-# agent startup, each truncation a window in which the mask is empty. (That is
-# the one difference from cnagent_test.sh's copy, which installs once per VM
-# and needs no such care.) But the reload is exactly what those repeated calls
-# retry for free: its status is discarded here, so if the write became
-# conditional AND the reload went with it, one failed reload would leave the
-# mask byte-correct on disk and stale in udevd for the rest of the run, with
-# dn_up reporting udev=present. It is cheap and idempotent, so it runs on both
-# paths and a transient failure gets every later instance's call as another
-# chance.
-install_udev_rule() {
-	local want
-	want=$(
-		cat <<'RULE_EOF'
-ACTION=="add|change", SUBSYSTEM=="block", ENV{ID_FS_TYPE}=="linux_raid_member", \
-  IMPORT{program}="/sbin/mdadm --examine --export $devnode"
-ENV{MD_NAME}=="dnv-*|*:dnv-*", ENV{SYSTEMD_READY}="0"
-RULE_EOF
-	)
-	if [ -s "$UDEV_RULE" ] &&
-		[ "$(cat "$UDEV_RULE" 2>/dev/null)" = "$want" ]; then
-		udevadm control --reload >/dev/null 2>&1
-		echo present
-		return 0
-	fi
-	printf '%s\n' "$want" >"$UDEV_RULE" || {
-		echo "install_udev_rule: writing $UDEV_RULE failed" >&2
+# write would rewrite a watched file that many times during agent startup. A
+# file is written only when its text differs, and then by a rename, so udevd
+# never reads half of one. (That is the one difference from cnagent_test.sh's
+# copy, which installs once per VM.) But the reload is exactly what those
+# repeated calls retry for free: its status is discarded here, so if the
+# write became conditional AND the reload went with it, one failed reload
+# would leave the rules byte-correct on disk and stale in udevd for the rest
+# of the run, with dn_up reporting udev=present. It is cheap and idempotent,
+# so it runs on both paths and a transient failure gets every later
+# instance's call as another chance.
+install_udev_rules() {
+	local name word=present
+	[ "${#UDEV_RULES[@]}" -gt 0 ] || {
+		echo "install_udev_rules: the helper carries no udev rule" >&2
 		return 1
 	}
-	[ -s "$UDEV_RULE" ] || {
-		echo "install_udev_rule: $UDEV_RULE is missing or empty" >&2
-		return 1
-	}
+	for name in "${!UDEV_RULES[@]}"; do
+		[ "$(cat "$UDEV_DIR/$name" 2>/dev/null)" = "${UDEV_RULES[$name]}" ] &&
+			continue
+		if ! printf '%s\n' "${UDEV_RULES[$name]}" >"$UDEV_DIR/.$name.tmp" ||
+			! mv -f "$UDEV_DIR/.$name.tmp" "$UDEV_DIR/$name"; then
+			rm -f "$UDEV_DIR/.$name.tmp"
+			echo "install_udev_rules: writing $UDEV_DIR/$name failed" >&2
+			return 1
+		fi
+		word=installed
+	done
 	udevadm control --reload >/dev/null 2>&1
-	echo installed
+	echo "$word"
 	return 0
 }
 
-remove_udev_rule() {
-	rm -f "$UDEV_RULE"
+remove_udev_rules() {
+	local name
+	for name in "${!UDEV_RULES[@]}"; do
+		rm -f "$UDEV_DIR/$name" "$UDEV_DIR/.$name.tmp"
+	done
 	udevadm control --reload >/dev/null 2>&1
 	echo removed
+	return 0
+}
+
+# udev_rules_list prints, for the dump, each rule file of deploy/udev/ in
+# $UDEV_DIR: its listing and whether it is the text this helper carries.
+udev_rules_list() {
+	local name
+	for name in "${!UDEV_RULES[@]}"; do
+		if [ ! -e "$UDEV_DIR/$name" ]; then
+			echo "$UDEV_DIR/$name absent"
+		elif [ "$(cat "$UDEV_DIR/$name" 2>/dev/null)" = "${UDEV_RULES[$name]}" ]; then
+			echo "$(ls -l "$UDEV_DIR/$name" 2>&1) (deploy/udev/$name)"
+		else
+			echo "$(ls -l "$UDEV_DIR/$name" 2>&1) (NOT deploy/udev/$name)"
+		fi
+	done
 	return 0
 }
 
@@ -4151,7 +4166,7 @@ diag_collect() { # <label> <out> <pid> <where>
 # read commits, but a thin pool's read still waits behind a commit of that
 # pool that waits on a leg with no usable path. `mdadm --detail` reads an
 # array's first member and can wait there the same way; on a DN any array is
-# a stray one over this suite's own dm devices (install_udev_rule).
+# a stray one over this suite's own dm devices (install_udev_rules).
 diag_kernel_reads() { # <md label>
 	local md_label=$1 status_out md_out status_pid="" md_pid=""
 	status_out=$(mktemp /var/tmp/dnv-e2e-diag.XXXXXX 2>/dev/null) ||
@@ -4195,11 +4210,12 @@ helper_dn_source() {
 # driver must die on. Never run two dn_up concurrently ON ONE GUEST:
 # `losetup --find` races with itself.
 #
-# It installs the md assembly mask first, exactly as cn_up does and for the
-# reason set out at install_udev_rule: the leg superblocks the CN writes land
-# on THIS guest's storage, and an unmasked DN assembles them behind the suite's
-# back. The mask is per GUEST, not per instance — install_udev_rule is a no-op
-# once the file is right, so every later call on this VM costs one compare.
+# It installs the udev rules of deploy/udev/ first, exactly as cn_up does and
+# for the reason set out at install_udev_rules: the leg superblocks the CN
+# writes land on THIS guest's storage, and a DN without the rules assembles
+# them behind the suite's back. The rules are per GUEST, not per instance —
+# install_udev_rules writes nothing once the files are right, so every later
+# call on this VM costs one compare per file.
 # <dir> <backing> <store> <log> <size> <ip> <grpc_port> <trsvcid> <port_id>
 # <pattern file> <pattern MiB> <pattern MiB>
 dn_up() {
@@ -4212,8 +4228,8 @@ dn_up() {
 		echo "dn_up: mkdir $dir / $store failed" >&2
 		return 1
 	}
-	udev=$(install_udev_rule) || {
-		echo "dn_up: installing the md assembly mask failed;" \
+	udev=$(install_udev_rules) || {
+		echo "dn_up: installing the udev rules of deploy/udev failed;" \
 			"without it this guest's own udev assembles the md legs whose" \
 			"superblocks the cn writes through the side export, and the" \
 			"arrays pin the dm devices under them against dn_cleanup" >&2
@@ -4485,8 +4501,8 @@ dn_cleanup() {
 	# STRAY md ARRAYS FIRST, before any dm device of ours is removed. A DN
 	# never assembles an array on purpose — nothing below this line creates
 	# one — but the leg superblocks the cn writes through the side export land
-	# on this guest, and an unmasked udev assembles them here (see
-	# install_udev_rule). Such an array sits ON TOP of the DN stack, holding
+	# on this guest, and udev without the rules assembles them here (see
+	# install_udev_rules). Such an array sits ON TOP of the DN stack, holding
 	# one of this suite's own dm devices open — the side (kind d4), or the
 	# per-CN linear (kind d1) that maps the side 1:1 and carries the same
 	# superblock at the same offset; the lab reading named a dm minor and not a
@@ -4498,8 +4514,8 @@ dn_cleanup() {
 	# over where the array sits on the linear, once for the linear and once for
 	# the side it goes on holding.
 	#
-	# It is kept even though install_udev_rule runs on DN VMs: a guest whose
-	# rule did not take, or whose rule file is gone,
+	# It is kept even though install_udev_rules runs on DN VMs: a guest whose
+	# rules did not take, or whose rule files are gone,
 	# must still be cleanable BY THE SUITE. md_stop_all matches only an
 	# MD_NAME of `dnv-…` or `<homehost>:dnv-…` (see its own comment), so it
 	# cannot touch an array of the guest's own.
@@ -4528,15 +4544,16 @@ dn_cleanup() {
 	ports_sweep
 	resume_suspended
 	loop_teardown
-	# AFTER loop_teardown, in the same position cn_cleanup_phase2 removes it:
-	# the mask may only go once no BLOCK DEVICE on this guest still exposes a
-	# dnv md superblock, because that is what a udev event is raised for. Every
+	# AFTER loop_teardown, in the same position cn_cleanup_phase2 removes them:
+	# the udev rules may only go once no BLOCK DEVICE on this guest still
+	# exposes a dnv md superblock, because that is what a udev event is raised
+	# for. Every
 	# dm device of ours is gone above, and loop_teardown has just detached
 	# every loop device — the superblocks themselves sit at inner offsets of
 	# the backing FILES, which the `rm -rf $WORK` below takes, not at the 4 KiB
-	# header loop_teardown zeroes. These are shared lab machines and the rule
-	# does not belong to them.
-	remove_udev_rule >/dev/null
+	# header loop_teardown zeroes. These are shared lab machines and the rules
+	# do not belong to them.
+	remove_udev_rules >/dev/null
 	rm -rf "$WORK"
 	echo cleaned
 	return 0
@@ -4571,8 +4588,8 @@ diag() {
 	# md on a DISK NODE is always a fault.
 	echo "--- /proc/mdstat (a DN must show none) ---"
 	mdstat
-	echo "--- 63-dnv-md.rules ---"
-	ls -l "$UDEV_RULE" 2>/dev/null || echo "$UDEV_RULE absent"
+	echo "--- the udev rules of deploy/udev ---"
+	udev_rules_list
 	echo "--- nvme subsystems ---"
 	subsys_nqns
 	echo "--- nvmet configfs ---"
@@ -5038,9 +5055,10 @@ dev_wsect() { # <major:minor>
 	echo "$wsect"
 }
 
-# cn_up installs the md mask and starts THIS guest's single cn agent.
-# The mask is installed before the agent, never after: the stock rule would
-# otherwise assemble an array the agent is in the middle of creating.
+# cn_up installs the udev rules of deploy/udev/ and starts THIS guest's single
+# cn agent. The rules are installed before the agent, never after: the stock
+# rule would otherwise assemble an array the agent is in the middle of
+# creating.
 #
 # No --nvmet-port-id: the cn agent takes the default, common.NvmetPortId = 1
 # in addCommonFlags (cmd/dnv-agent/main.go), which is the port cn_cleanup_phase2
@@ -5053,8 +5071,8 @@ cn_up() { # <dir> <store> <log> <ip> <grpc_port> <trsvcid> <capacity>
 		echo "cn_up: mkdir $dir / $store failed" >&2
 		return 1
 	}
-	udev=$(install_udev_rule) || {
-		echo "cn_up: installing the md assembly mask failed;" \
+	udev=$(install_udev_rules) || {
+		echo "cn_up: installing the udev rules of deploy/udev failed;" \
 			"starting the agent without it would let the stock udev rule" \
 			"assemble an array the agent is building" >&2
 		return 1
@@ -5079,9 +5097,9 @@ cn_up() { # <dir> <store> <log> <ip> <grpc_port> <trsvcid> <capacity>
 		fi
 	fi
 	echo "$pid" >"$dir/pid"
-	# `udev=` is install_udev_rule's own word — `installed` when this call
-	# wrote the mask, `present` when it was already exactly right — and not a
-	# constant, so the line cannot claim an install that did not happen.
+	# `udev=` is install_udev_rules's own word — `installed` when this call
+	# wrote a rule file, `present` when all were already exactly right — and
+	# not a constant, so the line cannot claim an install that did not happen.
 	printf 'pid=%s udev=%s\n' "$pid" "$udev"
 	return 0
 }
@@ -5155,7 +5173,7 @@ cn_cleanup_phase2() { # [extra host nqn…]
 
 	hosts_drop "$@"
 	port_drop "$CN_PORT_ID"
-	remove_udev_rule >/dev/null
+	remove_udev_rules >/dev/null
 	rm -rf "$WORK"
 	echo cleaned
 	return 0
@@ -6439,8 +6457,25 @@ HELPER_DISPATCH_EOF
 # share the node body; host and cp do not get it (a host holds no configfs
 # object and cp holds no block device, and a verb a role cannot use is a verb
 # that can be called there by mistake).
+# udev_rules_source prints the helper's copy of the udev rules: one
+# UDEV_RULES entry per file of $UDEV_SRC, keyed by its name, holding its
+# text, which install_udev_rules writes on the guest. It fails when $UDEV_SRC
+# holds no rule file.
+udev_rules_source() {
+	local f
+	printf 'declare -A UDEV_RULES=()\n'
+	for f in "$UDEV_SRC"/*.rules; do
+		[ -f "$f" ] || {
+			echo "udev_rules_source: no rule file in $UDEV_SRC" >&2
+			return 1
+		}
+		printf 'UDEV_RULES[%q]=%q\n' "${f##*/}" "$(cat "$f")"
+	done
+}
+
 helper_source() { # <dn|cn|host|cp>
 	helper_preamble "$1"
+	udev_rules_source || return 1
 	helper_common_source
 	case "$1" in
 	dn)
@@ -6842,11 +6877,11 @@ stop_cp_daemons() {
 # backing file dn_up has to create gets the backing pattern first (E2E5); a
 # reused one keeps what it holds.
 #
-# dn_up also installs the 63-dnv-md.rules mask, as cn_up does and before the
-# agent for the same reason — on a DN it is the CN's leg superblocks, arriving
-# through the side export, that the stock rule would assemble (rule 7). It is
-# per guest, so every later instance on a VM finds it already right and does
-# nothing.
+# dn_up also installs the udev rules of deploy/udev/, as cn_up does and before
+# the agent for the same reason — on a DN it is the CN's leg superblocks,
+# arriving through the side export, that the stock rule would assemble (rule
+# 7). They are per guest, so every later instance on a VM finds them already
+# right and writes nothing.
 start_dn_instance() { # <v> <k>
 	local v=$1 k=$2 out kv dev="" pid=""
 	out=$(helper_dn "$v" dn_up \
@@ -6886,8 +6921,8 @@ start_dn_vm() { # <v>
 		"$(dn_addr "$v" $((DNS_PER_VM - 1)))"
 }
 
-# start_cn_agent starts the one cn agent of a CN VM and, before it, the
-# 63-dnv-md.rules mask (cn_up does both, in that order: the stock rule would
+# start_cn_agent starts the one cn agent of a CN VM and, before it, the udev
+# rules of deploy/udev/ (cn_up does both, in that order: the stock rule would
 # otherwise assemble an array the agent is in the middle of creating).
 # --capacity 0 means "no local opinion" and the CP substitutes its default.
 start_cn_agent() { # <v>
@@ -6996,7 +7031,7 @@ FREE_MIN_CP=$((2 << 30))
 #   - dn_cleanup, on one DN VM: up to DNS_PER_VM instances' worth — 45 in the
 #     default shape — of nvmet ports with their ana_groups, 45 loop teardowns
 #     (a 4 KiB dd, a wipefs and a losetup -d each), the dm devices of every
-#     kind, and now md_stop_all over any stray array the mask did not catch —
+#     kind, and now md_stop_all over any stray array the rules did not catch —
 #     a bounded `udevadm info` read per array in /proc/mdstat, a bounded
 #     `mdadm --detail` read for each array udev could not name, and a bounded
 #     `mdadm --stop` for each dnv one.
@@ -7013,8 +7048,10 @@ FREE_MIN_CP=$((2 << 30))
 # long way round through dm_force_remove. Kind c9 and not kind ca: an md
 # member is a CnLegName (common/name_fmt.go) device, and CnGrpName is the
 # RedundNone group device, which a raid1 group does not have at all. Only the
-# PRIMARY has arrays (CN12), and the mask is what keeps a stray one off the
-# standby's leg wrappers, which carry md superblocks of their own.
+# PRIMARY has arrays (CN12), and the udev rules are what keep a stray one off
+# the standby's leg wrappers, which carry md superblocks of their own: the dm
+# rule keeps udev's probe off the wrappers, and the md mask off the NVMe
+# devices under them.
 #
 # THE FIGURE: a second cleanup over a failed run's debris finishes well inside
 # half of this bound, with no per-verb times to size from; 600 s is headroom
@@ -7114,18 +7151,18 @@ NODE_TOOLS="$NODE_TOOLS awk sed grep ss pgrep pkill timeout fallocate tail"
 # crashed run — gets one unguarded pass, and so does every `--cleanup-only`
 # invocation. From the first between-cases sweep on, the guest has been
 # checked. udevadm has other callers besides: md_names reads names with it, and
-# install_udev_rule and remove_udev_rule both run `udevadm control --reload`,
-# and what that buys is that the mask takes effect AT ONCE. systemd-udevd
+# install_udev_rules and remove_udev_rules both run `udevadm control --reload`,
+# and what that buys is that the rules take effect AT ONCE. systemd-udevd
 # notices a changed rules directory on its own — that is the same property
-# install_udev_rule's conditional write is written around — so a missing reload
-# leaves the mask stale for as long as udevd takes to see it, with the agent
-# already starting, and not unloaded for ever. (The mask's own IMPORT program
-# is mdadm as well, though by the absolute path udev rules use; `command -v` is
-# the proxy for it here, exactly as it is on a CN.)
+# install_udev_rules's conditional write is written around — so a missing reload
+# leaves the rules stale for as long as udevd takes to see them, with the agent
+# already starting, and not unloaded for ever. (The md mask's own IMPORT
+# program is mdadm as well, though by the absolute path udev rules use;
+# `command -v` is the proxy for it here, exactly as it is on a CN.)
 DN_TOOLS="$NODE_TOOLS truncate wipefs dd sha256sum mdadm udevadm"
 # mdadm: the cn agent's Md (agent/cnagent/md.go), md_stop_all, md_names and the
 # cn diag. udevadm: md_stop_all's and md_names' name reads, and the reloads of
-# install_udev_rule and remove_udev_rule.
+# install_udev_rules and remove_udev_rules.
 # thin_dump: the cn agent's thin metadata reads (above).
 CN_TOOLS="$NODE_TOOLS mdadm udevadm thin_dump"
 # tc and ip: the copy case's throttles, the clone's on a CN (throttle_from)
@@ -7534,18 +7571,17 @@ preflight_node() { # <role: dn|cn> <index>
 	# md support is what the agent needs to build an array at all. On a DN
 	# /proc/mdstat is what proves the guest CAN assemble one — which is
 	# precisely the hazard: the leg superblocks the cn writes land on the DN
-	# through the side export, so an unmasked DN assembles them behind the
-	# suite's back (install_udev_rule, rule 7).
+	# through the side export, so a DN without the udev rules assembles them
+	# behind the suite's back (install_udev_rules, rule 7).
 	got=$("$sshw" "$v" "ls /proc/mdstat 2>/dev/null || echo MISSING") ||
 		die "$label: reading /proc/mdstat failed"
 	assert_eq "$got" /proc/mdstat "$label: md support"
-	# The 63-dnv-md.rules mask dn_up and cn_up install works by setting
-	# SYSTEMD_READY=0 (see install_udev_rule (cnagent_test.sh)), which only
-	# suppresses the stock
-	# incremental assembly if the stock rule honours it. Both roles install
-	# the mask, so both roles need the precondition checked: on a DN a stock
-	# rule that ignored SYSTEMD_READY would leave the mask inert and the stray
-	# arrays would come straight back.
+	# The md mask of the udev rules dn_up and cn_up install works by setting
+	# SYSTEMD_READY=0 (see install_udev_rules), which only suppresses the
+	# stock incremental assembly if the stock rule honours it. Both roles
+	# install the mask, so both roles need the precondition checked: on a DN
+	# a stock rule that ignored SYSTEMD_READY would leave the mask inert over
+	# a migration destination's connection to its source.
 	got=$("$sshw" "$v" \
 		"for d in /usr/lib/udev/rules.d /lib/udev/rules.d; do" \
 		"f=\$d/64-md-raid-assembly.rules;" \
@@ -8057,8 +8093,9 @@ cleanup_start_gate() { # <what this cleanup was: for the message>
 	if [ -n "$saw_dn" ]; then
 		remedy="$remedy THE KNOWN CAUSE OF A DN TIMEOUT is a stray md array"
 		remedy="$remedy over one of this suite's own dm devices — the cn's leg"
-		remedy="$remedy superblocks travel down the side export and an unmasked"
-		remedy="$remedy udev assembles them on the DN, where the array pins the"
+		remedy="$remedy superblocks travel down the side export and udev"
+		remedy="$remedy without the rules of deploy/udev assembles them on the"
+		remedy="$remedy DN, where the array pins the"
 		remedy="$remedy side (kind d4) or the per-CN linear over it (kind d1) and"
 		remedy="$remedy dm_remove_kind cannot remove either. Check with"
 		remedy="$remedy \`cat /proc/mdstat\` on that guest (a DN must show"
@@ -11108,15 +11145,15 @@ cn_residue_empty() { # <v>
 # (cnagent.md CN12: "Groups (md.go; primary only)"), so a dnv-named array
 # on a DN VM means something else assembled one — which is not hypothetical:
 # the cn writes each leg's md superblock through the side's nvme-tcp export, so
-# it lands on the DN's storage, and an unmasked DN assembles it (rule 7,
-# install_udev_rule). This is therefore the assertion that the DN's md mask
-# WORKED, not a formality. It is still not a general "no md on this guest"
+# it lands on the DN's storage, and a DN without the udev rules assembles it
+# (rule 7, install_udev_rules). This is therefore the assertion that the DN's
+# udev rules WORKED, not a formality. It is still not a general "no md on this guest"
 # check: it names dnv arrays only, and the guest's own arrays are none of its
 # business.
 #
 # THREE WAYS IT COULD ANSWER EMPTY WITHOUT PROVING ANYTHING. Two are closed by
 # preflight and by the wrapper: a guest without mdadm or udevadm answers empty,
-# and both are in DN_TOOLS — dn_up's mask, dn_cleanup's md_stop_all and
+# and both are in DN_TOOLS — dn_up's rules, dn_cleanup's md_stop_all and
 # md_names all need them — so preflight fails first on a DN that lacks either;
 # and an ssh or sudo that fails at this moment also answers empty, which no
 # tool list covers, so the wrapper is the DYING helper_dn (over ssh_dn, not
@@ -11126,7 +11163,7 @@ cn_residue_empty() { # <v>
 # The third is the name read itself. A probe built on `mdadm --detail --scan |
 # grep -oE 'name=…dnv-…'` matches nothing on these guests, where that scan
 # prints no `name=` field at all (md_stop_all's comment), so it would pass
-# whatever the guest held — while the DN md mask it exists to verify is
+# whatever the guest held — while the DN udev rules it exists to verify are
 # exactly the thing that can be wrong. So it reads MD_NAME per array, the way
 # md_stop_all does, and cn_residue's md line goes through the same `md_names`.
 dn_md_residue() { # <v>
@@ -11278,7 +11315,7 @@ case_residue() {
 			die "dn$v: listing the md arrays failed (ssh or sudo), so the" \
 				"'no dnv md array on a DN' assertion could not be taken"
 		# Only a CN assembles one on purpose (CN12): a dnv array here is a
-		# stray assembly the DN's md mask exists to stop (rule 7).
+		# stray assembly the DN's udev rules exist to stop (rule 7).
 		assert_eq "${out//[[:space:]]/}" "" \
 			"dn$v holds no dnv md array"
 	done
@@ -20143,15 +20180,20 @@ react_fs_mark_gone() { # <leg id> <revision>
 # the one leg whose superblock the pass zeroed. An exit status is not that
 # proof: the agent runs mdadm under the soft timeout (dnagent.md SH15), and
 # it takes an assemble killed there that left the array running as a start
-# (cnagent.md CN12). The last assemble ahead of the record must be one from
-# <named leg id>'s member alone, the one leg member device it names, with
-# mdadm's run and force flags and the last superblock update the record
-# names. mdadm takes one update a run, so a record that names two, uuid and
-# then force-no-bbl, as for a named leg with a bad-block list, needs an
-# earlier such assemble with the first update, and a stop of the array
-# between the two when that first one answered, as it then started the
-# array (forcedAssemble). A superblock zero of the zeroed leg's member that
-# answered must come before the first of them. After the record comes an add of the zeroed member,
+# (cnagent.md CN12). Every create, assemble and superblock zero names the
+# 1.2 superblock format (--metadata=1.2). The last assemble ahead of the
+# record must be one from <named leg id>'s member alone, the one leg member
+# device it names, with mdadm's run and force flags and the last superblock
+# update the record names. mdadm takes one update a run, so a record that
+# names two, uuid and then force-no-bbl, as for a named leg with a bad-block
+# list, needs an earlier such assemble with the first update, and a stop of
+# the array between the two when that first one answered, as it then
+# started the array (forcedAssemble). A superblock zero of the zeroed leg's
+# member must come before the first of them: one that answered, or one that
+# did not answer and left the member blank, which the next pass then counts
+# as zeroed with no zero of its own, as a zero naming the 1.2 format fails on
+# a member with no superblock (the record's zeroed list is that pass's
+# word). After the record comes an add of the zeroed member,
 # never one mdadm reports as a re-add, as a member with no superblock joins
 # as a new member, which md copies whole. The add need not have answered:
 # one killed at the soft timeout once it took effect is not run again, as
@@ -20214,13 +20256,18 @@ react_fs_proof() { # <named leg id> <zeroed leg id>
 		   else map(select(forced and .i < $asm.i
 			and word("--update=" + $ups[0]))) | last end) as $run1
 		| [.[] | select(cmd and word("--zero-superblock")
-			and (.a | endswith(" " + $z)) and .rc == 0) | .i] as $zs
+			and (.a | endswith(" " + $z))) | .i] as $zs
+		| [.[] | select(cmd and (word("--zero-superblock")
+			or word("--assemble") or word("--create"))
+			and (word("--metadata=1.2") | not)) | .a] as $plain
 		| [.[] | select(cmd and (.a | endswith("--add --failfast " + $z))
 			and .i > $start)] as $adds
 		| ([.[] | select(cmd and word("--zero-superblock")
 			and (.a | endswith(" " + $n)))] | length) as $nz
 		| if $fs == null then
 			"the agent logged no forced start of group \($g) from leg \($l), which it logs only once the array runs"
+		  elif ($plain | length) != 0 then
+			"md commands name no --metadata=1.2: \($plain | join("; "))"
 		  elif $fs.zeroed != [$zl] then
 			"the forced start record names the zeroed legs \($fs.zeroed | tojson), not leg \($zl) alone"
 		  elif $asm == null then
@@ -20236,7 +20283,7 @@ react_fs_proof() { # <named leg id> <zeroed leg id>
 			| length) == 0 then
 			"the assemble with the \($ups[0]) update answered, and no stop of the array ran before the one with \($ups[1])"
 		  elif ([$zs[] | select(. < $run1.i)] | length) == 0 then
-			"no superblock zero of \($z) answered before the assemble"
+			"no superblock zero of \($z) ran before the assemble"
 		  elif ($adds | length) == 0 then
 			"no add of \($z) ran after the forced start record"
 		  elif ([$adds[] | select(.err | contains("re-added"))] | length) != 0 then

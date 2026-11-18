@@ -23,8 +23,9 @@ from equal superblocks copying the member in the lowest slot, which the
 worker's fence round rests on, no case pins: only
 `integtest/md_fence_order.sh` does (`layout.md`, Directory tree). It proves
 the happy path;
-error paths are out of scope but for the stale probe, the dead leg, the
-promotion that outruns the sides' flip, md's refusal to start an array from one
+error paths are out of scope but for the stale probe, the dead leg, a
+host's md, LVM and bcache signatures at an array's start and a newer md
+superblock at its legs' end, the promotion that outruns the sides' flip, md's refusal to start an array from one
 clean leg, md's check over sectors that fail reads, and over sectors that fail
 writes too, a repair's bad leg that does not serve, the leg that keeps the data
 dying while md copies onto a repair's new leg, where a forced start refuses the
@@ -80,10 +81,14 @@ installs nothing on the VMs — on the machine that runs the suite it builds
 Directory tree) — and fails fast, its per-VM half after the start-of-run
 cleanup, since free agent ports mean something only once a crashed run's agents
 are gone. It loads the kernel modules and mounts configfs, neither of which the
-agent does, then checks each module loaded or built in; the tools, no LVM one
-among them (`architecture.md`, [D13], [D14]); nvmet configfs, md support,
-native multipath and the udev rule the md mask needs; and the free space and
-punch-hole support of the work directory's filesystem and the free memory.
+agent does, then checks each module loaded or built in; the tools, lvm2's and
+bcache-tools' only for redund's foreign stage, which makes a host's
+signatures with them, as the agents run no LVM (`architecture.md`, [D13],
+[D14]); nvmet configfs, md support, native multipath, the stock udev rules the
+rules of `deploy/udev/` sort against, the stock assembly rule's honouring of
+the systemd-ready property the md mask sets, and udevadm's acceptance of the
+rules of `deploy/udev/`; and the free space and punch-hole support of the work
+directory's filesystem and the free memory.
 iptables and tc are left to the stages that use them, the partition stages and
 clone_xfer's slowed copy, so a VM without one fails in the stage that needs it
 rather than a run that might never reach one.
@@ -111,10 +116,38 @@ measures as the dn suite's does; and on the dm-clone table. This suite adds:
 * nvmet checks admission only when a host connects (`architecture.md`, Primary
   cntlr), so removing a host's link from a subsystem leaves the host's
   controller to it live, which smoke asserts after revoking the host.
-* The suite installs the md udev mask of `architecture.md`, Components:
-  invocation reference, for the run and removes it at cleanup, the VMs being
-  shared; the preflight checks that the stock incremental-assembly rule honours
-  the systemd-ready property the mask depends on.
+* The suite installs the udev rules of `deploy/udev/` (`architecture.md`,
+  Components: invocation reference) for the run, from the texts the VM helper
+  carries, checks that each file holds its text, and removes them at cleanup,
+  the VMs being shared; the preflight checks that the stock incremental-assembly
+  rule honours the systemd-ready property the md mask sets.
+* mdadm takes the 1.2 superblock format (`--metadata=1.2`) in its create,
+  assemble and misc modes and refuses it in its manage mode, and never as its
+  first option (`cnagent.md` CN12, The superblock format). Its bitmap
+  examine (`--examine-bitmap`) aborts with a heap error, exit status 134,
+  and its bad-block examine (`--examine-badblocks`) with a segmentation
+  fault, exit status 139, when they name the format; both read a member
+  without it. So the suite's bitmap and bad-block reads name no format,
+  take a failed run as an error, and run only after the foreign
+  superblocks are zeroed. Without it, an
+  examine and an assembly read, of the superblocks on a member, the one whose
+  array was created last: a 1.0 or 0.90 superblock of an array made after
+  dnv's, at the member's end, makes the plain examine show that array and the
+  plain assembly refuse the member for its name ("has wrong name."), while
+  the examine and the assembly that name the 1.2 format read dnv's and start
+  the array. The examine that names the format answers a device with no 1.2
+  superblock with exit status 0 and nothing on its output. A plain add of
+  such a member re-adds it and keeps the other superblock; a create over a
+  member that carries only a 1.0 superblock removes it. Seen with mdadm 4.5
+  on loop devices, kernel 7.0.0-42.
+* A write through a leg device reaches the leg past the page cache of the
+  NVMe device below it, and that cache keeps what an earlier read of the
+  NVMe device got while the leg device holds it open. udev's blkid probe
+  reads through that cache: after the foreign stage wrote the leg's end
+  through the leg device, the probe of the NVMe device found no signature
+  at all, while mdadm, which reads past the cache, found both superblocks.
+  Dropping the cache (`blockdev --flushbufs`) makes the probe read the
+  disk. Seen with util-linux 2.41.3, kernel 7.0.0-42.
 * mdadm gates a degraded assembly from a device list by the survivor's recorded
   array state (`cnagent.md` CN12), and the late flip relies on both halves: the
   member failed by hand before it is kicked as stale while the other,
@@ -237,9 +270,11 @@ measures as the dn suite's does; and on the dm-clone table. This suite adds:
   and the array reads clean, only the agent's probe writes to the legs, and
   none goes through md.
 * An assembly with the run and force flags from one member whose superblock
-  counts two working members starts the array degraded; a zero of a device
-  with no superblock answers success; and a member zeroed and then added is
-  added fresh and copied whole.
+  counts two working members starts the array degraded; a zero that names the
+  1.2 format fails on a device with no 1.2 superblock, with exit status 2, and
+  on a member that carries a 1.2 superblock and another format's takes the 1.2
+  one alone; and a member zeroed and then added is added fresh and copied
+  whole.
 * An assembly that gives the array a new identity makes a member of the old
   history added later a fresh member, copied whole; without it, mdadm
   re-adds a member whose events count is below the array's from the bitmap,
@@ -458,10 +493,39 @@ timeout plus a second over a converge that connects nothing (CN10). With the rul
 converge connects both legs again and a fresh check round names nothing;
 its dials leave no nvmet-tcp error in DN1's kernel log (`osclient.md`,
 DialTcp).
+Before the host writes, the foreign stage plants, one at a time, a host's md
+version-1.2 superblock, an LVM physical volume with a volume group and a
+volume, a bcache superblock and an ext4 file system at the start of the data
+group's array on the primary, where a fresh pool's first host write lands,
+each made with a host's tools on a scratch device that a rule of the stage's
+own keeps the system's rules off, and sends the array a change event, as its
+assembly does: a low-level blkid probe reads each signature, and udev's
+record of the array carries the md array rule's type, with nothing holding
+the array but dnv's devices, no link by uuid or label leading to it, no
+volume of the planted group active, no physical volume recorded online and
+no bcache device (`architecture.md`, Components: invocation reference); the
+array's start is zeroed again after each. It then writes the end of an md
+1.0 array made just then over the end of both data legs, through the
+primary's leg devices, as a host can make one at its volume's end; the
+standby's paths end in dm-error on the disk nodes (`dnagent.md` DN10), so
+only the primary's reach the legs. Through each VM's leg devices once they
+serve — the primary's at once, the standby's after the flip — mdadm's plain
+examine of each leg reads that newer superblock, the examine naming the 1.2
+format reads dnv's (Lab facts), and a change event leaves each leg's NVMe
+device marked not ready under dnv's name by the md mask, held by nothing but
+dnv's leg device. Before that event the stage drops the NVMe device's page
+cache: its writes reach the leg through the leg device above it, past that
+cache, which keeps an earlier read's data while the leg device holds the
+NVMe device open, and udev's probe reads through it (Lab facts).
 The demote moves ANA before the park (CN9's ANA pre-step before its park
 pre-step), stops the arrays and keeps the legs; the promote assembles both
 (CN12's assembly case), each with the arguments the first stage's rule builds
-for its own group, the data surviving. With what the primary's machine
+for its own group, the data surviving, the data group's from both legs,
+which the newer 1.0 superblocks would make a plain assembly refuse (CN12, The
+superblock format). After the failover neither VM holds an array, a volume
+group or a bcache device made from the planted signatures, and the stage
+zeroes the legs' ends again through the new primary's leg devices.
+With what the primary's machine
 sends to DN1's port delayed (`tc netem`, no device changed), the
 primary's inspect read reports a write half of the probe of each of DN1's
 legs, from a round made under the delay, at no less than the delay, and
@@ -742,8 +806,8 @@ mapped block down to its first sector, before its removal, which comes
 before its id's delete; the pool's used blocks go back to their baseline, and DN1's side
 device counts among its discards at least the blocks the volume still
 mapped. The case plays the worker's re-send of that request, since a
-removal right after the discard can meet udev's probe of the volume
-(CN14), and takes the first reply clean or naming the volume alone. It
+removal that fails busy leaves the volume to the next pass (CN14), and
+takes the first reply clean or naming the volume alone. It
 logs the pool's status with its discard passdown word, the discard
 counters of the side device and of the per-CN dm-linear above it, the
 backing file's allocated blocks before and after, and the agent's record
@@ -900,6 +964,16 @@ slowed, so its read-through window, logged too, is open when its probe reads,
 and the case fails unless the copy holds once its source goes and the wipe
 comes in the middle of it.
 
+**What the stock rules do without the rules of `deploy/udev/`** is a manual
+check the suite never runs, as it never removes rules it did not install: on
+a pair of lab VMs, after setup, the files of `deploy/udev/` are removed from
+the rules directory and udev reloaded, and redund's foreign stage is run with
+its checks of udev's records left out. What each stock rule then makes of
+each signature — an array over the data group's array or a leg's NVMe device,
+an active volume of the planted group, a physical volume recorded online, a
+bcache device — is read from the node; the cleanup's sweep of what the system
+made of the foreign signatures removes it.
+
 ## Teardown and cleanup
 
 Cleanup runs unconditionally at the start of every run and at its end only on
@@ -927,7 +1001,10 @@ order (`dnagent_integtest.md`, Teardown and cleanup); a dm-clone while its
 source is still connected (`cnagent.md` L3), which makes the cleanup two phases
 across both VMs, every clone of either VM gone before any transfer, as a clone
 flushes through a source the other VM exports; each disk's header block
-zeroed (`architecture.md`, [D13]) and the udev mask removed last. Every
+zeroed (`architecture.md`, [D13]) and the udev rules removed last; and before
+the arrays stop, whatever the system made of redund's foreign signatures, an
+array, an active volume or a bcache device over one of them, should a rule
+have failed, together with the stage's scratch devices. Every
 suspended dnv device is resumed before anything over it is removed, as one
 wedges its removal, the namespace disable above it and any block scan
 (`architecture.md`, [D12]). md arrays are named through udev, else by mdadm's

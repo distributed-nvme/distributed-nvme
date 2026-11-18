@@ -40,6 +40,10 @@ set -euo pipefail
 # ---------------------------------------------------------------------------
 
 REPO_ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
+# The udev rules every node that runs a dnv agent carries (layout.md,
+# Directory tree): the helper carries their texts as this checkout holds
+# them, and install_udev_rules writes them on the VMs.
+UDEV_SRC="$REPO_ROOT/deploy/udev"
 CTL_DN="$REPO_ROOT/integtest/bin/dnagentctl"
 CTL_CN="$REPO_ROOT/integtest/bin/cnagentctl"
 AGENT_BIN="$REPO_ROOT/bin/dnv-agent"
@@ -726,9 +730,10 @@ host_dev() { printf '/dev/disk/by-id/nvme-uuid.%s' "$1"; }
 # ---------------------------------------------------------------------------
 
 # md_assemble_args prints the arguments Md.Assemble (agent/cnagent/md.go) gives
-# mdadm to start one group: the group's node path and array name, then the
-# available members that carry a superblock, in ascending leg_idx order (the
-# order the agent sorts leg_list into), and nothing else. No --run, --force or
+# mdadm to start one group: the group's node path, the 1.2 superblock format
+# (mdFormatArgs) and the array name, then the available members that carry a
+# superblock, in ascending leg_idx order (the order the agent sorts leg_list
+# into), and nothing else. No --run, --force or
 # --scan among them is what leaves a degraded start to mdadm's own gate
 # (cnagent.md CN12). redund's md-refusal stage runs commands this rule builds
 # over a node path, an array name and members of its own, from one member and
@@ -740,20 +745,21 @@ host_dev() { printf '/dev/disk/by-id/nvme-uuid.%s' "$1"; }
 md_assemble_args() { # devpath arrayname member…
 	local dev=$1 name=$2
 	shift 2
-	printf -- '--assemble %s --name %s' "$dev" "$name"
+	printf -- '--assemble %s --metadata=1.2 --name %s' "$dev" "$name"
 	printf ' %s' "$@"
 	printf '\n'
 }
 
 # md_create_args prints the arguments Md.Create (agent/cnagent/md.go) gives
 # mdadm for CN12's create case, every leg_list member available and none
-# carrying a superblock: the bitmap chunk and the data offset in KiB, as the
+# carrying a superblock: the 1.2 superblock format after the node path
+# (mdFormatArgs), and the bitmap chunk and the data offset in KiB, as the
 # agent computes them from the block size, bitmap_chunk_block_cnt and
 # meta_blocks.
 md_create_args() { # devpath arrayname chunkKiB offsetKiB member…
 	local dev=$1 name=$2 chunk=$3 off=$4
 	shift 4
-	printf -- '--create %s --name %s --level 1 --raid-devices %s' \
+	printf -- '--create %s --metadata=1.2 --name %s --level 1 --raid-devices %s' \
 		"$dev" "$name" "$#"
 	printf -- ' --bitmap internal --bitmap-chunk %sK --data-offset %sK' \
 		"$chunk" "$off"
@@ -763,12 +769,21 @@ md_create_args() { # devpath arrayname chunkKiB offsetKiB member…
 }
 
 # md_forced_args prints the arguments Md.AssembleForced (agent/cnagent/md.go)
-# gives mdadm for CN12's forced start: the group's node path and array name,
-# --run and --force, one superblock update (uuid, or force-no-bbl for the
-# second run), then the named leg alone.
+# gives mdadm for CN12's forced start: the group's node path, the 1.2
+# superblock format (mdFormatArgs) and the array name, --run and --force, one
+# superblock update (uuid, or force-no-bbl for the second run), then the
+# named leg alone.
 md_forced_args() { # devpath arrayname update member
-	printf -- '--assemble %s --name %s --run --force --update=%s %s\n' \
+	printf -- '--assemble %s --metadata=1.2 --name %s --run --force --update=%s %s\n' \
 		"$1" "$2" "$3" "$4"
+}
+
+# md_zero_re prints the extended regular expression of the record of
+# Md.ZeroSuperblock's command (agent/cnagent/md.go) over the dm device <dm
+# name>: the mode word, the 1.2 superblock format (mdFormatArgs), then the
+# member alone, at the line's end.
+md_zero_re() { # dm name
+	printf '^mdadm --zero-superblock --metadata=1\\.2 /dev/mapper/%s$\n' "$1"
 }
 
 # ---------------------------------------------------------------------------
@@ -1142,6 +1157,21 @@ cn_syncup_cntlr() { # cnidx file [cnagentctl args...]
 # the quoting of the probing/teardown loops lives in one readable place.
 # ---------------------------------------------------------------------------
 
+# udev_rules_source prints the helper's copy of the udev rules: one
+# UDEV_RULES entry per file of $UDEV_SRC, keyed by its name, holding its
+# text. It fails when $UDEV_SRC holds no rule file.
+udev_rules_source() {
+	local f
+	printf 'declare -A UDEV_RULES=()\n'
+	for f in "$UDEV_SRC"/*.rules; do
+		[ -f "$f" ] || {
+			echo "udev_rules_source: no rule file in $UDEV_SRC" >&2
+			return 1
+		}
+		printf 'UDEV_RULES[%q]=%q\n' "${f##*/}" "$(cat "$f")"
+	done
+}
+
 vm_helper_source() {
 	cat <<'HELPER_EOF'
 #!/usr/bin/env bash
@@ -1157,7 +1187,7 @@ CN_LOG=$WORK/cn-agent.log
 NVMET=/sys/kernel/config/nvmet
 NQN_PREFIX=nqn.2024-01.io.dnv
 NQN_IT_PREFIX=nqn.2024-01.io.dnv-it
-UDEV_RULE=/etc/udev/rules.d/63-dnv-md.rules
+UDEV_DIR=/etc/udev/rules.d
 # TR_SVC_ID mirrors the driver's constant of the same name: the nvme-tcp port
 # every agent listens on, and so the only port the partition stages block
 # (case T's S4, case A's degrade).
@@ -1746,11 +1776,16 @@ md_array_state() {
 
 # md_bitmap_dirty <dm name> — the count of dirty chunks in the write-intent
 # bitmap on the dm device <dm name>, as mdadm --examine-bitmap reads it from
-# the device. md sets a chunk's bit on the device before a write to it and
-# clears it, in a write of its own to every member, over a few of its
-# daemon's periods after the write ends; 0 means md has no bitmap write left
-# to send until the next write to the array. It fails, saying so, when the
-# read fails, does not end within its bound, or prints no count.
+# the device beside its superblock. md sets a chunk's bit on the device
+# before a write to it and clears it, in a write of its own to every member,
+# over a few of its daemon's periods after the write ends; 0 means md has no
+# bitmap write left to send until the next write to the array. It fails,
+# saying so, when the read fails, does not end within its bound, or prints no
+# count. The read names no superblock format: mdadm 4.5 aborts on
+# `--examine-bitmap --metadata=1.2` (glibc "corrupted size vs. prev_size",
+# exit 134; `cnagent_integtest.md`, Lab facts), and the stages that read a
+# bitmap run after nofgn has zeroed the foreign tails, so the plain read
+# finds the agent's 1.2 superblock.
 md_bitmap_dirty() {
 	local out n
 	out=$(timeout 30 mdadm --examine-bitmap "/dev/mapper/$1" 2>&1) || {
@@ -1776,17 +1811,27 @@ md_bitmap_dirty() {
 # bad-block list from mdadm --examine-badblocks; "none" when mdadm finds no
 # superblock. It is the suite's own reading, beside the agent's (cnagent.md
 # CN12, The superblock read). It fails, saying so, when the device is not
-# there, the examine does not end within its bound, or a superblock lacks a
-# role, an identity or an events count.
+# there, the examine does not end within its bound, a superblock lacks a
+# role, an identity or an events count, or the bad-block read fails.
 md_examine() {
 	local out rc=0 role rec ev uuid bbl
 	[ -b "/dev/mapper/$1" ] || {
 		echo "md_examine: no /dev/mapper/$1 on this node" >&2
 		return 1
 	}
-	out=$(timeout 30 mdadm --examine "/dev/mapper/$1" 2>/dev/null) || rc=$?
+	# The 1.2 format, the agent's: mdadm then reads no superblock of another
+	# format a host left at the device's end, and answers a device with no
+	# 1.2 superblock with exit status 0 and nothing on stdout
+	# (cnagent_integtest.md, Lab facts).
+	out=$(timeout 30 mdadm --examine --metadata=1.2 "/dev/mapper/$1" \
+		2>/dev/null) || rc=$?
 	case "$rc" in
-	0) ;;
+	0)
+		[ -n "$out" ] || {
+			echo none
+			return 0
+		}
+		;;
 	124 | 137)
 		echo "md_examine: mdadm --examine of $1 did not end" >&2
 		return 1
@@ -1819,17 +1864,27 @@ md_examine() {
 		echo "md_examine: $1's superblock reads no array uuid" >&2
 		return 1
 	}
-	bbl=$(timeout 30 mdadm --examine-badblocks "/dev/mapper/$1" 2>/dev/null |
-		grep -c ' for ') || true
+	# The bad-block read names no format: mdadm 4.5 crashes on
+	# `--examine-badblocks --metadata=1.2` (exit 139; `cnagent_integtest.md`,
+	# Lab facts), and no stage reads a list while a host's superblock sits
+	# at a leg's end (redund's nofgn zeroes them). A read that fails is an
+	# error, never an empty list.
+	bbl=$(timeout 30 mdadm --examine-badblocks "/dev/mapper/$1" 2>&1) || {
+		echo "md_examine: mdadm --examine-badblocks of $1 failed: $bbl" >&2
+		return 1
+	}
+	bbl=$(printf '%s\n' "$bbl" | grep -c ' for ') || true
 	echo "role=${role// /_} recovery=${rec:-none} uuid=$uuid bbl=${bbl:-0} events=$ev"
 }
 
 # md_zero <dm name> — zeroes the md superblock on the dm device <dm name>
-# with mdadm --zero-superblock, as a forced start zeroes a member it keeps,
-# and prints "zeroed". It fails, saying so, when mdadm refuses, as it does
-# on a member a running array holds, or does not end within its bound.
+# with Md.ZeroSuperblock's command, which names the 1.2 format, as a forced
+# start zeroes a member it keeps, and prints "zeroed". It fails, saying so,
+# when mdadm refuses, as it does on a member a running array holds and on
+# one that carries no 1.2 superblock, or does not end within its bound.
 md_zero() {
-	timeout 30 mdadm --zero-superblock "/dev/mapper/$1" >/dev/null 2>&1 || {
+	timeout 30 mdadm --zero-superblock --metadata=1.2 "/dev/mapper/$1" \
+		>/dev/null 2>&1 || {
 		echo "md_zero: mdadm --zero-superblock of $1 failed" >&2
 		return 1
 	}
@@ -2278,12 +2333,17 @@ mdr_md() {
 		"members=$states"
 }
 
-# mdr_examine <dev> — one leg's superblock, twice: `mdadm --examine --export`,
-# then `mdadm --examine`, for the array state the export lacks. It fails when
-# the leg carries no superblock.
+# mdr_examine <dev> — one leg's version-1.2 superblock, the agent's format,
+# twice: `mdadm --examine --export`, then `mdadm --examine`, for the array
+# state the export lacks. It fails when the leg carries no 1.2 superblock,
+# which mdadm answers with exit status 0 and nothing on stdout
+# (cnagent_integtest.md, Lab facts).
 mdr_examine() {
-	mdadm --examine --export "$1" || return 1
-	mdadm --examine "$1" || return 1
+	local out
+	out=$(mdadm --examine --export --metadata=1.2 "$1") && [ -n "$out" ] ||
+		return 1
+	printf '%s\n' "$out"
+	mdadm --examine --metadata=1.2 "$1" || return 1
 }
 
 # mdr_loops — the loop devices whose backing file is one of the stage's,
@@ -2324,6 +2384,364 @@ mdr_diag() {
 		mdadm --examine "$dev" 2>&1
 	done
 	return 0
+}
+
+# --- foreign signatures (redund's foreign and nofgn stages) -----------------
+#
+# A host writes whatever it likes into a volume: an md superblock, an LVM
+# physical volume, a bcache superblock. Through a thin pool such a write can
+# land at the start of a data group's array, and an md superblock of a format
+# that sits at a device's end can land at a leg's end. The udev rules of
+# deploy/udev/ keep the system's own rules from acting on them
+# (architecture.md, Components: invocation reference). These functions make
+# such signatures on scratch devices, with the tools a host would use, and
+# copy them where a host's write can put them; they read what the system made
+# of them; and fgn_sweep removes whatever the system made, should a rule have
+# failed, before cleanup stops the arrays such a thing would hold.
+#
+# FGN_RULE keeps the system's md assembly, LVM and bcache rules off each
+# scratch loop device while it carries a signature: a rule of this suite's
+# own, in /run, which fgn_sweep and each scratch's own removal take away.
+FGN_DIR=/var/tmp/dnv-cn-integtest-fgn
+FGN_RULE=/run/udev/rules.d/61-dnv-it-fgn.rules
+FGN_VG=dnvitfgnvg
+FGN_PVID=DnvItF-ForE-ignP-V000-0000-0000-000001
+FGN_FSLABEL=dnvitfgnfs
+FGN_FSUUID=d17e0000-0000-4000-8000-00000000f9a5
+
+# fgn_loop <name> <bytes> — a scratch loop device over the sparse file
+# $FGN_DIR/<name>.img, which FGN_RULE marks not ready and keeps the "other"
+# rules (lvm2's, bcache's) off. Prints the loop device.
+fgn_loop() {
+	local dev
+	mkdir -p "$FGN_DIR" "${FGN_RULE%/*}" || return 1
+	rm -f "$FGN_DIR/$1.img"
+	truncate -s "$2" "$FGN_DIR/$1.img" || return 1
+	dev=$(losetup --find --show "$FGN_DIR/$1.img") || return 1
+	printf 'KERNEL=="%s", ENV{SYSTEMD_READY}="0", ENV{DM_UDEV_DISABLE_OTHER_RULES_FLAG}="1"\n' \
+		"${dev#/dev/}" >>"$FGN_RULE" || return 1
+	udevadm control --reload >/dev/null 2>&1
+	echo "$dev"
+}
+
+# fgn_unloop — detaches the scratch loop devices, removes their files and
+# FGN_RULE. It stops any md array that holds one first.
+fgn_unloop() {
+	local all dev h
+	all=$(losetup -a 2>/dev/null | grep -F "$FGN_DIR/" | cut -d: -f1)
+	for dev in $all; do
+		for h in "/sys/block/${dev#/dev/}"/holders/md*; do
+			[ -e "$h" ] || continue
+			timeout 15 mdadm --stop "/dev/${h##*/}" >/dev/null 2>&1
+		done
+		timeout 15 losetup -d "$dev" >/dev/null 2>&1
+	done
+	rm -rf "$FGN_DIR"
+	rm -f "$FGN_RULE"
+	udevadm control --reload >/dev/null 2>&1
+}
+
+# fgn_md_make <loop> <metadata> <name> — a two-place md RAID1 array of the
+# given superblock format and name on <loop> alone, as a host makes one,
+# stopped again: its superblock stays on <loop>.
+fgn_md_make() {
+	timeout 60 mdadm --create "/dev/md/$3" --metadata="$2" --level=1 \
+		--raid-devices=2 --bitmap=none --homehost=any --name="$3" --run \
+		"$1" missing >/dev/null 2>&1 || return 1
+	timeout 30 mdadm --stop "/dev/md/$3" >/dev/null 2>&1 || return 1
+	udevadm settle -t 10 >/dev/null 2>&1
+	return 0
+}
+
+# fgn_plant_start <md|lvm|bcache|fs> <md dev> — makes one host's signature in
+# a scratch place and copies the first MiB of that place over the start of
+# the dnv array <md dev>, where a fresh pool's first host write lands: an md
+# version-1.2 superblock of an array named fgnmd; an LVM physical volume of
+# id FGN_PVID with the volume group FGN_VG and one volume in it; a bcache
+# backing superblock; or an ext4 file system labelled FGN_FSLABEL with the
+# uuid FGN_FSUUID. The last two are made in a plain file, which udev never
+# sees. The scratch goes again. Prints "planted".
+fgn_plant_start() {
+	local src lvmcfg rc=0
+	case "$1" in
+	md)
+		src=$(fgn_loop md 67108864) || return 1
+		fgn_md_make "$src" 1.2 fgnmd || rc=1
+		;;
+	lvm)
+		src=$(fgn_loop lvm 67108864) || return 1
+		lvmcfg="devices { use_devicesfile=0 filter=[\"a|^$src\$|\",\"r|.*|\"] }"
+		{ pvcreate -q --config "$lvmcfg" --uuid "$FGN_PVID" --norestorefile \
+			"$src" && vgcreate -q --config "$lvmcfg" "$FGN_VG" "$src" &&
+			lvcreate -q --config "$lvmcfg" -an -Zn -L 8M -n lv "$FGN_VG"; } \
+			>/dev/null 2>&1 || rc=1
+		;;
+	bcache)
+		mkdir -p "$FGN_DIR" || return 1
+		src=$FGN_DIR/bcache.img
+		rm -f "$src"
+		{ truncate -s 67108864 "$src" && make-bcache -B "$src"; } \
+			>/dev/null 2>&1 || rc=1
+		;;
+	fs)
+		mkdir -p "$FGN_DIR" || return 1
+		src=$FGN_DIR/fs.img
+		rm -f "$src"
+		{ truncate -s 67108864 "$src" && mkfs.ext4 -q -F -L "$FGN_FSLABEL" \
+			-U "$FGN_FSUUID" "$src"; } >/dev/null 2>&1 || rc=1
+		;;
+	*)
+		echo "fgn_plant_start: no signature '$1'" >&2
+		return 1
+		;;
+	esac
+	[ "$rc" = 0 ] &&
+		dd if="$src" of="$2" bs=4096 count=256 conv=fsync >/dev/null 2>&1 ||
+		rc=1
+	if [ "$1" = lvm ]; then
+		{ vgremove -q -f --config "$lvmcfg" "$FGN_VG" &&
+			pvremove -q -f --config "$lvmcfg" "$src"; } >/dev/null 2>&1
+	fi
+	fgn_unloop
+	[ "$rc" = 0 ] || {
+		echo "fgn_plant_start: making or copying the $1 signature failed" >&2
+		return 1
+	}
+	echo planted
+}
+
+# fgn_unplant_start <md dev> — zeroes the first MiB of the dnv array <md
+# dev> again, as the side's zeroing and its unwritten extents left it.
+fgn_unplant_start() {
+	dd if=/dev/zero of="$1" bs=4096 count=256 conv=fsync >/dev/null 2>&1 || {
+		echo "fgn_unplant_start: zeroing the start of $1 failed" >&2
+		return 1
+	}
+	echo unplanted
+}
+
+# fgn_probe <dev> — the signature a low-level blkid probe reads on <dev>,
+# "none" for none.
+fgn_probe() {
+	local t
+	t=$(blkid -p -o value -s TYPE "$1" 2>/dev/null) || true
+	echo "${t:-none}"
+}
+
+# fgn_change <dev>… — a change event for each device, as an assembly or a
+# path's return brings, and waits for udev to handle it.
+fgn_change() {
+	udevadm trigger --action=change "$@" >/dev/null 2>&1 || return 1
+	udevadm settle -t 20 >/dev/null 2>&1
+	echo changed
+}
+
+# fgn_effects <md dev> — what the system's rules made of a signature at the
+# start of the dnv array <md dev>, after its change event: "type=<the file
+# system type in udev's record of the array> held=<what holds the array that
+# is no dnv dm device> links=<the links under /dev/disk by uuid, label,
+# partition uuid or partition label that lead to the array> vg=<dm devices
+# of FGN_VG> pv=<whether lvm2 recorded FGN_PVID online> bcache=<whether
+# bcache took the array>". It waits 2 s first, as lvm2's activation runs as
+# a unit of its own after the event.
+fgn_effects() {
+	local md node type h l held="" links="" vg pv=no bc=no
+	md=$(readlink -f "$1") || return 1
+	node=${md#/dev/}
+	[ -d "/sys/block/$node" ] || {
+		echo "fgn_effects: no block device $1" >&2
+		return 1
+	}
+	sleep 2
+	type=$(udevadm info --query=property --name="$md" 2>/dev/null |
+		sed -n 's/^ID_FS_TYPE=//p')
+	for h in "/sys/block/$node"/holders/*; do
+		[ -e "$h" ] || continue
+		case "$(cat "$h/dm/name" 2>/dev/null)" in dnv-*) continue ;; esac
+		held="$held${held:+,}${h##*/}"
+	done
+	for l in /dev/disk/by-uuid/* /dev/disk/by-label/* \
+		/dev/disk/by-partuuid/* /dev/disk/by-partlabel/*; do
+		[ -L "$l" ] && [ "$(readlink -f "$l")" = "$md" ] || continue
+		links="$links${links:+,}${l#/dev/disk/}"
+	done
+	vg=$(dmsetup ls 2>/dev/null |
+		awk -v p="$FGN_VG-" 'index($1, p) == 1 {print $1}' | tr '\n' ',')
+	[ -e "/run/lvm/pvs_online/${FGN_PVID//-/}" ] && pv=yes
+	[ -e "/sys/block/$node/bcache" ] && bc=yes
+	vg=${vg%,}
+	echo "type=${type:-none} held=${held:-none} links=${links:-none}" \
+		"vg=${vg:-none} pv=$pv bcache=$bc"
+}
+
+# fgn_plant_tail <wrapper>… — makes a two-place md RAID1 array of format 1.0,
+# which sits at a device's end, named fgntail, on a scratch loop device of
+# the leg wrappers' common size, now, so that its superblock is newer than
+# dnv's, and copies the last 64 KiB of the scratch, which hold that
+# superblock, over the end of each wrapper, as a host that makes such an
+# array on its volume's end can. Prints "planted".
+fgn_plant_tail() {
+	local size w s src rc=0 at
+	size=$(blockdev --getsize64 "$1") || return 1
+	for w in "$@"; do
+		s=$(blockdev --getsize64 "$w") || return 1
+		[ "$s" = "$size" ] || {
+			echo "fgn_plant_tail: $w is $s bytes, $1 is $size" >&2
+			return 1
+		}
+	done
+	[ $((size % 4096)) = 0 ] && [ "$size" -ge 1048576 ] || {
+		echo "fgn_plant_tail: a wrapper of $size bytes" >&2
+		return 1
+	}
+	src=$(fgn_loop tail "$size") || return 1
+	fgn_md_make "$src" 1.0 fgntail || rc=1
+	at=$((size / 4096 - 16))
+	if [ "$rc" = 0 ]; then
+		for w in "$@"; do
+			dd if="$src" of="$w" bs=4096 skip="$at" seek="$at" count=16 \
+				conv=fsync >/dev/null 2>&1 || rc=1
+		done
+	fi
+	fgn_unloop
+	[ "$rc" = 0 ] || {
+		echo "fgn_plant_tail: making or copying the 1.0 superblock failed" >&2
+		return 1
+	}
+	echo planted
+}
+
+# fgn_tail_clear <wrapper>… — zeroes the last 64 KiB of each wrapper again.
+fgn_tail_clear() {
+	local w size
+	for w in "$@"; do
+		size=$(blockdev --getsize64 "$w") || return 1
+		dd if=/dev/zero of="$w" bs=4096 seek=$((size / 4096 - 16)) count=16 \
+			conv=fsync >/dev/null 2>&1 || {
+			echo "fgn_tail_clear: zeroing the end of $w failed" >&2
+			return 1
+		}
+	done
+	echo cleared
+}
+
+# fgn_names <wrapper> — the array name mdadm's plain examine reads on a leg
+# wrapper, then the one it reads naming the 1.2 format, the agent's and the
+# md mask's: "plain=<MD_NAME> flagged=<MD_NAME>", "none" for none.
+fgn_names() {
+	local plain flagged
+	plain=$(timeout 30 mdadm --examine --export "$1" 2>/dev/null |
+		sed -n 's/^MD_NAME=//p')
+	flagged=$(timeout 30 mdadm --examine --export --metadata=1.2 "$1" \
+		2>/dev/null | sed -n 's/^MD_NAME=//p')
+	echo "plain=${plain:-none} flagged=${flagged:-none}"
+}
+
+# fgn_head <wrapper> — the leg's NVMe device under the leg wrapper, the
+# device the wrapper maps, by the device number its table names.
+fgn_head() {
+	local devno p
+	devno=$(dmsetup table "${1#/dev/mapper/}" 2>/dev/null |
+		awk 'NR == 1 {print $4}')
+	p=$(readlink -f "/sys/dev/block/$devno" 2>/dev/null) && [ -n "$devno" ] ||
+		return 1
+	echo "/dev/${p##*/}"
+}
+
+# fgn_head_change <head> — drops the page cache of the leg's NVMe device
+# <head>, then sends it a change event. The stage writes a leg through the
+# leg device above <head>, past <head>'s page cache, and that cache keeps
+# what an earlier read of <head> got while the leg device holds <head> open;
+# udev's blkid probe reads through it, so without the drop it reads old
+# data. After the drop the probe reads what a fresh connect's would.
+fgn_head_change() {
+	blockdev --flushbufs "$1" >/dev/null 2>&1 || return 1
+	fgn_change "$1"
+}
+
+# fgn_head_effects <head> — what the system's rules made of the leg's NVMe
+# device <head> after its change event: "ready=<SYSTEMD_READY in udev's
+# record> name=<MD_NAME in it> held=<what holds it that is no dnv dm device>".
+fgn_head_effects() {
+	local node props h held=""
+	node=${1#/dev/}
+	[ -d "/sys/block/$node" ] || {
+		echo "fgn_head_effects: no block device $1" >&2
+		return 1
+	}
+	props=$(udevadm info --query=property --name="$1" 2>/dev/null)
+	for h in "/sys/block/$node"/holders/*; do
+		[ -e "$h" ] || continue
+		case "$(cat "$h/dm/name" 2>/dev/null)" in dnv-*) continue ;; esac
+		held="$held${held:+,}${h##*/}"
+	done
+	echo "ready=$(printf '%s\n' "$props" | sed -n 's/^SYSTEMD_READY=//p')" \
+		"name=$(printf '%s\n' "$props" | sed -n 's/^MD_NAME=//p')" \
+		"held=${held:-none}"
+}
+
+# fgn_none — every trace the system's rules could have left of the stage's
+# signatures on this node, one per line, nothing when there is none: an md
+# array one of whose members is no dm device of dnv, a dm device of FGN_VG,
+# lvm2's online record of FGN_PVID, a bcache device.
+fgn_none() {
+	local d m name foreign
+	for d in /sys/block/md*; do
+		[ -d "$d/md" ] || continue
+		foreign=""
+		for m in "$d"/md/dev-*; do
+			[ -e "$m" ] || continue
+			name=$(cat "$m/block/dm/name" 2>/dev/null)
+			case "$name" in dnv-*) ;; *) foreign="$foreign ${m##*/dev-}" ;; esac
+		done
+		[ -z "$foreign" ] || echo "array ${d##*/} holds$foreign"
+	done
+	dmsetup ls 2>/dev/null |
+		awk -v p="$FGN_VG-" 'index($1, p) == 1 {print "volume " $1}'
+	[ ! -e "/run/lvm/pvs_online/${FGN_PVID//-/}" ] ||
+		echo "lvm2 records physical volume $FGN_PVID online"
+	for d in /sys/block/bcache*; do
+		[ -e "$d" ] && echo "bcache device ${d##*/}"
+	done
+	return 0
+}
+
+# fgn_sweep — removes whatever the system made of the stage's signatures, a
+# rule having failed, and the stage's scratch: FGN_VG's dm devices and
+# lvm2's online records of it; every bcache device, stopped through the
+# device it caches; and every md array that holds an md array or a scratch
+# loop device of the stage, or a member whose superblock, as mdadm's plain
+# examine reads it, names fgnmd or fgntail. It runs before cleanup stops the
+# arrays, which any of these would hold. Best-effort.
+fgn_sweep() {
+	local name d m stop
+	for name in $(dmsetup ls 2>/dev/null |
+		awk -v p="$FGN_VG-" 'index($1, p) == 1 {print $1}'); do
+		timeout 15 dmsetup remove "$name" >/dev/null 2>&1
+	done
+	rm -f "/run/lvm/pvs_online/${FGN_PVID//-/}" "/run/lvm/vgs_online/$FGN_VG"
+	for d in /sys/block/*/bcache/stop; do
+		[ -e "$d" ] && echo 1 >"$d" 2>/dev/null
+	done
+	for d in /sys/block/md*; do
+		[ -d "$d/md" ] || continue
+		stop=0
+		for m in "$d"/md/dev-*; do
+			[ -e "$m" ] || continue
+			m=${m##*/dev-}
+			case "$m" in md*) stop=1 ;; esac
+			case "$(losetup -n -O BACK-FILE "/dev/$m" 2>/dev/null)" in
+			"$FGN_DIR"/*) stop=1 ;;
+			esac
+			name=$(timeout 10 mdadm --examine --export "/dev/$m" 2>/dev/null |
+				sed -n 's/^MD_NAME=//p')
+			case "$name" in fgnmd | *:fgnmd | fgntail | *:fgntail) stop=1 ;; esac
+		done
+		[ "$stop" = 1 ] &&
+			timeout 15 mdadm --stop "/dev/${d##*/}" >/dev/null 2>&1
+	done
+	fgn_unloop
+	echo fgn_swept
 }
 
 # --- fault injection (case T; the partition also case A's degrade) -----------
@@ -3003,19 +3421,78 @@ cn_residue() {
 
 # --- setup / teardown --------------------------------------------------------
 
-# install_udev_rule masks the stock incremental md assembly for dnv arrays
-# (cnagent_integtest.md, Lab facts): the stock rule honors SYSTEMD_READY, so
-# setting it
-# to 0 leaves the agent as the only assembler. Removed again by cleanup — the
-# VMs are shared lab machines.
-install_udev_rule() {
-	cat >"$UDEV_RULE" <<'RULE_EOF'
-ACTION=="add|change", SUBSYSTEM=="block", ENV{ID_FS_TYPE}=="linux_raid_member", \
-  IMPORT{program}="/sbin/mdadm --examine --export $devnode"
-ENV{MD_NAME}=="dnv-*|*:dnv-*", ENV{SYSTEMD_READY}="0"
-RULE_EOF
+# install_udev_rules writes the udev rules every node that runs a dnv agent
+# carries, the files of deploy/udev/ whose texts this helper carries
+# (UDEV_RULES), into $UDEV_DIR and reloads udev (architecture.md, Components:
+# invocation reference): the dm rule keeps the system's rules off dnv's dm
+# devices, the md mask leaves the agent the only assembler of a dnv array,
+# and the md array rule keeps the stock rules off what a host wrote at a dnv
+# array's start. Each file goes in by a rename, so udev never reads half of
+# one. Removed again by cleanup — the VMs are shared lab machines.
+install_udev_rules() {
+	local name
+	[ "${#UDEV_RULES[@]}" -gt 0 ] || {
+		echo "install_udev_rules: the helper carries no udev rule" >&2
+		return 1
+	}
+	for name in "${!UDEV_RULES[@]}"; do
+		if ! printf '%s\n' "${UDEV_RULES[$name]}" >"$UDEV_DIR/.$name.tmp" ||
+			! mv -f "$UDEV_DIR/.$name.tmp" "$UDEV_DIR/$name"; then
+			rm -f "$UDEV_DIR/.$name.tmp"
+			echo "install_udev_rules: writing $UDEV_DIR/$name failed" >&2
+			return 1
+		fi
+	done
 	udevadm control --reload >/dev/null 2>&1
 	echo installed
+}
+
+# remove_udev_rules removes what install_udev_rules writes and reloads udev;
+# a file that is not there counts as removed.
+remove_udev_rules() {
+	local name
+	for name in "${!UDEV_RULES[@]}"; do
+		rm -f "$UDEV_DIR/$name" "$UDEV_DIR/.$name.tmp"
+	done
+	udevadm control --reload >/dev/null 2>&1
+	echo removed
+}
+
+# udev_rules_check prints one line for each fault of the udev rules of
+# deploy/udev/ on this node, and nothing when there is none: udevadm verify
+# refuses a text the helper carries; a stock file a rule sorts against is
+# missing — 55-dm.rules, which sets a dm device's name before
+# 58-dnv-dm.rules reads it, 63-md-raid-arrays.rules, which reads an md
+# array's name and probes its start before 63-zz-dnv-md-array.rules, and
+# 64-md-raid-assembly.rules, which the mask switches off; and, given
+# "installed", a rule file that $UDEV_DIR does not hold as the helper
+# carries it.
+udev_rules_check() {
+	local name f dir found tmp out
+	if tmp=$(mktemp -d); then
+		for name in "${!UDEV_RULES[@]}"; do
+			printf '%s\n' "${UDEV_RULES[$name]}" >"$tmp/$name"
+		done
+		out=$(udevadm verify --no-summary "$tmp"/*.rules 2>&1) ||
+			echo "udevadm verify refuses the rules: ${out//$'\n'/; }"
+		rm -rf "$tmp"
+	else
+		echo "mktemp -d failed"
+	fi
+	for f in 55-dm.rules 63-md-raid-arrays.rules 64-md-raid-assembly.rules; do
+		found=0
+		for dir in /usr/lib/udev/rules.d /lib/udev/rules.d; do
+			[ -r "$dir/$f" ] && found=1
+		done
+		[ "$found" = 1 ] || echo "no stock $f"
+	done
+	if [ "${1:-}" = installed ]; then
+		for name in "${!UDEV_RULES[@]}"; do
+			[ "$(cat "$UDEV_DIR/$name" 2>/dev/null)" = "${UDEV_RULES[$name]}" ] ||
+				echo "$UDEV_DIR/$name is not deploy/udev/$name"
+		done
+	fi
+	return 0
 }
 
 kill_role() { # <dn|cn>
@@ -3183,7 +3660,8 @@ drop_subsys_glob() {
 # them and udev holds each one's name, with mdadm asked directly when udev does
 # not. The agent's --homehost any means the name may or may not carry a
 # homehost prefix, so both forms are matched — the same `dnv-*|*:dnv-*` pair
-# install_udev_rule writes into the mask, against the same MD_NAME property.
+# the md mask of deploy/udev/ (install_udev_rules) matches, against the same
+# MD_NAME property.
 #
 # On these guests (kernel 7.0.0-31, Ubuntu 26.04 mdadm) `mdadm --detail --scan`
 # prints `ARRAY /dev/md/<hex MD_DEVNAME> metadata=1.2` and no array name, so
@@ -3359,6 +3837,9 @@ cleanup_phase2() { # <cn16> <dn16>
 	for kind in c5 c4 c3 c2 c1 c0; do
 		dm_remove_kind "$kind" "$cn16"
 	done
+	# What the system could have made of redund's foreign signatures holds
+	# the arrays it was made over, so it goes first.
+	fgn_sweep >/dev/null
 	md_stop_all
 	# redund's md-refusal stage builds its array over loop devices:
 	# mdr_teardown finds it by what holds them, so an inactive one that
@@ -3411,8 +3892,7 @@ cleanup_phase2() { # <cn16> <dn16>
 		losetup -d "$dev" >/dev/null 2>&1
 	done
 	rm -rf "$WORK"
-	rm -f "$UDEV_RULE"
-	udevadm control --reload >/dev/null 2>&1
+	remove_udev_rules >/dev/null
 	echo cleaned
 	return 0
 }
@@ -3542,7 +4022,7 @@ lab_wipe() {
 	# a cleanup nobody can trust, which is the same rule the sweep this suite
 	# tests lives by: what is left is reported, and reporting it is not
 	# success. Everything this deliberately does not touch — $WORK, the loop
-	# devices, the udev rule, the nvmet port — belongs to the
+	# devices, the udev rules, the nvmet port — belongs to the
 	# ordinary cleanup that runs after a wipe that does not fail and is not
 	# counted here.
 	local dm_left nvmet_left md_left
@@ -3987,15 +4467,16 @@ pause_stop() {
 	done
 	if [ -n "$alive" ]; then echo "killed$alive"; else echo stopped; fi
 }
-
-"$@"
 HELPER_EOF
+	udev_rules_source || return 1
+	printf '\n"$@"\n'
 }
 
 ship_helper() {
 	local tmp
 	tmp=$(mktemp)
-	vm_helper_source >"$tmp"
+	vm_helper_source >"$tmp" || die "generating the VM helper failed"
+	bash -n "$tmp" || die "the generated VM helper is not valid bash"
 	local idx
 	for idx in 1 2; do
 		log "[vm$idx] scp helper -> $HELPER"
@@ -4010,7 +4491,7 @@ ship_helper() {
 # other, so the shorter the window the better. `--wipe` is its only caller:
 # after a wipe that does not fail it runs the ordinary start-of-run cleanup,
 # which takes what the wipe deliberately leaves — $WORK, the loop devices,
-# the udev rule and the nvmet port; a wipe that leaves a dnv dm device or
+# the udev rules and the nvmet port; a wipe that leaves a dnv dm device or
 # nvmet subsystem behind dies here, before that cleanup. The wipe releases
 # no pin (unpin_all runs in cleanup_phase1 alone), so a device a pinned
 # process holds survives it and fails it, and `--cleanup-only`, whose
@@ -4139,10 +4620,13 @@ preflight_vms() {
 		ssh "${SSH_OPTS[@]}" "${VM[$idx]}" "sudo -n true" ||
 			die "missing: passwordless sudo on vm$idx (${VM[$idx]})"
 		local missing
-		# No LVM binaries: the CN uses no LVM ([D14]). thin_dump stays — it is
-		# the thin-metadata oracle of cnagent_integtest.md, Cases, thinbm, not
-		# an LVM command.
-		# udevadm: install_udev_rule's and cleanup_phase2's `udevadm control
+		# The CN uses no LVM ([D14]): lvm2's commands, bcache-tools'
+		# make-bcache and mkfs.ext4, with blkid, blockdev and truncate, are
+		# here for
+		# redund's foreign stage alone, which makes a host's signatures with
+		# them. thin_dump stays — it is the thin-metadata oracle of
+		# cnagent_integtest.md, Cases, thinbm, not an LVM command.
+		# udevadm: install_udev_rules' and cleanup_phase2's `udevadm control
 		# --reload`, and md_stop_all's MD_NAME read — the first of its two
 		# name sources, and the only one that answers for an array whose
 		# members mdadm can no longer read. mdadm is the other source and is
@@ -4150,7 +4634,7 @@ preflight_vms() {
 		# silent no-op. Note this list is reached
 		# AFTER the start-of-run cleanup_all and not at all under
 		# --cleanup-only, so those sweeps run unchecked.
-		missing=$(sshv "$idx" "for b in dmsetup nvme losetup blkdiscard lsblk dd fallocate sha256sum cmp pkill jq timeout mdadm udevadm stat thin_dump; do command -v \$b >/dev/null || echo \$b; done")
+		missing=$(sshv "$idx" "for b in dmsetup nvme losetup blkdiscard lsblk dd fallocate sha256sum cmp pkill jq timeout mdadm udevadm stat thin_dump blkid blockdev truncate pvcreate vgcreate lvcreate vgremove pvremove make-bcache mkfs.ext4; do command -v \$b >/dev/null || echo \$b; done")
 		[ -z "$missing" ] || die "missing: $missing on vm$idx"
 		# smoke's queue counts prove the cap only on a VM with more CPUs than
 		# QID_MAX: with no more, a host asks for no more queues than the
@@ -4184,6 +4668,13 @@ preflight_vms() {
 		got=$(sshv "$idx" "for d in /usr/lib/udev/rules.d /lib/udev/rules.d; do f=\$d/64-md-raid-assembly.rules; if [ -r \$f ] && grep -q SYSTEMD_READY \$f; then echo FOUND; break; fi; done; true")
 		assert_eq "$got" FOUND \
 			"vm$idx: 64-md-raid-assembly.rules honoring SYSTEMD_READY"
+		# The udev rules of deploy/udev/, which setup installs
+		# (cnagent_integtest.md, Assumptions and preflight checks): udevadm
+		# accepts their texts, and the stock files they sort against are
+		# there.
+		got=$(helper "$idx" udev_rules_check) ||
+			die "vm$idx: the udev rules check did not answer"
+		[ -z "$got" ] || die "vm$idx: the udev rules: ${got//$'\n'/; }"
 		got=$(sshv "$idx" "df -Pk /var/tmp | awk 'NR==2 {print \$4}'")
 		[ "$got" -ge 3145728 ] ||
 			die "vm$idx: /var/tmp has ${got}K free, want >= 3 GiB"
@@ -4227,13 +4718,16 @@ start_cn_agent() { # <idx>
 
 setup() {
 	CASE=setup
-	stage vms "backing store, md udev mask, both agents on both VMs"
-	local idx out
+	stage vms "backing store, the udev rules of deploy/udev, both agents on both VMs"
+	local idx out got
 	for idx in 1 2; do
 		# Both --local-store dirs must pre-exist: startup reconcile fails
 		# without them.
 		sshv "$idx" "mkdir -p $WORK/dn-store $WORK/cn-store && chmod 0777 $WORK && chmod 0755 $WORK/dn-store $WORK/cn-store"
-		helper "$idx" install_udev_rule
+		helper "$idx" install_udev_rules
+		got=$(helper "$idx" "udev_rules_check installed") ||
+			die "vm$idx: the udev rules check did not answer"
+		[ -z "$got" ] || die "vm$idx: the udev rules: ${got//$'\n'/; }"
 		sshv "$idx" "fallocate -l 2G $WORK/backing.img"
 		LOOP[idx]=$(sshv "$idx" "losetup --find --show $WORK/backing.img")
 		log "[vm$idx] loop device ${LOOP[idx]}"
@@ -5551,6 +6045,132 @@ redund_slow_leg() { # sp c2 rev2
 	done
 }
 
+# redund_foreign is redund's foreign stage (cnagent_integtest.md, Cases,
+# redund), run once the primary on vm1 has built the pool and before the host
+# writes: what a host can write where the udev rules of deploy/udev/ must
+# keep the system's own rules off it (architecture.md, Components:
+# invocation reference). One at a time, it plants a host's md version-1.2
+# superblock, LVM physical volume with a volume group and a volume, bcache
+# superblock and ext4 file system at the start of the data group's array on
+# vm1, where a fresh pool's first host write lands, and sends the array a
+# change event, as its assembly does: blkid must read each signature, the
+# positive control, and udev's record of the array must carry the md array
+# rule's type, with nothing holding the array but dnv's devices, no link by
+# content leading to it, no volume of the planted group active, no physical
+# volume recorded online and no bcache device. The array's start is zeroed
+# again after each. Then, through vm1's leg devices — the standby's paths end
+# in dm-error on the disk nodes, so only the primary's reach the legs — it
+# writes the end of an md 1.0 array made now over the end of both data legs,
+# as a host can make one at its volume's end, newer than dnv's superblock
+# (redund_foreign_legs checks vm1's view of it). The flip stage checks vm2's
+# view once vm2's paths serve, and the promote stage then starts the data
+# group on vm2 from both legs with the agent's flagged assembly.
+redund_foreign() {
+	local sp=$1 names mdpath aname kind want got vm i wraps
+	stage foreign "a host's md, LVM, bcache and file system signatures at the data array's start and a newer md 1.0 superblock at the data legs' end start nothing (architecture.md, Components: invocation reference)"
+	names=$(cnctl 1 md-name --sp "$sp" --slice-idx 0 --grp-idx 0)
+	mdpath=$(jq_of "$names" .dev_path)
+	aname=$(jq_of "$names" .array_name)
+	for kind in md lvm bcache fs; do
+		case "$kind" in
+		md) want=linux_raid_member ;;
+		lvm) want=LVM2_member ;;
+		bcache) want=bcache ;;
+		fs) want=ext4 ;;
+		esac
+		got=$(helper 1 "fgn_plant_start $kind '$mdpath'") ||
+			die "foreign: planting the $kind signature at the start of" \
+				"vm1's $mdpath failed: $got"
+		assert_eq "$(helper 1 "fgn_probe '$mdpath'")" "$want" \
+			"foreign: blkid's read of the $kind signature at the start of $mdpath"
+		helper 1 "fgn_change '$mdpath'" >/dev/null ||
+			die "foreign: the change event of vm1's $mdpath failed"
+		assert_eq "$(helper 1 "fgn_effects '$mdpath'")" \
+			"type=dnv_md_array held=none links=none vg=none pv=no bcache=no" \
+			"foreign: what vm1's udev rules made of the $kind signature"
+		helper 1 "fgn_unplant_start '$mdpath'" >/dev/null ||
+			die "foreign: zeroing the start of vm1's $mdpath again failed"
+	done
+	wraps=""
+	for i in 1 2; do
+		wraps="$wraps /dev/mapper/$(cn_dm_name c9 1 "$sp" "${A_DLEG[$i]}")"
+	done
+	got=$(helper 1 "fgn_plant_tail$wraps") ||
+		die "foreign: planting the md 1.0 superblock at the data legs' end" \
+			"through vm1 failed: $got"
+	redund_foreign_legs "$sp" 1 "$aname" foreign
+	for vm in 1 2; do
+		got=$(helper "$vm" fgn_none) ||
+			die "foreign: vm$vm's read of traces of the planted signatures" \
+				"did not answer"
+		assert_eq "$got" "" "foreign: vm$vm's traces of the planted signatures"
+	done
+}
+
+# redund_foreign_legs <sp> <vm> <array name> <label> — one VM's view of the
+# md 1.0 superblock redund_foreign wrote at the end of both data legs, read
+# through that VM's leg devices, which must serve: mdadm's plain examine of
+# each leg reads that newer superblock, which a plain assembly refuses ("has
+# wrong name"), and the examine that names the 1.2 format dnv's; and a change
+# event for each leg's NVMe device, after its page cache is dropped
+# (fgn_head_change), leaves it marked not ready under dnv's name by the md
+# mask, held by nothing but dnv's leg device.
+redund_foreign_legs() {
+	local sp=$1 vm=$2 aname=$3 label=$4 i wrap head got plain flagged
+	for i in 1 2; do
+		wrap=/dev/mapper/$(cn_dm_name c9 "$vm" "$sp" "${A_DLEG[$i]}")
+		got=$(helper "$vm" "fgn_names '$wrap'") ||
+			die "$label: vm$vm's examine of data leg $i did not answer"
+		plain=${got%% *}
+		plain=${plain#plain=}
+		flagged=${got#* flagged=}
+		case "$plain" in
+		fgntail | *:fgntail) ;;
+		*) die "$label: vm$vm's plain examine of data leg $i reads" \
+			"'$plain', want the newer 1.0 superblock's name fgntail" ;;
+		esac
+		case "$flagged" in
+		"$aname" | *":$aname") ;;
+		*) die "$label: vm$vm's examine of data leg $i in the 1.2 format" \
+			"reads '$flagged', want $aname" ;;
+		esac
+		head=$(helper "$vm" "fgn_head '$wrap'") ||
+			die "$label: no NVMe device under vm$vm's $wrap"
+		helper "$vm" "fgn_head_change '$head'" >/dev/null ||
+			die "$label: the change event of vm$vm's $head failed"
+		got=$(helper "$vm" "fgn_head_effects '$head'") ||
+			die "$label: vm$vm's udev record of $head did not answer"
+		case "$got" in
+		"ready=0 name=$aname held=none" | "ready=0 name="*":$aname held=none") ;;
+		*) die "$label: vm$vm's udev record of data leg $i's $head reads" \
+			"'$got', want it not ready, under $aname, held by nothing but" \
+			"dnv's devices" ;;
+		esac
+	done
+}
+
+# redund_nofgn is redund's nofgn stage, after the failover: the promote stage
+# started the data group from both legs, each with the newer md 1.0
+# superblock at its end, and neither VM holds a trace of the planted
+# signatures. The ends are zeroed again through the new primary's (vm2) leg
+# devices, as vm1's are fenced, so the rest of the case meets the legs as
+# the build left them.
+redund_nofgn() {
+	local sp=$1 vm i got wraps=""
+	stage nofgn "after the failover neither CN holds an array, a volume group or a bcache device made from the planted signatures"
+	for vm in 1 2; do
+		got=$(helper "$vm" fgn_none) ||
+			die "nofgn: vm$vm's read of traces of the planted signatures" \
+				"did not answer"
+		assert_eq "$got" "" "nofgn: vm$vm's traces of the planted signatures"
+	done
+	for i in 1 2; do
+		wraps="$wraps /dev/mapper/$(cn_dm_name c9 2 "$sp" "${A_DLEG[$i]}")"
+	done
+	helper 2 "fgn_tail_clear$wraps" >/dev/null ||
+		die "nofgn: zeroing the data legs' end through vm2 failed"
+}
+
 case_redund() {
 	CASE=redund
 	DIAG_CNTLRS=()
@@ -5668,6 +6288,8 @@ case_redund() {
 
 	redund_dial "$sp" "$c2" "$req2" "$rev2"
 
+	redund_foreign "$sp"
+
 	stage host "one namespace, two paths: CN1 optimized, CN2 inaccessible"
 	host_connect "$hv" 1 "$nqn"
 	host_connect "$hv" 2 "$nqn"
@@ -5713,6 +6335,9 @@ case_redund() {
 		leg_wait_ana 2 "$sp" "${A_MLEG[$i]}" "${CNID[2]}" "$i" optimized 20
 		leg_wait_ana 2 "$sp" "${A_DLEG[$i]}" "${CNID[2]}" "$i" optimized 20
 	done
+	# vm2's view of the foreign stage's md 1.0 superblocks, now that its
+	# paths serve the legs.
+	redund_foreign_legs "$sp" 2 "$(jq_of "$mddata" .array_name)" flip
 
 	stage promote "failover step 3: CN2 assembles what CN1 built"
 	req_set "$req2" '.cntlr.primary = true'
@@ -5762,6 +6387,8 @@ case_redund() {
 	write_range "$hv" "$WORK/probe-redund.bin" "$dev" 1 9
 	drop_caches "$hv"
 	assert_eq "$(sha_range "$hv" "$dev" 1 9)" "$got" "redund post-failover write"
+
+	redund_nofgn "$sp"
 
 	redund_slow_leg "$sp" "$c2" "$rev2"
 
@@ -6949,9 +7576,9 @@ repair_forced_start() {
 	assert_map_ok "$out" grp_id_to_md_raid "$A_DGRP" "repair forced"
 	seq=$(helper 2 "cn_events $TRACE")
 	assert_before "$seq" "^readsb /dev/mapper/$yname off=4096 " \
-		"^mdadm --zero-superblock /dev/mapper/$zname\$" \
+		"$(md_zero_re "$zname")" \
 		"repair forced: Y read, then Z zeroed"
-	assert_before "$seq" "^mdadm --zero-superblock /dev/mapper/$zname\$" \
+	assert_before "$seq" "$(md_zero_re "$zname")" \
 		"$forced" "repair forced: Z zeroed, then the start from Y"
 	assert_before "$seq" "$forced" \
 		"^mdadm $md2dev --add --failfast /dev/mapper/$zname\$" \
@@ -7058,7 +7685,7 @@ repair_forced_start() {
 	fi
 	assert_map_ok "$out" grp_id_to_md_raid "$A_DGRP" "repair restore: the start from O"
 	seq=$(helper 2 "cn_events $TRACE")
-	assert_before "$seq" "^mdadm --zero-superblock /dev/mapper/$zname\$" \
+	assert_before "$seq" "$(md_zero_re "$zname")" \
 		"^mdadm $(md_forced_args "$md2dev" "$md2name" "(uuid|force-no-bbl)" \
 			"/dev/mapper/$oname")\$" \
 		"repair restore: Z zeroed, then the start from O"
@@ -7289,7 +7916,7 @@ repair_forced_start() {
 	seq=$(helper 2 "cn_events $TRACE")
 	[ "$(event_cnt "$seq" "^readsb /dev/mapper/$zname ")" -ge 2 ] ||
 		die "repair badblocks: Z's superblock and list not both read"
-	assert_before "$seq" "^mdadm --zero-superblock /dev/mapper/$oname\$" \
+	assert_before "$seq" "$(md_zero_re "$oname")" \
 		"^mdadm $(md_forced_args "$md2dev" "$md2name" uuid \
 			"/dev/mapper/$zname")\$" \
 		"repair badblocks: O zeroed, then the start from Z"
@@ -7411,7 +8038,7 @@ repair_forced_start() {
 	assert_map_ok "$out" grp_id_to_md_raid "$A_DGRP" \
 		"repair older: the forced start with force"
 	seq=$(helper 2 "cn_events $TRACE")
-	assert_before "$seq" "^mdadm --zero-superblock /dev/mapper/$zname\$" \
+	assert_before "$seq" "$(md_zero_re "$zname")" \
 		"^mdadm $(md_forced_args "$md2dev" "$md2name" "(uuid|force-no-bbl)" \
 			"/dev/mapper/$oname")\$" \
 		"repair older: Z zeroed, then the start from O"
@@ -9160,9 +9787,11 @@ case_discard() {
 	req_set "$req" ".td_list = [] | .nqn_to_subsystem[\"$nqn\"].ns_list = []"
 	bump_cn_rev "$cn"
 	cntlrrev=${CNREV[$cn]}
-	# The worker's re-send (dnv-worker.md RW4): the discard's close makes udev
-	# probe the volume, and a removal that meets the probe fails busy
-	# (cnagent.md CN14), so the first pass may leave the volume, named alone.
+	# The worker's re-send (dnv-worker.md RW4): a removal that fails busy
+	# leaves the volume to the next pass (cnagent.md CN14), so the first pass
+	# may leave it, named alone. The dm rule of deploy/udev/ keeps udev's
+	# probe off the volume after the discard's close, so the first pass
+	# removes it unless something else holds it.
 	out=$(cn_syncup_cntlr "$cn" "$req" --expect-code 4 2>/dev/null || true)
 	[ -n "$out" ] || die "discard: the delete's syncup-cntlr printed no reply"
 	vd="$(jq_of "$out" '.agent_reply.code // 0') $(jq_of "$out" \

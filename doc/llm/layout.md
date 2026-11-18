@@ -73,7 +73,7 @@ Unit tests are colocated `_test.go` files inside each package.
 | `cmd/dnv-cdc/` | the `main` of `dnv-cdc`, the central discovery controller |
 | `cmd/dnvctl/` | the `main` of `dnvctl`, the operator CLI |
 | `cmd/dnv-csi/` | the `main` of `dnv-csi`, the CSI driver |
-| `deploy/` | the CSI driver's container image recipe and the plain manifests that deploy its two plugins with the Kubernetes sidecars (`csi.md`, Deployment) |
+| `deploy/` | the deployment files: under `deploy/udev/` the udev rules every node that runs a dnv agent carries, the one source the suites and the tutorials install from (`architecture.md`, Components: invocation reference); and the CSI driver's container image recipe and the plain manifests that deploy its two plugins with the Kubernetes sidecars (`csi.md`, Deployment) |
 | `doclint/` | a test-only package: the lint that holds the documents under `doc/` and `README.md` to the documentation rules, the placement and reference rules among them (Human docs and LLM docs) |
 
 The integration suites are driven over ssh against remote hosts. The two

@@ -1,0 +1,23 @@
+# dnv: a dnv md array starts with blocks a host writes through a thin pool,
+# so it can carry a host's md superblock, LVM label, bcache superblock, file
+# system or partition table. 63-md-raid-arrays.rules has just read the
+# array's name, probed its content and added links by that content; for a
+# dnv array, and each partition the kernel found on one, this file sets a
+# file system type no stock rule matches, so the md assembly, btrfs, bcache
+# and LVM rules skip it, takes the links by content away again, and puts any
+# other link it shares with a node's own device below that device. It must
+# sort after 63-md-raid-arrays.rules and before every 64- file. The link
+# removal (SYMLINK-=) needs systemd 253 or newer. Install on every node that
+# runs a dnv agent (architecture.md, Components: invocation reference).
+SUBSYSTEM!="block", GOTO="dnv_md_array_end"
+KERNEL!="md*", GOTO="dnv_md_array_end"
+ACTION!="add|change", GOTO="dnv_md_array_end"
+ENV{MD_NAME}!="dnv-*|*:dnv-*", GOTO="dnv_md_array_end"
+ENV{ID_FS_TYPE}="dnv_md_array"
+ENV{ID_FS_USAGE}=""
+SYMLINK-="disk/by-uuid/$env{ID_FS_UUID_ENC}"
+SYMLINK-="disk/by-label/$env{ID_FS_LABEL_ENC}"
+SYMLINK-="disk/by-partuuid/$env{ID_PART_ENTRY_UUID}"
+SYMLINK-="disk/by-partlabel/$env{ID_PART_ENTRY_NAME}"
+OPTIONS+="link_priority=-100"
+LABEL="dnv_md_array_end"

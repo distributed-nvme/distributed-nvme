@@ -4571,7 +4571,7 @@ func TestLateMemberRefusedStartIsNamedOnceItServes(t *testing.T) {
 	leg2 := srv.nf.DmPath(legName(srv, testDataLeg2))
 	nqn2 := srv.nf.SideToCnNqn(testCluster, testSp, testDataLeg2, testCn)
 	node.setAnaState(nqn2, testIp2, testSvcId2, "non-optimized")
-	start := "mdadm --assemble " + mdDev + " "
+	start := "mdadm --assemble " + mdDev + " --metadata=1.2 "
 	// The start from one member is exactly the node path, the array name and
 	// that member, as from both members: nothing such as --run, --force or
 	// --scan rides along to override mdadm's own gate. The cn suite's

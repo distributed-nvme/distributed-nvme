@@ -1417,7 +1417,8 @@ dm-clone (CN18).
 * `RedundNone`: the group device is `CnGrpName`, a dm-linear over the
   single leg wrapper at the data region's offset and of the data region's
   length, created or reloaded only while that leg is available (below).
-* `RedundMdRaid1`: an md-raid1 array under `CnMdDevName` (`--name` is
+* `RedundMdRaid1`: an md-raid1 array under `CnMdDevName` (the version-1.2
+  superblock format, The superblock format, below; `--name` is
   `CnMdArrayName`, an internal bitmap with its chunk from
   `bitmap_chunk_block_cnt` and the block size, the data offset from
   `meta_blocks` and the block size, every member `--failfast`,
@@ -1489,8 +1490,9 @@ dm-clone (CN18).
      `provisioned` flag has opened the gate (`architecture.md`, Side
      provisioning protocol), ids are never reused, and the agent zeroes a
      superblock only in the forced start — so a superblock-free leg is
-     otherwise a freshly provisioned side (though a fresh leg can still
-     carry an md superblock at its end, `architecture.md`, Known limits).
+     otherwise a freshly provisioned side (a host's md superblock of
+     another format at a fresh leg's end is no superblock here, The
+     superblock format, below).
      The rest of a data leg's data
      region is never zeroed, and the members need not agree there:
      dm-thin writes a block whole before a host can read any of it
@@ -2307,14 +2309,19 @@ dm-clone (CN18).
      as when the mark was written over an array that ran; across identities
      the counts mean nothing, and a member that is not full holds no whole
      copy, so neither is compared.
-  4. Each of them has its superblock zeroed and read again; a zero that
-     fails or is killed, a superblock read that does not answer, or one
-     that still shows a superblock, ends the pass before any assembly.
-     Reason for the read: mdadm takes a member whose read fails for one
-     with no superblock (What a killed mdadm means, below), and answers
-     success for a zero of such a member (`cnagent_integtest.md`, Lab
-     facts), having written nothing; such a member would keep the old
-     identity beside the named leg's new one.
+  4. Each of them whose superblock read of step 3 shows a superblock has it
+     zeroed and read again; one whose read shows none counts as zeroed, and
+     no zero runs for it. A zero that fails or is killed, a superblock read
+     that does not answer, or one that still shows a superblock, ends the
+     pass before any assembly. Reason for zeroing only a member that shows
+     one: the zero names the 1.2 format (The superblock format, below),
+     with which mdadm fails the zero of a member that carries none
+     (`cnagent_integtest.md`, Lab facts), and mdadm's own force flag on the
+     zero, which would let such a zero through, also drops mdadm's refusal
+     of a member an array holds. Reason for the read: the agent takes no tool's answer for
+     a member's superblock (The superblock read, below), and a member whose
+     zero did not take would keep the old identity beside the named leg's
+     new one.
      Reason for the zero: step 5 hands mdadm
      the named leg alone, so the array starts from that leg whatever the
      others hold, and the zero settles what becomes of the others after
@@ -2324,11 +2331,9 @@ dm-clone (CN18).
      no candidate of a later assembly (case 2, above). The price
      is a full copy of each other member, which a half-copied one needed
      anyway. Zeroing every member before the assembly keeps each pass
-     whole: a member a pass zeroed before it ended is blank at the next,
-     mdadm answers success for a zero of a device that carries no
-     superblock, and so the next pass zeroes it again and goes on; a member
-     that comes back with a superblock newer than the array, which md would
-     trust, cannot arise.
+     whole: a member a pass zeroed before it ended reads blank at the next,
+     which counts it as zeroed and goes on; a member that comes back with a
+     superblock newer than the array, which md would trust, cannot arise.
   5. The array is assembled from the named leg alone with mdadm's run and
      force flags and a new identity (`Md.AssembleForced`). When that fails,
      the same pass reads what the failed run left: it stops an array of the
@@ -2361,8 +2366,9 @@ dm-clone (CN18).
      identity, which the second run keeps, while a run that failed before
      the write leaves the old one, and a second run would start the array
      under it; so the array never starts under its old identity. A Warn
-     record names the group, the named leg, the members zeroed
-     and the updates of the runs that started the array.
+     record names the group, the named leg, the members zeroed, a member
+     read blank counted among them, and the updates of the runs that
+     started the array.
   6. The member reconciliation (above) then adds the zeroed `leg_list`
      members, and the repair's add (A group's repair, above) its zeroed new
      legs under the add's conditions; md copies each whole.
@@ -2493,6 +2499,32 @@ dm-clone (CN18).
   assembles its array normally — it is the concat that waits, not the md
   layer (CN13).
 
+**The superblock format.** Every dnv array carries md's version-1.2
+superblock, which sits 4 KiB into a member, inside the meta region no host
+writes (`architecture.md`, Group on-leg layout: meta region, data region,
+health block). The create, both assemblies and the zero name that format
+(`--metadata=1.2`; one helper builds them, `mdFormatArgs`): the create and
+the assemblies right after the md device, the zero right after its mode
+word, so that each command ends with its members. An add, a fail, a remove
+and a stop name none: mdadm refuses the flag in its manage mode, where an
+add writes the array's own format, and a stop reads no member
+(`cnagent_integtest.md`, Lab facts). Reason: without the flag mdadm reads, of every superblock
+format it finds on a member, the one whose array was created last, and the
+0.90 and 1.0 formats sit at a device's end, which on a leg holds a host's
+data or a recycled extent's old bytes. A superblock there of an array
+created after the leg's own — one a host makes on a volume whose end maps
+there, or one a host of an earlier pool left on an extent that a repair
+gives to a new leg of an older array, whose superblock carries that array's
+first creation time — makes a plain assembly refuse the leg for the name it
+reads, and makes the md assembly mask's examine read the host's name, so
+that the stock incremental assembly may take the leg (`architecture.md`,
+Components: invocation reference); a plain create or add over such a leg
+goes through (`cnagent_integtest.md`, Lab facts). With the flag mdadm reads only dnv's superblock, where
+the agent's own read reads it (The superblock read, below). The flag also
+changes the zero: it removes only the 1.2 superblock and fails on a member
+that carries none, which the forced start allows for (the forced start,
+above).
+
 **The superblock read.** The assembly, the forced start, the re-assembly,
 the inspect (CN31), the take-back
 check, the identity check of an add, and a cntlr's read for its names of an
@@ -2551,14 +2583,13 @@ it meets the same refusal from the same lone leg. Only an operator's forced
 start from the leg that carries the superblock recovers the group; the
 group is new — a slice group of a new pool, a group `GrowSlice` appends, or
 a clone meta group with no dm-clone over it yet — so no data is lost.
-`Md.ZeroSuperblock` (`mdadm --zero-superblock`) answers a read of the member
-that fails as it answers a member with no superblock, with success and no
-write, which the forced start's read after each zero catches (CN12, the
-forced start). A zero killed at the soft
-timeout is the group's error for the pass, though the kernel may have
-completed it, and the next pass's zero of the then blank member, in the
-converge the read's name of the forced start brings (CN12, the forced
-start; CN30), goes through. A
+`Md.ZeroSuperblock` names the 1.2 format, so mdadm fails a zero whose read
+of the member fails, as it fails one of a member that carries no 1.2
+superblock (CN12, The superblock format). A zero killed at the soft
+timeout is the group's error for the pass, though mdadm may have written
+it, and the next pass, in the converge the read's name of the forced start
+brings (CN12, the forced start; CN30), reads the then blank member and
+counts it as zeroed with no zero run. A
 forced assembly killed after the kernel started the array, of either
 form, is taken as started when the same pass finds the array
 running; a killed first run that left none goes on to the second form only
@@ -3245,15 +3276,17 @@ skipped, past the pass's count, behind a chunk that failed, or a mapped
 part-block — is logged with its bytes and why, and nothing of it stops the
 removal or the delete; once the volume is removed no pass discards it
 again, since the delete ends the volume and nothing remembers what was
-left. The discard's open for writing makes udev probe the volume when it
-closes (the stock watch rule), and a removal that meets that probe fails
-busy: the layer then stops, as a layer that leaves anything does, and the
-re-send's pass reads the volume's status again and discards from there.
-The top-first order is what makes that pass go on: the status names only
-the highest mapped sector, which a pass's top chunks lower as they unmap
-the top, so after a pass the count cut the next one starts below where it
+left. The dm udev rule takes udev's watch off every dnv dm device
+(`architecture.md`, Components: invocation reference), so the discard's
+close brings no udev probe of the volume, and its removal follows in the
+same pass. A removal that fails all the same, busy under another opener,
+stops the layer, as a layer that leaves anything does, and the re-send's
+pass reads the volume's status again and discards from there. The
+top-first order is what makes that pass go on: the status names only the
+highest mapped sector, which a pass's top chunks lower as they unmap the
+top, so after a pass the count cut the next one starts below where it
 stopped, and after a whole discard the volume maps no whole block, so the
-next pass sends nothing, opens nothing for udev to probe, and removes it.
+next pass sends nothing and removes it.
 A mapped
 part-block keeps the highest sector at the volume's end, so there a re-send
 after a pass the count cut starts again at the last whole block and sends

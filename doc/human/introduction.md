@@ -361,11 +361,20 @@ the name a host gives when it connects, that the cn agent uses on its node:
 the agent removes a connection opened with that name once no clone reads
 through it.
 
-Two settings the tutorial shows: a udev rule that keeps the system's own md
-assembly off dnv arrays, on disk nodes too, since a controller node's md
-superblocks reach their devices through the side exports; and the masked
-nvmf-connect unit, so that nvme-stas is the only program that connects to
-what a discovery change announces.
+Node settings: on every disk node and controller node, the three udev rules
+in the release's `deploy/udev/` folder, which keep the system's own md
+assembly, LVM scan and bcache off the devices dnv builds and off what hosts
+write into them, on disk nodes too, since a controller node's md
+superblocks reach their devices through the side exports; the rules need
+systemd 253 or newer; lvm2 set to read only the node's own physical
+volumes; `AUTO -all` in `/etc/mdadm/mdadm.conf`, after an ARRAY line for
+each md array of the node's own, so that md assembles by itself only
+those; and, on a controller node, the node's own file systems mounted by
+device path, never by a label or a uuid a tenant could copy.
+[The operations doc](operations.md#install-the-udev-rules-on-a-node) has
+the steps. The tutorials install the udev rules, and mask the nvmf-connect
+unit, so that nvme-stas is the only program that connects to what a
+discovery change announces.
 
 etcd: a release of 3.5.13 or later, run with the request caps and automatic
 compaction the tutorial's etcd command shows; the tutorial and the suites use

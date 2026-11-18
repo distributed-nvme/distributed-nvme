@@ -22,8 +22,9 @@ import (
 //
 // The agent runs `mdadm --zero-superblock` only in CN12's forced start, which
 // an operator's call asks for: it zeroes every other member the forced start
-// keeps (forcedStartLegs) but the open repair's bad leg before the array
-// starts from the named leg alone, so that each of them is added back later
+// keeps (forcedStartLegs) but the open repair's bad leg, each one that carries
+// a superblock, before the array starts from the named leg alone, so that
+// each of them is added back later
 // as a fresh member, which md copies whole, and is no candidate of a later
 // assembly, where its superblock of the array's old identity would have
 // mdadm refuse the assembly. Otherwise a leg leaves an array only as a
@@ -1046,17 +1047,38 @@ func mdStateLine(d *MdDetail) string {
 	return strings.Join(parts, ", ") + " (" + d.SyncCompleted + ")"
 }
 
+// mdMetadata names the superblock format of every dnv array, version 1.2,
+// which sits 4 KiB into a member (mdSbOffset), inside the meta region no host
+// writes (cnagent.md CN12, The superblock format).
+const mdMetadata = "--metadata=1.2"
+
+// mdFormatArgs is the argument list of every mdadm call that reads or writes
+// a member's superblock, the create, the two assemblies and the zero: lead,
+// then mdMetadata, then rest. lead is the mode word and, for a create or an
+// assembly, the md device, so the members stay at the line's end. An add, a
+// fail, a remove and a stop take no format: mdadm refuses the flag in manage
+// mode, and a stop reads no member. Reason: without the flag mdadm reads,
+// among every superblock format it finds on a member, the one created last,
+// and a host's 0.90 or 1.0 superblock at a leg's end, newer than dnv's, then
+// makes a plain assembly refuse the member for its name.
+func mdFormatArgs(lead []string, rest ...string) []string {
+	args := make([]string, 0, len(lead)+1+len(rest))
+	args = append(args, lead...)
+	args = append(args, mdMetadata)
+	return append(args, rest...)
+}
+
 // ZeroSuperblock wipes a member's md superblock, which only CN12's forced
-// start asks for (Md). mdadm refuses a member an array holds, a broken
-// array included, and answers success for a device that carries none, so a
-// zero repeated over a member an earlier pass zeroed goes through. mdadm
-// also takes a read of the member that fails with an IO error for a device
-// that carries none, and answers success with nothing written, so the
-// forced start reads each member back after its zero (ReadMember) and takes
-// the zero as done only when the read answers with no superblock
-// (forceStartGroup).
+// start asks for (Md). mdadm refuses a member an array holds, a broken array
+// included. Named for the 1.2 format (mdFormatArgs), the zero removes only
+// that superblock, and fails on a member that carries none and on one whose
+// read fails. So the forced start zeroes only a member whose reading shows a
+// superblock, counts one it reads blank as zeroed, and reads each member back
+// after its zero (ReadMember), taking the zero as done only when the read
+// answers with no superblock (forceStartGroup).
 func (m *Md) ZeroSuperblock(ctx context.Context, dev string) error {
-	return m.cmd.RunOk(ctx, "mdadm", "--zero-superblock", dev)
+	return m.cmd.RunOk(ctx, "mdadm",
+		mdFormatArgs([]string{"--zero-superblock"}, dev)...)
 }
 
 // MdCreateConf carries the options every dnv array is created with
@@ -1082,19 +1104,18 @@ func (m *Md) Create(
 	conf MdCreateConf,
 	members []string,
 ) error {
-	args := []string{
-		"--create", conf.DevPath,
+	args := mdFormatArgs([]string{"--create", conf.DevPath},
 		"--name", conf.ArrayName,
 		"--level", "1",
 		"--raid-devices", strconv.Itoa(conf.RaidDevices),
 		"--bitmap", "internal",
 		"--bitmap-chunk",
-		strconv.FormatUint(conf.BitmapChunkKiB, 10) + "K",
+		strconv.FormatUint(conf.BitmapChunkKiB, 10)+"K",
 		"--data-offset",
-		strconv.FormatUint(conf.DataOffsetKiB, 10) + "K",
+		strconv.FormatUint(conf.DataOffsetKiB, 10)+"K",
 		"--homehost", "any",
 		"--run",
-	}
+	)
 	if conf.AssumeClean {
 		args = append(args, "--assume-clean")
 	}
@@ -1118,8 +1139,8 @@ func (m *Md) Assemble(
 	arrayName string,
 	members []string,
 ) error {
-	args := []string{"--assemble", devPath, "--name", arrayName}
-	args = append(args, members...)
+	args := mdFormatArgs([]string{"--assemble", devPath},
+		append([]string{"--name", arrayName}, members...)...)
 	return m.cmd.RunOk(ctx, "mdadm", args...)
 }
 
@@ -1150,8 +1171,9 @@ func (m *Md) AssembleForced(
 	member string,
 	update string,
 ) error {
-	return m.cmd.RunOk(ctx, "mdadm", "--assemble", devPath,
-		"--name", arrayName, "--run", "--force", "--update="+update, member)
+	return m.cmd.RunOk(ctx, "mdadm", mdFormatArgs(
+		[]string{"--assemble", devPath}, "--name", arrayName, "--run",
+		"--force", "--update="+update, member)...)
 }
 
 func (m *Md) Add(ctx context.Context, devPath, member string) error {
@@ -2328,12 +2350,15 @@ func (s *CnAgentServer) forcedStartNamed(
 }
 
 // forcedStartPlan is what CN12's forced start would do from its checks
-// (planForcedStart): the named leg and its superblock read, and the members
-// it would zero, in the order it would zero them.
+// (planForcedStart): the named leg and its superblock read, the members it
+// leaves with no superblock, in the order it zeroes them, and those among
+// them whose read showed none already, which it counts as zeroed with no
+// zero run.
 type forcedStartPlan struct {
 	named *legPlan
 	sb    *mdSuperblock
 	zero  []*legPlan
+	blank map[uint64]bool
 }
 
 // update is the assembly's update the plan's start runs first, then, with
@@ -2394,7 +2419,7 @@ func (s *CnAgentServer) planForcedStart(
 	if refusal := badBlocksRefusal(gp, named, sb); refusal != "" {
 		return nil, errors.New(refusal)
 	}
-	fp := &forcedStartPlan{named: named, sb: sb}
+	fp := &forcedStartPlan{named: named, sb: sb, blank: map[uint64]bool{}}
 	for _, lp := range kept {
 		if lp == named || gp.isBadLeg(lp.legId) {
 			continue
@@ -2412,24 +2437,29 @@ func (s *CnAgentServer) planForcedStart(
 			return nil, errors.New(refusal)
 		}
 		fp.zero = append(fp.zero, lp)
+		if other.Sb == nil {
+			fp.blank[lp.legId] = true
+		}
 	}
 	return fp, nil
 }
 
 // forceStartGroup is CN12's forced start, which replaces the assembly while
 // the group's mark stands and no array of the group is there: its checks
-// (planForcedStart) hold; each member they would zero has its superblock
-// zeroed and read back, and the zero counts only when the read answers with
-// no superblock; and the array starts from the named leg alone under a new
-// identity (forcedAssemble), with the leg's bad-block list dropped when its
-// read shows one. Each step that does not hold is the group's error and
-// ends the pass for the group, the zero before any assembly, so no pass
-// starts the array beside a member it has not zeroed; the mark stands and
-// the next pass, which the worker's re-send brings once a read names the
-// forced start (forcedStartNamed), tries again from the first step. A member zeroed by a
-// pass that ends later is blank at the next, and its zero goes through
-// again. ensureGroup's member reconciliation then adds the zeroed members,
-// which md copies whole.
+// (planForcedStart) hold; each member they would zero whose read showed a
+// superblock has it zeroed and read back, and the zero counts only when the
+// read answers with no superblock, while one whose read showed none counts
+// as zeroed with no zero run, since a zero named for the 1.2 format fails on
+// a member that carries none (ZeroSuperblock); and the array starts from the
+// named leg alone under a new identity (forcedAssemble), with the leg's
+// bad-block list dropped when its read shows one. Each step that does not
+// hold is the group's error and ends the pass for the group, the zero before
+// any assembly, so no pass starts the array beside a member it has not
+// zeroed; the mark stands and the next pass, which the worker's re-send
+// brings once a read names the forced start (forcedStartNamed), tries again
+// from the first step. A member zeroed by a pass that ends later is blank at
+// the next, which counts it as zeroed. ensureGroup's member reconciliation
+// then adds the zeroed members, which md copies whole.
 func (s *CnAgentServer) forceStartGroup(
 	ctx context.Context,
 	plan *cntlrPlan,
@@ -2443,6 +2473,10 @@ func (s *CnAgentServer) forceStartGroup(
 	}
 	zeroed := make([]uint64, 0, len(fp.zero))
 	for _, lp := range fp.zero {
+		if fp.blank[lp.legId] {
+			zeroed = append(zeroed, lp.legId)
+			continue
+		}
 		if err := s.md.ZeroSuperblock(ctx, lp.path); err != nil {
 			return err
 		}

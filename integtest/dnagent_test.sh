@@ -26,6 +26,9 @@ set -euo pipefail
 # ---------------------------------------------------------------------------
 
 REPO_ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
+# The udev rules every node that runs a dnv agent carries (layout.md,
+# Directory tree): the helper carries their texts as this checkout holds them.
+UDEV_SRC="$REPO_ROOT/deploy/udev"
 CTL="$REPO_ROOT/integtest/bin/dnagentctl"
 AGENT_BIN="$REPO_ROOT/bin/dnv-agent"
 
@@ -528,6 +531,21 @@ write_range() { # vm src dst countMiB [seekMiB]
 # the quoting of the probing/teardown loops lives in one readable place.
 # ---------------------------------------------------------------------------
 
+# udev_rules_source prints the helper's copy of the udev rules: one
+# UDEV_RULES entry per file of $UDEV_SRC, keyed by its name, holding its
+# text. It fails when $UDEV_SRC holds no rule file.
+udev_rules_source() {
+	local f
+	printf 'declare -A UDEV_RULES=()\n'
+	for f in "$UDEV_SRC"/*.rules; do
+		[ -f "$f" ] || {
+			echo "udev_rules_source: no rule file in $UDEV_SRC" >&2
+			return 1
+		}
+		printf 'UDEV_RULES[%q]=%q\n' "${f##*/}" "$(cat "$f")"
+	done
+}
+
 vm_helper_source() {
 	cat <<'HELPER_EOF'
 #!/usr/bin/env bash
@@ -552,6 +570,45 @@ PIN_PREFIX=/var/tmp/dnv-it-pin
 # (dnagent_integtest.md, Cases, blocksize).
 BS_PORT_ID=9
 BS_DISK_SIZE=320M
+# UDEV_DIR is where install_udev_rules writes the udev rules of deploy/udev/,
+# whose texts the driver puts into this helper (UDEV_RULES).
+UDEV_DIR=/etc/udev/rules.d
+
+# install_udev_rules writes the udev rules every node that runs a dnv agent
+# carries, the files of deploy/udev/ (UDEV_RULES), into $UDEV_DIR, each by a
+# rename, so udev never reads half of one, and reloads udev (architecture.md,
+# Components: invocation reference). On a disk node the dm rule keeps the
+# system's probe, LVM and bcache rules off the side devices and their
+# exports, which carry the controller node's md superblocks and the tenants'
+# data. Removed again by cleanup: the VMs are shared lab machines.
+install_udev_rules() {
+	local name
+	[ "${#UDEV_RULES[@]}" -gt 0 ] || {
+		echo "install_udev_rules: the helper carries no udev rule" >&2
+		return 1
+	}
+	for name in "${!UDEV_RULES[@]}"; do
+		if ! printf '%s\n' "${UDEV_RULES[$name]}" >"$UDEV_DIR/.$name.tmp" ||
+			! mv -f "$UDEV_DIR/.$name.tmp" "$UDEV_DIR/$name"; then
+			rm -f "$UDEV_DIR/.$name.tmp"
+			echo "install_udev_rules: writing $UDEV_DIR/$name failed" >&2
+			return 1
+		fi
+	done
+	udevadm control --reload >/dev/null 2>&1
+	echo installed
+}
+
+# remove_udev_rules removes what install_udev_rules writes and reloads udev;
+# a file that is not there counts as removed.
+remove_udev_rules() {
+	local name
+	for name in "${!UDEV_RULES[@]}"; do
+		rm -f "$UDEV_DIR/$name" "$UDEV_DIR/.$name.tmp"
+	done
+	udevadm control --reload >/dev/null 2>&1
+	echo removed
+}
 
 # nvme_ctrl_present — does this node hold any nvme controller at all? A glob
 # over the class directory cannot fail the way a tool can, which is why it is
@@ -1709,6 +1766,7 @@ cleanup() {
 	# (see unmount_work); the agents went first.
 	unmount_work
 	rm -rf "$WORK"
+	remove_udev_rules >/dev/null
 	echo "cleaned"
 	return 0
 }
@@ -1762,8 +1820,10 @@ lab_wipe() {
 	# frees their member wrappers, but the members still carry md
 	# superblocks, and a dm device that reappears — or that udev re-examines
 	# while this is running — is re-assembled into a fresh array that pins
-	# the wrapper again (this suite installs no udev rule and masks nothing,
-	# so udev can re-assemble an array from its members).
+	# the wrapper again: the suite installs the udev rules of deploy/udev/
+	# only from its setup on, and a cn suite's debris, a run killed early or
+	# a guest whose rules did not take leaves udev free to re-assemble an
+	# array from its members.
 	# On a cn guest one pass can leave leg wrappers held open by
 	# re-assembled arrays; a second, identical pass removes them. So the
 	# sequence runs until the node is clean, not once.
@@ -1909,15 +1969,16 @@ diag() {
 	ls -la "$STORE" 2>/dev/null
 	return 0
 }
-
-"$@"
 HELPER_EOF
+	udev_rules_source || return 1
+	printf '\n"$@"\n'
 }
 
 ship_helper() {
 	local tmp
 	tmp=$(mktemp)
-	vm_helper_source >"$tmp"
+	vm_helper_source >"$tmp" || die "generating the VM helper failed"
+	bash -n "$tmp" || die "the generated VM helper is not valid bash"
 	local idx
 	for idx in 1 2; do
 		log "[vm$idx] scp helper -> $HELPER"
@@ -2071,7 +2132,9 @@ preflight_vms() {
 		ssh "${SSH_OPTS[@]}" "${VM[$idx]}" "sudo -n true" ||
 			die "missing: passwordless sudo on vm$idx (${VM[$idx]})"
 		local missing
-		missing=$(sshv "$idx" "for b in dmsetup nvme losetup blkdiscard lsblk dd fallocate sha256sum cmp pkill jq timeout setsid wipefs ss mountpoint sfdisk truncate; do command -v \$b >/dev/null || echo \$b; done")
+		# udevadm: install_udev_rules' and cleanup's `udevadm control
+		# --reload`.
+		missing=$(sshv "$idx" "for b in dmsetup nvme losetup blkdiscard lsblk dd fallocate sha256sum cmp pkill jq timeout setsid wipefs ss mountpoint sfdisk truncate udevadm; do command -v \$b >/dev/null || echo \$b; done")
 		[ -z "$missing" ] || die "missing: $missing on vm$idx"
 		# The agent hardcodes the configfs path and neither mounts nor
 		# modprobes; the harness does both here and nothing else.
@@ -2107,9 +2170,13 @@ start_agent() { # <idx>
 
 setup() {
 	CASE=setup
-	stage vms "creating the backing store and launching both agents"
+	stage vms "the udev rules of deploy/udev, the backing store and both agents"
 	local idx out
 	for idx in 1 2; do
+		# The udev rules every node that runs a dnv agent carries, before the
+		# agent (dnagent_integtest.md, Assumptions and preflight checks).
+		assert_eq "$(helper "$idx" install_udev_rules)" installed \
+			"vm$idx: the udev rules of deploy/udev"
 		# --local-store must pre-exist: startup reconcile fails without it.
 		sshv "$idx" "mkdir -p $WORK/store && chmod 0777 $WORK && chmod 0755 $WORK/store"
 		sshv "$idx" "fallocate -l 2G $WORK/backing.img"

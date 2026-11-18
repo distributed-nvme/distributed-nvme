@@ -72,7 +72,7 @@ How the commands are written:
   --sp sp0`. `dnvctl` prints one JSON document per command; the checks
   below pick the field to look at with `grep`.
 - The tutorial changes the machine: it installs packages, loads kernel
-  modules, writes a udev rule, masks a systemd unit and replaces the
+  modules, writes udev rules, masks a systemd unit and replaces the
   nvme-stas settings. Use a test machine. The teardown at the end puts
   back most of it; what stays is named there.
 
@@ -104,20 +104,23 @@ mountpoint -q /sys/kernel/config || sudo mount -t configfs none /sys/kernel/conf
 cat /sys/module/nvme_core/parameters/multipath
 ```
 
-The md mask. The controller node assembles its RAID1 arrays itself. The
-system's own udev rule would race it for an array it is creating, and on
-this one kernel it would also assemble half arrays from the superblocks
-that the disk nodes' devices carry. The rule below marks every dnv array
-as not ready, which keeps the system's rule off it.
+The udev rules. The controller node assembles its RAID1 arrays itself.
+The system's own udev rules would race it for an array it is creating, and
+on this one kernel they would also assemble half arrays from the
+superblocks that the disk nodes' devices carry, and read what hosts write
+as file systems, LVM volumes or caches. The three rule files in
+`deploy/udev/` keep them off dnv's devices;
+[the operations doc](operations.md#install-the-udev-rules-on-a-node) says
+what each one does. The unpacked release folder holds `deploy/`; a build
+has it in the repository, so copy it from there into this directory.
 
 ```
-sudo tee /etc/udev/rules.d/63-dnv-md.rules >/dev/null <<'EOF'
-ACTION=="add|change", SUBSYSTEM=="block", ENV{ID_FS_TYPE}=="linux_raid_member", \
-  IMPORT{program}="/sbin/mdadm --examine --export $devnode"
-ENV{MD_NAME}=="dnv-*|*:dnv-*", ENV{SYSTEMD_READY}="0"
-EOF
+sudo install -m 0644 deploy/udev/*.rules /etc/udev/rules.d/
 sudo udevadm control --reload
 ```
+
+A node of a real cluster also sets lvm2 and mdadm.conf as the operations
+doc says; this test machine goes without those two settings.
 
 One connector. nvme-cli installs a unit that connects to every subsystem a
 discovery change announces. nvme-stas is the only connector in this
@@ -555,10 +558,10 @@ rm -f etcd.log gateway.log worker.log cdc.log dn0.log dn1.log dn2.log dn3.log cn
 rm -f etcd.pid gateway.pid worker.pid cdc.pid dn0.pid dn1.pid dn2.pid dn3.pid cn0.pid
 ```
 
-The udev rule, the unit and the nvme-stas files:
+The udev rules, the unit and the nvme-stas files:
 
 ```
-sudo rm -f /etc/udev/rules.d/63-dnv-md.rules
+sudo rm -f /etc/udev/rules.d/58-dnv-dm.rules /etc/udev/rules.d/63-dnv-md.rules /etc/udev/rules.d/63-zz-dnv-md-array.rules
 sudo udevadm control --reload
 sudo systemctl unmask nvmf-connect@.service nvmf-connect.target
 sudo mv /etc/stas/stafd.conf.dnv-bak /etc/stas/stafd.conf

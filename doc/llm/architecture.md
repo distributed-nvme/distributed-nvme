@@ -1146,9 +1146,9 @@ index otherwise; slice and group fields are two hex digits each.
 * `CnMdArrayName` of an sp, slice index, group index and meta flag is
   {dnv}-{sp}-{slice}-{grp}, where {dnv} is `DnvPrefix`: the array's mdadm
   `--name`, its superblock name, within mdadm's name limit. Its fixed
-  prefix is what the udev mask of Components: invocation reference matches,
-  so that only the agent assembles dnv arrays (the cn integration suite
-  installs one).
+  prefix is what the md assembly mask and the md array rule of Components:
+  invocation reference match, so that only the agent assembles dnv arrays
+  and no stock rule acts on what a host wrote into one.
 
 The group index is the group's index inside its `meta_grp_list` or
 `data_grp_list` (stable: a surviving group is never renumbered, because
@@ -1173,7 +1173,7 @@ digits "ff" in both the slice and the group field:
   id needs sixteen hex digits and is unique only in its pool, so the sp
   joins the hash rather than taking sixteen digits of its own, which the
   limit has no room for.
-* `CnCloneMdArrayName` of an sp is {dnv}-{sp}-ff-ff, under the udev mask's
+* `CnCloneMdArrayName` of an sp is {dnv}-{sp}-ff-ff, under the udev rules'
   prefix and within mdadm's name limit as `CnMdArrayName` is.
 
 Neither form is ever a slice group's name: a slice field is at most the
@@ -4065,7 +4065,8 @@ the group's row in the report reading `OK` or absent), else the agent's
 dry run, its refusal word for word the real start's (the refusal of an
 array that runs aside, which is the dry run's own, as the real start
 leaves the mark waiting), or the members it
-would zero, in order, the assembly's update and whether it stops an array
+would zero, in order, a member already blank counted among them, the
+assembly's update and whether it stops an array
 that does not run first (`cnagent.md` CN12, CN31). Nothing is written and
 no mdadm command runs. Reasons: the choice of a forced start's leg rests
 on the members' superblocks, which no row shows, and the dry run runs the
@@ -4565,7 +4566,7 @@ block):
   rest of the side for no reader.
 
 The rest of a data side is never zeroed, nor is any tail; [D15] says why
-no pool reads those bytes and what a recycled tail can still cause.
+no pool reads those bytes and why a recycled tail needs no zeroing.
 
 **Length.** The disk node knows nothing of groups. The sp worker computes
 the length to zero when it builds a side's request, from the group it
@@ -7193,22 +7194,79 @@ while etcd does not answer, how it is backed up and restored, and how dnv
 is upgraded are Running without the control plane, etcd backup and restore
 and Upgrade in lockstep.
 
+**The udev rules.** Every node that runs a dnv agent carries the udev rules
+of `deploy/udev/`, which keep the system's own rules off what dnv builds and
+off what a host writes into it; each keys on a dnv name, so a node's own
+devices keep their stock handling:
+
+* the dm rule, `58-dnv-dm.rules`, ordered after the device mapper's own
+  rules, which set a device's name: for a dm device whose name carries
+  `DmPrefix` and a dash it sets the flags that keep the disk rules (udev's
+  content probe and the links by content), the other rules (lvm2's and
+  bcache's) and the persistent-storage rules off, with no watch, so a
+  host's data in a thin volume, a raid0 or a side is never probed. It never
+  sets the flag that drops the device's `/dev/mapper` link, which the
+  agents use. The flags also make systemd read the device as not ready, its
+  device unit inactive; nothing dnv runs waits for a dm device's unit or
+  mounts one, so that costs nothing.
+* the md assembly mask, `63-dnv-md.rules` (md assembly, below).
+* the md array rule, `63-zz-dnv-md-array.rules`, ordered after the stock
+  "63-md-raid-arrays.rules", which reads an md array's name, probes its
+  start and adds links by what it found there, and before every "64-" file:
+  for an array whose name carries the dnv prefix, and each partition the
+  kernel finds on one, it sets the file system type to one no stock rule
+  matches and clears its usage, so md's incremental assembly, btrfs's,
+  bcache's and lvm2's rules skip it; it takes away the links by uuid, label,
+  partition uuid and partition label the stock rule added, and puts any
+  other link the array shares with a device of the node's own below that
+  device. Reason: a data group's array starts with the first block a host
+  writes through the slice's thin pool, which can hold a host's md
+  superblock, LVM label, bcache superblock, file system or partition table,
+  and a link by a file system's label or uuid that a host chose could
+  otherwise lead a mount of the node's own to the host's data; a type
+  cleared instead would have bcache's rule probe the array, as it probes a
+  device of no type.
+
+The rules need systemd 253 or newer, the first udev that takes away a link
+an earlier rule added (`SYMLINK-=`, which the md array rule uses): an older
+udev drops those lines, with an error in its log, and keeps the rest, the
+lowered link priority among it.
+
+Two node settings go with them, as requirements, since no rule can key on
+a dnv name for what they cover: lvm2's devices file, listing only the
+node's own physical volumes, or a filter that accepts only those, so that
+no LVM scan reads a device of dnv's; and mdadm.conf "AUTO -all", written
+after ARRAY lines for the node's own arrays and followed by
+`update-initramfs`, since it stops the incremental assembly of every array
+the file does not list. "AUTO -all" keeps md's stock assembly off a leg's
+NVMe device that carries no dnv superblock — every leg of a `RedundNone`
+group, a new leg before its create — whose end can hold a host's 0.90 or
+1.0 superblock, off a disk node's raw disk, whose last extent can end with
+one, and off a clone's source; the agent's own assembly names its md device
+and is not affected. Beyond md and LVM, neither the rules nor the settings
+reach a clone's source: a bcache superblock, a file system or a partition
+table a host wrote at its start, or at a partition's, meets the node's stock
+rules (Known limits).
+
 **md assembly.** Only the agent assembles dnv arrays, so every node that
-runs a dnv agent masks udev's incremental assembly of them — a DN too, the
-superblocks of a CN's legs landing on its storage through the side export: a
-udev rule ordered before the stock "64-md-raid-assembly.rules" imports the
-md environment itself — the array name does not exist before the stock rule
-runs its own import, so a bare name match in an earlier rule never fires —
-and sets "SYSTEMD_READY" to zero for a device whose array name carries the
-fixed dnv prefix of `CnMdArrayName` (md names), in the bare form and in the
-"homehost:name" form; the cn agent creates its arrays with `--homehost any`,
-and the deployed mdadm stores such an array's name in the "homehost:name"
-form, "any:" before the dnv name. The mask works because the stock rule
-skips a device whose "SYSTEMD_READY" is zero, which the deployed mdadm's
-rules must do. On dedicated CN hosts two blunter means need no name
-matching: an mdadm.conf "AUTO -all", under which only arrays with explicit
-ARRAY lines, such as the OS array, assemble, or shadowing the stock rule
-entirely.
+runs a dnv agent masks udev's incremental assembly of them — a DN too,
+where a migration destination's connection to its source carries the
+source leg's superblock; the DN's side devices and their exports, which
+carry a CN's leg superblocks through the side export, are dm devices the dm
+rule keeps udev's probe off. The mask, `63-dnv-md.rules`, ordered before
+the stock "64-md-raid-assembly.rules", imports the md environment itself
+with an examine that names the 1.2 format — the array name does not exist
+before the stock rule runs its own import, so a bare name match in an
+earlier rule never fires — and sets "SYSTEMD_READY" to zero for a device
+whose array name carries the fixed dnv prefix of `CnMdArrayName` (md
+names), in the bare form and in the "homehost:name" form; the cn agent
+creates its arrays with `--homehost any`, and the deployed mdadm stores
+such an array's name in the "homehost:name" form, "any:" before the dnv
+name. Reason for the format: the plain examine reads a host's newer 0.90 or
+1.0 superblock at a leg's end in place of dnv's, and would let the stock
+rule take the leg (`cnagent.md` CN12, The superblock format). The mask
+works because the stock rule skips a device whose "SYSTEMD_READY" is zero,
+which the deployed mdadm's rules must do.
 
 ## Recorded design decisions
 
@@ -7380,7 +7438,8 @@ document and the component documents cite it by its id.
   later reload or resume of it succeeds, so the bound holds only as far as
   the reloads succeed. The side failover (Failover) has no window at all:
   it reloads onto dm-error directly. The residual exposure is external
-  tooling — udev, blkid, an operator's lsblk — reading a source's linears
+  tooling — blkid, an operator's lsblk, or udev on a node that lacks the dm
+  rule (Components: invocation reference) — reading a source's linears
   during the window, or longer where that bound does not hold; no dnv agent
   scans block devices, neither running an LVM command ([D13], [D14]).
 
@@ -7509,11 +7568,15 @@ document and the component documents cite it by its id.
   every new side. Nor is a tail: old md formats and some partition and
   file-system signatures sit at the end of a device, and a recycled extent
   at the end of a new side may hold one that a host wrote into a thin
-  device of an earlier pool. An md superblock there makes mdadm refuse the
-  leg as a foreign member, and the group reports an error (Known limits).
-  That failure is rare and loud, a host of a running pool can cause the
-  same at any time, so zeroing a tail would close only half of it, and one
-  zeroed prefix per side keeps the tracking simple. Resources deferred
+  device of an earlier pool. No reader of a leg acts on one: the agent's
+  mdadm commands that read a member's superblock name dnv's format, whose
+  superblock sits in the meta region (`cnagent.md` CN12, The superblock
+  format), the agent reads that place itself, and the node's udev rules and
+  settings keep the system's own md assembly off it (Components: invocation
+  reference). A host of a running
+  pool can write the same at any time, so zeroing a tail would close
+  nothing the format does not, and one zeroed prefix per side keeps the
+  tracking simple. Resources deferred
   while a side underneath them zeroes report `RES_STATUS_PROVISIONING` —
   *healthy, not ready, no action needed* — which **never** sets
   `err_epoch`; `ERROR` means *needs intervention*, which is why a missing
@@ -8041,11 +8104,28 @@ document and only pointed to here.
   copy had not reached reads what the destination's extents held, which
   may be another pool's bytes ([D15]); only the first blocks of a new data
   side are zeroed (Side provisioning protocol).
-* **A recycled tail can fail a fresh leg.** No tail of a new side is
-  zeroed ([D15]): an md superblock of a format that sits at the end of a
-  device, which a host of an earlier pool wrote there, can make a fresh
-  leg read as carrying one, and mdadm then refuses the foreign member, so
-  the group reports an error (`cnagent.md` CN12).
+* **What a host wrote in a clone's source reaches the controller node's
+  stock rules.** The primary connects a clone's source namespace and builds
+  its dm-clone directly over that NVMe device (Clones), which carries no dnv
+  name, so no udev rule of Components: invocation reference reaches it, nor
+  the partitions the kernel finds on it from the source volume's partition
+  table. What a host wrote at the start of the source volume, or of a
+  partition its table names, meets the node's stock rules. A bcache
+  superblock makes the stock bcache rule register that device, which then
+  holds it — a held partition holds the whole device too — and the clone
+  cannot open its source. A file system or a partition table gets the
+  stock persistent-storage rule's links by uuid, label, partition uuid and
+  partition label, at the default priority, so a lookup of the node's own
+  by a label or uuid that the host's data shares, as a mount by label or
+  uuid makes, can resolve to the host's device while the clone runs; and
+  the stock btrfs rule registers a btrfs with the kernel. An md superblock
+  or an LVM label there is covered by the two node settings beside the
+  rules, and a controller node mounts its own file systems by device path,
+  or by entries that name no label or uuid a tenant could copy, a node
+  requirement that keeps those links from reaching a mount. No host writes the start of any other device a dnv node
+  holds that carries no dnv name: a leg's NVMe device starts with its meta
+  region, which also keeps any partition table off it, and a disk node's
+  raw disk with the dnv disk format, before its first extent ([D13]).
 * **A damaged newest copy of the volume table rolls it back one save with
   no error.** The volume table has two slots and the agent loads the newest
   valid one (Disk node), so a slot damaged after its save, like one torn by

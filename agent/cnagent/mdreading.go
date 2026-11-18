@@ -31,7 +31,8 @@ import (
 const (
 	// mdSbOffset is where md's version-1.2 superblock sits on a member, in
 	// bytes: the kernel's super_offset of 8 sectors, which every dnv array
-	// has, since mdadm creates version 1.2 by default.
+	// has, since the agent creates and assembles each one in that format
+	// (mdMetadata).
 	mdSbOffset = 4096
 	// mdSbAreaLen is the length of the area read at mdSbOffset: one direct
 	// read's unit, which holds the superblock with all its roles.

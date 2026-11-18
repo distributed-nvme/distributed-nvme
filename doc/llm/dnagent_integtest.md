@@ -69,8 +69,8 @@ free agent ports mean something only once a crashed run's agents are gone. It
 supplies the kernel modules and the configfs mount, which the agent neither
 loads nor mounts, without verifying each module, and checks what the suite and
 the agent need and the agent does not check itself: passwordless ssh and sudo,
-the tools (no LVM: the dn agent runs none, `architecture.md`, [D13]), nvmet
-configfs present, native multipath on, which the standby assertions and the
+the tools (no LVM: the dn agent runs none, `architecture.md`, [D13]; udevadm,
+for the udev rules), nvmet configfs present, native multipath on, which the standby assertions and the
 migration merge need, the work directory's free space and punch-hole support,
 and the agent ports free. The suite rests on these lab facts:
 
@@ -200,7 +200,11 @@ their progress in. The info-read commands are plain memory reads.
 
 ## Cases
 
-Setup launches the agents (`dnagent.md` CM1, CM2) and proves each alive by
+Setup installs the udev rules of `deploy/udev/` on both VMs before the agents
+(`architecture.md`, Components: invocation reference): a disk node's side
+devices and their exports carry a controller node's md superblocks and
+tenants' data, which the dm rule keeps the system's rules off. Setup then
+launches the agents (`dnagent.md` CM1, CM2) and proves each alive by
 its first `GetDnSize` reply, exactly the disk's data area (DN1, DN3, SH1),
 and its disk format and port by a baseline `SyncupDn` (DN5, SH19;
 `architecture.md`, [D4]). As the agent's gRPC listener opens before its
@@ -440,7 +444,7 @@ device; host controllers before the nvmet objects they are connected to; dm
 devices top-down, a clone before the migration connection and export it
 flushes to on removal; and a disk's header block zeroed before its loop device
 is detached, which leaves its volume-table slots inert (`architecture.md`,
-[D13]; `dnagent.md` DN5). Two more rules keep the removals from wedging:
+[D13]; `dnagent.md` DN5); the udev rules go last. Two more rules keep the removals from wedging:
 every suspended device is resumed first, since a run killed in a
 cutover window leaves the source's linears suspended and a suspended device
 wedges its removal, the namespace disable above it and any block scan; and
