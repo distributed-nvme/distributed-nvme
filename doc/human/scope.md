@@ -79,6 +79,7 @@ pools, subsystems and hosts serve each user.
 | Changing a controller node's budget, the pool space it may serve, after creation | not yet |
 | Rolling upgrades | not yet; every program is upgraded at once |
 | Transports other than NVMe/TCP | not yet |
+| Disks of logical blocks other than 512 bytes, such as 4 KiB disks | not yet; the dn agent refuses such a disk ([the introduction](introduction.md#requirements)) |
 | More than one primary per pool | not yet |
 | cdc: host registration and mDNS discovery | not yet |
 | A login to an etcd that asks for a password or a client certificate | not yet |
@@ -1011,6 +1012,21 @@ Measured times are in [the introduction](introduction.md#status-and-limits-of-01
 - **A corrupt cdc entry withdraws its subsystem from hosts.** A cdc entry
   is the record in etcd that the cdc serves for one subsystem. Only a hand
   edit or a bug corrupts it. State: accepted.
+- **A disk node whose disk comes back with larger blocks keeps its data,
+  but its legs stop serving.** A disk that dnv formatted at 512-byte
+  logical blocks can read 4 KiB blocks later, as a loop device set up
+  again with `losetup -b 4096` over the same file does. The dn agent then
+  removes nothing: the disk keeps its records, its sides and their data,
+  and the agent reports the disk as an error with the fix, so the node
+  gets no new side. Until the operator sets the device up again at 512
+  bytes, no controller node can use its legs reliably. In a RAID1 group
+  the primary's md refuses to add such a leg to its running array, and
+  after a failover the new primary still sees 512-byte blocks over the
+  larger ones, so md fails the leg on its first write that the disk
+  refuses. Leg repair then puts a spare in the place of each leg, on
+  another disk node. State: accepted: the data stays in place for the fix
+  and for a recovery by hand, and refusing the disk would stop the same
+  legs. Read from the kernel's code; not seen in the lab.
 
 ## 7. Maintenance actions
 

@@ -8,6 +8,7 @@ package dnagent
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sync"
 	"sync/atomic"
@@ -386,22 +387,63 @@ func (s *DnAgentServer) sideKeysOf(clusterId, dnId uint64) []string {
 // raw size minus DnDataOffset, the fixed [D13] prefix the header, the two
 // volume-table slots and the clone-metadata area occupy. The CP divides this
 // by extent_size to get total_ext_cnt (architecture.md, Size → extents), so
-// there is no further subtraction anywhere. It has no AgentReply, so failure
-// travels in the gRPC status (architecture.md, Common agent rules); dn_id is
-// for logging only, and the call takes no lock and touches no store (DN3).
+// there is no further subtraction anywhere. A disk whose logical block size
+// is not DnLogicalBlockSize is refused, the error naming the size and the
+// fix (readDisk), so no disk node is ever registered on one. It has no
+// AgentReply, so failure travels in the gRPC status (architecture.md, Common
+// agent rules); dn_id is for logging only, and the call takes no lock and
+// touches no store (DN3).
 func (s *DnAgentServer) GetDnSize(
 	ctx context.Context,
 	req *pb.GetDnSizeRequest,
 ) (*pb.GetDnSizeReply, error) {
-	size, err := s.dm.DiskSize(ctx, s.disk)
-	if err != nil {
-		return nil, status.Error(codes.Internal, err.Error())
+	disk := s.readDisk(ctx)
+	if disk.err != nil {
+		return nil, status.Error(codes.Internal, disk.err.Error())
 	}
-	if size <= common.DnDataOffset {
+	if disk.size <= common.DnDataOffset {
 		return nil, status.Errorf(codes.Internal,
-			"disk too small: %d <= %d", size, common.DnDataOffset)
+			"disk too small: %d <= %d", disk.size, common.DnDataOffset)
 	}
-	return &pb.GetDnSizeReply{Size: size - common.DnDataOffset}, nil
+	return &pb.GetDnSizeReply{Size: disk.size - common.DnDataOffset}, nil
+}
+
+// diskRead is what one read of the --disk device found (readDisk).
+type diskRead struct {
+	// size is the device's byte size, 0 when its read did not answer.
+	size uint64
+	// err is the disk row's error (DN18) and GetDnSize's: a read that did
+	// not answer, or a logical block size other than DnLogicalBlockSize
+	// (DN3); nil when neither.
+	err error
+	// formatErr is nil only when the logical block size read answered
+	// DnLogicalBlockSize, the one case in which DN5 may format a blank disk;
+	// otherwise it is the refusal of the size, or the read's error.
+	formatErr error
+}
+
+// readDisk reads the --disk device's byte size and logical block size
+// (Dm.DiskSizes, SH17) and judges the block size by DN3's rule. GetDnSize,
+// the DN converge and the DN's read all read the disk through this one
+// function, so the disk row of a converge and of a read carry one text.
+func (s *DnAgentServer) readDisk(ctx context.Context) diskRead {
+	sizes, err := s.dm.DiskSizes(ctx, s.disk)
+	read := diskRead{size: sizes.Bytes, err: err}
+	switch block := sizes.LogicalBlock; {
+	case block == 0:
+		// DiskSizes leaves the size 0 only with an error that names the
+		// read that failed.
+		read.formatErr = fmt.Errorf("logical block size not read: %w", err)
+	case block != common.DnLogicalBlockSize:
+		read.formatErr = fmt.Errorf("disk %s has a logical block size of "+
+			"%d bytes, not %d: format it to %d-byte blocks with nvme "+
+			"format, or set its loop device up with losetup without -b "+
+			"and without --direct-io, or with -b %d",
+			s.disk, block, common.DnLogicalBlockSize,
+			common.DnLogicalBlockSize, common.DnLogicalBlockSize)
+		read.err = errors.Join(err, read.formatErr)
+	}
+	return read
 }
 
 // SyncupDn marks its converge as it arrives, before it waits for the node

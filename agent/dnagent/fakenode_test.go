@@ -36,11 +36,18 @@ type fakeNode struct {
 	traced map[string][]string
 
 	// block devices, by /dev path. A device-number read answers devNo, and
-	// a read of the "size" sysfs keeps under that number answers devSize in
-	// 512-byte sectors (sysBlockSize).
+	// the files sysfs keeps under that number answer from devSize, in
+	// 512-byte sectors, devLbs and partOf (sysBlockAttr).
 	devSize   map[string]uint64
 	devNo     map[string]string
 	nextMinor int
+	// devLbs is a device's logical block size, common.DnLogicalBlockSize
+	// when it holds none.
+	devLbs map[string]uint64
+	// partOf makes a device a partition, of the disk it names: its sysfs
+	// directory holds a "partition" file and no queue/, and its logical
+	// block size is its disk's.
+	partOf map[string]string
 
 	// raw-device metadata regions ([D13]). A sparse overlay, never a flat
 	// buffer: the data area alone is hundreds of MiB.
@@ -325,6 +332,8 @@ func newFakeNode() *fakeNode {
 	return &fakeNode{
 		devSize:       make(map[string]uint64),
 		devNo:         make(map[string]string),
+		devLbs:        make(map[string]uint64),
+		partOf:        make(map[string]string),
 		nextMinor:     1,
 		blocks:        make(map[string][]fakeSegment),
 		dms:           make(map[string]*fakeDm),
@@ -520,8 +529,8 @@ func (f *fakeNode) readFile(ctx context.Context, path string) (string, error) {
 		return "", err
 	}
 	f.touchAttrParent(path)
-	if size, ok := f.sysBlockSize(path); ok {
-		return size, nil
+	if attr, ok := f.sysBlockAttr(path); ok {
+		return attr, nil
 	}
 	data, ok := f.files[path]
 	if !ok && strings.HasPrefix(path, "/sys/dev/block/") &&
@@ -674,25 +683,64 @@ func (f *fakeNode) readDevNo(ctx context.Context, path string) (string, error) {
 	return devNo, nil
 }
 
-// sysBlockSize answers a read of "/sys/dev/block/<number>/size": the size of
-// the device devNo gives that number, in 512-byte sectors, as sysfs keeps
-// it. ok is false for any other path, and for a number no device of a known
-// size has, which then reads as a file that is not there. Called with f.mu
-// held.
-func (f *fakeNode) sysBlockSize(path string) (string, bool) {
-	devNo, ok := strings.CutPrefix(path, "/sys/dev/block/")
+// sysBlockAttr answers a read of a file sysfs keeps under a block device's
+// number, "/sys/dev/block/<number>/<file>", for the device devNo gives that
+// number, as the kernel lays the files out:
+//   - "size": its size in 512-byte sectors, for a device of a known size;
+//   - "partition": present for a partition (partOf) alone;
+//   - "queue/logical_block_size": its logical block size (devLbs), for a
+//     whole disk alone, since a partition has no queue/;
+//   - "../queue/logical_block_size": a partition's disk's, as the kernel
+//     resolves ".." in the disk's directory once it has followed the
+//     number's link to the partition's own, which lies there; nothing for a
+//     whole disk, whose parent directory holds no queue/. The path comes as
+//     the agent joins it: a path cleaned as text matches none of these.
+//
+// ok is false for any other path, and for a number no such device has,
+// which then reads as a file that is not there. Called with f.mu held.
+func (f *fakeNode) sysBlockAttr(path string) (string, bool) {
+	rest, ok := strings.CutPrefix(path, "/sys/dev/block/")
 	if !ok {
 		return "", false
 	}
-	if devNo, ok = strings.CutSuffix(devNo, "/size"); !ok {
+	devNo, file, ok := strings.Cut(rest, "/")
+	if !ok {
 		return "", false
 	}
 	for dev, no := range f.devNo {
-		if size, sized := f.devSize[dev]; no == devNo && sized {
-			return fmt.Sprintf("%d\n", size/agent.SectorSize), true
+		if no != devNo {
+			continue
+		}
+		disk, partition := f.partOf[dev]
+		switch file {
+		case "size":
+			if size, sized := f.devSize[dev]; sized {
+				return fmt.Sprintf("%d\n", size/agent.SectorSize), true
+			}
+		case "partition":
+			if partition {
+				return "1\n", true
+			}
+		case "queue/logical_block_size":
+			if !partition {
+				return fmt.Sprintf("%d\n", f.logicalBlock(dev)), true
+			}
+		case "../queue/logical_block_size":
+			if partition {
+				return fmt.Sprintf("%d\n", f.logicalBlock(disk)), true
+			}
 		}
 	}
 	return "", false
+}
+
+// logicalBlock is dev's logical block size: devLbs's, or
+// common.DnLogicalBlockSize when it holds none. Called with f.mu held.
+func (f *fakeNode) logicalBlock(dev string) uint64 {
+	if size, ok := f.devLbs[dev]; ok {
+		return size
+	}
+	return common.DnLogicalBlockSize
 }
 
 // inProcessHookErr applies the command hooks to the line of a call in the
@@ -1426,8 +1474,10 @@ func (f *fakeNode) newDevNo() string {
 	return fmt.Sprintf("253:%d", f.nextMinor)
 }
 
-// fakeLogicalBlock is the logical block size the fake's devices have: a disk
-// of 4 KiB logical blocks, the strictest the agent must zero on.
+// fakeLogicalBlock is the alignment the fake holds every discard and zero to:
+// 4 KiB, coarser than the logical block of any disk the agent takes
+// (common.DnLogicalBlockSize, DN3), so a range the agent's arithmetic leaves
+// off the 4 KiB grid that DnZeroAlign promises fails here.
 const fakeLogicalBlock = 4096
 
 // discardRanges answers OsClient.DiscardRanges, the agent's in-process
@@ -1452,8 +1502,8 @@ func (f *fakeNode) discardRanges(
 		f.recordTrace(ctx, line)
 		// The kernel refuses a range that does not start and end on the
 		// device's logical block, so a range the agent's arithmetic leaves
-		// misaligned fails here rather than only on a lab disk of 4 KiB
-		// blocks.
+		// misaligned fails here, on fakeLogicalBlock's grid, rather than
+		// only on a lab device of coarser blocks.
 		if r.Offset%fakeLogicalBlock != 0 || r.Length%fakeLogicalBlock != 0 {
 			return i, fmt.Errorf("BLKDISCARD %s offset=%d length=%d: %w",
 				path, r.Offset, r.Length, syscall.EINVAL)
@@ -1473,8 +1523,8 @@ func (f *fakeNode) cmdBlkdiscard(args []string) (string, int) {
 	dev := args[len(args)-1]
 	// The real tool refuses a range that does not start and end on the
 	// device's logical block, in these words, so a byte batch the agent's
-	// arithmetic leaves misaligned fails here rather than only on a lab disk
-	// of 4 KiB blocks.
+	// arithmetic leaves misaligned fails here, on fakeLogicalBlock's grid,
+	// rather than only on a lab device of coarser blocks.
 	for _, flag := range []string{"--offset", "--length"} {
 		value := flagValue(args, flag)
 		if value == "" {

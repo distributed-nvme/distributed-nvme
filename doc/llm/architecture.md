@@ -4343,9 +4343,10 @@ its pad bits in the middle of the chunk and shift every later bit. So
 
 * `GetDnSize` returns the byte size of the `--disk` device's **data area**:
   the raw size minus the fixed `DnDataOffset` prefix of the [D13] format.
-  A device at or below `DnDataOffset` is an Internal error. The gateway
-  calls it before registration; `dn_id` in the request is for logging
-  only (`dnagent.md` DN3).
+  A device at or below `DnDataOffset`, or one whose logical block size is
+  not 512 bytes, is an Internal error. The gateway calls it before
+  registration; `dn_id` in the request is for logging only (`dnagent.md`
+  DN3).
 * `SyncupDn` carries `revision`, `side_pointer_list` and `extent_size` (the
   cluster's `dn_bin_conf.extent_size`, stamped into the disk header at
   format time and immutable from then on, Disk node). It ensures the Disk

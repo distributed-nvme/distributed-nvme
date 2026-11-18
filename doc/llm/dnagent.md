@@ -951,17 +951,23 @@ SH17. Probing follows these conventions: the probe commands — the dn's are
 sysfs and its local store in its own process (`OsClient.ReadDir`, SH18)
 and reads there too a subsystem directory's age and, in
 the port probe, whether its port's directory is there (`OsClient.ReadMtime`,
-SH18), and the size of its `--disk`: the number of the device the `--disk`
-path names (`OsClient.ReadDevNo`), then the size sysfs keeps under that
-number, the file `lsblk` reads it from; the cn's are `cnagent.md` CN28's,
-and CN12's superblock read and `lsblk` of the array node — the walk of
-"/sys/class/nvme-subsystem" and "/sys/class/nvme" for every nvme host fact —
+SH18), and the size and the logical block size of its `--disk`: the number
+of the device the `--disk` path names (`OsClient.ReadDevNo`), then the size
+sysfs keeps under that number, the file `lsblk` reads it from, and the
+logical block size its `queue/` directory keeps; the cn's are `cnagent.md`
+CN28's, and CN12's superblock read and `lsblk` of the array node — the walk
+of "/sys/class/nvme-subsystem" and "/sys/class/nvme" for every nvme host fact —
 the namespace device, controller liveness and ANA state alike (SH20,
 `cnagent.md` CN12 and CN28) — configfs **reads** for nvmet, and `ReadBlock`
 of the disk header for the DN's [D13] metadata. No LVM report is probed
-anywhere ([D14]). Reason for the disk's size: every background read of a DN
-reads it, and a read in the agent's own process costs far less than a
-process, which on a node of many dn agents waits for its turn on the CPU.
+anywhere ([D14]). A partition has no `queue/`, and a `partition` file under
+the number marks one: its block size read goes on through `..`, which the
+kernel resolves in the disk's directory once it has followed the number's
+link to the partition's own, which lies there; a path cleaned as text would
+drop that step and read nothing. Reason for the disk's sizes: every
+background read of a DN reads them, and a read in the agent's own process
+costs far less than a process, which on a node of many dn agents waits for
+its turn on the CPU.
 These commands create, change and remove nothing; the one file a read writes
 itself is the store's probe file while the store refuses writes, which the
 read removes once the write holds (DN18), a file of the agent's own store
@@ -1771,14 +1777,27 @@ object lock (DN1).
 
 ### `GetDnSize`
 
-DN3. Read the byte size of the `--disk` device (SH17); reply the size
-**minus `DnDataOffset`** — the byte size of the [D13] data area, which is
-what the control plane divides by `extent_size` (`architecture.md`,
-Size → extents). A size at or below `DnDataOffset` is a
-"disk too small" error. Failures (bad disk, parse, too small) return a gRPC
+DN3. Read the byte size and the logical block size of the `--disk` device
+(SH17); reply the size **minus `DnDataOffset`** — the byte size of the [D13]
+data area, which is what the control plane divides by `extent_size`
+(`architecture.md`, Size → extents). A size at or below `DnDataOffset` is a
+"disk too small" error. A logical block size other than 512 bytes
+(`common.DnLogicalBlockSize`) is refused, the error naming the size and the
+fix: format the disk to 512-byte blocks with `nvme format`, or set its loop
+device up with `losetup` without `-b` and without `--direct-io`, or with
+`-b 512`. A loop device with direct IO and no `-b` takes the backing file's
+direct-IO alignment as its block size, 4096 over a disk of 4 KiB sectors,
+and `-b 512` turns its direct IO off there. Reason: every dm-error target dnv
+builds, the per-CN dm-error of a standby or a fenced side (DN10, DN12)
+and the cn agent's error devices, names no device, so it serves 512-byte
+blocks whatever the disk under the leg; only over a disk of 512-byte blocks
+is that the leg's own block size. A disk of larger blocks would need error
+targets that carry the disk's block size, which dnv does not build. Failures
+(bad disk, parse, too small, a block size other than 512) return a gRPC
 Internal status (`architecture.md`, Common agent rules — this RPC has no
-`AgentReply`). `dn_id` may be zero (pre-registration call from the
-gateway); it is for logging only. No locks, no store access.
+`AgentReply`), so the gateway registers no disk node on such a disk.
+`dn_id` may be zero (pre-registration call from the gateway); it is for
+logging only. No locks, no store access.
 
 ### `SyncupDn`
 
@@ -1815,15 +1834,37 @@ probe-first (SH16), building `DnInfo` as it goes:
 
 * report the store row (DN18): OK here, since the converge runs only after
   its own save held, or at startup before any save;
-* read the `--disk` device's size (SH17) — to report `disk_info`, to
-  give the disk counts of DN18 their total, and to hand the allocator the
-  raw size, the one input the disk format itself does not carry (the
-  extent count is that size minus `DnDataOffset`, divided by the
-  **header's** `extent_size`).
+* read the `--disk` device's size and logical block size (SH17) — to
+  report `disk_info`, to give the disk counts of DN18 their total, and to
+  hand the allocator the raw size, the one input the disk format itself
+  does not carry (the extent count is that size minus `DnDataOffset`,
+  divided by the **header's** `extent_size`). A logical block size other
+  than 512 makes `disk_info` `RES_STATUS_ERROR` with DN3's refusal, and so
+  does a read that did not answer, with its error. The two reads stand
+  apart: a size read that did not answer still lets the format below run,
+  and a block size read that did not answer does not.
 * **the [D13] disk format.** Read the header block. Magic absent ⇒ the disk
-  is blank, and it is formatted only when no side device or clone-metadata
-  wrapper maps it — the only devices dnv builds on the disk itself: a
-  `dmsetup ls`, then a `dmsetup table` of every `DnSideName` and
+  is blank, and it is formatted only when this pass's read found its
+  logical block size 512 (DN3): otherwise the converge writes nothing to
+  the disk and `meta_info` is `RES_STATUS_ERROR` with details "blank disk
+  header; refusing to format" and DN3's refusal, or the read's error, and
+  the next converge whose read answers 512 formats it. Reason: the format
+  is where a disk enters use, and DN3's reason holds for every side carved
+  from it. A disk already formatted converges as it would at 512, whatever
+  its block size reads now, and nothing of it is removed: a loop device set
+  up again with `-b` over the same file holds the same table and the same
+  sides' data, which stay in place with the sides' devices for the
+  operator's fix and for a by-hand recovery. Until the device reads 512
+  again, by DN3's reason, its legs serve no controller node reliably: md
+  on the controller node refuses them or fails them, and leg repair moves
+  them (Known limits). Its `disk_info` reads DN3's refusal, an `ERROR` row, so
+  the worker sets the node's `err_epoch`, which takes its capacity key and
+  so every new side away from it (`dnv-worker.md` HL1; `architecture.md`,
+  Capacity index keys), until the operator sets the device up again at
+  512. Nor is a blank disk formatted
+  while a side device or clone-metadata wrapper maps it — the only devices
+  dnv builds on the disk itself: a `dmsetup ls`, then a `dmsetup table` of
+  every `DnSideName` and
   `DnMigrMetaDmName` on the node, whatever cluster or dn the name carries,
   compared against the disk's device number. A header can go blank under
   live side devices (one mistaken write over its header block is enough),
@@ -1856,7 +1897,8 @@ probe-first (SH16), building `DnInfo` as it goes:
   device. Once no side device or clone-metadata wrapper maps the disk, and
   every side file of the store decodes and is either not provisioned or a
   side that a DN this agent holds no longer lists, the next converge whose
-  reads all answer formats. The format writes slot A with an empty table
+  reads all answer and whose block size read answers 512 formats. The
+  format writes slot A with an empty table
   at the first
   sequence number **first**, then the header (a fresh `format_uuid` from
   the kernel's random source, the request's `cluster_id`, `dn_id` and
@@ -3815,8 +3857,10 @@ needed, and the worker never turns one into an `err_epoch`
 (`architecture.md`, Live-state reporting); `RES_STATUS_ERROR` keeps meaning
 *needs intervention*.
 
-* `DnInfo.disk_info`, named by the `--disk` path: the disk's size read
-  succeeds.
+* `DnInfo.disk_info`, named by the `--disk` path: the disk's size and
+  logical block size reads succeed and the block size is 512, by DN3's
+  rule and the converge's own text, so a read and a converge report one
+  row (DN5).
 * `DnInfo.meta_info`, named by the `--disk` path: a `ReadBlock` of the
   header checks magic, version, CRC and the `cluster_id`/`dn_id`/
   `extent_size` identity (`DiskMeta.ProbeHeader`) — a header other than
@@ -4049,6 +4093,21 @@ else reported through `agent_reply` is still a protocol-level refusal.
 
 ## Known limits
 
+* A disk formatted at 512-byte blocks that reads another block size later,
+  as a loop device set up again with `-b 4096` over the same file does,
+  keeps its table, its sides' devices and their data (DN5), but until the
+  device reads 512 again its legs serve no controller node reliably, as
+  DN3's reason has it. A primary's per-CN namespace is enabled at the
+  side's larger blocks, and md on the controller node refuses to add a
+  member of larger blocks to its running array ("incompatible
+  logical_block_size").
+  A standby's per-CN namespace was enabled over its dm-error at 512, and
+  nvmet keeps a namespace's block size from its enable on, so after a
+  failover the reload onto the side leaves it at 512 over the larger
+  blocks, and md fails the leg on the first IO the disk refuses as not
+  aligned to its blocks. Leg repair then moves the legs (`dnv-worker.md`
+  AR8); the disk row's error names the fix, and the node takes no new side
+  meanwhile (DN5).
 * A migration's bitmap apply takes time that grows with its ranges: each
   push of a piece not held byte for byte applies the whole skip set under
   the side's DN1 locks (DN15), each

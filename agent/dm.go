@@ -2,6 +2,7 @@ package agent
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"regexp"
 	"strconv"
@@ -745,18 +746,55 @@ func LinearRunsTable(runs []ExtentRunSectors, devNo string) string {
 // its number.
 const sysDevBlockDir = "/sys/dev/block"
 
-// DiskSize returns the byte size of a block device, the GetDnSize probe,
-// read in the agent's own process (dnagent.md SH17): the number of the
-// device dev names, then the "size" sysfs keeps under that number, which
+// DiskSizes is what Dm.DiskSizes reads of a block device. A size whose read
+// did not answer is 0.
+type DiskSizes struct {
+	// Bytes is the device's size in bytes.
+	Bytes uint64
+	// LogicalBlock is the device's logical block size in bytes: the
+	// smallest unit its IO can address.
+	LogicalBlock uint64
+}
+
+// DiskSizes reads a block device's byte size and its logical block size in
+// the agent's own process (dnagent.md SH17), the reads behind GetDnSize and
+// the DN's disk row: the number of the device dev names, once, then two
+// files sysfs keeps under that number. The size is the "size" file, which
 // counts 512-byte sectors whatever the device's block size — the file
-// `lsblk` reads the size from. Every failure is an error: a device that is
-// not there, a read that did not answer, a value that is not a number.
-func (d *Dm) DiskSize(ctx context.Context, dev string) (uint64, error) {
+// `lsblk` reads the size from. The logical block size is
+// queue/logical_block_size, read as logicalBlockSize says. The two reads
+// stand apart: one that fails leaves its size 0 and keeps the other's
+// answer, and the error names every read that failed. A number read that
+// fails fails both. A failure is never a size: a device that is not there,
+// a read that did not answer, a file that is not there, a value that is not
+// a number.
+func (d *Dm) DiskSizes(ctx context.Context, dev string) (DiskSizes, error) {
 	devNo, err := d.readDevNo(ctx, dev)
 	if err != nil {
-		return 0, err
+		return DiskSizes{}, err
 	}
-	path := sysDevBlockDir + "/" + devNo + "/size"
+	dir := sysDevBlockDir + "/" + devNo
+	var sizes DiskSizes
+	sectors, sizeErr := d.diskSectors(ctx, dev, devNo, dir)
+	if sizeErr == nil {
+		sizes.Bytes = sectors * SectorSize
+	}
+	block, blockErr := d.logicalBlockSize(ctx, dev, devNo, dir)
+	if blockErr == nil {
+		sizes.LogicalBlock = block
+	}
+	return sizes, errors.Join(sizeErr, blockErr)
+}
+
+// diskSectors reads the "size" file of the block device whose sysfs
+// directory is dir: its size in 512-byte sectors.
+func (d *Dm) diskSectors(
+	ctx context.Context,
+	dev string,
+	devNo string,
+	dir string,
+) (uint64, error) {
+	path := dir + "/size"
 	text, ok, err := d.readAttrStrict(ctx, path)
 	if err != nil {
 		return 0, err
@@ -768,7 +806,47 @@ func (d *Dm) DiskSize(ctx context.Context, dev string) (uint64, error) {
 	if parseErr != nil {
 		return 0, fmt.Errorf("%s reads %q, not a size", path, text)
 	}
-	return sectors * SectorSize, nil
+	return sectors, nil
+}
+
+// logicalBlockSize reads the logical block size of the block device whose
+// sysfs directory is dir. sysfs keeps it in the queue/ directory of a whole
+// disk alone: a partition has no queue/, and its own directory lies in its
+// disk's. So a partition, which a "partition" file in dir marks, is read
+// through dir + "/..": the kernel follows the link that dir is,
+// /sys/dev/block/<devNo>, to the partition's directory and resolves ".."
+// from there, which is the disk's directory. The path is joined by hand and
+// never cleaned as text (path.Clean, filepath.Join): that drops the link
+// and the step with it, and reads /sys/dev/block/queue, which is not there.
+// A read of the "partition" file that did not answer is an error, since it
+// cannot say where the size is.
+func (d *Dm) logicalBlockSize(
+	ctx context.Context,
+	dev string,
+	devNo string,
+	dir string,
+) (uint64, error) {
+	_, partition, err := d.readAttrStrict(ctx, dir+"/partition")
+	if err != nil {
+		return 0, err
+	}
+	path := dir + "/queue/logical_block_size"
+	if partition {
+		path = dir + "/../queue/logical_block_size"
+	}
+	text, ok, err := d.readAttrStrict(ctx, path)
+	if err != nil {
+		return 0, err
+	}
+	if !ok {
+		return 0, fmt.Errorf("block device %s (%s) has no %s", dev, devNo,
+			path)
+	}
+	size, parseErr := strconv.ParseUint(text, 10, 64)
+	if parseErr != nil || size == 0 {
+		return 0, fmt.Errorf("%s reads %q, not a block size", path, text)
+	}
+	return size, nil
 }
 
 // InFlight reads the IO a block device has in flight, reads and writes, from

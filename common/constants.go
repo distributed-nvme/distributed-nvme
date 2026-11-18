@@ -309,6 +309,11 @@ const (
 	DnCloneMetaUnit    = 4 * 1024 * 1024   // slot allocation granularity
 	DnDataOffset       = 256 * 1024 * 1024 // extent area start (fixed!)
 
+	// DnLogicalBlockSize is the one logical block size, in bytes, a disk
+	// node's --disk may have (dnagent.md DN3): GetDnSize refuses any other,
+	// and the DN converge reports it and formats no blank disk of it.
+	DnLogicalBlockSize = 512
+
 	// DnCloneMetaUnitCnt is the DN clone-metadata slot area in units, shared
 	// by every migration destination the node hosts: the ceiling of a DN's
 	// used_meta_units, which CreateMigration never passes (architecture.md,

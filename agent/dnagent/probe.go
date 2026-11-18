@@ -47,10 +47,12 @@ func (s *DnAgentServer) probeDn(
 		s.nf.LocalDnProbePath(req.GetClusterId(), req.GetDnId()))
 	info.StoreInfo = s.store.Row(t)
 
-	size, err := s.dm.DiskSize(ctx, s.disk)
-	info.DiskInfo = t.FromErr(resKeyDisk, s.disk, "", err)
-	if err == nil {
-		s.meta.SetDiskSize(size)
+	// The disk row by the converge's own read and rule (readDisk, DN3), so
+	// the two report one text.
+	disk := s.readDisk(ctx)
+	info.DiskInfo = t.FromErr(resKeyDisk, s.disk, "", disk.err)
+	if disk.size != 0 {
+		s.meta.SetDiskSize(disk.size)
 	}
 
 	// Only the 4 KiB header is re-read: cheap enough for the health rounds

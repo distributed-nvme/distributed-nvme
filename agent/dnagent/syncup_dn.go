@@ -683,15 +683,18 @@ func (s *DnAgentServer) convergeDn(
 		return info
 	}
 
-	size, err := s.dm.DiskSize(ctx, s.disk)
-	info.DiskInfo = t.FromErr(resKeyDisk, s.disk, "", err)
-	if err == nil {
+	// A logical block size other than DnLogicalBlockSize is the disk row's
+	// error (DN3) and refuses the format of a blank disk below, while a disk
+	// formatted already converges as it is (DN5).
+	disk := s.readDisk(ctx)
+	info.DiskInfo = t.FromErr(resKeyDisk, s.disk, "", disk.err)
+	if disk.size != 0 {
 		// The allocator needs the extent count of the data area; the raw
 		// size is the only part of it the disk format does not carry.
-		s.meta.SetDiskSize(size)
+		s.meta.SetDiskSize(disk.size)
 	}
 
-	info.MetaInfo = s.ensureDiskMeta(ctx, t, req)
+	info.MetaInfo = s.ensureDiskMeta(ctx, t, req, disk.formatErr)
 	// The counts are taken here, before syncupDn's pointer diff and sweep
 	// (DN6), so the reply to a SyncupDn that removes a pointer still counts
 	// that side's record and says the records do not match the new list.
@@ -701,20 +704,31 @@ func (s *DnAgentServer) convergeDn(
 	return info
 }
 
+// refusingFormat leads every refusal of the format of a blank disk: the
+// meta row's error says the header is blank and the disk stays so (DN5).
+const refusingFormat = "blank disk header; refusing to format"
+
 // ensureDiskMeta converges the [D13] disk format: a blank disk is formatted
-// (header + an empty volume table in slot A) only as the format gate allows
-// (formatGate), a disk already formatted for this cluster/dn/extent_size is
-// left untouched, and a disk formatted for anything else is refused rather
-// than overwritten (DN5). The DNs' lists are read here, before
-// EnsureFormatted takes DiskMeta's lock, which the gate runs under: s.mu and
-// that lock are both leaf locks, so neither is taken inside the other.
+// (header + an empty volume table in slot A) only when this pass's read
+// found its logical block size DnLogicalBlockSize — blockErr, readDisk's
+// formatErr, is nil — and the format gate allows it (formatGate); a disk
+// already formatted for this cluster/dn/extent_size is left untouched,
+// whatever its block size reads now, and a disk formatted for anything else
+// is refused rather than overwritten (DN5). The DNs' lists are read here,
+// before EnsureFormatted takes DiskMeta's lock, which the gate runs under:
+// s.mu and that lock are both leaf locks, so neither is taken inside the
+// other.
 func (s *DnAgentServer) ensureDiskMeta(
 	ctx context.Context,
 	t *agent.ResTracker,
 	req *pb.SyncupDnRequest,
+	blockErr error,
 ) *pb.ResInfo {
 	lists := s.dnLists()
 	gate := func(ctx context.Context) error {
+		if blockErr != nil {
+			return fmt.Errorf("%s: %w", refusingFormat, blockErr)
+		}
 		return s.formatGate(ctx, lists)
 	}
 	if err := s.meta.EnsureFormatted(ctx, req.GetClusterId(),
@@ -741,19 +755,19 @@ func (s *DnAgentServer) ensureDiskMeta(
 // dn's sweep removes its own once nothing wants them; a device of another
 // cluster or dn stays until an operator removes it — and every such stored
 // side is one a DN this agent holds no longer lists, after which a converge
-// whose reads all answer formats it.
+// whose reads all answer and whose block size read answers DnLogicalBlockSize
+// (ensureDiskMeta) formats it.
 func (s *DnAgentServer) formatGate(
 	ctx context.Context,
 	lists map[[2]uint64]map[[2]uint64]struct{},
 ) error {
-	const refusing = "blank disk header; refusing to format"
 	devNo, err := s.dm.DevNo(ctx, s.disk)
 	if err != nil {
-		return fmt.Errorf("%s: %w", refusing, err)
+		return fmt.Errorf("%s: %w", refusingFormat, err)
 	}
 	dms, err := s.dm.List(ctx)
 	if err != nil {
-		return fmt.Errorf("%s: %w", refusing, err)
+		return fmt.Errorf("%s: %w", refusingFormat, err)
 	}
 	var live []string
 	for name := range dms {
@@ -765,7 +779,7 @@ func (s *DnAgentServer) formatGate(
 		}
 		targets, err := s.dm.Table(ctx, name)
 		if err != nil {
-			return fmt.Errorf("%s: %w", refusing, err)
+			return fmt.Errorf("%s: %w", refusingFormat, err)
 		}
 		if tableMaps(targets, devNo) {
 			live = append(live, name)
@@ -774,10 +788,10 @@ func (s *DnAgentServer) formatGate(
 	if len(live) > 0 {
 		sort.Strings(live)
 		return fmt.Errorf("%s: %d live dm device(s) still map the disk, "+
-			"first %s", refusing, len(live), live[0])
+			"first %s", refusingFormat, len(live), live[0])
 	}
 	if err := s.storedProvisionedSide(ctx, lists); err != nil {
-		return fmt.Errorf("%s: %w", refusing, err)
+		return fmt.Errorf("%s: %w", refusingFormat, err)
 	}
 	return nil
 }

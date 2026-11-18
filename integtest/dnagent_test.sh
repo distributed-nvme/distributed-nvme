@@ -8,7 +8,7 @@
 #       [--wipe] user1@ip1 user2@ip2
 #
 # Cases: smoke, zeroing, sides, migr_full, migr_bitmap, teardown, restart,
-# store_full (dnagent_integtest.md, Cases; for `teardown`, also
+# store_full, blocksize (dnagent_integtest.md, Cases; for `teardown`, also
 # architecture.md, Teardown by sweep). Cleanup runs
 # unconditionally at the start and, on success only, at the end: a failing run
 # leaves every dm/nvmet object and both agent logs in place and dumps
@@ -104,6 +104,15 @@ FENCE_TIMEOUT=90
 
 NQN_PREFIX=nqn.2024-01.io.dnv
 
+# The blocksize case's agent (dnagent_integtest.md, Cases, blocksize): one
+# more dn agent on vm1 beside dn1's, with a gRPC address, an nvme-tcp port,
+# an nvmet port and a dn id of its own, over one of the case's disks at a
+# time. BS_PORT_ID is the helper's too, whose cleanup removes that port.
+BS_GRPC_PORT=29538
+BS_TR_SVC_ID=4209
+BS_PORT_ID=9
+BS_DN=0x9
+
 # The details of a migration's rows while its cutover is pending (dnagent.md
 # DN12, DN18): the source's two rows, and the destination's two once its
 # metadata wrapper stands, which also carry RES_REASON_AWAITING_CUTOVER. The
@@ -148,7 +157,8 @@ SETUP_DONE=0
 # empty otherwise.
 STORE_VM=""
 
-CASES=(smoke zeroing sides migr_full migr_bitmap teardown restart store_full)
+CASES=(smoke zeroing sides migr_full migr_bitmap teardown restart store_full
+	blocksize)
 
 # ---------------------------------------------------------------------------
 # Logging, assertions, failure handling
@@ -536,6 +546,12 @@ TR_SVC_ID=4200
 # PIN_PREFIX is where pin_dev records its holders' pids: outside $WORK,
 # which cleanup removes wholesale, so a pin always outlives what it pins.
 PIN_PREFIX=/var/tmp/dnv-it-pin
+# BS_PORT_ID is the nvmet port of the blocksize case's agent and
+# BS_DISK_SIZE the size of each of its disks' files, which leaves a
+# partition of one a data area past the disk format's prefix
+# (dnagent_integtest.md, Cases, blocksize).
+BS_PORT_ID=9
+BS_DISK_SIZE=320M
 
 # nvme_ctrl_present — does this node hold any nvme controller at all? A glob
 # over the class directory cannot fail the way a tool can, which is why it is
@@ -1413,6 +1429,98 @@ unmount_work() {
 	return 0
 }
 
+# --- disks of other block sizes (dnagent_integtest.md, Cases, blocksize) ---
+
+# bs_disk <name> <lbs> <whole|part> — a loop device over a new sparse file
+# $WORK/bs-<name>.img of BS_DISK_SIZE at <lbs>-byte logical blocks, with no
+# -b at 512, losetup's own size and the fix the agent's refusal names, and,
+# with part, one partition over the whole of it; prints the device the
+# case's agent takes: the loop device, or its partition. sfdisk writes the
+# table in the device's own blocks and has the kernel read it again, which
+# a loop device set up with --partscan does at once.
+bs_disk() {
+	local img=$WORK/bs-$1.img dev block=()
+	[ "$2" = 512 ] || block=(--sector-size "$2")
+	truncate -s "$BS_DISK_SIZE" "$img" || return 1
+	if [ "$3" = whole ]; then
+		losetup --find --show "${block[@]}" "$img"
+		return
+	fi
+	dev=$(losetup --find --show --partscan "${block[@]}" "$img") || return 1
+	echo 'type=83' | sfdisk --quiet --label dos "$dev" >/dev/null || return 1
+	wait_dev "${dev}p1" 10 >/dev/null || return 1
+	echo "${dev}p1"
+}
+
+# bs_shape <dev> — "<logical block size> <whole|part>" of a device as the
+# kernel holds it, by lsblk and by the partition file sysfs keeps for a
+# partition alone, so the case proves its disks are the shapes it names.
+bs_shape() {
+	local lbs kind=whole
+	lbs=$(lsblk -dno LOG-SEC "$1") || return 1
+	[ -e "/sys/class/block/${1##*/}/partition" ] && kind=part
+	echo "$((lbs)) $kind"
+}
+
+# zero_head <dev> <MiB> — zero when the first <MiB> MiB of a device read as
+# zeros, written otherwise; a read that fails answers neither and fails.
+zero_head() {
+	local rc=0
+	cmp -s -n $(($2 * 1048576)) "$1" /dev/zero || rc=$?
+	case $rc in
+	0) echo zero ;;
+	1) echo written ;;
+	*)
+		echo "zero_head: cmp of $1 failed (rc $rc)" >&2
+		return 1
+		;;
+	esac
+}
+
+# bs_agent_stop <pid> <port> — stops the case's agent gracefully
+# (dnagent.md SH27) and prints stopped once it is gone and nothing listens
+# on its gRPC port, or STILL_RUNNING, failing, when either outlives the
+# wait: the next agent of the case takes that port.
+bs_agent_stop() {
+	local i
+	kill "$1" 2>/dev/null
+	for ((i = 0; i < 30; i++)); do
+		if ! kill -0 "$1" 2>/dev/null &&
+			! ss -ltnH | awk '{print $4}' | grep -q ":$2\$"; then
+			echo stopped
+			return 0
+		fi
+		sleep 0.5
+	done
+	echo STILL_RUNNING
+	return 1
+}
+
+# bs_teardown — what the blocksize case made on this node goes, once its
+# agent is stopped: its nvmet port, which its agents' converges made and to
+# which no subsystem is linked, its loop devices, their files and the
+# agents' stores. It prints torn down, or fails naming what is left.
+bs_teardown() {
+	local grp img dev left=""
+	for grp in 3 2; do
+		rmdir "$NVMET/ports/$BS_PORT_ID/ana_groups/$grp" 2>/dev/null
+	done
+	rmdir "$NVMET/ports/$BS_PORT_ID" 2>/dev/null
+	for img in "$WORK"/bs-*.img; do
+		[ -e "$img" ] || continue
+		for dev in $(losetup -j "$img" | cut -d: -f1); do
+			losetup -d "$dev" || left="$left $dev"
+		done
+	done
+	rm -rf "$WORK"/bs-*.img "$WORK"/bs-store-*
+	[ ! -e "$NVMET/ports/$BS_PORT_ID" ] || left="$left port $BS_PORT_ID"
+	if [ -n "$left" ]; then
+		echo "bs_teardown: left$left" >&2
+		return 1
+	fi
+	echo "torn down"
+}
+
 # --- teardown ---------------------------------------------------------------
 
 # agent_dm_names and dm_kind_names fail when `dmsetup ls` does, like the
@@ -1561,10 +1669,13 @@ cleanup() {
 		for host in "$NVMET"/hosts/"$NQN_PREFIX":*; do
 			[ -d "$host" ] && rmdir "$host" 2>/dev/null
 		done
-		for grp in 3 2; do
-			rmdir "$NVMET/ports/1/ana_groups/$grp" 2>/dev/null
+		local port
+		for port in 1 "$BS_PORT_ID"; do
+			for grp in 3 2; do
+				rmdir "$NVMET/ports/$port/ana_groups/$grp" 2>/dev/null
+			done
+			rmdir "$NVMET/ports/$port" 2>/dev/null
 		done
-		rmdir "$NVMET/ports/1" 2>/dev/null
 	fi
 
 	# Defensive: nothing the agent builds is ever left suspended ([D12]),
@@ -1770,6 +1881,10 @@ lab_wipe() {
 diag() {
 	echo "--- agent.log (last 120 lines) ---"
 	tail -n 120 "$WORK/agent.log" 2>/dev/null
+	if [ -e "$WORK/bs-agent.log" ]; then
+		echo "--- bs-agent.log, the blocksize case's agent (last 40 lines) ---"
+		tail -n 40 "$WORK/bs-agent.log"
+	fi
 	echo "--- dmsetup ls ---"
 	dmsetup ls 2>/dev/null
 	echo "--- dmsetup table ---"
@@ -1945,7 +2060,7 @@ preflight_vms() {
 		ssh "${SSH_OPTS[@]}" "${VM[$idx]}" "sudo -n true" ||
 			die "missing: passwordless sudo on vm$idx (${VM[$idx]})"
 		local missing
-		missing=$(sshv "$idx" "for b in dmsetup nvme losetup blkdiscard lsblk dd fallocate sha256sum cmp pkill jq timeout setsid wipefs ss mountpoint; do command -v \$b >/dev/null || echo \$b; done")
+		missing=$(sshv "$idx" "for b in dmsetup nvme losetup blkdiscard lsblk dd fallocate sha256sum cmp pkill jq timeout setsid wipefs ss mountpoint sfdisk truncate; do command -v \$b >/dev/null || echo \$b; done")
 		[ -z "$missing" ] || die "missing: $missing on vm$idx"
 		# The agent hardcodes the configfs path and neither mounts nor
 		# modprobes; the harness does both here and nothing else.
@@ -1960,8 +2075,8 @@ preflight_vms() {
 			die "vm$idx: /var/tmp has ${got}K free, want >= 3 GiB"
 		got=$(sshv "$idx" "f=/var/tmp/dnv-punch-probe.\$\$; fallocate -l 8M \$f && fallocate -p -o 0 -l 4M \$f && echo PUNCH_OK || echo PUNCH_NO; rm -f \$f")
 		assert_eq "$got" "PUNCH_OK" "vm$idx: /var/tmp punch-hole support"
-		got=$(sshv "$idx" "ss -ltnH | awk '{print \$4}' | sed 's/.*://' | grep -cE '^($GRPC_PORT|$TR_SVC_ID)\$' || true")
-		assert_eq "$got" "0" "vm$idx: ports $GRPC_PORT/$TR_SVC_ID must be free"
+		got=$(sshv "$idx" "ss -ltnH | awk '{print \$4}' | sed 's/.*://' | grep -cE '^($GRPC_PORT|$TR_SVC_ID|$BS_GRPC_PORT|$BS_TR_SVC_ID)\$' || true")
+		assert_eq "$got" "0" "vm$idx: ports $GRPC_PORT/$TR_SVC_ID/$BS_GRPC_PORT/$BS_TR_SVC_ID must be free"
 	done
 	log "preflight ok"
 }
@@ -4650,6 +4765,167 @@ case_store_full() {
 	assert_eq "$(jq_of "$out" '.revision // "0"')" "${DNREV[$dn]}" \
 		"dn$dn's revision over its disk store"
 	rm -rf "$snap"
+}
+
+# ---------------------------------------------------------------------------
+# blocksize (dnagent_integtest.md, Cases, blocksize)
+# ---------------------------------------------------------------------------
+
+# bs_agent_start <disk> <store> — a dn agent on vm1 beside dn1's, over
+# <disk>, with the case's own gRPC address, nvme-tcp port and nvmet port
+# and the local store <store>, which it makes first; prints the agent's
+# pid. The background job is the setsid command alone, which, as no process
+# group leader, forks nothing, so $! is the agent; bs_agent_stop proves it
+# gone by its gRPC port as well.
+bs_agent_start() {
+	sshv 1 "mkdir -p $2 && chmod 0755 $2 || exit 1; \
+setsid nohup $WORK/dnv-agent dn \
+--grpc-network tcp --grpc-address ${IP[1]}:$BS_GRPC_PORT \
+--tr-type tcp --adr-fam ipv4 --tr-addr ${IP[1]} --tr-svc-id $BS_TR_SVC_ID \
+--nvmet-port-id $BS_PORT_ID --local-store $2 --disk $1 \
+>> $WORK/bs-agent.log 2>&1 < /dev/null & echo \$!"
+}
+
+# bs_ctl drives the case's agent as ctl drives dn1's, under the stage's
+# trace id.
+bs_ctl() {
+	local sub=$1
+	shift
+	log "[bs] dnagentctl $sub $*"
+	"$CTL" "$sub" --addr "${IP[1]}:$BS_GRPC_PORT" --cluster "$CLUSTER" \
+		--dn "$BS_DN" --trace-id "$TRACE" "$@"
+}
+
+# bs_size <secs> — the case's agent's answer to GetDnSize: "size <n>" for a
+# reply, or "refused <message>" for the agent's own refusal, an Internal
+# status (dnagent.md DN3). Only an agent that does not listen yet is asked
+# again, within <secs>.
+bs_size() {
+	local out errf rc deadline=$((SECONDS + $1))
+	errf=$(mktemp)
+	while :; do
+		rc=0
+		out=$(bs_ctl get-dn-size 2>"$errf") || rc=$?
+		if [ "$rc" -eq 0 ]; then
+			rm -f "$errf"
+			echo "size $(jq_of "$out" .size)"
+			return 0
+		fi
+		if grep -q "code = Internal" "$errf"; then
+			echo "refused $(grep "code = Internal" "$errf")"
+			rm -f "$errf"
+			return 0
+		fi
+		if [ "$SECONDS" -ge "$deadline" ]; then
+			cat "$errf" >&2
+			rm -f "$errf"
+			die "the blocksize agent did not answer GetDnSize within $1 s"
+		fi
+		sleep 0.5
+	done
+}
+
+# bs_syncup <revision> — a SyncupDn of the case's agent with no side, sent
+# again while the agent answers that its startup pass runs (dnagent.md
+# SH33), as a GetDnSize the agent refuses cannot wait that out the way
+# the driver's --wait does; prints the reply, whatever its code.
+bs_syncup() {
+	local out code deadline=$((SECONDS + 15))
+	while :; do
+		out=$(bs_ctl syncup-dn --timeout "$SYNCUP_TIMEOUT" \
+			--revision "$1" --extent-size "$EXTENT_SIZE" || true)
+		[ -n "$out" ] || die "the blocksize agent's SyncupDn produced no reply"
+		code=$(jq_of "$out" '.agent_reply.code // 0')
+		if [ "$code" != 6 ]; then
+			printf '%s' "$out"
+			return 0
+		fi
+		[ "$SECONDS" -lt "$deadline" ] ||
+			die "the blocksize agent still starts after 15 s"
+		sleep 0.5
+	done
+}
+
+# assert_bs_refusal <text> <disk> <label> — text holds DN3's refusal of
+# <disk> at 4096-byte blocks: the size, the one size taken, and the fixes:
+# an nvme format, or a loop device with no -b and no direct IO, or with
+# -b 512.
+assert_bs_refusal() {
+	local part
+	for part in "disk $2 has a logical block size of 4096 bytes, not 512" \
+		"nvme format" "losetup without -b and without --direct-io" \
+		"or with -b 512"; do
+		case "$1" in
+		*"$part"*) ;;
+		*) die "$3: '$1' does not say '$part'" ;;
+		esac
+	done
+}
+
+case_blocksize() {
+	CASE=blocksize
+	local whole part512 part4096 out pid want
+
+	stage disks "vm1: a loop device at 4096-byte blocks, and a partition each of a loop device at 512 and at 4096"
+	whole=$(helper 1 "bs_disk whole 4096 whole")
+	part512=$(helper 1 "bs_disk part512 512 part")
+	part4096=$(helper 1 "bs_disk part4096 4096 part")
+	assert_eq "$(helper 1 "bs_shape $whole")" "4096 whole" \
+		"the loop device at 4096 ($whole)"
+	assert_eq "$(helper 1 "bs_shape $part512")" "512 part" \
+		"the partition at 512 ($part512)"
+	assert_eq "$(helper 1 "bs_shape $part4096")" "4096 part" \
+		"the partition at 4096 ($part4096)"
+
+	stage whole "over the loop device at 4096, GetDnSize is refused and a SyncupDn formats nothing"
+	pid=$(bs_agent_start "$whole" "$WORK/bs-store-whole")
+	out=$(bs_size 20)
+	assert_bs_refusal "$out" "$whole" "GetDnSize over $whole"
+	out=$(bs_syncup 1)
+	# The disk stays blank, so the record step names it (dnagent.md DN5,
+	# DN6): the leftover code, as under any refused format.
+	assert_eq "$(jq_of "$out" '.agent_reply.code // 0')" 4 \
+		"the SyncupDn's code over $whole"
+	assert_eq "$(jq_of "$out" '.dn_info.disk_info.status')" \
+		RES_STATUS_ERROR "disk_info over $whole"
+	assert_bs_refusal "$(jq_of "$out" '.dn_info.disk_info.details')" \
+		"$whole" "disk_info over $whole"
+	assert_eq "$(jq_of "$out" '.dn_info.meta_info.status')" \
+		RES_STATUS_ERROR "meta_info over $whole"
+	out=$(jq_of "$out" '.dn_info.meta_info.details')
+	case "$out" in
+	"blank disk header; refusing to format: "*) ;;
+	*) die "meta_info over $whole: '$out' does not refuse the format" ;;
+	esac
+	assert_bs_refusal "$out" "$whole" "meta_info over $whole"
+	# The header block and both volume-table slots lie in the first 36 MiB
+	# ([D13]).
+	assert_eq "$(helper 1 "zero_head $whole 36")" zero \
+		"the head of $whole after the SyncupDn"
+	assert_eq "$(helper 1 "bs_agent_stop $pid $BS_GRPC_PORT")" stopped \
+		"the agent over $whole stops"
+
+	stage part512 "over a partition of a loop device at 512, GetDnSize answers and a SyncupDn formats it"
+	pid=$(bs_agent_start "$part512" "$WORK/bs-store-part512")
+	want=$(($(sshv 1 "lsblk -bdno SIZE $part512") - DATA_OFFSET))
+	assert_eq "$(bs_size 20)" "size $want" "GetDnSize over $part512"
+	out=$(bs_syncup 1)
+	assert_eq "$(jq_of "$out" '.agent_reply.code // 0')" 0 \
+		"the SyncupDn's code over $part512"
+	assert_dn_info_ok "$out" "SyncupDn over $part512"
+	assert_eq "$(helper 1 "zero_head $part512 1")" written \
+		"the head of $part512 after its format"
+	assert_eq "$(helper 1 "bs_agent_stop $pid $BS_GRPC_PORT")" stopped \
+		"the agent over $part512 stops"
+
+	stage part4096 "over a partition of a loop device at 4096, GetDnSize is refused"
+	pid=$(bs_agent_start "$part4096" "$WORK/bs-store-part4096")
+	assert_bs_refusal "$(bs_size 20)" "$part4096" "GetDnSize over $part4096"
+	assert_eq "$(helper 1 "bs_agent_stop $pid $BS_GRPC_PORT")" stopped \
+		"the agent over $part4096 stops"
+
+	stage teardown "the case's port, loop devices, files and stores go"
+	assert_eq "$(helper 1 bs_teardown)" "torn down" "vm1 after the blocksize case"
 }
 
 # ---------------------------------------------------------------------------

@@ -345,6 +345,14 @@ that an IO never times out: it is the only bound on a write to a disk that
 stalls while its disk node still answers the keep-alives of the connection,
 the messages by which the kernel finds a silent target.
 
+Disks: the disk of a disk node, a whole disk or a partition, has 512-byte
+logical blocks. A disk of another block size, such as 4 KiB, cannot become
+a disk node: the dn agent refuses it, and its error says how to change it,
+with `nvme format` to a 512-byte format, which erases the disk, or with a
+loop device set up by `losetup` without `-b` and without `--direct-io`, or
+with `-b 512`. With direct IO and no `-b`, a loop device takes 4 KiB blocks
+when its file lies on a disk of 4 KiB sectors.
+
 Two settings the tutorial shows: a udev rule that keeps the system's own md
 assembly off dnv arrays, on disk nodes too, since a controller node's md
 superblocks reach their devices through the side exports; and the masked

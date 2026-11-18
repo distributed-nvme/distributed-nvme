@@ -248,7 +248,7 @@ the method set is exactly the following, each taking the caller's ctx:
   "enable" reads of `Nvmet.RemoveNamespace` / `RemoveSubsystem`, the
   attribute reads of `Nvmet.ProbeNamespace` and of
   `Nvmet.ProbePortState`, on which a verdict rests (`dnagent.md` DN16,
-  SH31), `Dm.DiskSize`, and through `Cmd.ReadAttr` the md sysfs reads
+  SH31), `Dm.DiskSizes`, and through `Cmd.ReadAttr` the md sysfs reads
   of `cnagent.md` CN12, among them) from making a live object read as an
   absent one.
 

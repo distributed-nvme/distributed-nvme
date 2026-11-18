@@ -15,12 +15,15 @@ format on a block device, nvmet configfs, nvme-tcp — behaves as `dnagent.md`
 specifies on two lab VMs driven over gRPC from the developer machine,
 exercising every `DiskNodeAgent` RPC and reading the kernel state itself
 beside the agent's report. It proves the happy path: error paths are out of
-scope but for the restart case's stale probe, migr_full's lost source and
-store_full's full local store, and a leftover reply is no exception, being
-an accepted request with residue (`dnagent.md` SH9, DN19).
+scope but for the restart case's stale probe, migr_full's lost source,
+store_full's full local store and blocksize's disks of another block size,
+and a leftover reply is no exception, being an accepted request with residue
+(`dnagent.md` SH9, DN19).
 The cases run in a fixed order, fail-fast — smoke, zeroing, sides, migr_full,
-migr_bitmap, teardown, restart, store_full — each under storage-pool ids of
-its own, and each ends with neither node holding anything of its pool.
+migr_bitmap, teardown, restart, store_full, blocksize — each that builds a
+pool under storage-pool ids of its own, and each ends with neither node
+holding anything of its pool; blocksize builds none, and ends with nothing
+of its own left on its node.
 
 Beside the suite, the Go tests of `agent/dnagent` run a real dn agent inside
 the test process, behind the real server interceptors over an in-memory gRPC
@@ -43,7 +46,9 @@ an OS command that hangs across rounds and past the pass budget
 The developer machine ships the agent over ssh and drives two lab VMs over
 gRPC, never touching the data path. Each VM runs one `dnv-agent dn` as root, a
 disk node of one cluster, on a loop device in the suite's work directory with
-a dedicated local store, one address serving ssh, gRPC and nvmet. No cn agent
+a dedicated local store, one address serving ssh, gRPC and nvmet. The
+blocksize case runs one more on the first VM, with a gRPC port, an nvmet
+port and a local store of its own, over disks of its own (Cases). No cn agent
 runs: the controller nodes are emulated hosts on the two VMs, each connecting
 under its own host NQN with the host id derived from it (`common.NvmeHostId`),
 as a VM holds several host NQNs and the kernel keeps one per host id. A
@@ -382,6 +387,22 @@ refusal (`dnagent.md`, Known limits). Once the pool is torn down, the agent
 goes back to its disk store, holding the last request it accepted. The other
 node takes no part.
 
+**blocksize** proves on real loop devices that a disk node takes a disk of
+512-byte logical blocks alone, and that it reads a partition's block size
+from its disk (`dnagent.md` DN3, DN5, SH17). Its agent runs over one disk
+at a time, each a loop device over a file of its own or a partition of
+one, whose block size and shape the case first reads back from the kernel. Over a loop device of
+4096-byte blocks, `GetDnSize` is refused with an error that names the disk,
+the size and both fixes, and a `SyncupDn` replies the leftover code, its disk
+row in error with the same text and its meta row refusing the format, and
+writes nothing: the head of the disk, where the header and both volume-table
+slots lie, still reads zeros. Over a partition of a loop device of 512-byte
+blocks, `GetDnSize` answers the partition's data area and a `SyncupDn`
+formats it, every row OK; over a partition of a loop device of 4096-byte
+blocks, `GetDnSize` is refused. The case removes its nvmet port, its loop
+devices and their files at its end. A disk formatted at 512 that reads 4096
+later, which converges as it is, is left to the unit tests.
+
 **What a pass means.** Exit status zero and PASS mean every case's assertions
 held in a run that stops at the first failure: data checked against a pattern
 file the agent never sees or against zeros, removals proved by the node's own
@@ -405,7 +426,8 @@ tore all its sides down, an info read's, which shows the side as the last
 converge or read left it and answers even while a converge is wedged. A
 cleanup-only run does the scrub alone. It takes every `dnv-agent` and every
 dnv dm device on the node, of either role, which is why one dnv suite runs at
-a time in the lab (`layout.md`, Directory tree). Each step is best-effort,
+a time in the lab (`layout.md`, Directory tree), and the blocksize case's
+nvmet port and loop devices beside the suite's own. Each step is best-effort,
 and the order is load-bearing on one principle, a holder goes before what it
 holds: the agents
 go first, a graceful stop joining their children (`dnagent.md` SH27) while one
@@ -447,9 +469,10 @@ only reported, a guest's own not being the suite's to fail on.
 
 ## Out of scope
 
-Error paths beyond the stale probe, migr_full's lost source and store_full's
-full local store, the provisioning error rows among them (`dnagent.md` DN9); a
-migration destination that waits for a free run in the clone-metadata area,
+Error paths beyond the stale probe, migr_full's lost source, store_full's
+full local store and blocksize's disks of another block size, the
+provisioning error rows among them (`dnagent.md` DN9); a migration
+destination that waits for a free run in the clone-metadata area,
 and the other states of the destination's shared row rule, whose rows the unit
 tests cover (DN13); the destination's retries of a failed connect within its
 pass, left to the unit tests (DN13); the cn role; fault injection under a live

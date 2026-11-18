@@ -599,45 +599,139 @@ func TestSubsysMtimeAbsentOnlyForMissing(t *testing.T) {
 // The disk's size, read in the agent's own process
 // ---------------------------------------------------------------------------
 
-// TestDiskSizeReadsSysfsInProcess pins the read of a disk's size (dnagent.md
-// SH17): the number of the block device the path names, then the "size"
-// sysfs keeps under that number, which counts 512-byte sectors, both read in
-// the agent's own process on a ctx carrying the SH15 soft timeout, with no
-// command run. Every failure is an error that names what failed: a device
-// that is not there or is not a block device, a read that did not answer, a
-// size file that is not there, a value that is not a number. None of them
-// reads as a size.
-func TestDiskSizeReadsSysfsInProcess(t *testing.T) {
+// TestDiskSizesReadsSysfsInProcess pins the read of a disk's two sizes
+// (dnagent.md SH17): the number of the block device the path names, once,
+// then the "size" sysfs keeps under that number, which counts 512-byte
+// sectors, and its logical block size, all read in the agent's own process
+// on a ctx carrying the SH15 soft timeout, with no command run. A whole
+// disk's block size is in its own queue/; a partition, which its "partition"
+// file marks, has none, and its disk's is read through "..", the path
+// joined as given and never cleaned, since only the kernel's walk of the
+// number's link makes ".." the disk's directory. Every failure is an error
+// that names what failed: a device that is not there or is not a block
+// device, a read that did not answer, a file that is not there, a value
+// that is not a number. None of them reads as a size, and the two reads
+// stand apart: one that fails keeps the other's answer.
+func TestDiskSizesReadsSysfsInProcess(t *testing.T) {
 	const dev = "/dev/disk/by-id/nvme-fake"
-	const sizePath = "/sys/dev/block/259:3/size"
+	const dir = "/sys/dev/block/259:3"
+	const sizePath = dir + "/size"
+	const partPath = dir + "/partition"
+	const diskLbs = dir + "/queue/logical_block_size"
+	const partLbs = dir + "/../queue/logical_block_size"
+	enoent := func(path string) error {
+		return &fs.PathError{Op: "open", Path: path, Err: syscall.ENOENT}
+	}
+	eio := func(path string) error {
+		return &fs.PathError{Op: "read", Path: path, Err: syscall.EIO}
+	}
+	type file struct {
+		text string
+		err  error
+	}
+	// disk512 is a whole disk of 1 GiB at 512-byte blocks: no partition
+	// file, its own queue/.
+	disk512 := func() map[string]file {
+		return map[string]file{
+			sizePath: {text: "2097152\n"},
+			partPath: {err: enoent(partPath)},
+			diskLbs:  {text: "512\n"},
+			partLbs:  {err: enoent(partLbs)},
+		}
+	}
+	// part is a partition of 1 GiB whose disk has lbs-byte blocks: a
+	// partition file, no queue/ of its own.
+	part := func(lbs string) map[string]file {
+		return map[string]file{
+			sizePath: {text: "2097152\n"},
+			partPath: {text: "1\n"},
+			diskLbs:  {err: enoent(diskLbs)},
+			partLbs:  {text: lbs},
+		}
+	}
+	with := func(files map[string]file, path string, f file) map[string]file {
+		files[path] = f
+		return files
+	}
+	diskReads := []string{"read " + sizePath, "read " + partPath,
+		"read " + diskLbs}
+	partReads := []string{"read " + sizePath, "read " + partPath,
+		"read " + partLbs}
 	for _, tc := range []struct {
 		name     string
 		devNo    string
 		devNoErr error
-		size     string
-		sizeErr  error
-		want     uint64
-		// wantErr is a part of the error's text; "" when the read answers.
-		wantErr string
+		files    map[string]file
+		want     DiskSizes
+		// wantReads are the reads after the number's.
+		wantReads []string
+		// wantErr are parts of the error's text; none when the read
+		// answers whole.
+		wantErr []string
 	}{
-		{name: "read", devNo: "259:3", size: "2097152\n", want: 1 << 30},
+		{name: "a disk", devNo: "259:3", files: disk512(),
+			want:      DiskSizes{Bytes: 1 << 30, LogicalBlock: 512},
+			wantReads: diskReads},
+		{name: "a disk of 4 KiB blocks", devNo: "259:3",
+			files:     with(disk512(), diskLbs, file{text: "4096\n"}),
+			want:      DiskSizes{Bytes: 1 << 30, LogicalBlock: 4096},
+			wantReads: diskReads},
+		{name: "a partition, through its disk", devNo: "259:3",
+			files:     part("512\n"),
+			want:      DiskSizes{Bytes: 1 << 30, LogicalBlock: 512},
+			wantReads: partReads},
+		{name: "a partition of a disk of 4 KiB blocks", devNo: "259:3",
+			files:     part("4096\n"),
+			want:      DiskSizes{Bytes: 1 << 30, LogicalBlock: 4096},
+			wantReads: partReads},
 		{name: "no device there", devNoErr: &fs.PathError{
 			Op: "stat", Path: dev, Err: syscall.ENOENT},
-			wantErr: "device number of " + dev},
+			wantErr: []string{"device number of " + dev}},
 		{name: "not a block device", devNoErr: &fs.PathError{
 			Op: "stat", Path: dev, Err: syscall.ENOTBLK},
-			wantErr: "device number of " + dev},
+			wantErr: []string{"device number of " + dev}},
 		{name: "the number read cut off", devNoErr: context.DeadlineExceeded,
-			wantErr: "device number of " + dev},
-		{name: "no size file", devNo: "259:3", sizeErr: &fs.PathError{
-			Op: "open", Path: sizePath, Err: syscall.ENOENT},
-			wantErr: dev + " (259:3) is not there"},
+			wantErr: []string{"device number of " + dev}},
+		{name: "no size file", devNo: "259:3",
+			files:     with(disk512(), sizePath, file{err: enoent(sizePath)}),
+			want:      DiskSizes{LogicalBlock: 512},
+			wantReads: diskReads,
+			wantErr:   []string{dev + " (259:3) is not there"}},
 		{name: "the size read failed", devNo: "259:3",
-			sizeErr: &fs.PathError{
-				Op: "read", Path: sizePath, Err: syscall.EIO},
-			wantErr: "read " + sizePath},
-		{name: "not a number", devNo: "259:3", size: "lots\n",
-			wantErr: sizePath + ` reads "lots"`},
+			files:     with(disk512(), sizePath, file{err: eio(sizePath)}),
+			want:      DiskSizes{LogicalBlock: 512},
+			wantReads: diskReads,
+			wantErr:   []string{"read " + sizePath}},
+		{name: "a size that is not a number", devNo: "259:3",
+			files:     with(disk512(), sizePath, file{text: "lots\n"}),
+			want:      DiskSizes{LogicalBlock: 512},
+			wantReads: diskReads,
+			wantErr:   []string{sizePath + ` reads "lots"`}},
+		{name: "the partition read failed", devNo: "259:3",
+			files:     with(disk512(), partPath, file{err: eio(partPath)}),
+			want:      DiskSizes{Bytes: 1 << 30},
+			wantReads: diskReads[:2],
+			wantErr:   []string{"read " + partPath}},
+		{name: "no block size file", devNo: "259:3",
+			files:     with(disk512(), diskLbs, file{err: enoent(diskLbs)}),
+			want:      DiskSizes{Bytes: 1 << 30},
+			wantReads: diskReads,
+			wantErr:   []string{dev + " (259:3) has no " + diskLbs}},
+		{name: "the block size read failed", devNo: "259:3",
+			files:     with(part("512\n"), partLbs, file{err: eio(partLbs)}),
+			want:      DiskSizes{Bytes: 1 << 30},
+			wantReads: partReads,
+			wantErr:   []string{"read " + partLbs}},
+		{name: "a block size of 0", devNo: "259:3",
+			files:     with(disk512(), diskLbs, file{text: "0\n"}),
+			want:      DiskSizes{Bytes: 1 << 30},
+			wantReads: diskReads,
+			wantErr:   []string{diskLbs + ` reads "0"`}},
+		{name: "both reads failed", devNo: "259:3",
+			files: with(with(disk512(), sizePath, file{err: eio(sizePath)}),
+				diskLbs, file{err: eio(diskLbs)}),
+			wantReads: diskReads,
+			wantErr:   []string{"read " + sizePath, "read " + diskLbs}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			var reads []string
@@ -667,35 +761,42 @@ func TestDiskSizeReadsSysfsInProcess(t *testing.T) {
 					ctx context.Context, path string,
 				) (string, error) {
 					reads = append(reads, "read "+path)
-					bounded(ctx, "the size read")
-					return tc.size, tc.sizeErr
+					bounded(ctx, "the read of "+path)
+					f, ok := tc.files[path]
+					if !ok {
+						t.Errorf("read %s, a path no kernel lays out", path)
+						return "", enoent(path)
+					}
+					return f.text, f.err
 				},
 			}
-			size, err := NewDm(oc).DiskSize(context.Background(), dev)
-			wantReads := []string{"devno " + dev}
-			if tc.devNoErr == nil {
-				wantReads = append(wantReads, "read "+sizePath)
-			}
+			sizes, err := NewDm(oc).DiskSizes(context.Background(), dev)
+			wantReads := append([]string{"devno " + dev}, tc.wantReads...)
 			if strings.Join(reads, "; ") != strings.Join(wantReads, "; ") {
 				t.Errorf("reads = %q, want %q", reads, wantReads)
 			}
-			if tc.wantErr == "" {
-				if err != nil || size != tc.want {
-					t.Fatalf("DiskSize = (%d, %v), want (%d, nil)", size,
-						err, tc.want)
+			if sizes != tc.want {
+				t.Errorf("DiskSizes = %+v, want %+v", sizes, tc.want)
+			}
+			if len(tc.wantErr) == 0 {
+				if err != nil {
+					t.Fatalf("DiskSizes: %v", err)
 				}
 				return
 			}
 			if err == nil {
-				t.Fatalf("a failed read gave the size %d", size)
+				t.Fatalf("a failed read gave no error, and %+v", sizes)
 			}
-			if size != 0 {
-				t.Errorf("a failed read came back with the size %d", size)
+			for _, part := range tc.wantErr {
+				if !strings.Contains(err.Error(), part) {
+					t.Errorf("error %q does not say %q", err, part)
+				}
 			}
-			if !strings.Contains(err.Error(), tc.wantErr) {
-				t.Errorf("error %q does not say %q", err, tc.wantErr)
+			causes := []error{tc.devNoErr}
+			for _, f := range tc.files {
+				causes = append(causes, f.err)
 			}
-			for _, cause := range []error{tc.devNoErr, tc.sizeErr} {
+			for _, cause := range causes {
 				if cause != nil && !errors.Is(err, cause) &&
 					!errors.Is(cause, fs.ErrNotExist) {
 					t.Errorf("error %q does not carry the read's own %v",
