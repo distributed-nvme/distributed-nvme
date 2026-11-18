@@ -113,7 +113,8 @@ func (a *Agent) obsStamp(obs time.Time, traceId string, answer time.Time) *pb.Ob
 // fake gave of the object, repeats that one whole — its time, trace id,
 // code, revision and *Info — and spends no leftover round, since the agent
 // read nothing. Every other answer is a new observation made now, and a
-// later repeat repeats it.
+// later repeat repeats it. A round of an object whose read leftover is set
+// answers as an agent's round does instead (readRoundLocked).
 func (a *Agent) readLocked(
 	key string, listed, round bool, traceId string,
 	info func(known bool) proto.Message,
@@ -137,6 +138,9 @@ func (a *Agent) readLocked(
 	if known && ob != nil {
 		if ob.ObsNone {
 			return answer{stamp: a.obsStamp(time.Time{}, "", now), noObs: true}
+		}
+		if round && ob.ReadLeftover != 0 {
+			return a.readRoundLocked(key, traceId, now, info)
 		}
 		if ob.ObsAge > 0 {
 			obsAt = now.Add(-ob.ObsAge)
@@ -171,6 +175,69 @@ func (a *Agent) readLocked(
 	return ans
 }
 
+// pendingRead is the read an object's round started under the read leftover
+// (Object.ReadLeftover): it ended at once, at at, under the round's trace
+// id, with what its observation carries.
+type pendingRead struct {
+	at      time.Time
+	traceId string
+	ans     answer
+}
+
+// readRoundLocked answers one Check round of an object whose read leftover
+// is set as an agent's round does (dnagent.md SH29, SH30): the read the
+// object's last round started, unless an accepted Syncup* cancelled it,
+// becomes the latest observation; the round answers from the latest
+// observation, repeating it whole; and the round starts a read of its own,
+// which ends at once and which the next round answers from. An object with
+// no observation yet is read at once, and the round answers from that read.
+func (a *Agent) readRoundLocked(
+	key, traceId string, now time.Time, info func(known bool) proto.Message,
+) answer {
+	if rd := a.reads[key]; rd != nil {
+		delete(a.reads, key)
+		a.observeLocked(key, rd.traceId, rd.at, time.Time{}, &rd.ans)
+	}
+	var ans answer
+	if last := a.observed[key]; last != nil {
+		ans = answer{
+			code:     last.code,
+			details:  last.details,
+			revision: last.revision,
+			info:     last.info,
+			stamp:    a.obsStamp(last.time, last.traceId, now),
+		}
+	} else {
+		ans = a.readAnswerLocked(key, info)
+		obs := a.observeLocked(key, traceId, now, time.Time{}, &ans)
+		ans.stamp = a.obsStamp(obs, traceId, now)
+	}
+	a.reads[key] = &pendingRead{
+		at: now, traceId: traceId, ans: a.readAnswerLocked(key, info),
+	}
+	return ans
+}
+
+// readAnswerLocked is what one read of an object under the read leftover
+// finds: a forced reply_code, or ReplyCodeLeftover while the leftover has
+// re-sends left, or code zero; the stored revision; and the *Info, with the
+// read rows applied while the leftover stands.
+func (a *Agent) readAnswerLocked(
+	key string, info func(known bool) proto.Message,
+) answer {
+	ans := answer{revision: a.revisionLocked(key)}
+	switch {
+	case a.forcedCodeLocked(key) != 0:
+		ans.code, ans.details = a.forcedCodeLocked(key), detailsForcedCode
+	case a.readLeft[key] != 0:
+		ans.code, ans.details = common.ReplyCodeLeftover, detailsReadLeftover
+	}
+	a.readingKey = key
+	ans.info = info(true)
+	a.readingKey = ""
+	return ans
+}
+
 // syncupStampLocked is the stamp of a Syncup* reply under ctx's trace id,
 // with the save time: saved is whether the call saved the request, and the
 // save time it returns is when, unset otherwise. A reply whose code refuses
@@ -192,6 +259,15 @@ func (a *Agent) syncupStampLocked(
 	var saveAt time.Time
 	if saved {
 		saveAt = now
+	}
+	if ob := a.objLocked(key); ob != nil && ob.ReadLeftover != 0 {
+		// The converge cancels the read the round before it started
+		// (dnagent.md SH30), and one that applied its request spends one of
+		// the read leftover's re-sends.
+		delete(a.reads, key)
+		if saved && a.readLeft[key] != 0 {
+			a.readLeft[key]--
+		}
 	}
 	traceId := callTraceId(ctx)
 	obs := a.observeLocked(key, traceId, now, saveAt, &answer{
@@ -240,7 +316,10 @@ func (a *Agent) startingErrLocked(keys ...string) error {
 const (
 	detailsForcedCode = "behavior.json reply_code"
 	detailsLeftover   = "behavior.json leftover_rounds"
-	detailsStarting   = "starting"
+	// detailsReadLeftover is the details of a read that names the read
+	// leftover.
+	detailsReadLeftover = "behavior.json read_leftover"
+	detailsStarting     = "starting"
 )
 
 func agentReply(code uint32, details string) *pb.AgentReply {

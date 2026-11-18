@@ -295,9 +295,9 @@ func TestRedundNoneNeedsNoBitmapChunkCount(t *testing.T) {
 	}
 }
 
-// TestConvergeCntlrRefusesAZeroConfMember covers convergeCntlr's own gate —
-// the entrances that do not come through syncupCntlr: the startup Reconcile,
-// and reconvergeCntlr, which both background retries re-enter through.
+// TestConvergeCntlrRefusesAZeroConfMember covers convergeCntlr's own gate,
+// for the entrance that does not come through syncupCntlr: the startup
+// Reconcile.
 func TestConvergeCntlrRefusesAZeroConfMember(t *testing.T) {
 	// The startup Reconcile: the persisted file holds the zero, and the
 	// converge must skip it exactly as syncupCntlr would.
@@ -358,38 +358,6 @@ func TestConvergeCntlrRefusesAZeroConfMember(t *testing.T) {
 				len(st.probers))
 		}
 		assertRefusalRecord(t, capture, msgNoBlockSize)
-	})
-
-	// The CN10/CN18 connect-retry loop re-enters with the request it already
-	// holds. Here the cntlr has already been converged once, so "left alone"
-	// is a real claim: the gate returns before newCntlrPlan, and the sweep
-	// that would otherwise run never enumerates anything.
-	t.Run("connect retry", func(t *testing.T) {
-		srv, node := newTestServer(t)
-		capture := captureLogs(t)
-		syncupBoth(t, srv, reqOpts{revision: 2, primary: true})
-		key := cntlrKey(testCluster, testCn, testSp, testCntlr)
-		st := srv.getCntlr(key)
-		if st == nil {
-			t.Fatalf("the fixture converge left no cntlr state")
-		}
-		reqBefore := st.loadReq()
-		// What a Reconcile-loaded zero, or a request the agent kept across a
-		// downgrade, leaves in the state the retry loop re-enters with.
-		st.storeReq(zeroConfReq(reqOpts{revision: 2, primary: true},
-			func(conf *pb.BdevConf) { conf.DmPoolConf.LowWaterMarkPct = 0 }))
-		node.Reset()
-
-		srv.reconvergeCntlr(context.Background(), key, st)
-
-		if mutations := node.Mutations(); len(mutations) != 0 {
-			t.Fatalf("a refused reconverge mutated:\n%s",
-				strings.Join(mutations, "\n"))
-		}
-		if st.loadReq() == reqBefore {
-			t.Fatalf("the fixture did not install the zeroed request")
-		}
-		assertRefusalRecord(t, capture, msgNoWaterMark)
 	})
 }
 

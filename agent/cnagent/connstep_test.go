@@ -86,6 +86,24 @@ func connectsTo(node *fakeNode, nqn, addr, svcId string) int {
 	return n
 }
 
+// noCtrlItem is one item of a verdict that names a side, or a clone source
+// endpoint, with no controller: noCtrlName as a verdict lists it.
+func noCtrlItem(nqn, addr, svcId string) string {
+	return "enumeration failed: " + noCtrlName(nqn, addr, svcId)
+}
+
+// connectsUnder counts the recorded `nvme connect`s of nqn that ran under
+// traceId.
+func connectsUnder(node *fakeNode, traceId, nqn string) int {
+	n := 0
+	for _, call := range tracedCalls(node, traceId, "cmd nvme connect ") {
+		if strings.Contains(call, "--nqn "+nqn+" ") {
+			n++
+		}
+	}
+	return n
+}
+
 // errorRows names every RES_STATUS_ERROR row of one reply: the rows that
 // would stamp a primary's err_epoch, or — in the leg map — a leg's.
 func errorRows(info *pb.CntlrInfo) []string {
@@ -152,13 +170,12 @@ func syncupGrow(
 
 // TestConnectRetriedWithinThePass pins the in-pass connect retry: a side whose
 // disk node refuses the first connects — its export not linked into the port
-// yet — is connected by the SAME pass, so the first reply is clean and no
-// background retry is registered. Without it a grow's first report would
+// yet — is connected by the SAME pass, so the first reply is clean and the
+// read after it names nothing (CN30). Without it a grow's first report would
 // carry "pool concat missing" and stamp a settled primary's err_epoch.
 func TestConnectRetriedWithinThePass(t *testing.T) {
 	t.Run("standby leg", func(t *testing.T) {
 		srv, node := newTestServer(t)
-		srv.retryInterval = time.Hour
 		clock := withPassClock(srv, node)
 		nqn := legNqn(srv, testDataLeg)
 		failConnects(node, nqn, testIp, testSvcId, 2)
@@ -176,13 +193,11 @@ func TestConnectRetriedWithinThePass(t *testing.T) {
 			t.Fatalf("the pass waited %v, want the two retry pauses %v",
 				got, want)
 		}
-		if retrying(t, srv) {
-			t.Fatalf("a leg the pass connected registered the retry")
-		}
+		assertRowVerdict(t, rowRound(t, srv, 2).GetAgentReply(),
+			"the read after a leg the pass connected")
 	})
 	t.Run("primary grow", func(t *testing.T) {
 		srv, node := newTestServer(t)
-		srv.retryInterval = time.Hour
 		withPassClock(srv, node)
 		nqn := legNqn(srv, testDataLeg2)
 		reply := syncupGrow(t, srv, node, func() {
@@ -198,9 +213,8 @@ func TestConnectRetriedWithinThePass(t *testing.T) {
 		if got := connectsTo(node, nqn, testIp2, testSvcId2); got != 2 {
 			t.Fatalf("%d connects to the grown leg, want 2", got)
 		}
-		if retrying(t, srv) {
-			t.Fatalf("the grow registered the retry")
-		}
+		assertRowVerdict(t, rowRound(t, srv, 3).GetAgentReply(),
+			"the read after the grow")
 	})
 }
 
@@ -218,7 +232,6 @@ func TestNsHeadAwaitedAfterConnect(t *testing.T) {
 	for _, n := range []int{2, 3} {
 		t.Run(fmt.Sprintf("standby, head on read %d", n), func(t *testing.T) {
 			srv, node := newTestServer(t)
-			srv.retryInterval = time.Hour
 			clock := withPassClock(srv, node)
 			deferNsHead(node, legNqn(srv, testDataLeg), n)
 			cnSyncup(t, srv, 2, true)
@@ -235,9 +248,6 @@ func TestNsHeadAwaitedAfterConnect(t *testing.T) {
 
 			assertOk(t, reply.GetCntlrInfo().GetLegIdToLeg()[testDataLeg],
 				"standby leg data")
-			if retrying(t, srv) {
-				t.Fatalf("a head that appeared registered the retry")
-			}
 			want := time.Duration(n-1) * common.CnNsScanPause
 			if got := clock.Now().Sub(start); got != want {
 				t.Fatalf("the pass waited %v, want %d scan pause(s), %v",
@@ -249,11 +259,12 @@ func TestNsHeadAwaitedAfterConnect(t *testing.T) {
 					"its start and after each of its two connect steps",
 					sysfsNvmeSubsysDir, got)
 			}
+			assertRowVerdict(t, rowRound(t, srv, 2).GetAgentReply(),
+				"the read after a head that appeared")
 		})
 	}
 	t.Run("primary grow, head on read 3", func(t *testing.T) {
 		srv, node := newTestServer(t)
-		srv.retryInterval = time.Hour
 		withPassClock(srv, node)
 		reply := syncupGrow(t, srv, node, func() {
 			deferNsHead(node, legNqn(srv, testDataLeg2), 3)
@@ -264,13 +275,12 @@ func TestNsHeadAwaitedAfterConnect(t *testing.T) {
 		}
 		assertOk(t, info.GetGrpIdToMdRaid()[testDataGrp2], "grown group")
 		assertOk(t, info.GetSliceIdToDmPool()[testSlice], "pool")
-		if retrying(t, srv) {
-			t.Fatalf("the grow registered the retry")
-		}
 		if got := walks(node); got != 2 {
 			t.Fatalf("the grow listed %s %d times, want 2: at its start and "+
 				"after its one connect step", sysfsNvmeSubsysDir, got)
 		}
+		assertRowVerdict(t, rowRound(t, srv, 3).GetAgentReply(),
+			"the read after the grow")
 	})
 }
 
@@ -320,8 +330,8 @@ const neverInThePass = 1 << 20
 // the last step, is listed beside it. Here the /sys/block entry and the ng
 // device come three listings after the head: the pass takes three short
 // pauses, never a scan pause, reads the head's number once, after the head
-// is complete, and builds the leg, so the reply is clean and no background
-// retry is registered. A wait that ended at the first listing that picks the
+// is complete, and builds the leg, so the reply is clean and the read after
+// it names nothing (CN30). A wait that ended at the first listing that picks the
 // head would read the number before the kernel made it and fail the leg with
 // "block device … is not there": in a grow of a running pool its group then
 // cannot be made and the pool rows read ERROR, which stamp the primary's
@@ -331,7 +341,6 @@ func TestLegBuiltOnceItsHeadIsComplete(t *testing.T) {
 	const shortPauses = 3
 	t.Run("standby, first build", func(t *testing.T) {
 		srv, node := newTestServer(t)
-		srv.retryInterval = time.Hour
 		clock := withPassClock(srv, node)
 		nqn := legNqn(srv, testDataLeg)
 		stageNsHead(node, nqn, late)
@@ -343,9 +352,6 @@ func TestLegBuiltOnceItsHeadIsComplete(t *testing.T) {
 			t.Fatalf("the first reply carries ERROR rows %v", rows)
 		}
 		assertOk(t, info.GetLegIdToLeg()[testDataLeg], "standby leg data")
-		if retrying(t, srv) {
-			t.Fatalf("a head that completed in the pass registered the retry")
-		}
 		if got, want := clock.Now().Sub(start),
 			shortPauses*common.CnNsHeadPause; got != want {
 			t.Fatalf("the pass waited %v, want %d short pauses, %v",
@@ -356,10 +362,11 @@ func TestLegBuiltOnceItsHeadIsComplete(t *testing.T) {
 			t.Fatalf("the pass read %s's number %d times, want once",
 				head, got)
 		}
+		assertRowVerdict(t, rowRound(t, srv, 2).GetAgentReply(),
+			"the read after a head that completed in the pass")
 	})
 	t.Run("primary grow", func(t *testing.T) {
 		srv, node := newTestServer(t)
-		srv.retryInterval = time.Hour
 		clock := withPassClock(srv, node)
 		nqn := legNqn(srv, testDataLeg2)
 		var start time.Time
@@ -374,9 +381,6 @@ func TestLegBuiltOnceItsHeadIsComplete(t *testing.T) {
 		assertOk(t, info.GetGrpIdToMdRaid()[testDataGrp2], "grown group")
 		assertOk(t, info.GetSliceIdToData()[testSlice], "pool data concat")
 		assertOk(t, info.GetSliceIdToDmPool()[testSlice], "pool")
-		if retrying(t, srv) {
-			t.Fatalf("the grow registered the retry")
-		}
 		if got, want := clock.Now().Sub(start),
 			shortPauses*common.CnNsHeadPause; got != want {
 			t.Fatalf("the grow waited %v, want %d short pauses, %v",
@@ -387,6 +391,8 @@ func TestLegBuiltOnceItsHeadIsComplete(t *testing.T) {
 			t.Fatalf("the grow read %s's number %d times, want once",
 				head, got)
 		}
+		assertRowVerdict(t, rowRound(t, srv, 3).GetAgentReply(),
+			"the read after the grow")
 	})
 }
 
@@ -400,7 +406,6 @@ func TestLegBuiltOnceItsHeadIsComplete(t *testing.T) {
 // the head alone, would take no pause and read the number at once.
 func TestHeadWaitWaitsForTheNgDevice(t *testing.T) {
 	srv, node := newTestServer(t)
-	srv.retryInterval = time.Hour
 	clock := withPassClock(srv, node)
 	nqn := legNqn(srv, testDataLeg)
 	stageNsHead(node, nqn, headStages{dir: 1, nsid: 1, block: 1, ng: 2})
@@ -409,9 +414,6 @@ func TestHeadWaitWaitsForTheNgDevice(t *testing.T) {
 
 	assertOk(t, reply.GetCntlrInfo().GetLegIdToLeg()[testDataLeg],
 		"standby leg data")
-	if retrying(t, srv) {
-		t.Fatalf("a head that completed in the pass registered the retry")
-	}
 	if got, want := clock.Now().Sub(start), common.CnNsHeadPause; got != want {
 		t.Fatalf("the pass waited %v, want one short pause, %v", got, want)
 	}
@@ -433,18 +435,18 @@ func TestHeadWaitWaitsForTheNgDevice(t *testing.T) {
 	if got := numberReads(node, head); got != 1 {
 		t.Fatalf("the pass read %s's number %d times, want once", head, got)
 	}
+	assertRowVerdict(t, rowRound(t, srv, 2).GetAgentReply(),
+		"the read after a head that completed in the pass")
 }
 
 // TestCloneSourceWaitsForACompleteHead pins CN18's use of the same head
 // wait: a clone source the pass connected whose /sys/block entry and ng
 // device come three listings after its head is waited for with three short
 // pauses, and the clone builds on the first reply, reading the source's
-// number once, with no background retry, and the read after it names
-// nothing (CN30). A wait that ended at the first listing that picks the head
+// number once, and the read after it names nothing (CN30). A wait that ended at the first listing that picks the head
 // would leave the dm-clone's number read to fail.
 func TestCloneSourceWaitsForACompleteHead(t *testing.T) {
 	srv, node := newTestServer(t)
-	srv.retryInterval = time.Hour
 	clock := withPassClock(srv, node)
 	syncupBoth(t, srv, reqOpts{revision: 2, primary: true})
 	stageNsHead(node, testSrcNqn, headStages{dir: 1, nsid: 1, block: 4, ng: 4})
@@ -462,10 +464,6 @@ func TestCloneSourceWaitsForACompleteHead(t *testing.T) {
 	}
 	assertOk(t, info.GetCloneIdToTarget()[testClone], "clone target")
 	assertOk(t, info.GetCloneIdToDmClone()[testClone], "dm-clone")
-	if retrying(t, srv) {
-		t.Fatalf("a source whose head completed in the pass registered the " +
-			"retry")
-	}
 	if got, want := clock.Now().Sub(start),
 		3*common.CnNsHeadPause; got != want {
 		t.Fatalf("the pass waited %v, want three short pauses, %v", got, want)
@@ -488,12 +486,15 @@ func TestCloneSourceWaitsForACompleteHead(t *testing.T) {
 // takes the two short pauses the budget covers, writes msgHeadWaitSpent
 // naming the subsystem, the head and those pauses, and the pass reads the
 // number, which is not there yet. The leg fails with that read's own error,
-// as without the wait, and registers the background retry, whose pass
-// builds the leg once the kernel has finished the head.
+// as without the wait. A read names nothing while the head's number is not
+// there, since a converge fails the leg the same way; once the kernel has
+// finished the head, a read names the leg's wrapper (wrapperName, CN30),
+// the one SyncupCntlr the worker re-sends on that round (dnv-worker.md RW4)
+// creates it under the round's trace id, and the read after it names
+// nothing.
 func TestHeadWaitStopsWhenTheBudgetIsSpent(t *testing.T) {
 	capture := captureLogs(t)
 	srv, node := newTestServer(t)
-	srv.retryInterval = time.Hour
 	withPassClock(srv, node)
 	metaNqn := legNqn(srv, testMetaLeg)
 	dataNqn := legNqn(srv, testDataLeg)
@@ -511,9 +512,6 @@ func TestHeadWaitStopsWhenTheBudgetIsSpent(t *testing.T) {
 		"leg meta, connected on its second attempt")
 	assertErrorDetails(t, info.GetLegIdToLeg()[testDataLeg],
 		"block device "+head+" is not there", "leg data")
-	if !retrying(t, srv) {
-		t.Fatalf("a leg whose head was not complete registered no retry")
-	}
 	recs := capture.msgRecords(t, msgHeadWaitSpent)
 	if len(recs) != 1 {
 		t.Fatalf("%d %q records, want 1: %v", len(recs), msgHeadWaitSpent,
@@ -527,15 +525,27 @@ func TestHeadWaitStopsWhenTheBudgetIsSpent(t *testing.T) {
 			"and no scan pause", rec, dataNqn, head)
 	}
 
+	held := cntlrReq(reqOpts{revision: 2})
+	wrapper := legName(srv, testDataLeg)
+	assertRowVerdict(t, rowRound(t, srv, 2).GetAgentReply(),
+		"the read while the head is not complete")
 	finishNsHead(t, node, dataNqn)
 	node.Reset()
-	retryAttempt(t, srv)
-	assertOk(t, probedCntlrInfo(t, srv).GetLegIdToLeg()[testDataLeg],
-		"leg data, built by the retry's pass")
-	if retrying(t, srv) {
-		t.Fatalf("the retry's pass built the leg and left the retry " +
-			"registered")
+	round, resent := resendRound(t, srv, held, "head-done")
+	assertRowVerdict(t, round.GetAgentReply(), "the read once the head is "+
+		"complete", rowNamed(wrapper, "absent"))
+	if resent == nil {
+		t.Fatalf("the round that names the wrapper brought no re-send")
 	}
+	if got := tracedCalls(node, "head-done", "cmd dmsetup create "+
+		wrapper); len(got) != 1 {
+		t.Fatalf("the re-send under the round's trace id created the "+
+			"wrapper %d times, want once", len(got))
+	}
+	assertOk(t, resent.GetCntlrInfo().GetLegIdToLeg()[testDataLeg],
+		"leg data, built by the re-send")
+	assertRowVerdict(t, rowRound(t, srv, 2).GetAgentReply(),
+		"the read after the re-send")
 }
 
 // TestHeadWaitSpentBeforeAnyHeadIsListed pins the record of the kept case
@@ -545,11 +555,13 @@ func TestHeadWaitStopsWhenTheBudgetIsSpent(t *testing.T) {
 // the data leg's subsystem lists no head in the pass. The wait takes the two
 // scan pauses the budget covers, writes msgHeadWaitSpent with an empty head,
 // two scan pauses and no short one, and the leg fails with "no multipath
-// namespace", as without the wait, registering the background retry.
+// namespace", as without the wait. A read names nothing while no head is
+// listed, since a converge fails the leg the same way; once the head is
+// there, a read names the leg's wrapper (wrapperName, CN30), the re-send on
+// that round creates it, and the read after it names nothing.
 func TestHeadWaitSpentBeforeAnyHeadIsListed(t *testing.T) {
 	capture := captureLogs(t)
 	srv, node := newTestServer(t)
-	srv.retryInterval = time.Hour
 	withPassClock(srv, node)
 	metaNqn := legNqn(srv, testMetaLeg)
 	dataNqn := legNqn(srv, testDataLeg)
@@ -566,9 +578,6 @@ func TestHeadWaitSpentBeforeAnyHeadIsListed(t *testing.T) {
 		"leg meta, connected on its second attempt")
 	assertErrorDetails(t, info.GetLegIdToLeg()[testDataLeg],
 		"no multipath namespace", "leg data")
-	if !retrying(t, srv) {
-		t.Fatalf("a leg with no head registered no retry")
-	}
 	recs := capture.msgRecords(t, msgHeadWaitSpent)
 	if len(recs) != 1 {
 		t.Fatalf("%d %q records, want 1: %v", len(recs), msgHeadWaitSpent,
@@ -581,6 +590,23 @@ func TestHeadWaitSpentBeforeAnyHeadIsListed(t *testing.T) {
 		t.Fatalf("record %v, want WARN naming %s, no head, 2 scan pauses "+
 			"and no short pause", rec, dataNqn)
 	}
+
+	held := cntlrReq(reqOpts{revision: 2})
+	wrapper := legName(srv, testDataLeg)
+	assertRowVerdict(t, rowRound(t, srv, 2).GetAgentReply(),
+		"the read while no head is listed")
+	finishNsHead(t, node, dataNqn)
+	node.Reset()
+	round, resent := resendRound(t, srv, held, "head-listed")
+	assertRowVerdict(t, round.GetAgentReply(), "the read once the head is "+
+		"listed", rowNamed(wrapper, "absent"))
+	if resent == nil {
+		t.Fatalf("the round that names the wrapper brought no re-send")
+	}
+	assertOk(t, resent.GetCntlrInfo().GetLegIdToLeg()[testDataLeg],
+		"leg data, built by the re-send")
+	assertRowVerdict(t, rowRound(t, srv, 2).GetAgentReply(),
+		"the read after the re-send")
 }
 
 // TestHeadWaitEndedByItsCallerIsNotRecorded pins the other edge of the
@@ -593,7 +619,6 @@ func TestHeadWaitSpentBeforeAnyHeadIsListed(t *testing.T) {
 func TestHeadWaitEndedByItsCallerIsNotRecorded(t *testing.T) {
 	capture := captureLogs(t)
 	srv, node := newTestServer(t)
-	srv.retryInterval = time.Hour
 	withPassClock(srv, node)
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -634,7 +659,6 @@ func TestHeadWaitEndedByItsCallerIsNotRecorded(t *testing.T) {
 // nsid, here complete on the third listing, and the pass builds the leg.
 func TestHeadListedBeforeItsNsid(t *testing.T) {
 	srv, node := newTestServer(t)
-	srv.retryInterval = time.Hour
 	clock := withPassClock(srv, node)
 	nqn := legNqn(srv, testDataLeg)
 	stageNsHead(node, nqn, headStages{dir: 1, nsid: 3, block: 3, ng: 3})
@@ -643,23 +667,24 @@ func TestHeadListedBeforeItsNsid(t *testing.T) {
 
 	assertOk(t, reply.GetCntlrInfo().GetLegIdToLeg()[testDataLeg],
 		"standby leg data")
-	if retrying(t, srv) {
-		t.Fatalf("a head that completed in the pass registered the retry")
-	}
 	if got, want := clock.Now().Sub(start),
 		2*common.CnNsScanPause; got != want {
 		t.Fatalf("the pass waited %v, want two scan pauses, %v", got, want)
 	}
+	assertRowVerdict(t, rowRound(t, srv, 2).GetAgentReply(),
+		"the read after a head that completed in the pass")
 }
 
 // TestSlowFailedConnectIsNotRetried pins the charge of a failed connect's own
 // elapsed time. A connect to a disk node whose VM is down takes about 3 s (the
 // kernel's SYN retries, or CmdSoftTimeout) and spends the whole
 // CnConnectPassBudget at once, so the pass does NOT try it again: the leg
-// fails on its first attempt, and the background retry takes over.
+// fails on its first attempt. A read names the side with no controller
+// (sidesToConnect, CN30), and once the disk node answers, the one
+// SyncupCntlr the worker re-sends on that round (dnv-worker.md RW4) connects
+// it once, under the round's trace id; the read after it names nothing.
 func TestSlowFailedConnectIsNotRetried(t *testing.T) {
 	srv, node := newTestServer(t)
-	srv.retryInterval = time.Hour
 	clock := withPassClock(srv, node)
 	nqn := legNqn(srv, testDataLeg)
 	failConnects(node, nqn, testIp, testSvcId, 1000)
@@ -675,14 +700,30 @@ func TestSlowFailedConnectIsNotRetried(t *testing.T) {
 	}
 	assertErrorDetails(t, reply.GetCntlrInfo().GetLegIdToLeg()[testDataLeg],
 		"connection refused", "leg data")
-	if !retrying(t, srv) {
-		t.Fatalf("a leg that did not connect registered no retry")
-	}
 	if got, want := clock.Now().Sub(start),
 		common.CmdSoftTimeout*time.Second; got != want {
 		t.Fatalf("the pass took %v, want the one connect's %v and no pause",
 			got, want)
 	}
+
+	held := cntlrReq(reqOpts{revision: 2})
+	failConnects(node, nqn, testIp, testSvcId, 0)
+	slowConnects(node, nqn, testIp, testSvcId, 0)
+	node.Reset()
+	round, resent := resendRound(t, srv, held, "node-back")
+	assertRowVerdict(t, round.GetAgentReply(), "the read of the leg that "+
+		"did not connect", noCtrlItem(nqn, testIp, testSvcId))
+	if resent == nil {
+		t.Fatalf("the round that names the side brought no re-send")
+	}
+	if got := connectsUnder(node, "node-back", nqn); got != 1 {
+		t.Fatalf("the re-send made %d connects of the side under the "+
+			"round's id, want 1", got)
+	}
+	assertOk(t, resent.GetCntlrInfo().GetLegIdToLeg()[testDataLeg],
+		"leg data, connected by the re-send")
+	assertRowVerdict(t, rowRound(t, srv, 2).GetAgentReply(),
+		"the read after the re-send")
 }
 
 // TestPassBudgetSharedByEveryLeg pins the ONE budget per pass: the meta leg
@@ -690,10 +731,13 @@ func TestSlowFailedConnectIsNotRetried(t *testing.T) {
 // retries, so the data leg's failed connect gets no retry at all — although a
 // retry would have succeeded. A budget per leg would multiply what a pass with
 // several failing sides costs under the object lock the cntlr's reads need.
-// The next pass is a new budget: a retry attempt retries again.
+// A read names both legs' sides with no controller (CN30), and the converge
+// the worker's re-send on that round brings (dnv-worker.md RW4) is a pass of
+// its own, with a budget of its own: the data leg connects on its first
+// try, and the meta leg gets its eleven attempts again rather than none, so
+// the read after it names the meta leg's side alone.
 func TestPassBudgetSharedByEveryLeg(t *testing.T) {
 	srv, node := newTestServer(t)
-	srv.retryInterval = time.Hour
 	withPassClock(srv, node)
 	metaNqn := legNqn(srv, testMetaLeg)
 	dataNqn := legNqn(srv, testDataLeg)
@@ -714,23 +758,28 @@ func TestPassBudgetSharedByEveryLeg(t *testing.T) {
 		"connection refused", "leg meta")
 	assertErrorDetails(t, info.GetLegIdToLeg()[testDataLeg],
 		"connection refused", "leg data")
-	if !retrying(t, srv) {
-		t.Fatalf("legs that did not connect registered no retry")
-	}
 
-	// A background retry attempt is a pass of its own, with a budget of its
-	// own: the data leg connects on its first try, and the meta leg gets its
-	// eleven attempts again rather than none.
+	held := cntlrReq(reqOpts{revision: 2})
+	metaSide := noCtrlItem(metaNqn, testIp, testSvcId)
 	node.Reset()
-	retryAttempt(t, srv)
+	round, resent := resendRound(t, srv, held, "both-named")
+	assertRowVerdict(t, round.GetAgentReply(), "the read of the two legs",
+		metaSide, noCtrlItem(dataNqn, testIp, testSvcId))
+	if resent == nil {
+		t.Fatalf("the round that names the legs brought no re-send")
+	}
 	if got := connectsTo(node, metaNqn, testIp, testSvcId); got != 11 {
-		t.Fatalf("%d connects to the meta leg in the retry attempt, want "+
+		t.Fatalf("%d connects to the meta leg in the re-send's pass, want "+
 			"11: every pass has its own budget", got)
 	}
 	if got := connectsTo(node, dataNqn, testIp, testSvcId); got != 1 {
-		t.Fatalf("%d connects to the data leg in the retry attempt, want 1",
+		t.Fatalf("%d connects to the data leg in the re-send's pass, want 1",
 			got)
 	}
+	assertOk(t, resent.GetCntlrInfo().GetLegIdToLeg()[testDataLeg],
+		"leg data, connected by the re-send")
+	assertRowVerdict(t, rowRound(t, srv, 2).GetAgentReply(),
+		"the read after the re-send", metaSide)
 }
 
 // TestNoHeadWaitWithoutAConnect pins the scope of the head wait: only a
@@ -740,7 +789,6 @@ func TestPassBudgetSharedByEveryLeg(t *testing.T) {
 // pause and no extra read, however long the budget is.
 func TestNoHeadWaitWithoutAConnect(t *testing.T) {
 	srv, node := newTestServer(t)
-	srv.retryInterval = time.Hour
 	clock := withPassClock(srv, node)
 	syncupBoth(t, srv, reqOpts{revision: 2})
 	nqn := legNqn(srv, testDataLeg)
@@ -834,7 +882,6 @@ func TestAConnectedHeadWithoutItsNgDeviceIsUsed(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			capture := captureLogs(t)
 			srv, node := newTestServer(t)
-			srv.retryInterval = time.Hour
 			clock := withPassClock(srv, node)
 			syncupBoth(t, srv, tc.opts(2))
 			head, dir := headOf(t, node, tc.nqn(srv))
@@ -890,9 +937,8 @@ func TestAConnectedHeadWithoutItsNgDeviceIsUsed(t *testing.T) {
 			if waited := clock.Now().Sub(start); waited != 0 {
 				t.Fatalf("the passes waited %v, want none", waited)
 			}
-			if retrying(t, srv) {
-				t.Fatalf("a head used as it is registered the retry")
-			}
+			assertRowVerdict(t, rowRound(t, srv, 4).GetAgentReply(),
+				"the read after a head used as it is")
 			if recs := capture.msgRecords(t, msgHeadWaitSpent); len(recs) != 0 {
 				t.Fatalf("a pass with no head wait wrote %q: %v",
 					msgHeadWaitSpent, recs)
@@ -919,7 +965,6 @@ func TestCloneSourceConnectStep(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			srv, node := newTestServer(t)
-			srv.retryInterval = time.Hour
 			withPassClock(srv, node)
 			syncupBoth(t, srv, reqOpts{revision: 2, primary: true})
 			tc.arm(node)
@@ -933,9 +978,6 @@ func TestCloneSourceConnectStep(t *testing.T) {
 			info := reply.GetCntlrInfo()
 			assertOk(t, info.GetCloneIdToTarget()[testClone], "clone target")
 			assertOk(t, info.GetCloneIdToDmClone()[testClone], "dm-clone")
-			if retrying(t, srv) {
-				t.Fatalf("a source the pass connected registered the retry")
-			}
 			assertRowVerdict(t, rowRound(t, srv, 3).GetAgentReply(),
 				"the read after the build")
 		})
@@ -963,7 +1005,6 @@ func TestAConvergeWalksAgainAfterAConnect(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			srv, node := newTestServer(t)
-			srv.retryInterval = time.Hour
 			opts := reqOpts{revision: 2, extraSide: true}
 			syncupBoth(t, srv, opts)
 			walks := func() int {
@@ -1061,7 +1102,6 @@ func TestTheHeadWaitWalksAgainWhenItsEntryGoes(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			srv, node := newTestServer(t)
-			srv.retryInterval = time.Hour
 			clock := withPassClock(srv, node)
 			nqn := legNqn(srv, testDataLeg)
 			if tc.headAfter > 0 {
@@ -1090,9 +1130,8 @@ func TestTheHeadWaitWalksAgainWhenItsEntryGoes(t *testing.T) {
 				t.Fatalf("the change after the connect never ran (%q)",
 					listing)
 			}
-			if retrying(t, srv) {
-				t.Fatalf("a leg the pass connected registered the retry")
-			}
+			assertRowVerdict(t, rowRound(t, srv, 2).GetAgentReply(),
+				"the read after a leg the pass connected")
 		})
 	}
 }
@@ -1141,7 +1180,6 @@ func TestACloneSourceConnectedAfterTheWalkIsAdopted(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			srv, node := newTestServer(t)
-			srv.retryInterval = time.Hour
 			withPassClock(srv, node)
 			syncupBoth(t, srv, reqOpts{revision: 2, primary: true})
 			node.mu.Lock()
@@ -1190,8 +1228,8 @@ func TestACloneSourceConnectedAfterTheWalkIsAdopted(t *testing.T) {
 
 // TestCloneSourceSharesThePassBudget pins that the clone source draws on the
 // budget the legs drew on, not on one of its own: with the meta leg having
-// spent it, the source's refused connect is not retried and the clone reports
-// its step-1 failure, as before the retry existed. The target row reads what
+// spent it, the source's refused connect is not tried again in the pass and
+// the clone reports its step-1 failure. The target row reads what
 // the refused connect left, no subsystem, MISSING as a check round reads it,
 // with the connect's error in its details (CN18). The converge's reply does
 // not name the source's entry, and a read does (CN30), so the round brings a
@@ -1199,7 +1237,6 @@ func TestACloneSourceConnectedAfterTheWalkIsAdopted(t *testing.T) {
 // connects go through, and the read after it names nothing.
 func TestCloneSourceSharesThePassBudget(t *testing.T) {
 	srv, node := newTestServer(t)
-	srv.retryInterval = time.Hour
 	withPassClock(srv, node)
 	failConnects(node, legNqn(srv, testMetaLeg), testIp, testSvcId, 1000)
 	failConnects(node, testSrcNqn, testIp2, testSvcId2, 1)
@@ -1223,9 +1260,6 @@ func TestCloneSourceSharesThePassBudget(t *testing.T) {
 	}
 	assertReason(t, info.GetCloneIdToDmClone()[testClone],
 		pb.ResReason_RES_REASON_SOURCE_FAULT, "dm-clone row")
-	if !retrying(t, srv) {
-		t.Fatalf("a source that did not connect registered no retry")
-	}
 	srcName := noCtrlName(testSrcNqn, testIp2, testSvcId2)
 	if strings.Contains(reply.GetAgentReply().GetDetails(), srcName) {
 		t.Fatalf("the converge's reply %v names the source's entry",
@@ -1261,7 +1295,7 @@ func TestCloneSourceSharesThePassBudget(t *testing.T) {
 // no head in the pass, while the clone meta group is ready. The converge
 // writes the target row MISSING "no namespace" and the dm-clone row MISSING
 // "source not connected" with no reason, which hold the worker's settle
-// (dnv-worker.md HL2), and registers the retry. A read in between, which
+// (dnv-worker.md HL2). A read in between, which
 // connects nothing and cannot tell, gives that same state the source-fault
 // reason (CN18); the status and the epoch stay, only the reason moves. That
 // read names neither the source, which has its controller, nor the
@@ -1272,7 +1306,6 @@ func TestCloneSourceSharesThePassBudget(t *testing.T) {
 // nothing.
 func TestCloneSourceHeadPendingCarriesNoReason(t *testing.T) {
 	srv, node := newTestServer(t)
-	srv.retryInterval = time.Hour
 	withPassClock(srv, node)
 	failConnects(node, legNqn(srv, testMetaLeg), testIp, testSvcId, 1000)
 	stageNsHead(node, testSrcNqn, headStages{dir: neverInThePass,
@@ -1292,9 +1325,6 @@ func TestCloneSourceHeadPendingCarriesNoReason(t *testing.T) {
 	assertReason(t, tgt, pb.ResReason_RES_REASON_NONE, "clone target")
 	assertMissingDetails(t, dm, "source not connected", "dm-clone row")
 	assertReason(t, dm, pb.ResReason_RES_REASON_NONE, "dm-clone row")
-	if !retrying(t, srv) {
-		t.Fatalf("a source whose head is not there registered no retry")
-	}
 
 	probed := probedCntlrInfo(t, srv)
 	for label, row := range map[string]struct{ converged, read *pb.ResInfo }{
@@ -1354,7 +1384,10 @@ func TestCloneSourceHeadPendingCarriesNoReason(t *testing.T) {
 // connect killed before it touched anything left no controller: a fault of
 // the source as this node reads it, with the source-fault reason on both.
 // A read names the source's entry in the second case alone, where a converge
-// would connect it (CN30).
+// would connect it (CN30), and the re-send on that round connects it. Once
+// the kernel has added the head, a read names the dm-clone in either case
+// (cloneDmName), the re-send on that round builds it, and the read after it
+// names nothing.
 func TestCloneSourceKilledConnectHeadPending(t *testing.T) {
 	const line = "nvme connect --transport tcp --traddr " + testIp2
 	noNs := fmt.Sprintf("no namespace 1 on %s", testSrcNqn)
@@ -1376,7 +1409,6 @@ func TestCloneSourceKilledConnectHeadPending(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			srv, node := newTestServer(t)
-			srv.retryInterval = time.Hour
 			withPassClock(srv, node)
 			stageNsHead(node, testSrcNqn, headStages{dir: neverInThePass,
 				nsid: neverInThePass, block: neverInThePass,
@@ -1397,18 +1429,54 @@ func TestCloneSourceKilledConnectHeadPending(t *testing.T) {
 			assertMissingDetails(t, dm, "source not connected",
 				"dm-clone row")
 			assertReason(t, dm, tc.reason, "dm-clone row")
-			if !retrying(t, srv) {
-				t.Fatalf("a source whose connect was killed registered " +
-					"no retry")
-			}
 			read := rowRound(t, srv, 2).GetAgentReply()
 			if named := strings.Contains(read.GetDetails(), noCtrlName(
 				testSrcNqn, testIp2, testSvcId2)); named != tc.named {
 				t.Fatalf("the read %v names the source's entry: %v, "+
 					"want %v", read, named, tc.named)
 			}
-			assertRowNotNamed(t, read, "the read",
-				cloneName(srv, testClone))
+			clone := cloneName(srv, testClone)
+			assertRowNotNamed(t, read, "the read", clone)
+
+			held := cntlrReq(reqOpts{revision: 2, primary: true,
+				clones: []*pb.Clone{cloneOf()}})
+			node.mu.Lock()
+			delete(node.killCmd, line)
+			delete(node.killCmdNoEffectAlways, line)
+			node.mu.Unlock()
+			if tc.named {
+				node.Reset()
+				round, resent := resendRound(t, srv, held, "connect")
+				assertCodeNames(t, "the read of the source", round,
+					noCtrlName(testSrcNqn, testIp2, testSvcId2))
+				if resent == nil {
+					t.Fatalf("the round that names the source brought no " +
+						"re-send")
+				}
+				if got := connectsUnder(node, "connect",
+					testSrcNqn); got != 1 {
+					t.Fatalf("the re-send made %d connects of the source "+
+						"under the round's id, want 1", got)
+				}
+			}
+			finishNsHead(t, node, testSrcNqn)
+			node.Reset()
+			round, resent := resendRound(t, srv, held, "head")
+			assertRowVerdict(t, round.GetAgentReply(),
+				"the read once the head is there",
+				rowNamed(clone, "absent"))
+			if resent == nil {
+				t.Fatalf("the round that names the dm-clone brought no " +
+					"re-send")
+			}
+			if !tracedCall(node, "head", "cmd dmsetup create "+clone) {
+				t.Fatalf("the re-send did not create the dm-clone under " +
+					"the round's id")
+			}
+			assertOk(t, resent.GetCntlrInfo().GetCloneIdToDmClone()[testClone],
+				"dm-clone, built by the re-send")
+			assertRowVerdict(t, rowRound(t, srv, 2).GetAgentReply(),
+				"the read after the re-send")
 		})
 	}
 }

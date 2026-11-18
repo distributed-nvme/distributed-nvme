@@ -14,9 +14,8 @@ import (
 //
 // A CheckCn or CheckCntlr round and a GetCnInfo or GetCntlrInfo answer from
 // the object's latest observation alone (answerCn, answerCntlr). The end of
-// every converge stores one — a syncup's, the startup reconcile's, a
-// connect-retry attempt's — and so does the
-// background read a round starts (refreshCn, refreshCntlr), which holds the
+// every converge stores one — a syncup's or the startup reconcile's — and so
+// does the background read a round starts (refreshCn, refreshCntlr), which holds the
 // CN1 locks a round once held and reads what a round once read. A syncup
 // marks its converge as it arrives and cancels the read before it waits for a
 // lock, unless a gate refuses it against the object's held request
@@ -24,8 +23,7 @@ import (
 // or for a CN the agent does not hold, marks the node too and cancels every
 // read, one at the held revision only the CN's own. While the store's latest
 // save failed, a syncup the gates admit marks its own object alone and
-// cancels no read. A background converge
-// marks its object before it waits for the object lock (markConverge). No
+// cancels no read. No converge of the cn role runs in the background. No
 // read starts while a mark of its object or of the node stands.
 // ---------------------------------------------------------------------------
 
@@ -367,18 +365,6 @@ func (s *CnAgentServer) markNodeSyncup(key string, revision uint64) func() {
 		st.obs.CancelReadLocked()
 	}
 	return func() { s.endMark(key, true) }
-}
-
-// markConverge marks a background converge of the cntlr key in flight (SH30),
-// a retry attempt that has found its cntlr and is about to wait for its
-// object lock. It cancels nothing: the attempt waits for a read as it waits
-// for another converge.
-func (s *CnAgentServer) markConverge(key string) func() {
-	now := s.now()
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	s.marks.BeginLocked(key, now)
-	return func() { s.endMark(key, false) }
 }
 
 func (s *CnAgentServer) endMark(key string, node bool) {

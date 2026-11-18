@@ -488,7 +488,6 @@ func TestNsDevParksOverAMissingDmClone(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			srv, node := newTestServer(t)
-			srv.retryInterval = time.Hour
 			syncupBoth(t, srv, reqOpts{revision: 2, primary: true,
 				clones: []*pb.Clone{cloneOf()}})
 			clone := cloneName(srv, testClone)
@@ -558,10 +557,11 @@ func TestNsDevParksOverAMissingDmClone(t *testing.T) {
 // that its `dmsetup info` finds and that is gone by its status read fails
 // that read, and a second `dmsetup info` that confirms it gone makes the
 // read an absence. A check round then reports the dm row MISSING, as for any
-// absent dm-clone, and a converge creates the dm-clone again in the same
-// pass: its row reads OK and no retry is registered. Read as an
-// error, the round would report ERROR and the converge would end its pass
-// and wait for the retry. In a cntlr's read, which a check round answers
+// absent dm-clone, and names the dm-clone a converge would create (CN30),
+// and a converge creates the dm-clone again in the same pass: its row reads
+// OK and its reply names nothing. Read as an error, the round would report
+// ERROR and name nothing, and the converge would end its pass with the
+// dm-clone missing. In a cntlr's read, which a check round answers
 // from, the first info is the reading's listing, and the confirming info is
 // the dm-clone's own, made after the failed status read: the reading, taken
 // before the device went, names it, so a confirm taken from it would keep the
@@ -625,18 +625,20 @@ func TestADmCloneGoneMidReadReadsAbsent(t *testing.T) {
 
 	t.Run("a check round", func(t *testing.T) {
 		srv, node := newTestServer(t)
-		srv.retryInterval = time.Hour
 		syncupBoth(t, srv, reqOpts{revision: 2, primary: true,
 			clones: []*pb.Clone{cloneOf()}})
 		node.Reset()
-		var probed *pb.CntlrInfo
+		var (
+			round  *pb.CheckCntlrReply
+			probed *pb.CntlrInfo
+		)
 		key := cntlrKey(testCluster, testCn, testSp, testCntlr)
 		st := srv.getCntlr(key)
 		goneMidRead(t, srv, node, true, func() {
 			// The round answers from the cntlr's read (dnagent.md SH29),
 			// so the read is what the device goes under.
 			srv.refreshCntlr(context.Background(), key, st)
-			_, probed = srv.checkCntlrRound(context.Background(),
+			round, probed = srv.checkCntlrRound(context.Background(),
 				&pb.CheckCntlrRequest{
 					ClusterId: testCluster, CnId: testCn,
 					CntlrPointer: cntlrPtr(), Revision: 2,
@@ -647,11 +649,15 @@ func TestADmCloneGoneMidReadReadsAbsent(t *testing.T) {
 		}
 		assertMissing(t, probed.GetCloneIdToDmClone()[testClone],
 			"the dm row of a dm-clone gone mid-read")
+		// The name's text is what the read made of the device before it
+		// went; the name itself is what brings the converge that creates
+		// it again.
+		assertCodeNames(t, "the round over the dm-clone gone mid-read",
+			round, rowNamed(cloneName(srv, testClone), ""))
 	})
 
 	t.Run("a converge", func(t *testing.T) {
 		srv, node := newTestServer(t)
-		srv.retryInterval = time.Hour
 		syncupBoth(t, srv, reqOpts{revision: 2, primary: true,
 			clones: []*pb.Clone{cloneOf()}})
 		clone := cloneName(srv, testClone)
@@ -677,9 +683,7 @@ func TestADmCloneGoneMidReadReadsAbsent(t *testing.T) {
 		}
 		assertOk(t, reply.GetCntlrInfo().GetCloneIdToDmClone()[testClone],
 			"the dm row of the rebuilt dm-clone")
-		if retrying(t, srv) {
-			t.Error("the pass that rebuilt the dm-clone registered the retry")
-		}
+		assertCodeZero(t, "the pass that rebuilt the dm-clone", reply)
 	})
 }
 
@@ -688,10 +692,11 @@ func TestADmCloneGoneMidReadReadsAbsent(t *testing.T) {
 // whose `dmsetup info` after that read does not answer, keeps the read an
 // error. A check round reports the dm row ERROR, not MISSING, and a converge
 // stops at that read, before CN18 step 3: it parks, removes and builds
-// nothing, the ns-dev keeps serving through the dm-clone, the dm row reads
-// ERROR with the failed read's error and the retry is registered. Read as an
-// absence, the converge would create a second dm-clone under the name of
-// one that serves. In a cntlr's read,
+// nothing, the ns-dev keeps serving through the dm-clone, and the dm row
+// reads ERROR with the failed read's error. Neither channel names the
+// dm-clone (CN30): a read that did not answer decides nothing, and the next
+// read reads it again. Read as an absence, the converge would create a
+// second dm-clone under the name of one that serves. In a cntlr's read,
 // which a check round answers from, the dm-clone's first info is the
 // reading's listing, so its own `dmsetup info` is the confirm alone.
 func TestADmCloneAbsenceTheInfoDidNotConfirmStaysAnError(t *testing.T) {
@@ -750,7 +755,6 @@ func TestADmCloneAbsenceTheInfoDidNotConfirmStaysAnError(t *testing.T) {
 
 	t.Run("a check round", func(t *testing.T) {
 		srv, node := newTestServer(t)
-		srv.retryInterval = time.Hour
 		syncupBoth(t, srv, reqOpts{revision: 2, primary: true,
 			clones: []*pb.Clone{cloneOf()}})
 		node.Reset()
@@ -762,11 +766,13 @@ func TestADmCloneAbsenceTheInfoDidNotConfirmStaysAnError(t *testing.T) {
 		}
 		assertErrorDetails(t, probed.GetCloneIdToDmClone()[testClone],
 			readErr, "the dm row of a dm-clone whose absence is unconfirmed")
+		assertRowNotNamed(t, rowRoundOnly(t, srv, 2).GetAgentReply(),
+			"the round over the unconfirmed absence", cloneName(srv,
+				testClone))
 	})
 
 	t.Run("a converge", func(t *testing.T) {
 		srv, node := newTestServer(t)
-		srv.retryInterval = time.Hour
 		syncupBoth(t, srv, reqOpts{revision: 2, primary: true,
 			clones: []*pb.Clone{cloneOf()}})
 		clone := cloneName(srv, testClone)
@@ -803,9 +809,8 @@ func TestADmCloneAbsenceTheInfoDidNotConfirmStaysAnError(t *testing.T) {
 		assertErrorDetails(t,
 			reply.GetCntlrInfo().GetCloneIdToDmClone()[testClone], readErr,
 			"the dm row of a dm-clone whose absence is unconfirmed")
-		if !retrying(t, srv) {
-			t.Error("the pass the read stopped registered no retry")
-		}
+		assertRowNotNamed(t, reply.GetAgentReply(),
+			"the pass the read stopped", clone)
 	})
 }
 
@@ -1250,7 +1255,6 @@ func TestCloneRowsAgreeBetweenConvergeAndCheck(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			srv, node := newTestServer(t)
-			srv.retryInterval = time.Hour
 			syncupBoth(t, srv, reqOpts{revision: 2, primary: true,
 				clones: []*pb.Clone{cloneOf()}})
 			if tc.unfinished {

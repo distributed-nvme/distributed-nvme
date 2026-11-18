@@ -40,8 +40,8 @@ type CnAgentServer struct {
 	port     agent.PortConf
 
 	// mu guards the in-memory mirrors of the local store below — the two
-	// maps — and what mirrors nothing: in each cntlr's state the
-	// connect-retry, prober and path-watcher (cutters) registries, in each
+	// maps — and what mirrors nothing: in each cntlr's state the prober and
+	// path-watcher (cutters) registries, in each
 	// CN's and each cntlr's state its observation slot (obs), the converge
 	// marks (marks) and the CN10 disconnect registry. It does not guard the
 	// request each state holds, which is an atomic pointer (cnState.req,
@@ -78,23 +78,21 @@ type CnAgentServer struct {
 
 	// rootCtx is the process lifetime ctx, captured by Prepare before the
 	// port opens, or at Reconcile when nothing prepared the server (a test);
-	// the CN10/CN18 connect retries, the CN10 background disconnects and
-	// path watchers, the CN11 probers and the background reads (SH29) hang
-	// off it, so shutdown cancels them. rootSet says Prepare set it.
+	// the CN10 background disconnects and path watchers, the CN11 probers
+	// and the background reads (SH29) hang off it, so shutdown cancels them.
+	// rootSet says Prepare set it.
 	rootCtx context.Context
 	rootSet bool
 	// startup is the agent's startup state (dnagent.md SH33).
 	startup agent.Startup
 
-	// probeInterval / probeStall / retryInterval are fields rather than
-	// constants, and now and sleep — like probeIO above — are overridable,
-	// so tests can drive the CN11 prober on a short fake clock and off the
-	// real syscalls, run the background retry's attempts by hand, and run a
-	// converge pass's CN10 connect budget (newPassBudget) on a fake clock
-	// too; nothing else changes them.
+	// probeInterval / probeStall are fields rather than constants, and now
+	// and sleep — like probeIO above — are overridable, so tests can drive
+	// the CN11 prober on a short fake clock and off the real syscalls, and
+	// run a converge pass's CN10 connect budget (newPassBudget) on a fake
+	// clock too; nothing else changes them.
 	probeInterval time.Duration
 	probeStall    time.Duration
-	retryInterval time.Duration
 	now           func() time.Time
 	sleep         func(context.Context, time.Duration) error
 }
@@ -233,10 +231,6 @@ type cntlrState struct {
 	// the cntlr's drop stops them all.
 	cutters map[uint64]*pathWatcher
 
-	// retrying/cancel drive the CN10/CN18 background connect retry.
-	retrying bool
-	cancel   context.CancelFunc
-
 	// obs is the cntlr's latest observation and its running read
 	// (dnagent.md SH28, SH29), guarded by the server's mu.
 	obs agent.ObsSlot[*pb.CntlrInfo]
@@ -290,7 +284,6 @@ func NewCnAgentServer(
 		rootCtx:         context.Background(),
 		probeInterval:   common.CnLegProbeInterval * time.Second,
 		probeStall:      common.CnLegProbeStallSeconds * time.Second,
-		retryInterval:   common.CnConnectRetryInterval * time.Second,
 		now:             time.Now,
 		sleep:           agent.SleepCtx,
 	}

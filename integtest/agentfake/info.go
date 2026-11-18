@@ -85,6 +85,25 @@ func (a *Agent) resolveDerivedRow(
 				reason = row.Reason
 			}
 		}
+		if a.readingKey == objKey && a.readLeft[objKey] != 0 {
+			// A read that names the read leftover finds its read rows
+			// (Object.ReadRows), over every other lever.
+			for _, key := range keys {
+				row, ok := ob.ReadRows[key]
+				if !ok || (row.WhenPrimary && !primary) {
+					continue
+				}
+				if row.Status != nil {
+					resStatus = *row.Status
+				}
+				if row.Details != nil {
+					details = *row.Details
+				}
+				if row.Reason != nil {
+					reason = row.Reason
+				}
+			}
+		}
 	}
 	resReason := pb.ResReason_RES_REASON_NONE
 	switch {

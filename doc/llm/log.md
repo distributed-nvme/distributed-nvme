@@ -295,10 +295,13 @@ logs for the same thing.
   absent that a re-sent `Syncup*` would build, or the node's nvmet port in
   a state one would rewrite (`dnagent.md` SH31, DN16), or, on a cntlr, a
   side of a wanted leg or an entry of a clone's source with no controller
-  that the converge would connect,
+  that the converge would connect, a migrating leg's path the converge
+  would cut,
   a forced-start mark of the request the agent holds while that request
-  does not count as delivered, or a group's forced start its converge would
-  carry through (`cnagent.md` CN8, CN12, CN30) — each rendered
+  does not count as delivered, a group's forced start its converge would
+  carry through, a group's md check its converge would start, stop or
+  adopt, or an uncreated snapshot whose create message its converge would
+  send (`cnagent.md` CN8, CN10, CN12, CN14, CN30) — each rendered
   "what: error" and joined by "; ".
 * The worker logs `syncup leftover` (`worker/revision.go`) on a `Syncup*`
   reply carrying `ReplyCodeLeftover`, with the object's ids, `revision`

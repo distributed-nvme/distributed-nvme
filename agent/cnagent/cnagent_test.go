@@ -121,13 +121,13 @@ func newCnServerOnPort(node *fakeNode, portId int) *CnAgentServer {
 
 // reconcileForTest runs the SH1 startup pass rooted at the *test's* context,
 // which is what stops the background goroutines it starts. Reconcile publishes
-// its ctx as the server's rootCtx (syncup_cn.go), and every CN11 prober and
-// CN10/CN18 connect retry hangs off that — so a server rooted at
-// context.Background() leaks a 5 s-ticker prober per leg past the end of the
-// test that made it, and those goroutines then race the next test's fields
-// (CN11: probers are stopped gracefully when the agent exits —
-// cancel, do not join). t.Context() is cancelled when the test returns, before
-// its cleanups run.
+// its ctx as the server's rootCtx (syncup_cn.go), and every CN11 prober,
+// CN10 path watcher and background disconnect hangs off that — so a server
+// rooted at context.Background() leaks a 5 s-ticker prober per leg past the
+// end of the test that made it, and those goroutines then race the next
+// test's fields (CN11: probers are stopped gracefully when the agent exits —
+// cancel, do not join). t.Context() is cancelled when the test returns,
+// before its cleanups run.
 func reconcileForTest(t *testing.T, srv *CnAgentServer) {
 	t.Helper()
 	if err := srv.Reconcile(t.Context()); err != nil {
@@ -1560,23 +1560,25 @@ func TestGroupCreateAssumeClean(t *testing.T) {
 }
 
 // TestGroupAssembleRefusalIsAnError: a promotion whose assembly md refuses
-// reads the group's row ERROR. The row re-drives nothing, so the failed
-// assembly registers the CN10 retry by itself (CN12), with no namespace
-// waiting over the group as under one, whose ns-dev stays parked and its
-// namespace inaccessible (CN16).
+// reads the group's row ERROR, and the namespace over the group stays parked
+// and inaccessible (CN16). The converge's own reply does not name the
+// group's absent array, a read-only name; a read does, since every member
+// serves and mdadm's degraded gate passes (absentArrayNamed), so the worker
+// re-sends the request (dnv-worker.md RW4). A re-send while md still refuses
+// builds nothing and the name stands; the re-send after the refusal ends
+// assembles the array under the round's trace id, and the read after it
+// names nothing, with or without a namespace over the group.
 func TestGroupAssembleRefusalIsAnError(t *testing.T) {
 	for _, tc := range []struct {
 		name string
 		// noTd: an SP with no td and no subsystem, so no namespace waits.
-		noTd  bool
-		retry bool
+		noTd bool
 	}{
-		{name: "under a namespace", retry: true},
-		{name: "with no td", noTd: true, retry: true},
+		{name: "under a namespace"},
+		{name: "with no td", noTd: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			srv, node := newTestServer(t)
-			srv.retryInterval = time.Hour
 			opts := func(revision uint64, primary bool) reqOpts {
 				o := reqOpts{revision: revision, primary: primary,
 					raid1: true}
@@ -1592,10 +1594,10 @@ func TestGroupAssembleRefusalIsAnError(t *testing.T) {
 				t.Fatalf("demote: %v", err)
 			}
 			node.Reset()
-			node.failCmdAlways["mdadm --assemble"] =
-				"mdadm: refusing degraded start"
-			reply, err := srv.SyncupCntlr(context.Background(),
-				cntlrReq(opts(4, true)))
+			const refusal = "mdadm --assemble"
+			node.failCmdAlways[refusal] = "mdadm: refusing degraded start"
+			held := cntlrReq(opts(4, true))
+			reply, err := srv.SyncupCntlr(context.Background(), held)
 			if err != nil {
 				t.Fatalf("promote: %v", err)
 			}
@@ -1605,9 +1607,10 @@ func TestGroupAssembleRefusalIsAnError(t *testing.T) {
 					info.GetStatus())
 			}
 			assertNoCall(t, node, "cmd mdadm --detail")
-			if got := retrying(t, srv); got != tc.retry {
-				t.Fatalf("the CN10 retry is %v after a refused assembly "+
-					"with every leg available, want %v", got, tc.retry)
+			absent := agent.LeftoverKindMdAbsent + ":" + info.GetResName()
+			if strings.Contains(reply.GetAgentReply().GetDetails(), absent) {
+				t.Fatalf("the converge's own reply names the absent "+
+					"array: %v", reply.GetAgentReply())
 			}
 			if !tc.noTd {
 				assertNoCall(t, node, "writedirect "+anaPath(testNqn, 1)+"=1")
@@ -1615,6 +1618,45 @@ func TestGroupAssembleRefusalIsAnError(t *testing.T) {
 					t.Fatalf("ana_grpid is %q over the unbuilt stack, "+
 						"want 3", got)
 				}
+			}
+
+			round, resent := resendRound(t, srv, held, "md-refuses")
+			assertCodeNames(t, "the read while md refuses", round, absent)
+			if resent == nil {
+				t.Fatalf("the round that names the array brought no " +
+					"re-send")
+			}
+			if row := resent.GetCntlrInfo().GetGrpIdToMdRaid()[testMetaGrp]; row.
+				GetStatus() != pb.ResStatus_RES_STATUS_ERROR {
+				t.Fatalf("the re-send while md refuses left the group %v",
+					row)
+			}
+
+			node.mu.Lock()
+			delete(node.failCmdAlways, refusal)
+			node.mu.Unlock()
+			round, resent = resendRound(t, srv, held, "md-assembles")
+			assertCodeNames(t, "the read after the refusal", round, absent)
+			if resent == nil {
+				t.Fatalf("the round that names the array brought no " +
+					"re-send")
+			}
+			if !tracedCall(node, "md-assembles", "mdadm --assemble") {
+				t.Fatalf("the re-send did not assemble under the round's " +
+					"trace id")
+			}
+			assertOk(t, resent.GetCntlrInfo().GetGrpIdToMdRaid()[testMetaGrp],
+				"grp meta after the re-send")
+			if !tc.noTd {
+				if got := node.files[anaPath(testNqn, 1)]; got != "1" {
+					t.Fatalf("ana_grpid is %q after the re-send, want 1",
+						got)
+				}
+			}
+			round, resent = resendRound(t, srv, held, "after-the-assembly")
+			assertCodeZero(t, "the read after the assembly", round)
+			if resent != nil {
+				t.Errorf("the round after the assembly re-sent the request")
 			}
 		})
 	}
@@ -2143,6 +2185,10 @@ func TestMemberReconciliationInSyncGuard(t *testing.T) {
 // the running array, whose members hold the group's data. The refusal holds
 // when the lsblk that asks whether an array runs under the name did not
 // answer, too: read as "no", a kill would create beside the running array.
+// A read never names the group's absent array while its name is in use, nor
+// while its own lsblk of the name does not answer: its dry run of the
+// assembly meets the same refusal (absentArrayNamed), so no re-send comes
+// for a create the converge refuses.
 func TestGroupNeverCreatesBesideARunningArray(t *testing.T) {
 	for _, tc := range []struct {
 		name          string
@@ -2153,7 +2199,6 @@ func TestGroupNeverCreatesBesideARunningArray(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			srv, node := newTestServer(t)
-			srv.retryInterval = time.Hour
 			syncupBoth(t, srv, reqOpts{
 				revision: 2, primary: true, raid1: true, twoLegs: true})
 			mdDev := srv.nf.MdPath(
@@ -2191,13 +2236,6 @@ func TestGroupNeverCreatesBesideARunningArray(t *testing.T) {
 				t.Fatalf("the group reported %v %q, want ERROR %q",
 					info.GetStatus(), info.GetDetails(), want)
 			}
-			// CN12: the refusal of a name another array holds is an
-			// operator's to end, so it registers no CN10 retry; a name probe
-			// that did not answer is a build failure, which does.
-			if got := retrying(t, srv); got != tc.killNameProbe {
-				t.Fatalf("the retry is registered: %v, want %v",
-					got, tc.killNameProbe)
-			}
 			assertNoCall(t, node, "cmd mdadm --create")
 			assertNoCall(t, node, "cmd mdadm --detail")
 			for _, verb := range []string{"--fail", "--remove", "--add"} {
@@ -2208,6 +2246,15 @@ func TestGroupNeverCreatesBesideARunningArray(t *testing.T) {
 				t.Fatalf("the running array changed: %+v, want members %v",
 					array, held)
 			}
+			// CN12, CN30: the read names no absent array while the name is
+			// in use or its lsblk does not answer.
+			absent := agent.LeftoverKindMdAbsent + ":" + info.GetResName()
+			round, _ := resendRound(t, srv, req, "name-in-use")
+			if strings.Contains(round.GetAgentReply().GetDetails(), absent) {
+				t.Fatalf("the read names the absent array beside the "+
+					"running one: %v", round.GetAgentReply())
+			}
+			assertNoCall(t, node, "cmd mdadm --create")
 		})
 	}
 }
@@ -2416,7 +2463,6 @@ func TestConcatNumberComesFromTheMatchedArray(t *testing.T) {
 
 	t.Run("a degraded array", func(t *testing.T) {
 		srv, node := newTestServer(t)
-		srv.retryInterval = time.Hour
 		syncupBoth(t, srv, opts)
 		dataMd := mdDevOf(srv, false)
 		leg2 := srv.nf.DmPath(legName(srv, testDataLeg2))
@@ -2867,10 +2913,8 @@ func TestGroupAssemblyBesideAnArrayMidStop(t *testing.T) {
 // overlapping another sp's teardown — is created beside it with every md row
 // OK and a clean reply, and a built group's Check round and converge read OK
 // and run no mdadm. A walk that read the missing block/dev as "did not
-// answer" would refuse that assembly, which, with every leg of the cntlr
-// available as here, nothing re-drives (a leg_list member of any group of
-// the cntlr that is not available registers the CN10 retry, whose next
-// converge would try it again, CN12), and a ListArrays that did would fail
+// answer" would refuse that assembly, and a read whose walk did not answer
+// names no absent array (CN12, CN30), and a ListArrays that did would fail
 // the sweep's md enumeration at this instant too (later in the stop, once md
 // marks the array deleted, its array_state reads EBUSY and ListArrays does
 // fail that pass — CN12).
@@ -2967,11 +3011,13 @@ func TestGroupBesideAnUnboundMember(t *testing.T) {
 // Leftover all the same, because their md enumeration keeps ListArrays'
 // strict rule (CN21, CN30) and the same fault fails it — a reply code,
 // never a row. With it not built yet, the unanswered array may be the
-// group's own, so the converge neither creates nor assembles (ERROR); with
-// every leg available the group registers no CN10 retry (CN12), but the
-// namespace over the stack it leaves unbuilt waits inaccessible and
-// registers it (CN16); the test's next SyncupCntlr, once the array answers,
-// assembles it.
+// group's own, so the converge neither creates nor assembles (ERROR). A read
+// then names no absent array, since its own walk does not answer either, but
+// its md enumeration fails, a leftover on both channels, so the worker
+// re-sends, and the re-send builds nothing. Once the array answers, a read
+// names both groups' absent arrays (absentArrayNamed), the one re-send the
+// worker sends on that round creates them, and the read after it names
+// nothing.
 func TestGroupBesideAnUnansweredArray(t *testing.T) {
 	ctx := context.Background()
 	const leg = "/dev/mapper/other-sp-leg"
@@ -3035,7 +3081,6 @@ func TestGroupBesideAnUnansweredArray(t *testing.T) {
 		})
 		t.Run(tc.name+", not built", func(t *testing.T) {
 			srv, node := newTestServer(t)
-			srv.retryInterval = time.Hour
 			// The node's own sweep refuses to run over an enumeration that
 			// did not answer (CN21), so the cn is synced first.
 			if reply, err := srv.SyncupCn(ctx, cnReq(2, true)); err != nil ||
@@ -3063,18 +3108,49 @@ func TestGroupBesideAnUnansweredArray(t *testing.T) {
 			}
 			assertNoCall(t, node, "cmd mdadm --create")
 			assertNoCall(t, node, "cmd mdadm --assemble")
-			if !retrying(t, srv) {
-				t.Fatalf("a namespace waiting over an unbuilt stack " +
-					"registered no retry")
+			held := cntlrReq(opts)
+			var absent []string
+			for _, row := range rows {
+				absent = append(absent,
+					agent.LeftoverKindMdAbsent+":"+row.GetResName())
 			}
+			round, resent := resendRound(t, srv, held, "unanswered")
+			assertCodeNames(t, "the read beside the unanswered array",
+				round, "md arrays")
+			for _, name := range absent {
+				if strings.Contains(round.GetAgentReply().GetDetails(),
+					name) {
+					t.Fatalf("the read names %s beside an array that did "+
+						"not answer: %v", name, round.GetAgentReply())
+				}
+			}
+			if resent == nil {
+				t.Fatalf("the round that names the md enumeration brought " +
+					"no re-send")
+			}
+			assertNoCall(t, node, "cmd mdadm --create")
 
 			clear(node.failReadAlways)
 			clear(node.killCmdAlways)
-			if reply, err = srv.SyncupCntlr(ctx, cntlrReq(opts)); err != nil {
-				t.Fatalf("SyncupCntlr: %v", err)
+			round, resent = resendRound(t, srv, held, "answering")
+			assertCodeNames(t, "the read once the array answers", round,
+				absent...)
+			if resent == nil {
+				t.Fatalf("the round that names the absent arrays brought " +
+					"no re-send")
 			}
-			for grp, row := range reply.GetCntlrInfo().GetGrpIdToMdRaid() {
+			if got := tracedCalls(node, "answering",
+				"mdadm --create"); len(got) != 2 {
+				t.Fatalf("the re-send made %q, want both groups' creates",
+					got)
+			}
+			for grp, row := range resent.GetCntlrInfo().GetGrpIdToMdRaid() {
 				assertOk(t, row, fmt.Sprintf("answering grp %#x", grp))
+			}
+			round, resent = resendRound(t, srv, held, "after-the-create")
+			assertCodeZero(t, "the read after the create", round)
+			if resent != nil {
+				t.Errorf("the round after the create re-sent the request")
 			}
 		})
 	}
@@ -3419,26 +3495,19 @@ func TestGroupMembersComparedByName(t *testing.T) {
 // still there — is never added, but the member md still holds for it stays
 // wanted. Counted as an extra, an equal-revision converge would --fail and
 // --remove an in-sync member because one side's path was briefly unusable,
-// and run the mirror on the other. Each unusable leg registers the CN10
-// retry all the same — a failed connect in ensureLegs, an unavailable path
-// as a late member (CN12), which is availability alone; the failed connect's
-// leg is late too, so TestFailedConnectRegistersTheRetryWithoutALateMember is
-// what pins ensureLegs' own registration. The late verdict ORs over the
-// group's whole leg_list, so a late first member beside an available later
-// one registers the retry too ("non-optimized first member": leg 1 late,
-// leg 2 available) — the leg-level twin of a late member in an earlier
-// group, TestLateMembersRegisterTheRetry's "meta only". Only after the
-// failed connect does an attempt change anything: it reconnects the side. A
-// held member whose path is merely inaccessible needs no converge: nvme
-// multipath queues its IO, so md keeps it, and the attempt after the path is
-// optimized again runs no mdadm and only stops the retry. A non-optimized
-// path is the side's dm-error, so the first write through it fails (a
-// target-internal DNR error, not a path error), md fails the failfast
-// member, and neither this converge nor the retry puts it back while the
-// path is not optimized; once it is and the leg's row reads OK, the verdict
-// names the member and the converge of the syncup that brings puts it back
-// (CN12, TestConvergePutsAFailedMemberBack). Until then each attempt is the
-// cost cnagent.md, Known limits, records.
+// and run the mirror on the other. Only the failed connect leaves something
+// a converge would do: a read names the side with no controller (CN10,
+// CN30), so the worker re-sends, and once the disk node takes the connect
+// the re-send reconnects the side. A held member whose path is merely
+// inaccessible needs no converge: nvme multipath queues its IO, so md keeps
+// it, and no read names anything for it. A non-optimized path is the side's
+// dm-error, so the first write through it fails (a target-internal DNR
+// error, not a path error), md fails the failfast member, and no converge
+// puts it back while the path is not optimized; once it is and the leg's row
+// reads OK, the verdict names the member and the converge of the syncup that
+// brings puts it back (CN12, TestConvergePutsAFailedMemberBack). Until then
+// nothing is named and nothing runs, a late first member beside an
+// available later one included ("non-optimized first member").
 func TestGroupUnavailableLegMemberStaysWanted(t *testing.T) {
 	for _, tc := range []struct {
 		name string
@@ -3478,7 +3547,6 @@ func TestGroupUnavailableLegMemberStaysWanted(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			srv, node := newTestServer(t)
-			srv.retryInterval = time.Hour
 			ctx := context.Background()
 			opts := reqOpts{
 				revision: 2, primary: true, raid1: true, twoLegs: true}
@@ -3490,9 +3558,9 @@ func TestGroupUnavailableLegMemberStaysWanted(t *testing.T) {
 				t.Fatalf("the converged array holds %v, want both legs",
 					held)
 			}
-			if retrying(t, srv) {
-				t.Fatalf("a converge with every leg available registered " +
-					"the retry")
+			if reply := checkCntlrVerdict(t, srv, 2); reply.GetCode() != 0 {
+				t.Fatalf("a converge with every leg available left a "+
+					"read naming %v", reply)
 			}
 			tc.unavail(srv, node)
 
@@ -3518,8 +3586,45 @@ func TestGroupUnavailableLegMemberStaysWanted(t *testing.T) {
 				t.Fatalf("the array's members changed to %v, want %v",
 					got, held)
 			}
-			if !retrying(t, srv) {
-				t.Fatalf("an unusable leg_list leg registered no retry")
+			held2 := cntlrReq(opts)
+			nqn := srv.nf.SideToCnNqn(testCluster, testSp, tc.legId, testCn)
+			round, resent := resendRound(t, srv, held2, "unusable")
+			if !tc.legErr {
+				assertCodeZero(t, "the read over the unusable path", round)
+				if resent != nil {
+					t.Fatalf("the round re-sent the request for a path " +
+						"no converge changes")
+				}
+				return
+			}
+			side := nqn + " at " + testIp2 + ":" + testSvcId2
+			assertCodeNames(t, "the read over the refused connect", round,
+				side)
+			if resent == nil {
+				t.Fatalf("the round that names the side brought no re-send")
+			}
+			for _, verb := range []string{"--fail", "--remove", "--add"} {
+				assertNoCall(t, node, "cmd mdadm "+mdDev+" "+verb)
+			}
+			node.mu.Lock()
+			delete(node.failCmdAlways, "--nqn "+nqn+" --hostnqn")
+			node.mu.Unlock()
+			round, resent = resendRound(t, srv, held2, "connects")
+			assertCodeNames(t, "the read once the connect is taken", round,
+				side)
+			if resent == nil || !tracedCall(node, "connects",
+				"nvme connect") {
+				t.Fatalf("the re-send did not connect the side under the " +
+					"round's trace id")
+			}
+			if got := node.arrays[mdDev].members; !slices.Equal(got, held) {
+				t.Fatalf("the array's members changed to %v, want %v",
+					got, held)
+			}
+			round, resent = resendRound(t, srv, held2, "connected")
+			assertCodeZero(t, "the read after the connect", round)
+			if resent != nil {
+				t.Errorf("the round after the connect re-sent the request")
 			}
 		})
 	}
@@ -3537,11 +3642,10 @@ func TestGroupUnavailableLegMemberStaysWanted(t *testing.T) {
 // row would read ERROR on every converge; and a put-back that did not wait
 // for the slot would --remove a member that may still have IO pending, which
 // md refuses (TestConvergePutsAFailedMemberBack is the put-back itself). Nor
-// is the faulty member late: only availability makes a member late (CN12),
-// so the converge registers no CN10 retry either.
+// does the read after the converge name anything: the member is not out of
+// its slot, so there is nothing to put back yet (CN12, CN30).
 func TestGroupHeldFaultyMemberStaysHeld(t *testing.T) {
 	srv, node := newTestServer(t)
-	srv.retryInterval = time.Hour
 	ctx := context.Background()
 	opts := reqOpts{revision: 2, primary: true, raid1: true, twoLegs: true}
 	syncupBoth(t, srv, opts)
@@ -3586,8 +3690,8 @@ func TestGroupHeldFaultyMemberStaysHeld(t *testing.T) {
 	if got := node.arrays[mdDev].members; !slices.Equal(got, held) {
 		t.Fatalf("the array's members changed to %v, want %v", got, held)
 	}
-	if retrying(t, srv) {
-		t.Fatalf("a faulty member on an available leg registered the retry")
+	if reply := checkCntlrVerdict(t, srv, 2); reply.GetCode() != 0 {
+		t.Fatalf("the read after the converge named %v", reply)
 	}
 }
 
@@ -3751,7 +3855,6 @@ func TestCheckRoundNamesAFailedMemberOnlyWhenItCanBePutBack(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			srv, node := newTestServer(t)
-			srv.retryInterval = time.Hour
 			ctx := context.Background()
 			opts := reqOpts{
 				revision: 2, primary: true, raid1: true, twoLegs: true}
@@ -3872,7 +3975,6 @@ func TestCheckRoundNamesNoMemberOfAnArrayThatIsNotRunning(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			srv, node := newTestServer(t)
-			srv.retryInterval = time.Hour
 			ctx := context.Background()
 			syncupBoth(t, srv, reqOpts{
 				revision: 2, primary: true, raid1: true, twoLegs: true})
@@ -3929,11 +4031,10 @@ func TestCheckRoundNamesNoMemberOfAnArrayThatIsNotRunning(t *testing.T) {
 // mdadm turns that --add into a re-add, which md resyncs from its write-intent
 // bitmap. The removed member is no longer held, so the add comes in the same
 // pass; an add loop that still counted it held would leave the array
-// degraded. The member is not late (CN12), so no CN10 retry is registered,
-// and the next check round reads clean.
+// degraded. The next check round reads clean, so the worker re-sends
+// nothing more (dnv-worker.md RW4).
 func TestConvergePutsAFailedMemberBack(t *testing.T) {
 	srv, node := newTestServer(t)
-	srv.retryInterval = time.Hour
 	ctx := context.Background()
 	opts := reqOpts{revision: 2, primary: true, raid1: true, twoLegs: true}
 	syncupBoth(t, srv, opts)
@@ -3969,9 +4070,6 @@ func TestConvergePutsAFailedMemberBack(t *testing.T) {
 		[]string{leg1, leg2}) {
 		t.Fatalf("the array holds %v, want %v", got, []string{leg1, leg2})
 	}
-	if retrying(t, srv) {
-		t.Fatalf("the put-back registered the CN10 retry")
-	}
 	if verdict := checkCntlrVerdict(t, srv, 2); verdict.GetCode() != 0 {
 		t.Fatalf("the check round after the put-back: %v", verdict)
 	}
@@ -3988,7 +4086,6 @@ func TestConvergePutsAFailedMemberBack(t *testing.T) {
 // asks for availability alone, adds it all the same.
 func TestCheckRoundNamesALackingMemberAndTheConvergeAddsIt(t *testing.T) {
 	srv, node := newTestServer(t)
-	srv.retryInterval = time.Hour
 	ctx := context.Background()
 	opts := reqOpts{revision: 2, primary: true, raid1: true, twoLegs: true}
 	syncupBoth(t, srv, opts)
@@ -4047,7 +4144,6 @@ func TestARefusedPutBackRemoveLeavesTheAddUnrun(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			srv, node := newTestServer(t)
-			srv.retryInterval = time.Hour
 			ctx := context.Background()
 			opts := reqOpts{
 				revision: 2, primary: true, raid1: true, twoLegs: true}
@@ -4088,12 +4184,13 @@ func TestARefusedPutBackRemoveLeavesTheAddUnrun(t *testing.T) {
 // is added only when its leg is available. Leg 2's wrapper is built but its
 // path is non-optimized, so an --add would put a member on a path this pass
 // may not use; the degraded array is left running on leg 1 and reads OK.
-// reconcileMembers reads neither leg's number. The late member registers
-// the CN10 retry (CN12). Once the path is optimized again, the next converge
-// adds it and, with no member late, stops the retry.
+// reconcileMembers reads neither leg's number. No read names the member
+// while its leg does not serve, so the worker re-sends nothing for it. Once
+// the path is optimized again and the leg's row reads OK, a read names the
+// member (CN30), and the one re-send the worker sends on that round adds it;
+// the read after it names nothing.
 func TestGroupNeverAddsAnUnavailableLeg(t *testing.T) {
 	srv, node := newTestServer(t)
-	srv.retryInterval = time.Hour
 	ctx := context.Background()
 	opts := reqOpts{revision: 2, primary: true, raid1: true, twoLegs: true}
 	syncupBoth(t, srv, opts)
@@ -4121,58 +4218,44 @@ func TestGroupNeverAddsAnUnavailableLeg(t *testing.T) {
 	}
 	assertOk(t, reply.GetCntlrInfo().GetGrpIdToMdRaid()[testDataGrp],
 		"grp data, leg 2 unavailable")
-	if !retrying(t, srv) {
-		t.Fatalf("the unavailable member registered no retry")
+	held := cntlrReq(opts)
+	round, resent := resendRound(t, srv, held, "leg-late")
+	assertCodeZero(t, "the read while leg 2 does not serve", round)
+	if resent != nil {
+		t.Fatalf("the round re-sent the request for a leg that does not " +
+			"serve")
 	}
 
-	// Non-vacuity: available again, the same converge adds it.
+	// Non-vacuity: available again and probed, the read names the member
+	// and the re-send adds it.
 	node.setAnaState(nqn2, testIp2, testSvcId2, "optimized")
+	probeAllLegs(t, srv)
 	node.Reset()
-	if _, err := srv.SyncupCntlr(ctx, cntlrReq(opts)); err != nil {
-		t.Fatalf("SyncupCntlr: %v", err)
+	add := "cmd mdadm " + mdDev + " --add --failfast " + leg2
+	round, resent = resendRound(t, srv, held, "leg-serves")
+	assertCodeNames(t, "the read once leg 2 serves", round,
+		legName(srv, testDataLeg2))
+	if resent == nil {
+		t.Fatalf("the round that names the member brought no re-send")
 	}
-	if !node.hasCall("cmd mdadm " + mdDev + " --add --failfast " + leg2) {
-		t.Fatalf("leg 2, available again, was not added")
+	if got := tracedCalls(node, "leg-serves", add); len(got) != 1 {
+		t.Fatalf("leg 2, available again, was added %d times under the "+
+			"round's trace id, want once", len(got))
 	}
-	if retrying(t, srv) {
-		t.Fatalf("the retry outlived its last late member")
+	round, resent = resendRound(t, srv, held, "after-the-add")
+	assertCodeZero(t, "the read after the add", round)
+	if resent != nil {
+		t.Errorf("the round after the add re-sent the request")
 	}
 }
 
 // ---------------------------------------------------------------------------
-// CN10/CN12 — a late leg_list member registers the background retry
+// CN12, CN30 — a late leg_list member, and the name a read gives its group
+// once it serves
 // ---------------------------------------------------------------------------
-
-// retrying reads the fixture cntlr's CN10 registration under s.mu, the lock
-// that guards it.
-func retrying(t *testing.T, srv *CnAgentServer) bool {
-	t.Helper()
-	st := srv.getCntlr(cntlrKey(testCluster, testCn, testSp, testCntlr))
-	if st == nil {
-		t.Fatalf("the fixture cntlr is not known")
-	}
-	srv.mu.Lock()
-	defer srv.mu.Unlock()
-	return st.retrying
-}
-
-// retryAttempt runs one attempt of the CN10 background retry by hand: the
-// call connectRetryLoop makes on each tick, on the ctx it makes it on. The
-// tests that use it set a retryInterval no test outlives, so the loop itself
-// never fires and every attempt is one the test ran.
-func retryAttempt(t *testing.T, srv *CnAgentServer) {
-	t.Helper()
-	key := cntlrKey(testCluster, testCn, testSp, testCntlr)
-	st := srv.getCntlr(key)
-	if st == nil {
-		t.Fatalf("the fixture cntlr is not known")
-	}
-	srv.reconvergeCntlr(srv.rootCtx, key, st)
-}
 
 // probedCntlrInfo is the fixture cntlr's rows as one read of it probes them,
-// read back with a GetCntlrInfo: how a test reads the node after a converge
-// that, like a retry attempt, has no reply.
+// read back with a GetCntlrInfo.
 func probedCntlrInfo(t *testing.T, srv *CnAgentServer) *pb.CntlrInfo {
 	t.Helper()
 	refreshTestCntlr(t, srv)
@@ -4185,21 +4268,22 @@ func probedCntlrInfo(t *testing.T, srv *CnAgentServer) *pb.CntlrInfo {
 	return reply.GetCntlrInfo()
 }
 
-// TestLateMembersRegisterTheRetry pins the late-member retry (CN12).
-// The worker's sides-first hold is bounded ([D16]), so a promoted standby can
-// still read its legs before the sides' ANA flips have reached its sysfs: the
-// paths are live but still non-optimized, those legs are not available, and a
-// group left with no available leg reports "no available leg" with no mdadm
-// run. Nothing re-drives that converge — the worker re-syncs on a revision or a
-// reply code, never on a row — so it registers the CN10 retry itself. A late
-// member in any group registers it, not just one in the last group the pass
-// converges: "meta only" leaves the meta group, which the pass converges before
-// the data group, late and the data group whole. An attempt that still finds a
-// member late keeps the retry, since the sides' flips can take longer than one
-// CnConnectRetryInterval. Once the paths read optimized, the retry's next
-// attempt assembles the late arrays and builds the stack above them, and, with
-// no member late, stops the retry.
-func TestLateMembersRegisterTheRetry(t *testing.T) {
+// TestLateMembersAreNamedOnceTheyServe pins what re-drives a promotion that
+// came before the sides' ANA flips (CN12, CN30). The worker's sides-first
+// hold is bounded ([D16]), so a promoted standby can still read its legs
+// before the flips have reached its sysfs: the paths are live but still
+// non-optimized, those legs are not available, and a group left with no
+// available leg reports "no available leg" with no mdadm run. Only a
+// converge assembles it, and the worker brings one only on a reply's code or
+// a new revision (dnv-worker.md RW4). While the members are late a read
+// names nothing, so nothing is re-sent and nothing runs between the
+// worker's calls. Once the paths read optimized, a read names each late
+// group's absent array (absentArrayNamed), in any group, not just the last
+// one the pass converges: "meta only" leaves the meta group, which the pass
+// converges before the data group, late and the data group whole. The one
+// re-send the worker sends on that round assembles the late arrays and
+// builds the stack above them, and the read after it names nothing.
+func TestLateMembersAreNamedOnceTheyServe(t *testing.T) {
 	for _, tc := range []struct {
 		name string
 		// late are the legs whose paths read non-optimized until the flip,
@@ -4216,7 +4300,6 @@ func TestLateMembersRegisterTheRetry(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			srv, node := newTestServer(t)
-			srv.retryInterval = time.Hour
 			ctx := context.Background()
 			opts := func(revision uint64, primary bool) reqOpts {
 				return reqOpts{revision: revision, primary: primary,
@@ -4256,7 +4339,9 @@ func TestLateMembersRegisterTheRetry(t *testing.T) {
 			setAna("non-optimized")
 
 			node.Reset()
-			reply, err := srv.SyncupCntlr(ctx, cntlrReq(opts(4, true)))
+			node.forgetTraces()
+			held := cntlrReq(opts(4, true))
+			reply, err := srv.SyncupCntlr(traced("promote"), held)
 			if err != nil {
 				t.Fatalf("promote: %v", err)
 			}
@@ -4264,36 +4349,66 @@ func TestLateMembersRegisterTheRetry(t *testing.T) {
 				t.Fatalf("rejected: %v", reply.GetAgentReply())
 			}
 			rows := reply.GetCntlrInfo().GetGrpIdToMdRaid()
+			absent := map[uint64]string{}
 			for _, grpId := range tc.lateGrps {
 				assertErrorDetails(t, rows[grpId], "no available leg",
 					fmt.Sprintf("grp %d before the flip", grpId))
+				absent[grpId] = agent.LeftoverKindMdAbsent + ":" +
+					rows[grpId].GetResName()
 			}
 			for _, grpId := range tc.wholeGrps {
 				assertOk(t, rows[grpId],
 					fmt.Sprintf("grp %d before the flip", grpId))
 			}
 			assertAssembled(tc.wholeGrps, "the promotion")
-			if !retrying(t, srv) {
-				t.Fatalf("a promotion that found a group with no available " +
-					"leg registered no retry: nothing else would ever " +
-					"assemble it")
-			}
 
-			// An attempt that still finds a member late keeps the retry: the
-			// sides' flips can take longer than one CnConnectRetryInterval.
-			node.Reset()
-			retryAttempt(t, srv)
-			assertAssembled(nil, "an attempt before the flip")
-			if !retrying(t, srv) {
-				t.Fatalf("an attempt that still found a member late " +
-					"stopped the retry")
+			// Before the flips no read names anything a converge would
+			// cure, so the worker re-sends nothing, and nothing runs
+			// between its calls; the sides' flips can take many rounds.
+			own := []string{"promote"}
+			for i := 0; i < 3; i++ {
+				id := fmt.Sprintf("late-%d", i)
+				own = append(own, id)
+				node.Reset()
+				round, resent := resendRound(t, srv, held, id)
+				assertCodeZero(t, id, round)
+				if resent != nil {
+					t.Fatalf("%s re-sent the request while the members "+
+						"are late", id)
+				}
+				assertAssembled(nil, id)
 			}
+			assertNothingRunsBetweenCalls(t, node, own...)
 
 			setAna("optimized")
 			node.Reset()
-			retryAttempt(t, srv)
-			assertAssembled(tc.lateGrps, "the attempt after the flip")
-			info := probedCntlrInfo(t, srv)
+			round, resent := resendRound(t, srv, held, "after-the-flip")
+			var want []string
+			for _, grpId := range tc.lateGrps {
+				want = append(want, absent[grpId])
+			}
+			assertCodeNames(t, "the read after the flip", round, want...)
+			for _, grpId := range tc.wholeGrps {
+				name := agent.LeftoverKindMdAbsent + ":" +
+					rows[grpId].GetResName()
+				if strings.Contains(round.GetAgentReply().GetDetails(),
+					name) {
+					t.Fatalf("the read names the running array %s", name)
+				}
+			}
+			if resent == nil {
+				t.Fatalf("the round that names the absent arrays brought " +
+					"no re-send")
+			}
+			assertAssembled(tc.lateGrps, "the re-send after the flip")
+			for _, grpId := range tc.lateGrps {
+				if !tracedCall(node, "after-the-flip",
+					"mdadm --assemble "+mdDevOf[grpId]+" ") {
+					t.Fatalf("grp %d was not assembled under the round's "+
+						"trace id", grpId)
+				}
+			}
+			info := resent.GetCntlrInfo()
 			assertOk(t, info.GetGrpIdToMdRaid()[testMetaGrp],
 				"grp meta after the flip")
 			assertOk(t, info.GetGrpIdToMdRaid()[testDataGrp],
@@ -4301,9 +4416,13 @@ func TestLateMembersRegisterTheRetry(t *testing.T) {
 			assertOk(t, info.GetTdIdToRaid0()[testTd], "raid0 after the flip")
 			assertOk(t, info.GetNsIdToDmLinear()[testNs],
 				"ns-dev after the flip")
-			if retrying(t, srv) {
-				t.Fatalf("the retry outlived its last late member")
+			own = append(own, "after-the-flip", "after-the-assembly")
+			round, resent = resendRound(t, srv, held, "after-the-assembly")
+			assertCodeZero(t, "the read after the assembly", round)
+			if resent != nil {
+				t.Errorf("the round after the assembly re-sent the request")
 			}
+			assertNothingRunsBetweenCalls(t, node, own...)
 		})
 	}
 }
@@ -4311,16 +4430,17 @@ func TestLateMembersRegisterTheRetry(t *testing.T) {
 // TestLateMembersProbeMissingWithoutTd pins the agent half of the worker's
 // settle (dnv-worker.md HL2, primaryShapeBuilt): a primary with no td whose
 // promotion found its members late reads its groups and pool ERROR in the
-// SyncupCntlr reply, but a read before the retry's first attempt probes
-// those devices absent and reads them MISSING "", not ERROR, and the Check
-// round after it answers that (dnagent.md SH29). That
-// reply, at the driven revision with an accepted code, then carries no ERROR
-// and no PROVISIONING row outside the leg rows: only its MISSING rows say the
-// stack is not built. A td would keep an ERROR row, its raid0 over the absent
-// thins, which is why this SP has none.
+// SyncupCntlr reply, but a read probes those devices absent and reads them
+// MISSING "", not ERROR, and the Check round after it answers that
+// (dnagent.md SH29) with code zero, since nothing a converge would cure is
+// named while the members are late. That reply, at the driven revision,
+// then carries no ERROR and no PROVISIONING row outside the leg rows: only
+// its MISSING rows say the stack is not built. A td would keep an ERROR row,
+// its raid0 over the absent thins, which is why this SP has none. Once the
+// members serve, a read names both groups' absent arrays, and the one
+// re-send builds the stack.
 func TestLateMembersProbeMissingWithoutTd(t *testing.T) {
 	srv, node := newTestServer(t)
-	srv.retryInterval = time.Hour
 	ctx := context.Background()
 	opts := func(revision uint64, primary bool) reqOpts {
 		return reqOpts{revision: revision, primary: primary, raid1: true,
@@ -4341,13 +4461,13 @@ func TestLateMembersProbeMissingWithoutTd(t *testing.T) {
 	if reply.GetAgentReply().GetCode() != 0 {
 		t.Fatalf("rejected: %v", reply.GetAgentReply())
 	}
+	var absent []string
 	for _, grpId := range []uint64{testMetaGrp, testDataGrp} {
-		assertErrorDetails(t,
-			reply.GetCntlrInfo().GetGrpIdToMdRaid()[grpId],
-			"no available leg", fmt.Sprintf("grp %d in the promotion", grpId))
-	}
-	if !retrying(t, srv) {
-		t.Fatalf("the promotion registered no retry")
+		row := reply.GetCntlrInfo().GetGrpIdToMdRaid()[grpId]
+		assertErrorDetails(t, row, "no available leg",
+			fmt.Sprintf("grp %d in the promotion", grpId))
+		absent = append(absent,
+			agent.LeftoverKindMdAbsent+":"+row.GetResName())
 	}
 
 	refreshTestCntlr(t, srv)
@@ -4355,10 +4475,11 @@ func TestLateMembersProbeMissingWithoutTd(t *testing.T) {
 		ClusterId: testCluster, CnId: testCn,
 		CntlrPointer: cntlrPtr(), Revision: 4,
 	}, nil)
-	if code := check.GetAgentReply().GetCode(); (code != 0 &&
-		code != common.ReplyCodeLeftover) || check.GetRevision() != 4 {
-		t.Fatalf("check round: code %d, revision %d, want an accepted "+
-			"code at revision 4", code, check.GetRevision())
+	if code := check.GetAgentReply().GetCode(); code != 0 ||
+		check.GetRevision() != 4 {
+		t.Fatalf("check round: code %d (%s), revision %d, want code 0 at "+
+			"revision 4", code, check.GetAgentReply().GetDetails(),
+			check.GetRevision())
 	}
 	for label, res := range map[string]*pb.ResInfo{
 		"grp meta":  info.GetGrpIdToMdRaid()[testMetaGrp],
@@ -4396,25 +4517,45 @@ func TestLateMembersProbeMissingWithoutTd(t *testing.T) {
 			}
 		}
 	}
+
+	for _, legId := range []uint64{testMetaLeg, testDataLeg} {
+		node.setAnaState(srv.nf.SideToCnNqn(testCluster, testSp, legId,
+			testCn), testIp, testSvcId, "optimized")
+	}
+	held := cntlrReq(opts(4, true))
+	round, resent := resendRound(t, srv, held, "after-the-flip")
+	assertCodeNames(t, "the read after the flip", round, absent...)
+	if resent == nil {
+		t.Fatalf("the round that names the absent arrays brought no " +
+			"re-send")
+	}
+	for _, grpId := range []uint64{testMetaGrp, testDataGrp} {
+		assertOk(t, resent.GetCntlrInfo().GetGrpIdToMdRaid()[grpId],
+			fmt.Sprintf("grp %d after the re-send", grpId))
+	}
+	round, resent = resendRound(t, srv, held, "after-the-assembly")
+	assertCodeZero(t, "the read after the assembly", round)
+	if resent != nil {
+		t.Errorf("the round after the assembly re-sent the request")
+	}
 }
 
-// TestLateMemberRefusedStartIsAssembledByTheRetry is
-// TestLateMembersRegisterTheRetry with one member of a two-leg group late
-// after a clean demote, the shape a failover leaves ([D16]). The demote stops
-// the array with both superblocks still counting both members, so case 2's
-// start from the available member alone, without --run, is refused: the
-// group reads ERROR with mdadm's own words, and the late member registers the
-// retry. An attempt while it is still late is refused the same way, runs no
-// --create and keeps the retry; the attempt after its path reads optimized
-// assembles the array from both members, adds nothing and stops the retry.
-// Both members' superblocks carry the role table that counts both, and the
-// fake's mdadm keeps mdadm's degraded gate (fakeAssemblyStarts); like mdadm,
-// which stops an array whose start it refused, its refusal leaves no array.
-// A read names the absent array (absentArrayNamed, CN30) only once leg 2
-// serves: before, the gate it reads refuses the start as mdadm does.
-func TestLateMemberRefusedStartIsAssembledByTheRetry(t *testing.T) {
+// TestLateMemberRefusedStartIsNamedOnceItServes is
+// TestLateMembersAreNamedOnceTheyServe with one member of a two-leg group
+// late after a clean demote, the shape a failover leaves ([D16]). The demote
+// stops the array with both superblocks still counting both members, so case
+// 2's start from the available member alone, without --run, is refused: the
+// group reads ERROR with mdadm's own words, and no --create runs. Both
+// members' superblocks carry the role table that counts both, and the fake's
+// mdadm keeps mdadm's degraded gate (fakeAssemblyStarts); like mdadm, which
+// stops an array whose start it refused, its refusal leaves no array. A read
+// names the absent array (absentArrayNamed, CN30) only once leg 2 serves:
+// before, the gate it reads refuses the start as mdadm does, so nothing is
+// re-sent and nothing runs between the worker's calls. The one re-send on
+// the round after the flip assembles the array from both members and adds
+// nothing, and the read after it names nothing.
+func TestLateMemberRefusedStartIsNamedOnceItServes(t *testing.T) {
 	srv, node := newTestServer(t)
-	srv.retryInterval = time.Hour
 	ctx := context.Background()
 	opts := func(revision uint64, primary bool) reqOpts {
 		return reqOpts{revision: revision, primary: primary, raid1: true,
@@ -4454,7 +4595,9 @@ func TestLateMemberRefusedStartIsAssembledByTheRetry(t *testing.T) {
 	}
 
 	node.Reset()
-	reply, err := srv.SyncupCntlr(ctx, cntlrReq(opts(4, true)))
+	node.forgetTraces()
+	held := cntlrReq(opts(4, true))
+	reply, err := srv.SyncupCntlr(traced("promote"), held)
 	if err != nil {
 		t.Fatalf("promote: %v", err)
 	}
@@ -4468,40 +4611,39 @@ func TestLateMemberRefusedStartIsAssembledByTheRetry(t *testing.T) {
 			"exactly %q, got %q", lone, started)
 	}
 	assertNoCall(t, node, "cmd mdadm --create")
-	if !retrying(t, srv) {
-		t.Fatalf("a refused start beside a late member registered no " +
-			"retry: nothing else would ever assemble the array")
-	}
-
-	// An attempt that still finds the member late is refused the same way
-	// and keeps the retry.
-	node.Reset()
-	retryAttempt(t, srv)
-	if got := node.callsMatching("cmd " + start); len(got) != 1 ||
-		got[0] != lone {
-		t.Fatalf("an attempt before the flip ran the starts %q of the data "+
-			"array, want exactly %q", got, lone)
-	}
-	assertNoCall(t, node, "cmd mdadm --create")
-	if !retrying(t, srv) {
-		t.Fatalf("an attempt that still found a member late stopped the " +
-			"retry")
-	}
 	if absentNamed() {
 		t.Fatalf("a read names the absent array while mdadm's gate " +
 			"refuses its start")
 	}
 
-	node.setAnaState(nqn2, testIp2, testSvcId2, "optimized")
-	if !absentNamed() {
-		t.Fatalf("a read after the flip does not name the absent array")
+	// Rounds while the member is late re-send nothing, and nothing runs
+	// between the worker's calls.
+	own := []string{"promote"}
+	for i := 0; i < 2; i++ {
+		id := fmt.Sprintf("late-%d", i)
+		own = append(own, id)
+		node.Reset()
+		round, resent := resendRound(t, srv, held, id)
+		assertCodeZero(t, id, round)
+		if resent != nil {
+			t.Fatalf("%s re-sent the request while leg 2 is late", id)
+		}
+		assertNoCall(t, node, "cmd "+start)
 	}
+	assertNothingRunsBetweenCalls(t, node, own...)
+
+	node.setAnaState(nqn2, testIp2, testSvcId2, "optimized")
 	node.Reset()
-	retryAttempt(t, srv)
-	started = node.callsMatching("cmd " + start)
+	round, resent := resendRound(t, srv, held, "after-the-flip")
+	assertCodeNames(t, "the read after the flip", round,
+		agent.LeftoverKindMdAbsent+":"+mdDev)
+	if resent == nil {
+		t.Fatalf("the round that names the absent array brought no re-send")
+	}
+	started = tracedCalls(node, "after-the-flip", "cmd "+start)
 	if len(started) != 1 || started[0] != both {
-		t.Fatalf("want one assembly of the data array from both legs, "+
-			"exactly %q, got %q:\n%s", both, started,
+		t.Fatalf("want one assembly of the data array from both legs under "+
+			"the round's trace id, exactly %q, got %q:\n%s", both, started,
 			strings.Join(node.Calls(), "\n"))
 	}
 	assertNoCall(t, node, "cmd mdadm "+mdDev+" --add")
@@ -4512,27 +4654,33 @@ func TestLateMemberRefusedStartIsAssembledByTheRetry(t *testing.T) {
 	info := probedCntlrInfo(t, srv)
 	assertOk(t, info.GetGrpIdToMdRaid()[testDataGrp], "grp data after the flip")
 	assertOk(t, info.GetNsIdToDmLinear()[testNs], "ns-dev after the flip")
-	if retrying(t, srv) {
-		t.Fatalf("the retry outlived its last late member")
+	if absentNamed() {
+		t.Fatalf("a read after the assembly still names the absent array")
 	}
+	round, resent = resendRound(t, srv, held, "after-the-assembly")
+	assertCodeZero(t, "the read after the assembly", round)
+	if resent != nil {
+		t.Errorf("the round after the assembly re-sent the request")
+	}
+	own = append(own, "after-the-flip", "after-the-assembly")
+	assertNothingRunsBetweenCalls(t, node, own...)
 }
 
-// TestLateMemberIsAddedByTheRetry is the other shape of one late member in a
-// two-leg group: md had failed and removed leg 2's member on the old primary
-// before the demote stopped the array, so leg 1's superblock no longer
-// counts it, and case 2's start from leg 1 alone is one mdadm allows
-// (cnagent.md CN12). The promotion
-// starts the array degraded and reports the group
-// OK, but leg 2 — late — still has to be added, and that --add is the
-// retry's: an attempt while it is still late adds nothing and keeps the
-// retry, and the attempt after its path reads optimized adds it and stops
-// the retry. (The fake's superblocks of a create record each member's own
-// place alone as working, so the fake's mdadm starts the array from any one
-// member; the --fail and --remove are what make the fixture the shape that
-// outcome belongs to.)
-func TestLateMemberIsAddedByTheRetry(t *testing.T) {
+// TestLateMemberIsAddedOnceItServes is the other shape of one late member in
+// a two-leg group: md had failed and removed leg 2's member on the old
+// primary before the demote stopped the array, so leg 1's superblock no
+// longer counts it, and case 2's start from leg 1 alone is one mdadm allows
+// (cnagent.md CN12). The promotion starts the array degraded and reports the
+// group OK, but leg 2 — late — still has to be added. While it is late no
+// read names it, so nothing is re-sent; once its path reads optimized and
+// its row reads OK, a read names the member (CN30), the one re-send the
+// worker sends on that round runs exactly its --add, and the read after it
+// names nothing. (The fake's superblocks of a create record each member's
+// own place alone as working, so the fake's mdadm starts the array from any
+// one member; the --fail and --remove are what make the fixture the shape
+// that outcome belongs to.)
+func TestLateMemberIsAddedOnceItServes(t *testing.T) {
 	srv, node := newTestServer(t)
-	srv.retryInterval = time.Hour
 	ctx := context.Background()
 	opts := func(revision uint64, primary bool) reqOpts {
 		return reqOpts{revision: revision, primary: primary, raid1: true,
@@ -4556,7 +4704,8 @@ func TestLateMemberIsAddedByTheRetry(t *testing.T) {
 	node.setAnaState(nqn2, testIp2, testSvcId2, "non-optimized")
 
 	node.Reset()
-	reply, err := srv.SyncupCntlr(ctx, cntlrReq(opts(4, true)))
+	held := cntlrReq(opts(4, true))
+	reply, err := srv.SyncupCntlr(ctx, held)
 	if err != nil {
 		t.Fatalf("promote: %v", err)
 	}
@@ -4571,40 +4720,44 @@ func TestLateMemberIsAddedByTheRetry(t *testing.T) {
 			"got %q", assembled)
 	}
 	assertNoCall(t, node, "cmd mdadm "+mdDev+" --add")
-	if !retrying(t, srv) {
-		t.Fatalf("an array assembled without a late member registered no " +
-			"retry: nothing else would ever add it")
-	}
 
-	// An attempt that still finds the member late adds nothing and keeps
-	// the retry.
+	// A round while the member is late names nothing and re-sends nothing.
 	node.Reset()
-	retryAttempt(t, srv)
-	assertNoCall(t, node, "cmd mdadm "+mdDev+" --add")
-	assertNoCall(t, node, "cmd mdadm --assemble")
-	if !retrying(t, srv) {
-		t.Fatalf("an attempt that still found a member late stopped the " +
-			"retry")
+	round, resent := resendRound(t, srv, held, "late")
+	assertCodeZero(t, "the read while leg 2 is late", round)
+	if resent != nil {
+		t.Fatalf("the round re-sent the request while leg 2 is late")
 	}
+	assertNoCall(t, node, "cmd mdadm "+mdDev+" --add")
 
 	node.setAnaState(nqn2, testIp2, testSvcId2, "optimized")
+	probeAllLegs(t, srv)
 	node.Reset()
-	retryAttempt(t, srv)
-	if !node.hasCall("cmd mdadm " + mdDev + " --add --failfast " + leg2) {
-		t.Fatalf("the retry did not add leg 2:\n%s",
-			strings.Join(node.Calls(), "\n"))
+	add := "cmd mdadm " + mdDev + " --add --failfast " + leg2
+	round, resent = resendRound(t, srv, held, "after-the-flip")
+	assertCodeNames(t, "the read after the flip", round,
+		legName(srv, testDataLeg2))
+	if resent == nil {
+		t.Fatalf("the round that names the member brought no re-send")
+	}
+	if got := node.callsMatching("cmd mdadm " + mdDev + " "); !slices.Equal(
+		got, []string{add}) || !tracedCall(node, "after-the-flip", add) {
+		t.Fatalf("the re-send ran %q, want exactly %q under the round's "+
+			"trace id", got, add)
 	}
 	assertNoCall(t, node, "cmd mdadm --assemble")
 	if got := node.arrays[mdDev].members; !slices.Equal(got,
 		[]string{leg1, leg2}) {
 		t.Fatalf("the array holds %v, want both legs", got)
 	}
-	if retrying(t, srv) {
-		t.Fatalf("the retry outlived its last late member")
+	round, resent = resendRound(t, srv, held, "after-the-add")
+	assertCodeZero(t, "the read after the add", round)
+	if resent != nil {
+		t.Errorf("the round after the add re-sent the request")
 	}
 }
 
-// TestLateRedundNoneLegsWaitForTheRetry is the same for a RedundNone SP,
+// TestLateRedundNoneLegsAreNamedOnceTheyServe is the same for a RedundNone SP,
 // redund_conf's default (CN12): a group's dm-linear is created only over an
 // available leg, since the layers above do IO through it and a side that has
 // not flipped to this CN yet exports dm-error to it. A promotion whose meta
@@ -4613,11 +4766,13 @@ func TestLateMemberIsAddedByTheRetry(t *testing.T) {
 // and keeps the namespace inaccessible with its ns-dev parked, so the hosts
 // wait rather than read IO errors from the late leg's blocks (CN16); "data
 // only" is the case whose pool could be built, its metadata read through
-// the meta leg that has flipped. The late member registers the CN10 retry; an
-// attempt while a leg is still late keeps it, and the attempt after the
-// paths read optimized builds the late groups and the stack, puts the ns-dev
-// on the raid0, only then moves the namespace optimized, and stops it.
-func TestLateRedundNoneLegsWaitForTheRetry(t *testing.T) {
+// the meta leg that has flipped. While a leg is late no read names anything,
+// so nothing is re-sent. Once the paths read optimized, a read names each
+// late group's dm-linear (linearGroupStep, CN30), and the one re-send the
+// worker sends on that round builds the late groups and the stack, puts the
+// ns-dev on the raid0 and only then moves the namespace optimized; the read
+// after it names nothing.
+func TestLateRedundNoneLegsAreNamedOnceTheyServe(t *testing.T) {
 	for _, tc := range []struct {
 		name string
 		// late are the legs whose paths read non-optimized until the flip,
@@ -4636,7 +4791,6 @@ func TestLateRedundNoneLegsWaitForTheRetry(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			srv, node := newTestServer(t)
-			srv.retryInterval = time.Hour
 			ctx := context.Background()
 			syncupBoth(t, srv, reqOpts{revision: 2, primary: true})
 			if _, err := srv.SyncupCntlr(ctx,
@@ -4677,16 +4831,11 @@ func TestLateRedundNoneLegsWaitForTheRetry(t *testing.T) {
 				assertNoCall(t, node, ana+"1")
 				assertAna(t, node, testNqn, "3", label)
 				assertParked(t, srv, node, testNs, testTd, label)
-				if !retrying(t, srv) {
-					t.Fatalf("%s: a late RedundNone leg registered no "+
-						"retry: nothing else would ever build its group",
-						label)
-				}
 			}
 
 			node.Reset()
-			reply, err := srv.SyncupCntlr(ctx,
-				cntlrReq(reqOpts{revision: 4, primary: true}))
+			held := cntlrReq(reqOpts{revision: 4, primary: true})
+			reply, err := srv.SyncupCntlr(ctx, held)
 			if err != nil {
 				t.Fatalf("promote: %v", err)
 			}
@@ -4712,15 +4861,35 @@ func TestLateRedundNoneLegsWaitForTheRetry(t *testing.T) {
 				"the promotion's namespace row")
 
 			node.Reset()
-			retryAttempt(t, srv)
-			assertWaiting("an attempt before the flip")
+			round, resent := resendRound(t, srv, held, "late")
+			assertCodeZero(t, "the read before the flip", round)
+			if resent != nil {
+				t.Fatalf("the round before the flip re-sent the request")
+			}
+			assertWaiting("the read before the flip")
 
 			setAna("optimized")
 			node.Reset()
-			retryAttempt(t, srv)
+			round, resent = resendRound(t, srv, held, "after-the-flip")
+			var linears []string
+			for _, grpId := range tc.lateGrps {
+				linears = append(linears, grpName(srv, grpId)+": ")
+			}
+			assertCodeNames(t, "the read after the flip", round, linears...)
+			if resent == nil {
+				t.Fatalf("the round that names the dm-linears brought no " +
+					"re-send")
+			}
 			raid0No := devNoOf(node, raid0Name(srv, testTd))
 			if raid0No == "" {
-				t.Fatalf("the attempt after the flip built no raid0")
+				t.Fatalf("the re-send after the flip built no raid0")
+			}
+			for _, grpId := range tc.lateGrps {
+				if !tracedCall(node, "after-the-flip",
+					"dmsetup create "+grpName(srv, grpId)) {
+					t.Fatalf("group %d's dm-linear was not built under "+
+						"the round's trace id", grpId)
+				}
 			}
 			for _, grpId := range tc.lateGrps {
 				assertOrder(t, node,
@@ -4731,7 +4900,7 @@ func TestLateRedundNoneLegsWaitForTheRetry(t *testing.T) {
 						" --table "+nsDevTableOn(raid0No),
 					ana+"1")
 			}
-			assertAna(t, node, testNqn, "1", "the attempt after the flip")
+			assertAna(t, node, testNqn, "1", "the re-send after the flip")
 			info := probedCntlrInfo(t, srv)
 			for _, grpId := range []uint64{testMetaGrp, testDataGrp} {
 				assertOk(t, info.GetGrpIdToMdRaid()[grpId],
@@ -4743,8 +4912,10 @@ func TestLateRedundNoneLegsWaitForTheRetry(t *testing.T) {
 				"ns-dev after the flip")
 			assertOk(t, info.GetNsIdToNamespace()[testNs],
 				"namespace after the flip")
-			if retrying(t, srv) {
-				t.Fatalf("the retry outlived its last late leg")
+			round, resent = resendRound(t, srv, held, "after-the-build")
+			assertCodeZero(t, "the read after the build", round)
+			if resent != nil {
+				t.Errorf("the round after the build re-sent the request")
 			}
 		})
 	}
@@ -4754,11 +4925,12 @@ func TestLateRedundNoneLegsWaitForTheRetry(t *testing.T) {
 // rule (CN12): a primary that serves keeps a RedundNone group's dm-linear
 // that has the table it wants whatever its leg's availability — no
 // teardown, no reload, no suspend — so it goes on serving through a short
-// loss of the leg's path, its namespace optimized, while the late member
-// registers the CN10 retry. A dm-linear that maps something else is not
-// reloaded over a late leg either: the group reads "no available leg", and
-// the attempt after the leg reads optimized again reloads it. Either way that
-// attempt ends the retry.
+// loss of the leg's path, its namespace optimized, and no read names it. A
+// dm-linear that maps something else is not reloaded over a late leg
+// either: the group reads "no available leg", and no read names it while the
+// leg does not serve. Once the leg reads optimized again, a read names the
+// drifted dm-linear (linearGroupStep, CN30), and the one re-send reloads it;
+// the kept one is named by nothing and nothing is re-sent for it.
 func TestARedundNoneGroupKeepsItsDeviceOverALateLeg(t *testing.T) {
 	for _, tc := range []struct {
 		name  string
@@ -4773,7 +4945,6 @@ func TestARedundNoneGroupKeepsItsDeviceOverALateLeg(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			srv, node := newTestServer(t)
-			srv.retryInterval = time.Hour
 			syncupBoth(t, srv, reqOpts{revision: 2, primary: true})
 			assertAna(t, node, testNqn, "1", "the fixture")
 			grp := grpName(srv, tc.grpId)
@@ -4793,8 +4964,8 @@ func TestARedundNoneGroupKeepsItsDeviceOverALateLeg(t *testing.T) {
 			node.setAnaState(nqn, testIp, testSvcId, "non-optimized")
 
 			node.Reset()
-			reply, err := srv.SyncupCntlr(context.Background(),
-				cntlrReq(reqOpts{revision: 3, primary: true}))
+			held := cntlrReq(reqOpts{revision: 3, primary: true})
+			reply, err := srv.SyncupCntlr(context.Background(), held)
 			if err != nil {
 				t.Fatalf("SyncupCntlr: %v", err)
 			}
@@ -4818,48 +4989,72 @@ func TestARedundNoneGroupKeepsItsDeviceOverALateLeg(t *testing.T) {
 			}
 			assertNoCall(t, node, "writedirect "+anaPath(testNqn, 1)+"=")
 			assertAna(t, node, testNqn, "1", "the primary over a late leg")
-			if !retrying(t, srv) {
-				t.Fatalf("a late RedundNone leg registered no retry")
+			round, resent := resendRound(t, srv, held, "late")
+			assertRowNotNamed(t, round.GetAgentReply(), "the read over the "+
+				"late leg", grp)
+			if resent != nil {
+				t.Fatalf("the round over the late leg re-sent the request: "+
+					"%v", round.GetAgentReply())
 			}
 
 			node.setAnaState(nqn, testIp, testSvcId, "optimized")
 			node.Reset()
-			retryAttempt(t, srv)
+			round, resent = resendRound(t, srv, held, "after-the-flip")
 			if tc.drift {
-				assertOrder(t, node, "cmd dmsetup reload "+grp)
+				assertCodeNames(t, "the read after the flip", round,
+					grp+": ")
+				if resent == nil {
+					t.Fatalf("the round that names the dm-linear brought " +
+						"no re-send")
+				}
+				if !tracedCall(node, "after-the-flip",
+					"dmsetup reload "+grp) {
+					t.Fatalf("the re-send did not reload the dm-linear "+
+						"under the round's trace id: %q", node.Calls())
+				}
 			} else {
+				assertCodeZero(t, "the read after the flip", round)
+				if resent != nil {
+					t.Fatalf("the round after the flip re-sent the request")
+				}
 				assertNoCall(t, node, "cmd dmsetup reload "+grp)
 			}
 			if got := node.dms[grp].table; got != want {
 				t.Fatalf("the group's dm-linear is %q after the flip, "+
 					"want %q", got, want)
 			}
-			assertAna(t, node, testNqn, "1", "the attempt after the flip")
-			if retrying(t, srv) {
-				t.Fatalf("the retry outlived the late leg")
+			assertAna(t, node, testNqn, "1", "after the flip")
+			round, resent = resendRound(t, srv, held, "after-the-cure")
+			assertCodeZero(t, "the read after the flip's re-send", round)
+			if resent != nil {
+				t.Errorf("the round after the cure re-sent the request")
 			}
 		})
 	}
 }
 
-// TestLateMemberRetryScope pins what never counts as a late member (CN12):
-// each case holds an unavailable leg that TestLateMembersRegisterTheRetry
-// shows would register the retry as a member of a wanted group. A standby
-// wants no group (architecture.md, Standby cntlr) — its non-optimized paths
-// are its designed steady
-// state — and nor does a primary whose sp_level suppresses its groups
-// (CN19): at NO_SIDE, where no leg is wanted, every member would otherwise
-// read unavailable. A deferred group builds no array at all ([D15]), even
-// when its leg_list holds a provisioned member that is unavailable, and,
-// with no forced-start mark standing, a repair's new leg is never a late
-// member (CN12).
-func TestLateMemberRetryScope(t *testing.T) {
+// TestALateMemberOutOfScopeIsNotNamed pins where an unavailable leg is
+// named by nothing (CN12, CN30): each case holds an unavailable leg that
+// TestLateMembersAreNamedOnceTheyServe shows would have its group named,
+// once it serves, as a member of a wanted group. A standby wants no group
+// (architecture.md, Standby cntlr) — its non-optimized paths are its
+// designed steady state — and nor does a primary whose sp_level suppresses
+// its groups (CN19): at NO_SIDE, where no leg is wanted, every member would
+// otherwise read unavailable. A deferred group builds no array at all
+// ([D15]), even when its leg_list holds a provisioned member that is
+// unavailable, and a repair's new leg that does not serve is not named for
+// an add (CN12). In none of them does a read name anything, so the worker
+// re-sends nothing (dnv-worker.md RW4).
+func TestALateMemberOutOfScopeIsNotNamed(t *testing.T) {
 	for _, tc := range []struct {
 		name string
-		// setup builds the cntlr with the unavailable leg in place.
-		setup func(t *testing.T, srv *CnAgentServer, node *fakeNode)
+		// setup builds the cntlr with the unavailable leg in place and
+		// returns the request the worker holds.
+		setup func(t *testing.T, srv *CnAgentServer,
+			node *fakeNode) *pb.SyncupCntlrRequest
 	}{
-		{"standby", func(t *testing.T, srv *CnAgentServer, node *fakeNode) {
+		{"standby", func(t *testing.T, srv *CnAgentServer,
+			node *fakeNode) *pb.SyncupCntlrRequest {
 			for _, leg := range []struct {
 				legId       uint64
 				addr, svcId string
@@ -4871,38 +5066,42 @@ func TestLateMemberRetryScope(t *testing.T) {
 				node.setAnaState(srv.nf.SideToCnNqn(testCluster, testSp,
 					leg.legId, testCn), leg.addr, leg.svcId, "non-optimized")
 			}
-			reply := syncupBoth(t, srv, reqOpts{revision: 2, raid1: true,
-				twoLegs: true})
+			opts := reqOpts{revision: 2, raid1: true, twoLegs: true}
+			reply := syncupBoth(t, srv, opts)
 			assertOk(t, reply.GetCntlrInfo().GetLegIdToLeg()[testDataLeg2],
 				"standby leg 2, non-optimized")
 			assertNoCall(t, node, "cmd mdadm")
+			return cntlrReq(opts)
 		}},
 		{"NO_SIDE primary", func(t *testing.T, srv *CnAgentServer,
-			node *fakeNode) {
-			reply := syncupBoth(t, srv, reqOpts{revision: 2, primary: true,
-				raid1: true, twoLegs: true,
-				level: pb.SpLevel_SP_LEVEL_NO_SIDE})
+			node *fakeNode) *pb.SyncupCntlrRequest {
+			opts := reqOpts{revision: 2, primary: true, raid1: true,
+				twoLegs: true, level: pb.SpLevel_SP_LEVEL_NO_SIDE}
+			reply := syncupBoth(t, srv, opts)
 			assertMissingSpLevel(t,
 				reply.GetCntlrInfo().GetGrpIdToMdRaid()[testDataGrp],
 				"grp data")
+			return cntlrReq(opts)
 		}},
 		{"NO_REDUND primary", func(t *testing.T, srv *CnAgentServer,
-			node *fakeNode) {
+			node *fakeNode) *pb.SyncupCntlrRequest {
 			node.setAnaState(srv.nf.SideToCnNqn(testCluster, testSp,
 				testDataLeg2, testCn), testIp2, testSvcId2, "non-optimized")
-			reply := syncupBoth(t, srv, reqOpts{revision: 2, primary: true,
-				raid1: true, twoLegs: true,
-				level: pb.SpLevel_SP_LEVEL_NO_REDUND})
+			opts := reqOpts{revision: 2, primary: true, raid1: true,
+				twoLegs: true, level: pb.SpLevel_SP_LEVEL_NO_REDUND}
+			reply := syncupBoth(t, srv, opts)
 			assertMissingSpLevel(t,
 				reply.GetCntlrInfo().GetGrpIdToMdRaid()[testDataGrp],
 				"grp data")
+			return cntlrReq(opts)
 		}},
 		{"deferred group", func(t *testing.T, srv *CnAgentServer,
-			node *fakeNode) {
+			node *fakeNode) *pb.SyncupCntlrRequest {
 			node.setAnaState(srv.nf.SideToCnNqn(testCluster, testSp,
 				testDataLeg2, testCn), testIp2, testSvcId2, "non-optimized")
-			reply := syncupBoth(t, srv, reqOpts{revision: 2, primary: true,
-				raid1: true, twoLegs: true, unprovisionedDataLeg: true})
+			opts := reqOpts{revision: 2, primary: true, raid1: true,
+				twoLegs: true, unprovisionedDataLeg: true}
+			reply := syncupBoth(t, srv, opts)
 			info := reply.GetCntlrInfo()
 			assertProvisioning(t, info.GetGrpIdToMdRaid()[testDataGrp],
 				"grp data")
@@ -4910,13 +5109,15 @@ func TestLateMemberRetryScope(t *testing.T) {
 			// not available, not a provisioning one.
 			assertPending(t, info.GetLegIdToLeg()[testDataLeg2], "leg 2")
 			assertOk(t, info.GetGrpIdToMdRaid()[testMetaGrp], "grp meta")
+			return cntlrReq(opts)
 		}},
-		{"new leg", func(t *testing.T, srv *CnAgentServer, node *fakeNode) {
+		{"new leg", func(t *testing.T, srv *CnAgentServer,
+			node *fakeNode) *pb.SyncupCntlrRequest {
 			node.setAnaState(legNqn(srv, repNewLeg), testIp, testSvcId,
 				"non-optimized")
 			cnSyncup(t, srv, 2, true)
-			reply, err := srv.SyncupCntlr(context.Background(),
-				repairReq(2, pb.RepStage_REP_STAGE_CREATED, false))
+			held := repairReq(2, pb.RepStage_REP_STAGE_CREATED, false)
+			reply, err := srv.SyncupCntlr(context.Background(), held)
 			if err != nil {
 				t.Fatalf("SyncupCntlr: %v", err)
 			}
@@ -4926,54 +5127,63 @@ func TestLateMemberRetryScope(t *testing.T) {
 			}
 			assertOk(t, reply.GetCntlrInfo().GetGrpIdToMdRaid()[testDataGrp],
 				"grp data")
+			return held
 		}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			srv, node := newTestServer(t)
-			srv.retryInterval = time.Hour
-			tc.setup(t, srv, node)
-			if retrying(t, srv) {
-				t.Fatalf("%s: an unavailable leg registered the retry",
-					tc.name)
+			held := tc.setup(t, srv, node)
+			round, resent := resendRound(t, srv, held, "out-of-scope")
+			assertCodeZero(t, tc.name+": the read", round)
+			if resent != nil {
+				t.Fatalf("%s: the round re-sent the request for an "+
+					"unavailable leg no converge acts on", tc.name)
 			}
 		})
 	}
 }
 
-// TestLateMemberRetryScopeWantedGroups pins the other edge of that scope
-// (CN12): a late member of every group the pass builds counts, however little
-// the pass builds above that group. A primary at NO_THINPOOL wants its groups
-// but no pool (CN19): a group left unassembled reads ERROR, and without the
-// retry it waits for the cntlr's next converge for some other reason. A group
-// after [D15]'s prefix cut is not a concat target yet, but it is not deferred
-// either: the pass converges it, and its late leg leaves its dm-linear
-// unbuilt, so its member counts all the same — only gp.deferred excludes a
-// group, and effective() is not its negation.
-func TestLateMemberRetryScopeWantedGroups(t *testing.T) {
+// TestALateMemberOfAWantedGroupIsNamedOnceItServes pins the other edge of
+// that scope (CN12, CN30): a late member of every group the pass builds
+// counts, however little the pass builds above that group. A primary at
+// NO_THINPOOL wants its groups but no pool (CN19): a group left unassembled
+// reads ERROR, a read names nothing while its member is late, and once the
+// member serves a read names the group's absent array (absentArrayNamed). A
+// group after [D15]'s prefix cut is not a concat target yet, but it is not
+// deferred either: the pass converges it, its late leg leaves its dm-linear
+// unbuilt, and once the leg serves a read names that dm-linear
+// (linearGroupStep) — only gp.deferred excludes a group, and effective() is
+// not its negation. In both, the one re-send the worker sends on the round
+// that names the group builds it, and the read after it names nothing.
+func TestALateMemberOfAWantedGroupIsNamedOnceItServes(t *testing.T) {
 	for _, tc := range []struct {
 		name string
-		// setup builds the cntlr with the late member in place.
-		setup func(t *testing.T, srv *CnAgentServer, node *fakeNode)
+		// setup builds the cntlr with the late member in place and returns
+		// the request the worker holds, the late leg's path and the name a
+		// read gives the group once the leg serves.
+		setup func(t *testing.T, srv *CnAgentServer,
+			node *fakeNode) (*pb.SyncupCntlrRequest, string, string)
 	}{
 		{"NO_THINPOOL primary", func(t *testing.T, srv *CnAgentServer,
-			node *fakeNode) {
-			node.setAnaState(srv.nf.SideToCnNqn(testCluster, testSp,
-				testDataLeg2, testCn), testIp2, testSvcId2, "non-optimized")
-			reply := syncupBoth(t, srv, reqOpts{revision: 2, primary: true,
-				raid1: true, twoLegs: true,
-				level: pb.SpLevel_SP_LEVEL_NO_THINPOOL})
-			assertErrorDetails(t,
-				reply.GetCntlrInfo().GetGrpIdToMdRaid()[testDataGrp],
-				"only 1 of 2 legs available", "grp data, leg 2 late")
+			node *fakeNode) (*pb.SyncupCntlrRequest, string, string) {
+			nqn := srv.nf.SideToCnNqn(testCluster, testSp, testDataLeg2,
+				testCn)
+			node.setAnaState(nqn, testIp2, testSvcId2, "non-optimized")
+			opts := reqOpts{revision: 2, primary: true, raid1: true,
+				twoLegs: true, level: pb.SpLevel_SP_LEVEL_NO_THINPOOL}
+			reply := syncupBoth(t, srv, opts)
+			row := reply.GetCntlrInfo().GetGrpIdToMdRaid()[testDataGrp]
+			assertErrorDetails(t, row, "only 1 of 2 legs available",
+				"grp data, leg 2 late")
+			return cntlrReq(opts), nqn,
+				agent.LeftoverKindMdAbsent + ":" + row.GetResName()
 		}},
 		{"group past the [D15] cut", func(t *testing.T, srv *CnAgentServer,
-			node *fakeNode) {
+			node *fakeNode) (*pb.SyncupCntlrRequest, string, string) {
 			syncupBoth(t, srv, reqOpts{revision: 2, primary: true})
-			if retrying(t, srv) {
-				t.Fatalf("the fixture registered the retry before the grow")
-			}
-			node.setAnaState(srv.nf.SideToCnNqn(testCluster, testSp,
-				testDataLeg3, testCn), testIp2, testSvcId2, "non-optimized")
+			nqn := srv.nf.SideToCnNqn(testCluster, testSp, testDataLeg3,
+				testCn)
+			node.setAnaState(nqn, testIp2, testSvcId2, "non-optimized")
 			// TestOutOfOrderGrowDefersEveryLaterGroup's grow: group 2 is
 			// deferred, which cuts group 3 out of the concat.
 			grow := cntlrReq(reqOpts{revision: 3, primary: true})
@@ -4990,75 +5200,139 @@ func TestLateMemberRetryScopeWantedGroups(t *testing.T) {
 			// dm-linear unbuilt.
 			assertErrorDetails(t, info.GetGrpIdToMdRaid()[testDataGrp3],
 				"no available leg", "grp grown 2, its leg late")
+			return grow, nqn, grpName(srv, testDataGrp3) + ": "
 		}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			srv, node := newTestServer(t)
-			srv.retryInterval = time.Hour
-			tc.setup(t, srv, node)
-			if !retrying(t, srv) {
-				t.Fatalf("%s: a late member of a group the pass builds "+
-					"registered no retry", tc.name)
+			held, nqn, named := tc.setup(t, srv, node)
+			round, resent := resendRound(t, srv, held, "late")
+			assertCodeZero(t, "the read while the member is late", round)
+			if resent != nil {
+				t.Fatalf("the round re-sent the request while the member " +
+					"is late")
+			}
+
+			node.setAnaState(nqn, testIp2, testSvcId2, "optimized")
+			round, resent = resendRound(t, srv, held, "serves")
+			assertCodeNames(t, "the read once the member serves", round,
+				named)
+			if resent == nil {
+				t.Fatalf("the round that names the group brought no re-send")
+			}
+			round, resent = resendRound(t, srv, held, "built")
+			assertCodeZero(t, "the read after the re-send", round)
+			if resent != nil {
+				t.Errorf("the round after the build re-sent the request")
 			}
 		})
 	}
 }
 
-// TestFailedConnectRegistersTheRetryWithoutALateMember pins ensureLegs' own
-// registration (CN10): a leg whose connect fails registers the retry whether
-// or not it is a late member. Each case's failing leg is never one — a
-// standby wants no group, and with no forced-start mark standing a repair's
-// new leg is never late — so the
-// retry is ensureLegs' alone, and build must OR the late-member verdict into
-// ensureLegs', not overwrite it.
-func TestFailedConnectRegistersTheRetryWithoutALateMember(t *testing.T) {
-	refuse := func(srv *CnAgentServer, node *fakeNode, legId uint64) {
-		node.mu.Lock()
-		defer node.mu.Unlock()
-		node.failCmdAlways["--nqn "+srv.nf.SideToCnNqn(testCluster, testSp,
-			legId, testCn)+" --hostnqn"] = "nvme connect: Connection refused"
+// TestAFailedConnectIsNamedAndResent pins what re-drives a leg whose
+// connect fails (CN10, CN30): a read names the side the leg's subsystem
+// holds no controller for, whether or not the leg is a late member of a
+// group. Each case's failing leg is never one — a standby wants no group,
+// and a repair's new leg is not a leg_list member. The name is a read's
+// alone: a re-send while the disk node still refuses connects nothing and
+// replies code zero, so the round that answers from that converge re-sends
+// nothing, and the read after it names the side again — a re-send every
+// second round at most (dnv-worker.md RW4). The re-send after the disk node
+// takes the connect connects the side under the round's trace id, and the
+// read after it no longer names the side.
+func TestAFailedConnectIsNamedAndResent(t *testing.T) {
+	refusal := func(srv *CnAgentServer, legId uint64) string {
+		return "--nqn " + srv.nf.SideToCnNqn(testCluster, testSp, legId,
+			testCn) + " --hostnqn"
 	}
 	for _, tc := range []struct {
-		name  string
-		legId uint64
-		// setup refuses the leg's connect and converges the cntlr.
+		name        string
+		legId       uint64
+		addr, svcId string
+		// setup refuses the leg's connect and converges the cntlr, and
+		// returns the converge's reply and the request the worker holds.
 		setup func(t *testing.T, srv *CnAgentServer,
-			node *fakeNode) *pb.SyncupCntlrReply
+			node *fakeNode) (*pb.SyncupCntlrReply, *pb.SyncupCntlrRequest)
 	}{
-		{"standby", testDataLeg2, func(t *testing.T, srv *CnAgentServer,
-			node *fakeNode) *pb.SyncupCntlrReply {
-			refuse(srv, node, testDataLeg2)
-			return syncupBoth(t, srv, reqOpts{revision: 2, raid1: true,
-				twoLegs: true})
-		}},
-		{"new leg", repNewLeg, func(t *testing.T, srv *CnAgentServer,
-			node *fakeNode) *pb.SyncupCntlrReply {
-			refuse(srv, node, repNewLeg)
-			cnSyncup(t, srv, 2, true)
-			reply, err := srv.SyncupCntlr(context.Background(),
-				repairReq(2, pb.RepStage_REP_STAGE_CREATED, false))
-			if err != nil {
-				t.Fatalf("SyncupCntlr: %v", err)
-			}
-			assertOk(t, reply.GetCntlrInfo().GetGrpIdToMdRaid()[testDataGrp],
-				"grp data")
-			return reply
-		}},
+		{"standby", testDataLeg2, testIp2, testSvcId2,
+			func(t *testing.T, srv *CnAgentServer,
+				node *fakeNode) (*pb.SyncupCntlrReply,
+				*pb.SyncupCntlrRequest) {
+				node.failCmdAlways[refusal(srv, testDataLeg2)] =
+					"nvme connect: Connection refused"
+				opts := reqOpts{revision: 2, raid1: true, twoLegs: true}
+				return syncupBoth(t, srv, opts), cntlrReq(opts)
+			}},
+		{"new leg", repNewLeg, testIp, testSvcId,
+			func(t *testing.T, srv *CnAgentServer,
+				node *fakeNode) (*pb.SyncupCntlrReply,
+				*pb.SyncupCntlrRequest) {
+				node.failCmdAlways[refusal(srv, repNewLeg)] =
+					"nvme connect: Connection refused"
+				cnSyncup(t, srv, 2, true)
+				held := repairReq(2, pb.RepStage_REP_STAGE_CREATED, false)
+				reply, err := srv.SyncupCntlr(context.Background(), held)
+				if err != nil {
+					t.Fatalf("SyncupCntlr: %v", err)
+				}
+				assertOk(t,
+					reply.GetCntlrInfo().GetGrpIdToMdRaid()[testDataGrp],
+					"grp data")
+				return reply, held
+			}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			srv, node := newTestServer(t)
-			srv.retryInterval = time.Hour
-			reply := tc.setup(t, srv, node)
+			reply, held := tc.setup(t, srv, node)
 			legRow := reply.GetCntlrInfo().GetLegIdToLeg()[tc.legId]
 			if legRow.GetStatus() != pb.ResStatus_RES_STATUS_ERROR {
 				t.Fatalf("leg %#x's row read %v %q, want ERROR: the "+
 					"connect did not fail", tc.legId, legRow.GetStatus(),
 					legRow.GetDetails())
 			}
-			if !retrying(t, srv) {
-				t.Fatalf("a failed connect registered no retry: build must " +
-					"OR the late-member verdict into ensureLegs', not " +
-					"overwrite it")
+			side := legNqn(srv, tc.legId) + " at " + tc.addr + ":" +
+				tc.svcId + ": " + errNoController.Error()
+			round, resent := resendRound(t, srv, held, "refused")
+			assertCodeNames(t, "the read while the connect is refused",
+				round, side)
+			if resent == nil {
+				t.Fatalf("the round that names the side brought no re-send")
+			}
+			assertCodeZero(t, "the re-send while the connect is refused",
+				resent)
+			if row := resent.GetCntlrInfo().GetLegIdToLeg()[tc.legId]; row.
+				GetStatus() != pb.ResStatus_RES_STATUS_ERROR {
+				t.Fatalf("the re-send while the connect is refused left "+
+					"the leg %v", row)
+			}
+			if _, again := resendRoundOnly(t, srv, held,
+				"after-the-resend"); again != nil {
+				t.Fatalf("the round that answers from the re-send's " +
+					"converge re-sent the request")
+			}
+			round, resent = resendRound(t, srv, held, "refused-again")
+			assertCodeNames(t, "the next read while the connect is refused",
+				round, side)
+			if resent == nil {
+				t.Fatalf("the read that names the side again brought no " +
+					"re-send")
+			}
+
+			node.mu.Lock()
+			delete(node.failCmdAlways, refusal(srv, tc.legId))
+			node.mu.Unlock()
+			round, resent = resendRound(t, srv, held, "taken")
+			assertCodeNames(t, "the read once the connect is taken", round,
+				side)
+			if resent == nil || !tracedCall(node, "taken",
+				refusal(srv, tc.legId)) {
+				t.Fatalf("the re-send did not connect the side under the " +
+					"round's trace id")
+			}
+			round, _ = resendRound(t, srv, held, "connected")
+			if strings.Contains(round.GetAgentReply().GetDetails(), side) {
+				t.Fatalf("the read after the connect still names the "+
+					"side: %v", round.GetAgentReply())
 			}
 		})
 	}
@@ -5079,11 +5353,17 @@ func TestFailedConnectRegistersTheRetryWithoutALateMember(t *testing.T) {
 // healthy leg, on a primary an md member, on a migrating leg the serving src
 // path.
 // The pass must do neither: it disconnects nothing, connects nothing beside
-// it, and fails the leg's converge with the read in its row, which registers
-// the retry; the retry's next attempt, the read answering, finds the
-// controllers where they were. Once the address stops answering, every read
-// of it fails for the rest of the pass, and the cases fail it both ways the
-// fake can: refused (failRead) and cut off at the soft timeout (killRead).
+// it, and fails the leg's converge with the read in its row. A read names
+// nothing for the leg while the address does not answer — neither a side to
+// connect nor its wrapper (CN30) — so the worker re-sends nothing; once it
+// answers, the read finds the controllers where they were. Where the pass
+// connected the side again, the kernel made a new head, and the read names
+// the wrapper that still maps the old one (wrapperName); the re-send reloads
+// it and connects, disconnects and assembles nothing. Elsewhere it names
+// nothing. Once the
+// address stops answering, every read of it fails for the rest of the pass,
+// and the cases fail it both ways the fake can: refused (failRead) and cut
+// off at the soft timeout (killRead).
 //
 // The reconnected cases, on a standby and on a primary, are that re-read
 // itself: the leg's controller was lost (a reconnect refused with DNR
@@ -5128,7 +5408,6 @@ func TestUnansweredAddressReadKeepsTheController(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			srv, node := newTestServer(t)
-			srv.retryInterval = time.Hour
 			built := tc.opts
 			if tc.migrate {
 				built.revision--
@@ -5200,9 +5479,17 @@ func TestUnansweredAddressReadKeepsTheController(t *testing.T) {
 			assertErrorDetails(t,
 				reply.GetCntlrInfo().GetLegIdToLeg()[testDataLeg], address,
 				"leg data, its address unanswered")
-			if !retrying(t, srv) {
-				t.Fatalf("a leg whose controller is unknown registered no " +
-					"retry: nothing else would re-run its converge")
+			held := cntlrReq(tc.opts)
+			round, resent := resendRound(t, srv, held, "unanswered")
+			if details := round.GetAgentReply().GetDetails(); strings.
+				Contains(details, nqn) ||
+				strings.Contains(details, legName(srv, testDataLeg)) {
+				t.Fatalf("the read names the leg while its controller is "+
+					"unknown: %v", round.GetAgentReply())
+			}
+			if resent != nil {
+				t.Fatalf("the round re-sent the request while the leg's "+
+					"controller is unknown: %v", round.GetAgentReply())
 			}
 			// want is what the data leg holds after the pass: ctrl, and on
 			// a migrating leg the dst side's new controller beside it.
@@ -5238,15 +5525,34 @@ func TestUnansweredAddressReadKeepsTheController(t *testing.T) {
 			delete(node.duringConnect, connectKey(nqn, testIp2, testSvcId2))
 			node.mu.Unlock()
 			node.Reset()
-			retryAttempt(t, srv)
+			wrapper := legName(srv, testDataLeg)
+			round, resent = resendRound(t, srv, held, "answering")
+			if tc.reconnect {
+				assertCodeNames(t, "the read once the address answers",
+					round, rowNamed(wrapper, "differs: "))
+				if resent == nil || !tracedCall(node, "answering",
+					"dmsetup reload "+wrapper) {
+					t.Fatalf("the re-send did not reload the wrapper " +
+						"under the round's trace id")
+				}
+			} else {
+				assertCodeZero(t, "the read once the address answers", round)
+				if resent != nil {
+					t.Fatalf("the round once the address answers re-sent " +
+						"the request")
+				}
+			}
 			for _, verb := range []string{
 				"cmd nvme connect", "cmd nvme disconnect", "cmd mdadm"} {
 				assertNoCall(t, node, verb)
 			}
-			if retrying(t, srv) {
-				t.Fatalf("the retry outlived the unanswered read")
+			assertHolds("the read once the address answers")
+			round, resent = resendRound(t, srv, held, "settled")
+			assertCodeZero(t, "the read after it", round)
+			if resent != nil {
+				t.Fatalf("the round after the address answers re-sent " +
+					"the request")
 			}
-			assertHolds("the retry's attempt")
 			tc.settled(t, probedCntlrInfo(t, srv).GetLegIdToLeg()[testDataLeg],
 				"leg data, its address answering")
 		})
@@ -5261,11 +5567,11 @@ func TestUnansweredAddressReadKeepsTheController(t *testing.T) {
 // side it alone served reads unconnected and is connected again (no
 // duplicate: the kernel's check passes over a controller being deleted);
 // the gone controller is not disconnected, its device being deleted
-// already; and the leg converges with no retry, on this pass and on the
-// next, while the subsystem still lists it. Read as unknown, it would hold
-// the leg in ERROR and its side unconnected for as long as the listing
-// lasts; read as an empty address, it would draw a disconnect of a device
-// that is no longer there.
+// already; and the leg converges, and the read after it names nothing, on
+// this pass and on the next, while the subsystem still lists it. Read as
+// unknown, it would hold the leg in ERROR and its side unconnected for as
+// long as the listing lasts; read as an empty address, it would draw a
+// disconnect of a device that is no longer there.
 func TestAbsentAddressIsAGoneController(t *testing.T) {
 	for _, tc := range []struct {
 		name string
@@ -5283,7 +5589,6 @@ func TestAbsentAddressIsAGoneController(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			srv, node := newTestServer(t)
-			srv.retryInterval = time.Hour
 			syncupBoth(t, srv, tc.opts)
 			nqn := legNqn(srv, testDataLeg)
 			gone := node.deleteCtrlDevice(nqn, testIp2, testSvcId2)
@@ -5324,9 +5629,12 @@ func TestAbsentAddressIsAGoneController(t *testing.T) {
 				assertNoCall(t, node, "cmd mdadm")
 				tc.settled(t,
 					reply.GetCntlrInfo().GetLegIdToLeg()[testDataLeg], label)
-				if retrying(t, srv) {
-					t.Fatalf("%s registered the retry for a gone controller",
-						label)
+				round, resent := resendRound(t, srv, cntlrReq(tc.opts),
+					fmt.Sprintf("after-pass-%d", pass))
+				assertCodeZero(t, label+": the read after it", round)
+				if resent != nil {
+					t.Fatalf("%s: the round after it re-sent the request "+
+						"for a gone controller", label)
 				}
 			}
 		})
@@ -5359,9 +5667,12 @@ func subsysnqnPath(t *testing.T, node *fakeNode, nqn string) string {
 // every leg and clone source up in that walk, and a listing that did not
 // answer, or a subsysnqn read that failed, is unknown for the pass, as an
 // unanswered address read is: the leg's (or the source's) converge fails
-// naming the read, connects nothing and registers the retry, whose next
-// attempt, the walk answering, finds the controllers where they were. A
-// killed listing fails every lookup of the pass. Read as "not connected" —
+// naming the read and connects nothing, and a read names no side, source
+// endpoint or wrapper of it while the walk does not answer (CN30); once the
+// walk answers, the read finds the controllers where they were, and names
+// nothing, or, where the pass connected a side again under a new head, the
+// wrapper that maps the old one, which the re-send reloads. A killed listing
+// fails every lookup of the pass. Read as "not connected" —
 // the listing's failure as no subsystem at all, the read's as some other
 // subsystem's — it would make the connect step ask for every side of the
 // leg again beside its live controllers (duplicates the host refuses,
@@ -5475,7 +5786,6 @@ func TestUnansweredSubsystemWalkKeepsTheConnections(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			srv, node := newTestServer(t)
-			srv.retryInterval = time.Hour
 			srv.probeInterval = time.Hour
 			syncupBoth(t, srv, tc.opts)
 			connects := 0
@@ -5536,9 +5846,27 @@ func TestUnansweredSubsystemWalkKeepsTheConnections(t *testing.T) {
 						"failed on another subsystem", lp, row.GetDetails())
 				}
 			}
-			if !retrying(t, srv) {
-				t.Fatalf("a walk that did not answer registered no " +
-					"retry: nothing else would re-run the converge")
+			// A read while the walk does not answer names no side, source
+			// endpoint or wrapper, and a re-send its round brings for
+			// another name connects nothing.
+			held := cntlrReq(tc.opts)
+			node.Reset()
+			round, _ := resendRound(t, srv, held, "unanswered")
+			details := round.GetAgentReply().GetDetails()
+			if strings.Contains(details, errNoController.Error()) {
+				t.Fatalf("the read names a connection while the walk does "+
+					"not answer: %v", round.GetAgentReply())
+			}
+			for _, lp := range tc.failed {
+				if strings.Contains(details, legName(srv, lp)) {
+					t.Fatalf("the read names leg %#x's wrapper while the "+
+						"walk does not answer: %v", lp,
+						round.GetAgentReply())
+				}
+			}
+			for _, verb := range []string{"cmd nvme connect",
+				"cmd nvme disconnect", "cmd mdadm"} {
+				assertNoCall(t, node, verb)
 			}
 			// A read in between, and the check round answering from it,
 			// read the same where the row comes from the walk: a
@@ -5574,13 +5902,32 @@ func TestUnansweredSubsystemWalkKeepsTheConnections(t *testing.T) {
 			}
 			node.mu.Unlock()
 			node.Reset()
-			retryAttempt(t, srv)
+			wrapper := legName(srv, testDataLeg)
+			round, resent := resendRound(t, srv, held, "answering")
+			if tc.reconnect {
+				assertCodeNames(t, "the read once the walk answers", round,
+					rowNamed(wrapper, "differs: "))
+				if resent == nil || !tracedCall(node, "answering",
+					"dmsetup reload "+wrapper) {
+					t.Fatalf("the re-send did not reload the wrapper " +
+						"under the round's trace id")
+				}
+			} else {
+				assertCodeZero(t, "the read once the walk answers", round)
+				if resent != nil {
+					t.Fatalf("the round once the walk answers re-sent the " +
+						"request")
+				}
+			}
 			for _, verb := range []string{
 				"cmd nvme connect", "cmd nvme disconnect", "cmd mdadm"} {
 				assertNoCall(t, node, verb)
 			}
-			if retrying(t, srv) {
-				t.Fatalf("the retry outlived the unanswered walk")
+			round, resent = resendRound(t, srv, held, "settled")
+			assertCodeZero(t, "the read after it", round)
+			if resent != nil {
+				t.Fatalf("the round after the walk answers re-sent the " +
+					"request")
 			}
 			probed := probedCntlrInfo(t, srv)
 			if tc.clone {
@@ -5624,7 +5971,6 @@ func TestAbsentSubsystemClassIsNoSubsystem(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			srv, node := newTestServer(t)
-			srv.retryInterval = time.Hour
 			node.mu.Lock()
 			tc.arm(node)
 			node.mu.Unlock()
@@ -5640,9 +5986,12 @@ func TestAbsentSubsystemClassIsNoSubsystem(t *testing.T) {
 					t.Errorf("leg %#x was connected %d times, want 1", lp, n)
 				}
 			}
-			if retrying(t, srv) {
-				t.Fatalf("an answer that the subsystem is absent " +
-					"registered the retry")
+			round, resent := resendRound(t, srv, cntlrReq(reqOpts{
+				revision: 2}), "absent-answered")
+			assertCodeZero(t, "the read after the converge", round)
+			if resent != nil {
+				t.Fatalf("an answer that the subsystem is absent left a " +
+					"read that re-sends the request")
 			}
 		})
 	}
@@ -5699,7 +6048,6 @@ func TestAStaleWalkEntryReadsNoSubsystem(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			srv, node := newTestServer(t)
-			srv.retryInterval = time.Hour
 			opts := reqOpts{revision: 2}
 			syncupBoth(t, srv, opts)
 			nqn := legNqn(srv, testDataLeg)
@@ -5821,10 +6169,12 @@ func TestAStaleWalkEntryReadsNoSubsystem(t *testing.T) {
 // not, cut off at the soft timeout or failed with an I/O error. The pass does
 // not know which NQN the entry names at the check, so the lookup did not
 // answer: the check round reads the leg's row ERROR, unknown, naming the
-// read, and the converge fails the leg the same way, connects nothing and
-// registers the retry. Read as no subsystem, the round would say the leg has
-// no controller, and the converge would connect the leg's side again beside
-// its live controller, a duplicate the host refuses.
+// read, and the converge fails the leg the same way and connects nothing.
+// Read as no subsystem, the round would say the leg has no controller, and
+// the converge would connect the leg's side again beside its live
+// controller, a duplicate the host refuses. The fault is the one read's, so
+// the next read finds the leg as it was and names nothing: no re-send comes
+// (CN30).
 func TestAnEntryWhoseCheckDidNotAnswerIsUnknown(t *testing.T) {
 	for _, converge := range []bool{false, true} {
 		for _, cutOff := range []bool{true, false} {
@@ -5839,7 +6189,6 @@ func TestAnEntryWhoseCheckDidNotAnswerIsUnknown(t *testing.T) {
 			}
 			t.Run(name, func(t *testing.T) {
 				srv, node := newTestServer(t)
-				srv.retryInterval = time.Hour
 				withPassClock(srv, node)
 				opts := reqOpts{revision: 2}
 				syncupBoth(t, srv, opts)
@@ -5894,8 +6243,11 @@ func TestAnEntryWhoseCheckDidNotAnswerIsUnknown(t *testing.T) {
 					return
 				}
 				assertNoCall(t, node, "cmd nvme connect")
-				if !retrying(t, srv) {
-					t.Fatalf("an unknown leg registered no retry")
+				round, resent := resendRound(t, srv, cntlrReq(opts),
+					"next-read")
+				assertCodeZero(t, "the next read", round)
+				if resent != nil {
+					t.Fatalf("the next round re-sent the request")
 				}
 			})
 		}
@@ -5907,9 +6259,10 @@ func TestAnEntryWhoseCheckDidNotAnswerIsUnknown(t *testing.T) {
 // directory is gone before the lookup lists it. Its controllers and namespace
 // are unread, so the pass does not know whether the NQN is connected, as for
 // any failed listing of the matching entry's own directory: the leg's row
-// reads unknown, naming the listing, and the converge connects nothing and
-// registers the retry, whose attempt walks afresh, finds no entry and
-// connects the leg.
+// reads unknown, naming the listing, and the converge connects nothing. The
+// next read walks afresh, finds no entry and names the side with no
+// controller (CN30); the one re-send the worker sends on that round connects
+// the leg, and the read after it names nothing.
 func TestAnEntryGoneBeforeItsListingIsUnknown(t *testing.T) {
 	for _, converge := range []bool{false, true} {
 		name := "check round"
@@ -5918,7 +6271,6 @@ func TestAnEntryGoneBeforeItsListingIsUnknown(t *testing.T) {
 		}
 		t.Run(name, func(t *testing.T) {
 			srv, node := newTestServer(t)
-			srv.retryInterval = time.Hour
 			opts := reqOpts{revision: 2}
 			syncupBoth(t, srv, opts)
 			nqn := legNqn(srv, testDataLeg)
@@ -5958,17 +6310,27 @@ func TestAnEntryGoneBeforeItsListingIsUnknown(t *testing.T) {
 				return
 			}
 			assertNoCall(t, node, "cmd nvme connect")
-			if !retrying(t, srv) {
-				t.Fatalf("an unknown leg registered no retry")
-			}
 			node.Reset()
-			retryAttempt(t, srv)
-			if got := connectsTo(node, nqn, testIp, testSvcId); got != 1 {
-				t.Fatalf("the retry made %d connects of the data leg, "+
-					"want 1", got)
+			held := cntlrReq(opts)
+			round, resent := resendRound(t, srv, held, "entry-gone")
+			assertCodeNames(t, "the next read", round,
+				nqn+" at "+testIp+":"+testSvcId+": "+
+					errNoController.Error())
+			if resent == nil {
+				t.Fatalf("the round that names the side brought no re-send")
+			}
+			if got := connectsTo(node, nqn, testIp, testSvcId); got != 1 ||
+				!tracedCall(node, "entry-gone", "--nqn "+nqn+" ") {
+				t.Fatalf("the re-send made %d connects of the data leg, "+
+					"want 1 under the round's trace id", got)
 			}
 			assertOk(t, probedCntlrInfo(t, srv).GetLegIdToLeg()[testDataLeg],
-				"leg data, connected by the retry")
+				"leg data, connected by the re-send")
+			round, resent = resendRound(t, srv, held, "connected")
+			assertCodeZero(t, "the read after the re-send", round)
+			if resent != nil {
+				t.Fatalf("the round after the connect re-sent the request")
+			}
 		})
 	}
 }

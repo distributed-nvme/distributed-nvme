@@ -78,7 +78,10 @@ type legSide struct {
 // cloneDmName), which the verdict names (cntlrRowVerdict). Among the md
 // conditions it returns are also each absent array the converge's
 // assembly would start (absentArrayNamed) and each forced start the
-// converge would carry through (forcedStartNamed), the second as a failure.
+// converge would carry through (forcedStartNamed), the second as a failure,
+// and as failures too each uncreated snapshot whose create message the
+// converge's pre-pass would send (snapshotDue) and each group whose md check
+// the converge would start, stop or adopt (mdCheckDue).
 func (s *CnAgentServer) probeCntlr(
 	ctx context.Context,
 	st *cntlrState,
@@ -212,6 +215,11 @@ func (s *CnAgentServer) probeCntlr(
 					err:  why})
 			}
 			noteMdCheck(st, gp, detail)
+			if mdCheckDue(st, gp, info.GrpIdToMdRaid[gp.grpId], detail) {
+				putBack = append(putBack, verdictName{
+					name: fmt.Sprintf("md check of group %#x", gp.grpId),
+					err:  errMdCheckDue})
+			}
 			reportGrpReading(info, gp, detail, refusals, actedMark(st, gp),
 				mdCheckDone(st, gp))
 		case plan.primary:
@@ -253,6 +261,16 @@ func (s *CnAgentServer) probeCntlr(
 		status, details, reason := s.probePool(ctx, plan, sp)
 		info.SliceIdToDmPool[sp.sliceId] = t.SetReason(
 			poolKey, sp.poolFinalName, status, details, reason)
+	}
+
+	// An uncreated snapshot whose create message the converge's pre-pass
+	// would send, by the pool rows above (CN14, CN30).
+	for _, tp := range plan.tds {
+		if s.snapshotDue(ctx, plan, tp, info) {
+			putBack = append(putBack, verdictName{
+				name: fmt.Sprintf("snapshot td %#x", tp.tdId),
+				err:  errSnapshotDue})
+		}
 	}
 
 	// Thin volumes.
@@ -443,9 +461,10 @@ func cloneSourceLive(view *subsysView, cp *clonePlan) bool {
 	return true
 }
 
-// verdictName is one md condition a read's verdict names beside the
-// leftovers (CN30): its leftover kind and its name, or, with err set, a
-// failure, err naming the cause after the name (forcedStartNamed).
+// verdictName is one condition a read's verdict names beside the leftovers
+// (CN30): its leftover kind and its name, or, with err set, a failure, err
+// naming the cause after the name (forcedStartNamed, mdCheckDue,
+// snapshotDue).
 type verdictName struct {
 	kind string
 	name string

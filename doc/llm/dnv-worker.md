@@ -1786,10 +1786,9 @@ pass could not free on a converge's alone (`dnagent.md` DN19).
 It is logged as
 `syncup leftover` (`log.md`, Leftovers) beside the ordinary
 `syncup result`: nothing agent-side re-drives the sweep for a leftover (the
-agents' own background converges, `cnagent.md` CN10's connect retry and
-`dnagent.md` DN12's fence timer, sweep only
-while one is registered or armed for a
-reason of its own); it runs again on the
+agents' one background converge, `dnagent.md` DN12's fence timer, sweeps
+only while it is armed for a reason of its own, and the cn agent runs none,
+`cnagent.md` CN10); it runs again on the
 re-sync RW4 step 5 issues, so a leftover is a normal state for as long as a
 dead remote's failfast window lasts, and the record is what makes one the
 re-sync keeps finding visible in the log. A cn teardown's reply carries the
@@ -2977,8 +2976,8 @@ stack is not built yet (`primaryShapeBuilt`): a `PROVISIONING` row, or a
 in a map the settle reads is clean and no proof of the build that follows,
 and settling on it would leave that build to `primary_unhealthy`. Which rows
 read `PROVISIONING`, `MISSING` or `ERROR` in which state — a slice deferred
-by its first zeroing, a member a converge found unavailable and left to the
-connect retry, a device a background read probes absent, a clone whose
+by its first zeroing, a member a converge found unavailable, a device a
+background read probes absent, a clone whose
 destination td or clone meta group still zeroes, whose two rows read
 `PROVISIONING` below `SP_LEVEL_NO_CLONE`, a clone with no dm-clone while its
 clone meta group is not ready, whose dm-clone row reads `MISSING` with no
@@ -3195,8 +3194,8 @@ between rounds, the round timer, armed after the round before (RW8),
 keeps running, so the next round comes less than an interval after the
 reply and is seldom late at all. A converge in flight that the
 stamp reports is not unhealthy by itself, and a `Syncup*` reply's
-observation is never judged by its age. Reason: a retry attempt or a
-migration's converge can hold an object's reads off for seconds at the
+observation is never judged by its age. Reason: a converge, a
+migration's among them, can hold an object's reads off for seconds at the
 largest pools, which a bound of several intervals lets pass where a round's
 one-interval wait would not; a node whose reads hang is found later than
 that wait alone would find it, by about the bound less one of the object's
@@ -3838,12 +3837,7 @@ rounds: epochs are whole seconds and the next verdict can come late, so one
 missed round could otherwise reach it. A `Syncup*` reply is left out of
 the run because the converge of a grow or of a promotion that waits for a
 member reports its groups `ERROR` though the next primary would wait the
-same. A round that answers from a retry attempt of such a converge is not
-left out: the cn agent's connect retry re-runs the converge while the
-member stays late (`cnagent.md` CN10, CN12), each attempt's observation
-carries the same rows, and a round that answers from one new to the
-child's loop counts them (RW23), so two such rounds in a row fill the run with no round
-missed (Known limits). The cost: after a restart or a handoff a reaction
+same. The cost: after a restart or a handoff a reaction
 waits for this coordinator's first verdict on its object. A missed round
 gives one at once; otherwise it comes from a `Syncup*` reply that the
 first answered round brings, or from the first round that answers from an
@@ -4555,7 +4549,7 @@ the array from before that change, so its row and its in-sync list may
 place legs where the group has changed since — a finish puts the new leg in
 the bad leg's place. The agent can make such a report after the bump: while
 the bump's syncup waits for the cntlr's lock, a converge of the old plan
-can hold it, as the late-member retry does (`cnagent.md` CN10, CN12). No
+can hold it, as an earlier `SyncupCntlr`'s does (`dnagent.md` SH30). No
 record keeps the revision of a group's own last change, so after any bump
 every group waits for the primary's report of an observation made at that
 revision, which the syncup of the bump's fan-out brings (RW14). The gate is
@@ -6335,7 +6329,16 @@ cntlr or on its CN.
 `leftover_rounds` is a leftover that clears: the fake
 applies and saves the request, unlike under a forced code, answers
 `ReplyCodeLeftover` (RW5) on the syncups and info reads meanwhile and on as
-many rounds as it counts, and then answers code zero. `disk_counts` gives
+many rounds as it counts, and then answers code zero. `read_leftover` is a
+leftover only reads name (`cnagent.md` CN30): while it is set, the object's
+rounds answer as an agent's rounds do (`dnagent.md` SH29, SH30), each from
+the latest observation and each starting a read the next round answers
+from, and a syncup the fake accepts cancels that read; a read answers
+`ReplyCodeLeftover` for as many re-sends as it counts, each accepted syncup
+that applies its request spending one and answering code zero, and
+`read_rows` override the rows of a read that names it. It is refused beside
+`obs_age_ms`, `obs_none` and `leftover_rounds`, and on the default entry.
+`disk_counts` gives
 the dn disk counts, sent only beside an OK meta row, as the dn agent sends
 them (`dnagent.md` DN18). The fake computes no sweep verdict and no disk
 counts of its own: a leftover and the counts come only from those levers,
@@ -6450,8 +6453,8 @@ which no suite case sets, so no suite case runs RW13's count compare.
   object — an undriven window, the gap of an ownership change (VW7), an
   idle (RW9) — or the agent starts and runs no read (HL8), its
   observation ages, unless a converge of the agent's own
-  stores one: a background retry attempt, the dn's fence timer or a
-  startup reconcile (`dnagent.md` SH28). The first round after the pause
+  stores one: the dn's fence timer or a startup reconcile (`dnagent.md`
+  SH28). The first round after the pause
   answers from that observation and gives no verdict on it (HL7): it
   re-syncs when its reply says so, but sets and clears no health epoch,
   counts in no run and reports nothing to the sp coordinator. Unless a
@@ -6673,9 +6676,7 @@ which no suite case sets, so no suite case runs RW13's count compare.
   primary's rounds (AR10), so one missed or slow round, or one whose
   observation is too old, followed by a clean answer fails no primary
   over, however late that answer comes, and neither does a `Syncup*` reply
-  that lists a converge still waiting for a member, though a round that
-  answers from a retry attempt of that converge can add to the run (next
-  item). A round waits for no lock of the cntlr, since the agent answers it
+  that lists a converge still waiting for a member. A round waits for no lock of the cntlr, since the agent answers it
   from its latest observation (`dnagent.md` SH25), but no read of the cntlr
   starts while a converge of it, or a syncup of its node that marks the
   node, is in flight (`dnagent.md` SH29, SH30). A converge that holds the cntlr's reads off
@@ -6714,20 +6715,6 @@ which no suite case sets, so no suite case runs RW13's count compare.
   the hold while its stack is gone and its hosts' IO waits (HL8). A
   restart over a live kernel, which the hold is for, and a reboot answer
   alike.
-* **A round that answers from a retry attempt counts the attempt's rows.**
-  The cn agent's connect retry re-runs the cntlr's whole converge while a
-  member stays late (`cnagent.md` CN10, CN12), and each attempt stores its
-  observation with that converge's rows, in which the groups that wait
-  read `ERROR`, as they do in the `Syncup*` reply AR10 leaves out of the
-  run. No reply has carried that observation to a child of the cntlr
-  before, so the first round that answers from it answers from a new one,
-  and its `ERROR` rows add to the primary's failover run (AR10, RW23). Two
-  counted rounds in a row that each answer from an attempt fill the run
-  with no round missed, as when an attempt outlasts
-  `CnConnectRetryInterval`, the next follows at once and no read fits
-  between them (`cnagent.md`, Known limits). Once the primary's threshold
-  has run out, that fails over a primary that only waits for a member,
-  though the next primary would wait the same.
 * **While a leftover keeps every round re-sending, a round's own report
   counts in a run only when a background converge made it, unless the
   agent's saves fail.** While the agent's saves succeed, each such round
@@ -6737,16 +6724,11 @@ which no suite case sets, so no suite case runs RW13's count compare.
   `Syncup*`'s observation on that reply, so a round that answers from it
   answers from no new one (RW23), and the `Syncup*` the round issues
   cancels the read the round starts (`dnagent.md` SH30), so no round
-  answers from a read while those saves succeed. A cntlr's background
-  converge is an attempt of the cn agent's connect retry (`cnagent.md`
-  CN10, CN18), which runs for a cause of its own beside the re-sends. An
-  attempt's observation reaches the loop first in a round's reply, so the
-  first round that answers from it answers from a new one, and its report
-  counts in the cntlr's run (AR10; previous item). A primary's failover
-  on its threshold therefore waits until the leftover clears unless its
-  rounds miss, answer from an observation too old, answer from such
-  attempts (AR10) or answer from reads while the agent's saves fail (end
-  of this item). The dn agent's one background converge, its fence
+  answers from a read while those saves succeed. The cn agent runs no
+  background converge of a cntlr (`cnagent.md` CN10), so a primary's
+  failover on its threshold waits until the leftover clears unless its
+  rounds miss, answer from an observation too old or answer from reads
+  while the agent's saves fail (end of this item). The dn agent's one background converge, its fence
   timer, converges a side (`dnagent.md` DN12), so a DN's count compare
   (RW13) waits until the leftover clears,
   unless the agent's saves fail (end of this item). A `Syncup*` reply's
@@ -6965,12 +6947,11 @@ which no suite case sets, so no suite case runs RW13's count compare.
   in the primary's own path to the source reads the same; which of the
   clone's rows carry the source-fault reason, and so hold no settle (HL2),
   is CN18's. The operator can move the role by disabling the primary cntlr
-  (AR5). The cn agent's retry of a source it cannot connect, or that has no
-  namespace, holds the cntlr's reads off while each attempt is in flight
-  (`dnagent.md` SH30; `cnagent.md`, Known limits), so an attempt that
-  outlasts HL7's bound makes the primary's rounds answer from an
-  observation too old, and such rounds can fail it over, as they can a
-  primary that is only busy (above). A role that moves while a fault at the
+  (AR5). A source endpoint the cn agent cannot connect is named by every
+  read of the cntlr (`cnagent.md` CN18), so the worker re-sends its
+  `SyncupCntlr` every second round at most (RW4), and each converge holds
+  the cntlr's reads off while it runs (`dnagent.md` SH30; `cnagent.md`,
+  Known limits); a source with no namespace is named by nothing. A role that moves while a fault at the
   source lasts can take even a clone that has hydrated in full out of
   service: a new primary that cannot connect the source, or finds no source
   namespace, cannot build the clone's dm-clone while the fault lasts, so

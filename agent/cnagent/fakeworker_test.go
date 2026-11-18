@@ -834,8 +834,8 @@ func TestFakeWorkerConvergesTheWidestCntlr(t *testing.T) {
 
 // startCnServer builds a cn server over node and runs its startup reconcile
 // under a root of its own, so a restart can end the old process's
-// background work (its probers and retries) without ending the test. Its
-// probers run on probeInterval and its rounds start their reads.
+// background work (its probers, path watchers and reads) without ending the
+// test. Its probers run on probeInterval and its rounds start their reads.
 func startCnServer(
 	t *testing.T,
 	node *fakeNode,
@@ -1170,14 +1170,15 @@ func grownLegConnect(srv *CnAgentServer) string {
 // (CnConnectPassBudget). Every round meanwhile answers at once from the
 // observation before the syncup, with the converge's start, and starts no
 // read (dnagent.md SH28 to SH30). The connect's own time spends the budget,
-// so the pass tries the connect no second time (CN10) and leaves the leg to
-// the background connect retry, which connects it once the disk node answers:
-// the rounds after answer clean at the syncup's revision, with no further
-// syncup.
+// so the pass tries the connect no second time (CN10). Nothing converges the
+// cntlr again between the worker's calls. Once the disk node answers, the
+// first round whose read finds the grown leg's side with no controller names
+// it (sidesToConnect, CN30), the worker re-sends the request under that
+// round's trace id (dnv-worker.md RW4), the re-send connects the side, and a
+// later round answers code 0.
 func TestFakeWorkerHungConnectPastThePassBudget(t *testing.T) {
 	srv, node := newTestServer(t)
 	probing(srv, 50*time.Millisecond)
-	srv.retryInterval = 200 * time.Millisecond
 	w := newFakeWorker(t, srv)
 	if reply := w.syncupCn(cnReq(1, true)); reply.GetAgentReply().
 		GetCode() != 0 {
@@ -1263,7 +1264,49 @@ func TestFakeWorkerHungConnectPastThePassBudget(t *testing.T) {
 			row)
 	}
 
+	// Calls before the grow's reply ran under ids the test did not give: the
+	// syncups' and the reads of the rounds that carried none.
+	node.forgetTraces()
+	own := make([]string, 0, len(rounds)+8)
+	for _, r := range rounds {
+		own = append(own, r.traceId)
+	}
 	release()
+	// Once the disk node answers, nothing connects the leg until the worker
+	// re-sends.
+	assertNothingRunsBetweenCalls(t, node, own...)
+	held := growReq(2)
+	side := noCtrlName(legNqn(srv, testDataLeg2), testIp2, testSvcId2)
+	resentBy, clean := "", false
+	for i := 0; i < 8 && !clean; i++ {
+		time.Sleep(20 * time.Millisecond)
+		traceId := fmt.Sprintf("after-round-%d", i)
+		own = append(own, traceId)
+		round, resent := w.resendRound(held, traceId)
+		joinReads(t, srv)
+		switch {
+		case resent != nil && resentBy != "":
+			t.Fatalf("%s re-sent again after %s's re-send: %v", traceId,
+				resentBy, round.GetAgentReply())
+		case resent != nil:
+			resentBy = traceId
+			if !strings.Contains(round.GetAgentReply().GetDetails(), side) {
+				t.Errorf("%s re-sent on %v, want the grown leg's side "+
+					"named", traceId, round.GetAgentReply())
+			}
+			if connectsUnder(node, traceId, legNqn(srv, testDataLeg2)) != 1 {
+				t.Errorf("the re-send did not connect the grown leg under "+
+					"%s's id", traceId)
+			}
+		case resentBy != "":
+			clean = round.GetRevision() == 2
+		}
+	}
+	if resentBy == "" || !clean {
+		t.Fatalf("the rounds after the release re-sent by %q and answered "+
+			"clean: %v; want one re-send, then code 0", resentBy, clean)
+	}
+	assertNothingRunsBetweenCalls(t, node, own...)
 	w.settledRound(srv, cntlrPtr(), 2)
 }
 

@@ -3392,8 +3392,8 @@ func newLegDue(p *spPass, leg *pb.Leg) bool {
 // since: a finish puts a new leg in the bad leg's place, a migration's
 // cutover moves a leg to another side. The agent can make such a report
 // after the bump: while the bump's syncup waits for the cntlr's lock, a
-// converge of the old plan can hold it, as the CN10 retry of a late member
-// does (cnagent.md CN10). The test compares with the snapshot's SpRevision,
+// converge of the old plan can hold it, as an earlier SyncupCntlr's does
+// (dnagent.md SH30). The test compares with the snapshot's SpRevision,
 // not with the group's own last change, which no record keeps, so every
 // group waits after any bump until the primary reports an observation made
 // at that revision, which the syncup the bump's fan-out sends brings (RW14,

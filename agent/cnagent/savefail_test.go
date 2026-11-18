@@ -455,12 +455,10 @@ func TestARestartAfterARefusedCnSaveRemovesNoBuiltCntlr(t *testing.T) {
 		}
 	}
 
-	// The process exits: its retries and probers stop. The kernel state and
-	// the local store survive.
+	// The process exits: its probers stop. The kernel state and the local
+	// store survive.
 	for _, key := range srv.allCntlrKeys() {
-		st := srv.getCntlr(key)
-		srv.stopConnectRetry(st)
-		srv.stopLegProbers(st, nil)
+		srv.stopLegProbers(srv.getCntlr(key), nil)
 	}
 	node.Reset()
 	fresh := newCnServer(node)
@@ -786,18 +784,18 @@ func TestASyncupWhileSavesFailCancelsNoRead(t *testing.T) {
 // reconcile loaded (cntlrState.reqFromRpc; CN8, CN12) until a SyncupCntlr
 // whose save holds arrives. The held request carries a forced-start mark
 // that a SyncupCntlr of this process delivered while the group's array ran,
-// so the mark waits (grpPlan.markWaits), and the newer request is the sp
-// worker's clear of it (dnv-worker.md AR13). Were the held request still
-// trusted, a CN10 retry attempt that reads the array broken would stop it,
-// zero the other member, which can hold newer data, and start the array
-// from the marked leg. The attempt acts on no mark instead
-// (dropForcedStartMarks), and the cntlr's read names the mark (storedMarks;
-// CN30), so the worker sends the clear again. A refused request at the held
-// revision leaves the trust as it is, and the attempt acts on the mark: a
+// so the mark waits, and the newer request is the sp worker's clear of it
+// (dnv-worker.md AR13). No converge of the held request runs between the
+// worker's calls. Once md reads the array broken, the cntlr's read names the
+// mark as a stored one (storedMarks; CN30), not as a forced start a converge
+// carries through (forcedStartNamed): the worker sends its clear again,
+// which is refused again while the store fails, and nothing acts on the
+// mark. A refused request at the held revision leaves the trust as it is: a
 // clear raises the revision, so a request at the held revision clears no
-// mark. A request whose save holds gives the trust back: the attempt over
-// the broken array starts it from the marked leg, and the read names no
-// mark.
+// mark, and the read names the forced start. A request whose save holds
+// gives the trust back: the read over the broken array names the forced
+// start, the re-send of that request on that round starts the array from
+// the marked leg, and the read after it names no mark.
 func TestARefusedNewerCntlrSaveTakesBackTheTrustInTheHeldRequest(t *testing.T) {
 	// marked delivers the marked request at revision 4 over the running
 	// array, where the mark waits, and fails the cntlr file's saves from
@@ -839,64 +837,82 @@ func TestARefusedNewerCntlrSaveTakesBackTheTrustInTheHeldRequest(t *testing.T) {
 				"which is at revision %d", cur.loadReq().GetRevision())
 		}
 	}
-	// breakAndRetry has md read the group's array broken and runs one CN10
-	// retry attempt of the held request. It returns the array's md node,
-	// the one the forced start stops.
-	breakAndRetry := func(t *testing.T, f *repFix) string {
-		t.Helper()
+	// breakArray has md read the group's array broken and returns its md
+	// node, the one the forced start stops.
+	breakArray := func(f *repFix) string {
 		f.node.setArrayState(f.mdDev, "broken")
-		mdNode := f.node.mdNode(f.mdDev)
+		f.node.forgetTraces()
 		f.node.Reset()
-		retryAttempt(t, f.srv)
-		return mdNode
+		return f.node.mdNode(f.mdDev)
 	}
-	// assertForcedStart checks that the attempt stopped the array, zeroed
-	// leg 1, started the array from leg 2 and added leg 1 back.
-	assertForcedStart := func(t *testing.T, f *repFix, mdNode string) {
+	// assertNothingActed checks that no converge acted on the mark: nothing
+	// stopped, zeroed or assembled.
+	assertNothingActed := func(t *testing.T, f *repFix) {
 		t.Helper()
-		assertOrder(t, f.node,
-			"cmd mdadm --stop "+mdNode,
-			zeroOf(f.leg1),
-			f.forced(f.leg2, mdUpdateUuid),
-			f.add(f.leg1))
-	}
-	const namedMark = "forced start of group"
-
-	t.Run("a newer request", func(t *testing.T) {
-		f, st, _ := marked(t)
-		refused(t, f, st, quietLevel(5))
-		if st.reqFromRpc {
-			t.Error("the held marked request still counts as delivered " +
-				"after its clear was refused for a failed save")
-		}
-		breakAndRetry(t, f)
 		var acted []string
 		for _, call := range []string{"cmd mdadm --stop ",
-			"--zero-superblock", examineOf(f.leg2),
-			"cmd mdadm --assemble"} {
+			"--zero-superblock", "cmd mdadm --assemble"} {
 			if f.node.hasCall(call) {
 				acted = append(acted, call)
 			}
 		}
 		if len(acted) != 0 {
-			t.Errorf("the retry attempt acted on the mark whose clear was "+
-				"refused, with %q:\n%s", acted,
-				strings.Join(f.node.Calls(), "\n"))
+			t.Errorf("a converge acted on the mark while the store fails, "+
+				"with %q:\n%s", acted, strings.Join(f.node.Calls(), "\n"))
 		}
-		if _, code := f.read(t, 4); !strings.Contains(code.GetDetails(),
-			namedMark) {
-			t.Errorf("the read's verdict is code %d (%q), want the held "+
-				"mark named", code.GetCode(), code.GetDetails())
+	}
+	storedNamed := fmt.Sprintf("forced start of group %#x: %s", testDataGrp,
+		errStoredMark)
+
+	t.Run("a newer request", func(t *testing.T) {
+		f, st, _ := marked(t)
+		clearReq := quietLevel(5)
+		refused(t, f, st, clearReq)
+		if st.reqFromRpc {
+			t.Error("the held marked request still counts as delivered " +
+				"after its clear was refused for a failed save")
 		}
+		breakArray(f)
+		round, resent := resendRound(t, f.srv, clearReq, "named-stored")
+		if details := round.GetAgentReply().GetDetails(); !strings.Contains(
+			details, storedNamed) || strings.Contains(details,
+			forcedNamed(testDataLeg2)) {
+			t.Errorf("the round's verdict is code %d (%q), want the held "+
+				"mark named as stored and no forced start named",
+				round.GetAgentReply().GetCode(), details)
+		}
+		if resent == nil {
+			t.Fatal("the round that names the stored mark brought no " +
+				"re-send of the clear")
+		}
+		assertSaveRefused(t, "the re-sent clear", resent.GetAgentReply(),
+			resent.GetRevision(), 4)
+		assertNothingActed(t, f)
+		assertNothingRunsBetweenCalls(t, f.node, "named-stored")
 	})
 	t.Run("a request at the held revision", func(t *testing.T) {
 		f, st, _ := marked(t)
-		refused(t, f, st, withMark(quietLevel(4), testDataLeg2))
+		atHeld := withMark(quietLevel(4), testDataLeg2)
+		refused(t, f, st, atHeld)
 		if !st.reqFromRpc {
 			t.Error("a refused request at the held revision took the " +
 				"trust from the held request")
 		}
-		assertForcedStart(t, f, breakAndRetry(t, f))
+		breakArray(f)
+		round, resent := resendRound(t, f.srv, atHeld, "named-forced")
+		if details := round.GetAgentReply().GetDetails(); !strings.Contains(
+			details, forcedNamed(testDataLeg2)) {
+			t.Errorf("the round's verdict is code %d (%q), want the forced "+
+				"start named", round.GetAgentReply().GetCode(), details)
+		}
+		if resent == nil {
+			t.Fatal("the round that names the forced start brought no " +
+				"re-send")
+		}
+		assertSaveRefused(t, "the re-sent request", resent.GetAgentReply(),
+			resent.GetRevision(), 4)
+		assertNothingActed(t, f)
+		assertNothingRunsBetweenCalls(t, f.node, "named-forced")
 	})
 	t.Run("a request whose save holds", func(t *testing.T) {
 		f, st, fault := marked(t)
@@ -919,12 +935,31 @@ func TestARefusedNewerCntlrSaveTakesBackTheTrustInTheHeldRequest(t *testing.T) {
 			t.Error("the request whose save held does not count as " +
 				"delivered")
 		}
-		assertForcedStart(t, f, breakAndRetry(t, f))
-		if _, code := f.read(t, 5); strings.Contains(code.GetDetails(),
-			namedMark) {
-			t.Errorf("the read after the request whose save held names "+
-				"the mark: code %d (%q)", code.GetCode(), code.GetDetails())
+		mdNode := breakArray(f)
+		round, resent := resendRound(t, f.srv, req, "named-forced")
+		if details := round.GetAgentReply().GetDetails(); !strings.Contains(
+			details, forcedNamed(testDataLeg2)) {
+			t.Fatalf("the round's verdict is code %d (%q), want the forced "+
+				"start named", round.GetAgentReply().GetCode(), details)
 		}
+		if resent == nil {
+			t.Fatal("the round that names the forced start brought no " +
+				"re-send")
+		}
+		assertOrder(t, f.node,
+			"cmd mdadm --stop "+mdNode,
+			zeroOf(f.leg1),
+			f.forced(f.leg2, mdUpdateUuid),
+			f.add(f.leg1))
+		if !tracedCall(f.node, "named-forced", zeroOf(f.leg1)) {
+			t.Error("the zero did not run under the round's trace id")
+		}
+		if _, code := f.read(t, 5); strings.Contains(code.GetDetails(),
+			"forced start of group") {
+			t.Errorf("the read after the re-send names the mark: code %d "+
+				"(%q)", code.GetCode(), code.GetDetails())
+		}
+		assertNothingRunsBetweenCalls(t, f.node, "named-forced")
 	})
 }
 
@@ -973,9 +1008,20 @@ func TestARefusedNewerCntlrSaveStopsTheThinIdSweep(t *testing.T) {
 			"newer request was refused for a failed save")
 	}
 
-	// Two CN10 retry attempts converge the held request; neither sweeps.
-	retryAttempt(t, srv)
-	retryAttempt(t, srv)
+	// Nothing converges the held request between the worker's calls: the
+	// rounds and their re-sends of the refused request, refused again while
+	// the store fails, sweep nothing.
+	refusedReq := cntlrReq(reqOpts{revision: 3, primary: true, tds: tds})
+	node.forgetTraces()
+	for _, id := range []string{"resend-1", "resend-2"} {
+		_, resent := resendRound(t, srv, refusedReq, id)
+		if resent == nil {
+			t.Fatalf("%s brought no re-send of the refused request", id)
+		}
+		assertSaveRefused(t, id, resent.GetAgentReply(),
+			resent.GetRevision(), 2)
+	}
+	assertNothingRunsBetweenCalls(t, node, "resend-1", "resend-2")
 	for _, fragment := range []string{
 		"cmd dmsetup message " + pool + " 0 reserve_metadata_snap",
 		"cmd thin_dump",
@@ -1017,9 +1063,10 @@ func TestARefusedNewerCntlrSaveStopsTheThinIdSweep(t *testing.T) {
 		t.Error("the completed sweep left the slice armed")
 	}
 
-	// A further retry attempt under the delivered request sweeps nothing.
+	// The same request sent again, as the worker sends it on a round whose
+	// code is not zero, sweeps nothing.
 	node.Reset()
-	retryAttempt(t, srv)
+	syncupCntlrAt(t, srv, reqOpts{revision: 3, primary: true, tds: tds})
 	if n := callCnt(node, "cmd thin_dump"); n != 0 {
 		t.Errorf("%d dumps after the sweep completed, want none", n)
 	}

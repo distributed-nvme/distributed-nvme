@@ -436,11 +436,13 @@ func TestADisconnectOutlivesTheRpcCtx(t *testing.T) {
 // every wanted address, connects nothing, and builds its dm-clone on a
 // namespace device about to vanish — every read of a region not yet hydrated
 // then fails until a later converge reloads the table. While that disconnect
-// runs, the step must neither adopt nor connect; the connect retry it
-// registers connects afresh once the disconnect has returned — exactly once.
+// runs, the step must neither adopt nor connect, and a read names nothing
+// for the source (CN30). Once the disconnect has returned, a read names the
+// source's endpoint with no controller, and the one SyncupCntlr the worker
+// re-sends on that round (dnv-worker.md RW4) connects it afresh, exactly
+// once, and builds the clone; the read after it names nothing.
 func TestARecreatedCloneNeverAdoptsADyingSource(t *testing.T) {
 	srv, node := newTestServer(t)
-	srv.retryInterval = 20 * time.Millisecond
 	ctx := context.Background()
 	syncupBoth(t, srv, reqOpts{
 		revision: 2, primary: true, clones: []*pb.Clone{cloneOf()}})
@@ -458,9 +460,9 @@ func TestARecreatedCloneNeverAdoptsADyingSource(t *testing.T) {
 	waitFor(t, func() bool { return node.hasCall(disconnect) })
 	// A new clone of the same source while that delete is in flight.
 	second := cloneOfTd(testClone+1, testSrcNqn, testTd)
-	if _, err := srv.SyncupCntlr(ctx, cntlrReq(reqOpts{
-		revision: 4, primary: true,
-		clones: []*pb.Clone{second}})); err != nil {
+	held := cntlrReq(reqOpts{revision: 4, primary: true,
+		clones: []*pb.Clone{second}})
+	if _, err := srv.SyncupCntlr(ctx, held); err != nil {
 		t.Fatalf("create clone: %v", err)
 	}
 	node.mu.Lock()
@@ -472,19 +474,37 @@ func TestARecreatedCloneNeverAdoptsADyingSource(t *testing.T) {
 	if n := connectsTo(node, testSrcNqn, testIp2, testSvcId2); n != 0 {
 		t.Fatalf("%d connects of a source whose disconnect is in flight", n)
 	}
+	srcName := noCtrlName(testSrcNqn, testIp2, testSvcId2)
+	if round, _ := resendRound(t, srv, held, "beside-the-disconnect"); strings.
+		Contains(round.GetAgentReply().GetDetails(), testSrcNqn) {
+		t.Fatalf("the read beside the disconnect %v names the source",
+			round.GetAgentReply())
+	}
+
 	node.releaseCmd(disconnect)
-	waitFor(t, func() bool {
-		node.mu.Lock()
-		defer node.mu.Unlock()
-		dm := node.dms[cloneName(srv, testClone+1)]
-		_, connected := node.subsystems[testSrcNqn]
-		return dm != nil && connected &&
-			!strings.Contains(dm.table, " "+oldSrc+" ")
-	})
+	awaitDisconnects(t, srv)
+	node.Reset()
+	round, resent := resendRound(t, srv, held, "after-the-disconnect")
+	assertCodeNames(t, "the read after the disconnect", round, srcName)
+	if resent == nil {
+		t.Fatalf("the round that names the source brought no re-send")
+	}
 	if n := connectsTo(node, testSrcNqn, testIp2, testSvcId2); n != 1 {
 		t.Fatalf("%d connects of the source once its disconnect returned, "+
 			"want 1", n)
 	}
+	if !tracedCall(node, "after-the-disconnect", "cmd nvme connect ") {
+		t.Errorf("the source's connect did not run under the round's id")
+	}
+	node.mu.Lock()
+	dm := node.dms[cloneName(srv, testClone+1)]
+	node.mu.Unlock()
+	if dm == nil || strings.Contains(dm.table, " "+oldSrc+" ") {
+		t.Fatalf("the re-send left the dm-clone %v, want it built over the "+
+			"new connection", dm)
+	}
+	assertRowVerdict(t, rowRound(t, srv, 4).GetAgentReply(),
+		"the read after the re-send")
 }
 
 // TestARestoredLegNeverAdoptsADyingConnection is the leg twin of
@@ -493,11 +513,13 @@ func TestARecreatedCloneNeverAdoptsADyingSource(t *testing.T) {
 // the kernel wants the legs again. Adopting the controllers it finds would
 // build the wrappers on multipath devices about to vanish, so each leg fails
 // for the pass — no connect, no wrapper, an ERROR row naming the disconnect —
-// and the connect retry builds both over fresh connections once the
-// disconnects have returned, each leg connected exactly once.
+// and a read names nothing while the disconnects run (CN30). Once they have
+// returned, a read names each leg's side with no controller, and the one
+// SyncupCntlr the worker re-sends on that round (dnv-worker.md RW4) builds
+// both legs over fresh connections, each connected exactly once; the read
+// after it names nothing.
 func TestARestoredLegNeverAdoptsADyingConnection(t *testing.T) {
 	srv, node := newTestServer(t)
-	srv.retryInterval = 20 * time.Millisecond
 	ctx := context.Background()
 	syncupBoth(t, srv, reqOpts{revision: 2})
 	legIds := []uint64{testMetaLeg, testDataLeg}
@@ -524,7 +546,8 @@ func TestARestoredLegNeverAdoptsADyingConnection(t *testing.T) {
 	}
 
 	node.Reset()
-	reply, err := srv.SyncupCntlr(ctx, cntlrReq(reqOpts{revision: 4}))
+	held := cntlrReq(reqOpts{revision: 4})
+	reply, err := srv.SyncupCntlr(ctx, held)
 	if err != nil {
 		t.Fatalf("the level lowered back: %v", err)
 	}
@@ -552,7 +575,7 @@ func TestARestoredLegNeverAdoptsADyingConnection(t *testing.T) {
 	// row, not one judged from the half-torn-down leg it finds — the two
 	// channels would otherwise flip it, and its epoch, every round.
 	refreshTestCntlr(t, srv)
-	_, probed := srv.checkCntlrRound(ctx, &pb.CheckCntlrRequest{
+	verdict, probed := srv.checkCntlrRound(ctx, &pb.CheckCntlrRequest{
 		ClusterId: testCluster, CnId: testCn,
 		CntlrPointer: cntlrPtr(), Revision: 4,
 	}, nil)
@@ -567,27 +590,38 @@ func TestARestoredLegNeverAdoptsADyingConnection(t *testing.T) {
 				converged.GetDetails())
 		}
 	}
+	// No converge would act while the disconnects run, so nothing is named.
+	assertCodeZero(t, "the read beside the disconnects", verdict)
 
 	node.releaseCmd(disconnect)
-	waitFor(t, func() bool {
-		node.mu.Lock()
-		defer node.mu.Unlock()
-		for _, legId := range legIds {
-			dm := node.dms[legName(srv, legId)]
-			_, connected := node.subsystems[legNqn(srv, legId)]
-			if dm == nil || !connected ||
-				strings.Contains(dm.table, " "+oldDev[legId]+" ") {
-				return false
-			}
+	awaitDisconnects(t, srv)
+	round, resent := resendRound(t, srv, held, "after-the-disconnects")
+	assertCodeNames(t, "the read after the disconnects", round,
+		noCtrlName(legNqn(srv, testMetaLeg), testIp, testSvcId),
+		noCtrlName(legNqn(srv, testDataLeg), testIp, testSvcId))
+	if resent == nil {
+		t.Fatalf("the round that names the legs brought no re-send")
+	}
+	node.mu.Lock()
+	for _, legId := range legIds {
+		dm := node.dms[legName(srv, legId)]
+		_, connected := node.subsystems[legNqn(srv, legId)]
+		if dm == nil || !connected ||
+			strings.Contains(dm.table, " "+oldDev[legId]+" ") {
+			node.mu.Unlock()
+			t.Fatalf("leg %#x not built over a fresh connection by the "+
+				"re-send", legId)
 		}
-		return true
-	})
+	}
+	node.mu.Unlock()
 	for _, legId := range legIds {
 		if n := connectsOf(legId); n != 1 {
 			t.Fatalf("%d connects of leg %#x once its disconnect returned, "+
 				"want 1", n, legId)
 		}
 	}
+	assertRowVerdict(t, rowRound(t, srv, 4).GetAgentReply(),
+		"the read after the re-send")
 }
 
 // TestTheCntlrReadMirrorsTheDisconnectGate pins the read-only half of
@@ -601,9 +635,6 @@ func TestARestoredLegNeverAdoptsADyingConnection(t *testing.T) {
 // converge, so a read that judged step 2 first would name the group.
 func TestTheCntlrReadMirrorsTheDisconnectGate(t *testing.T) {
 	srv, node := newTestServer(t)
-	// The failed step registers the connect retry, which the test runs by
-	// hand only.
-	srv.retryInterval = time.Hour
 	ctx := context.Background()
 	syncupBoth(t, srv, reqOpts{
 		revision: 2, primary: true, clones: []*pb.Clone{cloneOf()}})
@@ -1146,48 +1177,5 @@ func TestARefusedCallLeavesNoLockEntry(t *testing.T) {
 				t.Fatal("the refusal waited for the cntlr's object lock")
 			}
 		})
-	}
-}
-
-// TestABackgroundAttemptOnADroppedCntlrLeavesNoLockEntry: a background
-// attempt scheduled for a cntlr that a drop takes away before the attempt
-// gets the node read lock — a connect retry racing the cntlr's pointer
-// leaving its CN's list — creates no lock entry: the
-// attempt checks the cntlr under the node read lock, which the drop's write
-// lock excludes, before it takes the object lock (reconvergeCntlr).
-func TestABackgroundAttemptOnADroppedCntlrLeavesNoLockEntry(t *testing.T) {
-	srv, node := newTestServer(t)
-	ctx := context.Background()
-	syncupBoth(t, srv, reqOpts{revision: 2, primary: false})
-	key := cntlrKey(testCluster, testCn, testSp, testCntlr)
-	st := srv.getCntlr(key)
-	if st == nil {
-		t.Fatal("the fixture converge left no cntlr state")
-	}
-
-	srv.locks.Node().Lock()
-	started, done := make(chan struct{}), make(chan struct{})
-	go func() {
-		close(started)
-		srv.reconvergeCntlr(ctx, key, st)
-		close(done)
-	}()
-	<-started
-	// The attempt reaches the node lock and waits behind the write lock.
-	time.Sleep(50 * time.Millisecond)
-	srv.dropCntlrState(ctx, key, st)
-	before := srv.locks.ObjCount()
-	node.Reset()
-	srv.locks.Node().Unlock()
-	select {
-	case <-done:
-	case <-time.After(5 * time.Second):
-		t.Fatal("the attempt never returned")
-	}
-	if got := srv.locks.ObjCount(); got != before {
-		t.Errorf("%d lock entries after the attempt, want %d", got, before)
-	}
-	if calls := node.Calls(); len(calls) != 0 {
-		t.Errorf("the attempt on a dropped cntlr ran %q", calls)
 	}
 }

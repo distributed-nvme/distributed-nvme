@@ -303,8 +303,13 @@ its info-read commands are plain memory reads.
   a rebuilt clone copies, and clone_xfer's checks that its agent's restart
   over the held copy mutated nothing and that the source's return created no
   dm-clone carry positive controls, the reads of the dm-clone by the
-  restart's reconcile and by two connect retry attempts after it, each under
-  a trace id of its own, and the reload in the same reading, and in
+  restart's reconcile, under a trace id of its own, and by a round of the
+  stage's after it, and the reload in the same reading, clone_xfer's
+  giveback and finalize checks that the agent ran no command under a trace
+  id of its own have the stage's own commands in the same reading (the
+  reload, and the finalize's order) — the early, late-flip and srcgone
+  checks of that kind carry none, so a log reader that stops matching
+  passes them — and in
   redund's md-refusal stage the checks that no array holds a leg and that no
   loop device is left fail on a read that fails and have the running array
   and the listed loops as their positive controls, and repair's forced-start
@@ -441,10 +446,12 @@ not failed by itself once its leg's probe has failed twice (CN11, CN30), the
 stage logging how long after the cut, and the `SyncupCntlr` re-sent as the
 worker would fails each named member in md once and removes none (CN12, The
 early fail): both md rows read OK, and the survivor's superblock records the
-death, its array state counting itself alone. With the legs back, the
-re-sends, or the CN10 retry that converge registered, put the members back,
-and the data member takes back a small part of the array, counted in sectors
-as before. With the port link of one
+death, its array state counting itself alone. While the cut holds, the agent
+runs no command under a trace id of its own (`dnagent.md` SH31): no converge
+can make the late members serve, and no read names them. With the legs back,
+the `SyncupCntlr` re-sent on the rounds that name the members puts them back
+under the stage's trace id, and the data member takes back a small part of
+the array, counted in sectors as before. With the port link of one
 of the primary's data sides taken away on its DN while the port listens, the
 primary's reconnect is refused with DNR and its kernel deletes the controller;
 with the link back, a fresh check round names the side with no controller
@@ -461,12 +468,20 @@ available leg", the ns-dev stays parked with its row in error, and the
 promotion writes no optimized group, so the host's path stays inaccessible and
 its IO would wait rather than fail; the namespace row reads OK on the converge
 and alike in the observation a fresh round then reports, made after the
-converge by a read or by an attempt of the connect retry (CN12, CN16's ANA
-rule, CN28). The connect retry, which the late members and the waiting
-namespace keep registered, then assembles the arrays under its own trace ids,
-with no second `SyncupCntlr`, puts the ns-dev on the raid0 and moves the
-namespace optimized, then stops; and a block only the newer leg holds reads as
-that leg's, the stale member kicked (CN10, CN12; `architecture.md`, [D16]).
+converge by a read, which names nothing a converge could act on, and the agent
+runs no command under a trace id of its own while the members are late (CN12,
+CN16's ANA rule, CN28, CN30). Once the sides flip, a read names both groups'
+absent arrays, which the assembly would start, and nothing else; the
+`SyncupCntlr` re-sent on that code, the second the primary gets, assembles
+both arrays, puts the ns-dev on the raid0 and moves the namespace optimized,
+all under the stage's trace id. A block only the newer leg holds reads as
+that leg's, the stale member kicked (CN12, CN30; `architecture.md`, [D16]).
+Only then does the stale member go back: once its leg's row reads `OK`, after
+its prober's first round, a read names its put-back, and the stage, playing
+the worker for a bounded number of re-sends, brings the converge whose add
+of it runs under the stage's trace id, until a round answers zero with both
+arrays whole and the member in sync; through it all the agent runs no
+command under an id of its own.
 Last, md's check (CN12, The md check): eight sectors of one data side fail in
 its disk node's export to the primary alone, and the suite, playing the
 worker, puts an md check request on the data group and reads the cntlr until
@@ -665,23 +680,27 @@ namespace behind both agents' backs, as it does again once the copy is whole
 destination's agent then restarts over the held copy and leaves it as it is
 (CN2, CN18): the count reads the held one, the dm-clone, its group's device
 and its leg's wrapper keep their device numbers and tables, the fresh log,
-read once a second attempt of the connect retry the restart registers has
-begun, so that it holds the whole first attempt, holds no mutation, the
-source's row reads missing with the source-fault reason (CN18) and the
-dm-clone's and the group's ok. The source gets its namespace back from the
+read once a round of the stage's has read the dm-clone after the reconcile,
+so that it holds the whole reconcile, holds no mutation, the dm-clone is read
+under no trace id but the reconcile's and the stage's, six seconds later as
+well, the source's row reads missing with the source-fault reason (CN18) and
+the dm-clone's and the group's ok. The source gets its namespace back from the
 transfer's own converge of a re-sent request (CN17), under a new device number
-on the destination, and with no request to the destination the connect retry,
-which a source with no namespace keeps registered, reloads the dm-clone onto
-that number in place, tries the chunk again with the ns-devs paused, which
-marks nothing new since the first build marked the chunk's regions
-(`architecture.md`, Bitmap push protocol, The apply pauses the writers),
-and enables hydration (CN10, CN18), its count at least the held one, and the
-copy goes on. With no request,
-the startup reconcile, or the connect retry its pass registers when a step
-fails, rebuilds a destination CN wiped in the middle of that copy, the group's
-leg and device before the dm-clone over them and the chunk again before
-hydration (CN2, CN10, CN18), its dead host path replaced by device as the
-pools share the NQN. The wipe-time sample counts more than the held count,
+on the destination; the destination changes nothing by itself, and a read of
+it names the dm-clone, whose table names the old number (CN18, CN30). The
+request re-sent to the destination on that code, the one `SyncupCntlr` it
+gets, reloads the dm-clone onto the new number in place, under the stage's
+trace id like every command the destination runs meanwhile, tries the chunk
+again with the ns-devs paused, which marks nothing new since the first build
+marked the chunk's regions (`architecture.md`, Bitmap push protocol, The
+apply pauses the writers), and enables hydration (CN18), its count at least
+the held one, and the copy goes on. The startup reconcile rebuilds a
+destination CN wiped in the middle of that copy from the request it stored,
+and the request re-sent while a read names what a step of it left undone
+finishes the rebuild, the group's leg and device before the dm-clone over
+them and the chunk again before hydration (CN2, CN18, CN30), its dead host
+path replaced by device as the pools share the NQN. The wipe-time sample
+counts more than the held count,
 and between the destination raid0's write count read while the copy held,
 which holds any part of a block that a copy failing as the source went
 left, and one read between two samples that read the same count, the copy
@@ -699,25 +718,30 @@ source then loses its namespace behind both agents' backs, the transfer's
 export and the destination CN's controller of it staying: the clone's two
 rows, its group's row and its destination namespace's two read one status,
 with one epoch, on a converge, in the observations a fresh round and then an
-info read report, each made after that converge by a read or by an attempt of
-the connect retry, which a clone whose source is not ready keeps registered,
-and on a second converge (`cnagent.md` CN10, CN18, CN28), the source's row
-missing with the source-fault reason, which sets no health epoch, and the
-other four ok, the dm-clone's with no reason, while the namespace serves on,
-optimized, through the hydrated dm-clone (CN16's clone rule) and the
-dm-clone's row still carries the status line the gateway's hydration check
-reads. The state compared is measured as the dn suite's lost source measures
+info read report, each made after that converge by a read, and on a second
+converge (`cnagent.md` CN18, CN28), the source's row missing with the
+source-fault reason, which sets no health epoch, and the other four ok, the
+dm-clone's with no reason, while the namespace serves on, optimized, through
+the hydrated dm-clone (CN16's clone rule) and the dm-clone's row still carries
+the status line the gateway's hydration check reads. Over a live controller
+with no namespace every reply answers code zero, since a converge connects
+nowhere beside a controller; with no controller the fresh round and the info
+read name the source's endpoint, which only a converge connects, and the
+converges answer zero, naming no endpoint themselves (CN18, CN30); the
+driver samples hydration only from a round that answers zero, so the status
+line is sampled over the live controller alone. Either way the agent runs no
+command under a trace id of its own between the stage's calls. The state compared is measured as the dn suite's lost source measures
 it (`dnagent_integtest.md`, Cases), and a reading that moves before the
 comparison ends fails the stage. The finalize takes the clone down in layer
 order, the clone, its source connection, then its group's device and its leg
 (`cnagent.md` L3, L5, L9, L10), leftover while the leg's disconnect runs and
 while the source's does, unless the source's controller was already gone, and
 the group waits for a pass that finds the source's connection gone; that pass
-may be the agent's own retry (`cnagent.md` CN10), under a trace id of its own,
-so the order is read from every command the controller node runs after the
-finalize begins. The half
-the source wrote reads back intact through the destination, which then takes a
-write, while the half it never wrote stays unmapped and zero there, the
+is one of the stage's re-sends, and every command the controller node runs
+after the finalize begins, the disconnects off the passes included, is under
+the stage's trace id (`cnagent.md` CN10), the order read from them all. The
+half the source wrote reads back intact through the destination, which then
+takes a write, while the half it never wrote stays unmapped and zero there, the
 destination starting empty (`architecture.md`, [D3]); and at teardown both CNs
 pass smoke's per-CN check.
 
@@ -817,8 +841,8 @@ refuses, a zero that fails or is killed or that its read back does not
 prove, a superblock read that fails, a new leg of a CREATED repair whose
 abort flag is set, which it does not zero and starts from only when the
 mark names it, a STARTED repair's new
-leg, which it keeps whatever the flag says, its late member and the retry its
-other errors register, and of the take-back check, a new leg with no
+leg, which it keeps whatever the flag says, its wait for a late member and
+its other errors, and of the take-back check, a new leg with no
 superblock, a STARTED repair's add with no member to compare with, a keeper
 whose superblock read finds none and a superblock read that did not answer,
 and the identity check of a `leg_list` member's add, all of

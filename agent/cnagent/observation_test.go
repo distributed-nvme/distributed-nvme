@@ -242,7 +242,7 @@ func TestRoundReadsDefault(t *testing.T) {
 }
 
 // TestEveryConvergeEndStoresAnObservation: a SyncupCn's and a SyncupCntlr's
-// converge, a retry attempt's and the startup reconcile's each store the
+// converge and the startup reconcile's each store the
 // object's observation before their locks go (dnagent.md SH28): the rows and
 // the code the converge's reply carries, the revision it converged, the
 // agent's clock at its end and the trace id of its call. A syncup's reply
@@ -314,25 +314,6 @@ func TestEveryConvergeEndStoresAnObservation(t *testing.T) {
 		if calls := node.Calls(); len(calls) != 0 {
 			t.Errorf("the rounds read the node: %q", calls)
 		}
-	})
-
-	t.Run("a retry attempt", func(t *testing.T) {
-		srv, _ := newTestServer(t)
-		clock := withClock(srv)
-		syncupBoth(t, srv, reqOpts{revision: 2, primary: true})
-		syncup := latestCntlrObs(t, srv)
-		clock.advance(time.Second)
-		retryAttempt(t, srv)
-		got := latestCntlrObs(t, srv)
-		if got.Revision != 2 || !got.Time.Equal(clock.Now()) ||
-			got.Info == nil || got.TraceId == "" ||
-			got.TraceId == syncup.TraceId {
-			t.Errorf("the attempt stored %+v after the syncup's %+v",
-				got, syncup)
-		}
-		assertStamp(t, "the round after the attempt",
-			roundCntlr(srv, "round", 2).GetObsStamp(),
-			got.Time, got.TraceId, clock.Now(), time.Time{})
 	})
 
 	t.Run("the startup reconcile", func(t *testing.T) {
@@ -416,7 +397,6 @@ func TestACutOffConvergeStoresNothing(t *testing.T) {
 // (dnagent.md SH25, SH28).
 func TestAnObjectWithNoObservationAnswersAZeroTime(t *testing.T) {
 	srv, node := newTestServer(t)
-	srv.retryInterval = time.Hour
 	clock := withClock(srv)
 	cnSyncup(t, srv, 1, true)
 	cutOffSyncupCntlr(t, srv, node,
@@ -450,7 +430,7 @@ func TestAnObjectWithNoObservationAnswersAZeroTime(t *testing.T) {
 }
 
 // TestARoundBesideAConvergeAnswersFromMemory: while a converge of the object
-// runs — a SyncupCntlr, a retry attempt, a SyncupCn — and holds its locks, a
+// runs — a SyncupCntlr or a SyncupCn — and holds its locks, a
 // round and an info read answer at once from the observation from before it,
 // at that observation's revision, with the converge's start, and read
 // nothing; and no round starts a read until the converge's mark ends
@@ -471,14 +451,6 @@ func TestARoundBesideAConvergeAnswersFromMemory(t *testing.T) {
 					t.Errorf("SyncupCntlr: %v", err)
 				}
 				return 3
-			}},
-		{"a retry attempt", metaLegAttr,
-			func(t *testing.T, srv *CnAgentServer) uint64 {
-				srv.reconvergeCntlr(srv.rootCtx,
-					cntlrKey(testCluster, testCn, testSp, testCntlr),
-					srv.getCntlr(cntlrKey(
-						testCluster, testCn, testSp, testCntlr)))
-				return 2
 			}},
 		{"a SyncupCn", func(*CnAgentServer) string { return portProbeLine },
 			func(t *testing.T, srv *CnAgentServer) uint64 {
@@ -1153,14 +1125,15 @@ func TestARefusedSyncupCancelsNoRead(t *testing.T) {
 		}
 	}
 
-	// The refused syncup ends no mark it did not make: a retry attempt's
-	// mark of the cntlr, and an admitted SyncupCn's marks of the CN and the
-	// node, stand until their own converge ends them.
+	// The refused syncup ends no mark it did not make: an admitted
+	// SyncupCntlr's mark of the cntlr, and an admitted SyncupCn's marks of
+	// the CN and the node, stand until their own converge ends them.
 	t.Run("another converge's mark", func(t *testing.T) {
 		srv, _ := newTestServer(t)
 		syncupBoth(t, srv, reqOpts{revision: 2})
 
-		endAttempt := srv.markConverge(cntlrK)
+		endAdmitted := srv.markSyncup(cntlrK,
+			cntlrReq(reqOpts{revision: 3}))
 		within(t, "a stale SyncupCntlr", func() {
 			if got := staleCntlr(srv); got.GetCode() !=
 				common.ReplyCodeStaleRevision {
@@ -1172,9 +1145,9 @@ func TestARefusedSyncupCancelsNoRead(t *testing.T) {
 		cntlrSince := srv.marks.SinceLocked(cntlrK)
 		srv.mu.Unlock()
 		if cntlrSince.IsZero() {
-			t.Error("the stale SyncupCntlr ended the attempt's mark")
+			t.Error("the stale SyncupCntlr ended the admitted one's mark")
 		}
-		endAttempt()
+		endAdmitted()
 
 		endSyncup := srv.markNodeSyncup(cnK, 3)
 		within(t, "a stale SyncupCn", func() {

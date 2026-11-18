@@ -211,8 +211,8 @@ func TestADeadBadLegIsFailedOnce(t *testing.T) {
 	f.syncup(t, repairReq(3, pb.RepStage_REP_STAGE_CREATED, false))
 	f.badLegDead()
 	failRounds(t, f.srv, testDataLeg, deadLegRounds)
-	// The late-member retry skips an open repair's bad leg while the array
-	// runs, so the read's name is what brings the converge.
+	// Nothing in the agent converges again by itself (cnagent.md CN30), so
+	// the read's name is what brings the converge.
 	_, reply := f.read(t, 3)
 	assertNamesOnly(t, reply, "the dead bad leg", legName(f.srv, testDataLeg))
 	f.node.Reset()

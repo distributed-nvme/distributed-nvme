@@ -32,8 +32,9 @@ func (s *CnAgentServer) Prepare(ctx context.Context) {
 // plain agent restart a clone whose build had enabled hydration converges as
 // a no-op. It runs under the node write lock with the caller's
 // startup trace id (SH2), and fails only when the local store itself is
-// unreadable (SH3). Background retries (CN10/CN18) and probers (CN11) mint a
-// fresh trace id per attempt. It ends the agent's start as it returns nil
+// unreadable (SH3). The probers (CN11) and the path watchers (CN10) mint a
+// fresh trace id per round, and a background disconnect of a pass that had
+// none mints its own. It ends the agent's start as it returns nil
 // (dnagent.md SH33).
 func (s *CnAgentServer) Reconcile(ctx context.Context) error {
 	if !s.rootSet {
@@ -410,7 +411,6 @@ func (s *CnAgentServer) dropCntlrState(
 	key string,
 	st *cntlrState,
 ) {
-	s.stopConnectRetry(st)
 	s.stopLegProbers(st, nil)
 	s.keepPathWatchers(st, nil)
 	req := st.loadReq()

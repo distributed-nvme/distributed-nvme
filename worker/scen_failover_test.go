@@ -812,6 +812,98 @@ func TestFailoverNewPrimarySettlesOverACloneSourceFault(t *testing.T) {
 		})
 }
 
+// TestFailoverNewPrimarySettlesOnTheResentSyncupItsReadBrings pins HL2's
+// settle of a promotion that came before the sides' flips (cnagent.md CN12,
+// CN30). The new primary's fake reports its data group and its pool MISSING
+// with no reason on every answer and code zero, as a cn agent whose
+// converge found the members not serving and whose reads name nothing: it
+// stays settling, with no health epoch, and no round brings a syncup. Then
+// the sides flip: its reads name the absent array, with the group and the
+// pool still MISSING, and a converge builds them. The round that answers
+// from such a read brings the syncup again (RW4 step 5), under the read's
+// trace id, and the syncup's reply, which shows the stack built, settles
+// the primary.
+func TestFailoverNewPrimarySettlesOnTheResentSyncupItsReadBrings(t *testing.T) {
+	t.Parallel()
+	h := newWorkerHarness(t, harnessOpts{})
+	c := h.plantStd(t, nil)
+	w := h.startWorker(t, "w1")
+	h.waitOwnsAll(t, w)
+	c.waitConverged(t)
+
+	newAgent, newKey := c.cntlrAgent(t, 2)
+	absent := map[string]agentfake.Row{
+		foDataGrpRow(): rowLever(pb.ResStatus_RES_STATUS_MISSING, "", true),
+		fmt.Sprintf("slice_id_to_dm_pool.%d", stdSliceId): rowLever(
+			pb.ResStatus_RES_STATUS_MISSING, "", true),
+	}
+	foLever(t, newAgent, newKey, func(o *agentfake.Object) {
+		for rowKey, row := range absent {
+			foSetRow(o, rowKey, row)
+		}
+	})
+	foSetDisabled(t, c, 1, true)
+	applied := foWaitFailover(t, h, w, 1, 2, 20*time.Second)
+	promoted := foWaitCntlrSynced(t, h, w, 2, applied.num("revision"),
+		20*time.Second)
+	h.waitRounds(t, newAgent, 3, newKey)
+	if cntlr := c.cntlr(t, 2); !cntlr.GetPrimary() || !cntlr.GetSettling() ||
+		cntlr.GetErrEpoch() != 0 {
+		t.Fatalf("cntlr 2 over its group and pool MISSING: primary %t, "+
+			"settling %t, err_epoch %d; want a settling primary with no "+
+			"health epoch", cntlr.GetPrimary(), cntlr.GetSettling(),
+			cntlr.GetErrEpoch())
+	}
+	for _, rec := range h.records(w, msgCntlrSettled) {
+		if foIsCntlr(2)(rec) {
+			t.Fatalf("cntlr 2 settled over its group and pool MISSING")
+		}
+	}
+	for _, rec := range h.records(w, msgSyncupResult) {
+		if foIsCntlr(2)(rec) && rec.at.After(promoted.at) {
+			t.Fatalf("cntlr 2 got a syncup under %s while its reads named "+
+				"nothing", rec.traceId)
+		}
+	}
+
+	flipped := time.Now()
+	foLever(t, newAgent, newKey, func(o *agentfake.Object) {
+		for rowKey := range absent {
+			delete(o.Rows, rowKey)
+		}
+		o.ReadLeftover = 1
+		o.ReadRows = absent
+	})
+	settled := h.waitRecord(t, 20*time.Second, w, msgCntlrSettled,
+		func(rec logRecord) bool {
+			return foIsCntlr(2)(rec) && rec.at.After(flipped)
+		})
+	var resent []logRecord
+	for _, rec := range h.records(w, msgSyncupResult) {
+		if foIsCntlr(2)(rec) && rec.at.After(flipped) &&
+			!rec.at.After(settled.at) {
+			resent = append(resent, rec)
+		}
+	}
+	rounds := make(map[string]bool)
+	for _, msg := range newAgent.Record(newKey).Rounds {
+		if req, ok := msg.(interface{ GetTraceId() string }); ok {
+			rounds[req.GetTraceId()] = true
+		}
+	}
+	if len(resent) != 1 || resent[0].traceId != settled.traceId ||
+		resent[0].num("code") != 0 || !rounds[resent[0].str("obs_trace_id")] {
+		t.Fatalf("cntlr 2's syncups up to its settle: %d; want one, accepted "+
+			"with code 0, brought by a round under the trace id %s of the "+
+			"settle and naming the read a round started", len(resent),
+			settled.traceId)
+	}
+	h.waitUntil(t, 10*time.Second, "cntlr 2's settling cleared",
+		func() (bool, string) {
+			return !c.cntlr(t, 2).GetSettling(), "still settling"
+		})
+}
+
 // TestFailoverNewPrimaryRefusingItsSyncup pins HL9: the primary's agent
 // refuses its SyncupCntlr with the invalid-conf code, so it answers its
 // rounds from the observation of the revision before. Each such round is

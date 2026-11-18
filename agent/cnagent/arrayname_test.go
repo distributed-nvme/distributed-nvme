@@ -6,7 +6,6 @@ import (
 	"slices"
 	"strings"
 	"testing"
-	"time"
 
 	"github.com/distributed-nvme/distributed-nvme/agent"
 	"github.com/distributed-nvme/distributed-nvme/common"
@@ -799,7 +798,6 @@ func TestAStoredMarkIsNamedAsStoredNotAsAForcedStart(t *testing.T) {
 	f.node.failCmd[blocker] = ""
 	f.node.mu.Unlock()
 	fresh := newCnServer(f.node)
-	fresh.retryInterval = time.Hour
 	reconcileForTest(t, fresh)
 	f.srv = fresh
 	f.node.mu.Lock()

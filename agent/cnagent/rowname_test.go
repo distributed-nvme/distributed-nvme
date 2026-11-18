@@ -6,7 +6,6 @@ import (
 	"slices"
 	"strings"
 	"testing"
-	"time"
 
 	"github.com/distributed-nvme/distributed-nvme/common"
 	"github.com/distributed-nvme/distributed-nvme/pb"
@@ -279,7 +278,6 @@ func TestALegWrapperIsNamedWhileAConvergeWouldChangeIt(t *testing.T) {
 		for _, shape := range rowWrapperShapes {
 			t.Run(role+", "+shape.name, func(t *testing.T) {
 				srv, node := newTestServer(t)
-				srv.retryInterval = time.Hour
 				opts := reqOpts{revision: 2, primary: primary}
 				syncupBoth(t, srv, opts)
 				held := cntlrReq(opts)
@@ -320,7 +318,6 @@ func TestALegWrapperIsNamedWhileAConvergeWouldChangeIt(t *testing.T) {
 // creates it.
 func TestAFailedWrapperStepIsNamedByTheConverge(t *testing.T) {
 	srv, node := newTestServer(t)
-	srv.retryInterval = time.Hour
 	opts := reqOpts{revision: 2}
 	syncupBoth(t, srv, opts)
 	held := cntlrReq(opts)
@@ -453,7 +450,6 @@ func TestALegWrapperIsNotNamedWhereAConvergeWouldNotChangeIt(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			srv, node := newTestServer(t)
-			srv.retryInterval = time.Hour
 			wrapper := legName(srv, testDataLeg)
 			nqn := legNqn(srv, testDataLeg)
 			if tc.arm == nil {
@@ -568,7 +564,6 @@ func TestTheReadNamesALegWrapperExactlyWhenAConvergeWouldChangeIt(
 					shape.name, lookup.name)
 				t.Run(name, func(t *testing.T) {
 					srv, node := newTestServer(t)
-					srv.retryInterval = time.Hour
 					opts := reqOpts{revision: 2, primary: primary,
 						leftoverOk: true}
 					syncupBoth(t, srv, opts)
@@ -649,7 +644,6 @@ func TestARedundNoneGroupDeviceIsNamedWhileAConvergeWouldChangeIt(
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			srv, node := newTestServer(t)
-			srv.retryInterval = time.Hour
 			opts := reqOpts{revision: 2, primary: true}
 			syncupBoth(t, srv, opts)
 			held := cntlrReq(opts)
@@ -709,7 +703,6 @@ func TestARedundNoneGroupDeviceIsNamedWhileAConvergeWouldChangeIt(
 // builds it and the stack over it, and moves the namespace optimized.
 func TestAPromotionAheadOfTheFlipIsNamedOnceTheLegServes(t *testing.T) {
 	srv, node := newTestServer(t)
-	srv.retryInterval = time.Hour
 	ctx := context.Background()
 	syncupBoth(t, srv, reqOpts{revision: 2, primary: true})
 	if _, err := srv.SyncupCntlr(ctx,
@@ -757,7 +750,6 @@ func TestAPromotionAheadOfTheFlipIsNamedOnceTheLegServes(t *testing.T) {
 // re-send that reloads it.
 func TestAFailedLinearGroupStepIsNamedByTheConverge(t *testing.T) {
 	srv, node := newTestServer(t)
-	srv.retryInterval = time.Hour
 	opts := reqOpts{revision: 2, primary: true}
 	syncupBoth(t, srv, opts)
 	held := cntlrReq(opts)
@@ -859,7 +851,6 @@ func TestARedundNoneGroupDeviceIsNotNamedWhereAConvergeWouldNotChangeIt(
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			srv, node := newTestServer(t)
-			srv.retryInterval = time.Hour
 			tc.opts.leftoverOk = true
 			syncupBoth(t, srv, tc.opts)
 			grp := grpName(srv, testDataGrp)
@@ -911,7 +902,6 @@ func TestARedundNoneGroupDeviceWaitsForItsWrappersName(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			srv, node := newTestServer(t)
-			srv.retryInterval = time.Hour
 			opts := reqOpts{revision: 2, primary: true}
 			syncupBoth(t, srv, opts)
 			held := cntlrReq(opts)
@@ -1018,7 +1008,6 @@ func TestTheReadNamesARedundNoneGroupDeviceExactlyWhenAConvergeWouldChangeIt(
 		for _, leg := range legs {
 			t.Run(device.name+", "+leg.name, func(t *testing.T) {
 				srv, node := newTestServer(t)
-				srv.retryInterval = time.Hour
 				opts := reqOpts{revision: 2, primary: true, leftoverOk: true}
 				syncupBoth(t, srv, opts)
 				grp := grpName(srv, testDataGrp)
@@ -1061,7 +1050,6 @@ func TestATransferDeviceRestsOnItsOriginOnlyWhereItIsServed(t *testing.T) {
 
 	t.Run("unserved at the no-thin-pool level", func(t *testing.T) {
 		srv, node := newTestServer(t)
-		srv.retryInterval = time.Hour
 		ctx := context.Background()
 		opts := func(revision uint64, primary bool) reqOpts {
 			return reqOpts{revision: revision, primary: primary,
@@ -1116,7 +1104,6 @@ func TestATransferDeviceRestsOnItsOriginOnlyWhereItIsServed(t *testing.T) {
 
 	t.Run("served over a raid0 that is not there", func(t *testing.T) {
 		srv, node := newTestServer(t)
-		srv.retryInterval = time.Hour
 		opts := reqOpts{revision: 2, primary: true, xfers: xfers}
 		syncupBoth(t, srv, opts)
 		held := cntlrReq(opts)
@@ -1164,7 +1151,6 @@ func TestAConvergeMakesASetReadOnlyDeviceWritable(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			srv, node := newTestServer(t)
-			srv.retryInterval = time.Hour
 			opts := reqOpts{revision: 2, primary: true}
 			syncupBoth(t, srv, opts)
 			name := tc.device(srv, opts)
@@ -1226,7 +1212,6 @@ func TestAFailedReadOnlyClearFailsTheDevicesStep(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			srv, node := newTestServer(t)
-			srv.retryInterval = time.Hour
 			opts := reqOpts{revision: 2, primary: true}
 			syncupBoth(t, srv, opts)
 			held := cntlrReq(opts)

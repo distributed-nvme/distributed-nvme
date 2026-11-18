@@ -4,7 +4,6 @@ import (
 	"context"
 	"strings"
 	"testing"
-	"time"
 
 	"github.com/distributed-nvme/distributed-nvme/agent"
 )
@@ -19,7 +18,6 @@ import (
 // moves to optimized.
 func TestAResumeKeepsTheLiveTableAfterAStoppedReload(t *testing.T) {
 	srv, node := newTestServer(t)
-	srv.retryInterval = time.Hour
 	ctx := context.Background()
 	syncupBoth(t, srv, reqOpts{revision: 2, primary: true})
 	nsDev := nsDevName(srv, testNs)

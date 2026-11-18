@@ -2,8 +2,11 @@ package cnagent
 
 import (
 	"context"
+	"errors"
 	"log/slog"
 	"path"
+
+	"github.com/distributed-nvme/distributed-nvme/pb"
 )
 
 // ---------------------------------------------------------------------------
@@ -47,9 +50,49 @@ func (m *Md) SetSyncMin(ctx context.Context, dev, sector string) error {
 		sysfsBlockDir+"/"+path.Base(dev)+"/md/sync_min", sector)
 }
 
-// stepMdCheck is the converge's md check of one group of a primary, from
-// the array as the pass left it, which runs (CN12, The md check). With a
-// request in the group's record:
+// mdCheckAction is what the converge's md check does with one group's array
+// (stepMdCheck), as mdCheckActionOf decides it.
+type mdCheckAction int
+
+const (
+	// mdCheckNone writes nothing and changes no memory.
+	mdCheckNone mdCheckAction = iota
+	// mdCheckForget drops the memory: the array does not run, and a stopped
+	// array ended any check md ran on it.
+	mdCheckForget
+	// mdCheckStopOld stops a check this incarnation started for a request
+	// that is gone, md still running it, and then drops the memory.
+	mdCheckStopOld
+	// mdCheckStop stops a check md runs while the group does not suit one or
+	// the array is degraded, and drops the memory once the stop is written.
+	mdCheckStop
+	// mdCheckAdopt takes a check md runs, which this incarnation has no
+	// memory of, as the request's.
+	mdCheckAdopt
+	// mdCheckNote ends the request's check once md reads idle (noteMdCheck).
+	mdCheckNote
+	// mdCheckStart starts the request's check: sync_min back to 0, then
+	// "check".
+	mdCheckStart
+)
+
+// named reports whether a cntlr's read names a group's md check for the
+// action (mdCheckDue): a start or a stop, which write to the array's md
+// attributes, and an adoption, which only a converge makes. A note a read
+// makes itself (noteMdCheck), and a memory dropped changes nothing a
+// re-send would.
+func (a mdCheckAction) named() bool {
+	return a == mdCheckStopOld || a == mdCheckStop || a == mdCheckAdopt ||
+		a == mdCheckStart
+}
+
+// mdCheckActionOf decides the converge's md check of one group of a primary
+// from the array as read (detail), the group's request and the memory of
+// the check (cntlrState.mdChecks), with nothing written (CN12, The md
+// check). It is the one decision the converge acts on (stepMdCheck) and a
+// cntlr's read names the group by (mdCheckDue). dropOld reports a memory of
+// another request, which the converge drops before it acts. With a request
+// in the group's record:
 //
 //   - while md checks the array, a check this incarnation has no memory of
 //     is adopted as the request's; while the group stops suiting a check
@@ -65,51 +108,83 @@ func (m *Md) SetSyncMin(ctx context.Context, dev, sector string) error {
 // With no request, a check this incarnation started that md still runs is
 // stopped; one it adopted is left to run, as one it never saw is; either way
 // the memory goes. Another sync action of md (a resync, a recovery, a frozen
-// array) starts and stops nothing. A write that fails is logged and tried
-// again by the next converge; the memory changes only on a write that
-// succeeded.
+// array) starts and stops nothing.
+func mdCheckActionOf(
+	st *cntlrState,
+	gp *grpPlan,
+	detail *MdDetail,
+) (action mdCheckAction, dropOld bool) {
+	if detail == nil || !detail.Exists || !mdRunning(detail.State) {
+		return mdCheckForget, false
+	}
+	req := gp.grp.GetMdCheck().GetRequestEpoch()
+	run, have := st.mdChecks[gp.grpId]
+	if have && run.epoch != req {
+		if req == 0 && run.started && !run.done &&
+			detail.SyncAction == mdActionCheck {
+			return mdCheckStopOld, false
+		}
+		dropOld, have = true, false
+	}
+	if req == 0 {
+		return mdCheckNone, dropOld
+	}
+	switch {
+	case detail.SyncAction == mdActionCheck:
+		if !mdCheckSuits(gp) || detail.Degraded != 0 {
+			return mdCheckStop, dropOld
+		}
+		if !have {
+			return mdCheckAdopt, dropOld
+		}
+	case detail.SyncAction != mdActionIdle:
+	case have:
+		return mdCheckNote, dropOld
+	case mdCheckSuits(gp) && mdCheckable(detail):
+		return mdCheckStart, dropOld
+	}
+	return mdCheckNone, dropOld
+}
+
+// stepMdCheck is the converge's md check of one group of a primary, from
+// the array as the pass left it, which runs, its member reconciliation's
+// failure aside (ensureGroup; CN12, The md check): it takes the action
+// mdCheckActionOf decides. A write that fails is logged, and the
+// memory changes only on a write that succeeded, so the decision stands and
+// a cntlr's read names the group while it does (mdCheckDue): the worker's
+// re-send brings the converge that writes again.
 func (s *CnAgentServer) stepMdCheck(
 	ctx context.Context,
 	st *cntlrState,
 	gp *grpPlan,
 	detail *MdDetail,
 ) {
-	if detail == nil || !detail.Exists || !mdRunning(detail.State) {
-		// A stopped array ended any check md ran on it.
+	action, dropOld := mdCheckActionOf(st, gp, detail)
+	switch action {
+	case mdCheckForget:
 		delete(st.mdChecks, gp.grpId)
 		return
+	case mdCheckStopOld:
+		// A stop that fails leaves the memory, so the decision stands.
+		if s.setSyncAction(ctx, gp, detail, mdActionIdle) {
+			delete(st.mdChecks, gp.grpId)
+		}
+		return
+	}
+	if dropOld {
+		delete(st.mdChecks, gp.grpId)
 	}
 	req := gp.grp.GetMdCheck().GetRequestEpoch()
-	run, have := st.mdChecks[gp.grpId]
-	if have && run.epoch != req {
-		if req == 0 && run.started && !run.done &&
-			detail.SyncAction == mdActionCheck &&
-			!s.setSyncAction(ctx, gp, detail, mdActionIdle) {
-			// The stop failed: the memory stays, so the next converge
-			// tries it again.
-			return
+	switch action {
+	case mdCheckStop:
+		if s.setSyncAction(ctx, gp, detail, mdActionIdle) {
+			delete(st.mdChecks, gp.grpId)
 		}
-		delete(st.mdChecks, gp.grpId)
-		have = false
-	}
-	if req == 0 {
-		return
-	}
-	switch {
-	case detail.SyncAction == mdActionCheck:
-		if !mdCheckSuits(gp) || detail.Degraded != 0 {
-			if s.setSyncAction(ctx, gp, detail, mdActionIdle) {
-				delete(st.mdChecks, gp.grpId)
-			}
-			return
-		}
-		if !have {
-			st.mdChecks[gp.grpId] = mdCheckRun{epoch: req}
-		}
-	case detail.SyncAction != mdActionIdle:
-	case have:
+	case mdCheckAdopt:
+		st.mdChecks[gp.grpId] = mdCheckRun{epoch: req}
+	case mdCheckNote:
 		noteMdCheck(st, gp, detail)
-	case mdCheckSuits(gp) && mdCheckable(detail):
+	case mdCheckStart:
 		if err := s.md.SetSyncMin(ctx, detail.Dev, "0"); err != nil {
 			slog.ErrorContext(ctx, "md sync_min write failed",
 				slog.Uint64("grp_id", gp.grpId),
@@ -121,6 +196,42 @@ func (s *CnAgentServer) stepMdCheck(
 			st.mdChecks[gp.grpId] = mdCheckRun{epoch: req, started: true}
 		}
 	}
+}
+
+// errMdCheckDue is the failure a cntlr's read names a group's md check by
+// while a converge would start, stop or adopt it (mdCheckDue).
+var errMdCheckDue = errors.New(
+	"a converge starts, stops or adopts md's check of the group's array")
+
+// mdCheckDue reports whether a cntlr's read names a group's md check (CN12,
+// The md check; CN30): the group's row of the read reads OK, and the
+// converge's decision (mdCheckActionOf) over the array the read found is a
+// start, a stop or an adoption (mdCheckAction.named). The converge steps the
+// check over every running array its pass read, a member reconciliation
+// that failed included, but while the in-sync guard holds, whose row a read
+// reads as ERROR too (ensureGroup), so the name is one a converge cures: it
+// stands only while the converge's own read of the array does not answer —
+// before its member reconciliation, which its group row reads, or after
+// member commands that changed the array (arrayAfter), while its row reads
+// the command's error — while the converge's in-sync guard holds where the
+// read's does not (cnagent.md, Known limits), or while md refuses the write. A name only a
+// read gives: the converge that acts answers no name for it, so a write md
+// keeps refusing brings a converge every second round at most
+// (dnv-worker.md RW4). Reason: a converge's pass can leave the check
+// unstepped, as the delivering converge of a request whose array read did
+// not answer does, and with no name the request would stand, with no
+// converge to come, until the sp worker's MdCheckRequestBound ends it.
+func mdCheckDue(
+	st *cntlrState,
+	gp *grpPlan,
+	row *pb.ResInfo,
+	detail *MdDetail,
+) bool {
+	if row.GetStatus() != pb.ResStatus_RES_STATUS_OK {
+		return false
+	}
+	action, _ := mdCheckActionOf(st, gp, detail)
+	return action.named()
 }
 
 // forgetMdCheck drops the memory of a group's md check when the converge
@@ -160,10 +271,20 @@ func mdCheckSuits(gp *grpPlan) bool {
 	return true
 }
 
+// mdStateReadonly is the array_state of an array md holds read-only, which
+// counts as running (mdRunningStates).
+const mdStateReadonly = "readonly"
+
 // mdCheckable says whether a check may start on a group's running array: it
-// runs whole, with two or more members, every one in sync.
+// runs whole, with two or more members, every one in sync, and is not held
+// read-only. Reason for the last: md takes a "check" written to the
+// sync_action of a read-only array and starts nothing, so md would read idle
+// again at once and the start would be decided, and named by a read
+// (mdCheckDue), on every pass. A read-auto array is not read-only for this:
+// md makes it read-write on the write.
 func mdCheckable(detail *MdDetail) bool {
-	if detail.Degraded != 0 || len(detail.Members) < 2 {
+	if detail.Degraded != 0 || len(detail.Members) < 2 ||
+		detail.State == mdStateReadonly {
 		return false
 	}
 	for _, member := range detail.Members {

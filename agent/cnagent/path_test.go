@@ -6,7 +6,6 @@ import (
 	"sort"
 	"strings"
 	"testing"
-	"time"
 
 	"google.golang.org/protobuf/proto"
 
@@ -214,7 +213,6 @@ func TestPathRowsReportEachSideOfATwoSidedLeg(t *testing.T) {
 	for _, role := range pathRoles {
 		t.Run(role.name, func(t *testing.T) {
 			srv, _ := newTestServer(t)
-			srv.retryInterval = time.Hour
 			opts := reqOpts{revision: 2, primary: role.primary,
 				extraSide: true, twoLegs: true, raid1: role.primary}
 			syncupBoth(t, srv, opts)
@@ -363,7 +361,6 @@ func TestPathRowsFollowTheController(t *testing.T) {
 		for _, role := range pathRoles {
 			t.Run(tc.name+", "+role.name, func(t *testing.T) {
 				srv, node := newTestServer(t)
-				srv.retryInterval = time.Hour
 				opts := reqOpts{revision: 2, primary: role.primary,
 					extraSide: true}
 				syncupBoth(t, srv, opts)
@@ -399,7 +396,6 @@ func TestPathRowsFollowTheLevel(t *testing.T) {
 		for _, role := range pathRoles {
 			t.Run(tc.level.String()+", "+role.name, func(t *testing.T) {
 				srv, _ := newTestServer(t)
-				srv.retryInterval = time.Hour
 				opts := reqOpts{revision: 2, primary: role.primary,
 					extraSide: true}
 				syncupBoth(t, srv, opts)
@@ -420,7 +416,6 @@ func TestPathRowsWhileTheLegDisconnects(t *testing.T) {
 	for _, role := range pathRoles {
 		t.Run(role.name, func(t *testing.T) {
 			srv, _ := newTestServer(t)
-			srv.retryInterval = time.Hour
 			opts := reqOpts{revision: 2, primary: role.primary,
 				extraSide: true, unprovisionedExtraSide: true}
 			syncupBoth(t, srv, opts)
@@ -461,7 +456,6 @@ func TestPathRowsOfAnUnansweredRead(t *testing.T) {
 	for _, role := range pathRoles {
 		t.Run("the walk, "+role.name, func(t *testing.T) {
 			srv, node := newTestServer(t)
-			srv.retryInterval = time.Hour
 			opts := reqOpts{revision: 2, primary: role.primary,
 				extraSide: true}
 			syncupBoth(t, srv, opts)
@@ -497,7 +491,6 @@ func TestPathRowsOfAnUnansweredRead(t *testing.T) {
 		})
 		t.Run("an address, "+role.name, func(t *testing.T) {
 			srv, node := newTestServer(t)
-			srv.retryInterval = time.Hour
 			opts := reqOpts{revision: 2, primary: role.primary,
 				extraSide: true}
 			syncupBoth(t, srv, opts)

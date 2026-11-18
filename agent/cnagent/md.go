@@ -100,10 +100,10 @@ var mdBlockEntryPattern = regexp.MustCompile(`^md([0-9]+|_.+)$`)
 // while the array is otherwise clean: md writes the superblock of a broken
 // array that keeps retrying a copy onto a half-copied member to the dead
 // member too, and the state reads write-pending during each such write, so a
-// pass can read a broken array running, which is why a pass that reads it
-// running while the group's forced-start mark stands, and so runs no forced
-// start, registers the CN10 retry (grpPlan.markWaits, markedErr; cnagent.md
-// CN12).
+// pass can read a broken array running: a pass that reads it running while
+// the group's forced-start mark stands runs no forced start, and a read names
+// the forced start once it reads no array of the group running
+// (forcedStartNamed; cnagent.md CN12).
 var mdRunningStates = map[string]bool{
 	"clean":         true,
 	"active":        true,
@@ -722,9 +722,9 @@ func (w *MdWalk) Match(dmNames []string) (string, error) {
 			continue
 		}
 		if found != "" {
-			return "", mdStateError{fmt.Errorf(
+			return "", fmt.Errorf(
 				"arrays /dev/%s and /dev/%s both hold legs of the group",
-				found, node)}
+				found, node)
 		}
 		found = node
 	}
@@ -878,8 +878,8 @@ func (m *Md) readDetail(
 			return nil, err
 		}
 		if detail.Degraded, err = strconv.Atoi(degraded); err != nil {
-			return nil, mdStateError{
-				fmt.Errorf("%s md/degraded %q: %w", dev, degraded, err)}
+			return nil, fmt.Errorf("%s md/degraded %q: %w", dev, degraded,
+				err)
 		}
 		if detail.SyncAction, err = m.presentAttr(
 			ctx, mdDir+"/sync_action"); err != nil {
@@ -962,8 +962,8 @@ func (m *Md) presentAttr(ctx context.Context, path string) (string, error) {
 // ArrayUuid reads a running array's identity from its md/uuid, in mdadm's
 // spelling (mdSysfsUuid): a sysfs read that touches no member, which CN12's
 // identity check on a leg_list member's add compares the member's reading
-// with (legListAddRefusal). A value that does not parse is an md state the
-// pass leaves alone (mdStateError).
+// with (legListAddRefusal). A value that does not parse is an error the
+// pass leaves the array alone on.
 func (m *Md) ArrayUuid(ctx context.Context, dev string) (string, error) {
 	path := mdDirOf(strings.TrimPrefix(dev, "/dev/")) + "/uuid"
 	value, err := m.presentAttr(ctx, path)
@@ -972,8 +972,7 @@ func (m *Md) ArrayUuid(ctx context.Context, dev string) (string, error) {
 	}
 	uuid := mdSysfsUuid(value)
 	if uuid == "" {
-		return "", mdStateError{fmt.Errorf(
-			"%s md/uuid %q does not parse", dev, value)}
+		return "", fmt.Errorf("%s md/uuid %q does not parse", dev, value)
 	}
 	return uuid, nil
 }
@@ -1196,32 +1195,31 @@ func (m *Md) Stop(ctx context.Context, devPath string) error {
 // walk, and when it then cannot read the array, or finds it not running or
 // gone, it too returns no array and no error. Each way the group's row is the
 // reconciliation's, the pass reports no verdict and no reading for the
-// group, and the next read of the cntlr reports what it finds.
+// group, and the next read of the cntlr reports what it finds. When the
+// member reconciliation fails, the array as the pass last read it (arrayAfter)
+// comes back beside its error, for the md check alone: the build steps the
+// check over it all the same (CN12, The md check), so a read's name of the
+// check is one a converge cures; not while the in-sync guard holds
+// (inSyncGuardError), whose row a read reads as the converge does.
 //
 // running reports whether the pass found the md group's array running, as
 // it was or after its assembly, so that the member reconciliation ran over
-// it, whether or not that reconciliation went through; the late-member test
-// reads it (hasLateMember), and so does the test of a mark that waits
-// (grpPlan.markWaits). A RedundNone group has no array and reports false.
-// forcedStarted reports whether this pass's forced start started the array
-// (forcedStartPass), which the test of a mark that waits reads too. refusal
-// is the take-back check's refusal of the reconciliation that went through
-// (takeBackStep), which the repair's verdict carries.
+// it, whether or not that reconciliation went through; the build forgets
+// the group's md check when it reads false (forgetMdCheck). A RedundNone
+// group has no array and reports false. refusal is the take-back check's
+// refusal of the reconciliation that went through (takeBackStep), which the
+// repair's verdict carries.
 //
 // While the group's forced-start mark stands and no array of the group runs,
-// the forced start (forcedStartPass) stands in for the assembly, and an
-// error it ends the pass in is marked forcedStartError, for the pass's CN10
-// retry (forcedStartRetries); so is an error of the read that comes before
-// it, the walk's or the array's, while the mark stands (markedErr), since
-// that pass could not tell whether the array runs. A running array is
-// reconciled as without a mark, which leaves the mark waiting for the sp
-// worker's clear (dnv-worker.md AR13), and the pass registers the CN10 retry
-// for the mark (grpPlan.markWaits), since a broken array can read running
-// (mdRunningStates) and only a converge acts on the mark; one that holds a
-// member that is not a dm device is the group's error (runningArrayErr), as
-// without a mark, and marked forcedStartError while the mark stands
-// (markedErr), for the same retry: the same array read broken ends the
-// forced start in that error (MdDetail.strangerErr), which retries too.
+// the forced start (forcedStartPass) stands in for the assembly. A running
+// array is reconciled as without a mark, which leaves the mark waiting for
+// the sp worker's clear (dnv-worker.md AR13); a broken array can read
+// running (mdRunningStates), and a read names the forced start once it reads
+// no array of the group running (forcedStartNamed), so the worker's re-send
+// brings the converge that acts on the mark. One that holds a member that is
+// not a dm device is the group's error (runningArrayErr), as without a mark:
+// the same array read broken ends the forced start in that error
+// (MdDetail.strangerErr), and a read names nothing for it.
 func (s *CnAgentServer) ensureGroup(
 	ctx context.Context,
 	plan *cntlrPlan,
@@ -1231,29 +1229,29 @@ func (s *CnAgentServer) ensureGroup(
 	dead map[uint64]bool,
 ) (
 	detail *MdDetail,
-	running, forcedStarted bool,
+	running bool,
 	refusals grpRefusals,
 	err error,
 ) {
 	if !gp.raid1 {
-		return nil, false, false, grpRefusals{},
-			asBuildErr(s.ensureLinearGroup(ctx, gp, available))
+		return nil, false, grpRefusals{},
+			s.ensureLinearGroup(ctx, gp, available)
 	}
 	// A walk or an array read that did not answer leaves the group unbuilt
-	// for the pass, a build failure as a failed create is (asBuildErr).
+	// for the pass, as a failed create does.
 	walk, err := plan.mdWalks.get(ctx)
 	if err != nil {
-		return nil, false, false, grpRefusals{}, markedErr(gp, asBuildErr(err))
+		return nil, false, grpRefusals{}, err
 	}
 	detail, err = s.md.Detail(ctx, walk, gp.memberNames())
 	if err != nil {
-		return nil, false, false, grpRefusals{}, markedErr(gp, asBuildErr(err))
+		return nil, false, grpRefusals{}, err
 	}
 	forced := gp.mark != nil && !(detail.Exists && mdRunning(detail.State))
 	switch {
 	case forced:
-		detail, forcedStarted, err = s.forcedStartPass(ctx, plan, gp, walk,
-			detail, available)
+		detail, err = s.forcedStartPass(ctx, plan, gp, walk, detail,
+			available)
 	case reassembles(gp, detail):
 		detail, err = s.reassemblePass(ctx, plan, gp, walk, detail,
 			available, legRows)
@@ -1262,30 +1260,57 @@ func (s *CnAgentServer) ensureGroup(
 		if err == nil {
 			detail, err = s.startedArray(ctx, gp, walk)
 		}
-		err = asBuildErr(err)
 	}
 	if err == nil {
 		err = runningArrayErr(detail)
 	}
 	if err != nil {
-		return nil, false, false, grpRefusals{}, markedErr(gp, err)
+		return nil, false, grpRefusals{}, err
 	}
 	changed, refusals, err := s.reconcileMembers(
 		ctx, gp, detail, available, legRows, dead)
 	if err != nil {
-		return nil, true, forcedStarted, grpRefusals{}, err
+		// The array runs, and the build steps its md check over it all
+		// the same (stepMdCheck), as the pass last read it, but while the
+		// in-sync guard holds, whose row a read reads alike.
+		var guard inSyncGuardError
+		if errors.As(err, &guard) {
+			return nil, true, grpRefusals{}, err
+		}
+		return s.arrayAfter(ctx, walk, gp, detail, changed), true,
+			grpRefusals{}, err
 	}
+	detail = s.arrayAfter(ctx, walk, gp, detail, changed)
+	if detail == nil {
+		return nil, true, grpRefusals{}, nil
+	}
+	return detail, true, refusals, nil
+}
+
+// arrayAfter is the group's running array as the pass's member
+// reconciliation left it: detail, the array read before it, when it changed
+// nothing, and otherwise the array read again (Md.RefreshArray, Md.Detail),
+// since Md.Refresh does not see an added member; nil when that read fails,
+// finds the array gone or not running, or finds a member that is not a dm
+// device.
+func (s *CnAgentServer) arrayAfter(
+	ctx context.Context,
+	walk *MdWalk,
+	gp *grpPlan,
+	detail *MdDetail,
+	changed bool,
+) *MdDetail {
 	if !changed {
-		return detail, true, forcedStarted, refusals, nil
+		return detail
 	}
 	if err := s.md.RefreshArray(ctx, walk, detail.Dev); err != nil {
-		return nil, true, forcedStarted, grpRefusals{}, nil
+		return nil
 	}
-	detail, err = s.md.Detail(ctx, walk, gp.memberNames())
-	if err != nil || !detail.Exists || runningArrayErr(detail) != nil {
-		return nil, true, forcedStarted, grpRefusals{}, nil
+	after, err := s.md.Detail(ctx, walk, gp.memberNames())
+	if err != nil || !after.Exists || runningArrayErr(after) != nil {
+		return nil
 	}
-	return detail, true, forcedStarted, refusals, nil
+	return after
 }
 
 // startedArray reads the group's array again after this pass's assembly or
@@ -1346,10 +1371,9 @@ func runningArrayErr(detail *MdDetail) error {
 // waits, and every layer above it with it, the namespaces inaccessible
 // (CN16); a pool that serves when a grow adds the group keeps serving at its
 // old size, with the raid0s and ns-devs over it, while its concat and pool
-// rows read ERROR. The CN10 retry that the late member registers (build)
-// then finds the leg available, builds the group and builds or grows the
-// pool; so does the SyncupCntlr the worker re-sends once a read of the
-// cntlr names the device (linearGroupStep, CN30).
+// rows read ERROR. Once the leg serves, a read of the cntlr names the
+// device (linearGroupStep, CN30), and the SyncupCntlr the worker re-sends on
+// that name builds the group and builds or grows the pool.
 //
 // The step is linearGroupStep's, over the device as the pass reads it
 // (linearGroupShape). A create, reload or resume that fails is named by the
@@ -1680,11 +1704,12 @@ func (s *CnAgentServer) planAssembly(
 		// row OK, dnv-worker.md AR15): its legs that read no superblock
 		// were zeroed by a forced start that ended before its assembly, or
 		// before the add of each, and hold data, and a create over them
-		// would serve a mix with no error. The
-		// refusal is a build failure (asBuildErr), so the pass registers
-		// the CN10 retry, whose converge takes a leg with a superblock in
-		// case 2 once one is available, as a repair's new leg the forced
-		// start named; otherwise the operator's mark acts.
+		// would serve a mix with no error. A read's dry run of the
+		// assembly meets the same refusal and names nothing for it
+		// (absentArrayNamed); once a leg with a superblock serves, as a
+		// repair's new leg the forced start named, the read names the
+		// array case 2 would assemble, and otherwise the operator's mark
+		// acts.
 		if gp.grp.GetArrayMade() {
 			return nil, fmt.Errorf(
 				"the array of group %#x has run before and no member "+
@@ -1754,7 +1779,7 @@ type assemblyCand struct {
 // group's repair, then the open repair's new legs, then the repair's bad
 // leg, whatever the repair's stage. "" when no candidate carries one, which
 // is case 1. Two identities inside that first set are the group's error,
-// which the operator ends (mdStateError: no retry): a repair whose bad leg is
+// which the operator ends, and no read names it: a repair whose bad leg is
 // the leg of the identity not wanted moves it to the last set, keeping its
 // data, and a forced start names the leg to start from. Reason: mdadm refuses
 // an assembly handed members of two identities, as a forced start leaves them
@@ -1776,11 +1801,11 @@ func assemblyIdentity(gp *grpPlan, cands []assemblyCand) (string, error) {
 			case uuid == "":
 				uuid, first = c.sb.Uuid, c.lp
 			case c.sb.Uuid != uuid:
-				return "", mdStateError{fmt.Errorf(
+				return "", fmt.Errorf(
 					"members of two identities: leg %#x carries %s and "+
 						"leg %#x %s; a forced start names the leg to start "+
 						"group %#x from", first.legId, uuid, c.lp.legId,
-					c.sb.Uuid, gp.grpId)}
+					c.sb.Uuid, gp.grpId)
 			}
 		}
 		if uuid != "" {
@@ -1807,11 +1832,10 @@ const msgForcedStart = "forced start"
 // the cntlr's sp, as the sweep stops only an array it calls ours (cnagent.md
 // CN21); one that holds any other member is the group's error, and nothing
 // stops it (MdDetail.strangerErr). An array still there after the stop is
-// returned as the read found it, started false, for ensureGroup's test of an
-// array that runs: one that runs is reconciled and leaves the mark waiting,
-// as one the first read found running does (grpPlan.markWaits). started
-// reports that the forced start started the array, which is returned as read
-// again (startedArray).
+// returned as the read found it, for ensureGroup's test of an array that
+// runs: one that runs is reconciled and leaves the mark waiting, as one the
+// first read found running does. An array the forced start started is
+// returned as read again (startedArray).
 func (s *CnAgentServer) forcedStartPass(
 	ctx context.Context,
 	plan *cntlrPlan,
@@ -1819,34 +1843,30 @@ func (s *CnAgentServer) forcedStartPass(
 	walk *MdWalk,
 	detail *MdDetail,
 	available map[uint64]bool,
-) (found *MdDetail, started bool, err error) {
+) (*MdDetail, error) {
 	if detail.Exists {
 		if err := detail.strangerErr(
 			plan.clusterId, plan.cnId, plan.spId); err != nil {
-			return nil, false, err
+			return nil, err
 		}
 		if err := s.stopGroupArray(ctx, detail.Dev); err != nil {
-			return nil, false, err
+			return nil, err
 		}
 		if err := s.md.Refresh(ctx, walk); err != nil {
-			return nil, false, err
+			return nil, err
 		}
-		found, err = s.md.Detail(ctx, walk, gp.memberNames())
+		found, err := s.md.Detail(ctx, walk, gp.memberNames())
 		if err != nil {
-			return nil, false, err
+			return nil, err
 		}
 		if found.Exists {
-			return found, false, nil
+			return found, nil
 		}
 	}
 	if err := s.forceStartGroup(ctx, plan, gp, walk, available); err != nil {
-		return nil, false, err
+		return nil, err
 	}
-	found, err = s.startedArray(ctx, gp, walk)
-	if err != nil {
-		return nil, false, err
-	}
-	return found, true, nil
+	return s.startedArray(ctx, gp, walk)
 }
 
 // mdStateBroken is the array_state of an array md has marked broken, which
@@ -1955,10 +1975,9 @@ func (s *CnAgentServer) reassemblyRefusal(
 
 // brokenLeftError is the group's error of a pass whose re-assembly refused
 // (reassemblyRefusal): the array stays as it is, as before CN12's
-// re-assembly, and its text keeps runningArrayErr's words and adds why. It
-// registers no retry: the read's verdict names the array once its reading is
-// clear (CN30), and a leg_list member that does not serve is late
-// (hasLateMember).
+// re-assembly, and its text keeps runningArrayErr's words and adds why. The
+// read's verdict names the array once its reading is clear (CN30), which
+// brings the worker's re-send.
 func brokenLeftError(detail *MdDetail, why string) error {
 	return fmt.Errorf("array %s is %s; not assembled again: %s",
 		detail.Dev, detail.State, why)
@@ -1970,10 +1989,11 @@ func brokenLeftError(detail *MdDetail, why string) error {
 // array is stopped (stopGroupArray) and assembled again by CN12's assembly
 // (assembleGroup), whose plain assemble starts it from the members md holds
 // newest, and it is read again (startedArray). A refusal leaves it as it is
-// (brokenLeftError). A stop or an assembly that fails is a build failure
-// (asBuildErr), which registers the CN10 retry; an assembly that leaves an
-// array that does not run is the group's error by runningArrayErr, as it is
-// after any assembly.
+// (brokenLeftError). A stop or an assembly that fails is the group's error,
+// and a read names what a converge would do next: the broken array while it
+// is there (reassemblyNamed), the absent array once the stop went through
+// (absentArrayNamed). An assembly that leaves an array that does not run is
+// the group's error by runningArrayErr, as it is after any assembly.
 func (s *CnAgentServer) reassemblePass(
 	ctx context.Context,
 	plan *cntlrPlan,
@@ -1988,32 +2008,32 @@ func (s *CnAgentServer) reassemblePass(
 			return copySourceLeg(available[lp.legId], legRows[lp.legId])
 		})
 	if err != nil {
-		return nil, asBuildErr(err)
+		return nil, err
 	}
 	if why != "" {
 		return nil, brokenLeftError(detail, why)
 	}
 	if err := s.stopGroupArray(ctx, detail.Dev); err != nil {
-		return nil, asBuildErr(err)
+		return nil, err
 	}
 	if err := s.md.Refresh(ctx, walk); err != nil {
-		return nil, asBuildErr(err)
+		return nil, err
 	}
 	found, err := s.md.Detail(ctx, walk, gp.memberNames())
 	if err != nil {
-		return nil, asBuildErr(err)
+		return nil, err
 	}
 	if found.Exists {
-		return nil, asBuildErr(fmt.Errorf(
+		return nil, fmt.Errorf(
 			"array %s is still there after its stop: %s", found.Dev,
-			found.State))
+			found.State)
 	}
 	if err := s.assembleGroup(ctx, gp, available); err != nil {
-		return nil, asBuildErr(err)
+		return nil, err
 	}
 	found, err = s.startedArray(ctx, gp, walk)
 	if err != nil {
-		return nil, asBuildErr(err)
+		return nil, err
 	}
 	slog.WarnContext(ctx, msgReassembly, append(s.cntlrIdAttrs(plan),
 		slog.Uint64("grp_id", gp.grpId),
@@ -2027,111 +2047,11 @@ func (s *CnAgentServer) reassemblePass(
 // array's node it stopped and the node the assembly started.
 const msgReassembly = "broken array assembled again"
 
-// forcedStartError is the group's error of a pass that CN12's forced start
-// ended (forcedStartPass), or that a read before it, or a running array's
-// member that is not a dm device, ended while the group's mark stands
-// (markedErr), with err's own text. The pass registers the CN10 retry for it
-// (forcedStartRetries).
-type forcedStartError struct{ err error }
-
 // errArrayNameInUse is the create's refusal while an array that holds none of
 // the group's legs runs under the group's name (assembleGroup). Only an
-// operator ends it, so it registers no retry (asBuildErr).
+// operator ends it, and a read names nothing for it: the read's dry run of
+// the assembly meets the same refusal (absentArrayNamed).
 var errArrayNameInUse = errors.New("holding none of the group's legs")
-
-// mdStateError marks an md read that answered with a state the pass leaves
-// alone: two arrays that both hold legs of the group (MdWalk.Match), an md
-// attribute that does not parse (readDetail, Md.ArrayUuid), or the group's
-// members of two identities among the legs that decide its assembly
-// (assemblyIdentity). Only an operator ends the first and the third, and
-// nothing the pass does changes the second, so none registers the retry
-// (asBuildErr).
-type mdStateError struct{ err error }
-
-func (e mdStateError) Error() string { return e.err.Error() }
-
-func (e mdStateError) Unwrap() error { return e.err }
-
-// groupBuildError marks a failure of a group's build with the pass's legs as
-// they are: the md walk or the array read before it that did not answer, the
-// create or the assembly that failed or did not answer, the superblock probe
-// before it, the start that did not show, or a RedundNone group's dm-linear
-// step (CN12). The pass leaves the group as it found it, and the worker
-// re-sends no syncup for a row, so the pass registers the CN10 retry
-// (groupBuildRetries). An array the pass finds and leaves alone — a member
-// that is not a dm device, an array that does not run (runningArrayErr),
-// an md state that answered as the pass leaves it (mdStateError) — is no
-// build failure, and neither is the name another array holds
-// (errArrayNameInUse): only an operator ends those.
-type groupBuildError struct{ err error }
-
-func (e groupBuildError) Error() string { return e.err.Error() }
-
-func (e groupBuildError) Unwrap() error { return e.err }
-
-// asBuildErr marks err as a group build's failure (groupBuildError), the
-// refusal of a name in use aside.
-func asBuildErr(err error) error {
-	var answered mdStateError
-	if err == nil || errors.Is(err, errArrayNameInUse) ||
-		errors.As(err, &answered) {
-		return err
-	}
-	return groupBuildError{err}
-}
-
-// groupBuildRetries reports whether a group's error is a build failure that
-// registers the CN10 retry (groupBuildError).
-func groupBuildRetries(err error) bool {
-	var build groupBuildError
-	return errors.As(err, &build)
-}
-
-func (e forcedStartError) Error() string { return e.err.Error() }
-
-func (e forcedStartError) Unwrap() error { return e.err }
-
-// markedErr is a group's error that ensureGroup returns before the member
-// reconciliation, marked forcedStartError while the group's forced-start
-// mark stands, for the pass's CN10 retry (forcedStartRetries), and err as it
-// is otherwise: the forced start's own, the error of a read ensureGroup
-// makes before it knows whether the group's array runs — the pass's md
-// walk, the array's Detail — and a running array's member that is not a dm
-// device (runningArrayErr). Reason (cnagent.md CN12): a pass that could not
-// read the array could not start it either, and a read whose own read of
-// the array does not answer names nothing (forcedStartNamed); a retry over
-// an array that in fact runs finds it running, and the mark waits with the
-// retry registered again (grpPlan.markWaits) until a converge acts on the
-// mark no more. The
-// array that holds such a member reads running by md's state of the
-// moment (mdRunningStates), and the same array read broken ends the forced
-// start in the same refusal (MdDetail.strangerErr), so the retry does not
-// depend on which of the two a pass reads; it lasts for as long as the member
-// does, as a refusal that lasts does.
-func markedErr(gp *grpPlan, err error) error {
-	if gp.mark == nil {
-		return err
-	}
-	return forcedStartError{err}
-}
-
-// forcedStartRetries reports whether a group's error is one of the forced
-// start's (forcedStartError) that registers the CN10 background retry: every
-// one but a wait for a member that is not available (errForcedStartWait),
-// which is the late member's, the provisioning new leg aside
-// (hasLateMember). Reason (cnagent.md CN12): the worker re-syncs on a
-// revision or a reply code, never on a row, so with the mark standing the
-// retry brings the converge back to try again after a step that failed for
-// a passing reason — a run killed at the soft timeout, a stop that may have
-// gone through, a first assembly that left the old identity — as a read's
-// name of the forced start does once the read finds the checks passing
-// (forcedStartNamed). A refusal that lasts, such as a named leg that is no
-// full member or a stop a layer above refuses, retries at the retry
-// interval for as long as it lasts, and a read names nothing for it.
-func forcedStartRetries(err error) bool {
-	var fse forcedStartError
-	return errors.As(err, &fse) && !errors.Is(err, errForcedStartWait)
-}
 
 // errStoredMark is the failure a cntlr's read names a forced-start mark by
 // while the request the agent holds does not count as delivered
@@ -2445,8 +2365,8 @@ func (s *CnAgentServer) planForcedStart(
 // read shows one. Each step that does not hold is the group's error and
 // ends the pass for the group, the zero before any assembly, so no pass
 // starts the array beside a member it has not zeroed; the mark stands and
-// the next pass, which the CN10 retry brings (forcedStartRetries,
-// hasLateMember), tries again from the first step. A member zeroed by a
+// the next pass, which the worker's re-send brings once a read names the
+// forced start (forcedStartNamed), tries again from the first step. A member zeroed by a
 // pass that ends later is blank at the next, and its zero goes through
 // again. ensureGroup's member reconciliation then adds the zeroed members,
 // which md copies whole.
@@ -2628,18 +2548,13 @@ func (s *CnAgentServer) stopStartedArray(
 	return s.stopGroupArray(ctx, detail.Dev)
 }
 
-// errForcedStartWait marks the group's error while CN12's forced start waits
-// for a member it needs that is not available this pass (errForcedStartWaits).
-// Its text is the middle of that error's.
-var errForcedStartWait = errors.New("waits")
-
 // errForcedStartWaits is the group's error while CN12's forced start waits
-// for a member it needs that is not available this pass, which the CN10
-// retry brings the converge back for as a late member (hasLateMember), not
-// as a forced start's error (forcedStartRetries).
+// for a member it needs that is not available this pass. A read names the
+// forced start once that member serves (forcedStartNamed), which brings the
+// worker's re-send.
 func errForcedStartWaits(lp *legPlan) error {
-	return fmt.Errorf("forced start %w for leg %#x, which is not available",
-		errForcedStartWait, lp.legId)
+	return fmt.Errorf("forced start waits for leg %#x, which is not available",
+		lp.legId)
 }
 
 // forcedStartLeft is what a forced assembly that failed left of the group's
@@ -2688,9 +2603,8 @@ func (s *CnAgentServer) forcedStartLeft(
 // builds clones. A verify that did not answer is the group's error too: the
 // stop may have gone through, as when array_state reads EBUSY from the
 // moment md marks the stopped array deleted until its md/ goes (cnagent.md
-// CN12), and the CN10 retry that every such error of the forced start
-// registers (forcedStartRetries) brings the converge that finds the array
-// absent and starts it. The sweep's stop that did not verify is a Leftover,
+// CN12), and a read that finds the array absent names the forced start
+// (forcedStartNamed), whose re-send brings the converge that starts it. The sweep's stop that did not verify is a Leftover,
 // which the worker re-drives; this one is a row.
 func (s *CnAgentServer) stopGroupArray(ctx context.Context, dev string) error {
 	stopErr := s.md.Stop(ctx, dev)
@@ -2760,16 +2674,13 @@ func (s *CnAgentServer) stopGroupArray(ctx context.Context, dev string) error {
 // member still held: this pass fails before the add loops, so a leg_list
 // member the array lacks is not added either, nor, after a repair's bad leg,
 // its new leg. A
-// remove or an add that fails is the group's error for the pass, a row, which
-// registers no background retry of its own. What re-drives it is the read's
+// remove or an add that fails is the group's error for the pass, a row, and
+// nothing in this agent runs it again by itself. What re-drives it is the read's
 // verdict, which names a member this function would put back or add on a leg
 // the read finds able to take it, or remove for a repair (abortRemovals,
 // startedBadLegs; putBackNames, cnagent.md CN30), so the worker re-sends the
-// SyncupCntlr whose converge tries again; the CN10 retry tries again too when
-// the same pass registers it for something else, such as a leg that failed to
-// converge or a leg_list member of this cntlr that is not available, other
-// than an open repair's bad leg in a group whose array runs. A member the
-// group does not keep is never named itself. Nothing here remembers the
+// SyncupCntlr whose converge tries again. A member the group does not keep
+// is never named itself. Nothing here remembers the
 // failure. A refusal of the in-sync guard
 // is re-driven the same way once it clears: until then the read's row reads
 // ERROR too and its verdict names nothing for the group, and the first read
@@ -3273,8 +3184,8 @@ func deadMembers(
 // out; a repair's bad leg counts, since nothing leaves the array when a
 // member joins. The put-back, the add of a member the array lacks and a
 // STARTED repair's add all wait for it; a member left out is no error, and
-// the late-member retry or the read's verdict brings the converge that adds
-// it once a source serves again.
+// the read's verdict brings the converge that adds it once a source serves
+// again.
 func hasCopySource(
 	gp *grpPlan,
 	held map[string]MdMember,
@@ -3567,10 +3478,20 @@ func inSyncGuard(
 // (inSyncGuard), one text for the converge and the read, naming the member
 // it keeps from being failed and the array.
 func errInSyncGuard(member, dev string) error {
-	return fmt.Errorf("member %s left the group but is not failed: "+
-		"no other member of %s is in sync on an available leg of leg_list",
-		member, dev)
+	return inSyncGuardError{fmt.Sprintf("member %s left the group but is "+
+		"not failed: no other member of %s is in sync on an available leg "+
+		"of leg_list", member, dev)}
 }
+
+// inSyncGuardError is the group's error while the in-sync guard holds
+// (errInSyncGuard). Over it the build steps no md check (ensureGroup), as a
+// read, whose row of the group reads the same error, names none (CN12, The
+// md check): the members md shows in sync there may be on legs that do not
+// serve, so a check would read the data where only the leaving member holds
+// it.
+type inSyncGuardError struct{ msg string }
+
+func (e inSyncGuardError) Error() string { return e.msg }
 
 // putBackNames is what a cntlr's verdict names beside its leftovers for one
 // md group (cnagent.md CN30): the dm name of each member the converge's
@@ -3600,9 +3521,7 @@ func errInSyncGuard(member, dev string) error {
 // the repair's removals above (deadMembers; abortRemovals, startedBadLegs),
 // a member that still holds its slot, one being recovered, or one md holds
 // without a place and has not failed is never named, nor a new leg whose add
-// waits for its bad leg. The late-member
-// retry reads none of this: it counts a leg_list member by its leg's
-// availability, never by what md holds on it (hasLateMember).
+// waits for its bad leg.
 //
 // The new legs it would add pass the converge's take-back check first
 // (takeBackStep), whose superblock reads of a new leg taken from a retired

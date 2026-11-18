@@ -207,11 +207,12 @@ func nsAnaMove(np *nsPlan, outcome nsDevOutcome) (int, bool) {
 // to the raid0 directly. An existing ns-dev keeps its live table — one over
 // the dm-clone serves on through it (nsDevHeldServing), a parked one stays
 // parked (nsDevHeldParked) — and a new one starts parked on the td's
-// dm-error. The caller reports a held ns-dev's row ERROR, registers the
-// CN10 retry, moves a serving namespace to its desired group and a parked
-// one inaccessible (nsAnaMove); the first pass that leaves no such dm-clone
-// live — its listing names none, or its L3 removed it, parking first an
-// ns-dev still over it — reloads it. The ns-devs of a td whose raid0 no such
+// dm-error. The caller reports a held ns-dev's row ERROR, which the
+// converge's verdict and a read's both name (CN30), so the worker re-sends
+// the request; it moves a serving namespace to its desired group and a
+// parked one inaccessible (nsAnaMove). The first pass that leaves no such
+// dm-clone live — its listing names none, or its L3 removed it, parking
+// first an ns-dev still over it — reloads it. The ns-devs of a td whose raid0 no such
 // dm-clone writes into converge as usual.
 //
 // A step that fails, whatever read or command failed, reads the ns-dev's
@@ -421,8 +422,7 @@ func (s *CnAgentServer) nsDevParkedTable(
 }
 
 // nsDevOutcome is what ensureNsDev did with one ns-dev, which decides its
-// namespace's ANA move (nsAnaMove) and whether the namespace waits for the
-// CN10 retry (build).
+// namespace's ANA move (nsAnaMove).
 type nsDevOutcome int
 
 const (
@@ -458,12 +458,6 @@ const (
 // (CN18).
 func (o nsDevOutcome) held() bool {
 	return o == nsDevHeldServing || o == nsDevHeldParked
-}
-
-// onPlan reports whether the step left the ns-dev on what its rules want:
-// its serving device, or the dm-error rules 0-4 select.
-func (o nsDevOutcome) onPlan() bool {
-	return o == nsDevServing || o == nsDevOnError
 }
 
 // parked reports whether the step left the ns-dev on the td's dm-error as
@@ -633,9 +627,9 @@ func objectAnaGrpId(state *agent.NsState) int {
 // attributes (cnagent.md CN16). Each namespace's step leaves its error in
 // nsErrs, from which reportNamespaces writes the namespace rows after the
 // build's ANA loop; a subsystem whose own step fails steps none of its
-// namespaces, and they get no row. It reports whether every step went
-// through: one that failed goes to a row, which re-drives nothing, so the
-// build registers the CN10 retry for it (CN16).
+// namespaces, and they get no row. A step that failed goes to a row, and the
+// converge's verdict and a read's both name it (cntlrRowVerdict; CN16,
+// CN30), so the worker's re-send runs it again (dnv-worker.md RW4).
 func (s *CnAgentServer) ensureSubsystem(
 	ctx context.Context,
 	st *cntlrState,
@@ -643,25 +637,20 @@ func (s *CnAgentServer) ensureSubsystem(
 	sp *ssPlan,
 	info *pb.CntlrInfo,
 	nsErrs map[uint64]error,
-) bool {
+) {
 	ssKey := resKeyOf(resKeySubsysFmt, sp.ssId)
 	if err := s.nvmet.EnsureSubsystem(
 		ctx, s.subsysConf(plan, sp)); err != nil {
 		info.SsIdToSubsystem[sp.ssId] = st.tracker.Err(
 			ssKey, sp.nqn, err.Error())
-		return false
+		return
 	}
-	ok := true
 	for _, np := range sp.namespaces {
 		nsErrs[np.nsId] = s.ensureNamespaceObject(ctx, np)
-		if nsErrs[np.nsId] != nil {
-			ok = false
-		}
 	}
 	err := s.nvmet.EnsurePortLink(ctx, s.port.PortId, sp.nqn, s.port.QidMax)
 	info.SsIdToSubsystem[sp.ssId] = s.linkRow(
 		ctx, ssKey, sp.nqn, s.subsysConf(plan, sp), st, err)
-	return ok && err == nil
 }
 
 // linkRow is a subsystem's row after its port link step: OK when the step

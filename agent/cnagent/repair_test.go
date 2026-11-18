@@ -6,7 +6,6 @@ import (
 	"slices"
 	"strings"
 	"testing"
-	"time"
 
 	"github.com/distributed-nvme/distributed-nvme/common"
 	"github.com/distributed-nvme/distributed-nvme/pb"
@@ -31,7 +30,8 @@ type repOpts struct {
 	// level is the request's sp_level.
 	level pb.SpLevel
 	// noSubsys gives the request no subsystem, so that no namespace waits
-	// for the pool and registers its own retry (CN16).
+	// for the pool and no namespace row is named beside the group's (CN16,
+	// CN30).
 	noSubsys bool
 }
 
@@ -101,7 +101,6 @@ type repFix struct {
 func newRepFix(t *testing.T, probed ...uint64) *repFix {
 	t.Helper()
 	srv, node := newTestServer(t)
-	srv.retryInterval = time.Hour
 	f := &repFix{
 		srv:  srv,
 		node: node,
@@ -339,7 +338,8 @@ var allLegs = []uint64{testMetaLeg, testDataLeg, testDataLeg2}
 // repair's new leg (cnagent.md CN10, CN12): it is connected, wrapped,
 // probed and reported as the group's legs are, the sweep keeps it, it is no
 // member until the add's conditions hold, it never defers its group, and,
-// with no forced-start mark standing, it is never a late member. Here the
+// with no forced-start mark standing, a read names nothing for it until its
+// add can run. Here the
 // bad leg serves with an OK row, so the
 // repair waits: no mdadm command runs against the array, and the verdict
 // says not started. A standby connects the new leg too and reports neither
@@ -360,9 +360,6 @@ func TestRepairNewLegIsConnectedAndProbed(t *testing.T) {
 	}
 	assertReading(t, info, "the waiting repair", true,
 		testDataLeg, testDataLeg2)
-	if retrying(t, f.srv) {
-		t.Fatalf("the new leg registered the late-member retry")
-	}
 
 	// An equal-revision converge keeps the new leg: its wrapper and its
 	// connection are in the sweep's wanted set.
@@ -698,14 +695,16 @@ func TestRepairAddKilledVerb(t *testing.T) {
 	}
 }
 
-// TestRepairBadLegIsNotLate:an open repair's bad leg that does not serve
-// registers no late-member retry while the group's array runs, since no
-// converge adds it back to a running array while the repair is open, while
-// a dead leg_list leg that is no bad leg does, and so does the bad leg once
-// the repair is aborted (cnagent.md CN10, CN12). While the array does not
-// run, the bad leg is late as any other leg_list member is: the assembly
-// takes it once it is available, so the retry that waits for it is what
-// assembles the array when mdadm refuses to start it from leg 2 alone.
+// TestRepairBadLegIsNotLate: a leg whose path stops serving under a running
+// array is named by nothing, so no SyncupCntlr comes for it and nothing runs
+// between the worker's calls (cnagent.md CN12, CN30): an open repair's bad
+// leg, which no converge adds back to a running array while the repair is
+// open, at each open stage, the bad leg of an aborted repair, a leg_list
+// member like any other, and a leg_list leg that is no bad leg. No converge
+// can make a path whose disk node is dead serve. While the array does not
+// run, the bad leg counts as any other leg_list member does: the assembly
+// takes it once it serves, and a read names the absent array only once the
+// assembly would start it (absentArrayNamed).
 func TestRepairBadLegIsNotLate(t *testing.T) {
 	t.Run("array absent", func(t *testing.T) {
 		for _, stage := range []pb.RepStage{pb.RepStage_REP_STAGE_CREATED,
@@ -719,12 +718,11 @@ func TestRepairBadLegIsNotLate(t *testing.T) {
 		name  string
 		stage pb.RepStage
 		leg2  bool // leg 2 does not serve either
-		late  bool
 	}{
-		{"created", pb.RepStage_REP_STAGE_CREATED, false, false},
-		{"started", pb.RepStage_REP_STAGE_STARTED, false, false},
-		{"aborted", pb.RepStage_REP_STAGE_ABORTED, false, true},
-		{"leg 2 dead too", pb.RepStage_REP_STAGE_CREATED, true, true},
+		{"created", pb.RepStage_REP_STAGE_CREATED, false},
+		{"started", pb.RepStage_REP_STAGE_STARTED, false},
+		{"aborted", pb.RepStage_REP_STAGE_ABORTED, false},
+		{"leg 2 dead too", pb.RepStage_REP_STAGE_CREATED, true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			f := newRepFix(t, allLegs...)
@@ -732,32 +730,44 @@ func TestRepairBadLegIsNotLate(t *testing.T) {
 			if tc.leg2 {
 				f.legDead(testDataLeg2, testIp2, testSvcId2)
 			}
-			f.syncup(t, repairReq(3, tc.stage,
-				tc.stage == pb.RepStage_REP_STAGE_ABORTED))
-			if got := retrying(t, f.srv); got != tc.late {
-				t.Fatalf("the late-member retry is %v, want %v", got, tc.late)
+			f.node.forgetTraces()
+			req := repairReq(3, tc.stage,
+				tc.stage == pb.RepStage_REP_STAGE_ABORTED)
+			f.syncup(t, req)
+			round, resent := resendRound(t, f.srv, req, "quiet")
+			if round.GetAgentReply().GetCode() != 0 || resent != nil {
+				t.Fatalf("the round over the dead leg is %v, re-sent %v; "+
+					"want a clean verdict and no re-send",
+					round.GetAgentReply(), resent != nil)
 			}
+			assertNothingRunsBetweenCalls(t, f.node, "quiet")
 		})
 	}
 }
 
 // testRepairBadLegLateWhileArrayAbsent is TestRepairBadLegIsNotLate's case
-// of an array that does not run, in the shape
-// TestLateMemberRefusedStartIsAssembledByTheRetry plays: a demote stops the
-// array with both superblocks still counting both members, and the
-// promotion's first converge finds the bad leg connected while its path is
-// not optimized, so case 2 starts the array from leg 2 alone, which is
-// refused (injected, as there, for as long as the bad leg is late), and the
-// bad leg registers the retry. The request has no subsystem, so no waiting
-// namespace registers the retry instead. The attempt after the bad leg's
-// path reads optimized assembles the array from both legs and stops the
-// retry, and a converge that finds that path not optimized again while the
-// array runs registers none.
+// of an array that does not run: a demote stops the array with both
+// superblocks still counting both members, and the promotion's first
+// converge finds the bad leg connected while its path is not optimized, so
+// case 2 starts the array from leg 2 alone, which is refused (injected, for
+// as long as the bad leg does not serve). The read names nothing while the
+// bad leg does not serve: leg 2's superblock counts its peer, so mdadm's
+// degraded gate refuses leg 2 alone (mdadmStarts), and nothing runs between
+// the worker's calls. Once the bad leg's path reads optimized the read names
+// the absent array, and the re-send on that round assembles it from both
+// legs; a converge that then finds that path not optimized again while the
+// array runs leaves a read naming nothing. The request has no subsystem, so
+// no waiting namespace is named beside the group.
 func testRepairBadLegLateWhileArrayAbsent(t *testing.T, stage pb.RepStage) {
 	f := newRepFix(t, allLegs...)
 	noSubsys := repOpts{noSubsys: true}
 	f.syncup(t, repairReq(3, stage, false,
 		repOpts{standby: true, noSubsys: true}))
+	// Both superblocks count both members, as md leaves them on a clean
+	// stop.
+	f.node.setSuperblock(f.leg1, fakeSuperblock{events: 10, arrayState: "AA"})
+	f.node.setSuperblock(f.leg2, fakeSuperblock{
+		role: "Active device 1", events: 10, arrayState: "AA"})
 	nqn1 := legNqn(f.srv, testDataLeg)
 	f.node.setAnaState(nqn1, testIp, testSvcId, "non-optimized")
 	start := "mdadm --assemble " + f.mdDev + " "
@@ -771,8 +781,10 @@ func testRepairBadLegLateWhileArrayAbsent(t *testing.T, stage pb.RepStage) {
 		"drive - need 2 to start (use --run to insist)."
 	f.node.mu.Unlock()
 
+	f.node.forgetTraces()
 	f.node.Reset()
-	reply, err := f.srv.SyncupCntlr(f.ctx, repairReq(4, stage, false, noSubsys))
+	held := repairReq(4, stage, false, noSubsys)
+	reply, err := f.srv.SyncupCntlr(f.ctx, held)
 	if err != nil {
 		t.Fatalf("promote: %v", err)
 	}
@@ -783,40 +795,53 @@ func testRepairBadLegLateWhileArrayAbsent(t *testing.T, stage pb.RepStage) {
 		t.Fatalf("want one start of the data array from leg 2 alone, "+
 			"exactly %q, got %q", lone, got)
 	}
-	if !retrying(t, f.srv) {
-		t.Fatalf("a refused start beside a bad leg that is not available " +
-			"registered no retry: nothing else would assemble the array")
+	if _, reply := f.read(t, 4); strings.Contains(reply.GetDetails(),
+		f.absentNamed()) {
+		t.Fatalf("the read names the absent array while mdadm's gate "+
+			"refuses leg 2 alone: %q", reply.GetDetails())
 	}
+	assertNothingRunsBetweenCalls(t, f.node)
 
 	f.node.mu.Lock()
 	delete(f.node.failCmdAlways, start)
 	f.node.mu.Unlock()
 	f.node.setAnaState(nqn1, testIp, testSvcId, "optimized")
 	f.node.Reset()
-	retryAttempt(t, f.srv)
+	round, resent := resendRound(t, f.srv, held, "named")
+	if !strings.Contains(round.GetAgentReply().GetDetails(),
+		f.absentNamed()) || resent == nil {
+		t.Fatalf("the round once the bad leg serves is %v, re-sent %v; "+
+			"want the absent array named and a re-send",
+			round.GetAgentReply(), resent != nil)
+	}
 	if got := f.node.callsMatching("cmd " + start); !slices.Equal(got,
 		[]string{both}) {
 		t.Fatalf("want one assembly of the data array from both legs, "+
 			"exactly %q, got %q", both, got)
 	}
-	if retrying(t, f.srv) {
-		t.Fatalf("the retry outlived the bad leg's lateness")
+	if !tracedCall(f.node, "named", both) {
+		t.Fatalf("the assembly did not run under the round's trace id")
 	}
 
 	// The array runs: the same bad leg, its path not optimized again, is
-	// no late member.
+	// named by nothing.
 	f.node.setAnaState(nqn1, testIp, testSvcId, "non-optimized")
-	f.syncup(t, repairReq(5, stage, false, noSubsys))
-	if retrying(t, f.srv) {
-		t.Fatalf("the bad leg of a running array registered the " +
-			"late-member retry")
+	next := repairReq(5, stage, false, noSubsys)
+	f.syncup(t, next)
+	round, resent = resendRound(t, f.srv, next, "quiet")
+	if round.GetAgentReply().GetCode() != 0 || resent != nil {
+		t.Fatalf("the round over the running array is %v, re-sent %v; "+
+			"want a clean verdict and no re-send", round.GetAgentReply(),
+			resent != nil)
 	}
+	assertNothingRunsBetweenCalls(t, f.node, "named", "quiet")
 }
 
 // TestRepairUnavailableNewLegIsNotLate: a repair's new leg that the cntlr
-// has connected and that then stops serving registers no late-member retry,
-// at either open stage (cnagent.md CN10, CN12): it is no leg_list member,
-// and the read's verdict names it once its add can run.
+// has connected and that then stops serving is named by nothing, at either
+// open stage (cnagent.md CN12, CN30): it is no leg_list member, and the
+// read's verdict names it once its add can run. No SyncupCntlr comes for it,
+// and nothing runs between the worker's calls.
 func TestRepairUnavailableNewLegIsNotLate(t *testing.T) {
 	for _, stage := range []pb.RepStage{pb.RepStage_REP_STAGE_CREATED,
 		pb.RepStage_REP_STAGE_STARTED} {
@@ -824,11 +849,16 @@ func TestRepairUnavailableNewLegIsNotLate(t *testing.T) {
 			f := newRepFix(t, allLegs...)
 			f.syncup(t, repairReq(3, pb.RepStage_REP_STAGE_CREATED, false))
 			f.legDead(repNewLeg, testIp, testSvcId)
-			f.syncup(t, repairReq(4, stage, false))
-			if retrying(t, f.srv) {
-				t.Fatalf("the new leg that does not serve registered the " +
-					"late-member retry")
+			f.node.forgetTraces()
+			req := repairReq(4, stage, false)
+			f.syncup(t, req)
+			round, resent := resendRound(t, f.srv, req, "quiet")
+			if round.GetAgentReply().GetCode() != 0 || resent != nil {
+				t.Fatalf("the round over the new leg that does not serve "+
+					"is %v, re-sent %v; want a clean verdict and no "+
+					"re-send", round.GetAgentReply(), resent != nil)
 			}
+			assertNothingRunsBetweenCalls(t, f.node, "quiet")
 		})
 	}
 }
@@ -860,12 +890,6 @@ func TestRepairRereadThatFailsReportsNothing(t *testing.T) {
 		f.add(f.newLegDev))
 	if n := len(f.node.callsMatching("list " + mdDir)); n != 3 {
 		t.Fatalf("the converge listed %s %d times, want 3", mdDir, n)
-	}
-	// The reconciliation found the array running, so the dead bad leg is
-	// no late member (CN12).
-	if retrying(t, f.srv) {
-		t.Fatalf("the late-member retry registered after the failed read " +
-			"again")
 	}
 	assertOk(t, info.GetGrpIdToMdRaid()[testDataGrp], "grp data")
 	assertOk(t, info.GetSliceIdToData()[testSlice], "pool data concat")
@@ -933,12 +957,6 @@ func TestRepairRereadOfABrokenArrayReportsNothing(t *testing.T) {
 				t.Fatalf("the converge listed %s %d times, want 3", mdDir, n)
 			}
 			assertNoReport(t, onlyDataGrp(info), "the converge")
-			// The reconciliation found the array running, so the dead bad
-			// leg is no late member (CN12).
-			if retrying(t, f.srv) {
-				t.Fatalf("the late-member retry registered after the read "+
-					"again found the array %s", tc.name)
-			}
 		})
 	}
 }
@@ -1085,11 +1103,6 @@ func TestRepairVerdictNamesANewLegToAdd(t *testing.T) {
 	f.syncup(t, repairReq(3, pb.RepStage_REP_STAGE_CREATED, false))
 	f.assertMdCalls(t, "the failed add",
 		f.fail(f.leg1), f.remove(f.leg1), f.add(f.newLegDev))
-	// The array runs whatever the add did, so the dead bad leg is no late
-	// member (CN12).
-	if retrying(t, f.srv) {
-		t.Fatalf("the late-member retry registered after the failed add")
-	}
 	// The new leg's row reads OK once its prober has run: then its name
 	// comes, and the converge its name brings adds it.
 	_, reply := f.read(t, 3)
@@ -1561,7 +1574,6 @@ func TestRepairAssembly(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			srv, node := newTestServer(t)
-			srv.retryInterval = time.Hour
 			ctx := context.Background()
 			newLegDev := srv.nf.DmPath(legName(srv, repNewLeg))
 			mdDev := srv.nf.MdPath(srv.nf.CnMdDevName(
@@ -1638,7 +1650,6 @@ func TestRepairOnACloneMetaGroup(t *testing.T) {
 		return reply.GetCntlrInfo()
 	}
 	srv, node := newTestServer(t)
-	srv.retryInterval = time.Hour
 	if _, err := srv.SyncupCn(context.Background(), cnReq(2, true)); err !=
 		nil {
 		t.Fatalf("SyncupCn: %v", err)

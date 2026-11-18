@@ -1119,6 +1119,92 @@ func TestWholeWorkerSyncupLeftoverResentEveryRound(t *testing.T) {
 	}
 }
 
+// TestWholeWorkerSyncupReadLeftoverResentEveryOtherRound pins RW4 step 5 on
+// a leftover that only reads name (cnagent.md CN30), and AR10's run on the
+// rounds that answer from those reads. The primary's fake answers its rounds
+// as an agent's rounds do (dnagent.md SH29, SH30): each from the latest
+// observation, each starting a read the next round answers from, and a
+// syncup cancelling the read the round before it started. Its reads name a
+// leftover that the converge's own reply does not name, so a round that
+// answers from a read brings the syncup, under the read's trace id beside
+// its own, and the round after it answers from the syncup's clean code and
+// brings none: the re-sends fall to every other round at most, each one's
+// "syncup result" naming the round that started the read, and no syncup
+// leftover is logged. Its data group reads ERROR on both channels, a
+// converge that keeps failing where the read's test passes. A syncup reply
+// neither starts nor adds to the failover's run, nor does a round answering
+// from a syncup's observation, which the loop has seen (RW23); the rounds
+// answering from the reads are new observations a round asked for, so they
+// count, and AR5 fails the primary over on its threshold.
+func TestWholeWorkerSyncupReadLeftoverResentEveryOtherRound(t *testing.T) {
+	t.Parallel()
+	h, c, w := roundsCase(t, roundsLongCntlrThreshold)
+	o := roundCntlr(t, c, 1)
+	stored, _ := o.agent.Stored(o.key).(*pb.SyncupCntlrRequest)
+	held := stored.GetRevision()
+	grpRow := fmt.Sprintf("grp_id_to_md_raid.%d", stdDataGrpId)
+	since := time.Now()
+	o.set(t, func(ob *agentfake.Object) {
+		ob.ReadLeftover = 1000
+		if ob.Rows == nil {
+			ob.Rows = make(map[string]agentfake.Row)
+		}
+		ob.Rows[grpRow] = rowLever(pb.ResStatus_RES_STATUS_ERROR, "", true)
+	})
+	failover := h.waitRecord(t, 40*time.Second, w, msgReactionApplied,
+		func(rec logRecord) bool {
+			return rec.at.After(since) && rec.str("kind") == reactionFailover &&
+				rec.num("old_cntlr_id") == 1
+		})
+
+	// Where each round of cntlr 1 stands among its rounds, by trace id.
+	pos := make(map[string]int)
+	for i, msg := range o.record().Rounds {
+		if req, ok := msg.(interface{ GetTraceId() string }); ok {
+			pos[req.GetTraceId()] = i
+		}
+	}
+	var resent []int
+	for _, rec := range h.roundRecords(w, msgSyncupResult, o, since) {
+		if !rec.at.Before(failover.at) || rec.num("revision") != held {
+			continue
+		}
+		read := rec.str("obs_trace_id")
+		readAt, readOk := pos[read]
+		roundAt, roundOk := pos[rec.traceId]
+		if !readOk || !roundOk || roundAt != readAt+1 {
+			t.Errorf("cntlr 1's syncup under trace id %s names the read %q; "+
+				"want the round after the round that started the read", rec.traceId,
+				read)
+			continue
+		}
+		if rec.num("code") != 0 || rec.str("error") != "" {
+			t.Errorf("cntlr 1's syncup under %s answered code %d (%s), want 0: "+
+				"the converge's reply names nothing", rec.traceId, rec.num("code"),
+				rec.str("error"))
+		}
+		resent = append(resent, roundAt)
+	}
+	if len(resent) < 2 {
+		t.Fatalf("cntlr 1 got %d syncups brought by its rounds before the "+
+			"failover, want two or more", len(resent))
+	}
+	for i := 1; i < len(resent); i++ {
+		if resent[i]-resent[i-1] < 2 {
+			t.Errorf("cntlr 1's rounds %d and %d both brought a syncup, want "+
+				"every other round at most", resent[i-1], resent[i])
+		}
+	}
+	if recs := h.roundRecords(w, msgSyncupLeftover, o, since); len(recs) > 0 {
+		t.Errorf("%d syncup leftover records of cntlr 1, want none: the "+
+			"converge's reply names nothing", len(recs))
+	}
+	if failover.num("new_cntlr_id") != 2 {
+		t.Errorf("cntlr 1 failed over to cntlr %d, want 2",
+			failover.num("new_cntlr_id"))
+	}
+}
+
 // TestWholeWorkerSyncupAcceptedReplyAtAnotherRevision pins how an
 // accepted syncup reply that carries another revision than its request's is
 // read. A dn loop compares only a round's revision with the desired one:

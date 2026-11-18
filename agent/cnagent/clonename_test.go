@@ -6,7 +6,6 @@ import (
 	"slices"
 	"strings"
 	"testing"
-	"time"
 
 	"github.com/distributed-nvme/distributed-nvme/common"
 	"github.com/distributed-nvme/distributed-nvme/pb"
@@ -123,7 +122,6 @@ func TestACloneSourceEndpointIsNamedWhileAConvergeWouldConnectIt(
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			srv, node := newTestServer(t)
-			srv.retryInterval = time.Hour
 			withPassClock(srv, node)
 			opts := cloneOpts(2)
 			syncupBoth(t, srv, opts)
@@ -210,7 +208,6 @@ func TestACloneSourceEndpointIsNotNamedWhereAConvergeWouldNotConnectIt(
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			srv, node := newTestServer(t)
-			srv.retryInterval = time.Hour
 			withPassClock(srv, node)
 			opts := cloneOpts(2)
 			syncupBoth(t, srv, opts)
@@ -304,7 +301,6 @@ func TestTheReadNamesACloneSourceEndpointExactlyWhenAConvergeWouldConnectIt(
 				name := fmt.Sprintf("%s, %s, %s", s0, s1, gate.name)
 				t.Run(name, func(t *testing.T) {
 					srv, node := newTestServer(t)
-					srv.retryInterval = time.Hour
 					withPassClock(srv, node)
 					opts := cloneOpts(2, twoEps())
 					opts.leftoverOk = true
@@ -439,7 +435,6 @@ func TestADmCloneIsNamedWhileAConvergeWouldChangeIt(t *testing.T) {
 			t.Run(fmt.Sprintf("raid1=%v, %s", raid1, shape.name),
 				func(t *testing.T) {
 					srv, node := newTestServer(t)
-					srv.retryInterval = time.Hour
 					withPassClock(srv, node)
 					opts := cloneOpts(2)
 					opts.raid1 = raid1
@@ -480,7 +475,6 @@ func TestADmCloneIsNamedWhileAConvergeWouldChangeIt(t *testing.T) {
 // converge resumes it, and its row reads OK.
 func TestASuspendedDmCloneReadsSuspended(t *testing.T) {
 	srv, node := newTestServer(t)
-	srv.retryInterval = time.Hour
 	opts := cloneOpts(2)
 	syncupBoth(t, srv, opts)
 	clone := cloneName(srv, testClone)
@@ -508,7 +502,6 @@ func TestASuspendedDmCloneReadsSuspended(t *testing.T) {
 // converge's reply alike (CN18, CN30), as cloneRows writes it.
 func TestAnAbsentDmCloneHeldBackByItsDestinationRaid0SaysSo(t *testing.T) {
 	srv, node := newTestServer(t)
-	srv.retryInterval = time.Hour
 	opts := cloneOpts(2)
 	syncupBoth(t, srv, opts)
 	rowDropDm(node, cloneName(srv, testClone))
@@ -560,7 +553,6 @@ func TestAFailedDmCloneStepIsNamedByTheConverge(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			srv, node := newTestServer(t)
-			srv.retryInterval = time.Hour
 			opts := cloneOpts(2)
 			syncupBoth(t, srv, opts)
 			held := cntlrReq(opts)
@@ -736,7 +728,6 @@ func TestAReadOnlyDmCloneIsLeftAsItIs(t *testing.T) {
 		t.Run(fmt.Sprintf("hydration off %v", hydrationOff),
 			func(t *testing.T) {
 				srv, node := newTestServer(t)
-				srv.retryInterval = time.Hour
 				opts := cloneOpts(2)
 				syncupBoth(t, srv, opts)
 				clone := cloneName(srv, testClone)
@@ -812,7 +803,6 @@ func TestADmCloneReadThatDidNotAnswerInAConvergeNamesNothing(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			srv, node := newTestServer(t)
-			srv.retryInterval = time.Hour
 			opts := cloneOpts(2)
 			syncupBoth(t, srv, opts)
 			held := cntlrReq(opts)
@@ -868,7 +858,6 @@ func TestADmCloneIsNotNamedWhereAConvergeWouldNotChangeIt(t *testing.T) {
 			}
 			t.Run(gate.name+", "+shape.name, func(t *testing.T) {
 				srv, node := newTestServer(t)
-				srv.retryInterval = time.Hour
 				withPassClock(srv, node)
 				opts := cloneOpts(2)
 				opts.leftoverOk = true
@@ -932,7 +921,6 @@ func TestTheReadNamesADmCloneExactlyWhenAConvergeWouldChangeIt(t *testing.T) {
 			}
 			t.Run(shape.name+", "+gate.name, func(t *testing.T) {
 				srv, node := newTestServer(t)
-				srv.retryInterval = time.Hour
 				withPassClock(srv, node)
 				opts := cloneOpts(2)
 				opts.leftoverOk = true

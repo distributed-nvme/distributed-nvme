@@ -229,11 +229,11 @@ func (s *CnAgentServer) inspectMember(
 // from the same checks the real start runs (forcedStartPass,
 // planForcedStart) on a mark of the call's own, which no request carries
 // and nothing keeps. An array of the group that runs is the refusal, since
-// the primary leaves a mark waiting while it runs (grpPlan.markWaits); one
+// the primary leaves a mark waiting while it runs (ensureGroup); one
 // that is there and does not run is stopped first (forcedStartPass), unless
 // it holds a member that is no leg wrapper of this pool, which the real
 // start refuses to stop (MdDetail.strangerErr); a read of the array that
-// failed is the refusal, as it is the real start's error (markedErr).
+// failed is the refusal, as it is the real start's error (ensureGroup).
 func (s *CnAgentServer) forcedStartDryRun(
 	ctx context.Context,
 	look *inspectLook,

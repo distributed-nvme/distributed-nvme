@@ -165,9 +165,11 @@ func (p *legProber) finish(err error) {
 	}
 }
 
-// startLegProber registers one leg's prober when the wrapper converges. The
-// registry is keyed by leg_id, so an already-running prober is left alone —
-// the names it probes are deterministic and never change under it.
+// startLegProber registers one leg's prober when the leg converges, or after
+// a pass whose leg step failed over a wrapper that is there and sound
+// (keepLegProber). The registry is keyed by leg_id, so an already-running
+// prober is left alone — the names it probes are deterministic and never
+// change under it.
 func (s *CnAgentServer) startLegProber(
 	st *cntlrState,
 	plan *cntlrPlan,

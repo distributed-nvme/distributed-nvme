@@ -26,7 +26,9 @@
 // observation's time is the answer's own, made later than the object's
 // previous observation, and its trace id is the call's — the round's own for
 // a Check* round. Every round is thus a fresh, new observation to the worker
-// (dnv-worker.md HL7, RW23), unless a lever ages it or leaves it out. A round
+// (dnv-worker.md HL7, RW23), unless a lever ages it or leaves it out, or
+// answers it from the read the round before started, as the read leftover
+// does (Object.ReadLeftover). A round
 // or an info read that refuses its object as unknown — one its parent does
 // not list, or one a forced reply_code refuses so — has no observation: its
 // stamp carries only the answer time. A Syncup* that saved the request also
@@ -220,6 +222,16 @@ type Agent struct {
 	// written (armLocked) and spent one per round.
 	heldRounds map[string]uint32
 	leftRounds map[string]uint32
+	// readLeft counts, per object, the re-sends read_leftover's reads still
+	// name the leftover for, armed as the counts above and spent one per
+	// accepted Syncup* that applies its request; reads holds the read the
+	// object's last round started, which its next round answers from unless
+	// an accepted Syncup* cancels it first (Object.ReadLeftover); readingKey
+	// is the object whose read's *Info is being derived, so that its
+	// read_rows apply (resolveDerivedRow).
+	readLeft   map[string]uint32
+	reads      map[string]*pendingRead
+	readingKey string
 	// changed is closed and replaced whenever a lever changes
 	// (notifyLocked): every waiting lever waits on it, so a change wakes
 	// it at once and no wait polls.
@@ -249,6 +261,8 @@ func New(ctx context.Context, cfg Config) (*Agent, error) {
 		observed:   make(map[string]*observation),
 		heldRounds: make(map[string]uint32),
 		leftRounds: make(map[string]uint32),
+		readLeft:   make(map[string]uint32),
+		reads:      make(map[string]*pendingRead),
 		changed:    make(chan struct{}),
 		records:    make(map[string]*objectRecord),
 		calls:      make(map[string]int),

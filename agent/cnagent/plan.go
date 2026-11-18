@@ -389,10 +389,12 @@ func (gp *grpPlan) forcedStartLegs() (named *legPlan, kept []*legPlan) {
 
 // dropForcedStartMarks takes every group's forced-start mark out of the
 // plan, for a converge of a request that does not count as delivered
-// (cntlrState.reqFromRpc): the stored copy the startup reconcile loaded, or
-// a held request whose newer successor syncupCntlr refused for a failed
-// save. CN12 acts on a mark only from a request that counts as delivered,
-// and the group then converges as with no mark.
+// (cntlrState.reqFromRpc), which is the startup reconcile's of the stored
+// copy it loaded: a held request whose newer successor syncupCntlr refused
+// for a failed save counts no more either, but no converge runs from it,
+// and the reads name its marks as stored (storedMarks). CN12 acts on a mark
+// only from a request that counts as delivered, and the group then
+// converges as with no mark.
 func (p *cntlrPlan) dropForcedStartMarks() {
 	for _, gp := range p.grps {
 		gp.mark = nil
@@ -409,110 +411,6 @@ func (gp *grpPlan) isStartedBadLeg(legId uint64) bool {
 	return gp.rep != nil &&
 		gp.rep.rep.GetRepStage() == pb.RepStage_REP_STAGE_STARTED &&
 		gp.rep.badLegIds[legId]
-}
-
-// hasLateMember reports whether a group's leg_list holds a member this pass
-// may not use — not available (cnagent.md CN12: no path both live and
-// optimized, or its connect, its multipath namespace or its wrapper failed,
-// or a controller's address read did not answer, CN10). In an md group
-// that leaves the group unassembled, assembled degraded without it, with its
-// --add skipped by reconcileMembers, or running with md still holding it —
-// its side died under the array (AR8's case), its path is otherwise no
-// longer both live and optimized, or its converge failed this pass (CN10);
-// reconcileMembers keeps a held leg_list member (CN12). In a RedundNone
-// group it leaves the group's dm-linear unbuilt, and with it a pool not
-// built yet and every layer above that pool, while a pool that serves when a
-// grow adds the group keeps serving at its old size; or, where the dm-linear
-// is there already, it keeps it as it is (ensureLinearGroup): a side that has
-// not flipped to this CN yet exports dm-error to it (a non-optimized path).
-// Only availability decides: a held member md has failed on a leg that is
-// available again is not late — the read's verdict names it once its
-// leg can take it and a copy source serves, and the converge of the syncup
-// the worker re-sends puts it back (putBackNames, reconcileMembers; cnagent.md CN12) — unless CN12's
-// in-sync guard holds over its array (inSyncGuard): the read's row then reads
-// ERROR, its verdict names nothing for the group and the converge puts
-// nothing back while the guard holds (cnagent.md CN12). Short of a forced
-// start's wait (below), a repair's new leg is never late: it is no leg_list
-// member, and the read's verdict names it once its add can run (CN30). Nor
-// is an open repair's bad leg while running says the pass found the
-// group's array running (ensureGroup): no converge adds it back to a running
-// array while the repair is open (CN12), so a retry for it would bring
-// converges that change nothing. While the array does not run, the bad leg
-// is late as any other leg_list member is: the assembly takes it once it is
-// available (assembleGroup), and mdadm may refuse to start the array
-// without it. While the group's forced-start mark names a member the forced
-// start keeps and may name and the array does not run, a repair's new leg
-// that the forced start keeps is late too (forcedStartLegs): the forced
-// start waits for every member it keeps to be available, the open repair's
-// bad leg aside, which is late then as a leg_list member (CN12), and a
-// read names the group's forced start only once that new leg serves too
-// (forcedStartNamed). While the mark
-// stands over an array that runs and that no forced start of the pass
-// started, the pass registers the retry for the mark itself (markWaits),
-// whatever this test says. A provisioning leg defers its whole group
-// ([D15]), so the build never asks about one; it is excluded all the same
-// rather than trusting the caller. A provisioning new leg is excluded too:
-// its side's provisioned flip raises the pool's revision, whose fan-out
-// converges the cntlr again (dnv-worker.md RW18).
-func (gp *grpPlan) hasLateMember(
-	available map[uint64]bool,
-	running bool,
-) bool {
-	for _, lp := range gp.legs {
-		if !lp.provisioning && !available[lp.legId] &&
-			!(running && gp.isBadLeg(lp.legId)) {
-			return true
-		}
-	}
-	if running || !gp.raid1 {
-		return false
-	}
-	// The leg_list legs among kept were judged so above, the array not
-	// running, so only the repair's new legs the forced start keeps can
-	// change the answer here.
-	named, kept := gp.forcedStartLegs()
-	if named == nil {
-		return false
-	}
-	for _, lp := range kept {
-		if !lp.provisioning && !available[lp.legId] {
-			return true
-		}
-	}
-	return false
-}
-
-// markWaits reports whether the group's forced-start mark stands over an
-// array the pass found running and that no forced start of the pass
-// started: running is ensureGroup's, as hasLateMember reads it, and
-// forcedStarted says that this pass's forced start started the array
-// (forcedStartPass), which then runs from the named leg. The pass registers
-// the CN10 retry for such a mark (cnagent.md CN10, CN12), whose converge
-// reads the array again: one that reads it not running acts on the mark,
-// and one that reads it running registers the retry again, until a converge
-// acts on the mark no more and so registers nothing for it — that of a
-// request without the mark, which the sp worker's clear (dnv-worker.md
-// AR13), the operator's withdrawal of the mark or a finish of the group's
-// repair that retires the bad leg the mark names hands the agent
-// (architecture.md, Repair, Forced start), and that of a request by which
-// the cntlr builds no array of the group, a standby's or one at a level that
-// builds none (CN19). Reason: a broken array reads write-pending during each
-// superblock write md makes to the dead member while it keeps retrying a
-// copy onto a half-copied member (mdRunningStates), so a pass cannot tell
-// such an array from one that runs, and only a converge acts on the mark,
-// while a read names the forced start only when it reads no array of the
-// group running (forcedStartNamed, CN30). The cost is a converge every
-// retry interval for as long as a mark stands over an array that runs
-// (cnagent.md, Known limits). A running array
-// that holds a member that is not a dm device is the group's error, running
-// false, and that error registers the retry instead (markedErr). The pass
-// that started the array registers nothing for the mark: the array runs
-// from the named leg, and the worker's clear follows the primary's report
-// of it. A converge of a request that does not count as delivered
-// (cntlrState.reqFromRpc) holds no mark (dropForcedStartMarks), so it
-// registers nothing for one.
-func (gp *grpPlan) markWaits(running, forcedStarted bool) bool {
-	return gp.mark != nil && running && !forcedStarted
 }
 
 // legPlan is one leg: its side connections and the cn-local dm-linear wrapper

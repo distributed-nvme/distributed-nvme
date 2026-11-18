@@ -4,7 +4,6 @@ import (
 	"context"
 	"strings"
 	"testing"
-	"time"
 
 	"github.com/distributed-nvme/distributed-nvme/agent"
 	"github.com/distributed-nvme/distributed-nvme/common"
@@ -30,7 +29,6 @@ func readCode(t *testing.T, srv *CnAgentServer, revision uint64) *pb.AgentReply 
 // worker sends the syncup again and its converge moves it (review item 35).
 func TestAFailedAnaMoveIsNamedAndRetried(t *testing.T) {
 	srv, node := newTestServer(t)
-	srv.retryInterval = time.Hour
 	ctx := context.Background()
 	syncupBoth(t, srv, reqOpts{revision: 2, primary: true})
 	write := anaPath(testNqn, 1) + "=3"
@@ -92,7 +90,6 @@ func TestASuspendedCntlrDeviceIsNamedAndResumed(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			srv, node := newTestServer(t)
-			srv.retryInterval = time.Hour
 			syncupBoth(t, srv, reqOpts{revision: 2, primary: true})
 			dev := tc.dev(srv)
 			if node.dms[dev] == nil {
@@ -125,7 +122,6 @@ func TestASuspendedCntlrDeviceIsNamedAndResumed(t *testing.T) {
 // which the loose read's empty enable would have chosen.
 func TestAnUnansweredNamespaceReadMovesNothing(t *testing.T) {
 	srv, node := newTestServer(t)
-	srv.retryInterval = time.Hour
 	syncupBoth(t, srv, reqOpts{revision: 2, primary: true})
 	assertAna(t, node, testNqn, "1", "the fixture")
 	nsPath := agent.NvmetRoot + "/subsystems/" + testNqn + "/namespaces/1"
@@ -152,7 +148,6 @@ func TestAnUnansweredNamespaceReadMovesNothing(t *testing.T) {
 // absent.
 func TestACutOffCntlrConvergeIsNamedByTheNextRead(t *testing.T) {
 	srv, node := newTestServer(t)
-	srv.retryInterval = time.Hour
 	ctx := context.Background()
 	if reply, err := srv.SyncupCn(ctx, cnReq(2, true)); err != nil ||
 		reply.GetAgentReply().GetCode() != 0 {
@@ -181,13 +176,14 @@ func TestACutOffCntlrConvergeIsNamedByTheNextRead(t *testing.T) {
 	}
 }
 
-// A snapshot whose create keeps failing is not named: the pre-pass that
-// makes it suspends its origin (CN14), and a re-send on every round would
-// stall the origin's host IO on every round. The converge and the read
-// answer code zero, and the next revision tries again, as before.
+// A snapshot whose create keeps failing is not named on every round: the
+// pre-pass that makes it suspends its origin (CN14), and a re-send on every
+// round would stall the origin's host IO on every round. Its rows are not
+// named, so the converge answers code zero; only a read names the snapshot
+// itself (snapshotDue), so the worker re-sends every second round at most
+// (dnv-worker.md RW4).
 func TestAFailingSnapshotIsNotSentAgainEveryRound(t *testing.T) {
 	srv, node := newTestServer(t)
-	srv.retryInterval = time.Hour
 	node.failCmdAlways["message "+poolNameOf(srv, testSlice2)+
 		" 0 create_snap"] = "device-mapper: message ioctl failed: " +
 		"No space left on device"
@@ -196,16 +192,14 @@ func TestAFailingSnapshotIsNotSentAgainEveryRound(t *testing.T) {
 	if got := reply.GetAgentReply(); got.GetCode() != 0 {
 		t.Errorf("the converge answered %v, want code zero", got)
 	}
-	if got := readCode(t, srv, 3); got.GetCode() != 0 {
-		t.Errorf("the read answered %v, want code zero", got)
-	}
+	assertRowVerdict(t, readCode(t, srv, 3), "the read",
+		"enumeration failed: "+snapDueName())
 }
 
 // The snapshot's dm-error is one of the rows that wait with it: a re-send
 // for it would run the same pre-pass that suspends the origin.
 func TestAWaitingSnapshotsDmErrorIsNotNamed(t *testing.T) {
 	srv, node := newTestServer(t)
-	srv.retryInterval = time.Hour
 	node.failCmdAlways["message "+poolNameOf(srv, testSlice2)+
 		" 0 create_snap"] = "device-mapper: message ioctl failed: " +
 		"No space left on device"
@@ -253,15 +247,17 @@ func dropPort(node *fakeNode) {
 
 // A subsystem's link fails while the node's nvmet port itself is not there:
 // a SyncupCntlr cannot make the port, which the CN's verdict names, so the
-// cntlr's verdict leaves the subsystem out on both channels.
+// cntlr's verdict leaves the subsystem out on both channels. Once the CN's
+// converge has made the port again, the cntlr's read names the subsystem
+// "not linked to the port", and the re-send that round brings
+// (dnv-worker.md RW4) links it; the read after it names nothing.
 func TestASubsystemOverAMissingPortIsNotNamed(t *testing.T) {
 	srv, node := newTestServer(t)
-	srv.retryInterval = time.Hour
 	syncupBoth(t, srv, reqOpts{revision: 2, primary: true})
 	dropPort(node)
 
-	reply, err := srv.SyncupCntlr(context.Background(),
-		cntlrReq(reqOpts{revision: 2, primary: true}))
+	held := cntlrReq(reqOpts{revision: 2, primary: true})
+	reply, err := srv.SyncupCntlr(context.Background(), held)
 	if err != nil {
 		t.Fatalf("SyncupCntlr: %v", err)
 	}
@@ -278,6 +274,52 @@ func TestASubsystemOverAMissingPortIsNotNamed(t *testing.T) {
 		testNqn) {
 		t.Errorf("the read named the subsystem: %v", got)
 	}
+	differsPortBackLinksOnTheResend(t, srv, node, held, testNqn)
+}
+
+// differsPortBackLinksOnTheResend makes the node's nvmet port again with the
+// CN's own converge, then plays the worker's rounds of the fixture cntlr
+// held names: the read names the subsystem nqn "not linked to the port",
+// the re-send that round brings links it under the round's trace id, and the
+// read after it names nothing.
+func differsPortBackLinksOnTheResend(
+	t *testing.T,
+	srv *CnAgentServer,
+	node *fakeNode,
+	held *pb.SyncupCntlrRequest,
+	nqn string,
+) {
+	t.Helper()
+	cnReply, err := srv.SyncupCn(context.Background(), cnReq(2, true))
+	if err != nil {
+		t.Fatalf("SyncupCn: %v", err)
+	}
+	if code := cnReply.GetAgentReply().GetCode(); code != 0 {
+		t.Fatalf("the CN's converge answered %v, want the port made",
+			cnReply.GetAgentReply())
+	}
+	link := agent.NvmetRoot + "/ports/1/subsystems/" + nqn
+	if _, ok := node.links[link]; ok {
+		t.Fatalf("fixture is wrong: the CN's converge linked %s", nqn)
+	}
+	node.Reset()
+	round, resent := resendRound(t, srv, held, "port-back")
+	assertCodeNames(t, "the read with the port back", round,
+		rowNamed(nqn, "differs: not linked to the port"))
+	if resent == nil {
+		t.Fatalf("the round that names the subsystem brought no re-send")
+	}
+	if _, ok := node.links[link]; !ok {
+		t.Fatalf("the re-send did not link %s to the port", nqn)
+	}
+	if !tracedCall(node, "port-back", "ln -s") {
+		t.Fatalf("the link did not run under the round's trace id")
+	}
+	round, resent = resendRound(t, srv, held, "after-the-re-send")
+	assertCodeZero(t, "the read after the re-send", round)
+	if resent != nil {
+		t.Fatalf("the read after the re-send brought another one")
+	}
 }
 
 // A move to the inaccessible group is tried even when a read of the
@@ -286,7 +328,6 @@ func TestASubsystemOverAMissingPortIsNotNamed(t *testing.T) {
 // direction, tried all the same (review item 42).
 func TestAMoveToInaccessibleIsTriedWhenAReadFails(t *testing.T) {
 	srv, node := newTestServer(t)
-	srv.retryInterval = time.Hour
 	syncupBoth(t, srv, reqOpts{revision: 2, primary: true})
 	nsPath := agent.NvmetRoot + "/subsystems/" + testNqn + "/namespaces/1"
 	node.Reset()
@@ -307,7 +348,6 @@ func TestAMoveToInaccessibleIsTriedWhenAReadFails(t *testing.T) {
 // origin and no create_snap.
 func TestAnUncreatedSnapshotWithAllItsDevicesIsNamed(t *testing.T) {
 	srv, node := newTestServer(t)
-	srv.retryInterval = time.Hour
 	o := reqOpts{revision: 3, primary: true, twoSlices: true, tds: snapTds()}
 	syncupSnapshot(t, srv, node, o)
 	snapThin := thinNameOf(srv, testSnapTd, testSlice2)
@@ -342,10 +382,11 @@ func TestAnUncreatedSnapshotWithAllItsDevicesIsNamed(t *testing.T) {
 }
 
 // A transfer's subsystem reads the missing port as a cntlr's subsystem does,
-// and is not named either: a SyncupCntlr cannot make the port.
+// and is not named either: a SyncupCntlr cannot make the port. Once the
+// CN's converge has made it, the read names the transfer's subsystem and the
+// re-send links it.
 func TestATransferSubsystemOverAMissingPortIsNotNamed(t *testing.T) {
 	srv, node := newTestServer(t)
-	srv.retryInterval = time.Hour
 	o := reqOpts{revision: 2, primary: true, xfers: []*pb.Transfer{{
 		XferId:       testXfer,
 		OriNqn:       testNqn,
@@ -357,7 +398,8 @@ func TestATransferSubsystemOverAMissingPortIsNotNamed(t *testing.T) {
 	dropPort(node)
 	xferNqn := srv.nf.XferNqn(testCluster, testSp, testXfer)
 
-	reply, err := srv.SyncupCntlr(context.Background(), cntlrReq(o))
+	held := cntlrReq(o)
+	reply, err := srv.SyncupCntlr(context.Background(), held)
 	if err != nil {
 		t.Fatalf("SyncupCntlr: %v", err)
 	}
@@ -374,4 +416,5 @@ func TestATransferSubsystemOverAMissingPortIsNotNamed(t *testing.T) {
 		xferNqn) {
 		t.Errorf("the read named the transfer's subsystem: %v", got)
 	}
+	differsPortBackLinksOnTheResend(t, srv, node, held, xferNqn)
 }

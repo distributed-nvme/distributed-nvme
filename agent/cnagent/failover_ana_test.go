@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"strings"
 	"testing"
-	"time"
 
 	"github.com/distributed-nvme/distributed-nvme/agent"
 	"github.com/distributed-nvme/distributed-nvme/pb"
@@ -50,22 +49,35 @@ func assertRowStatus(
 	}
 }
 
+// failoverMdAbsent is how a cntlr's read names the absent array of the
+// fixture slice's meta group (isMeta) or data group (CN30).
+func failoverMdAbsent(srv *CnAgentServer, isMeta bool) string {
+	return agent.LeftoverKindMdAbsent + ":" + srv.nf.MdPath(
+		srv.nf.CnMdDevName(testCluster, testCn, testSp, 0, 0, isMeta))
+}
+
 // TestPromotionAheadOfTheSidesWaitsInaccessible pins the failover window of
 // a promotion whose converge cannot build the raid0 (cnagent.md CN16;
 // architecture.md, Failover): the namespace stays inaccessible — no
 // optimized write at all — while its ns-dev stays parked on the td's
 // dm-error. The ns-dev row reads ERROR and the namespace row OK, on the
-// converge and on a check round alike, and the pass registers the CN10
-// retry. "late members" is the promotion that came before the sides' switch
-// over ([D16]); "no late member" a raid0 whose create fails with every leg
-// available, which no late member re-drives. An attempt with the cause still
-// there keeps waiting; the attempt that builds the raid0 reloads the ns-dev
-// onto it and only then moves the namespace optimized, and ends the retry.
+// converge and on a check round alike. "late members" is the promotion that
+// came before the sides' switch-over ([D16]): no leg serves, so a read
+// names nothing and no re-send comes; once the sides flip, a read names
+// each group's absent array (CN12, CN30). "no late member" is a raid0 whose
+// create fails with every leg available: both channels name the raid0, and
+// each re-send while the fault stands keeps waiting. Either way the re-send
+// the naming round brings (dnv-worker.md RW4) builds the raid0, reloads the
+// ns-dev onto it under the round's trace id and only then moves the
+// namespace optimized, and the read after it names nothing.
 func TestPromotionAheadOfTheSidesWaitsInaccessible(t *testing.T) {
 	for _, tc := range []struct {
 		name string
 		// fault arms the cause and returns what removes it.
 		fault func(srv *CnAgentServer, node *fakeNode) func()
+		// late: the cause is the legs' paths, which a read does not name
+		// until they serve.
+		late bool
 	}{
 		{"late members", func(srv *CnAgentServer, node *fakeNode) func() {
 			set := func(state string) {
@@ -76,16 +88,15 @@ func TestPromotionAheadOfTheSidesWaitsInaccessible(t *testing.T) {
 			}
 			set("non-optimized")
 			return func() { set("optimized") }
-		}},
+		}, true},
 		{"no late member", func(srv *CnAgentServer, node *fakeNode) func() {
 			key := "dmsetup create " + raid0Name(srv, testTd) + " "
 			node.failCmdAlways[key] = "device-mapper: create ioctl failed"
 			return func() { delete(node.failCmdAlways, key) }
-		}},
+		}, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			srv, node := newTestServer(t)
-			srv.retryInterval = time.Hour
 			ctx := context.Background()
 			opts := func(revision uint64, primary bool) reqOpts {
 				return reqOpts{revision: revision, primary: primary,
@@ -102,7 +113,8 @@ func TestPromotionAheadOfTheSidesWaitsInaccessible(t *testing.T) {
 			nsDev := nsDevName(srv, testNs)
 
 			node.Reset()
-			reply, err := srv.SyncupCntlr(ctx, cntlrReq(opts(4, true)))
+			held := cntlrReq(opts(4, true))
+			reply, err := srv.SyncupCntlr(ctx, held)
 			if err != nil {
 				t.Fatalf("promote: %v", err)
 			}
@@ -126,37 +138,64 @@ func TestPromotionAheadOfTheSidesWaitsInaccessible(t *testing.T) {
 				"is not there", "the check round's ns-dev row")
 			assertOk(t, probed.GetNsIdToNamespace()[testNs],
 				"the check round's namespace row")
-			if !retrying(t, srv) {
-				t.Fatalf("a namespace left waiting registered no retry")
-			}
 
+			// While the cause stands: a read before the flip names
+			// nothing, since no member serves; a raid0 whose create fails
+			// is named, and its re-send waits again.
 			node.Reset()
-			retryAttempt(t, srv)
-			assertNoCall(t, node, ana)
-			assertAna(t, node, testNqn, "3", "an attempt with the cause")
-			if !retrying(t, srv) {
-				t.Fatalf("an attempt that left the namespace waiting " +
-					"stopped the retry")
+			round, resent := resendRound(t, srv, held, "with-the-cause")
+			if tc.late {
+				assertCodeZero(t, "the read before the flip", round)
+				if resent != nil {
+					t.Fatalf("the read before the flip brought a re-send")
+				}
+			} else {
+				assertCodeNames(t, "the read with the fault", round,
+					raid0Name(srv, testTd))
+				if resent == nil {
+					t.Fatalf("the round that names the raid0 brought no " +
+						"re-send")
+				}
+				assertCodeNames(t, "the re-send with the fault", resent,
+					raid0Name(srv, testTd))
 			}
+			assertNoCall(t, node, ana)
+			assertAna(t, node, testNqn, "3", "a round with the cause")
 
 			disarm()
 			node.Reset()
-			retryAttempt(t, srv)
+			round, resent = resendRound(t, srv, held, "after-the-cause")
+			if tc.late {
+				assertCodeNames(t, "the read after the flip", round,
+					failoverMdAbsent(srv, true),
+					failoverMdAbsent(srv, false))
+			} else {
+				assertCodeNames(t, "the read after the fault", round,
+					raid0Name(srv, testTd))
+			}
+			if resent == nil {
+				t.Fatalf("the round that names the stack brought no re-send")
+			}
+			assertCodeZero(t, "the re-send", resent)
 			raid0No := devNoOf(node, raid0Name(srv, testTd))
 			if raid0No == "" {
-				t.Fatalf("the attempt after the cause built no raid0")
+				t.Fatalf("the re-send after the cause built no raid0")
 			}
-			assertOrder(t, node,
-				"cmd dmsetup reload "+nsDev+" --table "+
-					nsDevTableOn(raid0No),
-				ana+"1")
-			assertAna(t, node, testNqn, "1", "the attempt after the cause")
+			reload := "dmsetup reload " + nsDev + " --table " +
+				nsDevTableOn(raid0No)
+			assertOrder(t, node, "cmd "+reload, ana+"1")
+			if !tracedCall(node, "after-the-cause", reload) {
+				t.Fatalf("the reload did not run under the round's trace id")
+			}
+			assertAna(t, node, testNqn, "1", "the re-send after the cause")
+			round, resent = resendRound(t, srv, held, "after-the-re-send")
+			assertCodeZero(t, "the read after the re-send", round)
+			if resent != nil {
+				t.Fatalf("the read after the re-send brought another one")
+			}
 			built := probedCntlrInfo(t, srv)
 			assertOk(t, built.GetNsIdToDmLinear()[testNs], "built ns-dev")
 			assertOk(t, built.GetNsIdToNamespace()[testNs], "built namespace")
-			if retrying(t, srv) {
-				t.Fatalf("the retry outlived the wait")
-			}
 		})
 	}
 }
@@ -167,9 +206,12 @@ func TestPromotionAheadOfTheSidesWaitsInaccessible(t *testing.T) {
 // the move would pause its hosts for nothing. An ns-dev found parked on the
 // td's dm-error while the rules want the raid0 moves its namespace
 // inaccessible, so its hosts queue rather than read IO errors; both
-// channels then read its namespace row OK. Either way the pass registers the
-// CN10 retry, whose attempt after the fault reloads the ns-dev onto the
-// raid0 and moves the namespace optimized.
+// channels then read its namespace row OK. Either way the converge's reply
+// names the ns-dev (CN30), so the round that answers from its observation
+// brings a re-send (dnv-worker.md RW4), which fails the same way while the
+// fault stands; the re-send after the fault reloads the ns-dev onto the
+// raid0 and moves the namespace optimized, and the read after it names
+// nothing.
 func TestAFailedNsDevStepMovesOnlyAParkedNamespace(t *testing.T) {
 	for _, tc := range []struct {
 		name string
@@ -196,7 +238,6 @@ func TestAFailedNsDevStepMovesOnlyAParkedNamespace(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			srv, node := newTestServer(t)
-			srv.retryInterval = time.Hour
 			ctx := context.Background()
 			syncupBoth(t, srv, reqOpts{revision: 2, primary: true})
 			assertAna(t, node, testNqn, "1", "the fixture")
@@ -204,11 +245,13 @@ func TestAFailedNsDevStepMovesOnlyAParkedNamespace(t *testing.T) {
 			ana := "writedirect " + anaPath(testNqn, 1) + "="
 
 			node.Reset()
-			reply, err := srv.SyncupCntlr(ctx,
-				cntlrReq(reqOpts{revision: 3, primary: true}))
+			held := cntlrReq(reqOpts{revision: 3, primary: true})
+			reply, err := srv.SyncupCntlr(ctx, held)
 			if err != nil {
 				t.Fatalf("SyncupCntlr: %v", err)
 			}
+			assertCodeNames(t, "the failed pass", reply,
+				nsDevName(srv, testNs))
 			assertAna(t, node, testNqn, tc.ana, "the failed pass")
 			assertNoCall(t, node, ana+"1")
 			if tc.ana == "1" {
@@ -226,28 +269,47 @@ func TestAFailedNsDevStepMovesOnlyAParkedNamespace(t *testing.T) {
 				assertOk(t, probed.GetNsIdToNamespace()[testNs],
 					"the check round's namespace row")
 			}
-			if !retrying(t, srv) {
-				t.Fatalf("a failed ns-dev step registered no retry")
+
+			// The round that answers from the converge's observation
+			// re-sends; with the fault standing the re-send fails alike.
+			round, resent := resendRoundOnly(t, srv, held, "with-the-fault")
+			assertCodeNames(t, "the round after the failed pass", round,
+				nsDevName(srv, testNs))
+			if resent == nil {
+				t.Fatalf("the round that names the ns-dev brought no re-send")
 			}
+			assertCodeNames(t, "the re-send with the fault", resent,
+				nsDevName(srv, testNs))
+			assertNoCall(t, node, ana+"1")
 
 			disarm()
 			node.Reset()
-			retryAttempt(t, srv)
+			round, resent = resendRoundOnly(t, srv, held, "after-the-fault")
+			if resent == nil {
+				t.Fatalf("the round after the fault brought no re-send: %v",
+					round.GetAgentReply())
+			}
+			assertCodeZero(t, "the re-send after the fault", resent)
 			raid0No := devNoOf(node, raid0Name(srv, testTd))
 			if got := node.dms[nsDevName(srv, testNs)].table; got !=
 				nsDevTableOn(raid0No) {
 				t.Fatalf("the ns-dev is %q after the fault, want the raid0",
 					got)
 			}
-			assertAna(t, node, testNqn, "1", "the attempt after the fault")
+			assertAna(t, node, testNqn, "1", "the re-send after the fault")
 			if tc.ana == "3" {
-				assertOrder(t, node,
-					"cmd dmsetup reload "+nsDevName(srv, testNs)+
-						" --table "+nsDevTableOn(raid0No),
-					ana+"1")
+				reload := "dmsetup reload " + nsDevName(srv, testNs) +
+					" --table " + nsDevTableOn(raid0No)
+				assertOrder(t, node, "cmd "+reload, ana+"1")
+				if !tracedCall(node, "after-the-fault", reload) {
+					t.Fatalf("the reload did not run under the round's " +
+						"trace id")
+				}
 			}
-			if retrying(t, srv) {
-				t.Fatalf("the retry outlived the fault")
+			round, resent = resendRound(t, srv, held, "after-the-re-send")
+			assertCodeZero(t, "the read after the re-send", round)
+			if resent != nil {
+				t.Fatalf("the read after the re-send brought another one")
 			}
 		})
 	}
@@ -258,12 +320,13 @@ func TestAFailedNsDevStepMovesOnlyAParkedNamespace(t *testing.T) {
 // table does not know it is parked, so its namespace keeps the group it has
 // — at a promotion that came before the sides' switch-over, the standby's
 // inaccessible group, and never optimized over a park the step could not
-// see. The pass registers the CN10 retry, whose attempt after the fault
-// reloads the ns-dev onto the raid0 and only then moves the namespace
-// optimized.
+// see. While no leg serves, a read names nothing, since no converge would
+// build the stack (CN30); once the sides flip and the table reads again, a
+// read names the groups' absent arrays, and the re-send that round brings
+// (dnv-worker.md RW4) reloads the ns-dev onto the raid0 and only then moves
+// the namespace optimized.
 func TestAFailedNsDevStepAtAPromotionKeepsInaccessible(t *testing.T) {
 	srv, node := newTestServer(t)
-	srv.retryInterval = time.Hour
 	ctx := context.Background()
 	opts := func(revision uint64, primary bool) reqOpts {
 		return reqOpts{revision: revision, primary: primary, raid1: true}
@@ -286,7 +349,8 @@ func TestAFailedNsDevStepAtAPromotionKeepsInaccessible(t *testing.T) {
 	ana := "writedirect " + anaPath(testNqn, 1) + "="
 
 	node.Reset()
-	if _, err := srv.SyncupCntlr(ctx, cntlrReq(opts(4, true))); err != nil {
+	held := cntlrReq(opts(4, true))
+	if _, err := srv.SyncupCntlr(ctx, held); err != nil {
 		t.Fatalf("promote: %v", err)
 	}
 	if _, ok := node.dms[raid0Name(srv, testTd)]; ok {
@@ -295,24 +359,35 @@ func TestAFailedNsDevStepAtAPromotionKeepsInaccessible(t *testing.T) {
 	assertParked(t, srv, node, testNs, testTd, "the promotion")
 	assertNoCall(t, node, ana+"1")
 	assertAna(t, node, testNqn, "3", "the promotion")
-	if !retrying(t, srv) {
-		t.Fatalf("a failed ns-dev step registered no retry")
+	round, resent := resendRound(t, srv, held, "before-the-flip")
+	assertCodeZero(t, "the read before the flip", round)
+	if resent != nil {
+		t.Fatalf("the read before the flip brought a re-send")
 	}
 
 	delete(node.failCmdAlways, tableKey)
 	setLegs("optimized")
 	node.Reset()
-	retryAttempt(t, srv)
+	round, resent = resendRound(t, srv, held, "after-the-flip")
+	assertCodeNames(t, "the read after the flip", round,
+		failoverMdAbsent(srv, true), failoverMdAbsent(srv, false))
+	if resent == nil {
+		t.Fatalf("the round that names the absent arrays brought no re-send")
+	}
 	raid0No := devNoOf(node, raid0Name(srv, testTd))
 	if raid0No == "" {
-		t.Fatalf("the attempt after the fault built no raid0")
+		t.Fatalf("the re-send after the flip built no raid0")
 	}
-	assertOrder(t, node,
-		"cmd dmsetup reload "+nsDev+" --table "+nsDevTableOn(raid0No),
-		ana+"1")
-	assertAna(t, node, testNqn, "1", "the attempt after the fault")
-	if retrying(t, srv) {
-		t.Fatalf("the retry outlived the fault")
+	reload := "dmsetup reload " + nsDev + " --table " + nsDevTableOn(raid0No)
+	assertOrder(t, node, "cmd "+reload, ana+"1")
+	if !tracedCall(node, "after-the-flip", reload) {
+		t.Fatalf("the reload did not run under the round's trace id")
+	}
+	assertAna(t, node, testNqn, "1", "the re-send after the flip")
+	round, resent = resendRound(t, srv, held, "after-the-re-send")
+	assertCodeZero(t, "the read after the re-send", round)
+	if resent != nil {
+		t.Fatalf("the read after the re-send brought another one")
 	}
 }
 
@@ -324,12 +399,15 @@ func TestAFailedNsDevStepAtAPromotionKeepsInaccessible(t *testing.T) {
 // the namespace row reads the ns-dev's live table, which maps no dm-error it
 // can name, and wants the desired group. Both channels decide the row by
 // that one rule, so it reads the same ERROR on the converge and on a check
-// round, and the pass registers the CN10 retry.
+// round. Both channels name the held ns-dev (CN30), so each round brings a
+// re-send (dnv-worker.md RW4); once the dm-error's number reads, the
+// re-send's converge takes the dropped dm-clone out from under the ns-dev,
+// reloads the ns-dev onto the raid0 and moves the namespace optimized, and
+// the read after it names nothing.
 func TestAHeldNsDevWithAnUnreadableDmErrorReadsTheSameOnBothChannels(
 	t *testing.T,
 ) {
 	srv, node := newTestServer(t)
-	srv.retryInterval = time.Hour
 	ctx := context.Background()
 	syncupBoth(t, srv, reqOpts{revision: 2, primary: true,
 		clones: []*pb.Clone{cloneOf()}})
@@ -344,11 +422,12 @@ func TestAHeldNsDevWithAnUnreadableDmErrorReadsTheSameOnBothChannels(
 	// converge's own `dmsetup info` and in the listing a cntlr's read takes
 	// alike: P2 cannot park the ns-dev, L3 cannot remove the dm-clone under
 	// it, and the build holds it.
+	errNo := node.devNo["/dev/mapper/"+errorName(srv, testTd)]
 	node.devNo["/dev/mapper/"+errorName(srv, testTd)] = "unreadable"
 
 	node.Reset()
-	reply, err := srv.SyncupCntlr(ctx,
-		cntlrReq(reqOpts{revision: 3, primary: true}))
+	held := cntlrReq(reqOpts{revision: 3, primary: true})
+	reply, err := srv.SyncupCntlr(ctx, held)
 	if err != nil {
 		t.Fatalf("SyncupCntlr: %v", err)
 	}
@@ -370,24 +449,63 @@ func TestAHeldNsDevWithAnUnreadableDmErrorReadsTheSameOnBothChannels(
 			"converge %v %q", probed.GetStatus(), probed.GetDetails(),
 			row.GetStatus(), row.GetDetails())
 	}
-	if !retrying(t, srv) {
-		t.Fatalf("a held ns-dev registered no retry")
+	assertCodeNames(t, "the converge", reply, nsDev)
+	round, resent := resendRound(t, srv, held, "held")
+	assertCodeNames(t, "the read of the held ns-dev", round, nsDev)
+	if resent == nil {
+		t.Fatalf("the round that names the held ns-dev brought no re-send")
 	}
+	assertCodeNames(t, "the re-send while the number is unreadable",
+		resent, nsDev)
+	assertAna(t, node, testNqn, "3", "the re-send of the held ns-dev")
+
+	node.devNo["/dev/mapper/"+errorName(srv, testTd)] = errNo
+	node.Reset()
+	round, resent = resendRound(t, srv, held, "readable")
+	if resent == nil {
+		t.Fatalf("the round after the number reads brought no re-send: %v",
+			round.GetAgentReply())
+	}
+	raid0No := devNoOf(node, raid0Name(srv, testTd))
+	if got := node.dms[nsDev].table; got != nsDevTableOn(raid0No) {
+		t.Fatalf("the ns-dev is %q after the re-send, want the raid0", got)
+	}
+	if _, ok := node.dms[cloneName(srv, testClone)]; ok {
+		t.Fatalf("the dropped dm-clone outlived the re-send")
+	}
+	assertAna(t, node, testNqn, "1", "the re-send after the number reads")
+	// The dropped clone's meta group under the dm-clone is a leftover the
+	// sweep names and removes from the top down, one re-send a layer
+	// (CN21); none of those re-sends touches the ns-dev again.
+	node.Reset()
+	for i := 0; ; i++ {
+		round, resent = resendRound(t, srv, held,
+			fmt.Sprintf("after-the-re-send-%d", i))
+		if resent == nil {
+			assertCodeZero(t, "the read after the re-sends", round)
+			break
+		}
+		if i == 3 {
+			t.Fatalf("the reads still name %v after %d re-sends",
+				round.GetAgentReply(), i+1)
+		}
+	}
+	assertNoCall(t, node, "dmsetup reload "+nsDev)
+	assertAna(t, node, testNqn, "1", "the re-sends after the hold")
 }
 
 // TestACloneBuildAtAPromotionWaitsInaccessible pins that a clone's build at a
 // promotion makes hosts wait (cnagent.md CN16 rule 5, CN18): a promotion to a
 // cntlr that builds the clone's dm-clone over its clone meta group, whose
 // build stops short of enabling hydration, leaves the namespace inaccessible
-// with its ns-dev parked — both rows OK on both channels — and registers the
-// CN10 retry. The converge's reply names the dm-clone with the enable's
-// failure, and a read names it while its hydration is off (CN30), so the
+// with its ns-dev parked — both rows OK on both channels. The converge's
+// reply names the dm-clone with the enable's failure, and a read names it
+// while its hydration is off (CN30), so the
 // round brings a re-send of the request, whose converge enables hydration,
 // puts the ns-dev on the dm-clone and only then moves the namespace
 // optimized.
 func TestACloneBuildAtAPromotionWaitsInaccessible(t *testing.T) {
 	srv, node := newTestServer(t)
-	srv.retryInterval = time.Hour
 	ctx := context.Background()
 	opts := func(revision uint64, primary bool) reqOpts {
 		return reqOpts{revision: revision, primary: primary,
@@ -421,9 +539,6 @@ func TestACloneBuildAtAPromotionWaitsInaccessible(t *testing.T) {
 	probed := checkRound(t, srv, 4)
 	assertOk(t, probed.GetNsIdToDmLinear()[testNs], "the probed ns-dev")
 	assertOk(t, probed.GetNsIdToNamespace()[testNs], "the probed namespace")
-	if !retrying(t, srv) {
-		t.Fatalf("an unfinished build registered no retry")
-	}
 	if !strings.HasPrefix(reply.GetAgentReply().GetDetails(),
 		rowNamed(clone, "differs: ")) ||
 		!strings.Contains(reply.GetAgentReply().GetDetails(),
@@ -449,9 +564,6 @@ func TestACloneBuildAtAPromotionWaitsInaccessible(t *testing.T) {
 		"the served namespace")
 	assertRowVerdict(t, rowRound(t, srv, 4).GetAgentReply(),
 		"the read after the re-send")
-	if retrying(t, srv) {
-		t.Fatalf("the retry outlived the build")
-	}
 }
 
 // TestAnUnfinishedDmCloneOnARunningPrimaryIsFinished pins CN18's finish of a
@@ -459,7 +571,7 @@ func TestACloneBuildAtAPromotionWaitsInaccessible(t *testing.T) {
 // build applies the source chunks the node holds and enables hydration, with
 // no park and no removal, and the namespace stays optimized. When the enable
 // fails, the ns-dev parks off the dm-clone, its namespace moved inaccessible
-// before the reload, and the retry is registered. A read names the dm-clone
+// before the reload. A read names the dm-clone
 // while its hydration is off, and so does the reply of a converge whose
 // enable failed (CN30); the re-send the round brings enables hydration,
 // puts the ns-dev back on the dm-clone and only then moves the namespace
@@ -475,7 +587,6 @@ func TestAnUnfinishedDmCloneOnARunningPrimaryIsFinished(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			srv, node := newTestServer(t)
-			srv.retryInterval = time.Hour
 			ctx := context.Background()
 			opts := reqOpts{revision: 2, primary: true,
 				clones: []*pb.Clone{cloneOf()}}
@@ -522,17 +633,11 @@ func TestAnUnfinishedDmCloneOnARunningPrimaryIsFinished(t *testing.T) {
 				assertRowVerdict(t, reply.GetAgentReply(), "the converge")
 				assertRowVerdict(t, rowRound(t, srv, 3).GetAgentReply(),
 					"the read after the build")
-				if retrying(t, srv) {
-					t.Fatalf("a finished build registered the retry")
-				}
 				return
 			}
 			assertOrder(t, node, "cmd "+enable, ana+"3", park)
 			assertNoCall(t, node, ana+"1")
 			assertAna(t, node, testNqn, "3", "the unfinished build")
-			if !retrying(t, srv) {
-				t.Fatalf("an unfinished build registered no retry")
-			}
 			if !strings.HasPrefix(reply.GetAgentReply().GetDetails(),
 				rowNamed(clone, "differs: ")) {
 				t.Fatalf("the converge replied %v, want it to name the "+
@@ -549,9 +654,8 @@ func TestAnUnfinishedDmCloneOnARunningPrimaryIsFinished(t *testing.T) {
 				"cmd dmsetup reload "+nsDev+" --table "+onClone,
 				ana+"1")
 			assertAna(t, node, testNqn, "1", "the finished build")
-			if retrying(t, srv) {
-				t.Fatalf("the retry outlived the build")
-			}
+			assertRowVerdict(t, rowRound(t, srv, 3).GetAgentReply(),
+				"the read after the re-send")
 		})
 	}
 }
@@ -578,7 +682,6 @@ func TestLoweringTheNoCloneLevelBuildsTheCloneOverItsGroup(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			srv, node := newTestServer(t)
-			srv.retryInterval = time.Hour
 			ctx := context.Background()
 			clones := []*pb.Clone{cloneOf()}
 			syncupBoth(t, srv, reqOpts{revision: 2, primary: true,
@@ -620,9 +723,6 @@ func TestLoweringTheNoCloneLevelBuildsTheCloneOverItsGroup(t *testing.T) {
 				assertAna(t, node, testNqn, "3", "the unfinished build")
 				assertParked(t, srv, node, testNs, testTd,
 					"the unfinished build")
-				if !retrying(t, srv) {
-					t.Fatalf("an unfinished build registered no retry")
-				}
 				if !strings.HasPrefix(reply.GetAgentReply().GetDetails(),
 					rowNamed(clone, "differs: ")) {
 					t.Fatalf("the converge replied %v, want it to name "+
@@ -656,9 +756,6 @@ func TestLoweringTheNoCloneLevelBuildsTheCloneOverItsGroup(t *testing.T) {
 			assertRowVerdict(t, rowRound(t, srv, 4).GetAgentReply(),
 				"the read after the build")
 			assertAna(t, node, testNqn, "1", "the finished build")
-			if retrying(t, srv) {
-				t.Fatalf("the retry outlived the build")
-			}
 		})
 	}
 }
@@ -668,7 +765,7 @@ func TestLoweringTheNoCloneLevelBuildsTheCloneOverItsGroup(t *testing.T) {
 // the thin pools, and at the one that removes the clone stacks of a td a
 // clone targets, the dm-error is the device the rules select, so the
 // namespace stays optimized over it — no ANA write at all — with both rows
-// OK on both channels and no retry.
+// OK on both channels, and a read names nothing (CN30).
 func TestLevelStepsStayOptimizedOverTheDmError(t *testing.T) {
 	for _, tc := range []struct {
 		name   string
@@ -681,7 +778,6 @@ func TestLevelStepsStayOptimizedOverTheDmError(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			srv, node := newTestServer(t)
-			srv.retryInterval = time.Hour
 			syncupBoth(t, srv, reqOpts{revision: 2, primary: true,
 				clones: tc.clones})
 			assertAna(t, node, testNqn, "1", "the fixture")
@@ -704,9 +800,8 @@ func TestLevelStepsStayOptimizedOverTheDmError(t *testing.T) {
 			assertOk(t, probed.GetNsIdToDmLinear()[testNs], "probed ns-dev")
 			assertOk(t, probed.GetNsIdToNamespace()[testNs],
 				"probed namespace")
-			if retrying(t, srv) {
-				t.Fatalf("a level step registered the retry")
-			}
+			assertCodeZero(t, "the read at the level",
+				rowRoundOnly(t, srv, 3))
 		})
 	}
 }
@@ -714,12 +809,14 @@ func TestLevelStepsStayOptimizedOverTheDmError(t *testing.T) {
 // TestTransferAtAPromotionWaitsInaccessible pins CN17's share of the rule: a
 // promotion whose converge cannot build the origin's raid0 leaves the
 // transfer device on the standby's error table and the transfer namespace
-// inaccessible — no optimized write — and registers the CN10 retry. Where
-// the step reads that error table, the transfer namespace row reads OK on
-// both channels; where the read of the device's table fails, the transfer
-// keeps the group it has, since what is not known moves no transfer. The
-// attempt that builds the raid0 reloads the transfer device onto it and
-// only then moves the transfer optimized.
+// inaccessible — no optimized write. Where the step reads that error table,
+// the transfer namespace row reads OK on both channels; where the read of
+// the device's table fails, the transfer keeps the group it has, since what
+// is not known moves no transfer. While no leg serves, a read names
+// nothing (CN30); once the sides flip, a read names the groups' absent
+// arrays, and the re-send that round brings (dnv-worker.md RW4) builds the
+// raid0, reloads the transfer device onto it and only then moves the
+// transfer optimized.
 func TestTransferAtAPromotionWaitsInaccessible(t *testing.T) {
 	for _, tc := range []struct {
 		name string
@@ -732,7 +829,6 @@ func TestTransferAtAPromotionWaitsInaccessible(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			srv, node := newTestServer(t)
-			srv.retryInterval = time.Hour
 			ctx := context.Background()
 			xfers := []*pb.Transfer{
 				{XferId: testXfer, OriNqn: testNqn, OriNsIdx: 1}}
@@ -764,7 +860,8 @@ func TestTransferAtAPromotionWaitsInaccessible(t *testing.T) {
 			}
 
 			node.Reset()
-			reply, err := srv.SyncupCntlr(ctx, cntlrReq(opts(4, true)))
+			held := cntlrReq(opts(4, true))
+			reply, err := srv.SyncupCntlr(ctx, held)
 			if err != nil {
 				t.Fatalf("promote: %v", err)
 			}
@@ -790,25 +887,38 @@ func TestTransferAtAPromotionWaitsInaccessible(t *testing.T) {
 				assertOk(t, probed.GetXferIdToSubsystem()[testXfer],
 					"the check round's transfer subsystem")
 			}
-			if !retrying(t, srv) {
-				t.Fatalf("a transfer left waiting registered no retry")
+			round, resent := resendRound(t, srv, held, "before-the-flip")
+			assertCodeZero(t, "the read before the flip", round)
+			if resent != nil {
+				t.Fatalf("the read before the flip brought a re-send")
 			}
 
 			delete(node.failCmdAlways, tableKey)
 			setLegs("optimized")
 			node.Reset()
-			retryAttempt(t, srv)
+			round, resent = resendRound(t, srv, held, "after-the-flip")
+			assertCodeNames(t, "the read after the flip", round,
+				failoverMdAbsent(srv, true), failoverMdAbsent(srv, false))
+			if resent == nil {
+				t.Fatalf("the round that names the absent arrays brought " +
+					"no re-send")
+			}
 			raid0No := devNoOf(node, raid0Name(srv, testTd))
 			if raid0No == "" {
-				t.Fatalf("the attempt after the flip built no raid0")
+				t.Fatalf("the re-send after the flip built no raid0")
 			}
 			assertOrder(t, node, "cmd dmsetup reload "+xfer, xferAna+"1")
+			if !tracedCall(node, "after-the-flip", "dmsetup reload "+xfer) {
+				t.Fatalf("the reload did not run under the round's trace id")
+			}
 			if got := node.dms[xfer].table; got != nsDevTableOn(raid0No) {
 				t.Fatalf("the transfer device is %q, want the raid0", got)
 			}
 			assertAna(t, node, xferNqn, "1", "the served transfer")
-			if retrying(t, srv) {
-				t.Fatalf("the retry outlived the wait")
+			round, resent = resendRound(t, srv, held, "after-the-re-send")
+			assertCodeZero(t, "the read after the re-send", round)
+			if resent != nil {
+				t.Fatalf("the read after the re-send brought another one")
 			}
 		})
 	}
@@ -820,12 +930,13 @@ func TestTransferAtAPromotionWaitsInaccessible(t *testing.T) {
 // on an error table, and whose reload onto the origin's raid0 fails, moves
 // to inaccessible, so the clone in the other pool waits rather than reads
 // IO errors; its namespace row reads OK on both channels. The origin
-// namespace serves on, so the transfer alone registers the CN10 retry,
-// whose attempt after the fault reloads the device and only then moves the
-// transfer optimized.
+// namespace serves on. The converge's reply names the transfer device
+// (CN30), so the round that answers from its observation brings a re-send
+// (dnv-worker.md RW4), which fails alike while the fault stands; the
+// re-send after the fault reloads the device and only then moves the
+// transfer optimized, and the read after it names nothing.
 func TestAServedTransferFoundOnAnErrorTableWaitsInaccessible(t *testing.T) {
 	srv, node := newTestServer(t)
-	srv.retryInterval = time.Hour
 	xfers := []*pb.Transfer{{XferId: testXfer, OriNqn: testNqn, OriNsIdx: 1}}
 	syncupBoth(t, srv, reqOpts{revision: 2, primary: true, xfers: xfers})
 	xferNqn := srv.nf.XferNqn(testCluster, testSp, testXfer)
@@ -837,11 +948,12 @@ func TestAServedTransferFoundOnAnErrorTableWaitsInaccessible(t *testing.T) {
 	xferAna := "writedirect " + anaPath(xferNqn, 1) + "="
 
 	node.Reset()
-	reply, err := srv.SyncupCntlr(context.Background(),
-		cntlrReq(reqOpts{revision: 3, primary: true, xfers: xfers}))
+	held := cntlrReq(reqOpts{revision: 3, primary: true, xfers: xfers})
+	reply, err := srv.SyncupCntlr(context.Background(), held)
 	if err != nil {
 		t.Fatalf("SyncupCntlr: %v", err)
 	}
+	assertCodeNames(t, "the failed pass", reply, xfer)
 	raid0No := devNoOf(node, raid0Name(srv, testTd))
 	if got := node.dms[nsDevName(srv, testNs)].table; got !=
 		nsDevTableOn(raid0No) {
@@ -858,21 +970,35 @@ func TestAServedTransferFoundOnAnErrorTableWaitsInaccessible(t *testing.T) {
 	probed := checkRound(t, srv, 3)
 	assertOk(t, probed.GetXferIdToNamespace()[testXfer],
 		"the check round's transfer namespace")
-	if !retrying(t, srv) {
-		t.Fatalf("a transfer left waiting alone registered no retry")
+	round, resent := resendRoundOnly(t, srv, held, "with-the-fault")
+	assertCodeNames(t, "the round after the failed pass", round, xfer)
+	if resent == nil {
+		t.Fatalf("the round that names the transfer device brought no " +
+			"re-send")
 	}
+	assertCodeNames(t, "the re-send with the fault", resent, xfer)
+	assertAna(t, node, xferNqn, "3", "the re-send with the fault")
 
 	delete(node.failCmdAlways, reload)
 	node.Reset()
-	retryAttempt(t, srv)
+	round, resent = resendRoundOnly(t, srv, held, "after-the-fault")
+	if resent == nil {
+		t.Fatalf("the round after the fault brought no re-send: %v",
+			round.GetAgentReply())
+	}
 	if got := node.dms[xfer].table; got != nsDevTableOn(raid0No) {
 		t.Fatalf("the transfer device is %q after the fault, want the "+
 			"raid0", got)
 	}
 	assertOrder(t, node, "cmd "+reload, xferAna+"1")
+	if !tracedCall(node, "after-the-fault", reload) {
+		t.Fatalf("the reload did not run under the round's trace id")
+	}
 	assertAna(t, node, xferNqn, "1", "the served transfer")
-	if retrying(t, srv) {
-		t.Fatalf("the retry outlived the fault")
+	round, resent = resendRound(t, srv, held, "after-the-re-send")
+	assertCodeZero(t, "the read after the re-send", round)
+	if resent != nil {
+		t.Fatalf("the read after the re-send brought another one")
 	}
 }
 
@@ -880,7 +1006,8 @@ func TestAServedTransferFoundOnAnErrorTableWaitsInaccessible(t *testing.T) {
 // of CN17's rule: a transfer the primary does not serve on purpose — at the
 // level that removes the thin pools, or with an origin that no longer
 // resolves (CN29) — has its device on the error table its rule selects, so
-// it stays optimized over it, with no ANA write and no retry. At the level,
+// it stays optimized over it, with no ANA write, and a read names nothing
+// for it (CN30). At the level,
 // its namespace and subsystem rows read OK on both channels (CN28): the row
 // compares the group with the desired one, since the transfer is not one
 // that should serve.
@@ -902,7 +1029,6 @@ func TestTransferOnPurposeOnAnErrorTableStaysOptimized(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			srv, node := newTestServer(t)
-			srv.retryInterval = time.Hour
 			syncupBoth(t, srv, reqOpts{revision: 2, primary: true,
 				xfers: xfers})
 			xferNqn := srv.nf.XferNqn(testCluster, testSp, testXfer)
@@ -936,10 +1062,8 @@ func TestTransferOnPurposeOnAnErrorTableStaysOptimized(t *testing.T) {
 						ch.label+" transfer subsystem")
 				}
 			}
-			if retrying(t, srv) {
-				t.Fatalf("a transfer on its error table on purpose " +
-					"registered the retry")
-			}
+			assertCodeZero(t, "the read of the unserved transfer",
+				rowRound(t, srv, tc.to.revision))
 		})
 	}
 }
@@ -989,13 +1113,15 @@ func TestADisabledNamespaceGetsInaccessibleBeforeItsEnable(t *testing.T) {
 	}
 }
 
-// TestAFailedAnaMoveRegistersTheRetry pins that a namespace or a transfer
+// TestAFailedAnaMoveIsNamedAndResent pins that a namespace or a transfer
 // whose device the converge put where the desired state wants it, but whose
-// move to the optimized group fails, registers the CN10 retry (cnagent.md
-// CN10, CN16, CN17): it is left short of optimized, and the worker re-syncs
-// on a revision or a reply code, never on a row. The attempt after the fault
-// moves it optimized and ends the retry.
-func TestAFailedAnaMoveRegistersTheRetry(t *testing.T) {
+// move to the optimized group fails, is left short of optimized and named
+// by the converge's own reply (cnagent.md CN16, CN17, CN30): its row reads
+// the group it has against the one its device earns. The round that answers
+// from that observation brings a re-send (dnv-worker.md RW4), which fails
+// alike while the fault stands; the re-send after the fault moves it
+// optimized, and the read after it names nothing.
+func TestAFailedAnaMoveIsNamedAndResent(t *testing.T) {
 	xfers := []*pb.Transfer{{XferId: testXfer, OriNqn: testNqn, OriNsIdx: 1}}
 	for _, tc := range []struct {
 		name string
@@ -1017,7 +1143,6 @@ func TestAFailedAnaMoveRegistersTheRetry(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			srv, node := newTestServer(t)
-			srv.retryInterval = time.Hour
 			ctx := context.Background()
 			opts := func(revision uint64, primary bool) reqOpts {
 				return reqOpts{revision: revision, primary: primary,
@@ -1034,10 +1159,12 @@ func TestAFailedAnaMoveRegistersTheRetry(t *testing.T) {
 			node.failWriteAlways[moveKey] = "invalid argument"
 
 			node.Reset()
-			if _, err := srv.SyncupCntlr(ctx,
-				cntlrReq(opts(4, true))); err != nil {
+			held := cntlrReq(opts(4, true))
+			reply, err := srv.SyncupCntlr(ctx, held)
+			if err != nil {
 				t.Fatalf("promote: %v", err)
 			}
+			assertCodeNames(t, "the failed move", reply, nsResName(nqn, 1))
 			raid0No := devNoOf(node, raid0Name(srv, testTd))
 			for _, dev := range []string{nsDevName(srv, testNs),
 				xferName(srv, testXfer)} {
@@ -1050,16 +1177,30 @@ func TestAFailedAnaMoveRegistersTheRetry(t *testing.T) {
 			assertOrder(t, node, "writedirect "+moveKey)
 			assertAna(t, node, nqn, "3", "the failed move")
 			assertAna(t, node, other, "1", "the move that succeeded")
-			if !retrying(t, srv) {
-				t.Fatalf("a failed move to optimized registered no retry")
+			round, resent := resendRoundOnly(t, srv, held, "with-the-fault")
+			assertCodeNames(t, "the round after the failed move", round,
+				nsResName(nqn, 1))
+			if resent == nil {
+				t.Fatalf("the round that names the namespace brought no " +
+					"re-send")
 			}
+			assertCodeNames(t, "the re-send with the fault", resent,
+				nsResName(nqn, 1))
+			assertAna(t, node, nqn, "3", "the re-send with the fault")
 
 			delete(node.failWriteAlways, moveKey)
 			node.Reset()
-			retryAttempt(t, srv)
-			assertAna(t, node, nqn, "1", "the attempt after the fault")
-			if retrying(t, srv) {
-				t.Fatalf("the retry outlived the fault")
+			round, resent = resendRoundOnly(t, srv, held, "after-the-fault")
+			if resent == nil {
+				t.Fatalf("the round after the fault brought no re-send: %v",
+					round.GetAgentReply())
+			}
+			assertCodeZero(t, "the re-send after the fault", resent)
+			assertAna(t, node, nqn, "1", "the re-send after the fault")
+			round, resent = resendRound(t, srv, held, "after-the-re-send")
+			assertCodeZero(t, "the read after the re-send", round)
+			if resent != nil {
+				t.Fatalf("the read after the re-send brought another one")
 			}
 		})
 	}
@@ -1071,12 +1212,14 @@ func TestAFailedAnaMoveRegistersTheRetry(t *testing.T) {
 // namespace's group for that pass, as any failed step that did not find a
 // park its rules do not want. A standby at the level that removes the thin
 // pools is promoted while the td's dm-error cannot be read: the namespace
-// stays inaccessible, with no optimized write, and the pass registers the
-// CN10 retry, whose attempt after the fault moves it optimized over the
-// dm-error, where the level wants it, and ends the retry.
+// stays inaccessible, with no optimized write. The converge's reply names
+// the dm-error, whose read failed, the lowest layer that is not OK (CN30),
+// so the round that answers from its observation brings a re-send
+// (dnv-worker.md RW4); the re-send after the fault moves the
+// namespace optimized over the dm-error, where the level wants it, and the
+// read after it names nothing.
 func TestAFailedStepAtTheNoThinPoolLevelKeepsTheGroup(t *testing.T) {
 	srv, node := newTestServer(t)
-	srv.retryInterval = time.Hour
 	ctx := context.Background()
 	opts := func(revision uint64, primary bool) reqOpts {
 		return reqOpts{revision: revision, primary: primary,
@@ -1093,27 +1236,33 @@ func TestAFailedStepAtTheNoThinPoolLevelKeepsTheGroup(t *testing.T) {
 	ana := "writedirect " + anaPath(testNqn, 1) + "="
 
 	node.Reset()
-	reply, err := srv.SyncupCntlr(ctx, cntlrReq(opts(4, true)))
+	held := cntlrReq(opts(4, true))
+	reply, err := srv.SyncupCntlr(ctx, held)
 	if err != nil {
 		t.Fatalf("promote: %v", err)
 	}
 	assertRowStatus(t, reply.GetCntlrInfo().GetNsIdToDmLinear()[testNs],
 		pb.ResStatus_RES_STATUS_ERROR, "the failed step's ns-dev row")
+	assertCodeNames(t, "the failed step", reply, errorName(srv, testTd))
 	assertParked(t, srv, node, testNs, testTd, "the failed step")
 	assertNoCall(t, node, ana+"1")
 	assertAna(t, node, testNqn, "3", "the failed step")
-	if !retrying(t, srv) {
-		t.Fatalf("a failed ns-dev step registered no retry")
-	}
 
 	delete(node.failCmdAlways, key)
 	node.Reset()
-	retryAttempt(t, srv)
-	assertParked(t, srv, node, testNs, testTd, "the attempt after the fault")
+	round, resent := resendRoundOnly(t, srv, held, "after-the-fault")
+	assertCodeNames(t, "the round after the failed step", round,
+		errorName(srv, testTd))
+	if resent == nil {
+		t.Fatalf("the round that names the dm-error brought no re-send")
+	}
+	assertParked(t, srv, node, testNs, testTd, "the re-send after the fault")
 	assertOrder(t, node, ana+"1")
-	assertAna(t, node, testNqn, "1", "the attempt after the fault")
-	if retrying(t, srv) {
-		t.Fatalf("the retry outlived the fault")
+	assertAna(t, node, testNqn, "1", "the re-send after the fault")
+	round, resent = resendRound(t, srv, held, "after-the-re-send")
+	assertCodeZero(t, "the read after the re-send", round)
+	if resent != nil {
+		t.Fatalf("the read after the re-send brought another one")
 	}
 }
 
@@ -1124,13 +1273,16 @@ func TestAFailedStepAtTheNoThinPoolLevelKeepsTheGroup(t *testing.T) {
 // one the primary does not serve keeps its group. A standby at the level
 // that removes the thin pools holds a transfer whose device is an error
 // table of the wrong size, and is promoted at that level while the reload
-// fails: the transfer stays inaccessible, with no optimized write, and the
-// pass registers the CN10 retry, whose attempt after the fault reloads the
-// device to the error table the level wants, only then moves the transfer
-// optimized, and ends the retry.
+// fails: the transfer stays inaccessible, with no optimized write. An
+// unserved transfer's device rests on no raid0 (xferServed), so both
+// channels name it while it is off the table the level wants (CN17, CN30),
+// though the level suppresses the origin's raid0; the re-send that round
+// brings (dnv-worker.md RW4) fails alike while the fault stands, and the
+// re-send after the fault reloads the device to the error table the level
+// wants and only then moves the transfer optimized; the read after it names
+// nothing.
 func TestAnUnservedTransferFailedOnAnErrorTableKeepsTheGroup(t *testing.T) {
 	srv, node := newTestServer(t)
-	srv.retryInterval = time.Hour
 	ctx := context.Background()
 	xfers := []*pb.Transfer{{XferId: testXfer, OriNqn: testNqn, OriNsIdx: 1}}
 	opts := func(revision uint64, primary bool) reqOpts {
@@ -1152,10 +1304,12 @@ func TestAnUnservedTransferFailedOnAnErrorTableKeepsTheGroup(t *testing.T) {
 	xferAna := "writedirect " + anaPath(xferNqn, 1) + "="
 
 	node.Reset()
-	reply, err := srv.SyncupCntlr(ctx, cntlrReq(opts(4, true)))
+	held := cntlrReq(opts(4, true))
+	reply, err := srv.SyncupCntlr(ctx, held)
 	if err != nil {
 		t.Fatalf("promote: %v", err)
 	}
+	assertCodeNames(t, "the failed step", reply, xfer)
 	if !node.hasCall("cmd " + reload) {
 		t.Fatalf("the case is vacuous: the promotion did not try to " +
 			"reload the transfer device")
@@ -1168,34 +1322,50 @@ func TestAnUnservedTransferFailedOnAnErrorTableKeepsTheGroup(t *testing.T) {
 		pb.ResStatus_RES_STATUS_ERROR, "the failed step's transfer device")
 	assertNoCall(t, node, xferAna+"1")
 	assertAna(t, node, xferNqn, "3", "the failed step")
-	if !retrying(t, srv) {
-		t.Fatalf("a failed transfer device step registered no retry")
+	round, resent := resendRound(t, srv, held, "with-the-fault")
+	assertCodeNames(t, "the read with the fault", round, xfer)
+	if resent == nil {
+		t.Fatalf("the round that names the transfer device brought no " +
+			"re-send")
 	}
+	assertCodeNames(t, "the re-send with the fault", resent, xfer)
+	assertAna(t, node, xferNqn, "3", "the re-send with the fault")
 
 	delete(node.failCmdAlways, reload)
 	node.Reset()
-	retryAttempt(t, srv)
+	round, resent = resendRound(t, srv, held, "after-the-fault")
+	assertCodeNames(t, "the read after the fault", round, xfer)
+	if resent == nil {
+		t.Fatalf("the round after the fault brought no re-send")
+	}
 	if got := node.dms[xfer].table; got != want {
 		t.Fatalf("the transfer device is %q after the fault, want %q",
 			got, want)
 	}
 	assertOrder(t, node, "cmd "+reload, xferAna+"1")
-	assertAna(t, node, xferNqn, "1", "the attempt after the fault")
-	if retrying(t, srv) {
-		t.Fatalf("the retry outlived the fault")
+	if !tracedCall(node, "after-the-fault", reload) {
+		t.Fatalf("the reload did not run under the round's trace id")
+	}
+	assertAna(t, node, xferNqn, "1", "the re-send after the fault")
+	round, resent = resendRound(t, srv, held, "after-the-re-send")
+	assertCodeZero(t, "the read after the re-send", round)
+	if resent != nil {
+		t.Fatalf("the read after the re-send brought another one")
 	}
 }
 
-// TestAServedTransferWhoseDeviceStepFailsRetries pins the transfer's own
-// registration of the CN10 retry for a device step that fails where the
-// device is not known to be on an error table (cnagent.md CN10, CN17), on a
-// primary whose namespaces all serve, so nothing else registers it: a new
+// TestAServedTransferWhoseDeviceStepFailsIsNamed pins a transfer device
+// step that fails where the device is not known to be on an error table
+// (cnagent.md CN17), on a primary whose namespaces all serve: a new
 // transfer whose device create fails has no device and no export, and a
 // served one whose table cannot be read keeps its group. Neither pass
-// writes an optimized group for the transfer; the attempt after the fault
-// creates the device and moves the new transfer optimized, or reads the
-// served one's table, and ends the retry.
-func TestAServedTransferWhoseDeviceStepFailsRetries(t *testing.T) {
+// writes an optimized group for the transfer. The converge's reply names
+// the transfer device (CN30), so the round that answers from its
+// observation brings a re-send (dnv-worker.md RW4); the re-send after the
+// fault creates the device and moves the new transfer optimized, or reads
+// the served one's table, and the read after it names nothing. A failed
+// table read that a read does not see is named by the converge alone.
+func TestAServedTransferWhoseDeviceStepFailsIsNamed(t *testing.T) {
 	xfers := []*pb.Transfer{{XferId: testXfer, OriNqn: testNqn, OriNsIdx: 1}}
 	for _, tc := range []struct {
 		name string
@@ -1219,12 +1389,8 @@ func TestAServedTransferWhoseDeviceStepFailsRetries(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			srv, node := newTestServer(t)
-			srv.retryInterval = time.Hour
 			syncupBoth(t, srv, reqOpts{revision: 2, primary: true,
 				xfers: tc.before})
-			if retrying(t, srv) {
-				t.Fatalf("the fixture registered the retry")
-			}
 			xfer := xferName(srv, testXfer)
 			xferNqn := srv.nf.XferNqn(testCluster, testSp, testXfer)
 			xferAna := "writedirect " + anaPath(xferNqn, 1) + "="
@@ -1232,11 +1398,13 @@ func TestAServedTransferWhoseDeviceStepFailsRetries(t *testing.T) {
 			disarm := tc.fault(srv, node)
 
 			node.Reset()
-			reply, err := srv.SyncupCntlr(context.Background(),
-				cntlrReq(reqOpts{revision: 3, primary: true, xfers: xfers}))
+			held := cntlrReq(reqOpts{revision: 3, primary: true,
+				xfers: xfers})
+			reply, err := srv.SyncupCntlr(context.Background(), held)
 			if err != nil {
 				t.Fatalf("SyncupCntlr: %v", err)
 			}
+			assertCodeNames(t, "the failed step", reply, xfer)
 			raid0No := devNoOf(node, raid0Name(srv, testTd))
 			if got := node.dms[nsDevName(srv, testNs)].table; got !=
 				nsDevTableOn(raid0No) {
@@ -1252,14 +1420,16 @@ func TestAServedTransferWhoseDeviceStepFailsRetries(t *testing.T) {
 				t.Fatalf("the failed step moved the transfer from %q to %q",
 					before, got)
 			}
-			if !retrying(t, srv) {
-				t.Fatalf("a transfer whose device step failed registered " +
-					"no retry")
-			}
 
 			disarm()
 			node.Reset()
-			retryAttempt(t, srv)
+			round, resent := resendRoundOnly(t, srv, held, "after-the-fault")
+			assertCodeNames(t, "the round after the failed step", round,
+				xfer)
+			if resent == nil {
+				t.Fatalf("the round that names the transfer device " +
+					"brought no re-send")
+			}
 			if got := node.dms[xfer]; got == nil ||
 				got.table != nsDevTableOn(raid0No) {
 				t.Fatalf("the transfer device is %+v after the fault, "+
@@ -1267,61 +1437,139 @@ func TestAServedTransferWhoseDeviceStepFailsRetries(t *testing.T) {
 			}
 			if tc.before == nil {
 				assertOrder(t, node, "cmd dmsetup create "+xfer, xferAna+"1")
+				if !tracedCall(node, "after-the-fault",
+					"dmsetup create "+xfer) {
+					t.Fatalf("the create did not run under the round's " +
+						"trace id")
+				}
 			}
-			assertAna(t, node, xferNqn, "1", "the attempt after the fault")
-			if retrying(t, srv) {
-				t.Fatalf("the retry outlived the fault")
+			assertAna(t, node, xferNqn, "1", "the re-send after the fault")
+			round, resent = resendRound(t, srv, held, "after-the-re-send")
+			assertCodeZero(t, "the read after the re-send", round)
+			if resent != nil {
+				t.Fatalf("the read after the re-send brought another one")
 			}
 		})
 	}
 }
 
-// TestATransferWhoseOriginIsGoneAndWhoseDemotionFailsRetries pins the
+// TestATransferWhoseOriginIsGoneAndWhoseDemotionFails pins the
 // missing-origin half of CN17's rule: a transfer whose origin no longer
 // resolves is put where the desired state wants it only by a demotion that
 // succeeds, so one whose demotion onto its error table fails — the device
-// still maps the departed td's raid0 — keeps its group and registers the
-// CN10 retry, whose attempt after the fault demotes the device and ends it.
-func TestATransferWhoseOriginIsGoneAndWhoseDemotionFailsRetries(t *testing.T) {
-	srv, node := newTestServer(t)
-	srv.retryInterval = time.Hour
+// still maps the origin td's raid0 — keeps its group. No row of a transfer
+// whose origin the request no longer names is named (CN30), since no
+// converge of the request can build it. With the origin's thin device gone
+// too, its raid0 is left over under the transfer device, and the sweep
+// names the raid0 (CN21), so the round brings a re-send (dnv-worker.md RW4)
+// whose converge, after the fault, demotes the device and removes the
+// raid0. With the thin device kept, nothing is named: the device stays on
+// the raid0 and nothing runs until a new revision, whose converge demotes
+// it (cnagent.md, Known limits).
+func TestATransferWhoseOriginIsGoneAndWhoseDemotionFails(t *testing.T) {
 	xfers := []*pb.Transfer{{XferId: testXfer, OriNqn: testNqn, OriNsIdx: 1}}
-	syncupBoth(t, srv, reqOpts{revision: 2, primary: true, xfers: xfers})
-	xfer := xferName(srv, testXfer)
-	xferNqn := srv.nf.XferNqn(testCluster, testSp, testXfer)
-	assertAna(t, node, xferNqn, "1", "the fixture transfer")
-	served := node.dms[xfer].table
-	reload := "dmsetup reload " + xfer
-	node.failCmdAlways[reload] = "device-mapper: reload ioctl failed"
-	gone := reqOpts{revision: 3, primary: true, xfers: xfers,
-		tds: []*pb.ThinDevice{}, subsys: map[string]*pb.Subsystem{}}
+	for _, tc := range []struct {
+		name string
+		// tds is the request's td_list: none, or the fixture's.
+		tds []*pb.ThinDevice
+	}{
+		{"its thin device gone too", []*pb.ThinDevice{}},
+		{"its thin device kept", nil},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			srv, node := newTestServer(t)
+			syncupBoth(t, srv, reqOpts{revision: 2, primary: true,
+				xfers: xfers})
+			xfer := xferName(srv, testXfer)
+			xferNqn := srv.nf.XferNqn(testCluster, testSp, testXfer)
+			assertAna(t, node, xferNqn, "1", "the fixture transfer")
+			served := node.dms[xfer].table
+			reload := "dmsetup reload " + xfer
+			node.failCmdAlways[reload] = "device-mapper: reload ioctl failed"
+			gone := func(revision uint64) *pb.SyncupCntlrRequest {
+				return cntlrReq(reqOpts{revision: revision, primary: true,
+					xfers: xfers, tds: tc.tds,
+					subsys: map[string]*pb.Subsystem{}})
+			}
+			held := gone(3)
+			want := fmt.Sprintf("0 %d error", testTdSize/512)
 
-	node.Reset()
-	if _, err := srv.SyncupCntlr(context.Background(),
-		cntlrReq(gone)); err != nil {
-		t.Fatalf("SyncupCntlr: %v", err)
-	}
-	if got := node.dms[xfer].table; got != served {
-		t.Fatalf("the case is vacuous: the transfer device is %q, want it "+
-			"still on the departed raid0 %q", got, served)
-	}
-	assertNoCall(t, node, "writedirect "+anaPath(xferNqn, 1)+"=")
-	assertAna(t, node, xferNqn, "1", "the failed demotion")
-	if !retrying(t, srv) {
-		t.Fatalf("a failed demotion of a transfer whose origin is gone " +
-			"registered no retry")
-	}
+			node.Reset()
+			reply, err := srv.SyncupCntlr(context.Background(), held)
+			if err != nil {
+				t.Fatalf("SyncupCntlr: %v", err)
+			}
+			if got := node.dms[xfer].table; got != served {
+				t.Fatalf("the case is vacuous: the transfer device is %q, "+
+					"want it still on the origin's raid0 %q", got, served)
+			}
+			assertNoCall(t, node, "writedirect "+anaPath(xferNqn, 1)+"=")
+			assertAna(t, node, xferNqn, "1", "the failed demotion")
+			assertRowNotNamed(t, reply.GetAgentReply(), "the converge", xfer)
 
-	delete(node.failCmdAlways, reload)
-	node.Reset()
-	retryAttempt(t, srv)
-	want := fmt.Sprintf("0 %d error", testTdSize/512)
-	if got := node.dms[xfer].table; got != want {
-		t.Fatalf("the transfer device is %q after the fault, want %q",
-			got, want)
-	}
-	if retrying(t, srv) {
-		t.Fatalf("the retry outlived the fault")
+			if tc.tds == nil {
+				assertCodeZero(t, "the converge", reply)
+				delete(node.failCmdAlways, reload)
+				node.forgetTraces()
+				own := []string{"kept", "kept-again"}
+				for _, id := range own {
+					round, resent := resendRound(t, srv, held, id)
+					assertCodeZero(t, id, round)
+					if resent != nil {
+						t.Fatalf("%s brought a re-send", id)
+					}
+				}
+				assertNothingRunsBetweenCalls(t, node, own...)
+				if got := node.dms[xfer].table; got != served {
+					t.Fatalf("the transfer device is %q with nothing "+
+						"named, want it left on the raid0", got)
+				}
+				node.Reset()
+				if _, err := srv.SyncupCntlr(context.Background(),
+					gone(4)); err != nil {
+					t.Fatalf("the next revision: %v", err)
+				}
+				if got := node.dms[xfer].table; got != want {
+					t.Fatalf("the next revision left the transfer device "+
+						"%q, want %q", got, want)
+				}
+				return
+			}
+
+			raid0 := raid0Name(srv, testTd)
+			assertCodeNames(t, "the converge", reply, raid0)
+			round, resent := resendRoundOnly(t, srv, held, "with-the-fault")
+			assertCodeNames(t, "the round after the failed demotion", round,
+				raid0)
+			if resent == nil {
+				t.Fatalf("the round that names the raid0 brought no re-send")
+			}
+			assertCodeNames(t, "the re-send with the fault", resent, raid0)
+
+			delete(node.failCmdAlways, reload)
+			node.Reset()
+			round, resent = resendRoundOnly(t, srv, held, "after-the-fault")
+			if resent == nil {
+				t.Fatalf("the round after the fault brought no re-send: %v",
+					round.GetAgentReply())
+			}
+			if got := node.dms[xfer].table; got != want {
+				t.Fatalf("the transfer device is %q after the fault, "+
+					"want %q", got, want)
+			}
+			if !tracedCall(node, "after-the-fault", reload) {
+				t.Fatalf("the demotion did not run under the round's " +
+					"trace id")
+			}
+			if _, ok := node.dms[raid0]; ok {
+				t.Fatalf("the re-send left the departed raid0")
+			}
+			round, resent = resendRound(t, srv, held, "after-the-re-send")
+			assertCodeZero(t, "the read after the re-send", round)
+			if resent != nil {
+				t.Fatalf("the read after the re-send brought another one")
+			}
+		})
 	}
 }
 
@@ -1329,10 +1577,12 @@ func TestATransferWhoseOriginIsGoneAndWhoseDemotionFailsRetries(t *testing.T) {
 // RedundNone group whose leg is not available in the pass. Its dm-linear is
 // not built, so the slice's concat keeps its old size, while the pool, the
 // raid0 and the ns-dev keep serving and the namespace stays optimized
-// (cnagent.md CN12). The retry builds the group once the leg is available.
+// (cnagent.md CN12). While the leg is late a read names nothing for the
+// group; once it serves, a read names the group's dm-linear (CN30), and the
+// re-send that round brings (dnv-worker.md RW4) builds the group under the
+// round's trace id; the read after it names nothing.
 func TestAGrowOverALateRedundNoneLegKeepsTheStackServing(t *testing.T) {
 	srv, node := newTestServer(t)
-	srv.retryInterval = time.Hour
 	ctx := context.Background()
 	syncupBoth(t, srv, reqOpts{revision: 2, primary: true})
 	assertAna(t, node, testNqn, "1", "the fixture")
@@ -1366,17 +1616,31 @@ func TestAGrowOverALateRedundNoneLegKeepsTheStackServing(t *testing.T) {
 		pb.ResStatus_RES_STATUS_OK, "the namespace row")
 	assertNoCall(t, node, "writedirect "+anaPath(testNqn, 1)+"=3")
 	assertAna(t, node, testNqn, "1", "after the grow over a late leg")
-	if !retrying(t, srv) {
-		t.Fatalf("a grown group over a late leg registered no retry")
+	grown := grpName(srv, testDataGrp2)
+	round, resent := resendRound(t, srv, grow, "late")
+	assertRowNotNamed(t, round.GetAgentReply(), "the read while late", grown)
+	if resent != nil {
+		t.Fatalf("the read while the leg is late brought a re-send: %v",
+			round.GetAgentReply())
 	}
 
 	setAna("optimized")
-	retryAttempt(t, srv)
-	if _, ok := node.dms[grpName(srv, testDataGrp2)]; !ok {
-		t.Fatalf("the retry did not build the grown group")
+	node.Reset()
+	round, resent = resendRound(t, srv, grow, "serving")
+	assertCodeNames(t, "the read once the leg serves", round, grown)
+	if resent == nil {
+		t.Fatalf("the round that names the grown group brought no re-send")
 	}
-	assertAna(t, node, testNqn, "1", "after the retry")
-	if retrying(t, srv) {
-		t.Fatalf("the retry kept running after the grown group was built")
+	if _, ok := node.dms[grown]; !ok {
+		t.Fatalf("the re-send did not build the grown group")
+	}
+	if !tracedCall(node, "serving", "dmsetup create "+grown) {
+		t.Fatalf("the create did not run under the round's trace id")
+	}
+	assertAna(t, node, testNqn, "1", "after the re-send")
+	round, resent = resendRound(t, srv, grow, "after-the-re-send")
+	assertCodeZero(t, "the read after the re-send", round)
+	if resent != nil {
+		t.Fatalf("the read after the re-send brought another one")
 	}
 }

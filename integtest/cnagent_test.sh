@@ -112,8 +112,8 @@ CN_SYNCUP_TIMEOUT=180
 
 # Deadline of a fresh check round, a check-* with --fresh (see dnctl/cnctl):
 # its rounds wait for two reads of the object that the agent makes after the
-# command begins, and for any converge of the object that runs meanwhile, a
-# retry attempt's included (dnagent.md SH29, SH30).
+# command begins, and for any converge of the object that runs meanwhile
+# (dnagent.md SH29, SH30).
 FRESH_TIMEOUT=30
 
 # Polling budget of `dnagentctl wait-zeroed` (architecture.md,
@@ -677,7 +677,7 @@ host_dev() { printf '/dev/disk/by-id/nvme-uuid.%s' "$1"; }
 # over a node path, an array name and members of its own, from one member and
 # then from both. They are the agent's because the agent's starts are held to
 # the rule in both forms: redund's promote stage holds its assemble records
-# from both members to it, and TestLateMemberRefusedStartIsAssembledByTheRetry
+# from both members to it, and TestLateMemberRefusedStartIsNamedOnceItServes
 # (agent/cnagent/cnagent_test.go) its start from one member, the form whose
 # refusal the stage pins, and from both.
 md_assemble_args() { # devpath arrayname member…
@@ -792,12 +792,13 @@ leg_state() { # cnvm sp leg cn dnidx
 # failover it is the ordering barrier of cnagent_integtest.md, Conventions,
 # Sides first: a promote that converges before its legs have optimized paths
 # finds them unavailable (cnagent.md CN12) and fails the md
-# assembly of its own converge. The agent's CN10 retry
-# finishes that assembly once they are optimized (cnagent.md CN12), but case
-# A's promote stage asserts its md rows OK and both --assembles under the
-# promote's own trace id, which holds only behind the barrier. Case A's
-# lateflip stage promotes before any side flips on purpose and calls this
-# afterwards, only to wait for the flips to land.
+# assembly of its own converge. Once they are optimized, a read names the
+# groups' absent arrays and the worker's re-send on that code finishes the
+# assembly (cnagent.md CN12, CN30), but case A's promote stage asserts its
+# md rows OK on the promote's reply and both --assembles in that one
+# converge, which holds only behind the barrier. Case A's lateflip stage
+# promotes before any side flips on purpose and calls this afterwards, only
+# to wait for the flips to land.
 leg_wait_ana() { # cnvm sp leg cn dnidx want secs
 	local nqn
 	nqn=$(side_to_cn_nqn "$CLUSTER" "$2" "$3" "$4")
@@ -2579,8 +2580,10 @@ cn_msg() {
 
 # cn_log_lines — the cn log's length in lines, a mark the two readers below
 # start after. A stage reads "since" a mark instead of by trace id when the
-# records it wants were not caused by its own RPCs: the CN10 background retry
-# mints a fresh trace id per attempt (CN2), which no stage knows in advance.
+# records it wants may carry another id than its own: the startup
+# reconcile's, which mints its own (cnagent.md CN2), or one the agent would
+# make itself for a converge of its own, of which a stage checks there is
+# none.
 cn_log_lines() {
 	local n
 	log_readable "$CN_LOG" || return 1
@@ -3902,11 +3905,16 @@ cn_drop_until_clean() { # cnidx secs
 # probe itself. A standby never reports it, so there the first poll returns.
 # The prober's results reach the observation only through a read, so the
 # poll's rounds start the reads it samples (dnagent.md SH29); a reply with no
-# observation yet, which carries no info, is no sample.
+# observation yet, which carries no info, is no sample. The poll reads the
+# leg rows whatever the round's code: a read may name what a converge would
+# do next, such as the absent array of a promotion whose legs serve only now
+# (cnagent.md CN30), and the stage, playing the worker, re-sends on that
+# name later (cnagentctl prints the reply before it checks the code).
 wait_legs_probed() { # cnidx sp cntlr secs label
 	local deadline=$((SECONDS + $4)) out pending
 	while :; do
-		out=$(cnctl "$1" check-cntlr --show-info --sp "$2" --cntlr "$3")
+		out=$(cnctl "$1" check-cntlr --show-info --sp "$2" --cntlr "$3" \
+			--expect-code 4 2>/dev/null || true)
 		pending=$(jq_of "$out" \
 			'if .obs_stamp.obs_time == null then "no observation" else
 			 [(.cntlr_info.leg_id_to_leg // {})[] | select(.status == "RES_STATUS_PENDING")] | length end')
@@ -3923,12 +3931,13 @@ wait_legs_probed() { # cnidx sp cntlr secs label
 # again since its export came back (cnagent.md CN11). A converge takes a leg
 # whose row reads ERROR as no copy source (cnagent.md CN12), so a stage that
 # brings a leg back and wants it to feed a copy in its next converge waits
-# for this first. The rounds start the reads they sample, as
-# wait_legs_probed's do.
+# for this first. The rounds start the reads they sample, and the poll reads
+# the leg row whatever the round's code, as wait_legs_probed's do.
 leg_wait_not_error() { # cnidx sp cntlr leg secs label
 	local deadline=$((SECONDS + $5)) out st
 	while :; do
-		out=$(cnctl "$1" check-cntlr --show-info --sp "$2" --cntlr "$3")
+		out=$(cnctl "$1" check-cntlr --show-info --sp "$2" --cntlr "$3" \
+			--expect-code 4 2>/dev/null || true)
 		st=$(jq_of "$out" \
 			"if .obs_stamp.obs_time == null then \"no observation\" else
 			 (.cntlr_info.leg_id_to_leg[\"$(d16 "$4")\"].status // \"ABSENT\") end")
@@ -4572,7 +4581,7 @@ case_redund() {
 	local req1="$WORK/req-redund-cn1.json" req2="$WORK/req-redund-cn2.json"
 	local out dev want got seq rev1 rev2 i nsdev
 	local writer deadline mkey dkey lkey mst dst ldet n rules mark cmds name
-	local mname vd
+	local mname vd metadev datadev
 	local grp md2 la lb nsdev1 err1 raid01 info1
 	diag_cntlr 1 "$sp" "$c1"
 	diag_cntlr 2 "$sp" "$c2"
@@ -4737,7 +4746,7 @@ case_redund() {
 	# md-refusal stage builds its commands by the same rule over a node path,
 	# an array name and loop devices of its own; this check holds the agent's
 	# start from both members to the rule, and
-	# TestLateMemberRefusedStartIsAssembledByTheRetry
+	# TestLateMemberRefusedStartIsNamedOnceItServes
 	# (agent/cnagent/cnagent_test.go) its start from one member, the form
 	# whose refusal that stage pins.
 	for grp in meta data; do
@@ -5035,6 +5044,10 @@ case_redund() {
 	# mdrefuse stage shows on loop devices. md fails a member itself if an
 	# IO reaches it, which the bitmap's own writes can make, so each member
 	# is either named or already failed by md, and at least one is named.
+	# Nothing of CN2 runs by itself meanwhile: every command it runs from the
+	# cut to the end of the stage, the put-back included, is under the
+	# stage's own trace id, its converges' or its rounds' reads (dnagent.md
+	# SH31).
 	# got keeps the degrade stage's digest, which the readonly stage reads.
 	local cut m named seen sname ex quiet dirty ast loud
 	# The stages before end with md's copies onto these members, after which
@@ -5065,6 +5078,7 @@ case_redund() {
 	mrd=$(helper 2 "md_member_read $name") ||
 		die "early: reading DN1's data member failed: $mrd"
 	before=$(member_field "$mrd" wsect)
+	mark=$(helper 2 cn_log_lines)
 	assert_eq "$(helper 1 "partition_from ${IP[2]}")" partitioned \
 		"early: the partition rule was not installed"
 	cut=$SECONDS
@@ -5098,9 +5112,7 @@ case_redund() {
 		sleep 1
 	done
 	log "  named $((SECONDS - cut)) s after the cut:$named"
-	# No CN10 retry runs here: only a converge that finds a late member
-	# registers one, and the resync stage's converges found every leg
-	# available; this converge registers it, under trace ids of its own.
+	# The worker's re-send on that code.
 	out=$(cn_syncup_cntlr 2 "$req2")
 	assert_map_ok "$out" grp_id_to_md_raid "$A_MGRP" "early: the meta row"
 	assert_map_ok "$out" grp_id_to_md_raid "$A_DGRP" "early: the data row"
@@ -5139,12 +5151,24 @@ case_redund() {
 			"'$(mdr_field "$ex" "Array State")', want the death recorded" ;;
 		esac
 	done
+	# The members stay late while the partition holds, and no converge can
+	# make them serve, so a read names none of them (cnagent.md CN30) and
+	# CN2 runs nothing by itself: the six seconds with no call of the
+	# stage's cover three of the worker's default intervals
+	# (DefaultHealthCheckInterval), so a re-drive paced anywhere near the
+	# worker's rounds would show.
+	sleep 6
+	cmds=$(helper 2 "cn_cmds_since $mark ''")
+	cmds=$(printf '%s\n' "$cmds" | grep -v "^$TRACE " || true)
+	[ -z "$cmds" ] ||
+		die "early: cn2 ran commands under trace ids of its own during the" \
+			"partition: $cmds"
 	# The legs back: the put-back takes each failed member back from md's
-	# bitmap, as after any fail (the readd stage), by the converge of a
-	# re-send or of the CN10 retry the converge above registered for its
-	# late members, whose own trace ids the stage's counts do not read; so
-	# the sectors written to the data member tell the bitmap's catch-up from
-	# a full copy, as in the resync stage, the probe's own writes included.
+	# bitmap, as after any fail (the readd stage), by the converge of the
+	# SyncupCntlr the stage re-sends, as the worker would, on a round that
+	# names the member, under the stage's trace id; the sectors written to
+	# the data member tell the bitmap's catch-up from a full copy, as in the
+	# resync stage, the probe's own writes included.
 	assert_eq "$(helper 1 "unpartition_from ${IP[2]}")" unpartitioned \
 		"early: the partition rule was not removed"
 	rules=$(helper 1 "partition_rules ${IP[2]}")
@@ -5153,12 +5177,19 @@ case_redund() {
 	leg_wait_live 2 "$sp" "${A_DLEG[1]}" "${CNID[2]}" 1 60
 	md_resync_until_clean 2 "$sp" "$c2" "$rev2" "$req2" 120 "early" \
 		"$A_MGRP" "$A_DGRP"
+	seq=$(helper 2 "cn_events $TRACE")
 	for m in "$mname" "$name"; do
 		mrd=$(helper 2 "md_member_read $m") ||
 			die "early: $m is not in CN2's array: $mrd"
 		member_in_sync "$mrd" ||
 			die "early: $m put back reads $mrd, want in_sync with failfast"
+		[ "$(event_cnt "$seq" "^mdadm .* --add --failfast /dev/mapper/$m\$")" -ge 1 ] ||
+			die "early: no re-sent converge of this stage put $m back"
 	done
+	cmds=$(helper 2 "cn_cmds_since $mark ''")
+	cmds=$(printf '%s\n' "$cmds" | grep -v "^$TRACE " || true)
+	[ -z "$cmds" ] ||
+		die "early: cn2 ran commands under trace ids of its own: $cmds"
 	mrd=$(helper 2 "md_member_read $name") ||
 		die "early: reading DN1's data member failed: $mrd"
 	after=$(member_field "$mrd" wsect)
@@ -5241,35 +5272,35 @@ case_redund() {
 	assert_eq "$(helper "$hv" "write_probe '$dev' 9")" ok \
 		"redund write after readwrite"
 
-	stage lateflip "a promotion that outruns the sides' flip waits inaccessible, then completes on the retry"
-	# CN12's late-member retry and link 1 of the failover ping-pong: a
-	# failover's SyncupCntlr waits for the sides' SyncupSide answers, but one
-	# cntlr_interval at most ([D16]), so a promoted standby can still read its
-	# legs before any side has flipped. Every path is then live but still
-	# non-optimized, no leg is available, and both groups report "no available
-	# leg". The promotion builds no raid0, so its ns-dev stays parked on the
-	# td's dm-error and its row reads an error naming the missing raid0; and
-	# since a namespace turns optimized only in a converge that put its ns-dev
-	# on its serving device (CN16's ANA rule), the namespace stays
-	# inaccessible and the host's IO waits instead of failing. Its namespace
-	# row reads OK on the converge and on a read made after it alike, both
-	# comparing its group with the inaccessible one a parked ns-dev calls for
-	# (CN28).
-	# Nothing re-drives that converge — the worker re-syncs on a revision or a
-	# reply code, never on a row — so the agent's CN10 retry, registered for
-	# the late members and for the namespace left waiting, must finish it.
-	# This stage promotes CN1 BEFORE it flips any side, then flips them all:
-	# the arrays must be assembled by a retry attempt, under a trace id of its
-	# own, which also puts the ns-dev on the raid0 and moves the namespace
-	# optimized, and CN1 must see no second SyncupCntlr. CN1
-	# assembles from the members' superblocks, where the data array's DN1
-	# leg is the member failed by hand on CN2 in the readonly stage: md kicks
-	# that stale member from the assembly, and CN12's member reconciliation
-	# adds it back. An attempt that runs between two flips sees one member of a
-	# group available: mdadm refuses to start the array from a member whose
-	# superblock still counts both ([D16]), or starts it degraded from the
-	# fresher one and a later attempt adds the other. Either way the rows
-	# end OK, degraded or not, and that is all this stage asserts of them.
+	stage lateflip "a promotion that outruns the sides' flip waits inaccessible, then completes on the re-send its read brings"
+	# Link 1 of the failover ping-pong: a failover's SyncupCntlr waits for
+	# the sides' SyncupSide answers, but one cntlr_interval at most ([D16]),
+	# so a promoted standby can still read its legs before any side has
+	# flipped. Every path is then live but still non-optimized, no leg is
+	# available, and both groups report "no available leg". The promotion
+	# builds no raid0, so its ns-dev stays parked on the td's dm-error and its
+	# row reads an error naming the missing raid0; and since a namespace turns
+	# optimized only in a converge that put its ns-dev on its serving device
+	# (CN16's ANA rule), the namespace stays inaccessible and the host's IO
+	# waits instead of failing. Its namespace row reads OK on the converge and
+	# on a read made after it alike, both comparing its group with the
+	# inaccessible one a parked ns-dev calls for (CN28).
+	# Only a converge assembles the arrays, and the worker sends one on a
+	# reply's code or a new revision, never on a row (dnv-worker.md RW4).
+	# Before the flips a read names nothing, since no converge can start an
+	# array over members that do not serve, and CN1 runs nothing by itself.
+	# Once the members serve, a read names each group's absent array, which
+	# the assembly would start (cnagent.md CN12, CN30), and the SyncupCntlr
+	# the stage re-sends on that code, as the worker would and under the
+	# round's trace id, assembles both arrays, puts the ns-dev on the raid0
+	# and moves the namespace optimized: CN1 sees exactly two SyncupCntlr,
+	# the promotion and that re-send. CN1 assembles from the members'
+	# superblocks, where the data array's DN1 leg is the member failed by
+	# hand on CN2 in the readonly stage: md kicks that stale member from the
+	# assembly. After the MiB-9 check below, which needs the array running
+	# from DN2's leg alone, the stage plays the worker until a round answers
+	# 0, and asserts that both md rows read whole, that CN12's put-back of
+	# the stale member ran under $TRACE and that the member reads in sync.
 	# The readonly stage restored READWRITE on req2, and req1 never left it.
 	# The host's path to CN1 went down with the degrade stage's partition; it
 	# must be live again for the ANA reads and the readback below.
@@ -5278,6 +5309,8 @@ case_redund() {
 	nsdev1=$(cn_dm_name c6 1 "$sp" "$A_NS")
 	err1=$(cn_dm_name c5 1 "$sp" "$A_TD")
 	raid01=$(cn_dm_name c4 1 "$sp" "$A_TD")
+	metadev=$(jq_of "$mdmeta" .dev_path)
+	datadev=$(jq_of "$mddata" .dev_path)
 	mark=$(helper 1 cn_log_lines)
 	req_set "$req2" '.cntlr.primary = false'
 	bump_cn_rev 2
@@ -5300,9 +5333,8 @@ case_redund() {
 	# the promotion's commands. The host's path to CN1 still reads
 	# inaccessible, the ns-dev is still parked, its row reads the missing
 	# raid0 as an error, and the namespace row reads OK, on the converge and
-	# on a read made after it alike (CN28): the fresh round answers from one.
-	# A retry attempt that runs before the flips below finds the members still
-	# late and changes none of this.
+	# on a read made after it alike (CN28): the fresh round answers from one,
+	# and with code zero, as nothing a converge could do is named yet.
 	assert_absent "$seq" '^write .*/ana_grpid 1$' \
 		"redund lateflip: the promotion moved a namespace optimized"
 	assert_eq "$(host_ana "$hv" "$nqn" 1)" inaccessible \
@@ -5316,6 +5348,17 @@ case_redund() {
 		"dm device $raid01 is not there" "redund lateflip fresh round"
 	assert_map_ok "$info1" ns_id_to_namespace "$A_NS" \
 		"redund lateflip fresh round"
+	# Nothing runs by itself while the members are late: for ten seconds,
+	# two of the worker's default intervals and more, CN1 runs no command
+	# under any trace id but this stage's own, which its fresh rounds' reads
+	# carry (dnagent.md SH31).
+	quiet=$(helper 1 cn_log_lines)
+	sleep 10
+	cmds=$(helper 1 "cn_cmds_since $quiet ''")
+	cmds=$(printf '%s\n' "$cmds" | grep -v "^$TRACE " || true)
+	[ -z "$cmds" ] ||
+		die "lateflip: cn1 ran commands under trace ids of its own before" \
+			"the flips: $cmds"
 	dn_side 1 "$sp" "${A_MLEG[1]}" "${A_MSIDE[1]}" 1 "$RAID1_MGRP_ZERO_BYTES" \
 		"${CNID[1]}" "${CNID[2]}"
 	dn_side 1 "$sp" "${A_DLEG[1]}" "${A_DSIDE[1]}" 2 "$RAID1_DGRP_ZERO_BYTES" \
@@ -5328,70 +5371,68 @@ case_redund() {
 		leg_wait_ana 1 "$sp" "${A_MLEG[$i]}" "${CNID[1]}" "$i" optimized 20
 		leg_wait_ana 1 "$sp" "${A_DLEG[$i]}" "${CNID[1]}" "$i" optimized 20
 	done
-	# The retry re-runs the converge every CnConnectRetryInterval (5 s). An
-	# attempt holds the cntlr's lock and stores its observation before it
-	# lets the lock go, and a read takes the same lock (dnagent.md SH28,
-	# SH29), so a row sampled here is never one from the middle of an
-	# attempt; the poll's rounds start the reads between attempts.
-	mkey=$(d16 "$A_MGRP")
-	dkey=$(d16 "$A_DGRP")
+	# Once the members serve, a read names both groups' absent arrays and
+	# nothing else; the poll's fresh rounds start the reads.
 	deadline=$((SECONDS + 15))
 	while :; do
-		out=$(cnctl 1 check-cntlr --show-info --sp "$sp" --cntlr "$c1")
-		mst=$(jq_of "$out" \
-			".cntlr_info.grp_id_to_md_raid[\"$mkey\"].status // \"ABSENT\"")
-		dst=$(jq_of "$out" \
-			".cntlr_info.grp_id_to_md_raid[\"$dkey\"].status // \"ABSENT\"")
-		[ "$mst" = RES_STATUS_OK ] && [ "$dst" = RES_STATUS_OK ] && break
+		vd=$(check_verdict 1 "$sp" "$c1" "$rev1")
+		verdict_names_only "$vd" "lateflip" "md_absent:$metadev" \
+			"md_absent:$datadev"
+		named=0
+		for m in "$metadev" "$datadev"; do
+			case "$vd, " in
+			"4 "*"md_absent:$m, "*) named=$((named + 1)) ;;
+			esac
+		done
+		[ "$named" = 2 ] && break
 		[ "$SECONDS" -lt "$deadline" ] ||
-			die "lateflip: 15 s after the flip the md rows read meta $mst /" \
-				"data $dst: $(jq_of "$out" '.cntlr_info.grp_id_to_md_raid')"
+			die "lateflip: 15 s after the flips CN1's check round reads" \
+				"'$vd', want the absent arrays $metadev and $datadev named"
 		sleep 1
 	done
-	assert_map_ok "$out" td_id_to_raid0 "$A_TD" "redund lateflip retried"
-	assert_map_ok "$out" ns_id_to_dm_linear "$A_NS" "redund lateflip retried"
-	assert_map_ok "$out" ns_id_to_namespace "$A_NS" "redund lateflip retried"
-	# The stack is built: the attempt that built the raid0 put the ns-dev on
-	# it, and in that same attempt moved the namespace optimized (below).
+	log "  CN1's verdict: $vd"
+	# The worker's re-send on that code: the request it holds, at the
+	# revision it already sent, under the round's trace id.
+	out=$(cn_syncup_cntlr 1 "$req1")
+	assert_map_ok "$out" grp_id_to_md_raid "$A_MGRP" "redund lateflip re-sent"
+	assert_map_ok "$out" grp_id_to_md_raid "$A_DGRP" "redund lateflip re-sent"
+	assert_map_ok "$out" td_id_to_raid0 "$A_TD" "redund lateflip re-sent"
+	assert_map_ok "$out" ns_id_to_dm_linear "$A_NS" "redund lateflip re-sent"
+	assert_map_ok "$out" ns_id_to_namespace "$A_NS" "redund lateflip re-sent"
+	log "  after the re-send: data md row" \
+		"'$(jq_of "$out" ".cntlr_info.grp_id_to_md_raid[\"$(d16 "$A_DGRP")\"].details")'"
+	# The stack is built: the re-sent converge put the ns-dev on the raid0
+	# it built, and in that same converge moved the namespace optimized.
 	assert_eq "$(helper 1 "dm_backing $nsdev1")" \
 		"$(helper 1 "dm_devno $raid01")" \
-		"redund lateflip: the retried ns-dev maps the raid0"
-	log "  after the retry: data md row" \
-		"'$(jq_of "$out" ".cntlr_info.grp_id_to_md_raid[\"$dkey\"].details")'"
-	# Who assembled: every `mdadm --assemble` CN1 ran since the demote, with
-	# the trace id it ran under. None may be the promotion's, and each array
-	# must have been assembled (an attempt between two flips may add a run
-	# that mdadm refused, above).
-	cmds=$(helper 1 "cn_cmds_since $mark 'mdadm --assemble '")
-	[ -n "$cmds" ] || die "lateflip: cn1 ran no mdadm --assemble since the demote"
-	[ "$(event_cnt "$cmds" "^$TRACE ")" = 0 ] ||
-		die "lateflip: an mdadm --assemble ran under the promotion's" \
-			"trace $TRACE: $cmds"
+		"redund lateflip: the re-sent converge's ns-dev maps the raid0"
+	# Who did it: each array's start and the optimized group ran under the
+	# stage's trace id, once, which the promotion did not use for either
+	# (above), so they are the re-send's; CN1 saw two SyncupCntlr since the
+	# demote, the promotion and the re-send.
+	seq=$(helper 1 "cn_events $TRACE")
 	for name in "$(jq_of "$mdmeta" .array_name)" \
 		"$(jq_of "$mddata" .array_name)"; do
-		[ "$(event_cnt "$cmds" " --name $name ")" != 0 ] ||
-			die "lateflip: no retry attempt assembled array $name: $cmds"
+		assert_eq "$(event_cnt "$seq" "^mdadm --assemble .* --name $name ")" \
+			1 "redund lateflip: the re-send's start of array $name"
 	done
+	assert_eq "$(event_cnt "$seq" '^write .*/ana_grpid 1$')" 1 \
+		"redund lateflip: the re-send moved the namespace optimized"
 	n=$(helper 1 "cn_requests_since $mark SyncupCntlr $(d16 "$sp") $(d16 "$c1")")
-	assert_eq "$n" 1 \
+	assert_eq "$n" 2 \
 		"lateflip: SyncupCntlr requests for cntlr $c1 on cn1 since the demote"
-	# The retry stops once no member is late, no connect fails and no
-	# namespace waits: after the attempt that is still due, if any, CN1 runs
-	# no command under any trace id but this stage's own for a whole retry
-	# interval.
-	deadline=$((SECONDS + 30))
-	while :; do
-		mark=$(helper 1 cn_log_lines)
-		sleep 7
-		cmds=$(helper 1 "cn_cmds_since $mark ''")
-		cmds=$(printf '%s\n' "$cmds" | grep -v "^$TRACE " || true)
-		[ -z "$cmds" ] && break
-		[ "$SECONDS" -lt "$deadline" ] ||
-			die "lateflip: cn1 still runs converges of its own: $cmds"
-	done
-	# The wait ends: the host's path to CN1 reads optimized, a move only a
-	# retry attempt can have made, since the promotion wrote no optimized
-	# group and CN1 saw no second SyncupCntlr.
+	# No command CN1 runs from the demote on is under a trace id of its own:
+	# each is one of the stage's converges' or of its rounds' reads. The six
+	# seconds with no call of the stage's cover three of the worker's
+	# default intervals (DefaultHealthCheckInterval), so a re-drive paced
+	# anywhere near the worker's rounds would show.
+	sleep 6
+	cmds=$(helper 1 "cn_cmds_since $mark ''")
+	cmds=$(printf '%s\n' "$cmds" | grep -v "^$TRACE " || true)
+	[ -z "$cmds" ] ||
+		die "lateflip: cn1 ran commands under trace ids of its own: $cmds"
+	# The wait ends: the host's path to CN1 reads optimized, a move the
+	# re-send made (above).
 	host_wait_ana "$hv" "$nqn" 1 optimized 30
 	assert_eq "$(host_ana "$hv" "$nqn" 2)" inaccessible \
 		"redund lateflip demoted primary path"
@@ -5404,9 +5445,9 @@ case_redund() {
 	# holds the degrade stage's pattern, which the readd stage resynced onto
 	# it, and the failover stage's write allocated MiB 9 in
 	# the thin pool, so zeros here come from a leg, never from an unwritten
-	# block. However CN1's attempts started the data array (above), it must
-	# run from DN2's leg, so the block reads as zeros; an array started from
-	# the stale leg reads that pattern here. The cache drop before the
+	# block. The re-send's converge started the data array (above), and it
+	# must run from DN2's leg, so the block reads as zeros; an array started
+	# from the stale leg reads that pattern here. The cache drop before the
 	# readback covers this read too: the host has not written MiB 9 since.
 	assert_eq "$(helper "$hv" "zero_probe '$dev' 9 1")" zeros \
 		"redund lateflip: MiB 9 reads as the newer leg's"
@@ -5415,6 +5456,50 @@ case_redund() {
 	write_range "$hv" "$WORK/probe-redund.bin" "$dev" 1 9
 	drop_caches "$hv"
 	assert_eq "$(sha_range "$hv" "$dev" 1 9)" "$got" "redund lateflip write"
+	# The stale member goes back, after the MiB-9 check above, which needs
+	# the array running from DN2's leg alone. md left DN1's data leg out of
+	# the re-send's assembly, and CN12's put-back of it is named by a read
+	# once that leg's row reads OK, after its prober's first round on CN1
+	# (cnagent.md CN11, CN12, CN30); the stage plays the worker until a
+	# round answers 0 with both md rows whole, re-sending req1 at most three
+	# times (dnv-worker.md RW4), and the put-back's add runs under $TRACE.
+	stale=$(cn_dm_name c9 1 "$sp" "${A_DLEG[1]}")
+	wait_legs_probed 1 "$sp" "$c1" 20 "lateflip: the probes before the put-back"
+	resends=0
+	deadline=$((SECONDS + 60))
+	while :; do
+		vd=$(check_verdict 1 "$sp" "$c1" "$rev1")
+		out=$(cnctl 1 check-cntlr --show-info --sp "$sp" --cntlr "$c1" \
+			--expect-code 4 2>/dev/null || true)
+		bad=$(md_rows_bad "$out" "$A_MGRP" "$A_DGRP")
+		case "$vd" in
+		"0 "*) [ -z "$bad" ] && break ;;
+		"4 "*)
+			[ "$resends" -lt 3 ] ||
+				die "lateflip: after $resends re-sends CN1's round reads '$vd'"
+			cn_syncup_cntlr 1 "$req1" >/dev/null
+			resends=$((resends + 1))
+			;;
+		esac
+		[ "$SECONDS" -lt "$deadline" ] ||
+			die "lateflip: after 60 s CN1's round reads '$vd', md rows:$bad"
+		sleep 1
+	done
+	log "  the put-back: $resends re-send(s)"
+	seq=$(helper 1 "cn_events $TRACE")
+	[ "$(event_cnt "$seq" "^mdadm .* --add --failfast /dev/mapper/$stale\$")" -ge 1 ] ||
+		die "lateflip: no put-back of $stale under $TRACE"
+	mrd=$(helper 1 "md_member_read $stale") ||
+		die "lateflip: reading the put-back member $stale failed: $mrd"
+	case "$mrd" in
+	*state=*in_sync*) ;;
+	*) die "lateflip: the put-back member $stale reads '$mrd', want in_sync" ;;
+	esac
+	sleep 6
+	cmds=$(helper 1 "cn_cmds_since $mark ''")
+	cmds=$(printf '%s\n' "$cmds" | grep -v "^$TRACE " || true)
+	[ -z "$cmds" ] ||
+		die "lateflip: cn1 ran commands under trace ids of its own: $cmds"
 
 	stage check "converge check rounds on both CNs"
 	converge_check 1 "$sp" "$c1" "$rev1"
@@ -5700,11 +5785,14 @@ repair_forced_start() {
 	# (cnagent_integtest.md, Lab facts). Once it first reads broken, the
 	# stage freezes md's copy (md/sync_action), which keeps it from starting
 	# again, and waits until the array reads broken ten seconds in a row: a
-	# converge that read a running state would leave the mark to the CN10
-	# retry (cnagent.md CN12), whose attempts carry trace ids of their own,
-	# which the next stages' counts do not read. The agent never writes
-	# sync_action; the freeze only holds still the state that md's retries
-	# keep moving, which CN12's retry handles in production.
+	# converge that read a running state would act on no mark and leave it
+	# waiting, and the next stages' counts would then read a converge that
+	# did nothing. The agent never writes sync_action; the freeze only holds
+	# still the state that md's retries keep moving, which a read's name of
+	# the forced start handles in production: a read names it only once it
+	# reads no array of the group running, and the worker's re-send on that
+	# code brings the converge that acts on the mark (cnagent.md CN12,
+	# CN30).
 	assert_eq "$(helper 1 "dm_error_load $ylin")" loaded \
 		"repair copydeath: Y's export to cn2 erroring"
 	deadline=$((SECONDS + 180))
@@ -5785,8 +5873,9 @@ repair_forced_start() {
 	log "  Y's superblock: $exy"
 	# Y feeds Z's copy only once its leg row stops reading ERROR, which its
 	# prober's next round on the restored export brings (cnagent.md CN11,
-	# CN12); a converge before that starts the array and leaves Z to the
-	# late-member retry.
+	# CN12); a converge before that starts the array and leaves Z's add to a
+	# later converge, which a read's name of the add brings once Y's row
+	# reads OK (cnagent.md CN30).
 	leg_wait_not_error 2 "$sp" "$c2" "$yleg" 30 "repair forced: Y's probe"
 	# The inspect and its dry run (cnagent.md CN31) say what the
 	# start below does, running no mdadm command: Z zeroed under the uuid
@@ -7743,7 +7832,7 @@ case_clone_xfer() {
 	local idx bmargs bmfiles nsdev2 err1 err2 hyd tot post deadline
 	local code details shape now tgt rows c1 k g c2 legdm grpdm legnqn raid0dm
 	local srcpass wsect bound w0 w1 held dm before i muts mark src0 src1 cmds
-	local ids again wbase json
+	local ids again wbase json vd wcode
 	diag_cntlr 1 "$sp1" "$cntlr"
 	diag_cntlr 2 "$sp2" "$cntlr"
 	dev=$(host_dev "$uuid")
@@ -8114,17 +8203,16 @@ case_clone_xfer() {
 	# the copy held, the count it shows after the restart is the held count
 	# exactly, not merely at least it; the dm-clone, its clone meta group's
 	# device and that group's leg wrapper keep their device numbers and their
-	# tables; and the fresh log holds no mutation at all, read once it holds
-	# a whole attempt of the CN10 retry as well, which the failed step 1
-	# keeps registered. Each pass reads the dm-clone for its rows (CN18), the
-	# reconcile under its own trace id and each retry attempt under one of
-	# its own (CN2), each under the CN1 locks, which let one pass of the
-	# cntlr run at a time, while the samples' reads carry the stage's. Reads
-	# of the dm-clone under three trace ids other than the stage's are
-	# therefore the reconcile, a first retry attempt and a second one, whose
-	# read comes only once the first has let the locks go: the log then
-	# holds the whole first attempt, and those reads are the positive
-	# control.
+	# tables; and the fresh log holds no mutation at all. Each pass reads the
+	# dm-clone for its rows (CN18): the reconcile under its own trace id
+	# (CN2), and the reads the samples' rounds start under the stage's. No
+	# read starts before the startup pass has ended (dnagent.md SH33), so a
+	# read of the dm-clone under the stage's id means the log holds the
+	# whole reconcile; that read and the reconcile's are the positive
+	# control. Nothing else runs: no converge follows the reconcile but the
+	# one a re-send brings, and a read of the restarted agent names nothing
+	# here (CN30), so the dm-clone is read under no third trace id, six
+	# seconds after the first sample as at once.
 	before=()
 	for dm in "$clonedm" "$grpdm" "$legdm"; do
 		before+=("$(helper 2 "dm_devno $dm") $(helper 2 "dm_table $dm")")
@@ -8144,20 +8232,26 @@ case_clone_xfer() {
 			"clone_xfer: $dm's device number and table across the restart"
 		i=$((i + 1))
 	done
-	deadline=$((SECONDS + 30))
-	while :; do
-		ids=$(helper 2 "cn_cmds_since 0 'dmsetup '" | awk -v t="$TRACE" \
-			-v dm="$clonedm" '$1 != t && ($3 == "status" || $3 == "table") &&
-				$NF == dm && !seen[$1]++ {n++} END {print n + 0}')
-		[ "$ids" -lt 3 ] || break
-		[ "$SECONDS" -lt "$deadline" ] ||
-			die "clone_xfer: 30 s after the restart the log reads the" \
-				"dm-clone under $ids trace id(s) besides $TRACE, not the" \
-				"reconcile's and two retry attempts'"
-		sleep 0.5
-	done
-	log "clone_xfer: the restarted agent's log reads the dm-clone under $ids" \
-		"trace ids besides $TRACE"
+	cmds=$(helper 2 "cn_cmds_since 0 'dmsetup '")
+	ids=$(printf '%s\n' "$cmds" | awk -v t="$TRACE" -v dm="$clonedm" \
+		'$1 != t && ($3 == "status" || $3 == "table") && $NF == dm &&
+			!seen[$1]++ {n++} END {print n + 0}')
+	again=$(printf '%s\n' "$cmds" | awk -v t="$TRACE" -v dm="$clonedm" \
+		'$1 == t && ($3 == "status" || $3 == "table") && $NF == dm {n++}
+			END {print n + 0}')
+	assert_eq "$ids" 1 \
+		"clone_xfer: trace ids besides $TRACE the restarted agent read the dm-clone under"
+	[ "$again" -ge 1 ] ||
+		die "clone_xfer: no read of the stage's rounds read the dm-clone" \
+			"after the restart: $cmds"
+	sleep 6
+	ids=$(helper 2 "cn_cmds_since 0 'dmsetup '" | awk -v t="$TRACE" \
+		-v dm="$clonedm" '$1 != t && ($3 == "status" || $3 == "table") &&
+			$NF == dm && !seen[$1]++ {n++} END {print n + 0}')
+	assert_eq "$ids" 1 \
+		"clone_xfer: trace ids besides $TRACE the restarted agent read the dm-clone under, six seconds on"
+	log "clone_xfer: the restarted agent's log reads the dm-clone under the" \
+		"reconcile's trace id and $TRACE alone"
 	muts=$(helper 2 mutations)
 	[ -z "$muts" ] ||
 		die "clone_xfer: cn2 mutated after the restart:"$'\n'"$muts"
@@ -8177,24 +8271,27 @@ case_clone_xfer() {
 	assert_eq "$(host_ana "$hv" "$nqn" 2)" optimized \
 		"clone_xfer: the host's path to cn2 across the restart"
 
-	stage giveback "stage 5d: the source gets its namespace back; cn2's retry reloads the dm-clone onto it and the copy goes on"
+	stage giveback "stage 5d: the source gets its namespace back; cn2's read names the dm-clone, and the re-send reloads it onto the source and the copy goes on"
 	# CN1 gets its request again at the revision it stored, as the worker
 	# re-sends one, and the transfer's converge builds the namespace it lost
 	# (cnagent.md CN17). On cn2 the namespace comes back under a new
 	# multipath head (stage 5b), so the dm-clone still names the source's
-	# old device number and reads nothing from it. cn2 gets no request: the
-	# CN10 retry reads the source ready again, and its pass reloads the
-	# dm-clone onto the source's new number, the one positional argument
-	# that differs, with hydration off, tries the chunk again with the
-	# ns-devs paused, which marks nothing new since the first build marked
-	# the chunk's regions (architecture.md, Bitmap push protocol, The apply
-	# pauses the writers), and enables hydration (CN18 steps 1, 3, 4 and
-	# 5). The reload suspends the
+	# old device number and reads nothing from it. Nothing of cn2 changes
+	# by itself: a read of cn2 finds the source ready again and the
+	# dm-clone's table naming another source number, and names the dm-clone
+	# (cnagent.md CN18, CN30). The SyncupCntlr the stage re-sends on that
+	# code, as the worker would, at the revision cn2 holds and under the
+	# round's trace id, reloads the dm-clone onto the source's new number,
+	# the one positional argument that differs, with hydration off, tries
+	# the chunk again with the ns-devs paused, which marks nothing new since
+	# the first build marked the chunk's regions (architecture.md, Bitmap
+	# push protocol, The apply pauses the writers), and enables hydration
+	# (CN18 steps 1, 3, 4 and 5). The reload suspends the
 	# dm-clone first, which commits its metadata to the group, so the
 	# reloaded dm-clone loads the held count. One over metadata formatted
 	# anew would count the chunk's 32 and climb from there, copying the
 	# regions copied before the hold once more, so a first sample taken a
-	# few seconds after the retry's enable could read the held count on
+	# few seconds after the re-send's enable could read the held count on
 	# such a dm-clone too: the check here is a quick one, and stage 6's
 	# write count is what tells the two apart whatever the timing. The copy
 	# then goes on, slowed still, and stage 6 wipes cn2 in the middle of it.
@@ -8216,14 +8313,29 @@ case_clone_xfer() {
 	out=$(cn_syncup_cntlr 1 "$req1")
 	assert_map_ok "$out" xfer_id_to_namespace "$C_XFER" \
 		"clone_xfer: the transfer's namespace back"
+	# The worker's round on cn2: its read names the dm-clone once the
+	# source's new head is there; the poll's fresh rounds start the reads.
 	deadline=$((SECONDS + 30))
-	until src1=$(helper 2 "dm_table $clonedm" | awk '{print $6}') &&
-		[ -n "$src1" ] && [ "$src1" != "$src0" ]; do
+	while :; do
+		vd=$(check_verdict 2 "$sp2" "$cntlr" "$rev2")
+		case "$vd" in
+		"4 "*"enumeration failed: $clonedm: "*) break ;;
+		esac
 		[ "$SECONDS" -lt "$deadline" ] ||
 			die "clone_xfer: 30 s after the source's namespace came back" \
-				"the dm-clone still names its old device $src0"
+				"cn2's check round reads '$vd', want the dm-clone named"
 		sleep 0.5
 	done
+	log "clone_xfer: cn2's verdict: $vd"
+	assert_eq "$(helper 2 "dm_table $clonedm" | awk '{print $6}')" "$src0" \
+		"clone_xfer: the dm-clone's source before the re-send"
+	out=$(cn_syncup_cntlr 2 "$req2")
+	assert_map_ok "$out" clone_id_to_dm_clone "$C_CLONE" \
+		"clone_xfer: the dm-clone after the re-send"
+	src1=$(helper 2 "dm_table $clonedm" | awk '{print $6}')
+	[ -n "$src1" ] && [ "$src1" != "$src0" ] ||
+		die "clone_xfer: after the re-send the dm-clone still names its" \
+			"old device $src0"
 	log "clone_xfer: the dm-clone's source moved from $src0 to $src1"
 	sample=$(clone_sample "$sp2" "$cntlr")
 	[ "${sample##*/}" = "$tot" ] && [ "${sample%%/*}" -ge "$hyd" ] ||
@@ -8237,11 +8349,11 @@ case_clone_xfer() {
 		"$(helper 2 "dm_devno $grpdm")" \
 		"clone_xfer: the reloaded dm-clone's metadata device is its group's"
 	# Who did it: every command cn2 ran since the mark, each with its trace
-	# id. The reload, the chunk and the enable are the retry's, under a
-	# trace id of its own, and cn2 saw no SyncupCntlr. The chunk lands
-	# after the reload with the namespace device paused around it
-	# (architecture.md, Bitmap push protocol, The apply pauses the writers),
-	# before hydration is enabled.
+	# id. The reload, the chunk and the enable are the re-send's, under the
+	# stage's trace id, and cn2 saw that one SyncupCntlr; nothing ran under
+	# an id of cn2's own. The chunk lands after the reload with the
+	# namespace device paused around it (architecture.md, Bitmap push
+	# protocol, The apply pauses the writers), before hydration is enabled.
 	cmds=$(helper 2 "cn_cmds_since $mark ''")
 	seq=$(printf '%s\n' "$cmds" | cut -d' ' -f2-)
 	assert_absent "$seq" "^dmsetup create $clonedm( |\$)" \
@@ -8262,19 +8374,24 @@ case_clone_xfer() {
 		"clone_xfer giveback: the chunk lands before hydration"
 	assert_absent "$seq" "^discard-failed .*/dev/mapper/$clonedm\$" \
 		"clone_xfer giveback: no discard of the chunk fails"
-	[ "$(printf '%s\n' "$cmds" | grep -cE "^$TRACE dmsetup reload ")" = 0 ] ||
-		die "clone_xfer giveback: the reload ran under the stage's own" \
-			"trace $TRACE: $cmds"
+	[ "$(printf '%s\n' "$cmds" | grep -cE "^$TRACE dmsetup reload $clonedm ")" = 1 ] ||
+		die "clone_xfer giveback: the re-send did not reload the dm-clone" \
+			"once under the stage's trace $TRACE: $cmds"
+	[ -z "$(printf '%s\n' "$cmds" | grep -v "^$TRACE " || true)" ] ||
+		die "clone_xfer giveback: cn2 ran commands under trace ids of its" \
+			"own: $cmds"
 	assert_eq "$(helper 2 "cn_requests_since $mark SyncupCntlr $(d16 "$sp2") $(d16 "$cntlr")")" \
-		0 "clone_xfer giveback: SyncupCntlr requests on cn2 since the source came back"
+		1 "clone_xfer giveback: SyncupCntlr requests on cn2 since the source came back"
 
 	stage wipe "stage 6: CN2 loses its kernel state in the middle of the copy; the rebuilt clone keeps its copied regions (architecture.md, Clone metadata durability)"
 	# The clone's metadata is on its clone meta group, a side on DN2 that the
-	# wipe leaves, so the agent rebuilds the clone with no request from the
-	# suite: the startup reconcile, or the CN10 retry its pass registers when
-	# a step fails, connects the group's leg, builds the group device and
-	# creates the dm-clone over the metadata the group holds (cnagent.md CN2,
-	# CN18): the copy goes on from where it was.
+	# wipe leaves, so the agent rebuilds the clone from the request it
+	# stored: the startup reconcile connects the group's leg, builds the
+	# group device and creates the dm-clone over the metadata the group
+	# holds (cnagent.md CN2, CN18), and where one of its steps fails, a
+	# read names what a converge would still do and the stage, playing the
+	# worker, re-sends the stored request on that code (CN30): the copy goes
+	# on from where it was.
 	#
 	# The wipe-time sample (cnagent_integtest.md, Cases, clone_xfer) is what
 	# the rebuilt clone is held to. The copy is still slowed, so the wipe
@@ -8339,14 +8456,19 @@ case_clone_xfer() {
 	# the rebuild's: the legs and the source connect again, and
 	# the groups, the pool and the dm-clone are built and the chunk is
 	# applied again before it answers, unless a step fails and the pass
-	# leaves the rest to the CN10 retry (cnagent.md CN18).
+	# leaves the rest to a later converge (cnagent.md CN18).
 	out=$(cnctl 2 get-cn-size --wait 120)
 	assert_eq "$(jq_of "$out" .size)" "$CN_CAPACITY" "clone_xfer cn2 size"
+	# The worker's rounds before the sample: while a read names what the
+	# reconcile left undone, the stored request is re-sent at the revision
+	# cn2 holds, until a round reads clean (dnv-worker.md RW4).
+	resync_until_clean 2 "$sp2" "$cntlr" "$rev2" "$req2" 60 \
+		"clone_xfer rebuild"
 	# The rebuilt clone's first sample, taken as soon as a dm-clone answers:
 	# a dm-clone over a freshly formatted metadata device would count only
 	# what the chunk marks, and climb from there, slowed. A sample that finds
-	# no dm-clone status is taken again, since the retry may build it; any
-	# other failure of the sample ends the case with the driver's words.
+	# no dm-clone status is taken again; any other failure of the sample
+	# ends the case with the driver's words.
 	deadline=$((SECONDS + 30))
 	until post=$(clone_sample "$sp2" "$cntlr" 2>"$sample_err"); do
 		grep -q "no dm-clone status" "$sample_err" ||
@@ -8375,7 +8497,8 @@ case_clone_xfer() {
 	out=$(cnctl 2 get-cntlr-info --sp "$sp2" --cntlr "$cntlr")
 	assert_all_ok "$out" .cntlr_info "clone_xfer post-wipe cntlr"
 	# The reconcile mints its own trace id, so the freshly rotated log is the
-	# filter: it holds the rebuild and nothing else. The group's leg wrapper,
+	# filter: it holds the rebuild, the reconcile's and that of any re-send
+	# above, and the reads, and nothing else. The group's leg wrapper,
 	# then its device, then the dm-clone over it, then the source chunk
 	# again, before hydration is enabled (CN18 steps 2 to 5). dm-clone drops
 	# the discard of a region its metadata already counts as copied, so the
@@ -8472,6 +8595,16 @@ case_clone_xfer() {
 	# the log says which of the two it compared, and the finalize below then
 	# finds no controller to disconnect. Any other reading fails the stage,
 	# and so does a reading that moved by the end of the comparison.
+	#
+	# Every channel answers one code. Over a live controller with no
+	# namespace the code is zero: a converge connects nowhere beside a
+	# controller, so nothing of the clone is named (cnagent.md CN18, CN30).
+	# With no controller a read names the source's endpoint, which only a
+	# converge connects, and the converges, which name no such endpoint
+	# themselves, answer zero (CN30). Either way cn2 runs nothing by itself
+	# between the stage's calls: every command it runs is under the stage's
+	# trace id (dnagent.md SH31).
+	mark=$(helper 2 cn_log_lines)
 	assert_eq "$(helper 2 "subsys_shape '$xnqn'")" "1 1 1" \
 		"clone_xfer: controllers, live ones and namespace nodes of the source on cn2"
 	assert_eq "$(helper 1 "drop_namespaces '$xnqn'")" dropped \
@@ -8502,6 +8635,7 @@ case_clone_xfer() {
 		;;
 	esac
 	# The stored request again, at its own revision.
+	if [ "$shape" = "1 1 0" ]; then wcode=0; else wcode=4; fi
 	c1=$(cn_syncup_cntlr 2 "$req2")
 	assert_eq "$(helper 2 "dm_backing $nsdev2")" \
 		"$(helper 2 "dm_devno $clonedm")" \
@@ -8510,10 +8644,19 @@ case_clone_xfer() {
 		"clone_xfer: the host's path to cn2 stays optimized"
 	sleep 1.1
 	k=$(cnctl 2 check-cntlr --fresh --revision "$rev2" --show-info \
-		--sp "$sp2" --cntlr "$cntlr")
+		--sp "$sp2" --cntlr "$cntlr" --expect-code "$wcode")
 	assert_eq "$(jq_of "$k" '.revision // "0"')" "$rev2" \
 		"clone_xfer srcgone check-cntlr revision"
-	g=$(cnctl 2 get-cntlr-info --sp "$sp2" --cntlr "$cntlr")
+	if [ "$wcode" = 4 ]; then
+		case "$(jq_of "$k" '.agent_reply.details // ""')" in
+		*"$xnqn at ${IP[1]}:$TR_SVC_ID: no controller"*) ;;
+		*) die "clone_xfer: with no source controller the fresh round" \
+			"reads '$(jq_of "$k" '.agent_reply.details // ""')', want" \
+			"the source's endpoint named with no controller" ;;
+		esac
+	fi
+	g=$(cnctl 2 get-cntlr-info --sp "$sp2" --cntlr "$cntlr" \
+		--expect-code "$wcode")
 	sleep 1.1
 	c2=$(cn_syncup_cntlr 2 "$req2")
 	# The reading compared held through all four replies.
@@ -8573,15 +8716,32 @@ case_clone_xfer() {
 	done
 	# The dm-clone's row carries its status line whenever the device is
 	# there, so the agent's read still proves the hydration checkCloneHydrated
-	# (gateway/clone.go) reads; the sample is a fresh round's.
-	sample=$(cnctl 2 wait-hydrated --sp "$sp2" --cntlr "$cntlr" \
-		--clone "$C_CLONE" --sample-only)
-	case "$sample" in
-	[0-9]*/[1-9]*) ;;
-	*) die "clone_xfer: no hydration sample with no source namespace: '$sample'" ;;
-	esac
-	assert_eq "${sample%%/*}" "${sample##*/}" \
-		"clone_xfer: hydrated regions with no source namespace"
+	# (gateway/clone.go) reads; the sample is a fresh round's. The driver
+	# samples only a round that answers code zero, so the source with no
+	# controller, whose endpoint a read names, is not sampled.
+	if [ "$wcode" = 0 ]; then
+		sample=$(cnctl 2 wait-hydrated --sp "$sp2" --cntlr "$cntlr" \
+			--clone "$C_CLONE" --sample-only)
+		case "$sample" in
+		[0-9]*/[1-9]*) ;;
+		*) die "clone_xfer: no hydration sample with no source namespace: '$sample'" ;;
+		esac
+		assert_eq "${sample%%/*}" "${sample##*/}" \
+			"clone_xfer: hydrated regions with no source namespace"
+	else
+		log "clone_xfer: no hydration sample with no source controller: a" \
+			"read names the source's endpoint"
+	fi
+	# Nothing of cn2 ran between the stage's calls: the six seconds with
+	# no call of the stage's cover three of the worker's default intervals
+	# (DefaultHealthCheckInterval), so a re-drive paced anywhere near the
+	# worker's rounds would show.
+	sleep 6
+	cmds=$(helper 2 "cn_cmds_since $mark ''")
+	cmds=$(printf '%s\n' "$cmds" | grep -v "^$TRACE " || true)
+	[ -z "$cmds" ] ||
+		die "clone_xfer srcgone: cn2 ran commands under trace ids of its" \
+			"own: $cmds"
 
 	stage finalize "stage 8: DeleteTransfer, then DeleteClone (CN18 order)"
 	req_set "$req1" ".xfer_list = []
@@ -8618,11 +8778,11 @@ case_clone_xfer() {
 	# none. That pass issues no disconnect of the source and goes on down to
 	# the group and its leg. Both are CN21's, and the stage takes whichever
 	# the timing gives it, telling them apart by whether the first reply names
-	# the source's connection. The layers under L5 may come down in the
-	# agent's own CN10 retry, which the leftover registers and which runs
-	# under a fresh trace id of its own (CN2), before the stage's re-send:
-	# the order is therefore read from every command cn2 runs after a mark
-	# taken here, not from the stage's trace alone.
+	# the source's connection. The layers under L5 come down in a pass of
+	# the stage's re-sends, and the disconnects run off the pass under its
+	# trace id (CN10), so every command cn2 runs after a mark taken here is
+	# under the stage's trace id: cn2 runs nothing by itself (dnagent.md
+	# SH31). The order is read from every command after the mark.
 	mark=$(helper 2 cn_log_lines)
 	out=$(cn_syncup_cntlr 2 "$req2" --expect-code 4 || true)
 	[ -n "$out" ] ||
@@ -8668,7 +8828,11 @@ case_clone_xfer() {
 		"clone_xfer: cn2 holds no controller of the source connection"
 	assert_eq "$(helper 2 "ctrl_of '$legnqn' '${IP[2]}'")" none \
 		"clone_xfer: cn2 holds no controller of the clone meta group's leg"
-	seq=$(helper 2 "cn_cmds_since $mark ''" | cut -d' ' -f2-)
+	cmds=$(helper 2 "cn_cmds_since $mark ''")
+	[ -z "$(printf '%s\n' "$cmds" | grep -v "^$TRACE " || true)" ] ||
+		die "clone_xfer finalize: cn2 ran commands under trace ids of its" \
+			"own: $cmds"
+	seq=$(printf '%s\n' "$cmds" | cut -d' ' -f2-)
 	assert_before "$seq" "^dmsetup reload $nsdev2 " "^dmsetup remove $clonedm\$" \
 		"clone_xfer: the ns-dev leaves the clone before the clone goes"
 	# The dm-clone goes before its clone meta group, which its removal writes

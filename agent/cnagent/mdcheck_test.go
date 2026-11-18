@@ -1,9 +1,11 @@
 package cnagent
 
 import (
+	"errors"
+	"fmt"
+	"slices"
 	"strings"
 	"testing"
-	"time"
 
 	"github.com/distributed-nvme/distributed-nvme/pb"
 )
@@ -311,7 +313,6 @@ func TestMdCheckLeavesAnAdoptedCheckAndStopsAnUnsuitedGroup(t *testing.T) {
 		}
 		f.node.Reset()
 		fresh := newCnServer(f.node)
-		fresh.retryInterval = time.Hour
 		reconcileForTest(t, fresh)
 		for _, write := range syncActionWrites(f) {
 			if write == mdActionCheck {
@@ -337,4 +338,305 @@ func TestMdCheckLeavesAnAdoptedCheckAndStopsAnUnsuitedGroup(t *testing.T) {
 			t.Fatalf("after the level: done %d, want 0", got)
 		}
 	})
+}
+
+// TestAnMdCheckADeliveringConvergeSkippedIsNamed: the SyncupCntlr that
+// delivers a group's md check request meets an array read that does not
+// answer, so its pass leaves the group's row ERROR and steps no check (CN12,
+// The md check). A read then finds the array running, its row OK, and names
+// the group's md check where a converge would act on it (mdCheckDue): a
+// start over an idle array that runs whole, an adoption of a check md
+// already runs, and a stop of a check md runs on a degraded array. The one
+// re-send that name brings acts, and the read after it names nothing.
+func TestAnMdCheckADeliveringConvergeSkippedIsNamed(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		read string
+		// arm sets md's sync state before the delivering converge.
+		arm func(f *repFix)
+		// writes are the sync_action writes the re-send makes.
+		writes []string
+		// done sets md idle after the re-send and checks the request reads
+		// done, for an adoption, which writes nothing.
+		done bool
+	}{
+		{"a start, sync_action unread", "/md/sync_action", nil,
+			[]string{mdActionCheck}, false},
+		{"a start, degraded unread", "/md/degraded", nil,
+			[]string{mdActionCheck}, false},
+		{"an adoption", "/md/degraded", func(f *repFix) {
+			f.node.setMdSync(f.mdDev, 0, mdActionCheck, "10 / 100")
+		}, nil, true},
+		{"a stop", "/md/sync_completed", func(f *repFix) {
+			f.node.setMdSync(f.mdDev, 1, mdActionCheck, "10 / 100")
+		}, []string{mdActionIdle}, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newRepFix(t, allLegs...)
+			f.syncup(t, quietLevel(3))
+			if tc.arm != nil {
+				tc.arm(f)
+			}
+			f.node.Reset()
+			f.node.mu.Lock()
+			f.node.killReadAlways[tc.read] = true
+			f.node.mu.Unlock()
+			held := withMdCheck(quietLevel(4), 1000)
+			reply, err := f.srv.SyncupCntlr(f.ctx, held)
+			if err != nil {
+				t.Fatalf("SyncupCntlr: %v", err)
+			}
+			f.node.mu.Lock()
+			clear(f.node.killReadAlways)
+			f.node.mu.Unlock()
+			if row := reply.GetCntlrInfo().GetGrpIdToMdRaid()[testDataGrp]; row.
+				GetStatus() != pb.ResStatus_RES_STATUS_ERROR {
+				t.Fatalf("fixture is wrong: the delivering converge's group "+
+					"row = %v", row)
+			}
+			if got := syncActionWrites(f); len(got) != 0 {
+				t.Fatalf("fixture is wrong: the delivering converge wrote "+
+					"%v", got)
+			}
+			named := fmt.Sprintf("md check of group %#x: %v", testDataGrp,
+				errMdCheckDue)
+			f.node.Reset()
+			f.node.forgetTraces()
+			round, resent := resendRound(t, f.srv, held, "named")
+			assertCodeNames(t, "the read after the converge", round, named)
+			if resent == nil {
+				t.Fatalf("the round that names the md check brought no " +
+					"re-send")
+			}
+			// The fake files a write by its path, not by trace id; the
+			// round's read writes nothing, so the writes are the re-send's.
+			if got := syncActionWrites(f); !slices.Equal(got, tc.writes) {
+				t.Fatalf("the re-send wrote sync_action %q, want %q", got,
+					tc.writes)
+			}
+			round, resent = resendRound(t, f.srv, held, "after")
+			assertRowNotNamed(t, round.GetAgentReply(), "the read after the "+
+				"re-send", fmt.Sprintf("md check of group %#x", testDataGrp))
+			if resent != nil && strings.Contains(
+				round.GetAgentReply().GetDetails(), "md check") {
+				t.Errorf("the round after the re-send re-sent for the md " +
+					"check")
+			}
+			if tc.done {
+				f.node.setMdSync(f.mdDev, 0, mdActionIdle, "none")
+				if read, _ := f.read(t, 4); mdDoneOf(read) != 1000 {
+					t.Fatalf("the adopted check reads done %d, want 1000",
+						mdDoneOf(read))
+				}
+			}
+			assertNothingRunsBetweenCalls(t, f.node, "named", "after")
+		})
+	}
+}
+
+// TestMdCheckLeavesAReadOnlyArrayAlone: md takes a "check" written to the
+// sync_action of an array it holds read-only and starts nothing, so a start
+// there would be decided again on every pass. Neither a converge nor a read
+// acts on a request over a read-only array (mdCheckable): the converge
+// writes nothing, and the read names nothing.
+func TestMdCheckLeavesAReadOnlyArrayAlone(t *testing.T) {
+	f := newRepFix(t, allLegs...)
+	f.syncup(t, quietLevel(3))
+	f.node.setArrayState(f.mdDev, mdStateReadonly)
+	f.node.Reset()
+	held := withMdCheck(quietLevel(4), 1000)
+	if reply, err := f.srv.SyncupCntlr(f.ctx, held); err != nil {
+		t.Fatalf("SyncupCntlr: %v", err)
+	} else if row := reply.GetCntlrInfo().GetGrpIdToMdRaid()[testDataGrp]; row.
+		GetStatus() != pb.ResStatus_RES_STATUS_OK {
+		t.Fatalf("fixture is wrong: the read-only array's row = %v", row)
+	}
+	if got := syncActionWrites(f); len(got) != 0 {
+		t.Fatalf("the converge wrote sync_action %q over a read-only array",
+			got)
+	}
+	_, verdict := f.read(t, 4)
+	assertRowNotNamed(t, verdict, "the read over a read-only array",
+		fmt.Sprintf("md check of group %#x", testDataGrp))
+	// Positive control: the same array read-write gets the check.
+	f.node.setArrayState(f.mdDev, "clean")
+	f.node.Reset()
+	if _, err := f.srv.SyncupCntlr(f.ctx, held); err != nil {
+		t.Fatalf("SyncupCntlr: %v", err)
+	}
+	if got := syncActionWrites(f); !slices.Equal(got,
+		[]string{mdActionCheck}) {
+		t.Fatalf("the read-write array got sync_action writes %q, want "+
+			"one check", got)
+	}
+}
+
+// TestAnMdCheckOverAReconciliationThatFailsIsSteppedByTheResend: the
+// converge's member reconciliation of a group whose array runs keeps failing
+// — a take-back repair's new leg whose superblock read does not answer, its
+// row PENDING, OK or ERROR as a stalled leg's prober leaves it, or an extra
+// member whose --fail md keeps refusing — and md then runs a check the group
+// does not suit (an open repair). A read names the check's stop (mdCheckDue);
+// the converge still steps the check over the array its pass read
+// (ensureGroup), so the one re-send that name brings writes idle, and the
+// read after it names the check no more.
+func TestAnMdCheckOverAReconciliationThatFailsIsSteppedByTheResend(
+	t *testing.T,
+) {
+	type shape struct {
+		name string
+		// arm builds the failing reconciliation and returns the request.
+		arm func(t *testing.T, f *repFix) *pb.SyncupCntlrRequest
+		// after runs once the delivering converge returned.
+		after func(t *testing.T, f *repFix)
+	}
+	stalledTakeBack := func(t *testing.T, f *repFix) *pb.SyncupCntlrRequest {
+		f.badLegDead()
+		f.node.setSuperblock(f.leg2, fakeSuperblock{
+			role: "Active device 1", events: 10})
+		f.node.setSuperblock(f.newLegDev, fakeSuperblock{events: 50})
+		f.node.mu.Lock()
+		f.node.killCmdAlways[examineOf(f.newLegDev)] = true
+		f.node.mu.Unlock()
+		return withMdCheck(
+			takenBackReq(3, pb.RepStage_REP_STAGE_CREATED, false), 1000)
+	}
+	for _, tc := range []shape{
+		{"a stalled take-back leg, its row PENDING", stalledTakeBack, nil},
+		{"a stalled take-back leg, its row OK", stalledTakeBack,
+			func(t *testing.T, f *repFix) { probeLegs(t, f.srv, repNewLeg) }},
+		{"a stalled take-back leg, its row ERROR", stalledTakeBack,
+			func(t *testing.T, f *repFix) {
+				st := legState(t, f.srv)
+				f.srv.mu.Lock()
+				prober := st.probers[repNewLeg]
+				f.srv.mu.Unlock()
+				if prober == nil {
+					t.Fatalf("no prober for the new leg")
+				}
+				prober.begin(f.srv.now())
+				prober.finish(errors.New("probe stalled"))
+			}},
+		{"an extra whose --fail md refuses", func(t *testing.T,
+			f *repFix) *pb.SyncupCntlrRequest {
+			f.plantAbortedExtra(t)
+			f.node.mu.Lock()
+			f.node.failCmdAlways["mdadm "+f.mdDev+" --fail "+f.newLegDev] =
+				"mdadm: set device faulty failed"
+			f.node.mu.Unlock()
+			return withMdCheck(abortedReq(4), 1000)
+		}, nil},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newRepFix(t, allLegs...)
+			held := tc.arm(t, f)
+			f.node.Reset()
+			reply, err := f.srv.SyncupCntlr(f.ctx, held)
+			if err != nil {
+				t.Fatalf("SyncupCntlr: %v", err)
+			}
+			if row := reply.GetCntlrInfo().GetGrpIdToMdRaid()[testDataGrp]; row.
+				GetStatus() != pb.ResStatus_RES_STATUS_ERROR {
+				t.Fatalf("fixture is wrong: the converge's group row = %v",
+					row)
+			}
+			if tc.after != nil {
+				tc.after(t, f)
+			}
+			// md starts a check of its own over the group the open repair
+			// keeps from suiting one.
+			f.node.setMdSync(f.mdDev, 0, mdActionCheck, "10 / 100")
+			named := fmt.Sprintf("md check of group %#x", testDataGrp)
+			f.node.Reset()
+			f.node.forgetTraces()
+			round, resent := resendRound(t, f.srv, held, "named")
+			assertCodeNames(t, "the read while md checks", round, named)
+			if resent == nil {
+				t.Fatalf("the round that names the md check brought no " +
+					"re-send")
+			}
+			if row := resent.GetCntlrInfo().GetGrpIdToMdRaid()[testDataGrp]; row.
+				GetStatus() != pb.ResStatus_RES_STATUS_ERROR {
+				t.Fatalf("fixture is wrong: the re-send's group row = %v",
+					row)
+			}
+			if got := syncActionWrites(f); !slices.Equal(got,
+				[]string{mdActionIdle}) {
+				t.Fatalf("the re-send wrote sync_action %q, want one %q",
+					got, mdActionIdle)
+			}
+			round, _ = resendRound(t, f.srv, held, "after")
+			assertRowNotNamed(t, round.GetAgentReply(), "the read after the "+
+				"re-send", named)
+			assertNothingRunsBetweenCalls(t, f.node, "named", "after")
+		})
+	}
+}
+
+// TestAnMdCheckIsLeftAloneWhileTheInSyncGuardHolds: while the in-sync guard
+// holds over a running array (CN12, Member reconciliation) — the member that
+// leaves is the only one in sync on a leg that serves — the converge steps
+// no md check beside the guard's error (inSyncGuardError) and a read, whose
+// group row reads the same error, names none: the members md shows in sync
+// there may be on legs that do not serve.
+func TestAnMdCheckIsLeftAloneWhileTheInSyncGuardHolds(t *testing.T) {
+	f := newRepFix(t, allLegs...)
+	f.plantAbortedExtra(t)
+	probeAllLegs(t, f.srv)
+	f.legDead(testDataLeg2, testIp2, testSvcId2)
+	f.node.setMdSync(f.mdDev, 0, mdActionCheck, "10 / 100")
+	held := withMdCheck(abortedReq(4), 1000)
+	f.node.Reset()
+	reply, err := f.srv.SyncupCntlr(f.ctx, held)
+	if err != nil {
+		t.Fatalf("SyncupCntlr: %v", err)
+	}
+	if row := reply.GetCntlrInfo().GetGrpIdToMdRaid()[testDataGrp]; !strings.
+		Contains(row.GetDetails(), "left the group but is not failed") {
+		t.Fatalf("fixture is wrong: the converge's group row = %v", row)
+	}
+	if got := syncActionWrites(f); len(got) != 0 {
+		t.Fatalf("the converge wrote sync_action %q while the guard holds",
+			got)
+	}
+	_, verdict := f.read(t, 4)
+	assertRowNotNamed(t, verdict, "the read while the guard holds",
+		fmt.Sprintf("md check of group %#x", testDataGrp))
+}
+
+// TestAnMdCheckStepReadsTheArrayAgainAfterAMemberCommand: the member
+// reconciliation fails an extra member (--fail goes through) and then fails
+// itself, md refusing the extra's --remove. The step over the failed
+// reconciliation decides over the array read again after the fail
+// (arrayAfter), which holds the extra faulty, so it starts no check though a
+// request stands and the group suits one; a step over the array as read
+// before the fail would start one over an array that is not whole. The read
+// after it names no md check either.
+func TestAnMdCheckStepReadsTheArrayAgainAfterAMemberCommand(t *testing.T) {
+	f := newRepFix(t, allLegs...)
+	f.plantAbortedExtra(t)
+	f.node.mu.Lock()
+	f.node.failCmdAlways["mdadm "+f.mdDev+" --remove "+f.newLegDev] =
+		"mdadm: hot remove failed: Device or resource busy"
+	f.node.mu.Unlock()
+	held := withMdCheck(noRepairReq(4), 1000)
+	f.node.Reset()
+	reply, err := f.srv.SyncupCntlr(f.ctx, held)
+	if err != nil {
+		t.Fatalf("SyncupCntlr: %v", err)
+	}
+	if row := reply.GetCntlrInfo().GetGrpIdToMdRaid()[testDataGrp]; row.
+		GetStatus() != pb.ResStatus_RES_STATUS_ERROR {
+		t.Fatalf("fixture is wrong: the converge's group row = %v", row)
+	}
+	if !f.node.hasCall(f.fail(f.newLegDev)) {
+		t.Fatalf("fixture is wrong: the extra was not failed")
+	}
+	if got := syncActionWrites(f); len(got) != 0 {
+		t.Fatalf("the step wrote sync_action %q over an array whose extra "+
+			"the pass failed", got)
+	}
+	_, verdict := f.read(t, 4)
+	assertRowNotNamed(t, verdict, "the read after the converge",
+		fmt.Sprintf("md check of group %#x", testDataGrp))
 }

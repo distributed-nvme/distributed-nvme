@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"strings"
 	"testing"
-	"time"
 
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
@@ -562,19 +561,17 @@ func TestCloneMetaGroupSweptWithItsClone(t *testing.T) {
 // was failed and removed — reads the group ERROR, so the
 // group is not ready for that pass (CN18 step 2). A dm-clone an earlier pass
 // built over the running array is left as it is and serves on: its row OK,
-// the namespace optimized over it, and, as for a slice's group, the failure
-// registers no CN10 retry (CN12). With no dm-clone there, the same failure
-// builds none: the clone's row reads MISSING naming the group, the namespace
-// waits parked and inaccessible, and the retry is registered. Step 2
-// registers it itself: with the namespace effectively suspended — its
-// stored flag set, the clone's auto_resume off — CN16 parks it whatever the
-// clone does and its desired group is inaccessible, so no namespace waits on
-// the dm-clone, and the retry is still registered, since the copy itself
-// waits for the dm-clone. The converge's reply names no dm-clone, since its
-// group's row is not OK; a read, whose group row reads the running array OK,
-// names the missing dm-clone (CN30), so the worker re-sends on the rounds
-// that answer from a read, and each such converge refuses again (cnagent.md,
-// Known limits).
+// the namespace optimized over it, and no channel names the dm-clone. With
+// no dm-clone there, the same failure builds none: the clone's row reads
+// MISSING naming the group, and the namespace waits parked and
+// inaccessible — or, effectively suspended (its stored flag set, the
+// clone's auto_resume off), stays parked with its desired group
+// inaccessible, the copy itself still waiting for the dm-clone. The
+// converge's reply names no dm-clone, since its group's row is not OK; a
+// read, whose group row reads the running array OK, names the missing
+// dm-clone (CN30), so the worker re-sends on the rounds that answer from a
+// read, and each such converge refuses again (cnagent.md, Known limits).
+// Once md takes the add, the re-send a read brings builds the dm-clone.
 func TestAFailedReconciliationUnderACloneMetaGroup(t *testing.T) {
 	for _, tc := range []struct {
 		name      string
@@ -587,7 +584,6 @@ func TestAFailedReconciliationUnderACloneMetaGroup(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			srv, node := newTestServer(t)
-			srv.retryInterval = time.Hour
 			clone := cloneWithGrp(true)
 			clone.AutoResume = !tc.suspended
 			syncupBoth(t, srv, reqOpts{revision: 2, primary: true,
@@ -643,10 +639,6 @@ func TestAFailedReconciliationUnderACloneMetaGroup(t *testing.T) {
 				}
 				assertAna(t, node, testNqn, "1",
 					"the namespace over the serving dm-clone")
-				if retrying(t, srv) {
-					t.Fatalf("a failed reconciliation under a serving " +
-						"dm-clone registered the retry")
-				}
 				return
 			}
 			assertMissing(t, row, "the dm row with no dm-clone")
@@ -663,10 +655,44 @@ func TestAFailedReconciliationUnderACloneMetaGroup(t *testing.T) {
 				"the namespace with no dm-clone")
 			assertAna(t, node, testNqn, "3",
 				"the namespace with no dm-clone")
-			if !retrying(t, srv) {
-				t.Fatalf("a clone meta group not ready under no dm-clone " +
-					"registered no retry")
+
+			// The read names the dm-clone, and the re-send it brings meets
+			// md's refusal again: it builds no dm-clone, and its reply
+			// names none.
+			held := cntlrReq(reqOpts{revision: 3, primary: true,
+				raid1: true, suspended: tc.suspended,
+				clones:  []*pb.Clone{repaired},
+				repairs: withCloneRepair(repaired, true)})
+			node.Reset()
+			round, resent := resendRound(t, srv, held, "refused")
+			assertCodeNames(t, "the read with the add refused", round,
+				rowNamed(dmClone, "absent"))
+			if resent == nil {
+				t.Fatalf("the round that names the dm-clone brought no " +
+					"re-send")
 			}
+			assertNoCall(t, node, "cmd dmsetup create "+dmClone)
+			assertRowNotNamed(t, resent.GetAgentReply(),
+				"the re-send with the add refused", dmClone)
+
+			// md takes the add: the read names the dm-clone, and the
+			// re-send builds it under the round's trace id.
+			delete(node.failCmdAlways, "mdadm "+cloneMdPath(srv)+
+				" --add --failfast "+newLeg)
+			node.Reset()
+			round, resent = resendRound(t, srv, held, "taken")
+			assertCodeNames(t, "the read with the add taken", round,
+				rowNamed(dmClone, "absent"))
+			if resent == nil {
+				t.Fatalf("the round that names the dm-clone brought no " +
+					"re-send")
+			}
+			if !tracedCall(node, "taken", "dmsetup create "+dmClone) {
+				t.Fatalf("the re-send did not create the dm-clone under " +
+					"the round's trace id")
+			}
+			assertRowNotNamed(t, rowRound(t, srv, 3).GetAgentReply(),
+				"the read after the re-send", dmClone)
 		})
 	}
 }
@@ -765,8 +791,9 @@ func assertHydrated(t *testing.T, row *pb.ResInfo, count uint64, label string) {
 // has a leg_list side zeroing is deferred as a clone whose destination still
 // provisions is (CN18, [D15]): no source connect and no dm-clone, its two
 // rows and its destination's namespace rows PROVISIONING on both channels,
-// the namespace inaccessible over the td's dm-error, and no retry. The
-// provisioned flip, a new revision, builds the group and the clone in one
+// the namespace inaccessible over the td's dm-error, and a read names
+// nothing, so nothing runs between the worker's calls. The provisioned
+// flip, a new revision, builds the group and the clone in one
 // pass and moves the namespace optimized. At raid1, where a repair can
 // replace a leg (architecture.md, Repairs), a repair's new leg that zeroes
 // defers nothing.
@@ -774,7 +801,6 @@ func TestACloneWaitsForItsCloneMetaGroup(t *testing.T) {
 	for _, raid1 := range []bool{false, true} {
 		t.Run(fmt.Sprintf("raid1=%v", raid1), func(t *testing.T) {
 			srv, node := newTestServer(t)
-			srv.retryInterval = time.Hour
 			clone := cloneWithGrp(raid1)
 			zeroing := clone.MetaGrp.LegList[len(clone.MetaGrp.LegList)-1]
 			zeroing.SideList[0].Provisioned = false
@@ -802,11 +828,16 @@ func TestACloneWaitsForItsCloneMetaGroup(t *testing.T) {
 			assertAna(t, node, testNqn, "3", "the deferred clone")
 			// A deferred clone builds nothing, so nothing of it is named
 			// (CN30): its source is not looked up and its dm-clone waits.
-			assertRowVerdict(t, rowRound(t, srv, 2).GetAgentReply(),
+			node.forgetTraces()
+			round, resent := resendRound(t, srv, cntlrReq(reqOpts{
+				revision: 2, primary: true, raid1: raid1,
+				clones: []*pb.Clone{clone}}), "deferred")
+			assertRowVerdict(t, round.GetAgentReply(),
 				"a read of the deferred clone")
-			if retrying(t, srv) {
-				t.Fatalf("a deferred clone registered the retry")
+			if resent != nil {
+				t.Fatalf("the read of the deferred clone brought a re-send")
 			}
+			assertNothingRunsBetweenCalls(t, node, "deferred")
 
 			node.Reset()
 			clone = cloneWithGrp(raid1)
@@ -855,7 +886,6 @@ func TestACloneMetaGroupThatProvisionsDefersOnlyItsNamespaces(t *testing.T) {
 	}
 	t.Run("at SP_LEVEL_NO_CLONE", func(t *testing.T) {
 		srv, node := newTestServer(t)
-		srv.retryInterval = time.Hour
 		reply := syncupBoth(t, srv, reqOpts{revision: 2, primary: true,
 			level:  pb.SpLevel_SP_LEVEL_NO_CLONE,
 			clones: []*pb.Clone{zeroingClone()}})
@@ -899,7 +929,6 @@ func TestACloneMetaGroupThatProvisionsDefersOnlyItsNamespaces(t *testing.T) {
 	})
 	t.Run("a transfer of the destination namespace", func(t *testing.T) {
 		srv, node := newTestServer(t)
-		srv.retryInterval = time.Hour
 		xfers := []*pb.Transfer{
 			{XferId: testXfer, OriNqn: testNqn, OriNsIdx: 1}}
 		reply := syncupBoth(t, srv, reqOpts{revision: 2, primary: true,
@@ -957,7 +986,6 @@ func TestAFailoverBuildsTheCloneOverItsCloneMetaGroup(t *testing.T) {
 	for _, raid1 := range []bool{false, true} {
 		t.Run(fmt.Sprintf("raid1=%v", raid1), func(t *testing.T) {
 			srv, node := newTestServer(t)
-			srv.retryInterval = time.Hour
 			ctx := context.Background()
 			opts := func(revision uint64, primary bool) reqOpts {
 				return reqOpts{revision: revision, primary: primary,
@@ -1063,8 +1091,9 @@ func TestAnAgentRestartKeepsTheClone(t *testing.T) {
 // namespace waits inaccessible over the td's dm-error, and its dm row reads
 // ERROR naming the mode on both channels. No channel names the dm-clone
 // (CN30): no converge cures that mode, so a name would bring a SyncupCntlr
-// on every round for a converge that changes nothing. The retry is still
-// registered.
+// on every round for a converge that changes nothing. Nothing runs between
+// the worker's calls either: the dm-clone costs no converge until a new
+// revision.
 func TestABrokenMetadataModeIsLeftAsItIs(t *testing.T) {
 	for _, tc := range []struct {
 		mode, details string
@@ -1074,7 +1103,6 @@ func TestABrokenMetadataModeIsLeftAsItIs(t *testing.T) {
 	} {
 		t.Run(tc.mode, func(t *testing.T) {
 			srv, node := newTestServer(t)
-			srv.retryInterval = time.Hour
 			opts := reqOpts{revision: 2, primary: true, raid1: true,
 				clones: []*pb.Clone{cloneOf()}}
 			syncupBoth(t, srv, opts)
@@ -1108,10 +1136,17 @@ func TestABrokenMetadataModeIsLeftAsItIs(t *testing.T) {
 			assertRowVerdict(t, reply.GetAgentReply(), "the converge")
 			assertRowVerdict(t, rowRound(t, srv, 3).GetAgentReply(),
 				"the read")
-			if !retrying(t, srv) {
-				t.Fatalf("a dm-clone that does not serve registered no " +
-					"retry")
+			node.forgetTraces()
+			node.Reset()
+			for _, id := range []string{"broken-1", "broken-2"} {
+				round, resent := resendRound(t, srv, cntlrReq(opts), id)
+				assertRowVerdict(t, round.GetAgentReply(), id)
+				if resent != nil {
+					t.Fatalf("%s brought a re-send", id)
+				}
 			}
+			assertNothingRunsBetweenCalls(t, node, "broken-1", "broken-2")
+			assertNoCall(t, node, "cmd dmsetup message "+clone)
 		})
 	}
 }
@@ -1123,7 +1158,6 @@ func TestABrokenMetadataModeIsLeftAsItIs(t *testing.T) {
 // clone's record stays in the request, on a converge and a read alike.
 func TestATransferOfAVolumeACloneFillsWaits(t *testing.T) {
 	srv, node := newTestServer(t)
-	srv.retryInterval = time.Hour
 	xfers := []*pb.Transfer{{XferId: testXfer, OriNqn: testNqn, OriNsIdx: 1}}
 	reply := syncupBoth(t, srv, reqOpts{revision: 2, primary: true,
 		clones: []*pb.Clone{cloneOf()}, xfers: xfers})
@@ -1156,7 +1190,6 @@ func TestATransferOfAVolumeACloneFillsWaits(t *testing.T) {
 // holes below the dm-clone.
 func TestATransferThatServedStopsWhenACloneFillsItsVolume(t *testing.T) {
 	srv, node := newTestServer(t)
-	srv.retryInterval = time.Hour
 	xfers := []*pb.Transfer{{XferId: testXfer, OriNqn: testNqn, OriNsIdx: 1}}
 	reply := syncupBoth(t, srv, reqOpts{revision: 2, primary: true,
 		xfers: xfers})

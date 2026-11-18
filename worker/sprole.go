@@ -4691,7 +4691,7 @@ func (d *cntlrDriver) observe(ctx context.Context, r *replyState) {
 	// report must show the stack built (primaryShapeBuilt): a new SP's primary
 	// reports its pools and what is over them PROVISIONING, clean, until its
 	// sides are zeroed, and a background read between a converge that left
-	// members unavailable and the retry that builds over them reports the
+	// members unavailable and the re-send that builds over them reports the
 	// unbuilt devices MISSING to the rounds that answer from it, clean too
 	// when the SP has no td; settling on either
 	// would leave the build that follows to primary_unhealthy.

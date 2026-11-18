@@ -185,8 +185,9 @@ func (s *CnAgentServer) rewalk(ctx context.Context, pw *passWalk) {
 // again beside the live controllers, which the host refuses, and the probe
 // rows read the connection missing. So the lookup fails for the pass, naming
 // the read, and its caller fails the leg or the clone source as it fails any
-// other step of it, which registers the retry. So does a listing of the
-// matching entry's own directory that fails, whatever the failure: its
+// other step of it, and a read names nothing on that answer. So does a
+// listing of the matching entry's own directory that fails, whatever the
+// failure: its
 // controllers and namespace are unread; and a read of the namespace's nsid
 // with no node picked, or of a controller's state, directory or path
 // ana_state, that did not answer. A match is the answer even beside a
@@ -294,23 +295,23 @@ func (s *CnAgentServer) lookupSubsys(
 // clone's clone meta group — a repair's new legs included, at every stage
 // of the repair, both roles. It reports
 // which legs are **available** (cnagent.md CN12), which is what the assembly
-// needs, records each leg's ResInfo and a two-sided leg's path rows
-// (legPathRows), and says
-// whether any leg failed to converge — its connect, a controller's address
-// read that did not answer, its multipath namespace or its wrapper — which
-// registers the cntlr for the background retry (build registers it too for a
-// group's leg_list member that is not available, other than an open repair's
-// bad leg while the group's array runs, CN12). budget is the pass's one CN10
-// wait budget, shared by every leg and by the clone sources after them.
+// needs, and records each leg's ResInfo and a two-sided leg's path rows
+// (legPathRows). A leg that failed to converge — its connect, a
+// controller's address read that did not answer, its multipath namespace or
+// its wrapper — goes to its row, and nothing here runs the converge again:
+// a cntlr's read names each side a converge would connect and each wrapper
+// a converge would change (sidesToConnect, wrapperName; cnagent.md CN30),
+// and the worker re-sends the request on that name (dnv-worker.md RW4).
+// budget is the pass's one CN10 wait budget, shared by every leg and by the
+// clone sources after them.
 func (s *CnAgentServer) ensureLegs(
 	ctx context.Context,
 	st *cntlrState,
 	plan *cntlrPlan,
 	info *pb.CntlrInfo,
 	budget *agent.WaitBudget,
-) (map[uint64]bool, bool) {
+) map[uint64]bool {
 	available := make(map[uint64]bool, len(plan.legs))
-	retryNeeded := false
 	for _, lp := range plan.legs {
 		if lp.provisioning {
 			// [D15]: every side is still zeroing, so the DN exports nothing —
@@ -334,8 +335,9 @@ func (s *CnAgentServer) ensureLegs(
 		if err != nil {
 			info.LegIdToLeg[lp.legId] = st.tracker.Err(
 				resKeyOf(resKeyLegFmt, lp.legId), lp.name, err.Error())
-			s.startConnectRetry(st, plan)
-			retryNeeded = true
+			if plan.primary {
+				s.keepLegProber(ctx, st, plan, lp)
+			}
 			continue
 		}
 		available[lp.legId] = view.available()
@@ -344,7 +346,42 @@ func (s *CnAgentServer) ensureLegs(
 		}
 		info.LegIdToLeg[lp.legId] = s.legInfo(ctx, st, plan, lp, view, nil)
 	}
-	return available, retryNeeded
+	return available
+}
+
+// keepLegProber starts a primary leg's prober (CN11) after a pass whose
+// ensureLeg failed, when the leg has none, no sweep is disconnecting its
+// subsystem, and its wrapper is there as the leg's whole-size dm-linear,
+// resumed and writable: two dm reads, made only for a leg with no prober.
+// The prober needs only the wrapper's path, takes no lock and needs no
+// converge, so a leg whose wrapper an earlier pass built is probed whatever
+// stopped this pass — a lookup that did not answer, a head number read that
+// failed — and its row says how the leg serves, where it would otherwise
+// read PENDING with no converge to come (cnagent.md CN11). A wrapper over a
+// head the kernel replaced fails its probe, which is the leg's truth, and a
+// read names that wrapper once a lookup answers (wrapperName). A wrapper
+// that is absent, of another shape, suspended or read-only, or whose read
+// did not answer, gets no prober: a probe through it would fail or hang for
+// a reason the leg's paths do not have, and the early fail would count it
+// (CN12).
+func (s *CnAgentServer) keepLegProber(
+	ctx context.Context,
+	st *cntlrState,
+	plan *cntlrPlan,
+	lp *legPlan,
+) {
+	s.mu.Lock()
+	_, running := st.probers[lp.legId]
+	s.mu.Unlock()
+	if running || s.disconnectInFlight(lp.nqn) {
+		return
+	}
+	shape, err := s.dmShapeOf(ctx, nil, lp.name, "linear", lp.sectors, nil,
+		argCmpAny, true)
+	if err != nil || shape != dmShapeWanted {
+		return
+	}
+	s.startLegProber(st, plan, lp)
 }
 
 // ensureLeg connects every side of one leg and builds its wrapper. All sides
@@ -361,7 +398,9 @@ func (s *CnAgentServer) ensureLegs(
 // fails the leg at once with its own error, and a head wait returns what
 // its last lookup read: a picked head that is not complete is used as it is,
 // and a step after the wait that fails fails the leg with its own error.
-// Either way ensureLegs registers the background retry. Each connect marks
+// Either way a later read names what a converge would still do: each side
+// with no controller (sidesToConnect) and the wrapper (wrapperName;
+// cnagent.md CN30). Each connect marks
 // the pass's walk stale first, so the lookup after it walks again: the
 // subsystem it made may have taken the number of an entry freed since the
 // walk.
@@ -414,8 +453,9 @@ func (s *CnAgentServer) ensureLeg(
 	}
 	s.disconnectDeadPaths(ctx, lp, view)
 	// CN10: unknown, never unwanted — disconnectDeadPaths passed over it, and
-	// the leg fails for the pass, which registers the retry that reads it
-	// again. After a connect this pass made, this is the re-read view.
+	// the leg fails for the pass; a later read judges the leg again once the
+	// address answers. After a connect this pass made, this is the re-read
+	// view.
 	if err := wrapperUnder(lp, view); err != nil {
 		return nil, err
 	}
@@ -865,8 +905,7 @@ func (s *CnAgentServer) connectWithin(
 // — while the entry it found stands; a lookup that finds no entry, or whose
 // entry fails the subsysnqn check, marks the walk stale again, so the next
 // one walks. A lookup that did not answer ends the wait with its error
-// (lookupSubsys), which fails the leg or the clone source for the pass and
-// registers the retry.
+// (lookupSubsys), which fails the leg or the clone source for the pass.
 func (s *CnAgentServer) awaitNsHead(
 	ctx context.Context,
 	budget *agent.WaitBudget,
@@ -1286,140 +1325,17 @@ func detailsDisconnectInFlight(nqn string) string {
 // would find at a wanted address — and adopt, since they connect only the
 // addresses that have none — is about to go, taking the device a leg wrapper
 // or a dm-clone would be built on with it. A step that finds one in flight
-// fails for the pass, which registers the CN10/CN18 connect retry, and the
-// first pass after the goroutine has gone takes a walk of its own, reads the
-// subsystem's entry, directory and controllers at its lookup, and connects
-// whatever is missing. The CN28 probe asks it too, so a read reports that
-// step the way the converge does.
+// fails for the pass. Once the goroutine has gone, a cntlr's read names each
+// side, or clone source endpoint, the subsystem holds no controller for
+// (sidesToConnect, cloneSource.toName; cnagent.md CN30), the worker re-sends
+// the request (dnv-worker.md RW4), and that converge takes a walk of its
+// own, reads the subsystem's entry, directory and controllers at its lookup,
+// and connects whatever is missing. The CN28 probe asks it too, so a read
+// reports that step the way the converge does and names nothing for the
+// subsystem while the disconnect runs.
 func (s *CnAgentServer) disconnectInFlight(nqn string) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	_, ok := s.disconnecting[nqn]
 	return ok
-}
-
-// ---------------------------------------------------------------------------
-// CN10/CN18 background connect retry
-// ---------------------------------------------------------------------------
-
-// startConnectRetry registers a cntlr for the CN10 background retry: a leg or
-// a clone source failed to converge (CN10/CN18), a clone's clone meta group
-// was not ready while no dm-clone of the clone served or a later step of a
-// clone stopped the build (CN18 says which), a group's leg_list holds a
-// member that is not available, other than an open repair's bad leg while
-// the group's array runs, a forced start waits for a member that is not
-// available, a forced start ends the pass in any other error, a read of a
-// group's array before its forced start fails while the group's mark
-// stands, or the group's mark stands over an array the pass found running
-// and that no forced start of the pass started (CN12, grpPlan.markWaits,
-// markedErr),
-// the build failed to move the ANA group of a namespace or a transfer (CN16,
-// CN17), or the build left the device of a namespace or a transfer whose
-// desired group is optimized off what the desired state wants — held off
-// its td's raid0 (CN18), waiting on the dm-error, or after a failed step —
-// whatever the cause (CN16, CN17). A
-// goroutine re-runs the whole converge every CnConnectRetryInterval seconds
-// under the CN1 locks until a pass registers none of these (build's
-// stopConnectRetry) or the cntlr is torn down. The RPC itself retries a
-// connect, or waits for its namespace head, only as far as the pass's
-// CnConnectPassBudget allows: an in-pass retry, or a step of that wait,
-// starts only while the budget still covers its pause (connectWithin,
-// awaitNsHead).
-func (s *CnAgentServer) startConnectRetry(
-	st *cntlrState,
-	plan *cntlrPlan,
-) {
-	key := cntlrKey(plan.clusterId, plan.cnId, plan.spId, plan.cntlrId)
-	s.mu.Lock()
-	if st.retrying {
-		s.mu.Unlock()
-		return
-	}
-	ctx, cancel := context.WithCancel(s.rootCtx)
-	st.retrying = true
-	st.cancel = cancel
-	interval := s.retryInterval
-	s.mu.Unlock()
-	go s.connectRetryLoop(ctx, key, st, interval)
-}
-
-func (s *CnAgentServer) stopConnectRetry(st *cntlrState) {
-	s.mu.Lock()
-	cancel := st.cancel
-	st.cancel = nil
-	st.retrying = false
-	s.mu.Unlock()
-	if cancel != nil {
-		cancel()
-	}
-}
-
-// connectRetryLoop is the loop of the CN10 background retry: each tick
-// re-runs the cntlr's whole converge (reconvergeCntlr), until ctx — the
-// registration's own — is cancelled.
-func (s *CnAgentServer) connectRetryLoop(
-	ctx context.Context,
-	key string,
-	st *cntlrState,
-	interval time.Duration,
-) {
-	ticker := time.NewTicker(interval)
-	defer ticker.Stop()
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case <-ticker.C:
-		}
-		// The attempt runs on rootCtx, never on this loop's ctx. That ctx is
-		// what stopConnectRetry cancels, and a pass of this very loop can be
-		// the one that calls it: the pass that ends the retry deregisters
-		// it, so an attempt running on the loop's ctx would cancel ITSELF
-		// and fail every OS call left in its pass on the dead context, with
-		// the registration already cleared and nothing ticking again. Where
-		// a stop call happens to sit in a pass would then decide whether the
-		// rest of the pass runs; on rootCtx it never does. Cancelling
-		// therefore ends the LOOP, not the attempt: the ctx.Err() check
-		// below reads it, one tick late at worst. Shutdown still stops an
-		// attempt in flight: process exit cancels rootCtx (dnagent.md
-		// SH27).
-		s.reconvergeCntlr(s.rootCtx, key, st)
-		if ctx.Err() != nil || s.rootCtx.Err() != nil {
-			return
-		}
-	}
-}
-
-// reconvergeCntlr re-runs one cntlr's converge from a background goroutine
-// under the CN1 locks. Every attempt is its own traceable operation (SH2/CN2).
-//
-// The cntlr is checked under the node read lock and before its object lock
-// is taken: a cntlr dropped since the attempt was scheduled — the drop runs
-// under the node write lock and forgets the cntlr's lock entry
-// (dropCntlrState) — gets no new entry from an attempt that converges
-// nothing (dnagent.md, SH11). Nothing that drops or replaces a held cntlr
-// runs under the read lock — a SyncupCntlr makes a new state only for a key
-// that has none — so the state the check finds stays for the attempt. Once
-// it has found the cntlr the attempt marks its converge, before it waits for
-// the object lock, so no round starts a read while it waits or converges;
-// it ends the mark once it has stored its observation (dnagent.md SH28,
-// SH30).
-func (s *CnAgentServer) reconvergeCntlr(
-	ctx context.Context,
-	key string,
-	st *cntlrState,
-) {
-	attemptCtx := common.WithTraceId(ctx, common.NewTraceId())
-	s.locks.Node().RLock()
-	defer s.locks.Node().RUnlock()
-	if s.getCntlr(key) != st {
-		return
-	}
-	defer s.markConverge(key)()
-	objLock := s.locks.Obj(key)
-	objLock.Lock()
-	defer objLock.Unlock()
-	rev := st.loadReq().GetRevision()
-	info, sweep := s.convergeCntlr(attemptCtx, st)
-	s.storeCntlrObs(attemptCtx, st, rev, info, sweep.Reply())
 }

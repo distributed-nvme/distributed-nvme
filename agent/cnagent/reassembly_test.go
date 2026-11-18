@@ -6,6 +6,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/distributed-nvme/distributed-nvme/agent"
 	"github.com/distributed-nvme/distributed-nvme/pb"
 )
 
@@ -63,7 +64,10 @@ func TestABrokenArrayIsAssembledAgain(t *testing.T) {
 
 // TestABrokenArrayIsLeftAsItIs: each condition that leaves the broken array
 // as it is, with nothing stopped or assembled, the group's row naming why,
-// and the read naming nothing.
+// the read naming nothing and nothing running between the worker's calls.
+// A leg that does not serve is the one condition that ends by itself: once
+// its path is live again the read names the array, and the re-send on that
+// round assembles it again.
 func TestABrokenArrayIsLeftAsItIs(t *testing.T) {
 	for _, tc := range []struct {
 		name string
@@ -120,10 +124,11 @@ func TestABrokenArrayIsLeftAsItIs(t *testing.T) {
 		}, nil, ""},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			f, _ := brokenIdle(t)
+			f, node := brokenIdle(t)
 			if tc.setup != nil {
 				tc.setup(t, f)
 			}
+			f.node.forgetTraces()
 			req := quietLevel(4)
 			if tc.req != nil {
 				req = tc.req()
@@ -146,16 +151,28 @@ func TestABrokenArrayIsLeftAsItIs(t *testing.T) {
 				t.Errorf("the group's row: %v, want ERROR naming %q", row,
 					tc.why)
 			}
-			// A refusal is no build failure: only a late leg brings the
-			// CN10 retry.
-			if late := tc.name == "a leg does not serve"; retrying(t,
-				f.srv) != late {
-				t.Errorf("the retry registered: %v, want %v",
-					retrying(t, f.srv), late)
-			}
 			if _, reply := f.read(t, 4); strings.Contains(
 				reply.GetDetails(), "md_broken:") {
 				t.Errorf("the read names the array: %s", reply.GetDetails())
+			}
+			assertNothingRunsBetweenCalls(t, f.node)
+			if tc.name != "a leg does not serve" {
+				return
+			}
+			f.node.setCtrlState(legNqn(f.srv, testDataLeg2), testIp2,
+				testSvcId2, "live")
+			f.node.Reset()
+			round, resent := resendRound(t, f.srv, req, "named")
+			if !strings.Contains(round.GetAgentReply().GetDetails(),
+				agent.LeftoverKindMdBroken+":"+node) || resent == nil {
+				t.Fatalf("the round once the leg serves is %v, re-sent %v; "+
+					"want the broken array named and a re-send",
+					round.GetAgentReply(), resent != nil)
+			}
+			assertOrder(t, f.node, "cmd mdadm --stop "+node,
+				"cmd mdadm --assemble "+f.mdDev)
+			if !tracedCall(f.node, "named", "cmd mdadm --stop "+node) {
+				t.Fatalf("the stop did not run under the round's trace id")
 			}
 		})
 	}
@@ -182,27 +199,40 @@ func TestABrokenArrayThePoolHoldsIsLeftAsItIs(t *testing.T) {
 	}
 }
 
-// TestABrokenArrayWhoseStopFailsRetries: a stop that fails is a build
-// failure, the group's error, and registers the CN10 retry, whose attempt
-// stops and assembles the array once the stop goes through.
-func TestABrokenArrayWhoseStopFailsRetries(t *testing.T) {
+// TestABrokenArrayWhoseStopFailsIsNamedAgain: a stop that fails is the
+// group's error, and the array stays broken, so the read after it names the
+// broken array again (reassemblyNamed), and the re-send on that round stops
+// and assembles the array once the stop goes through.
+func TestABrokenArrayWhoseStopFailsIsNamedAgain(t *testing.T) {
 	f, node := brokenIdle(t)
 	f.node.mu.Lock()
 	f.node.failCmd["mdadm --stop "+node] = "mdadm: stop refused"
 	f.node.mu.Unlock()
 	f.node.Reset()
-	info := f.syncup(t, quietLevel(4))
+	held := quietLevel(4)
+	info := f.syncup(t, held)
 	if row := info.GetGrpIdToMdRaid()[testDataGrp]; row.GetStatus() !=
 		pb.ResStatus_RES_STATUS_ERROR {
 		t.Fatalf("the group's row after the failed stop: %v", row)
 	}
-	if !retrying(t, f.srv) {
-		t.Fatalf("the failed stop registered no retry")
-	}
+	f.node.forgetTraces()
 	f.node.Reset()
-	retryAttempt(t, f.srv)
+	round, resent := resendRound(t, f.srv, held, "named")
+	if !strings.Contains(round.GetAgentReply().GetDetails(),
+		agent.LeftoverKindMdBroken+":"+node) || resent == nil {
+		t.Fatalf("the round after the failed stop is %v, re-sent %v; want "+
+			"the broken array named and a re-send", round.GetAgentReply(),
+			resent != nil)
+	}
 	assertOrder(t, f.node, "cmd mdadm --stop "+node,
 		"cmd mdadm --assemble "+f.mdDev)
+	if !tracedCall(f.node, "named", "cmd mdadm --assemble "+f.mdDev) {
+		t.Fatalf("the assembly did not run under the round's trace id")
+	}
+	if _, reply := f.read(t, 4); reply.GetCode() != 0 {
+		t.Fatalf("the read after the re-send: %v, want clean", reply)
+	}
+	assertNothingRunsBetweenCalls(t, f.node, "named")
 }
 
 // TestABrokenArrayWaitsForAnOpenRepairsNewLeg: the new leg of the group's
@@ -246,55 +276,89 @@ func TestABrokenArrayWithAMemberWithNoSuperblock(t *testing.T) {
 }
 
 // TestABrokenArrayWhoseHoldersDoNotRead: a listing of the holders that does
-// not answer is a build failure, which registers the CN10 retry, and the
-// read names nothing.
+// not answer is the group's error, and the read, which meets the same
+// listing, names nothing, so nothing runs between the worker's calls. Once
+// the listing answers, the read names the broken array, and the re-send on
+// that round assembles it again.
 func TestABrokenArrayWhoseHoldersDoNotRead(t *testing.T) {
 	f, node := brokenIdle(t)
+	holders := "list " + sysfsBlockDir + "/" +
+		strings.TrimPrefix(node, "/dev/") + "/holders"
 	f.node.mu.Lock()
-	f.node.failCmdAlways["list "+sysfsBlockDir+"/"+
-		strings.TrimPrefix(node, "/dev/")+"/holders"] = "input/output error"
+	f.node.failCmdAlways[holders] = "input/output error"
 	f.node.mu.Unlock()
+	f.node.forgetTraces()
 	if _, reply := f.read(t, 3); strings.Contains(reply.GetDetails(),
 		"md_broken:") {
 		t.Errorf("the read names the array: %s", reply.GetDetails())
 	}
 	f.node.Reset()
-	info := f.syncup(t, quietLevel(4))
+	held := quietLevel(4)
+	info := f.syncup(t, held)
 	assertNoCall(t, f.node, "cmd mdadm --stop")
 	if row := info.GetGrpIdToMdRaid()[testDataGrp]; row.GetStatus() !=
 		pb.ResStatus_RES_STATUS_ERROR {
 		t.Errorf("the group's row: %v, want ERROR", row)
 	}
-	if !retrying(t, f.srv) {
-		t.Errorf("the failed listing registered no retry")
+	if _, reply := f.read(t, 4); strings.Contains(reply.GetDetails(),
+		"md_broken:") {
+		t.Errorf("the read after the converge names the array: %s",
+			reply.GetDetails())
 	}
+	assertNothingRunsBetweenCalls(t, f.node)
+
+	f.node.mu.Lock()
+	delete(f.node.failCmdAlways, holders)
+	f.node.mu.Unlock()
+	f.node.Reset()
+	round, resent := resendRound(t, f.srv, held, "named")
+	if !strings.Contains(round.GetAgentReply().GetDetails(),
+		agent.LeftoverKindMdBroken+":"+node) || resent == nil {
+		t.Fatalf("the round once the listing answers is %v, re-sent %v; "+
+			"want the broken array named and a re-send",
+			round.GetAgentReply(), resent != nil)
+	}
+	assertOrder(t, f.node, "cmd mdadm --stop "+node,
+		"cmd mdadm --assemble "+f.mdDev)
 }
 
-// TestABrokenArrayWhoseAssemblyFailsRetries: an assembly that fails after
-// the stop is a build failure and registers the CN10 retry, whose attempt
-// assembles the array, absent by then, by CN12's ordinary assembly.
-func TestABrokenArrayWhoseAssemblyFailsRetries(t *testing.T) {
+// TestABrokenArrayWhoseAssemblyFailsIsNamedAbsent: an assembly that fails
+// after the stop is the group's error and leaves no array, so the read after
+// it names the absent array (absentArrayNamed), and the re-send on that
+// round assembles it by CN12's ordinary assembly, with no stop.
+func TestABrokenArrayWhoseAssemblyFailsIsNamedAbsent(t *testing.T) {
 	f, node := brokenIdle(t)
 	f.node.mu.Lock()
 	f.node.failCmd["mdadm --assemble "+f.mdDev] = "mdadm: assembly failed"
 	f.node.mu.Unlock()
 	f.node.Reset()
-	info := f.syncup(t, quietLevel(4))
+	held := quietLevel(4)
+	info := f.syncup(t, held)
 	assertOrder(t, f.node, "cmd mdadm --stop "+node,
 		"cmd mdadm --assemble "+f.mdDev)
 	if row := info.GetGrpIdToMdRaid()[testDataGrp]; row.GetStatus() !=
 		pb.ResStatus_RES_STATUS_ERROR {
 		t.Fatalf("the group's row after the failed assembly: %v", row)
 	}
-	if !retrying(t, f.srv) {
-		t.Fatalf("the failed assembly registered no retry")
-	}
+	f.node.forgetTraces()
 	f.node.Reset()
-	retryAttempt(t, f.srv)
-	assertNoCall(t, f.node, "cmd mdadm --stop")
-	if !f.node.hasCall("cmd mdadm --assemble " + f.mdDev) {
-		t.Errorf("the retry attempt did not assemble the array")
+	round, resent := resendRound(t, f.srv, held, "named")
+	if !strings.Contains(round.GetAgentReply().GetDetails(),
+		f.absentNamed()) || resent == nil {
+		t.Fatalf("the round after the failed assembly is %v, re-sent %v; "+
+			"want the absent array named and a re-send",
+			round.GetAgentReply(), resent != nil)
 	}
+	assertNoCall(t, f.node, "cmd mdadm --stop")
+	if !tracedCall(f.node, "named", "cmd mdadm --assemble "+f.mdDev) {
+		t.Errorf("the re-send did not assemble the array under the "+
+			"round's trace id:\n%s",
+			strings.Join(f.node.Traced("named"), "\n"))
+	}
+	if _, reply := f.read(t, 4); reply.GetCode() != 0 {
+		t.Fatalf("the read after the re-send: %v, want clean", reply)
+	}
+	assertNothingRunsBetweenCalls(t, f.node, "named")
 }
 
 // TestABrokenArrayWithATakenBackLeg: a new leg the open repair took back from

@@ -965,3 +965,94 @@ func TestDeadPathDisconnectedByDevice(t *testing.T) {
 		t.Fatalf("the leg has %d controllers after the cutover, want 1", got)
 	}
 }
+
+// TestARestartedPrimaryProbesALegWhoseStepFailedOverASoundWrapper is an
+// agent restart over a running primary whose startup reconcile meets one
+// leg's lookup that does not answer, so that leg's step fails (CN10) before
+// its prober registers. Its wrapper is there as the leg's whole-size
+// dm-linear, resumed and writable, so the reconcile registers the leg's
+// prober all the same (keepLegProber, CN11): the leg's row reads its probe,
+// not PENDING for good, though no read names anything and no converge comes
+// until a new revision. A wrapper that is suspended or read-only gets no
+// prober, since a probe through it fails or hangs for a reason the leg's
+// paths do not have, and neither does a leg whose subsystem a sweep is
+// disconnecting, whose controllers are being deleted under its wrapper.
+func TestARestartedPrimaryProbesALegWhoseStepFailedOverASoundWrapper(
+	t *testing.T,
+) {
+	for _, tc := range []struct {
+		name  string
+		raid1 bool
+		// spoil changes the data leg's wrapper before the restart; nil
+		// leaves it sound.
+		spoil func(t *testing.T, srv *CnAgentServer, node *fakeNode)
+		// inFlight registers a sweep's disconnect of the data leg's
+		// subsystem on the restarted server.
+		inFlight bool
+		probed   bool
+	}{
+		{"md raid1", true, nil, false, true},
+		{"RedundNone", false, nil, false, true},
+		{"a disconnect in flight", true, nil, true, false},
+		{"read-only wrapper", true, func(t *testing.T, srv *CnAgentServer,
+			node *fakeNode) {
+			rowSetroDm(t, node, legName(srv, testDataLeg))
+		}, false, false},
+		{"suspended wrapper", true, func(t *testing.T, srv *CnAgentServer,
+			node *fakeNode) {
+			rowSuspendDm(t, node, legName(srv, testDataLeg))
+		}, false, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			srv, node := newTestServer(t)
+			opts := reqOpts{revision: 2, primary: true, raid1: tc.raid1}
+			syncupBoth(t, srv, opts)
+			probeLegs(t, srv, testMetaLeg, testDataLeg)
+			if reply := checkCntlrVerdict(t, srv, 2); reply.GetCode() != 0 {
+				t.Fatalf("before the restart: %v", reply)
+			}
+			if tc.spoil != nil {
+				tc.spoil(t, srv, node)
+			}
+			entry := "list " + subsysDirOf(t, node, legNqn(srv, testDataLeg))
+			node.Reset()
+			fresh := newCnServer(node)
+			if tc.inFlight {
+				fresh.mu.Lock()
+				fresh.disconnecting[legNqn(srv, testDataLeg)] = struct{}{}
+				fresh.mu.Unlock()
+			}
+			node.mu.Lock()
+			node.killCmdAlways[entry] = true
+			node.mu.Unlock()
+			reconcileForTest(t, fresh)
+			node.mu.Lock()
+			delete(node.killCmdAlways, entry)
+			node.mu.Unlock()
+
+			obs := latestCntlrObs(t, fresh)
+			if row := obs.Info.GetLegIdToLeg()[testDataLeg]; row.
+				GetStatus() != pb.ResStatus_RES_STATUS_ERROR {
+				t.Fatalf("the reconcile's data leg row = %v, want ERROR "+
+					"naming the lookup that did not answer", row)
+			}
+			st := legState(t, fresh)
+			fresh.mu.Lock()
+			_, has := st.probers[testDataLeg]
+			fresh.mu.Unlock()
+			if has != tc.probed {
+				t.Fatalf("the data leg has a prober: %v, want %v", has,
+					tc.probed)
+			}
+			if !tc.probed {
+				return
+			}
+			probeLegs(t, fresh, testDataLeg)
+			row := checkRound(t, fresh, 2).GetLegIdToLeg()[testDataLeg]
+			if row.GetStatus() != pb.ResStatus_RES_STATUS_OK {
+				t.Fatalf("the data leg row after its probe = %v, want OK",
+					row)
+			}
+		})
+	}
+}

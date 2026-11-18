@@ -4,7 +4,6 @@ import (
 	"fmt"
 	"strings"
 	"testing"
-	"time"
 
 	"github.com/distributed-nvme/distributed-nvme/pb"
 )
@@ -14,7 +13,10 @@ import (
 // for every side of the leg (CN10): taken as absent, an nsid read would fail
 // the leg with "no multipath namespace", and a state read would read the path
 // as not live. A file that is gone still reads absent, which the agent
-// package's tests of the host read pin.
+// package's tests of the host read pin. The converge connects nothing on
+// that answer, and a read names nothing for the leg, neither a side to
+// connect nor its wrapper (cnagent.md CN30), so the worker re-sends nothing
+// for it: the next read whose lookup answers judges the leg again.
 func TestALegLookupFailsNamingAReadThatDidNotAnswer(t *testing.T) {
 	for _, tc := range []struct {
 		name string
@@ -59,7 +61,6 @@ func TestALegLookupFailsNamingAReadThatDidNotAnswer(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			srv, node := newTestServer(t)
-			srv.retryInterval = time.Hour
 			// Two sides per leg, so a case can read the second controller.
 			opts := reqOpts{revision: 2, extraSide: true}
 			syncupBoth(t, srv, opts)
@@ -96,8 +97,16 @@ func TestALegLookupFailsNamingAReadThatDidNotAnswer(t *testing.T) {
 					row, path)
 			}
 			assertNoCall(t, node, "cmd nvme connect")
-			if !retrying(t, srv) {
-				t.Fatalf("the unanswered read registered no retry")
+			round, resent := resendRound(t, srv, cntlrReq(opts), "unanswered")
+			if details := round.GetAgentReply().GetDetails(); strings.
+				Contains(details, nqn) ||
+				strings.Contains(details, legName(srv, testDataLeg)) {
+				t.Fatalf("the read names the leg on an unanswered read: %v",
+					round.GetAgentReply())
+			}
+			assertCodeZero(t, "the read", round)
+			if resent != nil {
+				t.Fatalf("the round re-sent the request on an unanswered read")
 			}
 		})
 	}

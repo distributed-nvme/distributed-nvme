@@ -1255,10 +1255,11 @@ func (s *tdStacks) owner(row cntlrRowId) (uint64, bool) {
 // other half. A converge that
 // finds a member not available (a promotion ahead of the sides' ANA flips, a
 // provisioned flip ahead of the side's export) reports the groups and pools it
-// could not build ERROR and leaves them to the CN10 retry, whose first pass
-// comes one CnConnectRetryInterval later; a background read in between, which
-// a Check round starts and the next round answers from (dnagent.md SH29),
-// probes the absent devices and reports them MISSING "", not ERROR, and in an
+// could not build ERROR; the background read after it, which a Check round
+// starts and the next round answers from (dnagent.md SH29), probes the absent
+// devices and reports them MISSING "", not ERROR, and names what a converge
+// would build once the members serve (cnagent.md CN30), which brings the
+// re-send that builds them (RW4); in an
 // SP with no td, as a new SP is until one is created, that reply has no ERROR
 // row in the maps HL2 judges a
 // cntlr by (a td's raid0 row reads ERROR while its thins are absent; a leg row,
@@ -1285,11 +1286,11 @@ func (s *tdStacks) owner(row cntlrRowId) (uint64, bool) {
 // connected nothing (a disconnect in flight, a lookup that did not answer)
 // of a source with no subsystem entry yet; and a converge that finds at
 // every endpoint a controller made before its step 1 looked — by an earlier
-// pass of its own cntlr, as the CN10 retry's pass after that state finds
-// one, by another clone's step 1 or by another cntlr's pass — before the
-// namespace head is there. A round that answers from one of them can settle
-// the primary a few seconds before the CN10 retry builds the rest of the
-// clone. Below SP_LEVEL_NO_CLONE, where a clone's rows do not read the level
+// pass of its own cntlr, as the converge a read's name of the dm-clone
+// brings after that state finds one, by another clone's step 1 or by
+// another cntlr's pass — before the namespace head is there. A round that
+// answers from one of them can settle the primary before the converge a
+// read's name brings builds the rest of the clone. Below SP_LEVEL_NO_CLONE, where a clone's rows do not read the level
 // (CN19), a clone with no dm-clone while its clone meta group is not ready,
 // its dm-clone row MISSING with no reason whatever its source reads (CN18),
 // holds the settle for as long as that lasts; a converge that could not

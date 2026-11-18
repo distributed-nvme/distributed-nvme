@@ -82,8 +82,7 @@ func (p *cntlrPlan) xferAnaMove(xp *xferPlan, outcome xferDevOutcome) (
 }
 
 // xferDevOutcome is what ensureXfer's device step did with one transfer
-// device, which decides the transfer's ANA move (xferAnaMove) and whether it
-// waits for the CN10 retry (build).
+// device, which decides the transfer's ANA move (xferAnaMove).
 type xferDevOutcome int
 
 const (
@@ -125,10 +124,6 @@ type xferStep struct {
 	outcome xferDevOutcome
 	rows    xferRows
 	nsErr   error
-	// exportFailed is a failed step of the transfer's export — its
-	// subsystem, its namespace or its port link — which the build registers
-	// the CN10 retry for (CN17).
-	exportFailed bool
 }
 
 func (s *CnAgentServer) xferSubsysConf(
@@ -232,7 +227,7 @@ func (s *CnAgentServer) ensureXfer(
 		ctx, s.xferSubsysConf(plan, xp)); err != nil {
 		info.XferIdToSubsystem[xp.xferId] = st.tracker.Err(
 			ssKey, xp.nqn, err.Error())
-		return xferStep{outcome: xferDevPut, exportFailed: true}
+		return xferStep{outcome: xferDevPut}
 	}
 	nsErr := s.ensureXferNamespace(ctx, plan, xp)
 	linkErr := s.nvmet.EnsurePortLink(
@@ -244,8 +239,7 @@ func (s *CnAgentServer) ensureXfer(
 		info.XferIdToSubsystem[xp.xferId] = deferredFromErr(
 			st.tracker, xp.deferred, ssKey, xp.nqn, "", linkErr)
 	}
-	return xferStep{outcome: xferDevPut, rows: xferRowsNamespace, nsErr: nsErr,
-		exportFailed: nsErr != nil || linkErr != nil}
+	return xferStep{outcome: xferDevPut, rows: xferRowsNamespace, nsErr: nsErr}
 }
 
 // reportXferExport writes the export rows ensureXfer left to the build, after

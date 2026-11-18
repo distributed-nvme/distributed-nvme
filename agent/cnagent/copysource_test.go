@@ -13,7 +13,9 @@ import (
 // only from IO to it, so on an idle array a dead member still reads in sync,
 // and a copy that reads it breaks the array. The put-back of a failed member
 // and the add of a member the array lacks wait for such a source, and so does
-// the read's verdict, which names neither while none serves.
+// the read's verdict, which names neither while none serves; once a source
+// serves, the read names the member, and the one re-send the worker sends on
+// that round (dnv-worker.md RW4) puts it back.
 
 // legTwoConnecting puts the data group's second leg's path in the state a
 // side whose disk node died leaves it: connecting, not available.
@@ -59,28 +61,37 @@ func TestAMemberJoinsOnlyBesideACopySource(t *testing.T) {
 					"nothing", reply)
 			}
 			f.node.Reset()
-			f.syncup(t, noRepairReq(2))
+			held := noRepairReq(2)
+			f.syncup(t, held)
 			for _, cmd := range tc.cmds(f) {
 				assertNoCall(t, f.node, cmd)
 			}
-			if !retrying(t, f.srv) {
-				t.Fatalf("the source's leg that does not serve registered " +
-					"no retry")
+			if _, reply := f.read(t, 2); reply.GetCode() != 0 {
+				t.Fatalf("the read after the converge named %v with no "+
+					"source serving, want nothing", reply)
 			}
 
 			legTwoLive(f)
-			if _, reply := f.read(t, 2); !strings.Contains(
-				reply.GetDetails(), legName(f.srv, testDataLeg)) {
-				t.Fatalf("the read with the source serving names %v, want "+
-					"leg 1's member", reply)
-			}
 			f.node.Reset()
-			retryAttempt(t, f.srv)
+			round, resent := resendRound(t, f.srv, held, "source-serves")
+			if !strings.Contains(round.GetAgentReply().GetDetails(),
+				legName(f.srv, testDataLeg)) {
+				t.Fatalf("the read with the source serving names %v, want "+
+					"leg 1's member", round.GetAgentReply())
+			}
+			if resent == nil {
+				t.Fatalf("the round that names the member brought no " +
+					"re-send")
+			}
 			for _, cmd := range tc.cmds(f) {
-				if !f.node.hasCall(cmd) {
-					t.Fatalf("the attempt with the source serving made "+
-						"%q, want %q", f.mdCalls(), cmd)
+				if !tracedCall(f.node, "source-serves", cmd) {
+					t.Fatalf("the re-send with the source serving made "+
+						"%q, want %q under the round's trace id",
+						f.mdCalls(), cmd)
 				}
+			}
+			if _, reply := f.read(t, 2); reply.GetCode() != 0 {
+				t.Fatalf("the read after the put-back names %v", reply)
 			}
 		})
 	}

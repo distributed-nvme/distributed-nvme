@@ -1676,8 +1676,8 @@ func (s *CnAgentServer) unownedSrcNqns(
 
 // sweepCntlr is the cntlr-level pass of CN21. It runs in convergeCntlr,
 // under the CN1 locks of convergeCntlr's caller: the node read lock and this
-// cntlr's object lock in SyncupCntlr and reconvergeCntlr, the node write lock
-// in the startup Reconcile. It removes only objects attributed to this
+// cntlr's object lock in SyncupCntlr, the node write lock in the startup
+// Reconcile. It removes only objects attributed to this
 // cntlr's sp — which is what lets two cntlrs of one CN converge concurrently.
 //
 // remove = false is the read-only VERDICT a cntlr's read takes (readCntlr):
@@ -1685,13 +1685,16 @@ func (s *CnAgentServer) unownedSrcNqns(
 // over the listings of the read's reading (plan.rd, plan.walk; CN30). A
 // converge passes no reading and lists the node itself (enumerateCn).
 //
-// putBack are the md conditions the verdict names beside the leftovers:
-// each md member, by dm name, the converge would fail early, put back, add
-// or remove for a repair (putBackNames), and each broken array, by its node,
+// putBack are the conditions the verdict names beside the leftovers: each
+// md member, by dm name, the converge would fail early, put back, add or
+// remove for a repair (putBackNames), and each broken array, by its node,
 // the converge would assemble again (reassemblyNamed; CN30), each absent
 // array, by its group's row name, the converge's assembly would start
-// (absentArrayNamed), and, as a failure, each forced start the converge
-// would carry through (forcedStartNamed): what the call's
+// (absentArrayNamed), and, as failures, each forced start the converge
+// would carry through (forcedStartNamed), each group whose md check the
+// converge would start, stop or adopt (mdCheckDue), and each uncreated
+// snapshot whose create message the converge would send (snapshotDue):
+// what the call's
 // probe read, so nothing here reads them again. A
 // converge passes none: it has just tried to put them back, and its rows say
 // how that went. The verdict also names each forced-start mark of a request
@@ -1850,8 +1853,9 @@ func (s *CnAgentServer) sweepCntlr(
 // "differs", the first line of the row's
 // details after it. It names a row only while every row it is built on
 // reads RES_STATUS_OK (rowsUnder): a stack over a group whose array does not
-// run waits for that array, which the verdict's md member rules and CN10's
-// late-member retry cover, and over a broken layer of its own only that
+// run waits for that array, which the verdict's md names cover (the absent
+// array, a member to put back, a broken array, a forced start), and over a
+// broken layer of its own only that
 // layer is named, the lowest, whose converge builds the rest. It names no row
 // the level suppresses (RES_REASON_SP_LEVEL), no RES_STATUS_PROVISIONING row,
 // the stack a deferred build holds back on purpose, no thin row whose pool
@@ -1921,9 +1925,11 @@ func cntlrRowVerdict(
 		// A snapshot not yet created that still lacks a device in a slice
 		// is made by CN14's pre-pass, which suspends its origin; a re-send
 		// on every round that its create fails would stall the origin's
-		// host IO on every round. Its rows, its dm-error's among them, wait
-		// for the next revision, as a create that fails always did
-		// (snapsLackingADevice).
+		// host IO on every round. So its rows, its dm-error's among them,
+		// are not named (snapsLackingADevice), and a read names the
+		// snapshot itself while the pre-pass would send a message
+		// (snapshotDue), a name only a read gives, which brings a converge
+		// every second round at most (dnv-worker.md RW4).
 		if snapsWaiting[tp.tdId] {
 			continue
 		}
@@ -1970,7 +1976,9 @@ func cntlrRowVerdict(
 // slice that is not deferred has no thin device, or one whose read does not
 // answer: a converge of them runs CN14's pre-pass, which suspends the
 // origin's raid0 to make the missing ids (snapshotPrePass), so the cntlr's
-// verdict leaves their rows out (cntlrRowVerdict). A snapshot whose devices
+// verdict leaves their rows out (cntlrRowVerdict), and a read names the
+// snapshot alone, while the pre-pass would send a message (snapshotDue). A
+// snapshot whose devices
 // are all there makes no message and suspends no origin, so its rows are
 // named like any other. Only a primary builds thin devices.
 func (s *CnAgentServer) snapsLackingADevice(

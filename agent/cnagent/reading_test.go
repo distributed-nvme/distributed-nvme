@@ -10,7 +10,6 @@ import (
 	"strings"
 	"syscall"
 	"testing"
-	"time"
 
 	"github.com/distributed-nvme/distributed-nvme/common"
 	"github.com/distributed-nvme/distributed-nvme/pb"
@@ -731,7 +730,6 @@ func TestPartialDmListingStillAnswers(t *testing.T) {
 
 	t.Run("an unfinished build", func(t *testing.T) {
 		srv, node := newTestServer(t)
-		srv.retryInterval = time.Hour
 		node.failCmdAlways["nvme connect"] = "fake: connection refused"
 		syncupBoth(t, srv, reqOpts{revision: 2, primary: true, raid1: true})
 		plantForeignDm(t, srv, node)

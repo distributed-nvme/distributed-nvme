@@ -199,6 +199,25 @@ type Object struct {
 	// answers code zero.
 	LeftoverRounds uint32
 
+	// ReadLeftover is a leftover that only the object's reads name, as a cn
+	// agent's read names an absent array a converge would start, or a
+	// forced start a converge would carry through, while the converge's own
+	// reply names nothing (cnagent.md CN30). While it is set, the object's
+	// Check rounds answer as an agent's rounds do (dnagent.md SH29, SH30):
+	// each round answers from the object's latest observation and starts a
+	// read, which ends at once, and the next round answers from that read;
+	// an accepted Syncup* cancels the read the round before it started and
+	// stores its converge's observation, which the next round answers from.
+	// A read answers ReplyCodeLeftover while the leftover has re-sends left
+	// and code zero once they are spent; each accepted Syncup* that applies
+	// its request spends one, and its own reply answers code zero unless
+	// another lever forces a code. A forced reply_code wins over it on the
+	// reads too. The info reads are left as they are. ReadRows override
+	// rows of a read that names the leftover, over every other lever, as a
+	// read finds absent what the converge the re-send brings builds.
+	ReadLeftover uint32
+	ReadRows     map[string]Row
+
 	// DiskCounts, on the dn alone, are the disk counts DnInfo carries.
 	DiskCounts *DiskCounts
 
@@ -235,15 +254,8 @@ func (ob *Object) clone() *Object {
 	out := *ob
 	out.Status = clonePtr(ob.Status)
 	out.Details = clonePtr(ob.Details)
-	if ob.Rows != nil {
-		out.Rows = make(map[string]Row, len(ob.Rows))
-		for key, row := range ob.Rows {
-			row.Status = clonePtr(row.Status)
-			row.Details = clonePtr(row.Details)
-			row.Reason = clonePtr(row.Reason)
-			out.Rows[key] = row
-		}
-	}
+	out.Rows = cloneRows(ob.Rows)
+	out.ReadRows = cloneRows(ob.ReadRows)
 	out.ZeroedBytes = clonePtr(ob.ZeroedBytes)
 	out.ZeroBytes = clonePtr(ob.ZeroBytes)
 	out.ThinMissingSlices = slices.Clone(ob.ThinMissingSlices)
@@ -294,6 +306,21 @@ func (ob *Object) clone() *Object {
 	return &out
 }
 
+// cloneRows deep-copies a map of row overrides.
+func cloneRows(rows map[string]Row) map[string]Row {
+	if rows == nil {
+		return nil
+	}
+	out := make(map[string]Row, len(rows))
+	for key, row := range rows {
+		row.Status = clonePtr(row.Status)
+		row.Details = clonePtr(row.Details)
+		row.Reason = clonePtr(row.Reason)
+		out[key] = row
+	}
+	return out
+}
+
 func clonePtr[T any](p *T) *T {
 	if p == nil {
 		return nil
@@ -320,18 +347,33 @@ func (b *Behavior) clone() *Behavior {
 // validate refuses levers that could never apply where they are set — a
 // misplaced lever would otherwise fail a test far from its cause: a row's
 // when_primary anywhere but on a cntlr object, disk counts anywhere but on
-// the dn.
+// the dn, read rows with no read leftover — and a read leftover beside a
+// lever that answers its rounds another way (obs_age_ms, obs_none,
+// leftover_rounds).
 func (ob *Object) validate(where, key string) error {
 	if ob == nil {
 		return nil
 	}
 	cntlr := strings.HasPrefix(key, cntlrObjPrefix)
-	for _, rowName := range slices.Sorted(maps.Keys(ob.Rows)) {
-		if ob.Rows[rowName].WhenPrimary && !cntlr {
-			return fmt.Errorf(
-				"%s: rows[%q]: when_primary on a non-cntlr object",
-				where, rowName)
+	for _, rows := range []struct {
+		name string
+		rows map[string]Row
+	}{{"rows", ob.Rows}, {"read_rows", ob.ReadRows}} {
+		for _, rowName := range slices.Sorted(maps.Keys(rows.rows)) {
+			if rows.rows[rowName].WhenPrimary && !cntlr {
+				return fmt.Errorf(
+					"%s: %s[%q]: when_primary on a non-cntlr object",
+					where, rows.name, rowName)
+			}
 		}
+	}
+	if ob.ReadRows != nil && ob.ReadLeftover == 0 {
+		return fmt.Errorf("%s: read_rows with no read_leftover", where)
+	}
+	if ob.ReadLeftover != 0 &&
+		(ob.ObsAge != 0 || ob.ObsNone || ob.LeftoverRounds != 0) {
+		return fmt.Errorf("%s: read_leftover beside obs_age_ms, obs_none "+
+			"or leftover_rounds, which answer its rounds another way", where)
 	}
 	if ob.DiskCounts != nil && key != DnKey {
 		return fmt.Errorf("%s: disk_counts on an object that is not %q",
@@ -363,6 +405,8 @@ func (ob *Object) validateDefault() error {
 		{"obs_none", ob.ObsNone},
 		{"syncup_revision", ob.SyncupRevision != nil},
 		{"leftover_rounds", ob.LeftoverRounds != 0},
+		{"read_leftover", ob.ReadLeftover != 0},
+		{"read_rows", ob.ReadRows != nil},
 		{"repairs", ob.Repairs != nil},
 		{"grps", ob.Grps != nil},
 	} {
@@ -391,7 +435,7 @@ func (b *Behavior) validate() error {
 
 // SetBehavior replaces every lever of the agent with b — nil clears them —
 // and wakes every waiting lever. It re-arms the counted levers
-// (HangRounds, LeftoverRounds) of every object from b, so a rewrite counts
+// (HangRounds, LeftoverRounds, ReadLeftover) of every object from b, so a rewrite counts
 // its rounds afresh and drops the rounds an earlier one had not spent, as a
 // reload of the behavior file does.
 func (a *Agent) SetBehavior(b *Behavior) error {
@@ -407,6 +451,8 @@ func (a *Agent) SetBehavior(b *Behavior) error {
 	a.beh = b
 	clear(a.heldRounds)
 	clear(a.leftRounds)
+	clear(a.readLeft)
+	clear(a.reads)
 	for key, ob := range b.Objects {
 		a.armLocked(key)
 		if ob != nil && !ob.Starting.IsZero() {
@@ -420,8 +466,8 @@ func (a *Agent) SetBehavior(b *Behavior) error {
 
 // Update edits one object's levers: fn gets a copy of them — zero ones for
 // an object with none — and what it leaves is set, which wakes every
-// waiting lever. A counted lever (HangRounds, LeftoverRounds) is re-armed
-// only when fn changed its value, so an edit of another lever leaves the
+// waiting lever. A counted lever (HangRounds, LeftoverRounds, ReadLeftover)
+// is re-armed only when fn changed its value, so an edit of another lever leaves the
 // rounds a count has left as they are; to count the same number afresh, a
 // test sets the lever to zero and back, or sets the whole behavior. fn runs
 // with the agent's lock held and must not call the agent.
@@ -456,6 +502,9 @@ func (a *Agent) Update(key string, fn func(*Object)) error {
 	if ob.LeftoverRounds != was.LeftoverRounds {
 		a.armLeftoverRoundsLocked(key)
 	}
+	if ob.ReadLeftover != was.ReadLeftover {
+		a.armReadLeftoverLocked(key)
+	}
 	a.notifyLocked()
 	return nil
 }
@@ -471,6 +520,7 @@ func (a *Agent) Behavior() *Behavior {
 func (a *Agent) armLocked(key string) {
 	a.armHangRoundsLocked(key)
 	a.armLeftoverRoundsLocked(key)
+	a.armReadLeftoverLocked(key)
 }
 
 // armHangRoundsLocked arms one object's HangRounds count from its current
@@ -488,6 +538,17 @@ func (a *Agent) armLeftoverRoundsLocked(key string) {
 	delete(a.leftRounds, key)
 	if ob := a.beh.Objects[key]; ob != nil && ob.LeftoverRounds != 0 {
 		a.leftRounds[key] = ob.LeftoverRounds
+	}
+}
+
+// armReadLeftoverLocked arms one object's ReadLeftover count from its
+// current levers and drops the read its rounds left running, so a re-armed
+// leftover starts from the object's latest observation.
+func (a *Agent) armReadLeftoverLocked(key string) {
+	delete(a.readLeft, key)
+	delete(a.reads, key)
+	if ob := a.beh.Objects[key]; ob != nil && ob.ReadLeftover != 0 {
+		a.readLeft[key] = ob.ReadLeftover
 	}
 }
 
@@ -567,6 +628,8 @@ type objectJSON struct {
 	ObsNone           bool                `json:"obs_none,omitempty"`
 	SyncupRevision    *uint64             `json:"syncup_revision,omitempty"`
 	LeftoverRounds    uint32              `json:"leftover_rounds,omitempty"`
+	ReadLeftover      uint32              `json:"read_leftover,omitempty"`
+	ReadRows          map[string]*rowJSON `json:"read_rows,omitempty"`
 	DiskCounts        *diskCountsJSON     `json:"disk_counts,omitempty"`
 	// Repairs is keyed by rep_name, Grps by grp_id in decimal or 0x hex.
 	Repairs map[string]*repairVerdictJSON `json:"repairs,omitempty"`
@@ -660,6 +723,7 @@ func (oj *objectJSON) convert(where string) (*Object, error) {
 		ObsNone:           oj.ObsNone,
 		SyncupRevision:    oj.SyncupRevision,
 		LeftoverRounds:    oj.LeftoverRounds,
+		ReadLeftover:      oj.ReadLeftover,
 	}
 	if oj.Status != nil {
 		resStatus, err := parseResStatus(*oj.Status)
@@ -688,18 +752,13 @@ func (oj *objectJSON) convert(where string) (*Object, error) {
 		}
 		ob.ChunkIdList = &list
 	}
-	for key, rj := range oj.Rows {
-		if rj == nil {
-			continue
-		}
-		row, err := rj.convert()
-		if err != nil {
-			return nil, fmt.Errorf("%s: rows[%q]: %w", where, key, err)
-		}
-		if ob.Rows == nil {
-			ob.Rows = make(map[string]Row)
-		}
-		ob.Rows[key] = row
+	var err error
+	if ob.Rows, err = convertRows(where, "rows", oj.Rows); err != nil {
+		return nil, err
+	}
+	if ob.ReadRows, err = convertRows(
+		where, "read_rows", oj.ReadRows); err != nil {
+		return nil, err
 	}
 	if dc := oj.DiskCounts; dc != nil {
 		ob.DiskCounts = &DiskCounts{
@@ -741,6 +800,27 @@ func (oj *objectJSON) convert(where string) (*Object, error) {
 			MdDone: gj.MdDone}
 	}
 	return ob, nil
+}
+
+// convertRows parses one map of row overrides, nil when it holds none.
+func convertRows(
+	where, name string, rows map[string]*rowJSON,
+) (map[string]Row, error) {
+	var out map[string]Row
+	for key, rj := range rows {
+		if rj == nil {
+			continue
+		}
+		row, err := rj.convert()
+		if err != nil {
+			return nil, fmt.Errorf("%s: %s[%q]: %w", where, name, key, err)
+		}
+		if out == nil {
+			out = make(map[string]Row)
+		}
+		out[key] = row
+	}
+	return out, nil
 }
 
 // ParseBehavior decodes a behavior file. Unknown fields are an error on

@@ -2,7 +2,9 @@ package cnagent
 
 import (
 	"context"
+	"errors"
 	"log/slog"
+	"strings"
 	"time"
 
 	"github.com/distributed-nvme/distributed-nvme/agent"
@@ -65,15 +67,17 @@ func (s *CnAgentServer) syncupCntlr(
 		// owner's during an ownership change (cnagent.md, Known limits).
 		// The refused request may be the sp worker's clear of a
 		// forced-start mark (dnv-worker.md AR13) or the operator's
-		// withdrawal of it. Were the held request still to count
-		// as delivered, every CN10 retry attempt would converge it and act
-		// on the mark: one that read the group's array not running would
-		// start the array from the marked leg and zero the other members
-		// the forced start keeps, one of which may hold newer data. So no
-		// converge acts on a mark of the held request
-		// (dropForcedStartMarks), the cntlr's reads name its marks
-		// (storedMarks), and CN14's thin id sweeps, behind the same gate,
-		// do not run from it either. A refused request at the held
+		// withdrawal of it, so a mark the held request carries may be one
+		// the worker no longer wants, and a start from it would zero the
+		// other members the forced start keeps, one of which may hold newer
+		// data. So no converge acts on a mark of the held request
+		// (dropForcedStartMarks), and the cntlr's reads name its marks as
+		// stored (storedMarks), not as a forced start a converge would carry
+		// through (forcedStartNamed), and report none acted on (actedMark):
+		// the name brings the worker's re-send of the refused request, and
+		// only a SyncupCntlr whose save holds brings a converge that acts on
+		// a mark. CN14's thin id sweeps, behind the same gate, do not run
+		// from the held request either. A refused request at the held
 		// revision leaves reqFromRpc as it is: the clear and the withdrawal
 		// of a mark each raise SpRev, so a request at the held revision
 		// clears no mark the held request carries. A cntlr the agent does
@@ -211,10 +215,8 @@ func (s *CnAgentServer) convergeCntlr(
 	st *cntlrState,
 ) (*pb.CntlrInfo, *agent.SweepResult) {
 	// The same refusal (architecture.md, Common validation) as syncupCntlr's,
-	// for the entrances that do not come through it: the startup Reconcile,
-	// which converges from a file that may hold zeros, and the background
-	// connect retry, which re-enters with the request it already holds.
-	// Refusing before
+	// for the entrance that does not come through it: the startup Reconcile,
+	// which converges from a file that may hold zeros. Refusing before
 	// newCntlrPlan touches nothing at all: the sweep is name-driven and needs
 	// no plan of this cntlr to find its objects later.
 	req := st.loadReq()
@@ -236,12 +238,12 @@ func (s *CnAgentServer) convergeCntlr(
 	// delivered (cntlrState.reqFromRpc). Any other held request is the
 	// stored copy the startup reconcile loaded, or one whose newer
 	// successor was refused for a failed save (syncupCntlr, dnagent.md
-	// SH5), and the background retry converges from it too: it can still
-	// carry a mark the worker has cleared since, whose clear this agent has
-	// not accepted (the clear never arrived, say, or its save failed), and
-	// a start from that mark's leg would zero the member with the newest
-	// data. Such a pass converges every group as with no mark, and the
-	// cntlr's read names the mark, so the worker re-sends the SyncupCntlr
+	// SH5): it can still carry a mark the worker has cleared since, whose
+	// clear this agent has not accepted (the clear never arrived, say, or
+	// its save failed), and a start from that mark's leg would zero the
+	// member with the newest data. The startup reconcile converges the
+	// first kind, every group as with no mark, and the cntlr's read names
+	// the mark of either kind, so the worker re-sends the SyncupCntlr
 	// (storedMarks).
 	// CN12: the memory of the marks this incarnation acted on follows the
 	// request's marks, read before a request that does not count as
@@ -258,9 +260,9 @@ func (s *CnAgentServer) convergeCntlr(
 	// CN14: the torn marks follow the request alone, on every converge.
 	keepTornMarks(st, plan)
 	info := newCntlrInfo()
-	// CN10: the pass's one wait budget, made here and nowhere else, so every
-	// entrance — the RPC, the startup reconcile, a background retry attempt
-	// — gets its own and no pass can spend another's.
+	// CN10: the pass's one wait budget, made here and nowhere else, so each
+	// entrance — the RPC or the startup reconcile — gets its own and no pass
+	// can spend another's.
 	budget := s.newPassBudget()
 	// CN11: the probers are this process's goroutines, not objects of the
 	// node, so the sweep does not own them. Every converge trims them,
@@ -284,16 +286,16 @@ func (s *CnAgentServer) convergeCntlr(
 		// SP_LEVEL_DISABLE: the sweep's wanted set is empty, so every
 		// cntlr-scoped object has just gone, but the store file and the
 		// in-memory desired state stay (CN19). What the sweep cannot do is
-		// stop the background retry or forget the resource histories,
-		// because neither is an object on the node.
-		s.stopConnectRetry(st)
+		// forget the resource histories, which are no object on the node.
 		s.dropAllResKeys(st, plan)
 	}
 	s.build(ctx, st, plan, info, budget)
 	// The converge's code names, beside its sweep's leftovers, every row of
-	// its build a re-sent SyncupCntlr could cure (CN30), as a read's does:
-	// a step that stopped in this pass is retried by the worker's next round
-	// (dnv-worker.md RW4).
+	// its build a re-sent SyncupCntlr could cure (CN30), as a read's does,
+	// but an uncreated snapshot's, which only a read names (snapshotDue):
+	// a step that stopped in this pass runs again in the converge of the
+	// request the worker re-sends on that code (dnv-worker.md RW4). Nothing
+	// in this agent runs the converge again by itself.
 	cntlrRowVerdict(plan, info, s.snapsLackingADevice(ctx, plan), sweep)
 	sweep.Log(ctx, s.cntlrIdAttrs(plan)...)
 	return info, sweep
@@ -369,12 +371,10 @@ func (s *CnAgentServer) build(
 	info *pb.CntlrInfo,
 	budget *agent.WaitBudget,
 ) {
-	retryNeeded := false
-
 	// Legs (CN10).
 	var available map[uint64]bool
 	if plan.wantLeg {
-		available, retryNeeded = s.ensureLegs(ctx, st, plan, info, budget)
+		available = s.ensureLegs(ctx, st, plan, info, budget)
 	} else {
 		for _, lp := range plan.legs {
 			info.LegIdToLeg[lp.legId] = suppressedRow(st.tracker,
@@ -388,7 +388,6 @@ func (s *CnAgentServer) build(
 	// pool concats after them take each md group's number from the same walk
 	// (mdDevNo), which an assembly here brings up to date (Md.Refresh).
 	plan.mdWalks = &mdWalkOnce{md: s.md}
-	late := false
 	if plan.wantGrp {
 		dead := s.deadLegs(st)
 		for _, gp := range plan.grps {
@@ -401,7 +400,7 @@ func (s *CnAgentServer) build(
 					detailsProvisioning)
 				continue
 			}
-			detail, running, forcedStarted, refusals, err := s.ensureGroup(
+			detail, running, refusals, err := s.ensureGroup(
 				ctx, plan, gp, available, info.LegIdToLeg, dead)
 			// CN28: an OK row carries the array's state line, as a read's
 			// does, when the pass read the array as it left it.
@@ -429,11 +428,18 @@ func (s *CnAgentServer) build(
 				s.stepMdCheck(ctx, st, gp, detail)
 				reportGrpReading(info, gp, detail, refusals,
 					actedMark(st, gp), mdCheckDone(st, gp))
-			}
-			if gp.hasLateMember(available, running) ||
-				gp.markWaits(running, forcedStarted) ||
-				forcedStartRetries(err) || groupBuildRetries(err) {
-				late = true
+			} else if running && detail != nil {
+				// CN12, The md check: a member reconciliation that failed
+				// over a running array still steps the check, over the
+				// array as the pass last read it, so a read's name of the
+				// check (mdCheckDue) is one a converge cures whatever made
+				// the reconciliation fail. md starts no check while a
+				// resync or a recovery is due or runs, running that sync in
+				// its place, and refuses a check while a sync runs; and the
+				// step stops a running check once the array reads
+				// degraded, so a check beside a failed member command holds
+				// no copy back past this step.
+				s.stepMdCheck(ctx, st, gp, detail)
 			}
 		}
 	} else if plan.primary {
@@ -442,47 +448,16 @@ func (s *CnAgentServer) build(
 				resKeyOf(resKeyGrpFmt, gp.grpId), gp.resName)
 		}
 	}
-	if late {
-		// CN12: a group's leg_list member that is not available this pass,
-		// other than an open repair's bad leg while the group's array runs
-		// (hasLateMember), is the same class of transient as a connect that
-		// failed — the side's ANA flip has not reached this CN's sysfs yet
-		// (the worker's sides-first hold is bounded, so a promotion's
-		// SyncupCntlr can still come before the sides' flips, [D16]), its DN
-		// is rebooting, its path is mid-reconnect — and the worker does not
-		// re-drive the converge that would assemble it, add it or build the
-		// pool over it: it re-syncs on a revision or a reply code, never on a
-		// row. So it registers the CN10 retry, which re-runs the whole
-		// converge until every such member is available. There is no record of
-		// its own: the rows already report it — a group's error, or "degraded"
-		// once a probe reads an md array, and the member's own leg row. A
-		// forced start that ends the pass in an error registers it too, a wait
-		// for a member aside, which is the late member's, and so does a read
-		// of the group's array before it that fails while the mark stands
-		// (forcedStartRetries, markedErr), for the same reason: the error is
-		// a row, and a read names the forced start only once the checks it
-		// can run pass (forcedStartNamed), and nothing while its own read of
-		// the array does not answer. So does a
-		// mark that stands over an array the pass found running and that no
-		// forced start of the pass started (grpPlan.markWaits; markedErr for
-		// such an array that holds a member that is not a dm device): a
-		// broken array reads write-pending during each superblock write md
-		// makes to the dead member (mdRunningStates), so the pass cannot tell
-		// it from one that runs, and the retry's converge reads it again
-		// until a converge acts on the mark no more — that of a request
-		// without the mark, from the worker's clear (dnv-worker.md AR13), the
-		// operator's withdrawal or a repair's finish that retires the leg the
-		// mark names, or of one by which this cntlr builds no array of the
-		// group, or of a held request that counts as delivered no more since
-		// syncupCntlr refused a newer one for a failed save
-		// (cntlrState.reqFromRpc). The pass that started the array registers
-		// nothing for its mark. A group build that failed with its legs as
-		// they are registers the retry too (groupBuildRetries): its error is
-		// a row, and a grow's new group under a pool that serves has no
-		// namespace that waits for it.
-		s.startConnectRetry(st, plan)
-		retryNeeded = true
-	}
+	// Nothing here runs the converge again for a group the pass left short:
+	// a member that is not available, a build that failed, a forced start
+	// that waits or failed. A cntlr's read names each group a converge would
+	// act on — an absent array the assembly would start, a member to put
+	// back, a broken array to assemble again, a forced start it would carry
+	// through, an md check it would start, stop or adopt, a RedundNone
+	// group's dm-linear it would change (CN12, CN30) — and the worker
+	// re-sends the request on that name (dnv-worker.md RW4).
+	// A late member whose controller the kernel keeps reconnecting is named
+	// by nothing, since no converge can make it serve.
 
 	// Per-slice pools (CN13) and thin volumes (CN14).
 	poolReady := make(map[uint64]bool, len(plan.slices))
@@ -532,8 +507,10 @@ func (s *CnAgentServer) build(
 	// CN14: the snapshot-message pre-pass. Every needed slice's `create_snap`
 	// goes out inside ONE suspension of the origin td's raid0, so the
 	// per-slice snapshots all describe the same instant instead of one per
-	// message. It has to sit exactly here: after the loop that fills
-	// poolReady, and before the thin loop — only the *messages* belong inside
+	// message. It has to sit exactly here: after the loop that builds the
+	// pools and writes their rows, which decide the slices it sends to
+	// (poolReady, poolTakesMessages), and before the thin loop — only the
+	// *messages* belong inside
 	// the window, because a snapshot's content is fixed at message time and
 	// its thin devices are built afterwards by the unchanged loop below.
 	if plan.wantPool {
@@ -546,7 +523,7 @@ func (s *CnAgentServer) build(
 			if tp.td.GetOriId() == 0 || tp.td.GetCreated() {
 				continue
 			}
-			if !s.snapshotPrePass(ctx, plan, tp, poolReady) {
+			if !s.snapshotPrePass(ctx, plan, tp, info, poolReady) {
 				continue
 			}
 			// CN14's torn mark: the run that tore the snapshot sets it, and
@@ -624,9 +601,7 @@ func (s *CnAgentServer) build(
 	// td loops above wrote.
 	if plan.wantClone {
 		for _, cp := range plan.clones {
-			if s.ensureClone(ctx, st, plan, cp, info, budget) {
-				retryNeeded = true
-			}
+			s.ensureClone(ctx, st, plan, cp, info, budget)
 		}
 	} else if plan.primary {
 		for _, cp := range plan.clones {
@@ -678,12 +653,7 @@ func (s *CnAgentServer) build(
 		// the ANA loop (reportNamespaces).
 		nsErrs := make(map[uint64]error, len(plan.namespaces))
 		for _, ssp := range plan.subsystems {
-			if !s.ensureSubsystem(ctx, st, plan, ssp, info, nsErrs) {
-				// A failed export step goes to a row, which re-drives nothing
-				// (CN16): the CN10 retry builds it again.
-				s.startConnectRetry(st, plan)
-				retryNeeded = true
-			}
+			s.ensureSubsystem(ctx, st, plan, ssp, info, nsErrs)
 		}
 
 		// ANA rewrites to optimized last — architecture.md, Failover,
@@ -706,25 +676,19 @@ func (s *CnAgentServer) build(
 		// ns-dev the pass may park, as a demotion's does; its row reads OK
 		// with RES_REASON_DIFFERS, and the converge's own verdict names it
 		// (cntlrRowVerdict), so the worker sends the SyncupCntlr again and
-		// its P1 moves it.
+		// its P1 moves it. A namespace left short of its desired group waits
+		// for what a read names: its ns-dev while a converge would change it,
+		// or the layer under it that a converge would build or change (the
+		// group's array, the group's dm-linear, the dm-clone, an uncreated
+		// snapshot whose create message the pre-pass would send; CN30). A
+		// wait on a layer no converge cures — a pool that needs a check or
+		// has failed — is named by nothing and costs nothing until a new
+		// revision.
 		for _, np := range plan.namespaces {
 			if np.anaGrpId == common.AnaGrpIdInaccessible {
 				continue
 			}
 			outcome := outcomes[np.nsId]
-			if !outcome.onPlan() {
-				// A namespace left short of its desired group waits, and
-				// nothing else is sure to re-drive the pass that ends the
-				// wait: the worker re-syncs on a revision or a reply code,
-				// never on a row, and a hold that an unanswered `dmsetup ls`
-				// alone caused leaves the read's verdict, which lists the
-				// node from the read's own reading, clean. So it registers
-				// the CN10 retry, whose next attempt reads the node afresh,
-				// until the namespace serves — for as long as its cause
-				// lasts, a cause that never goes away included.
-				s.startConnectRetry(st, plan)
-				retryNeeded = true
-			}
 			grpId, move := nsAnaMove(np, outcome)
 			if !move {
 				continue
@@ -735,11 +699,10 @@ func (s *CnAgentServer) build(
 					slog.String("nqn", np.ss.nqn),
 					slog.String("error", err.Error()))
 				// A move that fails leaves the namespace short of the group
-				// its ns-dev step earned, an ns-dev on what its rules want
-				// included, and a row re-drives nothing: it registers the
-				// CN10 retry, whose next attempt moves it again.
-				s.startConnectRetry(st, plan)
-				retryNeeded = true
+				// its ns-dev step earned. Its row reads the group it has
+				// against the one its ns-dev's table earns (reportNamespaces),
+				// which both channels name, so the worker's re-send moves it
+				// again.
 			}
 		}
 		// The transfers' ANA, by the same rule (CN17): a transfer moves to
@@ -748,21 +711,13 @@ func (s *CnAgentServer) build(
 		// raid0 where it is served, the error table where it is not on
 		// purpose (xferAnaMove). A served transfer whose device step failed
 		// goes inaccessible when its device is an error table, and keeps its
-		// group otherwise; one left short, its move that failed included,
-		// registers the CN10 retry, for the namespaces' reason.
+		// group otherwise. A failed export step, a device left short and a
+		// move that failed are each a row both channels name (CN17, CN30),
+		// as for the namespaces.
 		for _, xp := range plan.xfers {
 			step := xferSteps[xp.xferId]
-			if step.exportFailed {
-				// As a namespace's failed export step: the CN10 retry.
-				s.startConnectRetry(st, plan)
-				retryNeeded = true
-			}
 			if plan.xferAnaGrpId(xp) == common.AnaGrpIdInaccessible {
 				continue
-			}
-			if step.outcome != xferDevPut {
-				s.startConnectRetry(st, plan)
-				retryNeeded = true
 			}
 			grpId, move := plan.xferAnaMove(xp, step.outcome)
 			if !move {
@@ -773,9 +728,6 @@ func (s *CnAgentServer) build(
 				slog.ErrorContext(ctx, "ana transition failed",
 					slog.String("nqn", xp.nqn),
 					slog.String("error", err.Error()))
-				// As a namespace's move that fails: the CN10 retry.
-				s.startConnectRetry(st, plan)
-				retryNeeded = true
 			}
 		}
 		// The namespace rows, and the transfer rows ensureXfer left, come
@@ -791,10 +743,6 @@ func (s *CnAgentServer) build(
 		// resource from one the agent never looked at.
 		s.reportSuppressed(st, plan, info)
 	}
-
-	if !retryNeeded {
-		s.stopConnectRetry(st)
-	}
 }
 
 // snapshotPrePass sends one snapshot td's per-slice `create_snap` messages
@@ -807,8 +755,10 @@ func (s *CnAgentServer) build(
 //
 // It owns *every* message of an uncreated snapshot (CN14): ensureThin never
 // messages a td with ori_id != 0, so a slice this pass declines — or one
-// whose message failed — simply waits for the next converge, which is still
-// driven by the same `created == false`. A failed message is tolerated: the
+// whose message failed — waits for the next converge, which is still driven
+// by the same `created == false`, and a cntlr's read names the snapshot
+// while that converge would send a message (snapshotDue), so the worker's
+// re-send brings it. A failed message is tolerated: the
 // pool may already hold the dev_id after a crashed earlier pass, and the
 // `dmsetup create` that follows decides the outcome.
 //
@@ -818,57 +768,24 @@ func (s *CnAgentServer) build(
 // (agent.IsExists), the id being in its pool already. The slices of the two
 // kinds then date from different instants, since the ones already held were
 // made by an earlier run, in another quiesce or in none. The snapshot device
-// of every slice that is not deferred is read, one whose pool is not ready
-// this pass included, since a device there holds its id whatever the state
-// of its pool; only a ready pool is sent a message. A slice the run cannot
-// read, or whose message fails otherwise, counts as neither; so does one
-// with no device whose pool is not ready. A run that makes every id, or
-// none, tears nothing.
+// of every slice that is not deferred is read, one whose pool takes no
+// message this pass included, since a device there holds its id whatever
+// the state of its pool; only a pool that takes the message is sent one
+// (poolTakesMessages). A slice the run cannot read, or whose message
+// fails otherwise, counts as neither; so does one with no device whose pool
+// takes no message. A run that makes every id, or none, tears nothing.
 func (s *CnAgentServer) snapshotPrePass(
 	ctx context.Context,
 	plan *cntlrPlan,
 	tp *tdPlan,
+	info *pb.CntlrInfo,
 	poolReady map[uint64]bool,
 ) bool {
-	var need []*slicePlan
-	// had: a slice holds the id from before this run.
-	had := false
-	for _, sp := range plan.slices {
-		// [D15]: a deferred slice has no pool, so no snapshot device.
-		if sp.deferred {
-			continue
-		}
-		// The same trigger ensureThin uses. An Info error means "skip":
-		// ensureThin fails that slice with the same error anyway, or the
-		// thin loop reports its pool missing.
-		//
-		// CN14: there is no second filter on the origin's own thin device.
-		// The gateway refuses a snapshot of an origin that is not materialized
-		// in every slice pool (architecture.md, Thin devices), so `create_snap`
-		// cannot be inverted with the origin's `create_thin` — and whether
-		// *this* CN has built the origin's dm device is irrelevant to a message
-		// the pool metadata answers.
-		dev, err := s.dm.Info(ctx, plan.thinName(tp.tdId, sp.sliceId))
-		if err != nil {
-			continue
-		}
-		if dev != nil {
-			// The snapshot device attaches the id, so its pool holds it,
-			// ready this pass or not: the id was made by an earlier run.
-			had = true
-			continue
-		}
-		// poolReady only ever holds an entry for a non-deferred slice under
-		// plan.wantPool, so it also subsumes the pool-missing arm of the
-		// thin loop's switch. It is deliberately NOT tp.deferred: that flag
-		// is plan-global (anySliceDeferred), and gating the messages on it
-		// would drop create_snap for every ready slice whenever one sibling
-		// slice is still provisioning.
-		if !poolReady[sp.sliceId] {
-			continue
-		}
-		need = append(need, sp)
-	}
+	need, had := s.snapMessageSlices(ctx, nil, plan, tp,
+		func(sp *slicePlan) bool {
+			return poolReady[sp.sliceId] && poolTakesMessages(
+				info.GetSliceIdToDmPool()[sp.sliceId])
+		})
 	if len(need) == 0 {
 		// SH16: an equal-revision re-apply must not suspend anything. Every
 		// converge round would otherwise stall the origin's host IO.
@@ -918,6 +835,155 @@ func (s *CnAgentServer) snapshotPrePass(
 			slog.String("error", err.Error()))
 	}
 	return made && had
+}
+
+// snapMessageSlices is CN14's choice of the slices of an uncreated snapshot
+// td whose pool the pre-pass sends a `create_snap` (snapshotPrePass), which a
+// cntlr's read names the snapshot by too (snapshotDue), so the read names it
+// exactly while a converge would send a message. A slice is chosen when it
+// is not deferred, its snapshot thin device reads absent, and its pool takes
+// the message (takes): on a converge, a pool its pass built (ensureSlice)
+// whose row takes messages (poolTakesMessages); on a read, the same row test
+// beside the slice's two concat rows reading OK and the pool device not
+// reading read-only (readPoolTakesMessages). had
+// reports a slice whose thin device is there, which holds the id from before
+// this run. The device is read from rd, the reading of a cntlr's read, or
+// with no reading its own `dmsetup info`; a slice whose read did not answer
+// counts as neither.
+//
+// CN14: there is no second filter on the origin's own thin device. The
+// gateway refuses a snapshot of an origin that is not materialized in every
+// slice pool (architecture.md, Thin devices), so `create_snap` cannot be
+// inverted with the origin's `create_thin` — and whether *this* CN has built
+// the origin's dm device is irrelevant to a message the pool metadata
+// answers. Nor is it tp.deferred: that flag is plan-global
+// (anySliceDeferred), and gating the messages on it would drop create_snap
+// for every ready slice whenever one sibling slice is still provisioning.
+func (s *CnAgentServer) snapMessageSlices(
+	ctx context.Context,
+	rd *cnReading,
+	plan *cntlrPlan,
+	tp *tdPlan,
+	takes func(*slicePlan) bool,
+) (need []*slicePlan, had bool) {
+	for _, sp := range plan.slices {
+		// [D15]: a deferred slice has no pool, so no snapshot device.
+		if sp.deferred {
+			continue
+		}
+		dev, err := s.dmInfo(ctx, rd, plan.thinName(tp.tdId, sp.sliceId))
+		if err != nil {
+			continue
+		}
+		if dev != nil {
+			// The snapshot device attaches the id, so its pool holds it,
+			// ready this pass or not: the id was made by an earlier run.
+			had = true
+			continue
+		}
+		if !takes(sp) {
+			continue
+		}
+		need = append(need, sp)
+	}
+	return need, had
+}
+
+// poolTakesMessages is CN14's test of a slice's pool row of a pass, the
+// converge's or a read's, for the pre-pass's `create_snap`: the row reads
+// OK, and the pool's status line, which the row carries, shows the mode
+// "rw" or "out_of_data_space". dm-thin refuses every message to a pool
+// read-only for want of metadata space or for any other reason, which the
+// line shows as "ro" and whose row can read OK (poolHealth), and to one that
+// has failed or needs a check, whose row reads ERROR.
+func poolTakesMessages(pool *pb.ResInfo) bool {
+	if pool.GetStatus() != pb.ResStatus_RES_STATUS_OK {
+		return false
+	}
+	switch thinPoolMode(pool.GetDetails()) {
+	case "rw", "out_of_data_space":
+		return true
+	}
+	return false
+}
+
+// readPoolTakesMessages is poolTakesMessages as a cntlr's read can test a
+// slice's pool, by info, the read's rows, and rd, its reading: the slice's
+// metadata and data concat rows read OK beside the pool row, and the pool
+// device does not read read-only, in place of the converge's own test that
+// it built the pool (ensureSlice). Reason for the concat rows: a concat a
+// grow left unbuilt, over a late leg say, keeps the old pool's table, so the
+// read's pool row reads OK while the converge builds no pool over the
+// concat. A concat the converge builds a pool over whose block-layer
+// read-only flag it failed to clear reads ERROR on a converge but OK on a
+// read, which does not read the flag (CN28), so only the read tests the
+// concat rows. Reason for the pool's flag: the converge reloads a pool that
+// reads read-only and clears its flag (ensurePool), and a clear that fails
+// fails the pool's step, so the pass sends no message there, while the
+// read's pool row does not read the flag; the device's read, from the
+// reading, does. A read that did not answer takes no message.
+func (s *CnAgentServer) readPoolTakesMessages(
+	ctx context.Context,
+	rd *cnReading,
+	info *pb.CntlrInfo,
+	sp *slicePlan,
+) bool {
+	if info.GetSliceIdToMeta()[sp.sliceId].GetStatus() !=
+		pb.ResStatus_RES_STATUS_OK ||
+		info.GetSliceIdToData()[sp.sliceId].GetStatus() !=
+			pb.ResStatus_RES_STATUS_OK ||
+		!poolTakesMessages(info.GetSliceIdToDmPool()[sp.sliceId]) {
+		return false
+	}
+	dev, err := s.dmInfo(ctx, rd, sp.poolFinalName)
+	return err == nil && dev != nil && !dev.ReadOnly
+}
+
+// thinPoolMode is the mode word of a thin pool's `dmsetup status` line: rw,
+// ro or out_of_data_space, the fifth field after the `thin-pool` token
+// (common.ParseThinPoolStatus), "" for a line that carries none.
+func thinPoolMode(raw string) string {
+	fields := strings.Fields(raw)
+	for idx, field := range fields {
+		if field == "thin-pool" {
+			if len(fields) > idx+5 {
+				return fields[idx+5]
+			}
+			return ""
+		}
+	}
+	return ""
+}
+
+// errSnapshotDue is the failure a cntlr's read names an uncreated snapshot
+// by while a converge would send its `create_snap` (snapshotDue).
+var errSnapshotDue = errors.New(
+	"not made in every slice, and a converge sends its create message")
+
+// snapshotDue reports whether a cntlr's read names the uncreated snapshot td
+// tp (CN14, CN30): a primary at a level that builds pools, the td a snapshot
+// not yet created, and a slice the converge's pre-pass would send a message
+// to (snapMessageSlices) by the rows of info, the read's
+// (readPoolTakesMessages). A read-only name:
+// the converge's verdict leaves the snapshot's rows out
+// (snapsLackingADevice), so a create that keeps failing brings a converge,
+// and with it one suspension of the origin's raid0, every second round at
+// most (dnv-worker.md RW4), while a pool that takes no message, or a device
+// read that did not answer, names nothing.
+func (s *CnAgentServer) snapshotDue(
+	ctx context.Context,
+	plan *cntlrPlan,
+	tp *tdPlan,
+	info *pb.CntlrInfo,
+) bool {
+	if !plan.wantPool || tp.td.GetOriId() == 0 || tp.td.GetCreated() {
+		return false
+	}
+	need, _ := s.snapMessageSlices(ctx, plan.rd, plan, tp,
+		func(sp *slicePlan) bool {
+			return s.readPoolTakesMessages(ctx, plan.rd, info, sp)
+		})
+	return len(need) > 0
 }
 
 // msgSnapshotTorn is the Warn record of the converge whose snapshot pre-pass

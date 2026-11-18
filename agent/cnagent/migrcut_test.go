@@ -49,7 +49,6 @@ func TestTheCutOfAMigratingLegsPath(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			srv, node := newTestServer(t)
-			srv.retryInterval = time.Hour
 			opts := reqOpts{revision: 2, primary: tc.primary,
 				extraSide: true, raid1: !tc.noRaid, twoLegs: !tc.noRaid}
 			syncupBoth(t, srv, opts)
@@ -126,7 +125,6 @@ func TestThePathWatcherCutsWithNoConverge(t *testing.T) {
 		}
 		t.Run(name, func(t *testing.T) {
 			srv, node := newTestServer(t)
-			srv.retryInterval = time.Hour
 			srv.probeInterval = 10 * time.Millisecond
 			opts := reqOpts{revision: 2, primary: primary, extraSide: true,
 				raid1: true, twoLegs: true}
@@ -177,7 +175,6 @@ func TestTheCutsEdges(t *testing.T) {
 	setup := func(t *testing.T, primary bool) (*CnAgentServer, *fakeNode,
 		string, reqOpts) {
 		srv, node := newTestServer(t)
-		srv.retryInterval = time.Hour
 		opts := reqOpts{revision: 2, primary: primary, extraSide: true,
 			raid1: true, twoLegs: true}
 		syncupBoth(t, srv, opts)
@@ -256,7 +253,6 @@ func TestTheCutsEdges(t *testing.T) {
 // an IO error on the array's last member.
 func TestNoCutWithNoOtherMemberInSync(t *testing.T) {
 	srv, node := newTestServer(t)
-	srv.retryInterval = time.Hour
 	opts := reqOpts{revision: 2, primary: true, extraSide: true, raid1: true,
 		twoLegs: true}
 	syncupBoth(t, srv, opts)
@@ -288,7 +284,6 @@ func TestNoCutWithNoOtherMemberInSync(t *testing.T) {
 // cntlr's drop stops them all.
 func TestThePathWatchersFollowThePlan(t *testing.T) {
 	srv, _ := newTestServer(t)
-	srv.retryInterval = time.Hour
 	opts := reqOpts{revision: 2, primary: true, extraSide: true, raid1: true,
 		twoLegs: true}
 	syncupBoth(t, srv, opts)

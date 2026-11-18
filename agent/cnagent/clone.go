@@ -234,10 +234,9 @@ func (src cloneSource) unready() string {
 // built (dnv-worker.md HL2), but the converge's "no namespace" after a
 // connect of its own pass, with a controller at every endpoint
 // (headPending): that head may be a scan still in progress, a build in
-// progress the settle waits for, and the CN10 retry reads it again. No other
-// row of it carries a reason. A fault that fails CN18 step 1 still keeps the
-// CN10 retry running, whose attempts hold the cntlr's reads off while each
-// runs (dnagent.md SH30; cnagent.md, Known limits). The row reads OK, with
+// progress the settle waits for, and once the head is there a read names the
+// dm-clone a converge would build (cloneDmName). No other row of it carries
+// a reason. The row reads OK, with
 // the path states, while every endpoint has a live controller and the
 // namespace is there. A failed connect of the converge's decides no status
 // and leads the details of a row that is not OK.
@@ -393,21 +392,23 @@ func (s *CnAgentServer) cloneRows(
 		reason)
 }
 
-// ensureClone runs the CN18 sequence for one clone and reports whether the
-// cntlr needs the CN10 retry: the source is not ready, the build's gate
-// (cloneDmGate) does not pass while no dm-clone of the clone serves — the
-// clone meta group's or the destination raid0's row is not OK, or the read of
-// the dm-clone before step 3 did not answer or shows its metadata read-only
-// or failed — a later step stopped the build — step 3's converge of the
-// dm-clone or the enable — or the read after the build does not show a
-// dm-clone that serves: resumed, hydration on and its metadata read-write. A
-// pass that finished the build but failed to converge a rule-5 ns-dev of the
-// td registers the CN10 retry in CN16, as every other ns-dev step that
-// leaves a namespace short of its desired group does (build). A failed knob
-// message or source chunk stops nothing and is only logged. CN16 serves the
-// destination td through the dm-clone only while it serves (rule 5,
-// nsDevNow), so a build that stops short of step 5 leaves the td parked, and
-// its namespaces inaccessible, until a later pass finishes it.
+// ensureClone runs the CN18 sequence for one clone. A pass stops at the first
+// of these: the source is not ready, the build's gate (cloneDmGate) does not
+// pass — the clone meta group's or the destination raid0's row is not OK, or
+// the read of the dm-clone before step 3 did not answer or shows its
+// metadata read-only or failed — a later step fails — step 3's converge of
+// the dm-clone or the enable — or the read after the build does not show a
+// dm-clone that serves: resumed, hydration on and its metadata read-write.
+// Nothing here runs the converge again: a cntlr's read names each source
+// endpoint a converge would connect (cloneSource.toName) and the dm-clone
+// while a converge would change it (cloneDmName; CN18, CN30), and the
+// worker re-sends the request on that name (dnv-worker.md RW4). A read that
+// did not answer, a source whose head has not come, a group or a raid0 not
+// ready and a metadata mode no converge changes name nothing for the clone.
+// A failed knob message or source chunk stops nothing and is only logged.
+// CN16 serves the destination td through the dm-clone only while it serves
+// (rule 5, nsDevNow), so a build that stops short of step 5 leaves the td
+// parked, and its namespaces inaccessible, until a later pass finishes it.
 //
 // The clone's rows are not the steps' own. Wherever the pass ends, cloneRows
 // writes them from what it then reads of the node, the function the cntlr's
@@ -430,14 +431,14 @@ func (s *CnAgentServer) ensureClone(
 	cp *clonePlan,
 	info *pb.CntlrInfo,
 	budget *agent.WaitBudget,
-) (connectRetry bool) {
+) {
 	if cp.dstTd == nil {
 		s.reportCloneNoDst(st, cp, info)
-		return false
+		return
 	}
 	if cp.grp == nil {
 		s.reportCloneNoGrp(st, cp, info)
-		return false
+		return
 	}
 	if cp.deferred {
 		// [D15]: the destination td's raid0 or the clone meta group's device
@@ -445,7 +446,7 @@ func (s *CnAgentServer) ensureClone(
 		// exist, so there is nothing to clone onto or to keep the metadata
 		// on — no dm-clone and no source connection.
 		s.reportCloneDeferred(st, cp, info)
-		return false
+		return
 	}
 	// fresh reads the dm-clone for the rows of a pass a step ends, after
 	// whatever that step did to the device.
@@ -458,8 +459,7 @@ func (s *CnAgentServer) ensureClone(
 	srcDev, src, ok := s.ensureCloneSource(ctx, plan, cp, budget)
 	if !ok {
 		s.cloneRows(st, cp, info, src, fresh, "")
-		s.startConnectRetry(st, plan)
-		return true
+		return
 	}
 
 	// (2) what the dm-clone is built over and the dm-clone as the build finds
@@ -480,20 +480,13 @@ func (s *CnAgentServer) ensureClone(
 	// metadata is read-only or failed is left as it is: no chunk lands and no
 	// enable takes in that mode, so its row reads ERROR naming the mode, CN16
 	// does not serve through it, and nothing here takes it back to read-write
-	// mode (cnagent.md, Known limits). The CN10 retry is registered only
-	// while the read shows no dm-clone that serves: no region is copied then,
-	// and a parked namespace of the td waits as well (CN16). A dm-clone that
-	// serves serves on, and the group's fault is re-driven as a slice's
-	// group's is (CN12): a late member registers the retry itself (build),
-	// and a failed member reconciliation registers none.
+	// mode (cnagent.md, Known limits). A dm-clone that serves serves on,
+	// and the group's fault is re-driven as a slice's group's is (CN12): by
+	// what a read names of the group.
 	dm := s.probeCloneDm(ctx, nil, cp)
 	if !cloneDmGate(cp, src, info, dm) {
 		s.cloneRows(st, cp, info, src, func() cloneDmRead { return dm }, "")
-		if dm.serves() {
-			return false
-		}
-		s.startConnectRetry(st, plan)
-		return true
+		return
 	}
 
 	// (3) the dm-clone over the group's device, created with hydration off
@@ -507,8 +500,7 @@ func (s *CnAgentServer) ensureClone(
 	build, err := s.ensureDmClone(ctx, plan, cp, srcDev, dm)
 	if err != nil {
 		s.cloneRows(st, cp, info, src, fresh, err.Error())
-		s.startConnectRetry(st, plan)
-		return true
+		return
 	}
 	if knobErr := s.ensureHydrationKnobs(ctx, cp); knobErr != nil {
 		slog.ErrorContext(ctx, "applying dm-clone hydration knobs failed",
@@ -536,26 +528,21 @@ func (s *CnAgentServer) ensureClone(
 			cp.dmName = rowFailure(errRowDiffers, err.Error())
 		}
 		s.cloneRows(st, cp, info, src, fresh, err.Error())
-		s.startConnectRetry(st, plan)
-		return true
+		return
 	}
 	// The read after step 5 is the rows' (architecture.md, Live-state
 	// reporting: the raw status line carries hydration progress, which is
 	// what DeleteClone's force check reads). One that does not show a
 	// dm-clone that serves — it did not answer, the device went, the enable
 	// did not take, or its metadata left read-write mode — leaves the build
-	// unfinished and registers the retry.
+	// unfinished, and the next read names the dm-clone where a converge
+	// would change it.
 	dm = s.probeCloneDm(ctx, nil, cp)
 	s.cloneRows(st, cp, info, src, func() cloneDmRead { return dm }, "")
-	if !dm.serves() {
-		s.startConnectRetry(st, plan)
-		return true
-	}
 	// (6) the dst td's ns-devs move onto the dm-clone in CN16, which runs
 	// after clones in the CN9 build order and reads the status once more
 	// before it does (nsDevNow); their namespaces turn optimized in the same
 	// pass, after the reload (build).
-	return false
 }
 
 // cloneDstReady reports whether the destination td's raid0 is ready for the

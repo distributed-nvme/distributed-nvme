@@ -612,14 +612,9 @@ const (
 	LegHealthBlockSize = 4096
 	LegHealthMagic     = "DNVHLTH1"
 
-	// Seconds between background retries of a cn cntlr's converge after any
-	// of CN10's triggers (cnagent.md CN10).
-	CnConnectRetryInterval = 5
-
 	// The connect step's one wait budget per converge pass (cnagent.md CN10,
-	// CN18). A pass — one convergeCntlr, whether a SyncupCntlr, the startup
-	// reconcile or an attempt of the background retry above runs it — gets
-	// one budget of CnConnectPassBudget, shared by every leg and every clone
+	// CN18). A pass — one convergeCntlr, whether a SyncupCntlr or the
+	// startup reconcile runs it — gets one budget of CnConnectPassBudget, shared by every leg and every clone
 	// source it connects, and exactly three things draw on it: a failed
 	// `nvme connect`'s own elapsed time; the CnConnectRetryPause before each
 	// in-pass retry of a failed connect; and the steps of the wait for the
@@ -633,7 +628,8 @@ const (
 	// charged after it ran, so a slow one can overdraw the budget, and none
 	// of this bounds a side's first connect, which every pass makes. Once it
 	// is spent the pass behaves as it did without it: the leg or the clone
-	// source fails with the same error and registers the background retry.
+	// source fails with the same error, and a later read names what a
+	// converge would connect or build (cnagent.md CN30).
 	// Unlike the whole-second integers above them, these four are
 	// time.Durations.
 	CnConnectPassBudget = 1 * time.Second

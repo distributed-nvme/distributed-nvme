@@ -1030,3 +1030,142 @@ func TestCntlrInfoRepairsAndReadings(t *testing.T) {
 		t.Fatalf("Update set grps on a side")
 	}
 }
+
+// TestReadLeftoverLever is the leftover only reads name (ReadLeftover): each
+// round answers from the latest observation and starts a read the next round
+// answers from (dnagent.md SH29, SH30). A read names the leftover and finds
+// its read rows; an accepted SyncupCntlr answers code zero with the rows the
+// other levers give, cancels the read the round before it started and spends
+// one re-send, so the round after it answers from its observation; a refused
+// one cancels nothing. Once the re-sends are spent the reads answer code
+// zero. The lever is refused where it cannot act.
+func TestReadLeftoverLever(t *testing.T) {
+	agent := newTestAgent(t)
+	_, cnClient := startAgent(t, agent)
+	fixture := syncupCntlrFixture(t, cnClient, true)
+	key := CntlrKey(1, 1)
+	missing := pb.ResStatus_RES_STATUS_MISSING
+	update(t, agent, key, func(ob *Object) {
+		ob.ReadLeftover = 2
+		ob.ReadRows = map[string]Row{
+			"grp_id_to_md_raid.12": {Status: &missing, WhenPrimary: true},
+		}
+	})
+	round := func(traceId string) *pb.CheckCntlrReply {
+		t.Helper()
+		return oneRound(t, cnClient.CheckCntlr, &pb.CheckCntlrRequest{
+			ClusterId: 1, CnId: 1, CntlrPointer: cntlrPtr(1, 1), Revision: 5,
+			ShowInfo: true, TraceId: traceId,
+		})
+	}
+	resend := func(traceId string, revision uint64) *pb.SyncupCntlrReply {
+		t.Helper()
+		ctx := metadata.AppendToOutgoingContext(context.Background(),
+			common.TraceIdMetadataKey, traceId)
+		req := cntlrFixture(true)
+		req.Revision = revision
+		reply, err := cnClient.SyncupCntlr(ctx, req)
+		if err != nil {
+			t.Fatalf("SyncupCntlr: %v", err)
+		}
+		return reply
+	}
+	// want checks that a round answered from the observation made under
+	// obsTrace at obsAt (zero: any time), with code and the data group's
+	// status.
+	want := func(
+		what string, reply *pb.CheckCntlrReply, code uint32,
+		obsTrace string, obsAt time.Time, grp pb.ResStatus,
+	) time.Time {
+		t.Helper()
+		stamp := reply.GetObsStamp()
+		obs, _ := obsTimes(stamp)
+		got := reply.GetCntlrInfo().GetGrpIdToMdRaid()[12].GetStatus()
+		if reply.GetAgentReply().GetCode() != code ||
+			stamp.GetObsTraceId() != obsTrace ||
+			(!obsAt.IsZero() && !obs.Equal(obsAt)) || got != grp {
+			t.Fatalf("%s: code %d, observation %q at %v, group %v; want "+
+				"code %d, observation %q at %v, group %v", what,
+				reply.GetAgentReply().GetCode(), stamp.GetObsTraceId(), obs,
+				got, code, obsTrace, obsAt, grp)
+		}
+		return obs
+	}
+	fixtureObs, _ := obsTimes(fixture.GetObsStamp())
+	ok := pb.ResStatus_RES_STATUS_OK
+	want("the first round", round("r1"), 0,
+		fixture.GetObsStamp().GetObsTraceId(), fixtureObs, ok)
+	want("the round after it", round("r2"), common.ReplyCodeLeftover, "r1",
+		time.Time{}, missing)
+
+	first := resend("r1", 5)
+	if first.GetAgentReply().GetCode() != 0 || first.GetCntlrInfo().
+		GetGrpIdToMdRaid()[12].GetStatus() != ok {
+		t.Fatalf("the re-send: %v, group %v; want code 0 and the group as "+
+			"the converge builds it", first.GetAgentReply(), first.
+			GetCntlrInfo().GetGrpIdToMdRaid()[12])
+	}
+	firstObs, _ := obsTimes(first.GetObsStamp())
+	want("the round after the re-send", round("r3"), 0, "r1", firstObs, ok)
+	want("the next round", round("r4"), common.ReplyCodeLeftover, "r3",
+		time.Time{}, missing)
+
+	// A refused syncup cancels no read: the next round answers from r4's.
+	if code := resend("stale", 4).GetAgentReply().GetCode(); code !=
+		common.ReplyCodeStaleRevision {
+		t.Fatalf("a stale SyncupCntlr: code %d", code)
+	}
+	want("the round after a refused syncup", round("r5"),
+		common.ReplyCodeLeftover, "r4", time.Time{}, missing)
+
+	second := resend("r4", 5)
+	secondObs, _ := obsTimes(second.GetObsStamp())
+	want("the round after the last re-send", round("r6"), 0, "r4", secondObs,
+		ok)
+	want("a read after the leftover was spent", round("r7"), 0, "r6",
+		time.Time{}, ok)
+	want("the read after it", round("r8"), 0, "r7", time.Time{}, ok)
+
+	for _, tc := range []struct {
+		name string
+		fn   func(*Object)
+	}{
+		{"read rows with no read leftover", func(ob *Object) {
+			ob.ReadLeftover = 0
+		}},
+		{"a read leftover beside leftover rounds", func(ob *Object) {
+			ob.LeftoverRounds = 1
+		}},
+		{"a read leftover beside an old observation", func(ob *Object) {
+			ob.ObsAge = time.Second
+		}},
+	} {
+		if err := agent.Update(key, tc.fn); err == nil {
+			t.Errorf("Update accepted %s", tc.name)
+		}
+	}
+	if err := agent.Update(DnKey, func(ob *Object) {
+		ob.ReadLeftover = 1
+		ob.ReadRows = map[string]Row{"meta": {Status: &missing,
+			WhenPrimary: true}}
+	}); err == nil {
+		t.Errorf("Update accepted a when_primary read row on the dn")
+	}
+	if _, err := ParseBehavior([]byte(
+		`{"default": {"read_leftover": 1}}`)); err == nil {
+		t.Errorf("ParseBehavior accepted read_leftover on the default entry")
+	}
+	parsed, err := ParseBehavior([]byte(`{"objects": {"cntlr 1:1": {
+	  "read_leftover": 3,
+	  "read_rows": {"grp_id_to_md_raid.12": {"status": "MISSING",
+	                                         "when_primary": true}}}}}`))
+	if err != nil {
+		t.Fatalf("ParseBehavior: %v", err)
+	}
+	ob := parsed.Objects[key]
+	if row := ob.ReadRows["grp_id_to_md_raid.12"]; ob.ReadLeftover != 3 ||
+		row.Status == nil || *row.Status != missing || !row.WhenPrimary {
+		t.Errorf("parsed read leftover = %d, read rows %+v", ob.ReadLeftover,
+			ob.ReadRows)
+	}
+}

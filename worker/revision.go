@@ -1237,10 +1237,9 @@ func (w *revWorker) logSyncupRejected(
 // finds the connection, with nothing else left, answers code 0 and ends the
 // re-sync.
 // A background read only computes the observation's code and removes nothing
-// (dnagent.md SH29), and the agent registers nothing for a leftover: its
-// background converges (the cn's connect retry and the dn's fence timer)
-// sweep only while one is registered or
-// armed for a reason of its own. So the sweep a leftover brings back is the
+// (dnagent.md SH29), and the agent registers nothing for a leftover: its one
+// background converge, the dn's fence timer, sweeps only while it is armed
+// for a reason of its own, and the cn agent runs none (cnagent.md CN10). So the sweep a leftover brings back is the
 // one in the re-sync RW4 step 5 issues on that code, and a leftover that
 // re-sync still finds is logged every round. One only a read's verdict names
 // (a subsystem directory whose last controller is gone, above) is not: the

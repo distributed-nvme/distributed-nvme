@@ -173,10 +173,7 @@ func TestARestartKeepsTheThinIdOfACutOffPass(t *testing.T) {
 			"thin id and thin volume")
 	}
 
-	// The process exits: its retries stop. The kernel state and the local
-	// store survive.
-	st := srv.getCntlr(cntlrKey(testCluster, testCn, testSp, testCntlr))
-	srv.stopConnectRetry(st)
+	// The process exits. The kernel state and the local store survive.
 	node.Reset()
 	fresh := newCnServer(node)
 	reconcileForTest(t, fresh)

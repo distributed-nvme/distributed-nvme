@@ -279,9 +279,9 @@ SH27. **Background tasks and process exit.** (Its number is out of order
 because rule ids never shift: code comments cite them.) A role server MAY
 run goroutines outside any RPC: the DN12 fence timer, the DN9
 side-zeroing workers, the background reads the check rounds start (SH29),
-the cn's connect retry,
 the CN11 leg probers, the CN10 path watchers and the cn sweep's
-background `nvme disconnect` (`cnagent.md` CN10, CN18). Every one of them
+background `nvme disconnect` (`cnagent.md` CN10). The DN12 fence timer
+is the one of them that runs a converge. Every one of them
 derives its ctx from the server's **`rootCtx`** — the process-lifetime
 ctx, which `Serve` derives from its own ctx, hands the server before the
 port opens (SH33) and cancels before returning, and which `Reconcile`
@@ -300,8 +300,8 @@ is not clean among them, name the round that brought them; and it takes
 the SH11 or SH12 locks for that one read.
 
 A background task may additionally run a **child process**: DN9's
-`blkdiscard --zeroout` batches do, so can the converges one runs (the DN12
-fence timer's and the cn connect retry's), so do the
+`blkdiscard --zeroout` batches do, so can the converge the DN12 fence
+timer runs, so do the
 background reads, whose probes run commands (SH17),
 and the cn sweep's background `nvme disconnect` is one.
 Such a child must not outlive the agent — the cn sweep's background
@@ -329,12 +329,9 @@ shutdown forever — cancelling is the whole contract there. Nor is the child
 of the cn sweep's background `nvme disconnect` joined (`cnagent.md` CN10):
 it holds nothing a restarted agent needs, a delete already in the kernel
 finishes whether or not anybody waits for it, and a join could hold shutdown
-for the kernel's whole admin timeout. Nor is the cn's connect retry
-(`cnagent.md` CN10, CN18): an attempt of it runs
-the bounded commands of an ordinary pass, which the cancellation of
-`rootCtx` ends, and nothing waits for them. Nor are the cn's path
-watchers (`cnagent.md` CN10): a tick runs bounded commands too, which the
-same cancellation ends. Nor are the cn's background
+for the kernel's whole admin timeout. Nor are the cn's path
+watchers (`cnagent.md` CN10): a tick runs bounded commands, which the
+cancellation of `rootCtx` ends, and nothing waits for them. Nor are the cn's background
 reads (SH29): a read runs bounded commands too, which the same
 cancellation ends, and its children hold nothing a restarted agent needs.
 Object-scoped tasks that hold a device open are additionally cancelled
@@ -634,10 +631,9 @@ SH11. Node **read** lock + the object's lock: every object-scoped RPC
 but a check round and an info read (SH12) — `SyncupSide`/`SyncupCntlr`,
 `Push*Bitmap`, the cn's `Get*Bm` bitmap reads — the background read of a
 side or a cntlr (SH29), a zeroing batch's volume-table update (try-acquire,
-DN9), and every background converge attempt (the dn's DN12 fence timer,
-its one background converge, which runs `reconvergeSide`, and the cn's
-connect retry, which runs `reconvergeCntlr` — the SH27 background
-tasks that converge; `cnagent.md` CN1). Each takes the object's lock only once it has found the object, or
+DN9), and the dn's one background converge, which the DN12 fence timer
+runs (`reconvergeSide`), the one SH27 background task that converges; the
+cn runs none (`cnagent.md` CN1, CN10). Each takes the object's lock only once it has found the object, or
 its gates have admitted the request, under the node read lock (Concurrency
 — `locks.go`): a call its gates refuse for an object the agent does not
 hold takes the read lock alone, and a `SyncupSide` or `SyncupCntlr` they
@@ -1276,8 +1272,8 @@ revision zero and no observation time; how the worker judges such a reply
 is `dnv-worker.md` HL7.
 
 The end of every converge stores an observation before its locks go: a
-syncup's, the startup reconcile's for each object it converges, the DN12
-fence timer's, and the cn's connect retry's (`cnagent.md` CN10, CN18). It holds the rows and the
+syncup's, the startup reconcile's for each object it converges, and the
+DN12 fence timer's. It holds the rows and the
 code the converge's own reply carries, or would carry where no reply is
 sent, and the revision of the request it converged. A converge whose call
 was cut off stores none: every command after the cut fails at once, so
@@ -1304,8 +1300,8 @@ An object's observation times only increase: a time not later than
 the stored one is stored as just after it, so equal times mean the same
 observation.
 
-Reason: a reply that waited for the object's lock behind a converge or a
-retry attempt, or for its own node reads on a loaded node, would make the
+Reason: a reply that waited for the object's lock behind a converge, or
+for its own node reads on a loaded node, would make the
 worker miss rounds, which sets health epochs and can fail a primary over
 (`dnv-worker.md` HL1, HL2, AR10). A converge must store, because the
 worker's next round after a syncup's reply would otherwise answer from the
@@ -1398,9 +1394,9 @@ out sets it on a healthy disk as a full or read-only one does. It records no
 work owed and starts no retry. The second state of SH4, which only the store
 row and its probe read (DN18), plays no part here.
 
-A background converge attempt, on the dn the DN12 fence timer's alone
-(`cnagent.md` CN10, CN18 for the cn's), marks its object before it waits
-for the object's lock and cancels nothing. The
+A background converge attempt, the DN12 fence timer's alone (the cn runs
+none, `cnagent.md` CN10), marks its object before it waits for the
+object's lock and cancels nothing. The
 teardown of an object's state cancels its read and waits for nothing. The
 converge start a reply reports (SH28) is when the object's own marks began
 to stand without a break, so a node-level syncup shows as a converge start
@@ -4280,8 +4276,9 @@ else reported through `agent_reply` is still a protocol-level refusal.
   So does every re-converge a syncup at the held revision would bring, such
   as a leftover's sweep (DN17) or the start of a side's zeroing that nothing
   runs (DN16); only the converges no syncup brings still run — the
-  background converge attempts (SH11) and a restart's reconcile (DN2). On
-  the dn the one background converge is the DN12 fence timer's, so two
+  background converge attempts (SH11) and a restart's reconcile (DN2). The
+  one background converge is the DN12 fence timer's (the cn runs none,
+  `cnagent.md` CN10), so on the dn two
   waits last the whole fault short of an agent restart, whose reconcile
   converges each side from its held request with no new save (DN2): the
   migration gap a cutover request leaves when it was saved and its connect

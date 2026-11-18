@@ -149,8 +149,8 @@ type behaviorFront struct {
 // refresh implements the behavior file's re-read when its mtime or size
 // changed. A malformed file is logged once per mtime or size change and
 // ignored, keeping the previous levers; a file that is gone clears them.
-// Every load sets every lever, so it re-arms hang_rounds and leftover_rounds
-// and a rewrite counts their rounds afresh.
+// Every load sets every lever, so it re-arms hang_rounds, leftover_rounds
+// and read_leftover, and a rewrite counts their rounds afresh.
 func (f *behaviorFront) refresh(ctx context.Context) {
 	f.mu.Lock()
 	defer f.mu.Unlock()

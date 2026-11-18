@@ -4,7 +4,6 @@ import (
 	"context"
 	"strings"
 	"testing"
-	"time"
 
 	"github.com/distributed-nvme/distributed-nvme/common"
 	"github.com/distributed-nvme/distributed-nvme/pb"
@@ -61,7 +60,6 @@ func TestACheckRoundNamesALegSideWithNoController(t *testing.T) {
 		primary := tc.primary
 		t.Run(tc.name, func(t *testing.T) {
 			srv, node := newTestServer(t)
-			srv.retryInterval = time.Hour
 			opts := reqOpts{revision: 2, primary: primary}
 			syncupBoth(t, srv, opts)
 			nqn := legNqn(srv, testDataLeg)
@@ -153,7 +151,6 @@ func TestACheckRoundDoesNotNameASideTheConvergeWouldNotConnect(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			srv, node := newTestServer(t)
-			srv.retryInterval = time.Hour
 			if tc.pre != nil {
 				tc.pre(node)
 			}
@@ -176,7 +173,6 @@ func TestACheckRoundDoesNotNameASideTheConvergeWouldNotConnect(t *testing.T) {
 // (CN11), never the lookup's error.
 func TestAPrimaryLegRowKeepsItsProberWhenItsLookupFails(t *testing.T) {
 	srv, node := newTestServer(t)
-	srv.retryInterval = time.Hour
 	syncupBoth(t, srv, reqOpts{revision: 2, primary: true})
 	before := checkRound(t, srv, 2).GetLegIdToLeg()[testDataLeg]
 	node.mu.Lock()
@@ -197,7 +193,6 @@ func TestAPrimaryLegRowKeepsItsProberWhenItsLookupFails(t *testing.T) {
 // has failed and its row no longer reads OK.
 func TestAPrimaryLooksUpAOneSidedLegOnlyWhenItsRowIsNotOk(t *testing.T) {
 	srv, node := newTestServer(t)
-	srv.retryInterval = time.Hour
 	opts := reqOpts{revision: 2, primary: true}
 	syncupBoth(t, srv, opts)
 	probeLegs(t, srv, testMetaLeg, testDataLeg)

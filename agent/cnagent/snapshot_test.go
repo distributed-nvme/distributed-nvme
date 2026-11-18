@@ -486,7 +486,7 @@ func TestUncreatedSnapshotRetriesWhenTheOriginIdIsMissing(t *testing.T) {
 		t.Fatalf("re-apply: %v", err)
 	}
 	if n := len(node.callsMatching(message)); n != 1 {
-		t.Fatalf("the retry sent %d create_snap calls, want exactly 1", n)
+		t.Fatalf("the re-apply sent %d create_snap calls, want exactly 1", n)
 	}
 	row = reply.GetCntlrInfo().GetTdIdToThinInfo()[testSnapTd].
 		GetSliceIdToDmThin()[testSlice]

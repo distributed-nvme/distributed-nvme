@@ -39,23 +39,24 @@ func (f *repFix) identity(dev, id string) {
 // TestForcedStartRefusesAnOlderNamedLeg pins CN12's refusal of a named leg
 // whose change count is below that of a full member of the same identity
 // that the start would zero (olderNamedLeg): nothing is zeroed or
-// assembled, the row names both legs, and the pass registers the retry.
-// With the mark's force the start goes on. A higher count on a member of
+// assembled, and the row names both legs. The refusal lasts, so the read,
+// whose dry run meets it too (forcedStartNamed), names nothing, and nothing
+// runs between the worker's calls. With the mark's force the start goes on. A higher count on a member of
 // another identity, or on one that is not full, is not compared.
 func TestForcedStartRefusesAnOlderNamedLeg(t *testing.T) {
 	t.Run("refused", func(t *testing.T) {
 		f := downNoRepair(t)
 		f.node.setSuperblock(f.leg2, fakeSuperblock{events: 10})
 		f.node.setSuperblock(f.leg1, fakeSuperblock{events: 50})
+		f.node.forgetTraces()
 		info := f.syncup(t, withMark(quietReq(4), testDataLeg2))
 		assertErrorDetails(t, info.GetGrpIdToMdRaid()[testDataGrp],
 			"leg 0x7 is a full member with md change count 50, above "+
 				"the 10 of named leg 0x17", "grp data")
 		assertNoCall(t, f.node, "--zero-superblock")
 		assertNoCall(t, f.node, "cmd mdadm --assemble "+f.mdDev)
-		if !retrying(t, f.srv) {
-			t.Fatalf("the refused forced start registered no retry")
-		}
+		f.assertForcedStartUnnamed(t, 4, "the older named leg")
+		assertNoCall(t, f.node, "--zero-superblock")
 	})
 	t.Run("forced", func(t *testing.T) {
 		f := downNoRepair(t)
@@ -99,28 +100,45 @@ func TestForcedStartRefusesAnOlderNamedLeg(t *testing.T) {
 // TestForcedStartRefusesAMemberThatIsNotRead pins CN12's refusal of a
 // member the forced start would zero whose reading did not answer or failed:
 // a member whose disk returns errors is never taken for one with no
-// superblock, and nothing is zeroed or assembled.
+// superblock, and nothing is zeroed or assembled. The read meets the same
+// failure and names nothing (forcedStartNamed), so nothing runs between the
+// worker's calls while it lasts; once the member reads, the read names the
+// forced start, and the re-send on that round starts the array.
 func TestForcedStartRefusesAMemberThatIsNotRead(t *testing.T) {
 	f := downNoRepair(t)
 	f.node.mu.Lock()
 	f.node.failCmdAlways["readsb "+f.leg1] = ""
 	f.node.mu.Unlock()
-	info := f.syncup(t, withMark(quietReq(4), testDataLeg2))
+	f.node.forgetTraces()
+	held := withMark(quietReq(4), testDataLeg2)
+	info := f.syncup(t, held)
 	assertErrorDetails(t, info.GetGrpIdToMdRaid()[testDataGrp],
 		"forced start: member leg 0x7", "grp data")
 	assertErrorDetails(t, info.GetGrpIdToMdRaid()[testDataGrp],
 		"not read", "grp data")
 	assertNoCall(t, f.node, "--zero-superblock")
 	assertNoCall(t, f.node, "cmd mdadm --assemble "+f.mdDev)
-	if !retrying(t, f.srv) {
-		t.Fatalf("the refused forced start registered no retry")
-	}
+	f.assertForcedStartUnnamed(t, 4, "the member that is not read")
+
+	f.node.mu.Lock()
+	delete(f.node.failCmdAlways, "readsb "+f.leg1)
+	f.node.mu.Unlock()
+	f.node.Reset()
+	f.forcedStartResent(t, held, testDataLeg2, "named")
+	assertOrder(t, f.node,
+		zeroOf(f.leg1),
+		f.forced(f.leg2, mdUpdateUuid),
+		f.add(f.leg1))
+	f.assertForcedStartUnnamed(t, 4, "after the start", "named")
 }
 
 // TestForcedStartProvesEachZero pins CN12's read back of each zero: mdadm
 // answers a zero whose read of the member fails with success and writes
 // nothing, so a member that still shows a superblock after its zero, or
-// whose read back fails, is the group's error, and no assembly follows.
+// whose read back fails, is the group's error, and no assembly follows. The
+// read after it names the forced start, whose dry run reads no zero
+// (forcedStartNamed), and the re-send on that round zeroes again and, the
+// zero proven this time, starts the array.
 func TestForcedStartProvesEachZero(t *testing.T) {
 	for _, tc := range []struct {
 		name string
@@ -139,16 +157,26 @@ func TestForcedStartProvesEachZero(t *testing.T) {
 			f.node.mu.Lock()
 			tc.set(f)
 			f.node.mu.Unlock()
-			info := f.syncup(t, withMark(quietReq(4), testDataLeg2))
+			held := withMark(quietReq(4), testDataLeg2)
+			info := f.syncup(t, held)
 			assertErrorDetails(t, info.GetGrpIdToMdRaid()[testDataGrp],
 				tc.want, "grp data")
 			if !f.node.hasCall(zeroOf(f.leg1)) {
 				t.Fatalf("no zero of leg 1")
 			}
 			assertNoCall(t, f.node, "cmd mdadm --assemble "+f.mdDev)
-			if !retrying(t, f.srv) {
-				t.Fatalf("the unproven zero registered no retry")
-			}
+
+			f.node.mu.Lock()
+			delete(f.node.zeroNoEffect, f.leg1)
+			f.node.mu.Unlock()
+			f.node.forgetTraces()
+			f.node.Reset()
+			f.forcedStartResent(t, held, testDataLeg2, "named")
+			assertOrder(t, f.node,
+				zeroOf(f.leg1),
+				f.forced(f.leg2, mdUpdateUuid),
+				f.add(f.leg1))
+			f.assertForcedStartUnnamed(t, 4, "after the start", "named")
 		})
 	}
 }
@@ -215,7 +243,9 @@ func TestForcedStartDropsABadBlockList(t *testing.T) {
 // repair's bad leg decide, then the repair's new legs, then its bad leg,
 // and a member of another identity is not handed to mdadm, which would
 // refuse the whole assembly; two identities among the legs that decide are
-// the group's error, with no assembly and no retry.
+// the group's error, with no assembly, and the read, whose dry run of the
+// assembly meets the same refusal (absentArrayNamed), names nothing, so
+// nothing runs between the worker's calls.
 func TestAssemblyHandsMdOneIdentity(t *testing.T) {
 	assembled := func(f *repFix) string {
 		calls := f.node.callsMatching("cmd mdadm --assemble " + f.mdDev)
@@ -267,14 +297,18 @@ func TestAssemblyHandsMdOneIdentity(t *testing.T) {
 	t.Run("two identities in leg_list", func(t *testing.T) {
 		f := downNoRepair(t)
 		f.identity(f.leg1, "older")
+		f.node.forgetTraces()
 		info := f.syncup(t, quietReq(4))
 		assertErrorDetails(t, info.GetGrpIdToMdRaid()[testDataGrp],
 			"members of two identities", "grp data")
 		assertNoCall(t, f.node, "cmd mdadm --assemble "+f.mdDev)
 		assertNoCall(t, f.node, "cmd mdadm --create "+f.mdDev)
-		if retrying(t, f.srv) {
-			t.Fatalf("two identities registered a retry")
+		if _, reply := f.read(t, 4); strings.Contains(reply.GetDetails(),
+			f.absentNamed()) {
+			t.Fatalf("the read names the absent array of two identities: "+
+				"%q", reply.GetDetails())
 		}
+		assertNothingRunsBetweenCalls(t, f.node)
 	})
 }
 
@@ -435,9 +469,13 @@ func TestPutBackMakesTheIdentityCheck(t *testing.T) {
 // TestNoCreateOnceTheArrayRan pins CN12's refusal of case 1's create for a
 // group whose array has run (Group.array_made): with every leg available
 // and none carrying a superblock, as a forced start cut short after its
-// zeroes leaves them, the group's row reads ERROR, no array is created, and
-// the retry is registered, whose converge takes a leg with a superblock once
-// one is available; the same group without the flag is created.
+// zeroes leaves them, the group's row reads ERROR and no array is created.
+// The read, whose dry run of the assembly meets the same refusal
+// (absentArrayNamed), names nothing, and nothing runs between the worker's
+// calls. Once a leg with a superblock serves — one whose superblock records
+// its peer failed, which mdadm starts alone — the read names the absent
+// array, and the re-send on that round assembles it from that leg, its peer
+// added after. The same group without the flag is created.
 func TestNoCreateOnceTheArrayRan(t *testing.T) {
 	for _, made := range []bool{true, false} {
 		f := downNoRepair(t)
@@ -445,6 +483,7 @@ func TestNoCreateOnceTheArrayRan(t *testing.T) {
 		delete(f.node.superblocks, f.leg1)
 		delete(f.node.superblocks, f.leg2)
 		f.node.mu.Unlock()
+		f.node.forgetTraces()
 		req := quietReq(4)
 		dataGrpOf(req).ArrayMade = made
 		info := f.syncup(t, req)
@@ -457,8 +496,29 @@ func TestNoCreateOnceTheArrayRan(t *testing.T) {
 		assertErrorDetails(t, info.GetGrpIdToMdRaid()[testDataGrp],
 			"has run before", "grp data")
 		assertNoCall(t, f.node, "cmd mdadm --create "+f.mdDev)
-		if !retrying(t, f.srv) {
-			t.Fatalf("the refused create registered no retry")
+		if _, reply := f.read(t, 4); strings.Contains(reply.GetDetails(),
+			f.absentNamed()) {
+			t.Fatalf("the read names the absent array of a group whose "+
+				"array ran, with no superblock: %q", reply.GetDetails())
 		}
+		assertNothingRunsBetweenCalls(t, f.node)
+
+		f.node.setSuperblock(f.leg2, fakeSuperblock{
+			role: "Active device 1", events: 10, arrayState: ".A"})
+		f.node.Reset()
+		round, resent := resendRound(t, f.srv, req, "named")
+		if !strings.Contains(round.GetAgentReply().GetDetails(),
+			f.absentNamed()) || resent == nil {
+			t.Fatalf("the round once leg 2 carries a superblock is %v, "+
+				"re-sent %v; want the absent array named and a re-send",
+				round.GetAgentReply(), resent != nil)
+		}
+		assertNoCall(t, f.node, "cmd mdadm --create "+f.mdDev)
+		if !tracedCall(f.node, "named", "cmd mdadm --assemble "+f.mdDev) {
+			t.Fatalf("no assembly under the round's trace id:\n%s",
+				strings.Join(f.node.Traced("named"), "\n"))
+		}
+		assertOk(t, resent.GetCntlrInfo().GetGrpIdToMdRaid()[testDataGrp],
+			"grp data after the re-send")
 	}
 }
