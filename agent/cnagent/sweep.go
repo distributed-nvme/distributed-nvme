@@ -10,6 +10,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/distributed-nvme/distributed-nvme/agent"
 	"github.com/distributed-nvme/distributed-nvme/common"
@@ -949,9 +950,14 @@ type chainOutcome struct {
 // layers below report their objects as leftovers WITHOUT touching them.
 // Removing a leg out from under a live array would strand a migration's md
 // superblocks, and a pass that simply re-runs next round costs nothing.
+//
+// plan is the cntlr's plan in a cntlr's converge, from which L7 reads the
+// slices it discards on (removeThins), and nil in a node-level pass, whose
+// wanted set holds no pool, so that L7 discards nothing.
 func (s *CnAgentServer) runChain(
 	ctx context.Context,
 	st *cntlrState,
+	plan *cntlrPlan,
 	chain *cnChain,
 	actual *cnActual,
 	wanted *cnWanted,
@@ -1071,9 +1077,11 @@ func (s *CnAgentServer) runChain(
 			run:    func() bool { return s.removeDms(ctx, res, chain.raid0s, chain.tdErrors) },
 			report: func() { s.reportDms(res, chain.raid0s, chain.tdErrors) },
 		},
-		{ // L7 — thin volumes, and the pool-side `delete` of their ids.
+		{ // L7 — thin volumes, each discarded first where its id is
+			// deleted, and the pool-side `delete` of their ids.
 			run: func() bool {
-				return s.removeThins(ctx, chain, actual, wanted, res, &out)
+				return s.removeThins(
+					ctx, plan, chain, actual, wanted, res, &out)
 			},
 			report: func() { s.reportDms(res, chain.thins) },
 		},
@@ -1551,8 +1559,17 @@ func (s *CnAgentServer) reportDms(res *agent.SweepResult, groups ...[]string) {
 // kernel will act on. It records in out the pools whose delete message
 // failed, for the sweep that follows a failed delete
 // (sweepAfterFailedDeletes).
+//
+// A volume whose id the layer deletes is discarded first, before its
+// removal, so the disk nodes learn that its blocks are free (discardThin);
+// the delete alone changes only the pool's metadata. Only there: a volume
+// removed with its pool unwanted — a demotion, a level that drops the pool, a
+// whole sp leaving — is deactivated, and its blocks are the data the next
+// primary attaches. The discard is best effort, and nothing that becomes of
+// it stops the removal or the delete.
 func (s *CnAgentServer) removeThins(
 	ctx context.Context,
+	plan *cntlrPlan,
 	chain *cnChain,
 	actual *cnActual,
 	wanted *cnWanted,
@@ -1560,25 +1577,37 @@ func (s *CnAgentServer) removeThins(
 	out *chainOutcome,
 ) bool {
 	left := false
+	discard := newThinDiscard(plan)
 	for _, name := range chain.thins {
-		poolName, devId := s.thinIdentity(ctx, name, actual)
+		id := s.thinIdentity(ctx, name, actual)
+		_, poolWanted := wanted.dms[id.pool]
+		deletes := id.pool != "" && id.devId != "" && poolWanted
+		if deletes {
+			s.discardThin(ctx, discard, name, id)
+		}
 		if !s.removeDmVerified(ctx, name) {
 			res.Add(agent.LeftoverKindDm, name)
 			left = true
 			continue
 		}
-		if poolName == "" || devId == "" {
+		if !deletes {
 			continue
 		}
-		if _, poolWanted := wanted.dms[poolName]; !poolWanted {
-			continue
-		}
-		if s.deleteThinIdByName(ctx, poolName, devId) != nil &&
-			!slices.Contains(out.failedDeletes, poolName) {
-			out.failedDeletes = append(out.failedDeletes, poolName)
+		if s.deleteThinIdByName(ctx, id.pool, id.devId) != nil &&
+			!slices.Contains(out.failedDeletes, id.pool) {
+			out.failedDeletes = append(out.failedDeletes, id.pool)
 		}
 	}
 	return left
+}
+
+// thinId is what a thin volume's live table says of it: its pool's dm name,
+// its dev_id and its length in sectors. pool and devId are both empty when
+// the table cannot be read.
+type thinId struct {
+	pool    string
+	devId   string
+	sectors uint64
 }
 
 // thinIdentity reads a thin volume's pool and dev_id out of its live table.
@@ -1588,13 +1617,275 @@ func (s *CnAgentServer) thinIdentity(
 	ctx context.Context,
 	name string,
 	actual *cnActual,
-) (string, string) {
+) thinId {
 	targets, err := s.dm.Table(ctx, name)
 	if err != nil || len(targets) != 1 || targets[0].Type != "thin" ||
 		len(targets[0].Args) < 2 {
-		return "", ""
+		return thinId{}
 	}
-	return actual.byDevNo[targets[0].Args[0]], targets[0].Args[1]
+	return thinId{
+		pool:    actual.byDevNo[targets[0].Args[0]],
+		devId:   targets[0].Args[1],
+		sectors: targets[0].Length,
+	}
+}
+
+// thinDiscard is L7's discard state for one pass (discardThin): the chunks
+// the pass may still send, the one `dmsetup info` listing of the node it
+// reads suspended devices from, and each slice's answer, read once in the
+// pass whatever the number of volumes the slice's pool loses.
+type thinDiscard struct {
+	plan *cntlrPlan
+	// chunks is what is left of the pass's CnThinDiscardPassChunks.
+	chunks int
+	// listing is the node's `dmsetup info` listing, read at the first
+	// volume that has something to discard; listErr is why there is none
+	// to read from, a listing that failed or answered partial.
+	listed  bool
+	listing *agent.DmInfoListing
+	listErr error
+	// sliceWhy is each slice's reason to take no discard, "" for one that
+	// may take it.
+	sliceWhy map[uint64]string
+}
+
+func newThinDiscard(plan *cntlrPlan) *thinDiscard {
+	return &thinDiscard{
+		plan:     plan,
+		chunks:   common.CnThinDiscardPassChunks,
+		sliceWhy: make(map[uint64]string),
+	}
+}
+
+// discardThin discards one thin volume whose id L7 is about to delete
+// (cnagent.md CN14, CN21), in chunks of CnThinDiscardChunkBytes rounded down
+// to whole pool blocks, through one DiscardRanges call. The range ends at the
+// end of the volume's highest mapped block as its status reads it, or at the
+// volume's last whole block, and its chunks go top first, down toward the
+// first sector. dm-thin frees a block, and passes the discard down to the
+// pool's data device, only where no other volume maps it, so a snapshot keeps
+// the blocks it shares.
+//
+// The top-first order is what lets a later pass go on: the status names only
+// the highest mapped sector, which a pass's top chunks lower, so the next pass
+// that finds the volume — the re-send after a removal that failed — starts
+// below where this one stopped. A volume that ends inside a pool block keeps
+// that block once it is written: dm-thin unmaps only the blocks a discard
+// covers whole. So the range stops at the last whole block, the part-block
+// is counted as left, and a volume whose status reads only that block mapped
+// gets no discard at all, which keeps a re-send from opening it again for
+// nothing. Such a block also keeps the volume's highest sector at its end, so
+// a re-send after a pass the budget cut starts again at the last whole block.
+//
+// It sends nothing where the discard could wait in the kernel, which it
+// would do under the cntlr's CN1 locks: when a leg of the slice's groups has
+// a disconnect in flight, or its lookup in the pass's walk fails or finds no
+// live, optimized path (a discard into a dead leg waits out the leg fast IO
+// fail timeout), or when the volume, its pool or a dm device under the pool
+// reads suspended (sliceDiscardWhy); nor when the pool's status does not read
+// read-write, as dm-thin completes a discard on a read-only pool and unmaps
+// nothing. The pass sends at most CnThinDiscardPassChunks chunks over all its
+// volumes, so a pass's discards hold the locks for a bounded count of
+// BLKDISCARDs. Best effort: whatever it leaves — skipped, cut by the budget,
+// failed, or a mapped part-block — is logged with its bytes and why, and once
+// the volume is removed nothing discards it again, since the delete that
+// follows ends the volume and nothing remembers what was left.
+func (s *CnAgentServer) discardThin(
+	ctx context.Context,
+	td *thinDiscard,
+	name string,
+	id thinId,
+) {
+	stayed := func(bytes uint64, why string) {
+		slog.WarnContext(ctx, "thin volume not discarded in full",
+			slog.String("dm", name),
+			slog.String("pool", id.pool),
+			slog.Uint64("bytes_left", bytes),
+			slog.String("reason", why))
+	}
+	raw, err := s.dm.StatusNoFlush(ctx, name)
+	if err != nil {
+		stayed(id.sectors*agent.SectorSize, "status read: "+err.Error())
+		return
+	}
+	st, ok := common.ParseThinStatus(raw)
+	if !ok {
+		stayed(id.sectors*agent.SectorSize, "status does not parse: "+raw)
+		return
+	}
+	if !st.Mapped {
+		return
+	}
+	sp := td.sliceOfPool(id.pool)
+	if sp == nil || td.plan.blockSize < agent.SectorSize {
+		stayed(st.MappedSectors*agent.SectorSize,
+			"no slice of the request names the pool")
+		return
+	}
+	block := td.plan.blockSize / agent.SectorSize
+	whole := id.sectors / block * block
+	// part is the volume's last part-block, in sectors, when the status
+	// reads it mapped: a discard never unmaps it.
+	var part uint64
+	if st.HighestSector+1 > whole {
+		part = id.sectors - whole
+	}
+	partWhy := "the volume's last block is partial, and no discard unmaps it"
+	end := min(st.HighestSector+1, whole) * agent.SectorSize
+	if end == 0 || part > 0 && st.MappedSectors <= block {
+		if part > 0 {
+			stayed(part*agent.SectorSize, partWhy)
+		}
+		return
+	}
+	left := end + part*agent.SectorSize
+	if td.chunks <= 0 {
+		stayed(left, "the pass's discard budget is spent")
+		return
+	}
+	if why := s.sliceDiscardWhy(ctx, td, sp); why != "" {
+		stayed(left, why)
+		return
+	}
+	if dev := td.listing.Devs[name]; dev != nil && dev.Suspended {
+		stayed(left, "the volume is suspended")
+		return
+	}
+	chunk := uint64(common.CnThinDiscardChunkBytes)
+	if bytes := td.plan.blockSize; bytes <= chunk {
+		chunk -= chunk % bytes
+	}
+	var ranges []common.DiscardRange
+	for hi := end; hi > 0 && len(ranges) < td.chunks; {
+		lo := uint64(0)
+		if hi > chunk {
+			lo = hi - chunk
+		}
+		ranges = append(ranges,
+			common.DiscardRange{Offset: lo, Length: hi - lo})
+		hi = lo
+	}
+	began := time.Now()
+	done, err := s.oc.DiscardRanges(ctx, s.nf.DmPath(name), ranges)
+	sent := done
+	if err != nil {
+		sent++
+	}
+	td.chunks -= sent
+	var discarded uint64
+	for _, r := range ranges[:done] {
+		discarded += r.Length
+	}
+	left -= discarded
+	slog.InfoContext(ctx, "thin volume discarded",
+		slog.String("dm", name),
+		slog.String("pool", id.pool),
+		slog.Uint64("bytes", discarded),
+		slog.Int("chunks", done),
+		slog.Int64("duration_ms", time.Since(began).Milliseconds()))
+	switch {
+	case err != nil:
+		stayed(left, "discard: "+err.Error())
+	case discarded < end:
+		stayed(left, "the pass's discard budget is spent")
+	case part > 0:
+		stayed(left, partWhy)
+	}
+}
+
+// sliceOfPool is the plan's slice whose pool is the dm device pool, nil for
+// none.
+func (td *thinDiscard) sliceOfPool(pool string) *slicePlan {
+	if td.plan == nil {
+		return nil
+	}
+	for _, sp := range td.plan.slices {
+		if sp.poolFinalName == pool {
+			return sp
+		}
+	}
+	return nil
+}
+
+// sliceDiscardWhy is the reason a slice takes no discard in this pass, ""
+// for one that may (discardThin), read once a pass for each slice, the
+// node's `dmsetup info` listing once for all of them. Every leg of the
+// slice's groups that carries IO — the groups' legs and an open repair's new
+// legs, a provisioning one excepted, as nothing reaches it — needs a path
+// both live and optimized in the pass's walk and no disconnect in flight;
+// the pool, its two concats, a RedundNone group's dm-linear and every such
+// leg's wrapper need to read not suspended in the listing; and the pool's
+// status needs to read read-write.
+func (s *CnAgentServer) sliceDiscardWhy(
+	ctx context.Context,
+	td *thinDiscard,
+	sp *slicePlan,
+) string {
+	if why, ok := td.sliceWhy[sp.sliceId]; ok {
+		return why
+	}
+	why := s.readSliceDiscardWhy(ctx, td, sp)
+	td.sliceWhy[sp.sliceId] = why
+	return why
+}
+
+func (s *CnAgentServer) readSliceDiscardWhy(
+	ctx context.Context,
+	td *thinDiscard,
+	sp *slicePlan,
+) string {
+	devs := []string{sp.poolFinalName, sp.poolMetaName, sp.poolDataName}
+	for _, gp := range slices.Concat(sp.metaGrps, sp.dataGrps) {
+		if !gp.raid1 && gp.dmName != "" {
+			devs = append(devs, gp.dmName)
+		}
+		legs := gp.legs
+		if rp := gp.openRep(); rp != nil {
+			legs = slices.Concat(legs, rp.newLegs)
+		}
+		for _, lp := range legs {
+			if lp.provisioning {
+				continue
+			}
+			if s.disconnectInFlight(lp.nqn) {
+				return fmt.Sprintf("leg %016x is disconnecting", lp.legId)
+			}
+			view, err := s.lookupSubsys(ctx, td.plan.walk, lp.nqn, sideNsid)
+			if err != nil {
+				return fmt.Sprintf("leg %016x: %v", lp.legId, err)
+			}
+			if !view.available() {
+				return fmt.Sprintf("leg %016x has no live, optimized path",
+					lp.legId)
+			}
+			devs = append(devs, lp.name)
+		}
+	}
+	if !td.listed {
+		td.listed = true
+		td.listing, td.listErr = s.dm.ListInfo(ctx)
+		if td.listErr == nil && td.listing.Partial {
+			td.listing, td.listErr = nil,
+				errors.New("the dm listing answered partial")
+		}
+	}
+	if td.listErr != nil {
+		return "dm listing: " + td.listErr.Error()
+	}
+	for _, dev := range devs {
+		if info := td.listing.Devs[dev]; info != nil && info.Suspended {
+			return "dm device " + dev + " is suspended"
+		}
+	}
+	raw, err := s.dm.StatusNoFlush(ctx, sp.poolFinalName)
+	if err != nil {
+		return "pool status read: " + err.Error()
+	}
+	if st, ok := common.ParseThinPoolStatus(raw); !ok || st.ReadOnly ||
+		st.NeedsCheck {
+		return "the pool is not read-write: " + raw
+	}
+	return ""
 }
 
 // deleteThinIdByName is the CN14 deletion message addressed by name. The pool
@@ -2295,7 +2586,7 @@ func (s *CnAgentServer) sweepCntlr(
 	// read off this snapshot and this chain; the next pass learns its own.
 	if remove {
 		s.cntlrPreSteps(ctx, plan, actual, wanted)
-		out := s.runChain(ctx, st, chain, actual, wanted, res)
+		out := s.runChain(ctx, st, plan, chain, actual, wanted, res)
 		plan.cloneHold = s.lingeringCloneHold(
 			ctx, out.lingeringClones, actual)
 		// CN14: a delete message that failed is not sent again by any later
@@ -2997,7 +3288,7 @@ func (s *CnAgentServer) sweepCn(
 			s.reportChain(chain, res)
 			continue
 		}
-		s.runChain(ctx, nil, chain, actual, newCnWanted(), res)
+		s.runChain(ctx, nil, nil, chain, actual, newCnWanted(), res)
 	}
 
 	// Cross-sp items, each its own one-layer chain: they have no stack of

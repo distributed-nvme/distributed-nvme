@@ -3141,8 +3141,8 @@ messages — and is corrected by the bump's higher-revision request.
 A td leaving `td_list` is deleted by the sweep (CN21), which is where its
 layer order already puts the pieces: its namespaces, ns-devs, raid0 and
 dm-error go first because they reference it (L1, L2, L6), then the thin
-volume devices (L7), then the delete message of its `dev_id` per slice
-pool.
+volume devices (L7), each discarded first (below), then the delete message
+of its `dev_id` per slice pool.
 
 Both halves of that message are read from the volume's own live table —
 the thin target's pool device and its `dev_id` — immediately before the
@@ -3195,11 +3195,80 @@ a sweep of a pool's ids finds an id that has no dm device, so without the
 one after a failed delete, the id's blocks can stay allocated for the
 life of the pool device.
 
+**The discard before the delete.** The delete message frees the id's
+blocks in the pool's metadata alone, and nothing tells the disk nodes under
+the pool that those blocks are free. So L7 discards each volume whose id it
+is about to delete, before the volume's removal, in chunks of
+`CnThinDiscardChunkBytes` rounded down to whole pool blocks, through one
+`DiscardRanges` call in the agent's own process (`osclient.md`,
+DiscardRanges). The range runs down to the volume's first sector from the
+lower of two points, the end of its highest mapped block as its own status
+reads it (`dmsetup status --noflush`) and the end of its last whole pool
+block, the top chunk sent first. dm-thin unmaps each whole block a chunk
+covers and passes the discard down to the pool's data device only for a
+block no other volume maps, so a snapshot keeps every block it shares with
+the volume. The discard takes the delete's gate: a volume removed
+while its pool is unwanted keeps the data the next primary attaches, and
+gets neither. Reason: a volume whose id the pass deletes loses its data to
+that delete, so its discard loses nothing more. Only a volume gets a
+discard. A sweep of a pool's ids — the activation sweep, or the sweep
+after a failed delete — deletes ids that have no volume and discards
+nothing, so a td deleted while its pool was unwanted, whose volume was
+only deactivated and whose id such a sweep deletes later, keeps its blocks
+on the disk nodes until the pool writes them again.
+
+The discard is best effort and bounded, since each chunk holds the pass,
+and its CN1 locks, until the kernel answers it. A slice takes no discard
+in a pass when one of these reads, each made once in the pass, says a
+discard could wait there or do nothing: a leg of the slice's groups that
+carries IO — a leg of a group's `leg_list` or a new leg of its open
+repair, a provisioning one excepted — has a disconnect in flight, or its
+lookup in the pass's walk fails or finds no path both live and optimized,
+as a discard into a dead leg waits out the leg fast IO fail timeout; the
+pool, its two concats, a `RedundNone` group's dm-linear or such a leg's
+wrapper reads suspended in one `dmsetup info` listing of the node, or that
+listing fails or answers partial; or the pool's status does not read, or
+reads read-only or needs_check, as dm-thin completes a discard on a
+read-only pool and unmaps nothing (a pool out of data space takes it). A
+volume that reads suspended in that listing takes none either.
+A pass sends at most `CnThinDiscardPassChunks` chunks over all its
+volumes.
+
+A slice's volume is the td's size over the slice count, a whole number of
+stripes, and a stripe can be smaller than the pool's block, so a volume
+can end inside its last block. dm-thin unmaps only the blocks a discard
+covers whole and completes a shorter discard with nothing unmapped, so
+that part-block, once written, stays mapped until the delete: the range
+stops at the last whole block, and a volume whose status reads that
+part-block alone mapped gets no discard. What a volume keeps undiscarded —
+skipped, past the pass's count, behind a chunk that failed, or a mapped
+part-block — is logged with its bytes and why, and nothing of it stops the
+removal or the delete; once the volume is removed no pass discards it
+again, since the delete ends the volume and nothing remembers what was
+left. The discard's open for writing makes udev probe the volume when it
+closes (the stock watch rule), and a removal that meets that probe fails
+busy: the layer then stops, as a layer that leaves anything does, and the
+re-send's pass reads the volume's status again and discards from there.
+The top-first order is what makes that pass go on: the status names only
+the highest mapped sector, which a pass's top chunks lower as they unmap
+the top, so after a pass the count cut the next one starts below where it
+stopped, and after a whole discard the volume maps no whole block, so the
+next pass sends nothing, opens nothing for udev to probe, and removes it.
+A mapped
+part-block keeps the highest sector at the volume's end, so there a re-send
+after a pass the count cut starts again at the last whole block and sends
+the same top chunks again. Not taken: one discard of the whole volume,
+whose time under the locks has no bound; holding the delete until the
+volume reads unmapped, which keeps a large volume's deletion going for
+many passes; and a disk node's discard of the extents its sweep frees,
+which frees space behind the disk and changes nothing a host reads, since
+a thin volume never shows a host a block it has not written.
+
 A whole sp leaving this CN — the pointer removed, or `SP_LEVEL_DISABLE` —
 instead only deactivates: the pool is unwanted too, so by the rule above
-the thin volumes' removal sends no delete message at all, because the
-pool metadata lives on the DN legs and the next hosting CN must find the
-thin volumes intact.
+the thin volumes' removal sends no delete message and no discard at all,
+because the pool metadata lives on the DN legs and the next hosting CN must
+find the thin volumes intact.
 
 CN15. Per-td devices (`td.go`; the primary builds both, a standby only
 the error): the raid0 `CnRaid0Name` (dm-striped across the td's per-slice
@@ -4442,7 +4511,8 @@ L6. per-td raid0s and dm-errors.
 
 L7. each thin volume removed and then, only if its pool is one the
 desired state still wants, the pool-side delete of its id under CN14's
-rule; a delete that fails has that pool's ids swept later in the same
+rule, the volume discarded before its removal under that same condition,
+best effort and within CN14's bounds; a delete that fails has that pool's ids swept later in the same
 pass when the pass's request counts as delivered (CN8, CN14).
 
 L8. thin pools, then the concats under them. An arming of CN14's
@@ -4476,10 +4546,10 @@ when its own connection is still there: they are two different objects,
 and the connection is a leftover of this pass that a later pass's probe
 finds gone.
 
-No delete message is ever sent for a thin volume whose pool is itself
-going (CN14: this is deactivation, the metadata on the legs is the next
-CN's to find, and a created td's volumes are re-attached there without
-any message), and nothing in any layer runs mdadm --detail (CN12).
+No delete message and no discard are ever sent for a thin volume whose
+pool is itself going (CN14: this is deactivation, the metadata on the legs
+is the next CN's to find, and a created td's volumes are re-attached there
+without any message), and nothing in any layer runs mdadm --detail (CN12).
 
 **"Gone" is probed, never inferred from an exit status**
 (`architecture.md`, Teardown by sweep): `dmsetup info` for a dm device,

@@ -1533,6 +1533,23 @@ design:
   block on one slice only when it covers nearly the slice count times the
   block, and `fstrim` can report success and free nothing. Read from the kernel's code, not measured. State: accepted.
   Procedure to write, one line on the stripe setting.
+- **A deleted volume's space can stay in use on the disks.** The delete
+  of a volume frees its blocks in the thin pool alone, so the primary
+  first discards the blocks the volume wrote, and the discard reaches the
+  disk nodes' disks. That matters for an SSD and for a thin disk, such as
+  a cloud disk or a file. The primary skips the discard while a leg of
+  the slice has no live path, while a device mapper device of the slice
+  is suspended, or while the thin pool is read-only, since the discard
+  could then wait for a long time or do nothing. It also sends at most a
+  fixed amount of discards in one converge, and leaves the rest. A volume
+  whose part on each slice is not a whole number of thin pool blocks keeps
+  the last, partial block of each part once it was written. A volume deleted while its pool moves to another
+  controller node, or while the pool is turned off, is never discarded:
+  the thin pool deletes it later, with no volume left to discard. What is
+  skipped or left stays in use on the disk until the pool writes those
+  blocks again; no host can read it. A block that a snapshot shares stays
+  with the snapshot. Read from the kernel's code, not measured. State:
+  accepted.
 - **Every controller node of a cluster runs one kernel series.** From
   kernel 6.19 on, md records a new array's block size in bytes of its
   superblock that older kernels read as padding and refuse. A failover or

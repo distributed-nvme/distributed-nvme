@@ -37,7 +37,7 @@ the clone's source lost and given back, a new volume over a thin id that
 holds data, a disk node that dies under a host's writes, and
 the leftover, an accepted request reporting residue (`cnagent.md` CN20). The
 cases run in a fixed order, fail-fast — smoke, redund, repair, teardown,
-thinbm, torn, clone_xfer, restart, pause — each under pool ids of its own and
+thinbm, torn, discard, clone_xfer, restart, pause — each under pool ids of its own and
 each leaving nothing of its pools, a teardown per case and per stage that
 also keeps the run inside a DN's data area, which the cases together would
 overdraw.
@@ -307,10 +307,10 @@ that asks for the counters, which reads them at the call as
   and clone_xfer's rebuild after the wipe build a created td over the data
   the host or the copy wrote. thinbm and torn set `created` by hand, and keep
   a td not created where the stage is about that state: thinbm's snapshot,
-  and torn's refused volume and half-made snapshot. smoke, teardown and
-  restart send `created` false throughout, since none builds a written td's
-  thin volume again: they run no failover, wipe no kernel state, and the
-  restart case keeps the kernel's devices.
+  and torn's refused volume and half-made snapshot. smoke, teardown,
+  discard and restart send `created` false throughout, since none builds a
+  written td's thin volume again: they run no failover, wipe no kernel
+  state, and the restart case keeps the kernel's devices.
 * **Negatives are exact.** Provisioning and pending are healthy statuses, so an
   error row compares against error, never "not OK", and a suppressed one also
   reads the level's details and its reason. A failed read taken for an absence
@@ -727,6 +727,29 @@ torn marks file of the cntlr is in the local store, a fresh read after a
 second restart still reports the mark, and a request that lists the snapshot
 torn clears the mark and the file (CN2, CN14; `dnv-worker.md` RW19 is the
 worker's half).
+
+**discard** proves that a host's discard and a deleted volume's discard
+reach the thin pool and the disk node through the whole stack, on the S
+shape on DN1 with one slice, a data group many extents long and a volume
+of a gibibyte, which maps nothing it was not written. An 8 MiB host write
+raises the pool's used data blocks by eight; an aligned 4 MiB
+`blkdiscard` drops them by four and a 512 KiB one by none, as one slice
+hands the thin volume each discard whole (`architecture.md`, Known
+limits, the entry on a host discard). A request that drops the volume and
+its namespace then brings the discard of `cnagent.md` CN14: the agent's
+log shows the volume's discard, one chunk from the end of its highest
+mapped block down to its first sector, before its removal, which comes
+before its id's delete; the pool's used blocks go back to their baseline, and DN1's side
+device counts among its discards at least the blocks the volume still
+mapped. The case plays the worker's re-send of that request, since a
+removal right after the discard can meet udev's probe of the volume
+(CN14), and takes the first reply clean or naming the volume alone. It
+logs the pool's status with its discard passdown word, the discard
+counters of the side device and of the per-CN dm-linear above it, the
+backing file's allocated blocks before and after, and the agent's record
+of the discard with its time. With `DISCARD_MODE=measure` the host writes
+the whole volume before the delete, so that record times the discard of a
+written gibibyte.
 
 **clone_xfer** proves `architecture.md`, Transfer + clone = cross-SP live
 migration, and Clone metadata durability, between pools on different nodes

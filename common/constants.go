@@ -638,6 +638,21 @@ const (
 	CnLegProbeInterval     = 5
 	CnLegProbeStallSeconds = 15
 
+	// The primary's discard of a deleted thin volume (cnagent.md CN14, CN21):
+	// the sweep's thin layer discards each volume whose id it deletes, from
+	// the end of the volume's highest mapped block down, top chunk first, in
+	// BLKDISCARDs of CnThinDiscardChunkBytes rounded down to whole pool
+	// blocks, and sends at most CnThinDiscardPassChunks of them in one pass
+	// over all its volumes.
+	// Each one holds the cntlr's CN1 locks until the kernel answers it,
+	// however long that takes, so the count is what bounds a pass's time in
+	// them. What the count leaves is not discarded once the volume is
+	// removed: the delete that follows ends the volume, and nothing
+	// remembers it. The cn suite's discard case logs how long the discard
+	// of a written volume takes, which is what the two sizes answer to.
+	CnThinDiscardChunkBytes = 1 << 30
+	CnThinDiscardPassChunks = 16
+
 	// The leg health block (architecture.md, Group on-leg layout: meta region,
 	// data region, health block): the last 4 KiB of the leg's meta region.
 	// Payload = magic + writer id + timestamp, never interpreted on read

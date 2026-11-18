@@ -10,7 +10,7 @@
 #       [--wipe] user1@ip1 user2@ip2
 #
 # Cases (cnagent_integtest.md, Cases): smoke, redund, repair, teardown,
-# thinbm, torn, clone_xfer, restart, pause; `teardown`, the teardown-by-sweep
+# thinbm, torn, discard, clone_xfer, restart, pause; `teardown`, the teardown-by-sweep
 # case, injects the faults (a pinned dm device, an iptables partition of the
 # nvme-tcp port, a background writer); case A's `degrade` stage reuses the
 # partition, its `dial` stage drops new connections to the port, `clone_xfer` slows its copy with a token bucket on what the clone's node
@@ -218,7 +218,7 @@ PAUSE_STOP=""
 # summaries print; PAUSE_OUT can hold an earlier run's too.
 PAUSE_REPORTS=()
 
-CASES=(smoke redund repair teardown thinbm torn clone_xfer restart pause)
+CASES=(smoke redund repair teardown thinbm torn discard clone_xfer restart pause)
 
 # ---------------------------------------------------------------------------
 # Logging, assertions, failure handling
@@ -695,6 +695,14 @@ dn_lin_name() { # dnidx sp side cnidx
 	printf 'dnv-%s-%s-d1-%s-%s-%s\n' "$(hex16 "$CLUSTER")" \
 		"$(hex16 "${DNID[$1]}")" "$(hex16 "$2")" "$(hex16 "$3")" \
 		"$(hex16 "${CNID[$4]}")"
+}
+
+# dn_side_name mirrors DnSideName (architecture.md, dm device names): the
+# side's own data device on its disk node, kind d4, under every per-CN
+# dm-linear of the side.
+dn_side_name() { # dnidx sp side
+	printf 'dnv-%s-%s-d4-%s-%s\n' "$(hex16 "$CLUSTER")" \
+		"$(hex16 "${DNID[$1]}")" "$(hex16 "$2")" "$(hex16 "$3")"
 }
 
 side_to_cn_nqn() { # cluster sp leg cn
@@ -1384,6 +1392,56 @@ dm_wsect() {
 		;;
 	esac
 	echo "$wsect"
+}
+
+# dm_discards <name> — one dm device's discards since it was created: the
+# completed count and the sectors, fields 12 and 14 of its /sys/block stat,
+# "<count> <sectors>". It fails as dm_wsect does.
+dm_discards() {
+	local dmk got
+	dmk=$(readlink -f "/dev/mapper/$1" 2>/dev/null) || dmk=""
+	dmk=${dmk##*/}
+	case "$dmk" in
+	dm-*) ;;
+	*)
+		echo "dm_discards: /dev/mapper/$1 is not a dm device" >&2
+		return 1
+		;;
+	esac
+	got=$(awk '{print $12, $14}' "/sys/block/$dmk/stat") || return 1
+	if ! [[ "$got" =~ ^[0-9]+\ [0-9]+$ ]]; then
+		echo "dm_discards: $dmk's discard counters read '$got'" >&2
+		return 1
+	fi
+	echo "$got"
+}
+
+# pool_status <pool> — one thin pool's status line, read with --noflush so
+# that the read commits nothing (dnagent.md SH17); MISSING when it does not
+# read.
+pool_status() { dmsetup status --noflush "$1" 2>/dev/null || echo MISSING; }
+
+# pool_used <pool> — the data blocks one thin pool maps: the used half of
+# the data pair its status line carries after the transaction and the
+# metadata pair (common.ParseThinPoolStatus). It fails, saying so, when the
+# line carries no such pair.
+pool_used() {
+	local st used
+	if ! st=$(dmsetup status --noflush "$1" 2>&1); then
+		echo "pool_used: the status of $1 does not read: $st" >&2
+		return 1
+	fi
+	used=$(printf '%s\n' "$st" | awk '{
+		for (i = 1; i <= NF; i++)
+			if ($i == "thin-pool") { split($(i + 3), p, "/"); print p[1]; exit }
+	}')
+	case "$used" in
+	'' | *[!0-9]*)
+		echo "pool_used: the status of $1 reads '$st'" >&2
+		return 1
+		;;
+	esac
+	echo "$used"
 }
 
 # open_rc <name> — the exit status of a bounded 512-byte read of one dm device,
@@ -8981,6 +9039,180 @@ case_torn() {
 }
 
 # ---------------------------------------------------------------------------
+# Case K — discard (cnagent_integtest.md, Cases): host discards through the
+# stack, and the primary's discard of a deleted volume (cnagent.md CN14)
+# ---------------------------------------------------------------------------
+#
+# The S shape on DN1, its data group DISCARD_EXT extents long and its volume
+# DISCARD_TD_SIZE, so that DISCARD_MODE=measure can time the discard of a
+# written gibibyte; the default run writes a few MiB of it. A thin volume maps
+# nothing it was not written, so the size costs the default run nothing.
+
+DISCARD_EXT=20
+DISCARD_DATA=$((DISCARD_EXT * EXTENT_SIZE / BLOCK_SIZE - NONE_META_BLOCKS))
+DISCARD_TD_SIZE=1073741824
+# DISCARD_MODE picks what the delete stage discards (cnagent_integtest.md,
+# Cases, discard): "check", the default, the four blocks the host's writes
+# and discards leave mapped; "measure", the whole volume, written first, so
+# that the agent's record times the discard of a written gibibyte.
+DISCARD_MODE=${DISCARD_MODE:-check}
+
+# pool_wait_used polls one thin pool's used data blocks until they read want,
+# for a bounded time: a host write or discard that has returned has changed
+# the pool's count in memory, which the --noflush status reads, but the poll
+# keeps a slow read from failing the stage.
+pool_wait_used() { # cnidx pool want secs label
+	local deadline=$((SECONDS + $4)) got
+	while :; do
+		got=$(helper "$1" "pool_used '$2'") ||
+			die "$5: the used blocks of $2 do not read"
+		[ "$got" = "$3" ] && return 0
+		[ "$SECONDS" -lt "$deadline" ] ||
+			die "$5: $2 maps $got data blocks after $4 s, want $3"
+		sleep 0.5
+	done
+}
+
+case_discard() {
+	CASE=discard
+	DIAG_CNTLRS=()
+	SIDE_PROVISIONED=()
+	local sp=0x421 cntlr=0x1 cn=1 dn=1 hv=2 slot=0
+	local nqn="$NQN_IT_PREFIX:k:vol1"
+	local uuid=99999999-9999-4999-8999-999999999999
+	local req="$WORK/req-discard-cn1.json"
+	local out dev pool thin side lin base cntlrrev vd seq rec status
+	local mapped want_len sd0 sd1 ln0 ln1 al0 al1
+	diag_cntlr "$cn" "$sp" "$cntlr"
+	dev=$(host_dev "$uuid")
+	pool=$(cn_dm_name c2 "$cn" "$sp" "$S_SLICE")
+	thin=$(cn_dm_name c3 "$cn" "$sp" "$S_TD" "$S_SLICE")
+	side=$(dn_side_name "$dn" "$sp" "$S_DSIDE")
+	lin=$(dn_lin_name "$dn" "$sp" "$S_DSIDE" "$cn")
+
+	stage dn "the S-shaped SP on DN1, its data side $DISCARD_EXT extents"
+	dn_pointers "$dn" "$sp:$S_MLEG:$S_MSIDE" "$sp:$S_DLEG:$S_DSIDE"
+	dn_side "$dn" "$sp" "$S_MLEG" "$S_MSIDE" 1 "$NONE_MGRP_ZERO_BYTES" \
+		"${CNID[$cn]}"
+	dn_side "$dn" "$sp" "$S_DLEG" "$S_DSIDE" "$DISCARD_EXT" \
+		"$NONE_DGRP_ZERO_BYTES" "${CNID[$cn]}"
+
+	stage cn "CN1 builds the primary stack over one slice"
+	bump_cn_sync "$cn"
+	out=$(cnctl "$cn" syncup-cn --revision "${CNREV[$cn]}" --cntlr "$sp:$cntlr")
+	assert_cn_info_ok "$out" "discard syncup-cn"
+	req_none "$req" "$cn" "$dn" "$sp" "$cntlr" "$slot" "$nqn" "$uuid" false
+	req_set "$req" "(.id_to_slice[].data_grp_list[0] |=
+		(.ext_cnt = \"$DISCARD_EXT\" | .data_blocks = \"$DISCARD_DATA\"))
+		| .td_list[0].size = \"$DISCARD_TD_SIZE\""
+	bump_cn_rev "$cn"
+	out=$(cn_syncup_cntlr "$cn" "$req")
+	assert_map_ok "$out" slice_id_to_dm_pool "$S_SLICE" discard
+	assert_thin_ok "$out" "$S_TD" "$S_SLICE" discard
+	assert_map_ok "$out" ns_id_to_namespace "$S_NS" discard
+
+	stage write "an 8 MiB host write maps 8 pool blocks"
+	host_connect "$hv" "$cn" "$nqn"
+	helper "$hv" "wait_dev '$dev' 20" || die "no device node $dev on vm$hv"
+	host_wait_ana "$hv" "$nqn" "$cn" optimized 20
+	base=$(helper "$cn" "pool_used '$pool'") ||
+		die "discard: the used blocks of $pool do not read"
+	make_pattern "$hv" "$WORK/pattern-k.bin" 8
+	write_range "$hv" "$WORK/pattern-k.bin" "$dev" 8
+	pool_wait_used "$cn" "$pool" $((base + 8)) 10 "discard: the 8 MiB write"
+
+	stage hostdiscard "an aligned 4 MiB discard frees 4 blocks, a 512 KiB one none"
+	# One slice, so the raid0 hands the thin volume each discard whole, and
+	# a block is BLOCK_SIZE (architecture.md, Known limits, the entry on a
+	# host discard).
+	sshv "$hv" "blkdiscard --offset 0 --length $((4 * 1048576)) $dev"
+	pool_wait_used "$cn" "$pool" $((base + 4)) 10 \
+		"discard: the aligned 4 MiB discard"
+	sshv "$hv" "blkdiscard --offset $((4 * 1048576)) --length $((512 * 1024)) $dev"
+	sleep 1
+	assert_eq "$(helper "$cn" "pool_used '$pool'")" $((base + 4)) \
+		"discard: the 512 KiB discard frees no block"
+	mapped=4
+	want_len=$((8 * 1048576))
+	if [ "$DISCARD_MODE" = measure ]; then
+		# The whole volume, so that the delete's discard covers a written
+		# gibibyte; zeros map a thin block as data does.
+		sshv "$hv" "dd if=/dev/zero of=$dev bs=1M count=$((DISCARD_TD_SIZE / 1048576)) conv=fsync status=none && sync"
+		mapped=$((DISCARD_TD_SIZE / BLOCK_SIZE))
+		want_len=$DISCARD_TD_SIZE
+		pool_wait_used "$cn" "$pool" $((base + mapped)) 30 \
+			"discard: the whole volume written"
+	fi
+
+	stage delete "the td's delete discards its volume first; the pool goes back to its baseline"
+	host_disconnect "$hv" "$nqn"
+	status=$(helper "$cn" "pool_status '$pool'")
+	log "discard: $pool before the delete: $status"
+	case " $status " in
+	*" discard_passdown "*) ;;
+	*) die "discard: $pool does not pass discards down: $status" ;;
+	esac
+	sd0=$(helper "$dn" "dm_discards '$side'") ||
+		die "discard: the discard counters of $side do not read"
+	ln0=$(helper "$dn" "dm_discards '$lin'") ||
+		die "discard: the discard counters of $lin do not read"
+	al0=$(sshv_ok "$dn" "stat -c %b $WORK/backing.img")
+	req_set "$req" ".td_list = [] | .nqn_to_subsystem[\"$nqn\"].ns_list = []"
+	bump_cn_rev "$cn"
+	cntlrrev=${CNREV[$cn]}
+	# The worker's re-send (dnv-worker.md RW4): the discard's close makes udev
+	# probe the volume, and a removal that meets the probe fails busy
+	# (cnagent.md CN14), so the first pass may leave the volume, named alone.
+	out=$(cn_syncup_cntlr "$cn" "$req" --expect-code 4 2>/dev/null || true)
+	[ -n "$out" ] || die "discard: the delete's syncup-cntlr printed no reply"
+	vd="$(jq_of "$out" '.agent_reply.code // 0') $(jq_of "$out" \
+		'.agent_reply.details // ""')"
+	log "discard: the delete's first pass answers '$vd'"
+	verdict_names_only "$vd" "discard: the delete's first pass" "dm:$thin"
+	resync_until_clean "$cn" "$sp" "$cntlr" "$cntlrrev" "$req" 30 \
+		"discard: the delete"
+	assert_eq "$(helper "$cn" "dm_state '$thin'")" missing \
+		"discard: the thin volume is gone"
+	pool_wait_used "$cn" "$pool" "$base" 10 "discard: the delete"
+	seq=$(helper "$cn" "cn_events $TRACE")
+	assert_before "$seq" \
+		"^discard --offset 0 --length $want_len /dev/mapper/$thin\$" \
+		"^dmsetup remove $thin\$" \
+		"discard: the volume is discarded before its removal (CN14)"
+	assert_before "$seq" "^dmsetup remove $thin\$" \
+		"^dmsetup message $pool 0 delete 1\$" \
+		"discard: the volume is removed before its id's delete (CN14)"
+	assert_eq "$(event_cnt "$seq" "^discard-failed .* /dev/mapper/$thin\$")" 0 \
+		"discard: no chunk of the volume's discard failed"
+	sd1=$(helper "$dn" "dm_discards '$side'") ||
+		die "discard: the discard counters of $side do not read"
+	ln1=$(helper "$dn" "dm_discards '$lin'") ||
+		die "discard: the discard counters of $lin do not read"
+	al1=$(sshv_ok "$dn" "stat -c %b $WORK/backing.img")
+	rec=$(helper "$cn" "cn_msg $TRACE 'thin volume discarded'") ||
+		die "discard: the cn log does not read"
+	[ -n "$rec" ] || die "discard: the cn log holds no record of the discard"
+	# What reaches the disk node, and how long the agent's discard takes:
+	# the numbers the discard's bounds answer to (CnThinDiscardChunkBytes,
+	# CnThinDiscardPassChunks in common/constants.go).
+	log "discard: the agent's record: $rec"
+	log "discard: $side discards (count sectors) $sd0 -> $sd1"
+	log "discard: $lin discards (count sectors) $ln0 -> $ln1"
+	log "discard: DN1's backing file, 512-byte blocks allocated: $al0 -> $al1"
+	[ "${sd1#* }" -ge $((${sd0#* } + mapped * BLOCK_SIZE / 512)) ] ||
+		die "discard: $side took $((${sd1#* } - ${sd0#* })) discarded sectors, want at least $((mapped * BLOCK_SIZE / 512)): the delete's discard did not reach the disk node"
+
+	stage check "converge check round"
+	converge_check "$cn" "$sp" "$cntlr" "$cntlrrev"
+
+	stage teardown "empty cntlr list, then empty side list"
+	cn_drop "$cn"
+	dn_drop "$dn"
+	assert_no_residue "$sp"
+	sshv_ok "$hv" "rm -f $WORK/pattern-k.bin"
+}
+
+# ---------------------------------------------------------------------------
 # Case C — clone_xfer (cnagent_integtest.md, Cases): the live move
 # (architecture.md, Transfer + clone = cross-SP live migration) and the
 # metadata kept across an agent restart over a held copy and across a wipe
@@ -8989,8 +9221,10 @@ case_torn() {
 #
 # 32 of the td's 64 MiB are written, so the pushed bitmap is 00000000ffffffff:
 # bits 32..63 = 1 = skippable ⇒ exactly one 32 MiB discard at offset 32 MiB
-# **on the clone device**, which is the only discard a cn agent issues
-# (ApplySkipRanges (agent/bitmap.go)).
+# **on the clone device**, the only discard a cn agent issues in this case
+# (ApplySkipRanges (agent/bitmap.go)): its other one, a deleted volume's
+# (cnagent.md CN14), needs a td that leaves td_list, which no stage here
+# drops.
 #
 # The clone's clone meta group (architecture.md, Terminology and object
 # model) has sp2's own shape of group: sp2 has no redundancy, so the group is

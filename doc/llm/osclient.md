@@ -481,7 +481,8 @@ cache.
 How the agents mark dm-clone regions "already hydrated" (`architecture.md`,
 Bitmap push protocol): the whole set of a chunk apply in one call, where a
 child process per range would hold the caller's locks for tens of seconds on
-a fragmented source.
+a fragmented source. The cn agent's sweep discards a thin volume whose id it
+deletes through it too, in chunks, one call per volume (`cnagent.md` CN14).
 
 * It takes one semaphore slot for the whole call, opens the path once,
   write-only and, as `blkdiscard --force` does, not exclusively, and sends

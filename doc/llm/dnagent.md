@@ -826,9 +826,13 @@ instead of through a wrapper — `cnagent.md` CN25's read of the `thin_dump`
 file, and the dn's raw-device `ReadBlock`/`WriteBlock` calls of the [D13]
 disk metadata (`DiskMeta`) — takes the same bound from the exported
 `agent.CmdCtx`. `Dm.DiscardRanges` is the one wrapper call that passes its
-caller's ctx on unchanged: the `OsClient` bounds its wait for a slot, and
-waits for each discard it sends as long as the kernel takes (`osclient.md`,
-DiscardRanges). The bound holds in full only for a child the signals end.
+caller's ctx on unchanged, and `cnagent.md` CN14's discard of a deleted
+thin volume, which calls `OsClient.DiscardRanges` directly for the count of
+chunks it sent, passes its pass's ctx on unchanged too: the `OsClient`
+bounds its wait for a slot, and waits for each discard it sends as long as
+the kernel takes (`osclient.md`, DiscardRanges), so a deadline would only
+cut the list between chunks, which the pass's chunk count already bounds.
+The bound holds in full only for a child the signals end.
 A dial (`NvmeHost.Dial`) runs in the agent's own process and ends at the
 timeout its caller passes or at the deadline, whichever comes first
 (`osclient.md`, DialTcp).

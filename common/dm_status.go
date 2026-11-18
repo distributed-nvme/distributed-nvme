@@ -1,6 +1,7 @@
 package common
 
 import (
+	"slices"
 	"strconv"
 	"strings"
 )
@@ -293,6 +294,50 @@ func ParseThinPoolStatus(raw string) (*ThinPoolStatus, bool) {
 			st.NeedsCheck = true
 		}
 	}
+	return st, true
+}
+
+// ThinStatus is what one thin volume's `dmsetup status` line says of its
+// mappings: the sectors it maps, and the last sector of its highest mapped
+// block, which holds only while Mapped is set.
+type ThinStatus struct {
+	MappedSectors uint64
+	HighestSector uint64
+	// Mapped says the volume maps a block: dm-thin prints "-" in place of
+	// the highest sector while it maps none (thin_status).
+	Mapped bool
+}
+
+// ParseThinStatus parses one raw `dmsetup status` line of a thin volume. The
+// fields after the `thin` token are
+//
+//	<mapped_sectors> <highest_mapped_sector>
+//
+// the second "-" while nothing is mapped, so the token is located rather
+// than a fixed column counted, as in ParseThinPoolStatus. A line that carries
+// "Fail" (a failed pool), "Error" (a status read that could not read the
+// metadata) or "-" alone (a volume whose id is not open) in place of its
+// numbers does not parse.
+func ParseThinStatus(raw string) (*ThinStatus, bool) {
+	fields := strings.Fields(raw)
+	token := slices.Index(fields, "thin")
+	if token < 0 || len(fields) < token+3 {
+		return nil, false
+	}
+	mapped, err := strconv.ParseUint(fields[token+1], 10, 64)
+	if err != nil {
+		return nil, false
+	}
+	st := &ThinStatus{MappedSectors: mapped}
+	if fields[token+2] == "-" {
+		return st, true
+	}
+	highest, err := strconv.ParseUint(fields[token+2], 10, 64)
+	if err != nil {
+		return nil, false
+	}
+	st.HighestSector = highest
+	st.Mapped = true
 	return st, true
 }
 

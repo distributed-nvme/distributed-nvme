@@ -85,8 +85,18 @@ type fakeNode struct {
 	// thinMapped is the blocks each thin id maps in a pool's metadata, by
 	// the pool's dm name and id, outliving the dm device as thinPools does:
 	// the synthesized `thin_dump` document's mapped_blocks, which CN14's
-	// header read reads (holdThinData). An id it lacks maps no block.
+	// header read reads (holdThinData), and what a thin volume's status
+	// reads mapped (thinStatus, mapThinBlocks). An id it lacks maps no
+	// block, and a delete message drops the id's entry.
 	thinMapped map[string]map[uint32]uint64
+	// thinMapLo is the first block each thin id maps, by pool and id, 0 for
+	// an id it lacks: the fake maps an id's blocks as one run, from that
+	// block on, thinMapped of them (mapThinRun).
+	thinMapLo map[string]map[uint32]uint64
+	// emptyDiscards counts the DiscardRanges calls that carried no range,
+	// each of which still opens its device for writing, and so makes udev
+	// probe it at the close (discardRanges).
+	emptyDiscards int
 	// lsGhosts are names `dmsetup ls` reports that no longer exist. The
 	// listing is an inherently stale snapshot — another cntlr's sweep
 	// (CN21), at SP_LEVEL_DISABLE or otherwise, can remove a device between
@@ -510,6 +520,7 @@ func newFakeNode() *fakeNode {
 		thinPools:     make(map[string]map[uint32]bool),
 		heldRoots:     make(map[string]bool),
 		thinMapped:    make(map[string]map[uint32]uint64),
+		thinMapLo:     make(map[string]map[uint32]uint64),
 		infoOmit:      make(map[string]bool),
 		tableOmit:     make(map[string]bool),
 		arrays:        make(map[string]*fakeArray),
@@ -1755,6 +1766,9 @@ func (f *fakeNode) discardRanges(
 ) (int, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	if len(ranges) == 0 {
+		f.emptyDiscards++
+	}
 	for i, r := range ranges {
 		if err := ctx.Err(); err != nil {
 			return i, err
@@ -1769,6 +1783,7 @@ func (f *fakeNode) discardRanges(
 		}
 		if dm, ok := f.dms[strings.TrimPrefix(path, "/dev/mapper/")]; ok {
 			dm.discards = append(dm.discards, args)
+			f.thinUnmap(dm, r)
 		}
 	}
 	return len(ranges), nil
@@ -1802,6 +1817,84 @@ func (f *fakeNode) dialTcp(
 			syscall.ECONNREFUSED)
 	}
 	return nil
+}
+
+// thinUnmap is dm-thin's unmap of a discard on a thin volume: the blocks
+// the range covers whole leave the id's run (thinMapLo, thinMapped), and a
+// range that covers less than a block unmaps nothing. A range that cuts the
+// run in two takes its blocks off the count and leaves the run's ends, so
+// the status reads the highest block as dm-thin's does. A device that is no
+// thin volume is left alone.
+func (f *fakeNode) thinUnmap(dm *fakeDm, r common.DiscardRange) {
+	pool, id, blockSectors, ok := f.thinOf(dm)
+	if !ok || blockSectors == 0 {
+		return
+	}
+	blockBytes := blockSectors * 512
+	from := (r.Offset + blockBytes - 1) / blockBytes
+	to := (r.Offset + r.Length) / blockBytes
+	count := f.thinMapped[pool][id]
+	lo := f.thinMapLo[pool][id]
+	hi := lo + count
+	from, to = max(from, lo), min(to, hi)
+	if count == 0 || from >= to {
+		return
+	}
+	switch {
+	case from == lo && to == hi:
+		f.setThinRun(pool, id, 0, 0)
+	case to == hi:
+		f.setThinRun(pool, id, lo, from-lo)
+	case from == lo:
+		f.setThinRun(pool, id, to, hi-to)
+	default:
+		f.setThinRun(pool, id, lo, count-(to-from))
+	}
+}
+
+// thinOf names the pool and the id of a thin volume's live table, and the
+// pool's block in sectors; ok is false for any other device.
+func (f *fakeNode) thinOf(dm *fakeDm) (string, uint32, uint64, bool) {
+	if !isDmTarget(dm.table, "thin") {
+		return "", 0, 0, false
+	}
+	fields := strings.Fields(dmTargets(dm.table)[0])
+	if len(fields) < 5 {
+		return "", 0, 0, false
+	}
+	devId, err := strconv.ParseUint(fields[4], 10, 32)
+	if err != nil {
+		return "", 0, 0, false
+	}
+	pool := f.dmByDevNo(fields[3])
+	if pool == nil {
+		return "", 0, 0, false
+	}
+	for name, other := range f.dms {
+		if other != pool {
+			continue
+		}
+		var blockSectors uint64
+		poolFields := strings.Fields(dmTargets(pool.table)[0])
+		if len(poolFields) > 5 {
+			blockSectors, _ = strconv.ParseUint(poolFields[5], 10, 64)
+		}
+		return name, uint32(devId), blockSectors, true
+	}
+	return "", 0, 0, false
+}
+
+// setThinRun sets an id's run of mapped blocks: count of them from lo.
+// Called with f.mu held.
+func (f *fakeNode) setThinRun(pool string, id uint32, lo, count uint64) {
+	if f.thinMapped[pool] == nil {
+		f.thinMapped[pool] = make(map[uint32]uint64)
+	}
+	if f.thinMapLo[pool] == nil {
+		f.thinMapLo[pool] = make(map[uint32]uint64)
+	}
+	f.thinMapped[pool][id] = count
+	f.thinMapLo[pool][id] = lo
 }
 
 // ---------------------------------------------------------------------------
@@ -2307,14 +2400,44 @@ func (f *fakeNode) holdThinIds(pool string, ids ...uint32) {
 // it.
 func (f *fakeNode) holdThinData(pool string, id uint32, blocks uint64) {
 	f.holdThinIds(pool, id)
+	f.mapThinBlocks(pool, id, blocks)
+}
+
+// thinStatus is a thin volume's status line, as dm-thin prints it
+// (thin_status): the sectors its id maps in its pool's metadata
+// (thinMapped), then the last sector of its highest mapped block, or "-"
+// while it maps none. The fake maps an id's blocks as one run (thinMapLo),
+// so the highest is the run's last. fields are the volume's live table line,
+// split.
+func (f *fakeNode) thinStatus(sectors string, fields []string) string {
+	var blocks, lo, blockSectors uint64
+	if len(fields) >= 5 {
+		line := &fakeDm{table: strings.Join(fields, " ")}
+		if pool, id, bs, ok := f.thinOf(line); ok {
+			blocks = f.thinMapped[pool][id]
+			lo = f.thinMapLo[pool][id]
+			blockSectors = bs
+		}
+	}
+	if blocks == 0 || blockSectors == 0 {
+		return fmt.Sprintf("0 %s thin 0 -\n", sectors)
+	}
+	return fmt.Sprintf("0 %s thin %d %d\n", sectors, blocks*blockSectors,
+		(lo+blocks)*blockSectors-1)
+}
+
+// mapThinBlocks makes a pool's id map blocks (thinMapped), as a host's
+// writes to its volume do, so the volume's status reads them mapped from
+// its first block (thinStatus).
+func (f *fakeNode) mapThinBlocks(pool string, id uint32, blocks uint64) {
+	f.mapThinRun(pool, id, 0, blocks)
+}
+
+// mapThinRun makes a pool's id map blocks from block lo on, one run.
+func (f *fakeNode) mapThinRun(pool string, id uint32, lo, blocks uint64) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	mapped, ok := f.thinMapped[pool]
-	if !ok {
-		mapped = make(map[uint32]uint64)
-		f.thinMapped[pool] = mapped
-	}
-	mapped[id] = blocks
+	f.setThinRun(pool, id, lo, blocks)
 }
 
 // isDmTarget reports whether table is a single target of the given type.
@@ -2514,6 +2637,9 @@ func (f *fakeNode) dmMessage(args []string) (string, int) {
 	case strings.HasPrefix(message, "delete "):
 		devId, _ := strconv.ParseUint(fields[1], 10, 32)
 		delete(dm.thinIds, uint32(devId))
+		// dm-thin frees the id's mappings with it.
+		delete(f.thinMapped[args[1]], uint32(devId))
+		delete(f.thinMapLo[args[1]], uint32(devId))
 	case message == "reserve_metadata_snap":
 		if dm.heldRoot {
 			f.dispatchStderr = msgIoctlFailed(args[1],
@@ -2576,7 +2702,7 @@ func (f *fakeNode) dmStatus(name string) (string, int) {
 	case "striped":
 		return fmt.Sprintf("0 %s striped 1 0\n", sectors), 0
 	case "thin":
-		return fmt.Sprintf("0 %s thin 0 -1\n", sectors), 0
+		return f.thinStatus(sectors, fields), 0
 	case "thin-pool":
 		held := "-"
 		if dm.heldRoot {

@@ -285,6 +285,43 @@ func TestParseThinPoolStatus(t *testing.T) {
 	}
 }
 
+// TestParseThinStatus pins a thin volume's status line (thin_status): the
+// mapped sectors, then the last sector of the highest mapped block or "-"
+// while none is mapped; the words dm-thin prints in place of the numbers do
+// not parse.
+func TestParseThinStatus(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		line string
+		want *ThinStatus
+	}{
+		{"mapped", "0 131072 thin 16384 20479",
+			&ThinStatus{16384, 20479, true}},
+		{"named", "vol: 0 131072 thin 2048 2047",
+			&ThinStatus{2048, 2047, true}},
+		{"nothing mapped", "0 131072 thin 0 -", &ThinStatus{0, 0, false}},
+		{"a failed pool", "0 131072 thin Fail", nil},
+		{"a status read that failed", "0 131072 thin Error", nil},
+		{"no open id", "0 131072 thin -", nil},
+		{"a pool", "0 1024 thin-pool 3 12/4096 5/62 - rw " +
+			"discard_passdown queue_if_no_space - 1024", nil},
+		{"a highest that does not parse", "0 131072 thin 2048 x", nil},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got, ok := ParseThinStatus(tc.line)
+			if tc.want == nil {
+				if ok {
+					t.Fatalf("parsed %+v, want no parse", got)
+				}
+				return
+			}
+			if !ok || *got != *tc.want {
+				t.Fatalf("got %+v %v, want %+v", got, ok, tc.want)
+			}
+		})
+	}
+}
+
 // TestThinPoolFault pins the two words dm-thin prints in place of a pool's
 // numbers (pool_status): Fail for a pool it failed, Error for a status read
 // that could not read the metadata; every other line has none.
