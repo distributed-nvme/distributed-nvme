@@ -688,10 +688,14 @@ Measured times are in [the introduction](introduction.md#status-and-limits-of-01
   migration, steps the pool's level down to one that builds no side, or
   deletes the pool; the disk node itself cannot be deleted while the leg
   is on it. A clone source that the primary cannot connect costs the same
-  until the source answers, the clone is deleted, or an operator disables
-  the cntlr or steps the pool's level down to one that builds no clone.
-  State: accepted: the converge is the only way a deleted connection comes
-  back. Not seen in the lab.
+  until the source answers, the clone is deleted, or an operator steps the
+  pool's level down to one that builds no clone. An operator who disables
+  the primary ends the cost in two cases only: the fault is in that
+  controller node's own path to the source, or no standby can become the
+  primary, and then the pool serves no IO. Otherwise the failover makes a
+  standby the primary, which tries to connect the same source and costs
+  the same. State: accepted: the converge is the only way a deleted
+  connection comes back. Not seen in the lab.
 - **The primary can guess wrong whether mdadm would start a stopped
   array.** A check round of the primary names a group whose array does not
   run when mdadm would start it, which the agent works out from the legs'

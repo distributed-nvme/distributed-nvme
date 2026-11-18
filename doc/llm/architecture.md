@@ -7879,10 +7879,12 @@ document and only pointed to here.
   the check of its side device does not answer, the gap lasts until a later
   pass runs it: the `SyncupSide` the side's verdict brings on the worker's
   next round, since that verdict names what the stop left not as wanted
-  (`dnagent.md` DN13, DN16); a commit waits that long. No such pass runs
-  while no worker drives the pool, nor while the destination's store disk
-  refuses writes, which refuses every re-sent `SyncupSide` for its failed
-  save (`dnagent.md`, Known limits). The pass the cutover brings retries the
+  (`dnagent.md` DN13, DN16), or an agent restart's reconcile, which
+  converges the held request with no save (`dnagent.md` DN2); a commit
+  waits that long. Short of an agent restart, no such pass runs while no
+  worker drives the pool, nor while the destination's store disk refuses
+  writes, which refuses every re-sent `SyncupSide` for its failed save
+  (`dnagent.md`, Known limits). The pass the cutover brings retries the
   connect longer than any other (`dnagent.md` DN13). A migration whose record
   carries no `cutover_pending` has no cutover to wait at (Upgrade in lockstep):
   its gap can open before the primary has connected the destination, and the
@@ -8240,9 +8242,11 @@ document and only pointed to here.
   since the primary keeps the acted mark in memory alone (`cnagent.md`
   CN28): until the operator's cancel the mark holds leg repair off the
   group (`dnv-worker.md` AR8), no converge runs for it while the array
-  runs (`cnagent.md`, Known limits), and the mark acts once the array no
-  longer runs, at the next converge, which a read's name of the forced
-  start brings (`cnagent.md` CN12, CN30), starting the array
+  runs but the one the read's name of the stored mark brings after the
+  restart, which leaves it waiting (`cnagent.md` CN8, CN30; Known limits),
+  and the mark acts once the array no longer runs, at the next converge,
+  which a read's name of the forced start brings (`cnagent.md` CN12,
+  CN30), starting the array
   from the named leg, which may be stale by then, unless a member the start
   would zero is a full member of the named leg's identity with a higher
   change count, which refuses the start without the mark's force (Repairs,

@@ -324,11 +324,14 @@ each sweep or read whose verdict was not clean, the worker's once per such
 calls do NOT remove is in both logs at every re-send, which is exactly
 what distinguishes it from one the next pass removed. A leftover that only a
 background read's verdict names, and that the `Syncup*` it brings does not
-report — an md member that syncup's converge fails early, puts back or
-adds, or a broken array it assembles again (`cnagent.md` CN12), or a
-subsystem directory that outlives its last
-controller — is in the agent's record alone, under the trace id of the
-round that started the read. The worker re-sends the `Syncup*` on the
+report — an md member that syncup's converge fails early, puts back, adds
+or removes for a repair, a broken array it assembles again or an absent
+array its assembly starts (`cnagent.md` CN12, CN30), a failure a cntlr's
+verdict names only on a read, such as a forced start, an md check, an
+uncreated snapshot or a source entry with no controller (`cnagent.md`
+CN30), or a subsystem directory that outlives its last controller — is in
+the agent's record alone, under the trace id of the round that started
+the read. The worker re-sends the `Syncup*` on the
 round that answers from that read's observation, under that round's own
 trace id, and its `syncup result` record of the re-send also names the
 observation's trace id (`dnv-worker.md` RW4, RW10): the read's id joins

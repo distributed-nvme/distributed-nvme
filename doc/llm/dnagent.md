@@ -4278,14 +4278,15 @@ else reported through `agent_reply` is still a protocol-level refusal.
   runs (DN16); only the converges no syncup brings still run — the
   background converge attempts (SH11) and a restart's reconcile (DN2). The
   one background converge is the DN12 fence timer's (the cn runs none,
-  `cnagent.md` CN10), so on the dn two
-  waits last the whole fault short of an agent restart, whose reconcile
-  converges each side from its held request with no new save (DN2): the
-  migration gap a cutover request leaves when it was saved and its connect
-  failed, and a destination waiting for room in the clone-metadata area.
-  Short of that restart, only a re-sent `SyncupSide` closes the one or
-  takes the run of the other (DN13), and each re-send is refused for its
-  failed save.
+  `cnagent.md` CN10), so on the dn two waits last the whole fault short of
+  an agent restart, whose reconcile converges each side from its held
+  request with no new save (DN2): the migration gap a cutover request
+  leaves when it was saved and a step of its pass stopped — its connect,
+  the check of its side device, its slot or wrapper, its dm-clone (DN9,
+  DN13, DN10) — and a destination waiting for room in the clone-metadata
+  area. Short of that restart, only a re-sent `SyncupSide` closes the one
+  or takes the run of the other (DN13), and each re-send is refused for
+  its failed save.
   Apart
   from two narrow cases on a CN, during an ownership change of a pool
   (`cnagent.md`, Known limits) and at the failover below, nothing is lost

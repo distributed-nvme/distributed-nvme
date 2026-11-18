@@ -6950,19 +6950,26 @@ which no suite case sets, so no suite case runs RW13's count compare.
   fault fails only rows the old primary failed on is held as well, for as long
   as that fault lasts, every pass logging why.
 * **A dm-clone left with hydration off moves the role of the clone's
-  pool only where nothing names it.** Its row reads `ERROR` in every
-  observation, a background read's as much as a converge's (`cnagent.md`
-  CN18, CN28). That is a row of the primary's own (HL2), so its
-  `err_epoch` is set. Where the read's gates pass, a read names the
-  dm-clone (`cnagent.md` CN18, CN30), and the converge the worker's
-  re-send brings enables hydration, so the row reads `OK` and nothing
-  moves. Where nothing names it — a gate holds the read's name off (the
-  source not ready, the clone meta group's or the destination raid0's row
-  not OK), or its metadata is read-only or failed — the `err_epoch` stays
-  set, and AR5 fails the primary over at its threshold, or AR7 replaces it
-  where there is no failover candidate; the new primary creates the
-  dm-clone over the metadata its clone meta group holds and finishes the
-  build (`cnagent.md` CN18). A dm-clone left suspended reads `ERROR` the
+  pool only where no converge a name brings cures it.** Its row reads
+  `ERROR` in every observation, a background read's as much as a
+  converge's (`cnagent.md` CN18, CN28). That is a row of the primary's own
+  (HL2), so its `err_epoch` is set. Where the read's gates pass, a read
+  names the dm-clone (`cnagent.md` CN18, CN30), and the converge the
+  worker's re-send brings enables hydration, so the row reads `OK` and
+  nothing moves. Where a gate holds the read's name off and a converge
+  cures the gate, the gate has a name of its own — a source entry with no
+  controller, the clone meta group's absent or broken array, the
+  destination raid0's row (`cnagent.md` CN18, CN30) — and the converge
+  that name brings cures the gate and enables hydration in that pass, or
+  in the one the dm-clone's own name brings next, so nothing moves
+  either. Where nothing a converge cures holds the name off — a source
+  whose connect keeps failing or that has no namespace, a clone meta
+  group or destination raid0 whose row no converge brings to `OK` — or
+  its metadata is read-only or failed, the `err_epoch` stays set, and AR5
+  fails the primary over at its threshold, or AR7 replaces it where there
+  is no failover candidate; the new primary creates the dm-clone over the
+  metadata its clone meta group holds and finishes the build (`cnagent.md`
+  CN18). A dm-clone left suspended reads `ERROR` the
   same way. Where its gates pass and the create, resume or enable keeps
   failing, both channels name it (`cnagent.md` CN18, CN30), every round
   re-sends, and the failover waits for missed rounds or the operator's

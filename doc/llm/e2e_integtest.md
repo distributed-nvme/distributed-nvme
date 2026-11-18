@@ -1406,10 +1406,11 @@ the connect attempted.
   primary has built the whole stack and turned its namespaces optimized. A
   promotion that outruns the sides' ANA flips builds it only in the converge
   of the `SyncupCntlr` the worker re-sends once a read that starts after the
-  flips names the absent array, which adds the rounds until that read and one
-  more converge, each converge growing with the slice count (`cnagent.md`,
-  Known limits). The case bounds that wait only by the
-  build's own and logs how long the write took.
+  flips names the group's absent array, or under `--redund none` its
+  `RedundNone` dm-linear (`cnagent.md` CN12, CN30), which adds the rounds
+  until that read and one more converge, each converge growing with the
+  slice count (`cnagent.md`, Known limits). The case bounds that wait only
+  by the build's own and logs how long the write took.
 * **The outage takes etcd away, nothing else, and only once.** The gateway,
   the worker and the cdc run through it, so a program that starts while etcd
   is down (`cdc.md` CM4) is not exercised, nor a fault that waits for a
