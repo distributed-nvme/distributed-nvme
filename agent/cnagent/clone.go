@@ -772,12 +772,15 @@ func (s *CnAgentServer) ensureCloneSource(
 	connected := false
 	for _, tr := range srcToConnect(cp, src.view) {
 		plan.walk.stale = true
+		// The default fast IO fail timeout, never the pool's: one source
+		// controller serves every clone of its source on this node, of
+		// whichever pool (dnagent.md SH20).
 		if err := s.connectWithin(ctx, budget, agent.TrConf{
 			TrType:  tr.GetTrType(),
 			AdrFam:  tr.GetAdrFam(),
 			TrAddr:  tr.GetTrAddr(),
 			TrSvcId: tr.GetTrSvcId(),
-		}, nqn, plan.hostNqn()); err != nil {
+		}, nqn, plan.hostNqn(), common.DefaultNvmeFastIoFailTmo); err != nil {
 			src.stepErr = err
 			break
 		}

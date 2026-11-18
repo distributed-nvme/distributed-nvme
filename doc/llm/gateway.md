@@ -832,7 +832,11 @@ delete, get, list, update-disabled and inspect.
   substituted count the plan and the STM's slice loop build the SP from.
   A stripe the request names is then judged against that count by
   `validateStripeProduct` (`architecture.md`, Common validation, the
-  stripe's product) before any read.
+  stripe's product) before any read, and so are the threshold rules that
+  read the request alone (`validateEventThreshold`): the leg threshold
+  over the side one, and the legs' fast IO fail timeout in its range
+  whatever the cluster's intervals, which no rule therefore reads
+  `ClusterConf` for.
 
   Pre-STM plan (`planSpGroups`), in GW15's order: per slice the meta group
   (one extent) first, then the data group (`init_ext_cnt` extents) — extent

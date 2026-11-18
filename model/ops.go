@@ -205,11 +205,13 @@ func ReleaseShard(bucket []uint32, shard uint32) []uint32 {
 // whether to call one; nothing may re-implement the rule.
 //
 // A nil threshold — an SP written without one — resolves to the pure
-// defaults. Nothing here clamps a value: architecture.md, Common validation,
-// gives the four no maximum, a resolved zero already meets their floor of 1,
-// and its two other rules — leg_unhealthy above side_unhealthy, and
-// primary_unhealthy at least two of its cluster's cntlr_interval — are judged
-// by the gateway at the pool's creation.
+// defaults, leg_fast_io_fail_tmo to common.DefaultNvmeFastIoFailTmo. Nothing
+// here clamps a value: architecture.md, Common validation, gives the four
+// unhealthy thresholds no maximum, a resolved zero already meets their floor
+// of 1, and its other rules — leg_unhealthy above side_unhealthy,
+// primary_unhealthy at least two of its cluster's cntlr_interval, and a
+// leg_fast_io_fail_tmo that is set within its range — are judged by the
+// gateway at the pool's creation.
 //
 // event_threshold is deliberately still resolved at read time, and stored as
 // sent. It is a policy timer, not geometry: nothing is formatted or addressed
@@ -231,6 +233,7 @@ func ResolveEventThreshold(threshold *pb.EventThreshold) *pb.EventThreshold {
 		CntlrUnhealthy:   threshold.GetCntlrUnhealthy(),
 		SideUnhealthy:    threshold.GetSideUnhealthy(),
 		LegUnhealthy:     threshold.GetLegUnhealthy(),
+		LegFastIoFailTmo: threshold.GetLegFastIoFailTmo(),
 	}
 	if resolved.PrimaryUnhealthy == 0 {
 		resolved.PrimaryUnhealthy = common.DefaultPrimaryUnhealthy
@@ -243,6 +246,9 @@ func ResolveEventThreshold(threshold *pb.EventThreshold) *pb.EventThreshold {
 	}
 	if resolved.LegUnhealthy == 0 {
 		resolved.LegUnhealthy = common.DefaultLegUnhealthy
+	}
+	if resolved.LegFastIoFailTmo == 0 {
+		resolved.LegFastIoFailTmo = common.DefaultNvmeFastIoFailTmo
 	}
 	return resolved
 }

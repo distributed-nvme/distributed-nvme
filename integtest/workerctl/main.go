@@ -1156,11 +1156,12 @@ func cmdConstants(g *globals, args []string) {
 		"DefaultDmPoolDataBlockSize": common.DefaultDmPoolDataBlockSize,
 		"DefaultStripeSize": model.DefaultStripeSize(
 			common.DefaultDmPoolDataBlockSize),
-		"MaxNvmeTcpCmdBytes":      common.MaxNvmeTcpCmdBytes,
-		"DefaultPrimaryUnhealthy": common.DefaultPrimaryUnhealthy,
-		"DemotionHoldTimeout":     common.DemotionHoldTimeout,
-		"DefaultStartHoldSeconds": common.DefaultStartHoldSeconds,
-		"RetiredLegMaxAge":        common.RetiredLegMaxAge,
+		"MaxNvmeTcpCmdBytes":       common.MaxNvmeTcpCmdBytes,
+		"DefaultPrimaryUnhealthy":  common.DefaultPrimaryUnhealthy,
+		"DemotionHoldTimeout":      common.DemotionHoldTimeout,
+		"DefaultStartHoldSeconds":  common.DefaultStartHoldSeconds,
+		"RetiredLegMaxAge":         common.RetiredLegMaxAge,
+		"DefaultNvmeFastIoFailTmo": common.DefaultNvmeFastIoFailTmo,
 
 		"DnCloneMetaUnitCnt": common.DnCloneMetaUnitCnt,
 		"DnCloneMetaUnit":    common.DnCloneMetaUnit,

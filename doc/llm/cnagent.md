@@ -859,7 +859,13 @@ group's repair included, at every stage of the repair (CN12), both roles;
 a clone record without a group adds none). Per side
 in the leg's `side_list`: `nvme connect` to the `SideToCnNqn` of the cluster,
 sp, leg and this cn at the side's `nvme_tr_conf`, with the host NQN
-`CnHostNqn` (`dnagent.md` SH20 flags). A side with `provisioned` false is skipped: the
+`CnHostNqn` and the `dnagent.md` SH20 flags, the fast IO fail timeout
+among them the request's `leg_fast_io_fail_tmo`, or
+`DefaultNvmeFastIoFailTmo` for a request that carries none, as one from a
+worker without the field does. A controller found connected is adopted as
+it is, its timeout never read: the pool's is fixed at its create, and a
+build before the setting connected with the default, which is what a pool
+of that time resolves to. A side with `provisioned` false is skipped: the
 dn exports nothing for it yet (`dnagent.md` DN9, DN10), so a connect
 could only fail. Provisioned sides of the same
 leg connect normally, which is what keeps a two-side migrating leg
@@ -3487,7 +3493,9 @@ CN18. Clones (`clone.go`; primary only; `architecture.md`, Clones;
    (`srcToConnect`, the one test the converge connects by and a cntlr's
    read names the entries by: The clone names, below) — one subsystem, one
    path per source cntlr; the source's own ANA picks the serving path —
-   with the host NQN `CnHostNqn` and the `dnagent.md` SH20 flags; a
+   with the host NQN `CnHostNqn` and the `dnagent.md` SH20 flags, its fast
+   IO fail timeout `DefaultNvmeFastIoFailTmo` whatever the pool's
+   (`dnagent.md` SH20 gives the reason); a
    failure ends the pass for the clone, and a read names each entry the
    source has no controller for (The clone names, below), whose re-send
    connects it. The source namespace device

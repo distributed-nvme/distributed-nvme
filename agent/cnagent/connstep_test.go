@@ -1480,3 +1480,72 @@ func TestCloneSourceKilledConnectHeadPending(t *testing.T) {
 		})
 	}
 }
+
+// ---------------------------------------------------------------------------
+// CN10 — the fast IO fail timeout of a leg connection
+// ---------------------------------------------------------------------------
+
+// TestLegConnectsTakeThePoolsFastIoFail pins CN10's connect flags: every leg
+// connection, the clone meta group's legs included, is made with the
+// request's leg_fast_io_fail_tmo and a controller-loss timeout that never
+// gives up, while a clone source keeps DefaultNvmeFastIoFailTmo, since one
+// source controller serves every clone of its source on the node, of
+// whichever pool. A request that carries no value, as one from a worker
+// without the field, connects the legs with DefaultNvmeFastIoFailTmo too.
+func TestLegConnectsTakeThePoolsFastIoFail(t *testing.T) {
+	legFlags := func(tmo uint32) string {
+		return fmt.Sprintf(" --fast_io_fail_tmo %d --ctrl-loss-tmo -1", tmo)
+	}
+	for _, tc := range []struct {
+		name string
+		sent uint32
+		legs uint32
+	}{
+		{"the request carries 3", 3, 3},
+		{"the request carries 1", 1, 1},
+		{"the request carries none", 0, common.DefaultNvmeFastIoFailTmo},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			srv, node := newTestServer(t)
+			req := cntlrReq(reqOpts{revision: 2, primary: true, raid1: true,
+				twoLegs: true, clones: []*pb.Clone{cloneOf()}})
+			req.LegFastIoFailTmo = tc.sent
+			cnSyncup(t, srv, 2, true)
+			reply, err := srv.SyncupCntlr(context.Background(), req)
+			if err != nil {
+				t.Fatalf("SyncupCntlr: %v", err)
+			}
+			if reply.GetAgentReply().GetCode() != 0 {
+				t.Fatalf("SyncupCntlr rejected: %v", reply.GetAgentReply())
+			}
+			connects := node.callsMatching("cmd nvme connect ")
+			legs, sources := 0, 0
+			for _, call := range connects {
+				switch {
+				case strings.Contains(call, "--nqn "+testSrcNqn+" "):
+					sources++
+					want := legFlags(common.DefaultNvmeFastIoFailTmo)
+					if !strings.HasSuffix(call, want) {
+						t.Errorf("the clone source was connected with %q, "+
+							"want it to end %q", call, want)
+					}
+				case strings.Contains(call, "--nqn "+common.NqnPrefix+":2:"):
+					legs++
+					if want := legFlags(tc.legs); !strings.HasSuffix(call,
+						want) {
+						t.Errorf("a leg was connected with %q, want it to "+
+							"end %q", call, want)
+					}
+				default:
+					t.Errorf("a connect of neither a leg nor the source: %q",
+						call)
+				}
+			}
+			// The meta leg, both data legs and the clone meta group's leg.
+			if legs < 4 || sources != 1 {
+				t.Errorf("%d leg connects and %d source connects, want at "+
+					"least 4 and 1: %v", legs, sources, connects)
+			}
+		})
+	}
+}

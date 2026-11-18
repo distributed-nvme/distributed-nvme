@@ -1149,11 +1149,19 @@ has no "attr_qid_max" fails every first link while the cap is above 0; such
 a node runs with `--nvmet-qid-max 0`.
 
 SH20. `nvmehost.go`: `Connect` always passes `--fast_io_fail_tmo` set to
-`DefaultNvmeFastIoFailTmo` and `--ctrl-loss-tmo` set to never give up, the
-caller's hostnqn, and `--hostid` set to `common.NvmeHostId` of that hostnqn
-— never the node-wide host id file, which the kernel's one-to-one
+the timeout its caller gives and `--ctrl-loss-tmo` set to never give up,
+the caller's hostnqn, and `--hostid` set to `common.NvmeHostId` of that
+hostnqn — never the node-wide host id file, which the kernel's one-to-one
 hostnqn-to-hostid rule turns into an EINVAL the moment anything else on the
-node holds it. The
+node holds it. The cn agent's leg connections take their pool's
+`event_threshold.leg_fast_io_fail_tmo` (`cnagent.md` CN10); every other
+connection takes `DefaultNvmeFastIoFailTmo`: a clone source's, since one
+source controller serves every clone of that source on the node, of
+whichever pool (`cnagent.md` CN18), and a migration destination's
+connection to its source disk node (DN13), since the side syncup carries
+no pool setting. A timeout of zero is refused before nvme-cli runs:
+nvme-cli does not pass a zero, so the kernel would keep its own default, a
+timeout that never fails IO, on a connection that also never gives up. The
 underscores in `--fast_io_fail_tmo` are nvme-cli's own spelling and must
 not be "fixed" to dashes. `Disconnect` is `nvme disconnect --nqn`. The
 connections the host holds are read from **sysfs**

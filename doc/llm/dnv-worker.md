@@ -2580,8 +2580,12 @@ from the `SpConf`, `sp_level`, `cntlr` (the `Cntlr` record, its
 clear bumps no revision), `id_to_slice`
 keyed by the slice id rendered with `IdKeyFmt` — the key the cn agent reads
 —, `td_list` in `td_name_list` order, `nqn_to_subsystem`, `clone_list`,
-`xfer_list` and `name_to_repair`, every repair of the SP by its name, at
-every stage (`architecture.md`, Repair). Every cntlr of the SP receives the
+`xfer_list`, `name_to_repair`, every repair of the SP by its name, at
+every stage (`architecture.md`, Repair), and `leg_fast_io_fail_tmo`, the
+`SpConf`'s `event_threshold` member resolved by `model.ResolveEventThreshold`
+(`architecture.md`, Common validation), so a pool stored without it sends
+`DefaultNvmeFastIoFailTmo` and never a zero, which the cn agent connects
+the pool's legs with (`cnagent.md` CN10). Every cntlr of the SP receives the
 full state (`architecture.md`, sp role) — less any clone whose `deleting` is
 set, which is absent from every cntlr's `clone_list` (CLD5), and less the
 repair of such a clone's group, which the clone drain's final transaction
@@ -6689,10 +6693,10 @@ which no suite case sets, so no suite case runs RW13's count compare.
   syncup reply, reads that leg's row `ERROR` (HL1, HL2), normally after
   the leg's next health probe fails or stalls (`cnagent.md` CN11). On an
   array with IO, md breaks the array at the end of the path's failfast
-  window (`dnagent.md` SH20, `DefaultNvmeFastIoFailTmo`). On an idle
-  array md does not see the death and the row stays `OK`, so the window
-  lasts until the `err_epoch` is set, which is longer than the failfast
-  window. Legs that die together reach a repair threshold only long
+  window (`dnagent.md` SH20; the pool's `leg_fast_io_fail_tmo`, RW16). On
+  an idle array md does not see the death and the row stays `OK`, so the
+  window lasts until the `err_epoch` is set, which is longer than the
+  failfast window. Legs that die together reach a repair threshold only long
   after the window, since the shortest, `side_unhealthy`
   (`DefaultSideUnhealthy` when the SP sets none), is far longer than it
   at the defaults, but no validation rule keeps a threshold above it,

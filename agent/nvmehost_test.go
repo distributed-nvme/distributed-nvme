@@ -9,7 +9,64 @@ import (
 	"strings"
 	"syscall"
 	"testing"
+
+	"github.com/distributed-nvme/distributed-nvme/common"
 )
+
+// ---------------------------------------------------------------------------
+// The connect flags (SH20)
+// ---------------------------------------------------------------------------
+
+// TestConnectPassesTheFastIoFailTimeout pins Connect's flags (SH20): the fast
+// IO fail timeout is the one its caller passes, beside a controller-loss
+// timeout that never gives up, and a zero is refused before nvme-cli runs,
+// since nvme-cli drops a zero and the kernel then keeps a timeout that never
+// fails IO.
+func TestConnectPassesTheFastIoFailTimeout(t *testing.T) {
+	tr := TrConf{TrType: "tcp", AdrFam: "ipv4", TrAddr: "10.0.0.1",
+		TrSvcId: "4420"}
+	for _, tc := range []struct {
+		tmo  uint32
+		want string
+	}{
+		{3, "--fast_io_fail_tmo 3 --ctrl-loss-tmo -1"},
+		{5, "--fast_io_fail_tmo 5 --ctrl-loss-tmo -1"},
+		{1, "--fast_io_fail_tmo 1 --ctrl-loss-tmo -1"},
+	} {
+		var argv []string
+		oc := &common.FakeOsClient{
+			RunCommandFn: func(_ context.Context, name string, args []string,
+				_ string) (string, string, int, error) {
+				argv = append([]string{name}, args...)
+				return "", "", 0, nil
+			},
+		}
+		err := NewNvmeHost(oc).Connect(context.Background(), tr, "nqn.x",
+			"nqn.host", tc.tmo)
+		if err != nil {
+			t.Fatalf("Connect at %d: %v", tc.tmo, err)
+		}
+		if got := strings.Join(argv, " "); !strings.HasSuffix(got, tc.want) {
+			t.Errorf("Connect at %d ran %q, want it to end %q",
+				tc.tmo, got, tc.want)
+		}
+	}
+	ran := false
+	oc := &common.FakeOsClient{
+		RunCommandFn: func(context.Context, string, []string,
+			string) (string, string, int, error) {
+			ran = true
+			return "", "", 0, nil
+		},
+	}
+	if err := NewNvmeHost(oc).Connect(context.Background(), tr, "nqn.x",
+		"nqn.host", 0); err == nil {
+		t.Errorf("Connect at 0 succeeded")
+	}
+	if ran {
+		t.Errorf("Connect at 0 ran nvme-cli")
+	}
+}
 
 // ---------------------------------------------------------------------------
 // One walk for both agents, each caller under its own rule (SH20)

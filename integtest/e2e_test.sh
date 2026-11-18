@@ -177,6 +177,10 @@ DEFAULT_HC_INTERVAL=
 DEFAULT_PRIMARY_UNHEALTHY=
 DEMOTION_HOLD_TIMEOUT=
 DEFAULT_START_HOLD=
+# common.DefaultNvmeFastIoFailTmo, the fast IO fail timeout of the legs of a
+# pool whose event_threshold sets none, as no pool of this suite does
+# (setup_create_sp reads the pool's into LEG_FAST_IO_FAIL).
+DEFAULT_FAST_IO_FAIL=
 # The two that bound a pool's stripe, from the same JSON:
 # model.DefaultStripeSize of common.DefaultDmPoolDataBlockSize, the stripe
 # every cluster of this suite stores (setup step 4 checks it), and
@@ -1334,7 +1338,8 @@ read_constants() {
 	fi
 	local key val
 	for key in DefaultHealthCheckInterval DefaultPrimaryUnhealthy \
-		DemotionHoldTimeout DefaultStartHoldSeconds; do
+		DemotionHoldTimeout DefaultStartHoldSeconds \
+		DefaultNvmeFastIoFailTmo; do
 		val=$(jq_of "$json" ".$key")
 		case "$val" in
 		'' | *[!0-9]* | 0)
@@ -1346,6 +1351,7 @@ read_constants() {
 		DefaultPrimaryUnhealthy) DEFAULT_PRIMARY_UNHEALTHY=$val ;;
 		DemotionHoldTimeout) DEMOTION_HOLD_TIMEOUT=$val ;;
 		DefaultStartHoldSeconds) DEFAULT_START_HOLD=$val ;;
+		DefaultNvmeFastIoFailTmo) DEFAULT_FAST_IO_FAIL=$val ;;
 		esac
 	done
 	for key in DefaultStripeSize MaxNvmeTcpCmdBytes; do
@@ -10155,6 +10161,14 @@ setup_create_sp() {
 		"$THR_SIDE" "event_threshold.side_unhealthy"
 	assert_field "$SP_JSON" '.sp_conf.event_threshold.leg_unhealthy' \
 		"$THR_LEG" "event_threshold.leg_unhealthy"
+	# The legs' fast IO fail timeout, resolved as the worker resolves it
+	# (architecture.md, Common validation): the stored member, or the
+	# default where none is stored, as no set of this suite sends one. The
+	# waits on a dead leg read it (react steps 06 and 10).
+	LEG_FAST_IO_FAIL=$(jq_of "$SP_JSON" \
+		'.sp_conf.event_threshold.leg_fast_io_fail_tmo // 0')
+	[ "$LEG_FAST_IO_FAIL" != 0 ] || LEG_FAST_IO_FAIL=$DEFAULT_FAST_IO_FAIL
+	log "  the legs' fast IO fail timeout: ${LEG_FAST_IO_FAIL}s"
 	assert_field "$SP_JSON" '.sp_conf.sp_level' SP_LEVEL_READWRITE \
 		"a fresh sp is at SP_LEVEL_READWRITE"
 	assert_field "$SP_JSON" '.sp_conf.deleting' false "a fresh sp is not deleting"
@@ -17940,7 +17954,7 @@ case_copy() {
 #  what the start cleanup would do to it), which is what a dead DN VM looks
 #  like from both planes: the gRPC rounds fail (side err_epoch, side_unhealthy
 #  = $THR_SIDE) and the data path goes away (leg err_epoch, and the CNs connect
-#  with --fast_io_fail_tmo common.DefaultNvmeFastIoFailTmo = 5 and
+#  with the pool's leg fast IO fail timeout (LEG_FAST_IO_FAIL) and
 #  --ctrl-loss-tmo -1, NvmeHost.Connect (agent/nvmehost.go), so the probe fails
 #  fast instead of hanging).
 #
@@ -18286,11 +18300,12 @@ REACT_MC_SILENT_DN=-1
 # common.CnLegProbeInterval — the cn agent's probe interval, at which its
 # path watcher looks a migrating leg up (cnagent.md CN10, CN11).
 CN_LEG_PROBE_INTERVAL=5
-# common.DefaultNvmeFastIoFailTmo — the fast IO fail time of every path a
-# cn agent connects to a side (NvmeHost.Connect (agent/nvmehost.go)): an IO
-# with no live path fails once the down path has been reconnecting this
-# long (cnagent.md CN10).
-NVME_FAST_IO_FAIL_TMO=5
+# LEG_FAST_IO_FAIL — the fast IO fail time of every leg connection of the
+# pool (NvmeHost.Connect (agent/nvmehost.go)): an IO with no live path fails
+# once the down path has been reconnecting this long (cnagent.md CN10).
+# setup_create_sp reads it out of the pool it built; it starts at 0 so that
+# nothing is unset under `set -u`.
+LEG_FAST_IO_FAIL=0
 
 # The loop's range: the first stripe of ns 1, in 4 KiB slots, which setup's
 # pattern fills. The first stripe of $TD0 is slice 0's (the strided host IO
@@ -18317,7 +18332,9 @@ REACT_MC_WRITES=20
 # began before the cut, and md fails the member on that failed write, so
 # that time and WAIT_SHORT again.
 REACT_MC_CUT_WAIT=$((CN_LEG_PROBE_INTERVAL + WAIT_SHORT))
-REACT_MC_FAIL_WAIT=$((NVME_FAST_IO_FAIL_TMO + WAIT_SHORT))
+# react_mc_bounds sets the two that read the pool's LEG_FAST_IO_FAIL, once
+# the pool exists.
+REACT_MC_FAIL_WAIT=0
 
 # The loop's self-stop, in seconds: the bounds of every wait from its start
 # to its stop in step 10, summed, and one WAIT_BUILD more for the time the
@@ -18331,8 +18348,12 @@ REACT_MC_FAIL_WAIT=$((NVME_FAST_IO_FAIL_TMO + WAIT_SHORT))
 # the retired leg (WAIT_PROVISION each). So it outlives a passing step
 # however slow its waits, and still ends a failed one left in place. A wait
 # added between the start and the stop adds its bound here.
-REACT_MC_LOOP_MAX=$((REACT_MC_CUT_WAIT + REACT_MC_FAIL_WAIT + 3 * WAIT_HOST +
-	2 * WAIT_REACT + 4 * WAIT_PROVISION + WAIT_BUILD))
+REACT_MC_LOOP_MAX=0
+react_mc_bounds() {
+	REACT_MC_FAIL_WAIT=$((LEG_FAST_IO_FAIL + WAIT_SHORT))
+	REACT_MC_LOOP_MAX=$((REACT_MC_CUT_WAIT + REACT_MC_FAIL_WAIT +
+		3 * WAIT_HOST + 2 * WAIT_REACT + 4 * WAIT_PROVISION + WAIT_BUILD))
+}
 
 # The "last observation" scratch of this section's predicates, same discipline
 # as ANA_LAST / SHA_LAST / MIGR_HYD_LAST: each is logged from inside its own
@@ -22124,9 +22145,9 @@ react_dead_grp() {
 	local t0 gap allowed seen left newleg skips started
 	local epochs cur given want_retired retired grpvms a
 	local ids=() vms=() insts=() addrs=() idxs=() sides=()
-	# common.DefaultNvmeFastIoFailTmo: the fast IO fail timeout every CN
-	# connection to a leg is made with (NvmeHost.Connect (agent/nvmehost.go)).
-	local fast_io_fail=5
+	# The pool's legs' fast IO fail timeout, every CN connection to a leg
+	# is made with (NvmeHost.Connect (agent/nvmehost.go)).
+	local fast_io_fail=$LEG_FAST_IO_FAIL
 	# common.CnLegProbeInterval: how often the primary probes each leg
 	# (cnagent.md CN11).
 	local probe_every=5
@@ -23917,6 +23938,7 @@ react_mc_unsilence() {
 }
 
 react_migr_cut() {
+	react_mc_bounds
 	if [ "$REDUND" != raid1 ]; then
 		log ""
 		log "=== react step 10 (a migrating leg whose serving disk node goes" \

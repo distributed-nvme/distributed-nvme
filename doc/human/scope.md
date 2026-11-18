@@ -246,17 +246,21 @@ loss in the sense of this document. The application knows. Two cases:
   blocks keep serving. Under the CSI driver the cluster can be
   over-committed. State: accepted. An alert for it is not yet.
 - **Writes wait for the kernel's timers when a disk node dies.** Over
-  NVMe/TCP a dead disk node is noticed by the keep-alive alone, about 6 to
-  10 seconds. md fails the member then, and the writes complete on the
-  other leg. A flush md sent to that leg ends then too, with no error. IO sent
-  in the last second before that waits longer, for the fast IO fail
-  timeout, the kernel's wait before it fails the IO queued on a lost path:
-  5 seconds today, so 11 to 15 seconds in all. An fsync whose flush is in
-  that IO waits as long. A one-leg group has no other leg: its writes and
-  reads wait for the fast IO fail timeout and return the error, and a
-  failed commit leaves its thin pool read-only. State: accepted. Fix decided: the fast IO fail timeout becomes a pool
-  setting, fixed when the pool is created, with today's value as its
-  default. Not seen in the lab; read from the kernel's code.
+  NVMe/TCP a dead disk node is noticed by the keep-alive alone. In the lab
+  the controller node dropped its connections to the dead node 6 to 10
+  seconds after the node went silent. md fails the member then, and the
+  writes complete on the other leg. A write in flight when the node died
+  waited 9 to 10 seconds in all, and no write failed. A flush md sent to
+  that leg ends then too, with no error. IO that reaches the lost leg
+  after the keep-alive gives up waits longer, for the fast IO fail
+  timeout, the kernel's wait before it fails the IO queued on a lost path.
+  That timeout is a pool setting, chosen when the pool is created: 1 to 5
+  seconds, 5 by default. A shorter one shortens only this wait, not the
+  wait of the write in flight. An fsync whose flush is in that IO waits as
+  long. A one-leg group has no other leg: its writes and reads wait for
+  the fast IO fail timeout too and return the error, and a failed commit
+  leaves its thin pool read-only. The measured times are in [the
+  introduction](introduction.md#status-and-limits-of-01). State: accepted.
 
 **What a completed write means.** A volume tells the host that it has a
 volatile write cache, as many disks do, so the host sends flushes. A write
@@ -509,8 +513,9 @@ No case is known today.
 
 The table says what dnv does by itself for each fault, and what an
 operator does by hand. The third column gives the wait where a setting
-controls it. The settings are the pool's thresholds, the check interval
-and the cluster's start hold, which is how long the worker waits for an
+controls it. The settings are the pool's thresholds, the pool's fast IO
+fail timeout (section 4), the check interval and the cluster's start
+hold, which is how long the worker waits for an
 agent that is still rebuilding after a restart, in seconds, and three
 flags of the worker: `--vote-interval`, `--vote-grace-time` and
 `--vote-leave-grace-time`.
@@ -519,7 +524,7 @@ Measured times are in [the introduction](introduction.md#status-and-limits-of-01
 | Fault | What dnv does by itself | The wait, where a setting controls it | By hand |
 |---|---|---|---|
 | A disk fails, one leg of a RAID1 group | md fails the leg. IO goes on over the other leg. Leg repair replaces the leg with a new leg on another disk node, and md copies the data onto it. The old leg becomes a retired leg. | `leg_unhealthy`, 1200 at the default, before the repair starts. | Nothing. In a pool without RAID the data is gone (accepted case 2). |
-| A disk node is down and comes back | In a RAID1 pool, md fails its legs after the kernel's keep-alive. IO goes on over the other legs. A group with no IO sends md nothing to fail, so the primary fails such a leg in md itself once the leg has failed its health check twice in a row, while another leg holds the data in sync. md then records the death on the other leg, and a failover or a reboot can start the array from that leg alone. Back in time, its legs rejoin and md copies the changed regions. Down for long, leg repair moves each leg to another disk node. In a pool without RAID, the IO waits for the fast IO fail timeout and then fails (section 4). | `side_unhealthy`, 600 at the default, before the repairs start. | Nothing. A node that never returns needs the node replacement procedure (section 7). |
+| A disk node is down and comes back | In a RAID1 pool, md fails its legs after the kernel's keep-alive. IO goes on over the other legs. A group with no IO sends md nothing to fail, so the primary fails such a leg in md itself once the leg has failed its health check twice in a row, while another leg holds the data in sync. md then records the death on the other leg, and a failover or a reboot can start the array from that leg alone. Back in time, its legs rejoin and md copies the changed regions. Down for long, leg repair moves each leg to another disk node. In a pool without RAID, the IO waits for the fast IO fail timeout and then fails (section 4). | `side_unhealthy`, 600 at the default, before the repairs start. The pool's fast IO fail timeout, 5 at the default, bounds how long the IO of a pool without RAID waits before it fails, and how long IO that reaches a lost leg after the keep-alive gives up waits. | Nothing. A node that never returns needs the node replacement procedure (section 7). |
 | A controller node is down and comes back | Each primary on it that has a healthy enabled standby is failed over to it. Hosts see a pause. A pool of one cntlr waits for a cntlr replacement. Back, the cntlrs that were failed over are standbys. A cntlr unhealthy for long is replaced on another controller node. | `primary_unhealthy`, 4 at the default, with two check rounds in a row that find the primary unhealthy; a round runs every `cntlr_interval`, 2 at the default. A missed round counts only once its own wait of one interval has run out, so a failover comes about 6 to 10 seconds after the node dies. `cntlr_unhealthy`, 600, before a replacement. | Nothing. |
 | The network between a controller node and a disk node is cut | When the controller node holds the primary, as for a disk node down, seen from that controller node: md fails the legs behind the cut and takes them back when the cut ends. A long cut moves the legs. A cut from a node that holds only standbys changes nothing. | `leg_unhealthy`, 1200. | Nothing. |
 | The network between hosts and a controller node is cut | Nothing. dnv reads the agents, never a host. The primary stays the primary and stays in the cdc's answer. The host's IO queues as long as a standby path is left. | None. | Disable the primary, so a failover runs at once. Enable it again after. State: procedure to write; fix later, a host health signal into the worker. |
@@ -1369,7 +1374,8 @@ design:
   node, never across nodes. To scale out, spread the pools across
   controller nodes. State: accepted; more than one primary is not yet.
 - **No throughput or latency figures are published.** Only the failover
-  pause is measured, on the lab VMs. State: accepted; the figures come
+  pause and the write pause when a disk node dies are measured, on the lab
+  VMs. State: accepted; the figures come
   from a performance run on AWS.
 - **Every change of a pool sends the whole desired state to its sides and
   cntlrs.** A volume

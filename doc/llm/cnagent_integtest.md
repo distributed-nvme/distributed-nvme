@@ -34,12 +34,13 @@ bad-block list and one refused for a named leg older than a member it would
 zero, then forced, a broken array whose legs come back assembled again
 with no mark, a group whose array has run whose legs all read blank,
 the clone's source lost and given back, a new volume over a thin id that
-holds data, and
+holds data, a disk node that dies under a host's writes, and
 the leftover, an accepted request reporting residue (`cnagent.md` CN20). The
 cases run in a fixed order, fail-fast — smoke, redund, repair, teardown,
-thinbm, torn, clone_xfer, restart — each under pool ids of its own and each leaving
-nothing of its pools, a teardown per case and per stage that also keeps the run
-inside a DN's data area, which the cases together would overdraw.
+thinbm, torn, clone_xfer, restart, pause — each under pool ids of its own and
+each leaving nothing of its pools, a teardown per case and per stage that
+also keeps the run inside a DN's data area, which the cases together would
+overdraw.
 
 Beside the suite, the Go tests of `agent/cnagent` run a real cn agent the way
 the dn agent's run (`dnagent_integtest.md`, Goal and scope), driven by a fake
@@ -125,9 +126,12 @@ measures as the dn suite's does; and on the dm-clone table. This suite adds:
   read would block on, under a host write, since md learns of a dead member
   only from an IO to it (`cnagent.md` CN12, CN29); a failfast member write
   in flight on the path fails at the teardown the controller's keep-alive
-  expiry triggers, a quarter keep-alive timeout later, and one that reaches
-  the leg's multipath head after the expiry waits there until the fast IO
-  fail timeout (`architecture.md`, Known limits).
+  expiry triggers, a quarter keep-alive timeout later on the lab's kernel,
+  and one that reaches the leg's multipath head after the expiry waits there
+  until the fast IO fail timeout (`architecture.md`, Known limits), as the
+  pause case measures.
+* nvme-cli does not pass a fast IO fail timeout of zero to the kernel: the
+  controller it connects keeps the kernel's default, which never fails IO.
 * dm-flakey counts the feature name among its feature arguments and prints them
   back in a kernel-dependent order, so the read-only check matches the target
   and the error-writes feature apart, as `nsDevTableMatches` does.
@@ -806,6 +810,31 @@ activation sweep's included (`dnagent.md` SH16; `cnagent.md` CN14); and a
 `SyncupCn` below the revision those re-sends stored is refused as stale in a
 normal reply (`dnagent.md` SH8, SH9; CN4).
 
+**pause** is the write pause when a disk node dies (`architecture.md`, Known
+limits, the entry on a disk node that dies): DN1's VM is cut off from CN2's
+both ways, so DN1 answers nothing, as a dead node does, under a host
+writing on CN2's VM. It builds redund's pool with the primary on CN2 and the
+standby on CN1, its requests setting the legs' fast IO fail timeout below the
+default (`cnagent.md` CN10), and connects the host to both. Every time is
+read on CN2's VM, one clock for the writer, the sampler of CN2's leg paths
+and md members, the kernel log and the agent's stamps, and the case refuses
+a clock chrony reads as off, since chrony slews a clock that is far off and
+a slewed clock runs fast or slow by several percent. A writer of synced
+4 KiB blocks, one at a time, writes over a window it wrote first, so no
+write maps a new block. Through the cut the case plays the worker: check
+rounds at the check interval, and the `SyncupCntlr` re-sent once CN2's
+paths into DN1 have left live. Each of CN2's leg controllers reads the
+request's timeout, no write fails, and the longest write stays under the
+teardown's bound plus the timeout plus a margin; once the cut lifts, the
+paths come back and the members md failed are put back, as in redund. With
+`PAUSE_MODE=measure` and `--only pause` the case is the measurement instead:
+it first logs what a controller nvme-cli connects with a fast IO fail
+timeout of zero reads, then cuts the pool at the agent's default and with
+the leg controllers' timeout written shorter and longer in sysfs, then cuts
+a `RedundNone` pool at the default and at the longer timeout, timing the
+write that fails, and prints and keeps each cut's writes, samples, kernel
+logs, rounds and summary on the driver.
+
 **What a pass means.** Exit status zero and PASS mean every assertion held in a
 run that stops at the first failure: data checked against patterns the agents
 never see, removals proved by the nodes' own listings, every stop a case makes
@@ -821,7 +850,9 @@ Cleanup runs unconditionally at the start of every run and at its end only on
 success; a failing run leaves its debris and dumps the agents' logs, both VMs'
 dm, md, nvmet and host state, each read bounded, and the failing stage's trace
 id, but for clone_xfer's token bucket, which it removes, as the bucket would
-slow any suite that runs on the VMs before the next cleanup. A cleanup-only
+slow any suite that runs on the VMs before the next cleanup, and pause's cut
+and its writer, which it removes and stops, as the cut would black-hole
+another suite's connections. A cleanup-only
 run does the scrub alone. It takes every `dnv-agent` and
 every dnv dm device, md array and nvmet subsystem on the node, of either
 role, which is why one dnv suite runs at a

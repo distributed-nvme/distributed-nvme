@@ -611,22 +611,35 @@ func TestErrPreconditionAbortsWithoutCommit(t *testing.T) {
 // geometry — nothing is formatted or addressed with it — so CreateStoragePool
 // stores it verbatim and a stored zero here keeps meaning "the default".
 // (The other is the DmCloneConf hydration pair, resolved in worker/sprole.go.)
+//
+// The fifth member, leg_fast_io_fail_tmo, resolves a zero to the fast IO fail
+// timeout every connection had before the member existed,
+// common.DefaultNvmeFastIoFailTmo, so a pool stored without it keeps its
+// legs' timers, and keeps a value it stored.
 func TestResolveEventThreshold(t *testing.T) {
 	resolved := ResolveEventThreshold(nil)
 	if resolved.GetPrimaryUnhealthy() != common.DefaultPrimaryUnhealthy ||
 		resolved.GetCntlrUnhealthy() != common.DefaultCntlrUnhealthy ||
 		resolved.GetSideUnhealthy() != common.DefaultSideUnhealthy ||
-		resolved.GetLegUnhealthy() != common.DefaultLegUnhealthy {
+		resolved.GetLegUnhealthy() != common.DefaultLegUnhealthy ||
+		resolved.GetLegFastIoFailTmo() != common.DefaultNvmeFastIoFailTmo {
 		t.Errorf("nil must resolve to the Common validation defaults: %v", resolved)
 	}
-	stored := &pb.EventThreshold{PrimaryUnhealthy: 11, LegUnhealthy: 22}
+	stored := &pb.EventThreshold{
+		PrimaryUnhealthy: 11, LegUnhealthy: 22, LegFastIoFailTmo: 3}
 	resolved = ResolveEventThreshold(stored)
-	if resolved.GetPrimaryUnhealthy() != 11 || resolved.GetLegUnhealthy() != 22 {
+	if resolved.GetPrimaryUnhealthy() != 11 || resolved.GetLegUnhealthy() != 22 ||
+		resolved.GetLegFastIoFailTmo() != 3 {
 		t.Errorf("stored values must survive: %v", resolved)
 	}
 	if resolved.GetCntlrUnhealthy() != common.DefaultCntlrUnhealthy ||
 		resolved.GetSideUnhealthy() != common.DefaultSideUnhealthy {
 		t.Errorf("zero fields must default: %v", resolved)
+	}
+	resolved = ResolveEventThreshold(&pb.EventThreshold{PrimaryUnhealthy: 11})
+	if resolved.GetLegFastIoFailTmo() != common.DefaultNvmeFastIoFailTmo {
+		t.Errorf("a stored zero leg_fast_io_fail_tmo must resolve to %d: %v",
+			common.DefaultNvmeFastIoFailTmo, resolved)
 	}
 	if stored.GetCntlrUnhealthy() != 0 {
 		t.Errorf("the input must not be mutated")

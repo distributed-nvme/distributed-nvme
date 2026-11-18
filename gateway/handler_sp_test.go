@@ -1139,6 +1139,71 @@ func TestCreateStoragePoolJudgesTheMergedGeometry(t *testing.T) {
 	})
 }
 
+// TestCreateStoragePoolTakesTheLegFastIoFail pins event_threshold.
+// leg_fast_io_fail_tmo at the RPC (architecture.md, Common validation; GW11):
+// a set value from common.MinLegFastIoFailTmo to common.DefaultNvmeFastIoFailTmo
+// is taken and stored as sent, a zero is taken as no value and stored as sent
+// too, and a value over the default is INVALID_ARGUMENT and writes nothing,
+// at a cluster cntlr_interval of the least and of the most alike: the range is
+// fixed, judged apart from the interval. At the least interval a request
+// that sends no threshold at all is taken, as every pool a cluster at that
+// interval holds before the member existed. Each request meets the
+// primary-threshold rule at its interval (validatePrimaryThreshold), so only
+// the member decides.
+func TestCreateStoragePoolTakesTheLegFastIoFail(t *testing.T) {
+	for _, interval := range []uint32{
+		common.MinHealthCheckInterval, common.MaxHealthCheckInterval,
+	} {
+		t.Run(fmt.Sprintf("cntlr_interval %d", interval), func(t *testing.T) {
+			env := sptNewEnv(t, sptDnCnt, sptCnCnt, sptCnFree)
+			env.setCntlrInterval(interval)
+			primary := max(uint32(common.DefaultPrimaryUnhealthy), 2*interval)
+			for idx, tmo := range []uint32{
+				0, common.MinLegFastIoFailTmo, common.DefaultNvmeFastIoFailTmo,
+				common.DefaultNvmeFastIoFailTmo + 1,
+			} {
+				name := fmt.Sprintf("leg%d", idx)
+				req := sptSmallSpec(name).req(env.name)
+				req.EventThreshold.PrimaryUnhealthy = primary
+				req.EventThreshold.LegFastIoFailTmo = tmo
+				before := env.dump()
+				_, err := env.srv.CreateStoragePool(env.ctx, req)
+				if tmo > common.DefaultNvmeFastIoFailTmo {
+					sptWantCode(t, err, codes.InvalidArgument)
+					want := fmt.Sprintf("event_threshold."+
+						"leg_fast_io_fail_tmo %d is outside [%d, %d]", tmo,
+						common.MinLegFastIoFailTmo,
+						common.DefaultNvmeFastIoFailTmo)
+					if msg := status.Convert(err).Message(); msg != want {
+						t.Errorf("at %d: message %q, want %q", tmo, msg, want)
+					}
+					if changed := sptChangedKeys(before, env.dump()); len(
+						changed) != 0 {
+						t.Errorf("at %d: a refusal wrote %v", tmo, changed)
+					}
+					continue
+				}
+				if err != nil {
+					t.Fatalf("at %d: CreateStoragePool: %v", tmo, err)
+				}
+				got := env.spConf(name).GetEventThreshold()
+				if !proto.Equal(got, req.GetEventThreshold()) {
+					t.Errorf("at %d: event_threshold stored %v, want %v as "+
+						"sent", tmo, got, req.GetEventThreshold())
+				}
+			}
+			if interval != common.MinHealthCheckInterval {
+				return
+			}
+			req := sptSmallSpec("unset").req(env.name)
+			req.EventThreshold = nil
+			if _, err := env.srv.CreateStoragePool(env.ctx, req); err != nil {
+				t.Fatalf("a create with no threshold: %v", err)
+			}
+		})
+	}
+}
+
 // setCntlrInterval stores a cntlr_interval in the cluster's conf, the way
 // setCnBatchSize stores a batch size. A value from
 // common.MinHealthCheckInterval to common.MaxHealthCheckInterval passes the

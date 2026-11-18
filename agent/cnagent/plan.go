@@ -119,6 +119,10 @@ type cntlrPlan struct {
 	lowWaterPct       uint32
 	raid1             bool
 	bitmapChunkBlocks uint64
+	// legFastIoFail is the fast IO fail timeout every leg is connected
+	// with (CN10): the request's, or DefaultNvmeFastIoFailTmo when the
+	// request carries none, as one from a worker without the field does.
+	legFastIoFail uint32
 
 	sliceCnt  uint64
 	slices    []*slicePlan
@@ -648,6 +652,10 @@ func newCntlrPlan(
 		cloneById:         make(map[uint64]*clonePlan),
 		cloneByTd:         make(map[uint64]*clonePlan),
 		xferById:          make(map[uint64]*xferPlan),
+	}
+	p.legFastIoFail = req.GetLegFastIoFailTmo()
+	if p.legFastIoFail == 0 {
+		p.legFastIoFail = common.DefaultNvmeFastIoFailTmo
 	}
 	p.wantAny = level < pb.SpLevel_SP_LEVEL_DISABLE
 	p.levelLeg = p.wantAny && level < pb.SpLevel_SP_LEVEL_NO_SIDE

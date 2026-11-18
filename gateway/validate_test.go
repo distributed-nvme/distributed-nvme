@@ -1432,6 +1432,40 @@ func TestValidateEventThreshold(t *testing.T) {
 	}
 }
 
+// TestValidateLegFastIoFail pins the range of event_threshold.
+// leg_fast_io_fail_tmo (architecture.md, Common validation): a value that is
+// set lies from common.MinLegFastIoFailTmo to common.DefaultNvmeFastIoFailTmo,
+// so a pool may shorten its legs' window and never lengthen it past the
+// default, and a zero is no value set, judged by nothing. The refusal names
+// the field, the value sent and the range.
+func TestValidateLegFastIoFail(t *testing.T) {
+	for _, tc := range []struct {
+		tmo  uint32
+		want codes.Code
+	}{
+		{0, codes.OK},
+		{common.MinLegFastIoFailTmo, codes.OK},
+		{3, codes.OK},
+		{common.DefaultNvmeFastIoFailTmo, codes.OK},
+		{common.DefaultNvmeFastIoFailTmo + 1, codes.InvalidArgument},
+		{30, codes.InvalidArgument},
+		{^uint32(0), codes.InvalidArgument},
+	} {
+		t.Run(fmt.Sprint(tc.tmo), func(t *testing.T) {
+			err := validateEventThreshold(
+				&pb.EventThreshold{LegFastIoFailTmo: tc.tmo})
+			validateWantCode(t, "validateEventThreshold", err, tc.want)
+			if tc.want == codes.OK {
+				return
+			}
+			validateWantMsg(t, "the field and the range", err, fmt.Sprintf(
+				"event_threshold.leg_fast_io_fail_tmo %d is outside [%d, %d]",
+				tc.tmo, common.MinLegFastIoFailTmo,
+				common.DefaultNvmeFastIoFailTmo))
+		})
+	}
+}
+
 // TestValidateEventThresholdMessageIsResolved pins that the refusal quotes the
 // RESOLVED numbers. A message echoing the request's zeros would tell an
 // operator "leg_unhealthy 0 must exceed side_unhealthy 1200", which reads as a

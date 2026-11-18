@@ -427,7 +427,7 @@ infrastructure and the whole of setup, which clears every id the last case
 read; that rebuild is also where the next case's thresholds take effect.
 
 E2E12. **The shell literals mirror named constants and say so.** Every number a
-Go constant owns is repeated beside a comment naming the constant, except nine
+Go constant owns is repeated beside a comment naming the constant, except ten
 read from `workerctl constants` at the driver's preflight: `EtcdMaxTxnOps` and
 `EtcdMaxRequestBytes`, which etcd must be started with and which this suite,
 committing the transaction the first is sized by at two cntlrs, short of the
@@ -441,8 +441,10 @@ case computes its wait for its writer's failed write and the least time the
 writer's range must last; `DefaultStartHoldSeconds`, the start hold every
 cluster of the suite stores, as none names one at its create
 (`dnv-worker.md` HL8), which bounds the react case's wait for a restarted
-agent's start;
-`DefaultStripeSize`, the stripe every cluster of
+agent's start; `DefaultNvmeFastIoFailTmo`, the fast IO fail timeout of the
+legs of a pool that sets none, as no pool of the suite does, which the
+react case's waits on a dead leg take unless the pool's stored setting
+says otherwise; `DefaultStripeSize`, the stripe every cluster of
 the suite stores, which the react case's stripe also mirrors, the preflight
 holding that copy to the value read; and `MaxNvmeTcpCmdBytes`, which the
 pool's stripe times its slice count and the IO sizes host0 reads are held

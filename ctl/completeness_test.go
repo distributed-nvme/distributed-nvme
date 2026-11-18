@@ -275,6 +275,7 @@ var leafFlags = map[string][]string{
 		"redund", "bitmap-chunk-blocks", "stripe-size", "block-size",
 		"low-water-mark-pct",
 		"thr-primary", "thr-cntlr", "thr-side", "thr-leg",
+		"leg-fast-io-fail",
 		"dn-black", "dn-white", "cn-black", "cn-white"},
 	"sp delete":           {},
 	"sp get":              {},

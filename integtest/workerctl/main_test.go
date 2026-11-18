@@ -580,8 +580,8 @@ func TestKeyPrefix(t *testing.T) {
 
 // TestConstantsEmitsWhatTheSuitesRead pins `constants`, the channel through
 // which the shell suites read a Go constant (`geometry` and `meta-units` are
-// the others, for computed values). It prints twenty keys, and the suites
-// read eighteen of them and stop when one is missing: seventeen at preflight,
+// the others, for computed values). It prints twenty-one keys, and the suites
+// read nineteen of them and stop when one is missing: eighteen at preflight,
 // and RetiredLegMaxAge, which the worker suite's repair case reads.
 // Every suite that starts an etcd — the worker, gateway, cdc and e2e suites —
 // launches it with EtcdMaxTxnOps and EtcdMaxRequestBytes. The e2e suite
@@ -595,10 +595,11 @@ func TestKeyPrefix(t *testing.T) {
 // the counters the id step moves against IdStepStride and ThinIdStepStride. The
 // worker and e2e suites read DefaultHealthCheckInterval,
 // DefaultPrimaryUnhealthy and DemotionHoldTimeout for their failover cases,
-// and the e2e suite DefaultStartHoldSeconds for react's restart step.
+// and the e2e suite DefaultStartHoldSeconds for react's restart step and
+// DefaultNvmeFastIoFailTmo for the legs of a pool that sets none.
 // The cdc suite's flood case fills the pending cap, CdcMaxPendingConnCnt, and
 // waits by the pre-Connect deadline, DefaultCdcPendingTmoMs. One of those
-// eighteen dropped or renamed here would otherwise surface only when a suite
+// nineteen dropped or renamed here would otherwise surface only when a suite
 // is run, at its preflight or in that case. No suite reads the other two,
 // MaxDelGrpPerTxn and MaxDelBmPerTxn; they are pinned as well, because a case
 // may size itself against them.
@@ -634,11 +635,12 @@ func TestConstantsEmitsWhatTheSuitesRead(t *testing.T) {
 		"DefaultDmPoolDataBlockSize": common.DefaultDmPoolDataBlockSize,
 		"DefaultStripeSize": model.DefaultStripeSize(
 			common.DefaultDmPoolDataBlockSize),
-		"MaxNvmeTcpCmdBytes":      common.MaxNvmeTcpCmdBytes,
-		"DefaultPrimaryUnhealthy": common.DefaultPrimaryUnhealthy,
-		"DemotionHoldTimeout":     common.DemotionHoldTimeout,
-		"DefaultStartHoldSeconds": common.DefaultStartHoldSeconds,
-		"RetiredLegMaxAge":        common.RetiredLegMaxAge,
+		"MaxNvmeTcpCmdBytes":       common.MaxNvmeTcpCmdBytes,
+		"DefaultPrimaryUnhealthy":  common.DefaultPrimaryUnhealthy,
+		"DemotionHoldTimeout":      common.DemotionHoldTimeout,
+		"DefaultStartHoldSeconds":  common.DefaultStartHoldSeconds,
+		"RetiredLegMaxAge":         common.RetiredLegMaxAge,
+		"DefaultNvmeFastIoFailTmo": common.DefaultNvmeFastIoFailTmo,
 
 		"DnCloneMetaUnitCnt": common.DnCloneMetaUnitCnt,
 		"DnCloneMetaUnit":    common.DnCloneMetaUnit,

@@ -2125,6 +2125,11 @@ func (w *spWorker) buildCntlrPlans(
 	// cntlr, the only component that talks to them, which finds a group's
 	// repair through Group.rep_name.
 	repairs := cntlrRepairs(state)
+	// The legs' fast IO fail timeout, resolved as every reader of the
+	// pool's thresholds resolves them (architecture.md, Common validation),
+	// so a pool stored without it connects its legs as before it existed.
+	legFastIoFail := model.ResolveEventThreshold(
+		conf.GetEventThreshold()).GetLegFastIoFailTmo()
 	for _, cntlrId := range conf.GetCntlrIdList() {
 		cntlr, ok := state.Cntlrs[cntlrId]
 		if !ok {
@@ -2149,16 +2154,17 @@ func (w *spWorker) buildCntlrPlans(
 					SpId:    spId,
 					CntlrId: cntlrId,
 				},
-				Revision:       w.desired.revision,
-				BdevConf:       conf.GetBdevConf(),
-				SpLevel:        conf.GetSpLevel(),
-				Cntlr:          cntlr,
-				IdToSlice:      idToSlice,
-				TdList:         state.Tds,
-				NqnToSubsystem: state.Subsystems,
-				CloneList:      clones,
-				XferList:       xfers,
-				NameToRepair:   repairs,
+				Revision:         w.desired.revision,
+				BdevConf:         conf.GetBdevConf(),
+				SpLevel:          conf.GetSpLevel(),
+				Cntlr:            cntlr,
+				IdToSlice:        idToSlice,
+				TdList:           state.Tds,
+				NqnToSubsystem:   state.Subsystems,
+				CloneList:        clones,
+				XferList:         xfers,
+				NameToRepair:     repairs,
+				LegFastIoFailTmo: legFastIoFail,
 			},
 			sliceIds: sliceIds,
 		}

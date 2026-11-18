@@ -518,18 +518,29 @@ func validateStripeProduct(stripe uint64, sliceCnt int) error {
 		model.FitStripe(stripe, uint32(sliceCnt)))
 }
 
-// validateEventThreshold checks the four thresholds and their one cross-field
-// rule that reads the request alone (architecture.md, Common validation; the
-// one that reads the cluster is validatePrimaryThreshold): leg_unhealthy MUST
-// exceed side_unhealthy AFTER the defaults are resolved, because the leg
-// repair of dnv-worker.md AR8 fires on the side threshold when the DN looks
-// dead and on the leg threshold when only the cntlr's path is bad.
+// validateEventThreshold checks the thresholds by the rules that read the
+// request alone (architecture.md, Common validation; the one that reads the
+// cluster is validatePrimaryThreshold). leg_unhealthy MUST exceed
+// side_unhealthy AFTER the defaults are resolved, because the leg repair of
+// dnv-worker.md AR8 fires on the side threshold when the DN looks dead and on
+// the leg threshold when only the cntlr's path is bad. A leg_fast_io_fail_tmo
+// that is set lies from common.MinLegFastIoFailTmo to
+// common.DefaultNvmeFastIoFailTmo, whatever the cluster's intervals: a
+// longer one would hold a write at a dead leg past the time a host's own IO
+// timeout may fire, and a zero is no value set, judged by nothing.
 func validateEventThreshold(threshold *pb.EventThreshold) error {
 	resolved := model.ResolveEventThreshold(threshold)
 	if resolved.GetLegUnhealthy() <= resolved.GetSideUnhealthy() {
 		return errInvalid(
 			"event_threshold.leg_unhealthy %d must exceed side_unhealthy %d",
 			resolved.GetLegUnhealthy(), resolved.GetSideUnhealthy())
+	}
+	if tmo := threshold.GetLegFastIoFailTmo(); tmo != 0 &&
+		(tmo < common.MinLegFastIoFailTmo ||
+			tmo > common.DefaultNvmeFastIoFailTmo) {
+		return errInvalid(
+			"event_threshold.leg_fast_io_fail_tmo %d is outside [%d, %d]",
+			tmo, common.MinLegFastIoFailTmo, common.DefaultNvmeFastIoFailTmo)
 	}
 	return nil
 }

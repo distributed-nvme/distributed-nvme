@@ -1083,7 +1083,8 @@ func connectStray(t *testing.T, srv *CnAgentServer, nqn string) {
 	if err := srv.host.Connect(context.Background(),
 		agent.TrConf{TrType: "tcp", AdrFam: "ipv4",
 			TrAddr: testIp2, TrSvcId: testSvcId2},
-		nqn, srv.nf.CnHostNqn(testCluster, testCn)); err != nil {
+		nqn, srv.nf.CnHostNqn(testCluster, testCn),
+		common.DefaultNvmeFastIoFailTmo); err != nil {
 		t.Fatalf("connecting %s: %v", nqn, err)
 	}
 }

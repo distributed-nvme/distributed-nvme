@@ -431,7 +431,7 @@ func (s *CnAgentServer) ensureLeg(
 			AdrFam:  tr.GetAdrFam(),
 			TrAddr:  tr.GetTrAddr(),
 			TrSvcId: tr.GetTrSvcId(),
-		}, lp.nqn, plan.hostNqn()); err != nil {
+		}, lp.nqn, plan.hostNqn(), plan.legFastIoFail); err != nil {
 			return nil, err
 		}
 		connected = true
@@ -834,12 +834,12 @@ func (s *CnAgentServer) cutPaths(
 }
 
 // connectWithin is the CN10 connect of one side of a leg, and the CN18
-// connect of one clone-source path: `nvme connect`, and again after a
-// CnConnectRetryPause whenever it failed, for as long as the pass's budget
-// covers the pause. Every failed attempt is charged its own elapsed time, so
-// a connect to a disk node whose VM is down — about 3 s, the kernel's SYN
-// retries or CmdSoftTimeout — spends the whole budget at once and is never
-// retried in the pass.
+// connect of one clone-source path: `nvme connect` with the fast IO fail
+// timeout fastIoFailTmo, and again after a CnConnectRetryPause whenever it
+// failed, for as long as the pass's budget covers the pause. Every failed
+// attempt is charged its own elapsed time, so a connect to a disk node whose
+// VM is down — about 3 s, the kernel's SYN retries or CmdSoftTimeout —
+// spends the whole budget at once and is never retried in the pass.
 //
 // The error is never classified. The same failure is what a disk node that
 // has not linked the export into its port yet answers — refused at TCP by a
@@ -857,10 +857,11 @@ func (s *CnAgentServer) connectWithin(
 	tr agent.TrConf,
 	nqn string,
 	hostNqn string,
+	fastIoFailTmo uint32,
 ) error {
 	for {
 		start := budget.Now()
-		err := s.host.Connect(ctx, tr, nqn, hostNqn)
+		err := s.host.Connect(ctx, tr, nqn, hostNqn, fastIoFailTmo)
 		if err == nil {
 			return nil
 		}

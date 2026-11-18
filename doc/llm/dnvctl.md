@@ -487,8 +487,9 @@ oneof arm and the oneof has no third arm to carry it. The other members
 follow the "not given" convention: `dm_raid0_conf` is sent only for a
 non-zero `--stripe-size`, `dm_pool_conf` only when `--block-size` or
 `--low-water-mark-pct` is non-zero, carrying both, and `event_threshold`
-only when one of `--thr-primary`, `--thr-cntlr`, `--thr-side` and
-`--thr-leg` is non-zero. `--slice-cnt`, `--cntlr-cnt`, `--init-ext-cnt` and
+only when one of `--thr-primary`, `--thr-cntlr`, `--thr-side`, `--thr-leg`
+and `--leg-fast-io-fail`, the legs' fast IO fail timeout, is non-zero.
+`--slice-cnt`, `--cntlr-cnt`, `--init-ext-cnt` and
 `--low-water-mark-pct` are forwarded as typed, a zero and a mark above one
 hundred included (CT8); which zeros the gateway fills with a default and
 which it refuses is `architecture.md`, Storage pools and `architecture.md`,

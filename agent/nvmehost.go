@@ -2,6 +2,7 @@ package agent
 
 import (
 	"context"
+	"fmt"
 	"regexp"
 	"slices"
 	"strconv"
@@ -11,7 +12,7 @@ import (
 )
 
 // NvmeHost wraps the nvme-cli host patterns (SH17, SH20). Every dnv-internal
-// connection is made with --fast_io_fail_tmo DefaultNvmeFastIoFailTmo,
+// connection is made with the --fast_io_fail_tmo its caller passes,
 // --ctrl-loss-tmo -1 (SH20) and the common.NvmeHostId derived from its own
 // hostnqn — never the node-wide /etc/nvme/hostid, which the kernel's 1:1
 // hostnqn<->hostid rule would turn into an EINVAL the moment anything else
@@ -39,12 +40,22 @@ type TrConf struct {
 	TrSvcId string
 }
 
+// Connect connects one controller with the fast IO fail timeout
+// fastIoFailTmo, in seconds (SH20). A zero is refused before nvme-cli runs:
+// nvme-cli drops a zero, and the kernel then keeps its own default, a
+// timeout that never fails IO, which a connection that also never gives up
+// would turn into IO held for as long as the disk node stays away.
 func (h *NvmeHost) Connect(
 	ctx context.Context,
 	tr TrConf,
 	nqn string,
 	hostNqn string,
+	fastIoFailTmo uint32,
 ) error {
+	if fastIoFailTmo == 0 {
+		return fmt.Errorf("connect %s at %s:%s: fast_io_fail_tmo 0 never "+
+			"fails IO", nqn, tr.TrAddr, tr.TrSvcId)
+	}
 	return h.runOk(ctx, "nvme", "connect",
 		"--transport", tr.TrType,
 		"--traddr", tr.TrAddr,
@@ -53,7 +64,7 @@ func (h *NvmeHost) Connect(
 		"--hostnqn", hostNqn,
 		"--hostid", common.NvmeHostId(hostNqn),
 		"--fast_io_fail_tmo",
-		strconv.Itoa(common.DefaultNvmeFastIoFailTmo),
+		strconv.FormatUint(uint64(fastIoFailTmo), 10),
 		"--ctrl-loss-tmo", "-1")
 }
 

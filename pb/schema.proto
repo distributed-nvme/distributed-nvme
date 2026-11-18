@@ -119,6 +119,14 @@ message EventThreshold {
     // How long the LEG must have been unhealthy
     // before it is repaired (AR8 case 1).
     uint32 leg_unhealthy = 4;
+    // The fast IO fail timeout, in seconds, of every
+    // leg connection of the pool's cntlrs: how long
+    // the kernel holds IO queued for a leg whose
+    // controller is reconnecting to a lost disk node
+    // before it fails it (dnagent.md SH20). Its range
+    // when set is architecture.md, Common validation.
+    // Appended, never renumbered.
+    uint32 leg_fast_io_fail_tmo = 5;
 }
 
 message SidePointer {
@@ -2328,6 +2336,11 @@ message SyncupCntlrRequest {
     // The pool's repairs by name. The cntlr finds a group's repair through
     // Group.rep_name. Appended, never renumbered.
     map<string, Repair> name_to_repair = 14;
+    // The pool's EventThreshold.leg_fast_io_fail_tmo, resolved: the fast IO
+    // fail timeout the cn agent connects the cntlr's legs with (cnagent.md
+    // CN10). Zero, as a request from a worker without the field carries
+    // it, is DefaultNvmeFastIoFailTmo. Appended, never renumbered.
+    uint32 leg_fast_io_fail_tmo = 15;
 }
 
 message SyncupCntlrReply {

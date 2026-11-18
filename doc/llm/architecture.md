@@ -759,7 +759,9 @@ clones' clone meta groups (Terminology and object model):
    a side whose `provisioned` is false exports nothing yet and is skipped
    (`cnagent.md` CN10): `nvme connect` to the `SideToCnNqn` of the
    cluster, sp, leg and this CN at `Side.nvme_tr_conf`, with the hostnqn
-   `CnHostNqn` of the cluster and cn and the flags of `dnagent.md` SH20.
+   `CnHostNqn` of the cluster and cn and the flags of `dnagent.md` SH20,
+   the fast IO fail timeout among them the pool's
+   `event_threshold.leg_fast_io_fail_tmo` (Common validation).
    Because every side of a
    leg exports that one NQN with one namespace identity (Disk node, NQNs),
    the connections of a leg land in a single subsystem: the kernel presents
@@ -1985,11 +1987,16 @@ harmless. A migration destination takes its run before it zeroes
     `hydration_batch_size` from one to `MaxCloneBatchSize`; defaults
     `DefaultMigrThreshold` and `DefaultMigrBatchSize` for a migration and,
     for a clone, the dm-clone target's own (below);
-  * the four `EventThreshold` members, in seconds — `primary_unhealthy`,
+  * the four `EventThreshold` thresholds, in seconds — `primary_unhealthy`,
     `cntlr_unhealthy`, `side_unhealthy` and `leg_unhealthy`: any non-zero
     value, no maximum; defaults `DefaultPrimaryUnhealthy`,
     `DefaultCntlrUnhealthy`, `DefaultSideUnhealthy` and
     `DefaultLegUnhealthy`;
+  * `EventThreshold.leg_fast_io_fail_tmo`, in seconds, the fast IO fail
+    timeout every leg connection of the pool is made with (`cnagent.md`
+    CN10; Known limits, the entry on a disk node that dies):
+    `MinLegFastIoFailTmo` to `DefaultNvmeFastIoFailTmo`, default
+    `DefaultNvmeFastIoFailTmo`;
   * `health_check_conf.dn_interval`, `cn_interval`, `side_interval` and
     `cntlr_interval`, in seconds: `MinHealthCheckInterval` to
     `MaxHealthCheckInterval`, default `DefaultHealthCheckInterval`;
@@ -2091,6 +2098,16 @@ harmless. A migration destination takes its run before it zeroes
   `DefaultHealthCheckInterval`, so an SP on a cluster whose
   `cntlr_interval` is longer than its default must set `primary_unhealthy`
   itself.
+* `EventThreshold.leg_fast_io_fail_tmo`, when it is not zero, lies in its
+  range above (`INVALID_ARGUMENT` otherwise), whatever the cluster's
+  intervals; a zero is no value set and is judged by nothing, so a create
+  that leaves it out is never refused. The range only shortens the window
+  of the default: a longer one would hold a write at a dead leg past the
+  time a host's own "nvme_core.io_timeout" may fire and the host retries,
+  which is queueing dnv does not do, and a bound drawn from the check
+  interval would sit below the default at the shortest interval and have
+  no ceiling at the longest. No value turns the window off: the kernel
+  would then hold a dead leg's IO for as long as the disk node stays away.
 * `qos_ratio` must be all zero: a `QosRatio` with `strict` set or a
   non-zero `bytes_per_iops` or `bytes_per_bps` is `INVALID_ARGUMENT`, and
   an absent or all-zero one is stored as sent. Nothing enforces QoS
@@ -2137,7 +2154,9 @@ harmless. A migration destination takes its run before it zeroes
   timers and knobs rather than geometry — nothing is formatted or addressed
   with them: `EventThreshold` is stored exactly as sent (so an operator
   reads back what they asked for) and resolved member-wise when read
-  (Automatic reactions), and the `DmCloneConf` hydration pair is stored as
+  (Automatic reactions; the sp worker resolves `leg_fast_io_fail_tmo` as it
+  builds the `SyncupCntlr` request, `dnv-worker.md` RW16), and the
+  `DmCloneConf` hydration pair is stored as
   sent too — the sp worker resolves a migration's as it builds the
   `SyncupSide` request (`dnv-worker.md` RW15), while a zero in a clone's
   simply leaves the dm-clone target's own default in place (Clones).
@@ -5395,9 +5414,13 @@ AR2); none runs for an SP with `sp_level` at or above
 repaired, and a `deleting` SP runs a step of its drain instead
 (`dnv-worker.md` AR3). A threshold is breached when now minus `err_epoch`
 is at least the SP's `event_threshold` field of that kind, a zero field
-meaning its default (Common validation; `dnv-worker.md` AR4). A breach
-fires a reaction — the failover of an unhealthy primary, the withdrawal of
-a stuck grow, a cntlr replacement, a leg repair on either of its clocks —
+meaning its default (Common validation; `dnv-worker.md` AR4). The fifth
+member, `leg_fast_io_fail_tmo`, is no reaction's threshold: the worker
+resolves it the same way and sends it in every cntlr's request, and the cn
+agent connects the pool's legs with it (`dnv-worker.md` RW16; `cnagent.md`
+CN10). A breach fires a reaction — the failover of an unhealthy primary,
+the withdrawal of a stuck grow, a cntlr replacement, a leg repair on either
+of its clocks —
 only on an object whose latest health verdict by this worker's coordinator
 of the SP is unhealthy, and the failover only once the primary's last two
 health verdicts from check rounds, counted as `dnv-worker.md` RW23 says,
@@ -8120,17 +8143,23 @@ document and only pointed to here.
   through the array (`cnagent.md` CN12), and no rule reads the count.
 * **Writes to a group wait out the keep-alive when a disk node dies, and
   IO that follows the keep-alive's expiry waits the fast IO fail timeout
-  too.** A leg's connection carries a fast IO fail timeout and a
+  too.** A leg's connection carries its pool's fast IO fail timeout,
+  `event_threshold.leg_fast_io_fail_tmo` (Common validation), and a
   controller-loss timeout that never expires (`dnagent.md` SH20). Over TCP
   against nvmet, which advertises traffic-based keep-alive, the host
   kernel checks every quarter of the keep-alive timeout and sends a
   keep-alive only when no completion came since its last check, so the
   first unanswered one goes out up to two quarters after the node died;
-  it times out after one keep-alive timeout plus up to a second of timer
-  rounding, which takes the path out of live at once; and the transport
-  waits a quarter more before it tears the queues down and starts
-  reconnecting. The teardown fails at once the IO in flight that md sent
-  failfast, as md sends every write while the array has more than one
+  it times out after one keep-alive timeout plus the timers' own delays,
+  the block layer's rounding of the deadline up by about a second and the
+  kernel's timer wheel firing late, so the sum of two quarters, one
+  timeout and one second is no bound (the measured times below run past
+  it), and the timeout takes the path out of live at once; and the
+  distribution kernel the lab runs waits a quarter more before it tears
+  the queues down and starts reconnecting, where the kernel's own source
+  tears them down at once. The teardown fails at once the IO in flight
+  that md sent failfast, as md sends every write while the array has more
+  than one
   working member (`cnagent.md` CN12 gives every member the flag), so md
   fails the member there and those writes complete on the other leg; a
   flush md sent to that leg before the keep-alive timed out ends at the
@@ -8142,22 +8171,37 @@ document and only pointed to here.
   the teardown starts, fails it, and so does a commit of the slice's thin
   pool whose flush that is, with the IO that waits behind it; md then
   fails the member for a failed write and completes the write on the other
-  leg, and completes a flush whatever its members' flushes returned. With
-  the kernel's default keep-alive timeout of 5 s the teardown comes about
-  6 to 10 s after the node died, and that IO waits
-  `DefaultNvmeFastIoFailTmo` more, read from the kernel's code and timers,
-  not measured. A `RedundNone` group's device is a dm-linear over the leg
-  wrapper with no md between (`cnagent.md` CN12), so none of its IO is
+  leg, and completes a flush whatever its members' flushes returned.
+  Measured in the lab with the kernel's default keep-alive timeout of 5 s
+  (`cnagent_integtest.md`, Cases, pause): the keep-alive timed out 5.1 to
+  8.9 s after a disk node went silent and the teardown came 1.3 s later,
+  6.4 to 10.2 s after the node went; a host writing one synced 4 KiB block
+  at a time to a RAID1 group waited 9.0 to 10.2 s on the write in flight,
+  which ended at the teardown at each fast IO fail timeout tried, 1, 5 and
+  15 s, and no write failed; IO that reached a head after the keep-alive
+  timed out, md's own superblock write there, waited until the fast IO fail
+  timeout ended, 1.0, 5.1 to 5.4 and 15.1 to 15.4 s after the teardown. So
+  the pool's setting shortens the wait of the IO that reaches a dead leg
+  after the keep-alive's expiry, and a `RedundNone` group's time to its
+  error, and not the wait of the IO in flight when the node died. Through
+  such a death the worker's rounds on the primary answered from
+  observations no older than one check interval and 0.2 s, at the default
+  interval, and a `SyncupCntlr` sent while the dead legs' paths were down
+  returned in 0.1 s: a dead disk node does not age the primary's reads
+  toward a missed round (`dnv-worker.md` HL7). A `RedundNone` group's
+  device is a dm-linear over the leg wrapper with no md between (`cnagent.md` CN12), so none of its IO is
   failfast: its data IO in flight at the teardown, and all its IO that
   reached the head after the keep-alive timed out, waits in the head until
-  the fast IO fail timeout and returns the error, while a flush of its in
-  flight at the teardown ends there with no error, as md's does; a commit
-  of the slice's thin pool that fails leaves the pool read-only with its
+  the fast IO fail timeout and returns the error (measured: the write in
+  flight failed 13.2 s after the node went at 5 s, and 23.3 s at 15 s),
+  while a flush of its in flight at the teardown ends there with no error,
+  as md's does; a commit of the slice's thin pool that fails leaves the pool read-only with its
   needs_check flag set (A pool commit in a migration gap waits for the gap
   to end, above, says what dm-thin does then). A disk that stalls while
   its nvmet answers the keep-alives is bounded by none of this: its IO
   waits out the host's "nvme_core.io_timeout", the kernel's 30 s default,
-  which some cloud images raise to its largest value.
+  which some cloud images raise to its largest value. And no setting
+  makes the loss of every leg of a group at once a pause (the next entry).
 * **A group that loses every leg at once under IO is broken by md.** When
   every path of a group goes at once, as on a switch reload or a reboot of
   all its disk nodes, the transport's teardown and then the fast IO fail

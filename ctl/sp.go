@@ -129,9 +129,9 @@ func registerSp(root *cobra.Command) {
 // --stripe-size is non-zero, and dm_pool_conf, built only when --block-size
 // or --low-water-mark-pct is, so an untuned create leaves them absent and the
 // control plane picks the geometry and the mark; and event_threshold,
-// built only when at least one of the four --thr-* values is non-zero, for the
-// same reason — an all-zero EventThreshold would say "default everything" the
-// long way.
+// built only when at least one of the four --thr-* values or
+// --leg-fast-io-fail is non-zero, for the same reason — an all-zero
+// EventThreshold would say "default everything" the long way.
 //
 // What is never sent: bdev_feature_list. dnvctl exposes no BdevFeature flag
 // (dnvctl.md, In scope / out of scope).
@@ -178,12 +178,15 @@ func spCreateCmd() *cobra.Command {
 			cntlr := u32Of("thr-cntlr")
 			side := u32Of("thr-side")
 			leg := u32Of("thr-leg")
-			if primary != 0 || cntlr != 0 || side != 0 || leg != 0 {
+			legFastIoFail := u32Of("leg-fast-io-fail")
+			if primary != 0 || cntlr != 0 || side != 0 || leg != 0 ||
+				legFastIoFail != 0 {
 				req.EventThreshold = &pb.EventThreshold{
 					PrimaryUnhealthy: primary,
 					CntlrUnhealthy:   cntlr,
 					SideUnhealthy:    side,
 					LegUnhealthy:     leg,
+					LegFastIoFailTmo: legFastIoFail,
 				}
 			}
 			return func(
@@ -233,6 +236,13 @@ func spCreateCmd() *cobra.Command {
 		"event_threshold.side_unhealthy in seconds")
 	flags.Uint32("thr-leg", 0,
 		"event_threshold.leg_unhealthy in seconds")
+	// The range is interpolated for --slice-cnt's reason.
+	flags.Uint32("leg-fast-io-fail", 0,
+		fmt.Sprintf("event_threshold.leg_fast_io_fail_tmo in seconds, %d "+
+			"to %d: how long a leg's IO waits for its disk node once the "+
+			"connection is lost (0 = not sent: %d)",
+			common.MinLegFastIoFailTmo, common.DefaultNvmeFastIoFailTmo,
+			common.DefaultNvmeFastIoFailTmo))
 	selectorFlags(flags, "dn")
 	selectorFlags(flags, "cn")
 	return cmd

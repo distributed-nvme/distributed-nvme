@@ -402,6 +402,18 @@ changes, about 2 s at one slice, 3 s at four slices and, in the one run at
 mounted under the CSI driver, whose pools have one slice, it was about
 3.6 s (commit 1b1cba4).
 
+The write pause when a disk node dies was measured on the lab VMs (commit
+40eef7f) as the longest 4 KiB write with a flush, one write at a time, to a
+RAID1 pool while one of its disk nodes sent nothing back, as a dead node
+does. The primary's controller node dropped its connections to that node
+6.4 to 10.2 s after it went silent. The write in flight waited 9.2 to
+10.0 s over five runs at the default fast IO fail timeout of 5 s, and 9.0
+to 10.2 s over six runs at 1 s and at 15 s: the setting does not change
+it, and no write failed. IO that reached the lost leg after the keep-alive
+gave up waited until the fast IO fail timeout ended, 1, 5 or 15 s after
+the drop. On a pool with no RAID1 the write failed after 13.2 s at 5 s and
+after 23.3 s at 15 s.
+
 The limits dnv enforces, each against the largest size a test has run. The
 Go tests run the control plane against fake agents, test programs that answer
 an agent's calls with no node behind them, and the agents against a fake

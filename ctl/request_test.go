@@ -1025,17 +1025,20 @@ func TestTrConfFlagsMapOneToOne(t *testing.T) {
 	wantRequest(t, setTrList[0], custom)
 }
 
-// TestEventThresholdFieldsMapOneToOne gives the four --thr-* flags distinct
-// values at once, because each alone only proves that SOME field was set.
+// TestEventThresholdFieldsMapOneToOne gives the four --thr-* flags and
+// --leg-fast-io-fail distinct values at once, because each alone only proves
+// that SOME field was set.
 func TestEventThresholdFieldsMapOneToOne(t *testing.T) {
 	req := runArgv(t, "CreateStoragePool", "sp", "create",
 		"--thr-primary", "1", "--thr-cntlr", "2",
-		"--thr-side", "3", "--thr-leg", "4").(*pb.CreateStoragePoolRequest)
+		"--thr-side", "3", "--thr-leg", "4",
+		"--leg-fast-io-fail", "5").(*pb.CreateStoragePoolRequest)
 	wantRequest(t, req.EventThreshold, &pb.EventThreshold{
 		PrimaryUnhealthy: 1,
 		CntlrUnhealthy:   2,
 		SideUnhealthy:    3,
 		LegUnhealthy:     4,
+		LegFastIoFailTmo: 5,
 	})
 }
 
@@ -1272,7 +1275,8 @@ func TestSpCreateAlwaysSendsRedundConf(t *testing.T) {
 // dnvctl.md, `sp` — `ctl/sp.go`: dm_raid0_conf appears only when
 // --stripe-size is non-zero, dm_pool_conf only when --block-size or
 // --low-water-mark-pct is (the mark's half is TestSpCreateLowWaterMark's),
-// and event_threshold only when at least one --thr-* is.
+// and event_threshold only when at least one --thr-* or --leg-fast-io-fail
+// is.
 func TestSpCreateOptionalConfs(t *testing.T) {
 	req := runArgv(t, "CreateStoragePool", "sp", "create",
 		"--stripe-size", "16384", "--block-size", "1048576",
@@ -1282,16 +1286,26 @@ func TestSpCreateOptionalConfs(t *testing.T) {
 		&pb.DmPoolConf{DataBlockSize: 1048576})
 	wantRequest(t, req.EventThreshold, &pb.EventThreshold{SideUnhealthy: 30})
 
-	// Each --thr-* alone is enough to build the message, and the other three
-	// travel as zeros rather than being omitted.
+	// Each --thr-* alone, and --leg-fast-io-fail alone, is enough to build
+	// the message, and the other members travel as zeros rather than being
+	// omitted.
 	for _, flag := range []string{
 		"--thr-primary", "--thr-cntlr", "--thr-side", "--thr-leg",
+		"--leg-fast-io-fail",
 	} {
 		req := runArgv(t, "CreateStoragePool",
 			"sp", "create", flag, "5").(*pb.CreateStoragePoolRequest)
 		if req.EventThreshold == nil {
 			t.Errorf("%s 5 sent no event_threshold", flag)
 		}
+	}
+	// With none of them the message is not sent: a zero
+	// --leg-fast-io-fail is "not sent", as a zero --thr-* is.
+	req = runArgv(t, "CreateStoragePool", "sp", "create",
+		"--leg-fast-io-fail", "0").(*pb.CreateStoragePoolRequest)
+	if req.EventThreshold != nil {
+		t.Errorf("--leg-fast-io-fail 0 sent event_threshold %v",
+			req.EventThreshold)
 	}
 }
 

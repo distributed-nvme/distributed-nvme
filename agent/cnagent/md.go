@@ -649,15 +649,16 @@ func (m *Md) sameMembers(ctx context.Context, members []mdMemberDir) bool {
 // Detail runs no mdadm because `mdadm --detail` opens a member device: it loads
 // the superblock from the first member that opens, and when that member's DN
 // side has gone the read, sent without failfast, sits in the multipath head's
-// requeue list until the path's failfast expires — 11 to 15 s after the side
-// died, by the kernel's timers: the wait for the next keep-alive, the
-// keep-alive timeout, the quarter-KATO recovery delay, then fast_io_fail_tmo,
-// since the teardown fails only IO sent failfast and moves this read to the
-// head (architecture.md, Known limits) — or without limit while another path
-// of the leg stays live and none can serve — far past the soft timeout. A
-// kill would turn the group's md row ERROR for a
-// member fault the leg row already reports, and an md row counts toward cntlr
-// health. No enumerator in the agent runs mdadm for the same reason: a killed
+// requeue list until the path's failfast expires — the teardown, 6 to 10 s
+// after the side died in the lab (the wait for the next keep-alive, the
+// keep-alive timeout and the distribution kernel's quarter-KATO recovery
+// delay), then the pool's leg fast IO fail timeout, so 11 to 15 s at the
+// default and 7 to 11 s at the shortest, since the teardown fails only IO
+// sent failfast and moves this read to the head (architecture.md, Known
+// limits) — or without limit while another path of the leg stays live and
+// none can serve — far past the soft timeout. A kill would turn the group's
+// md row ERROR for a member fault the leg row already reports, and an md row
+// counts toward cntlr health. No enumerator in the agent runs mdadm for the same reason: a killed
 // read taken as absent would leave a teardown no array to stop (ListArrays,
 // cnagent.md CN21).
 //

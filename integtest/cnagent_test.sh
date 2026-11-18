@@ -10,11 +10,13 @@
 #       [--wipe] user1@ip1 user2@ip2
 #
 # Cases (cnagent_integtest.md, Cases): smoke, redund, repair, teardown,
-# thinbm, clone_xfer, restart; `teardown`, the teardown-by-sweep case, injects the
-# faults (a pinned dm device, an iptables partition of the nvme-tcp port, a
-# background writer); case A's `degrade` stage reuses the partition, and
-# `clone_xfer` slows its copy with a token bucket on what the clone's node
-# sends to its own nvme-tcp port. Cleanup
+# thinbm, torn, clone_xfer, restart, pause; `teardown`, the teardown-by-sweep
+# case, injects the faults (a pinned dm device, an iptables partition of the
+# nvme-tcp port, a background writer); case A's `degrade` stage reuses the
+# partition, `clone_xfer` slows its copy with a token bucket on what the clone's node
+# sends to its own nvme-tcp port, and `pause` cuts a disk node off both ways
+# under a timed writer; PAUSE_MODE=measure makes it the measurement of the
+# write pause (cnagent_integtest.md, Cases, pause). Cleanup
 # runs unconditionally at the start and, on success only, at the end: a
 # failing run leaves every dm/md/nvmet object and all four agent logs in place
 # and dumps diagnostics (cnagent_integtest.md, Teardown and cleanup).
@@ -183,8 +185,19 @@ DIAG_CNTLRS=()
 # (throttle_to), 0 while none is: on_exit takes the throttle off even when a
 # run fails.
 THROTTLED=0
+# The VM that holds the pause case's two-way cut (blackhole_from), and the
+# VM that runs its timed writer and sampler, 0 while none does: on_exit
+# lifts the cut and stops both loops even when a run fails.
+BLACKHOLED=0
+PAUSE_VM=0
+# The file whose removal ends the pause case's background rounds
+# (pause_rounds), "" while none run: on_exit removes it.
+PAUSE_STOP=""
+# The reports of the cuts this run of the pause case made, which its
+# summaries print; PAUSE_OUT can hold an earlier run's too.
+PAUSE_REPORTS=()
 
-CASES=(smoke redund repair teardown thinbm torn clone_xfer restart)
+CASES=(smoke redund repair teardown thinbm torn clone_xfer restart pause)
 
 # ---------------------------------------------------------------------------
 # Logging, assertions, failure handling
@@ -496,6 +509,17 @@ on_exit() {
 		if [ "$THROTTLED" -ne 0 ]; then
 			helper_ok "$THROTTLED" unthrottle >&2
 		fi
+		# The pause case's two-way cut and its writer, for the same reason:
+		# a cut left in place black-holes another suite's connections, and
+		# the writer writes on.
+		if [ "$BLACKHOLED" -ne 0 ]; then
+			helper_ok "$BLACKHOLED" \
+				"unblackhole_from ${IP[$((3 - BLACKHOLED))]}" >&2
+		fi
+		if [ "$PAUSE_VM" -ne 0 ]; then
+			helper_ok "$PAUSE_VM" "pause_stop 0" >&2
+		fi
+		[ -z "$PAUSE_STOP" ] || rm -f "$PAUSE_STOP"
 		log ""
 		log "debris left in place on both VMs; failing stage '$STAGE'"
 		log "pull records with: jq 'select(.trace_id==\"$TRACE\")' $CN_LOG"
@@ -3092,19 +3116,24 @@ cleanup_phase1() { # <cn16> [other vm ip]
 	kill_role dn >/dev/null
 
 	# The fault injectors (case T's three, the partition case A's degrade
-	# stage reuses, and clone_xfer's throttle), first and unconditionally.
+	# stage reuses, clone_xfer's throttle, and the pause case's two-way cut
+	# and its writer and sampler), first and unconditionally.
 	# Each of them outlives the stage that installed it and each would be
 	# diagnosed as something else entirely: a pin makes the dm passes below
 	# fail on a device nothing is testing, a partition rule black-holes the
 	# next run's legs, a writer holds a namespace open across the
 	# disconnects, and a token bucket slows every later suite's traffic to
-	# the port. None of the four may be conditional on this run having used
+	# the port. None of them may be conditional on this run having used
 	# them — the run that leaves them behind is by definition the one that
 	# failed.
 	stop_writer >/dev/null
+	pause_stop 0 >/dev/null
 	unpin_all
 	unthrottle >/dev/null
-	[ -z "${2:-}" ] || unpartition_from "$2" >/dev/null
+	if [ -n "${2:-}" ]; then
+		unpartition_from "$2" >/dev/null
+		unblackhole_from "$2" >/dev/null
+	fi
 
 	# Nothing may stay suspended from here on (see resume_suspended).
 	resume_suspended
@@ -3413,6 +3442,301 @@ degrade_diag() {
 	ipt=$(iptables_bin)
 	[ -n "$ipt" ] && "$ipt" -L INPUT -v -n -x 2>/dev/null | grep -F DROP
 	return 0
+}
+
+# --- case P, pause (cnagent_integtest.md, Cases, pause) ----------------------
+#
+# Every time these print is this VM's clock, $EPOCHREALTIME, which costs no
+# fork: the case reads the writer, the sampler, the kernel log and the agent's
+# stamps of one VM on that VM's one clock, and never subtracts two VMs' times.
+
+# blackhole_from <ip> — the two-way cut: drops every packet this VM receives
+# from <ip> aimed at the nvme-tcp port, and every packet it sends to <ip> from
+# that port. The disk node and the controller node on this VM then answer
+# <ip>'s connections to them with nothing at all, no reply, no FIN and no RST,
+# as a dead machine does; partition_from's one-way cut lets this VM's answers
+# out. The connections this VM opens to <ip>'s port keep working, as under
+# partition_from. Prints "cut <time>".
+blackhole_from() {
+	local ipt
+	ipt=$(iptables_bin)
+	if [ -n "$ipt" ] &&
+		"$ipt" -I INPUT -s "$1" -p tcp --dport "$TR_SVC_ID" -j DROP \
+			>/dev/null 2>&1 &&
+		"$ipt" -I OUTPUT -d "$1" -p tcp --sport "$TR_SVC_ID" -j DROP \
+			>/dev/null 2>&1; then
+		echo "cut $EPOCHREALTIME"
+	else
+		echo failed
+	fi
+}
+
+# unblackhole_from <ip> — removes both rules, each until none is left, for
+# unpartition_from's reason. Prints "restored <time>".
+unblackhole_from() {
+	local i ipt
+	ipt=$(iptables_bin)
+	if [ -n "$ipt" ]; then
+		for ((i = 0; i < 16; i++)); do
+			"$ipt" -D INPUT -s "$1" -p tcp --dport "$TR_SVC_ID" -j DROP \
+				>/dev/null 2>&1 || break
+		done
+		for ((i = 0; i < 16; i++)); do
+			"$ipt" -D OUTPUT -d "$1" -p tcp --sport "$TR_SVC_ID" -j DROP \
+				>/dev/null 2>&1 || break
+		done
+	fi
+	echo "restored $EPOCHREALTIME"
+}
+
+# blackhole_rules <ip> — the rules unblackhole_from is supposed to have
+# taken, partition_rules' twin: empty output is the assertion.
+blackhole_rules() {
+	local ipt
+	ipt=$(iptables_bin)
+	[ -n "$ipt" ] || return 0
+	{
+		"$ipt" -S INPUT 2>/dev/null |
+			grep -F -- "-s $1" | grep -F -- "--dport $TR_SVC_ID"
+		"$ipt" -S OUTPUT 2>/dev/null |
+			grep -F -- "-d $1" | grep -F -- "--sport $TR_SVC_ID"
+	} || true
+}
+
+# The pause case's files, under /var/tmp for the writer's reason:
+# cleanup_phase1 stops both loops (pause_stop) whatever the run did.
+PAUSE_FLAG=/var/tmp/dnv-it-pause.run
+PAUSE_WPID=/var/tmp/dnv-it-pause-writer.pid
+PAUSE_SPID=/var/tmp/dnv-it-pause-sampler.pid
+PAUSE_WRITES=/var/tmp/dnv-it-pause.writes
+PAUSE_SAMPLES=/var/tmp/dnv-it-pause.samples
+
+# leg_ctrls [traddr] — this VM's controllers of a disk node's side export
+# (kind 2 NQNs), one sysfs directory a line: the leg paths of the controller
+# node on this VM, those into <traddr> alone when it is given.
+leg_ctrls() {
+	local c n a
+	for c in /sys/class/nvme/nvme*; do
+		[ -r "$c/subsysnqn" ] || continue
+		read -r n <"$c/subsysnqn" 2>/dev/null || continue
+		case "$n" in
+		"$NQN_PREFIX":2:*) ;;
+		*) continue ;;
+		esac
+		if [ -n "${1:-}" ]; then
+			a=$(tr '\n' ',' <"$c/address" 2>/dev/null) || continue
+			case ",$a," in
+			*",traddr=$1,"*) ;;
+			*) continue ;;
+			esac
+		fi
+		echo "$c"
+	done
+}
+
+# leg_fast_io_fail [value] — writes <value> into the fast IO fail timeout of
+# every leg controller of this VM when one is given (the attribute is the
+# kernel's, writable per controller), then prints each controller's
+# "nvmeN=<value>", which reads "off" for a timeout that never fails IO. A
+# write the kernel refuses fails the call.
+leg_fast_io_fail() {
+	local c v out=""
+	for c in $(leg_ctrls); do
+		if [ -n "${1:-}" ]; then
+			echo "$1" >"$c/fast_io_fail_tmo" || return 1
+		fi
+		v=unread
+		read -r v <"$c/fast_io_fail_tmo" 2>/dev/null || v=unread
+		out="$out ${c##*/}=$v"
+	done
+	echo "${out# }"
+}
+
+# clock_offset — how far this VM's clock is from NTP time by chrony's own
+# reading, in seconds ("System time"), or "unknown". chrony brings a clock
+# that is far off back by slewing it, and a slewed clock runs up to about 8 %
+# fast or slow, so a pause timed on it is off by as much.
+clock_offset() {
+	chronyc tracking 2>/dev/null | awk '/^System time/ {
+	    printf "%s%s\n", ($6 == "slow" ? "-" : ""), $4; f = 1 }
+	    END { if (!f) print "unknown" }'
+}
+
+# pause_mark <text> — one line "<text> <time>" into the kernel log; prints
+# the time, which kmsg_since's offsets count from.
+pause_mark() {
+	local t=$EPOCHREALTIME
+	echo "$1 $t" >/dev/kmsg || return 1
+	echo "$t"
+}
+
+# kmsg_since <mark> — the kernel log from the last line holding <mark>, each
+# line as "<seconds since the mark> <text>", by the kernel's own stamps.
+kmsg_since() {
+	dmesg 2>/dev/null | awk -v m="$1" '
+	    !/^\[/ { next }
+	    { i = index($0, "]"); t = substr($0, 2, i - 2) + 0 }
+	    index($0, m) { m0 = t; buf = ""; f = 1 }
+	    f { buf = buf sprintf("%.3f %s\n", t - m0, substr($0, i + 2)) }
+	    END { printf "%s", buf }'
+}
+
+# pause_writer <dev> — the timed writer: one 4 KiB write after another over
+# the first 8 MiB of <dev> while the flag file stands, each synced and logged
+# as "<start> <end> <dd status>". The dd rule holds (conv=fsync, no oflag=).
+pause_writer() {
+	local i s rc
+	echo "$$" >"$PAUSE_WPID"
+	for ((i = 0; i < 200000; i++)); do
+		[ -e "$PAUSE_FLAG" ] || break
+		s=$EPOCHREALTIME
+		rc=0
+		dd if=/dev/zero of="$1" bs=4096 count=1 seek=$((i % 2048)) \
+			conv=fsync status=none 2>/dev/null || rc=$?
+		echo "$s $EPOCHREALTIME $rc" >>"$PAUSE_WRITES"
+	done
+	return 0
+}
+
+# pause_sampler <traddr> — every 0.1 s, the state of each leg path into
+# <traddr> and of each md member of this VM, one line "<time> <name>=<state>…"
+# whenever one of them changes. Its first lines name each md member's dm
+# device. Every read is a sysfs attribute, which takes no md mutex and waits
+# on no IO.
+pause_sampler() {
+	local f v d files=() names=() line last="" i j
+	echo "$$" >"$PAUSE_SPID"
+	for f in $(leg_ctrls "$1"); do
+		files+=("$f/state")
+		names+=("${f##*/}")
+	done
+	for f in /sys/block/md*/md/dev-*/state; do
+		[ -e "$f" ] || continue
+		v=${f#/sys/block/}
+		d=${f%/state}
+		d=${d##*/}
+		files+=("$f")
+		names+=("${v%%/*}:$d")
+		echo "# ${v%%/*}:$d $(cat "/sys/block/${d#dev-}/dm/name" 2>/dev/null)" \
+			>>"$PAUSE_SAMPLES"
+	done
+	for ((i = 0; i < 6000; i++)); do
+		[ -e "$PAUSE_FLAG" ] || break
+		line=""
+		for j in "${!files[@]}"; do
+			v=gone
+			{ read -r v <"${files[$j]}"; } 2>/dev/null || v=gone
+			line="$line ${names[$j]}=$v"
+		done
+		[ "$line" = "$last" ] || echo "$EPOCHREALTIME$line" >>"$PAUSE_SAMPLES"
+		last=$line
+		sleep 0.1
+	done
+	return 0
+}
+
+# pause_start <dev> <traddr> — the sampler and the timed writer, each
+# detached as start_writer detaches its loop, over fresh files.
+pause_start() {
+	local i
+	rm -f "$PAUSE_WPID" "$PAUSE_SPID" "$PAUSE_WRITES" "$PAUSE_SAMPLES"
+	: >"$PAUSE_WRITES"
+	: >"$PAUSE_SAMPLES"
+	: >"$PAUSE_FLAG"
+	setsid nohup bash "$0" pause_sampler "$2" </dev/null >/dev/null 2>&1 &
+	setsid nohup bash "$0" pause_writer "$1" </dev/null >/dev/null 2>&1 &
+	for ((i = 0; i < 50; i++)); do
+		[ -s "$PAUSE_WPID" ] && [ -s "$PAUSE_SPID" ] && break
+		sleep 0.1
+	done
+	if [ ! -s "$PAUSE_WPID" ] || [ ! -s "$PAUSE_SPID" ]; then
+		rm -f "$PAUSE_FLAG"
+		echo "the pause writer or sampler never reported" >&2
+		return 1
+	fi
+	echo started
+}
+
+# pause_wait_writes <n> <secs> — waits until the writer has logged <n>
+# writes that succeeded, and prints how many it has logged.
+pause_wait_writes() {
+	local n i
+	for ((i = 0; i < $2 * 10; i++)); do
+		n=$(awk '$3 == 0' "$PAUSE_WRITES" 2>/dev/null | wc -l)
+		if [ "$n" -ge "$1" ]; then
+			echo "$n"
+			return 0
+		fi
+		sleep 0.1
+	done
+	echo "the pause writer logged ${n:-no} good writes in $2 s, want $1" >&2
+	return 1
+}
+
+# pause_wait_failed <secs> — waits until the writer has logged a write that
+# failed, and prints that line.
+pause_wait_failed() {
+	local line i
+	for ((i = 0; i < $1 * 10; i++)); do
+		line=$(awk '$3 != 0 { print; exit }' "$PAUSE_WRITES" 2>/dev/null)
+		if [ -n "$line" ]; then
+			echo "$line"
+			return 0
+		fi
+		sleep 0.1
+	done
+	echo "no write failed in $1 s" >&2
+	return 1
+}
+
+# pause_wait_not_live <traddr> <secs> — polls the leg paths into <traddr>
+# every 0.05 s until none reads live, and prints "<time> nvmeN=<state>…".
+pause_wait_not_live() {
+	local c v ctrls=() line="" live i
+	mapfile -t ctrls < <(leg_ctrls "$1")
+	if [ "${#ctrls[@]}" -eq 0 ]; then
+		echo "no leg path into $1 on this VM" >&2
+		return 1
+	fi
+	for ((i = 0; i < $2 * 20; i++)); do
+		line=""
+		live=0
+		for c in "${ctrls[@]}"; do
+			v=gone
+			{ read -r v <"$c/state"; } 2>/dev/null || v=gone
+			[ "$v" != live ] || live=1
+			line="$line ${c##*/}=$v"
+		done
+		if [ "$live" -eq 0 ]; then
+			echo "$EPOCHREALTIME$line"
+			return 0
+		fi
+		sleep 0.05
+	done
+	echo "the leg paths into $1 still read$line after $2 s" >&2
+	return 1
+}
+
+# pause_stop <secs> — takes the flag away and waits up to <secs> for both
+# loops to end, then kills what is left of them (never a dd, for
+# stop_writer's reason) and prints "stopped" or "killed <which>".
+pause_stop() {
+	local i p alive=""
+	rm -f "$PAUSE_FLAG"
+	for ((i = 0; i <= ${1:-0} * 10; i++)); do
+		alive=""
+		for p in "$PAUSE_WPID" "$PAUSE_SPID"; do
+			[ -s "$p" ] && kill -0 "$(cat "$p")" 2>/dev/null &&
+				alive="$alive ${p##*/}"
+		done
+		[ -n "$alive" ] || break
+		[ "$i" -ge $((${1:-0} * 10)) ] || sleep 0.1
+	done
+	for p in "$PAUSE_WPID" "$PAUSE_SPID"; do
+		[ -s "$p" ] && kill -9 "$(cat "$p")" >/dev/null 2>&1
+		rm -f "$p"
+	done
+	if [ -n "$alive" ]; then echo "killed$alive"; else echo stopped; fi
 }
 
 "$@"
@@ -7170,7 +7494,9 @@ case_repair() {
 #
 # The bound every stage's patience comes from (cnagent_integtest.md, Cases,
 # teardown; dnagent.md SH20): legs are connected
-# with fast_io_fail_tmo = 5 and ctrl_loss_tmo = -1, so from 5 s after the
+# with fast_io_fail_tmo = 5 (no request of this case sets the pool's
+# leg_fast_io_fail_tmo, so the agent connects with the default) and
+# ctrl_loss_tmo = -1, so from 5 s after the
 # teardown that follows a path loss, a quarter keep-alive timeout after the
 # loss is seen, every IO queued at that multipath head fails at once, and a
 # controller stuck in `connecting` can always be disconnected. The bound is an
@@ -7345,11 +7671,11 @@ s2_paths_long_dead() {
 	host_disconnect "$hv" "$nqn"
 	dn_drop 1
 	dn_drop 2
-	# 20 s: past the legs' fast_io_fail_tmo of 5 s (agent/nvmehost.go,
-	# common.DefaultNvmeFastIoFailTmo), so every IO queued at those multipath
-	# heads has already been failed, and past the controllers' own reconnect
-	# attempt — which a removed subsystem refuses with DNR, so by now the
-	# paths are not merely failing, they are gone.
+	# 20 s: past the legs' fast_io_fail_tmo of 5 s (the request sets none,
+	# so common.DefaultNvmeFastIoFailTmo, cnagent.md CN10), so every IO
+	# queued at those multipath heads has already been failed, and past the
+	# controllers' own reconnect attempt — which a removed subsystem refuses
+	# with DNR, so by now the paths are not merely failing, they are gone.
 	sleep 20
 	# Logged, then asserted `none`. ctrl_loss_tmo = -1 does not keep a leg's
 	# controller here: each DN's port still listens, because it also carries
@@ -9463,6 +9789,495 @@ case_restart() {
 	assert_no_residue "$sp"
 	sshv_ok "$hv" "rm -f $WORK/pattern-restart.bin"
 	rm -rf "$snap"
+}
+
+# ---------------------------------------------------------------------------
+# Case P — pause (cnagent_integtest.md, Cases)
+# ---------------------------------------------------------------------------
+
+# PAUSE_MODE picks what the pause case runs (cnagent_integtest.md, Cases,
+# pause): "gate", the default, one cut of a RAID1 pool whose request sets
+# the legs' fast IO fail timeout to P_GATE_TMO; "measure", the measurement of
+# the write pause a dead disk node brings, whose numbers the docs carry.
+# PAUSE_OUT is where each cut keeps its raw files on the driver.
+PAUSE_MODE=${PAUSE_MODE:-gate}
+PAUSE_OUT=${PAUSE_OUT:-$WORK/pause}
+P_GATE_TMO=3
+
+# The A-shaped pool, its primary on CN2, and one S-shaped RedundNone pool on
+# DN1 per no-RAID run, each torn down before the next is built.
+P_SP=0x411
+P_NONE_SP=("" 0x412 0x413)
+P_UUID=44444444-4444-4444-8444-444444444441
+P_NONE_UUID=(""
+	44444444-4444-4444-8444-444444444442
+	44444444-4444-4444-8444-444444444443)
+
+# How long after DN1 dies CN2 may take to tear its leg connections into it
+# down, in whole seconds: the keep-alive timeout every controller keeps (the
+# kernel's default, 5 s, as no connect passes one), half of it again for the
+# keep-alive the host sends only when no completion came in a quarter of it,
+# 1 s of timer rounding, the quarter the lab's kernel waits before the
+# teardown, and 1 s of margin; the measurement saw 6.4 to 10.2 s. A cut is
+# held this long, plus the leg connections' fast IO fail timeout, plus 5 s,
+# and the gate holds the longest write under it plus the timeout plus 3 s.
+P_TEARDOWN=11
+# The interval at which the worker sends a cntlr's rounds by default
+# (common.DefaultHealthCheckInterval), at which pause_rounds sends them.
+P_INTERVAL=2
+
+# The jq of one reply of a round or a syncup: the code, then the stamp's
+# observation, answer and converge-start times as seconds ("-" for unset),
+# then the leg rows that do not read OK, "<leg id>=<status>" joined by ",".
+P_STAMP_JQ='def ts: if . == null then "-" else
+	(capture("^(?<s>[0-9T:-]+)(?<f>\\.[0-9]+)?Z$") as $c
+	 | (($c.s + "Z") | fromdateiso8601) + (($c.f // ".0") | ("0" + .) | tonumber)
+	 | tostring) end;
+	[(.agent_reply.code // 0 | tostring), (.obs_stamp.obs_time | ts),
+	 (.obs_stamp.answer_time | ts), (.obs_stamp.converge_start | ts),
+	 ([(.cntlr_info.leg_id_to_leg // {}) | to_entries[]
+	   | select(.value.status != "RES_STATUS_OK")
+	   | "\(.key)=\(.value.status | sub("RES_STATUS_"; ""))"] | join(",")
+	  | if . == "" then "-" else . end)] | join(" ")'
+
+# pause_rounds <sp> <cntlr> <rev> <req> <file> <go> <stop> — the worker's
+# loop on CN2's cntlr through a cut (dnv-worker.md RW4): a CheckCntlr round,
+# the next an interval from its reply; once the file <go> stands, the
+# SyncupCntlr re-sent at once at the stored revision, as after a round whose
+# leg row reads error, and the next round an interval from its reply. One
+# line a call into <file>: R (a round) or S (the syncup), the driver's send
+# and reply times, then P_STAMP_JQ's fields. It runs in the background until
+# <stop> is gone, for 600 rounds at most, and fails on nothing: a call that
+# did not answer is a line with code -1.
+pause_rounds() {
+	local sp=$1 c=$2 rev=$3 req=$4 file=$5 go=$6 stop=$7
+	local t0 t1 out sent=0 i n=0
+	while [ -e "$stop" ] && [ "$n" -lt 600 ]; do
+		n=$((n + 1))
+		t0=$(date +%s.%N)
+		out=$(cnctl 2 check-cntlr --revision "$rev" --show-info --sp "$sp" \
+			--cntlr "$c" --expect-code 4 2>/dev/null) || true
+		t1=$(date +%s.%N)
+		[ -n "$out" ] || out='{"agent_reply":{"code":-1}}'
+		echo "R $t0 $t1 $(jq_of "$out" "$P_STAMP_JQ" 2>/dev/null || echo bad)" \
+			>>"$file"
+		for ((i = 0; i < P_INTERVAL * 20; i++)); do
+			[ -e "$stop" ] || break
+			if [ "$sent" -eq 0 ] && [ -e "$go" ]; then
+				sent=1
+				t0=$(date +%s.%N)
+				out=$(cn_syncup_cntlr 2 "$req" --expect-code 4 2>/dev/null) ||
+					true
+				t1=$(date +%s.%N)
+				[ -n "$out" ] || out='{"agent_reply":{"code":-1}}'
+				echo "S $t0 $t1 $(jq_of "$out" "$P_STAMP_JQ" 2>/dev/null ||
+					echo bad)" >>"$file"
+				i=-1
+				continue
+			fi
+			sleep 0.05
+		done
+	done
+}
+
+# pause_report <out> <kind> <tmo> — one run's numbers from its raw files:
+# the writes, the samples and both kernel logs, by vm2's clock from the
+# start of the first write that lasted over half a second, the run's zero,
+# with vm1's kernel log by vm1's clock from the cut; the rounds by the
+# driver's clock from the cut, their observations' ages by the agent's. The
+# last line is the summary, "PAUSE …".
+pause_report() {
+	local out=$1 kind=$2 tmo=$3 z
+	z=$(awk '$2 - $1 > 0.5 { print $1; exit }' "$out.writes")
+	if [ -z "$z" ]; then
+		log "  no write lasted over 0.5 s; the zero is the not-live time"
+		z=$(awk '{ print $1; exit }' "$out.notlive")
+	fi
+	log "  writes (by vm2's clock, from the first long write's start):"
+	awk -v z="$z" '
+	    { d = $2 - $1; n++ }
+	    d > 0.2 { printf "    write +%.3f s took %.3f s, status %s\n", $1 - z, d, $3 }
+	    $3 != 0 { nf++; if (!ff) ff = sprintf("+%.3f s after %.3f s", $1 - z, d) }
+	    d > max { max = d; at = $1 - z }
+	    END { printf "    %d writes, longest %.3f s at +%.3f s, %d failed%s\n",
+	          n, max, at, nf, ff ? ", the first " ff : "" }' "$out.writes" >&2
+	log "  samples (state changes, from the zero):"
+	awk -v z="$z" '/^#/ { print "    " $0; next }
+	    $1 > z - 1 { $1 = sprintf("+%.3f", $1 - z); print "    " $0 }' \
+		"$out.samples" | head -n 60 >&2
+	log "  vm2 kernel log (from the zero):"
+	awk -v z="$z" -v m="$(cat "$out.mark2")" '
+	    /nvme|md|raid1|dnv-cn-it/ { t = $1; $1 = ""
+	        printf "    %+.3f%s\n", m + t - z, $0 }' "$out.kmsg2" |
+		head -n 80 >&2
+	log "  vm1 kernel log (by vm1's clock, from the cut):"
+	awk -v c="$(cat "$out.cut1")" -v m="$(cat "$out.mark1")" '
+	    /nvme|dnv-cn-it/ { t = $1; $1 = ""
+	        printf "    %+.3f%s\n", m + t - c, $0 }' "$out.kmsg1" |
+		head -n 40 >&2
+	if [ -s "$out.rounds" ]; then
+		log "  rounds and the syncup (sent, from the cut by the driver's clock):"
+		awk -v c="$(cat "$out.cutd")" '
+		    { age = ($5 == "-" || $6 == "-") ? "-" : sprintf("%.3f", $6 - $5)
+		      conv = ($7 == "-") ? "" : sprintf(" converging for %.3f s", $6 - $7)
+		      printf "    %s %+.3f s took %.3f s: code %s age %s%s legs %s\n",
+		          $1, $2 - c, $3 - $2, $4, age, conv, $8 }' "$out.rounds" >&2
+	fi
+	# The summary: per leg path into DN1 (the sampler's nvmeN names), its
+	# keep-alive timeout, the teardown that ends the keep-alive with an
+	# error, its first state that is not live and its failfast expiry; per
+	# md member that turned faulty, when, and the leg its dm device wraps;
+	# the oldest observation a round after the cut answered from, and how
+	# many were older than ObsMaxAgeIntervals of the interval.
+	awk -v z="$z" -v kind="$kind" -v tmo="$tmo" \
+		-v m2="$(cat "$out.mark2")" -v c1="$(cat "$out.cut1")" \
+		-v cd="$(cat "$out.cutd")" -v old=$((3 * P_INTERVAL)) '
+	    function ev(c, k, t) { if (!((c, k) in e)) e[c, k] = sprintf("%.3f", t) }
+	    FILENAME ~ /writes$/ { d = $2 - $1
+	        if (d > max) { max = d; at = $1 - z }
+	        if ($3 != 0) { nf++; if (fe == "") fe = sprintf("+%.3f", $2 - z) } }
+	    FILENAME ~ /samples$/ && /^#/ { n = split($3, p, "-")
+	        leg[$2] = p[n]; sub(/^0+/, "", leg[$2]); next }
+	    FILENAME ~ /samples$/ && $1 > z - 1 {
+	        for (i = 2; i <= NF; i++) { split($i, kv, "=")
+	            if (kv[1] ~ /^nvme/) { legc[kv[1]] = 1
+	                if (kv[2] != "live") ev(kv[1], "notlive", $1 - z) }
+	            else if (kv[2] ~ /faulty/ && !(kv[1] in mdf)) {
+	                mdf[kv[1]] = sprintf("%.3f", $1 - z); mdo[++nm] = kv[1] } } }
+	    FILENAME ~ /kmsg2$/ && $2 == "nvme" { c = $3; sub(/:$/, "", c)
+	        t = m2 + $1 - z
+	        if (/opcode 0x18 / && /QID 0 timeout/) ev(c, "ka", t)
+	        if (/failed nvme_keep_alive_end_io/) ev(c, "down", t)
+	        if (/failfast expired/) ev(c, "ff", t) }
+	    FILENAME ~ /rounds$/ && $1 == "R" && $5 != "-" && $6 != "-" &&
+	        $2 >= cd { a = $6 - $5; nr++; if (a > amax) amax = a
+	        if (a > old) nold++ }
+	    FILENAME ~ /rounds$/ && $1 == "S" {
+	        ss = sprintf("+%.3f/%.3fs/code%s", $2 - cd, $3 - $2, $4) }
+	    END {
+	        for (c in legc) { l = l sep c ":"; sep = ";"; s2 = ""
+	            split("ka down notlive ff", ks, " ")
+	            for (k = 1; k <= 4; k++) { l = l s2 ks[k] "+" \
+	                (((c, ks[k]) in e) ? e[c, ks[k]] : "-"); s2 = "," } }
+	        for (i = 1; i <= nm; i++) {
+	            m = m (i > 1 ? ";" : "") mdo[i] "/leg" leg[mdo[i]] ":+" mdf[mdo[i]] }
+	        printf "PAUSE kind=%s tmo=%s longest=%.3f at=+%.3f failed=%d " \
+	            "first_error_end=%s legs=%s md_faulty=%s rounds=%d " \
+	            "age_max=%s over_%ds=%d syncup=%s clock_vm1_minus_vm2=%.3f\n",
+	            kind, tmo, max, at, nf, fe == "" ? "-" : fe, l,
+	            m == "" ? "-" : m, nr, amax == "" ? "-" : sprintf("%.3f", amax),
+	            old, nold, ss == "" ? "-" : ss, c1 - z }' \
+		"$out.writes" "$out.samples" "$out.kmsg2" \
+		$([ -s "$out.rounds" ] && echo "$out.rounds") >&2
+}
+
+# pause_cut <n> <kind> <tmo> <set> <sp> <cntlr> <rev> <req> <dev> — one run
+# of the measurement, cntlr <cntlr> of pool <sp> being CN2's primary at
+# <rev> over request <req>, <dev> the host's node of its namespace. <tmo> is
+# the leg connections' fast IO fail timeout the run expects; with <set> 1
+# the run first writes it into each of CN2's leg controllers, with 0 it
+# reads the agent's own. Kind raid1 plays the worker's rounds and its
+# re-send through the cut, and after it puts the failed members back; kind
+# none waits for the write that fails. The writer, the sampler and the
+# kernel-log marks run from before the cut until after it is lifted.
+pause_cut() {
+	local n=$1 kind=$2 tmo=$3 set=$4 sp=$5 c=$6 rev=$7 req=$8 dev=$9
+	local out="$PAUSE_OUT/run$n" mark got hold cut0 rpid st rules
+	local go="$PAUSE_OUT/run$n.go" stop="$PAUSE_OUT/run$n.stop"
+	hold=$((P_TEARDOWN + tmo + 5))
+	stage "run$n" "run $n, $kind: DN1 cut two ways for ${hold} s, legs at $tmo s"
+	if [ "$set" -eq 1 ]; then
+		got=$(helper 2 "leg_fast_io_fail $tmo") ||
+			die "pause: the kernel refused fast_io_fail_tmo $tmo"
+	else
+		got=$(helper 2 leg_fast_io_fail)
+	fi
+	log "  leg controllers' fast_io_fail_tmo: $got"
+	case " $got " in
+	*"=$tmo "*) ;;
+	*) die "pause: no leg controller reads fast_io_fail_tmo $tmo: $got" ;;
+	esac
+	[ -z "$(printf '%s\n' "$got" | tr ' ' '\n' | grep -v "=$tmo\$")" ] ||
+		die "pause: a leg controller reads another fast_io_fail_tmo: $got"
+	rm -f "$out".* "$go"
+	mark="dnv-cn-it pause $TRACE start"
+	helper 2 "pause_mark '$mark'" >"$out.mark2"
+	helper 1 "pause_mark '$mark'" >"$out.mark1"
+	PAUSE_VM=2
+	assert_eq "$(helper 2 "pause_start '$dev' '${IP[1]}'")" started \
+		"pause: the writer and the sampler"
+	helper 2 "pause_wait_writes 50 30" >/dev/null ||
+		die "pause: the timed writer does not write"
+	: >"$out.rounds"
+	if [ "$kind" = raid1 ]; then
+		: >"$stop"
+		PAUSE_STOP=$stop
+		pause_rounds "$sp" "$c" "$rev" "$req" "$out.rounds" "$go" "$stop" \
+			2>/dev/null &
+		rpid=$!
+		sleep $((2 * P_INTERVAL))
+	fi
+	got=$(helper 1 "blackhole_from ${IP[2]}")
+	date +%s.%N >"$out.cutd"
+	cut0=$SECONDS
+	case "$got" in
+	"cut "*) BLACKHOLED=1 ;;
+	*) die "pause: the two-way cut was not installed on vm1: $got" ;;
+	esac
+	printf '%s\n' "${got#cut }" >"$out.cut1"
+	helper 2 "pause_wait_not_live '${IP[1]}' $((P_TEARDOWN + 10))" \
+		>"$out.notlive" ||
+		die "pause: CN2's leg paths into DN1 never left live"
+	: >"$go"
+	if [ "$kind" = none ]; then
+		helper 2 "pause_wait_failed $hold" >/dev/null ||
+			die "pause: no write failed on the RedundNone pool"
+	fi
+	while [ $((SECONDS - cut0)) -lt "$hold" ]; do sleep 0.2; done
+	got=$(helper 1 "unblackhole_from ${IP[2]}")
+	rules=$(helper 1 "blackhole_rules ${IP[2]}")
+	[ -z "$rules" ] || die "pause: vm1 still holds cut rules: $rules"
+	BLACKHOLED=0
+	if [ "$kind" = raid1 ]; then
+		rm -f "$stop"
+		PAUSE_STOP=""
+		wait "$rpid" || true
+	fi
+	st=$(helper 2 "pause_stop 30")
+	PAUSE_VM=0
+	# A write still in flight 30 s past the hold was never logged, so the
+	# longest write the gate reads would leave it out: the worst case the
+	# gate exists for fails the case instead.
+	if [ "$st" != stopped ]; then
+		[ "$PAUSE_MODE" != gate ] ||
+			die "pause: a write was still in flight $((hold + 30)) s after" \
+				"the cut: $st"
+		log "  WARNING the writer or sampler had to be killed: $st"
+	fi
+	helper 2 "cat /var/tmp/dnv-it-pause.writes" >"$out.writes"
+	helper 2 "cat /var/tmp/dnv-it-pause.samples" >"$out.samples"
+	helper 2 "kmsg_since '$mark'" >"$out.kmsg2"
+	helper 1 "kmsg_since '$mark'" >"$out.kmsg1"
+	PAUSE_REPORTS+=("$out.report")
+	pause_report "$out" "$kind" "$tmo" 2>&1 | tee "$out.report" >&2 ||
+		log "  WARNING the report of run $n failed"
+}
+
+# pause_raid1_build <req1> <req2> <nqn> <dev> <tmo> — the A-shaped pool
+# with its primary on CN2 and its standby on CN1, both requests carrying
+# leg_fast_io_fail_tmo <tmo> when it is not 0, and the host on vm2
+# connected to both. In measurement mode it first asks whether nvme-cli
+# passes a fast IO fail timeout of 0 to the kernel.
+pause_raid1_build() {
+	local req1=$1 req2=$2 nqn=$3 dev=$4 tmo=$5 sp=$P_SP c1=0x1 c2=0x2 out
+	stage dn "4 sides, one per leg, primary CN2 with CN1 as the standby"
+	dn_pointers 1 "$sp:${A_MLEG[1]}:${A_MSIDE[1]}" "$sp:${A_DLEG[1]}:${A_DSIDE[1]}"
+	dn_pointers 2 "$sp:${A_MLEG[2]}:${A_MSIDE[2]}" "$sp:${A_DLEG[2]}:${A_DSIDE[2]}"
+	dn_side 1 "$sp" "${A_MLEG[1]}" "${A_MSIDE[1]}" 1 "$RAID1_MGRP_ZERO_BYTES" \
+		"${CNID[2]}" "${CNID[1]}"
+	dn_side 1 "$sp" "${A_DLEG[1]}" "${A_DSIDE[1]}" 2 "$RAID1_DGRP_ZERO_BYTES" \
+		"${CNID[2]}" "${CNID[1]}"
+	dn_side 2 "$sp" "${A_MLEG[2]}" "${A_MSIDE[2]}" 1 "$RAID1_MGRP_ZERO_BYTES" \
+		"${CNID[2]}" "${CNID[1]}"
+	dn_side 2 "$sp" "${A_DLEG[2]}" "${A_DSIDE[2]}" 2 "$RAID1_DGRP_ZERO_BYTES" \
+		"${CNID[2]}" "${CNID[1]}"
+
+	stage cn "the primary on CN2, the standby on CN1"
+	bump_cn_sync 2
+	out=$(cnctl 2 syncup-cn --revision "${CNREV[2]}" --cntlr "$sp:$c2")
+	assert_cn_info_ok "$out" "pause syncup-cn 2"
+	bump_cn_sync 1
+	out=$(cnctl 1 syncup-cn --revision "${CNREV[1]}" --cntlr "$sp:$c1")
+	assert_cn_info_ok "$out" "pause syncup-cn 1"
+	req_raid1 "$req2" 2 "$sp" "$c2" 0 true "$nqn" "$P_UUID"
+	req_raid1 "$req1" 1 "$sp" "$c1" 1 false "$nqn" "$P_UUID"
+	if [ "$tmo" -ne 0 ]; then
+		req_set "$req2" ".leg_fast_io_fail_tmo = $tmo"
+		req_set "$req1" ".leg_fast_io_fail_tmo = $tmo"
+	fi
+	bump_cn_rev 2
+	out=$(cn_syncup_cntlr 2 "$req2")
+	assert_map_ok "$out" grp_id_to_md_raid "$A_MGRP" "pause primary"
+	assert_map_ok "$out" grp_id_to_md_raid "$A_DGRP" "pause primary"
+	assert_map_ok "$out" ns_id_to_namespace "$A_NS" "pause primary"
+	bump_cn_rev 1
+	out=$(cn_syncup_cntlr 1 "$req1")
+	assert_map_ok "$out" ns_id_to_namespace "$A_NS" "pause standby"
+	wait_legs_probed 2 "$sp" "$c2" 20 "pause primary legs"
+
+	if [ "$PAUSE_MODE" = measure ]; then
+		stage zero "does nvme-cli pass --fast_io_fail_tmo 0 to the kernel?"
+		pause_zero_probe "$nqn"
+	fi
+
+	stage host "one namespace, two paths: CN2 optimized, CN1 inaccessible"
+	host_connect 2 2 "$nqn"
+	host_connect 2 1 "$nqn"
+	helper 2 "wait_dev '$dev' 20" >/dev/null || die "no device node $dev on vm2"
+	host_wait_ana 2 "$nqn" 2 optimized 20
+	# The timed writer's window, written first: its writes then map no new
+	# thin block.
+	sshv 2 "dd if=/dev/urandom of=$dev bs=1M count=8 conv=fsync status=none && sync"
+}
+
+# pause_zero_probe <nqn> — connects the host to CN1's subsystem with
+# --fast_io_fail_tmo 0, logs what the controller's attribute reads, and
+# disconnects it by its device.
+pause_zero_probe() {
+	local nqn=$1 hid got ctrl i
+	hid=$(host_id "$HOST_NQN")
+	got=$(sshv 2 "nvme connect -t tcp -a ${IP[1]} -s $TR_SVC_ID -n '$nqn' --hostnqn '$HOST_NQN' --hostid '$hid' --fast_io_fail_tmo 0 2>&1; echo rc=\$?")
+	log "  nvme connect --fast_io_fail_tmo 0: $(printf '%s' "$got" | tr '\n' ' ')"
+	ctrl=$(helper 2 "path_field '$nqn' '${IP[1]}' Name")
+	if [ "$ctrl" = none ]; then
+		log "  FACT the connect with --fast_io_fail_tmo 0 made no controller"
+	else
+		got=$(sshv 2 "cat /sys/class/nvme/$ctrl/fast_io_fail_tmo")
+		log "  FACT the controller connected with --fast_io_fail_tmo 0 reads" \
+			"fast_io_fail_tmo '$got'"
+		sshv 2 "nvme disconnect -d $ctrl" >/dev/null
+	fi
+	for ((i = 0; i < 20; i++)); do
+		[ "$(helper 2 "path_field '$nqn' '${IP[1]}' Name")" = none ] && break
+		sleep 0.5
+	done
+}
+
+# pause_none_run <i> <tmo> — one no-RAID run: an S-shaped RedundNone pool
+# on DN1, primary on CN2, the host on vm2, cut with the leg connections at
+# <tmo>, then torn down.
+pause_none_run() {
+	local i=$1 tmo=$2 sp=${P_NONE_SP[$1]} uuid=${P_NONE_UUID[$1]} c=0x1
+	local nqn="$NQN_IT_PREFIX:p:none$1" req="$WORK/req-pause-none$1.json"
+	local out dev rev
+	dev=$(host_dev "$uuid")
+	SIDE_PROVISIONED=()
+	DIAG_CNTLRS=()
+	diag_cntlr 2 "$sp" "$c"
+	stage "none$i" "no-RAID pool $i on DN1, primary CN2"
+	dn_pointers 1 "$sp:$S_MLEG:$S_MSIDE" "$sp:$S_DLEG:$S_DSIDE"
+	dn_side 1 "$sp" "$S_MLEG" "$S_MSIDE" 1 "$NONE_MGRP_ZERO_BYTES" "${CNID[2]}"
+	dn_side 1 "$sp" "$S_DLEG" "$S_DSIDE" 2 "$NONE_DGRP_ZERO_BYTES" "${CNID[2]}"
+	bump_cn_sync 2
+	out=$(cnctl 2 syncup-cn --revision "${CNREV[2]}" --cntlr "$sp:$c")
+	assert_cn_info_ok "$out" "pause none syncup-cn"
+	req_none "$req" 2 1 "$sp" "$c" 0 "$nqn" "$uuid" false
+	bump_cn_rev 2
+	rev=${CNREV[2]}
+	out=$(cn_syncup_cntlr 2 "$req")
+	assert_map_ok "$out" ns_id_to_namespace "$S_NS" "pause none"
+	host_connect 2 2 "$nqn"
+	helper 2 "wait_dev '$dev' 20" >/dev/null || die "no device node $dev on vm2"
+	host_wait_ana 2 "$nqn" 2 optimized 20
+	sshv 2 "dd if=/dev/urandom of=$dev bs=1M count=8 conv=fsync status=none && sync"
+	pause_cut "none$i" none "$tmo" 1 "$sp" "$c" "$rev" "$req" "$dev"
+	leg_wait_live 2 "$sp" "$S_MLEG" "${CNID[2]}" 1 60
+	leg_wait_live 2 "$sp" "$S_DLEG" "${CNID[2]}" 1 60
+
+	stage "none${i}down" "the no-RAID pool torn down"
+	host_disconnect 2 "$nqn"
+	cn_drop 2
+	dn_drop 1
+	assert_no_residue "$sp"
+}
+
+# pause_gate_check <n> <tmo> — the gate's verdict on cut <n>: no write
+# failed, and the longest write is under the teardown's bound plus the
+# timeout plus 3 s.
+pause_gate_check() {
+	local out="$PAUSE_OUT/run$1" tmo=$2 got bound
+	bound=$((P_TEARDOWN + tmo + 3))
+	got=$(awk '{ d = $2 - $1; if (d > max) max = d; if ($3 != 0) nf++ }
+	    END { printf "%.3f %d %d\n", max, nf, NR }' "$out.writes")
+	set -- $got
+	log "  gate: $3 writes, the longest $1 s, $2 failed"
+	[ "$3" -gt 0 ] || die "pause: the writer logged no write"
+	[ "$2" = 0 ] || die "pause: $2 writes failed on a RAID1 pool with a" \
+		"live leg"
+	awk -v d="$1" -v b="$bound" 'BEGIN { exit !(d < b) }' ||
+		die "pause: the longest write took $1 s, not under $bound s"
+}
+
+case_pause() {
+	CASE=pause
+	DIAG_CNTLRS=()
+	SIDE_PROVISIONED=()
+	local sp=$P_SP c1=0x1 c2=0x2 nqn="$NQN_IT_PREFIX:p:vol1"
+	local req1="$WORK/req-pause-cn1.json" req2="$WORK/req-pause-cn2.json"
+	local dev rev2 n tmo
+	dev=$(host_dev "$P_UUID")
+	diag_cntlr 2 "$sp" "$c2"
+	diag_cntlr 1 "$sp" "$c1"
+	PAUSE_REPORTS=()
+	mkdir -p "$PAUSE_OUT"
+	case "$PAUSE_MODE" in
+	gate | measure) ;;
+	*) die "pause: PAUSE_MODE is '$PAUSE_MODE', want gate or measure" ;;
+	esac
+	assert_eq "$(helper 1 have_iptables)" yes \
+		"pause: vm1 needs iptables to cut the nvme-tcp port"
+	# Every time of a cut is vm2's but the cut's (clock_offset says why the
+	# clock must not be off), and vm1's is printed beside it.
+	for n in 1 2; do
+		tmo=$(helper "$n" clock_offset)
+		log "  vm$n's clock is $tmo s from NTP time"
+		case "$tmo" in
+		unknown) ;;
+		*) awk -v o="$tmo" 'BEGIN { exit !(o < 0.05 && o > -0.05) }' ||
+			die "pause: vm$n's clock is $tmo s off and chrony slews it;" \
+				"run 'sudo chronyc makestep' there first" ;;
+		esac
+	done
+
+	if [ "$PAUSE_MODE" = gate ]; then
+		# The request's setting reaches every leg controller of CN2 (the
+		# cut reads them), and a write in flight at the cut ends on DN2's
+		# leg in time.
+		pause_raid1_build "$req1" "$req2" "$nqn" "$dev" "$P_GATE_TMO"
+		rev2=${CNREV[2]}
+		pause_cut 1 raid1 "$P_GATE_TMO" 0 "$sp" "$c2" "$rev2" "$req2" "$dev"
+		pause_gate_check 1 "$P_GATE_TMO"
+		leg_wait_live 2 "$sp" "${A_MLEG[1]}" "${CNID[2]}" 1 60
+		leg_wait_live 2 "$sp" "${A_DLEG[1]}" "${CNID[2]}" 1 60
+		md_resync_until_clean 2 "$sp" "$c2" "$rev2" "$req2" 180 \
+			"pause put back" "$A_MGRP" "$A_DGRP"
+	else
+		pause_raid1_build "$req1" "$req2" "$nqn" "$dev" 0
+		rev2=${CNREV[2]}
+		n=0
+		for tmo in 5 5 5 5 5 1 1 1 15 15 15; do
+			n=$((n + 1))
+			if [ "$tmo" = 5 ]; then
+				pause_cut "$n" raid1 5 0 "$sp" "$c2" "$rev2" "$req2" "$dev"
+			else
+				pause_cut "$n" raid1 "$tmo" 1 "$sp" "$c2" "$rev2" "$req2" \
+					"$dev"
+			fi
+			leg_wait_live 2 "$sp" "${A_MLEG[1]}" "${CNID[2]}" 1 60
+			leg_wait_live 2 "$sp" "${A_DLEG[1]}" "${CNID[2]}" 1 60
+			md_resync_until_clean 2 "$sp" "$c2" "$rev2" "$req2" 180 \
+				"pause run $n" "$A_MGRP" "$A_DGRP"
+		done
+		helper 2 "leg_fast_io_fail 5" >/dev/null
+	fi
+
+	stage down "the RAID1 pool torn down"
+	host_disconnect 2 "$nqn"
+	cn_drop 2
+	cn_drop 1
+	dn_drop 1
+	dn_drop 2
+	assert_no_residue "$sp"
+
+	if [ "$PAUSE_MODE" = measure ]; then
+		pause_none_run 1 5
+		pause_none_run 2 15
+	fi
+
+	log ""
+	log "pause: the summaries"
+	[ "${#PAUSE_REPORTS[@]}" -eq 0 ] ||
+		cat "${PAUSE_REPORTS[@]}" 2>/dev/null | grep '^PAUSE' >&2 || true
 }
 
 # ---------------------------------------------------------------------------

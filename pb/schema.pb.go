@@ -1240,9 +1240,17 @@ type EventThreshold struct {
 	SideUnhealthy uint32 `protobuf:"varint,3,opt,name=side_unhealthy,json=sideUnhealthy,proto3" json:"side_unhealthy,omitempty"`
 	// How long the LEG must have been unhealthy
 	// before it is repaired (AR8 case 1).
-	LegUnhealthy  uint32 `protobuf:"varint,4,opt,name=leg_unhealthy,json=legUnhealthy,proto3" json:"leg_unhealthy,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
+	LegUnhealthy uint32 `protobuf:"varint,4,opt,name=leg_unhealthy,json=legUnhealthy,proto3" json:"leg_unhealthy,omitempty"`
+	// The fast IO fail timeout, in seconds, of every
+	// leg connection of the pool's cntlrs: how long
+	// the kernel holds IO queued for a leg whose
+	// controller is reconnecting to a lost disk node
+	// before it fails it (dnagent.md SH20). Its range
+	// when set is architecture.md, Common validation.
+	// Appended, never renumbered.
+	LegFastIoFailTmo uint32 `protobuf:"varint,5,opt,name=leg_fast_io_fail_tmo,json=legFastIoFailTmo,proto3" json:"leg_fast_io_fail_tmo,omitempty"`
+	unknownFields    protoimpl.UnknownFields
+	sizeCache        protoimpl.SizeCache
 }
 
 func (x *EventThreshold) Reset() {
@@ -1299,6 +1307,13 @@ func (x *EventThreshold) GetSideUnhealthy() uint32 {
 func (x *EventThreshold) GetLegUnhealthy() uint32 {
 	if x != nil {
 		return x.LegUnhealthy
+	}
+	return 0
+}
+
+func (x *EventThreshold) GetLegFastIoFailTmo() uint32 {
+	if x != nil {
+		return x.LegFastIoFailTmo
 	}
 	return 0
 }
@@ -15024,9 +15039,14 @@ type SyncupCntlrRequest struct {
 	// silently; the name goes with it.
 	// The pool's repairs by name. The cntlr finds a group's repair through
 	// Group.rep_name. Appended, never renumbered.
-	NameToRepair  map[string]*Repair `protobuf:"bytes,14,rep,name=name_to_repair,json=nameToRepair,proto3" json:"name_to_repair,omitempty" protobuf_key:"bytes,1,opt,name=key" protobuf_val:"bytes,2,opt,name=value"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
+	NameToRepair map[string]*Repair `protobuf:"bytes,14,rep,name=name_to_repair,json=nameToRepair,proto3" json:"name_to_repair,omitempty" protobuf_key:"bytes,1,opt,name=key" protobuf_val:"bytes,2,opt,name=value"`
+	// The pool's EventThreshold.leg_fast_io_fail_tmo, resolved: the fast IO
+	// fail timeout the cn agent connects the cntlr's legs with (cnagent.md
+	// CN10). Zero, as a request from a worker without the field carries
+	// it, is DefaultNvmeFastIoFailTmo. Appended, never renumbered.
+	LegFastIoFailTmo uint32 `protobuf:"varint,15,opt,name=leg_fast_io_fail_tmo,json=legFastIoFailTmo,proto3" json:"leg_fast_io_fail_tmo,omitempty"`
+	unknownFields    protoimpl.UnknownFields
+	sizeCache        protoimpl.SizeCache
 }
 
 func (x *SyncupCntlrRequest) Reset() {
@@ -15148,6 +15168,13 @@ func (x *SyncupCntlrRequest) GetNameToRepair() map[string]*Repair {
 		return x.NameToRepair
 	}
 	return nil
+}
+
+func (x *SyncupCntlrRequest) GetLegFastIoFailTmo() uint32 {
+	if x != nil {
+		return x.LegFastIoFailTmo
+	}
+	return 0
 }
 
 type SyncupCntlrReply struct {
@@ -17822,12 +17849,13 @@ const file_pb_schema_proto_rawDesc = "" +
 	"\rdm_raid0_conf\x18\x02 \x01(\v2\f.DmRaid0ConfR\vdmRaid0Conf\x12,\n" +
 	"\vredund_conf\x18\x03 \x01(\v2\v.RedundConfR\n" +
 	"redundConf\x128\n" +
-	"\x11bdev_feature_list\x18\x04 \x03(\v2\f.BdevFeatureR\x0fbdevFeatureList\"\xb2\x01\n" +
+	"\x11bdev_feature_list\x18\x04 \x03(\v2\f.BdevFeatureR\x0fbdevFeatureList\"\xe2\x01\n" +
 	"\x0eEventThreshold\x12+\n" +
 	"\x11primary_unhealthy\x18\x01 \x01(\rR\x10primaryUnhealthy\x12'\n" +
 	"\x0fcntlr_unhealthy\x18\x02 \x01(\rR\x0ecntlrUnhealthy\x12%\n" +
 	"\x0eside_unhealthy\x18\x03 \x01(\rR\rsideUnhealthy\x12#\n" +
-	"\rleg_unhealthy\x18\x04 \x01(\rR\flegUnhealthy\"R\n" +
+	"\rleg_unhealthy\x18\x04 \x01(\rR\flegUnhealthy\x12.\n" +
+	"\x14leg_fast_io_fail_tmo\x18\x05 \x01(\rR\x10legFastIoFailTmo\"R\n" +
 	"\vSidePointer\x12\x13\n" +
 	"\x05sp_id\x18\x01 \x01(\x04R\x04spId\x12\x15\n" +
 	"\x06leg_id\x18\x02 \x01(\x04R\x05legId\x12\x17\n" +
@@ -19073,7 +19101,7 @@ const file_pb_schema_proto_rawDesc = "" +
 	"\brevision\x18\x02 \x01(\x04R\brevision\x12 \n" +
 	"\acn_info\x18\x03 \x01(\v2\a.CnInfoR\x06cnInfo\x12&\n" +
 	"\tobs_stamp\x18\x04 \x01(\v2\t.ObsStampR\bobsStamp\x127\n" +
-	"\tsave_time\x18\x05 \x01(\v2\x1a.google.protobuf.TimestampR\bsaveTime\"\xcc\x06\n" +
+	"\tsave_time\x18\x05 \x01(\v2\x1a.google.protobuf.TimestampR\bsaveTime\"\xfc\x06\n" +
 	"\x12SyncupCntlrRequest\x12\x1d\n" +
 	"\n" +
 	"cluster_id\x18\x01 \x01(\x04R\tclusterId\x12\x13\n" +
@@ -19090,7 +19118,8 @@ const file_pb_schema_proto_rawDesc = "" +
 	"\n" +
 	"clone_list\x18\v \x03(\v2\x06.CloneR\tcloneList\x12&\n" +
 	"\txfer_list\x18\f \x03(\v2\t.TransferR\bxferList\x12K\n" +
-	"\x0ename_to_repair\x18\x0e \x03(\v2%.SyncupCntlrRequest.NameToRepairEntryR\fnameToRepair\x1aD\n" +
+	"\x0ename_to_repair\x18\x0e \x03(\v2%.SyncupCntlrRequest.NameToRepairEntryR\fnameToRepair\x12.\n" +
+	"\x14leg_fast_io_fail_tmo\x18\x0f \x01(\rR\x10legFastIoFailTmo\x1aD\n" +
 	"\x0eIdToSliceEntry\x12\x10\n" +
 	"\x03key\x18\x01 \x01(\tR\x03key\x12\x1c\n" +
 	"\x05value\x18\x02 \x01(\v2\x06.SliceR\x05value:\x028\x01\x1aM\n" +

@@ -378,7 +378,13 @@ const (
 	DefaultLegUnhealthy        = 1200
 	DefaultPoolLowWatermarkPct = 50
 
+	// DefaultNvmeFastIoFailTmo is the fast IO fail timeout, in seconds, of
+	// every connection an agent makes (dnagent.md SH20) but a leg's whose
+	// pool sets event_threshold.leg_fast_io_fail_tmo, and the most that
+	// member may set; MinLegFastIoFailTmo is the least (architecture.md,
+	// Common validation).
 	DefaultNvmeFastIoFailTmo = 5
+	MinLegFastIoFailTmo      = 1
 
 	// Default cap on the number of in-flight OsClient operations
 	// (commands + directory listings + modification-time reads +

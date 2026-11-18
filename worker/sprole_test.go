@@ -545,6 +545,44 @@ func TestSpSideZeroBytes(t *testing.T) {
 	})
 }
 
+// TestSpCntlrRequestLegFastIoFail pins the legs' fast IO fail timeout in the
+// cntlr requests (architecture.md, Common validation; cnagent.md CN10): the
+// pool's stored event_threshold.leg_fast_io_fail_tmo reaches every cntlr's
+// request as stored, the disabled one's included, and a pool that stores none,
+// or stores the member as zero, sends the default resolved, never a zero.
+func TestSpCntlrRequestLegFastIoFail(t *testing.T) {
+	captureLogs(t)
+	for _, tc := range []struct {
+		name      string
+		threshold *pb.EventThreshold
+		want      uint32
+	}{
+		{"stored as 3", &pb.EventThreshold{LegFastIoFailTmo: 3}, 3},
+		{"stored as 1", &pb.EventThreshold{LegFastIoFailTmo: 1}, 1},
+		{"no threshold stored", nil, common.DefaultNvmeFastIoFailTmo},
+		{
+			"the member stored as zero",
+			&pb.EventThreshold{PrimaryUnhealthy: 9},
+			common.DefaultNvmeFastIoFailTmo,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			state := spFixture()
+			state.Conf.EventThreshold = tc.threshold
+			plan := spTestWorker(nil).buildPlan(context.Background(), state)
+			if len(plan.cntlrs) != 3 {
+				t.Fatalf("%d cntlr children, want 3", len(plan.cntlrs))
+			}
+			for cntlrId, child := range plan.cntlrs {
+				if got := child.req.GetLegFastIoFailTmo(); got != tc.want {
+					t.Errorf("cntlr %d: leg_fast_io_fail_tmo = %d, want %d",
+						cntlrId, got, tc.want)
+				}
+			}
+		})
+	}
+}
+
 // wantZeroBytes checks that a plan drives exactly the given sides, each with
 // the given side_conf.zero_bytes.
 func wantZeroBytes(t *testing.T, plan *spPlan, want map[sideKey]uint64) {
@@ -596,6 +634,9 @@ func TestSpCntlrRequestGolden(t *testing.T) {
 		NqnToSubsystem: state.Subsystems,
 		CloneList:      []*pb.Clone{state.Clones[spCloneNm]},
 		XferList:       []*pb.Transfer{state.Xfers[spXferName]},
+		// The fixture's pool stores no threshold, so the legs' fast IO fail
+		// timeout is the default, resolved.
+		LegFastIoFailTmo: common.DefaultNvmeFastIoFailTmo,
 	}
 	if !proto.Equal(primary.req, want) {
 		t.Fatalf("primary cntlr request =\n%v\nwant\n%v", primary.req, want)

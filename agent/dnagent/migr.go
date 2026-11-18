@@ -834,7 +834,10 @@ func (s *DnAgentServer) connectMigrSrc(
 	budget := agent.NewWaitBudget(connectBudget, s.now, s.sleep)
 	for {
 		start := budget.Now()
-		err := s.host.Connect(ctx, conf, nqn, plan.dnHostNqn())
+		// The default fast IO fail timeout: the side syncup carries no
+		// pool setting, and only leg connections take the pool's (SH20).
+		err := s.host.Connect(ctx, conf, nqn, plan.dnHostNqn(),
+			common.DefaultNvmeFastIoFailTmo)
 		if err == nil {
 			return nil
 		}
