@@ -3814,8 +3814,8 @@ func TestReactionNeedsOwnVerdict(t *testing.T) {
 		// a member is not connected yet, the next round misses, and the round
 		// after it answers clean. A round answers at once from the agent's
 		// latest observation, so here it misses when no reply comes in time,
-		// or when its observation is too old while the agent's retry holds
-		// the cntlr's reads off (HL7).
+		// or when its observation is too old while a converge holds the
+		// cntlr's reads off (HL7).
 		h := newHarness(t)
 		h.state.Cntlrs[reactCntlrA].ErrEpoch = h.ago(3600)
 		syncupVerdict(h.w.verdicts, reactCntlrA, true)

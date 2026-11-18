@@ -617,8 +617,9 @@ side just after its export turns inaccessible (`architecture.md`, Known
 limits), which no run can force — after the gap check, so that the syncup the
 drop brings lies outside the window that check reads, and, as any converge of
 the primary puts the member back, with the primary at the pool's latest
-revision and no CN10 retry running, so that the converge that puts the member
-back is the re-send the naming verdict brings; the member must come back in
+revision and, as the case checks, running no converge of its own (`cnagent.md`
+CN10), so that the converge that puts the member back is the re-send the
+naming verdict brings; the member must come back in
 sync with its failfast flag and the array must read clean, and the logs must
 join the verdict to that converge through trace ids: the read whose verdict
 named the member, logged under the id of the round that started it
@@ -718,15 +719,18 @@ region in flight, since a copy of a few MiB over the lab's network would
 otherwise end in well under a second. Over the slowed source a device-mapper
 command after which udev reads the dm-clone, its create or the resume of a
 namespace device above it, can outlast the agent's command timeout, as it waits
-for udev's reads, which go through the source, and the agent's retry then
-finishes the build (`cnagent.md` CN16, CN18), so the case waits for the
+for udev's reads, which go through the source, and the converge of the
+`SyncupCntlr` the worker re-sends on the next round, which the converge's own
+name of the failed step brings, then finishes the build (`cnagent.md` CN16,
+CN18, CN30), so the case waits for the
 dm-clone to serve before it reads a count; the destination's namespace exists,
 suspended, before the clone, as in a live migration (`architecture.md`,
 Transfer + clone = cross-SP live migration), and the case logs the host's wait
 at the clone's creation — the time from the create to host0 reading that
 namespace optimized, and within it, when a poll sees it first, the time to
 every side of the clone meta group provisioned — with no limit on either, such
-a command lengthening the wait by the retry. The primary is disabled once a
+a command lengthening the wait by that round and the re-sent converge. The
+primary is disabled once a
 quarter of the copy's regions are copied, which fails it over at once
 (`dnv-worker.md` AR5); the new primary's first count must be at least the last
 count read on the old one and leave a region to copy; with the bucket gone
@@ -1400,11 +1404,11 @@ the connect attempted.
   group and no pool (`cnagent.md` CN12, CN13), so from the moment host0's path
   to the old primary goes, the loop's write in flight waits until the new
   primary has built the whole stack and turned its namespaces optimized. A
-  promotion that outruns the sides' ANA flips builds it only in a later
-  converge after them — the cn agent's first background retry attempt, or the
-  `SyncupCntlr` the worker re-sends once the cntlr's read names the absent
-  array, whichever comes first — which adds that wait and one more converge,
-  each converge growing with the slice count (`cnagent.md`, Known limits). The case bounds that wait only by the
+  promotion that outruns the sides' ANA flips builds it only in the converge
+  of the `SyncupCntlr` the worker re-sends once a read that starts after the
+  flips names the absent array, which adds the rounds until that read and one
+  more converge, each converge growing with the slice count (`cnagent.md`,
+  Known limits). The case bounds that wait only by the
   build's own and logs how long the write took.
 * **The outage takes etcd away, nothing else, and only once.** The gateway,
   the worker and the cdc run through it, so a program that starts while etcd

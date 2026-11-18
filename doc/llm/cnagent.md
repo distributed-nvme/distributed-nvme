@@ -5664,8 +5664,10 @@ stores instead is CN23's.
   (`dnv-worker.md` RW4 step 5): the converge's failed connect of the side,
   with the in-pass retries the pass budget allows (CN10), and the rest of
   the pass. It lasts until the node answers again, the finish of the leg
-  repair (`dnv-worker.md` AR8) retires the leg, or the operator removes
-  the disk node. The name cannot be left out: it is the only way a
+  repair (`dnv-worker.md` AR8) retires the leg, or an operator takes the
+  leg off the node by a repair or a migration, or deletes the pool (a
+  disk node that still holds a side cannot be deleted: `architecture.md`,
+  Disk nodes). The name cannot be left out: it is the only way a
   controller the kernel deleted is connected again.
 * A killed `--remove` leaves a repair's add half done: an add that runs
   within seconds of the bad leg's side dying can have its `--remove` of

@@ -635,6 +635,96 @@ Measured times are in [the introduction](introduction.md#status-and-limits-of-01
   namespaces stay inaccessible and the host waits, with no time limit,
   until the cause goes or an operator disables the cntlr, steps the level
   down or deletes the clone. State: fix later. Not seen in the lab.
+- **A part a converge keeps failing to build holds the primary's
+  failover.** Some parts of a cntlr's stack are named both by the
+  converge's own answer and by every check round while they are missing or
+  wrong: an export, a namespace's device, an ANA change, the device a
+  cntlr puts over a leg, a clone's dm-clone. When the kernel keeps
+  refusing to build such a part, the worker sends the cntlr's syncup again
+  on every check round, and the agent converges the cntlr one interval
+  after another. Every check round then answers with the last converge's
+  report, which the worker does not count toward a failover. So a primary
+  whose rows read error this way is failed over at its threshold only once
+  its check rounds fail to answer in time, or once an operator disables
+  it. A side on a disk node loops the same way, as a migration's new side
+  does when it cannot connect to the old side after the cutover. The loop
+  runs one converge of the cntlr or side at a time, with one interval
+  between two, and the node's other cntlrs and sides go on. State:
+  accepted. Not seen in the lab.
+- **A step only a check round names costs a converge every second check
+  round while the converge keeps failing it.** Some work is named only by
+  a check round, not by the converge's own answer: a leg to put back into
+  its array, an array to start, a forced start, a snapshot to make, the
+  start or stop of md's check, a connection to make again. The worker then
+  sends the syncup every second check round at most. When the check
+  round's test passes but the converge keeps failing, each such syncup
+  costs one converge that fails again. That happens when md keeps refusing
+  a change of the legs of a clone meta group's array, which a check round
+  does not try, so that it names the clone's dm-clone over that group;
+  when a program outside dnv holds an array open, so that md refuses to
+  stop it for a forced start or for a new assembly of a broken array; when
+  a leg that a migration moves serves on one path while its other path
+  cannot connect; when md keeps refusing to start or stop its check; and
+  when the message that makes a snapshot keeps failing, each try of which
+  pauses the IO of the snapshot's origin for a moment. Between two
+  converges a check round reads the cntlr anew, so the primary's check
+  rounds still count toward a failover. State: accepted; each case lasts
+  only as long as its fault. Not seen in the lab.
+- **A disk node or a clone source that stays away costs a converge every
+  second check round once its connection is gone.** While a disk node is
+  dead, the controller node's kernel keeps trying to connect to it again,
+  and beyond failing its legs in md, dnv spends nothing on it. Once the
+  kernel has deleted the connection, as after the disk node refused a
+  reconnect with "do not retry" or after a reboot of the controller node,
+  every check round of a cntlr with a leg there names the leg's side,
+  since only a converge connects it again. The worker then sends the
+  syncup every second check round at most, and each converge tries the
+  connect, with the retries a budget of about one second allows. This
+  lasts until the disk node answers, leg repair has replaced the leg, or
+  an operator takes the leg off the disk node, by a repair or a
+  migration, or deletes the pool; the disk node itself cannot be deleted
+  while the leg is on it. A clone source that the primary
+  cannot connect costs the same until the source answers or the clone is
+  deleted. State: accepted: the converge is the only way a deleted
+  connection comes back. Not seen in the lab.
+- **The primary can guess wrong whether mdadm would start a stopped
+  array.** A check round of the primary names a group whose array does not
+  run when mdadm would start it, which the agent works out from the legs'
+  md superblocks. Two rare shapes make the guess wrong. An md superblock
+  that a newer kernel series wrote, which the controller node's older
+  kernel refuses (section 10), reads as good, so the primary tries the
+  start every second check round until the controller node runs the right
+  kernel series. A replacement member, which only an operator's own mdadm
+  run makes, holds the same place in the array as another member, and the
+  guess, which keeps one member for each place, can hold back an array
+  mdadm would start; the group then waits for a syncup that comes for
+  another reason, or for the operator. State: accepted; each shape needs a
+  step outside dnv's rules. Not seen in the lab.
+- **A clone source address waits while the address of another connection
+  to the source cannot be read.** A clone's source can have more than one
+  address. When the controller node cannot read which address one of its
+  connections to the source uses, a check round names no address of the
+  source, since that connection may be the one an address needs, and the
+  kernel would refuse a second connection there as a copy of it. An
+  address with no connection then waits for a syncup that comes for
+  another reason, such as a new revision, for as long as that read fails.
+  State: accepted. Not seen in the lab.
+- **A transfer whose namespace is gone is named by nothing.** A transfer
+  is made from one of the pool's namespaces. When that namespace is gone
+  from the desired state while its volume stays, the primary names nothing
+  of the transfer. The transfer's device should then serve only errors;
+  when that change fails, the device stays as it was until a syncup comes
+  for another reason. The gateway refuses to delete a namespace a transfer
+  is made from, or to point it at another volume, so only a record written
+  before that refusal holds this state. State: accepted. Not seen in the
+  lab.
+- **A new side set read-only by hand does not finish zeroing.** When an
+  operator sets a new side's device read-only with `blockdev --setro`
+  while its disk node zeroes it, every zeroing step fails. The side's row
+  reads error, but nothing makes the worker send its syncup again, so the
+  side stays unprovisioned until a converge that comes for another reason
+  makes the device writable. State: accepted; only an operator's own step
+  makes it, and `blockdev --setrw` by hand ends it. Not seen in the lab.
 - **An old md superblock at the end of a new side can fail the leg.** The
   end of a new side is never zeroed. A host of an earlier pool may have
   written an md superblock of a format that sits at the end of a device,
@@ -760,17 +850,16 @@ Measured times are in [the introduction](introduction.md#status-and-limits-of-01
   read, the wait can last longer: while another agent on the machine keeps
   failing part way through a build of an export of the pool, and, when two
   agents on one machine hold the two sides of one leg, until the other
-  agent builds that export again or removes it. State: accepted. Only its age tells such an export
-  from another agent's export still being built. Not seen in the lab.
-- **A node's own converge whose call was cut off leaves part of its
-  build waiting.** When the call of a disk node's or a controller node's
-  own syncup is cut off, what its converge did not build, other than the
+  agent builds that export again or removes it. State: accepted. Only its
+  age tells such an export from another agent's export still being built.
+  Not seen in the lab.
+- **A node's own converge whose call was cut off leaves part of its build
+  waiting.** When the call of a disk node's or a controller node's own
+  syncup is cut off, what its converge did not build, other than the
   node's nvmet port, waits for the node's next revision. What it did not
   remove is a leftover, which the next check round names, and the worker
   sends the syncup again. Sides and cntlrs do not wait: their next check
-  round names what is left, but for the parts of a snapshot not yet made,
-  which wait for the next revision. State: fix later. Not seen in the
-  lab.
+  round names what is left. State: fix later. Not seen in the lab.
 - **An agent restart during a fence can leave devices suspended.** A disk
   node's agent keeps the start of a fence's wait in memory. A restart
   during that wait can leave the old primary's devices on the side
@@ -1072,8 +1161,13 @@ yourself: a disk the logs fill is one the stores and etcd cannot write.
   introduction. Before the build, the worker hands each group's leg md
   copies from its fence last (section 5.1), which adds the time the
   slowest disk node takes to report its fence, at most one interval, 2
-  seconds at the default. State: accepted. Fix later, large: a standby that
-  pre-assembles its arrays.
+  seconds at the default. A new primary can start its build before the
+  disk nodes have set the legs' paths to it ANA optimized. It then builds
+  its groups in the converge of a later syncup, which the worker sends
+  once a check round made after that change names the groups: up to about
+  two intervals more, 4 seconds at the default, plus the time of that
+  check round's read and of one more build. State: accepted. Fix later,
+  large: a standby that pre-assembles its arrays.
 - **Hosts still on the old primary's path see IO errors from the fence.**
   The worker hands the old primary its demotion first and holds the sides
   for three seconds at most. It holds the sides of the legs md copies from
@@ -1111,16 +1205,24 @@ yourself: a disk the logs fill is one the stores and etcd cannot write.
   seen in the lab.
 - **One slow or stuck command holds the agent's other work.** A command in
   an uninterruptible kernel wait outlives every timeout. The agent's
-  reports age, and the worker can count a missed round. State: accepted;
-  the waits are the kernel's. Not seen in the lab.
-- **The retry for a leg that joins late holds the primary's reads off
-  and can fail it over.** A leg that is not available when the primary
-  builds its group makes the agent run the cntlr's whole converge again
-  every retry interval. Each attempt holds the cntlr's lock, so no read
-  runs and the report ages. Two rounds answering from too old a
-  report fail the primary over. State: fix decided, the agent reads the
-  node once per interval on its own clock, reads and converges use the
-  latest reading, and this retry goes. Seen in the lab.
+  reports age, and the worker can count a missed round. The agent's read
+  of a leg's md superblock, made for a check round, can wait this way when
+  the leg's path stops serving between the test that found it serving and
+  the read. State: accepted; the waits are the kernel's. Not seen in the
+  lab.
+- **A controller node's build that stopped waits while no worker drives
+  the pool, and while the node's store disk refuses writes.** The agent
+  converges only when a syncup comes, and once at its own start. What a
+  converge could not build waits for the syncup the worker sends again
+  once a check round names it: a new primary's stack after a failover, a
+  leg to put back into its array, a forced start, a clone's build. While
+  no worker drives the pool, as before a new worker takes it over, that
+  wait lasts until the new worker's first check rounds. While the
+  controller node cannot save to its store disk, the disk that holds the
+  agent's local files, the agent refuses every syncup, so the wait lasts
+  as long as the fault, unless the agent restarts; a restart carries out
+  no forced start. State: accepted; a store disk that refuses writes
+  already stops every change of the node. Not seen in the lab.
 - **A migration destination waits for a run of free metadata units the
   count allowed.** The gateway counts free units, not runs. While it
   waits, the destination does no work of its own. Once a run comes free,
@@ -1366,8 +1468,7 @@ design:
   start failover after failover. A connect that reaches a grown group's
   side before its export exists leaves the group unbuilt until a later
   converge, which can outlast the primary threshold. State: accepted now;
-  checked again once the agent reads the node once per interval (section
-  8).
+  checked again by the next lab run at 32 slices.
 - **A call that takes space gives up after a fixed number of rounds while
   other calls take space on the same nodes.** Most calls that take disk or
   controller space give up after 32 rounds with the error code ABORTED.

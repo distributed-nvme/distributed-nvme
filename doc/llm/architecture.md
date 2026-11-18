@@ -2965,11 +2965,7 @@ so the flip follows that reply; that `SyncupCntlr` waits up to one
 for has not accepted the bump (sp role, sides first). When the reply does
 not report every slice `OK`, the flip follows the first later reply that
 does. A `SyncupCntlr` that a round re-sends on a non-zero code (Check
-streams) can be that reply. A row that the connect retry makes `OK`
-(`cnagent.md` CN10, CN18) shows on the
-first `CheckCntlr` round after that retry's converge, since a round
-answers from the agent's latest observation of the cntlr (Live-state
-reporting). A row that only a background read finds `OK` shows on the
+streams) can be that reply. A row that only a background read finds `OK` shows on the
 first round after such a read ends, and the first read that can store an
 observation of the cntlr after the reply is one that a round after the
 reply starts (`dnagent.md` SH29, SH30). With no converge in flight and a
@@ -5515,12 +5511,11 @@ revision):
    `SyncupCntlr` can land before the sides' ANA flips have reached the new
    primary; the sides-first hold (sp role, `dnv-worker.md` RW14) makes that
    rarer, not impossible. A group whose member is not yet available is
-   then built by a later converge, which two things bring: the agent's own
-   retry re-runs the converge until the member is available (`cnagent.md`
-   CN10), and once the members serve, the cntlr's read names the group's
-   absent array, or a `RedundNone` group's dm-linear (`cnagent.md` CN12,
-   CN30), on which the worker re-sends the `SyncupCntlr` (`dnv-worker.md`
-   RW4).
+   then built by a later converge: once the members serve, the cntlr's
+   read names the group's absent array, or a `RedundNone` group's
+   dm-linear (`cnagent.md` CN12, CN30), and the worker re-sends the
+   `SyncupCntlr` on that name (`dnv-worker.md` RW4); the agent runs no
+   converge of its own for it (`cnagent.md` CN10).
 2. Create the pools, thin volumes and raid0 devices (Primary cntlr, steps
    3 to 5).
 3. Reload every namespace's `CnNsDevName` from its td's `CnErrorName` onto
@@ -5623,10 +5618,10 @@ serves can lose an acknowledged write).
 — is a pause from the host's side: its paths drop, IO queues, and the
 new primary's optimized flip releases it once its stack is built
 (new_primary step 4). A promotion that outruns the sides' ANA flips
-(new_primary step 1) makes the pause longer by the later converge that
-builds the stack — the agent's retry or the worker's re-send of the
-`SyncupCntlr` the read's name brings (`cnagent.md` CN10, CN30; `cnagent.md`,
-Known limits) — and never turns it into IO
+(new_primary step 1) makes the pause longer by the rounds until a read
+that starts after the flips names the group, and by the converge of the
+`SyncupCntlr` the worker re-sends on that name (`cnagent.md` CN10, CN30;
+`cnagent.md`, Known limits), and never turns it into IO
 errors: the new primary builds its groups only over available legs, so no
 stack it builds reaches a side that still exports dm-error to it
 (`cnagent.md` CN12), and it moves no namespace to optimized over the
@@ -8244,9 +8239,10 @@ document and only pointed to here.
   and neither does it clear a mark whose start an agent restart forgot,
   since the primary keeps the acted mark in memory alone (`cnagent.md`
   CN28): until the operator's cancel the mark holds leg repair off the
-  group (`dnv-worker.md` AR8), the primary converges every retry interval
-  (`cnagent.md`, Known limits), and the mark acts once the array no
-  longer runs, starting the array
+  group (`dnv-worker.md` AR8), no converge runs for it while the array
+  runs (`cnagent.md`, Known limits), and the mark acts once the array no
+  longer runs, at the next converge, which a read's name of the forced
+  start brings (`cnagent.md` CN12, CN30), starting the array
   from the named leg, which may be stale by then, unless a member the start
   would zero is a full member of the named leg's identity with a higher
   change count, which refuses the start without the mark's force (Repairs,
@@ -8613,9 +8609,10 @@ document and only pointed to here.
   connect to one of their subsystems taking an id, or a machine that runs
   both roles, whose side exports draw from the same slot — that slot's ids
   can run out while the other slots' are free, and nvmet then answers
-  Connect with CTRL_BUSY and do-not-retry: a cntlr's connect to a leg fails
-  and registers the cn
-  agent's retry (`cnagent.md` CN10), a host's connect is refused, and a
+  Connect with CTRL_BUSY and do-not-retry: a cntlr's connect to a leg fails,
+  and the cntlr's reads name the side, which has no controller, so a
+  re-sent `SyncupCntlr` tries the connect again every second round at most
+  (`cnagent.md` CN10); a host's connect is refused; and a
   path mid-reconnect is deleted, since the kernel reconnects no controller
   refused with do-not-retry. Read in the kernel's nvmet and NVMe host
   sources, not in the lab.
@@ -8631,11 +8628,14 @@ document and only pointed to here.
   `clone_id_to_target` row reads `RES_STATUS_MISSING`, which sets no
   health epoch, so through that row neither a fault at the source nor one
   in the primary's own path to it fails the primary over or replaces it
-  while the copy waits. The cn agent's retry of a source it cannot
-  connect, or that has no namespace, can still hold the primary's reads
-  off long enough that the observation its check rounds answer from grows
-  too old (`dnv-worker.md` HL7), and such rounds count as missed ones,
-  which can move the role. A build of the clone's dm-clone that cannot
+  while the copy waits. A source endpoint the primary holds no controller
+  for is named by its reads (`cnagent.md` CN18, The clone names), so the
+  worker re-sends its `SyncupCntlr` every second round at most and each
+  converge tries the connect again within its pass's budget, holding the
+  cntlr's reads off while it runs (`cnagent.md`, Known limits); a source
+  whose every endpoint has a controller but which has no namespace is
+  named by nothing and costs no converge. A build of the clone's dm-clone
+  that cannot
   connect the source, or finds no source namespace, while the fault
   lasts — after a role move or a CN reboot, among others —
   takes the clone out of service until the source comes back or the clone

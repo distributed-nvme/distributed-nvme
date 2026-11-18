@@ -1716,8 +1716,14 @@ RW4. **Round**, every interval (RW9):
    pauses the re-sync, and while the condition lasts and the agent accepts
    the re-sends, they fall to every other round at most instead of
    stopping (the subsystem directory a cn teardown leaves is such a
-   condition, RW5); a re-send the agent refuses for a failed save stores
-   no observation (`dnagent.md` SH5, SH28), so it pauses nothing;
+   condition, RW5); neither agent runs a converge again by itself because
+   a build step stopped (`cnagent.md` CN10, `dnagent.md` SH31): a verdict
+   names what such a step left undone only while a converge would act on
+   it, and its re-send comes on every other round at most, or on every
+   round for a row that both a converge's reply and a read name
+   (`dnagent.md` SH31, `cnagent.md` CN30); a re-send the agent refuses for
+   a failed save stores no observation (`dnagent.md` SH5, SH28), so it
+   pauses nothing;
 6. re-arm the timer.
 
 RW5. **Syncup.** Build the request from the current inputs (RW13 to RW16),
@@ -2196,11 +2202,11 @@ pending, the coordinator judges every leg row by the held plan (HL2). The
 order mitigates three races and is no correctness dependency
 (`architecture.md`, [D16]): a promotion's
 `SyncupCntlr` outrunning the sides' ANA flips, which leaves the new
-primary's groups to a later converge — the agent's own retry, or the
-`SyncupCntlr` this worker re-sends once the cntlr's read names a group's
-absent array or a `RedundNone` group's dm-linear (`cnagent.md` CN10,
-CN30; RW4) — and a cntlr's connect to a new side outrunning that side's
-export (both `cnagent.md` CN10); and a leg
+primary's groups to the converge of the `SyncupCntlr` this worker
+re-sends once the cntlr's read names a group's absent array or a
+`RedundNone` group's dm-linear (`cnagent.md` CN10, CN30; RW4), and a
+cntlr's connect to a new side outrunning that side's export (both
+`cnagent.md` CN10); and a leg
 removal's `nvme disconnect` on a CN overlapping the disk node's unlink of
 that side's export, which can leave the disconnect waiting out the kernel's
 admin timeout. That unlink comes from the dn role's `SyncupDn`, which the
@@ -3006,8 +3012,9 @@ since what they lack waits on that source, and that wait is not a build
 in progress, so a primary whose stack is otherwise built settles, and is
 judged by `primary_unhealthy`, however long the wait lasts; a source still
 coming up that the agent's reading cannot tell from one that is not ready
-settles a primary the same way, a few seconds before the agent's connect
-retry builds the rest of the clone (`cnagent.md` CN18). Rows the
+settles a primary the same way, before the converge a read's name of
+the source or of its dm-clone brings builds the rest of the clone
+(`cnagent.md` CN18). Rows the
 `sp_level` suppresses: they read `MISSING` with the level's reason
 (`cnagent.md` CN19) and hold nothing, so a primary does not wait for a
 layer its level suppresses; the deferral of a slice does not depend on the
@@ -6638,7 +6645,7 @@ which no suite case sets, so no suite case runs RW13's count compare.
   until md sees it die, which on an idle array it does only when the
   primary fails it in md: by the early fail, at the first converge after
   the leg's probe has failed more than once in a row — one a check
-  round's verdict brings, or the primary's own background retry — and
+  round's verdict brings — and
   only while the leg is not available and another in-sync member is a
   copy source, or by a repair's step
   (`cnagent.md` CN12), so a leg whose
@@ -6734,7 +6741,16 @@ which no suite case sets, so no suite case runs RW13's count compare.
   unless the agent's saves fail (end of this item). A `Syncup*` reply's
   observation counts for nothing because a converge's rows can read unhealthy while it
   waits for a member (AR10); the case needs a leftover that lasts and an
-  unhealthy primary at once. A leftover of a disk node or a controller
+  unhealthy primary at once. A row of the primary's own build that its
+  converge keeps failing to cure is such a leftover, since the converge's
+  reply and the read both name it (`cnagent.md` CN30) — an export step, an
+  ns-dev reload or an ANA move that configfs or dm keeps refusing, a
+  dm-clone create the kernel refuses for good — so while the refusal lasts
+  and the primary's health epoch has aged its threshold, its failover
+  waits for missed rounds or for the operator's disable (AR5). A condition
+  only a read names, which the converge keeps failing on, brings a re-send
+  on every other round at most (RW4 step 5), so one read in each cycle
+  ends and its report counts (`cnagent.md`, Known limits). A leftover of a disk node or a controller
   node keeps no read of its sides or cntlrs from ending (`dnagent.md`
   SH30). A re-send the agent refuses for a failed save stores no
   observation (`dnagent.md` SH5), and while the agent's latest save stands
@@ -6936,12 +6952,18 @@ which no suite case sets, so no suite case runs RW13's count compare.
 * **A dm-clone left with hydration off moves the role of the clone's
   pool.** Its row reads `ERROR` in every observation, a background read's
   as much as a converge's (`cnagent.md` CN18, CN28). That is a row of the
-  primary's own (HL2), so its `err_epoch` stays set, and AR5 fails it over
-  at its threshold, or AR7 replaces it where there is no failover
-  candidate; the new primary creates the dm-clone over the metadata its
-  clone meta group holds and finishes the build (`cnagent.md` CN18). A
-  dm-clone left suspended, or whose metadata is read-only or failed, reads
-  `ERROR` and moves the role the same way. A fault of the clone's source
+  primary's own (HL2), so its `err_epoch` stays set. Where nothing names
+  it — a gate holds the read's name off (the source not ready, the clone
+  meta group's or the destination raid0's row not OK), or its metadata is
+  read-only or failed — AR5 fails the primary over at its threshold, or
+  AR7 replaces it where there is no failover candidate; the new primary
+  creates the dm-clone over the metadata its clone meta group holds and
+  finishes the build (`cnagent.md` CN18). A dm-clone left suspended reads
+  `ERROR` the same way. Where its gates pass and the create, resume or
+  enable keeps failing, both channels name it (`cnagent.md` CN18, CN30),
+  every round re-sends, and the failover waits for missed rounds or the
+  operator's disable, as the item "While a leftover keeps every round
+  re-sending" says; AR7's replacement is unchanged. A fault of the clone's source
   does not itself move the role: its row reads `MISSING` (`cnagent.md` CN18), which sets no
   `err_epoch` (HL2), so neither AR5 nor AR7 acts on that row, and a fault
   in the primary's own path to the source reads the same; which of the

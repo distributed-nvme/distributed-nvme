@@ -1668,10 +1668,10 @@ func TestSpCntlrSettle(t *testing.T) {
 	t.Run("stack probed missing after a failed build", func(t *testing.T) {
 		// A td-less primary whose converge at the driven revision found its
 		// members not available: the SyncupCntlr reply reads its groups and
-		// pool ERROR, and a background read between that converge and the
-		// agent's retry probes the devices absent and reads them MISSING ""
-		// — clean, at the driven revision, and no proof of the build the
-		// retry still has to do (primaryShapeBuilt). The rounds answer from
+		// pool ERROR, and a background read after that converge, before the
+		// re-send that builds the stack, probes the devices absent and reads
+		// them MISSING "" — clean, at the driven revision, and no proof of
+		// the build a later converge still has to do (primaryShapeBuilt). The rounds answer from
 		// that read's observation and probe nothing themselves. A row the
 		// sp_level suppresses reads MISSING with the level's reason and holds
 		// nothing; the text "sp_level" alone, with no reason, holds.

@@ -1918,9 +1918,9 @@ func TestPrimaryShapeBuilt(t *testing.T) {
 		t.Errorf("a grow's zeroing group holds the settle")
 	}
 	// The two MISSING shapes: a td-less primary probed between a converge
-	// that left its members unavailable and the retry — groups, concats and
-	// pool absent, no ERROR row anywhere — and a primary whose sp_level
-	// suppresses its pools.
+	// that left its members unavailable and the converge that builds them —
+	// groups, concats and pool absent, no ERROR row anywhere — and a primary
+	// whose sp_level suppresses its pools.
 	unbuilt := &pb.CntlrInfo{
 		GrpIdToMdRaid:   map[uint64]*pb.ResInfo{1: missing(""), 2: missing("")},
 		SliceIdToMeta:   map[uint64]*pb.ResInfo{1: missing("")},

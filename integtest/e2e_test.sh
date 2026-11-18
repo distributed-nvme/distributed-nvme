@@ -13477,9 +13477,11 @@ COPY_MIGR_THROTTLE_DN=-1
 #   spawn rate that decides a build. It follows WAIT_PROVISION's size because
 #   the copy runs on the SAME CN and competes with the same work.
 # WAIT_SRC_CONNECT — how long the CN may take to bring the source connection
-#   up before "it never will" is the honest reading. The CN retries a failed
-#   source connect from its own registry (ensureClone (agent/cnagent/clone.go)
-#   calls startConnectRetry), so this must be several retries wide, not one.
+#   up before "it never will" is the honest reading. A failed source connect
+#   is tried again by the converge of a SyncupCntlr the worker re-sends
+#   once a check round names the source's endpoint (cnagent.md CN18, The
+#   clone names), every second round at most, so this must be several such
+#   rounds wide, not one.
 # WAIT_HYDRATE_STALL — how long a LIVE dm-clone's status line may stand still
 #   before the copy is called frozen. It is deliberately smaller than
 #   WAIT_HYDRATE: the stall is what routes to the fallback, and a stall
@@ -13760,9 +13762,9 @@ src_sp_gone() {
 # (EnsureSubsystem (agent/nvmet.go) links them under
 # <subsys>/allowed_hosts/<hostnqn>), so its presence is the kernel's own
 # answer. Waiting for it is what keeps the clone's first connect attempt from
-# being refused and pushed into the CN's retry registry — which would still
-# heal, but only after a retry interval this case would then have to budget
-# for.
+# being refused — which would still heal, but only after the rounds until the
+# re-send a check round's name of the source brings (cnagent.md CN18), which
+# this case would then have to budget for.
 #
 # One line, read-only, root-only: that is the shape allowed through
 # ssh_cn_ok directly. The _ok form is required — a `test -e` that is false
@@ -14220,18 +14222,18 @@ copy_src_bm_read() { # [<slice idx>]
 # EVERY CONVERGE PUTS THE MEMBER BACK, so before the drop no converge other
 # than a re-send may still be due, or it would put the member back under a
 # trace id that no re-send on a read's verdict carries and copy_check_drop
-# would fail a put-back that worked. Two can be due. (1) The SyncupCntlr of
-# the pool's latest revision: the cutover bumps it, and the worker holds
+# would fail a put-back that worked. Two are ruled out. (1) The SyncupCntlr
+# of the pool's latest revision: the cutover bumps it, and the worker holds
 # the cntlr half of that fan-out until the sides report it, for up to one
 # cntlr_interval (dnv-worker.md, RW14). So the group must read clean at an
 # applied revision no older than the pool's revision of now (grp_md_clean
-# says why that proves the converge at it has finished). (2) An attempt of
-# the primary's CN10 retry, which the cutover's converge registers when it
-# runs inside the gap, at 32 slices most often: the primary must run no
-# converge of its own for a whole retry interval (copy_drop_quiet). The
-# group is read clean before the drop, so a drop the race made is put back
-# first, and after it; then the member must read in sync with its failfast
-# flag, and the records must show the re-send (copy_check_drop).
+# says why that proves the converge at it has finished). (2) A converge the
+# agent starts by itself: the cn agent starts none (cnagent.md CN10), and the
+# primary must run no command under an id of its own for a few seconds all
+# the same (copy_drop_quiet). The group is read clean before the drop, so a
+# drop the race made is put back first, and after it; then the member must
+# read in sync with its failfast flag, and the records must show the re-send
+# (copy_check_drop).
 #
 # After the drop the wait reads the member on the primary itself before it
 # reads the group's row (copy_member_in_sync): `cntlr inspect` answers from
@@ -14255,7 +14257,7 @@ copy_forced_drop() { # <leg id> <grp id>
 		grp_md_clean "$PRIMARY_CNTLR_ID" "$2" "$rev"
 	COPY_QUIET_LAST=""
 	wait_until "$WAIT_PROVISION" \
-		"cn$PRIMARY_CN to run no converge of its own for a whole retry interval before the forced drop" \
+		"cn$PRIMARY_CN to run no converge of its own for a few seconds before the forced drop" \
 		copy_drop_quiet
 	mark=$(ssh_cn "$PRIMARY_CN" "wc -l < $(cn_log)") ||
 		die "cannot count the lines of $(cn_log) on cn$PRIMARY_CN"
@@ -14316,10 +14318,9 @@ copy_member_in_sync() { # <dm name>
 }
 
 # copy_drop_quiet is true when the primary's cn agent runs no `os command`
-# under a trace id it minted itself for one CnConnectRetryInterval
-# (common/constants.go) and a margin: no attempt of the CN10 retry, a
-# converge of its own, has then run for a whole interval, so that retry is
-# not registered (cnagent.md, CN10). The agent mints such an id as
+# under a trace id it minted itself for a window of a few seconds: no
+# converge of its own has then run, as none should (cnagent.md, CN10). The
+# agent mints such an id as
 # common.NewTraceId's bare hex output, where the worker's ids carry its
 # seed's prefix and a dash (dnv-worker.md, RW10) and the case's own is
 # $TRACE (grpc.md, T4); the gateway mints a bare one too, but only for a
@@ -14333,10 +14334,10 @@ copy_member_in_sync() { # <dm name>
 # in it is logged when the commands change.
 copy_drop_quiet() {
 	local mark lines cmds
-	# common.CnConnectRetryInterval, plus a margin for an attempt that waits
-	# for the cntlr's lock behind a background read of the cntlr (dnagent.md
-	# SH29; cnagent.md, CN1).
-	local window=$((5 + 3))
+	# Eight seconds, with room for a converge that waits for the cntlr's lock
+	# behind a background read of the cntlr (dnagent.md SH29; cnagent.md,
+	# CN1), so that a converge the agent ran by itself would show in it.
+	local window=8
 	mark=$(ssh_cn "$PRIMARY_CN" "wc -l < $(cn_log)") || return 1
 	case "$mark" in
 	'' | *[!0-9]*) return 1 ;;
@@ -17419,9 +17420,11 @@ copy_reuse() {
 # after which udev reads the dm-clone — its create, or the resume of the
 # namespace device put on it — waits for udev's reads, which go through the
 # slowed source, so it can outlast the agent's command timeout and be killed
-# after its ioctl ran; the agent's retry then finishes the build (cnagent.md
-# CN16, CN18). That is why every count below is read only once the dm-clone
-# serves, and why such a kill lengthens the `clone wait:` by the retry.
+# after its ioctl ran; the converge of the SyncupCntlr the worker re-sends on
+# the next round, which the converge's own name of the failed step brings,
+# then finishes the build (cnagent.md CN16, CN18, CN30). That is why every
+# count below is read only once the dm-clone serves, and why such a kill
+# lengthens the `clone wait:` by that round and the re-sent converge.
 #
 # THE ORDER IS A LIVE MIGRATION'S (architecture.md, Transfer + clone =
 # cross-SP live migration): the destination's namespace exists, suspended,
@@ -18234,14 +18237,15 @@ REACT_FS_REFUSAL=""
 # source is dead, the array can read write-pending and active between its
 # reads of broken, which cnagent.md CN12 counts as running, for as long as
 # the half-copied member stays in the array (cnagent_integtest.md, Lab
-# facts); a converge of the primary's in that swing leaves the mark waiting
-# and registers the CN10 retry, whose converge runs the forced start once it
-# reads the array not running (cnagent.md CN12). The hold spans several of
-# the primary's check rounds, as a cntlr's rounds come at cntlr_interval,
-# and makes it likely that the mark's own converge runs the forced start;
-# the step's proof reads the agent's log from a line, not a trace id, so a
-# start the retry runs passes it too. A count of this suite's choosing, not
-# a constant of the tree.
+# facts); a converge of the primary's in that swing leaves the mark waiting,
+# and the forced start then runs in the converge of the SyncupCntlr the
+# worker re-sends once a read finds the array not running and names the
+# forced start (cnagent.md CN12, CN30). The hold spans several of the
+# primary's check rounds, as a cntlr's rounds come at cntlr_interval, and
+# makes it likely that the mark's own converge runs the forced start; the
+# step's proof reads the agent's log from a line, not a trace id, so a start
+# a re-send runs passes it too. A count of this suite's choosing, not a
+# constant of the tree.
 REACT_FS_HOLD_ROUNDS=5
 REACT_FS_DOWN_SINCE=-1
 
@@ -22469,9 +22473,10 @@ react_dead_grp() {
 # that leg's superblock as md last wrote it: a stop with the leg back would
 # write md's record of the regions its copy could not read into it, a
 # bad-block log the start would bring into the restored array (cnagent.md,
-# Known limits). Its forced start then waits for the leg, and the CN10
-# retry that wait registers starts the array once the leg's disk node is
-# back: it zeroes the superblock of the other leg, assembles the array from
+# Known limits). Its forced start then waits for the leg, and once the leg's
+# disk node is back, the converge of the SyncupCntlr the worker re-sends when
+# a read names the forced start (cnagent.md CN30) starts the array: it
+# zeroes the superblock of the other leg, assembles the array from
 # the named leg alone and adds the zeroed leg back as a new member, which
 # md copies whole (cnagent.md CN12); its cn agent's log of its commands shows
 # them in that order, and neither member then holds a bad block
@@ -22583,10 +22588,10 @@ react_fs_data_leg() {
 	assert_eq "$(react_fs_mark_of "$SP_JSON")" "$data@$REACT_FS_MARK_REV" \
 		"group $REACT_GRP_ID's forced-start mark while leg $data is dead"
 
-	# The data leg's disk node comes back: the CN10 retry the forced start's
-	# wait registered brings the converge that starts the array from it
-	# (cnagent.md CN12); then the worker's clear, and the group whole on
-	# both legs at the clear's revision or later.
+	# The data leg's disk node comes back: a read then names the forced
+	# start, and the worker's re-send brings the converge that starts the
+	# array from it (cnagent.md CN12, CN30); then the worker's clear, and the
+	# group whole on both legs at the clear's revision or later.
 	react_return_dn "$REACT_FS_DATA_VM" "$REACT_FS_DATA_INST"
 	sp_refresh
 	pos=$(react_fs_pos "$data")
