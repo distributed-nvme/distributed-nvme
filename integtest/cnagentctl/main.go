@@ -271,10 +271,11 @@ func cntlrPointerOf(sp, cntlr *hexUint) *pb.CntlrPointer {
 
 // cmdGetCnSize doubles as the agent liveness probe: GetCnSize takes no lock,
 // so --wait retries it until the freshly started agent answers
-// (cnagent_integtest.md, Cases, the setup paragraph). The port opens before
-// the startup pass (dnagent.md SH33), so --wait then also waits, within the
-// same deadline, until GetCnInfo no longer answers that the agent is
-// starting: a case that goes on reads the agent as its pass left it.
+// (cnagent_integtest.md, Cases, the setup paragraph). The gRPC listener
+// opens before the startup pass (dnagent.md SH33), so --wait then also
+// waits, within the same deadline, until GetCnInfo no longer answers that
+// the agent is starting: a case that goes on reads the agent as its pass
+// left it.
 func cmdGetCnSize(args []string) {
 	var g globals
 	fs := newFlagSet("get-cn-size", &g)

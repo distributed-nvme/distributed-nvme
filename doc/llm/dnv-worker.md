@@ -3252,41 +3252,42 @@ pick of a stuck group's side, AR8's case 2 and the side clock of a worker's
 repair's new leg. Past the hold — at or past it, with a hold of zero, which
 turns the hold off, with no start time or no answer time to measure by, or
 with an answer before the series' first start, as when the node's clock
-stepped back — the round is a missed round, as one with no reply is
-(`check round failed`, its error naming the hold), and a series that runs
-goes on. The first round the agent answers otherwise ends the start, within
-the hold or past it, and with it the pause (HL7): the startup reconcile
-held every read off, so the observations the agent answers from are the
-reconcile's, and the first round after the pause gives no verdict; the read
-it starts brings the next round's, which closes the series when the loop
-judges it. A hold ends at the round after the one that ends the start,
-whatever verdict that round gives, unless the agent answers it starting
-again, so it outlasts the start by one round; it ends sooner at any verdict
-on its object, a round's, a missed round's or a `Syncup*` reply's, and at a
-move to another endpoint (RW13), an idle or a refused conf (RW9) of its
-loop, which also forget the series. AR10's memo keeps a hold across a
-restart of the child that drives the object, until the new child's first
-verdict on it or the end of a start the new child sees. A starting reply
-keeps the health epoch that the missed rounds before the agent's gRPC
-listener opened may have set: a restart does not clear a fault, and the
-first clean round does. The loop of a DN or a CN logs the starting answer
-that begins a series, each round that ends a start, and a round whose reply
-carries another agent start time than the loop's rounds last carried,
-starting or not, as the agent's restart; a move forgets the start time last
-carried. An sp child logs none of them, so a controller node's restart
-makes one record of each, not one per cntlr (Log records). Reason: a
-restart of a controller node's agent converges every cntlr before it can
-read any, at many pools for longer than the primary threshold, and failing
-every primary over for it moves hosts to another controller node for no
-fault of the data path; the hold bounds that, by the node's clock, across a
-worker restart or a handoff, since the start time travels in every reply. A
-series is measured from its first start, and stays open past the end of a
-start until a round is judged, so that an agent that never comes to serve —
-its startup pass runs on, or dies and starts again, or ends each time and
-the agent dies before a round is judged — is judged past the hold as one
-that does not answer; a series lives in its loop, so each new loop during
-such a run — a worker restart, a handoff, a restarted child — and each idle
-or refused conf (RW9) can hold it up to one more start hold (Known limits).
+stepped back — the round is a missed round, as one with no reply is (`check
+round failed`, its error naming the hold), and a series that runs goes on.
+The first round the agent answers otherwise ends the start, within the hold
+or past it, and with it the pause (HL7): the startup reconcile held every
+read off, so the observations the agent answers from are the reconcile's,
+and the first round after the pause gives no verdict; the read it starts
+brings the next round's, which closes the series when the loop judges it. A
+hold ends at the round after the one that ends the start, whatever verdict
+that round gives, unless the agent answers it starting again, so it
+outlasts the start by one round; it ends sooner at any verdict on its
+object, a round's, a missed round's or a `Syncup*` reply's, and at a move
+to another endpoint (RW13), an idle or a refused conf (RW9) of its loop,
+which also forget the series. AR10's memo keeps a hold across a restart of
+the child that drives the object, until the new child's first verdict on it
+or the end of a start the new child sees. A starting reply keeps the health
+epoch that the missed rounds before the agent's gRPC listener opened may
+have set: a restart does not clear a fault, and the first clean round does.
+The loop of a DN or a CN logs the starting answer that begins a series,
+each round that ends a start, and a round whose reply carries another agent
+start time than the loop's rounds last carried, starting or not, as the
+agent's restart; a move forgets the start time last carried. An sp child
+logs none of them, so a controller node's restart makes one record of each,
+not one per cntlr (Log records). Reason: a restart of a controller node's
+agent converges every cntlr before it can read any, at many pools for
+longer than the primary threshold, and failing every primary over for it
+moves hosts to another controller node for no fault of the data path; the
+hold bounds that, by the node's clock, across a worker restart or a
+handoff, since every round's reply carries the agent's start time
+(`dnagent.md` SH33). A series is measured from its first start, and stays
+open past the end of a start until a round is judged, so that an agent that
+never comes to serve — its startup pass runs on, or dies and starts again,
+or ends each time and the agent dies before a round is judged — is judged
+past the hold as one that does not answer; a series lives in its loop, so
+each new loop during such a run — a worker restart, a handoff, a restarted
+child — and each idle or refused conf (RW9) can hold it up to one more
+start hold (Known limits).
 
 HL9. **A primary that refuses its syncups.** When the agent refuses a
 `SyncupCntlr` with `ReplyCodeInvalidConf` or `ReplyCodeSaveFailed` — the
@@ -3419,50 +3420,56 @@ a new child reads and pushes again (BM7).
 
 BM6. **Failure.** A push that fails — a gRPC error or timeout, a clone
 chunk whose value can no longer be read from etcd, a migration piece its
-child no longer holds, or a non-zero
-`agent_reply.code` (`ReplyCodeUnknownObject`: the introducing `Syncup*` has
-not been applied yet, or the address is out of range for the object) — is
-logged as `bitmap push failed` (Log records) and **ends that plan**; a
-migration piece is also refused `ReplyCodeSaveFailed` when its agent
-could not remove the chunks at its index and above, or could not save
-it (`dnagent.md` DN15), and its plan pushes no piece above it. The
-remaining parts are not sent, nothing is re-armed and no flag is raised
-anywhere. The next accepted `Syncup*` reply for the object re-plans the
-diff (BM2) from the agent's OWN acknowledged set, together with, for a
-migration, every piece the memo of BM5 does not list; the pushes after a
-migration's read and on its offers are planned without the agent's set
-(BM7). For a clone, a plan rebuilt from a remembered failure would be a
-plan built from the worker's memory instead of from the agent's state. A
-migration's reply and offer plans read the memo, the worker's record of
-the agent's code-zero answers (BM5), because no `SyncupSide` need follow
-the read and the agent's set cannot tell a piece of this read from a
-chunk an older build left at the same index (BM2, BM7); a piece the memo does not list is pushed again, at worst one
-the agent holds byte for byte and takes without a save (`dnagent.md`
-DN15).
-The rest of the plan goes with the failed part because the parts are
-ordered (BM3) and a migration's pieces are interpretable only in sequence.
-A migration's pieces are the one exception to waiting for a `Syncup*`:
-the offers of BM7 plan them again, as no `SyncupSide` need follow the
-read.
+child no longer holds, or a non-zero `agent_reply.code`
+(`ReplyCodeUnknownObject`: the introducing `Syncup*` has not been applied
+yet, or the address is out of range for the object; `ReplyCodeStarting`:
+the agent's startup reconcile still runs, `dnagent.md` SH33) — is logged as
+`bitmap push failed` (Log records) and **ends that plan**; a migration
+piece is also refused `ReplyCodeSaveFailed` when its agent could not remove
+the chunks at its index and above, or could not save it (`dnagent.md`
+DN15), and its plan pushes no piece above it. The remaining parts are not
+sent, nothing is re-armed and no flag is raised anywhere. The next accepted
+`Syncup*` reply for the object re-plans the diff (BM2) from the agent's OWN
+acknowledged set, together with, for a migration, every piece the memo of
+BM5 does not list; the pushes after a migration's read and on its offers
+are planned without the agent's set (BM7). For a clone, a plan rebuilt from
+a remembered failure would be a plan built from the worker's memory instead
+of from the agent's state. A migration's reply and offer plans read the
+memo, the worker's record of the agent's code-zero answers (BM5), because
+no `SyncupSide` need follow the read and the agent's set cannot tell a
+piece of this read from a chunk an older build left at the same index (BM2,
+BM7); a piece the memo does not list is pushed again, at worst one the
+agent holds byte for byte and takes without a save (`dnagent.md` DN15). The
+rest of the plan goes with the failed part because the parts are ordered
+(BM3) and a migration's pieces are interpretable only in sequence. A
+migration's pieces are the one exception to waiting for a `Syncup*`: the
+offers of BM7 plan them again, as no `SyncupSide` need follow the read.
 
 There is no push-specific timer and no push-driven re-sync. When the
 refusal was the agent's own, its `Check*` reply says so too — the same
 rejection code, or a stored revision behind the desired one — and RW4 step
 5 issues the `Syncup*` whose accepted reply re-plans within the round. A
-migration piece refused because its agent could not remove the chunks at
-its index and above, or could not save it (`dnagent.md` DN15), has no
-such echo; it waits for the next offer (BM7), or for an accepted
-`SyncupSide` reply that comes first (BM2). When
-the push failed on the wire while the agent is healthy and at the desired
-revision, no re-sync is due and a clone's chunk waits for the next accepted
-`Syncup*` from any cause (a revision bump or a leftover; a handoff sends
-none, since a new child starts with a round, which sends a syncup only on a
-code or a revision, RW4), and so do the parts of a plan that a worker's
-failure cut short; a migration's piece waits for the next offer instead,
-or for an accepted `SyncupSide` reply that comes first (BM2, BM7). That
-wait is accepted because the skip bitmap is an optimization: a chunk or a
-piece that has not arrived leaves its regions hydrated instead of discarded (`architecture.md`, Bitmap push protocol),
-which costs copying, never correctness.
+starting refusal is the exception: no round sends a `Syncup*` while the
+agent answers that it is starting (HL8), and the first round after the
+start answers from the startup reconcile's observation. Unless that
+observation's code or revision calls for a re-sync, a clone's chunk then
+waits as one that failed on the wire does (below), and a migration's piece
+waits for the next offer (BM7), or for an accepted `SyncupSide` reply that
+comes first (BM2). A migration piece refused because its agent could not
+remove the chunks at its index and above, or could not save it
+(`dnagent.md` DN15), has no such echo; it waits for the next offer (BM7),
+or for an accepted `SyncupSide` reply that comes first (BM2). When the push
+failed on the wire while the agent is healthy and at the desired revision,
+no re-sync is due and a clone's chunk waits for the next accepted `Syncup*`
+from any cause (a revision bump or a leftover; a handoff sends none, since
+a new child starts with a round, which sends a syncup only on a code or a
+revision, RW4), and so do the parts of a plan that a worker's failure cut
+short; a migration's piece waits for the next offer instead, or for an
+accepted `SyncupSide` reply that comes first (BM2, BM7). That wait is
+accepted because the skip bitmap is an optimization: a chunk or a piece
+that has not arrived leaves its regions hydrated instead of discarded
+(`architecture.md`, Bitmap push protocol), which costs copying, never
+correctness.
 
 BM7. **The migration bitmap read.** The side child of a migration's
 destination reads the leg's bitmap itself; no caller hands it in. The

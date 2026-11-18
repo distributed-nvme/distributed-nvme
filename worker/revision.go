@@ -24,8 +24,9 @@ var errRoundTimeout = errors.New("round timeout")
 var errStaleObservation = errors.New("observation too old")
 
 // errStartingPastHold is HL8's cause of a failed round: a reply that says
-// the agent is starting, whose start lies further back than the cluster's
-// start hold, or that carries no start time to judge it by.
+// the agent is starting at or past the cluster's start hold, counted from
+// the first start of the start series, with a hold of zero, with no start
+// or answer time to measure by, or with an answer before the series' start.
 var errStartingPastHold = errors.New("agent starting past its hold")
 
 // errRoundAborted ends a round that a desired change overtook (RW6). The
@@ -213,8 +214,8 @@ type objDriver interface {
 	// reaches it (startingRound).
 	starting(ctx context.Context)
 	// startEnded ends the hold starting began: the round after the one that
-	// ended the agent's start, a move to another endpoint and an idle reach
-	// it (HL8).
+	// ended the agent's start, a move to another endpoint, an idle and a
+	// refused conf reach it (HL8).
 	startEnded(ctx context.Context)
 }
 
@@ -710,8 +711,8 @@ func (w *revWorker) seeAgentStart(ctx context.Context, reply *replyState) {
 }
 
 // endStart forgets a start series and ends its hold: on a move to another
-// endpoint, whose agent is another, and on an idle, after which no round
-// has asked the agent anything (HL7).
+// endpoint, whose agent is another, and on an idle or a refused conf
+// (quiesce), after which no round has asked the agent anything (HL7).
 func (w *revWorker) endStart(ctx context.Context) {
 	if w.starting || w.endHold {
 		w.driver.startEnded(ctx)

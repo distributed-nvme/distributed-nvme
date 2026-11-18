@@ -4187,7 +4187,7 @@ func (d *sideDriver) send(ctx context.Context, rep spReport) {
 
 // starting is HL8's starting round: no verdict on the side, and AR10's memo
 // holds the side from the side clocks of AR6 and AR8 until a verdict on it
-// or the round after the one that ends the agent's start (startEnded).
+// or the end of the hold (startEnded).
 func (d *sideDriver) starting(ctx context.Context) {
 	if d.noteStarting != nil {
 		d.noteStarting()
@@ -4903,8 +4903,7 @@ func (d *cntlrDriver) send(ctx context.Context, rep spReport) {
 
 // starting is HL8's starting round: no verdict on the cntlr, and AR10's
 // memo ends its run of unhealthy rounds and holds its failover and its
-// replacement until a verdict on it or the round after the one that ends
-// the agent's start (startEnded).
+// replacement until a verdict on it or the end of the hold (startEnded).
 func (d *cntlrDriver) starting(ctx context.Context) {
 	d.memo.noteStarting(d.cntlrId)
 }

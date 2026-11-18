@@ -314,10 +314,11 @@ func sidePointerOf(sp, leg, side *hexUint) *pb.SidePointer {
 
 // cmdGetDnSize doubles as the agent liveness probe: GetDnSize takes no lock,
 // so --wait retries it until the freshly started agent answers
-// (dnagent_integtest.md, Cases, the setup paragraph). The port opens before
-// the startup pass (dnagent.md SH33), so --wait then also waits, within the
-// same deadline, until GetDnInfo no longer answers that the agent is
-// starting: a case that goes on reads the agent as its pass left it.
+// (dnagent_integtest.md, Cases, the setup paragraph). The gRPC listener
+// opens before the startup pass (dnagent.md SH33), so --wait then also
+// waits, within the same deadline, until GetDnInfo no longer answers that
+// the agent is starting: a case that goes on reads the agent as its pass
+// left it.
 func cmdGetDnSize(args []string) {
 	var g globals
 	fs := newFlagSet("get-dn-size", &g)

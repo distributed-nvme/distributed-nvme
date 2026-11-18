@@ -21063,19 +21063,18 @@ react_grow() {
 # A planned restart of the primary's cn agent (dnagent.md SH33; dnv-worker.md
 # HL8). The agent is stopped by SIGTERM, as an operator stops it, and exits
 # within its stop grace (common.AgentStopGrace); it is started again with the
-# same flags. It opens its port before its startup pass and answers every
-# round `starting` until the pass ends; the worker holds a starting primary
-# and a starting cntlr, so neither AR5 nor AR7 follows, under the reacting
-# set's 5-second primary threshold. host0 keeps its paths: the kernel objects
-# serve through the restart. The step judges the worker's records after its
-# own mark, and waits past the larger of the two thresholds plus a few passes
-# after the agent's own `agent started`: the rounds the downtime misses start
-# an err_epoch, and the second round answered after the start clears it (the
-# first gives no verdict), or the first when no round found the agent
+# same flags. It opens its gRPC listener before its startup pass and answers
+# every round `starting` until the pass ends; the worker holds a starting
+# primary and a starting cntlr, so neither AR5 nor AR7 follows, under the
+# reacting set's 5-second primary threshold. host0 keeps its paths: the kernel
+# objects serve through the restart. The step judges the worker's records after
+# its own mark, and waits past the larger of the two thresholds plus a few
+# passes after the agent's own `agent started`: the rounds the downtime misses
+# start an err_epoch, and the second round answered after the start clears it
+# (the first gives no verdict), or the first when no round found the agent
 # starting. A pass shorter than two rounds can end between them, so the
-# worker's `agent starting` record is asserted only for a pass that lasted
-# two cn intervals or more; a shorter one tests no hold, and the step logs
-# so.
+# worker's `agent starting` record is asserted only for a pass that lasted two
+# cn intervals or more; a shorter one tests no hold, and the step logs so.
 
 REACT_RESTART_CN=-1
 REACT_RESTART_MARK=0

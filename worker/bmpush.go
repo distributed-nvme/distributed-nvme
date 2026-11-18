@@ -502,11 +502,12 @@ func (p *bmPusher) pushOne(
 	slog.InfoContext(ctx, msgBitmapPushed, attrs...)
 	if code != 0 {
 		// The agent does not know the object, the chunk's address is out of
-		// range for it, or it could not remove the chunks at a migration
-		// piece's index and above or save the piece (dnagent.md DN15). The
-		// "bitmap pushed" record above (dnv-worker.md, Log records) carries
-		// only the code, so the agent's own explanation is logged next to it
-		// and the plan ends.
+		// range for it, its startup pass still runs (dnagent.md SH33), or
+		// it could not remove the chunks at a migration piece's index and
+		// above or save the piece (dnagent.md DN15). The "bitmap pushed"
+		// record above (dnv-worker.md, Log records) carries only the code,
+		// so the agent's own explanation is logged next to it and the plan
+		// ends.
 		slog.InfoContext(ctx, msgBitmapPushFailed, append(
 			p.attrs(plan.resId, chunk.SliceIdx, chunk.Idx),
 			slog.Uint64("code", uint64(code)),

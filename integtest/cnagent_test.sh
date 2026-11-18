@@ -8459,8 +8459,8 @@ case_clone_xfer() {
 	helper 2 "wipe_cn $(hex16 "${CNID[2]}")"
 	start_cn_agent 2
 	# get-cn-size --wait waits for the startup pass to end, not only for the
-	# port, which opens first (dnagent.md SH33), so the wait-up budget is
-	# the rebuild's: the legs and the source connect again, and
+	# gRPC listener, which opens first (dnagent.md SH33), so the wait-up
+	# budget is the rebuild's: the legs and the source connect again, and
 	# the groups, the pool and the dm-clone are built and the chunk is
 	# applied again before it answers, unless a step fails and the pass
 	# leaves the rest to a later converge (cnagent.md CN18).
@@ -9034,8 +9034,8 @@ case_restart() {
 		start_cn_agent "$idx"
 	done
 	for idx in 1 2; do
-		# --wait waits for the startup pass to end, not only for the port,
-		# which opens first (dnagent.md SH33).
+		# --wait waits for the startup pass to end, not only for the gRPC
+		# listener, which opens first (dnagent.md SH33).
 		out=$(cnctl "$idx" get-cn-size --wait 60)
 		assert_eq "$(jq_of "$out" .size)" "$CN_CAPACITY" "restart cn$idx size"
 	done

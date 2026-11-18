@@ -1264,7 +1264,7 @@ this document relies on:
 
 | message | key | notes |
 |---|---|---|
-| `ClusterConf` | {p} cluster_conf {cluster_name} | the only **name**-keyed message; holds `creation_epoch` (the second `cluster_id` input, cluster_id derivation) and the cluster-wide QoS, bdev, bin, alloc, health-check and md check confs |
+| `ClusterConf` | {p} cluster_conf {cluster_name} | the only **name**-keyed message; holds `creation_epoch` (the second `cluster_id` input, cluster_id derivation) and the cluster-wide QoS, bdev, bin, alloc, health-check, md check and start hold confs |
 | `DnGlobal` | {p} dn_global {cluster_id} | `next_id`, `shard_bucket` |
 | `CnGlobal` | {p} cn_global {cluster_id} | idem |
 | `SpGlobal` | {p} sp_global {cluster_id} | idem |
@@ -5161,28 +5161,28 @@ device is there, the next enumeration finds it.
   leftover that has since gone stops being reported once a read or a
   converge finds it gone, and one that is still there keeps being reported
   without anything having remembered it.
-* **A leftover travels as `ReplyCodeLeftover`.** It is the one
-  per-resource outcome that cannot ride in the `*Info` rows of Live-state
-  reporting: those rows are keyed by the ids of *wanted* objects, and a
-  leftover is by definition something nothing wants. The code means
-  **accepted with residue** — the desired state is stored and the converge
-  built what it could — and is not a rejection: the worker reads the reply's
-  rows exactly as for code zero and re-issues the object's `Syncup*` on a
-  round whose reply carries it, save a round whose observation is too old,
-  as Check streams says (`dnv-worker.md` RW4, RW5), and nothing on the
-  agent re-drives a sweep because something is left (`dnagent.md` DN17;
-  `cnagent.md` CN10, CN30). The startup case
-  needs no recovery step, because the startup reconcile stores an
-  observation of each object it converges, and the first `Check*` after a
-  restart answers from it with whatever that reconcile's sweep left on the
-  node. `details` names the
-  leftovers, at most `maxLeftoverNames` of them, and reports an
-  enumeration that did not answer the same way — an answer the agent
-  cannot trust cannot prove the node clean — as it does each role's
-  conditions that only a `Syncup*` cures (`dnagent.md` SH31, DN16;
-  `cnagent.md` CN30). The agent log carries the full list (`log.md`, Leftovers), so a
-  lingering leftover is visible on every pass that finds it rather than
-  once.
+* **A leftover travels as `ReplyCodeLeftover`.** It is the one per-resource
+  outcome that cannot ride in the `*Info` rows of Live-state reporting:
+  those rows are keyed by the ids of *wanted* objects, and a leftover is by
+  definition something nothing wants. The code means **accepted with
+  residue** — the desired state is stored and the converge built what it
+  could — and is not a rejection: the worker reads the reply's rows exactly
+  as for code zero and re-issues the object's `Syncup*` on a round whose
+  reply carries it, save a round whose observation is too old, as Check
+  streams says (`dnv-worker.md` RW4, RW5), and nothing on the agent
+  re-drives a sweep because something is left (`dnagent.md` DN17;
+  `cnagent.md` CN10, CN30). The startup case needs no recovery step,
+  because the startup reconcile stores an observation of each object it
+  converges, and the first `Check*` that finds the agent's start ended
+  answers from it, with whatever that reconcile's sweep left on the node,
+  unless a later converge has stored another; a round during the reconcile
+  answers that the agent is starting (`dnagent.md` SH33). `details` names
+  the leftovers, at most `maxLeftoverNames` of them, and reports an
+  enumeration that did not answer the same way — an answer the agent cannot
+  trust cannot prove the node clean — as it does each role's conditions
+  that only a `Syncup*` cures (`dnagent.md` SH31, DN16; `cnagent.md` CN30).
+  The agent log carries the full list (`log.md`, Leftovers), so a lingering
+  leftover is visible on every pass that finds it rather than once.
 
 ## Workers
 

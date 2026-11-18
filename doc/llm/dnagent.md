@@ -1671,27 +1671,28 @@ this one stopped before asking (the probe above hands `DiskMeta` no
 identity). There is no compatibility path: a cluster whose stored conf
 carries zeros is refused loudly everywhere and has to be recreated.
 
-A `dn-*` file that does not load — its read fails or it does not decode — is
-skipped, and while one is unread, so is every `side-*` file and `migr-bm-*`
-chunk whose DN is not loaded: a file that did not load names no DN (SH6),
-so any of those sides may be one its list still names, and a list that
-could not be read proves nothing about which sides left it. Skipped is
+A `dn-*` file that does not load — its read fails or it does not decode —
+is skipped, and while one is unread, so is every `side-*` file and
+`migr-bm-*` chunk whose DN is not loaded: a file that did not load names no
+DN (SH6), so any of those sides may be one its list still names, and a list
+that could not be read proves nothing about which sides left it. Skipped is
 neither loaded nor deleted: none of them is converged, swept or applied,
 and every one of those files stays on disk exactly as the restart found it
 — loaded, each side would reach the pointer-absent branch below, which
 would delete its request and its chunks for want of a list that could not
-be read. Nor is anything hidden: with none of it in memory, the DN and each
-of those sides answer their Check rounds `ReplyCodeUnknownObject` (SH25),
-and the worker re-sends each `Syncup*` (`dnv-worker.md` RW4). The
-`SyncupDn` rewrites the file, and from there each skipped side the list
-still names is where a lost `--local-store` leaves one — known by its
-pointer alone (DN6) — until its `SyncupSide`, which DN8 admits only after
-that `SyncupDn`, converges from the request it carries and rewrites its
-file; that reply's `bm_info` acknowledges no chunk, so the worker pushes
-each chunk of the migration again (`dnv-worker.md` BM2; DN15). A skipped side the re-sent list
-no longer names is in no list and not loaded, so that DN's node-level sweep
-removes its resources by name (DN6); its files wait for a later restart,
-whose pass finds its pointer absent and drops them (SH7).
+be read. Nor is anything hidden: with none of it in memory, once the agent
+has started, the DN and each of those sides answer their Check rounds
+`ReplyCodeUnknownObject` (SH25), and the worker re-sends each `Syncup*`
+(`dnv-worker.md` RW4). The `SyncupDn` rewrites the file, and from there
+each skipped side the list still names is where a lost `--local-store`
+leaves one — known by its pointer alone (DN6) — until its `SyncupSide`,
+which DN8 admits only after that `SyncupDn`, converges from the request it
+carries and rewrites its file; that reply's `bm_info` acknowledges no
+chunk, so the worker pushes each chunk of the migration again
+(`dnv-worker.md` BM2; DN15). A skipped side the re-sent list no longer
+names is in no list and not loaded, so that DN's node-level sweep removes
+its resources by name (DN6); its files wait for a later restart, whose pass
+finds its pointer absent and drops them (SH7).
 
 The order over the rest of the store is: the orphan `migr-bm-*` chunks are
 **deleted** as the store is loaded, before any DN converges — a chunk not
@@ -1736,7 +1737,9 @@ while the agent answers that it is starting (SH33). Outside it, a side's
 drop runs under `SyncupDn`'s node write lock, and DN13's deletions and the
 sweep's inside a converge of the side — a `SyncupSide`'s or the DN12 fence
 timer's — and a push's removal under the node read lock and the side's
-object lock (DN1).  ### `GetDnSize`
+object lock (DN1).
+
+### `GetDnSize`
 
 DN3. Read the byte size of the `--disk` device (SH17); reply the size
 **minus `DnDataOffset`** — the byte size of the [D13] data area, which is
@@ -3575,10 +3578,12 @@ DN16. Each answers from the object's latest observation (SH28) and reads
 nothing of the node: `agent_reply` is the observation's code, `revision`
 its revision and the info its rows, beside the reply's stamp; it takes no
 lock of the SH10 to SH13 hierarchy and starts no read. An unknown DN or
-side pointer — one this process holds no request for, as when none was
-ever accepted, or when the startup reload could not load or skipped its
-file (DN2) and none has been accepted since — ⇒ `ReplyCodeUnknownObject`
-with `revision` zero and no observation time (SH25).
+side pointer — one this process holds no request for, as when none was ever
+accepted, or when the startup reload could not load or skipped its file
+(DN2) and none has been accepted since — ⇒ `ReplyCodeUnknownObject` with
+`revision` zero and no observation time (SH25). While the agent starts,
+every info read, of a known object or not, answers `ReplyCodeStarting` with
+no observation instead (SH33).
 
 The DN18 probes and the read-only **verdict** run in the object's
 background read (SH29), under the DN1 locks, and the read stores both. For a known
@@ -3739,30 +3744,30 @@ the write holds, and a probe that holds clears the store's second state
 
 DN17. Instantiate the SH24 to SH26 loop: a round answers from the object's
 latest observation as the corresponding `Get*Info` does (DN16), and starts
-the object's background read when SH29 allows one; the read runs the probes
-of Probing and error capture and the read-only verdict under the DN1 locks.
-That is what
-makes the retry worker-driven: while leftovers exist, a read's verdict and
-a converge's sweep both name them, so the rounds reply
-`ReplyCodeLeftover`, the worker re-issues the `Syncup*` that owns them
-(`dnv-worker.md` RW4), and the sweep inside it tries again — including
-after a restart, where the observations the startup reconcile stores
-(SH28) report what the startup sweep could not remove. While the node's
-store disk refuses writes, the re-issued `Syncup*` is refused for its
-failed save before its converge, so it runs no sweep (SH5), and no
-syncup re-drives the leftover until a save holds again; meanwhile only a
-converge no syncup brings, a background converge attempt (SH11) or a
-restart's reconcile (DN2), can sweep it (Known limits). The conditions
-only a read's verdict names re-drive on the rounds that answer a read's
-observation (DN16, SH31). While a leftover keeps every round re-sending, each
-re-sent `Syncup*` cancels the read that the round which brought it started,
-so a read of the object ends only where it beats the re-send, save while
-the store's latest save failed, when a re-send cancels no read (SH30); what
-that does to the worker's runs of rounds in a row is the worker's
-(`dnv-worker.md` RW23; `dnv-worker.md`, Known limits). No agent-side loop
-exists for leftovers, because the one the worker already runs is enough;
-DN12's fence timer sweeps only as part of the converge it runs for a reason
-of its own.
+the object's background read when SH29 allows one; while the agent starts,
+every round answers `ReplyCodeStarting` with no observation and starts no
+read (SH33). The read runs the probes of Probing and error capture and the
+read-only verdict under the DN1 locks. That is what makes the retry
+worker-driven: while leftovers exist, a read's verdict and a converge's
+sweep both name them, so the rounds reply `ReplyCodeLeftover`, the worker
+re-issues the `Syncup*` that owns them (`dnv-worker.md` RW4), and the sweep
+inside it tries again — including after a restart, where the observations
+the startup reconcile stores (SH28) report what the startup sweep could not
+remove. While the node's store disk refuses writes, the re-issued `Syncup*`
+is refused for its failed save before its converge, so it runs no sweep
+(SH5), and no syncup re-drives the leftover until a save holds again;
+meanwhile only a converge no syncup brings, a background converge attempt
+(SH11) or a restart's reconcile (DN2), can sweep it (Known limits). The
+conditions only a read's verdict names re-drive on the rounds that answer a
+read's observation (DN16, SH31). While a leftover keeps every round
+re-sending, each re-sent `Syncup*` cancels the read that the round which
+brought it started, so a read of the object ends only where it beats the
+re-send, save while the store's latest save failed, when a re-send cancels
+no read (SH30); what that does to the worker's runs of rounds in a row is
+the worker's (`dnv-worker.md` RW23; `dnv-worker.md`, Known limits). No
+agent-side loop exists for leftovers, because the one the worker already
+runs is enough; DN12's fence timer sweeps only as part of the converge it
+runs for a reason of its own.
 
 ### Probing and error capture — `probe.go`
 

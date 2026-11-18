@@ -1189,8 +1189,9 @@ type verdictMemo struct {
 	sides map[sideKey]bool
 	// starting holds the cntlrs whose latest round answered that their
 	// agent is starting, within the start hold (HL8): AR5 fails none of them
-	// over and AR7 replaces none. A round that judges the cntlr, and any
-	// verdict on it, drops it.
+	// over and AR7 replaces none. Any verdict on it, a round's, a missed
+	// round's or a Syncup*'s, and the end of the hold (noteStartEnded) drop
+	// it.
 	starting map[uint64]bool
 	// refusing holds the cntlrs whose agent refuses their driven revision's
 	// SyncupCntlr with an invalid conf or a failed save (HL9): AR5 does not
@@ -1198,7 +1199,8 @@ type verdictMemo struct {
 	refusing map[uint64]bool
 	// sidesStarting holds the sides whose latest round answered that their
 	// disk node's agent is starting, within the start hold (HL8): no side
-	// clock of AR6 or AR8 counts for them. A verdict on the side drops it.
+	// clock of AR6 or AR8 counts for them. A verdict on the side, or the end
+	// of the hold (noteSideStartEnded), drops it.
 	sidesStarting map[sideKey]bool
 }
 
@@ -1245,7 +1247,7 @@ func (m *verdictMemo) noteStarting(cntlrId uint64) {
 }
 
 // noteStartEnded ends a cntlr's hold of HL8: the round after the one that
-// ended its agent's start, a move or an idle of its loop.
+// ended its agent's start, a move, an idle or a refused conf of its loop.
 func (m *verdictMemo) noteStartEnded(cntlrId uint64) {
 	if m == nil {
 		return

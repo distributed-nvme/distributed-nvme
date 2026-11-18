@@ -505,11 +505,12 @@ No case is known today.
 ## 6. The system comes back alone
 
 The table says what dnv does by itself for each fault, and what an
-operator does by hand. The third column gives the wait where a setting controls it. The
-settings are the pool's thresholds, the check interval and the
-cluster's start hold, which is how long the worker waits for an agent
-that is still rebuilding after a restart, in seconds, and two flags of
-the worker.
+operator does by hand. The third column gives the wait where a setting
+controls it. The settings are the pool's thresholds, the check interval
+and the cluster's start hold, which is how long the worker waits for an
+agent that is still rebuilding after a restart, in seconds, and three
+flags of the worker: `--vote-interval`, `--vote-grace-time` and
+`--vote-leave-grace-time`.
 Measured times are in [the introduction](introduction.md#status-and-limits-of-01).
 
 | Fault | What dnv does by itself | The wait, where a setting controls it | By hand |
