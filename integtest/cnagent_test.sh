@@ -5435,10 +5435,17 @@ redund_slow_leg() { # sp c2 rev2
 			[ "$(leg_round_since "$out" "$leg" "$t0" "$now")" = yes ] &&
 				after=$((after + 1))
 		done
-		[ "$after" -eq 2 ] && break
+		# DN2's legs are judged below by their last round's write time, so
+		# each must have one: just after the promotion a prober can still
+		# be in its first round.
+		for leg in "${A_MLEG[2]}" "${A_DLEG[2]}"; do
+			[ "$(leg_write_ms "$out" "$leg")" != none ] &&
+				after=$((after + 1))
+		done
+		[ "$after" -eq 4 ] && break
 		[ "$SECONDS" -lt "$deadline" ] ||
-			die "slowleg: no probe round of DN1's legs after the delay in" \
-				"$SLOW_LEG_WAIT s: $out"
+			die "slowleg: no probe round of DN1's legs after the delay," \
+				"or none yet of DN2's, in $SLOW_LEG_WAIT s: $out"
 		sleep 1
 	done
 	for leg in "${A_MLEG[1]}" "${A_DLEG[1]}"; do

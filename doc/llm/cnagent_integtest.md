@@ -465,7 +465,8 @@ for its own group, the data surviving. With what the primary's machine
 sends to DN1's port delayed (`tc netem`, no device changed), the
 primary's inspect read reports a write half of the probe of each of DN1's
 legs, from a round made under the delay, at no less than the delay, and
-of DN2's legs below it; every leg's row reads OK on a fresh round, and
+of DN2's legs, once each has a round, below it; every leg's row reads OK on
+a fresh round, and
 DN1's legs' counters, read at the call, have moved (CN11, CN23); with the
 delay gone, a later round of DN1's legs is fast again.
 With the primary's legs into one DN cut
