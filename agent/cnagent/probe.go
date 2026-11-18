@@ -19,7 +19,9 @@ import (
 // entry of each NVMe subsystem a lookup
 // uses — its NQN once more, its namespace and its controllers
 // (lookupSubsys) — and the number in /sys/block of a looked-up leg's
-// multipath head, which the wrapper's name compares (wrapperName); the own
+// multipath head, which the wrapper's name compares (wrapperName), and of a
+// clone's source head and md clone meta group's array, which the dm-clone's
+// name compares (cloneDmName); the own
 // read of a dm name that a partial info listing, or
 // the table listing, lacks (cnReading); the fresh `dmsetup info` that
 // confirms a device gone after its own status or table read failed; and the
@@ -46,14 +48,16 @@ import (
 // id sweeps (the activation sweep and the sweep after a failed delete) —
 // never from here (CN29).
 
-// legSide is one side of a leg, by its leg's subsystem NQN, that a cntlr's
-// verdict names (probeCntlr, sweepCntlr): a side with no controller that
-// the converge would connect, or, with cut set, a side whose path the
-// converge would cut (pathsToCut).
+// legSide is one endpoint of an NVMe subsystem, by the subsystem's NQN and
+// the endpoint's transport, that a cntlr's verdict names (probeCntlr,
+// sweepCntlr): a side of a leg, or an entry of a clone's src_tr_conf_list,
+// with no controller that the converge would connect (sidesToConnect,
+// srcToConnect), or, with cut set, a side whose path the converge would cut
+// (pathsToCut).
 type legSide struct {
-	nqn  string
-	side *pb.Side
-	cut  bool
+	nqn string
+	tr  *pb.NvmeTrConf
+	cut bool
 }
 
 // probeCntlr writes the rows of one read of the cntlr from plan, whose
@@ -67,9 +71,11 @@ type legSide struct {
 // it returns each provisioned side of a wanted leg that the converge would
 // connect, the leg's lookup having answered (sidesToConnect, CN30), and each
 // side whose live path the converge would cut (pathsToCut, CN10), which the
-// verdict names too. It marks in the plan each leg wrapper and each
-// RedundNone group's dm-linear the converge would change (wrapperName,
-// linearGroupName), which the verdict names (cntlrRowVerdict). Among the md
+// verdict names too, and each entry of a clone source's src_tr_conf_list
+// that the converge would connect (cloneSource.toName, CN30). It marks in
+// the plan each leg wrapper, each RedundNone group's dm-linear and each
+// dm-clone the converge would change (wrapperName, linearGroupName,
+// cloneDmName), which the verdict names (cntlrRowVerdict). Among the md
 // conditions it returns are also each absent array the converge's
 // assembly would start (absentArrayNamed) and each forced start the
 // converge would carry through (forcedStartNamed), the second as a failure.
@@ -130,7 +136,8 @@ func (s *CnAgentServer) probeCntlr(
 		if lookupErr == nil && view != nil {
 			lp.readView = view
 			for _, side := range sidesToConnect(lp, view, plan.primary) {
-				noCtrl = append(noCtrl, legSide{nqn: lp.nqn, side: side})
+				noCtrl = append(noCtrl, legSide{nqn: lp.nqn,
+					tr: side.GetNvmeTrConf()})
 			}
 			// The leg's wrapper, which the verdict names while a converge
 			// would create, reload or resume it (CN30). A primary's
@@ -149,7 +156,7 @@ func (s *CnAgentServer) probeCntlr(
 					if ctrl.trAddr == tr.GetTrAddr() &&
 						ctrl.trSvcId == tr.GetTrSvcId() {
 						noCtrl = append(noCtrl, legSide{nqn: lp.nqn,
-							side: side, cut: true})
+							tr: tr, cut: true})
 					}
 				}
 			}
@@ -319,7 +326,10 @@ func (s *CnAgentServer) probeCntlr(
 
 	// Clones: the rows of CN18's shared reading (cloneRows), from this
 	// read's look at the source and at the dm-clone, so a read reports what
-	// the converge reports for the same node.
+	// the converge reports for the same node; and from the same look, what
+	// the verdict names (CN30): the source's endpoints step 1 would connect
+	// (cloneSource.toName) and the dm-clone while step 3's create, reload or
+	// resume, or steps 4 and 5, would act on it (cloneDmName).
 	for _, cp := range plan.clones {
 		if !plan.wantClone {
 			if plan.primary {
@@ -345,8 +355,13 @@ func (s *CnAgentServer) probeCntlr(
 			s.reportCloneDeferred(st, cp, info)
 			continue
 		}
-		s.cloneRows(st, cp, info, s.readCloneSource(ctx, plan, cp),
-			func() cloneDmRead { return s.probeCloneDm(ctx, plan.rd, cp) }, "")
+		src := s.readCloneSource(ctx, plan, cp)
+		dm := s.probeCloneDm(ctx, plan.rd, cp)
+		s.cloneRows(st, cp, info, src, func() cloneDmRead { return dm }, "")
+		for _, tr := range src.toName(cp) {
+			noCtrl = append(noCtrl, legSide{nqn: cp.clone.GetSrcNqn(), tr: tr})
+		}
+		cp.dmName = s.cloneDmName(ctx, plan, cp, src, info, dm)
 	}
 
 	if !plan.wantAny {

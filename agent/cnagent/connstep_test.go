@@ -439,8 +439,9 @@ func TestHeadWaitWaitsForTheNgDevice(t *testing.T) {
 // wait: a clone source the pass connected whose /sys/block entry and ng
 // device come three listings after its head is waited for with three short
 // pauses, and the clone builds on the first reply, reading the source's
-// number once, with no background retry. A wait that ended at the first
-// listing that picks the head would leave the dm-clone's number read to fail.
+// number once, with no background retry, and the read after it names
+// nothing (CN30). A wait that ended at the first listing that picks the head
+// would leave the dm-clone's number read to fail.
 func TestCloneSourceWaitsForACompleteHead(t *testing.T) {
 	srv, node := newTestServer(t)
 	srv.retryInterval = time.Hour
@@ -473,6 +474,8 @@ func TestCloneSourceWaitsForACompleteHead(t *testing.T) {
 	if got := numberReads(node, head); got != 1 {
 		t.Fatalf("the pass read %s's number %d times, want once", head, got)
 	}
+	assertRowVerdict(t, rowRound(t, srv, 3).GetAgentReply(),
+		"the read after the build")
 }
 
 // TestHeadWaitStopsWhenTheBudgetIsSpent pins the kept case of the head wait
@@ -900,7 +903,8 @@ func TestAConnectedHeadWithoutItsNgDeviceIsUsed(t *testing.T) {
 
 // TestCloneSourceConnectStep pins CN18's clone-source connect as the same
 // connect step on the same rules: a refused-then-accepted source and a source
-// whose namespace appears on the second read both build on the first reply.
+// whose namespace appears on the second read both build on the first reply,
+// and the read after it names nothing (CN30).
 func TestCloneSourceConnectStep(t *testing.T) {
 	for _, tc := range []struct {
 		name string
@@ -932,6 +936,8 @@ func TestCloneSourceConnectStep(t *testing.T) {
 			if retrying(t, srv) {
 				t.Fatalf("a source the pass connected registered the retry")
 			}
+			assertRowVerdict(t, rowRound(t, srv, 3).GetAgentReply(),
+				"the read after the build")
 		})
 	}
 }
@@ -1187,7 +1193,10 @@ func TestACloneSourceConnectedAfterTheWalkIsAdopted(t *testing.T) {
 // spent it, the source's refused connect is not retried and the clone reports
 // its step-1 failure, as before the retry existed. The target row reads what
 // the refused connect left, no subsystem, MISSING as a check round reads it,
-// with the connect's error in its details (CN18).
+// with the connect's error in its details (CN18). The converge's reply does
+// not name the source's entry, and a read does (CN30), so the round brings a
+// re-send, whose converge connects the source and builds the clone once the
+// connects go through, and the read after it names nothing.
 func TestCloneSourceSharesThePassBudget(t *testing.T) {
 	srv, node := newTestServer(t)
 	srv.retryInterval = time.Hour
@@ -1217,6 +1226,30 @@ func TestCloneSourceSharesThePassBudget(t *testing.T) {
 	if !retrying(t, srv) {
 		t.Fatalf("a source that did not connect registered no retry")
 	}
+	srcName := noCtrlName(testSrcNqn, testIp2, testSvcId2)
+	if strings.Contains(reply.GetAgentReply().GetDetails(), srcName) {
+		t.Fatalf("the converge's reply %v names the source's entry",
+			reply.GetAgentReply())
+	}
+	round := rowRound(t, srv, 2)
+	if !strings.Contains(round.GetAgentReply().GetDetails(), srcName) {
+		t.Fatalf("the read %v does not name the source's entry",
+			round.GetAgentReply())
+	}
+
+	failConnects(node, legNqn(srv, testMetaLeg), testIp, testSvcId, 0)
+	node.Reset()
+	if rowResend(t, srv, cntlrReq(reqOpts{revision: 2, primary: true,
+		clones: []*pb.Clone{cloneOf()}}), round) == nil {
+		t.Fatalf("the round that names the source brought no re-send")
+	}
+	if got := connectsTo(node, testSrcNqn, testIp2, testSvcId2); got != 1 {
+		t.Fatalf("the re-send made %d connects of the source, want 1", got)
+	}
+	assertRowVerdict(t, rowRound(t, srv, 2).GetAgentReply(),
+		"the read after the re-send")
+	assertOk(t, probedCntlrInfo(t, srv).GetCloneIdToDmClone()[testClone],
+		"the dm-clone the re-send built")
 }
 
 // TestCloneSourceHeadPendingCarriesNoReason pins the clone rows of a source
@@ -1230,9 +1263,13 @@ func TestCloneSourceSharesThePassBudget(t *testing.T) {
 // "source not connected" with no reason, which hold the worker's settle
 // (dnv-worker.md HL2), and registers the retry. A read in between, which
 // connects nothing and cannot tell, gives that same state the source-fault
-// reason (CN18); the status and the epoch stay, only the reason moves. Once
-// the head is there and the meta leg connects, the retry's pass builds the
-// clone.
+// reason (CN18); the status and the epoch stay, only the reason moves. That
+// read names neither the source, which has its controller, nor the
+// dm-clone, whose source is not ready (CN30). Once the head is there, a read
+// names the meta leg's side with no controller and still not the dm-clone,
+// whose destination raid0 waits for that leg; the re-send the round brings
+// connects the leg and builds the clone, and the read after it names
+// nothing.
 func TestCloneSourceHeadPendingCarriesNoReason(t *testing.T) {
 	srv, node := newTestServer(t)
 	srv.retryInterval = time.Hour
@@ -1274,14 +1311,36 @@ func TestCloneSourceHeadPendingCarriesNoReason(t *testing.T) {
 		}
 	}
 
+	clone := cloneName(srv, testClone)
+	pending := rowRound(t, srv, 2).GetAgentReply()
+	assertRowNotNamed(t, pending, "the read of the pending head", clone)
+	if strings.Contains(pending.GetDetails(),
+		noCtrlName(testSrcNqn, testIp2, testSvcId2)) {
+		t.Fatalf("the read %v names the source, which has its controller",
+			pending)
+	}
+
 	finishNsHead(t, node, testSrcNqn)
 	failConnects(node, legNqn(srv, testMetaLeg), testIp, testSvcId, 0)
-	retryAttempt(t, srv)
+	round := rowRound(t, srv, 2)
+	assertRowNotNamed(t, round.GetAgentReply(), "the read of the head",
+		clone)
+	if !strings.Contains(round.GetAgentReply().GetDetails(),
+		noCtrlName(legNqn(srv, testMetaLeg), testIp, testSvcId)) {
+		t.Fatalf("the read %v does not name the meta leg's side",
+			round.GetAgentReply())
+	}
+	if rowResend(t, srv, cntlrReq(reqOpts{revision: 2, primary: true,
+		clones: []*pb.Clone{cloneOf()}}), round) == nil {
+		t.Fatalf("the round that names the meta leg brought no re-send")
+	}
 	built := probedCntlrInfo(t, srv)
 	assertOk(t, built.GetCloneIdToTarget()[testClone],
-		"clone target, read by the retry's pass")
+		"clone target, read after the re-send")
 	assertOk(t, built.GetCloneIdToDmClone()[testClone],
-		"dm-clone, built by the retry's pass")
+		"dm-clone, built by the re-send")
+	assertRowVerdict(t, rowRound(t, srv, 2).GetAgentReply(),
+		"the read after the re-send")
 }
 
 // TestCloneSourceKilledConnectHeadPending pins the clone rows of a source
@@ -1294,6 +1353,8 @@ func TestCloneSourceHeadPendingCarriesNoReason(t *testing.T) {
 // namespace" and the dm-clone row's "source not connected" carry no reason. A
 // connect killed before it touched anything left no controller: a fault of
 // the source as this node reads it, with the source-fault reason on both.
+// A read names the source's entry in the second case alone, where a converge
+// would connect it (CN30).
 func TestCloneSourceKilledConnectHeadPending(t *testing.T) {
 	const line = "nvme connect --transport tcp --traddr " + testIp2
 	noNs := fmt.Sprintf("no namespace 1 on %s", testSrcNqn)
@@ -1303,13 +1364,15 @@ func TestCloneSourceKilledConnectHeadPending(t *testing.T) {
 		// targetHas is a text the converge's target row carries.
 		targetHas string
 		reason    pb.ResReason
+		// named: a read names the source's entry.
+		named bool
 	}{
 		{"killed after it made the controller",
 			func(node *fakeNode) { node.killCmd[line] = true },
-			noNs, pb.ResReason_RES_REASON_NONE},
+			noNs, pb.ResReason_RES_REASON_NONE, false},
 		{"killed before it touched anything",
 			func(node *fakeNode) { node.killCmdNoEffectAlways[line] = true },
-			"signal: killed", pb.ResReason_RES_REASON_SOURCE_FAULT},
+			"signal: killed", pb.ResReason_RES_REASON_SOURCE_FAULT, true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			srv, node := newTestServer(t)
@@ -1338,6 +1401,14 @@ func TestCloneSourceKilledConnectHeadPending(t *testing.T) {
 				t.Fatalf("a source whose connect was killed registered " +
 					"no retry")
 			}
+			read := rowRound(t, srv, 2).GetAgentReply()
+			if named := strings.Contains(read.GetDetails(), noCtrlName(
+				testSrcNqn, testIp2, testSvcId2)); named != tc.named {
+				t.Fatalf("the read %v names the source's entry: %v, "+
+					"want %v", read, named, tc.named)
+			}
+			assertRowNotNamed(t, read, "the read",
+				cloneName(srv, testClone))
 		})
 	}
 }

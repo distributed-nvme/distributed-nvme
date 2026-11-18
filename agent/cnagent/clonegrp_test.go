@@ -570,7 +570,11 @@ func TestCloneMetaGroupSweptWithItsClone(t *testing.T) {
 // stored flag set, the clone's auto_resume off — CN16 parks it whatever the
 // clone does and its desired group is inaccessible, so no namespace waits on
 // the dm-clone, and the retry is still registered, since the copy itself
-// waits for the dm-clone.
+// waits for the dm-clone. The converge's reply names no dm-clone, since its
+// group's row is not OK; a read, whose group row reads the running array OK,
+// names the missing dm-clone (CN30), so the worker re-sends on the rounds
+// that answer from a read, and each such converge refuses again (cnagent.md,
+// Known limits).
 func TestAFailedReconciliationUnderACloneMetaGroup(t *testing.T) {
 	for _, tc := range []struct {
 		name      string
@@ -617,6 +621,16 @@ func TestAFailedReconciliationUnderACloneMetaGroup(t *testing.T) {
 				"add refused", "the clone meta group")
 			assertNoCall(t, node, "cmd dmsetup create "+dmClone)
 			assertNoCall(t, node, "cmd dmsetup reload "+dmClone)
+			assertRowNotNamed(t, reply.GetAgentReply(), "the converge",
+				dmClone)
+			read := rowRound(t, srv, 3).GetAgentReply()
+			if tc.serving {
+				assertRowNotNamed(t, read, "the read", dmClone)
+			} else if !strings.Contains(read.GetDetails(),
+				rowNamed(dmClone, "absent")) {
+				t.Fatalf("the read %v does not name the missing dm-clone "+
+					"over its running array", read)
+			}
 			row := info.GetCloneIdToDmClone()[testClone]
 			if tc.serving {
 				assertOk(t, row, "the serving dm-clone")
@@ -786,6 +800,10 @@ func TestACloneWaitsForItsCloneMetaGroup(t *testing.T) {
 			assertSameCloneRows(t, info, probed)
 			assertParked(t, srv, node, testNs, testTd, "the deferred clone")
 			assertAna(t, node, testNqn, "3", "the deferred clone")
+			// A deferred clone builds nothing, so nothing of it is named
+			// (CN30): its source is not looked up and its dm-clone waits.
+			assertRowVerdict(t, rowRound(t, srv, 2).GetAgentReply(),
+				"a read of the deferred clone")
 			if retrying(t, srv) {
 				t.Fatalf("a deferred clone registered the retry")
 			}
@@ -1042,8 +1060,11 @@ func TestAnAgentRestartKeepsTheClone(t *testing.T) {
 // read-only or failed — what dm-clone does when an operation on its clone
 // meta group fails — is left as it is (CN18): no chunk, no knob, no enable,
 // no reload and no removal. CN16 does not serve through it, so its
-// namespace waits inaccessible over the td's dm-error, its dm row reads
-// ERROR naming the mode on both channels, and the retry is registered.
+// namespace waits inaccessible over the td's dm-error, and its dm row reads
+// ERROR naming the mode on both channels. No channel names the dm-clone
+// (CN30): no converge cures that mode, so a name would bring a SyncupCntlr
+// on every round for a converge that changes nothing. The retry is still
+// registered.
 func TestABrokenMetadataModeIsLeftAsItIs(t *testing.T) {
 	for _, tc := range []struct {
 		mode, details string
@@ -1084,6 +1105,9 @@ func TestABrokenMetadataModeIsLeftAsItIs(t *testing.T) {
 				assertOk(t, rows.GetNsIdToDmLinear()[testNs],
 					label+" ns-dev row")
 			}
+			assertRowVerdict(t, reply.GetAgentReply(), "the converge")
+			assertRowVerdict(t, rowRound(t, srv, 3).GetAgentReply(),
+				"the read")
 			if !retrying(t, srv) {
 				t.Fatalf("a dm-clone that does not serve registered no " +
 					"retry")

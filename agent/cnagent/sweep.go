@@ -1698,8 +1698,9 @@ func (s *CnAgentServer) unownedSrcNqns(
 // that does not count as delivered (cntlrState.reqFromRpc; storedMarks;
 // CN12, CN30).
 //
-// noCtrl are the sides of wanted legs with no controller that the converge
-// would connect (sidesToConnect, CN30), named as failures for the same
+// noCtrl are the sides of wanted legs, and the entries of the clones'
+// src_tr_conf_list, with no controller that the converge would connect
+// (sidesToConnect, srcToConnect; CN30), named as failures for the same
 // reason: the kernel deletes a controller whose reconnect nvmet refused for
 // good, and only a converge connects it again; and, marked cut, the sides
 // whose live path the converge would cut (pathsToCut, CN10), which only a
@@ -1806,7 +1807,7 @@ func (s *CnAgentServer) sweepCntlr(
 		res.Add(vn.kind, vn.name)
 	}
 	for _, ls := range noCtrl {
-		tr := ls.side.GetNvmeTrConf()
+		tr := ls.tr
 		why := errNoController
 		if ls.cut {
 			why = errPathToCut
@@ -1839,9 +1840,10 @@ func (s *CnAgentServer) sweepCntlr(
 //
 // The rows are the concats, thin pools, raid0s, the thin volume's dm-error
 // and thin devices, ns-devs, namespaces, subsystems, and a transfer's
-// dm-linear, subsystem and namespace; and the leg wrappers and the
-// RedundNone groups' dm-linears that the pass's own test of them names
-// (legPlan.wrapperName, grpPlan.linearName). It names a row that reads
+// dm-linear, subsystem and namespace; and the leg wrappers, the RedundNone
+// groups' dm-linears and the dm-clones that the pass's own test of them
+// names (legPlan.wrapperName, grpPlan.linearName, clonePlan.dmName). It
+// names a row that reads
 // RES_STATUS_MISSING with no reason, as "absent"; one that reads
 // RES_STATUS_ERROR, or RES_STATUS_OK with RES_REASON_DIFFERS (a namespace
 // whose ANA group differs, or a thin pool short of its metadata device), as
@@ -1859,10 +1861,12 @@ func (s *CnAgentServer) sweepCntlr(
 // whose origin the request no longer names, none of which a converge cures.
 // A transfer's dm-linear rests on its origin's raid0 only where the
 // transfer is served (xferServed): elsewhere it is an error table, which
-// rests on nothing. The rest of the rows of legs and groups, and those of
-// paths, arrays and clones, rest on a remote end, and keep the rules the
-// verdict has for them (sides to connect, md members to put back): a new
-// syncup does not cure a disk node that is gone. A nil info names nothing.
+// rests on nothing. The rest of the rows of legs, groups and clones, and
+// those of paths and arrays, rest on a remote end, and keep the rules the
+// verdict has for them (sides and clone source endpoints to connect, md
+// members to put back): a new syncup does not cure a disk node that is gone.
+// A dm-clone's own test rests on its source, its clone meta group's row and
+// its destination raid0's row (cloneDmGate). A nil info names nothing.
 func cntlrRowVerdict(
 	plan *cntlrPlan,
 	info *pb.CntlrInfo,
@@ -1877,11 +1881,13 @@ func cntlrRowVerdict(
 			nameCntlrRow(row, res)
 		}
 	}
-	// A leg's wrapper and a RedundNone group's dm-linear are named by their
-	// own test, which the pass ran (wrapperName, linearGroupName), and not
-	// by their rows: those also carry what a remote end does, the leg's
-	// prober or transport and the leg's availability, and read neither the
-	// read-only flag nor, for the wrapper, the head's number.
+	// A leg's wrapper, a RedundNone group's dm-linear and a dm-clone are
+	// named by their own test, which the pass ran (wrapperName,
+	// linearGroupName, cloneDmName), and not by their rows: those also carry
+	// what a remote end does, the leg's prober or transport, the leg's
+	// availability and the clone's source, and read neither the read-only
+	// flag nor, for the wrapper and the dm-clone, the numbers their tables
+	// map.
 	for _, lp := range plan.legs {
 		if lp.wrapperName != nil {
 			res.Fail(lp.name, lp.wrapperName)
@@ -1890,6 +1896,11 @@ func cntlrRowVerdict(
 	for _, gp := range plan.grps {
 		if gp.linearName != nil {
 			res.Fail(gp.resName, gp.linearName)
+		}
+	}
+	for _, cp := range plan.clones {
+		if cp.dmName != nil {
+			res.Fail(cp.finalName, cp.dmName)
 		}
 	}
 	for _, sp := range plan.slices {

@@ -683,6 +683,11 @@ type clonePlan struct {
 	// dm-clone and connects to no source, and below SP_LEVEL_NO_CLONE its
 	// rows read provisioning (reportCloneDeferred).
 	deferred bool
+	// dmName is what this pass names the clone's dm-clone with
+	// (cntlrRowVerdict, CN30), nil for nothing: a converge's step 3 create,
+	// reload or resume, or enable message, that failed, or a read's
+	// cloneDmName.
+	dmName error
 }
 
 // xferPlan is one transfer export (CN17).

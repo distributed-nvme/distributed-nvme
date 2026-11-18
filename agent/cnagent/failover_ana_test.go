@@ -380,8 +380,11 @@ func TestAHeldNsDevWithAnUnreadableDmErrorReadsTheSameOnBothChannels(
 // cntlr that builds the clone's dm-clone over its clone meta group, whose
 // build stops short of enabling hydration, leaves the namespace inaccessible
 // with its ns-dev parked — both rows OK on both channels — and registers the
-// CN10 retry. The attempt that enables hydration puts the ns-dev on the
-// dm-clone and only then moves the namespace optimized.
+// CN10 retry. The converge's reply names the dm-clone with the enable's
+// failure, and a read names it while its hydration is off (CN30), so the
+// round brings a re-send of the request, whose converge enables hydration,
+// puts the ns-dev on the dm-clone and only then moves the namespace
+// optimized.
 func TestACloneBuildAtAPromotionWaitsInaccessible(t *testing.T) {
 	srv, node := newTestServer(t)
 	srv.retryInterval = time.Hour
@@ -421,10 +424,22 @@ func TestACloneBuildAtAPromotionWaitsInaccessible(t *testing.T) {
 	if !retrying(t, srv) {
 		t.Fatalf("an unfinished build registered no retry")
 	}
+	if !strings.HasPrefix(reply.GetAgentReply().GetDetails(),
+		rowNamed(clone, "differs: ")) ||
+		!strings.Contains(reply.GetAgentReply().GetDetails(),
+			"message ioctl failed") {
+		t.Fatalf("the converge replied %v, want it to name the dm-clone "+
+			"with the enable's failure", reply.GetAgentReply())
+	}
+	round := rowRound(t, srv, 4)
+	assertRowVerdict(t, round.GetAgentReply(), "the read",
+		rowNamed(clone, "differs: "+detailsCloneNotHydrating))
 
 	delete(node.failCmdAlways, enable)
 	node.Reset()
-	retryAttempt(t, srv)
+	if rowResend(t, srv, cntlrReq(opts(4, true)), round) == nil {
+		t.Fatalf("the round that names the dm-clone brought no re-send")
+	}
 	cloneNo := devNoOf(node, clone)
 	assertOrder(t, node, "cmd "+enable,
 		"cmd dmsetup reload "+nsDev+" --table "+nsDevTableOn(cloneNo),
@@ -432,6 +447,8 @@ func TestACloneBuildAtAPromotionWaitsInaccessible(t *testing.T) {
 	assertAna(t, node, testNqn, "1", "the finished build")
 	assertOk(t, probedCntlrInfo(t, srv).GetNsIdToNamespace()[testNs],
 		"the served namespace")
+	assertRowVerdict(t, rowRound(t, srv, 4).GetAgentReply(),
+		"the read after the re-send")
 	if retrying(t, srv) {
 		t.Fatalf("the retry outlived the build")
 	}
@@ -442,9 +459,11 @@ func TestACloneBuildAtAPromotionWaitsInaccessible(t *testing.T) {
 // build applies the source chunks the node holds and enables hydration, with
 // no park and no removal, and the namespace stays optimized. When the enable
 // fails, the ns-dev parks off the dm-clone, its namespace moved inaccessible
-// before the reload, and the retry is registered; the attempt that enables
-// hydration puts the ns-dev back on the dm-clone and only then moves the
-// namespace optimized.
+// before the reload, and the retry is registered. A read names the dm-clone
+// while its hydration is off, and so does the reply of a converge whose
+// enable failed (CN30); the re-send the round brings enables hydration,
+// puts the ns-dev back on the dm-clone and only then moves the namespace
+// optimized.
 func TestAnUnfinishedDmCloneOnARunningPrimaryIsFinished(t *testing.T) {
 	for _, tc := range []struct {
 		name string
@@ -481,10 +500,14 @@ func TestAnUnfinishedDmCloneOnARunningPrimaryIsFinished(t *testing.T) {
 			ana := "writedirect " + anaPath(testNqn, 1) + "="
 			park := "cmd dmsetup reload " + nsDev + " --table " +
 				nsDevTableOn(devNoOf(node, errorName(srv, testTd)))
+			assertRowVerdict(t, rowRound(t, srv, 2).GetAgentReply(),
+				"the read of hydration off",
+				rowNamed(clone, "differs: "+detailsCloneNotHydrating))
 
 			node.Reset()
 			opts.revision = 3
-			if _, err := srv.SyncupCntlr(ctx, cntlrReq(opts)); err != nil {
+			reply, err := srv.SyncupCntlr(ctx, cntlrReq(opts))
+			if err != nil {
 				t.Fatalf("SyncupCntlr: %v", err)
 			}
 			assertNoCall(t, node, "cmd dmsetup remove "+clone)
@@ -496,6 +519,9 @@ func TestAnUnfinishedDmCloneOnARunningPrimaryIsFinished(t *testing.T) {
 				assertNoCall(t, node, park)
 				assertNoCall(t, node, ana)
 				assertAna(t, node, testNqn, "1", "the finished build")
+				assertRowVerdict(t, reply.GetAgentReply(), "the converge")
+				assertRowVerdict(t, rowRound(t, srv, 3).GetAgentReply(),
+					"the read after the build")
 				if retrying(t, srv) {
 					t.Fatalf("a finished build registered the retry")
 				}
@@ -507,9 +533,18 @@ func TestAnUnfinishedDmCloneOnARunningPrimaryIsFinished(t *testing.T) {
 			if !retrying(t, srv) {
 				t.Fatalf("an unfinished build registered no retry")
 			}
+			if !strings.HasPrefix(reply.GetAgentReply().GetDetails(),
+				rowNamed(clone, "differs: ")) {
+				t.Fatalf("the converge replied %v, want it to name the "+
+					"dm-clone", reply.GetAgentReply())
+			}
 			delete(node.failCmdAlways, enable)
 			node.Reset()
-			retryAttempt(t, srv)
+			if rowResend(t, srv, cntlrReq(opts),
+				rowRoundOnly(t, srv, 3)) == nil {
+				t.Fatalf("the round after the failed enable brought no " +
+					"re-send")
+			}
 			assertOrder(t, node, "cmd "+enable,
 				"cmd dmsetup reload "+nsDev+" --table "+onClone,
 				ana+"1")
@@ -529,7 +564,8 @@ func TestAnUnfinishedDmCloneOnARunningPrimaryIsFinished(t *testing.T) {
 // group, with the hydrated count its metadata held, and the ns-dev moves
 // onto it in the pass, its namespace optimized throughout. When the enable
 // fails, the namespace goes inaccessible at the end of the pass, with its
-// ns-dev still parked, and turns optimized in the pass that puts the ns-dev
+// ns-dev still parked, the converge's reply names the dm-clone (CN30), and
+// the namespace turns optimized in the re-send's pass that puts the ns-dev
 // on the dm-clone.
 func TestLoweringTheNoCloneLevelBuildsTheCloneOverItsGroup(t *testing.T) {
 	for _, tc := range []struct {
@@ -587,9 +623,19 @@ func TestLoweringTheNoCloneLevelBuildsTheCloneOverItsGroup(t *testing.T) {
 				if !retrying(t, srv) {
 					t.Fatalf("an unfinished build registered no retry")
 				}
+				if !strings.HasPrefix(reply.GetAgentReply().GetDetails(),
+					rowNamed(clone, "differs: ")) {
+					t.Fatalf("the converge replied %v, want it to name "+
+						"the dm-clone", reply.GetAgentReply())
+				}
 				delete(node.failCmdAlways, enable)
 				node.Reset()
-				retryAttempt(t, srv)
+				if rowResend(t, srv, cntlrReq(reqOpts{revision: 4,
+					primary: true, clones: clones}),
+					rowRoundOnly(t, srv, 4)) == nil {
+					t.Fatalf("the round after the failed enable brought " +
+						"no re-send")
+				}
 				assertOrder(t, node, "cmd "+enable,
 					"cmd dmsetup reload "+nsDev+" --table "+
 						nsDevTableOn(devNoOf(node, clone)),
@@ -605,7 +651,10 @@ func TestLoweringTheNoCloneLevelBuildsTheCloneOverItsGroup(t *testing.T) {
 					t.Fatalf("the dm-clone built again reads %q, want the "+
 						"23 regions its metadata held", row.GetDetails())
 				}
+				assertRowVerdict(t, reply.GetAgentReply(), "the converge")
 			}
+			assertRowVerdict(t, rowRound(t, srv, 4).GetAgentReply(),
+				"the read after the build")
 			assertAna(t, node, testNqn, "1", "the finished build")
 			if retrying(t, srv) {
 				t.Fatalf("the retry outlived the build")

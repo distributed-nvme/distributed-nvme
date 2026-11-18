@@ -1044,8 +1044,9 @@ concat (CN13) or an ns-dev (CN16) — reloads it onto the table it wants and
 then clears the block layer's read-only flag of the device with
 `blockdev --setrw` (`Dm.SetWritable`; `dmStepReloadWritable` is the step
 of `ensureDmSingle` and of the group's dm-linear). A dm-clone is not
-reloaded for the flag, and no read names it for the flag. The clear is
-part of the device's step, so a clear that fails fails the step. For a
+reloaded for the flag, and no read names it for the flag (CN18 step 3).
+The clear is part of the device's step, so a clear that fails fails the
+step. For a
 wrapper and a group's dm-linear both channels then name the device: the
 converge's reply with blockdev's error, the read "differs: read-only"
 (CN30). A pool concat's and an ns-dev's rows do not read the flag (CN28),
@@ -3177,9 +3178,12 @@ step that failed there would be named by nothing.
 CN18. Clones (`clone.go`; primary only; `architecture.md`, Clones;
 `sp_level` below `SP_LEVEL_NO_CLONE`). Per `clone_list` entry, in order:
 
-1. `nvme connect` to `src_nqn` at every entry of `src_tr_conf_list` (one
-   subsystem, one path per source cntlr; the source's own ANA picks the
-   serving path), with the host NQN `CnHostNqn` and the `dnagent.md` SH20 flags;
+1. `nvme connect` to `src_nqn` at every entry of `src_tr_conf_list` that
+   the source's lookup holds no controller for, in any state
+   (`srcToConnect`, the one test the converge connects by and a cntlr's
+   read names the entries by: The clone names, below) — one subsystem, one
+   path per source cntlr; the source's own ANA picks the serving path —
+   with the host NQN `CnHostNqn` and the `dnagent.md` SH20 flags;
    failures go to the CN10 retry registry. The source namespace device
    is found by a lookup in the pass's sysfs walk like CN10's, by
    `src_nqn` and the nsid `src_ns_idx`. When the walk holds no entry for
@@ -3202,7 +3206,8 @@ CN18. Clones (`clone.go`; primary only; `architecture.md`, Clones;
    entry it alone serves reads unconnected and is connected again — a
    duplicate the host refuses while that controller lives, which fails
    step 1 once the budget is spent — and nothing is disconnected, since
-   step 1 retires no path. CN10's rule
+   step 1 retires no path; a cntlr's read names no entry while such an
+   address read does not answer (The clone names, below). CN10's rule
    for a walk or a lookup that did not answer is applied: it fails step 1
    naming the read, and nothing is connected on it; `clone_id_to_dm_clone`
    then reads, while no dm-clone of the clone is up, `MISSING` "source
@@ -3216,32 +3221,51 @@ CN18. Clones (`clone.go`; primary only; `architecture.md`, Clones;
    Terminology and object model), whose legs CN10 connects and wraps and
    whose md array or `CnGrpName` linear CN12 builds earlier in the same
    pass. The group is ready when its row of the pass (`grp_id_to_md_raid`,
-   CN28) reads `OK`. A running array's row reads `OK`, degraded or not,
+   CN28) reads `OK`, and the destination is ready when the td's raid0 row
+   of the pass (`td_id_to_raid0`, CN28) reads `OK`: on a converge, when
+   CN15's step of the raid0 in the same pass did not fail; on a read, when
+   the raid0 is there with the stripe the td wants and resumed. A running
+   array's row reads `OK`, degraded or not,
    unless a read of the array fails, another array also holds legs of the
    group, it holds a foreign member, the in-sync guard holds over it, on
    a converge and a read alike, or, on a converge, its member
    reconciliation fails otherwise (CN12, CN28): each of these reports
-   the group `ERROR`, and the group is not ready for that pass. A group that is not
-   ready ends the pass for the clone: no dm-clone is created over it, and
-   one an earlier pass built is left as it is. While the read of the
-   dm-clone shows none that serves, the CN10 retry is registered, whose
-   converge runs the group's build, the reconciliation included, again; a
-   dm-clone that serves serves on (CN16 rule 5), and the group's fault is
-   re-driven as a slice's group's is (CN12). Reason: a dm-clone created
-   over a device that is not the group's assembled array would format new
-   metadata there and copy the source over what the hosts wrote; with no
-   dm-clone that serves no region is copied, and the worker re-syncs on a
-   revision or a reply code, never on a row, so nothing else is sure to
-   re-drive the copy, whether or not a namespace of the destination td
-   waits, and a parked namespace of the td waits for the retry as well,
-   while a dm-clone that serves copies what is left and serves its
-   namespaces without it; the
-   row is the one test of readiness, the one the worker judges and the one
-   the probe writes; and the group's own row says what is wrong with it, so the
-   clone's row does not say it a second time (below). The build
+   the group `ERROR`, and the group is not ready for that pass. A group or
+   a destination that is not ready ends the pass for the clone: no
+   dm-clone is created over it, and one an earlier pass built is left as
+   it is. While the read of the dm-clone shows none that serves in the
+   row's sense — there, resumed, with hydration on and its metadata
+   read-write (below); CN16 rule 5's own test reads no suspend bit — the
+   CN10 retry is registered, whose converge runs the group's build, the
+   reconciliation included, and the raid0's again; a dm-clone that serves
+   serves on (CN16 rule 5), and the group's fault is re-driven as a slice's
+   group's is (CN12). Reason: a dm-clone created over a device that is not
+   the group's assembled array would format new metadata there and copy
+   the source over what the hosts wrote; one over a raid0 that is not the
+   stripe the td wants would copy regions into blocks the raid0's later
+   reload moves away, while its metadata counts them copied, and one over a
+   suspended raid0 would hold its copy and the hosts' writes behind it;
+   with no dm-clone that serves no region is copied, and the worker
+   re-syncs on a revision or a reply code, never on a row, and the verdict
+   names no row of the clone meta group, which rests on a remote end
+   (CN30), so for the group nothing else is sure to re-drive the copy,
+   whether or not a namespace of the destination td waits, and a parked
+   namespace of the td waits for the retry as well, while a dm-clone that
+   serves copies what is left and serves its namespaces without it; a
+   destination raid0 not as the td wants over thin volumes that are is
+   named by its own row on both channels (CN30), and the re-send that name
+   brings builds the raid0 and then the dm-clone, with the retry running
+   beside it; the row is the one test of readiness, the one the worker
+   judges and the one the probe writes; and the group's or the raid0's own
+   row says what is wrong with it, so the clone's row says only which of
+   them holds the dm-clone back (below). The build
    then reads the dm-clone, and that read decides steps
-   3 and 4. A read that fails or does not answer, of a dm-clone that is
-   there, ends the pass the same way: nothing is created or enabled, and
+   3 to 5. The build goes on to step 3 by the one test a cntlr's read
+   names the dm-clone by (`cloneDmGate`): the source ready, the group and
+   the destination ready, and the dm-clone's read answered with its
+   metadata neither read-only nor failed. A read that fails or does not
+   answer, of a dm-clone that is there, ends the pass the same way:
+   nothing is created or enabled, and
    CN16 reads the status again and moves no ns-dev onto a dm-clone it has
    not seen serve. A dm-clone that a `dmsetup info` after a failed read
    confirms gone reads as absent, and step 3 creates it. A dm-clone whose
@@ -3269,14 +3293,33 @@ CN18. Clones (`clone.go`; primary only; `architecture.md`, Clones;
    over a fresh group it finds the first data block zeroed
    (`architecture.md`, Side provisioning protocol) and formats new
    metadata there. A dm-clone that is there is converged probe-first: only
-   its four positional arguments are compared, since `dmsetup table` prints
+   its target, its size and its four positional arguments are compared,
+   since `dmsetup table` prints
    the constructor's feature and core arguments back and never the live
    hydration state, which `dmsetup status` alone shows: the table's feature
    arguments are the create's own fixed pair and its core arguments the
    create's own copy of `dm_clone_conf`, which no request changes after the
    create, and the live knobs are converged by message from the status, so
    a compare of them would find nothing a reload could change; one that
-   differs is reloaded, with hydration off. Then the `hydration_threshold`
+   differs is reloaded, with hydration off. One predicate decides step
+   3's create, reload or resume and steps 4 and 5, for the converge and for
+   a cntlr's read (`cloneDmBuild`); the knob messages below are not part of
+   it. Step 3 creates a dm-clone that is absent, reloads one whose table
+   differs — in its target, its size or one of the four positional arguments: the
+   metadata device's number, the destination's, the source head's and the
+   region size — and resumes one suspended on the table it wants; step 4
+   applies the chunks after any of those and on a dm-clone found with
+   hydration off, and step 5 enables hydration wherever it is off. The
+   read-only flag is not read: a dm-clone that an operator's `blockdev
+   --setro` made read-only is neither reloaded nor made writable, and no
+   read names it (CN30), unlike the devices of CN10 (A read-only device is
+   made writable). Reason: the flag stops no write of the hosts. Their IO
+   reaches the dm-clone as bios the ns-dev above it remaps, and the block
+   layer only warns once on such a bio to a read-only device
+   (`architecture.md`, SpLevel); the flag refuses only IO through the
+   dm-clone's own node, such as the discards of step 4's chunks, a failure
+   of which costs only an extra copy. So the flag is no fault a converge
+   has to cure. Then the `hydration_threshold`
    and `hydration_batch_size` messages from `dm_clone_conf`, one per
    non-zero member the probed status does not already show (probe-first,
    `dnagent.md` SH16; a zero leaves the target's own default in place,
@@ -3307,13 +3350,51 @@ CN18. Clones (`clone.go`; primary only; `architecture.md`, Clones;
    once the copy is whole (`dnv-worker.md` CLD13), or `DeleteClone`'s —
    clears the stored flag.
 
+**The clone names.** Only a converge connects a clone's source and builds
+its dm-clone, and the worker brings a converge on a code, never on a row
+(`dnv-worker.md` RW4), so a cntlr's read names (CN30) the entries step 1
+would connect and the dm-clone while step 3's create, reload or resume, or
+steps 4 and 5, would act on it, from
+the one lookup of the source and the one read of the dm-clone its rows take
+(below). It names each entry of `src_tr_conf_list` the lookup holds no
+controller for (`srcToConnect`) while no sweep's disconnect of the source
+is in flight, the lookup answered and every controller's "address" read
+answered (`cloneSource.toName`); a read alone gives this name. It names the
+dm-clone past the build's gate (`cloneDmGate`) while the build would act
+on it (`cloneDmBuild`): absent, suspended, with a table other than the one
+step 3 would load, by its target, its size and its four positional
+arguments, or with hydration off. For the table it takes step 3's reads:
+the dm-clone's table, the destination's number and a `CnGrpName` group's
+from its reading, and the source head's number and an md group's array's
+from "/sys/block" (CN28). A converge names the dm-clone in its own verdict
+when step 3's create, reload or resume, or the enable's message, fails; a
+failed knob message is only logged. A read that did not answer names
+nothing, on either channel, and neither does a dm-clone whose metadata is
+read-only or failed.
+So the worker's re-send connects a source whose controller the kernel
+deleted, reloads a dm-clone onto a source that came back under a new head
+number, which only the table compare shows, and finishes a dm-clone whose
+create, reload, resume or enable failed or that was left suspended; once
+it serves, CN16 rule 5 serves the namespaces of an `auto_resume` clone that
+waited parked, and a failed step of their ns-devs is named in turn (CN30).
+The read names no entry while a controller's "address" read does not
+answer, though the converge connects such an entry: that controller may be
+the entry's own, which the host then refuses to connect again as a
+duplicate while it lives, so the name would bring a `SyncupCntlr` every
+second round for a connect the host refuses. Reason: without the names
+each of those states reads code zero until a new revision, and a name over
+a state no converge cures, which the converge's own reply would not carry,
+would bring a `SyncupCntlr` on every second round (`dnv-worker.md` RW4
+step 5) for a converge that changes nothing.
+
 **One rule decides the clone's rows.** For a clone whose destination td
 resolves, that carries a clone meta group and that is not deferred, the
 converge, wherever its pass ends, and the CN28 probe decide the status of
 each of its two rows by one rule, from what each reads of the node: the
-source's lookup in the walk, the clone meta group's row of the pass, and
-the dm-clone's presence and status line. The converge reads after its own
-steps and a read only reads, so for the same state the two report the
+source's lookup in the walk, the clone meta group's and the destination
+raid0's rows of the pass, and the dm-clone's presence, suspend bit and
+status line. The converge reads
+after its own steps and a read only reads, so for the same state the two report the
 same status, and a row's epoch moves only when the state does:
 
 * `clone_id_to_target`: `RES_STATUS_ERROR` while a sweep's disconnect of
@@ -3332,12 +3413,17 @@ same status, and a row's epoch moves only when the state does:
   while the clone meta group is ready, save in the state below that a
   connect of the pass leaves, and with none while the group is not, and
   "metadata group not ready" beside a source step 1 reads as connected
-  while the group is not, with no reason, as a `MISSING` with no details
-  has none; `RES_STATUS_OK` with the raw status line while the dm-clone
-  serves, its hydration on and its metadata read-write; and
+  while the group is not, and "destination raid0 not ready" beside such a
+  source and a ready group while the destination's raid0 row is not `OK`,
+  each with no reason, as a `MISSING` with no details has none — the
+  group's or the raid0's own row says what is wrong with it;
+  `RES_STATUS_OK` with the raw status line while the dm-clone serves,
+  resumed, its hydration on and its metadata read-write; and
   `RES_STATUS_ERROR`, followed by the line, when it does not: "metadata
-  read-only" or "metadata failed" for its metadata mode, then "hydration
-  not enabled" for hydration off, and "metadata mode not read-write" for a
+  read-only" or "metadata failed" for its metadata mode, then "suspended"
+  for a dm-clone suspended, which serves no IO until step 3 resumes it, as
+  a suspended pool, concat or raid0 reads (CN28), then "hydration not
+  enabled" for hydration off, and "metadata mode not read-write" for a
   line that shows hydration on and no mode.
 
 The source's text on the dm-clone row carries no reason while the clone
@@ -3399,7 +3485,12 @@ read answers, none when its read without the flag failed — because
 `DeleteClone`'s hydration
 check reads it (`architecture.md`, Clones). Where the namespaces serve
 from does not follow the rows: CN16 rule 5 reads the dm-clone's status
-itself. A dm-clone up with hydration off therefore reads
+itself, and no suspend bit, so the ns-devs over a dm-clone suspended on
+the table it wants stay on it, their IO waiting in the dm-clone until step
+3 resumes it. Reason: a park of such an ns-dev would wait on that IO too,
+its reload's suspend flushing the ns-dev under the cntlr's lock until the
+soft timeout (`dnagent.md` SH15), while step 3's resume is what ends the
+wait. A dm-clone up with hydration off therefore reads
 `RES_STATUS_ERROR` on every read as on every converge, and a fault of the
 source reads `RES_STATUS_MISSING` on both, while a dm-clone that serves
 serves on (Known limits); so does a dm-clone that serves while its clone
@@ -3427,8 +3518,9 @@ cause, a source the pass cannot read as connected. A fault that fails
 step 1 still keeps the CN10 retry running, whose attempts hold the
 primary's reads off while they run, so its observation can become too
 old, which the worker counts as a missed round, and missed rounds can move
-the role (Known limits). A dm-clone up with hydration off, or with its
-metadata read-only or failed, is this node's own fault and reads `ERROR`:
+the role (Known limits). A dm-clone up with hydration off, suspended, or
+with its metadata read-only or failed, is this node's own fault and reads
+`ERROR`:
 the primary that takes the role assembles the clone meta group and creates
 the dm-clone over the metadata it holds (steps 2 and 3). A clone meta group
 no cntlr can assemble leaves the clone's dm-clone row `MISSING` and its
@@ -3443,8 +3535,9 @@ delete the clone instead. A dm-clone that serves and whose copy is whole
 serves on over such a group, since it writes no metadata (Known limits).
 
 Any failure of step 1 registers the CN10 retry, and so do these later
-ones, each of which stops the build before the dm-clone serves: a clone
-meta group that is not ready while no dm-clone of the clone serves, a
+ones, each of which stops the build before the dm-clone serves in the
+row's sense, resumed included (step 2): a clone meta group or a
+destination that is not ready while no dm-clone of the clone serves so, a
 read of the dm-clone before step 3 that
 does not answer or that shows its metadata read-only or failed, anything
 step 3's converge of the dm-clone fails on, and the enable (its own
@@ -4428,10 +4521,14 @@ or did not look up, one more lookup, one more number read once that
 lookup finds the path serving, one superblock read and, with a bad-block
 list, one more; and for the group the case selection's `lsblk` for a
 create, or the forced start's holders listing of an array of the group
-that is there. A group whose array runs costs none of them. The
-sweep turns a live
-table's numbers back into dm names through the dm listing it enumerates
-with: `dmsetup ls` (CN21), or in a cntlr's verdict the reading's
+that is there. A group whose array runs costs none of them. A cntlr's
+read checks a clone's dm-clone against the numbers CN18 step 3 would load
+(CN18, The clone names): the destination raid0's and a `CnGrpName`
+group's from its reading, and the source head's and an md group's array's
+from "/sys/block", one file read each for each clone whose dm-clone the
+read tests. The sweep turns a live table's numbers back into dm names
+through the dm listing it enumerates with: `dmsetup ls` (CN21), or in a
+cntlr's verdict the reading's
 `dmsetup info` listing (CN30). No number comes from `lsblk`: the cn
 agent's one `lsblk` is CN12's check that no array already runs under a
 group's name, which a converge's case 1 and a read's name of an absent
@@ -4512,8 +4609,10 @@ The rows, each with its `res_name` and what its probe checks:
   and the `CnErrorName`: `dmsetup table`. A raid0, a td's dm-error, a thin
   volume, a concat or a thin pool found dm-suspended on the table it wants
   serves no IO and reads `RES_STATUS_ERROR` "suspended", which the cntlr's
-  verdict names (CN30); the ns-dev has its own text above, and a dm-clone's
-  row reads its status line (CN18).
+  verdict names (CN30); the ns-dev has its own text above, and a dm-clone
+  found dm-suspended, whatever its table, reads "suspended" too, its status
+  line after it, unless its metadata is read-only or failed, which its row
+  names first (CN18), and the verdict names it by its own test (CN30).
 * `td_id_to_thin_info` with its `slice_id_to_dm_thin`, named by the
   `CnThinDevName`: `dmsetup table` (pool and `dev_id`); a created td's
   volume a read reads absent is `RES_STATUS_MISSING` with no reason
@@ -4684,14 +4783,16 @@ The rows, each with its `res_name` and what its probe checks:
   not answer (CN10) makes it `RES_STATUS_ERROR` naming the read, never
   `MISSING`.
 * `clone_id_to_dm_clone`, named by the `CnCloneFinalName`:
-  `dmsetup info` — the reading's in a read — then
+  `dmsetup info` — the reading's in a read — whose attr flags give the
+  suspend bit, then
   `dmsetup status` with the noflush flag of a dm-clone that is there, and
   once more without it when the copy reads whole (`dnagent.md` SH17),
   whose line is the one used, and after a status read
   that failed the fresh `dmsetup info` of CN16 rule 5 and CN18 step 2; its
   status and its reason are CN18's shared rule's, which reads the
-  dm-clone's hydration and its metadata mode from the status line, and the
-  clone meta group's row of the same read for a dm-clone that is absent. The
+  dm-clone's hydration and its metadata mode from the status line, its
+  suspend bit from the info, and the clone meta group's and the
+  destination raid0's rows of the same read for a dm-clone that is absent. The
   details carry the raw status line whenever it was read, whatever the row's
   status (`architecture.md`, Live-state reporting — hydration progress;
   `DeleteClone`'s hydration check, which `force` skips, reads it).
@@ -4887,8 +4988,8 @@ device their backing names, the subsystems, the namespaces over their
 ns-dev and subsystem, and a transfer's dm-linear — over its origin's
 raid0 where the transfer is served (`xferServed`, CN17), over nothing
 where its device is an error table — its subsystem and its namespace
-over both; and, by tests of their own (below), the leg wrappers and the
-`RedundNone` groups' dm-linears. It names a row that
+over both; and, by tests of their own (below), the leg wrappers, the
+`RedundNone` groups' dm-linears and the dm-clones. It names a row that
 reads `RES_STATUS_MISSING` with no reason as "absent", and one that reads
 `RES_STATUS_ERROR`, or `RES_STATUS_OK` with `RES_REASON_DIFFERS` (a
 namespace that serves and whose ANA group differs, or a thin pool short of
@@ -4917,8 +5018,8 @@ whose array does not run waits for that array, which the member rules,
 the names of an absent array and of a forced start below and CN10's
 late-member retry cover, and over a broken layer of its
 own only that layer is named, the lowest, whose converge builds the rest.
-Reason for leaving out the rest of the legs' and groups' rows, the paths,
-the arrays and the clones: their state rests
+Reason for leaving out the rest of the legs', groups' and clones' rows,
+the paths and the arrays: their state rests
 on a remote end, and a new syncup does not cure a disk node that is gone;
 the rules below name what a converge can do for them. A converge's own
 code names these rows from its build, so a step whose command failed or
@@ -4970,6 +5071,38 @@ would give, would bring a `SyncupCntlr` on every second round
 (`dnv-worker.md` RW4 step 5) for a converge that changes nothing, so the
 name comes with the first read that finds the leg serving.
 
+A clone's dm-clone is named by a test of its own too, which the converge
+shares (CN18, The clone names), and not by its row, which reads the
+dm-clone's info and status line and no number its table maps, and carries
+what the clone's source does. A read names it "absent" when it is missing
+and "differs" otherwise, with what differs after it — "table is not the
+desired clone target", "suspended" or "hydration not enabled"; a converge
+names it when step 3's create, reload or resume, or the enable's message,
+fails, "differs" with the command's error. A read names it past CN18's
+gate (`cloneDmGate`) — the source ready, the clone meta group's and the
+destination raid0's rows `OK`, and the dm-clone's read answered with its
+metadata neither read-only nor failed — while the build would act on it
+(`cloneDmBuild`): it is missing, suspended, its table is not the one step
+3 would load, by its target, its size and its four positional arguments,
+or its hydration is off (`cloneDmName`). A read inside the build that did
+not answer, of a number step 3 would load among them, names nothing on
+either channel. The build reads no read-only flag, so a dm-clone read-only
+by the block layer's flag is not named (CN18 step 3). A dm-clone over a
+row that is not `OK` waits for that row's own name, or for the group's
+rules below, the lowest layer, though the converge that name brings
+builds both. A clone meta group whose member reconciliation md refuses on
+every converge reads `ERROR` on the converge's row alone, since a read
+makes no reconciliation (CN12, CN28), so a read names a dm-clone the build
+would change over it, a missing one among them, and each converge that
+name brings refuses again, on every second round at most (`dnv-worker.md`
+RW4 step 5; Known limits). Reason: only a converge builds the dm-clone,
+and without the name a dm-clone left suspended, refused or on an old
+source number, or a build a promotion stopped short of its enable, reads
+code zero until a new revision; and over a state no converge cures, which
+the converge's own reply does not name, a name would bring a `SyncupCntlr`
+on every second round (`dnv-worker.md` RW4 step 5) for a converge that
+changes nothing.
+
 A cntlr's read-only verdict also names each side its converge would
 connect (CN10): each provisioned side of a wanted leg that the leg's
 subsystem holds no controller for, as "enumeration failed" with the leg's
@@ -4996,6 +5129,21 @@ with the leg's subsystem NQN, " at " and the side's address, then "path to
 cut", so that the worker's re-send brings the converge that cuts it. The
 converge's reply carries none of them, as for every condition only a read
 names (below).
+
+A cntlr's read-only verdict also names each entry of a clone's
+`src_tr_conf_list` that CN18 step 1 would connect (CN18, The clone names):
+an entry the source's lookup holds no controller for, in any state, as
+"enumeration failed" with the source NQN, " at " and the entry's address,
+then "no controller", while no sweep's disconnect of the source is in
+flight, the lookup answered and every controller's "address" read answered
+(`cloneSource.toName`). It reads them from the one lookup of the source the
+clone's rows take, for a clone the request builds below
+`SP_LEVEL_NO_CLONE` on a primary, whose destination td resolves, that
+carries a clone meta group and that is not deferred. The converge's reply
+carries none of them. Reason: a source controller the kernel deleted, or
+one a sweep's disconnect took while a clone of the source waited for that
+disconnect to return (CN18 step 1), comes back only from a converge's
+connect, as a leg's side does (above).
 
 A cntlr's read-only verdict also names each md member that its
 converge's member reconciliation would fail early (CN12, The early fail):
@@ -5181,11 +5329,11 @@ re-issues the `Syncup*` that sweeps again. A converge's observation
 carries what its own removing sweep names and, for a cntlr, the rows of
 its build the row rule above names, so what only a read's
 verdict names — a connection whose subsystem directory is left
-with no controller (CN21), a side with no controller the converge would
-connect, an md member to fail early or put back, a broken array to
-assemble again, an absent array to
-start, a forced start to carry through, a piece of the base state and a
-stored forced-start mark (all above) — brings by itself the
+with no controller (CN21), a side or a clone source's entry with no
+controller the converge would connect, an md member to fail early or put
+back, a broken array to assemble again, an absent array to start, a forced
+start to carry through, a piece of the base state and a stored
+forced-start mark (all above) — brings by itself the
 `Syncup*` on every second
 round at most (`dnv-worker.md` RW4 step 5, and RW5 for the subsystem
 directory) while the agent accepts it; while the agent's saves fail, the
@@ -5683,7 +5831,12 @@ stores instead is CN23's.
   read (CN18's shared rule), so the primary's health epoch stays set —
   what that costs in failovers is `dnv-worker.md`, Known limits — while a
   host waits on the namespace, which stays inaccessible for as long as
-  the build keeps failing (CN16). With the dm-clone gone between attempts
+  the build keeps failing (CN16). A resume, or a reload whose load fails,
+  that keeps failing leaves the dm-clone suspended, and its row reads
+  `RES_STATUS_ERROR` "suspended" on both channels, which sets the health
+  epoch the same way, and CN16, which reads no suspend bit, parks none of
+  its ns-devs for it (CN18). With the
+  dm-clone gone between attempts
   (a refused create), `clone_id_to_dm_clone` reads `RES_STATUS_MISSING`,
   which sets none, and `ns_id_to_dm_linear` reads `OK` over the park,
   because a dm-clone confirmed absent does not serve (CN16 rule 5,
@@ -5691,9 +5844,21 @@ stores instead is CN23's.
   epoch while a host waits on the namespace; a status read that keeps not
   answering leaves its rows `RES_STATUS_ERROR`; and a source fault reads
   `RES_STATUS_MISSING` in `clone_id_to_target`, which sets no health epoch
-  (the next item). Nothing but the retry re-runs the build unless the
-  cntlr is converged for another reason (a revision bump, a non-zero reply
-  code, an agent restart).
+  (the item "A fault of a clone's source", below). Beside the retry, a
+  cntlr's read names the dm-clone while the build would change it (CN18,
+  The clone names; CN30), and the worker's re-send re-runs the build on
+  that name; nothing else does unless the cntlr is converged for another
+  reason (a revision bump, another non-zero reply code, an agent restart).
+  A step 3 create, reload or resume, or an enable, that keeps failing is
+  named by the converge's own reply too, so it brings a `SyncupCntlr` on
+  every round (`dnv-worker.md` RW4), and no read completes in between
+  (`dnagent.md` SH30), at the cost the worker's Known limits give for every
+  lasting leftover. A clone meta group whose
+  member reconciliation md refuses on every converge reads `OK` in a read,
+  which makes no reconciliation, so the read names a dm-clone the build
+  would change over it, a missing one among them, and the converge of each
+  re-send refuses again, on every second round at most (`dnv-worker.md`
+  RW4 step 5), until the reconciliation goes through or an operator acts.
 * A dm-clone whose metadata is read-only or failed stays so. dm-clone
   leaves read-write mode when an operation on its metadata device — the
   clone meta group — fails, and nothing the agent does takes it back: the
@@ -5732,9 +5897,17 @@ stores instead is CN23's.
   keeps the CN10 retry running for as long as it lasts (CN18), with the
   profile of the late-member retry above: its attempts hold the cntlr's
   reads off, so its observation can become too old, which counts as a
-  missed round, and missed rounds can fail the primary over. A source whose
-  every endpoint has a controller, live or not, and whose namespace is
-  there passes step 1, so its fault registers no retry. A clone that has
+  missed round, and missed rounds can fail the primary over. Such an
+  endpoint is also named by every read while no disconnect of the source
+  is in flight and every controller's address read answers (CN18, The
+  clone names; CN30), so each round that answers from a read brings a
+  `SyncupCntlr`, every second round at most (`dnv-worker.md` RW4 step 5),
+  and one converge that fails at the connect after up to the pass's
+  connect budget (CN10). It lasts until the source answers a connect, as
+  a source that comes back does, or the clone leaves the request, and it
+  runs beside the retry. A source whose every endpoint has a controller,
+  live or not, and whose namespace is there passes step 1, so its fault
+  registers no retry and no name. A clone that has
   hydrated in full serves on through its dm-clone, its namespace optimized,
   since serving follows the dm-clone's own status and not the rows (CN16
   rule 5); that rests on a dm-clone keeping hydration enabled once it has

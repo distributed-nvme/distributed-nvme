@@ -294,7 +294,8 @@ logs for the same thing.
   (`dnagent.md` DN16), or, on either role, what a background read found
   absent that a re-sent `Syncup*` would build, or the node's nvmet port in
   a state one would rewrite (`dnagent.md` SH31, DN16), or, on a cntlr, a
-  side of a wanted leg with no controller that the converge would connect,
+  side of a wanted leg or an entry of a clone's source with no controller
+  that the converge would connect,
   a forced-start mark of the request the agent holds while that request
   does not count as delivered, or a group's forced start its converge would
   carry through (`cnagent.md` CN8, CN12, CN30) — each rendered

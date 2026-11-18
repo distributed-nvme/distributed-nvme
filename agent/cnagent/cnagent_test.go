@@ -2648,6 +2648,9 @@ func TestGroupRowReadsItsLegWrapperFirst(t *testing.T) {
 // many times over, so the md walk reads none of them. This read's arrays all
 // run, so it weighs no member (TestAGroupNameLooksUpAgainOnlyALegThatServed
 // counts those that do).
+// A read of a clone also reads the number of its source's head, and of its
+// clone meta group's array, for the dm-clone's name (cloneDmName); this
+// fixture holds none.
 func TestGroupProbeWalksOnce(t *testing.T) {
 	srv, node := newTestServer(t)
 	syncupBoth(t, srv, reqOpts{

@@ -474,7 +474,9 @@ func assertMissingDetails(
 // confirmed, never assumed: when that `dmsetup info` does not answer, the
 // read stays an error, the ns-dev keeps the table it has and its row reads
 // ERROR. The confirm is the dm-clone's own `dmsetup info` in a cntlr's read
-// too, never the reading's listing.
+// too, never the reading's listing. With the absence confirmed, the
+// converge's reply names the dm-clone with the refused create, and so does
+// the read, as absent (CN30).
 func TestNsDevParksOverAMissingDmClone(t *testing.T) {
 	for _, tc := range []struct {
 		name        string
@@ -537,6 +539,16 @@ func TestNsDevParksOverAMissingDmClone(t *testing.T) {
 			assertParked(t, srv, node, testNs, testTd, "the pass")
 			assertOk(t, converged, "ns-dev")
 			assertOk(t, probed, "probed ns-dev")
+			if details := reply.GetAgentReply().GetDetails(); !strings.
+				Contains(details, rowNamed(clone, "differs: ")) ||
+				!strings.Contains(details, "Invalid argument") {
+				t.Fatalf("the converge replied %v, want it to name the "+
+					"dm-clone with the refused create", reply.GetAgentReply())
+			}
+			if !strings.Contains(rowRound(t, srv, 3).GetAgentReply().
+				GetDetails(), rowNamed(clone, "absent")) {
+				t.Fatalf("the read does not name the absent dm-clone")
+			}
 		})
 	}
 }
@@ -1524,6 +1536,16 @@ func TestCloneDmRowRule(t *testing.T) {
 			pb.ResStatus_RES_STATUS_OK, raw, none},
 		{"serving beside a group not ready", ready, false, hydrating,
 			pb.ResStatus_RES_STATUS_OK, raw, none},
+		{"suspended, hydration on", ready, true, suspendedRead(hydrating),
+			pb.ResStatus_RES_STATUS_ERROR, detailsSuspended + "\n" + raw,
+			none},
+		{"suspended, hydration off", ready, true, suspendedRead(read(raw)),
+			pb.ResStatus_RES_STATUS_ERROR, detailsSuspended + "\n" + raw,
+			none},
+		{"suspended, metadata read-only", ready, true,
+			suspendedRead(read(strings.Replace(raw, " rw", " ro", 1))),
+			pb.ResStatus_RES_STATUS_ERROR, detailsCloneMetaReadOnly + "\n" +
+				strings.Replace(raw, " rw", " ro", 1), none},
 		{"hydration off", ready, true, read(raw),
 			pb.ResStatus_RES_STATUS_ERROR,
 			detailsCloneNotHydrating + "\n" + raw, none},
@@ -1549,7 +1571,7 @@ func TestCloneDmRowRule(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			status, details, reason := cloneDmRow(
-				cp, tc.src, tc.grpReady, tc.dm)
+				cp, tc.src, tc.grpReady, true, tc.dm)
 			if status != tc.status || details != tc.details ||
 				reason != tc.reason {
 				t.Fatalf("%v/%q/%v, want %v/%q/%v", status, details, reason,
@@ -1559,6 +1581,106 @@ func TestCloneDmRowRule(t *testing.T) {
 				(status == pb.ResStatus_RES_STATUS_OK) {
 				t.Fatalf("the read serves %v beside a row %v", serves,
 					status)
+			}
+		})
+	}
+}
+
+// TestCloneDmRowDestinationRule pins the dm-clone row beside a destination
+// raid0 whose row of the pass is not OK, which the build's gate holds the
+// dm-clone back for (cloneDmGate): an absent dm-clone beside a ready source
+// and group reads MISSING "destination raid0 not ready" with no reason,
+// beside a group not ready the group's text, which the gate reads first, and
+// beside an unready source the source's text; a dm-clone that is there reads
+// by its own read.
+func TestCloneDmRowDestinationRule(t *testing.T) {
+	cp := testClonePlan(t)
+	ready := cloneSource{view: &subsysView{found: true, nsDev: "/dev/nvme5n1",
+		ctrls: []ctrlView{{name: "nvme5", trAddr: testIp2,
+			trSvcId: testSvcId2, state: "live"}}}}
+	const raw = "0 131072 clone 8 1/1024 2048 0/64 0 0 0 rw"
+	hydrating := cloneDmRead{present: true, raw: raw, hydrating: true,
+		mode: common.CloneMetadataReadWrite}
+	for _, tc := range []struct {
+		name     string
+		src      cloneSource
+		grpReady bool
+		dm       cloneDmRead
+		status   pb.ResStatus
+		details  string
+	}{
+		{"absent beside a ready source and group", ready, true,
+			cloneDmRead{}, pb.ResStatus_RES_STATUS_MISSING,
+			detailsCloneDstNotReady},
+		{"absent beside a group not ready", ready, false, cloneDmRead{},
+			pb.ResStatus_RES_STATUS_MISSING, detailsCloneMetaGrpNotReady},
+		{"absent beside an unconnected source",
+			cloneSource{view: &subsysView{}}, true, cloneDmRead{},
+			pb.ResStatus_RES_STATUS_MISSING, "source not connected"},
+		{"serving", ready, true, hydrating, pb.ResStatus_RES_STATUS_OK,
+			raw},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			status, details, reason := cloneDmRow(
+				cp, tc.src, tc.grpReady, false, tc.dm)
+			if status != tc.status || details != tc.details ||
+				(status == pb.ResStatus_RES_STATUS_MISSING &&
+					tc.src.ready(cp) && reason != pb.ResReason_RES_REASON_NONE) {
+				t.Fatalf("%v/%q/%v, want %v/%q", status, details, reason,
+					tc.status, tc.details)
+			}
+		})
+	}
+}
+
+// suspendedRead is dm with its info's suspend bit set (probeCloneDm).
+func suspendedRead(dm cloneDmRead) cloneDmRead {
+	dm.suspended = true
+	return dm
+}
+
+// TestCloneDmBuildRule pins the predicate CN18 steps 3 to 5 and a cntlr's
+// read share past the gate (cloneDmBuild): step 3 creates an absent
+// dm-clone, reloads one whose table differs and resumes one suspended on the
+// table it wants; the build acts on any of them and on a dm-clone found with
+// hydration off, and on nothing else; and the verdict names the dm-clone
+// exactly while the build acts, with what step 3 would change before
+// hydration off.
+func TestCloneDmBuildRule(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		shape     dmShape
+		hydrating bool
+		step      dmStep
+		named     string
+	}{
+		{"as wanted", dmShapeWanted, true, dmStepNone, ""},
+		{"hydration off", dmShapeWanted, false, dmStepNone,
+			"differs: " + detailsCloneNotHydrating},
+		{"absent", dmShapeAbsent, false, dmStepCreate, "absent"},
+		{"another table", dmShapeOther, true, dmStepReload,
+			"differs: table is not the desired clone target"},
+		{"another table, hydration off", dmShapeOther, false, dmStepReload,
+			"differs: table is not the desired clone target"},
+		{"suspended", dmShapeSuspended, true, dmStepResume,
+			"differs: " + detailsSuspended},
+		{"suspended, hydration off", dmShapeSuspended, false, dmStepResume,
+			"differs: " + detailsSuspended},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			build := cloneDmBuild{shape: tc.shape, hydrating: tc.hydrating}
+			if got := build.step(); got != tc.step {
+				t.Fatalf("step %v, want %v", got, tc.step)
+			}
+			if got := build.acts(); got != (tc.named != "") {
+				t.Fatalf("acts %v, want %v", got, tc.named != "")
+			}
+			got := ""
+			if err := build.name(); err != nil {
+				got = err.Error()
+			}
+			if got != tc.named {
+				t.Fatalf("named %q, want %q", got, tc.named)
 			}
 		})
 	}
@@ -1623,6 +1745,56 @@ func TestCloneSourceReadyRule(t *testing.T) {
 
 // testClonePlan is the fixture clone's plan, as a primary's converge builds
 // it.
+// TestCloneSourceNameRule pins what a cntlr's read names of a clone's source
+// (cloneSource.toName): the entries CN18 step 1 would connect
+// (srcToConnect), the ones with no controller in any state, and none while a
+// disconnect of the source is in flight, the lookup did not answer, or a
+// controller's address read did not answer.
+func TestCloneSourceNameRule(t *testing.T) {
+	cp := testClonePlan(t)
+	unknown := ctrlView{name: "nvme7", addrUnknown: errors.New("killed")}
+	live := ctrlView{name: "nvme5", trAddr: testIp2, trSvcId: testSvcId2,
+		state: "live"}
+	connecting := live
+	connecting.state = "connecting"
+	other := ctrlView{name: "nvme6", trAddr: testIp, trSvcId: testSvcId,
+		state: "live"}
+	view := func(ctrls ...ctrlView) *subsysView {
+		return &subsysView{found: true, nsDev: "/dev/nvme5n1", ctrls: ctrls}
+	}
+	for _, tc := range []struct {
+		name  string
+		src   cloneSource
+		named bool
+	}{
+		{"its controller live", cloneSource{view: view(live)}, false},
+		{"its controller connecting", cloneSource{view: view(connecting)},
+			false},
+		{"no subsystem", cloneSource{view: &subsysView{}}, true},
+		{"another endpoint's controller only",
+			cloneSource{view: view(other)}, true},
+		{"a disconnect in flight", cloneSource{inFlight: true}, false},
+		{"a disconnect in flight over a read with no controller",
+			cloneSource{inFlight: true, view: &subsysView{}}, false},
+		{"the lookup unanswered", cloneSource{readErr: errSubsysUnknown},
+			false},
+		{"no read", cloneSource{}, false},
+		{"an address read unanswered", cloneSource{view: view(unknown)},
+			false},
+		{"an address read unanswered beside another endpoint's controller",
+			cloneSource{view: view(other, unknown)}, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got := tc.src.toName(cp)
+			if named := len(got) == 1 && got[0].GetTrAddr() == testIp2 &&
+				got[0].GetTrSvcId() == testSvcId2; named != tc.named ||
+				len(got) > 1 || (!tc.named && len(got) != 0) {
+				t.Fatalf("named %v, want the entry named: %v", got, tc.named)
+			}
+		})
+	}
+}
+
 func testClonePlan(t *testing.T) *clonePlan {
 	t.Helper()
 	plan := newCntlrPlan(common.NewNameFmt(common.DefaultLocalStorPrefix),

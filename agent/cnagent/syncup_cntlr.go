@@ -620,7 +620,8 @@ func (s *CnAgentServer) build(
 	}
 
 	// Clones (CN18), then transfers (CN17). A clone's build reads its clone
-	// meta group's row, which the group loop above wrote.
+	// meta group's row and its destination raid0's row, which the group and
+	// td loops above wrote.
 	if plan.wantClone {
 		for _, cp := range plan.clones {
 			if s.ensureClone(ctx, st, plan, cp, info, budget) {

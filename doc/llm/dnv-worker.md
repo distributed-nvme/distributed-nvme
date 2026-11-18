@@ -6958,9 +6958,9 @@ which no suite case sets, so no suite case runs RW13's count compare.
   at its threshold, or AR7 replaces it where there is no failover
   candidate; the new primary creates the dm-clone over the metadata its
   clone meta group holds and finishes the build (`cnagent.md` CN18). A
-  dm-clone whose metadata is read-only or failed reads `ERROR` and moves
-  the role the same way. A fault of the clone's source does not itself move
-  the role: its row reads `MISSING` (`cnagent.md` CN18), which sets no
+  dm-clone left suspended, or whose metadata is read-only or failed, reads
+  `ERROR` and moves the role the same way. A fault of the clone's source
+  does not itself move the role: its row reads `MISSING` (`cnagent.md` CN18), which sets no
   `err_epoch` (HL2), so neither AR5 nor AR7 acts on that row, and a fault
   in the primary's own path to the source reads the same; which of the
   clone's rows carry the source-fault reason, and so hold no settle (HL2),
