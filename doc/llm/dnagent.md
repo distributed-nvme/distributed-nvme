@@ -829,6 +829,9 @@ disk metadata (`DiskMeta`) — takes the same bound from the exported
 caller's ctx on unchanged: the `OsClient` bounds its wait for a slot, and
 waits for each discard it sends as long as the kernel takes (`osclient.md`,
 DiscardRanges). The bound holds in full only for a child the signals end.
+A dial (`NvmeHost.Dial`) runs in the agent's own process and ends at the
+timeout its caller passes or at the deadline, whichever comes first
+(`osclient.md`, DialTcp).
 An in-process `OsClient` call — a directory listing, a modification-time
 read, a device-number read, a file, proto or block read or write — is
 bounded only until its syscall starts: its ctx is checked once, before it
@@ -4179,6 +4182,14 @@ else reported through `agent_reply` is still a protocol-level refusal.
 
 ## Known limits
 
+* The migration destination's connect to the migration source export
+  (DN13) takes no connect place and dials nothing first, as the cn agent's
+  connects do (`cnagent.md` CN10). A source disk node whose machine is down
+  holds the kernel's one fabrics connect at a time on the machine for about
+  three seconds an attempt, its SYNs going unanswered, and every other
+  connect of the machine waits behind it, the cn agent's on the same
+  machine among them; a source whose port answers while its target is
+  stuck holds it until the kernel's own timeouts end the connect.
 * A disk formatted at 512-byte blocks that reads another block size later,
   as a loop device set up again with `-b 4096` over the same file does,
   keeps its table, its sides' devices and their data (DN5), but until the

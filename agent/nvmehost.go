@@ -3,10 +3,12 @@ package agent
 import (
 	"context"
 	"fmt"
+	"net"
 	"regexp"
 	"slices"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/distributed-nvme/distributed-nvme/common"
 )
@@ -66,6 +68,35 @@ func (h *NvmeHost) Connect(
 		"--fast_io_fail_tmo",
 		strconv.FormatUint(uint64(fastIoFailTmo), 10),
 		"--ctrl-loss-tmo", "-1")
+}
+
+// DialTransport is the one transport Dial dials.
+const DialTransport = "tcp"
+
+// Dial opens a TCP connection to tr's address and lets it go, waiting at
+// most timeout for the address to answer (cnagent.md CN10): the test before
+// a connect that a dead address fails in the agent's own process, where an
+// `nvme connect` would hold the kernel's one fabrics connect at a time while
+// its SYNs go unanswered. An address that did not answer is an error wrapping
+// common.ErrDialTimeout (osclient.md, DialTcp). A transport other than
+// DialTransport is not dialled: nil at once.
+func (h *NvmeHost) Dial(
+	ctx context.Context,
+	tr TrConf,
+	timeout time.Duration,
+) error {
+	if tr.TrType != DialTransport {
+		return nil
+	}
+	cctx, cancel := cmdCtx(ctx)
+	defer cancel()
+	return h.oc.DialTcp(cctx, DialAddress(tr), timeout)
+}
+
+// DialAddress is the "host:port" Dial dials for tr, the key of a pass's
+// mark of an address that did not answer (cnagent.md CN10).
+func DialAddress(tr TrConf) string {
+	return net.JoinHostPort(tr.TrAddr, tr.TrSvcId)
 }
 
 func (h *NvmeHost) Disconnect(ctx context.Context, nqn string) error {

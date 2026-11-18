@@ -75,6 +75,11 @@ type CnAgentServer struct {
 	// disconnectConcurrency: a goroutine holds one of its buffer slots for
 	// the whole `nvme disconnect`. It is a field so a test can shrink it.
 	disconnectSlots chan struct{}
+	// connectSlots are the agent's connect places (CN10, connectWithin):
+	// each connect attempt of a pass, its dial and its `nvme connect`,
+	// holds one of connectConcurrency buffer slots, taken before any
+	// OsClient slot. It is a field so a test can read it.
+	connectSlots chan struct{}
 
 	// rootCtx is the process lifetime ctx, captured by Prepare before the
 	// gRPC listener opens, or at Reconcile when nothing prepared the server
@@ -283,6 +288,7 @@ func NewCnAgentServer(
 		roundReads:      true,
 		disconnecting:   make(map[string]struct{}),
 		disconnectSlots: make(chan struct{}, disconnectConcurrency),
+		connectSlots:    make(chan struct{}, connectConcurrency),
 		rootCtx:         context.Background(),
 		probeInterval:   common.CnLegProbeInterval * time.Second,
 		probeStall:      common.CnLegProbeStallSeconds * time.Second,

@@ -13,7 +13,7 @@
 # thinbm, torn, clone_xfer, restart, pause; `teardown`, the teardown-by-sweep
 # case, injects the faults (a pinned dm device, an iptables partition of the
 # nvme-tcp port, a background writer); case A's `degrade` stage reuses the
-# partition, `clone_xfer` slows its copy with a token bucket on what the clone's node
+# partition, its `dial` stage drops new connections to the port, `clone_xfer` slows its copy with a token bucket on what the clone's node
 # sends to its own nvme-tcp port, and `pause` cuts a disk node off both ways
 # under a timed writer; PAUSE_MODE=measure makes it the measurement of the
 # write pause (cnagent_integtest.md, Cases, pause). Cleanup
@@ -77,6 +77,12 @@ QID_MAX=3
 # (copy_held).
 COPY_RATE=4mbit
 HOLD_SECS=4
+
+# redund's dial stage (cnagent.md CN10): the cn agent's dial timeout,
+# common.CnConnectDialTimeout, in ms, and the room the stage gives a converge
+# that waits for one dial over the time of one that connects nothing.
+DIAL_TIMEOUT_MS=1500
+DIAL_SLACK_MS=1000
 
 # Bdev parameters, everywhere.
 BLOCK_SIZE=1048576
@@ -195,6 +201,10 @@ THROTTLED=0
 # lifts the cut and stops both loops even when a run fails.
 BLACKHOLED=0
 PAUSE_VM=0
+# The VM that drops new connections to its nvme-tcp port for redund's dial
+# stage (syn_drop_from), 0 while none does: on_exit lifts the rule even when
+# a run fails, for the two-way cut's reason.
+SYNDROPPED=0
 # The file whose removal ends the pause case's background rounds
 # (pause_rounds), "" while none run: on_exit removes it.
 PAUSE_STOP=""
@@ -523,6 +533,10 @@ on_exit() {
 		fi
 		if [ "$PAUSE_VM" -ne 0 ]; then
 			helper_ok "$PAUSE_VM" "pause_stop 0" >&2
+		fi
+		if [ "$SYNDROPPED" -ne 0 ]; then
+			helper_ok "$SYNDROPPED" \
+				"unsyn_drop_from ${IP[$((3 - SYNDROPPED))]}" >&2
 		fi
 		[ -z "$PAUSE_STOP" ] || rm -f "$PAUSE_STOP"
 		log ""
@@ -3229,6 +3243,7 @@ cleanup_phase1() { # <cn16> [other vm ip]
 	if [ -n "${2:-}" ]; then
 		unpartition_from "$2" >/dev/null
 		unblackhole_from "$2" >/dev/null
+		unsyn_drop_from "$2" >/dev/null
 	fi
 
 	# Nothing may stay suspended from here on (see resume_suspended).
@@ -3597,6 +3612,55 @@ blackhole_rules() {
 		"$ipt" -S OUTPUT 2>/dev/null |
 			grep -F -- "-d $1" | grep -F -- "--sport $TR_SVC_ID"
 	} || true
+}
+
+# syn_drop_from <ip> — drops the SYNs this VM receives from <ip> aimed at the
+# nvme-tcp port, and nothing else: a new connection from <ip> goes
+# unanswered, as one to a machine that is down does, while the connections
+# that stand keep working (redund's dial stage). Prints "dropping", or
+# "failed" when the rule is not in.
+syn_drop_from() {
+	local ipt
+	ipt=$(iptables_bin)
+	if [ -n "$ipt" ] &&
+		"$ipt" -I INPUT -s "$1" -p tcp --dport "$TR_SVC_ID" --syn -j DROP \
+			>/dev/null 2>&1; then
+		echo dropping
+	else
+		echo failed
+	fi
+}
+
+# unsyn_drop_from <ip> — removes the rule until none is left, for
+# unpartition_from's reason. Prints "restored".
+unsyn_drop_from() {
+	local i ipt
+	ipt=$(iptables_bin)
+	if [ -n "$ipt" ]; then
+		for ((i = 0; i < 16; i++)); do
+			"$ipt" -D INPUT -s "$1" -p tcp --dport "$TR_SVC_ID" --syn \
+				-j DROP >/dev/null 2>&1 || break
+		done
+	fi
+	echo restored
+}
+
+# syn_drop_rules <ip> — the rules unsyn_drop_from is supposed to have taken:
+# empty output is the assertion.
+syn_drop_rules() {
+	local ipt
+	ipt=$(iptables_bin)
+	[ -n "$ipt" ] || return 0
+	"$ipt" -S INPUT 2>/dev/null | grep -F -- "-s $1" |
+		grep -F -- "--dport $TR_SVC_ID" | grep -F -- "SYN" || true
+}
+
+# kmsg_count_since <mark> <text> — how many kernel log lines after the last
+# line holding <mark> hold <text>.
+kmsg_count_since() {
+	dmesg 2>/dev/null | awk -v m="$1" 'index($0, m) { buf = ""; f = 1; next }
+		f { buf = buf $0 "\n" } END { printf "%s", buf }' |
+		grep -cF -- "$2" || true
 }
 
 # The pause case's files, under /var/tmp for the writer's reason:
@@ -5190,6 +5254,88 @@ redund_md_refusal() {
 	assert_no_residue "$sp"
 }
 
+# redund_dial is redund's dial stage (cnagent_integtest.md, Cases, redund;
+# cnagent.md CN10), run while CN2 is the standby, which holds its legs and
+# builds nothing above them, before the host connects. vm1 drops the SYNs
+# vm2 sends to its nvme-tcp port, so a new connection from CN2 into DN1 goes
+# unanswered, as one to a machine that is down does, while the connections
+# that stand keep working; CN2's two controllers into DN1 are then
+# disconnected, so the converge must connect them again. Before each connect
+# the agent dials the side's address: the first dial into DN1 goes
+# unanswered for the dial timeout and fails its leg, and the second leg
+# there fails at once with the same text, with no `nvme connect` into DN1,
+# which would hold the kernel's one connect at a time for about three
+# seconds a leg; every other row stays OK, and the converge takes no longer
+# than one dial timeout over one that connects nothing. With the rule gone,
+# the next converge connects both legs, whose dials, held open a moment
+# before they close (osclient.md, DialTcp), leave no nvmet-tcp error in
+# DN1's kernel log.
+redund_dial() { # sp c2 req2 rev2
+	local sp=$1 c2=$2 req2=$3 rev2=$4 out leg dnqn t0 base took bad mark seq
+	stage dial "a disk node that leaves new connections unanswered: one dial fails its legs, the rest stay OK (CN10)"
+	assert_eq "$(helper 1 have_iptables)" yes \
+		"dial: vm1 needs iptables to drop the SYNs to its nvme-tcp port"
+	t0=$(date +%s%N)
+	out=$(cn_syncup_cntlr 2 "$req2")
+	base=$((($(date +%s%N) - t0) / 1000000))
+	assert_all_ok "$out" .cntlr_info "dial: the converge before the drop"
+	SYNDROPPED=1
+	assert_eq "$(helper 1 "syn_drop_from ${IP[2]}")" dropping \
+		"dial: the SYN drop rule was not installed"
+	for leg in "${A_MLEG[1]}" "${A_DLEG[1]}"; do
+		dnqn=$(side_to_cn_nqn "$CLUSTER" "$sp" "$leg" "${CNID[2]}")
+		sshv 2 "nvme disconnect -n '$dnqn'" >/dev/null ||
+			die "dial: disconnecting CN2's controller of $dnqn"
+		helper 2 "wait_no_ctrl '$dnqn' 30" >/dev/null ||
+			die "dial: CN2 still holds a controller of $dnqn"
+	done
+	t0=$(date +%s%N)
+	out=$(cn_syncup_cntlr 2 "$req2")
+	took=$((($(date +%s%N) - t0) / 1000000))
+	log "  the converge took $took ms, $base ms with nothing to connect"
+	for leg in "${A_MLEG[1]}" "${A_DLEG[1]}"; do
+		assert_map_status "$out" leg_id_to_leg "$leg" RES_STATUS_ERROR \
+			"dial tcp ${IP[1]}:$TR_SVC_ID: timed out" "dial: DN1's leg"
+	done
+	assert_map_ok "$out" leg_id_to_leg "${A_MLEG[2]}" "dial: DN2's leg"
+	assert_map_ok "$out" leg_id_to_leg "${A_DLEG[2]}" "dial: DN2's leg"
+	bad=$(jq_of "$out" '[.cntlr_info | .. | objects | select(has("status"))
+		| select(.status != "RES_STATUS_OK") | (.res_name // "(unnamed)")]
+		| length')
+	assert_eq "$bad" 2 "dial: rows not OK beside DN1's two legs"
+	# One dial into DN1, and no `nvme connect` there: the second leg failed
+	# on the first one's mark.
+	seq=$(helper 2 "cn_msg $TRACE 'os dial'") ||
+		die "dial: reading CN2's dial records"
+	assert_eq "$(printf '%s\n' "$seq" |
+		grep -cF "\"address\":\"${IP[1]}:$TR_SVC_ID\"" || true)" 1 \
+		"dial: CN2's dials of DN1's address"
+	seq=$(helper 2 "cn_events $TRACE") || die "dial: reading CN2's commands"
+	assert_eq "$(event_cnt "$seq" "^nvme connect .*--traddr ${IP[1]} ")" 0 \
+		"dial: CN2's nvme connects into DN1"
+	[ "$took" -ge "$DIAL_TIMEOUT_MS" ] ||
+		die "dial: the converge took $took ms, less than the dial timeout"
+	[ "$took" -le $((base + DIAL_TIMEOUT_MS + DIAL_SLACK_MS)) ] ||
+		die "dial: the converge took $took ms, more than one dial timeout" \
+			"($DIAL_TIMEOUT_MS ms) over the $base ms of one that connects nothing"
+	assert_eq "$(helper 1 "unsyn_drop_from ${IP[2]}")" restored \
+		"dial: removing the SYN drop rule"
+	assert_eq "$(helper 1 "syn_drop_rules ${IP[2]}")" "" \
+		"dial: a SYN drop rule is left on vm1"
+	SYNDROPPED=0
+	mark="dnv-it-dial-$RANDOM$RANDOM"
+	sshv 1 "echo '$mark' >/dev/kmsg" || die "dial: marking vm1's kernel log"
+	out=$(cn_syncup_cntlr 2 "$req2")
+	assert_all_ok "$out" .cntlr_info "dial: the converge after the drop"
+	resync_until_clean 2 "$sp" "$c2" "$rev2" "$req2" 30 "dial"
+	assert_eq "$(helper 1 "kmsg_count_since '$mark' 'failed to allocate queue'")" 0 \
+		"dial: nvmet-tcp errors in DN1's kernel log after the dials"
+	for leg in "${A_MLEG[1]}" "${A_DLEG[1]}"; do
+		assert_eq "$(leg_state 2 "$sp" "$leg" "${CNID[2]}" 1)" live \
+			"dial: CN2's leg into DN1 connected again"
+	done
+}
+
 case_redund() {
 	CASE=redund
 	DIAG_CNTLRS=()
@@ -5304,6 +5450,8 @@ case_redund() {
 		assert_eq "$(helper "$i" "allowed_hosts '$nqn'")" "$HOST_NQN" \
 			"redund cn$i allowed_hosts"
 	done
+
+	redund_dial "$sp" "$c2" "$req2" "$rev2"
 
 	stage host "one namespace, two paths: CN1 optimized, CN2 inaccessible"
 	host_connect "$hv" 1 "$nqn"

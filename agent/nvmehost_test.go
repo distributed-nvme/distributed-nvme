@@ -9,6 +9,7 @@ import (
 	"strings"
 	"syscall"
 	"testing"
+	"time"
 
 	"github.com/distributed-nvme/distributed-nvme/common"
 )
@@ -16,6 +17,50 @@ import (
 // ---------------------------------------------------------------------------
 // The connect flags (SH20)
 // ---------------------------------------------------------------------------
+
+// TestDialDialsTheTcpAddress pins Dial (cnagent.md CN10): a tcp endpoint is
+// dialled at its "host:port", an IPv6 address in brackets, with the timeout
+// the caller passes and under the soft timeout of every OS touch (SH15); the
+// error comes back as the OsClient gave it; an endpoint of another transport
+// is not dialled at all.
+func TestDialDialsTheTcpAddress(t *testing.T) {
+	var dialled []string
+	var deadlines int
+	failure := fmt.Errorf("dial tcp: %w", common.ErrDialTimeout)
+	host := NewNvmeHost(&common.FakeOsClient{
+		DialTcpFn: func(ctx context.Context, addr string,
+			timeout time.Duration) error {
+			if _, ok := ctx.Deadline(); ok {
+				deadlines++
+			}
+			dialled = append(dialled, fmt.Sprintf("%s %v", addr, timeout))
+			if strings.HasPrefix(addr, "[") {
+				return failure
+			}
+			return nil
+		},
+	})
+	ctx := context.Background()
+	if err := host.Dial(ctx, TrConf{TrType: "tcp", AdrFam: "ipv4",
+		TrAddr: "192.0.2.7", TrSvcId: "4420"}, time.Second); err != nil {
+		t.Fatalf("Dial: %v", err)
+	}
+	if err := host.Dial(ctx, TrConf{TrType: "tcp", AdrFam: "ipv6",
+		TrAddr: "fd00::7", TrSvcId: "4420"},
+		2*time.Second); !errors.Is(err, common.ErrDialTimeout) {
+		t.Fatalf("Dial of the IPv6 endpoint: %v, want the OsClient's error",
+			err)
+	}
+	if err := host.Dial(ctx, TrConf{TrType: "rdma", AdrFam: "ipv4",
+		TrAddr: "192.0.2.8", TrSvcId: "4420"}, time.Second); err != nil {
+		t.Fatalf("Dial of an rdma endpoint: %v, want nil", err)
+	}
+	want := []string{"192.0.2.7:4420 1s", "[fd00::7]:4420 2s"}
+	if !slices.Equal(dialled, want) || deadlines != len(want) {
+		t.Fatalf("dialled %v (%d under a deadline), want %v, each under "+
+			"one", dialled, deadlines, want)
+	}
+}
 
 // TestConnectPassesTheFastIoFailTimeout pins Connect's flags (SH20): the fast
 // IO fail timeout is the one its caller passes, beside a controller-loss

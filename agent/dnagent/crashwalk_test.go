@@ -300,6 +300,16 @@ func (g *crashGate) DiscardRanges(
 	return g.inner.DiscardRanges(ctx, path, ranges)
 }
 
+func (g *crashGate) DialTcp(
+	ctx context.Context, address string, timeout time.Duration,
+) error {
+	if !g.enter(ctx, "dial "+address) {
+		return errCrashEnded
+	}
+	defer g.inflight.Done()
+	return g.inner.DialTcp(ctx, address, timeout)
+}
+
 func (g *crashGate) ReadProto(
 	ctx context.Context, path string, m proto.Message,
 ) error {

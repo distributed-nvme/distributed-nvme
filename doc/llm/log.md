@@ -189,6 +189,9 @@ implements them:
   logs `os discard ranges` with `path`, `range_cnt` (the ranges asked
   for), `done` (the ranges discarded), `ranges` (at most the first
   `discardLogRanges`, as `[offset, length]` pairs) and "error?";
+* a TCP dial made in the caller's own process (`DialTcp`) logs `os dial`
+  with `address` (the "host:port" dialled), `timeout_ms` (the caller's
+  timeout), `duration_ms` (how long the dial took) and "error?";
 * a proto read logs `os read proto` and a proto write `os write proto`, each
   with `path`, `size` (the serialized bytes), `data` (the message as
   `PbToLogValue` renders it) and "error?".

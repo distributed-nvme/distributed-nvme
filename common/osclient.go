@@ -3,9 +3,11 @@ package common
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
+	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -21,14 +23,17 @@ import (
 
 // OsClient defines high-level primitives for executing OS commands, listing
 // directories, reading a path's modification time or a block device's
-// number, performing disk file I/O, and handling Protobuf binary
-// serialization with context support.
+// number, dialling a TCP address, performing disk file I/O, and handling
+// Protobuf binary serialization with context support.
 //
 // All OS command execution, directory listing, modification-time read,
-// device-number read and disk file I/O in production code goes through an
-// OsClient; os/exec and os.ReadFile/os.WriteFile are never called, and no
-// directory is read and no path is stat'ed, directly outside this file
-// (osclient.md, Scope and placement). That is what makes the logging rules
+// device-number read, TCP connect made to test whether an address answers
+// (DialTcp) and disk file I/O in production code goes
+// through an OsClient; os/exec and os.ReadFile/os.WriteFile are never called, and no
+// directory is read, no path is stat'ed and no such test connect is made,
+// directly outside this file (osclient.md, Scope and placement). The
+// connections of the gRPC and etcd clients carry dnv's own calls and are
+// outside this rule. That is what makes the logging rules
 // of log.md R8.1, R8.2, R8.5, R8.6 and R8.7 enforceable, and every consumer
 // unit-testable through FakeOsClient.
 //
@@ -142,6 +147,14 @@ type OsClient interface {
 	// discarded and the first error, after which it discards no more. One
 	// "os discard ranges" record covers the whole call.
 	DiscardRanges(ctx context.Context, path string, ranges []DiscardRange) (done int, err error)
+
+	// DialTcp opens a TCP connection to address ("host:port") in the
+	// caller's own process, waiting at most timeout for the peer to answer,
+	// and closes it dialHold after it opened, on its own, having returned at
+	// once. An address that did not answer within timeout, while ctx was
+	// still live, is an error wrapping ErrDialTimeout; a refusal, and every
+	// other failure, is an error that does not wrap it. No byte is sent.
+	DialTcp(ctx context.Context, address string, timeout time.Duration) (err error)
 
 	// ReadProto loads a raw Protobuf binary file from disk and deserializes
 	// it into a target message struct (target must be a non-nil pointer,
@@ -663,6 +676,77 @@ func discardRanges(
 		}
 	}
 	return len(ranges), nil
+}
+
+// ErrDialTimeout is what a DialTcp error wraps when the address did not
+// answer within the timeout: the one outcome its caller decides by
+// (osclient.md, DialTcp), told apart without reading the error's text.
+var ErrDialTimeout = errors.New("timed out")
+
+// dialHold is how long DialTcp keeps a connection it opened before it closes
+// it (osclient.md, DialTcp): nvmet-tcp logs an error for a connection that
+// closes before its queue is set up, and one held this long closes in
+// silence. A variable, so the package's tests can see the close.
+var dialHold = 200 * time.Millisecond
+
+func (c *LimitedOsClient) DialTcp(
+	ctx context.Context,
+	address string,
+	timeout time.Duration,
+) error {
+	if err := c.sem.Acquire(ctx, 1); err != nil {
+		return err
+	}
+	if err := ctx.Err(); err != nil {
+		c.sem.Release(1)
+		return err
+	}
+	start := time.Now()
+	conn, err := dialTcp(ctx, address, timeout)
+	took := time.Since(start)
+	c.sem.Release(1)
+	if err == nil {
+		go holdThenClose(conn, dialHold)
+	}
+	attrs := []any{
+		slog.String("address", address),
+		slog.Int64("timeout_ms", timeout.Milliseconds()),
+		slog.Int64("duration_ms", took.Milliseconds()),
+	}
+	slog.InfoContext(ctx, "os dial", appendErr(attrs, err)...)
+	return err
+}
+
+// dialTcp is DialTcp without the slot, the hold and the record. A dial whose
+// own timeout ended it, with ctx still live, wraps ErrDialTimeout; one that
+// ctx ended is ctx's, whatever the dialer says, so a caller that went away
+// never marks an address dead.
+func dialTcp(
+	ctx context.Context,
+	address string,
+	timeout time.Duration,
+) (net.Conn, error) {
+	dialer := net.Dialer{Timeout: timeout}
+	conn, err := dialer.DialContext(ctx, "tcp", address)
+	if err == nil {
+		return conn, nil
+	}
+	if ctx.Err() != nil {
+		return nil, fmt.Errorf("dial tcp %s: %w", address, ctx.Err())
+	}
+	var netErr net.Error
+	if errors.As(err, &netErr) && netErr.Timeout() {
+		return nil, fmt.Errorf("dial tcp %s: %w after %s", address,
+			ErrDialTimeout, timeout)
+	}
+	return nil, err
+}
+
+// holdThenClose closes conn once hold has passed. It runs on its own, so no
+// caller waits for the hold, and it holds no semaphore slot.
+func holdThenClose(conn net.Conn, hold time.Duration) {
+	time.Sleep(hold)
+	conn.Close()
 }
 
 func (c *LimitedOsClient) WriteBlock(

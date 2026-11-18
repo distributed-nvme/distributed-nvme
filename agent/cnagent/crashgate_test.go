@@ -412,6 +412,17 @@ func (g *crashGate) DiscardRanges(
 	return g.osc.DiscardRanges(ctx, path, ranges)
 }
 
+func (g *crashGate) DialTcp(
+	ctx context.Context, address string, timeout time.Duration,
+) error {
+	ok, held := g.enter(ctx, "dial "+address)
+	if !ok {
+		return errCrashEnded
+	}
+	defer g.leave(held)
+	return g.osc.DialTcp(ctx, address, timeout)
+}
+
 func (g *crashGate) ReadProto(
 	ctx context.Context, path string, m proto.Message,
 ) error {

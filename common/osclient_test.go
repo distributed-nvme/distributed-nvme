@@ -4,7 +4,9 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"io/fs"
+	"net"
 	"os"
 	"path/filepath"
 	"slices"
@@ -1344,6 +1346,9 @@ func TestFakeOsClientDefaultsAndOverrides(t *testing.T) {
 	if err := fake.WriteProto(ctx, "/x", &pb.SidePointer{}); err != nil {
 		t.Errorf("unset WriteProtoFn = %v", err)
 	}
+	if err := fake.DialTcp(ctx, "192.0.2.1:4420", time.Second); err != nil {
+		t.Errorf("unset DialTcpFn = %v", err)
+	}
 
 	var gotName string
 	var gotArgs []string
@@ -2044,5 +2049,105 @@ func TestDiscardRangesBoundsItsWaitForASlot(t *testing.T) {
 	}
 	if time.Since(start) > 5*time.Second {
 		t.Fatalf("waited %v for a slot", time.Since(start))
+	}
+}
+
+// ---------------------------------------------------------------------------
+// DialTcp (osclient.md, DialTcp)
+// ---------------------------------------------------------------------------
+
+// TestDialTcpHoldsThenCloses pins a dial that the address answers: DialTcp
+// returns once the connection is open, without waiting for the hold, and the
+// connection stays open dialHold before it is closed, so nvmet-tcp sets its
+// queue up before the close (osclient.md, DialTcp). No byte is sent. One
+// "os dial" record covers the call, with no error.
+func TestDialTcpHoldsThenCloses(t *testing.T) {
+	saved := dialHold
+	dialHold = 300 * time.Millisecond
+	defer func() { dialHold = saved }()
+	lis, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	defer lis.Close()
+	type closed struct {
+		held time.Duration
+		read int
+	}
+	got := make(chan closed, 1)
+	go func() {
+		conn, err := lis.Accept()
+		if err != nil {
+			got <- closed{held: -1}
+			return
+		}
+		defer conn.Close()
+		start := time.Now()
+		n, _ := io.Copy(io.Discard, conn)
+		got <- closed{held: time.Since(start), read: int(n)}
+	}()
+	capture := captureLogs(t)
+	start := time.Now()
+	if err := NewLimitedOsClient(0).DialTcp(context.Background(),
+		lis.Addr().String(), time.Second); err != nil {
+		t.Fatalf("DialTcp: %v", err)
+	}
+	if took := time.Since(start); took >= dialHold {
+		t.Fatalf("DialTcp returned after %v, want before the %v hold", took,
+			dialHold)
+	}
+	c := <-got
+	if c.held < dialHold-50*time.Millisecond || c.read != 0 {
+		t.Fatalf("the peer saw the connection open %v with %d bytes, want "+
+			"about %v and none", c.held, c.read, dialHold)
+	}
+	rec := capture.onlyMsg(t, "os dial")
+	hasAttrs(t, rec, "address", "timeout_ms", "duration_ms")
+	if rec["address"] != lis.Addr().String() ||
+		rec["timeout_ms"] != float64(1000) || rec["error"] != nil {
+		t.Fatalf("record %v", rec)
+	}
+}
+
+// TestDialTcpTellsATimeoutFromARefusal pins the one outcome a caller decides
+// by: an address that did not answer within the timeout is an error wrapping
+// ErrDialTimeout, while a refusal, and a dial the caller's ctx ended, are
+// errors that do not wrap it.
+func TestDialTcpTellsATimeoutFromARefusal(t *testing.T) {
+	client := NewLimitedOsClient(0)
+	lis, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	addr := lis.Addr().String()
+	lis.Close()
+	err = client.DialTcp(context.Background(), addr, time.Second)
+	if err == nil || errors.Is(err, ErrDialTimeout) ||
+		!errors.Is(err, syscall.ECONNREFUSED) {
+		t.Fatalf("a refused dial: %v, want ECONNREFUSED, not ErrDialTimeout",
+			err)
+	}
+	// A timeout already over when the dial starts ends it the way a peer
+	// that never answers does, without a peer that drops SYNs.
+	err = client.DialTcp(context.Background(), addr, time.Nanosecond)
+	if !errors.Is(err, ErrDialTimeout) ||
+		!strings.Contains(err.Error(), "dial tcp "+addr+": timed out") {
+		t.Fatalf("a timed-out dial: %v, want ErrDialTimeout with the "+
+			"address", err)
+	}
+	ctx, cancel := context.WithDeadline(context.Background(),
+		time.Now().Add(-time.Second))
+	defer cancel()
+	sem := NewLimitedOsClient(1)
+	err = sem.DialTcp(ctx, addr, time.Second)
+	if err == nil || errors.Is(err, ErrDialTimeout) {
+		t.Fatalf("a dial whose ctx ended: %v, want ctx's error, not "+
+			"ErrDialTimeout", err)
+	}
+	if _, err := dialTcp(ctx, addr, time.Second); err == nil ||
+		errors.Is(err, ErrDialTimeout) ||
+		!errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("dialTcp under an ended ctx: %v, want ctx's error, not "+
+			"ErrDialTimeout", err)
 	}
 }

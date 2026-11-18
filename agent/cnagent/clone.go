@@ -775,7 +775,7 @@ func (s *CnAgentServer) ensureCloneSource(
 		// The default fast IO fail timeout, never the pool's: one source
 		// controller serves every clone of its source on this node, of
 		// whichever pool (dnagent.md SH20).
-		if err := s.connectWithin(ctx, budget, agent.TrConf{
+		if err := s.connectWithin(ctx, plan, budget, agent.TrConf{
 			TrType:  tr.GetTrType(),
 			AdrFam:  tr.GetAdrFam(),
 			TrAddr:  tr.GetTrAddr(),

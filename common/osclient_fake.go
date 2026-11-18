@@ -30,6 +30,7 @@ type FakeOsClient struct {
 	ReadBlockDirectFn func(ctx context.Context, path string, offset uint64, length uint64) ([]byte, error)
 	WriteBlockFn      func(ctx context.Context, path string, offset uint64, data []byte) error
 	DiscardRangesFn   func(ctx context.Context, path string, ranges []DiscardRange) (int, error)
+	DialTcpFn         func(ctx context.Context, address string, timeout time.Duration) error
 	ReadProtoFn       func(ctx context.Context, path string, target proto.Message) error
 	WriteProtoFn      func(ctx context.Context, path string, msg proto.Message) error
 }
@@ -114,6 +115,13 @@ func (f *FakeOsClient) DiscardRanges(ctx context.Context, path string, ranges []
 		return f.DiscardRangesFn(ctx, path, ranges)
 	}
 	return 0, nil
+}
+
+func (f *FakeOsClient) DialTcp(ctx context.Context, address string, timeout time.Duration) error {
+	if f.DialTcpFn != nil {
+		return f.DialTcpFn(ctx, address, timeout)
+	}
+	return nil
 }
 
 func (f *FakeOsClient) ReadProto(ctx context.Context, path string, target proto.Message) error {

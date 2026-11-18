@@ -4,9 +4,14 @@ import (
 	"context"
 	"fmt"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
+	"google.golang.org/protobuf/proto"
+
+	"github.com/distributed-nvme/distributed-nvme/agent"
 	"github.com/distributed-nvme/distributed-nvme/common"
 	"github.com/distributed-nvme/distributed-nvme/pb"
 )
@@ -1548,4 +1553,385 @@ func TestLegConnectsTakeThePoolsFastIoFail(t *testing.T) {
 			}
 		})
 	}
+}
+
+// ---------------------------------------------------------------------------
+// CN10 — the connect places and the dial before each connect
+// ---------------------------------------------------------------------------
+
+// dialsTo counts the recorded dials of one address ("host:port").
+func dialsTo(node *fakeNode, addr string) int {
+	return len(node.callsMatching("dial " + addr))
+}
+
+// loseDials makes every dial of addr go unanswered, the address of a disk
+// node whose machine is down (fakeNode.dialLost).
+func loseDials(node *fakeNode, addr string, lost bool) {
+	node.mu.Lock()
+	defer node.mu.Unlock()
+	node.dialLost[addr] = lost
+}
+
+// refuseDials refuses the next n dials of addr (fakeNode.dialRefused).
+func refuseDials(node *fakeNode, addr string, n int) {
+	node.mu.Lock()
+	defer node.mu.Unlock()
+	node.dialRefused[addr] = n
+}
+
+// osCallCounter counts the calls of a server's OsClient that are running,
+// and the `nvme connect`s among them, with the most of those seen at once.
+type osCallCounter struct {
+	inFlight    atomic.Int32
+	connects    atomic.Int32
+	maxConnects atomic.Int32
+}
+
+// enter counts one call in and returns its exit.
+func (c *osCallCounter) enter(connect bool) func() {
+	c.inFlight.Add(1)
+	if !connect {
+		return func() { c.inFlight.Add(-1) }
+	}
+	n := c.connects.Add(1)
+	for {
+		top := c.maxConnects.Load()
+		if n <= top || c.maxConnects.CompareAndSwap(top, n) {
+			break
+		}
+	}
+	return func() {
+		c.connects.Add(-1)
+		c.inFlight.Add(-1)
+	}
+}
+
+// countOsCalls puts every OsClient wrapper of srv on a copy of node's
+// OsClient double whose every call c counts while it runs.
+func countOsCalls(srv *CnAgentServer, node *fakeNode, c *osCallCounter) {
+	oc := node.osClient()
+	counted := *oc
+	counted.RunCommandFn = func(ctx context.Context, name string,
+		args []string, stdin string) (string, string, int, error) {
+		defer c.enter(name == "nvme" && len(args) > 0 &&
+			args[0] == "connect")()
+		return oc.RunCommandFn(ctx, name, args, stdin)
+	}
+	counted.ReadFileFn = func(ctx context.Context, path string) (string,
+		error) {
+		defer c.enter(false)()
+		return oc.ReadFileFn(ctx, path)
+	}
+	counted.ReadDirFn = func(ctx context.Context, path string) ([]string,
+		error) {
+		defer c.enter(false)()
+		return oc.ReadDirFn(ctx, path)
+	}
+	counted.ReadMtimeFn = func(ctx context.Context, path string) (time.Time,
+		error) {
+		defer c.enter(false)()
+		return oc.ReadMtimeFn(ctx, path)
+	}
+	counted.WriteFileFn = func(ctx context.Context, path, data string) error {
+		defer c.enter(false)()
+		return oc.WriteFileFn(ctx, path, data)
+	}
+	counted.WriteFileDirectFn = func(ctx context.Context, path,
+		data string) error {
+		defer c.enter(false)()
+		return oc.WriteFileDirectFn(ctx, path, data)
+	}
+	counted.ReadBlockFn = func(ctx context.Context, path string, off,
+		n uint64) ([]byte, error) {
+		defer c.enter(false)()
+		return oc.ReadBlockFn(ctx, path, off, n)
+	}
+	counted.ReadBlockDirectFn = func(ctx context.Context, path string, off,
+		n uint64) ([]byte, error) {
+		defer c.enter(false)()
+		return oc.ReadBlockDirectFn(ctx, path, off, n)
+	}
+	counted.DiscardRangesFn = func(ctx context.Context, path string,
+		ranges []common.DiscardRange) (int, error) {
+		defer c.enter(false)()
+		return oc.DiscardRangesFn(ctx, path, ranges)
+	}
+	counted.DialTcpFn = func(ctx context.Context, addr string,
+		timeout time.Duration) error {
+		defer c.enter(false)()
+		return oc.DialTcpFn(ctx, addr, timeout)
+	}
+	counted.ReadProtoFn = func(ctx context.Context, path string,
+		m proto.Message) error {
+		defer c.enter(false)()
+		return oc.ReadProtoFn(ctx, path, m)
+	}
+	counted.WriteProtoFn = func(ctx context.Context, path string,
+		m proto.Message) error {
+		defer c.enter(false)()
+		return oc.WriteProtoFn(ctx, path, m)
+	}
+	srv.oc = &counted
+	srv.cmd = agent.NewCmd(&counted)
+	srv.store = agent.NewStore(&counted, common.DefaultLocalStorPrefix)
+	srv.dm = agent.NewDm(&counted)
+	srv.nvmet = agent.NewNvmet(&counted)
+	srv.host = agent.NewNvmeHost(&counted)
+	srv.md = NewMd(&counted)
+}
+
+// sidesAt moves every side of req to addr, so each cntlr of a test can have
+// its disk node at an address of its own.
+func sidesAt(req *pb.SyncupCntlrRequest, addr string) {
+	for _, slice := range req.GetIdToSlice() {
+		for _, grps := range [][]*pb.Group{
+			slice.GetMetaGrpList(), slice.GetDataGrpList()} {
+			for _, grp := range grps {
+				for _, leg := range grp.GetLegList() {
+					for _, side := range leg.GetSideList() {
+						side.NvmeTrConf.TrAddr = addr
+					}
+				}
+			}
+		}
+	}
+}
+
+// TestConnectsTakeOneOfTheAgentsPlaces pins CN10's connect places: the
+// converges of connectConcurrency + 2 cntlrs at once, each with its disk node
+// at an address of its own, run at most connectConcurrency connects at once.
+// With the first connects held in the kernel, the two converges left wait for
+// a place holding no OsClient slot, so the node's other work goes on beside
+// them; and the wait is no failed attempt, so it is charged nothing: the
+// clock moves on by twice the pass budget while they wait, and the first dial
+// each makes after it is refused, which a pass whose budget the wait had
+// spent would not retry.
+func TestConnectsTakeOneOfTheAgentsPlaces(t *testing.T) {
+	const cntlrCnt = connectConcurrency + 2
+	srv, node := newTestServer(t)
+	clock := withPassClock(srv, node)
+	var calls osCallCounter
+	countOsCalls(srv, node, &calls)
+	ctx := context.Background()
+	if reply, err := srv.SyncupCn(ctx, fullCnReq(2, cntlrCnt)); err != nil ||
+		reply.GetAgentReply().GetCode() != 0 {
+		t.Fatalf("SyncupCn: %v %v", reply.GetAgentReply(), err)
+	}
+	addrOf := func(i int) string { return fmt.Sprintf("192.168.20.%d", i+1) }
+	const connect = "cmd nvme connect "
+	node.blockCmd(connect)
+	t.Cleanup(func() { node.releaseCmd(connect) })
+	replies := make([]*pb.SyncupCntlrReply, cntlrCnt)
+	var wg sync.WaitGroup
+	for i := 0; i < cntlrCnt; i++ {
+		req := fullCntlrReq(2, i)
+		sidesAt(req, addrOf(i))
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			reply, err := srv.SyncupCntlr(ctx, req)
+			if err != nil {
+				t.Errorf("SyncupCntlr of cntlr %d: %v", i, err)
+			}
+			replies[i] = reply
+		}()
+	}
+
+	// Settled: the places all held, and no call made for a while.
+	settled := false
+	last := -1
+	for still, deadline := 0, time.Now().Add(5*time.Second); time.Now().
+		Before(deadline); time.Sleep(20 * time.Millisecond) {
+		n := len(node.Calls())
+		if n == last && len(node.callsMatching(connect)) ==
+			connectConcurrency {
+			if still++; still == 10 {
+				settled = true
+				break
+			}
+		} else {
+			still = 0
+		}
+		last = n
+	}
+	if !settled {
+		node.releaseCmd(connect)
+		wg.Wait()
+		t.Fatalf("the converges did not settle with %d connects held: %d "+
+			"connects ran, at most %d at once", connectConcurrency,
+			len(node.callsMatching(connect)), calls.maxConnects.Load())
+	}
+	if n := len(srv.connectSlots); n != connectConcurrency {
+		t.Fatalf("%d connect places held, want %d", n, connectConcurrency)
+	}
+	if n := calls.inFlight.Load(); n != connectConcurrency {
+		t.Fatalf("%d OsClient calls running with %d connects held and two "+
+			"converges waiting for a place, want %d: a converge that waits "+
+			"for a place holds no OsClient slot", n, connectConcurrency,
+			connectConcurrency)
+	}
+	waiting := 0
+	for i := 0; i < cntlrCnt; i++ {
+		if dialsTo(node, addrOf(i)+":"+testSvcId) == 0 {
+			waiting++
+		}
+	}
+	if waiting != cntlrCnt-connectConcurrency {
+		t.Fatalf("%d cntlrs dialled nothing yet, want %d", waiting,
+			cntlrCnt-connectConcurrency)
+	}
+	for i := 0; i < cntlrCnt; i++ {
+		refuseDials(node, addrOf(i)+":"+testSvcId, 1)
+	}
+	clock.advance(2 * common.CnConnectPassBudget)
+	node.releaseCmd(connect)
+	wg.Wait()
+
+	if top := calls.maxConnects.Load(); top != connectConcurrency {
+		t.Fatalf("at most %d connects ran at once, want %d", top,
+			connectConcurrency)
+	}
+	// A primary's leg reads PENDING until its first probe: what matters
+	// here is that no leg failed its connect step.
+	for i, reply := range replies {
+		info := reply.GetCntlrInfo()
+		for _, legId := range []uint64{testMetaLeg, testDataLeg} {
+			if row := info.GetLegIdToLeg()[legId]; row == nil ||
+				row.GetStatus() == pb.ResStatus_RES_STATUS_ERROR {
+				t.Fatalf("cntlr %d, leg %#x: %v %q, want it connected", i,
+					legId, row.GetStatus(), row.GetDetails())
+			}
+		}
+		if got := len(node.callsMatching(connect + "--transport tcp " +
+			"--traddr " + addrOf(i) + " ")); got != 2 {
+			t.Fatalf("cntlr %d ran %d connects, want one per leg", i, got)
+		}
+	}
+	if n := len(srv.connectSlots); n != 0 {
+		t.Fatalf("%d connect places still held once every converge "+
+			"returned", n)
+	}
+}
+
+// TestATimedOutDialFailsEveryLegThere pins the dial's timeout (CN10): the
+// meta leg's dial of a disk node whose machine is down goes unanswered for
+// CnConnectDialTimeout, which spends the whole budget, and no `nvme connect`
+// runs there, which would hold the kernel's one connect at a time; the data
+// leg, at the same address, fails at once with the same error, neither
+// dialling nor connecting, and the pass waits no more than that one dial.
+// The mark lives in the pass's plan only: the re-send a read brings dials
+// again, once, and connects both legs once the address answers.
+func TestATimedOutDialFailsEveryLegThere(t *testing.T) {
+	srv, node := newTestServer(t)
+	clock := withPassClock(srv, node)
+	addr := testIp + ":" + testSvcId
+	metaNqn := legNqn(srv, testMetaLeg)
+	dataNqn := legNqn(srv, testDataLeg)
+	loseDials(node, addr, true)
+	start := clock.Now()
+	reply := syncupBoth(t, srv, reqOpts{revision: 2})
+
+	if got := dialsTo(node, addr); got != 1 {
+		t.Fatalf("%d dials of %s, want 1: the first that timed out marks "+
+			"the address for the pass", got, addr)
+	}
+	for _, nqn := range []string{metaNqn, dataNqn} {
+		if got := connectsTo(node, nqn, testIp, testSvcId); got != 0 {
+			t.Fatalf("%d connects of %s at an address whose dial timed "+
+				"out, want 0", got, nqn)
+		}
+	}
+	want := "dial tcp " + addr + ": timed out"
+	info := reply.GetCntlrInfo()
+	meta := info.GetLegIdToLeg()[testMetaLeg]
+	assertErrorDetails(t, meta, want, "leg meta")
+	assertErrorDetails(t, info.GetLegIdToLeg()[testDataLeg],
+		meta.GetDetails(), "leg data")
+	if got := clock.Now().Sub(start); got != common.CnConnectDialTimeout {
+		t.Fatalf("the pass took %v, want the one dial's %v", got,
+			common.CnConnectDialTimeout)
+	}
+
+	node.Reset()
+	if resent := syncupBoth(t, srv, reqOpts{revision: 3}); dialsTo(node,
+		addr) != 1 {
+		t.Fatalf("the next pass dialled %s %d times, want once: the mark "+
+			"is the pass's (%v)", addr, dialsTo(node, addr),
+			errorRows(resent.GetCntlrInfo()))
+	}
+	loseDials(node, addr, false)
+	node.Reset()
+	back := syncupBoth(t, srv, reqOpts{revision: 4})
+	for _, legId := range []uint64{testMetaLeg, testDataLeg} {
+		assertOk(t, back.GetCntlrInfo().GetLegIdToLeg()[legId],
+			fmt.Sprintf("leg %#x once the address answers", legId))
+	}
+	if got := dialsTo(node, addr); got != 2 {
+		t.Fatalf("%d dials once the address answers, want one per leg", got)
+	}
+}
+
+// TestARefusedDialIsRetried pins the dial a port refuses (CN10): no listener
+// yet, as at a disk node that has not linked its export into the port. It is
+// a failed attempt like a refused connect, retried after each
+// CnConnectRetryPause within the pass's budget, and marks nothing: the leg
+// connects on its third attempt, and the data leg after it dials and connects
+// once.
+func TestARefusedDialIsRetried(t *testing.T) {
+	srv, node := newTestServer(t)
+	clock := withPassClock(srv, node)
+	addr := testIp + ":" + testSvcId
+	refuseDials(node, addr, 2)
+	start := clock.Now()
+	reply := syncupBoth(t, srv, reqOpts{revision: 2})
+
+	info := reply.GetCntlrInfo()
+	for _, legId := range []uint64{testMetaLeg, testDataLeg} {
+		assertOk(t, info.GetLegIdToLeg()[legId],
+			fmt.Sprintf("leg %#x", legId))
+	}
+	if got := dialsTo(node, addr); got != 4 {
+		t.Fatalf("%d dials of %s, want 4: two refused and one answered for "+
+			"the meta leg, one for the data leg", got, addr)
+	}
+	for _, legId := range []uint64{testMetaLeg, testDataLeg} {
+		if got := connectsTo(node, legNqn(srv, legId), testIp,
+			testSvcId); got != 1 {
+			t.Fatalf("%d connects of leg %#x, want 1: a refused dial runs "+
+				"no connect", got, legId)
+		}
+	}
+	if got, want := clock.Now().Sub(start),
+		2*common.CnConnectRetryPause; got != want {
+		t.Fatalf("the pass waited %v, want the two retry pauses %v", got,
+			want)
+	}
+}
+
+// TestACloneSourceAtADeadAddressIsSkipped pins the mark's reach (CN10,
+// CN18): a clone source served at the address whose dial a leg's attempt saw
+// time out in the same pass, as on a machine that runs a disk node and a
+// controller node on one port, is neither dialled nor connected: its step
+// fails at once with the dial's error, which leads the clone target's row.
+func TestACloneSourceAtADeadAddressIsSkipped(t *testing.T) {
+	srv, node := newTestServer(t)
+	withPassClock(srv, node)
+	addr := testIp + ":" + testSvcId
+	clone := cloneOf()
+	clone.SrcTrConfList = []*pb.NvmeTrConf{sideTrConf(testIp, testSvcId)}
+	loseDials(node, addr, true)
+	reply := syncupBoth(t, srv, reqOpts{revision: 2, primary: true,
+		clones: []*pb.Clone{clone}})
+
+	if got := dialsTo(node, addr); got != 1 {
+		t.Fatalf("%d dials of %s, want 1: the meta leg's", got, addr)
+	}
+	if got := connectsTo(node, testSrcNqn, testIp, testSvcId); got != 0 {
+		t.Fatalf("%d connects of the clone source at a dead address, want 0",
+			got)
+	}
+	tgt := reply.GetCntlrInfo().GetCloneIdToTarget()[testClone]
+	assertMissingDetails(t, tgt, "dial tcp "+addr+": timed out",
+		"clone target")
+	assertReason(t, tgt, pb.ResReason_RES_REASON_SOURCE_FAULT, "clone target")
 }

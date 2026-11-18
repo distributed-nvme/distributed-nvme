@@ -214,6 +214,16 @@ type fakeNode struct {
 	// down spends CmdSoftTimeout. Without an advance it is inert.
 	connectTakes map[string]time.Duration
 	advance      func(time.Duration)
+	// dialLost and dialRefused model a disk node's address at the dial
+	// before a connect (NvmeHost.Dial), keyed by the dialled "host:port":
+	// an address in dialLost answers nothing, so its dial moves the clock
+	// (advance) on by its whole timeout and fails wrapping
+	// common.ErrDialTimeout, as a machine that is down does; dialRefused
+	// refuses the first N dials of an address and then lets them through,
+	// as a port that does not listen yet does. Every dial is recorded as
+	// "dial <address>".
+	dialLost    map[string]bool
+	dialRefused map[string]int
 	// duringConnect runs, under the fake's lock, when a connect to one
 	// endpoint (connectKey) succeeds: what else changes on the node while
 	// that connect runs — a migrating leg's src controller whose `address`
@@ -520,6 +530,8 @@ func newFakeNode() *fakeNode {
 		nsIdxOf:       make(map[string]uint32),
 		connectFail:   make(map[string]int),
 		connectTakes:  make(map[string]time.Duration),
+		dialLost:      make(map[string]bool),
+		dialRefused:   make(map[string]int),
 		duringConnect: make(map[string]func()),
 		nsHeadAt:      make(map[string]headStages),
 		pendingHeads:  make(map[string]*pendingHead),
@@ -599,6 +611,7 @@ func (f *fakeNode) osClient() *common.FakeOsClient {
 		ReadBlockFn:       f.readBlock,
 		ReadBlockDirectFn: f.readSuperblockArea,
 		DiscardRangesFn:   f.discardRanges,
+		DialTcpFn:         f.dialTcp,
 		ReadProtoFn:       f.readProto,
 		WriteProtoFn:      f.writeProto,
 	}
@@ -1740,6 +1753,36 @@ func (f *fakeNode) discardRanges(
 		}
 	}
 	return len(ranges), nil
+}
+
+// dialTcp is the dial of an address before a connect (dialLost,
+// dialRefused): recorded as "dial <address>", under the ctx's trace id.
+func (f *fakeNode) dialTcp(
+	ctx context.Context,
+	address string,
+	timeout time.Duration,
+) error {
+	if err := f.ctxErr(ctx); err != nil {
+		return err
+	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	line := "dial " + address
+	f.record("%s", line)
+	f.recordTrace(ctx, line)
+	if f.dialLost[address] {
+		if f.advance != nil {
+			f.advance(timeout)
+		}
+		return fmt.Errorf("dial tcp %s: %w after %s", address,
+			common.ErrDialTimeout, timeout)
+	}
+	if left := f.dialRefused[address]; left > 0 {
+		f.dialRefused[address] = left - 1
+		return fmt.Errorf("dial tcp %s: connect: %w", address,
+			syscall.ECONNREFUSED)
+	}
+	return nil
 }
 
 // ---------------------------------------------------------------------------

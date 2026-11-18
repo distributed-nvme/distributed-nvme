@@ -700,7 +700,11 @@ Measured times are in [the introduction](introduction.md#status-and-limits-of-01
   there names the leg's side, since only a converge connects it again. The
   worker then sends the syncup every second check round at most, and each
   converge tries the connect, with the retries a budget of about one second
-  allows. This lasts until the disk node answers, leg repair has replaced
+  allows. Before each connect the controller node checks that the disk
+  node answers on the network. When the disk node's machine is down, that
+  check gives up after about one and a half seconds, and every other leg
+  on that disk node then fails at once in the same converge. This lasts
+  until the disk node answers, leg repair has replaced
   the leg, or an operator takes the leg off the disk node, by a repair or a
   migration, steps the pool's level down to one that builds no side, or
   deletes the pool; the disk node itself cannot be deleted while the leg is
@@ -713,6 +717,19 @@ Measured times are in [the introduction](introduction.md#status-and-limits-of-01
   standby the primary, which tries to connect the same source and costs the
   same. State: accepted: the converge is the only way a deleted connection
   comes back. Not seen in the lab.
+- **A disk node whose network answers while its NVMe target is stuck
+  slows every connect of a controller node.** The kernel of a machine
+  makes one NVMe connect at a time. Before each connect, the controller
+  node checks that the disk node answers on the network. On a disk node
+  whose machine is down, the check gives up after about one and a half
+  seconds instead of holding the kernel. A disk node whose machine
+  answers while its target does not passes the check. Its connect then
+  holds the kernel until the kernel's own timers end it, and every other
+  connect of that machine waits, a host's too. A disk node's connect to
+  the old side of a migration makes no such check first, so a dead old
+  side holds the kernel about three seconds for each try. State: accepted:
+  dnv has no way to cut short a connect the kernel makes. Not seen in the
+  lab.
 - **The primary can guess wrong whether mdadm would start a stopped
   array.** A check round of the primary names a group whose array does not
   run when mdadm would start it, which the agent works out from the legs'

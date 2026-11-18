@@ -447,6 +447,15 @@ a superblock, and no read reaches a data block the pool has not written
 every leg connected and non-optimized, assembles no two-member array, and backs
 its ns-dev with the td's dm-error, the namespace inaccessible (CN10, CN11,
 CN16's standby rule); each CN's subsystem admits exactly the host's NQN (CN16).
+With new connections from the standby's VM to DN1's port dropped there, and
+the standby's controllers of its two legs into DN1 disconnected, a converge
+of the standby dials DN1's address once and runs no `nvme connect` into it:
+both legs read `ERROR` with the dial's timeout, every other row reads OK, and
+the converge takes at least the dial's timeout and no more than one dial
+timeout plus a second over a converge that connects nothing (CN10). With the rule taken away, the next
+converge connects both legs again and a fresh check round names nothing;
+its dials leave no nvmet-tcp error in DN1's kernel log (`osclient.md`,
+DialTcp).
 The demote moves ANA before the park (CN9's ANA pre-step before its park
 pre-step), stops the arrays and keeps the legs; the promote assembles both
 (CN12's assembly case), each with the arguments the first stage's rule builds
@@ -866,7 +875,8 @@ dm, md, nvmet and host state, each read bounded, and the failing stage's trace
 id, but for clone_xfer's token bucket, which it removes, as the bucket would
 slow any suite that runs on the VMs before the next cleanup, and pause's cut
 and its writer, which it removes and stops, as the cut would black-hole
-another suite's connections. A cleanup-only
+another suite's connections, and redund's drop of new connections, which it
+removes for the same reason. A cleanup-only
 run does the scrub alone. It takes every `dnv-agent` and
 every dnv dm device, md array and nvmet subsystem on the node, of either
 role, which is why one dnv suite runs at a

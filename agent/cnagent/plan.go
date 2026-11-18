@@ -212,6 +212,21 @@ type cntlrPlan struct {
 	// slice that fails, and read by every other such volume of the slice in
 	// the same pass. Only a converge's build fills it.
 	thinHeaders map[uint64]*thinHeaderRead
+	// deadAddrs are the addresses ("host:port", agent.DialAddress) whose
+	// dial timed out in this pass, each with the dial's error (CN10,
+	// connectWithin): every later connect of the pass there, a leg's or a
+	// clone source's, fails at once with that error. Only a converge's build
+	// fills it, and like the plan it never outlives the pass.
+	deadAddrs map[string]error
+}
+
+// markDeadAddr records that the dial of addr timed out in this pass, with its
+// error (deadAddrs).
+func (p *cntlrPlan) markDeadAddr(addr string, err error) {
+	if p.deadAddrs == nil {
+		p.deadAddrs = make(map[string]error)
+	}
+	p.deadAddrs[addr] = err
 }
 
 // slicePlan is one slice of the SP: the two pool concats and the thin-pool

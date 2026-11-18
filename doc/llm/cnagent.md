@@ -270,7 +270,8 @@ lock, and a request is never modified once stored. The tracker has its own
 lock; the chunk sets are touched only under the cntlr's object lock, or
 under the node write lock, which excludes it. A buffered channel of
 `disconnectConcurrency` slots caps how many of the disconnect registry's
-disconnects run at once. `rootCtx` anchors the CN10 background disconnects
+disconnects run at once, and one of `connectConcurrency` places how many
+connect attempts of all the cntlrs' passes run at once (CN10). `rootCtx` anchors the CN10 background disconnects
 and path watchers, the CN11 probers and the background reads, so shutdown
 cancels them and joins none (CN-CM2). No cn lock is held across OS calls
 but the `LockSet`'s own.
@@ -951,17 +952,17 @@ budget,
 `CnConnectPassBudget`, made at the start of that pass, shared by every
 leg and by the clone sources of CN18, and never carried into another pass
 or another cntlr. Exactly three things draw on it. (1) Every failed
-`nvme connect` is charged its own elapsed time. (2) After a failed connect
-to a provisioned side the pass pauses `CnConnectRetryPause` and connects
-again — an in-pass retry — as long as the budget still covers the pause.
-The error is not classified: a disk node that has not linked the export
-into its port yet refuses the connect at TCP, or, when the port already
-listens for another export, rejects it with the same fabrics write error
-a permanently rejected export gets, and a disk node that is down refuses
-it too, or does not answer at all; every failed connect is a candidate
-until the budget is gone. A connect to a disk node whose machine is down
-runs long (the kernel's SYN retries, or `CmdSoftTimeout`), spends the
-whole budget at once and so is never retried in the pass. (3) After a
+connect attempt, its dial and its `nvme connect` (below), is charged its
+own elapsed time. (2) After a failed attempt at a provisioned side the
+pass pauses `CnConnectRetryPause` and tries again — an in-pass retry — as
+long as the budget still covers the pause. The error is not classified: a
+disk node that has not linked the export into its port yet refuses the
+dial at TCP, or, when the port already listens for another export,
+rejects the connect with the same fabrics write error a permanently
+rejected export gets; every failed attempt is a candidate until the
+budget is gone. A dial of a disk node whose machine is down runs to its
+timeout, spends the whole budget at once and so is never retried in the
+pass (below). (3) After a
 connect made in this pass, the subsystem is looked up again until its
 multipath head is complete, as long as the budget covers the pause before
 the next lookup: `nvme connect` returns once the controller is live and
@@ -989,10 +990,12 @@ head whose ng device is not listed. Reason: a head that never gets an ng device,
 on a kernel that makes none, then costs at most what is left of the budget
 of the pass that connected it, and is used as it is, never failed for the
 missing sign. A pause starts only while it fits in what is left, and a
-failed connect is charged after it has run, so a retried connect that runs
-long can overdraw the budget; nothing bounds the first connect of a side.
+failed attempt is charged after it has run, so a retried attempt that runs
+long can overdraw the budget; the dial bounds the first attempt at an
+address that does not answer, and nothing bounds a connect to an address
+that does (Known limits).
 Once the budget is spent the pass behaves exactly as it does without one:
-every connect it makes is made once, the first that fails still ends its
+every attempt it makes is made once, the first that fails still ends its
 leg's converge (the leg's other unconnected sides wait for a later pass), a
 leg that did not connect, or whose head did not appear, fails with the
 same error, and a head that is picked but not complete is used as it is:
@@ -1006,6 +1009,38 @@ waiting is part of a converge, which holds the cntlr's object lock and
 keeps the cntlr's reads off while it runs (CN1; `dnagent.md` SH30), so
 the cntlr's observation ages for as long as the pass waits; that is why
 the budget is one per pass and not one per leg.
+
+**A connect attempt takes a place and dials the address first.** Each
+attempt, at a leg's side or at a clone source's endpoint (CN18), takes one
+of the agent's `connectConcurrency` connect places, which every cntlr's
+pass shares, before it takes any `OsClient` slot, and gives it back when
+the attempt ends. The wait for a place takes no lock and no `OsClient`
+slot and draws nothing on the budget: it is no failed attempt. Holding
+the place, the attempt dials the side's address — a TCP connect, in the
+agent's own process, to the address and service id of the side's
+`nvme_tr_conf` (`NvmeHost.Dial`; `osclient.md`, DialTcp) — with the
+timeout `CnConnectDialTimeout`, and runs `nvme connect` only once the dial
+has answered. Reason: the kernel runs one fabrics connect at a time on the
+machine; an `nvme connect` to an address whose SYNs go unanswered holds
+that turn for about three seconds, and a connect that waits for the turn
+cannot be killed, so every other connect of the machine, another cntlr's,
+a dn agent's or a host's, waits behind it. The dial meets such an address
+in the agent's own process and takes no turn of the kernel's. Places
+beyond one only queue in the kernel, each holding an `OsClient` slot;
+more than one leaves room for a dial to an address that does not answer
+beside the connects to live ones. The timeout is built from the budget,
+half as much again, so a dial outlives one lost SYN, which Linux sends
+again after a second. A dial the address refuses — a port that does not
+listen yet — is a failed attempt, tried again within the budget as a
+failed connect is. A dial that times out spends the whole budget at once,
+and the pass marks its address dead in the pass's plan: every later
+attempt of the pass at that address, at another leg's side or at a clone
+source's endpoint, fails at once with the dial's error, and takes no
+place, dials nothing and draws nothing. So a disk node whose machine is
+down costs a pass one dial timeout whatever the count of its legs, and its
+legs read `RES_STATUS_ERROR` with the dial's text. The mark goes with the
+plan: the next pass dials again. Only a `DialTransport` side is dialled; a
+side of another transport is connected with no dial.
 
 **No converge in the background.** A connect failure marks that leg
 `RES_STATUS_ERROR`, and nothing in the agent runs the converge again by
@@ -5994,6 +6029,15 @@ stores instead is CN23's.
   that is live but ANA inaccessible; md does not learn of that leg either,
   until IO to it ends. A failed round followed by one that hangs does make
   the leg dead.
+* The dial tests only that an address answers (CN10). A disk node whose
+  port answers while its target does not — an nvmet that is stuck — takes
+  the `nvme connect` into the kernel, which runs one fabrics connect at a
+  time on the machine: the attempt holds its place and that turn until the
+  kernel's own timeouts end it, and every other connect of the machine
+  waits behind it, the agent's within their places and, outside them, a
+  host's and a dn agent's on the same machine. The places count this
+  agent's attempts alone, and the dn agent's connect to a migration source
+  export dials nothing (`dnagent.md`, Known limits).
 * A side whose controller is gone and whose connect keeps failing is named
   on every read (CN30). A side whose disk node dies keeps its controller,
   connecting, since a leg's controller has no controller-loss timeout
@@ -6009,9 +6053,10 @@ stores instead is CN23's.
   a CN reboot — a side whose disk node is dead or refuses the connect reads
   with no controller, so a round that answers from a read brings one
   `SyncupCntlr` and one converge, every second round at most
-  (`dnv-worker.md` RW4 step 5): the converge's failed connect of the side,
-  with the in-pass retries the pass budget allows (CN10), and the rest of
-  the pass. It lasts until the node answers again, the finish of the leg
+  (`dnv-worker.md` RW4 step 5): the converge's failed attempt at the side,
+  with the in-pass retries the pass budget allows, or, at a disk node whose
+  machine is down, one dial timeout for every side there (CN10), and the
+  rest of the pass. It lasts until the node answers again, the finish of the leg
   repair (`dnv-worker.md` AR8) retires the leg, or an operator takes the
   leg off the node by a repair or a migration, steps the pool's level to
   `SP_LEVEL_NO_SIDE` or a level past it, where no read names a leg's side

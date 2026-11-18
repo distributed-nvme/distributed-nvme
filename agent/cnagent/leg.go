@@ -427,7 +427,7 @@ func (s *CnAgentServer) ensureLeg(
 	for _, side := range sidesToConnect(lp, view, plan.primary) {
 		tr := side.GetNvmeTrConf()
 		plan.walk.stale = true
-		if err := s.connectWithin(ctx, budget, agent.TrConf{
+		if err := s.connectWithin(ctx, plan, budget, agent.TrConf{
 			TrType:  tr.GetTrType(),
 			AdrFam:  tr.GetAdrFam(),
 			TrAddr:  tr.GetTrAddr(),
@@ -835,43 +835,97 @@ func (s *CnAgentServer) cutPaths(
 }
 
 // connectWithin is the CN10 connect of one side of a leg, and the CN18
-// connect of one clone-source path: `nvme connect` with the fast IO fail
-// timeout fastIoFailTmo, and again after a CnConnectRetryPause whenever it
-// failed, for as long as the pass's budget covers the pause. Every failed
-// attempt is charged its own elapsed time, so a connect to a disk node whose
-// VM is down — about 3 s, the kernel's SYN retries or CmdSoftTimeout —
-// spends the whole budget at once and is never retried in the pass.
+// connect of one clone-source path: an attempt, and again after a
+// CnConnectRetryPause whenever it failed, for as long as the pass's budget
+// covers the pause. An attempt takes one of connectSlots, the agent's connect
+// places, and then dials the side's address (NvmeHost.Dial, with
+// CnConnectDialTimeout) and, once the dial answers, runs `nvme connect` with
+// the fast IO fail timeout fastIoFailTmo; it gives the place back when it
+// ends. The wait for a place is no attempt and is charged nothing: every
+// failed attempt is charged its own elapsed time from the place on, its dial
+// and its connect.
 //
-// The error is never classified. The same failure is what a disk node that
-// has not linked the export into its port yet answers — refused at TCP by a
-// port that does not listen yet, rejected by one that does ("failed to write
-// to nvme-fabrics device") — for as long as its SyncupSide takes after the
-// worker's fan-out ([D16]: the sides-first hold is bounded, so a SyncupCntlr
-// can still come before the side's export), and what a permanently rejected
-// export or a dead disk node answers; only the first goes away within a pass,
-// and the budget is what caps how often the other two are retried. The last
+// The kernel runs one fabrics connect at a time on the machine, and a
+// connect to an address that does not answer holds that turn for about three
+// seconds, the SYNs it sends going unanswered, with every other connect of
+// the node, a dn agent's or a host's on the same machine among them,
+// waiting behind it. The dial meets such an address in the agent's own
+// process instead and gives up at its timeout, which overdraws the budget at
+// once, so the attempt is not retried; it marks the address dead in the
+// pass's plan (deadAddrs), and every later attempt of the pass at that
+// address, another leg's or a clone source's, fails at once with the dial's
+// error, taking no place, dialling nothing and charging nothing. A dial the
+// address refuses — a disk node whose port does not listen yet — is a failed
+// attempt like a failed connect, retried in the budget.
+//
+// The error of a failed connect is never classified. The same failure is
+// what a disk node that has not linked the export into its port yet answers
+// when the port already listens for another export — rejected with "failed
+// to write to nvme-fabrics device" — for as long as its SyncupSide takes
+// after the worker's fan-out ([D16]: the sides-first hold is bounded, so a
+// SyncupCntlr can still come before the side's export), and what a
+// permanently rejected export answers; only the first goes away within a
+// pass, and the budget is what caps how often the other is retried. The last
 // attempt's error is the one returned, so a leg that stays unconnected reads
-// as a failed connect.
+// as a failed dial or a failed connect.
 func (s *CnAgentServer) connectWithin(
 	ctx context.Context,
+	plan *cntlrPlan,
 	budget *agent.WaitBudget,
 	tr agent.TrConf,
 	nqn string,
 	hostNqn string,
 	fastIoFailTmo uint32,
 ) error {
+	addr := agent.DialAddress(tr)
 	for {
+		if err := plan.deadAddrs[addr]; err != nil {
+			return err
+		}
+		release, err := s.takeConnectSlot(ctx)
+		if err != nil {
+			return err
+		}
 		start := budget.Now()
-		err := s.host.Connect(ctx, tr, nqn, hostNqn, fastIoFailTmo)
+		err = s.host.Dial(ctx, tr, common.CnConnectDialTimeout)
+		dead := errors.Is(err, common.ErrDialTimeout)
+		if err == nil {
+			err = s.host.Connect(ctx, tr, nqn, hostNqn, fastIoFailTmo)
+		}
+		release()
 		if err == nil {
 			return nil
 		}
 		budget.Charge(budget.Now().Sub(start))
+		if dead {
+			plan.markDeadAddr(addr, err)
+			return err
+		}
 		if !budget.Pause(ctx, common.CnConnectRetryPause) {
 			return err
 		}
 	}
 }
+
+// takeConnectSlot waits for one of connectSlots and returns its release, or
+// ctx's error when ctx ends first. It takes no lock and no OsClient slot
+// while it waits; the caller's cntlr lock stays held.
+func (s *CnAgentServer) takeConnectSlot(ctx context.Context) (func(), error) {
+	slots := s.connectSlots
+	select {
+	case slots <- struct{}{}:
+		return func() { <-slots }, nil
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
+}
+
+// connectConcurrency is how many connect attempts of the agent run at once
+// (connectWithin), across every cntlr's pass. The kernel runs one fabrics
+// connect at a time, so more places would only queue in the kernel, each
+// holding an OsClient slot; more than one leaves room for a dial to an
+// address that does not answer beside the connects to live ones.
+const connectConcurrency = 4
 
 // awaitNsHead looks one subsystem up again after a connect this pass made,
 // until its multipath namespace head is complete or the pass's budget no

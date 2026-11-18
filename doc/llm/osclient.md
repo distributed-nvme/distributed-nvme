@@ -2,13 +2,14 @@
 
 This document owns the one path every dnv binary takes to the operating
 system: the `OsClient` interface for OS commands, for directory listings, for
-modification-time reads, for device-number reads, for discards and for file,
-protobuf and raw block IO, its production implementation `LimitedOsClient` with its
+modification-time reads, for device-number reads, for discards, for TCP
+dials and for file, protobuf and raw block IO, its production implementation `LimitedOsClient` with its
 concurrency limit, its command timeouts and kill rule, the guarantees of each
 operation (a listing's names, all of them in byte order or none; the time of
 the path itself, never of what a link names; the number of the block device
-a path leads to, links followed; the atomic replace and fsync of a file
-write; the exact-length read and fsynced write of a block), the exported raw
+a path leads to, links followed; the dial's timeout told from a refusal; the
+atomic replace and fsync of a file write; the exact-length read and fsynced
+write of a block), the exported raw
 helpers and the probe-IO
 carve-out that is the one sanctioned bypass, and what emitting the record of
 each operation requires. It leans on `log.md` for the helpers it reuses
@@ -33,15 +34,17 @@ it.
   the dn's read of an nvmet subsystem directory's age, for both roles' read
   of whether their nvmet port's directory is there, for the dn's read of its
   disk's device number, for both roles' discards on a dm-clone, for the
-  cn's direct read of an md member's superblock area, and for
+  cn's direct read of an md member's superblock area, for the cn's dial of
+  a side's address before a connect (`cnagent.md` CN10), and for
   persisting the `Local*Path` protobuf state
   files; and `dnv-csi`'s node plugin, for its nvme-cli, blkid, filesystem
   maker and mount commands, its sysfs and mount table reads and its read of
   a volume's device link (`csi.md`, The node plugin). **All** OS command execution, directory listing, modification-time
-  read, device-number read, discard and disk file IO in production code goes
-  through an `OsClient` — never call `os/exec` or
-  `os.ReadFile`/`os.WriteFile`, and never read a directory or stat a path,
-  directly outside this file. This is what makes the logging rules of
+  read, device-number read, discard, TCP connect made to test whether an
+  address answers (DialTcp) and disk file IO in
+  production code goes through an `OsClient` — never call `os/exec` or
+  `os.ReadFile`/`os.WriteFile`, and never read a directory, stat a path or
+  make such a test connect, directly outside this file. This is what makes the logging rules of
   `log.md` R8 (its first, second, fifth, sixth, seventh and eighth items)
   enforceable and
   makes every consumer unit-testable via `FakeOsClient`. There is exactly **one** sanctioned exception in
@@ -53,7 +56,10 @@ it.
   etcd binary, and the tests that re-run the test binary itself) are outside
   the rule, not exceptions to it: no production code path spawns them, so
   routing them through an `OsClient` would buy neither the logging nor the
-  `FakeOsClient` testability the rule exists for.
+  `FakeOsClient` testability the rule exists for. The connections of the
+  gRPC clients and servers (`grpc.md`) and of the etcd clients are outside
+  the rule too, not exceptions to it: they carry dnv's own calls, whose
+  rules are `grpc.md`'s and `dnv-worker.md` EU1's, and are no OS work.
 * Dependencies: the semaphore and protobuf modules of `dependencies.md`,
   Direct dependencies; the command's `Cancel` and `WaitDelay` fields come
   with the Go version `go.mod` pins.
@@ -105,6 +111,11 @@ the method set is exactly the following, each taking the caller's ctx:
 * `DiscardRanges` discards byte ranges of a block device in the caller's own
   process, one open, not exclusive, and one BLKDISCARD per range, and returns how
   many it discarded and the first error (DiscardRanges).
+* `DialTcp` opens a TCP connection to an address in the caller's own
+  process, waiting at most a timeout the caller passes, and lets it go; an
+  address that did not answer within the timeout is an error wrapping
+  `ErrDialTimeout`, and every other failure is an error that does not
+  (DialTcp).
 * `ReadProto` reads a protobuf binary file and deserializes it into a
   non-nil target message.
 * `WriteProto` serializes a message to wire binary and writes it with the
@@ -117,7 +128,7 @@ the method set is exactly the following, each taking the caller's ctx:
 * `NewLimitedOsClient` takes the limit; a limit of zero or less means "use
   `DefaultOsClientLimit`", the default cap on in-flight operations
   (commands, directory listings, modification-time reads, device-number
-  reads, discards, file IO and proto IO combined) that
+  reads, discards, dials, file IO and proto IO combined) that
   `constants.go` holds. Its reason: during convergence an agent fans out
   many dmsetup, mdadm, nvme and blkdiscard invocations plus state-file
   writes, and the default bounds fork and disk pressure while leaving ample
@@ -488,6 +499,31 @@ a fragmented source.
 * One `os discard ranges` record covers the call (`log.md`, OS commands and
   file IO), with the path, the range count, the ranges done and at most the
   first `discardLogRanges` ranges, whatever the count.
+
+### DialTcp
+
+How the cn agent tests a side's address before it runs `nvme connect`
+(`cnagent.md` CN10): a TCP connect in the agent's own process, which an
+address that does not answer meets without taking the kernel's one
+fabrics connect at a time.
+
+* It takes one semaphore slot, checks the ctx error after acquiring it,
+  and dials with the caller's timeout; it gives the slot back as soon as
+  the dial returns, whatever its outcome.
+* A dial that the timeout ended, while the caller's ctx was still live, is
+  an error wrapping `ErrDialTimeout` that names the address: the one
+  outcome its caller decides by, told apart without reading the error's
+  text. A dial the ctx ended returns the ctx's error, which does not wrap
+  it, so a caller that went away never reads an address as dead. A
+  refusal, and every other failure, comes back as the dialer gave it.
+* A connection that opened is closed `dialHold` after it opened, on its
+  own, and the call returns at once, sending no byte. Reason: nvmet-tcp
+  logs an error for a connection that closes before the target has set its
+  queue up, and a dial before every connect must not write an error on the
+  disk node; one held that long closes in silence. The hold takes no slot,
+  and nobody waits for it.
+* One `os dial` record covers the call (`log.md`, OS commands and file
+  IO).
 
 ### Exported raw helpers and the probe-IO carve-out
 
