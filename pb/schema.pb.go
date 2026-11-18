@@ -233,9 +233,10 @@ const (
 	// optimized after a failed move to inaccessible (one wanted optimized
 	// that is not reads RES_STATUS_ERROR instead), and a thin pool whose
 	// metadata total is short of its metadata device, which a reload
-	// finishes (cnagent.md CN13), its details the raw status line, which
-	// shows the short total. Both agents set it on
-	// both channels, on a RES_STATUS_OK row whose details say what
+	// finishes, or that holds a metadata snapshot no live reader made,
+	// which a release ends (cnagent.md CN13), its details the raw status
+	// line, which shows the short total or the held root. Both agents set
+	// it on both channels, on a RES_STATUS_OK row whose details say what
 	// differs, and the object's verdict names the row on both channels, so
 	// the worker re-sends its Syncup* (dnagent.md SH31). The worker's
 	// health reads the status alone, so the row is healthy.
@@ -443,8 +444,9 @@ type ObsStamp struct {
 	// When the converge of the object that runs now began. Unset: none runs.
 	ConvergeStart *timestamppb.Timestamp `protobuf:"bytes,4,opt,name=converge_start,json=convergeStart,proto3" json:"converge_start,omitempty"`
 	// When the agent process began to serve, the start of its startup pass
-	// (dnagent.md SH33): the worker reads how long a starting agent has
-	// been starting from it, and a new value as the agent's restart.
+	// (dnagent.md SH33): the worker measures a start series' hold from it,
+	// and logs a new value on a round's reply as the agent's restart
+	// (dnv-worker.md HL8).
 	// Appended, never renumbered.
 	AgentStartTime *timestamppb.Timestamp `protobuf:"bytes,5,opt,name=agent_start_time,json=agentStartTime,proto3" json:"agent_start_time,omitempty"`
 	unknownFields  protoimpl.UnknownFields

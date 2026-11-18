@@ -4723,7 +4723,8 @@ optimized after a failed move to inaccessible, where one wanted optimized
 that is not leaves the primary without its optimized path and reads
 `RES_STATUS_ERROR` instead (`dnagent.md` DN18, SH31; `cnagent.md` CN28);
 and a thin pool whose metadata total is short of its metadata device,
-which a reload finishes (`cnagent.md` CN13). The object's verdict names a `RES_REASON_DIFFERS` row, so the
+which a reload finishes, or that holds a metadata snapshot no live
+reader made, which a release ends (`cnagent.md` CN13). The object's verdict names a `RES_REASON_DIFFERS` row, so the
 worker re-sends its `Syncup*` (`dnagent.md` SH31); no health rule reads
 it, so such a row is healthy. An agent sets a reason from what its own pass
 established, never from a row's text: `cnagent.md` CN29 says how the cn
@@ -7857,7 +7858,9 @@ document and only pointed to here.
   commits the pool in a gap: a thin device's create or delete (`cnagent.md`
   CN14); every read through a thin metadata snapshot, whose reservation commits
   the pool, the bitmap reads of a thin device and of a data leg (`cnagent.md`
-  CN25) and the thin id sweeps (`cnagent.md` CN14) among them; a reload or
+  CN25) and the thin id sweeps (`cnagent.md` CN14) among them; a converge's
+  release of a metadata snapshot it finds held (`cnagent.md` CN13), which a
+  restart after an agent died in such a read sends; a reload or
   suspend of the pool; a commit of a clone's dm-clone, which flushes the td it
   writes into and so commits the pool, whether a status read of a dm-clone
   whose copy reads whole makes it (`dnagent.md` SH17) or dm-clone makes it

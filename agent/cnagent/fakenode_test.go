@@ -74,6 +74,14 @@ type fakeNode struct {
 	// A fakeDm's thinIds field aliases this map, so the message handlers
 	// need no separate lookup.
 	thinPools map[string]map[uint32]bool
+	// heldRoots is the held metadata root a thin-pool's metadata keeps, by
+	// the pool's dm name, and like thinPools it outlives the dm device:
+	// dm-thin writes a reserve_metadata_snap's root into the metadata
+	// superblock, so a pool created again over the same metadata — on a new
+	// primary, or after a reboot — comes up holding it (cnagent.md CN13).
+	// A create takes it into the device's heldRoot; a reserve and a release
+	// change both (holdMetaSnap).
+	heldRoots map[string]bool
 	// lsGhosts are names `dmsetup ls` reports that no longer exist. The
 	// listing is an inherently stale snapshot — another cntlr's sweep
 	// (CN21), at SP_LEVEL_DISABLE or otherwise, can remove a device between
@@ -472,6 +480,7 @@ func newFakeNode() *fakeNode {
 		nextMinor:     1,
 		dms:           make(map[string]*fakeDm),
 		thinPools:     make(map[string]map[uint32]bool),
+		heldRoots:     make(map[string]bool),
 		infoOmit:      make(map[string]bool),
 		tableOmit:     make(map[string]bool),
 		arrays:        make(map[string]*fakeArray),
@@ -2098,6 +2107,9 @@ func (f *fakeNode) dmCreate(args []string, stdin string) (string, int) {
 		readOnly: readOnly,
 		thinIds:  f.poolThinIds(name, table),
 	}
+	if isDmTarget(table, "thin-pool") {
+		dm.heldRoot = f.heldRoots[name]
+	}
 	applyCloneTable(dm, table)
 	if code := f.checkTableDeps(table); code != 0 {
 		return "", code
@@ -2186,6 +2198,18 @@ func (f *fakeNode) poolThinIds(name, table string) map[uint32]bool {
 		f.thinPools[name] = held
 	}
 	return held
+}
+
+// holdMetaSnap leaves a metadata snapshot held in a pool's metadata, and in
+// its device when the pool is up, as an agent that died between a
+// reserve_metadata_snap and its release leaves it (heldRoots).
+func (f *fakeNode) holdMetaSnap(pool string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.heldRoots[pool] = true
+	if dm := f.dms[pool]; dm != nil {
+		dm.heldRoot = true
+	}
 }
 
 // holdThinIds seeds a pool's dm-thin metadata with ids no cntlr of this node
@@ -2347,6 +2371,14 @@ func (f *fakeNode) dmMessage(args []string) (string, int) {
 	if !ok {
 		return "", 1
 	}
+	// dm-thin serves no pool message to a pool whose mode is out of
+	// metadata space, read-only or failed (pool_message): its status reads
+	// ro, needs_check or a fault word then.
+	if isDmTarget(dm.table, "thin-pool") &&
+		(dm.poolMode == "ro" || dm.poolNeedsCheck || dm.poolFault != "") {
+		f.dispatchStderr = msgIoctlFailed(args[1], "Operation not supported")
+		return "", 1
+	}
 	message := strings.Join(args[3:], " ")
 	fields := strings.Fields(message)
 	switch {
@@ -2400,12 +2432,14 @@ func (f *fakeNode) dmMessage(args []string) (string, int) {
 			return "", 1
 		}
 		dm.heldRoot = true
+		f.heldRoots[args[1]] = true
 		f.lastSnapPool = args[1]
 	case message == "release_metadata_snap":
 		if !dm.heldRoot {
 			return "", 1
 		}
 		dm.heldRoot = false
+		delete(f.heldRoots, args[1])
 	}
 	return "", 0
 }

@@ -199,8 +199,9 @@ func HydrationComplete(details string) bool {
 
 // ThinPoolStatus is what one thin pool's `dmsetup status` line says of its
 // size and state: the metadata pair in dm-thin's fixed metadata blocks
-// (ThinMetaBlockSize), the data pair in the pool's data_block_size, and
-// whether the line carries needs_check.
+// (ThinMetaBlockSize), the data pair in the pool's data_block_size, whether
+// the line carries needs_check, whether a metadata snapshot is held, and
+// whether the mode word reads ro.
 type ThinPoolStatus struct {
 	UsedMetaBlocks  uint64
 	TotalMetaBlocks uint64
@@ -211,6 +212,14 @@ type ThinPoolStatus struct {
 	// until the flag is cleared, and dm-thin grows no metadata device at a
 	// resume (maybe_resize_metadata_dev), whatever its size.
 	NeedsCheck bool
+	// HeldRoot says the line's held metadata root is set: a
+	// reserve_metadata_snap made a metadata snapshot that no
+	// release_metadata_snap has released. dm-thin keeps it in the pool's
+	// metadata, where it pins the metadata blocks it shares.
+	HeldRoot bool
+	// ReadOnly says the mode word reads ro: a pool out of metadata space, or
+	// a read-only one, to which dm-thin serves no pool message.
+	ReadOnly bool
 }
 
 // ThinPoolFault is the word a thin pool's `dmsetup status` line carries in
@@ -241,11 +250,12 @@ func ThinPoolFault(raw string) string {
 // or may not be prefixed with the device name and the start/length pair.
 // Of what follows the two ratios — the held metadata root, the mode word
 // (rw, ro or out_of_data_space), the discard and no-space words,
-// needs_check, the low watermark — only needs_check is read: dm-thin prints
-// ro both for a pool out of metadata space and for a read-only one, and only
-// the second carries needs_check, since dnv's table never asks for
-// read-only. A line that carries `Fail` or `Error` in place of its numbers
-// (ThinPoolFault) does not parse.
+// needs_check, the low watermark — the held metadata root, which reads "-"
+// when none is held, whether the mode word is ro, and needs_check are read:
+// dm-thin prints ro both for a pool out of metadata space and for a
+// read-only one, and only the second carries needs_check, since dnv's table
+// never asks for read-only. A line that carries `Fail` or `Error` in place
+// of its numbers (ThinPoolFault) does not parse.
 func ParseThinPoolStatus(raw string) (*ThinPoolStatus, bool) {
 	fields := strings.Fields(raw)
 	token := -1
@@ -271,6 +281,12 @@ func ParseThinPoolStatus(raw string) (*ThinPoolStatus, bool) {
 		TotalMetaBlocks: totalMeta,
 		UsedDataBlocks:  usedData,
 		TotalDataBlocks: totalData,
+	}
+	if len(fields) > token+4 {
+		st.HeldRoot = fields[token+4] != "-"
+	}
+	if len(fields) > token+5 {
+		st.ReadOnly = fields[token+5] == "ro"
 	}
 	for _, field := range fields[token+4:] {
 		if field == "needs_check" {

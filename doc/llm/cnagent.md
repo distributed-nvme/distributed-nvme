@@ -2655,8 +2655,9 @@ metadata device's size, each only when the pool resumes, so the converge
 that appended the groups reloads the pool even over an unchanged table
 (`concatGrew`); no pool message is involved. A pass that grew the metadata
 concat and stopped before the pool's reload, as one killed between the
-two does, leaves a pool whose table matches; so every converge also reads
-the pool's status (noflush) and reloads the pool while its total metadata
+two does, leaves a pool whose table matches; so every converge that does
+not reload the pool for a grown concat also reads the pool's status
+(noflush) and reloads the pool while its total metadata
 blocks are fewer than dm-thin takes from the concat — the concat's size
 capped at `ThinMetaMaxBlocks` blocks of `ThinMetaBlockSize`, the kernel's
 own arithmetic (`common.ThinMetaBlocks`), so a pool that took its device
@@ -2666,7 +2667,29 @@ grows no metadata device under needs_check, and a reload would change
 nothing on every pass. A read makes the same comparison and reports such
 a pool's row `RES_STATUS_OK` with `RES_REASON_DIFFERS`, its details still
 the raw status line, so its verdict names the row (CN30) and the worker
-sends the `SyncupCntlr` whose converge reloads it. A deferred group (CN9) is left
+sends the `SyncupCntlr` whose converge reloads it.
+
+A converge that reads that status also releases a metadata snapshot the
+pool holds, whose held metadata root the line shows
+(`common.ThinPoolStatus.HeldRoot`): it sends `release_metadata_snap`
+(`poolHeldSnap`). Every reserve of the pool runs under this cntlr's object
+lock or inside its converge (CN1, CN14, CN25), so a snapshot a converge
+finds held is no live reader's: an agent died between a reserve and its
+release, or the release failed. dm-thin keeps it in the pool's metadata,
+so it outlives the process, and a pool created over that metadata — on
+the next primary, or after a reboot — comes up holding it: so a converge
+that creates the pool reads its status right after the create and
+releases a snapshot it finds held the same way. Held, it pins the pool's
+metadata blocks until a later reserve meets it, which may never come. A
+release that fails is logged. The pool's row
+reads `RES_STATUS_OK` with `RES_REASON_DIFFERS` while a snapshot is held,
+on a converge and a read alike, its details still the raw status line, so
+the verdict names the row (CN30): a converge that reloads the pool for a
+grown concat, and reads no status before it, or whose release failed, and
+a read, bring the worker's `SyncupCntlr` whose converge releases it. A
+line that does not parse, or whose mode reads `ro` — under needs_check, or
+out of metadata space — is not judged: dm-thin serves no pool message to
+such a pool, so a release there would fail on every pass. A deferred group (CN9) is left
 out of both concats and out of the pool sizing until it clears, and so
 is every group after it in the same list — the concat takes each list's
 leading run of non-deferred groups, never a filtered subset, because a
@@ -2907,7 +2930,8 @@ request is the newest accepted desired state, `dev_id`s are never reused
 (`architecture.md`, Known limits, names the etcd restore that can break
 that) and thin ids belong to tds alone. An agent restart under a
 surviving pool device does not sweep (nothing else writes the pool, and
-the CN2 zero-mutation reconcile stays intact), and a startup reconcile that
+the CN2 zero-mutation reconcile stays intact, save the release of a
+metadata snapshot an agent died holding, CN13), and a startup reconcile that
 re-creates the device (a node reboot) arms but does not run it: the
 reconcile converges the stored request, and the sweep runs only from a
 request that counts as delivered (CN8), the gate CN12 puts on the
@@ -4332,6 +4356,10 @@ metadata snapshot is already held — one an earlier reserve made and
 nothing released — is retried once after a release; that refusal is read from the error's type,
 EBUSY, or EEXIST for an output that words it "already exists", never from
 its text (`dnagent.md`, OS wrappers — `dm.go`, `nvmet.go`, `nvmehost.go`).
+An agent that dies between a reserve and its release leaves the snapshot
+held in the pool's metadata; the next converge of the cntlr that reads
+the pool's status releases it, and until then every read of the cntlr
+names the pool, as CN13 says.
 The XML goes to a file, never to stdout: the OS
 command record logs a command's stdout in full (`log.md`, OS commands
 and file IO), and a dump is one element per mapped run — large on a
@@ -4732,7 +4760,8 @@ The rows, each with its `res_name` and what its probe checks:
   place of its numbers, `RES_STATUS_ERROR` with
   `RES_REASON_POOL_NEEDS_CHECK` for one with needs_check, and
   `RES_STATUS_OK` otherwise, with `RES_REASON_DIFFERS` while its metadata
-  total is short of its metadata device; the details are the raw line in
+  total is short of its metadata device or it holds a metadata snapshot
+  that a converge releases; the details are the raw line in
   every case. A serving pool keeps its row so even while a deferred group
   waits to be grown in (CN13): `PROVISIONING` never marks the serving pool,
   because it would switch auto-grow off.
@@ -4984,7 +5013,8 @@ from its own pass's state, CN19's level, from the level the pass's plan
 reads, CN18's source fault, which marks the clone rows this node keeps
 missing because it does not read the clone's source as ready, from step 1's
 reading of the source, CN28's differs, on a namespace whose ANA group
-differs and on a thin pool short of its metadata device (CN13), CN28's
+differs and on a thin pool short of its metadata device or holding a
+metadata snapshot (CN13), CN28's
 parked, on a parked ns-dev, and CN13's needs_check and failed pool, from the
 pool's status line. And a clone's two rows take their status from CN18's
 shared rule, from the live state, on a converge and a read alike, a failed
@@ -5097,7 +5127,7 @@ over both; and, by tests of their own (below), the leg wrappers, the
 reads `RES_STATUS_MISSING` with no reason as "absent", and one that reads
 `RES_STATUS_ERROR`, or `RES_STATUS_OK` with `RES_REASON_DIFFERS` (a
 namespace that serves and whose ANA group differs, or a thin pool short of
-its metadata device, CN13), as "differs". It
+its metadata device or holding a metadata snapshot, CN13), as "differs". It
 names no row the level suppresses, no `RES_STATUS_PROVISIONING` row, no
 thin row a converge marks `RES_REASON_THIN_ID_LOST` (CN14), no pool row that
 reads needs_check or failed (`RES_REASON_POOL_NEEDS_CHECK`,

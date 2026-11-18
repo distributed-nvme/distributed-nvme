@@ -119,7 +119,8 @@ func (s *CnAgentServer) ensureSlice(
 //     data space, and one read-only for want of metadata space, whose cure
 //     is the metadata auto-grow (dnv-worker.md AR6), which an error row
 //     would stop; with RES_REASON_DIFFERS while it is short of its metadata
-//     device (poolMetaShort), so the verdict names it (CN30).
+//     device (poolMetaShort) or holds a metadata snapshot the converge
+//     releases (poolHeldSnap), so the verdict names it (CN30).
 //
 // The details are the raw line in every case.
 func poolHealth(raw string, metaSectors uint64) (pb.ResStatus, pb.ResReason) {
@@ -131,7 +132,7 @@ func poolHealth(raw string, metaSectors uint64) (pb.ResStatus, pb.ResReason) {
 		return pb.ResStatus_RES_STATUS_ERROR,
 			pb.ResReason_RES_REASON_POOL_NEEDS_CHECK
 	}
-	if poolMetaShort(raw, metaSectors) {
+	if poolMetaShort(raw, metaSectors) || poolHeldSnap(raw) {
 		return pb.ResStatus_RES_STATUS_OK, pb.ResReason_RES_REASON_DIFFERS
 	}
 	return pb.ResStatus_RES_STATUS_OK, pb.ResReason_RES_REASON_NONE
@@ -223,6 +224,12 @@ func (s *CnAgentServer) ensurePool(
 		// like any other — the reboot deferral lives at the run site, not
 		// here.
 		st.pendingSweep[sp.sliceId] = true
+		// dm-thin keeps a held metadata snapshot in the pool's metadata,
+		// so a pool opened on a new primary or after a reboot can come up
+		// holding one.
+		if raw, err := s.dm.StatusNoFlush(ctx, sp.poolFinalName); err == nil {
+			s.releaseHeldSnap(ctx, sp, raw)
+		}
 		return nil
 	}
 	if concatGrew {
@@ -230,8 +237,11 @@ func (s *CnAgentServer) ensurePool(
 	}
 	// A status that cannot be read is no reason to reload: the row's own
 	// status read reports it after this.
-	if raw, err := s.dm.StatusNoFlush(ctx, sp.poolFinalName); err == nil &&
-		poolMetaShort(raw, sp.metaSectors) {
+	raw, err := s.dm.StatusNoFlush(ctx, sp.poolFinalName)
+	if err == nil {
+		s.releaseHeldSnap(ctx, sp, raw)
+	}
+	if err == nil && poolMetaShort(raw, sp.metaSectors) {
 		slog.InfoContext(ctx, "thin-pool metadata short of its device",
 			slog.String("pool", sp.poolFinalName),
 			slog.String("status", raw),
@@ -242,6 +252,28 @@ func (s *CnAgentServer) ensurePool(
 	// so only the four arguments the agent writes are compared.
 	return s.ensureDmSingle(ctx, sp.poolFinalName, "thin-pool",
 		sp.dataSectors, args, len(args))
+}
+
+// releaseHeldSnap releases the metadata snapshot the pool holds when its
+// status line raw shows one held (poolHeldSnap). A metadata snapshot a
+// converge finds held is no live reader's: every reserve of the pool runs
+// under this cntlr's object lock or inside its converge (CN1, CN14, CN25),
+// so it is one an agent died holding, or whose release failed. Held, it pins
+// the pool's metadata blocks until some later reserve meets it, which may
+// never come (CN13). A release that fails is logged, and the pool's row then
+// names it again.
+func (s *CnAgentServer) releaseHeldSnap(
+	ctx context.Context,
+	sp *slicePlan,
+	raw string,
+) {
+	if !poolHeldSnap(raw) {
+		return
+	}
+	slog.InfoContext(ctx, "thin-pool holds a metadata snapshot",
+		slog.String("pool", sp.poolFinalName),
+		slog.String("status", raw))
+	s.releaseMetadataSnap(ctx, sp)
 }
 
 // ---------------------------------------------------------------------------
@@ -533,6 +565,19 @@ func poolMetaShort(raw string, metaSectors uint64) bool {
 		return false
 	}
 	return st.TotalMetaBlocks < common.ThinMetaBlocks(metaSectors)
+}
+
+// poolHeldSnap reports whether a thin pool's status line shows a metadata
+// snapshot held (common.ThinPoolStatus.HeldRoot) on a pool that serves pool
+// messages: the state an agent leaves that died between a
+// reserve_metadata_snap and its release (CN13, CN25). A line that does not
+// parse, a failed pool's among them, and one whose mode reads ro, under
+// needs_check or out of metadata space, are not judged: dm-thin refuses the
+// release then, and naming the pool would bring a converge on every round
+// that changes nothing.
+func poolHeldSnap(raw string) bool {
+	st, ok := common.ParseThinPoolStatus(raw)
+	return ok && st.HeldRoot && !st.NeedsCheck && !st.ReadOnly
 }
 
 func (s *CnAgentServer) probeThin(

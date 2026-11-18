@@ -1849,7 +1849,8 @@ func (s *CnAgentServer) sweepCntlr(
 // names a row that reads
 // RES_STATUS_MISSING with no reason, as "absent"; one that reads
 // RES_STATUS_ERROR, or RES_STATUS_OK with RES_REASON_DIFFERS (a namespace
-// whose ANA group differs, or a thin pool short of its metadata device), as
+// whose ANA group differs, or a thin pool short of its metadata device or
+// holding a metadata snapshot), as
 // "differs", the first line of the row's
 // details after it. It names a row only while every row it is built on
 // reads RES_STATUS_OK (rowsUnder): a stack over a group whose array does not
