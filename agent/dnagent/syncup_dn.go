@@ -308,10 +308,15 @@ func (s *DnAgentServer) Reconcile(ctx context.Context) error {
 // where a side's SyncupSide may store its request meanwhile; knownSides is
 // read before claimedMigrs for the same reason sweepSide reads it before the
 // claims.
+//
+// unsettled is sweepDn's set of sps whose side devices wait for an export the
+// pass could not settle: their side records wait with them, neither freed
+// nor named, as the devices are neither removed nor named.
 func (s *DnAgentServer) sweepOrphanRecords(
 	ctx context.Context,
 	res *agent.SweepResult,
 	remove bool,
+	unsettled map[uint64]struct{},
 ) {
 	clusterId, dnId, ok := s.meta.Identity()
 	if !ok {
@@ -344,6 +349,9 @@ func (s *DnAgentServer) sweepOrphanRecords(
 	for _, rec := range sideRecs {
 		key := [2]uint64{rec.GetSpId(), rec.GetSideId()}
 		if _, live := known[key]; live {
+			continue
+		}
+		if _, wait := unsettled[rec.GetSpId()]; wait {
 			continue
 		}
 		name := s.nf.DnSideName(

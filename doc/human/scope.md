@@ -745,6 +745,23 @@ Measured times are in [the introduction](introduction.md#status-and-limits-of-01
   leftovers stand unless forced. Procedure to write: node removal and disk
   reuse. Fix later: a forced node delete for a dead disk node. Not seen in
   the lab.
+- **Space of a dropped side can stay in use for a while.** When a side
+  leaves a disk node and no other side of its pool stays on that disk
+  node, the agent keeps the side's extents in use for as long as the
+  machine holds an empty NVMe-oF export of that pool, one that is being
+  built or whose removal stopped part way, that is less than 30 seconds
+  old. The side's own removal leaves such an export when it stops after the
+  export's namespace is gone; one that stops earlier leaves an export the
+  check rounds report. Another agent on the same machine has such an export
+  while it builds or removes an export of the pool. The check rounds report
+  no leftover meanwhile. A side placed on that disk node in that time can
+  fail for want of room, and a node deleted in that time keeps the side.
+  When the kernel renews an export's time stamp each time its settings are
+  read, the wait can last longer: while another agent on the machine keeps
+  failing part way through a build of an export of the pool, and, when two
+  agents on one machine hold the two sides of one leg, until the other
+  agent builds that export again or removes it. State: accepted. Only its age tells such an export
+  from another agent's export still being built. Not seen in the lab.
 - **A node's own converge whose call was cut off leaves part of its
   build waiting.** When the call of a disk node's or a controller node's
   own syncup is cut off, what its converge did not build, other than the

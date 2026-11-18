@@ -781,20 +781,24 @@ func TestPortLinksListedOncePerPass(t *testing.T) {
 	}
 }
 
-// TestHalfBuiltExportAgeUnreadIsForeign pins what an age read that does not
-// answer means: nothing. The age is the first evidence read of a :2: export
-// without namespace one, and the orphan verdict rests on it, so an export
-// whose age cannot be read this pass — the read cut off at the soft timeout,
-// or failed with an error other than "not exist" — is FOREIGN for the pass,
-// like every other failed read of classifyExport: not removed, nothing of it
-// listed, and the enumeration named as failed, so the verdict is not clean
-// and the worker re-drives. That holds for a young export on a sibling's port
-// too, which the port links alone would settle: the age comes first. A
-// sibling's build never has that shape, since it links its port only after
-// its namespace; a removal of an export two agents of one kernel link leaves
-// it, and so can a configfs change made outside dnv. The next pass reads it
-// again.
-func TestHalfBuiltExportAgeUnreadIsForeign(t *testing.T) {
+// TestHalfBuiltExportAgeUnreadIsLeftAlone pins what an age read that does
+// not answer means: nothing. The age is the first evidence read of a :2:
+// export without namespace one, and the orphan verdict rests on it, so an
+// export whose age cannot be read this pass — the read cut off at the soft
+// timeout, or failed with an error other than "not exist" — is left alone
+// for the pass, as a foreign one is, like every other failed read of
+// classifyExport (exportUnread): not removed, nothing of it listed, and the
+// enumeration named as failed, so the verdict is not clean and the worker
+// re-drives. That holds for a young export on a sibling's port too, which
+// the port links alone would settle: the age comes first. A sibling's build
+// never has that shape, since it links its port only after its namespace; a
+// removal of an export two agents of one kernel link leaves it, and so can a
+// configfs change made outside dnv. The next pass reads it again. Unlike a
+// foreign one, the node-level pass also keeps the side devices of the
+// export's sp's dropped sides and the sp's side records while no side
+// anchors the sp (DN6, An sp waits for its exports); the held side here
+// anchors it, so nothing else waits.
+func TestHalfBuiltExportAgeUnreadIsLeftAlone(t *testing.T) {
 	nf := common.NewNameFmt(common.DefaultLocalStorPrefix)
 	for _, scope := range sweepScopes() {
 		for _, tc := range []struct {

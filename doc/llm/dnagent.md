@@ -883,45 +883,41 @@ These primitives must honour it, because each one's caller answers an
 
 `NvmeHost.readTrimmed` follows the same rule from the other side of the
 fence: it reads sysfs rather than running a tool, so **only** a not-exist
-error is "absent" and every other read failure is an error — the nvme
-class directories under
-"/sys/class" can stall while a controller is mid-reset, and a stalled read
-taken as absence would report a live subsystem as not connected (SH20); in
-the cn's lookups, a subsystem whose "subsysnqn" read failed, passed over as
-another NQN's, would send the connect step after sides whose controllers
-are live (`cnagent.md` CN10). The read under it, `osBase.readAttrStrict`,
-carries the rule for the other strict reads besides `Md.Detail`'s above,
-among them:
-`Nvmet.NsDevicePath` (a
-namespace's "device_path", by which the cn sweep attributes a host-facing
-subsystem no stored request claims — a namespace over another device makes
-it foreign, and a read taken as absent could leave only the model to decide
-and get a dnv-model subsystem removed, `cnagent.md` CN21 — and by
-which DN6 attributes a `SideToCnNqn` export: an export whose read did not
-answer is foreign for that pass and named as a failed enumeration; and by
-which DN6's step before the first layer finds the device a migration
+error is "absent" and every other read failure is an error — the nvme class
+directories under "/sys/class" can stall while a controller is mid-reset,
+and a stalled read taken as absence would report a live subsystem as not
+connected (SH20); in the cn's lookups, a subsystem whose "subsysnqn" read
+failed, passed over as another NQN's, would send the connect step after
+sides whose controllers are live (`cnagent.md` CN10). The read under it,
+`osBase.readAttrStrict`, carries the rule for the other strict reads besides
+`Md.Detail`'s above, among them: `Nvmet.NsDevicePath` (a namespace's
+"device_path", by which the cn sweep attributes a host-facing subsystem no
+stored request claims — a namespace over another device makes it foreign,
+and a read taken as absent could leave only the model to decide and get a
+dnv-model subsystem removed, `cnagent.md` CN21 — and by which DN6 attributes
+a `SideToCnNqn` export: an export whose read did not answer is left alone
+for that pass, as a foreign one is, and named as a failed enumeration; and
+by which DN6's step before the first layer finds the device a migration
 source export serves: a read that did not answer stops the descent before
-L1, so no layer runs),
-`Nvmet.NsAnaGrpId` (a namespace's "ana_grpid", by which DN13 reads, in a
-destination pass whose step stopped, whether a per-CN stack serves through
-the dm-clone: a group read that did not answer, taken as not optimized,
-would reload the leg's only serving path onto its dm-error),
-`Nvmet.SubsysModel` (a subsystem's "attr_model", by which the cn sweep
-calls a subsystem with no namespace device dnv's: a read that did not
+L1, so no layer runs), `Nvmet.NsAnaGrpId` (a namespace's "ana_grpid", by
+which DN13 reads, in a destination pass whose step stopped, whether a per-CN
+stack serves through the dm-clone: a group read that did not answer, taken
+as not optimized, would reload the leg's only serving path onto its
+dm-error), `Nvmet.SubsysModel` (a subsystem's "attr_model", by which the cn
+sweep calls a subsystem with no namespace device dnv's: a read that did not
 answer is not ours for the pass and named, `cnagent.md` CN21), the "enable"
-reads of `Nvmet.RemoveNamespace` and `RemoveSubsystem` (an
-"absent" would skip the disabling write and the rmdir of a namespace the
-kernel still has enabled), the attribute reads of `Nvmet.ProbeNamespace`
-(a namespace's path, identity, "enable" and "ana_grpid", SH31: an empty
-path read beside an enable that answered would make `EnsureNamespace`
-disable a live export's namespace, and an empty enable would make a cn
-step move a serving namespace's ANA group), the
-attribute reads of `Nvmet.ProbePortState`
-(SH31: a group whose state read did not answer, read as absent, would make
-a read's verdict re-send a `SyncupDn` or `SyncupCn` for a port that is
-there) and, through `Cmd.ReadAttr`, the md sysfs reads of `Md.ListArrays`
-and `Md.Gone` (`cnagent.md` CN12: an array read as absent, or as gone, would
-let the sweep disconnect a leg under a live array).
+reads of `Nvmet.RemoveNamespace` and `RemoveSubsystem` (an "absent" would
+skip the disabling write and the rmdir of a namespace the kernel still has
+enabled), the attribute reads of `Nvmet.ProbeNamespace` (a namespace's path,
+identity, "enable" and "ana_grpid", SH31: an empty path read beside an
+enable that answered would make `EnsureNamespace` disable a live export's
+namespace, and an empty enable would make a cn step move a serving
+namespace's ANA group), the attribute reads of `Nvmet.ProbePortState` (SH31:
+a group whose state read did not answer, read as absent, would make a read's
+verdict re-send a `SyncupDn` or `SyncupCn` for a port that is there) and,
+through `Cmd.ReadAttr`, the md sysfs reads of `Md.ListArrays` and `Md.Gone`
+(`cnagent.md` CN12: an array read as absent, or as gone, would let the sweep
+disconnect a leg under a live array).
 
 The listings the agent makes in its own process honour the file-read half
 of the same rule (`osclient.md`, RunCommand): `Cmd.ListDir`, through which
@@ -1931,39 +1927,45 @@ wanted set is empty for every side that is not in any authoritative list: a
 `DnErrorName`/`DnLinearName`/`DnSideName` device whose `(sp_id, side_id)`
 appears in no synced DN's `side_pointer_list` **and** in no side whose
 stored request this process holds (a side whose file DN2's reload did not
-load is on disk but held by none until its `SyncupSide`) goes, together
+load is on disk but held by none until its `SyncupSide`) goes — save a
+`DnSideName` device while the sweep cannot settle every export of its sp and
+no side of the sp anchors it (An sp waits for its exports, below) — together
 with the migration objects no held side claims (once every side of their sp
 this node may host is held, below) and the exports this agent can attribute
-to itself that name no side it must keep — a `SideToCnNqn` export carries
-no dn id, so it is attributed before it is judged (below), or the sweep
-would take a sibling agent's. It never touches a side that **is** in a
-pointer list, even when that side's file is absent (DN8): a node that lost
-`--local-store` but kept its disk must rebuild those sides from their
-records, and sweeping them would free the extents and send the next
+to itself that name no side it must keep — a `SideToCnNqn` export carries no
+dn id, so it is attributed before it is judged (below), or the sweep would
+take a sibling agent's. It judges only the `SideToCnNqn` exports of an sp
+this agent holds a device of or knows a side of. Reason: an agent that
+judged every export on a kernel dozens of dn agents share would read the
+whole configfs tree of exports on every pass, its siblings' included, though
+it can own none of an sp it has nothing of. It never touches a side that
+**is** in a pointer list, even when that side's file is absent (DN8): a node
+that lost `--local-store` but kept its disk must rebuild those sides from
+their records, and sweeping them would free the extents and send the next
 `SyncupSide` through the provisioning protocol again, zeroing live data.
-Nor, while such a side is not held — its file absent or unreadable — does
-it judge a migration object of that side's sp: the migration objects follow
-the known-with-state rule of the `CloneMetaRecord` (the record rule,
-below). Each names `(sp_id, migr_id)` and no side, and the claim rule reads
-held sides' requests only, so while any side of its sp is known by its
-pointer alone, "no held side claims it" proves nothing — that side may be
-the one playing the migration. Judging them anyway, in the `SyncupDn` that
-brings a lost store's pointer list back, would take a source's
-`DnMigrSrcName` and its `MigrSrcNqn` export out from under the
-destination's dm-clone, whose reads of every region not yet hydrated then
-fail on the leg the host is using. Such an object is neither removed nor
-named as a leftover — naming it would only have the worker re-send a
-`SyncupDn` that must not remove it — and the wait ends by itself: the
-side's Check round replies `ReplyCodeUnknownObject` until its `SyncupSide`
-stores the request, and that rejection is what brings the `SyncupSide`
-(`dnv-worker.md` RW4); once every side of the sp this node may host is
-held, the next pass judges the object by the claim rule again. A
-destination's source connection waits with its dm-clone, not only behind
-L3's stop rule: with the clone out of the chain, L3 would find no clone of
-its own to fail on and disconnect the source under the live one. It also
-takes the namespace-less exports nobody can attribute, once they are older
-than `DnExportOrphanGrace` (below). When no DN has been synced or reloaded
-at all nothing is authoritative and the sweep does nothing.
+Nor, while such a side is not held — its file absent or unreadable — does it
+judge a migration object of that side's sp: the migration objects follow the
+known-with-state rule of the `CloneMetaRecord` (the record rule, below).
+Each names `(sp_id, migr_id)` and no side, and the claim rule reads held
+sides' requests only, so while any side of its sp is known by its pointer
+alone, "no held side claims it" proves nothing — that side may be the one
+playing the migration. Judging them anyway, in the `SyncupDn` that brings a
+lost store's pointer list back, would take a source's `DnMigrSrcName` and
+its `MigrSrcNqn` export out from under the destination's dm-clone, whose
+reads of every region not yet hydrated then fail on the leg the host is
+using. Such an object is neither removed nor named as a leftover — naming it
+would only have the worker re-send a `SyncupDn` that must not remove it —
+and the wait ends by itself: the side's Check round replies
+`ReplyCodeUnknownObject` until its `SyncupSide` stores the request, and that
+rejection is what brings the `SyncupSide` (`dnv-worker.md` RW4); once every
+side of the sp this node may host is held, the next pass judges the object
+by the claim rule again. A destination's source connection waits with its
+dm-clone, not only behind L3's stop rule: with the clone out of the chain,
+L3 would find no clone of its own to fail on and disconnect the source under
+the live one. It also takes the namespace-less exports nobody can attribute,
+once they are older than `DnExportOrphanGrace` (below). When no DN has been
+synced or reloaded at all nothing is authoritative and the sweep does
+nothing.
 
 **Scope 2, side-level.** Inside `convergeSide` and ahead of its build phase
 (`SyncupSide`), under whatever DN1 locks that caller holds (SH10/SH11). Its
@@ -2107,14 +2109,15 @@ names nobody; what becomes of it is a known limit, Known limits.) The age
 is read from the node, never remembered: the directory's mtime
 (`Nvmet.SubsysMtime`, read in the agent's own process, SH18) against the
 agent's clock, as exact as the kernel keeps it. A read of it that fails
-makes the export foreign for that sweep, as every other failed read of the
-attribution does — one on a sibling's port or holding a namespace at
-another id included, since both are read only after the age: one that did
-not answer, or failed other than as "not exist", is named as a failed
-enumeration, so the verdict is not clean (SH15), and one that found the
-directory gone is simply passed over. The mtime is set at `mkdir`, and
-adding an allowed-host link or a namespace directory under it does not
-move it.
+leaves the export alone for that sweep, as a foreign one is left, and so
+does every other failed read of the attribution — one on a sibling's port
+or holding a namespace at another id included, since both are read only
+after the age: one that did not answer, or failed other than as "not
+exist", is named as a failed enumeration, so the verdict is not clean
+(SH15), and holds the side devices of the export's sp as a young export
+does (An sp waits for its exports, below); one that found the directory
+gone is simply passed over. The mtime is set at `mkdir`, and adding an
+allowed-host link or a namespace directory under it does not move it.
 Kernels differ in one respect. One that stamps the parent directory on
 every lookup of one of the subsystem's own "attr_*" files — a read, a
 write, even a "stat" of one, because configfs instantiates an attribute's
@@ -2279,6 +2282,43 @@ and no command blocks, unless the target behind one of the node's connections
 stalls but still takes the reconnect, which holds the IO without limit, as on a
 leg (`osclient.md`, Exported raw helpers and the probe-IO carve-out).
 
+**An sp waits for its exports.** Scope 1 judges an export only while this
+agent holds a device of its sp or knows a side of it (Scope 1, above), so a
+sweep finds an abandoned export old only if its sp is still in view then. A
+removal that stops after the namespace went — any later step of it does not
+answer or is refused, or the agent ends there — leaves an export of ours
+without its namespace, which the age rule leaves alone while it reads young.
+Were the next sweep to take the side's devices from beneath it, and leave
+the sp with no device and no known side, no sweep would judge the export
+again, and it would stay for ever, unnamed. So while an sp has no anchoring
+side and an export of it that a sweep cannot settle — young, or whose
+attribution read failed — that sweep keeps the side devices of the sp's
+dropped sides and every side record of the sp, neither removed nor named,
+and the layers above the side devices go as they would. A sweep whose
+listing of the nvmet subsystems did not answer can settle no export, so it
+keeps them in every sp that has a dropped side's device and no anchoring
+side; it names the failed listing. An anchoring side is a known side whose
+own `DnSideName` device is on the node: it keeps that device for as long as
+it is known, at every level (DN11), so its sp stays in view whatever becomes
+of a side dropped beside it. A side known by its pointer alone anchors too
+while its side device is still on the node, as after a lost `--local-store`.
+A known side with no side device on the node — none built yet, as before its
+first `SyncupSide`, or its allocation refused — anchors nothing, and once it
+is dropped too nothing of it would keep the sp in view. One device keeps the
+sp in view, and the side device is the one at the bottom: nothing above it
+waits on it, and a dropped side's export stands over that side's own side
+device — a side's export is built over its side device, which no level
+removes, and a removal that leaves the export stops the descent above it.
+They are not named for the reason the young export is not: naming them would
+only bring a `SyncupDn` that must not remove them yet. Once a sweep settles
+the export — it has its namespace one; or it is older than the grace and so
+ours, an orphan or foreign; or it is gone — the side devices and records are
+judged as any others: a read's verdict names them, and the export too when
+it is an orphan, and the `SyncupDn` that verdict brings removes them. A
+sibling's export of the sp that stands young without namespace one on a
+shared kernel keeps them the same way, with the side's extents, until it has
+its namespace one or is old (Known limits).
+
 **"Gone" is probe-verified.** Every removal is followed by a re-probe —
 `dmsetup info` for a dm device, the configfs directory for a subsystem, the
 sysfs walk for a connection — and that probe, never the removal command's
@@ -2336,7 +2376,9 @@ probed and found already gone. A record whose device is still there — or
 whose `dmsetup info` did not answer, which is not an absence (SH15) — is
 reported as a leftover and stays allocated until a later pass finds the
 device gone; freeing extents a live device still maps is the corruption
-path above, not a leak. Cancelling the zeroing goroutine is not this step's
+path above, not a leak. The side records of an sp that waits for its
+exports (An sp waits for its exports, above) the step neither frees nor
+names while it waits. Cancelling the zeroing goroutine is not this step's
 business either: the goroutine ends when the side's state is dropped,
 ahead of the sweep — the drop of a side whose pointer left the list cancels
 and waits for it — because a live `blkdiscard --zeroout` child holds
@@ -4126,6 +4168,32 @@ else reported through `agent_reply` is still a protocol-level refusal.
   long before the removal; and the export two agents link reads old once no
   side of the agent whose port it is left on has looked up its attributes
   within the grace, as when no side of that agent wants it any more.
+* A dropped side whose sp keeps no anchoring side on this node keeps its
+  side device, its record and so its extents, neither removed nor named, for
+  as long as one of three holds (DN6, An sp waits for its exports): an
+  export of the sp that no held side claims stands on the kernel without
+  namespace one and younger than `DnExportOrphanGrace`; a read of an export
+  of the sp that no held side claims fails, whatever the export holds; or
+  the listing of the nvmet subsystems does not answer. The failed read and
+  the failed listing are named in the verdict; the young export is not. A
+  sibling's build in flight is in the first state for a moment, and one that
+  keeps failing after its subsystem `mkdir` and before its namespace stays
+  in it while it retries, on a kernel that stamps the directory on an
+  attribute lookup. So is an export that two agents of one kernel link, one
+  for each side of a leg, once a removal by one of them left it without its
+  namespace: on a kernel that stamps the directory on an attribute lookup it
+  reads young while a side of the other agent that wants it looks up its
+  attributes, that is until a converge of that agent builds its namespace
+  again or removes it. On a kernel that keeps the directory's time at its
+  `mkdir`, an export made longer than the grace before reads old, and the
+  next sweep finds it the other agent's by its port link; from that sweep
+  on, the dropped side's device and record are judged as any others: a
+  read's verdict names them, and the `SyncupDn` that verdict brings removes
+  them. While the record waits, the disk counts say the side records do not
+  match the pointers, so the worker's count compare waits (`dnv-worker.md`
+  RW13), and a side placed on this node meanwhile that needs those extents
+  reads `RES_STATUS_ERROR` for want of room (DN9) until the record goes,
+  though the control plane counts them free since the drop.
 * The dn sweep's disconnect of a destination's source connection (DN6 L3)
   runs under the DN1 locks, as the cn build's dead-path disconnect does;
   only the cn sweep's runs off them (`cnagent.md` CN10 and CN21). A target
@@ -4164,11 +4232,14 @@ else reported through `agent_reply` is still a protocol-level refusal.
   for a reason of the worker's own, the worker counts that reply's age
   from a round before the restart, and takes the round for a missed round
   once that earlier round lies more than its bound back.
-* The dn sweep gates its removals on its `dmsetup ls` alone: an nvmet
-  listing or a host walk that did not answer is named in the verdict, so
-  the reply is not clean and the worker re-drives the pass, but it stops
-  nothing — the layer that removes exports or the one that disconnects
-  source connections finds nothing to remove, and the layers below run on.
+* The dn sweep gates its removals on its `dmsetup ls`: an nvmet listing or
+  a host walk that did not answer is named in the verdict, so the reply is
+  not clean and the worker re-drives the pass, and the layer that removes
+  exports or the one that disconnects source connections finds nothing to
+  remove. The layers below run on, save that a pass whose nvmet listing did
+  not answer keeps the side devices of the dropped sides, and the side
+  records, of every sp that has such a device and no anchoring side (DN6,
+  An sp waits for its exports).
 * A migration destination that waits for a free run in the clone-metadata
   area waits until another destination role of the node ends and its run
   is freed, and then for the worker's re-send that a read's name brings

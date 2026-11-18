@@ -58,8 +58,12 @@ type dnActual struct {
 	// dn, those of the migration-source connections a destination side
 	// makes.
 	hostSubsys []agent.SubsysBrief
-	// nvmetSubsys is every subsystem in the target's configfs tree.
+	// nvmetSubsys is every subsystem in the target's configfs tree, and
+	// nvmetListed says the listing behind it answered: an unanswered one
+	// leaves the node-level sweep with no export to settle, so it keeps
+	// every side device that waits for one (sweepDn).
 	nvmetSubsys []string
+	nvmetListed bool
 }
 
 func (s *DnAgentServer) enumerateDn(
@@ -101,6 +105,7 @@ func (s *DnAgentServer) enumerateDn(
 	if err != nil {
 		res.Fail("nvmet subsystems", err)
 	} else {
+		actual.nvmetListed = true
 		actual.nvmetSubsys = nvmetSubsys
 	}
 	return actual
@@ -1076,6 +1081,12 @@ const (
 	// naming its owner's linear or the age of an export nobody is building; a
 	// namespace at another id decides it only once it is old.
 	exportYoung
+	// exportUnread: a read the attribution needs failed (SH15), so this pass
+	// can say nothing of the export. It is left alone, as a foreign one is,
+	// and the failure makes the verdict not clean; Scope 1 also keeps the
+	// side devices of its sp, as for a young one, unless a side of the sp
+	// anchors it (sweepDn).
+	exportUnread
 )
 
 // portLinks is the lazily built "which port is this subsystem linked to" map.
@@ -1155,7 +1166,7 @@ func (s *DnAgentServer) classifyExport(
 	path, present, err := s.nvmet.NsDevicePath(ctx, nqn, sideNsid)
 	if err != nil {
 		res.Fail(fmt.Sprintf("nvmet %s ns %d device_path", nqn, sideNsid), err)
-		return exportForeign, 0, 0, ""
+		return exportUnread, 0, 0, ""
 	}
 	if present {
 		// One naming no device we can read an owner off is somebody
@@ -1178,7 +1189,7 @@ func (s *DnAgentServer) classifyExport(
 	mtime, present, err := s.nvmet.SubsysMtime(ctx, nqn)
 	if err != nil {
 		res.Fail("nvmet subsystem age of "+nqn, err)
-		return exportForeign, 0, 0, ""
+		return exportUnread, 0, 0, ""
 	}
 	if !present {
 		// Removed between the listing and this read.
@@ -1192,7 +1203,7 @@ func (s *DnAgentServer) classifyExport(
 	nsids, found, err := s.nvmet.ListNamespaces(ctx, nqn)
 	if err != nil {
 		res.Fail("nvmet namespaces of "+nqn, err)
-		return exportForeign, 0, 0, ""
+		return exportUnread, 0, 0, ""
 	}
 	if !found {
 		// Removed between the age read and this listing.
@@ -1204,7 +1215,7 @@ func (s *DnAgentServer) classifyExport(
 		path, present, err := s.nvmet.NsDevicePath(ctx, nqn, nsid)
 		if err != nil {
 			res.Fail(fmt.Sprintf("nvmet %s ns %d device_path", nqn, nsid), err)
-			return exportForeign, 0, 0, ""
+			return exportUnread, 0, 0, ""
 		}
 		if !present {
 			continue
@@ -1224,7 +1235,7 @@ func (s *DnAgentServer) classifyExport(
 	byNqn, err := s.portLinksOf(ctx, links)
 	if err != nil {
 		res.Fail("nvmet port links", err)
-		return exportForeign, 0, 0, ""
+		return exportUnread, 0, 0, ""
 	}
 	for _, portId := range byNqn[nqn] {
 		if portId != s.port.PortId {
@@ -1314,7 +1325,7 @@ func (s *DnAgentServer) collectExports(
 			owner, ownerSp, ownerSide, linear := s.classifyExport(
 				ctx, clusterId, dnId, nqn, links, res)
 			switch owner {
-			case exportForeign, exportYoung:
+			case exportForeign, exportYoung, exportUnread:
 				continue
 			case exportOurs:
 				if ownerSp != spId || ownerSide != sideId {
@@ -1497,9 +1508,13 @@ func (s *DnAgentServer) dmMapsUnwanted(
 // even when its side file is absent: after a lost --local-store the side must
 // be REBUILT from its record, and sweeping it would free the extents and send
 // the next SyncupSide through architecture.md, Side provisioning protocol,
-// again, zeroing
-// live data. Nor, while that side is not held, is a migration object of its
-// sp (fullyKnown below).
+// again, zeroing live data. Nor, while that side is not held, is a migration
+// object of its sp (fullyKnown below). Nor, while this pass cannot settle
+// every export of its sp — one reads young or a read of it failed, or, for
+// an sp with a dropped side's device here, the nvmet listing did not
+// answer — and no known side of the sp keeps its own side device here, is
+// the side device of a dropped side, or a side record of that sp
+// (unsettled below).
 //
 // redrive is what the read's probe found wrong of the base state in a way a
 // SyncupDn would cure (probeDn, SH31); each piece is a failure, so the worker
@@ -1619,18 +1634,46 @@ func (s *DnAgentServer) sweepDn(
 	// with one in-process read, and reads the age of each that has not in
 	// process too.
 	//
-	// It loses nothing: an export this agent could have left behind belongs
-	// to a side whose devices are still there (the layers remove the export
-	// FIRST and stop the descent when it will not go), so its sp is in
-	// actual.ours by construction.
+	// It loses nothing, because an sp keeps a side device here until its
+	// exports are settled. The layers remove an export FIRST and stop the
+	// descent when it will not go, but a removal that stops after the
+	// namespace went — a later step of it unanswered or refused, or the
+	// agent ended there — leaves an export the age rule may read as young,
+	// and the next pass's descent would take the sp's devices from beneath
+	// it. Were the sp then left with no device and no known side, it would
+	// leave `hosted`, no pass would judge that export again, and it would
+	// stay, unnamed, for ever. So an sp no anchoring side holds that has an
+	// export this pass could not settle — young, or unread — is `unsettled`:
+	// its side devices and every side record of it wait, unnamed, and keep
+	// it hosted, until a pass settles the export and judges them as any
+	// others. A pass whose nvmet listing did not answer settles no export,
+	// so there every sp with a side device in the chain and no anchoring
+	// side is unsettled; the failed listing is named.
+	//
+	// An anchoring side is a known side whose own side device is here: it
+	// keeps that device for as long as it is known, at every level (DN11),
+	// so its sp stays hosted whatever becomes of a dropped side beside it. A
+	// side known by its pointer alone anchors too while its side device is
+	// still here, as after a lost --local-store. A known side with no side
+	// device here — none built yet, as before its first SyncupSide, or its
+	// allocation refused — anchors nothing, and once it is dropped too
+	// nothing of it would keep the sp hosted.
 	links := &portLinks{}
 	hosted := make(map[uint64]struct{})
+	anchored := make(map[uint64]struct{})
 	for _, dn := range actual.ours {
 		hosted[dn.Ids[0]] = struct{}{}
+		if dn.Kind != common.DmKindDnSide {
+			continue
+		}
+		if _, live := known[[2]uint64{dn.Ids[0], dn.Ids[1]}]; live {
+			anchored[dn.Ids[0]] = struct{}{}
+		}
 	}
 	for key := range known {
 		hosted[key[0]] = struct{}{}
 	}
+	unsettled := make(map[uint64]struct{})
 	for _, nqn := range actual.nvmetSubsys {
 		parts, ok := common.ParseNqn(nqn)
 		if !ok {
@@ -1653,7 +1696,12 @@ func (s *DnAgentServer) sweepDn(
 			owner, ownerSp, ownerSide, linear := s.classifyExport(
 				ctx, clusterId, dnId, nqn, links, res)
 			switch owner {
-			case exportForeign, exportYoung:
+			case exportForeign:
+				continue
+			case exportYoung, exportUnread:
+				if _, held := anchored[parts.Ids[1]]; !held {
+					unsettled[parts.Ids[1]] = struct{}{}
+				}
 				continue
 			case exportOurs:
 				if _, live := known[[2]uint64{ownerSp, ownerSide}]; live {
@@ -1681,6 +1729,32 @@ func (s *DnAgentServer) sweepDn(
 	}
 	sort.Strings(chain.exports)
 	sort.Strings(chain.exportLinears)
+	if !actual.nvmetListed {
+		for _, name := range chain.sideDevs {
+			dn, ok := common.ParseDmName(name)
+			if !ok {
+				continue
+			}
+			if _, held := anchored[dn.Ids[0]]; !held {
+				unsettled[dn.Ids[0]] = struct{}{}
+			}
+		}
+	}
+	// The side devices of an unsettled sp wait for its exports (hosted,
+	// above). One device is all it takes to keep the sp hosted, and the side
+	// device is the one at the bottom: nothing above waits on it, so the
+	// layers above it go as they would — a suspended linear retired by P0
+	// included. A dropped side's export stands over its own side device: a
+	// side's export is built over its side device, which no level removes,
+	// and a removal that leaves the export stops the descent above it.
+	chain.sideDevs = slices.DeleteFunc(chain.sideDevs, func(name string) bool {
+		dn, ok := common.ParseDmName(name)
+		if !ok {
+			return false
+		}
+		_, wait := unsettled[dn.Ids[0]]
+		return wait
+	})
 
 	hostNqn := s.nf.DnHostNqn(clusterId, dnId)
 	for _, state := range actual.hostSubsys {
@@ -1711,7 +1785,7 @@ func (s *DnAgentServer) sweepDn(
 
 	if !remove {
 		reportChain(chain, res)
-		s.sweepOrphanRecords(ctx, res, false)
+		s.sweepOrphanRecords(ctx, res, false, unsettled)
 		res.Log(ctx,
 			slog.Uint64("cluster_id", clusterId),
 			slog.Uint64("dn_id", dnId))
@@ -1740,7 +1814,7 @@ func (s *DnAgentServer) sweepDn(
 		side:      func(uint64, uint64) bool { return identified },
 		cloneMeta: s.cloneMetaGate(identified).cloneMeta,
 	})
-	s.sweepOrphanRecords(ctx, res, true)
+	s.sweepOrphanRecords(ctx, res, true, unsettled)
 	res.Log(ctx,
 		slog.Uint64("cluster_id", clusterId),
 		slog.Uint64("dn_id", dnId))

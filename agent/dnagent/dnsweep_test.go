@@ -2,6 +2,7 @@ package dnagent
 
 import (
 	"context"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -264,6 +265,411 @@ func TestRemovedSideSweptByName(t *testing.T) {
 	if !node.hasCall("cmd dmsetup remove " + objs.sideDev) {
 		t.Errorf("the side device was never removed:\n%s",
 			strings.Join(node.Calls(), "\n"))
+	}
+}
+
+// TestAHalfRemovedExportOfAnSpsLastSideGoesAfterTheGrace pins DN6's rule for
+// an export a removal leaves without its namespace when the side dropped was
+// the last of its sp on this node. The export's removal stops after its
+// namespace went — its directory's `rmdir` here does not answer, and a crash
+// there leaves the same — so it stands with no namespace, the shape of every
+// export in flight, and the age rule leaves it alone until it is older than
+// the grace. The sweep judges the exports of an sp only while the node holds a
+// device of it or knows a side of it. Had the next sweep taken the side's
+// devices meanwhile, no sweep would ever look at the export again: it would
+// stay, unnamed, past the grace and for ever. So the side device and its
+// record stay, unnamed, while the export is young — the layers above it go as
+// they would — and once the export is older, a read names it and the
+// SyncupDn that brings removes it, the side device and the record. A pass
+// whose read of the export's age fails cannot settle it either: it names the
+// failed read, and the side device and the record stay.
+func TestAHalfRemovedExportOfAnSpsLastSideGoesAfterTheGrace(t *testing.T) {
+	srv, node := newTestServer(t)
+	clock := withDnClock(srv, node)
+	ctx := context.Background()
+	syncupBoth(t, srv, 1, testSide)
+	objs := objectsOf(sidePtr(testSide))
+	objs.assertAllPresent(t, node)
+	nqn := srv.nf.SideToCnNqn(testCluster, testSp, testLeg, testCn0)
+	dir := agent.NvmetRoot + "/subsystems/" + nqn
+	// The first `rmdir` under the export is its namespace's, the second its
+	// own directory's.
+	node.mu.Lock()
+	node.killCmdNoEffectNth["rmdir "+dir] = 2
+	node.mu.Unlock()
+
+	reply, err := srv.SyncupDn(ctx, dnReq(2))
+	if err != nil {
+		t.Fatalf("SyncupDn: %v", err)
+	}
+	assertNamed(t, "the drop whose export removal stopped", reply, nqn)
+	node.mu.Lock()
+	hasNs := node.dirs[dir+"/namespaces/1"]
+	node.mu.Unlock()
+	if !subsysPresent(node, nqn) || hasNs {
+		t.Fatalf("fixture is wrong: %s should stand without its namespace",
+			nqn)
+	}
+
+	read := func(what string) *pb.CheckDnReply {
+		t.Helper()
+		reply, _ := checkDnNow(srv, traced(what), &pb.CheckDnRequest{
+			ClusterId: testCluster, DnId: testDn, Revision: 2,
+			ShowInfo: true,
+		}, nil)
+		return reply
+	}
+	recordHeld := func() bool {
+		t.Helper()
+		_, ok, err := srv.meta.LookupSide(ctx, testSp, testSide)
+		if err != nil {
+			t.Fatalf("LookupSide: %v", err)
+		}
+		return ok
+	}
+
+	// Younger than the grace: the export is left alone and not named, and
+	// so are the side device and the record that keep the sp in the sweep's
+	// view. The first pass cannot read the export's age at all.
+	ageHook := "mtime " + dir
+	for pass := 1; pass <= 2; pass++ {
+		if pass == 1 {
+			setFailAlways(node, ageHook, "")
+		}
+		reply, err := srv.SyncupDn(ctx, dnReq(2))
+		if err != nil {
+			t.Fatalf("SyncupDn: %v", err)
+		}
+		if pass == 1 {
+			if got := reply.GetAgentReply(); got.GetCode() !=
+				common.ReplyCodeLeftover ||
+				!strings.Contains(got.GetDetails(), "age of "+nqn) {
+				t.Errorf("the SyncupDn whose age read failed: code %d (%s), "+
+					"want %d naming the unread age of %s", got.GetCode(),
+					got.GetDetails(), common.ReplyCodeLeftover, nqn)
+			}
+			clearFailAlways(node, ageHook)
+		} else {
+			assertNotNamed(t, "re-sent SyncupDn inside the grace", reply)
+		}
+		assertNotNamed(t, fmt.Sprintf("read %d inside the grace", pass),
+			read(fmt.Sprintf("young-read-%d", pass)))
+		if !subsysPresent(node, nqn) {
+			t.Fatalf("pass %d removed %s, a namespace-less export younger "+
+				"than the grace", pass, nqn)
+		}
+		for _, name := range objs.dms {
+			if name == objs.sideDev && !dmPresent(node, name) {
+				t.Errorf("pass %d removed %s while an export of its sp is "+
+					"not settled: no sweep would judge that export again",
+					pass, name)
+			}
+			if name != objs.sideDev && dmPresent(node, name) {
+				t.Errorf("pass %d kept %s: only the side device waits",
+					pass, name)
+			}
+		}
+		if !recordHeld() {
+			t.Errorf("pass %d freed the side's record under its devices",
+				pass)
+		}
+	}
+
+	// Older than the grace: a read names it, and the SyncupDn that brings
+	// removes it and everything of the side.
+	clock.mu.Lock()
+	clock.now = clock.now.Add(common.DnExportOrphanGrace + time.Second)
+	clock.mu.Unlock()
+	assertNamed(t, "the read past the grace", read("aged-read"), nqn)
+	reply, err = srv.SyncupDn(ctx, dnReq(2))
+	if err != nil {
+		t.Fatalf("SyncupDn: %v", err)
+	}
+	assertNotNamed(t, "the SyncupDn past the grace", reply)
+	objs.assertAllGone(t, node)
+	if recordHeld() {
+		t.Error("the side's record survived its devices")
+	}
+	assertNotNamed(t, "the read after the removal", read("clean-read"))
+}
+
+// halfRemovedExport brings the fixture side up, has the removal of its cn0
+// export stop after the namespace went (the directory's `rmdir` does not
+// answer), and returns the export's NQN, the side's objects, and a check of
+// whether the side's record is still in the volume table.
+func halfRemovedExport(
+	t *testing.T,
+	srv *DnAgentServer,
+	node *fakeNode,
+) (string, sideObjects, func() bool) {
+	t.Helper()
+	syncupBoth(t, srv, 1, testSide)
+	objs := objectsOf(sidePtr(testSide))
+	objs.assertAllPresent(t, node)
+	nqn := srv.nf.SideToCnNqn(testCluster, testSp, testLeg, testCn0)
+	node.mu.Lock()
+	node.killCmdNoEffectNth["rmdir "+agent.NvmetRoot+"/subsystems/"+nqn] = 2
+	node.mu.Unlock()
+	recordHeld := func() bool {
+		t.Helper()
+		_, ok, err := srv.meta.LookupSide(context.Background(), testSp,
+			testSide)
+		if err != nil {
+			t.Fatalf("LookupSide: %v", err)
+		}
+		return ok
+	}
+	return nqn, objs, recordHeld
+}
+
+// TestAnUnansweredExportListingKeepsAWaitingSideDevice pins DN6's rule that
+// an sp waits for its exports through a pass whose nvmet subsystems listing
+// does not answer. Such a pass sees no export, so it can settle none; had it
+// taken the dropped side's device and record, the sp would have left the
+// sweep's view with its half-removed export still there, and no later sweep
+// would have looked at that export again. The pass names the failed
+// listing, and the side device and the record stay until a sweep that sees
+// the export settles it.
+func TestAnUnansweredExportListingKeepsAWaitingSideDevice(t *testing.T) {
+	srv, node := newTestServer(t)
+	clock := withDnClock(srv, node)
+	ctx := context.Background()
+	nqn, objs, recordHeld := halfRemovedExport(t, srv, node)
+	reply, err := srv.SyncupDn(ctx, dnReq(2))
+	if err != nil {
+		t.Fatalf("SyncupDn: %v", err)
+	}
+	assertNamed(t, "the drop whose export removal stopped", reply, nqn)
+
+	listing := "ls -1 " + agent.NvmetRoot + "/subsystems"
+	setHook(node, node.killCmdNoEffectAlways, listing)
+	reply, err = srv.SyncupDn(ctx, dnReq(2))
+	clearHook(node, node.killCmdNoEffectAlways, listing)
+	if err != nil {
+		t.Fatalf("SyncupDn: %v", err)
+	}
+	if got := reply.GetAgentReply(); got.GetCode() == 0 ||
+		!strings.Contains(got.GetDetails(), "nvmet subsystems") {
+		t.Errorf("the pass whose listing did not answer: code %d (%s), "+
+			"want the failed listing named", got.GetCode(),
+			got.GetDetails())
+	}
+	if !dmPresent(node, objs.sideDev) || !recordHeld() {
+		t.Fatalf("the pass whose listing did not answer took %s or its "+
+			"record: no sweep would judge %s again", objs.sideDev, nqn)
+	}
+
+	reply, err = srv.SyncupDn(ctx, dnReq(2))
+	if err != nil {
+		t.Fatalf("SyncupDn: %v", err)
+	}
+	assertNotNamed(t, "the re-send inside the grace", reply)
+	if !dmPresent(node, objs.sideDev) || !recordHeld() {
+		t.Fatalf("a pass inside the grace took %s or its record",
+			objs.sideDev)
+	}
+	clock.mu.Lock()
+	clock.now = clock.now.Add(common.DnExportOrphanGrace + time.Second)
+	clock.mu.Unlock()
+	aged, _ := checkDnNow(srv, traced("aged-read"), &pb.CheckDnRequest{
+		ClusterId: testCluster, DnId: testDn, Revision: 2, ShowInfo: true,
+	}, nil)
+	assertNamed(t, "the read past the grace", aged, nqn)
+	reply, err = srv.SyncupDn(ctx, dnReq(2))
+	if err != nil {
+		t.Fatalf("SyncupDn: %v", err)
+	}
+	assertNotNamed(t, "the SyncupDn past the grace", reply)
+	objs.assertAllGone(t, node)
+	if recordHeld() {
+		t.Error("the side's record survived its devices")
+	}
+}
+
+// TestADevicelessKnownSideDoesNotAnchorItsSp pins one half of what anchors
+// an sp in DN6's rule that an sp waits for its exports: a known side whose
+// own side device is on the node, never a known side with no side device,
+// as one whose pointer came before any SyncupSide built its devices. Such a
+// side keeps nothing in the sweep's view once it is dropped too, so while
+// it is the only other side of the sp, the dropped side's device waits for
+// the half-removed export as if no side were known — whether that side was
+// known before the drop or came after it. The other half is
+// TestAKnownSideWithItsSideDeviceAnchorsItsSp.
+func TestADevicelessKnownSideDoesNotAnchorItsSp(t *testing.T) {
+	for _, order := range []string{"known before the drop",
+		"added after the drop"} {
+		t.Run(order, func(t *testing.T) {
+			srv, node := newTestServer(t)
+			clock := withDnClock(srv, node)
+			ctx := context.Background()
+			nqn, objs, recordHeld := halfRemovedExport(t, srv, node)
+			// Another side of the sp, on another leg, known by its pointer
+			// alone: its SyncupSide has not come.
+			other := &pb.SidePointer{SpId: testSp, LegId: testLeg + 0x100,
+				SideId: testSide2}
+			withOther := func(revision uint64) *pb.SyncupDnRequest {
+				return sweepDnReq(revision, other)
+			}
+			send := func(what string, req *pb.SyncupDnRequest) {
+				t.Helper()
+				if _, err := srv.SyncupDn(ctx, req); err != nil {
+					t.Fatalf("%s: SyncupDn: %v", what, err)
+				}
+			}
+			if order == "known before the drop" {
+				send("the other side's pointer",
+					sweepDnReq(2, sidePtr(testSide), other))
+				send("the drop", withOther(3))
+				send("the re-send", withOther(3))
+			} else {
+				send("the drop", dnReq(2))
+				send("the re-send", dnReq(2))
+				send("the other side's pointer", withOther(3))
+			}
+			if !dmPresent(node, objs.sideDev) || !recordHeld() {
+				t.Fatalf("%s or its record went while the only other "+
+					"known side of the sp has no device", objs.sideDev)
+			}
+			send("the other side's drop", dnReq(4))
+			send("its re-send", dnReq(4))
+			if !subsysPresent(node, nqn) || !dmPresent(node, objs.sideDev) {
+				t.Fatalf("fixture is wrong: inside the grace %s and %s "+
+					"should stand", nqn, objs.sideDev)
+			}
+			clock.mu.Lock()
+			clock.now = clock.now.Add(
+				common.DnExportOrphanGrace + time.Second)
+			clock.mu.Unlock()
+			aged, _ := checkDnNow(srv, traced("aged-read"),
+				&pb.CheckDnRequest{ClusterId: testCluster, DnId: testDn,
+					Revision: 4, ShowInfo: true}, nil)
+			assertNamed(t, "the read past the grace", aged, nqn)
+			send("the SyncupDn past the grace", dnReq(4))
+			objs.assertAllGone(t, node)
+			if recordHeld() {
+				t.Error("the side's record survived its devices")
+			}
+		})
+	}
+}
+
+// TestAKnownSideWithItsSideDeviceAnchorsItsSp pins the other half of what
+// anchors an sp in DN6's rule that an sp waits for its exports: a known side
+// whose own side device is on the node keeps that device for as long as it
+// is known, so its sp stays in the sweep's view, and a side dropped beside
+// it goes at once — its side device and its record — although the export
+// its removal left without a namespace is still younger than the grace.
+// Without the anchor, a drop on an sp whose other sides are healthy would
+// keep the dropped side's space whenever an export of the sp stands young or
+// unread — its own half-removed one, or a sibling's build in flight — until
+// that export is settled.
+// A side known by its pointer alone after a lost --local-store anchors the
+// same way, its devices being still on the node.
+func TestAKnownSideWithItsSideDeviceAnchorsItsSp(t *testing.T) {
+	for _, other := range []string{"held", "known by its pointer alone"} {
+		t.Run(other, func(t *testing.T) {
+			srv, node := newTestServer(t)
+			clock := withDnClock(srv, node)
+			ctx := context.Background()
+			ours := sidePtr(testSide)
+			sibling := sweepSidePtr(testLeg+0x100, testSide2)
+			send := func(
+				what string,
+				req *pb.SyncupDnRequest,
+			) *pb.AgentReply {
+				t.Helper()
+				reply, err := srv.SyncupDn(ctx, req)
+				if err != nil {
+					t.Fatalf("%s: SyncupDn: %v", what, err)
+				}
+				return reply.GetAgentReply()
+			}
+			recordHeld := func(sideId uint64) bool {
+				t.Helper()
+				_, ok, err := srv.meta.LookupSide(ctx, testSp, sideId)
+				if err != nil {
+					t.Fatalf("LookupSide: %v", err)
+				}
+				return ok
+			}
+			send("both pointers", sweepDnReq(1, ours, sibling))
+			syncupSideTwoPhase(t, srv, sweepSideReq(1, ours))
+			syncupSideTwoPhase(t, srv, sweepSideReq(1, sibling))
+			objs, siblingObjs := objectsOf(ours), objectsOf(sibling)
+			objs.assertAllPresent(t, node)
+			siblingObjs.assertAllPresent(t, node)
+			revision := uint64(2)
+			if other == "known by its pointer alone" {
+				// The agent starts again with its local store lost, and the
+				// SyncupDn brings both pointers back; no SyncupSide comes.
+				stopTestServer(t, srv)
+				node.mu.Lock()
+				node.protos = map[string][]byte{}
+				node.mu.Unlock()
+				srv = startTestServer(t, node)
+				srv.now = clock.Now
+				srv.sleep = clock.Sleep
+				send("the pointers again", sweepDnReq(2, ours, sibling))
+				if srv.getSide(sideKey(testCluster, testDn, testSp,
+					testSide2)) != nil ||
+					!dmPresent(node, siblingObjs.sideDev) {
+					t.Fatalf("fixture is wrong: side %d should be known by "+
+						"its pointer alone, its devices on the node",
+						testSide2)
+				}
+				revision = 3
+			}
+			nqn := srv.nf.SideToCnNqn(testCluster, testSp, testLeg, testCn0)
+			dir := agent.NvmetRoot + "/subsystems/" + nqn
+			// The first `rmdir` under the export is its namespace's, the
+			// second its own directory's.
+			node.mu.Lock()
+			node.killCmdNoEffectNth["rmdir "+dir] = 2
+			node.mu.Unlock()
+			drop := sweepDnReq(revision, sibling)
+			send("the drop", drop)
+			node.mu.Lock()
+			hasNs := node.dirs[dir+"/namespaces/1"]
+			node.mu.Unlock()
+			if !subsysPresent(node, nqn) || hasNs {
+				t.Fatalf("fixture is wrong: %s should stand without its "+
+					"namespace", nqn)
+			}
+
+			reply := send("the re-send", drop)
+			if reply.GetCode() != 0 {
+				t.Errorf("the re-send inside the grace: code %d (%s), "+
+					"want 0", reply.GetCode(), reply.GetDetails())
+			}
+			if !subsysPresent(node, nqn) {
+				t.Fatalf("fixture is wrong: %s should stand inside the "+
+					"grace", nqn)
+			}
+			if dmPresent(node, objs.sideDev) || recordHeld(testSide) {
+				t.Errorf("%s or its record waits for the young %s, "+
+					"although side %d's own side device anchors the sp",
+					objs.sideDev, nqn, testSide2)
+			}
+			siblingObjs.assertAllPresent(t, node)
+			if !recordHeld(testSide2) {
+				t.Errorf("the anchoring side %d lost its record", testSide2)
+			}
+
+			clock.mu.Lock()
+			clock.now = clock.now.Add(common.DnExportOrphanGrace + time.Second)
+			clock.mu.Unlock()
+			aged, _ := checkDnNow(srv, traced("aged-read"),
+				&pb.CheckDnRequest{ClusterId: testCluster, DnId: testDn,
+					Revision: revision, ShowInfo: true}, nil)
+			assertNamed(t, "the read past the grace", aged, nqn)
+			if got := send("the SyncupDn past the grace",
+				drop); got.GetCode() != 0 {
+				t.Errorf("the SyncupDn past the grace: code %d (%s), want 0",
+					got.GetCode(), got.GetDetails())
+			}
+			objs.assertAllGone(t, node)
+			siblingObjs.assertAllPresent(t, node)
+		})
 	}
 }
 
