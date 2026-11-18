@@ -169,8 +169,8 @@ func (c *Cmd) RunProbe(
 
 // ListDir lists a sysfs directory for a role package, in the agent's own
 // process (readDir); ok is false only when the directory does not exist, and
-// an error means the listing did not answer. The nvmet configfs tree is never
-// listed this way (SH18).
+// an error means the listing did not answer. The nvmet configfs tree is
+// listed by Nvmet alone (listDir, SH18).
 func (c *Cmd) ListDir(
 	ctx context.Context,
 	path string,
@@ -237,7 +237,11 @@ func (e *CmdError) Unwrap() error {
 // (osclient.md, RunCommand). The match is a case-insensitive substring of the
 // output, never of the command line, and the first row that matches names the
 // errno. "already exists" reads as EEXIST too, for an output that words the
-// refusal that way and not in strerror's words.
+// refusal that way and not in strerror's words. "device does not exist" is
+// dmsetup's own line, "Device does not exist.", for a name under which its
+// info ioctl finds no device, which the kernel answers with ENXIO; it is how
+// Dm.Info and Dm.InfoDevNo tell a device that is not there from a run that
+// failed (IsNoDevice).
 var dmErrnoTexts = []struct {
 	text  string
 	errno syscall.Errno
@@ -246,6 +250,7 @@ var dmErrnoTexts = []struct {
 	{"file exists", syscall.EEXIST},
 	{"already exists", syscall.EEXIST},
 	{"device or resource busy", syscall.EBUSY},
+	{"device does not exist", syscall.ENXIO},
 }
 
 // dmErrno is the errno a dmsetup output names, 0 when it names none.
@@ -306,6 +311,13 @@ func IsExists(err error) bool {
 // metadata snapshot.
 func IsBusy(err error) bool {
 	return cmdErrno(err) == syscall.EBUSY
+}
+
+// IsNoDevice says whether err holds a dmsetup refusal with ENXIO: a
+// `dmsetup info` of a name no dm device has. Any other failure of that read,
+// one that did not reach the driver among them, is no such refusal.
+func IsNoDevice(err error) bool {
+	return cmdErrno(err) == syscall.ENXIO
 }
 
 // cmdErrno is the errno of the first CmdError in err's chain, 0 when the
@@ -413,39 +425,31 @@ func (b *osBase) readDir(
 	return names, true, nil
 }
 
-// listDir returns the entries of a directory of the nvmet configfs tree by
-// `ls`: that tree alone is listed by a child rather than in the agent's own
-// process (SH18). ok is false when the directory does not exist. An `ls` that
-// did NOT answer is an error, never "absent": RemoveSubsystem and
-// RemovePortLink walk their children through this, and a killed listing must
-// never read as an empty directory, or they would skip every object silently.
+// listDir lists a directory of the nvmet configfs tree, in the agent's own
+// process (readDir, SH18), with readDir's split: ok is false only when the
+// directory does not exist, and every other failure is an error naming the
+// listing, never an absence. RemoveSubsystem and RemovePortLink walk their
+// children through this and the sweeps enumerate the tree through it, and a
+// listing that failed, read as an empty directory, would make them skip
+// every object in it. No time limit bounds the listing itself: its open
+// waits for the directory's lock, which a `mkdir`, `rmdir`, link or unlink
+// in it holds for its whole run (SH18).
 func (b *osBase) listDir(
 	ctx context.Context,
 	path string,
 ) ([]string, bool, error) {
-	stdout, ok, err := b.runProbe(ctx, "ls", "-1", path)
-	if err != nil || !ok {
-		return nil, false, err
-	}
-	var out []string
-	for _, line := range strings.Split(stdout, "\n") {
-		name := strings.TrimSpace(line)
-		if name != "" {
-			out = append(out, name)
-		}
-	}
-	return out, true, nil
+	return b.readDir(ctx, path)
 }
 
 // dirMtime reads a directory's modification time from the node in the
 // agent's own process (OsClient.ReadMtime) on a ctx carrying the soft timeout
 // (SH15), so an age can be judged from what the kernel says rather than from
 // anything remembered (dnagent.md DN6), and so the port probe learns whether
-// the port's directory is there without a child process. It reads the
+// the port's directory is there without listing it. It reads the
 // directory itself, never one of its entries, and is no listing (SH18). ok
 // is false only when the directory does not exist; every other failure is an
 // error naming the read — "mtime of <path>: <cause>" — and is never an
-// absence, as listDir's split has it: a read that did not answer is not a
+// absence, as readDir's split has it: a read that did not answer is not a
 // directory that is gone.
 func (b *osBase) dirMtime(
 	ctx context.Context,
@@ -479,8 +483,8 @@ func (b *osBase) readDevNo(ctx context.Context, path string) (string, error) {
 }
 
 // dirExists says whether a directory of the nvmet configfs tree exists, by
-// listDir's `ls` (SH18), with listDir's split: an `ls` that did not answer
-// is an error.
+// listDir's listing (SH18), with its split: a listing that failed is an
+// error, never an absence.
 func (b *osBase) dirExists(ctx context.Context, path string) (bool, error) {
 	_, ok, err := b.listDir(ctx, path)
 	return ok, err

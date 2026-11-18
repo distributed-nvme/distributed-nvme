@@ -73,7 +73,7 @@ type fakeNode struct {
 	dirs  map[string]bool
 	files map[string]string
 	links map[string]string
-	// subsysGhosts are names the `ls` of the nvmet subsystems directory
+	// subsysGhosts are names the listing of the nvmet subsystems directory
 	// reports that no longer exist: an export removed between the listing
 	// and the reads of it that follow, as a sibling agent's removal does in
 	// a burst. Like lsGhosts, the deterministic form of a stale snapshot.
@@ -445,7 +445,7 @@ func (f *fakeNode) Reset() {
 
 // readOnlyPrefixes are the probes; everything else changes the system.
 var readOnlyPrefixes = []string{
-	"cmd ls ", "list ", "mtime ", "devno ", "cmd lsblk ",
+	"list ", "mtime ", "devno ", "cmd lsblk ",
 	"cmd dmsetup info", "cmd dmsetup table", "cmd dmsetup status",
 	// `dmsetup ls` is the root of the sweep's enumeration and changes
 	// nothing; without it here every SH16 no-mutation assertion would fail
@@ -578,13 +578,14 @@ func (f *fakeNode) readHookErr(path string) error {
 }
 
 // readDir answers OsClient.ReadDir: a listing in the agent's own process,
-// of sysfs or of the local store, from the directory model. It records
-// "list <path>", and the command hooks match that line as they match a
-// command line, so a key "list "+X catches every listing of a path that
-// starts with X. A fail hook answers an I/O error part-way through the
-// listing and a kill hook a listing the soft timeout cut off: both did not
-// answer, never a missing directory, which only the model says. A hooked
-// listing advances no pending namespace.
+// of sysfs, of the local store or of the nvmet configfs tree (SH17, SH18),
+// from the directory model. It records "list <path>", and the command hooks
+// match that line as they match a command line, so a key "list "+X catches
+// every listing of a path that starts with X. A fail hook answers an I/O
+// error part-way through the listing and a kill hook a listing the soft
+// timeout cut off: both are errors, never a missing directory, which only
+// the model says. A hooked listing advances no pending namespace. A listing
+// of the nvmet subsystems directory also names the subsysGhosts.
 func (f *fakeNode) readDir(ctx context.Context, path string) ([]string, error) {
 	if err := f.ctxErr(ctx); err != nil {
 		return nil, err
@@ -598,14 +599,14 @@ func (f *fakeNode) readDir(ctx context.Context, path string) ([]string, error) {
 		Op: "readdirent", Path: path, Err: syscall.EIO}); err != nil {
 		return nil, err
 	}
-	if inNvmetTree(path) {
-		// SH18: the nvmet configfs tree is listed by `ls` alone. A listing
-		// of it here took the wrong path, and it does not answer.
-		return nil, context.DeadlineExceeded
-	}
 	if !f.dirs[path] {
 		return nil, fmt.Errorf("no such directory: %s: %w", path,
 			fs.ErrNotExist)
+	}
+	if path == agent.NvmetRoot+"/subsystems" && len(f.subsysGhosts) > 0 {
+		names := append(f.children(path), f.subsysGhosts...)
+		sort.Strings(names)
+		return names, nil
 	}
 	if pending := f.pendingNs[path]; pending != nil {
 		if pending.misses > 0 {
@@ -757,13 +758,6 @@ func (f *fakeNode) takeFailCmd(line string) (string, bool) {
 		return stderr, true
 	}
 	return "", false
-}
-
-// inNvmetTree says whether path is in the nvmet configfs tree, the one tree
-// the agent lists with `ls` (SH18).
-func inNvmetTree(path string) bool {
-	return path == agent.NvmetRoot ||
-		strings.HasPrefix(path, agent.NvmetRoot+"/")
 }
 
 func (f *fakeNode) writeFile(
@@ -1142,11 +1136,10 @@ func (f *fakeNode) runCommand(
 
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	if name == "ls" && !inNvmetTree(args[len(args)-1]) {
-		// The agent lists sysfs and its local store in its own process
-		// (readDir) and the nvmet configfs tree alone with `ls` (SH17,
-		// SH18): an `ls` of anything else took the wrong path, and it gets
-		// the answer of a run that never reported.
+	if name == "ls" {
+		// The agent lists every directory in its own process (readDir;
+		// SH17, SH18): an `ls` took the wrong path, and it gets the answer
+		// of a run that never reported.
 		return killedCmdResult()
 	}
 	f.dispatchStderr = ""
@@ -1201,8 +1194,6 @@ func (f *fakeNode) dispatch(
 	name string, args []string, stdin string,
 ) (string, int) {
 	switch name {
-	case "ls":
-		return f.cmdLs(args)
 	case "rm":
 		return f.cmdRm(args)
 	case "mkdir":
@@ -1300,22 +1291,6 @@ func childOf(dir, entry string) (string, bool) {
 		return "", false
 	}
 	return entry[len(dir)+1:], true
-}
-
-// cmdLs answers `ls -1` of a directory of the nvmet configfs tree, the only
-// tree the agent lists with `ls` (runCommand refuses any other). A listing of
-// the subsystems directory also names the subsysGhosts.
-func (f *fakeNode) cmdLs(args []string) (string, int) {
-	path := args[len(args)-1]
-	if !f.dirs[path] {
-		return "", 2
-	}
-	names := f.children(path)
-	if path == agent.NvmetRoot+"/subsystems" && len(f.subsysGhosts) > 0 {
-		names = append(names, f.subsysGhosts...)
-		sort.Strings(names)
-	}
-	return strings.Join(names, "\n") + "\n", 0
 }
 
 func (f *fakeNode) cmdRm(args []string) (string, int) {
@@ -1673,6 +1648,9 @@ func (f *fakeNode) cmdDmsetup(args []string, stdin string) (string, int) {
 		}
 		dm, ok := f.dms[name]
 		if !ok {
+			// The lab's words for a name no device has, the one failure
+			// Dm.Info reads as absent.
+			f.dispatchStderr = "Device does not exist.\nCommand failed."
 			return "", 1
 		}
 		// The real four-position attr column: live, inactive-table,

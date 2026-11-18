@@ -201,11 +201,16 @@ the method set is exactly the following, each taking the caller's ctx:
   whole-node dm listings below apply it under their own rule. Every probe
   whose non-zero exit means "absent" runs through it, a role package's own through `Cmd.RunProbe`, and answers "absent"
   only for a reported non-zero exit and an error for a run that did not
-  answer; `Nvmet` lists the nvmet configfs tree with `ls` through it
-  (`dnagent.md` SH18). `Cmd.ListDir` lists sysfs in the agent's own process
-  through `ReadDir` instead, and answers "absent" only for
-  `fs.ErrNotExist`; so do `Nvmet.SubsysMtime`, which reads a subsystem
-  directory's age through `ReadMtime`, and the port probe's test of whether
+  answer. `Dm.Info` and `Dm.InfoDevNo` do not take every reported
+  non-zero exit for an absence: dmsetup exits 1 for a device that is not
+  there and for a read that failed, so they answer "absent" only for the
+  typed refusal that says the device does not exist, and an error for
+  every other failure (`dnagent.md` SH15). The agents list no directory by
+  a command: `Nvmet` lists the nvmet configfs tree, and `Cmd.ListDir`
+  sysfs, in the agent's own process through `ReadDir`, and both answer
+  "absent" only for `fs.ErrNotExist` (`dnagent.md` SH18); so do
+  `Nvmet.SubsysMtime`, which reads a subsystem directory's age through
+  `ReadMtime`, and the port probe's test of whether
   the port's directory is there (`Nvmet.ProbePort`,
   `Nvmet.ProbePortState`), read the same way. Of the probe's attribute
   reads, only those of `Nvmet.ProbePortState` keep that split;
@@ -289,8 +294,10 @@ the method set is exactly the following, each taking the caller's ctx:
 * `ReadDir` lists a directory in the caller's own process; no child process
   runs. Reason: an agent lists many sysfs directories in one background
   read or converge, and starting a process for each listing costs far more
-  than the listing itself. The nvmet configfs tree is never listed this way
-  (`dnagent.md` SH18).
+  than the listing itself; and its error tells a directory that is not
+  there from a listing that failed, which the exit status of `ls` does not.
+  The agents list sysfs, their local store and the nvmet configfs tree
+  this way (`dnagent.md` SH17, SH18).
 * Like `ReadFile`, it holds one semaphore slot and checks the ctx error after
   acquiring it. That is its last cancellation point: the listing itself is
   not cancelable, and one the kernel holds returns only when the kernel does
@@ -301,10 +308,13 @@ the method set is exactly the following, each taking the caller's ctx:
   a sysfs class or block directory is such a link.
 * It reads the names alone: it opens and stats no entry.
 * It returns every name but "." and "..", untrimmed, names that start with a
-  dot included, which `ls` leaves out and which no caller acts on: sysfs
-  holds none, and the local store keeps only the names of its kinds
-  (`dnagent.md` SH6). The names are sorted in byte order, the order `ls` prints in the C
-  locale. The order is fixed because callers take the first match, such as
+  dot included, which `ls` leaves out. dnv makes no such name, the local
+  store keeps only the names of its kinds (`dnagent.md` SH6), and sysfs
+  holds none where dnv lists, but nvmet refuses none in configfs: a link
+  made by hand under a subsystem's `allowed_hosts` with such a name admits
+  its host, and the listing now shows it, so a converge unlinks it and a
+  probe names it like any other entry (`dnagent.md` SH18). The names are
+  sorted in byte order, the order `ls` prints in the C locale. The order is fixed because callers take the first match, such as
   a lookup that stops at the first subsystem entry naming its NQN.
 * A missing directory is absent: the error wraps `fs.ErrNotExist`. Every
   other failure — a path that is not a directory, a read that fails part-way

@@ -90,8 +90,9 @@ type cnActual struct {
 	// nvmetSubsys is every subsystem in the target's configfs tree, linked to
 	// the port or not.
 	nvmetSubsys []string
-	// nvmetListed is dmListed for nvmetSubsys: the `ls` of the configfs
-	// subsystems tree answered.
+	// nvmetListed is dmListed for nvmetSubsys: the listing of the configfs
+	// subsystems tree answered, in the agent's own process (dnagent.md
+	// SH18); one that failed is no empty tree.
 	nvmetListed bool
 	// nvmetOwner is that tree attributed once per pass. Attribution costs
 	// configfs reads per host-facing subsystem, and doing it again for every

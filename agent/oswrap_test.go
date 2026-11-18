@@ -60,11 +60,12 @@ func dmRefusal(ioctl, dev, strerror string) osRun {
 // on: ENODATA for a thin table whose id the pool lacks (the lost thin id of
 // cnagent.md CN14), EEXIST for a snapshot message whose id the pool already
 // holds (the torn test of CN14), EBUSY for a held metadata snapshot (CN25's
-// reserve retry). A caller that read the text instead would break with the
-// next wording change, and one that read it from the whole error would match
-// the command line too. Around those three, the cases that must name no
-// errno: another errno, a run that never reported, a tool other than
-// dmsetup.
+// reserve retry), ENXIO for dmsetup's own line for a device that is not there
+// (the absence Dm.Info reads, dnagent.md SH15). A caller that read the text
+// instead would break with the next wording change, and one that read it
+// from the whole error would match the command line too. Around those four,
+// the cases that must name no errno: another errno, a driver dmsetup cannot
+// reach, a run that never reported, a tool other than dmsetup.
 func TestDmsetupRefusalCarriesItsErrno(t *testing.T) {
 	ctx := context.Background()
 	const dev = "dnv-thin-0000000000000001"
@@ -164,6 +165,37 @@ func TestDmsetupRefusalCarriesItsErrno(t *testing.T) {
 				return err
 			},
 			errno: syscall.EBUSY,
+		},
+		{
+			// dmsetup's own line for a name no device has, which Info and
+			// InfoDevNo read as absent (IsNoDevice) and any other read
+			// carries as its error.
+			name: "a table read of a device that is not there",
+			run: osRun{
+				stderr:   "Device does not exist.\nCommand failed.\n",
+				exitCode: 1,
+				err:      errors.New("exit status 1"),
+			},
+			call: func(oc common.OsClient) error {
+				_, err := NewDm(oc).Table(ctx, dev)
+				return err
+			},
+			errno: syscall.ENXIO,
+		},
+		{
+			// dmsetup exits 1 here too, and nothing says the device is
+			// not there.
+			name: "a table read that cannot reach the driver",
+			run: osRun{
+				stderr: "Failure to communicate with kernel " +
+					"device-mapper driver.\nCommand failed.\n",
+				exitCode: 1,
+				err:      errors.New("exit status 1"),
+			},
+			call: func(oc common.OsClient) error {
+				_, err := NewDm(oc).Table(ctx, dev)
+				return err
+			},
 		},
 		{
 			name: "a listing, which builds its own error",
@@ -292,6 +324,7 @@ func TestDmsetupRefusalCarriesItsErrno(t *testing.T) {
 				{"IsNoData", IsNoData, syscall.ENODATA},
 				{"IsExists", IsExists, syscall.EEXIST},
 				{"IsBusy", IsBusy, syscall.EBUSY},
+				{"IsNoDevice", IsNoDevice, syscall.ENXIO},
 			} {
 				want := tc.errno == h.errno
 				if got := h.is(err); got != want {
@@ -319,8 +352,9 @@ func TestDmsetupRefusalCarriesItsErrno(t *testing.T) {
 			"No data available"),
 		errors.New("failed: File exists"),
 		errors.New("failed: Device or resource busy"),
+		errors.New("Device does not exist."),
 	} {
-		if IsNoData(err) || IsExists(err) || IsBusy(err) {
+		if IsNoData(err) || IsExists(err) || IsBusy(err) || IsNoDevice(err) {
 			t.Errorf("%v reads as a dmsetup refusal", err)
 		}
 	}

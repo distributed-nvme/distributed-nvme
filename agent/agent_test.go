@@ -1206,9 +1206,8 @@ func TestAnaStateOf(t *testing.T) {
 
 // fakeSysfs is a tiny read-only tree: ReadDir lists the direct children of a
 // registered directory in byte order, as the production client does, and
-// `ls -1 <dir>`, which the nvmet configfs tree alone is listed with (SH18),
-// lists them in the order they were registered; ReadFile serves a registered
-// file. It also pins the rule that every read and listing of the SH20 walk
+// ReadFile serves a registered file; it runs no command. It also pins the
+// rule that every read and listing of the SH20 walk
 // must arrive with an SH15 deadline on its ctx, so a stalled /sys/class/nvme*
 // read can never hold a converge — and through the node lock, a whole node's
 // RPC surface — open.
@@ -1216,12 +1215,10 @@ type fakeSysfs struct {
 	dirs  map[string][]string
 	files map[string]string
 	// killLs makes a listing of a directory answer the way one the SH15
-	// soft timeout cut off does: `ls -1 <dir>` exits -1 with a non-nil error,
-	// as a killed child does, instead of the exit status a tool that ran and
-	// looked gives, and ReadDir fails with context.DeadlineExceeded instead
-	// of the not-exist error of a missing directory. No arrangement of the
-	// tree's contents can express that outcome, and telling it apart from an
-	// absence is exactly what the enumerators of a sweep turn on.
+	// soft timeout cut off does: ReadDir fails with context.DeadlineExceeded
+	// instead of the not-exist error of a missing directory. No arrangement
+	// of the tree's contents can express that outcome, and telling it apart
+	// from an absence is exactly what the enumerators of a sweep turn on.
 	killLs map[string]bool
 	// readErr answers one path with an error that is NOT fs.ErrNotExist: an
 	// attribute that could not be read at all, as opposed to one that is not
@@ -1243,18 +1240,7 @@ func (fs *fakeSysfs) osClient() *common.FakeOsClient {
 		RunCommandFn: func(
 			ctx context.Context, cmd string, args []string, stdin string,
 		) (string, string, int, error) {
-			if cmd != "ls" {
-				return "", "", 127, fmt.Errorf("unexpected command %q", cmd)
-			}
-			path := args[len(args)-1]
-			if fs.killLs[path] {
-				return "", "signal: killed", -1, errors.New("signal: killed")
-			}
-			entries, ok := fs.dirs[path]
-			if !ok {
-				return "", "", 2, fmt.Errorf("no such directory")
-			}
-			return strings.Join(entries, "\n") + "\n", "", 0, nil
+			return "", "", 127, fmt.Errorf("unexpected command %q", cmd)
 		},
 		ReadDirFn: func(ctx context.Context, path string) ([]string, error) {
 			fs.readDirCalls = append(fs.readDirCalls, path)

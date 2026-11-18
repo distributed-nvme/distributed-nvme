@@ -95,13 +95,13 @@ func portDir(portId int) string {
 	return fmt.Sprintf("%s/ports/%d", agent.NvmetRoot, portId)
 }
 
-// lsCount is how many `ls` of exactly dir the calls since the last Reset
-// ran. The port listing starts with an `ls` of the ports directory, which
-// nothing else lists.
-func lsCount(node *fakeNode, dir string) int {
+// listCount is how many listings of exactly dir the calls since the last
+// Reset made. The port listing starts with a listing of the ports directory,
+// which nothing else lists.
+func listCount(node *fakeNode, dir string) int {
 	n := 0
 	for _, call := range node.Calls() {
-		if call == "cmd ls -1 "+dir {
+		if call == "list "+dir {
 			n++
 		}
 	}
@@ -567,12 +567,12 @@ func TestHalfBuiltExportAgeGate(t *testing.T) {
 // nothing of it at all — a namespace at an id other than one included, which
 // decides it only once it is old. An old one with no namespace is that
 // sibling's when it is on a sibling's port, and an orphan otherwise. The
-// namespace listing is a child per export and the port listing an `ls` of the
-// ports directory and one of each port's links, a child each, and every build
-// or removal in flight on a kernel many dn agents share has the shape for a
-// moment: listed before the age, either would make such an agent's reads
-// (SH29) run long in every burst. A sibling's port is on the kernel in every
-// case, so a listing would show.
+// namespace listing is one per export and the port listing one of the ports
+// directory and one of each port's links, and every build or removal in
+// flight on a kernel many dn agents share has the shape for a moment: listed
+// before the age, either would make such an agent's reads (SH29) wait on
+// configfs in every burst. A sibling's port is on the kernel in every case, so
+// a listing would show.
 func TestHalfBuiltExportAgeBeforePortLinks(t *testing.T) {
 	nf := common.NewNameFmt(common.DefaultLocalStorPrefix)
 	ports := agent.NvmetRoot + "/ports"
@@ -655,15 +655,15 @@ func TestHalfBuiltExportAgeBeforePortLinks(t *testing.T) {
 					if removes {
 						wantNs++
 					}
-					if got := lsCount(node, dir+"/namespaces"); got != wantNs {
+					if got := listCount(node, dir+"/namespaces"); got != wantNs {
 						t.Errorf("the %s listed the namespaces of %s %d "+
 							"times, want %d", pass, stray, got, wantNs)
 					}
-					if got := lsCount(node, ports); got != wantPorts {
+					if got := listCount(node, ports); got != wantPorts {
 						t.Errorf("the %s listed the ports directory %d "+
 							"times, want %d", pass, got, wantPorts)
 					}
-					if got := lsCount(node, siblingLinks); got != wantPorts {
+					if got := listCount(node, siblingLinks); got != wantPorts {
 						t.Errorf("the %s listed the sibling port's links "+
 							"%d times, want %d", pass, got, wantPorts)
 					}
@@ -744,11 +744,11 @@ func TestPortLinksListedOncePerPass(t *testing.T) {
 							"process, want 1", pass, nqn, got)
 					}
 				}
-				if got := lsCount(node, ports); got != 1 {
+				if got := listCount(node, ports); got != 1 {
 					t.Errorf("the %s listed the ports directory %d times, "+
 						"want 1", pass, got)
 				}
-				if got := lsCount(node, siblingLinks); got != 1 {
+				if got := listCount(node, siblingLinks); got != 1 {
 					t.Errorf("the %s listed the sibling port's links %d "+
 						"times, want 1", pass, got)
 				}
@@ -778,6 +778,105 @@ func TestPortLinksListedOncePerPass(t *testing.T) {
 			}
 			once("Syncup's pass")
 		})
+	}
+}
+
+// TestAFailedPortListingRemovesNoOldExport pins the port links' half of
+// DN6's attribution against a listing that fails (SH18): an old export with no
+// namespace, linked to a sibling's port and admitting that sibling's cn, is
+// the sibling's, and a pass whose listing of the ports or of a port's links
+// failed — with an I/O error, or cut off at the soft timeout — cannot see the
+// link. Read as a port with no link, the export would be an orphan, and its
+// removal would strip the sibling's host link before its `rmdir` failed on
+// the sibling's port link. The pass leaves it alone, host link and all, and
+// names the failed listing, so the verdict is not clean; the next pass whose
+// listings answer finds it the sibling's.
+func TestAFailedPortListingRemovesNoOldExport(t *testing.T) {
+	nf := common.NewNameFmt(common.DefaultLocalStorPrefix)
+	hostNqn := nf.CnHostNqn(testCluster, testCn0)
+	for _, scope := range sweepScopes() {
+		for _, tc := range []struct {
+			name    string
+			listing string
+			failed  bool
+		}{
+			{"the ports, I/O error", agent.NvmetRoot + "/ports", true},
+			{"the sibling port's links, I/O error",
+				portDir(siblingPort) + "/subsystems", true},
+			{"the sibling port's links, cut off",
+				portDir(siblingPort) + "/subsystems", false},
+		} {
+			t.Run(scope.name+"/"+tc.name, func(t *testing.T) {
+				srv, node := newTestServer(t)
+				ctx := context.Background()
+				ours := sweepSidePtr(testLeg, testSide)
+				if _, err := srv.SyncupDn(ctx,
+					sweepDnReq(1, ours)); err != nil {
+					t.Fatalf("SyncupDn: %v", err)
+				}
+				syncupSideTwoPhase(t, srv, sweepSideReq(1, ours))
+				stray := scope.stray(nf)
+				dir := agent.NvmetRoot + "/subsystems/" + stray
+				seedExport(node, stray, "")
+				link := linkAllowedHost(node, stray, hostNqn)
+				linkPort(node, siblingPort, stray)
+				node.ageDir(dir, common.DnExportOrphanGrace+time.Minute)
+
+				hook := "list " + tc.listing
+				if tc.failed {
+					setFailAlways(node, hook, "")
+				} else {
+					setHook(node, node.killCmdNoEffectAlways, hook)
+				}
+				for _, pass := range []string{"read-only verdict",
+					"Syncup's pass"} {
+					node.Reset()
+					var reply *pb.AgentReply
+					if pass == "read-only verdict" {
+						reply = scope.read(t, srv)
+					} else {
+						reply = scope.run(t, srv, 2)
+					}
+					if reply.GetCode() != common.ReplyCodeLeftover ||
+						!strings.Contains(reply.GetDetails(),
+							"nvmet port links") {
+						t.Errorf("the %s: code %d %q, want %d naming the "+
+							"failed port listing", pass, reply.GetCode(),
+							reply.GetDetails(), common.ReplyCodeLeftover)
+					}
+					if listCount(node, tc.listing) == 0 {
+						t.Fatalf("fixture is wrong: the %s never listed %s",
+							pass, tc.listing)
+					}
+					if !subsysPresent(node, stray) ||
+						!linkPresent(node, link) {
+						t.Fatalf("the %s took %s or its host link %s "+
+							"although it could not see the export's port",
+							pass, stray, link)
+					}
+					if node.hasCall("cmd rm -f "+link) ||
+						node.hasCall("cmd rmdir "+dir) {
+						t.Fatalf("the %s began to remove %s:\n%s", pass,
+							stray, strings.Join(node.Calls(), "\n"))
+					}
+				}
+
+				if tc.failed {
+					clearFailAlways(node, hook)
+				} else {
+					clearHook(node, node.killCmdNoEffectAlways, hook)
+				}
+				reply := scope.run(t, srv, 3)
+				if got := reply.GetCode(); got != 0 {
+					t.Fatalf("the next pass: code = %d (%s), want 0", got,
+						reply.GetDetails())
+				}
+				if !subsysPresent(node, stray) || !linkPresent(node, link) {
+					t.Fatalf("the next pass removed %s, on a sibling's "+
+						"port", stray)
+				}
+			})
+		}
 	}
 }
 
@@ -858,11 +957,11 @@ func TestHalfBuiltExportAgeUnreadIsLeftAlone(t *testing.T) {
 					t.Fatalf("the pass read the age of %s %d times, want 1",
 						stray, got)
 				}
-				if got := lsCount(node, dir+"/namespaces"); got != 0 {
+				if got := listCount(node, dir+"/namespaces"); got != 0 {
 					t.Fatalf("the pass listed the namespaces %d times for "+
 						"an export whose age did not answer, want 0", got)
 				}
-				if got := lsCount(node,
+				if got := listCount(node,
 					agent.NvmetRoot+"/ports"); got != 0 {
 					t.Fatalf("the pass listed the ports %d times for an "+
 						"export whose age did not answer, want 0", got)
@@ -892,7 +991,7 @@ func TestHalfBuiltExportAgeUnreadIsLeftAlone(t *testing.T) {
 // removal by a sibling agent in a burst can leave one — is passed over,
 // in both scopes and in the read-only verdict as in the Syncup's pass. Its
 // age read answers "not exist", which is no failure: the verdict stays clean,
-// and nothing of it is listed, so a gone export costs a pass no child process.
+// and nothing of it is listed, so a gone export costs a pass no listing.
 func TestGoneExportIsPassedOver(t *testing.T) {
 	nf := common.NewNameFmt(common.DefaultLocalStorPrefix)
 	for _, scope := range sweepScopes() {
@@ -923,11 +1022,11 @@ func TestGoneExportIsPassedOver(t *testing.T) {
 					t.Errorf("the %s read the age of %s %d times in "+
 						"process, want 1", pass, stray, got)
 				}
-				if got := lsCount(node, dir+"/namespaces"); got != 0 {
+				if got := listCount(node, dir+"/namespaces"); got != 0 {
 					t.Errorf("the %s listed the namespaces of the gone %s "+
 						"%d times, want 0", pass, stray, got)
 				}
-				if got := lsCount(node,
+				if got := listCount(node,
 					agent.NvmetRoot+"/ports"); got != 0 {
 					t.Errorf("the %s listed the ports %d times for a gone "+
 						"export, want 0", pass, got)

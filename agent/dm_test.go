@@ -575,6 +575,65 @@ func TestDmInfoDevNo(t *testing.T) {
 	}
 }
 
+// TestDmInfoAbsentOnlyWhenDmsetupSaysSo pins the absence both one-device
+// reads give (dnagent.md SH15): dmsetup exits 1 for a device that is not
+// there and for a read that failed, as one that cannot reach the driver, so
+// only its own line for a device that is not there reads as absent, and every
+// other failure is an error. On the dn that absence frees a side's extents
+// (freeSideOf), so a failed read taken as one would hand out extents a live
+// device still maps.
+func TestDmInfoAbsentOnlyWhenDmsetupSaysSo(t *testing.T) {
+	ctx := context.Background()
+	const dev = "dnvprobe-notable"
+	reads := []struct {
+		name string
+		read func(oc common.OsClient) (*DmDevInfo, error)
+	}{
+		{"Info", func(oc common.OsClient) (*DmDevInfo, error) {
+			return NewDm(oc).Info(ctx, dev)
+		}},
+		{"InfoDevNo", func(oc common.OsClient) (*DmDevInfo, error) {
+			return NewDm(oc).InfoDevNo(ctx, dev)
+		}},
+	}
+	for _, tc := range []struct {
+		name   string
+		run    osRun
+		absent bool
+	}{
+		{name: "not there", run: exitedWith(1, "", labGoneDevice),
+			absent: true},
+		{name: "a driver it cannot reach", run: exitedWith(1, "",
+			"Failure to communicate with kernel device-mapper driver.\n"+
+				"Command failed.\n")},
+		{name: "the control node refused", run: exitedWith(1, "",
+			"/dev/mapper/control: open failed: Permission denied\n"+
+				"Failure to communicate with kernel device-mapper driver.\n"+
+				"Command failed.\n")},
+		{name: "exit 1 with no words", run: exitedWith(1, "", "")},
+		{name: "killed", run: killedAfter("")},
+	} {
+		for _, r := range reads {
+			t.Run(tc.name+"/"+r.name, func(t *testing.T) {
+				got, err := r.read(refusing(tc.run, nil, nil))
+				if tc.absent {
+					if got != nil || err != nil {
+						t.Fatalf("got %+v, %v; want nil, nil", got, err)
+					}
+					return
+				}
+				if err == nil {
+					t.Fatalf("got %+v and no error: a read that failed "+
+						"read as a device that is not there", got)
+				}
+				if got != nil {
+					t.Errorf("got %+v beside the error %v", got, err)
+				}
+			})
+		}
+	}
+}
+
 // dmsetupRecording answers every dmsetup run with exit status 0, but for
 // the one command line failing, which exits 1, and records each command
 // line it ran in *ran.

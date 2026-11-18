@@ -671,7 +671,7 @@ func (f *fakeNode) SysfsNoDeadline() []string {
 
 // readOnlyPrefixes are the probes; everything else changes the system.
 var readOnlyPrefixes = []string{
-	"cmd ls ", "list ", "mtime ", "cmd lsblk ", "cmd stat ",
+	"list ", "mtime ", "cmd lsblk ", "cmd stat ",
 	"cmd dmsetup info", "cmd dmsetup table", "cmd dmsetup status",
 	"cmd dmsetup ls", "cmd nvme list-subsys",
 	"cmd mdadm --detail", "readsb ",
@@ -816,13 +816,13 @@ func (f *fakeNode) readHookErr(path string) error {
 }
 
 // readDir answers OsClient.ReadDir: a listing in the agent's own process,
-// of sysfs or of the local store, from the directory model. It records
-// "list <path>", and the command hooks match that line as they match a
-// command line, so a key "list "+X catches every listing of a path that
-// starts with X. A fail hook answers an I/O error part-way through the
-// listing and a kill hook a listing the soft timeout cut off: both did not
-// answer, never a missing directory, which only the model says. A hooked
-// listing advances no pending head.
+// of sysfs, of the local store or of the nvmet configfs tree (dnagent.md
+// SH18), from the directory model. It records "list <path>", and the command
+// hooks match that line as they match a command line, so a key "list "+X
+// catches every listing of a path that starts with X. A fail hook answers an
+// I/O error part-way through the listing and a kill hook a listing the soft
+// timeout cut off: both are errors, never a missing directory, which only the
+// model says. A hooked listing advances no pending head.
 func (f *fakeNode) readDir(ctx context.Context, path string) ([]string, error) {
 	if err := f.ctxErr(ctx); err != nil {
 		return nil, err
@@ -854,11 +854,6 @@ func (f *fakeNode) dirAnswer(line, path string) ([]string, error) {
 	if err := f.inProcessHookErr(line, &fs.PathError{
 		Op: "readdirent", Path: path, Err: syscall.EIO}); err != nil {
 		return nil, err
-	}
-	if inNvmetTree(path) {
-		// SH18: the nvmet configfs tree is listed by `ls` alone. A listing
-		// of it here took the wrong path, and it does not answer.
-		return nil, context.DeadlineExceeded
 	}
 	if rest, ok := strings.CutPrefix(path, sysfsBlockDir+"/"); ok {
 		if node, ok := strings.CutSuffix(rest, "/holders"); ok {
@@ -1008,13 +1003,6 @@ func (f *fakeNode) inProcessHookErr(line string, failed error) error {
 		return context.DeadlineExceeded
 	}
 	return nil
-}
-
-// inNvmetTree says whether path is in the nvmet configfs tree, the one tree
-// the agent lists with `ls` (SH18).
-func inNvmetTree(path string) bool {
-	return path == agent.NvmetRoot ||
-		strings.HasPrefix(path, agent.NvmetRoot+"/")
 }
 
 func (f *fakeNode) writeFile(
@@ -1323,11 +1311,10 @@ func (f *fakeNode) runCommand(
 
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	if name == "ls" && !inNvmetTree(args[len(args)-1]) {
-		// The agent lists sysfs and its local store in its own process
-		// (readDir) and the nvmet configfs tree alone with `ls` (SH18): an
-		// `ls` of anything else took the wrong path, and it gets the answer
-		// of a run that never reported.
+	if name == "ls" {
+		// The agent lists every directory in its own process (readDir;
+		// dnagent.md SH17, SH18): an `ls` took the wrong path, and it gets
+		// the answer of a run that never reported.
 		return killedCmdResult()
 	}
 	f.dispatchStderr = ""
@@ -1405,8 +1392,6 @@ func (f *fakeNode) dispatch(
 	name string, args []string, stdin string,
 ) (string, int) {
 	switch name {
-	case "ls":
-		return f.cmdLs(args)
 	case "rm":
 		return f.cmdRm(args)
 	case "mkdir":
@@ -1499,17 +1484,6 @@ func childOf(dir, entry string) (string, bool) {
 		return "", false
 	}
 	return entry[len(dir)+1:], true
-}
-
-// cmdLs answers `ls -1` of a directory of the nvmet configfs tree, the only
-// tree the agent lists with `ls`; every listing of sysfs, and the local
-// store's, is readDir's.
-func (f *fakeNode) cmdLs(args []string) (string, int) {
-	path := args[len(args)-1]
-	if !f.dirs[path] {
-		return "", 2
-	}
-	return strings.Join(f.children(path), "\n") + "\n", 0
 }
 
 // countHeadListing counts one listing of a subsystem directory against the
@@ -1804,6 +1778,9 @@ func (f *fakeNode) cmdDmsetup(args []string, stdin string) (string, int) {
 		switch fields {
 		case "attr":
 			if !ok {
+				// The lab's words for a name no device has, the one failure
+				// Dm.Info reads as absent.
+				f.dispatchStderr = "Device does not exist.\nCommand failed."
 				return "", 1
 			}
 			return dmAttr(dm) + "\n", 0

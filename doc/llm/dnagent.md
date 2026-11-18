@@ -794,12 +794,15 @@ the logs, and it also carries the exit status and, for a dmsetup refusal,
 the errno the output names. That errno is read from the output in one
 place, the wrapper's own table of the tool's words in the C locale, the
 one every command runs in (`osclient.md`, RunCommand), and a caller asks
-the type (`IsNoData`, `IsExists`, `IsBusy`), never the text: ENODATA, with
-which dm-thin refuses a thin table whose id its pool does not hold
-(`cnagent.md` CN14); EEXIST, with which a thin create or snapshot message
-meets an id the pool holds already (`cnagent.md` CN14); and EBUSY, with
-which a metadata-snapshot reserve meets a reservation already held
-(`cnagent.md` CN25). A run that never reported — killed, or never
+the type (`IsNoData`, `IsExists`, `IsBusy`, `IsNoDevice`), never the text:
+ENODATA, with which dm-thin refuses a thin table whose id its pool does
+not hold (`cnagent.md` CN14); EEXIST, with which a thin create or snapshot
+message meets an id the pool holds already (`cnagent.md` CN14); EBUSY,
+with which a metadata-snapshot reserve meets a reservation already held
+(`cnagent.md` CN25); and ENXIO, the kernel's answer to a `dmsetup info` of
+a name no device has, which dmsetup words in its own line, "Device does
+not exist.": the one failure `Dm.Info` and `Dm.InfoDevNo` read as a device
+that is not there (SH15). A run that never reported — killed, or never
 started — refused nothing and carries no errno, whatever it printed
 first. No caller reads a refusal's text to decide. Reason: a tool's
 wording is no contract; one wrapper maps it, and a change of it is fixed
@@ -839,7 +842,13 @@ an exit code above zero when the tool ran and answered "no".
 test, and `osBase.runProbe` is the one probe wrapper that applies it to a
 probe whose non-zero exit means "not there" (the cn's whole-node dm
 listings apply it under their own rule, `osclient.md`, RunCommand): a
-probe that did not answer returns an **error**, never a "not there". The
+probe that did not answer returns an **error**, never a "not there".
+`Dm.Info` and `Dm.InfoDevNo` keep a stricter rule: dmsetup exits 1 both
+for a device that is not there and for a read that failed, as one that
+cannot reach the driver, so they read as absent only the typed refusal
+that says the device does not exist (OS wrappers, "A refusal a caller
+decides by is typed"), and every other failure, a reported one included,
+is an error. The
 distinction is not cosmetic. A killed command may still have completed in
 the kernel — the ioctl finishes regardless of the signal — so the only thing
 a caller learns from a kill is that it must probe again; and a caller that
@@ -855,9 +864,15 @@ These primitives must honour it, because each one's caller answers an
 
 * `Dm.Info`, whose "absent" answer gates `FreeSide` and `FreeCloneMeta`
   (DN6's record rule);
-* `osBase.listDir` and the `dirExists` above it, the `ls` of the nvmet
-  configfs tree (SH18), which `Nvmet.RemoveSubsystem` and `RemovePortLink`
-  walk their children through;
+* `osBase.listDir` and the `dirExists` above it, the listing of the nvmet
+  configfs tree in the agent's own process (`OsClient.ReadDir`, SH18),
+  which `Nvmet.RemoveSubsystem` and `RemovePortLink` walk their children
+  through and the sweeps enumerate the tree through: only a directory that
+  is not there is absent, and a listing that failed otherwise, read as an
+  empty directory, would make a removal skip every object in it, a sweep
+  see no export, and `Nvmet.EnsureSubsystem` and `ProbeSubsystem` see no
+  allowed host, so that a subsystem that is to admit no host keeps a
+  retired one admitted while both read it converged;
 * `osBase.dirMtime` beside them, the read in the agent's own process
   (`OsClient.ReadMtime`) behind `Nvmet.SubsysMtime`, DN6's age of an export
   without namespace one: a subsystem directory that reads absent is passed
@@ -919,9 +934,10 @@ disconnect a leg under a live array).
 
 The listings the agent makes in its own process honour the file-read half
 of the same rule (`osclient.md`, RunCommand): `Cmd.ListDir`, through which
-the md walk (`cnagent.md` CN12) lists sysfs, and
+the md walk (`cnagent.md` CN12) lists sysfs,
 `NvmeHost`'s listings of the nvme class directories, which its walk makes
-beside the `NvmeHost.readTrimmed` reads.
+beside the `NvmeHost.readTrimmed` reads, and `Nvmet`'s listings of the
+configfs tree (above).
 
 SH16. **Convergence is probe-first.** Every `Ensure*` helper reads current
 state and mutates only differences; an equal-revision re-apply on a live,
@@ -930,10 +946,10 @@ safe: gratuitous re-writes of live objects are not no-ops (re-linking a
 live port-to-subsystem link or reloading a live dm table stalls host IO).
 
 SH17. Probing follows these conventions: the probe commands — the dn's are
-`dmsetup info`, `dmsetup status`, `dmsetup table` and `dmsetup ls`, `lsblk`
-for a device's number, and `ls` of the nvmet configfs tree alone (SH18),
-since it lists sysfs and its local store in its own process
-(`OsClient.ReadDir`) and reads there too a subsystem directory's age and, in
+`dmsetup info`, `dmsetup status`, `dmsetup table` and `dmsetup ls`, and
+`lsblk` for a device's number, since it lists the nvmet configfs tree,
+sysfs and its local store in its own process (`OsClient.ReadDir`, SH18)
+and reads there too a subsystem directory's age and, in
 the port probe, whether its port's directory is there (`OsClient.ReadMtime`,
 SH18), and the size of its `--disk`: the number of the device the `--disk`
 path names (`OsClient.ReadDevNo`), then the size sysfs keeps under that
@@ -1007,8 +1023,10 @@ directory on an attribute lookup, on both agents the agent's own port
 directory's, for whether it is there (`Nvmet.ProbePort`,
 `Nvmet.ProbePortState`), and each port's link of a subsystem whose queue
 cap is about to be written, for whether the subsystem is linked there
-(SH32); and directory listings through `RunCommand` as
-well (`ls`), never in the agent's own process (`OsClient.ReadDir`). Reason
+(SH32); and directory listings through `OsClient.ReadDir`,
+in the agent's own process too, where only a directory that is not there
+reads as absent and any other failure is an error naming the listing,
+never an empty directory. Reason
 for the time read: it is no listing — it looks up the one directory and
 opens nothing in it — and DN6 reads it for every export without namespace
 one that a sweep meets, which every export is for a moment while it is built
@@ -1018,8 +1036,20 @@ export in flight; and every background read of a DN or a CN probes the
 agent's port, so a child for the port's directory would cost every such
 read one more; like every
 in-process call, it is bounded only up to its syscall (SH13). Reason for
-the listings: the process each `ls` starts costs little as long as a
-converge or a background read lists few configfs directories. On the cn that
+the listings in process: `ls` exits with the same status for a directory
+that is not there and for one it cannot open, so only its words could tell
+them apart, and a tool's words are no contract (OS wrappers, "A refusal a
+caller decides by is typed"); a failed listing read as an empty directory
+is the false absence SH15 forbids. The listing in process tells them apart
+by the error alone, gives the names `ls` prints, in the same order (byte
+order), and fails whole, with no names. It also gives a name that starts
+with a dot, which `ls` hid: dnv makes none, but nvmet refuses none, so a
+link made by hand with such a name under a subsystem's `allowed_hosts`,
+which admits its host, is now unlinked by the converge and named by the
+probe like any other entry. It costs less than a child, but no listing is
+free: each still opens the directory, and the open waits for the
+directory's lock (below), so the configfs listings a converge or a background read makes
+are kept few. On the cn that
 holds every time: it lists the subsystems directory once, and attributes
 every dn export, a co-hosted dn agent's included, by its NQN alone
 (`cnagent.md`, CN21), so what it lists follows the subsystems and transfers
@@ -1038,11 +1068,11 @@ meets it, and, when it has no namespace at all, the port links — a listing
 of the ports directory and one of each port's links, as many as the kernel
 has ports — at most once a sweep. On a kernel that stamps the directory on
 an attribute lookup no build in flight reads that old; Known limits names
-when a live export reads old. The time limit bounds a configfs listing in
-neither form: opening and closing a configfs directory wait for the
-directory's lock, which a `mkdir` or `rmdir` in it holds for its whole run,
-and no signal ends that wait, so a killed `ls` exits only once the `mkdir`
-or `rmdir` returns (SH13).
+when a live export reads old. No time limit bounds a configfs listing:
+opening and closing a configfs directory wait for the directory's lock,
+which a `mkdir`, `rmdir`, link or unlink in it holds for its whole run, and
+no signal ends that wait, so a listing behind one holds its goroutine, and
+the thread under it, until that call returns (SH13).
 `WriteFile` MUST NOT be used on paths under "/sys/kernel/config".
 
 SH19. `nvmet.go` owns the [D4] fixed-ANA-group model:
@@ -2043,12 +2073,13 @@ is the reason. Scope 1 attributes, in every sweep — each background
 read's verdict among them, the sweep with its removals left out (DN16) —
 every export of an sp this agent holds a device or a known side of that no
 held side of its own claims, which includes every sibling's export of that
-sp. Listing each one's namespaces would cost an `ls` apiece, so each sweep
-of every agent holding sides of an sp would grow with all the other
+sp. Listing each one's namespaces would cost a listing per export, so each
+sweep of every agent holding sides of an sp would grow with all the other
 agents' exports of it, quadratically in the agents of one sp on a kernel.
-The read of namespace one runs in process, so attributing an export that
-has it costs a sweep no command at all. No attribution is kept from one
-sweep to the next, and none needs to be: one sweep attributes an export at
+The read of namespace one is one file read in process, so attributing an
+export that has it costs a sweep no command and no listing at all. No
+attribution is kept from one sweep to the next, and none needs to be: one
+sweep attributes an export at
 most once, and a read's verdict and the `SyncupDn` after it each attribute
 it afresh — an owner remembered between them could be stale, the export
 removed and built again by another agent in between. An export holding no namespace at all
@@ -2078,13 +2109,14 @@ the nvmet **port** it is linked to, each agent converging exactly one port
 id: linked to a sibling's port, it is that sibling's; linked to no port, or
 only to ours, it is an orphan and goes — unless a held side still claims
 it, which is the claim rule again. The order is the cost. The age is one
-read in the agent's own process (SH18); the namespaces are a listing, a
-child process; the port links are a listing of the ports directory and one
-of each port's links, a child process each, as many as the kernel has
-ports, built at most once a sweep. Every export is without namespace one for
+read of the directory itself in the agent's own process (SH18); the
+namespaces are a listing; the port links are a listing of the ports
+directory and one of each port's links, as many as the kernel has ports,
+built at most once a sweep, each listing in process too and each waiting
+for its directory's lock (SH18). Every export is without namespace one for
 a moment while it is built or removed, and the age alone settles every one
 that is young or already gone, so a burst of builds or removals costs a
-sweep no child process for those. On a kernel that stamps the directory on
+sweep no listing for those. On a kernel that stamps the directory on
 an attribute lookup, every export a build has in flight reads young — the
 build's own attribute reads and writes keep it so — so a burst of builds on
 a kernel many dn agents share makes no agent list a namespace or a port;
@@ -2354,9 +2386,10 @@ whose hydration is supposed to resume from disk (`architecture.md`,
 Migration). Freeing a record while its device still maps those extents is
 not a leak but a corruption path: the next allocation hands the same
 extents to another side, which zeroes the part it must and serves them as
-its own. In this agent that is where reading a killed `dmsetup info` as
-"the device is gone" destroys data rather than leaking a device, and it is
-why SH15's rule is a rule.
+its own. In this agent that is where reading a `dmsetup info` that was
+killed, or that failed for any reason but the device's absence, as "the
+device is gone" destroys data rather than leaking a device, and it is why
+SH15's rule is a rule.
 
 **The record step.** The same proof, run over the volume table itself
 rather than over the devices the enumeration found, closes the crash window
@@ -2368,7 +2401,8 @@ something above will not go, and a removal issued from here would jump that
 order. What is left for this step is the record, and the only record it
 frees is one whose owner is provably gone **and** whose device it has
 probed and found already gone. A record whose device is still there — or
-whose `dmsetup info` did not answer, which is not an absence (SH15) — is
+whose `dmsetup info` did not answer or failed otherwise, which is not an
+absence (SH15) — is
 reported as a leftover and stays allocated until a later pass finds the
 device gone; freeing extents a live device still maps is the corruption
 path above, not a leak. The side records of an sp that waits for its
@@ -4129,10 +4163,11 @@ else reported through `agent_reply` is still a protocol-level refusal.
 * A live export that reads older than `DnExportOrphanGrace` while it has no
   namespace costs a listing of its namespaces and of the port links (DN6,
   SH18): every agent on the kernel that holds a side of its sp, save one
-  whose held side still claims the export (DN6), lists its namespaces, a
-  child process, and the ports, once a sweep, a child process per port, in
-  each sweep that meets it, which on a loaded kernel shared by many dn
-  agents can make a background read run long: the object's rounds answer its
+  whose held side still claims the export (DN6), lists its namespaces, and
+  the ports — a listing per port, once a sweep — in each sweep that meets
+  it; each listing waits for its directory's lock behind any `mkdir`,
+  `rmdir`, link or unlink in that directory, which on a kernel shared by many dn agents can
+  make a background read run long: the object's rounds answer its
   observation from before the read meanwhile, and an observation that ages
   past the worker's bound makes a missed round (`dnv-worker.md` HL7). Three
   shapes leave a live export without its namespace. A removal unlinks the port, then removes the

@@ -44,11 +44,13 @@ func AnaStateOf(grpId int) string {
 
 // Nvmet wraps the nvmet configfs patterns (SH18, SH19; cnagent.md CN16).
 // Attribute writes go through OsClient.WriteFileDirect, directory and link
-// operations and directory listings through RunCommand, attribute reads
-// through ReadFile, and a directory's modification time through ReadMtime,
-// in the agent's own process: a subsystem's age (SubsysMtime) and the port
-// probe's test of whether the port's directory is there (SH18). WriteFile is
-// never used on a /sys/kernel/config path.
+// operations through RunCommand, attribute reads through ReadFile, directory
+// listings through ReadDir (listDir), and a directory's modification time
+// through ReadMtime, in the agent's own process: a subsystem's age
+// (SubsysMtime) and the port probe's test of whether the port's directory is
+// there (SH18). A listing that fails is an error, never an absence; only a
+// directory that is not there reads as absent. WriteFile is never used on a
+// /sys/kernel/config path.
 type Nvmet struct {
 	osBase
 }
@@ -268,11 +270,11 @@ func (n *Nvmet) probePort(
 	read func(context.Context, string) (string, bool, error),
 ) (PortState, string, error) {
 	portPath := n.PortPath(portId)
-	// Whether the port's directory is there is a read of its time in the
-	// agent's own process, not an `ls` of it (SH18): every background read
-	// of a DN or a CN, which a check round starts (SH29), probes the agent's
-	// port, as a converge of one does, and a child for the port's directory
-	// would cost each of them one more.
+	// Whether the port's directory is there is a read of its time, not a
+	// listing of it (SH18): every background read of a DN or a CN, which a
+	// check round starts (SH29), probes the agent's port, as a converge of
+	// one does, and the time read looks up the one directory and reads
+	// nothing in it.
 	_, exists, err := n.dirMtime(ctx, portPath)
 	if err != nil {
 		return 0, "", err
@@ -993,7 +995,8 @@ func (n *Nvmet) linkedToAnyPort(ctx context.Context, nqn string) (bool, error) {
 		return false, err
 	}
 	if !ok {
-		return false, fmt.Errorf("list %s: not there", portsPath)
+		return false, fmt.Errorf(
+			"no nvmet ports directory %s: no port is set up", portsPath)
 	}
 	for _, name := range ports {
 		portId, err := strconv.Atoi(name)

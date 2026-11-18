@@ -77,10 +77,11 @@ func TestKilledProbeIsNotAbsent(t *testing.T) {
 			},
 		},
 		{
-			// osBase.listDir, through the enumerator that walks configfs.
-			// RemoveSubsystem and RemovePortLink walk their children through
-			// the same listing, so a killed `ls` must not make them skip the
-			// objects they should remove, silently and with no error.
+			// osBase.listDir, through the enumerator that walks configfs, a
+			// listing in the agent's own process (SH18). RemoveSubsystem and
+			// RemovePortLink walk their children through the same listing,
+			// so a killed listing must not make them skip the objects they
+			// should remove, silently and with no error.
 			name: "listDir",
 			probe: func(answer osAnswer) (bool, error) {
 				fs := &fakeSysfs{
@@ -91,21 +92,26 @@ func TestKilledProbeIsNotAbsent(t *testing.T) {
 				if answer == didNotAnswer {
 					fs.killLs[NvmetRoot+"/subsystems"] = true
 				}
-				// answeredNo needs no fixture: `ls` of a directory this tree
-				// does not hold exits non-zero, exactly as it does on a node
-				// whose nvmet module was never loaded.
+				// answeredNo needs no fixture: a directory this tree does
+				// not hold is missing, exactly as it is on a node whose
+				// nvmet module was never loaded.
 				got, err := NewNvmet(fs.osClient()).ListSubsystems(ctx)
+				if !slices.Contains(fs.readDirCalls, NvmetRoot+"/subsystems") {
+					// A listing that never reached the tree proves
+					// nothing; it fails both halves.
+					return false, nil
+				}
 				return len(got) == 0, err
 			},
 		},
 		{
-			// osBase.readDir, the sysfs twin of listDir: NvmeHost lists the
-			// nvme class directories in the agent's own process, and its
-			// enumerator of every connection the host holds starts with the
-			// listing of /sys/class/nvme-subsystem. That listing cut off at
-			// the soft timeout must not read as "this host holds no
-			// connection", which would let a sweep leave every connection
-			// it should disconnect.
+			// osBase.readDir, the listing listDir runs on, for sysfs:
+			// NvmeHost lists the nvme class directories in the agent's own
+			// process, and its enumerator of every connection the host holds
+			// starts with the listing of /sys/class/nvme-subsystem. That
+			// listing cut off at the soft timeout must not read as "this host
+			// holds no connection", which would let a sweep leave every
+			// connection it should disconnect.
 			name: "NvmeHost listing",
 			probe: func(answer osAnswer) (bool, error) {
 				fs := &fakeSysfs{

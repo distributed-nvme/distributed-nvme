@@ -714,18 +714,19 @@ wait_older() {
 # attribution_reads <trace> <nqn> — what the agent read of one export under
 # one trace id, as three counts on one line: its in-process age reads, the
 # listings of its namespaces, and the listings of the ports directory, which
-# every port listing starts with. One jq evaluation (see the note above
-# clone_discards).
+# every port listing starts with. Every listing is the agent's own, an
+# `os read dir` record (dnagent.md SH18). One jq evaluation (see the note
+# above clone_discards).
 attribution_reads() {
 	jq -rn --arg t "$1" --arg dir "$NVMET/subsystems/$2" \
 		--arg ports "$NVMET/ports" '
 	    [ inputs | select(.trace_id == $t) ] as $r
 	    | [ ($r | map(select(.msg == "os read mtime" and .path == $dir))
 	          | length),
-	        ($r | map(select(.msg == "os command" and .cmd == "ls"
-	                  and .args[-1] == $dir + "/namespaces")) | length),
-	        ($r | map(select(.msg == "os command" and .cmd == "ls"
-	                  and .args[-1] == $ports)) | length) ]
+	        ($r | map(select(.msg == "os read dir"
+	                  and .path == $dir + "/namespaces")) | length),
+	        ($r | map(select(.msg == "os read dir"
+	                  and .path == $ports)) | length) ]
 	    | map(tostring) | join(" ")' "$WORK/agent.log"
 }
 

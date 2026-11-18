@@ -1095,11 +1095,13 @@ const (
 // age is read first, in the agent's own process, then the namespaces are
 // listed, and only then the ports. On a kernel that stamps the directory on an
 // attribute lookup, every export a build has in flight is younger than that,
-// so the listing it costs — an `ls` of the ports directory and one of each
-// port's links, a child each, as many as the kernel has ports — is paid
-// neither when every export has its namespace nor in a burst of builds on a
-// kernel many dn agents share (dnagent.md, Known limits, names when a live
-// export reads old). A pass that needs it builds it once.
+// so the listings it costs — one of the ports directory and one of each
+// port's links, in the agent's own process, as many as the kernel has ports —
+// are paid neither when every export has its namespace nor in a burst of
+// builds on a kernel many dn agents share (dnagent.md, Known limits, names
+// when a live export reads old). A pass that needs it builds it once, and a
+// listing that fails is the pass's error, never a port with no link
+// (dnagent.md SH18).
 type portLinks struct {
 	done bool
 	err  error
@@ -1146,9 +1148,9 @@ func (s *DnAgentServer) portLinksOf(
 // namespace and no other — and the namespaces are listed only when it is
 // absent and the export is old. On a kernel several dn agents share, the
 // node-level pass attributes every sibling's export of an sp this node hosts,
-// on every pass; an `ls` exec per export made the pass of each agent holding
-// sides of an sp grow with all the others' exports of it, where the read is
-// one in-process file read. Every export is without namespace one for a
+// on every pass; a listing per export would make the pass of each agent
+// holding sides of an sp grow with all the others' exports of it, where the
+// read is one in-process file read. Every export is without namespace one for a
 // moment while it is built or removed, so in a burst of builds or removals
 // the same holds for the exports in flight: their age is one in-process read
 // too, and settles every one that is young or gone. Nothing of an
@@ -1183,9 +1185,9 @@ func (s *DnAgentServer) classifyExport(
 	// It is read from the node, never remembered: the subsystem directory's
 	// mtime against our clock, read in our own process (SH18). A gone export
 	// is passed over and a young one left alone whatever it holds and
-	// whatever port it is linked to, so neither costs a child process: the
-	// namespaces, a child, and the port links, a child per port, are listed
-	// only for an old one.
+	// whatever port it is linked to, so neither costs a listing: the
+	// namespaces, and the port links, a listing per port, are listed only
+	// for an old one.
 	mtime, present, err := s.nvmet.SubsysMtime(ctx, nqn)
 	if err != nil {
 		res.Fail("nvmet subsystem age of "+nqn, err)

@@ -745,7 +745,7 @@ func TestAFailedStepFiveIsCuredByTheResend(t *testing.T) {
 				"through its dm-clone")
 		}
 
-		probe := "ls -1 " + srv.nvmet.NsPath(newPrimary.nqn, sideNsid)
+		probe := "list " + srv.nvmet.NsPath(newPrimary.nqn, sideNsid)
 		setHook(node, node.killCmdNoEffect, probe)
 		held := flippedMigrDstReq(3)
 		reply, err := srv.SyncupSide(ctx, held)

@@ -2650,11 +2650,11 @@ cn_requests_since() {
 # not in the list; the cn agent issues the second alone, its superblock read
 # of an md member (cnagent.md CN12), and the probers' `ReadBlockDirectAt`
 # logs nothing (osclient.md, Exported raw helpers and the probe-IO
-# carve-out). Probe commands (lsblk, dmsetup info|table|status|ls, the `ls`
-# of configfs, stat, nvme list-subsys) are expected and deliberately not in
-# the list. Every other directory listing,
-# of sysfs or of the local store, is an `os read dir` record, a read and never
-# a mutation. The cn agent reads md state from sysfs and never runs
+# carve-out). Probe commands (lsblk, dmsetup info|table|status|ls, stat,
+# nvme list-subsys) are expected and deliberately not in the list. Every
+# directory listing, of configfs, of sysfs or of the local store, is an
+# `os read dir` record, a read and never a mutation. The cn agent reads md
+# state from sysfs and never runs
 # `mdadm --detail`, which is a read too.
 mutations() {
 	local trace=${1:-} log=${2:-$CN_LOG}

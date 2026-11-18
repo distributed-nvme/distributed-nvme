@@ -28,8 +28,8 @@ import (
 // also lists the nvmet tree in configfs, and reads the namespace node and the
 // number of each connection it checks against a live dm-clone (srcNqnsInUse).
 // So such a read starts a few processes whatever the slice count, plus the
-// status reads of its thin pools and dm-clones and the configfs `ls` of its
-// exports (dnagent.md SH18).
+// status reads of its thin pools and dm-clones; its configfs listings of its
+// exports run in the agent's own process (dnagent.md SH18).
 //
 // dmInfo, dmTable and dmDevNo read a dm device's attrs, its live table and
 // its number for the helpers the converge and the probe share: from the

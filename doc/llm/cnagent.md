@@ -3969,8 +3969,10 @@ for nvme host connections — at cntlr level the converge's own, taken
 right before its sweep and shared with its build, at node level one of
 its own (`ListAllSubsys`) — whose list fails on any entry whose
 "subsysnqn" read did not answer, as `ListAllSubsys` does (`dnagent.md`
-SH20); and the listing of the nvmet subsystems tree — linked to the port
-or not, a partially removed subsystem is unlinked but present. A cntlr's
+SH20); and the listing of the nvmet subsystems tree, in the agent's own
+process, where only a tree that is not there is empty and a listing that
+failed otherwise did not answer (`dnagent.md` SH15, SH18) — linked to the
+port or not, a partially removed subsystem is unlinked but present. A cntlr's
 read takes its verdict's dm, md and nvme listings from its reading
 instead (CN30). An enumerator that did
 not answer leaves its part of the snapshot empty and is reported as
@@ -4546,12 +4548,13 @@ leg.
 ### Probing and error capture — `probe.go`
 
 CN28. Probe map (`dnagent.md` SH17 conventions plus the cn probes fixed here:
-`ls` for the nvmet configfs tree — except in the
+listings of the nvmet configfs tree in the agent's own process
+(`dnagent.md` SH18) — except in the
 port probe the two agents share (`Nvmet.ProbePort`,
 `Nvmet.ProbePortState`), which tests whether the port's own directory is
 there by reading the directory's modification time in the agent's own
 process (`dnagent.md` SH18), while the port build (`Nvmet.EnsurePort`),
-which runs only once that probe found the port short, keeps its `ls` —
+which runs only once that probe found the port short, lists it —
 `dmsetup info` and `dmsetup table` for dm
 devices — over the whole node at once in the reading below, of one
 device elsewhere — with `dmsetup status` for thin pools and dm-clones
@@ -4594,7 +4597,8 @@ reload) and the pool test of an uncreated snapshot's name
 of a read's time goes to starting processes, and one listing of the
 whole node costs about what one device's read does, so such a read
 starts a few processes whatever the slice count, besides its status
-reads and the configfs `ls` of its exports (`dnagent.md` SH18); the
+reads, and lists the configfs tree of its exports in its own process
+(`dnagent.md` SH18); the
 superblock reads CN12's take-back check, identity check and re-assembly
 take, and those of the names of an absent array and of a forced start,
 are reads in the agent's own process, no processes, save the one `lsblk`

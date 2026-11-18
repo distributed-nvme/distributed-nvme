@@ -1992,16 +1992,19 @@ func TestFenceClearedWhenTheSourceRoleEnds(t *testing.T) {
 	}
 }
 
-// breakSideDev makes the side device unreadable the way one transient
-// `dmsetup info` failure does: Dm.Info collapses a failed probe into "the
-// device is absent", so the converge tries to re-create it, fails, and returns
-// sideDevFailed — the DN9 side-device gate, taken by a side
-// that is in fact serving.
+// breakSideDev makes the side device one no converge gets past: `dmsetup
+// info` answers that it is not there, in dmsetup's own words, and its create
+// is refused because it is, as when the two reads race a device's removal and
+// its creation. The converge tries to create it, fails, and returns
+// sideDevFailed — the DN9 side-device gate, taken by a side that is in fact
+// serving. The create it tries is the proof that it took the gate. (A
+// `dmsetup info` that fails otherwise takes the gate too, with no create:
+// Dm.Info answers it with an error.)
 func breakSideDev(node *fakeNode, sideDevName string) {
 	node.mu.Lock()
 	defer node.mu.Unlock()
 	node.failCmdAlways["dmsetup info --columns --noheadings -o attr "+
-		sideDevName] = "no such device"
+		sideDevName] = "Device does not exist.\nCommand failed."
 	node.failCmdAlways["dmsetup create "+sideDevName] = "device already exists"
 }
 
@@ -3223,8 +3226,8 @@ func TestFenceAdoptedSettlesAtTheGate(t *testing.T) {
 	// through ensureCnDm, so the pass has to be proved gated or this test
 	// silently degenerates into TestFenceNotRestartedAcrossAnAgentRestart.
 	// A `dmsetup create` of the side device is attempted only when Dm.Info
-	// collapsed breakSideDev's injected probe failure into "absent", and it
-	// can only fail — the device is in fact there — so the converge returned
+	// read it as not there, which breakSideDev makes it answer, and it can
+	// only fail — the device is in fact there — so the converge returned
 	// sideDevFailed and took the DN9 gate.
 	if !node.hasCall("cmd dmsetup create " + sideDevName) {
 		t.Fatalf("the converge never took the DN9 gate, so it proves nothing "+

@@ -11,6 +11,7 @@ import (
 	"syscall"
 	"testing"
 
+	"github.com/distributed-nvme/distributed-nvme/agent"
 	"github.com/distributed-nvme/distributed-nvme/common"
 	"github.com/distributed-nvme/distributed-nvme/pb"
 )
@@ -477,7 +478,7 @@ func TestACntlrReadReadsTheNodeOnce(t *testing.T) {
 						t.Errorf("%s: %d status reads, want %d", label, got,
 							wantStatus)
 					}
-					lists := callCnt(node, "cmd ls ")
+					lists := callCnt(node, "list "+agent.NvmetRoot)
 					if first, seen := configfsLists[entrance.name]; !seen {
 						configfsLists[entrance.name] = lists
 					} else if lists != first {

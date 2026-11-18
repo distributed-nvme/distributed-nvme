@@ -424,65 +424,78 @@ func halfRemovedExport(
 
 // TestAnUnansweredExportListingKeepsAWaitingSideDevice pins DN6's rule that
 // an sp waits for its exports through a pass whose nvmet subsystems listing
-// does not answer. Such a pass sees no export, so it can settle none; had it
-// taken the dropped side's device and record, the sp would have left the
-// sweep's view with its half-removed export still there, and no later sweep
-// would have looked at that export again. The pass names the failed
-// listing, and the side device and the record stay until a sweep that sees
-// the export settles it.
+// does not answer: one the soft timeout cut off, or one that failed with an
+// I/O error, which is no empty directory (SH18). Such a pass sees no export,
+// so it can settle none; had it taken the dropped side's device and record,
+// the sp would have left the sweep's view with its half-removed export still
+// there, and no later sweep would have looked at that export again. The pass
+// names the failed listing, and the side device and the record stay until a
+// sweep that sees the export settles it.
 func TestAnUnansweredExportListingKeepsAWaitingSideDevice(t *testing.T) {
-	srv, node := newTestServer(t)
-	clock := withDnClock(srv, node)
-	ctx := context.Background()
-	nqn, objs, recordHeld := halfRemovedExport(t, srv, node)
-	reply, err := srv.SyncupDn(ctx, dnReq(2))
-	if err != nil {
-		t.Fatalf("SyncupDn: %v", err)
-	}
-	assertNamed(t, "the drop whose export removal stopped", reply, nqn)
+	for _, failure := range []string{"killed", "I/O error"} {
+		t.Run(failure, func(t *testing.T) {
+			srv, node := newTestServer(t)
+			clock := withDnClock(srv, node)
+			ctx := context.Background()
+			nqn, objs, recordHeld := halfRemovedExport(t, srv, node)
+			reply, err := srv.SyncupDn(ctx, dnReq(2))
+			if err != nil {
+				t.Fatalf("SyncupDn: %v", err)
+			}
+			assertNamed(t, "the drop whose export removal stopped", reply,
+				nqn)
 
-	listing := "ls -1 " + agent.NvmetRoot + "/subsystems"
-	setHook(node, node.killCmdNoEffectAlways, listing)
-	reply, err = srv.SyncupDn(ctx, dnReq(2))
-	clearHook(node, node.killCmdNoEffectAlways, listing)
-	if err != nil {
-		t.Fatalf("SyncupDn: %v", err)
-	}
-	if got := reply.GetAgentReply(); got.GetCode() == 0 ||
-		!strings.Contains(got.GetDetails(), "nvmet subsystems") {
-		t.Errorf("the pass whose listing did not answer: code %d (%s), "+
-			"want the failed listing named", got.GetCode(),
-			got.GetDetails())
-	}
-	if !dmPresent(node, objs.sideDev) || !recordHeld() {
-		t.Fatalf("the pass whose listing did not answer took %s or its "+
-			"record: no sweep would judge %s again", objs.sideDev, nqn)
-	}
+			listing := "list " + agent.NvmetRoot + "/subsystems"
+			if failure == "killed" {
+				setHook(node, node.killCmdNoEffectAlways, listing)
+			} else {
+				setFailAlways(node, listing, "")
+			}
+			reply, err = srv.SyncupDn(ctx, dnReq(2))
+			clearHook(node, node.killCmdNoEffectAlways, listing)
+			clearFailAlways(node, listing)
+			if err != nil {
+				t.Fatalf("SyncupDn: %v", err)
+			}
+			if got := reply.GetAgentReply(); got.GetCode() == 0 ||
+				!strings.Contains(got.GetDetails(), "nvmet subsystems") {
+				t.Errorf("the pass whose listing did not answer: code %d "+
+					"(%s), want the failed listing named", got.GetCode(),
+					got.GetDetails())
+			}
+			if !dmPresent(node, objs.sideDev) || !recordHeld() {
+				t.Fatalf("the pass whose listing did not answer took %s "+
+					"or its record: no sweep would judge %s again",
+					objs.sideDev, nqn)
+			}
 
-	reply, err = srv.SyncupDn(ctx, dnReq(2))
-	if err != nil {
-		t.Fatalf("SyncupDn: %v", err)
-	}
-	assertNotNamed(t, "the re-send inside the grace", reply)
-	if !dmPresent(node, objs.sideDev) || !recordHeld() {
-		t.Fatalf("a pass inside the grace took %s or its record",
-			objs.sideDev)
-	}
-	clock.mu.Lock()
-	clock.now = clock.now.Add(common.DnExportOrphanGrace + time.Second)
-	clock.mu.Unlock()
-	aged, _ := checkDnNow(srv, traced("aged-read"), &pb.CheckDnRequest{
-		ClusterId: testCluster, DnId: testDn, Revision: 2, ShowInfo: true,
-	}, nil)
-	assertNamed(t, "the read past the grace", aged, nqn)
-	reply, err = srv.SyncupDn(ctx, dnReq(2))
-	if err != nil {
-		t.Fatalf("SyncupDn: %v", err)
-	}
-	assertNotNamed(t, "the SyncupDn past the grace", reply)
-	objs.assertAllGone(t, node)
-	if recordHeld() {
-		t.Error("the side's record survived its devices")
+			reply, err = srv.SyncupDn(ctx, dnReq(2))
+			if err != nil {
+				t.Fatalf("SyncupDn: %v", err)
+			}
+			assertNotNamed(t, "the re-send inside the grace", reply)
+			if !dmPresent(node, objs.sideDev) || !recordHeld() {
+				t.Fatalf("a pass inside the grace took %s or its record",
+					objs.sideDev)
+			}
+			clock.mu.Lock()
+			clock.now = clock.now.Add(common.DnExportOrphanGrace +
+				time.Second)
+			clock.mu.Unlock()
+			aged, _ := checkDnNow(srv, traced("aged-read"),
+				&pb.CheckDnRequest{ClusterId: testCluster, DnId: testDn,
+					Revision: 2, ShowInfo: true}, nil)
+			assertNamed(t, "the read past the grace", aged, nqn)
+			reply, err = srv.SyncupDn(ctx, dnReq(2))
+			if err != nil {
+				t.Fatalf("SyncupDn: %v", err)
+			}
+			assertNotNamed(t, "the SyncupDn past the grace", reply)
+			objs.assertAllGone(t, node)
+			if recordHeld() {
+				t.Error("the side's record survived its devices")
+			}
+		})
 	}
 }
 
@@ -748,55 +761,76 @@ func TestSideRecordFreedOnlyAfterDeviceGone(t *testing.T) {
 	}
 }
 
-// TestKilledDmInfoDoesNotFreeARecord is the narrower half of the same
+// TestAFailedDmInfoDoesNotFreeARecord is the narrower half of the same
 // property, driven through the primitive instead of the removal: with
-// `dmsetup info` killed, the agent cannot know whether the side device is
-// there, and "I could not tell" must never be read as "it is gone".
+// `dmsetup info` killed, or failing for a reason other than a device that is
+// not there — one that cannot reach the driver, which dmsetup exits 1 for as
+// it does for a missing device — the agent cannot know whether the side
+// device is there, and "I could not tell" must never be read as "it is gone".
 //
-// Dm.Info separates a tool that answered "no such device" from a tool that
-// did not answer at all: a killed probe read as absent would let removeDm
-// report success and the caller free the extents underneath a device that is
-// still live.
-func TestKilledDmInfoDoesNotFreeARecord(t *testing.T) {
-	srv, node := newTestServer(t)
-	ctx := context.Background()
-	syncupBoth(t, srv, 1, testSide)
-	objs := objectsOf(sidePtr(testSide))
-	objs.assertAllPresent(t, node)
+// Dm.Info reads as absent only dmsetup's own line for a device that is not
+// there (dnagent.md SH15): any other failure read as absent would let
+// removeDm report success and the caller free the extents underneath a
+// device that is still live.
+func TestAFailedDmInfoDoesNotFreeARecord(t *testing.T) {
+	for _, failure := range []string{"killed", "a driver it cannot reach"} {
+		t.Run(failure, func(t *testing.T) {
+			srv, node := newTestServer(t)
+			ctx := context.Background()
+			syncupBoth(t, srv, 1, testSide)
+			objs := objectsOf(sidePtr(testSide))
+			objs.assertAllPresent(t, node)
 
-	// "-o attr <name>" is the tail of `dmsetup info --columns --noheadings
-	// -o attr <name>` and of nothing else, so only the probe of this one
-	// device is killed.
-	setHook(node, node.killCmdNoEffectAlways, "-o attr "+objs.sideDev)
+			// "-o attr <name>" is the tail of `dmsetup info --columns
+			// --noheadings -o attr <name>` and of nothing else, so only the
+			// probe of this one device fails.
+			probe := "-o attr " + objs.sideDev
+			if failure == "killed" {
+				setHook(node, node.killCmdNoEffectAlways, probe)
+			} else {
+				setFailAlways(node, probe, "Failure to communicate with "+
+					"kernel device-mapper driver.\nCommand failed.")
+			}
 
-	node.Reset()
-	reply, err := srv.SyncupDn(ctx, dnReq(2))
-	if err != nil {
-		t.Fatalf("SyncupDn: %v", err)
-	}
-	if _, ok, _ := srv.meta.LookupSide(ctx, testSp, testSide); !ok {
-		t.Fatal("a killed probe was read as \"the device is gone\" and the " +
-			"extents were freed under a live device")
-	}
-	if !dmPresent(node, objs.sideDev) {
-		t.Fatal("the fake removed the device although its probe was killed")
-	}
-	if got := reply.GetAgentReply().GetCode(); got !=
-		common.ReplyCodeLeftover {
-		t.Errorf("code = %d (%s), want %d: an object whose state is unknown "+
-			"is a leftover", got, reply.GetAgentReply().GetDetails(),
-			common.ReplyCodeLeftover)
-	}
+			node.Reset()
+			reply, err := srv.SyncupDn(ctx, dnReq(2))
+			if err != nil {
+				t.Fatalf("SyncupDn: %v", err)
+			}
+			if !node.hasCall("cmd dmsetup info --columns --noheadings " +
+				probe) {
+				t.Fatal("fixture is wrong: the pass never probed " +
+					objs.sideDev)
+			}
+			if _, ok, _ := srv.meta.LookupSide(ctx, testSp, testSide); !ok {
+				t.Fatal("a failed probe was read as \"the device is gone\" " +
+					"and the extents were freed under a live device")
+			}
+			if !dmPresent(node, objs.sideDev) {
+				t.Fatal("the fake removed the device although its probe " +
+					"failed")
+			}
+			if got := reply.GetAgentReply().GetCode(); got !=
+				common.ReplyCodeLeftover {
+				t.Errorf("code = %d (%s), want %d: an object whose state is "+
+					"unknown is a leftover", got,
+					reply.GetAgentReply().GetDetails(),
+					common.ReplyCodeLeftover)
+			}
 
-	// And once the probe answers again the record goes, so the assertion
-	// above is about the killed probe and not about a side that could never
-	// be freed at all.
-	clearHook(node, node.killCmdNoEffectAlways, "-o attr "+objs.sideDev)
-	if _, err := srv.SyncupDn(ctx, dnReq(3)); err != nil {
-		t.Fatalf("SyncupDn: %v", err)
-	}
-	if _, ok, _ := srv.meta.LookupSide(ctx, testSp, testSide); ok {
-		t.Error("the record survived a pass whose probes all answered")
+			// And once the probe answers again the record goes, so the
+			// assertion above is about the failed probe and not about a
+			// side that could never be freed at all.
+			clearHook(node, node.killCmdNoEffectAlways, probe)
+			clearFailAlways(node, probe)
+			if _, err := srv.SyncupDn(ctx, dnReq(3)); err != nil {
+				t.Fatalf("SyncupDn: %v", err)
+			}
+			if _, ok, _ := srv.meta.LookupSide(ctx, testSp, testSide); ok {
+				t.Error("the record survived a pass whose probes all " +
+					"answered")
+			}
+		})
 	}
 }
 
@@ -1132,10 +1166,10 @@ func TestOrphanExportsAndConnectionsSwept(t *testing.T) {
 // held side of its own claims — in the verdict of every read of the DN a
 // check round starts (SH29) and in every SyncupDn — and on a shared kernel
 // nearly all of those are the siblings': each side-holding agent exports its
-// own leg of the sp, one export per cn. Attributing each with an `ls` exec of
+// own leg of the sp, one export per cn. Attributing each with a listing of
 // its namespaces would make every side-holding agent's pass grow with
-// everybody else's exports of the sp — about s·(s−1) execs per cn per round
-// for s side-holding agents.
+// everybody else's exports of the sp — about s·(s−1) listings per cn per
+// round for s side-holding agents.
 //
 // dnv builds every side export with one namespace, nsid 1, so its
 // device_path is read directly, and the age of an export without it is read
@@ -1147,9 +1181,10 @@ func TestOrphanExportsAndConnectionsSwept(t *testing.T) {
 // after the subsystems listing, which every read of it then finds gone. The
 // test runs both passes — the verdict of the DN's read and a SyncupDn — over
 // four sibling agents of one sp holding one export of each shape each, then
-// eight each, then thirty-two agents holding one each, and counts the execs
-// and the listings the agent makes in its own process (sysfs and the local
-// store): neither count may move. The third run holds the number of exports
+// eight each, then thirty-two agents holding one each, and counts the execs,
+// the listings the agent makes in its own process (sysfs, the local store and
+// the nvmet configfs tree) and, among them, the configfs ones: no count may
+// move. The third run holds the number of exports
 // of the second and changes only the number of agents, each on its own port:
 // a cost per sibling AGENT (a port listing, say) is as quadratic on the node
 // as one per export, and the first two runs hold the agent count still. Each
@@ -1158,20 +1193,20 @@ func TestOrphanExportsAndConnectionsSwept(t *testing.T) {
 // attribution pointless within a pass. The read's count is the read's own:
 // the round after it answers from the observation and adds no call (SH28).
 //
-// The execs left are the fixed ones, and only two: the sweep's `dmsetup ls`
-// and its `ls` of the subsystems directory. The disk's size and whether the
-// agent's own port is there are read in the agent's own process, once each
-// a pass (dnagent.md SH17, SH18): a child for either would cost every read
-// of a disk node one more process.
+// The exec left is the fixed one: the sweep's `dmsetup ls`. Its listing of
+// the subsystems directory, the disk's size and whether the agent's own port
+// is there are read in the agent's own process, once each a pass (dnagent.md
+// SH17, SH18): a child for any of them would cost every read of a disk node
+// one more process.
 func TestNodeSweepCostIsLinearInOwnExports(t *testing.T) {
 	nf := common.NewNameFmt(common.DefaultLocalStorPrefix)
 
 	// execs seeds `per` exports for each of `siblings` sibling agents, runs
-	// the two passes and returns the `ls`, the total exec and the in-process
-	// listing count of each.
+	// the two passes and returns the exec, the in-process listing and the
+	// configfs listing count of each.
 	type cost struct {
-		verdictLs, verdictCmds, verdictLists int
-		syncLs, syncCmds, syncLists          int
+		verdictConfigfs, verdictCmds, verdictLists int
+		syncConfigfs, syncCmds, syncLists          int
 	}
 	execs := func(t *testing.T, siblings, per int) cost {
 		srv, node := newTestServer(t)
@@ -1212,12 +1247,12 @@ func TestNodeSweepCostIsLinearInOwnExports(t *testing.T) {
 		node.subsysGhosts = gone
 		node.mu.Unlock()
 		// fixedOnly checks that the pass just run started no child but the
-		// sweep's two whole-node listings, and read the disk's number and
-		// its own port's directory in its own process, once each.
+		// sweep's whole-node dm listing, and listed the subsystems directory
+		// and read the disk's number and its own port's directory in its
+		// own process, once each.
 		fixedOnly := func(pass string) {
 			t.Helper()
-			fixed := []string{"cmd dmsetup ls",
-				"cmd ls -1 " + agent.NvmetRoot + "/subsystems"}
+			fixed := []string{"cmd dmsetup ls"}
 			var got []string
 			for _, call := range node.callsMatching("cmd ") {
 				got = append(got, call)
@@ -1227,14 +1262,19 @@ func TestNodeSweepCostIsLinearInOwnExports(t *testing.T) {
 				}
 				if !known {
 					t.Errorf("siblings=%d per=%d: the %s ran %q, a child "+
-						"beside the sweep's two listings", siblings, per,
+						"beside the sweep's dm listing", siblings, per,
 						pass, call)
 				}
 			}
 			if len(got) != len(fixed) {
 				t.Errorf("siblings=%d per=%d: the %s ran %d children, want "+
-					"%d, the sweep's two listings: %q", siblings, per, pass,
+					"%d, the sweep's dm listing: %q", siblings, per, pass,
 					len(got), len(fixed), got)
+			}
+			if n := listCount(node, agent.NvmetRoot+"/subsystems"); n != 1 {
+				t.Errorf("siblings=%d per=%d: the %s listed the "+
+					"subsystems directory %d times, want 1", siblings, per,
+					pass, n)
 			}
 			for _, read := range []string{
 				"devno " + testDisk,
@@ -1282,7 +1322,7 @@ func TestNodeSweepCostIsLinearInOwnExports(t *testing.T) {
 			t.Fatalf("siblings=%d per=%d: CheckDn code = %d (%s), want 0",
 				siblings, per, got, reply.GetAgentReply().GetDetails())
 		}
-		c.verdictLs = len(node.callsMatching("cmd ls "))
+		c.verdictConfigfs = len(node.callsMatching("list " + agent.NvmetRoot))
 		c.verdictCmds = len(node.callsMatching("cmd "))
 		c.verdictLists = len(node.callsMatching("list "))
 		readsOnce("DN's read")
@@ -1297,7 +1337,7 @@ func TestNodeSweepCostIsLinearInOwnExports(t *testing.T) {
 			t.Fatalf("siblings=%d per=%d: SyncupDn code = %d (%s), want 0",
 				siblings, per, got, syncReply.GetAgentReply().GetDetails())
 		}
-		c.syncLs = len(node.callsMatching("cmd ls "))
+		c.syncConfigfs = len(node.callsMatching("list " + agent.NvmetRoot))
 		c.syncCmds = len(node.callsMatching("cmd "))
 		c.syncLists = len(node.callsMatching("list "))
 		readsOnce("SyncupDn")
@@ -1331,11 +1371,13 @@ func TestNodeSweepCostIsLinearInOwnExports(t *testing.T) {
 			"agents: %+v with %d of them, %+v with %d", few, siblings,
 			agents, siblings*8)
 	}
-	if many.verdictLs != few.verdictLs || many.syncLs != few.syncLs {
-		t.Errorf("`ls` execs grew with the siblings' exports: the verdict "+
-			"ran %d with %d of them and %d with %d, the SyncupDn %d and %d",
-			few.verdictLs, siblings, many.verdictLs, siblings*8,
-			few.syncLs, many.syncLs)
+	if many.verdictConfigfs != few.verdictConfigfs ||
+		many.syncConfigfs != few.syncConfigfs {
+		t.Errorf("configfs listings grew with the siblings' exports: the "+
+			"verdict made %d with %d of them and %d with %d, the SyncupDn "+
+			"%d and %d", few.verdictConfigfs, siblings,
+			many.verdictConfigfs, siblings*8, few.syncConfigfs,
+			many.syncConfigfs)
 	}
 	if many.verdictCmds != few.verdictCmds || many.syncCmds != few.syncCmds {
 		t.Errorf("execs grew with the siblings' exports: the verdict ran "+

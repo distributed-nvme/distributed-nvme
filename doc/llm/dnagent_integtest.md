@@ -211,8 +211,9 @@ DN6, SH18): an export of the side's sp for a leg no side holds, made by hand
 with no namespace and no port link. While it is young the fresh rounds stay
 clean, the agent's log shows its age read in the agent's own process at least
 as many times as the stage sent fresh rounds under its trace id, and no
-listing of its namespaces or of the ports, and its directory's time, read from
-the shell before and after, does not move. Once it is older than the orphan
+listing of its namespaces or of the ports, listings the agent makes in its own
+process too (`dnagent.md` SH18), and its directory's time, read from the shell
+before and after, does not move. Once it is older than the orphan
 grace, the real one, as nothing backdates it, a fresh round reports it as a
 leftover, the agent's log shows its namespaces and the ports listed as many
 times as its age was read, at least once, and the next syncup removes it,

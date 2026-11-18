@@ -1647,11 +1647,11 @@ func TestUnansweredMdListingStopsTheDescent(t *testing.T) {
 
 // TestUnansweredSubsystemListingRemovesNothing pins the same rule on the two
 // listings of subsystems: the sysfs walk of this host's nvme connections and
-// the `ls` of the nvmet configfs tree. Either one that does not answer leaves
-// its part of the snapshot empty, and an empty part is the shape of "nothing
-// here" to the layers that read it — L1 finds no nvmet object above the
-// ns-devs, L5 and L10 no connection — so a pass that went on would run every
-// layer below as though those had gone clean. The fixture is the harshest one
+// the listing of the nvmet configfs tree. Either one that does not answer
+// leaves its part of the snapshot empty, and an empty part is the shape of
+// "nothing here" to the layers that read it — L1 finds no nvmet object above
+// the ns-devs, L5 and L10 no connection — so a pass that went on would run
+// every layer below as though those had gone clean. The fixture is the harshest one
 // again: the cntlr is forgotten, so a pass that did run would tear down
 // everything of the sp it could see. The `dmsetup ls` row holds that listing
 // to the same full list of teardown commands, which
@@ -1663,7 +1663,7 @@ func TestUnansweredSubsystemListingRemovesNothing(t *testing.T) {
 	}{
 		{"dmsetup ls", "dmsetup ls"},
 		{"nvme subsystems", "list " + sysfsNvmeSubsysDir},
-		{"nvmet subsystems", "ls -1 " + agent.NvmetRoot + "/subsystems"},
+		{"nvmet subsystems", "list " + agent.NvmetRoot + "/subsystems"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			srv, node := newTestServer(t)
@@ -1807,7 +1807,7 @@ var cnSweepListings = []struct {
 	{"dmsetup ls", "dmsetup ls"},
 	{"md arrays", "list " + sysfsBlockDir},
 	{"nvme subsystems", "list " + sysfsNvmeSubsysDir},
-	{"nvmet subsystems", "ls -1 " + agent.NvmetRoot + "/subsystems"},
+	{"nvmet subsystems", "list " + agent.NvmetRoot + "/subsystems"},
 }
 
 // TestUnansweredListingStillMovesAnaBeforeThePark pins what a converge still
@@ -2029,7 +2029,7 @@ func TestUnansweredNamespaceListingRemovesNoNamespace(t *testing.T) {
 	node.Reset()
 	// One-shot: the pass's first listing of the subsystem's namespaces is
 	// the sweep's.
-	node.killCmd["ls -1 "+agent.NvmetRoot+"/subsystems/"+testNqn+
+	node.killCmd["list "+agent.NvmetRoot+"/subsystems/"+testNqn+
 		"/namespaces"] = true
 	reply, err := srv.SyncupCntlr(ctx, req)
 	if err != nil {

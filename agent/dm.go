@@ -65,17 +65,37 @@ func dmAttrInfo(attr string) *DmDevInfo {
 }
 
 // Info returns the live state of a dm device, nil when it does not exist, and
-// an error when `dmsetup info` did not answer. The third case is never folded
-// into the second: a killed probe read as "gone" would free the extent record
-// that still backs the device, and the next allocation would hand those
-// extents out twice.
+// an error when `dmsetup info` did not answer or failed otherwise. The third
+// case is never folded into the second: a killed probe, or one that could not
+// reach the driver, read as "gone" would free the extent record that still
+// backs the device, and the next allocation would hand those extents out
+// twice.
 func (d *Dm) Info(ctx context.Context, name string) (*DmDevInfo, error) {
-	stdout, ok, err := d.runProbe(ctx, "dmsetup", "info",
+	stdout, ok, err := d.runInfo(ctx, "info",
 		"--columns", "--noheadings", "-o", "attr", name)
 	if err != nil || !ok {
 		return nil, err
 	}
 	return dmAttrInfo(strings.TrimSpace(stdout)), nil
+}
+
+// runInfo runs one `dmsetup info` of a named device, for Info and InfoDevNo:
+// (stdout, true, nil) when it answered, ("", false, nil) when dmsetup
+// answered that the device does not exist (IsNoDevice, the typed refusal:
+// dnagent.md, OS wrappers — `dm.go`, `nvmet.go`, `nvmehost.go`), and ("",
+// false, err) for anything else (SH15). dmsetup exits 1 both for a device
+// that is not there and for a read that failed, as when it cannot reach the
+// driver, so the exit status alone proves no absence.
+func (d *Dm) runInfo(ctx context.Context, args ...string) (string, bool, error) {
+	stdout, stderr, exitCode, err := d.run(ctx, "dmsetup", args...)
+	if err == nil {
+		return stdout, true, nil
+	}
+	cmdErr := cmdError("dmsetup", args, stdout, stderr, exitCode, err)
+	if IsNoDevice(cmdErr) {
+		return "", false, nil
+	}
+	return "", false, cmdErr
 }
 
 // dmNoDevicesLine is what `dmsetup ls`, and each whole-node form of `dmsetup
@@ -190,15 +210,15 @@ func (d *Dm) ListInfo(ctx context.Context) (*DmInfoListing, error) {
 }
 
 // InfoDevNo is Info with the device's number: one `dmsetup info` of name, in
-// ListInfo's line form. Like Info it returns nil, nil when the device does
-// not exist and an error when the run did not answer. A run that exits 0
-// and does not print the device's line first is an error too, never an
-// absence. A line whose numbers do not parse gives the device with an empty
-// DevNo, as ListInfo does; a caller that needs the number turns that into
-// its own error.
+// ListInfo's line form. Like Info it returns nil, nil when dmsetup answers
+// that the device does not exist and an error for any other failure, a run
+// that did not answer among them. A run that exits 0 and does not print the
+// device's line first is an error too, never an absence. A line whose
+// numbers do not parse gives the device with an empty DevNo, as ListInfo
+// does; a caller that needs the number turns that into its own error.
 func (d *Dm) InfoDevNo(ctx context.Context, name string) (*DmDevInfo, error) {
 	args := dmInfoArgs(name)
-	stdout, ok, err := d.runProbe(ctx, "dmsetup", args...)
+	stdout, ok, err := d.runInfo(ctx, args...)
 	if err != nil || !ok {
 		return nil, err
 	}

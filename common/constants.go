@@ -549,9 +549,9 @@ const (
 	// sibling's, whose request this agent cannot see; only age tells an
 	// abandoned one from one in flight, so a younger one is left alone whatever
 	// it holds and whatever port it is linked to. The age comes first because it
-	// is read in the agent's own process (dnagent.md SH18), while the namespaces
-	// are an `ls`, a child, and the port links an `ls` of the ports directory
-	// and one of each port's links, a child each. So the grace also bounds that
+	// is one read of the directory itself (dnagent.md SH18), while the
+	// namespaces are a listing, and the port links a listing of the ports
+	// directory and one of each port's links. So the grace also bounds that
 	// cost: a live export that reads older than it while it has no namespace — a
 	// removal, a build that slow — costs each agent on the kernel that holds a
 	// side of its sp, save one whose held side claims it, those listings once in
