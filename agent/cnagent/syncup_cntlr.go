@@ -411,6 +411,17 @@ func (s *CnAgentServer) build(
 			}
 			info.GrpIdToMdRaid[gp.grpId] = st.tracker.FromErr(
 				resKeyOf(resKeyGrpFmt, gp.grpId), gp.resName, line, err)
+			// CN12, The identity check: the legs whose add the running
+			// array refused for another identity, and the legs of two
+			// identities the assembly met, each leg row's status and
+			// details kept.
+			markLegRows(st.tracker, info, refusals.otherIdentity,
+				pb.ResReason_RES_REASON_OTHER_IDENTITY)
+			var conflict *identityConflict
+			if errors.As(err, &conflict) {
+				markLegRows(st.tracker, info, conflict.legIds,
+					pb.ResReason_RES_REASON_IDENTITY_UNDECIDED)
+			}
 			if !running {
 				// CN12, The md check: an array the pass left not running
 				// holds no check of this incarnation's.

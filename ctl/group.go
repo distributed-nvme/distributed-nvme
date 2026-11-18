@@ -108,9 +108,10 @@ func groupInspectCmd() *cobra.Command {
 // that repair is created or started, as the gateway's refusal says. --cancel withdraws the group's mark instead of
 // writing one. --force puts the operator's force on the mark: the start goes
 // on from a named leg whose md change count is below that of a full member
-// of the same array the start would zero (cnagent.md CN12), and the mark may
+// of the same array the start would zero, and from a named leg that carries
+// a bad-block list, which the start drops (cnagent.md CN12), and the mark may
 // name a taken-back leg that carries the partial mark (architecture.md,
-// Retired legs). dnvctl checks
+// Retired legs); one force passes all three. dnvctl checks
 // none of the pairings: a --cancel with a non-zero --leg or with --force,
 // and a write with no --leg, are forwarded, and the gateway refuses them
 // (CT8).
@@ -167,8 +168,10 @@ func groupForceStartCmd() *cobra.Command {
 	flags.Bool("force", false,
 		"start even when a member the start overwrites holds a higher md "+
 			"change count of the same array, so newer data, which is lost, "+
-			"or when the named leg is a taken-back leg md once wrote onto "+
-			"(partial)")
+			"when the named leg carries a bad-block list, which the start "+
+			"drops, so md serves the listed regions as written, or when the "+
+			"named leg is a taken-back leg md once wrote onto (partial); one "+
+			"force passes all three")
 	return cmd
 }
 

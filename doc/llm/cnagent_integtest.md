@@ -601,7 +601,10 @@ the host reads the restored copy. Then a bad-block list: the suite writes
 a bad block on the new leg of the third repair, in sync beside leg 1,
 through md's own bad-block file of that member, and md writes it into the
 leg's superblock; at the level that stops group arrays, and
-then the one that builds no thin pool, a mark naming that leg reads its
+then the one that builds no thin pool, a mark naming that leg with no
+force is refused for its list, its row naming the list, with nothing
+zeroed or assembled, and the dry run refuses alike and, with the force,
+names the drop; the same mark with the force reads its
 superblock and its list, zeroes leg 1, starts the array from the leg under
 a new identity, stops it and starts it again with the list dropped, then
 adds leg 1, under one record naming both updates, and the leg's superblock
@@ -612,7 +615,11 @@ moves past leg 1's; with the arrays stopped and leg 1 back, both
 superblocks of one identity, a mark naming leg 1 is refused, the row
 naming the change count, with nothing zeroed or assembled, and the same
 mark with the operator's force zeroes the other leg and starts the array
-from leg 1; the host reads its data unchanged (`cnagent.md` CN12). Then
+from leg 1; the host reads its data unchanged (`cnagent.md` CN12). The marks that name a leg whose bad-block list depends
+on the run — the forced start from the leg that kept the data, and the one
+from the retired leg taken back — read the named leg's list at run time and,
+when it carries one, meet the refusal with no force and go on with the
+force. Then
 the re-assembly, the way the forced-start guide gives an operator: both
 legs' exports to the primary error every IO, and a host write to a region
 it wrote before fails, which leaves the data group's array broken under
@@ -887,7 +894,8 @@ leg, which it keeps whatever the flag says, its wait for a late member and
 its other errors, and of the take-back check, a new leg with no
 superblock, a STARTED repair's add with no member to compare with, a keeper
 whose superblock read finds none and a superblock read that did not answer,
-and the identity check of a `leg_list` member's add, all of
+and the identity check of a `leg_list` member's add with the reasons it
+and an assembly of two identities put on the legs' rows, all of
 which the unit tests cover (CN12); a snapshot torn by a quiesce that fails,
 and a header read that waits or fails, whose rules the unit tests cover
 (CN14); the lingering-clone hold's scope per

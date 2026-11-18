@@ -60,8 +60,11 @@ everything the wiped legs hold that the named leg does not hold.
 - A forced start gives the array a new **identity**. A leg from before it
   keeps the old identity. Change counts can be compared only between legs
   of the same identity.
-- The **force flag** of a mark lets the start go on from a leg whose
-  change count is below that of a leg it wipes.
+- The **force flag** of a mark lets the start go on past three refusals:
+  a named leg whose change count is below that of a leg it wipes, a named
+  leg that carries a bad-block list, which the start drops, and a named
+  leg that a repair took back after md wrote onto it. One flag passes all
+  three, so a flag given for one passes the others too.
 - The **keep flag** of a retired leg keeps the worker from deleting it.
 - The **operator-in-charge flag** of a group is the operator's mark that
   keeps the worker's repairs off the group.
@@ -81,10 +84,13 @@ It also shows the state of the array and the group's retired legs.
 
 The dry run is a forced start that only says what it would do:
 `dnvctl group inspect --grp <group id> --leg <leg id>`. It says which legs
-the start would wipe, and whether it would stop the array first. Or it
-says why the start would refuse, in the same words as the real start. Add
-`--force` to see what a start with the force flag would do. The dry run
-runs nothing.
+the start would wipe, whether it would stop the array first, and its
+update: `uuid`, or `uuid,force-no-bbl` when the start drops the named
+leg's bad-block list. Or it says why the start would refuse, in the same
+words as the real start. Add `--force` to see what a start with the force
+flag would do. The dry run with `--force` shows no refusal the flag
+passes: run it without `--force` first, to see each one. The dry run runs
+nothing.
 
 Tested: the cn agent suite, `integtest/cnagent_test.sh`, repair case,
 stage `forced`. It runs the primary's read and dry run before a real
@@ -143,21 +149,30 @@ Choose the leg with these rules:
    it copied onto is the new leg of the group's latest repair; the legs'
    rows and health epochs, read while the legs were down, show which leg
    died while md copied. If you cannot tell, stop.
-4. A leg of another identity is from before an earlier forced start.
+4. A named leg with a bad-block list is refused unless the mark carries
+   the force flag. The start drops the list, and md then serves the listed
+   regions from what the leg holds there. That is right for the leg md
+   copied from, whose list the array's stop wrote, and wrong for the leg it
+   copied onto. `dnvctl group inspect` shows each leg's list length.
+5. A leg of another identity is from before an earlier forced start.
    Nothing compares it with the others: a mark naming it wipes the legs of
    the current identity, with no refusal and no warning in the dry run.
    Compare it by hand.
-5. The named leg may be dead when you write the mark. The primary then
+6. The named leg may be dead when you write the mark. The primary then
    waits for it and starts from it when it comes back.
-6. The start waits for every other leg it would wipe. A leg that will
+7. The start waits for every other leg it would wipe. A leg that will
    never come back blocks it: see "A forced start that waits".
 
 Safe steps:
 
 1. Do the steps "Before every forced start".
-2. Run the dry run from the leg you chose.
+2. Run the dry run from the leg you chose, without `--force`. When it
+   refuses the named leg for its bad-block list, or as older than a leg it
+   wipes, and you choose to go on (rules 2 to 4), run it again with
+   `--force` and read what it would wipe and drop.
 3. Write the mark:
-   `dnvctl group force-start --grp <group id> --leg <leg id>`.
+   `dnvctl group force-start --grp <group id> --leg <leg id>`, with
+   `--force` only when step 2 needed it.
    The gateway refuses it while the primary reads the group's array
    running. It also refuses it while the primary's report has no row for
    the group, or the primary does not answer. Then try again after a few
@@ -167,10 +182,10 @@ Safe steps:
    the array runs with a member in sync on a leg whose row reads ok.
 5. Read the group again. md is copying onto the other legs. Wait until
    every leg is in sync. Check that no leg shows a bad-block list. If the
-   named leg's list is still there, the start's second run, which drops
-   it, did not happen, and hosts get IO errors over the list's regions.
-   No procedure for this is tested: stop. No such case was seen in the
-   lab.
+   named leg's list is still there after a start with the force flag, the
+   start's second run, which drops it, did not happen, and hosts get IO
+   errors over the list's regions. No procedure for this is tested: stop.
+   No such case was seen in the lab.
 6. Step the level back:
    `dnvctl sp set-level --level READWRITE`, or the level the pool had.
 7. Write to a volume from a host. A thin pool that comes back read-only
@@ -185,9 +200,11 @@ Steps that can lose data:
 - The force flag (`--force`) starts the array from a leg older than a leg
   it wipes. That leg serves and holds newer data, and you choose to give
   that data up. Use it only when the newer data is known to be bad.
-- If two legs have the same change count and you name the wrong one,
-  hosts read the regions md never copied as whatever that leg's disk held,
-  with no error.
+- The force flag also drops the named leg's bad-block list. If two legs
+  have the same change count and you force the wrong one, hosts read the
+  regions md never copied as whatever that leg's disk held, with no
+  error. A flag given for the list also passes an older named leg in the
+  same start, so read the dry run without the flag first.
 - A start from an older copy restores this group alone. The pool's other
   groups keep their newer state, so the pool's volumes can mix old and new
   blocks. A block first written since that copy can read another pool's
@@ -201,8 +218,10 @@ Tested: the cn agent suite, repair case, stages `refuse` (a half-copied
 leg refused, nothing wiped), `forced` (a start from the leg that kept the
 data), `older` and `olderstart` (an older leg refused, then started with
 the force flag), and `badblocks` and `badstart` (the named leg's
-bad-block list dropped). The end-to-end suite, `integtest/e2e_test.sh`,
-react case: its first forced start.
+bad-block list refused with no force flag, nothing wiped, then dropped
+with it). The end-to-end suite, `integtest/e2e_test.sh`, react case: its
+first forced start, which reads the named leg's list length first and,
+when the leg has a list, checks the refusal and then forces.
 
 ### A group whose in-sync leg died during a copy
 
@@ -233,7 +252,8 @@ bad-block lists on both legs, and you can no longer tell the two legs
 apart.
 
 Steps that can lose data: if md has already marked the half-copied leg in
-sync, a mark naming it is not refused. Hosts then read the regions md never
+sync, a mark naming it is refused for its bad-block list only while it
+carries no force flag. With the flag, hosts read the regions md never
 copied as whatever that leg's disk held.
 
 When to stop: the leg that kept the data will never come back. A retired
@@ -414,11 +434,20 @@ failover or restart the group can stay down, its row naming two
 identities.
 
 Confirm: `dnvctl cntlr inspect --id <primary's cntlr id>` shows the
-refusal in the primary's report for the group;
-`dnvctl group inspect --grp <group id>` shows the two identities.
+refusal in the primary's report for the group, and the leg's row there
+carries the reason `RES_REASON_OTHER_IDENTITY` while the array runs and
+the row reads `RES_STATUS_OK`; once
+the group is down with two identities, each leg of either identity carries
+`RES_REASON_IDENTITY_UNDECIDED`, since dnv cannot tell which identity is
+the current one. `dnvctl group inspect --grp <group id>` shows the two
+identities.
 
 What dnv does alone: the primary leaves that leg out, since it may hold
-data the array lacks.
+data the array lacks, and names it by that reason. A repair that replaces
+such a leg, with no health epoch on it, is decided and not yet built:
+while the array runs, the running array tells which leg is the old one;
+once the group is down, that repair will ask for the force flag, since a
+wrong choice serves older data and loses the writes made since.
 
 Safe steps: none is tested. While the array runs, the gateway refuses a
 mark, and a repair whose bad leg is that leg is refused while the leg

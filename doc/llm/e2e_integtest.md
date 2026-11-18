@@ -863,9 +863,17 @@ row of the group (`architecture.md`, Repairs), must leave a mark that `sp get`
 shows, and the primary must stop the array that does not run while that leg is
 still dead, which leaves that leg's superblock as md last wrote it, with no
 record of the regions md could not copy (`cnagent.md`, Known limits); once the
-leg is back, the primary's own log must show the other leg's superblock zeroed,
-the array assembled from the named leg alone and the agent's record that the
-array started, and after that record the zeroed leg added back as a new member,
+leg is back, the named leg's bad-block list is read from `group inspect`, as
+whether md wrote one depends on the run: when the leg carries one, the dry
+run with no force must refuse it, the one with the force must name the drop,
+and the mark is written again with the force (`cnagent.md` CN12); the
+second forced start reads its named leg's list the same way before its mark.
+Then the primary's own log must show the other leg's superblock zeroed,
+the array assembled from the named leg alone — with the new identity's
+update, and when the record names the list's drop too, assembled once more
+with that update after a stop of the array the first assemble started, as
+mdadm takes one update a run — and the agent's record that the array
+started, and after that record the zeroed leg added back as a new member,
 which md copies whole (`cnagent.md` CN12); the worker must clear the mark from
 the primary's report once the start is done (`dnv-worker.md` AR13), and host0
 must read both namespaces' data unchanged. For the second, host0 writes new

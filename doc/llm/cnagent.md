@@ -1419,7 +1419,13 @@ dm-clone (CN18).
      open repair's new legs, then the repair's bad leg, at any stage of the
      repair, an ABORTED one's included. A member of another identity is
      not handed to mdadm. Two identities inside that first set are the
-     group's error, which no read names: the operator ends it with a
+     group's error, which no read names, and every leg of that set that
+     carries a superblock reads `RES_REASON_IDENTITY_UNDECIDED` on its row,
+     the row's status and details kept, on the converge whose assembly
+     meets them and on a read of the absent array (`absentArrayNamed`): the
+     agent cannot decide which identity is current, and a repair create
+     that would replace such a leg must ask for the force (Known limits).
+     The operator ends it with a
      forced start, which names the leg to start from, or with a repair
      whose bad leg is the leg of the identity not wanted, which moves that
      leg to the last set and keeps its data at the finish, once that leg
@@ -1839,7 +1845,18 @@ dm-clone (CN18).
   superblock read that failed, or an identity that did not read, is the
   group's error for the pass, as a failed add is. A refused member is named
   in the group's reading (`GrpInfo.refusal`, CN28), a text for people, and
-  the read's verdict does not name it (CN30), so no syncup comes for it on
+  its leg's row, while it reads `OK`, reads `RES_REASON_OTHER_IDENTITY` on
+  both channels, the row's status and details kept, the probe's
+  (`markLegRows`), on a converge whose reconciliation then fails too, or
+  whose read of the array after its member changes does not answer: the
+  running array tells which identity is current, and wave 7's repair
+  create reads the reason in the primary's report. A row that does not
+  read `OK` carries no reason, since a read makes the check only for a leg
+  whose row reads `OK` and that serves (`putBackNames`), and a converge
+  that a failed command or superblock read stops before it checks a leg
+  leaves that leg's row unmarked for the pass, where a read checks the
+  legs after the one whose read failed. No health rule moves, and the read's
+  verdict does not name it (CN30), so no syncup comes for it on
   every round. It stays out while the array runs: the gateway refuses a
   forced-start mark while the primary reads the array running, and
   `CreateRepair` refuses a bad leg with no health epoch, which a leg that
@@ -2162,6 +2179,17 @@ dm-clone (CN18).
      writes a copy position on a member it was copying onto, so a
      half-copied leg is refused here, and md starts no array from one alone
      anyway; and a read that fails is no answer, never "no superblock".
+     The read must also show no bad-block list, unless the mark carries the
+     operator's force (`ForcedStart.force`, `badBlocksRefusal`): the row
+     then names the leg and the list's length and says the force goes on,
+     and nothing is zeroed. Reason: the start drops the list (step 5), and
+     md then serves the regions it listed from what the leg holds there; on
+     a half-copied leg that md marked in sync by mistake (Known limits)
+     those are regions it never copied, another pool's bytes among them, so
+     the drop is the operator's choice, which `InspectGrp`'s list length per
+     member and the dry run's update show first. One force passes this
+     refusal, step 3's and a mark that names a taken-back leg with the
+     partial mark alike (`architecture.md`, Repair, Forced start).
   3. Every other member the forced start keeps, the open repair's bad leg
      excepted, is available this pass and its superblock read answers, each read
      before step 4 zeroes any; otherwise the row names the first that is
@@ -5141,12 +5169,13 @@ its details and the converge pass continues with the remaining resources.
 Two things qualify that. The details are for people: where the worker must
 tell one cause of a row's status from another, the row says so in its reason
 (`architecture.md`, Live-state reporting), never in the text. The cn agent
-sets eight reasons: CN14's lost thin id, from the command wrapper's typed
+sets ten reasons: CN14's lost thin id, from the command wrapper's typed
 error (`dnagent.md`, OS wrappers — `dm.go`, `nvmet.go`, `nvmehost.go`);
 CN14's thin id not adopted, from the thin create's typed refusal and the
 pool's header read; and,
 from its own pass's state, CN19's level, from the level the pass's plan
-reads, CN18's source fault, which marks the clone rows this node keeps
+reads, CN12's other identity and undecided identity, on a leg's row, from
+its pass's identity check and assembly, CN18's source fault, which marks the clone rows this node keeps
 missing because it does not read the clone's source as ready, from step 1's
 reading of the source, CN28's differs, on a namespace whose ANA group
 differs and on a thin pool short of its metadata device or holding a
@@ -5942,14 +5971,17 @@ stores instead is CN23's.
   Lab facts). The forced start's superblock read then takes it for a full
   member, and the leg that kept the data carries a bad-block list too, as
   the stop writes one onto it, both with the same change count. The forced
-  start drops the named leg's list (CN12). That is right for the leg that
-  kept the data. When the mark names the new leg instead, the array serves
-  the regions md never copied onto it as whatever that leg held there,
-  with no error. The leg md copied from holds the data, not the new leg it
-  copied onto, and only the operator can tell them apart. A mark written
-  while the leg that kept the data is still dead avoids the case: the
-  forced start then stops the broken array before that leg is back, waits
-  for it, and starts from it once it is back (CN12, the forced start).
+  start refuses a named leg with a list unless the mark carries the force,
+  and with it drops the list (CN12). That is right for the leg that kept
+  the data. When the mark names the new leg with the force, the array
+  serves the regions md never copied onto it as whatever that leg held
+  there, with no error. The leg md copied from holds the data, not the new
+  leg it copied onto, and only the operator can tell them apart; the force
+  is their choice, which the list's length per member in `InspectGrp`
+  shows first. A mark written while the leg that kept the data is still
+  dead avoids the case: the forced start then stops the broken array before
+  that leg is back, waits for it, and starts from it once it is back (CN12,
+  the forced start).
 * A stop between the two runs of a forced assembly that fails leaves the
   array running from the named leg under its new identity with the leg's
   bad-block list (CN12, the forced start): the pass ends in the group's
@@ -5963,11 +5995,16 @@ stores instead is CN23's.
   assembly carry two identities stays down at its next assembly (CN12,
   case 2): a leg the forced start left as it was, the bad leg of a repair
   since cancelled among them, whose add the identity check refused while
-  the array ran. The group's row reads `ERROR` naming both, on every
-  primary, until the operator acts: a forced start from the leg wanted, or
-  a repair whose bad leg is the leg of the identity not wanted, which
-  `CreateRepair` refuses while that leg has no health epoch, as a leg that
-  serves and passes its probe does not.
+  the array ran, its row reading `RES_REASON_OTHER_IDENTITY`. The group's
+  row reads `ERROR` naming both, on every primary, and each such leg's row
+  reads `RES_REASON_IDENTITY_UNDECIDED`, since the agent cannot tell which
+  identity is current, until the operator acts: a forced start from the
+  leg wanted, or a repair whose bad leg is the leg of the identity not
+  wanted, which `CreateRepair` refuses while that leg has no health epoch,
+  as a leg that serves and passes its probe does not. A repair that would
+  take such a leg must ask for the force: once the wrong leg is repaired
+  away, the array assembles from the other, hosts read its older data and
+  write onto it, and going back loses those writes.
 * A park whose load fails can wedge the cntlr: a reload fails closed
   (CN16) and P0 only logs a park that fails (CN21), so an unwanted ns-dev
   that was still serving stays dm-suspended on its old table while L1

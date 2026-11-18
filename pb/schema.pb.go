@@ -275,21 +275,42 @@ const (
 	// row (CN30), and the worker's shared-state class reads it for a td
 	// created or not, so no failover follows it (dnv-worker.md HL2).
 	ResReason_RES_REASON_THIN_ID_NOT_ADOPTED ResReason = 9
+	// A leg of the group's leg_list that the primary does not add to the
+	// group's running array, because its md superblock carries another
+	// identity than the array's (cnagent.md CN12). The cn agent sets it on
+	// both channels, on the leg's row while that row reads RES_STATUS_OK,
+	// its status and details kept; the running array tells which identity
+	// is current, so
+	// wave 7's repair create may take such a leg with no force. No health
+	// rule reads it, and the verdict does not name the row.
+	ResReason_RES_REASON_OTHER_IDENTITY ResReason = 10
+	// A leg of the group whose md superblock carries one of two identities
+	// the legs of its first tier carry while no array of the group runs, so
+	// the assembly is refused and the agent cannot decide which identity is
+	// current (cnagent.md CN12). The cn agent sets it on the row of every
+	// such leg, on a converge whose assembly meets the two and on a read of
+	// the absent array, the row's status and details kept; the group's row
+	// names both identities. A repair create that would replace such a leg
+	// must ask for the force. No health rule reads it, and the verdict does
+	// not name the row.
+	ResReason_RES_REASON_IDENTITY_UNDECIDED ResReason = 11
 )
 
 // Enum value maps for ResReason.
 var (
 	ResReason_name = map[int32]string{
-		0: "RES_REASON_NONE",
-		1: "RES_REASON_THIN_ID_LOST",
-		2: "RES_REASON_AWAITING_CUTOVER",
-		3: "RES_REASON_SP_LEVEL",
-		4: "RES_REASON_SOURCE_FAULT",
-		5: "RES_REASON_DIFFERS",
-		6: "RES_REASON_PARKED",
-		7: "RES_REASON_POOL_NEEDS_CHECK",
-		8: "RES_REASON_POOL_FAILED",
-		9: "RES_REASON_THIN_ID_NOT_ADOPTED",
+		0:  "RES_REASON_NONE",
+		1:  "RES_REASON_THIN_ID_LOST",
+		2:  "RES_REASON_AWAITING_CUTOVER",
+		3:  "RES_REASON_SP_LEVEL",
+		4:  "RES_REASON_SOURCE_FAULT",
+		5:  "RES_REASON_DIFFERS",
+		6:  "RES_REASON_PARKED",
+		7:  "RES_REASON_POOL_NEEDS_CHECK",
+		8:  "RES_REASON_POOL_FAILED",
+		9:  "RES_REASON_THIN_ID_NOT_ADOPTED",
+		10: "RES_REASON_OTHER_IDENTITY",
+		11: "RES_REASON_IDENTITY_UNDECIDED",
 	}
 	ResReason_value = map[string]int32{
 		"RES_REASON_NONE":                0,
@@ -302,6 +323,8 @@ var (
 		"RES_REASON_POOL_NEEDS_CHECK":    7,
 		"RES_REASON_POOL_FAILED":         8,
 		"RES_REASON_THIN_ID_NOT_ADOPTED": 9,
+		"RES_REASON_OTHER_IDENTITY":      10,
+		"RES_REASON_IDENTITY_UNDECIDED":  11,
 	}
 )
 
@@ -1777,9 +1800,11 @@ type ForcedStart struct {
 	Revision uint64                 `protobuf:"varint,2,opt,name=revision,proto3" json:"revision,omitempty"`
 	// The operator's force (ForceStartGroupRequest.force): the start goes on
 	// from a named leg whose md change count is below that of a full member
-	// of the same identity the start would zero (cnagent.md CN12), and the
-	// mark may name a taken-back leg that carries the partial mark
-	// (Repair.new_leg_id_to_partial). Appended, never renumbered.
+	// of the same identity the start would zero, and from a named leg that
+	// carries a bad-block list, which the start drops (cnagent.md CN12), and
+	// the mark may name a taken-back leg that carries the partial mark
+	// (Repair.new_leg_id_to_partial). One force passes all three. Appended,
+	// never renumbered.
 	Force         bool `protobuf:"varint,3,opt,name=force,proto3" json:"force,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
@@ -12833,9 +12858,10 @@ type ForceStartGroupRequest struct {
 	// Withdraw the group's mark instead of writing one.
 	Cancel bool `protobuf:"varint,6,opt,name=cancel,proto3" json:"cancel,omitempty"`
 	// Start from the named leg even when a full member the start would zero
-	// holds a higher md change count of the same identity, or the leg is a
-	// taken-back leg that carries the partial mark (ForcedStart.force);
-	// false with cancel. Appended, never renumbered.
+	// holds a higher md change count of the same identity, when the leg
+	// carries a bad-block list, which the start drops, or when the leg is a
+	// taken-back leg that carries the partial mark (ForcedStart.force); one
+	// force passes all three; false with cancel. Appended, never renumbered.
 	Force         bool `protobuf:"varint,7,opt,name=force,proto3" json:"force,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
@@ -19270,7 +19296,7 @@ const file_pb_schema_proto_rawDesc = "" +
 	"\x10RES_STATUS_ERROR\x10\x02\x12\x11\n" +
 	"\rRES_STATUS_OK\x10\x03\x12\x1b\n" +
 	"\x17RES_STATUS_PROVISIONING\x10\x04\x12\x16\n" +
-	"\x12RES_STATUS_PENDING\x10\x05*\xa4\x02\n" +
+	"\x12RES_STATUS_PENDING\x10\x05*\xe6\x02\n" +
 	"\tResReason\x12\x13\n" +
 	"\x0fRES_REASON_NONE\x10\x00\x12\x1b\n" +
 	"\x17RES_REASON_THIN_ID_LOST\x10\x01\x12\x1f\n" +
@@ -19281,7 +19307,10 @@ const file_pb_schema_proto_rawDesc = "" +
 	"\x11RES_REASON_PARKED\x10\x06\x12\x1f\n" +
 	"\x1bRES_REASON_POOL_NEEDS_CHECK\x10\a\x12\x1a\n" +
 	"\x16RES_REASON_POOL_FAILED\x10\b\x12\"\n" +
-	"\x1eRES_REASON_THIN_ID_NOT_ADOPTED\x10\t*O\n" +
+	"\x1eRES_REASON_THIN_ID_NOT_ADOPTED\x10\t\x12\x1d\n" +
+	"\x19RES_REASON_OTHER_IDENTITY\x10\n" +
+	"\x12!\n" +
+	"\x1dRES_REASON_IDENTITY_UNDECIDED\x10\v*O\n" +
 	"\bRepStage\x12\x15\n" +
 	"\x11REP_STAGE_CREATED\x10\x00\x12\x15\n" +
 	"\x11REP_STAGE_STARTED\x10\x01\x12\x15\n" +

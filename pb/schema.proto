@@ -225,9 +225,11 @@ message ForcedStart {
     uint64 revision = 2;
     // The operator's force (ForceStartGroupRequest.force): the start goes on
     // from a named leg whose md change count is below that of a full member
-    // of the same identity the start would zero (cnagent.md CN12), and the
-    // mark may name a taken-back leg that carries the partial mark
-    // (Repair.new_leg_id_to_partial). Appended, never renumbered.
+    // of the same identity the start would zero, and from a named leg that
+    // carries a bad-block list, which the start drops (cnagent.md CN12), and
+    // the mark may name a taken-back leg that carries the partial mark
+    // (Repair.new_leg_id_to_partial). One force passes all three. Appended,
+    // never renumbered.
     bool force = 3;
 }
 
@@ -388,6 +390,25 @@ enum ResReason {
     // row (CN30), and the worker's shared-state class reads it for a td
     // created or not, so no failover follows it (dnv-worker.md HL2).
     RES_REASON_THIN_ID_NOT_ADOPTED = 9;
+    // A leg of the group's leg_list that the primary does not add to the
+    // group's running array, because its md superblock carries another
+    // identity than the array's (cnagent.md CN12). The cn agent sets it on
+    // both channels, on the leg's row while that row reads RES_STATUS_OK,
+    // its status and details kept; the running array tells which identity
+    // is current, so
+    // wave 7's repair create may take such a leg with no force. No health
+    // rule reads it, and the verdict does not name the row.
+    RES_REASON_OTHER_IDENTITY = 10;
+    // A leg of the group whose md superblock carries one of two identities
+    // the legs of its first tier carry while no array of the group runs, so
+    // the assembly is refused and the agent cannot decide which identity is
+    // current (cnagent.md CN12). The cn agent sets it on the row of every
+    // such leg, on a converge whose assembly meets the two and on a read of
+    // the absent array, the row's status and details kept; the group's row
+    // names both identities. A repair create that would replace such a leg
+    // must ask for the force. No health rule reads it, and the verdict does
+    // not name the row.
+    RES_REASON_IDENTITY_UNDECIDED = 11;
 }
 
 message ResInfo {
@@ -1900,9 +1921,10 @@ message ForceStartGroupRequest {
     // Withdraw the group's mark instead of writing one.
     bool cancel = 6;
     // Start from the named leg even when a full member the start would zero
-    // holds a higher md change count of the same identity, or the leg is a
-    // taken-back leg that carries the partial mark (ForcedStart.force);
-    // false with cancel. Appended, never renumbered.
+    // holds a higher md change count of the same identity, when the leg
+    // carries a bad-block list, which the start drops, or when the leg is a
+    // taken-back leg that carries the partial mark (ForcedStart.force); one
+    // force passes all three; false with cancel. Appended, never renumbered.
     bool force = 7;
 }
 

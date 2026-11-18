@@ -5704,6 +5704,33 @@ mark_set() { # file [leg [force]]
 	req_set "$1" "$grp.forced_start = {\"leg_id\": \"$(d16 "$2")\", \"revision\": \"$(($("$JQ" -r .revision "$1") + 1))\", \"force\": $force}"
 }
 
+# leg_bbl <cnidx> <sp> <cntlr> <leg> — the length of the bad-block list the
+# primary reads on one leg of the case's data group (InspectGrp, cnagent.md
+# CN31), 0 for none. md writes such a list depending on a run's timing, so
+# the stages that write a forced-start mark read it at run time: a named leg
+# that carries one is refused with no force (cnagent.md CN12).
+leg_bbl() {
+	local out
+	out=$(cnctl "$1" inspect-grp --sp "$2" --cntlr "$3" --grp "$A_DGRP") ||
+		return 1
+	jq_of "$out" "[.member_list[]? | select(.leg_id == \"$(d16 "$4")\")
+		| (.bad_blocks // 0)][0] // 0"
+}
+
+# refused_for_list <json> — whether a reply's data group row reads the
+# forced start's refusal of a named leg with a bad-block list (cnagent.md
+# CN12).
+refused_for_list() {
+	local key
+	key=$(d16 "$A_DGRP")
+	[ "$(jq_of "$1" ".cntlr_info.grp_id_to_md_raid[\"$key\"].status // \"\"")" = \
+		RES_STATUS_ERROR ] &&
+		case "$(jq_of "$1" ".cntlr_info.grp_id_to_md_raid[\"$key\"].details // \"\"")" in
+		*"carries a bad-block list"*) true ;;
+		*) false ;;
+		esac
+}
+
 # grp_acted prints the revision a reply's reading of one group names as the
 # forced-start mark the primary acted on, 0 for none or no reading
 # (cnagent.md CN28).
@@ -5731,7 +5758,7 @@ repair_forced_start() {
 	local zleg=0x17 zside=0x18 zrep=0x19 vrep=0x1a trep=0x1b
 	local out seq f md2dev md2name yname zname oname l2name ylin st exz exy
 	local exo uuy uuo rec deadline refusal old0 newx mrd forced held
-	local oline exo2 exz2 bb uuz frozen
+	local oline exo2 exz2 bb uuz frozen bbl ymark
 	md2dev=$(jq_of "$md2" .dev_path)
 	md2name=$(jq_of "$md2" .array_name)
 	yname=$(cn_dm_name c9 2 "$sp" "$yleg")
@@ -5919,16 +5946,38 @@ repair_forced_start() {
 	leg_wait_not_error 2 "$sp" "$c2" "$yleg" 30 "repair forced: Y's probe"
 	# The inspect and its dry run (cnagent.md CN31) say what the
 	# start below does, running no mdadm command: Z zeroed under the uuid
-	# update. Y's read matches md's own examine of it.
+	# update. Y's read matches md's own examine of it. Y written back while
+	# still dead carries no bad-block list by the case's design; one that
+	# carries a list all the same is refused with no force (cnagent.md
+	# CN12), which the dry run shows first, and the mark then carries the
+	# force, the choice read at run time.
+	bbl=$(leg_bbl 2 "$sp" "$c2" "$yleg") ||
+		die "repair forced: reading Y's bad-block list failed"
+	log "  Y's bad-block list: $bbl entries"
 	out=$(cnctl 2 inspect-grp --sp "$sp" --cntlr "$c2" --grp "$A_DGRP" \
 		--leg "$yleg")
 	log "  the inspect: $out"
+	ymark=""
+	if [ "$bbl" -gt 0 ]; then
+		case "$(jq_of "$out" '.dry_run.refusal // ""')" in
+		*"carries a bad-block list"*) ;;
+		*) die "repair forced: the dry run with no force does not refuse Y's list" ;;
+		esac
+		out=$(cnctl 2 inspect-grp --sp "$sp" --cntlr "$c2" --grp "$A_DGRP" \
+			--leg "$yleg" --force)
+		ymark=force
+	fi
 	assert_eq "$(jq_of "$out" '.dry_run.refusal // ""')" "" \
 		"repair forced: the dry run's refusal"
 	assert_eq "$(jq_of "$out" '(.dry_run.zero_leg_id_list // []) | join(",")')" \
 		"$(d16 "$zleg")" "repair forced: the dry run's zeroed legs"
-	assert_eq "$(jq_of "$out" '.dry_run.update // ""')" uuid \
-		"repair forced: the dry run's update"
+	if [ "$bbl" -gt 0 ]; then
+		assert_eq "$(jq_of "$out" '.dry_run.update // ""')" uuid,force-no-bbl \
+			"repair forced: the dry run's update"
+	else
+		assert_eq "$(jq_of "$out" '.dry_run.update // ""')" uuid \
+			"repair forced: the dry run's update"
+	fi
 	uuy=${exy#* uuid=}
 	uuy=${uuy%% *}
 	assert_eq "$(jq_of "$out" "[.member_list[] | select(.leg_id == \"$(d16 "$yleg")\")
@@ -5937,7 +5986,7 @@ repair_forced_start() {
 	seq=$(helper 2 "cn_events $TRACE")
 	assert_eq "$(event_cnt "$seq" '^mdadm ')" 0 \
 		"repair forced: mdadm commands of the inspect"
-	for f in "$req1" "$req2"; do mark_set "$f" "$yleg"; done
+	for f in "$req1" "$req2"; do mark_set "$f" "$yleg" $ymark; done
 	bump_cn_rev 2
 	rev2=${CNREV[2]}
 	out=$(cn_syncup_cntlr 2 "$req2")
@@ -6036,6 +6085,21 @@ repair_forced_start() {
 	bump_cn_rev 2
 	rev2=${CNREV[2]}
 	out=$(cn_syncup_cntlr 2 "$req2")
+	# O may carry a bad-block list from its time in the array; the start
+	# then refuses it with no force and zeroes nothing, and the mark goes
+	# again with the force (cnagent.md CN12), the choice read at run time.
+	if refused_for_list "$out"; then
+		log "  O carries a bad-block list: the start refused, then forced"
+		seq=$(helper 2 "cn_events $TRACE")
+		assert_eq "$(event_cnt "$seq" '^mdadm --zero-superblock ')" 0 \
+			"repair restore: superblocks zeroed by the refused start"
+		for f in "$req1" "$req2"; do
+			mark_set "$f" "${A_DLEG[1]}" force
+		done
+		bump_cn_rev 2
+		rev2=${CNREV[2]}
+		out=$(cn_syncup_cntlr 2 "$req2")
+	fi
 	assert_map_ok "$out" grp_id_to_md_raid "$A_DGRP" "repair restore: the start from O"
 	seq=$(helper 2 "cn_events $TRACE")
 	assert_before "$seq" "^mdadm --zero-superblock /dev/mapper/$zname\$" \
@@ -6192,7 +6256,7 @@ repair_forced_start() {
 	# Z starts the array from it under a new identity, a start that keeps the
 	# list, so the forced start stops it and starts it again with the list
 	# dropped (cnagent.md CN12, the forced start). O and Z carry the same
-	# change count, so the start needs no force.
+	# change count, so only Z's list asks for the force (badstart).
 	bb=$(helper 2 "md_bad_block_add $zname 4096 8") ||
 		die "repair badblocks: recording a bad block on Z failed: $bb"
 	log "  Z's bad blocks in md: $bb"
@@ -6229,12 +6293,37 @@ repair_forced_start() {
 	*" bbl=0 "*) die "repair badblocks: the stop dropped Z's list: $exz" ;;
 	esac
 
-	stage badstart "the forced start from the leg with the list drops it"
+	stage badstart "the forced start from the leg with the list is refused, then forced, and drops it"
 	# Under a trace of its own, so that the counts and the order below read
-	# the forced start's converge alone, never the stop the level made.
+	# the forced start's converges alone, never the stop the level made.
+	# With no force the start refuses Z for its list and zeroes nothing,
+	# and the dry run says so; with the force it goes on (cnagent.md CN12).
 	for f in "$req1" "$req2"; do
 		mark_set "$f" "$zleg"
 		req_set "$f" '.sp_level = "SP_LEVEL_NO_THINPOOL"'
+	done
+	bump_cn_rev 2
+	rev2=${CNREV[2]}
+	out=$(cn_syncup_cntlr 2 "$req2")
+	assert_map_status "$out" grp_id_to_md_raid "$A_DGRP" RES_STATUS_ERROR \
+		"carries a bad-block list" "repair badblocks: the refusal"
+	seq=$(helper 2 "cn_events $TRACE")
+	assert_eq "$(event_cnt "$seq" '^mdadm --zero-superblock ')" 0 \
+		"repair badblocks: superblocks zeroed by the refused start"
+	assert_eq "$(event_cnt "$seq" "^mdadm --assemble $md2dev ")" 0 \
+		"repair badblocks: assemblies of the data array by the refused start"
+	out=$(cnctl 2 inspect-grp --sp "$sp" --cntlr "$c2" --grp "$A_DGRP" \
+		--leg "$zleg")
+	case "$(jq_of "$out" '.dry_run.refusal // ""')" in
+	*"carries a bad-block list"*) ;;
+	*) die "repair badblocks: the dry run with no force does not refuse Z" ;;
+	esac
+	out=$(cnctl 2 inspect-grp --sp "$sp" --cntlr "$c2" --grp "$A_DGRP" \
+		--leg "$zleg" --force)
+	assert_eq "$(jq_of "$out" '.dry_run.update // ""')" uuid,force-no-bbl \
+		"repair badblocks: the dry run with the force"
+	for f in "$req1" "$req2"; do
+		mark_set "$f" "$zleg" force
 	done
 	bump_cn_rev 2
 	rev2=${CNREV[2]}

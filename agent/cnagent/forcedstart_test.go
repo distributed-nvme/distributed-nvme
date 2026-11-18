@@ -1306,7 +1306,8 @@ func TestForcedStartZeroEndsThePass(t *testing.T) {
 // read names the forced start (forcedStartNamed), runs the first form
 // again. Both runs failing is the group's error with both outputs; a run
 // killed after the kernel started the array, of either form, is taken as
-// started.
+// started. The mark carries the force, which a named leg with a list needs
+// (badBlocksRefusal).
 func TestForcedStartFallsBackToForceNoBbl(t *testing.T) {
 	// refused scripts the named leg's bad-block log the kernel refuses.
 	refused := func(f *repFix) {
@@ -1327,7 +1328,7 @@ func TestForcedStartFallsBackToForceNoBbl(t *testing.T) {
 		oldUuid := f.legUuid(f.leg2)
 		refused(f)
 		logs := captureLogs(t)
-		info := f.syncup(t, withMark(noRepairReq(4), testDataLeg2))
+		info := f.syncup(t, withForcedMark(noRepairReq(4), testDataLeg2))
 		assertOrder(t, f.node,
 			examineOf(f.leg2),
 			zeroOf(f.leg1),
@@ -1345,7 +1346,7 @@ func TestForcedStartFallsBackToForceNoBbl(t *testing.T) {
 		f := downNoRepair(t)
 		refused(f)
 		leaves(f)
-		info := f.syncup(t, withMark(noRepairReq(4), testDataLeg2))
+		info := f.syncup(t, withForcedMark(noRepairReq(4), testDataLeg2))
 		stops := f.node.callsMatching("cmd mdadm --stop ")
 		if len(stops) != 1 {
 			t.Fatalf("stops %v, want the one of what the refused run left",
@@ -1368,7 +1369,7 @@ func TestForcedStartFallsBackToForceNoBbl(t *testing.T) {
 			"mdadm: Cannot get exclusive access"
 		f.node.mu.Unlock()
 		logs := captureLogs(t)
-		info := f.syncup(t, withMark(noRepairReq(4), testDataLeg2))
+		info := f.syncup(t, withForcedMark(noRepairReq(4), testDataLeg2))
 		row := info.GetGrpIdToMdRaid()[testDataGrp]
 		assertErrorDetails(t, row, "--update="+mdUpdateUuid, "grp data")
 		assertErrorDetails(t, row, "Cannot get exclusive access", "grp data")
@@ -1385,7 +1386,7 @@ func TestForcedStartFallsBackToForceNoBbl(t *testing.T) {
 		f := downNoRepair(t)
 		refused(f)
 		leaves(f, "/dev/sdb1")
-		info := f.syncup(t, withMark(noRepairReq(4), testDataLeg2))
+		info := f.syncup(t, withForcedMark(noRepairReq(4), testDataLeg2))
 		assertErrorDetails(t, info.GetGrpIdToMdRaid()[testDataGrp],
 			"holds a foreign member", "grp data")
 		assertNoCall(t, f.node, "cmd mdadm --stop ")
@@ -1397,7 +1398,7 @@ func TestForcedStartFallsBackToForceNoBbl(t *testing.T) {
 		refused(f)
 		leaves(f, "/dev/mapper/"+names(f.srv).DnLinearName(
 			testCluster, 0xd1, testSp, 0x51, testCn))
-		info := f.syncup(t, withMark(noRepairReq(4), testDataLeg2))
+		info := f.syncup(t, withForcedMark(noRepairReq(4), testDataLeg2))
 		assertErrorDetails(t, info.GetGrpIdToMdRaid()[testDataGrp],
 			"which is no leg of this sp", "grp data")
 		assertNoCall(t, f.node, "cmd mdadm --stop ")
@@ -1412,7 +1413,7 @@ func TestForcedStartFallsBackToForceNoBbl(t *testing.T) {
 			"mdadm: cannot open " + f.leg2 + ": Device or resource busy"
 		f.node.mu.Unlock()
 		logs := captureLogs(t)
-		info := f.syncup(t, withMark(quietReq(4), testDataLeg2))
+		info := f.syncup(t, withForcedMark(quietReq(4), testDataLeg2))
 		assertErrorDetails(t, info.GetGrpIdToMdRaid()[testDataGrp],
 			"--update="+mdUpdateUuid, "grp data")
 		assertOrder(t, f.node,
@@ -1426,7 +1427,7 @@ func TestForcedStartFallsBackToForceNoBbl(t *testing.T) {
 			t.Fatalf("%d forced start records for a start that failed", n)
 		}
 		f.node.Reset()
-		f.forcedStartResent(t, withMark(quietReq(4), testDataLeg2),
+		f.forcedStartResent(t, withForcedMark(quietReq(4), testDataLeg2),
 			testDataLeg2, "named")
 		assertOrder(t, f.node,
 			zeroOf(f.leg1),
@@ -1445,7 +1446,7 @@ func TestForcedStartFallsBackToForceNoBbl(t *testing.T) {
 			"mdadm: Not enough devices to start the array."
 		f.node.mu.Unlock()
 		logs := captureLogs(t)
-		info := f.syncup(t, withMark(noRepairReq(4), testDataLeg2))
+		info := f.syncup(t, withForcedMark(noRepairReq(4), testDataLeg2))
 		row := info.GetGrpIdToMdRaid()[testDataGrp]
 		assertErrorDetails(t, row, "--update="+mdUpdateUuid, "grp data")
 		assertErrorDetails(t, row, "--update="+mdUpdateForceNoBbl,
@@ -1461,7 +1462,7 @@ func TestForcedStartFallsBackToForceNoBbl(t *testing.T) {
 		f.node.killCmd["--update="+mdUpdateUuid] = true
 		f.node.mu.Unlock()
 		logs := captureLogs(t)
-		info := f.syncup(t, withMark(noRepairReq(4), testDataLeg2))
+		info := f.syncup(t, withForcedMark(noRepairReq(4), testDataLeg2))
 		assertNoCall(t, f.node, "--update="+mdUpdateForceNoBbl)
 		assertOk(t, info.GetGrpIdToMdRaid()[testDataGrp], "grp data")
 		assertForcedRecord(t, logs, testDataLeg2, mdUpdateUuid, testDataLeg)
@@ -1474,7 +1475,7 @@ func TestForcedStartFallsBackToForceNoBbl(t *testing.T) {
 		f.node.killCmd["--update="+mdUpdateForceNoBbl] = true
 		f.node.mu.Unlock()
 		logs := captureLogs(t)
-		info := f.syncup(t, withMark(noRepairReq(4), testDataLeg2))
+		info := f.syncup(t, withForcedMark(noRepairReq(4), testDataLeg2))
 		assertOrder(t, f.node,
 			f.forced(f.leg2, mdUpdateForceNoBbl),
 			f.add(f.leg1))

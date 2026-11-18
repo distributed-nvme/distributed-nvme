@@ -417,17 +417,18 @@ The entries:
   copied onto in sync, with the regions it never copied in that leg's
   bad-block list, when the leg that died comes back before the broken array
   is stopped. The leg that died gets a bad-block list too. The forced
-  start drops the named leg's list, which is right for the leg that died.
-  When the mark names the half-copied leg instead, hosts read, over the
-  regions md never copied, whatever that leg's disk held there, possibly
-  another pool's bytes, with no error. Both legs show the same change
-  count. State: fix decided, the forced start refuses a named leg that
-  carries a bad-block list unless the mark carries the force flag; until
-  then, procedure written,
+  start refuses a named leg that carries a bad-block list unless the mark
+  carries the force flag, and with the flag drops the list, which is right
+  for the leg that died. When a forced mark names the half-copied leg
+  instead, hosts read, over the regions md never copied, whatever that
+  leg's disk held there, possibly another pool's bytes, with no error. Both
+  legs show the same change count. One force flag also passes the forced
+  start's other refusals in the same start. State: accepted, the force is
+  the operator's choice; procedure written,
   [the forced-start guide](operations.md#the-forced-start-guide): name the
   leg md copied from, not the new leg it copied onto; `dnvctl group
-  inspect` shows each leg's bad-block count and md's view of it. Seen in
-  the lab.
+  inspect` shows each leg's bad-block count and md's view of it, and its
+  dry run without the flag shows the refusal. Seen in the lab.
 - **A failed stop during a forced start keeps a bad-block list.** When the
   named leg carries a bad-block list, the forced start starts the array,
   stops it at once, and starts it again with the list dropped. If that stop
@@ -822,11 +823,16 @@ Measured times are in [the introduction](introduction.md#status-and-limits-of-01
   assembly, as after a failover or a restart, finds legs of two identities
   and leaves the group down, its row in error. A repair that would keep
   that leg's data is refused while the leg reads healthy, which it does,
-  and a forced start from the leg wanted wipes it. State: fix decided, the
-  primary's report names the leg's identity refusal, and a repair may then
-  take it as its bad leg; until then
-  [the forced-start guide](operations.md#the-forced-start-guide) says to
-  stop and ask for help. Not seen in the lab.
+  and a forced start from the leg wanted wipes it. While the array runs,
+  the primary's report names that leg on its row as a leg of another
+  identity. Once the group is down with two identities, the report names
+  every leg of either identity as one dnv cannot decide on, since only the
+  operator can tell which identity is current. State: fix decided, a
+  repair may take as its bad leg a leg the report names while the array
+  runs, and must ask for the force flag for a leg named undecided, since a
+  wrong choice serves older data and loses the writes made since; until
+  then [the forced-start guide](operations.md#the-forced-start-guide) says
+  to stop and ask for help. Not seen in the lab.
 - **A primary that keeps a leaving member is failed over, and the new
   primary leaves that member out.** The primary never fails a member that
   is leaving the group while no member that stays is in sync on a working

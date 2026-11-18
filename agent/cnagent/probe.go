@@ -204,9 +204,20 @@ func (s *CnAgentServer) probeCntlr(
 			}
 			// An absent array the converge's assembly would start, and a
 			// forced start the converge would carry through (CN30).
-			if s.absentArrayNamed(ctx, st, plan, gp, found) {
+			named, conflict := s.absentArrayNamed(ctx, st, plan, gp, found)
+			if named {
 				putBack = append(putBack, verdictName{
 					kind: agent.LeftoverKindMdAbsent, name: gp.resName})
+			}
+			// CN12, The identity check: the legs of another identity than
+			// the running array's, and those of two identities an
+			// assembly of the absent array would meet, marked as the
+			// converge marks them.
+			markLegRows(t, info, refusals.otherIdentity,
+				pb.ResReason_RES_REASON_OTHER_IDENTITY)
+			if conflict != nil {
+				markLegRows(t, info, conflict.legIds,
+					pb.ResReason_RES_REASON_IDENTITY_UNDECIDED)
 			}
 			if why := s.forcedStartNamed(
 				ctx, st, plan, gp, found); why != nil {

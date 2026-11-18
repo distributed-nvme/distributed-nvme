@@ -1206,9 +1206,12 @@ func (m *Md) Stop(ctx context.Context, devPath string) error {
 // it was or after its assembly, so that the member reconciliation ran over
 // it, whether or not that reconciliation went through; the build forgets
 // the group's md check when it reads false (forgetMdCheck). A RedundNone
-// group has no array and reports false. refusal is the take-back check's
-// refusal of the reconciliation that went through (takeBackStep), which the
-// repair's verdict carries.
+// group has no array and reports false. refusals are the reconciliation's
+// (grpRefusals): the take-back check's refusal of one that went through
+// (takeBackStep), which the repair's verdict carries, and the identity
+// check's marks, which a reconciliation that failed after its check returns
+// too, as does one whose array, read again after its member changes, gives
+// no detail (arrayAfter).
 //
 // While the group's forced-start mark stands and no array of the group runs,
 // the forced start (forcedStartPass) stands in for the assembly. A running
@@ -1278,12 +1281,11 @@ func (s *CnAgentServer) ensureGroup(
 			return nil, true, grpRefusals{}, err
 		}
 		return s.arrayAfter(ctx, walk, gp, detail, changed), true,
-			grpRefusals{}, err
+			refusals, err
 	}
+	// An array read again that fails gives no reading (reportGrpReading),
+	// and the identity check's marks stand all the same.
 	detail = s.arrayAfter(ctx, walk, gp, detail, changed)
-	if detail == nil {
-		return nil, true, grpRefusals{}, nil
-	}
 	return detail, true, refusals, nil
 }
 
@@ -1788,31 +1790,76 @@ type assemblyCand struct {
 // alone would tie one against one in a group of two legs. The bad leg is the
 // leg the repair replaces, also once an abort let it stay, which a forced
 // start from another leg left out of the array, and the new legs join only
-// by the repair, so the leg_list legs that stay decide first.
+// by the repair, so the leg_list legs that stay decide first. The error is
+// an identityConflict, which names every leg of that set that carries a
+// superblock: each disagrees with another, and the agent cannot tell which
+// identity is current, so both channels mark each such leg's row
+// (RES_REASON_IDENTITY_UNDECIDED).
 func assemblyIdentity(gp *grpPlan, cands []assemblyCand) (string, error) {
 	for tier := assemblyTierLegList; tier <= assemblyTierBadLeg; tier++ {
 		uuid := ""
-		var first *legPlan
+		var first, other *legPlan
+		var otherUuid string
+		var legs []uint64
 		for _, c := range cands {
 			if c.tier != tier || c.sb == nil {
 				continue
 			}
+			legs = append(legs, c.lp.legId)
 			switch {
 			case uuid == "":
 				uuid, first = c.sb.Uuid, c.lp
-			case c.sb.Uuid != uuid:
-				return "", fmt.Errorf(
-					"members of two identities: leg %#x carries %s and "+
-						"leg %#x %s; a forced start names the leg to start "+
-						"group %#x from", first.legId, uuid, c.lp.legId,
-					c.sb.Uuid, gp.grpId)
+			case c.sb.Uuid != uuid && other == nil:
+				other, otherUuid = c.lp, c.sb.Uuid
 			}
+		}
+		if other != nil {
+			slices.Sort(legs)
+			return "", &identityConflict{legIds: legs, text: fmt.Sprintf(
+				"members of two identities: leg %#x carries %s and "+
+					"leg %#x %s; a forced start names the leg to start "+
+					"group %#x from", first.legId, uuid, other.legId,
+				otherUuid, gp.grpId)}
 		}
 		if uuid != "" {
 			return uuid, nil
 		}
 	}
 	return "", nil
+}
+
+// identityConflict is assemblyIdentity's refusal of an assembly whose first
+// set of candidates carries two identities: legIds are the legs of that set
+// that carry a superblock, ascending, whose rows both channels mark
+// RES_REASON_IDENTITY_UNDECIDED (markLegRows).
+type identityConflict struct {
+	legIds []uint64
+	text   string
+}
+
+func (e *identityConflict) Error() string {
+	return e.text
+}
+
+// markLegRows sets reason on the rows of legIds in info's leg map, each
+// row's status and details kept (CN12, CN28): the identity check's refused
+// adds of a running array (RES_REASON_OTHER_IDENTITY) and an assembly's two
+// identities (RES_REASON_IDENTITY_UNDECIDED). A leg with no row is left
+// out. A change of the reason alone moves no epoch (dnagent.md SH14).
+func markLegRows(
+	t *agent.ResTracker,
+	info *pb.CntlrInfo,
+	legIds []uint64,
+	reason pb.ResReason,
+) {
+	for _, legId := range legIds {
+		row := info.GetLegIdToLeg()[legId]
+		if row == nil {
+			continue
+		}
+		info.LegIdToLeg[legId] = t.SetReason(resKeyOf(resKeyLegFmt, legId),
+			row.GetResName(), row.GetStatus(), row.GetDetails(), reason)
+	}
 }
 
 // msgForcedStart is the Warn record of a forced start that started the
@@ -2203,19 +2250,26 @@ func actsOnMark(st *cntlrState, gp *grpPlan) bool {
 // refuses costs a SyncupCntlr every second round while the state lasts, and
 // one that withholds a name leaves the array to another re-drive; neither
 // refuses a start (cnagent.md, Known limits).
+//
+// The assembly's refusal for two identities comes back too, nil for none:
+// its legs' rows the read marks as the converge does (identityConflict).
 func (s *CnAgentServer) absentArrayNamed(
 	ctx context.Context,
 	st *cntlrState,
 	plan *cntlrPlan,
 	gp *grpPlan,
 	found *MdDetail,
-) bool {
+) (bool, *identityConflict) {
 	if !plan.wantGrp || !gp.raid1 || gp.deferred || actsOnMark(st, gp) ||
 		found == nil || found.Exists {
-		return false
+		return false, nil
 	}
 	ap, err := s.planAssembly(ctx, gp, s.readAvailability(ctx, plan, gp))
-	return err == nil && (ap.create || mdadmStarts(ap.sbs))
+	var conflict *identityConflict
+	if errors.As(err, &conflict) {
+		return false, conflict
+	}
+	return err == nil && (ap.create || mdadmStarts(ap.sbs)), nil
 }
 
 // errForcedStartDue is the failure a cntlr's read names a group's forced
@@ -2295,7 +2349,9 @@ func (fp *forcedStartPlan) update() string {
 // leg is a member the forced start keeps (forcedStartLegs), other than the
 // bad leg of a STARTED repair (isStartedBadLeg), available, and its
 // superblock read (ReadMember) answers and shows a full member, one md held
-// in a place with no copy position (mdSuperblock.notFullMember); every other
+// in a place with no copy position (mdSuperblock.notFullMember), and carries
+// no bad-block list unless the mark carries the operator's force
+// (badBlocksRefusal); every other
 // member the forced start keeps but the open repair's bad leg is available
 // and its read answers, each read before any is zeroed; and none of them is
 // a full member of the named leg's identity with a higher change count,
@@ -2333,6 +2389,9 @@ func (s *CnAgentServer) planForcedStart(
 		return nil, fmt.Errorf(
 			"forced start: leg %#x is not a full member: %s",
 			named.legId, gap)
+	}
+	if refusal := badBlocksRefusal(gp, named, sb); refusal != "" {
+		return nil, errors.New(refusal)
 	}
 	fp := &forcedStartPlan{named: named, sb: sb}
 	for _, lp := range kept {
@@ -2407,6 +2466,28 @@ func (s *CnAgentServer) forceStartGroup(
 		slog.Any("zeroed", zeroed),
 		slog.String("update", update))...)
 	return nil
+}
+
+// badBlocksRefusal is CN12's refusal of a named leg that carries a bad-block
+// list, "" when none holds: the leg's superblock read shows a list and the
+// mark carries no force. The start drops the list (forcedStartPlan.update),
+// and md then serves the regions it listed as written, from what the leg
+// holds there — on a half-copied leg md marked in sync by mistake, the
+// regions it never copied, another pool's bytes among them. With the force
+// the drop is the operator's choice, which the inspect call's list length
+// and the dry run's update show first.
+func badBlocksRefusal(
+	gp *grpPlan,
+	named *legPlan,
+	namedSb *mdSuperblock,
+) string {
+	if gp.mark.GetForce() || namedSb.BadBlocks == 0 {
+		return ""
+	}
+	return fmt.Sprintf("forced start: named leg %#x carries a bad-block "+
+		"list of %d entries, which the start drops, so md would serve the "+
+		"regions it lists as written; a forced start with force goes on",
+		named.legId, namedSb.BadBlocks)
 }
 
 // olderNamedLeg is CN12's refusal of a named leg older than a member the
@@ -2777,16 +2858,22 @@ func (s *CnAgentServer) reconcileMembers(
 		}
 		why, err := s.legListAddRefusal(ctx, gp, lp, arrayUuid)
 		if err != nil {
-			return changed, grpRefusals{}, err
+			return changed, refusals, err
 		}
 		if why != "" {
 			if refusals.grp == "" {
 				refusals.grp = why
 			}
+			// The leg row is marked only while it reads OK, as a read,
+			// which checks only such a leg (putBackNames), marks it.
+			if takes(lp) {
+				refusals.otherIdentity = append(refusals.otherIdentity,
+					lp.legId)
+			}
 			continue
 		}
 		if err := run(s.md.Add, lp.path); err != nil {
-			return changed, grpRefusals{}, err
+			return changed, refusals, err
 		}
 	}
 	step := repSteps(gp, held, func(lp *legPlan) bool {
@@ -2797,7 +2884,7 @@ func (s *CnAgentServer) reconcileMembers(
 	// leg stays in its place unless another new leg is added.
 	step, rep, err := s.takeBackStep(ctx, gp, held, takes, step)
 	if err != nil {
-		return changed, grpRefusals{}, err
+		return changed, refusals, err
 	}
 	for i := range step.out {
 		// A bad leg the early fail failed this pass is not failed again.
@@ -2808,16 +2895,16 @@ func (s *CnAgentServer) reconcileMembers(
 	for _, out := range step.out {
 		if out.fail {
 			if err := run(s.md.Fail, out.lp.path); err != nil {
-				return changed, grpRefusals{}, err
+				return changed, refusals, err
 			}
 		}
 		if err := run(s.md.Remove, out.lp.path); err != nil {
-			return changed, grpRefusals{}, err
+			return changed, refusals, err
 		}
 	}
 	for _, lp := range step.add {
 		if err := run(s.md.Add, lp.path); err != nil {
-			return changed, grpRefusals{}, err
+			return changed, refusals, err
 		}
 	}
 	refusals.rep, refusals.waits = rep, step.waits
@@ -2830,10 +2917,17 @@ func (s *CnAgentServer) reconcileMembers(
 // check's on a leg_list member's add (legListAddRefusal), which the group's
 // reading carries. "" where nothing holds an add back. waits is why the
 // repair's step waits (repStep.waits), which the verdict carries too.
+// otherIdentity are the legs whose add the identity check refused and whose
+// leg row reads OK, which the pass marks RES_REASON_OTHER_IDENTITY
+// (markLegRows), a converge's failure after the check included: from the
+// identity check on, reconcileMembers and ensureGroup return the refusals
+// beside their error, as a read keeps them past a failed take-back read
+// (putBackNames).
 type grpRefusals struct {
-	rep   string
-	grp   string
-	waits string
+	rep           string
+	grp           string
+	waits         string
+	otherIdentity []uint64
 }
 
 // arrayUuidOnce reads the identity of the group's running array once, at
@@ -3601,6 +3695,7 @@ func (s *CnAgentServer) putBackNames(
 			if refusals.grp == "" {
 				refusals.grp = why
 			}
+			refusals.otherIdentity = append(refusals.otherIdentity, lp.legId)
 			continue
 		}
 		names = append(names, lp.name)

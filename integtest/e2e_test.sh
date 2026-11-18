@@ -19965,8 +19965,11 @@ react_fs_mark_of() { # <json>
 # refusal included: the level, the leg's place and the primary that the
 # call's other refusals read do not change while the step waits. Each
 # refusal is logged as it changes.
-react_fs_try_start() { # <leg id>
-	if ctl_try group force-start --grp "$REACT_GRP_ID" --leg "$1"; then
+react_fs_try_start() { # <leg id> [force]
+	local extra=()
+	[ "${2:-}" = force ] && extra=(--force)
+	if ctl_try group force-start --grp "$REACT_GRP_ID" --leg "$1" \
+		"${extra[@]}"; then
 		return 0
 	fi
 	case "$CTL_ERR" in
@@ -19996,14 +19999,16 @@ react_fs_try_start() { # <leg id>
 # pass at the least, so the read right after the call finds it; should the
 # clear have come first, the worker's record of it must be in its log
 # instead. It fills REACT_FS_MARK_REV, REACT_FS_CN_MARK and REACT_FS_WK_MARK.
-react_fs_mark() { # <leg id>
+# With "force" the mark carries the operator's force (cnagent.md CN12), which
+# a named leg with a bad-block list needs (react_fs_list_forced).
+react_fs_mark() { # <leg id> [force]
 	local mark recs n
 	REACT_FS_CN_MARK=$(react_cn_log_mark)
 	REACT_FS_WK_MARK=$(worker_log_mark)
 	REACT_FS_LAST=""
 	wait_until "$WAIT_PROVISION" \
 		"the gateway to accept the forced start of group $REACT_GRP_ID from leg $1" \
-		react_fs_try_start "$1"
+		react_fs_try_start "$1" "${2:-}"
 	assert_eq "$CTL_ERR" "" \
 		"stderr of: dnvctl group force-start --grp $REACT_GRP_ID --leg $1 must be empty"
 	assert_parses "$CTL_OUT" "dnvctl group force-start --grp $REACT_GRP_ID --leg $1"
@@ -20038,6 +20043,47 @@ react_fs_mark() { # <leg id>
 			"$REACT_FS_MARK_REV"
 		;;
 	esac
+}
+
+# react_fs_bbl prints the length of the bad-block list the primary reads on
+# leg <leg id> of slice 0's first data group (`group inspect`, cnagent.md
+# CN31), 0 for none.
+react_fs_bbl() { # <leg id>
+	ctl_ok group inspect --grp "$REACT_GRP_ID"
+	jq_of "$CTL_OUT" "[.leg_list[]? | select(.member.leg_id == \"$1\")
+		| (.member.bad_blocks // 0)][0] // 0"
+}
+
+# react_fs_list_forced reads, just before the forced start from <leg id>
+# runs, whether that leg carries a bad-block list, and when it does checks
+# the refusal with no force and writes the mark again with the force
+# (cnagent.md CN12): whether md wrote a list depends on the run's timing, so
+# the choice is made at run time. The dry run with no force must name the
+# list, and the one with the force must drop it. It returns 0 when it wrote
+# the mark with the force, 1 when the leg carries no list.
+react_fs_list_forced() { # <leg id>
+	local bbl refusal
+	bbl=$(react_fs_bbl "$1")
+	case "$bbl" in
+	'' | *[!0-9]*) die "leg $1's bad-block list reads '$bbl'" ;;
+	esac
+	if [ "$bbl" -eq 0 ]; then
+		log "  leg $1 carries no bad-block list: the start needs no force"
+		return 1
+	fi
+	log "  leg $1 carries a bad-block list of $bbl entries: the start is" \
+		"refused with no force, then forced"
+	ctl_ok group inspect --grp "$REACT_GRP_ID" --leg "$1"
+	refusal=$(jq_of "$CTL_OUT" '.dry_run.refusal // ""')
+	case "$refusal" in
+	*"carries a bad-block list"*) ;;
+	*) die "the dry run from leg $1 with no force refuses '$refusal'" ;;
+	esac
+	ctl_ok group inspect --grp "$REACT_GRP_ID" --leg "$1" --force
+	assert_field "$CTL_OUT" '.dry_run.update' uuid,force-no-bbl \
+		"the dry run from leg $1 with the force"
+	react_fs_mark "$1" force
+	return 0
 }
 
 # react_fs_mark_gone is the wait for the worker's clear (dnv-worker.md AR13):
@@ -20075,9 +20121,13 @@ react_fs_mark_gone() { # <leg id> <revision>
 # it takes an assemble killed there that left the array running as a start
 # (cnagent.md CN12). The last assemble ahead of the record must be one from
 # <named leg id>'s member alone, the one leg member device it names, with
-# mdadm's run and force flags and the superblock update the record names,
-# and a superblock zero of the zeroed leg's member that answered must come
-# before that assemble. After the record comes an add of the zeroed member,
+# mdadm's run and force flags and the last superblock update the record
+# names. mdadm takes one update a run, so a record that names two, uuid and
+# then force-no-bbl, as for a named leg with a bad-block list, needs an
+# earlier such assemble with the first update, and a stop of the array
+# between the two when that first one answered, as it then started the
+# array (forcedAssemble). A superblock zero of the zeroed leg's member that
+# answered must come before the first of them. After the record comes an add of the zeroed member,
 # never one mdadm reports as a re-add, as a member with no superblock joins
 # as a new member, which md copies whole. The add need not have answered:
 # one killed at the soft timeout once it took effect is not run again, as
@@ -20135,6 +20185,10 @@ react_fs_proof() { # <named leg id> <zeroed leg id>
 			and .leg_id == $l)) | first) as $fs
 		| (if $fs == null then -1 else $fs.i end) as $start
 		| (map(select(forced and .i < $start)) | last) as $asm
+		| (($fs.update // "") | tostring | split(",")) as $ups
+		| (if $asm == null or ($ups | length) != 2 then $asm
+		   else map(select(forced and .i < $asm.i
+			and word("--update=" + $ups[0]))) | last end) as $run1
 		| [.[] | select(cmd and word("--zero-superblock")
 			and (.a | endswith(" " + $z)) and .rc == 0) | .i] as $zs
 		| [.[] | select(cmd and (.a | endswith("--add --failfast " + $z))
@@ -20147,9 +20201,17 @@ react_fs_proof() { # <named leg id> <zeroed leg id>
 			"the forced start record names the zeroed legs \($fs.zeroed | tojson), not leg \($zl) alone"
 		  elif $asm == null then
 			"no assemble with the run and force flags and a uuid or force-no-bbl update, naming \($n) and no other member, ran before the forced start record"
-		  elif (($asm | word("--update=" + ($fs.update | tostring))) | not) then
-			"the last assemble before the forced start record ran \($asm.a), not the update \($fs.update) the record names"
-		  elif ([$zs[] | select(. < $asm.i)] | length) == 0 then
+		  elif ($ups | length) < 1 or ($ups | length) > 2 then
+			"the forced start record names the updates \($fs.update), not one or two"
+		  elif (($asm | word("--update=" + ($ups | last))) | not) then
+			"the last assemble before the forced start record ran \($asm.a), not the update \($ups | last) the record names last"
+		  elif $run1 == null then
+			"the forced start record names the updates \($fs.update), and no assemble with the \($ups[0]) update ran before the one with \($ups[1])"
+		  elif $run1 != $asm and $run1.rc == 0 and ([.[] | select(cmd
+			and word("--stop") and .i > $run1.i and .i < $asm.i)]
+			| length) == 0 then
+			"the assemble with the \($ups[0]) update answered, and no stop of the array ran before the one with \($ups[1])"
+		  elif ([$zs[] | select(. < $run1.i)] | length) == 0 then
 			"no superblock zero of \($z) answered before the assemble"
 		  elif ($adds | length) == 0 then
 			"no add of \($z) ran after the forced start record"
@@ -20173,8 +20235,8 @@ react_fs_proof() { # <named leg id> <zeroed leg id>
 	esac
 	read -r _ asm_rc update add_rcs <<<"$verdict"
 	log "  the primary zeroed leg $2's member, assembled the array from leg" \
-		"$1's alone with the $update update and added leg $2's back as a" \
-		"new member (cnagent.md CN12)"
+		"$1's alone with the superblock update(s) $update and added leg" \
+		"$2's back as a new member (cnagent.md CN12)"
 	[ "$asm_rc" = 0 ] ||
 		log "  the assemble that started the array exited $asm_rc, and the" \
 			"agent found the array running after it, which it takes as a" \
@@ -22598,6 +22660,11 @@ react_fs_data_leg() {
 	wait_until "$WAIT_PROVISION" \
 		"leg $data to read healthy with its disk node back (dnv-worker.md HL2)" \
 		copy_rep_leg_epoch "$pos" "$data" healthy
+	# The start runs only now, with the leg back to read: a list on it is
+	# refused with no force, the mark then written again with the force.
+	if react_fs_list_forced "$data"; then
+		log "  the forced start from leg $data carries the force"
+	fi
 	REACT_FS_LAST=""
 	msg="the primary to start group $REACT_GRP_ID's array from leg $data and"
 	msg="$msg the worker to clear the mark (dnv-worker.md AR13)"
@@ -22869,8 +22936,11 @@ react_fs_restore() {
 
 	# The forced start from the repair's new leg, the repair's start and
 	# finish, the worker's clear, and the group whole on the retired leg
-	# taken back and the fresh leg.
-	react_fs_mark "$old"
+	# taken back and the fresh leg. A list on the leg, read at run time, has
+	# the mark carry the force (react_fs_list_forced).
+	if ! react_fs_list_forced "$old"; then
+		react_fs_mark "$old"
+	fi
 	COPY_REP_LAST=""
 	msg="the worker to move repair $REACT_FS_REP to STARTED once the primary"
 	msg="$msg reports leg $old holding a place in the array it started"

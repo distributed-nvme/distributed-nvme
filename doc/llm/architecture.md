@@ -4706,7 +4706,12 @@ read it (Clones, Migrations).
 `reason` (`ResReason`) is the cause of a row's status that a control-plane
 decision reads: `RES_REASON_NONE` on a row no rule gives a reason;
 `RES_REASON_THIN_ID_LOST`, which `cnagent.md` CN14 sets on an `ERROR` row
-and `dnv-worker.md` HL2 reads; `RES_REASON_THIN_ID_NOT_ADOPTED`, which
+and `dnv-worker.md` HL2 reads; `RES_REASON_OTHER_IDENTITY` and
+`RES_REASON_IDENTITY_UNDECIDED`, which `cnagent.md` CN12 sets on a leg's row,
+its status and details kept, for a leg the running array does not add for
+another identity and for the legs of two identities an assembly meets,
+which no health rule reads and a repair create is to read
+(Repair); `RES_REASON_THIN_ID_NOT_ADOPTED`, which
 `cnagent.md` CN14 sets on the `ERROR` thin row of a new volume whose thin id
 it does not adopt and `dnv-worker.md` HL2 reads; `RES_REASON_POOL_NEEDS_CHECK` and
 `RES_REASON_POOL_FAILED`, which `cnagent.md` CN13 sets on an `ERROR` pool row
@@ -6269,13 +6274,21 @@ bad-block list dropped, keeping the identity the first run wrote, so the
 array never starts under its old identity, and serves no IO errors over
 regions the leg holds unless the stop between the two runs fails
 (`cnagent.md`, Known limits). A named leg that is not available, whose read does
-not answer or that is not a full member of the old array; another member
+not answer or that is not a full member of the old array; a named leg that
+carries a bad-block list, which the start drops, unless the mark carries
+the operator's force (`ForcedStart.force`); another member
 that is not available or whose read does not answer; or another member that
 is a full member of the named leg's identity with a higher change count,
-which holds newer data, unless the mark carries the operator's force
-(`ForcedStart.force`), is the group's error for the pass, before anything
+which holds newer data, unless the mark carries the force, is the group's
+error for the pass, before anything
 is zeroed; a zero that the read back does not prove is the group's error
-before the assembly. Reason: mdadm answers a read of a member that fails as
+before the assembly. One force passes both refusals, and a mark that
+names a taken-back leg with the partial mark (`ForceStartGroup`), as one
+operator's choice. Reason for the list's refusal: with the list dropped,
+md serves the regions it lists from what the named leg holds there, which
+on a half-copied leg md marked in sync are regions it never copied (Known
+limits), and only the operator can tell that leg from the one that kept
+the data. Reason: mdadm answers a read of a member that fails as
 it answers a member with no superblock, so only the agent's own read tells
 them apart, and a zero mdadm answered with success can have written
 nothing. An array that runs the primary never stops: the mark waits. The steps, their order and their error rows are `cnagent.md` CN12's.
@@ -8277,11 +8290,13 @@ document and only pointed to here.
   repair's new leg by recording each region it could not read as bad on that
   leg and marking the leg in sync, and the stop writes a bad-block list onto
   the leg that kept the data too, both with the same change count
-  (`cnagent.md`, Known limits). The forced start drops the named leg's list
-  (Repair, Forced start), which is right for the leg that kept the data;
-  named on the new leg, it serves the regions md never copied as whatever
-  that leg held there. Which leg died last is the operator's to read in the
-  leg rows.
+  (`cnagent.md`, Known limits). The forced start refuses a named leg with
+  a list unless the mark carries the force, and with the force drops the
+  list (Repair, Forced start), which is right for the leg that kept the
+  data; forced on the new leg, it serves the regions md never copied as
+  whatever that leg held there. Which leg died last is the operator's to
+  read in the leg rows, and the list's length per member in
+  `InspectGroup`.
 * **A forced start from an older copy restores one group, not the pool.**
   Each group is an array of its own under the pool, and the pool's meta
   group, which holds dm-thin's metadata, is apart from its data groups

@@ -185,14 +185,16 @@ func TestForcedStartProvesEachZero(t *testing.T) {
 // reading shows a bad-block list the kernel takes: the first run starts the
 // array under its new identity with the list, so the pass stops it and
 // starts it again with the list dropped, keeping the new identity; the
-// record names both updates. A stop that fails is the group's error.
+// record names both updates. A stop that fails is the group's error. The
+// mark carries the force, which a named leg with a list needs
+// (badBlocksRefusal).
 func TestForcedStartDropsABadBlockList(t *testing.T) {
 	t.Run("dropped", func(t *testing.T) {
 		f := downNoRepair(t)
 		oldUuid := f.legUuid(f.leg2)
 		f.node.setSuperblock(f.leg2, fakeSuperblock{badBlocks: 2})
 		logs := captureLogs(t)
-		info := f.syncup(t, withMark(quietReq(4), testDataLeg2))
+		info := f.syncup(t, withForcedMark(quietReq(4), testDataLeg2))
 		assertOrder(t, f.node,
 			examineOf(f.leg2),
 			zeroOf(f.leg1),
@@ -218,7 +220,7 @@ func TestForcedStartDropsABadBlockList(t *testing.T) {
 		f.node.failCmdAlways["cmd mdadm --stop "] =
 			"mdadm: Cannot get exclusive access"
 		f.node.mu.Unlock()
-		info := f.syncup(t, withMark(quietReq(4), testDataLeg2))
+		info := f.syncup(t, withForcedMark(quietReq(4), testDataLeg2))
 		assertErrorDetails(t, info.GetGrpIdToMdRaid()[testDataGrp],
 			"its stop to drop the list failed", "grp data")
 		assertNoCall(t, f.node, "--update="+mdUpdateForceNoBbl)
@@ -236,6 +238,44 @@ func TestForcedStartDropsABadBlockList(t *testing.T) {
 				"%d, want 4", got)
 		}
 	})
+}
+
+// TestForcedStartRefusesANamedLegWithABadBlockList pins CN12's refusal of
+// a named leg whose reading shows a bad-block list (badBlocksRefusal): with
+// no force nothing is zeroed or assembled, the row names the leg and the
+// list's length, the dry run refuses alike, and the read names no forced
+// start, so nothing runs between the worker's calls; with the force the dry
+// run names the drop and the start goes on.
+func TestForcedStartRefusesANamedLegWithABadBlockList(t *testing.T) {
+	f := downNoRepair(t)
+	f.node.setSuperblock(f.leg2, fakeSuperblock{badBlocks: 3})
+	f.node.forgetTraces()
+	info := f.syncup(t, withMark(quietReq(4), testDataLeg2))
+	assertErrorDetails(t, info.GetGrpIdToMdRaid()[testDataGrp],
+		"named leg 0x17 carries a bad-block list of 3 entries", "grp data")
+	assertNoCall(t, f.node, "--zero-superblock")
+	assertNoCall(t, f.node, "cmd mdadm --assemble "+f.mdDev)
+	f.assertForcedStartUnnamed(t, 4, "a named leg with a bad-block list")
+	assertNoCall(t, f.node, "--zero-superblock")
+
+	f.node.Reset()
+	dry := f.inspect(t, testDataLeg2, false).GetDryRun()
+	if !strings.Contains(dry.GetRefusal(), "carries a bad-block list") {
+		t.Fatalf("the dry run with no force: %v, want the refusal", dry)
+	}
+	dry = f.inspect(t, testDataLeg2, true).GetDryRun()
+	if dry.GetRefusal() != "" ||
+		dry.GetUpdate() != mdUpdateUuid+","+mdUpdateForceNoBbl {
+		t.Fatalf("the dry run with the force: %v, want the list dropped", dry)
+	}
+	assertNoCall(t, f.node, "cmd mdadm")
+
+	info = f.syncup(t, withForcedMark(quietReq(5), testDataLeg2))
+	assertOrder(t, f.node,
+		zeroOf(f.leg1),
+		f.forced(f.leg2, mdUpdateUuid),
+		f.forced(f.leg2, mdUpdateForceNoBbl))
+	assertOk(t, info.GetGrpIdToMdRaid()[testDataGrp], "grp data")
 }
 
 // TestAssemblyHandsMdOneIdentity pins CN12's assembly of members of two
@@ -435,6 +475,190 @@ func TestAddRefusesALegListMemberOfAnotherIdentity(t *testing.T) {
 		if got := info.GetGrpIdToGrpInfo()[testDataGrp].
 			GetRefusal(); got != "" {
 			t.Fatalf("the group's refusal is %q, want none", got)
+		}
+	})
+}
+
+// legReason is the reason of legId's row in info, NONE for a row it lacks.
+func legReason(info *pb.CntlrInfo, legId uint64) pb.ResReason {
+	return info.GetLegIdToLeg()[legId].GetReason()
+}
+
+// TestTheIdentityReasonOnTheLegRow pins CN12's reasons on a leg's row: a
+// leg_list member the running array does not add for another identity reads
+// RES_REASON_OTHER_IDENTITY on its row, whose status stays the probe's, on
+// the converge and on the read, and the verdict does not name it, while the
+// leg of the array's identity carries no reason; the row is marked only
+// while it reads OK, on both channels alike, and a converge whose
+// reconciliation fails after the check, or whose read of the array after
+// its member changes fails, still marks it; legs of two
+// identities an assembly of the absent array meets read
+// RES_REASON_IDENTITY_UNDECIDED, a reason of their own, on both channels.
+func TestTheIdentityReasonOnTheLegRow(t *testing.T) {
+	// olderLeg1 takes leg 1's member out of the running array and gives its
+	// superblock another identity.
+	olderLeg1 := func(f *repFix) {
+		f.node.mu.Lock()
+		defer f.node.mu.Unlock()
+		array := f.node.arrays[f.mdDev]
+		var kept []string
+		for _, member := range array.members {
+			if member != f.leg1 {
+				kept = append(kept, member)
+			}
+		}
+		array.members = kept
+		array.degraded = 1
+		f.node.publishArray(array)
+		f.node.memberArray[f.leg1] = "older"
+	}
+	t.Run("the running array's case", func(t *testing.T) {
+		f := newRepFix(t, allLegs...)
+		olderLeg1(f)
+		info := f.syncup(t, noRepairReq(3))
+		read, reply := f.read(t, 3)
+		for label, got := range map[string]*pb.CntlrInfo{
+			"converge": info, "read": read} {
+			row := got.GetLegIdToLeg()[testDataLeg]
+			if row.GetReason() != pb.ResReason_RES_REASON_OTHER_IDENTITY ||
+				row.GetStatus() != pb.ResStatus_RES_STATUS_OK {
+				t.Fatalf("%s: leg 1's row = %v, want OK with the other "+
+					"identity's reason", label, row)
+			}
+			if r := legReason(got, testDataLeg2); r !=
+				pb.ResReason_RES_REASON_NONE {
+				t.Fatalf("%s: leg 2's reason = %v, want none", label, r)
+			}
+		}
+		if strings.Contains(reply.GetDetails(), legName(f.srv, testDataLeg)) {
+			t.Fatalf("the read names the leg of another identity: %v", reply)
+		}
+	})
+	t.Run("a leg row that does not read OK", func(t *testing.T) {
+		f := newRepFix(t, allLegs...)
+		olderLeg1(f)
+		failRounds(t, f.srv, testDataLeg, 1)
+		info := f.syncup(t, noRepairReq(3))
+		read, _ := f.read(t, 3)
+		for label, got := range map[string]*pb.CntlrInfo{
+			"converge": info, "read": read} {
+			row := got.GetLegIdToLeg()[testDataLeg]
+			if row.GetStatus() != pb.ResStatus_RES_STATUS_ERROR ||
+				row.GetReason() != pb.ResReason_RES_REASON_NONE {
+				t.Fatalf("%s: leg 1's row = %v, want the probe's ERROR "+
+					"with no reason", label, row)
+			}
+		}
+		assertNoCall(t, f.node, f.add(f.leg1))
+	})
+	t.Run("a converge that fails after the check", func(t *testing.T) {
+		f := newRepFix(t, allLegs...)
+		olderLeg1(f)
+		// A third leg_list member after leg 1, fresh, whose add fails: the
+		// reconciliation fails after leg 1's check.
+		req := noRepairReq(3)
+		third := legOf(repNewLeg, sideOf(repNewSide, testIp, testSvcId))
+		third.LegIdx = 2
+		dataGrpOf(req).LegList = append(dataGrpOf(req).LegList, third)
+		f.node.mu.Lock()
+		f.node.failCmdAlways["--add --failfast "+f.newLegDev] =
+			"mdadm: add new device failed for " + f.newLegDev
+		f.node.mu.Unlock()
+		info := f.syncup(t, req)
+		if row := info.GetGrpIdToMdRaid()[testDataGrp]; row.GetStatus() !=
+			pb.ResStatus_RES_STATUS_ERROR {
+			t.Fatalf("fixture: the group's row = %v, want the add's ERROR",
+				row)
+		}
+		if !f.node.hasCall(f.add(f.newLegDev)) {
+			t.Fatalf("fixture: no add of the third leg ran")
+		}
+		if r := legReason(info, testDataLeg); r !=
+			pb.ResReason_RES_REASON_OTHER_IDENTITY {
+			t.Fatalf("leg 1's reason = %v after the failed add, want the "+
+				"other identity's", r)
+		}
+	})
+	t.Run("an array read again that fails", func(t *testing.T) {
+		// The third leg's add goes through, and the md listing of the
+		// array after it is killed, so the array read again gives no
+		// detail: the converge keeps leg 1's mark, as the read has it.
+		withThird := func() *pb.SyncupCntlrRequest {
+			req := noRepairReq(3)
+			third := legOf(repNewLeg, sideOf(repNewSide, testIp, testSvcId))
+			third.LegIdx = 2
+			dataGrpOf(req).LegList = append(dataGrpOf(req).LegList, third)
+			return req
+		}
+		// listingsBeforeAdd counts the md listings of the array a converge
+		// runs before the third leg's add.
+		listingsBeforeAdd := func(t *testing.T) (string, int) {
+			f := newRepFix(t, allLegs...)
+			olderLeg1(f)
+			f.node.mu.Lock()
+			key := "list /sys/block/" + f.node.arrays[f.mdDev].node + "/md"
+			f.node.mu.Unlock()
+			f.node.Reset()
+			f.syncup(t, withThird())
+			before, after, added := 0, 0, false
+			for _, call := range f.node.Calls() {
+				if strings.Contains(call, f.add(f.newLegDev)) {
+					added = true
+				}
+				if strings.Contains(call, key) {
+					if added {
+						after++
+					} else {
+						before++
+					}
+				}
+			}
+			if !added || after == 0 {
+				t.Fatalf("fixture: no add of the third leg, or no md " +
+					"listing after it")
+			}
+			return key, before
+		}
+		key, before := listingsBeforeAdd(t)
+		f := newRepFix(t, allLegs...)
+		olderLeg1(f)
+		f.node.mu.Lock()
+		f.node.killCmdNth[key] = before + 1
+		f.node.mu.Unlock()
+		f.node.Reset()
+		info := f.syncup(t, withThird())
+		if !f.node.hasCall(f.add(f.newLegDev)) {
+			t.Fatalf("fixture: no add of the third leg ran")
+		}
+		if got := info.GetGrpIdToGrpInfo()[testDataGrp]; got != nil {
+			t.Fatalf("fixture: the converge read the array again: %v", got)
+		}
+		read, _ := f.read(t, 3)
+		for label, got := range map[string]*pb.CntlrInfo{
+			"converge": info, "read": read} {
+			if r := legReason(got, testDataLeg); r !=
+				pb.ResReason_RES_REASON_OTHER_IDENTITY {
+				t.Fatalf("%s: leg 1's reason = %v, want the other "+
+					"identity's", label, r)
+			}
+		}
+	})
+	t.Run("the assembly's case", func(t *testing.T) {
+		f := downNoRepair(t)
+		f.identity(f.leg1, "older")
+		info := f.syncup(t, quietReq(4))
+		assertErrorDetails(t, info.GetGrpIdToMdRaid()[testDataGrp],
+			"members of two identities", "grp data")
+		read, _ := f.read(t, 4)
+		for label, got := range map[string]*pb.CntlrInfo{
+			"converge": info, "read": read} {
+			for _, legId := range []uint64{testDataLeg, testDataLeg2} {
+				if r := legReason(got, legId); r !=
+					pb.ResReason_RES_REASON_IDENTITY_UNDECIDED {
+					t.Fatalf("%s: leg %#x's reason = %v, want the "+
+						"undecided identity's", label, legId, r)
+				}
+			}
 		}
 	})
 }

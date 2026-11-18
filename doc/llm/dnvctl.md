@@ -673,9 +673,11 @@ gateway finds the group's parent itself, and the leg the array starts from
 by `--leg`. With `--cancel` it withdraws the group's mark instead and names
 no leg. `--force` puts the operator's force on the mark, so that the start
 goes on from a named leg whose change count is below that of a full member
-of the same array, which it overwrites (`architecture.md`, Repair, Forced
+of the same array, which it overwrites, and from a named leg that carries a
+bad-block list, which it drops (`architecture.md`, Repair, Forced
 start), and so that the mark may name a taken-back leg that carries the
-partial mark (`architecture.md`, Retired legs). dnvctl checks none of the pairings: a non-zero `--leg` or a
+partial mark (`architecture.md`, Retired legs); one force passes all three,
+which the leaf's help says. dnvctl checks none of the pairings: a non-zero `--leg` or a
 `--force` beside `--cancel`, and a write with no `--leg`, reach the gateway,
 which refuses them (CT8).
 The forced start overwrites the other members it keeps, the open repair's

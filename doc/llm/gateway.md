@@ -1506,7 +1506,10 @@ pool's repairs, retired legs and groups still answer.
   group's parent, the leg, the cancel flag and the force, which writes the
   mark, the force in it, with the revision its own bump commits, and
   re-checks the token, the pool, the
-  group and the leg in its STM; its `model.ReasonLegNotNamable`, a leg a
+  group and the leg in its STM. The gateway makes no refusal of a named
+  leg's bad-block list: the primary reads the leg's superblock at the start
+  and refuses a list with no force (`cnagent.md` CN12), as it refuses an
+  older named leg. Its `model.ReasonLegNotNamable`, a leg a
   write took away after the planning read, and its
   `model.ReasonLegPartial`, a leg a write marked partial since, are
   answered `FAILED_PRECONDITION` in the gateway's words (`modelReason`). A cancel
