@@ -6313,55 +6313,63 @@ stores instead is CN23's.
   (`architecture.md`, Known limits).
 * While the CN's store disk refuses writes, the agent keeps the last
   requests it accepted for the CN and its cntlrs: every `SyncupCn` and
-  `SyncupCntlr` the gates admit is refused until a save holds
-  (`dnagent.md` SH5), so a cntlr here is neither promoted nor demoted, a
-  td new to `td_list` gets no thin volume, and a cntlr whose pointer
-  leaves the CN's list keeps its devices (`dnagent.md`, Known limits).
-  The worker reads an enabled primary here unhealthy for those refusals
-  and fails it over, and fails no primary over onto a cntlr here, and
-  where every healthy, enabled standby refuses so too it moves no role at
-  all
-  (`dnv-worker.md` HL9, AR5, AR7); the failed-over primary, whose demotion is
-  refused too, serves on until the fence.
-  The agent converges only in a `SyncupCntlr` whose save holds and in the
-  startup reconcile (CN10, No converge in the background), so every
+  `SyncupCntlr` the gates admit is refused until a save holds (`dnagent.md`
+  SH5), so a cntlr here is neither promoted nor demoted, a td new to
+  `td_list` gets no thin volume, and a cntlr whose pointer leaves the CN's
+  list keeps its devices (`dnagent.md`, Known limits). The worker reads an
+  enabled primary here unhealthy, and fails it over, once the agent refuses
+  a `SyncupCntlr` newer than the request it holds, for as long as the
+  primary's rounds answer from the held one; a refused re-send of the held
+  revision, such as one a leftover's sweep or a read's name brings, makes
+  none of its rounds unhealthy. The worker passes over a standby here only
+  while its own refused `SyncupCntlr` marks it, from the refusal until a
+  round answers, accepted, at the revision its child drives, or a round is
+  missed, and where every healthy, enabled standby is so marked it moves no
+  role at all (`dnv-worker.md` HL9, AR5, AR7). A standby here that holds
+  its driven revision and whose rounds answer code zero is sent no
+  `SyncupCntlr` (`dnv-worker.md` RW4), so it carries no mark, and the store
+  row marks the node, not the cntlr (`dnv-worker.md` HL1): the worker can
+  elect it; its promotion is then refused for the failed save, HL9 reads
+  its rounds unhealthy, and AR5 fails the role over again once a settling
+  primary's threshold has run out (`dnv-worker.md` HL2, HL9, AR5). The
+  failed-over primary, whose demotion is refused too, serves on until the
+  fence. The agent converges only in a `SyncupCntlr` whose save holds and
+  in the startup reconcile (CN10, No converge in the background), so every
   re-send a read's name brings is refused too, and whatever a converge
-  would cure waits for the whole fault: a late member's put-back, an
-  absent array to start, a forced start, a clone build, a leg's wrapper;
-  short of an agent restart, whose startup reconcile converges each cntlr
-  from the request in its file with no new save (CN2), and acts on no
-  forced-start mark (CN8).
-  A refused `SyncupCntlr` newer than the held request makes the held
-  request count as delivered no more (CN8), so until a `SyncupCntlr` of
-  that cntlr is saved, no converge acts on a forced-start mark the held
-  request carries, and the cntlr's reads name the mark (CN12, CN30). A mark whose clear (`dnv-worker.md`
-  AR13) or withdrawal (`architecture.md`, Repairs, `ForceStartGroup`) is
-  refused is thus not acted on until then. The cost: a mark that still
-  stands waits too — one a refused newer request keeps, and, after an
-  agent restart in that time, each mark of the request the startup
-  reconcile loaded (CN2), since the `SyncupCntlr` the worker sends again
-  for it (CN30) is refused as well — so a group whose array does not run
-  stays down until a save holds.
-  Neither of CN14's thin-id sweeps runs from the held request either, so
-  a pending activation sweep waits, and a thin id whose delete message
-  fails in that time waits for a later sweep of its pool's ids (CN14). A
-  request refused at the held revision changes nothing: the held request
-  keeps counting as delivered, or not counting (CN8). But a request at the
-  held revision whose save holds makes the held request count again
-  (CN8), so a mark whose clear or withdrawal was refused can still be
-  acted on. During an ownership change of the pool (`dnv-worker.md` VW7)
-  the old owner can still want the held revision after the new owner's
-  request that drops the mark was refused, and it sends that revision
-  again, since the cntlr's reads name the mark. Once the store disk takes
-  writes again, the old owner's request can be saved before the new
-  owner's, which that owner sends again each round (`dnv-worker.md` RW5).
-  Its converge, and that of each re-send of it, then act on the mark
-  until the new owner's request is saved: one that reads the group's array not
-  running can start the array from the marked leg and zero the other
-  members the forced start keeps, one of which may hold newer data
-  (CN12). The case needs an ownership change, a store disk that takes
-  writes again inside it, and a group whose array does not run. The
-  revision gate admits the old owner's request because it measures
-  against the request the agent accepted last (CN8, `dnagent.md` SH8): a
-  refused request never becomes the desired state (`dnagent.md` SH5), and
-  the agent keeps no revision of it.
+  would cure waits for the whole fault: a late member's put-back, an absent
+  array to start, a forced start, a clone build, a leg's wrapper; short of
+  an agent restart, whose startup reconcile converges each cntlr from the
+  request in its file with no new save (CN2), and acts on no forced-start
+  mark (CN8). A refused `SyncupCntlr` newer than the held request makes the
+  held request count as delivered no more (CN8), so until a `SyncupCntlr`
+  of that cntlr is saved, no converge acts on a forced-start mark the held
+  request carries, and the cntlr's reads name the mark (CN12, CN30). A mark
+  whose clear (`dnv-worker.md` AR13) or withdrawal (`architecture.md`,
+  Repairs, `ForceStartGroup`) is refused is thus not acted on until then.
+  The cost: a mark that still stands waits too — one a refused newer
+  request keeps, and, after an agent restart in that time, each mark of the
+  request the startup reconcile loaded (CN2), since the `SyncupCntlr` the
+  worker sends again for it (CN30) is refused as well — so a group whose
+  array does not run stays down until a save holds. Neither of CN14's
+  thin-id sweeps runs from the held request either, so a pending activation
+  sweep waits, and a thin id whose delete message fails in that time waits
+  for a later sweep of its pool's ids (CN14). A request refused at the held
+  revision changes nothing: the held request keeps counting as delivered,
+  or not counting (CN8). But a request at the held revision whose save
+  holds makes the held request count again (CN8), so a mark whose clear or
+  withdrawal was refused can still be acted on. During an ownership change
+  of the pool (`dnv-worker.md` VW7) the old owner can still want the held
+  revision after the new owner's request that drops the mark was refused,
+  and it sends that revision again, since the cntlr's reads name the mark.
+  Once the store disk takes writes again, the old owner's request can be
+  saved before the new owner's, which that owner sends again each round
+  (`dnv-worker.md` RW5). Its converge, and that of each re-send of it, then
+  act on the mark until the new owner's request is saved: one that reads
+  the group's array not running can start the array from the marked leg and
+  zero the other members the forced start keeps, one of which may hold
+  newer data (CN12). The case needs an ownership change, a store disk that
+  takes writes again inside it, and a group whose array does not run. The
+  revision gate admits the old owner's request because it measures against
+  the request the agent accepted last (CN8, `dnagent.md` SH8): a refused
+  request never becomes the desired state (`dnagent.md` SH5), and the agent
+  keeps no revision of it.

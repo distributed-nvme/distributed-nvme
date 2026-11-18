@@ -751,14 +751,16 @@ is a transfer of its own cluster (`cnagent.md` CN21, Known limits), so the
 removal of the second pool, here as after the fallback, drops it on every
 controller node before the pool's subsystem goes.
 
-**react** proves the four reactions on real faults, an operator's forced
-start of a group md will not start, an operator's take-over of a group's
-repair from the worker, and the cut of a migrating leg whose serving disk
-node goes silent, on a pool of the run's slice count but at most
-`REACT_SLICE_CAP` slices (Topology and parameters), each by the record it
-writes, one action per pass making every wait a threshold plus a few passes
-(`dnv-worker.md` AR2); its own build may have reacted, so each reaction is
-judged by a delta from values read just before the trigger. Auto-grow:
+**react** proves the four reactions on real faults, that a planned restart
+of the primary's cn agent moves nothing, an operator's forced start of a
+group md will not start, an operator's take-over of a group's repair from
+the worker, and the cut of a migrating leg whose serving disk node goes
+silent, on a pool of the run's slice count but at most `REACT_SLICE_CAP`
+slices (Topology and parameters), each by the record it writes or, for the
+restart, by the records it does not write, one action per pass making every
+wait a threshold plus a few passes (`dnv-worker.md` AR2); its own build may
+have reacted, so each reaction is judged by a delta from values read just
+before the trigger. Auto-grow:
 strided writes sized from the primary's own pool usage push slice 0's thin
 pool past its mark, and the worker must add exactly one data group and the
 pool grow on the device (`dnv-worker.md` AR6); the case's two thin devices

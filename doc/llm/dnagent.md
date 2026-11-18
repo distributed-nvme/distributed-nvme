@@ -160,9 +160,10 @@ The constants this document relies on, whose values and comments
   (`dnv-worker.md` RW5), a round answered with `ReplyCodeUnknownObject` is
   not judged by its observation's age (`dnv-worker.md` HL7), and a
   `SyncupCntlr` refused with `ReplyCodeInvalidConf` or
-  `ReplyCodeSaveFailed` makes the worker judge an enabled primary's later
-  rounds unhealthy (`dnv-worker.md` HL9); otherwise it serves details and
-  tests.
+  `ReplyCodeSaveFailed` at a revision newer than the one the agent holds
+  makes the worker judge an enabled primary's later rounds unhealthy while
+  they answer from the older one (`dnv-worker.md` HL9); otherwise it serves
+  details and tests.
 * `DnMigrConnectPassBudget`, `DnMigrCutoverConnectBudget` and
   `DnMigrConnectRetryPause`, the migration destination's retries of a
   failed connect to the migration source export within one pass (DN13):
@@ -356,42 +357,45 @@ elapsed (DN12 rule 1), save the restarts Known limits names.
 trace id, derives the run ctx, hands it to the role server's prepare step,
 which keeps it as `rootCtx` and marks the agent starting (SH33), listens,
 builds the gRPC server with the message limit, a handshake bound of
-`AgentHandshakeTimeout` and the two server interceptors, registers the role's service, serves and logs
-`agent serving`, then runs the role's reconcile and logs `agent started`
-with the time the reconcile took, and serves on until its own ctx is
-cancelled (SIGTERM or SIGINT, CM4). Then it stops the gRPC server
-gracefully, which lets the RPCs in flight end, for at most
-`AgentStopGrace`, and past it stops the server at once, which ends every
-stream still open and cancels the ctx of every handler still running;
+`AgentHandshakeTimeout` and the two server interceptors, registers the
+role's service, serves and logs `agent serving`, then runs the role's
+reconcile and logs `agent started` with the time the reconcile took, and
+serves on until its own ctx is cancelled (SIGTERM or SIGINT, CM4). Then it
+stops the gRPC server gracefully, which lets the RPCs in flight end, for at
+most `AgentStopGrace`, and past it stops the server at once, which ends
+every stream still open and cancels the ctx of every handler still running;
 `Serve` returns only once that stop has ended, which waits until every
-handler has returned. A converge so cut has its commands killed through
-its cancelled ctx (SH15) and is left as a crash would leave it, and the
-next start's reconcile converges the node again from the local store
-(SH1). Reason: a worker's `Check*` stream never ends by
-itself, and a worker whose rounds the agent answers in time drops it
-once those answers, which no read refreshes after the signal has
-cancelled `rootCtx`, have aged past its bound (`dnv-worker.md` HL7), so
-an unbounded drain would keep a stopping agent answering stale rounds
-for seconds; bounded, the agent stops answering within about a second of
-its signal. A connection whose handshake is still pending holds grpc's
-stop, so the handshake bound keeps that wait to a few seconds. `Serve`
-waits for the handlers the stop cut so that no converge goes on, and no
-command of one outlives the process, once it has returned. A reconcile
-that fails stops the server at once and returns its error (SH3), and a
-gRPC server that ends without a signal, as on a failed accept, is
-stopped the same way; on either path `Serve` waits for the handlers
-still running before it returns.
-The cancel-then-join pair is deferred, so **every** return path takes it,
-not just the one through serving: the reconcile has already armed the
-background goroutines (and forked their children) by the time a reconcile
-error returns, and cancellation alone does not reap a child — the
-watchdog that turns it into SIGTERM and then SIGKILL lives in this process
-and dies with it, so the child would be reparented to init still holding its
-dm device open. Cancel first, then join, in that order: the background
-goroutines only unwind on cancellation, so joining first would hang shutdown
-for ever. `CheckRoundCtx` is SH24's helper: the stream's ctx re-keyed to the
-trace id a round's request carries, or the stream's own when that id is
-empty.
+handler has returned. A converge so cut has its commands killed through its
+cancelled ctx (SH15) and is left as a crash would leave it, and the next
+start's reconcile converges the node again from the local store (SH1).
+Reason: a worker's `Check*` stream never ends by itself, and a worker whose
+rounds the agent answers in time drops it once those answers, which no read
+refreshes after the signal has cancelled `rootCtx`, have aged past its
+bound (`dnv-worker.md` HL7), so an unbounded drain would keep a stopping
+agent answering stale rounds for seconds; bounded, the agent stops
+answering within about a second of its signal. A connection whose handshake
+is still pending holds grpc's stop, so the handshake bound keeps that wait
+to a few seconds. `Serve` waits for the handlers the stop cut so that no
+converge goes on, and no command of one outlives the process, once it has
+returned. A reconcile that fails stops the server at once and returns its
+error (SH3). A gRPC server that ends without a signal, as on a failed
+accept, is stopped as a signal stops it, gracefully for at most
+`AgentStopGrace`, once the startup reconcile has ended. On both paths
+`Serve` waits for the handlers still running before it returns. The
+cancel-then-join pair is deferred, so **every** return path takes it. A
+return after the reconcile, which has armed the background goroutines (and
+forked their children), is the one that needs it: on a signal the cancel is
+done already and the join remains, and a gRPC server that ends without a
+signal returns with `rootCtx` still live, so it needs both; cancellation
+alone does not reap a child — the watchdog that turns it into SIGTERM and
+then SIGKILL lives in this process and dies with it, so the child would be
+reparented to init still holding its dm device open. A failed listen
+returns before the reconcile, and a failed reconcile from the listing of
+the local store, its first step (SH3), so neither has armed anything.
+Cancel first, then join, in that order: the background goroutines only
+unwind on cancellation, so joining first would hang shutdown for ever.
+`CheckRoundCtx` is SH24's helper: the stream's ctx re-keyed to the trace id
+a round's request carries, or the stream's own when that id is empty.
 
 ### Local store — `store.go`
 
@@ -4293,10 +4297,14 @@ else reported through `agent_reply` is still a protocol-level refusal.
   neither sets nor clears a health epoch (`dnv-worker.md` HL1); the node's
   store row does (DN18), from the first save the disk refuses, with the
   effects `dnv-worker.md` HL1 gives it. On a CN, the rounds of an enabled
-  primary whose `SyncupCntlr` is so refused read unhealthy, so the worker
-  fails it over, and fails no primary over onto a cntlr so refused, and
-  where every healthy, enabled standby is so refused too it moves no role
-  at all (`dnv-worker.md` HL9, AR5, AR7); the old primary's demotion is
+  primary whose agent so refuses a `SyncupCntlr` newer than the request it
+  holds read unhealthy while they answer from the held one, so the worker
+  fails it over, and fails no primary over onto a cntlr while such a
+  refusal of its own marks it, and where every healthy, enabled standby is
+  so marked too it moves no role at all (`dnv-worker.md` HL9, AR5, AR7); a
+  refused re-send of the held revision marks a cntlr only until its next
+  round answers, accepted, at that revision, and makes none of its rounds
+  unhealthy (`cnagent.md`, Known limits). The old primary's demotion is
   refused as well, so it serves on until the fence (`architecture.md`,
   Known limits, A failover while the old primary serves can lose an
   acknowledged write). The fault also shows in the logs: the agent's record

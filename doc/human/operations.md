@@ -6,10 +6,10 @@ page](scope.md) says what dnv promises and which limits each procedure
 works around. The first procedures are the forced-start guide: how to bring
 back a group whose legs all failed.
 
-Every procedure has the same parts: the symptom, how to confirm it, what
-dnv does alone and how long it waits, the safe steps, the steps that can
-lose data, and when to stop and ask for help. Each one says which test
-checked it, or that no test did.
+A procedure has these parts, each where it applies: the symptom, or when to
+use the procedure; how to confirm it; what dnv does alone and how long it
+waits; the safe steps; the steps that can lose data; and when to stop and
+ask for help. Each one says which test checked it, or that no test did.
 
 The commands are `dnvctl` commands. Each one needs `--gateway-address`,
 `--cluster` and `--sp`, which are left out below. A command that changes
@@ -692,8 +692,9 @@ What dnv does alone:
   A worker restart, or the pool's move to another worker, in that time
   counts it from the agent's latest start instead.
 - The check rounds after the startup pass clear those health epochs, if
-  nothing else is wrong. The first round after the pass judges nothing
-  yet, so the epochs normally clear at the second.
+  nothing else is wrong. If a check round found the agent starting, the
+  first round after the pass judges nothing yet, so the epochs clear at the
+  second. If no round did, as after a short pass, they clear at the first.
 - The start hold does not cover the time the agent is stopped. The worker
   learns that the agent is starting only from a check round. Two failed
   check rounds in a row can fail a primary on the node over, once its
@@ -710,15 +711,17 @@ Safe steps:
 
 1. Find how long the agent may stay stopped. On a controller node that
    holds a primary, the time from the stop to the moment the new agent
-   opens its port must stay well under one check interval: about one and
-   a half seconds at the defaults. The worker's connection to the agent
-   waits a little before it tries again after a refused connect, so a
-   whole interval leaves no margin. The agent stops answering within
-   about a second of SIGTERM, so the new agent must start right after the
-   old one exits. On a node that
-   holds no primary, the pools' `cntlr_unhealthy` for a cntlr and
-   `side_unhealthy` for a side bound it, 600 seconds each at the default.
-   `dnvctl sp get` shows them in `sp_conf.event_threshold`.
+   opens its port must stay well under one check interval: about one and a
+   half seconds at the defaults. The worker's connection to the agent waits
+   a little before it tries again after a refused connect, so a whole
+   interval leaves no margin. The agent stops answering within about a
+   second of SIGTERM, so the new agent must start right after the old one
+   exits. On a node that holds no primary, the pools' `cntlr_unhealthy` for
+   a cntlr and `side_unhealthy` for a side bound it, 600 seconds each at
+   the default. `dnvctl sp get` shows them in `sp_conf.event_threshold`. A
+   pool that `dnvctl sp create` made with no `--thr-*` flag shows
+   `event_threshold` as null, and a threshold that the create did not set
+   shows 0. Both mean the default.
 2. Have the command that starts the agent ready before you stop it, so
    that the stop lasts only as long as the restart itself.
 3. If the agent of a controller node that holds a primary may stay

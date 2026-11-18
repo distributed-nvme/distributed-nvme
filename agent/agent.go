@@ -41,13 +41,17 @@ import (
 // sweep's background `nvme disconnect` holds nothing a restarted agent needs
 // (cnagent.md CN10).
 //
-// The cancel-then-join pair is deferred, so *every* return path takes it, not
-// just the one through grpcServer.Serve: reconcile has already armed the
-// background goroutines (and forked their children) by the time a reconcile
-// error returns, and cancellation alone does not reap a child — the
-// exec.CommandContext watchdog that turns it into SIGTERM and then SIGKILL
-// (SH15, osclient.md, RunCommand) lives in this process and dies with it, so
-// the child would be reparented to init still holding its dm device open.
+// The cancel-then-join pair is deferred, so *every* return path takes it. A
+// return after reconcile, which has armed the background goroutines (and
+// forked their children), is the one that needs it: on a signal the cancel
+// is done already and the join remains, and a grpcServer.Serve that ends
+// without a signal returns with runCtx still live, so it needs both;
+// cancellation alone does not reap a child — the exec.CommandContext
+// watchdog that turns it into SIGTERM and then SIGKILL (SH15, osclient.md,
+// RunCommand) lives in this process and dies with it, so the child would be
+// reparented to init still holding its dm device open. A failed listen
+// returns before reconcile, and a failed reconcile from its listing of the
+// local store, its first step (SH3), so neither has armed anything.
 func Serve(
 	ctx context.Context,
 	network string,

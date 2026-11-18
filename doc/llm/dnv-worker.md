@@ -1729,52 +1729,54 @@ RW4. **Round**, every interval (RW9):
 RW5. **Syncup.** Build the request from the current inputs (RW13 to RW16),
 send under `DefaultWorkerSyncupTimeout` with a trace id (RW10). An ACCEPTED
 reply — code zero, or `ReplyCodeLeftover` below — has its `*Info` processed
-(Health bookkeeping), its `bm_info` or `bm_info_list` diffed (Bitmap pushes)
-and its sp flips run (RW18, RW19). A REJECTED one (`ReplyCodeStaleRevision`,
-`ReplyCodeUnknownObject`, `ReplyCodeInvalidConf`, `ReplyCodeSaveFailed`,
-`ReplyCodeStarting`, and
-any other non-zero code — below) is logged as `syncup rejected` (`code`,
+(Health bookkeeping), its `bm_info` or `bm_info_list` diffed (Bitmap
+pushes) and its sp flips run (RW18, RW19). A REJECTED one
+(`ReplyCodeStaleRevision`, `ReplyCodeUnknownObject`,
+`ReplyCodeInvalidConf`, `ReplyCodeSaveFailed`, `ReplyCodeStarting`, and any
+other non-zero code — below) is logged as `syncup rejected` (`code`,
 `details`) and left to the next round: starting means the agent's startup
 reconcile still runs and it applied nothing (`dnagent.md` SH33), and the
 rounds send no `Syncup*` while it answers so within the start hold (HL8);
-unknown object means the parent
-syncup has not landed yet — an sp worker's `SyncupSide` reaching the DN
-before the dn worker's `SyncupDn` listed the side, say, which is normal
-since the roles are independent (VW10) — and stale revision means the agent
-holds a revision newer than this worker's, which an overlap of two owners
-(VW7) causes for a while — for longer when the lagging owner's revision
-watch has stopped being served — and which only an etcd restore causes for
-good (`architecture.md`, etcd backup and restore); it is logged at Error.
-Invalid conf means the agent found a value the control plane cannot have
-written — a proto3 zero where `architecture.md`, Common validation, requires
-a concrete value, or a side's length to zero outside the bounds of the dn
-agent's side conf gate (`dnagent.md` DN8) — and converged nothing
-(`dnagent.md`, Names and constants in `common`). `SyncupDn`, `SyncupSide`
-and `SyncupCntlr` can return it, and the same values are checked on this
-side first — `extent_size` by RW9's gate, the SP's `bdev_conf` and every
-group's length to zero by RW14's — so a request this worker sends should
-never provoke it. From a live agent, a `ReplyCodeInvalidConf` to `SyncupDn`
-or `SyncupCntlr` means the agent's copy of those rules and `model`'s have
-drifted apart (`dnagent.md`, Shared mechanism — package `agent`); one to
-`SyncupSide` means a stored group whose block counts claim more than its
-extents hold, the one bound the dn agent checks and RW14 does not, since
-checking it needs the extent size. A failed save (`ReplyCodeSaveFailed`)
-means the agent could not save the request to its local store and so refused
-it (`dnagent.md` SH5): the request did not become the agent's desired state
+unknown object means the parent syncup has not landed yet — an sp worker's
+`SyncupSide` reaching the DN before the dn worker's `SyncupDn` listed the
+side, say, which is normal since the roles are independent (VW10) — and
+stale revision means the agent holds a revision newer than this worker's,
+which an overlap of two owners (VW7) causes for a while — for longer when
+the lagging owner's revision watch has stopped being served — and which
+only an etcd restore causes for good (`architecture.md`, etcd backup and
+restore); it is logged at Error. Invalid conf means the agent found a value
+the control plane cannot have written — a proto3 zero where
+`architecture.md`, Common validation, requires a concrete value, or a
+side's length to zero outside the bounds of the dn agent's side conf gate
+(`dnagent.md` DN8) — and converged nothing (`dnagent.md`, Names and
+constants in `common`). `SyncupDn`, `SyncupSide` and `SyncupCntlr` can
+return it, and the same values are checked on this side first —
+`extent_size` by RW9's gate, the SP's `bdev_conf` and every group's length
+to zero by RW14's — so a request this worker sends should never provoke it.
+From a live agent, a `ReplyCodeInvalidConf` to `SyncupDn` or `SyncupCntlr`
+means the agent's copy of those rules and `model`'s have drifted apart
+(`dnagent.md`, Shared mechanism — package `agent`); one to `SyncupSide`
+means a stored group whose block counts claim more than its extents hold,
+the one bound the dn agent checks and RW14 does not, since checking it
+needs the extent size. A failed save (`ReplyCodeSaveFailed`) means the
+agent could not save the request to its local store and so refused it
+(`dnagent.md` SH5): the request did not become the agent's desired state
 and nothing was converged, and the reply carries the revision the agent
 still holds for the object, zero when it holds none. The agent answers the
 object's rounds from what it still holds (`dnagent.md` SH28), so a request
-at a revision the agent does not hold, or for an object it does not hold, is
-re-issued by each round (RW4 step 5) until a save succeeds, and one at the
-held revision by each round that answers a non-zero code. The main cause is
-a local store on a full or read-only disk, an operator event; a save that
-the agent's soft timeout cut off is another (`dnagent.md` SH4). It is logged
-at Error: a rejection neither sets nor clears a health epoch (HL1, HL2), so
-this record is where the worker's log shows the fault, once for each refused
-`Syncup*`; the node's store row shows the disk's refusal as the node's
-health epoch (HL1; `dnagent.md` DN18), and an enabled primary whose
-`SyncupCntlr` is refused, for a failed save or an invalid conf, reads
-unhealthy on its later rounds (HL9).
+at a revision the agent does not hold, or for an object it does not hold,
+is re-issued by each round (RW4 step 5) until a save succeeds, and one at
+the held revision by each round that answers a non-zero code. The main
+cause is a local store on a full or read-only disk, an operator event; a
+save that the agent's soft timeout cut off is another (`dnagent.md` SH4).
+It is logged at Error: a rejection neither sets nor clears a health epoch
+(HL1, HL2), so this record is where the worker's log shows the fault, once
+for each refused `Syncup*`; the node's store row shows the disk's refusal
+as the node's health epoch (HL1; `dnagent.md` DN18), and an enabled primary
+whose `SyncupCntlr` of a revision newer than the one its agent holds is
+refused, for a failed save or an invalid conf, reads unhealthy on its later
+rounds while they answer from the older one (HL9); a refused re-send of the
+held revision makes none of its rounds unhealthy.
 
 `ReplyCodeLeftover` is the one non-zero code that is **not** a rejection:
 the request was applied — the desired state is stored and the converge
@@ -1887,13 +1889,17 @@ queues a burst of catch-up rounds.
 
 RW9. **Inputs from the cache** (RW21), every one used **as stored**:
 `dn_interval`, `cn_interval`, `side_interval` and `cntlr_interval` (already
-inside the bounds `MinHealthCheckInterval` and `MaxHealthCheckInterval` set —
-`CreateCluster` resolved and clamped them at write time, `architecture.md`,
-Common validation), `extent_size`, `qos_ratio`, `dn_bin_conf`. The intervals,
-`extent_size` and `qos_ratio` are read from the process-wide cache every
-round, never captured once. A cluster absent from the cache makes the loop
-**idle**: no stream, no syncup, one `cluster conf missing` record, a retry
-every `DefaultHealthCheckInterval`.
+inside the bounds `MinHealthCheckInterval` and `MaxHealthCheckInterval` set
+— `CreateCluster` resolved and clamped them at write time,
+`architecture.md`, Common validation), `extent_size`, `qos_ratio`,
+`dn_bin_conf`. One more is read, but not as stored: `start_hold_conf`,
+which HL8 reads on each round that finds the agent starting, through
+`model.ResolveStartHoldSeconds`; an absent message, from a cluster a build
+before the hold created, reads as `DefaultStartHoldSeconds`, and a zero is
+no hold. The intervals, `extent_size` and `qos_ratio` are read from the
+process-wide cache every round, never captured once. A cluster absent from
+the cache makes the loop **idle**: no stream, no syncup, one
+`cluster conf missing` record, a retry every `DefaultHealthCheckInterval`.
 
 A cluster whose entry fails `model.ValidateClusterConf` makes the loop
 **refuse** it: the same quiesced state (stream dropped, RW7 connection
@@ -2683,35 +2689,37 @@ reaction pass runs on the coordinator's own ticker (AR1).
 
 ### `ClusterConf` cache — `worker/clusterconf.go`
 
-RW21. One per process: a `Range` of `ClusterConfPrefix`, then a `WatchTyped`
-from that revision plus one, decoding `ClusterConf`. Entries are keyed by
-`ClusterId` of the name and the creation epoch — the name is the key
-suffix, the epoch is in the value — and a delete removes the entry. Readers
-receive an immutable snapshot of the entry **exactly as etcd holds it**:
-the cache resolves nothing, because `CreateCluster` made every defaultable
-member concrete when it wrote the key (`architecture.md`, Common
-validation), so a zero read back here is corruption or foreign data, not an
-omission. Each reader validates the snapshot with
-`model.ValidateClusterConf`, the clone drain's final step through the model
-op it hands the snapshot to (CLD7), and **refuses** rather than guessing a
-geometry the rest of the cluster may not agree with; the cache validates
-nothing itself, because its five readers refuse differently — idle the loop
-(RW9), keep the tick cadence and skip the pass (AR1), fail the DN health
-write (HL1), fail the clone drain's final step, which the next pass runs
-again (CLD7) — and a validating get would either hide that or log it five
-times.
-An invalid conf is deliberately still **cached**: dropping it would make a
-cluster whose conf went bad indistinguishable from a deleted one and send
-the operator chasing a phantom deletion that never happened. A value that
-does not decode is the exception: it ends the watch, and the rescan skips
-its key and replaces the whole map, so the last good entry goes with it —
-the cache keys an entry by the `cluster_id` built from the value's
-`creation_epoch`, which such a value does not give — and the cluster's
-loops idle as on a deleted cluster, logging `cluster conf missing` (RW9),
-while `etcdutil`'s own record of the decode names the key and the error. A
-cluster
-**absent** from the cache is the separate RW9 and SW6 idle path, with a
-record of its own. Watch errors and compaction are handled like SW4.
+RW21. One per process: a `Range` of `ClusterConfPrefix`, then a
+`WatchTyped` from that revision plus one, decoding `ClusterConf`. Entries
+are keyed by `ClusterId` of the name and the creation epoch — the name is
+the key suffix, the epoch is in the value — and a delete removes the entry.
+Readers receive an immutable snapshot of the entry **exactly as etcd holds
+it**: the cache resolves nothing, because `CreateCluster` made every
+defaultable member concrete when it wrote the key (`architecture.md`,
+Common validation), so a zero read back here is corruption or foreign data,
+not an omission, save in `md_check_conf` and `start_hold_conf`: the zero of
+either turns its setting off, the md check or the start hold, and a cluster
+a build before the setting created lacks the message, which reads as no md
+check, or as `DefaultStartHoldSeconds`, which RW9's reader resolves. Each
+reader validates the snapshot with `model.ValidateClusterConf`, the clone
+drain's final step through the model op it hands the snapshot to (CLD7),
+and **refuses** rather than guessing a geometry the rest of the cluster may
+not agree with; the cache validates nothing itself, because its five
+readers refuse differently — idle the loop (RW9), keep the tick cadence and
+skip the pass (AR1), fail the DN health write (HL1), fail the clone drain's
+final step, which the next pass runs again (CLD7) — and a validating get
+would either hide that or log it five times. An invalid conf is
+deliberately still **cached**: dropping it would make a cluster whose conf
+went bad indistinguishable from a deleted one and send the operator chasing
+a phantom deletion that never happened. A value that does not decode is the
+exception: it ends the watch, and the rescan skips its key and replaces the
+whole map, so the last good entry goes with it — the cache keys an entry by
+the `cluster_id` built from the value's `creation_epoch`, which such a
+value does not give — and the cluster's loops idle as on a deleted cluster,
+logging `cluster conf missing` (RW9), while `etcdutil`'s own record of the
+decode names the key and the error. A cluster **absent** from the cache is
+the separate RW9 and SW6 idle path, with a record of its own. Watch errors
+and compaction are handled like SW4.
 
 ## Health bookkeeping — `worker/health.go`
 
@@ -3219,68 +3227,66 @@ The stream drops because the agent leaves an unchanged info out on a kept
 stream, which the unknown marking would then read as clean.
 
 HL8. **An agent that starts.** A round whose agent answers
-`ReplyCodeStarting` (`dnagent.md` SH33) is judged by how long the agent
-has been starting, by the node's clock. A starting answer that carries a
-start time begins a **start** of the agent, and the starting answers and
-missed rounds that follow extend it, whatever start each later answer
-carries, until the first round the agent answers otherwise ends it. The
-starts from the first one since the loop began, since a move, an idle or a
-refused conf of the loop, or since the last round the loop **judged** — one whose
-reply reaches its health judgement, answering in time from an observation
-that is not too old and ended no earlier than the first round after the
-pause (HL7), or refusing the object as unknown — up to the next round it
-judges make one **start series**, measured from its first start. So an
-agent that dies in its startup pass and starts again, its rounds missed
-while it is down, stays in one series, and so does one that ends each
-pass and dies before a round is judged. A starting round is measured by
-its answer time less the series' first start. Below the cluster's
-**start hold** (`ClusterConf.start_hold_conf`,
-`model.ResolveStartHoldSeconds`; a stored conf without it reads
-`DefaultStartHoldSeconds`), the round gives no verdict on the object,
-sends no `Syncup*`, which the agent would refuse, and keeps its stream,
-and a cntlr or a side is **held**: a cntlr's run of unhealthy rounds ends
-(AR10), AR5's threshold trigger fails no held cntlr over and AR7 replaces
-none, and a held side counts on no side clock — AR6's pick of a stuck
-group's side, AR8's case 2 and the side clock of a worker's repair's new
-leg. Past the hold — at or past it, with a hold of zero, which turns the
-hold off, with no start time or no answer time to measure by, or with an
-answer before the series' first start, as when the node's clock stepped
-back — the round is a missed round, as one with no reply is (`check round
-failed`, its error naming the hold), and a series that runs goes on. The
-first round the agent answers otherwise ends the start, within the hold
-or past it, and with it the pause (HL7): the startup reconcile held every
-read off, so the observations the agent answers from are the
-reconcile's, and the first round after the pause gives no verdict; the
-read it starts brings the next round's, which closes the series when the
-loop judges it. A hold ends at the round after the one that ends the
-start, whatever verdict that round gives, unless the agent answers it
-starting again, so it outlasts the start by one round; it ends sooner at
-any verdict on its object, a round's, a missed round's or a `Syncup*`
-reply's, and at a move to another endpoint (RW13), an idle or a refused
-conf (RW9) of its loop, which also forget the series. AR10's memo keeps a hold across a
+`ReplyCodeStarting` (`dnagent.md` SH33) is judged by how long the agent has
+been starting, by the node's clock. A starting answer that carries a start
+time begins a **start** of the agent, and the starting answers and missed
+rounds that follow extend it, whatever start each later answer carries,
+until the first round the agent answers otherwise ends it. The starts from
+the first one since the loop began, since a move, an idle or a refused conf
+of the loop, or since the last round the loop **judged** — one whose reply
+reaches its health judgement, answering in time from an observation that is
+not too old and ended no earlier than the first round after the pause
+(HL7), or refusing the object as unknown — up to the next round it judges
+make one **start series**, measured from its first start. So an agent that
+dies in its startup pass and starts again, its rounds missed while it is
+down, stays in one series, and so does one that ends each pass and dies
+before a round is judged. A starting round is measured by its answer time
+less the series' first start. Below the cluster's **start hold**
+(`ClusterConf.start_hold_conf`, `model.ResolveStartHoldSeconds`; a stored
+conf without it reads `DefaultStartHoldSeconds`), the round gives no
+verdict on the object, sends no `Syncup*`, which the agent would refuse,
+and keeps its stream, and a cntlr or a side is **held**: a cntlr's run of
+unhealthy rounds ends (AR10), AR5's threshold trigger fails no held cntlr
+over and AR7 replaces none, and a held side counts on no side clock — AR6's
+pick of a stuck group's side, AR8's case 2 and the side clock of a worker's
+repair's new leg. Past the hold — at or past it, with a hold of zero, which
+turns the hold off, with no start time or no answer time to measure by, or
+with an answer before the series' first start, as when the node's clock
+stepped back — the round is a missed round, as one with no reply is
+(`check round failed`, its error naming the hold), and a series that runs
+goes on. The first round the agent answers otherwise ends the start, within
+the hold or past it, and with it the pause (HL7): the startup reconcile
+held every read off, so the observations the agent answers from are the
+reconcile's, and the first round after the pause gives no verdict; the read
+it starts brings the next round's, which closes the series when the loop
+judges it. A hold ends at the round after the one that ends the start,
+whatever verdict that round gives, unless the agent answers it starting
+again, so it outlasts the start by one round; it ends sooner at any verdict
+on its object, a round's, a missed round's or a `Syncup*` reply's, and at a
+move to another endpoint (RW13), an idle or a refused conf (RW9) of its
+loop, which also forget the series. AR10's memo keeps a hold across a
 restart of the child that drives the object, until the new child's first
 verdict on it or the end of a start the new child sees. A starting reply
 keeps the health epoch that the missed rounds before the agent's port
-opened may have set: a restart does not clear a fault, and the first
-clean round does. The loop of a DN or a CN logs the starting answer that
-begins a series, each round that ends a start, and a round whose reply
-carries another agent start time than the loop's rounds last carried,
-starting or not, as the agent's restart; a move forgets the start time
-last carried. An sp child logs none of them, so a controller node's
-restart makes one record of each, not one per cntlr (Log records).
-Reason: a restart of a controller node's agent converges every cntlr
-before it can read any, at many pools for longer than the primary
-threshold, and failing every primary over for it moves hosts to another
-controller node for no fault of the data path; the hold bounds that, by
-the node's clock, across a worker restart or a handoff, since the start
-time travels in every reply. A series is measured from its first start,
-and stays open past the end of a start until a round is judged, so that
-an agent that never comes to serve — its startup pass runs on, or dies
-and starts again, or ends each time and the agent dies before a round is
-judged — is judged past the hold as one that does not answer; a series
-lives in its loop, so each new loop during such a run — a worker
-restart, a handoff, a restarted child — and each idle can hold it up to
-one more start hold (Known limits).
+opened may have set: a restart does not clear a fault, and the first clean
+round does. The loop of a DN or a CN logs the starting answer that begins a
+series, each round that ends a start, and a round whose reply carries
+another agent start time than the loop's rounds last carried, starting or
+not, as the agent's restart; a move forgets the start time last carried. An
+sp child logs none of them, so a controller node's restart makes one record
+of each, not one per cntlr (Log records). Reason: a restart of a controller
+node's agent converges every cntlr before it can read any, at many pools
+for longer than the primary threshold, and failing every primary over for
+it moves hosts to another controller node for no fault of the data path;
+the hold bounds that, by the node's clock, across a worker restart or a
+handoff, since the start time travels in every reply. A series is measured
+from its first start, and stays open past the end of a start until a round
+is judged, so that an agent that never comes to serve — its startup pass
+runs on, or dies and starts again, or ends each time and the agent dies
+before a round is judged — is judged past the hold as one that does not
+answer; a series lives in its loop, so each new loop during such a run — a
+worker restart, a handoff, a restarted child — and each idle or refused
+conf (RW9) can hold it up to one more start hold (Known limits).
 
 HL9. **A primary that refuses its syncups.** When the agent refuses a
 `SyncupCntlr` with `ReplyCodeInvalidConf` or `ReplyCodeSaveFailed` — the
@@ -3293,25 +3299,26 @@ accepting reply came back, as after a syncup cut by its deadline, a lost
 reply or a stopped child. A missed round ends it too: a cntlr that does not
 answer is unhealthy on its own account, and whether it still refuses is
 learnt again from the `Syncup*` its next answered round re-sends. While the
-mark names the revision the child
-drives and the plan makes the cntlr the enabled primary, each round that
-the agent answers, accepted, from an observation of an older revision is
-unhealthy (`res_name` `SyncupCntlr refused`), so its `err_epoch` is set
-and AR5 fails it over at the primary threshold, the settling primary's
-rule included, as for any unhealthy primary. While any mark stands, the
-cntlr is no failover candidate: AR5's election passes over it, and so do
-the failover's and the replacement's own writes, to which the pass hands
-it (AR5, AR7). The stale, unknown and starting
-refusals, and every other code, change nothing here: they say the agent
-is behind or not ready, which RW4, RW5 and HL8 handle. Reason: a primary
-that never applies its syncups never applies a change of the pool either
-— a repair's new leg it never adds, a thin device it never creates —
-while it answers its rounds clean from what it last applied; and a cntlr
-whose agent refuses its own syncups would refuse the promotion's too, so
-a failover onto it would leave the pool's changes waiting on the new
-primary, and a refusal every cntlr shares, such as a conf every agent
-finds invalid, would move the role from one refuser to the next every
-threshold.
+mark names the revision the child drives and the plan makes the cntlr the
+enabled primary, each round that the agent answers, accepted, from an
+observation of an older revision is unhealthy (`res_name`
+`SyncupCntlr refused`), so its `err_epoch` is set and AR5 fails it over at
+the primary threshold, the settling primary's rule included, as for any
+unhealthy primary. While any mark stands, the cntlr is no failover
+candidate: AR5's election passes over it, and so do the failover's and the
+replacement's own writes, to which the pass hands it (AR5, AR7). The stale,
+unknown and starting refusals, and every code this worker does not know,
+change nothing here: a stale revision says this worker is behind the agent,
+an unknown object or a starting answer says the agent is behind or not
+ready, and an unknown code carries no verdict this worker may act on; RW4,
+RW5 and HL8 handle them. Reason: a primary that never applies its syncups
+never applies a change of the pool either — a repair's new leg it never
+adds, a thin device it never creates — while it answers its rounds clean
+from what it last applied; and a cntlr whose agent refuses its own syncups
+would refuse the promotion's too, so a failover onto it would leave the
+pool's changes waiting on the new primary, and a refusal every cntlr
+shares, such as a conf every agent finds invalid, would move the role from
+one refuser to the next every threshold.
 
 ## Bitmap pushes — `worker/bmpush.go`
 
@@ -3472,50 +3479,53 @@ OK and its details parse as a dm-clone status line — and only while it
 holds no bitmap of the migration and no read is in flight. Reasons: the
 destination builds its dm-clone only over the source's export, which the
 source links only once every per-CN dm-linear of the side is fenced
-(`dnagent.md` DN12), so the source takes no more writes
-(`architecture.md`, Migration); a reply at the desired revision leaves no
-`SyncupSide` pending, so the dm-clone the reply shows is that of the
-request the plan names, which the pushes address; and the path keeps the read's commit of the pool from
-blocking on a leg with no path. The read is one `GetLegBm` of the whole leg
-(`block_cnt` zero) to that CN, under `DefaultWorkerSyncupTimeout` (RW5), on a
-goroutine of the child's pusher, so a slow read holds neither the
-coordinator nor the child's loop, and the child's stop cancels it. The
+(`dnagent.md` DN12), so the source takes no more writes (`architecture.md`,
+Migration); a reply at the desired revision leaves no `SyncupSide` pending,
+so the dm-clone the reply shows is that of the request the plan names,
+which the pushes address; and the path keeps the read's commit of the pool
+from blocking on a leg with no path. The read is one `GetLegBm` of the
+whole leg (`block_cnt` zero) to that CN, under `DefaultWorkerSyncupTimeout`
+(RW5), on a goroutine of the child's pusher, so a slow read holds neither
+the coordinator nor the child's loop, and the child's stop cancels it. The
 reply is cut into pieces of `MigrBmPieceBytes`, each but the last covering
 a multiple of 8 blocks, so they join at the byte (`architecture.md`, Bitmap
 reads); more than `MaxMigrBmCnt` pieces fails the read, as the agent
 refuses a `bm_idx` past it (`dnagent.md` DN15). The pieces live in the
 child's memory alone. Right after the read the child pushes every piece,
-whatever the applied set of any `SyncupSide` reply lists: that set may
-list an older build's chunks (BM2), and a new child whose agent kept the
-desired revision has had no `SyncupSide` reply at all. The agent takes a
-piece it holds byte for byte without saving or applying it again, and
-saves any other, taking out the chunk at its index and those above it
-first (`dnagent.md` DN15), so no piece is placed behind an older chunk of
-another length (`architecture.md`, Upgrade in lockstep). Each later offer
-to a child that holds the bitmap, made while the same condition on its
-last reply holds, pushes again from the lowest piece the memo of BM5 does
-not list to the last piece (BM2): no `SyncupSide` need follow the read, so
-the offer is what retries a push that failed (BM6). An offer made while a
-plan of the migration runs or waits pushes nothing: that plan's pushes
-take its pieces out of the memo until each is answered (BM5), so a plan
-built from the memo meanwhile would push them again; the first offer
-after it ends plans from what it left. A read that fails — the
-call fails or times out, or the bitmap has more than `MaxMigrBmCnt` pieces
-— is logged as `migration bitmap read failed` and leaves no bitmap, and a
-later offer reads again; but a bitmap of too many pieces, and the third
-read in all that the agent refused or did not answer in time, make the
-child give the bitmap up (`given_up` on the record): it holds an empty
-bitmap, reads no more and pushes nothing, and the copy copies every region.
-A call that found the agent unreachable counts for nothing. Reason: a read
-that fails on the agent's side, such as a metadata dump past its timeout,
-fails again, and each try holds the primary's cntlr lock (`cnagent.md`
-CN25). A read that succeeds is logged as `migration bitmap read` with its
-piece count (Log records). The bitmap goes with the child and with the
-migration: a child restarted, a handoff or a worker restart reads it again,
-and a `SyncupSide` reply to a plan that no longer names the migration, at
-its finish, drops it, as a cancel, which removes the destination side,
-stops its child (RW14), so a read still in flight then keeps nothing. A round that finds the agent unreachable clears the condition on
-the dm-clone, as it clears the cutover's wait (RW18).
+whatever the applied set of any `SyncupSide` reply lists: that set may list
+an older build's chunks (BM2), and a new child whose agent kept the desired
+revision has had no `SyncupSide` reply at all. The agent takes a piece it
+holds byte for byte without saving or applying it again, and saves any
+other, taking out the chunk at its index and those above it first
+(`dnagent.md` DN15), so no piece is placed behind an older chunk of another
+length (`architecture.md`, Upgrade in lockstep). Each later offer to a
+child that holds the bitmap, made while the same condition on its last
+reply holds, pushes again from the lowest piece the memo of BM5 does not
+list to the last piece (BM2): no `SyncupSide` need follow the read, so the
+offer is what retries a push that failed (BM6). An offer made while a plan
+of the migration runs or waits pushes nothing: that plan's pushes take its
+pieces out of the memo until each is answered (BM5), so a plan built from
+the memo meanwhile would push them again; the first offer after it ends
+plans from what it left. A read that fails — the call fails or times out,
+or the bitmap has more than `MaxMigrBmCnt` pieces — is logged as
+`migration bitmap read failed` and leaves no bitmap, and a later offer
+reads again; but a bitmap of too many pieces, and the third read in all
+that the agent refused for another reason than its start or did not answer
+in time, make the child give the bitmap up (`given_up` on the record): it
+holds an empty bitmap, reads no more and pushes nothing, and the copy
+copies every region. A call that ends with gRPC's Unavailable counts for
+nothing: one that found the agent unreachable, and one the agent refused
+because it is still starting (`dnagent.md` SH33). Reason: a read that fails
+on the agent's side, such as a metadata dump past its timeout, fails again,
+and each try holds the primary's cntlr lock (`cnagent.md` CN25). A read
+that succeeds is logged as `migration bitmap read` with its piece count
+(Log records). The bitmap goes with the child and with the migration: a
+child restarted, a handoff or a worker restart reads it again, and a
+`SyncupSide` reply to a plan that no longer names the migration, at its
+finish, drops it, as a cancel, which removes the destination side, stops
+its child (RW14), so a read still in flight then keeps nothing. A round
+that finds the agent unreachable clears the condition on the dm-clone, as
+it clears the cutover's wait (RW18).
 
 ## Automatic reactions — `worker/reaction.go`
 
@@ -6693,25 +6703,24 @@ which no suite case sets, so no suite case runs RW13's count compare.
   reachability: two such rounds in a row are two missed rounds all the
   same, and fail over a primary that still serves its hosts once its
   threshold has run out.
-* **A startup longer than the start hold fails over the node's
-  primaries.** An agent answers every round starting until its whole
-  startup reconcile ends, and the reconcile converges every object of the
-  node one after another (`dnagent.md` SH33). Past the cluster's start
-  hold, counted from the first start of the start series, each such round
-  is a missed round (HL8), so every primary with a failover candidate on a
-  controller node whose reconcile outlasts the
-  hold is failed over once its threshold has run out and two such rounds
-  in a row have filled its run (AR5, AR10), and its cntlrs are replaced
-  as AR7 says once the hold has passed and `cntlr_unhealthy` has run out
-  from their health epochs, which the rounds missed while the agent was
-  stopped may have set before it started. The hold is fixed when the
-  cluster is created (`architecture.md`, Clusters), so a cluster whose
-  controller nodes hold more pools than its hold covers needs a longer
-  one at its create. A start series lives in its loop (HL8): a worker
-  restart, a handoff, a restarted child or an idle begins a new one at
-  the agent's latest start, so an agent that dies in its startup pass and
-  starts again, or ends each pass and dies before a round is judged, is
-  held up to one more start hold for each of them.
+* **A startup longer than the start hold fails over the node's primaries.**
+  An agent answers every round starting until its whole startup reconcile
+  ends, and the reconcile converges every object of the node one after
+  another (`dnagent.md` SH33). Past the cluster's start hold, counted from
+  the first start of the start series, each such round is a missed round
+  (HL8), so every primary with a failover candidate on a controller node
+  whose reconcile outlasts the hold is failed over once its threshold has
+  run out and two such rounds in a row have filled its run (AR5, AR10), and
+  its cntlrs are replaced as AR7 says once the hold has passed and
+  `cntlr_unhealthy` has run out from their health epochs, which the rounds
+  missed while the agent was stopped may have set before it started. The
+  hold is fixed when the cluster is created (`architecture.md`, Clusters),
+  so a cluster whose controller nodes hold more pools than its hold covers
+  needs a longer one at its create. A start series lives in its loop (HL8):
+  a worker restart, a handoff, a restarted child, an idle or a refused conf
+  begins a new one at the agent's latest start, so an agent that dies in
+  its startup pass and starts again, or ends each pass and dies before a
+  round is judged, is held up to one more start hold for each of them.
 * **A reboot that the worker first sees as a starting agent holds its
   failover up to the start hold.** The start time tells the worker how
   long the agent has been starting, not whether the node's kernel kept

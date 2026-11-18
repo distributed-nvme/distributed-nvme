@@ -3907,10 +3907,13 @@ var errMigrBmTooLarge = errors.New("leg bitmap too large")
 // primary's cn agent, cut into pieces of MigrBmPieceBytes, kept in memory
 // and pushed. A read that fails is logged and leaves no bitmap, so a later
 // offer reads again, unless it is the migrBmReadTries-th that failed on the
-// agent's side — the call reached the agent, which refused or did not answer
-// in time — or the bitmap has too many pieces: the child then holds an empty
-// bitmap, reads no more and pushes nothing, and the copy copies every
-// region. A call that found the agent unreachable counts for nothing.
+// agent's side — the call reached the agent, which refused for another
+// reason than its start or did not answer in time — or the bitmap has too
+// many pieces: the child then holds an empty bitmap, reads no more and
+// pushes nothing, and the copy copies every region. A call that ends with
+// Unavailable counts for nothing: one that found the agent unreachable, and
+// one the agent refused because its startup pass still runs (dnagent.md
+// SH33).
 func (d *sideDriver) readMigrBitmap(
 	ctx context.Context,
 	migrId uint64,
@@ -4805,10 +4808,12 @@ const resSyncupRefused = "SyncupCntlr refused"
 // it, and one that accepts a request ends it, as does a round that answers,
 // accepted, at the driven revision or later: the agent holds what it once
 // refused, though no accepting reply came back (a syncup cut by its
-// deadline, a reply lost, a child stopped). A stale, unknown-object or
-// starting refusal says the agent is behind or not ready, which other rules
-// judge, and changes nothing. The memo learns whether the cntlr refuses,
-// which AR5 reads of its standbys.
+// deadline, a reply lost, a child stopped). A stale refusal says this worker
+// is behind the agent, an unknown-object or starting one that the agent is
+// behind or not ready, and a code this worker does not know carries no
+// verdict it may act on; other rules judge them, and none changes the mark.
+// The memo learns whether the cntlr refuses, which AR5 reads of its
+// standbys.
 func (d *cntlrDriver) noteRefusal(r *replyState, plan *cntlrPlan) {
 	if r.fromRound {
 		if accepted(r.code) && r.revision >= plan.req.GetRevision() {

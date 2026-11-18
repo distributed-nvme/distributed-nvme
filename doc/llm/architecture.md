@@ -2215,20 +2215,21 @@ one attempt reuse the stamped epoch, so they stay idempotent; a client
 that retries after a failed `CreateCluster` stamps a new epoch and thus
 targets a different `cluster_id` — which is why the collision guard is
 re-evaluated inside every attempt's STM.
-Action: bound-check the raw request (Common validation), then resolve it
-— in that order, or the bounds check nothing — and build the message to
-store once, outside the STM, like the epoch above. The resolved
-`bdev_conf` is judged by the geometry rules once more before it is stored,
-since a member the request omitted meets them only as its default: its
-constant or, for the stripe, the stripe its block gives. One
-STM creates `ClusterConf` (the **resolved** members plus the stamped
-`creation_epoch`), and `DnGlobal`, `CnGlobal` and `SpGlobal`, each at its
-first `next_id` with every `shard_bucket` entry zero (Globals: id
-allocation + shard buckets). Reply `cluster_id`. Nothing downstream
-resolves again: a zero read back out of this key is corruption and is
-refused, not substituted, save an `md_check_conf` zero, which means no
-check, and a `start_hold_conf` zero, which means no start hold (Common
-validation).
+Action: bound-check the raw request (Common validation), then resolve it —
+in that order, or the bounds check nothing — and build the message to store
+once, outside the STM, like the epoch above. The resolved `bdev_conf` is
+judged by the geometry rules once more before it is stored, since a member
+the request omitted meets them only as its default: its constant or, for
+the stripe, the stripe its block gives. One STM creates `ClusterConf` (the
+**resolved** members plus the stamped `creation_epoch`), and `DnGlobal`,
+`CnGlobal` and `SpGlobal`, each at its first `next_id` with every
+`shard_bucket` entry zero (Globals: id allocation + shard buckets). Reply
+`cluster_id`. Nothing downstream resolves again, save the start hold of a
+conf a build before the hold stored, whose absent `start_hold_conf` reads
+as `DefaultStartHoldSeconds` (`model.ResolveStartHoldSeconds`): a zero read
+back out of this key is corruption and is refused, not substituted, save an
+`md_check_conf` zero, which means no check, and a `start_hold_conf` zero,
+which means no start hold (Common validation).
 `ClusterConf` is **write-once**: `qos_ratio`, `bdev_conf`, `dn_bin_conf`,
 `alloc_conf`, `health_check_conf`, `md_check_conf` and `start_hold_conf`
 can only be set here — no RPC updates
@@ -5361,48 +5362,49 @@ Agents only report; the worker alone reacts. Every reaction is an ordinary
 STM mutation that bumps `SpRev` (`dnv-worker.md` MD6), so the data-plane
 choreography is the same as for the equivalent manual RPC; the withdrawal
 of a stuck grow has no such RPC, and removes a group no array was built
-from (`dnv-worker.md` AR6). The sp role
-evaluates the reactions per SP on its own cadence and applies at most one
-per pass (`dnv-worker.md` AR1, AR2); none runs for an SP with `sp_level`
-at or above `SP_LEVEL_NO_THINPOOL`, a disabled cntlr is never a candidate,
-replaced or repaired, and a `deleting` SP runs a step of its drain instead
+from (`dnv-worker.md` AR6). The sp role evaluates the reactions per SP on
+its own cadence and applies at most one per pass (`dnv-worker.md` AR1,
+AR2); none runs for an SP with `sp_level` at or above
+`SP_LEVEL_NO_THINPOOL`, a disabled cntlr is never a candidate, replaced or
+repaired, and a `deleting` SP runs a step of its drain instead
 (`dnv-worker.md` AR3). A threshold is breached when now minus `err_epoch`
 is at least the SP's `event_threshold` field of that kind, a zero field
 meaning its default (Common validation; `dnv-worker.md` AR4). A breach
 fires a reaction — the failover of an unhealthy primary, the withdrawal of
 a stuck grow, a cntlr replacement, a leg repair on either of its clocks —
-only on an object
-whose latest health verdict by this worker's coordinator of the SP is
-unhealthy, and the failover only once the primary's last two health
-verdicts from check rounds, counted as `dnv-worker.md` RW23 says, are both
-unhealthy, with no clean answer, of a round or of a syncup, since the
-earlier of them. A coordinator has no verdict when it starts, after a
+only on an object whose latest health verdict by this worker's coordinator
+of the SP is unhealthy, and the failover only once the primary's last two
+health verdicts from check rounds, counted as `dnv-worker.md` RW23 says,
+are both unhealthy, with no clean answer, of a round or of a syncup, since
+the earlier of them. A coordinator has no verdict when it starts, after a
 restart and after a handoff alike; the clock still runs from the stored
 `err_epoch`, and the disabled trigger needs no verdict (`dnv-worker.md`
-AR10). An epoch that an earlier owner left, or that another observer
-wrote, therefore fires nothing before this worker has judged the object
-itself. That judgment reads the agent's report, and the agent answers from
-its latest observation, which only a converge or a read that a round
-starts renews (Live-state reporting; `dnagent.md` SH29). After a pause in
-the worker's rounds of an object (`dnv-worker.md` HL7), such as a worker
-restart, a fence, a handoff or the end of an agent's start, a round that answers from an observation
-that ended before the first round after the pause gives no verdict on
-what it reports and drives only the re-sync, until the
-observation is too old and the round is a missed round (`dnv-worker.md`
-HL7). No failover on its threshold, withdrawal of a stuck grow, cntlr
-replacement or leg repair therefore rests on what such an observation
-reports, though a missed
-round counts in a failover run as any other does (`dnv-worker.md` AR10).
-While an agent answers that it is starting, for no longer than the
-cluster's start hold from the first of its starts since the worker last
-judged a round of the object, a round of it ends a cntlr's failover
-run, keeps the cntlr from a failover and a replacement, and keeps a side
-off the side clocks of the withdrawal of a stuck grow and of leg repair,
-each until the round after the one that ends the start, or an earlier
-verdict on the object, its health epoch standing (`dnv-worker.md` HL8). A
-primary whose agent refuses its syncups, with an invalid conf or a failed
-save, reads unhealthy and is failed over, and a cntlr so refused is no
-failover candidate (`dnv-worker.md` HL9).
+AR10). An epoch that an earlier owner left, or that another observer wrote,
+therefore fires nothing before this worker has judged the object itself.
+That judgment reads the agent's report, and the agent answers from its
+latest observation, which only a converge or a read that a round starts
+renews (Live-state reporting; `dnagent.md` SH29). After a pause in the
+worker's rounds of an object (`dnv-worker.md` HL7), such as a worker
+restart, a fence, a handoff or the end of an agent's start, a round that
+answers from an observation that ended before the first round after the
+pause gives no verdict on what it reports and drives only the re-sync,
+until the observation is too old and the round is a missed round
+(`dnv-worker.md` HL7). No failover on its threshold, withdrawal of a stuck
+grow, cntlr replacement or leg repair therefore rests on what such an
+observation reports, though a missed round counts in a failover run as any
+other does (`dnv-worker.md` AR10). While an agent answers that it is
+starting, for no longer than the cluster's start hold from the first of its
+starts since the worker last judged a round of the object, a round of it
+ends a cntlr's failover run, keeps the cntlr from a failover and a
+replacement, and keeps a side off the side clocks of the withdrawal of a
+stuck grow and of leg repair, each until the round after the one that ends
+the start, or an earlier verdict on the object, its health epoch standing
+(`dnv-worker.md` HL8). A primary whose agent refuses a syncup newer than
+the request it holds, with an invalid conf or a failed save, reads
+unhealthy and is failed over, and a cntlr so refused is no failover
+candidate while the refusal stands; a refusal the primary shares with every
+healthy, enabled standby moves no role, by a failover or by a replacement
+(`dnv-worker.md` HL9, AR5, AR7).
 The four reactions:
 
 * **Failover** (`dnv-worker.md` AR5): an unhealthy primary — or a
