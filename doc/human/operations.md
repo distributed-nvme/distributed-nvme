@@ -679,9 +679,10 @@ What dnv does alone:
   and then exits.
 - The worker's check rounds to the stopped agent fail. The first failed
   round sets the health epoch of the node and of each cntlr and side on it.
-- The new agent opens its port before its startup pass. Until the pass
-  ends, it answers every check round that it is starting, and it refuses
-  every syncup, which the worker sends again later.
+- The new agent starts to listen for the worker's calls before its startup
+  pass. Until the pass ends, it answers every check round that it is
+  starting, and it refuses every syncup, which the worker sends again
+  later.
 - While the agent answers that it is starting, and for the start hold at
   most, the worker makes no failover and no cntlr replacement for a cntlr
   on the node. A side on the node does not count toward a leg repair, and
@@ -711,38 +712,47 @@ Safe steps:
 
 1. Find how long the agent may stay stopped. On a controller node that
    holds a primary, the time from the stop to the moment the new agent
-   opens its port must stay well under one check interval: about one and a
-   half seconds at the defaults. The worker's connection to the agent waits
-   a little before it tries again after a refused connect, so a whole
-   interval leaves no margin. The agent stops answering within about a
-   second of SIGTERM, so the new agent must start right after the old one
-   exits. On a node that holds no primary, the pools' `cntlr_unhealthy` for
-   a cntlr and `side_unhealthy` for a side bound it, 600 seconds each at
-   the default. `dnvctl sp get` shows them in `sp_conf.event_threshold`. A
-   pool that `dnvctl sp create` made with no `--thr-*` flag shows
-   `event_threshold` as null, and a threshold that the create did not set
-   shows 0. Both mean the default.
+   starts to listen for the worker's calls must stay well under one check
+   interval: about one and a half seconds at the defaults. The worker's
+   connection to the agent waits a little before it tries again after a
+   refused connect, so a whole interval leaves no margin. The agent stops
+   answering within about a second of SIGTERM, so the new agent must start
+   right after the old one exits. On a node that holds no primary, the
+   pools' `cntlr_unhealthy` for a cntlr and `side_unhealthy` for a side
+   bound it, 600 seconds each at the default. `dnvctl sp get` shows them
+   in `sp_conf.event_threshold`. A pool that `dnvctl sp create` made with
+   no `--thr-*` flag shows `event_threshold` as null, and a threshold that
+   the create did not set shows 0. Both mean the default.
 2. Have the command that starts the agent ready before you stop it, so
    that the stop lasts only as long as the restart itself.
-3. If the agent of a controller node that holds a primary may stay
-   stopped longer than step 1 allows, move each primary off the node
-   first. For each cntlr on the node that `dnvctl sp get` shows as
-   primary, first check that `dnvctl sp get` shows another cntlr of the
-   pool with `disabled` false and `err_epoch` 0: an enabled standby with
-   no health epoch. If there is one, run
+3. If the agent of a controller node that holds a primary may stay stopped
+   longer than step 1 allows, move each primary off the node first. For
+   each cntlr on the node that `dnvctl sp get` shows as primary, first
+   check that `dnvctl sp get` shows another cntlr of the pool with
+   `disabled` false and `err_epoch` 0: an enabled standby with no health
+   epoch. If there is one, run
    `dnvctl cntlr set-enabled --id <cntlr id> --enabled=false`, and wait
-   until `dnvctl sp get` shows another cntlr of the pool as primary. A
-   disabled cntlr serves no IO. A standby whose agent refuses its own
-   syncups also shows no health epoch, and the worker does not make it
-   primary. So if no other cntlr becomes primary within a few check
-   intervals, enable the disabled cntlr again at once, with step 8's
-   command, to give the pool its IO back, and then ask for help. If there
-   is none, do not disable the
-   primary: that stops the pool's IO, and no other cntlr becomes primary.
-   In such a pool a stop of any length fails the primary over only if an
-   enabled standby with no health epoch appears meanwhile, but a stop
-   longer than the pool's `cntlr_unhealthy`, 600 seconds at the default,
-   can replace the primary with a new cntlr on another controller node.
+   until `dnvctl sp get` shows another cntlr of the pool as primary with
+   `settling` false: the worker sets that flag false once a new primary
+   reports its devices built. A disabled cntlr serves no IO. A standby
+   whose agent refuses its own syncups also shows no health epoch. The
+   worker does not make such a standby primary once it has seen it refuse
+   a syncup, but it can make it primary before then. That standby's agent
+   then refuses the syncup that makes it primary, so the new primary
+   serves no IO and keeps `settling` true. So if no other cntlr becomes
+   primary within a few check intervals, or the new primary still shows
+   `settling` true a minute after it became primary, enable the disabled
+   cntlr again at once, with step 8's command. If another cntlr became
+   primary, wait until `dnvctl sp get` shows the cntlr you enabled with
+   `err_epoch` 0, and then disable the new primary with the same command
+   as above, so that the worker moves the role back at once and the pool
+   gets its IO back. Then ask for help. If the pool has no enabled standby
+   with no health epoch, do not disable the primary: that stops the pool's
+   IO, and no other cntlr becomes primary. In such a pool a stop of any
+   length fails the primary over only if an enabled standby with no health
+   epoch appears meanwhile, but a stop longer than the pool's
+   `cntlr_unhealthy`, 600 seconds at the default, can replace the primary
+   with a new cntlr on another controller node.
 4. Stop the agent with SIGTERM (`kill <pid>`, or `systemctl stop` for a
    service), not with SIGKILL, and wait until its process has exited.
 5. Start the agent again at once with the same addresses, port id and
@@ -750,10 +760,9 @@ Safe steps:
 6. In the agent's log, find the record `agent serving` and after it the
    record `agent started`. Its `startup_ms` is how long the startup pass
    took. It must be well under the start hold. In one lab measurement, of
-   one pool of 32 slices, the stop, sent over ssh, took about 1.3
-   seconds, the new agent's port opened at once, and the startup pass
-   took 1.8 seconds on the primary's controller node and 1.1 seconds on
-   the standby's.
+   one pool of 32 slices, the stop, sent over ssh, took about 1.3 seconds,
+   the new agent listened at once, and the startup pass took 1.8 seconds
+   on the primary's controller node and 1.1 seconds on the standby's.
 7. Check that nothing moved: `dnvctl sp get` shows the same primary for
    each pool, unless step 3 moved it.
 8. If step 3 moved a primary, enable the cntlr it disabled again:
@@ -774,10 +783,11 @@ demotion done before the other cntlr serves. An agent that runs reports
 it well inside that time.
 
 Stop and ask for help when the agent's log shows `agent reconcile failed`,
-when the agent exits on its own, when no other cntlr becomes primary
-after step 3 disabled one (enable it again first, as step 3 says), or
-when `dnvctl sp get` shows a failover or a new cntlr that step 3 did not
-ask for.
+when the agent exits on its own, when no other cntlr becomes primary after
+step 3 disabled one, or the new primary still shows `settling` true a
+minute after it became primary (give the pool its IO back first, as step 3
+says), or when `dnvctl sp get` shows a failover or a new cntlr that step 3
+did not ask for.
 
 Tested: the e2e suite's react case restarts the primary's cn agent this
 way, with its host connected, and checks that no failover and no cntlr

@@ -19,7 +19,8 @@ type Startup struct {
 	starting bool
 }
 
-// Begin marks the agent starting from at, before its port opens (Serve).
+// Begin marks the agent starting from at, before its gRPC listener opens
+// (Serve).
 func (s *Startup) Begin(at time.Time) {
 	s.mu.Lock()
 	defer s.mu.Unlock()

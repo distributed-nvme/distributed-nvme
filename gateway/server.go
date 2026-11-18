@@ -93,10 +93,11 @@ func serverOptions() []grpc.ServerOption {
 
 // Run serves the Gateway service until ctx is canceled (GW2, GW3).
 //
-// It mirrors agent/agent.go Serve: one listener, one grpc.Server carrying
-// serverOptions' message limit and two interceptor chains (grpc.md, Wiring,
-// behind the trace-id mint), a goroutine that turns ctx cancellation into
-// GracefulStop, and Serve. Shutdown is GracefulStop and nothing else:
+// It is one listener, one grpc.Server carrying serverOptions' message limit
+// and two interceptor chains (grpc.md, Wiring, behind the trace-id mint), a
+// goroutine that turns ctx cancellation into GracefulStop, and Serve; unlike
+// agent.Serve it has no prepare step, no reconcile, no handshake bound and
+// no bounded stop. Shutdown is GracefulStop and nothing else:
 // in-flight handlers finish (each bounded by its client deadline and the
 // 10 s per-STM budget of EU5), new requests are refused, and there is nothing
 // to drain — no registry key to delete, no background loop to stop (GW3).

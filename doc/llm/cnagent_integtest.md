@@ -362,13 +362,13 @@ its info-read commands are plain memory reads.
 
 Setup proves each dn agent by its exact data area and a baseline `SyncupDn`
 (`dnagent.md` DN3, DN5), each cn agent by a `GetCnSize` echoing its capacity
-(`cnagent.md` CN3, CN-CM1) and a baseline `SyncupCn` with its base row and its
-store row OK (CN5, CN28). As an agent's port opens before its startup pass
-(`dnagent.md` SH33), the drivers' wait for the size reply, here and after
-every restart, goes on reading the node's info until the agent no longer
-answers that it is starting. Both agents of a VM start with an IO queue cap below
-the VMs' CPU count, so that the cap and not the CPU count sets each path's
-queues (`dnagent.md` CM2, SH32).
+(`cnagent.md` CN3, CN-CM1) and a baseline `SyncupCn` with its base row and
+its store row OK (CN5, CN28). As an agent's gRPC listener opens before its
+startup pass (`dnagent.md` SH1, SH33), the drivers' wait for the size reply,
+here and after every restart, goes on reading the node's info until the
+agent no longer answers that it is starting. Both agents of a VM start with
+an IO queue cap below the VMs' CPU count, so that the cap and not the CPU
+count sets each path's queues (`dnagent.md` CM2, SH32).
 
 **smoke** proves the plumbing: the pointer before the `SyncupCntlr` that builds
 a `RedundNone` primary stack (`cnagent.md` CN8 to CN16), all rows OK but the

@@ -108,9 +108,10 @@ func TestServeJoinsBackgroundOnEveryReturnPath(t *testing.T) {
 }
 
 // TestServeAnswersDuringTheStartupPass pins SH33's order: Serve prepares the
-// role server, opens its port and serves before it runs the reconcile, so a
-// connection reaches the agent while its startup pass still runs; a
-// reconcile that fails then stops the server and Serve returns its error.
+// role server, opens its gRPC listener and serves before it runs the
+// reconcile, so a connection reaches the agent while its startup pass still
+// runs; a reconcile that fails then stops the server and Serve returns its
+// error.
 func TestServeAnswersDuringTheStartupPass(t *testing.T) {
 	probe, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {

@@ -11,8 +11,8 @@ import (
 )
 
 // Prepare hands the server the process's ctx and begins its startup state,
-// before agent.Serve opens the port (dnagent.md SH33): every RPC goroutine
-// then reads the rootCtx Reconcile keeps.
+// before agent.Serve opens the gRPC listener (dnagent.md SH33): every RPC
+// goroutine then reads the rootCtx Reconcile keeps.
 func (s *CnAgentServer) Prepare(ctx context.Context) {
 	s.rootCtx = ctx
 	s.rootSet = true

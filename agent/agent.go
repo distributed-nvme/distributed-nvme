@@ -20,10 +20,10 @@ import (
 
 // Serve runs the shared agent lifecycle (SH1-SH3, SH33): prepare the role
 // server with the process's ctx, listen and serve, then reconcile the OS to
-// the local store while the port answers that the agent is starting, and
-// serve until ctx is canceled (SIGTERM/SIGINT via signal.NotifyContext in
+// the local store while the agent answers that it is starting, and serve
+// until ctx is canceled (SIGTERM/SIGINT via signal.NotifyContext in
 // cmd/dnv-agent). A listen that fails touches nothing of the node, so a
-// second agent on the same port stops before its reconcile.
+// second agent on the same gRPC address stops before its reconcile.
 //
 // prepare hands the role server the ctx its background work derives from
 // (its rootCtx) and begins its startup state, before any RPC can arrive, so

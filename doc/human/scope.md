@@ -984,17 +984,29 @@ Measured times are in [the introduction](introduction.md#status-and-limits-of-01
   taken over the pool, each primary on the node keeps its role for up to
   the start hold while its hosts' IO waits. State: accepted; the start
   hold bounds the wait. Not seen in the lab.
-- **A disabled primary whose standbys all refuse their syncups keeps its
-  role.** A standby refuses its syncups when it cannot save them to its
-  local files or finds a setting in them invalid. The worker does not
-  make such a standby primary, since it would refuse the syncup that
-  makes it primary too. When an operator disables a primary and every
-  healthy, enabled standby of its pool refuses, no other cntlr takes the
-  role, and the worker does not replace a disabled cntlr. The pool's IO stays
-  stopped until a standby accepts its syncups again or the operator
-  enables the primary again. State: accepted; a cntlr the operator
-  disabled is left to the operator, and the worker does not replace it.
-  Read from the code; not seen in the lab.
+- **A disabled primary whose standbys refuse their syncups can stop the
+  pool's IO.** A standby refuses its syncups when it cannot save them to
+  its local files or finds a setting in them invalid. Once the worker has
+  seen a standby refuse a syncup, it does not make that standby primary,
+  since it would refuse the syncup that makes it primary too. When an
+  operator disables a primary and every healthy, enabled standby of its
+  pool has so refused, no other cntlr takes the role, and the worker does
+  not replace a disabled cntlr. The pool's IO stays stopped until a
+  standby accepts its syncups again, or until the operator enables the
+  primary again, enables a healthy standby whose agent accepts its
+  syncups, or adds a cntlr. If the primary's own agent refuses the disable
+  too, the primary keeps serving the hosts that do not follow the cdc's
+  changes. A standby that has refused no syncup yet, such as one whose
+  node's local files began to refuse writes after its last syncup, can
+  still be made primary by the disable, before its refusal of the
+  disable's own syncup comes back. Its agent then refuses the syncup that
+  makes it primary, and the pool's IO stays stopped until the worker moves
+  the role again after the longer of the pool's event thresholds for the
+  primary and for any cntlr, 600 seconds at the defaults, onto a cntlr
+  that accepts its syncups, such as the old primary once the operator
+  enables it again. State: accepted; a cntlr the operator disabled is left
+  to the operator, and the worker does not replace it. Read from the code;
+  not seen in the lab.
 - **A corrupt cdc entry withdraws its subsystem from hosts.** A cdc entry
   is the record in etcd that the cdc serves for one subsystem. Only a hand
   edit or a bug corrupts it. State: accepted.

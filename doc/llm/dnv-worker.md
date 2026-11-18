@@ -3267,26 +3267,26 @@ move to another endpoint (RW13), an idle or a refused conf (RW9) of its
 loop, which also forget the series. AR10's memo keeps a hold across a
 restart of the child that drives the object, until the new child's first
 verdict on it or the end of a start the new child sees. A starting reply
-keeps the health epoch that the missed rounds before the agent's port
-opened may have set: a restart does not clear a fault, and the first clean
-round does. The loop of a DN or a CN logs the starting answer that begins a
-series, each round that ends a start, and a round whose reply carries
-another agent start time than the loop's rounds last carried, starting or
-not, as the agent's restart; a move forgets the start time last carried. An
-sp child logs none of them, so a controller node's restart makes one record
-of each, not one per cntlr (Log records). Reason: a restart of a controller
-node's agent converges every cntlr before it can read any, at many pools
-for longer than the primary threshold, and failing every primary over for
-it moves hosts to another controller node for no fault of the data path;
-the hold bounds that, by the node's clock, across a worker restart or a
-handoff, since the start time travels in every reply. A series is measured
-from its first start, and stays open past the end of a start until a round
-is judged, so that an agent that never comes to serve — its startup pass
-runs on, or dies and starts again, or ends each time and the agent dies
-before a round is judged — is judged past the hold as one that does not
-answer; a series lives in its loop, so each new loop during such a run — a
-worker restart, a handoff, a restarted child — and each idle or refused
-conf (RW9) can hold it up to one more start hold (Known limits).
+keeps the health epoch that the missed rounds before the agent's gRPC
+listener opened may have set: a restart does not clear a fault, and the
+first clean round does. The loop of a DN or a CN logs the starting answer
+that begins a series, each round that ends a start, and a round whose reply
+carries another agent start time than the loop's rounds last carried,
+starting or not, as the agent's restart; a move forgets the start time last
+carried. An sp child logs none of them, so a controller node's restart
+makes one record of each, not one per cntlr (Log records). Reason: a
+restart of a controller node's agent converges every cntlr before it can
+read any, at many pools for longer than the primary threshold, and failing
+every primary over for it moves hosts to another controller node for no
+fault of the data path; the hold bounds that, by the node's clock, across a
+worker restart or a handoff, since the start time travels in every reply. A
+series is measured from its first start, and stays open past the end of a
+start until a round is judged, so that an agent that never comes to serve —
+its startup pass runs on, or dies and starts again, or ends each time and
+the agent dies before a round is judged — is judged past the hold as one
+that does not answer; a series lives in its loop, so each new loop during
+such a run — a worker restart, a handoff, a restarted child — and each idle
+or refused conf (RW9) can hold it up to one more start hold (Known limits).
 
 HL9. **A primary that refuses its syncups.** When the agent refuses a
 `SyncupCntlr` with `ReplyCodeInvalidConf` or `ReplyCodeSaveFailed` — the
@@ -3982,15 +3982,22 @@ does (AR7, Known limits):
 
 The first two refusals hold no `disabled` primary: that trigger is the
 operator's. The third holds one too, as no cntlr is left that would take
-the role; AR7 replaces no disabled cntlr (AR3), so such a primary keeps
-the role, its namespaces inaccessible and the pool's IO stopped
-(`architecture.md`, Cntlrs), every pass logging `candidate_refuses`,
-until a refusal ends or an operator enables the primary again. The first
-two read a report and the third the memo of a refusal (AR10), none of
-which an STM sees, so `model.Failover` does not re-validate them, nor
-AR10's verdict, which no STM sees either; it takes the refusing standbys
-the pass passes over on the worker's word, and re-validates the election
-among the rest. The second
+the role; AR7 replaces no disabled cntlr (AR3), so such a primary keeps the
+role, every pass logging `candidate_refuses`. The disable takes it out of
+the pool's discovery records at once ([D18]), and its namespaces go
+inaccessible, the pool's IO stopped, once its agent applies the disable
+(`architecture.md`, Cntlrs); where its own agent refuses the disable too,
+as it does a conf every agent finds invalid, that agent keeps the primary
+shape it last applied, its namespaces optimized, and only a host that does
+not follow the discovery log keeps that path (`architecture.md`, Host
+view). The hold lasts until a refusal ends, or until an operator enables
+the primary again, enables a standby with no `err_epoch` whose agent does
+not refuse, or adds a cntlr: a pass that finds such a standby or the new
+cntlr with no refusal mark elects it. The first two read a report and the
+third the memo of a refusal (AR10), none of which an STM sees, so
+`model.Failover` does not re-validate them, nor AR10's verdict, which no
+STM sees either; it takes the refusing standbys the pass passes over on the
+worker's word, and re-validates the election among the rest. The second
 rests on the coordinator's record of the last failover it applied, one of
 the two records of its own a pass decides by (AR7's second refusal rests on
 the other): why the role moved is kept in no etcd record. A coordinator
@@ -4248,13 +4255,19 @@ row (`cnagent.md` CN14), so its `ERROR` rows are its own.
 
 * **The cntlrs all refuse.** The primary's own agent refuses its
   `SyncupCntlr` (HL9), and every healthy, enabled standby's refuses its
-  own, which left AR5 no candidate: `reaction skipped` (`candidate_refuses`,
-  with `old_cntlr_id` and, as `new_cntlr_id`, the smallest refusing
-  standby; the kind, `replace_cntlr`, tells the record from AR5's). A
-  refusal every cntlr shares moves no role: the replacement would refuse
-  the same request and never build, while the primary still serves what
-  it last applied. A primary whose own agent refuses nothing is replaced
-  as any, whatever made it unhealthy, though every standby refuses; and a
+  own, which left AR5 no candidate: `reaction skipped`
+  (`candidate_refuses`, with `old_cntlr_id` and, as `new_cntlr_id`, the
+  smallest refusing standby; the kind, `replace_cntlr`, tells the record
+  from AR5's). A refusal every cntlr shares moves no role. The rule
+  presumes the refusal is the request's, as with a conf every agent finds
+  invalid, which the replacement would refuse as well and so never build,
+  while the primary still serves what it last applied. It reads the
+  refusals, not their causes: a failed save comes from the refusing node's
+  own local store (RW5), so where the primary's node and every such
+  standby's node fail their saves, a replacement on a CN whose store takes
+  writes would build, and the role stays all the same until a refusal ends
+  (Known limits). A primary whose own agent refuses nothing is replaced as
+  any, whatever made it unhealthy, though every standby refuses; and a
   primary whose agent stops answering has its mark ended by its missed
   rounds (HL9), so it is replaced as a dead primary with no candidate.
 
@@ -6528,33 +6541,35 @@ which no suite case sets, so no suite case runs RW13's count compare.
   conditions AR8 checks before the flag, logs the hold
   (`grp_operator_in_charge`, AR8); the worker never writes the flag (MD6;
   `architecture.md`, Repairs).
-* **A new leg the primary never reports keeps its repair CREATED while
-  the role cannot move.** AR8's
-  try-to-abort reads the new leg's health epoch and its side's, and the
-  worker stamps the leg's only from the primary's leg row of it (HL2), so a
-  new leg whose side is provisioned and healthy while the primary reports
-  nothing of it, as when the primary never applies the syncup that carries
-  the repair, never asks for an abort. A primary whose agent refuses that
-  syncup with an invalid conf or a failed save reads unhealthy and is
-  failed over at its threshold (HL9), and the new primary reports the new
-  leg; the wait stays where the role cannot move that way: with no
-  enabled standby with no `err_epoch`, where AR7 replaces the primary only
-  at `cntlr_unhealthy`, and with only standbys whose agents refuse their
-  syncups too, where neither AR5 nor AR7 moves a role that every cntlr's
-  refusal would follow (AR5, AR7), until the refusals end. Meanwhile the
-  repair stays CREATED, and keeps
-  the worker from creating another repair for its group, until the primary
-  reports the new leg holding a place in the array or confirms an abort. An
-  abort, whether the operator asks for it or one of AR8's other triggers
-  does, ends the wait only once the primary applies a syncup that carries
-  the abort flag and confirms the abort, since only the primary's verdict
-  moves the stage (`architecture.md`, Repair). The wait holds that group
-  only (AR2). A give-up on a clock would not end it: the primary reports a
-  row of every new leg of every repair its request carries (`cnagent.md`
-  CN28), so a new leg has no row only while the primary has not applied the
-  syncup that carries the repair, and the abort flag reaches the primary
-  only in a later syncup that carries the repair too; and it would abort a
-  repair that a slow primary still carries out.
+* **A new leg the primary never reports keeps its repair CREATED while the
+  role cannot move.** AR8's try-to-abort reads the new leg's health epoch
+  and its side's, and the worker stamps the leg's only from the primary's
+  leg row of it (HL2), so a new leg whose side is provisioned and healthy
+  while the primary reports nothing of it, as when the primary never
+  applies the syncup that carries the repair, never asks for an abort. A
+  primary whose agent refuses that syncup with an invalid conf or a failed
+  save reads unhealthy and is failed over at its threshold (HL9), and the
+  new primary reports the new leg; the wait stays where the role cannot
+  move that way: with no enabled standby with no `err_epoch`, where AR7
+  replaces the primary only at `cntlr_unhealthy`, and with only standbys
+  whose agents refuse their syncups too, where neither AR5 nor AR7 moves
+  the role, AR7 presuming that a refusal every cntlr shares is the
+  request's (AR5, AR7), until the refusals end. Where the cause is failed
+  saves on the local stores of the primary's node and of every such
+  standby's node, a replacement on a CN whose store takes writes would
+  build, and the wait lasts all the same. Meanwhile the repair stays
+  CREATED, and keeps the worker from creating another repair for its group,
+  until the primary reports the new leg holding a place in the array or
+  confirms an abort. An abort, whether the operator asks for it or one of
+  AR8's other triggers does, ends the wait only once the primary applies a
+  syncup that carries the abort flag and confirms the abort, since only the
+  primary's verdict moves the stage (`architecture.md`, Repair). The wait
+  holds that group only (AR2). A give-up on a clock would not end it: the
+  primary reports a row of every new leg of every repair its request
+  carries (`cnagent.md` CN28), so a new leg has no row only while the
+  primary has not applied the syncup that carries the repair, and the abort
+  flag reaches the primary only in a later syncup that carries the repair
+  too; and it would abort a repair that a slow primary still carries out.
 * **A DN that stays healthy but cannot serve a new leg can still get the
   group's next worker's repair.** AR8 joins the cancel of a repair whose
   new leg is due to the next create, which black-lists that leg's DN; when

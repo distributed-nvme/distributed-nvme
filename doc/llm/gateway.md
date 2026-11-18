@@ -188,20 +188,19 @@ the same case by construction.
 
 GW2. **Serving.** `gateway.Run` takes the etcd client and a `gateway.Config`
 holding the gRPC network, the gRPC address and the etcd endpoints. `Run`
-emits `gateway starting` as its first record and
-`gateway stopping` on the way out, closes the client as the last step of its
-drain (so `main` does not, CM3), and serves exactly as `Serve` in
-`agent/agent.go` does: it listens on the configured network and address;
+emits `gateway starting` as its first record and `gateway stopping` on the
+way out, closes the client as the last step of its drain (so `main` does
+not, CM3), and serves: it listens on the configured network and address;
 builds the gRPC server from `serverOptions`, which carries the message limit
 of `grpc.md`, Wiring, and chains the gateway's entry-point trace-id mint,
 `ensureTraceIdUnary` and `ensureTraceIdStream`, FIRST and the shared pair,
 `common.GrpcUnaryServerInterceptor` and
 `common.GrpcStreamServerInterceptor`, behind it; registers the `Gateway`
-service; starts a goroutine that turns the end of the ctx into
-`GracefulStop`; emits `gateway serving`; then serves. The gateway mints a
-trace id for a request that
-arrived without one (it is one of the entry points of `grpc.md` T4): when
-the incoming metadata carries no `trace_id`, the mint injects a fresh
+service; starts a goroutine that turns the end of the ctx into a plain
+`GracefulStop`, with no time bound of its own (GW3); emits
+`gateway serving`; then serves. The gateway mints a trace id for a request
+that arrived without one (it is one of the entry points of `grpc.md` T4):
+when the incoming metadata carries no `trace_id`, the mint injects a fresh
 `common.NewTraceId` into the incoming metadata, upstream of the shared
 interceptors and outside `common/interceptor.go`, and they adopt it as they
 adopt a client's and never mint themselves.

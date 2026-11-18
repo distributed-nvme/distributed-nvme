@@ -77,10 +77,10 @@ type CnAgentServer struct {
 	disconnectSlots chan struct{}
 
 	// rootCtx is the process lifetime ctx, captured by Prepare before the
-	// port opens, or at Reconcile when nothing prepared the server (a test);
-	// the CN10 background disconnects and path watchers, the CN11 probers
-	// and the background reads (SH29) hang off it, so shutdown cancels them.
-	// rootSet says Prepare set it.
+	// gRPC listener opens, or at Reconcile when nothing prepared the server
+	// (a test); the CN10 background disconnects and path watchers, the CN11
+	// probers and the background reads (SH29) hang off it, so shutdown
+	// cancels them. rootSet says Prepare set it.
 	rootCtx context.Context
 	rootSet bool
 	// startup is the agent's startup state (dnagent.md SH33).

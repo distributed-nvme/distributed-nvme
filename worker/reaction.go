@@ -2641,8 +2641,8 @@ func growExtCnt(
 
 // tryReplaceCntlr is AR7. It reports whether the pass ends here.
 //
-// A primary its two refusals hold (replaceTarget) does NOT end the pass
-// (AR2), and neither does a scan that finds no CN.
+// A primary one of its three refusals holds (replaceTarget) does NOT end the
+// pass (AR2), and neither does a scan that finds no CN.
 func (w *spWorker) tryReplaceCntlr(ctx context.Context, p *spPass) bool {
 	oldId, old := w.replaceTarget(ctx, p)
 	if old == nil {
@@ -2713,7 +2713,7 @@ func (w *spWorker) tryReplaceCntlr(ctx context.Context, p *spPass) bool {
 // has been unhealthy for cntlr_unhealthy, whose latest verdict by this
 // coordinator is unhealthy (AR10), is not disabled (AR3), and is either not
 // the primary or is the primary of an SP with no failover
-// candidate — the sole-cntlr SP of AR7 — unless one of AR7's two
+// candidate — the sole-cntlr SP of AR7 — unless one of AR7's three
 // refusals holds that primary (below): it is recorded and passed over, and
 // the scan goes on.
 func (w *spWorker) replaceTarget(
@@ -2743,10 +2743,16 @@ func (w *spWorker) replaceTarget(
 		}
 		if cntlr.GetPrimary() && p.refusingCand != 0 &&
 			p.judged.refusing[cntlrId] {
-			// HL9: the primary refuses its own SyncupCntlr, and so does every
-			// healthy standby. A refusal every cntlr shares moves no role: a
-			// replacement would refuse the same request and never build,
-			// while the primary still serves the revision it last applied.
+			// AR7's third refusal, judged first and on AR10's memo (HL9):
+			// the primary refuses its own SyncupCntlr, and so does every
+			// healthy standby. A refusal every cntlr shares moves no role.
+			// The rule presumes the refusal is the request's, as with a conf
+			// every agent finds invalid, which a replacement would refuse as
+			// well and so never build, while the primary still serves the
+			// revision it last applied. The memo holds no cause: where every
+			// one of those nodes fails its saves instead, a replacement on a
+			// CN whose store takes writes would build, and the primary is
+			// held all the same (dnv-worker.md, Known limits).
 			w.reactionSkipped(ctx, reactionReplaceCntlr,
 				reasonCandidateRefuses,
 				slog.Uint64("old_cntlr_id", cntlrId),
@@ -2754,9 +2760,11 @@ func (w *spWorker) replaceTarget(
 			)
 			continue
 		}
-		// AR7's two refusals, both judged on the report the pass holds, the
-		// primary's latest (AR1); no standby's is read, and none carries a
-		// thin row (cnagent.md CN14), so a standby's ERROR rows are its own.
+		// AR7's first two refusals, both judged on the report the pass
+		// holds, the primary's latest (AR1); no standby's is read, and none
+		// carries a thin row (cnagent.md CN14), so a standby's ERROR rows
+		// are its own. The third, above, reads AR10's memo of refusals
+		// (HL9).
 		//
 		// The first is AR5's first (sharedStateOf): a primary whose every
 		// ERROR row is of HL2's shared-state class is not replaced. The

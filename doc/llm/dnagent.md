@@ -46,9 +46,11 @@ local store, `revision.go` the revision gate and the reply builders,
 (`oswrap.go` is the shared command, listing and configfs plumbing the other
 three sit on), `bitmap.go` the bitmap-chunk store, `observation.go` the
 observation, the slot that holds an object's latest one and its running
-background read, and the converge marks (SH28 to SH30), `sweep.go` the part
-of DN6's sweep both roles share (the leftover kinds, the result value a pass
-accumulates, its log record and the `AgentReply` it becomes) and
+background read, and the converge marks (SH28 to SH30), `startup.go` the
+startup state — whether the startup pass still runs, the start time every
+reply's stamp carries — and the starting refusal (SH33), `sweep.go` the
+part of DN6's sweep both roles share (the leftover kinds, the result value
+a pass accumulates, its log record and the `AgentReply` it becomes) and
 `waitbudget.go` the `WaitBudget`, the bounded wait one converge pass may
 spend on the node catching up with what that pass asked of it: DN13's two,
 the retries of the connect to the migration source export and the wait for
@@ -246,57 +248,55 @@ local-store prefix unreadable); per-resource failures are captured as
 reconcile stops the gRPC server SH33 opened and ends the process.
 
 SH33. **The agent answers while it starts.** (Its number is out of order
-because rule ids never shift.) `Serve` first prepares the role server —
-it hands it the `rootCtx` its background work derives from (SH27) and
-marks it **starting** from that moment, its **start time** — then opens
-the port and serves, and then runs the startup reconcile (SH1); the agent
+because rule ids never shift.) `Serve` first prepares the role server — it
+hands it the `rootCtx` its background work derives from (SH27) and marks it
+**starting** from that moment, its **start time** — then opens the gRPC
+listener and serves, and then runs the startup reconcile (SH1); the agent
 is starting until that reconcile ends. While it starts, every check round
 and every info read, of any object, answers `ReplyCodeStarting` with no
-observation, and every `Syncup*` and push is refused with that code, and
-a bitmap read or an inspect call with gRPC's Unavailable, its reply
-carrying no code: none of them takes a lock, touches the node or starts a
-read (SH29). Every reply's stamp carries the start time
+observation, and every `Syncup*` and push is refused with that code, and a
+bitmap read or an inspect call with gRPC's Unavailable, its reply carrying
+no code: none of them takes a lock, touches the node or starts a read
+(SH29). Every reply's stamp carries the start time
 (`ObsStamp.agent_start_time`), by the node's clock, during the start and
 after it. A round or an info read reads whether the agent is starting
-before it reads the object's observation, and the reconcile ends the
-start only after it has stored its last observation, so one that finds
-the start ended answers from every observation the reconcile made.
-Reason: the startup reconcile holds the
-node write lock while it converges every object, at many pools for
-minutes, and a worker's round to a port not yet open is a missed round, two
-of which fail a primary over (`dnv-worker.md` AR10); an agent that answers
-that it starts lets the worker hold its verdict for a bounded time
-(`dnv-worker.md` HL8), and the start time lets it bound that hold by the
-node's clock across a worker restart. Every object answers starting, not
-only the ones the reconcile has not converged yet: no read runs while the
-reconcile holds the node write lock, so an object converged early would
-answer from an observation that ages for the rest of the pass. A listen
-that fails comes before the reconcile, so a second agent on a port already
-in use ends before it touches the node.
+before it reads the object's observation, and the reconcile ends the start
+only after it has stored its last observation, so one that finds the start
+ended answers from every observation the reconcile made. Reason: the
+startup reconcile holds the node write lock while it converges every
+object, at many pools for minutes, and a worker's round to an agent whose
+gRPC listener is not yet open is a missed round, two of which fail a
+primary over (`dnv-worker.md` AR10); an agent that answers that it starts
+lets the worker hold its verdict for a bounded time (`dnv-worker.md` HL8),
+and the start time lets it bound that hold by the node's clock across a
+worker restart. Every object answers starting, not only the ones the
+reconcile has not converged yet: no read runs while the reconcile holds the
+node write lock, so an object converged early would answer from an
+observation that ages for the rest of the pass. A listen that fails comes
+before the reconcile, so a second agent on a gRPC address already in use
+ends before it touches the node.
 
 SH27. **Background tasks and process exit.** (Its number is out of order
 because rule ids never shift: code comments cite them.) A role server MAY
-run goroutines outside any RPC: the DN12 fence timer, the DN9
-side-zeroing workers, the background reads the check rounds start (SH29),
-the CN11 leg probers, the CN10 path watchers and the cn sweep's
-background `nvme disconnect` (`cnagent.md` CN10). The DN12 fence timer
-is the one of them that runs a converge. Every one of them
-derives its ctx from the server's **`rootCtx`** — the process-lifetime
-ctx, which `Serve` derives from its own ctx, hands the server before the
-port opens (SH33) and cancels before returning, and which `Reconcile`
-captures instead when nothing prepared the server, as in a test — and,
-the background disconnect and the background reads
-aside, mints a fresh trace id per attempt (`common.NewTraceId`), taking the
-SH11 locks, where it takes any, for the attempt only, never across the
-whole task. The
-background disconnect is one command of the pass that set it going: it
-carries that pass's trace id, minting one only when that pass had none,
-and, like the CN11 probers and the CN10 path watchers, takes no SH11 lock
-at all. A background read
-reads for the round that started it: it carries that round's trace id,
-minting one only when that round had none, so its records, a verdict that
-is not clean among them, name the round that brought them; and it takes
-the SH11 or SH12 locks for that one read.
+run goroutines outside any RPC: the DN12 fence timer, the DN9 side-zeroing
+workers, the background reads the check rounds start (SH29), the CN11 leg
+probers, the CN10 path watchers and the cn sweep's background
+`nvme disconnect` (`cnagent.md` CN10). The DN12 fence timer is the one of
+them that runs a converge. Every one of them derives its ctx from the
+server's **`rootCtx`** — the process-lifetime ctx, which `Serve` derives
+from its own ctx, hands the server before the gRPC listener opens (SH33)
+and cancels before returning, and which `Reconcile` captures instead when
+nothing prepared the server, as in a test — and, the background disconnect
+and the background reads aside, mints a fresh trace id per attempt
+(`common.NewTraceId`), taking the SH11 locks, where it takes any, for the
+attempt only, never across the whole task. The background disconnect is one
+command of the pass that set it going: it carries that pass's trace id,
+minting one only when that pass had none, and, like the CN11 probers and
+the CN10 path watchers, takes no SH11 lock at all. A background read reads
+for the round that started it: it carries that round's trace id, minting
+one only when that round had none, so its records, a verdict that is not
+clean among them, name the round that brought them; and it takes the SH11
+or SH12 locks for that one read.
 
 A background task may additionally run a **child process**: DN9's
 `blkdiscard --zeroout` batches do, so can the converge the DN12 fence
@@ -1595,25 +1595,23 @@ the background reads of a DN and of a side (SH29) and the converge marks
 
 ### Server type and lock mapping
 
-`DnAgentServer` embeds the generated unimplemented server and holds the name
-formatter, the local store, the `DiskMeta`, the `Dm`, `Nvmet` and
+`DnAgentServer` embeds the generated unimplemented server and holds the
+name formatter, the local store, the `DiskMeta`, the `Dm`, `Nvmet` and
 `NvmeHost` wrappers — the `OsClient`-backed wrappers, no raw client field —
 the `LockSet` (object key = the `LocalSidePath` id tuple), the `--disk`
 path, the port conf (`--tr-*`, `--nvmet-port-id` and `--nvmet-qid-max` as
-one `PortConf`),
-the per-object `ResInfo` trackers, each DN's and each side's latest
-observation and running background read (SH28, SH29), the converge marks
-(SH30), the per-side zeroing registry and its
-zeroing slots (DN9), the startup state of SH33, and the SH27
-background-task bookkeeping: the `rootCtx` `Serve` hands it before the
-port opens, the wait group that `WaitBackground`
-waits on, and the mark that wait sets when it begins, under the lock every
-registration and every fence-timer arming takes, and never clears: from
-then on no task registers and no fence timer is armed (SH27). The
-observations and the converge marks sit under that same lock, so a round's
-test that no read and no converge of its object runs and its start of a
-read are one step against a syncup's mark and its cancel of that read
-(SH30).
+one `PortConf`), the per-object `ResInfo` trackers, each DN's and each
+side's latest observation and running background read (SH28, SH29), the
+converge marks (SH30), the per-side zeroing registry and its zeroing slots
+(DN9), the startup state of SH33, and the SH27 background-task bookkeeping:
+the `rootCtx` `Serve` hands it before the gRPC listener opens, the wait
+group that `WaitBackground` waits on, and the mark that wait sets when it
+begins, under the lock every registration and every fence-timer arming
+takes, and never clears: from then on no task registers and no fence timer
+is armed (SH27). The observations and the converge marks sit under that
+same lock, so a round's test that no read and no converge of its object
+runs and its start of a read are one step against a syncup's mark and its
+cancel of that read (SH30).
 
 DN1. Lock mapping (instantiates SH10 to SH13): `SyncupDn` and the startup
 reconcile — node write; `SyncupSide`, `PushMigrBitmap`, a side's background
@@ -1705,44 +1703,40 @@ name, then the remaining `side-*` files re-run the `SyncupSide` converge
 (DN8 to DN14) from the stored request — a converge that finds bytes of the
 side still to zero (re)starts that side's DN9 zeroing goroutine, which is
 how provisioning resumes after a restart (on a migration destination that
-has not provisioned, only once it holds its run in the clone-metadata
-area: a converge refused the run starts none, and the converge that takes
-the run, which a re-sent `SyncupSide` brings, starts it, DN13), and one
-whose stored length to zero DN8's side conf gate refuses converges and
-sweeps nothing of that side. Then every chunk that was kept is re-applied
-(SH21 to SH23); that step deletes nothing. The chunks an older build left
-for a migration under way at the upgrade are loaded and re-applied like
-any other, at the places that build gave them; the first piece of the
-worker's that this agent saves, one that is not byte for byte the chunk it
-holds at that index, takes out every chunk at its index or above before
-its save (DN15). A chunk whose side is not
-loaded is no orphan while a
-`side-*` file does not load and the chunk's loaded DN still names its side:
-that file names no side, so it may be this side's, and the chunk is
-skipped like the files of a DN that did not load — neither loaded nor
-deleted. The chunk's side is then where a lost `--local-store` leaves
-one, as above, until its `SyncupSide` rewrites its file and the worker
-pushes the chunk again. A chunk whose loaded DN no
-longer names its side is an orphan whatever `side-*` file failed to decode:
-the side has left the list, and its chunks go with it (SH7). Every other
-deletion — with the side that owns them (DN6, SH7), on a destination's
-`migr_id` change (DN13), and in the side-level sweep of a converge (DN6's
-Scope 2) once the side's request carries no `migr_dst_conf` of the chunks'
-`migr_id` (the finish of `architecture.md`, Migration; a level that only
-suppresses the destination role keeps them, DN11) — names the files from
-the side's in-memory chunk set, keyed by the one `migr_id` that set is
-tracking, so a file this process never loaded is invisible to all of them,
-and a restart is the only place that can collect it, save a push of a
-chunk that is not equal to the one held, which removes its migration's
-chunk files at its index and above by their paths (DN15). The reconcile holds
-the node write lock throughout, with the SH2 trace id, while the port
-answers that the agent is starting (SH33). Outside it, a side's
+has not provisioned, only once it holds its run in the clone-metadata area:
+a converge refused the run starts none, and the converge that takes the
+run, which a re-sent `SyncupSide` brings, starts it, DN13), and one whose
+stored length to zero DN8's side conf gate refuses converges and sweeps
+nothing of that side. Then every chunk that was kept is re-applied (SH21 to
+SH23); that step deletes nothing. The chunks an older build left for a
+migration under way at the upgrade are loaded and re-applied like any
+other, at the places that build gave them; the first piece of the worker's
+that this agent saves, one that is not byte for byte the chunk it holds at
+that index, takes out every chunk at its index or above before its save
+(DN15). A chunk whose side is not loaded is no orphan while a `side-*` file
+does not load and the chunk's loaded DN still names its side: that file
+names no side, so it may be this side's, and the chunk is skipped like the
+files of a DN that did not load — neither loaded nor deleted. The chunk's
+side is then where a lost `--local-store` leaves one, as above, until its
+`SyncupSide` rewrites its file and the worker pushes the chunk again. A
+chunk whose loaded DN no longer names its side is an orphan whatever
+`side-*` file failed to decode: the side has left the list, and its chunks
+go with it (SH7). Every other deletion — with the side that owns them (DN6,
+SH7), on a destination's `migr_id` change (DN13), and in the side-level
+sweep of a converge (DN6's Scope 2) once the side's request carries no
+`migr_dst_conf` of the chunks' `migr_id` (the finish of `architecture.md`,
+Migration; a level that only suppresses the destination role keeps them,
+DN11) — names the files from the side's in-memory chunk set, keyed by the
+one `migr_id` that set is tracking, so a file this process never loaded is
+invisible to all of them, and a restart is the only place that can collect
+it, save a push of a chunk that is not equal to the one held, which removes
+its migration's chunk files at its index and above by their paths (DN15).
+The reconcile holds the node write lock throughout, with the SH2 trace id,
+while the agent answers that it is starting (SH33). Outside it, a side's
 drop runs under `SyncupDn`'s node write lock, and DN13's deletions and the
-sweep's inside a converge of the side — a `SyncupSide`'s or the DN12
-fence timer's — and a push's removal under the node
-read lock and the side's object lock (DN1).
-
-### `GetDnSize`
+sweep's inside a converge of the side — a `SyncupSide`'s or the DN12 fence
+timer's — and a push's removal under the node read lock and the side's
+object lock (DN1).  ### `GetDnSize`
 
 DN3. Read the byte size of the `--disk` device (SH17); reply the size
 **minus `DnDataOffset`** — the byte size of the [D13] data area, which is

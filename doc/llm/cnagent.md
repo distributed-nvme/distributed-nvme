@@ -236,34 +236,34 @@ are binding, file names are not.
 `CnAgentServer` embeds the generated unimplemented server and holds the
 process's single `OsClient`, the `NameFmt`, the shared `Cmd`, `Store`,
 `Dm`, `Nvmet` and `NvmeHost` wrappers, the cn-only `Md` wrapper, the
-`LegProbeIO` of the CN11 probers, the `LockSet` (object key:
-the `LocalCntlrPath` id tuple), the `--capacity` value and the port conf
-(`PortConf`: the transport flags, `--nvmet-port-id` and `--nvmet-qid-max`).
-A leaf mutex
-guards the in-memory mirrors of the local store — two maps: cn requests,
-and cntlr states (last accepted request, `ResInfo` tracker, a per-clone
+`LegProbeIO` of the CN11 probers, the `LockSet` (object key: the
+`LocalCntlrPath` id tuple), the `--capacity` value, the port conf
+(`PortConf`: the transport flags, `--nvmet-port-id` and `--nvmet-qid-max`)
+and the startup state of `dnagent.md` SH33. A leaf mutex guards the
+in-memory mirrors of the local store — two maps: cn requests, and cntlr
+states (last accepted request, `ResInfo` tracker, a per-clone
 `CloneChunkSet` keyed by the `(src_slice_idx, bm_idx)` pair) — and what
 mirrors nothing: in each cntlr's state the prober and path-watcher
-registries; in each CN's and each
-cntlr's state its observation slot, which holds its latest observation
-and its running background read (`dnagent.md` SH28, SH29); the converge
-marks (`dnagent.md` SH30); and the CN10 disconnect registry, all in
-memory only, never persisted. Five more in-memory-only
-fields of a cntlr's state sit outside that mutex, touched only under the
-cntlr's object lock or the node write lock: the marks of CN14's
-activation sweep (`pendingSweep`), CN14's torn marks (`tornTds`), CN12's acted marks
-(`forcedStarts`), CN12's md checks (`mdChecks`) and `reqFromRpc`, which says whether the request this process holds counts
-as delivered (CN8, CN12, CN14). Each state's request is an atomic
-pointer, stored and loaded without that mutex: other cntlrs' passes and the
+registries; in each CN's and each cntlr's state its observation slot, which
+holds its latest observation and its running background read (`dnagent.md`
+SH28, SH29); the converge marks (`dnagent.md` SH30); and the CN10
+disconnect registry, all in memory only, never persisted. Five more
+in-memory-only fields of a cntlr's state sit outside that mutex, touched
+only under the cntlr's object lock or the node write lock: the marks of
+CN14's activation sweep (`pendingSweep`), CN14's torn marks (`tornTds`),
+CN12's acted marks (`forcedStarts`), CN12's md checks (`mdChecks`) and
+`reqFromRpc`, which says whether the request this process holds counts as
+delivered (CN8, CN12, CN14). Each state's request is an atomic pointer,
+stored and loaded without that mutex: other cntlrs' passes and the
 node-level verdict read every cntlr's request holding none of its object
-lock, and a request is never modified once stored. The tracker has its
-own lock; the chunk sets are touched only under the cntlr's object lock,
-or under the node write lock, which excludes it. A buffered channel of
+lock, and a request is never modified once stored. The tracker has its own
+lock; the chunk sets are touched only under the cntlr's object lock, or
+under the node write lock, which excludes it. A buffered channel of
 `disconnectConcurrency` slots caps how many of the disconnect registry's
-disconnects run at once. `rootCtx` anchors the CN10 background
-disconnects and path watchers, the CN11 probers and the background reads,
-so shutdown cancels them and joins none (CN-CM2). No cn
-lock is held across OS calls but the `LockSet`'s own.
+disconnects run at once. `rootCtx` anchors the CN10 background disconnects
+and path watchers, the CN11 probers and the background reads, so shutdown
+cancels them and joins none (CN-CM2). No cn lock is held across OS calls
+but the `LockSet`'s own.
 
 CN1. Lock mapping (instantiates `dnagent.md` SH10 to SH13): `SyncupCn` and the startup
 reconcile — node write; `SyncupCntlr`, `PushCloneBitmap`, one background
@@ -423,18 +423,17 @@ every CN's base state, then drop the orphan cntlrs, then the node-level
 sweep per CN, then converge every remaining cntlr.
 
 All under the node write lock, with the `dnagent.md` SH2 trace id, while
-the port answers every round and info read that the agent is starting
+the agent answers every round and info read that it is starting
 (`dnagent.md` SH33): none of the observations the pass stores is answered
-before the whole pass ends. Probers (CN11) and path watchers (CN10)
-mint a fresh trace id per round.
-Each CN's converge and node-level sweep, and each cntlr's converge, end
-in the object's observation (`dnagent.md` SH28): its rows, with the code
-of its own sweep, a cntlr's with the rows of its build named too (CN30).
-Whatever this pass could not remove is remembered only
-as the code of the object's observation, which the next read or converge
+before the whole pass ends. Probers (CN11) and path watchers (CN10) mint a
+fresh trace id per round. Each CN's converge and node-level sweep, and each
+cntlr's converge, end in the object's observation (`dnagent.md` SH28): its
+rows, with the code of its own sweep, a cntlr's with the rows of its build
+named too (CN30). Whatever this pass could not remove is remembered only as
+the code of the object's observation, which the next read or converge
 replaces, and no later pass reads it (CN30): the object's `Check*` rounds
-answer from that observation until then, and each later read names
-afresh what is still there.
+answer from that observation until then, and each later read names afresh
+what is still there.
 
 ### `GetCnSize`
 

@@ -112,10 +112,10 @@ type DnAgentServer struct {
 	reads sync.WaitGroup
 
 	// rootCtx is the process lifetime ctx, captured by Prepare before the
-	// port opens, or at Reconcile when nothing prepared the server (a test);
-	// the DN9 zeroing loops, the background reads and the DN12 fence timer's
-	// converge hang off it so shutdown stops them. rootSet says Prepare set
-	// it.
+	// gRPC listener opens, or at Reconcile when nothing prepared the server
+	// (a test); the DN9 zeroing loops, the background reads and the DN12
+	// fence timer's converge hang off it so shutdown stops them. rootSet
+	// says Prepare set it.
 	rootCtx context.Context
 	rootSet bool
 	// startup is the agent's startup state (SH33).

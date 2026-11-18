@@ -13,8 +13,8 @@ import (
 )
 
 // Prepare hands the server the process's ctx and begins its startup state,
-// before agent.Serve opens the port (SH33): every RPC goroutine then reads
-// the rootCtx Reconcile keeps.
+// before agent.Serve opens the gRPC listener (SH33): every RPC goroutine
+// then reads the rootCtx Reconcile keeps.
 func (s *DnAgentServer) Prepare(ctx context.Context) {
 	s.rootCtx = ctx
 	s.rootSet = true

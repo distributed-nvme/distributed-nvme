@@ -4207,25 +4207,24 @@ its pad bits in the middle of the chunk and shift every later bit. So
   current request is an atomic pointer, so another object's pass reads it
   whole beside the converge that replaces it; a node's request is replaced
   only under the node write lock. On start the agent loads every other
-  request and chunk file of its role's kinds under its prefix and
-  reconciles the system to it (full idempotent re-apply; for a clone, Clone
-  metadata durability), its port already open and answering that it is
-  starting until that reconcile ends (`dnagent.md` SH1, SH33) —
-  except that it skips, neither loading nor
-  deleting them, the files that may belong under a file it cannot load: a
-  file that did not load names no object, so it proves no owner gone
-  (`dnagent.md` DN2 and `cnagent.md` CN2 say which files that holds back).
-  When an object disappears from its parent's pointer list, the agent drops
-  its file or files, its chunk files, its in-memory entry and its object
-  lock in that same pass, **before** anything of it is removed — save a file
-  no memory entry names, such as one a restart left unloaded (`dnagent.md`
-  SH7 says which): the sweep (Teardown by sweep) removes its object's
-  resources by name in that pass, and such a file stays until a later
-  restart decodes it and finds the pointer absent. The agent keeps no record
-  of the object afterwards because it needs none: the sweep finds the
-  object's resources by their names, and a record kept until they were gone
-  would be a record of work owed — the very thing that lets a failed
-  teardown be forgotten.
+  request and chunk file of its role's kinds under its prefix and reconciles
+  the system to it (full idempotent re-apply; for a clone, Clone metadata
+  durability), its gRPC listener already open and the agent answering that
+  it is starting until that reconcile ends (`dnagent.md` SH1, SH33) — except
+  that it skips, neither loading nor deleting them, the files that may
+  belong under a file it cannot load: a file that did not load names no
+  object, so it proves no owner gone (`dnagent.md` DN2 and `cnagent.md` CN2
+  say which files that holds back). When an object disappears from its
+  parent's pointer list, the agent drops its file or files, its chunk files,
+  its in-memory entry and its object lock in that same pass, **before**
+  anything of it is removed — save a file no memory entry names, such as one
+  a restart left unloaded (`dnagent.md` SH7 says which): the sweep (Teardown
+  by sweep) removes its object's resources by name in that pass, and such a
+  file stays until a later restart decodes it and finds the pointer absent.
+  The agent keeps no record of the object afterwards because it needs none:
+  the sweep finds the object's resources by their names, and a record kept
+  until they were gone would be a record of work owed — the very thing that
+  lets a failed teardown be forgotten.
 * **Revision gate.** A `Syncup*` request with a revision **lower** than
   the stored one is rejected (`AgentReply.code` non-zero, `details`
   explains). Equal revision: re-apply idempotently (workers retry).
@@ -4279,28 +4278,29 @@ its pad bits in the middle of the chunk and shift every later bit. So
   `AgentReply` with its `code` and `details` (zero is OK). `Syncup*`,
   `Get*Info` and `Check*` replies also carry the object's `*Info`, a
   `revision` and an `obs_stamp` (Live-state reporting). Once the agent has
-  started (`dnagent.md` SH33), a `Get*Info` or
-  `Check*` reply about an object the agent holds answers from the agent's
-  latest observation of it: the code, the `revision` and the `*Info` — on
-  a `Check*` reply as `show_info` asks (Check streams) — are that
-  observation's, and the stamp names it. A `Syncup*` reply carries the
+  started (`dnagent.md` SH33), a `Get*Info` or `Check*` reply about an
+  object the agent holds answers from the agent's latest observation of it:
+  the code, the `revision` and the `*Info` — on a `Check*` reply as
+  `show_info` asks (Check streams) — are that observation's, and the stamp
+  names it. Once the agent has started, a `Syncup*` reply carries the
   revision of the request the agent holds for the object; when the agent
   accepted the request, its gates admitting it and its save holding
   (Revision gate), its code and `*Info` are what its converge reached, its
-  stamp is that of the observation the converge stored, and its
-  `save_time`, which every such reply carries, is when the agent saved the
-  request (`dnagent.md` SH28).
-  The exact reply fields are listed per RPC under `service DiskNodeAgent` and
-  `service ControllerNodeAgent`. `PushMigrBitmapReply` and
-  `PushCloneBitmapReply` carry only `AgentReply`; `GetDnSize`, `GetCnSize`,
-  `GetThinDeviceBm`, `GetLegBm` and `InspectGrp` return only their payload
-  (`size`, `bitmap`, the members' reads) and report failure through the
-  gRPC status. While the agent starts, every `Syncup*`, `Push*Bitmap`,
-  `Get*Info` and `Check*` reply carries `ReplyCodeStarting` and no
-  observation, and `GetThinDeviceBm`, `GetLegBm` and `InspectGrp` end
-  with gRPC's Unavailable (`dnagent.md` SH33). A worker issues the
-  `Syncup*` calls for one object sequentially — the next revision only after
-  the previous call returned.
+  stamp is that of the observation the converge stored, and its `save_time`,
+  which every such reply carries, is when the agent saved the request
+  (`dnagent.md` SH28). The exact reply fields are listed per RPC under
+  `service DiskNodeAgent` and `service ControllerNodeAgent`.
+  `PushMigrBitmapReply` and `PushCloneBitmapReply` carry only `AgentReply`;
+  `GetDnSize`, `GetCnSize`, `GetThinDeviceBm`, `GetLegBm` and `InspectGrp`
+  return only their payload (`size`, `bitmap`, the members' reads) and
+  report failure through the gRPC status. While the agent starts, every
+  `Syncup*`, `Push*Bitmap`, `Get*Info` and `Check*` reply carries
+  `ReplyCodeStarting` and no observation, a `Syncup*`, `Get*Info` or
+  `Check*` one a zero `revision` and no `*Info` whatever request the agent
+  holds, and `GetThinDeviceBm`, `GetLegBm` and `InspectGrp` end with gRPC's
+  Unavailable (`dnagent.md` SH33). A worker issues the `Syncup*` calls for
+  one object sequentially — the next revision only after the previous call
+  returned.
 * **Error capture.** Shell execution uses the command timeouts (Common
   validation); failures are captured into the affected resource's
   `ResInfo` as `RES_STATUS_ERROR` with what failed in `details` rather than
@@ -5001,23 +5001,24 @@ every round answers that it is starting (`dnagent.md` SH33):
   below), and on a reply that the agent is starting, which re-issues
   nothing either (`dnv-worker.md` HL8).
 * **Health.** The worker turns a broken stream, a missing reply within the
-  round timeout, a reply whose observation is too old, or
-  `RES_STATUS_ERROR` entries in the `*Info` into the `err_epoch` updates
-  of dn / cn roles and sp role (`RES_STATUS_UNKNOWN` is what the worker
-  records itself while the stream is dead, Live-state reporting). A reply
-  whose observation is too old counts as a missing reply; how old is too
-  old, and why, is `dnv-worker.md` HL7, which also makes the first round
-  after a pause in the worker's rounds of an object give no verdict on an
-  observation that ended before that round. A reply that the agent is
-  starting is no verdict while the agent has been starting for less than
-  the cluster's start hold, counted from the first of its starts since
-  the worker last judged a round of the object, and a missing reply once
-  it has been starting longer, and the end of each start is a pause in
-  the worker's rounds (`dnv-worker.md` HL8). A
-  primary whose agent refuses its syncups, with an invalid conf or a
-  failed save, is unhealthy on its rounds (`dnv-worker.md` HL9). The
-  `Check*` replies are the primary health signal; the `Syncup*` replies
-  are the secondary one.
+  round timeout, a reply whose observation is too old, or `RES_STATUS_ERROR`
+  entries in the `*Info` into the `err_epoch` updates of dn / cn roles and
+  sp role (`RES_STATUS_UNKNOWN` is what the worker records itself while the
+  stream is dead, Live-state reporting). A reply whose observation is too
+  old counts as a missing reply; how old is too old, and why, is
+  `dnv-worker.md` HL7, which also makes the first round after a pause in the
+  worker's rounds of an object give no verdict on an observation that ended
+  before that round. A reply that the agent is starting is no verdict while
+  the agent has been starting for less than the cluster's start hold,
+  counted from the first of its starts since the worker last judged a round
+  of the object, and a missing reply once it has been starting longer, and
+  the end of each start is a pause in the worker's rounds (`dnv-worker.md`
+  HL8). An enabled primary whose agent refuses a `SyncupCntlr` newer than
+  the request it holds, with an invalid conf or a failed save, is unhealthy
+  on the rounds that answer, accepted, from the older request; a refused
+  re-send of the request it holds makes no round unhealthy (`dnv-worker.md`
+  HL9). The `Check*` replies are the primary health signal; the `Syncup*`
+  replies are the secondary one.
 
 ### Teardown by sweep
 
