@@ -5368,10 +5368,12 @@ redund_dial() { # sp c2 req2 rev2
 }
 
 # leg_write_ms <json> <leg id> — the write half of a leg's last probe round
-# in a get-cntlr-info --io-stats reply, in ms, or "none".
+# in a get-cntlr-info --io-stats reply, in ms, or "none" before the leg's
+# first round. A write under a millisecond reads 0: the reply leaves a zero
+# write_ms out, as JSON leaves out every zero field.
 leg_write_ms() {
-	jq_of "$1" ".io_stats.leg_id_to_io[\"$(d16 "$2")\"].probe_times.write_ms
-		// \"none\""
+	jq_of "$1" ".io_stats.leg_id_to_io[\"$(d16 "$2")\"].probe_times as \$p
+		| if \$p == null then \"none\" else (\$p.write_ms // 0) end"
 }
 
 # leg_round_age_ms <json> <leg id> — how long before the reply's answer a
