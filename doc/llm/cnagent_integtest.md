@@ -37,9 +37,10 @@ with no mark, a group whose array has run whose legs all read blank,
 the clone's source lost and given back, a new volume over a thin id that
 holds data, a disk node that dies under a host's writes, and
 the leftover, an accepted request reporting residue (`cnagent.md` CN20). The
-cases run in a fixed order, fail-fast — smoke, redund, repair, teardown,
-thinbm, torn, discard, clone_xfer, restart, pause — each under pool ids of its own and
-each leaving nothing of its pools, a teardown per case and per stage that
+cases run in a fixed order, fail-fast — nodecheck, smoke, redund, repair,
+teardown, thinbm, torn, discard, clone_xfer, restart, pause — nodecheck
+building no pool and each other case under pool ids of its own, and each
+leaving nothing of its pools, a teardown per case and per stage that
 also keeps the run inside a DN's data area, which the cases together would
 overdraw.
 
@@ -282,6 +283,23 @@ measures as the dn suite's does; and on the dm-clone table. This suite adds:
   one whose count is above is re-added and copied over, its newer data lost
   with no error. An assembly handed members of both identities refuses, in
   every order (`cnagent.md` CN12).
+* A read of /proc/mdstat waits behind a stuck md member in one of the two
+  shapes tried. With the member suspended under a write, md's thread waits
+  in the superblock update that marks the array active, which holds no
+  lock the read takes: /proc/mdstat, md's sysfs attributes and `mdadm
+  --detail` all answer at once. In the other shape, an array written with
+  both members up, marked clean again within a second, and then a member
+  suspended held a /proc/mdstat read 12 s after the suspend, until a
+  resume freed it. Seen with kernel 7.0.0-42. By md's bitmap code at 7.0:
+  /proc/mdstat takes the bitmap's mutex, which md's bitmap daemon holds
+  through each of its passes, 5 s apart; a pass sends its bitmap page
+  writes without waiting for them, but a pass with work waits, with the
+  mutex held and before it sends its own, for every md metadata write
+  still out. After the write, the first pass writes the bitmap
+  superblock's count of cleared events; with the member suspended by then,
+  that write is stuck on it, and the next pass, which clears the written
+  chunk's bit, waits for it. Suspended after that first pass, the member
+  holds only the write of the cleared bit, which no later pass waits for.
 * mdadm writes an assembly's superblock update into each member before the
   kernel takes it: a run that gives the array a new identity and that the
   kernel refuses for the member's bad-block log, or that mdadm refuses for
@@ -428,6 +446,33 @@ here and after every restart, goes on reading the node's info until the
 agent no longer answers that it is starting. Both agents of a VM start with
 an IO queue cap below the VMs' CPU count, so that the cap and not the CPU
 count sets each path's queues (`dnagent.md` CM2, SH32).
+
+**nodecheck** runs first, while neither VM holds a dnv object, and proves
+`dnv-agent`'s node check, md replay and gather on the lab's kernels and
+tools (`dnagent.md` CM5, CM6). The check stage runs `check dn` over each
+VM's loop device and `check cn` on each VM, as the agents run: each exits
+zero with no failed result, and its warnings are logged. The replay stage
+runs `check cn --md-replay` on vm1: it exits zero, every step of the replay
+holds, and no loop device, array or directory of the replay is left. The
+replaywrap stage puts an mdadm first in the check's PATH that adds the
+start-anyway flag to every assembly, as a node whose mdadm does not keep
+its degraded gate: the check exits one, the replay fails at the lone
+leg's refusal and stops there, and its teardown leaves nothing. The gather
+stage builds an md array with an internal bitmap over two dm-linears, named
+outside dnv's dm prefix and with a dnv array name, so that no agent and no
+replay reads them as dnv's while the md assembly mask keeps udev off them,
+writes the array once with both members up, suspends one member a second
+later, which is most often before md's bitmap daemon's next pass, and
+first proves its premise: a read of /proc/mdstat
+that has not finished after 2 s, seen within 30 s, a read started every
+2 s (Lab facts); then
+`collect` with a short deadline returns within that deadline and a margin,
+exits zero, and its archive's read list names the /proc/mdstat read as not
+finished, while its in-process md read shows the array.
+The stage then resumes the member and removes what it built, and
+/proc/mdstat reads again. The cleanup's first phase, and a failing run's
+exit, release the stall and remove the mdadm wrapper (Teardown and
+cleanup).
 
 **smoke** proves the plumbing: the pointer before the `SyncupCntlr` that builds
 a `RedundNone` primary stack (`cnagent.md` CN8 to CN16), all rows OK but the
@@ -925,7 +970,9 @@ fresh round's reply, and the reloaded infos, revisions included, equal the
 snapshots but for the status epochs (`dnagent.md` SH14) and the replies'
 stamps, which differ by nature; the agent's log shows no mdadm command
 the check counts, which leaves an examine out, though the agent runs none
-and reads superblocks itself (CN12); equal-revision re-sends leave the new logs free of any mutation, an
+and reads superblocks itself (CN12), and leaves out the start record's
+`mdadm --version` (`log.md`, Agent start), which reads no member;
+equal-revision re-sends leave the new logs free of any mutation, an
 activation sweep's included (`dnagent.md` SH16; `cnagent.md` CN14); and a
 `SyncupCn` below the revision those re-sends stored is refused as stale in a
 normal reply (`dnagent.md` SH8, SH9; CN4).
@@ -982,8 +1029,10 @@ dm, md, nvmet and host state, each read bounded, and the failing stage's trace
 id, but for clone_xfer's token bucket, which it removes, as the bucket would
 slow any suite that runs on the VMs before the next cleanup, and pause's cut
 and its writer, which it removes and stops, as the cut would black-hole
-another suite's connections, and redund's drop of new connections, which it
-removes for the same reason. A cleanup-only
+another suite's connections, redund's drop of new connections, which it
+removes for the same reason, and nodecheck's stalled array and mdadm
+wrapper, which it resumes and removes, as a suspended member wedges another
+suite's udev and LVM scans. A cleanup-only
 run does the scrub alone. It takes every `dnv-agent` and
 every dnv dm device, md array and nvmet subsystem on the node, of either
 role, which is why one dnv suite runs at a

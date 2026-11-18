@@ -5,6 +5,7 @@ import (
 	"encoding/hex"
 	"fmt"
 	"hash/fnv"
+	"path"
 	"regexp"
 	"strings"
 	"testing"
@@ -386,5 +387,42 @@ func TestDnNsIdentity(t *testing.T) {
 	otherSp, _ := DnNsIdentity(0xebada5168620c5fe, 0x12, 0x15)
 	if uuid == otherSp {
 		t.Error("two storage pools share a namespace identity")
+	}
+}
+
+// globMatches reports whether a value matches a pattern of "|"-separated
+// shell globs, as udev matches a property.
+func globMatches(pattern, value string) bool {
+	for _, alt := range strings.Split(pattern, "|") {
+		if ok, _ := path.Match(alt, value); ok {
+			return true
+		}
+	}
+	return false
+}
+
+// Every array name the agent makes matches CnMdArrayNameGlob, bare and
+// after a homehost, and a node's own array named after a host called
+// dnv-... does not.
+func TestCnMdArrayNameGlob(t *testing.T) {
+	nf := NewNameFmt("")
+	names := []string{
+		nf.CnMdArrayName(1, 0, 0, false),
+		nf.CnMdArrayName(^uint64(0), MaxSliceCntPerSp-1,
+			MaxGrpCntPerSlice-1, true),
+		nf.CnCloneMdArrayName(0x3f1),
+	}
+	for _, name := range names {
+		for _, v := range []string{name, "any:" + name, "cn0:" + name} {
+			if !globMatches(CnMdArrayNameGlob, v) {
+				t.Errorf("%q does not match %q", v, CnMdArrayNameGlob)
+			}
+		}
+	}
+	for _, v := range []string{"dnv-cn0:0", "dnv-cn0:root", "dnv-replay",
+		"any:dnv-replay", names[0] + "0", "any:dnv-" + names[0][4:20]} {
+		if globMatches(CnMdArrayNameGlob, v) {
+			t.Errorf("%q matches %q", v, CnMdArrayNameGlob)
+		}
 	}
 }

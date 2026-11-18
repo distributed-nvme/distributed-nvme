@@ -1086,16 +1086,17 @@ Measured times are in [the introduction](introduction.md#status-and-limits-of-01
 ## 7. Maintenance actions
 
 Every maintenance action should have a tool and a document. The table says
-what exists today. "Tool" is a dnvctl command, a gateway call, or what the
-worker does by itself. "Doc" names the document with the steps. The two
+what exists today. "Tool" is a dnvctl command, a gateway call, what the
+worker does by itself, or a `dnv-agent` command an operator runs by hand on
+a node. "Doc" names the document with the steps. The two
 tutorials are [dnv on one machine](tutorial_all_in_one.md) and
 [dnv under Kubernetes on one machine](tutorial_csi.md). "Operations doc"
 names [the operations doc](operations.md), the procedures an operator
 follows by hand, which holds the forced-start guide, the steps for a pool
 made before the stripe bound and for a new volume refused for a thin id
-that holds data, a planned restart of an agent, a slow leg and the install
-of the udev rules on a node so far, and gets the others as they are
-written. Every row with no tool
+that holds data, a planned restart of an agent, a slow leg, the install
+of the udev rules on a node, the node check and the gather of a node's
+state so far, and gets the others as they are written. Every row with no tool
 or no doc carries its note. Section 6.1 and the tables give some short
 steps; the section "Steps known today" below gives the longer ones.
 
@@ -1104,7 +1105,8 @@ steps; the section "Steps known today" below gives the longer ones.
 | Action | Tool today | Doc today | State |
 |---|---|---|---|
 | Add a disk node or a controller node | `dnvctl dn create`, `dnvctl cn create` | the tutorials | done |
-| Prepare a node: the udev rules on every node that keep the system's own md assembly, LVM and bcache off dnv's devices, the LVM and md settings that go with them, the network and the firewall | the udev rules ship in `deploy/udev/` with the programs | the operations doc, for the udev rules and the two settings; the tutorials, for the udev rules | procedure written for the udev rules and the two settings; procedure to write for the network and the firewall. Fix decided: a node check, a subcommand of `dnv-agent`, reports what a node lacks and how to fix it. |
+| Prepare a node: the udev rules on every node that keep the system's own md assembly, LVM and bcache off dnv's devices, the LVM and md settings that go with them, the network and the firewall | the udev rules ship in `deploy/udev/` with the programs; `dnv-agent check dn`, `dnv-agent check cn`: the node check reports what a node lacks and how to fix it | the operations doc, for the udev rules and the two settings, and Check a node before it joins; the tutorials, for the udev rules | procedure written for the udev rules, the two settings and the node check; procedure to write for the network and the firewall. |
+| Gather a node's state for a bug report | `dnv-agent collect` | the operations doc, Gather a node's state for a bug report | done |
 | Disable a node | `dnvctl dn set-disabled`, `dnvctl cn set-disabled` | none | procedure to write, one line: when to disable |
 | Remove a node | `dnvctl dn delete`, `dnvctl cn delete`. Refused while a side or a cntlr is on it. | the teardown of the tutorials | procedure to write: drain first, check the leftovers. Fix decided: the delete asks the agent. |
 | Replace a dead disk node | leg repair moves its RAID1 legs; `dnvctl retired-leg delete` frees the retired ones | none | procedure to write. Fix later: a forced node delete. |
@@ -1112,7 +1114,6 @@ steps; the section "Steps known today" below gives the longer ones.
 | Reuse a disk from an old node | none: stop the agent; zero the disk's header block, where dnv records the disk; delete the agent's local store; start the agent; create the node | none | procedure to write |
 | See a node's live state and the cluster's capacity | `dnvctl dn inspect`, `dnvctl cn inspect`, `dnvctl cluster get-capacity` | none | procedure to write, one line. Fix decided: a capacity answer that also says what can still be placed and which limit the cluster reaches first. |
 | Compare a disk node's own free count with its record | `dnvctl dn inspect` shows the agent's count, `dnvctl dn get` the record's | none | procedure to write, one line: the counts are compared, never reconciled |
-| Gather a node's state for a bug report | none | none | fix decided: a gather subcommand of `dnv-agent` writes one archive |
 | Restart a node's agent | none; the agent answers "starting" while it rebuilds, and the worker waits for it up to the start hold | the operations doc | done |
 
 ### Pools
@@ -1213,18 +1214,39 @@ yourself: a disk the logs fill is one the stores and etcd cannot write.
 
 ### Notes on the maintenance tools
 
-- **md's behaviour is tested in the lab only.** Failover safety and the
-  forced start rest on mdadm's behaviour, tested on the lab's mdadm. The
-  order of fences of section 5.1 also rests on the kernel's md: it
-  completes a write that landed on one leg and failed on the other, and
-  when the legs' records read equal, the start of the array copies the
-  leg in its first place over the others. A script,
+- **Part of md's behaviour is tested in the lab only.** Failover safety
+  and the forced start rest on mdadm's and the kernel's md behaviour,
+  tested on the lab's. On a node, the node check (`dnv-agent check`)
+  reports a kernel outside the tested 7.0 series and, on a controller
+  node, an mdadm other than the tested 4.5; on a spare machine with a
+  node's mdadm and kernel, its md replay (`dnv-agent check cn
+  --md-replay`) runs md's refusal of a lone clean leg, the start of the
+  survivor, the pick of the newer leg and a forced start
+  ([operations](operations.md#check-a-node-before-it-joins)). Each agent
+  logs the kernel release when it starts, and a controller node's agent
+  also the mdadm version. The order of fences of section 5.1 also rests on
+  the kernel's md: it completes a write that landed on one leg and failed
+  on the other, and when the legs' records read equal, the start of the
+  array copies the leg in its first place over the others. A script,
   `integtest/md_fence_order.sh`, checks this by hand on one lab VM's
-  kernel, and no suite runs it. Nothing checks the
-  mdadm or the kernel of a deployed node. State: fix decided, the agent
-  logs the mdadm version when it starts, the requirements name the tested
-  version, and the node check reports a version outside the tested range
-  and a kernel outside the tested series.
+  kernel; no suite runs it, and the md replay does not, since it needs a
+  write in flight at the fence and does not show it on every run. Nor does
+  anything check which part of a leg a re-add copies. State: accepted.
+- **The node check counts only dnv's own md rule.** It counts a mask of
+  the system's md assembly in two forms alone: dnv's rule
+  `63-dnv-md.rules` exactly as shipped, or mdadm.conf's AUTO line refusing
+  every format, as `AUTO -all` does, with no `homehost` on it, no POLICY
+  line that sets `auto=`, no ARRAY line of a dnv array, and no ARRAY line
+  that names devices (`devices=` or `super-minor=`) but no uuid; it reads
+  an ARRAY line's device name as mdadm does, from the first word that
+  starts with "/" or holds no "=". A rule
+  of the node's own, or another mdadm.conf, that keeps md off dnv's
+  devices fails the check all the same, since a rule cannot be judged by
+  its text: udev's order of a line's parts, how it finds the program and
+  what it puts in for its names all come between the text and what runs.
+  The shipped rule rests on the system's own md rule skipping a device it
+  marks not ready and coming after it, as the lab's Ubuntu ships that
+  rule; the check does not read it. State: accepted.
 - **Retired legs keep their extents until deleted.** A group never back to
   whole keeps them for good. At the bound of two, an operator's repair
   with a fresh leg is refused. State: procedure to write, one line.
@@ -1512,6 +1534,14 @@ design:
   code, not seen in the lab. The default block is 1 MiB. State: fix
   decided: the block is bounded at 4 MiB at cluster and pool create; a
   pool made before the bound keeps its block.
+- **A disk whose best IO size is above 4 MiB can be sent commands it
+  refuses.** A disk can tell the kernel a best IO size, as a hardware RAID
+  volume does from its stripe. The disk node passes it on to the
+  controller node, whose path to the leg then sends commands up to that
+  size, above the 4 MiB a disk node's kernel takes over TCP. Read from the
+  kernel's code, not seen in the lab. State: accepted; the node check of
+  a disk node (`dnv-agent check dn`) warns for such a disk
+  ([operations](operations.md#check-a-node-before-it-joins)).
 - **A CSI volume costs a pool.** Under the CSI driver every volume is a
   pool with its own cntlrs and sides, so the ceilings of the introduction's
   table bound the volume count. A controller node holds at most 256
@@ -1573,7 +1603,10 @@ design:
   superblock that older kernels read as padding and refuse. A failover or
   a cntlr replacement to a controller node on an older kernel then cannot
   assemble the pool's arrays. State: accepted; a requirement, which the
-  introduction names. Read in the kernel's md source, not in the lab.
+  introduction names. Read in the kernel's md source, not in the lab. The
+  node check of a controller node says which side of 6.19 its kernel is
+  on and warns for one before it; it reads one node, so it cannot hold the
+  cluster to one series.
 - **A thin id can leak after a failed delete.** When the delete of a
   volume fails twice, or the read of the volume's table does not answer,
   the volume's blocks stay allocated in its thin pool until a later pass

@@ -1145,10 +1145,14 @@ index otherwise; slice and group fields are two hex digits each.
   under /dev/md.
 * `CnMdArrayName` of an sp, slice index, group index and meta flag is
   {dnv}-{sp}-{slice}-{grp}, where {dnv} is `DnvPrefix`: the array's mdadm
-  `--name`, its superblock name, within mdadm's name limit. Its fixed
-  prefix is what the md assembly mask and the md array rule of Components:
-  invocation reference match, so that only the agent assembles dnv arrays
-  and no stock rule acts on what a host wrote into one.
+  `--name`, its superblock name, within mdadm's name limit. Its exact form
+  (`CnMdArrayNameGlob`: the prefix, then fields of their fixed lengths,
+  bare or after a "homehost:") is what the md assembly mask and the md
+  array rule of Components: invocation reference match, so that only the
+  agent assembles dnv arrays and no stock rule acts on what a host wrote
+  into one. The exact form, not the prefix alone, since a node's own array
+  carries its host's name first ("dnv-cn0:0" on a host called dnv-cn0),
+  which a match of the prefix would take for dnv's.
 
 The group index is the group's index inside its `meta_grp_list` or
 `data_grp_list` (stable: a surviving group is never renumbered, because
@@ -1173,8 +1177,9 @@ digits "ff" in both the slice and the group field:
   id needs sixteen hex digits and is unique only in its pool, so the sp
   joins the hash rather than taking sixteen digits of its own, which the
   limit has no room for.
-* `CnCloneMdArrayName` of an sp is {dnv}-{sp}-ff-ff, under the udev rules'
-  prefix and within mdadm's name limit as `CnMdArrayName` is.
+* `CnCloneMdArrayName` of an sp is {dnv}-{sp}-ff-ff, in the exact form the
+  udev rules match (`common.CnMdArrayNameGlob`) and within mdadm's name
+  limit as `CnMdArrayName` is.
 
 Neither form is ever a slice group's name: a slice field is at most the
 last slice index of `MaxSliceCntPerSp` with the meta bit, and a group field
@@ -7141,9 +7146,11 @@ processes run co-located on any number of control-plane servers (fig.
 * `dnv-worker` (`dnv-worker.md`) — the vote, shard and revision workers of
   the roles it runs, any subset of `dn`, `cn` and `sp` (`dnv-worker.md`
   CM1): it reads and writes etcd and dials the agents.
-* `dnv-agent dn` and `dnv-agent cn` (`dnagent.md`, `cnagent.md`) — one
-  cobra root command with exactly those two subcommands (`dnagent.md` CM1);
-  the dn agent runs on every DN and the cn agent on every CN. An agent
+* `dnv-agent dn` and `dnv-agent cn` (`dnagent.md`, `cnagent.md`) — two
+  subcommands of one cobra root command, beside the node check, `dnv-agent
+  check dn` and `check cn`, and the gather, `dnv-agent collect`, one-shot
+  tools that start no server (`dnagent.md` CM1, CM5, CM6); the dn agent
+  runs on every DN and the cn agent on every CN. An agent
   serves its gRPC service to the workers and the gateway, converges one
   nvmet port on the node's kernel from its four transport flags, and keeps
   its local store (Agent local-store paths). It never talks to etcd. The
@@ -7213,9 +7220,9 @@ devices keep their stock handling:
 * the md array rule, `63-zz-dnv-md-array.rules`, ordered after the stock
   "63-md-raid-arrays.rules", which reads an md array's name, probes its
   start and adds links by what it found there, and before every "64-" file:
-  for an array whose name carries the dnv prefix, and each partition the
-  kernel finds on one, it sets the file system type to one no stock rule
-  matches and clears its usage, so md's incremental assembly, btrfs's,
+  for an array whose name has the exact form of dnv's (md names), and each
+  partition the kernel finds on one, it sets the file system type to one no
+  stock rule matches and clears its usage, so md's incremental assembly, btrfs's,
   bcache's and lvm2's rules skip it; it takes away the links by uuid, label,
   partition uuid and partition label the stock rule added, and puts any
   other link the array shares with a device of the node's own below that
@@ -7258,15 +7265,18 @@ the stock "64-md-raid-assembly.rules", imports the md environment itself
 with an examine that names the 1.2 format — the array name does not exist
 before the stock rule runs its own import, so a bare name match in an
 earlier rule never fires — and sets "SYSTEMD_READY" to zero for a device
-whose array name carries the fixed dnv prefix of `CnMdArrayName` (md
-names), in the bare form and in the "homehost:name" form; the cn agent
+whose array name has the exact form of `CnMdArrayName` (md names), in the
+bare form and in the "homehost:name" form; the cn agent
 creates its arrays with `--homehost any`, and the deployed mdadm stores
 such an array's name in the "homehost:name" form, "any:" before the dnv
 name. Reason for the format: the plain examine reads a host's newer 0.90 or
 1.0 superblock at a leg's end in place of dnv's, and would let the stock
 rule take the leg (`cnagent.md` CN12, The superblock format). The mask
 works because the stock rule skips a device whose "SYSTEMD_READY" is zero,
-which the deployed mdadm's rules must do.
+which the deployed mdadm's rules must do. The node check counts a mask in
+two ways alone: this rule in effect, byte for byte the shipped text, or an
+mdadm.conf that refuses every format in a strict form and names no dnv
+array; it judges no other rule (`dnagent.md` CM5).
 
 ## Recorded design decisions
 
@@ -7672,8 +7682,11 @@ document and the component documents cite it by its id.
   `integtest/md_fence_order.sh` pins another part, which the fence round
   rests on: a start from equal superblocks copies the member in the
   lowest slot. That script is run by hand on one lab guest and by no
-  suite (`layout.md`, Directory tree). Nothing checks the mdadm or the
-  kernel a deployed node runs (Known limits). For a host
+  suite (`layout.md`, Directory tree). On a node the node check reports the
+  kernel's series and mdadm's version against the tested ones, and its md
+  replay asserts the refusal, the start of a survivor and the newer leg on
+  a spare machine with that node's mdadm and kernel (`dnagent.md` CM5); the
+  slot-0 copy stays pinned by the script alone (Known limits). For a host
   that follows the discovery log, the demotion hold and the withdrawal close
   both edges of a failover: an old primary that applies its demotion within
   the demotion hold is inaccessible before the fence, and one the worker
@@ -7890,6 +7903,13 @@ document and only pointed to here.
   by it, since that would change the block rule every pool's geometry
   rests on; the default block is within it. Read in the kernel's sources,
   not seen in the lab. Every clone into such a pool is refused (Clones).
+* **A disk whose best or minimum IO size is over `MaxNvmeTcpCmdBytes` can
+  be sent commands its disk node refuses.** A side's dm-linear takes the
+  disk's best and minimum IO size, as a hardware RAID volume's stripe can
+  set them, nvmet passes both to the controller node's leg path, and that
+  path then lets one request grow to them, past the bound. No rule refuses
+  such a disk: the node check of a disk node warns for one (`dnagent.md`
+  CM5). Read in the kernel's sources, not seen in the lab.
 * **A CSI volume costs the cluster a pool** (`csi.md`, The volume model).
 * **A RAID1 pool needs as many disk nodes per slice at create as its meta
   and data groups have legs together.** `CreateStoragePool` puts every leg
@@ -8232,25 +8252,30 @@ document and only pointed to here.
   the sides' reports and converges, not their fence steps (`dnv-worker.md`,
   Known limits), and the cutoff case's fence writer lost no acknowledged
   write in those runs.
-* **md's assembly behaviour is pinned in the lab only.** The cross-leg
-  half of failover safety ([D16], "Make sure all groups are available")
-  rests on mdadm refusing to start an array from a lone survivor whose
-  superblock still counts a clean full array, and, once both legs are
-  back, on the event counts picking the newer leg and a resync overwriting
-  the stale one; on the lab's mdadm the cn suite asserts the refusal and
-  that a block only the newer leg holds reads as that leg's
-  (`cnagent_integtest.md`, Cases), and nothing checks the mdadm a deployed
-  node runs. The fence round rests as well on a start from equal
-  superblocks copying the member in the lowest slot (`dnv-worker.md`
-  RW24), which only `integtest/md_fence_order.sh` pins, run by hand on
-  one lab guest's kernel and by no suite, and nothing checks the kernel a
-  deployed node runs. The forced start rests on md behaviour pinned in the lab
-  only as well (Repair, Forced start): an assembly from one member with
-  mdadm's run and force flags under a new identity, a run that writes the
-  new identity into the member before the kernel takes it, the layout of
-  md's version-1.2 superblock, which the agent reads itself, a run that
-  drops a member's bad-block list, and a zeroed member that md adds as a
-  fresh one (`cnagent.md` CN12).
+* **Parts of md's assembly behaviour are pinned in the lab only.** The
+  cross-leg half of failover safety ([D16], "Make sure all groups are
+  available") rests on mdadm refusing to start an array from a lone
+  survivor whose superblock still counts a clean full array, and, once both
+  legs are back, on the event counts picking the newer leg and a resync
+  overwriting the stale one; on the lab's mdadm the cn suite asserts the
+  refusal and that a block only the newer leg holds reads as that leg's
+  (`cnagent_integtest.md`, Cases). A deployed node's kernel and mdadm are
+  checked only as far as the node check goes (`dnagent.md` CM5): it reports
+  a kernel outside the tested series and an mdadm other than the tested
+  one, and its md replay, run on a spare machine with the node's mdadm and
+  kernel, asserts the refusal, the survivor's start, the newer leg's pick
+  and a forced start from one member under a new identity, and holds the
+  agent's superblock reader and its model of mdadm's start to that mdadm.
+  The fence round rests as well on a start from equal superblocks copying
+  the member in the lowest slot (`dnv-worker.md` RW24), which only
+  `integtest/md_fence_order.sh` pins, run by hand on one lab guest's kernel
+  and by no suite, since it needs a writer in flight at a fence and does not
+  show it on every run; the replay leaves it out, as it leaves out the
+  range a bitmap re-add copies. The rest of the forced start rests on md
+  behaviour pinned in the lab only (Repair, Forced start): a run that
+  writes the new identity into the member before the kernel takes it, a run
+  that drops a member's bad-block list, and a zeroed member that md adds as
+  a fresh one (`cnagent.md` CN12).
 * **An md check of a RAID1 data group or clone meta group counts
   mismatches.** The legs of a data group or of a clone meta group are
   never zeroed past their first data block, so they may differ wherever

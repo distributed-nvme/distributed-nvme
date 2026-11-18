@@ -53,7 +53,8 @@ Unit tests are colocated `_test.go` files inside each package.
 | `worker/` | dnv-worker: the vote worker, the shard workers, the per-object revision workers with their dn, cn and sp roles, the agent-connection cache, the `ClusterConf` cache, health bookkeeping, the bitmap pushes, the automatic reactions and the sp and clone drains (`dnv-worker.md`) |
 | `agent/` | the mechanism both agent roles share: bootstrap, the local store, the revision gate, the stored-conf validators, the lock hierarchy, `ResInfo` tracking, the bitmap-chunk store, the part of teardown by sweep both roles share, the per-pass wait budget, the store of each object's latest observation with the bookkeeping of its background read, the converge marks, and the dm, nvmet and nvme-host wrappers (`dnagent.md`, SH1 to SH30) |
 | `agent/dnagent/` | the dn role's policy, the `DiskNodeAgent` service: which disk-metadata records, dm tables and nvmet objects a disk node builds, and when (`dnagent.md`) |
-| `agent/cnagent/` | the cn role's policy, the `ControllerNodeAgent` service: which leg connections, md arrays, thin pools, dm and nvmet objects a controller node builds, and when, with the wrappers of the tools only the cn runs (`cnagent.md`) |
+| `agent/cnagent/` | the cn role's policy, the `ControllerNodeAgent` service: which leg connections, md arrays, thin pools, dm and nvmet objects a controller node builds, and when, with the wrappers of the tools only the cn runs and the md replay that runs them on a spare machine (`cnagent.md`; `dnagent.md` CM5) |
+| `agent/nodecheck/` | the node check and the gather of `dnv-agent`: one-shot reads of a node's kernel, tools, udev rules, modules and disk for a role, and one archive of its state for a bug report; never a server (`dnagent.md` CM5, CM6) |
 | `cdc/` | dnv-cdc: the etcd watcher of the `CdcEntry` keys, the per-host view registry, the discovery-log rendering and the NVMe/TCP discovery controller (`cdc.md`) |
 | `ctl/` | dnvctl: the cobra command tree, one file per noun group, and in `ctl/root.go` what the groups share — the viper binding, the dial, the result rendering and the exit codes (`dnvctl.md`) |
 | `csi/` | dnv-csi: the Container Storage Interface driver, served over a unix socket to Kubernetes: the identity service; the controller plugin, which is a gRPC client of the gateway, with the volume naming and the capacity arithmetic; and the node plugin, with the follower, the node's NVMe connects, the mounts and the kernel's event socket (`csi.md`) |
@@ -69,7 +70,7 @@ Unit tests are colocated `_test.go` files inside each package.
 | `integtest/fakegateway/` | every `Gateway` method behind a behavior file, which the dnvctl suite runs in place of a gateway |
 | `cmd/dnv-gateway/` | the `main` of `dnv-gateway`, the control-plane API server |
 | `cmd/dnv-worker/` | the `main` of `dnv-worker`, the control-plane worker |
-| `cmd/dnv-agent/` | the `main` of `dnv-agent`, the node agent in its dn and cn roles |
+| `cmd/dnv-agent/` | the `main` of `dnv-agent`, the node agent in its dn and cn roles, with the node check and the gather |
 | `cmd/dnv-cdc/` | the `main` of `dnv-cdc`, the central discovery controller |
 | `cmd/dnvctl/` | the `main` of `dnvctl`, the operator CLI |
 | `cmd/dnv-csi/` | the `main` of `dnv-csi`, the CSI driver |
@@ -157,10 +158,11 @@ names.
 | `gateway` | `common`, `pb`, `etcdutil`, `model` | gRPC server and client: it dials agents |
 | `worker` | `common`, `pb`, `etcdutil`, `model` | gRPC client only: it dials agents (`dnv-worker.md`) |
 | `agent`, `agent/dnagent`, `agent/cnagent` | `common`, `pb`; the two role packages also `agent`, the shared mechanism they build on | gRPC server only; no etcd: agents never talk to etcd (`architecture.md`, System overview) |
+| `agent/nodecheck` | `common`, `pb`, `agent`, `agent/cnagent` (the md replay and the md array listing) | no server and no client: it reads the node through the `OsClient` alone; no etcd |
 | `cdc` | `common`, `pb`, `etcdutil`, `model` | serves NVMe-oF discovery, not gRPC |
 | `ctl` | `common`, `pb` | gRPC client of the gateway; cobra, pflag and viper, because the dnvctl command tree and its viper binding (`dnvctl.md` CT9) live here, not in `cmd/dnvctl` (`dnvctl.md`, Files); no etcd |
 | `csi` | `common`, `pb` | gRPC client of the gateway, under the shared client chain, and gRPC server of the CSI services, under an interceptor of its own (`csi.md` CSI8); the CSI spec module (`dependencies.md`, Direct dependencies); no etcd |
-| each `cmd/` package | the matching top-level package and `common`. `cmd/dnv-worker`, `cmd/dnv-gateway` and `cmd/dnv-cdc` also `etcdutil`: each main builds the client its `Run` takes. `cmd/dnv-agent` also `agent/dnagent`, `agent/cnagent` and `pb`: its main builds the role servers and their `NvmeTrConf` and registers each through `agent.Serve`. `cmd/dnvctl` imports only `common` and `ctl`, and `cmd/dnv-csi` only `common` and `csi`. | cobra and viper live here, for the flag, config and environment parsing and the subcommand trees (`architecture.md`, Components: invocation reference; `dnagent.md` CM1), except for dnvctl, whose tree is `ctl`'s and whose main imports neither |
+| each `cmd/` package | the matching top-level package and `common`. `cmd/dnv-worker`, `cmd/dnv-gateway` and `cmd/dnv-cdc` also `etcdutil`: each main builds the client its `Run` takes. `cmd/dnv-agent` also `agent/dnagent`, `agent/cnagent`, `agent/nodecheck` and `pb`: its main builds the role servers and their `NvmeTrConf` and registers each through `agent.Serve`, and runs the node check and the gather. `cmd/dnvctl` imports only `common` and `ctl`, and `cmd/dnv-csi` only `common` and `csi`. | cobra and viper live here, for the flag, config and environment parsing and the subcommand trees (`architecture.md`, Components: invocation reference; `dnagent.md` CM1), except for dnvctl, whose tree is `ctl`'s and whose main imports neither |
 | each `integtest/` driver | `common`, `pb`; `integtest/agentfake` for `fakeagent`; `model` and `etcdutil` for `workerctl`, which plays the gateway, and `cdcctl`, which plays the gateway and the worker for the `CdcEntry` keys; `integtest/plant` for `workerctl`, which writes through it | test drivers only, never linked into a `cmd/` binary |
 | `integtest/agentfake` | `common`, `pb`, `agent` (`CheckRoundCtx` and `Timestamp`, `dnagent.md` SH24, SH28) | a test library: imported by `fakeagent` and by the `_test.go` files of `worker`; the `_test.go` files of `gateway` and `cdc` MAY import it; no other package does, so it is never linked into a `cmd/` binary; gRPC server and client, over TCP or over in-memory connections |
 | `integtest/plant` | `common`, `pb`, `etcdutil`, `model` | the planting library, test code only: `workerctl` and the `_test.go` files of `worker` may import it, no other package does, and it is never linked into a `cmd/` binary |
@@ -211,9 +213,11 @@ env-backed global flags that way, in `ctl/` (`dnvctl.md` CT9). Specifics:
 
 * `cmd/dnvctl/main.go` sets the log level to Warn with `SetLogLevel` as its
   first statement (`log.md` R6), then hands off to `ctl.Execute`.
-* `cmd/dnv-agent/main.go` is a cobra root command with the `dn` and `cn`
-  subcommands (`dnagent.md` CM1), dispatching to `agent/dnagent` or
-  `agent/cnagent`. Both roles share `agent` for the server bootstrap and the
+* `cmd/dnv-agent/main.go` is a cobra root command with the `dn`, `cn`,
+  `check` and `collect` subcommands (`dnagent.md` CM1), dispatching to
+  `agent/dnagent`, `agent/cnagent` or `agent/nodecheck`; the node check and
+  the gather set the log level to Warn (`log.md` R6) and end with an exit
+  status of their own (`dnagent.md` CM5). Both roles share `agent` for the server bootstrap and the
   `--local-store` handling, and the process builds a single
   `LimitedOsClient` (`dnagent.md` CM4), which the CN11 leg probers
   deliberately bypass (`osclient.md`, Exported raw helpers and the probe-IO

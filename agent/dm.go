@@ -908,30 +908,44 @@ func (d *Dm) diskSectors(
 }
 
 // logicalBlockSize reads the logical block size of the block device whose
-// sysfs directory is dir. sysfs keeps it in the queue/ directory of a whole
-// disk alone: a partition has no queue/, and its own directory lies in its
-// disk's. So a partition, which a "partition" file in dir marks, is read
-// through dir + "/..": the kernel follows the link that dir is,
-// /sys/dev/block/<devNo>, to the partition's directory and resolves ".."
-// from there, which is the disk's directory. The path is joined by hand and
-// never cleaned as text (path.Clean, filepath.Join): that drops the link
-// and the step with it, and reads /sys/dev/block/queue, which is not there.
-// A read of the "partition" file that did not answer is an error, since it
-// cannot say where the size is.
+// sysfs directory is dir, as queueValue reads a queue/ file; 0 is no block
+// size.
 func (d *Dm) logicalBlockSize(
 	ctx context.Context,
 	dev string,
 	devNo string,
 	dir string,
 ) (uint64, error) {
+	return d.queueValue(ctx, dev, devNo, dir, "logical_block_size",
+		"block size", func(size uint64) bool { return size != 0 })
+}
+
+// queueValue reads the number in the file name of the queue/ directory of
+// the block device whose sysfs directory is dir; a text that is no number,
+// or a number valid refuses, is an error naming it as no what. sysfs keeps
+// the queue/ directory of a whole disk alone: a partition has no queue/,
+// and its own directory lies in its disk's. So a partition, which a
+// "partition" file in dir marks, is read through dir + "/..": the kernel
+// follows the link that dir is, /sys/dev/block/<devNo>, to the partition's
+// directory and resolves ".." from there, which is the disk's directory.
+// The path is joined by hand and never cleaned as text (path.Clean,
+// filepath.Join): that drops the link and the step with it, and reads
+// /sys/dev/block/queue, which is not there. A read of the "partition" file
+// that did not answer is an error, since it cannot say where the value is.
+func (d *Dm) queueValue(
+	ctx context.Context,
+	dev string,
+	devNo string,
+	dir string,
+	name string,
+	what string,
+	valid func(uint64) bool,
+) (uint64, error) {
 	_, partition, err := d.readAttrStrict(ctx, dir+"/partition")
 	if err != nil {
 		return 0, err
 	}
-	path := dir + "/queue/logical_block_size"
-	if partition {
-		path = dir + "/../queue/logical_block_size"
-	}
+	path := queuePath(dir, partition, name)
 	text, ok, err := d.readAttrStrict(ctx, path)
 	if err != nil {
 		return 0, err
@@ -940,11 +954,46 @@ func (d *Dm) logicalBlockSize(
 		return 0, fmt.Errorf("block device %s (%s) has no %s", dev, devNo,
 			path)
 	}
-	size, parseErr := strconv.ParseUint(text, 10, 64)
-	if parseErr != nil || size == 0 {
-		return 0, fmt.Errorf("%s reads %q, not a block size", path, text)
+	value, parseErr := strconv.ParseUint(text, 10, 64)
+	if parseErr != nil || !valid(value) {
+		return 0, fmt.Errorf("%s reads %q, not a %s", path, text, what)
 	}
-	return size, nil
+	return value, nil
+}
+
+// queuePath is the path of the file name in the queue/ directory that
+// holds a block device's limits, from its sysfs directory dir (queueValue).
+func queuePath(dir string, partition bool, name string) string {
+	if partition {
+		return dir + "/../queue/" + name
+	}
+	return dir + "/queue/" + name
+}
+
+// IoSizes reads a block device's best IO size and its minimum IO size, in
+// bytes, in the agent's own process, as DiskSizes reads its logical block
+// size: queue/optimal_io_size and queue/minimum_io_size, through its disk
+// for a partition (queueValue). A best IO size of 0 is a device that names
+// none. The node check reads them for a disk node's disk (dnagent.md CM5):
+// nvmet passes both to every host of a side the disk carries, and a host
+// raises its largest request to them. The two reads stand apart, as
+// DiskSizes' do: one that fails leaves its size 0, and the error names
+// every read that failed.
+func (d *Dm) IoSizes(
+	ctx context.Context,
+	dev string,
+) (optimal uint64, minimum uint64, err error) {
+	devNo, err := d.readDevNo(ctx, dev)
+	if err != nil {
+		return 0, 0, err
+	}
+	dir := sysDevBlockDir + "/" + devNo
+	anySize := func(uint64) bool { return true }
+	optimal, optErr := d.queueValue(ctx, dev, devNo, dir, "optimal_io_size",
+		"size", anySize)
+	minimum, minErr := d.queueValue(ctx, dev, devNo, dir, "minimum_io_size",
+		"size", anySize)
+	return optimal, minimum, errors.Join(optErr, minErr)
 }
 
 // InFlight reads the IO a block device has in flight, reads and writes, from

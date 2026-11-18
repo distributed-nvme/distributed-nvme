@@ -187,8 +187,13 @@ when it carries dnv's model and has a host or a port link, or when it has
 neither and is older than the grace, and another cn agent's subsystem
 passes through those shapes while it is being built.
 
-CN-CM2. `runCn` has the shape of `runDn` (`dnagent.md` CM4), with two cn
-differences. `--capacity` is optional, since zero is a value (CN3), and a
+CN-CM2. `runCn` has the shape of `runDn` (`dnagent.md` CM4), with three cn
+differences. Its start record (`agent.LogStartVersions`) carries, beside
+the kernel release, the version line of the mdadm the agent runs, the
+mdadm its model of mdadm's start rests on (`mdadmStarts`; Known limits); a read that fails is logged and the start goes on, since an agent
+refuses nothing at its start: `dnv-agent check cn` reports a version other
+than the tested one, and its md replay checks the model against the
+node's mdadm (`dnagent.md` CM5). `--capacity` is optional, since zero is a value (CN3), and a
 value from the flag, the environment or a config file's string that is not
 a plain unsigned decimal number, with no leading zero, is refused at start;
 a config file's YAML number is taken by the value YAML decodes, and one
@@ -6234,14 +6239,23 @@ stores instead is CN23's.
   the earlier kernel cannot assemble the pool's arrays (CN12) and its
   primary cannot build the pool. Every controller node of a cluster
   therefore runs one kernel series; `introduction.md`, Requirements,
-  carries the rule. Read in the kernel's md source, not in the lab. The
+  carries the rule. Read in the kernel's md source, not in the lab.
+  `dnv-agent check cn` reports which side of the line a node's md is on, by
+  md's parameter of the kernels from 6.19, `check_new_feature`, and warns
+  for a kernel without it (`dnagent.md` CM5); it sees one node, so it
+  cannot hold the cluster to one series. The
   agent's own superblock read accepts such a superblock, so a cntlr's read
   names the group's absent array (CN30) and each `SyncupCntlr` it brings
   fails the assembly again, one every second round, until the controller
   node runs the series the array was created on.
 * A cntlr read's guess of mdadm's assembly (CN12, `mdadmStarts`) reads the
   superblocks, so it parts from mdadm only where a refusal or a start rests
-  on what it does not read. Two such states are known. A superblock an
+  on what it does not read, or where a node's mdadm keeps another gate than
+  the tested one, which the guess models; the md replay of `dnv-agent
+  check cn --md-replay` holds the guess to the node's mdadm on a spare
+  machine, at the gate's refusals and starts it reaches (`dnagent.md` CM5),
+  and the start record names the mdadm a node runs (CN-CM2). Two states
+  of the first kind are known. A superblock an
   older kernel series refuses (above) is named, and its name brings a
   `SyncupCntlr` every second round. A replacement member, which only an
   operator's mdadm run makes, is kept by mdadm beside the member of its

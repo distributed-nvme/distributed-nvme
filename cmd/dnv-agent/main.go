@@ -1,12 +1,15 @@
 // Command dnv-agent is the node-local agent
-// (architecture.md, Components: invocation reference). It has
-// exactly two subcommands: dn serves DiskNodeAgent, cn serves
-// ControllerNodeAgent; both share the bootstrap, --local-store handling and
-// the single OsClient of package agent (dnagent.md CM1-CM4).
+// (architecture.md, Components: invocation reference). Its command tree
+// (dnagent.md CM1): dn serves DiskNodeAgent and cn serves
+// ControllerNodeAgent, sharing the bootstrap, --local-store handling and the
+// single OsClient of package agent (CM2-CM4); check dn and check cn are the
+// node check (CM5) and collect the gather (CM6), one-shot tools of package
+// nodecheck that start no server.
 package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"os"
@@ -14,6 +17,7 @@ import (
 	"strconv"
 	"strings"
 	"syscall"
+	"time"
 
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
@@ -22,6 +26,7 @@ import (
 	"github.com/distributed-nvme/distributed-nvme/agent"
 	"github.com/distributed-nvme/distributed-nvme/agent/cnagent"
 	"github.com/distributed-nvme/distributed-nvme/agent/dnagent"
+	"github.com/distributed-nvme/distributed-nvme/agent/nodecheck"
 	"github.com/distributed-nvme/distributed-nvme/common"
 	"github.com/distributed-nvme/distributed-nvme/pb"
 )
@@ -37,20 +42,44 @@ var requiredCommon = []string{
 	"grpc-address", "tr-type", "adr-fam", "tr-addr", "tr-svc-id",
 }
 
+// main runs the command tree. A node check or a gather ends with an exit
+// status of its own (nodecheck.ExitError), printing its error, if any, once;
+// any other error is printed and exits 1 (CM3).
 func main() {
 	if err := newRootCmd().Execute(); err != nil {
+		var exit *nodecheck.ExitError
+		if errors.As(err, &exit) {
+			if exit.Err != nil {
+				fmt.Fprintln(os.Stderr, "dnv-agent:", exit.Err)
+			}
+			os.Exit(exit.Code)
+		}
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
 	}
 }
 
+// The seams the command tree's tests replace: what serves an agent, and
+// what the node check and the gather read the node through.
+var (
+	serveAgent = agent.Serve
+	nodeEnv    = func() nodecheck.Env {
+		return nodecheck.Env{
+			// The process's single OsClient (osclient.md).
+			Oc:   common.NewLimitedOsClient(0),
+			Euid: os.Geteuid,
+			Now:  time.Now,
+		}
+	}
+)
+
 func newRootCmd() *cobra.Command {
 	root := &cobra.Command{
 		Use:          "dnv-agent",
-		Short:        "dnv node agent (dn / cn roles)",
+		Short:        "dnv node agent (dn / cn roles), node check and gather",
 		SilenceUsage: true,
 	}
-	root.AddCommand(newDnCmd(), newCnCmd())
+	root.AddCommand(newDnCmd(), newCnCmd(), newCheckCmd(), newCollectCmd())
 	return root
 }
 
@@ -61,8 +90,7 @@ func newDnCmd() *cobra.Command {
 		RunE:  runDn,
 	}
 	addCommonFlags(cmd)
-	cmd.Flags().String("disk", "",
-		"raw block device that carries the dnv disk format (required)")
+	addDiskFlag(cmd)
 	return cmd
 }
 
@@ -73,16 +101,143 @@ func newCnCmd() *cobra.Command {
 		RunE:  runCn,
 	}
 	addCommonFlags(cmd)
-	// A string flag: pflag's own uint64 parse takes Go integer syntax
-	// ("0x100", "1_000", a leading 0 as octal), which the environment and a
-	// config file's string would not get, so capacityFromViper holds the
-	// three to one decimal rule; a config file's YAML number keeps YAML's own
-	// syntax and is taken by its value (CM3).
+	addCapacityFlag(cmd)
+	return cmd
+}
+
+// addDiskFlag adds the dn role's --disk.
+func addDiskFlag(cmd *cobra.Command) {
+	cmd.Flags().String("disk", "",
+		"raw block device that carries the dnv disk format (required)")
+}
+
+// addCapacityFlag adds the cn role's --capacity. A string flag: pflag's own
+// uint64 parse takes Go integer syntax ("0x100", "1_000", a leading 0 as
+// octal), which the environment and a config file's string would not get,
+// so capacityFromViper holds the three to one decimal rule; a config file's
+// YAML number keeps YAML's own syntax and is taken by its value (CM3).
+func addCapacityFlag(cmd *cobra.Command) {
 	cmd.Flags().String("capacity", "0",
 		"capacity budget in bytes this CN is willing to host, a plain "+
 			"decimal number; GetCnSize replies it verbatim, 0 = use the "+
 			"CP default")
+}
+
+// notRunOnFlagError makes a flag a check or a gather cannot parse end it
+// with nodecheck.ExitNotRun, as any other way it cannot run does (CM5).
+func notRunOnFlagError(cmd *cobra.Command) {
+	cmd.SetFlagErrorFunc(func(_ *cobra.Command, err error) error {
+		return &nodecheck.ExitError{Code: nodecheck.ExitNotRun, Err: err}
+	})
+}
+
+// newCheckCmd is the node check (CM5): check dn and check cn, each with its
+// role's flags, bound as the role binds them, so the agent's own --config
+// serves the check too.
+func newCheckCmd() *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "check",
+		Short: "check a node before it joins: dn or cn",
+	}
+	dn := &cobra.Command{
+		Use:   "dn",
+		Short: "check this node for a disk node agent",
+		RunE: func(c *cobra.Command, _ []string) error {
+			return runCheck(c, nodecheck.RoleDn)
+		},
+		SilenceErrors: true,
+	}
+	addCommonFlags(dn)
+	addDiskFlag(dn)
+	cn := &cobra.Command{
+		Use:   "cn",
+		Short: "check this node for a controller node agent",
+		RunE: func(c *cobra.Command, _ []string) error {
+			return runCheck(c, nodecheck.RoleCn)
+		},
+		SilenceErrors: true,
+	}
+	addCommonFlags(cn)
+	addCapacityFlag(cn)
+	cn.Flags().Bool("md-replay", false,
+		"also replay md's start rules on two loop devices (a spare "+
+			"machine only: it refuses a node that holds dnv objects)")
+	for _, sub := range []*cobra.Command{dn, cn} {
+		sub.Flags().String("output", nodecheck.OutputText,
+			"report form: text or json")
+		notRunOnFlagError(sub)
+		cmd.AddCommand(sub)
+	}
 	return cmd
+}
+
+// runCheck runs the node check for role: viper binds the role's flags, and
+// no value is required, since the check reads the node, not a cluster (CM5).
+// It logs at Warn, as dnvctl does (log.md R6).
+func runCheck(cmd *cobra.Command, role string) error {
+	common.SetLogLevel(slog.LevelWarn)
+	if err := bindViper(cmd); err != nil {
+		return &nodecheck.ExitError{Code: nodecheck.ExitNotRun, Err: err}
+	}
+	ctx, stop := toolSignalContext()
+	defer stop()
+	opts := nodecheck.CheckOptions{
+		Role:       role,
+		Disk:       viper.GetString("disk"),
+		LocalStore: viper.GetString("local-store"),
+		MdReplay:   viper.GetBool("md-replay"),
+	}
+	return nodecheck.RunCheck(ctx, nodeEnv(), opts,
+		viper.GetString("output"), cmd.OutOrStdout())
+}
+
+// newCollectCmd is the gather (CM6).
+func newCollectCmd() *cobra.Command {
+	cmd := &cobra.Command{
+		Use:           "collect",
+		Short:         "gather this node's state into one archive",
+		RunE:          runCollect,
+		SilenceErrors: true,
+	}
+	flags := cmd.Flags()
+	flags.String("log-file", "", "the agent's log file")
+	flags.String("journal-unit", "", "the systemd unit the agent's log is "+
+		"in, read with journalctl")
+	flags.String("local-store", common.DefaultLocalStorPrefix,
+		"prefix of the agent's local state files, listed by name, size "+
+			"and time")
+	flags.Duration("deadline", nodecheck.DefaultGatherDeadline,
+		"how long the reads that can wait in the kernel may take, all "+
+			"together")
+	flags.String("out", "", "the archive to write; by default "+
+		"dnv-collect-<host>-<time>.tar.gz in the working directory")
+	notRunOnFlagError(cmd)
+	return cmd
+}
+
+// runCollect runs the gather. It logs at Warn, as dnvctl does (log.md R6).
+func runCollect(cmd *cobra.Command, _ []string) error {
+	common.SetLogLevel(slog.LevelWarn)
+	flags := cmd.Flags()
+	var opts nodecheck.GatherOptions
+	var err error
+	get := func(name string) string {
+		value, flagErr := flags.GetString(name)
+		err = errors.Join(err, flagErr)
+		return value
+	}
+	opts.LogFile = get("log-file")
+	opts.JournalUnit = get("journal-unit")
+	opts.LocalStore = get("local-store")
+	opts.Out = get("out")
+	deadline, flagErr := flags.GetDuration("deadline")
+	opts.Deadline = deadline
+	if err = errors.Join(err, flagErr); err != nil {
+		return &nodecheck.ExitError{Code: nodecheck.ExitNotRun, Err: err}
+	}
+	ctx, stop := toolSignalContext()
+	defer stop()
+	return nodecheck.RunGather(ctx, nodeEnv(), opts, cmd.OutOrStdout())
 }
 
 func addCommonFlags(cmd *cobra.Command) {
@@ -214,6 +369,35 @@ func signalContext() (context.Context, func()) {
 	}
 }
 
+// toolSignals are the signals that stop the node check and the gather (CM5,
+// CM6): the two that stop an agent, and the hang-up and quit a terminal or
+// an ssh session that goes away sends, which would otherwise end the
+// process with no teardown.
+var toolSignals = []os.Signal{syscall.SIGINT, syscall.SIGTERM,
+	syscall.SIGHUP, syscall.SIGQUIT}
+
+// toolSignalContext is the node check's and the gather's stop by signal:
+// the first of toolSignals cancels the context, so the tool stops at its
+// next step and tears down what it made (the md replay's array and loop
+// devices); every later one is ignored, so the teardown runs to its end.
+// The returned stop ends the watch.
+func toolSignalContext() (context.Context, func()) {
+	ctx, cancel := context.WithCancel(context.Background())
+	sigCh := make(chan os.Signal, 4)
+	signal.Notify(sigCh, toolSignals...)
+	go func() {
+		select {
+		case <-sigCh:
+			cancel()
+		case <-ctx.Done():
+		}
+	}()
+	return ctx, func() {
+		signal.Stop(sigCh)
+		cancel()
+	}
+}
+
 // watchSignals waits for the first signal on sigCh and cancels ctx, then
 // for a second one, on which it calls exit(1). It returns when ctx ends
 // before any signal, so a clean stop leaves no watcher behind. exit is a
@@ -275,11 +459,14 @@ func runDn(cmd *cobra.Command, args []string) error {
 	nf := common.NewNameFmt(localStore)
 	// The process's single OsClient, shared by every wrapper (osclient.md).
 	oc := common.NewLimitedOsClient(0)
+	// The start record: the kernel release; a failed read is logged, and
+	// the start goes on (CM4; log.md, Agent start).
+	agent.LogStartVersions(ctx, oc, false)
 	srv := dnagent.NewDnAgentServer(
 		oc, nf, localStore, viper.GetString("disk"), trConfFromViper(),
 		portId, qidMax)
 
-	return agent.Serve(ctx,
+	return serveAgent(ctx,
 		viper.GetString("grpc-network"), viper.GetString("grpc-address"),
 		srv.Prepare, srv.Reconcile,
 		func(grpcServer *grpc.Server) {
@@ -320,10 +507,14 @@ func runCn(cmd *cobra.Command, args []string) error {
 	nf := common.NewNameFmt(localStore)
 	// The process's single OsClient, shared by every wrapper (osclient.md).
 	oc := common.NewLimitedOsClient(0)
+	// The start record: the kernel release and the version of the mdadm the
+	// agent runs; a failed read is logged, and the start goes on (CM4,
+	// CN-CM2; log.md, Agent start).
+	agent.LogStartVersions(ctx, oc, true)
 	srv := cnagent.NewCnAgentServer(oc, nf, localStore,
 		capacity, trConfFromViper(), portId, qidMax)
 
-	return agent.Serve(ctx,
+	return serveAgent(ctx,
 		viper.GetString("grpc-network"), viper.GetString("grpc-address"),
 		srv.Prepare, srv.Reconcile,
 		func(grpcServer *grpc.Server) {

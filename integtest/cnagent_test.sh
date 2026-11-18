@@ -9,8 +9,10 @@
 #   bash integtest/cnagent_test.sh [--only <case>] [--cleanup-only] \
 #       [--wipe] user1@ip1 user2@ip2
 #
-# Cases (cnagent_integtest.md, Cases): smoke, redund, repair, teardown,
-# thinbm, torn, discard, clone_xfer, restart, pause; `teardown`, the teardown-by-sweep
+# Cases (cnagent_integtest.md, Cases): nodecheck, smoke, redund, repair,
+# teardown, thinbm, torn, discard, clone_xfer, restart, pause; `nodecheck`
+# runs the node check, the md replay and the gather on the VMs; `teardown`,
+# the teardown-by-sweep
 # case, injects the faults (a pinned dm device, an iptables partition of the
 # nvme-tcp port, a background writer); case A's `degrade` stage reuses the
 # partition, its `dial` stage drops new connections to the port, `clone_xfer` slows its copy with a token bucket on what the clone's node
@@ -215,6 +217,9 @@ PAUSE_VM=0
 # stage (syn_drop_from), 0 while none does: on_exit lifts the rule even when
 # a run fails, for the two-way cut's reason.
 SYNDROPPED=0
+# The VM that holds the nodecheck case's stalled array or its mdadm wrapper,
+# 0 while none does: on_exit removes both even when a run fails.
+NCG_VM=0
 # The file whose removal ends the pause case's background rounds
 # (pause_rounds), "" while none run: on_exit removes it.
 PAUSE_STOP=""
@@ -222,7 +227,7 @@ PAUSE_STOP=""
 # summaries print; PAUSE_OUT can hold an earlier run's too.
 PAUSE_REPORTS=()
 
-CASES=(smoke redund repair teardown thinbm torn discard clone_xfer restart pause)
+CASES=(nodecheck smoke redund repair teardown thinbm torn discard clone_xfer restart pause)
 
 # ---------------------------------------------------------------------------
 # Logging, assertions, failure handling
@@ -547,6 +552,12 @@ on_exit() {
 		if [ "$SYNDROPPED" -ne 0 ]; then
 			helper_ok "$SYNDROPPED" \
 				"unsyn_drop_from ${IP[$((3 - SYNDROPPED))]}" >&2
+		fi
+		# The nodecheck case's stalled array and mdadm wrapper: a suspended
+		# member wedges another suite's udev and LVM scans, and the wrapper
+		# changes what mdadm does.
+		if [ "$NCG_VM" -ne 0 ]; then
+			helper_ok "$NCG_VM" ncg_teardown >&2
 		fi
 		[ -z "$PAUSE_STOP" ] || rm -f "$PAUSE_STOP"
 		log ""
@@ -2744,6 +2755,139 @@ fgn_sweep() {
 	echo fgn_swept
 }
 
+# The nodecheck case's verbs (cnagent_integtest.md, Cases, nodecheck). The
+# gather stage's stall is an md array over two dm-linears, written once and
+# then one member suspended: a bitmap write of md's bitmap daemon sticks on
+# that member, and its next pass waits for it holding the bitmap mutex a
+# read of /proc/mdstat takes (Lab facts). The dm names stay outside dnv's
+# prefix, so no agent's sweep and no md replay's refusal reads them as
+# dnv's, and the array's name carries it, so the md assembly mask keeps udev
+# off its members; the name has the exact form of the agent's names
+# (common.CnMdArrayNameGlob), which the mask matches, with fields no agent
+# array has and not the md replay's (cnagent replayArrayName, NCG_REPLAY_MD).
+# ncg_build, ncg_stall and ncg_wrap fail when a step they
+# rest on fails; ncg_teardown is best-effort, for the stage's end and for
+# cleanup_phase1.
+NCG_IMG=$WORK/ncgather
+NCG_DM=itgather
+NCG_NAME=dnv-0000000000000000-fe-fd
+NCG_MD=/dev/md/$NCG_NAME
+NCG_REPLAY_MD=/dev/md/dnv-0000000000000000-fe-fe
+NCG_WRAP=$WORK/mdadm-wrap
+
+# ncg_build <MiB> — two files of <MiB> MiB, a loop device and a dm-linear
+# over each, and a clean RAID1 array with an internal bitmap over the two.
+ncg_build() {
+	local i dev sectors
+	for i in a b; do
+		rm -f "$NCG_IMG-$i.img" || return 1
+		fallocate -l "$1M" "$NCG_IMG-$i.img" || return 1
+		dev=$(losetup --find --show "$NCG_IMG-$i.img") || return 1
+		sectors=$(blockdev --getsz "$dev") || return 1
+		dmsetup create "$NCG_DM-$i" --table "0 $sectors linear $dev 0" ||
+			return 1
+	done
+	timeout 60 mdadm --create "$NCG_MD" --name "$NCG_NAME" --level 1 \
+		--raid-devices 2 --bitmap internal --homehost any --assume-clean \
+		--run "/dev/mapper/$NCG_DM-a" "/dev/mapper/$NCG_DM-b" \
+		>/dev/null 2>&1 || return 1
+	udevadm settle -t 10 >/dev/null 2>&1
+	echo built
+}
+
+# ncg_stall — writes the array once with both members up, waits a second, in
+# which md marks the array clean again with a superblock write to both, then
+# suspends the second member and prints "stalled". md's bitmap daemon holds
+# its mutex through each pass, 5 s apart, and sends its writes without
+# waiting; its first pass after the write writes the bitmap superblock's
+# count of cleared events, which sticks on the suspended member, and its next
+# pass, which clears the written chunk's bit, waits for that write with the
+# mutex held. So the suspend must come before that first pass, and the wait
+# stays short. A write sent after the suspend would not do: md first writes
+# the superblock to mark the array active, which waits before the daemon runs
+# and holds no lock a /proc/mdstat read takes (Lab facts). conv=fsync and no
+# oflag=, by the uutils dd rule.
+ncg_stall() {
+	dd if=/dev/urandom of="$NCG_MD" bs=4k count=16 conv=fsync status=none ||
+		return 1
+	sleep 1
+	dmsetup suspend "$NCG_DM-b" || return 1
+	echo stalled
+}
+# ncg_mdstat_blocks <secs> — the stall's positive control: a read of
+# /proc/mdstat in a session of its own, its output to a file, that has not
+# finished after <secs> seconds prints "blocked", one that has prints
+# "read". Nothing waits for the reader, which a read stuck in the kernel
+# would make wait too; the teardown's resume frees it.
+ncg_mdstat_blocks() {
+	local out=$WORK/ncg-mdstat.out
+	rm -f "$out" "$out.done"
+	setsid bash -c "cat /proc/mdstat >'$out' 2>&1; touch '$out.done'" \
+		>/dev/null 2>&1 </dev/null &
+	sleep "$1"
+	if [ -e "$out.done" ]; then echo read; else echo blocked; fi
+}
+# ncg_mdstat_wait_blocked <secs> — starts a read of /proc/mdstat as
+# ncg_mdstat_blocks does, one every 2 s, until one has not finished after its
+# 2 s ("blocked") or <secs> seconds have passed ("read"): the daemon's pass
+# that waits with the mutex held comes two passes after the write, about 10 s.
+ncg_mdstat_wait_blocked() {
+	local end=$((SECONDS + $1))
+	while [ "$SECONDS" -lt "$end" ]; do
+		[ "$(ncg_mdstat_blocks 2)" = blocked ] && {
+			echo blocked
+			return 0
+		}
+	done
+	echo read
+}
+
+# ncg_wrap — an mdadm, first in a PATH of its own, that adds --run to every
+# assembly, so mdadm starts an array from a lone clean leg; prints the
+# directory to put first in PATH.
+ncg_wrap() {
+	mkdir -p "$NCG_WRAP" || return 1
+	cat >"$NCG_WRAP/mdadm" <<'NCG_WRAP_EOF' || return 1
+#!/bin/sh
+case " $* " in
+*" --assemble "*) exec /sbin/mdadm "$@" --run ;;
+esac
+exec /sbin/mdadm "$@"
+NCG_WRAP_EOF
+	chmod 0755 "$NCG_WRAP/mdadm" || return 1
+	echo "$NCG_WRAP"
+}
+
+# ncg_replay_left — what an md replay left: a loop device over one of its
+# files, its array's node, its directory; empty when it left nothing.
+ncg_replay_left() {
+	losetup -a 2>/dev/null | grep -F '/var/tmp/dnv-replay.' | cut -d: -f1
+	[ -e "$NCG_REPLAY_MD" ] && echo "$NCG_REPLAY_MD"
+	ls -d /var/tmp/dnv-replay.* 2>/dev/null
+	return 0
+}
+
+# ncg_teardown — resumes the suspended member, which frees the bitmap write
+# and any /proc/mdstat read stuck behind it, stops the array, removes the
+# dm-linears, the loop devices, the files and the wrapper. Best-effort.
+ncg_teardown() {
+	local i dev
+	timeout 10 dmsetup resume "$NCG_DM-b" >/dev/null 2>&1
+	if [ -e "$NCG_MD" ]; then
+		timeout 15 mdadm --stop "$NCG_MD" >/dev/null 2>&1
+	fi
+	udevadm settle -t 10 >/dev/null 2>&1
+	for i in a b; do
+		dm_force_remove "$NCG_DM-$i"
+		for dev in $(losetup -j "$NCG_IMG-$i.img" -n -O NAME 2>/dev/null); do
+			timeout 15 losetup -d "$dev" >/dev/null 2>&1
+		done
+		rm -f "$NCG_IMG-$i.img"
+	done
+	rm -rf "$NCG_WRAP" "$WORK/gather.tar.gz" "$WORK"/ncg-mdstat.out*
+	echo ncg_cleaned
+}
+
 # --- fault injection (case T; the partition also case A's degrade) -----------
 #
 # The teardown-by-sweep case needs three things the other cases do not (case
@@ -3659,9 +3803,11 @@ drop_subsys_glob() {
 # md_stop_all stops every array this suite created: /proc/mdstat enumerates
 # them and udev holds each one's name, with mdadm asked directly when udev does
 # not. The agent's --homehost any means the name may or may not carry a
-# homehost prefix, so both forms are matched — the same `dnv-*|*:dnv-*` pair
-# the md mask of deploy/udev/ (install_udev_rules) matches, against the same
-# MD_NAME property.
+# homehost prefix, so both forms are matched, each in the exact form of the
+# agent's names (common.CnMdArrayNameGlob) — the same pair the md mask of
+# deploy/udev/ (install_udev_rules) matches, against the same MD_NAME
+# property, so a guest's own array named after a host called dnv-... is
+# never stopped.
 #
 # On these guests (kernel 7.0.0-31, Ubuntu 26.04 mdadm) `mdadm --detail --scan`
 # prints `ARRAY /dev/md/<hex MD_DEVNAME> metadata=1.2` and no array name, so
@@ -3701,7 +3847,7 @@ md_stop_all() {
 			--no-devices --export "/dev/$d" 2>/dev/null |
 			sed -n 's/^MD_NAME=//p')
 		case "$name" in
-		dnv-* | *:dnv-*) ;;
+		dnv-????????????????-??-?? | *:dnv-????????????????-??-??) ;;
 		*) continue ;;
 		esac
 		timeout 15 mdadm --stop "/dev/$d" >/dev/null 2>&1
@@ -3725,7 +3871,7 @@ md_names() {
 			--no-devices --export "/dev/$d" 2>/dev/null |
 			sed -n 's/^MD_NAME=//p')
 		case "$name" in
-		dnv-* | *:dnv-*) printf '%s\n' "$name" ;;
+		dnv-????????????????-??-?? | *:dnv-????????????????-??-??) printf '%s\n' "$name" ;;
 		esac
 	done
 	return 0
@@ -3793,8 +3939,9 @@ cleanup_phase1() { # <cn16> [other vm ip]
 	kill_role dn >/dev/null
 
 	# The fault injectors (case T's three, the partition case A's degrade
-	# stage reuses, clone_xfer's throttle, and the pause case's two-way cut
-	# and its writer and sampler), first and unconditionally.
+	# stage reuses, clone_xfer's throttle, the pause case's two-way cut
+	# and its writer and sampler, and the nodecheck case's stalled array and
+	# mdadm wrapper), first and unconditionally.
 	# Each of them outlives the stage that installed it and each would be
 	# diagnosed as something else entirely: a pin makes the dm passes below
 	# fail on a device nothing is testing, a partition rule black-holes the
@@ -3805,6 +3952,7 @@ cleanup_phase1() { # <cn16> [other vm ip]
 	# failed.
 	stop_writer >/dev/null
 	pause_stop 0 >/dev/null
+	ncg_teardown >/dev/null
 	unpin_all
 	unthrottle >/dev/null
 	if [ -n "${2:-}" ]; then
@@ -3972,7 +4120,7 @@ lab_wipe() {
 				[ -n "$mdname" ] || mdname=$(timeout 10 mdadm --detail \
 					--no-devices --export "/dev/${d##*/}" 2>/dev/null |
 					sed -n 's/^MD_NAME=//p')
-				case "$mdname" in dnv-* | *:dnv-*) hit=1 ;; esac
+				case "$mdname" in dnv-????????????????-??-?? | *:dnv-????????????????-??-??) hit=1 ;; esac
 			fi
 			if [ "$hit" -eq 1 ]; then
 				timeout 15 mdadm --stop "/dev/${d##*/}" >/dev/null 2>&1
@@ -5282,6 +5430,111 @@ assert_absent() { # stream regex label
 		die "$3: the event stream is empty, so it cannot show '$2' absent"
 	at=$(event_line "$1" "$2")
 	[ -z "$at" ] || die "$3: unexpected event matching '$2' at $at"
+}
+
+# ---------------------------------------------------------------------------
+# Case nodecheck (cnagent_integtest.md, Cases): the node check, the md
+# replay and the gather of `dnv-agent` on the lab's kernels and tools
+# ---------------------------------------------------------------------------
+
+# NCG_DEADLINE is the gather stage's --deadline, in seconds, and
+# NCG_SLACK what collect may take past it: its other reads, ssh, and the
+# archive's write.
+NCG_DEADLINE=10
+NCG_SLACK=20
+
+# check_report_ok asserts a node check's JSON report: exit status 0, no
+# result failed; its warnings are logged.
+check_report_ok() { # json rc label
+	local failed warned
+	failed=$(jq_of "$1" '[.results[] | select(.level == "fail") |
+		"\(.name): \(.detail)"] | join("; ")') ||
+		die "$3: the report is no JSON (exit $2): $1"
+	assert_eq "$2/$failed" "0/" "$3: exit status and failed results"
+	warned=$(jq_of "$1" '[.results[] | select(.level == "warn") |
+		"\(.name): \(.detail)"] | join("; ")')
+	[ -z "$warned" ] || log "  $3 warns: $warned"
+}
+
+case_nodecheck() {
+	CASE=nodecheck
+	DIAG_CNTLRS=()
+	local idx out rc got left wrap start took
+
+	stage check "dnv-agent check dn and check cn pass on both VMs"
+	for idx in 1 2; do
+		rc=0
+		out=$(sshv "$idx" "$WORK/dnv-agent check dn --disk ${LOOP[$idx]} \
+--output json") || rc=$?
+		check_report_ok "$out" "$rc" "vm$idx check dn"
+		rc=0
+		out=$(sshv "$idx" "$WORK/dnv-agent check cn --output json") || rc=$?
+		check_report_ok "$out" "$rc" "vm$idx check cn"
+	done
+
+	stage replay "the md replay passes on vm1 and leaves nothing"
+	rc=0
+	out=$(sshv 1 "$WORK/dnv-agent check cn --md-replay --output json") ||
+		rc=$?
+	check_report_ok "$out" "$rc" "replay"
+	got=$(jq_of "$out" '[.results[] |
+		select(.name | startswith("md replay: "))] | length')
+	assert_eq "$got" 14 "replay: the replay's steps"
+	left=$(helper 1 ncg_replay_left)
+	assert_eq "$left" "" "replay: what the replay left on vm1"
+
+	stage replaywrap "the md replay fails with an mdadm that starts a lone leg"
+	NCG_VM=1
+	wrap=$(helper 1 ncg_wrap) || die "replaywrap: the mdadm wrapper"
+	rc=0
+	out=$(sshv 1 "PATH=$wrap:\$PATH $WORK/dnv-agent check cn --md-replay \
+--output json") || rc=$?
+	assert_eq "$rc" 1 "replaywrap: the check's exit status"
+	got=$(jq_of "$out" '[.results[] |
+		select(.name == "md replay: lone leg refused")][0].level')
+	assert_eq "$got" fail "replaywrap: the lone leg's step"
+	got=$(jq_of "$out" '[.results[] |
+		select(.name | startswith("md replay: ")) | .name] | last')
+	assert_eq "$got" "md replay: lone leg refused" \
+		"replaywrap: the replay stops at the lone leg"
+	left=$(helper 1 ncg_replay_left)
+	assert_eq "$left" "" "replaywrap: what the replay left on vm1"
+	helper 1 ncg_teardown >/dev/null
+
+	stage gather "the gather returns by its deadline over a stalled array"
+	helper 1 "ncg_build 64" >/dev/null || die "gather: the array"
+	helper 1 ncg_stall >/dev/null || die "gather: the stall"
+	# The daemon's second pass after the write, about 10 s later, waits on
+	# the member with the bitmap mutex held: seen 12 s after the suspend.
+	got=$(helper 1 "ncg_mdstat_wait_blocked 30")
+	assert_eq "$got" blocked \
+		"gather: the stall holds a read of /proc/mdstat (the premise)"
+	start=$(date +%s)
+	rc=0
+	out=$(sshv 1 "cd $WORK && timeout 120 $WORK/dnv-agent collect \
+--deadline ${NCG_DEADLINE}s --out $WORK/gather.tar.gz --log-file $CN_LOG") ||
+		rc=$?
+	took=$(($(date +%s) - start))
+	assert_eq "$rc" 0 "gather: collect's exit status ($out)"
+	[ "$took" -le $((NCG_DEADLINE + NCG_SLACK)) ] ||
+		die "gather: collect took ${took}s, its deadline ${NCG_DEADLINE}s"
+	got=$(sshv 1 "tar -xzf $WORK/gather.tar.gz -O dnv-collect/reads.txt") ||
+		die "gather: the archive's read list"
+	case "$got" in
+	*"cat /proc/mdstat: did not finish by the"*) ;;
+	*) die "gather: the read list does not name the /proc/mdstat read as" \
+		"not finished: $got" ;;
+	esac
+	got=$(sshv 1 "tar -xzf $WORK/gather.tar.gz -O dnv-collect/sysfs-md.txt") ||
+		die "gather: the archive's md sysfs read"
+	case "$got" in
+	*"array_state: "*) ;;
+	*) die "gather: the in-process md read names no array: $got" ;;
+	esac
+	helper 1 ncg_teardown >/dev/null
+	NCG_VM=0
+	got=$(helper 1 "ncg_mdstat_blocks 2")
+	assert_eq "$got" read "gather: /proc/mdstat reads again after the teardown"
 }
 
 # ---------------------------------------------------------------------------
@@ -11180,11 +11433,13 @@ case_restart() {
 	done
 	# An active array is recognized, not re-assembled. It is read from
 	# /sys/block (CN12), so a `--detail` here is as wrong as a
-	# mutation and is not excluded.
+	# mutation and is not excluded. The start record's `mdadm --version`
+	# (log.md, Agent start) reads no member and changes nothing, so it is
+	# left out with the examines.
 	for idx in 1 2; do
 		seq=$(helper "$idx" cn_events)
 		got=$(printf '%s\n' "$seq" | grep -E '^mdadm ' |
-			grep -Ev -- '--examine' || true)
+			grep -Ev -e '--examine' -e '^mdadm --version$' || true)
 		[ -z "$got" ] ||
 			die "restart: cn$idx ran an mdadm other than --examine:"$'\n'"$got"
 	done

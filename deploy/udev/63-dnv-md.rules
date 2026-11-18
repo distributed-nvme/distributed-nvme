@@ -1,9 +1,11 @@
 # dnv: only the dnv agent assembles a dnv md array. A device whose md
-# version-1.2 superblock carries a dnv array name is marked not ready, and
-# 64-md-raid-assembly.rules then skips it. --metadata=1.2 reads the
+# version-1.2 superblock carries a dnv array name, in the exact form dnv
+# makes, bare or after "homehost:", is marked not ready, and
+# 64-md-raid-assembly.rules then skips it; a node's own array whose name a
+# host called dnv-... starts is left alone. --metadata=1.2 reads the
 # superblock dnv writes, 4 KiB into the device, and never a 0.90 or 1.0
 # superblock a host wrote at the device's end. Install on every node that
 # runs a dnv agent (architecture.md, Components: invocation reference).
 ACTION=="add|change", SUBSYSTEM=="block", ENV{ID_FS_TYPE}=="linux_raid_member", \
   IMPORT{program}="/sbin/mdadm --examine --export --metadata=1.2 $devnode"
-ENV{MD_NAME}=="dnv-*|*:dnv-*", ENV{SYSTEMD_READY}="0"
+ENV{MD_NAME}=="dnv-????????????????-??-??|*:dnv-????????????????-??-??", ENV{SYSTEMD_READY}="0"

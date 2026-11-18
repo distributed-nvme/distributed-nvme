@@ -4,7 +4,8 @@ This document owns the `dnv-agent` binary: the mechanism package `agent`
 both roles share (bootstrap and lifecycle, the local store, the revision and
 conf gates, the lock hierarchy, `ResInfo` tracking, the dm, nvmet and
 nvme-host wrappers, the bitmap-chunk store, the check-stream rules and the
-observations), the `cmd/dnv-agent` command, and the dn role, package
+observations), the `cmd/dnv-agent` command with its node check and gather
+(package `nodecheck`), and the dn role, package
 `dnagent`, which serves
 `DiskNodeAgent`: the startup reconcile, `SyncupDn` with the on-disk format,
 side provisioning and zeroing, the per-CN exports and the sweep, `SyncupSide`
@@ -25,7 +26,8 @@ migration procedure, the levels, the cntlid slots and the decisions [D4],
 |---|---|---|---|
 | `agent` | `agent/` | shared dn/cn **mechanism**: bootstrap, local store, revision gate, locks, `ResInfo` tracking, OS wrappers, bitmap store, check-loop rules, observations | `common`, `pb` |
 | `dnagent` | `agent/dnagent/` | dn **policy**: the `DiskNodeAgent` service — which extent allocations, dm tables and nvmet objects to build and when | `common`, `pb`, `agent` |
-| `main` | `cmd/dnv-agent/` | cobra `dn`/`cn` dispatch, viper flags, dependency construction | `agent`, `agent/dnagent`, `agent/cnagent`, `common`, `pb` |
+| `nodecheck` | `agent/nodecheck/` | the node check and the gather (CM5, CM6): one-shot reads of the node, never a server | `common`, `pb`, `agent`, `agent/cnagent` |
+| `main` | `cmd/dnv-agent/` | the cobra command tree (CM1), viper flags, dependency construction | `agent`, `agent/dnagent`, `agent/cnagent`, `agent/nodecheck`, `common`, `pb` |
 
 Agents never talk to etcd (`layout.md`, Dependency rules). The gRPC server
 carries the **server** interceptors and the message limit of `grpc.md`,
@@ -356,7 +358,8 @@ The suspension a stopped timer would have ended is the next process's to
 end: its restart finds the linears suspended and treats the window as
 elapsed (DN12 rule 1), save the restarts Known limits names.
 
-`Serve` in `agent/agent.go` is the shared lifecycle: it mints the startup
+Before `Serve`, the role's `RunE` logs the start record, `agent node
+versions` (CM4). `Serve` in `agent/agent.go` is the shared lifecycle: it mints the startup
 trace id, derives the run ctx, hands it to the role server's prepare step,
 which keeps it as `rootCtx` and marks the agent starting (SH33), listens,
 builds the gRPC server with the message limit, a handshake bound of
@@ -835,7 +838,13 @@ cut the list between chunks, which the pass's chunk count already bounds.
 The bound holds in full only for a child the signals end.
 A dial (`NvmeHost.Dial`) runs in the agent's own process and ends at the
 timeout its caller passes or at the deadline, whichever comes first
-(`osclient.md`, DialTcp).
+(`osclient.md`, DialTcp). The node check and the gather take the same bound
+from `agent.CmdCtx` for their reads and commands (CM5, CM6), but for three
+that can take longer than the soft timeout and run under a bound of their
+own: the gather's detached children (`osclient.md`, StartDetached), which
+nothing waits for, under the gather's deadline, its read of the agent's
+log, under a second bound of that length, and the md replay's wait for
+udev after each mdadm call, under the wait's own timeout.
 An in-process `OsClient` call — a directory listing, a modification-time
 read, a device-number read, a file, proto or block read or write — is
 bounded only until its syscall starts: its ctx is checked once, before it
@@ -1556,10 +1565,14 @@ one failed command left unbuilt or wrong would stay so.
 
 ## `cmd/dnv-agent` — cobra + viper
 
-CM1. The binary is a cobra root command `dnv-agent` with exactly two
-subcommands, `dn` and `cn`. cobra and viper live in `cmd/` and in `ctl/`,
-dnvctl's command tree (`dnvctl.md`, Files); both are direct dependencies
-(`dependencies.md`, Direct dependencies).
+CM1. The binary is a cobra root command `dnv-agent` with four
+subcommands: `dn` and `cn`, which serve the two agents (CM2 to CM4); `check`,
+whose two subcommands `check dn` and `check cn` are the node check (CM5);
+and `collect`, the gather (CM6). The node check and the gather are one-shot
+tools of package `nodecheck`: they start no server, and no agent runs them.
+cobra and viper live in `cmd/` and in `ctl/`, dnvctl's command tree
+(`dnvctl.md`, Files); both are direct dependencies (`dependencies.md`,
+Direct dependencies).
 
 CM2. Flags (`architecture.md`, Components: invocation reference; every flag
 is also settable via config file and environment through viper). Both roles
@@ -1641,7 +1654,7 @@ empty variable leaves the default standing. Every
 flag's env spelling is the prefix plus the flag with dashes replaced by
 underscores.
 
-CM4. Each subcommand's `RunE`: bind viper, then run CM3's checks —
+CM4. The `RunE` of `dn` and of `cn`: bind viper, then run CM3's checks —
 `requireValues`, then the `--nvmet-port-id` floor and the `--nvmet-qid-max`
 range, and for the cn the `--capacity` number, whose resolved values are
 carried on to the constructor; a ctx the first SIGINT or SIGTERM cancels,
@@ -1650,8 +1663,11 @@ second one ends the process at once with exit status 1, as every other dnv
 program's second signal does (`signalContext`, `watchSignals`), skipping
 SH27's join of background work;
 construct `common.NewNameFmt` over the local store and the process's
-**single** `common.NewLimitedOsClient` (with the default limit); build the
-role server (`dnagent.NewDnAgentServer` / `cnagent.NewCnAgentServer`); call
+**single** `common.NewLimitedOsClient` (with the default limit); log the
+start record, `agent.LogStartVersions` (`log.md`, Agent start): the kernel
+release, and for the cn the version of the mdadm it runs (`cnagent.md`
+CN-CM2), a read that fails logged in the record, and the start going on,
+since an agent refuses nothing at its start; build the role server (`dnagent.NewDnAgentServer` / `cnagent.NewCnAgentServer`); call
 `agent.Serve` with the role's prepare step (SH33) and reconcile, a register func that calls
 `pb.RegisterDiskNodeAgentServer` (resp.
 `pb.RegisterControllerNodeAgentServer`), and the role's SH27 background
@@ -1662,6 +1678,225 @@ is plaintext (`grpc.md`, Wiring);
 log level stays the default Info (`log.md` R6 — the agent calls nothing).
 No flag is marked required through cobra: "required" is checked after the
 viper binding, so a config file or env var satisfies it too (CM2, CM3).
+
+CM5. **The node check.** `dnv-agent check dn` and `dnv-agent check cn`
+read, as root and in the order of the rows below, the facts the role's
+agent needs to work and dnv's safety rests on, and print one result for
+each: what it read, its level, and for a warning or a failure one fix
+line. A failure is a fact the agent cannot work without or that safety
+rests on. A warning is one of five kinds (`nodecheck.Check`): a node
+setting the check warns for rather than fails, which must still be set
+(lvm2, mdadm.conf, the modules loaded at boot, a cn kernel before 6.19,
+where every controller node of the cluster must run one kernel series, and
+a dn's `nvme_core.io_timeout` at the value that never times out); a known
+limit, a disk whose IO size is above what nvmet-tcp takes
+(`architecture.md`, Known limits); a feature nothing uses yet, the cut of
+a removed host's connection; a fact outside what dnv is tested with (the
+kernel series, the mdadm version, a dnv udev rule's text, a cn's
+`nvme_core.io_timeout` other than the kernel's default); and a fact the
+check could not read, whose detail starts "not read" and whose fix line
+says how to read it by hand or what to do first. Each takes its role's
+flags, bound through `bindViper` as the role binds them, so the agent's
+own config file serves its check; it runs no `requireValues` and needs no
+cluster value; `check dn` reads the one disk `--disk` names. It prints
+text, or with `--output json` one JSON report for the suites. It exits
+`nodecheck.ExitOk` when nothing failed, warnings allowed,
+`nodecheck.ExitFailed` when a result failed, and `nodecheck.ExitNotRun`
+when it could not run — not root, an output form it does not know, a flag
+it cannot parse — by a `nodecheck.ExitError`, which `main` turns into the
+exit status in place of cobra's error print. It logs at Warn (`log.md`
+R6). Apart from the cn's md replay it changes nothing on the node. The
+rows, by role:
+
+- the kernel release (`agent.KernelRelease`): below the oldest series with
+  every feature both agents use fails, outside the tested series warns,
+  each compared by series, never by build (`nodecheck` names both);
+- cn only, md's side of the line from which md writes an array's logical
+  block size into its superblock (`cnagent.md`, Known limits): md_mod's
+  `check_new_feature` parameter present is that side, absent warns, as a
+  setting to fix: every controller node of a cluster must run one kernel
+  series, since a failover to a node before the line cannot start an array
+  a node after it made; md_mod not loaded warns as not read;
+- mdadm (`agent.MdadmVersion`): on a dn the absolute path the md assembly
+  mask's rule imports must run, else it fails; on a cn the mdadm the agent
+  runs by name must run, else it fails, and another version than the
+  tested one warns;
+- udev's version (`udevadm --version`): one older than `minUdevVersion`,
+  the first that takes the shipped md array rule's link removal, fails,
+  and so does a udevadm that does not run;
+- the md assembly mask (`architecture.md`, Components: invocation
+  reference), which must keep md's incremental assembly off a dnv leg. The
+  check counts a mask in exactly two ways; a node with neither fails. The
+  shipped mask rule is in effect: the file udev reads for `mdMaskRuleName`,
+  found in udev's order of directories as its rule row finds it, a name that
+  starts with "." skipped as udev skips it, byte for byte the shipped text.
+  Or the configuration mdadm reads, in mdadm's order (/etc/mdadm.conf and
+  its directory, else Debian's file and its directory, else
+  /etc/mdadm.conf.d alone, a directory's name that starts with "." skipped
+  as mdadm skips it), is in a strict form: its first AUTO line names no
+  `homehost`, under which mdadm takes an array it judges the node's own, as
+  a host's superblock carrying the node's name is, and every dnv array is
+  under `HOMEHOST any`; the first word of that line that names each format
+  (0.90, 1.x, ddf, imsm), as mdadm's autoline names them, or `all`, is a
+  minus word, a `yes` or `no` before it, which ends mdadm's reading of the
+  line, not being one; no POLICY line sets `auto=`, since the check does not
+  judge POLICY lines; no ARRAY line matches by `devices=` or `super-minor=`
+  with no uuid, by which mdadm assembles any device the line covers, which
+  the check does not judge either, and which no line `mdadm --detail
+  --brief` prints is; and no ARRAY line can match a dnv array, since mdadm
+  assembles an array a line matches whatever AUTO says. The configuration's
+  lines and words are read as mdadm reads them: the first AUTO line alone, a
+  line that starts with a blank continuing the one before, quotes taken
+  away, and a `#` that starts a comment only at a word's start; the
+  `MDADM_CONF_AUTO` environment variable, whose words mdadm puts before the
+  AUTO line's, is not read. An ARRAY line is read as mdadm's arrayline reads
+  it: its device name is the first word, at any place, that starts with "/"
+  or holds no "=", and its uuid is the first `uuid=` mdadm's parse takes.
+  mdadm matches a line to an array by its uuid, its `devices=` or its
+  super-minor, never by its name= or device name: a line with a uuid counts
+  when the uuid is that of a dnv array running on the node, or when its
+  name= or device name has the exact form of a dnv array's name
+  (`common.CnMdArrayNameGlob`) or node, since such a line was copied from
+  one and matches it by its uuid wherever the array's legs appear, a
+  standby's among them; it never counts when its uuid is that of a running
+  array of the node's own, whose name a host called "dnv-..." can start. Any
+  other rule or setting is no mask to the check, a hand-written rule, the
+  stock rule hidden and an equivalent configuration among them: a rule's
+  text cannot be judged soundly, since udev's order of a line's keys, its
+  lookup of the program and its substitutions all stand between the text and
+  what runs, and a correct node installs the shipped rules. The failure says
+  why neither way counts and names the shipped rule's install. The shipped
+  mask rests on the stock assembly rule skipping a device it marks not ready
+  and sorting after it, as the tested distribution's mdadm ships that rule,
+  which the check does not read;
+- each of the three rules of `deploy/udev/` (`dmRuleName`, `mdMaskRuleName`,
+  `mdArrayRuleName`): absent fails, and so does one masked by an empty file
+  or a link to /dev/null of its name, which udev reads in its place,
+  whatever else masks md; another text than the shipped one, byte for byte,
+  warns; the texts are copies in the code that a unit test holds to the
+  files;
+- lvm2's scan, by lvm2's effective settings (`lvmconfig`): no devices file
+  in use and no filter or global filter that rejects a dnv device by every
+  name lvm2 reads it by warns, by lvm2's rule that a name's first matching
+  item decides it and one accepting name accepts the device. lvm2 walks /dev
+  whole and takes every link to a device as one more name, so the names are
+  a dm device's /dev/mapper link, kernel node and /dev/block link (the dm
+  rule keeps the /dev/disk links off it), an md array's /dev/md link, kernel
+  node, /dev/block link and its /dev/disk/by-id links by name and by uuid,
+  and the same names of a partition of one; a devices file lvm2 uses that
+  cannot be read, with no filter that rejects, warns as not read; a node
+  with no lvm2 passes;
+- mdadm.conf's `AUTO -all`: a configuration not in the mask's strict form
+  warns, and so does an ARRAY line of a dnv array, and one of the node's own
+  arrays that no ARRAY line names, which `AUTO -all` then keeps from
+  starting at boot;
+- the kernel modules: one that must be loaded before the agent starts and
+  is neither loaded nor built in, one the kernel loads on demand that the
+  running release does not ship, nvmet's configfs tree missing, and native
+  NVMe multipath off or not built (nvme_core without its multipath
+  parameter) each fail; such a module, loaded by hand, that no
+  modules-load file names, directly or as one a named module needs, warns;
+- the role's commands, looked up by PATH as the agent runs them, and on a
+  cn the flags of the thin tools' header read (`cnagent.md` CN14): each
+  missing fails;
+- `nvme_core.io_timeout`: the value that never times out fails on a cn,
+  whose legs are NVMe connections, and warns on a dn, as a setting to fix;
+  on a cn another value than the kernel's default warns;
+- cn only, the cut of a removed host's connection: nvmet without its
+  debugfs directory, debugfs not mounted or a lockdown in force warns;
+- dn only, the disk's logical block size, read as the agent reads it
+  (`Dm.DiskSizes`): any but `DnLogicalBlockSize` fails, as DN3 refuses it;
+  and its best and minimum IO size (`Dm.IoSizes`): above
+  `MaxNvmeTcpCmdBytes` warns, since nvmet passes them to every controller
+  node a side of the disk is exported to, which raises its largest request
+  to them past what nvmet-tcp takes; no `--disk` fails both.
+
+`check cn --md-replay` runs the md replay last (`cnagent.MdReplay`), never
+by default, on a spare machine: on two small loop devices, with the cn
+agent's own `Md` calls, it creates an array, stops it, has one clean leg's
+assembly refused with its superblock unchanged, assembles both, fails one
+and stops the array, has the failed leg alone refused, starts the survivor
+degraded and writes a block through it, has the array started from both
+legs read that block, then zeroes the failed leg and starts the survivor
+alone with the forced start's form; at each assembly the agent's model
+of mdadm's start (`mdadmStarts`) must agree with what mdadm did, a refusal
+must be mdadm's degraded gate's, and at each read of the legs the agent's
+superblock reader (`Md.ReadMember`) must agree with mdadm's examine of
+each, after the zero too, where both must find none. The examine names the
+1.2 format after its mode words, as the agent's other mdadm calls do
+(`cnagent.md` CN12, The superblock format), and is judged by what it
+prints: named so, mdadm answers a leg with no 1.2 superblock with exit
+status 0 and nothing on its output, and no output of a run whose exit
+status is not 0 is trusted. No read of the replay names a format to
+`--examine-bitmap` or `--examine-badblocks`, on which mdadm 4.5 aborts or
+crashes with nothing on its output. It
+refuses to start on a node that holds an md array over a dnv dm device, an
+earlier replay's array, a dnv dm device, an nvmet subsystem under dnv's NQN
+prefix or a file in the local store `--local-store` names, and when the
+mask row failed; it stops at the first step that fails, always tears down,
+and names what a teardown could not remove. The check and the gather catch
+SIGINT, SIGTERM, SIGHUP and SIGQUIT (`toolSignals`): the first stops the
+replay at its next step, later ones are ignored, so a hang-up of the
+session that runs it still leaves its teardown to run; the teardown also
+finds by its file a loop device losetup attached and did not print. Each
+step is one result. It covers neither the bitmap re-add's range nor the fence
+order of `integtest/md_fence_order.sh`, which need a writer in flight
+(`architecture.md`, Known limits).
+
+CM6. **The gather.** `dnv-agent collect` gathers, as root, the node's
+state into one tar.gz built in memory and written once through the
+`OsClient` (`nodecheck.Gather`), for a bug report, in this order: the
+versions (the kernel release, the distribution's, mdadm's, nvme-cli's,
+dmsetup's, the thin tools' and the agent's own build); the kernel log;
+md's array and member attributes and each NVMe controller's state,
+transport, NQNs and paths' ANA state from sysfs, and the device number
+each /dev/md link leads to, which names an array beside its kernel node;
+dmsetup's listing, info and tables; then the reads that can wait in the
+kernel; then the tail of the agent's log, the last `gatherLogBytes` of
+`--log-file` or the last `gatherJournalLines` records of
+`--journal-unit`, newest first, under a bound of the deadline's length of
+its own, a read the bound cuts keeping what it printed, the newest of the
+journal's, and saying it was cut (with neither, the archive says it holds
+none), since dnv rotates no log
+(`log.md` R2) and the archive and the memory it takes stay bounded; and
+last the local store's file names, sizes and times, never their contents.
+Nothing that can wait in the kernel runs in its own process, since one
+thread stuck in such a wait keeps the whole process from exiting:
+`/proc/mdstat`, whose read takes md's bitmap mutex, which md's bitmap
+daemon holds while it waits for an earlier bitmap write stuck at a
+suspended or dead member, though a read does not wait while md waits to
+update the superblock (seen with kernel 7.0.0-42, `cnagent_integtest.md`,
+Lab facts); the nvmet configfs
+walk, whose listings wait on a directory's lock that a
+`mkdir` or `rmdir` holds; each NVMe controller's address, whose show takes
+nvme-tcp's queue lock; and each dm device's status, always with
+`--noflush`, which still waits behind a commit already running. Each runs
+as a detached child in a process group of its own, its output in a file
+(`OsClient.StartDetached`), a few at a time; the gather collects them until
+one shared deadline, `--deadline`, never waits past it, names in the
+archive's read list each read that did not finish and what it waits on,
+and each the deadline left unstarted, and only then kills the group of
+each child still running, which takes effect once its wait ends: a kill at
+the deadline would end a child whose wait a signal ends, a shell's for its
+command among them, and its read would read as done. The gather runs no
+mdadm read of the arrays: `mdadm --detail` loads a superblock from a
+member device. In its own process it reads only
+sysfs attributes whose show function takes no sleeping lock, each checked
+in the kernel's source: a member's dm name is not one, so the archive
+names a member by its device number. It reads no member device and runs no
+examine. The configfs walk reads no attribute of a subsystem's own
+directory, since such a read moves the directory's time, which DN6's
+attribution of an export judges by, and no host's key. The archive is
+its owner's alone, mode 0600, since it holds the kernel log, which is
+root's alone on most distributions: it is written into a directory of its
+own beside its path and moved to it, never into it; an `--out` that names
+a directory, or a link to one, fails the gather before it reads anything. It prints the archive's path, a
+warning that the archive names hosts, NQNs and addresses, and each read
+that did not finish; it exits
+`nodecheck.ExitOk` once the archive is written and `nodecheck.ExitNotRun`
+when it could not run or write it; it logs at Warn (`log.md` R6). It does
+not call the gateway: an agent never does (`layout.md`, Dependency
+rules).
 
 ## The dn role — package `dnagent`
 

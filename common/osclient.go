@@ -13,6 +13,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 	"unsafe"
@@ -26,15 +27,16 @@ import (
 // number, dialling a TCP address, performing disk file I/O, and handling
 // Protobuf binary serialization with context support.
 //
-// All OS command execution, directory listing, modification-time read,
-// device-number read, TCP connect made to test whether an address answers
-// (DialTcp) and disk file I/O in production code goes
+// All OS command execution, detached child start (StartDetached), directory
+// listing, modification-time read, device-number read, TCP connect made to
+// test whether an address answers (DialTcp) and disk file I/O in production
+// code goes
 // through an OsClient; os/exec and os.ReadFile/os.WriteFile are never called, and no
 // directory is read, no path is stat'ed and no such test connect is made,
 // directly outside this file (osclient.md, Scope and placement). The
 // connections of the gRPC and etcd clients carry dnv's own calls and are
 // outside this rule. That is what makes the logging rules
-// of log.md R8.1, R8.2, R8.5, R8.6 and R8.7 enforceable, and every consumer
+// of log.md R8.1, R8.2, R8.5, R8.6, R8.7, R8.8 and R8.9 enforceable, and every consumer
 // unit-testable through FakeOsClient.
 //
 // One carve-out is recorded (osclient.md, Exported raw helpers and the
@@ -156,6 +158,18 @@ type OsClient interface {
 	// other failure, is an error that does not wrap it. No byte is sent.
 	DialTcp(ctx context.Context, address string, timeout time.Duration) (err error)
 
+	// StartDetached starts the OS binary name with args as a child in a
+	// process group of its own, its stdout and stderr both written to a new
+	// file it creates in dir (the system's temporary directory when dir is
+	// ""), and returns at once, never waiting for the child to end: a child
+	// that waits in the kernel holds no slot of the limit and keeps no
+	// caller waiting. The returned Detached says when the child ended and
+	// how, and names the output file, which the caller reads with ReadFile
+	// and removes. ctx's end sends SIGKILL to the child's whole group, which
+	// takes effect only once a wait in the kernel ends (osclient.md,
+	// StartDetached).
+	StartDetached(ctx context.Context, name string, args []string, dir string) (child *Detached, err error)
+
 	// ReadProto loads a raw Protobuf binary file from disk and deserializes
 	// it into a target message struct (target must be a non-nil pointer,
 	// e.g. &pb.SyncupDnRequest{}).
@@ -165,6 +179,11 @@ type OsClient interface {
 	// writes it directly to disk, with the same atomic replace as WriteFile.
 	WriteProto(ctx context.Context, path string, msg proto.Message) (err error)
 }
+
+// ErrCommandNotFound is what a RunCommand error wraps when no binary of the
+// name was found by PATH (osclient.md, RunCommand): a tool that is not
+// installed, told apart without reading the error's text.
+var ErrCommandNotFound = exec.ErrNotFound
 
 // commandLocale is the locale setting RunCommand adds to every command's
 // environment (osclient.md, RunCommand).
@@ -747,6 +766,119 @@ func dialTcp(
 func holdThenClose(conn net.Conn, hold time.Duration) {
 	time.Sleep(hold)
 	conn.Close()
+}
+
+// Detached is a child StartDetached started: its process id, which is also
+// its process group's, the file its stdout and stderr go to, and, once Done
+// is closed, how it ended.
+type Detached struct {
+	Pid    int
+	Output string
+
+	done     chan struct{}
+	exitCode int
+	err      error
+}
+
+// NewDetached builds a Detached for a child pid writing to output, and the
+// function that ends it with an exit code and an error, which closes Done:
+// what StartDetached's child waiter calls, and what a test double gives a
+// child it models.
+func NewDetached(pid int, output string) (*Detached, func(int, error)) {
+	d := &Detached{Pid: pid, Output: output, done: make(chan struct{})}
+	var once sync.Once
+	return d, func(exitCode int, err error) {
+		once.Do(func() {
+			d.exitCode, d.err = exitCode, err
+			close(d.done)
+		})
+	}
+}
+
+// Done is closed once the child has ended.
+func (d *Detached) Done() <-chan struct{} { return d.done }
+
+// Exit is how the child ended, read once Done is closed, in RunCommand's
+// terms: the exit code, -1 for a child a signal ended, and an error for any
+// end but a zero exit.
+func (d *Detached) Exit() (int, error) {
+	<-d.done
+	return d.exitCode, d.err
+}
+
+func (c *LimitedOsClient) StartDetached(
+	ctx context.Context,
+	name string,
+	args []string,
+	dir string,
+) (*Detached, error) {
+	if err := c.sem.Acquire(ctx, 1); err != nil {
+		return nil, err
+	}
+	child, err := startDetached(ctx, name, args, dir)
+	c.sem.Release(1)
+	pid, output := 0, ""
+	if child != nil {
+		pid, output = child.Pid, child.Output
+	}
+	attrs := []any{
+		slog.String("cmd", name),
+		slog.Any("args", args),
+		slog.Int("pid", pid),
+		slog.String("output", output),
+	}
+	slog.InfoContext(ctx, "os start detached", appendErr(attrs, err)...)
+	return child, err
+}
+
+// startDetached is StartDetached without the slot and the record. The child
+// gets the C locale, as RunCommand's does, and no stdin. Its waiter runs on
+// its own and is the only one that waits: a child stuck in the kernel keeps
+// that goroutine, never the caller. ctx's end kills the child's group, since
+// what it ran can have children of its own (a shell's).
+func startDetached(
+	ctx context.Context,
+	name string,
+	args []string,
+	dir string,
+) (*Detached, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	out, err := os.CreateTemp(dir, "dnv-detached-*.out")
+	if err != nil {
+		return nil, err
+	}
+	cmd := exec.CommandContext(ctx, name, args...)
+	cmd.Env = append(os.Environ(), commandLocale)
+	cmd.Stdout = out
+	cmd.Stderr = out
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	cmd.Cancel = func() error {
+		return syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+	}
+	if err := cmd.Start(); err != nil {
+		out.Close()
+		os.Remove(out.Name())
+		return nil, err
+	}
+	// The child holds its own copy of the file; the parent's is closed now,
+	// so a stuck child keeps nothing of the caller's open.
+	out.Close()
+	child, end := NewDetached(cmd.Process.Pid, out.Name())
+	go func() {
+		err := cmd.Wait()
+		exitCode := 0
+		if err != nil {
+			exitCode = -1
+			var exitErr *exec.ExitError
+			if errors.As(err, &exitErr) {
+				exitCode = exitErr.ExitCode()
+			}
+		}
+		end(exitCode, err)
+	}()
+	return child, nil
 }
 
 func (c *LimitedOsClient) WriteBlock(

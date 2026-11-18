@@ -202,6 +202,21 @@ mkdir -p store-dn0 store-dn1 store-dn2 store-dn3 store-cn0
 sudo -v
 ```
 
+First, the node check: the agent program reads the machine as a disk node
+and as a controller node and reports what an agent needs, one line each.
+It starts no agent and changes nothing.
+
+```
+sudo ./dnv-agent check dn --disk $(sudo losetup -j dn0.img | cut -d: -f1)
+sudo ./dnv-agent check cn
+```
+
+Each must end with `0 failures`; fix any `FAIL` line by its `fix:` line
+before you go on. Some `WARN` lines are normal on a machine like this one,
+such as modules that a reboot would not load again or no `AUTO -all` in
+mdadm.conf; [operations](operations.md#check-a-node-before-it-joins) says
+what each means.
+
 Four dn agents, each with its own gRPC address, nvmet port id, NVMe/TCP
 port, store and disk:
 
@@ -235,7 +250,8 @@ sudo nohup ./dnv-agent cn --grpc-address 127.0.0.1:29950 \
 ```
 
 Check: five agents have started, a second after the starts. An agent
-logs "agent serving" as soon as it answers calls, and "agent started" once
+first logs "agent node versions", the kernel release and, for the cn
+agent, the mdadm version; then "agent serving" as soon as it answers calls, and "agent started" once
 it has rebuilt the node from its local files; until then it answers the
 worker's check rounds with "starting". A new node has nothing to rebuild,
 so the two lines come together here.

@@ -1174,6 +1174,18 @@ there and may be refused. The tool check covers only the sweeps after it: the
 start sweep runs before it and a cleanup-only run skips it, so on a guest
 missing mdadm or udevadm their md stop can silently leave dnv arrays standing.
 
+The node check (`dnagent.md` CM5) runs later, as a stage of the first setup,
+since the guests get the binary and the md assembly mask only in the setup's
+first stages: once every agent started and before the pool create,
+`dnv-agent check dn` on each disk node guest, over the loop device of its
+first agent, as a guest's loop devices are made alike, and `dnv-agent check
+cn` on each controller node guest. A check that does not exit zero, or a
+report with a failed result, fails the run with the report's failures; each
+warning is logged. It runs once a run, not before each case, since nothing
+between the cases changes a guest's kernel or tools; hosts and the
+control-plane guest run no agent and no check. The guest checks above stay:
+they run before anything is written and guard the start sweep's tools.
+
 ## Cleanup, and why the order is what it is
 
 The cleanup (E2E6) is best-effort and tells on itself: every verb prints a

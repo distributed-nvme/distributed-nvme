@@ -1015,7 +1015,10 @@ that take the links away, with an error in the system log, and keeps the
 rest.
 
 What dnv does alone: nothing. No agent installs or checks the rules or
-the settings.
+the settings; the node check reads them
+([Check a node before it joins](#check-a-node-before-it-joins)). It
+counts the md rule only when its file is exactly the shipped one, and it
+judges no rule of the node's own, even one that does the same work.
 
 Safe steps, before the node's first dnv agent starts:
 
@@ -1044,9 +1047,16 @@ Safe steps, before the node's first dnv agent starts:
 4. md. `sudo mdadm --detail --scan` prints one ARRAY line for each md
    array that runs on the node; before the node's first dnv agent starts,
    each one is the node's own. Add those lines to `/etc/mdadm/mdadm.conf`,
-   and add the line `AUTO -all` after them. With it md assembles by itself only the arrays
-   the file lists. An array of the node's own that the file does not list
-   no longer comes up at boot.
+   and add the line `AUTO -all` after them. With it md assembles by itself
+   only the arrays the file lists. An array of the node's own that the
+   file does not list no longer comes up at boot. mdadm reads only the
+   first AUTO line, so if the file has one already, make that line
+   `AUTO -all`. Keep no POLICY line that sets `auto=`, and give every
+   ARRAY line its `UUID=`. The node check does not judge a POLICY line
+   that sets `auto=`, or an ARRAY line that names its array by its devices
+   (`devices=`) or minor number (`super-minor=`) and not by its UUID, and
+   does not count a file that has one. The lines `mdadm --detail --scan`
+   prints carry the UUID.
 5. Write the new settings into the initial RAM disk, which also holds a
    copy of them: `sudo update-initramfs -u` on Debian and Ubuntu.
 6. On a controller node, mount the node's own file systems by device
@@ -1081,3 +1091,137 @@ system at the start of a RAID1 array and an md superblock of version 1.0 at the 
 of its legs, and checks that the system made nothing of them on either
 controller node, through a failover. No test checks the lvm2, md and
 mount settings of steps 3, 4 and 6.
+
+## Check a node before it joins
+
+Words: the **node check** is `dnv-agent check dn` or `dnv-agent check cn`,
+a run of the agent program that reads the node and reports, one line each,
+what the agent needs to work and what dnv's safety rests on. It starts no
+agent and changes nothing on the node. The **md replay** is the check's
+`--md-replay` mode on a controller node: it runs md's start rules on two
+small loop devices with the node's mdadm and kernel.
+
+When: before you add a disk node (`dnvctl dn create`) or a controller node
+(`dnvctl cn create`), after a kernel or mdadm update on a node, and after you
+change its udev rules, mdadm.conf or modules.
+
+Safe steps:
+
+1. Install the agent program on the node, then run, as root, with the
+   flags the agent will run with (the same `--config` file serves both):
+   `dnv-agent check dn --disk <disk>` on a disk node, and `dnv-agent check
+   cn` on a controller node. Add `--output json` for a script.
+2. Read the report. Each line is `ok`, `WARN` or `FAIL`, what it read, and
+   for a `WARN` or a `FAIL` a `fix:` line under it. The last line counts
+   the failures and the warnings. The exit status is 0 with no failure, 1
+   with one, and 2 when the check could not run, as when not root.
+3. Fix every `FAIL` before the node joins: the agent cannot work there, or
+   a failover or a repair can lose data there. A `WARN` is one of five
+   kinds.
+   - Node settings to fix. The `lvm2 scan` and `mdadm.conf AUTO -all`
+     warnings are the node settings of
+     [Install the udev rules on a node](#install-the-udev-rules-on-a-node)
+     (steps 3 to 5). The `kernel modules at boot` warning names modules a
+     reboot would not load again; list them in a file under
+     `/etc/modules-load.d`, since no agent loads a module. The
+     `md format (the 6.19 line)` warning says a controller node's kernel
+     is older than 6.19: every controller node of the cluster must run one
+     kernel series, since a RAID1 array created on 6.19 or newer is
+     refused by an older kernel, so a failover to the older node cannot
+     start the pool. The `nvme_core.io_timeout` warning on a disk node says
+     it is at its largest value, 4294967295, so a migration's write to a
+     stalled disk never times out; set it to 30. The check warns for these
+     rather than fails, and they must be fixed all the same.
+   - A known limit. The `disk best IO size` warning says the disk's best
+     or minimum IO size is above 4 MiB, so a controller node's write to
+     the disk can be refused
+     ([the scope page](scope.md#10-sizes-and-performance)).
+     Use another disk, or give it a smaller stripe, or accept the limit.
+   - A feature nothing uses yet. The `nvmet host cut (debugfs)` warning
+     says the node could not cut a removed host's connection; nothing in
+     dnv cuts one today, so it can stay.
+   - Facts outside what dnv was tested with: a kernel outside the 7.0
+     series, an mdadm other than 4.5 on a controller node, a udev rule of
+     dnv's with another text, and `nvme_core.io_timeout` other than 30
+     seconds on a controller node. Fix them, or accept them knowing that
+     nothing tested them.
+   - A fact the check could not read: the line's text starts `not read`.
+     Read the fact by hand, or do first what the `fix:` line says, and run
+     the check again.
+4. For a new kernel or mdadm on controller nodes, run the md replay on a
+   spare machine with that kernel and mdadm, never on a node in service:
+   `dnv-agent check cn --md-replay`. It refuses to start on a node that
+   holds any dnv device, array, subsystem or local store file. Each of its
+   steps is one more line of the report; a failed step means that mdadm or
+   the kernel does not keep a rule dnv's failover rests on, and that
+   kernel or mdadm must not run on a controller node. The replay removes
+   what it made, also after Ctrl-C, and names anything it could not
+   remove.
+
+What dnv does alone: nothing. An agent refuses nothing at its start. It
+logs the kernel release and, on a controller node, the mdadm version once
+when it starts, as the record `agent node versions`.
+
+When to stop: the check exits 2 as root, or the md replay names something
+it could not remove. Ask for help; remove what the replay names by hand
+with `mdadm --stop`, `losetup -d` and `rm -rf`.
+
+Tested: unit tests check each line of the report at each level on modelled
+nodes, the exit statuses, and the md replay against a stand-in mdadm,
+including one that starts a lone leg. The e2e suite runs the check on
+every disk node and controller node guest before it creates its pool, and
+fails the run on a failure; that stage is written and has not yet run in
+the lab. The cn suite's nodecheck case runs the check, the md replay, and
+the md replay with an mdadm that starts a lone leg on the lab VMs, and it
+passes there.
+
+## Gather a node's state for a bug report
+
+Words: the **gather** is `dnv-agent collect`, a run of the agent program
+that writes one archive of the node's state for a bug report. Some reads
+can wait in the kernel without end on a node with a stalled device, such
+as a read of /proc/mdstat or of a dm device's status; the gather runs each
+of those apart, under one time limit, and names in the archive each one
+that did not finish.
+
+When: a node or a pool on it behaves wrongly and you want to report it,
+or to keep the node's state before you change anything.
+
+Safe steps:
+
+1. On the node, as root: `dnv-agent collect --log-file <the agent's log
+   file>`, or `--journal-unit <unit>` when systemd keeps the agent's log.
+   `--deadline` sets the time limit of the reads that can wait (20 seconds
+   when not given), and `--out` the archive's path; by default it is
+   `dnv-collect-<host>-<time>.tar.gz` in the current directory; an
+   `--out` that names a directory, or a link to one, is refused before
+   anything is read. The archive takes the end
+   of the agent's log: the last 16 MiB of the file, or the last 100000
+   records of the unit, newest first. A log read that runs out of its time
+   limit, which is as long as `--deadline`, keeps what it read and ends
+   with the line `[cut at the bound ...]`; for the unit that is the newest
+   records. Keep an older part by hand if the trouble began earlier.
+2. It prints the archive's path, then each read that did not finish. A
+   read that did not finish is a fact for the report: it shows what the
+   kernel waits on. The reads stay stopped in the kernel until what they
+   wait on ends; the gather does not wait for them.
+3. Read the archive before you share it: it names the cluster's hosts,
+   NQNs and addresses, and it holds the kernel log, which on most
+   distributions only root may read. The gather writes it so that only its
+   owner can read it (mode 0600). It holds no keys and no contents of the
+   agent's local store, only the store's file names, sizes and times.
+
+What dnv does alone: nothing. The gather reads; it writes only the
+archive. It reads no device's data and never flushes a thin pool's or a
+dm-clone's metadata.
+
+When to stop: the gather exits 2, which means it could not run or could
+not write the archive; it says why on stderr.
+
+Tested: unit tests check that a dm status read that never returns ends the
+gather by its time limit and is named in the archive, that every status
+read is the one that flushes nothing, and that the gather never reads
+/proc/mdstat, nvmet's configfs tree or a dm status in its own process. The
+cn suite's nodecheck case stalls an md array on a lab VM and checks that
+the gather returns by its time limit and names the /proc/mdstat read as
+not finished, and it passes there.

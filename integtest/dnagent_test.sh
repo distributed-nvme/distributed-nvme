@@ -1857,7 +1857,7 @@ lab_wipe() {
 				[ -n "$mdname" ] || mdname=$(timeout 10 mdadm --detail \
 					--no-devices --export "/dev/${d##*/}" 2>/dev/null |
 					sed -n 's/^MD_NAME=//p')
-				case "$mdname" in dnv-* | *:dnv-*) hit=1 ;; esac
+				case "$mdname" in dnv-????????????????-??-?? | *:dnv-????????????????-??-??) hit=1 ;; esac
 			fi
 			if [ "$hit" -eq 1 ]; then
 				timeout 15 mdadm --stop "/dev/${d##*/}" >/dev/null 2>&1

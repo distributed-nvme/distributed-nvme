@@ -45,8 +45,12 @@ it.
 agent on a controller node: it builds and removes the local devices (device
 mapper, md, nvmet, NVMe connections) so that the node matches its desired
 state, reports the real state, keeps the last desired state it accepted in
-local files, and never talks to etcd. `dnvctl` is the command line tool of
-the operator, one command for each call of the gateway API.
+local files, and never talks to etcd. The same program also checks a node
+before it joins (`dnv-agent check dn` or `check cn`, the node check) and
+gathers a node's state for a bug report (`dnv-agent collect`, the gather);
+neither starts an agent ([operations](operations.md#check-a-node-before-it-joins)).
+`dnvctl` is the command line tool of the operator, one command for each
+call of the gateway API.
 
 `dnv-csi` connects dnv to Kubernetes through the Container Storage Interface
 (CSI), the plugin API Kubernetes uses to create, attach and mount volumes.
@@ -320,10 +324,41 @@ moves over.*
 
 ## Requirements
 
-dnv is tested on Ubuntu 26.04 LTS with the kernel 7.0.0-42-generic, the lab VMs'
-distribution and kernel. The md behaviour that a failover's order of fences
-rests on was checked by hand on that kernel, on one lab VM
-([the scope page](scope.md#notes-on-the-maintenance-tools)).
+dnv is tested on Ubuntu 26.04 LTS with the kernels 7.0.0-42-generic and
+7.0.0-43-generic, the lab VMs' distribution and kernels of the 7.0 series,
+and with mdadm 4.5. The md behaviour that a failover's order of fences
+rests on was checked by hand on the first of these kernels, on one lab VM
+([the scope page](scope.md#notes-on-the-maintenance-tools)). The agents
+need a kernel of the 6.1 series or newer, the first with every kernel
+feature they use.
+
+Run the node check, `dnv-agent check dn --disk <disk>` on a disk node and
+`dnv-agent check cn` on a controller node, as root, before a node joins
+([operations](operations.md#check-a-node-before-it-joins)). It fails a
+node the agent cannot work on or whose setup a failover or a repair is not
+safe on: a kernel older than 6.1, a udev older than systemd 253's, a
+missing tool or module, native NVMe multipath off, one of dnv's three udev
+rules missing or masked, no mask of the system's md assembly that the
+check counts (dnv's md rule exactly as shipped, or mdadm.conf's AUTO line
+refusing every format, as `AUTO -all` does, with no `homehost` on it, no
+POLICY line that sets `auto=`, no ARRAY line of a dnv array and none that
+names devices but no uuid),
+`nvme_core.io_timeout` at its largest value on a controller node, or a
+disk without 512-byte blocks. It warns for five kinds of fact. Node
+settings to fix: lvm2 able to read dnv's own devices, mdadm.conf not set
+as the node settings below say, a module a reboot would not load again, a
+controller node's kernel older than 6.19, where every controller node of
+the cluster must run one kernel series (below), and
+`nvme_core.io_timeout` at its largest value on a disk node. A known
+limit: a disk whose best IO size is above 4 MiB, to which a controller
+node's write can be refused. A feature nothing uses yet: no way to cut a
+removed host's connection on a controller node. What dnv was not tested
+with: a kernel outside the 7.0 series, on a controller node an mdadm
+other than 4.5 or `nvme_core.io_timeout` other than 30 seconds, and a
+udev rule of dnv's with another text. And a fact the check could not
+read, which the operator then reads by hand. On a spare machine,
+`dnv-agent check cn --md-replay` also runs md's start rules, which a
+failover rests on, with that machine's mdadm and kernel.
 
 Tools: nvme-cli, mdadm, nvme-stas, a 2.x version with its daemons stafd and
 stacd, dmsetup, and thin-provisioning-tools, whose thin_dump the agents run,
@@ -374,7 +409,13 @@ device path, never by a label or a uuid a tenant could copy.
 [The operations doc](operations.md#install-the-udev-rules-on-a-node) has
 the steps. The tutorials install the udev rules, and mask the nvmf-connect
 unit, so that nvme-stas is the only program that connects to what a
-discovery change announces.
+discovery change announces. The node check fails a node where one of the
+three udev rules is missing or masked, and warns when lvm2 can read dnv's
+own devices or mdadm.conf is not set this way. It judges no udev rule of
+the node's own: a rule that does the work of dnv's md rule does not count.
+It cannot tell whether lvm2 reads a leg's NVMe device or a clone's source,
+which carry no dnv name, and it does not read how the node's file systems
+are mounted.
 
 etcd: a release of 3.5.13 or later, run with the request caps and automatic
 compaction the tutorial's etcd command shows; the tutorial and the suites use

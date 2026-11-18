@@ -423,6 +423,17 @@ func (g *crashGate) DialTcp(
 	return g.osc.DialTcp(ctx, address, timeout)
 }
 
+func (g *crashGate) StartDetached(
+	ctx context.Context, name string, args []string, dir string,
+) (*common.Detached, error) {
+	ok, held := g.enter(ctx, "detach "+name+" "+strings.Join(args, " "))
+	if !ok {
+		return nil, errCrashEnded
+	}
+	defer g.leave(held)
+	return g.osc.StartDetached(ctx, name, args, dir)
+}
+
 func (g *crashGate) ReadProto(
 	ctx context.Context, path string, m proto.Message,
 ) error {

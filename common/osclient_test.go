@@ -2151,3 +2151,161 @@ func TestDialTcpTellsATimeoutFromARefusal(t *testing.T) {
 			"ErrDialTimeout", err)
 	}
 }
+
+// ---------------------------------------------------------------------------
+// StartDetached (osclient.md, StartDetached)
+// ---------------------------------------------------------------------------
+
+// waitDone waits at most d for a detached child to end.
+func waitDone(child *Detached, d time.Duration) bool {
+	select {
+	case <-child.Done():
+		return true
+	case <-time.After(d):
+		return false
+	}
+}
+
+// StartDetached returns while its child runs, the child in a process group
+// of its own and its stdout and stderr in the one output file, and frees
+// the limit's slot at once.
+func TestStartDetachedReturnsWhileTheChildRuns(t *testing.T) {
+	client := NewLimitedOsClient(1)
+	dir := t.TempDir()
+	start := time.Now()
+	child, err := client.StartDetached(context.Background(), "sh",
+		[]string{"-c", "echo out; echo err >&2; sleep 30"}, dir)
+	if err != nil {
+		t.Fatalf("StartDetached: %v", err)
+	}
+	defer syscall.Kill(-child.Pid, syscall.SIGKILL)
+	if took := time.Since(start); took > 5*time.Second {
+		t.Errorf("StartDetached waited %s", took)
+	}
+	if filepath.Dir(child.Output) != dir {
+		t.Errorf("output %s is not in %s", child.Output, dir)
+	}
+	if pgid, err := syscall.Getpgid(child.Pid); err != nil ||
+		pgid != child.Pid {
+		t.Errorf("the child's process group is %d (%v), want its own %d",
+			pgid, err, child.Pid)
+	}
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		data, _ := os.ReadFile(child.Output)
+		if string(data) == "out\nerr\n" {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("output = %q, want out and err", data)
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	if waitDone(child, 100*time.Millisecond) {
+		t.Fatal("the child ended while it sleeps")
+	}
+	// The one slot is free: another operation runs while the child does.
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	if _, _, _, err := client.RunCommand(ctx, "true", nil, ""); err != nil {
+		t.Errorf("a detached child holds the limit's slot: %v", err)
+	}
+}
+
+// A child's end is read from its handle: its exit code and error.
+func TestStartDetachedExit(t *testing.T) {
+	client := NewLimitedOsClient(0)
+	child, err := client.StartDetached(context.Background(), "sh",
+		[]string{"-c", "exit 3"}, t.TempDir())
+	if err != nil {
+		t.Fatalf("StartDetached: %v", err)
+	}
+	if !waitDone(child, 5*time.Second) {
+		t.Fatal("the child did not end")
+	}
+	if code, err := child.Exit(); code != 3 || err == nil {
+		t.Errorf("Exit = %d, %v; want 3 and an error", code, err)
+	}
+	ok, err := client.StartDetached(context.Background(), "true", nil,
+		t.TempDir())
+	if err != nil {
+		t.Fatalf("StartDetached: %v", err)
+	}
+	if !waitDone(ok, 5*time.Second) {
+		t.Fatal("the child did not end")
+	}
+	if code, err := ok.Exit(); code != 0 || err != nil {
+		t.Errorf("Exit = %d, %v; want 0, nil", code, err)
+	}
+	if _, err := client.StartDetached(context.Background(),
+		"/nonexistent/dnv-no-such-tool", nil, t.TempDir()); err == nil {
+		t.Error("a tool that is not there started")
+	}
+}
+
+// ctx's end kills the child's whole group, a grandchild with it, and ends
+// the child's wait.
+func TestStartDetachedCtxKillsTheGroup(t *testing.T) {
+	client := NewLimitedOsClient(0)
+	ctx, cancel := context.WithCancel(context.Background())
+	child, err := client.StartDetached(ctx, "sh",
+		[]string{"-c", "sleep 30 & echo $!; wait"}, t.TempDir())
+	if err != nil {
+		t.Fatalf("StartDetached: %v", err)
+	}
+	var grandchild int
+	deadline := time.Now().Add(5 * time.Second)
+	for grandchild == 0 {
+		data, _ := os.ReadFile(child.Output)
+		fmt.Sscanf(string(data), "%d", &grandchild)
+		if time.Now().After(deadline) {
+			t.Fatalf("no grandchild pid in %q", data)
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	cancel()
+	if !waitDone(child, 5*time.Second) {
+		t.Fatal("the child outlived ctx")
+	}
+	if code, err := child.Exit(); code != -1 || err == nil {
+		t.Errorf("Exit = %d, %v; want -1 and an error", code, err)
+	}
+	deadline = time.Now().Add(5 * time.Second)
+	for syscall.Kill(grandchild, 0) == nil {
+		if time.Now().After(deadline) {
+			syscall.Kill(grandchild, syscall.SIGKILL)
+			t.Fatal("the grandchild outlived its group's kill")
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+}
+
+// A test double with no StartDetachedFn refuses, since no child stands
+// behind a handle it could give; NewDetached's end closes Done once.
+func TestFakeStartDetached(t *testing.T) {
+	if _, err := (&FakeOsClient{}).StartDetached(context.Background(), "x",
+		nil, ""); err == nil {
+		t.Error("an unset StartDetachedFn started a child")
+	}
+	child, end := NewDetached(7, "/tmp/out")
+	end(2, errors.New("exit status 2"))
+	end(0, nil)
+	if code, err := child.Exit(); code != 2 || err == nil {
+		t.Errorf("Exit = %d, %v; want the first end", code, err)
+	}
+}
+
+// A name no binary answers to by PATH is told apart by ErrCommandNotFound.
+func TestRunCommandNotFound(t *testing.T) {
+	_, _, code, err := NewLimitedOsClient(0).RunCommand(context.Background(),
+		"dnv-no-such-tool-anywhere", nil, "")
+	if code != -1 || !errors.Is(err, ErrCommandNotFound) {
+		t.Errorf("RunCommand = %d, %v; want -1 and ErrCommandNotFound", code,
+			err)
+	}
+	_, _, _, err = NewLimitedOsClient(0).RunCommand(context.Background(),
+		"sh", []string{"-c", "exit 127"}, "")
+	if errors.Is(err, ErrCommandNotFound) {
+		t.Errorf("a tool that exits 127 reads as not found: %v", err)
+	}
+}

@@ -3612,8 +3612,8 @@ nvmet_tree() {
 # only the first is scoped. The first — ACTION=="add|change",
 # SUBSYSTEM=="block", ENV{ID_FS_TYPE}=="linux_raid_member" — IMPORTs MD_NAME
 # from `mdadm --examine --export --metadata=1.2` on the MEMBER's devnode, the
-# event whose assembly it then suppresses. The second, ENV{MD_NAME}=="dnv-*|*:dnv-*",
-# ENV{SYSTEMD_READY}="0", carries no subsystem and no fs-type match at all;
+# event whose assembly it then suppresses. The second, the MD_NAME match
+# with ENV{SYSTEMD_READY}="0", carries no subsystem and no fs-type match at all;
 # what keeps it off an ARRAY device is the file name. 63-dnv-md.rules sorts
 # ahead of 63-md-raid-arrays.rules, which is what sets MD_NAME on an array, so
 # on the array's own event the property is not there yet to match — with the
@@ -3627,15 +3627,16 @@ nvmet_tree() {
 # agent's own `--create`/`--assemble` do not go through udev at all.
 #
 # WHAT IT MATCHES, because it runs on DN VMs too (dn_cleanup) where no dnv
-# array is ever supposed to exist: an MD_NAME of `dnv-…` or `<homehost>:dnv-…`,
-# and nothing else. That is the SAME pair of patterns the md mask of
-# deploy/udev/ matches (ENV{MD_NAME}=="dnv-*|*:dnv-*"), against the same udev
-# property — one reading of "the name" at both ends. It is
-# the dnv prefix of the name the cn agent gives every array it creates
-# (common.NameFmt.CnMdArrayName, or CnCloneMdArrayName for a clone meta
-# group's array (common/name_fmt.go), passed as `--name` by Md.Create
-# (agent/cnagent/md.go) with `--homehost any`), so a guest's own
-# root or data array is never touched — only an array minted by a dnv cn agent,
+# array is ever supposed to exist: an MD_NAME of `dnv-…` or `<homehost>:dnv-…`
+# in the exact form of the agent's names (common.CnMdArrayNameGlob), and
+# nothing else. That is the SAME pair of patterns the md mask of
+# deploy/udev/ matches, against the same udev property — one reading of
+# "the name" at both ends. It is the form of the name the cn agent gives
+# every array it creates (common.NameFmt.CnMdArrayName, or
+# CnCloneMdArrayName for a clone meta group's array (common/name_fmt.go),
+# passed as `--name` by Md.Create (agent/cnagent/md.go) with `--homehost
+# any`), so a guest's own root or data array is never touched, even on a
+# guest whose host name starts dnv- — only an array minted by a dnv cn agent,
 # whether it was assembled here on purpose or by the stock udev rule behind our
 # back.
 #
@@ -3673,7 +3674,7 @@ md_stop_all() {
 			--no-devices --export "/dev/$d" 2>/dev/null |
 			sed -n 's/^MD_NAME=//p')
 		case "$name" in
-		dnv-* | *:dnv-*) ;;
+		dnv-????????????????-??-?? | *:dnv-????????????????-??-??) ;;
 		*) continue ;;
 		esac
 		timeout 15 mdadm --stop "/dev/$d" >/dev/null 2>&1
@@ -3697,7 +3698,7 @@ md_names() {
 			--no-devices --export "/dev/$d" 2>/dev/null |
 			sed -n 's/^MD_NAME=//p')
 		case "$name" in
-		dnv-* | *:dnv-*) printf '%s\n' "$name" ;;
+		dnv-????????????????-??-?? | *:dnv-????????????????-??-??) printf '%s\n' "$name" ;;
 		esac
 	done
 	return 0
@@ -3746,8 +3747,9 @@ mdstat() {
 # point. dn_up calls this once per instance — DNS_PER_VM times on each DN VM
 # — and systemd-udevd watches the rules directories, so an unconditional
 # write would rewrite a watched file that many times during agent startup. A
-# file is written only when its text differs, and then by a rename, so udevd
-# never reads half of one. (That is the one difference from cnagent_test.sh's
+# file is written only when its bytes differ, and then by a rename, so udevd
+# never reads half of one; bytes, since the node check counts the md mask
+# only byte for byte (dnagent.md CM5). (That is the one difference from cnagent_test.sh's
 # copy, which installs once per VM.) But the reload is exactly what those
 # repeated calls retry for free: its status is discarded here, so if the
 # write became conditional AND the reload went with it, one failed reload
@@ -3762,8 +3764,8 @@ install_udev_rules() {
 		return 1
 	}
 	for name in "${!UDEV_RULES[@]}"; do
-		[ "$(cat "$UDEV_DIR/$name" 2>/dev/null)" = "${UDEV_RULES[$name]}" ] &&
-			continue
+		printf '%s\n' "${UDEV_RULES[$name]}" |
+			cmp -s - "$UDEV_DIR/$name" && continue
 		if ! printf '%s\n' "${UDEV_RULES[$name]}" >"$UDEV_DIR/.$name.tmp" ||
 			! mv -f "$UDEV_DIR/.$name.tmp" "$UDEV_DIR/$name"; then
 			rm -f "$UDEV_DIR/.$name.tmp"
@@ -3794,7 +3796,8 @@ udev_rules_list() {
 	for name in "${!UDEV_RULES[@]}"; do
 		if [ ! -e "$UDEV_DIR/$name" ]; then
 			echo "$UDEV_DIR/$name absent"
-		elif [ "$(cat "$UDEV_DIR/$name" 2>/dev/null)" = "${UDEV_RULES[$name]}" ]; then
+		elif printf '%s\n' "${UDEV_RULES[$name]}" |
+			cmp -s - "$UDEV_DIR/$name"; then
 			echo "$(ls -l "$UDEV_DIR/$name" 2>&1) (deploy/udev/$name)"
 		else
 			echo "$(ls -l "$UDEV_DIR/$name" 2>&1) (NOT deploy/udev/$name)"
@@ -8024,7 +8027,8 @@ cleanup_dirty_banner() {
 	log "each mdN it lists,"
 	log "  udevadm info --query=property --name=/dev/mdN | grep MD_NAME"
 	log "and \`sudo mdadm --stop /dev/mdN\` for every one whose MD_NAME is"
-	log "\`dnv-…\` or \`<homehost>:dnv-…\`. Neither /proc/mdstat nor"
+	log "\`dnv-<16 hex>-<2 hex>-<2 hex>\`, bare or after \`<homehost>:\`."
+	log "Neither /proc/mdstat nor"
 	log "\`mdadm --detail --scan\` prints the name on these guests, which is"
 	log "why the udev property is the one to read. udev has no MD_NAME for an"
 	log "array whose state is \`inactive\` — which is what a one-member"
@@ -10863,9 +10867,50 @@ setup_case() {
 		"$CNTLR_CNT cntlrs, host0 on $(host_dev "$UUID1")"
 }
 
-# setup is what main calls before the first case.
+# setup_node_check is the node check stage (e2e_integtest.md, Preflight):
+# once, in the first setup, after every agent started and before the pool
+# create, `dnv-agent check dn` on each dn guest, over the loop device of its
+# first instance, since a guest's loop devices are made alike, and
+# `dnv-agent check cn` on each cn guest. A check that does not exit 0
+# fails the run with its report; each warning is logged. Once, since
+# nothing between cases changes a guest's kernel or tools.
+setup_node_check() {
+	CASE=setup
+	stage 03c "dnv-agent check on every dn and cn guest"
+	local v out rc failed warned
+	for v in "${!DN[@]}"; do
+		rc=0
+		out=$(ssh_dn "$v" "$WORK/bin/dnv-agent check dn --disk \
+${DN_LOOP[$(dn_key "$v" 0)]} --output json") || rc=$?
+		node_check_ok "dn$v" "$out" "$rc"
+	done
+	for v in "${!CN[@]}"; do
+		rc=0
+		out=$(ssh_cn "$v" "$WORK/bin/dnv-agent check cn --output json") ||
+			rc=$?
+		node_check_ok "cn$v" "$out" "$rc"
+	done
+}
+
+# node_check_ok judges one guest's node check report: exit 0 with no result
+# failed, its warnings logged.
+node_check_ok() { # <guest> <json> <rc>
+	local failed warned
+	failed=$(jq_of "$2" '[.results[] | select(.level == "fail") |
+		"\(.name): \(.detail) (fix: \(.fix))"] | join("; ")') ||
+		die "$1: the node check printed no report (exit $3): $2"
+	[ "$3" = 0 ] && [ -z "$failed" ] ||
+		die "$1: the node check exits $3: $failed"
+	warned=$(jq_of "$2" '[.results[] | select(.level == "warn") |
+		"\(.name): \(.detail)"] | join("; ")')
+	[ -z "$warned" ] || log "  $1: node check warns: $warned"
+}
+
+# setup is what main calls before the first case: setup_between_cases
+# rebuilds the rest for each later case, and not the node check.
 setup() {
 	setup_infra
+	setup_node_check
 	setup_case
 }
 
@@ -11136,10 +11181,11 @@ cn_residue_empty() { # <v>
 	[ -z "${out//[[:space:]]/}" ]
 }
 
-# dn_md_residue lists any md array on a DN VM whose name carries the dnv
-# prefix. It is the same filter cn_residue applies on a CN, and it is the
-# same CODE: both call the shared node body's `md_names`, which reads MD_NAME
-# per array the way md_stop_all does.
+# dn_md_residue lists any md array on a DN VM whose name has a dnv array
+# name's exact form (common.CnMdArrayNameGlob: dnv-<16 hex>-<2>-<2>, bare
+# or after the homehost). It is the same filter cn_residue applies on a CN,
+# and it is the same CODE: both call the shared node body's `md_names`,
+# which reads MD_NAME per array the way md_stop_all does.
 #
 # WHAT IT IS MEANT TO PROVE, EXACTLY: only the CN assembles arrays ON PURPOSE
 # (cnagent.md CN12: "Groups (md.go; primary only)"), so a dnv-named array

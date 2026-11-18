@@ -310,6 +310,16 @@ func (g *crashGate) DialTcp(
 	return g.inner.DialTcp(ctx, address, timeout)
 }
 
+func (g *crashGate) StartDetached(
+	ctx context.Context, name string, args []string, dir string,
+) (*common.Detached, error) {
+	if !g.enter(ctx, "detach "+name+" "+strings.Join(args, " ")) {
+		return nil, errCrashEnded
+	}
+	defer g.inflight.Done()
+	return g.inner.StartDetached(ctx, name, args, dir)
+}
+
 func (g *crashGate) ReadProto(
 	ctx context.Context, path string, m proto.Message,
 ) error {

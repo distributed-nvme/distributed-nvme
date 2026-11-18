@@ -265,12 +265,19 @@ func (nf *NameFmt) CnMdDevName(
 	)
 }
 
-// CnMdArrayName is the array's superblock name (mdadm --name). The fixed
-// "dnv-" prefix is what the udev guard matches
-// (ENV{MD_NAME}=="dnv-*|*:dnv-*", architecture.md, md names; Components:
-// invocation reference — the second alternative covers the homehost:name
-// form `mdadm --examine --export` reports); 26 chars, within mdadm's 32-byte
-// limit.
+// CnMdArrayNameGlob is every name CnMdArrayName and CnCloneMdArrayName
+// make, in the exact form of their fields, bare or after a "homehost:", as
+// a udev match of MD_NAME and the node check read it: "|"-separated shell
+// globs, which deploy/udev's md rules quote (architecture.md, md names;
+// Components: invocation reference). The exact form keeps off a node's own
+// array whose name a host called "dnv-..." starts, such as "dnv-cn0:0",
+// which "dnv-*" would match; the second alternative covers the
+// homehost:name form `mdadm --examine --export` reports.
+const CnMdArrayNameGlob = "dnv-????????????????-??-??|" +
+	"*:dnv-????????????????-??-??"
+
+// CnMdArrayName is the array's superblock name (mdadm --name), whose form
+// CnMdArrayNameGlob matches; 26 chars, within mdadm's 32-byte limit.
 func (nf *NameFmt) CnMdArrayName(
 	spId uint64,
 	sliceIdx uint32,

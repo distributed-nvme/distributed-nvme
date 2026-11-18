@@ -84,11 +84,15 @@ R5. The trace id is carried in the context under an unexported key and
 
 R6. Log levels per binary: the five daemons — `dnv-gateway`, `dnv-worker`,
     `dnv-agent` in both roles, `dnv-cdc` and `dnv-csi` — log at Info; `dnvctl` logs at
-    Warn. Implemented with a package-level `slog.LevelVar`, whose zero value
-    is Info, plus `SetLogLevel`. The five daemons do nothing; `dnvctl` calls
-    `SetLogLevel` with `slog.LevelWarn` as the first statement of its `main`.
-    Because all the R8 logging points are Info, they are automatically
-    silenced in dnvctl — this is intended.
+    Warn, and so do `dnv-agent`'s node check and gather, the one-shot tools
+    `check` and `collect` (`dnagent.md` CM5, CM6). Implemented with a
+    package-level `slog.LevelVar`, whose zero value is Info, plus
+    `SetLogLevel`. The five daemons do nothing; `dnvctl` calls
+    `SetLogLevel` with `slog.LevelWarn` as the first statement of its `main`,
+    and the node check and the gather as the first statement of their
+    `RunE`. Because all the R8 logging points are Info, they are
+    automatically silenced in dnvctl and in the two tools — this is
+    intended: what the tools read is in their report and their archive.
 
 R7. Attributes are always built with the strongly-typed constructors of
     `log/slog` — `slog.String`, `slog.Int`, `slog.Int64`, `slog.Uint64`,
@@ -118,7 +122,9 @@ R8. The following events MUST be logged at **Info** level, with the record
        the number read) — implemented once inside `LimitedOsClient`;
     8. every set of discards made in the caller's own process (full path;
        the ranges asked for, the ranges done) — implemented once inside
-       `LimitedOsClient`.
+       `LimitedOsClient`;
+    9. every detached child started (the command, its process id, its
+       output file) — implemented once inside `LimitedOsClient`.
 
 R9. Each logging point emits exactly **one** record per operation, on
     completion, so the record can carry the outcome (exit code, error); a
@@ -192,6 +198,11 @@ implements them:
 * a TCP dial made in the caller's own process (`DialTcp`) logs `os dial`
   with `address` (the "host:port" dialled), `timeout_ms` (the caller's
   timeout), `duration_ms` (how long the dial took) and "error?";
+* a detached child's start (`StartDetached`) logs `os start detached` with
+  `cmd`, `args`, `pid` (the child's, 0 when it did not start), `output` (the
+  file its stdout and stderr go to, empty when it did not start) and
+  "error?"; the child's end is not logged, since one stuck in the kernel
+  never ends (`osclient.md`, StartDetached);
 * a proto read logs `os read proto` and a proto write `os write proto`, each
   with `path`, `size` (the serialized bytes), `data` (the message as
   `PbToLogValue` renders it) and "error?".
@@ -216,6 +227,15 @@ fall out of that list by construction rather than by a path-based exemption.
 Everything else about them — one Info record per operation, emitted on
 completion, under the caller's trace id, with "error?" only on failure —
 follows the same rules as the records above.
+
+### Agent start
+
+An agent's start logs `agent node versions` (`agent.LogStartVersions`),
+before it serves (`dnagent.md` CM4), with `kernel_release` (the running
+kernel's release) and, for the cn role, `mdadm_version` (the version line
+of the mdadm the agent runs; `cnagent.md` CN-CM2). A read that failed
+leaves its attribute empty and adds `error`, the failed reads' errors
+joined, and the record is then at Warn; the start goes on either way.
 
 ### gRPC messages
 

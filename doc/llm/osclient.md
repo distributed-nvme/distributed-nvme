@@ -1,9 +1,9 @@
 # osclient.md — OS client
 
 This document owns the one path every dnv binary takes to the operating
-system: the `OsClient` interface for OS commands, for directory listings, for
-modification-time reads, for device-number reads, for discards, for TCP
-dials and for file, protobuf and raw block IO, its production implementation `LimitedOsClient` with its
+system: the `OsClient` interface for OS commands, for detached children,
+for directory listings, for modification-time reads, for device-number
+reads, for discards, for TCP dials and for file, protobuf and raw block IO, its production implementation `LimitedOsClient` with its
 concurrency limit, its command timeouts and kill rule, the guarantees of each
 operation (a listing's names, all of them in byte order or none; the time of
 the path itself, never of what a link names; the number of the block device
@@ -37,17 +37,19 @@ it.
   inspect call's block counters (`cnagent.md` CN23, `dnagent.md` DN16), for
   both roles' discards on a dm-clone, for the
   cn's direct read of an md member's superblock area, for the cn's dial of
-  a side's address before a connect (`cnagent.md` CN10), and for
-  persisting the `Local*Path` protobuf state
-  files; and `dnv-csi`'s node plugin, for its nvme-cli, blkid, filesystem
+  a side's address before a connect (`cnagent.md` CN10), for its node
+  check's reads and the md replay's commands and block reads (`dnagent.md`
+  CM5), for its gather's reads, the detached children among them, and the
+  archive's write (`dnagent.md` CM6), and for persisting the `Local*Path`
+  protobuf state files; and `dnv-csi`'s node plugin, for its nvme-cli, blkid, filesystem
   maker and mount commands, its sysfs and mount table reads and its read of
-  a volume's device link (`csi.md`, The node plugin). **All** OS command execution, directory listing, modification-time
+  a volume's device link (`csi.md`, The node plugin). **All** OS command execution, detached child start, directory listing, modification-time
   read, device-number read, discard, TCP connect made to test whether an
   address answers (DialTcp) and disk file IO in
   production code goes through an `OsClient` — never call `os/exec` or
   `os.ReadFile`/`os.WriteFile`, and never read a directory, stat a path or
   make such a test connect, directly outside this file. This is what makes the logging rules of
-  `log.md` R8 (its first, second, fifth, sixth, seventh and eighth items)
+  `log.md` R8 (its first, second, fifth, sixth, seventh, eighth and ninth items)
   enforceable and
   makes every consumer unit-testable via `FakeOsClient`. There is exactly **one** sanctioned exception in
   production code, recorded under "Exported raw helpers and the probe-IO
@@ -118,6 +120,10 @@ the method set is exactly the following, each taking the caller's ctx:
   address that did not answer within the timeout is an error wrapping
   `ErrDialTimeout`, and every other failure is an error that does not
   (DialTcp).
+* `StartDetached` starts an OS binary as a child in a process group of its
+  own, its stdout and stderr in one file it creates, and returns at once
+  with a handle (`Detached`) that says when and how the child ended; it
+  never waits for the child (StartDetached).
 * `ReadProto` reads a protobuf binary file and deserializes it into a
   non-nil target message.
 * `WriteProto` serializes a message to wire binary and writes it with the
@@ -149,7 +155,10 @@ the method set is exactly the following, each taking the caller's ctx:
 
 * The command runs through `exec.CommandContext`; the stdin payload is
   attached only when it is non-empty; stdout and stderr are captured into
-  separate buffers.
+  separate buffers. A name no binary answers to by PATH never starts: its
+  error wraps `ErrCommandNotFound`, with exit code -1, so a caller tells a
+  tool that is not installed from one that failed without reading text
+  (the node check's lvm2 row, `dnagent.md` CM5).
 * The command runs in the C locale: it gets the process's own environment
   with `LC_ALL` set to the C locale on top, which overrides whatever locale
   the process was started with. Reason: callers read the tools' output,
@@ -532,6 +541,33 @@ fabrics connect at a time.
 * One `os dial` record covers the call (`log.md`, OS commands and file
   IO).
 
+### StartDetached
+
+How the gather runs a read that can wait in the kernel (`dnagent.md` CM6):
+a thread stuck in such a wait cannot be killed and keeps its whole process
+from exiting, and a `RunCommand` waits for its child to exit whatever its
+timeouts say, so such a read runs as a child nobody waits on.
+
+* It takes one semaphore slot for the start alone and gives it back as
+  soon as the child started or failed to start: a child that waits in the
+  kernel holds no slot. It checks the ctx error before it starts anything.
+* The child runs with the C locale, as `RunCommand`'s does, no stdin, and
+  a process group of its own, whose id is its process id (`Detached.Pid`);
+  its stdout and stderr both go to one new file the call creates in the
+  directory the caller names, or in the system's temporary directory
+  (`Detached.Output`). The caller reads the file with `ReadFile`, as far as
+  the child has written it, and removes it.
+* The call returns once the child started. One goroutine of the client
+  waits for the child and records its end, which `Detached.Done` and
+  `Detached.Exit` give in `RunCommand`'s terms: the exit code, -1 for a
+  child a signal ended, and an error for any end but a zero exit.
+* The end of the ctx the call took sends SIGKILL to the child's whole
+  group, so a shell's children go with it; the kill takes effect only once
+  a wait in the kernel ends, and the caller never waits for it.
+* One `os start detached` record covers the start (`log.md`, OS commands
+  and file IO); the child's end is logged by no one, since a child stuck in
+  the kernel never ends.
+
 ### Exported raw helpers and the probe-IO carve-out
 
 The `OsClient` interface's direct read (ReadBlockDirect) holds a semaphore
@@ -677,11 +713,14 @@ per interface method, of which a test sets only the ones it needs; an unset
 field succeeds with zero values. An unset listing field answers an empty
 listing, never a missing directory, so a test that expects a listing to fail
 or its directory to be missing sets that field and checks that it ran. An
-unset mtime-read field is the one exception: it fails, with an error that
+unset mtime-read field is one exception: it fails, with an error that
 does not wrap `fs.ErrNotExist`. Reason: the zero time reads as older than
 any age a caller judges by, so with a zero default every unit test that met
 an export without namespace one would read it as old and remove it, and a
-"not exist" default would pass every such export over as gone. It is
+"not exist" default would pass every such export over as gone. An unset
+detached-start field is the other: it fails, since no child stands behind
+a handle it could give; a test that models a child builds its handle with
+`NewDetached`, whose end function closes `Detached.Done`. It is
 exported — not a `_test.go` file — so
 tests in other packages can reuse it. Its field for the direct read serves
 `ReadBlockDirect` alone: the probe read is not on the interface, and probe

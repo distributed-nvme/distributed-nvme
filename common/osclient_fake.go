@@ -12,9 +12,10 @@ import (
 // fields your test needs; unset fields succeed with zero values. An unset
 // ReadDirFn answers an empty listing, so a test that expects a listing to
 // fail, or its directory to be missing, sets it and checks that it ran. An
-// unset ReadMtimeFn is the one exception: it fails, with an error that is not
+// unset ReadMtimeFn is one exception: it fails, with an error that is not
 // fs.ErrNotExist, since the zero time reads as older than any age a caller
-// judges by, and a missing path reads as gone.
+// judges by, and a missing path reads as gone. An unset StartDetachedFn is
+// the other: it fails, since no child stands behind a handle it could give.
 //
 // It is exported (not a _test.go file) so that tests in other packages can
 // reuse it (osclient.md, Test double — `common/osclient_fake.go`).
@@ -31,6 +32,7 @@ type FakeOsClient struct {
 	WriteBlockFn      func(ctx context.Context, path string, offset uint64, data []byte) error
 	DiscardRangesFn   func(ctx context.Context, path string, ranges []DiscardRange) (int, error)
 	DialTcpFn         func(ctx context.Context, address string, timeout time.Duration) error
+	StartDetachedFn   func(ctx context.Context, name string, args []string, dir string) (*Detached, error)
 	ReadProtoFn       func(ctx context.Context, path string, target proto.Message) error
 	WriteProtoFn      func(ctx context.Context, path string, msg proto.Message) error
 }
@@ -122,6 +124,17 @@ func (f *FakeOsClient) DialTcp(ctx context.Context, address string, timeout time
 		return f.DialTcpFn(ctx, address, timeout)
 	}
 	return nil
+}
+
+// errStartDetachedUnset is what an unset StartDetachedFn answers.
+var errStartDetachedUnset = errors.New(
+	"FakeOsClient: StartDetachedFn is not set")
+
+func (f *FakeOsClient) StartDetached(ctx context.Context, name string, args []string, dir string) (*Detached, error) {
+	if f.StartDetachedFn != nil {
+		return f.StartDetachedFn(ctx, name, args, dir)
+	}
+	return nil, errStartDetachedUnset
 }
 
 func (f *FakeOsClient) ReadProto(ctx context.Context, path string, target proto.Message) error {

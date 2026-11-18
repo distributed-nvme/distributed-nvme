@@ -1,8 +1,15 @@
 package main
 
 import (
+	"bytes"
 	"context"
+	"errors"
+	"io/fs"
+	"log/slog"
+	"net"
 	"os"
+	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"syscall"
@@ -10,8 +17,11 @@ import (
 	"time"
 
 	"github.com/spf13/cobra"
+	"github.com/spf13/pflag"
 	"github.com/spf13/viper"
+	"google.golang.org/grpc"
 
+	"github.com/distributed-nvme/distributed-nvme/agent/nodecheck"
 	"github.com/distributed-nvme/distributed-nvme/common"
 )
 
@@ -53,24 +63,203 @@ func parse(t *testing.T, use string, args []string) *cobra.Command {
 	return cmd
 }
 
-// CM1: exactly two subcommands, and --disk belongs only to dn.
+// CM1: the command tree. dn and cn serve the agents; check dn and check cn
+// are the node check with their roles' flags; collect is the gather.
+// --disk belongs to the dn role's two commands alone, --capacity to the cn
+// role's, and --md-replay to check cn.
 func TestSubcommands(t *testing.T) {
 	root := newRootCmd()
 	if root.Use != "dnv-agent" {
 		t.Errorf("root command = %q", root.Use)
 	}
-	var names []string
-	for _, cmd := range root.Commands() {
-		names = append(names, cmd.Use)
+	tree := map[string][]string{}
+	var walk func(prefix string, cmd *cobra.Command)
+	walk = func(prefix string, cmd *cobra.Command) {
+		for _, sub := range cmd.Commands() {
+			if sub.Name() == "help" || sub.Name() == "completion" {
+				continue
+			}
+			tree[prefix] = append(tree[prefix], sub.Use)
+			walk(strings.TrimSpace(prefix+" "+sub.Use), sub)
+		}
 	}
-	if len(names) != 2 || !contains(names, "dn") || !contains(names, "cn") {
-		t.Fatalf("subcommands = %v, want exactly dn and cn", names)
+	walk("", root)
+	want := map[string][]string{
+		"":      {"check", "cn", "collect", "dn"},
+		"check": {"cn", "dn"},
 	}
-	if subCmd(t, "dn").Flags().Lookup("disk") == nil {
-		t.Error("dn has no --disk flag")
+	for prefix, names := range want {
+		got := append([]string{}, tree[prefix]...)
+		sort.Strings(got)
+		if strings.Join(got, " ") != strings.Join(names, " ") {
+			t.Errorf("subcommands of %q = %v, want %v", prefix, got, names)
+		}
 	}
-	if subCmd(t, "cn").Flags().Lookup("disk") != nil {
-		t.Error("cn has a --disk flag")
+	if len(tree) != len(want) {
+		t.Errorf("command tree = %v, want %v", tree, want)
+	}
+	flags := map[string]map[string]bool{
+		"dn":       {"disk": true, "capacity": false, "md-replay": false},
+		"cn":       {"disk": false, "capacity": true, "md-replay": false},
+		"check dn": {"disk": true, "capacity": false, "md-replay": false},
+		"check cn": {"disk": false, "capacity": true, "md-replay": true},
+		"collect":  {"disk": false, "log-file": true, "journal-unit": true},
+	}
+	for path, want := range flags {
+		cmd, _, err := root.Find(strings.Fields(path))
+		if err != nil {
+			t.Fatalf("find %q: %v", path, err)
+		}
+		for flag, has := range want {
+			if (cmd.Flags().Lookup(flag) != nil) != has {
+				t.Errorf("%s: --%s present = %v, want %v", path, flag,
+					!has, has)
+			}
+		}
+	}
+	// The two check commands take every flag of their role, so an agent's
+	// own --config serves its check.
+	for _, role := range []string{"dn", "cn"} {
+		agentCmd, _, _ := root.Find([]string{role})
+		checkCmd, _, _ := root.Find([]string{"check", role})
+		agentCmd.Flags().VisitAll(func(f *pflag.Flag) {
+			if checkCmd.Flags().Lookup(f.Name) == nil {
+				t.Errorf("check %s lacks --%s", role, f.Name)
+			}
+		})
+	}
+}
+
+// nodeTestEnv is a node whose every read answers empty, as root, for the
+// command tree's tests: no directory is there, so the gather's --out is no
+// directory; the gather's archive is moved from its private directory to
+// its path.
+func nodeTestEnv(t *testing.T, written map[string]string) nodecheck.Env {
+	t.Helper()
+	return nodecheck.Env{
+		Oc: &common.FakeOsClient{
+			ReadDirFn: func(_ context.Context, path string) ([]string,
+				error) {
+				return nil, &fs.PathError{Op: "open", Path: path,
+					Err: fs.ErrNotExist}
+			},
+			RunCommandFn: func(_ context.Context, name string,
+				args []string, _ string) (string, string, int, error) {
+				switch name {
+				case "mktemp":
+					return strings.Replace(args[len(args)-1], "XXXXXX",
+						"x", 1), "", 0, nil
+				case "mv":
+					from, to := args[len(args)-2], args[len(args)-1]
+					written[to] = written[from]
+					delete(written, from)
+				}
+				return "", "", 0, nil
+			},
+			WriteFileFn: func(_ context.Context, path, data string) error {
+				written[path] = data
+				return nil
+			},
+			StartDetachedFn: func(context.Context, string, []string,
+				string) (*common.Detached, error) {
+				child, end := common.NewDetached(1, "/tmp/out")
+				end(0, nil)
+				return child, nil
+			},
+		},
+		Euid: func() int { return 0 },
+		Now:  time.Now,
+	}
+}
+
+// executeRoot runs the command tree with args, as main does, its output to
+// out.
+func executeRoot(args []string, out *strings.Builder) error {
+	viper.Reset()
+	root := newRootCmd()
+	root.SetArgs(args)
+	root.SetOut(out)
+	root.SetErr(out)
+	return root.Execute()
+}
+
+// Neither the node check nor the gather starts a server: each runs to its
+// end, never calls the agent's serve, and leaves the gRPC address it was
+// given unused.
+func TestCheckAndCollectStartNoServer(t *testing.T) {
+	served := false
+	oldServe, oldEnv := serveAgent, nodeEnv
+	t.Cleanup(func() {
+		serveAgent, nodeEnv = oldServe, oldEnv
+		viper.Reset()
+	})
+	serveAgent = func(context.Context, string, string,
+		func(context.Context), func(context.Context) error,
+		func(*grpc.Server), func()) error {
+		served = true
+		return nil
+	}
+	written := map[string]string{}
+	nodeEnv = func() nodecheck.Env { return nodeTestEnv(t, written) }
+	lis, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	addr := lis.Addr().String()
+	lis.Close()
+	out := filepath.Join(t.TempDir(), "c.tar.gz")
+	for _, args := range [][]string{
+		{"check", "dn", "--grpc-address", addr, "--disk", "/dev/loop0"},
+		{"check", "cn", "--grpc-address", addr, "--output", "json"},
+		{"collect", "--out", out, "--deadline", "100ms"},
+	} {
+		var printed strings.Builder
+		err := executeRoot(args, &printed)
+		var exit *nodecheck.ExitError
+		if err != nil && (!errors.As(err, &exit) ||
+			exit.Code == nodecheck.ExitNotRun) {
+			t.Errorf("%v: %v\n%s", args, err, printed.String())
+		}
+		if printed.Len() == 0 {
+			t.Errorf("%v printed nothing", args)
+		}
+		if served {
+			t.Fatalf("%v started a server", args)
+		}
+		again, err := net.Listen("tcp", addr)
+		if err != nil {
+			t.Errorf("%v holds %s: %v", args, addr, err)
+		} else {
+			again.Close()
+		}
+	}
+	if written[out] == "" {
+		t.Errorf("collect wrote no archive: %v", written)
+	}
+}
+
+// The node check's exit statuses reach the command line: a flag it cannot
+// parse, and a run not as root, end it with ExitNotRun.
+func TestCheckCannotRun(t *testing.T) {
+	oldEnv := nodeEnv
+	t.Cleanup(func() { nodeEnv = oldEnv; viper.Reset() })
+	nodeEnv = func() nodecheck.Env {
+		env := nodeTestEnv(t, map[string]string{})
+		env.Euid = func() int { return 1000 }
+		return env
+	}
+	for _, args := range [][]string{
+		{"check", "cn"},
+		{"check", "dn", "--no-such-flag"},
+		{"collect"},
+		{"collect", "--deadline", "soon"},
+	} {
+		var printed strings.Builder
+		err := executeRoot(args, &printed)
+		var exit *nodecheck.ExitError
+		if !errors.As(err, &exit) || exit.Code != nodecheck.ExitNotRun {
+			t.Errorf("%v: %v, want exit %d", args, err, nodecheck.ExitNotRun)
+		}
 	}
 }
 
@@ -540,5 +729,77 @@ func TestWatchSignalsReturnsWhenCtxEnds(t *testing.T) {
 	case <-done:
 	case <-time.After(2 * time.Second):
 		t.Fatal("watchSignals did not return when ctx ended")
+	}
+}
+
+// Each role logs its start record before it serves: the kernel release,
+// and for the cn the mdadm version too. A read that fails is in the record,
+// and the start goes on to serve.
+func TestRolesLogTheirStartRecord(t *testing.T) {
+	oldServe := serveAgent
+	t.Cleanup(func() {
+		serveAgent = oldServe
+		viper.Reset()
+		common.SetLogLevel(slog.LevelInfo)
+	})
+	common.SetLogLevel(slog.LevelInfo)
+	var buf bytes.Buffer
+	oldLog := slog.Default()
+	slog.SetDefault(slog.New(slog.NewJSONHandler(&buf, nil)))
+	t.Cleanup(func() { slog.SetDefault(oldLog) })
+	flags := []string{"--grpc-address", "127.0.0.1:1", "--tr-type", "tcp",
+		"--adr-fam", "ipv4", "--tr-addr", "127.0.0.1", "--tr-svc-id", "4420",
+		"--local-store", t.TempDir()}
+	for _, role := range []string{"dn", "cn"} {
+		buf.Reset()
+		var recordBeforeServe bool
+		serveAgent = func(context.Context, string, string,
+			func(context.Context), func(context.Context) error,
+			func(*grpc.Server), func()) error {
+			recordBeforeServe = strings.Contains(buf.String(),
+				`"msg":"agent node versions"`)
+			return nil
+		}
+		args := append([]string{role}, flags...)
+		if role == "dn" {
+			args = append(args, "--disk", "/dev/null")
+		}
+		var printed strings.Builder
+		if err := executeRoot(args, &printed); err != nil {
+			t.Fatalf("%s: %v\n%s", role, err, printed.String())
+		}
+		if !recordBeforeServe {
+			t.Errorf("%s: no start record before serving:\n%s", role,
+				buf.String())
+		}
+		hasMdadm := strings.Contains(buf.String(), `"mdadm_version"`)
+		if hasMdadm != (role == "cn") {
+			t.Errorf("%s: mdadm_version in the record = %v:\n%s", role,
+				hasMdadm, buf.String())
+		}
+	}
+}
+
+// The node check's and the gather's first signal, a hang-up or a quit
+// among them, cancels their context instead of ending the process, and a
+// later one is ignored, so the md replay's teardown runs to its end (CM5).
+func TestToolSignalsStopWithoutEnding(t *testing.T) {
+	for _, sig := range []syscall.Signal{syscall.SIGHUP, syscall.SIGQUIT,
+		syscall.SIGTERM} {
+		ctx, stop := toolSignalContext()
+		if err := syscall.Kill(os.Getpid(), sig); err != nil {
+			t.Fatal(err)
+		}
+		select {
+		case <-ctx.Done():
+		case <-time.After(5 * time.Second):
+			stop()
+			t.Fatalf("%v did not cancel the tool's context", sig)
+		}
+		if err := syscall.Kill(os.Getpid(), sig); err != nil {
+			t.Fatal(err)
+		}
+		time.Sleep(100 * time.Millisecond)
+		stop()
 	}
 }
