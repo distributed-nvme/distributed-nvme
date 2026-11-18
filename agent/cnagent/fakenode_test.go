@@ -82,6 +82,11 @@ type fakeNode struct {
 	// A create takes it into the device's heldRoot; a reserve and a release
 	// change both (holdMetaSnap).
 	heldRoots map[string]bool
+	// thinMapped is the blocks each thin id maps in a pool's metadata, by
+	// the pool's dm name and id, outliving the dm device as thinPools does:
+	// the synthesized `thin_dump` document's mapped_blocks, which CN14's
+	// header read reads (holdThinData). An id it lacks maps no block.
+	thinMapped map[string]map[uint32]uint64
 	// lsGhosts are names `dmsetup ls` reports that no longer exist. The
 	// listing is an inherently stale snapshot — another cntlr's sweep
 	// (CN21), at SP_LEVEL_DISABLE or otherwise, can remove a device between
@@ -481,6 +486,7 @@ func newFakeNode() *fakeNode {
 		dms:           make(map[string]*fakeDm),
 		thinPools:     make(map[string]map[uint32]bool),
 		heldRoots:     make(map[string]bool),
+		thinMapped:    make(map[string]map[uint32]uint64),
 		infoOmit:      make(map[string]bool),
 		tableOmit:     make(map[string]bool),
 		arrays:        make(map[string]*fakeArray),
@@ -2205,6 +2211,22 @@ func (f *fakeNode) holdThinIds(pool string, ids ...uint32) {
 	}
 }
 
+// holdThinData seeds a pool's dm-thin metadata with an id no cntlr of this
+// node created that maps blocks: what an etcd restore leaves for a new volume
+// that takes an old volume's id (CN14). The id is held as holdThinIds holds
+// it.
+func (f *fakeNode) holdThinData(pool string, id uint32, blocks uint64) {
+	f.holdThinIds(pool, id)
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	mapped, ok := f.thinMapped[pool]
+	if !ok {
+		mapped = make(map[uint32]uint64)
+		f.thinMapped[pool] = mapped
+	}
+	mapped[id] = blocks
+}
+
 // isDmTarget reports whether table is a single target of the given type.
 func isDmTarget(table, target string) bool {
 	lines := dmTargets(table)
@@ -3670,9 +3692,13 @@ func (f *fakeNode) thinDumpDoc(path string) string {
 		}
 		sort.Ints(ids)
 		for _, id := range ids {
-			fmt.Fprintf(&sb, "  <device dev_id=\"%d\" mapped_blocks=\"0\" "+
+			// A device whose mapped_blocks is not zero carries no mapping
+			// element: only a header read (--skip-mappings) reads it, and
+			// a full dump of it fails its mapping count, as a dump the
+			// tests do not script must not be read for one.
+			fmt.Fprintf(&sb, "  <device dev_id=\"%d\" mapped_blocks=\"%d\" "+
 				"transaction=\"0\" creation_time=\"0\" snap_time=\"0\">\n"+
-				"  </device>\n", id)
+				"  </device>\n", id, f.thinMapped[f.lastSnapPool][uint32(id)])
 		}
 	}
 	sb.WriteString("</superblock>\n")

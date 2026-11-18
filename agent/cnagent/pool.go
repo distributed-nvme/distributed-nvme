@@ -2,6 +2,7 @@ package cnagent
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"strconv"
@@ -296,10 +297,21 @@ func (s *CnAgentServer) releaseHeldSnap(
 // loss surfaces as an intervention event instead of a fresh, empty volume
 // silently taking over a live dev_id.
 //
-// For an uncreated plain td the rule is: a message for an id the
-// pool already holds fails harmlessly and the `dmsetup create` that follows
-// is what decides the outcome, which is what makes a crash between the two
-// restart-safe.
+// For an uncreated plain td the rule is: a message that makes the id is
+// followed by the `dmsetup create`. A message that fails for any cause — the
+// pool holds the id already (EEXIST, agent.IsExists), after a crash between
+// the message and the create or a message another primary sent; the pool
+// takes no message (EOPNOTSUPP, read-only, out of metadata space or under
+// needs_check), while dm-thin still loads a thin table over an id it holds;
+// a message the soft timeout killed, which the kernel may have carried out
+// — is followed by the pool's device headers (adoptThinId): the volume is
+// built over the id only while they show it mapping no block, or not held
+// at all, when the `dmsetup create` decides; an id that holds data is
+// another volume's, after an etcd restore handed the id out again, and a
+// new volume over it would serve that volume's data. A header read that
+// fails refuses the id. A device already there is adopted as it is: it is
+// this node's own earlier build. A created td is never messaged, so the
+// guard never runs for the pool's own created volume.
 func (s *CnAgentServer) ensureThin(
 	ctx context.Context,
 	plan *cntlrPlan,
@@ -317,6 +329,9 @@ func (s *CnAgentServer) ensureThin(
 				slog.String("pool", sp.poolFinalName),
 				slog.String("thin", name),
 				slog.String("error", err.Error()))
+			if err := s.adoptThinId(ctx, plan, tp, sp); err != nil {
+				return err
+			}
 		}
 	}
 	poolNo, err := s.dmDevNo(ctx, nil, sp.poolFinalName)
@@ -342,6 +357,14 @@ func (s *CnAgentServer) ensureThin(
 // whose create_snap has not made its id yet reads the same — and keeps no
 // reason. Only a converge names a lost id: a read reads the absent
 // volume RES_STATUS_MISSING (probeThin).
+//
+// A new volume's build that adoptThinId stopped reads its outcome: an id
+// the agent does not adopt (thinIdNotAdopted) reads RES_STATUS_ERROR with
+// the reason RES_REASON_THIN_ID_NOT_ADOPTED, which the verdict does not name
+// (CN30) and the worker's shared-state class reads (dnv-worker.md HL2); a
+// header read that waits for a metadata snapshot already held
+// (thinHeadersHeld) reads RES_STATUS_MISSING with the refusal's text and no
+// reason, which the verdict names, so the worker's re-send tries again.
 func thinRowOf(
 	st *cntlrState,
 	tp *tdPlan,
@@ -349,11 +372,111 @@ func thinRowOf(
 	name string,
 	err error,
 ) *pb.ResInfo {
-	if err != nil && tp.td.GetCreated() && agent.IsNoData(err) {
+	var refused *thinIdNotAdopted
+	var held *thinHeadersHeld
+	switch {
+	case err != nil && tp.td.GetCreated() && agent.IsNoData(err):
 		return st.tracker.ErrReason(key, name, err.Error(),
 			pb.ResReason_RES_REASON_THIN_ID_LOST)
+	case errors.As(err, &refused):
+		return st.tracker.ErrReason(key, name, err.Error(),
+			pb.ResReason_RES_REASON_THIN_ID_NOT_ADOPTED)
+	case errors.As(err, &held):
+		return st.tracker.Missing(key, name, err.Error())
 	}
 	return st.tracker.FromErr(key, name, "", err)
+}
+
+// thinIdNotAdopted is adoptThinId's refusal of a thin id for a new volume
+// whose create failed (CN14): the slice's pool holds the id and maps blocks
+// to it, or the header read that would tell failed other than for a
+// metadata snapshot already held. Its text says which.
+type thinIdNotAdopted struct {
+	text string
+}
+
+func (e *thinIdNotAdopted) Error() string {
+	return e.text
+}
+
+// thinHeadersHeld is adoptThinId's wait: the slice's header read was refused
+// because a metadata snapshot is already held, which a release ends (CN14).
+type thinHeadersHeld struct {
+	err error
+}
+
+func (e *thinHeadersHeld) Error() string {
+	return "the thin create failed; its pool's header read waits for a " +
+		"held metadata snapshot: " + e.err.Error()
+}
+
+func (e *thinHeadersHeld) Unwrap() error {
+	return e.err
+}
+
+// thinHeaderRead is one slice's header read of a pass (cntlrPlan.
+// thinHeaders): the blocks each thin id the pool holds maps, or the read's
+// error.
+type thinHeaderRead struct {
+	mapped map[uint32]uint64
+	err    error
+}
+
+// adoptThinId decides whether a new plain volume may be built over its thin
+// id after its create message failed, whatever the failure (CN14): nil when
+// the pool's device headers show the id mapping no block, or not holding it
+// at all, so the `dmsetup create` that follows decides; a thinIdNotAdopted
+// when the id
+// maps blocks, or when the header read failed for any cause but a metadata
+// snapshot already held; a thinHeadersHeld for that one. The header read
+// (readThinHeaders) runs once per slice per pass, at the first such volume
+// of the slice, and serves every other one (thinHeadersOf). Reason for the
+// headers: no device is there to read the id from, and a full metadata dump
+// walks every mapping of the pool under the command limit, which on a large
+// pool would never let the agent adopt even its own empty id.
+func (s *CnAgentServer) adoptThinId(
+	ctx context.Context,
+	plan *cntlrPlan,
+	tp *tdPlan,
+	sp *slicePlan,
+) error {
+	devId := tp.td.GetDevId()
+	read := s.thinHeadersOf(ctx, plan, sp)
+	switch {
+	case read.err != nil && (agent.IsBusy(read.err) ||
+		agent.IsExists(read.err)):
+		return &thinHeadersHeld{err: read.err}
+	case read.err != nil:
+		return &thinIdNotAdopted{text: fmt.Sprintf(
+			"the create of thin id %d in pool %s failed, and the pool's "+
+				"header read failed: %v", devId, sp.poolFinalName, read.err)}
+	}
+	if mapped := read.mapped[devId]; mapped > 0 {
+		return &thinIdNotAdopted{text: fmt.Sprintf(
+			"thin id %d exists in pool %s and maps %d blocks; "+
+				"not adopted for a new volume",
+			devId, sp.poolFinalName, mapped)}
+	}
+	return nil
+}
+
+// thinHeadersOf is the pass's header read of one slice's pool (cntlrPlan.
+// thinHeaders), taken at its first call in the pass.
+func (s *CnAgentServer) thinHeadersOf(
+	ctx context.Context,
+	plan *cntlrPlan,
+	sp *slicePlan,
+) *thinHeaderRead {
+	if read := plan.thinHeaders[sp.sliceId]; read != nil {
+		return read
+	}
+	if plan.thinHeaders == nil {
+		plan.thinHeaders = make(map[uint64]*thinHeaderRead)
+	}
+	mapped, err := s.readThinHeaders(ctx, sp)
+	read := &thinHeaderRead{mapped: mapped, err: err}
+	plan.thinHeaders[sp.sliceId] = read
+	return read
 }
 
 // createThinId sends one slice's `create_thin`. Its only caller is ensureThin
@@ -379,13 +502,16 @@ func (s *CnAgentServer) createThinId(
 // origin raid0 quiesce (CN14) wraps around the whole per-slice sequence. The
 // message's refusal carries its errno in its type (agent.CmdError): EEXIST
 // says the slice's pool holds the id already, which the pre-pass reads for
-// CN14's torn mark (snapshotPrePass).
+// CN14's torn mark (snapshotPrePass). sent says the message was sent, so
+// that an error the message never answered (agent.Reported) — the soft
+// timeout killed it, and the kernel may have made the id — is told from a
+// failed read or suspend of the origin, after which no message went.
 func (s *CnAgentServer) createSnapId(
 	ctx context.Context,
 	plan *cntlrPlan,
 	tp *tdPlan,
 	sp *slicePlan,
-) error {
+) (sent bool, err error) {
 	devId := tp.td.GetDevId()
 	oriId := tp.td.GetOriId()
 	message := fmt.Sprintf("create_snap %d %d", devId, oriId)
@@ -394,25 +520,28 @@ func (s *CnAgentServer) createSnapId(
 		oriName = plan.thinName(origin.tdId, sp.sliceId)
 	}
 	if oriName == "" {
-		return s.dm.Message(ctx, sp.poolFinalName, 0, message)
+		return true, s.dm.Message(ctx, sp.poolFinalName, 0, message)
 	}
 	oriDev, err := s.dm.Info(ctx, oriName)
 	if err != nil {
-		return err
+		return false, err
 	}
 	if oriDev == nil || oriDev.Suspended {
-		return s.dm.Message(ctx, sp.poolFinalName, 0, message)
+		return true, s.dm.Message(ctx, sp.poolFinalName, 0, message)
 	}
 	if err := s.dm.Suspend(ctx, oriName); err != nil {
-		return err
+		return false, err
 	}
 	messageErr := s.dm.Message(ctx, sp.poolFinalName, 0, message)
-	if err := s.dm.Resume(ctx, oriName); err != nil {
+	// The resume survives a cancelled call, as the pre-pass's resume of the
+	// origin's raid0 does (snapshotPrePass): a cancelled ctx would run no
+	// command and leave the origin's thin volume suspended.
+	if err := s.dm.Resume(context.WithoutCancel(ctx), oriName); err != nil {
 		slog.ErrorContext(ctx, "resuming the snapshot origin failed",
 			slog.String("thin", oriName),
 			slog.String("error", err.Error()))
 	}
-	return messageErr
+	return true, messageErr
 }
 
 // The thin id sweep's two log records (CN14). They are named once here

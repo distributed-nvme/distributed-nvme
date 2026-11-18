@@ -378,6 +378,16 @@ enum ResReason {
     // primary opens the pool from its last commit. The verdict does not
     // name the row, since no converge opens the pool again (CN30).
     RES_REASON_POOL_FAILED = 8;
+    // A thin volume not yet created whose thin id the cn agent does not
+    // adopt: the thin create failed, whatever the failure, and the slice
+    // pool's device headers show the id mapping blocks, or that header read
+    // failed other than for a metadata snapshot already held (cnagent.md
+    // CN14). The cn agent sets it on a converge's
+    // RES_STATUS_ERROR thin row, its details the blocks or the read's
+    // failure; a read finds the volume absent. The verdict does not name the
+    // row (CN30), and the worker's shared-state class reads it for a td
+    // created or not, so no failover follows it (dnv-worker.md HL2).
+    RES_REASON_THIN_ID_NOT_ADOPTED = 9;
 }
 
 message ResInfo {
@@ -468,13 +478,16 @@ message SideInfo {
 message CntlrInfo {
     message ThinInfo {
         map<uint64, ResInfo> slice_id_to_dm_thin = 1;
-        // The primary's torn mark for this thin device (cnagent.md CN14): in
-        // one run of the snapshot pre-pass a slice's message made a new thin
-        // id while another slice already had its id. The cn agent keeps it
-        // in memory until the request shows the td created or drops it, the
-        // converge's report and a background read's carry it alike, and the
-        // created flip copies it into ThinDevice.torn (dnv-worker.md RW19).
-        // Appended, never renumbered.
+        // The cn agent's torn mark for this thin device (cnagent.md CN14):
+        // in one run of the snapshot pre-pass a slice's message made a new
+        // thin id while another slice already had its id, or the run's
+        // messages made ids in two slices without the origin's quiesce. The
+        // agent saves it in its local store at once and keeps it until the
+        // request shows the td torn or drops it; every cntlr reports it, in
+        // any role, the converge's report and a background read's alike, a
+        // standby in an entry with no rows; and the worker records it in
+        // ThinDevice.torn from the first report that shows it
+        // (dnv-worker.md RW19). Appended, never renumbered.
         bool torn = 2;
     }
     // The primary's verdict on one repair: whether the repair's new leg
@@ -835,12 +848,12 @@ message ThinDevice {
     // create_thin/create_snap is ever sent for this td again (CN14; the
     // delete sent when the td leaves td_list stays ungated).
     bool created = 5;
-    // torn is written once, in the put that sets created, from the torn mark
-    // the reports that completed the td carried (CntlrInfo.ThinInfo.torn;
-    // dnv-worker.md RW19), and never changed after it. Best effort: false
-    // proves nothing when the cn agent restarted, or the primary role moved,
-    // between the snapshot messages and the flip (architecture.md, Known
-    // limits). Appended, never renumbered.
+    // torn is set at most once and never cleared: by the sp worker from the
+    // first accepted report that carries the cn agent's torn mark for the td
+    // (CntlrInfo.ThinInfo.torn; dnv-worker.md RW19), created or not, and
+    // kept by the created flip. False proves nothing when the primary's
+    // node never came back, or lost its local store, after the tear
+    // (architecture.md, Known limits). Appended, never renumbered.
     bool torn = 6;
 }
 
@@ -2303,6 +2316,17 @@ message SyncupCntlrReply {
     ObsStamp obs_stamp = 5;
     // As SyncupDnReply.save_time.
     google.protobuf.Timestamp save_time = 6;
+}
+
+// The cn agent's local-store record of one cntlr's torn marks (cnagent.md
+// CN14): the td_ids of the snapshots whose snapshot pre-pass tore them,
+// saved at once and loaded by the startup reconcile (CN2). It names its
+// cntlr, as every store file does by its content (dnagent.md SH6).
+message TornMarks {
+    uint64 cluster_id = 1;
+    uint64 cn_id = 2;
+    CntlrPointer cntlr_pointer = 3;
+    repeated uint64 td_id_list = 4;
 }
 
 message PushCloneBitmapRequest {

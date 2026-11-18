@@ -19,9 +19,9 @@ import (
 
 // Local-store file-name kind prefixes (architecture.md,
 // Agent local-store paths). The dn role owns the dn, side, migration chunk
-// and dn probe kinds, the cn role the cn, cntlr, clone chunk and cn probe
-// kinds (SH6). No kind is a prefix of another, so a listing by kind never
-// takes one kind's file for another's.
+// and dn probe kinds, the cn role the cn, cntlr, clone chunk, cn probe and
+// torn mark kinds (SH6). No kind is a prefix of another, so a listing by kind
+// never takes one kind's file for another's.
 const (
 	StoreKindDn      = "dn-"
 	StoreKindSide    = "side-"
@@ -31,6 +31,7 @@ const (
 	StoreKindCntlr   = "cntlr-"
 	StoreKindCloneBm = "clone-bm-"
 	StoreKindCnProbe = "probe-cn-"
+	StoreKindTorn    = "torn-"
 )
 
 // Store is the agent's local store (SH4-SH7): per object, the last

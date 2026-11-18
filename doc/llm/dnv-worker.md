@@ -566,8 +566,8 @@ it is handed, and when its pick has gone stale in any other way since the
 scan — its record deleted, the DN no longer allocatable, or short of
 extents (MD6).
 
-MD6. **Internal mutations.** Each is **one** `RunSTM` (`FlipCreated`: one per
-`MaxFlipCreatedPerTxn` candidates, RW19), re-validates every precondition it
+MD6. **Internal mutations.** Each is **one** `RunSTM` (`FlipCreated` and
+`MarkTdTorn`: one per `MaxFlipCreatedPerTxn` tds, RW19), re-validates every precondition it
 lists (MD7), and bumps exactly the revisions the equivalent RPC bumps
 (`architecture.md`, `service Gateway` — RPC specifications, and
 `architecture.md`, Workers); `WithdrawGrow`, which no RPC runs, bumps the
@@ -715,15 +715,22 @@ list; the flip, which reads the repair's key alone, and
   a side of each of `MaxCloneCntPerSp` clones, is past etcd's default
   transaction cap (Constants this document owns).
 * `FlipCreated` takes a list of `TdRef`s (name, td id and the torn mark the
-  reports carried) and commits them
+  drain's reports carried) and commits them
   `MaxFlipCreatedPerTxn` at a time in list order, one STM each (RW19): it
   skips a candidate whose key is absent, whose `td_id` differs, or that is
-  already `created`; sets the rest — `created`, and `torn` as the ref
-  carries it, in the same put, so the mark is written once and a mark that
-  comes after the flip changes nothing; each STM bumps once iff it wrote; it
+  already `created`; sets the rest — `created`, and `torn` when the ref
+  carries the mark, in the same put, keeping a `torn` already set; each STM
+  bumps once iff it wrote; it
   returns the tds actually flipped, as above — on an error, those of the STMs
   that committed before the failing one, which the sp worker does not log
   (RW19).
+* `MarkTdTorn` takes a list of `TdRef`s (name and td id) and commits them
+  in `FlipCreated`'s shape, `MaxFlipCreatedPerTxn` at a time, one STM each
+  at the same compare count (RW19): it skips a td whose key is absent,
+  whose `td_id` differs, or whose `torn` is already set; sets `torn` on the
+  rest, `created` or not; each STM bumps once iff it wrote, so the cntlrs'
+  requests then carry the mark; it returns the tds actually marked. `torn`
+  is set at most once and never cleared.
 * `StartCutover` takes one migration — its name and `migr_id`, the slice
   and the leg that hold its two sides, and the two side ids — and the cntlr
   whose report it acts on. It requires the SP's `SpConf` to hold the SP's
@@ -1167,8 +1174,9 @@ list; the flip, which reads the repair's key alone, and
 
 MD7. **`ErrPrecondition`.** A struct carrying the op and the reason;
 returned from inside the STM callback, it aborts without commit (EU4). An
-op never writes partially (`FlipCreated` is the exception: its STMs, RW19,
-each commit whole, and an error in one leaves those before it committed),
+op never writes partially (`FlipCreated` and `MarkTdTorn` are the
+exceptions: their STMs, RW19, each commit whole, and an error in one leaves
+those before it committed),
 never sleeps, and never retries a precondition failure — the caller logs
 the refusal with its reason (Log records) and re-evaluates on its next
 pass.
@@ -2654,18 +2662,30 @@ and `CheckCntlrReply` with an accepted code (RW18: code zero or
 `ReplyCodeLeftover`) is scanned: a td of the loaded state with `created` false
 is a candidate when `cntlr_info.td_id_to_thin_info` holds its `td_id`, that
 entry's `slice_id_to_dm_thin` key set equals the SP's slice ids exactly, and
-every row is `RES_STATUS_OK`. The entry's `torn` mark, the cn agent's report
-that the snapshot is torn (`cnagent.md` CN14), travels with the candidate,
-and `model.FlipCreated` writes it into the record's `torn` in the put that
-sets `created` (MD6; `architecture.md`, Thin devices). A reply's mark counts
-only for a td that reply completes; when the replies one drain folds into
-the call complete a td more than once, the td is flipped torn if any of
-them marks it. A `SyncupCntlrReply` and a `CheckCntlrReply` carry the mark
-alike, so the flip records it whichever reply completes the td. Reason: the
-mark lives only in the agent's memory until the flip, and the thin device
-record is the one place an operator reads it from (`ListThinDevices`).
-Candidates go to `model.FlipCreated`; a reply
-that completes none causes no etcd traffic. The call commits them
+every row is `RES_STATUS_OK`. The `torn` mark, the cn agent's report that
+the snapshot is torn (`cnagent.md` CN14), travels with the candidate, and
+`model.FlipCreated` sets the record's `torn` in the put that sets
+`created`, keeping a mark set before (MD6; `architecture.md`, Thin
+devices): the td is flipped torn when any reply the drain folds into the
+call marks it — the one that completes it, another that completes it too,
+or one that completes nothing, such as a standby's. **The torn mark's
+record.** Every accepted reply of any
+cntlr, in any role, is read for torn marks too, whatever its rows: a cntlr
+that is not the primary reports a mark in an entry with no rows. A td the
+reply marks, whose loaded record reads `torn` false, `created` or not, and
+which no reply of the drain completes, goes to `model.MarkTdTorn` (MD6)
+after the created flip, in one call per drain; the tds it writes leave the
+coordinator's set of such tds until the next load, so a later report of the
+mark costs no transaction. A call that fails is logged and tried again by
+the next report that carries the mark: the agent reports it until a request
+lists the td `torn`, which the call's bump brings. A `SyncupCntlrReply` and
+a `CheckCntlrReply` carry the mark alike. Reason: after a failover only the
+old primary knows the tear, its node may come back after the new primary's
+created flip, and the thin device record is the one place an operator
+reads the mark from (`ListThinDevices`). Candidates go to
+`model.FlipCreated`; a drain whose replies complete no td makes no created
+flip, and no etcd traffic unless one of its replies marks a td for the
+torn mark's record (above). The created flip's call commits them
 `MaxFlipCreatedPerTxn` at a time, in list order, one STM each, and each STM
 that wrote bumps `SpRev` once: the coordinator folds every td one drain of its
 reports completed into one call, a set only `MaxTdCntPerSp` bounds, and one
@@ -2923,7 +2943,12 @@ whose `created` is set and whose thin row, in some slice, reads `ERROR`
 with the reason `RES_REASON_THIN_ID_LOST` (`architecture.md`, Live-state
 reporting): the cn agent sets it when dm-thin refuses a created td's thin
 table with ENODATA because the slice's pool has lost its id (`cnagent.md`
-CN14). Or it is the pool row of a slice that reads `ERROR` with the reason
+CN14); or to the stack of a td, created or not, whose thin row, in some
+slice, reads `ERROR` with the reason `RES_REASON_THIN_ID_NOT_ADOPTED`: the
+cn agent sets it when a new volume's thin id is in the slice's pool and
+maps blocks, or the pool's header read that would tell failed (`cnagent.md`
+CN14), and every new primary meets the same id in the same pool, so a
+failover would only bring the next one to it. Or it is the pool row of a slice that reads `ERROR` with the reason
 `RES_REASON_POOL_NEEDS_CHECK`, a thin row of that slice, or a row of the
 stack of a td whose thin row in that slice does not read `OK`: dm-thin keeps
 needs_check in the pool's metadata, so the pool opens read-only on every
@@ -2950,8 +2975,9 @@ the cntlr's **own**. Both classes set
 epoch set — and the class steers AR5 and AR7 alone: a report whose
 `ERROR` rows are all shared-state is no failover trigger, nor a
 replacement one for a primary with no failover candidate. Only a
-converge's observation carries the lost thin id's reason (`dnagent.md`
-SH28); both channels carry needs_check's. A
+converge's observation carries the lost thin id's reason and the reason of
+a thin id not adopted (`dnagent.md` SH28); both channels carry
+needs_check's. A
 background read's probe finds the volume absent and reads it `MISSING`
 with empty details and no reason, while the raid0 over it still reads
 `ERROR`, so a report from a read's observation of the same loss holds own
@@ -3945,14 +3971,15 @@ does (AR7, Known limits):
   HL2's shared-state class:
   `reaction skipped` (`shared_state`, with the primary's `cntlr_id` and the
   smallest `slice_id` whose pool reads needs_check, or with none, the
-  smallest `td_id` whose thin id is lost), judged ahead of the candidate, so
+  smallest `td_id` whose thin id is lost or not adopted), judged ahead of the candidate, so
   a primary with none logs this rather than `no candidate`; nor does AR7
   replace such a primary once it is due for replacement (AR7). The next
   primary would read the same rows from the same pool: failing over would
   move the host paths and nothing else, and the promoted cntlr, never
   settling, would lose the role again at `cntlr_unhealthy` — to the peer
   whose standby report had cleared its `err_epoch` — once per window, for
-  as long as the td stayed lost or the pool kept its needs_check.
+  as long as the td stayed lost, its new id held data or the pool kept its
+  needs_check.
 * **The same error.** The failover this coordinator last applied took the
   role from the candidate, the primary's `err_epoch` was set less than
   `cntlr_unhealthy` after that failover, and every `ERROR` row of the
@@ -5603,13 +5630,14 @@ before the write landed (HL2) or for a second owner in an overlap (VW7);
 transition or settle the next round tries again (RW12);
 `flip applied` a committed provisioned flip, the clone flip's and the
 repair flip's included, a
-committed created flip or a committed cutover, naming the new `SpRev`
+committed created flip, a committed torn mark's record (kind `torn`) or a
+committed cutover, naming the new `SpRev`
 — for a provisioned flip and a cutover the revision their own transaction
 wrote, never a later one, so a reply to the first request that carries the
 change is never older than the record — and a cutover's naming the cntlr
 whose report it acted on and that report's revision (RW18, RW19);
-`sp flip failed` a flip or a cutover whose STM did not commit, which a
-later report tries again (RW18, RW19);
+`sp flip failed` a flip, a torn mark's record or a cutover whose STM did
+not commit, which a later report tries again (RW18, RW19);
 `sp sides unsynced` the release of RW14's sides-first hold by its timer, one
 record per hold and never per round, and expected in normal operation too:
 for a new side whose first `SyncupSide` its disk node refused
@@ -6925,7 +6953,8 @@ which no suite case sets, so no suite case runs RW13's count compare.
   the record goes with the cntlr; otherwise its record names the demotion
   (RW22).
 * **A lost thin id costs a failover or a replacement, and the second refusals
-  that bound them are a memory.** A report marks a created td's lost thin
+  that bound them are a memory.** The same holds for a new volume's thin id
+  the cn agent does not adopt (`cnagent.md` CN14). A report marks a created td's lost thin
   id, with its thin row's reason, only when it comes from a converge's
   observation; a background read's probe reads the absent volume `MISSING`
   with no reason (HL2), so a primary whose latest report is a read's is

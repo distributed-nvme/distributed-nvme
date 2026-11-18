@@ -55,6 +55,7 @@ const (
 	opSetSideErrEpoch  = "SetSideErrEpoch"
 	opFlipProvisioned  = "FlipProvisioned"
 	opFlipCreated      = "FlipCreated"
+	opMarkTdTorn       = "MarkTdTorn"
 	opStartCutover     = "StartCutover"
 	opFailover         = "Failover"
 	opGrowSlice        = "GrowSlice"
@@ -1230,9 +1231,10 @@ type SideRef struct {
 type TdRef struct {
 	Name string
 	TdId uint64
-	// Torn is the torn mark the reports that completed the td carried
-	// (CntlrInfo.ThinInfo.torn; cnagent.md CN14): FlipCreated writes it into
-	// ThinDevice.torn in the put that sets created (RW19).
+	// Torn is the torn mark any report of the drain that completed the td
+	// carried (CntlrInfo.ThinInfo.torn; cnagent.md CN14): FlipCreated sets
+	// ThinDevice.torn from it in the put that sets created, and keeps a
+	// mark MarkTdTorn set before (RW19). MarkTdTorn reads no Torn.
 	Torn bool
 }
 
@@ -1433,8 +1435,8 @@ func containsId(ids []uint64, id uint64) bool {
 }
 
 // FlipCreated sets ThinDevice.created on every listed candidate that still
-// needs it, and ThinDevice.torn to the candidate's torn mark in the same put
-// (MD6, RW19). It returns the
+// needs it, and ThinDevice.torn when the candidate carries the torn mark, in
+// the same put (MD6, RW19); a record already torn stays so. It returns the
 // candidates it ACTUALLY wrote, in the order they were listed; the MD6 count
 // is len() of that slice.
 //
@@ -1448,8 +1450,8 @@ func containsId(ids []uint64, id uint64) bool {
 // deleted meanwhile), when its td_id differs (deleted and re-created under the
 // same name), or when created is already true (another worker or a concurrent
 // reply got there first). Nothing written ⇒ no bump, and a call whose whole
-// batch is skipped leaves etcd untouched. So torn is written once, with
-// created, and a mark that arrives after the flip changes nothing.
+// batch is skipped leaves etcd untouched. A mark that arrives after the flip
+// is MarkTdTorn's to write; torn is set at most once and never cleared.
 //
 // The list is committed common.MaxFlipCreatedPerTxn candidates at a time, in
 // list order, one STM each, and each STM that wrote bumps SpRev once. The list
@@ -1505,7 +1507,7 @@ func flipCreatedTxn(
 				continue
 			}
 			td.Created = true
-			td.Torn = cand.Torn
+			td.Torn = td.GetTorn() || cand.Torn
 			s.Put(key, td)
 			created = append(created, cand)
 		}
@@ -1518,6 +1520,80 @@ func flipCreatedTxn(
 		return nil, err
 	}
 	return created, nil
+}
+
+// MarkTdTorn sets ThinDevice.torn on every listed td whose record still
+// reads it false, created or not (MD6, RW19): the sp worker records the cn
+// agent's torn mark from the first report that shows it. It returns the tds
+// it ACTUALLY wrote, in the order they were listed, for FlipCreated's
+// reason.
+//
+// A td is skipped — never an error — when its key is absent (the td was
+// deleted meanwhile), when its td_id differs (deleted and re-created under
+// the same name), or when torn is already set. Nothing written ⇒ no bump.
+// Each STM that wrote bumps SpRev once, as every op of the sp role does, so
+// the cntlrs' requests then carry the mark and each cn agent drops the mark
+// it saved (cnagent.md CN14). torn is never cleared.
+//
+// The list is committed common.MaxFlipCreatedPerTxn tds at a time, in list
+// order, one STM each, with FlipCreated's shape and compare count; an error
+// ends the call at the STM that failed, those before it staying committed.
+func MarkTdTorn(
+	ctx context.Context,
+	cli *etcdutil.Client,
+	cid uint64,
+	shard uint32,
+	spId uint64,
+	refs []TdRef,
+) ([]TdRef, error) {
+	var marked []TdRef
+	for start := 0; start < len(refs); start += common.MaxFlipCreatedPerTxn {
+		end := min(start+common.MaxFlipCreatedPerTxn, len(refs))
+		wrote, err := markTdTornTxn(ctx, cli, cid, shard, spId,
+			refs[start:end])
+		if err != nil {
+			return marked, err
+		}
+		marked = append(marked, wrote...)
+	}
+	return marked, nil
+}
+
+// markTdTornTxn is one MarkTdTorn STM, over at most
+// common.MaxFlipCreatedPerTxn tds.
+func markTdTornTxn(
+	ctx context.Context,
+	cli *etcdutil.Client,
+	cid uint64,
+	shard uint32,
+	spId uint64,
+	refs []TdRef,
+) ([]TdRef, error) {
+	var marked []TdRef
+	err := cli.RunSTM(ctx, func(s etcdutil.STM) error {
+		marked = nil
+		for _, ref := range refs {
+			key := ThinDeviceKey(cid, spId, ref.Name)
+			td := &pb.ThinDevice{}
+			if !s.Get(key, td) {
+				continue
+			}
+			if td.GetTdId() != ref.TdId || td.GetTorn() {
+				continue
+			}
+			td.Torn = true
+			s.Put(key, td)
+			marked = append(marked, ref)
+		}
+		if len(marked) == 0 {
+			return nil
+		}
+		return BumpSpRev(s, opMarkTdTorn, shard, cid, spId)
+	})
+	if err != nil {
+		return nil, err
+	}
+	return marked, nil
 }
 
 // ---------------------------------------------------------------------------

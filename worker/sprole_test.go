@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"maps"
 	"slices"
 	"strings"
 	"sync"
@@ -644,6 +645,17 @@ func TestSpCntlrRequestGolden(t *testing.T) {
 	if ref := plan.tdRefs[spTdOpen]; ref.Name != "td0" ||
 		ref.TdId != spTdOpen {
 		t.Fatalf("td candidate = %+v", ref)
+	}
+	// RW19: every td whose record still says torn == false may be marked
+	// torn, the created one included.
+	if len(plan.untornRefs) != 2 || plan.untornRefs[spTdOpen].Name != "td0" ||
+		plan.untornRefs[spTdDone].TdId != spTdDone {
+		t.Fatalf("untorn tds = %v, want both", plan.untornRefs)
+	}
+	state.Tds[1].Torn = true
+	if plan := w.buildPlan(context.Background(), state); len(plan.untornRefs) != 1 {
+		t.Fatalf("untorn tds = %v, want only the one not torn",
+			plan.untornRefs)
 	}
 }
 
@@ -2154,37 +2166,95 @@ func TestSpCompletedTds(t *testing.T) {
 	}
 }
 
-// TestSpTornTds pins which of the tds a reply completes carry the torn mark
-// RW19's flip copies (tornTds): those whose thin info has it, in the order
-// they were given. A mark on a td the caller did not pass is not read.
+// TestSpTornTds pins which tds a reply marks torn (tornTds): every td whose
+// thin info carries the mark, ascending, whatever its rows — a complete
+// entry, a partial one, or a standby's entry with no rows (cnagent.md CN14)
+// — and none whose entry lacks it.
 func TestSpTornTds(t *testing.T) {
-	thin := func(torn bool) *pb.CntlrInfo_ThinInfo {
-		return &pb.CntlrInfo_ThinInfo{
-			SliceIdToDmThin: map[uint64]*pb.ResInfo{spSliceA: resOk("thin")},
-			Torn:            torn,
-		}
+	thin := func(torn bool, rows map[uint64]*pb.ResInfo) *pb.CntlrInfo_ThinInfo {
+		return &pb.CntlrInfo_ThinInfo{SliceIdToDmThin: rows, Torn: torn}
 	}
+	complete := map[uint64]*pb.ResInfo{spSliceA: resOk("thin")}
 	info := &pb.CntlrInfo{
 		TdIdToThinInfo: map[uint64]*pb.CntlrInfo_ThinInfo{
-			1: thin(true), 2: thin(false), 3: thin(true), 4: thin(true),
+			4: thin(true, complete),
+			2: thin(false, complete),
+			3: thin(true, map[uint64]*pb.ResInfo{}),
+			1: thin(true, map[uint64]*pb.ResInfo{
+				spSliceA: {Status: pb.ResStatus_RES_STATUS_MISSING}}),
 		},
 	}
-	got := tornTds(info, []uint64{3, 2, 1, 9})
-	if want := []uint64{3, 1}; !slices.Equal(got, want) {
+	if got, want := tornTds(info), []uint64{1, 3, 4}; !slices.Equal(got, want) {
 		t.Fatalf("torn = %v, want %v", got, want)
 	}
 	for _, tc := range []struct {
-		name  string
-		info  *pb.CntlrInfo
-		tdIds []uint64
+		name string
+		info *pb.CntlrInfo
 	}{
-		{"no td passed", info, nil},
-		{"no thin info", &pb.CntlrInfo{}, []uint64{1}},
-		{"no info", nil, []uint64{1}},
+		{"no thin info", &pb.CntlrInfo{}},
+		{"no info", nil},
 	} {
-		if got := tornTds(tc.info, tc.tdIds); len(got) != 0 {
+		if got := tornTds(tc.info); len(got) != 0 {
 			t.Fatalf("%s: torn = %v, want none", tc.name, got)
 		}
+	}
+}
+
+// TestSpTornMarkRecordedFromAnyReport pins RW19's record of a torn mark: a
+// report that marks a td the drain does not complete writes the mark at once
+// through the torn op, whether the loaded record reads the td created or
+// not, while a td the drain completes carries its mark into the created flip
+// instead, and a td whose record already reads torn, or that the loaded
+// state does not hold, is not marked again. A td the op wrote leaves
+// untornRefs, so a later report of the same mark costs no transaction.
+func TestSpTornMarkRecordedFromAnyReport(t *testing.T) {
+	const createdTd, tornTd, doneTd = spTdOpen + 1, spTdOpen + 2, spTdOpen + 3
+	h := newSpHarness(t)
+	w := spTestWorker(h.deps)
+	w.ops = h.ops
+	w.tdRefs = map[uint64]model.TdRef{
+		spTdOpen: {Name: "td0", TdId: spTdOpen},
+		doneTd:   {Name: "td3", TdId: doneTd},
+	}
+	w.untornRefs = map[uint64]model.TdRef{
+		spTdOpen:  {Name: "td0", TdId: spTdOpen},
+		createdTd: {Name: "td1", TdId: createdTd},
+		doneTd:    {Name: "td3", TdId: doneTd},
+	}
+	// A standby's report: no td complete, three marks; then a primary's
+	// that completes doneTd and marks it.
+	w.reportCh <- spReport{createdTdIds: []uint64{doneTd},
+		tornTdIds: []uint64{doneTd}}
+	w.handleReports(spReport{
+		tornTdIds: []uint64{spTdOpen, createdTd, tornTd}})
+
+	torn := h.ops.tornCalls()
+	if len(torn) != 1 {
+		t.Fatalf("torn op calls = %v, want one", torn)
+	}
+	got := map[uint64]bool{}
+	for _, ref := range torn[0] {
+		got[ref.TdId] = true
+	}
+	if len(got) != 2 || !got[spTdOpen] || !got[createdTd] {
+		t.Fatalf("torn op marked %+v, want td0 and td1 alone", torn[0])
+	}
+	created := h.ops.createdCalls()
+	if len(created) != 1 || len(created[0]) != 1 ||
+		created[0][0].TdId != doneTd || !created[0][0].Torn {
+		t.Fatalf("created flip = %+v, want td3 torn", created)
+	}
+	if _, ok := w.untornRefs[spTdOpen]; ok {
+		t.Fatalf("td0 is still in untornRefs after the op wrote it")
+	}
+	if _, ok := w.untornRefs[createdTd]; ok {
+		t.Fatalf("td1 is still in untornRefs after the op wrote it")
+	}
+
+	// The same marks again: nothing left to write.
+	w.handleReports(spReport{tornTdIds: []uint64{spTdOpen, createdTd}})
+	if n := len(h.ops.tornCalls()); n != 1 {
+		t.Fatalf("torn op calls = %d after a repeated mark, want 1", n)
 	}
 }
 
@@ -2192,7 +2262,10 @@ func TestSpTornTds(t *testing.T) {
 // the flip's candidates: a report that completes a td and marks it hands
 // FlipCreated the td with Torn set, one that does not hands it unset, and
 // when several reports of one drain complete a td it is torn if any of them
-// marks it, whichever comes first. The plan's own refs keep no mark.
+// marks it, whichever comes first. A report that marks the td and completes
+// nothing — a standby's entry with no rows — counts the same, beside the
+// primary's unmarked completion in the same drain, and no torn op follows.
+// The plan's own refs keep no mark.
 func TestSpCreatedFlipCarriesTheTornMark(t *testing.T) {
 	const otherTd = spTdOpen + 100
 	marked := func(tdIds ...uint64) spReport {
@@ -2223,6 +2296,12 @@ func TestSpCreatedFlipCarriesTheTornMark(t *testing.T) {
 		{"two unmarked reports", []spReport{
 			unmarked(spTdOpen), unmarked(otherTd, spTdOpen),
 		}, map[uint64]bool{spTdOpen: false, otherTd: false}},
+		{"a standby's mark first in the drain", []spReport{
+			{tornTdIds: []uint64{spTdOpen}}, unmarked(spTdOpen),
+		}, map[uint64]bool{spTdOpen: true}},
+		{"a standby's mark second in the drain", []spReport{
+			unmarked(spTdOpen), {tornTdIds: []uint64{spTdOpen}},
+		}, map[uint64]bool{spTdOpen: true}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			h := newSpHarness(t)
@@ -2232,6 +2311,7 @@ func TestSpCreatedFlipCarriesTheTornMark(t *testing.T) {
 				spTdOpen: {Name: "td0", TdId: spTdOpen},
 				otherTd:  {Name: "td2", TdId: otherTd},
 			}
+			w.untornRefs = maps.Clone(w.tdRefs)
 			for _, rep := range tc.reports[1:] {
 				w.reportCh <- rep
 			}
@@ -2252,6 +2332,10 @@ func TestSpCreatedFlipCarriesTheTornMark(t *testing.T) {
 				if ref.Torn {
 					t.Fatalf("the plan's ref of td %d took the mark", tdId)
 				}
+			}
+			if torn := h.ops.tornCalls(); len(torn) != 0 {
+				t.Fatalf("torn op calls = %v, want none: the flip carries "+
+					"the mark", torn)
 			}
 		})
 	}
@@ -2322,6 +2406,44 @@ func TestSpCreatedFlipFromATornReport(t *testing.T) {
 					spTdOpen, tc.torn)
 			}
 		})
+	}
+}
+
+// TestSpTornMarkFromAStandbysCheckRound pins where the coordinator reads a
+// torn mark that completes nothing (RW19): a standby's Check round whose thin
+// info carries the mark in an entry with no rows (cnagent.md CN14) reaches
+// the torn mark's record, and so does every later round that carries it and
+// reports nothing else, so a record that failed is tried again.
+func TestSpTornMarkFromAStandbysCheckRound(t *testing.T) {
+	synctest.Test(t, testSpTornMarkFromAStandbysCheckRound)
+}
+
+func testSpTornMarkFromAStandbysCheckRound(t *testing.T) {
+	h := newSpHarness(t)
+	h.ops.markTornErr = errors.New("etcdserver: request timed out")
+	h.addFixtureAgents()
+	h.cntlrs[spCnB].checkReply = func(
+		req *pb.CheckCntlrRequest,
+	) *pb.CheckCntlrReply {
+		return &pb.CheckCntlrReply{
+			Revision: req.GetRevision(),
+			CntlrInfo: &pb.CntlrInfo{
+				TdIdToThinInfo: map[uint64]*pb.CntlrInfo_ThinInfo{
+					spTdOpen: {SliceIdToDmThin: map[uint64]*pb.ResInfo{},
+						Torn: true},
+				},
+			},
+		}
+	}
+	h.start()
+	h.advanceUntil("the torn mark's record, tried again", roundInterval,
+		func() bool { return len(h.ops.tornCalls()) > 1 })
+	calls := h.ops.tornCalls()
+	if len(calls[0]) != 1 || calls[0][0].TdId != spTdOpen {
+		t.Fatalf("torn op batch = %+v, want td %d", calls[0], spTdOpen)
+	}
+	if n := len(h.ops.createdCalls()); n != 0 {
+		t.Fatalf("%d created flips from a report that completes nothing", n)
 	}
 }
 
@@ -2743,6 +2865,10 @@ type fakeSpOps struct {
 	repairProvisioned []model.RepairSideRef
 	repairFlipErr     error
 	created           [][]model.TdRef
+	// torn records every markTdTorn call; markTornErr, when set, is what
+	// each returns, having written nothing.
+	torn        [][]model.TdRef
+	markTornErr error
 	// applySides / applyCloneSides / applyTds decide what the STM reports
 	// back as WRITTEN. nil means "everything the caller listed"; a set
 	// restricts it, which is how the tests reproduce a candidate another
@@ -3058,6 +3184,29 @@ func (o *fakeSpOps) createdCalls() [][]model.TdRef {
 	o.mu.Lock()
 	defer o.mu.Unlock()
 	return append([][]model.TdRef(nil), o.created...)
+}
+
+func (o *fakeSpOps) markTdTorn(
+	ctx context.Context,
+	cid uint64,
+	shard uint32,
+	spId uint64,
+	refs []model.TdRef,
+) ([]model.TdRef, error) {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	o.order = append(o.order, "torn")
+	o.torn = append(o.torn, refs)
+	if o.markTornErr != nil {
+		return nil, o.markTornErr
+	}
+	return refs, nil
+}
+
+func (o *fakeSpOps) tornCalls() [][]model.TdRef {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	return append([][]model.TdRef(nil), o.torn...)
 }
 
 // spHarness runs a real sp coordinator against bufconn agents.

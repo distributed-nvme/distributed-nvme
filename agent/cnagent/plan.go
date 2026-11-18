@@ -203,6 +203,11 @@ type cntlrPlan struct {
 	// (cnReading.mdWalks). No other plan builder reads an md array, and their
 	// plans leave it nil.
 	mdWalks *mdWalkOnce
+	// thinHeaders is each slice's header read of the pass (CN14,
+	// thinHeadersOf): taken at the first thin create of a new volume in the
+	// slice that fails, and read by every other such volume of the slice in
+	// the same pass. Only a converge's build fills it.
+	thinHeaders map[uint64]*thinHeaderRead
 }
 
 // slicePlan is one slice of the SP: the two pool concats and the thin-pool

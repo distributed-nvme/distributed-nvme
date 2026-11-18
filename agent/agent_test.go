@@ -621,6 +621,24 @@ func TestResTrackerCutPass(t *testing.T) {
 // Local store (SH4-SH7)
 // ---------------------------------------------------------------------------
 
+// TestStoreKindsArePrefixFree pins the kinds' rule (SH6): no kind is a
+// prefix of another, so a listing by kind never takes one kind's file for
+// another's — the cn kind and the torn marks' kind among them.
+func TestStoreKindsArePrefixFree(t *testing.T) {
+	kinds := []string{
+		StoreKindDn, StoreKindSide, StoreKindMigrBm, StoreKindDnProbe,
+		StoreKindCn, StoreKindCntlr, StoreKindCloneBm, StoreKindCnProbe,
+		StoreKindTorn,
+	}
+	for _, a := range kinds {
+		for _, b := range kinds {
+			if a != b && strings.HasPrefix(b, a) {
+				t.Errorf("store kind %q is a prefix of %q", a, b)
+			}
+		}
+	}
+}
+
 func TestStoreListFiltersByKind(t *testing.T) {
 	names := []string{
 		"dn-0000000000000001-0000000000000003",

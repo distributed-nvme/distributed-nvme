@@ -16,7 +16,7 @@ import (
 )
 
 // thinbm.go is the dm-thin metadata reader behind GetThinDeviceBm / GetLegBm
-// (CN25-CN27) and CN14's thin id sweeps, and the geometry fold of
+// (CN25-CN27), CN14's thin id sweeps and header read, and the geometry fold of
 // architecture.md, raid0 bitmap math, which applies the source chunks
 // PushCloneBitmap stores (CN22) to a dm-clone (CN18 step 4).
 // thin-provisioning-tools has a single role, so by the split rule of
@@ -160,31 +160,7 @@ func (s *CnAgentServer) dumpThinMetadata(
 	ctx context.Context,
 	sp *slicePlan,
 ) (*thinSuperblock, error) {
-	if err := s.ensureThinDumpDir(ctx); err != nil {
-		return nil, err
-	}
-	if err := s.reserveMetadataSnap(ctx, sp); err != nil {
-		if !commandRefused(err) {
-			s.releaseMetadataSnap(context.WithoutCancel(ctx), sp)
-		}
-		return nil, err
-	}
-	defer s.releaseMetadataSnap(context.WithoutCancel(ctx), sp)
-
-	metaPath := s.nf.DmPath(sp.poolMetaName)
-	dumpPath := thinDumpPath(sp)
-	defer s.removeThinDump(context.WithoutCancel(ctx), dumpPath)
-	stdout, stderr, _, err := s.cmd.Run(ctx, "thin_dump",
-		"--metadata-snap", metaPath, "-o", dumpPath)
-	if err != nil {
-		return nil, fmt.Errorf("thin_dump %s: %s", metaPath,
-			firstNonEmpty(stderr, stdout, err.Error()))
-	}
-	doc, err := s.readThinDump(ctx, dumpPath)
-	if err != nil {
-		return nil, fmt.Errorf("thin_dump %s: %w", metaPath, err)
-	}
-	sb, err := parseThinDump(doc)
+	sb, err := s.thinDumpSnap(ctx, sp)
 	if err != nil {
 		return nil, err
 	}
@@ -205,6 +181,73 @@ func (s *CnAgentServer) dumpThinMetadata(
 		}
 	}
 	return sb, nil
+}
+
+// readThinHeaders reads the device headers of one slice's pool (CN14): each
+// thin id the pool holds and the blocks it maps, from `thin_dump
+// --metadata-snap --skip-mappings`, under the reserve, release and file
+// rules dumpThinMetadata runs a dump under (thinDumpSnap). It reads no
+// mapping, so its cost grows with the thin devices and not with the
+// mappings, and there is no mapping count to check the headers against. An
+// id the pool does not hold is not in the map: the document lists every
+// device of the pool, and only a dump of one id (--dev-id) answers an id it
+// lacks with an empty document. A reserve refused because a metadata
+// snapshot is already held, after the release and retry reserveMetadataSnap
+// makes, keeps its typed refusal (agent.IsBusy, agent.IsExists), which the
+// caller reads as a wait.
+func (s *CnAgentServer) readThinHeaders(
+	ctx context.Context,
+	sp *slicePlan,
+) (map[uint32]uint64, error) {
+	sb, err := s.thinDumpSnap(ctx, sp, "--skip-mappings")
+	if err != nil {
+		return nil, err
+	}
+	mapped := make(map[uint32]uint64, len(sb.Devices))
+	for _, dev := range sb.Devices {
+		mapped[dev.DevId] = dev.MappedBlocks
+	}
+	return mapped, nil
+}
+
+// thinDumpSnap reserves a dm-thin metadata snapshot of one slice's pool,
+// runs `thin_dump --metadata-snap` over it with flags into the dump file,
+// reads and parses the document, and removes the file and releases the
+// snapshot on every path, by dumpThinMetadata's rules: the release after
+// every reserve that succeeded or did not answer, the file's `rm -f` after
+// every dump that ran, both on a ctx the caller's cancellation does not
+// reach.
+func (s *CnAgentServer) thinDumpSnap(
+	ctx context.Context,
+	sp *slicePlan,
+	flags ...string,
+) (*thinSuperblock, error) {
+	if err := s.ensureThinDumpDir(ctx); err != nil {
+		return nil, err
+	}
+	if err := s.reserveMetadataSnap(ctx, sp); err != nil {
+		if !commandRefused(err) {
+			s.releaseMetadataSnap(context.WithoutCancel(ctx), sp)
+		}
+		return nil, err
+	}
+	defer s.releaseMetadataSnap(context.WithoutCancel(ctx), sp)
+
+	metaPath := s.nf.DmPath(sp.poolMetaName)
+	dumpPath := thinDumpPath(sp)
+	defer s.removeThinDump(context.WithoutCancel(ctx), dumpPath)
+	args := append([]string{"--metadata-snap"}, flags...)
+	args = append(args, metaPath, "-o", dumpPath)
+	stdout, stderr, _, err := s.cmd.Run(ctx, "thin_dump", args...)
+	if err != nil {
+		return nil, fmt.Errorf("thin_dump %s: %s", metaPath,
+			firstNonEmpty(stderr, stdout, err.Error()))
+	}
+	doc, err := s.readThinDump(ctx, dumpPath)
+	if err != nil {
+		return nil, fmt.Errorf("thin_dump %s: %w", metaPath, err)
+	}
+	return parseThinDump(doc)
 }
 
 // drainThinDevices makes sure, before a leg's bitmap is read (CN27), that

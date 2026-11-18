@@ -652,6 +652,89 @@ namespace created on the controller node while the host was connected
 over two paths had both its path devices set, and an 8 MiB direct read
 of it passed. Step 3 is not tested.
 
+## A new volume refused for a thin id that holds data
+
+Words: a volume's **thin id** is dm-thin's number for the volume inside the
+thin pool of each slice. `dnvctl td list` shows it as `dev_id`. The pool
+keeps the blocks of each thin id until the id is deleted. A volume is
+**recorded as created** once its primary has built it in every slice;
+`dnvctl td list` shows `created`.
+
+Symptom: a new volume, `created` false, does not come up. In
+`dnvctl cntlr inspect --id <primary cntlr id>`, a row of the volume in
+`td_id_to_thin_info` reads `RES_STATUS_ERROR` with the reason
+`RES_REASON_THIN_ID_NOT_ADOPTED`. Its details say that the thin id exists
+in the slice's pool and maps some blocks. Details that name a failed read
+instead are covered under When to stop.
+
+Confirm: the row's details name the pool and the block count. Two cases
+give this row, and the steps differ:
+
+1. **After an etcd restore.** The cluster's etcd was restored from a
+   backup, and the volume was created after the restore. The id holds the
+   data of a volume made after the backup, which the restore lost. Only a
+   pool that created more than 1,048,576 thin devices after the backup
+   meets this ([the scope page](scope.md), section 7).
+2. **After a failover, in the volume's first moments.** No restore
+   happened. A host wrote to the volume before it was recorded as
+   created, and the primary then failed over. The id holds the volume's
+   own data. `dnvctl sp get` shows another cntlr as the primary than the
+   one that built the volume, and the worker's log shows the failover.
+
+What dnv does alone: the primary builds the volume in every slice whose
+thin id maps no block, and builds nothing over the id that holds data. It
+does not fail over for this row. The worker sends the cntlr's syncup again
+every second check round, and the primary reads the pool's records of its
+thin ids again each time, until the row changes.
+
+Safe steps for case 2, as root on the primary's controller node, for each
+slice whose row reads the refusal:
+
+1. Take the device name from the row's `res_name`, and the pool's device
+   name from the slice's row in `slice_id_to_dm_pool`.
+2. Read the pool device's number:
+   `dmsetup info -c --noheadings -o major,minor <pool name>`.
+3. Work out the size: the volume's `size` from `dnvctl td list`, divided
+   by the slice count (`sp_conf.slice_id_list` of `dnvctl sp get`), and
+   by 512.
+4. Make the device by hand over the id:
+   `dmsetup create <device name> --table "0 <size> thin <major>:<minor> <dev_id>"`.
+
+The primary takes a device that is already there as its own, as after a
+restart of its agent. The next syncup builds the rest of the volume, and
+the volume is recorded as created. The data the host wrote is kept.
+
+Safe steps for case 1: the id holds a lost volume's data. To keep a copy,
+read it first through a device made by hand under a name that does not
+start with `dnv-`, with `--readonly`, as in step 4 above, and copy it off;
+then remove that device with `dmsetup remove`.
+
+Steps that can lose data: in case 1, delete the id on the primary's
+controller node with `dmsetup message <pool name> 0 delete <dev_id>`. Its
+blocks are gone. The next syncup makes the id again, empty, and builds the
+volume. Never delete the id in case 2: it holds the host's data. Deleting
+the refused volume with `dnvctl td delete` and creating it again loses the
+same data in case 2.
+
+When to stop: the details name a failed read of the pool's records instead
+of a block count. First wait: the primary reads the records again at each
+syncup the worker sends, every second check round, and once a read
+answers it builds the volume or refuses it as above. So a read that
+failed once, as on a slow pool, needs nothing from you. A pool out of
+metadata space takes no change: its own row in `slice_id_to_dm_pool`
+reads `RES_STATUS_OK` with no reason, and its status line in the details
+says `ro`. Auto-grow adds metadata to it, unless auto-grow is off for the
+pool, and the volume then builds. Stop when the read keeps failing for
+another cause: the node misses a tool or one of its options, which is a
+node fault, or the pool's row reads `RES_REASON_POOL_NEEDS_CHECK`, a pool
+that waits for a check of its records and needs its own repair first, or
+auto-grow is off. Ask for help, and do not delete the id.
+
+Tested: the cn suite plants an id with data, sends a new volume over it,
+reads the refusal, deletes the id and sees the volume build. A unit test
+of the cn agent makes the device by hand over the refused id and sees it
+taken. Case 2 itself is not tested.
+
 ## A planned restart of an agent
 
 Words: when an agent starts, it first runs its **startup pass**: it reads

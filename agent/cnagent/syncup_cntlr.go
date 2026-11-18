@@ -257,8 +257,9 @@ func (s *CnAgentServer) convergeCntlr(
 	// the cntlr holds its object lock or the node write lock, so the helpers
 	// write through st.tracker with this pass bound (agent.ResTracker.Bind).
 	defer st.tracker.Bind(ctx)()
-	// CN14: the torn marks follow the request alone, on every converge.
-	keepTornMarks(st, plan)
+	// CN14: the torn marks follow the request alone, on every converge, and
+	// so does their file in the local store.
+	s.keepTornMarks(ctx, st, plan)
 	info := newCntlrInfo()
 	// CN10: the pass's one wait budget, made here and nowhere else, so each
 	// entrance — the RPC or the startup reconcile — gets its own and no pass
@@ -527,18 +528,31 @@ func (s *CnAgentServer) build(
 				continue
 			}
 			// CN14's torn mark: the run that tore the snapshot sets it, and
-			// only the request clears it (keepTornMarks).
-			if !st.tornTds[tp.tdId] {
-				slog.WarnContext(ctx, msgSnapshotTorn, append(
-					s.cntlrIdAttrs(plan),
-					slog.Uint64("td_id", tp.tdId),
-					slog.Uint64("dev_id", uint64(tp.td.GetDevId())))...)
+			// only the request clears it (keepTornMarks). A new mark is
+			// saved at once, before the thin loop, so an agent restart
+			// keeps it.
+			if st.tornTds[tp.tdId] {
+				continue
 			}
+			slog.WarnContext(ctx, msgSnapshotTorn, append(
+				s.cntlrIdAttrs(plan),
+				slog.Uint64("td_id", tp.tdId),
+				slog.Uint64("dev_id", uint64(tp.td.GetDevId())))...)
 			st.tornTds[tp.tdId] = true
+			s.saveTornMarks(ctx, st)
 		}
 	}
 	for _, tp := range plan.tds {
 		if !plan.primary {
+			// CN14: a cntlr in any other role builds no thin volume and
+			// reports a torn mark it holds in an entry with no rows, so the
+			// worker reads a mark a demoted primary saved.
+			if tornMark(st, tp) {
+				info.TdIdToThinInfo[tp.tdId] = &pb.CntlrInfo_ThinInfo{
+					SliceIdToDmThin: map[uint64]*pb.ResInfo{},
+					Torn:            true,
+				}
+			}
 			continue
 		}
 		thinInfo := &pb.CntlrInfo_ThinInfo{
@@ -767,13 +781,31 @@ func (s *CnAgentServer) build(
 // snapshot device is there, or its message was refused with EEXIST
 // (agent.IsExists), the id being in its pool already. The slices of the two
 // kinds then date from different instants, since the ones already held were
-// made by an earlier run, in another quiesce or in none. The snapshot device
-// of every slice that is not deferred is read, one whose pool takes no
-// message this pass included, since a device there holds its id whatever
-// the state of its pool; only a pool that takes the message is sent one
-// (poolTakesMessages). A slice the run cannot read, or whose message
-// fails otherwise, counts as neither; so does one with no device whose pool
-// takes no message. A run that makes every id, or none, tears nothing.
+// made by an earlier run, in another quiesce or in none. A message that
+// never answered (agent.Reported: the soft timeout killed it) counts as one
+// that made the id, since the kernel may have carried it out and the thin
+// loop of the same pass then builds the device over it, after which no run
+// messages that slice again; reason for no read of the id: when such a
+// message made nothing, a later run makes the id beside the others, which
+// tears the snapshot as well, so the mark is false only for a run whose
+// quiesce failed and two or more of whose killed messages made nothing — a
+// snapshot flagged as possibly inconsistent, the safe side. The snapshot
+// device of every slice that is not deferred is read, one whose pool takes
+// no message this pass included, since a device there holds its id
+// whatever the state of its pool; only a pool that takes the message is
+// sent one (poolTakesMessages). A slice the run cannot read, or whose
+// message fails otherwise — or is never sent, after a failed read or
+// suspend of the slice's origin thin volume — counts as neither; so does one
+// with no device whose pool takes no message. A run that makes every id, or
+// none, tears nothing — but for a run whose quiesce of the origin's raid0
+// failed (suspendSnapOrigin): its messages still go, and when they make ids
+// in two or more slices, those may date from different instants too, so the
+// run tears the snapshot.
+// Reason: a run that sent no message would wait for a re-send that never
+// comes, as the verdict leaves a waiting snapshot's rows unnamed
+// (snapsLackingADevice), and naming them would stall the origin's host IO
+// every second round. One id made alone tears nothing: a later run that
+// makes another beside it marks the tear by the first rule.
 func (s *CnAgentServer) snapshotPrePass(
 	ctx context.Context,
 	plan *cntlrPlan,
@@ -799,8 +831,13 @@ func (s *CnAgentServer) snapshotPrePass(
 	// the deferred arm of the raid0 loop below suppresses the converge, not
 	// the device, so a raid0 an earlier revision built is still live and is
 	// quiesced like any other.
+	// unquiesced: the origin's raid0 may be live and the run could not
+	// suspend it, so its messages go unquiesced.
+	unquiesced := false
 	if origin := plan.tdByDevId[tp.td.GetOriId()]; origin != nil {
-		if raid0 := s.suspendSnapOrigin(ctx, origin); raid0 != "" {
+		raid0, failed := s.suspendSnapOrigin(ctx, origin)
+		unquiesced = failed
+		if raid0 != "" {
 			defer func() {
 				// [D12]: the resume runs on every path out of the sequence —
 				// a failed message, a timeout, an early return. It also has
@@ -818,23 +855,26 @@ func (s *CnAgentServer) snapshotPrePass(
 			}()
 		}
 	}
-	// made: a message of this run made the id in its slice's pool.
-	made := false
+	// made: how many slices' pools a message of this run made the id in, or
+	// may have, its message never answering.
+	made := 0
 	for _, sp := range need {
-		err := s.createSnapId(ctx, plan, tp, sp)
-		if err == nil {
-			made = true
+		sent, err := s.createSnapId(ctx, plan, tp, sp)
+		switch {
+		case err == nil:
+			made++
 			continue
-		}
-		if agent.IsExists(err) {
+		case agent.IsExists(err):
 			had = true
+		case sent && !commandRefused(err):
+			made++
 		}
 		slog.ErrorContext(ctx, "thin-pool create message failed",
 			slog.String("pool", sp.poolFinalName),
 			slog.String("thin", plan.thinName(tp.tdId, sp.sliceId)),
 			slog.String("error", err.Error()))
 	}
-	return made && had
+	return made > 0 && had || unquiesced && made >= 2
 }
 
 // snapMessageSlices is CN14's choice of the slices of an uncreated snapshot
@@ -991,30 +1031,82 @@ func (s *CnAgentServer) snapshotDue(
 
 // msgSnapshotTorn is the Warn record of the converge whose snapshot pre-pass
 // tore a snapshot and set its torn mark (CN14). The mark is reported until
-// the created flip records it; the only remedy is to delete and re-create
-// the snapshot (architecture.md, Thin devices).
+// the request shows the worker recorded it; the only remedy is to delete and
+// re-create the snapshot (architecture.md, Thin devices).
 const msgSnapshotTorn = "snapshot torn"
 
+// msgTornSaveFailed is the Error record of a save or removal of a cntlr's
+// torn marks' file that failed (saveTornMarks). The marks stay in memory and
+// are reported.
+const msgTornSaveFailed = "saving the torn marks failed"
+
 // tornMark is the torn mark a cntlr's report carries in one td's thin info,
-// the same on the converge and the read (CN14, CN28): set while the
-// cntlr holds a mark for the td and its request does not list it created
-// yet. A created td reads false here even before a converge has dropped its
-// mark (keepTornMarks), so a read never reports one either.
+// the same on the converge and the read, in any role (CN14, CN28): set while
+// the cntlr holds a mark for the td and its request does not list it torn
+// yet, created or not. A td the request lists torn reads false here even
+// before a converge has dropped its mark (keepTornMarks), so a read never
+// reports one either.
 func tornMark(st *cntlrState, tp *tdPlan) bool {
-	return !tp.td.GetCreated() && st.tornTds[tp.tdId]
+	return !tp.td.GetTorn() && st.tornTds[tp.tdId]
 }
 
 // keepTornMarks drops the torn marks of the tds the request no longer lists,
-// or lists created: the created flip has recorded the mark in the thin device
-// record by then (dnv-worker.md RW19), and a td that left td_list has nothing
-// to mark. Every converge runs it, from the request alone; a pass that makes
-// no id clears nothing else, so the mark stays reported through any number
-// of re-applies until the flip.
-func keepTornMarks(st *cntlrState, plan *cntlrPlan) {
+// or lists torn: the worker has recorded the mark in the thin device record
+// by then (dnv-worker.md RW19), and a td that left td_list has nothing to
+// mark. A td the request lists created keeps its mark: a primary whose node
+// died after the tear can come back after the new primary's created flip,
+// and its saved mark is then the only record of the tear. Every converge
+// runs it, from the request alone; a pass that makes no id clears nothing
+// else, so the mark stays reported through any number of re-applies until
+// the request shows it. It writes the marks' file again, or removes it, when
+// it dropped a mark.
+func (s *CnAgentServer) keepTornMarks(
+	ctx context.Context,
+	st *cntlrState,
+	plan *cntlrPlan,
+) {
+	dropped := false
 	for tdId := range st.tornTds {
-		if tp := plan.tdById[tdId]; tp == nil || tp.td.GetCreated() {
+		if tp := plan.tdById[tdId]; tp == nil || tp.td.GetTorn() {
 			delete(st.tornTds, tdId)
+			dropped = true
 		}
+	}
+	if dropped {
+		s.saveTornMarks(ctx, st)
+	}
+}
+
+// saveTornMarks writes the cntlr's torn marks into their file in the local
+// store (CN14; architecture.md, Agent local-store paths), or removes the
+// file when the cntlr holds no mark. A save goes through agent.Store.Save,
+// like a request's, so a disk that refuses it marks the node's store row
+// (CN28). A failure is logged and changes nothing else: the marks stay in
+// memory and are reported, and the next write of the file, at another tear
+// or a dropped mark, holds every mark the cntlr then holds. Nothing
+// remembers the failure: a removal that failed leaves a file whose marks the
+// request already shows, and the startup reconcile that loads them has its
+// first converge drop them and remove the file again.
+func (s *CnAgentServer) saveTornMarks(ctx context.Context, st *cntlrState) {
+	req := st.loadReq()
+	ptr := req.GetCntlrPointer()
+	path := s.nf.LocalTornPath(req.GetClusterId(), req.GetCnId(),
+		ptr.GetSpId(), ptr.GetCntlrId())
+	var err error
+	if len(st.tornTds) == 0 {
+		err = s.store.Remove(ctx, path)
+	} else {
+		err = s.store.Save(ctx, path, &pb.TornMarks{
+			ClusterId:    req.GetClusterId(),
+			CnId:         req.GetCnId(),
+			CntlrPointer: ptr,
+			TdIdList:     sortedIds(st.tornTds),
+		})
+	}
+	if err != nil {
+		slog.ErrorContext(ctx, msgTornSaveFailed,
+			slog.String("path", path),
+			slog.String("error", err.Error()))
 	}
 }
 
@@ -1052,27 +1144,36 @@ func actedMark(st *cntlrState, gp *grpPlan) uint64 {
 }
 
 // suspendSnapOrigin quiesces the origin td's raid0 and returns its name, or
-// "" when it did not suspend it — no live raid0 (a standby, or a stack this
-// cntlr has not built yet), or one somebody else already holds suspended.
-// Liveness is the whole test: a td the plan defers keeps whatever raid0 an
-// earlier revision built, and that one is quiesced. "" is the caller's
-// signal that it owns no resume: un-suspending a device another operation is
-// holding would be silently destructive.
+// "" when it did not suspend it. Of those, it reports failed when the raid0
+// may be live and was not suspended — its info read did not answer, or its
+// suspend failed — and not when there is nothing to quiesce: no live raid0
+// (a standby, or a stack this cntlr has not built yet), or one somebody else
+// already holds suspended. Liveness is the whole test: a td the plan defers
+// keeps whatever raid0 an earlier revision built, and that one is quiesced.
+// "" is the caller's signal that it owns no resume: un-suspending a device
+// another operation is holding would be silently destructive. A failed
+// quiesce lets the messages go and may tear the snapshot (snapshotPrePass).
 func (s *CnAgentServer) suspendSnapOrigin(
 	ctx context.Context,
 	origin *tdPlan,
-) string {
+) (string, bool) {
 	dev, err := s.dm.Info(ctx, origin.raid0Name)
-	if err != nil || dev == nil || dev.Suspended {
-		return ""
+	if err != nil {
+		slog.ErrorContext(ctx, "reading the snapshot origin raid0 failed",
+			slog.String("raid0", origin.raid0Name),
+			slog.String("error", err.Error()))
+		return "", true
+	}
+	if dev == nil || dev.Suspended {
+		return "", false
 	}
 	if err := s.dm.Suspend(ctx, origin.raid0Name); err != nil {
 		slog.ErrorContext(ctx, "suspending the snapshot origin raid0 failed",
 			slog.String("raid0", origin.raid0Name),
 			slog.String("error", err.Error()))
-		return ""
+		return "", true
 	}
-	return origin.raid0Name
+	return origin.raid0Name, false
 }
 
 // suppressedRow is the row of a resource the sp_level suppresses, on the

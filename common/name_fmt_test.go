@@ -325,6 +325,10 @@ func TestLocalStorePaths(t *testing.T) {
 		"/var/lib/dnv/probe-dn-"+c+"-0000000000000003")
 	checkName(t, "LocalCnProbePath", nf.LocalCnProbePath(testCluster, testCn),
 		"/var/lib/dnv/probe-cn-"+c+"-0000000000000005")
+	// The torn marks' file has a kind of its own too, which no other kind
+	// starts with and which starts with no other kind (agent.StoreKindTorn).
+	checkName(t, "LocalTornPath", nf.LocalTornPath(testCluster, testCn, testSp, 0x61),
+		"/var/lib/dnv/torn-"+c+"-0000000000000005-0000000000000011-0000000000000061")
 
 	// --local-store overrides the prefix (architecture.md, Components:
 	// invocation reference).

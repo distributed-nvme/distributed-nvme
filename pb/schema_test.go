@@ -99,11 +99,37 @@ func TestRowReasonAndTornMarkNumbers(t *testing.T) {
 		{"RES_REASON_SP_LEVEL", 3},
 		{"RES_REASON_SOURCE_FAULT", 4},
 		{"RES_REASON_DIFFERS", 5},
+		{"RES_REASON_THIN_ID_NOT_ADOPTED", 9},
 	} {
 		ev := reason.Values().ByName(v.name)
 		if ev == nil || ev.Number() != v.number {
 			t.Errorf("%s.%s is %v, want the number %d",
 				reason.FullName(), v.name, ev, v.number)
+		}
+	}
+}
+
+// TestTornMarksNumbers pins the cn agent's torn marks' store file
+// (cnagent.md CN14): the startup reconcile decodes files an older build
+// saved, so a renumbered field would read a stored mark wrong, silently.
+func TestTornMarksNumbers(t *testing.T) {
+	md := (&pb.TornMarks{}).ProtoReflect().Descriptor()
+	for _, tc := range []struct {
+		name   protoreflect.Name
+		number protoreflect.FieldNumber
+		kind   protoreflect.Kind
+		list   bool
+	}{
+		{"cluster_id", 1, protoreflect.Uint64Kind, false},
+		{"cn_id", 2, protoreflect.Uint64Kind, false},
+		{"cntlr_pointer", 3, protoreflect.MessageKind, false},
+		{"td_id_list", 4, protoreflect.Uint64Kind, true},
+	} {
+		fd := md.Fields().ByName(tc.name)
+		if fd == nil || fd.Number() != tc.number || fd.Kind() != tc.kind ||
+			fd.IsList() != tc.list {
+			t.Errorf("%s.%s is %v, want %v at %d (list %v)", md.FullName(),
+				tc.name, fd, tc.kind, tc.number, tc.list)
 		}
 	}
 }

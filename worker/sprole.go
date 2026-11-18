@@ -52,6 +52,7 @@ const (
 	flipKindProvisioned = "provisioned"
 	flipKindCreated     = "created"
 	flipKindCutover     = "cutover"
+	flipKindTorn        = "torn"
 )
 
 // Non-normative records of the sp coordinator. The strings of dnv-worker.md,
@@ -191,6 +192,15 @@ type spOps interface {
 		spId uint64,
 		cands []model.TdRef,
 	) ([]model.TdRef, error)
+	// markTdTorn is RW19's record of a torn mark (MD6's MarkTdTorn); it
+	// returns the tds it actually wrote.
+	markTdTorn(
+		ctx context.Context,
+		cid uint64,
+		shard uint32,
+		spId uint64,
+		refs []model.TdRef,
+	) ([]model.TdRef, error)
 	// startCutover is the cutover beside RW18's flip (MD6): it clears the
 	// migration's cutover_pending once cntlrId, still the primary and not
 	// disabled, reported a live path to its dst side, at a level below
@@ -298,6 +308,16 @@ func (o *modelSpOps) flipCreated(
 	cands []model.TdRef,
 ) ([]model.TdRef, error) {
 	return model.FlipCreated(ctx, o.cli, cid, shard, spId, cands)
+}
+
+func (o *modelSpOps) markTdTorn(
+	ctx context.Context,
+	cid uint64,
+	shard uint32,
+	spId uint64,
+	refs []model.TdRef,
+) ([]model.TdRef, error) {
+	return model.MarkTdTorn(ctx, o.cli, cid, shard, spId, refs)
 }
 
 func (o *modelSpOps) startCutover(
@@ -442,8 +462,11 @@ type spPlan struct {
 	legClone  map[uint64]cloneOwner
 	legRepair map[uint64]repairOwner
 	// tdRefs are the tds whose created flag is still false, keyed by td_id:
-	// the only candidates RW19 may flip.
-	tdRefs map[uint64]model.TdRef
+	// the only candidates RW19 may flip. untornRefs are the tds whose torn
+	// mark is still false, created or not: the only ones RW19's record of a
+	// torn mark may mark.
+	tdRefs     map[uint64]model.TdRef
+	untornRefs map[uint64]model.TdRef
 	// cutovers are the migrations whose cutover_pending is set and whose
 	// dst side is provisioned, in migr_name_list order: the only ones the
 	// cutover beside RW18's flip may start (cutoverRefs).
@@ -561,9 +584,11 @@ type spReport struct {
 	// conditions 1-4); the coordinator keeps those its loaded state still
 	// shows created == false.
 	createdTdIds []uint64
-	// tornTdIds are the members of createdTdIds whose thin info carries the
-	// cn agent's torn mark (CntlrInfo.ThinInfo.torn; cnagent.md CN14), which
-	// the created flip copies into the record (RW19).
+	// tornTdIds are the tds whose thin info in the reply carries the cn
+	// agent's torn mark (CntlrInfo.ThinInfo.torn; cnagent.md CN14), created
+	// or not, of any cntlr in any role: the created flip copies the mark of
+	// a td the drain completes into the record, and the torn mark's record
+	// writes the mark of any other td whose record lacks it (RW19).
 	tornTdIds []uint64
 	// legRows are the primary cntlr's leg probe rows (HL2).
 	legRows []legRow
@@ -682,6 +707,9 @@ type spWorker struct {
 	legClone  map[uint64]cloneOwner
 	legRepair map[uint64]repairOwner
 	tdRefs    map[uint64]model.TdRef
+	// untornRefs are the latest fan-out's spPlan.untornRefs, less the tds a
+	// torn mark's record wrote since.
+	untornRefs map[uint64]model.TdRef
 	// cutovers are the latest fan-out's spPlan.cutovers, less those a
 	// cutover started since.
 	cutovers  []model.CutoverRef
@@ -732,31 +760,32 @@ func newSpWorker(p revWorkerParams) revWorkerHandle {
 func startSpWorker(p revWorkerParams, ops spOps) *spWorker {
 	ctx, cancel := context.WithCancel(newTraceCtx(context.Background(), p.seed))
 	w := &spWorker{
-		deps:      p.deps,
-		ops:       ops,
-		shard:     p.shard,
-		cid:       p.cid,
-		spId:      p.id,
-		seed:      p.seed,
-		desiredCh: make(chan desiredState, 1),
-		reportCh:  make(chan spReport, 64),
-		drainCh:   make(chan struct{}, 1),
-		ctx:       ctx,
-		cancel:    cancel,
-		done:      make(chan struct{}),
-		after:     p.after,
-		desired:   p.desired,
-		sides:     make(map[sideKey]*sideChild),
-		cntlrs:    make(map[uint64]*cntlrChild),
-		legs:      make(map[uint64]*healthMonitor),
-		legOwners: make(map[uint64]legOwner),
-		legSlice:  make(map[uint64]uint64),
-		legClone:  make(map[uint64]cloneOwner),
-		legRepair: make(map[uint64]repairOwner),
-		tdRefs:    make(map[uint64]model.TdRef),
-		react:     newReactor(&modelReactionOps{cli: p.deps.cli}),
-		verdicts:  newVerdictMemo(),
-		fenceLast: make(map[uint64]grpFenceView),
+		deps:       p.deps,
+		ops:        ops,
+		shard:      p.shard,
+		cid:        p.cid,
+		spId:       p.id,
+		seed:       p.seed,
+		desiredCh:  make(chan desiredState, 1),
+		reportCh:   make(chan spReport, 64),
+		drainCh:    make(chan struct{}, 1),
+		ctx:        ctx,
+		cancel:     cancel,
+		done:       make(chan struct{}),
+		after:      p.after,
+		desired:    p.desired,
+		sides:      make(map[sideKey]*sideChild),
+		cntlrs:     make(map[uint64]*cntlrChild),
+		legs:       make(map[uint64]*healthMonitor),
+		legOwners:  make(map[uint64]legOwner),
+		legSlice:   make(map[uint64]uint64),
+		legClone:   make(map[uint64]cloneOwner),
+		legRepair:  make(map[uint64]repairOwner),
+		tdRefs:     make(map[uint64]model.TdRef),
+		untornRefs: make(map[uint64]model.TdRef),
+		react:      newReactor(&modelReactionOps{cli: p.deps.cli}),
+		verdicts:   newVerdictMemo(),
+		fenceLast:  make(map[uint64]grpFenceView),
 	}
 	go w.run()
 	return w
@@ -1124,26 +1153,28 @@ func (w *spWorker) buildPlan(
 ) *spPlan {
 	conf := state.Conf
 	plan := &spPlan{
-		sides:     make(map[sideKey]*sidePlan),
-		cntlrs:    make(map[uint64]*cntlrPlan),
-		legSlice:  make(map[uint64]uint64),
-		legClone:  make(map[uint64]cloneOwner),
-		legRepair: make(map[uint64]repairOwner),
-		tdRefs:    make(map[uint64]model.TdRef),
-		listed:    make(map[uint64]bool),
-		deleting:  conf.GetDeleting(),
+		sides:      make(map[sideKey]*sidePlan),
+		cntlrs:     make(map[uint64]*cntlrPlan),
+		legSlice:   make(map[uint64]uint64),
+		legClone:   make(map[uint64]cloneOwner),
+		legRepair:  make(map[uint64]repairOwner),
+		tdRefs:     make(map[uint64]model.TdRef),
+		untornRefs: make(map[uint64]model.TdRef),
+		listed:     make(map[uint64]bool),
+		deleting:   conf.GetDeleting(),
 	}
 	for _, cntlrId := range conf.GetCntlrIdList() {
 		plan.listed[cntlrId] = true
 	}
 	for i, td := range state.Tds {
+		ref := model.TdRef{Name: state.TdNames[i], TdId: td.GetTdId()}
+		if !td.GetTorn() {
+			plan.untornRefs[td.GetTdId()] = ref
+		}
 		if td.GetCreated() {
 			continue
 		}
-		plan.tdRefs[td.GetTdId()] = model.TdRef{
-			Name: state.TdNames[i],
-			TdId: td.GetTdId(),
-		}
+		plan.tdRefs[td.GetTdId()] = ref
 	}
 
 	// The cntlr side of the plan first: the side requests need the primary's
@@ -2812,6 +2843,7 @@ func (w *spWorker) applyPlan(ctx context.Context, plan *spPlan) {
 	w.legClone = plan.legClone
 	w.legRepair = plan.legRepair
 	w.tdRefs = plan.tdRefs
+	w.untornRefs = plan.untornRefs
 	w.cutovers = plan.cutovers
 	// A leg monitor goes with its leg, and with its owner: a new leg that its
 	// finish moved into its group's record gets a fresh monitor on its next
@@ -2987,10 +3019,11 @@ func (w *spWorker) logUnresolved(
 // drain is RW18's collection window: several sides of slices reported within
 // one round share one FlipProvisioned STM, and several sides of clone meta
 // groups one FlipCloneProvisioned STM, and every td completed by the replies
-// of that moment shares one FlipCreated, torn when any of those replies marks
-// it (RW19). A demoted cntlr's synced revision goes to RW22's demotion hold
-// and a side's to RW14's barrier, which the last report each waits for moves
-// on ahead of those STMs, and a cntlr's leg rows are recorded only while it is
+// of that moment shares one FlipCreated, torn when any reply of the drain
+// marks it, whether or not that reply completes it (RW19). A demoted cntlr's
+// synced revision goes to RW22's demotion hold and a side's to RW14's
+// barrier, which the last report each waits for moves on ahead of those
+// STMs, and a cntlr's leg rows are recorded only while it is
 // the primary of the plan the coordinator last decided (recordsLegRows). Its
 // path rows count for a cutover under the same rule, the cntlr also not
 // disabled (countsPaths), the newest report of the drain for each cntlr, and
@@ -3015,6 +3048,10 @@ func (w *spWorker) handleReports(first spReport) {
 	var tds []model.TdRef
 	// tdIdx is each candidate's index in tds.
 	tdIdx := make(map[uint64]int)
+	// tornIds are the tds any report of the drain marks torn, in the order
+	// first marked.
+	var tornIds []uint64
+	tornSeen := make(map[uint64]bool)
 	// paths is the newest path report of each cntlr the plan makes the
 	// primary and not disabled: a later reply of the drain replaces an
 	// earlier one, live path or not.
@@ -3058,18 +3095,14 @@ func (w *spWorker) handleReports(first spReport) {
 				repairSides = append(repairSides, *ref)
 			}
 		}
-		var torn map[uint64]bool
-		if len(rep.tornTdIds) > 0 {
-			torn = make(map[uint64]bool, len(rep.tornTdIds))
-			for _, tdId := range rep.tornTdIds {
-				torn[tdId] = true
+		for _, tdId := range rep.tornTdIds {
+			if !tornSeen[tdId] {
+				tornSeen[tdId] = true
+				tornIds = append(tornIds, tdId)
 			}
 		}
 		for _, tdId := range rep.createdTdIds {
-			if idx, seen := tdIdx[tdId]; seen {
-				// RW19: when the replies of one drain complete a td more than
-				// once, any reply that marks it torn makes it torn.
-				tds[idx].Torn = tds[idx].Torn || torn[tdId]
+			if _, seen := tdIdx[tdId]; seen {
 				continue
 			}
 			ref, ok := w.tdRefs[tdId]
@@ -3079,7 +3112,6 @@ func (w *spWorker) handleReports(first spReport) {
 				continue
 			}
 			// A copy: the plan's own ref carries no mark.
-			ref.Torn = torn[tdId]
 			tdIdx[tdId] = len(tds)
 			tds = append(tds, ref)
 		}
@@ -3096,6 +3128,12 @@ func (w *spWorker) handleReports(first spReport) {
 			}
 		}
 	}
+	// RW19: a td the drain completes is torn when any reply of the drain
+	// marks it — a standby's entry with no rows beside the primary's
+	// unmarked completion included.
+	for i := range tds {
+		tds[i].Torn = tornSeen[tds[i].TdId]
+	}
 	w.releaseHeld(ctx)
 	w.applyProvisionedFlip(ctx, sides)
 	w.applyCloneFlip(ctx, cloneSides)
@@ -3103,6 +3141,19 @@ func (w *spWorker) handleReports(first spReport) {
 	w.applyCutovers(ctx, paths)
 	w.offerBitmapReads(paths)
 	w.applyCreatedFlip(ctx, tds)
+	// RW19: a marked td the drain completes carries its mark into the
+	// created flip; every other marked td whose loaded record lacks the mark
+	// gets it from the torn mark's record.
+	var marks []model.TdRef
+	for _, tdId := range tornIds {
+		if _, flipped := tdIdx[tdId]; flipped {
+			continue
+		}
+		if ref, ok := w.untornRefs[tdId]; ok {
+			marks = append(marks, ref)
+		}
+	}
+	w.applyTornMarks(ctx, marks)
 }
 
 // observeLeg writes one leg's health (HL2). The row came from the PRIMARY
@@ -3481,6 +3532,45 @@ func (w *spWorker) applyCreatedFlip(ctx context.Context, cands []model.TdRef) {
 	for _, ref := range created {
 		slog.InfoContext(ctx, msgFlipApplied,
 			slog.String("kind", flipKindCreated),
+			slog.Uint64("cluster_id", w.cid),
+			slog.Uint64("sp_id", w.spId),
+			slog.String("td_name", ref.Name),
+			slog.Uint64("td_id", ref.TdId),
+			slog.Uint64("revision", revision),
+		)
+	}
+}
+
+// applyTornMarks writes the torn mark into the record of every listed td
+// (RW19, MD6's MarkTdTorn) and drops each td it wrote from untornRefs, so a
+// later report of the same mark costs no transaction before the next load.
+// A call that fails is logged, and the next report that carries the mark
+// tries again: the cn agent keeps reporting it until a request shows it
+// (cnagent.md CN14).
+func (w *spWorker) applyTornMarks(ctx context.Context, refs []model.TdRef) {
+	if len(refs) == 0 {
+		return
+	}
+	marked, err := w.ops.markTdTorn(ctx, w.cid, w.shard, w.spId, refs)
+	for _, ref := range marked {
+		delete(w.untornRefs, ref.TdId)
+	}
+	if err != nil {
+		slog.InfoContext(ctx, msgSpFlipFailed,
+			slog.String("kind", flipKindTorn),
+			slog.Uint64("cluster_id", w.cid),
+			slog.Uint64("sp_id", w.spId),
+			slog.String("error", err.Error()),
+		)
+		return
+	}
+	if len(marked) == 0 {
+		return
+	}
+	revision := w.currentRevision(ctx)
+	for _, ref := range marked {
+		slog.InfoContext(ctx, msgFlipApplied,
+			slog.String("kind", flipKindTorn),
 			slog.Uint64("cluster_id", w.cid),
 			slog.Uint64("sp_id", w.spId),
 			slog.String("td_name", ref.Name),
@@ -4731,9 +4821,9 @@ func (d *cntlrDriver) observe(ctx context.Context, r *replyState) {
 	rep := spReport{
 		cntlrId:      d.ptr.GetCntlrId(),
 		createdTdIds: completedTds(info, plan.sliceIds),
+		// RW19: from any accepted reply, of any cntlr in any role.
+		tornTdIds: tornTds(info),
 	}
-	// A subset of createdTdIds, so it adds no reason to send of its own.
-	rep.tornTdIds = tornTds(info, rep.createdTdIds)
 	if plan.effectivePrimary() && r.revision == plan.req.GetRevision() {
 		// HL2: leg rows and path rows count only from a reply at the plan's
 		// own revision, the test canSettle makes: a promoted cntlr's reply
@@ -4755,8 +4845,9 @@ func (d *cntlrDriver) observe(ctx context.Context, r *replyState) {
 		d.synced = r.revision
 		rep.cntlrSynced = r.revision
 	}
-	if len(rep.createdTdIds) == 0 && len(rep.legRows) == 0 &&
-		rep.cntlrSynced == 0 && rep.paths.empty() && rep.fenceViews == nil {
+	if len(rep.createdTdIds) == 0 && len(rep.tornTdIds) == 0 &&
+		len(rep.legRows) == 0 && rep.cntlrSynced == 0 &&
+		rep.paths.empty() && rep.fenceViews == nil {
 		return
 	}
 	d.send(ctx, rep)
@@ -5054,14 +5145,14 @@ func completedTds(info *pb.CntlrInfo, sliceIds []uint64) []uint64 {
 	return out
 }
 
-// tornTds returns the td_ids of tdIds, in their order, whose thin info in one
-// CntlrInfo carries the torn mark (CntlrInfo.ThinInfo.torn): what RW19's flip
-// writes into ThinDevice.torn beside created. The callers pass the tds the
-// same reply completes (completedTds), so a mark on a td still incomplete is
-// not read.
-func tornTds(info *pb.CntlrInfo, tdIds []uint64) []uint64 {
+// tornTds returns the td_ids, ascending, whose thin info in one CntlrInfo
+// carries the torn mark (CntlrInfo.ThinInfo.torn), whatever its rows: a
+// standby reports a mark in an entry with no rows (cnagent.md CN14). RW19
+// writes each into ThinDevice.torn, beside created for a td the same drain
+// completes, by the torn mark's record for any other.
+func tornTds(info *pb.CntlrInfo) []uint64 {
 	var out []uint64
-	for _, tdId := range tdIds {
+	for _, tdId := range sortedKeys(info.GetTdIdToThinInfo()) {
 		if info.GetTdIdToThinInfo()[tdId].GetTorn() {
 			out = append(out, tdId)
 		}

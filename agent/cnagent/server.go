@@ -168,16 +168,18 @@ type cntlrState struct {
 	// through. The startup Reconcile's Create branch arms it too; running
 	// additionally requires reqFromRpc.
 	pendingSweep map[uint64]bool
-	// tornTds marks the snapshot tds this incarnation tore (CN14): one run
-	// of the snapshot pre-pass made the td's id in one slice while another
-	// slice already held it (snapshotPrePass). Keyed by td_id; in-memory
-	// only, so an agent restart loses a mark the worker has not read yet. A
-	// pre-pass sets a mark and nothing but the request clears it: every
+	// tornTds marks the snapshot tds this cntlr tore (CN14): one run of the
+	// snapshot pre-pass made the td's id in one slice while another slice
+	// already held it, or made ids in two slices without the origin's
+	// quiesce (snapshotPrePass). Keyed by td_id. The pre-pass saves a new
+	// mark in the local store at once (saveTornMarks), and the startup
+	// reconcile loads the saved marks (CN2), so an agent restart keeps them.
+	// A pre-pass sets a mark and nothing but the request clears it: every
 	// converge drops the marks of tds its request no longer lists or lists
-	// created (keepTornMarks), the created flip having recorded the mark by
-	// then (dnv-worker.md RW19). Both channels report a mark in the td's thin
-	// info (tornMark). It is read and written under this cntlr's object lock
-	// or the node write lock, as pendingSweep is.
+	// torn (keepTornMarks), the worker having recorded the mark by then
+	// (dnv-worker.md RW19). Both channels report a mark in the td's thin
+	// info, in any role (tornMark). It is read and written under this
+	// cntlr's object lock or the node write lock, as pendingSweep is.
 	tornTds map[uint64]bool
 	// forcedStarts holds, per group id, the revision of the forced-start
 	// mark whose forced start this incarnation ran its assembly for, the

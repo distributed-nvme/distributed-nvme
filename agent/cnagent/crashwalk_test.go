@@ -39,7 +39,9 @@ import (
 //     SH5);
 //   - the torn snapshot mark: the next agent's pre-pass sets it exactly when
 //     the cut fell between the first and the last slice's snapshot message
-//     (CN14), and it is no row, so the rows stay OK;
+//     (CN14), and it is no row, so the rows stay OK; the mark's file in the
+//     local store is then the one difference the node holds, as no worker
+//     records the mark here to clear it;
 //   - the leg rows read "health probe pending" until the restarted probers'
 //     first round (CN11): the drive waits for it;
 //   - a node sweep that sets a disconnect going names it until it returns
@@ -219,6 +221,8 @@ func crashStoreText(path string, raw []byte) string {
 		msg = &pb.PushCloneBitmapRequest{}
 	case strings.HasPrefix(base, "cn-"):
 		msg = &pb.SyncupCnRequest{}
+	case strings.HasPrefix(base, "torn-"):
+		msg = &pb.TornMarks{}
 	default:
 		return fmt.Sprintf("%x", raw)
 	}
@@ -1022,11 +1026,36 @@ func (sh crashShape) restartAndJudge(
 		got = rest
 		out.dumpLeft = true
 	}
+	// CN14: a torn snapshot's mark is saved in the local store, and stays
+	// there while no request lists the td torn; it must be there exactly
+	// when the cut tore the snapshot, and is then no difference.
+	if wantTorn {
+		rest, found := crashDropTornFile(got)
+		if !found {
+			out.failure = "the cut tore the snapshot, and the local store " +
+				"holds no torn marks' file"
+			return out
+		}
+		got = rest
+	}
 	if got != ref.snap {
 		out.failure = "the node differs from a run with no cut:\n" +
 			crashDiff(ref.snap, got)
 	}
 	return out
+}
+
+// crashDropTornFile removes from a node image (crashSnapshot) its one line
+// of a torn marks' file, and says whether it found one.
+func crashDropTornFile(image string) (string, bool) {
+	lines := strings.Split(image, "\n")
+	for i, line := range lines {
+		if strings.HasPrefix(line, "store ") &&
+			strings.Contains(line, "/torn-") {
+			return strings.Join(slices.Delete(lines, i, i+1), "\n"), true
+		}
+	}
+	return image, false
 }
 
 // crashKeptOrphans names each cntlr srv holds, in memory or in a cntlr file

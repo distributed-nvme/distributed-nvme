@@ -1462,8 +1462,9 @@ func TestFlipCreated(t *testing.T) {
 // TestFlipCreatedWritesTheTornMark pins RW19's copy of the torn mark: the put
 // that sets created writes each candidate's mark, true or false, into
 // ThinDevice.torn, every other field kept, and the refs it returns carry the
-// marks. A candidate the STM skips writes nothing, so a later mark cannot
-// change the record of a td already created, nor clear its mark.
+// marks. A candidate the STM skips writes nothing, so a later candidate
+// cannot change the record of a td already created, nor clear its mark: a
+// mark that comes after the flip is MarkTdTorn's to write.
 func TestFlipCreatedWritesTheTornMark(t *testing.T) {
 	env := newOpsEnv(t)
 	cands := []TdRef{
@@ -1507,6 +1508,72 @@ func TestFlipCreatedWritesTheTornMark(t *testing.T) {
 	}
 	if got := env.spRev(); got != revBefore {
 		t.Errorf("SpRev must not move: got %d, want %d", got, revBefore)
+	}
+}
+
+// TestFlipCreatedKeepsAnEarlyMark pins RW19's "set at most once, never
+// cleared": a td the torn op marked before its created flip keeps the mark
+// through a flip whose candidate carries none.
+func TestFlipCreatedKeepsAnEarlyMark(t *testing.T) {
+	env := newOpsEnv(t)
+	if _, err := MarkTdTorn(env.ctx, env.cli, env.cid, opsShard, opsSpId,
+		[]TdRef{{Name: "td0", TdId: 601}}); err != nil {
+		t.Fatalf("MarkTdTorn: %v", err)
+	}
+	if got := env.td("td0"); !got.GetTorn() || got.GetCreated() {
+		t.Fatalf("td0 after the mark = %v, want torn and not created", got)
+	}
+	created, err := FlipCreated(env.ctx, env.cli, env.cid, opsShard, opsSpId,
+		[]TdRef{{Name: "td0", TdId: 601}})
+	if err != nil || len(created) != 1 {
+		t.Fatalf("FlipCreated = %v, %v; want td0 flipped", created, err)
+	}
+	if got := env.td("td0"); !got.GetTorn() || !got.GetCreated() {
+		t.Fatalf("td0 after the flip = %v, want created and still torn", got)
+	}
+}
+
+// TestMarkTdTorn pins MD6's MarkTdTorn (RW19): it sets torn on every listed
+// td whose record reads it false, created or not, every other field kept,
+// with one bump per STM that wrote; it skips an absent key, another td_id
+// and a td already torn, and a call that writes nothing does not bump.
+func TestMarkTdTorn(t *testing.T) {
+	env := newOpsEnv(t)
+	mustPut(env.t, env.cli, ThinDeviceKey(env.cid, opsSpId, "td1"),
+		&pb.ThinDevice{TdId: 602, DevId: 2, Size: 1 << 30, Created: true})
+	revBefore := env.spRev()
+	refs := []TdRef{
+		{Name: "td0", TdId: 601},
+		{Name: "td1", TdId: 602},
+		{Name: "gone", TdId: 1234},
+	}
+	marked, err := MarkTdTorn(env.ctx, env.cli, env.cid, opsShard, opsSpId,
+		append(refs, TdRef{Name: "td0", TdId: 999}))
+	if err != nil {
+		t.Fatalf("MarkTdTorn: %v", err)
+	}
+	if !equalTdRefs(marked, refs[:2]) {
+		t.Fatalf("marked = %v, want td0 and td1", marked)
+	}
+	for name, want := range map[string]*pb.ThinDevice{
+		"td0": {TdId: 601, DevId: 1, Size: 1 << 30, Torn: true},
+		"td1": {TdId: 602, DevId: 2, Size: 1 << 30, Created: true, Torn: true},
+	} {
+		if got := env.td(name); !proto.Equal(got, want) {
+			t.Errorf("%s: got %v, want %v", name, got, want)
+		}
+	}
+	if got := env.spRev(); got != revBefore+1 {
+		t.Errorf("SpRev: got %d, want %d (one bump)", got, revBefore+1)
+	}
+	marked, err = MarkTdTorn(env.ctx, env.cli, env.cid, opsShard, opsSpId,
+		refs[:2])
+	if err != nil || len(marked) != 0 {
+		t.Fatalf("MarkTdTorn again = %v, %v; want nothing written",
+			marked, err)
+	}
+	if got := env.spRev(); got != revBefore+1 {
+		t.Errorf("SpRev moved on a call that wrote nothing: %d", got)
 	}
 }
 

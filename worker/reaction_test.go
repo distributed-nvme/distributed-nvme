@@ -1950,6 +1950,28 @@ func TestReactionSharedStateErrorIsNotATrigger(t *testing.T) {
 		}
 	})
 
+	// A new volume's thin id the agent does not adopt (cnagent.md CN14) is of
+	// the class too, for a td created or not: every new primary meets the
+	// same id in the same pool.
+	for _, created := range []bool{false, true} {
+		t.Run(fmt.Sprintf("an id not adopted, created %v", created),
+			func(t *testing.T) {
+				h := newReactHarness(t, sharedStateFixture(t))
+				h.state.Tds[0].Created = created
+				h.state.Cntlrs[reactCntlrA].ErrEpoch = h.ago(
+					common.DefaultPrimaryUnhealthy)
+				info := lostStackInfo(true)
+				row := info.TdIdToThinInfo[reactLostTd].
+					SliceIdToDmThin[reactSliceId]
+				row.Reason = pb.ResReason_RES_REASON_THIN_ID_NOT_ADOPTED
+				row.Details = "thin id 1 exists in pool p and maps 7 blocks"
+				h.setPrimaryInfo(reactCntlrA, info)
+				h.pass()
+				h.wantOps()
+				h.wantSkipped(reactionFailover, "shared_state")
+			})
+	}
+
 	// The class reads the row's reason and nothing in its details: the
 	// reason with any text is the lost id, the case below without it is not.
 	t.Run("the reason with other details", func(t *testing.T) {

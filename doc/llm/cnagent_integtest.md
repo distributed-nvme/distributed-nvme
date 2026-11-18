@@ -33,10 +33,11 @@ retired leg of another identity, a forced start that drops the named leg's
 bad-block list and one refused for a named leg older than a member it would
 zero, then forced, a broken array whose legs come back assembled again
 with no mark, a group whose array has run whose legs all read blank,
-the clone's source lost and given back, and
+the clone's source lost and given back, a new volume over a thin id that
+holds data, and
 the leftover, an accepted request reporting residue (`cnagent.md` CN20). The
 cases run in a fixed order, fail-fast — smoke, redund, repair, teardown,
-thinbm, clone_xfer, restart — each under pool ids of its own and each leaving
+thinbm, torn, clone_xfer, restart — each under pool ids of its own and each leaving
 nothing of its pools, a teardown per case and per stage that also keeps the run
 inside a DN's data area, which the cases together would overdraw.
 
@@ -287,6 +288,23 @@ its info-read commands are plain memory reads.
   optimized, then promotes (`architecture.md`, Failover), host IO quiesced
   across the window with no serving path (Lab facts); only the late flip
   promotes first.
+* **The created flip.** A request's tds go out with `created` false at
+  first, and the suite plays the sp worker's created flip (`dnv-worker.md`
+  RW19): once a primary's reply carries every slice's thin row of a td
+  `RES_STATUS_OK`, the case sets that td `created` in each of its cntlrs'
+  request files (`flip_created`), and each file's next syncup carries it.
+  The worker flips a td soon after its first build, and a primary that
+  builds the thin volume of a td not yet created again over an id that maps
+  blocks refuses it (`cnagent.md` CN14; `architecture.md`, Known limits).
+  redund, repair and clone_xfer flip after their first primary build, so
+  their promotions, the forced starts whose levels take the thin pool down,
+  and clone_xfer's rebuild after the wipe build a created td over the data
+  the host or the copy wrote. thinbm and torn set `created` by hand, and keep
+  a td not created where the stage is about that state: thinbm's snapshot,
+  and torn's refused volume and half-made snapshot. smoke, teardown and
+  restart send `created` false throughout, since none builds a written td's
+  thin volume again: they run no failover, wipe no kernel state, and the
+  restart case keeps the kernel's devices.
 * **Negatives are exact.** Provisioning and pending are healthy statuses, so an
   error row compares against error, never "not OK", and a suppressed one also
   reads the level's details and its reason. A failed read taken for an absence
@@ -649,6 +667,23 @@ dm-thin pool that a bare `dmsetup create` attaches the existing ids, both
 mappings intact, with no suspend and no create, snapshot or delete message, the
 activation sweep sending its reserve and release once each (CN14, CN21).
 
+**torn** builds a pool of two slices on DN1, each the S shape's two RedundNone
+groups, so a volume stripes over two thin volumes (`cnagent.md` CN14). A thin
+id planted by hand in slice 1's pool, one block written through a device made
+by hand and then removed, as an etcd restore can leave it, makes a new volume
+over that id read `RES_STATUS_ERROR` with `RES_REASON_THIN_ID_NOT_ADOPTED` and
+the block in its details in that slice, with no thin volume built over it and
+one header read of that pool, while the other slice builds; the converge's
+reply names nothing, and a read names the absent volume (CN30). Once the id
+is removed by hand, the re-send builds the volume. A snapshot's id made by
+hand in slice 2's pool, inside the origin's per-slice quiesce, then an agent
+restart, stand for a primary that stopped between the two slices' steps: the
+next converge makes slice 1's id beside it and reports the snapshot torn, the
+torn marks file of the cntlr is in the local store, a fresh read after a
+second restart still reports the mark, and a request that lists the snapshot
+torn clears the mark and the file (CN2, CN14; `dnv-worker.md` RW19 is the
+worker's half).
+
 **clone_xfer** proves `architecture.md`, Transfer + clone = cross-SP live
 migration, and Clone metadata durability, between pools on different nodes
 exporting one NQN and namespace identity from disjoint cntlid slots. The
@@ -853,8 +888,9 @@ its other errors, and of the take-back check, a new leg with no
 superblock, a STARTED repair's add with no member to compare with, a keeper
 whose superblock read finds none and a superblock read that did not answer,
 and the identity check of a `leg_list` member's add, all of
-which the unit tests cover (CN12); a torn snapshot, which needs two slices,
-whose mark the unit tests cover (CN14); the lingering-clone hold's scope per
+which the unit tests cover (CN12); a snapshot torn by a quiesce that fails,
+and a header read that waits or fails, whose rules the unit tests cover
+(CN14); the lingering-clone hold's scope per
 thin device, left to the unit tests (CN18); the other states of the clone's
 shared row rule (CN18); and whether a refused request leaves a lock entry
 (`dnagent.md`, Concurrency — `locks.go`; `cnagent.md` CN7), left to the unit

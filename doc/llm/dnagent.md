@@ -404,7 +404,10 @@ Agent local-store paths, prescribe: the last accepted `Syncup*Request` per
 object, persisted at the point SH5 gives (or the refused one after it whose
 save failed only at the directory sync, SH5), and one file per received
 `Push*BitmapRequest` chunk, all written via `OsClient.WriteProto` (atomic
-replace) at the `Local*Path` locations and read back via `ReadProto`. The
+replace) at the `Local*Path` locations and read back via `ReadProto`. On a
+cn, a cntlr's torn marks file (`cnagent.md` CN14) is saved the same way,
+through the same save, outside the gates: its saves and removals follow
+the marks, not a request. The
 probe file of DN18 is written the same way while the store refuses writes,
 and never read. Both calls, `WriteProto` and `ReadProto`, run on a ctx
 carrying the SH15 soft timeout, as the store's listing and `rm` do (SH6,
@@ -416,8 +419,8 @@ its caller logs it, and a request whose save failed is refused with no
 converge (SH5) and a migration piece whose save failed is refused too
 (DN15), while a clone chunk whose save failed is acked at once
 (`cnagent.md` CN22); each RPC then returns and releases its locks. The
-store keeps two states over every save, of a request or a chunk, whatever
-its object. The first is whether its latest save failed, until a save
+store keeps two states over every save, of a request, a chunk or a torn
+marks file, whatever its object. The first is whether its latest save failed, until a save
 succeeds (`Store.SaveFailing`); SH30 says what a syncup does while it holds.
 The second is whether the disk refused a save: a save that fails with an
 error of the write itself, such as no space left, a read-only file system or
@@ -497,7 +500,8 @@ bound itself); a prefix that is missing, is not a directory or whose listing
 fails in any other way is SH3's fatal case. It filters by the role's
 `Local*Path` kind prefixes (`StoreKindDn`, `StoreKindSide`,
 `StoreKindMigrBm` and `StoreKindDnProbe` for the dn; `StoreKindCn`,
-`StoreKindCntlr`, `StoreKindCloneBm` and `StoreKindCnProbe` for the cn); the
+`StoreKindCntlr`, `StoreKindCloneBm`, `StoreKindCnProbe` and
+`StoreKindTorn` for the cn); the
 probe file of DN18 is never loaded: the enumeration deletes it, and its temp
 files with the others, before anything is loaded, since nothing reads it and
 it holds room the store may need; a failed delete is logged, and the next
@@ -529,7 +533,8 @@ nothing, so it is safe beside any save.
 
 SH7. When an object's pointer leaves its parent's list, its state is dropped
 **at that moment** and nothing of it is removed from the node yet: its
-request file and its bitmap-chunk files are deleted with one `rm -f` under
+request file and its bitmap-chunk files (on a cn, its torn marks file too,
+`cnagent.md` CN14) are deleted with one `rm -f` under
 the same bound as SH6's listing, its memory entry and object lock go, and its
 goroutines are stopped. The resources are found afterwards **by name**, by
 the sweep that runs later in the same pass (DN6), so no file has to be kept

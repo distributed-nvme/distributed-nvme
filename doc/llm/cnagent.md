@@ -247,14 +247,15 @@ mirrors nothing: in each cntlr's state the prober and path-watcher
 registries; in each CN's and each cntlr's state its observation slot, which
 holds its latest observation and its running background read (`dnagent.md`
 SH28, SH29); the converge marks (`dnagent.md` SH30); and the CN10
-disconnect registry, all in memory only, never persisted. Five more
-in-memory-only fields of a cntlr's state sit outside that mutex, touched
-only under the cntlr's object lock or the node write lock: the marks of
-CN14's activation sweep (`pendingSweep`), CN14's torn marks (`tornTds`),
-CN12's acted marks (`forcedStarts`), CN12's md checks (`mdChecks`) and
-`reqFromRpc`, which says whether the request this process holds counts as
-delivered (CN8, CN12, CN14). Each state's request is an atomic pointer,
-stored and loaded without that mutex: other cntlrs' passes and the
+disconnect registry, all in memory only, never persisted. Five more fields
+of a cntlr's state sit outside that mutex, touched only under the cntlr's
+object lock or the node write lock: the marks of CN14's activation sweep
+(`pendingSweep`), CN14's torn marks (`tornTds`), the one of these the local
+store also holds (CN14), CN12's acted marks (`forcedStarts`), CN12's md
+checks (`mdChecks`) and `reqFromRpc`, which says whether the request this
+process holds counts as delivered (CN8, CN12, CN14); the rest are in memory
+only. Each state's request is an atomic pointer, stored and loaded without
+that mutex: other cntlrs' passes and the
 node-level verdict read every cntlr's request holding none of its object
 lock, and a request is never modified once stored. The tracker has its own
 lock; the chunk sets are touched only under the cntlr's object lock, or
@@ -294,10 +295,11 @@ slots.
 
 ### Startup reconcile
 
-CN2. Enumerate the store (`dnagent.md` SH6) for the cn's four store kinds —
+CN2. Enumerate the store (`dnagent.md` SH6) for the cn's five store kinds —
 `StoreKindCn`, the CN request file; `StoreKindCntlr`, the cntlr request
 file; `StoreKindCloneBm`, the clone bitmap chunk file; `StoreKindCnProbe`,
-the probe file of CN28, which the enumeration deletes and never loads — and
+the probe file of CN28, which the enumeration deletes and never loads;
+`StoreKindTorn`, a cntlr's torn marks file of CN14 — and
 load every CN and cntlr request into memory first, saving the cntlr files
 skipped with their CN (below). Then reload every chunk into the owning
 cntlr's `CloneChunkSet` (`dnagent.md` SH21), keyed by the `(src_slice_idx,
@@ -325,6 +327,14 @@ chunk's own push (CN22), each with the ns-devs paused for the apply when
 they map the dm-clone (`architecture.md`, Bitmap push protocol, The apply
 pauses the writers). Until then the clone re-copies regions it never needed
 to.
+
+Then load every torn marks file into its cntlr's torn marks, before any
+converge, which drops the marks its request no longer wants (CN14); the
+cntlr comes out of the file's content, `TornMarks`, never out of its name.
+Such a file follows the chunk files' rules below for an owner that is not
+loaded: deleted as an orphan, or skipped while a CN or cntlr file that did
+not load may name its cntlr. A torn marks file that does not decode is
+logged and left; the drop of its cntlr deletes it by name (CN7).
 
 A decoded chunk file whose cntlr is not among the loaded cntlr
 requests, or whose `clone_id` is absent from that cntlr's stored
@@ -486,7 +496,7 @@ not in memory and keeps its file (CN2). A pointer in the request without
 local state needs nothing
 yet — resources come with its first `SyncupCntlr`; the accepted request
 the agent holds for the CN is what makes the pointer known (CN8). A local
-cntlr whose pointer left the list is forgotten: its cntlr file and chunk files are deleted, its
+cntlr whose pointer left the list is forgotten: its cntlr file, chunk files and torn marks file are deleted, its
 leg probers, its path watchers (CN10) and its running read are cancelled, its memory entry and object lock are dropped
 (`dnagent.md` SH7) — and nothing of its is removed from the node by this
 step. The diff also drops the object lock entry of every pointer that
@@ -2751,9 +2761,23 @@ Three cases, decided per td by two request fields:
    the thin table when the device is absent; the id is known to exist in
    every slice pool (`architecture.md`, sp role).
 2. `created` false, `ori_id` zero — `ensureThin` messages the thin create
-   of `dev_id` when the device is absent, then `dmsetup create`. EEXIST
-   is tolerated: a crash between the message and the create, or a message
-   a previous primary already sent.
+   of `dev_id` when the device is absent, then `dmsetup create`. A device
+   already there is adopted as it is, the restart of this node's own
+   build. A create that fails, whatever the failure, is followed by the
+   pool's device headers, and the volume is built over the id only while
+   they show it maps no block, or do not list it (below, A new volume's
+   thin id). The pool may hold the id: the create is refused with EEXIST
+   after a crash between the message and the create, after a message a
+   previous primary already sent, and after an etcd restore handed the id
+   out again while an old volume still holds it (`architecture.md`, Known
+   limits). Or the message may never have been carried out or answered: a
+   pool that takes no message — read-only, out of metadata space, or
+   waiting for a check — refuses it with EOPNOTSUPP, while dm-thin still
+   loads a thin table over an id that pool holds, and a message the
+   `dnagent.md` SH15 soft timeout killed may have made the id. Reason for
+   every failure: only the headers tell an id that holds another volume's
+   data from one that does not, and a thin table over such an id serves
+   that data to the new volume's host.
 3. `created` false, `ori_id` non-zero — the pre-pass messages, and only
    it: the snapshot message of `dev_id` from `ori_id` per slice whose pool
    takes the message (below) and whose snapshot device is absent, inside
@@ -2791,6 +2815,51 @@ absent volume `MISSING` with no reason (CN28). Reason: the worker
 decides by the field, and a tool's wording is no contract. Standby cntlrs
 build no thin volumes and are unaffected. The delete message a td leaving
 `td_list` triggers is not gated on `created` (below).
+
+**A new volume's thin id.** When the thin create of case 2 fails, whatever
+the failure (`adoptThinId`), no device is there to read the id from, so the
+agent reads
+the slice pool's device headers — each thin id the pool holds and the
+blocks it maps, never a mapping — with `thin_dump --metadata-snap
+--skip-mappings`, between a metadata snapshot's reserve and its release,
+under the reserve, release and file rules of CN25 (`readThinHeaders`). The
+read runs once per slice per pass, at the first such volume of the slice,
+and serves every other one of that slice in the pass. An id that maps
+blocks is not adopted: the row reads `RES_STATUS_ERROR` with the reason
+`RES_REASON_THIN_ID_NOT_ADOPTED` and the blocks in its details, and no thin
+volume is built over it. An id that maps none is adopted, and the `dmsetup
+create` that follows decides; so it does for an id the headers do not list
+at all, which the create's message did not make and the thin table's
+create then refuses. A reserve refused
+because a metadata snapshot is already held, after CN25's release and
+retry, is a wait: the row reads `RES_STATUS_MISSING` with the refusal's
+text and no reason, which the converge's verdict names, so the worker's
+re-send tries again (CN30). Any other failure of the read — a timeout, a
+tool or option that is missing, a document that does not parse, a reserve
+refused by a pool that takes no message, as its create was — reads
+`RES_STATUS_ERROR` with `RES_REASON_THIN_ID_NOT_ADOPTED` and the read's
+text. The verdict names no row of that reason (CN30), and the worker
+counts it, for a td created or not, among the faults a failover cannot
+cure (`dnv-worker.md` HL2): the pool and its ids live on the sp's legs, so
+every new primary meets the same id. A read finds such a volume absent
+and names it, so the worker re-sends every second round, as for a lost id
+(Known limits), and each re-send's converge reads the headers again: a
+read that then answers decides as above; otherwise the volume waits for
+the operator. Reasons: a full dump walks every mapping of the pool under
+the `dnagent.md` SH15 command limit, which on a large pool even the
+agent's own empty id would never get through; a probe device over the id
+is a thin device, which the sweep deletes by id when it removes it over a
+wanted pool. Cost: a promotion over uncreated volumes in S slices runs at
+most S header reads ahead of the namespaces' ANA step under the cntlr's
+lock, each up to nine commands under a command limit of its own — the
+dump directory's mkdir and stat, the reserve, with a release and a second
+reserve when it is refused as held, the dump, the file's read and
+removal, and the release. What the refusal does not
+cover: a snapshot's id maps its origin's blocks, so a snapshot after an
+etcd restore can still take an old volume's id; and a host write between a
+new volume's build and its created flip, then a failover, makes the new
+primary refuse the pool's own volume (`architecture.md`, Known limits).
+Both stay inside one pool.
 
 **Cross-slice point-in-time.** The per-slice suspend quiesces one pool's
 origin only; a striped td snapshots atomically only if no host write
@@ -2837,7 +2906,15 @@ message the pool metadata answers. The quiesce is `suspendSnapOrigin`
 when the plan holds the origin, which suspends the raid0 iff it is live —
 covering a fresh primary, a plan with nothing built yet and a raid0
 someone else holds suspended. An origin absent from the plan means there
-is nothing to quiesce, not that the messages belong to someone else.
+is nothing to quiesce, not that the messages belong to someone else. A
+quiesce that fails — the raid0's info read does not answer, or its
+suspend fails — still sends every needed message, and a run whose
+messages then make ids in two or more slices marks the snapshot torn
+(below). Reason: a run that sent no message would wait for a re-send that
+never comes, since the verdict leaves a waiting snapshot's rows unnamed
+(CN30), and naming them would stall the origin's host IO every second
+round. One id made alone tears nothing; a later run that makes another
+beside it marks the tear by the rule below.
 
 **A read names an uncreated snapshot while the pre-pass would message.**
 One test decides the pre-pass's claim set and whether a cntlr's read names
@@ -2892,23 +2969,42 @@ run of it makes a new thin id in one slice while another slice of the
 snapshot already has its id: that slice's snapshot thin device exists, or
 its message is refused with EEXIST, read from the error's type, never from
 its text; the device of every slice that is not deferred is read,
-whether or not its pool takes the message this pass. A slice whose device
-read fails, one with no device whose pool takes no message, and one whose
-message fails otherwise count as neither, and a run that makes every slice's id,
-or none, marks nothing. The agent keeps the mark in memory (`tornTds`)
-from that run until a request carries the td `created` or the td leaves
-`td_list`, and every report carries it in the td's entry of
-`td_id_to_thin_info` while the td is uncreated, a converge's and a
-read's alike (CN28), so the created flip, which either reply can bring,
-writes it into the thin device record
-(`dnv-worker.md` RW19). The mark is best effort: between the run that saw
-the tear and the flip, an agent restart can lose it, and so can a failover
-or a cntlr replacement that moves the primary role off this cntlr (Known
-limits). `created` certifies materialization, not point-in-time
-consistency: a later pass sends the remaining messages, every row goes
-`OK`, and the flag flips, torn only when the mark has lasted until then.
-Reason: the one remedy is to delete and re-create the snapshot, and
-nothing else tells the operator which one.
+whether or not its pool takes the message this pass. A message that never
+answered — the soft timeout killed it — counts as one that made the id:
+the kernel may have carried it out, and the thin loop of the same pass
+then builds the device over it, after which no run messages that slice
+again. Reason for no read of the id: a killed message that made nothing
+leaves the slice to a later run, which makes its id beside the others and
+tears the snapshot as well, so the mark is false only for a run whose
+quiesce failed and two or more of whose killed messages made nothing — a
+snapshot flagged as possibly inconsistent, the safe side. A slice whose
+device read fails, one with no device whose pool takes no message, one
+whose message is refused otherwise, and one whose message never went,
+after a failed read or suspend of its origin thin volume, count as
+neither, and a run that makes every slice's id, or none, marks nothing,
+but for a run whose quiesce failed (above). The
+agent keeps the mark (`tornTds`) from that run until a request lists the
+td `torn` or the td leaves `td_list`, and saves it at once in the local
+store, before the thin loop, in a file of the cntlr's own
+(`LocalTornPath`, `architecture.md`, Agent local-store paths), which the
+startup reconcile loads (CN2) and a converge that drops a mark rewrites,
+or removes once it holds no mark (`keepTornMarks`). A save that fails is
+logged and keeps the mark in memory and reported; nothing remembers the
+failure, and the next write of the file, at another tear or a dropped mark,
+holds every mark the cntlr then holds. Every
+report carries the mark in the td's entry of `td_id_to_thin_info`, a
+converge's and a read's alike (CN28), in any role, created or not: a
+cntlr that is not the primary builds no thin volume and reports it in an
+entry with no rows. The worker records it in the thin device record from
+the first report that shows it (`dnv-worker.md` RW19), and the request then
+lists the td `torn`. Reason: after a failover only the old primary knows
+the tear, and its node may come back long after the new primary's
+created flip. What still loses the mark is under Known limits. `created`
+certifies materialization, not point-in-time consistency: a later pass
+sends the remaining messages, every row goes `OK`, and the flag flips,
+whether the mark is recorded yet or not. Reason: the one remedy is to
+delete and re-create the snapshot, and nothing else tells the operator
+which one.
 
 The persisted `SyncupCntlrRequest` carries `created` too (`dnagent.md`
 SH5). Between a td's materialization and the flip's re-sync the stored
@@ -4783,7 +4879,8 @@ The rows, each with its `res_name` and what its probe checks:
   `CnThinDevName`: `dmsetup table` (pool and `dev_id`); a created td's
   volume a read reads absent is `RES_STATUS_MISSING` with no reason
   (CN14). The td's entry also carries its torn mark, which a read reports
-  from the agent's memory as the converge does (CN14).
+  from the agent's memory as the converge does, in any role, a cntlr that
+  is not the primary in an entry with no rows (CN14).
 * `slice_id_to_dm_pool`, named by the `CnPoolFinalName`:
   `dmsetup status` with the `--noflush` flag (`dnagent.md` SH17); the
   details are the raw status line — the worker
@@ -5044,8 +5141,10 @@ its details and the converge pass continues with the remaining resources.
 Two things qualify that. The details are for people: where the worker must
 tell one cause of a row's status from another, the row says so in its reason
 (`architecture.md`, Live-state reporting), never in the text. The cn agent
-sets seven reasons: CN14's lost thin id, from the command wrapper's typed
-error (`dnagent.md`, OS wrappers — `dm.go`, `nvmet.go`, `nvmehost.go`); and,
+sets eight reasons: CN14's lost thin id, from the command wrapper's typed
+error (`dnagent.md`, OS wrappers — `dm.go`, `nvmet.go`, `nvmehost.go`);
+CN14's thin id not adopted, from the thin create's typed refusal and the
+pool's header read; and,
 from its own pass's state, CN19's level, from the level the pass's plan
 reads, CN18's source fault, which marks the clone rows this node keeps
 missing because it does not read the clone's source as ready, from step 1's
@@ -5059,7 +5158,8 @@ command's output joining their details. Probes create, change and remove no
 object of the node — the one file the CN's read writes itself is the store's
 probe file (the store row above) — the metadata-snapshot reserve runs only
 inside `dumpThinMetadata` (the CN25 bitmap reads and CN14's sweeps of a
-pool's thin ids — the activation sweep and the sweep after a failed delete),
+pool's thin ids — the activation sweep and the sweep after a failed delete)
+and `readThinHeaders` (CN14's header read of a converge),
 never from `probe.go` — though a status read of a dm-clone whose copy
 reads whole makes the kernel commit the clone's metadata, where every other
 status read commits nothing (`dnagent.md` SH17). `RES_STATUS_PROVISIONING` is never produced by this
@@ -5166,7 +5266,8 @@ reads `RES_STATUS_MISSING` with no reason as "absent", and one that reads
 namespace that serves and whose ANA group differs, or a thin pool short of
 its metadata device or holding a metadata snapshot, CN13), as "differs". It
 names no row the level suppresses, no `RES_STATUS_PROVISIONING` row, no
-thin row a converge marks `RES_REASON_THIN_ID_LOST` (CN14), no pool row that
+thin row a converge marks `RES_REASON_THIN_ID_LOST` or
+`RES_REASON_THIN_ID_NOT_ADOPTED` (CN14), no pool row that
 reads needs_check or failed (`RES_REASON_POOL_NEEDS_CHECK`,
 `RES_REASON_POOL_FAILED`, CN13), no subsystem
 whose link fails because the node's port is not there ("the port is not
@@ -6304,16 +6405,28 @@ stores instead is CN23's.
   converge then meets the lost id again, marks its row
   `RES_REASON_THIN_ID_LOST` and names nothing for it, so the worker sends
   the `SyncupCntlr` on every second round for as long as the id stays
-  lost, which only an operator ends (`dnv-worker.md` HL2).
-* A torn snapshot's mark is best effort. CN14 keeps it in memory from the
-  pre-pass run that saw the tear until a request carries the td `created`,
-  and the created flip records it from a reply that completes the td
-  (`dnv-worker.md` RW19). An agent restart in between can lose it, and so
-  can a failover or a cntlr replacement that moves the primary role off
-  the cntlr holding it (`dnv-worker.md` AR5, AR7): a primary whose run
-  finds every slice's id made already sees no tear, and a demoted primary
-  reports no thin rows. The snapshot then flips with `torn` false
-  (`architecture.md`, Known limits).
+  lost, which only an operator ends (`dnv-worker.md` HL2). A new volume
+  whose thin id the converge does not adopt (CN14) costs the same: the read
+  reads it absent and names it, and each re-send's converge runs the
+  slice's header read again, up to nine bounded commands per such slice
+  (CN14), for as
+  long as the id holds data or its header read fails; a failing read is
+  not left out of the read's name, since the agent keeps no memory of a
+  converge's failure.
+* A torn snapshot's mark is lost only with the cntlr that saw the tear.
+  CN14 saves it in the local store right after the pre-pass run that saw
+  it, so an agent restart keeps it, and every cntlr reports a mark it holds
+  in any role until a request lists the td `torn`, so a demoted primary,
+  or one whose node comes back after the new primary's created flip,
+  reports it and the worker records it (`dnv-worker.md` RW19). It is lost
+  when the cntlr that saw the tear never reports again — its node never
+  comes back, its local store is lost, or its pointer leaves the CN's list
+  first — and when the agent dies between the run's first message and the
+  save, a window of the rest of one pre-pass: a primary whose run then
+  finds every slice's id made sees no tear. The snapshot then reads `torn`
+  false (`architecture.md`, Known limits). A save that fails keeps the mark
+  in memory and logs, so an agent restart before the worker records it, and
+  before another write of the file, loses it too.
 * While the CN's store disk refuses writes, the agent keeps the last
   requests it accepted for the CN and its cntlrs: every `SyncupCn` and
   `SyncupCntlr` the gates admit is refused until a save holds (`dnagent.md`

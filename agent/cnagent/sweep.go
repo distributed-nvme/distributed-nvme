@@ -1861,7 +1861,9 @@ func (s *CnAgentServer) sweepCntlr(
 // layer is named, the lowest, whose converge builds the rest. It names no row
 // the level suppresses (RES_REASON_SP_LEVEL), no RES_STATUS_PROVISIONING row,
 // the stack a deferred build holds back on purpose, no thin row whose pool
-// has lost its thin id (RES_REASON_THIN_ID_LOST), no pool row that reads
+// has lost its thin id (RES_REASON_THIN_ID_LOST) or holds a thin id the
+// agent does not adopt for a new volume (RES_REASON_THIN_ID_NOT_ADOPTED), no
+// pool row that reads
 // needs_check (RES_REASON_POOL_NEEDS_CHECK) or failed
 // (RES_REASON_POOL_FAILED), and no row of a transfer
 // whose origin the request no longer names, none of which a converge cures.
@@ -2049,6 +2051,7 @@ func nameCntlrRow(row *pb.ResInfo, res *agent.SweepResult) {
 		err = errRowAbsent
 	case pb.ResStatus_RES_STATUS_ERROR:
 		if row.GetReason() == pb.ResReason_RES_REASON_THIN_ID_LOST ||
+			row.GetReason() == pb.ResReason_RES_REASON_THIN_ID_NOT_ADOPTED ||
 			row.GetReason() == pb.ResReason_RES_REASON_POOL_NEEDS_CHECK ||
 			row.GetReason() == pb.ResReason_RES_REASON_POOL_FAILED ||
 			row.GetDetails() == detailsPortMissing ||

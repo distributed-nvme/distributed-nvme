@@ -99,6 +99,7 @@ const (
 	localStorKindCloneBm = "clone-bm"
 	localStorKindDnProbe = "probe-dn"
 	localStorKindCnProbe = "probe-cn"
+	localStorKindTorn    = "torn"
 )
 
 type NameFmt struct {
@@ -731,6 +732,26 @@ func (nf *NameFmt) LocalCntlrPath(
 		"%s/%s-%016x-%016x-%016x-%016x",
 		nf.localStorPrefix,
 		localStorKindCntlr,
+		clusterId,
+		cnId,
+		spId,
+		cntlrId,
+	)
+}
+
+// LocalTornPath names the file of one cntlr's torn marks in a cn agent's
+// local store (cnagent.md CN14), which the agent writes while it holds a mark
+// and removes once it holds none.
+func (nf *NameFmt) LocalTornPath(
+	clusterId uint64,
+	cnId uint64,
+	spId uint64,
+	cntlrId uint64,
+) string {
+	return fmt.Sprintf(
+		"%s/%s-%016x-%016x-%016x-%016x",
+		nf.localStorPrefix,
+		localStorKindTorn,
 		clusterId,
 		cnId,
 		spId,

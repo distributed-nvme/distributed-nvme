@@ -184,7 +184,7 @@ DIAG_CNTLRS=()
 # run fails.
 THROTTLED=0
 
-CASES=(smoke redund repair teardown thinbm clone_xfer restart)
+CASES=(smoke redund repair teardown thinbm torn clone_xfer restart)
 
 # ---------------------------------------------------------------------------
 # Logging, assertions, failure handling
@@ -912,7 +912,9 @@ req_grp() { # grpid ext_cnt meta_blocks data_blocks leg_json…
 # created defaults to false — the state a td is in between CreateThinDevice
 # and the sp-worker's materialization flip (dnv-worker.md RW19). A
 # request carrying `created: true` is the one a real worker publishes after
-# the flip, and the agent then sends no pool message for that td at all.
+# the flip, and the agent then sends no pool message for that td at all;
+# flip_created plays that flip after a primary's build (cnagent_integtest.md,
+# Conventions, The created flip).
 req_td() { # tdid dev_id ori_id [created]
 	printf '{"td_id": "%s", "dev_id": %s, "ori_id": %s, "size": "%s", "created": %s}' \
 		"$(d16 "$1")" "$2" "$3" "$TD_SIZE" "${4:-false}"
@@ -1041,6 +1043,32 @@ req_set() { # file jq-filter
 	local tmp="$1.tmp"
 	"$JQ" "$2" "$1" >"$tmp" || die "editing $1 failed: $2"
 	mv "$tmp" "$1"
+}
+
+# flip_created plays the sp worker's created flip (dnv-worker.md RW19;
+# cnagent_integtest.md, Conventions, The created flip): every td whose thin
+# rows in the primary's reply <json> all read RES_STATUS_OK, one for each
+# slice of the first request file, is set `created` in every request file
+# given, and the change goes out with each file's next syncup. A td the
+# reply does not carry whole and OK is left as it is, and a reply that
+# completes no td fails the stage, since each caller follows a build that
+# must have completed its td.
+flip_created() { # json file…
+	local json=$1 n ids f
+	shift
+	n=$("$JQ" '.id_to_slice | length' "$1") ||
+		die "flip_created: the slices of $1 do not read"
+	ids=$(printf '%s' "$json" | "$JQ" -c --argjson n "$n" '
+		[(.cntlr_info.td_id_to_thin_info // {}) | to_entries[]
+		 | select((.value.slice_id_to_dm_thin // {})
+			| length == $n and all(.[]; .status == "RES_STATUS_OK"))
+		 | .key]') || die "flip_created: the primary's reply does not parse"
+	[ "$ids" != "[]" ] ||
+		die "flip_created: the primary's reply completes no td"
+	for f; do
+		req_set "$f" "$ids"' as $ids | .td_list |= map(.td_id as $t
+			| if any($ids[]; . == $t) then .created = true else . end)'
+	done
 }
 
 # cn_syncup_cntlr posts one request file at the CN's current revision. The
@@ -4582,7 +4610,7 @@ case_redund() {
 	local out dev want got seq rev1 rev2 i nsdev
 	local writer deadline mkey dkey lkey mst dst ldet n rules mark cmds name
 	local mname vd metadev datadev
-	local grp md2 la lb nsdev1 err1 raid01 info1
+	local grp md2 la lb nsdev1 err1 raid01 info1 built
 	diag_cntlr 1 "$sp" "$c1"
 	diag_cntlr 2 "$sp" "$c2"
 	dev=$(host_dev "$uuid")
@@ -4620,6 +4648,7 @@ case_redund() {
 	assert_map_ok "$out" slice_id_to_dm_pool "$A_SLICE" "redund primary"
 	assert_map_ok "$out" td_id_to_raid0 "$A_TD" "redund primary"
 	assert_map_ok "$out" ns_id_to_namespace "$A_NS" "redund primary"
+	built=$out
 	bump_cn_rev 2
 	rev2=${CNREV[2]}
 	out=$(cn_syncup_cntlr 2 "$req2")
@@ -4629,6 +4658,10 @@ case_redund() {
 	done
 	assert_map_ok "$out" ns_id_to_namespace "$A_NS" "redund standby"
 	assert_map_ok "$out" ns_id_to_dm_linear "$A_NS" "redund standby"
+	# The worker's created flip: both promotions below build the td's thin
+	# volume again over the id the host writes into, which a volume that
+	# is not created would refuse (cnagent.md CN14).
+	flip_created "$built" "$req1" "$req2"
 
 	stage assert "primary md state, standby shape, host isolation"
 	# CN12 case 1: neither member carries an md superblock — a fresh side's
@@ -6596,6 +6629,7 @@ case_repair() {
 	local xleg=0x11 xside=0x12 yleg=0x13 yside=0x14 xrep=0x15 yrep=0x16
 	local out dev want seq rev1 rev2 f grp md1 md1dev md2 bad xname yname
 	local leg2name mrd full wsect outplace want_cmds name vd deadline named
+	local built
 	diag_cntlr 1 "$sp" "$c1"
 	diag_cntlr 2 "$sp" "$c2"
 	dev=$(host_dev "$uuid")
@@ -6639,12 +6673,18 @@ case_repair() {
 	assert_eq "$(grp_reading "$out" "$A_DGRP")" \
 		"true $(d16 "${A_DLEG[1]}"),$(d16 "${A_DLEG[2]}")" \
 		"repair primary: the data array's reading"
+	built=$out
 	bump_cn_rev 2
 	rev2=${CNREV[2]}
 	out=$(cn_syncup_cntlr 2 "$req2")
 	assert_map_ok "$out" ns_id_to_dm_linear "$A_NS" "repair standby"
 	assert_eq "$(grp_reading "$out" "$A_DGRP")" none \
 		"repair standby: a standby reads no array"
+	# The worker's created flip: the failover and the forced starts, whose
+	# levels take the thin pool down, build the td's thin volume again over
+	# the id the host writes into, which a volume that is not created would
+	# refuse (cnagent.md CN14).
+	flip_created "$built" "$req1" "$req2"
 	md1=$(cnctl 1 md-name --sp "$sp" --slice-idx 0 --grp-idx 0)
 	md1dev=$(jq_of "$md1" .dev_path)
 	bad=$(cn_dm_name c9 1 "$sp" "${A_DLEG[1]}")
@@ -7736,6 +7776,222 @@ case_thinbm() {
 }
 
 # ---------------------------------------------------------------------------
+# Case W — torn (cnagent_integtest.md, Cases): a torn snapshot's saved mark,
+# and a new volume over a thin id that holds data
+# ---------------------------------------------------------------------------
+#
+# The W-shaped SP is the S shape twice over: two slices, each with one
+# RedundNone meta group and one RedundNone data group on DN1, so a td stripes
+# over two thin volumes and a snapshot has two slices to be torn between
+# (cnagent.md CN14). Slice 1 takes the S shape's sub-ids; slice 2 takes them
+# plus 0x10.
+
+W_SLICE=("" 0x2 0x12)
+W_MGRP=("" 0x3 0x13)
+W_MLEG=("" 0x4 0x14)
+W_MSIDE=("" 0x5 0x15)
+W_DGRP=("" 0x6 0x16)
+W_DLEG=("" 0x7 0x17)
+W_DSIDE=("" 0x8 0x18)
+W_TD=0x9
+W_SNAP=0x19
+W_TD3=0x1a
+W_SS=0xa
+W_NS=0xb
+
+# req_wide writes the W-shaped request: one primary cntlr, the origin td
+# with one namespace, and the two slices.
+req_wide() { # file cnidx dnidx sp cntlr slot ss_nqn uuid
+	local file=$1 cn=$2 dn=$3 sp=$4 cntlr=$5 slot=$6 nqn=$7 uuid=$8 i slices=()
+	for i in 1 2; do
+		slices+=("$(printf '"%s": {"slice_idx": %s, "meta_grp_list": [%s], "data_grp_list": [%s]}' \
+			"$(hex16 "${W_SLICE[$i]}")" $((i - 1)) \
+			"$(req_grp "${W_MGRP[$i]}" 1 "$NONE_META_BLOCKS" "$NONE_EXT1_DATA" \
+				"$(req_leg "${W_MLEG[$i]}" 0 "$(req_side "${W_MSIDE[$i]}" "$dn")")")" \
+			"$(req_grp "${W_DGRP[$i]}" 2 "$NONE_META_BLOCKS" "$NONE_EXT2_DATA" \
+				"$(req_leg "${W_DLEG[$i]}" 0 "$(req_side "${W_DSIDE[$i]}" "$dn")")")")")
+	done
+	cat >"$file" <<EOF
+{
+  "cluster_id": "$(d16 "$CLUSTER")", "cn_id": "$(d16 "${CNID[$cn]}")",
+  "cntlr_pointer": {"sp_id": "$(d16 "$sp")", "cntlr_id": "$(d16 "$cntlr")"},
+  "revision": "0",
+  "bdev_conf": {
+    "dm_pool_conf": {"data_block_size": "$BLOCK_SIZE",
+                     "low_water_mark_pct": $LOW_WATER_PCT},
+    "dm_raid0_conf": {"stripe_size": "$STRIPE_SIZE"},
+    "redund_conf": {"redund_none": {}}
+  },
+  "sp_level": "SP_LEVEL_READWRITE",
+  "cntlr": $(req_cntlr "$cn" "$slot" true),
+  "id_to_slice": {$(join_json "${slices[@]}")},
+  "td_list": [$(req_td "$W_TD" 1 0)],
+  "nqn_to_subsystem": {
+    "$nqn": $(req_subsys "$W_SS" "[\"$HOST_NQN\"]" \
+			"$(req_ns "$W_NS" 1 "$W_TD" "$uuid" false)")
+  }
+}
+EOF
+}
+
+# thin_row_of <json> <td> <slice> <field> — one field of a thin row of a
+# reply, "" for one it does not carry.
+thin_row_of() {
+	jq_of "$1" ".cntlr_info.td_id_to_thin_info[\"$(d16 "$2")\"].slice_id_to_dm_thin[\"$(d16 "$3")\"].$4 // \"\""
+}
+
+# torn_of <json> <td> — the torn mark a reply carries for a td, true or
+# false (protojson omits a false bool).
+torn_of() {
+	jq_of "$1" ".cntlr_info.td_id_to_thin_info[\"$(d16 "$2")\"].torn // false"
+}
+
+# restart_cn <cnidx> <label> — stops the cn agent and starts it again over
+# the same local store and the same kernel state, as the restart case does,
+# and waits for its startup pass to end (dnagent.md SH33).
+restart_cn() {
+	local out
+	assert_eq "$(helper "$1" "kill_role cn")" stopped "$2: cn$1 stopped"
+	sshv "$1" "mv $CN_LOG $WORK/cn-agent.$CASE-$(date +%s).log"
+	start_cn_agent "$1"
+	out=$(cnctl "$1" get-cn-size --wait 60)
+	assert_eq "$(jq_of "$out" .size)" "$CN_CAPACITY" "$2: cn$1 size"
+}
+
+case_torn() {
+	CASE=torn
+	DIAG_CNTLRS=()
+	SIDE_PROVISIONED=()
+	local sp=0x3f1 cntlr=0x1 cn=1 dn=1 slot=0 i
+	local nqn="$NQN_IT_PREFIX:w:vol1"
+	local uuid=77777777-7777-4777-8777-777777777777
+	local req="$WORK/req-torn-cn1.json"
+	local out cntlrrev pool pool1 orithin2 devno got
+	local plant=dnv-it-plant
+	diag_cntlr "$cn" "$sp" "$cntlr"
+
+	stage dn "the W-shaped SP, two slices on DN1"
+	dn_pointers "$dn" "$sp:${W_MLEG[1]}:${W_MSIDE[1]}" \
+		"$sp:${W_DLEG[1]}:${W_DSIDE[1]}" "$sp:${W_MLEG[2]}:${W_MSIDE[2]}" \
+		"$sp:${W_DLEG[2]}:${W_DSIDE[2]}"
+	for i in 1 2; do
+		dn_side "$dn" "$sp" "${W_MLEG[$i]}" "${W_MSIDE[$i]}" 1 \
+			"$NONE_MGRP_ZERO_BYTES" "${CNID[$cn]}"
+		dn_side "$dn" "$sp" "${W_DLEG[$i]}" "${W_DSIDE[$i]}" 2 \
+			"$NONE_DGRP_ZERO_BYTES" "${CNID[$cn]}"
+	done
+
+	stage cn "CN1 builds the origin over both slices"
+	bump_cn_sync "$cn"
+	out=$(cnctl "$cn" syncup-cn --revision "${CNREV[$cn]}" --cntlr "$sp:$cntlr")
+	assert_cn_info_ok "$out" "torn syncup-cn"
+	req_wide "$req" "$cn" "$dn" "$sp" "$cntlr" "$slot" "$nqn" "$uuid"
+	bump_cn_rev "$cn"
+	out=$(cn_syncup_cntlr "$cn" "$req")
+	for i in 1 2; do
+		assert_thin_ok "$out" "$W_TD" "${W_SLICE[$i]}" torn
+	done
+	assert_map_ok "$out" td_id_to_raid0 "$W_TD" torn
+
+	stage plant "a planted thin id that holds data (CN14)"
+	# What an etcd restore leaves: slice 1's pool holds id 3 with one block
+	# mapped, and no device. The device made by hand goes before the
+	# syncup, so the agent meets the id alone.
+	pool1=$(cn_dm_name c2 "$cn" "$sp" "${W_SLICE[1]}")
+	devno=$(sshv "$cn" "dmsetup info -c --noheadings -o major,minor $pool1" |
+		tr -d ' ')
+	sshv "$cn" "dmsetup message $pool1 0 create_thin 3"
+	sshv "$cn" "dmsetup create $plant --table '0 $((TD_SIZE / 2 / 512)) thin $devno 3'"
+	make_pattern "$cn" "$WORK/pattern-w-plant.bin" 1
+	write_range "$cn" "$WORK/pattern-w-plant.bin" "/dev/mapper/$plant" 1
+	sshv "$cn" "dmsetup remove $plant"
+
+	stage refuse "a new volume over the id is refused, unnamed (CN14, CN30)"
+	req_set "$req" ".td_list = [$(req_td "$W_TD" 1 0 true), $(req_td "$W_TD3" 3 0)]"
+	bump_cn_rev "$cn"
+	cntlrrev=${CNREV[$cn]}
+	out=$(cn_syncup_cntlr "$cn" "$req")
+	assert_eq "$(thin_row_of "$out" "$W_TD3" "${W_SLICE[1]}" status)" \
+		RES_STATUS_ERROR "torn: the refused slice's row"
+	assert_eq "$(thin_row_of "$out" "$W_TD3" "${W_SLICE[1]}" reason)" \
+		RES_REASON_THIN_ID_NOT_ADOPTED "torn: the refused slice's reason"
+	case "$(thin_row_of "$out" "$W_TD3" "${W_SLICE[1]}" details)" in
+	*"maps 1 blocks"*) ;;
+	*) die "torn: the refusal's details do not name the one mapped block" ;;
+	esac
+	assert_thin_ok "$out" "$W_TD3" "${W_SLICE[2]}" "torn: the other slice"
+	got=$(helper "$cn" "cn_events $TRACE")
+	assert_absent "$got" "^dmsetup create $(cn_dm_name c3 "$cn" "$sp" "$W_TD3" \
+		"${W_SLICE[1]}")( |\$)" "torn: a thin volume was built over the id"
+	assert_eq "$(event_cnt "$got" "^thin_dump --metadata-snap --skip-mappings ")" 1 \
+		"torn: one header read, of slice 1's pool"
+	# The read finds the volume absent and names it (CN30).
+	cnctl "$cn" check-cntlr --fresh --sp "$sp" --cntlr "$cntlr" \
+		--revision "$cntlrrev" --expect-code 4 >/dev/null
+
+	stage remove "the id removed by hand, the volume builds"
+	# The operator's step for an id an etcd restore handed out again
+	# (operations.md, A new volume refused for a thin id that holds data).
+	sshv "$cn" "dmsetup message $pool1 0 delete 3"
+	out=$(cn_syncup_cntlr "$cn" "$req")
+	for i in 1 2; do
+		assert_thin_ok "$out" "$W_TD3" "${W_SLICE[$i]}" "torn: after the remove"
+	done
+	assert_map_ok "$out" td_id_to_raid0 "$W_TD3" "torn: after the remove"
+	req_set "$req" ".td_list = [$(req_td "$W_TD" 1 0 true)]"
+	bump_cn_rev "$cn"
+	out=$(cn_syncup_cntlr "$cn" "$req")
+
+	stage halfsnap "slice 2 holds the snapshot's id; the agent restarts"
+	# What a primary leaves that made slice 2's snapshot id and stopped
+	# before slice 1's: the id is made by hand, inside the per-slice quiesce
+	# of the origin's thin volume that dm-thin asks for, and the agent then
+	# restarts between the two slices' steps.
+	pool=$(cn_dm_name c2 "$cn" "$sp" "${W_SLICE[2]}")
+	orithin2=$(cn_dm_name c3 "$cn" "$sp" "$W_TD" "${W_SLICE[2]}")
+	sshv "$cn" "dmsetup suspend $orithin2 && dmsetup message $pool 0 create_snap 2 1; rc=\$?; dmsetup resume $orithin2; exit \$rc"
+	restart_cn "$cn" "torn halfsnap"
+
+	stage tear "slice 1's step tears the snapshot; the mark is saved (CN14)"
+	req_set "$req" ".td_list = [$(req_td "$W_TD" 1 0 true), $(req_td "$W_SNAP" 2 1)]"
+	bump_cn_rev "$cn"
+	cntlrrev=${CNREV[$cn]}
+	out=$(cn_syncup_cntlr "$cn" "$req")
+	for i in 1 2; do
+		assert_thin_ok "$out" "$W_SNAP" "${W_SLICE[$i]}" "torn: the snapshot"
+	done
+	assert_eq "$(torn_of "$out" "$W_SNAP")" true "torn: the converge's mark"
+	assert_eq "$(torn_of "$out" "$W_TD")" false "torn: the origin's mark"
+	sshv "$cn" "test -s $WORK/cn-store/torn-$(hex16 "$CLUSTER")-$(hex16 "${CNID[$cn]}")-$(hex16 "$sp")-$(hex16 "$cntlr")" ||
+		die "torn: no torn marks file in the local store"
+
+	stage saved "the mark outlives a restart (CN2, CN14)"
+	restart_cn "$cn" "torn saved"
+	out=$(cnctl "$cn" check-cntlr --fresh --show-info --sp "$sp" \
+		--cntlr "$cntlr" --revision "$cntlrrev")
+	assert_eq "$(torn_of "$out" "$W_SNAP")" true "torn: the mark after a restart"
+
+	stage recorded "a request that lists the td torn clears the mark"
+	# The worker's record of the mark (dnv-worker.md RW19), with the flip.
+	req_set "$req" ".td_list |= map(.created = true) | .td_list[1].torn = true"
+	bump_cn_rev "$cn"
+	cntlrrev=${CNREV[$cn]}
+	out=$(cn_syncup_cntlr "$cn" "$req")
+	assert_eq "$(torn_of "$out" "$W_SNAP")" false "torn: the mark once recorded"
+	! sshv "$cn" "ls $WORK/cn-store/torn-* 2>/dev/null" >/dev/null ||
+		die "torn: the torn marks file outlives the recorded mark"
+
+	stage check "converge check round"
+	converge_check "$cn" "$sp" "$cntlr" "$cntlrrev"
+
+	stage teardown "empty cntlr list, then empty side list"
+	cn_drop "$cn"
+	dn_drop "$dn"
+	assert_no_residue "$sp"
+	sshv_ok "$cn" "rm -f $WORK/pattern-w-*.bin"
+}
+
+# ---------------------------------------------------------------------------
 # Case C — clone_xfer (cnagent_integtest.md, Cases): the live move
 # (architecture.md, Transfer + clone = cross-SP live migration) and the
 # metadata kept across an agent restart over a held copy and across a wipe
@@ -7880,6 +8136,8 @@ case_clone_xfer() {
 	rev1=${CNREV[1]}
 	out=$(cn_syncup_cntlr 1 "$req1")
 	assert_map_ok "$out" ns_id_to_namespace "$S_NS" "clone_xfer sp1"
+	# The worker's created flip, as for sp2 below.
+	flip_created "$out" "$req1"
 	host_connect "$hv" 1 "$nqn"
 	helper "$hv" "wait_dev '$dev' 20" || die "no device node $dev on vm$hv"
 	host_wait_ana "$hv" "$nqn" 1 optimized 20
@@ -7907,6 +8165,10 @@ case_clone_xfer() {
 	rev2=${CNREV[2]}
 	out=$(cn_syncup_cntlr 2 "$req2")
 	assert_map_ok "$out" ns_id_to_namespace "$S_NS" "clone_xfer sp2"
+	# The worker's created flip: stage 6's rebuild after the wipe builds the
+	# destination td's thin volume again over the id the copy writes into,
+	# which a volume that is not created would refuse (cnagent.md CN14).
+	flip_created "$out" "$req2"
 	host_connect "$hv" 2 "$nqn"
 	assert_eq "$(host_state "$hv" "$nqn" 2)" live "clone_xfer sp2 path state"
 	assert_eq "$(host_ana "$hv" "$nqn" 2)" inaccessible \

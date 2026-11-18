@@ -188,7 +188,8 @@ always means the SP's `DmPoolConf.data_block_size`.
   Snapshots are thin devices with `ori_id` set. `created` marks a td whose
   thin volume the primary has reported `OK` in every slice (sp role), and
   `torn` a snapshot whose slices the cn agent saw taken at two different
-  moments; only a created td can be snapshotted, and an origin cannot be
+  moments, set at most once and never cleared; only a created td can be
+  snapshotted, and an origin cannot be
   deleted while a snapshot of it is uncreated (Thin devices).
 * **subsystem (ss), namespace (ns)** — The host-facing NVMe-oF objects. A
   namespace binds an `ns_idx` (NSID) of a subsystem to a thin device. Fig.
@@ -1216,6 +1217,7 @@ and {bm_idx} are both rendered with `BmIdxFmt`.
 | `LocalMigrBmPath` | {prefix}/migr-bm-{cluster}-{dn}-{sp}-{migr}-{bm_idx} | one received `PushMigrBitmapRequest` chunk (Bitmap push protocol) |
 | `LocalDnProbePath` | {prefix}/probe-dn-{cluster}-{dn} | the probe a dn agent's read saves while its store's disk refuses writes (`dnagent.md` DN18); never loaded |
 | `LocalCnProbePath` | {prefix}/probe-cn-{cluster}-{cn} | the probe a cn agent's read saves while its store's disk refuses writes (`cnagent.md` CN28); never loaded |
+| `LocalTornPath` | {prefix}/torn-{cluster}-{cn}-{sp}-{cntlr} | a cntlr's torn marks (`TornMarks`, `cnagent.md` CN14), saved while the cntlr holds one and removed once it holds none |
 | `LocalCloneBmPath` | {prefix}/clone-bm-{cluster}-{cn}-{sp}-{clone}-{src_slice_idx}-{bm_idx} | one received `PushCloneBitmapRequest` chunk (Bitmap push protocol); a clone chunk is addressed by the PAIR, so the name carries two index segments where the migration name carries one |
 
 ## etcd data model
@@ -2888,22 +2890,26 @@ whose messages one pass did not all send — the primary stopped between two
 of them, or the pass skipped a slice or a slice's message failed — is
 finished by a later pass and is **torn**: its slices date from different
 instants. The cn agent marks it torn in its report when one pass makes a
-slice's thin id while another slice's id already exists (`cnagent.md`
-CN14), and the created flip writes the mark into `ThinDevice.torn` in the
-put that sets `created` (sp role; `dnv-worker.md` RW19), so `torn` is
-written once and never changed, and `ListThinDevices` returns it. The one
-remedy is to delete and re-create the snapshot. The mark is best effort:
-the agent keeps it in memory until the flip, so in between an agent
-restart can lose it, and so can a failover or a cntlr replacement that
-moves the primary role off the cntlr holding it; the snapshot then flips
-with `torn` false (Known limits). Reason: nothing else tells the operator
-which snapshot needs the remedy.
+slice's thin id while another slice's id already exists, or makes ids in
+two slices without the quiesce, which failed; a message the soft timeout
+killed counts as one that made its id (`cnagent.md` CN14). It saves
+the mark in its local store at once and reports it in any role until the
+request shows it, and the sp worker writes it into `ThinDevice.torn` from
+the first drain of reports that shows it, created or not, and the created
+flip keeps it (sp role; `dnv-worker.md` RW19): `torn` is set at most once and
+never cleared, and `ListThinDevices` returns it. The one remedy is to
+delete and re-create the snapshot. The mark is lost only with the cntlr
+that saw the tear, by a crash between the run's first message and the
+save, or by a save that fails followed by an agent restart before the
+worker records it; the snapshot then reads `torn` false (Known limits). Reason: nothing
+else tells the operator which snapshot needs the remedy.
 
 **Materialization.** `ThinDevice.created` is written false here and set
 true exactly once by the sp worker, when a cntlr has reported that td's
 thin volume `RES_STATUS_OK` in **every** slice of the SP (sp role);
 `ThinDevice.torn` is written false here too and set, if at all, only by
-that flip. `created` is never cleared: a pool holds a thin id until a
+the sp worker from a cn agent's mark (Snapshot point-in-time). `created`
+is never cleared: a pool holds a thin id until a
 delete message of its `dev_id` reaches it — sent by the td's own deletion
 or, when that fan-out also demoted the applying cntlr (or suppressed its
 pool) so that CN14's pool-presence gate skipped the message, by the CN14
@@ -4700,7 +4706,9 @@ read it (Clones, Migrations).
 `reason` (`ResReason`) is the cause of a row's status that a control-plane
 decision reads: `RES_REASON_NONE` on a row no rule gives a reason;
 `RES_REASON_THIN_ID_LOST`, which `cnagent.md` CN14 sets on an `ERROR` row
-and `dnv-worker.md` HL2 reads; `RES_REASON_POOL_NEEDS_CHECK` and
+and `dnv-worker.md` HL2 reads; `RES_REASON_THIN_ID_NOT_ADOPTED`, which
+`cnagent.md` CN14 sets on the `ERROR` thin row of a new volume whose thin id
+it does not adopt and `dnv-worker.md` HL2 reads; `RES_REASON_POOL_NEEDS_CHECK` and
 `RES_REASON_POOL_FAILED`, which `cnagent.md` CN13 sets on an `ERROR` pool row
 whose status line carries needs_check, or `Fail` or `Error` in place of its
 numbers, the first of which `dnv-worker.md` HL2 reads; `RES_REASON_AWAITING_CUTOVER`, which
@@ -5345,9 +5353,12 @@ clears the migration's `cutover_pending` and bumps `SpRev` (Migration;
 a td: thin rows are only ever filled by a cntlr acting as primary, and the
 ids live in the shared pool metadata on the DN legs. When an accepted
 reply's thin rows for a td cover exactly the SP's slices, every row
-`RES_STATUS_OK`, the worker sets `ThinDevice.created`, writes the reply's
-torn mark for the td into `ThinDevice.torn` in the same put (Thin
-devices), and bumps `SpRev` (`dnv-worker.md` RW19, MD6); the bump re-fans
+`RES_STATUS_OK`, the worker sets `ThinDevice.created`, sets
+`ThinDevice.torn` in the same put when any reply of the same drain marks
+the td torn, keeping a mark set before, and bumps `SpRev` (`dnv-worker.md`
+RW19, MD6); a reply that marks a td torn that no reply of its drain
+completes has the worker set `ThinDevice.torn` alone, with a bump of its
+own (Thin devices). The bump re-fans
 the SP, which is how `created` reaches the cn agent (`cnagent.md` CN14).
 It cannot loop: the re-sync's reply, reporting the same rows `OK`, finds
 no candidate. The flip is idempotent and observation-driven, so a worker
@@ -7967,15 +7978,17 @@ document and only pointed to here.
   cn agent persists the ratio its syncup carries and enforces nothing
   (`cnagent.md` CN6).
 * **Snapshot creation is not atomic across a primary crash, and the torn
-  mark is best effort.** With the origin quiesce of Thin devices a
-  snapshot is point-in-time against live IO, but a crash between two
-  slices' `create_snap` messages, or a slice a pass skipped or whose
-  message failed, still leaves a torn snapshot; delete and re-create it.
-  The cn agent that finishes such a snapshot reports it, and the created
-  flip records it in `ThinDevice.torn` (Thin devices). The agent holds the
-  mark in memory until the flip, so in between an agent restart can lose
-  it, and so can a failover or a cntlr replacement that moves the primary
-  role off the cntlr holding it; the snapshot then flips with `torn` false
+  mark can be lost with the cntlr that saw the tear.** With the origin
+  quiesce of Thin devices a snapshot is point-in-time against live IO, but
+  a crash between two slices' `create_snap` messages, or a slice a pass
+  skipped or whose message failed, or a quiesce that failed, still leaves a
+  torn snapshot; delete and re-create it. The cn agent that finishes such a
+  snapshot saves the mark and reports it in any role, and the sp worker
+  records it in `ThinDevice.torn` (Thin devices). The mark is lost when the
+  cntlr that saw the tear never reports again — its node never comes back,
+  or loses its local store — when that agent dies between the run's first
+  message and the save, and when the save fails and the agent restarts
+  before the worker records the mark; the snapshot then reads `torn` false
   (`cnagent.md`, Known limits): a snapshot that reads `torn` false is not
   proven whole. `ThinDevice.created` certifies materialization, not
   point-in-time consistency: a torn snapshot still flips to `created` once
@@ -8595,9 +8608,19 @@ document and only pointed to here.
 * **A restore can hand out a pool's thin ids again.** The id step moves a
   pool's `next_dev_id` by `ThinIdStepStride` (Clusters), so a pool that
   handed out more thin ids than that between a backup and its restore hands
-  some of them out again after the restore. A new thin device that takes
-  such an id while its pool still holds it serves that id's blocks, data
-  included (`cnagent.md` CN14). On a cntlr that holds the pool
+  some of them out again after the restore. A new plain thin device that
+  takes such an id while its pool still holds it is refused while the id
+  maps blocks, whatever its create message answered, and while the pool's
+  records of its ids cannot be read: the primary does not adopt the id,
+  and the volume waits for an operator (`cnagent.md` CN14). A new snapshot that takes such an id is
+  not refused, since a snapshot's id maps its origin's blocks anyway, and
+  serves the old id's blocks, data included. The refusal has a false case
+  of its own: a host write to a new volume between its build and its
+  created flip, then a failover, makes the new primary meet the volume's
+  own id with data and refuse it; `operations.md`, A new volume refused for
+  a thin id that holds data, tells the two cases apart. Both stay inside
+  one pool.
+  On a cntlr that holds the pool
   (`cnagent.md` CN14), the cn agent deletes the thin id of each thin volume
   the restored state does not name, but only once the sweep that removes
   the volume gets through (`cnagent.md` CN21); on any other cntlr, such as

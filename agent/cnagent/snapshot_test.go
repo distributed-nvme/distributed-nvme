@@ -6,6 +6,8 @@ import (
 	"strings"
 	"testing"
 
+	"google.golang.org/protobuf/proto"
+
 	"github.com/distributed-nvme/distributed-nvme/pb"
 )
 
@@ -754,12 +756,14 @@ func TestSnapshotNotTornWhenNoIdIsMade(t *testing.T) {
 		"a run whose every message was refused with EEXIST")
 }
 
-// TestTornMarkLastsUntilTheCreatedFlip pins the mark's life (CN14): a run
+// TestTornMarkLastsUntilTheRequestShowsIt pins the mark's life (CN14): a run
 // sets it, a later run that makes no id — every snapshot device is there, so
 // it sends no message and suspends nothing — leaves it set, and both
-// channels report it until the request lists the td created, which is when
-// the created flip has recorded it (dnv-worker.md RW19), or drops the td.
-func TestTornMarkLastsUntilTheCreatedFlip(t *testing.T) {
+// channels report it until the request lists the td torn, which is when the
+// worker has recorded it (dnv-worker.md RW19), or drops the td; a request
+// that lists the td created and not torn keeps it, and its file goes with
+// the last mark.
+func TestTornMarkLastsUntilTheRequestShowsIt(t *testing.T) {
 	tornSnapshot := func(t *testing.T) (*CnAgentServer, *fakeNode) {
 		t.Helper()
 		srv, node := newTestServer(t)
@@ -782,59 +786,409 @@ func TestTornMarkLastsUntilTheCreatedFlip(t *testing.T) {
 			"check round after the re-apply")
 	})
 
-	t.Run("the created flip clears it", func(t *testing.T) {
-		srv, _ := tornSnapshot(t)
+	t.Run("a request that lists it torn clears it", func(t *testing.T) {
+		srv, node := tornSnapshot(t)
 		tds := snapTds()
 		tds[1].Created = true
 		tds[1].Torn = true
 		reply := syncupCntlrAt(t, srv, reqOpts{
 			revision: 4, primary: true, twoSlices: true, tds: tds})
 		assertTorn(t, reply.GetCntlrInfo(), testSnapTd, false,
-			"converge of the created td")
+			"converge of the td the request lists torn")
 		assertTorn(t, checkRound(t, srv, 4), testSnapTd, false,
-			"check round of the created td")
+			"check round of the td the request lists torn")
 		if marks := tornMarks(t, srv); len(marks) != 0 {
-			t.Fatalf("torn marks %v outlive the created flip", marks)
+			t.Fatalf("torn marks %v outlive the request's mark", marks)
+		}
+		if storeFileExists(node, tornPathOf(srv)) {
+			t.Fatalf("the torn marks' file outlives the last mark")
 		}
 	})
 
-	t.Run("a check round reads created before a converge drops it",
+	t.Run("a created td keeps it", func(t *testing.T) {
+		srv, node := tornSnapshot(t)
+		tds := snapTds()
+		tds[1].Created = true
+		reply := syncupCntlrAt(t, srv, reqOpts{
+			revision: 4, primary: true, twoSlices: true, tds: tds})
+		assertTorn(t, reply.GetCntlrInfo(), testSnapTd, true,
+			"converge of a td the request lists created, not torn")
+		assertTorn(t, checkRound(t, srv, 4), testSnapTd, true,
+			"check round of a td the request lists created, not torn")
+		if !storeFileExists(node, tornPathOf(srv)) {
+			t.Fatalf("the torn marks' file went with the created flip")
+		}
+	})
+
+	t.Run("a check round reads torn before a converge drops it",
 		func(t *testing.T) {
 			srv, _ := tornSnapshot(t)
 			tds := snapTds()
 			tds[1].Created = true
+			tds[1].Torn = true
 			st := srv.getCntlr(cntlrKey(testCluster, testCn, testSp,
 				testCntlr))
 			st.storeReq(cntlrReq(reqOpts{
 				revision: 3, primary: true, twoSlices: true, tds: tds}))
 			assertTorn(t, checkRound(t, srv, 3), testSnapTd, false,
-				"check round of a td the request lists created")
+				"check round of a td the request lists torn")
 		})
 
 	t.Run("dropping the td clears it", func(t *testing.T) {
-		srv, _ := tornSnapshot(t)
+		srv, node := tornSnapshot(t)
 		syncupCntlrAt(t, srv, reqOpts{
 			revision: 4, primary: true, twoSlices: true,
 			tds: snapTds()[:1]})
 		if marks := tornMarks(t, srv); len(marks) != 0 {
 			t.Fatalf("torn marks %v outlive the td", marks)
 		}
+		if storeFileExists(node, tornPathOf(srv)) {
+			t.Fatalf("the torn marks' file outlives the td")
+		}
 	})
 }
 
-// TestTornMarkIsLostOnRestart is the mark's best-effort limit (CN14;
-// architecture.md, Known limits): it lives in the agent's memory only, and
-// the restarted agent's runs make no id — every snapshot device is there —
-// so nothing sets it again.
-func TestTornMarkIsLostOnRestart(t *testing.T) {
+// tornPathOf is the fixture cntlr's torn marks' file (CN14).
+func tornPathOf(srv *CnAgentServer) string {
+	return srv.nf.LocalTornPath(testCluster, testCn, testSp, testCntlr)
+}
+
+// storedTornMarks decodes the fixture cntlr's torn marks' file.
+func storedTornMarks(
+	t *testing.T,
+	srv *CnAgentServer,
+	node *fakeNode,
+) *pb.TornMarks {
+	t.Helper()
+	node.mu.Lock()
+	raw, ok := node.protos[tornPathOf(srv)]
+	node.mu.Unlock()
+	if !ok {
+		t.Fatalf("no torn marks' file at %s", tornPathOf(srv))
+	}
+	marks := &pb.TornMarks{}
+	if err := proto.Unmarshal(raw, marks); err != nil {
+		t.Fatalf("the torn marks' file does not decode: %v", err)
+	}
+	return marks
+}
+
+// TestTornMarkSurvivesARestart pins the saved mark (CN14, CN2): the run
+// that tears the snapshot saves the mark in the local store before the thin
+// loop, naming its cntlr, and the restarted agent, whose runs make no id —
+// every snapshot device is there — loads it and reports it again.
+func TestTornMarkSurvivesARestart(t *testing.T) {
 	srv, node := newTestServer(t)
 	reply := syncupSnapshotHeld(t, srv, node, reqOpts{
 		revision: 3, primary: true, twoSlices: true, tds: snapTds()},
 		testSlice2)
 	assertTorn(t, reply.GetCntlrInfo(), testSnapTd, true, "the torn run")
+	assertOrder(t, node, "writeproto "+tornPathOf(srv),
+		"cmd dmsetup create "+thinNameOf(srv, testSnapTd, testSlice))
+	marks := storedTornMarks(t, srv, node)
+	if marks.GetClusterId() != testCluster || marks.GetCnId() != testCn ||
+		marks.GetCntlrPointer().GetSpId() != testSp ||
+		marks.GetCntlrPointer().GetCntlrId() != testCntlr ||
+		len(marks.GetTdIdList()) != 1 ||
+		marks.GetTdIdList()[0] != testSnapTd {
+		t.Fatalf("saved torn marks = %v, want the fixture cntlr's td %#x",
+			marks, testSnapTd)
+	}
 
 	fresh := newCnServer(node)
 	reconcileForTest(t, fresh)
-	assertTorn(t, checkRound(t, fresh, 3), testSnapTd, false,
+	assertTorn(t, checkRound(t, fresh, 3), testSnapTd, true,
 		"check round after a restart")
+	node.Reset()
+	reply = syncupCntlrAt(t, fresh, reqOpts{
+		revision: 4, primary: true, twoSlices: true, tds: snapTds()})
+	assertNoCall(t, node, "create_snap")
+	assertTorn(t, reply.GetCntlrInfo(), testSnapTd, true,
+		"the first converge after a restart")
+}
+
+// TestATornMarkWhoseSaveFailsStays pins a failed save of the mark (CN14):
+// the converge logs it, the mark stays in memory and both channels report
+// it, and the node's store row reads the disk's refusal (CN28).
+func TestATornMarkWhoseSaveFailsStays(t *testing.T) {
+	srv, node := newTestServer(t)
+	syncupBoth(t, srv, reqOpts{revision: 2, primary: true, twoSlices: true})
+	failSaves(srv, node, tornPathOf(srv))
+	node.holdThinIds(poolNameOf(srv, testSlice2), 2)
+	node.Reset()
+	reply := syncupCntlrAt(t, srv, reqOpts{
+		revision: 3, primary: true, twoSlices: true, tds: snapTds()})
+	if n := len(node.callsMatching(failedWrite(tornPathOf(srv)))); n != 1 {
+		t.Fatalf("%d failed saves of the torn marks, want 1", n)
+	}
+	assertTorn(t, reply.GetCntlrInfo(), testSnapTd, true, "the torn run")
+	assertTorn(t, checkRound(t, srv, 3), testSnapTd, true,
+		"check round after the failed save")
+	if storeFileExists(node, tornPathOf(srv)) {
+		t.Fatalf("fixture: the failed save wrote the file")
+	}
+	if _, refused := srv.store.Refusal(); !refused {
+		t.Fatalf("the store does not read the refused save")
+	}
+}
+
+// TestATornMarkIsReportedInAnyRole pins CN14's report in any role: a primary
+// that tore a snapshot and is demoted, or whose agent restarts as a standby
+// after the new primary's created flip — the td listed created and not torn
+// — reports the mark in an entry with no rows, on both channels, so the
+// worker reads a tear only the old primary saw (dnv-worker.md RW19).
+func TestATornMarkIsReportedInAnyRole(t *testing.T) {
+	tdsAt := func(created bool) []*pb.ThinDevice {
+		tds := snapTds()
+		tds[1].Created = created
+		return tds
+	}
+	for _, tc := range []struct {
+		name    string
+		restart bool
+		created bool
+	}{
+		{"demoted", false, false},
+		{"back as a standby after the created flip", true, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			srv, node := newTestServer(t)
+			syncupSnapshotHeld(t, srv, node, reqOpts{
+				revision: 3, primary: true, twoSlices: true,
+				tds: snapTds()}, testSlice2)
+			if tc.restart {
+				srv = newCnServer(node)
+				reconcileForTest(t, srv)
+			}
+			reply := syncupCntlrAt(t, srv, reqOpts{
+				revision: 4, twoSlices: true, tds: tdsAt(tc.created),
+				leftoverOk: true})
+			for label, info := range map[string]*pb.CntlrInfo{
+				"converge":    reply.GetCntlrInfo(),
+				"check round": checkRound(t, srv, 4),
+			} {
+				assertTorn(t, info, testSnapTd, true, label)
+				if rows := info.GetTdIdToThinInfo()[testSnapTd].
+					GetSliceIdToDmThin(); len(rows) != 0 {
+					t.Fatalf("%s: a standby's entry carries rows %v",
+						label, rows)
+				}
+				if _, ok := info.GetTdIdToThinInfo()[testTd]; ok {
+					t.Fatalf("%s: a standby reports the unmarked origin",
+						label)
+				}
+			}
+		})
+	}
+}
+
+// TestSnapshotTornWhenTheOriginCannotBeQuiesced pins CN14's failed quiesce
+// (suspendSnapOrigin): when the origin's raid0 may be live and the run cannot
+// suspend it — its info read does not answer, or its suspend fails — the
+// messages still go, and a run that makes ids in two slices marks the
+// snapshot torn; one that makes a single id does not.
+func TestSnapshotTornWhenTheOriginCannotBeQuiesced(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		fail     func(srv *CnAgentServer, node *fakeNode)
+		heldIn   []uint64
+		wantTorn bool
+	}{
+		{"the suspend fails", func(srv *CnAgentServer, node *fakeNode) {
+			node.failCmdAlways["dmsetup suspend "+raid0Name(srv, testTd)] =
+				"device-mapper: suspend ioctl failed: Invalid argument"
+		}, nil, true},
+		{"the info read does not answer", func(srv *CnAgentServer,
+			node *fakeNode) {
+			node.killCmdNoEffectAlways["dmsetup info --columns --noheadings "+
+				"-o attr "+raid0Name(srv, testTd)] = true
+		}, nil, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			srv, node := newTestServer(t)
+			syncupBoth(t, srv, reqOpts{revision: 2, primary: true,
+				twoSlices: true})
+			for _, sliceId := range tc.heldIn {
+				node.holdThinIds(poolNameOf(srv, sliceId), 2)
+			}
+			tc.fail(srv, node)
+			node.Reset()
+			reply := syncupCntlrAt(t, srv, reqOpts{
+				revision: 3, primary: true, twoSlices: true, tds: snapTds(),
+				leftoverOk: true})
+			assertNoCall(t, node, "cmd dmsetup resume "+raid0Name(srv, testTd))
+			for _, sliceId := range []uint64{testSlice, testSlice2} {
+				if n := len(node.callsMatching(
+					snapMessage(srv, sliceId))); n != 1 {
+					t.Fatalf("slice %#x: %d create_snap calls, want 1",
+						sliceId, n)
+				}
+			}
+			assertTorn(t, reply.GetCntlrInfo(), testSnapTd, tc.wantTorn,
+				"the unquiesced run")
+		})
+	}
+
+	t.Run("a single slice made unquiesced", func(t *testing.T) {
+		srv, node := newTestServer(t)
+		syncupBoth(t, srv, reqOpts{revision: 2, primary: true,
+			twoSlices: true})
+		node.failCmdAlways["dmsetup suspend "+raid0Name(srv, testTd)] =
+			"device-mapper: suspend ioctl failed: Invalid argument"
+		node.failCmdAlways["message "+poolNameOf(srv, testSlice2)+
+			" 0 create_snap"] = msgIoctlFailed(poolNameOf(srv, testSlice2),
+			"Invalid argument")
+		node.Reset()
+		reply := syncupCntlrAt(t, srv, reqOpts{
+			revision: 3, primary: true, twoSlices: true, tds: snapTds(),
+			leftoverOk: true})
+		assertTorn(t, reply.GetCntlrInfo(), testSnapTd, false,
+			"an unquiesced run that made one id alone")
+	})
+}
+
+// TestAKilledSnapMessageCountsAsMade pins CN14's count of a create_snap the
+// soft timeout killed: the kernel may have made the id, and the thin loop of
+// the same pass builds the device over it, after which no run messages the
+// slice again, so the run counts the slice as made — beside a slice already
+// held by an earlier run, and in an unquiesced run beside one more made id.
+// A slice whose message never went — its origin thin volume's suspend was
+// killed — counts as nothing.
+func TestAKilledSnapMessageCountsAsMade(t *testing.T) {
+	failRaid0Suspend := func(srv *CnAgentServer, node *fakeNode) {
+		node.failCmdAlways["dmsetup suspend "+raid0Name(srv, testTd)] =
+			"device-mapper: suspend ioctl failed: Invalid argument"
+	}
+	o := reqOpts{revision: 3, primary: true, twoSlices: true, tds: snapTds(),
+		leftoverOk: true}
+	key := func(srv *CnAgentServer) string {
+		return snapMessage(srv, testSlice2)[len("cmd dmsetup "):]
+	}
+
+	t.Run("an unquiesced run", func(t *testing.T) {
+		srv, node := newTestServer(t)
+		syncupBoth(t, srv, reqOpts{revision: 2, primary: true,
+			twoSlices: true})
+		failRaid0Suspend(srv, node)
+		node.killCmd[key(srv)] = true
+		node.Reset()
+		reply := syncupCntlrAt(t, srv, o)
+		if _, ok := node.dms[thinNameOf(srv, testSnapTd, testSlice2)]; !ok {
+			t.Fatal("fixture: the pass built no device over the id the " +
+				"killed message made")
+		}
+		assertTorn(t, reply.GetCntlrInfo(), testSnapTd, true,
+			"an unquiesced run that made one id and killed the other's "+
+				"message")
+		if !tornMarks(t, srv)[testSnapTd] {
+			t.Fatal("the run kept no mark")
+		}
+	})
+
+	t.Run("a later run", func(t *testing.T) {
+		srv, node := newTestServer(t)
+		syncupBoth(t, srv, reqOpts{revision: 2, primary: true,
+			twoSlices: true})
+		node.failCmd[key(srv)] = msgIoctlFailed(poolNameOf(srv, testSlice2),
+			"Invalid argument")
+		node.Reset()
+		assertTorn(t, syncupCntlrAt(t, srv, o).GetCntlrInfo(), testSnapTd,
+			false, "a run that made one id and failed the other")
+		node.killCmd[key(srv)] = true
+		assertTorn(t, syncupCntlrAt(t, srv, o).GetCntlrInfo(), testSnapTd,
+			true, "a run whose killed message joined slice 0's device")
+	})
+
+	t.Run("a message never sent", func(t *testing.T) {
+		srv, node := newTestServer(t)
+		syncupBoth(t, srv, reqOpts{revision: 2, primary: true,
+			twoSlices: true})
+		failRaid0Suspend(srv, node)
+		node.killCmdNoEffect["dmsetup suspend "+
+			thinNameOf(srv, testTd, testSlice2)] = true
+		node.Reset()
+		reply := syncupCntlrAt(t, srv, o)
+		assertNoCall(t, node, snapMessage(srv, testSlice2))
+		assertTorn(t, reply.GetCntlrInfo(), testSnapTd, false,
+			"an unquiesced run that made one id and sent no other message")
+	})
+}
+
+// TestSnapshotResumesTheOriginThinOnACancelledCall pins the per-slice
+// resume's ctx (CN14, createSnapId): a call cancelled while a slice's
+// create_snap runs still resumes that slice's origin thin volume, as the
+// raid0's resume does, so no origin is left suspended.
+func TestSnapshotResumesTheOriginThinOnACancelledCall(t *testing.T) {
+	srv, node := newTestServer(t)
+	syncupBoth(t, srv, reqOpts{revision: 2, primary: true, twoSlices: true})
+	node.Reset()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	node.cancelCmd[snapMessage(srv, testSlice)] = cancel
+	_, _ = srv.SyncupCntlr(ctx, cntlrReq(reqOpts{
+		revision: 3, primary: true, twoSlices: true, tds: snapTds()}))
+	ori := thinNameOf(srv, testTd, testSlice)
+	assertOrder(t, node, "cmd dmsetup suspend "+ori,
+		snapMessage(srv, testSlice), "cmd dmsetup resume "+ori)
+	if node.dms[ori].suspended {
+		t.Fatalf("a cancelled call left the origin thin volume suspended")
+	}
+	if node.dms[raid0Name(srv, testTd)].suspended {
+		t.Fatalf("a cancelled call left the origin raid0 suspended")
+	}
+}
+
+// TestTornMarksFileGoesWithItsCntlr pins the life of the torn marks' file
+// (CN7, CN2): the drop of a cntlr whose pointer leaves its CN's list removes
+// it with the cntlr's other files, and a startup reconcile removes one whose
+// cntlr it does not load, as an orphan, while a file of a loaded cntlr is
+// kept.
+func TestTornMarksFileGoesWithItsCntlr(t *testing.T) {
+	t.Run("the cntlr's drop", func(t *testing.T) {
+		srv, node := newTestServer(t)
+		syncupSnapshotHeld(t, srv, node, reqOpts{
+			revision: 3, primary: true, twoSlices: true, tds: snapTds()},
+			testSlice2)
+		if !storeFileExists(node, tornPathOf(srv)) {
+			t.Fatal("fixture: no torn marks' file")
+		}
+		if _, err := srv.SyncupCn(context.Background(),
+			cnReq(2, false)); err != nil {
+			t.Fatalf("SyncupCn: %v", err)
+		}
+		if storeFileExists(node, tornPathOf(srv)) {
+			t.Fatal("the torn marks' file outlives its cntlr's drop")
+		}
+	})
+
+	t.Run("an orphan at startup", func(t *testing.T) {
+		srv, node := newTestServer(t)
+		syncupSnapshotHeld(t, srv, node, reqOpts{
+			revision: 3, primary: true, twoSlices: true, tds: snapTds()},
+			testSlice2)
+		orphan := srv.nf.LocalTornPath(testCluster, testCn, testSp,
+			testCntlr+0x40)
+		raw, err := proto.Marshal(&pb.TornMarks{
+			ClusterId: testCluster, CnId: testCn,
+			CntlrPointer: &pb.CntlrPointer{SpId: testSp,
+				CntlrId: testCntlr + 0x40},
+			TdIdList: []uint64{testSnapTd},
+		})
+		if err != nil {
+			t.Fatalf("marshal: %v", err)
+		}
+		node.mu.Lock()
+		node.protos[orphan] = raw
+		node.mu.Unlock()
+
+		fresh := newCnServer(node)
+		reconcileForTest(t, fresh)
+		if storeFileExists(node, orphan) {
+			t.Fatal("a torn marks' file of no loaded cntlr outlives the " +
+				"startup reconcile")
+		}
+		if !storeFileExists(node, tornPathOf(srv)) {
+			t.Fatal("the startup reconcile removed a loaded cntlr's file")
+		}
+	})
 }

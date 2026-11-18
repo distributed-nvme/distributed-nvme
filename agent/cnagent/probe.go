@@ -276,10 +276,19 @@ func (s *CnAgentServer) probeCntlr(
 	// Thin volumes.
 	for _, tp := range plan.tds {
 		if !plan.primary {
+			// A torn mark is reported in any role, in an entry with no rows,
+			// as the converge reports it (tornMark, CN14).
+			if tornMark(st, tp) {
+				info.TdIdToThinInfo[tp.tdId] = &pb.CntlrInfo_ThinInfo{
+					SliceIdToDmThin: map[uint64]*pb.ResInfo{},
+					Torn:            true,
+				}
+			}
 			continue
 		}
 		// The torn mark is the converge's (tornMark, CN14); no row carries
-		// the lost thin id's reason (CN29): only a converge names one.
+		// the lost thin id's reason, nor the reason of a thin id the agent
+		// does not adopt (CN29): only a converge names either.
 		thinInfo := &pb.CntlrInfo_ThinInfo{
 			SliceIdToDmThin: make(map[uint64]*pb.ResInfo, len(plan.slices)),
 			Torn:            tornMark(st, tp),

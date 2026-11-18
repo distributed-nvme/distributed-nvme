@@ -1086,6 +1086,14 @@ func cntlrErrorRows(info *pb.CntlrInfo) []cntlrRowId {
 //     absent and reads it MISSING, so a round carries the reason only while
 //     it answers from the converge's observation, until the next read
 //     replaces it (dnagent.md SH28, SH29).
+//   - it belongs to the stack of a td (state), created or not, whose thin
+//     row, in some slice, reads RES_STATUS_ERROR with the reason
+//     RES_REASON_THIN_ID_NOT_ADOPTED: the cn agent's build of a new volume
+//     found its thin id in the slice's pool holding blocks, or could not
+//     read the pool's device headers (cnagent.md CN14). The pool and its
+//     ids live on the SP's legs, so every new primary meets the same id,
+//     and a failover would only bring the next one to it. Only a converge's
+//     observation carries that reason, as for a lost id.
 //   - it is the pool row of a slice that reads RES_STATUS_ERROR with
 //     RES_REASON_POOL_NEEDS_CHECK (cnagent.md CN13), a thin row of that
 //     slice, or a row of the stack of a td whose thin row in that slice
@@ -1111,13 +1119,17 @@ func cntlrErrorRows(info *pb.CntlrInfo) []cntlrRowId {
 func sharedStateOf(info *pb.CntlrInfo, state *model.SpState) sharedState {
 	lost := make(map[uint64]bool)
 	for _, td := range state.Tds {
-		if !td.GetCreated() {
-			continue
-		}
 		thin := info.GetTdIdToThinInfo()[td.GetTdId()]
 		for _, res := range thin.GetSliceIdToDmThin() {
-			if res.GetStatus() == pb.ResStatus_RES_STATUS_ERROR &&
-				res.GetReason() == pb.ResReason_RES_REASON_THIN_ID_LOST {
+			if res.GetStatus() != pb.ResStatus_RES_STATUS_ERROR {
+				continue
+			}
+			switch res.GetReason() {
+			case pb.ResReason_RES_REASON_THIN_ID_LOST:
+				if td.GetCreated() {
+					lost[td.GetTdId()] = true
+				}
+			case pb.ResReason_RES_REASON_THIN_ID_NOT_ADOPTED:
 				lost[td.GetTdId()] = true
 			}
 		}
@@ -1156,8 +1168,9 @@ func sharedStateOf(info *pb.CntlrInfo, state *model.SpState) sharedState {
 }
 
 // sharedState is what sharedStateOf finds: the created tds whose thin id a
-// pool lost, and the slices whose pool reads needs_check, when they account
-// for every ERROR row of a report.
+// pool lost and the tds whose thin id the agent does not adopt, and the
+// slices whose pool reads needs_check, when they account for every ERROR
+// row of a report.
 type sharedState struct {
 	tdIds    []uint64
 	sliceIds []uint64
@@ -1169,7 +1182,8 @@ func (s sharedState) holds() bool {
 }
 
 // attr is the cause a `reaction skipped` record names: the first slice
-// whose pool reads needs_check, else the first td whose thin id is lost.
+// whose pool reads needs_check, else the first td whose thin id is lost or
+// not adopted.
 func (s sharedState) attr() slog.Attr {
 	if len(s.sliceIds) != 0 {
 		return slog.Uint64("slice_id", s.sliceIds[0])

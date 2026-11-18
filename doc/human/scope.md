@@ -367,13 +367,16 @@ the host.
   grow with the pool.
 - **A torn snapshot can read as whole.** Silent. A snapshot is taken slice
   by slice. A primary crash between two slices, or a slice whose step was
-  skipped or failed, leaves a torn snapshot. The agent reports it torn, but holds the
-  mark in memory until the snapshot is recorded as created. An agent
-  restart, a failover or a cntlr replacement in between can lose the
-  mark, and a lost mark leaves no sign. Delete and re-create a snapshot
-  reported torn. State: fix decided, the
-  agent saves the mark at once and the worker records it from the first
-  report. Not seen in the lab.
+  skipped or failed, leaves a torn snapshot. The agent marks it torn and
+  saves the mark at once in its local store, the directory where it keeps
+  its own state on its node. Every cntlr reports a mark it holds, as the
+  primary or not, and the worker records the mark from the first report,
+  before or after the snapshot is recorded as created. The mark is lost
+  only when the controller node that saw the tear never comes back or
+  loses its local store, when its agent dies in the moment between the
+  first slice's step and the save, or when the save fails and the agent
+  restarts before the worker records the mark. A lost mark leaves no sign. Delete and
+  re-create a snapshot reported torn. State: accepted. Not seen in the lab.
 
 ### 5.2 The forced start
 
@@ -468,11 +471,17 @@ No case is known today.
 
 - **An etcd restore can hand a volume's thin ids out again.** Silent. A
   thin id is dm-thin's device number inside a pool. A restore sets a pool's
-  next id back. A new volume can take the id of an old volume and serve its
-  data. State: fix decided, the primary refuses to adopt an existing
-  dm-thin device that holds data for a new volume. Procedure to write: the
-  restore procedure (section 7 has the steps known today). Not seen in the
-  lab.
+  next id back. A new volume can take the id of an old volume. The primary
+  then reads the pool's records of its thin ids, and refuses a new volume
+  whose id holds data, or whose pool's records it cannot read: the volume
+  stays unbuilt and its row names the refusal. Two cases stay. A new snapshot can still take an old volume's id
+  and serve its data, since a snapshot's id always holds data. And a host
+  write to a new volume before it is recorded as created, then a failover,
+  makes the new primary refuse the volume's own id. Both stay inside one
+  pool. State: accepted. Procedure: [a new volume refused for a thin id
+  that holds data](operations.md#a-new-volume-refused-for-a-thin-id-that-holds-data),
+  which tells the two cases apart; section 7 has the restore's steps
+  known today. Not seen in the lab.
 - **A damaged copy of the disk node's own records can re-zero a serving
   leg.** Silent. A disk node keeps the records of its sides on its disk,
   in two copies written in turn, and loads the newest good one. A newest
@@ -1089,7 +1098,7 @@ steps; the section "Steps known today" below gives the longer ones.
 
 | Action | Tool today | Doc today | State |
 |---|---|---|---|
-| Back up and restore etcd | etcd's own tools; `dnvctl cluster advance-ids` after a restore | this page, below | procedure to write. Fix decided: a restored thin id that holds data is refused. |
+| Back up and restore etcd | etcd's own tools; `dnvctl cluster advance-ids` after a restore | this page, below; [operations](operations.md#a-new-volume-refused-for-a-thin-id-that-holds-data) for a refused thin id | procedure to write. A new volume over a restored thin id that holds data is refused. |
 | Upgrade | none; every program at once | this page, below | procedure to write. Rolling upgrades are not yet. Fix decided: every program gets a version flag. |
 | Run while the control plane is down | nothing to do; the data plane serves | none | procedure to write |
 | Handle the logs | none; JSON on stderr, no rotation | this page, below | procedure to write |

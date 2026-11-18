@@ -47,7 +47,7 @@ func (s *CnAgentServer) Reconcile(ctx context.Context) error {
 	// write, and a probe file whose removal a probe did not get to goes too:
 	// nothing reads it, and it holds room the store may need (CN28).
 	files, err := s.store.List(ctx, agent.StoreKindCn, agent.StoreKindCntlr,
-		agent.StoreKindCloneBm, agent.StoreKindCnProbe)
+		agent.StoreKindCloneBm, agent.StoreKindCnProbe, agent.StoreKindTorn)
 	if err != nil {
 		return err
 	}
@@ -176,6 +176,8 @@ func (s *CnAgentServer) Reconcile(ctx context.Context) error {
 				slog.String("error", err.Error()))
 		}
 	}
+	s.loadTornMarks(ctx, files[agent.StoreKindTorn], unreadParent,
+		unreadCntlr)
 
 	cnInfos := make(map[string]*pb.CnInfo)
 	for _, key := range s.cnKeys() {
@@ -219,6 +221,60 @@ func (s *CnAgentServer) Reconcile(ctx context.Context) error {
 	}
 	s.startup.End()
 	return nil
+}
+
+// loadTornMarks is the startup reconcile's load of the torn marks' files
+// (CN2, CN14): each names its cntlr by its content, never by its name
+// (dnagent.md SH6), and its marks go into that cntlr's tornTds, saved as
+// they stand. It runs after the cntlr files are loaded and before any
+// converge, whose keepTornMarks then drops the marks the request no longer
+// wants. A file whose cntlr is not loaded goes, as an orphan bitmap chunk
+// does, unless it goes with a cn-* file that did not load (unreadParent), or
+// with a cntlr-* file that did not load while its loaded CN still names its
+// cntlr (unreadCntlr): nothing read then proves its cntlr gone. A file that
+// does not load is logged and left, and names no cntlr; the drop of its
+// cntlr (dropCntlrState) removes it by its name.
+func (s *CnAgentServer) loadTornMarks(
+	ctx context.Context,
+	paths []string,
+	unreadParent func(clusterId, cnId uint64) bool,
+	unreadCntlr bool,
+) {
+	var orphans []string
+	for _, path := range paths {
+		marks := &pb.TornMarks{}
+		if err := s.store.Load(ctx, path, marks); err != nil {
+			slog.ErrorContext(ctx, "skipping unreadable torn marks file",
+				slog.String("path", path),
+				slog.String("error", err.Error()))
+			continue
+		}
+		if unreadParent(marks.GetClusterId(), marks.GetCnId()) {
+			continue
+		}
+		ptr := marks.GetCntlrPointer()
+		st := s.getCntlr(cntlrKey(marks.GetClusterId(), marks.GetCnId(),
+			ptr.GetSpId(), ptr.GetCntlrId()))
+		if st == nil && unreadCntlr {
+			cn := s.getCn(cnKey(marks.GetClusterId(), marks.GetCnId()))
+			if cn != nil && pointerKnown(cn.loadReq(), ptr) {
+				continue
+			}
+		}
+		if st == nil {
+			orphans = append(orphans, path)
+			continue
+		}
+		for _, tdId := range marks.GetTdIdList() {
+			st.tornTds[tdId] = true
+		}
+	}
+	if len(orphans) > 0 {
+		if err := s.store.Remove(ctx, orphans...); err != nil {
+			slog.ErrorContext(ctx, "removing orphan torn marks files failed",
+				slog.String("error", err.Error()))
+		}
+	}
 }
 
 // syncupCn implements CN4-CN7. The node write lock is held by the caller. A
@@ -404,8 +460,9 @@ func (s *CnAgentServer) dropRemovedCntlrs(
 }
 
 // dropCntlrState is the bookkeeping half of a cntlr's drop (CN7): stop what
-// this cntlr is running, delete what it persisted, and forget it — which
-// cancels its running read too (dropCntlr).
+// this cntlr is running, delete what it persisted — its request, its bitmap
+// chunks and its torn marks' file — and forget it, which cancels its running
+// read too (dropCntlr).
 func (s *CnAgentServer) dropCntlrState(
 	ctx context.Context,
 	key string,
@@ -420,6 +477,8 @@ func (s *CnAgentServer) dropCntlrState(
 		ptr.GetSpId(), ptr.GetCntlrId())}
 	paths = append(paths, s.allChunkPathsOf(st,
 		req.GetClusterId(), req.GetCnId(), ptr.GetSpId())...)
+	paths = append(paths, s.nf.LocalTornPath(req.GetClusterId(),
+		req.GetCnId(), ptr.GetSpId(), ptr.GetCntlrId()))
 	if err := s.store.Remove(ctx, paths...); err != nil {
 		slog.ErrorContext(ctx, "removing cntlr state files failed",
 			slog.String("error", err.Error()))
