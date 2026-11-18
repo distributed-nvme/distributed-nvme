@@ -6949,49 +6949,50 @@ which no suite case sets, so no suite case runs RW13's count compare.
   exceptions aside. It compares rows, not causes: a replacement whose own
   fault fails only rows the old primary failed on is held as well, for as long
   as that fault lasts, every pass logging why.
-* **A dm-clone left with hydration off moves the role of the clone's
-  pool only where no converge a name brings cures it.** Its row reads
-  `ERROR` in every observation, a background read's as much as a
-  converge's (`cnagent.md` CN18, CN28). That is a row of the primary's own
-  (HL2), so its `err_epoch` is set. Where the read's gates pass, a read
-  names the dm-clone (`cnagent.md` CN18, CN30), and the converge the
-  worker's re-send brings enables hydration, so the row reads `OK` and
-  nothing moves. Where a gate holds the read's name off and a converge
-  cures the gate, the gate has a name of its own — a source entry with no
-  controller, the clone meta group's absent or broken array, the
-  destination raid0's row (`cnagent.md` CN18, CN30) — and the converge
-  that name brings cures the gate and enables hydration in that pass, or
-  in the one the dm-clone's own name brings next, so nothing moves
-  either. Where nothing a converge cures holds the name off — a source
-  whose connect keeps failing or that has no namespace, a clone meta
-  group or destination raid0 whose row no converge brings to `OK` — or
-  its metadata is read-only or failed, the `err_epoch` stays set, and AR5
-  fails the primary over at its threshold, or AR7 replaces it where there
-  is no failover candidate; the new primary creates the dm-clone over the
-  metadata its clone meta group holds and finishes the build (`cnagent.md`
-  CN18). A dm-clone left suspended reads `ERROR` the
-  same way. Where its gates pass and the create, resume or enable keeps
-  failing, both channels name it (`cnagent.md` CN18, CN30), every round
-  re-sends, and the failover waits for missed rounds or the operator's
-  disable, as the item "While a leftover keeps every round re-sending"
-  says; AR7's replacement is unchanged. A fault of the clone's source
-  does not itself move the role: its row reads `MISSING` (`cnagent.md` CN18), which sets no
-  `err_epoch` (HL2), so neither AR5 nor AR7 acts on that row, and a fault
-  in the primary's own path to the source reads the same; which of the
-  clone's rows carry the source-fault reason, and so hold no settle (HL2),
-  is CN18's. The operator can move the role by disabling the primary cntlr
+* **A dm-clone left with hydration off moves the role of the clone's pool
+  only where no converge a name brings cures it.** Its row reads `ERROR` in
+  every observation, a background read's as much as a converge's
+  (`cnagent.md` CN18, CN28). That is a row of the primary's own (HL2), so
+  its `err_epoch` is set. Where the read's gates pass, a read names the
+  dm-clone (`cnagent.md` CN18, CN30), and the converge the worker's re-send
+  brings enables hydration, so the row reads `OK` and nothing moves. Where
+  a gate holds the read's name off and a converge cures the gate, the gate
+  has a name of its own — a source entry with no controller, the clone meta
+  group's absent or broken array or, in a `RedundNone` pool, its dm-linear,
+  a wrapper of one of that group's legs, the destination raid0's row
+  (`cnagent.md` CN10, CN12, CN18, CN30) — and the converge that name brings
+  cures the gate and enables hydration in that pass, or in the one the
+  dm-clone's own name brings next, so nothing moves either. Where nothing a
+  converge cures holds the name off — a source whose connect keeps failing
+  or that has no namespace, a clone meta group or destination raid0 whose
+  row no converge brings to `OK` — or its metadata is read-only or failed,
+  the `err_epoch` stays set, and AR5 fails the primary over at its
+  threshold, or AR7 replaces it where there is no failover candidate; the
+  new primary creates the dm-clone over the metadata its clone meta group
+  holds and finishes the build (`cnagent.md` CN18). A dm-clone left
+  suspended reads `ERROR` the same way. Where its gates pass and the
+  create, resume or enable keeps failing, both channels name it
+  (`cnagent.md` CN18, CN30), every round re-sends, and the failover waits
+  for missed rounds or the operator's disable, as the item "While a
+  leftover keeps every round re-sending" says; AR7's replacement is
+  unchanged. A fault of the clone's source does not itself move the role:
+  its row reads `MISSING` (`cnagent.md` CN18), which sets no `err_epoch`
+  (HL2), so neither AR5 nor AR7 acts on that row, and a fault in the
+  primary's own path to the source reads the same; which of the clone's
+  rows carry the source-fault reason, and so hold no settle (HL2), is
+  CN18's. The operator can move the role by disabling the primary cntlr
   (AR5). A source endpoint the cn agent cannot connect is named by every
   read of the cntlr (`cnagent.md` CN18), so the worker re-sends its
   `SyncupCntlr` every second round at most (RW4), and each converge holds
   the cntlr's reads off while it runs (`dnagent.md` SH30; `cnagent.md`,
-  Known limits); a source with no namespace is named by nothing. A role that moves while a fault at the
-  source lasts can take even a clone that has hydrated in full out of
-  service: a new primary that cannot connect the source, or finds no source
-  namespace, cannot build the clone's dm-clone while the fault lasts, so
-  the clone's destination namespace waits inaccessible, its hosts' IO
-  queued, until the source comes back or the clone is deleted with `force`
-  (`cnagent.md` CN16). What else those rows cost on the cn agent is
-  `cnagent.md`, Known limits.
+  Known limits); a source with no namespace is named by nothing. A role
+  that moves while a fault at the source lasts can take even a clone that
+  has hydrated in full out of service: a new primary that cannot connect
+  the source, or finds no source namespace, cannot build the clone's
+  dm-clone while the fault lasts, so the clone's destination namespace
+  waits inaccessible, its hosts' IO queued, until the source comes back or
+  the clone is deleted with `force` (`cnagent.md` CN16). What else those
+  rows cost on the cn agent is `cnagent.md`, Known limits.
 * **A clone's drain can give its clone meta group back before the primary
   removes the dm-clone.** CLD9's transaction waits for no agent (CLD10),
   so a DN can tear a side of the group down while the primary's dm-clone

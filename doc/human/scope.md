@@ -676,26 +676,27 @@ Measured times are in [the introduction](introduction.md#status-and-limits-of-01
 - **A disk node or a clone source that stays away costs a converge every
   second check round once its connection is gone.** While a disk node is
   dead, the controller node's kernel keeps trying to connect to it again,
-  and beyond failing its legs in md, dnv spends nothing on it. Once the
-  kernel has deleted the connection, as after the disk node refused a
-  reconnect with "do not retry" or after a reboot of the controller node,
-  every check round of a cntlr with a leg there names the leg's side,
-  since only a converge connects it again. The worker then sends the
-  syncup every second check round at most, and each converge tries the
-  connect, with the retries a budget of about one second allows. This
-  lasts until the disk node answers, leg repair has replaced the leg, or
-  an operator takes the leg off the disk node, by a repair or a
+  and beyond failing its legs in md, and cutting the other path of a leg
+  that a migration moves when the dead node's path was the one that served,
+  dnv spends nothing on it. Once the kernel has deleted the connection, as
+  after the disk node refused a reconnect with "do not retry" or after a
+  reboot of the controller node, every check round of a cntlr with a leg
+  there names the leg's side, since only a converge connects it again. The
+  worker then sends the syncup every second check round at most, and each
+  converge tries the connect, with the retries a budget of about one second
+  allows. This lasts until the disk node answers, leg repair has replaced
+  the leg, or an operator takes the leg off the disk node, by a repair or a
   migration, steps the pool's level down to one that builds no side, or
-  deletes the pool; the disk node itself cannot be deleted while the leg
-  is on it. A clone source that the primary cannot connect costs the same
+  deletes the pool; the disk node itself cannot be deleted while the leg is
+  on it. A clone source that the primary cannot connect costs the same
   until the source answers, the clone is deleted, or an operator steps the
   pool's level down to one that builds no clone. An operator who disables
   the primary ends the cost in two cases only: the fault is in that
   controller node's own path to the source, or no standby can become the
   primary, and then the pool serves no IO. Otherwise the failover makes a
-  standby the primary, which tries to connect the same source and costs
-  the same. State: accepted: the converge is the only way a deleted
-  connection comes back. Not seen in the lab.
+  standby the primary, which tries to connect the same source and costs the
+  same. State: accepted: the converge is the only way a deleted connection
+  comes back. Not seen in the lab.
 - **The primary can guess wrong whether mdadm would start a stopped
   array.** A check round of the primary names a group whose array does not
   run when mdadm would start it, which the agent works out from the legs'
@@ -852,23 +853,25 @@ Measured times are in [the introduction](introduction.md#status-and-limits-of-01
   reuse. Fix later: a forced node delete for a dead disk node. Not seen in
   the lab.
 - **Space of a dropped side can stay in use for a while.** When a side
-  leaves a disk node and no other side of its pool stays on that disk
-  node, the agent keeps the side's extents in use for as long as the
+  leaves a disk node and no other side of its pool has its device on that
+  disk node, the agent keeps the side's extents in use for as long as the
   machine holds an empty NVMe-oF export of that pool, one that is being
   built or whose removal stopped part way, that is less than 30 seconds
-  old. The side's own removal leaves such an export when it stops after the
+  old. It also keeps them for as long as the agent cannot read an NVMe-oF
+  export of that pool, or cannot list the machine's exports at all. The
+  side's own removal leaves such an empty export when it stops after the
   export's namespace is gone; one that stops earlier leaves an export the
   check rounds report. Another agent on the same machine has such an export
   while it builds or removes an export of the pool. The check rounds report
-  no leftover meanwhile. A side placed on that disk node in that time can
-  fail for want of room, and a node deleted in that time keeps the side.
-  When the kernel renews an export's time stamp each time its settings are
-  read, the wait can last longer: while another agent on the machine keeps
-  failing part way through a build of an export of the pool, and, when two
-  agents on one machine hold the two sides of one leg, until the other
-  agent builds that export again or removes it. State: accepted. Only its
-  age tells such an export from another agent's export still being built.
-  Not seen in the lab.
+  a read or a listing that fails, but not the young export. A side placed
+  on that disk node in that time can fail for want of room, and a node
+  deleted in that time keeps the side. When the kernel renews an export's
+  time stamp each time its settings are read, the wait can last longer:
+  while another agent on the machine keeps failing part way through a build
+  of an export of the pool, and, when two agents on one machine hold the
+  two sides of one leg, until the other agent builds that export again or
+  removes it. State: accepted. Only its age tells such an export from
+  another agent's export still being built. Not seen in the lab.
 - **A node's own converge whose call was cut off leaves part of its build
   waiting.** When the call of a disk node's or a controller node's own
   syncup is cut off, what its converge did not build, other than the
@@ -876,6 +879,19 @@ Measured times are in [the introduction](introduction.md#status-and-limits-of-01
   remove is a leftover, which the next check round names, and the worker
   sends the syncup again. Sides and cntlrs do not wait: their next check
   round names what is left. State: fix later. Not seen in the lab.
+- **A leg of a primary can go without its health check.** The primary
+  starts the health check of a leg in a converge: after a restart, after
+  a failover, and for a new leg. When that converge's step for the leg
+  fails, and the controller node also does not answer the read of the
+  device the cntlr puts over the leg, the leg gets no health check. Its
+  row then reads pending, which sets no health epoch. No check round names
+  the leg, and the primary does not fail it in md by itself either, as it
+  does for a leg that fails its health check twice in a row (section 6).
+  This lasts until a syncup comes for another reason, such as a new
+  revision or a check round that names another part of the cntlr. A leg
+  whose health check already runs keeps it. State: accepted; it needs two
+  reads of the controller node that do not answer in one converge, as on
+  a node whose reads stall. Not seen in the lab.
 - **An agent restart during a fence can leave devices suspended.** A disk
   node's agent keeps the start of a fence's wait in memory. A restart
   during that wait can leave the old primary's devices on the side

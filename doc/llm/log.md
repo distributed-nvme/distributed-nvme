@@ -278,33 +278,32 @@ logs for the same thing.
 * The agent logs `sweep leftover` (`agent/sweep.go`) on a sweep, or a
   background read's read-only verdict, that was not clean; a read logs it
   under the trace id of the round that started the read (`dnagent.md`
-  SH29). It carries the object's ids —
-  `cluster_id` plus `cn_id` or `dn_id` for a node-level pass, plus `sp_id`
-  and `cntlr_id` or `side_id` for an object-level one — then `leftover_cnt`,
-  `leftovers` (the sorted "kind:name" entries joined by a space; `kind` is
-  one of the `LeftoverKind*` labels of `agent/sweep.go`, and a cntlr's
-  read-only verdict lists there, each under a kind of its own, the md
-  members, the broken arrays and the absent arrays `cnagent.md` CN30
-  names) and
+  SH29). It carries the object's ids — `cluster_id` plus `cn_id` or `dn_id`
+  for a node-level pass, plus `sp_id` and `cntlr_id` or `side_id` for an
+  object-level one — then `leftover_cnt`, `leftovers` (the sorted
+  "kind:name" entries joined by a space; `kind` is one of the
+  `LeftoverKind*` labels of `agent/sweep.go`, and a cntlr's read-only
+  verdict lists there, each under a kind of its own, the md members, the
+  broken arrays and the absent arrays `cnagent.md` CN30 names) and
   `failures`: the steps that could not prove the scope clean — an
   enumeration that did not answer, a record the pass could not free, or, on
-  the dn, a disk whose identity is not confirmed or a side with bytes
-  still to zero and no zeroing goroutine that is not a migration
-  destination waiting for a free run in the clone-metadata area
-  (`dnagent.md` DN16), or, on either role, each row that a converge or a
-  background read found absent or different where a re-sent `Syncup*`
-  would cure it, on a cntlr a leg wrapper, a `RedundNone` group's
-  dm-linear and a dm-clone a converge would change among them (rendered
-  "absent" or "differs" with the row's words), or the node's nvmet port
-  in a state one would rewrite (`dnagent.md` SH31, DN16), or, on a cntlr,
-  a side of a wanted leg or an entry of a clone's source with no
-  controller that the converge would connect, a migrating leg's path the
-  converge would cut, a forced-start mark of the request the agent holds
-  while that request does not count as delivered, a group's forced start
-  its converge would carry through, a group's md check its converge would
-  start, stop or adopt, or an uncreated snapshot whose create message its
-  converge would send (`cnagent.md` CN8, CN10, CN12, CN14, CN30) — each
-  rendered "what: error" and joined by "; ".
+  the dn, a disk whose identity is not confirmed or a side with bytes still
+  to zero and no zeroing goroutine that is not a migration destination
+  whose side device row reads the clone-metadata area's refusal of its run
+  (`dnagent.md` DN13, DN16), or, on either role, each row that a converge
+  or a background read found absent or different where a re-sent `Syncup*`
+  would cure it, on a cntlr a leg wrapper, a `RedundNone` group's dm-linear
+  and a dm-clone a converge would change among them (rendered "absent" or
+  "differs" with the row's words), or the node's nvmet port in a state one
+  would rewrite (`dnagent.md` SH31, DN16), or, on a cntlr, a side of a
+  wanted leg or an entry of a clone's source with no controller that the
+  converge would connect, a migrating leg's path the converge would cut, a
+  forced-start mark of the request the agent holds while that request does
+  not count as delivered, a group's forced start its converge would carry
+  through, a group's md check its converge would start, stop or adopt, or
+  an uncreated snapshot whose create message its converge would send
+  (`cnagent.md` CN8, CN10, CN12, CN14, CN30) — each rendered "what: error"
+  and joined by "; ".
 * The worker logs `syncup leftover` (`worker/revision.go`) on a `Syncup*`
   reply carrying `ReplyCodeLeftover`, with the object's ids, `revision`
   (the one the request carried) and `details` (the agent's own leftover

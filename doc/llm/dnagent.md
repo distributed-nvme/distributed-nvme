@@ -111,45 +111,43 @@ The constants this document relies on, whose values and comments
   transition rewrites a namespace's "ana_grpid" instead.
 * The `AgentReply.code` values. Zero is OK. `ReplyCodeStaleRevision`,
   `ReplyCodeUnknownObject`, `ReplyCodeInvalidConf` and
-  `ReplyCodeSaveFailed` are rejections: the request was not applied, so
-  the worker reads no verdict from the reply's rows; so is
-  `ReplyCodeStarting`, the answer of an agent whose startup reconcile still
-  runs (SH33), which applies nothing and reads nothing.
-  `ReplyCodeInvalidConf` refuses a request whose conf carries a value the
-  control plane cannot have written — a proto3 zero where
-  `architecture.md`, Common validation, requires a concrete geometry, or a
-  side's length to zero outside the bounds of DN8's side conf gate; the
-  object is known and the revision is current, it is the conf that is
-  unusable, which is why it is neither of the first two.
+  `ReplyCodeSaveFailed` are rejections: the request was not applied, so the
+  worker reads no verdict from the reply's rows; so is `ReplyCodeStarting`,
+  the answer of an agent whose startup reconcile still runs (SH33), which
+  applies nothing and reads nothing. `ReplyCodeInvalidConf` refuses a
+  request whose conf carries a value the control plane cannot have written
+  — a proto3 zero where `architecture.md`, Common validation, requires a
+  concrete geometry, or a side's length to zero outside the bounds of DN8's
+  side conf gate; the object is known and the revision is current, it is
+  the conf that is unusable, which is why it is neither of the first two.
   `ReplyCodeSaveFailed` refuses a request the gates admitted whose save to
-  the local store failed (SH5): the request is current and its conf
-  usable, and the agent cannot keep it, which is why it is none of the
-  other three; a dn agent also refuses with it a migration piece whose
-  push could not first remove the chunks stored at its index and above,
-  or could not then save the piece (DN15).
-  `ReplyCodeLeftover` reports an **accepted** request with residue: the
-  desired state is stored and the converge built what it could, but the
-  node still holds objects the desired state does not want, or an
-  enumeration of what exists did not answer. It is the one thing that
-  travels in `agent_reply` rather than in the `*Info` rows, because a
-  leftover by definition has no row — nothing wanted names it. An agent also
-  reports a few conditions this way so that the worker re-sends the
-  `Syncup*` whose converge acts on them (`architecture.md`, Teardown by
+  the local store failed (SH5): the request is current and its conf usable,
+  and the agent cannot keep it, which is why it is none of the other three;
+  a dn agent also refuses with it a migration piece whose push could not
+  first remove the chunks stored at its index and above, or could not then
+  save the piece (DN15). `ReplyCodeLeftover` reports an **accepted**
+  request with residue: the desired state is stored and the converge built
+  what it could, but the node still holds objects the desired state does
+  not want, or an enumeration of what exists did not answer. It is the one
+  thing that travels in `agent_reply` rather than in the `*Info` rows,
+  because a leftover by definition has no row — nothing wanted names it. An
+  agent also reports a few conditions this way so that the worker re-sends
+  the `Syncup*` whose converge acts on them (`architecture.md`, Teardown by
   sweep): on a dn a disk identity not yet confirmed, a side with bytes
-  still to zero and nothing zeroing it that is not a migration destination
-  waiting for a free run in the clone-metadata area (DN16), what a read
-  found absent that a re-sent `Syncup*` would build, or the port in a
-  state one would rewrite (SH31, DN16), or a side or clone-metadata record
-  a converge's pass could not free (DN19); on a cn what `cnagent.md` CN30
+  still to zero and nothing zeroing it, save a migration destination whose
+  side device row reads the clone-metadata area's refusal of its run, a
+  wait for a free run or a refusal no wait cures (DN13, DN16), what a read
+  found absent that a re-sent `Syncup*` would build, or the port in a state
+  one would rewrite (SH31, DN16), or a side or clone-metadata record a
+  converge's pass could not free (DN19); on a cn what `cnagent.md` CN30
   lists. Only a read's verdict names a side nothing zeroes, what a read
   found absent, and the port in a state one would rewrite, so the
   observation a converge stores leaves them out until the object's next
-  read (SH31, DN16); `cnagent.md` CN30 says which of the
-  cn's conditions only a read names. It is not a rejection: the worker
-  evaluates the reply's rows exactly as for code zero and re-issues the
-  `Syncup*` on every round whose reply carries the code from an
-  observation that is not too old (`dnv-worker.md` HL7; RW12, no backoff)
-  until the code changes.
+  read (SH31, DN16); `cnagent.md` CN30 says which of the cn's conditions
+  only a read names. It is not a rejection: the worker evaluates the
+  reply's rows exactly as for code zero and re-issues the `Syncup*` on
+  every round whose reply carries the code from an observation that is not
+  too old (`dnv-worker.md` HL7; RW12, no backoff) until the code changes.
   "Pending" is never stored as a flag: the code is recomputed by
   enumerating the node in every converge and every background read, and
   kept only as the code of the observation each of them stores (SH28). Any
@@ -157,14 +155,14 @@ The constants this document relies on, whose values and comments
   (`dnv-worker.md` RW4), save in a reply whose observation is too old
   (`dnv-worker.md` HL7) and in a reply of `ReplyCodeStarting`, which the
   worker judges by the agent's start time (`dnv-worker.md` HL8), and in a
-  `Push*Bitmap` reply ends that push plan.
-  Among the rejections the specific value sets the level of the worker's
-  "syncup rejected" record (`dnv-worker.md` RW5), a round answered
-  with `ReplyCodeUnknownObject` is not judged by its observation's age
-  (`dnv-worker.md` HL7), and a `SyncupCntlr` refused with
-  `ReplyCodeInvalidConf` or `ReplyCodeSaveFailed` makes the worker judge
-  an enabled primary's later rounds unhealthy (`dnv-worker.md` HL9);
-  otherwise it serves details and tests.
+  `Push*Bitmap` reply ends that push plan. Among the rejections the
+  specific value sets the level of the worker's "syncup rejected" record
+  (`dnv-worker.md` RW5), a round answered with `ReplyCodeUnknownObject` is
+  not judged by its observation's age (`dnv-worker.md` HL7), and a
+  `SyncupCntlr` refused with `ReplyCodeInvalidConf` or
+  `ReplyCodeSaveFailed` makes the worker judge an enabled primary's later
+  rounds unhealthy (`dnv-worker.md` HL9); otherwise it serves details and
+  tests.
 * `DnMigrConnectPassBudget`, `DnMigrCutoverConnectBudget` and
   `DnMigrConnectRetryPause`, the migration destination's retries of a
   failed connect to the migration source export within one pass (DN13):
@@ -3174,39 +3172,38 @@ fail host IO until that request came.
 
 With the gate open, the five dst steps of `architecture.md`, Migration,
 numbered as there. What the dn adds to them: the slot of step (2) is the
-run taken before zeroing (above), contiguous `DnCloneMetaUnit` units of
-the [D13] clone-metadata area, `CloneMetaUnits` of the side's `ext_cnt`
-extents and `migr_dst_conf.block_size` (`migrMetaUnits`; `architecture.md`,
-Metadata units), whose head is zeroed **before** its record is persisted
-so that bytes an earlier migration left in those units cannot be
-misparsed as a dm-clone superblock; step (2) finds that record and builds
-the wrapper over it, and refuses as the run's own step does — no free run
-reads both `migr_dst_info` rows `RES_STATUS_PROVISIONING` with the wait's
-details, any other refusal the pair the shared rule below gives; the
-connect of step (3) carries the hostnqn `DnHostNqn` of this cluster and dn
-(SH20), the one field by which
-the connection is later attributed to this agent (DN6); the dm-clone of step
-(4) carries the features **no_hydration and no_discard_passdown** — both
-are mandatory on **every** dnv dm-clone, dn and cn alike (`cnagent.md`
-CN18), because the bitmap protocols of `architecture.md`, Bitmap push
-protocol and raid0 bitmap math, use a discard on a dm-clone as the
-metadata-only "mark this region hydrated" primitive: dm-clone turns discard
-passdown on by default whenever the destination's discard granularity is no
-larger than one region — a dm-linear over a raw disk always satisfies that
-— and would then *also* remap the discard to the destination. The hazard is
-**after** the cutover, not before it: host IO already flows through the
-destination dm-clone, a host write hydrates region *r*, and a skip-bitmap
-chunk whose bit for *r* was read from the CN thin metadata before that
-write arrives later — pushes are legal at any time and a restart re-applies
-every stored chunk — so the resulting discard would destroy the only
-copy of an acknowledged write. Without passdown the same discard is the
-metadata no-op that `architecture.md`, Bitmap push protocol, and
-`architecture.md`, [D7] assume, and a pass that creates the dm-clone
-re-applies the applied set onto it (SH21 to SH23); and step (5) puts the
-primary's namespace in `AnaGrpIdOptimized` and the standbys' in
-`AnaGrpIdNonOptimized`. The implemented converge order differs from that
-numbering without changing any end state (`SyncupSide` builds bottom-up:
-slot, connect, clone, linear,
+run taken before zeroing (above), contiguous `DnCloneMetaUnit` units of the
+[D13] clone-metadata area, `CloneMetaUnits` of the side's `ext_cnt` extents
+and `migr_dst_conf.block_size` (`migrMetaUnits`; `architecture.md`,
+Metadata units), whose head is zeroed **before** its record is persisted so
+that bytes an earlier migration left in those units cannot be misparsed as
+a dm-clone superblock; step (2) finds that record and builds the wrapper
+over it, and refuses as the run's own step does — no free run reads both
+`migr_dst_info` rows `RES_STATUS_PROVISIONING` with the wait's details, any
+other refusal the pair the shared rule below gives; the connect of step (3)
+carries the hostnqn `DnHostNqn` of this cluster and dn (SH20), the one
+field by which the connection is later attributed to this agent (DN6); the
+dm-clone of step (4) carries the features **no_hydration and
+no_discard_passdown** — both are mandatory on **every** dnv dm-clone, dn
+and cn alike (`cnagent.md` CN18), because the bitmap protocols of
+`architecture.md`, Bitmap push protocol and raid0 bitmap math, use a
+discard on a dm-clone as the metadata-only "mark this region hydrated"
+primitive: dm-clone turns discard passdown on by default whenever the
+destination's discard granularity is no larger than one region — a
+dm-linear over a raw disk always satisfies that — and would then *also*
+remap the discard to the destination. The hazard is **after** the cutover,
+not before it: host IO already flows through the destination dm-clone, a
+host write hydrates region *r*, and a skip-bitmap chunk whose bit for *r*
+was read from the CN thin metadata before that write arrives later — pushes
+are legal at any time and a restart re-applies every stored chunk — so the
+resulting discard would destroy the only copy of an acknowledged write.
+Without passdown the same discard is the metadata no-op that
+`architecture.md`, Bitmap push protocol, and `architecture.md`, [D7]
+assume, and a pass that creates the dm-clone re-applies the applied set
+onto it (SH21 to SH23); and step (5) puts the primary's namespace in
+`AnaGrpIdOptimized` and the standbys' in `AnaGrpIdNonOptimized`. The
+implemented converge order differs from that numbering without changing any
+end state (`SyncupSide` builds bottom-up: slot, connect, clone, linear,
 "ana_grpid"): `ensureMigrDst` runs steps (2) to (4) **before** the per-CN
 stacks converge, so a pass that runs steps (2) to (4) and finds no per-CN
 stack *creates* the primary's dm-linear directly on the dm-clone and puts
@@ -3214,119 +3211,114 @@ its namespace straight into `AnaGrpIdOptimized`, unless a step of it stops
 (below). A migration whose record the create wrote with `cutover_pending`
 set never takes that path: the pass that waits for the cutover builds its
 stacks first, in step (1)'s shape, and the request that clears the flag
-moves the primary onto the dm-clone with step (5)'s reload.
-Step (1)'s dm-error and `AnaGrpIdInaccessible` shape is what a pass builds
-when its source connection answers with no namespace device, or when a
-step stops or the pass waits for the cutover and it finds the dm-clone
-absent or, with every read answered, no per-CN stack serving through it
-(below); step (5)'s *reload*
-then moves the primary onto the dm-clone in a later pass that has one to
-serve through, the converge of a `SyncupSide`. Trying step (3) again
-(`architecture.md`, Migration) is done in two tiers: the retry within one
-pass, and past it the worker's re-send (below). A converge pass
-whose sysfs walk finds no controller for the source — no subsystem entry, an
-entry the kernel keeps with no controller in it (`architecture.md`, Teardown
-by sweep), or one that lists only controllers whose device is deleted
-(`cnagent.md` CN10) — connects, and after a connect that failed connects
-again, pausing `DnMigrConnectRetryPause` between attempts, for as long as
-the pass's connect budget still covers the pause, each failed connect's own
-time drawing on it too (`connectMigrSrc`, a `WaitBudget`, the dn twin of
-`cnagent.md` CN10's in-pass retry), so a connect that runs long can spend it
-at once. The budget is `DnMigrCutoverConnectBudget` in the converge the
+moves the primary onto the dm-clone with step (5)'s reload. Step (1)'s
+dm-error and `AnaGrpIdInaccessible` shape is what a pass builds when its
+source connection answers with no namespace device, or when a step stops or
+the pass waits for the cutover and it finds the dm-clone absent or, with
+every read answered, no per-CN stack serving through it (below); step (5)'s
+*reload* then moves the primary onto the dm-clone in a later pass that has
+one to serve through: the converge of a `SyncupSide`, or DN2's re-run after
+a restart. Trying step (3) again (`architecture.md`, Migration) is done in
+two tiers: the retry within one pass, and past it the worker's re-send
+(below). A converge pass whose sysfs walk finds no controller for the
+source — no subsystem entry, an entry the kernel keeps with no controller
+in it (`architecture.md`, Teardown by sweep), or one that lists only
+controllers whose device is deleted (`cnagent.md` CN10) — connects, and
+after a connect that failed connects again, pausing
+`DnMigrConnectRetryPause` between attempts, for as long as the pass's
+connect budget still covers the pause, each failed connect's own time
+drawing on it too (`connectMigrSrc`, a `WaitBudget`, the dn twin of
+`cnagent.md` CN10's in-pass retry), so a connect that runs long can spend
+it at once. The budget is `DnMigrCutoverConnectBudget` in the converge the
 cutover brings and `DnMigrConnectPassBudget` in every other. The converge
 the cutover brings is that of a `SyncupSide` whose request carries
 `migr_dst_conf` without `cutover_pending` while the request this process
-held for the side before it carried the flag for the same migration; the RPC
-reads the held request before it saves the new one and lets it replace the
-held one (SH5), and stores nothing of the reading. Every other converge
+held for the side before it carried the flag for the same migration; the
+RPC reads the held request before it saves the new one and lets it replace
+the held one (SH5), and stores nothing of the reading. Every other converge
 keeps the shorter budget, among them a `SyncupSide` that finds the process
-holding a request without the flag or none for the side, and the DN12
-fence timer and DN2's re-run, which converge a request the process already
-holds. The error is not classified: an export not linked yet, a
-source disk node that is down and a refused host are tried alike, and the
-budget caps how often. Reason: after the cutover the source links its
-migration source export to its nvmet port only after its step 1 and the
-suspend that starts its step 2 (DN12), in its own pass, so the pass the
-cutover brings often connects too early. The worker sends the request that
-brings the cutover at once (`dnv-worker.md` RW6), but it sends it again
-only on the side's next round, up to one interval later (`dnv-worker.md`
-RW4), the leg in the migration gap all that time; the longer budget is
-sized to outlast the source's pass on a loaded node, so that normally the
-gap holds only the two sides' own steps. A process gives it to one pass
-per cutover, since once that pass's request has replaced the held one the
-process holds no request with the flag, so a source that never answers
-holds the side's locks that long once, not on every re-send and not on
-every revision. A request without the flag whose
-save fails is refused before it replaces the held one (SH5), so the process
-still holds the request with the flag, and the converge of the request the
-worker sends again is still the one the cutover brings. The longer budget is a bound,
-not a wait for the source: a source whose pass outlasts it leaves the gap to
-the converge of the worker's re-send (`architecture.md`, Known limits), and
-so does a
-source slower than the shorter budget wherever no pass gets the longer one:
-for a migration whose record never carried the flag (`architecture.md`,
-Upgrade in lockstep), and wherever the process holds no request with the
-flag when the request that clears it comes, as after a restart inside the
-cutover's converge, whose re-run starts from the stored request alone, or
-after a restart that left the process holding no request for the side, as a
-lost `--local-store`, a missing `side-*` file or a side DN2 skips does.
-After a connect that succeeded the pass re-reads the
-subsystem until the source's namespace device is there, pausing
-`DnMigrDstNsPause` between reads and `DnMigrDstNsWait` in all
-(`awaitMigrSrcNs`, a `WaitBudget` of its own) — the kernel returns from the
-connect once the controller is live and only queues the namespace scan that
-adds the device, so a single re-read could fail the target "controller has
-no namespace" for a device milliseconds away (the dn twin of `cnagent.md`
-CN10's head wait); a read that fails ends that wait at once. Both waits hold
-the pass's DN1 locks, so a `SyncupDn` waits behind them, about the two
-budgets together and longer when a connect itself runs long, and while
-that `SyncupDn` waits for the node write lock every later call, task and
-background read of the agent that takes the node lock waits too (SH30).
-No read of the side starts while the pass runs, since its converge mark
-stands (SH30): the side's rounds answer at once
+holding a request without the flag or none for the side, and the DN12 fence
+timer and DN2's re-run, which converge a request the process already holds.
+The error is not classified: an export not linked yet, a source disk node
+that is down and a refused host are tried alike, and the budget caps how
+often. Reason: after the cutover the source links its migration source
+export to its nvmet port only after its step 1 and the suspend that starts
+its step 2 (DN12), in its own pass, so the pass the cutover brings often
+connects too early. The worker sends the request that brings the cutover at
+once (`dnv-worker.md` RW6), but it sends it again only on the side's next
+round, up to one interval later (`dnv-worker.md` RW4), the leg in the
+migration gap all that time; the longer budget is sized to outlast the
+source's pass on a loaded node, so that normally the gap holds only the two
+sides' own steps. A process gives it to one pass per cutover, since once
+that pass's request has replaced the held one the process holds no request
+with the flag, so a source that never answers holds the side's locks that
+long once, not on every re-send and not on every revision. A request
+without the flag whose save fails is refused before it replaces the held
+one (SH5), so the process still holds the request with the flag, and the
+converge of the request the worker sends again is still the one the cutover
+brings. The longer budget is a bound, not a wait for the source: a source
+whose pass outlasts it leaves the gap to the converge of the worker's
+re-send (`architecture.md`, Known limits), and so does a source slower than
+the shorter budget wherever no pass gets the longer one: for a migration
+whose record never carried the flag (`architecture.md`, Upgrade in
+lockstep), and wherever the process holds no request with the flag when the
+request that clears it comes, as after a restart inside the cutover's
+converge, whose re-run starts from the stored request alone, or after a
+restart that left the process holding no request for the side, as a lost
+`--local-store`, a missing `side-*` file or a side DN2 skips does. After a
+connect that succeeded the pass re-reads the subsystem until the source's
+namespace device is there, pausing `DnMigrDstNsPause` between reads and
+`DnMigrDstNsWait` in all (`awaitMigrSrcNs`, a `WaitBudget` of its own) —
+the kernel returns from the connect once the controller is live and only
+queues the namespace scan that adds the device, so a single re-read could
+fail the target "controller has no namespace" for a device milliseconds
+away (the dn twin of `cnagent.md` CN10's head wait); a read that fails ends
+that wait at once. Both waits hold the pass's DN1 locks, so a `SyncupDn`
+waits behind them, about the two budgets together and longer when a connect
+itself runs long, and while that `SyncupDn` waits for the node write lock
+every later call, task and background read of the agent that takes the node
+lock waits too (SH30). No read of the side starts while the pass runs,
+since its converge mark stands (SH30): the side's rounds answer at once
 from the observation before the pass, which ages for as long as the pass
 runs (`dnv-worker.md` HL7). A re-sent `SyncupSide` against a source that
 keeps refusing holds the locks about the shorter connect budget; its pass
-ends in the observation its reply stamps, and the worker's loop of the
-side waits for that call before its next round (`dnv-worker.md` RW1).
-The dm-clone holds the source's multipath head open, so after the host
-deletes the source's controllers —
-as it does when the target refuses a reconnect with DNR — the walk finds
-the subsystem's entry still there with no controller in it, and the side's
-next converge connects again: step (4) reloads the dm-clone onto the
-namespace device the new controller brings, a new multipath head with a
-new device number. That converge is the `SyncupSide` the side's verdict
-brings once a read finds the connection gone and names the destination's
-rows (DN16), or DN2's re-run. When the connect still fails once its budget
-is spent, the pass records `target_info` as `RES_STATUS_ERROR` with the
-connect's error, and nothing runs the converge again by itself: the
-second tier is the worker's re-send. The side's verdict names the rows
-every step that stops leaves not as wanted, on the converge's reply and on
-the read after it, while a re-sent `SyncupSide` would act on them (DN16),
-so the worker sends the `SyncupSide` again on its next round
-(`dnv-worker.md` RW4). That covers the connect, the slot or its wrapper, a
-walk of the source connection that did not answer, the dm-clone, the
-status read, hydration that will not converge (a knob or the enable), as
-the status line read after the messages shows it, a step (5) that leaves
-the primary's dm-linear or its export unconverged (the linear onto the
-dm-clone, the namespace in `AnaGrpIdOptimized`), and a pass that waits for
-the cutover and leaves them unconverged where it puts them (above). Three
-states leave the target row unnamed, since a re-send would do nothing for
-it (DN16): a controller the walk finds with no namespace device, live or
-not, whether this pass's connect brought it or an earlier one did, which
-leaves the dm-clone row unnamed too while that row reads the walk's
-answer; a source controller with a namespace device whose paths are not
-live, which the kernel reconnects by itself — no converge connects beside
-a controller; and a refusal of the
-run that a re-sent request meets the same way, which leaves the dm-clone
-row unnamed too. Over a namespace device a fault of the dm-clone's own is
-still named, and the next read names the dm-clone once the namespace
-device is there. With the
-source having handed IO over by then (DN12), a destination not serving
-through its dm-clone leaves the leg with no serving path until a re-send
-finishes it, and one whose hydration is off copies nothing in the
-background. While no worker drives the pool, a stopped step stays as it
-is (Known limits).
+ends in the observation its reply stamps, and the worker's loop of the side
+waits for that call before its next round (`dnv-worker.md` RW1). The
+dm-clone holds the source's multipath head open, so after the host deletes
+the source's controllers — as it does when the target refuses a reconnect
+with DNR — the walk finds the subsystem's entry still there with no
+controller in it, and the side's next converge connects again: step (4)
+reloads the dm-clone onto the namespace device the new controller brings, a
+new multipath head with a new device number. That converge is the
+`SyncupSide` the side's verdict brings once a read finds the connection
+gone and names the destination's rows (DN16), or DN2's re-run. When the
+connect still fails once its budget is spent, the pass records
+`target_info` as `RES_STATUS_ERROR` with the connect's error, and nothing
+runs the converge again by itself: the second tier is the worker's re-send.
+The side's verdict names the rows every step that stops leaves not as
+wanted, on the converge's reply and on the read after it, while a re-sent
+`SyncupSide` would act on them (DN16), so the worker sends the `SyncupSide`
+again on its next round (`dnv-worker.md` RW4). That covers the connect, the
+slot or its wrapper, a walk of the source connection that did not answer,
+the dm-clone, the status read, hydration that will not converge (a knob or
+the enable), as the status line read after the messages shows it, a step
+(5) that leaves the primary's dm-linear or its export unconverged (the
+linear onto the dm-clone, the namespace in `AnaGrpIdOptimized`), and a pass
+that waits for the cutover and leaves them unconverged where it puts them
+(above). Three states leave the target row unnamed, since a re-send would
+do nothing for it (DN16): a controller the walk finds with no namespace
+device, live or not, whether this pass's connect brought it or an earlier
+one did, which leaves the dm-clone row unnamed too while that row reads the
+walk's answer; a source controller with a namespace device whose paths are
+not live, which the kernel reconnects by itself — no converge connects
+beside a controller; and a refusal of the run that a re-sent request meets
+the same way, which leaves the dm-clone row unnamed too. Over a namespace
+device a fault of the dm-clone's own is still named, and the next read
+names the dm-clone once the namespace device is there. With the source
+having handed IO over by then (DN12), a destination not serving through its
+dm-clone leaves the leg with no serving path until a re-send finishes it,
+and one whose hydration is off copies nothing in the background. While no
+worker drives the pool, a stopped step stays as it is (Known limits).
 
 **Short of the source connection's own answer, a step that stops takes the
 serving path neither onto the dm-clone nor off it.** Where the per-CN
@@ -3993,22 +3985,21 @@ could not remove everything, or whose enumeration did not answer, replies
 `ReplyCodeLeftover` with `details` listing the leftovers as "kind:name"
 entries with their count — at most `maxLeftoverNames` names, then a "[+k
 more]" tail — and an "enumeration failed" entry naming what did not answer
-and the error, for each such listing (`LeftoverReply`). Four dn checks
-that are not listings are folded into the same outcome, in that same form,
-so that they drive the same re-send: DN6's record step on a disk whose
+and the error, for each such listing (`LeftoverReply`). Four dn checks that
+are not listings are folded into the same outcome, in that same form, so
+that they drive the same re-send: DN6's record step on a disk whose
 identity is not confirmed; a record of a side, or of the clone-metadata
 area, that a converge's pass could not free — a read frees nothing — named
-as that record with the error
-(`log.md`, Leftovers); and, in the read-only verdict only, so a
-converge's observation leaves them out until the object's next read
-(DN16), a side with bytes still to zero and no zeroing goroutine, other
-than a migration destination waiting for a free run in the
-clone-metadata area, and what the read found absent that a re-sent
-`Syncup*` would build, or the port in a state one would rewrite (SH31,
-DN16).
-The full list goes to the agent log as the "sweep leftover" record
-(`log.md`, Leftovers), once per converge and once per background read, so
-a lingering leftover is visible in each of them rather than once.
+as that record with the error (`log.md`, Leftovers); and, in the read-only
+verdict only, so a converge's observation leaves them out until the
+object's next read (DN16), a side with bytes still to zero and no zeroing
+goroutine, other than a migration destination whose side device row reads
+the clone-metadata area's refusal of its run (DN13, DN16), and what the
+read found absent that a re-sent `Syncup*` would build, or the port in a
+state one would rewrite (SH31, DN16). The full list goes to the agent log
+as the "sweep leftover" record (`log.md`, Leftovers), once per converge and
+once per background read, so a lingering leftover is visible in each of
+them rather than once.
 
 It is **not** a rejection (SH9). The request was applied, the desired state
 is stored, and the `*Info` rows are the full account of every wanted
@@ -4268,50 +4259,50 @@ else reported through `agent_reply` is still a protocol-level refusal.
   destination whose connect failed, or one waiting for room, waits for the
   next worker's first round of the side and the re-send its name brings
   (DN13).
-* While a node's store disk refuses writes, full or read-only, every request
-  the gates admit is refused for its failed save (SH5), so every change of
-  that node's desired state stalls until a save holds again: a failover's
-  fence or primary flip, a migration's cutover or finish and a cntlr's
-  promotion stall with it, and so does a removal, such as a pool delete's.
-  So does every re-converge a syncup at the held revision would bring, such
-  as a leftover's sweep (DN17) or the start of a side's zeroing that nothing
-  runs (DN16); only the converges no syncup brings still run — the
-  background converge attempts (SH11) and a restart's reconcile (DN2). The
-  one background converge is the DN12 fence timer's (the cn runs none,
+* While a node's store disk refuses writes, full or read-only, every
+  request the gates admit is refused for its failed save (SH5), so every
+  change of that node's desired state stalls until a save holds again: a
+  failover's fence or primary flip, a migration's cutover or finish and a
+  cntlr's promotion stall with it, and so does a removal, such as a pool
+  delete's. So does every re-converge a syncup at the held revision would
+  bring, such as a leftover's sweep (DN17) or the start of a side's zeroing
+  that nothing runs (DN16); only the converges no syncup brings still run —
+  the background converge attempts (SH11) and a restart's reconcile (DN2).
+  The one background converge is the DN12 fence timer's (the cn runs none,
   `cnagent.md` CN10), so on the dn two waits last the whole fault short of
   an agent restart, whose reconcile converges each side from its held
   request with no new save (DN2): the migration gap a cutover request
-  leaves when it was saved and a step of its pass stopped — its connect,
-  the check of its side device, its slot or wrapper, its dm-clone (DN9,
-  DN13, DN10) — and a destination waiting for room in the clone-metadata
-  area. Short of that restart, only a re-sent `SyncupSide` closes the one
-  or takes the run of the other (DN13), and each re-send is refused for
-  its failed save.
-  Apart
-  from two narrow cases on a CN, during an ownership change of a pool
-  (`cnagent.md`, Known limits) and at the failover below, nothing is lost
-  on either role: the node
-  serves on as the requests it accepted left it, and md's arbitration keeps
-  a group from two writers (`architecture.md`, Failover). On a CN, what a
-  `SyncupCntlr` refused for its failed save does to the forced-start marks
-  and thin-id sweeps of the request the agent holds for that cntlr is
-  `cnagent.md` CN8; what that costs is `cnagent.md`, Known limits. The
-  worker sends each refused change again every round, with no backoff (SH5),
-  each a failed save and no converge; each such syncup waits for the reads
-  in flight rather than cancel them (SH30). A rejection neither sets nor
-  clears a health epoch (`dnv-worker.md` HL1); the node's store row does
-  (DN18), from the first save the disk refuses, with the effects
-  `dnv-worker.md` HL1 gives it. On a CN, the rounds of an enabled primary
-  whose `SyncupCntlr` is so refused read unhealthy, so the worker fails it
-  over, and fails no primary over onto a cntlr so refused, and where every
-  healthy, enabled standby is so refused too it moves no role at all
-  (`dnv-worker.md` HL9, AR5, AR7); the old primary's demotion is refused as well, so
-  it serves on until the fence (`architecture.md`, Known limits, A
-  failover while the old primary serves can lose an acknowledged write).
-  The fault also shows in the logs: the
-  agent's record of each failed save, and the worker's record of each
-  rejection, on each round that re-sends the refused request (SH5;
-  `dnv-worker.md`, Log records).
+  leaves when it was saved and a step of its pass stopped — the check of
+  its side device, its slot or wrapper, the walk of the source connection
+  or its connect, its dm-clone or the dm-clone's status read, or a step (5)
+  that leaves the primary's dm-linear or its export unconverged, DN10's
+  fence check that fails included (DN9, DN13, DN10) — and a destination
+  waiting for room in the clone-metadata area. Short of that restart, only
+  a re-sent `SyncupSide` closes the one or takes the run of the other
+  (DN13), and each re-send is refused for its failed save. Apart from two
+  narrow cases on a CN, during an ownership change of a pool (`cnagent.md`,
+  Known limits) and at the failover below, nothing is lost on either role:
+  the node serves on as the requests it accepted left it, and md's
+  arbitration keeps a group from two writers (`architecture.md`, Failover).
+  On a CN, what a `SyncupCntlr` refused for its failed save does to the
+  forced-start marks and thin-id sweeps of the request the agent holds for
+  that cntlr is `cnagent.md` CN8; what that costs is `cnagent.md`, Known
+  limits. The worker sends each refused change again every round, with no
+  backoff (SH5), each a failed save and no converge; each such syncup waits
+  for the reads in flight rather than cancel them (SH30). A rejection
+  neither sets nor clears a health epoch (`dnv-worker.md` HL1); the node's
+  store row does (DN18), from the first save the disk refuses, with the
+  effects `dnv-worker.md` HL1 gives it. On a CN, the rounds of an enabled
+  primary whose `SyncupCntlr` is so refused read unhealthy, so the worker
+  fails it over, and fails no primary over onto a cntlr so refused, and
+  where every healthy, enabled standby is so refused too it moves no role
+  at all (`dnv-worker.md` HL9, AR5, AR7); the old primary's demotion is
+  refused as well, so it serves on until the fence (`architecture.md`,
+  Known limits, A failover while the old primary serves can lose an
+  acknowledged write). The fault also shows in the logs: the agent's record
+  of each failed save, and the worker's record of each rejection, on each
+  round that re-sends the refused request (SH5; `dnv-worker.md`, Log
+  records).
 * A store disk that fills, or turns read-only, while nothing is saved is
   offered for new sides and cntlrs until a save is refused: the store row
   reads the saves, the probe of DN18 runs only once one was refused, and no
