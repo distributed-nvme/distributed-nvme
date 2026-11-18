@@ -1704,7 +1704,8 @@ read, one DN12 fence-timer converge, and a DN9 zeroing
 batch's volume-table update (try-acquire) — node read + that side's object
 lock (key = `(cluster_id, dn_id, sp_id, side_id)`); a DN's background
 read — node read; `GetDnSize`, `GetDnInfo`, `GetSideInfo` and every
-`CheckDn` and `CheckSide` round — no lock of the hierarchy.
+`CheckDn` and `CheckSide` round — no lock of the hierarchy, nor the disk
+counters an inspect call's `GetDnInfo` reads (DN16).
 `SyncupDn` and `SyncupSide` cancel the reads SH30 names for each, as each
 arrives and before it takes a lock.
 
@@ -3742,6 +3743,19 @@ accepted, or when the startup reload could not load or skipped its file
 `revision` zero and no observation time (SH25). While the agent starts,
 every info read, of a known object or not, answers `ReplyCodeStarting` with
 no observation instead (SH33).
+
+The one exception is an inspect call's: a `GetDnInfo` with
+`read_io_stats`, which only the gateway's `InspectDiskNode` sends
+(`gateway.md`), answers as above and then also reads, at the call, the
+disk's block counters, the kernel's sysfs "stat" file under the disk's
+number (`Dm.BlockStat`), into the reply's `disk_io_stats`. It takes no lock
+of the hierarchy, starts no read and stores nothing in the observation; a
+disk whose counters do not read carries the read's text, cut as
+`cnagent.md` CN23 cuts it, never zeros. The reason is the cn's
+(`cnagent.md` CN23): the counters are for a person, and no round, syncup reply or other caller
+carries them. A disk's health beyond its counters — its SMART data, its
+error counts — is the node's usual tools' (smartd, the Prometheus node
+exporter), not dnv's.
 
 The DN18 probes and the read-only **verdict** run in the object's
 background read (SH29), under the DN1 locks, and the read stores both. For a known

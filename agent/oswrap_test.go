@@ -9,6 +9,7 @@ import (
 	"syscall"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"github.com/distributed-nvme/distributed-nvme/common"
 )
@@ -804,5 +805,145 @@ func TestDiskSizesReadsSysfsInProcess(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// TestBlockStatReadsTheStatFile pins Dm.BlockStat (cnagent.md CN23;
+// dnagent.md DN16): the device's number, then the "stat" file sysfs keeps
+// under it, both in the agent's own process under the SH15 soft timeout,
+// and no command; the seventeen counters land in the kernel's order. A
+// device that is not there, a stat file that is not there or holds too few
+// counters, and one that holds a word, are each an error naming the read,
+// and DevIoStats then carries that text and no counters.
+func TestBlockStatReadsTheStatFile(t *testing.T) {
+	enoent := func(path string) error {
+		return &fs.PathError{Op: "open", Path: path, Err: fs.ErrNotExist}
+	}
+	eio := func(path string) error {
+		return &fs.PathError{Op: "read", Path: path, Err: syscall.EIO}
+	}
+	const dev = "/dev/mapper/dnv-leg"
+	const statPath = "/sys/dev/block/253:4/stat"
+	full := "     1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17\n"
+	for _, tc := range []struct {
+		name     string
+		devNoErr error
+		stat     string
+		statErr  error
+		wantErr  string
+	}{
+		{name: "the counters", stat: full},
+		{name: "a device that is not there",
+			devNoErr: enoent(dev), wantErr: "device number of " + dev},
+		{name: "no stat file", statErr: enoent(statPath),
+			wantErr: dev + " (253:4) is not there"},
+		{name: "a read that failed", statErr: eio(statPath),
+			wantErr: "read " + statPath},
+		{name: "too few counters", stat: "1 2 3 4 5 6 7 8 9 10 11\n",
+			wantErr: statPath + " holds 11 counters, want 17"},
+		{name: "a word", stat: strings.Replace(full, " 9 ", " x ", 1),
+			wantErr: statPath + `: counter 9 reads "x"`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var reads []string
+			bounded := func(ctx context.Context, what string) {
+				if _, ok := ctx.Deadline(); !ok {
+					t.Errorf("%s reached the OsClient without the SH15 "+
+						"soft timeout", what)
+				}
+			}
+			oc := &common.FakeOsClient{
+				RunCommandFn: func(_ context.Context, name string,
+					args []string, _ string) (string, string, int, error) {
+					t.Errorf("the stat read ran %s %q", name, args)
+					return "", "", 0, nil
+				},
+				ReadDevNoFn: func(ctx context.Context, path string) (string,
+					error) {
+					reads = append(reads, "devno "+path)
+					bounded(ctx, "the device-number read")
+					return "253:4", tc.devNoErr
+				},
+				ReadFileFn: func(ctx context.Context, path string) (string,
+					error) {
+					reads = append(reads, "read "+path)
+					bounded(ctx, "the read of "+path)
+					return tc.stat, tc.statErr
+				},
+			}
+			stat, err := NewDm(oc).BlockStat(context.Background(), dev)
+			want := []string{"devno " + dev, "read " + statPath}
+			if tc.devNoErr != nil {
+				want = want[:1]
+			}
+			if strings.Join(reads, "; ") != strings.Join(want, "; ") {
+				t.Errorf("reads = %q, want %q", reads, want)
+			}
+			io := NewDm(oc).DevIoStats(context.Background(), dev)
+			if tc.wantErr == "" {
+				if err != nil {
+					t.Fatalf("BlockStat: %v", err)
+				}
+				if stat.GetReadIos() != 1 || stat.GetReadTicksMs() != 4 ||
+					stat.GetWriteIos() != 5 || stat.GetInFlight() != 9 ||
+					stat.GetTimeInQueueMs() != 11 ||
+					stat.GetDiscardIos() != 12 ||
+					stat.GetFlushTicksMs() != 17 {
+					t.Fatalf("BlockStat = %v, want 1 to 17 in order", stat)
+				}
+				if io.GetReadError() != "" || io.GetStat().GetFlushIos() != 16 {
+					t.Fatalf("DevIoStats = %v", io)
+				}
+				return
+			}
+			if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
+				t.Fatalf("BlockStat error %v, want one saying %q", err,
+					tc.wantErr)
+			}
+			if stat != nil || io.GetStat() != nil ||
+				!strings.Contains(io.GetReadError(), tc.wantErr) {
+				t.Fatalf("a failed read gave %v and %v, want no counters "+
+					"and the read's text", stat, io)
+			}
+		})
+	}
+}
+
+// TestIoStatErrorKeepsTheEnd pins the cut of a counter read's error in an
+// inspect reply's entry (Dm.DevIoStats): a text within
+// common.IoStatErrorMax bytes stays whole, and a longer one keeps its end,
+// where the cause is, behind the cut's mark, in exactly that many bytes,
+// splitting no UTF-8 sequence.
+func TestIoStatErrorKeepsTheEnd(t *testing.T) {
+	short := "read /sys/dev/block/253:4/stat: input/output error"
+	if got := ioStatError(short); got != short {
+		t.Fatalf("a short text became %q", got)
+	}
+	long := "device number of /dev/mapper/" + strings.Repeat("d", 200) +
+		": stat: no such file or directory"
+	got := ioStatError(long)
+	if len(got) != common.IoStatErrorMax ||
+		!strings.HasPrefix(got, ioStatErrorCut) ||
+		!strings.HasSuffix(got, ": stat: no such file or directory") {
+		t.Fatalf("the cut text is %q (%d bytes), want %d bytes, the mark "+
+			"and the cause", got, len(got), common.IoStatErrorMax)
+	}
+	// DevIoStats cuts the error it carries.
+	dev := "/dev/mapper/" + strings.Repeat("d", 200)
+	io := NewDm(&common.FakeOsClient{
+		ReadDevNoFn: func(context.Context, string) (string, error) {
+			return "", &fs.PathError{Op: "stat", Path: dev,
+				Err: syscall.ENOENT}
+		},
+	}).DevIoStats(context.Background(), dev)
+	if got := io.GetReadError(); len(got) != common.IoStatErrorMax ||
+		!strings.HasSuffix(got, "no such file or directory") {
+		t.Fatalf("DevIoStats carries %q (%d bytes), want the error cut to "+
+			"%d bytes", got, len(got), common.IoStatErrorMax)
+	}
+	wide := strings.Repeat("é", common.IoStatErrorMax)
+	if got := ioStatError(wide); !utf8.ValidString(got) ||
+		len(got) > common.IoStatErrorMax {
+		t.Fatalf("a cut through two-byte runes gave %q", got)
 	}
 }

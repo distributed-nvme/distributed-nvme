@@ -32,6 +32,78 @@ message ObsStamp {
     google.protobuf.Timestamp agent_start_time = 5;
 }
 
+// BlockStat is one block device's counters as the kernel's sysfs "stat"
+// file holds them when the agent reads it: its seventeen fields, in the
+// kernel's order, each the raw running count since the device appeared
+// (requests, merges, 512-byte sectors and milliseconds), never a rate. A
+// person compares two reads to see a device's load; nothing in dnv reads them
+// (cnagent.md CN23; dnagent.md DN16).
+message BlockStat {
+    uint64 read_ios = 1;
+    uint64 read_merges = 2;
+    uint64 read_sectors = 3;
+    uint64 read_ticks_ms = 4;
+    uint64 write_ios = 5;
+    uint64 write_merges = 6;
+    uint64 write_sectors = 7;
+    uint64 write_ticks_ms = 8;
+    uint64 in_flight = 9;
+    uint64 io_ticks_ms = 10;
+    uint64 time_in_queue_ms = 11;
+    uint64 discard_ios = 12;
+    uint64 discard_merges = 13;
+    uint64 discard_sectors = 14;
+    uint64 discard_ticks_ms = 15;
+    uint64 flush_ios = 16;
+    uint64 flush_ticks_ms = 17;
+}
+
+// DevIoStats is one device's BlockStat as an inspect call read it, keyed as
+// the device's row is, whose name names the device: the counters, or the
+// failed read's text in their place (at most IoStatErrorMax bytes, its end
+// kept), never zeros.
+message DevIoStats {
+    oneof read {
+        BlockStat stat = 1;
+        string read_error = 2;
+    }
+}
+
+// LegProbeTimes is the last completed round of a primary's leg prober
+// (cnagent.md CN11), kept in memory only, in whole milliseconds; an age is
+// counted back from the reply's answer time and stops at the largest
+// uint32.
+message LegProbeTimes {
+    // How long before the answer the round began.
+    uint32 round_age_ms = 1;
+    // How long its write half took: a buffered write and an fsync.
+    uint32 write_ms = 2;
+    // How long its direct read half took. Unset when the write failed and
+    // no read ran.
+    optional uint32 read_ms = 3;
+    // How long before the answer the last round that succeeded ended.
+    // Unset: none has.
+    optional uint32 last_success_age_ms = 4;
+}
+
+// LegIoStats is one leg's part of a cntlr's CntlrIoStats.
+message LegIoStats {
+    // The leg wrapper's counters.
+    DevIoStats dev = 1;
+    // Unset on a standby, which runs no prober, and before the first round
+    // ends.
+    LegProbeTimes probe_times = 2;
+}
+
+// CntlrIoStats is what an inspect call of a cntlr reads beside its
+// observation (cnagent.md CN23): each leg's and each namespace device's
+// counters, read at the call, and each leg's probe times. No check round and
+// no syncup reply carries it.
+message CntlrIoStats {
+    map<uint64, LegIoStats> leg_id_to_io = 1;
+    map<uint64, DevIoStats> ns_id_to_io = 2;
+}
+
 message NodeSelector {
     repeated string black_list = 1;
     repeated string white_list = 2;
@@ -1275,6 +1347,9 @@ message InspectDiskNodeReply {
     // The observation's age when the agent answered: its answer time less
     // its observation time. Unset while the agent holds no observation.
     google.protobuf.Duration obs_age = 4;
+    // The disk's counters the agent read at the call, passed through.
+    // Appended, never renumbered.
+    DevIoStats disk_io_stats = 5;
 }
 
 message CreateControllerNodeRequest {
@@ -1494,6 +1569,9 @@ message InspectCntlrReply {
     // The observation's age when the agent answered: its answer time less
     // its observation time. Unset while the agent holds no observation.
     google.protobuf.Duration obs_age = 4;
+    // The counters and probe times the agent read at the call, passed
+    // through. Appended, never renumbered.
+    CntlrIoStats io_stats = 5;
 }
 
 message InspectSideRequest {
@@ -2219,6 +2297,10 @@ message PushMigrBitmapReply {
 message GetDnInfoRequest {
     uint64 cluster_id = 1;
     uint64 dn_id = 2;
+    // Read the disk's counters at the call, into the reply's disk_io_stats
+    // (dnagent.md DN16). Only InspectDiskNode sets it.
+    // Appended, never renumbered.
+    bool read_io_stats = 3;
 }
 
 message GetDnInfoReply {
@@ -2226,6 +2308,9 @@ message GetDnInfoReply {
     uint64 revision = 2;
     DnInfo dn_info = 3;
     ObsStamp obs_stamp = 4;
+    // Set only for a request with read_io_stats, of the disk node the agent
+    // holds. Appended, never renumbered.
+    DevIoStats disk_io_stats = 5;
 }
 
 message GetSideInfoRequest {
@@ -2394,6 +2479,10 @@ message GetCntlrInfoRequest {
     uint64 cluster_id = 1;
     uint64 cn_id = 2;
     CntlrPointer cntlr_pointer = 3;
+    // Read each leg's and namespace device's counters at the call, into the
+    // reply's io_stats (cnagent.md CN23). Only InspectCntlr sets it.
+    // Appended, never renumbered.
+    bool read_io_stats = 4;
 }
 
 message GetCntlrInfoReply {
@@ -2401,6 +2490,9 @@ message GetCntlrInfoReply {
     uint64 revision = 2;
     CntlrInfo cntlr_info = 3;
     ObsStamp obs_stamp = 4;
+    // Set only for a request with read_io_stats, of a cntlr the agent holds.
+    // Appended, never renumbered.
+    CntlrIoStats io_stats = 5;
 }
 
 message GetThinDeviceBmRequest {

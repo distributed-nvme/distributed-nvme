@@ -631,7 +631,8 @@ func TestWedgedProbeDoesNotBlockAConverge(t *testing.T) {
 
 // TestDirectProbeIoLogsOneRecordPerHalf pins CN11's own log records: exactly
 // one per half, msg `probe write block` / `probe read block direct`, carrying
-// the attempt's trace id and the shape of the IO — never the data.
+// the attempt's trace id, the shape of the IO and how long the half took —
+// never the data.
 func TestDirectProbeIoLogsOneRecordPerHalf(t *testing.T) {
 	capture := captureLogs(t)
 	path := filepath.Join(t.TempDir(), "leg-wrapper")
@@ -650,6 +651,9 @@ func TestDirectProbeIoLogsOneRecordPerHalf(t *testing.T) {
 	if rec["path"] != path || rec["offset"] != float64(0) ||
 		rec["length"] != float64(common.LegHealthBlockSize) {
 		t.Fatalf("the write record is %v", rec)
+	}
+	if ms, ok := rec["duration_ms"].(float64); !ok || ms < 0 {
+		t.Fatalf("the write record carries no duration_ms: %v", rec)
 	}
 	if _, ok := rec["error"]; ok {
 		t.Fatalf("a successful write logged an error: %v", rec)
@@ -672,6 +676,9 @@ func TestDirectProbeIoLogsOneRecordPerHalf(t *testing.T) {
 	}
 	if _, ok := rec["error"].(string); !ok {
 		t.Fatalf("a failed read logged no error: %v", rec)
+	}
+	if ms, ok := rec["duration_ms"].(float64); !ok || ms < 0 {
+		t.Fatalf("the read record carries no duration_ms: %v", rec)
 	}
 	// The health block is device content: its shape is logged, never its bytes.
 	for _, rec := range capture.records(t) {

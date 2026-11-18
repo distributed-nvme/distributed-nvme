@@ -532,13 +532,18 @@ func (s *Server) UpdateCntlrEnabled(
 //
 // The reply is the agent's, whole: `applied_revision` and `cntlr_info`
 // both come from the GetCntlrInfo reply (architecture.md, Cntlrs), which
-// answers from the agent's latest observation of the cntlr and reads nothing
-// (architecture.md, Live-state reporting). `applied_revision` is the revision
+// answers from the agent's latest observation of the cntlr (architecture.md,
+// Live-state reporting). `applied_revision` is the revision
 // the agent held when that observation's reading started — it can trail the
 // last SyncupCntlr the agent accepted, as it does while that syncup's
 // converge runs — so diff it against the SpRev token GetStoragePool hands out
 // to see how far the agent lags desired state. The reply's stamp passes
-// through beside them with the observation's age (obsAge).
+// through beside them with the observation's age (obsAge). The call asks the
+// agent for its devices' counters and its legs' probe times too
+// (read_io_stats), which the agent reads at the call (cnagent.md CN23), and
+// passes them through: InspectCntlr serves a person, and is the only one of
+// the gateway's GetCntlrInfo callers that asks, so the others, which read
+// rows alone, cost the agent no read of the node.
 //
 // The agent's reply is passed through as it comes: only a transport failure
 // or a non-OK gRPC status is this RPC's ABORTED, because AG3 exempts the
@@ -593,6 +598,7 @@ func (s *Server) InspectCntlr(
 	var appliedRevision uint64
 	var info *pb.CntlrInfo
 	var stamp *pb.ObsStamp
+	var ioStats *pb.CntlrIoStats
 	err = withCnAgent(ctx, addrPort,
 		func(ctx context.Context, client pb.ControllerNodeAgentClient) error {
 			reply, err := client.GetCntlrInfo(
@@ -604,6 +610,7 @@ func (s *Server) InspectCntlr(
 						SpId:    spId,
 						CntlrId: req.GetCntlrId(),
 					},
+					ReadIoStats: true,
 				},
 			)
 			if err != nil {
@@ -612,6 +619,7 @@ func (s *Server) InspectCntlr(
 			appliedRevision = reply.GetRevision()
 			info = reply.GetCntlrInfo()
 			stamp = reply.GetObsStamp()
+			ioStats = reply.GetIoStats()
 			return nil
 		})
 	if err != nil {
@@ -623,6 +631,7 @@ func (s *Server) InspectCntlr(
 		CntlrInfo:       info,
 		ObsStamp:        stamp,
 		ObsAge:          obsAge(stamp),
+		IoStats:         ioStats,
 	}, nil
 }
 

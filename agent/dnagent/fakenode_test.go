@@ -44,6 +44,10 @@ type fakeNode struct {
 	// devLbs is a device's logical block size, common.DnLogicalBlockSize
 	// when it holds none.
 	devLbs map[string]uint64
+	// devStat is the text of a device's sysfs "stat" file, by its /dev
+	// path: its counters (sysBlockAttr). A device it lacks has no stat
+	// file.
+	devStat map[string]string
 	// partOf makes a device a partition, of the disk it names: its sysfs
 	// directory holds a "partition" file and no queue/, and its logical
 	// block size is its disk's.
@@ -340,6 +344,7 @@ func newFakeNode() *fakeNode {
 		devSize:       make(map[string]uint64),
 		devNo:         make(map[string]string),
 		devLbs:        make(map[string]uint64),
+		devStat:       make(map[string]string),
 		partOf:        make(map[string]string),
 		nextMinor:     1,
 		blocks:        make(map[string][]fakeSegment),
@@ -706,6 +711,7 @@ func (f *fakeNode) readDevNo(ctx context.Context, path string) (string, error) {
 //   - "partition": present for a partition (partOf) alone;
 //   - "queue/logical_block_size": its logical block size (devLbs), for a
 //     whole disk alone, since a partition has no queue/;
+//   - "stat": its counters, for a device devStat holds;
 //   - "../queue/logical_block_size": a partition's disk's, as the kernel
 //     resolves ".." in the disk's directory once it has followed the
 //     number's link to the partition's own, which lies there; nothing for a
@@ -736,6 +742,10 @@ func (f *fakeNode) sysBlockAttr(path string) (string, bool) {
 		case "partition":
 			if partition {
 				return "1\n", true
+			}
+		case "stat":
+			if stat, ok := f.devStat[dev]; ok {
+				return stat, true
 			}
 		case "queue/logical_block_size":
 			if !partition {

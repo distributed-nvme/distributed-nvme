@@ -84,6 +84,12 @@ HOLD_SECS=4
 DIAL_TIMEOUT_MS=1500
 DIAL_SLACK_MS=1000
 
+# redund's slow leg stage (cnagent.md CN11, CN23): the delay vm2 adds to
+# what it sends to vm1's nvme-tcp port, and how long the stage waits for a
+# probe round of DN1's legs made under it (CnLegProbeInterval is 5 s).
+SLOW_LEG_DELAY_MS=100
+SLOW_LEG_WAIT=30
+
 # Bdev parameters, everywhere.
 BLOCK_SIZE=1048576
 STRIPE_SIZE=65536
@@ -2045,6 +2051,31 @@ throttle_to() {
 			prio 1 u32 match ip dst "$1"/32 match ip dport "$TR_SVC_ID" 0xffff \
 			flowid "$THROTTLE_HANDLE":4 >/dev/null 2>&1; then
 		echo throttled
+	else
+		unthrottle >/dev/null
+		echo failed
+	fi
+}
+
+# delay_to <ip> <delay> — delays what this node sends to the nvme-tcp port of
+# <ip> by <delay> (a tc time such as 100ms) and prints "delayed", or prints
+# "failed" when a step fails, leaving no qdisc of this suite's behind. It is
+# throttle_to with a netem delay in the token bucket's place (redund's slow
+# leg stage), under the same handle, so unthrottle takes it off.
+delay_to() {
+	local tc nic
+	tc=$(tc_bin)
+	nic=$(nic_to "$1")
+	if [ -n "$tc" ] && [ -n "$nic" ] &&
+		"$tc" qdisc replace dev "$nic" root handle "$THROTTLE_HANDLE": prio \
+			bands 4 priomap 1 2 2 2 1 2 0 0 1 1 1 1 1 1 1 1 \
+			>/dev/null 2>&1 &&
+		"$tc" qdisc add dev "$nic" parent "$THROTTLE_HANDLE":4 netem \
+			delay "$2" >/dev/null 2>&1 &&
+		"$tc" filter add dev "$nic" parent "$THROTTLE_HANDLE": protocol ip \
+			prio 1 u32 match ip dst "$1"/32 match ip dport "$TR_SVC_ID" 0xffff \
+			flowid "$THROTTLE_HANDLE":4 >/dev/null 2>&1; then
+		echo delayed
 	else
 		unthrottle >/dev/null
 		echo failed
@@ -5336,6 +5367,123 @@ redund_dial() { # sp c2 req2 rev2
 	done
 }
 
+# leg_write_ms <json> <leg id> — the write half of a leg's last probe round
+# in a get-cntlr-info --io-stats reply, in ms, or "none".
+leg_write_ms() {
+	jq_of "$1" ".io_stats.leg_id_to_io[\"$(d16 "$2")\"].probe_times.write_ms
+		// \"none\""
+}
+
+# leg_round_age_ms <json> <leg id> — how long before the reply's answer a
+# leg's last probe round began, in ms, or "none".
+leg_round_age_ms() {
+	jq_of "$1" ".io_stats.leg_id_to_io[\"$(d16 "$2")\"].probe_times.round_age_ms
+		// \"none\""
+}
+
+# leg_write_ios <json> <leg id> — the writes a leg's wrapper has completed,
+# from its counters in a get-cntlr-info --io-stats reply, or "none".
+leg_write_ios() {
+	jq_of "$1" ".io_stats.leg_id_to_io[\"$(d16 "$2")\"].dev.stat.write_ios
+		// \"none\""
+}
+
+# now_ms — the driver's clock in ms.
+now_ms() { echo $(($(date +%s%N) / 1000000)); }
+
+# leg_round_since <json> <leg id> <since> <now> — "yes" when a leg's last
+# probe round in a reply the driver took at <now> began after <since> (both
+# the driver's ms), a second's slack aside: the round's age counts back from
+# the node's answer, which came before <now>.
+leg_round_since() {
+	local age
+	age=$(leg_round_age_ms "$1" "$2")
+	if [ "$age" != none ] && [ "$age" -lt $(($4 - $3 - 1000)) ]; then
+		echo yes
+	else
+		echo no
+	fi
+}
+
+# redund_slow_leg is redund's slow leg stage (cnagent_integtest.md, Cases,
+# redund; cnagent.md CN11, CN23), run once CN2 is the primary, whose probers
+# time each round. vm2 delays what it sends to vm1's nvme-tcp port (tc netem,
+# no device changed), which slows CN2's legs into DN1 and nothing else: the
+# inspect read's probe times show the write half of a round of DN1's legs
+# made under the delay at no less than the delay, while DN2's stay below it,
+# every leg's row stays OK on a fresh round, and the leg's counters, read at
+# the call, have moved. With the delay gone, a later round of DN1's legs is
+# fast again.
+redund_slow_leg() { # sp c2 rev2
+	local sp=$1 c2=$2 rev2=$3 out before after leg ms t0 now deadline
+	stage slowleg "a slow leg: its probe write time rises while its row stays OK (CN11, CN23)"
+	before=$(cnctl 2 get-cntlr-info --sp "$sp" --cntlr "$c2" --io-stats)
+	for leg in "${A_MLEG[1]}" "${A_DLEG[1]}" "${A_MLEG[2]}" "${A_DLEG[2]}"; do
+		[ "$(leg_write_ios "$before" "$leg")" != none ] ||
+			die "slowleg: no counters for leg $leg: $before"
+	done
+	THROTTLED=2
+	assert_eq "$(helper 2 "delay_to '${IP[1]}' ${SLOW_LEG_DELAY_MS}ms")" delayed \
+		"slowleg: the netem delay on vm2 toward vm1's port"
+	t0=$(now_ms)
+	deadline=$((SECONDS + SLOW_LEG_WAIT))
+	while :; do
+		out=$(cnctl 2 get-cntlr-info --sp "$sp" --cntlr "$c2" --io-stats)
+		now=$(now_ms)
+		after=0
+		for leg in "${A_MLEG[1]}" "${A_DLEG[1]}"; do
+			[ "$(leg_round_since "$out" "$leg" "$t0" "$now")" = yes ] &&
+				after=$((after + 1))
+		done
+		[ "$after" -eq 2 ] && break
+		[ "$SECONDS" -lt "$deadline" ] ||
+			die "slowleg: no probe round of DN1's legs after the delay in" \
+				"$SLOW_LEG_WAIT s: $out"
+		sleep 1
+	done
+	for leg in "${A_MLEG[1]}" "${A_DLEG[1]}"; do
+		ms=$(leg_write_ms "$out" "$leg")
+		log "  DN1's leg $leg: probe write ${ms} ms under the delay"
+		[ "$ms" != none ] && [ "$ms" -ge "$SLOW_LEG_DELAY_MS" ] ||
+			die "slowleg: DN1's leg $leg wrote in $ms ms, want at least" \
+				"$SLOW_LEG_DELAY_MS"
+		[ "$(leg_write_ios "$out" "$leg")" -gt "$(leg_write_ios "$before" "$leg")" ] ||
+			die "slowleg: the counters of DN1's leg $leg did not move"
+	done
+	for leg in "${A_MLEG[2]}" "${A_DLEG[2]}"; do
+		ms=$(leg_write_ms "$out" "$leg")
+		log "  DN2's leg $leg: probe write ${ms} ms"
+		[ "$ms" != none ] && [ "$ms" -lt "$SLOW_LEG_DELAY_MS" ] ||
+			die "slowleg: DN2's leg $leg wrote in $ms ms, want under" \
+				"$SLOW_LEG_DELAY_MS: the delay reached more than DN1's port"
+	done
+	out=$(cnctl 2 check-cntlr --fresh --revision "$rev2" --sp "$sp" \
+		--cntlr "$c2")
+	for leg in "${A_MLEG[1]}" "${A_DLEG[1]}" "${A_MLEG[2]}" "${A_DLEG[2]}"; do
+		assert_map_ok "$out" leg_id_to_leg "$leg" "slowleg: a fresh round"
+	done
+	assert_eq "$(helper 2 unthrottle)" unthrottled "slowleg: lifting the delay"
+	assert_eq "$(helper 2 throttle_rules)" "" "slowleg: a qdisc is left on vm2"
+	THROTTLED=0
+	t0=$(now_ms)
+	deadline=$((SECONDS + SLOW_LEG_WAIT))
+	while :; do
+		out=$(cnctl 2 get-cntlr-info --sp "$sp" --cntlr "$c2" --io-stats)
+		now=$(now_ms)
+		after=0
+		for leg in "${A_MLEG[1]}" "${A_DLEG[1]}"; do
+			ms=$(leg_write_ms "$out" "$leg")
+			[ "$(leg_round_since "$out" "$leg" "$t0" "$now")" = yes ] &&
+				[ "$ms" -lt "$SLOW_LEG_DELAY_MS" ] && after=$((after + 1))
+		done
+		[ "$after" -eq 2 ] && break
+		[ "$SECONDS" -lt "$deadline" ] ||
+			die "slowleg: DN1's legs did not write fast again in" \
+				"$SLOW_LEG_WAIT s once the delay went: $out"
+		sleep 1
+	done
+}
+
 case_redund() {
 	CASE=redund
 	DIAG_CNTLRS=()
@@ -5547,6 +5695,8 @@ case_redund() {
 	write_range "$hv" "$WORK/probe-redund.bin" "$dev" 1 9
 	drop_caches "$hv"
 	assert_eq "$(sha_range "$hv" "$dev" 1 9)" "$got" "redund post-failover write"
+
+	redund_slow_leg "$sp" "$c2" "$rev2"
 
 	stage degrade "a dead leg: the md rows stay OK, read from sysfs"
 	# CN28: the md row is read from /sys/block/mdN/md,

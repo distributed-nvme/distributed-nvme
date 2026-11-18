@@ -171,8 +171,8 @@ Every dnv server and client connection also carries the message limit,
 `common.GrpcServerMsgOptions`, a client connection
 `common.GrpcClientMsgOption`, the default of every call made on it. gRPC's
 own receive default is below the widest messages dnv builds — the cntlr
-syncup, the cntlr report and the pool get reply of a pool at the cardinality
-limits (`architecture.md`, Known limits) — and one limit on both ends means
+syncup, the cntlr report, the cntlr inspect reply and the pool get reply of
+a pool at the cardinality limits (`architecture.md`, Known limits) — and one limit on both ends means
 that what one end may send the other takes. `GrpcMaxMsgSize` is this
 document's constant; `common/constants.go` is authoritative for its comment.
 

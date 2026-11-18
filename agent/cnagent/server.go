@@ -602,7 +602,8 @@ func (s *CnAgentServer) GetCnInfo(
 // GetCntlrInfo answers from the cntlr's latest observation, as a CheckCntlr
 // round does, and starts no read (dnagent.md SH28): it takes no lock, so a
 // read of an unknown cntlr leaves no lock entry (dnagent.md, SH11), and reads
-// nothing of the node (CN23).
+// nothing of the node (CN23), but for the devices' counters a request with
+// read_io_stats asks for (cntlrIoStats).
 func (s *CnAgentServer) GetCntlrInfo(
 	ctx context.Context,
 	req *pb.GetCntlrInfoRequest,
@@ -626,12 +627,21 @@ func (s *CnAgentServer) GetCntlrInfo(
 			ObsStamp:   s.startup.Stamped((&cntlrObs{}).Stamp(now, time.Time{})),
 		}, nil
 	}
-	return &pb.GetCntlrInfoReply{
+	reply := &pb.GetCntlrInfoReply{
 		AgentReply: obs.Reply,
 		Revision:   obs.Revision,
 		CntlrInfo:  obs.Info,
 		ObsStamp:   s.startup.Stamped(obs.Stamp(now, since)),
-	}, nil
+	}
+	// CN23's one exception: the flagged call, which only InspectCntlr
+	// makes, reads the devices' counters at the call, after the answer
+	// above is taken and holding no lock of CN1.
+	if req.GetReadIoStats() {
+		if st := s.getCntlr(key); st != nil {
+			reply.IoStats = s.cntlrIoStats(ctx, st, now)
+		}
+	}
+	return reply, nil
 }
 
 // startingStamp is the stamp of a reply the agent gives while its startup

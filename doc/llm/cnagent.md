@@ -283,7 +283,8 @@ read of a cntlr (`dnagent.md` SH29), `GetThinDeviceBm`, `GetLegBm` and
 ids); one background read of a CN — node read; `GetCnSize`, `GetCnInfo`,
 `GetCntlrInfo` and one `CheckCn` or `CheckCntlr` round — no lock, since
 the last four answer from the object's latest observation (`dnagent.md`
-SH28). How a syncup cancels a read and how every other holder waits for
+SH28), and the counters an inspect call's `GetCntlrInfo` reads beside it
+take none either (CN23). How a syncup cancels a read and how every other holder waits for
 one is `dnagent.md` SH30. While the agent starts, every RPC above that
 takes a lock is refused before it takes one, and no background read
 starts (`dnagent.md` SH33), so no RPC queues behind the startup
@@ -1330,7 +1331,13 @@ commands and file IO) on the prober's fresh per-attempt trace id (CN2).
 The loop is single-flight: a blocked IO simply delays the next round.
 Probers publish since when an attempt has been in flight, whether any
 has completed, the last error and how many completed rounds in a row
-failed, which a round that succeeds sets to zero. The member
+failed, which a round that succeeds sets to zero. Each also keeps, in
+memory, the times of its last completed round — when it began, how long
+its write half took (a buffered write and an fsync), how long its read
+half took, which runs only after a write that succeeded — and when its
+last round that succeeded ended; each half's record carries its own time
+too (`log.md`, OS commands and file IO). Only an inspect read reports the
+times (CN23), and no health rule reads them (Known limits). The member
 reconciliation reads that count, plus one for a round in flight longer
 than `CnLegProbeStallSeconds`, which a failed end of that round then does
 not count again, and takes a leg at `deadLegRounds` or more that is not
@@ -4635,6 +4642,27 @@ same moment answers the same observation (CN24). While the agent starts,
 every info read, of a known object or not, answers `ReplyCodeStarting`
 with no observation instead (`dnagent.md` SH33).
 
+**The one exception: an inspect call's counters.** A `GetCntlrInfo`
+with `read_io_stats`, which only the gateway's `InspectCntlr` sends
+(`gateway.md`), answers as above and then also reads, at the call, each
+leg wrapper's and each ns-dev's block counters, the kernel's sysfs "stat"
+file under the device's number (`Dm.BlockStat`), and each leg's probe
+times from its prober (CN11), into the reply's `io_stats`, keyed as the
+rows are. It reads the devices the held request's plan names, as far as
+its level keeps them: no provisioning leg, which has no wrapper, and no
+deferred namespace's ns-dev. The read takes no lock of CN1, starts no
+read and stores nothing in the observation; a stat file is read with no
+IO and waits on no device, so a suspended device or a leg whose paths are
+all dead answers at once. A device whose counters do not read carries
+the read's text, cut to its last `IoStatErrorMax` bytes, in place of its
+counters, never zeros. Reason: the counters and the times are for a
+person who looks for a slow leg; read in every observation, they would
+cost every cntlr two reads per leg and per namespace every round, and,
+moving all the time, they would change every round's reply. So no check
+round, no syncup reply and no other `GetCntlrInfo` caller carries them,
+and the worker sees nothing new. The counters are raw running counts
+since the device appeared, never rates: a person compares two reads.
+
 What the observation holds was read by the object's background read,
 which a round starts (`dnagent.md` SH29), or made by a converge, whose
 observation carries the converge's own rows and code (`dnagent.md` SH28).
@@ -5991,9 +6019,12 @@ stores instead is CN23's.
   only once every member has taken it, and no reaction acts: the leg has
   no health epoch (`dnv-worker.md` HL2), so leg repair creates no repair
   for it (`dnv-worker.md` AR8), and an operator's repair refuses a leg with
-  no health epoch. Nothing in dnv measures a leg's latency; the operator's
+  no health epoch. The prober times each round and an inspect read shows
+  the last round's times and every leg's block counters (CN11, CN23), but
+  no health rule reads them and nothing alerts on them; the operator's
   action is a migration of the leg's side (`architecture.md`, Repairs: a
-  healthy leg is moved, not repaired).
+  healthy leg is moved, not repaired). A standby runs no prober, so its
+  legs show counters and no times.
 * A member can be named on every read on a leg whose converge fails:
   the verdict tests only the parts of the leg's availability a read can
   read (CN30). A leg with two sides, a migration in flight, whose path

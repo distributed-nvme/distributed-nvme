@@ -464,7 +464,9 @@ func cmdPushCloneBm(args []string) {
 // cmdGetCnInfo and cmdGetCntlrInfo are info reads: the agent answers from
 // memory and starts no read (dnagent.md SH28), so they show the observation
 // the last converge or read stored, and the stage that needs the node as it
-// is now uses a check command's --fresh instead.
+// is now uses a check command's --fresh instead. get-cntlr-info's --io-stats
+// asks for what InspectCntlr asks for: the legs' and namespace devices'
+// counters, read at the call, and the legs' probe times (cnagent.md CN23).
 func cmdGetCnInfo(args []string) {
 	var g globals
 	fs := newFlagSet("get-cn-info", &g)
@@ -492,6 +494,8 @@ func cmdGetCntlrInfo(args []string) {
 	var g globals
 	fs := newFlagSet("get-cntlr-info", &g)
 	sp, cntlr := cntlrPointerFlags(fs)
+	ioStats := fs.Bool("io-stats", false,
+		"read the devices' counters and the probe times at the call")
 	fs.Parse(args)
 
 	conn, client, err := g.dial()
@@ -506,6 +510,7 @@ func cmdGetCntlrInfo(args []string) {
 		ClusterId:    uint64(g.cluster),
 		CnId:         uint64(g.cn),
 		CntlrPointer: cntlrPointerOf(sp, cntlr),
+		ReadIoStats:  *ioStats,
 	})
 	if err != nil {
 		die("GetCntlrInfo failed: %v", err)

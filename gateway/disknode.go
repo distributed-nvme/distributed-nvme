@@ -464,14 +464,17 @@ func (s *Server) UpdateDiskNodeDisabled(
 // The reply is the agent's, whole: `applied_revision` and `dn_info` both
 // come from the GetDnInfo reply (architecture.md, Disk nodes, deliberately not
 // the stored rev key), which answers from the agent's latest observation of
-// the node and reads nothing (architecture.md, Live-state reporting). The
+// the node (architecture.md, Live-state reporting). The
 // pair is that one observation: `applied_revision` is the revision the agent
 // held when the reading started, which can trail the last SyncupDn it
 // accepted, as it does while that syncup's converge runs, and a caller diffs
 // it against the desired-state token GetDiskNode hands out. The reply's stamp
 // passes through beside them with the observation's age (obsAge), so a
 // caller sees how old the observation is and whether a converge of the node
-// is in flight.
+// is in flight. The call asks the agent for the disk's counters too
+// (read_io_stats), which the agent reads at the call (dnagent.md DN16), and
+// passes them through: InspectDiskNode serves a person, and is the only
+// caller that asks.
 //
 // The Snapshot resolves the cluster itself, so the agent request's cluster_id
 // comes from it rather than from a second plain pre-read: the read is already
@@ -510,11 +513,13 @@ func (s *Server) InspectDiskNode(
 	var appliedRevision uint64
 	var info *pb.DnInfo
 	var stamp *pb.ObsStamp
+	var ioStats *pb.DevIoStats
 	agentErr := withDnAgent(ctx, req.GetAddrPort(),
 		func(ctx context.Context, client pb.DiskNodeAgentClient) error {
 			reply, err := client.GetDnInfo(ctx, &pb.GetDnInfoRequest{
-				ClusterId: cid,
-				DnId:      dnId,
+				ClusterId:   cid,
+				DnId:        dnId,
+				ReadIoStats: true,
 			})
 			if err != nil {
 				return err
@@ -522,6 +527,7 @@ func (s *Server) InspectDiskNode(
 			appliedRevision = reply.GetRevision()
 			info = reply.GetDnInfo()
 			stamp = reply.GetObsStamp()
+			ioStats = reply.GetDiskIoStats()
 			return nil
 		})
 	if agentErr != nil {
@@ -533,5 +539,6 @@ func (s *Server) InspectDiskNode(
 		DnInfo:          info,
 		ObsStamp:        stamp,
 		ObsAge:          obsAge(stamp),
+		DiskIoStats:     ioStats,
 	}, nil
 }

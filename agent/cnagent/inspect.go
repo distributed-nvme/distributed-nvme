@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"slices"
+	"time"
 
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
@@ -27,6 +28,63 @@ func (s *CnAgentServer) startingErr() error {
 	}
 	return status.Error(codes.Unavailable,
 		"the agent's startup pass still runs")
+}
+
+// cntlrIoStats is what a GetCntlrInfo that asks for it reads beside the
+// observation (CN23's exception, which only InspectCntlr's call takes): the
+// counters of each leg's wrapper and each namespace's ns-dev, read now from
+// sysfs (Dm.DevIoStats), and each leg's probe times, from its prober's
+// memory (CN11). It takes no lock of CN1, starts no read and touches no
+// observation, so no check round and no syncup reply carries what it reads.
+// The devices are those the held request's plan names, as far as its level
+// keeps them: a provisioning leg has no wrapper, so it is not read, and a
+// deferred namespace's ns-dev stands on the td's dm-error and serves no IO,
+// so it is not read either; a device that is not there reads as an error
+// in its entry, never as zero counters. A request the conf gate refuses
+// (CN8) plans nothing and reads nothing. The probe ages count back from
+// answered, the answer time the reply's stamp carries (pb.LegProbeTimes).
+func (s *CnAgentServer) cntlrIoStats(
+	ctx context.Context,
+	st *cntlrState,
+	answered time.Time,
+) *pb.CntlrIoStats {
+	out := &pb.CntlrIoStats{
+		LegIdToIo: make(map[uint64]*pb.LegIoStats),
+		NsIdToIo:  make(map[uint64]*pb.DevIoStats),
+	}
+	req := st.loadReq()
+	if validateCntlrConf(req) != nil {
+		return out
+	}
+	plan := newCntlrPlan(s.nf, req)
+	s.mu.Lock()
+	probers := make(map[uint64]*legProber, len(st.probers))
+	for legId, prober := range st.probers {
+		probers[legId] = prober
+	}
+	s.mu.Unlock()
+	if plan.wantLeg {
+		for _, lp := range plan.legs {
+			if lp.provisioning {
+				continue
+			}
+			io := &pb.LegIoStats{Dev: s.dm.DevIoStats(ctx, lp.path)}
+			if prober := probers[lp.legId]; prober != nil {
+				io.ProbeTimes = prober.probeTimes(answered)
+			}
+			out.LegIdToIo[lp.legId] = io
+		}
+	}
+	if plan.wantAny {
+		for _, np := range plan.namespaces {
+			if np.deferred {
+				continue
+			}
+			out.NsIdToIo[np.nsId] = s.dm.DevIoStats(ctx,
+				s.nf.DmPath(np.devName))
+		}
+	}
+	return out
 }
 
 // InspectGrp is cnagent.md CN31, the inspect of one md-raid1 group on the

@@ -609,9 +609,12 @@ Measured times are in [the introduction](introduction.md#status-and-limits-of-01
   check from reaching it. The worker gives that check up after two days
   and asks again one interval later. A cluster created before this
   setting existed, or with zero, has no check. A leg with slow IO reads
-  ok, and every write of the group waits for it. State: accepted for the
-  time between two checks and for slow legs; migrate the leg's side by
-  hand. Seen in the lab: a check over a sector that fails reads healed
+  ok, and every write of the group waits for it. `dnvctl cntlr inspect`
+  shows how long the primary's last small test write and read of each leg
+  took, and the kernel's IO counters of each leg, so the slow leg can be
+  found ([A slow leg](operations.md#a-slow-leg)); nothing in dnv acts on
+  them. State: accepted for the time between two checks and for slow
+  legs; migrate the leg's side by hand. Seen in the lab: a check over a sector that fails reads healed
   it, and over a sector that fails reads and writes recorded a bad block.
   Not seen in the lab: drops that keep a check from reaching its sector.
 - **A whole copy still needs its source until the worker drains the
@@ -1351,8 +1354,13 @@ yourself: a disk the logs fill is one the stores and etcd cannot write.
 
 - **No metrics, no alerts.** The worker's log is the only alert. The logs
   go to stderr as JSON with no rotation. An auto-grow refused for budget, a
-  subsystem no cdc serves, a frozen worker watch, a slow leg and a stuck
-  repair show in a log line or not at all. The worker's log records the
+  subsystem no cdc serves, a frozen worker watch and a stuck repair show
+  in a log line or not at all. A slow leg shows only when a person asks:
+  `dnvctl cntlr inspect` prints each leg's last test write and read times
+  and the IO counters of each leg and each volume's device, and `dnvctl dn
+  inspect` the counters of a disk node's disk, read when asked; nothing
+  keeps them or alerts on them. A disk's own health is for the usual tools
+  of the node, such as smartd and node_exporter. The worker's log records the
   reactions it applied and the ones it skipped. No dnv program serves
   metrics, profiles or health over a port, though the CSI driver's
   manifests add a helper container that answers Kubernetes' health checks

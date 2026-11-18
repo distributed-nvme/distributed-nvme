@@ -2475,8 +2475,9 @@ fails.
 Action: read the `DnConf` in an STM for the ids, which address the agent
 request and the log line; then, outside the STM, call
 `DiskNodeAgent.GetDnInfo`, which answers from the agent's latest
-observation of the node and reads nothing (Live-state reporting), and
-return its `revision`, `DnInfo` and stamp; an agent still starting
+observation of the node (Live-state reporting) and, asked by this call
+alone, reads the disk's block counters at the call (`dnagent.md` DN16),
+and return its `revision`, `DnInfo`, stamp and those counters; an agent still starting
 answers with no observation (`dnagent.md` SH33), so the reply then
 carries a zero revision, no `DnInfo` and a stamp with no observation
 time. The reply's `applied_revision`
@@ -2864,11 +2865,16 @@ Reply `cntlr_id` and `enabled`.
 
 **InspectCntlr** — read the `Cntlr` in an STM for its `addr_port`;
 outside the STM call `ControllerNodeAgent.GetCntlrInfo` with the
-`cluster_id`, `cn_id`, `sp_id` and `cntlr_id`; an agent failure is
+`cluster_id`, `cn_id`, `sp_id` and `cntlr_id`, asking the agent for the
+counters an inspect call reads (`cnagent.md` CN23); an agent failure is
 `ABORTED`. Reply `applied_revision` — the revision of the agent's latest
 observation of the cntlr, to diff against the desired `SpRev` of
 `GetStoragePool` —, the `CntlrInfo`, `obs_stamp` and `obs_age`, all with
-the semantics of `InspectDiskNode`.
+the semantics of `InspectDiskNode`, and `io_stats`: each leg's and each
+namespace device's block counters and each leg's last probe round's
+times, read at the call, the raw material for finding a slow leg. No
+other caller of `GetCntlrInfo` asks for them, and no health rule reads
+them.
 
 **InspectSide** — locate the side by scanning the SP's slices in the STM
 (bounded by the SP's slices, groups and legs), when no slice holds it the
@@ -4706,7 +4712,10 @@ The end of a converge stores one, unless the converge's call was cut off,
 and so does the end of a background read, which a check round starts,
 unless a syncup cancelled it (`dnagent.md` SH29, SH30). A
 `Check*` round and a `Get*Info` answer at once from the latest one and
-read nothing themselves: their `agent_reply`, `revision` and `*Info` are
+read nothing themselves, but for the block counters an inspect call's
+`GetCntlrInfo` or `GetDnInfo` asks for, read at the call beside the
+observation and kept in no observation (`cnagent.md` CN23, `dnagent.md`
+DN16): their `agent_reply`, `revision` and `*Info` are
 the observation's, and their `obs_stamp` gives its time and trace id, the
 agent's clock as it answers and the start of a converge of the object in
 flight. Every stamp also gives the time the agent started, by the node's
@@ -7758,8 +7767,11 @@ document and only pointed to here.
   times the slices and with the migrations, two path rows each (Live-state
   reporting); every dnv gRPC server and client takes messages
   up to `GrpcMaxMsgSize` (`grpc.md`, Wiring), and unit tests hold the three
-  under it at the limits of Cardinality limits and Common validation. Three
-  parts have no such limit: a row's text, which a failed command fills with
+  under it at the limits of Cardinality limits and Common validation, and
+  the reply of a cntlr's inspect call too, the report beside an entry of
+  block counters per leg and per namespace device (`cnagent.md` CN23), whose
+  error texts the agent cuts to `IoStatErrorMax` so that it fits with the
+  rows' text. Three parts have no such limit: a row's text, which a failed command fills with
   its output; a bitmap read's reply, which grows with the blocks it asks
   for, so a caller pages through a large volume (Bitmap reads), and a
   leg's, which the worker reads whole and which fails once it passes

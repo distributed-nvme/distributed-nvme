@@ -7,8 +7,10 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/distributed-nvme/distributed-nvme/common"
+	"github.com/distributed-nvme/distributed-nvme/pb"
 )
 
 // SectorSize is the device-mapper unit: every table size and offset is in
@@ -784,6 +786,102 @@ func (d *Dm) DiskSizes(ctx context.Context, dev string) (DiskSizes, error) {
 		sizes.LogicalBlock = block
 	}
 	return sizes, errors.Join(sizeErr, blockErr)
+}
+
+// blockStatFields is how many counters a block device's sysfs "stat" file
+// holds: the kernel's seventeen since Linux 5.5, older than any kernel the
+// agents run on.
+const blockStatFields = 17
+
+// BlockStat reads the counters of the block device at dev from its sysfs
+// "stat" file, in the agent's own process: the device's number first
+// (readDevNo), then the file sysfs keeps under that number, both on a ctx
+// carrying the soft timeout (SH15). The read does no IO to the device and
+// takes no lock of it, so a suspended device, or a leg whose paths are all
+// dead, answers at once (cnagent.md CN23; dnagent.md DN16). Every failure is
+// an error naming the read: a device that is not there, a read that did not
+// answer, a file that holds fewer than blockStatFields numbers.
+func (d *Dm) BlockStat(ctx context.Context, dev string) (*pb.BlockStat, error) {
+	devNo, err := d.readDevNo(ctx, dev)
+	if err != nil {
+		return nil, err
+	}
+	path := sysDevBlockDir + "/" + devNo + "/stat"
+	text, ok, err := d.readAttrStrict(ctx, path)
+	if err != nil {
+		return nil, err
+	}
+	if !ok {
+		return nil, fmt.Errorf("block device %s (%s) is not there", dev, devNo)
+	}
+	return parseBlockStat(path, text)
+}
+
+// parseBlockStat reads the first blockStatFields numbers of a "stat" file's
+// text, in the kernel's order (BlockStat's field numbers).
+func parseBlockStat(path, text string) (*pb.BlockStat, error) {
+	fields := strings.Fields(text)
+	if len(fields) < blockStatFields {
+		return nil, fmt.Errorf("%s holds %d counters, want %d: %q", path,
+			len(fields), blockStatFields, text)
+	}
+	var v [blockStatFields]uint64
+	for i := range v {
+		n, err := strconv.ParseUint(fields[i], 10, 64)
+		if err != nil {
+			return nil, fmt.Errorf("%s: counter %d reads %q, not a count",
+				path, i+1, fields[i])
+		}
+		v[i] = n
+	}
+	return &pb.BlockStat{
+		ReadIos:        v[0],
+		ReadMerges:     v[1],
+		ReadSectors:    v[2],
+		ReadTicksMs:    v[3],
+		WriteIos:       v[4],
+		WriteMerges:    v[5],
+		WriteSectors:   v[6],
+		WriteTicksMs:   v[7],
+		InFlight:       v[8],
+		IoTicksMs:      v[9],
+		TimeInQueueMs:  v[10],
+		DiscardIos:     v[11],
+		DiscardMerges:  v[12],
+		DiscardSectors: v[13],
+		DiscardTicksMs: v[14],
+		FlushIos:       v[15],
+		FlushTicksMs:   v[16],
+	}, nil
+}
+
+// DevIoStats is BlockStat as an inspect call reports it (cnagent.md CN23;
+// dnagent.md DN16): the device's counters, or the failed read's text in
+// their place, its last common.IoStatErrorMax bytes at most (ioStatError).
+func (d *Dm) DevIoStats(ctx context.Context, dev string) *pb.DevIoStats {
+	stat, err := d.BlockStat(ctx, dev)
+	if err != nil {
+		return &pb.DevIoStats{Read: &pb.DevIoStats_ReadError{
+			ReadError: ioStatError(err.Error())}}
+	}
+	return &pb.DevIoStats{Read: &pb.DevIoStats_Stat{Stat: stat}}
+}
+
+// ioStatErrorCut is what ioStatError puts in front of a text it cut.
+const ioStatErrorCut = "..."
+
+// ioStatError is text cut to common.IoStatErrorMax bytes by its start, so
+// the cause at its end stays; a cut text begins with ioStatErrorCut, and a
+// cut never splits a UTF-8 sequence.
+func ioStatError(text string) string {
+	if len(text) <= common.IoStatErrorMax {
+		return text
+	}
+	keep := text[len(text)-(common.IoStatErrorMax-len(ioStatErrorCut)):]
+	for len(keep) > 0 && !utf8.RuneStart(keep[0]) {
+		keep = keep[1:]
+	}
+	return ioStatErrorCut + keep
 }
 
 // diskSectors reads the "size" file of the block device whose sysfs

@@ -465,7 +465,8 @@ through to the agent's records (`grpc.md` T3). `dn inspect` is the group's
 read of the DN agent's latest observation of the node, through its
 `GetDnInfo`, rather than of etcd, so its disk counts are the agent's own,
 to set beside the record's counts that `dn get` shows (`architecture.md`,
-Live-state reporting).
+Live-state reporting); beside them it prints the disk's block counters,
+which the agent reads at the call (`dnagent.md` DN16).
 
 ### `cn` — `ctl/cn.go`
 
@@ -527,7 +528,12 @@ pool stops its IO; the gateway allows it (`architecture.md`, Cntlrs), and
 dnvctl does not warn: the warning would need a pre-read of the pool's
 cntlrs, an RPC the operator did not type (CT8). `cntlr delete` has
 preconditions that are server state (`architecture.md`, Cntlrs); dnvctl
-checks none of them (CT8).
+checks none of them (CT8). `cntlr inspect` prints, beside the cntlr's
+rows, the `io_stats` the agent read at the call: each leg's and each
+namespace device's raw block counters and each leg's last probe round's
+times (`cnagent.md` CN23). They are counts since the device appeared, so
+a slow leg shows as the difference of two inspects a few seconds apart
+(`operations.md`, A slow leg).
 
 ### `td` — `ctl/td.go`
 

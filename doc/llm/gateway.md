@@ -799,9 +799,10 @@ to no cluster (`architecture.md`, Worker registry).
   agent request and the log line; the resolving `Snapshot` supplies the
   cluster id, so there is no plain pre-read — and no `DnRev` read: a client
   that wants the desired-state token calls `GetDiskNode`); **after** the STM
-  call `GetDnInfo` with the cluster id and `dn_id`; an agent failure is
-  `ABORTED`. Reply `applied_revision`, `dn_info` and `obs_stamp`, all from
-  the agent's reply, which answers from its latest observation of the node,
+  call `GetDnInfo` with the cluster id, `dn_id` and `read_io_stats`, the
+  one caller that sets it (`dnagent.md` DN16); an agent failure is
+  `ABORTED`. Reply `applied_revision`, `dn_info`, `obs_stamp` and
+  `disk_io_stats`, all from the agent's reply, which answers from its latest observation of the node,
   or with none while the agent starts (`dnagent.md` SH33), its code not
   passed on,
   and `obs_age`, which `obsAge` derives from that stamp (`architecture.md`,
@@ -1037,10 +1038,13 @@ position, and a re-run of the STM closure on the same picks and reads
 * **InspectCntlr** — STM: resolve; the `Cntlr` by id (`NOT_FOUND`), keeping
   its `addr_port` and the `CnConf`'s `cn_id` (read `CnConfKey` of that
   address in the same STM; deliberately no `SpRev` read); after the STM,
-  `GetCntlrInfo` with the cluster id, `cn_id`, `sp_id` and `cntlr_id` at
-  that address; a failure is `ABORTED`. Reply `applied_revision`,
-  `cntlr_info`, `obs_stamp` and `obs_age` as `InspectDiskNode` replies its
-  own (`architecture.md`, Cntlrs).
+  `GetCntlrInfo` with the cluster id, `cn_id`, `sp_id`, `cntlr_id` and
+  `read_io_stats` at that address; a failure is `ABORTED`. Reply
+  `applied_revision`, `cntlr_info`, `obs_stamp` and `obs_age` as
+  `InspectDiskNode` replies its own, and the agent's `io_stats`
+  (`architecture.md`, Cntlrs). It is the one `GetCntlrInfo` caller that
+  sets `read_io_stats`: the others read rows alone, and cost the agent no
+  read of the node (`cnagent.md` CN23).
 * **InspectSide** — STM: resolve; find the side by scanning the SP's slices
   (bounded, `architecture.md`, Cntlrs) for `side_id`, only when no slice
   holds it the clones' clone meta groups (`findCloneSide`), and only when no

@@ -3,7 +3,13 @@ package gateway
 import (
 	"context"
 	"fmt"
+	"go/ast"
+	"go/parser"
+	"go/token"
 	"net"
+	"path/filepath"
+	"slices"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -102,6 +108,10 @@ type agentpathFake struct {
 	// cntlrInfo and sideInfo are what GetCntlrInfo / GetSideInfo report.
 	cntlrInfo *pb.CntlrInfo
 	sideInfo  *pb.SideInfo
+	// cntlrIo and diskIo are what GetCntlrInfo and GetDnInfo carry for a
+	// request with read_io_stats, and only for one.
+	cntlrIo *pb.CntlrIoStats
+	diskIo  *pb.DevIoStats
 	// stamp is the ObsStamp every Get*Info reply carries, fakeAgentStamp
 	// until a test sets another: the agent answers from its latest
 	// observation (architecture.md, Live-state reporting), and every
@@ -208,6 +218,17 @@ func (f *agentpathFake) setSpInfos(
 	f.cntlrInfo, f.sideInfo = cntlrInfo, sideInfo
 }
 
+// setIoStats fixes what GetCntlrInfo and GetDnInfo carry for a request with
+// read_io_stats.
+func (f *agentpathFake) setIoStats(
+	cntlrIo *pb.CntlrIoStats,
+	diskIo *pb.DevIoStats,
+) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.cntlrIo, f.diskIo = cntlrIo, diskIo
+}
+
 // setStamp fixes the ObsStamp the four info probes carry from now on.
 func (f *agentpathFake) setStamp(stamp *pb.ObsStamp) {
 	f.mu.Lock()
@@ -276,15 +297,19 @@ func (f *agentpathFake) GetDnInfo(
 ) (*pb.GetDnInfoReply, error) {
 	f.mu.Lock()
 	f.dnInfoReqs = append(f.dnInfoReqs, req)
-	info, rev, stamp := f.dnInfo, f.agentRev, f.stamp
+	info, rev, stamp, io := f.dnInfo, f.agentRev, f.stamp, f.diskIo
 	f.mu.Unlock()
 	if err := f.block(ctx); err != nil {
 		return nil, err
 	}
+	if !req.GetReadIoStats() {
+		io = nil
+	}
 	return &pb.GetDnInfoReply{
-		Revision: rev,
-		DnInfo:   info,
-		ObsStamp: stamp,
+		Revision:    rev,
+		DnInfo:      info,
+		ObsStamp:    stamp,
+		DiskIoStats: io,
 	}, nil
 }
 
@@ -312,15 +337,19 @@ func (f *agentpathFake) GetCntlrInfo(
 ) (*pb.GetCntlrInfoReply, error) {
 	f.mu.Lock()
 	f.cntlrInfoReqs = append(f.cntlrInfoReqs, req)
-	info, rev, stamp := f.cntlrInfo, f.agentRev, f.stamp
+	info, rev, stamp, io := f.cntlrInfo, f.agentRev, f.stamp, f.cntlrIo
 	f.mu.Unlock()
 	if err := f.block(ctx); err != nil {
 		return nil, err
+	}
+	if !req.GetReadIoStats() {
+		io = nil
 	}
 	return &pb.GetCntlrInfoReply{
 		Revision:  rev,
 		CntlrInfo: info,
 		ObsStamp:  stamp,
+		IoStats:   io,
 	}, nil
 }
 
@@ -748,6 +777,21 @@ func TestAgentPathInspectRepliesTheAppliedRevision(t *testing.T) {
 			},
 		},
 	}
+	// What the agents read at an inspect call (cnagent.md CN23; dnagent.md
+	// DN16): the gateway asks for it on InspectDiskNode and InspectCntlr, and
+	// passes it through.
+	wantDiskIo := &pb.DevIoStats{Read: &pb.DevIoStats_Stat{
+		Stat: &pb.BlockStat{ReadIos: 11, WriteIos: 12}}}
+	wantCntlrIo := &pb.CntlrIoStats{
+		LegIdToIo: map[uint64]*pb.LegIoStats{
+			7: {Dev: &pb.DevIoStats{Read: &pb.DevIoStats_Stat{
+				Stat: &pb.BlockStat{WriteTicksMs: 13}}},
+				ProbeTimes: &pb.LegProbeTimes{WriteMs: 40}},
+		},
+		NsIdToIo: map[uint64]*pb.DevIoStats{
+			9: {Read: &pb.DevIoStats_ReadError{ReadError: "no stat file"}},
+		},
+	}
 	wantSideInfo := &pb.SideInfo{
 		SideDevInfo: &pb.ResInfo{
 			ResName: "side_dev",
@@ -762,6 +806,7 @@ func TestAgentPathInspectRepliesTheAppliedRevision(t *testing.T) {
 		fake := agentpathStartAgent(t)
 		fake.setSizes(uint64(common.DefaultDnExtSize), 0)
 		fake.setInfos(wantDnInfo, nil, agentRev)
+		fake.setIoStats(nil, wantDiskIo)
 		clusterName, cid := agentpathCreateCluster(t, srv)
 		created, err := srv.CreateDiskNode(
 			context.Background(), &pb.CreateDiskNodeRequest{
@@ -798,6 +843,10 @@ func TestAgentPathInspectRepliesTheAppliedRevision(t *testing.T) {
 			t.Errorf("dn_info = %v, want the agent's %v",
 				reply.GetDnInfo(), wantDnInfo)
 		}
+		if !proto.Equal(reply.GetDiskIoStats(), wantDiskIo) {
+			t.Errorf("disk_io_stats = %v, want the agent's %v",
+				reply.GetDiskIoStats(), wantDiskIo)
+		}
 		wantInspectObs(t, "InspectDiskNode",
 			reply.GetObsStamp(), reply.GetObsAge(), fakeAgentStamp(), seenAge)
 		fake.mu.Lock()
@@ -811,6 +860,9 @@ func TestAgentPathInspectRepliesTheAppliedRevision(t *testing.T) {
 			t.Errorf("GetDnInfo asked for (%#x, %d), want (%#x, %d)",
 				infoReqs[0].GetClusterId(), infoReqs[0].GetDnId(),
 				cid, created.GetDnId())
+		}
+		if !infoReqs[0].GetReadIoStats() {
+			t.Errorf("InspectDiskNode did not ask for the disk's counters")
 		}
 
 		fake.setStamp(fakeAgentNoObsStamp())
@@ -930,6 +982,7 @@ func TestAgentPathInspectRepliesTheAppliedRevision(t *testing.T) {
 			fake.setSizes(64<<30, 64<<30)
 			fake.setInfos(nil, nil, agentRev)
 			fake.setSpInfos(wantCntlrInfo, wantSideInfo)
+			fake.setIoStats(wantCntlrIo, nil)
 			fx.fakes[fake.addrPort] = fake
 			dnCreated, err := srv.CreateDiskNode(
 				ctx, &pb.CreateDiskNodeRequest{
@@ -998,6 +1051,10 @@ func TestAgentPathInspectRepliesTheAppliedRevision(t *testing.T) {
 			t.Errorf("cntlr_info = %v, want the agent's %v",
 				reply.GetCntlrInfo(), wantCntlrInfo)
 		}
+		if !proto.Equal(reply.GetIoStats(), wantCntlrIo) {
+			t.Errorf("io_stats = %v, want the agent's %v",
+				reply.GetIoStats(), wantCntlrIo)
+		}
 		wantInspectObs(t, "InspectCntlr",
 			reply.GetObsStamp(), reply.GetObsAge(), fakeAgentStamp(), seenAge)
 		fake.mu.Lock()
@@ -1018,6 +1075,9 @@ func TestAgentPathInspectRepliesTheAppliedRevision(t *testing.T) {
 				infoReqs[0].GetCntlrPointer().GetSpId(),
 				infoReqs[0].GetCntlrPointer().GetCntlrId(),
 				fx.cid, fx.cnId, fx.conf.GetSpId(), cntlrId)
+		}
+		if !infoReqs[0].GetReadIoStats() {
+			t.Errorf("InspectCntlr did not ask for the counters")
 		}
 
 		fake.setStamp(fakeAgentNoObsStamp())
@@ -2003,4 +2063,92 @@ func TestRaceSameNameCreatesHaveOneWinner(t *testing.T) {
 				rev.GetAddrPort(), rev.GetRevision(), fake.addrPort)
 		}
 	})
+}
+
+// TestOnlyTheInspectsAskForCounters pins who asks an agent to read its
+// devices' counters at the call (cnagent.md CN23; dnagent.md DN16): of the
+// gateway's GetCntlrInfo callers — the bitmap park check, the clone delete
+// check, InspectGroup, the repair's array check and InspectCntlr — only
+// InspectCntlr sets read_io_stats, and of its GetDnInfo callers only
+// InspectDiskNode does, so no RPC that runs on another's path makes an
+// agent read the node. It reads the package's sources, so a new caller is
+// held to the rule too.
+func TestOnlyTheInspectsAskForCounters(t *testing.T) {
+	files, err := filepath.Glob("*.go")
+	if err != nil {
+		t.Fatalf("listing the package: %v", err)
+	}
+	type literal struct{ fn, typ string }
+	asks := map[literal]int{}
+	all := map[literal]int{}
+	fset := token.NewFileSet()
+	for _, name := range files {
+		if strings.HasSuffix(name, "_test.go") {
+			continue
+		}
+		file, err := parser.ParseFile(fset, name, nil, 0)
+		if err != nil {
+			t.Fatalf("parsing %s: %v", name, err)
+		}
+		for _, decl := range file.Decls {
+			fn, ok := decl.(*ast.FuncDecl)
+			if !ok || fn.Body == nil {
+				continue
+			}
+			ast.Inspect(fn.Body, func(n ast.Node) bool {
+				lit, ok := n.(*ast.CompositeLit)
+				if !ok {
+					return true
+				}
+				sel, ok := lit.Type.(*ast.SelectorExpr)
+				if !ok || (sel.Sel.Name != "GetCntlrInfoRequest" &&
+					sel.Sel.Name != "GetDnInfoRequest") {
+					return true
+				}
+				key := literal{fn.Name.Name, sel.Sel.Name}
+				all[key]++
+				for _, elt := range lit.Elts {
+					if kv, ok := elt.(*ast.KeyValueExpr); ok {
+						if id, ok := kv.Key.(*ast.Ident); ok &&
+							id.Name == "ReadIoStats" {
+							asks[key]++
+						}
+					}
+				}
+				return true
+			})
+		}
+	}
+	var callers []string
+	for key := range all {
+		callers = append(callers, key.typ+" in "+key.fn)
+	}
+	slices.Sort(callers)
+	want := []string{
+		"GetCntlrInfoRequest in InspectCntlr",
+		"GetCntlrInfoRequest in InspectGroup",
+		"GetCntlrInfoRequest in checkCloneHydrated",
+		"GetCntlrInfoRequest in checkGrpArrayDown",
+		"GetCntlrInfoRequest in checkVolumeParked",
+		"GetDnInfoRequest in InspectDiskNode",
+	}
+	wantAsks := map[literal]int{
+		{"InspectCntlr", "GetCntlrInfoRequest"}: 1,
+		{"InspectDiskNode", "GetDnInfoRequest"}: 1,
+	}
+	if !slices.Equal(callers, want) {
+		t.Fatalf("the gateway builds the info requests in %v, want %v",
+			callers, want)
+	}
+	for key, n := range asks {
+		if wantAsks[key] != n {
+			t.Fatalf("%s in %s sets read_io_stats: only InspectCntlr and "+
+				"InspectDiskNode may", key.typ, key.fn)
+		}
+	}
+	for key, n := range wantAsks {
+		if asks[key] != n {
+			t.Fatalf("%s in %s does not set read_io_stats", key.typ, key.fn)
+		}
+	}
 }

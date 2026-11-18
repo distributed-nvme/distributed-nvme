@@ -271,7 +271,9 @@ It reads the agent as the dn driver does
 (`dnagent_integtest.md`, The driver: `dnagentctl`): its round commands have
 the fresh mode, its hydration poller samples with rounds on one stream, the
 first sample a fresh one, so its one-sample probe takes a fresh sample, and
-its info-read commands are plain memory reads.
+its info-read commands are plain memory reads, but for a cntlr's info read
+that asks for the counters, which reads them at the call as
+`InspectCntlr`'s does (`cnagent.md` CN23).
 
 ## Conventions
 
@@ -459,7 +461,14 @@ DialTcp).
 The demote moves ANA before the park (CN9's ANA pre-step before its park
 pre-step), stops the arrays and keeps the legs; the promote assembles both
 (CN12's assembly case), each with the arguments the first stage's rule builds
-for its own group, the data surviving. With the primary's legs into one DN cut
+for its own group, the data surviving. With what the primary's machine
+sends to DN1's port delayed (`tc netem`, no device changed), the
+primary's inspect read reports a write half of the probe of each of DN1's
+legs, from a round made under the delay, at no less than the delay, and
+of DN2's legs below it; every leg's row reads OK on a fresh round, and
+DN1's legs' counters, read at the call, have moved (CN11, CN23); with the
+delay gone, a later round of DN1's legs is fast again.
+With the primary's legs into one DN cut
 under a host write, every fresh check round reads both md rows OK until the
 data row reports degraded and the dead legs' rows error (CN12, CN28, CN29);
 once a dead leg's probe has failed enough rounds, a round may also name,

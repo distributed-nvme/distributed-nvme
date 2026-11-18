@@ -154,7 +154,8 @@ var renderCases = []renderCase{
 				},
 			},
 		},
-		want: `{"applied_revision":"7","dn_info":{"disk_counts":` +
+		want: `{"applied_revision":"7","disk_io_stats":null,` +
+			`"dn_info":{"disk_counts":` +
 			`{"free_ext_cnt":"231","free_meta_units":"64",` +
 			`"side_rec_cnt":"1","side_recs_match":false,` +
 			`"total_ext_cnt":"256"},"disk_info":null,"meta_info":null,` +
@@ -171,7 +172,8 @@ var renderCases = []renderCase{
 			AppliedRevision: 7,
 			DnInfo:          &pb.DnInfo{},
 		},
-		want: `{"applied_revision":"7","dn_info":{"disk_counts":null,` +
+		want: `{"applied_revision":"7","disk_io_stats":null,` +
+			`"dn_info":{"disk_counts":null,` +
 			`"disk_info":null,"meta_info":null,"port_info":null,` +
 			`"store_info":null},"obs_age":null,"obs_stamp":null}` + "\n",
 	},
@@ -194,13 +196,54 @@ var renderCases = []renderCase{
 			},
 			ObsAge: durationpb.New(1500500 * time.Microsecond),
 		},
-		want: `{"applied_revision":"9","cntlr_info":null,` +
+		want: `{"applied_revision":"9","cntlr_info":null,"io_stats":null,` +
 			`"obs_age":"1.500500s","obs_stamp":{` +
 			`"agent_start_time":null,` +
 			`"answer_time":"2026-01-02T03:04:06.500506Z",` +
 			`"converge_start":null,` +
 			`"obs_time":"2026-01-02T03:04:05.000006Z",` +
 			`"obs_trace_id":"trace-1"}}` + "\n",
+	},
+	{
+		// The counters and probe times the agent read at the inspect call
+		// (cnagent.md CN23): the counters as uint64 strings in the kernel's
+		// field names, the probe times in whole milliseconds, a read that
+		// failed as its text alone; the read half of a round whose write
+		// failed, and the age of a success none has had, are left out, as
+		// protojson leaves out an optional field that is not set.
+		name: "cntlr inspect, the io stats",
+		rpc:  "InspectCntlr",
+		argv: []string{"cntlr", "inspect", "--id", "3"},
+		reply: &pb.InspectCntlrReply{
+			IoStats: &pb.CntlrIoStats{
+				LegIdToIo: map[uint64]*pb.LegIoStats{
+					5: {
+						Dev: &pb.DevIoStats{Read: &pb.DevIoStats_Stat{
+							Stat: &pb.BlockStat{WriteIos: 40,
+								WriteTicksMs: 900}}},
+						ProbeTimes: &pb.LegProbeTimes{
+							RoundAgeMs: 1200,
+							WriteMs:    250,
+						},
+					},
+				},
+				NsIdToIo: map[uint64]*pb.DevIoStats{
+					9: {Read: &pb.DevIoStats_ReadError{
+						ReadError: "no stat file"}},
+				},
+			},
+		},
+		want: `{"applied_revision":"0","cntlr_info":null,"io_stats":{` +
+			`"leg_id_to_io":{"5":{"dev":{"stat":{"discard_ios":"0",` +
+			`"discard_merges":"0","discard_sectors":"0",` +
+			`"discard_ticks_ms":"0","flush_ios":"0","flush_ticks_ms":"0",` +
+			`"in_flight":"0","io_ticks_ms":"0","read_ios":"0",` +
+			`"read_merges":"0","read_sectors":"0","read_ticks_ms":"0",` +
+			`"time_in_queue_ms":"0","write_ios":"40","write_merges":"0",` +
+			`"write_sectors":"0","write_ticks_ms":"900"}},` +
+			`"probe_times":{"round_age_ms":1200,"write_ms":250}}},` +
+			`"ns_id_to_io":{"9":{"read_error":"no stat file"}}},` +
+			`"obs_age":null,"obs_stamp":null}` + "\n",
 	},
 	{
 		// A uint64 MAP KEY is quoted too, and the re-marshal sorts the map's

@@ -3,6 +3,7 @@ package dnagent
 import (
 	"context"
 	"fmt"
+	"strings"
 	"testing"
 	"time"
 
@@ -345,5 +346,88 @@ func TestDiskCountsSurviveARestart(t *testing.T) {
 					"before %v\nafter  %v", before, after)
 			}
 		})
+	}
+}
+
+// TestInspectReadsTheDisksCounters pins DN16's exception: a GetDnInfo with
+// read_io_stats, which only InspectDiskNode sends, reads the disk's sysfs
+// counters at the call and carries them beside the observation; one without
+// the flag, the dn's read and its check rounds read no stat file and carry
+// none. A disk whose counters do not read carries the read's text, never
+// zeros. The flagged read takes no lock of the hierarchy: it answers while
+// the test holds the node's write lock.
+func TestInspectReadsTheDisksCounters(t *testing.T) {
+	srv, node := newTestServer(t)
+	ctx := context.Background()
+	if _, err := srv.SyncupDn(ctx, dnReq(1)); err != nil {
+		t.Fatalf("SyncupDn: %v", err)
+	}
+	node.mu.Lock()
+	node.devStat[testDisk] = "  7 0 56 3 9 0 72 4 0 6 7 1 0 8 1 2 1\n"
+	node.mu.Unlock()
+	statReads := func() []string {
+		var out []string
+		for _, call := range node.Calls() {
+			if strings.HasSuffix(call, "/stat") {
+				out = append(out, call)
+			}
+		}
+		return out
+	}
+
+	node.Reset()
+	plain := dnInfoOf(t, srv)
+	reply, err := srv.GetDnInfo(ctx,
+		&pb.GetDnInfoRequest{ClusterId: testCluster, DnId: testDn})
+	if err != nil {
+		t.Fatalf("GetDnInfo: %v", err)
+	}
+	if reply.GetDiskIoStats() != nil || plain == nil {
+		t.Fatalf("an info read without the flag carries %v",
+			reply.GetDiskIoStats())
+	}
+	if reads := statReads(); len(reads) != 0 {
+		t.Fatalf("a read and an info read without the flag read %v", reads)
+	}
+
+	srv.locks.Node().Lock()
+	got := make(chan *pb.GetDnInfoReply, 1)
+	go func() {
+		reply, err := srv.GetDnInfo(ctx, &pb.GetDnInfoRequest{
+			ClusterId: testCluster, DnId: testDn, ReadIoStats: true})
+		if err != nil {
+			t.Errorf("GetDnInfo: %v", err)
+		}
+		got <- reply
+	}()
+	select {
+	case reply = <-got:
+	case <-time.After(5 * time.Second):
+		srv.locks.Node().Unlock()
+		t.Fatalf("GetDnInfo with read_io_stats waited on the node lock")
+	}
+	srv.locks.Node().Unlock()
+	io := reply.GetDiskIoStats()
+	if io.GetReadError() != "" ||
+		io.GetStat().GetReadIos() != 7 || io.GetStat().GetWriteSectors() != 72 ||
+		io.GetStat().GetFlushTicksMs() != 1 {
+		t.Fatalf("the disk's io stats %v, want its counters", io)
+	}
+	if len(statReads()) != 1 {
+		t.Fatalf("the flagged call read %v, want the disk's stat file once",
+			statReads())
+	}
+
+	node.mu.Lock()
+	delete(node.devStat, testDisk)
+	node.mu.Unlock()
+	reply, err = srv.GetDnInfo(ctx, &pb.GetDnInfoRequest{
+		ClusterId: testCluster, DnId: testDn, ReadIoStats: true})
+	if err != nil {
+		t.Fatalf("GetDnInfo: %v", err)
+	}
+	if io := reply.GetDiskIoStats(); io.GetStat() != nil ||
+		!strings.Contains(io.GetReadError(), "is not there") {
+		t.Fatalf("a disk with no stat file reads %v, want the read's text", io)
 	}
 }

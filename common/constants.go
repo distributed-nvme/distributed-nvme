@@ -386,6 +386,14 @@ const (
 	DefaultNvmeFastIoFailTmo = 5
 	MinLegFastIoFailTmo      = 1
 
+	// IoStatErrorMax bounds the text an inspect call's counter read puts in
+	// a device's entry when the read fails (cnagent.md CN23; dnagent.md
+	// DN16), keeping the text's end, where the cause is; the agent's own
+	// record of the failed read holds it whole. So a cntlr's inspect reply,
+	// an entry per leg beside the cntlr report, fits GrpcMaxMsgSize at the
+	// cardinality limits.
+	IoStatErrorMax = 128
+
 	// Default cap on the number of in-flight OsClient operations
 	// (commands + directory listings + modification-time reads +
 	// device-number reads + file I/O + proto I/O combined). See osclient.md.

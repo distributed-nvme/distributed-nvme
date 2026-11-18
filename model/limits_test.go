@@ -145,6 +145,10 @@ func widestCounts() map[protoreflect.FullName]int {
 		"CntlrInfo.GrpInfo.in_sync_leg_id_to_slot": common.MaxAllocLegPerGrp + 1,
 		// The new legs of a repair md holds: one per repair.
 		"CntlrInfo.RepairInfo.held_new_leg_id_list": 1,
+		// The counters an inspect call reads (cnagent.md CN23): an entry per
+		// leg row and per namespace device.
+		"CntlrIoStats.leg_id_to_io": grpsPerSp * legsPerGrp,
+		"CntlrIoStats.ns_id_to_io":  common.MaxSsCntPerSp * common.MaxNsCntPerSs,
 		// A migration's list; a cntlr reports the bitmaps of clones only.
 		"BitmapInfo.bm_idx_list":   0,
 		"BitmapInfo.chunk_id_list": common.MaxSliceCntPerSp * common.MaxCloneBmCnt,
@@ -426,6 +430,13 @@ func (b *widestBuilder) strLen(
 		// A repair verdict's refusal is agent text beside the rows, which
 		// no limit cuts either (cnagent.md CN12).
 		return b.rowText
+	case "DevIoStats.read_error":
+		// A counter read's error, which the agent cuts (cnagent.md CN23):
+		// text only where the report has text.
+		if b.rowText == 0 {
+			return 0
+		}
+		return common.IoStatErrorMax
 	}
 	if n, ok := b.strLens[fd.FullName()]; ok {
 		b.used[fd.FullName()] = true
@@ -641,9 +652,12 @@ func mib(n int) string {
 // (grpc.md, Wiring): the cntlr syncup and the pool get reply of a pool at the
 // limits, whose every group has its repair (widestCounts), and the report of a
 // cntlr of that pool, with no row text and with rowTextAllowance of text on
-// every row. The first three fit in half the limit; the report with text
-// fits. A row's text is the one part of the report no limit bounds
-// (architecture.md, Known limits).
+// every row, and the reply of a cntlr's inspect call, that report beside the
+// counters the agent reads at the call (cnagent.md CN23). The first three
+// fit in half the limit; the report with text fits, and so does the inspect
+// reply with that text, whose counter reads' errors the agent cuts to
+// IoStatErrorMax. A row's text is the one part of the report no limit
+// bounds (architecture.md, Known limits).
 func TestWidestMessagesFitGrpcMaxMsgSize(t *testing.T) {
 	if common.EtcdMaxRequestBytes > common.GrpcMaxMsgSize {
 		t.Errorf("EtcdMaxRequestBytes %d is above GrpcMaxMsgSize %d: a value "+
@@ -740,7 +754,22 @@ func checkWidestMessages(t *testing.T, b *widestBuilder) {
 	}
 
 	withText := &pb.SyncupCntlrReply{}
-	newWidestBuilder(t, rowTextAllowance).build(withText)
+	textBuilder := newWidestBuilder(t, rowTextAllowance)
+	textBuilder.build(withText)
+	// An inspect call's reply: the cntlr report and, beside it, the
+	// counters the agent read at the call (cnagent.md CN23), as the agent
+	// sends it to the gateway and as the gateway passes it on.
+	infoReply := &pb.GetCntlrInfoReply{}
+	b.build(infoReply)
+	inspect := &pb.InspectCntlrReply{}
+	b.build(inspect)
+	inspectText := &pb.InspectCntlrReply{}
+	textBuilder.build(inspectText)
+	if got, want := len(inspect.GetIoStats().GetLegIdToIo()),
+		len(info.GetLegIdToLeg()); got != want {
+		t.Errorf("the inspect reply holds %d leg entries, want one per leg "+
+			"row, %d", got, want)
+	}
 
 	for _, c := range []struct {
 		name string
@@ -753,6 +782,13 @@ func checkWidestMessages(t *testing.T, b *widestBuilder) {
 		{"the cntlr report with no row text", noText, 2},
 		{fmt.Sprintf("the cntlr report with %d bytes of text per row",
 			rowTextAllowance), withText, 1},
+		// The replies of an inspect call fit as the report with text does,
+		// not in half the limit: the counters add an entry per leg.
+		{"the cntlr info reply with its counters", infoReply, 1},
+		{"the cntlr inspect reply with its counters", inspect, 1},
+		{fmt.Sprintf("the cntlr inspect reply with %d bytes of text per "+
+			"row and its counter reads' errors cut", rowTextAllowance),
+			inspectText, 1},
 	} {
 		size := proto.Size(c.msg)
 		t.Logf("%s: %s", c.name, mib(size))

@@ -910,3 +910,66 @@ replacement follows and that the host reads its data. No test restarts a
 dn agent this way; the worker's tests check that a dn agent's start keeps
 a new leg from being given up. A unit test of the agent checks that a
 second signal ends it with exit status 1; no suite sends one.
+
+## A slow leg
+
+Words: the primary's **leg probe** is a small test write and read of one
+block at the end of each leg's metadata, which the primary makes every
+few seconds through the leg. A device's **counters** are the kernel's
+numbers for it: how many reads and writes it has done since it appeared,
+how many sectors they moved, and how many milliseconds they took, in the
+order the kernel's `stat` file of the device gives them.
+
+Symptom: writes to a pool's volumes are slow while every row reads
+`RES_STATUS_OK`. In a group of two legs, every write waits for both legs,
+so one slow leg slows the whole group.
+
+Confirm:
+
+1. Run `dnvctl cntlr inspect --id <primary cntlr id>` twice, about ten
+   seconds apart. Each run reads the counters at that moment. Under
+   `io_stats.leg_id_to_io`, each leg has `probe_times`, the primary's last
+   leg probe, and `dev.stat`, the counters of the leg's device on the
+   controller node.
+2. A slow leg shows a `probe_times.write_ms`, and a `read_ms`, well above
+   those of the other legs. Between the two runs, divide the growth of
+   its `write_ticks_ms` by the growth of its `write_ios`: that is the
+   average time of one write, which is well above that of the other legs.
+   The `round_age_ms` says how old the probe is; a probe still running is
+   not shown until it ends, and one that runs longer than the stall bound
+   turns the leg's row to `RES_STATUS_ERROR` anyway.
+3. Find the leg: `cntlr_info.leg_id_to_leg` gives its device name for the
+   same leg id, and `dnvctl sp get` lists the slices, their groups and
+   their legs, with each leg's side and the disk node that holds it.
+4. On that disk node, `dnvctl dn inspect --addr <disk node address>`
+   prints the disk's counters as `disk_io_stats`, read at that moment.
+   Two runs show whether the disk itself is slow. The disk's own health,
+   such as its SMART data, is for the node's usual tools, such as smartd
+   and node_exporter.
+
+A standby runs no leg probe, so its legs show counters and no
+`probe_times`.
+
+What dnv does alone: nothing. A slow leg reads `RES_STATUS_OK`, no rule
+reads the times or the counters, and leg repair does not replace a leg
+that works ([the scope page](scope.md), section 6.1).
+
+Safe steps: move the slow leg's side to another disk node with a
+migration: `dnvctl migr create` with the side's id as `--src-side`, and
+`--dn-black` naming the slow disk node; watch the copy with
+`dnvctl sp inspect-side`; then `dnvctl migr finish`. The scope page lists
+the whole migration flow as a procedure still to write; the introduction
+explains it. When the disk node's disk is the cause, move every side it
+holds the same way, and then fix or replace the disk.
+
+When to stop: the counters do not read, and the entry shows a
+`read_error` instead of `stat`; or every leg into one disk node is slow
+and the disk's counters look normal, which points at the network between
+the nodes rather than the disk. Ask for help before a migration in that
+case: the new side may be just as slow.
+
+Tested: a unit test of the cn agent checks that the inspect read carries
+the probe times and the counters, and that no check round carries them.
+The cn suite's slow leg stage, which delays one disk node's traffic with
+tc netem and reads a higher write time on its legs while their rows stay
+ok, is written and has not yet run in the lab.

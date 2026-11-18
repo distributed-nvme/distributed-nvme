@@ -2,6 +2,7 @@ package cnagent
 
 import (
 	"context"
+	"fmt"
 	"slices"
 	"strings"
 	"testing"
@@ -9,6 +10,7 @@ import (
 
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
+	"google.golang.org/protobuf/proto"
 
 	"github.com/distributed-nvme/distributed-nvme/pb"
 )
@@ -290,4 +292,245 @@ func TestInspectGrpReadsNoLegThatDoesNotServe(t *testing.T) {
 		t.Errorf("the unreachable new leg reads %v, want not serving", m)
 	}
 	assertNoCall(t, f.node, "readsb "+f.newLegDev)
+}
+
+// ---------------------------------------------------------------------------
+// CN23's exception: the counters and probe times an inspect call reads
+// ---------------------------------------------------------------------------
+
+// statText is a sysfs "stat" file whose seventeen counters are base, base+1,
+// ..., base+16, padded as the kernel pads them.
+func statText(base uint64) string {
+	var sb strings.Builder
+	for i := uint64(0); i < 17; i++ {
+		fmt.Fprintf(&sb, " %8d", base+i)
+	}
+	return sb.String() + "\n"
+}
+
+// plantStat gives the dm device name a "stat" file under its number whose
+// counters start at base.
+func plantStat(t *testing.T, node *fakeNode, name string, base uint64) {
+	t.Helper()
+	node.mu.Lock()
+	defer node.mu.Unlock()
+	devNo := node.devNo["/dev/mapper/"+name]
+	if devNo == "" {
+		t.Fatalf("%s has no device number", name)
+	}
+	node.files["/sys/dev/block/"+devNo+"/stat"] = statText(base)
+}
+
+// wantStat checks that an entry read the counters plantStat planted at base.
+func wantStat(t *testing.T, io *pb.DevIoStats, name string, base uint64) {
+	t.Helper()
+	if io.GetStat() == nil || io.GetReadError() != "" {
+		t.Fatalf("entry %v, want the counters of %s", io, name)
+	}
+	stat := io.GetStat()
+	if stat.GetReadIos() != base || stat.GetWriteIos() != base+4 ||
+		stat.GetInFlight() != base+8 || stat.GetFlushTicksMs() != base+16 {
+		t.Fatalf("%s's counters %v, want base %d in the kernel's order",
+			name, stat, base)
+	}
+}
+
+// statReads are the calls of a test's node that read a device's number or a
+// "stat" file.
+func statReads(node *fakeNode) []string {
+	var out []string
+	for _, call := range node.Calls() {
+		if strings.HasPrefix(call, "devno ") ||
+			strings.HasSuffix(call, "/stat") {
+			out = append(out, call)
+		}
+	}
+	return out
+}
+
+// TestInspectReadsProbeTimesAndCounters pins the inspect call's read (CN11,
+// CN23): with read_io_stats, GetCntlrInfo carries each leg's last probe
+// round — its start, its write half and its read half, the end of the last
+// round that succeeded — and each leg wrapper's and the ns-dev's counters,
+// read at the call. A round whose write fails reports its write half alone
+// and keeps the earlier success; a leg no round has probed carries no times;
+// a device whose counters do not read carries the read's error and no
+// counters, never zeros. The read takes no CN1 lock: it answers while the
+// test holds the node's write lock.
+func TestInspectReadsProbeTimesAndCounters(t *testing.T) {
+	srv, node := newTestServer(t)
+	clock := withClock(srv)
+	srv.probeInterval = time.Hour
+	failWrite := false
+	srv.probeIO = &fakeProbeIO{
+		WriteFn: func(context.Context, string, uint64, []byte) error {
+			clock.advance(30 * time.Millisecond)
+			if failWrite {
+				return fmt.Errorf("input/output error")
+			}
+			return nil
+		},
+		ReadDirectFn: func(context.Context, string, uint64,
+			uint64) ([]byte, error) {
+			clock.advance(20 * time.Millisecond)
+			return nil, nil
+		},
+	}
+	syncupBoth(t, srv, reqOpts{revision: 2, primary: true})
+	st := legState(t, srv)
+	srv.mu.Lock()
+	prober := st.probers[testDataLeg]
+	srv.mu.Unlock()
+	first := clock.Now()
+	srv.runLegProbe(context.Background(), prober, testCn)
+	succeeded := clock.Now()
+	clock.advance(time.Second)
+	failWrite = true
+	second := clock.Now()
+	srv.runLegProbe(context.Background(), prober, testCn)
+	plantStat(t, node, legName(srv, testDataLeg), 100)
+	plantStat(t, node, nsDevName(srv, testNs), 300)
+
+	node.Reset()
+	srv.locks.Node().Lock()
+	got := make(chan *pb.GetCntlrInfoReply, 1)
+	go func() {
+		reply, err := srv.GetCntlrInfo(context.Background(),
+			&pb.GetCntlrInfoRequest{
+				ClusterId: testCluster, CnId: testCn,
+				CntlrPointer: cntlrPtr(), ReadIoStats: true,
+			})
+		if err != nil {
+			t.Errorf("GetCntlrInfo: %v", err)
+		}
+		got <- reply
+	}()
+	var reply *pb.GetCntlrInfoReply
+	select {
+	case reply = <-got:
+	case <-time.After(5 * time.Second):
+		srv.locks.Node().Unlock()
+		t.Fatalf("GetCntlrInfo with read_io_stats waited on the node lock")
+	}
+	srv.locks.Node().Unlock()
+
+	io := reply.GetIoStats()
+	data := io.GetLegIdToIo()[testDataLeg]
+	wantStat(t, data.GetDev(), legName(srv, testDataLeg), 100)
+	// The ages count back from the answer, at the failed round's end.
+	times := data.GetProbeTimes()
+	if times.GetRoundAgeMs() != 30 || times.GetWriteMs() != 30 ||
+		times.ReadMs != nil || times.LastSuccessAgeMs == nil ||
+		times.GetLastSuccessAgeMs() != uint32(clock.Now().Sub(succeeded)/
+			time.Millisecond) {
+		t.Fatalf("data leg's probe times %v, want the failed round begun "+
+			"30 ms before the answer (write 30 ms, no read) and the success "+
+			"that ended %v before it", times, clock.Now().Sub(succeeded))
+	}
+	if second.Sub(succeeded) != time.Second {
+		t.Fatalf("the rounds are %v apart", second.Sub(succeeded))
+	}
+	if succeeded.Sub(first) != 50*time.Millisecond {
+		t.Fatalf("the first round took %v", succeeded.Sub(first))
+	}
+	meta := io.GetLegIdToIo()[testMetaLeg]
+	if meta.GetProbeTimes() != nil {
+		t.Fatalf("the meta leg, which no round probed, carries times %v",
+			meta.GetProbeTimes())
+	}
+	if meta.GetDev().GetStat() != nil ||
+		!strings.Contains(meta.GetDev().GetReadError(), "is not there") {
+		t.Fatalf("the meta leg's wrapper has no stat file, and its entry "+
+			"reads %v", meta.GetDev())
+	}
+	wantStat(t, io.GetNsIdToIo()[testNs], nsDevName(srv, testNs), 300)
+	if len(io.GetLegIdToIo()) != 2 || len(io.GetNsIdToIo()) != 1 {
+		t.Fatalf("io stats %v, want two legs and one ns-dev", io)
+	}
+
+	// The times of a round that succeeded: both halves. The clock moves on
+	// a millisecond at every read of it during the call, so the ages show
+	// which read they count from: the answer time the stamp carries.
+	failWrite = false
+	clock.advance(time.Second)
+	third := clock.Now()
+	srv.runLegProbe(context.Background(), prober, testCn)
+	ended := clock.Now()
+	srv.now = func() time.Time {
+		clock.advance(time.Millisecond)
+		return clock.Now()
+	}
+	reply, err := srv.GetCntlrInfo(context.Background(),
+		&pb.GetCntlrInfoRequest{ClusterId: testCluster, CnId: testCn,
+			CntlrPointer: cntlrPtr(), ReadIoStats: true})
+	srv.now = clock.Now
+	if err != nil {
+		t.Fatalf("GetCntlrInfo: %v", err)
+	}
+	answered := reply.GetObsStamp().GetAnswerTime().AsTime()
+	times = reply.GetIoStats().GetLegIdToIo()[testDataLeg].GetProbeTimes()
+	if times.GetRoundAgeMs() != uint32(answered.Sub(third)/
+		time.Millisecond) || times.GetWriteMs() != 30 ||
+		times.ReadMs == nil || times.GetReadMs() != 20 ||
+		times.LastSuccessAgeMs == nil ||
+		times.GetLastSuccessAgeMs() != uint32(answered.Sub(ended)/
+			time.Millisecond) {
+		t.Fatalf("a round that succeeded reports %v, want its ages counted "+
+			"back from the answer time %v (round began %v, ended %v)",
+			times, answered, third, ended)
+	}
+}
+
+// TestInfoReadsAndRoundsReadNoCounters pins the reach of CN23's exception:
+// a GetCntlrInfo without read_io_stats, a cntlr's read and its check rounds
+// read no device number and no "stat" file, and carry no counters, so the
+// rounds' replies stay equal while the counters move and the worker sees no
+// change; only the flagged call reads them.
+func TestInfoReadsAndRoundsReadNoCounters(t *testing.T) {
+	srv, node := newTestServer(t)
+	srv.probeInterval = time.Hour
+	syncupBoth(t, srv, reqOpts{revision: 2, primary: true})
+	for _, legId := range []uint64{testMetaLeg, testDataLeg} {
+		plantStat(t, node, legName(srv, legId), 10)
+	}
+	plantStat(t, node, nsDevName(srv, testNs), 10)
+
+	node.Reset()
+	plain, err := srv.GetCntlrInfo(context.Background(),
+		&pb.GetCntlrInfoRequest{ClusterId: testCluster, CnId: testCn,
+			CntlrPointer: cntlrPtr()})
+	if err != nil {
+		t.Fatalf("GetCntlrInfo: %v", err)
+	}
+	if plain.GetIoStats() != nil {
+		t.Fatalf("an info read without the flag carries %v",
+			plain.GetIoStats())
+	}
+	before := rowRound(t, srv, 2)
+	for _, legId := range []uint64{testMetaLeg, testDataLeg} {
+		plantStat(t, node, legName(srv, legId), 5000)
+	}
+	plantStat(t, node, nsDevName(srv, testNs), 5000)
+	after := rowRound(t, srv, 2)
+	if reads := statReads(node); len(reads) != 0 {
+		t.Fatalf("an info read, two reads and two rounds read counters: %v",
+			reads)
+	}
+	if !proto.Equal(before.GetCntlrInfo(), after.GetCntlrInfo()) ||
+		before.GetAgentReply().GetCode() != after.GetAgentReply().GetCode() {
+		t.Fatalf("the rounds' replies moved with the counters:\n%v\n%v",
+			before, after)
+	}
+
+	flagged, err := srv.GetCntlrInfo(context.Background(),
+		&pb.GetCntlrInfoRequest{ClusterId: testCluster, CnId: testCn,
+			CntlrPointer: cntlrPtr(), ReadIoStats: true})
+	if err != nil {
+		t.Fatalf("GetCntlrInfo: %v", err)
+	}
+	if len(statReads(node)) == 0 {
+		t.Fatalf("the flagged call read no counters")
+	}
+	wantStat(t, flagged.GetIoStats().GetNsIdToIo()[testNs],
+		nsDevName(srv, testNs), 5000)
 }

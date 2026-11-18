@@ -33,7 +33,9 @@ it.
   nvmet-configfs work, for its listings of sysfs and of its local store, for
   the dn's read of an nvmet subsystem directory's age, for both roles' read
   of whether their nvmet port's directory is there, for the dn's read of its
-  disk's device number, for both roles' discards on a dm-clone, for the
+  disk's device number, for both roles' reads of a device's number for an
+  inspect call's block counters (`cnagent.md` CN23, `dnagent.md` DN16), for
+  both roles' discards on a dm-clone, for the
   cn's direct read of an md member's superblock area, for the cn's dial of
   a side's address before a connect (`cnagent.md` CN10), and for
   persisting the `Local*Path` protobuf state
@@ -373,12 +375,16 @@ the method set is exactly the following, each taking the caller's ctx:
 * `ReadDevNo` reads the number of a block device in the caller's own
   process; no child process runs. The dn reads its disk's number this way,
   to read the disk's size from sysfs, which names each block device by its
-  number, for the reason the probing conventions give (`dnagent.md` SH17).
+  number, for the reason the probing conventions give (`dnagent.md` SH17);
+  both roles read a device's number this way, the cn a leg wrapper's or an
+  ns-dev's and the dn its disk's, to read that device's block counters
+  from sysfs for an inspect call (`cnagent.md` CN23, `dnagent.md` DN16).
 * It returns the number and nothing else, as "major:minor", the form
-  sysfs and dm tables print. Reason: the disk node's size read is the only
-  caller that uses the number — the node plugin calls it too, to test that
-  a block device is there, and drops the number (Scope and placement) —
-  and a general stat would add surface no caller needs.
+  sysfs and dm tables print. Reason: the disk node's size read and the
+  inspect calls' counter reads are the callers that use the number, each
+  to find the device's directory in sysfs — the node plugin calls it too,
+  to test that a block device is there, and drops the number (Scope and
+  placement) — and a general stat would add surface no caller needs.
 * Like `ReadMtime`, it holds one semaphore slot and checks the ctx error
   after acquiring it. That is its last cancellation point: the read itself
   is not cancelable, and one the kernel holds returns only when the kernel

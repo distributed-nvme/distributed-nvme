@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/binary"
 	"log/slog"
+	"math"
 	"sync"
 	"time"
 
@@ -73,12 +74,16 @@ func (directLegProbeIO) Write(
 	if err := ctx.Err(); err != nil {
 		return err
 	}
+	start := time.Now()
 	err := common.WriteBlockAt(path, offset, data)
-	// The health block is device content; only its shape is ever logged.
+	took := time.Since(start)
+	// The health block is device content; only its shape is ever logged,
+	// and how long the half took: a buffered write and an fsync.
 	attrs := []any{
 		slog.String("path", path),
 		slog.Uint64("offset", offset),
 		slog.Int("length", len(data)),
+		slog.Int64("duration_ms", took.Milliseconds()),
 	}
 	if err != nil {
 		attrs = append(attrs, slog.String("error", err.Error()))
@@ -95,11 +100,14 @@ func (directLegProbeIO) ReadDirect(
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
+	start := time.Now()
 	data, err := common.ReadBlockDirectAt(path, offset, length)
+	took := time.Since(start)
 	attrs := []any{
 		slog.String("path", path),
 		slog.Uint64("offset", offset),
 		slog.Uint64("length", length),
+		slog.Int64("duration_ms", took.Milliseconds()),
 	}
 	if err != nil {
 		attrs = append(attrs, slog.String("error", err.Error()))
@@ -123,6 +131,67 @@ type legProber struct {
 	// failedRounds is the number of completed rounds in a row that failed,
 	// zero after a round that succeeds (deadRounds).
 	failedRounds int
+	// last is the last completed round's times and lastOk the end of the
+	// last round that succeeded, both zero before one: what an inspect read
+	// reports (probeTimes), and no health rule's input (CN11).
+	last   probeRound
+	lastOk time.Time
+}
+
+// probeRound is one completed round's times (CN11): when it began, how long
+// its write half and its read half took, and whether the read ran, which it
+// does only after a write that succeeded.
+type probeRound struct {
+	start   time.Time
+	write   time.Duration
+	read    time.Duration
+	readRan bool
+}
+
+// noteRound keeps the times of a round that ended at end, with err.
+func (p *legProber) noteRound(r probeRound, end time.Time, err error) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.last = r
+	if err == nil {
+		p.lastOk = end
+	}
+}
+
+// probeTimes is the prober's last completed round as an inspect read
+// reports it at now (CN23), nil before the first round ends.
+func (p *legProber) probeTimes(now time.Time) *pb.LegProbeTimes {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.last.start.IsZero() {
+		return nil
+	}
+	times := &pb.LegProbeTimes{
+		RoundAgeMs: wholeMs(now.Sub(p.last.start)),
+		WriteMs:    wholeMs(p.last.write),
+	}
+	if p.last.readRan {
+		readMs := wholeMs(p.last.read)
+		times.ReadMs = &readMs
+	}
+	if !p.lastOk.IsZero() {
+		okAge := wholeMs(now.Sub(p.lastOk))
+		times.LastSuccessAgeMs = &okAge
+	}
+	return times
+}
+
+// wholeMs is d in whole milliseconds, 0 for a negative d and the largest
+// uint32 for one longer than that (pb.LegProbeTimes).
+func wholeMs(d time.Duration) uint32 {
+	ms := d.Milliseconds()
+	switch {
+	case ms < 0:
+		return 0
+	case ms > math.MaxUint32:
+		return math.MaxUint32
+	}
+	return uint32(ms)
 }
 
 // snapshot is the lock-free readers' view: {inflightSince, completed, lastErr}.
@@ -258,16 +327,23 @@ func (s *CnAgentServer) runLegProbe(
 	// reconcile's, and `grep <that id>` — the documented way to isolate the
 	// reconcile — would return an unbounded stream of probe IO instead.
 	attemptCtx := common.WithTraceId(ctx, common.NewTraceId())
-	prober.begin(s.now())
+	round := probeRound{start: s.now()}
+	prober.begin(round.start)
 	payload := healthBlockPayload(cnId, s.now().UnixNano())
 	// The two records of a round are `probe write block` and `probe read block
 	// direct`, emitted by the LegProbeIO itself (osclient.md, Exported raw
 	// helpers and the probe-IO carve-out).
 	err := s.probeIO.Write(attemptCtx, prober.path, prober.offset, payload)
+	wrote := s.now()
+	round.write = wrote.Sub(round.start)
+	end := wrote
 	if err == nil {
 		_, err = s.probeIO.ReadDirect(attemptCtx, prober.path,
 			prober.offset, common.LegHealthBlockSize)
+		end = s.now()
+		round.read, round.readRan = end.Sub(wrote), true
 	}
+	prober.noteRound(round, end, err)
 	prober.finish(err)
 }
 

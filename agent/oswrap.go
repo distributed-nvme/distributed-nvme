@@ -470,8 +470,9 @@ func (b *osBase) dirMtime(
 // readDevNo reads the number of the block device at path, "major:minor", in
 // the agent's own process (OsClient.ReadDevNo) on a ctx carrying the soft
 // timeout (SH15). Every failure is an error naming the read — "device number
-// of <path>: <cause>" — a missing path's as well: its one caller, the disk's
-// size read, reports a disk that is not there as a read that failed.
+// of <path>: <cause>" — a missing path's as well: its two callers, the
+// disk's size read (Dm.DiskSizes) and the counter read of an inspect call
+// (Dm.BlockStat), report a device that is not there as a read that failed.
 func (b *osBase) readDevNo(ctx context.Context, path string) (string, error) {
 	cctx, cancel := cmdCtx(ctx)
 	defer cancel()

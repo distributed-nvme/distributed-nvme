@@ -208,7 +208,8 @@ agent's `directLegProbeIO`, because the CN11 leg health probers deliberately
 bypass the OsClient semaphore (see `osclient.md`, Exported raw helpers and
 the probe-IO carve-out): the probe's write half logs `probe write block` and
 its direct read half `probe read block direct`, each with `path`, `offset`,
-`length` and "error?" — **never** `data`. They are "probe …" and not "os …"
+`length`, `duration_ms` (how long the half took, the write half a buffered
+write and an fsync) and "error?" — **never** `data`. They are "probe …" and not "os …"
 on purpose: the cn suite's mutation grep names `os write block` explicitly
 (`cnagent_integtest.md`, Conventions), and the continuous health probes must
 fall out of that list by construction rather than by a path-based exemption.

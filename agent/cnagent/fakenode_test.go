@@ -606,6 +606,7 @@ func (f *fakeNode) osClient() *common.FakeOsClient {
 		ReadFileFn:        f.readFile,
 		ReadDirFn:         f.readDir,
 		ReadMtimeFn:       f.readMtime,
+		ReadDevNoFn:       f.readDevNo,
 		WriteFileFn:       f.writeFile,
 		WriteFileDirectFn: f.writeFileDirect,
 		ReadBlockFn:       f.readBlock,
@@ -789,6 +790,24 @@ func (f *fakeNode) readFile(ctx context.Context, path string) (string, error) {
 		after()
 	}
 	return data, err
+}
+
+// readDevNo is the device-number read in the agent's own process
+// (OsClient.ReadDevNo), recorded as "devno <path>": the number devNo holds
+// for the path, or not there.
+func (f *fakeNode) readDevNo(ctx context.Context, path string) (string, error) {
+	if err := f.ctxErr(ctx); err != nil {
+		return "", err
+	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.record("devno %s", path)
+	f.recordTrace(ctx, "devno "+path)
+	devNo, ok := f.devNo[path]
+	if !ok || devNo == "" {
+		return "", fmt.Errorf("stat %s: %w", path, fs.ErrNotExist)
+	}
+	return devNo, nil
 }
 
 // fileAnswer is what a read of path answers: a hook's failure, an attribute

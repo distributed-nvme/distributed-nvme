@@ -558,7 +558,8 @@ func (s *DnAgentServer) PushMigrBitmap(
 }
 
 // GetDnInfo answers from the DN's latest observation, as a check round does,
-// and takes no lock, reads nothing of the node and starts no read (SH28).
+// and takes no lock, reads nothing of the node and starts no read (SH28),
+// but for the disk's counters a request with read_io_stats asks for (DN16).
 func (s *DnAgentServer) GetDnInfo(
 	ctx context.Context,
 	req *pb.GetDnInfoRequest,
@@ -584,12 +585,19 @@ func (s *DnAgentServer) GetDnInfo(
 	obs := st.obs.LatestLocked()
 	since := s.marks.SinceLocked(key)
 	s.mu.Unlock()
-	return &pb.GetDnInfoReply{
+	reply := &pb.GetDnInfoReply{
 		AgentReply: obs.Reply,
 		Revision:   obs.Revision,
 		DnInfo:     obs.Info,
 		ObsStamp:   s.startup.Stamped(obs.Stamp(s.now(), since)),
-	}, nil
+	}
+	// DN16's one exception: the flagged call, which only InspectDiskNode
+	// makes, reads the disk's counters at the call, after the answer above
+	// is taken and holding no lock of the hierarchy (Dm.DevIoStats).
+	if req.GetReadIoStats() {
+		reply.DiskIoStats = s.dm.DevIoStats(ctx, s.disk)
+	}
+	return reply, nil
 }
 
 // GetSideInfo answers from the side's latest observation, as a check round
