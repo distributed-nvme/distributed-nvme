@@ -664,12 +664,15 @@ Measured times are in [the introduction](introduction.md#status-and-limits-of-01
   when a program outside dnv holds an array open, so that md refuses to
   stop it for a forced start or for a new assembly of a broken array; when
   a leg that a migration moves serves on one path while its other path
-  cannot connect; when md keeps refusing to start or stop its check; and
-  when the message that makes a snapshot keeps failing, each try of which
-  pauses the IO of the snapshot's origin for a moment. Between two
-  converges a check round reads the cntlr anew, so the primary's check
-  rounds still count toward a failover. State: accepted; each case lasts
-  only as long as its fault. Not seen in the lab.
+  cannot connect; when md keeps refusing to start or stop its check; when
+  the message that makes a snapshot keeps failing, each try of which
+  pauses the IO of the snapshot's origin for a moment; and when a slice's
+  thin pool has lost a volume's thin id, dm-thin's device number of the
+  volume inside the pool, which a check round cannot tell from a volume
+  not built yet, and which only an operator ends. Between two converges a
+  check round reads the cntlr anew, so the primary's check rounds still
+  count toward a failover. State: accepted; each case lasts only as long
+  as its fault. Not seen in the lab.
 - **A disk node or a clone source that stays away costs a converge every
   second check round once its connection is gone.** While a disk node is
   dead, the controller node's kernel keeps trying to connect to it again,
@@ -682,11 +685,13 @@ Measured times are in [the introduction](introduction.md#status-and-limits-of-01
   connect, with the retries a budget of about one second allows. This
   lasts until the disk node answers, leg repair has replaced the leg, or
   an operator takes the leg off the disk node, by a repair or a
-  migration, or deletes the pool; the disk node itself cannot be deleted
-  while the leg is on it. A clone source that the primary
-  cannot connect costs the same until the source answers or the clone is
-  deleted. State: accepted: the converge is the only way a deleted
-  connection comes back. Not seen in the lab.
+  migration, steps the pool's level down to one that builds no side, or
+  deletes the pool; the disk node itself cannot be deleted while the leg
+  is on it. A clone source that the primary cannot connect costs the same
+  until the source answers, the clone is deleted, or an operator disables
+  the cntlr or steps the pool's level down to one that builds no clone.
+  State: accepted: the converge is the only way a deleted connection comes
+  back. Not seen in the lab.
 - **The primary can guess wrong whether mdadm would start a stopped
   array.** A check round of the primary names a group whose array does not
   run when mdadm would start it, which the agent works out from the legs'
@@ -725,6 +730,13 @@ Measured times are in [the introduction](introduction.md#status-and-limits-of-01
   side stays unprovisioned until a converge that comes for another reason
   makes the device writable. State: accepted; only an operator's own step
   makes it, and `blockdev --setrw` by hand ends it. Not seen in the lab.
+- **A thin pool set read-only by hand holds back a new snapshot.** When an
+  operator sets a slice's thin pool device read-only with `blockdev
+  --setro`, the primary's check rounds no longer name a snapshot not yet
+  made there, though a converge would make the pool writable again and
+  make the snapshot. The snapshot then waits until a syncup comes for
+  another reason. State: accepted; only an operator's own step makes it,
+  and `blockdev --setrw` by hand ends it. Not seen in the lab.
 - **An old md superblock at the end of a new side can fail the leg.** The
   end of a new side is never zeroed. A host of an earlier pool may have
   written an md superblock of a format that sits at the end of a device,

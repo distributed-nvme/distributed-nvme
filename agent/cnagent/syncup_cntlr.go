@@ -921,7 +921,10 @@ func poolTakesMessages(pool *pb.ResInfo) bool {
 // reads read-only and clears its flag (ensurePool), and a clear that fails
 // fails the pool's step, so the pass sends no message there, while the
 // read's pool row does not read the flag; the device's read, from the
-// reading, does. A read that did not answer takes no message.
+// reading, does. So a pool read-only by that flag alone, whose clear a
+// converge would make before it messages, gets no snapshot name, and the
+// snapshot waits for a converge something else brings (cnagent.md, Known
+// limits). A read that did not answer takes no message.
 func (s *CnAgentServer) readPoolTakesMessages(
 	ctx context.Context,
 	rd *cnReading,

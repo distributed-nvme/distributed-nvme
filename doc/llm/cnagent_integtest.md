@@ -447,8 +447,9 @@ stage logging how long after the cut, and the `SyncupCntlr` re-sent as the
 worker would fails each named member in md once and removes none (CN12, The
 early fail): both md rows read OK, and the survivor's superblock records the
 death, its array state counting itself alone. While the cut holds, the agent
-runs no command under a trace id of its own (`dnagent.md` SH31): no converge
-can make the late members serve, and no read names them. With the legs back,
+runs no command under a trace id of its own (CN10, No converge in the
+background; CN30): no converge can make the late members serve, and no read
+names them. With the legs back,
 the `SyncupCntlr` re-sent on the rounds that name the members puts them back
 under the stage's trace id, and the data member takes back a small part of
 the array, counted in sectors as before. With the port link of one
@@ -476,12 +477,16 @@ absent arrays, which the assembly would start, and nothing else; the
 both arrays, puts the ns-dev on the raid0 and moves the namespace optimized,
 all under the stage's trace id. A block only the newer leg holds reads as
 that leg's, the stale member kicked (CN12, CN30; `architecture.md`, [D16]).
-Only then does the stale member go back: once its leg's row reads `OK`, after
-its prober's first round, a read names its put-back, and the stage, playing
-the worker for a bounded number of re-sends, brings the converge whose add
-of it runs under the stage's trace id, until a round answers zero with both
-arrays whole and the member in sync; through it all the agent runs no
-command under an id of its own.
+The stale member goes back in the first converge after the flips whose copy
+source's leg row no longer reads `ERROR` (CN12): the probers start at the
+promotion and their rounds through the standby's dm-error export fail
+(CN11), so that is the re-send's own converge when a probe round of the
+newer leg made after the flips has passed by then, and otherwise a converge
+the stage brings once a read names the put-back, after the stale leg's row
+reads `OK` on such a round. Either way the add runs under the stage's trace
+id, and the stage plays the worker for a bounded number of re-sends until a
+round answers zero with both arrays whole and the member in sync; through
+it all the agent runs no command under an id of its own.
 Last, md's check (CN12, The md check): eight sectors of one data side fail in
 its disk node's export to the primary alone, and the suite, playing the
 worker, puts an md check request on the data group and reads the cntlr until
@@ -730,14 +735,16 @@ read name the source's endpoint, which only a converge connects, and the
 converges answer zero, naming no endpoint themselves (CN18, CN30); the
 driver samples hydration only from a round that answers zero, so the status
 line is sampled over the live controller alone. Either way the agent runs no
-command under a trace id of its own between the stage's calls. The state compared is measured as the dn suite's lost source measures
-it (`dnagent_integtest.md`, Cases), and a reading that moves before the
+command under a trace id of its own between the stage's calls. The state
+compared is measured as the dn suite's lost source measures it
+(`dnagent_integtest.md`, Cases), and a reading that moves before the
 comparison ends fails the stage. The finalize takes the clone down in layer
 order, the clone, its source connection, then its group's device and its leg
 (`cnagent.md` L3, L5, L9, L10), leftover while the leg's disconnect runs and
 while the source's does, unless the source's controller was already gone, and
-the group waits for a pass that finds the source's connection gone; that pass
-is one of the stage's re-sends, and every command the controller node runs
+the group waits for a pass that finds the source's connection gone. That pass
+is the finalize's first when the source's controller was already gone, and
+one of the stage's re-sends otherwise; every command the controller node runs
 after the finalize begins, the disconnects off the passes included, is under
 the stage's trace id (`cnagent.md` CN10), the order read from them all. The
 half the source wrote reads back intact through the destination, which then

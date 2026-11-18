@@ -8684,11 +8684,12 @@ document and only pointed to here.
   worker's no `syncup leftover` for it (`log.md`, Leftovers), and removes by
   hand what a node deleted earlier still holds. On a disk node that log is
   clean too while a dropped side's device and record wait for an export of
-  its pool that is not yet settled (`dnagent.md` DN6, An sp waits for its
-  exports), a wait that on a kernel two dn agents share can have no time
+  its pool that still reads young (`dnagent.md` DN6, An sp waits for its
+  exports; a failed read of such an export, or a failed listing, the log
+  does name), a wait that on a kernel two dn agents share can have no time
   bound (`dnagent.md`, Known limits), so the operator also waits until
   `InspectDiskNode` answers, at the revision of the last drop or a later
-  one, with disk counts that hold no side record (Live-state reporting). The
-  deleted node's request stays in the agent's local store and is converged
+  one, with disk counts that hold no side record (Live-state reporting).
+  The deleted node's request stays in the agent's local store and is converged
   at every start (`dnagent.md` DN2; `cnagent.md` CN2) until the store is
   deleted (Disk nodes).

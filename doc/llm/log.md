@@ -291,18 +291,20 @@ logs for the same thing.
   the dn, a disk whose identity is not confirmed or a side with bytes
   still to zero and no zeroing goroutine that is not a migration
   destination waiting for a free run in the clone-metadata area
-  (`dnagent.md` DN16), or, on either role, what a background read found
-  absent that a re-sent `Syncup*` would build, or the node's nvmet port in
-  a state one would rewrite (`dnagent.md` SH31, DN16), or, on a cntlr, a
-  side of a wanted leg or an entry of a clone's source with no controller
-  that the converge would connect, a migrating leg's path the converge
-  would cut,
-  a forced-start mark of the request the agent holds while that request
-  does not count as delivered, a group's forced start its converge would
-  carry through, a group's md check its converge would start, stop or
-  adopt, or an uncreated snapshot whose create message its converge would
-  send (`cnagent.md` CN8, CN10, CN12, CN14, CN30) — each rendered
-  "what: error" and joined by "; ".
+  (`dnagent.md` DN16), or, on either role, each row that a converge or a
+  background read found absent or different where a re-sent `Syncup*`
+  would cure it, on a cntlr a leg wrapper, a `RedundNone` group's
+  dm-linear and a dm-clone a converge would change among them (rendered
+  "absent" or "differs" with the row's words), or the node's nvmet port
+  in a state one would rewrite (`dnagent.md` SH31, DN16), or, on a cntlr,
+  a side of a wanted leg or an entry of a clone's source with no
+  controller that the converge would connect, a migrating leg's path the
+  converge would cut, a forced-start mark of the request the agent holds
+  while that request does not count as delivered, a group's forced start
+  its converge would carry through, a group's md check its converge would
+  start, stop or adopt, or an uncreated snapshot whose create message its
+  converge would send (`cnagent.md` CN8, CN10, CN12, CN14, CN30) — each
+  rendered "what: error" and joined by "; ".
 * The worker logs `syncup leftover` (`worker/revision.go`) on a `Syncup*`
   reply carrying `ReplyCodeLeftover`, with the object's ids, `revision`
   (the one the request carried) and `details` (the agent's own leftover

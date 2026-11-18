@@ -5046,8 +5046,8 @@ case_redund() {
 	# is either named or already failed by md, and at least one is named.
 	# Nothing of CN2 runs by itself meanwhile: every command it runs from the
 	# cut to the end of the stage, the put-back included, is under the
-	# stage's own trace id, its converges' or its rounds' reads (dnagent.md
-	# SH31).
+	# stage's own trace id, its converges' or its rounds' reads (cnagent.md
+	# CN10, No converge in the background; dnagent.md SH29).
 	# got keeps the degrade stage's digest, which the readonly stage reads.
 	local cut m named seen sname ex quiet dirty ast loud
 	# The stages before end with md's copies onto these members, after which
@@ -5351,7 +5351,8 @@ case_redund() {
 	# Nothing runs by itself while the members are late: for ten seconds,
 	# two of the worker's default intervals and more, CN1 runs no command
 	# under any trace id but this stage's own, which its fresh rounds' reads
-	# carry (dnagent.md SH31).
+	# carry (cnagent.md CN10, No converge in the background; dnagent.md
+	# SH29).
 	quiet=$(helper 1 cn_log_lines)
 	sleep 10
 	cmds=$(helper 1 "cn_cmds_since $quiet ''")
@@ -5458,11 +5459,17 @@ case_redund() {
 	assert_eq "$(sha_range "$hv" "$dev" 1 9)" "$got" "redund lateflip write"
 	# The stale member goes back, after the MiB-9 check above, which needs
 	# the array running from DN2's leg alone. md left DN1's data leg out of
-	# the re-send's assembly, and CN12's put-back of it is named by a read
-	# once that leg's row reads OK, after its prober's first round on CN1
-	# (cnagent.md CN11, CN12, CN30); the stage plays the worker until a
-	# round answers 0 with both md rows whole, re-sending req1 at most three
-	# times (dnv-worker.md RW4), and the put-back's add runs under $TRACE.
+	# the re-send's assembly, and it goes back in the first converge after
+	# the flips whose copy source's leg row no longer reads ERROR (cnagent.md
+	# CN12): the probers started at the promotion and their rounds through
+	# the standby's dm-error export failed (cnagent.md CN11), so that is the
+	# re-send's own converge when a probe round of DN2's data leg made after
+	# the flips has passed by then, and otherwise a converge the stage
+	# brings once a read names the put-back, after DN1's data leg's row
+	# reads OK on such a round (cnagent.md CN30). The stage plays the worker
+	# until a round answers 0 with both md rows whole, re-sending req1 at
+	# most three times, none if the add went with the assembly (dnv-worker.md
+	# RW4), and the put-back's add runs under $TRACE either way.
 	stale=$(cn_dm_name c9 1 "$sp" "${A_DLEG[1]}")
 	wait_legs_probed 1 "$sp" "$c1" 20 "lateflip: the probes before the put-back"
 	resends=0
@@ -8603,7 +8610,7 @@ case_clone_xfer() {
 	# converge connects, and the converges, which name no such endpoint
 	# themselves, answer zero (CN30). Either way cn2 runs nothing by itself
 	# between the stage's calls: every command it runs is under the stage's
-	# trace id (dnagent.md SH31).
+	# trace id (cnagent.md CN10, No converge in the background).
 	mark=$(helper 2 cn_log_lines)
 	assert_eq "$(helper 2 "subsys_shape '$xnqn'")" "1 1 1" \
 		"clone_xfer: controllers, live ones and namespace nodes of the source on cn2"
@@ -8778,11 +8785,13 @@ case_clone_xfer() {
 	# none. That pass issues no disconnect of the source and goes on down to
 	# the group and its leg. Both are CN21's, and the stage takes whichever
 	# the timing gives it, telling them apart by whether the first reply names
-	# the source's connection. The layers under L5 come down in a pass of
-	# the stage's re-sends, and the disconnects run off the pass under its
-	# trace id (CN10), so every command cn2 runs after a mark taken here is
-	# under the stage's trace id: cn2 runs nothing by itself (dnagent.md
-	# SH31). The order is read from every command after the mark.
+	# the source's connection. The layers under L5 come down in the first
+	# pass when the source's controller was already gone, and otherwise in
+	# a pass of the stage's re-sends, and the disconnects run off the pass
+	# under its trace id (CN10), so every command cn2 runs after a mark
+	# taken here is under the stage's trace id: cn2 runs nothing by itself
+	# (cnagent.md CN10, No converge in the background). The order is read
+	# from every command after the mark.
 	mark=$(helper 2 cn_log_lines)
 	out=$(cn_syncup_cntlr 2 "$req2" --expect-code 4 || true)
 	[ -n "$out" ] ||

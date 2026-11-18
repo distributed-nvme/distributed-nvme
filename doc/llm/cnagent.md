@@ -952,34 +952,37 @@ reconcile (CN2). The RPC itself retries a connect, or waits for its head,
 only as far as the pass's budget allows. What a pass leaves undone is run
 again by the converge of the `SyncupCntlr` the worker re-sends on a
 round that answers a code that is not zero (`dnv-worker.md` RW4), and a
-cntlr's verdict names exactly what a converge would act on (CN30). The
-converge's own reply names the rows its build left not as wanted: a failed
-step of an export, an ns-dev, an ANA move, a transfer device, a leg's
-wrapper, a `RedundNone` group's dm-linear or a dm-clone, among them. A
-read names those rows too and, beside them, what only a read sees: the
-sides and clone source endpoints with no controller (below; CN18), a
-migrating leg's path to cut (The cut of a migrating leg's path, below),
-the md members to fail early, put back, add or remove, a broken array to
-assemble again, an absent array the assembly would start, a forced start a
-converge would carry through and an md check a converge would start, stop
-or adopt (CN12), the forced-start marks of a held request that does not
-count as delivered (CN8), and an uncreated snapshot whose create message
-the pre-pass would send (CN14). A state no converge
-cures is named by nothing and costs nothing: a late member whose
-controller the kernel keeps reconnecting, once the early fail has failed
-it where md held it in sync (CN12, The early fail: one name and one
+cntlr's verdict names what a converge would act on, as far as a read can
+test it (CN30; Known limits lists where it names a state no converge
+cures, or withholds a name). The converge's own reply names the rows its
+build left not as wanted: a failed step of an export, an ns-dev, an ANA
+move, a transfer device, a leg's wrapper, a `RedundNone` group's dm-linear
+or a dm-clone, among them. A read names those rows too and, beside them,
+what only a read sees: the sides and clone source endpoints with no
+controller (below; CN18), a migrating leg's path to cut (The cut of a
+migrating leg's path, below), the md members to fail early, put back, add
+or remove, a broken array to assemble again, an absent array the assembly
+would start, a forced start a converge would carry through and an md check
+a converge would start, stop or adopt (CN12), the forced-start marks of a
+held request that does not count as delivered (CN8), and an uncreated
+snapshot whose create message the pre-pass would send (CN14). Some states
+no converge cures are named by nothing and cost nothing: a late member
+whose controller the kernel keeps reconnecting, once the early fail has
+failed it where md held it in sync (CN12, The early fail: one name and one
 `SyncupCntlr` that runs `mdadm --fail`), a disconnect of the leg's
 subsystem still in flight (its sides are named once it ends, below), a
-read that did not answer (the next read judges again). Reason: a converge holds the cntlr's object lock and
-keeps the cntlr's reads off while it runs (CN1; `dnagent.md` SH30); run
-again on a timer for a state no converge cures, such as a late leg whose
-disk node is dead, it would spend commands and age the cntlr's
-observation for as long as the state lasts, while the worker's re-send
-already brings a converge for every name, at the pace of its rounds
-(`dnv-worker.md` RW12). A name only a read gives brings a converge on
-every second round at most (`dnv-worker.md` RW4 step 5); a row both
-channels name brings one on every round while a converge keeps failing
-on it (Known limits).
+read that did not answer (the next read judges again). Others are named
+on every read and cost one `SyncupCntlr` every second round at most, such
+as a side whose controller is gone and whose connect keeps failing (Known
+limits). Reason: a converge holds the cntlr's object lock and keeps the
+cntlr's reads off while it runs (CN1; `dnagent.md` SH30); run again on a
+timer for a state no converge cures, such as a late leg whose disk node is
+dead, it would spend commands and age the cntlr's observation for as long
+as the state lasts, while the worker's re-send already brings a converge
+for every name, at the pace of its rounds (`dnv-worker.md` RW12). A name
+only a read gives brings a converge on every second round at most
+(`dnv-worker.md` RW4 step 5); a row both channels name brings one on every
+round while a converge keeps failing on it (Known limits).
 
 Only a converge connects a side, and the worker brings one on a reply's
 code or a new revision, never on a row (`dnv-worker.md` RW4). A
@@ -1037,17 +1040,18 @@ then clears the block layer's read-only flag of the device with
 of `ensureDmSingle` and of the group's dm-linear). A dm-clone is not
 reloaded for the flag, and no read names it for the flag (CN18 step 3).
 The clear is part of the device's step, so a clear that fails fails the
-step. For a
-wrapper and a group's dm-linear both channels then name the device: the
-converge's reply with blockdev's error, the read "differs: read-only"
-(CN30). A pool concat's and an ns-dev's rows do not read the flag (CN28),
-so a failed clear there is the converge's row alone: its reply names the
-row with blockdev's error, the read after it names nothing, and the
-worker's re-send on the round that answers from the converge's observation
-tries the clear again, after a reload of the device. A concat whose clear
-failed is there, resumed and on its table, so the slice goes on to its
-pool; an ns-dev whose clear failed is a failed ns-dev step (CN16). The
-cost lasts only while blockdev keeps failing on a device that is there, a
+step. For a wrapper and a group's dm-linear both channels then name the
+device: the converge's reply with blockdev's error, the read "differs:
+read-only" (CN30). The rows of every other device listed — a thin pool, a
+thin volume, a raid0, a dm-error, a transfer device, a pool concat and an
+ns-dev — do not read the flag (CN28), so a failed clear there is the
+converge's row alone: its reply names the row with blockdev's error, the
+read after it names nothing, and the worker's re-send on the round that
+answers from the converge's observation tries the clear again, after a
+reload of the device. A concat whose clear failed is there, resumed and
+on its table, so the slice goes on to its pool; on any other device a
+failed clear fails the device's step, an ns-dev's as CN16 says. The cost
+lasts only while blockdev keeps failing on a device that is there, a
 fault of the node. Reason: dmsetup reads a device read-only while either
 its table's mode or the block layer's own flag of the device says so, and
 a reload of a read-write table clears only the first. In the lab on kernel
@@ -1246,21 +1250,23 @@ prober all the same when the leg has none, no sweep is disconnecting its
 subsystem, and its wrapper is there as the leg's whole-size dm-linear,
 resumed and writable (`keepLegProber`). Reason: the prober needs only the
 wrapper's path, takes no lock and needs no converge, while a leg with no
-prober reads `PENDING` until a converge registers one, and no read names
-such a leg, so after a restart nothing would bring that converge before a
-new revision; a wrapper over a head the kernel replaced fails its probe,
-which is the leg's truth, and a read names that wrapper once a lookup
-answers (CN10, The wrapper name). A wrapper that is absent, of another
-shape, suspended or read-only gets no prober: a probe through it fails or
-hangs for a reason the leg's paths do not have, and the early fail would
-count it. A pass whose read of the wrapper did not answer either starts
-none, and no read names such a leg, so it reads `PENDING` until a converge
-something else brings (Known limits). Each failing converge marks the leg
-`RES_STATUS_ERROR`. A standby
-reports the transport probe instead: the sysfs walk (CN10) shows a live
-controller per desired (provisioned) side and, for a leg with exactly one
-desired side, an "ana_state" of optimized or
-non-optimized — non-optimized is a standby path's designed steady state
+prober reads `PENDING` until a converge registers one; no read names a
+leg whose lookup or head number read did not answer, and a converge that
+a refused side's name brings (CN30) fails again at the same connect, so
+after a restart no converge would register the prober before a new
+revision; a wrapper over a head the kernel replaced fails its probe, which
+is the leg's truth, and a read names that wrapper once a lookup answers
+(CN10, The wrapper name). A wrapper that is absent, of another shape,
+suspended or read-only gets no prober: a probe through it fails or hangs
+for a reason the leg's paths do not have, and the early fail would count
+it. A pass whose read of the wrapper did not answer either starts none;
+where the leg's lookup or its head number's read did not answer too, no
+read names such a leg, so it reads `PENDING` until a converge something
+else brings (Known limits). Each failing converge marks the leg
+`RES_STATUS_ERROR`. A standby reports the transport probe instead: the
+sysfs walk (CN10) shows a live controller per desired (provisioned) side
+and, for a leg with exactly one desired side, an "ana_state" of optimized
+or non-optimized — non-optimized is a standby path's designed steady state
 (the DN grants the optimized group to the primary CN alone) and optimized
 the pre-promote window after the DN's flip, while inaccessible, or any
 state the DN never sets, cannot serve a promote and reports
@@ -2234,9 +2240,9 @@ dm-clone (CN18).
   finds two arrays that hold legs of the group, since that pass cannot
   tell whether the array runs. Nothing in the agent runs the converge
   again for it (CN10, No converge in the background): a read names the
-  forced start once its checks pass and every member it keeps serves
-  (CN30), and the converge of the worker's re-send tries again from the
-  first step. That covers a step that failed for a passing reason, such
+  forced start once its checks pass and the named leg and every member the
+  start would zero serve (CN30), and the converge of the worker's re-send
+  tries again from the first step. That covers a step that failed for a passing reason, such
   as a run killed at the soft timeout, a stop that went through
   unverified, a first assembly that left the old identity or a member
   that serves again. An error that lasts, such as a named leg that is no
@@ -2261,17 +2267,18 @@ dm-clone (CN18).
   a request that counts as delivered, no array of the group runs, an array
   of the group that is there passes step 1's member test and its holders
   listing shows no device above it, so no layer above blocks step 1's
-  stop, and the checks
-  of steps 2 and 3, run over the members the read finds serving
-  (`planForcedStart`), hold. Reason: the read runs the converge's own
-  checks, so it names nothing for a refusal that lasts — a named leg that
-  is no full member or is older than a member the start would zero, a
-  member that is no leg of this pool, a device above that holds the array —
-  nor while a member the forced start keeps is not available, a kept new
-  leg still provisioning among them, whose sides' provisioned flip raises
-  the pool's revision (`dnv-worker.md` RW18); and a name brings a converge
-  that acts, short of a stop refused by a process that holds the array
-  open, which no holders listing shows (Known limits).
+  stop, and the checks of steps 2 and 3, run over the members the read
+  finds serving (`planForcedStart`), hold. Reason: the read runs the
+  converge's own checks, so it names nothing for a refusal that lasts — a
+  named leg that is no full member or is older than a member the start
+  would zero, a member that is no leg of this pool, a device above that
+  holds the array — nor while the named leg or a member the start would
+  zero is not available, a kept new leg still provisioning among them,
+  whose sides' provisioned flip raises the pool's revision
+  (`dnv-worker.md` RW18); the open repair's bad leg, which step 3 neither
+  reads nor zeroes, is not tested; and a name brings a converge that acts,
+  short of a stop refused by a process that holds the array open, which no
+  holders listing shows (Known limits).
 
   **The re-assembly.** A group's array that reads broken, with no
   forced-start mark in the group's record and the group's
@@ -2496,24 +2503,23 @@ converge's own read of the array does not answer — its read before the
 member reconciliation, which its group row then reads, or its read again
 after member commands that changed the array, while its group row reads
 the command's error — and while the converge's in-sync guard holds where
-the read's does not (Known limits). Not while the in-sync guard holds (Member reconciliation,
-below): there the read's group row reads the guard's error too, and
-neither channel acts, since the members md shows in sync may be on legs
-that do not serve. Reason for the step beside a failed member command: md
-starts no check while a resync or a recovery is due or runs, and runs that
-sync in place of the check; it refuses a check while a sync runs; the step
-stops a running check once the array reads degraded, so a recovery that a
-member command made due waits behind it no longer than the next step; a
-check's read error fails no member (below); and a stop only ends md's own
-check; and
-without the step a reconciliation that keeps failing, on a member no read
-names (an extra's fail or remove, an add on a leg whose row is not `OK`),
-would leave the name standing with no converge to cure it. Reason for the
-name: a request whose delivering converge met an array read that did not
-answer would otherwise stand, with no converge to come, until the sp
-worker's bound on a request ends it (`MdCheckRequestBound`, `dnv-worker.md`
-AR16). Both
-channels end a check of the request once md reads "idle" again
+the read's does not (Known limits). Not while the in-sync guard holds (The
+in-sync guard, above): there the read's group row reads the guard's error
+too, and neither channel acts, since the members md shows in sync may be
+on legs that do not serve. Reason for the step beside a failed member
+command: md starts no check while a resync or a recovery is due or runs,
+and runs that sync in place of the check; it refuses a check while a sync
+runs; the step stops a running check once the array reads degraded, so a
+recovery that a member command made due waits behind it no longer than
+the next step; a check's read error fails no member (below); and a stop
+only ends md's own check; and without the step a reconciliation that
+keeps failing, on a member no read names (an extra's fail or remove, an
+add on a leg whose row is not `OK`), would leave the name standing with
+no converge to cure it. Reason for the name: a request whose delivering
+converge met an array read that did not answer would otherwise stand,
+with no converge to come, until the sp worker's bound on a request ends
+it (`MdCheckRequestBound`, `dnv-worker.md` AR16). Both channels end a
+check of the request once md reads "idle" again
 (`noteMdCheck`): done when md ran it to its end — its last action
 ("md/last_sync_action") the check, "md/sync_min" back at 0 and the array
 whole — and forgotten otherwise, md having stopped it, as it does when a
@@ -2844,12 +2850,15 @@ a read's concat row does not read the flag (CN10, A read-only device is
 made writable). The pool's own flag is the other way round: a converge
 whose clear of it fails builds no pool for the pass, and sends no message,
 so the read, whose pool row does not read the flag either, reads it from
-the pool device itself. It
-is a name only a read gives (CN30): the converge's verdict leaves the
-snapshot's rows out, so a create that keeps failing brings a converge, and
-with it one suspension of the origin's raid0, every second round at most
-(`dnv-worker.md` RW4). A pool that takes no message and a device read that
-did not answer name nothing. Reason: the next converge's pre-pass cures a
+the pool device itself. So a pool that reads read-only by that flag
+alone, which a converge would make writable and then message, gets no
+snapshot name, and no read names the pool: that snapshot waits for a
+converge something else brings (Known limits). It is a name only a read
+gives (CN30): the converge's verdict leaves the snapshot's rows out, so a
+create that keeps failing brings a converge, and with it one suspension
+of the origin's raid0, every second round at most (`dnv-worker.md` RW4).
+A pool that takes no message and a device read that did not answer name
+nothing. Reason: the next converge's pre-pass cures a
 create that failed once — a message killed at the soft timeout, a pass cut
 off by its call's deadline — and without the name nothing would bring that
 converge before a new revision, while the snapshot's raid0 row reads
@@ -3016,10 +3025,14 @@ backing state machine, evaluated in this order (first match wins;
    that table is the park (the ANA rule below). The namespace turns
    optimized in the pass whose read here finds the dm-clone serving and
    moves the ns-dev onto it. Every pass before it leaves the namespace
-   waiting for what a read names, whatever stopped the build: the
-   dm-clone while a converge would change it (CN18, The clone names), or
-   the layer under it (CN30), after which the ns-dev's own name follows
-   once the dm-clone serves (the ANA rule below);
+   waiting for what a read names where a converge would cure what stopped
+   the build: the dm-clone while a converge would change it (CN18, The
+   clone names), or the layer under it (CN30), after which the ns-dev's
+   own name follows once the dm-clone serves (the ANA rule below). A cause
+   no converge cures, such as a dm-clone whose metadata is read-only or
+   failed, and some source faults, such as a source with a controller at
+   every endpoint and no namespace head, are named by nothing (CN18; Known
+   limits);
 6. otherwise ⇒ → `CnRaid0Name` (via dm-flakey when rule 7 applies);
 7. `sp_level` at or above `SP_LEVEL_READONLY` (primary only): the table
    is a dm-flakey table with the error-writes feature over the rule-5 or
@@ -3186,15 +3199,19 @@ converge would build or change waits for that layer's name — the group's
 absent array or dm-linear (CN12), the dm-clone (CN18), a row of the
 stack, a snapshot not yet created whose create message the pre-pass would
 send (CN14) — after which the ns-dev's own name follows. A wait on a
-layer no converge cures — a pool that reads needs_check or failed — is
-named by nothing and costs nothing until a new revision (CN30). A failed step of a subsystem's export —
-its `EnsureSubsystem`, a namespace object's step or its port link — is a
-row both channels name. A move of the last loop that fails leaves the
+layer no read names — a pool that reads needs_check or failed, an absent
+array whose assembly the read's guess of mdadm refuses (CN12), a
+dm-clone whose metadata is read-only or failed (CN18) — is named by
+nothing and costs nothing until a converge something else brings (CN30;
+Known limits). A failed step of a subsystem's export — its
+`EnsureSubsystem`, a namespace object's step or its port link — is a row
+both channels name. A move of the last loop that fails leaves the
 namespace out of the group this rule gives it, even over an ns-dev on its
 serving device; its row reads the group it has against the one its
 ns-dev's table earns, which both channels name (CN28). Reasons: an IO
-error the target returns with the do-not-retry bit reaches the application and
-cannot be taken back, while a wait ends by itself, and everywhere else the
+error the target returns with the do-not-retry bit reaches the
+application and cannot be taken back, while a wait ends by itself, and
+everywhere else the
 design makes a host wait when the stack is not there (the deferral
 conjunct above, CN18's hold); and the worker re-syncs on a revision or a
 reply code, never on a row, so without a name a short cause would leave
@@ -3287,15 +3304,16 @@ or its port link, each leave a row that the converge's own reply and a
 read name (CN30), so the worker's re-send runs the step again; a device
 left off what is wanted because the origin's raid0 is not built yet
 waits for the names of the stack under it, as a namespace does (CN16).
-The clone in the other pool then waits rather than reads IO errors. The cntlr's verdict names a transfer device
-that is not as wanted (CN30) only while its origin td's raid0 reads `OK`
-where the transfer is served (`xferServed`); elsewhere the device is an
-error table, which rests on no row of the cntlr, so the verdict names it
-whatever the raid0's row reads — save a transfer whose origin the request
-no longer names (CN29), whose rows the verdict leaves out. Reason: at a
-level from `SP_LEVEL_NO_THINPOOL` up to but excluding `SP_LEVEL_DISABLE`
-the raid0's row is the level's, which never reads `OK`, so an error-table
-step that failed there would be named by nothing.
+The clone in the other pool then waits rather than reads IO errors. The
+cntlr's verdict names a transfer device that is not as wanted (CN30) only
+while its origin td's raid0 reads `OK` where the transfer is served
+(`xferServed`); elsewhere the device is an error table, which rests on no
+row of the cntlr, so the verdict names it whatever the raid0's row reads
+— save a transfer whose origin the request no longer names, whose rows
+the verdict leaves out (CN30; Known limits). Reason: at a level from
+`SP_LEVEL_NO_THINPOOL` up to but excluding `SP_LEVEL_DISABLE` the raid0's
+row is the level's, which never reads `OK`, so an error-table step that
+failed there would be named by nothing.
 
 CN18. Clones (`clone.go`; primary only; `architecture.md`, Clones;
 `sp_level` below `SP_LEVEL_NO_CLONE`). Per `clone_list` entry, in order:
@@ -3559,9 +3577,9 @@ one included, or, in a race, another cntlr's — and the kernel adds the
 namespace head after it makes the controller, so that namespace may be a
 scan still in progress, which a later read reads again, naming the
 dm-clone a converge would build once the head is there (The clone names,
-below); a controller
-whose "address" did not answer at that lookup, found there once it
-answers, reads the same way, on the side that holds the settle. A target
+above); a controller whose "address" did not answer at that lookup, found
+there once it answers, reads the same way, on the side that holds the
+settle. A target
 row that reads an endpoint's controller not live keeps the reason, so in
 that state the dm-clone row alone holds the settle. A read gives that
 state the reason (below); the two channels then differ in the reason, and
@@ -3666,20 +3684,25 @@ that is not ready waits for the names of the group or the raid0 (step
 2), and then the read's name of the dm-clone; a read of the dm-clone
 before step 3 that does not answer is judged again by the next read, and
 one that shows its metadata read-only or failed is named by nothing,
-since no converge takes it back (Known limits); anything step 3's
-converge of the dm-clone fails on, and the enable's message, are named
-by the converge's own reply and by a read while the build would act; and
-a read after the enable that fails or does not show a dm-clone that
-serves, whose line the dm-clone row carries (`architecture.md`,
-Live-state reporting), leaves the dm-clone to the next read's name. Some
-failures stop nothing and are only logged: a failed knob message of step
-3 (the knob keeps the value it had) and a failed source-chunk discard of
-step 4 (it costs an extra copy). Step 6 is CN16's, and a namespace of the
-td that a pass leaves waiting waits for the dm-clone's name and then its
-own (CN16). Whatever stopped a pass, CN16 puts the td's ns-devs on the
-dm-clone only while it serves (rule 5), which no dm-clone does before
-step 5 has run on it; a later pass, the one a name brings, finishes the
-build.
+since no converge takes it back (Known limits); a create, reload or
+resume of step 3 that fails, and the enable's message, are named by the
+converge's own reply and by a read while the build would act, while a
+read inside step 3 that did not answer, a device number's among them, is
+judged again by the next read, and a clone geometry of 0 is named by
+nothing; and a read after the enable that fails or does not show a
+dm-clone that serves, whose line the dm-clone row carries
+(`architecture.md`, Live-state reporting), leaves the dm-clone to the
+next read's name. Some failures stop nothing and are only logged: a
+failed knob message of step 3 (the knob keeps the value it had) and a
+failed source-chunk discard of step 4 (it costs an extra copy). Step 6 is
+CN16's, and a namespace of the td that a pass leaves waiting waits for
+the dm-clone's name, where a read gives one, and then its own (CN16);
+where the cause is named by nothing, as for the read-only or failed
+metadata above, it waits for a converge something else brings, if any
+cures it (Known limits). Whatever stopped a pass, CN16 puts the td's
+ns-devs on the dm-clone only while it serves (rule 5), which no dm-clone
+does before step 5 has run on it; a later pass, the one a name or
+something else brings, finishes the build.
 
 **Removing a clone** is not a step of its own: it is the CN21 sweep
 finding the clone's objects unwanted and taking them in layer order,
@@ -4558,9 +4581,13 @@ leg's or clone source's entry in the walk and its group's array in the
 md walk; its other reads stay outside the reading (below). The read-only
 flag among the attr flags is set while the device's table is read-only or
 the block layer's own flag of the device is (CN10, A read-only device is
-made writable); no row reads it, and the names of a leg wrapper and of a
-`RedundNone` group's dm-linear, which a converge's step decides, do
-(CN30). Reason: most
+made writable); no row reads it. The names of a leg wrapper and of a
+`RedundNone` group's dm-linear, which a converge's step decides, do read
+it (CN30), and so do the availability a read weighs for the names of a
+group's dm-linear, an absent array and a forced start (`readAvailable`,
+whose wrapper test counts a read-only wrapper as one a converge would
+reload) and the pool test of an uncreated snapshot's name
+(`readPoolTakesMessages`, CN14). Reason: most
 of a read's time goes to starting processes, and one listing of the
 whole node costs about what one device's read does, so such a read
 starts a few processes whatever the slice count, besides its status
@@ -4877,15 +4904,18 @@ The rows, each with its `res_name` and what its probe checks:
   read they come first in each leg's turn, and the read's other uses of
   the leg — the sides it names with no controller and the wrapper it names
   (CN30), and a standby's leg row — read their lookup, so the leg loop
-  looks up a leg at most once:
-  every wanted leg on a standby, and on a primary a two-sided leg or one
-  whose row does not read `OK` (CN30); the put-back test looks up again the
-  legs it weighs, members whose row reads `OK` and their copy sources, and
-  so does the in-sync guard (CN30, CN12), and so does the name of a
-  `RedundNone` group's device, of the group's leg while the device is
-  missing, maps another table or is read-only and no sweep is
-  disconnecting the leg (CN12, CN30). The
-  worker's cutover reads the primary's row of a migration's destination
+  looks up a leg at most once: every wanted leg on a standby, and on a
+  primary a two-sided leg or one whose row does not read `OK` (CN30). The
+  put-back test looks up again the legs it weighs, members whose row reads
+  `OK` and their copy sources, and so do the in-sync guard (CN30, CN12)
+  and the re-assembly's member test (`legServes`). The names of a
+  `RedundNone` group's device, of an absent array and of a forced start
+  look up again each leg they weigh — the group's leg while the device is
+  missing, maps another table or is read-only, and each member of the
+  array — but only where the leg is not provisioning, no sweep is
+  disconnecting it and the loop's lookup, where it made one, found a path
+  both live and optimized (`readAvailable`; CN12, CN30). The worker's
+  cutover reads the primary's row of a migration's destination
   side (`dnv-worker.md` RW18), and no health rule judges these rows
   (`dnv-worker.md` HL2). Reason for the rows' scope: the primary's leg
   row carries its prober's verdict, which goes over the serving path and
@@ -5149,14 +5179,15 @@ are all there the pre-pass sends no message and suspends nothing, and its
 rows are named like any other's. A concat the agent refuses to
 shrink reads the refusal on both channels. A read
 cannot tell a thin id the pool has lost from a volume not built yet, and
-names the volume (Known limits). Reason for the rows it is built on: a stack over a group
-whose array does not run waits for that array, which the member rules,
-the names of an absent array and of a forced start below cover, and
-over a broken layer of its
-own only that layer is named, the lowest, whose converge builds the rest.
-Reason for leaving out the rest of the legs', groups' and clones' rows,
-the paths and the arrays: their state rests
-on a remote end, and a new syncup does not cure a disk node that is gone;
+names the volume (Known limits). Reason for the rows it is built on: a
+stack over a group whose array does not run waits for that array, which
+the names of an absent array to start, of a broken array to assemble
+again and of a forced start (below) cover, and the member rules once it
+runs; and over a broken layer of its own only that layer is named, the
+lowest, whose converge builds the rest. Reason for leaving out the rest
+of the legs', groups' and clones' rows, the paths and the arrays: their
+state rests on a remote end, and a new syncup does not cure a disk node
+that is gone;
 the rules below name what a converge can do for them. A converge's own
 code names these rows from its build, so a step whose command failed or
 was cut off by its own deadline (`dnagent.md` SH15), a resume that failed
@@ -5424,19 +5455,20 @@ array of the group runs and the leg a converge starts it from; the log
 record lists it among its failures. That is a wanted `RedundMdRaid1`
 group that is not deferred, whose mark stands in a request that counts as
 delivered (CN8), the only mark a converge acts on, and no array of which
-runs; an array of the group that
-is there holds no member that is not a leg wrapper of this pool and its
-holders listing shows no device above it; and the forced start's checks
-(`planForcedStart`), run over the members the read finds available as for
-an absent array, hold. A read of the holders or of a superblock that did
-not answer names nothing; the next read reads again. So it names nothing
-for a refusal that lasts — a named leg that is no full member or is older
-than a member the start would zero, a member that is no leg of this
-pool, a device above that holds the array — nor while a member the start
-keeps is not available, a kept new leg still provisioning among them,
-nor over an array that reads running, where the mark waits; a process
-that holds the array open shows in no holders listing, and a stop it
-refuses is in Known limits. Reason: as
+runs; an array of the group that is there holds no member that is not a
+leg wrapper of this pool and its holders listing shows no device above
+it; and the forced start's checks (`planForcedStart`), run over the
+members the read finds available as for an absent array, hold. A read of
+the holders or of a superblock that did not answer names nothing; the
+next read reads again. So it names nothing for a refusal that lasts — a
+named leg that is no full member or is older than a member the start
+would zero, a member that is no leg of this pool, a device above that
+holds the array — nor while the named leg or a member the start would
+zero is not available, a kept new leg still provisioning among them
+(the open repair's bad leg is not tested: CN12 step 3), nor over an
+array that reads running, where the mark waits; a process that holds the
+array open shows in no holders listing, and a stop it refuses is in Known
+limits. Reason: as
 for the absent array, and a read cannot act on a mark, while a group
 whose array does not run changes no desired state.
 
@@ -5467,16 +5499,16 @@ and on each round that answers from an observation that names it and
 is not too old (`dnv-worker.md` HL7), the worker's "re-sync while the code is non-zero" rule (`dnv-worker.md` RW4)
 re-issues the `Syncup*` that sweeps again. A converge's observation
 carries what its own removing sweep names and, for a cntlr, the rows of
-its build the row rule above names, so what only a read's
-verdict names — a connection whose subsystem directory is left
-with no controller (CN21), a side or a clone source's entry with no
-controller the converge would connect, an md member to fail early or put
-back, a broken array to assemble again, an absent array to start, a forced
-start to carry through, an md check to start, stop or adopt, an uncreated
-snapshot to message, a piece of the base state and a stored forced-start
-mark (all above) — brings by itself the
-`Syncup*` on every second
-round at most (`dnv-worker.md` RW4 step 5, and RW5 for the subsystem
+its build the row rule above names, so what only a read's verdict names
+— a connection whose subsystem directory is left with no controller
+(CN21), a side or a clone source's entry with no controller the converge
+would connect, a side whose live path the converge would cut, an md
+member to fail early, put back, add or remove, a broken array to
+assemble again, an absent array to start, a forced start to carry
+through, an md check to start, stop or adopt, an uncreated snapshot to
+message, a piece of the base state and a stored forced-start mark (all
+above) — brings by itself the `Syncup*` on every second round at most
+(`dnv-worker.md` RW4 step 5, and RW5 for the subsystem
 directory) while the agent accepts it; while the agent's saves fail, the
 `Syncup*` is refused and stores no observation, so each round brings it
 (`dnagent.md` SH5, SH28). No agent-side loop exists for
@@ -5550,6 +5582,18 @@ stores instead is CN23's.
   (`dnv-worker.md` HL2), so no failover rebuilds it either. Naming such
   rows would re-send the `SyncupCntlr` on every round for a td not yet
   created there, whose `create_thin` the read-only pool refuses each time.
+* A slice's pool that an operator's `blockdev --setro` made read-only, by
+  the block layer's flag alone, leaves a snapshot not yet created on it
+  unnamed (CN14, A read names an uncreated snapshot while the pre-pass
+  would message): the read tests the pool device's flag and withholds the
+  name, and no read names the pool, whose row does not read the flag
+  (CN28), while a converge would reload the pool, clear the flag (CN10, A
+  read-only device is made writable) and send the message. The snapshot
+  is created by the next converge something else brings — a new
+  revision's, or a re-send for another of the cntlr's names. dnv never
+  makes a device read-only ([D11]), so only an operator's step makes this
+  state, and `blockdev --setrw` by hand ends it: the next read names the
+  snapshot.
 * A superblock read of a member whose disk node stalls while the leg's
   path stays live and optimized waits without limit (CN12, The superblock
   read; `osclient.md`, ReadBlockDirect): a converge's assembly, forced
@@ -5973,8 +6017,9 @@ stores instead is CN23's.
   only some ways of failing set a health epoch: CN16 keeps a clone's td
   parked, and its namespaces inaccessible, while its dm-clone does not
   serve (rule 5). A CN18 step that stopped the build before the dm-clone
-  serves is run again only by the converge a name brings (CN18, The clone
-  names; CN30). What keeps failing
+  serves is run again by the next converge of the cntlr: the one a name
+  brings (CN18, The clone names; CN30), or one that comes for another
+  reason (below). What keeps failing
   may leave the dm-clone up with hydration off — a refused enable, a
   `dmsetup create` killed after its ioctl ran — and its row then reads
   `RES_STATUS_ERROR` "hydration not enabled" on every converge and every
@@ -6050,19 +6095,24 @@ stores instead is CN23's.
   second round at most (`dnv-worker.md` RW4 step 5), and one converge
   that fails at the connect after up to the pass's connect budget (CN10).
   It lasts until the source answers a connect, as a source that comes
-  back does, or the clone leaves the request. A source with no namespace
-  while every endpoint has a controller, live or not, is named by
-  nothing and costs no converge; nor does a source whose namespace is
-  there and every endpoint has a controller, which passes step 1. A clone that has
+  back does, the clone leaves the request, or an operator disables the
+  cntlr or steps the pool's level to `SP_LEVEL_NO_CLONE` or above, where
+  no read names a clone's source (CN30). A source with no namespace while
+  every endpoint has a controller, live or not, is named by nothing and
+  costs no converge; nor does a source whose namespace is there and every
+  endpoint has a controller, which passes step 1. A clone that has
   hydrated in full serves on through its dm-clone, its namespace optimized,
   since serving follows the dm-clone's own status and not the rows (CN16
   rule 5); that rests on a dm-clone keeping hydration enabled once it has
   hydrated in full, and one that turned it off would read
   `RES_STATUS_ERROR` on every finished clone and park its namespaces. A
   dm-clone up with hydration off, by contrast, reads `RES_STATUS_ERROR`
-  (above) and moves the role at the primary's threshold, and the new
-  primary creates the dm-clone over the clone meta group's metadata and
-  finishes the build (CN18). The clone goes out of service when its
+  (above); where the read's gates pass, a read names it and the converge
+  the worker's re-send brings enables hydration (CN18, The clone names;
+  CN30), and where nothing names it, it moves the role at the primary's
+  threshold, and the new primary creates the dm-clone over the clone meta
+  group's metadata and finishes the build (CN18; `dnv-worker.md`, Known
+  limits). The clone goes out of service when its
   dm-clone must be built again while a fault at the source lasts and that
   build fails step 1 (CN18). A clone whose copy the current primary has
   reported whole is latched by the worker's next pass that reads the
