@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"strconv"
+	"strings"
 
 	"github.com/distributed-nvme/distributed-nvme/agent"
 	"github.com/distributed-nvme/distributed-nvme/common"
@@ -604,7 +605,40 @@ func (s *CnAgentServer) ensureNamespaceObject(
 	if err != nil {
 		return err
 	}
-	return s.nvmet.EnsureNamespace(ctx, s.nsConf(np, objectAnaGrpId(state)))
+	conf := s.nsConf(np, objectAnaGrpId(state))
+	if conf.Disables(state) {
+		if err := s.disableSafe(ctx, state.DevicePath); err != nil {
+			return fmt.Errorf("namespace %s/%d is not disabled: %w",
+				np.ss.nqn, np.nsIdx, err)
+		}
+	}
+	return s.nvmet.EnsureNamespace(ctx, conf)
+}
+
+// disableSafe returns nil when the disable of an enabled namespace over
+// devicePath may run: the disable waits, unkillable, for every request in
+// flight on the namespace, and a suspended dm device never completes one,
+// so a dm device that reads suspended, or whose read did not answer, makes
+// it an error. A
+// namespace whose id the request gave to another namespace can still sit
+// over an unwanted ns-dev the sweep's park step could not prove out of
+// suspension (CN21); the step fails, its row names it, and the converge
+// the worker's re-send brings parks that ns-dev first. A device that is no
+// dm device, or is gone, is no such wait.
+func (s *CnAgentServer) disableSafe(ctx context.Context, devicePath string) error {
+	name, ok := strings.CutPrefix(strings.TrimSpace(devicePath), "/dev/mapper/")
+	if !ok || name == "" {
+		return nil
+	}
+	dev, err := s.dm.Info(ctx, name)
+	if err != nil {
+		return fmt.Errorf("its device %s did not read: %w", name, err)
+	}
+	if dev != nil && dev.Suspended {
+		return fmt.Errorf("its device %s is suspended, and its disable "+
+			"would wait for that device's IO", name)
+	}
+	return nil
 }
 
 // objectAnaGrpId is the group a namespace object's step writes: the one an

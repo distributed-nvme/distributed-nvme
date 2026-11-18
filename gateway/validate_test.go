@@ -292,6 +292,54 @@ func TestValidateHostFacingNqn(t *testing.T) {
 	}
 }
 
+// TestValidateCloneSrcNqn pins the clone source row of architecture.md,
+// Common validation: a src_nqn in the dnv namespace is taken only when it
+// decodes as a transfer NQN, of this cluster or another; one that decodes
+// to nothing, or as any other dnv kind, is refused, since the cn agent
+// would never disconnect its source once its clone has gone (cnagent.md
+// CN21). A name outside the namespace keeps validateNqn's rule.
+func TestValidateCloneSrcNqn(t *testing.T) {
+	nf := common.NewNameFmt("")
+	cases := []struct {
+		name  string
+		value string
+		want  codes.Code
+	}{
+		{"a transfer", nf.XferNqn(1, 2, 3), codes.OK},
+		{"a transfer of another cluster", nf.XferNqn(9, 2, 3), codes.OK},
+		{"kind 2", nf.SideToCnNqn(1, 2, 3, 4), codes.InvalidArgument},
+		{"kind 3", nf.MigrSrcNqn(1, 2, 3, 4), codes.InvalidArgument},
+		{"prefix that decodes to nothing", common.NqnPrefix +
+			":legacy-volume", codes.InvalidArgument},
+		{"no colon after the prefix", "nqn.2024-01.io.dnv-it:x", codes.OK},
+		{"outside the namespace", "nqn.2024-01.io.example:x", codes.OK},
+		{"outside the namespace but a comma",
+			"nqn.2024-01.io.example:x,hostnqn=y", codes.InvalidArgument},
+	}
+	for _, item := range cases {
+		t.Run(item.name, func(t *testing.T) {
+			validateWantCode(t, "validateCloneSrcNqn",
+				validateCloneSrcNqn("src_nqn", item.value), item.want)
+		})
+	}
+}
+
+// TestCreateCloneRefusesADnvSourceThatIsNoTransfer pins the rule at the
+// RPC: CreateClone with an src_nqn in the dnv namespace that decodes to
+// nothing is INVALID_ARGUMENT, and nothing is written.
+func TestCreateCloneRefusesADnvSourceThatIsNoTransfer(t *testing.T) {
+	env := newVolEnv(t)
+	env.putTd("dst", 900, 7, 0, true)
+	req := volCloneRequest(env, "clone-a", "dst")
+	req.SrcNqn = common.NqnPrefix + ":legacy-volume"
+	_, err := env.srv.CreateClone(env.ctx, req)
+	if status.Code(err) != codes.InvalidArgument ||
+		!strings.Contains(err.Error(), "is no transfer NQN") {
+		t.Fatalf("CreateClone: %v, want INVALID_ARGUMENT naming the rule",
+			err)
+	}
+}
+
 // TestValidateExistingNqn pins the row of architecture.md, Common validation,
 // for the nqn of DeleteNamespace and
 // DeleteSubsystem: only non-empty and at most MaxNqnLength bytes, so that a

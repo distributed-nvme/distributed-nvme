@@ -572,6 +572,20 @@ const (
 	// and never remembered. A time.Duration, like the two above.
 	DnExportOrphanGrace = 30 * time.Second
 
+	// CnSubsysOrphanGrace is the age a host-facing subsystem with no
+	// namespace device, no allowed host and no port link, which no held
+	// cntlr request claims, must exceed before the cn agent's node-level
+	// sweep removes it, whatever its model (cnagent.md CN21); a younger one
+	// is left alone. It is the dn's export grace, for the same reason: such
+	// a subsystem may be a build in flight between its `mkdir` and its
+	// first namespace, and only its age tells it from one left behind. The
+	// age is the subsystem directory's mtime, read in the agent's own
+	// process, and no attribute file of such a subsystem is ever read: on a
+	// kernel that stamps the directory on an attribute lookup, each read
+	// would keep it young. One with a host or a port link is judged by its
+	// model alone, with no age. A time.Duration, like the one above.
+	CnSubsysOrphanGrace = DnExportOrphanGrace
+
 	// Side provisioning ([D15], architecture.md, Side provisioning protocol,
 	// dnagent.md DN9): the background zeroing goroutine zeroes the prefix of
 	// the side that side_conf.zero_bytes names, through the side's

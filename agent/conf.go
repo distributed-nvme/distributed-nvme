@@ -74,7 +74,13 @@ var validNqn = regexp.MustCompile(common.ValidNqnPattern)
 // a request reach paths outside its directory and a "," would add options to
 // the connect; every NQN a released gateway stored passes it. Only a store
 // written before the gateway held NQNs to the rule, or by hand, can carry one
-// it refuses. The first refusal, in a fixed order, is the error.
+// it refuses. A clone's src_nqn in the dnv namespace must also decode as a
+// transfer NQN (XferNqn), the gateway's rule for CreateClone
+// (validateCloneSrcNqn, gateway/validate.go): the cn agent removes a clone
+// source once its clone has gone only when it is a transfer, judged by its
+// NQN, or in no dnv namespace, judged by its controllers' host NQN
+// (cnagent.md CN21), so any other source in the dnv namespace would stay
+// connected for good. The first refusal, in a fixed order, is the error.
 func ValidateCntlrNqns(req *pb.SyncupCntlrRequest) error {
 	check := func(field, nqn string) error {
 		switch {
@@ -113,8 +119,13 @@ func ValidateCntlrNqns(req *pb.SyncupCntlrRequest) error {
 		}
 	}
 	for _, clone := range req.GetCloneList() {
-		if err := check("clone src_nqn", clone.GetSrcNqn()); err != nil {
+		src := clone.GetSrcNqn()
+		if err := check("clone src_nqn", src); err != nil {
 			return err
+		}
+		if !common.IsCloneSrcNqn(src) {
+			return invalidConf("clone src_nqn %q is in the dnv namespace %q "+
+				"and is no transfer NQN", src, common.NqnPrefix+":")
 		}
 	}
 	return nil

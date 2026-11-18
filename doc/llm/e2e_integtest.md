@@ -747,11 +747,12 @@ delete must be accepted, or answer `NOT_FOUND` once the worker has drained the
 clone, and the whole destination must read the whole source's digest, which
 host1 read before the clone. The worker logs that one failover, the old primary
 returns as a standby once enabled, both cntlrs are listed again, and host0
-still reads its data. Both controller nodes keep their connection to the source
-after the clone has gone, as the cn agent disconnects only a clone source that
-is a transfer of its own cluster (`cnagent.md` CN21, Known limits), so the
+still reads its data. A controller node keeps its connection to the source
+after the clone has gone until its node-level sweep, which a read of the node
+that names the source brings, disconnects it (`cnagent.md` CN21), so the
 removal of the second pool, here as after the fallback, drops it on every
-controller node before the pool's subsystem goes.
+controller node before the pool's subsystem goes, rather than wait for that
+sweep.
 
 **react** proves the four reactions on real faults, that a planned restart
 of the primary's cn agent moves nothing, an operator's forced start of a

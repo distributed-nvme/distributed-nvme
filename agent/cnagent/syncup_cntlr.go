@@ -724,7 +724,12 @@ func (s *CnAgentServer) build(
 		// snapshot whose create message the pre-pass would send; CN30). A
 		// wait on a layer no converge cures — a pool that needs a check or
 		// has failed — is named by nothing and costs nothing until a new
-		// revision.
+		// revision. A namespace whose object step failed is never moved to
+		// optimized and keeps its group: the nvmet namespace may not be the
+		// one the step wanted — one whose disable the step refused over a
+		// suspended device still sits over the old ns-dev
+		// (ensureNamespaceObject) — and the move would send host IO to it.
+		// Its row names the step, so the worker's re-send runs it again.
 		for _, np := range plan.namespaces {
 			if np.anaGrpId == common.AnaGrpIdInaccessible {
 				continue
@@ -732,6 +737,10 @@ func (s *CnAgentServer) build(
 			outcome := outcomes[np.nsId]
 			grpId, move := nsAnaMove(np, outcome)
 			if !move {
+				continue
+			}
+			if nsErrs[np.nsId] != nil &&
+				grpId == common.AnaGrpIdOptimized {
 				continue
 			}
 			if err := s.setAna(

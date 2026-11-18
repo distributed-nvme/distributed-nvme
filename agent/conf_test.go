@@ -195,8 +195,10 @@ func TestValidateCntlrNqnsTakesEveryNqnDnvMints(t *testing.T) {
 		NqnToSubsystem: map[string]*pb.Subsystem{
 			"nqn.2024-01.io.example:vol1": {AllowedHosts: []string{host}},
 		},
-		XferList:  []*pb.Transfer{{AllowedHosts: []string{host}}},
-		CloneList: []*pb.Clone{{SrcNqn: xfer}},
+		XferList: []*pb.Transfer{{AllowedHosts: []string{host}}},
+		CloneList: []*pb.Clone{{SrcNqn: xfer},
+			{SrcNqn: nf.XferNqn(2, 0x11, 0x21)},
+			{SrcNqn: "nqn.2024-01.io.example:vol2"}},
 	}
 	if err := ValidateCntlrNqns(good); err != nil {
 		t.Fatalf("NQNs dnv mints were refused: %v", err)
@@ -220,6 +222,16 @@ func TestValidateCntlrNqnsTakesEveryNqnDnvMints(t *testing.T) {
 		{"a dot-dot source", &pb.SyncupCntlrRequest{
 			CloneList: []*pb.Clone{{SrcNqn: "nqn.2024-01.io.a..b:x"}},
 		}, "clone src_nqn \"nqn.2024-01.io.a..b:x\" contains \"..\""},
+		// The cn removes a clone source once its clone has gone only when
+		// it is a transfer, or in no dnv namespace (cnagent.md CN21).
+		{"a dnv source that decodes to nothing", &pb.SyncupCntlrRequest{
+			CloneList: []*pb.Clone{{SrcNqn: common.NqnPrefix +
+				":legacy-volume"}},
+		}, "is no transfer NQN"},
+		{"a dnv source of another kind", &pb.SyncupCntlrRequest{
+			CloneList: []*pb.Clone{{
+				SrcNqn: nf.SideToCnNqn(1, 0x11, 0x21, 5)}},
+		}, "is no transfer NQN"},
 	} {
 		err := ValidateCntlrNqns(tc.req)
 		if err == nil || !strings.Contains(err.Error(), tc.want) ||

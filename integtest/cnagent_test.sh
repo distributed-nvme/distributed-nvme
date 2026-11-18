@@ -118,6 +118,11 @@ CN_SYNCUP_TIMEOUT=180
 # (dnagent.md SH29, SH30).
 FRESH_TIMEOUT=30
 
+# The grace of a host-facing subsystem with no namespace device
+# (common.CnSubsysOrphanGrace), in seconds: past it the node-level sweep
+# judges such a subsystem's links (cnagent.md CN21).
+CN_ORPHAN_GRACE=30
+
 # Polling budget of `dnagentctl wait-zeroed` (architecture.md,
 # Side provisioning protocol). On a loop device the kernel maps
 # REQ_OP_WRITE_ZEROES onto fallocate, so even a meta group's side, zeroed
@@ -1444,6 +1449,93 @@ unset_subsys_add() {
 	mkdir "$NVMET/subsystems/$1" || return 1
 	echo dnv >"$NVMET/subsystems/$1/attr_model" || return 1
 	mkdir "$NVMET/subsystems/$1/namespaces/1" || return 1
+	echo added
+}
+
+# host_link_add <nqn> <hostnqn> — admit one host to a subsystem made by hand:
+# the host's directory under hosts, made when missing, and the subsystem's
+# link to it. The link is made in allowed_hosts, so it leaves the subsystem
+# directory's time as it is. Fails when a step fails.
+host_link_add() {
+	[ -d "$NVMET/hosts/$2" ] || mkdir "$NVMET/hosts/$2" || return 1
+	ln -s "$NVMET/hosts/$2" "$NVMET/subsystems/$1/allowed_hosts/$2" ||
+		return 1
+	echo linked
+}
+
+# host_link_drop <hostnqn> — the host directory host_link_add made, once no
+# subsystem links it. Best-effort.
+host_link_drop() { rmdir "$NVMET/hosts/$1" 2>/dev/null || true; }
+
+# subsys_mtime <nqn> — a subsystem directory's time in whole seconds. stat
+# looks up the directory alone, so it leaves that time where it is.
+subsys_mtime() { stat -c %Y "$NVMET/subsystems/$1"; }
+
+# subsys_present <nqn> — yes/no.
+subsys_present() {
+	if [ -d "$NVMET/subsystems/$1" ]; then echo yes; else echo no; fi
+}
+
+# subsys_age <nqn> — how many seconds old a subsystem directory is by this
+# node's clock, the one the agent judges it by.
+subsys_age() {
+	local t
+	t=$(subsys_mtime "$1") || return 1
+	echo $(($(date +%s) - t))
+}
+
+# hand_src_add <nqn> — a subsystem made by hand on this node's port 1, as
+# another program's export is: a 64 MiB loop device under $WORK as its one
+# namespace, any host admitted. Prints the loop device. Fails when a step
+# fails.
+hand_src_add() {
+	local dir="$NVMET/subsystems/$1" img="$WORK/hand-src.img" dev
+	truncate -s 64M "$img" || return 1
+	dev=$(losetup -f --show "$img") || return 1
+	mkdir "$dir" || return 1
+	echo 1 >"$dir/attr_allow_any_host" || return 1
+	mkdir "$dir/namespaces/1" || return 1
+	echo "$dev" >"$dir/namespaces/1/device_path" || return 1
+	echo 1 >"$dir/namespaces/1/enable" || return 1
+	ln -s "$dir" "$NVMET/ports/1/subsystems/$1" || return 1
+	echo "$dev"
+}
+
+# hand_src_drop <nqn> — hand_src_add undone: the subsystem, then its loop
+# device and file. Best-effort.
+hand_src_drop() {
+	local dev
+	drop_subsys_glob "$1"
+	for dev in $(losetup -j "$WORK/hand-src.img" 2>/dev/null | cut -d: -f1); do
+		losetup -d "$dev" 2>/dev/null
+	done
+	rm -f "$WORK/hand-src.img"
+	return 0
+}
+
+# ctrl_hostnqns <nqn> — the host NQN of each controller this node holds of
+# one subsystem, sorted, one per line; nothing when it holds none. Fails when
+# a read fails.
+ctrl_hostnqns() {
+	local d c got
+	for d in /sys/class/nvme-subsystem/*; do
+		[ -e "$d/subsysnqn" ] || continue
+		got=$(cat "$d/subsysnqn") || return 1
+		[ "$got" = "$1" ] || continue
+		for c in "$d"/nvme*; do
+			case "${c##*/}" in nvme*[0-9]n* | nvme*c*) continue ;; esac
+			[ -e "/sys/class/nvme/${c##*/}/hostnqn" ] || continue
+			cat "/sys/class/nvme/${c##*/}/hostnqn" || return 1
+		done
+	done | LC_ALL=C sort
+}
+
+# dnv_subsys_add <nqn> — what a deletion leaves of a host-facing subsystem
+# once its namespaces have gone: dnv's model ("dnv", common.NvmeModel) and no
+# namespace; the caller links a host to it. Fails when a step fails.
+dnv_subsys_add() {
+	mkdir "$NVMET/subsystems/$1" || return 1
+	echo dnv >"$NVMET/subsystems/$1/attr_model" || return 1
 	echo added
 }
 
@@ -3092,7 +3184,11 @@ loop_devs() {
 # without it, and its removal writes its last metadata to its group.
 wipe_cn() { # <cn16>
 	resume_suspended
+	disconnect_prefix "$NQN_IT_PREFIX:hand-"
+	hand_src_drop "$NQN_IT_PREFIX:hand-src"
 	drop_subsys_glob "$NQN_IT_PREFIX:*"
+	drop_subsys_glob "$NQN_PREFIX:9:*"
+	host_link_drop "$NQN_IT_PREFIX:operator-host"
 	dm_remove_kind c6 "$1"
 	dm_remove_kind c8 "$1"
 	dm_remove_kind c7 "$1"
@@ -4250,6 +4346,34 @@ cn_drop_until_clean() { # cnidx secs
 	done
 }
 
+# cn_resync_until_clean re-sends a CN's SyncupCn, with the given cntlr
+# pointers, at ${CNSYNC} until it replies clean, as the worker re-sends one a
+# CheckCn round's verdict names a leftover in: a pass that sets a disconnect
+# going replies leftover naming it, and a later pass's probe finds it gone
+# (cnagent.md CN10). It dies on any code but 0 and 4 and once <secs> pass.
+cn_resync_until_clean() { # cnidx secs [--cntlr sp:cntlr]...
+	local idx=$1 secs=$2 out code details deadline
+	shift 2
+	deadline=$((SECONDS + secs))
+	while :; do
+		out=$(cnctl "$idx" syncup-cn --revision "${CNSYNC[$idx]}" "$@" ||
+			true)
+		[ -n "$out" ] ||
+			die "cn$idx syncup-cn printed no reply — the call never reached the agent"
+		code=$(jq_of "$out" '.agent_reply.code // 0')
+		details=$(jq_of "$out" '.agent_reply.details // ""')
+		if [ "$code" = 0 ]; then
+			assert_cn_info_ok "$out" "cn$idx re-sent syncup-cn"
+			return 0
+		fi
+		[ "$code" = 4 ] ||
+			die "cn$idx syncup-cn replied code $code ($details), want 0 or 4"
+		[ "$SECONDS" -lt "$deadline" ] ||
+			die "cn$idx still reports leftovers after ${secs}s: $details"
+		sleep 2
+	done
+}
+
 # wait_legs_probed polls a cntlr with check rounds until no leg row reads
 # RES_STATUS_PENDING — CN11's "the prober has not completed a round", which a
 # primary reports for every leg whose prober has just started (a build, a
@@ -4665,36 +4789,179 @@ case_smoke() {
 	host_disconnect "$hv" "$nqn"
 	host_refused "$hv" "$cn" "$nqn" "smoke revoke"
 
-	stage foreign "subsystems dnv did not make are left alone (CN21)"
-	# Two nvmet subsystems made by hand on the CN, as an operator's own
-	# exports are: one with a namespace over a device that is no ns-dev, and
-	# one with no namespace and the kernel's default model. The node-level
-	# sweep of the teardown's SyncupCn leaves both alone; the stage removes
-	# them by hand after it. A third, with dnv's model and a namespace whose
-	# device was never written, is what a converge cut off early leaves: the
-	# sweep removes it.
+	stage orphans "subsystems made by hand: the cntlr's reads through the grace read none of them (CN21)"
+	# Four nvmet subsystems made by hand on the CN, as an operator's own
+	# exports or a cut-off converge's leftovers are: one with a namespace
+	# over a device that is no ns-dev, foreign whatever its age; one with no
+	# namespace and the kernel's default model, and one with dnv's model and
+	# a namespace whose device was never written, neither with a host or a
+	# port link, which the node-level sweep removes once older than the
+	# grace; and one with no namespace and the kernel's default model but an
+	# allowed host, which it leaves alone. A cntlr's read reads none of them,
+	# so the cntlr's reads through the grace leave their directories' times
+	# where they were, and the node's own read while they are young names
+	# none of them.
 	local fdev="$NQN_IT_PREFIX:foreign-dev" fempty="$NQN_IT_PREFIX:foreign-empty"
-	local funset="$NQN_IT_PREFIX:unset-dev"
+	local fhost="$NQN_IT_PREFIX:foreign-host" funset="$NQN_IT_PREFIX:unset-dev"
+	local ophost="$NQN_IT_PREFIX:operator-host" details t0e t0u age
 	assert_eq "$(helper "$cn" "foreign_subsys_add '$fdev' /dev/dnv-it-no-ns-dev")" \
 		added "smoke: making $fdev by hand"
 	assert_eq "$(helper "$cn" "foreign_subsys_add '$fempty'")" added \
 		"smoke: making $fempty by hand"
+	assert_eq "$(helper "$cn" "foreign_subsys_add '$fhost'")" added \
+		"smoke: making $fhost by hand"
+	assert_eq "$(helper "$cn" "host_link_add '$fhost' '$ophost'")" linked \
+		"smoke: admitting a host to $fhost"
 	assert_eq "$(helper "$cn" "unset_subsys_add '$funset'")" added \
 		"smoke: making $funset by hand"
 	assert_eq "$(helper "$cn" "ns_attr '$funset' 1 device_path")" '(null)' \
 		"smoke: a device_path never written"
+	# A second past the last write, so a lookup that moved a directory's time
+	# would show in whole seconds.
+	sleep 2
+	t0e=$(helper "$cn" "subsys_mtime '$fempty'")
+	t0u=$(helper "$cn" "subsys_mtime '$funset'")
+	out=$(cnctl "$cn" check-cn --fresh --revision "${CNSYNC[$cn]}" --show-info)
+	assert_cn_info_ok "$out" "smoke: the node's read while they are young"
+	while :; do
+		age=$(helper "$cn" "subsys_age '$fempty'") ||
+			die "smoke: reading the age of $fempty failed"
+		[ "$age" -le $((CN_ORPHAN_GRACE + 1)) ] || break
+		out=$(cnctl "$cn" check-cntlr --fresh --revision "$cntlrrev" \
+			--sp "$sp" --cntlr "$cntlr")
+		sleep 2
+	done
+	age=$(helper "$cn" "subsys_age '$funset'") ||
+		die "smoke: reading the age of $funset failed"
+	[ "$age" -gt "$CN_ORPHAN_GRACE" ] ||
+		die "smoke: $funset is ${age}s old after the grace of $fempty"
+	assert_eq "$(helper "$cn" "subsys_mtime '$fempty'")" "$t0e" \
+		"smoke: the time of $fempty after the cntlr's reads"
+	assert_eq "$(helper "$cn" "subsys_mtime '$funset'")" "$t0u" \
+		"smoke: the time of $funset after the cntlr's reads"
+
+	stage orphans_old "past the grace the node's read names the empty two and a linked one with dnv's model, and the SyncupCn it brings removes them"
+	# A fifth subsystem, what a deletion leaves once its namespaces have
+	# gone: dnv's model and an allowed host, made just now. A linked one is
+	# judged by its model with no age, so it goes at once, although the
+	# node's read that names it reads its model and so makes it young again.
+	local fdnv="$NQN_IT_PREFIX:deleted-dnv"
+	assert_eq "$(helper "$cn" "dnv_subsys_add '$fdnv'")" added \
+		"smoke: making $fdnv by hand"
+	assert_eq "$(helper "$cn" "host_link_add '$fdnv' '$ophost'")" linked \
+		"smoke: admitting a host to $fdnv"
+	out=$(cnctl "$cn" check-cn --fresh --revision "${CNSYNC[$cn]}" \
+		--expect-code 4)
+	details=$(jq_of "$out" '.agent_reply.details // ""')
+	for name in "$fempty" "$funset" "$fdnv"; do
+		case "$details" in
+		*"$name"*) ;;
+		*) die "smoke: the node's read past the grace names no $name: $details" ;;
+		esac
+	done
+	for name in "$fdev" "$fhost"; do
+		case "$details" in
+		*"$name"*) die "smoke: the node's read names $name: $details" ;;
+		esac
+	done
+	cn_resync_until_clean "$cn" 30 --cntlr "$sp:$cntlr"
+	assert_eq "$(helper "$cn" "subsys_present '$fempty'")" no \
+		"smoke: the node sweep removed $fempty"
+	assert_eq "$(helper "$cn" "subsys_present '$funset'")" no \
+		"smoke: the node sweep removed $funset"
+	assert_eq "$(helper "$cn" "subsys_present '$fdnv'")" no \
+		"smoke: the node sweep removed $fdnv"
+	assert_eq "$(helper "$cn" "subsys_present '$fhost'")" yes \
+		"smoke: the node sweep left $fhost alone"
+	assert_eq "$(helper "$cn" "ns_attr '$fdev' 1 device_path")" \
+		/dev/dnv-it-no-ns-dev "smoke: the node sweep left $fdev alone"
+
+	stage handconn "a connection made by hand with the CN's host NQN goes, another host NQN's stays (CN21)"
+	# A subsystem made by hand on vm$hv, which is no transfer of this
+	# cluster, connected from the CN twice: once with the cn agent's own
+	# host NQN, as a clone build would, and once with another, as a host
+	# stack on the same machine would. No request names it and no dm-clone
+	# maps it, so the node's read names it, and the SyncupCn that brings
+	# disconnects the CN's controller of it by its device; the other stays.
+	local hand="$NQN_IT_PREFIX:hand-src" cnhost otherhost hid
+	cnhost=$(cn_host_nqn "$CLUSTER" "${CNID[$cn]}")
+	otherhost="$NQN_IT_PREFIX:hand-host"
+	helper "$hv" "hand_src_add '$hand'" >/dev/null ||
+		die "smoke: making $hand by hand on vm$hv failed"
+	hid=$(host_id "$cnhost")
+	sshv "$cn" "nvme connect -t tcp -a ${IP[$hv]} -s $TR_SVC_ID -n '$hand' --hostnqn '$cnhost' --hostid '$hid'" ||
+		die "smoke: connecting $hand with $cnhost failed"
+	hid=$(host_id "$otherhost")
+	sshv "$cn" "nvme connect -t tcp -a ${IP[$hv]} -s $TR_SVC_ID -n '$hand' --hostnqn '$otherhost' --hostid '$hid' --duplicate-connect" ||
+		die "smoke: connecting $hand with $otherhost failed"
+	got=$(helper "$cn" "ctrl_hostnqns '$hand'") ||
+		die "smoke: reading the controllers of $hand failed"
+	got=$(printf '%s\n' "$got" | paste -sd' ' -)
+	want=$(printf '%s\n' "$cnhost" "$otherhost" | LC_ALL=C sort |
+		paste -sd' ' -)
+	assert_eq "$got" "$want" "smoke: the controllers of $hand"
+	out=$(cnctl "$cn" check-cn --fresh --revision "${CNSYNC[$cn]}" \
+		--expect-code 4)
+	details=$(jq_of "$out" '.agent_reply.details // ""')
+	case "$details" in
+	*"nvme:$hand"*) ;;
+	*) die "smoke: the node's read names no nvme:$hand: $details" ;;
+	esac
+	cn_resync_until_clean "$cn" 60 --cntlr "$sp:$cntlr"
+	got=$(helper "$cn" "ctrl_hostnqns '$hand'") ||
+		die "smoke: reading the controllers of $hand failed"
+	assert_eq "$got" "$otherhost" \
+		"smoke: the controller the other host NQN opened stays"
+	sshv_ok "$cn" "nvme disconnect -n '$hand' || true"
+	helper_ok "$hv" "hand_src_drop '$hand'"
+
+	stage undecodable "a namespace that left a claimed subsystem whose NQN decodes to nothing goes (CN21)"
+	# A subsystem whose NQN carries dnv's prefix and decodes to nothing,
+	# which the request names, so it is the pool's: the namespace the
+	# request drops from it goes. Once the request no longer names it, the
+	# sweep leaves it alone (cnagent.md, Known limits), and the stage removes
+	# it by hand.
+	local und td2=0x31 ss2=0x32 ns2=0x33
+	local uuid2=22222222-2222-4222-8222-222222222222
+	und="$NQN_PREFIX:9:$(hex16 1)"
+	req_set "$req" ".td_list += [$(req_td "$td2" 2 0)]"
+	req_set "$req" ".nqn_to_subsystem[\"$und\"] = $(req_subsys "$ss2" \
+		"[\"$HOST_NQN\"]" "$(req_ns "$ns2" 1 "$td2" "$uuid2" false)")"
+	bump_cn_rev "$cn"
+	cntlrrev=${CNREV[$cn]}
+	out=$(cn_syncup_cntlr "$cn" "$req")
+	assert_map_ok "$out" ns_id_to_namespace "$ns2" "smoke undecodable"
+	assert_eq "$(helper "$cn" "ns_attr '$und' 1 device_path")" \
+		"/dev/mapper/$(cn_dm_name c6 "$cn" "$sp" "$ns2")" \
+		"smoke: the namespace of $und over its ns-dev"
+	req_set "$req" ".nqn_to_subsystem[\"$und\"].ns_list = []"
+	bump_cn_rev "$cn"
+	cntlrrev=${CNREV[$cn]}
+	out=$(cn_syncup_cntlr "$cn" "$req")
+	assert_eq "$(helper "$cn" "ns_attr '$und' 1 device_path")" MISSING \
+		"smoke: the sweep removed the namespace that left $und"
+	assert_eq "$(helper "$cn" "subsys_present '$und'")" yes \
+		"smoke: $und stays while the request names it"
+	req_set "$req" "del(.nqn_to_subsystem[\"$und\"])
+		| .td_list |= map(select(.td_id != \"$(d16 "$td2")\"))"
+	bump_cn_rev "$cn"
+	cntlrrev=${CNREV[$cn]}
+	out=$(cn_syncup_cntlr "$cn" "$req")
+	assert_eq "$(helper "$cn" "subsys_present '$und'")" yes \
+		"smoke: unclaimed, $und is left alone"
+	helper_ok "$cn" "drop_subsys_glob '$und'"
+	converge_check "$cn" "$sp" "$cntlr" "$cntlrrev"
 
 	stage teardown "empty cntlr list, then empty side list"
 	cn_drop "$cn"
 	dn_drop "$dn"
 	assert_eq "$(helper "$cn" "ns_attr '$fdev' 1 device_path")" \
 		/dev/dnv-it-no-ns-dev "smoke: the node sweep left $fdev alone"
-	assert_eq "$(helper "$cn" "ss_attr '$fempty' attr_model")" Linux \
-		"smoke: the node sweep left $fempty alone"
-	assert_eq "$(helper "$cn" "ss_attr '$funset' attr_model")" MISSING \
-		"smoke: the node sweep removed $funset"
+	assert_eq "$(helper "$cn" "ss_attr '$fhost' attr_model")" Linux \
+		"smoke: the node sweep left $fhost alone"
 	helper_ok "$cn" "drop_subsys_glob '$fdev'"
-	helper_ok "$cn" "drop_subsys_glob '$fempty'"
+	helper_ok "$cn" "drop_subsys_glob '$fhost'"
+	helper_ok "$cn" "host_link_drop '$ophost'"
 	got=$(helper "$cn" "cn_residue $(hex16 "${CNID[$cn]}")")
 	[ -z "$got" ] || die "smoke: vm$cn still holds cn objects: $got"
 	out=$(cnctl "$cn" check-cn --fresh --revision "${CNSYNC[$cn]}")

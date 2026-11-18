@@ -85,23 +85,38 @@ type NqnParts struct {
 // IsDnvNqn reports whether an NQN is in the dnv namespace at all, whether or
 // not it decodes. The distinction matters to a sweep: a subsystem whose NQN
 // carries the dnv prefix but decodes to nothing — an unknown kind, a wrong
-// arity, a non-hex id — is "not ours, never touched", NOT the user-chosen
-// host-facing NQN that ParseNqn's false otherwise means. Treating it as
-// host-facing would let a malformed name get a subsystem deleted, because a
-// host-facing subsystem with no namespace device and dnv's model is swept as
-// unowned.
+// arity, a non-hex id — is "not ours" unless a held request names it, NOT
+// the user-chosen host-facing NQN that ParseNqn's false otherwise means.
+// Treating it as host-facing would let a malformed name get a subsystem
+// deleted, because a host-facing subsystem with no namespace device can be
+// swept as unowned; the cn agent attributes one only by a held request that
+// names it (cnagent.md CN21).
 func IsDnvNqn(nqn string) bool {
 	return strings.HasPrefix(nqn, NqnPrefix+":")
+}
+
+// IsCloneSrcNqn reports whether an NQN may be a clone's source by the dnv
+// namespace rule (architecture.md, Common validation): one in no dnv
+// namespace, or one that decodes as a transfer NQN (XferNqn). Any other NQN
+// in the dnv namespace is one the cn agent never judges as a clone source,
+// so its connection would outlive its clone (cnagent.md CN21).
+func IsCloneSrcNqn(nqn string) bool {
+	if !IsDnvNqn(nqn) {
+		return true
+	}
+	parts, ok := ParseNqn(nqn)
+	return ok && parts.Kind == NqnKindXfer
 }
 
 // ParseNqn decodes a dnv-format NQN. A host-facing subsystem NQN is chosen by
 // the user and carries nothing, so it parses false; that "false" is the
 // signal the sweep attributes such a subsystem by the held request that names
-// it, its namespaces' backing device, and with no namespace device its model
-// instead. The gateway refuses a NEW host-facing NQN in the dnv
-// namespace (architecture.md, Common validation), but a stored subsystem
-// may still carry one: if it decodes, it is attributed as
-// the kind it mimics, and if it does not, it is left alone (IsDnvNqn).
+// it, its namespaces' backing device, and with no namespace device, at node
+// level, its links, then its model when it has one and its age when not. The gateway refuses a NEW
+// host-facing NQN in the dnv namespace (architecture.md, Common validation),
+// but a stored subsystem may still carry one: if it decodes, it is attributed
+// as the kind it mimics, and if it does not, a held request that names it is
+// its only owner (IsDnvNqn).
 func ParseNqn(nqn string) (NqnParts, bool) {
 	rest, found := strings.CutPrefix(nqn, NqnPrefix+":")
 	if !found {

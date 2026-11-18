@@ -1063,8 +1063,9 @@ device torn down by the wrong agent. Non-attribution is the safe failure: a
 name that carries a dnv prefix but decodes to nothing is dropped by every
 attribution path — a failed `ParseDmName` keeps the device out of each
 agent's own set, an md array with such a member is never stopped, and an
-NQN in the dnv namespace that does not decode is never touched
-(`IsDnvNqn`) — so no agent ever sweeps it.
+NQN in the dnv namespace that does not decode is attributed only by a held
+cntlr request that names it (`IsDnvNqn`; `cnagent.md` CN21) — so no agent
+ever sweeps one by reading it.
 
 The kinds are the `DmKind` constants. DN side: `d0` error, `d1` linear,
 `d2` migr-src, `d3` migr-final (dm-clone), `d4` side (the [D13] extent-run
@@ -1113,12 +1114,16 @@ is "not a dnv name" rather than a partly-read one, because the caller's next
 move is a removal. A subsystem in a cn's nvmet tree whose NQN does not
 decode is a host-facing one, which the cn agent attributes by the held
 request that still names it or else by the namespaces it is built out of,
-and with none of those by its model; one dnv did not make, an operator's
-own export on the same kernel, is foreign and never touched (`cnagent.md`
-CN21); one carrying the dnv prefix is never touched
-(dm-device kinds); and any other NQN that does not decode, a connection's
-on the cn or any on the dn, is left alone and never judged (`cnagent.md`
-CN21; `dnagent.md` DN6). Every dm kind of both roles carries the **sp id
+and with none of those, at node level only, by its hosts and port links,
+then its model when it has one and its age when it has neither; one dnv did not make that holds a namespace or
+a link, an operator's own export on the same kernel, is foreign and never
+touched (`cnagent.md` CN21); one carrying the dnv prefix is touched only
+while a held request names it (dm-device kinds); a connection on the cn
+whose NQN is in no dnv namespace, or is a transfer of another cluster, is
+judged at node level only, by its controllers' host NQN, and one in the dnv
+namespace that does not decode is never judged (`cnagent.md` CN21); and any
+NQN on the dn that does not decode is left alone and never judged
+(`dnagent.md` DN6). Every dm kind of both roles carries the **sp id
 first**,
 which is what lets a sweep group a node's devices by storage pool without
 consulting any stored plan (Teardown by sweep).
@@ -1881,25 +1886,37 @@ harmless. A migration destination takes its run before it zeroes
   judged as one dnv minted: the cn agent would never sweep one shaped like
   a side export's NQN after `DeleteSubsystem`, and would sweep one shaped
   like a transfer NQN naming another SP of this cluster as that SP's
-  transfer export while a host still uses it. Host NQNs
-  (`Transfer.allowed_hosts` carries `CnHostNqn`s), `CreateClone.src_nqn`
-  (another SP's `XferNqn`, NQNs) and the `nqn` of `UpdateSubsystemHosts`,
+  transfer export while a host still uses it. `CreateClone.src_nqn`, in turn,
+  may lie in the dnv namespace only when it decodes as a transfer NQN
+  (`XferNqn`, `IsCloneSrcNqn`; another SP's, NQNs), and the cn agent's
+  cntlr gate holds a stored clone to the same rule (`cnagent.md` CN8): the
+  cn agent removes a clone source once its clone has gone only when it is a
+  transfer, judged by its NQN, or in no dnv namespace, judged by its
+  controllers' host NQN (`cnagent.md` CN21), so any other source in the dnv
+  namespace would stay connected for good. Host NQNs
+  (`Transfer.allowed_hosts` carries `CnHostNqn`s) and the `nqn` of
+  `UpdateSubsystemHosts`,
   `CreateNamespace`, `UpdateNamespaceDev` and `UpdateNamespaceSuspended`,
   which address an existing subsystem, take only the NQN rule above. A
   subsystem already stored in the dnv namespace can therefore still be
   updated if its NQN passes the NQN rule, and emptied and deleted in any
   case (next bullet); only a transfer cannot be built on it. The rule does
   not change how the cn agent judges such a subsystem, though (Teardown by
-  sweep). Unless its NQN decodes as a transfer NQN of this cluster, no sweep
-  of the cn agent ever removes it or a namespace in it, and nothing else
-  removes a namespace that left `ns_list`: the sweep is the only remover of
-  one (`cnagent.md` CN21). So a namespace `DeleteNamespace` takes out of
-  such a subsystem stays enabled on every CN that had it, and once a CN's
-  cntlr stops wanting the subsystem — after `DeleteSubsystem`, at
-  `SP_LEVEL_DISABLE` (SpLevel), or when that cntlr leaves the CN — the cn
-  agent leaves its nvmet subsystem there too, still linked to that CN's
-  port and holding every namespace that CN had enabled in it. Each such
-  namespace keeps its ns-dev open, so that SP's sweep on that CN stops at
+  sweep). When its NQN decodes to nothing, the cn agent attributes it by a
+  claim alone: while a cntlr request it holds names the subsystem, the
+  subsystem is that cntlr's SP's, so the sweep — the only remover of a
+  namespace that left `ns_list` (`cnagent.md` CN21) — removes a namespace
+  `DeleteNamespace` takes out of it, and the whole subsystem at
+  `SP_LEVEL_DISABLE` (SpLevel). One that decodes as any dnv kind other than
+  a transfer of this cluster, such as one shaped like a side export's NQN,
+  is never attributed, claimed or not. Such a subsystem, and one that
+  decodes to nothing once no cntlr request the agent holds names it —
+  after `DeleteSubsystem`, or when that cntlr leaves the CN — is removed
+  by no sweep of the cn agent, nor is a namespace in it: a namespace
+  `DeleteNamespace` takes out of one that decodes stays enabled on every
+  CN that had it, and the cn agent leaves its nvmet subsystem there, still
+  linked to that CN's port and holding every namespace it still has. Each
+  such namespace keeps its ns-dev open, so that SP's sweep on that CN stops at
   the ns-dev layer on every pass and leaves the SP's unwanted objects in
   every lower layer in place (Teardown by sweep); once that cntlr or the SP
   is deleted, that is the rest of that SP's stack on that CN. And one that
@@ -3200,7 +3217,8 @@ size paragraph below), the message naming both products, the size, the
 pool's block and the bound; `INVALID_ARGUMENT` when
 `src_tr_conf` is empty or longer than `MaxCntlrCntPerSp` or has an entry
 that is empty or has a member left blank (Common validation), `src_nqn` is
-invalid, `src_slice_cnt` is outside one to `MaxSliceCntPerSp` (unlike
+invalid or lies in the dnv namespace and is no transfer NQN (Common
+validation), `src_slice_cnt` is outside one to `MaxSliceCntPerSp` (unlike
 `CreateStoragePool`'s own `slice_cnt`, a
 `src_slice_cnt` of zero is refused, not defaulted — it describes a source
 that already exists), `src_stripe_size` is not a positive multiple of
@@ -5108,9 +5126,10 @@ device is there, the next enumeration finds it.
   the ids of a dm name say which agent, which cluster, which node and
   which sp a dm device belongs to (dm-device kinds, dm device names), and
   a dnv-format NQN says the same of itself (NQNs); an object whose name
-  carries no owner is attributed by what it is built out of, a cn's
-  host-facing subsystem with no namespace device by its model, and only
-  then judged. Several agents share one kernel — a lab node runs a dn
+  carries no owner is attributed by what it is built out of — a cn's
+  host-facing subsystem with no namespace device, at node level, by its
+  model when it has a host or a port link and by its age when it has
+  neither (`cnagent.md` CN21) — and only then judged. Several agents share one kernel — a lab node runs a dn
   agent per disk and often a cn beside them, and dm, nvmet and the nvme
   host namespace are all per kernel — so an object attributed to another
   agent is **foreign** and is never touched, and only one that no agent's
@@ -6689,7 +6708,13 @@ finalizations (Transfers, Clones). Nothing is dm-suspended, short of a park
 whose load fails and leaves the ns-dev suspended on its old table
 (`cnagent.md` CN16): hosts queue against the ANA state, which nvmet
 enforces at the target, and a local opener of a parked ns-dev gets EIO
-rather than blocking ([D12]).
+rather than blocking ([D12]). A park whose load fails is never followed by
+the disable of the namespace over that ns-dev in the same pass: the sweep
+removes an unwanted namespace only once its ns-dev is known out of
+suspension, the build disables no namespace whose live device reads
+suspended or does not read, as when a request gives a namespace's id to
+another namespace (`cnagent.md` CN16, CN21), and the converge the worker's
+re-send brings parks it again.
 
 ### SpLevel
 
@@ -7372,7 +7397,8 @@ document and the component documents cite it by its id.
   CN18). With the park, the CN holds no
   suspension **across** a converge pass at all, short of a `dmsetup`
   command that fails (a park whose load fails leaves its ns-dev suspended
-  on its old table: `cnagent.md` CN16 and `cnagent.md`, Known limits).
+  on its old table, and the sweep then disables no namespace over it until
+  a later converge parks it: `cnagent.md` CN16 and CN21).
   What is left there is the snapshot quiesce of `cnagent.md` CN14, a
   suspend bracketed around one per-slice snapshot sequence and resumed
   before the pass returns unless that resume fails — otherwise bounded by

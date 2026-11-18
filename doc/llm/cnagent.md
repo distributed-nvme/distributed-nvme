@@ -159,8 +159,11 @@ the leg NQN, then for each controller entry inside that subsystem
 directory read its "address" and parse it as comma-separated key=value
 pairs (traddr, trsvcid) to find that side's controller — never by
 field position; a controller whose "address" did not answer, or is
-absent, is never taken for it (CN10). `dnagent.md` SH20 places the
-wrapper among the nvme-host wrappers.
+absent, is never taken for it (CN10). The node-level sweep's disconnect
+of a clone source judged by its host NQN takes, by the same wrapper, each
+controller of the source's subsystem whose "hostnqn" reads this cn's host
+NQN (CN21). `dnagent.md` SH20 places the wrapper among the nvme-host
+wrappers.
 
 ## `cmd/dnv-agent cn`
 
@@ -179,9 +182,10 @@ and the rule — the cn names that carry no cn id, and why placement
 does not reliably keep two cntlrs of one SP off one kernel — is
 `architecture.md`, Controller node, common. CN21's attribution assumes
 the rule as well: a host-facing subsystem that no cntlr this agent holds
-claims, with no namespace device and dnv's model, is unowned and removed
-at node level, and another cn agent's subsystem passes through that very
-shape while it is being built.
+claims, with no namespace device, is unowned and removed at node level
+when it carries dnv's model and has a host or a port link, or when it has
+neither and is older than the grace, and another cn agent's subsystem
+passes through those shapes while it is being built.
 
 CN-CM2. `runCn` has the shape of `runDn` (`dnagent.md` CM4), with two cn
 differences. `--capacity` is optional, since zero is a value (CN3), and a
@@ -365,12 +369,15 @@ delete its request and its chunks for want of a list that could not be
 read. The node-level sweep (CN21) keeps a skipped cntlr's sp stacks
 while its pointer is in the list; but its request-derived set — the clone
 sources some request names (CN21) — is read from the cntlrs in memory
-alone, so a skipped cntlr's clone source that the sweep judges at all, a
-transfer of this cluster (CN21), survives a sweep whose listings answered
-only while a live dm-clone maps it: the source reads as in use. So is the
-ownership of its host-facing subsystems: with no cntlr in memory to claim
-it, a subsystem of its sp that holds no namespace device and carries
-dnv's model reads as nobody's and is removed, and its connected hosts can lose that controller:
+alone, so a skipped cntlr's clone source — a transfer of this cluster,
+or, at node level, a connection whose controllers carry this cn's host
+NQN (CN21) — survives a sweep whose listings answered only while a live
+dm-clone maps it: the source reads as in use. So is the ownership of its
+host-facing subsystems: with no cntlr in memory to claim it, a subsystem
+of its sp that holds no namespace device reads as nobody's when it
+carries dnv's model and has a host or a port link, or when it has neither
+and is older than the grace, and is removed, and its connected hosts can
+lose that controller:
 a reconnect attempt that finds the subsystem gone while the port still
 carries another subsystem is refused with DNR and ends the host's
 reconnects, so such a host must connect again once the cntlr's
@@ -557,7 +564,12 @@ within `MaxNqnLength` and no "..", copied as `conf.go` copies `model`'s
 `SubsysPath`, `HostPath` and the port links are built from the first two,
 so a "/" or ".." would reach outside the subsystem's directory, and the
 source NQN goes into the kernel's connect, whose options a "," would add
-to. Every NQN a released gateway stored passes it; only a store written
+to. A clone's `src_nqn` in the dnv namespace must also decode as a transfer
+NQN (`IsCloneSrcNqn`), the gateway's rule for `CreateClone`: the sweep
+removes a clone source once its clone has gone only when it is a transfer,
+or in no dnv namespace (CN21), so any other source in the dnv namespace
+would stay connected for good. Every NQN a released gateway stored passes
+the NQN rule; only a store written
 before the gateway held NQNs to the rule, or by hand, can carry one it
 refuses, and such a pool takes no new request until the record that
 carries the NQN is removed or replaced. The gateway keeps a way for each:
@@ -842,9 +854,9 @@ build phase — and runs on every converge:
    L6 can remove that raid0.
 
 A fourth park runs inside the chain rather than here, because its set is
-the chain's own: every unwanted ns-dev, whether or not a plan names it —
-at `SP_LEVEL_DISABLE` the plan names them all and the wanted set holds
-none of them. See CN21's P0.
+the chain's own: every unwanted ns-dev and transfer device, whether or not
+a plan names it — at `SP_LEVEL_DISABLE` the plan names them all and the
+wanted set holds none of them. See CN21's P0.
 
 A primary-to-standby flip is therefore nothing but "the desired set
 shrank to the standby shape"; standby-to-primary is "it grew".
@@ -901,8 +913,10 @@ sizes come from the desired state, never from probing the device.
 converge takes one right before its sweep, and its lookups share it,
 except that it walks again after a connect step that ran a connect
 (below), and once more when a clone source's lookup reads no subsystem,
-before it connects the source (CN18, step 1); the sweep's check that a
-removed connection is gone walks once per connection (Known limits). The
+before it connects the source (CN18, step 1). The sweep's check that a
+removed connection is gone reads that connection's entry of the walk its
+pass took — its "subsysnqn" again, then its controllers — as a lookup
+does, so a sweep walks once however many connections it checks (CN21). The
 list of connections of a converge's sweep comes from the walk the
 converge takes before it, and that of the verdict of a cntlr's read from
 the reading's (CN21, CN30). Reason: a walk lists
@@ -1209,8 +1223,10 @@ the cutover back, which waits for the primary's live path to the
 destination (`dnv-worker.md` RW18): a destination cannot copy from a dead
 source.
 
-**The disconnect registry.** The CN21 sweep's `nvme disconnect --nqn` —
-L10's legs, L5's clone sources and the node-level pass's unowned sources —
+**The disconnect registry.** The CN21 sweep's `nvme disconnect` —
+`--nqn` for L10's legs, L5's clone sources and the node-level pass's
+unowned transfer connections, `--device` for each controller of this cn's
+host NQN of the node-level pass's other unowned clone sources (CN21) —
 is never run inline: when the target vanishes mid-delete the kernel cannot
 enter error recovery on a DELETING controller, the controller's shutdown
 command waits out the admin timeout, and `nvme disconnect` waits with it
@@ -1242,7 +1258,9 @@ a slot. And the connect steps read it too: a converge that wants a
 subsystem whose disconnect is still in flight neither adopts nor connects
 it — the controller it would adopt is about to be deleted under it, and
 one connected beside it could go with it, the disconnect being by NQN — so
-the step fails. Once the goroutine has gone, a read names each side and
+the step fails. A disconnect by controller is registered under its
+subsystem's NQN as well, and runs its controllers one after another on
+one slot, each read again right before its disconnect (CN21). Once the goroutine has gone, a read names each side and
 each clone source endpoint the subsystem holds no controller for (CN30),
 and the converge of the worker's re-send reads the subsystem afresh and
 connects whatever is missing. The CN28 probe asks the same question: while the disconnect is in
@@ -3279,7 +3297,9 @@ reloads one whose table does not match, and one whose table does match
 while it is suspended, and that reload resumes it as a side effect.
 CN21's P0 is neither of those two: it is `parkByTable`, which has no plan
 at all for an ns-dev nothing wants, so it bare-resumes an already-parked
-one and reloads only an unparked one. `removeDm` resumes any suspended
+one and reloads only an unparked one; a load onto the td's dm-error that
+fails is followed at once by the plain error table, and an ns-dev it
+cannot prove out of suspension stops its chain before L1 (CN21). `removeDm` resumes any suspended
 device it is about to remove, whatever its table: `dmsetup remove` does
 not succeed on a suspended device. `UpdateNamespaceDev` arrives as a
 changed `td_id` and is exactly one ns-dev reload — the nvmet
@@ -3295,13 +3315,22 @@ verbatim from the record (the gateway stamped them, `architecture.md`,
 `allowed_hosts` as `architecture.md`, Primary cntlr, states (an empty list
 admits no host); per `Namespace` an nvmet
 namespace whose nsid is `ns_idx`, whose "device_path" is its own ns-dev,
-with "uuid" and "nguid" from the record. A namespace that has left `ns_list`
+with "uuid" and "nguid" from the record. An enabled namespace whose live
+device or identity differs from the record's is disabled first, unless its
+live device is a dm device that reads suspended or does not read: the
+disable waits, unkillable, for every request in flight on the namespace,
+which a suspended dm device never completes. That is the namespace whose id
+a request gives to another namespace, while it still sits over the old
+namespace's ns-dev, which CN21's park step parks as unwanted and could not
+prove out of suspension; the step fails, its row names it, and the converge
+the worker's re-send brings parks the ns-dev first. A namespace that has left `ns_list`
 under a subsystem that stays is not the build's to remove: CN21's L1 alone
 removes it (and so nothing does under a subsystem whose NQN carries the dnv
-prefix but decodes to nothing, which the sweep never attributes —
-`architecture.md`, dm-device kinds, and Common validation), `AnaGrpIdInaccessible`
-first, after P0 has parked or resumed the ns-dev under it — or failed to,
-which does not stop L1 (CN21) — and only from an enumeration that answered.
+prefix but decodes to nothing and that no held request names, which the
+sweep never attributes — `architecture.md`, dm-device kinds, and Common
+validation), moved `AnaGrpIdInaccessible` by P0 before P0 parks or resumes
+the ns-dev under it, only once P0 knows that ns-dev out of suspension
+(CN21), and only from an enumeration that answered.
 A pass in which one did not — one of the four listings, or the sweep's own
 listing of that subsystem's namespaces — leaves it where it is with a non-OK
 verdict, and the next pass whose listings answer removes it.
@@ -3879,10 +3908,12 @@ something else brings, finishes the build.
 **Removing a clone** is not a step of its own: it is the CN21 sweep
 finding the clone's objects unwanted and taking them in layer order,
 which is exactly the order this stack needs. A clone that left
-`clone_list` loses its dm-clone, its source connection when the source is
-a transfer of this cluster (CN21; a source of any other kind stays
-connected, Known limits), and its clone meta group's array or group
-device and legs; one the role or the level
+`clone_list` loses its dm-clone, its source connection — by L5 when the
+source is a transfer of this cluster, by the node-level pass when it is in
+no dnv namespace or a transfer of another cluster, through its controllers
+of this cn's host NQN (CN21); CN8's gate refuses any other source in the
+dnv namespace — and its clone meta group's array or group device and
+legs; one the role or the level
 merely suppresses loses its dm-clone, and of its clone meta group only
 what the role and the level take from any group — a standby has no array
 or group device (CN12), and the level takes the array or group device
@@ -3948,7 +3979,8 @@ dm-clone tables), and a suppressed clone is still in that list.
 * L5 disconnects the source subsystem — the one a clone that has left
   `clone_list` loses beside its clone meta group when its NQN is a
   transfer NQN of this cluster (CN21); by NQN is safe here, as every path
-  of it is going. The disconnect runs off the pass (CN10), so
+  of it is going. A source under any other NQN is the node-level pass's,
+  which judges it by its controllers' host NQN (CN21). The disconnect runs off the pass (CN10), so
   the connection is that pass's leftover until a later pass finds it
   gone, and a clone created on the same source meanwhile waits for it
   rather than adopt it (step 1). The set of unowned sources is computed
@@ -4005,8 +4037,10 @@ cn behavior per level, each holding at that level and above:
   level-blind (CN21: a source is in use while any stored cntlr's
   `clone_list` names it, which `sp_level` does not shorten, or a live
   dm-clone table maps it), so it is disconnected only once the clone
-  leaves `clone_list` or the cntlr's stored state goes, and then only
-  when its NQN is a transfer NQN of this cluster (CN21); the ns-devs of
+  leaves `clone_list` or the cntlr's stored state goes — by the cntlr's
+  L5 when its NQN is a transfer NQN of this cluster, by the node-level
+  pass when it is in no dnv namespace or a transfer of another cluster
+  (CN21); the ns-devs of
   clone-target tds go on `CnErrorName` (CN16 rule 4), so an `auto_resume`
   clone's destination namespace stays exported and optimized and its
   host takes IO errors instead of queueing (CN16). A clone's clone meta
@@ -4103,8 +4137,9 @@ cn agent runs it at two scopes:
   write lock on the startup one, which is only stronger: this cntlr's sp
   minus the CN9 wanted set. It removes only objects attributed to its own
   sp, so two cntlrs of one CN sweep concurrently without meeting. The one
-  exception is L5's clone-source connections, which belong to no sp at
-  all and which both scopes disconnect — safe because "in use" is read
+  exception is L5's clone-source connections of our cluster's transfers,
+  which belong to no sp at all and which both scopes disconnect — safe
+  because "in use" is read
   from every stored cntlr's request (and from the live tables), and a
   cntlr's request is stored before its converge issues any
   `nvme connect`, so a source another cntlr is about to use is already
@@ -4132,9 +4167,11 @@ enumeration of CN12 (`ListArrays`, strict: one array that did not answer
 fails it — never `Md.Walk`'s unanswered rule); the sysfs walk of CN10
 for nvme host connections — at cntlr level the converge's own, taken
 right before its sweep and shared with its build, at node level one of
-its own (`ListAllSubsys`) — whose list fails on any entry whose
-"subsysnqn" read did not answer, as `ListAllSubsys` does (`dnagent.md`
-SH20); and the listing of the nvmet subsystems tree, in the agent's own
+its own — whose list fails on any entry whose "subsysnqn" read did not
+answer (`SubsysWalk.Briefs`; `dnagent.md` SH20), and which the pass keeps:
+each of its checks that a removed connection is gone reads that
+connection's entry again (below), so a pass lists the host's subsystems
+once; and the listing of the nvmet subsystems tree, in the agent's own
 process, where only a tree that is not there is empty and a listing that
 failed otherwise did not answer (`dnagent.md` SH15, SH18) — linked to the
 port or not, a partially removed subsystem is unlinked but present. A cntlr's
@@ -4184,23 +4221,54 @@ array with a foreign, unparsable or differently-owned member is silently
 skipped and never stopped, which is what leaves a co-hosted dn agent's
 udev-assembled array alone. A side-export host connection is ours by the
 cn id inside the NQN, which is how it is told from one another CN of this
-cluster holds. A host connection is a clone source of ours only when its
-NQN is a transfer NQN of our cluster (`XferNqn`), the one kind of NQN that
-says a clone of this cluster dials it. Such a connection belongs to no sp
-— its NQN names the source sp, not the cntlr that dials it — so the only
-test there is is "does somebody here still want it": it is in use iff
-some cntlr this process holds names it as a clone's `src_nqn` or a live
-dm-clone table maps its namespace device, and unowned otherwise. A clone
-source under any other NQN — another pool's subsystem, whose NQN its user
-chose, or a transfer of another cluster — names no owner here, and the
-sweep reads no other mark of who made a connection, so no sweep ever
-judges it and it stays connected once its clone has gone (Known limits). A
-subsystem in the nvmet tree whose NQN is dnv-format says whose it is
-outright: a transfer subsystem of our cluster is the transfer export of
-the sp its NQN names, and an NQN that carries the dnv prefix but decodes
-to nothing is left alone (`architecture.md`, dm-device kinds) rather than
-falling through to the rule below. Only a name that decodes as neither —
-no dnv prefix at all — reaches that rule. A host-facing nvmet subsystem
+cluster holds. A host connection whose NQN is a transfer NQN of our
+cluster (`XferNqn`), the one kind of NQN that says a clone of this
+cluster dials it, is a clone source of ours at both scopes. Such a
+connection belongs to no sp — its NQN names the source sp, not the cntlr
+that dials it — so the only test there is is "does somebody here still
+want it": it is in use iff some cntlr this process holds names it as a
+clone's `src_nqn` or a live dm-clone table maps its namespace device, and
+unowned otherwise. A clone source under any other NQN — another pool's
+subsystem, whose NQN its user chose, or a transfer of another cluster —
+names no owner in its NQN, so the node-level scope alone judges it, by
+the mark the kernel keeps of who opened a controller: the controller's
+"hostnqn" (`dnagent.md` SH20). It judges so a connection whose NQN is in
+no dnv namespace, or is a transfer of another cluster: any other NQN in the
+dnv namespace is no clone source the cn opens, as CN8's gate refuses a
+clone whose `src_nqn` is one (`IsCloneSrcNqn`) — a leg is its sp's chain's,
+a migration source a co-hosted dn agent connects is that agent's — and one
+that decodes to nothing is left alone, as a newer build's may be after a
+rollback (`architecture.md`, dm-device kinds). A source of that kind a
+build without the gate's rule connected stays (Known limits). Such
+a connection, one of whose controllers reads this cn's host NQN
+(`CnHostNqn`), is a clone source of ours, since the cn opens nothing else
+with that NQN but its legs; it is unowned by the same test of use, the
+live dm-clones' half reading its namespace device too. Its disconnect takes
+only the controllers that read this cn's host NQN, one by one by device,
+never the NQN: the host keeps one subsystem per NQN, so a host stack on
+the same machine can hold a controller of it under a host NQN of its own,
+which a disconnect by NQN would cut (CN10's registry holds it under the
+NQN all the same). The disconnect runs later, off the pass, and the kernel
+gives a freed controller's number to the next controller connected, so
+right before each controller's disconnect it reads that controller again,
+as the cut of a migrating leg's path does (CN10): still listed under the
+source's entry, whose "subsysnqn" still reads the source, and its
+"hostnqn" this cn's; one that fails that read is passed over. A
+connection a held request names costs no read; every other connection it
+judges costs a listing of its entry and a "hostnqn" read per controller
+up to the first that reads ours, in every node pass, the node's reads
+included (Known limits); a cntlr's pass reads none, as it would in every cntlr read,
+every round. A "hostnqn" read that did not answer leaves the connection
+alone for the pass, named as a failed enumeration. A subsystem in the
+nvmet tree whose NQN is dnv-format says whose it is outright: a transfer
+subsystem of our cluster is the transfer export of the sp its NQN names.
+An NQN that carries the dnv prefix but decodes to nothing is judged by a
+claim alone: one a held request's `nqn_to_subsystem` names is that
+cntlr's sp's, so L1 removes its namespaces that left the request, and an
+unclaimed one is left alone (`architecture.md`, dm-device kinds) rather
+than falling through to the rule below — it may be a newer build's
+subsystem over a wanted ns-dev after a rollback. Only a name that decodes
+as neither — no dnv prefix at all — reaches that rule. A host-facing nvmet subsystem
 carries a user-chosen NQN and therefore carries no ids at all, so it is
 attributed in two steps, the request first for the reason
 `architecture.md`, Teardown by sweep, gives. First, a cntlr this process
@@ -4218,47 +4286,94 @@ empty one does) —
 an ns-dev of ours (`CnNsDevName`) makes it that sp's; any other device,
 another cn's or another cluster's ns-dev or a device that is no ns-dev at
 all, makes the subsystem foreign and untouchable, since dnv exports a host
-namespace only over an ns-dev. A subsystem with no namespace device is
-dnv's only when its "attr_model" reads dnv's model name
-(`common.NvmeModel`), which the gateway stamps on every subsystem record
-and the converge writes right after it closes the subsystem and, when the
-new cntlid range lies above the live one, raises its cntlid max, before any
-namespace or link, and it is then unowned; with the kernel's default model
-it is foreign, and a model
-read that did not answer makes it not ours for the pass, named as a failed
-enumeration. Unowned subsystems only the node-level scope removes.
-Reason: the node-level sweep is the only remover of a host-facing
-subsystem a teardown left behind with no namespace that names it, while an
+namespace only over an ns-dev. A subsystem with no namespace device is no
+pool's at cntlr level, and nothing more of it is read there. At node level
+its allowed hosts and its port links — a listing of the ports directory
+and one of each port's links, built at most once a pass — are listed
+next, in the agent's own process (SH18); a listing looks up no attribute
+file. With a host or a port link its "attr_model" alone decides, with no
+age: dnv's model name (`common.NvmeModel`), which the gateway stamps on
+every subsystem record and the converge writes right after it closes the
+subsystem and, when the new cntlid range lies above the live one, raises
+its cntlid max, before any namespace or link, makes it unowned — what a
+deletion leaves once its namespaces have gone, or a teardown cut off
+before its unlinks — and any other model foreign. A build of this agent in
+flight never reaches that read: a cntlr's request is stored before its
+converge builds anything, so its subsystems are claimed (above). With
+neither link its configfs directory's age decides, read in process too,
+and no attribute file of it is read: younger than `CnSubsysOrphanGrace` it
+is left alone, as another program's build between its `mkdir` and its
+first namespace may be; older, it exports nothing and is unowned whatever
+its model — what a converge cut off between its `mkdir` and its model
+write leaves. A model, age, hosts or port read that did not answer makes
+it not ours for the pass, named as a failed enumeration. Reasons: on a
+kernel that stamps a subsystem directory on every lookup of one of its
+attribute files (`dnagent.md` DN6), a model read in each cntlr read would
+keep a directory young for good, and the model read of the node's read,
+which runs every round, would make a linked one young again for the
+`SyncupCn` that read brings, so the age can judge only a subsystem whose
+model is never read; no memory decides a removal (`architecture.md`,
+Teardown by sweep); the dn's export age rule works so (`dnagent.md` DN6);
+and an empty subsystem with no link exports nothing. The price is an
+operator's own empty subsystem on a controller node (Known limits).
+Unowned subsystems only the node-level scope removes. Reason: the
+node-level sweep is the only remover of a host-facing subsystem a teardown
+or a cut-off build left behind with no namespace that names it, while an
 operator's own export on the same kernel must never be touched. Calling anything
 unowned assumes at most one cn agent per kernel (`cmd/dnv-agent cn`); a co-hosted dn
 agent is fine, because its NQNs are all dnv-format dn kinds, which never
 reach that arm.
 
-**P0, before every layer**: every unwanted ns-dev is parked, unless the
-park fails (below). It has no plan — nothing wanted names it, and its td
-may be leaving in the same pass — so the park is derived from the
-device's own live table. Only one backing names a td: a raid0
-(`CnRaid0Name`), whose ids are also its td's dm-error's (`CnErrorName`),
-so there the target is
-CN16's own. Anywhere else — a table this build never wrote, an ns-dev
-over a dm-clone — the device is reloaded onto an error table of its own
-size, which is the same thing one indirection shorter. A device already
-parked is left alone but resumed if it is suspended. Both halves matter:
-disabling the nvmet namespace above it in L1 closes its backing device,
-and that does not complete on a suspended dm device; and the reload's
-own flushing suspend is what completes the in-flight host IO instead of
-replaying it at resume onto a stack that is about to go. A park that
-fails does not stop the chain: L1 still runs on that pass, and an ns-dev
-whose load failed is still suspended on its old table (the reload fails
-closed, CN16) — the suspended device the first half is there to keep
-from L1 (Known limits).
+**P0, before every layer, the park step.** First every unwanted
+namespace moves to `AnaGrpIdInaccessible` — one dropped under a subsystem
+that stays, and every namespace of a subsystem that left the request,
+listed for it — so nvmet refuses new host IO to it, the order a planned
+park has too (CN16). Then every suspended device of ours below an unwanted
+ns-dev or transfer device of the chain is resumed, on whatever table is
+live, children before their parent. Then each unwanted ns-dev and each
+unwanted transfer device is parked. A park has no plan — nothing wanted
+names the device, and its td may be leaving in the same pass — so it is
+derived from the device's own live table. For an ns-dev only one backing
+names a td: a raid0 (`CnRaid0Name`), whose ids are also its td's dm-error's
+(`CnErrorName`), so there the target is CN16's own. Anywhere else — a
+table this build never wrote, an ns-dev over a dm-clone, a transfer device,
+whose shape off service is an error table of its size (CN17) — the device
+is reloaded onto an error table of its own size, which is the same thing
+one indirection shorter; a load onto the td's dm-error that fails is
+followed at once by the plain error table, since an error target names no
+device that can have gone since the read. A device already parked is left
+alone but resumed if it is suspended. Each step matters: L1's disable of an
+nvmet namespace waits, unkillable, for every request in flight on it, and
+a suspended dm device under it never completes one, so the pass would hold
+its CN1 locks in the kernel for as long as the device stays so; the
+reload's own flushing suspend is what completes the in-flight host IO
+instead of replaying it at resume onto a stack that is about to go; and a
+suspended device below holds the IO that suspend waits for. Nothing on a
+controller node stays suspended across passes on purpose
+(`architecture.md`, Namespace suspend semantics), so a suspended device of
+ours below — a raid0, a thin volume — was left so by a reload or a quiesce
+that failed or was cut off, and a bare resume releases its IO where it was
+going, as the dn's P0 does (`dnagent.md` DN6). One `dmsetup info` listing
+of the node comes first, and when it answered whole and reads no device of
+ours suspended but the ones being parked, no table below is read: the
+common case costs one command whatever the stacks' depth. **A device the
+park cannot prove out of suspension stops the chain before L1**, as a
+layer that left something behind does: proved out means absent, never
+suspended, or its reload or resume went through; a `dmsetup info` that did
+not answer proves nothing, nor does a suspended device whose table did not
+read, as a bare resume would replay its IO onto the stack being retired
+(CN16). The layers below report their objects untouched, so the reply
+names the device, and the converge the worker's re-send brings
+(`dnv-worker.md` RW4) parks it again. A failed ANA move, or a failed read
+or resume below, stops nothing: the park's own result is what the chain
+stops on.
 
 **Layers, strictly top-down.** Within one sp's chain:
 
 L1. nvmet. Each unwanted namespace under a surviving subsystem attributed
-to the sp (above) goes `AnaGrpIdInaccessible` and is then removed (a host
-still holding a path is told to stop using it rather than losing it under
-IO) — by this layer alone: the build phase's `ensureSubsystem` converges
+to the sp (above), which P0 has moved `AnaGrpIdInaccessible` (a host still
+holding a path is told to stop using it rather than losing it under IO), is
+removed — by this layer alone: the build phase's `ensureSubsystem` converges
 the wanted namespaces and removes none, so a pass whose enumeration did
 not answer removes none either; then the unwanted subsystems whole (port
 link, namespace disable, namespace rmdir, allowed-hosts unlink, subsystem
@@ -4327,8 +4442,12 @@ any message), and nothing in any layer runs mdadm --detail (CN12).
 **"Gone" is probed, never inferred from an exit status**
 (`architecture.md`, Teardown by sweep): `dmsetup info` for a dm device,
 "array_state" for an array, a configfs read for a namespace or subsystem,
-the sysfs walk for a connection — where "gone" is the absence of any
-controller, not of the subsystem directory, and a controller the
+the connection's entry of the pass's walk, its "subsysnqn" read again, for
+a connection — where "gone" is the absence of any controller (for a clone
+source judged by its host NQN, of any controller that reads this cn's host
+NQN), not of the subsystem directory; an entry whose "subsysnqn" now reads
+another NQN is another subsystem, as the kernel gives a freed entry's
+number to the next new one; and a controller the
 subsystem still lists after its device was deleted is no controller
 (CN10): read as present, either would hold the descent below its layer
 and set a disconnect going on every pass; a probe that itself did not
@@ -5714,9 +5833,8 @@ sp-less clone-source connections below. Neither reports the other's sp
 chain, because each drives its own `Syncup*`: reporting a cntlr's chain
 leftover on `CheckCn` would re-issue a `SyncupCn` that builds no chain
 for that sp at all (CN21: an sp in the pointer list gets none). One kind
-of object both verdicts can name: an unowned clone-source connection,
-which by the attribution of CN21 is a connection to one of our cluster's
-transfers. It belongs to no sp at all, so both scopes enumerate it
+of object both verdicts can name: an unowned clone-source connection to
+one of our cluster's transfers (CN21). It belongs to no sp at all, so both scopes enumerate it
 node-wide (CN21), the cntlr-level L5 set being the same set the
 node-level pass uses: our cluster's transfer connections that no stored
 cntlr names as a clone's `src_nqn` and no live dm-clone table maps. Such
@@ -5725,8 +5843,8 @@ an NQN is therefore reported by `CheckCn` and by every
 `SyncupCn` and each cntlr's `SyncupCntlr` — one round of work more than
 the minimum, and never a round less, which is the safe direction for a
 verdict whose only job is to make somebody try again. A clone source
-under any other NQN is in neither set, so neither verdict names it
-(Known limits). A cntlr whose stored
+under any other NQN only the node-level verdict names, once CN21 reads it
+ours and unowned. A cntlr whose stored
 conf the gate refuses has no verdict either — it converged nothing and
 enumerated nothing, and naming objects this agent is not allowed to remove
 would be a leftover report no `Syncup*` could ever clear; what its read
@@ -6046,28 +6164,11 @@ stores instead is CN23's.
   take such a leg must ask for the force: once the wrong leg is repaired
   away, the array assembles from the other, hosts read its older data and
   write onto it, and going back loses those writes.
-* A park whose load fails can wedge the cntlr: a reload fails closed
-  (CN16) and P0 only logs a park that fails (CN21), so an unwanted ns-dev
-  that was still serving stays dm-suspended on its old table while L1
-  runs over it. A namespace CN9's pre-step 1 has not moved — its loop is
-  over the plan, so one dropped from `ns_list`, one under a subsystem
-  that left the request, or any of an sp no longer in the
-  `cntlr_pointer_list` — is still in the ANA group it had when the park's
-  suspend lands, and if that is `AnaGrpIdOptimized`, host IO that arrives
-  after the suspend queues in dm. L1's namespace disable (or the one
-  inside a whole subsystem's removal) then waits in the kernel for that
-  IO: a configfs write returns only when the kernel does (`osclient.md`,
-  ReadFile / WriteFile / WriteFileDirect), and the pass holds its CN1
-  locks — the cntlr's object lock, or the node write lock at node level
-  and at startup (CN21) — so no later pass reaches the reload that would
-  release it. A namespace no host IO reaches after the suspend is not
-  exposed; only a reload or resume of the ns-dev from outside the agent
-  ends it.
-* A host-facing subsystem dnv made whose converge stopped before its
-  `attr_model` write — a kill, or a refused or unanswered step before it —
-  reads the kernel's default model, so once no cntlr claims it and it holds
-  no namespace device the node-level sweep reads it as foreign and leaves
-  it (CN21); an operator removes it.
+* An operator's own empty subsystem on a controller node — one with no
+  namespace device, no allowed host and no port link, that no held request
+  names — is removed by the node-level sweep once it is older than
+  `CnSubsysOrphanGrace`, whatever its model (CN21). The introduction's
+  requirements keep subsystems that are not dnv's off a controller node.
 * A clone's bitmap apply takes time that grows with its ranges: its
   create, resume or reload and a build that finds hydration off (CN18 step
   4) and a push of a changed chunk (CN22) apply the whole skip set under
@@ -6084,14 +6185,15 @@ stores instead is CN23's.
   discard: a pause for nothing, and those regions are copied, until the
   next apply. A cancelled push sends no further range and still waits for
   the one in the kernel.
-* A namespace dropped from a dnv-prefixed subsystem that decodes to
-  nothing stays enabled: the sweep is the only remover of a namespace
-  (CN21), and it never attributes a subsystem whose NQN carries the dnv
-  prefix but decodes to nothing — neither to an sp nor as unowned
-  (`architecture.md`, dm-device kinds) — so a namespace `DeleteNamespace` takes out of
-  one stays enabled on every CN that had it, and that sp's chain stops
-  at the ns-dev layer on every pass (`architecture.md`, Common
-  validation).
+* A subsystem whose NQN carries the dnv prefix but decodes to nothing
+  stays, with its namespaces, once no held request names it: the sweep
+  never attributes such a subsystem unclaimed (CN21; `architecture.md`,
+  dm-device kinds), so its namespaces stay enabled on every CN that had
+  them, keep their ns-devs open, and that sp's chain stops at the ns-dev
+  layer on every pass until an operator removes the subsystem. The
+  gateway refuses a subsystem NQN in dnv's namespace (`architecture.md`,
+  Common validation), so only a request the gateway did not check, such
+  as a hand-written store record or a direct agent call, carries one.
 * A transfer whose origin namespace left the request while its thin
   device stayed is named by nothing: the cntlr's verdict leaves out every
   row of a transfer whose origin the request no longer names (CN30), so
@@ -6404,33 +6506,37 @@ stores instead is CN23's.
   underneath. Reads of regions not yet hydrated then fail until a later
   converge of that cntlr connects the source afresh and reloads the
   table. The window runs from that read to the registration.
-* A clone source that is not a transfer of this cluster stays connected
-  after its clone has gone: the sweep judges a clone-source connection only
-  when its NQN is a transfer NQN of this cluster (CN21), so a connection to
-  another pool's subsystem, or to a transfer of another cluster, stays on
-  every CN whose build of the clone connected it — a controller per source
-  endpoint and the source's namespace head — until an operator disconnects
-  it or the node reboots. That includes a primary whose build stopped
-  before the dm-clone, since CN18 connects the source in step 1, ahead of
-  the clone meta group's check and the dm-clone. A clone created after it
-  on the same source adopts it (CN18
-  step 1). Like every connection the agent makes it has no controller-loss
-  timeout (`dnagent.md` SH20), so once the source's export goes its
-  controller can go on reconnecting for as long as it stays.
-* The sweep's check that a removed connection is gone walks
-  "/sys/class/nvme-subsystem" once per connection: the probe behind CN10's
-  disconnect registry — for L10's legs, L5's clone sources and the
-  node-level pass's unowned sources — lists it and reads entries'
-  "subsysnqn" for each connection it checks (`ListSubsys`). So a pass that
-  removes many connections — a pool's teardown, a level that takes the
-  legs away (CN19), the node-level sweep under the node write lock — makes
-  a number of reads that grows with the square of their count, and so
-  does a converge that connects many legs, such as a standby's first
-  build, which walks again after each connect step (CN10). Reason: the
-  check is each removal's own fresh probe (CN21) under `ListSubsys`'s rule
-  (`dnagent.md` SH20); the reads are listings and file reads in the
-  agent's own process, which start no process, and only a pass that
-  removes or connects many connections makes them.
+* A clone source in the dnv namespace that is no transfer stays connected
+  once its clone has gone, on every controller node whose build connected
+  it before CN8's gate held a clone's `src_nqn` to `IsCloneSrcNqn`: the
+  node-level pass never judges a connection in the dnv namespace that is
+  no transfer (CN21), and from then on the gate refuses every request
+  that carries such a source, the stored one at startup and in a read too.
+  Only a request stored before the gateway held `CreateClone` to the rule,
+  or written by hand, carries one; an operator disconnects the source.
+* A connection made by hand with this controller node's host NQN to a
+  subsystem that is not dnv's, which no held request names, is taken by the
+  node-level sweep for a clone source of ours whose clone has gone (CN21),
+  and its controllers of that host NQN are disconnected. dnv writes no
+  host NQN file of the machine's own, so only a person who copies the
+  cn's host NQN makes one.
+* A machine that is also a host pays for the node-level clone source
+  judgment in every node pass, the node's reads included (CN21): each
+  connection whose NQN is in no dnv namespace, or is a transfer of another
+  cluster, and that no held request names — every connection of the
+  machine's own host stack among them — costs a listing of its entry and a
+  "hostnqn" read per controller. The reads are in the agent's own process
+  and start no process. A controller node that is no host holds such a
+  connection only while a clone source of another kind outlives its clone,
+  until the pass that removes it; a co-hosted dn agent's migration
+  connections cost nothing, as their NQNs are dnv's.
+* A converge that connects many legs, such as a standby's first build,
+  walks "/sys/class/nvme-subsystem" again after each connect step (CN10),
+  so it makes a number of reads that grows with the square of their count.
+  Reason: the kernel may give the subsystem a connect makes the number of
+  an entry freed since the walk (CN10); the reads are listings and file
+  reads in the agent's own process, which start no process, and only a
+  converge that connects many connections makes them.
 * A thin `delete` message that fails after its volume's removal is
   re-driven only once, by the sweep of that pool's ids its own pass runs
   under a request that counts as delivered (CN8, CN14), and nothing of it

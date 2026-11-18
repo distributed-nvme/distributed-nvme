@@ -740,9 +740,13 @@ func widestCntlrReq(revision uint64, shape widestShape) *pb.SyncupCntlrRequest {
 	}
 	req.CloneList = nil
 	for c := 0; c < shape.clones; c++ {
-		clone := cloneOfTd(uint64(0x50000+c), maxNqn(testSrcNqn+"-",
-			fmt.Sprintf("-%d", c)), uint64(0x10000+common.MaxSsCntPerSp*
-			common.MaxNsCntPerSs+c))
+		// Another pool's subsystem as the source: a transfer NQN padded
+		// to the limit would no longer decode, which the cntlr gate
+		// refuses for a source in the dnv namespace (IsCloneSrcNqn).
+		clone := cloneOfTd(uint64(0x50000+c), maxNqn(
+			"nqn.2024-01.io.dnv-it:src-", fmt.Sprintf("-%d", c)),
+			uint64(0x10000+common.MaxSsCntPerSp*
+				common.MaxNsCntPerSs+c))
 		clone.SrcTrConfList = nil
 		for k := 0; k < common.MaxCntlrCntPerSp; k++ {
 			clone.SrcTrConfList = append(clone.SrcTrConfList,

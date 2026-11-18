@@ -212,17 +212,19 @@ that it is starting.
 its path live and optimized, a data round trip, clean check rounds, and the
 side torn down by an empty side list (`dnagent.md` DN6 to DN10, L1, L2, L5,
 L7). Before the teardown it proves the age gate on a real kernel (`dnagent.md`
-DN6, SH18): an export of the side's sp for a leg no side holds, made by hand
-with no namespace and no port link. While it is young the fresh rounds stay
-clean, the agent's log shows its age read in the agent's own process at least
-as many times as the stage sent fresh rounds under its trace id, and no
-listing of its namespaces or of the ports, listings the agent makes in its own
-process too (`dnagent.md` SH18), and its directory's time, read from the shell
-before and after, does not move. Once it is older than the orphan
-grace, the real one, as nothing backdates it, a fresh round reports it as a
-leftover, the agent's log shows its namespaces and the ports listed as many
-times as its age was read, at least once, and the next syncup removes it,
-which the case's residue check proves too. Each count is a total over the
+DN6, SH18): two exports of the side's sp for legs no side holds, made by hand
+with no port link, one with no namespace and one with namespace one whose
+"device_path" was never written, which DN6 counts as none. While they are
+young the fresh rounds stay clean, the agent's log shows each one's age read
+in the agent's own process at least as many times as the stage sent fresh
+rounds under its trace id, and no listing of their namespaces or of the
+ports, listings the agent makes in its own process too (`dnagent.md` SH18),
+and their directories' times, read from the shell before and after, do not
+move. Once they are older than the orphan grace, the real one, as nothing
+backdates them, a fresh round reports both as leftovers, the agent's log
+shows each one's namespaces, and the ports, listed as many times as its age
+was read, at least once, and the next syncup removes both, which the case's
+residue check proves too. Each count is a total over the
 reads the stage's own rounds started, not a count per read, as a read logs
 under the trace id of the round that started it (`dnagent.md` SH29) and a
 fresh round sends several rounds, each of which can start a read; the stage

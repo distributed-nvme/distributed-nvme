@@ -1059,15 +1059,16 @@ const (
 	// in the DN's pointer list keeps its export although no local state
 	// claims it, because such a side must be REBUILT from its record (DN8).
 	exportOurs
-	// exportOrphan: no namespace at all, its directory is older than
-	// DnExportOrphanGrace, and the subsystem is linked to our port or to no
-	// port at all. It exports nothing and holds nothing open — this is what
-	// our own half-finished RemoveSubsystem leaves behind, and what a build
-	// abandoned by an agent that died leaves — and leaving it would leak it
-	// for ever.
+	// exportOrphan: no namespace at all, or none with a device written, its
+	// directory is older than DnExportOrphanGrace, and the subsystem is
+	// linked to our port or to no port at all. It exports nothing and holds
+	// nothing open — this is what our own half-finished RemoveSubsystem
+	// leaves behind, and what a build abandoned by an agent that died leaves
+	// — and leaving it would leak it for ever.
 	exportOrphan
-	// exportYoung: no namespace one, and no older than the grace, whatever else
-	// it holds and whatever port it is linked to. It is not only debris: it is
+	// exportYoung: no namespace one, or one with no device written, and no
+	// older than the grace, whatever else it holds and whatever port it is
+	// linked to. It is not only debris: it is
 	// ALSO every export's shape between its subsystem `mkdir` and its namespace
 	// `mkdir` — carrying the CN's host link from the build's host-link step on —
 	// and on a kernel shared by several dn agents that build may be a sibling's,
@@ -1091,7 +1092,8 @@ const (
 
 // portLinks is the lazily built "which port is this subsystem linked to" map.
 // It is needed only for a subsystem whose directory is older than
-// DnExportOrphanGrace and that has no namespace at all (classifyExport): the
+// DnExportOrphanGrace and that has no namespace at all, or none with a device
+// written (classifyExport): the
 // age is read first, in the agent's own process, then the namespaces are
 // listed, and only then the ports. On a kernel that stamps the directory on an
 // attribute lookup, every export a build has in flight is younger than that,
@@ -1138,11 +1140,14 @@ func (s *DnAgentServer) portLinksOf(
 
 // classifyExport attributes one :2: export. It reads the export's namespace
 // one first — the cheap and usually conclusive evidence — and only when there
-// is none falls back to the subsystem directory's age, read in the agent's own
-// process; only for an export older than the grace does it then list the
-// namespaces and, when there are none at all, the port links. An export of
-// ours also names the per-CN dm-linear its namespace backs, which P0 has to
-// have out of suspension before it goes.
+// is none, or its device_path was never written, falls back to the subsystem
+// directory's age, read in the agent's own process; only for an export older
+// than the grace does it then list the namespaces and, when none of them has
+// a device written, the port links. A namespace whose device was never
+// written counts as none: it names nobody, and nvmet never enables it, so it
+// serves nothing (dnagent.md DN6). An export of ours also names the per-CN
+// dm-linear its namespace backs, which P0 has to have out of suspension
+// before it goes.
 //
 // The namespace is read by its id, sideNsid — every side export has that one
 // namespace and no other — and the namespaces are listed only when it is
@@ -1170,18 +1175,19 @@ func (s *DnAgentServer) classifyExport(
 		res.Fail(fmt.Sprintf("nvmet %s ns %d device_path", nqn, sideNsid), err)
 		return exportUnread, 0, 0, ""
 	}
-	if present {
+	if present && !nsDevicePathUnset(path) {
 		// One naming no device we can read an owner off is somebody
-		// else's, or a shape this build did not write — or a build
-		// abandoned between its namespace `mkdir` and its device_path
-		// write, which names nobody, so every agent reads it as foreign
-		// and no sweep removes it.
+		// else's, or a shape this build did not write.
 		owner, spId, sideId, linear, _ = nsOwner(path, clusterId, dnId)
 		return owner, spId, sideId, linear
 	}
-	// No namespace sideNsid: removed between the listing and this read, not
-	// built yet, half removed, or a shape this build did not write. The
-	// shape a build in flight has too (exportYoung), so the age comes first.
+	// No namespace sideNsid, or one whose device_path was never written,
+	// which names nobody and never serves (nvmet enables no namespace
+	// without a device): removed between the listing and this read, not
+	// built yet, half removed, a build abandoned between its namespace
+	// `mkdir` and its device_path write, or a shape this build did not
+	// write. The shape a build in flight has too (exportYoung), so the age
+	// comes first.
 	// It is read from the node, never remembered: the subsystem directory's
 	// mtime against our clock, read in our own process (SH18). A gone export
 	// is passed over and a young one left alone whatever it holds and
@@ -1213,12 +1219,17 @@ func (s *DnAgentServer) classifyExport(
 	}
 	sawNs := false
 	for _, nsid := range nsids {
-		sawNs = true
 		path, present, err := s.nvmet.NsDevicePath(ctx, nqn, nsid)
 		if err != nil {
 			res.Fail(fmt.Sprintf("nvmet %s ns %d device_path", nqn, nsid), err)
 			return exportUnread, 0, 0, ""
 		}
+		if present && nsDevicePathUnset(path) {
+			// A namespace whose device was never written is no namespace:
+			// it names nobody and never serves.
+			continue
+		}
+		sawNs = true
 		if !present {
 			continue
 		}
@@ -1233,7 +1244,8 @@ func (s *DnAgentServer) classifyExport(
 		// owner off. Somebody else's, or a shape this build did not write.
 		return exportForeign, 0, 0, ""
 	}
-	// No namespace at all, and old: the port links decide.
+	// No namespace at all, or none with a device written, and old: the port
+	// links decide.
 	byNqn, err := s.portLinksOf(ctx, links)
 	if err != nil {
 		res.Fail("nvmet port links", err)
@@ -1254,6 +1266,14 @@ func (s *DnAgentServer) classifyExport(
 	}
 	// No namespace, older than the grace, and on no port but ours.
 	return exportOrphan, 0, 0, ""
+}
+
+// nsDevicePathUnset says a namespace's device_path reads as never written:
+// the kernel prints such a path as agent.NsDevicePathUnset, and an empty one
+// names nothing either.
+func nsDevicePathUnset(path string) bool {
+	path = strings.TrimSpace(path)
+	return path == "" || path == agent.NsDevicePathUnset
 }
 
 // nsOwner attributes an export by one of its namespaces' device_path. named is

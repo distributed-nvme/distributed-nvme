@@ -65,7 +65,7 @@ const (
 	// host NQN and a clone's src_nqn need not, so the other four keep it.
 	volNqn    = "nqn.2024-01.io.example:vol-a"
 	volNqnB   = "nqn.2024-01.io.example:vol-b"
-	volSrcNqn = "nqn.2024-01.io.dnv:src"
+	volSrcNqn = "nqn.2024-01.io.dnv-it:src"
 	volHostA  = "nqn.2024-01.io.dnv:host-a"
 	volHostB  = "nqn.2024-01.io.dnv:host-b"
 	volHostC  = "nqn.2024-01.io.dnv:host-c"

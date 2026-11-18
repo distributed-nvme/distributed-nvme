@@ -402,12 +402,26 @@ and the admin queue (`dnagent.md` SH32); revoked again, the connected host keeps
 refused; host IO; clean check rounds, the namespace identity included
 (`dnagent.md` SH17); the raw thin-pool status line the auto-grow parses (CN28);
 a raid0 suspended by hand, which a check round's read names with the leftover
-code and the `SyncupCntlr` sent again resumes (CN30); two subsystems made by hand, one with a namespace over a device that is no
-ns-dev and one empty with the kernel's default model, which the teardown's
-node-level sweep leaves alone, and a third with dnv's model and a namespace
-whose device was never written, which it removes (CN21); and a teardown by an empty pointer
-list, re-sent while it replies leftover (CN7, CN21), leaving the CN no dm device or host-facing subsystem but the two made by hand, which the stage then removes itself, and a
-fresh `CheckCn` round replying clean (CN30).
+code and the `SyncupCntlr` sent again resumes (CN30); four subsystems made by
+hand (CN21): one with a namespace over a device that is no ns-dev, one empty
+with the kernel's default model, one with dnv's model and a namespace whose
+device was never written, and one empty with the kernel's default model and an
+allowed host. Through the grace the cntlr is read every round and those reads
+leave the directories' times where they were, and the node's read while they
+are young names none; past the grace the node's read names the two with no
+host and no port link, and a fifth made just then with dnv's model and an
+allowed host, which its model alone decides with no age, and the `SyncupCn`
+that brings removes the three and leaves the other two. A subsystem made by hand on the other VM, which is no transfer
+of the cluster, connected from the CN once with the cn agent's host NQN and
+once with another: the node's read names it, and the `SyncupCn` that brings
+disconnects the controller of the cn's host NQN and leaves the other's (CN21).
+A subsystem whose NQN carries dnv's prefix and decodes to nothing, which the
+request names: the namespace the request drops goes, and the subsystem, once
+the request no longer names it, stays, as the known limit says, until the
+stage removes it. Then a teardown by an empty pointer list, re-sent while it
+replies leftover (CN7, CN21), leaving the CN no dm device or host-facing
+subsystem but the two made by hand that it leaves alone, which the stage then
+removes itself, and a fresh `CheckCn` round replying clean (CN30).
 
 **redund** first pins, with no agent and no NVMe-oF path, the refusal the
 cross-leg half of failover safety rests on (`architecture.md`, [D16]): on one

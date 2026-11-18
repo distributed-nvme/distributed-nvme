@@ -76,7 +76,9 @@ func (h *NvmeHost) Disconnect(ctx context.Context, nqn string) error {
 // two sides of a migrating leg share one subsystem NQN ([D1]), so
 // `nvme disconnect --nqn` would kill the live path together with the dead one;
 // the cn agent drops the dead side by its controller device instead
-// (cnagent.md, `NvmeHost.DisconnectDevice`; CN10).
+// (cnagent.md, `NvmeHost.DisconnectDevice`; CN10), and so its own
+// controllers of a clone source that a host stack on the machine may share
+// (CN21).
 func (h *NvmeHost) DisconnectDevice(ctx context.Context, dev string) error {
 	return h.runOk(ctx, "nvme", "disconnect", "--device", dev)
 }
@@ -496,6 +498,13 @@ const (
 	CtrlHostNqn
 	// CtrlNone reads nothing of a controller (SubsysDevicePath).
 	CtrlNone
+	// CtrlHostNqnEach reads every controller's hostnqn, in listing order,
+	// and names in HostNqnCtrls each one equal to HostNqn: what a caller
+	// that disconnects a subsystem's controllers of one host NQN, and only
+	// those, needs (cnagent.md CN21). A controller whose hostnqn is not
+	// there, as one the kernel has deleted, is passed over. A hostnqn read
+	// that did not answer ends the read with its error, under either rule.
+	CtrlHostNqnEach
 )
 
 // SubsysReadOpts is what one ReadSubsys reads, and under which rule.
@@ -507,7 +516,7 @@ type SubsysReadOpts struct {
 	NsIdx uint32
 	// Ctrls is what is read of each controller.
 	Ctrls SubsysCtrlReads
-	// HostNqn is the host NQN CtrlHostNqn looks for.
+	// HostNqn is the host NQN CtrlHostNqn and CtrlHostNqnEach look for.
 	HostNqn string
 	// Transport reads each controller's transport too, under CtrlPaths
 	// (ListSubsys). A transport read that did not answer ends the read with
@@ -539,8 +548,11 @@ type SubsysRead struct {
 	// Ctrls is one CtrlRead per controller, in listing order (CtrlPaths).
 	Ctrls []CtrlRead
 	// HostNqnHeld says some controller's hostnqn equals HostNqn
-	// (CtrlHostNqn).
+	// (CtrlHostNqn, CtrlHostNqnEach).
 	HostNqnHeld bool
+	// HostNqnCtrls are the controllers, by device name, whose hostnqn
+	// equals HostNqn, in listing order (CtrlHostNqnEach).
+	HostNqnCtrls []string
 }
 
 // CtrlRead is the read of one controller, /sys/class/nvme/<Name>, under
@@ -619,16 +631,20 @@ func (h *NvmeHost) ReadSubsys(
 					return nil, err
 				}
 				read.Ctrls = append(read.Ctrls, ctrl)
-			case CtrlHostNqn:
+			case CtrlHostNqn, CtrlHostNqnEach:
 				got, ok, err := h.readTrimmed(
 					ctx, sysfsNvmeCtrlDir+"/"+name+"/hostnqn")
 				if err != nil {
 					return nil, err
 				}
-				if ok && got == opts.HostNqn {
-					read.HostNqnHeld = true
+				if !ok || got != opts.HostNqn {
+					continue
+				}
+				read.HostNqnHeld = true
+				if opts.Ctrls == CtrlHostNqn {
 					return read, nil
 				}
+				read.HostNqnCtrls = append(read.HostNqnCtrls, name)
 			}
 		}
 	}

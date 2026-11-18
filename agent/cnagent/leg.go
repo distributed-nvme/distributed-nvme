@@ -7,6 +7,7 @@ import (
 	"io/fs"
 	"log/slog"
 	"path"
+	"slices"
 	"strings"
 	"time"
 
@@ -1273,6 +1274,96 @@ func pathHealth(
 // and reads, whose OS calls would then be refused at the soft timeout
 // and report ERROR rows on healthy objects.
 func (s *CnAgentServer) startDisconnect(ctx context.Context, nqn string) {
+	s.startInRegistry(ctx, nqn, func(bgCtx context.Context) {
+		if err := s.host.Disconnect(bgCtx, nqn); err != nil {
+			slog.ErrorContext(bgCtx, "nvme disconnect failed",
+				slog.String("nqn", nqn),
+				slog.String("error", err.Error()))
+		}
+	})
+}
+
+// startDisconnectCtrls is startDisconnect by controller: it disconnects each
+// of ctrls by its device (`nvme disconnect --device`), one after another, in
+// one goroutine that holds one slot, and never the whole NQN. It is the
+// disconnect of a clone source the node-level sweep judges by its
+// controllers' host NQN (CN21): the host keeps one subsystem per NQN, so a
+// host stack on the same machine can hold a controller of the same
+// subsystem with a host NQN of its own, which a disconnect by NQN would cut.
+// The registry entry is the NQN's, as for startDisconnect, so a clone build
+// of the same source neither adopts nor connects it while the goroutine
+// runs (disconnectInFlight), and a second pass issues nothing more.
+//
+// The goroutine can run long after the pass read ctrls — it waits for a
+// slot, and each disconnect before it can wait out the admin timeout — and
+// the kernel gives a freed controller's number to the next controller
+// connected, which may be a leg's or a host stack's. So right before each
+// disconnect it reads the controller again (ownCtrlStill), as cutPaths
+// does, and passes over one that is no longer a controller of dir's
+// subsystem, nqn, opened with hostNqn.
+func (s *CnAgentServer) startDisconnectCtrls(
+	ctx context.Context,
+	nqn string,
+	dir string,
+	hostNqn string,
+	ctrls []string,
+) {
+	ctrls = append([]string(nil), ctrls...)
+	s.startInRegistry(ctx, nqn, func(bgCtx context.Context) {
+		for _, ctrl := range ctrls {
+			if !s.ownCtrlStill(bgCtx, nqn, dir, hostNqn, ctrl) {
+				slog.InfoContext(bgCtx, "controller passed over: no "+
+					"longer the source's of this host NQN",
+					slog.String("nqn", nqn),
+					slog.String("device", ctrl))
+				continue
+			}
+			if err := s.host.DisconnectDevice(bgCtx, ctrl); err != nil {
+				slog.ErrorContext(bgCtx, "nvme disconnect failed",
+					slog.String("nqn", nqn),
+					slog.String("device", ctrl),
+					slog.String("error", err.Error()))
+			}
+		}
+	})
+}
+
+// ownCtrlStill reads, right before a disconnect, whether ctrl is still a
+// controller of the subsystem entry dir, whose subsysnqn still reads nqn,
+// and whose hostnqn reads hostNqn. A read that did not answer is a no: the
+// disconnect of a controller nobody can name is never issued, and the next
+// pass's check sets one going again if the connection is still there.
+func (s *CnAgentServer) ownCtrlStill(
+	ctx context.Context,
+	nqn string,
+	dir string,
+	hostNqn string,
+	ctrl string,
+) bool {
+	got, ok, err := s.host.ReadSubsysNqn(ctx, dir)
+	if err != nil || !ok || got != nqn {
+		return false
+	}
+	read, err := s.host.ReadSubsys(ctx, dir, agent.SubsysReadOpts{
+		Ctrls:   agent.CtrlHostNqnEach,
+		HostNqn: hostNqn,
+		Rule:    agent.ReadStrict,
+	})
+	if err != nil {
+		return false
+	}
+	return slices.Contains(read.HostNqnCtrls, ctrl)
+}
+
+// startInRegistry is the registry half of startDisconnect and
+// startDisconnectCtrls: it registers nqn, unless a disconnect of it is in
+// flight already, and runs run from a goroutine on rootCtx once a slot is
+// free, the entry living exactly as long as the goroutine.
+func (s *CnAgentServer) startInRegistry(
+	ctx context.Context,
+	nqn string,
+	run func(bgCtx context.Context),
+) {
 	s.mu.Lock()
 	if _, inFlight := s.disconnecting[nqn]; inFlight {
 		s.mu.Unlock()
@@ -1298,11 +1389,7 @@ func (s *CnAgentServer) startDisconnect(ctx context.Context, nqn string) {
 			return
 		}
 		defer func() { <-slots }()
-		if err := s.host.Disconnect(bgCtx, nqn); err != nil {
-			slog.ErrorContext(bgCtx, "nvme disconnect failed",
-				slog.String("nqn", nqn),
-				slog.String("error", err.Error()))
-		}
+		run(bgCtx)
 	}()
 }
 

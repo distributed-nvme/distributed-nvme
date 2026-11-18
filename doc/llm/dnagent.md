@@ -1073,14 +1073,17 @@ on the node, never the slices of a pool; the listings that grow with the
 slice count are the sysfs ones (`osclient.md`, ReadDir).
 On the dn, a sweep lists few configfs directories as long as no export it
 meets without namespace one is older than `DnExportOrphanGrace`: the
-attribution reads namespace one in process and, for an export without it,
-the export's age in process too (DN6), so the number of listings a
+attribution reads namespace one in process and, for an export without it
+or whose namespace one has no device written, the export's age in process
+too (DN6), so the number of listings a
 converge, a background read or the node-level sweep makes then grows with
 neither the slice count nor the number of agents on the kernel, and there
 too the listings that grow with the slice count are the sysfs ones. The
-dn's attribution lists a directory only for an export without namespace one
-that is older than the grace (DN6): its namespaces, once each time a sweep
-meets it, and, when it has no namespace at all, the port links — a listing
+dn's attribution lists a directory only for an export without namespace
+one, or whose namespace one has no device written, that is older than the
+grace (DN6): its namespaces, once each time a sweep meets it, and, when it
+has no namespace at all or none with a device written, the port links — a
+listing
 of the ports directory and one of each port's links, as many as the kernel
 has ports — at most once a sweep. On a kernel that stamps the directory on
 an attribute lookup no build in flight reads that old; Known limits names
@@ -1180,7 +1183,9 @@ taken from the names the listing holds, so at no read's cost, which
 `cnagent.md` CN10's head wait judges; and of its controllers what its
 caller reads — address, state and ANA state, with the transport where
 `ListSubsys` reads it; for `HeldWithHostNqn` each controller's "hostnqn"
-alone, up to the first that matches; for `SubsysDevicePath` nothing.
+alone, up to the first that matches; for the cn's disconnect by controller
+of a clone source every controller's "hostnqn", naming each that matches
+(`CtrlHostNqnEach`; `cnagent.md` CN21); for `SubsysDevicePath` nothing.
 `ListAllSubsys`, `ListSubsys`,
 `HeldWithHostNqn` and `SubsysDevicePath` each fail on a listing they make
 that failed, and each has its own rule for the reads past it:
@@ -1206,7 +1211,9 @@ blocked inside the kernel.
 controller of an NQN whose other paths must live — the two sides of
 a migrating leg share a subsystem NQN (`architecture.md`, [D1]), so the cn
 agent cannot use `--nqn` to drop a dead side or cut a live one
-(`cnagent.md` CN10); which controller it selects,
+(`cnagent.md` CN10), nor to drop its own controllers of a clone source a
+host stack on the same machine also holds (`cnagent.md` CN21); which
+controller it selects,
 and by which reads, is the cn role's rule (`cnagent.md`,
 `NvmeHost.DisconnectDevice`).
 
@@ -2152,10 +2159,14 @@ in an authoritative list, which is what keeps a side that must be rebuilt
 from its record exporting (DN8) even though no held side claims it. The
 namespace is read by its id — namespace one's "device_path"; every side
 export has that one namespace and no other (`SyncupSide`) — and the
-namespaces are listed only when there is no namespace one and the export is
-older than `DnExportOrphanGrace` (below); one whose namespace one names no
-per-CN linear of this cluster is foreign, whatever else it holds. The cost
-is the reason. Scope 1 attributes, in every sweep — each background
+namespaces are listed only when there is no namespace one, or one with no
+device written, and the export is older than `DnExportOrphanGrace` (below); one whose namespace one names no
+per-CN linear of this cluster is foreign, whatever else it holds. A
+namespace whose "device_path" was never written is no namespace here: the
+kernel prints its path as "(null)" (`NsDevicePathUnset`), nvmet enables no
+namespace without a device, so it names nobody and serves nothing, and an
+export whose namespace one is such is judged as one with no namespace one
+(below). The cost is the reason. Scope 1 attributes, in every sweep — each background
 read's verdict among them, the sweep with its removals left out (DN16) —
 every export of an sp this agent holds a device or a known side of that no
 held side of its own claims, which includes every sibling's export of that
@@ -2180,7 +2191,9 @@ can show. Removing it there takes the sibling's host link — and any
 namespace it adds meanwhile — from under its build, and a broken dn export
 is rebuilt only by some later converge of its side, which the breakage
 itself never triggers: a leg is lost that way. Only age tells an abandoned
-half-built export from one in flight, so an export without namespace one is
+half-built export from one in flight, so an export without namespace one —
+or whose namespace one has no device written, what a build abandoned
+between its namespace `mkdir` and its "device_path" write leaves — is
 judged by its **age** first: while its configfs subsystem directory is no
 older than `DnExportOrphanGrace` it is left alone that sweep, whatever else
 it holds and whatever port it is linked to — not removed, not a leftover,
@@ -2190,8 +2203,9 @@ owner's linear, or the age of an export nobody is building. Only an older
 one has its namespaces listed: a namespace at another id, which dnv never
 builds but another tool can make, decides it when its "device_path" names a
 per-CN linear of this cluster, as namespace one's would, and makes it
-foreign when none does. One with no namespace at all is then attributed by
-the nvmet **port** it is linked to, each agent converging exactly one port
+foreign when none does; a namespace with no device written counts as none.
+One with no namespace at all, or none with a device written, is then
+attributed by the nvmet **port** it is linked to, each agent converging exactly one port
 id: linked to a sibling's port, it is that sibling's; linked to no port, or
 only to ours, it is an orphan and goes — unless a held side still claims
 it, which is the claim rule again. The order is the cost. The age is one
@@ -2216,9 +2230,8 @@ node). Both link the one export, each to its own port, and a removal by one
 unlinks only its own port and leaves the export namespace-less on the
 other's: there the port links make it the other agent's, so no sibling of
 that agent reads it as an orphan. They also guard against a configfs
-change made outside dnv. (A build abandoned between its
-namespace `mkdir` and its "device_path" write leaves a namespace that
-names nobody; what becomes of it is a known limit, Known limits.) The age
+change made outside dnv. A namespace with no device written widens a race
+the namespace-less shape has already, which Known limits names. The age
 is read from the node, never remembered: the directory's mtime
 (`Nvmet.SubsysMtime`, read in the agent's own process, SH18) against the
 agent's clock, as exact as the kernel keeps it. A read of it that fails
@@ -2247,7 +2260,8 @@ does a first build still short of its namespace that long after its
 Nothing a sweep does looks up
 one of the subsystem's own "attr_*" files (it reads namespace one's
 "device_path", which sits in the namespace's directory and not the
-subsystem's, and which such an export does not have; it reads the
+subsystem's, and which such an export does not have or never had written;
+it reads the
 directory's own time, which looks up none of its entries, and, for an old
 export, lists the namespaces and the port links), so an abandoned export
 ages, and the first sweep that finds it
@@ -2424,13 +2438,15 @@ device — a side's export is built over its side device, which no level
 removes, and a removal that leaves the export stops the descent above it.
 They are not named for the reason the young export is not: naming them would
 only bring a `SyncupDn` that must not remove them yet. Once a sweep settles
-the export — it has its namespace one; or it is older than the grace and so
-ours, an orphan or foreign; or it is gone — the side devices and records are
+the export — it has its namespace one, with a device written; or it is older
+than the grace and so ours, an orphan or foreign; or it is gone — the side
+devices and records are
 judged as any others: a read's verdict names them, and the export too when
 it is an orphan, and the `SyncupDn` that verdict brings removes them. A
-sibling's export of the sp that stands young without namespace one on a
-shared kernel keeps them the same way, with the side's extents, until it has
-its namespace one or is old (Known limits).
+sibling's export of the sp that stands young without namespace one, or with
+one that has no device written, on a shared kernel keeps them the same way,
+with the side's extents, until it has its namespace one with a device or is
+old (Known limits).
 
 **"Gone" is probe-verified.** Every removal is followed by a re-probe —
 `dmsetup info` for a dm device, the configfs directory for a subsystem, the
@@ -4284,11 +4300,19 @@ else reported through `agent_reply` is still a protocol-level refusal.
   side's exports away (DN12 rule 3) still ends it, since neither needs the
   extent size. Only a corrupt store file produces such a request; an
   upgrade does not (`architecture.md`, Upgrade in lockstep).
-* A side export whose build was abandoned between its namespace `mkdir` and
-  its "device_path" write holds a namespace that names nobody. Every
-  agent's attribution (DN6) reads that export as foreign, so no sweep
-  removes it; a later converge of the side it was built for finishes it,
-  but once no side wants it, it stays.
+* On a kernel that keeps a subsystem directory's time at its `mkdir`, an
+  agent's build can lose its export to the sweep of another agent of the
+  kernel that holds a side of the same sp (DN6). A build still short of
+  its "device_path" write more than `DnExportOrphanGrace` after the
+  export's `mkdir` — a rebuild of an export whose first build stopped
+  early, or a first build retried that long — has its export read old with
+  no namespace one, or with one that has no device written yet, and with
+  no port link yet, since the port link is the build's last step; the
+  other agent then removes it as an orphan. The build fails a step, its
+  side's row reads the failure, and the converge the worker's re-send
+  brings builds the export again. Counting a namespace with no device
+  written as none widens that window by the steps from the namespace
+  `mkdir` to the "device_path" write.
 * A live export that reads older than `DnExportOrphanGrace` while it has no
   namespace costs a listing of its namespaces and of the port links (DN6,
   SH18): every agent on the kernel that holds a side of its sp, save one
@@ -4301,10 +4325,11 @@ else reported through `agent_reply` is still a protocol-level refusal.
   past the worker's bound makes a missed round (`dnv-worker.md` HL7). Three
   shapes leave a live export without its namespace. A removal unlinks the port, then removes the
   namespace, then the directory, so its export is namespace-less for a
-  moment. A build that is still short of its namespace more than the grace
-  after the export's `mkdir` — a rebuild of an export whose first build
-  stopped before its namespace, or a first build retried that long — is
-  namespace-less until its namespace `mkdir`. An export that two agents of
+  moment. A build that is still short of its namespace's "device_path"
+  write more than the grace after the export's `mkdir` — a rebuild of an
+  export whose first build stopped before it, or a first build retried that
+  long — reads as namespace-less until that write: a namespace with no
+  device written counts as none. An export that two agents of
   one kernel link, one for each side of a leg, is left namespace-less on one
   agent's port by the other's removal (DN6), and stays so until a converge
   of that agent builds its namespace again or removes the export, which can
@@ -4326,7 +4351,8 @@ else reported through `agent_reply` is still a protocol-level refusal.
   side device, its record and so its extents, neither removed nor named, for
   as long as one of three holds (DN6, An sp waits for its exports): an
   export of the sp that no held side claims stands on the kernel without
-  namespace one and younger than `DnExportOrphanGrace`; a read of an export
+  namespace one, or with one that has no device written, and younger than
+  `DnExportOrphanGrace`; a read of an export
   of the sp that no held side claims fails, whatever the export holds; or
   the listing of the nvmet subsystems does not answer. The failed read and
   the failed listing are named in the verdict; the young export is not. A

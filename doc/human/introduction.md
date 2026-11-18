@@ -353,6 +353,14 @@ loop device set up by `losetup` without `-b` and without `--direct-io`, or
 with `-b 512`. With direct IO and no `-b`, a loop device takes 4 KiB blocks
 when its file lies on a disk of 4 KiB sectors.
 
+A controller node holds no subsystem of anyone else that has no namespace,
+no host and no port: the cn agent's sweep removes such a subsystem once it
+is 30 s old, whoever made it, since a build or a removal of dnv cut short
+leaves that shape. And nothing but the cn agent connects with the host NQN,
+the name a host gives when it connects, that the cn agent uses on its node:
+the agent removes a connection opened with that name once no clone reads
+through it.
+
 Two settings the tutorial shows: a udev rule that keeps the system's own md
 assembly off dnv arrays, on disk nodes too, since a controller node's md
 superblocks reach their devices through the side exports; and the masked

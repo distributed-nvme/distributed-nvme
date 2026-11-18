@@ -331,6 +331,16 @@ type fakeNode struct {
 	// owner uid, octal mode, file type. A directory the fake holds without
 	// one answers as a private directory of the agent's own user.
 	dirStat map[string]string
+	// mtimes scripts the time readMtime answers per path: the age the
+	// node-level sweep judges a host-facing subsystem with no namespace
+	// device by (cnagent.md CN21). A path without one answers fakeDirMtime,
+	// long past.
+	mtimes map[string]time.Time
+	// stampAttrs, when set, makes a read of an nvmet subsystem's own
+	// attr_* file set that subsystem directory's time to its answer, as
+	// kernel 7.0 stamps the directory on every lookup of one of its
+	// attribute files (Nvmet.SubsysMtime).
+	stampAttrs func() time.Time
 }
 
 type fakeDm struct {
@@ -476,6 +486,9 @@ type fakeCtrl struct {
 	state    string
 	anaState string
 	pathDev  string // "nvme0c3n1"
+	// hostNqn is the host NQN the controller was connected with, which
+	// its sysfs hostnqn shows; "" for a planted one, which publishes none.
+	hostNqn string
 }
 
 func newFakeNode() *fakeNode {
@@ -531,6 +544,7 @@ func newFakeNode() *fakeNode {
 		hardGate:  make(map[string]chan struct{}),
 		cancelCmd: make(map[string]context.CancelFunc),
 		dirStat:   make(map[string]string),
+		mtimes:    make(map[string]time.Time),
 	}
 	f.dirs[sysfsNvmeSubsysDir] = true
 	f.dirs[sysfsNvmeCtrlDir] = true
@@ -748,6 +762,15 @@ func (f *fakeNode) readFile(ctx context.Context, path string) (string, error) {
 		f.sysfsNoDeadline = append(f.sysfsNoDeadline, path)
 	}
 	data, err := f.fileAnswer(path)
+	if f.stampAttrs != nil {
+		if rest, ok := strings.CutPrefix(
+			path, agent.NvmetRoot+"/subsystems/"); ok {
+			if nqn, attr, ok := strings.Cut(rest, "/"); ok &&
+				strings.HasPrefix(attr, "attr_") {
+				f.mtimes[agent.NvmetRoot+"/subsystems/"+nqn] = f.stampAttrs()
+			}
+		}
+	}
 	if after := f.afterRead[path]; after != nil {
 		delete(f.afterRead, path)
 		after()
@@ -901,8 +924,9 @@ func (f *fakeNode) holdersOf(key string) []string {
 
 // readMtime answers OsClient.ReadMtime, an mtime read in the agent's own
 // process: the port probe's test of whether the port's directory is there
-// (dnagent.md SH18). The cn judges no age, so every directory answers one
-// fixed time. It records "mtime <path>", and the command hooks match that
+// (dnagent.md SH18), and the age of a host-facing subsystem the node-level
+// sweep judges (cnagent.md CN21). A directory answers its time in mtimes, or
+// fakeDirMtime, long past. It records "mtime <path>", and the command hooks match that
 // line as they match a listing's: a fail hook answers an I/O error and a
 // kill hook a read the soft timeout cut off, both never a missing
 // directory, which only the model says. The gate, hardGate and cancelCmd
@@ -950,6 +974,9 @@ func (f *fakeNode) readMtime(
 		return time.Time{}, &fs.PathError{
 			Op: "lstat", Path: path, Err: syscall.ENOENT}
 	}
+	if mtime, ok := f.mtimes[path]; ok {
+		return mtime, nil
+	}
 	return fakeDirMtime, nil
 }
 
@@ -982,7 +1009,8 @@ func (f *fakeNode) parksOf(
 	return gate, hard, cancel
 }
 
-// fakeDirMtime is the one time readMtime answers for every directory.
+// fakeDirMtime is the time readMtime answers for a directory mtimes does not
+// name: long before any test's clock, so such a directory reads old.
 var fakeDirMtime = time.Unix(1700000000, 0)
 
 // inProcessHookErr applies the command hooks to the line of a call in the
@@ -3742,18 +3770,22 @@ func (f *fakeNode) nvmeConnect(args []string) (string, int) {
 	nqn := mdFlagValue(args, "--nqn")
 	trAddr := mdFlagValue(args, "--traddr")
 	trSvcId := mdFlagValue(args, "--trsvcid")
+	hostNqn := mdFlagValue(args, "--hostnqn")
 	if nqn == "" {
 		return "", 3
 	}
-	// A connect to an endpoint the host already holds a controller for is
-	// refused before it reaches the network: nvme-cli's own "already
-	// connected" check, and behind it the kernel's
+	// A connect to an endpoint the host already holds a controller of the
+	// same host NQN for is refused before it reaches the network: nvme-cli's
+	// own "already connected" check, and behind it the kernel's
 	// nvme_tcp_existing_controller, which answers EALREADY — the agent never
 	// passes --duplicate-connect. A controller being deleted, or dead, no
-	// longer counts (nvmf_ctlr_matches_baseopts).
+	// longer counts, and neither does one of another host NQN
+	// (nvmf_ctlr_matches_baseopts); a planted one, which carries none,
+	// matches any.
 	if held := f.subsystems[nqn]; held != nil {
 		for _, ctrl := range held.ctrls {
 			if ctrl.trAddr == trAddr && ctrl.trSvcId == trSvcId &&
+				(ctrl.hostNqn == "" || ctrl.hostNqn == hostNqn) &&
 				ctrl.state != "deleting" &&
 				ctrl.state != "deleting (no IO)" && ctrl.state != "dead" {
 				f.dispatchStderr =
@@ -3780,7 +3812,7 @@ func (f *fakeNode) nvmeConnect(args []string) (string, int) {
 	if !ok {
 		subsys = f.addSubsys(f.nextSubsys, nqn, f.nsHeadAt[nqn])
 	}
-	f.addCtrl(subsys, trAddr, trSvcId)
+	f.addCtrl(subsys, trAddr, trSvcId, hostNqn)
 	if during := f.duringConnect[key]; during != nil {
 		during()
 	}
@@ -3815,8 +3847,12 @@ func (f *fakeNode) addSubsys(idx int, nqn string, at headStages) *fakeSubsys {
 }
 
 // addCtrl adds a live controller of subsys at one endpoint, with its path
-// device's ana_state (anaOf, else optimized).
-func (f *fakeNode) addCtrl(subsys *fakeSubsys, trAddr, trSvcId string) {
+// device's ana_state (anaOf, else optimized) and, when hostNqn is set, its
+// hostnqn.
+func (f *fakeNode) addCtrl(
+	subsys *fakeSubsys,
+	trAddr, trSvcId, hostNqn string,
+) {
 	ctrlName := fmt.Sprintf("nvme%d", f.nextCtrl)
 	f.nextCtrl++
 	ana := "optimized"
@@ -3827,7 +3863,7 @@ func (f *fakeNode) addCtrl(subsys *fakeSubsys, trAddr, trSvcId string) {
 		strings.TrimPrefix(ctrlName, "nvme"))
 	ctrl := &fakeCtrl{
 		name: ctrlName, trAddr: trAddr, trSvcId: trSvcId,
-		state: "live", anaState: ana, pathDev: pathDev,
+		state: "live", anaState: ana, pathDev: pathDev, hostNqn: hostNqn,
 	}
 	subsys.ctrls = append(subsys.ctrls, ctrl)
 
@@ -3839,6 +3875,9 @@ func (f *fakeNode) addCtrl(subsys *fakeSubsys, trAddr, trSvcId string) {
 	f.files[ctrlDir+"/address"] = fmt.Sprintf(
 		"traddr=%s,trsvcid=%s,src_addr=%s\n", trAddr, trSvcId, trAddr)
 	f.files[ctrlDir+"/state"] = ctrl.state + "\n"
+	if hostNqn != "" {
+		f.files[ctrlDir+"/hostnqn"] = hostNqn + "\n"
+	}
 	f.dirs[ctrlDir+"/"+pathDev] = true
 	f.files[ctrlDir+"/"+pathDev+"/ana_state"] = ctrl.anaState + "\n"
 }
@@ -3859,7 +3898,7 @@ func (f *fakeNode) plantSubsys(idx int, nqn string, eps ...endpoint) {
 	f.dirs[sysfsNvmeCtrlDir] = true
 	subsys := f.addSubsys(idx, nqn, headStages{})
 	for _, ep := range eps {
-		f.addCtrl(subsys, ep.trAddr, ep.trSvcId)
+		f.addCtrl(subsys, ep.trAddr, ep.trSvcId, "")
 	}
 }
 

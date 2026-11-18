@@ -624,21 +624,28 @@ Measured times are in [the introduction](introduction.md#status-and-limits-of-01
   that read. State: accepted. The window is short, but the operator's
   level step can hold it open as long as the level stays. Not seen in the
   lab.
-- **Orphans the sweep never removes.** An export of a side whose build
-  stopped before the export named its device. A subsystem for hosts whose
-  build stopped before dnv set the model name by which it knows its own
-  subsystems. A connection to a clone
-  source outside this cluster, which reconnects for ever. A namespace in a
-  subsystem whose name has dnv's prefix but names no dnv object. The sweep
-  takes each for something that is not dnv's. Until the fix an operator
-  removes them by hand. State: fix
-  decided, the sweep learns to own them. Not seen in the lab.
-- **A park whose load fails wedges the cntlr.** A park sets a namespace
-  aside: its device is suspended and loaded with a table that serves
-  nothing, so that the volume under it can be changed. When the load
-  fails, the device stays suspended and host IO queues in it. State: fix
-  decided, the next converge repeats the load or resumes the device. Not
-  seen in the lab.
+- **A subsystem or a connection with dnv's prefix that names no dnv
+  object can stay.** A subsystem's name starts with dnv's prefix, but this
+  build of dnv reads no pool from it. While a cntlr asks for it, the sweep
+  treats it as that pool's subsystem. Once no cntlr asks for it, the sweep
+  leaves it and its namespaces alone, since a newer build of dnv may have
+  made it, and the pool's devices under those namespaces stay too. A
+  controller node's connection to a clone's source whose name has dnv's
+  prefix but is no transfer stays the same way once the clone has gone:
+  the sweep never judges such a connection. The gateway refuses such a
+  subsystem name, and the gateway and the cn agent refuse such a source
+  for a clone, so only a desired state written by hand, or one stored
+  before those checks, makes either. An operator removes it by hand.
+  State: accepted. Not seen in the lab.
+- **A controller node's sweep removes two things that may be an
+  operator's.** A subsystem that is not dnv's and has no namespace, no
+  host and no port, once it is 30 s old: a build or a removal of dnv cut
+  short leaves the same shape, and nothing else tells the two apart. And a
+  connection opened by hand with the host NQN that the cn agent uses, once
+  no clone reads through it: dnv takes it for the source of a clone that
+  has gone. State: accepted; a requirement, which
+  [the introduction](introduction.md#requirements) names. Not seen in the
+  lab.
 - **A clone build that keeps failing may start no failover.** Some ways of
   failing mark the primary unhealthy and others do not. The clone's
   namespaces stay inaccessible and the host waits, with no time limit,
@@ -1526,7 +1533,9 @@ design:
   degraded.** State: accepted.
 - **Steady control-plane cost.** The reaction pass reads the whole pool
   from etcd every interval. Every check round logs two records per object.
-  State: accepted. Fix decided: one subsystem listing per sweep pass.
+  On a controller node that is also a host, every read of the node also
+  reads the host NQN of each controller of a connection that is not dnv's,
+  one read per controller. State: accepted.
 - **The size cap on one message between dnv programs, and the cap on a
   program's commands.** Every dnv connection caps the size of one message,
   and every program caps how many commands and file operations it runs at

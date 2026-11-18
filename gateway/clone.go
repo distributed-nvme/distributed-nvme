@@ -334,7 +334,7 @@ func (s *Server) CreateClone(
 	); err != nil {
 		return nil, err
 	}
-	if err := validateNqn("src_nqn", req.GetSrcNqn()); err != nil {
+	if err := validateCloneSrcNqn("src_nqn", req.GetSrcNqn()); err != nil {
 		return nil, err
 	}
 	if err := validateCloneGeometry(

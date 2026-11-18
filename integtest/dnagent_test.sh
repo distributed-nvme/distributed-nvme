@@ -709,6 +709,17 @@ make_bare_export() {
 	mkdir "$NVMET/subsystems/$1" && echo made
 }
 
+# make_unset_export <nqn> — make_bare_export with namespace one made and its
+# device_path never written, the shape of a build abandoned between its
+# namespace mkdir and its device_path write: the kernel prints the path as
+# "(null)" and never enables the namespace. The namespace's mkdir is under
+# the namespaces directory, so it leaves the subsystem directory's time as
+# it is, and nothing here reads an attribute of the subsystem.
+make_unset_export() {
+	mkdir "$NVMET/subsystems/$1" &&
+		mkdir "$NVMET/subsystems/$1/namespaces/1" && echo made
+}
+
 # subsys_mtime <nqn> — the subsystem directory's time in whole seconds. stat
 # looks up the directory alone, so it leaves that time where it is.
 subsys_mtime() { stat -c %Y "$NVMET/subsystems/$1"; }
@@ -2378,13 +2389,15 @@ sync_side_2phase() { # dnidx rev1 rev2 sp leg side [extra syncup-side flags…]
 # ---------------------------------------------------------------------------
 
 # age_gate_stages proves DN6's age read on a real kernel (dnagent_integtest.md,
-# Cases, smoke): an export of the side's sp for a leg no side holds, made by
-# hand with no namespace and no port link. While it is young the disk node's
-# reads stay clean, each reading its age in the agent's own process and
-# listing neither its namespaces nor the ports, and nothing moves the
-# directory's time. Once it is older than the orphan grace — the real one:
-# nothing backdates it — a read reports it as a leftover after one listing of
-# its namespaces and one of the ports, and the next syncup removes it.
+# Cases, smoke): two exports of the side's sp for legs no side holds, made by
+# hand with no port link, one with no namespace and one with namespace one
+# whose device_path was never written, which DN6 counts as none. While they
+# are young the disk node's reads stay clean, each reading their ages in the
+# agent's own process and listing neither their namespaces nor the ports,
+# and nothing moves the directories' times. Once they are older than the
+# orphan grace — the real one: nothing backdates them — a read reports both
+# as leftovers after one listing of each one's namespaces and one of the
+# ports, and the next syncup removes both.
 #
 # The rounds are fresh, and a read logs under the trace id of the round that
 # started it (dnagent.md SH29), so the stage counts what the reads of its own
@@ -2395,19 +2408,27 @@ sync_side_2phase() { # dnidx rev1 rev2 sp leg side [extra syncup-side flags…]
 # its own.
 age_gate_stages() { # dnidx sp leg side cn
 	local dn=$1 sp=$2 leg=$3 side=$4 cn=$5
-	local nqn out t0 t1 i age details reads age_reads ns_lists port_lists
+	local bare nodev nqn out t0 t1 i age details reads age_reads ns_lists
+	local port_lists
+	local -A t0s
 	local rounds=3
-	nqn=$(side_to_cn_nqn "$CLUSTER" "$sp" 0x2 "$cn")
+	bare=$(side_to_cn_nqn "$CLUSTER" "$sp" 0x2 "$cn")
+	nodev=$(side_to_cn_nqn "$CLUSTER" "$sp" 0x3 "$cn")
 
-	stage bare "an export of the sp for a leg no side holds, made by hand"
-	assert_eq "$(helper "$dn" "subsys_present '$nqn'")" no "$nqn before"
-	helper "$dn" "make_bare_export '$nqn'" >/dev/null
-	# A second past the mkdir, so a lookup that moved the directory's time
+	stage bare "two exports of the sp for legs no side holds, made by hand"
+	for nqn in "$bare" "$nodev"; do
+		assert_eq "$(helper "$dn" "subsys_present '$nqn'")" no "$nqn before"
+	done
+	helper "$dn" "make_bare_export '$bare'" >/dev/null
+	helper "$dn" "make_unset_export '$nodev'" >/dev/null
+	# A second past the mkdirs, so a lookup that moved a directory's time
 	# would show in whole seconds.
 	sleep 2
-	t0=$(helper "$dn" "subsys_mtime '$nqn'")
+	for nqn in "$bare" "$nodev"; do
+		t0s[$nqn]=$(helper "$dn" "subsys_mtime '$nqn'")
+	done
 
-	stage young "reads while it is young: clean, its age read in process, nothing listed"
+	stage young "reads while they are young: clean, ages read in process, nothing listed"
 	for ((i = 1; i <= rounds; i++)); do
 		out=$(ctl "$dn" check-dn --fresh --revision "${DNREV[$dn]}" \
 			--show-info)
@@ -2415,47 +2436,61 @@ age_gate_stages() { # dnidx sp leg side cn
 		sleep 1
 	done
 	flush_reads "$dn" 0
-	t1=$(helper "$dn" "subsys_mtime '$nqn'")
-	assert_eq "$t1" "$t0" "the time of $nqn after the young rounds"
-	# Each read reads the age once; each fresh command's reply comes from a
-	# read one of its own rounds started, so there are at least as many.
-	reads=$(helper "$dn" "attribution_reads '$TRACE' '$nqn'")
-	case "$reads" in
-	*" 0 0") ;;
-	*) die "the young reads listed the namespaces or the ports of $nqn" \
-		"(age reads, namespace and port listings: $reads)" ;;
-	esac
-	[ "${reads%% *}" -ge "$rounds" ] ||
-		die "the young reads read the age of $nqn ${reads%% *} times," \
-			"want at least $rounds (age reads, namespace and port" \
-			"listings: $reads)"
+	for nqn in "$bare" "$nodev"; do
+		t0=${t0s[$nqn]}
+		t1=$(helper "$dn" "subsys_mtime '$nqn'")
+		assert_eq "$t1" "$t0" "the time of $nqn after the young rounds"
+		# Each read reads each age once; each fresh command's reply comes
+		# from a read one of its own rounds started, so there are at least
+		# as many.
+		reads=$(helper "$dn" "attribution_reads '$TRACE' '$nqn'")
+		case "$reads" in
+		*" 0 0") ;;
+		*) die "the young reads listed the namespaces or the ports of" \
+			"$nqn (age reads, namespace and port listings: $reads)" ;;
+		esac
+		[ "${reads%% *}" -ge "$rounds" ] ||
+			die "the young reads read the age of $nqn ${reads%% *} times," \
+				"want at least $rounds (age reads, namespace and port" \
+				"listings: $reads)"
+	done
 
-	stage old "past the orphan grace a read reports it, after one listing of each"
-	age=$(helper "$dn" "wait_older '$nqn' $ORPHAN_GRACE")
-	log "smoke: $nqn is ${age}s old"
+	stage old "past the orphan grace a read reports both, after one listing of each"
+	for nqn in "$bare" "$nodev"; do
+		age=$(helper "$dn" "wait_older '$nqn' $ORPHAN_GRACE")
+		log "smoke: $nqn is ${age}s old"
+	done
 	out=$(ctl "$dn" check-dn --fresh --revision "${DNREV[$dn]}" --show-info \
 		--expect-code 4)
 	details=$(jq_of "$out" '.agent_reply.details // ""')
-	case "$details" in
-	*"$nqn"*) ;;
-	*) die "the old export's check round names no $nqn: $details" ;;
-	esac
+	for nqn in "$bare" "$nodev"; do
+		case "$details" in
+		*"$nqn"*) ;;
+		*) die "the old exports' check round names no $nqn: $details" ;;
+		esac
+	done
 	flush_reads "$dn" 4
-	# Every read of the old export reads its age, lists its namespaces and
-	# lists the ports once each.
-	reads=$(helper "$dn" "attribution_reads '$TRACE' '$nqn'")
-	read -r age_reads ns_lists port_lists <<<"$reads"
-	[ "$age_reads" -ge 1 ] && [ "$ns_lists" = "$age_reads" ] &&
-		[ "$port_lists" = "$age_reads" ] ||
-		die "the old reads' age reads, namespace and port listings of" \
-			"$nqn are '$reads', want three equal counts of at least 1"
+	# Every read of an old export reads its age and lists its namespaces
+	# once each, and lists the ports once, for both exports together.
+	for nqn in "$bare" "$nodev"; do
+		reads=$(helper "$dn" "attribution_reads '$TRACE' '$nqn'")
+		read -r age_reads ns_lists port_lists <<<"$reads"
+		[ "$age_reads" -ge 1 ] && [ "$ns_lists" = "$age_reads" ] &&
+			[ "$port_lists" = "$age_reads" ] ||
+			die "the old reads' age reads, namespace and port listings" \
+				"of $nqn are '$reads', want three equal counts of at" \
+				"least 1"
+	done
 
-	stage sweep "the next syncup removes it"
+	stage sweep "the next syncup removes both"
 	bump_dn_rev "$dn"
 	out=$(ctl "$dn" syncup-dn --revision "${REV[$dn]}" \
 		--extent-size "$EXTENT_SIZE" --side "$sp:$leg:$side")
 	assert_dn_info_ok "$out" "smoke age syncup-dn"
-	assert_eq "$(helper "$dn" "subsys_present '$nqn'")" no "$nqn after the syncup"
+	for nqn in "$bare" "$nodev"; do
+		assert_eq "$(helper "$dn" "subsys_present '$nqn'")" no \
+			"$nqn after the syncup"
+	done
 }
 
 # flush_reads <dnidx> <code> runs one fresh check-dn under a trace id of its

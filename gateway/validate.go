@@ -124,11 +124,12 @@ func validateNqn(field string, value string) error {
 // one. The agents attribute a subsystem by parsing its NQN (common.ParseNqn,
 // common.IsDnvNqn): a user NQN of a dnv kind would read as one dnv minted, and
 // one that only carries the prefix is never swept. Host NQNs (a transfer's
-// allowed_hosts holds CnHostNqns), a clone's src_nqn (another SP's XferNqn)
-// and the nqn of UpdateSubsystemHosts, CreateNamespace, UpdateNamespaceDev
-// and UpdateNamespaceSuspended keep plain validateNqn, so a subsystem stored
-// in the dnv namespace can still be updated when its NQN passes
-// validateNqn; DeleteNamespace and DeleteSubsystem take validateExistingNqn.
+// allowed_hosts holds CnHostNqns) and the nqn of UpdateSubsystemHosts,
+// CreateNamespace, UpdateNamespaceDev and UpdateNamespaceSuspended keep plain
+// validateNqn, so a subsystem stored in the dnv namespace can still be
+// updated when its NQN passes validateNqn; a clone's src_nqn takes
+// validateCloneSrcNqn, and DeleteNamespace and DeleteSubsystem take
+// validateExistingNqn.
 func validateHostFacingNqn(field string, value string) error {
 	if err := validateNqn(field, value); err != nil {
 		return err
@@ -136,6 +137,25 @@ func validateHostFacingNqn(field string, value string) error {
 	if common.IsDnvNqn(value) {
 		return errInvalid("%s %q is in the dnv namespace %q, which only "+
 			"the NQNs dnv mints may use", field, value, common.NqnPrefix+":")
+	}
+	return nil
+}
+
+// validateCloneSrcNqn is validateNqn plus the dnv namespace rule for a
+// clone's source, CreateClone's src_nqn (architecture.md, Common
+// validation): one in the dnv namespace is taken only when it decodes as a
+// transfer NQN (common.IsCloneSrcNqn). The cn agent removes a clone source
+// once its clone has gone only when it is a transfer, judged by its NQN, or
+// in no dnv namespace, judged by its controllers' host NQN (cnagent.md
+// CN21), so any other source in the dnv namespace would stay connected on
+// every controller node that read it, for good.
+func validateCloneSrcNqn(field string, value string) error {
+	if err := validateNqn(field, value); err != nil {
+		return err
+	}
+	if !common.IsCloneSrcNqn(value) {
+		return errInvalid("%s %q is in the dnv namespace %q and is no "+
+			"transfer NQN", field, value, common.NqnPrefix+":")
 	}
 	return nil
 }

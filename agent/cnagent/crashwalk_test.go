@@ -829,7 +829,7 @@ func crashShapes() []crashShape {
 		setup:              built(crashRich(1, true, nil)),
 		conv:               sendCn(cnReq(2, false)),
 		held:               crashHeld{cn: cnReq(2, false)},
-		minCalls:           172,
+		minCalls:           164,
 		minBackgroundCalls: 5,
 		minStartupCalls:    14,
 		minDoubleCuts:      66,

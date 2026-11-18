@@ -431,7 +431,7 @@ func (e *sptEnv) createClonePool() uint64 {
 		SpName:        sptSpName,
 		CloneName:     "clone-a",
 		SrcTrConf:     []*pb.NvmeTrConf{sptTrConf("src:9000")},
-		SrcNqn:        "nqn.2024-01.io.dnv:src",
+		SrcNqn:        "nqn.2024-01.io.dnv-it:src",
 		SrcNsIdx:      1,
 		SrcSliceCnt:   1,
 		SrcStripeSize: 64 * 1024,

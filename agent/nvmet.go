@@ -354,10 +354,11 @@ type SubsysConf struct {
 // subsystem left open as not converged. The loop writes the rest in this
 // order, and raiseCntlidMax may write "attr_cntlid_max" ahead of it.
 func (c SubsysConf) attrs() [][2]string {
-	// The model comes right after the close and raiseCntlidMax: a subsystem
-	// with no namespace device is dnv's only by its model (cnagent.md CN21),
-	// so a converge cut off early should leave as few subsystems without it
-	// as it can.
+	// The model comes right after the close and raiseCntlidMax, before any
+	// host or port link: the cn sweep judges a subsystem with no namespace
+	// device by its model only once it has a host or a port link, and one
+	// with neither by its age alone (cnagent.md CN21), so a converge cut off
+	// early leaves no linked subsystem without dnv's model.
 	attrs := [][2]string{{"attr_allow_any_host", "0"}}
 	if c.Model != "" {
 		attrs = append(attrs, [2]string{"attr_model", c.Model})
@@ -577,6 +578,20 @@ type NsState struct {
 	AnaGrpId   int
 }
 
+// Disables says EnsureNamespace of conf writes enable=0 to the namespace
+// state reads: one that is enabled with another device or identity. That
+// write waits, unkillable, for every request in flight on the namespace,
+// which a suspended dm device under it never completes.
+func (conf NsConf) Disables(state *NsState) bool {
+	if state == nil || !state.Exists || !state.Enabled {
+		return false
+	}
+	identityOk := state.DevicePath == conf.DevicePath &&
+		(conf.Uuid == "" || SameNsId(state.Uuid, conf.Uuid)) &&
+		(conf.Nguid == "" || SameNsId(state.Nguid, conf.Nguid))
+	return !identityOk
+}
+
 // ProbeNamespace reads one namespace's state. Every attribute is read
 // strictly (readAttrStrict): only a file that is not there reads as absent,
 // and a read that did not answer is an error, never an empty value. Read
@@ -674,10 +689,7 @@ func (n *Nvmet) EnsureNamespace(
 		}
 		state = &NsState{Exists: true}
 	}
-	identityOk := state.DevicePath == conf.DevicePath &&
-		(conf.Uuid == "" || SameNsId(state.Uuid, conf.Uuid)) &&
-		(conf.Nguid == "" || SameNsId(state.Nguid, conf.Nguid))
-	if state.Enabled && !identityOk {
+	if conf.Disables(state) {
 		if err := n.writeAttr(ctx, nsPath+"/enable", "0"); err != nil {
 			return err
 		}
@@ -742,6 +754,17 @@ func (n *Nvmet) ListNamespaces(
 		nsids = append(nsids, nsid)
 	}
 	return nsids, true, nil
+}
+
+// ListAllowedHosts is the host NQNs linked into one subsystem's
+// allowed_hosts, listed in the agent's own process (SH18); ok is false when
+// the subsystem is gone. The listing looks up no attribute of the subsystem,
+// so it leaves the directory's time as it is (SubsysMtime).
+func (n *Nvmet) ListAllowedHosts(
+	ctx context.Context,
+	nqn string,
+) ([]string, bool, error) {
+	return n.listDir(ctx, n.SubsysPath(nqn)+"/allowed_hosts")
 }
 
 // ListSubsystems enumerates every subsystem in the target's configfs tree,

@@ -2062,9 +2062,10 @@ require_cluster_id() {
 # `^nqn\.\d{4}-(0[1-9]|1[0-2])\.[a-z0-9][a-z0-9.-]*:[A-Za-z0-9._:-]+$`,
 # whose suffix set takes its letters, digits and
 # '-', so an NQN carrying it still passes the gateway's validateNqn
-# (gateway/validate.go) — src_nqn and allowed_hosts get no dnv-namespace
-# check — and only a bad id holding a character outside that set, or a "..",
-# would be refused there. What makes it findable is the log line naming the
+# (gateway/validate.go) — allowed_hosts gets no dnv-namespace check — and
+# only a bad id holding a character outside that set, or a "..", would be
+# refused there; a transfer NQN carrying it as a clone's src_nqn no longer
+# decodes, so CreateClone refuses it (validateCloneSrcNqn). What makes it findable is the log line naming the
 # caller plus a name that then matches nothing on any guest — which is still
 # far better than a silent cluster-0 name that matches the WRONG thing.
 hex16() { # <decimal id>
@@ -15121,14 +15122,16 @@ copy_src_released() { # <v…>
 # and only then the subsystem, the thin device and the pool.
 #
 # THE CNs LET GO TOO. Each CN whose build of a clone connected this source
-# still holds its controller to it after the clone has gone: the cn agent's
-# sweep disconnects only a clone source whose NQN is a transfer of its own
-# cluster (cnagent.md CN21, Known limits), and this subsystem is not one. With
-# no controller-loss timeout on the agent's connections, such a controller
-# would retry for as long as it stayed. Which CNs connected it differs between
-# the two callers — the fallback's primary, step 7's old and new primaries —
-# so every --cn guest is told, and a guest with no such controller has nothing
-# to drop.
+# still holds its controller to it after the clone has gone, until its
+# node-level sweep disconnects it: the cn agent judges a clone source whose
+# NQN is not a transfer of its own cluster at node level only, by its
+# controllers' host NQN (cnagent.md CN21), and that sweep comes with a
+# SyncupCn the node's read brings. With no controller-loss timeout on the
+# agent's connections, such a controller would retry meanwhile, so the case
+# does not wait for that sweep. Which CNs connected it differs between the
+# two callers — the fallback's primary, step 7's old and new primaries — so
+# every --cn guest is told, and a guest with no such controller, its sweep's
+# disconnect landed first, has nothing to drop.
 copy_src_sp_teardown() {
 	local v
 	log "  removing the second pool $SP_SRC"

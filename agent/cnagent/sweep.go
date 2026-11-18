@@ -87,6 +87,12 @@ type cnActual struct {
 	// hostListed is dmListed for hostSubsys: the sysfs subsystem walk
 	// answered.
 	hostListed bool
+	// hostWalk is the walk hostSubsys came from, the pass's one walk of the
+	// host's subsystems: each check that a removed connection is gone finds
+	// its entry there and reads that entry alone (disconnectVerified), so a
+	// pass lists /sys/class/nvme-subsystem once however many connections it
+	// checks. nil when the walk's listing did not answer.
+	hostWalk *agent.SubsysWalk
 	// nvmetSubsys is every subsystem in the target's configfs tree, linked to
 	// the port or not.
 	nvmetSubsys []string
@@ -128,14 +134,18 @@ type nvmetAttr struct {
 // passes no reading and its own walk, which its build's lookups share: it
 // lists the dm devices with the strict `dmsetup ls` and the arrays with
 // ListArrays. The node-level passes pass neither, and take a walk of their own
-// (ListAllSubsys). Every list of connections fails on any subsysnqn read that
+// (newPassWalk). Every list of connections fails on any subsysnqn read that
 // did not answer (SubsysWalk.Briefs).
+//
+// node says the pass is a node-level one, which alone judges a host-facing
+// subsystem with no namespace device by its age (nvmetOwner).
 func (s *CnAgentServer) enumerateCn(
 	ctx context.Context,
 	clusterId uint64,
 	cnId uint64,
 	rd *cnReading,
 	pw *passWalk,
+	node bool,
 	res *agent.SweepResult,
 ) *cnActual {
 	actual := &cnActual{
@@ -166,12 +176,16 @@ func (s *CnAgentServer) enumerateCn(
 		actual.mdListed = true
 		actual.arrays = arrays
 	}
-	hostSubsys, err := s.hostSubsys(ctx, pw)
+	if pw == nil {
+		pw = s.newPassWalk(ctx)
+	}
+	hostSubsys, err := s.hostSubsys(pw)
 	if err != nil {
 		res.Fail("nvme subsystems", err)
 	} else {
 		actual.hostListed = true
 		actual.hostSubsys = hostSubsys
+		actual.hostWalk = pw.walk
 	}
 	nvmetSubsys, err := s.nvmet.ListSubsystems(ctx)
 	if err != nil {
@@ -181,8 +195,10 @@ func (s *CnAgentServer) enumerateCn(
 		actual.nvmetSubsys = nvmetSubsys
 	}
 	actual.nvmetOwner = make(map[string]nvmetAttr, len(actual.nvmetSubsys))
+	links := &portLinks{}
 	for _, nqn := range actual.nvmetSubsys {
-		spId, ours, unowned := s.nvmetOwner(ctx, clusterId, cnId, nqn, res)
+		spId, ours, unowned := s.nvmetOwner(
+			ctx, clusterId, cnId, nqn, node, links, res)
 		actual.nvmetOwner[nqn] = nvmetAttr{
 			spId: spId, ours: ours, unowned: unowned}
 	}
@@ -239,16 +255,10 @@ func (s *CnAgentServer) listArrays(
 	return rd.md.Arrays()
 }
 
-// hostSubsys is the list of connections of enumerateCn: pw's when the pass
-// took a walk — a converge's own, or a read's in its reading — and a walk of
-// its own when it did not (pw nil, the node-level passes).
-func (s *CnAgentServer) hostSubsys(
-	ctx context.Context,
-	pw *passWalk,
-) ([]agent.SubsysBrief, error) {
-	if pw == nil {
-		return s.host.ListAllSubsys(ctx)
-	}
+// hostSubsys is the list of connections of enumerateCn, from the pass's
+// walk: a converge's own, a read's in its reading, or the one a node-level
+// pass takes.
+func (s *CnAgentServer) hostSubsys(pw *passWalk) ([]agent.SubsysBrief, error) {
 	if pw.err != nil {
 		return nil, pw.err
 	}
@@ -323,30 +333,50 @@ func legWrapperSp(clusterId, cnId uint64, name string) (uint64, bool) {
 }
 
 // nvmetOwner attributes one subsystem in the target's configfs tree. It is
-// called once per subsystem per pass, from enumerateCn.
+// called once per subsystem per pass, from enumerateCn, in every scope: each
+// cntlr's converge and read, and the node's passes (node). Its reads come in
+// one order for every caller, and a step that decides reads nothing after
+// it (cnagent.md CN21).
 //
-// A dnv-format NQN carries its own ids. A HOST-FACING NQN is chosen by the
-// user and carries nothing, so it is attributed by what its namespaces point
-// at: a namespace whose device_path is a kind-c6 ns-dev of ours makes the
-// subsystem that sp's. dnv exports a host namespace only over an ns-dev, so a
-// namespace over any other device, another cn's ns-dev included, makes the
-// subsystem foreign. One with no namespace device at all is dnv's only when
-// its attr_model reads common.NvmeModel, which every host-facing subsystem
-// dnv makes carries (a model read that did not answer is not dnv's, and is named as a
-// failure); it is then **unowned**, and only the node-level sweep may remove
-// it — which assumes at most one cn agent per kernel. A co-hosted dn agent is
-// fine: its NQNs are all dnv-format kinds 2 and 3, which never reach that
-// arm. A subsystem dnv made whose converge stopped before its model write —
-// a kill, or a refused or unanswered step before it — reads the kernel's
-// default and stays (cnagent.md, Known limits).
+// A dnv-format NQN carries its own ids. One that carries dnv's prefix and
+// decodes to nothing is judged by a claim alone: a held request that names it
+// makes it that cntlr's sp's, and unclaimed it is never touched — it may be a
+// newer build's subsystem over a wanted ns-dev after a rollback, and the
+// answer of any read could only be used to remove it. A HOST-FACING NQN is
+// chosen by the user and carries nothing. A claim settles it first; then what
+// its namespaces point at: a namespace whose device_path is a kind-c6 ns-dev
+// of ours makes the subsystem that sp's. dnv exports a host namespace only
+// over an ns-dev, so a namespace over any other device, another cn's ns-dev
+// included, makes the subsystem foreign.
 //
-// ours is false for a subsystem this agent must never touch; unowned is true
-// only when ours is true and no sp could be named.
+// One with no namespace device at all is no pool's at cntlr level, and
+// nothing more of it is read there. At node level its allowed hosts and its
+// port links are listed next (emptySubsysOwner). With a host or a port link
+// its attr_model decides, with no age: common.NvmeModel, which every
+// host-facing subsystem dnv makes carries, makes it **unowned** — what a
+// deletion or a teardown leaves once its namespaces have gone — anything
+// else foreign (a model read that did not answer is not dnv's, and is named
+// as a failure). With neither, its age decides and no attribute file of it
+// is read: younger than common.CnSubsysOrphanGrace it is left alone, older
+// it exports nothing and is unowned whatever its model — what a converge cut
+// off between its `mkdir` and its model write leaves. On a kernel that
+// stamps the directory on every lookup of an attribute file, a model read
+// on each cntlr read would keep a directory young for good, and one on each
+// node read would keep a linked one young for the SyncupCn it brings. Only
+// the node-level sweep removes an unowned subsystem — which assumes at most
+// one cn agent per kernel. A co-hosted dn agent is fine: its NQNs are all
+// dnv-format kinds 2 and 3, which never reach that arm.
+//
+// ours is false for a subsystem this agent must never touch, or that is no
+// pool's at cntlr level; unowned is true only when ours is true and no sp
+// could be named.
 func (s *CnAgentServer) nvmetOwner(
 	ctx context.Context,
 	clusterId uint64,
 	cnId uint64,
 	nqn string,
+	node bool,
+	links *portLinks,
 	res *agent.SweepResult,
 ) (spId uint64, ours bool, unowned bool) {
 	if parts, ok := common.ParseNqn(nqn); ok {
@@ -357,21 +387,21 @@ func (s *CnAgentServer) nvmetOwner(
 		}
 		return 0, false, false
 	}
+	// An NQN a stored cntlr still names settles it before anything is read,
+	// and it has to come FIRST: a subsystem whose last namespace was just
+	// deleted has nothing left to attribute it by, and the namespace rule
+	// below would call it unowned and take the host's subsystem away while
+	// `nqn_to_subsystem` still names it.
+	if spId, ok := s.hostFacingClaim(clusterId, cnId, nqn); ok {
+		return spId, true, false
+	}
 	if common.IsDnvNqn(nqn) {
-		// In our namespace but decoding to nothing: never touched. Treating
-		// it as host-facing would let a malformed name get a subsystem
-		// deleted.
+		// In our namespace but decoding to nothing, and claimed by no held
+		// request: never touched. Treating it as host-facing would let a
+		// malformed name get a subsystem deleted.
 		slog.DebugContext(ctx, "undecodable dnv nqn left alone",
 			slog.String("nqn", nqn))
 		return 0, false, false
-	}
-	// A host-facing NQN a stored cntlr still names settles it before anything
-	// is read, and it has to come FIRST: a subsystem whose last namespace was
-	// just deleted has nothing left to attribute it by, and the namespace
-	// rule below would call it unowned and take the host's subsystem away
-	// while `nqn_list` still names it.
-	if spId, ok := s.hostFacingClaim(clusterId, cnId, nqn); ok {
-		return spId, true, false
 	}
 	nsids, found, err := s.nvmet.ListNamespaces(ctx, nqn)
 	if err != nil {
@@ -414,25 +444,133 @@ func (s *CnAgentServer) nvmetOwner(
 		}
 		return dn.SpId(), true, false
 	}
-	// No namespace device: dnv's only by its model.
-	model, ok, err := s.nvmet.SubsysModel(ctx, nqn)
+	if !node {
+		// No namespace device: no pool's, and only the node-level scope
+		// judges it further. A cntlr pass reads nothing more of it, so its
+		// reads every round leave the directory's age alone.
+		return 0, false, false
+	}
+	return s.emptySubsysOwner(ctx, nqn, links, res)
+}
+
+// emptySubsysOwner is the node-level half of nvmetOwner for a subsystem no
+// held request claims and with no namespace device. Its allowed hosts and
+// its port links are listed first, in the agent's own process; a listing
+// looks up no attribute file, so it leaves the directory's time as it is.
+//
+// With a host or a port link, the model alone decides, with no age:
+// common.NvmeModel makes it unowned, anything else foreign. A dnv build in
+// flight never reaches here, since a cntlr's request is stored (storeReq,
+// putCntlr) before its converge makes anything, so the subsystem is
+// claimed; and the age could not decide anyway: on a kernel that stamps
+// the directory on an attribute lookup, the model read of each node read
+// would make it young again for the SyncupCn that read brings, for good.
+//
+// With neither, its age decides, and the model is never read: younger than
+// common.CnSubsysOrphanGrace it is left alone, as it may be a build between
+// its `mkdir` and its first namespace whose request is not this agent's to
+// see (another program's); older, it exports nothing and is unowned
+// whatever its model. Nothing of such a subsystem looks up an attribute
+// file, so a directory nothing touches ages.
+func (s *CnAgentServer) emptySubsysOwner(
+	ctx context.Context,
+	nqn string,
+	links *portLinks,
+	res *agent.SweepResult,
+) (spId uint64, ours bool, unowned bool) {
+	hosts, found, err := s.nvmet.ListAllowedHosts(ctx, nqn)
 	if err != nil {
-		res.Fail("nvmet "+nqn+" attr_model", err)
+		res.Fail("nvmet allowed hosts of "+nqn, err)
 		return 0, false, false
 	}
-	if !ok || model != common.NvmeModel {
+	if !found {
+		// Removed between the listing and this read.
 		return 0, false, false
 	}
+	linked := len(hosts) > 0
+	if !linked {
+		byNqn, err := s.portLinksOf(ctx, links)
+		if err != nil {
+			res.Fail("nvmet port links", err)
+			return 0, false, false
+		}
+		linked = byNqn[nqn]
+	}
+	if linked {
+		model, ok, err := s.nvmet.SubsysModel(ctx, nqn)
+		if err != nil {
+			res.Fail("nvmet "+nqn+" attr_model", err)
+			return 0, false, false
+		}
+		if !ok || model != common.NvmeModel {
+			return 0, false, false
+		}
+		return 0, true, true
+	}
+	mtime, present, err := s.nvmet.SubsysMtime(ctx, nqn)
+	if err != nil {
+		res.Fail("nvmet subsystem age of "+nqn, err)
+		return 0, false, false
+	}
+	if !present {
+		return 0, false, false
+	}
+	if s.now().Sub(mtime) <= common.CnSubsysOrphanGrace {
+		return 0, false, false
+	}
+	// Old, and empty: no namespace device, no host, no port. It exports
+	// nothing, whoever made it.
 	return 0, true, true
 }
 
+// portLinks is the lazily built "which subsystems are linked to a port"
+// set of one pass, built from the ports directory and each port's links,
+// listed in the agent's own process, the first time emptySubsysOwner needs
+// it, so a pass with no unclaimed subsystem without namespace device and
+// host lists no port. A listing that
+// fails is the pass's error, never a port with no link (dnagent.md SH18).
+type portLinks struct {
+	done   bool
+	err    error
+	linked map[string]bool
+}
+
+// portLinksOf is the pass's set of subsystems linked to any port of the
+// kernel, this agent's or another's.
+func (s *CnAgentServer) portLinksOf(
+	ctx context.Context,
+	links *portLinks,
+) (map[string]bool, error) {
+	if links.done {
+		return links.linked, links.err
+	}
+	links.done = true
+	links.linked = make(map[string]bool)
+	ports, err := s.nvmet.ListPorts(ctx)
+	if err != nil {
+		links.err = err
+		return nil, err
+	}
+	for _, portId := range ports {
+		linked, err := s.nvmet.ListPortSubsystems(ctx, portId)
+		if err != nil {
+			links.err = err
+			return nil, err
+		}
+		for _, nqn := range linked {
+			links.linked[nqn] = true
+		}
+	}
+	return links.linked, nil
+}
+
 // hostFacingClaim reports whether any cntlr of this cn still names one
-// host-facing NQN in its stored request, and under which sp. It is the
-// request-derived half of the attribution rule (cnagent.md CN21): the NQN is
-// the user's own
-// string and carries nothing, so "somebody here still wants it" is evidence
-// in its own right — and the only evidence there is for a subsystem that
-// currently has no namespace at all.
+// host-facing NQN, or one that carries dnv's prefix and decodes to nothing,
+// in its stored request, and under which sp. It is the request-derived half
+// of the attribution rule (cnagent.md CN21): such an NQN carries no ids of
+// ours, so "somebody here still wants it" is evidence in its own right — and
+// the only evidence there is for a subsystem that currently has no namespace
+// at all.
 //
 // A cntlr's request is stored (storeReq, and putCntlr for a new cntlr)
 // before its converge creates anything, so a subsystem cannot be built by a
@@ -820,22 +958,30 @@ func (s *CnAgentServer) runChain(
 	res *agent.SweepResult,
 ) chainOutcome {
 	var out chainOutcome
-	// P0, before every layer: an unwanted ns-dev is reloaded onto an error
-	// table of its own size. Two things need that. Disabling the nvmet
-	// namespace above it in L1 closes its backing device, which does not
-	// complete on a SUSPENDED dm device; and the reload's own flushing
+	// P0, before every layer, the park step: every unwanted ns-dev and
+	// transfer device is reloaded onto an error table of its own size. Two
+	// things need that. Disabling the nvmet namespace above it in L1 waits,
+	// unkillable, for every request in flight on the namespace, which a
+	// SUSPENDED dm device never completes; and the reload's own flushing
 	// suspend is what completes the in-flight host IO instead of replaying it
-	// at resume onto a stack that is about to be removed. A park that fails
-	// does not stop the chain: L1 below still runs, and an ns-dev whose load
-	// failed is still suspended on its old table (Dm.Reload fails closed).
+	// at resume onto a stack that is about to be removed (CN16, CN17).
+	//
+	// It runs in three steps (parkStep): every unwanted namespace moves to
+	// the inaccessible ANA group, so nvmet refuses new host IO to it; every
+	// suspended device of ours below an unwanted ns-dev or transfer device
+	// is resumed, so the park's flushing suspend does not wait for IO held
+	// below it; and each such device is parked. A device the park cannot
+	// prove out of suspension STOPS the chain before L1, as a layer that left
+	// something behind does: L1's disable over it would hold the pass, and
+	// its locks, in the kernel for as long as the device stays suspended, and
+	// no later pass could reach the reload that would release it. The stopped
+	// chain names the device, and the converge the worker's re-send brings
+	// parks it again.
 	//
 	// The size comes from the device's own live table, so this needs neither
 	// the td that backed it — which may be leaving in the same pass — nor any
 	// memory of what the ns-dev mapped before.
-	for _, name := range chain.nsDevs {
-		s.parkByTable(ctx, name, actual)
-	}
-	stuck := false
+	stuck := !s.parkStep(ctx, chain, actual)
 	// cloneLayerRan is set by L3 alone: before it runs, every dm-clone of
 	// the chain may still be live.
 	cloneLayerRan := false
@@ -849,10 +995,9 @@ func (s *CnAgentServer) runChain(
 			run: func() bool {
 				left := false
 				for _, ref := range chain.nvmetNs {
-					// An unwanted namespace goes ANA-inaccessible immediately
-					// before it is removed, so a host that still holds a path
-					// is told to stop using it rather than losing it under IO.
-					s.setAnaLogged(ctx, ref.nqn, ref.nsid)
+					// The park step has moved it ANA-inaccessible, so a host
+					// that still holds a path is told to stop using it rather
+					// than losing it under IO.
 					if err := s.nvmet.RemoveNamespace(
 						ctx, ref.nqn, ref.nsid); err != nil {
 						slog.ErrorContext(ctx,
@@ -909,7 +1054,7 @@ func (s *CnAgentServer) runChain(
 			run: func() bool {
 				left := false
 				for _, nqn := range chain.srcNqnList() {
-					if !s.disconnectVerified(ctx, nqn) {
+					if !s.disconnectVerified(ctx, actual, nqn) {
 						res.Add(agent.LeftoverKindNvme, nqn)
 						left = true
 					}
@@ -999,7 +1144,7 @@ func (s *CnAgentServer) runChain(
 				// holds an open fd on the wrapper; the disconnect set
 				// going below is what releases one stuck in D state (CN11).
 				for _, nqn := range chain.legNqns {
-					if !s.disconnectVerified(ctx, nqn) {
+					if !s.disconnectVerified(ctx, actual, nqn) {
 						res.Add(agent.LeftoverKindNvme, nqn)
 						left = true
 					}
@@ -1100,74 +1245,256 @@ func (s *CnAgentServer) lingeringCloneHold(
 	return hold
 }
 
-// parkByTable stops an UNWANTED ns-dev serving, deriving everything it needs
-// from the device's own live table — there is no plan for a namespace that
-// left the desired state, and its td may be leaving in the same pass.
+// parkStep is the chain's park step (P0): the ANA move of every unwanted
+// namespace, the release of the devices below, then the park of each
+// unwanted ns-dev and transfer device. It reports whether every one of those
+// devices is now known out of suspension (parkByTable); every one is
+// attempted whatever the others gave.
+func (s *CnAgentServer) parkStep(
+	ctx context.Context,
+	chain *cnChain,
+	actual *cnActual,
+) bool {
+	s.unwantedNsAna(ctx, chain)
+	s.releaseStacks(ctx, chain, actual)
+	ok := true
+	for _, names := range [][]string{chain.nsDevs, chain.xferDms} {
+		for _, name := range names {
+			if !s.parkByTable(ctx, name, actual) {
+				ok = false
+			}
+		}
+	}
+	return ok
+}
+
+// unwantedNsAna moves every unwanted namespace of the chain to the
+// inaccessible ANA group before the park: one dropped under a subsystem that
+// stays, and every namespace of a subsystem that left the request, listed
+// for it. nvmet refuses IO to an inaccessible group, so from the move on no
+// new host IO reaches the ns-dev the park suspends — the order the planned
+// park has too (parkNsDev). A move or a listing that fails is logged and
+// stops nothing: the park still completes or errors the IO in flight, and
+// its own result is what the chain stops on.
+func (s *CnAgentServer) unwantedNsAna(ctx context.Context, chain *cnChain) {
+	for _, ref := range chain.nvmetNs {
+		s.setAnaLogged(ctx, ref.nqn, ref.nsid)
+	}
+	for _, nqn := range chain.nvmetSs {
+		nsids, _, err := s.nvmet.ListNamespaces(ctx, nqn)
+		if err != nil {
+			slog.ErrorContext(ctx, "listing the namespaces of a subsystem "+
+				"before its park failed",
+				slog.String("nqn", nqn),
+				slog.String("error", err.Error()))
+			continue
+		}
+		for _, nsid := range nsids {
+			s.setAnaLogged(ctx, nqn, nsid)
+		}
+	}
+}
+
+// releaseStacks is the park step's second part, as the dn's releaseStacks:
+// below every unwanted ns-dev and transfer device of the chain it walks the
+// live tables down and resumes every suspended device of ours it finds, on
+// whatever table is live, children before their parent. Nothing on a
+// controller node stays suspended across passes on purpose (architecture.md,
+// Namespace suspend semantics), so a device of ours found suspended — a raid0
+// or a thin volume — was left so by a reload or a quiesce that failed or was
+// cut off, and the IO it holds came through devices that still map it: a bare
+// resume releases it where it was going, and without it the park's flushing
+// suspend would wait for that IO until the soft timeout killed it. One
+// `dmsetup info` listing of the node comes first, and when it answered whole
+// and reads no device of ours suspended but the ones the step parks, nothing
+// is walked: the common case costs one command whatever the stacks' depth. A
+// read or a resume that fails is logged; the park's own result is what the
+// chain stops on.
+func (s *CnAgentServer) releaseStacks(
+	ctx context.Context,
+	chain *cnChain,
+	actual *cnActual,
+) {
+	starts := make(map[string]bool, len(chain.nsDevs)+len(chain.xferDms))
+	for _, names := range [][]string{chain.nsDevs, chain.xferDms} {
+		for _, name := range names {
+			starts[name] = true
+		}
+	}
+	if len(starts) == 0 {
+		return
+	}
+	listing, err := s.dm.ListInfo(ctx)
+	if err == nil && !listing.Partial {
+		suspended := false
+		for name, dev := range listing.Devs {
+			if _, ours := actual.ours[name]; ours && dev.Suspended &&
+				!starts[name] {
+				suspended = true
+				break
+			}
+		}
+		if !suspended {
+			return
+		}
+	}
+	seen := make(map[string]bool)
+	for _, names := range [][]string{chain.nsDevs, chain.xferDms} {
+		for _, name := range names {
+			s.releaseBelow(ctx, name, actual, starts, seen)
+		}
+	}
+}
+
+// releaseBelow walks name's live table down and resumes every suspended
+// device of ours on the way, children before their parent, so a device's
+// released IO meets no suspended device below it; name itself is resumed
+// too unless it is one the park step parks.
+func (s *CnAgentServer) releaseBelow(
+	ctx context.Context,
+	name string,
+	actual *cnActual,
+	starts map[string]bool,
+	seen map[string]bool,
+) {
+	if seen[name] {
+		return
+	}
+	seen[name] = true
+	if _, listed := actual.dms[name]; !listed {
+		return
+	}
+	targets, err := s.dm.Table(ctx, name)
+	if err != nil {
+		slog.ErrorContext(ctx, "reading a dm table below a park failed",
+			slog.String("dm", name),
+			slog.String("error", err.Error()))
+		return
+	}
+	for _, target := range targets {
+		for _, arg := range target.Args {
+			below, found := actual.byDevNo[arg]
+			if !found {
+				continue
+			}
+			if _, ours := actual.ours[below]; !ours {
+				continue
+			}
+			s.releaseBelow(ctx, below, actual, starts, seen)
+		}
+	}
+	if _, ours := actual.ours[name]; !ours || starts[name] {
+		return
+	}
+	dev, err := s.dm.Info(ctx, name)
+	if err != nil {
+		slog.ErrorContext(ctx, "probing a dm device below a park failed",
+			slog.String("dm", name),
+			slog.String("error", err.Error()))
+		return
+	}
+	if dev == nil || !dev.Suspended {
+		return
+	}
+	if err := s.dm.Resume(ctx, name); err != nil {
+		slog.ErrorContext(ctx, "resuming a dm device below a park failed",
+			slog.String("dm", name),
+			slog.String("error", err.Error()))
+	}
+}
+
+// parkByTable stops an UNWANTED ns-dev or transfer device serving, deriving
+// everything it needs from the device's own live table — there is no plan
+// for a namespace that left the desired state, and its td may be leaving in
+// the same pass.
 //
-// The park's target is the CN16 one wherever the live table still says what
-// it is: an ns-dev mapping a kind-c4 raid0 names its td in that raid0's own
-// name, and the td's kind-c5 dm-error carries the same ids. Where it does not
-// — a table this build never wrote, or an ns-dev over a dm-clone whose td
-// cannot be read back — the device is reloaded onto an error target of its
-// own size instead, which is the same thing one indirection shorter.
+// An ns-dev's park target is the CN16 one wherever the live table still says
+// what it is: an ns-dev mapping a kind-c4 raid0 names its td in that raid0's
+// own name, and the td's kind-c5 dm-error carries the same ids. Where it does
+// not — a table this build never wrote, an ns-dev over a dm-clone whose td
+// cannot be read back, or a transfer device, whose shape off service is an
+// error table of its size (CN17) — the device is reloaded onto an error
+// target of its own size instead, which is the same thing one indirection
+// shorter. When the load onto the td's dm-error fails, the plain error table
+// is loaded at once: an error target names no device, so a dm-error that went
+// or changed its number since the read cannot fail it.
 //
 // A device already parked is left alone but RESUMED if it is suspended:
-// disabling the nvmet namespace above it closes its backing device, and that
-// does not complete on a suspended dm device.
+// disabling the nvmet namespace above it waits for its in-flight IO, which a
+// suspended dm device never completes.
+//
+// It reports whether the device is now known out of suspension: absent,
+// never suspended, or its reload or resume went through. A `dmsetup info`
+// that did not answer is none of those, and neither is a suspended device
+// whose table did not read, as its size is then unknown: a bare resume would
+// send the IO it holds onto the stack being retired (Dm.Reload fails
+// closed).
 func (s *CnAgentServer) parkByTable(
 	ctx context.Context,
 	name string,
 	actual *cnActual,
-) {
+) bool {
 	dev, err := s.dm.Info(ctx, name)
-	if err != nil || dev == nil {
-		return
+	if err != nil {
+		slog.ErrorContext(ctx, "probing a device before its park failed",
+			slog.String("dm", name),
+			slog.String("error", err.Error()))
+		return false
+	}
+	if dev == nil {
+		return true
 	}
 	targets, err := s.dm.Table(ctx, name)
 	if err != nil {
 		slog.ErrorContext(ctx, "reading a device table before removal failed",
 			slog.String("dm", name),
 			slog.String("error", err.Error()))
-		return
+		return !dev.Suspended
 	}
 	var sectors uint64
 	for _, target := range targets {
 		sectors += target.Length
 	}
 	if sectors == 0 {
-		return
+		return !dev.Suspended
 	}
-	resume := func() {
+	resume := func() bool {
 		if !dev.Suspended {
-			return
+			return true
 		}
 		if err := s.dm.Resume(ctx, name); err != nil {
 			slog.ErrorContext(ctx, "resuming a parked device failed",
 				slog.String("dm", name),
 				slog.String("error", err.Error()))
+			return false
 		}
+		return true
 	}
 	// The reload below is the whole park: its internal flushing suspend
 	// completes the in-flight IO, and installing the new table before the
 	// resume is what errors the stragglers instead of replaying them onto a
 	// stack that is about to go.
-	reload := func(table string) {
+	reload := func(table string) bool {
 		if err := s.dm.Reload(ctx, name, table); err != nil {
 			slog.ErrorContext(ctx, "parking a device before removal failed",
 				slog.String("dm", name),
 				slog.String("error", err.Error()))
+			return false
 		}
+		return true
 	}
+	errorTable := agent.ErrorTable(sectors)
+	own, parsed := common.ParseDmName(name)
+	nsDev := parsed && own.Kind == common.DmKindCnNsDev
 	if len(targets) == 1 {
 		if targets[0].Type == "error" && targets[0].Length == sectors {
-			resume()
-			return
+			return resume()
 		}
-		if targets[0].Type == "linear" && len(targets[0].Args) > 0 {
+		if nsDev && targets[0].Type == "linear" &&
+			len(targets[0].Args) > 0 {
 			backing, ok := actual.ours[actual.byDevNo[targets[0].Args[0]]]
 			if ok && backing.Kind == common.DmKindCnError {
-				resume()
-				return
+				return resume()
 			}
 			if ok && backing.Kind == common.DmKindCnRaid0 {
 				// c4 and c5 carry the same ids: [sp, td].
@@ -1177,14 +1504,17 @@ func (s *CnAgentServer) parkByTable(
 				if err == nil && errDev != nil {
 					devNo, err := s.dmDevNo(ctx, nil, errName)
 					if err == nil {
-						reload(agent.LinearTable(sectors, devNo, 0))
-						return
+						if reload(agent.LinearTable(sectors, devNo, 0)) {
+							return true
+						}
+						// The load failed: the plain error table at once.
+						return reload(errorTable)
 					}
 				}
 			}
 		}
 	}
-	reload(agent.ErrorTable(sectors))
+	return reload(errorTable)
 }
 
 // removeDms removes each named device and reports whether any is still there.
@@ -1437,6 +1767,10 @@ func (s *CnAgentServer) stopArrayVerified(
 // fast its disconnect turns out to be — a later pass's probe is what finds
 // it gone. A disconnect already in flight is not issued a second time.
 //
+// The probe reads the connection's entry of the pass's own walk alone
+// (walkedEntry), so the pass lists /sys/class/nvme-subsystem once however
+// many connections it checks.
+//
 // "Gone" is the absence of any CONTROLLER, not the absence of the
 // subsystem directory (architecture.md, Teardown by sweep): the kernel keeps
 // /sys/class/nvme-subsystem/nvme-subsysN after its last controller is deleted
@@ -1456,20 +1790,105 @@ func (s *CnAgentServer) stopArrayVerified(
 // disconnect.
 func (s *CnAgentServer) disconnectVerified(
 	ctx context.Context,
+	actual *cnActual,
 	nqn string,
 ) bool {
-	state, err := s.host.ListSubsys(ctx, nqn)
+	dir, found, err := s.walkedEntry(ctx, actual, nqn)
+	if err == nil && found {
+		var read *agent.SubsysRead
+		read, err = s.host.ReadSubsys(ctx, dir, agent.SubsysReadOpts{
+			Rule: agent.ReadStrict,
+		})
+		if err == nil && !read.State(nqn).HasCtrl() {
+			found = false
+		}
+	}
 	if err != nil {
 		slog.ErrorContext(ctx, "verifying an nvme disconnect failed",
 			slog.String("nqn", nqn),
 			slog.String("error", err.Error()))
 		return false
 	}
-	if !state.HasCtrl() {
+	if !found {
 		return true
 	}
 	s.startDisconnect(ctx, nqn)
 	return false
+}
+
+// disconnectOwnCtrlsVerified is disconnectVerified for a clone source the
+// node-level pass judges by its controllers' host NQN (nodeUnownedSrcs):
+// the connection is gone once no controller of it reads this cn's host NQN,
+// and the disconnect it sets going takes those controllers one by one, by
+// their devices (startDisconnectCtrls), never the whole NQN — the host keeps
+// one subsystem per NQN, so a host stack on the same machine can hold a
+// controller of the same subsystem with its own host NQN, and a disconnect
+// by NQN would cut it.
+func (s *CnAgentServer) disconnectOwnCtrlsVerified(
+	ctx context.Context,
+	clusterId uint64,
+	cnId uint64,
+	actual *cnActual,
+	nqn string,
+) bool {
+	hostNqn := s.nf.CnHostNqn(clusterId, cnId)
+	dir, found, err := s.walkedEntry(ctx, actual, nqn)
+	var ctrls []string
+	if err == nil && found {
+		var read *agent.SubsysRead
+		read, err = s.host.ReadSubsys(ctx, dir, agent.SubsysReadOpts{
+			Ctrls:   agent.CtrlHostNqnEach,
+			HostNqn: hostNqn,
+			Rule:    agent.ReadStrict,
+		})
+		if err == nil {
+			ctrls = read.HostNqnCtrls
+		}
+	}
+	if err != nil {
+		slog.ErrorContext(ctx, "verifying an nvme disconnect failed",
+			slog.String("nqn", nqn),
+			slog.String("error", err.Error()))
+		return false
+	}
+	if len(ctrls) == 0 {
+		return true
+	}
+	s.startDisconnectCtrls(ctx, nqn, dir, hostNqn, ctrls)
+	return false
+}
+
+// walkedEntry is the directory of nqn's entry in the pass's walk, read again
+// for its subsysnqn: the walk can be as old as the pass, and the kernel gives
+// a freed entry's number to the next new subsystem, so an entry gone since
+// the walk, or whose subsysnqn now reads another NQN, is no entry of nqn's
+// (found false), as an NQN the walk did not find is not. A pass with no walk,
+// an entry of the walk whose read did not answer where none matched, or a
+// read again that did not answer, is an error.
+func (s *CnAgentServer) walkedEntry(
+	ctx context.Context,
+	actual *cnActual,
+	nqn string,
+) (dir string, found bool, err error) {
+	if actual.hostWalk == nil {
+		return "", false, fmt.Errorf("subsystem %s %w: no NVMe walk in "+
+			"this pass", nqn, errSubsysUnknown)
+	}
+	match, unread := actual.hostWalk.Find(nqn)
+	if match == nil {
+		if unread != nil {
+			return "", false, unread.Err
+		}
+		return "", false, nil
+	}
+	got, ok, err := s.host.ReadSubsysNqn(ctx, match.Dir)
+	if err != nil {
+		return "", false, err
+	}
+	if !ok || got != nqn {
+		return "", false, nil
+	}
+	return match.Dir, true, nil
 }
 
 // sweepCloneChunks deletes the bitmap chunk files of every clone this cntlr
@@ -1547,6 +1966,10 @@ func (s *CnAgentServer) sweepCloneChunks(
 // stored after this read, and whose step 1 runs before the disconnect is
 // registered, still adopts the source (cnagent.md Known limits).
 //
+// The live half reads the namespace node of every transfer connection, and
+// of each connection in also: the other clone sources the node-level pass
+// judges (nodeUnownedSrcs).
+//
 // A live dm-clone's table comes from rd, the reading of a cntlr's read, and
 // from one `dmsetup table` of the device in every other pass (dmTable). The
 // `dmsetup info` that confirms such a device gone after its table read failed
@@ -1557,20 +1980,10 @@ func (s *CnAgentServer) srcNqnsInUse(
 	cnId uint64,
 	actual *cnActual,
 	rd *cnReading,
+	also map[string]struct{},
 	res *agent.SweepResult,
 ) map[string]struct{} {
-	inUse := make(map[string]struct{})
-	for _, key := range s.cntlrKeysOf(clusterId, cnId) {
-		st := s.getCntlr(key)
-		if st == nil {
-			continue
-		}
-		for _, clone := range st.loadReq().GetCloneList() {
-			if nqn := clone.GetSrcNqn(); nqn != "" {
-				inUse[nqn] = struct{}{}
-			}
-		}
-	}
+	inUse := s.requestedSrcNqns(clusterId, cnId)
 	// A dm-clone that is live right now holds its source open whatever any
 	// request says; disconnecting under it would strand its hydration IO.
 	srcDevNos := make(map[string]struct{})
@@ -1611,7 +2024,8 @@ func (s *CnAgentServer) srcNqnsInUse(
 	}
 	for _, state := range actual.hostSubsys {
 		parts, ok := common.ParseNqn(state.Nqn)
-		if !ok || parts.Kind != common.NqnKindXfer {
+		_, judged := also[state.Nqn]
+		if !judged && (!ok || parts.Kind != common.NqnKindXfer) {
 			// Only a clone source can be the thing a dm-clone maps, and the
 			// namespace node is read only for those: on a node holding a
 			// leg per group that read would otherwise be one listing per
@@ -1644,8 +2058,30 @@ func (s *CnAgentServer) srcNqnsInUse(
 	return inUse
 }
 
+// requestedSrcNqns is the stored-request half of srcNqnsInUse: every clone
+// source NQN a cntlr this process holds names.
+func (s *CnAgentServer) requestedSrcNqns(
+	clusterId uint64,
+	cnId uint64,
+) map[string]struct{} {
+	inUse := make(map[string]struct{})
+	for _, key := range s.cntlrKeysOf(clusterId, cnId) {
+		st := s.getCntlr(key)
+		if st == nil {
+			continue
+		}
+		for _, clone := range st.loadReq().GetCloneList() {
+			if nqn := clone.GetSrcNqn(); nqn != "" {
+				inUse[nqn] = struct{}{}
+			}
+		}
+	}
+	return inUse
+}
+
 // unownedSrcNqns is every kind-4 connection this host holds for our cluster
-// that srcNqnsInUse does not claim, with rd as srcNqnsInUse takes it.
+// that srcNqnsInUse does not claim, with rd as srcNqnsInUse takes it: the
+// clone sources every scope judges, by their NQN alone.
 func (s *CnAgentServer) unownedSrcNqns(
 	ctx context.Context,
 	clusterId uint64,
@@ -1654,7 +2090,17 @@ func (s *CnAgentServer) unownedSrcNqns(
 	rd *cnReading,
 	res *agent.SweepResult,
 ) []string {
-	inUse := s.srcNqnsInUse(ctx, clusterId, cnId, actual, rd, res)
+	inUse := s.srcNqnsInUse(ctx, clusterId, cnId, actual, rd, nil, res)
+	return xferSrcsUnused(clusterId, actual, inUse)
+}
+
+// xferSrcsUnused is the transfer connections of our cluster that inUse does
+// not hold, sorted.
+func xferSrcsUnused(
+	clusterId uint64,
+	actual *cnActual,
+	inUse map[string]struct{},
+) []string {
 	var out []string
 	for _, state := range actual.hostSubsys {
 		parts, ok := common.ParseNqn(state.Nqn)
@@ -1668,6 +2114,83 @@ func (s *CnAgentServer) unownedSrcNqns(
 		out = append(out, state.Nqn)
 	}
 	sort.Strings(out)
+	return out
+}
+
+// hostNqnJudged says whether the node-level pass judges a connection by its
+// controllers' host NQN: one whose NQN is in no dnv namespace — another
+// pool's subsystem, whose NQN its user chose — or is a transfer of another
+// cluster. Every other dnv-format NQN is passed over with no read: a
+// transfer of our cluster is judged by its NQN, a leg is its sp's chain's,
+// and the cn opens no other dnv kind, so a migration source a co-hosted dn
+// agent connects costs nothing; and one in the dnv namespace that decodes
+// to nothing may be a newer build's after a rollback, which this build
+// never touches (IsDnvNqn).
+func hostNqnJudged(clusterId uint64, nqn string) bool {
+	if parts, ok := common.ParseNqn(nqn); ok {
+		return parts.Kind == common.NqnKindXfer && parts.Ids[0] != clusterId
+	}
+	return !common.IsDnvNqn(nqn)
+}
+
+// nodeSrcs is what the node-level pass judges of the clone sources: the
+// transfer connections of our cluster no one uses (unownedSrcNqns' rule), and
+// the other connections of this cn's whose clone has gone (foreign).
+type nodeSrcs struct {
+	xfers   []string
+	foreign []string
+}
+
+// nodeUnownedSrcs is the node-level pass's whole judgment of the clone
+// sources (cnagent.md CN21). Beside the transfer connections of our
+// cluster, judged by their NQN as in every scope, it judges each connection
+// hostNqnJudged names by its controllers' host NQN, the mark the kernel
+// keeps of who opened a controller: one of whose controllers reads this
+// cn's host NQN is a clone source of ours, since the cn opens nothing else
+// with it but its legs, and is unowned when no held request names it as a
+// clone's src_nqn and no live dm-clone maps its namespace device. A
+// connection a held request names costs no read; every other one it judges
+// costs a listing of its entry and a hostnqn read per controller up to the
+// first that reads ours, in every node pass, the node's reads included:
+// only a machine that is also a host, or that a clone of another pool or
+// cluster reads through, holds such connections. A hostnqn read that did
+// not answer leaves the connection alone for the pass and is named as a
+// failure. A cntlr's pass judges none of these: the reads would come in
+// every cntlr read, every round.
+func (s *CnAgentServer) nodeUnownedSrcs(
+	ctx context.Context,
+	clusterId uint64,
+	cnId uint64,
+	actual *cnActual,
+	res *agent.SweepResult,
+) nodeSrcs {
+	requested := s.requestedSrcNqns(clusterId, cnId)
+	hostNqn := s.nf.CnHostNqn(clusterId, cnId)
+	ownConns := make(map[string]struct{})
+	for _, state := range actual.hostSubsys {
+		if !hostNqnJudged(clusterId, state.Nqn) {
+			continue
+		}
+		if _, named := requested[state.Nqn]; named {
+			continue
+		}
+		held, err := s.host.HeldWithHostNqn(ctx, state, hostNqn)
+		if err != nil {
+			res.Fail("nvme host nqn of "+state.Nqn, err)
+			continue
+		}
+		if held {
+			ownConns[state.Nqn] = struct{}{}
+		}
+	}
+	inUse := s.srcNqnsInUse(ctx, clusterId, cnId, actual, nil, ownConns, res)
+	out := nodeSrcs{xfers: xferSrcsUnused(clusterId, actual, inUse)}
+	for nqn := range ownConns {
+		if _, used := inUse[nqn]; !used {
+			out.foreign = append(out.foreign, nqn)
+		}
+	}
+	sort.Strings(out.foreign)
 	return out
 }
 
@@ -1720,7 +2243,7 @@ func (s *CnAgentServer) sweepCntlr(
 ) *agent.SweepResult {
 	res := &agent.SweepResult{}
 	actual := s.enumerateCn(
-		ctx, plan.clusterId, plan.cnId, plan.rd, plan.walk, res)
+		ctx, plan.clusterId, plan.cnId, plan.rd, plan.walk, false, res)
 	// converge is what the caller asked for; from here on, remove is what
 	// the snapshot licenses.
 	converge := remove
@@ -2381,9 +2904,12 @@ func (s *CnAgentServer) reportChain(chain *cnChain, res *agent.SweepResult) {
 // SyncupCntlr, and after a lost --local-store the resources exist and must be
 // re-adopted probe-first by that syncup rather than swept. The steps for
 // unowned subsystems and source connections are keyed on the stored requests
-// and on what the kernel shows instead, so a host-facing subsystem of such an
-// sp that holds no namespace device and carries dnv's model, with no cntlr in
-// memory to claim it, or an unmapped source, is removed (CN21).
+// and on what the kernel shows instead, so an unowned host-facing subsystem
+// of such an sp, with no cntlr in memory to claim it, or an unmapped source,
+// is removed (CN21). Those steps are this scope's alone: an old host-facing
+// subsystem with no namespace device (nvmetOwner) and a clone source judged
+// by its controllers' host NQN (nodeUnownedSrcs), disconnected controller
+// by controller (disconnectOwnCtrlsVerified).
 //
 // redrive is what of the base state the caller's own probe read wrong in a
 // way a SyncupCn's converge would cure (probeCn): a piece of it absent, or an
@@ -2404,7 +2930,7 @@ func (s *CnAgentServer) sweepCn(
 	req := st.loadReq()
 	clusterId := req.GetClusterId()
 	cnId := req.GetCnId()
-	actual := s.enumerateCn(ctx, clusterId, cnId, nil, nil, res)
+	actual := s.enumerateCn(ctx, clusterId, cnId, nil, nil, true, res)
 	// AN ENUMERATION THAT DID NOT ANSWER LICENSES NO REMOVAL. Everything
 	// below is "actual minus desired", and with a listing unanswered its
 	// part of `actual` is empty for want of an answer — which subtracts to
@@ -2485,13 +3011,23 @@ func (s *CnAgentServer) sweepCn(
 			res.Add(agent.LeftoverKindNvmet, nqn)
 		}
 	}
-	for _, nqn := range s.unownedSrcNqns(
-		ctx, clusterId, cnId, actual, nil, res) {
+	srcs := s.nodeUnownedSrcs(ctx, clusterId, cnId, actual, res)
+	for _, nqn := range srcs.xfers {
 		if !remove {
 			res.Add(agent.LeftoverKindNvme, nqn)
 			continue
 		}
-		if !s.disconnectVerified(ctx, nqn) {
+		if !s.disconnectVerified(ctx, actual, nqn) {
+			res.Add(agent.LeftoverKindNvme, nqn)
+		}
+	}
+	for _, nqn := range srcs.foreign {
+		if !remove {
+			res.Add(agent.LeftoverKindNvme, nqn)
+			continue
+		}
+		if !s.disconnectOwnCtrlsVerified(
+			ctx, clusterId, cnId, actual, nqn) {
 			res.Add(agent.LeftoverKindNvme, nqn)
 		}
 	}

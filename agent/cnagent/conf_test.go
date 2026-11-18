@@ -392,6 +392,14 @@ var badNqnCases = []struct {
 		req.CloneList = []*pb.Clone{clone}
 	}, "clone src_nqn \"nqn.2024-01.io.dnv:x,hostnqn=y\" is not a " +
 		"valid NQN"},
+	// A source in the dnv namespace that is no transfer: the sweep never
+	// judges it, so its connection would outlive its clone (CN21).
+	{"a clone source in the dnv namespace", func(req *pb.SyncupCntlrRequest) {
+		clone := cloneOf()
+		clone.SrcNqn = "nqn.2024-01.io.dnv:legacy-volume"
+		req.CloneList = []*pb.Clone{clone}
+	}, "clone src_nqn \"nqn.2024-01.io.dnv:legacy-volume\" is in the dnv " +
+		"namespace \"nqn.2024-01.io.dnv:\" and is no transfer NQN"},
 }
 
 // TestSyncupCntlrRefusesAnInvalidNqn pins the cntlr's NQN gate (CN8;
