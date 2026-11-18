@@ -114,6 +114,13 @@ type fakeNode struct {
 	// pendingNs are the namespaces nsMisses deferred, keyed by the
 	// subsystem's sysfs directory.
 	pendingNs map[string]*pendingNs
+	// ngMisses defers a namespace head's ng device, keyed by NQN: the
+	// kernel adds it last, after the node (nvmehost.go, SubsysRead.NgListed),
+	// and it appears only after that many listings of the subsystem
+	// directory have found the node without it. pendingNg are the ng
+	// devices it deferred, keyed by the subsystem's sysfs directory.
+	ngMisses  map[string]int
+	pendingNg map[string]*pendingNs
 	// lostAfterConnect, keyed by NQN, makes the next connect that joins a
 	// subsystem the kernel kept (dropCtrlsWhileHeld) answer success and then
 	// lose the controller and the head it added before anything reads it;
@@ -347,6 +354,8 @@ func newFakeNode() *fakeNode {
 		conns:         make(map[string]*fakeConn),
 		nsMisses:      make(map[string]int),
 		pendingNs:     make(map[string]*pendingNs),
+		ngMisses:      make(map[string]int),
+		pendingNg:     make(map[string]*pendingNs),
 		failCmd:       make(map[string]string),
 		failCmdAlways: make(map[string]string),
 		cloneHydrated: make(map[string]uint64),
@@ -623,6 +632,13 @@ func (f *fakeNode) readDir(ctx context.Context, path string) ([]string, error) {
 		} else {
 			f.addNsSysfs(pending.conn)
 			delete(f.pendingNs, path)
+		}
+	} else if pending := f.pendingNg[path]; pending != nil {
+		if pending.misses > 0 {
+			pending.misses--
+		} else {
+			f.addNgSysfs(pending.conn)
+			delete(f.pendingNg, path)
 		}
 	}
 	return f.children(path), nil
@@ -2216,10 +2232,30 @@ func (f *fakeNode) addSubsysSysfs(conn *fakeConn) {
 }
 
 // addNsSysfs is the kernel's namespace scan landing: the multipath namespace
-// node under the subsystem directory, and its block device.
+// node under the subsystem directory, and its block device, then its ng
+// device beside it, at once or after the listings ngMisses defers it by.
 func (f *fakeNode) addNsSysfs(conn *fakeConn) {
 	f.dirs["/sys/class/nvme-subsystem/"+conn.subsys+"/"+conn.device] = true
 	f.devNo["/dev/"+conn.device] = f.newDevNo()
+	if misses := f.ngMisses[conn.nqn]; misses > 0 {
+		f.pendingNg["/sys/class/nvme-subsystem/"+conn.subsys] =
+			&pendingNs{misses: misses, conn: conn}
+		return
+	}
+	f.addNgSysfs(conn)
+}
+
+// addNgSysfs lists a namespace head's ng device beside its node, the last
+// step the kernel takes in adding the head.
+func (f *fakeNode) addNgSysfs(conn *fakeConn) {
+	f.dirs["/sys/class/nvme-subsystem/"+conn.subsys+"/"+
+		ngDevOf(conn.device)] = true
+}
+
+// ngDevOf is the ng device the kernel adds beside the multipath namespace
+// head nsDev: ng<X>n<Y> for nvme<X>n<Y>.
+func ngDevOf(nsDev string) string {
+	return "ng" + strings.TrimPrefix(nsDev, "nvme")
 }
 
 // scanNs is the namespace scan a connect queues: addNsSysfs at once, or after
@@ -2313,7 +2349,9 @@ func (f *fakeNode) dropHeld(conn *fakeConn, listed bool) string {
 	conn.refresh()
 	conn.kept = true
 	delete(f.pendingNs, subsysDir)
+	delete(f.pendingNg, subsysDir)
 	delete(f.dirs, subsysDir+"/"+conn.device)
+	delete(f.dirs, subsysDir+"/"+ngDevOf(conn.device))
 	devNo := f.devNo["/dev/"+conn.device]
 	delete(f.devNo, "/dev/"+conn.device)
 	return devNo
@@ -2324,6 +2362,7 @@ func (f *fakeNode) dropSubsysSysfs(conn *fakeConn) {
 	deleteTree(f.dirs, subsysDir)
 	deleteTree(f.files, subsysDir)
 	delete(f.pendingNs, subsysDir)
+	delete(f.pendingNg, subsysDir)
 }
 
 // deleteTree drops root and everything under it from a path-keyed map.

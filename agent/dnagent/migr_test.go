@@ -3490,6 +3490,56 @@ func withDnClock(srv *DnAgentServer, node *fakeNode) *dnClock {
 	return clock
 }
 
+// TestMigrationDestinationAwaitsTheNgDevice pins DN13 step (3)'s wait for a
+// complete head, the dn twin of cnagent.md CN10's: the kernel adds the
+// head's ng device last, after the node, so the pass re-reads, in
+// DnMigrDstNsPause steps, until the ng device is listed beside the node,
+// and builds the dm-clone on that read, with one connect; a head whose ng
+// device never comes is used as it is once DnMigrDstNsWait is spent.
+func TestMigrationDestinationAwaitsTheNgDevice(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		misses int
+		waited time.Duration
+	}{
+		{"the ng device after 2 missed reads", 2,
+			2 * common.DnMigrDstNsPause},
+		{"the ng device never comes", 1000, common.DnMigrDstNsWait},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			srv, node := newTestServer(t)
+			ctx := context.Background()
+			syncupBoth(t, srv, 1, testSide)
+			clock := withDnClock(srv, node)
+			srcNqn := srv.nf.MigrSrcNqn(
+				testCluster, testSrcDn, testSp, testMigrId)
+			node.mu.Lock()
+			node.ngMisses[srcNqn] = tc.misses
+			node.mu.Unlock()
+			start := clock.Now()
+
+			node.Reset()
+			reply, err := srv.SyncupSide(ctx,
+				migrDstReq(2, pb.SpLevel_SP_LEVEL_READWRITE))
+			if err != nil {
+				t.Fatalf("SyncupSide: %v", err)
+			}
+			info := reply.GetSideInfo().GetMigrDstInfo()
+			if dm := info.GetDmCloneInfo(); dm.GetStatus() !=
+				pb.ResStatus_RES_STATUS_OK {
+				t.Fatalf("dm_clone_info = %v %q, want OK",
+					dm.GetStatus(), dm.GetDetails())
+			}
+			if n := len(node.callsMatching("cmd nvme connect ")); n != 1 {
+				t.Fatalf("%d connects, want exactly 1 (DN13)", n)
+			}
+			if got := clock.Now().Sub(start); got != tc.waited {
+				t.Fatalf("the pass waited %v, want %v", got, tc.waited)
+			}
+		})
+	}
+}
+
 // TestMigrationDestinationAwaitsTheSourceNamespace pins DN13 step (3)'s wait:
 // the kernel returns from `nvme connect` once the controller is live and only
 // queues the scan that adds the namespace node, so a single re-read could

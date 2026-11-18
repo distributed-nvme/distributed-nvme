@@ -54,6 +54,17 @@ const zeroLockPoll = 20 * time.Millisecond
 const zeroBackoffFmt = "%w (%d batches killed in a row: backed off to %s " +
 	"MiB per batch)"
 
+// msgZeroedCountCompleted is the Warn record of a converge that found a
+// side's zeroed count short of its length to zero under provisioned = true
+// and wrote it to its end, zeroing nothing (DN9): a record that rolled back
+// one save. A side writes it once, as the count is whole after it.
+// msgZeroedCountWriteFailed is the Error record of that write when it does
+// not hold; the side's row then reads tagNotZeroed.
+const (
+	msgZeroedCountCompleted   = "partial zeroed count taken as complete"
+	msgZeroedCountWriteFailed = "writing the zeroed count complete failed"
+)
+
 // zeroJob is what one zeroing loop works on. It is captured once, at
 // registration, rather than read from a *sidePlan on every batch: the loop
 // outlives the converge pass that started it, and a plan is a per-pass value.
@@ -200,6 +211,13 @@ func (s *DnAgentServer) zeroLoop(
 		// The side may have been torn down and re-created under this loop; the
 		// new sideState owns its own goroutine (the DN8 guard).
 		if s.getSide(key) != st {
+			return
+		}
+		// DN9: zeroing never writes a side the held request says is
+		// provisioned. The converge then takes a short count as complete
+		// (ensureSideDev); a loop the side's provisioning started stops
+		// before its next batch.
+		if st.req.Load().GetSideConf().GetProvisioned() {
 			return
 		}
 		attemptCtx := common.WithTraceId(ctx, common.NewTraceId())

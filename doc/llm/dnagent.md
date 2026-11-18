@@ -1915,7 +1915,12 @@ probe-first (SH16), building `DnInfo` as it goes:
   but version or CRC wrong ⇒ **error**, and every later operation errors
   too — a corrupt header is never formatted over, and neither is one
   written under another version of the format: such a disk is refused
-  until it is re-created. Magic present and valid ⇒ verify `cluster_id`,
+  until it is re-created. A header whose three layout fields are not this
+  build's constants (`DnDataOffset`, `DnCloneMetaOffset`,
+  `DnCloneMetaSize`) is refused the same way, naming the field, its value
+  and the constant (`parseDnHeader`): every reader takes the layout from the
+  constants, so such a disk would be read and written at the wrong places.
+  Every disk any build formatted carries the constants. Magic present and valid ⇒ verify `cluster_id`,
   `dn_id` and `extent_size` match; a mismatch is a "foreign disk" error
   naming both identities, and the disk is **never** overwritten.
   `extent_size` is therefore immutable for the life of a format. A re-call
@@ -2620,9 +2625,10 @@ pool left there is `architecture.md`, [D15]:
    past `zero_bytes`);
 4. the per-CN export stacks (DN10) and the migration roles (DN12, DN13)
    converge **only** when the request says `provisioned` true **and** the
-   record's `zeroed_bytes` equals its `zero_bytes`. The agent always trusts
-   its own record over the flag: the disk is authoritative ([D13]); the
-   etcd flag is a gate, never evidence.
+   record's `zeroed_bytes` equals its `zero_bytes`. The agent trusts its
+   own record over the flag — the disk is authoritative ([D13]); the etcd
+   flag is a gate, never evidence — except for a partial count under
+   `provisioned` true, which it takes as complete (row 5 below).
 
 `zeroed_bytes` counts the bytes zeroed from the side's start, so what is
 zeroed is always one prefix of the side, and the count alone says where
@@ -2647,8 +2653,19 @@ the build would ensure were the gate open (DN6).
 | false | present | partial | ensure the linear + the goroutine | `RES_STATUS_PROVISIONING`, "zeroing k/n MiB" |
 | false | present | complete | linear ensured; no goroutine; **no exports** | `RES_STATUS_OK` (the per-CN rows the level emits report `RES_STATUS_PROVISIONING`, "side provisioning", DN18) |
 | true | present | complete | full DN10 export converge | normal |
-| true | present | partial | **refuse exports**; keep the goroutine (it self-heals) | `RES_STATUS_ERROR`, "not zeroed" |
+| true | present | partial | **take the count as complete**: stop a goroutine that runs, write `zeroed_bytes` up to `zero_bytes` (`SetSideZeroed`), log a warning, zero nothing, then as the row above | as the row above; `RES_STATUS_ERROR`, "not zeroed", while the write has not held |
 | true | absent | — | **never allocate**; no linear, nothing converges | `RES_STATUS_ERROR`, "record missing" |
+
+Row 5's reason: the worker flips `provisioned` only on a whole count
+(`dnv-worker.md` RW18, the provisioned flip), so a partial count under it
+is a record rolled back one save (`architecture.md`, Known limits) or a hand
+edit; zeroing again would write over the pool's data the side holds since,
+and refusing the exports would have leg repair replace a whole leg whose
+data is intact. The warning comes once: the count is whole after the write.
+A write that does not hold leaves the row "not zeroed", and the side's read
+names the side (`zeroingVerdict`), so the worker's re-send tries the write
+again, never the zeroing; a background read reads the row "not zeroed" too
+until a converge's write has held.
 
 Partial means the record's `zeroed_bytes` is short of its `zero_bytes`,
 complete that the two are equal; k and n are those two counts in MiB,
@@ -2730,7 +2747,10 @@ disk cannot hold (`dnv-worker.md` HL2, AR8).
   goroutine for the side, a restart's included, starts again at
   `DnZeroBatchMaxBytes` with no kills counted.
 * zeroing runs at **every** `sp_level`, `SP_LEVEL_DISABLE` included
-  (DN11): it is bottom-layer provisioning.
+  (DN11): it is bottom-layer provisioning. It never writes a side whose
+  held request says `provisioned`: the goroutine stops before its next
+  batch once the request does (`zeroLoop`), and the converge of row 5 starts
+  none.
 * cancellation: the drop of a side whose pointer left the list (DN6, which
   is also where a cancelled migration lands — `CancelMigration` reaches
   the agent as the side pointer leaving the list) **cancels the goroutine
@@ -3354,8 +3374,12 @@ namespace device is there, pausing `DnMigrDstNsPause` between reads and
 the kernel returns from the connect once the controller is live and only
 queues the namespace scan that adds the device, so a single re-read could
 fail the target "controller has no namespace" for a device milliseconds
-away (the dn twin of `cnagent.md` CN10's head wait); a read that fails ends
-that wait at once. Both waits hold the pass's DN1 locks, so a `SyncupDn`
+away. The wait also holds for the head's ng device listed beside its node
+(`SubsysState.NgListed`), which the kernel adds last, once the node can be
+opened by its number, which the dm-clone's table takes; past the budget the
+head is used as the last read found it (the dn twin of `cnagent.md` CN10's
+head wait); a read that fails ends that wait at once. Both waits hold the
+pass's DN1 locks, so a `SyncupDn`
 waits behind them, about the two budgets together and longer when a connect
 itself runs long, and while that `SyncupDn` waits for the node write lock
 every later call, task and background read of the agent that takes the node
@@ -3682,7 +3706,9 @@ leftovers, while one of its listings does not answer, and — the first of
 the two comparisons a side's verdict makes beyond its sweep's — while its record,
 read from a table this node has confirmed (DN5), still has bytes to zero
 and no DN9 zeroing goroutine is running for it ("zeroing k/n MiB: nothing
-is zeroing the side"). Only a converge starts that goroutine, and one that
+is zeroing the side"; under `provisioned` true, where DN9's row 5 writes
+the count complete and zeroes nothing, "zeroing k/n MiB: the count is short
+under provisioned, and a converge writes it complete"). Only a converge starts that goroutine, and one that
 could not — the startup reconcile's, while no read of the disk answered —
 would otherwise leave every read reporting the same progress with nothing
 to re-send its `SyncupSide`; each read takes the registry and the record
@@ -3800,7 +3826,12 @@ converges nothing and sweeps nothing, so naming leftovers there would
 report objects this agent has deliberately refused to touch — and neither
 has a side whose DN is unknown or in that state, since its own geometry
 comes from the DN, nor a side whose stored request DN8's side conf gate
-refuses, which converges and sweeps nothing for the same reason.
+refuses, which converges and sweeps nothing for the same reason. The side
+device row of a side whose DN's stored `extent_size` is unusable reads
+`RES_STATUS_ERROR` with the DN's own refusal ("invalid stored conf:
+dn_bin_conf.extent_size is zero"), on a converge and on a read
+(`ensureSideDev`, `probeSideDev`), and not the refusal of the table that
+the DN's refusal leaves unconfirmed: the fault is the DN's conf.
 
 A read never creates, changes or removes an object of the node, though one
 that finds a migration destination's copy whole reads the dm-clone's status

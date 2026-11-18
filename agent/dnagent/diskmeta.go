@@ -252,7 +252,12 @@ func (d *DiskMeta) readSlot(
 }
 
 // parseDnHeader validates the header block. ok is false — with no error —
-// only when the magic is absent, i.e. the disk is unformatted.
+// only when the magic is absent, i.e. the disk is unformatted. A header whose
+// three layout fields — data_offset, clone_meta_offset and clone_meta_size —
+// are not this build's constants is refused like one of another format
+// version (DN5; architecture.md, [D13]): every reader of the disk takes the
+// layout from the constants, so a disk laid out otherwise would be read and
+// written at the wrong places. It is never formatted over.
 func parseDnHeader(raw []byte) (*pb.DnDiskHeader, bool, error) {
 	if len(raw) < common.DnHeaderSize {
 		return nil, false, fmt.Errorf(
@@ -280,6 +285,21 @@ func parseDnHeader(raw []byte) (*pb.DnDiskHeader, bool, error) {
 	if err := proto.Unmarshal(
 		raw[dnHeaderProtoOff:dnHeaderProtoOff+size], hdr); err != nil {
 		return nil, false, fmt.Errorf("corrupt header: %w", err)
+	}
+	for _, field := range []struct {
+		name      string
+		got, want uint64
+	}{
+		{"data_offset", hdr.GetDataOffset(), common.DnDataOffset},
+		{"clone_meta_offset", hdr.GetCloneMetaOffset(),
+			common.DnCloneMetaOffset},
+		{"clone_meta_size", hdr.GetCloneMetaSize(), common.DnCloneMetaSize},
+	} {
+		if field.got != field.want {
+			return nil, false, fmt.Errorf(
+				"unsupported disk header: %s is %d, want %d",
+				field.name, field.got, field.want)
+		}
 	}
 	return hdr, true, nil
 }
@@ -906,8 +926,11 @@ func sideZeroedBytes(rec *pb.DnDiskTable_SideRecord) uint64 {
 // Side provisioning protocol; the gate step of dnagent.md DN9): the record's
 // whole length to zero is zeroed. The agent trusts its own count over the
 // request's provisioned flag, because the disk is authoritative ([D13]) and
-// the etcd flag is a gate, never evidence. A length of zero never reads as
-// done: AllocSide writes none, and zero of zero must not open the gate.
+// the etcd flag is a gate, never evidence of zeroing still to do; the one
+// exception, a short count under the flag, is written up to the length
+// before this gate is read (ensureSideDev; dnagent.md DN9, row 5). A length
+// of zero never reads as done: AllocSide writes none, and zero of zero must
+// not open the gate.
 func sideFullyZeroed(rec *pb.DnDiskTable_SideRecord) bool {
 	zero := sideZeroBytes(rec)
 	return zero > 0 && sideZeroedBytes(rec) == zero

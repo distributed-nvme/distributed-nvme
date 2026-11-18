@@ -1878,9 +1878,11 @@ func (s *DnAgentServer) sideVerdict(
 
 // zeroingVerdict is one of the two comparisons a side's verdict makes beyond
 // the sweep's: zeroing that should be running and is not. A record this node's
-// confirmed table holds with bytes still to zero wants its DN9 goroutine,
-// at every level and on both sides of the provisioned gate, and only a
-// converge starts one. A converge that could not — the startup reconcile's
+// confirmed table holds with bytes still to zero wants, at provisioned =
+// false, its DN9 goroutine, at every level, and only a converge starts one;
+// at provisioned = true, the converge's write of the count to its end, which
+// zeroes nothing (ensureSideDev), so the name there brings that write, never
+// the zeroing. A converge that could not — the startup reconcile's
 // while no read of the disk answered, say — left nothing zeroing the side,
 // and every read then reports the same progress with nothing to re-send
 // the SyncupSide. Both halves are read fresh on every call, the
@@ -1927,6 +1929,14 @@ func (s *DnAgentServer) zeroingVerdict(
 	running := st.zeroing
 	s.mu.Unlock()
 	if running || s.readsRunRefusal(ctx, plan, read.GetSideDevInfo()) {
+		return
+	}
+	if plan.provisioned {
+		// DN9: under provisioned = true the converge writes the count to its
+		// end and zeroes nothing, so the name brings that write again.
+		res.Fail(zeroingDetails(sideZeroedBytes(rec), sideZeroBytes(rec)),
+			fmt.Errorf("the count is short under provisioned, and a "+
+				"converge writes it complete"))
 		return
 	}
 	res.Fail(zeroingDetails(sideZeroedBytes(rec), sideZeroBytes(rec)),

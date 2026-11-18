@@ -1103,9 +1103,11 @@ func TestSideProvisioningMatrix(t *testing.T) {
 		}
 	})
 
-	// Row 5: provisioned = true over a partial count. The agent trusts its
-	// own count over the flag: ERROR, no exports, and the goroutine keeps
-	// running so the side self-heals.
+	// Row 5: provisioned = true over a partial count, a record that rolled
+	// back one save (DN9). The count is taken as complete: the converge
+	// stops the loop the side's provisioning left running, writes the count
+	// to its end, zeroes nothing, logs one Warn record and exports the side;
+	// a second converge writes and logs nothing more.
 	t.Run("provisioned/partial", func(t *testing.T) {
 		srv, node := newTestServer(t)
 		if _, err := srv.SyncupDn(ctx, dnReq(1, testSide)); err != nil {
@@ -1119,33 +1121,119 @@ func TestSideProvisioningMatrix(t *testing.T) {
 			pb.SpLevel_SP_LEVEL_READWRITE)); err != nil {
 			t.Fatalf("SyncupSide: %v", err)
 		}
-		node.Reset()
+		logs := captureLogs(t)
 		reply, err := srv.SyncupSide(ctx,
 			sideReq(1, testSide, testCn0, nil, pb.SpLevel_SP_LEVEL_READWRITE))
 		if err != nil {
 			t.Fatalf("SyncupSide: %v", err)
 		}
+		node.mu.Lock()
+		delete(node.failCmdAlways, "blkdiscard --zeroout")
+		node.mu.Unlock()
+		node.Reset()
 		got := reply.GetSideInfo().GetSideDevInfo()
-		if got.GetStatus() != pb.ResStatus_RES_STATUS_ERROR ||
-			got.GetDetails() != tagNotZeroed {
-			t.Errorf("side_dev = %v/%q, want ERROR/%q",
-				got.GetStatus(), got.GetDetails(), tagNotZeroed)
+		if got.GetStatus() != pb.ResStatus_RES_STATUS_OK {
+			t.Errorf("side_dev = %v/%q, want OK", got.GetStatus(),
+				got.GetDetails())
 		}
-		if node.hasCall("cmd mkdir -p " + agent.NvmetRoot + "/subsystems/") {
-			t.Error("a partially zeroed side was exported")
+		if reply.GetSideInfo().GetZeroedBytes() != testZeroBytes {
+			t.Errorf("zeroed_bytes = %d, want the whole %d",
+				reply.GetSideInfo().GetZeroedBytes(), testZeroBytes)
+		}
+		rec, ok, _ := srv.meta.LookupSide(ctx, testSp, testSide)
+		if !ok || sideZeroedBytes(rec) != testZeroBytes {
+			t.Fatalf("the record's count is not written to its end: %v", rec)
 		}
 		st := srv.getSide(sideKey(testCluster, testDn, testSp, testSide))
 		srv.mu.Lock()
 		zeroing := st.zeroing
 		srv.mu.Unlock()
-		if !zeroing {
-			t.Error("row 5 dropped the self-healing goroutine")
+		if zeroing {
+			t.Error("row 5 left a zeroing loop running")
 		}
-		// And it does self-heal once the command works again.
-		node.mu.Lock()
-		delete(node.failCmdAlways, "blkdiscard --zeroout")
-		node.mu.Unlock()
-		waitZeroed(t, srv, testSide)
+		if n := len(logs.msgRecords(t, msgZeroedCountCompleted)); n != 1 {
+			t.Errorf("%d records of the count taken as complete, want 1", n)
+		}
+		reply, err = srv.SyncupSide(ctx,
+			sideReq(1, testSide, testCn0, nil, pb.SpLevel_SP_LEVEL_READWRITE))
+		if err != nil {
+			t.Fatalf("SyncupSide: %v", err)
+		}
+		if node.hasCall("cmd blkdiscard") {
+			t.Error("a provisioned side was zeroed")
+		}
+		if n := len(logs.msgRecords(t, msgZeroedCountCompleted)); n != 1 {
+			t.Errorf("%d records after a re-apply, want still 1", n)
+		}
+		if !node.hasCall("cmd mkdir -p "+agent.NvmetRoot+"/subsystems/") &&
+			reply.GetSideInfo().GetCnIdToNvmeof()[testCn0].GetStatus() !=
+				pb.ResStatus_RES_STATUS_OK {
+			t.Error("the side whose count was taken as complete is not exported")
+		}
+	})
+
+	// Row 5 when the write of the count does not hold: the row reads "not
+	// zeroed", nothing is exported or zeroed, and the read's verdict names
+	// the side, so the re-send tries the write again (zeroingVerdict).
+	t.Run("provisioned/partial, the write fails", func(t *testing.T) {
+		for _, slot := range []uint64{
+			common.DnTableSlotAOffset, common.DnTableSlotBOffset,
+		} {
+			srv, node := newTestServer(t)
+			syncupBoth(t, srv, 1, testSide)
+			clearZeroed(t, srv, node)
+			node.mu.Lock()
+			node.failBlockSet, node.failBlockWrite = true, slot
+			node.mu.Unlock()
+			node.Reset()
+			reply, err := srv.SyncupSide(ctx, sideReq(2, testSide, testCn0,
+				nil, pb.SpLevel_SP_LEVEL_READWRITE))
+			if err != nil {
+				t.Fatalf("SyncupSide: %v", err)
+			}
+			if rec, _, _ := srv.meta.LookupSide(ctx, testSp, testSide); sideFullyZeroed(rec) {
+				// The save went to the other slot: try that one.
+				continue
+			}
+			got := reply.GetSideInfo().GetSideDevInfo()
+			if got.GetStatus() != pb.ResStatus_RES_STATUS_ERROR ||
+				got.GetDetails() != tagNotZeroed {
+				t.Fatalf("side_dev = %v/%q, want ERROR/%q",
+					got.GetStatus(), got.GetDetails(), tagNotZeroed)
+			}
+			if node.hasCall("cmd blkdiscard") {
+				t.Fatal("a provisioned side was zeroed")
+			}
+			read, err := sideInfoNow(srv, ctx, &pb.GetSideInfoRequest{
+				ClusterId: testCluster, DnId: testDn,
+				SidePointer: sidePtr(testSide),
+			})
+			if err != nil {
+				t.Fatalf("GetSideInfo: %v", err)
+			}
+			if !strings.Contains(read.GetAgentReply().GetDetails(),
+				"a converge writes it complete") {
+				t.Fatalf("the read's verdict %q does not name the count",
+					read.GetAgentReply().GetDetails())
+			}
+			node.mu.Lock()
+			node.failBlockSet = false
+			node.mu.Unlock()
+			reply, err = srv.SyncupSide(ctx, sideReq(2, testSide, testCn0,
+				nil, pb.SpLevel_SP_LEVEL_READWRITE))
+			if err != nil {
+				t.Fatalf("SyncupSide: %v", err)
+			}
+			if got := reply.GetSideInfo().GetSideDevInfo(); got.GetStatus() !=
+				pb.ResStatus_RES_STATUS_OK {
+				t.Fatalf("the re-send's side_dev = %v, want OK", got)
+			}
+			if node.hasCall("cmd blkdiscard") {
+				t.Fatal("the re-send zeroed a provisioned side")
+			}
+			return
+		}
+		t.Fatal("fixture: no slot failed the count's write")
 	})
 
 	// Row 6: provisioned = true, no record. The data is gone; re-allocating
@@ -1224,8 +1312,8 @@ func TestSideProvisioningMatrix(t *testing.T) {
 	})
 
 	// A probe over a re-allocated record, nothing of it zeroed, at
-	// provisioned = true reports the same hard error the converge does — and
-	// still starts nothing.
+	// provisioned = true reports "not zeroed" until a converge has written
+	// the count to its end (DN9) — and starts nothing.
 	t.Run("probe/provisioned/partial", func(t *testing.T) {
 		srv, node := newTestServer(t)
 		syncupBoth(t, srv, 1, testSide)
@@ -2733,105 +2821,279 @@ func TestSpLevels(t *testing.T) {
 	}
 }
 
-// A side re-synced at SP_LEVEL_DISABLE while its zeroed count is still short
-// keeps issuing its zeroing batches (DN11). DN9 provisioning sits
-// *below* the level ladder — exactly as the trim it replaced did — which is why
-// convergeSide runs ensureSideDev, and with it startZeroing, before the
-// !plan.wantDm early return: the level takes the layers that serve IO away, not
-// the work that makes the side safe to serve at all, so a side disabled
-// mid-zeroing has its length zeroed by the time the level comes back down
-// instead of starting over. The invariants of the level itself are unchanged
-// by the unfinished count: the per-CN dm stacks and the exports go, the side
-// device and its allocation record stay.
+// TestDisableLevelKeepsZeroing pins DN9 and DN10 at SP_LEVEL_DISABLE: a side
+// still zeroing, at provisioned = false, keeps its goroutine through the
+// level, which takes the layers that serve IO away, not the work that makes
+// the side safe to serve at all, so a side disabled mid-zeroing has its
+// length zeroed by the time the level comes back down instead of starting
+// over; and a side whose count rolled back under provisioned = true has the
+// count taken as complete at that level as at any other, with nothing
+// zeroed. The invariants of the level itself are unchanged by the count: the
+// per-CN dm stacks and the exports go, the side device and its allocation
+// record stay.
 func TestDisableLevelKeepsZeroing(t *testing.T) {
-	srv, node := newTestServer(t)
 	nf := common.NewNameFmt(common.DefaultLocalStorPrefix)
 	ctx := context.Background()
 	sideDevName := nf.DnSideName(testCluster, testDn, testSp, testSide)
 	sideDevPath := nf.DmPath(sideDevName)
 	nqn := nf.SideToCnNqn(testCluster, testSp, testLeg, testCn0)
+	disabledInvariants := func(t *testing.T, srv *DnAgentServer,
+		node *fakeNode) {
+		t.Helper()
+		for _, cnId := range []uint64{testCn0, testCn1} {
+			linName := nf.DnLinearName(testCluster, testDn, testSp,
+				testSide, cnId)
+			if _, ok := node.dms[linName]; ok {
+				t.Errorf("SP_LEVEL_DISABLE kept the dm-linear of cn %d", cnId)
+			}
+		}
+		if node.dirs[agent.NvmetRoot+"/subsystems/"+nqn] {
+			t.Error("SP_LEVEL_DISABLE kept the subsystem")
+		}
+		if _, ok := node.dms[sideDevName]; !ok {
+			t.Error("SP_LEVEL_DISABLE removed the side device")
+		}
+		if _, ok, _ := srv.meta.LookupSide(ctx, testSp, testSide); !ok {
+			t.Error("SP_LEVEL_DISABLE freed the allocation record")
+		}
+	}
 
-	// The side starts in the steady state, so the teardown below has real
-	// exports and dm-linears to remove; then its record is re-allocated behind
-	// the agent's back, which is what leaves the count short under a request
-	// that still says provisioned = true (the "not zeroed" row of the
-	// converge matrix of dnagent.md DN9 — the
-	// flag is not what keeps the goroutine, the count is).
-	syncupBoth(t, srv, 1, testSide)
-	clearZeroed(t, srv, node)
+	t.Run("provisioned, a count rolled back", func(t *testing.T) {
+		srv, node := newTestServer(t)
+		// The side starts in the steady state, so the teardown below has
+		// real exports and dm-linears to remove; then its record is
+		// re-allocated behind the agent's back, which is what leaves the
+		// count short under a request that still says provisioned = true.
+		syncupBoth(t, srv, 1, testSide)
+		clearZeroed(t, srv, node)
+		node.Reset()
+		reply, err := srv.SyncupSide(ctx, sideReq(2, testSide, testCn0,
+			[]uint64{testCn1}, pb.SpLevel_SP_LEVEL_DISABLE))
+		if err != nil {
+			t.Fatalf("SyncupSide: %v", err)
+		}
+		if reply.GetAgentReply().GetCode() != 0 {
+			t.Fatalf("rejected: %v", reply.GetAgentReply())
+		}
+		if got := reply.GetSideInfo().GetSideDevInfo(); got.GetStatus() !=
+			pb.ResStatus_RES_STATUS_OK {
+			t.Errorf("side_dev = %v/%q, want OK", got.GetStatus(),
+				got.GetDetails())
+		}
+		disabledInvariants(t, srv, node)
+		if rec, _, _ := srv.meta.LookupSide(ctx, testSp,
+			testSide); !sideFullyZeroed(rec) {
+			t.Errorf("the count was not written to its end: %v", rec)
+		}
+		st := srv.getSide(sideKey(testCluster, testDn, testSp, testSide))
+		srv.mu.Lock()
+		zeroing := st.zeroing
+		srv.mu.Unlock()
+		if zeroing || node.hasCall("cmd blkdiscard") {
+			t.Error("a provisioned side was zeroed at SP_LEVEL_DISABLE")
+		}
+	})
 
-	// The second batch parks inside its child, so the loop cannot run out of
-	// work while the assertions below look at it: "still zeroing" is then a
-	// fact about the side rather than a race against the goroutine.
+	t.Run("still provisioning", func(t *testing.T) {
+		srv, node := newTestServer(t)
+		if _, err := srv.SyncupDn(ctx, dnReq(1, testSide)); err != nil {
+			t.Fatalf("SyncupDn: %v", err)
+		}
+		// The second batch parks inside its child, so the loop cannot run
+		// out of work while the assertions below look at it.
+		batch1 := zerooutBatches(sideDevPath, testZeroBytes)[1]
+		node.blockCmd(batch1)
+		t.Cleanup(func() { node.releaseCmd(batch1) })
+		if _, err := srv.SyncupSide(ctx, unprovisionedSideReq(1, testSide,
+			testCn0, []uint64{testCn1},
+			pb.SpLevel_SP_LEVEL_READWRITE)); err != nil {
+			t.Fatalf("SyncupSide: %v", err)
+		}
+		reply, err := srv.SyncupSide(ctx, unprovisionedSideReq(2, testSide,
+			testCn0, []uint64{testCn1}, pb.SpLevel_SP_LEVEL_DISABLE))
+		if err != nil {
+			t.Fatalf("SyncupSide: %v", err)
+		}
+		if reply.GetAgentReply().GetCode() != 0 {
+			t.Fatalf("rejected: %v", reply.GetAgentReply())
+		}
+		disabledInvariants(t, srv, node)
+		st := srv.getSide(sideKey(testCluster, testDn, testSp, testSide))
+		srv.mu.Lock()
+		zeroing := st.zeroing
+		srv.mu.Unlock()
+		if !zeroing {
+			t.Fatal("SP_LEVEL_DISABLE dropped the zeroing goroutine")
+		}
+		// The parked batch is released and the side runs to its length at
+		// DISABLE, at exactly the byte ranges an enabled side would use.
+		node.releaseCmd(batch1)
+		waitZeroed(t, srv, testSide)
+		assertOrder(t, node, zerooutBatches(sideDevPath, testZeroBytes)...)
+		if node.hasCall("cmd mkdir -p " + agent.NvmetRoot + "/subsystems/") {
+			t.Error("a disabled side was exported while it finished zeroing")
+		}
+	})
+}
+
+// TestTheConvergeStopsALoopUnderProvisioned pins DN9's row 5 outcome over a
+// running loop: a converge under provisioned = true over a short count
+// returns with nothing left zeroing and the side OK. The stop that comes
+// before the count write is pinned by TestAFailedCountWriteStillStopsTheLoop,
+// since after a write that holds the converge stops the loop again.
+func TestTheConvergeStopsALoopUnderProvisioned(t *testing.T) {
+	srv, node := newTestServer(t)
+	ctx := context.Background()
+	nf := common.NewNameFmt(common.DefaultLocalStorPrefix)
+	sideDevPath := nf.DmPath(nf.DnSideName(testCluster, testDn, testSp,
+		testSide))
+	if _, err := srv.SyncupDn(ctx, dnReq(1, testSide)); err != nil {
+		t.Fatalf("SyncupDn: %v", err)
+	}
 	batch1 := zerooutBatches(sideDevPath, testZeroBytes)[1]
-	node.blockCmd(batch1)
-	t.Cleanup(func() { node.releaseCmd(batch1) })
-
-	node.Reset()
-	reply, err := srv.SyncupSide(ctx, sideReq(2, testSide, testCn0,
-		[]uint64{testCn1}, pb.SpLevel_SP_LEVEL_DISABLE))
+	gate := make(chan struct{})
+	node.mu.Lock()
+	node.gate[strings.TrimPrefix(batch1, "cmd ")] = gate
+	node.mu.Unlock()
+	t.Cleanup(func() { close(gate) })
+	if _, err := srv.SyncupSide(ctx, unprovisionedSideReq(1, testSide,
+		testCn0, nil, pb.SpLevel_SP_LEVEL_READWRITE)); err != nil {
+		t.Fatalf("SyncupSide: %v", err)
+	}
+	if !waitFor(t, 5*time.Second, func() bool {
+		return node.hasCall(batch1)
+	}) {
+		t.Fatal("fixture: the second batch never started")
+	}
+	reply, err := srv.SyncupSide(ctx,
+		sideReq(2, testSide, testCn0, nil, pb.SpLevel_SP_LEVEL_READWRITE))
 	if err != nil {
 		t.Fatalf("SyncupSide: %v", err)
 	}
-	if reply.GetAgentReply().GetCode() != 0 {
-		t.Fatalf("rejected: %v", reply.GetAgentReply())
-	}
-	// The agent trusts its own count over the flag at every level.
-	if got := reply.GetSideInfo().GetSideDevInfo(); got.GetStatus() !=
-		pb.ResStatus_RES_STATUS_ERROR || got.GetDetails() != tagNotZeroed {
-		t.Errorf("side_dev = %v/%q, want ERROR/%q",
-			got.GetStatus(), got.GetDetails(), tagNotZeroed)
-	}
-
-	// The DISABLE invariants.
-	for _, cnId := range []uint64{testCn0, testCn1} {
-		linName := nf.DnLinearName(testCluster, testDn, testSp, testSide, cnId)
-		if _, ok := node.dms[linName]; ok {
-			t.Errorf("SP_LEVEL_DISABLE kept the dm-linear of cn %d", cnId)
-		}
-	}
-	if node.dirs[agent.NvmetRoot+"/subsystems/"+nqn] {
-		t.Error("SP_LEVEL_DISABLE kept the subsystem")
-	}
-	if _, ok := node.dms[sideDevName]; !ok {
-		t.Error("SP_LEVEL_DISABLE removed the side device")
-	}
-	if _, ok, _ := srv.meta.LookupSide(ctx, testSp, testSide); !ok {
-		t.Error("SP_LEVEL_DISABLE freed the allocation record")
-	}
-
 	st := srv.getSide(sideKey(testCluster, testDn, testSp, testSide))
 	srv.mu.Lock()
 	zeroing := st.zeroing
 	srv.mu.Unlock()
-	if !zeroing {
-		t.Fatal("SP_LEVEL_DISABLE dropped the zeroing goroutine")
+	if zeroing {
+		t.Fatal("the converge returned with the loop still in its batch")
 	}
-	// And it is *issuing batches*, not merely registered: the first one lands,
-	// count and all, with the side sitting at DISABLE.
-	if !waitFor(t, 5*time.Second, func() bool {
-		rec, ok, _ := srv.meta.LookupSide(ctx, testSp, testSide)
-		return ok && sideZeroedBytes(rec) == testZeroBatchMax
-	}) {
-		t.Fatal("no zeroing batch landed at SP_LEVEL_DISABLE")
+	if got := reply.GetSideInfo().GetSideDevInfo(); got.GetStatus() !=
+		pb.ResStatus_RES_STATUS_OK {
+		t.Fatalf("side_dev = %v, want OK", got)
 	}
-	// The parked batch is released and the side runs to its length: three
-	// batches at exactly the byte ranges an enabled side would use, every one
-	// of them recorded after the Reset above and so issued at DISABLE.
-	node.releaseCmd(batch1)
-	waitZeroed(t, srv, testSide)
-	assertOrder(t, node, zerooutBatches(sideDevPath, testZeroBytes)...)
+}
 
-	// Provisioning is bottom-layer work, so finishing it rebuilds nothing the
-	// level forbids — the side is ready, and still disabled.
-	if node.hasCall("cmd mkdir -p " + agent.NvmetRoot + "/subsystems/") {
-		t.Error("a disabled side was exported while it finished zeroing")
-	}
-	for _, cnId := range []uint64{testCn0, testCn1} {
-		linName := nf.DnLinearName(testCluster, testDn, testSp, testSide, cnId)
-		if _, ok := node.dms[linName]; ok {
-			t.Errorf("zeroing rebuilt the dm-linear of cn %d at DISABLE", cnId)
+// TestAFailedCountWriteStillStopsTheLoop pins DN9's row 5 stop, which comes
+// before the count write: a converge under provisioned = true over a short
+// count, whose write of the count does not hold, still cancels a loop
+// inside a batch and waits for it, so the converge returns with nothing
+// zeroing, the side reading "not zeroed", and no batch runs on a side whose
+// request says provisioned.
+func TestAFailedCountWriteStillStopsTheLoop(t *testing.T) {
+	ctx := context.Background()
+	nf := common.NewNameFmt(common.DefaultLocalStorPrefix)
+	sideDevPath := nf.DmPath(nf.DnSideName(testCluster, testDn, testSp,
+		testSide))
+	failed := false
+	for _, slot := range []uint64{
+		common.DnTableSlotAOffset, common.DnTableSlotBOffset,
+	} {
+		srv, node := newTestServer(t)
+		if _, err := srv.SyncupDn(ctx, dnReq(1, testSide)); err != nil {
+			t.Fatalf("SyncupDn: %v", err)
 		}
+		batch1 := zerooutBatches(sideDevPath, testZeroBytes)[1]
+		gate := make(chan struct{})
+		node.mu.Lock()
+		node.gate[strings.TrimPrefix(batch1, "cmd ")] = gate
+		node.mu.Unlock()
+		if _, err := srv.SyncupSide(ctx, unprovisionedSideReq(1, testSide,
+			testCn0, nil, pb.SpLevel_SP_LEVEL_READWRITE)); err != nil {
+			t.Fatalf("SyncupSide: %v", err)
+		}
+		if !waitFor(t, 5*time.Second, func() bool {
+			return node.hasCall(batch1)
+		}) {
+			t.Fatal("fixture: the second batch never started")
+		}
+		node.mu.Lock()
+		node.failBlockSet, node.failBlockWrite = true, slot
+		node.mu.Unlock()
+		reply, err := srv.SyncupSide(ctx,
+			sideReq(2, testSide, testCn0, nil, pb.SpLevel_SP_LEVEL_READWRITE))
+		if err != nil {
+			t.Fatalf("SyncupSide: %v", err)
+		}
+		st := srv.getSide(sideKey(testCluster, testDn, testSp, testSide))
+		srv.mu.Lock()
+		zeroing := st.zeroing
+		srv.mu.Unlock()
+		close(gate)
+		if rec, _, _ := srv.meta.LookupSide(ctx, testSp,
+			testSide); sideFullyZeroed(rec) {
+			// The save went to the other slot: try that one.
+			continue
+		}
+		failed = true
+		if zeroing {
+			t.Fatal("the converge whose count write failed returned with " +
+				"the loop still in its batch")
+		}
+		got := reply.GetSideInfo().GetSideDevInfo()
+		if got.GetStatus() != pb.ResStatus_RES_STATUS_ERROR ||
+			got.GetDetails() != tagNotZeroed {
+			t.Fatalf("side_dev = %v/%q, want ERROR/%q", got.GetStatus(),
+				got.GetDetails(), tagNotZeroed)
+		}
+		node.mu.Lock()
+		node.failBlockSet = false
+		node.mu.Unlock()
+	}
+	if !failed {
+		t.Fatal("fixture: the count write held on both slots")
+	}
+}
+
+// TestAZeroingLoopStopsUnderProvisioned pins DN9's stop of the loop: a loop
+// the side's provisioning started stops before its next batch once the held
+// request says provisioned, whatever the count.
+func TestAZeroingLoopStopsUnderProvisioned(t *testing.T) {
+	srv, node := newTestServer(t)
+	ctx := context.Background()
+	nf := common.NewNameFmt(common.DefaultLocalStorPrefix)
+	sideDevPath := nf.DmPath(nf.DnSideName(testCluster, testDn, testSp,
+		testSide))
+	if _, err := srv.SyncupDn(ctx, dnReq(1, testSide)); err != nil {
+		t.Fatalf("SyncupDn: %v", err)
+	}
+	batch1 := zerooutBatches(sideDevPath, testZeroBytes)[1]
+	node.blockCmd(batch1)
+	t.Cleanup(func() { node.releaseCmd(batch1) })
+	if _, err := srv.SyncupSide(ctx, unprovisionedSideReq(1, testSide,
+		testCn0, nil, pb.SpLevel_SP_LEVEL_READWRITE)); err != nil {
+		t.Fatalf("SyncupSide: %v", err)
+	}
+	if !waitFor(t, 5*time.Second, func() bool {
+		return node.hasCall("cmd " + strings.TrimPrefix(batch1, "cmd "))
+	}) {
+		t.Fatal("fixture: the second batch never started")
+	}
+	// The held request turns provisioned behind the converge's back, as a
+	// SyncupSide stores it before its converge runs.
+	st := srv.getSide(sideKey(testCluster, testDn, testSp, testSide))
+	st.req.Store(sideReq(2, testSide, testCn0, nil,
+		pb.SpLevel_SP_LEVEL_READWRITE))
+	node.Reset()
+	node.releaseCmd(batch1)
+	if !waitFor(t, 5*time.Second, func() bool {
+		srv.mu.Lock()
+		defer srv.mu.Unlock()
+		return !st.zeroing
+	}) {
+		t.Fatal("the loop goes on under a provisioned request")
+	}
+	if node.hasCall("cmd blkdiscard") {
+		t.Fatal("the loop zeroed a batch under a provisioned request")
 	}
 }
 

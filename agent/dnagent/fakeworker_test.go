@@ -823,13 +823,19 @@ func TestDiskHeaderRecordBound(t *testing.T) {
 			dn, ok)
 	}
 
+	// The padded records carry this build's layout fields, which a read
+	// holds every header to (parseDnHeader), and the widest of the rest.
 	padded := func(size int) *pb.DnDiskHeader {
 		hdr := proto.Clone(wide).(*pb.DnDiskHeader)
-		for pad := size - proto.Size(wide); pad >= 0; pad-- {
+		hdr.DataOffset = common.DnDataOffset
+		hdr.CloneMetaOffset = common.DnCloneMetaOffset
+		hdr.CloneMetaSize = common.DnCloneMetaSize
+		base := proto.Size(hdr)
+		for pad := size - base; pad >= 0; pad-- {
 			unknown := protowire.AppendBytes(
 				protowire.AppendTag(nil, 1000, protowire.BytesType),
 				make([]byte, pad))
-			if proto.Size(wide)+len(unknown) == size {
+			if base+len(unknown) == size {
 				hdr.ProtoReflect().SetUnknown(unknown)
 				return hdr
 			}

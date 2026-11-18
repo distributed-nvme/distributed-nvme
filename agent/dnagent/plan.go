@@ -33,8 +33,8 @@ const (
 	zeroingDetailsFmt = "zeroing %s/%s MiB"
 	// tagNotZeroed is the RES_STATUS_ERROR detail for a request that claims
 	// provisioned = true over a side whose zeroed count is short of its
-	// length to zero: the agent trusts its own count over the flag and
-	// refuses the exports.
+	// length to zero, while the converge's write of the count to its end has
+	// not held (DN9): the exports wait for it.
 	tagNotZeroed = "not zeroed"
 	// tagRecordMissing is the RES_STATUS_ERROR detail for provisioned = true
 	// with no allocation record: the data is gone (lost or foreign disk), and
@@ -103,8 +103,11 @@ type sidePlan struct {
 	level   pb.SpLevel
 
 	// provisioned is side_conf.provisioned: the CP's gate on exporting this
-	// side. It is a gate, never evidence — the agent always trusts its own
-	// zeroed count over the flag, because the disk is authoritative ([D13]).
+	// side. It is a gate, not evidence of zeroing still to do — the agent
+	// trusts its own zeroed count over the flag, because the disk is
+	// authoritative ([D13]), except that under the flag a short count is
+	// taken as complete and written to its end (dnagent.md DN9, row 5),
+	// since the worker flips the flag only on a whole count.
 	provisioned bool
 	// migrSrcRaw is migr_src_conf exactly as received, and migrSrcDeferred
 	// says its dst_provisioned is false: the destination has not provisioned

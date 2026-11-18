@@ -165,6 +165,13 @@ func (s *DnAgentServer) probeSideDev(
 	t := st.tracker
 	name := plan.sideDevName
 	info.ZeroBytes = plan.conf.GetZeroBytes()
+	// A disk node whose stored extent size is unusable (DN2) reads the side
+	// with its own refusal, as the converge does (ensureSideDev), not the
+	// table's refusal that follows from it.
+	if err := agent.ValidateExtentSize(plan.extentSize); err != nil {
+		info.SideDevInfo = t.Err(resKeySideDev, name, err.Error())
+		return sideDevFailed, nil
+	}
 	rec, ok, err := s.meta.LookupSide(ctx, plan.spId, plan.sideId)
 	if err != nil {
 		// An unreadable or corrupt disk is an error, never "absent".
@@ -243,7 +250,9 @@ func (s *DnAgentServer) probeSideDev(
 		zeroErr := s.zeroingErr(st)
 		switch {
 		case plan.provisioned:
-			// The agent trusts its own count over the flag.
+			// A short count under the flag reads "not zeroed" until a
+			// converge writes it up to its length (dnagent.md DN9, row 5),
+			// which the read's name brings (zeroingVerdict).
 			info.SideDevInfo = t.Err(resKeySideDev, name, tagNotZeroed)
 			return sideDevFailed, nil
 		case zeroErr != nil:

@@ -78,6 +78,11 @@ type SubsysState struct {
 	Live       bool
 	States     []string
 	DevicePath string
+	// NgListed says the listing that picked DevicePath holds the node's ng
+	// device too (SubsysRead.NgListed): the kernel adds it last, after the
+	// node can be opened by its number, so it is the sign the namespace head
+	// is complete. False when DevicePath is "".
+	NgListed bool
 	// Paths carries one entry per controller of the subsystem, so a caller
 	// can pick a single path out of a multipath subsystem (DisconnectDevice)
 	// or judge per-side liveness and ANA state (cnagent.md CN11/CN12). A
@@ -706,7 +711,8 @@ func (h *NvmeHost) readCtrl(
 // subsystem found, its namespace node, one PathState per controller, and
 // live when any controller's state is.
 func (r *SubsysRead) State(nqn string) *SubsysState {
-	state := &SubsysState{Found: true, Nqn: nqn, DevicePath: r.NsDev}
+	state := &SubsysState{Found: true, Nqn: nqn, DevicePath: r.NsDev,
+		NgListed: r.NgListed}
 	for _, ctrl := range r.Ctrls {
 		state.Paths = append(state.Paths, PathState{
 			Name:      ctrl.Name,

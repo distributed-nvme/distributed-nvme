@@ -478,7 +478,9 @@ Per DN, once (created by the dn agent at the first `SyncupDn`):
      self-describing header — a magic, a format version, a checksum and a
      `DnDiskHeader` carrying `cluster_id`, `dn_id`, `extent_size`, a random
      64-bit `format_uuid` and the three layout fields `data_offset`,
-     `clone_meta_offset` and `clone_meta_size`;
+     `clone_meta_offset` and `clone_meta_size`, which a read holds to the
+     constants: a header whose layout fields differ is refused like one of
+     another format version, and never formatted over (`dnagent.md` DN5);
    * the two alternating **volume-table** slots at `DnTableSlotAOffset` and
      `DnTableSlotBOffset`, each `DnTableSlotSize` bytes — a magic, the
      header's `format_uuid`, a monotonic `seq`, a checksum and a
@@ -4580,8 +4582,14 @@ worker's own, which leg repair creates once the leg's thresholds pass, on a
 clone meta group as on a slice's group (Automatic reactions), or an
 operator's (Repair); under `RedundNone` effectively delete-SP, or for a
 clone meta group the clone's delete).
-**The agent always trusts its own count over the flag** — the disk is
-authoritative ([D13]); the etcd flag is a gate, never evidence. A record
+**The agent trusts its own count over the flag** — the disk is
+authoritative ([D13]); the etcd flag is a gate, never evidence of zeroing
+still to do — **with one exception**: under `provisioned` true a count
+short of the length is taken as complete and written up to the length,
+and nothing is zeroed again (`dnagent.md` DN9, row 5). Reason: the sp
+worker flips the flag only on a whole count (sp role), so a short count
+under it is a record rolled back one save, or a hand edit, and zeroing
+again would write over the data the side holds since. A record
 whose extent total disagrees with `ext_cnt`, or whose length to zero
 disagrees with the request's, is an error. While the gate is closed
 every resource above the side device reports
@@ -7982,10 +7990,11 @@ document and only pointed to here.
   record. A torn write costs nothing a side reported, since a save commits
   and reports its count only once the write succeeded; a slot damaged after
   a committed save can, at a restart before the next save, lose the last
-  step of a side's zeroed count, and the agent then zeroes that batch of a
-  serving leg again, over what the pool has written there since. It
-  allocates no live extent again: a provisioned side with no record is
-  refused (`dnagent.md` DN9).
+  step of a side's zeroed count. Under `provisioned` the agent takes such a
+  count as complete and zeroes nothing (`dnagent.md` DN9), so a serving
+  leg is not zeroed again; the roll-back of any other record still loads
+  silently. It allocates no live extent again: a provisioned side with no
+  record is refused (`dnagent.md` DN9).
 * **QoS is not enforced** (Controller node, common): `CreateCluster`
   refuses a `qos_ratio` that is not all zero (Common validation), and the
   cn agent persists the ratio its syncup carries and enforces nothing

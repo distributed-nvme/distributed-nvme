@@ -428,6 +428,71 @@ func TestDiskMetaRefusesAVersion1Header(t *testing.T) {
 	assertNoWrite(t, node, "a version-1 disk")
 }
 
+// TestDiskMetaRefusesAHeaderOfAnotherLayout pins DN5's read of the header's
+// three layout fields: a header whose data_offset, clone_meta_offset or
+// clone_meta_size is not this build's constant, under a valid magic, version
+// and CRC, is refused by every call like a header of another format version,
+// naming the field, and never formatted over; a header with the constants
+// loads.
+func TestDiskMetaRefusesAHeaderOfAnotherLayout(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		set  func(hdr *pb.DnDiskHeader)
+		want string
+	}{
+		{"data_offset", func(hdr *pb.DnDiskHeader) {
+			hdr.DataOffset++
+		}, fmt.Sprintf("unsupported disk header: data_offset is %d, want %d",
+			common.DnDataOffset+1, common.DnDataOffset)},
+		{"clone_meta_offset", func(hdr *pb.DnDiskHeader) {
+			hdr.CloneMetaOffset++
+		}, fmt.Sprintf("unsupported disk header: clone_meta_offset is %d, "+
+			"want %d", common.DnCloneMetaOffset+1, common.DnCloneMetaOffset)},
+		{"clone_meta_size", func(hdr *pb.DnDiskHeader) {
+			hdr.CloneMetaSize--
+		}, fmt.Sprintf("unsupported disk header: clone_meta_size is %d, "+
+			"want %d", common.DnCloneMetaSize-1, common.DnCloneMetaSize)},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			_, node := formatted(t)
+			ctx := context.Background()
+			raw, err := node.readBlock(
+				ctx, metaDisk, common.DnHeaderOffset, common.DnHeaderSize)
+			if err != nil {
+				t.Fatalf("readBlock: %v", err)
+			}
+			hdr, ok, err := parseDnHeader(raw)
+			if err != nil || !ok {
+				t.Fatalf("fixture: the header does not load: %v", err)
+			}
+			tc.set(hdr)
+			block, err := buildDnHeader(hdr)
+			if err != nil {
+				t.Fatalf("buildDnHeader: %v", err)
+			}
+			node.corruptBlock(metaDisk, common.DnHeaderOffset, block)
+			node.Reset()
+
+			meta := reopen(node)
+			if err := meta.EnsureFormatted(ctx, testCluster, testDn,
+				metaExtentSize, mayFormat); err == nil ||
+				err.Error() != tc.want {
+				t.Fatalf("EnsureFormatted = %v, want %q", err, tc.want)
+			}
+			if _, err := meta.AllocSide(
+				ctx, testSp, testSide, 1, metaExtentSize); err == nil {
+				t.Error("AllocSide succeeded on a header of another layout")
+			}
+			if _, err := meta.ProbeHeader(ctx, testCluster, testDn,
+				metaExtentSize); err == nil ||
+				!strings.Contains(err.Error(), tc.want) {
+				t.Errorf("ProbeHeader = %v, want %q", err, tc.want)
+			}
+			assertNoWrite(t, node, "a disk of another layout")
+		})
+	}
+}
+
 func TestDiskMetaProbeHeader(t *testing.T) {
 	meta, node := formatted(t)
 	ctx := context.Background()

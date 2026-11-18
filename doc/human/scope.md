@@ -483,14 +483,6 @@ No case is known today.
   that holds data](operations.md#a-new-volume-refused-for-a-thin-id-that-holds-data),
   which tells the two cases apart; section 7 has the restore's steps
   known today. Not seen in the lab.
-- **A damaged copy of the disk node's own records can re-zero a serving
-  leg.** Silent. A disk node keeps the records of its sides on its disk,
-  in two copies written in turn, and loads the newest good one. A newest
-  copy damaged after its write leaves the older one, one change behind. At
-  a restart the agent can then zero again the part of a side it zeroed
-  last, over the pool's data written there since. State:
-  fix decided, the zeroing never writes a side that is provisioned. Not
-  seen in the lab.
 - **Making the old primary the primary again right after a failed fence
   can write old data.** Silent. A fence that suspends the old primary's
   path and then fails to load the error target leaves that path suspended

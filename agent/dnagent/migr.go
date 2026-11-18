@@ -846,13 +846,19 @@ func (s *DnAgentServer) connectMigrSrc(
 }
 
 // awaitMigrSrcNs re-reads the migration source's subsystem after a connect
-// this pass made, until its namespace device is there, pausing
-// DnMigrDstNsPause between reads and DnMigrDstNsWait in all — the reads
-// themselves are not counted (DN13 step (3)). The kernel returns from
-// `nvme connect` as soon as the controller is live and only QUEUES the
-// namespace scan that adds the device, so a single re-read could find the
-// controller and no namespace yet, failing the target with "controller has
-// no namespace" for a device milliseconds away.
+// this pass made, until its namespace head is complete — its device there
+// and its ng device listed beside it — pausing DnMigrDstNsPause between
+// reads and DnMigrDstNsWait in all — the reads themselves are not counted
+// (DN13 step (3)), as the cn twin waits (cnagent.md CN10, the head wait).
+// The kernel returns from `nvme connect` as soon as the controller is live
+// and only QUEUES the namespace scan that adds the device, so a single
+// re-read could find the controller and no namespace yet, failing the
+// target with "controller has no namespace" for a device milliseconds away;
+// and it adds the ng device last, after the node, so a head whose ng device
+// is not listed yet may not be opened by its number, which the dm-clone's
+// table takes. Past the budget the head is used as the last read found it:
+// a device with no ng device listed yet is handed on, and a step after the
+// wait that fails fails the target with its own error.
 // A ListSubsys that fails ends the wait at once. It connects nothing and
 // has a budget of its own: the connect's retries are connectMigrSrc's.
 func (s *DnAgentServer) awaitMigrSrcNs(
@@ -862,7 +868,7 @@ func (s *DnAgentServer) awaitMigrSrcNs(
 	budget := agent.NewWaitBudget(common.DnMigrDstNsWait, s.now, s.sleep)
 	for {
 		state, err := s.host.ListSubsys(ctx, nqn)
-		if err != nil || state.DevicePath != "" {
+		if err != nil || (state.DevicePath != "" && state.NgListed) {
 			return state, err
 		}
 		if !budget.Pause(ctx, common.DnMigrDstNsPause) {

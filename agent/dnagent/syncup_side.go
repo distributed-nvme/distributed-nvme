@@ -408,7 +408,8 @@ type sideDevState int
 const (
 	// sideDevFailed is a real fault: an unreadable disk, a table that will not
 	// converge, or a request claiming provisioned = true over a side whose
-	// record is missing or whose zeroed count is short of its length to zero.
+	// record is missing, or whose short zeroed count the converge could not
+	// write up to its length to zero (row 5's count write did not hold).
 	// ERROR is reported and feeds err_epoch.
 	sideDevFailed sideDevState = iota
 	// sideDevProvisioning is healthy but not exportable yet: the side is being
@@ -443,7 +444,8 @@ const (
 //	false / partial  ensure the linear, keep the goroutine
 //	false / complete linear ensured, goroutine stopped, still no exports
 //	true  / complete the full DN10 export converge
-//	true  / partial  refuse the exports, keep the goroutine (it self-heals)
+//	true  / partial  take the count as complete: stop the goroutine, write
+//	                 the count to its end, zero nothing, then as complete
 //	true  / absent   never allocate; the data is gone
 //
 // A migration destination adds one step to the first two rows: it takes its
@@ -480,6 +482,14 @@ func (s *DnAgentServer) ensureSideDev(
 	// overwritten from the record below — the record always wins.
 	info.ZeroBytes = plan.conf.GetZeroBytes()
 
+	// A disk node whose stored extent size is unusable is refused itself
+	// (DN2), so its table is never confirmed; the side reads that refusal,
+	// the disk node's own, on the converge and on the read (probeSideDev),
+	// rather than the table's refusal that follows from it.
+	if err := agent.ValidateExtentSize(plan.extentSize); err != nil {
+		info.SideDevInfo = t.Err(resKeySideDev, name, err.Error())
+		return sideDevFailed, nil
+	}
 	rec, ok, err := s.meta.LookupSide(ctx, plan.spId, plan.sideId)
 	if err != nil {
 		// An unreadable or corrupt disk is an error, never "absent".
@@ -523,7 +533,34 @@ func (s *DnAgentServer) ensureSideDev(
 		info.SideDevInfo = t.Err(resKeySideDev, name, err.Error())
 		return sideDevFailed, nil
 	}
-	if !sideFullyZeroed(rec) {
+	if !sideFullyZeroed(rec) && plan.provisioned {
+		// Row 5. The worker flips provisioned only on a whole count
+		// (dnv-worker.md RW18), so a partial one under it is a record that
+		// rolled back one save, or a hand edit: the count is taken as
+		// complete and written to its end, and nothing is zeroed — zeroing
+		// again would write over the pool's data the side holds since, and
+		// refusing would have a leg repair replace a leg whose data is
+		// intact. A loop that still runs from the side's provisioning is
+		// stopped first. A write that does not hold reads "not zeroed", which
+		// the verdict names (zeroingVerdict), so the re-send tries the write
+		// again, never the zeroing.
+		s.stopZeroing(st)
+		if err := s.meta.SetSideZeroed(
+			ctx, plan.spId, plan.sideId, zeroed, zero); err != nil {
+			slog.ErrorContext(ctx, msgZeroedCountWriteFailed,
+				slog.Uint64("sp_id", plan.spId),
+				slog.Uint64("side_id", plan.sideId),
+				slog.String("error", err.Error()))
+			info.SideDevInfo = t.Err(resKeySideDev, name, tagNotZeroed)
+			return sideDevFailed, nil
+		}
+		slog.WarnContext(ctx, msgZeroedCountCompleted,
+			slog.Uint64("sp_id", plan.spId),
+			slog.Uint64("side_id", plan.sideId),
+			slog.Uint64("zeroed_bytes", zeroed),
+			slog.Uint64("zero_bytes", zero))
+		info.ZeroedBytes = zero
+	} else if !sideFullyZeroed(rec) {
 		if !plan.provisioned && plan.migrDst != nil {
 			// A migration destination takes its run in the clone-metadata
 			// area before it zeroes, at every level (holdMigrMeta, DN13).
@@ -543,14 +580,8 @@ func (s *DnAgentServer) ensureSideDev(
 				return sideDevFailed, nil
 			}
 		}
-		// Rows 2 and 5. The goroutine runs on both sides of the gate: at
-		// provisioned = true it is what self-heals a side whose count was lost
-		// or never finished.
+		// Row 2: the goroutine zeroes a side the gate holds back.
 		s.startZeroing(st, plan)
-		if plan.provisioned {
-			info.SideDevInfo = t.Err(resKeySideDev, name, tagNotZeroed)
-			return sideDevFailed, nil
-		}
 		if zeroErr := s.zeroingErr(st); zeroErr != nil {
 			// A batch that failed or was killed reports its output, and ERROR
 			// wins while that failure is outstanding; the next successful

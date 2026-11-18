@@ -318,6 +318,47 @@ func TestReconcileRefusesAZeroExtentSizeWithoutTearingSidesDown(
 	}
 }
 
+// TestASideOfAnUnusableExtentSizeReadsItsDiskNodesRefusal pins the side's
+// row on a disk node whose stored extent size is unusable (DN2, DN16): the
+// startup converge and a read both read the side ERROR with the disk node's
+// own refusal, not the table's refusal that follows from it, and the read's
+// verdict names nothing, as no re-send cures a disk node's conf.
+func TestASideOfAnUnusableExtentSizeReadsItsDiskNodesRefusal(t *testing.T) {
+	ctx := context.Background()
+	srv, node := newTestServer(t)
+	syncupBoth(t, srv, 1, testSide)
+	nf := common.NewNameFmt(common.DefaultLocalStorPrefix)
+	req := dnReq(2, testSide)
+	req.ExtentSize = 0
+	if err := node.writeProto(ctx, nf.LocalDnPath(testCluster, testDn),
+		req); err != nil {
+		t.Fatalf("rewriting the dn state file: %v", err)
+	}
+	fresh := startTestServer(t, node)
+	reply, err := sideInfoNow(fresh, ctx, &pb.GetSideInfoRequest{
+		ClusterId: testCluster, DnId: testDn, SidePointer: sidePtr(testSide),
+	})
+	if err != nil {
+		t.Fatalf("GetSideInfo: %v", err)
+	}
+	row := reply.GetSideInfo().GetSideDevInfo()
+	if row.GetStatus() != pb.ResStatus_RES_STATUS_ERROR ||
+		row.GetDetails() != msgNoExtentSize {
+		t.Fatalf("the read's side_dev = %v %q, want ERROR %q",
+			row.GetStatus(), row.GetDetails(), msgNoExtentSize)
+	}
+	if code := reply.GetAgentReply().GetCode(); code != 0 {
+		t.Fatalf("the read names the side: %v", reply.GetAgentReply())
+	}
+	st := fresh.getSide(sideKey(testCluster, testDn, testSp, testSide))
+	converged, _ := fresh.convergeSide(ctx, st, 0, 0)
+	if row := converged.GetSideDevInfo(); row.GetStatus() !=
+		pb.ResStatus_RES_STATUS_ERROR || row.GetDetails() != msgNoExtentSize {
+		t.Fatalf("the converge's side_dev = %v %q, want ERROR %q",
+			row.GetStatus(), row.GetDetails(), msgNoExtentSize)
+	}
+}
+
 // The accept side of the same gate, so the refusal above cannot pass by
 // refusing everything: the fixture's own extent size validates and converges.
 func TestSyncupDnAcceptsAConcreteExtentSize(t *testing.T) {
