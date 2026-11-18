@@ -90,8 +90,9 @@ the method set is exactly the following, each taking the caller's ctx:
   failure, is an error, with an empty number.
 * `WriteFile` creates or overwrites a file with string data under the
   default file permissions, by atomic replace.
-* `WriteFileDirect` writes string data straight into the file at a path —
-  no temp file, no rename — and exists only for kernel virtual filesystems.
+* `WriteFileDirect` writes string data straight into the existing file at a
+  path — no temp file, no rename, no create — and exists only for kernel
+  virtual filesystems.
 * `ReadBlock` reads exactly the requested length at a byte offset of a block
   device (or regular file); a short read is an error; buffered IO, which
   callers use only for regions no dm table references.
@@ -280,9 +281,13 @@ the method set is exactly the following, each taking the caller's ctx:
   local-store requirement ("temp file in the same dir, fsync, rename, fsync
   the dir"; `architecture.md`, Common agent rules) automatic for every
   state file, and is the right default for every regular-file write.
-* `WriteFileDirect` is a plain in-place write (`os.WriteFile` under the
-  default permissions): it creates a missing file and overwrites an existing
-  one in place, with no temp file, no fsync and no rename. It exists for
+* `WriteFileDirect` is a plain in-place write of an existing file
+  (`writeExisting`): it opens the file write-only and truncated, never with
+  the create flag, and overwrites it in place, with no temp file, no fsync
+  and no rename; a missing file is an error wrapping `fs.ErrNotExist`, and
+  nothing is made. Reason: configfs and sysfs have no create operation, so a
+  create only ever worked on a path that left them for a real file system,
+  where it made a file at a path a request's name chose. It exists for
   kernel virtual filesystems (nvmet configfs, sysfs), where the atomic
   replace is impossible: configfs forbids creating arbitrary files, so
   `WriteFile` can never succeed there. Use it **only** for such attribute

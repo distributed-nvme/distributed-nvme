@@ -21,9 +21,11 @@ import (
 // Serve runs the shared agent lifecycle (SH1-SH3, SH33): prepare the role
 // server with the process's ctx, listen and serve, then reconcile the OS to
 // the local store while the agent answers that it is starting, and serve
-// until ctx is canceled (SIGTERM/SIGINT via signal.NotifyContext in
-// cmd/dnv-agent). A listen that fails touches nothing of the node, so a
-// second agent on the same gRPC address stops before its reconcile.
+// until ctx is canceled (the first SIGTERM or SIGINT, through signalContext
+// and watchSignals in cmd/dnv-agent; a second signal exits 1 at once,
+// skipping the join below, dnagent.md CM4, SH27). A listen that fails
+// touches nothing of the node, so a second agent on the same gRPC address
+// stops before its reconcile.
 //
 // prepare hands the role server the ctx its background work derives from
 // (its rootCtx) and begins its startup state, before any RPC can arrive, so
@@ -32,10 +34,12 @@ import (
 // waitBackground (may be nil) is joined after the gRPC server has drained
 // every RPC, so no background goroutine it covers — and, more to the point,
 // no child process one of them owns, such as DN9's zeroing `blkdiscard` —
-// outlives the agent (dnagent.md SH27). Only a role whose background work
-// holds a long-running child that must not outlive it passes one: the dn
-// passes its WaitGroup join, the cn passes nil because its CN11 probers are
-// stopped by cancellation and never joined (a wedged pread is
+// outlives an agent that exits through it (dnagent.md SH27); an exit on a
+// second signal skips it, and such a child can outlive the agent. Only a
+// role whose background work holds a long-running child that must not
+// outlive it passes one: the dn passes its WaitGroup join, the cn passes
+// nil because its CN11 probers are stopped by cancellation and never joined
+// (a wedged pread is
 // uninterruptible, so waiting would hang shutdown forever — the very
 // starvation the probe-IO carve-out exists to prevent) and the child of its
 // sweep's background `nvme disconnect` holds nothing a restarted agent needs

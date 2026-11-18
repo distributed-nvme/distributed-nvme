@@ -1560,6 +1560,21 @@ func TestWriteFileDirect(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "ana_state")
 
+	// A missing file fails and nothing is made: configfs and sysfs have no
+	// create operation, and a create only ever worked on a path that left
+	// them for a real file system (osclient.md, ReadFile / WriteFile /
+	// WriteFileDirect).
+	if err := client.WriteFileDirect(ctx, path, "optimized"); err == nil ||
+		!errors.Is(err, fs.ErrNotExist) {
+		t.Fatalf("a write to a missing file = %v, want not exist", err)
+	}
+	if _, err := os.Stat(path); !errors.Is(err, fs.ErrNotExist) {
+		t.Fatalf("the failed write made the file: %v", err)
+	}
+	// An existing attribute, as configfs holds it, is written in place.
+	if err := os.WriteFile(path, []byte("unset"), 0o644); err != nil {
+		t.Fatalf("making the attribute: %v", err)
+	}
 	if err := client.WriteFileDirect(ctx, path, "optimized"); err != nil {
 		t.Fatalf("WriteFileDirect: %v", err)
 	}
@@ -1581,7 +1596,7 @@ func TestWriteFileDirect(t *testing.T) {
 		t.Errorf("direct write left extra files: %v", entries)
 	}
 
-	rec := capture.withMsg(t, "os write file direct")[0]
+	rec := capture.withMsg(t, "os write file direct")[1]
 	hasAttrs(t, rec, "path", "size", "data", TraceIdLogKey)
 	if rec["path"] != path || rec["data"] != "optimized" ||
 		rec[TraceIdLogKey] != "direct-trace" {
@@ -1594,7 +1609,7 @@ func TestWriteFileDirect(t *testing.T) {
 	if err == nil {
 		t.Error("writing into a missing directory succeeded")
 	}
-	failRec := capture.withMsg(t, "os write file direct")[2]
+	failRec := capture.withMsg(t, "os write file direct")[3]
 	if _, ok := failRec["error"]; !ok {
 		t.Errorf("failed direct write has no error attr: %v", failRec)
 	}

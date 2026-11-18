@@ -319,7 +319,10 @@ child through the SH15 soft/hard timeout machinery (`osclient.md`,
 RunCommand, sends SIGTERM then SIGKILL), so the wait is bounded by
 `CmdHardTimeout` per in-flight command — unless the child sits in an
 uninterruptible kernel wait, which no signal ends: the join then lasts until
-the kernel returns (SH15).
+the kernel returns (SH15). A second SIGINT or SIGTERM ends the process at
+once and skips the join (CM4): a zeroing child can then outlive the agent,
+holding its side device open until its batch ends, and the next start's
+reconcile meets it as after a kill (below).
 
 **Only child-owning tasks are waited for.** The cn passes a nil
 `waitBackground`: a CN11 prober's IO is a direct, uninterruptible syscall
@@ -568,7 +571,9 @@ SH9. Unknown-object rejections use `ReplyCodeUnknownObject` with a
 `details` string naming the missing pointer or id. A request whose conf
 carries a value the control plane cannot have written is rejected with
 `ReplyCodeInvalidConf` and the validator's message of Files (DN4,
-`cnagent.md` CN8), or the message of DN8's side conf gate: the object is
+`cnagent.md` CN8) — on a cn that also covers a cntlr request's NQNs, held
+to the gateway's rule (`ValidateCntlrNqns`) — or the message of DN8's side
+conf gate: the object is
 known and the revision is current, so it is neither a stale revision nor
 an unknown object, and `details` names the proto field rather than an id.
 A request the gates admit whose save then fails is rejected with
@@ -1574,19 +1579,37 @@ automatic environment reads, and when `--config` is set read that config
 file. All value reads go through viper (so file and environment win per
 viper precedence).
 
-Three checks run **after** that resolution rather than through cobra's own
+Four checks run **after** that resolution rather than through cobra's own
 flag machinery, so that a config file or an environment variable is subject
 to the same rule as a flag: `requireValues` over `requiredCommon` (the
 values both roles must have, plus `--disk` for dn), the
-`--nvmet-port-id` floor (`nvmetPortIdFromViper`) and the `--nvmet-qid-max`
-range (`nvmetQidMaxFromViper`). A port id below one makes the
+`--nvmet-port-id` floor (`nvmetPortIdFromViper`), the `--nvmet-qid-max`
+range (`nvmetQidMaxFromViper`) and, for the cn, a `--capacity` from the
+flag, the environment or a config file's string that is a plain unsigned
+decimal number that fits 64 bits: digits alone, with no leading zero but in
+"0" itself (`capacityFromViper`). A port id below one makes the
 subcommand's `RunE` return an error naming the floor and the value it got,
-and a queue cap outside 0 to `NvmetQidMaxLimit` one naming the range and
-the value as it was given; the root command sets `SilenceUsage`, so
+a queue cap outside 0 to `NvmetQidMaxLimit` one naming the range and
+the value as it was given, and a capacity from those three sources that is
+not such a number, as "500GiB", "1e12", "-1", "1.5", "0x100", "+5",
+"0100" or an empty string in a config file, one naming the flag and the
+value as it was given, where viper's read would turn some of them into
+zero, which the control plane reads as no local opinion (`cnagent.md`
+CN3). `--capacity` is a string flag, so pflag's own parse, which takes Go
+integer syntax, never runs on it, and the flag is held to the same decimal
+rule as the environment and a config file's string. A leading zero is
+refused rather than read as decimal, since the flag's former integer parse
+read it as octal. A config file's YAML number is the one source with a
+syntax of its own: it reaches the check as YAML decoded it, written out in
+decimal, so `capacity: 1e12` there is taken as 1000000000000,
+`capacity: 0x100` as 256 and `capacity: 0100` as 64, and one that is no
+whole number, as `capacity: 1.5`, is refused. The root command sets
+`SilenceUsage`, so
 `dnv-agent` exits non-zero with no usage dump, printing that message
 **twice** — cobra's own error line plus `main`'s own print to stderr —
-which is what anything grepping the output sees. It is the same rule, not
-the same validation: a non-numeric **flag** never reaches either check,
+which is what anything grepping the output sees. For the port id and the
+queue cap it is the same rule, not the same validation: a non-numeric
+`--nvmet-port-id` or `--nvmet-qid-max` **flag** never reaches its check,
 because pflag rejects it at parse time, while viper's integer read turns
 any non-numeric env or config value into zero, which the port-id floor then
 reports as zero. The queue-cap check parses the resolved value itself, so
@@ -1596,11 +1619,14 @@ empty variable leaves the default standing. Every
 flag's env spelling is the prefix plus the flag with dashes replaced by
 underscores.
 
-CM4. Each subcommand's `RunE`: bind viper, then run CM3's three checks —
+CM4. Each subcommand's `RunE`: bind viper, then run CM3's checks —
 `requireValues`, then the `--nvmet-port-id` floor and the `--nvmet-qid-max`
-range, whose resolved values are carried on to the constructor; a
-signal-notified ctx for SIGINT and SIGTERM, whose cancellation starts
-`Serve`'s bounded stop (Bootstrap and lifecycle);
+range, and for the cn the `--capacity` number, whose resolved values are
+carried on to the constructor; a ctx the first SIGINT or SIGTERM cancels,
+which starts `Serve`'s bounded stop (Bootstrap and lifecycle), while a
+second one ends the process at once with exit status 1, as every other dnv
+program's second signal does (`signalContext`, `watchSignals`), skipping
+SH27's join of background work;
 construct `common.NewNameFmt` over the local store and the process's
 **single** `common.NewLimitedOsClient` (with the default limit); build the
 role server (`dnagent.NewDnAgentServer` / `cnagent.NewCnAgentServer`); call

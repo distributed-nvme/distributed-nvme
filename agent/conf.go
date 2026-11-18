@@ -2,6 +2,9 @@ package agent
 
 import (
 	"fmt"
+	"regexp"
+	"sort"
+	"strings"
 
 	"github.com/distributed-nvme/distributed-nvme/common"
 	"github.com/distributed-nvme/distributed-nvme/pb"
@@ -53,6 +56,66 @@ func ValidateBdevConf(conf *pb.BdevConf) error {
 		return invalidConf(
 			"bdev_conf.redund_conf.redund_md_raid1." +
 				"bitmap_chunk_block_cnt is zero")
+	}
+	return nil
+}
+
+// validNqn is common.ValidNqnPattern, compiled once.
+var validNqn = regexp.MustCompile(common.ValidNqnPattern)
+
+// ValidateCntlrNqns refuses a cntlr request that carries an NQN the gateway
+// would not store (architecture.md, Common validation): each key of
+// nqn_to_subsystem, each subsystem's and each transfer's allowed_hosts and
+// each clone's src_nqn is held to common.ValidNqnPattern, within
+// common.MaxNqnLength, with no "..", the gateway's own rule (validateNqn,
+// gateway/validate.go) copied as this file copies model's. Reason: the cn
+// agent builds configfs paths from the subsystem and host NQNs and hands
+// the clone's source NQN to the kernel's connect, so a "/" or ".." would let
+// a request reach paths outside its directory and a "," would add options to
+// the connect; every NQN a released gateway stored passes it. Only a store
+// written before the gateway held NQNs to the rule, or by hand, can carry one
+// it refuses. The first refusal, in a fixed order, is the error.
+func ValidateCntlrNqns(req *pb.SyncupCntlrRequest) error {
+	check := func(field, nqn string) error {
+		switch {
+		case nqn == "":
+			return invalidConf("%s is empty", field)
+		case len(nqn) > common.MaxNqnLength:
+			return invalidConf("%s is %d bytes, the maximum is %d", field,
+				len(nqn), common.MaxNqnLength)
+		case !validNqn.MatchString(nqn):
+			return invalidConf("%s %q is not a valid NQN", field, nqn)
+		case strings.Contains(nqn, ".."):
+			return invalidConf("%s %q contains \"..\"", field, nqn)
+		}
+		return nil
+	}
+	nqns := make([]string, 0, len(req.GetNqnToSubsystem()))
+	for nqn := range req.GetNqnToSubsystem() {
+		nqns = append(nqns, nqn)
+	}
+	sort.Strings(nqns)
+	for _, nqn := range nqns {
+		if err := check("nqn_to_subsystem key", nqn); err != nil {
+			return err
+		}
+		for _, host := range req.GetNqnToSubsystem()[nqn].GetAllowedHosts() {
+			if err := check("subsystem allowed_hosts", host); err != nil {
+				return err
+			}
+		}
+	}
+	for _, xfer := range req.GetXferList() {
+		for _, host := range xfer.GetAllowedHosts() {
+			if err := check("transfer allowed_hosts", host); err != nil {
+				return err
+			}
+		}
+	}
+	for _, clone := range req.GetCloneList() {
+		if err := check("clone src_nqn", clone.GetSrcNqn()); err != nil {
+			return err
+		}
 	}
 	return nil
 }

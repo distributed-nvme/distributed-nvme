@@ -7853,16 +7853,19 @@ document and only pointed to here.
   a node, which can read the old bytes of a recycled extent from the raw
   leg or disk. Deploy on an isolated, trusted fabric. The agents' gRPC
   ports are open the same way: whoever reaches one can send a syncup the
-  agent accepts, since its gates check the revision, the object and a few
-  geometry values and nothing else (`dnagent.md` SH8, SH9, DN4, DN8;
+  agent accepts, since its gates check the revision, the object, a few
+  geometry values and, on a cn, the form of the NQNs, and nothing else
+  (`dnagent.md` SH8, SH9, DN4, DN8;
   `cnagent.md` CN4, CN8), so such a caller can store a desired state that
   removes the
-  node's sides or cntlrs; and the cn agent builds its configfs paths from a
-  request's NQNs with no check of their form (`SubsysPath` and `HostPath`
-  of `agent/nvmet.go`), under "mkdir -p" and the file writes of
-  `osclient.md`, ReadFile / WriteFile / WriteFileDirect, so a caller that
-  bypasses the gateway's NQN checks (Common validation) can make it create
-  directories and files at paths of its choosing, as root. Hosts need only
+  node's sides or cntlrs. The cn agent holds a request's NQNs to the
+  gateway's rule before it builds a configfs path or a connect from one
+  (`cnagent.md` CN8), and its attribute writes create no file
+  (`osclient.md`, ReadFile / WriteFile / WriteFileDirect), so such a caller
+  cannot make it create a directory or file at a path of its choosing; in
+  nvmet's configfs tree a well-formed NQN of its choosing is still built,
+  and the agent still creates its own files and devices at the paths dnv
+  names (the local store, its dm and md devices). Hosts need only
   the NVMe/TCP ports and the cdc; a deployment limits who reaches the
   gateway, the agents and etcd by its firewall alone. Root on a host can
   claim any host NQN, so the allow-lists bind no one who holds a host.

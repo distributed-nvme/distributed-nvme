@@ -8,6 +8,7 @@ package main
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"os"
 	"os/signal"
 	"strconv"
@@ -72,9 +73,15 @@ func newCnCmd() *cobra.Command {
 		RunE:  runCn,
 	}
 	addCommonFlags(cmd)
-	cmd.Flags().Uint64("capacity", 0,
-		"capacity budget in bytes this CN is willing to host; "+
-			"GetCnSize replies it verbatim, 0 = use the CP default")
+	// A string flag: pflag's own uint64 parse takes Go integer syntax
+	// ("0x100", "1_000", a leading 0 as octal), which the environment and a
+	// config file's string would not get, so capacityFromViper holds the
+	// three to one decimal rule; a config file's YAML number keeps YAML's own
+	// syntax and is taken by its value (CM3).
+	cmd.Flags().String("capacity", "0",
+		"capacity budget in bytes this CN is willing to host, a plain "+
+			"decimal number; GetCnSize replies it verbatim, 0 = use the "+
+			"CP default")
 	return cmd
 }
 
@@ -165,6 +172,78 @@ func nvmetQidMaxFromViper() (int, error) {
 	return qidMax, nil
 }
 
+// capacityFromViper resolves --capacity and refuses, naming the value as
+// given, a value from the flag (a string flag for this), the environment
+// or a config file's string that is not a plain unsigned decimal number
+// that fits 64 bits: digits alone, with no leading zero but in "0" itself.
+// A leading zero is refused, not read as decimal, since the flag's former
+// uint64 parse read it as octal, so its meaning would change with no word.
+// A config file's YAML number reaches it as YAML decoded it, written out in
+// decimal ("1e12" as 1000000000000, "0x100" as 256, "0100" as 64), so it is
+// taken by its value, and one that is no whole number, as 1.5 or -1, is
+// refused. viper.GetUint64 would turn "500GiB" or "-1" into 0, which the
+// control plane reads as no local opinion and replaces with its default, so
+// a typo would size the node with no word (CM3). Its range is the control
+// plane's to judge (cnagent.md CN3).
+func capacityFromViper() (uint64, error) {
+	raw := strings.TrimSpace(viper.GetString("capacity"))
+	capacity, err := strconv.ParseUint(raw, 10, 64)
+	if err != nil || (len(raw) > 1 && raw[0] == '0') {
+		return 0, fmt.Errorf("--capacity must be a plain decimal number "+
+			"of bytes, got %q", raw)
+	}
+	return capacity, nil
+}
+
+// signalContext is the agent's stop by signal (CM4): the first SIGINT or
+// SIGTERM cancels the context, which starts Serve's bounded stop; a second
+// one ends the process at once with status 1, as every other dnv program's
+// does (watchSignals), skipping the join of background work, so a child of
+// it, such as a zeroing batch, outlives the agent (SH27). signal.NotifyContext
+// is not used: it stops reading after the first signal, which would swallow
+// the second. The returned stop ends the watch.
+func signalContext() (context.Context, func()) {
+	ctx, cancel := context.WithCancel(context.Background())
+	// Capacity 2: the first signal starts the stop, the second ends it.
+	sigCh := make(chan os.Signal, 2)
+	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
+	go watchSignals(ctx, cancel, sigCh, os.Exit)
+	return ctx, func() {
+		signal.Stop(sigCh)
+		cancel()
+	}
+}
+
+// watchSignals waits for the first signal on sigCh and cancels ctx, then
+// for a second one, on which it calls exit(1). It returns when ctx ends
+// before any signal, so a clean stop leaves no watcher behind. exit is a
+// parameter so the unit tests can observe the second signal without ending
+// the test binary.
+func watchSignals(
+	ctx context.Context,
+	cancel context.CancelFunc,
+	sigCh <-chan os.Signal,
+	exit func(int),
+) {
+	var first os.Signal
+	select {
+	case first = <-sigCh:
+	case <-ctx.Done():
+		return
+	}
+	slog.InfoContext(ctx, "signal received",
+		slog.String("signal", first.String()))
+	cancel()
+
+	second, ok := <-sigCh
+	if !ok {
+		return
+	}
+	slog.WarnContext(ctx, "second signal, exiting without a clean stop",
+		slog.String("signal", second.String()))
+	exit(1)
+}
+
 func trConfFromViper() *pb.NvmeTrConf {
 	return &pb.NvmeTrConf{
 		TrType:  viper.GetString("tr-type"),
@@ -189,8 +268,7 @@ func runDn(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return err
 	}
-	ctx, stop := signal.NotifyContext(
-		context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	ctx, stop := signalContext()
 	defer stop()
 
 	localStore := viper.GetString("local-store")
@@ -231,8 +309,11 @@ func runCn(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return err
 	}
-	ctx, stop := signal.NotifyContext(
-		context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	capacity, err := capacityFromViper()
+	if err != nil {
+		return err
+	}
+	ctx, stop := signalContext()
 	defer stop()
 
 	localStore := viper.GetString("local-store")
@@ -240,7 +321,7 @@ func runCn(cmd *cobra.Command, args []string) error {
 	// The process's single OsClient, shared by every wrapper (osclient.md).
 	oc := common.NewLimitedOsClient(0)
 	srv := cnagent.NewCnAgentServer(oc, nf, localStore,
-		viper.GetUint64("capacity"), trConfFromViper(), portId, qidMax)
+		capacity, trConfFromViper(), portId, qidMax)
 
 	return agent.Serve(ctx,
 		viper.GetString("grpc-network"), viper.GetString("grpc-address"),

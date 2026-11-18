@@ -1,6 +1,7 @@
 package agent
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/distributed-nvme/distributed-nvme/common"
@@ -177,5 +178,54 @@ func TestInvalidConfReply(t *testing.T) {
 		"invalid stored conf: dn_bin_conf.extent_size is zero" {
 		t.Errorf("details %q, want the validator's own text",
 			reply.GetDetails())
+	}
+}
+
+// TestValidateCntlrNqnsTakesEveryNqnDnvMints holds the NQN gate to the NQNs
+// a released gateway stores and dnv mints (architecture.md, Common
+// validation): a user subsystem NQN, a controller node's host NQN and a
+// transfer's NQN as a clone's source all pass, and so does a request with
+// none; one byte over the length limit, an empty host and a "..", each in
+// its own field, are refused naming the field.
+func TestValidateCntlrNqnsTakesEveryNqnDnvMints(t *testing.T) {
+	nf := common.NewNameFmt("")
+	host := nf.CnHostNqn(1, 5)
+	xfer := nf.XferNqn(1, 0x11, 0x21)
+	good := &pb.SyncupCntlrRequest{
+		NqnToSubsystem: map[string]*pb.Subsystem{
+			"nqn.2024-01.io.example:vol1": {AllowedHosts: []string{host}},
+		},
+		XferList:  []*pb.Transfer{{AllowedHosts: []string{host}}},
+		CloneList: []*pb.Clone{{SrcNqn: xfer}},
+	}
+	if err := ValidateCntlrNqns(good); err != nil {
+		t.Fatalf("NQNs dnv mints were refused: %v", err)
+	}
+	if err := ValidateCntlrNqns(&pb.SyncupCntlrRequest{}); err != nil {
+		t.Fatalf("a request with no NQN was refused: %v", err)
+	}
+	long := "nqn.2024-01.io.example:" +
+		string(make([]byte, common.MaxNqnLength)) // NUL bytes, over the limit
+	for _, tc := range []struct {
+		name string
+		req  *pb.SyncupCntlrRequest
+		want string
+	}{
+		{"over the limit", &pb.SyncupCntlrRequest{
+			NqnToSubsystem: map[string]*pb.Subsystem{long: {}},
+		}, "nqn_to_subsystem key is"},
+		{"an empty host", &pb.SyncupCntlrRequest{
+			XferList: []*pb.Transfer{{AllowedHosts: []string{""}}},
+		}, "transfer allowed_hosts is empty"},
+		{"a dot-dot source", &pb.SyncupCntlrRequest{
+			CloneList: []*pb.Clone{{SrcNqn: "nqn.2024-01.io.a..b:x"}},
+		}, "clone src_nqn \"nqn.2024-01.io.a..b:x\" contains \"..\""},
+	} {
+		err := ValidateCntlrNqns(tc.req)
+		if err == nil || !strings.Contains(err.Error(), tc.want) ||
+			!strings.HasPrefix(err.Error(), "invalid stored conf: ") {
+			t.Errorf("%s: %v, want an invalid stored conf naming %q",
+				tc.name, err, tc.want)
+		}
 	}
 }

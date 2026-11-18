@@ -187,14 +187,30 @@ func cntlrGates(
 	// reloads ns-dev linears and removes dm devices) and the local-store
 	// Save (syncupCntlr), so a bad request cannot even be replayed by the
 	// next Reconcile. The stored revision is echoed back, not the request's,
-	// so the worker sees the request was not accepted.
-	if err := agent.ValidateBdevConf(req.GetBdevConf()); err != nil {
+	// so the worker sees the request was not accepted. The same gate holds
+	// the request's NQNs to the gateway's rule (validateCntlrConf).
+	if err := validateCntlrConf(req); err != nil {
 		return &pb.SyncupCntlrReply{
 			AgentReply: agent.InvalidConfReply("%v", err),
 			Revision:   stored,
 		}, err
 	}
 	return nil, nil
+}
+
+// validateCntlrConf is the conf gate of a cntlr request (architecture.md,
+// Common validation), the same at its three entrances — the SyncupCntlr's
+// gates (cntlrGates), the converge of a stored request (convergeCntlr) and a
+// cntlr's read (readCntlr): the bdev conf's geometry is concrete
+// (agent.ValidateBdevConf), and every NQN the agent builds a path or a
+// connect from passes the gateway's rule (agent.ValidateCntlrNqns), so no
+// pass, a read's included, builds a configfs path or a connect's options
+// from an NQN the gateway would refuse.
+func validateCntlrConf(req *pb.SyncupCntlrRequest) error {
+	if err := agent.ValidateBdevConf(req.GetBdevConf()); err != nil {
+		return err
+	}
+	return agent.ValidateCntlrNqns(req)
 }
 
 // convergeCntlr is the CN9 converge pass: one sweep top-down, then one build
@@ -220,7 +236,7 @@ func (s *CnAgentServer) convergeCntlr(
 	// newCntlrPlan touches nothing at all: the sweep is name-driven and needs
 	// no plan of this cntlr to find its objects later.
 	req := st.loadReq()
-	if err := agent.ValidateBdevConf(req.GetBdevConf()); err != nil {
+	if err := validateCntlrConf(req); err != nil {
 		ptr := req.GetCntlrPointer()
 		slog.ErrorContext(ctx, msgInvalidStoredConf,
 			slog.Uint64("cluster_id", req.GetClusterId()),

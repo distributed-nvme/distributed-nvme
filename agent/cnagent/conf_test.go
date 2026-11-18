@@ -361,6 +361,140 @@ func TestConvergeCntlrRefusesAZeroConfMember(t *testing.T) {
 	})
 }
 
+// badNqnCases are the cntlr requests whose NQNs the gateway would refuse,
+// each one field: a subsystem key that leaves its configfs directory, a
+// subsystem host "..", a transfer host with "/", and a clone source with ","
+// that would add options to the kernel's connect (agent.ValidateCntlrNqns).
+var badNqnCases = []struct {
+	name string
+	set  func(req *pb.SyncupCntlrRequest)
+	want string
+}{
+	{"a subsystem key", func(req *pb.SyncupCntlrRequest) {
+		ss := req.NqnToSubsystem[testNqn]
+		delete(req.NqnToSubsystem, testNqn)
+		req.NqnToSubsystem["../../../../../tmp/x"] = ss
+	}, "nqn_to_subsystem key \"../../../../../tmp/x\" is not a valid NQN"},
+	{"a subsystem host", func(req *pb.SyncupCntlrRequest) {
+		req.NqnToSubsystem[testNqn].AllowedHosts = []string{
+			"nqn.2024-01.io.dnv-it:host:..",
+		}
+	}, "subsystem allowed_hosts \"nqn.2024-01.io.dnv-it:host:..\" " +
+		"contains \"..\""},
+	{"a transfer host", func(req *pb.SyncupCntlrRequest) {
+		req.XferList = []*pb.Transfer{{XferId: 0x77, OriNqn: testNqn,
+			OriNsIdx: 1, AllowedHosts: []string{"nqn.2024-01.io.dnv:a/b"}}}
+	}, "transfer allowed_hosts \"nqn.2024-01.io.dnv:a/b\" is not a " +
+		"valid NQN"},
+	{"a clone source", func(req *pb.SyncupCntlrRequest) {
+		clone := cloneOf()
+		clone.SrcNqn = "nqn.2024-01.io.dnv:x,hostnqn=y"
+		req.CloneList = []*pb.Clone{clone}
+	}, "clone src_nqn \"nqn.2024-01.io.dnv:x,hostnqn=y\" is not a " +
+		"valid NQN"},
+}
+
+// TestSyncupCntlrRefusesAnInvalidNqn pins the cntlr's NQN gate (CN8;
+// dnagent.md SH9; agent.ValidateCntlrNqns): a request that carries an NQN
+// the gateway would refuse is refused with the invalid-conf code at the
+// stored revision, before its save, so nothing is stored, built or swept,
+// and nothing is made at a path the NQN names.
+func TestSyncupCntlrRefusesAnInvalidNqn(t *testing.T) {
+	for _, tc := range badNqnCases {
+		t.Run(tc.name, func(t *testing.T) {
+			srv, node := newTestServer(t)
+			syncupBoth(t, srv, reqOpts{revision: 2, primary: true})
+			path := srv.nf.LocalCntlrPath(testCluster, testCn, testSp,
+				testCntlr)
+			storedBefore := append([]byte(nil), node.protos[path]...)
+			node.Reset()
+			req := cntlrReq(reqOpts{revision: 3, primary: true})
+			tc.set(req)
+			reply, err := srv.SyncupCntlr(context.Background(), req)
+			if err != nil {
+				t.Fatalf("SyncupCntlr: %v", err)
+			}
+			if reply.GetAgentReply().GetCode() !=
+				common.ReplyCodeInvalidConf ||
+				!strings.Contains(reply.GetAgentReply().GetDetails(),
+					tc.want) {
+				t.Fatalf("reply %v, want the invalid-conf code naming %q",
+					reply.GetAgentReply(), tc.want)
+			}
+			if reply.GetRevision() != 2 {
+				t.Errorf("reply revision %d, want the stored 2",
+					reply.GetRevision())
+			}
+			if calls := node.Calls(); len(calls) != 0 {
+				t.Fatalf("a refused SyncupCntlr touched the node:\n%s",
+					strings.Join(calls, "\n"))
+			}
+			if string(node.protos[path]) != string(storedBefore) {
+				t.Errorf("the cntlr state file was rewritten")
+			}
+		})
+	}
+}
+
+// TestAStoredInvalidNqnIsNeitherConvergedNorRead pins the NQN gate's other
+// two entrances (convergeCntlr, readCntlr): a stored request whose NQN the
+// gateway would refuse, as a store written before the gateway's rule holds,
+// is not converged by the startup reconcile, and a read of it takes no
+// reading — its rows empty, its verdict clean — so no read builds a path
+// from it and no re-send comes for rows the converge refuses.
+func TestAStoredInvalidNqnIsNeitherConvergedNorRead(t *testing.T) {
+	for _, tc := range badNqnCases {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := context.Background()
+			node := newFakeNode()
+			node.dirs[agent.NvmetRoot] = true
+			srv := newCnServer(node)
+			if err := node.writeProto(ctx,
+				srv.nf.LocalCnPath(testCluster, testCn),
+				cnReq(2, true)); err != nil {
+				t.Fatalf("seeding the cn state file: %v", err)
+			}
+			req := cntlrReq(reqOpts{revision: 2, primary: true})
+			tc.set(req)
+			if err := node.writeProto(ctx, srv.nf.LocalCntlrPath(
+				testCluster, testCn, testSp, testCntlr), req); err != nil {
+				t.Fatalf("seeding the cntlr state file: %v", err)
+			}
+			node.Reset()
+			reconcileForTest(t, srv)
+			for _, fragment := range []string{
+				"cmd dmsetup create", "cmd mdadm", "cmd nvme connect",
+				"cmd mkdir -p " + agent.NvmetRoot + "/subsystems",
+				"writedirect " + agent.NvmetRoot + "/subsystems",
+			} {
+				if node.hasCall(fragment) {
+					t.Errorf("a refused Reconcile ran %q: %v", fragment,
+						node.callsMatching(fragment))
+				}
+			}
+			st := srv.getCntlr(cntlrKey(testCluster, testCn, testSp,
+				testCntlr))
+			if st == nil {
+				t.Fatal("the stored cntlr was not loaded")
+			}
+			node.Reset()
+			info, sweep := srv.readCntlr(ctx, st)
+			if code := sweep.Reply().GetCode(); code != 0 {
+				t.Errorf("the read's verdict = %v, want clean",
+					sweep.Reply())
+			}
+			if len(info.GetSsIdToSubsystem()) != 0 ||
+				len(info.GetLegIdToLeg()) != 0 {
+				t.Errorf("the read took a reading: %v", info)
+			}
+			if calls := node.Calls(); len(calls) != 0 {
+				t.Errorf("the read touched the node:\n%s",
+					strings.Join(calls, "\n"))
+			}
+		})
+	}
+}
+
 // ---------------------------------------------------------------------------
 // An unreadable cn file deletes nothing it might own (CN2)
 // ---------------------------------------------------------------------------

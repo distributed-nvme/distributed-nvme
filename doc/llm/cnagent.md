@@ -184,7 +184,12 @@ at node level, and another cn agent's subsystem passes through that very
 shape while it is being built.
 
 CN-CM2. `runCn` has the shape of `runDn` (`dnagent.md` CM4), with two cn
-differences. `--capacity` is optional, since zero is a value (CN3). And
+differences. `--capacity` is optional, since zero is a value (CN3), and a
+value from the flag, the environment or a config file's string that is not
+a plain unsigned decimal number, with no leading zero, is refused at start;
+a config file's YAML number is taken by the value YAML decodes, and one
+that is no whole number is refused (`capacityFromViper`, `dnagent.md`
+CM3). And
 `agent.Serve` gets no `dnagent.md` SH27 background waiter: the cn joins
 no background task — its CN11 probers, its CN10 path watchers, its
 sweep's background `nvme disconnect` (CN10) and its background reads are
@@ -448,8 +453,14 @@ what is still there.
 ### `GetCnSize`
 
 CN3. Reply `--capacity` verbatim. Zero means "no local opinion" and the
-control plane substitutes `DefaultCnCap`; the agent never validates or
-clamps — the gateway owns the mapping onto the range from `MinCnCap` to
+control plane substitutes `DefaultCnCap`; the agent never clamps, and
+refuses at start only a value that breaks the flag's syntax: from the
+flag, the environment or a config file's string, one that is not a plain
+unsigned decimal number, with no leading zero, that fits 64 bits, and from
+a config file's YAML
+number, read by YAML's own syntax, one whose value is not a whole unsigned
+number that fits 64 bits (CN-CM2, `dnagent.md` CM3) — the
+gateway owns the mapping onto the range from `MinCnCap` to
 `MaxCnCap`. `cn_id` may be zero (a pre-registration call); it is for
 logging only. No locks, no store, no OS access. This RPC has no
 `AgentReply`; it cannot fail.
@@ -537,8 +548,27 @@ with a zero `bitmap_chunk_block_cnt`. The control plane resolves all four
 when it writes the conf, so a zero here is a geometry no agent may invent
 a replacement for — those values become the thin-pool's, the raid0's and
 the md bitmap's own arguments (CN12, CN13, CN15), and a geometry this
-node guessed is one the rest of the cluster does not share. The refusal
-is `ReplyCodeInvalidConf` (`dnagent.md` SH9) carrying the validator's
+node guessed is one the rest of the cluster does not share. The same gate
+holds every NQN the agent builds a path or a connect from — each key of
+`nqn_to_subsystem`, each subsystem's and each transfer's `allowed_hosts`
+and each clone's `src_nqn` — to the gateway's rule, `ValidNqnPattern`
+within `MaxNqnLength` and no "..", copied as `conf.go` copies `model`'s
+(`agent.ValidateCntlrNqns`; `validateCntlrConf`): the configfs paths of
+`SubsysPath`, `HostPath` and the port links are built from the first two,
+so a "/" or ".." would reach outside the subsystem's directory, and the
+source NQN goes into the kernel's connect, whose options a "," would add
+to. Every NQN a released gateway stored passes it; only a store written
+before the gateway held NQNs to the rule, or by hand, can carry one it
+refuses, and such a pool takes no new request until the record that
+carries the NQN is removed or replaced. The gateway keeps a way for each:
+`DeleteNamespace` and `DeleteSubsystem` check a stored subsystem NQN for
+its length alone, so such a subsystem can be emptied and deleted;
+`UpdateSubsystemHosts` replaces a subsystem's host list, and
+`UpdateTransferHosts` a transfer's (`architecture.md`, `service Gateway` —
+RPC specifications); and the worker leaves a deleting clone, and its source
+NQN, out of the request (`dnv-worker.md` CLD5). Each bumps the pool's revision,
+and the agent holds no memory of the refusal, so the next request, which
+no longer carries the NQN, is taken. The refusal is `ReplyCodeInvalidConf` (`dnagent.md` SH9) carrying the validator's
 message, and the reply echoes the stored revision, not the request's, so
 the worker sees that the request was not accepted. One Error record, msg
 "invalid stored conf", names the ids and the field. A request the three
@@ -556,11 +586,14 @@ devices; the skipped persist is what keeps a refused request from being
 replayed by the next startup reconcile. The same check is repeated in the
 converge itself for the one entrance that does not come through this RPC,
 the CN2 startup reconcile, which converges from a file that may have been
-persisted with zeros.
+persisted with zeros, or with an NQN a store from before the gateway's
+rule holds, and again in a cntlr's read (`readCntlr`).
 There it returns an empty `CntlrInfo`,
 enumerates nothing and converges nothing — and it carries no leftover
 verdict either (CN30), because a cntlr this agent deliberately did not
-build must not have its objects named as removable.
+build must not have its objects named as removable; a read takes no
+reading, so it builds no path from such an NQN and names no row the
+converge refuses to build.
 
 The request the agent holds for a cntlr **counts as delivered**
 (`reqFromRpc`) while a `SyncupCntlr` of this process stored it, its save

@@ -107,8 +107,9 @@ type OsClient interface {
 	// path.
 	WriteFile(ctx context.Context, path string, data string) (err error)
 
-	// WriteFileDirect writes data straight into the file at path with a
-	// plain open/truncate/write/close — no temp file, no rename. It exists
+	// WriteFileDirect writes data straight into the existing file at path
+	// with a plain open/truncate/write/close — no temp file, no rename, no
+	// create: a missing file is an error wrapping fs.ErrNotExist. It exists
 	// for kernel virtual filesystems (nvmet configfs, sysfs), where the
 	// atomic-replace protocol of WriteFile is impossible: configfs forbids
 	// creating arbitrary files, so a temp file + rename can never succeed
@@ -429,7 +430,7 @@ func (c *LimitedOsClient) WriteFileDirect(
 		return err
 	}
 
-	err := os.WriteFile(path, []byte(data), 0o644)
+	err := writeExisting(path, []byte(data))
 
 	attrs := []any{
 		slog.String("path", path),
@@ -438,6 +439,24 @@ func (c *LimitedOsClient) WriteFileDirect(
 	}
 	slog.InfoContext(ctx, "os write file direct", appendErr(attrs, err)...)
 
+	return err
+}
+
+// writeExisting writes data into the file at path, which must exist: it opens
+// it write-only and truncated, never with O_CREATE (osclient.md, ReadFile /
+// WriteFile / WriteFileDirect). configfs and sysfs have no create operation,
+// so a create only ever worked on a path that left them for a real file
+// system, where it made a file; a missing attribute is ENOENT. The write's
+// error wins over the close's.
+func writeExisting(path string, data []byte) error {
+	f, err := os.OpenFile(path, os.O_WRONLY|os.O_TRUNC, 0)
+	if err != nil {
+		return err
+	}
+	_, err = f.Write(data)
+	if cerr := f.Close(); err == nil {
+		err = cerr
+	}
 	return err
 }
 

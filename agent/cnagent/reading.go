@@ -106,9 +106,11 @@ func (rd *cnReading) mdWalks() *mdWalkOnce {
 // and the sides of wanted legs the converge would connect (sidesToConnect,
 // CN30).
 //
-// A stored conf the gate refuses (architecture.md, Common validation) takes
-// no reading: its rows are empty, what a cntlr with nothing provable looks
-// like, and its verdict is clean. Every table the rows compare is built from
+// A stored conf the gate refuses (architecture.md, Common validation;
+// validateCntlrConf), an NQN the gateway would refuse included, takes no
+// reading: its rows are empty, what a cntlr with nothing provable looks
+// like, and its verdict is clean, so no read builds a path from such an NQN
+// and no re-send comes for rows the converge refuses to build. Every table the rows compare is built from
 // that conf — the pool's low_water_mark and block size and the raid0's
 // stripe are its own arguments — so a probe with a zero would report a
 // correctly built pool as needing a reload. And the converge refuses it
@@ -119,7 +121,7 @@ func (s *CnAgentServer) readCntlr(
 	st *cntlrState,
 ) (*pb.CntlrInfo, *agent.SweepResult) {
 	req := st.loadReq()
-	if err := agent.ValidateBdevConf(req.GetBdevConf()); err != nil {
+	if err := validateCntlrConf(req); err != nil {
 		ptr := req.GetCntlrPointer()
 		slog.ErrorContext(ctx, msgInvalidStoredConf,
 			slog.Uint64("cluster_id", req.GetClusterId()),

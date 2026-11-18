@@ -867,6 +867,9 @@ Safe steps:
    with a new cntlr on another controller node.
 4. Stop the agent with SIGTERM (`kill <pid>`, or `systemctl stop` for a
    service), not with SIGKILL, and wait until its process has exited.
+   Send it once: a second SIGTERM or SIGINT ends the agent at once,
+   without its clean stop, as SIGKILL would, and on a disk node a zeroing
+   command it started can then go on after it.
 5. Start the agent again at once with the same addresses, port id and
    `--local-store` as before.
 6. In the agent's log, find the record `agent serving` and after it the
@@ -905,4 +908,5 @@ Tested: the e2e suite's react case restarts the primary's cn agent this
 way, with its host connected, and checks that no failover and no cntlr
 replacement follows and that the host reads its data. No test restarts a
 dn agent this way; the worker's tests check that a dn agent's start keeps
-a new leg from being given up.
+a new leg from being given up. A unit test of the agent checks that a
+second signal ends it with exit status 1; no suite sends one.

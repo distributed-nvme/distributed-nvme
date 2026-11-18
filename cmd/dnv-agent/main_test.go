@@ -1,10 +1,13 @@
 package main
 
 import (
+	"context"
 	"os"
 	"strconv"
 	"strings"
+	"syscall"
 	"testing"
+	"time"
 
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
@@ -396,5 +399,146 @@ func TestCapacityFromEnv(t *testing.T) {
 	})
 	if got := viper.GetUint64("capacity"); got != 4294967296 {
 		t.Errorf("capacity = %d, want the environment value", got)
+	}
+}
+
+// CM3: one rule for --capacity from the flag, the environment and a config
+// file's string: a plain unsigned decimal number that fits 64 bits, with no
+// leading zero but in "0" itself, is taken, and anything else is refused,
+// naming the flag and the value as given, where viper.GetUint64 would read
+// it as 0 and pflag's uint64 parse would take Go integer syntax from the
+// flag alone. The default is 0. A config file's YAML number is taken by the
+// value YAML decodes.
+func TestCapacityRefusesWhatIsNotANumber(t *testing.T) {
+	cnArgs := []string{
+		"--grpc-address", "192.168.0.20:29529",
+		"--tr-type", "tcp", "--adr-fam", "ipv4",
+		"--tr-addr", "192.168.0.20", "--tr-svc-id", "4200",
+	}
+	parse(t, "cn", cnArgs)
+	if got, err := capacityFromViper(); err != nil || got != 0 {
+		t.Errorf("capacityFromViper() = %d, %v; want the default 0, nil",
+			got, err)
+	}
+	conf := t.TempDir() + "/agent.yaml"
+	// sources each parse cn's flags with the value v given by one source.
+	sources := map[string]func(t *testing.T, v string){
+		"the flag": func(t *testing.T, v string) {
+			parse(t, "cn", append([]string{"--capacity", v}, cnArgs...))
+		},
+		"the environment": func(t *testing.T, v string) {
+			t.Setenv("DNV_AGENT_CAPACITY", v)
+			parse(t, "cn", cnArgs)
+		},
+		"a config file's string": func(t *testing.T, v string) {
+			if err := os.WriteFile(conf, []byte("capacity: \""+v+"\"\n"),
+				0o600); err != nil {
+				t.Fatalf("writing the config file: %v", err)
+			}
+			parse(t, "cn", append([]string{"--config", conf}, cnArgs...))
+		},
+	}
+	for name, from := range sources {
+		t.Run(name, func(t *testing.T) {
+			for raw, want := range map[string]uint64{
+				"4294967296": 4294967296, "0": 0,
+			} {
+				from(t, raw)
+				if got, err := capacityFromViper(); err != nil ||
+					got != want {
+					t.Errorf("capacityFromViper() of %q = %d, %v; want "+
+						"%d, nil", raw, got, err, want)
+				}
+			}
+			for _, bad := range []string{"500GiB", "1e12", "-1", "1.5",
+				"0x100", "1_000", "+5", "0100", "00",
+				"18446744073709551616"} {
+				from(t, bad)
+				got, err := capacityFromViper()
+				if err == nil {
+					t.Fatalf("a capacity of %q was taken as %d", bad, got)
+				}
+				if !strings.Contains(err.Error(), "--capacity") ||
+					!strings.Contains(err.Error(), bad) {
+					t.Errorf("error %q does not name the flag and the "+
+						"value %s", err, bad)
+				}
+			}
+		})
+	}
+	t.Run("a config file's number", func(t *testing.T) {
+		for raw, want := range map[string]uint64{
+			"1e12": 1000000000000, "0x100": 256, "0100": 64,
+			"4294967296": 4294967296,
+		} {
+			if err := os.WriteFile(conf, []byte("capacity: "+raw+"\n"),
+				0o600); err != nil {
+				t.Fatalf("writing the config file: %v", err)
+			}
+			parse(t, "cn", append([]string{"--config", conf}, cnArgs...))
+			if got, err := capacityFromViper(); err != nil || got != want {
+				t.Errorf("capacity: %s = %d, %v; want %d, nil", raw, got,
+					err, want)
+			}
+		}
+		if err := os.WriteFile(conf, []byte("capacity: 1.5\n"),
+			0o600); err != nil {
+			t.Fatalf("writing the config file: %v", err)
+		}
+		parse(t, "cn", append([]string{"--config", conf}, cnArgs...))
+		if got, err := capacityFromViper(); err == nil {
+			t.Fatalf("a config file's capacity 1.5 was taken as %d", got)
+		}
+	})
+}
+
+// CM4: the first signal cancels the context, which starts the bounded stop,
+// and a second one exits with status 1.
+func TestWatchSignalsSecondSignalExits(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	sigCh := make(chan os.Signal, 2)
+	exited := make(chan int, 1)
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		watchSignals(ctx, cancel, sigCh, func(code int) { exited <- code })
+	}()
+
+	sigCh <- syscall.SIGTERM
+	select {
+	case <-ctx.Done():
+	case <-time.After(2 * time.Second):
+		t.Fatal("the first signal did not cancel ctx")
+	}
+
+	sigCh <- syscall.SIGINT
+	select {
+	case code := <-exited:
+		if code != 1 {
+			t.Errorf("exit code = %d, want 1", code)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("the second signal did not exit")
+	}
+	<-done
+}
+
+// CM4: a stop with no signal leaves no watcher behind and never exits.
+func TestWatchSignalsReturnsWhenCtxEnds(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	sigCh := make(chan os.Signal, 1)
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		watchSignals(ctx, cancel, sigCh, func(int) {
+			t.Error("exit was called without any signal")
+		})
+	}()
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("watchSignals did not return when ctx ended")
 	}
 }
