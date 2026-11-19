@@ -400,8 +400,9 @@ go of its own paths before nvme-stas starts and gets them back once it stops,
 so every path host0 holds meanwhile is one nvme-stas made from a discovery
 record; host0's own nvme-stas configuration is copied before and put back
 after. A host discovers through the cdc wherever the subsystem has a
-`CdcEntry`, expecting one record per cntlr the listing rule lists
-(`architecture.md` [D18]; `cdc.md` DS3). A step that needs every enabled cntlr
+`CdcEntry`, expecting one subsystem record per cntlr the listing rule lists
+(`architecture.md` [D18]; `cdc.md` DS3), behind the cdc's record of itself
+(`cdc.md` DS12). A step that needs every enabled cntlr
 in the log first waits until each is listed, as a standby whose health epoch
 is set is out of the records until its next clean round. Three connects
 are direct by necessity: to the transfer, which has no `CdcEntry`; to the

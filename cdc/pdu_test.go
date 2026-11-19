@@ -80,6 +80,9 @@ func TestReadPduDecodesAcceptedTypes(t *testing.T) {
 		wantTyp  uint8
 		wantHlen int
 		wantData int
+		// dataOff is where the data starts in the frame when that is not
+		// PDO: an H2CTermReq's data follows its header, its PDO reserved.
+		dataOff int
 	}{
 		{
 			name:     "icreq",
@@ -103,6 +106,31 @@ func TestReadPduDecodesAcceptedTypes(t *testing.T) {
 			wantTyp:  pduH2CTermReq,
 			wantHlen: termReqHdrLen,
 			wantData: capsuleCmdHdrLen,
+		},
+		{
+			// The specs' form: PDO is reserved and the error data follows
+			// the header (NVMe/TCP, H2CTermReq).
+			name: "h2c term req with error data at pdo 0",
+			frame: pduFrame(
+				pduH2CTermReq, 0, termReqHdrLen, 0,
+				termReqHdrLen+capsuleCmdHdrLen,
+			),
+			wantTyp:  pduH2CTermReq,
+			wantHlen: termReqHdrLen,
+			wantData: capsuleCmdHdrLen,
+			dataOff:  termReqHdrLen,
+		},
+		{
+			// A reserved field is not read, whatever it holds.
+			name: "h2c term req with a pdo past its plen",
+			frame: pduFrame(
+				pduH2CTermReq, 0, termReqHdrLen, 200,
+				termReqHdrLen+capsuleCmdHdrLen,
+			),
+			wantTyp:  pduH2CTermReq,
+			wantHlen: termReqHdrLen,
+			wantData: capsuleCmdHdrLen,
+			dataOff:  termReqHdrLen,
 		},
 		{
 			name: "capsule cmd without data",
@@ -151,8 +179,12 @@ func TestReadPduDecodesAcceptedTypes(t *testing.T) {
 				t.Fatalf("data is %d bytes, want %d", len(p.data), tt.wantData)
 			}
 			if tt.wantData > 0 {
-				if !bytes.Equal(p.data, tt.frame[int(p.pdo):]) {
-					t.Error("data is not the bytes from PDO to the end")
+				off := int(p.pdo)
+				if tt.dataOff != 0 {
+					off = tt.dataOff
+				}
+				if !bytes.Equal(p.data, tt.frame[off:]) {
+					t.Errorf("data is not the bytes from %d to the end", off)
 				}
 			}
 		})
@@ -237,18 +269,6 @@ func TestReadPduRejectsMalformed(t *testing.T) {
 			name: "pdo past the end of the pdu",
 			frame: pduFrame(
 				pduCapsuleCmd, 0, capsuleCmdHdrLen, 200, capsuleCmdHdrLen+8,
-			),
-			fes: fesInvalidPduHdr,
-			fei: 3,
-		},
-		{
-			// An H2CTermReq carrying the header of the PDU in error with PDO
-			// 0 is framed like any other PDU, so it fails here before the
-			// terminate handling ever sees it: a PDU error, not a `closed`.
-			name: "h2c term req carrying error data at pdo 0",
-			frame: pduFrame(
-				pduH2CTermReq, 0, termReqHdrLen, 0,
-				termReqHdrLen+capsuleCmdHdrLen,
 			),
 			fes: fesInvalidPduHdr,
 			fei: 3,

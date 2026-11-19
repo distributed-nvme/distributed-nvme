@@ -173,8 +173,9 @@ func TestTheMostEntriesAClusterHolds(t *testing.T) {
 // burstHost is one host of the burst, run off the test goroutine, so it
 // reports a failure rather than ending the test: it connects, sends its
 // ICReq and says so on sent, then waits for the controller to answer, which
-// it counts in answered, connects as hostNqn and reads its log, which must
-// hold exactly the one record of subNqn. It returns the connection, still
+// it counts in answered, connects as hostNqn, enables the controller (NP6)
+// and reads its log, which must hold the record of the cdc itself (DS12) and
+// then exactly the one record of subNqn. It returns the connection, still
 // open.
 func burstHost(
 	addr string,
@@ -223,8 +224,25 @@ func burstHost(
 	if c := parseCapsuleResp(p); c.status != statusSuccess {
 		return fail(fmt.Errorf("connect refused with status %#x", c.status))
 	}
-	const length = common.CdcDiscLogHeaderSize + common.CdcDiscLogEntrySize
-	s := newSqe(opcGetLogPage, 2)
+	// The enable a host sends before its first admin command (NP6).
+	en := newSqe(opcFabrics, 2)
+	en[4] = fctypePropertySet
+	binary.LittleEndian.PutUint32(en[44:48], regCc)
+	binary.LittleEndian.PutUint64(en[48:56], ccEnable)
+	if _, err := nc.Write(capsuleFrame(en, nil)); err != nil {
+		return fail(err)
+	}
+	if p, err = readCtrlPdu(br); err != nil {
+		return fail(fmt.Errorf("enable: %w", err))
+	}
+	if c := parseCapsuleResp(p); p.typ != pduCapsuleResp ||
+		c.status != statusSuccess {
+		return fail(fmt.Errorf("enable: pdu type %#x status %#x", p.typ,
+			c.status))
+	}
+	// The record of the cdc itself (DS12), then the host's one record.
+	const length = common.CdcDiscLogHeaderSize + 2*common.CdcDiscLogEntrySize
+	s := newSqe(opcGetLogPage, 3)
 	setSgl(s, length)
 	s[40] = lidDiscovery
 	binary.LittleEndian.PutUint16(s[42:44], length/4-1)
@@ -238,10 +256,16 @@ func burstHost(
 		return fail(fmt.Errorf("pdu type %#x of %d bytes, want the %d "+
 			"bytes of the log", p.typ, len(p.data), length))
 	}
-	if n := binary.LittleEndian.Uint64(p.data[8:16]); n != 1 {
-		return fail(fmt.Errorf("numrec %d, want 1", n))
+	if n := binary.LittleEndian.Uint64(p.data[8:16]); n != 2 {
+		return fail(fmt.Errorf("numrec %d, want 2", n))
 	}
-	record := p.data[common.CdcDiscLogHeaderSize:]
+	self := p.data[common.CdcDiscLogHeaderSize:]
+	if got := string(bytes.TrimRight(self[256:512], "\x00")); got !=
+		common.NvmeDiscoveryNqn {
+		return fail(fmt.Errorf("record 0 subnqn %q, want the cdc's own %q",
+			got, common.NvmeDiscoveryNqn))
+	}
+	record := self[common.CdcDiscLogEntrySize:]
 	if got := string(bytes.TrimRight(record[256:512], "\x00")); got != subNqn {
 		return fail(fmt.Errorf("subnqn %q, want %q", got, subNqn))
 	}
@@ -682,9 +706,11 @@ func TestSlowHostIsServedWhileOthersAreToo(t *testing.T) {
 	slow.enableAen()
 	slowAer := armConfirmed(t, slow)
 
+	// The header, the record of the cdc itself (DS12) and the entries.
 	total := uint32(common.CdcDiscLogHeaderSize +
-		slowCnt*common.CdcDiscLogEntrySize)
-	want := newWantLog(entries, slowNqn, ownsAll).all(t)
+		(slowCnt+1)*common.CdcDiscLogEntrySize)
+	want := append(wantSelf(t, slow),
+		newWantLog(entries, slowNqn, ownsAll).all(t)...)
 	logCid := sendLogRead(slow, total)
 
 	// The slow reader takes exactly the page's C2HData PDU off the socket,
@@ -860,17 +886,18 @@ func TestHostNqnAtItsLimits(t *testing.T) {
 
 // TestLogOfExactlyOnePageAndOneMore proves NP8's transfer bound at its
 // limit, where a page is the most one Get Log Page command moves: a log of
-// exactly that size, the header and as many records as fill it, is read
-// whole by one command. One more entry in etcd makes the log one record
-// longer: one command for all of it is refused with invalid field, and the
-// host reads it in two, at LPO 0 and at the bound, the second one past the
-// end answered with zeros (DS9).
+// exactly that size, the header, the record of the cdc itself (DS12) and as
+// many entries' records as fill it, is read whole by one command. One more
+// entry in etcd makes the log one record longer: one command for all of it
+// is refused with invalid field, and the host reads it in two, at LPO 0 and
+// at the bound, the second one past the end answered with zeros (DS9).
 func TestLogOfExactlyOnePageAndOneMore(t *testing.T) {
 	cli := newTestClient(t)
 	env := newPlantEnv(t, cli)
 	hostNqn := env.hostNqn(0)
-	perPage := (maxLogTransfer - common.CdcDiscLogHeaderSize) /
-		common.CdcDiscLogEntrySize
+	// The records one page holds, the cdc's own among them.
+	perPage := (maxLogTransfer-common.CdcDiscLogHeaderSize)/
+		common.CdcDiscLogEntrySize - 1
 	entries := hostEntries(env, 1, perPage, hostNqn)
 	env.put(entries...)
 	ts := startPlanted(t, cli, allRanges(), nil)
@@ -879,15 +906,15 @@ func TestLogOfExactlyOnePageAndOneMore(t *testing.T) {
 	h := ts.dial()
 	h.connectOk(hostNqn)
 	h.enableAen()
-	if gen, num := logHeader(t, h); gen != 1 || num != uint64(perPage) {
-		t.Fatalf("genctr %d numrec %d, want 1 and %d", gen, num, perPage)
+	if gen, num := logHeader(t, h); gen != 1 || num != uint64(perPage+1) {
+		t.Fatalf("genctr %d numrec %d, want 1 and %d", gen, num, perPage+1)
 	}
 	c, page := logAt(h, maxLogTransfer, 0)
 	connStatus(t, c, statusSuccess, "a log of exactly one page in one read")
 	if len(page) != maxLogTransfer {
 		t.Fatalf("one page moved %d bytes, want %d", len(page), maxLogTransfer)
 	}
-	want := newWantLog(entries, hostNqn, ownsAll).all(t)
+	want := append(wantSelf(t, h), newWantLog(entries, hostNqn, ownsAll).all(t)...)
 	if !bytes.Equal(page[common.CdcDiscLogHeaderSize:], want) {
 		t.Fatal("the one page is not the log")
 	}
@@ -897,8 +924,8 @@ func TestLogOfExactlyOnePageAndOneMore(t *testing.T) {
 	env.put(extra)
 	entries = append(entries, extra)
 	awaitAen(t, h, aer, "for the record that needs a second page")
-	if gen, num := logHeader(t, h); gen != 2 || num != uint64(perPage+1) {
-		t.Fatalf("genctr %d numrec %d, want 2 and %d", gen, num, perPage+1)
+	if gen, num := logHeader(t, h); gen != 2 || num != uint64(perPage+2) {
+		t.Fatalf("genctr %d numrec %d, want 2 and %d", gen, num, perPage+2)
 	}
 	total := uint32(maxLogTransfer + common.CdcDiscLogEntrySize)
 	c, _ = logAt(h, total, 0)
@@ -915,7 +942,7 @@ func TestLogOfExactlyOnePageAndOneMore(t *testing.T) {
 	if g := binary.LittleEndian.Uint64(first[0:8]); g != 2 {
 		t.Errorf("genctr %d in the first page, want 2", g)
 	}
-	want = newWantLog(entries, hostNqn, ownsAll).all(t)
+	want = append(wantSelf(t, h), newWantLog(entries, hostNqn, ownsAll).all(t)...)
 	got := append(append([]byte{}, first[common.CdcDiscLogHeaderSize:]...),
 		second[:common.CdcDiscLogEntrySize]...)
 	if !bytes.Equal(got, want) {

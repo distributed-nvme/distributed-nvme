@@ -156,7 +156,7 @@ The vocabulary of dnv in alphabetical order, one entry per term, with synonyms s
 
 **disconnect registry** — The cn agent's in-memory set of subsystems whose `nvme disconnect` a sweep has set going off its locks. A later pass issues no second disconnect, and no converge adopts or connects such a subsystem until the disconnect has returned.
 
-**discovery log, GENCTR** — The log page the cdc renders for a host from the owned entries visible to it, one record per entry per transport, with a generation counter kept per instance and connected host that advances only when that host's rendered log changes.
+**discovery log, GENCTR** — The log page a host's connection reads from the cdc: the cdc's record of itself first (see `cdc.md` DS12), then the host's view, one record per transport of each owned entry visible to it, with a generation counter kept per instance and connected host that advances only when that host's rendered log changes.
 
 **disk counts** — The numbers a disk node's info carries beside its rows (`disk_counts`): the disk's total and free extents, the side records of its volume table, its free metadata units, and whether those records name exactly the side pointers of the request the agent held when it read them, the one whose revision the reply carries. The agent sends them only while it knows its volume table, as this disk node's, and its disk size, so a count not known never reads as zero. They are no row and set no health epoch: the dn role's count compare reads their free extents, and nothing writes them to etcd (see `architecture.md`, Live-state reporting; `dnagent.md` DN18; `dnv-worker.md` RW13).
 

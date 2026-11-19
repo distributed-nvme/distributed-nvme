@@ -32,10 +32,10 @@ const (
 	// capTimeout is CAP.TO, the CC.EN-to-CSTS.RDY timeout in 500 ms units.
 	// 15 is nvmet's value (NP14).
 	capTimeout = 15
-	// controllerVersion is the VS property and Identify's VER: NVMe 1.3.0,
-	// a fixed value of dnv's own, not the mirror rule's (NP14): Linux 7.0's
-	// nvmet reports 2.1.0 in both.
-	controllerVersion = 0x00010300
+	// controllerVersion is the VS property and Identify's VER: NVMe 2.1.0,
+	// nvmet's NVMET_DEFAULT_VS, which its discovery subsystem always
+	// reports, by the mirror rule (NP14).
+	controllerVersion = 0x00020100
 	// identifyLen is the size of the Identify data structure.
 	identifyLen = 4096
 	// cnsController is the only CNS this controller answers (NP7).
@@ -49,15 +49,27 @@ const (
 	maxLogTransfer = 1 << 20
 )
 
-// The CC and CSTS register bits this controller acts on (NP6).
+// The CC fields and CSTS bits this controller acts on (NP6), as nvmet reads
+// them: EN, CSS, MPS, AMS and SHN of CC; RDY, CFS and SHST of CSTS.
 const (
 	ccEnable   = 1 << 0
+	ccCssShift = 4
+	ccCssMask  = 0x7
+	ccMpsShift = 7
+	ccMpsMask  = 0xf
+	ccAmsShift = 11
+	ccAmsMask  = 0x7
 	ccShnShift = 14
 	ccShnMask  = 0x3
 
+	// ccCssNvm and ccCssCsi are the two command set selections nvmet takes
+	// at an enable: the NVM command set, and all the I/O command sets.
+	ccCssNvm = 0
+	ccCssCsi = 6
+
 	cstsReady       = 1 << 0
+	cstsCfs         = 1 << 1
 	cstsShstComplet = 0x2 << 2
-	cstsShstMask    = 0x3 << 2
 )
 
 // The AEN this controller sends (DS8): a Notice of type "Discovery Log Page
@@ -95,7 +107,11 @@ type conn struct {
 	reg    *registry
 	nc     net.Conn
 	remote string
-	ctx    context.Context
+	// selfRecord is the record of the cdc itself that begins every log page
+	// this connection reads (DS12), rendered once at accept from the
+	// connection's local address.
+	selfRecord []byte
+	ctx        context.Context
 
 	// done is closed when the reader goroutine has left; the keep-alive and
 	// AEN goroutines watch it.
@@ -157,6 +173,7 @@ func newConn(s *server, nc net.Conn) *conn {
 		reg:        s.reg,
 		nc:         nc,
 		remote:     nc.RemoteAddr().String(),
+		selfRecord: selfRecordFor(nc.LocalAddr(), s.deps.cfg),
 		ctx:        ctx,
 		done:       make(chan struct{}),
 		wake:       make(chan struct{}, 1),
@@ -331,7 +348,8 @@ func (c *conn) timeoutLocked() time.Duration {
 }
 
 // touch restarts the keep-alive timer, which every command received once
-// connected does (the nvmet rule, NP10).
+// connected does, a refused one included (NP10), where nvmet restarts its
+// own only for a command it does not refuse at parse.
 func (c *conn) touch() {
 	now := c.deps.clk.now()
 	c.mu.Lock()
@@ -469,11 +487,18 @@ func (c *conn) handleCapsule(p *pdu) error {
 		}
 		return c.handleConnect(s, p.data)
 	}
-	// NP10: from Connect on, every received command restarts the timer.
+	// NP10: from Connect on, every received command restarts the timer,
+	// one the gate below refuses included.
 	c.touch()
 	if isConnect {
 		return newPduError(fesPduSequenceErr, 0,
 			"a second fabrics connect on one connection")
+	}
+	// NP6: until the host enables the controller, every command but the
+	// fabrics ones is refused, as nvmet's discovery controller refuses it.
+	// In-capsule data was already consumed with its PDU (NP2).
+	if s.opc() != opcFabrics && !c.readyNow() {
+		return c.respond(s.cid(), statusInvalidOpcode, 0, 0)
 	}
 
 	switch s.opc() {
@@ -567,8 +592,9 @@ func (c *conn) handleConnect(s sqe, data []byte) error {
 	// moves it to the KATO's deadline now (NP10).
 	c.rearmKeepAlive()
 
-	// The host state must exist before the response: the host may issue Get
-	// Log Page on the very next capsule (DS7).
+	// The host state exists before the response, so it is there for the
+	// host's first Get Log Page, which may come as soon as the host has
+	// enabled the controller (NP6, DS7).
 	c.reg.attach(hostNqn, c)
 
 	slog.InfoContext(c.ctx, msgHostConnected,
@@ -658,10 +684,19 @@ func (c *conn) handlePropertySet(s sqe) error {
 	return c.respond(cid, statusSuccess, 0, 0)
 }
 
-// updateCcLocked follows nvmet: CSTS.RDY tracks CC.EN, and a shutdown notice
-// clears RDY and reports the shutdown complete. The IOSQES/IOCQES and CSS
-// fields are accepted without enforcement — a discovery controller has no I/O
-// queues for them to describe.
+// readyNow reports CSTS.RDY, which the gate of NP6 reads.
+func (c *conn) readyNow() bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.csts&cstsReady != 0
+}
+
+// updateCcLocked is nvmet's nvmet_update_cc, ported line for line (NP6): it
+// stores the value written, then compares the old and the new value. EN
+// rising starts the controller, EN falling clears it, SHN rising clears it
+// and reports the shutdown complete, and SHN falling takes that report back.
+// Since a clear sets CC to zero, a write after a shutdown notice never sees
+// SHN fall, and SHST stays until the next enable, as in nvmet.
 func (c *conn) updateCcLocked(value uint32) {
 	old := c.cc
 	c.cc = value
@@ -670,18 +705,42 @@ func (c *conn) updateCcLocked(value uint32) {
 	oldShn := (old >> ccShnShift) & ccShnMask
 	newShn := (value >> ccShnShift) & ccShnMask
 	if newEn && !oldEn {
-		c.csts |= cstsReady
+		c.startCtrlLocked()
 	}
 	if !newEn && oldEn {
-		c.csts &^= cstsReady
+		c.clearCtrlLocked()
 	}
 	if newShn != 0 && oldShn == 0 {
-		c.csts &^= cstsReady
+		c.clearCtrlLocked()
 		c.csts |= cstsShstComplet
 	}
 	if newShn == 0 && oldShn != 0 {
-		c.csts &^= cstsShstMask
+		c.csts &^= cstsShstComplet
 	}
+}
+
+// startCtrlLocked is nvmet's nvmet_start_ctrl for a discovery controller: an
+// enable with a memory page size, an arbitration or a command set nvmet does
+// not take sets the fatal status, and any other sets ready. Either is an
+// assignment, so it also clears SHST and an earlier CFS. IOSQES and IOCQES
+// are not checked: nvmet skips them for a discovery controller, which has no
+// I/O queues for them to describe.
+func (c *conn) startCtrlLocked() {
+	mps := (c.cc >> ccMpsShift) & ccMpsMask
+	ams := (c.cc >> ccAmsShift) & ccAmsMask
+	css := (c.cc >> ccCssShift) & ccCssMask
+	if mps != 0 || ams != 0 || (css != ccCssNvm && css != ccCssCsi) {
+		c.csts = cstsCfs
+		return
+	}
+	c.csts = cstsReady
+}
+
+// clearCtrlLocked is nvmet's nvmet_clear_ctrl: not ready, and CC back to
+// zero. It leaves SHST and CFS as they are.
+func (c *conn) clearCtrlLocked() {
+	c.csts &^= cstsReady
+	c.cc = 0
 }
 
 // ---------------------------------------------------------------------------
@@ -706,8 +765,9 @@ func (c *conn) handleIdentify(s sqe) error {
 	return c.transfer(cid, payload)
 }
 
-// The Identify Controller field offsets this controller fills in. Everything
-// not named here stays zero, which is what nvmet's discovery identify does.
+// The Identify Controller field offsets this controller fills in: the fields
+// NP7 pins and MAXCMD. Everything not named here stays zero, as nvmet's
+// discovery identify leaves it (NP14).
 const (
 	idOffSerial    = 4
 	idLenSerial    = 20
@@ -719,20 +779,14 @@ const (
 	idOffCntlId    = 78
 	idOffVer       = 80
 	idOffOaes      = 92
-	idOffCtratt    = 96
 	idOffCntrlType = 111
 	idOffAerl      = 259
 	idOffLpa       = 261
 	idOffKas       = 320
-	idOffSqes      = 512
-	idOffCqes      = 513
 	idOffMaxCmd    = 514
 	idOffSgls      = 536
 	idOffSubNqn    = 768
 	idLenSubNqn    = 256
-	idOffIoccsz    = 1792
-	idOffIorcsz    = 1796
-	idOffIcdoff    = 1800
 	idOffDctype    = 1806
 )
 
@@ -747,9 +801,6 @@ const (
 	// oaesDiscChange is OAES bit 31: this controller supports Discovery Log
 	// Page Change notices, which is what makes a Linux host enable them (NP9).
 	oaesDiscChange = 1 << 31
-	// ctrattHostId128 says the host identifier is 128 bits, as fabrics
-	// hosts always send it.
-	ctrattHostId128 = 1 << 0
 	// lpaExtended is LPA bit 2: the Log Page Offset and the extended Number
 	// of Dwords fields are supported, which is how a host pages the
 	// discovery log (NP8).
@@ -760,10 +811,6 @@ const (
 	// data block address may be an offset), the pair nvmet advertises and
 	// the Linux host requires of a fabrics controller.
 	sglsSupported = 1<<0 | 1<<20
-	// sqesValue and cqesValue are the required and maximum queue entry
-	// sizes, 64 and 16 bytes as powers of two.
-	sqesValue = 0x66
-	cqesValue = 0x44
 	// dctypeDdc is DCTYPE 1, "Direct Discovery Controller": dnv-cdc serves
 	// discovery but accepts no TP-8010 registration
 	// (cdc.md, The NVMe/TCP discovery service), so a host must not treat it as
@@ -772,8 +819,8 @@ const (
 )
 
 // buildIdentify renders the Identify Controller data structure (NP7). Fields
-// this document does not pin follow nvmet's discovery controller (NP14):
-// everything unnamed is zero.
+// NP7 does not pin follow nvmet's discovery controller (NP14): MAXCMD is
+// nvmet's MQES + 1 over NP6's queue size, and everything unnamed is zero.
 func buildIdentify(cntlId uint16, serial string) []byte {
 	buf := make([]byte, identifyLen)
 	putAscii(buf[idOffSerial:idOffSerial+idLenSerial], serial)
@@ -783,24 +830,15 @@ func buildIdentify(cntlId uint16, serial string) []byte {
 	binary.LittleEndian.PutUint16(buf[idOffCntlId:idOffCntlId+2], cntlId)
 	binary.LittleEndian.PutUint32(buf[idOffVer:idOffVer+4], controllerVersion)
 	binary.LittleEndian.PutUint32(buf[idOffOaes:idOffOaes+4], oaesDiscChange)
-	binary.LittleEndian.PutUint32(buf[idOffCtratt:idOffCtratt+4], ctrattHostId128)
 	buf[idOffCntrlType] = cntrlTypeDiscovery
 	buf[idOffAerl] = common.CdcAerl
 	buf[idOffLpa] = lpaExtended
 	binary.LittleEndian.PutUint16(buf[idOffKas:idOffKas+2], kasUnits)
-	buf[idOffSqes] = sqesValue
-	buf[idOffCqes] = cqesValue
 	binary.LittleEndian.PutUint16(
 		buf[idOffMaxCmd:idOffMaxCmd+2], common.CdcMaxAdminSqSize,
 	)
 	binary.LittleEndian.PutUint32(buf[idOffSgls:idOffSgls+4], sglsSupported)
 	putField(buf[idOffSubNqn:idOffSubNqn+idLenSubNqn], common.NvmeDiscoveryNqn)
-	binary.LittleEndian.PutUint32(
-		buf[idOffIoccsz:idOffIoccsz+4],
-		(sqeLen+common.CdcMaxH2CData)/16,
-	)
-	binary.LittleEndian.PutUint32(buf[idOffIorcsz:idOffIorcsz+4], cqeLen/16)
-	binary.LittleEndian.PutUint16(buf[idOffIcdoff:idOffIcdoff+2], 0)
 	buf[idOffDctype] = dctypeDdc
 	return buf
 }
@@ -819,8 +857,9 @@ func putAscii(dst []byte, value string) {
 // ---------------------------------------------------------------------------
 
 // handleGetLogPage serves the discovery log out of a snapshot taken right
-// here, when the command arrived (DS9). RAE is accepted and ignored: event
-// clearing is delivery-based (NP11).
+// here, when the command arrived (DS9), with the record of the cdc itself
+// first (DS12). RAE is accepted and ignored: event clearing is
+// delivery-based (NP11).
 func (c *conn) handleGetLogPage(s sqe) error {
 	cid := s.cid()
 	if s.logLid() != lidDiscovery {
@@ -842,8 +881,21 @@ func (c *conn) handleGetLogPage(s sqe) error {
 	c.mu.Lock()
 	hostNqn := c.hostNqn
 	c.mu.Unlock()
-	genCtr, numRec, body := c.reg.snapshot(hostNqn)
-	return c.transfer(cid, logPageBytes(genCtr, numRec, body, off, int(length)))
+	genCtr, viewRec, body := c.reg.snapshot(hostNqn)
+	// The record of the cdc itself comes first and is no part of the view
+	// (DS12), so NUMREC counts it on top of the view's records.
+	numRec := viewRec + 1
+	size := uint64(common.CdcDiscLogHeaderSize) +
+		numRec*common.CdcDiscLogEntrySize
+	if off > size {
+		// NP8: a read that starts past the end of the snapshot is refused,
+		// as the specs and nvmet refuse it; one that starts at the end gets
+		// zeros.
+		return c.respond(cid, statusInvalidField, 0, 0)
+	}
+	return c.transfer(cid, logPageBytes(
+		genCtr, numRec, c.selfRecord, body, off, int(length),
+	))
 }
 
 // ---------------------------------------------------------------------------

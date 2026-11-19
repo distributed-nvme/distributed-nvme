@@ -48,10 +48,9 @@ const (
 	c2hDataHdrLen    = 24
 	h2cDataHdrLen    = 24
 
-	// sqeLen and cqeLen are the submission and completion queue entry
-	// sizes: a CapsuleCmd carries one SQE, a CapsuleResp one CQE.
+	// sqeLen is the submission queue entry size: a CapsuleCmd carries one
+	// SQE.
 	sqeLen = 64
-	cqeLen = 16
 )
 
 // pfv10 is the PDU format version of NVMe/TCP 1.0, the only one accepted or
@@ -129,7 +128,8 @@ func newPduError(fes uint16, fei uint32, format string, args ...any) *pduError {
 // ---------------------------------------------------------------------------
 
 // pdu is one received PDU. hdr is exactly HLEN bytes (the common header
-// included) and data is what follows PDO, empty when the PDU carries none.
+// included) and data is what follows PDO, or HLEN for an H2CTermReq, empty
+// when the PDU carries none.
 type pdu struct {
 	typ   uint8
 	flags uint8
@@ -200,8 +200,13 @@ func readPdu(r io.Reader) (*pdu, error) {
 	}
 	// PDO is the offset of the data from the start of the PDU. CPDA is 0
 	// (NP3), so a host never needs padding; a PDO inside the header or past
-	// the PDU is malformed either way.
-	if p.plen > uint32(p.hlen) {
+	// the PDU is malformed either way. The H2CTermReq is the exception: the
+	// specs reserve its PDO and put its data right after its header, so its
+	// PDO is not read at all (NP2).
+	dataOff := int(p.pdo)
+	if p.typ == pduH2CTermReq {
+		dataOff = want
+	} else if p.plen > uint32(p.hlen) {
 		if int(p.pdo) < want || uint32(p.pdo) > p.plen {
 			return early(newPduError(fesInvalidPduHdr, 3,
 				"pdu type %#x: pdo %d outside [%d, %d]",
@@ -216,7 +221,7 @@ func readPdu(r io.Reader) (*pdu, error) {
 	p.hdr = append(p.hdr, ch[:]...)
 	p.hdr = append(p.hdr, rest[:want-pduCommonHdrLen]...)
 	if p.plen > uint32(p.hlen) {
-		p.data = rest[int(p.pdo)-pduCommonHdrLen:]
+		p.data = rest[dataOff-pduCommonHdrLen:]
 	}
 	return p, nil
 }

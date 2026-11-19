@@ -3,15 +3,18 @@ package cdc
 import (
 	"encoding/binary"
 	"hash/fnv"
+	"net"
+	"strconv"
 
 	"github.com/distributed-nvme/distributed-nvme/common"
 	"github.com/distributed-nvme/distributed-nvme/pb"
 )
 
-// This file is the DS3/DS9 rendering half of the discovery service: one
+// This file is the DS3/DS9/DS12 rendering half of the discovery service: one
 // CdcEntry transport-configuration element becomes one discovery log entry,
-// and a host's entries plus a header become the bytes a Get Log Page command
-// serves. The byte layout is the specs'; this file names the fields.
+// a connection's local address becomes the record of the cdc itself, and a
+// header, that record and a host's entries become the bytes a Get Log Page
+// command serves. The byte layout is the specs'; this file names the fields.
 
 // ---------------------------------------------------------------------------
 // Discovery log entry layout (DS3)
@@ -51,21 +54,32 @@ const (
 	_ = uint(entryLenTrAddr - common.MaxStrSize)
 )
 
-// The field VALUES of DS3. TRTYPE/ADRFAM are the specs' transport and address
-// family codes; SUBTYPE says these entries name NVM subsystems, never further
-// discovery services (dnv-cdc serves no referrals,
-// cdc.md, Scope and placement).
+// The field VALUES of DS3 and DS12. TRTYPE/ADRFAM are the specs' transport
+// and address family codes; SUBTYPE says an entry's records name NVM
+// subsystems, and the one other record names the cdc itself (DS12), never a
+// further discovery service (dnv-cdc serves no referrals, cdc.md, Scope and
+// placement).
 const (
 	trTypeTcp = 3
 
 	adrFamIpv4 = 1
 	adrFamIpv6 = 2
 
-	subtypeNvmSubsystem = 2
+	subtypeNvmSubsystem     = 2
+	subtypeCurrentDiscovery = 3
 
 	// TREQ "not specified": dnv exports no TLS, so a host is neither
 	// required nor forbidden to use it by this record.
 	treqNotSpecified = 0
+	// treqSqFlowDisable is TREQ's "SQ flow control disable supported" bit,
+	// which the record of the cdc itself carries: this controller honors the
+	// attribute (NP4), as nvmet's own record says of nvmet (DS12).
+	treqSqFlowDisable = 1 << 2
+
+	// eflagsEpcsd is EFLAGS' "explicit persistent connection support for
+	// discovery" bit, the one flag the record of the cdc itself sets
+	// (DS12).
+	eflagsEpcsd = 1 << 1
 
 	// CNTLID 0xffff means "dynamic controller": the host asks the target
 	// for whatever controller id it likes, which is what every dnv nvmet
@@ -154,14 +168,78 @@ func renderEntry(nqn string, conf *pb.NvmeTrConf) ([]byte, string) {
 	if !ok {
 		return nil, skipForeignAdrFam
 	}
+	return layEntry(entryFields{
+		trType:  trType,
+		adrFam:  adrFam,
+		subtype: subtypeNvmSubsystem,
+		treq:    treqNotSpecified,
+		nqn:     nqn,
+		trAddr:  conf.GetTrAddr(),
+		trSvcId: conf.GetTrSvcId(),
+	}), ""
+}
+
+// selfRecordFor renders the record of the cdc itself for a connection whose
+// local end is local (DS12). Every listener of dnv-cdc is TCP, so local is a
+// *net.TCPAddr; for any other the record falls back to the listen endpoint,
+// whose address CM2 has proven an IP.
+func selfRecordFor(local net.Addr, cfg Config) []byte {
+	if a, ok := local.(*net.TCPAddr); ok {
+		return renderSelfEntry(a.IP, strconv.Itoa(a.Port))
+	}
+	return renderSelfEntry(net.ParseIP(cfg.TrAddr), cfg.TrSvcId)
+}
+
+// renderSelfEntry renders the record of the cdc itself (DS12) for the local
+// address ip and port trSvcId of one connection: an address with a four byte
+// form, an IPv4-mapped one on a dual-stack listener included, is named as
+// IPv4, any other as IPv6; the subtype is the current discovery subsystem,
+// SUBNQN the well-known discovery NQN, EFLAGS the persistent-connection flag
+// alone, TREQ with SQ flow control disable supported, and the rest as DS3
+// gives it.
+func renderSelfEntry(ip net.IP, trSvcId string) []byte {
+	adrFam, trAddr := uint8(adrFamIpv6), ip.String()
+	if v4 := ip.To4(); v4 != nil {
+		adrFam, trAddr = adrFamIpv4, v4.String()
+	}
+	return layEntry(entryFields{
+		trType:  trTypeTcp,
+		adrFam:  adrFam,
+		subtype: subtypeCurrentDiscovery,
+		treq:    treqNotSpecified | treqSqFlowDisable,
+		eflags:  eflagsEpcsd,
+		nqn:     common.NvmeDiscoveryNqn,
+		trAddr:  trAddr,
+		trSvcId: trSvcId,
+	})
+}
+
+// entryFields are the values that differ between the records of DS3 and
+// DS12.
+type entryFields struct {
+	trType  uint8
+	adrFam  uint8
+	subtype uint8
+	treq    uint8
+	eflags  uint16
+	nqn     string
+	trAddr  string
+	trSvcId string
+}
+
+// layEntry lays one discovery log entry out: the fields given, then what
+// every record of dnv-cdc carries alike — the PORTID hash over the record's
+// address and port, the dynamic controller, ASQSZ common.CdcMaxAdminSqSize
+// and TSAS TCP with no security type (DS3).
+func layEntry(f entryFields) []byte {
 	buf := make([]byte, common.CdcDiscLogEntrySize)
-	buf[entryOffTrType] = trType
-	buf[entryOffAdrFam] = adrFam
-	buf[entryOffSubtype] = subtypeNvmSubsystem
-	buf[entryOffTreq] = treqNotSpecified
+	buf[entryOffTrType] = f.trType
+	buf[entryOffAdrFam] = f.adrFam
+	buf[entryOffSubtype] = f.subtype
+	buf[entryOffTreq] = f.treq
 	binary.LittleEndian.PutUint16(
 		buf[entryOffPortId:entryOffPortId+2],
-		portId(conf.GetTrAddr(), conf.GetTrSvcId()),
+		portId(f.trAddr, f.trSvcId),
 	)
 	binary.LittleEndian.PutUint16(
 		buf[entryOffCntlId:entryOffCntlId+2], cntlIdDynamic,
@@ -169,15 +247,16 @@ func renderEntry(nqn string, conf *pb.NvmeTrConf) ([]byte, string) {
 	binary.LittleEndian.PutUint16(
 		buf[entryOffAsqsz:entryOffAsqsz+2], common.CdcMaxAdminSqSize,
 	)
-	binary.LittleEndian.PutUint16(buf[entryOffEflags:entryOffEflags+2], 0)
-	putField(
-		buf[entryOffTrSvcId:entryOffTrSvcId+entryLenTrSvcId],
-		conf.GetTrSvcId(),
+	binary.LittleEndian.PutUint16(
+		buf[entryOffEflags:entryOffEflags+2], f.eflags,
 	)
-	putField(buf[entryOffSubNqn:entryOffSubNqn+entryLenSubNqn], nqn)
-	putField(buf[entryOffTrAddr:entryOffTrAddr+entryLenTrAddr], conf.GetTrAddr())
+	putField(
+		buf[entryOffTrSvcId:entryOffTrSvcId+entryLenTrSvcId], f.trSvcId,
+	)
+	putField(buf[entryOffSubNqn:entryOffSubNqn+entryLenSubNqn], f.nqn)
+	putField(buf[entryOffTrAddr:entryOffTrAddr+entryLenTrAddr], f.trAddr)
 	buf[entryOffTcpSecTp] = tcpSecTypeNone
-	return buf, ""
+	return buf
 }
 
 // ---------------------------------------------------------------------------
@@ -195,24 +274,33 @@ func renderHeader(genCtr uint64, numRec uint64) []byte {
 }
 
 // logPageBytes serves one Get Log Page read out of a snapshot (DS9): the
-// header block at offset 0, entry i at
-// common.CdcDiscLogHeaderSize + i * common.CdcDiscLogEntrySize, and zeros past
-// the end. body is the concatenation of the snapshot's rendered entries, so
-// its length is always a whole multiple of the entry size.
+// header block at offset 0 with numRec as its NUMREC, the record of the cdc
+// itself (self, DS12) right after it, then the view's records (body), and
+// zeros past the end. body is the concatenation of the snapshot's rendered
+// entries, so its length is always a whole multiple of the entry size, and
+// numRec counts self and body's records together.
 //
 // The returned slice is always exactly length bytes, which is what the host's
-// buffer expects; an offset past the end therefore yields all zeros rather
-// than an error. DS9 states the zeros beyond the end; the NVMe Base
-// specification aborts a log page read that starts past the end with Invalid
-// Field, and nvmet does so with DNR, a departure common hosts never meet.
-func logPageBytes(genCtr uint64, numRec uint64, body []byte, off uint64, length int) []byte {
+// buffer expects: a read that starts inside the log gets zeros past its end.
+// A read that starts past the end is refused before this is called (NP8), so
+// the zeros of a window wholly past the end are only ever served for one that
+// starts exactly at it.
+func logPageBytes(
+	genCtr uint64,
+	numRec uint64,
+	self []byte,
+	body []byte,
+	off uint64,
+	length int,
+) []byte {
 	out := make([]byte, length)
 	if length == 0 {
 		return out
 	}
 	header := renderHeader(genCtr, numRec)
 	copyFrom(out, header, off, 0)
-	copyFrom(out, body, off, uint64(len(header)))
+	copyFrom(out, self, off, uint64(len(header)))
+	copyFrom(out, body, off, uint64(len(header)+len(self)))
 	return out
 }
 

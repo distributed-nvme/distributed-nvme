@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net"
 	"sort"
+	"strconv"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -284,9 +285,10 @@ func sortPlanted(entries []plantedEntry) {
 }
 
 // wantLog yields, one record at a time and in log order (DS5), the records
-// a host's log must hold: those of the entries that name the host (DS4) and
-// whose shard code the instance owns (DS2), each entry's in its transport
-// order.
+// of a host's view: those of the entries that name the host (DS4) and whose
+// shard code the instance owns (DS2), each entry's in its transport order.
+// The log a connection reads holds the record of the cdc itself before them
+// (DS12; wantSelf).
 type wantLog struct {
 	entries []plantedEntry
 	ei      int
@@ -379,13 +381,27 @@ func logHeader(t *testing.T, h *fakeHost) (uint64, uint64) {
 		binary.LittleEndian.Uint64(data[8:16])
 }
 
+// wantSelf is the record of the cdc itself the connection of h must read
+// first (DS12): the one for the address and port h dialed, which are the
+// connection's local ones on the instance's side.
+func wantSelf(t *testing.T, h *fakeHost) []byte {
+	t.Helper()
+	a, ok := h.nc.RemoteAddr().(*net.TCPAddr)
+	if !ok {
+		t.Fatalf("the host's remote address %v is not TCP", h.nc.RemoteAddr())
+	}
+	return renderSelfEntry(a.IP, strconv.Itoa(a.Port))
+}
+
 // checkLog reads the whole log a host is served, in commands of at most
 // maxLogTransfer bytes, the most one command moves (NP8), and fails the test
-// unless its GENCTR is genCtr and its records are exactly want's. Each
-// chunk is compared as it arrives, so the test never holds the whole log.
+// unless its GENCTR is genCtr and its records are the record of the cdc
+// itself (DS12) and then exactly want's. Each chunk is compared as it
+// arrives, so the test never holds the whole log.
 func checkLog(t *testing.T, h *fakeHost, genCtr uint64, want *wantLog) {
 	t.Helper()
-	numRec := want.numRec()
+	self := wantSelf(t, h)
+	numRec := want.numRec() + 1
 	gotGen, gotNum := logHeader(t, h)
 	if gotGen != genCtr || gotNum != numRec {
 		t.Fatalf("log header: genctr %d numrec %d, want genctr %d numrec %d",
@@ -412,13 +428,17 @@ func checkLog(t *testing.T, h *fakeHost, genCtr uint64, want *wantLog) {
 		}
 		pending = append(pending, data...)
 		for len(pending) >= common.CdcDiscLogEntrySize {
-			record := want.next(t)
+			record := self
+			if idx > 0 {
+				record = want.next(t)
+			}
 			if record == nil {
 				t.Fatalf("record %d is past the %d the log must hold", idx,
 					numRec)
 			}
 			if !bytes.Equal(pending[:common.CdcDiscLogEntrySize], record) {
-				t.Fatalf("record %d of %d is not the one DS5 orders there: "+
+				t.Fatalf("record %d of %d is not the one DS12 and DS5 "+
+					"order there: "+
 					"subnqn %q, traddr %q", idx, numRec,
 					bytes.TrimRight(pending[256:512], "\x00"),
 					bytes.TrimRight(pending[512:768], "\x00"))

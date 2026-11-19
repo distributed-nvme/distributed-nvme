@@ -5,13 +5,15 @@ import (
 	"crypto/sha256"
 	"encoding/binary"
 	"encoding/hex"
+	"net"
 	"testing"
 
 	"github.com/distributed-nvme/distributed-nvme/common"
 )
 
-// The DS3/DS9 byte-level tests: one CdcEntry transport configuration rendered
-// to exact bytes, the log page header rendered to exact bytes, and the paging
+// The DS3/DS9/DS12 byte-level tests: one CdcEntry transport configuration
+// rendered to exact bytes, the record of the cdc itself rendered to exact
+// bytes, the log page header rendered to exact bytes, and the paging
 // arithmetic a Get Log Page read is served with.
 //
 // Every offset and every value in this file is written as a LITERAL, never as
@@ -383,8 +385,8 @@ func lpBody(n int) []byte {
 }
 
 // lpWindow is the obviously correct reading of DS9: the log is the header
-// followed by the body, a read copies what it overlaps and zero fills the
-// rest.
+// followed by the record of the cdc itself and the body, a read copies what
+// it overlaps and zero fills the rest.
 func lpWindow(image []byte, off uint64, length int) []byte {
 	out := make([]byte, length)
 	if off < uint64(len(image)) {
@@ -394,12 +396,15 @@ func lpWindow(image []byte, off uint64, length int) []byte {
 }
 
 // TestLogPageBytes proves the DS9 paging arithmetic: aligned reads, unaligned
-// reads, a read spanning the header/body boundary, reads past the end (all
-// zeros) and a zero length read.
+// reads, a read spanning the header/record boundary and the boundary between
+// the record of the cdc itself (DS12) and the view's records, reads past the
+// end (all zeros: the window function alone, whose callers refuse a read
+// that starts past the end, NP8) and a zero length read.
 func TestLogPageBytes(t *testing.T) {
 	const genCtr, numRec = 9, 3
-	body := lpBody(numRec)
-	image := append(renderHeader(genCtr, numRec), body...)
+	records := lpBody(numRec)
+	self, body := records[:1024], records[1024:]
+	image := append(renderHeader(genCtr, numRec), records...)
 	if len(image) != 4096 {
 		t.Fatalf("fixture image is %d bytes, want 4096", len(image))
 	}
@@ -416,6 +421,7 @@ func TestLogPageBytes(t *testing.T) {
 		{"second entry, aligned", 2048, 1024},
 		{"last entry, aligned", 3072, 1024},
 		{"spanning the header/body boundary", 1020, 8},
+		{"spanning the record/view boundary", 2040, 16},
 		{"spanning the boundary, wide", 1021, 1030},
 		{"odd offset inside the header", 3, 17},
 		{"odd offset inside an entry", 2049, 7},
@@ -429,7 +435,8 @@ func TestLogPageBytes(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			got := logPageBytes(genCtr, numRec, body, tc.off, tc.length)
+			got := logPageBytes(genCtr, numRec, self, body, tc.off,
+				tc.length)
 			if got == nil {
 				t.Fatal("logPageBytes returned nil")
 			}
@@ -440,26 +447,38 @@ func TestLogPageBytes(t *testing.T) {
 				got, lpWindow(image, tc.off, tc.length))
 		})
 	}
-	// The boundary case spelled out, because it is the one an off-by-one
-	// hides in: four bytes of header tail then four of the first entry.
-	edge := logPageBytes(genCtr, numRec, body, 1020, 8)
+	// The boundary cases spelled out, because they are the ones an
+	// off-by-one hides in: four bytes of header tail then four of the
+	// record of the cdc itself, and four of that record then four of the
+	// view's first record.
+	edge := logPageBytes(genCtr, numRec, self, body, 1020, 8)
 	if !bytes.Equal(edge[:4], image[1020:1024]) {
 		t.Errorf("boundary read: header tail %x, want %x",
 			edge[:4], image[1020:1024])
 	}
+	if !bytes.Equal(edge[4:], self[:4]) {
+		t.Errorf("boundary read: record head %x, want %x", edge[4:],
+			self[:4])
+	}
+	edge = logPageBytes(genCtr, numRec, self, body, 2044, 8)
+	if !bytes.Equal(edge[:4], self[1020:]) {
+		t.Errorf("boundary read: record tail %x, want %x", edge[:4],
+			self[1020:])
+	}
 	if !bytes.Equal(edge[4:], body[:4]) {
 		t.Errorf("boundary read: body head %x, want %x", edge[4:], body[:4])
 	}
-	// Entry i really does start at 1024 + i*1024 (DS9).
+	// Record i really does start at 1024 + i*1024 (DS9), the record of the
+	// cdc itself first (DS12).
 	for i := 0; i < numRec; i++ {
 		off := uint64(1024 + i*1024)
-		got := logPageBytes(genCtr, numRec, body, off, 1024)
-		if !bytes.Equal(got, body[i*1024:(i+1)*1024]) {
-			t.Errorf("entry %d at offset %d is not the ith record", i, off)
+		got := logPageBytes(genCtr, numRec, self, body, off, 1024)
+		if !bytes.Equal(got, records[i*1024:(i+1)*1024]) {
+			t.Errorf("record %d at offset %d is not the ith record", i, off)
 		}
 	}
 	// Past the end is zeros, not an error and not stale bytes.
-	past := logPageBytes(genCtr, numRec, body, 4096, 256)
+	past := logPageBytes(genCtr, numRec, self, body, 4096, 256)
 	for i, b := range past {
 		if b != 0 {
 			t.Fatalf("byte %d past the end is %#02x, want 0", i, b)
@@ -468,19 +487,24 @@ func TestLogPageBytes(t *testing.T) {
 }
 
 // TestLogPageBytesEmptyView proves DS9 for a host that sees nothing: the
-// header still serves, NUMREC is 0 and everything after the header is zeros.
+// header still serves, NUMREC counts the record of the cdc itself alone
+// (DS12), and everything after that record is zeros.
 func TestLogPageBytesEmptyView(t *testing.T) {
-	got := logPageBytes(1, 0, nil, 0, 2048)
-	if len(got) != 2048 {
-		t.Fatalf("length %d, want 2048", len(got))
+	self := lpBody(1)
+	got := logPageBytes(1, 1, self, nil, 0, 3072)
+	if len(got) != 3072 {
+		t.Fatalf("length %d, want 3072", len(got))
 	}
 	if genCtr := binary.LittleEndian.Uint64(got[0:8]); genCtr != 1 {
 		t.Errorf("GENCTR = %d, want 1", genCtr)
 	}
-	if numRec := binary.LittleEndian.Uint64(got[8:16]); numRec != 0 {
-		t.Errorf("NUMREC = %d, want 0", numRec)
+	if numRec := binary.LittleEndian.Uint64(got[8:16]); numRec != 1 {
+		t.Errorf("NUMREC = %d, want 1", numRec)
 	}
-	for i := 1024; i < len(got); i++ {
+	if !bytes.Equal(got[1024:2048], self) {
+		t.Error("the record after the header is not the cdc's own")
+	}
+	for i := 2048; i < len(got); i++ {
 		if got[i] != 0 {
 			t.Fatalf("byte %d of an empty view is %#02x, want 0", i, got[i])
 		}
@@ -489,15 +513,71 @@ func TestLogPageBytesEmptyView(t *testing.T) {
 
 // TestLogPageBytesDoesNotAliasBody proves the DS9 snapshot promise at the
 // rendering level: the served window is a copy, so a caller cannot scribble
-// on the registry's body through it.
+// on the registry's body, or on the connection's record of the cdc itself,
+// through it.
 func TestLogPageBytesDoesNotAliasBody(t *testing.T) {
-	body := lpBody(1)
+	self, body := lpBody(1), lpBody(1)
+	keepSelf := append([]byte(nil), self...)
 	keep := append([]byte(nil), body...)
-	got := logPageBytes(1, 1, body, 1024, 1024)
+	got := logPageBytes(1, 2, self, body, 1024, 2048)
 	for i := range got {
 		got[i] = 0xee
 	}
 	if !bytes.Equal(body, keep) {
 		t.Fatal("writing to a served window mutated the snapshot body")
+	}
+	if !bytes.Equal(self, keepSelf) {
+		t.Fatal("writing to a served window mutated the cdc's own record")
+	}
+}
+
+// lpGoldenSelfEntry builds the record of the cdc itself DS12 demands, from
+// literal offsets and literal field values: the independent half of
+// TestRenderSelfEntryGolden.
+func lpGoldenSelfEntry(adrFam byte, addr string, svcId string) []byte {
+	buf := make([]byte, 1024)
+	// TRTYPE TCP, ADRFAM 1 ipv4 or 2 ipv6, SUBTYPE 3 the current discovery
+	// subsystem, TREQ 4 not specified with SQ flow control disable
+	// supported.
+	buf[0] = 3
+	buf[1] = adrFam
+	buf[2] = 3
+	buf[3] = 4
+	// PORTID, CNTLID dynamic, ASQSZ, EFLAGS 2 (EPCSD).
+	binary.LittleEndian.PutUint16(buf[4:6], portId(addr, svcId))
+	binary.LittleEndian.PutUint16(buf[6:8], 0xffff)
+	binary.LittleEndian.PutUint16(buf[8:10], 32)
+	binary.LittleEndian.PutUint16(buf[10:12], 2)
+	// TRSVCID, SUBNQN, TRADDR, and TSAS's security type none.
+	copy(buf[32:64], svcId)
+	copy(buf[256:512], "nqn.2014-08.org.nvmexpress.discovery")
+	copy(buf[512:768], addr)
+	buf[768] = 0
+	return buf
+}
+
+// TestRenderSelfEntryGolden proves DS12's record byte for byte for an IPv4
+// address, an IPv6 one, and an IPv4-mapped one, which a dual-stack listener
+// reports for a host that reached it over IPv4 and which is named as IPv4.
+func TestRenderSelfEntryGolden(t *testing.T) {
+	for _, tt := range []struct {
+		name   string
+		ip     string
+		adrFam byte
+		addr   string
+	}{
+		{"ipv4", lpGoldenAddr, 1, lpGoldenAddr},
+		{"ipv6", lpGoldenAddr6, 2, lpGoldenAddr6},
+		{"ipv4-mapped", "::ffff:" + lpGoldenAddr, 1, lpGoldenAddr},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			ip := net.ParseIP(tt.ip)
+			if ip == nil {
+				t.Fatalf("fixture %q is no IP", tt.ip)
+			}
+			got := renderSelfEntry(ip, "8009")
+			lpCompare(t, "self record", got,
+				lpGoldenSelfEntry(tt.adrFam, tt.addr, "8009"))
+		})
 	}
 }

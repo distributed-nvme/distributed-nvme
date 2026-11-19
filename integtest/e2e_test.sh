@@ -738,6 +738,10 @@ REACT_RUN_CAP_BYTES=0
 REACT_TD_UNIT=0
 
 JQ=jq
+# DISC_NQN is the well-known discovery NQN, the SUBNQN of the cdc's record of
+# itself that opens every discovery log (cdc.md DS12); the host helper keeps
+# its own copy on the guest.
+DISC_NQN=nqn.2014-08.org.nvmexpress.discovery
 ONLY=""
 CLEANUP_ONLY=0
 # --keep-logs DIR, a directory on the driver, empty when the flag is absent
@@ -6080,10 +6084,11 @@ wipe() { # [cdc traddr]
 }
 
 # discover runs ONE `nvme discover` against the cdc and prints its JSON log,
-# propagating the exit status: an empty log is {"genctr":N,"records":[]} with
-# status 0, while an instance that is down is non-zero, and swallowing the
-# difference would make a "serves nothing" assertion pass on a dead cdc
-# (see disc_raw (cdc_test.sh)).
+# propagating the exit status: a log with no subsystem record answers with
+# status 0 and the cdc's record of itself alone (cdc.md DS12), while an
+# instance that is down is non-zero, and swallowing the difference would make
+# a "serves nothing" assertion pass on a dead cdc (see disc_raw
+# (cdc_test.sh)).
 #
 # -q and -I are the host's own identity and are passed explicitly (rule 2):
 # nvme-cli fills an omitted -I from /etc/nvme/hostid, so a -q that is not that
@@ -6146,11 +6151,15 @@ report_ctrls() { # <nqn>
 #     nothing on stdout, nothing on stderr, and
 #     `failed to connect socket: -111` — ECONNREFUSED — in the host's dmesg,
 #     once per discovery record. nvme-cli reports neither and returns 0.
-#   * AN EMPTY DISCOVERY LOG. Presenting a hostnqn that is not in the
-#     subsystem's allowed_hosts, DS4 hides the entry (cdc/view.go, cdc.md
-#     DS4), the log page comes back empty and there is nothing to connect to:
-#     exit 0, nothing on stdout, nothing on stderr, nothing in dmesg, and
-#     `nvme list-subsys` empty afterwards.
+#   * A DISCOVERY LOG WITH NO SUBSYSTEM RECORD. Presenting a hostnqn that is
+#     not in the subsystem's allowed_hosts, DS4 hides the entry (cdc/view.go,
+#     cdc.md DS4) and there is nothing to connect to: exit 0, nothing on
+#     stdout, nothing on stderr, nothing in dmesg, and `nvme list-subsys`
+#     empty afterwards. That was measured when such a log was empty. It now
+#     holds the cdc's record of itself alone (cdc.md DS12), which nvme-cli
+#     2.16's connect-all skips without a word, by its source (the
+#     `lookup_ctrl` match in `__discover`, and libnvme's refusal of a current
+#     discovery subsystem record); that shape is read, not measured.
 #
 # Read those as two observations rather than a law about nvme-cli: what is
 # established is that on this lab's nvme-cli an empty log and a socket that
@@ -9310,8 +9319,9 @@ wait_ns_exported() { # <cntlr id> <what> <ss_id> <ns_id> [sp name] [secs]
 }
 
 # wait_ns_exported_all is the connect-all form. `nvme connect-all` connects
-# EVERY transport the discovery log offers, and the log carries one record per
-# cntlr the listing rule lists (architecture.md [D18], model.CdcTrConfList
+# EVERY transport the discovery log offers, and the log carries, beside the
+# cdc's record of itself, which connect-all skips (cdc.md DS12), one record
+# per cntlr the listing rule lists (architecture.md [D18], model.CdcTrConfList
 # (model/ops.go)) — every enabled one, in the steady state each connect-all
 # site first waits for (wait_all_listed) — so every one of them has to be
 # listening, not just the primary.
@@ -9368,18 +9378,21 @@ wait_xfer_exported() { # <cntlr id> <what> <xfer_id> [secs]
 # ---------------------------------------------------------------------------
 
 # disc_records renders one discovery log as recs_of (cdc_test.sh) does, the
-# comparison unit: one "<subnqn>|<traddr>|<trsvcid>" line per record, sorted.
-# Driver-side, like every other parse here — no guest has a jq.
+# comparison unit: one "<subnqn>|<traddr>|<trsvcid>" line per subsystem
+# record, sorted. The cdc's record of itself, which opens every log (cdc.md
+# DS12), is left out by its SUBNQN, the discovery NQN. Driver-side, like
+# every other parse here — no guest has a jq.
 disc_records() { # <discovery json>
-	printf '%s' "$1" | "$JQ" -r \
-		'[.records[]? | "\(.subnqn)|\(.traddr)|\(.trsvcid)"] | sort | .[]'
+	printf '%s' "$1" | "$JQ" -r --arg d "$DISC_NQN" \
+		'[.records[]? | select(.subnqn != $d) |
+		  "\(.subnqn)|\(.traddr)|\(.trsvcid)"] | sort | .[]'
 }
 
 # host_disc runs ONE `nvme discover` against the cdc as host <h> itself and
 # echoes the JSON, or "" when the command failed. The helper's `discover`
-# propagates nvme's status on purpose (an empty log is
-# {"genctr":N,"records":[]} with status 0, a dead cdc is non-zero), so the two
-# cases stay distinguishable here.
+# propagates nvme's status on purpose (a log with no subsystem record answers
+# with status 0, a dead cdc is non-zero), so the two cases stay
+# distinguishable here.
 host_disc() { # <h>
 	local out
 	if ! out=$(helper_host "$1" discover "$CP_IP" "$CDC_PORT" \
@@ -9491,8 +9504,8 @@ host_disc_is_listed() { # <h> <subsystem nqn>
 	host_disc_is "$1"
 }
 
-# host_disc_is is the polling predicate: the host's whole discovery log equals
-# DISC_WANT. It is an EXACT set comparison, which is right while the sp has
+# host_disc_is is the polling predicate: the subsystem records of the host's
+# discovery log equal DISC_WANT. It is an EXACT set comparison, which is right while the sp has
 # one subsystem; a case that adds a transfer subsystem must extend DISC_WANT
 # (disc_want_of_sp + its own line) rather than switch to a subset test.
 # DISC_LAST keeps what was actually there for the failure report, and
@@ -9521,10 +9534,13 @@ host_disc_is() { # <h>
 # CONNECTED NOTHING — measured on host0 against this very lab in
 # two shapes, NEITHER of which is a target refusing a connect: with nothing
 # listening on an address the discovery log advertised
-# (`failed to connect socket: -111` in dmesg, once per record) and with an EMPTY
-# discovery log (a hostnqn outside allowed_hosts, so DS4 hid the entry and
-# nothing was attempted at all — nothing on stdout, nothing on stderr, nothing
-# in dmesg, `nvme list-subsys` empty afterwards). Those are two observations
+# (`failed to connect socket: -111` in dmesg, once per record) and with a
+# discovery log that held no subsystem record (a hostnqn outside
+# allowed_hosts, so DS4 hid the entry and nothing was attempted at all —
+# nothing on stdout, nothing on stderr, nothing in dmesg, `nvme list-subsys`
+# empty afterwards; measured when such a log was empty, while it now holds
+# the cdc's record of itself alone, cdc.md DS12, which connect-all skips by
+# nvme-cli's source — see the host helper's connect_all). Those are two observations
 # and not a law about nvme-cli, and the plain `nvme connect` behind
 # host_connect was not one of them — which is exactly why neither wrapper
 # judges by rc. So the helper reports
@@ -9590,7 +9606,8 @@ connect_verdict() { # <h> <subnqn> <verb> <rc> <ctrl_cnt> <what was offered>
 				rcsaid="$rcsaid with nothing on stdout and nothing on stderr,"
 				rcsaid="$rcsaid both when nothing was listening on an address"
 				rcsaid="$rcsaid the discovery log advertised and when the"
-				rcsaid="$rcsaid discovery log it was served was empty."
+				rcsaid="$rcsaid discovery log it was served held no subsystem"
+				rcsaid="$rcsaid record."
 			else
 				rcsaid="AND NVME-CLI EXITED 0, WHICH IS NOT EVIDENCE THAT"
 				rcsaid="$rcsaid ANYTHING CONNECTED. The silent zero measured in"
@@ -10589,17 +10606,24 @@ setup_connect_host0() {
 		host_disc_is 0
 	log "  host0 discovery log:"
 	printf '%s\n' "$DISC_LAST" >&2
-	# Counted on the RAW discovery document, not on DISC_LAST. host_disc_is
-	# has just proved DISC_LAST = DISC_WANT as whole strings, and DISC_WANT is
-	# built one line per listed cntlr, so counting DISC_LAST's lines would
-	# re-count what the wait already compared and could never fail.
-	# `.records | length` is the one number in this step that nothing here
-	# derived: it is what the cdc's reply actually carried, before
-	# disc_records rendered it (CreateSubsystem (gateway/subsystem.go) writes
-	# one transport per listed cntlr into the CdcEntry, model.CdcTrConfList,
-	# and both are listed here).
-	assert_field "$DISC_JSON" '.records | length' "$CNTLR_CNT" \
+	# Counted on the RAW discovery document. The count of its subsystem
+	# records is the line count of DISC_LAST, which host_disc_is has just
+	# proved equal to DISC_WANT, one line per cntlr disc_want_of_sp lists;
+	# so what it adds is that the listed count is CNTLR_CNT, one record per
+	# listed cntlr (CreateSubsystem (gateway/subsystem.go) writes one
+	# transport per listed cntlr into the CdcEntry, model.CdcTrConfList, and
+	# both are listed here). The two checks of the cdc's record of itself
+	# (cdc.md DS12), exactly one and first, are what the wait did not
+	# compare.
+	assert_field "$DISC_JSON" \
+		"[.records[]? | select(.subnqn != \"$DISC_NQN\")] | length" \
+		"$CNTLR_CNT" \
 		"one discovery record per listed cntlr (architecture.md [D18])"
+	assert_field "$DISC_JSON" \
+		"[.records[]? | select(.subnqn == \"$DISC_NQN\")] | length" \
+		1 "the cdc's record of itself in the discovery log (cdc.md DS12)"
+	assert_field "$DISC_JSON" '.records[0].subnqn' "$DISC_NQN" \
+		"the first discovery record is the cdc's own (cdc.md DS12)"
 
 	# THE DISCOVERY LOG IS NOT THE DATA PLANE, and this is the wait between
 	# the two. The cdc serves the log out of etcd, so it advertises both

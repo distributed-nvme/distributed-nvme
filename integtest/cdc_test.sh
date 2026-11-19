@@ -139,6 +139,9 @@ MANY_SPARE_MIB=256
 WAIT_MANY=120
 
 NQN_PREFIX=nqn.2024-01.io.dnv-it:cdc
+# DISC_NQN is the well-known discovery NQN: the SUBNQN of the record of the
+# cdc itself that opens every discovery log (cdc.md DS12).
+DISC_NQN=nqn.2014-08.org.nvmexpress.discovery
 # The ghost identity (Integration test plan, Topology), used only through an
 # explicit -q/-I pair from h1.
 GHOST_NQN="$NQN_PREFIX:ghost"
@@ -542,10 +545,11 @@ put_matrix() {
 # "ghost" adds the ghost's -q/-I pair, which the kernel's 1:1 hostnqn rule
 # makes mandatory together (Integration test plan, Topology).
 #
-# The status matters: an empty discovery log is `{"genctr":N,"records":[]}`
-# with status 0, while an instance that is down, a refused connection or a
-# broken ssh are all non-zero. Swallowing the difference would make every
-# "serves nothing" assertion below pass on a dead fleet.
+# The status matters: a log with no subsystem record still answers, with
+# status 0 and the record of the cdc itself alone (cdc.md DS12), while an
+# instance that is down, a refused connection or a broken ssh are all
+# non-zero. Swallowing the difference would make every "serves nothing"
+# assertion below pass on a dead fleet.
 disc_raw() { # <h1|h2> <instance> [ghost]
 	local hostsel=$1 inst=$2 ident=${3-}
 	local extra=""
@@ -580,7 +584,7 @@ disc_try() { # <h1|h2> <instance> [ghost]
 }
 
 # disc_json is disc_try for a one-shot assertion: a failure is the run's
-# failure, not an empty log.
+# failure, not a log with no subsystem record.
 disc_json() { # <h1|h2> <instance> [ghost]
 	local out rc=0
 	# stdout only: stderr carries ssh_to's own transcript line as well as
@@ -596,11 +600,40 @@ disc_json() { # <h1|h2> <instance> [ghost]
 }
 
 # recs_of turns one discover's JSON into the set of (subnqn, traddr, trsvcid)
-# triples, one per line and sorted — the comparison unit of Integration test
-# plan, What a pass means.
+# triples of its subsystem records, one per line and sorted — the comparison
+# unit of Integration test plan, What a pass means. The record of the cdc
+# itself (cdc.md DS12) is left out by its SUBNQN, which every nvme-cli prints
+# the same, rather than by its subtype's words; self_recs_of and the matrix
+# case's self stage assert it apart.
 recs_of() {
-	"$JQ" -r '[.records[]? |
+	"$JQ" -r --arg d "$DISC_NQN" '[.records[]? | select(.subnqn != $d) |
 		"\(.subnqn)|\(.traddr)|\(.trsvcid)"] | sort | .[]'
+}
+
+# self_recs_of prints, for one discover's JSON, the record of the cdc itself
+# (cdc.md DS12) as "<index>|<subtype>|<traddr>|<trsvcid>|<eflags>", one line
+# per record of the discovery NQN, in log order.
+self_recs_of() {
+	"$JQ" -r --arg d "$DISC_NQN" '.records // [] | to_entries[] |
+		select(.value.subnqn == $d) |
+		"\(.key)|\(.value.subtype)|\(.value.traddr)|\(.value.trsvcid)|\(.value.eflags)"'
+}
+
+# assert_self is the matrix case's self stage (Integration test plan,
+# Cases): instance <instance> answers identity <identity> with exactly one
+# record of the cdc itself, first in the log, naming the address and port
+# the host reached, of subtype "current discovery subsystem" and with the
+# explicit persistent connection flag (cdc.md DS12; the words are libnvme's).
+assert_self() { # <h1|h2> <instance> <identity|""> <label>
+	local got want
+	got=$(disc_json "$1" "$2" "$3" | self_recs_of)
+	want="0|current discovery subsystem|$IP1|$(cdc_port "$2")|explicit discovery connections"
+	if [ "$got" != "$want" ]; then
+		die "$4: the record of the cdc itself
+    got:  [$(printf '%s' "$got" | tr '\n' ' ')]
+    want: [$want]"
+	fi
+	log "  ok: $4"
 }
 
 # disc_set is the assertion form: it dies if the discover did not answer.
@@ -657,8 +690,10 @@ wait_disc() { # <secs> <h1|h2> <instance> <identity|""> <label> <ss:port…>
 }
 
 # twins_agree is the ha case's twin assertion (Integration test plan, Cases;
-# DS2): two instances of one range serve byte-identical, NON-EMPTY content.
-# Emptiness is excluded on purpose — two failed discovers also "agree".
+# DS2): two instances of one range serve the same, NON-EMPTY set of
+# subsystem records; the record of the cdc itself names each instance's own
+# port, so it differs by design (DS12) and recs_of leaves it out. Emptiness
+# is excluded on purpose — two failed discovers also "agree".
 twins_agree() { # <h1|h2> <instance a> <instance b>
 	local ja jb a b
 	ja=$(disc_try "$1" "$2") || return 1
@@ -2263,6 +2298,13 @@ cdc_msg_count() { # <dir> <msg> [jq args…]
 	count_recs "$dir" "select(.msg == \"$msg\")" "$@"
 }
 
+# cdc_connects_of counts one instance's `host connected` records of one host
+# NQN (cdc.md, Log records).
+cdc_connects_of() { # <dir> <hostnqn>
+	count_recs "$1" 'select(.msg == "host connected" and .hostnqn == $h)' \
+		--arg h "$2"
+}
+
 connected_hosts() { # <dir> -> the hostnqns that connected, sorted unique
 	recsr "$1" 'select(.msg == "host connected") | .hostnqn' | sort -u
 }
@@ -2277,9 +2319,9 @@ case_smoke() {
 	wait_until "$WAIT_SHORT" "cdc0 to apply the put" \
 		cdc_applied_ge cdc0 1
 
-	stage discover "cdc0 serves exactly {ssA}, cdc2 (high half) serves nothing"
+	stage discover "cdc0 serves exactly {ssA}, cdc2 (high half) no subsystem"
 	assert_disc h1 0 "" "cdc0 (range $CDC_RANGE_LOW) serves ssA" ssa:1
-	assert_disc h1 2 "" "cdc2 (range $CDC_RANGE_HIGH) serves nothing"
+	assert_disc h1 2 "" "cdc2 (range $CDC_RANGE_HIGH) serves no subsystem"
 
 	stage noview "no host was active at the put, so no view changed record"
 	# The discovers above created and dropped host states, but they happened
@@ -2292,8 +2334,19 @@ case_smoke() {
 	log "  ok: cdc0 has no 'view changed' record"
 
 	stage connect "h1 connect-all through cdc0, then read the dm-zero backend"
+	# The log connect-all reads opens with the record of the cdc itself
+	# (cdc.md DS12), which it must not follow: exactly one more connection
+	# of h1 reaches cdc0, connect-all's own discovery connection. A host
+	# that followed the record would connect cdc0 a second time, and the
+	# kernel state cannot show it, since connect-all drops every discovery
+	# controller it made (Integration test plan, Cases).
+	local before after
+	before=$(cdc_connects_of cdc0 "$H1NQN")
 	connect_all h1 0 >/dev/null
 	wait_dev h1 ssa
+	after=$(cdc_connects_of cdc0 "$H1NQN")
+	assert_eq "$((after - before))" 1 \
+		"cdc0 host connected records of h1 across one connect-all"
 	local ids
 	ids=$(subsys_trsvcids h1 ssa)
 	assert_eq "$ids" "$((NVMET_PORT_BASE))" "h1: ssA path trsvcid"
@@ -2312,9 +2365,10 @@ case_smoke() {
 	host_wipe h1
 	wait_dev_gone h1 ssa
 
-	stage del "delete ssA; cdc0 serves nothing"
+	stage del "delete ssA; cdc0 serves no subsystem"
 	del_entry ssa
-	wait_until "$WAIT_SHORT" "cdc0 to serve an empty log" disc_empty h1 0
+	wait_until "$WAIT_SHORT" "cdc0 to serve a log with no subsystem" \
+		disc_empty h1 0
 	assert_disc h1 0 "" "cdc0 after the delete"
 }
 
@@ -2334,12 +2388,15 @@ cdc_deletes_gt() { # <dir> <baseline>
 	[ "$(cdc_deletes_at "$1")" -gt "$2" ]
 }
 
-# disc_empty needs the instance to ANSWER with an empty log, which is not the
-# same thing as failing to answer.
-disc_empty() { # <h1|h2> <instance>
+# disc_empty needs the instance to ANSWER with a log that holds no subsystem
+# record, which is not the same thing as failing to answer: the log is the
+# record of the cdc itself alone (cdc.md DS12).
+disc_empty() { # <h1|h2> <instance> [ghost]
 	local out
-	out=$(disc_try "$1" "$2") || return 1
-	[ "$(printf '%s' "$out" | "$JQ" -r '.records | length')" = 0 ]
+	out=$(disc_try "$@") || return 1
+	[ "$(printf '%s' "$out" | "$JQ" -r --arg d "$DISC_NQN" \
+		'[(.records // [])[] | select(.subnqn == $d)] | length')" = 1 ] &&
+		[ "$(printf '%s' "$out" | "$JQ" -r '(.records // []) | length')" = 1 ]
 }
 
 # ---------------------------------------------------------------------------
@@ -2367,20 +2424,37 @@ case_matrix() {
 	assert_disc h1 1 "" "cdc1 / H1" ssb:2 sse:3
 	assert_disc h1 2 "" "cdc2 / H1" ssd:1 ssd:2
 	assert_disc h1 3 "" "cdc3 / H1" ssd:1 ssd:2
-	# H2 gets a genuinely empty log in the low half, and C, D and the
-	# cross-cluster F in the high half.
+	# H2 gets a log with no subsystem record in the low half, and C, D and
+	# the cross-cluster F in the high half.
 	assert_disc h2 0 "" "cdc0 / H2"
 	assert_disc h2 1 "" "cdc1 / H2"
 	assert_disc h2 2 "" "cdc2 / H2" ssc:3 ssd:1 ssd:2 ssf:4
 	assert_disc h2 3 "" "cdc3 / H2" ssc:3 ssd:1 ssd:2 ssf:4
-	# The ghost is named nowhere, so it gets a genuinely empty log from
-	# every instance.
+	# The ghost is named nowhere, so it gets a log with no subsystem record
+	# from every instance.
 	assert_disc h1 0 ghost "cdc0 / ghost"
 	assert_disc h1 1 ghost "cdc1 / ghost"
 	assert_disc h1 2 ghost "cdc2 / ghost"
 	assert_disc h1 3 ghost "cdc3 / ghost"
 
-	stage twins "the twins of a range are byte-identical"
+	stage self "every log of the grid opens with the record of the cdc itself"
+	# cdc.md DS12: one record of the discovery NQN, first, naming the address
+	# and port the host reached, for every identity alike, the ghost
+	# included — the grid above compared the subsystem records only.
+	local i
+	for i in 0 1 2 3; do
+		assert_self h1 "$i" "" "cdc$i / H1: its own record"
+		assert_self h2 "$i" "" "cdc$i / H2: its own record"
+		assert_self h1 "$i" ghost "cdc$i / ghost: its own record"
+	done
+	# And for the ghost that record is the whole log.
+	for i in 0 1 2 3; do
+		disc_empty h1 "$i" ghost ||
+			die "cdc$i / ghost: the log is not the record of the cdc itself alone"
+	done
+	log "  ok: the ghost's log is the record of the cdc itself alone, at every instance"
+
+	stage twins "the twins of a range serve the same subsystem records"
 	local a b
 	a=$(disc_set h1 0)
 	b=$(disc_set h1 1)
@@ -2459,7 +2533,7 @@ case_lowlevel() {
 	g1=$(disc_dev_genctr h1 "$devx")
 	g2=$(disc_dev_genctr h2 "$devy")
 	# cdc0 holds ssA, which names no host, so neither baseline lists it
-	# (DS4), and h2's is a genuinely empty log.
+	# (DS4), and h2's holds no subsystem record.
 	assert_dev_disc h1 "$devx" "h1 baseline" ssb:2
 	assert_dev_disc h2 "$devy" "h2 baseline"
 	log "  baseline genctr: h1 $g1, h2 $g2"
@@ -2814,8 +2888,9 @@ many_batch() { # <file> <puts> <deletes>
 
 # many_want_dump prints what many_dump must print on one host with the
 # entries of ME_LIVE in etcd: each copy's four discovery controllers,
-# connected, and on each controller one record per transport (DS3) of every
-# live entry in that instance's range (DS2) that names the copy (DS4).
+# connected, and on each controller the record of the cdc itself, naming that
+# instance's address and port (DS12), and one record per transport (DS3) of
+# every live entry in that instance's range (DS2) that names the copy (DS4).
 many_want_dump() { # <1|2>
 	local v=$1 k g nn c port name p digit
 	local -a range=()
@@ -2826,6 +2901,7 @@ many_want_dump() { # <1|2>
 		for c in 0 1 2 3; do
 			port=$(cdc_port "$c")
 			echo "dc $nn $IP1 $port True"
+			echo "rec $nn $port $DISC_NQN $IP1 $port"
 			for name in "${!ME_LIVE[@]}"; do
 				[[ " ${ME_ALLOW[$name]} " == *" $g "* ]] || continue
 				digit=${ME_SHARD[$name]:0:1}
@@ -2854,8 +2930,8 @@ many_want_ctrls() { # <1|2>
 
 # many_read runs one read of the host helper on one host and sorts its
 # answer into a file, the helper's complaints beside it. Its status is the
-# read's: a host whose copies did not all answer is a failed read, never an
-# empty log.
+# read's: a host whose copies did not all answer is a failed read, never a
+# log with no subsystem record.
 many_read() { # <h1|h2> <helper verb and arguments> <out file>
 	h "$1" "$WORK/cdc_host.sh $2" 2> "$3.err" | LC_ALL=C sort > "$3"
 }
@@ -3072,7 +3148,7 @@ case_manyhosts() {
 	many_batch "$batch" $((copies + 1)) $((copies + 1))
 	wait_many_logs "every copy reads its log after the removals and moves"
 
-	stage empty "one batch deletes every entry left: every copy's log is empty"
+	stage empty "one batch deletes every entry left: no copy's log holds a subsystem"
 	: > "$batch"
 	for name in "${ME_NAMES[@]}"; do
 		[ "${ME_LIVE[$name]-}" = 1 ] || continue
@@ -3081,7 +3157,7 @@ case_manyhosts() {
 		left=$((left + 1))
 	done
 	many_batch "$batch" 0 "$left"
-	wait_many_logs "every copy reads an empty log"
+	wait_many_logs "every copy reads the cdcs' records of themselves alone"
 
 	stage persist "the copies' discovery connections lasted the whole case"
 	# No instance ever saw a copy disconnect, so every log change above
@@ -3142,6 +3218,19 @@ case_stas() {
 	stage converge "each host holds four persistent discovery connections"
 	wait_stas_converged h1
 	wait_stas_converged h2
+	# Exactly four, after a settle: each log opens with the record of the
+	# cdc itself (cdc.md DS12), and a stacd that connected it would hold a
+	# fifth live discovery controller to the fleet. A stafd that followed it
+	# would add none, so the count cannot show that: stafd keeps its
+	# controllers as a set keyed by transport, address, port, NQN and host
+	# fields, and the record's key is that of the controller it is
+	# configured with.
+	sleep "$SETTLE"
+	local hostsel
+	for hostsel in h1 h2; do
+		assert_eq "$(disc_ctrl_count "$hostsel")" 4 \
+			"$hostsel: live discovery controllers to the fleet"
+	done
 	local dir
 	for dir in "${CDC_DIRS[@]}"; do
 		wait_until "$WAIT_STAS" "$dir: both hostnqns connected" \

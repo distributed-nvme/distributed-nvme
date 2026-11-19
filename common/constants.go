@@ -961,8 +961,8 @@ const (
 	// CdcMaxAdminSqSize is the admin SQ entry count: CAP.MQES is one less,
 	// Connect's 0's-based SQSIZE is capped at CAP.MQES so the queue never
 	// holds more entries than this (NP4), and it is the ASQSZ of every
-	// discovery log entry (DS3). 32 is NVME_AQ_DEPTH, what the Linux host
-	// asks for.
+	// discovery log entry (DS3) and of the cdc's own record (DS12). 32 is
+	// NVME_AQ_DEPTH, what the Linux host asks for.
 	CdcMaxAdminSqSize = 32
 	// CdcAerl is Identify's AERL: up to CdcAerl + 1 outstanding AERs per
 	// connection (NP11).

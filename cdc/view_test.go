@@ -1434,7 +1434,7 @@ func TestSnapshotIsolation(t *testing.T) {
 		t.Fatalf("snapshot = (%d, %d), want (1, 2)", genCtr, numRec)
 	}
 	keep := append([]byte(nil), body...)
-	firstPage := logPageBytes(genCtr, numRec, body, 0, 3072)
+	firstPage := logPageBytes(genCtr, numRec, nil, body, 0, 3072)
 
 	// An equal-length change and a second command's snapshot of it, then a
 	// growing change, all while the command is still paging through the
@@ -1459,7 +1459,7 @@ func TestSnapshotIsolation(t *testing.T) {
 	}
 	// The rest of the paged read still comes out of the same snapshot.
 	for _, off := range []uint64{1024, 2048} {
-		page := logPageBytes(genCtr, numRec, body, off, 1024)
+		page := logPageBytes(genCtr, numRec, nil, body, off, 1024)
 		if !bytes.Equal(page, firstPage[off:off+1024]) {
 			t.Errorf("the page at %d stopped being self-consistent", off)
 		}

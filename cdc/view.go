@@ -305,8 +305,10 @@ func (r *registry) refreshLocked(
 // stays as it was, so the view moves exactly when the entry's own
 // contribution to it does. Deciding that takes, per active host, the entry's
 // visibility on both sides and at most a compare of the entry's own records,
-// never of a whole view. An impacted host's NUMREC moves by the difference
-// and its view is marked dirty, for its next snapshot to render.
+// never of a whole view. An impacted host's view count moves by the
+// difference and its view is marked dirty, for its next snapshot to render.
+// That count is the view's alone: the NUMREC a connection reads is one more,
+// the record of the cdc itself (DS12), which is no part of the view.
 func (r *registry) apply(
 	ctx context.Context,
 	k entryKey,
@@ -413,8 +415,10 @@ func (r *registry) detach(hostNqn string, c *conn) {
 	}
 }
 
-// snapshot takes the (genctr, records) pair one Get Log Page command serves
-// (DS9), rendering the view first when an event left it dirty (DS6): a render
+// snapshot takes the (genctr, records) pair of the view one Get Log Page
+// command serves (DS9), after the record of the cdc itself that the
+// connection adds (DS12), rendering the view first when an event left it
+// dirty (DS6): a render
 // is paid here, once per read of a moved view, not once per event. The
 // returned body is never mutated afterwards — a render builds a new slice
 // rather than writing into the old one — so the command can page through it
@@ -426,7 +430,7 @@ func (r *registry) snapshot(hostNqn string) (uint64, uint64, []byte) {
 	if !ok {
 		// Only a connection that has completed Connect asks, and that
 		// connection is attached, so this is unreachable in practice; an
-		// empty log is nonetheless the right answer to "a host nobody
+		// empty view is nonetheless the right answer to "a host nobody
 		// tracks".
 		return 0, 0, nil
 	}

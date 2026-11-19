@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/binary"
 	"errors"
+	"fmt"
 	"net"
 	"testing"
 	"time"
@@ -455,9 +456,14 @@ func TestConnectSqSizeClampedNotRefused(t *testing.T) {
 	if c.sqhd != 1 {
 		t.Fatalf("connect sqhd %d, want 1", c.sqhd)
 	}
+	// The enable a host sends before its admin commands (NP6) is the second
+	// command.
+	if e := h.propertySet(regCc, ccEnable); e.sqhd != 2 {
+		t.Fatalf("enable sqhd %d, want 2", e.sqhd)
+	}
 	// The clamped queue is common.CdcMaxAdminSqSize entries deep, so the
 	// head returns to 0 exactly that many commands after it left it.
-	for i := 1; i < common.CdcMaxAdminSqSize; i++ {
+	for i := 2; i < common.CdcMaxAdminSqSize; i++ {
 		k := h.keepAlive()
 		connStatus(t, k, statusSuccess, "keep alive")
 		want := uint16((1 + i) % common.CdcMaxAdminSqSize)
@@ -525,7 +531,7 @@ func propValue64(c completion) uint64 {
 func TestPropertyDanceToReady(t *testing.T) {
 	ts := startServer(t)
 	h := ts.dial()
-	h.connectOk(connHostA)
+	h.connectNotEnabled(connHostA)
 
 	c := h.propertyGet(regCap, true)
 	connStatus(t, c, statusSuccess, "property get cap")
@@ -545,8 +551,8 @@ func TestPropertyDanceToReady(t *testing.T) {
 
 	c = h.propertyGet(regVs, false)
 	connStatus(t, c, statusSuccess, "property get vs")
-	if propValue64(c) != controllerVersion {
-		t.Errorf("vs %#x, want %#x", propValue64(c), controllerVersion)
+	if propValue64(c) != 0x00020100 {
+		t.Errorf("vs %#x, want 0x00020100 (nvmet's 2.1.0)", propValue64(c))
 	}
 	if c := h.propertyGet(regCc, false); propValue64(c) != 0 {
 		t.Errorf("cc %#x before enable, want 0", propValue64(c))
@@ -569,7 +575,7 @@ func TestPropertyDanceToReady(t *testing.T) {
 	shn := uint64(ccEnable | 1<<ccShnShift)
 	connStatus(t, h.propertySet(regCc, shn), statusSuccess, "set cc.shn")
 	csts = propValue64(h.propertyGet(regCsts, false))
-	if csts&cstsShstMask != cstsShstComplet {
+	if csts&(0x3<<2) != cstsTestShst {
 		t.Errorf("csts %#x: SHST is not `shutdown complete`", csts)
 	}
 	if csts&cstsReady != 0 {
@@ -583,7 +589,7 @@ func TestPropertyDanceToReady(t *testing.T) {
 func TestPropertyEnableThenDisableClearsReady(t *testing.T) {
 	ts := startServer(t)
 	h := ts.dial()
-	h.connectOk(connHostA)
+	h.connectNotEnabled(connHostA)
 	connStatus(t, h.propertySet(regCc, ccEnable), statusSuccess, "set cc.en")
 	if csts := propValue64(h.propertyGet(regCsts, false)); csts&cstsReady == 0 {
 		t.Fatalf("csts %#x: RDY did not follow CC.EN", csts)
@@ -628,6 +634,282 @@ func TestPropertyRejects(t *testing.T) {
 		c := h.propertySet(regCsts, 1)
 		connStatus(t, c, statusInvalidField, "property set csts")
 	})
+}
+
+// The CC fields a host writes and the CSTS bits it reads (NP6), spelled as
+// the specs spell them rather than as conn.go's constants.
+const (
+	ccTestEn     = 1 << 0
+	ccTestShnNrm = 1 << 14
+	ccTestIosqes = 6 << 16
+	ccTestIocqes = 4 << 20
+	cstsTestRdy  = 1 << 0
+	cstsTestCfs  = 1 << 1
+	cstsTestShst = 2 << 2
+)
+
+// connRefusedBeforeReady fails the test unless c is the answer NP6 gives a
+// command while the controller is not ready: invalid command opcode with
+// DNR, as nvmet's discovery controller answers it.
+func connRefusedBeforeReady(t *testing.T, c completion, what string) {
+	t.Helper()
+	connStatus(t, c, statusInvalidOpcode, what)
+	if c.status>>15 == 0 {
+		t.Fatalf("%s: a command refused before ready must carry DNR", what)
+	}
+}
+
+// TestAdminCommandsRefusedUntilReady proves NP6's gate: a connected
+// controller that the host has not enabled refuses every command but the
+// fabrics ones with invalid command opcode, DNR, as nvmet's discovery
+// controller does, and keeps the connection; an enable opens it, and a
+// disable or a shutdown notice closes it again.
+func TestAdminCommandsRefusedUntilReady(t *testing.T) {
+	logs := captureLogs(t)
+	ts := startServer(t)
+	connInject(ts, 1, connEntry("nqn.2016-06.io.dnv:ss0", "10.0.0.1", "4420",
+		connHostA))
+	h := ts.dial()
+	h.connectNotEnabled(connHostA)
+
+	c, data := h.identify(cnsController)
+	connRefusedBeforeReady(t, c, "identify before ready")
+	if len(data) != 0 {
+		t.Errorf("identify before ready moved %d bytes", len(data))
+	}
+	c, data = connGetLog(h, lidDiscovery, false, 4096, 0)
+	connRefusedBeforeReady(t, c, "get log page before ready")
+	if len(data) != 0 {
+		t.Errorf("get log page before ready moved %d bytes", len(data))
+	}
+	connRefusedBeforeReady(t,
+		h.setFeatures(fidAsyncEventConfig, aenCfgDiscChange),
+		"set features before ready")
+	connRefusedBeforeReady(t, h.getFeatures(fidKeepAliveTimer),
+		"get features before ready")
+	connRefusedBeforeReady(t, h.keepAlive(), "keep alive before ready")
+	// A refused AER completes at once: it is never armed.
+	connRefusedBeforeReady(t, h.await(h.armAer()), "an aer before ready")
+	cid := h.allocCid()
+	h.send(newSqe(0xc0, cid), nil)
+	connRefusedBeforeReady(t, h.await(cid), "an unknown opcode before ready")
+	const opcDiscInfoMgmt = 0x21
+	cid = h.allocCid()
+	s := newSqe(opcDiscInfoMgmt, cid)
+	setSgl(s, connectDataLen)
+	s[39] = 0x5<<4 | 0x1 // in-capsule data
+	h.send(s, make([]byte, connectDataLen))
+	connRefusedBeforeReady(t, h.await(cid),
+		"discovery information management before ready")
+
+	// The fabrics commands pass the gate: the properties a host reads and
+	// writes to enable the controller, and an unknown command type, which
+	// keeps NP12's invalid field.
+	c = h.propertyGet(regCsts, false)
+	connStatus(t, c, statusSuccess, "property get csts before ready")
+	if propValue64(c) != 0 {
+		t.Errorf("csts %#x before ready, want 0", propValue64(c))
+	}
+	cid = h.allocCid()
+	s = newSqe(opcFabrics, cid)
+	s[4] = 0x7f // an fctype no fabrics command uses
+	h.send(s, nil)
+	connStatus(t, h.await(cid), statusInvalidField,
+		"fabrics fctype 0x7f before ready")
+
+	ready := func(what string) {
+		t.Helper()
+		c, data := h.identify(cnsController)
+		connStatus(t, c, statusSuccess, what)
+		if len(data) != identifyLen {
+			t.Fatalf("%s: %d bytes, want %d", what, len(data), identifyLen)
+		}
+	}
+	connStatus(t, h.propertySet(regCc, ccTestEn), statusSuccess, "set cc.en")
+	ready("identify once enabled")
+	connStatus(t, h.propertySet(regCc, 0), statusSuccess, "clear cc.en")
+	c, _ = h.identify(cnsController)
+	connRefusedBeforeReady(t, c, "identify after cc.en 1->0")
+	connStatus(t, h.propertySet(regCc, ccTestEn), statusSuccess,
+		"set cc.en again")
+	ready("identify once enabled again")
+	connStatus(t, h.propertySet(regCc, ccTestEn|ccTestShnNrm), statusSuccess,
+		"set cc.shn")
+	c, _ = h.identify(cnsController)
+	connRefusedBeforeReady(t, c, "identify after a shutdown notice")
+
+	// Every refusal was a command's answer, never the connection's end.
+	if n := ts.srv.connCount(); n != 1 {
+		t.Fatalf("%d connections, want 1", n)
+	}
+	if n := logs.count(msgPduError); n != 0 {
+		t.Fatalf("%d `pdu error` records, want 0", n)
+	}
+}
+
+// TestRefusedCommandsBeforeReadyRestartTheKeepAlive proves that NP10's
+// "every received command restarts the timer" holds for a command the gate
+// of NP6 refuses too, where nvmet restarts its traffic-based keep-alive only
+// for a command it executes: a host that never enables the controller but
+// keeps sending is not reaped.
+func TestRefusedCommandsBeforeReadyRestartTheKeepAlive(t *testing.T) {
+	logs := captureLogs(t)
+	ts := startServer(t)
+	h := ts.dial()
+	h.handshake()
+	args := connDefaults(connHostA)
+	args.katoMs = uint32(connKato.Milliseconds())
+	connStatus(t, connSend(h, args), statusSuccess, "connect")
+	ts.clk.waitWaiters(t, 2)
+
+	ts.clk.advance(connKatoExpiry / 4 * 3)
+	connRefusedBeforeReady(t, h.keepAlive(), "keep alive before ready")
+	// Past the deadline the connection had before the refused command: the
+	// timer fires, finds the command and arms itself again.
+	ts.clk.advance(connKatoExpiry / 2)
+	ts.clk.waitWaiters(t, 1)
+	if n := logs.count(msgHostDisconnected); n != 0 {
+		t.Fatalf("reaped despite a refused command inside the budget "+
+			"(%d records)", n)
+	}
+	ts.clk.advance(connKatoExpiry * 2)
+	rec := logs.waitFor(t, msgHostDisconnected, 1)[0]
+	if rec["reason"] != reasonKeepAlive {
+		t.Fatalf("reason %v, want %v", rec["reason"], reasonKeepAlive)
+	}
+}
+
+// TestDisableAndShutdownClearCc proves NP6's port of nvmet's controller
+// state: a disable or a shutdown notice clears CC to zero and RDY, a shutdown
+// notice reports shutdown complete until the next enable, and an enable
+// reports ready alone.
+func TestDisableAndShutdownClearCc(t *testing.T) {
+	ts := startServer(t)
+	h := ts.dial()
+	h.connectNotEnabled(connHostA)
+	cc := func() uint64 { return propValue64(h.propertyGet(regCc, false)) }
+	csts := func() uint64 { return propValue64(h.propertyGet(regCsts, false)) }
+	set := func(v uint64, what string) {
+		t.Helper()
+		connStatus(t, h.propertySet(regCc, v), statusSuccess, what)
+	}
+	const queues = ccTestIosqes | ccTestIocqes
+
+	set(queues, "write cc with en clear")
+	set(queues|ccTestEn, "set cc.en")
+	if got := cc(); got != queues|ccTestEn {
+		t.Fatalf("cc %#x once enabled, want %#x", got, queues|ccTestEn)
+	}
+	if got := csts(); got != cstsTestRdy {
+		t.Fatalf("csts %#x once enabled, want %#x", got, cstsTestRdy)
+	}
+	set(queues, "clear cc.en")
+	if got := cc(); got != 0 {
+		t.Errorf("cc %#x after cc.en 1->0, want 0: a disable clears it", got)
+	}
+	if got := csts(); got != 0 {
+		t.Errorf("csts %#x after cc.en 1->0, want 0", got)
+	}
+
+	set(queues|ccTestEn, "enable again")
+	set(queues|ccTestEn|ccTestShnNrm, "a shutdown notice")
+	if got := cc(); got != 0 {
+		t.Errorf("cc %#x after a shutdown notice, want 0", got)
+	}
+	if got := csts(); got != cstsTestShst {
+		t.Errorf("csts %#x after a shutdown notice, want %#x (shutdown "+
+			"complete, not ready)", got, cstsTestShst)
+	}
+	// CC is zero now, so a write with SHN clear sees no SHN falling and
+	// SHST stays: nvmet's own order, ported as it is.
+	set(queues, "a write with shn clear")
+	if got := csts(); got != cstsTestShst {
+		t.Errorf("csts %#x after a write with shn clear, want %#x", got,
+			cstsTestShst)
+	}
+	set(queues|ccTestEn, "enable after the shutdown")
+	if got := csts(); got != cstsTestRdy {
+		t.Errorf("csts %#x after the next enable, want %#x: an enable "+
+			"reports ready alone", got, cstsTestRdy)
+	}
+}
+
+// TestEnableWithAnUnsupportedCcIsFatal proves NP6's fatal status: an enable
+// whose memory page size, arbitration or command set nvmet refuses sets
+// CSTS.CFS and leaves the controller not ready, so it refuses its admin
+// commands; IOSQES and IOCQES are not checked, as nvmet skips them for a
+// discovery controller. A disable leaves CFS; only the next good enable
+// clears it.
+func TestEnableWithAnUnsupportedCcIsFatal(t *testing.T) {
+	for _, tt := range []struct {
+		name  string
+		cc    uint64
+		fatal bool
+	}{
+		{"mps 1", ccTestEn | 1<<7, true},
+		{"ams 1", ccTestEn | 1<<11, true},
+		{"css 1", ccTestEn | 1<<4, true},
+		{"css 7", ccTestEn | 7<<4, true},
+		{"css 6, all i/o command sets", ccTestEn | 6<<4, false},
+		{"css 0, no queue entry sizes", ccTestEn, false},
+		{"css 0, the linux host's queue entry sizes",
+			ccTestEn | ccTestIosqes | ccTestIocqes, false},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			ts := startServer(t)
+			h := ts.dial()
+			h.connectNotEnabled(connHostA)
+			connStatus(t, h.propertySet(regCc, tt.cc), statusSuccess,
+				"set cc")
+			csts := propValue64(h.propertyGet(regCsts, false))
+			if !tt.fatal {
+				if csts != cstsTestRdy {
+					t.Fatalf("csts %#x, want %#x", csts, cstsTestRdy)
+				}
+				c, _ := h.identify(cnsController)
+				connStatus(t, c, statusSuccess, "identify once ready")
+				return
+			}
+			if csts != cstsTestCfs {
+				t.Fatalf("csts %#x, want %#x (fatal, not ready)", csts,
+					cstsTestCfs)
+			}
+			c, _ := h.identify(cnsController)
+			connRefusedBeforeReady(t, c, "identify after a fatal enable")
+			connStatus(t, h.propertySet(regCc, 0), statusSuccess, "clear cc")
+			if got := propValue64(h.propertyGet(regCsts, false)); got !=
+				cstsTestCfs {
+				t.Fatalf("csts %#x after a disable, want %#x: only an "+
+					"enable clears CFS", got, cstsTestCfs)
+			}
+			connStatus(t, h.propertySet(regCc, ccTestEn), statusSuccess,
+				"a good enable")
+			if got := propValue64(h.propertyGet(regCsts, false)); got !=
+				cstsTestRdy {
+				t.Fatalf("csts %#x after a good enable, want %#x", got,
+					cstsTestRdy)
+			}
+		})
+	}
+}
+
+// TestVersionIsNvmets proves NP6 and NP7 under the mirror rule (NP14): VS
+// and Identify's VER report 2.1.0, NVMET_DEFAULT_VS of the reference kernel's
+// nvmet, whose discovery subsystem always reports its default.
+func TestVersionIsNvmets(t *testing.T) {
+	ts := startServer(t)
+	h := ts.dial()
+	h.connectOk(connHostA)
+	c := h.propertyGet(regVs, false)
+	connStatus(t, c, statusSuccess, "property get vs")
+	if v := propValue64(c); v != 0x00020100 {
+		t.Errorf("vs %#x, want 0x00020100 (2.1.0)", v)
+	}
+	c, data := h.identify(cnsController)
+	connStatus(t, c, statusSuccess, "identify")
+	if ver := binary.LittleEndian.Uint32(data[80:84]); ver != 0x00020100 {
+		t.Errorf("identify ver %#x, want 0x00020100 (2.1.0)", ver)
+	}
 }
 
 // ---------------------------------------------------------------------------
@@ -749,13 +1031,58 @@ func TestIdentifyOtherCnsRefused(t *testing.T) {
 	}
 }
 
+// TestIdentifyLeavesUnpinnedFieldsZero proves NP7's "every unlisted field
+// per NP14": outside the fields NP7 lists and MAXCMD, which follows nvmet's
+// formula over NP6's queue size, every byte of the Identify data is zero, as
+// nvmet's discovery identify leaves it. The specs reserve SQES, CQES, IOCCSZ
+// and IORCSZ for a discovery controller, and nvmet sets no CTRATT.
+func TestIdentifyLeavesUnpinnedFieldsZero(t *testing.T) {
+	ts := startServer(t)
+	h := ts.dial()
+	h.connectOk(connHostA)
+	c, data := h.identify(cnsController)
+	connStatus(t, c, statusSuccess, "identify")
+	if len(data) != identifyLen {
+		t.Fatalf("identify data is %d bytes, want %d", len(data), identifyLen)
+	}
+	// The byte ranges of the fields that may be set, as the specs place them.
+	set := []struct {
+		name     string
+		off, len int
+	}{
+		{"sn", 4, 20}, {"mn", 24, 40}, {"fr", 64, 8}, {"mdts", 77, 1},
+		{"cntlid", 78, 2}, {"ver", 80, 4}, {"oaes", 92, 4},
+		{"cntrltype", 111, 1}, {"aerl", 259, 1}, {"lpa", 261, 1},
+		{"kas", 320, 2}, {"maxcmd", 514, 2}, {"sgls", 536, 4},
+		{"subnqn", 768, 256}, {"dctype", 1806, 1},
+	}
+	named := make([]string, identifyLen)
+	for _, f := range set {
+		for i := f.off; i < f.off+f.len; i++ {
+			named[i] = f.name
+		}
+	}
+	for i, b := range data {
+		if b != 0 && named[i] == "" {
+			t.Errorf("identify byte %d is %#02x: no field NP7 lists or "+
+				"nvmet sets is there", i, b)
+		}
+	}
+	if maxCmd := binary.LittleEndian.Uint16(data[514:516]); maxCmd !=
+		common.CdcMaxAdminSqSize {
+		t.Errorf("maxcmd %d, want %d (MQES + 1, nvmet's formula)", maxCmd,
+			common.CdcMaxAdminSqSize)
+	}
+}
+
 // ---------------------------------------------------------------------------
 // Get Log Page (NP8, DS9)
 // ---------------------------------------------------------------------------
 
 // TestGetLogPagePagedReads proves the DS9 layout and NP8's paging against an
-// injected view: the header block first, one entry per record after it, and
-// zeros past the end.
+// injected view: the header block first, the record of the cdc itself
+// (DS12), one entry per record after it, and zeros past the end of a read
+// that starts inside the log.
 func TestGetLogPagePagedReads(t *testing.T) {
 	ts := startServer(t)
 	// Two entries, injected before the host connects, so its view is
@@ -767,7 +1094,7 @@ func TestGetLogPagePagedReads(t *testing.T) {
 	h := ts.dial()
 	h.connectOk(connHostA)
 
-	const total = common.CdcDiscLogHeaderSize + 2*common.CdcDiscLogEntrySize
+	const total = common.CdcDiscLogHeaderSize + 3*common.CdcDiscLogEntrySize
 
 	t.Run("header only", func(t *testing.T) {
 		c, data := connGetLog(h, lidDiscovery, false,
@@ -780,8 +1107,9 @@ func TestGetLogPagePagedReads(t *testing.T) {
 		if genCtr := binary.LittleEndian.Uint64(data[0:8]); genCtr != 1 {
 			t.Errorf("genctr %d, want 1", genCtr)
 		}
-		if numRec := binary.LittleEndian.Uint64(data[8:16]); numRec != 2 {
-			t.Errorf("numrec %d, want 2", numRec)
+		if numRec := binary.LittleEndian.Uint64(data[8:16]); numRec != 3 {
+			t.Errorf("numrec %d, want 3: the cdc's own record and two "+
+				"entries", numRec)
 		}
 		if recFmt := binary.LittleEndian.Uint16(data[16:18]); recFmt != 0 {
 			t.Errorf("recfmt %d, want 0", recFmt)
@@ -799,8 +1127,9 @@ func TestGetLogPagePagedReads(t *testing.T) {
 	}()
 
 	t.Run("entry fields", func(t *testing.T) {
-		e0 := full[common.CdcDiscLogHeaderSize : common.CdcDiscLogHeaderSize+
-			common.CdcDiscLogEntrySize]
+		// The first entry's record, after the cdc's own.
+		const at = common.CdcDiscLogHeaderSize + common.CdcDiscLogEntrySize
+		e0 := full[at : at+common.CdcDiscLogEntrySize]
 		if e0[0] != trTypeTcp {
 			t.Errorf("trtype %d, want %d", e0[0], trTypeTcp)
 		}
@@ -822,12 +1151,12 @@ func TestGetLogPagePagedReads(t *testing.T) {
 	})
 
 	t.Run("aligned page at a non-zero lpo", func(t *testing.T) {
-		off := uint64(common.CdcDiscLogHeaderSize)
+		off := uint64(common.CdcDiscLogHeaderSize + common.CdcDiscLogEntrySize)
 		c, data := connGetLog(h, lidDiscovery, false,
 			common.CdcDiscLogEntrySize, off)
 		connStatus(t, c, statusSuccess, "get log page at lpo")
 		if !bytes.Equal(data, full[off:off+common.CdcDiscLogEntrySize]) {
-			t.Error("the page at lpo 1024 is not the first entry")
+			t.Error("the page at lpo 2048 is not the first entry")
 		}
 	})
 
@@ -840,22 +1169,22 @@ func TestGetLogPagePagedReads(t *testing.T) {
 		}
 	})
 
-	t.Run("the 4096 byte read a real host does", func(t *testing.T) {
-		c, data := connGetLog(h, lidDiscovery, false, 4096, 0)
-		connStatus(t, c, statusSuccess, "get log page 4096")
+	t.Run("the 8192 byte read past the end", func(t *testing.T) {
+		c, data := connGetLog(h, lidDiscovery, false, 8192, 0)
+		connStatus(t, c, statusSuccess, "get log page 8192")
 		if !bytes.Equal(data[:total], full) {
-			t.Error("the first 3072 bytes are not the log")
+			t.Error("the first 4096 bytes are not the log")
 		}
-		if !bytes.Equal(data[total:], make([]byte, 4096-total)) {
+		if !bytes.Equal(data[total:], make([]byte, 8192-total)) {
 			t.Error("the bytes past the end are not zeros")
 		}
 	})
 
-	t.Run("a read entirely past the end", func(t *testing.T) {
+	t.Run("a read entirely past the end is refused", func(t *testing.T) {
 		c, data := connGetLog(h, lidDiscovery, false, 1024, 8192)
-		connStatus(t, c, statusSuccess, "get log page past the end")
-		if !bytes.Equal(data, make([]byte, 1024)) {
-			t.Error("a read past the end must return zeros")
+		connStatus(t, c, statusInvalidField, "get log page past the end")
+		if len(data) != 0 {
+			t.Errorf("%d bytes moved on a refused read", len(data))
 		}
 	})
 }
@@ -960,8 +1289,9 @@ func TestGetLogPageServesASnapshot(t *testing.T) {
 	if genCtr := binary.LittleEndian.Uint64(first[0:8]); genCtr != 1 {
 		t.Fatalf("genctr %d before any change, want 1", genCtr)
 	}
-	if numRec := binary.LittleEndian.Uint64(first[8:16]); numRec != 0 {
-		t.Fatalf("numrec %d on an empty view, want 0", numRec)
+	if numRec := binary.LittleEndian.Uint64(first[8:16]); numRec != 1 {
+		t.Fatalf("numrec %d on an empty view, want 1: the cdc's own record "+
+			"(DS12)", numRec)
 	}
 	connInject(ts, 1, connEntry("nqn.2016-06.io.dnv:ss0", "10.0.0.1", "4420",
 		connHostA))
@@ -969,8 +1299,8 @@ func TestGetLogPageServesASnapshot(t *testing.T) {
 	if genCtr := binary.LittleEndian.Uint64(second[0:8]); genCtr != 2 {
 		t.Fatalf("genctr %d after one impact, want 2", genCtr)
 	}
-	if numRec := binary.LittleEndian.Uint64(second[8:16]); numRec != 1 {
-		t.Fatalf("numrec %d, want 1", numRec)
+	if numRec := binary.LittleEndian.Uint64(second[8:16]); numRec != 2 {
+		t.Fatalf("numrec %d, want 2", numRec)
 	}
 }
 
@@ -979,7 +1309,9 @@ func TestGetLogPageServesASnapshot(t *testing.T) {
 // hosts connected to one instance are served different logs, an entry naming
 // both is served to both, and an entry with an empty allowed_hosts is served
 // to neither — it sorts after every record the test reads by position, so
-// the record counts are what would show it served.
+// the record counts are what would show it served. Each log begins with the
+// record of the cdc itself (DS12), so a host's subsystem records start at
+// the second.
 func TestLogPageIsFilteredPerHost(t *testing.T) {
 	ts := startServer(t)
 	connInject(ts, 1, connEntry("nqn.2016-06.io.dnv:shared", "10.0.0.1", "4420",
@@ -994,22 +1326,232 @@ func TestLogPageIsFilteredPerHost(t *testing.T) {
 	b.connectOk(connHostB)
 
 	_, aLog := connGetLog(a, lidDiscovery, false, 4096, 0)
-	if numRec := binary.LittleEndian.Uint64(aLog[8:16]); numRec != 1 {
-		t.Fatalf("host A sees %d records, want 1", numRec)
+	if numRec := binary.LittleEndian.Uint64(aLog[8:16]); numRec != 2 {
+		t.Fatalf("host A sees %d records, want 2", numRec)
 	}
-	aNqn := string(bytes.TrimRight(aLog[1024+256:1024+512], "\x00"))
+	aNqn := string(bytes.TrimRight(aLog[2048+256:2048+512], "\x00"))
 	if aNqn != "nqn.2016-06.io.dnv:shared" {
-		t.Errorf("host A's only record is %q, want the shared entry", aNqn)
+		t.Errorf("host A's only subsystem record is %q, want the shared "+
+			"entry", aNqn)
 	}
 
 	_, bLog := connGetLog(b, lidDiscovery, false, 4096, 0)
-	if numRec := binary.LittleEndian.Uint64(bLog[8:16]); numRec != 2 {
-		t.Fatalf("host B sees %d records, want 2", numRec)
+	if numRec := binary.LittleEndian.Uint64(bLog[8:16]); numRec != 3 {
+		t.Fatalf("host B sees %d records, want 3", numRec)
 	}
-	bNqn := string(bytes.TrimRight(bLog[2048+256:2048+512], "\x00"))
+	bNqn := string(bytes.TrimRight(bLog[3072+256:3072+512], "\x00"))
 	if bNqn != "nqn.2016-06.io.dnv:bonly" {
 		t.Errorf("host B's second record is %q, want the entry allowed to "+
 			"it alone", bNqn)
+	}
+}
+
+// connSelfRecord is the record of the cdc itself DS12 demands for a
+// connection whose local end is addr and port, built from literal offsets and
+// values: TCP, the address family given, subtype current discovery subsystem
+// (3), TREQ "not specified, SQ flow control disable supported" (4), the
+// PORTID of DS3 over that address and port, the dynamic CNTLID, ASQSZ
+// common.CdcMaxAdminSqSize, EFLAGS EPCSD alone (bit 1), the discovery NQN
+// and TSAS TCP with no security.
+func connSelfRecord(adrFam byte, addr string, port string) []byte {
+	buf := make([]byte, 1024)
+	buf[0] = 3
+	buf[1] = adrFam
+	buf[2] = 3
+	buf[3] = 4
+	binary.LittleEndian.PutUint16(buf[4:6], portId(addr, port))
+	binary.LittleEndian.PutUint16(buf[6:8], 0xffff)
+	binary.LittleEndian.PutUint16(buf[8:10], common.CdcMaxAdminSqSize)
+	binary.LittleEndian.PutUint16(buf[10:12], 1<<1)
+	copy(buf[32:64], port)
+	copy(buf[256:512], "nqn.2014-08.org.nvmexpress.discovery")
+	copy(buf[512:768], addr)
+	buf[768] = 0
+	return buf
+}
+
+// connPort is the port of a host:port string.
+func connPort(t *testing.T, hostPort string) string {
+	t.Helper()
+	_, port, err := net.SplitHostPort(hostPort)
+	if err != nil {
+		t.Fatalf("split %q: %v", hostPort, err)
+	}
+	return port
+}
+
+// TestLogPageStartsWithTheCdcsOwnRecord proves DS12 through the socket: the
+// log a connection reads begins with one record of the cdc itself, named by
+// the connection's local address and port, then the host's view (DS5); NUMREC
+// counts both. The record is outside the view: a host that sees nothing reads
+// it alone, and an impact moves GENCTR and leaves the record as it was.
+func TestLogPageStartsWithTheCdcsOwnRecord(t *testing.T) {
+	ts := startServer(t)
+	connInject(ts, 1, connEntry("nqn.2016-06.io.dnv:ss0", "10.0.0.1", "4420",
+		connHostA))
+	connInject(ts, 2, connEntry("nqn.2016-06.io.dnv:ss1", "10.0.0.2", "4421",
+		connHostA))
+	self := connSelfRecord(1, "127.0.0.1", connPort(t, ts.addr))
+
+	a := ts.dial()
+	a.connectOk(connHostA)
+	c, data := connGetLog(a, lidDiscovery, false, 4096, 0)
+	connStatus(t, c, statusSuccess, "get log page")
+	if numRec := binary.LittleEndian.Uint64(data[8:16]); numRec != 3 {
+		t.Fatalf("numrec %d, want 3: the cdc's own record and two entries",
+			numRec)
+	}
+	lpCompare(t, "record 0", data[1024:2048], self)
+	for i, nqn := range []string{
+		"nqn.2016-06.io.dnv:ss0", "nqn.2016-06.io.dnv:ss1",
+	} {
+		rec := data[2048+i*1024 : 3072+i*1024]
+		if got := string(bytes.TrimRight(rec[256:512], "\x00")); got != nqn {
+			t.Errorf("record %d is %q, want %q", i+1, got, nqn)
+		}
+		if rec[2] != 2 {
+			t.Errorf("record %d subtype %d, want 2", i+1, rec[2])
+		}
+	}
+
+	// A host that sees nothing reads the record alone.
+	b := ts.dial()
+	b.connectOk(connHostB)
+	c, data = connGetLog(b, lidDiscovery, false, 4096, 0)
+	connStatus(t, c, statusSuccess, "get log page of an empty view")
+	if numRec := binary.LittleEndian.Uint64(data[8:16]); numRec != 1 {
+		t.Fatalf("numrec %d for a host that sees nothing, want 1", numRec)
+	}
+	lpCompare(t, "the only record", data[1024:2048], self)
+	if !bytes.Equal(data[2048:], make([]byte, 2048)) {
+		t.Error("the bytes past the only record are not zeros")
+	}
+
+	// An impact moves GENCTR, and the record stays byte for byte.
+	_, before := connGetLog(a, lidDiscovery, false, 4096, 0)
+	connInject(ts, 3, connEntry("nqn.2016-06.io.dnv:ss2", "10.0.0.3", "4422",
+		connHostA))
+	_, after := connGetLog(a, lidDiscovery, false, 8192, 0)
+	gBefore := binary.LittleEndian.Uint64(before[0:8])
+	gAfter := binary.LittleEndian.Uint64(after[0:8])
+	if gAfter != gBefore+1 {
+		t.Errorf("genctr %d after one impact, want %d", gAfter, gBefore+1)
+	}
+	if numRec := binary.LittleEndian.Uint64(after[8:16]); numRec != 4 {
+		t.Errorf("numrec %d after one more entry, want 4", numRec)
+	}
+	lpCompare(t, "record 0 after the impact", after[1024:2048], self)
+}
+
+// TestSelfRecordNamesTheAddressTheHostReached proves DS12's address rule: the
+// record names the connection's local address, never the wildcard an
+// instance listens on, with the address family of that address; an IPv4
+// address reached through a dual-stack listener is named as IPv4.
+func TestSelfRecordNamesTheAddressTheHostReached(t *testing.T) {
+	for _, tt := range []struct {
+		name       string
+		listen     string
+		dial       string
+		adrFam     byte
+		wantTrAddr string
+	}{
+		{"an ipv4 wildcard", "0.0.0.0", "127.0.0.1", 1, "127.0.0.1"},
+		{"an ipv6 wildcard reached over ipv6", "::", "::1", 2, "::1"},
+		{"an ipv6 wildcard reached over ipv4", "::", "127.0.0.1", 1,
+			"127.0.0.1"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			if probe, err := net.Listen("tcp",
+				net.JoinHostPort(tt.listen, "0")); err != nil {
+				t.Skipf("no %s listener on this machine: %v", tt.listen, err)
+			} else {
+				probe.Close()
+			}
+			if tt.dial == "::1" {
+				probe, err := net.Listen("tcp", "[::1]:0")
+				if err != nil {
+					t.Skipf("no ipv6 loopback on this machine: %v", err)
+				}
+				probe.Close()
+			}
+			ts := startServerAt(t, tt.listen, tt.dial, nil)
+			h := ts.dial()
+			h.connectOk(connHostA)
+			c, data := connGetLog(h, lidDiscovery, false, 2048, 0)
+			connStatus(t, c, statusSuccess, "get log page")
+			if numRec := binary.LittleEndian.Uint64(data[8:16]); numRec != 1 {
+				t.Fatalf("numrec %d, want 1", numRec)
+			}
+			lpCompare(t, "record 0", data[1024:2048],
+				connSelfRecord(tt.adrFam, tt.wantTrAddr,
+					connPort(t, ts.addr)))
+		})
+	}
+}
+
+// TestGetLogPageRefusesAnOffsetPastTheEnd proves NP8's refusal of a read that
+// starts past the end of the DS9 snapshot, as the specs and nvmet refuse it:
+// invalid field, DNR. A read that starts exactly at the end gets zeros, and
+// an offset past the end of one snapshot reads once the log has grown past
+// it.
+func TestGetLogPageRefusesAnOffsetPastTheEnd(t *testing.T) {
+	ts := startServer(t)
+	connInject(ts, 1, connEntry("nqn.2016-06.io.dnv:ss0", "10.0.0.1", "4420",
+		connHostA))
+	connInject(ts, 2, connEntry("nqn.2016-06.io.dnv:ss1", "10.0.0.2", "4421",
+		connHostA))
+	h := ts.dial()
+	h.connectOk(connHostA)
+	// The header, the cdc's own record (DS12) and two entries.
+	const end = 1024 + 3*1024
+
+	c, data := connGetLog(h, lidDiscovery, false, 1024, end)
+	connStatus(t, c, statusSuccess, "a read at the end")
+	if !bytes.Equal(data, make([]byte, 1024)) {
+		t.Error("a read that starts at the end must return zeros")
+	}
+	for _, off := range []uint64{end + 4, end + 1024, 1 << 40} {
+		c, data = connGetLog(h, lidDiscovery, false, 1024, off)
+		connStatus(t, c, statusInvalidField,
+			fmt.Sprintf("a read at lpo %d, past the end", off))
+		if c.status>>15 == 0 {
+			t.Errorf("lpo %d: the refusal must carry DNR", off)
+		}
+		if len(data) != 0 {
+			t.Errorf("lpo %d: %d bytes moved on a refused read", off,
+				len(data))
+		}
+	}
+
+	connInject(ts, 3, connEntry("nqn.2016-06.io.dnv:ss2", "10.0.0.3", "4422",
+		connHostA))
+	c, data = connGetLog(h, lidDiscovery, false, 1020, end+4)
+	connStatus(t, c, statusSuccess, "the same lpo once the log has grown")
+	nqn := string(bytes.TrimRight(data[256-4:512-4], "\x00"))
+	if nqn != "nqn.2016-06.io.dnv:ss2" {
+		t.Errorf("the read at lpo %d holds %q, want the new entry", end+4, nqn)
+	}
+}
+
+// TestViewChangedCountsTheView proves DS6's split of the two counts: the
+// `view changed` record carries the view's count, and the NUMREC a
+// connection reads is one more, the cdc's own record (DS12) outside the view.
+func TestViewChangedCountsTheView(t *testing.T) {
+	logs := captureLogs(t)
+	ts := startServer(t)
+	h := ts.dial()
+	h.connectOk(connHostA)
+	connInject(ts, 1, connEntry("nqn.2016-06.io.dnv:ss0", "10.0.0.1", "4420",
+		connHostA))
+	rec := logs.waitFor(t, msgViewChanged, 1)[0]
+	if rec["numrec"] != uint64(1) {
+		t.Errorf("`view changed` numrec %v, want 1, the view's count",
+			rec["numrec"])
+	}
+	_, data := connGetLog(h, lidDiscovery, false, 1024, 0)
+	if numRec := binary.LittleEndian.Uint64(data[8:16]); numRec != 2 {
+		t.Errorf("numrec %d read, want 2: the view and the cdc's own record",
+			numRec)
 	}
 }
 
@@ -1233,8 +1775,9 @@ func TestAerNotSentForAnEntryNamingNoHost(t *testing.T) {
 		t.Fatalf("genctr %d after a put and a delete naming no host, want 1",
 			genCtr)
 	}
-	if numRec := binary.LittleEndian.Uint64(data[8:16]); numRec != 0 {
-		t.Fatalf("numrec %d, want 0", numRec)
+	if numRec := binary.LittleEndian.Uint64(data[8:16]); numRec != 1 {
+		t.Fatalf("numrec %d, want 1: the cdc's own record (DS12) alone",
+			numRec)
 	}
 	connInject(ts, 2, connEntry("nqn.2016-06.io.dnv:ss0", "10.0.0.1", "4420",
 		connHostA))
@@ -1296,9 +1839,9 @@ const (
 		common.DefaultCdcKeepAliveGraceMs*time.Millisecond
 )
 
-// connConnectWithKato connects with a KATO and waits until the keep-alive loop
-// has armed the timer for it, so the fake clock cannot be advanced past a
-// deadline that is not there yet.
+// connConnectWithKato connects with a KATO, enables the controller (NP6) and
+// waits until the keep-alive loop has armed the timer for it, so the fake
+// clock cannot be advanced past a deadline that is not there yet.
 func connConnectWithKato(
 	t *testing.T,
 	ts *testServer,
@@ -1310,6 +1853,7 @@ func connConnectWithKato(
 	args := connDefaults(connHostA)
 	args.katoMs = katoMs
 	connStatus(t, connSend(h, args), statusSuccess, "connect")
+	h.enable()
 	// Two timers: the one armed at accept on the pre-Connect deadline, and
 	// the one the connection re-armed once Connect named its KATO. The first
 	// stays armed in the fake clock, unread, until an advance passes it.
@@ -1346,8 +1890,9 @@ func TestKeepAliveExpiresAtKatoPlusGrace(t *testing.T) {
 	}
 }
 
-// TestKeepAliveRestartedByEveryCommand proves the nvmet rule NP10 adopts: any
-// received command, not only Keep Alive, restarts the timer.
+// TestKeepAliveRestartedByEveryCommand proves NP10's rule for commands the
+// controller accepts, which nvmet has too: any received command, not only
+// Keep Alive, restarts the timer.
 func TestKeepAliveRestartedByEveryCommand(t *testing.T) {
 	logs := captureLogs(t)
 	ts := startServer(t)
@@ -1478,6 +2023,7 @@ func TestConnectBeforeThePendingDeadlineKeepsTheConnection(t *testing.T) {
 	ts.clk.advance(tmo - time.Millisecond)
 	connStatus(t, connSend(h, connDefaults(connHostA)), statusSuccess,
 		"connect a millisecond before the pre-Connect deadline")
+	h.enable()
 	// The second timer is the one Connect's kick armed on the zero-KATO
 	// deadline; the pre-Connect timer stays armed in the fake clock, unread.
 	ts.clk.waitWaiters(t, 2)
@@ -1585,31 +2131,45 @@ func TestGarbageOnTheWireTerminatesTheConnection(t *testing.T) {
 }
 
 // TestHostTerminateRequestEndsTheConnection proves the other half of NP2's
-// terminate handling: a well-framed H2CTermReq (here a data-less one, PLEN =
-// HLEN = 24) is the HOST's decision, so the connection ends without an answer
-// and without a `pdu error` record, and NP13 files it under `closed` like any
-// other client-side close. One that carries error data with PDO 0 fails
-// readPdu's PDO check first and is a PDU error like any other malformed PDU
-// (a C2HTermReq, reason `pdu_error`; TestReadPduRejectsMalformed).
+// terminate handling: a well-framed H2CTermReq is the HOST's decision, so the
+// connection ends without an answer and without a `pdu error` record, and
+// NP13 files it under `closed` like any other client-side close. Its PDO is
+// reserved and not read, and its data follows its header, so a data-less one
+// (PLEN = HLEN = 24), one carrying the header of the PDU in error with PDO 0
+// (the specs' form) and one with PDO 24 all end the same way.
 func TestHostTerminateRequestEndsTheConnection(t *testing.T) {
-	logs := captureLogs(t)
-	ts := startServer(t)
-	h := ts.dial()
-	h.connectOk(connHostA)
-	h.write(pduFrame(pduH2CTermReq, 0, termReqHdrLen, 0, termReqHdrLen))
-	rec := logs.waitFor(t, msgHostDisconnected, 1)[0]
-	if rec["reason"] != reasonClosed {
-		t.Errorf("reason %v, want %v", rec["reason"], reasonClosed)
-	}
-	if n := logs.count(msgPduError); n != 0 {
-		t.Errorf("%d `pdu error` records, want 0: the host terminated, this "+
-			"side did not fault", n)
-	}
-	// No C2HTermReq comes back — the socket simply ends.
-	connSocketClosed(t, h)
-	if n := ts.reg.hostCount(); n != 0 {
-		t.Errorf("registry tracks %d hosts after the host terminated, want 0",
-			n)
+	for _, tt := range []struct {
+		name  string
+		frame []byte
+	}{
+		{"no data", pduFrame(pduH2CTermReq, 0, termReqHdrLen, 0,
+			termReqHdrLen)},
+		{"error data at pdo 0", pduFrame(pduH2CTermReq, 0, termReqHdrLen, 0,
+			termReqHdrLen+capsuleCmdHdrLen)},
+		{"error data at pdo 24", pduFrame(pduH2CTermReq, 0, termReqHdrLen,
+			termReqHdrLen, termReqHdrLen+capsuleCmdHdrLen)},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			logs := captureLogs(t)
+			ts := startServer(t)
+			h := ts.dial()
+			h.connectOk(connHostA)
+			h.write(tt.frame)
+			rec := logs.waitFor(t, msgHostDisconnected, 1)[0]
+			if rec["reason"] != reasonClosed {
+				t.Errorf("reason %v, want %v", rec["reason"], reasonClosed)
+			}
+			if n := logs.count(msgPduError); n != 0 {
+				t.Errorf("%d `pdu error` records, want 0: the host "+
+					"terminated, this side did not fault", n)
+			}
+			// No C2HTermReq comes back — the socket simply ends.
+			connSocketClosed(t, h)
+			if n := ts.reg.hostCount(); n != 0 {
+				t.Errorf("registry tracks %d hosts after the host "+
+					"terminated, want 0", n)
+			}
+		})
 	}
 }
 

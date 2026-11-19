@@ -110,6 +110,12 @@ func TestStressHostsAndWatcher(t *testing.T) {
 					t.Errorf("connect: %#x", c.status)
 					return
 				}
+				// The enable a host sends before its admin commands (NP6).
+				if e := h.propertySet(regCc, ccEnable); e.status !=
+					statusSuccess {
+					t.Errorf("enable: %#x", e.status)
+					return
+				}
 				h.enableAen()
 				for n := 0; n < 40; n++ {
 					h.armAer()

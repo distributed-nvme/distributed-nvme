@@ -7122,7 +7122,7 @@ over no disk an older build formatted.
 
 `dnv-cdc` serves the NVMe-oF Central Discovery Controller, the well-known
 discovery subsystem `NvmeDiscoveryNqn`, to hosts over NVMe/TCP. `cdc.md`
-owns it: the discovery service model (DS1 to DS11), the etcd watcher (WV1
+owns it: the discovery service model (DS1 to DS12), the etcd watcher (WV1
 to WV6) and the NVMe/TCP discovery service (NP1 to NP14). An instance
 serves the ranges it is configured with — a range is the shard codes that
 share one first hex digit — by watching the cdc prefix and filtering on

@@ -1,7 +1,8 @@
 // Package cdc is dnv-cdc's engine (cdc.md): the etcd watcher over the
 // {p} cdc keys (WV1 to WV6), the per-active-host view registry (DS1 to DS11)
 // and the NVMe/TCP discovery controller that answers hosts on the well-known
-// discovery NQN (NP1 to NP14).
+// discovery NQN (NP1 to NP14), every log page it serves beginning with the
+// record of the cdc itself (DS12).
 //
 // It reads etcd through etcdutil and NEVER writes it (WV6), serves and dials
 // no dnv-internal gRPC (grpc.md, Wiring), and never touches the local
@@ -73,10 +74,11 @@ type Config struct {
 	// h0…hf (DS2). Non-empty and duplicate-free.
 	Ranges []uint32
 	// TrType, AdrFam, TrAddr and TrSvcId are the listen endpoint. TrType is
-	// always common.DefaultCdcTrType (CM2); AdrFam is reported in no log
-	// entry of dnv-cdc's own — it describes the LISTEN address, while each
-	// discovery log entry carries the address family of the CN port it
-	// names (DS3).
+	// always common.DefaultCdcTrType (CM2). AdrFam is reported in no
+	// discovery log entry: it describes the LISTEN address, while an entry's
+	// record carries the address family of the CN port it names (DS3), and
+	// the record of the cdc itself the family of the address its connection
+	// reached (DS12).
 	TrType  string
 	AdrFam  string
 	TrAddr  string

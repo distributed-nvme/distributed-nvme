@@ -389,8 +389,9 @@ whose allowed hosts name it, so the read carries the host NQN and host id:
 sudo nvme discover -t tcp -a 127.0.0.1 -s 8009 -q nqn.2014-08.org.nvmexpress:uuid:aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee -I aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee
 ```
 
-It prints one record: the subsystem's NQN at `127.0.0.1` port `4420`, the
-controller node's port.
+It prints two records. The first is the cdc's record of itself: the
+well-known discovery NQN at `127.0.0.1` port `8009`. The second is the
+subsystem's NQN at `127.0.0.1` port `4420`, the controller node's port.
 
 nvme-stas. Back up its three files, write the host identity, point its
 discovery daemon at the cdc with a persistent connection, and let its

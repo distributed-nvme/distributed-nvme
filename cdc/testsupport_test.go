@@ -530,6 +530,19 @@ func startServerOn(
 	wrap func(net.Listener) net.Listener,
 ) *testServer {
 	t.Helper()
+	return startServerAt(t, "127.0.0.1", "127.0.0.1", wrap)
+}
+
+// startServerAt is startServerOn listening on trAddr, the --tr-addr of the
+// instance, while its hosts dial dialAddr: a wildcard trAddr is listened on
+// but cannot be dialed.
+func startServerAt(
+	t *testing.T,
+	trAddr string,
+	dialAddr string,
+	wrap func(net.Listener) net.Listener,
+) *testServer {
+	t.Helper()
 	clk := newFakeClock()
 	store := newFakeStore()
 	d := &deps{
@@ -537,7 +550,7 @@ func startServerOn(
 			Ranges:  []uint32{0},
 			TrType:  common.DefaultCdcTrType,
 			AdrFam:  common.DefaultCdcAdrFam,
-			TrAddr:  "127.0.0.1",
+			TrAddr:  trAddr,
 			TrSvcId: "0",
 		},
 		store: store,
@@ -553,13 +566,18 @@ func startServerOn(
 	if wrap != nil {
 		srv.ln = wrap(srv.ln)
 	}
+	_, port, err := net.SplitHostPort(srv.addr().String())
+	if err != nil {
+		cancel()
+		t.Fatalf("listen address %v: %v", srv.addr(), err)
+	}
 	ts := &testServer{
 		t:      t,
 		srv:    srv,
 		reg:    reg,
 		store:  store,
 		clk:    clk,
-		addr:   srv.addr().String(),
+		addr:   net.JoinHostPort(dialAddr, port),
 		cancel: cancel,
 		done:   make(chan struct{}),
 	}
@@ -926,9 +944,11 @@ func (h *fakeHost) connect(
 	return h.await(cid)
 }
 
-// connectOk is connect plus the assertion that it worked; it returns the
+// connectNotEnabled is the handshake and a Connect, with the assertion that
+// it worked, and nothing more: the controller is connected and not ready, so
+// it refuses every command but the fabrics ones (NP6). It returns the
 // CNTLID.
-func (h *fakeHost) connectOk(hostNqn string) uint16 {
+func (h *fakeHost) connectNotEnabled(hostNqn string) uint16 {
 	h.t.Helper()
 	h.handshake()
 	c := h.connect(
@@ -938,6 +958,26 @@ func (h *fakeHost) connectOk(hostNqn string) uint16 {
 		h.t.Fatalf("connect: status %#x", c.status)
 	}
 	return uint16(c.dw0)
+}
+
+// connectOk is connectNotEnabled and then the enable a Linux host sends
+// before its first admin command (enable), so the controller is ready. It
+// returns the CNTLID.
+func (h *fakeHost) connectOk(hostNqn string) uint16 {
+	h.t.Helper()
+	cntlId := h.connectNotEnabled(hostNqn)
+	h.enable()
+	return cntlId
+}
+
+// enable writes CC.EN, as a Linux host does between its Connect and its first
+// admin command (nvme_enable_ctrl, host/core.c): the controller is ready from
+// then on (NP6).
+func (h *fakeHost) enable() {
+	h.t.Helper()
+	if c := h.propertySet(regCc, ccEnable); c.status != statusSuccess {
+		h.t.Fatalf("property set cc.en: status %#x", c.status)
+	}
 }
 
 // propertyGet issues a fabrics property get.

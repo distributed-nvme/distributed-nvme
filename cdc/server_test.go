@@ -150,8 +150,9 @@ func TestReconnectingHostRestartsGenCtr(t *testing.T) {
 	if genCtr := binary.LittleEndian.Uint64(data[0:8]); genCtr != 1 {
 		t.Fatalf("genctr %d on a rebuilt host state, want 1", genCtr)
 	}
-	if numRec := binary.LittleEndian.Uint64(data[8:16]); numRec != 1 {
-		t.Fatalf("numrec %d, want 1: the view is rendered at attach", numRec)
+	if numRec := binary.LittleEndian.Uint64(data[8:16]); numRec != 2 {
+		t.Fatalf("numrec %d, want 2, the cdc's own record (DS12) and the "+
+			"entry: the view is rendered at attach", numRec)
 	}
 }
 
@@ -250,12 +251,14 @@ func srvServedTheEntry(t *testing.T, h *fakeHost, subNqn string) {
 	c := h.connect(connHostA, common.NvmeDiscoveryNqn, 0,
 		common.CdcMaxAdminSqSize-1, 0)
 	connStatus(t, c, statusSuccess, "connect after the first scan")
+	h.enable()
 	c, data := connGetLog(h, lidDiscovery, false, 4096, 0)
 	connStatus(t, c, statusSuccess, "get log page after the first scan")
-	if numRec := binary.LittleEndian.Uint64(data[8:16]); numRec != 1 {
-		t.Fatalf("numrec %d after the first scan, want 1", numRec)
+	if numRec := binary.LittleEndian.Uint64(data[8:16]); numRec != 2 {
+		t.Fatalf("numrec %d after the first scan, want 2: the cdc's own "+
+			"record (DS12) and the entry", numRec)
 	}
-	nqn := string(bytes.TrimRight(data[1024+256:1024+512], "\x00"))
+	nqn := string(bytes.TrimRight(data[2048+256:2048+512], "\x00"))
 	if nqn != subNqn {
 		t.Errorf("the served record is %q, want the scanned entry %q",
 			nqn, subNqn)
@@ -264,8 +267,8 @@ func srvServedTheEntry(t *testing.T, h *fakeHost, subNqn string) {
 
 // TestNoDiscoveryAnswerBeforeTheFirstScan proves CM4's start order through the
 // socket. Until the watcher's first scan has landed the registry holds no
-// state at all, and a successful log page with NUMREC 0 served out of it
-// would tell a host there are no subsystems. So the listener is open (the
+// state at all, and a successful log page with no subsystem record served
+// out of it would tell a host there are no subsystems. So the listener is open (the
 // host's TCP connect completes into the backlog) but its ICReq goes
 // unanswered, and once etcd answers and the scan lands, that same connection
 // is served the real records.
@@ -288,6 +291,7 @@ func TestNoDiscoveryAnswerBeforeTheFirstScan(t *testing.T) {
 		c := h.connect(connHostA, common.NvmeDiscoveryNqn, 0,
 			common.CdcMaxAdminSqSize-1, 0)
 		connStatus(t, c, statusSuccess, "connect before the first scan")
+		h.enable()
 		c, data := connGetLog(h, lidDiscovery, false, 4096, 0)
 		t.Fatalf("before the first scan a host was served a discovery log "+
 			"page with status %#06x, genctr %d, numrec %d: it was told there "+
@@ -411,8 +415,8 @@ func TestShutdownWhileWaitingForTheFirstScan(t *testing.T) {
 // TestAnEmptyFirstScanStillOpensTheAcceptLoop pins the other side of CM4's
 // gate: a first scan that lands holding no owned entry is a real answer — no
 // subsystems — not the empty registry of an instance that has not scanned
-// yet, so the accept loop starts and the host reads a successful NUMREC 0
-// page. A gate keyed on the registry holding an entry would leave an instance
+// yet, so the accept loop starts and the host reads a successful page whose
+// only record is the cdc's own (DS12, NUMREC 1). A gate keyed on the registry holding an entry would leave an instance
 // whose owned shards hold none (a fresh cluster, a twin whose range has no
 // subsystem yet) answering nobody.
 func TestAnEmptyFirstScanStillOpensTheAcceptLoop(t *testing.T) {
@@ -434,10 +438,12 @@ func TestAnEmptyFirstScanStillOpensTheAcceptLoop(t *testing.T) {
 	c := h.connect(connHostA, common.NvmeDiscoveryNqn, 0,
 		common.CdcMaxAdminSqSize-1, 0)
 	connStatus(t, c, statusSuccess, "connect after an empty first scan")
+	h.enable()
 	c, data := connGetLog(h, lidDiscovery, false, 4096, 0)
 	connStatus(t, c, statusSuccess, "get log page after an empty first scan")
-	if numRec := binary.LittleEndian.Uint64(data[8:16]); numRec != 0 {
-		t.Fatalf("numrec %d after an empty first scan, want 0", numRec)
+	if numRec := binary.LittleEndian.Uint64(data[8:16]); numRec != 1 {
+		t.Fatalf("numrec %d after an empty first scan, want 1: the cdc's "+
+			"own record (DS12) alone", numRec)
 	}
 }
 
@@ -689,8 +695,9 @@ func TestAcceptStopsAtThePendingCap(t *testing.T) {
 	}
 	c, data := connGetLog(host, lidDiscovery, false, 4096, 0)
 	connStatus(t, c, statusSuccess, "get log page at the cap")
-	if numRec := binary.LittleEndian.Uint64(data[8:16]); numRec != 1 {
-		t.Fatalf("numrec %d at the cap, want 1", numRec)
+	if numRec := binary.LittleEndian.Uint64(data[8:16]); numRec != 2 {
+		t.Fatalf("numrec %d at the cap, want 2: the cdc's own record (DS12) "+
+			"and the entry", numRec)
 	}
 
 	// One pending connection ends, and the one that waited takes its slot:
