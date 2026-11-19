@@ -20,20 +20,21 @@
 //     command whose request has no token field to put it in (run, CT3);
 //     every parsed value is sent as typed and the gateway's validation is
 //     the only validator. Empty required fields, contradictory flags and
-//     unknown enum numbers are all forwarded.
+//     unknown enum numbers are all forwarded, save through --override,
+//     which takes words only (groupOverridesOf).
 //   - CT9 — only the env-backed global flags (every one but --rev) have a
 //     second carrier: they are bound into viper, so a DNVCTL_* environment
 //     variable or a --config file supplies one just as the flag does. --rev
 //     and every leaf flag are read off the parsed command line and nothing
 //     else (CT9): a token, a force or a name is typed per command, and a
 //     leaf value is parsed before the dial — by pflag through numberValue,
-//     or by the readers below and spParseLevel/spRedundConf for the flags
-//     pflag holds as strings — so text that does not fit its field is exit
-//     2, never a cast
-//     that reads back as zero (dnvctl.md, Conventions, Value types). The
-//     comma-split list flags below stay plain strings for the
-//     replace-on-each-occurrence rule (dnvctl.md, Conventions), which
-//     pflag's own slice flags do not follow (they append).
+//     or by the readers below and spParseLevel/spRedundConf/groupOverridesOf
+//     for the flags pflag holds as strings — so text that does not fit its
+//     field is exit 2, never a cast that reads back as zero (dnvctl.md,
+//     Conventions, Value types). The comma-split list flags below stay
+//     plain strings for the replace-on-each-occurrence rule (dnvctl.md,
+//     Conventions), which pflag's own slice flags do not follow (they
+//     append).
 package ctl
 
 import (

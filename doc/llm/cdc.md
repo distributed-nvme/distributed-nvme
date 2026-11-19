@@ -576,18 +576,18 @@ nothing, while one that a refused Connect moved would let a client that
 never connects keep its place under the cap for as long as it keeps sending
 Connects the controller refuses. From a successful Connect on, every
 received command restarts the timer, as nvmet's keep-alive does for every
-command but one it refuses outright, an unknown opcode or any command
-before the controller is ready (NP6); here those restart it too, because
-the timer asks whether the host is still there, and a host that sends is.
-A non-zero KATO
-expires at KATO plus `DefaultCdcKeepAliveGraceMs`; a zero KATO expires after
-`DefaultCdcZeroKatoTmoMs` idle, because zero does not mean immortal: such
-connections, a one-shot "nvme discover" among them, get a fixed idle cutoff:
-the default nvmet's discovery controller gives a zero KATO at Connect, kept
-here for a zero a later Set Features writes too, where nvmet runs no
-keep-alive timer. Expiry closes the socket; a connected connection then logs
-`host disconnected`, reason `keep_alive`, and a pending one logs nothing
-(NP13).
+command but one its command parser refuses, as an unknown opcode or an
+unknown fabrics command type, or a command but a fabrics one before the
+controller is ready (NP6); here those restart it too, because the timer
+asks whether the host is still there, and a host that sends is. A non-zero
+KATO expires at KATO plus `DefaultCdcKeepAliveGraceMs`; a zero KATO
+expires after `DefaultCdcZeroKatoTmoMs` idle, because zero does not mean
+immortal: such connections, a one-shot "nvme discover" among them, get a
+fixed idle cutoff: the default nvmet's discovery controller gives a zero
+KATO at Connect, kept here for a zero a later Set Features writes too,
+where nvmet runs no keep-alive timer. Expiry closes the socket; a
+connected connection then logs `host disconnected`, reason `keep_alive`,
+and a pending one logs nothing (NP13).
 
 NP11. **AER.** Up to `CdcAerl` + 1 outstanding per connection; one more is
 refused with the AER-limit-exceeded status. An armed AER completes

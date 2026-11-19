@@ -23,12 +23,12 @@ logging; and on `layout.md` for package placement and the dependency rules.
 (`architecture.md`, System overview). It reads and writes etcd, and calls
 agents only for `GetDnSize` and `GetCnSize`, the `Get*Info` behind its
 `Inspect*` RPCs, behind the `force` false hydration checks of
-`DeleteClone` and `FinishMigration`, behind `ForceStartGroup`'s check
-of the group's array and behind `GetThinDeviceBitmap`'s check of the
-parks, the `GetThinDeviceBm` bitmap read, and the `InspectGrp` read behind
-`InspectGroup` (Agent calls). It is
-one of the three co-located control-plane processes — gateway, worker,
-cdc — that any number of control-plane servers may run.
+`DeleteClone` and `FinishMigration`, behind `ForceStartGroup`'s check of
+the group's array, behind `CreateRepair`'s read of the bad leg's row and
+behind `GetThinDeviceBitmap`'s check of the parks, the `GetThinDeviceBm`
+bitmap read, and the `InspectGrp` read behind `InspectGroup` (Agent
+calls). It is one of the three co-located control-plane processes —
+gateway, worker, cdc — that any number of control-plane servers may run.
 This document covers `gateway/` and `cmd/dnv-gateway` only: `dnvctl` is a
 separate component with its own document (`dnvctl.md`), and the integration
 suite drives the gateway with a dedicated test client, `gatewayctl`, not
@@ -1477,21 +1477,24 @@ and, where the op takes one, the stored `ClusterConf` (`repairOpenSp`,
 `repairCreateChecks` for the create, `forceStartChecks` for the forced
 start and `operatorInChargeChecks` for the operator-in-charge flag); the op
 makes every check again inside its own STM, the token's revision as its
-expected revision ahead of every other read (GW6), save
-`ForceStartGroup`'s checks of the primary, which its planning read alone
-makes, and of the primary's report, which no transaction sees. `model`
-raises every refusal as an `ErrPrecondition`, which `mapModelErr` answers
-`FAILED_PRECONDITION` save a stale token and candidate changed (GW7), so
-the other codes come from the gateway's own checks — the pure checks
-(GW4), the planning read's resolution and token, `CreateRepair`'s own
-planning checks and its scan, and the own planning checks of
-`ForceStartGroup` and `UpdateGroupOperatorInCharge` — and from the four
-reasons `model` exports for them, `model.ReasonRepairExists`,
-`model.ReasonRepairNotFound`, `model.ReasonRetiredLegNotFound` and
-`model.ReasonRetiredListFull`, which a handler answers before
-`mapModelErr` (`modelReason`) with the code and the words the gateway's own
-check of the same refusal gives. `ForceStartGroup` alone reads an agent
-between its planning read and its op (Agent calls).
+expected revision ahead of every other read (GW6), save the checks of the
+primary that the planning reads of `ForceStartGroup` and `CreateRepair`
+alone make, and the checks of the primary's report, which no transaction
+sees: `ForceStartGroup`'s of the group's row, and `CreateRepair`'s of the
+bad leg's row, whose verdict the op takes as
+`model.RepairNewLeg.IdentityRefused`. `model` raises every refusal as an
+`ErrPrecondition`, which `mapModelErr` answers `FAILED_PRECONDITION` save
+a stale token and candidate changed (GW7), so the other codes come from
+the gateway's own checks — the pure checks (GW4), the planning read's
+resolution and token, `CreateRepair`'s own planning checks and its scan,
+and the own planning checks of `ForceStartGroup` and
+`UpdateGroupOperatorInCharge` — and from the four reasons `model` exports
+for them, `model.ReasonRepairExists`, `model.ReasonRepairNotFound`,
+`model.ReasonRetiredLegNotFound` and `model.ReasonRetiredListFull`, which
+a handler answers before `mapModelErr` (`modelReason`) with the code and
+the words the gateway's own check of the same refusal gives.
+`ForceStartGroup` and `CreateRepair` alone read an agent between their
+planning read and their op (Agent calls).
 The three reads and `InspectGroup` open with `openSpRead`, so a deleting
 pool's repairs, retired legs and groups still answer.
 

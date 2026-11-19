@@ -150,12 +150,12 @@ copy case's second migration, cancelled with force after its cutover, which
 the case does not check at all. The default location and the pool create's
 first preference (`architecture.md`, Disk nodes, Per-operation allocation):
 every node passes its guest's role as its location, and no controller node
-shares one with a disk node; the gateway suite and the Go tests prove them.
-The cut of a migrating leg's path while its
-source serves, and leg repair's cancel of a migration whose cutover is
-pending and its wait on a copy not shown whole (`cnagent.md` CN10;
-`dnv-worker.md` AR8): react's migrating leg loses its destination after the
-cutover, with its copy whole.
+shares one with a disk node; the Go tests prove both, the gateway suite the
+first preference, and the dn and cn suites the host name each agent reports.
+The cut of a migrating leg's path while its source serves, and leg repair's
+cancel of a migration whose cutover is pending and its wait on a copy not
+shown whole (`cnagent.md` CN10; `dnv-worker.md` AR8): react's migrating leg
+loses its destination after the cutover, with its copy whole.
 
 ## Topology and parameters
 

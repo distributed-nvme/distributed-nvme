@@ -779,30 +779,30 @@ the older leg alone; the host reads its data unchanged (`cnagent.md`
 CN12). The marks that name a leg whose bad-block list depends on the run
 — the forced start from the leg that kept the data, and the one from the
 retired leg taken back — read the named leg's list at run time and, when
-it carries one, meet the refusal with no override and go on passing
-bad-blocks; the first also reads the dry run, which lists that list alone
-before the mark passes it. The other leg of each is half-copied or of
-another identity, so no older-leg refusal arises. Then
-the re-assembly, the way the forced-start guide gives an operator: both
-legs' exports to the primary error every IO, and a host write to a region
-it wrote before fails, which leaves the data group's array broken under
-the pool; with both exports back and both legs' rows no longer `ERROR`,
-a converge leaves the array broken, its row naming the pool's device that
+it carries one, meet the refusal with no override and then pass
+bad-blocks: the first in the dry run, which lists that list alone, before
+its mark passes it; the second in a converge, which zeroes nothing, before
+the same mark goes again passing it. The other leg of each is half-copied
+or of another identity, so no older-leg refusal arises. Then the
+re-assembly, the way the forced-start guide gives an operator: both legs'
+exports to the primary error every IO, and a host write to a region it
+wrote before fails, which leaves the data group's array broken under the
+pool; with both exports back and both legs' rows no longer `ERROR`, a
+converge leaves the array broken, its row naming the pool's device that
 holds it open, and a check round does not name it; the step to the level
 that takes the pools away is a converge that sweeps the pool's devices
-before it builds the groups, so it stops the array and assembles it
-again, with no zeroed superblock and no run flag, both members in sync
-after md's copy (`cnagent.md` CN12, The re-assembly). Broken once more at
-that level by a write through the array itself, with the exports back, the
-array is named by a fresh check round, by its node under its own kind
-(`cnagent.md` CN30), and the `SyncupCntlr` re-sent as the worker would
-assembles it again. The pool comes back at the level that builds it, and
-the host reads its data unchanged. Before
-its teardown, with the arrays stopped, every member of the data group is
-zeroed by hand, as a forced start cut short after its zeroing leaves them,
-and the request carries the flag that the group's array has run: the
-primary creates no array over the blank legs and reads the group's row
-`ERROR` "has run before" (`cnagent.md` CN12).
+before it builds the groups, so it stops the array and assembles it again,
+with no zeroed superblock and no run flag, both members in sync after md's
+copy (`cnagent.md` CN12, The re-assembly). Broken once more at that level
+by a write through the array itself, with the exports back, the array is
+named by a fresh check round, by its node under its own kind (`cnagent.md`
+CN30), and the `SyncupCntlr` re-sent as the worker would assembles it
+again. The pool comes back at the level that builds it, and the host reads
+its data unchanged. Before its teardown, with the arrays stopped, every
+member of the data group is zeroed by hand, as a forced start cut short
+after its zeroing leaves them, and the request carries the flag that the
+group's array has run: the primary creates no array over the blank legs
+and reads the group's row `ERROR` "has run before" (`cnagent.md` CN12).
 
 **teardown** proves `architecture.md`, Teardown by sweep, on a CN: a teardown
 finishes when what lies under it is gone, long gone, under load or unreachable,

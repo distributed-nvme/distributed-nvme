@@ -1656,12 +1656,13 @@ counts no metadata units, since no copy keeps its metadata there.
   with the next group. The growing black list means every leg of the SP
   lands on a distinct DN. The groups are scanned in the order the STM mints
   them (`gateway.md` GW15), per slice the meta group first, and a short
-  group never sends the scan back to an earlier pick (only a pick whose
-  capacity key moved reruns the scan, `gateway.md` GW9): a group the scan
-  leaves short refuses the whole create, though another draw for an earlier
-  group could have left it room, so a
-  cluster that could hold the pool can refuse a create that a repeat then
-  builds (`csi.md` CSI11).
+  group of the plain scans never sends the scan back to an earlier pick
+  (only a pick whose capacity key moved reruns the scan, `gateway.md` GW9,
+  and a short group of the preferred scans below reruns every pick as the
+  plain scans): a group the plain scans leave short refuses the whole
+  create, though another draw for an earlier group could have left it
+  room, so a cluster that could hold the pool can refuse a create that a
+  repeat then builds (`csi.md` CSI11).
   The **first primary's location is a first preference**: every group's
   scan is two-tier as CreateMigration's below, with the `location` of the
   first CN pick as its tier-1 `excludeLocs`, so the legs keep out of the
@@ -1675,12 +1676,13 @@ counts no metadata units, since no copy keeps its metadata there.
   both down at once, and the new primary does not start that group (Known
   limits). Reason for the second try: tier 1 is met group by group, so
   while two other domains have room the first groups take both, and a
-  later group can find only the primary's domain left, where the plain
-  scans spread the groups and place the pool; without it, a cluster of
+  later group can find only the primary's domain left, which tier 2 adds
+  as a single candidate, too few for a group of two legs, where the plain
+  scans can spread the groups and place the pool; without it, a cluster of
   three machines that each run the same count of disk nodes and a
-  controller node would refuse, every time, a pool with more legs than two
-  of its machines have disk nodes. So the preference never refuses a
-  create the plain scans place.
+  controller node would refuse, every time, a `RedundMdRaid1` pool with
+  more legs than two of its machines have disk nodes. So the preference
+  never refuses a create the plain scans place.
 * **GrowSlice** — like the DN flow for exactly one group, the new one. Its
   black list is seeded with the request's own `NodeSelector.black_list` and
   nothing else, and the gateway never appends to it: one scan-and-pick
@@ -2531,11 +2533,13 @@ changes a node's `location` after creation, so a `location` read outside a
 transaction never goes stale — the premise of the location reads of
 Per-operation allocation.
 Action: (pre-STM) call `DiskNodeAgent.GetDnSize` at `addr_port` with a
-zero `dn_id` (the id is only for logging; the agent does not need it),
-compute `total_ext_cnt` (Size → extents) and, for a request with no
-`location`, take the reported host name as the `location` or refuse the
-create (Defaults). One STM then: allocate `dn_id`
-and `shard_code` from `DnGlobal` (Globals: id allocation + shard buckets);
+zero `dn_id` (the id is only for logging; the agent does not need it) and,
+for a request with no `location`, take the reported host name as the
+`location` or refuse the create (Defaults). One STM then: refuse an
+existing `dn_conf` key; compute `total_ext_cnt` (Size → extents) from the
+`extent_size` of the `ClusterConf` it reads, refusing a count below one;
+allocate `dn_id` and `shard_code` from `DnGlobal` (Globals: id allocation +
+shard buckets);
 write the `DnConf` (`disabled`, a zero `err_epoch`, `nvme_tr_conf`,
 `location`, an empty `side_ptr_list`, `total_ext_cnt`, and `free_ext_cnt`
 equal to `total_ext_cnt`); write the `DnCapacity` key at the computed
@@ -6630,16 +6634,18 @@ wrote with its force (`ForcedStart.force`) passes every kind, since marks
 stay in etcd across a lockstep upgrade (Upgrade in lockstep); no build
 writes the force. Reason for naming each: an override given for
 one refusal passes no other, so passing a bad-block list never also
-passes a member with newer data. Reason for going on: the start, its row
-and the dry run name every refusal at once, so the operator names each
-override knowing all of them. Reason for the list's refusal: with the list dropped,
-md serves the regions it lists from what the named leg holds there, which
-on a half-copied leg md marked in sync are regions it never copied (Known
-limits), and only the operator can tell that leg from the one that kept
-the data. Reason: mdadm answers a read of a member that fails as
-it answers a member with no superblock, so only the agent's own read tells
-them apart, and a zero mdadm answered with success can have written
-nothing. An array that runs the primary never stops: the mark waits. The steps, their order and their error rows are `cnagent.md` CN12's.
+passes a member with newer data. Reason for going on: the start's record
+and the dry run name every refusal at once, and its row their kinds, so
+the operator names each override knowing all of them. Reason for the
+list's refusal: with the list dropped, md serves the regions it lists from
+what the named leg holds there, which on a half-copied leg md marked in
+sync are regions it never copied (Known limits), and only the operator can
+tell that leg from the one that kept the data. Reason: mdadm answers a
+read of a member that fails as it answers a member with no superblock, so
+only the agent's own read tells them apart, and a zero mdadm answered with
+success can have written nothing. An array that runs the primary never
+stops: the mark waits. The steps, their order and their error rows are
+`cnagent.md` CN12's.
 The members the forced start keeps are the group's `leg_list` legs and the
 new legs of its open repair, except the new legs of a CREATED repair whose
 abort flag is set, which the abort takes out of the group; such a new leg
@@ -8355,7 +8361,8 @@ document and only pointed to here.
   group need as many `location`s, and a disk node's default `location` is
   its machine (Disk nodes), so the disk nodes of one machine, all created
   with no `location`, place no RAID1 pool at all, whatever their count;
-  the refusal names the disk nodes it found in distinct locations.
+  the refusal counts the disk nodes with room it found in distinct
+  locations, against the legs a group needs.
   `GrowSlice` and
   `CreateClone` black-list no disk node of the pool's — a grow's black list
   is the request's own selector and nothing else, a clone's is empty — and
@@ -8379,21 +8386,23 @@ document and only pointed to here.
   repair or a migration can (below).
 * **A primary can share a machine with a leg.** `CreateStoragePool` keeps
   the legs out of the first primary's `location` only as a first
-  preference (Per-operation allocation, CreateStoragePool — DNs), so a
-  pool that the preferred scans cannot place can hold a leg there. Nothing
-  else looks at the primary's `location`: a failover makes a standby
-  primary wherever the legs are (`dnv-worker.md` AR5), and a cntlr
-  replacement (`dnv-worker.md` AR7), an operator's `CreateCntlr`, a grow,
-  a repair and a migration each place by their own rules. A controller
-  node whose `location` no disk node shares gives the preference nothing
-  to keep the legs from: one created under a rack name its machine's disk
-  nodes do not carry, or one v0.1.0 created with no `location`, whose
-  `location` is its `addr_port`. When one machine
-  holds a pool's primary and a leg of a group and stops, the surviving
-  leg's superblock still counts a clean full array, so a new primary's
-  assemble of that group is refused, and the pool waits for the machine to
-  come back or for an operator's forced start ("Make sure all groups are
-  available"; [D16]).
+  preference (Per-operation allocation, CreateStoragePool — DNs): a group
+  that tier 1 leaves short takes a leg in that `location` at tier 2, as
+  every group of two legs does on a cluster of two machines that each run
+  disk nodes, and a pool the preferred scans refuse is placed by the plain
+  scans, which keep no `location` out. Nothing else looks at the primary's
+  `location`: a failover makes a standby primary wherever the legs are
+  (`dnv-worker.md` AR5), and a cntlr replacement (`dnv-worker.md` AR7), an
+  operator's `CreateCntlr`, a grow, a clone's clone meta group, a repair
+  and a migration each place by their own rules. A controller node whose
+  `location` no disk node shares gives the preference nothing to keep the
+  legs from: one created under a rack name its machine's disk nodes do not
+  carry, or one v0.1.0 created with no `location`, whose `location` is its
+  `addr_port`. When one machine holds a pool's primary and a leg of a
+  group and stops, the surviving leg's superblock still counts a clean
+  full array, so a new primary's assemble of that group is refused, and
+  the pool waits for the machine to come back or for an operator's forced
+  start ("Make sure all groups are available"; [D16]).
 * **With fewer machines than a group's placement needs, a repair or a
   migration can put two legs of a group on one machine.** The new leg of a
   repair and the destination of a migration keep out of the group's
@@ -9097,10 +9106,19 @@ document and only pointed to here.
   another controller of the subsystem holds unless that one is being
   deleted ("Duplicate cntlid", seen in the lab), and a controller to a
   node that is gone keeps reconnecting until its loss timeout. So the host
-  gets no path to the replacement until it drops the lost path: a host
-  that follows the discovery log drops it once the failover's records
-  withdraw the lost cntlr (Host view); a path connected by hand stays
-  (above).
+  gets no path to the replacement until it drops the lost path. A host
+  that follows the discovery log drops it once the records withdraw the
+  lost cntlr (Host view). A node of the Kubernetes driver drops it only
+  once it holds a listed cntlr's path that shows the volume's namespace
+  (`csi.md` CSI15), and the replacement's path cannot be that one, so a
+  node that holds no other such path, as on a pool of one cntlr, whose
+  replacement no failover precedes (`dnv-worker.md` AR7), keeps the lost
+  path, which its connect lets reconnect for ever (`csi.md` CSI14): the
+  volume's IO waits with no error until that path ends, by a reconnect
+  refused with DNR or the operator's `nvme disconnect -d` of that
+  controller, and the mount does not survive that end (A mount does not
+  survive the loss of its last path, below). A path connected by hand
+  stays (above).
 * **A detach does not cut a connected host.** The CSI driver's detach empties
   the subsystem's allowed hosts (`csi.md` CSI10), which closes it to new
   connections only (Primary cntlr), so a host already connected keeps its
@@ -9150,21 +9168,24 @@ document and only pointed to here.
   same device, and the plugin keeps a path the cdc withdrew until a listed
   cntlr's path shows the volume's namespace, or until the cdcs list no
   cntlr for the subsystem, as after a detach or the disable of a pool's
-  only cntlr (`csi.md` CSI14, CSI15). A
-  cntlr replacement on a pool of one cntlr keeps the mount only while the
-  old path lasts that long: its controller node down, or its port
-  listening for no other subsystem; a port that serves other subsystems
-  refuses the old path's next reconnect with DNR once the old export is
-  gone, and the old path ends. A host whose connect sets no
-  controller-loss limit, nvme-stas's among them, keeps the kernel's default,
-  past which the kernel deletes the controller. And a refusal with DNR ends a
-  path's reconnects for good on any host: one from a cntlr's port that
-  listens for another subsystem before the volume's is built again, or one
-  from a subsystem whose cntlid slot has run out (cntlid slots). Once the
-  last controller is gone, a later connect makes a new namespace device,
-  which the mount does not follow. The way out is `csi.md` CSI14's: the
-  operator deletes the pod, as a host of any other kind mounts the new
-  device again by hand.
+  only cntlr (`csi.md` CSI14, CSI15). A cntlr replacement on a pool of one
+  cntlr keeps the mount only while the old path lasts that long (its
+  controller node down, or its port listening for no other subsystem; a
+  port that serves other subsystems refuses the old path's next reconnect
+  with DNR once the old export is gone, and the old path ends), and only
+  where the replacement's node gives the host a CNTLID other than the one
+  the old path holds, without which the replacement's path never joins (A
+  host that still holds a lost cntlr's path refuses the path of its
+  replacement, above). A host whose connect sets no controller-loss limit,
+  nvme-stas's among them, keeps the kernel's default, past which the
+  kernel deletes the controller. And a refusal with DNR ends a path's
+  reconnects for good on any host: one from a cntlr's port that listens
+  for another subsystem before the volume's is built again, or one from a
+  subsystem whose cntlid slot has run out (cntlid slots). Once the last
+  controller is gone, a later connect makes a new namespace device, which
+  the mount does not follow. The way out is `csi.md` CSI14's: the operator
+  deletes the pod, as a host of any other kind mounts the new device again
+  by hand.
 * **A volume none of whose cntlrs comes back waits for ever on a
   Kubernetes node.** The node plugin's connect never gives up, so the
   kernel never deletes the volume's controllers and IO to the volume
@@ -9211,14 +9232,16 @@ document and only pointed to here.
   needs a pool with no failover candidate — the sole-primary replacement
   of Automatic reactions; the replacement's path comes with its build. A node of the Kubernetes driver keeps the old primary's path
   until the replacement's path shows the volume's namespace (`csi.md`
-  CSI15), so its IO can meet those errors until that teardown, or until the
-  node drops the old path, which it does once the replacement's path shows
-  the namespace, if that comes first; after the teardown the old path
-  reconnects and its IO waits, unless the old port refuses the reconnect
-  with DNR (A mount does not survive the loss of its last path). A host
-  on the old primary's path can also lose an acknowledged write (A
-  failover while the old primary serves can lose an acknowledged write,
-  above).
+  CSI15), so its IO can meet those errors until that teardown, or until
+  the node drops the old path, which it does once the replacement's path
+  shows the namespace, if that comes first, and never while the old path
+  holds the CNTLID the replacement's node gives the host (A host that
+  still holds a lost cntlr's path refuses the path of its replacement,
+  above); after the teardown the old path reconnects and its IO waits,
+  unless the old port refuses the reconnect with DNR (A mount does not
+  survive the loss of its last path). A host on the old primary's path can
+  also lose an acknowledged write (A failover while the old primary serves
+  can lose an acknowledged write, above).
 * **A DN's metadata area can refuse a migration the count allowed.** A
   migration's run is contiguous, and a release can commit before the DN
   frees the run, so an area whose free units lie in runs too short, or

@@ -54,8 +54,10 @@ var groupOverrideWords = map[string]pb.ForcedStartOverride{
 // groupOverridesOf is --override, a comma-split list of groupOverrideWords
 // sent as override_list in the order typed. An empty flag is an empty list;
 // an item that is no word, an empty one included, is a usage error (exit 2,
-// CT8), since the field is an enum and dnvctl has no other spelling to send.
-// A word typed twice is sent twice, for the gateway to refuse (CT8).
+// CT5): the flag has no number form, so a kind the enum does not declare
+// cannot be typed here, the one exception to CT8's forwarding of unknown
+// enum numbers. A word typed twice is sent twice, for the gateway to refuse
+// (CT8).
 func groupOverridesOf() ([]pb.ForcedStartOverride, error) {
 	raw := strOf("override")
 	if raw == "" {

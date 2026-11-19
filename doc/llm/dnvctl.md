@@ -118,9 +118,9 @@ zero. A leaf value that can be malformed is parsed before the dial — by
 pflag, with the command line, for the flags declared as pflag numbers,
 after dnvctl's check of their spelling (Conventions, Value types), or as
 booleans, and by dnvctl's own parsers for the id flags, `--ids`,
-`--bad-legs`, `--slots`, `--bm-hex`, `--level` and `--redund`, which are
-declared as strings (Conventions, CT8) — so text that does not fit its
-field is exit 2 with no RPC issued.
+`--bad-legs`, `--slots`, `--bm-hex`, `--level`, `--redund` and
+`--override`, which are declared as strings (Conventions, CT8) — so text
+that does not fit its field is exit 2 with no RPC issued.
 `--timeout`, the one numeric env-backed global flag, is parsed from whichever
 carrier supplied it: `DNVCTL_TIMEOUT` holding text that is not a number, or
 such text under the `timeout` key of the config file, is a usage error (exit
@@ -233,17 +233,18 @@ flag, a value pflag cannot parse or dnvctl's spelling check refuses before
 pflag reads it), viper's (a `--config` file it cannot read) or dnvctl's own: a
 missing `--gateway-address`; `dnvctl` or a group typed without a verb; an
 "invalid --flag" message for a value dnvctl parses itself — an id, `--ids`,
-`--bad-legs`, `--slots`, `--bm-hex`, `--level`, `--redund`, `--rev`, a
-`--timeout` from the environment or the config file, a NaN or infinite
-`--timeout` from any carrier; and, for a `--rev` on a command whose request
-carries no token, whatever its value, an "invalid --rev" message naming the
-command as one that takes no revision token. CODE is the gRPC code in its
-UPPER_SNAKE wire spelling — NOT_FOUND, ABORTED, DEADLINE_EXCEEDED, UNAVAILABLE
-and the rest — from the `codeNames` table, because the code's own string form
-is CamelCase and operators grep for the wire spelling; message is the status
-message verbatim, such as "stale revision". A dial that cannot resolve, or is
-refused, maps to whatever code gRPC reports — UNAVAILABLE for a refused
-connection; dnvctl adds no translation layer.
+`--bad-legs`, `--slots`, `--bm-hex`, `--level`, `--redund`, `--override`,
+`--rev`, a `--timeout` from the environment or the config file, a NaN or
+infinite `--timeout` from any carrier; and, for a `--rev` on a command
+whose request carries no token, whatever its value, an "invalid --rev"
+message naming the command as one that takes no revision token. CODE is
+the gRPC code in its UPPER_SNAKE wire spelling — NOT_FOUND, ABORTED,
+DEADLINE_EXCEEDED, UNAVAILABLE and the rest — from the `codeNames` table,
+because the code's own string form is CamelCase and operators grep for the
+wire spelling; message is the status message verbatim, such as "stale
+revision". A dial that cannot resolve, or is refused, maps to whatever
+code gRPC reports — UNAVAILABLE for a refused connection; dnvctl adds no
+translation layer.
 
 ## Revision tokens
 
@@ -385,20 +386,22 @@ gateway to judge (CT8); one typed with an empty value, or with spaces
 alone, is a usage error, as a typed empty `--rev` is (CT3): an unset shell
 variable must not send zero, which `repair create` reads as a fresh leg.
 `--slots`, `--ids` and `--bad-legs` are comma-separated numeric lists;
-`--hosts` and the selector flags are comma-separated string lists. An empty
-list flag is the empty list. Any other value is split at each comma: a
-string list sends every item as typed, spaces and empty items included, and
-a numeric list trims each item and parses it by the rule above, so an empty
-item is a usage error. No item is dropped, because a comma list whose items
-are all unset shell variables, such as `$A,$B`, would otherwise shrink to
-nothing and revoke every host of a subsystem (`architecture.md`, Primary cntlr)
-or drop a white list (`architecture.md`, Finding DN candidates), while the
-gateway refuses an empty host NQN or node address (`architecture.md`, Common
-validation). A list flag replaces its value on each occurrence rather than
-accumulating, which is why the lists are plain string flags: pflag's own slice
-flags append. A boolean that must be turned off is written `--enabled=false`,
-never `--enabled false`, whose `false` would be a positional argument, which no
-leaf accepts.
+`--hosts` and the selector flags are comma-separated string lists;
+`--override` is a comma-separated list of words (`group` —
+`ctl/group.go`). An empty list flag is the empty list. Any other value is
+split at each comma: a string list sends every item as typed, spaces and
+empty items included, and a numeric list trims each item and parses it by
+the rule above, so an empty item is a usage error. No item is dropped,
+because a comma list whose items are all unset shell variables, such as
+`$A,$B`, would otherwise shrink to nothing and revoke every host of a
+subsystem (`architecture.md`, Primary cntlr) or drop a white list
+(`architecture.md`, Finding DN candidates), while the gateway refuses an
+empty host NQN or node address (`architecture.md`, Common validation). A
+list flag replaces its value on each occurrence rather than accumulating,
+which is why the lists are plain string flags: pflag's own slice flags
+append. A boolean that must be turned off is written `--enabled=false`,
+never `--enabled false`, whose `false` would be a positional argument,
+which no leaf accepts.
 
 **Defaults.** dnvctl keeps a leaf-flag default of its own only where a spec
 names one: `sp create`'s redundancy (`sp` — `ctl/sp.go`), the transport flags
@@ -428,10 +431,11 @@ leading zero or in any form but decimal and hex after `0x`, an id typed empty
 plus a `--rev` on a command whose request has no token field to carry it
 (CT3). Every parsed value is sent as typed, and the gateway's validation
 (`architecture.md`, Common validation) answers: empty required fields,
-contradictory flags and unknown enum numbers are all forwarded. Nor does
-dnvctl issue an RPC the operator did not type: no token auto-fetch, no
-pre-read behind a warning (`cntlr` — `ctl/cntlr.go`), no poller behind a
-latching delete (`sp` — `ctl/sp.go`).
+contradictory flags and unknown enum numbers are all forwarded, save
+through `--override`, which takes words only (`group` — `ctl/group.go`).
+Nor does dnvctl issue an RPC the operator did not type: no token
+auto-fetch, no pre-read behind a warning (`cntlr` — `ctl/cntlr.go`), no
+poller behind a latching delete (`sp` — `ctl/sp.go`).
 
 CT1. **Completeness.** The leaves are exhaustive: one per RPC of
 `service Gateway`, none left out and none doubled. A leaf carries the
@@ -753,11 +757,12 @@ drops (`architecture.md`, Repair, Forced start); and `partial`, so that
 the mark may name a taken-back leg that carries the partial mark
 (`architecture.md`, Retired legs). A start passes a refusal only when its
 word is named, which the leaf's help says. An item that is no word, an
-empty one included, is a usage error (exit 2, CT5), since the field takes
-the enum's values alone; there is no `--force`. dnvctl checks none of the
-pairings: a non-zero `--leg` or an `--override` beside `--cancel`, a word
-typed twice, and a write with no `--leg`, reach the gateway, which refuses
-them (CT8).
+empty one included, is a usage error (exit 2, CT5): `--override` has words
+only and no number form, so a kind the enum does not declare cannot be
+typed here and reaches the gateway's check of the enum only from another
+client; there is no `--force`. dnvctl checks none of the pairings: a
+non-zero `--leg` or an `--override` beside `--cancel`, a word typed twice,
+and a write with no `--leg`, reach the gateway, which refuses them (CT8).
 The forced start overwrites the other members it keeps, the open repair's
 bad leg excepted, with a full copy of the named leg (`architecture.md`,
 Repair, Forced start), and a start from an older copy restores that group

@@ -77,7 +77,7 @@ pools, subsystems and hosts serve each user.
 | Reverting a volume to a snapshot | not yet; Cinder asks for it |
 | Changing a pool's thresholds or the cluster's check intervals after creation | not yet |
 | Changing a controller node's budget, the pool space it may serve, after creation | not yet |
-| Changing a node's location after creation | not yet; delete the node and create it again |
+| Changing a node's location after creation | not yet; empty the node, delete it and create it again; the steps that empty a node are not written yet ([the operations doc](operations.md#choose-a-nodes-location)) |
 | Rolling upgrades | not yet; every program is upgraded at once |
 | Transports other than NVMe/TCP | not yet |
 | Disks of logical blocks other than 512 bytes, such as 4 KiB disks | not yet; the dn agent refuses such a disk ([the introduction](introduction.md#requirements)) |
@@ -193,17 +193,20 @@ the reason. Section 5 lists the data-loss defects known today.
    operator names another, so the legs of a new group sit on different
    machines when every machine has a host name of its own. That does not
    hold for a disk node that the first release, 0.1, created with no
-   location: it keeps its address as its location, so two such disk nodes
-   of one machine can hold both legs of a new group
+   location, which keeps its address as its location; for the disk nodes
+   of one machine created before and after a rename of the machine; or for
+   an agent in a container with a host name of its own, which reports the
+   container's name. In each case two disk nodes of one machine can hold
+   both legs of a new group
    ([the operations doc](operations.md#choose-a-nodes-location)). Losing
-   fewer disk nodes than a group has legs never loses a group. Losing every leg of one group loses that
-   slice's thin pool. Every volume is striped over all slices, so the
-   whole pool's data is lost. A repair finished between two losses
-   restores the redundancy. So a RAID1 pool survives the loss of any one
-   disk node, but not every loss of two. The pairs of disk nodes that can
-   cause it are at most the pool's group count. For two random failures
-   among N disk nodes the chance is at most that count divided by
-   N(N-1)/2.
+   fewer disk nodes than a group has legs never loses a group. Losing
+   every leg of one group loses that slice's thin pool. Every volume is
+   striped over all slices, so the whole pool's data is lost. A repair
+   finished between two losses restores the redundancy. So a RAID1 pool
+   survives the loss of any one disk node, but not every loss of two. The
+   pairs of disk nodes that can cause it are at most the pool's group
+   count. For two random failures among N disk nodes the chance is at most
+   that count divided by N(N-1)/2.
 2. **A pool without RAID loses a disk or its disk node.** A group has one
    leg there. The data of the pool is gone. No repair exists for such a
    leg. A migration can move a side that still reads but is sick. An
@@ -1080,15 +1083,24 @@ Measured times are in [the introduction](introduction.md#status-and-limits-of-01
   told was done. While a host still holds the path of a cntlr that was
   lost, it also gets no path to the cntlr that replaces it, which takes the
   same controller id; the host must drop the old path first, as nvme-stas
-  does once the cdc stops naming it (seen in the lab). State: procedure to
-  write.
+  does once the cdc stops naming it (seen in the lab). A Kubernetes node
+  drops it only once another path of the volume shows the volume, so on a
+  pool of one cntlr it keeps the old path, and the volume waits (the next
+  entry). State: procedure to write.
 - **A Kubernetes mount waits for ever when no cntlr of its volume comes
   back.** The node plugin's connect keeps reconnecting through an outage
   of every path, however long, and the IO waits. So the mount survives a
-  long outage, and a cntlr replacement on a pool of one cntlr while the
-  old path lasts until the new one has joined. But a pod blocked in that
-  IO cannot be stopped until the operator runs `nvme disconnect -n` with
-  the volume's subsystem NQN on the node. Nothing reports a dead mount.
+  long outage. It survives a cntlr replacement on a pool of one cntlr only
+  while the old path lasts until the new path has joined, and the new path
+  cannot join while the old path holds the controller id that the new
+  cntlr gives the node (A host keeps a withdrawn path, above). The plugin
+  then keeps the old path, which keeps reconnecting, and the mount waits
+  until that path ends, by a reconnect refused with "do not retry" or by
+  the operator's `nvme disconnect`; the mount does not survive that end (A
+  Kubernetes mount does not follow a new device, below). But a pod blocked
+  in that IO cannot be stopped until the operator runs
+  `nvme disconnect -n` with the volume's subsystem NQN on the node.
+  Nothing reports a dead mount.
   State: procedure to write; no fix.
 - **A Kubernetes mount does not follow a new device.** A reconnect refused
   with "do not retry" ends for good, as when a controller node comes back
@@ -1112,8 +1124,12 @@ Measured times are in [the introduction](introduction.md#status-and-limits-of-01
   doc](operations.md#change-the-cdc-addresses-of-the-kubernetes-driver).
 - **A cntlr replacement on a one-cntlr pool can cost the volume its path.**
   This happens when the old path's reconnect is refused with "do not
-  retry" before the new path joins. State: accepted; use two cntlrs per
-  volume. Procedure to write, one line in the CSI tutorial.
+  retry" before the new path joins. It also happens when the new cntlr
+  gives the node the controller id that the old path, still reconnecting,
+  holds: the new path cannot join, and the mount waits until the old path
+  ends (A Kubernetes mount waits for ever when no cntlr of its volume
+  comes back, above). State: accepted; use two cntlrs per volume.
+  Procedure to write, one line in the CSI tutorial.
 - **A primary that never reports its stack built waits for the longer
   threshold.** It is failed over or replaced only after the longer of the
   primary and the cntlr thresholds, 600 seconds at the defaults. The pool
@@ -1152,15 +1168,16 @@ Measured times are in [the introduction](introduction.md#status-and-limits-of-01
   its first primary while another location has room, and a node's location
   is its machine by default. Nothing else keeps the primary away from the
   legs: a failover, a cntlr replacement, a cntlr an operator creates, a
-  grow, a repair and a migration each place without looking at it, and a
-  pool created where too few locations have room can keep a leg there. A
-  node an older build created with no location has its address as its
-  location, and a rack name given to a machine's controller node and not
-  to its disk nodes hides the machine the same way: the pool then has
-  nothing to keep its legs from. When such a machine stops, the leg on the other machine still
-  records both legs as in sync, so md does not start the array from it
-  alone, and the new primary leaves the group stopped. The pool waits for
-  the machine to come back, or for an operator's forced start
+  grow, a clone's own group, a repair and a migration each place without
+  looking at it, and a pool created where too few locations have room can
+  keep a leg there. A node an older build created with no location has its
+  address as its location, and a rack name given to a machine's controller
+  node and not to its disk nodes hides the machine the same way: the pool
+  then has nothing to keep its legs from. When such a machine stops, the
+  leg on the other machine still records both legs as in sync, so md does
+  not start the array from it alone, and the new primary leaves the group
+  stopped. The pool waits for the machine to come back, or for an
+  operator's forced start
   ([the forced-start guide](operations.md#the-forced-start-guide)). State:
   accepted. Read from dnv's code; not seen in the lab.
 - **A disabled primary whose standbys refuse their syncups can stop the
@@ -1751,9 +1768,14 @@ design:
   its own, and each slice has a meta group and a data group of two legs
   each, in two locations. A cluster with fewer disk nodes, or with its
   disk nodes in one location, is refused with the error code
-  RESOURCE_EXHAUSTED. The disk nodes of one machine created with no
-  location are one location, so on one machine pass a location for each
-  disk node ([the operations doc](operations.md#choose-a-nodes-location)).
+  RESOURCE_EXHAUSTED. Four disk nodes per slice in two locations are not
+  always enough: a location takes at most one leg of each group, so in two
+  locations each one needs a disk node for every group, and with three or
+  more locations the random draw of the picks can still refuse a create
+  that another draw would place; such a create may place when it is sent
+  again. The disk nodes of one machine created with no location are one
+  location, so on one machine pass a location for each disk node
+  ([the operations doc](operations.md#choose-a-nodes-location)).
   A group added later may share disk nodes with the pool's other groups.
   State: accepted, by design.
 - **Nothing limits recovery load.** A dead disk node starts a full copy in

@@ -1548,18 +1548,21 @@ dm-clone (CN18).
      of the absent array (`absentArrayNamed`): the agent cannot decide which
      identity is current, so a repair that replaces such a leg rests on the
      operator's judgement alone, which `CreateRepair` asks for with its
-     `force_undecided` (`architecture.md`, Repairs, A leg of another
-     identity; Known limits). The operator ends it with a forced start,
-     which names the leg to start from, or with a repair whose bad leg is
-     the leg of the identity not wanted, which moves that leg to the last
-     set and keeps its data at the finish. Reason: mdadm refuses an assembly handed members of two
-     identities, in any order (`cnagent_integtest.md`, Lab facts), as a
-     forced start leaves them when it starts the array from one leg under a
-     new identity while the repair's bad leg keeps the old one, or a
-     taken-back leg its own; a plain majority ties one against one in a
-     group of two legs; the bad leg is the leg the repair replaces, also
-     once an abort let it stay, and the new legs join only by the repair, so
-     the `leg_list` legs that stay decide first.
+     `force_undecided` while the primary's latest report names that reason
+     (`architecture.md`, Repairs, A leg of another identity; Known
+     limits). The operator ends it with a forced start, which names the
+     leg to start from, or with a repair whose bad leg is the leg of the
+     identity not wanted, which moves that leg to the last set and, taken
+     for that reason, keeps its data at the finish; a report that does not
+     name the reason leaves the record's answer (Known limits). Reason:
+     mdadm refuses an assembly handed members of two identities, in any
+     order (`cnagent_integtest.md`, Lab facts), as a forced start leaves
+     them when it starts the array from one leg under a new identity while
+     the repair's bad leg keeps the old one, or a taken-back leg its own;
+     a plain majority ties one against one in a group of two legs; the bad
+     leg is the leg the repair replaces, also once an abort let it stay,
+     and the new legs join only by the repair, so the `leg_list` legs that
+     stay decide first.
 
   While the group's forced-start mark stands, the forced start (below)
   starts an absent array in place of both cases.
@@ -2332,15 +2335,17 @@ dm-clone (CN18).
      (`architecture.md`, Live-state reporting), keeps the kinds at its
      head; and a Warn record, `forced start refused`, names the group, the
      named leg, each such refusal whole, its kind's word first, and the
-     words of the kinds the mark passed among those met. Reason for meeting
-     them all: the operator names each override, so the row, the record and
-     the dry run (CN31) show every refusal before the operator chooses; and
-     an override given for one kind passes no other, so passing a bad-block
-     list never also passes a member with newer data. The bad leg is excepted, neither read
-     nor zeroed, because the repair replaces it: the finish retires it with
-     its data kept, and the move to ABORTED ends the open repair with the
-     leg still in `leg_list` as it is, where the identity check of the
-     member reconciliation refuses its add (Member reconciliation, above).
+     words of the kinds the mark passed among those met. Reason for
+     meeting them all: the operator names each override, so the record and
+     the dry run (CN31) show every refusal, and the row the kinds of all
+     of them at its head, before the operator chooses; and an override
+     given for one kind passes no other, so passing a bad-block list never
+     also passes a member with newer data. The bad leg is excepted,
+     neither read nor zeroed, because the repair replaces it: the finish
+     retires it with its data kept, and the move to ABORTED ends the open
+     repair with the leg still in `leg_list` as it is, where the identity
+     check of the member reconciliation refuses its add (Member
+     reconciliation, above).
      Reason for the count: within one identity md raises the count on
      every change of the array, so such a member holds newer data than the
      named leg, which the zero and the copy from the named leg would lose,

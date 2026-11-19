@@ -25,22 +25,24 @@ name. The dnv name is the name Kubernetes gives the volume when dnv takes
 it as a name (`architecture.md`, Common validation) free of the id's
 separator and of "..", which the gateway refuses in the subsystem's NQN
 (`architecture.md`, Common validation); any other name, longer than dnv's
-names, with a character outside their set or holding "..", which the spec
-lets a caller send, becomes its leading characters, each made acceptable
-and the second dot of each ".." among them a dash, and a hash of the whole
-name, the same for the same name, so a repeated create finds its objects;
-so every name the spec allows makes a volume, mapped before any create. So every object
-of a volume is found by one name, the per-pool limits on subsystems,
-namespaces and hosts never bind, and the tenant promise of dnv holds per volume
-(`architecture.md`, System overview). A volume costs the cluster what a pool
-costs: its cntlrs count against the controller nodes' cntlr ceiling; its sides,
-one per leg of each of its groups and one more for each migration destination,
-repair's new leg and retired leg a group holds, up to `MaxRetiredLegPerGrp`
-retired legs a group, against the disk nodes' side ceiling; and the pool itself
-against the cluster's pool ceiling; so how many volumes a cluster can hold
-follows from those ceilings and the node counts, the free extents each volume
-reserves, the class's cntlr count, its redundancy and the groups auto-grow adds
-to each volume (`architecture.md`, Cardinality limits).
+names, with a character outside their set or holding the separator or
+"..", which the spec lets a caller send, becomes its leading characters,
+each one outside the set, the separator and the second dot of each ".."
+among them made a dash, and a hash of the whole name, the same for the
+same name, so a repeated create finds its objects; so every name the spec
+allows makes a volume, mapped before any create. So every object of a
+volume is found by one name, the per-pool limits on subsystems, namespaces
+and hosts never bind, and the tenant promise of dnv holds per volume
+(`architecture.md`, System overview). A volume costs the cluster what a
+pool costs: its cntlrs count against the controller nodes' cntlr ceiling;
+its sides, one per leg of each of its groups and one more for each
+migration destination, repair's new leg and retired leg a group holds, up
+to `MaxRetiredLegPerGrp` retired legs a group, against the disk nodes' side
+ceiling; and the pool itself against the cluster's pool ceiling; so how
+many volumes a cluster can hold follows from those ceilings and the node
+counts, the free extents each volume reserves, the class's cntlr count, its
+redundancy and the groups auto-grow adds to each volume (`architecture.md`,
+Cardinality limits).
 
 A storage class names one dnv cluster, the redundancy of every group and
 the cntlr count of every pool. A pool has one slice, with a meta group of one
@@ -73,20 +75,20 @@ subcommand serves the identity service and the controller plugin, and the
 node subcommand the identity service and the node plugin. Each is a thin
 main over the library package `csi`: flags, a config file and the
 environment are one thing, bound under the prefix `DNV_CSI`, as for every
-daemon (`architecture.md`, Components: invocation reference). The controller
-plugin takes the socket to serve (`--csi-address`), the gateway's address
-(`--gateway-address`), the cdc addresses it puts in the publish context at
-attach (`--cdc-addresses`; CSI10) and the bound on one gateway call
-(`--gateway-timeout`); a cdc address is an IP literal and a port, an IPv6
-address in brackets, since the node connects to the addresses of its own list
-as the kernel's discovery address. The identity service
-reports the driver's name and its build version (`common.BuildVersion`) and
-advertises the controller service
-and the accessibility constraints (CSI13) from both plugins, since a
-capability describes the driver, not the process that answers: the
-conformance test reads it off the node plugin's socket before it drives a
-volume through the controller plugin, and the sidecars read it off the
-controller plugin's.
+daemon (`architecture.md`, Components: invocation reference). The
+controller plugin takes the socket to serve (`--csi-address`), the
+gateway's address (`--gateway-address`), the cdc addresses it puts in the
+publish context at attach (`--cdc-addresses`; CSI10) and the bound on one
+gateway call (`--gateway-timeout`). A cdc address, in either plugin's
+list, is an IP literal and a port, an IPv6 address in brackets, since the
+node connects to the addresses of its own list as the kernel's discovery
+address, and the manifests give both plugins their list from one config
+map (CSI19). The identity service reports the driver's name and its build version
+(`common.BuildVersion`) and advertises the controller service and the
+accessibility constraints (CSI13) from both plugins, since a capability
+describes the driver, not the process that answers: the conformance test
+reads it off the node plugin's socket before it drives a volume through the
+controller plugin, and the sidecars read it off the controller plugin's.
 
 CSI7. **The gateway is the controller plugin's only peer.** It holds one
 plaintext connection to the gateway under the shared client chain and the
@@ -312,45 +314,49 @@ disconnect -n` of the volume's subsystem on the node (`architecture.md`, Known
 limits). The follower keeps a withdrawn path until a listed cntlr's path shows
 the volume's namespace, or until the cdcs list no cntlr for the subsystem
 (CSI15), so on a pool of one cntlr a cntlr replacement, whose new cntlr the cdc
-lists before its agent has exported the subsystem, keeps the old path until the
-new one has joined the device, as long as the old path's reconnects are not
-refused before then. Each path holds at most the cn agent's IO queue cap of IO
-queues, one per CPU up to the cap, plus its admin queue, when the cap is above
-zero (`dnagent.md` SH32): the cap binds this connect too. Each connect and
-each of the two discovery reads of CSI15 runs under the agents' command bound
-(`architecture.md`, Common validation), since the follower runs them one at a
-time and one that hangs would hold up every stage of the node. The bound ends
-a hang of nvme-cli and a wait the kernel lets a signal end, as the TCP connect
-and the first message of a connection, and no wait the kernel holds whatever
-the signal: the Connect command of a path or of a discovery connection to a
-cntlr or a cdc that took the TCP connection and does not answer, which lasts
-up to the kernel's admin timeout, and the discovery log read, a command on the
-persistent discovery connection that a cdc which keeps that connection and
-does not answer holds until the kernel's error recovery of the connection
-ends it: once the connection's keep-alive fails, or, while the cdc still
-answers the keep-alives, once the read's own admin timeout passes, the
-distribution kernel the lab runs starting that recovery half a keep-alive
-period late, so the wait comes to about a minute or a little more (CSI15). A
-disconnect has no bound, the stop's included: the kernel's delete runs to its
-end whatever the signal, and a kill would only make a delete that was done
-look failed. A connect that fails, or that the bound ends, counts as
-made when sysfs then shows a controller of the subsystem at the cntlr's
-address under the node's host NQN that is not being deleted or dead, one for
-which the kernel would refuse a second connect, whatever nvme-cli printed; the
-plugin reads none of nvme-cli's words. The plugin reports no volume health,
-so nothing in the driver or in Kubernetes acts on a dead mount, and the
-operator deletes the pod. A stage connects to every cntlr the cdcs list
-for the volume's subsystem and repeats the connects, since the cdc lists a
-subsystem before its cntlrs have built it, until a pass ends with no error or
-the node holds a path to the subsystem, a standby's included, and a stage whose
-wait runs out first is UNAVAILABLE; a cntlr still refusing when the connects
-end is handed to the follower's loop at once, whose retry timer tries it again
-a second later and then at delays that double up to the follower's period
-(CSI15), so the wait the stage has left covers those retries while they come
-within it, as the first ones do at the defaults; the stage then waits for the
-volume's device link by uuid under the disk-by-id directory, which appears
-once a path is live and optimized. A volume whose link does not come within
-the wait is UNAVAILABLE, and the kubelet calls again.
+lists before its agent has exported the subsystem, keeps the old path until
+the new one has joined the device, as long as the old path's reconnects are
+not refused before then; the new one cannot join while the old path holds the
+CNTLID the replacement's controller node gives the connect, and the old path
+then stays, its IO waiting, until a reconnect of it is refused or the operator
+disconnects it (`architecture.md`, Known limits). Each path holds at most the
+cn agent's IO queue cap of IO queues, one per CPU up to the cap, plus its
+admin queue, when the cap is above zero (`dnagent.md` SH32): the cap binds
+this connect too. Each connect and each of the two discovery reads of CSI15
+runs under the agents' command bound (`architecture.md`, Common validation),
+since the follower runs them one at a time and one that hangs would hold up
+every stage of the node. The bound ends a hang of nvme-cli and a wait the
+kernel lets a signal end, as the TCP connect and the first message of a
+connection, and no wait the kernel holds whatever the signal: the Connect
+command of a path or of a discovery connection to a cntlr or a cdc that took
+the TCP connection and does not answer, which lasts up to the kernel's admin
+timeout, and the discovery log read, a command on the persistent discovery
+connection that a cdc which keeps that connection and does not answer holds
+until the kernel's error recovery of the connection ends it: once the
+connection's keep-alive fails, or, while the cdc still answers the
+keep-alives, once the read's own admin timeout passes, the distribution kernel
+the lab runs starting that recovery half a keep-alive period late, so the wait
+comes to about a minute or a little more (CSI15). A disconnect has no bound,
+the stop's included: the kernel's delete runs to its end whatever the signal,
+and a kill would only make a delete that was done look failed. A connect that
+fails, or that the bound ends, counts as made when sysfs then shows a
+controller of the subsystem at the cntlr's address under the node's host NQN
+that is not being deleted or dead, one for which the kernel would refuse a
+second connect, whatever nvme-cli printed; the connect reads none of nvme-cli's
+words. The plugin reports no volume health, so nothing in the driver or in
+Kubernetes acts on a dead mount, and the operator deletes the pod. A stage
+connects to every cntlr the cdcs list for the volume's subsystem and repeats
+the connects, since the cdc lists a subsystem before its cntlrs have built it,
+until a pass ends with no error or the node holds a path to the subsystem, a
+standby's included, and a stage whose wait runs out first is UNAVAILABLE; a
+cntlr still refusing when the connects end is handed to the follower's loop at
+once, whose retry timer tries it again a second later and then at delays that
+double up to the follower's period (CSI15), so the wait the stage has left
+covers those retries while they come within it, as the first ones do at the
+defaults; the stage then waits for the volume's device link by uuid under the
+disk-by-id directory, which appears once a path is live and optimized. A
+volume whose link does not come within the wait is UNAVAILABLE, and the
+kubelet calls again.
 
 CSI15. **The follower.** The plugin keeps the set of subsystems it has staged
 and follows the cdcs of its own configuration, read once at its start, and no
@@ -367,24 +373,25 @@ withdrawn one but still refuses the connect, or whose path has not yet joined
 the multipath device, does not cost the volume its last path.
 
 The triggers are a stage; one pass when the loop starts, so a plugin that
-restarted acts at once on a log that changed while it was away; the kernel's
-change events of an nvme controller, read off its event socket: the
-discovery-log-change notification and the notice of a controller's connect or
-reconnect, but not a controller's add or remove event, which a connect that
-fails makes, so a refused connect does not start the next pass at once; a
-retry timer; and a timer of the follower's period as the safety net.
-The retry timer runs one more pass after a pass that failed, a cdc it could not
-reach or read included, or that held a drop back only because no listed path
-shows the namespace yet, for which no event comes: a path's namespace device
-sends none. Its delay starts at a second, doubles after each such pass up to
-the period, and starts again from a second after a pass that a stage or an
-event began, since news can end what held the passes back, and after a pass
-that leaves nothing to retry. The event socket survives a receive overflow,
-which starts a pass, since events were lost, and any other failure, which
-starts a pass as well and after which the socket is opened again after a
-pause that doubles up to the period, its opening starting one more pass for
-the events lost meanwhile; each receive returns within a second, so the loop
-sees its stop, and a failure of the socket logs a sync error.
+restarted acts at once on a log that changed while it was away; every
+change event of an nvme controller, read off the kernel's event socket,
+among them the discovery-log-change notification and the notice of a
+controller's connect or reconnect, but not a controller's add or remove
+event, which a connect that fails makes, so a refused connect does not
+start the next pass at once; a retry timer; and a timer of the follower's
+period as the safety net. The retry timer runs one more pass after a pass
+that failed, a cdc it could not reach or read included, or that held a
+drop back only because no listed path shows the namespace yet, for which
+no event comes: a path's namespace device sends none. Its delay starts at
+a second, doubles after each such pass up to the period, and starts again
+from a second after a pass that a stage or an event began, since news can
+end what held the passes back, and after a pass that leaves nothing to
+retry. The event socket survives a receive overflow, which starts a pass,
+since events were lost, and any other failure, which starts a pass as well
+and after which the socket is opened again after a pause that doubles up
+to the period, its opening starting one more pass for the events lost
+meanwhile; each receive returns within a second, so the loop sees its
+stop, and a failure of the socket logs a sync error.
 
 A stage, a pass, an unstage's forget and drop of the discovery connections, and
 the stop's drop run one at a time, so an unstage that empties the set never
@@ -559,16 +566,17 @@ own copies of the deployment verbs: etcd, the gateway, the worker and the
 cdc on the control-plane guest as the login user, one dn agent per
 disk-node guest over a sparse loop device, one cn agent per controller-node
 guest, each guest its own location, passed at its node's create (the lab's
-guests share one host name, the default location: `architecture.md`, Disk
-nodes), and a cluster with every node registered; the controller and disk
-nodes carry the udev rules of
-`deploy/udev/` (`architecture.md`, Components: invocation reference), and the
-hosts the mask of nvme-cli's autoconnector, for the run. The stack
-listens on a port block of its own, bound by no other suite. The suite never
-builds a pool: the driver does, one per volume, so a RAID1 pool of one slice
-takes four disk-node guests, which is the least the suite accepts, and the
-failover needs the second controller-node guest. The storage class of the cases
-names the suite's cluster, RAID1 and two cntlrs.
+disk-node and controller-node guests share one host name, the default
+location: `architecture.md`, Disk nodes), and a cluster with every node
+registered; the controller and disk nodes carry the udev rules of
+`deploy/udev/` (`architecture.md`, Components: invocation reference), and
+the hosts the mask of nvme-cli's autoconnector, for the run. The stack
+listens on a port block of its own, bound by no other suite. The suite
+never builds a pool: the driver does, one per volume, so a RAID1 pool of
+one slice takes four disk-node guests, which is the least the suite
+accepts, and the failover needs the second controller-node guest. The two
+storage classes of the cases name the suite's cluster, RAID1 and two
+cntlrs, and the second also names xfs.
 
 ## Log records
 
@@ -686,7 +694,7 @@ host.
 ### The cases
 
 Every case runs on the suite's dnv stack with the driver deployed from the
-manifests, the config map and the storage class of the suite in place of
+manifests, the config map and the storage classes of the suite in place of
 the examples; the IO pods run the driver's own image, since it carries the
 tools they need and is already on every node. Each case that creates
 volumes ends with the check that nothing is left: no pool in the cluster,

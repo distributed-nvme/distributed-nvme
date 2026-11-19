@@ -112,9 +112,13 @@ no other leg: a leg of another identity (rule 5), a half-copied leg and a
 leg with no superblock are never listed, whatever they hold. Each entry
 says whether the request passes it (`overridden`). Add `--override` with a
 comma list of words, such as `--override bad-blocks`, to see what a start
-that passes those refusals would do. A refusal no override passes, such
-as a leg that does not serve, ends the dry run's checks, and the list then
-holds only the refusals met before it. The dry run runs nothing.
+that passes those refusals would do. A refusal of the primary's checks
+that no override passes, such as a leg that does not serve, ends those
+checks, and the list then holds only the refusals met before it. A refusal
+the gateway makes on its own, such as a pool level at which no group array
+is built, or a report of the primary with no row for the group, ends
+nothing: the list still holds every refusal the primary's checks met. The
+dry run runs nothing.
 
 Tested: the cn agent suite, `integtest/cnagent_test.sh`, repair case,
 stage `forced`. It runs the primary's read and dry run before a real
@@ -125,8 +129,9 @@ stand-in gateway. The end-to-end suite's react case runs
 named leg carries a bad-block list. The cn agent suite's stage `badstart` reads the list of
 refusals, and so do its stage `forced` and the end-to-end suite's react
 case when the named leg carries a bad-block list; a start that names one
-override and is refused for another kind is tested by the unit tests of
-the cn agent alone.
+override and is refused for another kind is tested only by unit tests:
+those of the cn agent for `older-leg` and `bad-blocks`, and those of the
+gateway for `partial`.
 
 ### Before every forced start
 
@@ -188,7 +193,12 @@ Choose the leg with these rules:
    the current identity, with no refusal and no warning in the dry run.
    Compare it by hand.
 6. The named leg may be dead when you write the mark. The primary then
-   waits for it and starts from it when it comes back.
+   waits for it and starts from it when it comes back, unless the start
+   then meets a refusal the mark does not pass (step 4 of the safe steps).
+   While the named leg does not serve, the dry run says only that the
+   start waits for it, and its list is empty. In the same way, while a leg
+   the start would wipe does not serve (rule 7), the list can lack a
+   refusal that the start meets once that leg serves.
 7. The start waits for every other leg it would wipe. A leg that will
    never come back blocks it: see "A forced start that waits".
 
@@ -213,7 +223,13 @@ Safe steps:
    seconds.
 4. Wait until the group's row reads ok and the mark is gone. The worker
    clears the mark once the primary reports that it acted on it, and that
-   the array runs with a member in sync on a leg whose row reads ok.
+   the array runs with a member in sync on a leg whose row reads ok. If
+   the group's row reads error with a text that starts
+   `forced start refused`, the start met a refusal the mark does not pass,
+   as when the named leg came back with a bad-block list (rule 6), and it
+   wiped nothing. Run the dry run again and follow step 2. To go on past
+   what it lists, write the mark again with those words, as in step 3: a
+   new mark replaces the one that stands.
 5. Read the group again. md is copying onto the other legs. Wait until
    every leg is in sync. Check that no leg shows a bad-block list. If the
    named leg's list is still there after a start that passed `bad-blocks`,
@@ -252,10 +268,11 @@ data), `older` and `olderstart` (an older leg refused, then started
 passing `older-leg`), and `badblocks` and `badstart` (the named leg's
 bad-block list refused with no override, nothing wiped, the dry run
 listing it alone, then dropped passing `bad-blocks`). The end-to-end
-suite, `integtest/e2e_test.sh`, react case: its first forced start, which
-reads the named leg's list length first and, when the leg has a list,
-checks the refusal and the dry run's list, then passes the kinds that list
-holds.
+suite, `integtest/e2e_test.sh`, react case: its first forced start, whose
+mark is written while the named leg is dead; once the leg is back, the
+suite reads the leg's list length and, when the leg has a list, checks the
+dry run's refusal and list, then writes the mark again passing the kinds
+that list holds.
 
 ### A group whose in-sync leg died during a copy
 
@@ -277,7 +294,9 @@ Safe steps, in this order:
 2. Write the mark naming the dead leg that kept the data, while it is
    still dead. The primary stops the broken array and waits for that leg.
 3. Bring the leg back. The primary starts the array from it and wipes the
-   half-copied leg. md copies onto it again.
+   half-copied leg. md copies onto it again. If the leg comes back with a
+   bad-block list, the start is refused instead and wipes nothing: see
+   step 4 of "Which leg to choose".
 4. Continue with steps 4 to 7 of "Which leg to choose".
 
 Why this order: if the leg comes back before the primary stops the array,
@@ -431,6 +450,14 @@ Causes and steps:
   need, so stop instead. Not tested.
 - A start from a repair's new leg waits the same way for the leg of the
   list that is not the repair's bad leg.
+- The group's row reads error with a text that starts
+  `forced start refused`. The start met a refusal the mark does not pass,
+  such as a bad-block list on a named leg that was dead when the mark was
+  written, and it wiped nothing. Follow step 4 of the safe steps of "Which
+  leg to choose". Tested: the cn agent suite, repair case, stages `older`
+  and `olderstart`, a start refused for an older leg and then passed; the
+  end-to-end suite's react case writes the mark again, from the dry run,
+  when a dead named leg comes back with a list.
 
 Steps that can lose data: a mark left standing over a running array (see
 above).
@@ -841,12 +868,14 @@ Safe steps, to move every volume of the pool to a new pool:
      a controller node of the other pool. Before each move of step 2,
      compare the `addr_port` of the cntlrs that `dnvctl sp get` shows for
      both pools. If two share a controller node, stop moving and move one
-     of them. Disable it with
-     `dnvctl cntlr set-enabled --id <cntlr id> --enabled=false`. If it was
-     the primary, wait until `dnvctl sp get` shows another cntlr as the
-     primary, since the gateway refuses to delete the primary. Then delete
-     it with `dnvctl cntlr delete --id <cntlr id>`, and create it again
-     with
+     of them. Choose one whose pool has another healthy, enabled cntlr:
+     disabling a pool's only enabled cntlr stops that pool's IO, and no
+     failover follows. If neither has one, stop and ask for help. Disable
+     it with `dnvctl cntlr set-enabled --id <cntlr id> --enabled=false`.
+     If it was the primary, wait until `dnvctl sp get` shows another cntlr
+     as the primary, since the gateway refuses to delete the primary. Then
+     delete it with `dnvctl cntlr delete --id <cntlr id>`, and create it
+     again with
      `dnvctl cntlr create --slot <its cntlid slot> --cn-black <the other pool's controller nodes>`,
      the addresses separated by commas.
 2. Move the volumes one at a time, or a few at once: a pool holds at most
@@ -1593,12 +1622,13 @@ name, and a new pool's legs kept out of its first primary's location,
 with the placement that ignores that location tried once more when it is
 refused. The gateway suite's smoke case checks the legs kept out of the
 primary's location over its fake nodes, and the dn and cn suites check the
-host name each agent reports; those three checks are written and have not
-yet run in the lab. The e2e suite's loss of a primary's machine, a reset of
-its controller node that fails the pool over and replaces the lost cntlr,
-passed in the lab at one slice on 2026-11-19; it does not test the
-location default, as in that suite no controller node shares a location
-with a disk node.
+host name each agent reports; those three checks passed in the lab on
+2026-11-19. The e2e suite's loss of a primary's machine, a reset of its
+controller node that fails the pool over and replaces the lost cntlr,
+passed in the lab at one slice on 2026-11-19; it tests neither the
+location default, as every node there is created with a location named,
+nor a new pool keeping its legs out of its primary's location, as no
+controller node there shares a location with a disk node.
 
 ## Gather a node's state for a bug report
 
@@ -1874,10 +1904,13 @@ Safe steps, in this order:
 1. Start the new cdcs, each with its range, while the old cdcs still serve
    every pool they served. Do not yet stop an old cdc or restart it with a
    narrower range.
-2. Write the new list: every cdc address of every range that serves the
-   pools of this cluster, so that a cdc of the list serves each pool. Edit
-   the config map, `kubectl -n dnv-csi edit configmap dnv-csi-config`, or
-   apply the edited `deploy/config.yaml`.
+2. Write the new list: the address of every cdc that still serves after
+   step 5, the new cdcs and the old ones that stay, so that a cdc of the
+   list serves each pool. Leave out each address that step 5 stops: a
+   listed cdc that cannot be reached keeps the node plugin from dropping
+   any path, a failed-over primary's path included. Edit the config map,
+   `kubectl -n dnv-csi edit configmap dnv-csi-config`, or apply the edited
+   `deploy/config.yaml`.
 3. Start both plugins again:
    `kubectl -n dnv-csi rollout restart deployment/dnv-csi-controller daemonset/dnv-csi-node`,
    and wait for `kubectl -n dnv-csi rollout status daemonset/dnv-csi-node`.
@@ -1906,9 +1939,10 @@ listed cdc that is stopped, by contrast, only holds the drops while it
 cannot be reached. Keep the order of the steps, and check the new list
 against every range before step 3.
 
-When to stop: after step 3 a node logs `csi follower sync error` naming a
-cdc of the list on every try: the address is wrong or the cdc is down. Fix
-the list or the cdc before step 5 and before any volume fails over.
+When to stop: after step 3 or step 5, a node logs
+`csi follower sync error` naming a cdc of the list on every try: the
+address is wrong or the cdc is down. Fix the list or the cdc before you go
+on and before any volume fails over.
 
 Tested: unit tests of the node plugin check that it follows its own list
 alone, and not an address the controller plugin passes at attach; that it
@@ -1957,16 +1991,19 @@ up to five minutes between tries.
 Safe steps:
 
 1. Fix what the refusal names, as root on the node.
-   - The identity files, on a node that holds a dnv volume, connected as
-     `nvme list-subsys` shows: write back the host NQN and host id its
-     connections carry, which the kernel shows for each connection:
+   - The identity files, on a node with any NVMe-oF connection, a dnv
+     volume's or another tool's, as `nvme list-subsys` shows: write back
+     the host NQN and host id its connections carry, which the kernel
+     shows for each connection:
      `cat /sys/class/nvme/nvme*/hostnqn 2>/dev/null | sort -u` prints one
      host NQN, to put in `/etc/nvme/hostnqn`, and
      `cat /sys/class/nvme/nvme*/hostid 2>/dev/null | sort -u` one host id,
-     to put in `/etc/nvme/hostid`. Stop if either prints more than one line.
-   - The identity files, on a node that holds no dnv volume and has no NVMe
-     connection: `nvme gen-hostnqn > /etc/nvme/hostnqn` and
-     `uuidgen > /etc/nvme/hostid`, only for a file that is missing or empty.
+     to put in `/etc/nvme/hostid`. Stop if either prints more than one
+     line.
+   - The identity files, on a node with no NVMe-oF connection:
+     `nvme gen-hostnqn > /etc/nvme/hostnqn` and
+     `uuidgen > /etc/nvme/hostid`, only for a file the refusal names as
+     missing, empty or holding no host NQN.
    - Multipath: add `nvme_core.multipath=Y` to the kernel's command line and
      reboot the node; a kernel built without native NVMe multipath must be
      replaced.
