@@ -1112,6 +1112,11 @@ dn_backing() { printf '%s/dn%s/backing.img' "$WORK" "$1"; }
 dn_store() { printf '%s/dn%s/store' "$WORK" "$1"; }
 dn_log() { printf '%s/dn%s/agent.log' "$WORK" "$1"; }
 dn_location() { printf 'dn%s' "$1"; }
+# cn_location is the location every CN VM's cn agent registers: its role
+# name, passed with --location, since the lab's CN guests share one host
+# name, the default location (CreateControllerNode
+# (gateway/controllernode.go)), and would all be one location without it.
+cn_location() { printf 'cn%s' "$1"; }
 
 cn_dir() { printf '%s/cn' "$WORK"; }
 cn_store() { printf '%s/cn/store' "$WORK"; }
@@ -4620,6 +4625,22 @@ HELPER_DN_EOF
 # --- cn guests --------------------------------------------------------------
 helper_cn_source() {
 	cat <<'HELPER_CN_EOF'
+
+# power_reset resets this guest at once through the kernel's sysrq trigger,
+# the react case's loss of a machine: no sync, no unmount, every kernel object
+# gone, as a power loss leaves a machine, and the hypervisor starts the guest
+# again. The reset runs a second later in a session of its own, its streams
+# on /dev/null, so this verb and the ssh that ran it end first and nothing of
+# the session waits on it; it prints the boot id the guest had, which a new
+# boot replaces. A write to /proc/sysrq-trigger takes effect for root
+# whatever kernel.sysrq holds.
+power_reset() {
+	local boot
+	boot=$(cat /proc/sys/kernel/random/boot_id 2>/dev/null) || boot=""
+	setsid -f sh -c 'sleep 1; echo b > /proc/sysrq-trigger' \
+		</dev/null >/dev/null 2>&1
+	echo "boot=$boot"
+}
 
 # md_member_of <dm name> prints the md array node holding the dm device <dm
 # name> as a member and the member's kernel name, "<mdN> <dm-K>", found by
@@ -9052,10 +9073,9 @@ sp_read_roles() {
 
 	# The idle CNs: every --cn guest carrying no cntlr of this sp. cn
 	# placement dedupes by location in FindCnCandidates (model/alloc.go), and
-	# an omitted location becomes the node's own addr_port in
-	# CreateControllerNode (gateway/controllernode.go), so with one cn agent
-	# per VM the CNTLR_CNT cntlrs are on CNTLR_CNT different VMs and the rest
-	# carry none.
+	# every CN registers its VM's role as its location (setup step 5), so
+	# with one cn agent per VM the CNTLR_CNT cntlrs are on CNTLR_CNT
+	# different VMs and the rest carry none.
 	IDLE_CN_LIST=()
 	IDLE_CN=-1
 	for v in "${!CN[@]}"; do
@@ -9888,16 +9908,21 @@ setup_register_nodes() {
 		log "  dn$v: $DNS_PER_VM disk nodes at location $(dn_location "$v")"
 	done
 
-	# CNs keep the default location, which the gateway fills with the
-	# node's own addr_port, so with one cn agent per VM every CN is its own
-	# failure domain and the CNTLR_CNT cntlrs land on CNTLR_CNT VMs.
+	# Every CN registers --location cn<v>, the VM's role: the lab's guests
+	# share one host name, which a node created with no location takes
+	# (CreateControllerNode (gateway/controllernode.go)), so without it every
+	# CN would be one location. With one cn agent per VM every CN is then its
+	# own failure domain, and the CNTLR_CNT cntlrs land on CNTLR_CNT VMs. No
+	# CN shares a location with a DN, so the pool create's first preference
+	# (pickSpDns (gateway/storagepool.go)) keeps no leg from any DN here.
 	for v in "${!CN[@]}"; do
 		addr=$(cn_addr "$v")
 		wait_until "$WAIT_AGENT" \
 			"cn create $addr to be accepted (the gateway calls that agent's GetCnSize inline)" \
 			ctl_create_try cn create --addr "$addr" \
 			--tr-type tcp --adr-fam ipv4 \
-			--tr-addr "${CN_IP[$v]}" --tr-svc-id "$CN_TRSVCID"
+			--tr-addr "${CN_IP[$v]}" --tr-svc-id "$CN_TRSVCID" \
+			--location "$(cn_location "$v")"
 	done
 	log "  $CN_CNT controller nodes registered"
 
@@ -13240,7 +13265,7 @@ ops_namespace() {
 #
 # The refusal is RESOURCE_EXHAUSTED because the scan found too few candidates:
 # pickDns draws plan.Legs of them and errExhausted's message is
-# "<what>: %d disk nodes with %d free extents, need %d"
+# "<what>: %d disk nodes with %d free extents in distinct locations, need %d"
 # (pickDns (gateway/alloc.go)), with `what` = "grow slice"
 # (GrowSlice (gateway/storagepool.go)). The white list is
 # exactly LEGS free DNs on LEGS DIFFERENT VMs, one of them the disabled one:
@@ -17993,8 +18018,8 @@ case_copy() {
 # ---------------------------------------------------------------------------
 # Case: react — the four automatic reactions, AR5 to AR8, two forced
 # starts (AR13, CN12), an operator's take-over of a group's repair from
-# the worker (architecture.md, Repairs) and a migrating leg whose serving
-# disk node goes silent (CN10, AR8)
+# the worker (architecture.md, Repairs), a migrating leg whose serving
+# disk node goes silent (CN10, AR8) and the loss of the primary's machine
 # (e2e_integtest.md, The cases, react)
 # ---------------------------------------------------------------------------
 #
@@ -18241,6 +18266,15 @@ REACT_REPL_POS=-1
 REACT_REPL_ID=""
 REACT_REPL_ADDR=""
 REACT_REPL_TRADDR=""
+
+# Step 12, the loss of a machine: the guest it resets and the boot id that
+# guest had before, which a new boot replaces (react_guest_rebooted).
+REACT_PL_CN=-1
+REACT_PL_BOOT=""
+# How long the reset guest may take to answer ssh again, counted from the
+# reset. The lab's guests answered after about eight seconds; the bound is
+# the suite's choice, wide enough for a slow boot.
+REACT_PL_BOOT_WAIT=180
 
 # AR8: the leg this case kills, the repair the worker creates for it and the
 # new leg that repair puts in its place; REACT_REP_MARK is the worker log's
@@ -24573,6 +24607,262 @@ react_drop_target() {
 	check_sha0 "after the react case deleted its own namespace and thin device"
 }
 
+# --- step 12 ----------------------------------------------------------------
+#
+# THE LOSS OF A MACHINE (e2e_integtest.md, The cases, react). The primary's
+# controller-node guest is reset through the kernel's sysrq trigger (the
+# guest helper's power_reset): no sync, no unmount, every kernel object of
+# the guest gone, as a power loss leaves a machine, and the hypervisor starts
+# the guest again. A sysrq reset and not the hypervisor's power-off, because
+# the suite reaches its guests by ssh alone (E2E1); and not a network cut,
+# which is a partition and leaves the kernel's objects serving.
+#
+# UNLIKE STEP 3'S KILL, NOTHING OF THE OLD PRIMARY OUTLIVES IT: its nvmet
+# port, its namespaces and their ANA states go with its kernel, so the hazard
+# step 3 disarms by hand (the case header) cannot arise, and host0 keeps every
+# path it holds through the failover. Its path to the reset guest retries,
+# and its multipath head queues IO on the standby's path, inaccessible, until
+# the new primary turns it optimized. So the step reads host0's data through
+# the new primary with no disconnect first, then drops the dead path once the
+# cdc's log no longer names the reset guest, as a host that follows the
+# discovery log does, and only then connects the replacement through the cdc,
+# as step 4 does: a host that still holds the dead path refuses the
+# replacement's (the comment at the drop says why).
+#
+# THE START. After steps 3 and 4 the cntlrs sit on the CN step 3 elected the
+# primary on and on the CN that carried none then (the replacement, the
+# standby now); the CN step 3 killed holds none and its agent runs again since
+# step 4, so AR7 has a place for the replacement here as well. Steps 5 to 11
+# moved no cntlr (each asserts no failover).
+#
+# THE GUEST'S RETURN. The reset guest boots with no nvmet, nvme-tcp, dm-thin,
+# dm-clone or raid1 module loaded and configfs mounted, and its cn agent not
+# running; its work directory under /var/tmp survives, store, log and binary.
+# The step waits for the new boot before anything else, to bound it, and
+# brings the agent back only once AR7 has replaced the dead cntlr: an agent
+# back before that would answer its rounds and keep the cntlr it rebuilds
+# from its store, which AR7 would then not replace. The guest's per-boot
+# preparation is preflight_node's, the module loads and the configfs mount
+# included (the udev rules sit in /etc/udev/rules.d, and cn_up writes them
+# again anyway); the agent then starts from its store, as an agent after a
+# reboot does, and must converge to a node with no cntlr of the pool.
+
+# react_guest_rebooted is the new boot: the guest answers ssh, and its boot
+# id is not the one power_reset printed.
+react_guest_rebooted() { # <v> <old boot id>
+	local boot
+	boot=$(ssh_cn "$1" "cat /proc/sys/kernel/random/boot_id") || return 1
+	[ -n "$boot" ] && [ "$boot" != "$2" ]
+}
+
+react_power_loss() {
+	stage 12 "the primary's machine loses its power: failover, replacement, host0's reads, and the machine back with no cntlr"
+	local out wmark tag t0 boot_secs old_id old_addr old_traddr old_slot
+	local old_standby idle idle_addrs ctrl_dead msg i cnt=0 idx=-1
+	local repl_id repl_addr repl_traddr hits
+
+	sp_refresh
+	sp_read_roles
+	assert_eq "$CNTLR_CNT" 2 \
+		"this step is written for a cntlr_cnt of 2 (one standby to elect)"
+	old_id=$PRIMARY_CNTLR_ID
+	old_addr=$PRIMARY_ADDR
+	old_traddr=$PRIMARY_TRADDR
+	old_standby=$STANDBY_CNTLR_ID
+	old_slot=$(sp_field ".cntlr_list[$PRIMARY_POS].cntlid_slot")
+	REACT_PL_CN=$PRIMARY_CN
+	idle_addrs=","
+	for idle in "${IDLE_CN_LIST[@]:-}"; do
+		[ -n "$idle" ] || continue
+		idle_addrs="$idle_addrs$(cn_addr "$idle"),"
+	done
+	[ "$IDLE_CN" -ge 0 ] ||
+		die "every --cn guest carries a cntlr of $SP, so AR7 would have no" \
+			"controller node to replace the lost primary on"
+	log "  primary cntlr $old_id is on cn$REACT_PL_CN ($old_addr)," \
+		"cntlid_slot $old_slot; the standby is $old_standby on" \
+		"cn$STANDBY_CN; carrying no cntlr:${idle_addrs//,/ }"
+	# host0 holds both paths, and keeps them through the reset: nothing of the
+	# old primary's kernel survives to advertise a path (the step header).
+	assert_eq "$(host_path_state 0 "$SS0" "$old_traddr")" live \
+		"host0's path to the primary on cn$REACT_PL_CN before the reset"
+	assert_eq "$(host_path_state 0 "$SS0" "$STANDBY_TRADDR")" live \
+		"host0's path to the standby on cn$STANDBY_CN before the reset"
+	ctrl_dead=$(host_ctrl 0 "$SS0" "$old_traddr")
+
+	wmark=$(worker_log_mark)
+	tag="dnv-e2e-react-power-mark-$(hex16 "$CLUSTER_ID")"
+	host_kmsg_mark 0 "$tag"
+	out=$(helper_cn "$REACT_PL_CN" power_reset) ||
+		die "cn$REACT_PL_CN: the power_reset verb failed: $out"
+	t0=$SECONDS
+	REACT_PL_BOOT=${out#boot=}
+	case "$REACT_PL_BOOT" in
+	'' | *[!0-9a-f-]*)
+		die "cn$REACT_PL_CN: power_reset read the boot id '$REACT_PL_BOOT'"
+		;;
+	esac
+	log "  cn$REACT_PL_CN reset (boot $REACT_PL_BOOT)"
+	wait_until "$REACT_PL_BOOT_WAIT" \
+		"cn$REACT_PL_CN to answer ssh again under a new boot id" \
+		react_guest_rebooted "$REACT_PL_CN" "$REACT_PL_BOOT"
+	boot_secs=$((SECONDS - t0))
+	log "  cn$REACT_PL_CN answers again ${boot_secs}s after the reset"
+
+	REACT_ROLE_LAST=""
+	msg="AR5 to move the primary role off cntlr $old_id, whose machine was"
+	msg="$msg reset (primary_unhealthy ${THR_PRIMARY}s after its err_epoch)"
+	wait_until "$WAIT_REACT" "$msg" react_primary_moved "$old_id"
+	SP_JSON=$CTL_OUT
+	sp_read_roles
+	assert_eq "$PRIMARY_CNTLR_ID" "$old_standby" \
+		"the elected primary is the cntlr that was the standby (AR5)"
+	assert_ne "$PRIMARY_ADDR" "$old_addr" \
+		"and it is not on the reset cn$REACT_PL_CN"
+	REACT_NEW_PRIMARY_ID=$PRIMARY_CNTLR_ID
+
+	sp_totals
+	stack_wait_reset
+	msg="the new primary cntlr $PRIMARY_CNTLR_ID on cn$PRIMARY_CN to build"
+	msg="$msg $SLICE_CNT pools, $SP_GRP_TOTAL groups and"
+	msg="$msg $((SP_LEG_TOTAL + SP_REPAIR_TOTAL)) legs"
+	wait_until "$WAIT_BUILD" "$msg" \
+		react_new_primary_ready "$REACT_NEW_PRIMARY_ID"
+	wait_until "$WAIT_PROVISION" \
+		"the new primary to build the raid0 of $TD0" \
+		cntlr_raid0_ready "$PRIMARY_CNTLR_ID" 1
+	ops_level_want READWRITE
+	LEVEL_LAST=""
+	wait_until "$WAIT_PROVISION" \
+		"the new primary to report CN19's READWRITE shape, subsystem and namespace rows included" \
+		cntlr_level_ready "$PRIMARY_CNTLR_ID"
+
+	# host0's head turns to the path it already holds to the new primary.
+	host_wait_ana 0 "$SS0" "$PRIMARY_TRADDR" "$UUID1" optimized
+	wait_dev 0 "$UUID1"
+	assert_ne "$(host_path_state 0 "$SS0" "$old_traddr")" live \
+		"host0's path to the reset cn$REACT_PL_CN is not live"
+	check_sha0 "through the new primary, after the primary's machine was reset"
+
+	# host0 drops its path to the reset guest once the cdc's log no longer
+	# names it, as a host that follows the discovery log does: the failover's
+	# own transaction withdrew the lost cntlr (architecture.md [D18]). It goes
+	# by device, as ops step 3 drops its dead path: the guest listens on no
+	# port for $SS0, so the controller would retry until ctrl_loss_tmo,
+	# pinning the namespace head; a controller the kernel deleted on its own
+	# is the other ending. AND IT GOES BEFORE THE REPLACEMENT'S CONNECT: the
+	# replacement keeps the lost cntlr's cntlid slot (AR7), the replacement's
+	# node hands host0 the slot's first controller id, which the retrying
+	# controller still holds, and the kernel refuses a second controller of
+	# one id while the first is not being deleted ("Duplicate cntlid …,
+	# rejecting", seen in the lab; architecture.md, Known limits).
+	DISC_LAST=""
+	wait_until "$WAIT_HOST" \
+		"the cdc to serve $SS0 to host0 as the listing rule lists it, without the reset cn$REACT_PL_CN" \
+		host_disc_is_listed 0 "$SS0"
+	hits=$(printf '%s\n' "$DISC_LAST" | grep -cF -- "|$old_traddr|" || true)
+	assert_eq "$hits" 0 \
+		"the reset CN's transport is out of host0's discovery log (the failover took it out)"
+	case "$ctrl_dead" in
+	'' | none) ;;
+	*) ssh_host_ok 0 "timeout 30 nvme disconnect -d $ctrl_dead >/dev/null 2>&1 || true" ;;
+	esac
+	wait_until "$WAIT_HOST" \
+		"host0 to stop holding a path to the reset cn$REACT_PL_CN" \
+		host_path_is_none 0 "$SS0" "$old_traddr"
+
+	msg="AR7 to replace cntlr $old_id (${THR_CNTLR}s after its err_epoch,"
+	msg="$msg and only after AR5 demoted it)"
+	wait_until "$WAIT_REACT" "$msg" react_cntlr_replaced "$old_id"
+	SP_JSON=$CTL_OUT
+	sp_read_roles
+	if [ "$PRIMARY_CNTLR_ID" != "$REACT_NEW_PRIMARY_ID" ]; then
+		die "AR5 fired again after the reset: cntlr" \
+			"$REACT_NEW_PRIMARY_ID was elected and rebuilt, cntlr" \
+			"$PRIMARY_CNTLR_ID holds the role now, so this step cannot" \
+			"resolve AR7's replacement from the primary"
+	fi
+	for i in "${!CNTLR_ADDRS[@]}"; do
+		if [ "${CNTLR_ADDRS[$i]}" = "$PRIMARY_ADDR" ] ||
+			[ "${CNTLR_ADDRS[$i]}" = "$old_addr" ]; then
+			continue
+		fi
+		cnt=$((cnt + 1))
+		idx=$i
+	done
+	assert_eq "$cnt" 1 \
+		"exactly one cntlr of $SP is neither the new primary's nor on the reset cn$REACT_PL_CN"
+	repl_id=${CNTLR_IDS[$idx]}
+	repl_addr=${CNTLR_ADDRS[$idx]}
+	repl_traddr=${CNTLR_TRADDRS[$idx]}
+	case "$idle_addrs" in
+	*",$repl_addr,"*) ;;
+	*)
+		die "the replacement cntlr $repl_id landed on $repl_addr, which" \
+			"carried a cntlr of $SP when the machine was reset. The CNs" \
+			"that carried none were ${idle_addrs//,/ }"
+		;;
+	esac
+	assert_field "$SP_JSON" ".cntlr_list[$idx].cntlid_slot" "$old_slot" \
+		"the replacement inherits the lost cntlr's cntlid_slot"
+	assert_field "$SP_JSON" ".cntlr_list[$idx].primary" false \
+		"the replacement is a standby"
+	log "  cntlr $old_id on cn$REACT_PL_CN was replaced by cntlr $repl_id" \
+		"on cn$(cn_vm_of_addr "$repl_addr") ($repl_addr)"
+	sp_totals
+	stack_wait_reset
+	wait_until "$WAIT_BUILD" \
+		"the replacement cntlr $repl_id to connect all $((SP_LEG_TOTAL + SP_REPAIR_TOTAL)) legs as a standby" \
+		cntlr_legs_full_ready "$repl_id"
+
+	# host0 comes to the replacement THROUGH THE CDC (E2E10), as in step 4.
+	wait_all_listed "$WAIT_PROVISION" \
+		"the new primary and the replacement to be in $SP's discovery records"
+	disc_want_of_sp "$SS0"
+	DISC_LAST=""
+	wait_until "$WAIT_HOST" \
+		"the cdc to serve $SS0 over the new primary and the replacement" \
+		host_disc_is 0
+	hits=$(printf '%s\n' "$DISC_LAST" | grep -cF -- "|$old_traddr|" || true)
+	assert_eq "$hits" 0 \
+		"the reset CN's transport is out of host0's discovery log"
+	hits=$(printf '%s\n' "$DISC_LAST" | grep -cF -- "|$repl_traddr|" || true)
+	assert_ne "$hits" 0 "and the replacement's transport is in it"
+	wait_ns_exported_all "$SS0" "$SS0_ID" "$NS1_ID"
+	host_connect_all 0 "$SS0"
+	connect_added_ctrl 0 "$SS0" "$repl_traddr"
+	wait_until "$WAIT_HOST" \
+		"host0's path to the replacement cntlr $repl_id ($repl_traddr) to go live" \
+		host_path_live 0 "$SS0" "$repl_traddr"
+	host_wait_ana 0 "$SS0" "$repl_traddr" "$UUID1" inaccessible
+	assert_eq "$(host_path_state 0 "$SS0" "$PRIMARY_TRADDR")" live \
+		"host0's path to the new primary is still live"
+	check_sha0 "after AR7 replaced the cntlr of the reset machine"
+	host_kmsg_clean 0 "$tag" "across the reset of the primary's machine"
+
+	# One failover and one replacement, the reset's: no second failover.
+	assert_eq "$(worker_reaction_kind_cnt "$wmark" failover)" 1 \
+		"failovers the worker applied after the reset (AR5)"
+	assert_eq "$(worker_reaction_kind_cnt "$wmark" replace_cntlr)" 1 \
+		"cntlr replacements the worker applied after the reset (AR7)"
+
+	# The machine back: its per-boot preparation, then its agent from its
+	# store, which must converge to no cntlr of the pool.
+	preflight_node cn "$REACT_PL_CN"
+	start_cn_agent "$REACT_PL_CN"
+	wait_until "$WAIT_PROVISION" \
+		"cn$REACT_PL_CN to report its node state again" \
+		cn_node_ready "$REACT_PL_CN"
+	wait_until "$WAIT_PROVISION" \
+		"cn$REACT_PL_CN's record to show an empty cntlr_ptr_list" \
+		react_cn_has_no_cntlr "$old_addr"
+	RESIDUE_LAST=""
+	wait_until "$WAIT_PROVISION" \
+		"cn$REACT_PL_CN to hold nothing of $SP after its agent's start from its store" \
+		cn_residue_empty "$REACT_PL_CN"
+	check_sha0 "after the reset machine came back with no cntlr"
+}
+
 case_react() {
 	CASE=react
 	react_snapshot
@@ -24588,6 +24878,7 @@ case_react() {
 	react_take_over
 	react_migr_cut
 	react_drop_target
+	react_power_loss
 	case_finish
 }
 

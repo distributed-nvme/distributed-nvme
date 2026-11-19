@@ -446,7 +446,8 @@ that asks for the counters, which reads them at the call as
 
 Setup proves each dn agent by its exact data area and a baseline `SyncupDn`
 (`dnagent.md` DN3, DN5), each cn agent by a `GetCnSize` echoing its capacity
-(`cnagent.md` CN3, CN-CM1) and a baseline `SyncupCn` with its base row and
+and the VM's host name as the VM reads it (`cnagent.md` CN3, CN-CM1;
+`dnagent.md` SH34) and a baseline `SyncupCn` with its base row and
 its store row OK (CN5, CN28). As an agent's gRPC listener opens before its
 startup pass (`dnagent.md` SH1, SH33), the drivers' wait for the size reply,
 here and after every restart, goes on reading the node's info until the

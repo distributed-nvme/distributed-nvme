@@ -2171,7 +2171,7 @@ start_agent() { # <idx>
 setup() {
 	CASE=setup
 	stage vms "the udev rules of deploy/udev, the backing store and both agents"
-	local idx out
+	local idx out host
 	for idx in 1 2; do
 		# The udev rules every node that runs a dnv agent carries, before the
 		# agent (dnagent_integtest.md, Assumptions and preflight checks).
@@ -2193,6 +2193,12 @@ setup() {
 	for idx in 1 2; do
 		out=$(ctl "$idx" get-dn-size --wait 15)
 		assert_eq "$(jq_of "$out" .size)" "$DATA_SIZE" "vm$idx GetDnSize"
+		# The reply carries the machine's host name, read at the call
+		# (dnagent.md SH34): the location a disk node created with none
+		# takes.
+		host=$(sshv "$idx" "cat /proc/sys/kernel/hostname")
+		assert_eq "$(jq_of "$out" .host_name)" "$host" \
+			"vm$idx GetDnSize host_name"
 	done
 
 	stage base "SyncupDn baseline: disk format (header + table), nvmet port"

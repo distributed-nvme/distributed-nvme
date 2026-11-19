@@ -850,7 +850,7 @@ func TestLegRepairCreateExcludesGroupLocations(t *testing.T) {
 		wantScan(t, h, []string{"rack-left"})
 	})
 
-	t.Run("the default location is the addr_port", func(t *testing.T) {
+	t.Run("a location equal to the addr_port", func(t *testing.T) {
 		h := build(t, reactDnA, reactDnB)
 		h.pass()
 		h.wantOps("create_repair")

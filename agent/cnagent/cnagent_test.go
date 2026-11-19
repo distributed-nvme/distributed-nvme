@@ -7515,20 +7515,49 @@ func assertAllOk(t *testing.T, info *pb.CntlrInfo) {
 // GetCnSize / GetCnInfo / GetCntlrInfo
 // ---------------------------------------------------------------------------
 
+// TestGetCnSize pins CN3: the reply is the --capacity flag and the machine's
+// host name (dnagent.md SH34), trimmed of its line end and read again on
+// every call; a failed read gives an empty name and still answers. The host
+// name file is the one OS access of the call: no lock, no store.
 func TestGetCnSize(t *testing.T) {
+	const hostNamePath = "/proc/sys/kernel/hostname"
 	srv, node := newTestServer(t)
-	reply, err := srv.GetCnSize(context.Background(),
-		&pb.GetCnSizeRequest{ClusterId: testCluster, CnId: 0})
-	if err != nil {
-		t.Fatalf("GetCnSize: %v", err)
+	ask := func(what string, wantName string) {
+		t.Helper()
+		node.Reset()
+		reply, err := srv.GetCnSize(context.Background(),
+			&pb.GetCnSizeRequest{ClusterId: testCluster, CnId: 0})
+		if err != nil {
+			t.Fatalf("%s: GetCnSize: %v", what, err)
+		}
+		if reply.GetSize() != testCapacity {
+			t.Errorf("%s: size %d, want %d",
+				what, reply.GetSize(), testCapacity)
+		}
+		if reply.GetHostName() != wantName {
+			t.Errorf("%s: host_name %q, want %q",
+				what, reply.GetHostName(), wantName)
+		}
+		want := []string{"read " + hostNamePath}
+		if calls := node.Calls(); !slices.Equal(calls, want) {
+			t.Errorf("%s: GetCnSize touched the OS with %q, want %q",
+				what, calls, want)
+		}
 	}
-	if reply.GetSize() != testCapacity {
-		t.Fatalf("size %d, want %d", reply.GetSize(), testCapacity)
+	setName := func(name string) {
+		node.mu.Lock()
+		defer node.mu.Unlock()
+		node.files[hostNamePath] = name
 	}
-	// CN3: no locks, no store, no OS access.
-	if calls := node.Calls(); len(calls) != 0 {
-		t.Fatalf("GetCnSize touched the OS: %v", calls)
-	}
+
+	setName("node-a\n")
+	ask("a machine named node-a", "node-a")
+	setName("node-b\n")
+	ask("the machine renamed", "node-b")
+	node.mu.Lock()
+	node.failReadAlways[hostNamePath] = true
+	node.mu.Unlock()
+	ask("a read that fails", "")
 }
 
 func TestGetInfoUnknownObject(t *testing.T) {

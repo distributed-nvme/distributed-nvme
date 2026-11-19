@@ -62,8 +62,9 @@ func dnAddrFlag(cmd *cobra.Command) {
 // the gateway.
 //
 // --location defaults to empty rather than to a rack name because the gateway
-// then defaults it to addr_port itself, so a create that names only --addr
-// still stores a well-formed DnConf.
+// then defaults it to the host name the node's agent reports
+// (architecture.md, Disk nodes), so a create that names only --addr puts the
+// node in its machine's location.
 func dnCreateCmd() *cobra.Command {
 	cmd := leaf("create", "create a disk node (CreateDiskNode)",
 		func() (job, error) {
@@ -83,7 +84,8 @@ func dnCreateCmd() *cobra.Command {
 	dnAddrFlag(cmd)
 	flags := cmd.Flags()
 	flags.String("location", "",
-		"failure domain; empty lets the gateway default it to addr_port")
+		"failure domain; empty lets the gateway default it to the "+
+			"machine's host name")
 	flags.Bool("disabled", false,
 		"create the node already disabled (no capacity key)")
 	trConfFlags(flags, "")

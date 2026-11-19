@@ -518,7 +518,11 @@ and carries no token, as every read does (CT3).
 
 `dn create` reaches the agent: the gateway calls the DN agent's `GetDnSize`
 inline (`gateway.md`, Agent calls), so the invocation's trace id chains
-through to the agent's records (`grpc.md` T3). `dn inspect` is the group's
+through to the agent's records (`grpc.md` T3). Its `--location` is empty
+unless given, which lets the gateway take the host name the agent reports
+(`architecture.md`, Disk nodes): every disk node of one machine created
+without it is one location, so a RAID1 setup on one machine names one per
+disk node. `dn inspect` is the group's
 read of the DN agent's latest observation of the node, through its
 `GetDnInfo`, rather than of etcd, so its disk counts are the agent's own,
 to set beside the record's counts that `dn get` shows (`architecture.md`,

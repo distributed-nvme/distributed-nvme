@@ -213,8 +213,8 @@ func TestCreateCloneRefusesFewerLocationsThanLegs(t *testing.T) {
 	_, err := env.srv.CreateClone(env.ctx,
 		volCloneRequest(env, "clone-a", "dst"))
 	msg := volWantCode(t, err, codes.ResourceExhausted)
-	want := fmt.Sprintf("clone %q: 1 disk nodes with %d free extents, "+
-		"need %d", "clone-a", common.CloneMetaGrpExtCnt,
+	want := fmt.Sprintf("clone %q: 1 disk nodes with %d free extents "+
+		"in distinct locations, need %d", "clone-a", common.CloneMetaGrpExtCnt,
 		common.MaxAllocLegPerGrp)
 	if msg != want {
 		t.Errorf("message: got %q, want %q", msg, want)

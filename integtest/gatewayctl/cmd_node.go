@@ -62,8 +62,9 @@ func nodeAddrFlag(fs *flag.FlagSet) *string {
 // CreateControllerNode take, which is the same set for both.
 //
 // --location defaults to the empty string rather than to a rack name: the
-// gateway then defaults it to addr_port itself (architecture.md, Disk nodes),
-// so a create-dn that only passes --addr still produces a well-formed DnConf.
+// gateway then defaults it to the host name the node's agent reports
+// (architecture.md, Disk nodes), so a create-dn that only passes --addr puts
+// the node in its machine's location.
 // The four transport flags default through trConfFlags to the
 // tcp/ipv4/127.0.0.1/4420 the fake agents of the suite's topology listen on,
 // for the same reason (gateway.md, Integration test plan, Topology).
@@ -75,7 +76,8 @@ func nodeCreateFlags(fs *flag.FlagSet) (
 ) {
 	addr = nodeAddrFlag(fs)
 	location = fs.String("location", "",
-		"failure domain; empty lets the gateway default it to addr_port")
+		"failure domain; empty lets the gateway default it to the "+
+			"machine's host name")
 	disabled = fs.Bool("disabled", false,
 		"create the node already disabled (no capacity key)")
 	trConf = trConfFlags(fs, "", "tcp", "ipv4", "127.0.0.1", "4420")

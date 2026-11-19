@@ -14208,8 +14208,12 @@ func (x *GetDnSizeRequest) GetDnId() uint64 {
 }
 
 type GetDnSizeReply struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	Size          uint64                 `protobuf:"varint,1,opt,name=size,proto3" json:"size,omitempty"`
+	state protoimpl.MessageState `protogen:"open.v1"`
+	Size  uint64                 `protobuf:"varint,1,opt,name=size,proto3" json:"size,omitempty"`
+	// The machine's host name, read on every call; empty when the read
+	// failed (dnagent.md SH34). A disk node created with no location takes
+	// it as its location (architecture.md, Disk nodes).
+	HostName      string `protobuf:"bytes,2,opt,name=host_name,json=hostName,proto3" json:"host_name,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -14249,6 +14253,13 @@ func (x *GetDnSizeReply) GetSize() uint64 {
 		return x.Size
 	}
 	return 0
+}
+
+func (x *GetDnSizeReply) GetHostName() string {
+	if x != nil {
+		return x.HostName
+	}
+	return ""
 }
 
 type SyncupDnRequest struct {
@@ -15336,8 +15347,12 @@ func (x *GetCnSizeRequest) GetCnId() uint64 {
 }
 
 type GetCnSizeReply struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	Size          uint64                 `protobuf:"varint,1,opt,name=size,proto3" json:"size,omitempty"`
+	state protoimpl.MessageState `protogen:"open.v1"`
+	Size  uint64                 `protobuf:"varint,1,opt,name=size,proto3" json:"size,omitempty"`
+	// The machine's host name, as GetDnSizeReply's (dnagent.md SH34). A
+	// controller node created with no location takes it as its location
+	// (architecture.md, Controller nodes).
+	HostName      string `protobuf:"bytes,2,opt,name=host_name,json=hostName,proto3" json:"host_name,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -15377,6 +15392,13 @@ func (x *GetCnSizeReply) GetSize() uint64 {
 		return x.Size
 	}
 	return 0
+}
+
+func (x *GetCnSizeReply) GetHostName() string {
+	if x != nil {
+		return x.HostName
+	}
+	return ""
 }
 
 type SyncupCnRequest struct {
@@ -19549,9 +19571,10 @@ const file_pb_schema_proto_rawDesc = "" +
 	"\x10GetDnSizeRequest\x12\x1d\n" +
 	"\n" +
 	"cluster_id\x18\x01 \x01(\x04R\tclusterId\x12\x13\n" +
-	"\x05dn_id\x18\x02 \x01(\x04R\x04dnId\"$\n" +
+	"\x05dn_id\x18\x02 \x01(\x04R\x04dnId\"A\n" +
 	"\x0eGetDnSizeReply\x12\x12\n" +
-	"\x04size\x18\x01 \x01(\x04R\x04size\"\xbc\x01\n" +
+	"\x04size\x18\x01 \x01(\x04R\x04size\x12\x1b\n" +
+	"\thost_name\x18\x02 \x01(\tR\bhostName\"\xbc\x01\n" +
 	"\x0fSyncupDnRequest\x12\x1d\n" +
 	"\n" +
 	"cluster_id\x18\x01 \x01(\x04R\tclusterId\x12\x13\n" +
@@ -19675,9 +19698,10 @@ const file_pb_schema_proto_rawDesc = "" +
 	"\x10GetCnSizeRequest\x12\x1d\n" +
 	"\n" +
 	"cluster_id\x18\x01 \x01(\x04R\tclusterId\x12\x13\n" +
-	"\x05cn_id\x18\x02 \x01(\x04R\x04cnId\"$\n" +
+	"\x05cn_id\x18\x02 \x01(\x04R\x04cnId\"A\n" +
 	"\x0eGetCnSizeReply\x12\x12\n" +
-	"\x04size\x18\x01 \x01(\x04R\x04size\"\xc6\x01\n" +
+	"\x04size\x18\x01 \x01(\x04R\x04size\x12\x1b\n" +
+	"\thost_name\x18\x02 \x01(\tR\bhostName\"\xc6\x01\n" +
 	"\x0fSyncupCnRequest\x12\x1d\n" +
 	"\n" +
 	"cluster_id\x18\x01 \x01(\x04R\tclusterId\x12\x13\n" +

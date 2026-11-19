@@ -1932,6 +1932,10 @@ dnv_up() {
 	assert_field "$CTL_OUT" '.cluster_conf.dn_bin_conf.extent_size' "$EXTENT_SIZE" "the stored extent size"
 
 	stage 05 "register ${#DN[@]} disk nodes and ${#CN[@]} controller nodes"
+	# Every node passes its guest's role as its location: the lab's
+	# disk-node and controller-node guests share one host name, the default
+	# location (architecture.md, Disk nodes), so the nodes created with
+	# none would all be one location and no RAID1 pool could be placed.
 	for v in "${!DN[@]}"; do
 		wait_until "$WAIT_AGENT" "dn create $(dn_addr "$v") to be accepted" \
 			ctl_create_try dn create --addr "$(dn_addr "$v")" \
@@ -1941,7 +1945,8 @@ dnv_up() {
 	for v in "${!CN[@]}"; do
 		wait_until "$WAIT_AGENT" "cn create $(cn_addr "$v") to be accepted" \
 			ctl_create_try cn create --addr "$(cn_addr "$v")" \
-			--tr-type tcp --adr-fam ipv4 --tr-addr "${CN_IP[$v]}" --tr-svc-id "$CN_TRSVCID"
+			--tr-type tcp --adr-fam ipv4 --tr-addr "${CN_IP[$v]}" --tr-svc-id "$CN_TRSVCID" \
+			--location "cn$v"
 	done
 	for v in "${!DN[@]}"; do
 		wait_until "$WAIT_PROVISION" "dn$v to report disk, header, port and store OK" dn_node_ready "$v"

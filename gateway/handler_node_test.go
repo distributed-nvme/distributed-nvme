@@ -1078,8 +1078,9 @@ func TestListClustersPagesAndRejectsABadToken(t *testing.T) {
 //
 // The rows are chosen to pin four separate rules at once: total_ext_cnt is the
 // reported size divided by the cluster's extent_size and ROUNDS DOWN
-// (architecture.md, Size → extents); an omitted location defaults to the node's
-// own endpoint (CreateDiskNode's Defaults, architecture.md, Disk nodes); the
+// (architecture.md, Size → extents); an omitted location is the host name the
+// node's agent reports (CreateDiskNode's Defaults, architecture.md, Disk
+// nodes), and a location sent wins over it; the
 // shard code is the index of the smallest bucket entry, first index on ties, so
 // three creates land on shards 0, 1 and 2 (GW12); and a node created disabled
 // gets no capacity key at all, in any bin — it is invisible to the allocator
@@ -1092,8 +1093,10 @@ func TestCreateDiskNodeWritesFourKeys(t *testing.T) {
 
 	wantCapKeys := []string{}
 	for _, tc := range []struct {
-		label     string
-		location  string
+		label    string
+		location string
+		// hostName is what the fake agent reports as its machine's name.
+		hostName  string
 		size      uint64
 		disabled  bool
 		wantId    uint64
@@ -1106,6 +1109,7 @@ func TestCreateDiskNodeWritesFourKeys(t *testing.T) {
 			// Size → extents, floors it to 16, which is exactly bin 1's level
 			// (1 << DefaultDnBin1Shift).
 			label:     "default location",
+			hostName:  "host-a",
 			size:      16<<30 + 512<<20,
 			wantId:    1,
 			wantShard: 0,
@@ -1115,6 +1119,7 @@ func TestCreateDiskNodeWritesFourKeys(t *testing.T) {
 		{
 			label:     "explicit location",
 			location:  "rack-2",
+			hostName:  "host-b",
 			size:      300 << 30,
 			wantId:    2,
 			wantShard: 1,
@@ -1132,7 +1137,10 @@ func TestCreateDiskNodeWritesFourKeys(t *testing.T) {
 		},
 	} {
 		addr := fakeAddrPort(t, "dn")
-		startFakeAgent(t, addr, tc.size)
+		agent := startFakeAgent(t, addr, tc.size)
+		if tc.hostName != "" {
+			agent.setHostName(tc.hostName)
+		}
 		reply, err := s.CreateDiskNode(ctx, &pb.CreateDiskNodeRequest{
 			ClusterName: cluster,
 			AddrPort:    addr,
@@ -1147,7 +1155,7 @@ func TestCreateDiskNodeWritesFourKeys(t *testing.T) {
 		}
 		location := tc.location
 		if location == "" {
-			location = addr
+			location = tc.hostName
 		}
 		// err_epoch 0, an empty side_ptr_list and free == total are the state
 		// of a node that is healthy and hosts nothing yet

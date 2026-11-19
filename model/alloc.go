@@ -280,14 +280,12 @@ func (r *freeRun) take(
 // nothing else. An empty excludeLocs makes tier 1 the plain scan, and tier 2
 // — which would offer the same locations again — is skipped.
 //
-// In a default deployment location defaults to addr_port (architecture.md,
-// Disk nodes), so a group's
-// locations ARE the addr_ports its caller already black-lists: tier 1 is
-// byte-identical to the plain scan, and tier 2 — reached only where that scan
-// was already short — re-walks the whole index for a result that cannot
-// differ from tier 1's. Unchanged picks and refusals are not a free ride:
-// what such a cluster pays is the second walk, on a path that was failing
-// anyway.
+// In a default deployment a node's location is its machine's host name
+// (architecture.md, Disk nodes), so tier 1 keeps the candidates off the
+// machines the caller's group already holds, and tier 2 is what places a
+// leg on one of them once no other machine has a DN with room — the second
+// tier of architecture.md, Per-operation allocation, which a cluster of few
+// machines reaches (architecture.md, Known limits).
 func FindDnCandidatesAntiAffine(
 	ctx context.Context,
 	cli *etcdutil.Client,
@@ -433,11 +431,11 @@ func FindCnCandidates(
 // makes tier 1 the plain scan, and tier 2 — which would repeat it exactly — is
 // skipped.
 //
-// In a default deployment location defaults to addr_port (architecture.md,
-// Controller nodes), so the SP's
-// locations ARE the addr_ports of the CNs its caller already excludes by
-// address: tier 1 is the plain scan, and tier 2 — reached only where that
-// scan was empty — re-walks the index for the same empty answer.
+// In a default deployment a node's location is its machine's host name
+// (architecture.md, Controller nodes), so tier 1 keeps a new cntlr off the
+// machines the SP's other cntlrs hold, and tier 2 is what places it on one
+// of them once no other machine has a CN with room (architecture.md, Known
+// limits).
 func FindCnCandidatesAntiAffine(
 	ctx context.Context,
 	cli *etcdutil.Client,

@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"math"
 
+	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 	"google.golang.org/protobuf/proto"
 
@@ -405,6 +406,50 @@ func planSpGroups(sliceCnt int, initExtCnt uint64) []spGrpPlan {
 	return plans
 }
 
+// pickSpDns runs the DN scan of architecture.md, Per-operation allocation,
+// CreateStoragePool, for every group of plans in GW15's order, one pickDns
+// each. The black list starts as the request's own (pickDns folds
+// dn_selector.black_list in) and grows with every pick, so every leg of the
+// WHOLE SP lands on a distinct DN — not merely every leg of one group.
+// excludeLocs is the first preference: every group's scan keeps those
+// locations out at tier 1 and takes from them at tier 2 only what tier 1
+// left short (pickDns), so each group still lands in distinct locations.
+// The caller passes the first primary's location, and runs the plain scans,
+// with excludeLocs nil, once more when the preferred ones refuse: tier 1 is
+// met group by group, so while two other locations have room the first
+// groups take them both, and a later group can find only the primary's
+// location left, where the plain scans would have spread the groups and
+// placed the pool.
+func pickSpDns(
+	ctx context.Context,
+	cli *etcdutil.Client,
+	cid uint64,
+	cc *pb.ClusterConf,
+	plans []spGrpPlan,
+	legs int,
+	selector *pb.NodeSelector,
+	excludeLocs []string,
+) ([][]model.Cand, error) {
+	dnPicks := make([][]model.Cand, 0, len(plans))
+	var dnBlack []string
+	for _, plan := range plans {
+		picks, err := pickDns(
+			ctx, cli, cid, cc,
+			dnPickPlan{
+				ExtCnt:      plan.ExtCnt,
+				Legs:        legs,
+				ExcludeLocs: excludeLocs,
+			},
+			selector, dnBlack, "create storage pool")
+		if err != nil {
+			return nil, err
+		}
+		dnPicks = append(dnPicks, picks)
+		dnBlack = append(dnBlack, candAddrs(picks)...)
+	}
+	return dnPicks, nil
+}
+
 // ---------------------------------------------------------------------------
 // The RPCs
 // ---------------------------------------------------------------------------
@@ -602,35 +647,13 @@ func (s *Server) CreateStoragePool(
 			return err
 		}
 		legs := legCntOf(scanBdev)
-		// The DN scan of architecture.md, Per-operation allocation, in
-		// GW15's group order. The black list starts
-		// as the request's own (pickDns folds dn_selector.black_list in) and
-		// grows with every pick, so every leg of the WHOLE SP lands on a
-		// distinct DN — not merely every leg of one group. ExcludeLocs stays
-		// empty: architecture.md, Per-operation allocation, leaves
-		// CreateStoragePool's DN scans out of the two-tier
-		// rule (only its CN picks below are two-tier) — a group being created
-		// has no failure domains of its own to keep out of yet, and the scan's
-		// own one-DN-per-location rule already spreads each group.
-		dnPicks := make([][]model.Cand, 0, len(plans))
-		var dnBlack []string
-		for _, plan := range plans {
-			picks, err := pickDns(
-				ctx, s.cli, scanCid, scanCc,
-				dnPickPlan{ExtCnt: plan.ExtCnt, Legs: legs, ExcludeLocs: nil},
-				req.GetDnSelector(), dnBlack, "create storage pool")
-			if err != nil {
-				return err
-			}
-			dnPicks = append(dnPicks, picks)
-			dnBlack = append(dnBlack, candAddrs(picks)...)
-		}
-		// The CN scan of architecture.md, Per-operation allocation: one pick
-		// per cntlr, each for the SP's whole
-		// footprint, each black-listed so two cntlrs never share a CN, and
-		// each pick's location excluded from every later pick's tier 1 so
-		// the cntlrs spread over failure domains while a domain none of them
-		// occupies yet still has a CN with room.
+		// The CN scan of architecture.md, Per-operation allocation, first,
+		// so the DN scans below know the first primary's location: one pick
+		// per cntlr, each for the SP's whole footprint, each black-listed so
+		// two cntlrs never share a CN, and each pick's location excluded
+		// from every later pick's tier 1 so the cntlrs spread over failure
+		// domains while a domain none of them occupies yet still has a CN
+		// with room. When both scans would refuse, this one answers.
 		cnPicks := make([]model.Cand, 0, cntlrCnt)
 		var cnBlack, cnLocs []string
 		for idx := 0; idx < cntlrCnt; idx++ {
@@ -644,6 +667,22 @@ func (s *Server) CreateStoragePool(
 			cnPicks = append(cnPicks, pick)
 			cnBlack = append(cnBlack, pick.AddrPort)
 			cnLocs = append(cnLocs, pick.Location)
+		}
+		// The DN scans, with the first primary's location (cnPicks[0], the
+		// cntlr the STM makes primary) as a first preference; a pool the
+		// preferred scans refuse is picked once more by the plain scans, so
+		// the preference never refuses a create the plain pick places
+		// (pickSpDns).
+		dnPicks, err := pickSpDns(
+			ctx, s.cli, scanCid, scanCc, plans, legs, req.GetDnSelector(),
+			[]string{cnPicks[0].Location})
+		if status.Code(err) == codes.ResourceExhausted {
+			dnPicks, err = pickSpDns(
+				ctx, s.cli, scanCid, scanCc, plans, legs,
+				req.GetDnSelector(), nil)
+		}
+		if err != nil {
+			return err
 		}
 		return s.cli.RunSTM(ctx, func(stm etcdutil.STM) error {
 			spId = 0

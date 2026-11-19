@@ -4867,7 +4867,7 @@ start_cn_agent() { # <idx>
 setup() {
 	CASE=setup
 	stage vms "backing store, the udev rules of deploy/udev, both agents on both VMs"
-	local idx out got
+	local idx out got host
 	for idx in 1 2; do
 		# Both --local-store dirs must pre-exist: startup reconcile fails
 		# without them.
@@ -4904,6 +4904,11 @@ setup() {
 	for idx in 1 2; do
 		out=$(cnctl "$idx" get-cn-size --wait 15)
 		assert_eq "$(jq_of "$out" .size)" "$CN_CAPACITY" "vm$idx GetCnSize"
+		# The machine's host name, read at the call (dnagent.md SH34): the
+		# location a controller node created with none takes.
+		host=$(sshv "$idx" "cat /proc/sys/kernel/hostname")
+		assert_eq "$(jq_of "$out" .host_name)" "$host" \
+			"vm$idx GetCnSize host_name"
 		bump_cn_sync "$idx"
 		out=$(cnctl "$idx" syncup-cn --revision "${CNREV[$idx]}")
 		assert_cn_info_ok "$out" "cn$idx baseline"

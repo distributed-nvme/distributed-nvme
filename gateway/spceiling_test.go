@@ -194,8 +194,9 @@ func TestCreateStoragePoolAtTheCeiling(t *testing.T) {
 	// TestCntlrsSpreadAcrossLocations' tier-2 case, whose CNs share
 	// locations, and TestCreateStoragePoolRefusals' one-CN case, whose single
 	// CN is its own location, every run. The DN arm has no such gap —
-	// the create's DN scans exclude no locations, and 128 picks out of 128
-	// DNs are never all distinct by accident.
+	// the create's DN scans keep out only the first primary's location,
+	// which no DN of this fixture holds, and 128 picks out of 128 DNs are
+	// never all distinct by accident.
 	seenCn := make(map[string]struct{}, cnCnt)
 	for _, cntlr := range get.GetCntlrList() {
 		seenCn[cntlr.GetAddrPort()] = struct{}{}

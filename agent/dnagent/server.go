@@ -26,6 +26,9 @@ import (
 type DnAgentServer struct {
 	pb.UnimplementedDiskNodeAgentServer
 
+	// oc is the process's single OsClient, kept for the one read no wrapper
+	// owns: the host name GetDnSize reports (SH34).
+	oc    common.OsClient
 	nf    *common.NameFmt
 	store *agent.Store
 	meta  *DiskMeta
@@ -282,6 +285,7 @@ func NewDnAgentServer(
 	qidMax int,
 ) *DnAgentServer {
 	return &DnAgentServer{
+		oc:                oc,
 		nf:                nf,
 		store:             agent.NewStore(oc, localStore),
 		meta:              NewDiskMeta(oc, disk),
@@ -392,7 +396,8 @@ func (s *DnAgentServer) sideKeysOf(clusterId, dnId uint64) []string {
 // fix (readDisk), so no disk node is ever registered on one. It has no
 // AgentReply, so failure travels in the gRPC status (architecture.md, Common
 // agent rules); dn_id is for logging only, and the call takes no lock and
-// touches no store (DN3).
+// touches no store (DN3). The reply also carries the machine's host name,
+// read on every call (SH34); a failed read leaves it empty and fails nothing.
 func (s *DnAgentServer) GetDnSize(
 	ctx context.Context,
 	req *pb.GetDnSizeRequest,
@@ -405,7 +410,10 @@ func (s *DnAgentServer) GetDnSize(
 		return nil, status.Errorf(codes.Internal,
 			"disk too small: %d <= %d", disk.size, common.DnDataOffset)
 	}
-	return &pb.GetDnSizeReply{Size: disk.size - common.DnDataOffset}, nil
+	return &pb.GetDnSizeReply{
+		Size:     disk.size - common.DnDataOffset,
+		HostName: agent.HostName(ctx, s.oc),
+	}, nil
 }
 
 // diskRead is what one read of the --disk device found (readDisk).

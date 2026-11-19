@@ -205,8 +205,9 @@ Setup installs the udev rules of `deploy/udev/` on both VMs before the agents
 devices and their exports carry a controller node's md superblocks and
 tenants' data, which the dm rule keeps the system's rules off. Setup then
 launches the agents (`dnagent.md` CM1, CM2) and proves each alive by
-its first `GetDnSize` reply, exactly the disk's data area (DN1, DN3, SH1),
-and its disk format and port by a baseline `SyncupDn` (DN5, SH19;
+its first `GetDnSize` reply, exactly the disk's data area (DN1, DN3, SH1)
+and the VM's host name as the VM reads it (SH34), and its disk format and
+port by a baseline `SyncupDn` (DN5, SH19;
 `architecture.md`, [D4]). As the agent's gRPC listener opens before its
 startup pass (SH1, SH33), the driver's wait for that reply, here and after
 every restart, goes on reading `GetDnInfo` until the agent no longer answers

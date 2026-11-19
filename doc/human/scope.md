@@ -77,6 +77,7 @@ pools, subsystems and hosts serve each user.
 | Reverting a volume to a snapshot | not yet; Cinder asks for it |
 | Changing a pool's thresholds or the cluster's check intervals after creation | not yet |
 | Changing a controller node's budget, the pool space it may serve, after creation | not yet |
+| Changing a node's location after creation | not yet; delete the node and create it again |
 | Rolling upgrades | not yet; every program is upgraded at once |
 | Transports other than NVMe/TCP | not yet |
 | Disks of logical blocks other than 512 bytes, such as 4 KiB disks | not yet; the dn agent refuses such a disk ([the introduction](introduction.md#requirements)) |
@@ -187,8 +188,15 @@ data loss is a defect, unless section 3 or 5 marks it accepted and gives
 the reason. Section 5 lists the data-loss defects known today.
 
 1. **Every leg of a group is lost for good.** In a RAID1 pool no disk node
-   holds two legs of one group. Losing fewer disk nodes than a group has
-   legs never loses a group. Losing every leg of one group loses that
+   holds two legs of one group, and a new group never has two legs in one
+   location. A node's location is the host name of its machine unless the
+   operator names another, so the legs of a new group sit on different
+   machines when every machine has a host name of its own. That does not
+   hold for a disk node that the first release, 0.1, created with no
+   location: it keeps its address as its location, so two such disk nodes
+   of one machine can hold both legs of a new group
+   ([the operations doc](operations.md#choose-a-nodes-location)). Losing
+   fewer disk nodes than a group has legs never loses a group. Losing every leg of one group loses that
    slice's thin pool. Every volume is striped over all slices, so the
    whole pool's data is lost. A repair finished between two losses
    restores the redundancy. So a RAID1 pool survives the loss of any one
@@ -216,8 +224,16 @@ the reason. Section 5 lists the data-loss defects known today.
    leg. After the copy is whole, only the new side matters. RAID1 then
    decides whether the pool loses data.
 
-Two more things belong with case 1:
+Three more things belong with case 1:
 
+- **With too few machines, a repair or a migration can put two legs of a
+  group on one machine.** The new leg of a repair and the new side of a
+  migration keep out of the locations the group holds only while another
+  location has a disk node with room. When none has, they go to a disk node
+  in a location the group already holds, and that machine's loss then takes
+  both legs. A new cntlr can share a machine with another cntlr of its pool
+  the same way. State: accepted; have more machines with free space than a
+  group has legs. Read from dnv's code; not seen in the lab.
 - **A group that loses every leg at once under IO is broken by md.** On a
   switch reload, or a reboot of all its disk nodes, every path of a group
   goes at once. md marks the array broken and refuses every write. An idle
@@ -1060,8 +1076,12 @@ Measured times are in [the introduction](introduction.md#status-and-limits-of-01
   Kubernetes node plugin keeps a cdc address an old attach named. Such a
   host writes to the fenced old primary and gets IO errors in the failover
   window, and, in the cases section 5.1 lists, can lose a write it was
-  told was done. State: procedure to write for the first two; fix decided for the
-  plugin, which takes the cdc list from its deployment on every pass.
+  told was done. While a host still holds the path of a cntlr that was
+  lost, it also gets no path to the cntlr that replaces it, which takes the
+  same controller id; the host must drop the old path first, as nvme-stas
+  does once the cdc stops naming it (seen in the lab). State: procedure to
+  write for the first two; fix decided for the plugin, which takes the cdc
+  list from its deployment on every pass.
 - **A Kubernetes mount waits for ever when no cntlr of its volume comes
   back.** The node plugin's connect keeps reconnecting through an outage
   of every path, however long, and the IO waits. So the mount survives a
@@ -1113,6 +1133,22 @@ Measured times are in [the introduction](introduction.md#status-and-limits-of-01
   taken over the pool, each primary on the node keeps its role for up to
   the start hold while its hosts' IO waits. State: accepted; the start
   hold bounds the wait. Not seen in the lab.
+- **A machine that holds a pool's primary and a leg of a group stops the
+  group when it stops.** A new pool keeps its legs out of the location of
+  its first primary while another location has room, and a node's location
+  is its machine by default. Nothing else keeps the primary away from the
+  legs: a failover, a cntlr replacement, a cntlr an operator creates, a
+  grow, a repair and a migration each place without looking at it, and a
+  pool created where too few locations have room can keep a leg there. A
+  node an older build created with no location has its address as its
+  location, and a rack name given to a machine's controller node and not
+  to its disk nodes hides the machine the same way: the pool then has
+  nothing to keep its legs from. When such a machine stops, the leg on the other machine still
+  records both legs as in sync, so md does not start the array from it
+  alone, and the new primary leaves the group stopped. The pool waits for
+  the machine to come back, or for an operator's forced start
+  ([the forced-start guide](operations.md#the-forced-start-guide)). State:
+  accepted. Read from dnv's code; not seen in the lab.
 - **A disabled primary whose standbys refuse their syncups can stop the
   pool's IO.** A standby refuses its syncups when it cannot save them to
   its local files or finds a setting in them invalid. Once the worker has
@@ -1167,9 +1203,10 @@ names [the operations doc](operations.md), the procedures an operator
 follows by hand, which holds the forced-start guide, the steps for a pool
 made before the stripe bound, for a pool made before the block bound, for
 a new volume refused for a thin id that holds data and for a pool left by
-a Kubernetes volume whose name held "..", a planned restart of an agent, a slow leg, the install
-of the udev rules on a node, the node check, the gather of a node's
-state and a Kubernetes volume the node plugin will not format so far, and
+a Kubernetes volume whose name held "..", a planned restart of an agent, a
+slow leg, the install of the udev rules on a node, the node check, the
+choice of a node's location, the gather of a node's state and a Kubernetes
+volume the node plugin will not format so far, and
 gets the others as they are written. Every row with no tool
 or no doc carries its note. Section 6.1 and the tables give some short
 steps; the section "Steps known today" below gives the longer ones.
@@ -1179,6 +1216,7 @@ steps; the section "Steps known today" below gives the longer ones.
 | Action | Tool today | Doc today | State |
 |---|---|---|---|
 | Add a disk node or a controller node | `dnvctl dn create`, `dnvctl cn create` | the tutorials | done |
+| Choose a node's location: the machine's host name by default, or a location the operator names | `--location` of `dnvctl dn create` and `dnvctl cn create` | the operations doc, Choose a node's location | procedure written |
 | Prepare a node: the udev rules on every node that keep the system's own md assembly, LVM and bcache off dnv's devices, the LVM and md settings that go with them, the network and the firewall | the udev rules ship in `deploy/udev/` with the programs; `dnv-agent check dn`, `dnv-agent check cn`: the node check reports what a node lacks and how to fix it | the operations doc, for the udev rules and the two settings, and Check a node before it joins; the tutorials, for the udev rules | procedure written for the udev rules, the two settings and the node check; procedure to write for the network and the firewall. |
 | Gather a node's state for a bug report | `dnv-agent collect` | the operations doc, Gather a node's state for a bug report | done |
 | Disable a node | `dnvctl dn set-disabled`, `dnvctl cn set-disabled` | none | procedure to write, one line: when to disable |
@@ -1290,7 +1328,10 @@ program prints the version of the file on the machine, such as
 plugin logs when it starts carries the version of the program that runs; a
 program that was not stopped still runs the old one. The introduction says
 which builds have `--version`. No build may replace a newer one: section
-5.5 says why.
+5.5 says why. A node that 0.1 created with no location keeps its address
+as its location after the upgrade; only emptying, deleting and creating it
+again puts it in its machine's location
+([the operations doc](operations.md#choose-a-nodes-location)).
 
 **Logs.** The programs log to stderr as JSON, one record per line, at one
 level, with no level flag and no rotation. Keep the logs on a filesystem
@@ -1666,12 +1707,16 @@ design:
   for a time. A volume takes whole extents, one for its meta group and at
   least one for its first data group on every leg, however small the
   volume. State: accepted, by design.
-- **A RAID1 pool needs four disk nodes per slice at create.** The create
-  puts every leg of the pool on a disk node of its own, and each slice has
-  a meta group and a data group of two legs each. A cluster with fewer
-  disk nodes is refused with the error code RESOURCE_EXHAUSTED. A group added later may
-  share disk nodes with the pool's other groups. State: accepted, by
-  design.
+- **A RAID1 pool needs four disk nodes per slice at create, in at least
+  two locations.** The create puts every leg of the pool on a disk node of
+  its own, and each slice has a meta group and a data group of two legs
+  each, in two locations. A cluster with fewer disk nodes, or with its
+  disk nodes in one location, is refused with the error code
+  RESOURCE_EXHAUSTED. The disk nodes of one machine created with no
+  location are one location, so on one machine pass a location for each
+  disk node ([the operations doc](operations.md#choose-a-nodes-location)).
+  A group added later may share disk nodes with the pool's other groups.
+  State: accepted, by design.
 - **Nothing limits recovery load.** A dead disk node starts a full copy in
   every group it held, and a dead controller node fails over every primary
   it held, all at about the same time. The agents set no copy speed on md. Only the

@@ -2962,10 +2962,9 @@ func TestReactionReplaceCntlrExcludesCntlrLocations(t *testing.T) {
 		wantScan(t, h, nil)
 	})
 
-	t.Run("the default location is the addr_port", func(t *testing.T) {
-		// The default of architecture.md, Controller nodes, makes the exclusion
-		// the same CN spCnAddrs already excludes, which is AR7's behavior
-		// before the two tiers covered it.
+	t.Run("a location equal to the addr_port", func(t *testing.T) {
+		// A CN registered under its own addr_port as its location makes the
+		// exclusion the same CN spCnAddrs already excludes.
 		h := build(t, reactCnA, reactCnB)
 		h.pass()
 		wantScan(t, h, []string{reactCnA})

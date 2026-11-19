@@ -60,7 +60,8 @@ a pass accumulates, its log record and the `AgentReply` it becomes),
 `CutText`, which keeps the end alone, for the errors of the counter reads),
 `version.go` the version reads the start record and the node check share
 (`KernelRelease`, `MdadmVersion`) and the start record itself
-(`LogStartVersions`; CM4, CM5), and `waitbudget.go` the `WaitBudget`, the
+(`LogStartVersions`; CM4, CM5), `hostname.go` the host name both size
+calls report (SH34), and `waitbudget.go` the `WaitBudget`, the
 bounded wait one converge pass may spend on the node catching up with what
 that pass asked of it: DN13's two, the retries of the connect to the
 migration source export and the wait for the source's namespace, and the cn
@@ -1186,6 +1187,19 @@ Kubernetes driver's connect included (`csi.md` CSI14). A kernel whose nvmet
 has no "attr_qid_max" fails every first link while the cap is above 0; such
 a node runs with `--nvmet-qid-max 0`.
 
+SH34. **The host name.** Both size calls, `GetDnSize` (DN3) and the cn
+role's `GetCnSize` (`cnagent.md` CN3), reply the machine's host name
+beside the size: "/proc/sys/kernel/hostname", read through the OsClient
+under the SH15 soft timeout on every call, trimmed of white space
+(`HostName`). A read that fails gives an empty name and fails nothing:
+the size is still answered, so a node created with a `location` never
+depends on the read. Reason: the gateway takes the name as the default
+`location` of a node created with none (`architecture.md`, Disk nodes),
+which makes the nodes of one machine one failure domain; read at every
+call, a renamed machine reports its new name to the next create, while a
+node already created keeps its `location`. The agent judges nothing: the
+gateway refuses a name that is no valid `location`.
+
 SH20. `nvmehost.go`: `Connect` always passes `--fast_io_fail_tmo` set to
 the timeout its caller gives and `--ctrl-loss-tmo` set to never give up,
 the caller's hostnqn, and `--hostid` set to `common.NvmeHostId` of that
@@ -2115,8 +2129,9 @@ targets that carry the disk's block size, which dnv does not build. Failures
 (bad disk, parse, too small, a block size other than 512) return a gRPC
 Internal status (`architecture.md`, Common agent rules — this RPC has no
 `AgentReply`), so the gateway registers no disk node on such a disk.
-`dn_id` may be zero (pre-registration call from the gateway); it is for
-logging only. No locks, no store access.
+The reply also carries the machine's host name (SH34), whose read never
+fails the call. `dn_id` may be zero (pre-registration call from the
+gateway); it is for logging only. No locks, no store access.
 
 ### `SyncupDn`
 

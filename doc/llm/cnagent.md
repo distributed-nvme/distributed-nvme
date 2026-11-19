@@ -482,9 +482,11 @@ a config file's YAML
 number, read by YAML's own syntax, one whose value is not a whole unsigned
 number that fits 64 bits (CN-CM2, `dnagent.md` CM3) — the
 gateway owns the mapping onto the range from `MinCnCap` to
-`MaxCnCap`. `cn_id` may be zero (a pre-registration call); it is for
-logging only. No locks, no store, no OS access. This RPC has no
-`AgentReply`; it cannot fail.
+`MaxCnCap`. The reply also carries the machine's host name
+(`dnagent.md` SH34), the call's one OS access, read on every call; a read
+that fails leaves it empty. `cn_id` may be zero (a pre-registration call);
+it is for logging only. No locks, no store. This RPC has no `AgentReply`;
+it cannot fail.
 
 ### `SyncupCn`
 

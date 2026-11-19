@@ -463,8 +463,14 @@ type fakeAgent struct {
 	// is registered under.
 	AddrPort string
 
-	mu        sync.Mutex
-	size      uint64
+	mu   sync.Mutex
+	size uint64
+	// hostName is the machine name both size calls report, which a node
+	// created with no location takes as its location (architecture.md, Disk
+	// nodes). It starts as AddrPort, so every fixture node created with no
+	// location keeps a location of its own; a test sets another with
+	// setHostName.
+	hostName  string
 	fail      error
 	block     chan struct{}
 	calls     []string
@@ -521,6 +527,13 @@ func (f *fakeAgent) setFail(err error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.fail = err
+}
+
+// setHostName fixes the host name both size calls report from now on.
+func (f *fakeAgent) setHostName(name string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.hostName = name
 }
 
 // setBlock makes every method hang until the returned func is called or the
@@ -625,7 +638,10 @@ func (f *fakeDnServer) GetDnSize(
 	}
 	f.agent.mu.Lock()
 	defer f.agent.mu.Unlock()
-	return &pb.GetDnSizeReply{Size: f.agent.size}, nil
+	return &pb.GetDnSizeReply{
+		Size:     f.agent.size,
+		HostName: f.agent.hostName,
+	}, nil
 }
 
 func (f *fakeDnServer) GetDnInfo(
@@ -680,7 +696,10 @@ func (f *fakeCnServer) GetCnSize(
 	}
 	f.agent.mu.Lock()
 	defer f.agent.mu.Unlock()
-	return &pb.GetCnSizeReply{Size: f.agent.size}, nil
+	return &pb.GetCnSizeReply{
+		Size:     f.agent.size,
+		HostName: f.agent.hostName,
+	}, nil
 }
 
 func (f *fakeCnServer) GetCnInfo(
@@ -865,6 +884,7 @@ func startFakeAgent(t *testing.T, addrPort string, size uint64) *fakeAgent {
 	agent := &fakeAgent{
 		AddrPort: addrPort,
 		size:     size,
+		hostName: addrPort,
 		stamp:    fakeAgentStamp(),
 	}
 	server := grpc.NewServer(

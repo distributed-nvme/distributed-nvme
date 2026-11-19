@@ -43,7 +43,8 @@ func registerCn(root *cobra.Command) {
 	// chains through the gateway into the agent's log.
 	//
 	// --location defaults to empty rather than to a rack name because the
-	// gateway then defaults it to addr_port itself; the four transport flags
+	// gateway then defaults it to the host name the node's agent reports
+	// (architecture.md, Controller nodes); the four transport flags
 	// default through trConfFlags to tcp/ipv4/127.0.0.1/4420 (dnvctl.md,
 	// Conventions).
 	create := leaf("create", "create a controller node",
@@ -69,7 +70,8 @@ func registerCn(root *cobra.Command) {
 	createFlags := create.Flags()
 	cnAddrFlag(createFlags)
 	createFlags.String("location", "",
-		"failure domain; empty lets the gateway default it to addr_port")
+		"failure domain; empty lets the gateway default it to the "+
+			"machine's host name")
 	createFlags.Bool("disabled", false,
 		"create the node already disabled (no capacity key)")
 	trConfFlags(createFlags, "")

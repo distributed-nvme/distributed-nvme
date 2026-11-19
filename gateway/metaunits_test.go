@@ -180,8 +180,9 @@ func TestCreateMigrationRefusesWhenNoDnHasMetadataRoom(t *testing.T) {
 		{
 			name: "extents are short too",
 			free: volDataExtCnt - 1,
-			want: fmt.Sprintf("%s: 0 disk nodes with %d free extents, "+
-				"need 1", whatMigrDst, volDataExtCnt),
+			want: fmt.Sprintf("%s: 0 disk nodes with %d free extents "+
+				"in distinct locations, need 1", whatMigrDst,
+				volDataExtCnt),
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

@@ -902,7 +902,8 @@ func repRefusals() []repRefusal {
 			},
 			code: codes.ResourceExhausted,
 			msg: fmt.Sprintf("new leg of the repair: 0 disk nodes with %d "+
-				"free extents, need 1", volDataExtCnt),
+				"free extents in distinct locations, need 1",
+				volDataExtCnt),
 		},
 	}
 }

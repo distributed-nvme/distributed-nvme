@@ -2858,8 +2858,10 @@ func otherCntlrAddrs(p *spPass, oldId uint64) []string {
 // the domains the SP keeps — so the old cntlr's domain is excluded only when a
 // survivor shares it.
 //
-// With the default `location = addr_port` this excludes exactly the CNs
-// spCnAddrs already does.
+// Under the location default, the machine's host name (architecture.md,
+// Controller nodes), this keeps the replacement off the surviving cntlrs'
+// machines at tier 1; on a cluster with no other machine with room, tier 2
+// can still put it on one of them.
 func otherCntlrLocations(p *spPass, oldId uint64) []string {
 	var locs []string
 	for _, addrPort := range otherCntlrAddrs(p, oldId) {
@@ -3541,8 +3543,9 @@ func (w *spWorker) createRepair(
 // the slices the pass decided on. A DN missing from that read contributes no
 // location; it is black-listed by address anyway.
 //
-// With the default `location = addr_port` this excludes exactly the
-// black-listed DNs' own domains.
+// Under the location default, the machine's host name (architecture.md,
+// Disk nodes), this keeps the new leg off the group's machines at tier 1; on
+// a cluster with too few machines, tier 2 can still put it on one of them.
 func grpLocations(state *model.SpState, grp *pb.Group) []string {
 	var locs []string
 	for _, addrPort := range grpAddrs(grp) {

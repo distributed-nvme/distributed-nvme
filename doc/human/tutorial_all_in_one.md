@@ -24,7 +24,10 @@ subsystem and one namespace in it, and you let the host in.
 Why four disk nodes: a storage pool create puts every leg of the pool on a
 different disk node. A RAID1 pool with one slice has a meta group and a
 data group, each with two legs, so it needs four disk nodes. Two disk
-nodes would only hold a pool without redundancy.
+nodes would only hold a pool without redundancy. The two legs of a group
+must also be in two locations, and a node's location is the host name of
+its machine unless you name another, so each disk node here gets a
+location of its own.
 
 Everything listens on 127.0.0.1:
 
@@ -272,17 +275,27 @@ The cluster, at the default extent size of 1 GiB:
 
 The four disk nodes and the controller node. A node's name is the gRPC
 address of its agent, and the transport values repeat the agent's flags.
-The gateway asks the agent for its size at once, so the agent must be
-running. A node's location defaults to its address, so the four disk nodes
-are four failure domains, which the RAID1 placement needs.
+The gateway asks the agent for its size and for the host name of the
+machine at once, so the agent must be running. A node created with no
+location takes that host name as its location, so on one machine all four
+disk nodes would be one location, and the RAID1 pool below would be
+refused. Each disk node therefore gets a location of its own, `dn0` to
+`dn3`. The two copies of each group are then on two disks of this one
+machine, not on two machines. The controller node keeps the host name as
+its location.
 
 ```
-./dnvctl --gateway-address 127.0.0.1:29527 --cluster c0 dn create --addr 127.0.0.1:29900 --tr-addr 127.0.0.1 --tr-svc-id 4301
-./dnvctl --gateway-address 127.0.0.1:29527 --cluster c0 dn create --addr 127.0.0.1:29901 --tr-addr 127.0.0.1 --tr-svc-id 4302
-./dnvctl --gateway-address 127.0.0.1:29527 --cluster c0 dn create --addr 127.0.0.1:29902 --tr-addr 127.0.0.1 --tr-svc-id 4303
-./dnvctl --gateway-address 127.0.0.1:29527 --cluster c0 dn create --addr 127.0.0.1:29903 --tr-addr 127.0.0.1 --tr-svc-id 4304
+./dnvctl --gateway-address 127.0.0.1:29527 --cluster c0 dn create --addr 127.0.0.1:29900 --tr-addr 127.0.0.1 --tr-svc-id 4301 --location dn0
+./dnvctl --gateway-address 127.0.0.1:29527 --cluster c0 dn create --addr 127.0.0.1:29901 --tr-addr 127.0.0.1 --tr-svc-id 4302 --location dn1
+./dnvctl --gateway-address 127.0.0.1:29527 --cluster c0 dn create --addr 127.0.0.1:29902 --tr-addr 127.0.0.1 --tr-svc-id 4303 --location dn2
+./dnvctl --gateway-address 127.0.0.1:29527 --cluster c0 dn create --addr 127.0.0.1:29903 --tr-addr 127.0.0.1 --tr-svc-id 4304 --location dn3
 ./dnvctl --gateway-address 127.0.0.1:29527 --cluster c0 cn create --addr 127.0.0.1:29950 --tr-addr 127.0.0.1 --tr-svc-id 4420
 ```
+
+A machine whose host name is not a valid location, such as the kernel's
+`(none)`, refuses the controller node's create too; give the machine a
+name, or pass a `--location` to that create as well
+([the operations doc](operations.md#choose-a-nodes-location)).
 
 The controller node's budget, the space of the pools whose cntlrs it may
 hold, is read at this create from the `--capacity` its cn agent was started

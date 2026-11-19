@@ -49,8 +49,10 @@ func isMdRaid1(bdev *pb.BdevConf) bool {
 // needs, how many legs the group has, the failure domains tier 1 of the
 // scan of architecture.md, Per-operation allocation, keeps out, and the free
 // metadata units each candidate's metadata area must still have. ExcludeLocs
-// is empty for the DN scans that section leaves on
-// the plain scan (CreateStoragePool's, GrowSlice's and CreateClone's). MetaUnits is zero for
+// is empty for the DN scans that section leaves on the plain scan
+// (GrowSlice's and CreateClone's, and CreateStoragePool's second try), and
+// holds the first primary's location for CreateStoragePool's preferred
+// scans (pickSpDns). MetaUnits is zero for
 // every scan but CreateMigration's, whose one destination holds a dm-clone
 // run in its node's metadata area (architecture.md, Metadata units).
 type dnPickPlan struct {
@@ -68,7 +70,8 @@ type dnPickPlan struct {
 // plus every DN already picked in this operation — which is what puts every
 // leg of one group (and, for CreateStoragePool, every leg of the whole SP) on
 // a distinct DN. plan.ExcludeLocs is the two-tier half of the same rule: tier
-// 1 keeps the candidates out of the group's existing failure domains and tier
+// 1 keeps the candidates out of the group's existing failure domains (out of
+// the first primary's, for a pool create's preferred scans) and tier
 // 2 rescans without that exclusion when tier 1 yields fewer than plan.Legs —
 // the DNs this group must actually place, never the oversampled scan width —
 // so a cluster with too few domains still places rather than refusing. Too few
@@ -140,7 +143,8 @@ func pickDns(
 			}
 		}
 		return nil, errExhausted(
-			"%s: %d disk nodes with %d free extents, need %d",
+			"%s: %d disk nodes with %d free extents in distinct "+
+				"locations, need %d",
 			what, len(picks), plan.ExtCnt, plan.Legs)
 	}
 	return picks, nil
@@ -716,8 +720,9 @@ func grpDnAddrs(grp *pb.Group, rep *pb.Repair) []string {
 //
 // One plain DnConf read per DISTINCT addr_port, outside every STM like the
 // capacity scan it feeds. Reading them before the transaction is sound because
-// `location` is immutable — CreateDiskNode defaults it to addr_port and
-// UpdateDiskNodeDisabled is the only later DN mutator (architecture.md, Disk
+// `location` is immutable — CreateDiskNode sets it once, from the request or
+// the agent's host name, and UpdateDiskNodeDisabled is the only later DN
+// mutator (architecture.md, Disk
 // nodes) — so a location read here cannot have gone stale by the time the op
 // re-validates the pick, which is also why that re-validation stays
 // address-based. A DN whose conf is gone contributes no location: it is
@@ -755,9 +760,10 @@ func grpDnLocations(
 // off their CNs.
 //
 // grpDnLocations' CN twin. Reading it before the transaction is sound for two
-// reasons together. `location` is immutable — CreateControllerNode
-// defaults it to addr_port and UpdateControllerNodeDisabled is the only later
-// CN mutator (architecture.md, Controller nodes) — so no location read here
+// reasons together. `location` is immutable — CreateControllerNode sets
+// it once, from the request or the agent's host name, and
+// UpdateControllerNodeDisabled is the only later CN mutator
+// (architecture.md, Controller nodes) — so no location read here
 // goes stale. And CreateCntlr's STM drops the pick when the SP, as it reads
 // it, has a cntlr on a CN outside addrs: a cntlr committed after this read is
 // the only way the set of domains to exclude can grow, and immutability alone

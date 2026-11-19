@@ -63,8 +63,9 @@ func validateName(field string, value string) error {
 }
 
 // validateOptionalName is validateName for a field whose empty value is legal
-// (cluster_name, which defaults; location, which defaults to addr_port;
-// CreateThinDevice's ori_name, which is optional).
+// (cluster_name, which defaults; location, which defaults to the host name
+// the node's agent reports, judged by hostNameLocation; CreateThinDevice's
+// ori_name, which is optional).
 func validateOptionalName(field string, value string) error {
 	if value == "" {
 		return nil
@@ -78,6 +79,29 @@ func validateOptionalName(field string, value string) error {
 			field, value, common.ValidStrPattern)
 	}
 	return nil
+}
+
+// hostNameLocation is the location of a node created with none: the host
+// name its agent reported in the size reply (architecture.md, Disk nodes and
+// Controller nodes). A name that is no valid location — empty, as an agent
+// older than the field or a failed read reports it, too long, or outside
+// ValidStrPattern, as the kernel's "(none)" of a machine never named is —
+// refuses the create FAILED_PRECONDITION with the advice to pass a location:
+// the request is well formed and the node is what refuses it. No fall back
+// to addr_port: that would give each agent a failure domain of its own, in
+// silence.
+func hostNameLocation(addrPort string, hostName string) (string, error) {
+	if hostName == "" {
+		return "", errPrecondition("the agent at %q reports no host name "+
+			"(an agent older than the gateway reports none); pass a "+
+			"location", addrPort)
+	}
+	if err := validateOptionalName("host name", hostName); err != nil {
+		return "", errPrecondition("the agent at %q reports a host name "+
+			"that is no valid location: %s; pass a location",
+			addrPort, status.Convert(err).Message())
+	}
+	return hostName, nil
 }
 
 // validateRepName is CreateRepair's rep_name rule (architecture.md, Common

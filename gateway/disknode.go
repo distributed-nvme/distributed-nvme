@@ -28,7 +28,8 @@ import (
 // helper and no model op that names an op is called from it.
 //
 // Two of the six leave etcd (AG1): CreateDiskNode needs the node's disk size
-// before it can compute `total_ext_cnt`, and InspectDiskNode needs the agent's
+// before it can compute `total_ext_cnt`, and the host name of its machine for
+// a node created with no location, and InspectDiskNode needs the agent's
 // latest observation of the node. Both calls sit strictly outside the
 // transaction, one before it and one after it.
 
@@ -42,8 +43,9 @@ import (
 // authoritative and it is that ClusterConf's `extent_size` that
 // `total_ext_cnt` is computed from, so a cluster deleted and recreated between
 // the probe and the transaction cannot leave a DN sized against a stale conf.
-// The size itself is a fact of the node, not of the store, so carrying it into
-// the closure keeps the closure a pure function of what it reads (GW8).
+// The size and the host name are facts of the node, not of the store, so
+// carrying them into the closure keeps the closure a pure function of what
+// it reads (GW8).
 func (s *Server) CreateDiskNode(
 	ctx context.Context,
 	req *pb.CreateDiskNodeRequest,
@@ -68,14 +70,6 @@ func (s *Server) CreateDiskNode(
 		// cntlr, so the record would describe a node no SP could ever use.
 		return nil, errInvalid("nvme_tr_conf must not be empty")
 	}
-	// CreateDiskNode's Defaults (architecture.md, Disk nodes): an omitted
-	// location is the node's own endpoint, which
-	// makes every node its own failure domain until an operator groups them.
-	location := req.GetLocation()
-	if location == "" {
-		location = req.GetAddrPort()
-	}
-
 	clusterName := clusterNameOf(req.GetClusterName())
 	probeConf := &pb.ClusterConf{}
 	found, err := s.cli.Get(ctx, model.ClusterConfKey(clusterName), probeConf)
@@ -87,6 +81,7 @@ func (s *Server) CreateDiskNode(
 	}
 	probeCid := model.ClusterId(clusterName, probeConf.GetCreationEpoch())
 	var dnSize uint64
+	var hostName string
 	// dn_id 0: the node has not been given one yet and the agent needs none —
 	// it uses the id for logging only (architecture.md, Disk nodes).
 	agentErr := withDnAgent(ctx, req.GetAddrPort(),
@@ -99,6 +94,7 @@ func (s *Server) CreateDiskNode(
 				return err
 			}
 			dnSize = reply.GetSize()
+			hostName = reply.GetHostName()
 			return nil
 		})
 	if agentErr != nil {
@@ -107,6 +103,18 @@ func (s *Server) CreateDiskNode(
 		// node is not registered, so there is nothing to roll back.
 		return nil, errAborted(
 			"get dn size from %q: %v", req.GetAddrPort(), agentErr)
+	}
+	// The location default of architecture.md, Disk nodes: a node
+	// created with no location takes the host name its agent reported, so
+	// every node of one machine is one failure domain until an operator
+	// names another; a name that is no valid location refuses the create
+	// before anything is written (hostNameLocation).
+	location := req.GetLocation()
+	if location == "" {
+		location, err = hostNameLocation(req.GetAddrPort(), hostName)
+		if err != nil {
+			return nil, err
+		}
 	}
 
 	var dnId uint64

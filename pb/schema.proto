@@ -2211,6 +2211,10 @@ message GetDnSizeRequest {
 
 message GetDnSizeReply {
     uint64 size = 1;
+    // The machine's host name, read on every call; empty when the read
+    // failed (dnagent.md SH34). A disk node created with no location takes
+    // it as its location (architecture.md, Disk nodes).
+    string host_name = 2;
 }
 
 message SyncupDnRequest {
@@ -2391,6 +2395,10 @@ message GetCnSizeRequest {
 
 message GetCnSizeReply {
     uint64 size = 1;
+    // The machine's host name, as GetDnSizeReply's (dnagent.md SH34). A
+    // controller node created with no location takes it as its location
+    // (architecture.md, Controller nodes).
+    string host_name = 2;
 }
 
 message SyncupCnRequest {

@@ -604,15 +604,18 @@ Per **side** (one per hosted leg replica):
     rule already covers.
 
     Only a **migration** ever gives a leg two sides, so the rule is a
-    placement one, not an agent-flag one: register every DN of one kernel
-    under the same `location` and the first tier of Per-operation allocation
-    keeps a migration destination (and a repair's fresh new leg) off the
-    source's kernel. Two things bound that. An omitted `location`
-    defaults to the node's own `addr_port` (Disk nodes), so agents left to
-    the default are separate failure domains and nothing keeps them apart at
-    all; and even under a shared `location` the second tier of Per-operation
-    allocation rescans without the exclusion rather than refuse to place, so
-    the guarantee holds only while some other domain still has a free DN.
+    placement one, not an agent-flag one: when every DN of one kernel shares
+    one `location`, the first tier of Per-operation allocation keeps a
+    migration destination (and a repair's fresh new leg) off the source's
+    kernel. An omitted `location` is the host name of the node's machine
+    (Disk nodes), so the DNs of one kernel share it unless the operator
+    names another. Two things bound that. A DN created with a `location`
+    other than its kernel's DNs', or on a machine renamed between two
+    creates, is a failure domain apart, and nothing keeps it off its
+    kernel's other DNs; and even under a shared `location` the second tier
+    of Per-operation allocation rescans without the exclusion rather than
+    refuse to place, so the guarantee holds only while some other domain
+    still has a free DN.
 
 ```mermaid
 flowchart BT
@@ -716,9 +719,9 @@ Per CN, once (created by the cn agent at the first `SyncupCn`):
    that SP's cntlrs already hold — which any SP with more cntlrs than the
    cluster has domains with room reaches — and a cntlr replacement, which
    excludes only the surviving cntlrs' domains (`dnv-worker.md` AR7), can
-   land on the other cn agent of the failed cntlr's kernel even at tier 1;
-   under the default `location`, the node's `addr_port` (Controller nodes),
-   they are simply two CNs to the allocator.
+   land on the other cn agent of the failed cntlr's kernel even at tier 1.
+   The default `location`, the host name of the machine (Controller nodes),
+   puts both cn agents of one kernel in one `location`.
 2. **QoS**: `SyncupCnRequest.qos_ratio`, a copy of `ClusterConf.qos_ratio`
    (dn / cn roles), is accepted and stored, and nothing enforces it: the cn
    agent persists it with the request and programs no limit (`cnagent.md`
@@ -1626,6 +1629,20 @@ counts no metadata units, since no copy keeps its metadata there.
 
 ### Per-operation allocation
 
+* **CreateStoragePool — CNs.** The CN picks come first, before the DN
+  scans, so that those know where the primary is; when both would refuse,
+  the CN scan's refusal is the answer. `candExt` is the sum of `ext_cnt`
+  over **all** groups of the SP; `requiredCnt` is one and `candCnt` is
+  `alloc_conf.cn_batch_size`; repeat `cntlr_cnt` times, a random pick that
+  is then black-listed. The first pick is the cntlr the STM makes primary.
+  Placement is **two-tier**, as for CreateMigration
+  below: **tier 1** also excludes the `location`s of the CNs picked so far,
+  and **tier 2** rescans without that exclusion (the black list still
+  applies) when tier 1 yields no candidate — so the cntlrs of one SP land in
+  distinct failure domains as long as a domain none of them holds yet has a
+  CN with room, and a cluster with fewer such domains than `cntlr_cnt`
+  still places them when it has `cntlr_cnt` CNs with room. The picks'
+  locations come out of the scan itself ([D5]).
 * **CreateStoragePool — DNs.** For every group to create (per slice, one
   meta group and one data group): `candExt` is that group's `ext_cnt` — the
   initial **data** group of each slice uses `init_ext_cnt`, and the initial
@@ -1645,17 +1662,25 @@ counts no metadata units, since no copy keeps its metadata there.
   group could have left it room, so a
   cluster that could hold the pool can refuse a create that a repeat then
   builds (`csi.md` CSI11).
-* **CreateStoragePool — CNs.** `candExt` is the sum of `ext_cnt` over
-  **all** groups of the SP; `requiredCnt` is one and `candCnt` is
-  `alloc_conf.cn_batch_size`; repeat `cntlr_cnt` times, a random pick that
-  is then black-listed. Placement is **two-tier**, as for CreateMigration
-  below: **tier 1** also excludes the `location`s of the CNs picked so far,
-  and **tier 2** rescans without that exclusion (the black list still
-  applies) when tier 1 yields no candidate — so the cntlrs of one SP land in
-  distinct failure domains as long as a domain none of them holds yet has a
-  CN with room, and a cluster with fewer such domains than `cntlr_cnt`
-  still places them when it has `cntlr_cnt` CNs with room. The picks'
-  locations come out of the scan itself ([D5]).
+  The **first primary's location is a first preference**: every group's
+  scan is two-tier as CreateMigration's below, with the `location` of the
+  first CN pick as its tier-1 `excludeLocs`, so the legs keep out of the
+  primary's failure domain while another domain has room, and a group that
+  tier 1 leaves short takes that one domain's candidate at tier 2, which
+  keeps the group's legs in distinct domains. When these preferred scans
+  refuse the create, the plain scans, with no `excludeLocs` and a black
+  list that starts again from the request's own, run once more and decide.
+  Reason for the preference: with the machine as the default `location`
+  (Disk nodes), a machine that holds the primary and a leg of a group takes
+  both down at once, and the new primary does not start that group (Known
+  limits). Reason for the second try: tier 1 is met group by group, so
+  while two other domains have room the first groups take both, and a
+  later group can find only the primary's domain left, where the plain
+  scans spread the groups and place the pool; without it, a cluster of
+  three machines that each run the same count of disk nodes and a
+  controller node would refuse, every time, a pool with more legs than two
+  of its machines have disk nodes. So the preference never refuses a
+  create the plain scans place.
 * **GrowSlice** — like the DN flow for exactly one group, the new one. Its
   black list is seeded with the request's own `NodeSelector.black_list` and
   nothing else, and the gateway never appends to it: one scan-and-pick
@@ -2471,15 +2496,42 @@ Errors: `NOT_FOUND` cluster; `ALREADY_EXISTS` `dn_conf` key;
 `RESOURCE_EXHAUSTED` when the `DnGlobal` `shard_bucket` sum is at or above
 `MaxDnCntPerCluster`; `INVALID_ARGUMENT` if `nvme_tr_conf` is empty or has
 a member left blank (Common validation), or if the
-reported disk size yields a `total_ext_cnt` below one; `ABORTED` if the
+reported disk size yields a `total_ext_cnt` below one;
+`FAILED_PRECONDITION` when the request names no `location` and the host
+name `GetDnSize` reports is no valid `location` — empty, as from an agent
+older than the field or a failed read, too long, or outside the name rule
+of Common validation, as the kernel's `(none)` of a machine never named —
+the message saying to pass a `location`; `ABORTED` if the
 `DnGlobal` is missing or `GetDnSize` fails.
-Defaults: `location` is the node's `addr_port`; `disabled` as sent. No RPC
+Defaults: `location` is the host name of the node's machine, as
+`GetDnSize` reports it (`dnagent.md` SH34), so the disk nodes of one
+machine are one failure domain unless the operator names another; `disabled`
+as sent. Reason: a machine is the unit that fails as a whole, and every dn
+agent of one machine reports its name. A name that is no valid `location`
+refuses the create rather than fall back to the `addr_port`, which would
+give each agent a failure domain of its own in silence. The name is read
+at the create alone: a node keeps its `location` when its machine is
+renamed, so a machine renamed between two creates puts its nodes in two
+locations, and an agent in a container with a host name of its own
+reports that name. Two machines that report one name are one location: a
+new group still never has two legs in it, but a repair's new leg, a
+migration's destination and a pool create's first preference find no
+other location sooner, and their second tier can then place a leg on the
+machine of the group's other leg or of the primary (Per-operation
+allocation; Known limits). So every machine needs a host name of its own,
+or each node of a machine a `location` naming that machine. A disk node or
+a controller node v0.1.0 created with no `location` keeps its `addr_port`
+as its `location`, a failure domain of its own and not its machine's, as
+no code rewrites a stored `location`: only emptying, deleting and creating
+the node again puts it in its machine's location. No RPC
 changes a node's `location` after creation, so a `location` read outside a
 transaction never goes stale — the premise of the location reads of
 Per-operation allocation.
 Action: (pre-STM) call `DiskNodeAgent.GetDnSize` at `addr_port` with a
-zero `dn_id` (the id is only for logging; the agent does not need it) and
-compute `total_ext_cnt` (Size → extents). One STM then: allocate `dn_id`
+zero `dn_id` (the id is only for logging; the agent does not need it),
+compute `total_ext_cnt` (Size → extents) and, for a request with no
+`location`, take the reported host name as the `location` or refuse the
+create (Defaults). One STM then: allocate `dn_id`
 and `shard_code` from `DnGlobal` (Globals: id allocation + shard buckets);
 write the `DnConf` (`disabled`, a zero `err_epoch`, `nvme_tr_conf`,
 `location`, an empty `side_ptr_list`, `total_ext_cnt`, and `free_ext_cnt`
@@ -2570,7 +2622,10 @@ and `CnGlobal`, with these differences:
   zero `cn_id`) and maps the reply to `total_ext_cnt` per Size → extents —
   a zero takes `DefaultCnCap`, a larger size is clamped to `MaxCnCap`, and
   a non-zero size below `MinCnCap` is treated like a zero.
-  `RESOURCE_EXHAUSTED` at `MaxCnCntPerCluster`.
+  `RESOURCE_EXHAUSTED` at `MaxCnCntPerCluster`. Its `location` default is
+  the host name `GetCnSize` reports, with the refusal and the reasons of
+  `CreateDiskNode`, so a machine's controller node shares the location of
+  its disk nodes unless the operator names others.
 * **DeleteControllerNode**: `FAILED_PRECONDITION` while `cntlr_ptr_list`
   is not empty. Like `DeleteDiskNode` it reaches no agent, so the node
   keeps what its agent has not swept yet, and the agent keeps the node's
@@ -2590,7 +2645,8 @@ and `CnGlobal`, with these differences:
 Errors: `ALREADY_EXISTS` `sp_conf` key; `RESOURCE_EXHAUSTED` when the
 `SpGlobal` `shard_bucket` sum is at or above `MaxSpCntPerCluster`, when fewer than
 `cntlr_cnt` CNs are eligible, or when DN allocation fails (Per-operation
-allocation); `INVALID_ARGUMENT` when `cntlr_cnt` lies outside
+allocation; the CN scan runs first and answers when both would refuse);
+`INVALID_ARGUMENT` when `cntlr_cnt` lies outside
 `MinCntlrCntPerSp` to `MaxCntlrCntPerSp`; when `slice_cnt` is **above**
 `MaxSliceCntPerSp` (a zero `slice_cnt` is not refused — it takes the
 default below, as `cntlr_cnt` does); when `init_ext_cnt` is zero; when a
@@ -4503,8 +4559,10 @@ its pad bits in the middle of the chunk and shift every later bit. So
   `service DiskNodeAgent` and `service ControllerNodeAgent`.
   `PushMigrBitmapReply` and `PushCloneBitmapReply` carry only `AgentReply`;
   `GetDnSize`, `GetCnSize`, `GetThinDeviceBm`, `GetLegBm` and `InspectGrp`
-  return only their payload (`size`, `bitmap`, the members' reads) and
-  report failure through the gRPC status. While the agent starts, every
+  return only their payload (`size` and `host_name`, `bitmap`, the members'
+  reads) and report failure through the gRPC status, but for a failed read
+  of the host name, which leaves `host_name` empty and fails nothing
+  (`dnagent.md` SH34). While the agent starts, every
   `Syncup*`, `Push*Bitmap`, `Get*Info` and `Check*` reply carries
   `ReplyCodeStarting` and no observation, a `Syncup*`, `Get*Info` or
   `Check*` one a zero `revision` and no `*Info` whatever request the agent
@@ -4553,9 +4611,10 @@ its pad bits in the middle of the chunk and shift every later bit. So
 ### `service DiskNodeAgent`
 
 * `GetDnSize` returns the byte size of the `--disk` device's **data area**:
-  the raw size minus the fixed `DnDataOffset` prefix of the [D13] format.
-  A device at or below `DnDataOffset`, or one whose logical block size is
-  not 512 bytes, is an Internal error. The gateway calls it before
+  the raw size minus the fixed `DnDataOffset` prefix of the [D13] format,
+  and the machine's host name, empty when its read failed (`dnagent.md`
+  SH34). A device at or below `DnDataOffset`, or one whose logical block
+  size is not 512 bytes, is an Internal error. The gateway calls it before
   registration; `dn_id` in the request is for logging only (`dnagent.md`
   DN3).
 * `SyncupDn` carries `revision`, `side_pointer_list` and `extent_size` (the
@@ -4608,7 +4667,7 @@ its pad bits in the middle of the chunk and shift every later bit. So
 
 * `GetCnSize` returns the capacity budget in bytes this CN is willing to
   host, zero meaning "use the default"; typically from local config
-  (`cnagent.md` CN3).
+  (`cnagent.md` CN3); and the machine's host name, as `GetDnSize` does.
 * `SyncupCn` carries `revision`, `qos_ratio` and `cntlr_pointer_list`. It
   ensures the base state of Controller node, common — the single nvmet
   port; it accepts and persists
@@ -8249,7 +8308,12 @@ document and only pointed to here.
   with every pick (Per-operation allocation), and each slice has a meta
   group and a data group of `MaxAllocLegPerGrp` legs each under
   `RedundMdRaid1`, so a cluster with fewer disk nodes than the pool has legs
-  is refused `RESOURCE_EXHAUSTED` whatever its disks hold. `GrowSlice` and
+  is refused `RESOURCE_EXHAUSTED` whatever its disks hold. The legs of each
+  group need as many `location`s, and a disk node's default `location` is
+  its machine (Disk nodes), so the disk nodes of one machine, all created
+  with no `location`, place no RAID1 pool at all, whatever their count;
+  the refusal names the disk nodes it found in distinct locations.
+  `GrowSlice` and
   `CreateClone` black-list no disk node of the pool's — a grow's black list
   is the request's own selector and nothing else, a clone's is empty — and
   spread the one new group's legs over distinct disk nodes through the
@@ -8266,7 +8330,40 @@ document and only pointed to here.
   as many failures as a group has legs, drawn at random among N disk nodes,
   the chance is at most that count over the number of such sets N disk
   nodes hold; a repair whose copy ends between the losses restores the
-  redundancy (Repair).
+  redundancy (Repair). The same holds for machines as long as each
+  machine's disk nodes share one `location`, the default (Disk nodes): no
+  allocation round puts two legs of one group in one `location`, but a
+  repair or a migration can (below).
+* **A primary can share a machine with a leg.** `CreateStoragePool` keeps
+  the legs out of the first primary's `location` only as a first
+  preference (Per-operation allocation, CreateStoragePool — DNs), so a
+  pool that the preferred scans cannot place can hold a leg there. Nothing
+  else looks at the primary's `location`: a failover makes a standby
+  primary wherever the legs are (`dnv-worker.md` AR5), and a cntlr
+  replacement (`dnv-worker.md` AR7), an operator's `CreateCntlr`, a grow,
+  a repair and a migration each place by their own rules. A controller
+  node whose `location` no disk node shares gives the preference nothing
+  to keep the legs from: one created under a rack name its machine's disk
+  nodes do not carry, or one v0.1.0 created with no `location`, whose
+  `location` is its `addr_port`. When one machine
+  holds a pool's primary and a leg of a group and stops, the surviving
+  leg's superblock still counts a clean full array, so a new primary's
+  assemble of that group is refused, and the pool waits for the machine to
+  come back or for an operator's forced start ("Make sure all groups are
+  available"; [D16]).
+* **With fewer machines than a group's placement needs, a repair or a
+  migration can put two legs of a group on one machine.** The new leg of a
+  repair and the destination of a migration keep out of the group's
+  `location`s at tier 1 only (Per-operation allocation): when no other
+  `location` has a disk node with room, tier 2 places them in one the
+  group holds. With the machine as the default `location` this tier is
+  reached whenever the cluster's other machines are full, and the group
+  then loses both legs with that machine. Two machines that report one
+  host name, their nodes created with no `location`, are one location,
+  which reaches this tier sooner: the new leg can then land on the machine
+  of the group's surviving leg where distinct names would have offered the
+  other machine (Disk nodes). The cntlrs of a pool, at its
+  create and at a cntlr replacement, can share a machine the same way.
 * **Nothing limits recovery load across pools.** The reaction pass takes
   one action per pool per interval and holds nothing across pools
   (`dnv-worker.md` AR2): a dead disk node starts a repair, a full copy onto
@@ -8948,6 +9045,19 @@ document and only pointed to here.
   rather than discovered, stays when the records withdraw its cntlr, so
   that host keeps a failed-over primary's path past the fence (Host view,
   Failover).
+* **A host that still holds a lost cntlr's path refuses the path of its
+  replacement.** A cntlr replacement keeps the lost cntlr's `cntlid_slot`
+  (`dnv-worker.md` AR7; cntlid slots), and the replacement's node can give
+  the host's connect the CNTLID the host's controller to the lost cntlr
+  holds, as nvmet draws from the slot's start on a kernel that holds no
+  controller in it. The host's kernel refuses a controller whose CNTLID
+  another controller of the subsystem holds unless that one is being
+  deleted ("Duplicate cntlid", seen in the lab), and a controller to a
+  node that is gone keeps reconnecting until its loss timeout. So the host
+  gets no path to the replacement until it drops the lost path: a host
+  that follows the discovery log drops it once the failover's records
+  withdraw the lost cntlr (Host view); a path connected by hand stays
+  (above).
 * **A detach does not cut a connected host.** The CSI driver's detach empties
   the subsystem's allowed hosts (`csi.md` CSI10), which closes it to new
   connections only (Primary cntlr), so a host already connected keeps its

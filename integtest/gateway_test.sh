@@ -420,7 +420,10 @@ cn_svcid() { printf '443%d' "$1"; }
 dn_loc() { printf 'rack%d' "$1"; }
 # CN locations are distinct too: the CN scan location-dedupes
 # (architecture.md, Finding CN candidates), so three CNs sharing a location
-# would make a two-cntlr SP unallocatable.
+# would make a two-cntlr SP unallocatable. CN i shares rack<i> with DN i, so
+# a pool's first primary always shares its location with one DN, which is
+# what lets smoke stage 6 see the DN scans' first preference
+# (architecture.md, Per-operation allocation).
 cn_loc() { printf 'rack%d' "$1"; }
 
 # ---------------------------------------------------------------------------
@@ -2070,6 +2073,34 @@ EOF
 	done
 	assert_eq "$(smoke_jq "$spOut" '[.cntlrs[] | .addr_port] | unique | length')" \
 		"$SP_CNTLR_CNT" "sp0 cntlrs are on distinct CNs"
+	# The first preference of architecture.md, Per-operation allocation,
+	# CreateStoragePool — DNs: the CN scan runs first, and every group's DN
+	# scan keeps the first primary's location out at tier 1. CN i and DN i
+	# share rack<i>, and sp0's one slice needs all four DNs, so the
+	# primary's rack holds exactly one leg of sp0: the meta group, scanned
+	# first, finds two other racks with room, and the data group, which
+	# tier 1 then leaves one short, takes the primary's rack at tier 2.
+	# Without the preference the meta group takes that rack half the time.
+	local primAddr primRack primDn
+	primAddr=$(sp_primary_cntlr sp0)
+	primAddr=${primAddr##* }
+	primRack=""
+	for i in 0 1 2; do
+		if [ "$(cn_addr "$i")" = "$primAddr" ]; then
+			primRack=$i
+		fi
+	done
+	[ -n "$primRack" ] ||
+		die "stage 6: the primary's CN $primAddr is none of the three CNs"
+	primDn=$(dn_addr "$primRack")
+	assert_eq "$(smoke_jq "$spOut" '
+		[ .slices[] | .meta_grp_list[]? | .leg_list[]? | .side_list[]?
+		  | select(.addr_port == $a) ] | length' --arg a "$primDn")" "0" \
+		"sp0: no meta group leg in the primary's $(cn_loc "$primRack")"
+	assert_eq "$(smoke_jq "$spOut" '
+		[ .slices[] | .data_grp_list[]? | .leg_list[]? | .side_list[]?
+		  | select(.addr_port == $a) ] | length' --arg a "$primDn")" "1" \
+		"sp0: one data group leg in the primary's $(cn_loc "$primRack")"
 	# The reverse lookup of architecture.md, Storage pools: an id with no
 	# sp_id_to_name key is simply left out of the map, so absence IS the answer
 	# "no such sp_id".

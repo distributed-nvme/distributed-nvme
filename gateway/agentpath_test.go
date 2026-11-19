@@ -96,6 +96,10 @@ type agentpathFake struct {
 	// Size → extents, turns them into total_ext_cnt.
 	dnSize uint64
 	cnSize uint64
+	// hostName is the machine name both size calls report: addrPort, so a
+	// node created with no location keeps a location of its own
+	// (architecture.md, Disk nodes).
+	hostName string
 	// dnInfo and cnInfo are what GetDnInfo / GetCnInfo report.
 	dnInfo *pb.DnInfo
 	cnInfo *pb.CnInfo
@@ -145,6 +149,7 @@ func agentpathStartAgent(t *testing.T) *agentpathFake {
 	}
 	fake := &agentpathFake{
 		addrPort: lis.Addr().String(),
+		hostName: lis.Addr().String(),
 		stamp:    fakeAgentStamp(),
 	}
 	fake.server = grpc.NewServer(
@@ -269,12 +274,12 @@ func (f *agentpathFake) GetDnSize(
 ) (*pb.GetDnSizeReply, error) {
 	f.mu.Lock()
 	f.dnSizeReqs = append(f.dnSizeReqs, req)
-	size := f.dnSize
+	size, hostName := f.dnSize, f.hostName
 	f.mu.Unlock()
 	if err := f.block(ctx); err != nil {
 		return nil, err
 	}
-	return &pb.GetDnSizeReply{Size: size}, nil
+	return &pb.GetDnSizeReply{Size: size, HostName: hostName}, nil
 }
 
 func (f *agentpathFake) GetCnSize(
@@ -283,12 +288,12 @@ func (f *agentpathFake) GetCnSize(
 ) (*pb.GetCnSizeReply, error) {
 	f.mu.Lock()
 	f.cnSizeReqs = append(f.cnSizeReqs, req)
-	size := f.cnSize
+	size, hostName := f.cnSize, f.hostName
 	f.mu.Unlock()
 	if err := f.block(ctx); err != nil {
 		return nil, err
 	}
-	return &pb.GetCnSizeReply{Size: size}, nil
+	return &pb.GetCnSizeReply{Size: size, HostName: hostName}, nil
 }
 
 func (f *agentpathFake) GetDnInfo(

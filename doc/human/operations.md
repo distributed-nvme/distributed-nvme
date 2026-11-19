@@ -1482,6 +1482,106 @@ the lab. The cn suite's nodecheck case runs the check, the md replay, and
 the md replay with an mdadm that starts a lone leg on the lab VMs, and it
 passes there.
 
+## Choose a node's location
+
+A node's location is the failure domain dnv keeps the legs of a group
+apart by. When you create a node with no `--location`, the gateway asks
+the node's agent for the host name of its machine, the name in
+`/proc/sys/kernel/hostname`, and stores it as the node's location. So the
+disk nodes of one machine share one location, and when every machine has
+a host name of its own, a new group never has two legs on one machine. A
+new pool also keeps its legs out of the location of its first primary
+while another location has room, so that one machine does not hold the
+primary and a leg of a group. A node keeps its location for its whole
+life: no command changes it. A node that the first release, 0.1, created
+with no location keeps its address as its location after an upgrade, so
+it is a location of its own and not its machine's.
+
+When: before you create the nodes of a cluster, after an upgrade from
+0.1, and when a node create or a pool create is refused for want of a
+location.
+
+Symptoms:
+
+- `dnvctl dn create` or `dnvctl cn create` with no `--location` fails with
+  FAILED_PRECONDITION, and the text says the agent "reports no host name"
+  or "reports a host name that is no valid location". A location is at most
+  64 bytes of letters, digits and `-_/.:`. The kernel's `(none)`, the name
+  of a machine never named, is not one. An agent of an older build than
+  the gateway reports no host name at all.
+- `dnvctl sp create` of a RAID1 pool fails with RESOURCE_EXHAUSTED, and
+  the text says "disk nodes with ... free extents in distinct locations,
+  need 2": the disk nodes with room are in fewer locations than a group
+  has legs, for example all on one machine.
+
+How to confirm: `dnvctl dn get --addr <addr>` and `dnvctl cn get --addr
+<addr>` show each node's `location`. `cat /proc/sys/kernel/hostname` on
+the machine shows the name its agents report; compare it across the
+machines, since two machines with one name are one location. A location
+equal to the node's own address is one that 0.1 gave a node created with
+no location. For the second symptom, count the locations of the disk
+nodes that have free extents.
+
+What dnv does alone: it reads the host name at each create that names no
+location, and nothing more. A location stored once never follows a later
+rename of the machine. A repair, a migration, a grow, a failover and a
+cntlr replacement do not look at the primary's location, and when too few
+locations have room, a repair or a migration can put two legs of a group
+in one location ([the scope page](scope.md#4-data-loss-dnv-accepts) and
+[section 6.1](scope.md#61-cases-where-dnv-does-not-come-back-alone-today)).
+
+Safe steps:
+
+1. Give every machine a host name of its own before you create its nodes,
+   with `hostnamectl set-hostname <name>`, or pass `--location` with one
+   name per machine on each of its nodes. Machines made from one disk
+   image often share one name: rename them before their first node
+   create. Two machines with one name are one location to dnv. A new group
+   still never has two legs in it, but a repair or a migration then finds
+   no other location sooner and can put the new leg on the machine that
+   holds the group's other leg, and a new pool can put a leg on its
+   primary's machine. Set the name once: a machine renamed between two
+   creates puts its nodes in two locations, and a group can then get two
+   legs on that machine.
+2. To keep the legs of a group in different racks, not only on different
+   machines, pass `--location <rack>` on every node of every machine in
+   the rack: on its disk nodes and on its controller node alike. A rack
+   name on the controller node alone hides the machine, and a new pool
+   then keeps its legs out of the rack of its primary, not out of its
+   primary's machine.
+3. Pass `--location` when the host name does not name the machine: an
+   agent in a container with a host name of its own reports the
+   container's name.
+4. On one machine, as in [dnv on one machine](tutorial_all_in_one.md), a
+   RAID1 pool needs its disk nodes in different locations: pass
+   `--location dn0`, `--location dn1` and so on, one for each disk node.
+   The two copies of each group are then on two disks of one machine, not
+   on two machines.
+
+Steps that lose data: none. A node delete is refused while the node holds
+a side or a cntlr, and no step here deletes anything else.
+
+When to stop: a node already holds sides or cntlrs and has the wrong
+location: nodes of two machines that share one host name, nodes of one
+machine created before and after a rename of it, or a node 0.1 created
+with no location on a machine that runs other nodes. No command changes a location; the
+node must be emptied, deleted and created again, and those steps are not
+written yet (the scope page, section 7, Remove a node and Reuse a disk
+from an old node). Ask for help.
+
+Tested: the gateway's Go tests check the host name as the default, the
+refusals of a name that is no location, a RAID1 pool refused on one host
+name, and a new pool's legs kept out of its first primary's location,
+with the placement that ignores that location tried once more when it is
+refused. The gateway suite's smoke case checks the legs kept out of the
+primary's location over its fake nodes, and the dn and cn suites check the
+host name each agent reports; those three checks are written and have not
+yet run in the lab. The e2e suite's loss of a primary's machine, a reset of
+its controller node that fails the pool over and replaces the lost cntlr,
+passed in the lab at one slice on 2026-11-19; it does not test the
+location default, as in that suite no controller node shares a location
+with a disk node.
+
 ## Gather a node's state for a bug report
 
 Words: the **gather** is `dnv-agent collect`, a run of the agent program

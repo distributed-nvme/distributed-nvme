@@ -45,7 +45,8 @@ import (
 // cntlrs the node already hosts keep running.
 //
 // Two of the six leave etcd (AG1): CreateControllerNode needs the node's
-// capacity budget before it can compute `total_ext_cnt`, and
+// capacity budget before it can compute `total_ext_cnt`, and the host name
+// of its machine for a node created with no location, and
 // InspectControllerNode needs the agent's latest observation of the node. Both
 // calls sit strictly outside the transaction, one before it and one after it.
 
@@ -82,8 +83,9 @@ func cnCapBudget(size uint64) uint64 {
 // authoritative and it is that ClusterConf's `extent_size` that
 // `total_ext_cnt` is computed from, so a cluster deleted and recreated between
 // the probe and the transaction cannot leave a CN sized against a stale conf.
-// The budget itself is a fact of the node, not of the store, so carrying it
-// into the closure keeps the closure a pure function of what it reads (GW8).
+// The budget and the host name are facts of the node, not of the store, so
+// carrying them into the closure keeps the closure a pure function of what
+// it reads (GW8).
 func (s *Server) CreateControllerNode(
 	ctx context.Context,
 	req *pb.CreateControllerNodeRequest,
@@ -110,14 +112,6 @@ func (s *Server) CreateControllerNode(
 		// exactly this message.
 		return nil, errInvalid("nvme_tr_conf must not be empty")
 	}
-	// CreateDiskNode's Defaults (architecture.md, Disk nodes): an omitted
-	// location is the node's own endpoint, which
-	// makes every node its own failure domain until an operator groups them.
-	location := req.GetLocation()
-	if location == "" {
-		location = req.GetAddrPort()
-	}
-
 	clusterName := clusterNameOf(req.GetClusterName())
 	probeConf := &pb.ClusterConf{}
 	found, err := s.cli.Get(ctx, model.ClusterConfKey(clusterName), probeConf)
@@ -129,6 +123,7 @@ func (s *Server) CreateControllerNode(
 	}
 	probeCid := model.ClusterId(clusterName, probeConf.GetCreationEpoch())
 	var cnSize uint64
+	var hostName string
 	// cn_id 0: the node has not been given one yet and the agent needs none —
 	// it uses the id for logging only (architecture.md, Disk nodes).
 	agentErr := withCnAgent(ctx, req.GetAddrPort(),
@@ -141,6 +136,7 @@ func (s *Server) CreateControllerNode(
 				return err
 			}
 			cnSize = reply.GetSize()
+			hostName = reply.GetHostName()
 			return nil
 		})
 	if agentErr != nil {
@@ -149,6 +145,18 @@ func (s *Server) CreateControllerNode(
 		// node is not registered, so there is nothing to roll back.
 		return nil, errAborted(
 			"get cn size from %q: %v", req.GetAddrPort(), agentErr)
+	}
+	// The location default of architecture.md, Controller nodes: a node
+	// created with no location takes the host name its agent reported, so
+	// every node of one machine is one failure domain until an operator
+	// names another; a name that is no valid location refuses the create
+	// before anything is written (hostNameLocation).
+	location := req.GetLocation()
+	if location == "" {
+		location, err = hostNameLocation(req.GetAddrPort(), hostName)
+		if err != nil {
+			return nil, err
+		}
 	}
 	budget := cnCapBudget(cnSize)
 

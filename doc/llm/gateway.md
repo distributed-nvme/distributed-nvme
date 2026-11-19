@@ -407,8 +407,10 @@ uncommitted (`dnv-worker.md` EU4).
   `cloneIoSizeCheck`), a side of a clone meta group named to
   `CreateMigration`, a side of a repair's bad leg named to
   `CreateMigration`, a repair call on the group of a clone being deleted,
-  and a repair call the repair's stage does not allow (`architecture.md`,
-  Clones, Migrations, Repairs).
+  a repair call the repair's stage does not allow (`architecture.md`,
+  Clones, Migrations, Repairs), and a node create with no `location` whose
+  agent reports a host name that is no valid `location` (`architecture.md`,
+  Disk nodes).
 * `RESOURCE_EXHAUSTED`: a global's `shard_bucket` sum at `Max*CntPerCluster`;
   the per-SP and per-group count ceilings — `cntlr_id_list` at
   `MaxCntlrCntPerSp`, `td_name_list` at `MaxTdCntPerSp`, `nqn_list` at
@@ -777,7 +779,12 @@ to no cluster (`architecture.md`, Worker registry).
 
 * **CreateDiskNode** — validate; **pre-STM agent call** (AG1):
   `DiskNodeAgent.GetDnSize` at `addr_port` (with a zero `dn_id`, for logging
-  only) — a gRPC failure is `ABORTED`. STM: resolve; `DnConfKey` of the
+  only) — a gRPC failure is `ABORTED`. With no `location` in the request,
+  the reply's host name is the node's `location` (`hostNameLocation`): one
+  that `validateOptionalName` refuses, or an empty one, is
+  `FAILED_PRECONDITION` with the advice to pass a `location`, before the
+  STM, so nothing is written (`architecture.md`, Disk nodes). STM:
+  resolve; `DnConfKey` of the
   cluster id and `addr_port` present is `ALREADY_EXISTS`;
   `model.ValidateClusterConf` on the `ClusterConf` this STM resolved, then
   `total_ext_cnt` is the reported bytes divided by `extent_size`
@@ -828,7 +835,8 @@ to no cluster (`architecture.md`, Worker registry).
 The exact mirror of Disk nodes over `CnConf`, the CN capacity key, `CnRev`
 and `CnGlobal`, with these differences: `CreateControllerNode` calls
 `GetCnSize` and maps the reply through `cnCapBudget`, the budget rule of
-`architecture.md`, Size → extents; the per-cluster ceiling is
+`architecture.md`, Size → extents, and takes the reply's host name as the
+default `location` as `CreateDiskNode` does; the per-cluster ceiling is
 `MaxCnCntPerCluster`; the delete's occupancy precondition is
 `cntlr_ptr_list`; the capacity maintenance is `model.MaintainCnCapacity`,
 which needs no `ClusterConf` because a CN capacity key carries no bin index
@@ -870,12 +878,15 @@ update-disabled and inspect.
   and `validatePrimaryThreshold`; then come the name (`spNameUnused`) on a
   plain read of its own, and on another of `SpGlobal` the pool count
   ceiling and then whether its id counter has an id left
-  (`spCntBelowCeiling`). Then the DN scan per group
-  (`pickDns`) and the CN scan per cntlr (`pickCn`) of `architecture.md`,
+  (`spCntBelowCeiling`). Then the CN scan per cntlr (`pickCn`) and the DN
+  scan per group (`pickSpDns`, one `pickDns` each) of `architecture.md`,
   Per-operation allocation, which owns the growing black list, the random
-  pick and the two CN tiers — the DN scan asks for no metadata units, since
-  a new SP has no migration, and a CN counts none; too few at any point is
-  `RESOURCE_EXHAUSTED`.
+  pick, the two CN tiers and the DN scans' first preference: the DN scans
+  run with the first CN pick's `location` as tier 1's exclusion, and once
+  more with none when those refuse `RESOURCE_EXHAUSTED`. The DN scan asks
+  for no metadata units, since a new SP has no migration, and a CN counts
+  none; too few at any point is `RESOURCE_EXHAUSTED`, and the CN scan,
+  which runs first, answers when both would refuse.
 
   STM, in this order: resolve; build the `bdev_conf` to store with
   `resolveSpBdevConf`, `model.ResolveSpBdevConf` of `mergeSpBdevConf` of the
@@ -914,11 +925,12 @@ update-disabled and inspect.
 
 GW15. **One fixed create order.** `CreateStoragePool` plans, scans and
 mints in one fixed order — per slice the one-extent meta group, then the
-data group; the cntlr ids first, in pick order, then per slice its
-`slice_id` and, in plan order, each group's `grp_id` and per leg a `leg_id`
-and its `side_id` — so the scan's picks and the STM's ids line up by plan
-position, and a re-run of the STM closure on the same picks and reads
-(GW8) reproduces exactly the same write set.
+data group; the cntlr scan before the group scans, and the cntlr ids first,
+in pick order, then per slice its `slice_id` and, in plan order, each
+group's `grp_id` and per leg a `leg_id` and its `side_id` — so the scan's
+picks and the STM's ids line up by plan position, and a re-run of the STM
+closure on the same picks and reads (GW8) reproduces exactly the same write
+set.
 
 * **DeleteStoragePool** — it LATCHES, and the sp worker drains
   (`dnv-worker.md` SPD9 to SPD12, SPD15). STM: `openSpFlags` with the `deleting`
@@ -1854,8 +1866,11 @@ cluster's), a DN's metadata ceiling `DnCloneMetaUnitCnt` and its unit size
 `DnCloneMetaUnit`, for the area the ceiling case fills, and the id step's
 strides `IdStepStride` and `ThinIdStepStride`, which its smoke case checks
 the moved counters against); three gateway instances on one launch line that
-differs only in the gRPC address; four fake DNs and three fake CNs, in
-distinct locations because the CN scan dedupes locations too, served by
+differs only in the gRPC address; four fake DNs and three fake CNs, the DNs
+in four distinct locations and the CNs in three of them, each CN in its DN
+twin's, since the CN scan dedupes locations too and a CN that shares a
+location with a DN shows the first preference of the pool create's DN
+scans (`architecture.md`, Per-operation allocation), served by
 `fakeagent`, the worker suite's fake (`dnv-worker.md`, Integration test
 plan); and the two drivers, `gatewayctl` for the RPCs and `workerctl` for
 the etcd ground truth, both run on the server. Every stage runs under a
@@ -1870,7 +1885,9 @@ gateway, never through `workerctl`.
 
 * smoke (one gateway) — the full lifecycle: every RPC's happy path but
   `ListStoragePools`, which the parallel and restart cases run, each
-  mutation's exact write set read back, the `CdcEntry` the cdc serves
+  mutation's exact write set read back, the first pool's one leg in its
+  first primary's location a leg of its data group, never of its meta
+  group, the `CdcEntry` the cdc serves
   included — its transport list read back against the listing rule of
   `architecture.md` [D18] as `CreateSubsystem` writes it and as
   `UpdateSubsystemHosts` sets it, once more while a cntlr is disabled,

@@ -68,7 +68,10 @@ no repair, no forced start, no take-over and no cut of a migrating leg's path:
   and a migrating leg whose serving disk node goes silent after the cutover
   is cut down to one path by the primary, so md fails its member while a
   host's writes go on finishing, and the worker finishes the migration and
-  repairs the leg.
+  repairs the leg; and the primary's machine, reset by its kernel with no
+  sync, loses the primary role and then its cntlr while host0 keeps its
+  paths and reads its data through the new primary, and comes back with no
+  cntlr of the pool.
 * **A group md will not start comes back from one leg** (`architecture.md`,
   Repair; `cnagent.md` CN12), on react's pool, at the level where reactions
   stop. When the leg md holds in sync dies while md copies onto a repair's
@@ -144,7 +147,11 @@ fresh new leg in the react case at as many disk-node guests as a group has
 legs, where no guest lies outside the group's, and for a leg repair whose fresh
 leg react's steer pushes to the second tier (E2E4); and the destination of the
 copy case's second migration, cancelled with force after its cutover, which
-the case does not check at all. The cut of a migrating leg's path while its
+the case does not check at all. The default location and the pool create's
+first preference (`architecture.md`, Disk nodes, Per-operation allocation):
+every node passes its guest's role as its location, and no controller node
+shares one with a disk node; the gateway suite and the Go tests prove them.
+The cut of a migrating leg's path while its
 source serves, and leg repair's cancel of a migration whose cutover is
 pending and its wait on a copy not shown whole (`cnagent.md` CN10;
 `dnv-worker.md` AR8): react's migrating leg loses its destination after the
@@ -155,8 +162,11 @@ cutover, with its copy whole.
 Every guest comes from the command line (E2E1), each in one role. The
 control-plane guest runs etcd, `dnv-gateway`, `dnv-worker`, `dnv-cdc` and
 `dnvctl` as the login user. At least three controller-node guests run one
-`dnv-agent cn` each: two carry the pool's cntlrs and the rest none, where the
-ops case's third cntlr and the cntlr replacement land. The disk-node guests, at
+`dnv-agent cn` each, registered at its guest's role as its location, since
+the lab's node guests share one host name, the default location
+(`architecture.md`, Controller nodes): two carry the pool's cntlrs and the
+rest none, where the ops case's third cntlr and the cntlr replacements land.
+The disk-node guests, at
 least as many as a group has legs, and more than that in a run with the copy
 case, which the suite refuses otherwise, run many `dnv-agent dn` instances
 each, every one on its own loop device and its own nvmet port and service id,
@@ -763,8 +773,9 @@ node before the pool's subsystem goes, rather than wait for that sweep.
 **react** proves the four reactions on real faults, that a planned restart
 of the primary's cn agent moves nothing, an operator's forced start of a
 group md will not start, an operator's take-over of a group's repair from
-the worker, and the cut of a migrating leg whose serving disk node goes
-silent, on a pool of the run's slice count but at most `REACT_SLICE_CAP`
+the worker, the cut of a migrating leg whose serving disk node goes silent
+and the loss of the primary's machine, on a pool of the run's slice count
+but at most `REACT_SLICE_CAP`
 slices (Topology and parameters), each by the record it writes or, for the
 restart, by the records it does not write, one action per pass making every
 wait a threshold plus a few passes (`dnv-worker.md` AR2); its own build may
@@ -994,7 +1005,29 @@ the loop must still finish writes, and no cntlr may hold the retired leg.
 The loop stops on its stop file with no write failed by its records,
 host0's kernel log since a mark taken before the silence must report no
 failed IO, host0 reads its data unchanged, and no failover may happen
-across the stage.
+across the stage. The loss of a machine runs last: the primary's
+controller-node guest is reset through the kernel's sysrq trigger, with no
+sync, which drops every kernel object of the guest as a power loss does,
+and the hypervisor starts it again; the guest must answer again under a new
+boot id within a bound. Nothing of the old primary survives to advertise a
+path, so host0 keeps every path it holds through the failover: the standby
+must become primary and build the stack (`dnv-worker.md` AR5), and host0
+must read its data through the path it already held, now optimized. Once
+the cdc's records no longer name the reset node, host0 drops its path to
+it, as a host that follows the discovery log does, and must hold none; it
+does so before it connects the replacement, which keeps the lost cntlr's
+cntlid slot, so that a retrying controller of the same controller id
+does not make the kernel refuse the new one (`architecture.md`, Known
+limits). The lost cntlr must be replaced on the controller node that held
+none (`dnv-worker.md` AR7), host0 must connect the replacement through the
+cdc, its kernel log since a mark taken before the reset must report no
+failed IO, and the worker must have applied one failover and one
+replacement. Only then does the guest get its
+per-boot preparation again, the module loads and the configfs mount of
+Preflight, and its cn agent, started from its store, must converge to a
+node with no cntlr of the pool and no dnv object (`cnagent.md` CN7): an
+agent back before the replacement would answer its rounds and keep the
+cntlr it rebuilds.
 
 **cutoff** proves that a primary cut off from the control plane fails over as
 a pause for a host that follows the discovery log (`architecture.md`,
@@ -1306,6 +1339,12 @@ the connect attempted.
 ## Known limits
 
 * **A multi-case run pays a full rebuild per case** (E2E11).
+* **The loss of a machine is a controller-node guest's reset, on react's
+  pool.** The suite reaches its guests by ssh alone (E2E1), so react resets
+  the primary's guest through the kernel's sysrq trigger, which drops every
+  kernel object as a power loss does but leaves the hypervisor's machine
+  running; no disk-node guest loses its power, and the step runs at react's
+  slice count only.
 * **The clone source may fall back.** Whether one kernel can be initiator and
   target for the same bytes is the lab kernel's property, so a source that
   never connects or stops hydrating routes to a fallback pool on another

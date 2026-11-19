@@ -410,7 +410,11 @@ lvm2 set to read only the node's own physical volumes; `AUTO -all` in
 `/etc/mdadm/mdadm.conf`, after an ARRAY line for each md array of the node's
 own, so that md assembles by itself only those; and, on a controller node,
 the node's own file systems mounted by device path, never by a label or a
-uuid a tenant could copy.
+uuid a tenant could copy. Every machine has a host name of its own, which
+is the location of each node created on it with no location, so the nodes
+of one machine are one location; a machine whose host name is not a valid
+location, as the kernel's `(none)`, needs a location at each node create
+([operations](operations.md#choose-a-nodes-location)).
 [The operations doc](operations.md#install-the-udev-rules-on-a-node) has
 the steps. The tutorials install the udev rules, and mask the nvmf-connect
 unit, so that nvme-stas is the only program that connects to what a

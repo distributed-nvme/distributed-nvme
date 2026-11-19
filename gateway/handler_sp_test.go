@@ -1225,7 +1225,8 @@ func (e *sptEnv) setCntlrInterval(interval uint32) {
 // and again on the transaction's own read.
 //
 // The cluster has two CNs, one for each of the two cntlrs sptDefaultSpec asks
-// for, and a stored cntlr_interval just over half of
+// for, each with room for the footprint of the DN control below, and a stored
+// cntlr_interval just over half of
 // common.DefaultPrimaryUnhealthy, so that its bound, twice the interval, is
 // above that default. Each refusal must be INVALID_ARGUMENT, name both fields
 // with the numbers they are judged at and write nothing. The refused requests
@@ -1234,10 +1235,11 @@ func (e *sptEnv) setCntlrInterval(interval uint32) {
 // cluster has CNs, the other for a data group larger than any DN's free
 // extents. The rule is judged before both scans, so neither may become a
 // scan's RESOURCE_EXHAUSTED, and a control per scan shows that the same shape
-// at the bound does. The DN control must carry the DN scan's message, not the
-// CN scan's: its footprint is too large for every CN as well, and only a
-// refusal by the DN scan, which runs first, lets its row tell a rule judged
-// before both scans from one judged between them. A create at the bound is
+// at the bound does. The CN scan runs first, and answers when both scans
+// would refuse, so the CN control's row is the one that tells a rule judged
+// before both scans from one judged between them. The DN control must carry
+// the DN scan's message, not the CN scan's: the room each CN has for its
+// footprint lets it reach the DN scan. A create at the bound is
 // accepted and stores the threshold as sent (GW11); an unset one under the
 // name that pool then holds is still INVALID_ARGUMENT, not ALREADY_EXISTS.
 //
@@ -1260,7 +1262,11 @@ func TestCreateStoragePoolJudgesThePrimaryThreshold(t *testing.T) {
 	// common.DefaultPrimaryUnhealthy, so an unset primary_unhealthy is under
 	// its bound.
 	const interval = uint32(common.DefaultPrimaryUnhealthy/2 + 1)
-	env := sptNewEnv(t, sptDnCnt, sptCntlrCnt, sptCnFree)
+	// cnFree is the footprint of the DN control's pool, whose data groups
+	// are each one extent over sptDnFree: the CN scan, which runs first,
+	// passes it, and the DN scan refuses it.
+	const cnFree = uint64(sptSliceCnt) * (1 + sptDnFree + 1)
+	env := sptNewEnv(t, sptDnCnt, sptCntlrCnt, cnFree)
 	env.setCntlrInterval(interval)
 	// request is sptDefaultSpec's request under name, with
 	// primary_unhealthy left unset when primary is zero.

@@ -451,13 +451,18 @@ func pointerKnown(req *pb.SyncupCnRequest, ptr *pb.CntlrPointer) bool {
 
 // GetCnSize replies the --capacity flag verbatim (CN3). 0 means "no local
 // opinion" and the CP substitutes DefaultCnCap; the agent never validates or
-// clamps. No locks, no store, no OS access — and no AgentReply: it cannot
-// fail.
+// clamps. It also replies the machine's host name, read on every call
+// (dnagent.md SH34), its one OS access. No locks, no store — and no
+// AgentReply: it cannot fail, since a failed host name read leaves the name
+// empty.
 func (s *CnAgentServer) GetCnSize(
 	ctx context.Context,
 	req *pb.GetCnSizeRequest,
 ) (*pb.GetCnSizeReply, error) {
-	return &pb.GetCnSizeReply{Size: s.capacity}, nil
+	return &pb.GetCnSizeReply{
+		Size:     s.capacity,
+		HostName: agent.HostName(ctx, s.oc),
+	}, nil
 }
 
 // SyncupCn marks its converge as it arrives, before it waits for the node
