@@ -653,7 +653,7 @@ func TestAgentPathCreateDiskNodeConsumesAgentSize(t *testing.T) {
 //
 // The MinCnCap row is the boundary that makes the floor a substitution and
 // not a clamp-up: exactly MinCnCap is believed, and 1 KiB buys no extent, so
-// the create is refused rather than silently promoted to 4 TiB.
+// the create is refused rather than silently promoted to the default.
 func TestAgentPathCreateControllerNodeCapBudget(t *testing.T) {
 	extSize := uint64(common.DefaultDnExtSize)
 	tests := []struct {
@@ -663,15 +663,15 @@ func TestAgentPathCreateControllerNodeCapBudget(t *testing.T) {
 		wantCode   codes.Code
 	}{
 		{
-			name:       "zero takes the default budget",
+			name:       "zero takes the default budget, the largest",
 			cnSize:     0,
-			wantExtCnt: common.DefaultCnCap / extSize,
+			wantExtCnt: common.MaxCnCap / extSize,
 			wantCode:   codes.OK,
 		},
 		{
 			name:       "below the floor takes the default budget too",
 			cnSize:     common.MinCnCap - 1,
-			wantExtCnt: common.DefaultCnCap / extSize,
+			wantExtCnt: common.MaxCnCap / extSize,
 			wantCode:   codes.OK,
 		},
 		{

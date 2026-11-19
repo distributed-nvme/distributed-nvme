@@ -253,7 +253,7 @@ var leafFlags = map[string][]string{
 	"cluster get":          {"name"},
 	"cluster list":         {"count", "page-token"},
 	"cluster advance-ids":  {"name"},
-	"cluster get-capacity": {"name"},
+	"cluster get-capacity": {"name", "leg-cnt", "cntlr-cnt", "slice-cnt"},
 	// dn — trConfFlags("") expands to the four unprefixed transport flags.
 	"dn create": {"addr", "location", "disabled",
 		"tr-type", "adr-fam", "tr-addr", "tr-svc-id"},

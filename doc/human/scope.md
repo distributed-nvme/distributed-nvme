@@ -266,7 +266,10 @@ loss in the sense of this document. The application knows. Two cases:
   holds the most data groups it can. Nothing reserves space ahead. A write
   that needs a new block waits for the kernel's no-space timeout and fails. Written
   blocks keep serving. Under the CSI driver the cluster can be
-  over-committed. State: accepted. An alert for it is not yet.
+  over-committed. `dnvctl cluster get-capacity` says what the cluster can
+  still give pools and which limit it reaches first ([the operations
+  doc](operations.md#the-clusters-capacity)). State: accepted. An alert
+  for it is not yet.
 - **Writes wait for the kernel's timers when a disk node dies.** Over
   NVMe/TCP a dead disk node is noticed by the keep-alive alone. In the lab
   the controller node dropped its connections to the dead node 6 to 10
@@ -1257,7 +1260,7 @@ steps; the section "Steps known today" below gives the longer ones.
 | Replace a dead disk node | leg repair moves its RAID1 legs; `dnvctl retired-leg delete` frees the retired ones | none | procedure to write. Fix later: a forced node delete. |
 | Replace a dead controller node | the worker replaces its cntlrs after `cntlr_unhealthy`; `dnvctl cntlr create` and `dnvctl cntlr delete` by hand | none | procedure to write |
 | Reuse a disk from an old node | none: stop the agent; zero the disk's header block, where dnv records the disk; delete the agent's local store; start the agent; create the node | none | procedure to write |
-| See a node's live state and the cluster's capacity | `dnvctl dn inspect`, `dnvctl cn inspect`, `dnvctl cluster get-capacity` | none | procedure to write, one line. Fix decided: a capacity answer that also says what can still be placed and which limit the cluster reaches first. |
+| See a node's live state and the cluster's capacity | `dnvctl dn inspect`, `dnvctl cn inspect`, `dnvctl cluster get-capacity`, which also says what pools of one shape can still get and which limit the cluster reaches first | the operations doc, The cluster's capacity | procedure written for the capacity; procedure to write, one line, for a node's live state |
 | Compare a disk node's own free count with its record | `dnvctl dn inspect` shows the agent's count, `dnvctl dn get` the record's | none | procedure to write, one line: the counts are compared, never reconciled |
 | Restart a node's agent | none; the agent answers "starting" while it rebuilds, and the worker waits for it up to the start hold | the operations doc | done |
 
@@ -1370,7 +1373,12 @@ which builds have `--version`. No build may replace a newer one: section
 5.5 says why. A node that 0.1 created with no location keeps its address
 as its location after the upgrade; only emptying, deleting and creating it
 again puts it in its machine's location
-([the operations doc](operations.md#choose-a-nodes-location)).
+([the operations doc](operations.md#choose-a-nodes-location)). A
+controller node that 0.1 created with no budget keeps the 4 TiB 0.1 gave
+it after the upgrade, not the 64 TiB a new node gets, so `dnvctl cluster
+get-capacity` can name the budget as the limit sooner than the new default
+suggests; only emptying, deleting and creating it again gives it another
+budget ([the operations doc](operations.md#the-clusters-capacity)).
 
 **Logs.** The programs log to stderr as JSON, one record per line, at one
 level, with no level flag and no rotation. Keep the logs on a filesystem
@@ -1654,11 +1662,17 @@ design:
   pool's groups. So the sum of the budgets divided by the cntlr count of
   the pools is the most group space the cluster holds, whatever its disks
   hold. The budget is read once, at the node's create, from the
-  `--capacity` its cn agent was started with; unset, it takes a default.
-  No call changes it, so set `--capacity` on every cn agent before its
-  node's create. An auto-grow refused for want of budget shows only in
-  the worker's log. State: accepted. Fix decided: a node created without
-  a budget gets the largest one.
+  `--capacity` its cn agent was started with; unset, it is the largest
+  budget, 64 TiB, so the cap binds a cluster whose operator set budgets, or
+  one whose pool space passes 64 TiB times its controller nodes, divided
+  by the cntlr count of a pool. No call changes it, so set `--capacity` on
+  every cn agent before its node's create. A controller node that 0.1
+  created with no budget keeps 0.1's 4 TiB after an upgrade. `dnvctl
+  cluster get-capacity` names the budget when it is the limit the cluster
+  reaches first, and an auto-grow refused for want of budget shows in the
+  worker's log. State: accepted.
+  Procedure: [the operations doc](operations.md#the-clusters-capacity),
+  The cluster's capacity.
 - **The default cap on IO queues is unmeasured.** Each path holds one
   TCP connection per IO queue, and the agent caps the queues of a
   subsystem; no host with many CPUs has been measured for it. State:

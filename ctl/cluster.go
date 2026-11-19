@@ -240,16 +240,20 @@ func clusterAdvanceIdsCmd() *cobra.Command {
 
 // clusterGetCapacityCmd drives GetClusterCapacity, the capacity read of
 // architecture.md, Clusters: every node's recorded extent counts and flags,
-// for the layer above to sum. A read, so it carries no token (CT3); like
-// `cluster get` it names its cluster with --name and falls back to the
-// global --cluster.
+// and the space answer for the pool shape the three counts name, each sent
+// as typed, so a zero takes the gateway's default as `sp create` does. A
+// read, so it carries no token (CT3); like `cluster get` it names its
+// cluster with --name and falls back to the global --cluster.
 func clusterGetCapacityCmd() *cobra.Command {
 	cmd := leaf("get-capacity",
-		"read every node's recorded extent counts and flags "+
-			"(GetClusterCapacity)",
+		"read every node's recorded extent counts and flags, and what "+
+			"pools of one shape can still place (GetClusterCapacity)",
 		func() (job, error) {
 			req := &pb.GetClusterCapacityRequest{
 				ClusterName: clusterNameOf(),
+				LegCnt:      u32Of("leg-cnt"),
+				CntlrCnt:    u32Of("cntlr-cnt"),
+				SliceCnt:    u32Of("slice-cnt"),
 			}
 			return func(
 				ctx context.Context, client pb.GatewayClient,
@@ -258,5 +262,16 @@ func clusterGetCapacityCmd() *cobra.Command {
 			}, nil
 		})
 	clusterNameFlag(cmd)
+	// The defaults are interpolated, spCreateCmd's --slice-cnt rule.
+	flags := cmd.Flags()
+	flags.Uint32("leg-cnt", 0,
+		"leg_cnt — legs a group has: 2 for RAID1, 1 without redundancy "+
+			"(0 = the cluster's redundancy)")
+	flags.Uint32("cntlr-cnt", 0,
+		fmt.Sprintf("cntlr_cnt — cntlrs a pool has (0 = the gateway "+
+			"default, %d)", common.DefaultCntlrCntPerSp))
+	flags.Uint32("slice-cnt", 0,
+		fmt.Sprintf("slice_cnt — slices a pool has (0 = the gateway "+
+			"default, %d)", common.DefaultSliceCntPerSp))
 	return cmd
 }

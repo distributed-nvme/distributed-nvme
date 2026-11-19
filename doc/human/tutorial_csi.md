@@ -195,9 +195,11 @@ sudo k3s kubectl -n dnv-csi logs ds/dnv-csi-node -c dnv-csi | grep -c '"csi node
 The first two end with `successfully rolled out`, the last two print `1`.
 
 Check: Kubernetes knows the free space of the class. The provisioner
-sidecar asks the controller plugin, which reads every node's free extents
-from the gateway; the first answer comes within a minute of the start, so
-repeat until a row shows.
+sidecar asks the controller plugin, which asks the gateway what the cluster
+can give a pool of the class: RAID1, one cntlr and one slice, the answer
+`dnvctl cluster get-capacity --name c0 --leg-cnt 2 --cntlr-cnt 1
+--slice-cnt 1` prints. The first answer comes within a minute of the
+start, so repeat until a row shows.
 
 ```
 sudo k3s kubectl get csistoragecapacities -A -o custom-columns=CLASS:.storageClassName,CAPACITY:.capacity,LARGEST:.maximumVolumeSize
@@ -205,8 +207,11 @@ sudo k3s kubectl get csistoragecapacities -A -o custom-columns=CLASS:.storageCla
 
 It prints one row: the class `dnv`, a capacity of `18Gi` and a largest
 volume of `18Gi`. The four disk nodes hold 36 free extents of 1 GiB, and
-RAID1 writes every byte twice, so 18 GiB is free now, and the largest
-volume Kubernetes is told of is capped at that. Both are free space, not a
+RAID1 writes every byte twice, so 18 GiB is free now, the gateway's
+`placeable_bytes`; the controller node's budget, 64 TiB, is far from the
+limit. The largest volume Kubernetes is told of is eight times the
+gateway's `largest_init_ext_cnt`, the nine extents a first data group is
+sure of, capped at the free space. Both are free space, not a
 promise: nothing is held for a volume, and a create can build a larger
 claim too, since a volume takes only one extent for its metadata and an
 eighth of its size for data at the start.

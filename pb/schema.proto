@@ -1264,6 +1264,58 @@ message AdvanceClusterIdsReply {
 
 message GetClusterCapacityRequest {
     string cluster_name = 1;
+    // The pool shape the space answer is for: the legs of a group, the
+    // cntlrs and the slices of a pool. Zero takes what CreateStoragePool
+    // takes for it: the legs of the cluster's stored bdev_conf, and the
+    // default cntlr and slice counts (architecture.md, Clusters). Appended,
+    // never renumbered.
+    uint32 leg_cnt = 2;
+    uint32 cntlr_cnt = 3;
+    uint32 slice_cnt = 4;
+}
+
+// CapacityLimit is the limit a cluster reaches first for pools of one shape
+// (architecture.md, Clusters, GetClusterCapacity), judged in this order: the
+// pool ceiling, too few controller nodes, too few disk nodes, disk nodes in
+// too few locations, then whichever side holds less: disk space or the
+// controller nodes' budgets.
+enum CapacityLimit {
+    CAPACITY_LIMIT_UNSPECIFIED = 0;
+    CAPACITY_LIMIT_POOL_CEILING = 1;
+    CAPACITY_LIMIT_CN_COUNT = 2;
+    CAPACITY_LIMIT_DN_COUNT = 3;
+    CAPACITY_LIMIT_DN_LOCATIONS = 4;
+    CAPACITY_LIMIT_DN_SPACE = 5;
+    CAPACITY_LIMIT_CN_BUDGET = 6;
+}
+
+// ClusterSpace is GetClusterCapacity's answer for one pool shape, computed
+// from the records the reply's entries copy (architecture.md, Clusters,
+// GetClusterCapacity): an estimate, as those records are. Raw is every
+// record's extents, charged the extents its pointers hold, free the free
+// extents of the nodes a scan can offer; every byte count is extents times
+// the cluster's extent size.
+message ClusterSpace {
+    // The request's counts, zeros resolved.
+    uint32 leg_cnt = 1;
+    uint32 cntlr_cnt = 2;
+    uint32 slice_cnt = 3;
+    uint64 dn_raw_bytes = 4;
+    uint64 dn_charged_bytes = 5;
+    uint64 dn_free_bytes = 6;
+    uint64 cn_raw_bytes = 7;
+    uint64 cn_charged_bytes = 8;
+    uint64 cn_free_bytes = 9;
+    // The group space pools of this shape can still place, one copy: zero
+    // when a count limit is reached or when no pool of the shape fits.
+    uint64 placeable_bytes = 10;
+    // The largest first data group, in extents, a new pool of this shape
+    // can get: sure to get when every disk node is a location of its own
+    // (architecture.md, Clusters, GetClusterCapacity).
+    uint64 largest_init_ext_cnt = 11;
+    CapacityLimit limit = 12;
+    // The cluster's pools, those being deleted included.
+    uint32 pool_cnt = 13;
 }
 
 // DnCapacityEntry is one disk node's recorded counts and flags as
@@ -1296,6 +1348,10 @@ message GetClusterCapacityReply {
     uint64 extent_size = 2;
     map<string, DnCapacityEntry> addr_port_to_dn = 3;
     map<string, CnCapacityEntry> addr_port_to_cn = 4;
+    // The space answer for the request's pool shape. Always set by a
+    // gateway that knows it; a reader treats its absence as an error.
+    // Appended, never renumbered.
+    ClusterSpace space = 5;
 }
 
 // ListWorkersRequest names nothing: the worker registry is cluster-independent

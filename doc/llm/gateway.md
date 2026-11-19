@@ -288,8 +288,9 @@ placement), and `GrowSlice`'s CN-budget pre-check — take the cluster id, and
 the `ClusterConf` where they use it, from that snapshot and never read
 `ClusterConf` themselves. The **paged** `List*` RPCs use plain
 reads, not an STM (`architecture.md`, page_token; GW10). So does
-`GetClusterCapacity`, whose two ranges follow the same plain `ClusterConf`
-read the cluster-scoped lists make (Clusters), and so does `ListWorkers`,
+`GetClusterCapacity`, whose plain `SpGlobal` read and two ranges follow the
+same plain `ClusterConf` read the cluster-scoped lists make (Clusters), and
+so does `ListWorkers`,
 whose one range needs no `ClusterConf` read (Worker registry).
 `ListThinDevices`,
 `ListSubsystems`, `ListRepairs`, `ListRetiredLegs` and the single-object
@@ -597,7 +598,10 @@ repair finishes at the retired-leg bound, and the gate runs whether or not
 a side goes back),
 and in the scans `pickDns` and `pickCn`
 (where a zero batch size would silently make the scan width zero and turn
-every allocation into `RESOURCE_EXHAUSTED`), in `CreateMigration`'s plan
+every allocation into `RESOURCE_EXHAUSTED`), in `GetClusterCapacity`
+right after its `ClusterConf` read (its space answer counts disk nodes by
+the stored ladder and turns extents into bytes by the stored extent size),
+in `CreateMigration`'s plan
 and STM before the
 destination's metadata units are sized by the cluster's `extent_size`
 (`migrMetaUnitsOf`), and in `CreateClone`'s plan and STM before its clone
@@ -735,12 +739,18 @@ and field-level rules stay in the cited section of `architecture.md`,
   suffixes.
 * **AdvanceClusterIds** — validate the name (GW4); GW19's transactions.
   Reply the cluster id and the count of pools whose `SpConf` it moved.
-* **GetClusterCapacity** — validate the name (GW4); the plain `ClusterConf`
-  read of the cluster-scoped lists for the cluster id (GW5), then two plain
+* **GetClusterCapacity** — validate the name (GW4) and the pool shape
+  (`validateCapacityShape`: the three counts against the bounds
+  `CreateStoragePool` holds, before any read); the plain `ClusterConf` read
+  of the cluster-scoped lists for the cluster id (GW5) and the stored-conf
+  gate (GW11); a plain `SpGlobal` read for the pool count; then two plain
   ranges, `DnConfPrefix` and `CnConfPrefix` of that id, outside any STM,
   each record decoded and copied into its entry: the counts, the flags and
-  the pointer count, never the pointer list. Reply the defaulted name, the
-  extent size and the two entry maps (`architecture.md`, Clusters).
+  the pointer count, never the pointer list. The zero counts are resolved
+  as `CreateStoragePool` resolves them, the legs from the stored
+  `bdev_conf` (`legCntOf`), and `model.ClusterSpaceOf` computes the space
+  answer from the decoded records. Reply the defaulted name, the extent
+  size, the two entry maps and the space (`architecture.md`, Clusters).
 
 GW19. **The id step.** `AdvanceClusterIds` runs the transactions of
 `architecture.md`, Clusters, which owns their order and their reasons. One
@@ -1993,7 +2003,12 @@ gateway, never through `workerctl`.
   and write nothing; the token works as a fence — a stale token and a
   present zero token are refused — and, through the documented client retry
   on "stale revision", as a liveness loop that converges.
-* faults (one gateway) — the refusal batteries on a live pool: validation,
+* faults (one gateway) — first, the capacity read's space answer for the
+  shape of the case's pool, before the pool is made and after it
+  (`architecture.md`, Clusters): the disk side's share as the limit, the
+  largest first data group, and after the create the pool's legs charged
+  to the disk nodes and its footprint to each cntlr's controller node;
+  then the refusal batteries on a live pool: validation,
   not-found and precondition classes — among them an extent size off its
   unit and a data block over the block's bound at a cluster's and a pool's
   create, the NSID that names every namespace, a clone source's namespace

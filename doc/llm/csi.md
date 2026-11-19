@@ -180,42 +180,31 @@ host the volume moves to (`architecture.md`, Known limits).
 
 ## Capacity
 
-CSI11. **Capacity is arithmetic over the cluster capacity call.** A disk
-node counts when it is enabled, healthy, below its side ceiling and holds at
-least the free extents of the cluster's smallest bin, below which no scan
-finds it (`architecture.md`, DN bins); a controller node counts when it is
-enabled, healthy, below its cntlr ceiling and has an extent free. A pool
-puts every leg on a disk node of its own and every cntlr on a controller
-node of its own, charged with the pool's footprint (`architecture.md`,
-Per-operation allocation), so a class whose pool of a meta group and a data
-group needs more disk nodes, or whose cntlr count needs more controller
-nodes, than count has nothing available and a largest volume of zero, and so
-has a cluster at its pool ceiling, since every volume is a pool of its own.
-Otherwise the available bytes are the smaller of two sides. The disk side is
-the free extents of the disk nodes that count, times the extent size,
-divided by the legs a group has under the class's redundancy. The controller
-side is the free extents of the controller nodes that count, times the
-extent size, divided by the class's cntlr count. The largest volume is the
-one whose first data group, one part in `volumeSteps` of it, fits whichever
-disk nodes the meta group takes, since the gateway places the meta group first
-and at random: of the twice-legs disk nodes with the most free extents, legs
-stay for the data group, so the bound is the twice-legs-th largest free count,
-the worst case, which can be well below what a create builds where the
-allocator offers the meta group only the disk nodes with the fewest free
-extents. It also fits the controller node that would carry its last cntlr, the
-cntlr-count-th largest free count less the meta group's extent; it is never
-above the available bytes, and it is always reported, zero included, since an
-absent one means no bound per volume. Locations are not counted, so a cluster
-whose disk nodes share few locations can answer more than a create builds. Both
-are estimates, as the capacity call's records are (`architecture.md`,
-Clusters), and the available bytes can be over-promised, since a volume
-reserves one extent and one part in `volumeSteps` of itself (The volume model).
-A create does not check them: whether it builds a claim depends on the
-gateway's placement, which draws the meta group first and at random and can
-take a retry. A cluster that does not exist has nothing free: both answers are
-zero, not an error, since Kubernetes asks the capacity of every class on a
-timer and a class may name a cluster still to be created; a create in it is the
-class's error (CSI12).
+CSI11. **Capacity is the gateway's answer.** The plugin asks the gateway's
+capacity read for a pool of the class's shape — the legs of its redundancy,
+its cntlr count as the class states it, the gateway's default where it
+states none, as a create sends it, and one slice — and does no capacity
+arithmetic of its own: which nodes count, the limits, the locations and the
+largest first data group are the gateway's (`architecture.md`, Clusters,
+GetClusterCapacity), so the driver and an operator's `dnvctl cluster
+get-capacity` read one answer. The available bytes are the answer's
+placeable bytes. The largest volume is the one whose first data group, one
+part in `volumeSteps` of it, is the largest first data group the answer
+names, never above the available bytes; it is always reported, zero
+included, since an absent one means no bound per volume. Both are
+estimates, as the gateway's answer is, and the available bytes can be
+over-promised, since a volume reserves one extent and one part in
+`volumeSteps` of itself (The volume model). A create does not check them:
+whether it builds a claim depends on the gateway's placement, which draws
+the meta group first and at random and can take a retry. A cluster that does
+not exist has nothing free: both answers are zero, not an error, since
+Kubernetes asks the capacity of every class on a timer and a class may name
+a cluster still to be created; a create in it is the class's error (CSI12).
+A reply that carries no space answer, which a gateway older than the plugin
+sends, is `UNAVAILABLE`, not zero: the provisioner then leaves the capacity
+object as it last wrote it, where a zero would stop every claim of the class
+that waits for its pod's node. Any other refusal of the gateway is the
+call's.
 
 ## Parameters and capabilities
 
@@ -708,16 +697,22 @@ and never pulling. Each pod is Running on its host, each log is the one
 line, and the pods go.
 
 **volume.** The first class's capacity object is published with a capacity
-above zero; a filesystem claim becomes a pool of one slice and two cntlrs; a
-pod on host0 writes a pattern and its digest; the same claim under a pod on
-host1 checks the digest, while every path host1 holds to it shows a
-controller-loss timeout of "off" (CSI14); a raw block claim is written and
-read back through the device by a pod on host0; a claim of a second class that
-names xfs is formatted with the profile of the 6.1 series (CSI17), which the
-filesystem's own report shows, read in host0's node plugin container at the
-target of a pod that holds the claim, since only a container with the host's
-devices can read it: two features the image's maker turns on by default are
-off; then every delete, and nothing left.
+above zero, and comes to hold the gateway's placeable bytes for the class's
+shape, read with `dnvctl cluster get-capacity` (CSI11), which proves that
+the provisioner publishes the gateway's figure; that the plugin keeps no
+sums of its own is the plugin's unit tests' to prove, since on the suite's
+disk nodes, of equal free space in a location each, sums over the node
+entries would give the same bytes; a filesystem claim becomes a pool of one
+slice and two cntlrs; a pod on host0 writes a pattern and its digest; the
+same claim under a pod on host1 checks the digest, while every path host1
+holds to it shows a controller-loss timeout of "off" (CSI14); a raw block
+claim is written and read back through the device by a pod on host0; a
+claim of a second class that names xfs is formatted with the profile of the
+6.1 series (CSI17), which the filesystem's own report shows, read in
+host0's node plugin container at the target of a pod that holds the claim,
+since only a container with the host's devices can read it: two features
+the image's maker turns on by default are off; then every delete, and
+nothing left.
 
 **failover.** The controller plugin's cdc list names a dead address beside
 the cdc for the case, so the publish context of every attach does, while the

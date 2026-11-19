@@ -142,7 +142,13 @@ always means the SP's `DmPoolConf.data_block_size`.
 * **CN, controller node** — A machine running the volume logic. It
   contributes no persistent storage and holds no clone's metadata — a
   clone's dm-clone keeps it on the clone's clone meta group, on DNs — but
-  has a capacity budget in extents.
+  has a capacity budget in extents. Every cntlr of a pool, a standby as
+  much as the primary, charges its CN the pool's whole group size, so the
+  CNs' budgets divided by a pool's cntlr count bound the group space a
+  cluster can hold, whatever its disks hold; a CN whose agent states no
+  budget gets the largest, `MaxCnCap` (Size → extents), and the capacity
+  read names the budget when it is the limit a cluster reaches first
+  (Clusters, GetClusterCapacity).
 * **extent** — The allocation unit for both DN space and CN budget, of
   `ClusterConf.dn_bin_conf.extent_size` bytes (default
   `DefaultDnExtSize`). Counts are always rounded **down**.
@@ -1540,8 +1546,12 @@ divided by `extent_size`, rounded down; the agent already reports the
 data-area bytes, the disk size less `DnDataOffset` ([D13]), so no further
 subtraction exists. A CN's `total_ext_cnt` is its capacity budget divided
 by `extent_size`, rounded down, where the budget comes from `GetCnSize`: a
-zero reply takes `DefaultCnCap`, a reply above `MaxCnCap` is clamped to it,
-and a non-zero reply below `MinCnCap` is treated like a zero.
+zero reply takes `DefaultCnCap`, which is `MaxCnCap`, the largest budget, a
+reply above `MaxCnCap` is clamped to it, and a non-zero reply below
+`MinCnCap` is treated like a zero. Reason for the largest: a budget is a
+limit an operator sets on purpose, and one left unset should not cap a
+cluster unseen; the capacity read names the budget when it binds (Clusters,
+GetClusterCapacity).
 
 ### DN bins
 
@@ -2432,29 +2442,87 @@ and the sync fan-out). A call that fails part-way leaves what it moved
 moved and is run again, which moves every counter once more. Reply the
 `cluster_id` and the number of pools moved.
 
-**GetClusterCapacity** — the capacity read of the layer above (`csi.md`
-CSI11): what a cluster can still promise, as its records hold it.
-Errors: `NOT_FOUND` cluster.
-Action: no STM. A plain `ClusterConf` read derives `cluster_id`, then two
-plain ranges, the cluster's `dn_conf` prefix and its `cn_conf` prefix, run
-outside any STM, as the paged lists' ranges do (page_token): a transaction
-cannot range, and the reply is a figure, not an invariant, so the two ranges
-may straddle a write, and a node created or deleted between them is a
-change such a read is allowed to straddle. The reply carries `cluster_name`
-defaulted, the cluster's `extent_size`, and one entry per node keyed by
-`addr_port`: for a disk node its `location`, `disabled`, `err_epoch`,
-`total_ext_cnt`, `free_ext_cnt` and the count of its side pointers; for a
-controller node the same with the count of its cntlr pointers. Nothing is
-computed. `free_ext_cnt` is the ledger's count, which moves only with the
-node's pointers (Per-operation allocation), so a side charged but not yet
-provisioned, both sides of a migration, a repair's new leg, a retired leg
-and a side awaiting its drain step all count as used; a node at its pointer
-ceiling shows free extents no allocation can use, which the pointer count
-reveals; and a cntlr charges its controller node the pool's footprint, so a
-cluster's room is bounded by its controller nodes as well as its disk
-nodes. Each record is decoded through the etcd door, which logs it as it
-logs every decoded value, so on a cluster at the node ceilings this is a
-heavy read meant for an occasional poll, not a hot path.
+**GetClusterCapacity** — the capacity read: what a cluster can still place
+for pools of one shape, and the records that answer is computed from; the
+one answer for capacity, which the layer above reads (`csi.md` CSI11).
+Errors: `INVALID_ARGUMENT` for a shape no `CreateStoragePool` takes — a
+`leg_cnt` above `MaxAllocLegPerGrp`, a `cntlr_cnt` above
+`MaxCntlrCntPerSp`, a `slice_cnt` above `MaxSliceCntPerSp` — judged before
+any read; `NOT_FOUND` cluster; `ABORTED` for a stored conf its validator
+refuses (Common validation) and for a missing `SpGlobal`.
+Defaults: a zero `leg_cnt` takes the legs of the cluster's stored
+`bdev_conf`, a zero `cntlr_cnt` `DefaultCntlrCntPerSp` and a zero
+`slice_cnt` `DefaultSliceCntPerSp`, as `CreateStoragePool` takes them.
+Action: no STM. A plain `ClusterConf` read derives `cluster_id` and the
+stored conf is judged, since the answer counts disk nodes by its bin ladder
+and turns extents into bytes by its extent size; a plain `SpGlobal` read
+gives the pool count, the sum of its shard buckets, pools being deleted
+included; then two plain ranges, the cluster's `dn_conf` prefix and its
+`cn_conf` prefix, run outside any STM, as the paged lists' ranges do
+(page_token): a transaction cannot range, and the reply is a figure, not an
+invariant, so the reads may straddle a write, and a node created or deleted
+between them is a change such a read is allowed to straddle. The reply
+carries `cluster_name` defaulted, the cluster's `extent_size`, one entry
+per node keyed by `addr_port` — for a disk node its `location`, `disabled`,
+`err_epoch`, `total_ext_cnt`, `free_ext_cnt` and the count of its side
+pointers; for a controller node the same with the count of its cntlr
+pointers — and the space answer for the shape, computed from those records
+(`model.ClusterSpaceOf`):
+
+* the counts as resolved, and the pool count;
+* raw, charged and free bytes of each kind of node: raw is every record's
+  `total_ext_cnt`, charged its `total_ext_cnt` less its `free_ext_cnt`, and
+  free the `free_ext_cnt` of the nodes a scan can offer, those that hold a
+  capacity key (Capacity index keys), each times `extent_size`; what the
+  other nodes hold free is raw less charged less free;
+* the limit the cluster reaches first, judged in this order: the pool
+  ceiling, `MaxSpCntPerCluster` pools; fewer controller nodes that count
+  than the cntlr count; fewer disk nodes that count than the pool's legs,
+  the leg count times twice the slice count; disk nodes in too few
+  locations, where a location gives a pool at most one leg of each group,
+  so at most its counting disk nodes or the pool's group count, whichever
+  is fewer, and the locations together give fewer than the pool's legs;
+  then whichever holds less, disk space or the controller nodes' budgets,
+  disk space on a tie;
+* the placeable bytes, zero when a count limit is reached or when the
+  largest first data group below is zero, so that no pool of the shape
+  fits, the limit then naming the side whose bound is zero: the group
+  space, one copy, that pools of the shape can still place, the smaller of
+  two shares. On the disk side a location holds at most one leg of each
+  group, so a group space of X takes at most X of a location's free
+  extents and takes X from each of legs locations: the share is the
+  largest X whose locations' free extents, each capped at X, sum to at
+  least legs times X. On the controller side each cntlr of a pool sits on
+  a controller node of its own, charged the pool's whole footprint: the
+  same share over the controller nodes' free extents, with the cntlr count
+  in place of the legs;
+* the largest first data group, in extents, zero when a count limit is
+  reached: the smaller of two bounds. On the disk side, the largest size
+  whose disk nodes, those with at least that many free extents, pass the
+  location count above for every group of the pool at that size; on the
+  controller side, the free extents of the controller node that would carry
+  the last cntlr, the cntlr-count-th fullest, over the slice count, rounded
+  down, less the meta group's extent. With every disk node in a location of
+  its own this is the worst case over the gateway's draws, where the
+  earlier groups take the fullest disk nodes (Per-operation allocation);
+  where a location holds several disk nodes, a draw can still leave a data
+  group short of locations, the create is refused, and a repeat can build
+  it.
+
+The answer is an estimate, as its records are: `free_ext_cnt` is the
+ledger's count, which moves only with the node's pointers (Per-operation
+allocation), so a side charged but not yet provisioned, both sides of a
+migration, a repair's new leg, a retired leg and a side awaiting its drain
+step all count as used; the shares treat free space as divisible, while a
+group takes whole extents on one disk node per leg, and every leg of a pool
+takes a disk node of its own, so where a few disk nodes hold most of the
+free space, pools of small groups use the disk nodes up before the space
+and place less than the share; and a cntlr charges its
+controller node the pool's footprint, so a cluster's room is bounded by its
+controller nodes' budgets (Size → extents) as well as by its disk nodes.
+Each record is decoded through the etcd door, which logs it as it logs
+every decoded value, so on a cluster at the node ceilings this is a heavy
+read meant for an occasional poll, not a hot path.
 
 ### Worker registry
 
@@ -2627,8 +2695,9 @@ and `CnGlobal`, with these differences:
 
 * **CreateControllerNode** calls `ControllerNodeAgent.GetCnSize` (with a
   zero `cn_id`) and maps the reply to `total_ext_cnt` per Size → extents —
-  a zero takes `DefaultCnCap`, a larger size is clamped to `MaxCnCap`, and
-  a non-zero size below `MinCnCap` is treated like a zero.
+  a zero takes `DefaultCnCap`, the largest budget, a larger size is clamped
+  to `MaxCnCap`, and a non-zero size below `MinCnCap` is treated like a
+  zero.
   `RESOURCE_EXHAUSTED` at `MaxCnCntPerCluster`. Its `location` default is
   the host name `GetCnSize` reports, with the refusal and the reasons of
   `CreateDiskNode`, so a machine's controller node shares the location of
@@ -4690,7 +4759,7 @@ its pad bits in the middle of the chunk and shift every later bit. So
 ### `service ControllerNodeAgent`
 
 * `GetCnSize` returns the capacity budget in bytes this CN is willing to
-  host, zero meaning "use the default"; typically from local config
+  host, zero meaning "use the default", the largest; typically from local config
   (`cnagent.md` CN3); and the machine's host name, as `GetDnSize` does.
 * `SyncupCn` carries `revision`, `qos_ratio` and `cntlr_pointer_list`. It
   ensures the base state of Controller node, common — the single nvmet
@@ -9361,7 +9430,15 @@ document and only pointed to here.
   `CreateControllerNode`, from the `GetCnSize` reply (Size → extents;
   Controller nodes), and no call changes it, so the budgets, divided by
   the pools' cntlr counts, cap the group space of a cluster whatever its
-  disks hold, and an auto-grow refused for want of budget shows only as
+  disks hold. A node whose agent states no budget takes the largest,
+  `MaxCnCap`, so the cap binds a cluster whose operator set budgets, or one
+  whose group space passes its controller nodes' count times `MaxCnCap`
+  over the cntlr count. A controller node v0.1.0 created with no budget
+  keeps that build's smaller default, as no code rewrites a stored
+  `total_ext_cnt`: only emptying, deleting and creating the node again
+  gives it another budget. The capacity read names the budget when it is the
+  limit a cluster reaches first (Clusters, GetClusterCapacity); an
+  auto-grow refused for want of budget shows only as
   the worker's `reaction skipped` record (`dnv-worker.md` AR6), the pass
   going on to the reactions after it when its own check finds the
   shortfall (`dnv-worker.md` AR2), while an operator's `GrowSlice` is

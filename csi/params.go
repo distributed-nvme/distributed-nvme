@@ -86,15 +86,6 @@ func (p params) legs() int {
 	return common.MaxAllocLegPerGrp
 }
 
-// cntlrCnt is the cntlr count a pool of the class gets, the gateway's
-// default resolved for the capacity arithmetic.
-func (p params) cntlrCnt() uint32 {
-	if p.cntlrs == 0 {
-		return common.DefaultCntlrCntPerSp
-	}
-	return p.cntlrs
-}
-
 // redundConf is the redundancy a pool of the class is created with.
 func (p params) redundConf() *pb.RedundConf {
 	if p.redundancy == redundancyNone {

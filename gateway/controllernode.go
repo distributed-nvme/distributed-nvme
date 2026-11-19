@@ -57,11 +57,12 @@ import (
 // reports how much working space for clones and migrations the operator lets
 // dnv use — an opinion, and therefore one read with a floor and a ceiling.
 //
-// 0 means "no opinion" and takes DefaultCnCap (4 TiB); a NON-ZERO reply below
-// MinCnCap is treated exactly like 0 rather than accepted as a budget too
-// small to allocate anything from; anything above MaxCnCap (64 TiB) is clamped
-// to it. Whether the resulting budget yields at least one extent is decided by
-// the caller against the cluster's extent_size, which only the STM knows.
+// 0 means "no opinion" and takes DefaultCnCap, which is MaxCnCap, the
+// largest budget; a NON-ZERO reply below MinCnCap is treated exactly like 0
+// rather than accepted as a budget too small to allocate anything from;
+// anything above MaxCnCap is clamped to it. Whether the resulting budget
+// yields at least one extent is decided by the caller against the cluster's
+// extent_size, which only the STM knows.
 func cnCapBudget(size uint64) uint64 {
 	if size < common.MinCnCap {
 		return common.DefaultCnCap

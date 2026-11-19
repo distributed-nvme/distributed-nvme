@@ -282,11 +282,17 @@ const (
 	DnCntlidSlotStep = 5000
 
 	DefaultClusterName = "default"
-	DefaultCnCap       = 4 * 1024 * 1024 * 1024 * 1024
-	MaxCnCap           = 64 * 1024 * 1024 * 1024 * 1024
-	MinCnCap           = 1024
-	DefaultListCnt     = 64
-	MaxListCnt         = 1024
+	// DefaultCnCap is the budget of a controller node whose agent states
+	// none: the largest, MaxCnCap, since a budget is a limit an operator
+	// sets on purpose and an unset one should not cap a cluster unseen
+	// (architecture.md, Size → extents). The capacity read names the budget
+	// when it is the limit a cluster reaches first (architecture.md,
+	// Clusters, GetClusterCapacity).
+	DefaultCnCap   = MaxCnCap
+	MaxCnCap       = 64 * 1024 * 1024 * 1024 * 1024
+	MinCnCap       = 1024
+	DefaultListCnt = 64
+	MaxListCnt     = 1024
 
 	DnvPrefix = "dnv"
 	DmPrefix  = "dnv"

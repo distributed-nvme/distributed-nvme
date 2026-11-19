@@ -385,7 +385,10 @@ exists so that the worker's internal mutations and the gateway's public RPCs
 run the same transaction bodies (MD8).
 
 MD1. **Files.** `keys.go` (key formats, parsers, `ClusterId`), `stm.go` (the
-SP snapshot loader), `capacity.go` (the capacity keys), `alloc.go` (the
+SP snapshot loader), `capacity.go` (the capacity keys), `space.go` (the
+space answer of the gateway's capacity read, `model.ClusterSpaceOf`,
+computed from node records as the allocator places pools:
+`architecture.md`, Clusters, GetClusterCapacity), `alloc.go` (the
 allocator of `architecture.md`, Finding DN candidates, and `architecture.md`,
 Finding CN candidates), `ops.go` (the internal mutations of MD6),
 `repair.go` (MD6's repair and retired-leg ops, `architecture.md`, Repair),

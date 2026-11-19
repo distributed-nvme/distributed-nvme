@@ -104,7 +104,7 @@ The vocabulary of dnv in alphabetical order, one entry per term, with synonyms s
 
 **control plane, data plane** — The control plane is etcd plus the stateless processes on the control-plane servers, gateway, worker and cdc; the data plane is the disk nodes, the controller nodes and the NVMe-oF paths between them and the hosts.
 
-**controller node, CN** — A machine that runs the volume logic of the cntlrs it hosts: it contributes no persistent storage and holds no clone's metadata — a clone's dm-clone keeps it on the clone's clone meta group — and offers a capacity budget, given to `--capacity` in bytes and counted in extents, from which every cntlr's footprint is debited. It runs one cn agent, never two on one kernel, and exports its namespaces over that agent's nvmet port.
+**controller node, CN** — A machine that runs the volume logic of the cntlrs it hosts: it contributes no persistent storage and holds no clone's metadata — a clone's dm-clone keeps it on the clone's clone meta group — and offers a capacity budget, given to `--capacity` in bytes and counted in extents, from which every cntlr's footprint is debited; a node whose agent states none gets the largest, `MaxCnCap` (see `architecture.md`, Size → extents). It runs one cn agent, never two on one kernel, and exports its namespaces over that agent's nvmet port.
 
 **controller plugin** — The part of the CSI driver that runs once per Kubernetes cluster and talks to the gateway alone: for each volume it creates and deletes one storage pool with one thin device, one subsystem and one namespace, attaches and detaches it, and answers the capacity of a storage class (see `csi.md`, The driver).
 

@@ -299,9 +299,15 @@ name, or pass a `--location` to that create as well
 
 The controller node's budget, the space of the pools whose cntlrs it may
 hold, is read at this create from the `--capacity` its cn agent was started
-with; the tutorial leaves it unset, so the node takes the default, and no call
-changes a budget afterwards, so a deployment sets `--capacity` on every cn
-agent before its node's create.
+with; the tutorial leaves it unset, so the node takes the default, the
+largest budget, 64 TiB, and no call changes a budget afterwards, so a
+deployment sets `--capacity` on every cn agent before its node's create.
+Every cntlr of a pool, the primary and each standby, takes the size of all
+the pool's groups from its controller node's budget, and each leg takes the
+size of its own group from its disk node. So the space a cluster can give
+pools is at most the smaller of two bounds: the free space of its disk nodes
+divided by the legs of a group, and its controller nodes' budgets divided
+by the cntlrs of a pool.
 
 Check: a disk node has nine extents. A 10 GiB disk minus the 256 MiB the
 disk node keeps for its header, its record of which extents each side holds
@@ -313,6 +319,19 @@ whole 1 GiB extents.
 ```
 
 It prints `"free_ext_cnt":"9"` and `"total_ext_cnt":"9"`.
+
+Check: what the cluster can give a RAID1 pool of one cntlr and one slice,
+the pool below. Four disk nodes of nine free extents, in four locations,
+can hold 18 extents of groups with two legs each, while the controller
+node's budget holds 64 TiB, so the disks are the limit; and the first data
+group of such a pool is sure of nine extents.
+
+```
+./dnvctl --gateway-address 127.0.0.1:29527 cluster get-capacity --name c0 --leg-cnt 2 --cntlr-cnt 1 --slice-cnt 1 | grep -o '"largest_init_ext_cnt":"[0-9]*"\|"limit":"[A-Z_]*"\|"placeable_bytes":"[0-9]*"'
+```
+
+It prints `"largest_init_ext_cnt":"9"`, `"limit":"CAPACITY_LIMIT_DN_SPACE"`
+and `"placeable_bytes":"19327352832"`, 18 GiB.
 
 Check: the worker has made each node follow its record. The agent's own
 report shows every row OK: on a disk node the disk, the disk node's header

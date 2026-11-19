@@ -112,10 +112,13 @@ var sweepRows = []sweepRow{
 		&pb.AdvanceClusterIdsRequest{ClusterName: "c1"}},
 
 	{6, "GetClusterCapacity",
-		[]string{"cluster", "get-capacity"},
+		[]string{"cluster", "get-capacity", "--leg-cnt", "2",
+			"--cntlr-cnt", "1", "--slice-cnt", "1"},
 		// No --name: the fallback to the global --cluster, as for
-		// `cluster get`; a read, so the request has no token field.
-		&pb.GetClusterCapacityRequest{ClusterName: itCluster}},
+		// `cluster get`; a read, so the request has no token field. The
+		// three counts name the pool shape of the space answer.
+		&pb.GetClusterCapacityRequest{ClusterName: itCluster,
+			LegCnt: 2, CntlrCnt: 1, SliceCnt: 1}},
 
 	// ---- dn ----
 	{7, "CreateDiskNode",

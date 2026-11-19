@@ -1642,6 +1642,137 @@ location default, as every node there is created with a location named,
 nor a new pool keeping its legs out of its primary's location, as no
 controller node there shares a location with a disk node.
 
+## The cluster's capacity
+
+`dnvctl cluster get-capacity` says what pools of one shape can still be
+made in a cluster, and which limit the cluster reaches first. The shape is
+the number of legs of a group, `--leg-cnt` (2 for RAID1, 1 for a pool with
+no redundancy), the number of cntlrs of a pool, `--cntlr-cnt`, and its
+number of slices, `--slice-cnt`. A flag left out, or 0, takes what a pool
+create takes: the legs of the cluster's own redundancy, and the default
+counts. The answer is under `space`. The CSI driver gives Kubernetes the
+same answer for a storage class, with the class's legs and cntlrs and one
+slice.
+
+A controller node has a budget: the most pool space its cntlrs may serve,
+given in bytes to `--capacity` of its cn agent and read once, when the node
+is created. Every cntlr of a pool, the primary and each standby alike,
+takes the size of all the pool's groups from the budget of its controller
+node. So the budgets of the controller nodes, divided by the number of
+cntlrs of a pool, bound the pool space the cluster can hold, whatever its
+disks hold. A cn agent started with no `--capacity`, or with 0, gives its
+node the largest budget, 64 TiB. A controller node that 0.1 created with no
+`--capacity` keeps the 4 TiB budget 0.1 gave it, after an upgrade too: its
+`total_ext_cnt` under `addr_port_to_cn` shows it.
+
+When: before you make pools or Kubernetes volumes in a cluster; when a pool
+create is refused for want of room; when a Kubernetes claim waits for
+capacity; when the worker skips an auto-grow.
+
+Symptoms:
+
+- `dnvctl sp create` fails with RESOURCE_EXHAUSTED, and the text says
+  "no controller node with ... free extents" or "disk nodes with ... free
+  extents in distinct locations".
+- A Kubernetes claim of a storage class with `volumeBindingMode:
+  WaitForFirstConsumer` waits, and `kubectl get csistoragecapacities -A`
+  shows its class a `maximumVolumeSize` below the claim's size: the
+  scheduler compares the claim with that field, which the CSI driver always
+  sets. A class with `Immediate` binding, as `deploy/storageclass.yaml`
+  has, never waits on capacity: a create that does not fit is refused
+  instead.
+- The worker's log has a `reaction skipped` line for an auto-grow with the
+  reason `cn free_ext_cnt too low`: a controller node of the pool has no
+  budget left for the new group.
+
+How to confirm: run `dnvctl cluster get-capacity --leg-cnt 2 --cntlr-cnt 2
+--slice-cnt 1`, with the shape of the pool you want. In `space`:
+
+- `limit` is the limit the cluster reaches first, checked in this order:
+  - `CAPACITY_LIMIT_POOL_CEILING`: the cluster holds the most pools it can,
+    4096, the pools being deleted included.
+  - `CAPACITY_LIMIT_CN_COUNT`: fewer controller nodes can take a new cntlr
+    than the pool has cntlrs.
+  - `CAPACITY_LIMIT_DN_COUNT`: fewer disk nodes can take a new leg than
+    the pool has legs: the legs of a group times twice the number of
+    slices, since each slice has a meta group and a data group, and every
+    leg of a pool is on a disk node of its own.
+  - `CAPACITY_LIMIT_DN_LOCATIONS`: there are disk nodes enough, but in too
+    few locations, since a location holds at most one leg of each group.
+  - `CAPACITY_LIMIT_DN_SPACE`: the free space of the disks is the limit.
+  - `CAPACITY_LIMIT_CN_BUDGET`: the budgets of the controller nodes are the
+    limit.
+- `placeable_bytes` is the pool space, one copy of the data, that pools of
+  this shape can still get. It is 0 when one of the first four limits is
+  reached. A location gives each group at most one leg, so a disk node with
+  far more free space than the others adds only what the others can pair
+  with it.
+- `largest_init_ext_cnt` is the largest first data group, in extents, that
+  a new pool of this shape is sure to get when every disk node has a
+  location of its own: `--init-ext-cnt` of `dnvctl sp create` above it can
+  be refused. Where a location holds several disk nodes, a create below it
+  can still be refused, and a second try can place it.
+- `dn_raw_bytes`, `dn_charged_bytes` and `dn_free_bytes` are the whole
+  space of the disk nodes, the space their legs take, and the free space of
+  the disk nodes that can take a new leg; `cn_raw_bytes`,
+  `cn_charged_bytes` and `cn_free_bytes` are the same for the budgets of
+  the controller nodes. The free space of a disabled node, a node with a
+  health epoch and a node that holds the most sides or cntlrs it can is in
+  the whole space only, not in the free space: it is the whole space less
+  the space taken less the free space.
+- `addr_port_to_dn` and `addr_port_to_cn` list each node's record: its
+  location, its flags, its extents and how many sides or cntlrs it holds.
+
+The answer is an estimate, read from the records of the nodes. A leg that a
+migration copies counts on both of its disk nodes, and a retired leg counts
+until it is deleted. Every leg of a pool needs a disk node of its own, so
+when a few disk nodes hold most of the free space, pools of small groups use
+up the disk nodes before the space, and fewer bytes fit than
+`placeable_bytes`. When no pool of the shape fits at all, because no
+controller node or no set of disk nodes has room for even the smallest pool,
+`placeable_bytes` and `largest_init_ext_cnt` are 0 and `limit` names the
+side that has no room.
+
+What dnv does alone: nothing adds space and nothing changes a budget.
+Auto-grow adds a group to a slice while a disk node and every controller
+node of the pool have room for it; when they have none, the worker skips
+the grow, logs it, and goes on with its other reactions. A write that needs
+a new block in a full thin pool waits for the kernel's no-space timeout and
+fails ([the scope page](scope.md#4-data-loss-dnv-accepts)).
+
+Safe steps:
+
+1. For `CAPACITY_LIMIT_DN_SPACE` and `CAPACITY_LIMIT_DN_COUNT`, add disk
+   nodes.
+2. For `CAPACITY_LIMIT_DN_LOCATIONS`, add disk nodes in locations the
+   cluster has few of, on other machines, or give the disk nodes of one
+   machine locations of their own ([Choose a node's
+   location](#choose-a-nodes-location)).
+3. For `CAPACITY_LIMIT_CN_COUNT` and `CAPACITY_LIMIT_CN_BUDGET`, add
+   controller nodes, their cn agents started with the `--capacity` you want
+   or with none for the largest budget. No command changes the budget of a
+   controller node that exists ([the scope page](scope.md)): a node that 0.1
+   made with its 4 TiB default gets a larger one only once it is emptied,
+   deleted and created again, and those steps are not written yet (the
+   scope page, section 7, Remove a node).
+4. Make the pool with fewer cntlrs or fewer slices, if the shape that
+   fits is one you can use: run the command again with that shape first.
+
+Steps that lose data: deleting a pool or a volume to make room deletes its
+data. A deleted pool still counts toward the pool ceiling, and its space
+stays taken, until the worker's drain of it ends.
+
+When to stop: the answer shows free space for the shape, `limit` is
+`CAPACITY_LIMIT_DN_SPACE` or `CAPACITY_LIMIT_CN_BUDGET`, and every create
+of a pool of that shape is still refused. Ask for help.
+
+Tested: the Go tests of the answer on hand-made node records, and of the
+gateway's read, its refusals and its check of the cluster's stored
+settings; the gateway suite's faults case checks the answer over its fake
+nodes before and after its pool is made, and the csi suite's volume case
+checks that the capacity Kubernetes shows for its storage class is the
+gateway's answer. Neither suite has yet run in the lab with this answer.
+
 ## Gather a node's state for a bug report
 
 Words: the **gather** is `dnv-agent collect`, a run of the agent program

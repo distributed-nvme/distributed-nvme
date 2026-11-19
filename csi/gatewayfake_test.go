@@ -38,6 +38,8 @@ type fakeGateway struct {
 	// read the hosts: a test's other attach or detach lands between that
 	// read and the write that follows it.
 	afterList func()
+	// capReqs is every GetClusterCapacity request, in order.
+	capReqs []*pb.GetClusterCapacityRequest
 }
 
 type fakeCluster struct {
@@ -46,8 +48,10 @@ type fakeCluster struct {
 	// fake holds, to stand for a cluster at its ceiling.
 	spCnt uint32
 	pools map[string]*fakePool
-	dns   map[string]*pb.DnCapacityEntry
-	cns   map[string]*pb.CnCapacityEntry
+	// space is the space answer GetClusterCapacity gives, whatever shape
+	// it is asked for; nil answers none, as a gateway older than the
+	// driver would.
+	space *pb.ClusterSpace
 }
 
 type fakePool struct {
@@ -63,17 +67,11 @@ type fakePool struct {
 	nextSs uint64
 }
 
-// The fixture's geometry: 64 MiB extents, 64 KiB stripes, 1 MiB blocks,
-// four disk nodes of 1024 extents with 1000 free, three controller nodes of
-// 1024 with 900 free.
+// The fixture's geometry: 64 MiB extents, 64 KiB stripes, 1 MiB blocks.
 const (
 	fakeExtent     = uint64(64) << 20
 	fakeStripe     = uint64(64) << 10
 	fakeBlock      = uint64(1) << 20
-	fakeDnTotal    = uint64(1024)
-	fakeDnFree     = uint64(1000)
-	fakeCnTotal    = uint64(1024)
-	fakeCnFree     = uint64(900)
 	fakeClusterOne = "c0"
 )
 
@@ -86,7 +84,10 @@ func newFakeGateway() *fakeGateway {
 	return g
 }
 
-// addCluster plants a cluster with the fixture's geometry and nodes.
+// addCluster plants a cluster with the fixture's geometry and the space
+// answer the gateway gives a RAID1 pool of two cntlrs and one slice over four
+// disk nodes of 1000 free extents in four locations and three controller
+// nodes of 900: the budgets limit it.
 func (g *fakeGateway) addCluster(name string) *fakeCluster {
 	c := &fakeCluster{
 		conf: &pb.ClusterConf{
@@ -97,20 +98,14 @@ func (g *fakeGateway) addCluster(name string) *fakeCluster {
 			},
 		},
 		pools: map[string]*fakePool{},
-		dns:   map[string]*pb.DnCapacityEntry{},
-		cns:   map[string]*pb.CnCapacityEntry{},
-	}
-	for i := range 4 {
-		addr := "dn" + string(rune('0'+i)) + ":9000"
-		c.dns[addr] = &pb.DnCapacityEntry{
-			Location: addr, TotalExtCnt: fakeDnTotal, FreeExtCnt: fakeDnFree,
-		}
-	}
-	for i := range 3 {
-		addr := "cn" + string(rune('0'+i)) + ":9000"
-		c.cns[addr] = &pb.CnCapacityEntry{
-			Location: addr, TotalExtCnt: fakeCnTotal, FreeExtCnt: fakeCnFree,
-		}
+		space: &pb.ClusterSpace{
+			LegCnt:            2,
+			CntlrCnt:          2,
+			SliceCnt:          1,
+			PlaceableBytes:    1350 * fakeExtent,
+			LargestInitExtCnt: 899,
+			Limit:             pb.CapacityLimit_CAPACITY_LIMIT_CN_BUDGET,
+		},
 	}
 	g.clusters[name] = c
 	return c
@@ -252,6 +247,8 @@ func (g *fakeGateway) GetClusterCapacity(
 ) (*pb.GetClusterCapacityReply, error) {
 	g.mu.Lock()
 	defer g.mu.Unlock()
+	g.capReqs = append(g.capReqs,
+		proto.Clone(req).(*pb.GetClusterCapacityRequest))
 	if err := g.enter("GetClusterCapacity"); err != nil {
 		return nil, err
 	}
@@ -260,16 +257,11 @@ func (g *fakeGateway) GetClusterCapacity(
 		return nil, err
 	}
 	reply := &pb.GetClusterCapacityReply{
-		ClusterName:  clusterNameOf(req.GetClusterName()),
-		ExtentSize:   c.conf.GetDnBinConf().GetExtentSize(),
-		AddrPortToDn: map[string]*pb.DnCapacityEntry{},
-		AddrPortToCn: map[string]*pb.CnCapacityEntry{},
+		ClusterName: clusterNameOf(req.GetClusterName()),
+		ExtentSize:  c.conf.GetDnBinConf().GetExtentSize(),
 	}
-	for addr, dn := range c.dns {
-		reply.AddrPortToDn[addr] = proto.Clone(dn).(*pb.DnCapacityEntry)
-	}
-	for addr, cn := range c.cns {
-		reply.AddrPortToCn[addr] = proto.Clone(cn).(*pb.CnCapacityEntry)
+	if c.space != nil {
+		reply.Space = proto.Clone(c.space).(*pb.ClusterSpace)
 	}
 	return reply, nil
 }

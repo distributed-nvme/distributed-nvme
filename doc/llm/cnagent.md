@@ -179,7 +179,8 @@ wrappers.
 
 CN-CM1. The `dnagent.md` CM2 flags gain one cn-only flag, `--capacity`: the capacity
 budget in bytes this CN is willing to host; `GetCnSize` replies it
-verbatim, and zero means "use the control-plane default" (`DefaultCnCap`).
+verbatim, and zero means "use the control-plane default" (`DefaultCnCap`,
+the largest budget).
 It is the only cn-only flag. `--nvmet-port-id` and `--nvmet-qid-max` are
 both-roles flags and live in `dnagent.md` CM2 itself: the cn resolves and
 checks both exactly as the dn does (`dnagent.md` CM3; the queue cap's rule
@@ -474,7 +475,8 @@ what is still there.
 ### `GetCnSize`
 
 CN3. Reply `--capacity` verbatim. Zero means "no local opinion" and the
-control plane substitutes `DefaultCnCap`; the agent never clamps, and
+control plane substitutes `DefaultCnCap`, the largest budget
+(`architecture.md`, Size → extents); the agent never clamps, and
 refuses at start only a value that breaks the flag's syntax: from the
 flag, the environment or a config file's string, one that is not a plain
 unsigned decimal number, with no leading zero, that fits 64 bits, and from

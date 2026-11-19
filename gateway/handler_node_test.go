@@ -1802,11 +1802,11 @@ func TestCreateControllerNodeAppliesTheBudgetRule(t *testing.T) {
 		wantCode  codes.Code
 	}{
 		{
-			label:     "no opinion takes DefaultCnCap",
+			label:     "no opinion takes the largest budget, MaxCnCap",
 			size:      0,
 			wantId:    1,
 			wantShard: 0,
-			wantExt:   common.DefaultCnCap / common.DefaultDnExtSize,
+			wantExt:   common.MaxCnCap / common.DefaultDnExtSize,
 			wantCode:  codes.OK,
 		},
 		{

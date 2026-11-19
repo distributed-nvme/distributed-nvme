@@ -818,7 +818,9 @@ func (c *controller) ValidateVolumeCapabilities(
 }
 
 // GetCapacity reports what the class's cluster can still promise (csi.md,
-// Capacity), from the cluster capacity call's records.
+// Capacity): the gateway's space answer for a pool of the class's shape, its
+// legs, its cntlr count as the class states it and one slice, converted to
+// the volume model.
 func (c *controller) GetCapacity(
 	ctx context.Context,
 	req *csi.GetCapacityRequest,
@@ -832,41 +834,36 @@ func (c *controller) GetCapacity(
 			return nil, status.Error(codes.InvalidArgument, err.Error())
 		}
 	}
-	// A cluster that does not exist has nothing free (csi.md, Capacity):
-	// Kubernetes asks on a timer, and a create is where a class that names
-	// a wrong cluster fails.
-	nothing := &csi.GetCapacityResponse{MaximumVolumeSize: wrapperspb.Int64(0)}
 	gctx, cancel := c.gwCtx(ctx)
-	cluster, err := c.gw.GetCluster(gctx, &pb.GetClusterRequest{
-		ClusterName: p.cluster,
-	})
-	cancel()
-	if err != nil {
-		if codeOf(err) == codes.NotFound {
-			return nothing, nil
-		}
-		return nil, fromGateway("GetCluster", err)
-	}
-	gctx, cancel = c.gwCtx(ctx)
 	defer cancel()
 	reply, err := c.gw.GetClusterCapacity(gctx, &pb.GetClusterCapacityRequest{
 		ClusterName: p.cluster,
+		LegCnt:      uint32(p.legs()),
+		CntlrCnt:    p.cntlrs,
+		SliceCnt:    1,
 	})
 	if err != nil {
+		// A cluster that does not exist has nothing free (csi.md,
+		// Capacity): Kubernetes asks on a timer, and a create is where a
+		// class that names a wrong cluster fails.
 		if codeOf(err) == codes.NotFound {
-			return nothing, nil
+			return &csi.GetCapacityResponse{
+				MaximumVolumeSize: wrapperspb.Int64(0),
+			}, nil
 		}
 		return nil, fromGateway("GetClusterCapacity", err)
 	}
-	// Every volume is a pool of its own, so a cluster at its pool ceiling
-	// has nothing free whatever its nodes hold.
-	if poolCntOf(cluster.GetSpGlobal()) >= common.MaxSpCntPerCluster {
-		return nothing, nil
+	// A gateway that gives no space answer is older than the driver: an
+	// error, so Kubernetes keeps what it last read, where a zero would
+	// stop every claim of the class.
+	if reply.GetSpace() == nil {
+		return nil, status.Error(codes.Unavailable,
+			"gateway GetClusterCapacity: the reply carries no space "+
+				"answer; is the gateway older than the driver?")
 	}
 	// The largest volume is always set, zero included: an unset one means
 	// no bound per volume.
-	available, maxVolume := capacityOf(reply, p.legs(), p.cntlrCnt(),
-		dnFloorOf(cluster.GetClusterConf().GetDnBinConf()))
+	available, maxVolume := capacityOf(reply.GetSpace(), reply.GetExtentSize())
 	return &csi.GetCapacityResponse{
 		AvailableCapacity: int64(available),
 		MaximumVolumeSize: wrapperspb.Int64(int64(maxVolume)),

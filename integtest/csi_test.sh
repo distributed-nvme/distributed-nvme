@@ -228,6 +228,8 @@ JQ=""
 CTL_RC=""
 CTL_ERR=""
 CTL_OUT=""
+# The last capacity object and gateway answer capacity_is_the_gateways read.
+CAPACITY_SEEN=""
 declare -A PID=()
 declare -A RUNNING=()
 CLUSTER_ID=""
@@ -2524,11 +2526,48 @@ capacity_published() {
 	[ -n "$out" ] && ! printf '%s\n' "$out" | grep -qxE '0|'
 }
 
+# quantity_bytes prints the bytes of a Kubernetes quantity as the
+# provisioner writes a capacity, a whole number of bytes with a binary suffix
+# where the number divides by it ("18Gi"), and nothing for any other form.
+quantity_bytes() { # <quantity>
+	local q=$1 n mul=1
+	case "$q" in
+	*Ki) n=${q%Ki} mul=$((1 << 10)) ;;
+	*Mi) n=${q%Mi} mul=$((1 << 20)) ;;
+	*Gi) n=${q%Gi} mul=$((1 << 30)) ;;
+	*Ti) n=${q%Ti} mul=$((1 << 40)) ;;
+	*Pi) n=${q%Pi} mul=$((1 << 50)) ;;
+	*) n=$q ;;
+	esac
+	case "$n" in '' | *[!0-9]*) return 0 ;; esac
+	printf '%s\n' "$((n * mul))"
+}
+
+# capacity_is_the_gateways answers whether the capacity object of the
+# suite's class holds the gateway's answer for the class's pool shape, RAID1,
+# two cntlrs and one slice: its placeable bytes (csi.md CSI11). Both are read
+# each try, so a provisioner poll that lags a change of the cluster is waited
+# out rather than failed.
+capacity_is_the_gateways() {
+	local cap want
+	ctl_exec cluster get-capacity --leg-cnt 2 --cntlr-cnt 2 --slice-cnt 1
+	[ "$CTL_RC" = 0 ] || return 1
+	want=$(jq_of "$CTL_OUT" '.space.placeable_bytes')
+	cap=$(kc get csistoragecapacities -A -o jsonpath="{range .items[?(@.storageClassName==\"$SC_NAME\")]}{.capacity}{end}" 2>/dev/null) ||
+		return 1
+	CAPACITY_SEEN="$cap, the gateway's $want"
+	[ -n "$want" ] && [ "$(quantity_bytes "$cap")" = "$want" ]
+}
+
 case_volume() {
 	CASE=volume
 	stage 01 "a filesystem claim and a pod on host0 that writes a pattern"
 	wait_until "$WAIT_CAPACITY" "the capacity object of the class $SC_NAME" capacity_published
 	log "  capacity of $SC_NAME: $(kc_ok get csistoragecapacities -A -o jsonpath="{range .items[?(@.storageClassName==\"$SC_NAME\")]}{.capacity} (largest volume {.maximumVolumeSize}){end}" 2>/dev/null)"
+	# The capacity is the gateway's answer, not a sum of the driver's own.
+	wait_until "$WAIT_CAPACITY" "the capacity object of $SC_NAME to hold the gateway's placeable bytes" \
+		capacity_is_the_gateways
+	log "  capacity object $CAPACITY_SEEN"
 	claim v0 1Gi Filesystem
 	wait_until "$WAIT_PVC" "claim v0 Bound" pvc_bound v0
 	local pv

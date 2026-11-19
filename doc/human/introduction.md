@@ -168,6 +168,18 @@ flowchart TB
 *A storage pool: cntlrs, slices, groups, legs, sides, and a thin device over
 the slices.*
 
+The space of a pool is the size of its groups, one copy. Each leg takes the
+size of its own group from its disk node, and each cntlr, the primary and
+every standby, takes the size of all the pool's groups from its controller
+node's budget, the most pool space the node's cntlrs may serve, set with
+`--capacity` on its cn agent and the largest, 64 TiB, when unset; a
+controller node that 0.1 created with no budget keeps the 4 TiB of 0.1.
+So the space a cluster can give pools is bounded by the free space of its
+disks divided by the legs of a group, and by its controller nodes' budgets
+divided by the cntlrs of a pool. `dnvctl cluster get-capacity` reads both for a pool of a given
+shape and names the limit the cluster reaches first
+([operations](operations.md#the-clusters-capacity)).
+
 ## Failover
 
 The worker starts a failover when the primary is disabled or has been
@@ -515,7 +527,7 @@ proven against fakes alone.
 | Thin ids per pool, one taken from a counter by every thin device the pool creates, snapshots included | 16,777,215 | the counter set to the limit by hand, one create at it, the next refused | no test reaches it |
 | Extent size | 64 MiB to 1 TiB, a whole number of 4 KiB | pools created on 5 GiB extents; 1 TiB checked by validation alone | 64 MiB and 1 GiB; no run at 1 TiB |
 | Data block of a pool | 64 KiB to 4 MiB, a power of two | pools created on 4 MiB blocks; the next power of two refused | the default 1 MiB; 64 KiB in a suite on fake agents |
-| Controller node budget | one extent to 64 TiB, set once per node: a larger `--capacity` is cut to 64 TiB, one smaller than an extent is refused, and one under 1 KiB counts as unset | the bounds, through the create with a fake agent | the default on real nodes; a budget of about 12 TiB on fake agents in a suite |
+| Controller node budget | one extent to 64 TiB, set once per node: a larger `--capacity` is cut to 64 TiB, one smaller than an extent is refused, and one unset or under 1 KiB is 64 TiB | the bounds, through the create with a fake agent | 4 TiB, the default of 0.1, on real nodes and on fake agents in a suite; 64 TiB not yet run |
 
 To measure dnv fairly, write the whole volume first, since a thin device
 returns zeros for a block it has not written without reading any disk; run

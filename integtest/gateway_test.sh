@@ -166,6 +166,13 @@ META_UNIT=
 ID_STEP_STRIDE=
 THIN_ID_STEP_STRIDE=
 
+# The extents of every CN: the fake cn agents run --size 0, so GetCnSize
+# replies 0 and the gateway gives each the budget of a CN that states none,
+# common.DefaultCnCap (architecture.md, Size → extents), at the 1 GiB extent
+# size of DN_SIZE / DN_EXTENTS below. It is NOT typed here: read_constants()
+# fills it from `workerctl constants`.
+CN_EXTENTS=
+
 # Identity plan.
 CLUSTER=itgw
 GW_DIRS=(gw0 gw1 gw2)
@@ -176,7 +183,6 @@ NQN_PREFIX=nqn.2025-01.io.dnv
 # Test-time constants.
 DN_SIZE=68719476736 # 64 GiB = 64 extents at the default 1 GiB extent_size
 DN_EXTENTS=64
-CN_EXTENTS=4096 # DefaultCnCap 4 TiB / 1 GiB
 SP_CNTLR_CNT=2
 SP_SLICE_CNT=1
 SP_INIT_EXT=2
@@ -1005,8 +1011,9 @@ read_constants() {
 			"common.DefaultHealthCheckInterval, the default block and" \
 			"stripe, a DN metadata area's" \
 			"common.DnCloneMetaUnitCnt and common.DnCloneMetaUnit and the" \
-			"id step's common.IdStepStride and common.ThinIdStepStride from" \
-			"it and must not guess them"
+			"id step's common.IdStepStride and common.ThinIdStepStride and" \
+			"a CN's default budget, common.DefaultCnCap, from it and must" \
+			"not guess them"
 	ETCD_MAX_TXN_OPS=$(jq_of "$json" .EtcdMaxTxnOps)
 	case "$ETCD_MAX_TXN_OPS" in
 	'' | *[!0-9]*)
@@ -1093,6 +1100,17 @@ read_constants() {
 	done
 	log "  the id step's strides: common.IdStepStride = $ID_STEP_STRIDE," \
 		"common.ThinIdStepStride = $THIN_ID_STEP_STRIDE"
+	# A CN's budget when its agent states none. Zero is refused: a budget of
+	# no extents registers no CN.
+	val=$(jq_of "$json" .DefaultCnCap)
+	case "$val" in
+	'' | 0 | *[!0-9]*)
+		die "workerctl constants: DefaultCnCap is '$val' in $json"
+		;;
+	esac
+	CN_EXTENTS=$((val / (DN_SIZE / DN_EXTENTS)))
+	log "  every CN's extents: common.DefaultCnCap / $((DN_SIZE / DN_EXTENTS))" \
+		"= $CN_EXTENTS"
 }
 
 preflight_driver() {
@@ -1199,9 +1217,10 @@ setup() {
 		clear_behavior "$d"
 		reset_state "$d"
 		# --size 0 is deliberate: GetCnSize then replies 0, which is what
-		# makes the gateway apply "0 => DefaultCnCap 4 TiB" (architecture.md,
-		# Size → extents) and give every CN 4096 extents. The fakeagent's own
-		# default is 1 TiB, which would silently test a different mapping.
+		# makes the gateway apply "0 => DefaultCnCap" (architecture.md,
+		# Size → extents) and give every CN CN_EXTENTS extents. The
+		# fakeagent's own default is 1 TiB, which would silently test a
+		# different mapping.
 		start_fake cn "$d" "$(cn_addr "$i")" "--size 0"
 	done
 	wait_until "$WAIT_SHORT" "the seven fake-agent ports" ports_up \
@@ -1855,8 +1874,8 @@ case_smoke() {
 	assert_eq "$(jq_of "$page" '.addr_port | length')" "0" "list-dns page 3"
 	assert_eq "$(jq_of "$page" '.page_token')" "" "list-dns page 3 token"
 	# The CNs are the same six RPCs with one difference that matters here:
-	# the fakes run --size 0, so "0 ⇒ DefaultCnCap 4 TiB" (architecture.md,
-	# Size → extents) gives 4096.
+	# the fakes run --size 0, so "0 ⇒ DefaultCnCap" (architecture.md,
+	# Size → extents) gives CN_EXTENTS.
 	for i in 0 1 2; do
 		addr=$(cn_addr "$i")
 		out=$(gw create-cn --addr "$addr" --location "$(cn_loc "$i")" \
@@ -2064,8 +2083,9 @@ EOF
 	done
 	assert_eq "$(key_count dn_capacity)" "4" "dn_capacity keys after create-sp"
 	for i in 0 1 2; do
-		# Two CNs took a cntlr and reserved the whole footprint (4096 -> 4093,
-		# CnRev 1 -> 2); the third was never touched, so it stays at 1.
+		# Two CNs took a cntlr and reserved the whole footprint (CN_EXTENTS
+		# less 3, CnRev 1 -> 2); the third was never touched, so it stays
+		# at 1.
 		addr=$(cn_addr "$i")
 		want=1
 		[ "$(smoke_cn_cntlrs sp0 "$addr")" = 0 ] || want=2
@@ -4090,8 +4110,8 @@ case_parallel() {
 		conf=$(cn_json "$addr")
 		assert_ne "$(jq_of "$conf" '.cn_id')" "0" "$addr: cn_id"
 		# The fakes answer GetCnSize with 0, which is what makes the gateway
-		# apply DefaultCnCap (4 TiB / 1 GiB = 4096 extents; architecture.md,
-		# Size → extents).
+		# apply DefaultCnCap (CN_EXTENTS at 1 GiB; architecture.md, Size →
+		# extents).
 		assert_field "$conf" '.total_ext_cnt' "$CN_EXTENTS" "$addr: total_ext_cnt"
 		assert_field "$conf" '.free_ext_cnt' "$CN_EXTENTS" "$addr: free_ext_cnt"
 		assert_field "$conf" '.location' "$(cn_loc "$i")" "$addr: location"
@@ -5442,6 +5462,27 @@ case_faults() {
 	assert_eq "$(jq_of "$out" \
 		'[.addr_port_to_dn[] | select(.free_ext_cnt == .total_ext_cnt and .side_cnt == 0)] | length')" \
 		"4" "capacity: every disk node whole and without a side"
+	# The space answer for sp0's shape (architecture.md, Clusters,
+	# GetClusterCapacity): four disk nodes in four racks, DN_EXTENTS free
+	# each, so a RAID1 group space of twice DN_EXTENTS, the disk side the
+	# smaller beside three controller nodes of CN_EXTENTS; the first data
+	# group is sure of DN_EXTENTS, the fourth fullest disk node.
+	local ext space
+	ext=$(jq_of "$out" '.extent_size')
+	out=$(gw get-cluster-capacity --leg-cnt 2 --cntlr-cnt "$SP_CNTLR_CNT" \
+		--slice-cnt "$SP_SLICE_CNT")
+	space=$(jq_of "$out" '.space')
+	assert_field "$space" '.limit' "CAPACITY_LIMIT_DN_SPACE" "space: the limit"
+	assert_field "$space" '.placeable_bytes' "$((2 * DN_EXTENTS * ext))" \
+		"space: placeable"
+	assert_field "$space" '.largest_init_ext_cnt' "$DN_EXTENTS" \
+		"space: the largest first data group"
+	assert_field "$space" '.dn_free_bytes' "$((4 * DN_EXTENTS * ext))" \
+		"space: the disk nodes' free bytes"
+	assert_field "$space" '.cn_free_bytes' "$((3 * CN_EXTENTS * ext))" \
+		"space: the controller nodes' free bytes"
+	assert_field "$space" '.dn_charged_bytes' "0" "space: no disk byte charged"
+	assert_field "$space" '.pool_cnt' "0" "space: no pool"
 	make_sp sp0
 	verify_sp sp0
 	assert_eq "$SP_REV" "1" "sp0: SpRev is 1 after create-sp"
@@ -5453,6 +5494,20 @@ case_faults() {
 		"$((4 * SP_SLICE_CNT))" "capacity: the sides of sp0 are charged"
 	assert_eq "$(jq_of "$out" '[.addr_port_to_cn[] | .cntlr_cnt] | add')" \
 		"$SP_CNTLR_CNT" "capacity: the cntlrs of sp0 are charged"
+	# And the space answer charges them: the pool's legs on the disk nodes,
+	# its footprint on each cntlr's controller node, and the disk side's
+	# share of what is left, whichever disk nodes took the larger legs.
+	out=$(gw get-cluster-capacity --leg-cnt 2 --cntlr-cnt "$SP_CNTLR_CNT" \
+		--slice-cnt "$SP_SLICE_CNT")
+	space=$(jq_of "$out" '.space')
+	assert_field "$space" '.dn_charged_bytes' "$((SP_EXT_COST * ext))" \
+		"space: sp0's legs charged"
+	assert_field "$space" '.cn_charged_bytes' \
+		"$((SP_CNTLR_CNT * SP_SLICE_CNT * (1 + SP_INIT_EXT) * ext))" \
+		"space: sp0's footprint charged on each cntlr's controller node"
+	assert_field "$space" '.placeable_bytes' \
+		"$(((4 * DN_EXTENTS - SP_EXT_COST) / 2 * ext))" "space: placeable after sp0"
+	assert_field "$space" '.pool_cnt' "1" "space: one pool"
 
 	# Five thin devices with four different roles. t0 is never flipped, so
 	# it is both the namespace's backing device and step 3's uncreated
@@ -6312,7 +6367,8 @@ case_restart() {
 	assert_eq "$(key_count dn_rev)" "${#DN_DIRS[@]}" "dn_rev key count"
 	assert_eq "$(key_count cn_rev)" "${#CN_DIRS[@]}" "cn_rev key count"
 	# No SP yet, so this is the pristine baseline every later step is measured
-	# against: 64 free on each DN, 4096 on each CN, one capacity key each.
+	# against: 64 free on each DN, CN_EXTENTS on each CN, one capacity key
+	# each.
 	restart_assert_accounting
 
 	# ③ gateway read-back.
@@ -6629,7 +6685,7 @@ case_restart() {
 	assert_field "$(raw_key "$DNV_PREFIX sp_global $(printf '%016x' "$CID")")" \
 		'.next_id' "$((${#names[@]} + 1))" "SpGlobal next_id after ten mints"
 	# No arguments: every DN back to 64 free with an empty side_ptr_list,
-	# every CN back to 4096, every capacity key rewritten to match.
+	# every CN back to CN_EXTENTS, every capacity key rewritten to match.
 	restart_assert_accounting
 
 	# ③ read-back.

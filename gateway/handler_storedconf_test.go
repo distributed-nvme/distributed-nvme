@@ -153,9 +153,10 @@ func scSparseSpConf(conf *pb.SpConf, zero func(conf *pb.SpConf)) *pb.SpConf {
 // TestStoredClusterConfZeroIsRefusedByEveryReader plants a sparse stored
 // ClusterConf and drives every RPC that computes a DN's geometry or its
 // capacity key from one — the RPCs that take DN capacity as well as the ones
-// that give it back.
+// that give it back — and the capacity read that computes a cluster's space
+// from it.
 //
-// The twelve cases are seven different gates:
+// The thirteen cases are eight different gates:
 //
 //   - CreateDiskNode and CreateControllerNode check inside their own STM,
 //     immediately above the division that turns the node's byte count into
@@ -205,10 +206,14 @@ func scSparseSpConf(conf *pb.SpConf, zero func(conf *pb.SpConf)) *pb.SpConf {
 //   - DeleteDiskNode and UpdateDiskNodeDisabled check in their own STM, as
 //     the last thing before their first write. Both move exactly one capacity
 //     key and nothing else, so without a gate their whole effect would be the
-//     wrong one.
+//     wrong one;
+//   - GetClusterCapacity checks right after its plain ClusterConf read,
+//     before any range: its space answer counts disk nodes by the stored
+//     ladder and turns extents into bytes by the stored extent size, and a
+//     read that skipped the gate would answer a figure computed from a zero.
 //
 // Each gate validates the WHOLE stored conf rather than the member it is
-// about to use, which is why one zeroed member reaches all twelve. Two are
+// about to use, which is why one zeroed member reaches all thirteen. Two are
 // planted in turn: `dn_bin_conf.extent_size`, the fixture's member and the
 // one a gateway that lost its gate would divide by, and
 // `alloc_conf.dn_batch_size`, which nothing divides by — so the second row
@@ -457,6 +462,11 @@ func TestStoredClusterConfZeroIsRefusedByEveryReader(t *testing.T) {
 				SrcBlockSize:  1024 * 1024,
 				DstTdName:     "sc-clone-dst",
 			})
+			return err
+		}},
+		{"GetClusterCapacity", func() error {
+			_, err := env.srv.GetClusterCapacity(env.ctx,
+				&pb.GetClusterCapacityRequest{ClusterName: env.name})
 			return err
 		}},
 	}

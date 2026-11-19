@@ -1133,9 +1133,12 @@ func cmdPing(g *globals, args []string) {
 // fills a DN's area to that ceiling with a migration it sizes in that unit.
 // The next two, IdStepStride and ThinIdStepStride, are the strides of the id
 // step (architecture.md, Clusters), which the gateway suite's smoke case
-// checks every counter the step moves against. The last two are the cdc's
+// checks every counter the step moves against. The next two are the cdc's
 // pending cap and pre-Connect deadline (cdc.md NP1, NP10), which the cdc
 // suite's flood case fills and waits by (cdc.md, Integration test plan).
+// The last is the budget a controller node gets when its agent states none
+// (architecture.md, Size → extents), which the gateway suite sizes every
+// controller node of its fake agents by.
 //
 // It dials nothing and needs no --cluster, so a suite runs it on the DRIVER
 // against the binary it has just built, before any host is contacted.
@@ -1171,6 +1174,8 @@ func cmdConstants(g *globals, args []string) {
 
 		"CdcMaxPendingConnCnt":   common.CdcMaxPendingConnCnt,
 		"DefaultCdcPendingTmoMs": common.DefaultCdcPendingTmoMs,
+
+		"DefaultCnCap": common.DefaultCnCap,
 	})
 }
 

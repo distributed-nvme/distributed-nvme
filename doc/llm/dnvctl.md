@@ -514,9 +514,12 @@ one transaction per pool of the cluster (`architecture.md`, Clusters), so on
 a cluster of many pools it needs a `--timeout` that covers them all.
 
 `cluster get-capacity` is the capacity read of `architecture.md`, Clusters:
-every node's recorded extent counts and flags, for the layer above to sum.
-It names its cluster with `--name`, falling back to the global `--cluster`,
-and carries no token, as every read does (CT3).
+every node's recorded extent counts and flags, and what pools of one shape
+can still place, with the limit the cluster reaches first. `--leg-cnt`,
+`--cntlr-cnt` and `--slice-cnt` name the shape, each sent as typed, so a
+zero takes the gateway's default as on `sp create`. It names its cluster
+with `--name`, falling back to the global `--cluster`, and carries no
+token, as every read does (CT3).
 
 ### `dn` — `ctl/dn.go`
 

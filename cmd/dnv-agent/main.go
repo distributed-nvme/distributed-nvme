@@ -133,8 +133,8 @@ func addDiskFlag(cmd *cobra.Command) {
 func addCapacityFlag(cmd *cobra.Command) {
 	cmd.Flags().String("capacity", "0",
 		"capacity budget in bytes this CN is willing to host, a plain "+
-			"decimal number; GetCnSize replies it verbatim, 0 = use the "+
-			"CP default")
+			"decimal number; GetCnSize replies it verbatim, 0 = no "+
+			"budget of its own: the gateway takes the largest")
 }
 
 // notRunOnFlagError makes a flag a check or a gather cannot parse end it

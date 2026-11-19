@@ -11,6 +11,7 @@ import (
 	"github.com/container-storage-interface/spec/lib/go/csi"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
+	"google.golang.org/protobuf/proto"
 
 	"github.com/distributed-nvme/distributed-nvme/common"
 	"github.com/distributed-nvme/distributed-nvme/pb"
@@ -543,89 +544,94 @@ func TestValidateVolumeCapabilities(t *testing.T) {
 	wantCode(t, err, codes.InvalidArgument, "no capabilities")
 }
 
-// TestGetCapacity pins csi.md, Capacity, on the fixture: the controller
-// side is the smaller, a disabled, an unhealthy or a full disk node drops
-// out, the Kubernetes-reserved parameters are ignored, and the largest
-// volume follows the legs-th largest disk node.
+// TestGetCapacity pins csi.md, Capacity: the driver asks the gateway's
+// space answer for a pool of the class's shape, the legs of its redundancy,
+// its cntlr count as the class states it and one slice, makes no capacity
+// arithmetic of its own, and turns the answer into the two numbers
+// Kubernetes asks for; a cluster that does not exist has nothing free, and a
+// gateway that gives no space answer is an error, never zero.
 func TestGetCapacity(t *testing.T) {
 	c, g := newTestController(t)
 	ctx := t.Context()
+	plant := func(space *pb.ClusterSpace) {
+		g.mu.Lock()
+		g.clusters[fakeClusterOne].space = space
+		g.capReqs = nil
+		g.mu.Unlock()
+	}
+	lastReq := func() *pb.GetClusterCapacityRequest {
+		g.mu.Lock()
+		defer g.mu.Unlock()
+		if len(g.capReqs) == 0 {
+			return nil
+		}
+		return g.capReqs[len(g.capReqs)-1]
+	}
 	req := &csi.GetCapacityRequest{Parameters: map[string]string{
 		paramCluster: fakeClusterOne, paramCntlrs: "2",
 		"csi.storage.k8s.io/fstype": "ext4",
 	}}
+
+	// The largest first data group, 100 extents, times volumeSteps is below
+	// the placeable bytes: it is the largest volume.
+	plant(&pb.ClusterSpace{PlaceableBytes: 5000 * fakeExtent, LargestInitExtCnt: 100})
 	reply, err := c.GetCapacity(ctx, req)
 	wantCode(t, err, codes.OK, "capacity")
-	// Disk side: 4 x 1000 x 64 MiB / 2 legs; controller side: 3 x 900 x
-	// 64 MiB / 2 cntlrs, the smaller.
-	wantAvail := int64(3 * fakeCnFree * fakeExtent / 2)
-	if reply.GetAvailableCapacity() != wantAvail {
-		t.Errorf("available %d, want %d", reply.GetAvailableCapacity(), wantAvail)
+	if reply.GetAvailableCapacity() != int64(5000*fakeExtent) ||
+		reply.GetMaximumVolumeSize().GetValue() != int64(100*fakeExtent*volumeSteps) {
+		t.Errorf("available %d, maximum %d, want %d and %d",
+			reply.GetAvailableCapacity(), reply.GetMaximumVolumeSize().GetValue(),
+			5000*fakeExtent, 100*fakeExtent*volumeSteps)
 	}
-	// The fourth-largest disk node holds 1000 extents and the
-	// second-largest controller node 900, less the meta group's one; times
-	// 8 either is above the available bytes, so the largest volume is the
-	// available bytes.
-	if reply.GetMaximumVolumeSize().GetValue() != wantAvail {
-		t.Errorf("maximum volume %d, want %d",
-			reply.GetMaximumVolumeSize().GetValue(), wantAvail)
+	wantReq := &pb.GetClusterCapacityRequest{
+		ClusterName: fakeClusterOne, LegCnt: 2, CntlrCnt: 2, SliceCnt: 1,
+	}
+	if got := lastReq(); !proto.Equal(got, wantReq) {
+		t.Errorf("the capacity request is %v, want %v", got, wantReq)
+	}
+	// The class's own arithmetic is gone: no read of the cluster.
+	if n := g.methodCalls("GetCluster"); n != 0 {
+		t.Errorf("GetCapacity called GetCluster %d times, want none", n)
 	}
 
-	g.mu.Lock()
-	cl := g.clusters[fakeClusterOne]
-	cl.dns["dn0:9000"].Disabled = true
-	cl.dns["dn1:9000"].ErrEpoch = 7
-	cl.dns["dn2:9000"].FreeExtCnt = 10
-	for _, cn := range cl.cns {
-		cn.FreeExtCnt = 10000
-	}
-	g.mu.Unlock()
+	// Above the placeable bytes, the largest volume is those bytes.
+	plant(&pb.ClusterSpace{PlaceableBytes: 300 * fakeExtent, LargestInitExtCnt: 100})
 	reply, err = c.GetCapacity(ctx, req)
-	wantCode(t, err, codes.OK, "capacity with nodes dropped")
-	// Two disk nodes are left, and a RAID1 pool takes four: nothing, with a
-	// largest volume of zero that is set, not left out.
-	if reply.GetAvailableCapacity() != 0 || reply.GetMaximumVolumeSize() == nil ||
-		reply.GetMaximumVolumeSize().GetValue() != 0 {
-		t.Errorf("RAID1 over two disk nodes answers %v, want zero and zero", reply)
+	wantCode(t, err, codes.OK, "capacity under a small placeable space")
+	if reply.GetAvailableCapacity() != int64(300*fakeExtent) ||
+		reply.GetMaximumVolumeSize().GetValue() != int64(300*fakeExtent) {
+		t.Errorf("available %d, maximum %d, want both %d",
+			reply.GetAvailableCapacity(), reply.GetMaximumVolumeSize().GetValue(),
+			300*fakeExtent)
 	}
 
+	// A class without redundancy and no cntlr count: one leg, and the
+	// cntlr count left to the gateway's default, as its creates leave it.
 	none := &csi.GetCapacityRequest{Parameters: map[string]string{
-		paramCluster: fakeClusterOne, paramRedundancy: redundancyNone, paramCntlrs: "1",
+		paramCluster: fakeClusterOne, paramRedundancy: redundancyNone,
 	}}
+	plant(&pb.ClusterSpace{Limit: pb.CapacityLimit_CAPACITY_LIMIT_DN_COUNT})
 	reply, err = c.GetCapacity(ctx, none)
 	wantCode(t, err, codes.OK, "capacity without redundancy")
-	// A pool without redundancy takes two disk nodes, with 10 and 1000
-	// free; its meta group may take the fuller, so the data group is sure
-	// of 10 extents, times 8.
-	if want := int64(1010 * fakeExtent); reply.GetAvailableCapacity() != want ||
-		reply.GetMaximumVolumeSize().GetValue() != int64(10*fakeExtent*volumeSteps) {
-		t.Errorf("without redundancy: available %d, maximum %d, want %d and %d",
-			reply.GetAvailableCapacity(), reply.GetMaximumVolumeSize().GetValue(), want,
-			10*fakeExtent*volumeSteps)
+	// A limit reached: nothing, with a largest volume of zero that is set,
+	// not left out.
+	if reply.GetAvailableCapacity() != 0 || reply.GetMaximumVolumeSize() == nil ||
+		reply.GetMaximumVolumeSize().GetValue() != 0 {
+		t.Errorf("an answer with nothing placeable gives %v, want zero and zero", reply)
 	}
-	// A cluster at its pool ceiling has nothing free, whatever its nodes
-	// hold.
-	g.mu.Lock()
-	cl.spCnt = common.MaxSpCntPerCluster
-	g.mu.Unlock()
-	reply, err = c.GetCapacity(ctx, none)
-	wantCode(t, err, codes.OK, "capacity at the pool ceiling")
-	if reply.GetAvailableCapacity() != 0 || reply.GetMaximumVolumeSize().GetValue() != 0 {
-		t.Errorf("a cluster at its pool ceiling answers %v, want nothing", reply)
+	wantReq = &pb.GetClusterCapacityRequest{
+		ClusterName: fakeClusterOne, LegCnt: 1, SliceCnt: 1,
 	}
-	g.mu.Lock()
-	cl.spCnt = 0
-	g.mu.Unlock()
-	// The cluster's smallest bin is 16 extents: the disk node with 10 is
-	// offered to no scan, and one is left.
-	g.mu.Lock()
-	cl.conf.DnBinConf.Bin0Shift = 4
-	g.mu.Unlock()
-	reply, err = c.GetCapacity(ctx, none)
-	wantCode(t, err, codes.OK, "capacity under a bin floor")
-	if reply.GetAvailableCapacity() != 0 || reply.GetMaximumVolumeSize().GetValue() != 0 {
-		t.Errorf("one disk node above the floor answers %v, want nothing", reply)
+	if got := lastReq(); !proto.Equal(got, wantReq) {
+		t.Errorf("the capacity request is %v, want %v", got, wantReq)
 	}
+
+	// A gateway that gives no space answer, as one older than the driver:
+	// an error, so Kubernetes keeps what it last read rather than zero.
+	plant(nil)
+	_, err = c.GetCapacity(ctx, req)
+	wantCode(t, err, codes.Unavailable, "a reply with no space answer")
+
 	_, err = c.GetCapacity(ctx, &csi.GetCapacityRequest{Parameters: map[string]string{
 		"pool": "sp0",
 	}})
@@ -643,6 +649,12 @@ func TestGetCapacity(t *testing.T) {
 	}
 	_, err = c.GetCapacity(ctx, &csi.GetCapacityRequest{})
 	wantCode(t, err, codes.OK, "no parameters at all")
+	// Any other gateway error is the call's.
+	g.mu.Lock()
+	g.fail["GetClusterCapacity"] = codes.Aborted
+	g.mu.Unlock()
+	_, err = c.GetCapacity(ctx, req)
+	wantCode(t, err, codes.Aborted, "a gateway refusal")
 }
 
 // TestCreateVolumeWithANameDnvDoesNotTake pins csi.md, The volume model: a

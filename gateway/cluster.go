@@ -6,6 +6,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/distributed-nvme/distributed-nvme/common"
 	"github.com/distributed-nvme/distributed-nvme/etcdutil"
 	"github.com/distributed-nvme/distributed-nvme/model"
 	"github.com/distributed-nvme/distributed-nvme/pb"
@@ -402,19 +403,23 @@ func (s *Server) AdvanceClusterIds(
 }
 
 // GetClusterCapacity is the GetClusterCapacity of architecture.md, Clusters:
-// the recorded counts and flags of every node of a cluster, for the layer
-// above to sum (csi.md CSI11).
+// the recorded counts and flags of every node of a cluster, and the space
+// answer for one pool shape computed from them (model.ClusterSpaceOf), the
+// one answer for capacity the layer above reads (csi.md CSI11).
 //
-// It reads as the paged lists read (GW5, GW10): a plain `ClusterConf` read
-// for the cluster id, then two plain ranges, the DnConf prefix and the CnConf
-// prefix, outside any STM — a transaction cannot range, and the reply is a
-// capacity figure, not an invariant, so the two ranges may straddle a write
-// and a node created or deleted between them is the kind of change such a
-// read is allowed to straddle. Nothing is computed: each entry carries the
-// counts and flags its record holds, with the pointer list reduced to its
-// count. Each record is decoded through the etcd door, which logs it as it
-// logs every decoded value, so on a cluster at the node ceilings this is a
-// heavy read meant for an occasional poll.
+// The shape is judged first, before any read, against the bounds
+// CreateStoragePool holds a request to (validateCapacityShape). It then
+// reads as the paged lists read (GW5, GW10): a plain `ClusterConf` read for
+// the cluster id, the stored-conf gate every reader that computes from the
+// stored conf runs (GW11), a plain `SpGlobal` read for the pool count, then
+// two plain ranges, the DnConf prefix and the CnConf prefix, outside any STM
+// — a transaction cannot range, and the reply is a capacity figure, not an
+// invariant, so the reads may straddle a write and a node created or deleted
+// between them is the kind of change such a read is allowed to straddle.
+// Each entry carries the counts and flags its record holds, with the pointer
+// list reduced to its count. Each record is decoded through the etcd door,
+// which logs it as it logs every decoded value, so on a cluster at the node
+// ceilings this is a heavy read meant for an occasional poll.
 func (s *Server) GetClusterCapacity(
 	ctx context.Context,
 	req *pb.GetClusterCapacityRequest,
@@ -422,6 +427,9 @@ func (s *Server) GetClusterCapacity(
 	if err := validateOptionalName(
 		"cluster_name", req.GetClusterName(),
 	); err != nil {
+		return nil, err
+	}
+	if err := validateCapacityShape(req); err != nil {
 		return nil, err
 	}
 	name := clusterNameOf(req.GetClusterName())
@@ -433,7 +441,24 @@ func (s *Server) GetClusterCapacity(
 	if !found {
 		return nil, errNotFound("cluster %q not found", name)
 	}
+	// The space answer counts disk nodes by the stored bin ladder, turns
+	// extents into bytes by the stored extent size and takes a zero leg
+	// count from the stored bdev_conf: a stored conf that fails its
+	// validator is ABORTED here, before any figure is computed from it
+	// (GW11).
+	if err := model.ValidateClusterConf(cc); err != nil {
+		return nil, errAborted("%v", err)
+	}
 	cid := model.ClusterId(name, cc.GetCreationEpoch())
+	spKey := model.SpGlobalKey(cid)
+	spGlobal := &pb.SpGlobal{}
+	found, err = s.cli.Get(ctx, spKey, spGlobal)
+	if err != nil {
+		return nil, errAborted("%v", err)
+	}
+	if !found {
+		return nil, errAborted("sp_global key %q is missing", spKey)
+	}
 	reply := &pb.GetClusterCapacityReply{
 		ClusterName:  name,
 		ExtentSize:   cc.GetDnBinConf().GetExtentSize(),
@@ -445,11 +470,13 @@ func (s *Server) GetClusterCapacity(
 	if err != nil {
 		return nil, errAborted("%v", err)
 	}
+	dns := make([]*pb.DnConf, 0, len(kvs))
 	for _, kv := range kvs {
 		dn := &pb.DnConf{}
 		if err := s.cli.Decode(ctx, kv, dn); err != nil {
 			return nil, errAborted("%v", err)
 		}
+		dns = append(dns, dn)
 		reply.AddrPortToDn[strings.TrimPrefix(kv.Key, dnPrefix)] =
 			&pb.DnCapacityEntry{
 				Location:    dn.GetLocation(),
@@ -465,11 +492,13 @@ func (s *Server) GetClusterCapacity(
 	if err != nil {
 		return nil, errAborted("%v", err)
 	}
+	cns := make([]*pb.CnConf, 0, len(kvs))
 	for _, kv := range kvs {
 		cn := &pb.CnConf{}
 		if err := s.cli.Decode(ctx, kv, cn); err != nil {
 			return nil, errAborted("%v", err)
 		}
+		cns = append(cns, cn)
 		reply.AddrPortToCn[strings.TrimPrefix(kv.Key, cnPrefix)] =
 			&pb.CnCapacityEntry{
 				Location:    cn.GetLocation(),
@@ -480,5 +509,39 @@ func (s *Server) GetClusterCapacity(
 				CntlrCnt:    uint32(len(cn.GetCntlrPtrList())),
 			}
 	}
+	legCnt := req.GetLegCnt()
+	if legCnt == 0 {
+		legCnt = uint32(legCntOf(cc.GetBdevConf()))
+	}
+	cntlrCnt := req.GetCntlrCnt()
+	if cntlrCnt == 0 {
+		cntlrCnt = common.DefaultCntlrCntPerSp
+	}
+	sliceCnt := req.GetSliceCnt()
+	if sliceCnt == 0 {
+		sliceCnt = common.DefaultSliceCntPerSp
+	}
+	reply.Space = model.ClusterSpaceOf(cc, dns, cns,
+		bucketSum(spGlobal.GetShardBucket()), legCnt, cntlrCnt, sliceCnt)
 	return reply, nil
+}
+
+// validateCapacityShape refuses a GetClusterCapacity shape no
+// CreateStoragePool takes (architecture.md, Clusters): more legs a group
+// than the allocator places, a cntlr count above MaxCntlrCntPerSp, a slice
+// count above MaxSliceCntPerSp. A zero is the default and passes.
+func validateCapacityShape(req *pb.GetClusterCapacityRequest) error {
+	if legs := req.GetLegCnt(); legs > common.MaxAllocLegPerGrp {
+		return errInvalid("leg_cnt %d is outside [1, %d]",
+			legs, common.MaxAllocLegPerGrp)
+	}
+	if cntlrs := req.GetCntlrCnt(); cntlrs > common.MaxCntlrCntPerSp {
+		return errInvalid("cntlr_cnt %d is outside [%d, %d]", cntlrs,
+			common.MinCntlrCntPerSp, common.MaxCntlrCntPerSp)
+	}
+	if slices := req.GetSliceCnt(); slices > common.MaxSliceCntPerSp {
+		return errInvalid("slice_cnt %d is outside [1, %d]",
+			slices, common.MaxSliceCntPerSp)
+	}
+	return nil
 }

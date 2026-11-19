@@ -146,15 +146,22 @@ func setupGetCluster(fs *flag.FlagSet) job {
 }
 
 // setupGetClusterCapacity drives GetClusterCapacity, the capacity read of
-// architecture.md, Clusters: the same --name override as get-cluster, no
-// other flag.
+// architecture.md, Clusters: the same --name override as get-cluster, and
+// the three counts of the pool shape the space answer is for, each sent as
+// typed (0 = the gateway's default).
 func setupGetClusterCapacity(fs *flag.FlagSet) job {
 	name := clusterNameFlag(fs)
+	legs := fs.Uint("leg-cnt", 0, "leg_cnt (0 = the cluster's redundancy)")
+	cntlrs := fs.Uint("cntlr-cnt", 0, "cntlr_cnt (0 = the gateway default)")
+	slices := fs.Uint("slice-cnt", 0, "slice_cnt (0 = the gateway default)")
 	return func(
 		ctx context.Context, client pb.GatewayClient, g *globals,
 	) (any, error) {
 		return client.GetClusterCapacity(ctx, &pb.GetClusterCapacityRequest{
 			ClusterName: clusterNameOf(g, *name),
+			LegCnt:      uint32(*legs),
+			CntlrCnt:    uint32(*cntlrs),
+			SliceCnt:    uint32(*slices),
 		})
 	}
 }

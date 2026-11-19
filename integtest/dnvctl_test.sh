@@ -953,10 +953,12 @@ EOF
 		cluster advance-ids --name c1
 
 	# The capacity read (architecture.md, Clusters): no --name, so the
-	# group falls back to the global --cluster, and no token travels.
+	# group falls back to the global --cluster, and no token travels; the
+	# three counts name the pool shape of the space answer, each sent as
+	# typed.
 	sweep_step 06 GetClusterCapacity \
-		"{\"cluster_name\":\"$CLUSTER\"}" \
-		cluster get-capacity
+		"{\"cluster_name\":\"$CLUSTER\",\"leg_cnt\":2,\"cntlr_cnt\":1,\"slice_cnt\":1}" \
+		cluster get-capacity --leg-cnt 2 --cntlr-cnt 1 --slice-cnt 1
 
 	# --- `dn` — `ctl/dn.go` --------------------------------------------
 	sweep_step 07 CreateDiskNode \

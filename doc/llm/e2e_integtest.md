@@ -119,7 +119,8 @@ no repair, no forced start, no take-over and no cut of a migrating leg's path:
 listings of clusters, disk nodes and controller nodes, the id step and the
 capacity read `GetClusterCapacity` (`architecture.md`, Clusters): the gateway
 suite issues each of them, the dnvctl suite each against its fake gateway, and
-the csi suite reaches the capacity read through dnv-csi; this run discards the
+the csi suite reaches the capacity read through dnv-csi and through `dnvctl`,
+whose answer it compares with the driver's; this run discards the
 whole cluster between cases. Error paths, beyond the few refusals the ops case
 asserts on purpose, the copy case's refused abort and cancel of a started
 repair, react's refused forced start of a group whose array runs and its
