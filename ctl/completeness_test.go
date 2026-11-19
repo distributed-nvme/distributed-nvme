@@ -260,7 +260,7 @@ var leafFlags = map[string][]string{
 	// dn — trConfFlags("") expands to the four unprefixed transport flags.
 	"dn create": {"addr", "location", "disabled",
 		"tr-type", "adr-fam", "tr-addr", "tr-svc-id"},
-	"dn delete":       {"addr"},
+	"dn delete":       {"addr", "force"},
 	"dn get":          {"addr"},
 	"dn list":         {"count", "page-token"},
 	"dn set-disabled": {"addr", "disabled"},
@@ -268,7 +268,7 @@ var leafFlags = map[string][]string{
 	// cn — the exact mirror of dn, asserted literally.
 	"cn create": {"addr", "location", "disabled",
 		"tr-type", "adr-fam", "tr-addr", "tr-svc-id"},
-	"cn delete":       {"addr"},
+	"cn delete":       {"addr", "force"},
 	"cn get":          {"addr"},
 	"cn list":         {"count", "page-token"},
 	"cn set-disabled": {"addr", "disabled"},

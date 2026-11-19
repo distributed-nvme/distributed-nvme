@@ -90,6 +90,8 @@ through viper (Components: invocation reference):
 * `dnv-gateway` serves the `Gateway` gRPC service to users and CLIs. It
   reads and writes etcd, and calls agents only for `GetDnSize` and
   `GetCnSize`, the `Get*Info` behind its `Inspect*` RPCs, behind the
+  `force` false proof of `DeleteDiskNode` and `DeleteControllerNode` that
+  the node is clean (Disk nodes, Controller nodes), behind the
   `force` false hydration checks of `DeleteClone` and `FinishMigration`
   (Clones, Migrations), behind `ForceStartGroup`'s check that the
   group's array does not run (Repairs) and behind `GetThinDeviceBitmap`'s
@@ -1517,9 +1519,10 @@ GW9). `AdvanceClusterIds` commits one
 transaction for its cluster and then one per pool, which take the cluster
 id the first one derived (Clusters). Network calls to agents (`GetDnSize` and
 `GetCnSize`, the `Get*Info` behind `Inspect*`, behind the `force` false
-hydration checks of Clones and Migrations and behind `ForceStartGroup`'s
-check of the group's array (Repairs), the bitmap reads, the inspect of a
-group) must happen
+proof of the node deletes (Disk nodes, Controller nodes), behind the
+`force` false hydration checks of Clones and Migrations and behind
+`ForceStartGroup`'s check of the group's array (Repairs), the bitmap
+reads, the inspect of a group) must happen
 **outside** the STM, before or after it; when such a call needs
 `cluster_id`, a plain pre-read of `ClusterConf` provides it and the in-STM
 read stays authoritative.
@@ -2749,26 +2752,55 @@ to `disabled` go through `UpdateDiskNodeDisabled` below (and
 
 **DeleteDiskNode** —
 Errors: `NOT_FOUND` cluster or dn; `FAILED_PRECONDITION` while
-`side_ptr_list` is not empty (delete or migrate the owning SPs first; a
-retired leg's side counts, and the message says that `DeleteRetiredLeg`
-frees one, Retired legs);
-`ABORTED` for a missing `DnGlobal` or a stale `DnRev` token.
-Action: one STM reads the `DnConf` (for the `dn_id` and `shard_code` the
-id-keyed `DnRev` key is built from), deletes the `DnRev` (the worker stops
-the node's syncups and check rounds and sends no last syncup,
-`dnv-worker.md` SW3), the `DnConf` and the `DnCapacity` key if present
-(Capacity index keys), and decrements the node's `shard_bucket` entry of
-`DnGlobal`. Reply `dn_id`. The delete reaches no agent: the node keeps
-what its agent has not swept yet (Known limits); the agent keeps the
-node's request in its local store and converges it again at every start
-(`dnagent.md` DN2); and the disk's header still names the node, so the
-agent refuses the disk as a foreign one under any new node id
-(`dnagent.md` DN5). To add the disk again, in this order: stop the agent,
-zero the disk's header block, delete the agent's local store, start the
-agent, and create the node (etcd backup and restore). An agent started
-with the old store would format the blank disk under the old node id
-(`dnagent.md` DN2) or, while that store holds a provisioned side its
-stored node still lists, refuse to format it (`dnagent.md` DN5).
+`side_ptr_list` is not empty, with `force` too (delete or migrate the
+owning SPs first; a retired leg's side counts, and the message says that
+`DeleteRetiredLeg` frees one, Retired legs); `FAILED_PRECONDITION`,
+without `force`, while the node's agent does not prove the node clean
+(below); `ABORTED` for a missing `DnGlobal`, a stale `DnRev` token, or,
+without `force`, a node that changed during the proof.
+Action: without `force`, a planning snapshot makes every check of the
+deciding STM first, so a refusal about the request or the store comes
+before any agent call; then, outside any STM, one `GetDnInfo` asks the
+node's agent for its latest observation of the node, which proves the node
+clean only when its code is zero, an observation exists, its revision is
+the node's stored `DnRev` revision, and its disk counts are present and
+show an empty volume table — no side record, every extent free and every
+clone-metadata unit free. The code alone proves no empty table: while an
+export of a pool reads young, the sweep keeps a dropped side's device and
+record and names neither (`dnagent.md` DN6, An sp waits for its exports),
+and counts are sent only from a table the agent has confirmed as this
+node's (`dnagent.md` DN18), so a node whose disk is failed or foreign
+never reads clean. A revision below the stored one is a desired state the
+agent has not applied, so the sweep that empties the node may not have
+run; one above it is an agent that holds a newer state than etcd, as
+after an etcd restore. An agent that does not answer proves nothing. The
+refusal passes the agent's code and details on, the details cut to the
+row text cap (Live-state reporting), and names `force`. Then the
+deciding STM makes the checks again and requires the cluster id, the
+`dn_id` and the `DnRev` revision the planning snapshot read, whatever the
+token: a token-less delete would otherwise take a node whose state moved
+during the call, or one deleted and created again at the address, for the
+one the agent proved. With `force`, one STM and no agent call: the node
+goes with what its agent still holds. The STM reads the `DnConf` (for the
+`dn_id` and `shard_code` the id-keyed `DnRev` key is built from), deletes
+the `DnRev` (the worker stops the node's syncups and check rounds and
+sends no last syncup, `dnv-worker.md` SW3), the `DnConf` and the
+`DnCapacity` key if present (Capacity index keys), and decrements the
+node's `shard_bucket` entry of `DnGlobal`. Reply `dn_id`. Reason for the
+proof: a node deleted before its agent has swept keeps every device,
+export and record the sweep had not removed, with no worker left to send
+the syncup that removes them. The agent keeps the node's request in its
+local store and converges it again at every start (`dnagent.md` DN2): after
+a clean delete that is the empty node, its port and the disk's header;
+after a forced one, everything the stored request still names, exports
+included, over extents the cluster counts as free. And the disk's header
+still names the node, so the agent refuses the disk as a foreign one under
+any new node id (`dnagent.md` DN5). To add the disk again, in this order:
+stop the agent, zero the disk's header block, delete the agent's local
+store, start the agent, and create the node (etcd backup and restore). An
+agent started with the old store would format the blank disk under the
+old node id (`dnagent.md` DN2) or, while that store holds a provisioned
+side its stored node still lists, refuse to format it (`dnagent.md` DN5).
 
 **GetDiskNode** — Errors: `NOT_FOUND`; `ABORTED` if the `DnRev` that must
 exist is missing.
@@ -2832,9 +2864,13 @@ and `CnGlobal`, with these differences:
   `CreateDiskNode`, so a machine's controller node shares the location of
   its disk nodes unless the operator names others.
 * **DeleteControllerNode**: `FAILED_PRECONDITION` while `cntlr_ptr_list`
-  is not empty. Like `DeleteDiskNode` it reaches no agent, so the node
-  keeps what its agent has not swept yet, and the agent keeps the node's
-  request in its local store (Known limits).
+  is not empty, with `force` too. Without `force` it proves the node clean
+  as `DeleteDiskNode` does, through `GetCnInfo` and with no counts to read,
+  since a controller node holds no disk: a zero code, an observation and
+  the node's stored `CnRev` revision; the deciding STM requires the
+  cluster id, the `cn_id` and the revision the planning snapshot read.
+  With `force` it asks no agent. Either way the agent keeps the node's
+  request in its local store (`cnagent.md` CN2).
 * **UpdateControllerNodeDisabled**: as `UpdateDiskNodeDisabled` against
   `CnConf` and `CnCapacity`, with the `CnRev` token; reply `cn_id`.
 * **InspectControllerNode** calls `ControllerNodeAgent.GetCnInfo`; reply
@@ -7466,8 +7502,8 @@ A restore loses or breaks what changed after the backup:
   retired leg, followed by a delete of that retired leg, since a migration
   of it never copies, its roles
   converging only behind the gate that refuses it (`dnagent.md` DN9). Then
-  delete the disk node, which is refused while it holds a side; stop its
-  agent; zero the disk's header block by hand, since the agent formats only
+  delete the disk node, which is refused while it holds a side and, without
+  `force`, until its agent proves it clean (Disk nodes); stop its agent; zero the disk's header block by hand, since the agent formats only
   a disk whose header carries no magic (`dnagent.md` DN5); delete the
   agent's local store, start it, and add the node again. An agent started
   with its old store formats the blank disk under the old node's identity
@@ -7487,7 +7523,9 @@ A restore loses or breaks what changed after the backup:
   exception: its agent refuses the disk as a foreign one (`dnagent.md` DN5),
   so the node reads unhealthy and its agent frees and builds nothing on the
   disk. It is resolved as the conflict above is, every side on it going the
-  way the conflicting side goes there, since its agent serves none, and what
+  way the conflicting side goes there, since its agent serves none, the
+  node then deleted with `force`, since an agent that refuses its disk
+  never proves it clean, and what
   the node added again built on the disk is removed by hand before the
   header block is zeroed, since the agent formats no disk that a side device
   or a clone-metadata wrapper maps (`dnagent.md` DN5).
@@ -9718,29 +9756,22 @@ document and only pointed to here.
   device suspended on its old table, so [D12]'s bound on a suspension
   holds only as far as the reloads succeed; what that costs on each role
   is `dnagent.md`, Known limits, and `cnagent.md`, Known limits.
-* **A node deleted before its agent has swept keeps the leftovers.**
-  `DeleteDiskNode`, `DeleteControllerNode` and `DeleteCntlr` look at no
-  agent, and the stop of a deleted node's revision worker sends no last
-  syncup (`dnv-worker.md` SW3), so a node deleted right after a pool's
-  drain, or right after a `DeleteCntlr`, keeps every device, export, array
-  and connection its last sweep had not removed. A syncup already running
-  finishes its sweep (`dnv-worker.md` RW11), and an agent that stored the
-  emptied list finishes the removal at its next start, while one that never
-  got it keeps the old objects in its stored request. The drain's own rule
-  counts on those later syncups (`dnv-worker.md` SPD13), so an operator
-  deletes a node only once its agent's log shows no `sweep leftover` and the
-  worker's no `syncup leftover` for it (`log.md`, Leftovers), and removes by
-  hand what a node deleted earlier still holds. On a disk node that log is
-  clean too while a dropped side's device and record wait for an export of
-  its pool that still reads young (`dnagent.md` DN6, An sp waits for its
-  exports; a failed read of such an export, or a failed listing, the log
-  does name), a wait that on a kernel two dn agents share can have no time
-  bound (`dnagent.md`, Known limits), so the operator also waits until
-  `InspectDiskNode` answers, at the revision of the last drop or a later
-  one, with disk counts that hold no side record (Live-state reporting).
-  The deleted node's request stays in the agent's local store and is converged
-  at every start (`dnagent.md` DN2; `cnagent.md` CN2) until the store is
-  deleted (Disk nodes).
+* **A node deleted with `force` keeps the leftovers.** A forced
+  `DeleteDiskNode` or `DeleteControllerNode` asks no agent, and the stop of
+  a deleted node's revision worker sends no last syncup (`dnv-worker.md`
+  SW3), so the node keeps every device, export, array and connection its
+  last sweep had not removed, and its agent rebuilds what its stored
+  request names at every start (`dnagent.md` DN2; `cnagent.md` CN2) until
+  the store is deleted (Disk nodes); the operator stops the agent, removes
+  them by hand and deletes the store. A delete without `force` proves the
+  node clean from its agent's latest observation (Disk nodes) and has one
+  blind spot: on a controller node, an empty subsystem with no host and no
+  port link, younger than `CnSubsysOrphanGrace`, is left alone by the
+  node-level sweep and named by no verdict (`cnagent.md` CN21), so the proof
+  does not see it; it exports nothing, and the agent's next start, whose
+  converge of the stored request sweeps the node, removes it. The deleted
+  node's request stays in the agent's local store either way, and is
+  converged at every start until the store is deleted.
 * **A downgrade can lose data** (Upgrade in lockstep): no build replaces a
   newer one, yet nothing checks a build, so an older build started over
   what a newer one wrote runs. It ignores the fields the newer build added,

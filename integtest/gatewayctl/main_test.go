@@ -348,6 +348,21 @@ func (c *recordingClient) CreateCluster(
 	return &pb.CreateClusterReply{ClusterId: 1}, nil
 }
 
+func (c *recordingClient) DeleteDiskNode(
+	ctx context.Context, in *pb.DeleteDiskNodeRequest, _ ...grpc.CallOption,
+) (*pb.DeleteDiskNodeReply, error) {
+	c.req = in
+	return &pb.DeleteDiskNodeReply{DnId: 1}, nil
+}
+
+func (c *recordingClient) DeleteControllerNode(
+	ctx context.Context, in *pb.DeleteControllerNodeRequest,
+	_ ...grpc.CallOption,
+) (*pb.DeleteControllerNodeReply, error) {
+	c.req = in
+	return &pb.DeleteControllerNodeReply{CnId: 1}, nil
+}
+
 func (c *recordingClient) CreateStoragePool(
 	ctx context.Context, in *pb.CreateStoragePoolRequest, _ ...grpc.CallOption,
 ) (*pb.CreateStoragePoolReply, error) {
@@ -475,6 +490,41 @@ func TestCreateRepairRequest(t *testing.T) {
 		"--force", "--force-undecided").(*pb.CreateRepairRequest)
 	if !forced.GetForce() || !forced.GetForceUndecided() {
 		t.Errorf("--force --force-undecided sent %v, want both set", forced)
+	}
+}
+
+// TestDeleteNodeRequests pins the requests delete-dn and delete-cn build:
+// the address, a token message that is present, and force sent only when
+// typed.
+func TestDeleteNodeRequests(t *testing.T) {
+	dn := runArgv(t, "delete-dn", "--addr", "a:1", "--rev", "7",
+		"--force").(*pb.DeleteDiskNodeRequest)
+	wantDn := &pb.DeleteDiskNodeRequest{
+		ClusterName: defaultCluster,
+		AddrPort:    "a:1",
+		DnRev:       &pb.DnRev{Revision: 7},
+		Force:       true,
+	}
+	if !proto.Equal(dn, wantDn) {
+		t.Errorf("delete-dn request:\n got %v\nwant %v", dn, wantDn)
+	}
+	cn := runArgv(t, "delete-cn", "--addr", "a:2",
+		"--force").(*pb.DeleteControllerNodeRequest)
+	wantCn := &pb.DeleteControllerNodeRequest{
+		ClusterName: defaultCluster,
+		AddrPort:    "a:2",
+		CnRev:       &pb.CnRev{},
+		Force:       true,
+	}
+	if !proto.Equal(cn, wantCn) {
+		t.Errorf("delete-cn request:\n got %v\nwant %v", cn, wantCn)
+	}
+	for _, name := range []string{"delete-dn", "delete-cn"} {
+		bare := runArgv(t, name, "--addr", "a:3")
+		if bare.ProtoReflect().Get(bare.ProtoReflect().Descriptor().
+			Fields().ByName("force")).Bool() {
+			t.Errorf("a bare %s sent force", name)
+		}
 	}
 }
 

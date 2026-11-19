@@ -990,14 +990,22 @@ Measured times are in [the introduction](introduction.md#status-and-limits-of-01
   ([the operations doc](operations.md#read-what-is-wrong)). State:
   procedure to write, how to restore one record from the etcd backup;
   never remove the name.
-- **A node deleted before its sweep keeps leftovers.** A node delete asks
-  no agent. A reused disk is refused, since its header block, where dnv
-  records the disk, still names the old node, until that block is zeroed
-  by hand. A dead disk node cannot be deleted while a side is on
-  it. State: fix decided, the node delete asks the agent and refuses while
-  leftovers stand unless forced. Procedure to write: node removal and disk
-  reuse. Fix later: a forced node delete for a dead disk node. Not seen in
-  the lab.
+- **A node deleted with force keeps leftovers.** A node delete asks the
+  node's agent. It is refused while the agent does not answer, reports a
+  leftover or has not yet applied the node's latest desired state, and, on
+  a disk node, while the disk still keeps a side or a part of its metadata
+  area in use. `dnvctl dn delete --force` and `dnvctl cn delete --force`
+  delete the node without asking. Such a node keeps what its last sweep
+  had not removed, and its agent builds that again each time it starts,
+  until the agent's local files are deleted. A disk node whose disk is dead
+  or names another node is deleted only with force. A reused disk is
+  refused, since its header block, where dnv records the disk, still names
+  the old node, until that block is zeroed by hand. A dead disk node cannot
+  be deleted while a side is on it, with force too. State: procedure
+  written for the removal of a node ([the operations
+  doc](operations.md#remove-a-node)); procedure to write for disk reuse.
+  Fix later: a forced delete of a dead disk node that also frees the sides
+  of its retired legs. Not seen in the lab.
 - **Space of a dropped side can stay in use for a while.** When a side
   leaves a disk node and no other side of its pool has its device on that
   disk node, the agent keeps the side's extents in use for as long as the
@@ -1011,7 +1019,7 @@ Measured times are in [the introduction](introduction.md#status-and-limits-of-01
   while it builds or removes an export of the pool. The check rounds report
   a read or a listing that fails, but not the young export. A side placed
   on that disk node in that time can fail for want of room, and a node
-  deleted in that time keeps the side. When the kernel renews an export's
+  delete without force is refused in that time. When the kernel renews an export's
   time stamp each time its settings are read, the wait can last longer:
   while another agent on the machine keeps failing part way through a build
   of an export of the pool, and, when two agents on one machine hold the
@@ -1244,10 +1252,10 @@ made before the stripe bound, for a pool made before the block bound, for
 a new volume refused for a thin id that holds data and for a pool left by
 a Kubernetes volume whose name held "..", a planned restart of an agent, a
 slow leg, the install of the udev rules on a node, the node check, the
-choice of a node's location, the gather of a node's state, a Kubernetes
-volume the node plugin will not format, a change of the cdc addresses of the
-Kubernetes driver and a Kubernetes node plugin that does not start so far,
-and
+choice of a node's location, the removal of a node, the gather of a node's
+state, a Kubernetes volume the node plugin will not format, a change of the
+cdc addresses of the Kubernetes driver and a Kubernetes node plugin that
+does not start so far, and
 gets the others as they are written. Every row with no tool
 or no doc carries its note. Section 6.1 and the tables give some short
 steps; the section "Steps known today" below gives the longer ones.
@@ -1261,8 +1269,8 @@ steps; the section "Steps known today" below gives the longer ones.
 | Prepare a node: the udev rules on every node that keep the system's own md assembly, LVM and bcache off dnv's devices, the LVM and md settings that go with them, the network and the firewall | the udev rules ship in `deploy/udev/` with the programs; `dnv-agent check dn`, `dnv-agent check cn`: the node check reports what a node lacks and how to fix it | the operations doc, for the udev rules and the two settings, and Check a node before it joins; the tutorials, for the udev rules | procedure written for the udev rules, the two settings and the node check; procedure to write for the network and the firewall. |
 | Gather a node's state for a bug report | `dnv-agent collect` | the operations doc, Gather a node's state for a bug report | done |
 | Disable a node | `dnvctl dn set-disabled`, `dnvctl cn set-disabled` | none | procedure to write, one line: when to disable |
-| Remove a node | `dnvctl dn delete`, `dnvctl cn delete`. Refused while a side or a cntlr is on it. | the teardown of the tutorials | procedure to write: drain first, check the leftovers. Fix decided: the delete asks the agent. |
-| Replace a dead disk node | leg repair moves its RAID1 legs; `dnvctl retired-leg delete` frees the retired ones | none | procedure to write. Fix later: a forced node delete. |
+| Remove a node | `dnvctl dn delete`, `dnvctl cn delete`. Refused while a side or a cntlr is on it, and until the node's agent shows the node clean; `--force` deletes without asking the agent. | the operations doc, Remove a node | procedure written |
+| Replace a dead disk node | leg repair moves its RAID1 legs; `dnvctl retired-leg delete` frees the retired ones; `dnvctl dn delete --force` once no side is on it | none | procedure to write. Fix later: a forced delete that also frees the sides of the node's retired legs. |
 | Replace a dead controller node | the worker replaces its cntlrs after `cntlr_unhealthy`; `dnvctl cntlr create` and `dnvctl cntlr delete` by hand | none | procedure to write |
 | Reuse a disk from an old node | none: stop the agent; zero the disk's header block, where dnv records the disk; delete the agent's local store; start the agent; create the node | none | procedure to write |
 | See a node's live state and the cluster's capacity | `dnvctl dn inspect`, `dnvctl cn inspect`, `dnvctl cluster get-capacity`, which also says what pools of one shape can still get and which limit the cluster reaches first | the operations doc, The cluster's capacity | procedure written for the capacity; procedure to write, one line, for a node's live state |

@@ -7397,10 +7397,15 @@ func (x *CreateDiskNodeReply) GetDnId() uint64 {
 }
 
 type DeleteDiskNodeRequest struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	ClusterName   string                 `protobuf:"bytes,1,opt,name=cluster_name,json=clusterName,proto3" json:"cluster_name,omitempty"`
-	AddrPort      string                 `protobuf:"bytes,2,opt,name=addr_port,json=addrPort,proto3" json:"addr_port,omitempty"`
-	DnRev         *DnRev                 `protobuf:"bytes,3,opt,name=dn_rev,json=dnRev,proto3" json:"dn_rev,omitempty"`
+	state       protoimpl.MessageState `protogen:"open.v1"`
+	ClusterName string                 `protobuf:"bytes,1,opt,name=cluster_name,json=clusterName,proto3" json:"cluster_name,omitempty"`
+	AddrPort    string                 `protobuf:"bytes,2,opt,name=addr_port,json=addrPort,proto3" json:"addr_port,omitempty"`
+	DnRev       *DnRev                 `protobuf:"bytes,3,opt,name=dn_rev,json=dnRev,proto3" json:"dn_rev,omitempty"`
+	// Skip the agent's proof that the node is clean (architecture.md, Disk
+	// nodes): the node goes with whatever its agent still holds. A node that
+	// still hosts a side is refused all the same. Appended, never
+	// renumbered.
+	Force         bool `protobuf:"varint,4,opt,name=force,proto3" json:"force,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -7454,6 +7459,13 @@ func (x *DeleteDiskNodeRequest) GetDnRev() *DnRev {
 		return x.DnRev
 	}
 	return nil
+}
+
+func (x *DeleteDiskNodeRequest) GetForce() bool {
+	if x != nil {
+		return x.Force
+	}
+	return false
 }
 
 type DeleteDiskNodeReply struct {
@@ -8090,10 +8102,13 @@ func (x *CreateControllerNodeReply) GetCnId() uint64 {
 }
 
 type DeleteControllerNodeRequest struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	ClusterName   string                 `protobuf:"bytes,1,opt,name=cluster_name,json=clusterName,proto3" json:"cluster_name,omitempty"`
-	AddrPort      string                 `protobuf:"bytes,2,opt,name=addr_port,json=addrPort,proto3" json:"addr_port,omitempty"`
-	CnRev         *CnRev                 `protobuf:"bytes,3,opt,name=cn_rev,json=cnRev,proto3" json:"cn_rev,omitempty"`
+	state       protoimpl.MessageState `protogen:"open.v1"`
+	ClusterName string                 `protobuf:"bytes,1,opt,name=cluster_name,json=clusterName,proto3" json:"cluster_name,omitempty"`
+	AddrPort    string                 `protobuf:"bytes,2,opt,name=addr_port,json=addrPort,proto3" json:"addr_port,omitempty"`
+	CnRev       *CnRev                 `protobuf:"bytes,3,opt,name=cn_rev,json=cnRev,proto3" json:"cn_rev,omitempty"`
+	// As DeleteDiskNodeRequest.force: a node that still hosts a cntlr is
+	// refused all the same. Appended, never renumbered.
+	Force         bool `protobuf:"varint,4,opt,name=force,proto3" json:"force,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -8147,6 +8162,13 @@ func (x *DeleteControllerNodeRequest) GetCnRev() *CnRev {
 		return x.CnRev
 	}
 	return nil
+}
+
+func (x *DeleteControllerNodeRequest) GetForce() bool {
+	if x != nil {
+		return x.Force
+	}
+	return false
 }
 
 type DeleteControllerNodeReply struct {
@@ -20249,11 +20271,12 @@ const file_pb_schema_proto_rawDesc = "" +
 	"\blocation\x18\x04 \x01(\tR\blocation\x12\x1a\n" +
 	"\bdisabled\x18\x05 \x01(\bR\bdisabled\"*\n" +
 	"\x13CreateDiskNodeReply\x12\x13\n" +
-	"\x05dn_id\x18\x01 \x01(\x04R\x04dnId\"v\n" +
+	"\x05dn_id\x18\x01 \x01(\x04R\x04dnId\"\x8c\x01\n" +
 	"\x15DeleteDiskNodeRequest\x12!\n" +
 	"\fcluster_name\x18\x01 \x01(\tR\vclusterName\x12\x1b\n" +
 	"\taddr_port\x18\x02 \x01(\tR\baddrPort\x12\x1d\n" +
-	"\x06dn_rev\x18\x03 \x01(\v2\x06.DnRevR\x05dnRev\"*\n" +
+	"\x06dn_rev\x18\x03 \x01(\v2\x06.DnRevR\x05dnRev\x12\x14\n" +
+	"\x05force\x18\x04 \x01(\bR\x05force\"*\n" +
 	"\x13DeleteDiskNodeReply\x12\x13\n" +
 	"\x05dn_id\x18\x01 \x01(\x04R\x04dnId\"T\n" +
 	"\x12GetDiskNodeRequest\x12!\n" +
@@ -20296,11 +20319,12 @@ const file_pb_schema_proto_rawDesc = "" +
 	"\blocation\x18\x04 \x01(\tR\blocation\x12\x1a\n" +
 	"\bdisabled\x18\x05 \x01(\bR\bdisabled\"0\n" +
 	"\x19CreateControllerNodeReply\x12\x13\n" +
-	"\x05cn_id\x18\x01 \x01(\x04R\x04cnId\"|\n" +
+	"\x05cn_id\x18\x01 \x01(\x04R\x04cnId\"\x92\x01\n" +
 	"\x1bDeleteControllerNodeRequest\x12!\n" +
 	"\fcluster_name\x18\x01 \x01(\tR\vclusterName\x12\x1b\n" +
 	"\taddr_port\x18\x02 \x01(\tR\baddrPort\x12\x1d\n" +
-	"\x06cn_rev\x18\x03 \x01(\v2\x06.CnRevR\x05cnRev\"0\n" +
+	"\x06cn_rev\x18\x03 \x01(\v2\x06.CnRevR\x05cnRev\x12\x14\n" +
+	"\x05force\x18\x04 \x01(\bR\x05force\"0\n" +
 	"\x19DeleteControllerNodeReply\x12\x13\n" +
 	"\x05cn_id\x18\x01 \x01(\x04R\x04cnId\"Z\n" +
 	"\x18GetControllerNodeRequest\x12!\n" +

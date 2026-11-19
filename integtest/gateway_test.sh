@@ -597,6 +597,28 @@ set_state() { # <agent>   (JSON on stdin)
 		 mv -f $WORK/$agent/state.json.tmp $WORK/$agent/state.json"
 }
 
+# plant_clean_node makes one fake answer a node delete's proof without force
+# (architecture.md, Disk nodes, Controller nodes): its stored request of the
+# node at the node's stored revision, with no pointer, as the node's last
+# syncup would leave it, and on a disk node the counts of an empty volume
+# table of <total> extents. This suite runs no worker, so no syncup stores a
+# request in a fake, and an unplanted fake answers revision 0, below every
+# node's.
+plant_clean_node() { # <dir> <dn|cn> <node id> <revision> [<total>]
+	set_state "$1" <<EOF
+{"objects":{"$2":{"revision":$4,"request":{"cluster_id":"$CID",
+  "$2_id":"$3","revision":"$4"}}}}
+EOF
+	if [ "$2" = dn ]; then
+		set_behavior "$1" <<EOF
+{"objects":{"dn":{"disk_counts":{"total_ext_cnt":$5,"free_ext_cnt":$5,
+  "free_meta_units":$DN_META_UNITS}}}}
+EOF
+	else
+		clear_behavior "$1"
+	fi
+}
+
 reset_fakes() {
 	local d
 	for d in "${DN_DIRS[@]}" "${CN_DIRS[@]}"; do
@@ -3913,9 +3935,14 @@ EOF
 		assert_eq "$(smoke_cap_free cn_capacity "$addr")" "$CN_EXTENTS" \
 			"$addr cn_capacity key after delete-sp"
 	done
+	# A node delete asks the node's agent, which must prove the node clean
+	# (architecture.md, Disk nodes): each fake is planted with the answer of
+	# an agent that has applied the node's emptied state and swept it.
 	for i in 0 1 2 3; do
 		addr=$(dn_addr "$i")
 		rev=$(dn_rev_of "$addr")
+		plant_clean_node "$(dn_dir "$i")" dn "$((i + 1))" "$rev" \
+			"$DN_EXTENTS"
 		out=$(gw delete-dn --addr "$addr" --rev "$rev")
 		assert_field "$out" '.dn_id' "$((i + 1))" "delete-dn $addr reply dn_id"
 	done
@@ -3929,6 +3956,7 @@ EOF
 	for i in 0 1 2; do
 		addr=$(cn_addr "$i")
 		rev=$(cn_rev_of "$addr")
+		plant_clean_node "$(cn_dir "$i")" cn "$((i + 1))" "$rev"
 		out=$(gw delete-cn --addr "$addr" --rev "$rev")
 		assert_field "$out" '.cn_id' "$((i + 1))" "delete-cn $addr reply cn_id"
 	done
@@ -5475,7 +5503,7 @@ faults_status_rows() { # <reply> <kind suffix> <sp name or "">
 		| select(.kind == \"STATUS_KIND_$2\" and .sp_name == \"$3\") ]"
 }
 
-# faults_status_stage is stage 6 of the faults case: the status read of
+# faults_status_stage is stage 7 of the faults case: the status read of
 # architecture.md, Clusters, GetClusterStatus, against planted faults. No
 # dnv-worker runs in this suite, so every first page carries one row per
 # worker role; sp0, clean, carries none until a fault is planted. The fault
@@ -5590,6 +5618,109 @@ EOF
 		"the lost revision key gives one row"
 	assert_field "$rows" '.[0].object | test(" sp_rev ")' "true" \
 		"the row names the pool's revision key"
+}
+
+# faults_node_deletes is the node deletes' battery (architecture.md, Disk
+# nodes, Controller nodes): without force, a delete is refused unless the
+# node's agent proves the node clean, and with force it asks no agent. Its
+# subjects are a disk node and a controller node made for it, with no side
+# and no cntlr, served by dn0's and cn2's fakes under a second address
+# ("localhost" for 127.0.0.1, as the agent battery reaches dn0), so the
+# battery runs late in the case, when nothing allocates any more, and
+# the case's own nodes keep their pool, before the status read, whose last
+# step leaves the pool undriven. The fake answers about its one node
+# object whatever node id a call names, so the planted state is the new
+# node's.
+faults_node_deletes() {
+	local dnAddr="localhost:$DN_PORT_BASE" cnAddr="localhost:$(cn_port 2)"
+	local dnId cnId rev out
+	gw create-dn --addr "$dnAddr" --location rack9 --tr-svc-id 4429 \
+		>/dev/null
+	gw create-cn --addr "$cnAddr" --location rack9 --tr-svc-id 4439 \
+		>/dev/null
+	dnId=$(dn_id_of "$dnAddr")
+	cnId=$(cn_id_of "$cnAddr")
+
+	# An agent that has never applied the node's state: the fake holds no
+	# request, so it answers revision 0, below the node's.
+	reset_state dn0
+	clear_behavior dn0
+	rev=$(dn_rev_of "$dnAddr")
+	assert_no_write "delete-dn of a node its agent has not applied" \
+		faults_gwx_out FAILED_PRECONDITION delete-dn --addr "$dnAddr" \
+		--rev "$rev"
+	assert_field "$FAULTS_OUT" '.message | test("has not applied")' "true" \
+		"delete-dn: an agent behind the node is refused for it"
+	# An agent whose latest observation names a leftover: the code is
+	# passed on, and force is named as the way on.
+	plant_clean_node dn0 dn "$dnId" "$rev" "$DN_EXTENTS"
+	set_behavior dn0 <<EOF
+{"objects":{"dn":{"reply_code":4,"disk_counts":{"total_ext_cnt":$DN_EXTENTS,
+  "free_ext_cnt":$DN_EXTENTS,"free_meta_units":$DN_META_UNITS}}}}
+EOF
+	assert_no_write "delete-dn of a node whose agent names a leftover" \
+		faults_gwx_out FAILED_PRECONDITION delete-dn --addr "$dnAddr" \
+		--rev "$rev"
+	assert_field "$FAULTS_OUT" \
+		'.message | test("answers code 4") and test("force")' "true" \
+		"delete-dn: a leftover is refused, and force named"
+	# A clean code over a volume table that still holds a side record: the
+	# disk node's half of the proof.
+	set_behavior dn0 <<EOF
+{"objects":{"dn":{"disk_counts":{"total_ext_cnt":$DN_EXTENTS,
+  "free_ext_cnt":$DN_EXTENTS,"free_meta_units":$DN_META_UNITS,
+  "side_rec_cnt":1}}}}
+EOF
+	assert_no_write "delete-dn of a node whose table holds a side record" \
+		faults_gwx_out FAILED_PRECONDITION delete-dn --addr "$dnAddr" \
+		--rev "$rev"
+	assert_field "$FAULTS_OUT" '.message | test("1 side records")' "true" \
+		"delete-dn: a side record left is refused"
+	# A stopped agent proves nothing; force deletes the node with no agent
+	# call at all.
+	sig_dir dn0 TERM
+	wait_gone dn0 "$WAIT_SHORT"
+	assert_no_write "delete-dn of a node whose agent is stopped" \
+		faults_gwx_out FAILED_PRECONDITION delete-dn --addr "$dnAddr" \
+		--rev "$rev"
+	assert_field "$FAULTS_OUT" '.message | test("did not answer")' "true" \
+		"delete-dn: a stopped agent is refused"
+	out=$(gw delete-dn --addr "$dnAddr" --rev "$rev" --force)
+	assert_field "$out" '.dn_id' "$dnId" "delete-dn --force reply dn_id"
+	gwx NOT_FOUND get-dn --addr "$dnAddr" >/dev/null
+	start_fake dn dn0 "$(dn_addr 0)" "--size $DN_SIZE"
+	wait_until "$WAIT_SHORT" "dn0's port to listen again" ports_up \
+		"$DN_PORT_BASE"
+
+	# The controller node's mirror, with no counts to read.
+	rev=$(cn_rev_of "$cnAddr")
+	plant_clean_node cn2 cn "$cnId" "$rev"
+	set_behavior cn2 <<<'{"objects":{"cn":{"reply_code":4}}}'
+	assert_no_write "delete-cn of a node whose agent names a leftover" \
+		faults_gwx_out FAILED_PRECONDITION delete-cn --addr "$cnAddr" \
+		--rev "$rev"
+	assert_field "$FAULTS_OUT" \
+		'.message | test("answers code 4") and test("force")' "true" \
+		"delete-cn: a leftover is refused, and force named"
+	sig_dir cn2 TERM
+	wait_gone cn2 "$WAIT_SHORT"
+	assert_no_write "delete-cn of a node whose agent is stopped" \
+		faults_gwx_out FAILED_PRECONDITION delete-cn --addr "$cnAddr" \
+		--rev "$rev"
+	assert_field "$FAULTS_OUT" '.message | test("did not answer")' "true" \
+		"delete-cn: a stopped agent is refused"
+	out=$(gw delete-cn --addr "$cnAddr" --rev "$rev" --force)
+	assert_field "$out" '.cn_id' "$cnId" "delete-cn --force reply cn_id"
+	gwx NOT_FOUND get-cn --addr "$cnAddr" >/dev/null
+	start_fake cn cn2 "$(cn_addr 2)" "--size 0"
+	wait_until "$WAIT_SHORT" "cn2's port to listen again" ports_up \
+		"$(cn_port 2)"
+	# The status read runs next over these two fakes' nodes: leave them
+	# with no lever and no planted state.
+	clear_behavior dn0
+	reset_state dn0
+	clear_behavior cn2
+	reset_state cn2
 }
 
 # ---------------------------------------------------------------------------
@@ -5869,6 +6000,10 @@ case_faults() {
 	assert_no_write "delete-dn while it still hosts sides" \
 		gwx FAILED_PRECONDITION delete-dn --addr "$dnAddr" \
 		--rev "$(dn_rev_of "$dnAddr")"
+	# Force skips the agent's proof alone, never this refusal.
+	assert_no_write "delete-dn --force while it still hosts sides" \
+		gwx FAILED_PRECONDITION delete-dn --addr "$dnAddr" \
+		--rev "$(dn_rev_of "$dnAddr")" --force
 
 	# An SP that still holds tds, nqns, clones, xfers or migrs (gateway.md,
 	# Storage pools and GrowSlice).
@@ -6227,7 +6362,12 @@ case_faults() {
 		"${forceDnAddr##*:}"
 
 	# -----------------------------------------------------------------
-	stage 6 "the status read: the rows of planted faults, its pages"
+	stage 6 "the node deletes: unproven nodes refused, force deletes"
+	# -----------------------------------------------------------------
+	faults_node_deletes
+
+	# -----------------------------------------------------------------
+	stage 7 "the status read: the rows of planted faults, its pages"
 	# -----------------------------------------------------------------
 	# The status read (architecture.md, Clusters, GetClusterStatus) lists
 	# what is wrong, from etcd and the primary's latest report; its rows

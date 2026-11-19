@@ -130,11 +130,12 @@ var sweepRows = []sweepRow{
 			Location:    "rack0",
 		}},
 	{8, "DeleteDiskNode",
-		[]string{"dn", "delete", "--addr", itDnAddr, "--rev", "7"},
+		[]string{"dn", "delete", "--addr", itDnAddr, "--force", "--rev", "7"},
 		&pb.DeleteDiskNodeRequest{
 			ClusterName: itCluster,
 			AddrPort:    itDnAddr,
 			DnRev:       wantDnRev(itRevValue),
+			Force:       true,
 		}},
 	{9, "GetDiskNode",
 		[]string{"dn", "get", "--addr", itDnAddr},
@@ -166,11 +167,12 @@ var sweepRows = []sweepRow{
 			Location:    "rack1",
 		}},
 	{14, "DeleteControllerNode",
-		[]string{"cn", "delete", "--addr", itCnAddr, "--rev", "7"},
+		[]string{"cn", "delete", "--addr", itCnAddr, "--force", "--rev", "7"},
 		&pb.DeleteControllerNodeRequest{
 			ClusterName: itCluster,
 			AddrPort:    itCnAddr,
 			CnRev:       wantCnRev(itRevValue),
+			Force:       true,
 		}},
 	{15, "GetControllerNode",
 		[]string{"cn", "get", "--addr", itCnAddr},
@@ -1927,12 +1929,27 @@ func TestForceStartCancelIsSentAsTyped(t *testing.T) {
 
 // TestForceFlagsAreSent covers the refusals `group force-start` passes and
 // the operator's force of `repair create` (dnvctl.md, `group` —
-// `ctl/group.go`, `repair` — `ctl/repair.go`): --override sends each word as
-// its kind in the order typed, spaces around a word aside, a word typed
-// twice twice and a leaf without it none; an --override beside --cancel is
-// sent as typed for the gateway to refuse (CT8); --force on `repair create`
-// sends force true.
+// `ctl/group.go`, `repair` — `ctl/repair.go`) and of the node deletes
+// (dnvctl.md, `dn` — `ctl/dn.go`, `cn` — `ctl/cn.go`): --override sends each
+// word as its kind in the order typed, spaces around a word aside, a word
+// typed twice twice and a leaf without it none; an --override beside
+// --cancel is sent as typed for the gateway to refuse (CT8); --force on
+// `repair create` and on the node deletes sends force true, a node delete
+// without it false.
 func TestForceFlagsAreSent(t *testing.T) {
+	// The sweep rows type --force on the node deletes; the bare leaves
+	// send none.
+	dn := runArgv(t, "DeleteDiskNode", "dn", "delete", "--addr", itDnAddr)
+	wantRequest(t, dn, &pb.DeleteDiskNodeRequest{
+		ClusterName: itCluster,
+		AddrPort:    itDnAddr,
+	})
+	cn := runArgv(t, "DeleteControllerNode", "cn", "delete",
+		"--addr", itCnAddr)
+	wantRequest(t, cn, &pb.DeleteControllerNodeRequest{
+		ClusterName: itCluster,
+		AddrPort:    itCnAddr,
+	})
 	start := runArgv(t, "ForceStartGroup", "group", "force-start",
 		"--grp", "1", "--leg", "2",
 		"--override", "partial, bad-blocks,older-leg,partial")

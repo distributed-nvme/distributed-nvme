@@ -1757,9 +1757,10 @@ When to stop: a node already holds sides or cntlrs and has the wrong
 location: nodes of two machines that share one host name, nodes of one
 machine created before and after a rename of it, or a node 0.1 created
 with no location on a machine that runs other nodes. No command changes a location; the
-node must be emptied, deleted and created again, and those steps are not
-written yet (the scope page, section 7, Remove a node and Reuse a disk
-from an old node). Ask for help.
+node must be emptied, deleted and created again. [Remove a
+node](#remove-a-node) gives the first two steps; the steps that use a disk
+node's disk again are not written yet (the scope page, section 7, Reuse a
+disk from an old node). Ask for help.
 
 Tested: the gateway's Go tests check the host name as the default, the
 refusals of a name that is no location, a RAID1 pool refused on one host
@@ -1973,6 +1974,116 @@ Tested: the Go tests of the answer on hand-made rows, and of the gateway's
 read with a fake agent; the gateway suite's smoke case checks it over a fake
 agent's row, and the e2e suite's setup over real agents after host0 writes
 its pattern. Neither suite has yet run in the lab with this read.
+
+## Remove a node
+
+Words: an agent's **local files** are the files where it keeps the last
+desired state it accepted, under its `--local-store` directory. A disk
+node's **header block** is the first block of its disk, where dnv records
+which node the disk belongs to.
+
+When: a disk node or a controller node leaves the cluster, for example
+because its machine is retired, or because the node must be created again
+with another location.
+
+How to confirm the node is empty: `dnvctl dn get --addr <addr>` shows
+`dn_conf.side_ptr_list` as `[]`, and `dnvctl cn get --addr <addr>` shows
+`cn_conf.cntlr_ptr_list` as `[]`.
+
+What dnv does alone:
+
+- A node delete is refused while a side or a cntlr is on the node. Nothing
+  moves them off by itself.
+- When the last side or cntlr leaves the node's desired state, the worker
+  sends the node a syncup, and its agent removes the devices, exports and
+  connections that are no longer wanted. While a sweep leaves something
+  behind, the agent reports a leftover and the worker sends the syncup
+  again.
+- On a disk node, the agent can keep a side's space in use after the side
+  left, while an NVMe-oF export of its pool on the machine is younger than
+  30 seconds, and longer in the cases [the scope page](scope.md) gives
+  (Space of a dropped side can stay in use for a while).
+- A delete without `--force` asks the node's agent for its latest report
+  of the node. It is refused unless the agent has applied the node's
+  latest desired state and reports no leftover, and, on a disk node, unless
+  the disk keeps no side and no part of its metadata area in use. The
+  refusal says what the agent reports. The first report that can pass
+  comes a check round or two after the node's last sweep, and about 30
+  seconds later when a side's space waited for a young export, as the item
+  above says. A node
+  check round comes every 2 seconds at the default, which `dnvctl cluster
+  get` shows as `cluster_conf.health_check_conf.dn_interval` and
+  `cn_interval`. These times are not measured.
+- The delete removes the node from etcd, and the worker sends the node
+  nothing more. The agent keeps the node's desired state in its local files
+  and applies it again each time it starts: after a delete without
+  `--force`, that is a node with nothing on it but its NVMe-oF port and, on
+  a disk node, the disk's header block.
+
+Safe steps:
+
+1. Disable the node, so that nothing new is placed on it:
+   `dnvctl dn set-disabled --addr <addr> --disabled`, or
+   `dnvctl cn set-disabled --addr <addr> --disabled`.
+2. Empty a disk node: delete the storage pools that have a leg on it, or
+   move each such leg to another disk node with a migration
+   (`dnvctl migr create`, then `dnvctl migr finish`; the steps of that flow
+   are not written yet). `dnvctl retired-leg list` shows the pool's retired
+   legs; delete each one on the node with `dnvctl retired-leg delete` once
+   you no longer want its copy.
+3. Empty a controller node: delete the storage pools that have a cntlr on
+   it, or give each such pool a cntlr on another controller node with
+   `dnvctl cntlr create`, then disable the old one with
+   `dnvctl cntlr set-enabled --id <cntlr id> --enabled=false` and delete it
+   with `dnvctl cntlr delete --id <cntlr id>`. A disabled primary fails
+   over to an enabled standby with no health epoch first, as [A planned
+   restart of an agent](#a-planned-restart-of-an-agent), step 3, says; a
+   primary is never deleted.
+4. Check that the node is empty, as above.
+5. Delete the node, and run the delete again until it passes:
+
+   ```
+   for i in $(seq 90); do
+     dnvctl dn delete --addr <addr> && break
+     sleep 1
+   done
+   ```
+
+   Use `dnvctl cn delete` for a controller node. Read each refusal: it
+   names what the agent still reports.
+6. Stop the node's agent if its machine leaves. Its local files still hold
+   the node's desired state: delete them before an agent serves a new node
+   with that `--local-store` directory. The steps that use a disk node's
+   disk again, which also zero its header block, are not written yet (the
+   scope page, section 7, Reuse a disk from an old node).
+
+Steps that can lose data or leave state behind: `--force`. `dnvctl dn
+delete --force` and `dnvctl cn delete --force` delete the node without
+asking its agent. Use them only for a node whose agent is gone for good, or
+whose disk is dead or names another node, since such a node never passes
+the check. A node with a side or a cntlr on it is refused with `--force`
+too. The node keeps every device, export and connection its last sweep had
+not removed, and its agent builds again, each time it starts, what its local
+files still name: NVMe-oF exports included, open to the hosts and
+controller nodes they named, over disk space that the cluster counts as
+free. So after a forced delete, stop that agent and delete its local files,
+remove by hand what it built, and on a disk node zero the header block
+before the disk is used again.
+
+When to stop and ask for help: a refusal that names the same leftover for
+several minutes, while the agent's log keeps showing `sweep leftover`
+records for it; a refusal that says the agent holds a newer desired state
+than etcd, which happens after an etcd restore (do not force the delete);
+a disk node whose agent reports no counts of its disk, whose disk failed or
+names another node, and which can only leave with `--force`.
+
+Tested: the gateway's Go tests check each refusal, a clean delete, `--force`
+on a node whose agent does not answer and on a node that still holds a side,
+and a node whose desired state changed, or that was deleted and created
+again, while its agent was asked. The gateway suite's faults case checks the
+refusals and `--force` over fake agents, and its smoke case deletes every
+node of its cluster over fake agents that answer clean. No test removes a
+node from real agents, and no test runs the loop of step 5.
 
 ## Gather a node's state for a bug report
 

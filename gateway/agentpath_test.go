@@ -1433,11 +1433,13 @@ func TestAgentPathHangingAgentAbortsWithinBudget(t *testing.T) {
 	}
 }
 
-// TestAgentPathForceFalseRefusesUnreachableAgent pins AG3's one exception:
-// for DeleteClone and FinishMigration with force == false an unreachable
+// TestAgentPathForceFalseRefusesUnreachableAgent pins AG3's exception for
+// the force false checks: for DeleteClone and FinishMigration an unreachable
 // agent is FAILED_PRECONDITION, not the usual ABORTED, because the caller
 // cannot PROVE hydration finished and silence is not proof (architecture.md,
-// Clones and Migrations).
+// Clones and Migrations), and for DeleteDiskNode and DeleteControllerNode
+// the same, because the caller cannot prove the node clean (architecture.md,
+// Disk nodes, Controller nodes).
 //
 // Both subtests seed etcd by hand rather than building an SP through the
 // creating handlers: the subject is the between-the-phases call and the code
@@ -1584,6 +1586,74 @@ func TestAgentPathForceFalseRefusesUnreachableAgent(t *testing.T) {
 		if rev.GetRevision() != spRev {
 			t.Errorf("sp_rev revision = %d, want the untouched %d",
 				rev.GetRevision(), spRev)
+		}
+	})
+
+	t.Run("DeleteDiskNode", func(t *testing.T) {
+		srv, cli := agentpathServer(t)
+		clusterName, cid := agentpathSeedCluster(t, cli)
+		dead := agentpathDeadAddr(t)
+		const (
+			dnId  = uint64(0xd01)
+			shard = uint32(4)
+		)
+		agentpathPut(t, cli, model.DnConfKey(cid, dead), &pb.DnConf{
+			DnId:       dnId,
+			ShardCode:  shard,
+			NvmeTrConf: agentpathTrConf(dead),
+		})
+		agentpathPut(t, cli, model.DnRevKey(shard, cid, dnId),
+			&pb.DnRev{AddrPort: dead, Revision: 1})
+		agentpathPut(t, cli, model.DnGlobalKey(cid),
+			&pb.DnGlobal{NextId: dnId + 1, ShardBucket: hnodeBucket(shard)})
+
+		_, err := srv.DeleteDiskNode(
+			context.Background(), &pb.DeleteDiskNodeRequest{
+				ClusterName: clusterName,
+				AddrPort:    dead,
+			})
+		if got := agentpathCode(err); got != codes.FailedPrecondition {
+			t.Fatalf("DeleteDiskNode code = %v (%v), want %v",
+				got, err, codes.FailedPrecondition)
+		}
+		if !agentpathGet(t, cli, model.DnConfKey(cid, dead), &pb.DnConf{}) ||
+			!agentpathGet(t, cli,
+				model.DnRevKey(shard, cid, dnId), &pb.DnRev{}) {
+			t.Errorf("the node was deleted by a refused DeleteDiskNode")
+		}
+	})
+
+	t.Run("DeleteControllerNode", func(t *testing.T) {
+		srv, cli := agentpathServer(t)
+		clusterName, cid := agentpathSeedCluster(t, cli)
+		dead := agentpathDeadAddr(t)
+		const (
+			cnId  = uint64(0xe01)
+			shard = uint32(6)
+		)
+		agentpathPut(t, cli, model.CnConfKey(cid, dead), &pb.CnConf{
+			CnId:       cnId,
+			ShardCode:  shard,
+			NvmeTrConf: agentpathTrConf(dead),
+		})
+		agentpathPut(t, cli, model.CnRevKey(shard, cid, cnId),
+			&pb.CnRev{AddrPort: dead, Revision: 1})
+		agentpathPut(t, cli, model.CnGlobalKey(cid),
+			&pb.CnGlobal{NextId: cnId + 1, ShardBucket: hnodeBucket(shard)})
+
+		_, err := srv.DeleteControllerNode(
+			context.Background(), &pb.DeleteControllerNodeRequest{
+				ClusterName: clusterName,
+				AddrPort:    dead,
+			})
+		if got := agentpathCode(err); got != codes.FailedPrecondition {
+			t.Fatalf("DeleteControllerNode code = %v (%v), want %v",
+				got, err, codes.FailedPrecondition)
+		}
+		if !agentpathGet(t, cli, model.CnConfKey(cid, dead), &pb.CnConf{}) ||
+			!agentpathGet(t, cli,
+				model.CnRevKey(shard, cid, cnId), &pb.CnRev{}) {
+			t.Errorf("the node was deleted by a refused DeleteControllerNode")
 		}
 	})
 }
@@ -2141,6 +2211,7 @@ func TestOnlyTheInspectsAskForCounters(t *testing.T) {
 		"GetCntlrInfoRequest in checkVolumeParked",
 		"GetCntlrInfoRequest in repairBadLegReason",
 		"GetDnInfoRequest in InspectDiskNode",
+		"GetDnInfoRequest in checkDnClean",
 	}
 	wantAsks := map[literal]int{
 		{"InspectCntlr", "GetCntlrInfoRequest"}: 1,

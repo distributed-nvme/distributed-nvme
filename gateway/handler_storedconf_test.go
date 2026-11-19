@@ -327,6 +327,10 @@ func TestStoredClusterConfZeroIsRefusedByEveryReader(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("CreateDiskNode for the DeleteDiskNode case: %v", err)
 	}
+	// Its agent proves it clean (architecture.md, Disk nodes), so the replay
+	// on the repaired conf deletes it; the refusals come before the agent
+	// call.
+	plantCleanDn(t, env.srv, env.name, delDnAddr)
 
 	cases := []scCase{
 		{"FinishMigration", func() error {

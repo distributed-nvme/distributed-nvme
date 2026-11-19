@@ -566,14 +566,18 @@ cat /proc/mdstat
 
 `/proc/mdstat` lists no array.
 
-The nodes and the cluster:
+The nodes and the cluster. A node delete asks the node's agent to show
+that the node is clean, and is refused until the agent's latest report
+shows it, which can come some seconds after the kernel is clean, or about
+30 seconds later on a disk node whose agent waits for an NVMe-oF export
+to age ([Remove a node](operations.md#remove-a-node)). So each delete
+runs again until it passes, for 90 seconds at most:
 
 ```
-./dnvctl --gateway-address 127.0.0.1:29527 --cluster c0 cn delete --addr 127.0.0.1:29950
-./dnvctl --gateway-address 127.0.0.1:29527 --cluster c0 dn delete --addr 127.0.0.1:29900
-./dnvctl --gateway-address 127.0.0.1:29527 --cluster c0 dn delete --addr 127.0.0.1:29901
-./dnvctl --gateway-address 127.0.0.1:29527 --cluster c0 dn delete --addr 127.0.0.1:29902
-./dnvctl --gateway-address 127.0.0.1:29527 --cluster c0 dn delete --addr 127.0.0.1:29903
+for i in $(seq 90); do ./dnvctl --gateway-address 127.0.0.1:29527 --cluster c0 cn delete --addr 127.0.0.1:29950 && break; sleep 1; done
+for a in 127.0.0.1:29900 127.0.0.1:29901 127.0.0.1:29902 127.0.0.1:29903; do
+  for i in $(seq 90); do ./dnvctl --gateway-address 127.0.0.1:29527 --cluster c0 dn delete --addr $a && break; sleep 1; done
+done
 ./dnvctl --gateway-address 127.0.0.1:29527 cluster delete --name c0
 ```
 

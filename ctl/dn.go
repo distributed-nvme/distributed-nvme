@@ -94,7 +94,9 @@ func dnCreateCmd() *cobra.Command {
 
 // dnDeleteCmd drives DeleteDiskNode. The DnRev message travels with only its
 // revision set: the gateway matches on `revision` alone and never reads the
-// token's echo fields back out.
+// token's echo fields back out. Without --force the gateway refuses the
+// delete unless the node's agent proves the node clean; with it the gateway
+// asks no agent and the node goes with what it still holds.
 func dnDeleteCmd() *cobra.Command {
 	cmd := leaf("delete", "delete a disk node (DeleteDiskNode)",
 		func() (job, error) {
@@ -106,6 +108,7 @@ func dnDeleteCmd() *cobra.Command {
 				ClusterName: clusterOf(),
 				AddrPort:    strOf("addr"),
 				DnRev:       rev,
+				Force:       boolOf("force"),
 			}
 			return func(
 				ctx context.Context, client pb.GatewayClient,
@@ -114,6 +117,8 @@ func dnDeleteCmd() *cobra.Command {
 			}, nil
 		})
 	dnAddrFlag(cmd)
+	cmd.Flags().Bool("force", false,
+		"force — skip the agent's proof that the node is clean")
 	return cmd
 }
 

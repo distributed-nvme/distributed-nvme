@@ -253,11 +253,14 @@ func setupCreateDn(fs *flag.FlagSet) job {
 
 // setupDeleteDn drives DeleteDiskNode. The DnRev message is sent with only
 // its revision set: the gateway matches the token against the stored dn_rev
-// and never reads addr_port back out of it.
+// and never reads addr_port back out of it. --force skips the agent's proof
+// that the node is clean.
 func setupDeleteDn(fs *flag.FlagSet) job {
 	addr := nodeAddrFlag(fs)
 	var rev hexUint
 	fs.Var(&rev, "rev", "expected dn_rev token; 0 sends a zero token")
+	force := fs.Bool("force", false,
+		"force: skip the agent's proof that the node is clean")
 	return func(
 		ctx context.Context, client pb.GatewayClient, g *globals,
 	) (any, error) {
@@ -265,6 +268,7 @@ func setupDeleteDn(fs *flag.FlagSet) job {
 			ClusterName: g.cluster,
 			AddrPort:    *addr,
 			DnRev:       &pb.DnRev{Revision: uint64(rev)},
+			Force:       *force,
 		})
 	}
 }
@@ -358,11 +362,14 @@ func setupCreateCn(fs *flag.FlagSet) job {
 	}
 }
 
-// setupDeleteCn drives DeleteControllerNode over the CnRev token.
+// setupDeleteCn drives DeleteControllerNode over the CnRev token, --force
+// as on delete-dn.
 func setupDeleteCn(fs *flag.FlagSet) job {
 	addr := nodeAddrFlag(fs)
 	var rev hexUint
 	fs.Var(&rev, "rev", "expected cn_rev token; 0 sends a zero token")
+	force := fs.Bool("force", false,
+		"force: skip the agent's proof that the node is clean")
 	return func(
 		ctx context.Context, client pb.GatewayClient, g *globals,
 	) (any, error) {
@@ -371,6 +378,7 @@ func setupDeleteCn(fs *flag.FlagSet) job {
 				ClusterName: g.cluster,
 				AddrPort:    *addr,
 				CnRev:       &pb.CnRev{Revision: uint64(rev)},
+				Force:       *force,
 			})
 	}
 }

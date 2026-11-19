@@ -22,15 +22,16 @@ logging; and on `layout.md` for package placement and the dependency rules.
 `dnv-gateway` serves the `Gateway` gRPC service to users and CLIs
 (`architecture.md`, System overview). It reads and writes etcd, and calls
 agents only for `GetDnSize` and `GetCnSize`, the `Get*Info` behind its
-`Inspect*` RPCs, behind the `force` false hydration checks of
-`DeleteClone` and `FinishMigration`, behind `ForceStartGroup`'s check of
-the group's array, behind `CreateRepair`'s read of the bad leg's row and
-behind `GetThinDeviceBitmap`'s check of the parks, the `GetThinDeviceBm`
-bitmap read, the `InspectGrp` read behind `InspectGroup`, and the
-primaries' `GetCntlrInfo` and the migration destinations' `GetSideInfo`
-behind the status read, `GetClusterStatus` (Agent calls). It is one of
-the three co-located control-plane processes — gateway, worker, cdc —
-that any number of control-plane servers may run.
+`Inspect*` RPCs, behind the `force` false proof of `DeleteDiskNode` and
+`DeleteControllerNode` that the node is clean, behind the `force` false
+hydration checks of `DeleteClone` and `FinishMigration`, behind
+`ForceStartGroup`'s check of the group's array, behind `CreateRepair`'s
+read of the bad leg's row and behind `GetThinDeviceBitmap`'s check of the
+parks, the `GetThinDeviceBm` bitmap read, the `InspectGrp` read behind
+`InspectGroup`, and the primaries' `GetCntlrInfo` and the migration
+destinations' `GetSideInfo` behind the status read, `GetClusterStatus`
+(Agent calls). It is one of the three co-located control-plane processes —
+gateway, worker, cdc — that any number of control-plane servers may run.
 This document covers `gateway/` and `cmd/dnv-gateway` only: `dnvctl` is a
 separate component with its own document (`dnvctl.md`), and the integration
 suite drives the gateway with a dedicated test client, `gatewayctl`, not
@@ -596,9 +597,9 @@ GrowSlice). A handler that then COMPUTES with a
 stored member validates it first and REFUSES rather than guessing around a
 zero: `model.ValidateClusterConf` in `CreateDiskNode` and
 `CreateControllerNode` (before dividing a reported size by `extent_size`),
-in `DeleteDiskNode` and `UpdateDiskNodeDisabled` (the last check before
-their first write, because the one capacity key each moves is named by
-shifting the STORED ladder), in `CreateStoragePool` (on its plain pre-read,
+in `DeleteDiskNode` and `UpdateDiskNodeDisabled` (before their first
+write, the last of their checks of the request and the store, because the
+one capacity key each moves is named by shifting the STORED ladder), in `CreateStoragePool` (on its plain pre-read,
 before the merge that gives its scans their leg count and that the geometry
 rules of `architecture.md`, Common validation, judge, and again in its STM
 before any group geometry) and the `GrowSlice` handler (before any group
@@ -883,14 +884,30 @@ to no cluster (`architecture.md`, Worker registry).
   `model.MaintainDnCapacity` from no record to the new one; put the `DnRev`
   holding the `addr_port` and the first revision at `DnRevKey`; put the
   global. Reply `dn_id`.
-* **DeleteDiskNode** — STM: resolve; the `DnConf` by address (`NOT_FOUND`);
-  the token against the `DnRev` (GW6); a non-empty `side_ptr_list` is
-  `FAILED_PRECONDITION`; `model.ValidateClusterConf` on the resolved
-  `ClusterConf` (a zero is `ABORTED`, GW11 — the last check before the first
-  write, since the capacity key to delete is named by the stored ladder);
-  delete the `DnRev`, the `DnConf` and the capacity key (`MaintainDnCapacity`
-  from the old record to none); decrement the node's entry of `DnGlobal`'s
-  `shard_bucket`. Reply `dn_id`.
+* **DeleteDiskNode** — the checks (`dnDeleteChecks`): resolve; the
+  `DnConf` by address (`NOT_FOUND`); the token against the `DnRev` (GW6),
+  whose read gives the node's revision; a non-empty `side_ptr_list` is
+  `FAILED_PRECONDITION`, with `force` too, and its message does not offer
+  `force`; the `DnGlobal` (missing is `ABORTED`);
+  `model.ValidateClusterConf` on the resolved `ClusterConf` (a zero is
+  `ABORTED`, GW11 — the last check of the request and the store, since
+  the capacity key to delete is named by the stored ladder). Without `force`,
+  two-phase (AG4): a planning `Snapshot` makes the checks and keeps the
+  cluster id, the `dn_id` and the revision; then `checkDnClean` calls
+  `GetDnInfo` with the cluster id and the `dn_id` and no `read_io_stats`,
+  and refuses `FAILED_PRECONDITION`, naming what failed and `force`, an
+  agent that does not answer, a non-zero code (its details passed on, cut
+  to the row text cap by `common.CutRowText`), no observation, a revision
+  other than the node's, and disk counts that are
+  absent or show a side record, a held extent or a held clone-metadata
+  unit (`architecture.md`, Disk nodes); the deciding STM makes the checks
+  again and answers `ABORTED`, with "run the delete again", when the
+  cluster id, the `dn_id` or the revision differs from the planning one
+  (`nodePlan.sameNode`), whatever the token. With `force`, the one STM
+  with the checks and no agent call. The STM deletes the `DnRev`, the
+  `DnConf` and the capacity key (`MaintainDnCapacity` from the old record
+  to none) and decrements the node's entry of `DnGlobal`'s `shard_bucket`.
+  Reply `dn_id`.
 * **GetDiskNode** — one STM: the `DnConf`, then the `DnRev` by the id and
   shard it read (missing is `ABORTED`). Reply the address, the conf and the
   rev (the token source).
@@ -925,7 +942,9 @@ and `CnGlobal`, with these differences: `CreateControllerNode` calls
 `architecture.md`, Size → extents, and takes the reply's host name as the
 default `location` as `CreateDiskNode` does; the per-cluster ceiling is
 `MaxCnCntPerCluster`; the delete's occupancy precondition is
-`cntlr_ptr_list`; the capacity maintenance is `model.MaintainCnCapacity`,
+`cntlr_ptr_list`, and its proof without `force` (`checkCnClean`) calls
+`GetCnInfo` and reads no counts, since a controller node holds no disk;
+the capacity maintenance is `model.MaintainCnCapacity`,
 which needs no `ClusterConf` because a CN capacity key carries no bin index
 (`architecture.md`, Capacity index keys), so `DeleteControllerNode` and
 `UpdateControllerNodeDisabled` run no `model.ValidateClusterConf` (GW11);
@@ -1783,10 +1802,11 @@ AG1. **Placement.** Agent calls happen outside STMs (`architecture.md`, STM
 discipline); the matrix below places each one. A `DeleteClone` whose clone
 is ALREADY `deleting` answers in phase 1 and makes no agent call at all
 (Clones), and neither does a `ForceStartGroup` with `cancel` (Repairs and
-retired legs) or a `CreateRepair` in a pool with no primary, which judges
+retired legs), a `CreateRepair` in a pool with no primary, which judges
 the bad leg on its record alone (`architecture.md`, Repairs, A leg of
 another identity), nor `GetClusterStatus` for a pool being deleted or with
-no primary (GW20). The two pre-STM size calls take the cluster id from a
+no primary (GW20), nor a node delete with `force` (Disk nodes). The two
+pre-STM size calls take the cluster id from a
 plain pre-read of `ClusterConf`, the in-STM read staying authoritative; the
 calls after resolution take it from the resolving transaction.
 
@@ -1807,7 +1827,10 @@ dial (GW20).
 AG3. **Failure mapping.** A transport or non-OK status maps to the code the
 RPC's specification names: `ABORTED` everywhere except the `force` false
 checks of `DeleteClone` and `FinishMigration`, where an unreachable agent is
-`FAILED_PRECONDITION` (the caller cannot prove hydration is done),
+`FAILED_PRECONDITION` (the caller cannot prove hydration is done), the
+`force` false proof of the node deletes, where it is `FAILED_PRECONDITION`
+too (the caller cannot prove the node clean), and that proof also refuses
+a reply with a non-zero code,
 `ForceStartGroup`'s check of the group's array, where it is
 `FAILED_PRECONDITION` too (the caller cannot prove the array does not run),
 and `GetThinDeviceBitmap`'s check of the parks, where it is
@@ -1839,7 +1862,10 @@ what keeps such a two-phase RPC exactly as safe as a one-STM RPC. A
 GW6 is presence-based, so an interleaved mutation it did not observe stays
 invisible to it. That is the
 AG4 half of the token-less cost `architecture.md`, Revision keys and the
-sync fan-out, accepts.
+sync fan-out, accepts. The node deletes are the exception: their agent
+call proves a fact of one node at one revision, so their deciding STM
+compares the cluster id, the node id and the revision with the planning
+snapshot's whatever the token (Disk nodes).
 
 The complete call matrix:
 
@@ -1852,6 +1878,8 @@ The complete call matrix:
 | `InspectCntlr` | `GetCntlrInfo` | after the STM |
 | `InspectSide` | `GetSideInfo` | after the STM |
 | `InspectStoragePool` | `GetCntlrInfo` | after the snapshot |
+| `DeleteDiskNode` with `force` false | `GetDnInfo` | between the snapshot and the STM |
+| `DeleteControllerNode` with `force` false | `GetCnInfo` | between the snapshot and the STM |
 | `DeleteClone` with `force` false | `GetCntlrInfo` | between the STMs |
 | `FinishMigration` with `force` false | `GetSideInfo` | between the STMs |
 | `ForceStartGroup` without `cancel` | `GetCntlrInfo` | between the STMs |
@@ -2085,8 +2113,11 @@ gateway, never through `workerctl`.
   write bumping `SpRev`, a repeated set and a repeated clear writing nothing, and
   refused for an unknown group, an unknown pool and a stale token;
   and the sp latch with the refusals it brings, then its drain, after
-  which every extent, metadata unit and capacity key is back and no dnv key
-  is left. Before the case tears its
+  which every extent, metadata unit and capacity key is back; then the
+  node deletes without `force`, each fake first given the answer of an
+  agent that has applied and swept its node's emptied state, since no
+  worker runs to send a fake a syncup; and no dnv key is left. Before the
+  case tears its
   pool down, the id step runs on the live pool: every counter moves by its
   stride, in one store revision for the globals and one for the pool, no rev
   key moves, and a thin device created after it draws its ids from the moved
@@ -2124,7 +2155,12 @@ gateway, never through `workerctl`.
   agent faults — a hung agent bounded by the agent-call budget, a closed
   port refused fast, inspects of hung and stopped fakes; the hydration
   checks of `DeleteClone` and `FinishMigration` refusing on incomplete
-  hydration and on an unreachable agent, `force` skipping them; and the
+  hydration and on an unreachable agent, `force` skipping them; the node
+  deletes' proof, on a disk node and a controller node made for it
+  late in the case, refusing an agent behind the node, a leftover
+  the agent names, a side record the disk's table still holds and a
+  stopped agent, `force` deleting the node, and refusing with `force` too
+  a disk node that still hosts a side; and the
   status read over planted faults (GW20) — one row per worker role, since
   no worker runs, and none of the clean pool; a leg whose health epoch is
   set and whose row the primary reads ERROR, listed as one row; a thin
@@ -2170,8 +2206,8 @@ the parallel case GW9 — candidate units that lose a pick and run again,
 invisibly — and GW12 under concurrency; the contention case GW6 as fence
 and as liveness loop, GW8 and GW12 (a loser burns no id); the faults
 case GW4, GW7 throughout, AG2's budget, AG3, of AG4 only that
-`DeleteClone` and `FinishMigration` run their agent call between the
-phases, GW20's rows, budget and pages, and the primary
+`DeleteClone`, `FinishMigration` and the node deletes run their agent call
+between the phases, GW20's rows, budget and pages, and the primary
 threshold's floor of `architecture.md`, Common validation, from both
 sides, with GW11's `event_threshold` stored as sent; the restart
 case GW1, with the atomicity of one STM per RPC (GW8); and the ceiling

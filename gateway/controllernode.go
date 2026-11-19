@@ -44,11 +44,12 @@ import (
 // `disabled` gates CP scheduling only, so no agent has to be told and the
 // cntlrs the node already hosts keep running.
 //
-// Two of the six leave etcd (AG1): CreateControllerNode needs the node's
+// Three of the six leave etcd (AG1): CreateControllerNode needs the node's
 // capacity budget before it can compute `total_ext_cnt`, and the host name
-// of its machine for a node created with no location, and
-// InspectControllerNode needs the agent's latest observation of the node. Both
-// calls sit strictly outside the transaction, one before it and one after it.
+// of its machine for a node created with no location; DeleteControllerNode
+// without force needs its agent's proof that the node is clean; and
+// InspectControllerNode needs the agent's latest observation of the node.
+// Each call sits strictly outside a transaction, as on a disk node.
 
 // cnCapBudget maps a GetCnSize reply onto the capacity budget `total_ext_cnt`
 // is computed from (architecture.md, Size → extents). This is the one place
@@ -248,18 +249,15 @@ func (s *Server) CreateControllerNode(
 }
 
 // DeleteControllerNode is the DeleteControllerNode of architecture.md,
-// Controller nodes.
-//
-// It reaches no agent by design: removing the CnRev key stops the cn-worker,
-// which sends no last syncup, so the node keeps what its agent has not swept
-// and the agent keeps the node's request in its local store (architecture.md,
-// Controller nodes; Known limits). The occupancy check is
-// `cntlr_ptr_list` — the CN mirror of the `side_ptr_list` of architecture.md,
-// Disk nodes — and it runs AFTER the token check (GW6) so an operator working
-// from a stale GetControllerNode is told its view is stale, not told about
-// cntlrs it never saw. An operator who sent no token has opted out of that
-// ordering (GW6 is presence-based) and is told about the
-// cntlrs directly.
+// Controller nodes: the mirror of DeleteDiskNode, two-phase without force
+// (AG4), with checkCnClean as the agent call between the phases and no
+// counts to read, since a controller node holds no disk. The occupancy check
+// is `cntlr_ptr_list` — the CN mirror of the `side_ptr_list` of
+// architecture.md, Disk nodes — with force too, and it runs AFTER the token
+// check (GW6) so an operator working from a stale GetControllerNode is told
+// its view is stale, not told about cntlrs it never saw. An operator who sent
+// no token has opted out of that ordering (GW6 is presence-based) and is told
+// about the cntlrs directly.
 func (s *Server) DeleteControllerNode(
 	ctx context.Context,
 	req *pb.DeleteControllerNodeRequest,
@@ -272,53 +270,60 @@ func (s *Server) DeleteControllerNode(
 	if err := validateName("addr_port", req.GetAddrPort()); err != nil {
 		return nil, err
 	}
+	var plan *nodePlan
+	if !req.GetForce() {
+		err := s.cli.Snapshot(ctx, func(stm etcdutil.STM) error {
+			plan = nil
+			read, err := cnDeleteChecks(stm, req)
+			if err != nil {
+				return err
+			}
+			plan = &nodePlan{
+				Cid:      read.cid,
+				NodeId:   read.cn.GetCnId(),
+				Revision: read.rev.GetRevision(),
+			}
+			return nil
+		})
+		if err != nil {
+			return nil, mapStmErr(err)
+		}
+		if err := checkCnClean(ctx, req.GetAddrPort(), plan); err != nil {
+			return nil, err
+		}
+	}
 	var cnId uint64
 	err := s.cli.RunSTM(ctx, func(stm etcdutil.STM) error {
 		cnId = 0
-		cid, _, err := resolveCluster(stm, req.GetClusterName())
+		read, err := cnDeleteChecks(stm, req)
 		if err != nil {
 			return err
 		}
-		confKey := model.CnConfKey(cid, req.GetAddrPort())
-		cn := &pb.CnConf{}
-		if !stm.Get(confKey, cn) {
-			return errNotFound(
-				"controller node %q not found", req.GetAddrPort())
-		}
-		if _, err := checkCnToken(
-			stm, cid, cn, req.GetCnRev(),
+		if err := plan.sameNode(
+			"controller node", req.GetAddrPort(), read.cid,
+			read.cn.GetCnId(), read.rev.GetRevision(),
 		); err != nil {
 			return err
 		}
-		if len(cn.GetCntlrPtrList()) != 0 {
-			return errPrecondition(
-				"controller node %q still hosts %d cntlrs: delete or migrate "+
-					"the owning storage pools first",
-				req.GetAddrPort(), len(cn.GetCntlrPtrList()))
-		}
-		globalKey := model.CnGlobalKey(cid)
-		global := &pb.CnGlobal{}
-		if !stm.Get(globalKey, global) {
-			return errAborted("cn_global key %q is missing", globalKey)
-		}
+		cn := read.cn
 		// Deleting the rev key is the event that stops the owning cn-worker
 		// health-checking the node (architecture.md, Revision keys and the
 		// sync fan-out); CnConf and the capacity key go
 		// with it in one atomic commit, so no worker ever sees a node whose
 		// conf is gone but whose rev key survives.
-		stm.Del(model.CnRevKey(cn.GetShardCode(), cid, cn.GetCnId()))
-		stm.Del(confKey)
+		stm.Del(model.CnRevKey(cn.GetShardCode(), read.cid, cn.GetCnId()))
+		stm.Del(model.CnConfKey(read.cid, req.GetAddrPort()))
 		// cn is the record THIS transaction read, which is what makes the
 		// capacity-key delete exact: the key embeds free_ext_cnt
 		// (architecture.md, Capacity index keys).
-		model.MaintainCnCapacity(stm, cid, req.GetAddrPort(), cn, nil)
+		model.MaintainCnCapacity(stm, read.cid, req.GetAddrPort(), cn, nil)
 		// Only the bucket is decremented; next_id keeps growing, because ids
 		// are never reused and an agent may assume, an etcd restore aside,
 		// that a deleted node never comes back under the same id
 		// (architecture.md, Globals: id allocation + shard buckets).
-		global.ShardBucket = releaseShard(
-			global.GetShardBucket(), cn.GetShardCode())
-		stm.Put(globalKey, global)
+		read.global.ShardBucket = releaseShard(
+			read.global.GetShardBucket(), cn.GetShardCode())
+		stm.Put(model.CnGlobalKey(read.cid), read.global)
 		cnId = cn.GetCnId()
 		return nil
 	})
@@ -326,6 +331,73 @@ func (s *Server) DeleteControllerNode(
 		return nil, mapStmErr(err)
 	}
 	return &pb.DeleteControllerNodeReply{CnId: cnId}, nil
+}
+
+// cnDeleteRead is what cnDeleteChecks read.
+type cnDeleteRead struct {
+	cid    uint64
+	cn     *pb.CnConf
+	rev    *pb.CnRev
+	global *pb.CnGlobal
+}
+
+// cnDeleteChecks makes DeleteControllerNode's checks in their order, the
+// same in the planning snapshot and in the deciding STM: resolve; the CnConf
+// by address (NOT_FOUND); the token (GW6), whose read of the CnRev key also
+// gives the revision the agent's answer is held to; a non-empty
+// cntlr_ptr_list, with force too; CnGlobal present. No ClusterConf check: a
+// CN capacity key carries no bin index (GW11).
+func cnDeleteChecks(
+	stm etcdutil.STM,
+	req *pb.DeleteControllerNodeRequest,
+) (*cnDeleteRead, error) {
+	cid, _, err := resolveCluster(stm, req.GetClusterName())
+	if err != nil {
+		return nil, err
+	}
+	cn := &pb.CnConf{}
+	if !stm.Get(model.CnConfKey(cid, req.GetAddrPort()), cn) {
+		return nil, errNotFound(
+			"controller node %q not found", req.GetAddrPort())
+	}
+	rev, err := checkCnToken(stm, cid, cn, req.GetCnRev())
+	if err != nil {
+		return nil, err
+	}
+	if len(cn.GetCntlrPtrList()) != 0 {
+		return nil, errPrecondition(
+			"controller node %q still hosts %d cntlrs: delete or migrate "+
+				"the owning storage pools first",
+			req.GetAddrPort(), len(cn.GetCntlrPtrList()))
+	}
+	globalKey := model.CnGlobalKey(cid)
+	global := &pb.CnGlobal{}
+	if !stm.Get(globalKey, global) {
+		return nil, errAborted("cn_global key %q is missing", globalKey)
+	}
+	return &cnDeleteRead{cid: cid, cn: cn, rev: rev, global: global}, nil
+}
+
+// checkCnClean is DeleteControllerNode's agent call between its two phases,
+// checkDnClean's mirror over GetCnInfo: the answer must pass
+// nodeObsRefusal, and a controller node has no counts to read.
+func checkCnClean(ctx context.Context, addrPort string, plan *nodePlan) error {
+	var reply *pb.GetCnInfoReply
+	callErr := withCnAgent(ctx, addrPort,
+		func(ctx context.Context, client pb.ControllerNodeAgentClient) error {
+			got, err := client.GetCnInfo(ctx, &pb.GetCnInfoRequest{
+				ClusterId: plan.Cid,
+				CnId:      plan.NodeId,
+			})
+			reply = got
+			return err
+		})
+	if callErr != nil {
+		return errNodeUnproven("controller node", addrPort,
+			"its agent did not answer: %v", callErr)
+	}
+	return nodeObsRefusal("controller node", addrPort, plan,
+		reply.GetAgentReply(), reply.GetRevision(), reply.GetObsStamp())
 }
 
 // GetControllerNode is the GetControllerNode of architecture.md, Controller

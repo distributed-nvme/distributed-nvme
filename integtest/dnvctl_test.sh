@@ -984,8 +984,8 @@ EOF
 		dn create --addr "$DN_ADDR" --location "$DN_LOCATION"
 	sweep_step 08 DeleteDiskNode \
 		"{\"cluster_name\":\"$CLUSTER\",\"addr_port\":\"$DN_ADDR\",
-		  \"dn_rev\":{\"revision\":\"7\"}}" \
-		dn delete --addr "$DN_ADDR" --rev 7
+		  \"dn_rev\":{\"revision\":\"7\"},\"force\":true}" \
+		dn delete --addr "$DN_ADDR" --force --rev 7
 	sweep_step 09 GetDiskNode \
 		"{\"cluster_name\":\"$CLUSTER\",\"addr_port\":\"$DN_ADDR\"}" \
 		dn get --addr "$DN_ADDR"
@@ -1009,8 +1009,8 @@ EOF
 		cn create --addr "$CN_ADDR" --location "$CN_LOCATION"
 	sweep_step 14 DeleteControllerNode \
 		"{\"cluster_name\":\"$CLUSTER\",\"addr_port\":\"$CN_ADDR\",
-		  \"cn_rev\":{\"revision\":\"7\"}}" \
-		cn delete --addr "$CN_ADDR" --rev 7
+		  \"cn_rev\":{\"revision\":\"7\"},\"force\":true}" \
+		cn delete --addr "$CN_ADDR" --force --rev 7
 	sweep_step 15 GetControllerNode \
 		"{\"cluster_name\":\"$CLUSTER\",\"addr_port\":\"$CN_ADDR\"}" \
 		cn get --addr "$CN_ADDR"

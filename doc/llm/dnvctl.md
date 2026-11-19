@@ -107,8 +107,8 @@ variable named after a leaf flag — and a config-file key of the same name
 reach no request. Binding every flag would let one exported variable decide
 requests nobody typed it for: `DNVCTL_REV` would put its revision on every
 token-carrying write typed without `--rev`, `DNVCTL_FORCE` would force each
-`clone delete`, `migr finish` and `migr cancel` typed without `--force` and
-turn such an `xfer delete` into an abort, and `DNVCTL_NAME` would stand in for every
+`dn delete`, `cn delete`, `clone delete`, `migr finish` and `migr cancel`
+typed without `--force` and turn such an `xfer delete` into an abort, and `DNVCTL_NAME` would stand in for every
 untyped `--name`, redirecting a bare `cluster get` or `cluster delete`. A
 revision token is per object and per write, never ambient context.
 
@@ -566,13 +566,22 @@ to set beside the record's counts that `dn get` shows (`architecture.md`,
 Live-state reporting); beside them it prints the disk's block counters,
 which the agent reads at the call (`dnagent.md` DN16).
 
+`dn delete` reaches the agent too, unless `--force` is typed: the gateway
+asks the node's agent, through `GetDnInfo`, to prove the node clean, and
+refuses the delete until it does (`architecture.md`, Disk nodes), so an
+operator runs it again until it passes and reads a refusal's text for what
+the agent still holds. `--force` sends `force` true, which skips the proof:
+the node goes with what it still holds. A node that still hosts a side is
+refused with `--force` too.
+
 ### `cn` — `ctl/cn.go`
 
 The `cn` group mirrors `dn` exactly against the controller-node RPCs: the
 same verbs and the same flags, the requests differing only in carrying
-`cn_rev` where the `dn` ones carry `dn_rev`, and `cn create` reaching the CN
-agent's `GetCnSize` as `dn create` reaches `GetDnSize`. A change to one
-group is a change to both.
+`cn_rev` where the `dn` ones carry `dn_rev`, `cn create` reaching the CN
+agent's `GetCnSize` as `dn create` reaches `GetDnSize`, and `cn delete`
+reaching its `GetCnInfo`, unless `--force` is typed, as `dn delete` reaches
+`GetDnInfo`. A change to one group is a change to both.
 
 ### `sp` — `ctl/sp.go`
 

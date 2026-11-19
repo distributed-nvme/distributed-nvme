@@ -2,6 +2,7 @@ package gateway
 
 import (
 	"context"
+	"fmt"
 
 	"google.golang.org/protobuf/proto"
 
@@ -27,11 +28,13 @@ import (
 // running. That is why no op-name constant is declared in this file — no bump
 // helper and no model op that names an op is called from it.
 //
-// Two of the six leave etcd (AG1): CreateDiskNode needs the node's disk size
-// before it can compute `total_ext_cnt`, and the host name of its machine for
-// a node created with no location, and InspectDiskNode needs the agent's
-// latest observation of the node. Both calls sit strictly outside the
-// transaction, one before it and one after it.
+// Three of the six leave etcd (AG1): CreateDiskNode needs the node's disk
+// size before it can compute `total_ext_cnt`, and the host name of its
+// machine for a node created with no location; DeleteDiskNode without force
+// needs its agent's proof that the node is clean; and InspectDiskNode needs
+// the agent's latest observation of the node. Each call sits strictly outside
+// a transaction: before the create's, between the delete's planning snapshot
+// and its deciding STM, and after the inspect's.
 
 // CreateDiskNode is the CreateDiskNode of architecture.md, Disk nodes.
 //
@@ -201,14 +204,25 @@ func (s *Server) CreateDiskNode(
 
 // DeleteDiskNode is the DeleteDiskNode of architecture.md, Disk nodes.
 //
-// It reaches no agent by design: removing the DnRev key stops the dn-worker,
-// which sends no last syncup, so the node keeps what its agent has not swept
-// and the agent keeps the node's request in its local store (architecture.md,
-// Disk nodes; Known limits). The occupancy check is
-// `side_ptr_list`, and it runs AFTER the token check (GW6) so an operator
-// working from a stale GetDiskNode is told its view is stale, not told about
-// sides it never saw. An operator who sent no token has opted out of that
-// ordering (GW6 is presence-based) and is told about the sides directly.
+// Without force it is two-phase (AG4): a planning snapshot makes every check
+// the deciding STM makes (dnDeleteChecks), so a refusal about the request or
+// the store comes before the agent is asked; checkDnClean then asks the
+// node's agent, outside any STM (AG1), for its latest observation of the
+// node, which must prove the node clean; and the deciding STM makes the
+// checks again and requires the cluster id, the dn_id and the DnRev
+// revision the planning snapshot read (sameNode), so a node whose desired
+// state moved, or that was deleted and created again at the address, during
+// the agent call is refused rather than deleted on an answer about another
+// state. With force the delete is one STM and asks no agent: the node goes
+// with what its agent still holds. Removing the DnRev key stops the
+// dn-worker, which sends no last syncup, and the agent keeps the node's
+// request in its local store (architecture.md, Disk nodes; Known limits).
+//
+// The occupancy check is `side_ptr_list`, with force too, and it runs AFTER
+// the token check (GW6) so an operator working from a stale GetDiskNode is
+// told its view is stale, not told about sides it never saw. An operator who
+// sent no token has opted out of that ordering (GW6 is presence-based) and
+// is told about the sides directly.
 func (s *Server) DeleteDiskNode(
 	ctx context.Context,
 	req *pb.DeleteDiskNodeRequest,
@@ -221,68 +235,61 @@ func (s *Server) DeleteDiskNode(
 	if err := validateName("addr_port", req.GetAddrPort()); err != nil {
 		return nil, err
 	}
+	var plan *nodePlan
+	if !req.GetForce() {
+		err := s.cli.Snapshot(ctx, func(stm etcdutil.STM) error {
+			plan = nil
+			read, err := dnDeleteChecks(stm, req)
+			if err != nil {
+				return err
+			}
+			plan = &nodePlan{
+				Cid:      read.cid,
+				NodeId:   read.dn.GetDnId(),
+				Revision: read.rev.GetRevision(),
+			}
+			return nil
+		})
+		if err != nil {
+			return nil, mapStmErr(err)
+		}
+		if err := checkDnClean(ctx, req.GetAddrPort(), plan); err != nil {
+			return nil, err
+		}
+	}
 	var dnId uint64
 	err := s.cli.RunSTM(ctx, func(stm etcdutil.STM) error {
 		dnId = 0
-		cid, cc, err := resolveCluster(stm, req.GetClusterName())
+		read, err := dnDeleteChecks(stm, req)
 		if err != nil {
 			return err
 		}
-		confKey := model.DnConfKey(cid, req.GetAddrPort())
-		dn := &pb.DnConf{}
-		if !stm.Get(confKey, dn) {
-			return errNotFound("disk node %q not found", req.GetAddrPort())
-		}
-		if _, err := checkDnToken(
-			stm, cid, dn, req.GetDnRev(),
+		if err := plan.sameNode(
+			"disk node", req.GetAddrPort(), read.cid, read.dn.GetDnId(),
+			read.rev.GetRevision(),
 		); err != nil {
 			return err
 		}
-		if len(dn.GetSidePtrList()) != 0 {
-			return errPrecondition(
-				"disk node %q still hosts %d sides: delete or migrate the "+
-					"owning storage pools, or delete their retired legs "+
-					"(DeleteRetiredLeg), first",
-				req.GetAddrPort(), len(dn.GetSidePtrList()))
-		}
-		globalKey := model.DnGlobalKey(cid)
-		global := &pb.DnGlobal{}
-		if !stm.Get(globalKey, global) {
-			return errAborted("dn_global key %q is missing", globalKey)
-		}
-		// The last check before the first write, and so the last point at
-		// which this transaction can still return having staged nothing.
-		// MaintainDnCapacity below names the key to delete by shifting the
-		// STORED ladder (architecture.md, Common validation), so against a
-		// conf CreateCluster could not have written it names a key nothing
-		// ever wrote: the delete would miss, the node's real capacity key
-		// would outlive its DnConf, and once the conf was repaired the scan of
-		// architecture.md, Per-operation allocation, would keep offering free
-		// space on a node that is gone. The check runs after the token and the
-		// side_ptr_list check so an operator still hears about a stale view
-		// or about the sides first — those are answers about the request,
-		// this one is about the store.
-		if err := model.ValidateClusterConf(cc); err != nil {
-			return errAborted("%v", err)
-		}
+		dn := read.dn
 		// Deleting the rev key is the event that stops the owning dn-worker
 		// health-checking the node (architecture.md, Revision keys and the
 		// sync fan-out); DnConf and the capacity key go
 		// with it in one atomic commit, so no worker ever sees a node whose
 		// conf is gone but whose rev key survives.
-		stm.Del(model.DnRevKey(dn.GetShardCode(), cid, dn.GetDnId()))
-		stm.Del(confKey)
+		stm.Del(model.DnRevKey(dn.GetShardCode(), read.cid, dn.GetDnId()))
+		stm.Del(model.DnConfKey(read.cid, req.GetAddrPort()))
 		// dn is the record THIS transaction read, which is what makes the
 		// capacity-key delete exact: the key embeds free_ext_cnt
 		// (architecture.md, Capacity index keys).
-		model.MaintainDnCapacity(stm, cid, req.GetAddrPort(), cc, dn, nil)
+		model.MaintainDnCapacity(
+			stm, read.cid, req.GetAddrPort(), read.cc, dn, nil)
 		// Only the bucket is decremented; next_id keeps growing, because ids
 		// are never reused and an agent may assume, an etcd restore aside,
 		// that a deleted node never comes back under the same id
 		// (architecture.md, Globals: id allocation + shard buckets).
-		global.ShardBucket = releaseShard(
-			global.GetShardBucket(), dn.GetShardCode())
-		stm.Put(globalKey, global)
+		read.global.ShardBucket = releaseShard(
+			read.global.GetShardBucket(), dn.GetShardCode())
+		stm.Put(model.DnGlobalKey(read.cid), read.global)
 		dnId = dn.GetDnId()
 		return nil
 	})
@@ -290,6 +297,231 @@ func (s *Server) DeleteDiskNode(
 		return nil, mapStmErr(err)
 	}
 	return &pb.DeleteDiskNodeReply{DnId: dnId}, nil
+}
+
+// dnDeleteRead is what dnDeleteChecks read: the resolved cluster, the node's
+// record, its DnRev and the cluster's DnGlobal.
+type dnDeleteRead struct {
+	cid    uint64
+	cc     *pb.ClusterConf
+	dn     *pb.DnConf
+	rev    *pb.DnRev
+	global *pb.DnGlobal
+}
+
+// dnDeleteChecks makes DeleteDiskNode's checks in their order, the same in
+// the planning snapshot and in the deciding STM: resolve; the DnConf by
+// address (NOT_FOUND); the token (GW6), whose read of the DnRev key also
+// gives the revision the agent's answer is held to; a non-empty
+// side_ptr_list, with force too (FAILED_PRECONDITION, and its message does
+// not offer force); DnGlobal present; and the stored ClusterConf.
+func dnDeleteChecks(
+	stm etcdutil.STM,
+	req *pb.DeleteDiskNodeRequest,
+) (*dnDeleteRead, error) {
+	cid, cc, err := resolveCluster(stm, req.GetClusterName())
+	if err != nil {
+		return nil, err
+	}
+	dn := &pb.DnConf{}
+	if !stm.Get(model.DnConfKey(cid, req.GetAddrPort()), dn) {
+		return nil, errNotFound("disk node %q not found", req.GetAddrPort())
+	}
+	rev, err := checkDnToken(stm, cid, dn, req.GetDnRev())
+	if err != nil {
+		return nil, err
+	}
+	if len(dn.GetSidePtrList()) != 0 {
+		return nil, errPrecondition(
+			"disk node %q still hosts %d sides: delete or migrate the "+
+				"owning storage pools, or delete their retired legs "+
+				"(DeleteRetiredLeg), first",
+			req.GetAddrPort(), len(dn.GetSidePtrList()))
+	}
+	globalKey := model.DnGlobalKey(cid)
+	global := &pb.DnGlobal{}
+	if !stm.Get(globalKey, global) {
+		return nil, errAborted("dn_global key %q is missing", globalKey)
+	}
+	// The last check of the request and the store, before the deciding
+	// transaction's first write, so it can still return having staged
+	// nothing. MaintainDnCapacity names the key to delete by shifting the
+	// STORED ladder (architecture.md, Common validation), so against a
+	// conf CreateCluster could not have written it names a key nothing
+	// ever wrote: the delete would miss, the node's real capacity key
+	// would outlive its DnConf, and once the conf was repaired the scan of
+	// architecture.md, Per-operation allocation, would keep offering free
+	// space on a node that is gone. The check runs after the token and the
+	// side_ptr_list check so an operator still hears about a stale view
+	// or about the sides first — those are answers about the request,
+	// this one is about the store.
+	if err := model.ValidateClusterConf(cc); err != nil {
+		return nil, errAborted("%v", err)
+	}
+	return &dnDeleteRead{cid: cid, cc: cc, dn: dn, rev: rev, global: global}, nil
+}
+
+// nodePlan is what a node delete's planning snapshot read and its agent's
+// answer was judged against: the cluster id, the node's id and its stored
+// revision. A nil plan is a forced delete, which asked no agent.
+type nodePlan struct {
+	Cid      uint64
+	NodeId   uint64
+	Revision uint64
+}
+
+// sameNode is a node delete's check in its deciding STM that the node is
+// the one its agent answered about, at the same desired state: the same
+// cluster id, the same node id and the same stored revision as the planning
+// snapshot read, whatever the token (AG4). A token-less request would not
+// see a side added and dropped again during the agent call, nor a node
+// deleted and created again at the address, whose new id and first
+// revision can match the old ones' numbers only together with a new
+// cluster. Each is ABORTED: the caller runs the delete again. A nil plan
+// (force) checks nothing.
+func (p *nodePlan) sameNode(
+	kind string,
+	addrPort string,
+	cid uint64,
+	nodeId uint64,
+	revision uint64,
+) error {
+	switch {
+	case p == nil:
+		return nil
+	case cid != p.Cid:
+		return errAborted(
+			"%s %q: its cluster was created again during the check of "+
+				"the node; run the delete again", kind, addrPort)
+	case nodeId != p.NodeId:
+		return errAborted(
+			"%s %q is node %d, not node %d the check asked about: it was "+
+				"created again during the check; run the delete again",
+			kind, addrPort, nodeId, p.NodeId)
+	case revision != p.Revision:
+		return errAborted(
+			"%s %q changed during the check: its revision is %d, the "+
+				"check proved %d; run the delete again",
+			kind, addrPort, revision, p.Revision)
+	}
+	return nil
+}
+
+// checkDnClean is DeleteDiskNode's agent call between its two phases (AG1,
+// AG3): one GetDnInfo, which answers from the agent's latest observation of
+// the node and reads nothing of it (architecture.md, Live-state reporting),
+// with no read_io_stats. The answer proves the node clean, or the delete is
+// refused (nodeObsRefusal, then the disk counts). An agent that does not
+// answer is FAILED_PRECONDITION, as the hydration checks answer one (AG3):
+// its silence proves nothing about what the node still holds.
+func checkDnClean(ctx context.Context, addrPort string, plan *nodePlan) error {
+	var reply *pb.GetDnInfoReply
+	callErr := withDnAgent(ctx, addrPort,
+		func(ctx context.Context, client pb.DiskNodeAgentClient) error {
+			got, err := client.GetDnInfo(ctx, &pb.GetDnInfoRequest{
+				ClusterId: plan.Cid,
+				DnId:      plan.NodeId,
+			})
+			reply = got
+			return err
+		})
+	if callErr != nil {
+		return errNodeUnproven("disk node", addrPort,
+			"its agent did not answer: %v", callErr)
+	}
+	if err := nodeObsRefusal("disk node", addrPort, plan,
+		reply.GetAgentReply(), reply.GetRevision(), reply.GetObsStamp(),
+	); err != nil {
+		return err
+	}
+	return dnCountsRefusal(addrPort, reply.GetDnInfo().GetDiskCounts())
+}
+
+// nodeObsRefusal judges an agent's answer about its node (GetDnInfo,
+// GetCnInfo) for a node delete: the observation's code must be zero, an
+// observation must exist, and it must be of the plan's revision. A non-zero
+// code is a leftover the node's latest sweep or read names, a failure, a
+// refused conf, an unknown node or an agent that still starts (dnagent.md
+// SH33), and its details pass on cut to the row text cap (common.CutRowText;
+// architecture.md, Live-state reporting). A revision below the stored one is a node whose
+// latest desired state the agent has not applied, so the sweep that removes
+// what the state no longer names may not have run; one above it is an agent
+// that holds a newer state than etcd, as after an etcd restore.
+func nodeObsRefusal(
+	kind string,
+	addrPort string,
+	plan *nodePlan,
+	agentReply *pb.AgentReply,
+	revision uint64,
+	stamp *pb.ObsStamp,
+) error {
+	switch {
+	case agentReply.GetCode() != 0:
+		return errNodeUnproven(kind, addrPort,
+			"its agent's latest observation of the node answers code %d: %s",
+			agentReply.GetCode(), common.CutRowText(agentReply.GetDetails()))
+	case stamp.GetObsTime() == nil:
+		return errNodeUnproven(kind, addrPort,
+			"its agent holds no observation of the node yet")
+	case revision < plan.Revision:
+		return errNodeUnproven(kind, addrPort,
+			"its agent's latest observation is of revision %d, the node's "+
+				"is %d: the agent has not applied the node's latest "+
+				"desired state yet", revision, plan.Revision)
+	case revision > plan.Revision:
+		return errNodeUnproven(kind, addrPort,
+			"its agent's latest observation is of revision %d, above the "+
+				"node's %d in etcd: the agent holds a newer desired state "+
+				"than etcd, as after an etcd restore",
+			revision, plan.Revision)
+	}
+	return nil
+}
+
+// dnCountsRefusal is the disk node's half of the proof: an empty volume
+// table. The clean code alone proves no such table: while an export of a
+// pool reads young, the agent's sweep keeps a dropped side's device and
+// record and names neither (dnagent.md DN6, An sp waits for its exports).
+// So the counts must be there, which the agent sends only beside an OK meta
+// row from a table it has confirmed as this node's (dnagent.md DN18), and
+// they must show no side record, every extent free and every
+// clone-metadata unit free.
+func dnCountsRefusal(addrPort string, counts *pb.DnInfo_DiskCounts) error {
+	switch {
+	case counts == nil:
+		return errNodeUnproven("disk node", addrPort,
+			"its agent reports no counts of the disk's volume table, "+
+				"which it sends only from a table it has confirmed as "+
+				"this node's")
+	case counts.GetSideRecCnt() != 0:
+		return errNodeUnproven("disk node", addrPort,
+			"the disk's volume table still holds %d side records",
+			counts.GetSideRecCnt())
+	case counts.GetFreeExtCnt() != counts.GetTotalExtCnt():
+		return errNodeUnproven("disk node", addrPort,
+			"%d of the disk's %d extents are free",
+			counts.GetFreeExtCnt(), counts.GetTotalExtCnt())
+	case counts.GetFreeMetaUnits() != common.DnCloneMetaUnitCnt:
+		return errNodeUnproven("disk node", addrPort,
+			"%d of the disk's %d clone-metadata units are free",
+			counts.GetFreeMetaUnits(), uint64(common.DnCloneMetaUnitCnt))
+	}
+	return nil
+}
+
+// errNodeUnproven is a node delete's refusal for a node its agent does not
+// prove clean: what failed, then the two ways on.
+func errNodeUnproven(
+	kind string,
+	addrPort string,
+	format string,
+	args ...any,
+) error {
+	return errPrecondition(
+		"%s %q is not proven clean: %s; retry once its agent has removed "+
+			"what the node no longer needs, or delete with force, which "+
+			"leaves on the node what it still holds",
+		kind, addrPort, fmt.Sprintf(format, args...))
 }
 
 // GetDiskNode is the GetDiskNode of architecture.md, Disk nodes.

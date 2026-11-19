@@ -59,8 +59,9 @@ may import is `layout.md`, Dependency rules.
 
 Out of scope here: the gateway (request validation, the public RPCs, and
 the agent calls it makes: the `Get*Info` info reads, which serve its
-inspects, its hydration checks, its forced start's check of a group's
-array and its bitmap read's check of the parks, and the `Get*Size` calls
+inspects, its node deletes' proof that the node is clean, its hydration
+checks, its forced start's check of a group's array and its bitmap read's
+check of the parks, and the `Get*Size` calls
 and `GetThinDeviceBm`),
 `dnv-cdc`, `dnvctl`. Where the
 worker performs an "internal" variant of a gateway mutation (Automatic

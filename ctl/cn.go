@@ -80,6 +80,8 @@ func registerCn(root *cobra.Command) {
 	// carriers. cnRev() is nil unless --rev was typed, and that nil must
 	// reach the field as nil: GW6 is presence-based, so an absent token
 	// means "skip the check" and a present one means strict equality (CT3).
+	// --force skips the agent's proof that the node is clean, as on `dn
+	// delete`.
 	del := leaf("delete", "delete a controller node",
 		func() (job, error) {
 			rev, err := cnRev()
@@ -88,6 +90,7 @@ func registerCn(root *cobra.Command) {
 			}
 			cluster := clusterOf()
 			addr := strOf("addr")
+			force := boolOf("force")
 			return func(
 				ctx context.Context, client pb.GatewayClient,
 			) (any, error) {
@@ -96,10 +99,13 @@ func registerCn(root *cobra.Command) {
 						ClusterName: cluster,
 						AddrPort:    addr,
 						CnRev:       rev,
+						Force:       force,
 					})
 			}, nil
 		})
 	cnAddrFlag(del.Flags())
+	del.Flags().Bool("force", false,
+		"force — skip the agent's proof that the node is clean")
 
 	// cn get — GetControllerNode. This is the CnRev token source (CT3): its
 	// reply carries the CnConf and the current cn_rev, which is where an

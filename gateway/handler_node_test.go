@@ -1621,6 +1621,7 @@ func TestDeleteDiskNodeReleasesTheShard(t *testing.T) {
 	second := fakeAddrPort(t, "dn")
 	mustDn(t, s, cluster, first, "", 16<<30)
 	mustDn(t, s, cluster, second, "", 16<<30)
+	plantCleanDn(t, s, cluster, first)
 
 	reply, err := s.DeleteDiskNode(ctx, &pb.DeleteDiskNodeRequest{
 		ClusterName: cluster,
@@ -2106,6 +2107,7 @@ func TestDeleteControllerNodeReleasesTheShard(t *testing.T) {
 	second := fakeAddrPort(t, "cn")
 	mustCn(t, s, cluster, first, "", 8<<30)
 	mustCn(t, s, cluster, second, "", 8<<30)
+	plantCleanCn(t, s, cluster, first)
 
 	reply, err := s.DeleteControllerNode(
 		ctx, &pb.DeleteControllerNodeRequest{
@@ -2445,6 +2447,8 @@ func TestNodeMutatorsRunWithNoTokenAtAll(t *testing.T) {
 	dnDelId := mustDn(t, s, cluster, dnDel, "rack-1", 16<<30)
 	cnUpdId := mustCn(t, s, cluster, cnUpd, "rack-1", 8<<30)
 	cnDelId := mustCn(t, s, cluster, cnDel, "rack-1", 8<<30)
+	plantCleanDn(t, s, cluster, dnDel)
+	plantCleanCn(t, s, cluster, cnDel)
 
 	dnUpdShard := hnodeDnShard(t, s, cid, dnUpd)
 	dnDelShard := hnodeDnShard(t, s, cid, dnDel)

@@ -1487,6 +1487,11 @@ message DeleteDiskNodeRequest {
     string cluster_name = 1;
     string addr_port = 2;
     DnRev dn_rev = 3;
+    // Skip the agent's proof that the node is clean (architecture.md, Disk
+    // nodes): the node goes with whatever its agent still holds. A node that
+    // still hosts a side is refused all the same. Appended, never
+    // renumbered.
+    bool force = 4;
 }
 
 message DeleteDiskNodeReply {
@@ -1560,6 +1565,9 @@ message DeleteControllerNodeRequest {
     string cluster_name = 1;
     string addr_port = 2;
     CnRev cn_rev = 3;
+    // As DeleteDiskNodeRequest.force: a node that still hosts a cntlr is
+    // refused all the same. Appended, never renumbered.
+    bool force = 4;
 }
 
 message DeleteControllerNodeReply {

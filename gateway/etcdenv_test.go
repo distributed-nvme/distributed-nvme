@@ -470,9 +470,12 @@ type fakeAgent struct {
 	// nodes). It starts as AddrPort, so every fixture node created with no
 	// location keeps a location of its own; a test sets another with
 	// setHostName.
-	hostName  string
-	fail      error
-	block     chan struct{}
+	hostName string
+	fail     error
+	block    chan struct{}
+	// blockOn, when set, limits block to the one method it names, so a test
+	// can hold an info read while the same node answers its size calls.
+	blockOn   string
 	calls     []string
 	traceIds  []string
 	dnInfo    *pb.DnInfo
@@ -497,6 +500,16 @@ type fakeAgent struct {
 	// every InspectGrp request, in call order.
 	inspectGrp  *pb.InspectGrpReply
 	inspectReqs []*pb.InspectGrpRequest
+	// nodeReply and nodeRevision are the AgentReply and the revision the
+	// node's own info reads (GetDnInfo, GetCnInfo) carry: nil, which reads
+	// as code OK, and fakeAgentRevision until a test sets others
+	// (setNodeAnswer), and dnInfoReqs and cnInfoReqs every request of the
+	// two, in call order. A node delete holds the answer to the node's
+	// stored revision (architecture.md, Disk nodes).
+	nodeReply    *pb.AgentReply
+	nodeRevision uint64
+	dnInfoReqs   []*pb.GetDnInfoRequest
+	cnInfoReqs   []*pb.GetCnInfoRequest
 }
 
 // enter is what every fake method runs first: it records the call and the T3
@@ -510,6 +523,9 @@ func (f *fakeAgent) enter(ctx context.Context, method string) error {
 	traceId, _ := common.TraceIdFromCtx(ctx)
 	f.traceIds = append(f.traceIds, traceId)
 	fail, block := f.fail, f.block
+	if f.blockOn != "" && f.blockOn != method {
+		block = nil
+	}
 	f.mu.Unlock()
 	if fail != nil {
 		return fail
@@ -549,6 +565,39 @@ func (f *fakeAgent) setBlock() func() {
 	f.mu.Unlock()
 	var once sync.Once
 	return func() { once.Do(func() { close(block) }) }
+}
+
+// setBlockOn is setBlock for the one method named: every other method
+// answers as before.
+func (f *fakeAgent) setBlockOn(method string) func() {
+	unblock := f.setBlock()
+	f.mu.Lock()
+	f.blockOn = method
+	f.mu.Unlock()
+	return unblock
+}
+
+// setNodeAnswer installs the AgentReply (nil reads as code OK) and the
+// revision the node's info reads carry from now on.
+func (f *fakeAgent) setNodeAnswer(reply *pb.AgentReply, revision uint64) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.nodeReply = reply
+	f.nodeRevision = revision
+}
+
+// dnInfoReqList and cnInfoReqList are every GetDnInfo and GetCnInfo request
+// the fake answered, in call order.
+func (f *fakeAgent) dnInfoReqList() []*pb.GetDnInfoRequest {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]*pb.GetDnInfoRequest(nil), f.dnInfoReqs...)
+}
+
+func (f *fakeAgent) cnInfoReqList() []*pb.GetCnInfoRequest {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]*pb.GetCnInfoRequest(nil), f.cnInfoReqs...)
 }
 
 // setInfo installs the *Info messages the Inspect* RPCs must pass through
@@ -664,14 +713,16 @@ func (f *fakeDnServer) GetDnInfo(
 	}
 	f.agent.mu.Lock()
 	defer f.agent.mu.Unlock()
+	f.agent.dnInfoReqs = append(f.agent.dnInfoReqs, req)
 	// The revision the agent reports is the one every Inspect* reply MUST
 	// carry back to the client (architecture.md, Disk nodes); it is a
-	// distinctive number here so that a handler which regressed to the stored
-	// rev key would be caught.
+	// distinctive number here, until a test sets another, so that a handler
+	// which regressed to the stored rev key would be caught.
 	return &pb.GetDnInfoReply{
-		Revision: fakeAgentRevision,
-		DnInfo:   f.agent.dnInfo,
-		ObsStamp: f.agent.stamp,
+		AgentReply: f.agent.nodeReply,
+		Revision:   f.agent.nodeRevision,
+		DnInfo:     f.agent.dnInfo,
+		ObsStamp:   f.agent.stamp,
 	}, nil
 }
 
@@ -723,10 +774,12 @@ func (f *fakeCnServer) GetCnInfo(
 	}
 	f.agent.mu.Lock()
 	defer f.agent.mu.Unlock()
+	f.agent.cnInfoReqs = append(f.agent.cnInfoReqs, req)
 	return &pb.GetCnInfoReply{
-		Revision: fakeAgentRevision,
-		CnInfo:   f.agent.cnInfo,
-		ObsStamp: f.agent.stamp,
+		AgentReply: f.agent.nodeReply,
+		Revision:   f.agent.nodeRevision,
+		CnInfo:     f.agent.cnInfo,
+		ObsStamp:   f.agent.stamp,
 	}, nil
 }
 
@@ -894,10 +947,11 @@ func startFakeAgent(t *testing.T, addrPort string, size uint64) *fakeAgent {
 			network, target, err)
 	}
 	agent := &fakeAgent{
-		AddrPort: addrPort,
-		size:     size,
-		hostName: addrPort,
-		stamp:    fakeAgentStamp(),
+		AddrPort:     addrPort,
+		size:         size,
+		hostName:     addrPort,
+		stamp:        fakeAgentStamp(),
+		nodeRevision: fakeAgentRevision,
 	}
 	server := grpc.NewServer(
 		grpc.ChainUnaryInterceptor(common.GrpcUnaryServerInterceptor()),
@@ -910,13 +964,65 @@ func startFakeAgent(t *testing.T, addrPort string, size uint64) *fakeAgent {
 		defer close(done)
 		_ = server.Serve(lis)
 	}()
+	fakeAgents.Store(addrPort, agent)
 	t.Cleanup(func() {
+		fakeAgents.Delete(addrPort)
 		// Stop, not GracefulStop: a test that left the fake blocked would
 		// otherwise wait for a call that is never coming back.
 		server.Stop()
 		<-done
 	})
 	return agent
+}
+
+// fakeAgents is every running fake by its addr_port, so a test that made
+// its nodes through mustDn or mustCn can still turn their fakes' knobs
+// (fakeAgentOf). fakeAddrPort never hands one addr_port out twice in a run.
+var fakeAgents sync.Map
+
+// fakeAgentOf is the running fake at addrPort.
+func fakeAgentOf(t *testing.T, addrPort string) *fakeAgent {
+	t.Helper()
+	agent, ok := fakeAgents.Load(addrPort)
+	if !ok {
+		t.Fatalf("no fake agent runs at %q", addrPort)
+	}
+	return agent.(*fakeAgent)
+}
+
+// plantCleanDn makes the fake at addrPort answer a disk node delete's proof
+// (architecture.md, Disk nodes): code OK, an observation, the node's stored
+// revision as GetDiskNode reads it, and the counts of an empty volume table
+// over the node's own total_ext_cnt.
+func plantCleanDn(t *testing.T, s *Server, cluster string, addrPort string) {
+	t.Helper()
+	reply, err := s.GetDiskNode(context.Background(),
+		&pb.GetDiskNodeRequest{ClusterName: cluster, AddrPort: addrPort})
+	if err != nil {
+		t.Fatalf("GetDiskNode %q: %v", addrPort, err)
+	}
+	agent := fakeAgentOf(t, addrPort)
+	agent.setNodeAnswer(nil, reply.GetDnRev().GetRevision())
+	agent.setInfo(&pb.DnInfo{DiskCounts: cleanDiskCounts(
+		reply.GetDnConf().GetTotalExtCnt())}, nil, nil, nil)
+}
+
+// plantCleanCn is plantCleanDn for a controller node: code OK, an
+// observation and the node's stored revision.
+func plantCleanCn(t *testing.T, s *Server, cluster string, addrPort string) {
+	t.Helper()
+	fakeAgentOf(t, addrPort).setNodeAnswer(nil, cnTok(t, s, cluster, addrPort))
+}
+
+// cleanDiskCounts are the counts of an empty volume table over total
+// extents: no side record, every extent and every clone-metadata unit free.
+func cleanDiskCounts(total uint64) *pb.DnInfo_DiskCounts {
+	return &pb.DnInfo_DiskCounts{
+		TotalExtCnt:   total,
+		FreeExtCnt:    total,
+		FreeMetaUnits: common.DnCloneMetaUnitCnt,
+		SideRecsMatch: true,
+	}
 }
 
 // ---------------------------------------------------------------------------
