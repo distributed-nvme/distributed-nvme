@@ -545,6 +545,11 @@ func TestEachRowAtEachLevel(t *testing.T) {
 			"kernel modules at boot", LevelOk},
 
 		// The commands.
+		// Both agents run blockdev: each clears a read-only flag with it
+		// after a reload (Dm.SetWritable).
+		{"no blockdev", both, func(t *tree) {
+			t.missing["blockdev"] = true
+		}, "commands", LevelFail},
 		{"no blkdiscard", []string{RoleDn}, func(t *tree) {
 			t.missing["blkdiscard"] = true
 		}, "commands", LevelFail},

@@ -272,12 +272,13 @@ func (c *checker) namedModules(ctx context.Context) (map[string]bool, error) {
 }
 
 // The commands each role's agent runs, by name, through its OsClient
-// (dnagent.md CM5).
+// (dnagent.md CM5). blockdev is both roles': each agent clears a device's
+// read-only flag with it after a reload (Dm.SetWritable).
 var (
 	commandsBoth = []string{"dmsetup", "nvme", "lsblk", "mkdir", "rmdir",
-		"ln", "rm"}
+		"ln", "rm", "blockdev"}
 	commandsDn = []string{"blkdiscard"}
-	commandsCn = []string{"mdadm", "thin_dump", "blockdev", "stat"}
+	commandsCn = []string{"mdadm", "thin_dump", "stat"}
 )
 
 // thinDumpHeaderFlags are the flags of the cn agent's thin header read
