@@ -309,9 +309,11 @@ func (s *CnAgentServer) releaseHeldSnap(
 // at all, when the `dmsetup create` decides; an id that holds data is
 // another volume's, after an etcd restore handed the id out again, and a
 // new volume over it would serve that volume's data. A header read that
-// fails refuses the id. A device already there is adopted as it is: it is
-// this node's own earlier build. A created td is never messaged, so the
-// guard never runs for the pool's own created volume.
+// fails refuses the id, save one refused because a metadata snapshot is
+// already held, which makes the volume wait for the worker's re-send. A
+// device already there is adopted as it is: it is this node's own earlier
+// build. A created td is never messaged, so the guard never runs for the
+// pool's own created volume.
 func (s *CnAgentServer) ensureThin(
 	ctx context.Context,
 	plan *cntlrPlan,

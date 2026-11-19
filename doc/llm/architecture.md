@@ -4251,42 +4251,44 @@ its pad bits in the middle of the chunk and shift every later bit. So
   `SyncupSideRequest` at `LocalSidePath`, `SyncupCnRequest` at
   `LocalCnPath`, `SyncupCntlrRequest` at `LocalCntlrPath` — plus one file
   per received bitmap chunk at `LocalMigrBmPath` or `LocalCloneBmPath`
-  (Agent local-store paths, Bitmap push protocol). While the store's disk
-  refuses writes, a node's read also saves a probe file at
-  `LocalDnProbePath` or `LocalCnProbePath`, which nothing loads
-  (`dnagent.md` DN18). Every write goes to a temp file in the same dir,
-  fsync, rename, fsync the dir (until then a crash can undo the rename). A
-  request whose save fails is refused (Revision gate below) and its file
-  left as it was, save when only that last fsync failed, after the rename
-  put the refused request in place (`dnagent.md` SH5). A write that does not
-  succeed can leave its temp file behind, as one whose process dies between
-  the write and the rename does (`osclient.md`, ReadFile / WriteFile /
-  WriteFileDirect, lists every way). The committed file is the only truth:
-  the next start deletes such a file unread (`dnagent.md` SH6), since what
-  it held was never committed and the worker sends again whatever the
-  committed files lack. The stored request contains the revision, so no
-  separate revision record exists. In memory each side's and each cntlr's
-  current request is an atomic pointer, so another object's pass reads it
-  whole beside the converge that replaces it; a node's request is replaced
-  only under the node write lock. On start the agent loads every other
-  request and chunk file of its role's kinds under its prefix and reconciles
-  the system to it (full idempotent re-apply; for a clone, Clone metadata
-  durability), its gRPC listener already open and the agent answering that
-  it is starting until that reconcile ends (`dnagent.md` SH1, SH33) — except
-  that it skips, neither loading nor deleting them, the files that may
-  belong under a file it cannot load: a file that did not load names no
-  object, so it proves no owner gone (`dnagent.md` DN2 and `cnagent.md` CN2
-  say which files that holds back). When an object disappears from its
-  parent's pointer list, the agent drops its file or files, its chunk files,
-  its in-memory entry and its object lock in that same pass, **before**
-  anything of it is removed — save a file no memory entry names, such as one
-  a restart left unloaded (`dnagent.md` SH7 says which): the sweep (Teardown
-  by sweep) removes its object's resources by name in that pass, and such a
-  file stays until a later restart decodes it and finds the pointer absent.
-  The agent keeps no record of the object afterwards because it needs none:
-  the sweep finds the object's resources by their names, and a record kept
-  until they were gone would be a record of work owed — the very thing that
-  lets a failed teardown be forgotten.
+  (Agent local-store paths, Bitmap push protocol) and, on a cn, a cntlr's
+  torn marks at `LocalTornPath` while it holds one, which the startup
+  reconcile loads (`cnagent.md` CN14). While the store's disk refuses
+  writes, a node's read also saves a probe file at `LocalDnProbePath` or
+  `LocalCnProbePath`, which nothing loads (`dnagent.md` DN18). Every write
+  goes to a temp file in the same dir, fsync, rename, fsync the dir (until
+  then a crash can undo the rename). A request whose save fails is refused
+  (Revision gate below) and its file left as it was, save when only that
+  last fsync failed, after the rename put the refused request in place
+  (`dnagent.md` SH5). A write that does not succeed can leave its temp file
+  behind, as one whose process dies between the write and the rename does
+  (`osclient.md`, ReadFile / WriteFile / WriteFileDirect, lists every way).
+  The committed file is the only truth: the next start deletes such a file
+  unread (`dnagent.md` SH6), since what it held was never committed and the
+  worker sends again whatever the committed files lack. The stored request
+  contains the revision, so no separate revision record exists. In memory
+  each side's and each cntlr's current request is an atomic pointer, so
+  another object's pass reads it whole beside the converge that replaces it;
+  a node's request is replaced only under the node write lock. On start the
+  agent loads every other request, chunk and torn marks file of its role's
+  kinds under its prefix and reconciles the system to it (full idempotent
+  re-apply; for a clone, Clone metadata durability), its gRPC listener
+  already open and the agent answering that it is starting until that
+  reconcile ends (`dnagent.md` SH1, SH33) — except that it skips, neither
+  loading nor deleting them, the files that may belong under a file it
+  cannot load: a file that did not load names no object, so it proves no
+  owner gone (`dnagent.md` DN2 and `cnagent.md` CN2 say which files that
+  holds back). When an object disappears from its parent's pointer list, the
+  agent drops its file or files, its chunk files, its in-memory entry and
+  its object lock in that same pass, **before** anything of it is removed —
+  save a file no memory entry names, such as one a restart left unloaded
+  (`dnagent.md` SH7 says which): the sweep (Teardown by sweep) removes its
+  object's resources by name in that pass, and such a file stays until a
+  later restart decodes it and finds the pointer absent. The agent keeps no
+  record of the object afterwards because it needs none: the sweep finds the
+  object's resources by their names, and a record kept until they were gone
+  would be a record of work owed — the very thing that lets a failed
+  teardown be forgotten.
 * **Revision gate.** A `Syncup*` request with a revision **lower** than
   the stored one is rejected (`AgentReply.code` non-zero, `details`
   explains). Equal revision: re-apply idempotently (workers retry).
@@ -4297,27 +4299,30 @@ its pad bits in the middle of the chunk and shift every later bit. So
   accepted (`dnagent.md` SH5, SH9). `Push*Bitmap` carries no
   revision and passes no such gate; Bitmap push protocol says why.
 * **Conf gate.** Agents resolve no conf defaults of their own (Common
-  validation): a geometry an agent invented is one the rest of the
-  cluster does not share, and dm, md and the on-disk headers would be
-  built against it. A request carrying a value the control plane cannot
-  have written — `SyncupDn`'s `extent_size` zero; a zero among the three
-  always present defaultable members of `SyncupCntlr`'s `bdev_conf` plus
-  the `bitmap_chunk_block_cnt` that exists only under an md-raid1
-  `redund_conf`; or `SyncupSide`'s `side_conf.zero_bytes` zero, not a
-  multiple of `DnZeroAlign`, or longer than the side's `ext_cnt` extents
-  (Side provisioning protocol; `dnagent.md` DN8) — is refused with its
-  own `AgentReply.code` (`ReplyCodeInvalidConf`, `dnagent.md` SH9)
-  **after** the revision gate and **before** the request is persisted or
-  becomes the desired state, so nothing converges, nothing is persisted,
-  and the restart reconcile cannot replay it; the reply echoes the revision the
-  agent still holds, so the worker sees the request was not accepted. A
-  persisted file carrying such a value never becomes live either, and
-  both roles get there the same way: the file is **loaded**, never
-  skipped, and refused inside the converge, which then converges and
-  sweeps nothing of that DN and its sides, of that side, or of that
-  cntlr — a conf fault must not destroy resources (`dnagent.md` DN2 says
-  why skipping the file instead would, and DN8 what still runs for a
-  refused side; `cnagent.md` CN8).
+  validation): a geometry an agent invented is one the rest of the cluster
+  does not share, and dm, md and the on-disk headers would be built against
+  it. A request carrying a value the control plane does not write —
+  `SyncupDn`'s `extent_size` zero; a zero among the three always present
+  defaultable members of `SyncupCntlr`'s `bdev_conf` plus the
+  `bitmap_chunk_block_cnt` that exists only under an md-raid1 `redund_conf`;
+  on a cn, an NQN of `nqn_to_subsystem`, an allowed host or a clone's
+  `src_nqn` that breaks the NQN rule, or a clone `src_nqn` in the dnv
+  namespace that decodes as no transfer NQN, which an older gateway took
+  (Common validation; `cnagent.md` CN8; Upgrade in lockstep); or
+  `SyncupSide`'s `side_conf.zero_bytes` zero, not a multiple of
+  `DnZeroAlign`, or longer than the side's `ext_cnt` extents (Side
+  provisioning protocol; `dnagent.md` DN8) — is refused with its own
+  `AgentReply.code` (`ReplyCodeInvalidConf`, `dnagent.md` SH9) **after** the
+  revision gate and **before** the request is persisted or becomes the
+  desired state, so nothing converges, nothing is persisted, and the restart
+  reconcile cannot replay it; the reply echoes the revision the agent still
+  holds, so the worker sees the request was not accepted. A persisted file
+  carrying such a value never becomes live either, and both roles get there
+  the same way: the file is **loaded**, never skipped, and refused inside
+  the converge, which then converges and sweeps nothing of that DN and its
+  sides, of that side, or of that cntlr — a conf fault must not destroy
+  resources (`dnagent.md` DN2 says why skipping the file instead would, and
+  DN8 what still runs for a refused side; `cnagent.md` CN8).
 * **Full sync.** Every `Syncup*` request carries the complete desired
   state of its object — there is no partial mode.
   `SyncupDn.side_pointer_list` and `SyncupCn.cntlr_pointer_list` are
@@ -5429,18 +5434,19 @@ a td: thin rows are only ever filled by a cntlr acting as primary, and the
 ids live in the shared pool metadata on the DN legs. When an accepted
 reply's thin rows for a td cover exactly the SP's slices, every row
 `RES_STATUS_OK`, the worker sets `ThinDevice.created`, sets
-`ThinDevice.torn` in the same put when any reply of the same drain marks
-the td torn, keeping a mark set before, and bumps `SpRev` (`dnv-worker.md`
-RW19, MD6); a reply that marks a td torn that no reply of its drain
-completes has the worker set `ThinDevice.torn` alone, with a bump of its
-own (Thin devices). The bump re-fans
-the SP, which is how `created` reaches the cn agent (`cnagent.md` CN14).
-It cannot loop: the re-sync's reply, reporting the same rows `OK`, finds
-no candidate. The flip is idempotent and observation-driven, so a worker
-restart or a shard-ownership change (Membership and shard ownership) needs
-no recovery step: the new owner's first round on a Check stream carries
-the complete `*Info`, any torn mark the agent still holds included, and
-the first later reply the worker judges — a `Syncup*` reply that round
+`ThinDevice.torn` in the same put when any reply of the same drain marks the
+td torn, keeping a mark set before, and bumps `SpRev` (`dnv-worker.md` RW19,
+MD6); a reply that marks a td torn that the drain's created flip does not
+take (one whose loaded record already reads `created`, whatever the replies'
+rows, or one no reply of the drain completes) has the worker set
+`ThinDevice.torn` alone, with a bump of its own (Thin devices). The bump
+re-fans the SP, which is how `created` reaches the cn agent (`cnagent.md`
+CN14). It cannot loop: the re-sync's reply, reporting the same rows `OK`,
+finds no candidate. The flip is idempotent and observation-driven, so a
+worker restart or a shard-ownership change (Membership and shard ownership)
+needs no recovery step: the new owner's first round on a Check stream
+carries the complete `*Info`, any torn mark the agent still holds included,
+and the first later reply the worker judges — a `Syncup*` reply that round
 brings, or the first round that answers from an observation made after it
 (`dnv-worker.md` HL7) — flips whatever is complete and still false.
 
@@ -7216,19 +7222,25 @@ and Upgrade in lockstep.
 **The udev rules.** Every node that runs a dnv agent carries the udev rules
 of `deploy/udev/`, which keep the system's own rules off what dnv builds and
 off what a host writes into it; each keys on a dnv name, so a node's own
-devices keep their stock handling:
+devices keep their stock handling, as long as none of them has a dm name
+that starts as the dm rule's key does (below):
 
 * the dm rule, `58-dnv-dm.rules`, ordered after the device mapper's own
-  rules, which set a device's name: for a dm device whose name carries
+  rules, which set a device's name: for a dm device whose name starts with
   `DmPrefix` and a dash it sets the flags that keep the disk rules (udev's
   content probe and the links by content), the other rules (lvm2's and
   bcache's) and the persistent-storage rules off, with no watch, so a host's
   data in a thin volume, a raid0 or a side is never probed. It never sets
   the flag that drops the device's `/dev/mapper` link, which the agents use.
-  Whether systemd then reads the device as ready, its device unit active,
-  depends on its version's rules, as systemd 255's mark a flagged device not
-  ready on its add event alone; nothing dnv runs waits for a dm device's
-  unit or mounts one, so either way costs nothing.
+  It keys on that start alone, not on the whole form of dnv's dm names, so a
+  node names no dm device of its own so: no LVM volume group named
+  `DmPrefix`, or starting with it and a dash, since dm names the group's
+  volumes with that start; such a device would lose its content probe and
+  its links by uuid and label. Whether systemd then reads the device as
+  ready, its device unit active, depends on its version's rules, as systemd
+  255's mark a flagged device not ready on its add event alone; nothing dnv
+  runs waits for a dm device's unit or mounts one, so either way costs
+  nothing.
 * the md assembly mask, `63-dnv-md.rules` (md assembly, below).
 * the md array rule, `63-zz-dnv-md-array.rules`, ordered after the stock
   "63-md-raid-arrays.rules", which reads an md array's name, probes its

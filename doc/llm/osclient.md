@@ -528,10 +528,10 @@ deletes through it too, in chunks, one call per volume (`cnagent.md` CN14).
 
 ### DialTcp
 
-How the cn agent tests a side's address before it runs `nvme connect`
-(`cnagent.md` CN10): a TCP connect in the agent's own process, which an
-address that does not answer meets without taking the kernel's one
-fabrics connect at a time.
+How the cn agent tests a side's or a clone source's address before it
+runs `nvme connect` (`cnagent.md` CN10): a TCP connect in the agent's own
+process, which an address that does not answer meets without taking the
+kernel's one fabrics connect at a time.
 
 * It takes one semaphore slot, checks the ctx error after acquiring it,
   and dials with the caller's timeout; it gives the slot back as soon as
@@ -546,8 +546,9 @@ fabrics connect at a time.
   own, and the call returns at once, sending no byte. Reason: nvmet-tcp
   logs an error for a connection that closes before the target has set its
   queue up, and a dial before every connect must not write an error on the
-  disk node; one held that long closes in silence. The hold takes no slot,
-  and nobody waits for it.
+  target's node, a disk node or the node that exports a clone's source, a
+  controller node's transfer among them; one held that long closes in
+  silence. The hold takes no slot, and nobody waits for it.
 * One `os dial` record covers the call (`log.md`, OS commands and file
   IO).
 

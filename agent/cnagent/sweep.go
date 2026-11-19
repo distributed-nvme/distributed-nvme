@@ -1278,12 +1278,13 @@ func (s *CnAgentServer) parkStep(
 
 // unwantedNsAna moves every unwanted namespace of the chain to the
 // inaccessible ANA group before the park: one dropped under a subsystem that
-// stays, and every namespace of a subsystem that left the request, listed
-// for it. nvmet refuses IO to an inaccessible group, so from the move on no
-// new host IO reaches the ns-dev the park suspends — the order the planned
-// park has too (parkNsDev). A move or a listing that fails is logged and
-// stops nothing: the park still completes or errors the IO in flight, and
-// its own result is what the chain stops on.
+// stays, and every namespace of an unwanted subsystem (one that left the
+// request, or every one at SP_LEVEL_DISABLE), listed for it. nvmet refuses
+// IO to an inaccessible group, so from the move on no new host IO reaches
+// the ns-dev the park suspends — the order the planned park has too
+// (parkNsDev). A move or a listing that fails is logged and stops nothing:
+// the park still completes or errors the IO in flight, and its own result
+// is what the chain stops on.
 func (s *CnAgentServer) unwantedNsAna(ctx context.Context, chain *cnChain) {
 	for _, ref := range chain.nvmetNs {
 		s.setAnaLogged(ctx, ref.nqn, ref.nsid)
@@ -1416,14 +1417,15 @@ func (s *CnAgentServer) releaseBelow(
 // for a namespace that left the desired state, and its td may be leaving in
 // the same pass.
 //
-// An ns-dev's park target is the CN16 one wherever the live table still says
-// what it is: an ns-dev mapping a kind-c4 raid0 names its td in that raid0's
-// own name, and the td's kind-c5 dm-error carries the same ids. Where it does
-// not — a table this build never wrote, an ns-dev over a dm-clone whose td
-// cannot be read back, or a transfer device, whose shape off service is an
-// error table of its size (CN17) — the device is reloaded onto an error
-// target of its own size instead, which is the same thing one indirection
-// shorter. When the load onto the td's dm-error fails, the plain error table
+// An ns-dev's park target is the CN16 one where the live table still says
+// what it is: an ns-dev that is a dm-linear over a kind-c4 raid0 names its td
+// in that raid0's own name, and the td's kind-c5 dm-error, when it reads
+// present, carries the same ids. Anywhere else — a table this build never
+// wrote, the dm-flakey of a read-only ns-dev, an ns-dev over a dm-clone whose
+// td cannot be read back, a raid0 whose td's dm-error is missing or does not
+// read, or a transfer device, whose shape off service is an error table of
+// its size (CN17) — the device is reloaded onto an error target of its own
+// size instead, which is the same thing one indirection shorter. When the load onto the td's dm-error fails, the plain error table
 // is loaded at once: an error target names no device, so a dm-error that went
 // or changed its number since the read cannot fail it.
 //
@@ -2677,10 +2679,12 @@ func (s *CnAgentServer) sweepCntlr(
 // the stack a deferred build holds back on purpose, no thin row whose pool
 // has lost its thin id (RES_REASON_THIN_ID_LOST) or holds a thin id the
 // agent does not adopt for a new volume (RES_REASON_THIN_ID_NOT_ADOPTED), no
-// pool row that reads
-// needs_check (RES_REASON_POOL_NEEDS_CHECK) or failed
-// (RES_REASON_POOL_FAILED), and no row of a transfer
-// whose origin the request no longer names, none of which a converge cures.
+// pool row that reads needs_check (RES_REASON_POOL_NEEDS_CHECK) or failed
+// (RES_REASON_POOL_FAILED), and no row of a transfer whose origin the
+// request no longer names, none of which a converge cures, save a new volume
+// refused because its header read failed: a later converge reads the
+// headers again and can then build it, and a read names that volume absent
+// (probeThin), so the re-send comes every second round at most.
 // A transfer's dm-linear rests on its origin's raid0 only where the
 // transfer is served (xferServed): elsewhere it is an error table, which
 // rests on nothing. The rest of the rows of legs, groups and clones, and

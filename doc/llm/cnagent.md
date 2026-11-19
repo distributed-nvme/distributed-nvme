@@ -17,10 +17,10 @@ transfers and the clones, the level gating and the reply), the sweep,
 and the read-only verdict. The mechanism both roles share — bootstrap and
 lifecycle, the local store, the revision and conf gates, the lock
 hierarchy, `ResInfo` tracking, the OS wrappers, the bitmap-chunk store,
-the check-stream rules and the observations (SH1 to SH30) — and the
-`cmd/dnv-agent` command
-(CM1 to CM4) are `dnagent.md`'s and are not restated here. This document
-leans on `dnagent.md` for them, on `log.md`, `osclient.md` and `grpc.md`
+the check-stream rules and the observations (SH1 to SH33) — and the
+`cmd/dnv-agent` command, the node check and the gather included (CM1 to
+CM6), are `dnagent.md`'s and are not restated here. This document leans
+on `dnagent.md` for them, on `log.md`, `osclient.md` and `grpc.md`
 for the logging, OS-access and interceptor rules, on `schema.proto` for
 the service and its messages, and on `architecture.md` for the
 controller-node device stacks and the on-leg layout, the names, the common
@@ -38,14 +38,16 @@ arrays, thin pools, dm and nvmet objects to build and when. It may import
 `common`, `pb` and `agent` (`layout.md`, Dependency rules). Everything
 mechanism-shaped that both roles use lives in `agent` (`dnagent.md`, Scope
 and placement, states the split rule) and is reused verbatim. Tooling only
-the cn role runs — mdadm, the thin-metadata reader — is not promoted into
-`agent`: by the same split rule a wrapper with a single role is role code
-and lives in `agent/cnagent/` (`md.go`, `thinbm.go`). There is no LVM
-anywhere in dnv (`architecture.md`, [D14]), and the CN keeps no clone's
-metadata: a clone keeps its dm-clone metadata on its clone meta group, on
-DNs (CN18). Agents never talk to etcd (`layout.md`, Dependency rules). The
-gRPC server carries the server interceptors and the message limit of
-`grpc.md`, Wiring; the cn agent's outbound connections are its
+the cn role runs — mdadm's array commands, the thin-metadata reader — is
+not promoted into `agent`: by the same split rule a wrapper with a single
+role is role code and lives in `agent/cnagent/` (`md.go`, `thinbm.go`).
+The mdadm version read, which the cn start record and both roles' node
+checks share, is `agent`'s (`MdadmVersion`; `dnagent.md`, Files). There is
+no LVM anywhere in dnv (`architecture.md`, [D14]), and the CN keeps no
+clone's metadata: a clone keeps its dm-clone metadata on its clone meta
+group, on DNs (CN18). Agents never talk to etcd (`layout.md`, Dependency
+rules). The gRPC server carries the server interceptors and the message
+limit of `grpc.md`, Wiring; the cn agent's outbound connections are its
 `nvme connect`s and the TCP dial before each (CN10), never gRPC.
 
 ## The cn's part of the shared packages
@@ -68,13 +70,21 @@ and comments `common/constants.go` holds:
   of the leg's meta region (`architecture.md`, Group on-leg layout: meta
   region, data region, health block): the payload is the magic, the writer
   id and a timestamp, never interpreted on read (`architecture.md`, [D6]).
-* `CnConnectPassBudget`, `CnConnectRetryPause`, `CnNsScanPause` and
-  `CnNsHeadPause`, the connect step's one wait budget per converge pass
-  (CN10, CN18), shared by every leg and clone source of the pass and drawn
-  on by exactly three things: a failed connect's own elapsed time, the
-  pause before each in-pass retry, and the steps of the wait for the
-  namespace head after a connect this pass made, with a pause of its own
-  while a picked head is not complete (CN10).
+* `CnConnectPassBudget`, `CnConnectRetryPause`, `CnNsScanPause`,
+  `CnNsHeadPause` and `CnConnectDialTimeout`, the connect step's one wait
+  budget per converge pass (CN10, CN18), shared by every leg and clone
+  source of the pass and drawn on by exactly three things: a failed
+  attempt's own elapsed time, its dial and its `nvme connect`; the pause
+  before each in-pass retry; and the steps of the wait for the namespace
+  head after a connect this pass made, with a pause of its own while a
+  picked head is not complete. `CnConnectDialTimeout` bounds the dial
+  before each attempt, half as much again as the budget (CN10).
+* `CnSubsysOrphanGrace`, the age under which the node-level sweep leaves
+  alone a subsystem that has no namespace device, no allowed host and no
+  port link and that no held cntlr request claims (CN21).
+* `CnThinDiscardChunkBytes` and `CnThinDiscardPassChunks`, the chunk size
+  of the primary's discard of a deleted volume and how many chunks one
+  pass sends over all its volumes (CN14).
 
 Two dm kinds in the cn namespace are the cn's own — `DmKindCnLeg`, the
 leg wrapper; `DmKindCnGrp`, the `RedundNone` group device — with their
@@ -803,28 +813,30 @@ build phase — and runs on every converge:
 1. **ANA.** Every namespace of the plan whose desired "ana_grpid" is
    `AnaGrpIdInaccessible` — a suspended one, a standby's, a deferred one,
    one at `SP_LEVEL_DISABLE` (CN16), and every transfer namespace the
-   same — is moved there first,
-   probe-first. The loop is over the plan, not over the wanted set, and
-   the difference is the whole of `SP_LEVEL_DISABLE`: `wantAny` is false
-   there, so the wanted set holds no namespace and no subsystem at all,
-   the chain takes the subsystems whole, and L1 never writes a
-   per-namespace "ana_grpid" before the rmdir — this pre-step is that
-   level's only ANA move. It is the old primary's first step of
+   same — is moved there first, probe-first. The loop is over the plan,
+   not over the wanted set, and the difference is the whole of
+   `SP_LEVEL_DISABLE`: `wantAny` is false there, so the wanted set holds
+   no namespace and no subsystem at all, the chain takes the subsystems
+   whole, and L1 writes no per-namespace "ana_grpid" before the rmdir.
+   CN21's P0 moves every namespace of each unwanted subsystem, but only
+   on a pass whose listings all answered, so this pre-step is that
+   level's only move on a stopped sweep, and the one that comes before
+   pre-steps 2 and 3 and the build. It is the old primary's first step of
    `architecture.md`, Failover, and it precedes the park below for the
    reason given there: the host is told to stop using the path before the
    path stops working. The move reads the namespace's group alone
    (`Nvmet.NsAnaGrpId`) and is tried even when that read does not answer:
    inaccessible is the safe direction. A move that fails is only logged,
-   and no later step of the pass tries it again: the namespace stays in the
+   and no later step of the pass tries it again, short of P0 at
+   `SP_LEVEL_DISABLE` on a pass that removes: the namespace stays in the
    group it had, over a ns-dev the same pass may park, as a demotion's
    does, whose IO then fails; its row reads `RES_STATUS_OK` with
-   `RES_REASON_DIFFERS`, and the
-   converge's own verdict names it (CN30), so the worker sends the
-   `SyncupCntlr` again and its pre-step 1 moves it. It is also the one
-   pre-step a converge still runs
-   when an unanswered listing has stopped its sweep (CN21): it removes
-   nothing, and the build phase that follows parks ns-devs whether or not
-   the sweep ran (CN16), so the move has to come first there too.
+   `RES_REASON_DIFFERS`, and the converge's own verdict names it (CN30),
+   so the worker sends the `SyncupCntlr` again and its pre-step 1 moves
+   it. It is also the one pre-step a converge still runs when an
+   unanswered listing has stopped its sweep (CN21): it removes nothing,
+   and the build phase that follows parks ns-devs whether or not the sweep
+   ran (CN16), so the move has to come first there too.
 2. **Park of a planned ns-dev.** A `CnNsDevName` of the plan whose CN16
    backing is its td's `CnErrorName` (rules 0 to 4), or whose live table
    still maps a device this pass is about to remove, is reloaded onto
@@ -1041,10 +1053,12 @@ and the pass marks its address dead in the pass's plan: every later
 attempt of the pass at that address, at another leg's side or at a clone
 source's endpoint, fails at once with the dial's error, and takes no
 place, dials nothing and draws nothing. So a disk node whose machine is
-down costs a pass one dial timeout whatever the count of its legs, and its
-legs read `RES_STATUS_ERROR` with the dial's text. The mark goes with the
-plan: the next pass dials again. Only a `DialTransport` side is dialled; a
-side of another transport is connected with no dial.
+down costs a pass at most one dial timeout, whatever the count of its
+sides the pass tries to connect, and each such leg reads
+`RES_STATUS_ERROR` with the dial's text; a leg that still holds its
+controller to that node, connecting, is not dialled (Known limits). The
+mark goes with the plan: the next pass dials again. Only a `DialTransport`
+side is dialled; a side of another transport is connected with no dial.
 
 **No converge in the background.** A connect failure marks that leg
 `RES_STATUS_ERROR`, and nothing in the agent runs the converge again by
@@ -2988,8 +3002,11 @@ pass. An id that maps blocks is not adopted: the row reads
 `RES_STATUS_ERROR` with the reason `RES_REASON_THIN_ID_NOT_ADOPTED` and the
 blocks in its details, and no thin volume is built over it. An id that maps
 none is adopted, and the `dmsetup create` that follows decides; so it does
-for an id the headers do not list at all, which the create's message did
-not make and the thin table's create then refuses. A reserve refused
+for an id the headers do not list at all: one the create's message did not
+make, which the thin table's create then refuses, or, since one read serves
+the whole slice for the pass, one that a later volume's create message,
+killed by the soft timeout after the kernel carried it out, made after the
+read, a new empty id that the create then attaches. A reserve refused
 because a metadata snapshot is already held, after CN25's release and
 retry, is a wait: the row reads `RES_STATUS_MISSING` with the refusal's
 text and no reason, which the converge's verdict names, so the worker's
@@ -4476,47 +4493,50 @@ dnv-format dn kinds, which never reach that arm.
 
 **P0, before every layer, the park step.** First every unwanted namespace
 moves to `AnaGrpIdInaccessible` — one dropped under a subsystem that stays,
-and every namespace of a subsystem that left the request, listed for it —
-so nvmet refuses new host IO to it, the order a planned park has too
-(CN16). Then every suspended dm device of ours that the live dm tables
-below an unwanted ns-dev or transfer device of the chain lead to is
-resumed, on whatever table is live, children before their parent; the walk
-ends at an md array, whose members it does not read (Known limits). Then
-each unwanted ns-dev and each unwanted transfer device is parked. A park
-has no plan — nothing wanted names the device, and its td may be leaving in
-the same pass — so it is derived from the device's own live table. For an
-ns-dev only one backing names a td: a raid0 (`CnRaid0Name`), whose ids are
-also its td's dm-error's (`CnErrorName`), so there the target is CN16's
-own. Anywhere else — a table this build never wrote, an ns-dev over a
-dm-clone, a transfer device, whose shape off service is an error table of
-its size (CN17) — the device is reloaded onto an error table of its own
-size, which is the same thing one indirection shorter; a load onto the td's
-dm-error that fails is followed at once by the plain error table, since an
-error target names no device that can have gone since the read. A device
-already parked is left alone but resumed if it is suspended. Each step
-matters: L1's disable of an nvmet namespace waits, unkillable, for every
-request in flight on it, and a suspended dm device under it never completes
-one, so the pass would hold its CN1 locks in the kernel for as long as the
-device stays so; the reload's own flushing suspend is what completes the
-in-flight host IO instead of replaying it at resume onto a stack that is
-about to go; and a suspended device below holds the IO that suspend waits
-for. Nothing on a controller node stays suspended across passes on purpose
-(`architecture.md`, Namespace suspend semantics), so a suspended device of
-ours below — a raid0, a thin volume — was left so by a reload or a quiesce
-that failed or was cut off, and a bare resume releases its IO where it was
-going, as the dn's P0 does (`dnagent.md` DN6). One `dmsetup info` listing
-of the node comes first, and when it answered whole and reads no device of
-ours suspended but the ones being parked, no table below is read: the
-common case costs one command whatever the stacks' depth. **A device the
-park cannot prove out of suspension stops the chain before L1**, as a layer
-that left something behind does: proved out means absent, never suspended,
-or its reload or resume went through; a `dmsetup info` that did not answer
-proves nothing, nor does a suspended device whose table did not read, as a
-bare resume would replay its IO onto the stack being retired (CN16). The
-layers below report their objects untouched, so the reply names the device,
-and the converge the worker's re-send brings (`dnv-worker.md` RW4) parks it
-again. A failed ANA move, or a failed read or resume below, stops nothing:
-the park's own result is what the chain stops on.
+and every namespace of an unwanted subsystem (one that left the request, or
+every one at `SP_LEVEL_DISABLE`), listed for it — so nvmet refuses new host
+IO to it, the order a planned park has too (CN16). Then every suspended dm
+device of ours that the live dm tables below an unwanted ns-dev or transfer
+device of the chain lead to is resumed, on whatever table is live, children
+before their parent; the walk ends at an md array, whose members it does not
+read (Known limits). Then each unwanted ns-dev and each unwanted transfer
+device is parked. A park has no plan — nothing wanted names the device, and
+its td may be leaving in the same pass — so it is derived from the device's
+own live table. For an ns-dev only one backing names a td: a raid0
+(`CnRaid0Name`), whose ids are also its td's dm-error's (`CnErrorName`), so
+there the target is CN16's own when the ns-dev is a dm-linear over that
+raid0 and the td's dm-error reads present. Anywhere else — a table this
+build never wrote, the dm-flakey of a read-only ns-dev, an ns-dev over a
+dm-clone, a raid0 whose td's dm-error is missing or does not read, a
+transfer device, whose shape off service is an error table of its size
+(CN17) — the device is reloaded onto an error table of its own size, which
+is the same thing one indirection shorter; a load onto the td's dm-error
+that fails is followed at once by the plain error table, since an error
+target names no device that can have gone since the read. A device already
+parked is left alone but resumed if it is suspended. Each step matters: L1's
+disable of an nvmet namespace waits, unkillable, for every request in flight
+on it, and a suspended dm device under it never completes one, so the pass
+would hold its CN1 locks in the kernel for as long as the device stays so;
+the reload's own flushing suspend is what completes the in-flight host IO
+instead of replaying it at resume onto a stack that is about to go; and a
+suspended device below holds the IO that suspend waits for. Nothing on a
+controller node stays suspended across passes on purpose (`architecture.md`,
+Namespace suspend semantics), so a suspended device of ours below — a raid0,
+a thin volume — was left so by a reload or a quiesce that failed or was cut
+off, and a bare resume releases its IO where it was going, as the dn's P0
+does (`dnagent.md` DN6). One `dmsetup info` listing of the node comes first,
+and when it answered whole and reads no device of ours suspended but the
+ones being parked, no table below is read: the common case costs one command
+whatever the stacks' depth. **A device the park cannot prove out of
+suspension stops the chain before L1**, as a layer that left something
+behind does: proved out means absent, never suspended, or its reload or
+resume went through; a `dmsetup info` that did not answer proves nothing,
+nor does a suspended device whose table did not read, as a bare resume would
+replay its IO onto the stack being retired (CN16). The layers below report
+their objects untouched, so the reply names the device, and the converge the
+worker's re-send brings (`dnv-worker.md` RW4) parks it again. A failed ANA
+move, or a failed read or resume below, stops nothing: the park's own result
+is what the chain stops on.
 
 **Layers, strictly top-down.** Within one sp's chain:
 
@@ -4896,8 +4916,9 @@ and its `CmdSoftTimeout` bound: metadata too large to dump inside the bound
 fails a sweep the same way it fails a bitmap read; an armed activation
 sweep retries on later converges, and the sweep after a failed delete does
 not (CN14). The header read skips the mappings, so only a pool whose thin
-devices alone outgrow the bound fails it, and a read that fails refuses the
-id (CN14).
+devices alone outgrow the bound fails it, and a read that fails so, or for
+any cause but a metadata snapshot already held, refuses the id; a held
+snapshot makes the volume wait for the worker's re-send (CN14).
 
 CN26. `GetThinDeviceBm`: from the `slice_idx` pool's dump, the mapping
 bitmap of the td's thin volume (its `dev_id` looked up in the stored
@@ -5614,60 +5635,60 @@ rendered, why a probe that did not answer and a transport attribute that
 differs while a subsystem is linked name nothing, and why neither the
 `SyncupCn` reply nor the observation a converge stores carries them.
 
-A cntlr's verdict, on a converge and on a read alike, also names each row
-of the pass, of a dm device or nvmet object the cntlr's converge builds
-from devices of its own node, that is not as the desired state wants it
-while every row it is built on reads `RES_STATUS_OK` (`cntlrRowVerdict`;
+A cntlr's verdict, on a converge and on a read alike, also names each row of
+the pass, of a dm device or nvmet object the cntlr's converge builds from
+devices of its own node, that is not as the desired state wants it while
+every row it is built on reads `RES_STATUS_OK` (`cntlrRowVerdict`;
 `dnagent.md` SH31): the concats over their groups' arrays, the thin pools
-over their concats, the thin volumes over their pools, the td's
-dm-error, the raid0s over their thin volumes, the ns-devs over the
-device their backing names, the subsystems, the namespaces over their
-ns-dev and subsystem, and a transfer's dm-linear — over its origin's
-raid0 where the transfer is served (`xferServed`, CN17), over nothing
-where its device is an error table — its subsystem and its namespace
-over both; and, by tests of their own (below), the leg wrappers, the
-`RedundNone` groups' dm-linears and the dm-clones. It names a row that
-reads `RES_STATUS_MISSING` with no reason as "absent", and one that reads
-`RES_STATUS_ERROR`, or `RES_STATUS_OK` with `RES_REASON_DIFFERS` (a
-namespace that serves and whose ANA group differs, or a thin pool short of
-its metadata device or holding a metadata snapshot, CN13), as "differs". It
-names no row the level suppresses, no `RES_STATUS_PROVISIONING` row, no
-thin row a converge marks `RES_REASON_THIN_ID_LOST` or
-`RES_REASON_THIN_ID_NOT_ADOPTED` (CN14), no pool row that
-reads needs_check or failed (`RES_REASON_POOL_NEEDS_CHECK`,
-`RES_REASON_POOL_FAILED`, CN13), no subsystem
-whose link fails because the node's port is not there ("the port is not
-there", which the CN's verdict names), no concat the agent refuses to
-shrink, and no row of a transfer whose origin the request no longer
-names: no converge of the cntlr cures those. Nor does it name the rows of
-a snapshot not yet created while a slice that is not deferred lacks its
-thin device, or the read of one does not answer (`snapsLackingADevice`):
-a converge then runs CN14's pre-pass, which suspends the origin to make
-the missing ids, so a re-send on every round that a create fails would
-stall the origin's host IO on every round. A read names the snapshot
-itself instead, while the pre-pass would send a message (CN14,
-`snapshotDue`), a name only a read gives, so a create that keeps failing
-brings a converge every second round at most. A re-send the cntlr gets
-for another of its rows runs that pre-pass all the same. For a snapshot whose devices
-are all there the pre-pass sends no message and suspends nothing, and its
-rows are named like any other's. A concat the agent refuses to
-shrink reads the refusal on both channels. A read
-cannot tell a thin id the pool has lost from a volume not built yet, and
-names the volume (Known limits). Reason for the rows it is built on: a
-stack over a group whose array does not run waits for that array, which
-the names of an absent array to start, of a broken array to assemble
-again and of a forced start (below) cover, and the member rules once it
-runs; and over a broken layer of its own only that layer is named, the
-lowest, whose converge builds the rest. Reason for leaving out the rest
+over their concats, the thin volumes over their pools, the td's dm-error,
+the raid0s over their thin volumes, the ns-devs over the device their
+backing names, the subsystems, the namespaces over their ns-dev and
+subsystem, and a transfer's dm-linear — over its origin's raid0 where the
+transfer is served (`xferServed`, CN17), over nothing where its device is an
+error table — its subsystem and its namespace over both; and, by tests of
+their own (below), the leg wrappers, the `RedundNone` groups' dm-linears and
+the dm-clones. It names a row that reads `RES_STATUS_MISSING` with no reason
+as "absent", and one that reads `RES_STATUS_ERROR`, or `RES_STATUS_OK` with
+`RES_REASON_DIFFERS` (a namespace that serves and whose ANA group differs,
+or a thin pool short of its metadata device or holding a metadata snapshot,
+CN13), as "differs". It names no row the level suppresses, no
+`RES_STATUS_PROVISIONING` row, no thin row a converge marks
+`RES_REASON_THIN_ID_LOST` or `RES_REASON_THIN_ID_NOT_ADOPTED` (CN14), no
+pool row that reads needs_check or failed (`RES_REASON_POOL_NEEDS_CHECK`,
+`RES_REASON_POOL_FAILED`, CN13), no subsystem whose link fails because the
+node's port is not there ("the port is not there", which the CN's verdict
+names), no concat the agent refuses to shrink, and no row of a transfer
+whose origin the request no longer names: no converge of the cntlr cures
+those, save a new volume refused because its header read failed: a later
+converge reads the headers again and can then build it (CN14), and a read
+names that volume absent, so the worker's re-send runs the header read again
+every second round at most, not on every round. Nor does it name the rows of
+a snapshot not yet created while a slice that is not deferred lacks its thin
+device, or the read of one does not answer (`snapsLackingADevice`): a
+converge then runs CN14's pre-pass, which suspends the origin to make the
+missing ids, so a re-send on every round that a create fails would stall the
+origin's host IO on every round. A read names the snapshot itself instead,
+while the pre-pass would send a message (CN14, `snapshotDue`), a name only a
+read gives, so a create that keeps failing brings a converge every second
+round at most. A re-send the cntlr gets for another of its rows runs that
+pre-pass all the same. For a snapshot whose devices are all there the
+pre-pass sends no message and suspends nothing, and its rows are named like
+any other's. A concat the agent refuses to shrink reads the refusal on both
+channels. A read cannot tell a thin id the pool has lost from a volume not
+built yet, and names the volume (Known limits). Reason for the rows it is
+built on: a stack over a group whose array does not run waits for that
+array, which the names of an absent array to start, of a broken array to
+assemble again and of a forced start (below) cover, and the member rules
+once it runs; and over a broken layer of its own only that layer is named,
+the lowest, whose converge builds the rest. Reason for leaving out the rest
 of the legs', groups' and clones' rows, the paths and the arrays: their
-state rests on a remote end, and a new syncup does not cure a disk node
-that is gone;
-the rules below name what a converge can do for them. A converge's own
-code names these rows from its build, so a step whose command failed or
+state rests on a remote end, and a new syncup does not cure a disk node that
+is gone; the rules below name what a converge can do for them. A converge's
+own code names these rows from its build, so a step whose command failed or
 was cut off by its own deadline (`dnagent.md` SH15), a resume that failed
-and an ANA move that failed bring the
-`SyncupCntlr` again on the next round, and the read after a converge whose
-call was cut off names what the converge left undone.
+and an ANA move that failed bring the `SyncupCntlr` again on the next round,
+and the read after a converge whose call was cut off names what the converge
+left undone.
 
 A leg's wrapper and a `RedundNone` group's dm-linear are named by tests of
 their own, which the converge shares, and not by their rows' status, since
@@ -6368,7 +6389,7 @@ stores instead is CN23's.
   namespace device, no allowed host and no port link, that no held request
   names — is removed by the node-level sweep once it is older than
   `CnSubsysOrphanGrace`, whatever its model (CN21). The introduction's
-  requirements keep subsystems that are not dnv's off a controller node.
+  requirements keep such a subsystem off a controller node.
 * A clone's bitmap apply takes time that grows with its ranges: its
   create, resume or reload and a build that finds hydration off (CN18 step
   4) and a push of a changed chunk (CN22) apply the whole skip set under

@@ -35,11 +35,12 @@ const (
 )
 
 // Store is the agent's local store (SH4-SH7): per object, the last
-// Syncup*Request saved for it, plus one file per received Push*Bitmap chunk,
-// all under the --local-store prefix; Save says when each is saved. Writes go
-// through OsClient.WriteProto (atomic replace); reads through ReadProto. It
-// keeps two states over every save, SaveFailing and Refusal, and while the
-// second holds a node's read saves a probe file through Probe (DN18).
+// Syncup*Request saved for it, plus one file per received Push*Bitmap chunk
+// and, on a cn, a cntlr's torn marks, all under the --local-store prefix;
+// Save says when each is saved. Writes go through OsClient.WriteProto
+// (atomic replace); reads through ReadProto. It keeps two states over every
+// save, SaveFailing and Refusal, and while the second holds a node's read
+// saves a probe file through Probe (DN18).
 type Store struct {
 	oc     common.OsClient
 	prefix string
@@ -232,8 +233,9 @@ func cutOff(err error) bool {
 		errors.Is(err, context.DeadlineExceeded)
 }
 
-// SaveFailing reports whether the latest Save failed, of a request or of a
-// chunk, whichever object it was for; the first Save that succeeds ends it.
+// SaveFailing reports whether the latest Save failed, of a request, of a
+// chunk or, on a cn, of a torn marks file, whichever object it was for; the
+// first Save that succeeds ends it.
 // While it holds, a syncup that the gates admit as it arrives marks its own
 // object alone and cancels no read (SH30): the worker re-sends every round a
 // request the agent refused for a failed save, and each re-send would
@@ -301,9 +303,9 @@ func (s *Store) Row(t *ResTracker) *pb.ResInfo {
 // began, and then removes the file, so that it keeps none of the room it
 // proved; a refused probe keeps Refusal and gives it the probe's error; a
 // cut-off one changes nothing. It never touches SaveFailing, which waits for a
-// Save of a request or a chunk to hold (SH30): a re-sent request whose save
-// fails would otherwise cancel each round's reads, a probe that holds clearing
-// the state between two of them.
+// Save of a request, a chunk or a torn marks file to hold (SH30): a re-sent
+// request whose save fails would otherwise cancel each round's reads, a probe
+// that holds clearing the state between two of them.
 func (s *Store) Probe(ctx context.Context, path string) error {
 	s.mu.Lock()
 	refused, refusals := s.refused, s.refusals

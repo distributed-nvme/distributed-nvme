@@ -820,8 +820,10 @@ and `CnGlobal`, with these differences: `CreateControllerNode` calls
 which needs no `ClusterConf` because a CN capacity key carries no bin index
 (`architecture.md`, Capacity index keys), so `DeleteControllerNode` and
 `UpdateControllerNodeDisabled` run no `model.ValidateClusterConf` (GW11);
-`InspectControllerNode` calls `GetCnInfo`. The same six RPCs: create,
-delete, get, list, update-disabled and inspect.
+`InspectControllerNode` calls `GetCnInfo`, which takes no `read_io_stats`,
+and its reply carries no block counters: a controller node's counters are
+per cntlr, in `InspectCntlr`. The same six RPCs: create, delete, get, list,
+update-disabled and inspect.
 
 ### Storage pools and GrowSlice
 

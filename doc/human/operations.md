@@ -1008,10 +1008,13 @@ release:
 - `58-dnv-dm.rules` keeps the system's rules off every device mapper device
   of dnv, whose name starts with `dnv-`. Such a device holds what hosts
   wrote, and the node must never read that as a file system, an LVM volume,
-  an md array or a cache. The device keeps its name under `/dev/mapper`,
-  which dnv uses. Some versions of systemd show such a device as not ready.
-  That does no harm: dnv mounts nothing on it and waits for no systemd
-  device unit.
+  an md array or a cache. The rule reads the name's start alone, so the
+  node must have no device mapper device of its own whose name starts with
+  `dnv-`, such as a volume of an LVM volume group named `dnv` or `dnv-…`:
+  such a device would lose its links by uuid and label. A device of dnv's
+  keeps its name under `/dev/mapper`, which dnv uses. Some versions of
+  systemd show a device of dnv's as not ready. That does no harm: dnv
+  mounts nothing on it and waits for no systemd device unit.
 - `63-dnv-md.rules` keeps the system's md assembly off the members of
   dnv's RAID1 arrays, so that only dnv assembles them. It reads the md
   superblock of version 1.2, the only one dnv writes, so a superblock of
@@ -1053,13 +1056,16 @@ Safe steps, before the node's first dnv agent starts:
    sudo udevadm control --reload
    ```
 
-2. Check that udev takes the files:
+2. Check that udev takes the files, on systemd 254 or newer, the first
+   whose udevadm has the `verify` command:
 
    ```
    sudo udevadm verify /etc/udev/rules.d/58-dnv-dm.rules /etc/udev/rules.d/63-dnv-md.rules /etc/udev/rules.d/63-zz-dnv-md-array.rules
    ```
 
-   It must report every file as a success.
+   It must report every file as a success. On systemd 253 skip this step:
+   the node check reads the files
+   ([Check a node before it joins](#check-a-node-before-it-joins)).
 3. lvm2. In the `devices` section of `/etc/lvm/lvm.conf`, set a global
    filter that accepts the node's own physical volumes and rejects every
    other device. For a node whose only physical volume is `/dev/vda3`:

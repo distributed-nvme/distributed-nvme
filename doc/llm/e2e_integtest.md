@@ -729,9 +729,10 @@ dm-clone, its create or the resume of a namespace device above it, can
 outlast the agent's command timeout, as it waits for udev's reads, which go
 through the source, and the converge of the `SyncupCntlr` the worker
 re-sends on the next round, which the converge's own name of the failed step
-brings, then finishes the build (`cnagent.md` CN16, CN18, CN30), so the case
-waits for the dm-clone to serve before it reads a count; the destination's
-namespace exists, suspended, before the clone, as in a live migration
+brings, then finishes the build (`cnagent.md` CN16, CN18, CN30), and whether
+one still can with the rule in place is not measured, so the case waits for
+the dm-clone to serve before it reads a count; the destination's namespace
+exists, suspended, before the clone, as in a live migration
 (`architecture.md`, Transfer + clone = cross-SP live migration), and the
 case logs the host's wait at the clone's creation — the time from the create
 to host0 reading that namespace optimized, and within it, when a poll sees

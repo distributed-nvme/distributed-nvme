@@ -401,13 +401,16 @@ no clone reads through it.
 Node settings: on every disk node and controller node, the three udev rules
 in the release's `deploy/udev/` folder, which keep the system's own md
 assembly, LVM scan and bcache off the devices dnv builds and off what hosts
-write into them, on disk nodes too, since a controller node's md
-superblocks reach their devices through the side exports; the rules need
-systemd 253 or newer; lvm2 set to read only the node's own physical
-volumes; `AUTO -all` in `/etc/mdadm/mdadm.conf`, after an ARRAY line for
-each md array of the node's own, so that md assembles by itself only
-those; and, on a controller node, the node's own file systems mounted by
-device path, never by a label or a uuid a tenant could copy.
+write into them, on disk nodes too, since a controller node's md superblocks
+reach their devices through the side exports; the rules need systemd 253 or
+newer; no device-mapper device of the node's own whose name starts with
+`dnv-`, such as a volume of an LVM volume group named `dnv` or `dnv-…`,
+since dnv's udev rule keeps the system's own rules off every such device;
+lvm2 set to read only the node's own physical volumes; `AUTO -all` in
+`/etc/mdadm/mdadm.conf`, after an ARRAY line for each md array of the node's
+own, so that md assembles by itself only those; and, on a controller node,
+the node's own file systems mounted by device path, never by a label or a
+uuid a tenant could copy.
 [The operations doc](operations.md#install-the-udev-rules-on-a-node) has
 the steps. The tutorials install the udev rules, and mask the nvmf-connect
 unit, so that nvme-stas is the only program that connects to what a

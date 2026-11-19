@@ -31,10 +31,11 @@ migration procedure, the levels, the cntlid slots and the decisions [D4],
 
 Agents never talk to etcd (`layout.md`, Dependency rules). The gRPC server
 carries the **server** interceptors and the message limit of `grpc.md`,
-Wiring, and no client interceptors — the agent's only outbound connections
-are `nvme connect`s, not gRPC. The split rule for new code: anything both
-roles need verbatim is mechanism and belongs in `agent`; anything that knows
-*which* resource to build is policy and belongs in `dnagent` or `cnagent`.
+Wiring, and no client interceptors — the agent's outbound connections are
+its `nvme connect`s and, on a cn, the TCP dial before each (`cnagent.md`
+CN10), never gRPC. The split rule for new code: anything both roles need
+verbatim is mechanism and belongs in `agent`; anything that knows *which*
+resource to build is policy and belongs in `dnagent` or `cnagent`.
 
 ## Shared mechanism — package `agent`
 
@@ -1463,26 +1464,27 @@ starting, such a read would end only between two re-sends, none would
 while a read takes longer than that, and the observations of sides and
 cntlrs with no fault would go too old (`dnv-worker.md` HL7).
 
-While the store's latest save failed, of a request or a chunk, whatever its
-object (`Store.SaveFailing`, SH4), a syncup that marks its object as it
-arrives marks that object alone and cancels no read, its own object's
-included, whatever its revision: a node-level syncup marks no node. It then
-waits for its locks behind the reads that hold them, each of which runs
-bounded commands (SH13): a `SyncupSide` or `SyncupCntlr` behind its object's
-read, a node-level syncup behind every read that holds the node read lock
-when it asks for it, as one at the held revision does (above). A syncup a
-gate refuses as it arrives still marks nothing. The first save that succeeds
-ends the state; the probe of DN18 leaves it as it is. Reason: the worker
-re-sends a request refused for a failed save round after round (SH5), as it
-re-sends one a gate refuses, and nothing knows before the save that the
-request will be refused; a cancel on each re-send would stop the reads of
-every round that brings one, so the observations of objects with no fault
-would go too old (`dnv-worker.md` HL7) and their health epochs would go on
-and off. The state is the outcome of the latest save, not a reading of the
-disk: a save that fails because its call was cancelled or the SH4 bound ran
-out sets it on a healthy disk as a full or read-only one does. It records no
-work owed and starts no retry. The second state of SH4, which only the store
-row and its probe read (DN18), plays no part here.
+While the store's latest save failed, of a request, a chunk or, on a cn, a
+torn marks file, whatever its object (`Store.SaveFailing`, SH4), a syncup
+that marks its object as it arrives marks that object alone and cancels no
+read, its own object's included, whatever its revision: a node-level syncup
+marks no node. It then waits for its locks behind the reads that hold them,
+each of which runs bounded commands (SH13): a `SyncupSide` or `SyncupCntlr`
+behind its object's read, a node-level syncup behind every read that holds
+the node read lock when it asks for it, as one at the held revision does
+(above). A syncup a gate refuses as it arrives still marks nothing. The
+first save that succeeds ends the state; the probe of DN18 leaves it as it
+is. Reason: the worker re-sends a request refused for a failed save round
+after round (SH5), as it re-sends one a gate refuses, and nothing knows
+before the save that the request will be refused; a cancel on each re-send
+would stop the reads of every round that brings one, so the observations of
+objects with no fault would go too old (`dnv-worker.md` HL7) and their
+health epochs would go on and off. The state is the outcome of the latest
+save, not a reading of the disk: a save that fails because its call was
+cancelled or the SH4 bound ran out sets it on a healthy disk as a full or
+read-only one does. It records no work owed and starts no retry. The second
+state of SH4, which only the store row and its probe read (DN18), plays no
+part here.
 
 A background converge attempt, the DN12 fence timer's alone (the cn runs
 none, `cnagent.md` CN10), marks its object before it waits for the
@@ -2148,82 +2150,82 @@ probe-first (SH16), building `DnInfo` as it goes:
   apart: a size read that did not answer still lets the format below run,
   and a block size read that did not answer does not.
 * **the [D13] disk format.** Read the header block. Magic absent ⇒ the disk
-  is blank, and it is formatted only when this pass's read found its
-  logical block size 512 (DN3): otherwise the converge writes nothing to
-  the disk and `meta_info` is `RES_STATUS_ERROR` with details "blank disk
-  header; refusing to format" and DN3's refusal, or the read's error, and
-  the next converge whose read answers 512 formats it. Reason: the format
-  is where a disk enters use, and DN3's reason holds for every side carved
-  from it. A disk already formatted converges as it would at 512, whatever
-  its block size reads now, and nothing of it is removed: a loop device set
-  up again with `-b` over the same file holds the same table and the same
-  sides' data, which stay in place with the sides' devices for the
-  operator's fix and for a by-hand recovery. Until the device reads 512
-  again, by DN3's reason, its legs serve no controller node reliably: md
+  is blank, and it is formatted only when this pass's read found its logical
+  block size 512 (DN3): otherwise the converge writes nothing to the disk
+  and `meta_info` is `RES_STATUS_ERROR` with details "blank disk header;
+  refusing to format" and DN3's refusal, or the read's error, and the next
+  converge whose read answers 512 formats it. Reason: the format is where a
+  disk enters use, and DN3's reason holds for every side carved from it. A
+  disk already formatted converges as it would at 512, whatever its block
+  size reads now, and nothing of it is removed: a loop device set up again
+  with `-b` over the same file holds the same table and the same sides'
+  data, which stay in place with the sides' devices for the operator's fix
+  and for a by-hand recovery. Until the device reads 512 again, by DN3's
+  reason, its legs serve no controller node reliably: in an md-raid1 pool md
   on the controller node refuses them or fails them, and leg repair moves
-  them (Known limits). Its `disk_info` reads DN3's refusal, an `ERROR` row, so
-  the worker sets the node's `err_epoch`, which takes its capacity key and
-  so every new side away from it (`dnv-worker.md` HL1; `architecture.md`,
-  Capacity index keys), until the operator sets the device up again at
-  512. Nor is a blank disk formatted
-  while a side device or clone-metadata wrapper maps it — the only devices
-  dnv builds on the disk itself: a `dmsetup ls`, then a `dmsetup table` of
-  every `DnSideName` and
-  `DnMigrMetaDmName` on the node, whatever cluster or dn the name carries,
-  compared against the disk's device number. A header can go blank under
-  live side devices (one mistaken write over its header block is enough),
-  and a fresh, empty table would hand their extents to the next side, which
-  zeroes the part it must and serves them as its own. So while one of them
-  maps the disk, or while any of those reads does not answer, the converge
-  writes nothing to the disk and `meta_info` is `RES_STATUS_ERROR` with
-  details "blank disk header; refusing to format" and the cause. This dn's
-  DN6 sweep removes its own such devices once nothing wants them. A device
-  named for another cluster or dn is not its to remove: while one maps the
-  disk, the disk stays blank, `meta_info` names the first device that maps
-  it and the DN's code is `ReplyCodeLeftover` (DN6's record step), in
-  every `SyncupDn`'s reply and every observation of the DN, until an
-  operator removes it. Nor is a blank disk formatted while the local
-  store holds a side at `provisioned` true, read afresh from the store's
-  side files (`Store.Paths`), or while that listing or one of those files
-  does not answer or does not decode; the converge's `meta_info` then
+  them; a `RedundNone` pool has neither md nor leg repair (`dnv-worker.md`
+  AR8), so its leg stays so until the operator sets the device up at 512
+  again (Known limits). Its `disk_info` reads DN3's refusal, an `ERROR` row,
+  so the worker sets the node's `err_epoch`, which takes its capacity key
+  and so every new side away from it (`dnv-worker.md` HL1;
+  `architecture.md`, Capacity index keys), until the operator sets the
+  device up again at 512. Nor is a blank disk formatted while a side device
+  or clone-metadata wrapper maps it — the only devices dnv builds on the
+  disk itself: a `dmsetup ls`, then a `dmsetup table` of every `DnSideName`
+  and `DnMigrMetaDmName` on the node, whatever cluster or dn the name
+  carries, compared against the disk's device number. A header can go blank
+  under live side devices (one mistaken write over its header block is
+  enough), and a fresh, empty table would hand their extents to the next
+  side, which zeroes the part it must and serves them as its own. So while
+  one of them maps the disk, or while any of those reads does not answer,
+  the converge writes nothing to the disk and `meta_info` is
+  `RES_STATUS_ERROR` with details "blank disk header; refusing to format"
+  and the cause. This dn's DN6 sweep removes its own such devices once
+  nothing wants them. A device named for another cluster or dn is not its to
+  remove: while one maps the disk, the disk stays blank, `meta_info` names
+  the first device that maps it and the DN's code is `ReplyCodeLeftover`
+  (DN6's record step), in every `SyncupDn`'s reply and every observation of
+  the DN, until an operator removes it. Nor is a blank disk formatted while
+  the local store holds a side at `provisioned` true, read afresh from the
+  store's side files (`Store.Paths`), or while that listing or one of those
+  files does not answer or does not decode; the converge's `meta_info` then
   names the side, the file, or the store directory whose listing failed.
   Reason: dm devices do not survive a reboot, so after one a header blanked
   by a stray write has no device over it, while the stored sides still say
-  the disk held their records; a format would take away the by-hand
-  recovery of the old table and hand its extents to the next side. Sides
-  not provisioned never refuse, since they hold no data yet. A DN's list
-  of side pointers never refuses either, since a new disk's first
-  `SyncupDn` can bring a list before any side is stored; it only lets pass
-  a stored side that a DN this agent holds no longer lists, such as one
-  whose state file the drop could not delete (SH7), which no one wants any
-  more. While the format is refused the disk stays blank, so DN6's record
-  step names it and the DN's code is `ReplyCodeLeftover`, as under a live
-  device. Once no side device or clone-metadata wrapper maps the disk, and
-  every side file of the store decodes and is either not provisioned or a
-  side that a DN this agent holds no longer lists, the next converge whose
-  reads all answer and whose block size read answers 512 formats. The
-  format writes slot A with an empty table
-  at the first
-  sequence number **first**, then the header (a fresh `format_uuid` from
-  the kernel's random source, the request's `cluster_id`, `dn_id` and
-  `extent_size`, and the three layout fields; the two envelopes, what each
-  holds and what makes a slot a candidate are `architecture.md`, Disk
-  node's) — slot-A-before-header is what lets a load read a valid header
-  with no valid slot as corruption, since a crash between the two writes
-  leaves an inert slot rather than a header with no table. Magic present
-  but version or CRC wrong ⇒ **error**, and every later operation errors
-  too — a corrupt header is never formatted over, and neither is one
-  written under another version of the format: such a disk is refused
-  until it is re-created. A header whose three layout fields are not this
-  build's constants (`DnDataOffset`, `DnCloneMetaOffset`,
+  the disk held their records; a format would take away the by-hand recovery
+  of the old table and hand its extents to the next side. Sides not
+  provisioned never refuse, since they hold no data yet. A DN's list of side
+  pointers never refuses either, since a new disk's first `SyncupDn` can
+  bring a list before any side is stored; it only lets pass a stored side
+  that a DN this agent holds no longer lists, such as one whose state file
+  the drop could not delete (SH7), which no one wants any more. While the
+  format is refused the disk stays blank, so DN6's record step names it and
+  the DN's code is `ReplyCodeLeftover`, as under a live device. Once no side
+  device or clone-metadata wrapper maps the disk, and every side file of the
+  store decodes and is either not provisioned or a side that a DN this agent
+  holds no longer lists, the next converge whose reads all answer and whose
+  block size read answers 512 formats. The format writes slot A with an
+  empty table at the first sequence number **first**, then the header (a
+  fresh `format_uuid` from the kernel's random source, the request's
+  `cluster_id`, `dn_id` and `extent_size`, and the three layout fields; the
+  two envelopes, what each holds and what makes a slot a candidate are
+  `architecture.md`, Disk node's) — slot-A-before-header is what lets a load
+  read a valid header with no valid slot as corruption, since a crash
+  between the two writes leaves an inert slot rather than a header with no
+  table. Magic present but version or CRC wrong ⇒ **error**, and every later
+  operation errors too — a corrupt header is never formatted over, and
+  neither is one written under another version of the format: such a disk is
+  refused until it is re-created. A header whose three layout fields are not
+  this build's constants (`DnDataOffset`, `DnCloneMetaOffset`,
   `DnCloneMetaSize`) is refused the same way, naming the field, its value
   and the constant (`parseDnHeader`): every reader takes the layout from the
   constants, so such a disk would be read and written at the wrong places.
-  Every disk any build formatted carries the constants. Magic present and valid ⇒ verify `cluster_id`,
-  `dn_id` and `extent_size` match; a mismatch is a "foreign disk" error
-  naming both identities, and the disk is **never** overwritten.
-  `extent_size` is therefore immutable for the life of a format. A re-call
-  on an already-converged disk issues **zero** writes (SH16).
+  Every disk any build formatted carries the constants. Magic present and
+  valid ⇒ verify `cluster_id`, `dn_id` and `extent_size` match; a mismatch
+  is a "foreign disk" error naming both identities, and the disk is
+  **never** overwritten. `extent_size` is therefore immutable for the life
+  of a format. A re-call on an already-converged disk issues **zero** writes
+  (SH16).
 
   The identity check is what makes the volume table this node's to build on
   and to change: handing out a record it already holds (`AllocSide`,
@@ -4464,17 +4466,18 @@ else reported through `agent_reply` is still a protocol-level refusal.
   as a loop device set up again with `-b 4096` over the same file does,
   keeps its table, its sides' devices and their data (DN5), but until the
   device reads 512 again its legs serve no controller node reliably, as
-  DN3's reason has it. A primary's per-CN namespace is enabled at the
-  side's larger blocks, and md on the controller node refuses to add a
-  member of larger blocks to its running array ("incompatible
-  logical_block_size").
-  A standby's per-CN namespace was enabled over its dm-error at 512, and
-  nvmet keeps a namespace's block size from its enable on, so after a
-  failover the reload onto the side leaves it at 512 over the larger
-  blocks, and md fails the leg on the first IO the disk refuses as not
-  aligned to its blocks. Leg repair then moves the legs (`dnv-worker.md`
-  AR8); the disk row's error names the fix, and the node takes no new side
-  meanwhile (DN5).
+  DN3's reason has it. A primary's per-CN namespace is enabled at the side's
+  larger blocks, and in an md-raid1 pool md on the controller node refuses
+  to add a member of larger blocks to its running array ("incompatible
+  logical_block_size"). A standby's per-CN namespace was enabled over its
+  dm-error at 512, and nvmet keeps a namespace's block size from its enable
+  on, so after a failover the reload onto the side leaves it at 512 over the
+  larger blocks, and there md fails the leg on the first IO the disk refuses
+  as not aligned to its blocks. Leg repair then moves an md-raid1 pool's
+  legs (`dnv-worker.md` AR8); a `RedundNone` pool's leg, which no leg repair
+  moves (`dnv-worker.md`, Known limits), serves unreliably until the
+  operator sets the device up at 512 again. The disk row's error names the
+  fix, and the node takes no new side meanwhile (DN5).
 * A migration's bitmap apply takes time that grows with its ranges: each
   push of a piece not held byte for byte applies the whole skip set under
   the side's DN1 locks (DN15), each

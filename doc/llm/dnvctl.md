@@ -166,18 +166,20 @@ the same shape as gatewayctl's: the reply is marshalled as protojson with
 proto field names and its unpopulated fields emitted (`marshalOpts`), then
 re-parsed through encoding/json and encoded again, so the document has
 sorted keys, stable spacing, proto field names, proto3 defaults visible and
-uint64 fields as JSON strings. The bitmap read, `td get-bm`, is the one
-deviation, because protojson renders a bytes field as base64: it prints a
-document of two keys, `bitmap_hex`, the
-bitmap as lowercase hex with no prefix, and `byte_cnt`, its length in bytes
+uint64 fields as JSON strings, save that a proto3 `optional` field that is
+not set, such as `probe_times.read_ms` after a failed write or
+`last_success_age_ms` before any round succeeded, is left out, as protojson
+leaves out every member of a oneof that is not set. The bitmap read,
+`td get-bm`, is the one deviation, because protojson renders a bytes field
+as base64: it prints a document of two keys, `bitmap_hex`, the bitmap as
+lowercase hex with no prefix, and `byte_cnt`, its length in bytes
 (`hexBitmapResult`). Nothing else is ever printed to stdout on an RPC path;
 cobra's stock help and completion write their text there too. There is no
-quiet or verbose mode.
-The emit path is the package's only caller of fmt.Print*, under the
-exemption `log.md` R1 makes for CLI results; the two error lines of CT5 are
-the package's only other direct writes, to stderr from `Execute`, and `ctl/`
-calls slog nowhere at all — the records CT7's Warn level silences are the
-client interceptors'.
+quiet or verbose mode. The emit path is the package's only caller of
+fmt.Print*, under the exemption `log.md` R1 makes for CLI results; the two
+error lines of CT5 are the package's only other direct writes, to stderr
+from `Execute`, and `ctl/` calls slog nowhere at all — the records CT7's
+Warn level silences are the client interceptors'.
 
 ### Errors and exit codes
 
@@ -530,11 +532,12 @@ pool stops its IO; the gateway allows it (`architecture.md`, Cntlrs), and
 dnvctl does not warn: the warning would need a pre-read of the pool's
 cntlrs, an RPC the operator did not type (CT8). `cntlr delete` has
 preconditions that are server state (`architecture.md`, Cntlrs); dnvctl
-checks none of them (CT8). `cntlr inspect` prints, beside the cntlr's
-rows, the `io_stats` the agent read at the call: each leg's and each
-namespace device's raw block counters and each leg's last probe round's
-times (`cnagent.md` CN23). They are counts since the device appeared, so
-a slow leg shows as the difference of two inspects a few seconds apart
+checks none of them (CT8). `cntlr inspect` prints, beside the cntlr's rows,
+the `io_stats` the agent read at the call: the raw block counters of each
+leg that has a wrapper and of each namespace device that serves IO, and, on
+the primary, each probed leg's last completed probe round's times
+(`cnagent.md` CN11, CN23). The counters count from when the device appeared,
+so a slow leg shows as the difference of two inspects a few seconds apart
 (`operations.md`, A slow leg).
 
 ### `td` — `ctl/td.go`

@@ -481,14 +481,17 @@ No case is known today.
   next id back. A new volume can take the id of an old volume. The primary
   then reads the pool's records of its thin ids, and refuses a new volume
   whose id holds data, or whose pool's records it cannot read: the volume
-  stays unbuilt and its row names the refusal. Two cases stay. A new snapshot can still take an old volume's id
-  and serve its data, since a snapshot's id always holds data. And a host
-  write to a new volume before it is recorded as created, then a failover,
-  makes the new primary refuse the volume's own id. Both stay inside one
-  pool. State: accepted. Procedure: [a new volume refused for a thin id
-  that holds data](operations.md#a-new-volume-refused-for-a-thin-id-that-holds-data),
-  which tells the two cases apart; section 7 has the restore's steps
-  known today. Not seen in the lab.
+  stays unbuilt and its row names the refusal. Two cases stay. A new
+  snapshot can still take an old volume's id and serve its data, since a
+  snapshot's id always holds data. And a host write to a new volume before
+  it is recorded as created, followed by anything that makes a primary
+  build the volume again before then (a failover, a reboot of the primary's
+  controller node, or a step of the pool's level down to `NO_THINPOOL` or
+  further and back), makes that primary refuse the volume's own id. Both
+  stay inside one pool. State: accepted. Procedure:
+  [a new volume refused for a thin id that holds data](operations.md#a-new-volume-refused-for-a-thin-id-that-holds-data),
+  which tells the two cases apart; section 7 has the restore's steps known
+  today. Not seen in the lab.
 - **Making the old primary the primary again right after a failed fence
   can write old data.** Silent. A fence that suspends the old primary's
   path and then fails to load the error target leaves that path suspended
@@ -640,10 +643,15 @@ Measured times are in [the introduction](introduction.md#status-and-limits-of-01
   node's connection to a clone's source whose name has dnv's prefix but is
   no transfer stays the same way once the clone has gone: the sweep never
   judges such a connection as a clone source. The gateway refuses such a
-  subsystem name, and the gateway and the cn agent refuse such a source for
-  a clone, so only a desired state written by hand, or one stored before
-  those checks, makes either. An operator removes it by hand. State:
-  accepted. Not seen in the lab.
+  subsystem name, so only a desired state written by hand, or one stored
+  before that check, makes one. Such a connection stays only where an
+  earlier build of the cn agent made it: this build refuses every desired
+  state of a cntlr that carries such a source, the stored one at the
+  agent's start included. So a pool whose stored clone carries one, as the
+  gateway of 0.1 allowed, takes no change, and a cntlr of that pool builds
+  nothing on its controller node after that node's reboot, until the clone
+  is deleted. An operator removes such a subsystem or connection by hand.
+  State: accepted. Not seen in the lab.
 - **A controller node's sweep removes two things that may be an
   operator's.** A subsystem that is not dnv's and has no namespace that
   names a device, no host and no port, once it is 30 s old: a build or a
@@ -700,27 +708,33 @@ Measured times are in [the introduction](introduction.md#status-and-limits-of-01
   between two, and the node's other cntlrs and sides go on. State:
   accepted. Not seen in the lab.
 - **A step only a check round names costs a converge every second check
-  round while the converge keeps failing it.** Some work is named only by
-  a check round, not by the converge's own answer: a leg to put back into
-  its array, an array to start, a forced start, a snapshot to make, the
-  start or stop of md's check, a connection to make again. The worker then
-  sends the syncup every second check round at most. When the check
-  round's test passes but the converge keeps failing, each such syncup
-  costs one converge that fails again. That happens when md keeps refusing
-  a change of the legs of a clone meta group's array, which a check round
-  does not try, so that it names the clone's dm-clone over that group;
-  when a program outside dnv holds an array open, so that md refuses to
-  stop it for a forced start or for a new assembly of a broken array; when
-  a leg that a migration moves serves on one path while its other path
-  cannot connect; when md keeps refusing to start or stop its check; when
-  the message that makes a snapshot keeps failing, each try of which
-  pauses the IO of the snapshot's origin for a moment; and when a slice's
-  thin pool has lost a volume's thin id, dm-thin's device number of the
-  volume inside the pool, which a check round cannot tell from a volume
-  not built yet, and which only an operator ends. Between two converges a
-  check round reads the cntlr anew, so the primary's check rounds still
-  count toward a failover. State: accepted; each case lasts only as long
-  as its fault. Not seen in the lab.
+  round while the converge keeps failing it.** Some work is named only by a
+  check round, not by the converge's own answer: a leg to put back into its
+  array, an array to start, a forced start, a snapshot to make, the start
+  or stop of md's check, a connection to make again. The worker then sends
+  the syncup every second check round at most. When the check round's test
+  passes but the converge keeps failing, each such syncup costs one
+  converge that fails again. That happens when md keeps refusing a change
+  of the legs of a clone meta group's array, which a check round does not
+  try, so that it names the clone's dm-clone over that group; when a
+  program outside dnv holds an array open, so that md refuses to stop it
+  for a forced start or for a new assembly of a broken array; when a leg
+  that a migration moves serves on one path while its other path cannot
+  connect; when md keeps refusing to start or stop its check; when the
+  message that makes a snapshot keeps failing, each try of which pauses the
+  IO of the snapshot's origin for a moment; when a slice's thin pool has
+  lost a volume's thin id, dm-thin's device number of the volume inside the
+  pool, which a check round cannot tell from a volume not built yet, and
+  which only an operator ends; and when the primary refuses a new volume's
+  thin id because the id holds data, or because the read of the pool's
+  records of its thin ids fails for a reason other than another read of
+  them that is running
+  ([a new volume refused for a thin id that holds data](operations.md#a-new-volume-refused-for-a-thin-id-that-holds-data)),
+  which a check round cannot tell from a volume not built yet either: each
+  converge reads those records again, until a read shows the id free or an
+  operator ends it. Between two converges a check round reads the cntlr
+  anew, so the primary's check rounds still count toward a failover. State:
+  accepted; each case lasts only as long as its fault. Not seen in the lab.
 - **A disk node or a clone source that stays away costs a converge every
   second check round once its connection is gone.** While a disk node is
   dead, the controller node's kernel keeps trying to connect to it again,
@@ -960,6 +974,17 @@ Measured times are in [the introduction](introduction.md#status-and-limits-of-01
   suspended, with no timer to end it. A syncup of the side, or a level
   step, ends it. Nothing in the wait can reach the data. State: accepted.
   Not seen in the lab.
+- **A leg's device left suspended under a RAID1 array can stop a
+  controller node's removals.** The cn agent puts a device mapper device
+  over each leg it connects. When a reload of that device fails, the
+  device can stay suspended under the leg's RAID1 array. The sweep resumes
+  suspended devices only down to an md array, so it does not resume this
+  one. md's writes to the leg then wait in it, and the removal of the
+  namespaces above the array fails each time the sweep runs. While the
+  cntlr still wants the leg, its next converge resumes the device. For a
+  pool that has left the controller node, nothing does, until an operator
+  runs `dmsetup resume` on that device. State: accepted. Not seen in the
+  lab.
 - **Worker membership windows.** Workers meet only in etcd. At every owner
   change two workers can drive the same pool, or none, for a few seconds.
   A worker learns of changes through streams from etcd. One whose stream

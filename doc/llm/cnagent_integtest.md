@@ -23,28 +23,29 @@ before redund builds its pool and the kick in its late flip
 the member in the lowest slot, which the worker's fence round rests on, no
 case pins: only `integtest/md_fence_order.sh` does (`layout.md`, Directory
 tree). It proves the happy path; error paths are out of scope but for the
-stale probe, the dead leg, a host's md, LVM and bcache signatures at an
-array's start and a newer md superblock at its legs' end, the promotion that
-outruns the sides' flip, md's refusal to start an array from one clean leg,
-md's check over sectors that fail reads, and over sectors that fail writes
-too, a repair's bad leg that does not serve, the leg that keeps the data
-dying while md copies onto a repair's new leg, where a forced start refuses
-the half-copied leg and starts from the leg that died, a take-back refused
-for a retired leg of another identity, a forced start that drops the named
-leg's bad-block list and one refused for a named leg older than a member it
-would zero, then forced, a broken array whose legs come back assembled again
-with no mark, a group whose array has run whose legs all read blank, the
-clone's source lost and given back, a new volume over a thin id that holds
-data, a snapshot torn by a primary stopped between its slices' steps, a disk
-node that dies under a host's writes, a disk node that leaves new
-connections unanswered, a node whose mdadm does not keep its degraded gate,
-an md array stalled under the gather, and the leftover, an accepted request
-reporting residue (`cnagent.md` CN20). The cases run in a fixed order,
-fail-fast — nodecheck, smoke, redund, repair, teardown, thinbm, torn,
-discard, clone_xfer, restart, pause — nodecheck building no pool and each
-other case under pool ids of its own, and each leaving nothing of its pools,
-a teardown per case and per stage that also keeps the run inside a DN's data
-area, which the cases together would overdraw.
+stale probe, the dead leg, a host's md, LVM, bcache and file system
+signatures at an array's start and a newer md superblock at its legs' end,
+the promotion that outruns the sides' flip, md's refusal to start an array
+from one clean leg, md's check over sectors that fail reads, and over
+sectors that fail writes too, a repair's bad leg that does not serve, the
+leg that keeps the data dying while md copies onto a repair's new leg, where
+a forced start refuses the half-copied leg and starts from the leg that
+died, a take-back refused for a retired leg of another identity, a forced
+start that drops the named leg's bad-block list and one refused for a named
+leg older than a member it would zero, then forced, a broken array whose
+legs come back assembled again with no mark, a group whose array has run
+whose legs all read blank, the clone's source lost and given back, a new
+volume over a thin id that holds data, a snapshot torn by a primary stopped
+between its slices' steps, a disk node that dies under a host's writes, a
+disk node that leaves new connections unanswered, a node whose mdadm does
+not keep its degraded gate, an md array stalled under the gather, and the
+leftover, an accepted request reporting residue (`cnagent.md` CN20). The
+cases run in a fixed order, fail-fast — nodecheck, smoke, redund, repair,
+teardown, thinbm, torn, discard, clone_xfer, restart, pause — nodecheck
+building no pool and each other case under pool ids of its own, and each
+leaving nothing of its pools, a teardown per case and per stage that also
+keeps the run inside a DN's data area, which the cases together would
+overdraw.
 
 Beside the suite, the Go tests of `agent/cnagent` run a real cn agent the way
 the dn agent's run (`dnagent_integtest.md`, Goal and scope), driven by a fake
@@ -1073,7 +1074,10 @@ wedges its removal, the namespace disable above it and any block scan
 mdadm's export, never by its scan, which prints no name on these guests;
 only a dnv-named one is stopped, but for an array over the loop devices of
 redund's md-refusal stage, which is found by what holds those devices,
-whatever its name or state, and stopped before they are detached.
+whatever its name or state, and stopped before they are detached, and, by
+the foreign stage's sweep, an array that holds an md array, one of that
+stage's scratch loop devices, or a member whose superblock names one of the
+stage's arrays.
 
 The wipe is a separate flag that runs no case. Kind-blind, it takes every
 dnv-named dm device, every dnv nvmet subsystem and md array, an array named
