@@ -768,7 +768,9 @@ primary reads each member the group keeps, its md superblock and md's view
 of it, and the reply adds each leg's row and health (`architecture.md`,
 Repairs). With `--leg` it is the dry run of `group force-start` from that
 leg, `--force` as that leaf's: the reply says what the start would do, or
-the refusal it would meet, and nothing runs. The dry run is this leaf and
+the refusal it would meet, and lists every refusal the force passes that
+the start's checks met, each with whether the request passes it; nothing
+runs. The dry run is this leaf and
 not a `--dry-run` of `group force-start`, since a leaf sends one RPC
 (CT1). dnvctl checks nothing (CT8).
 

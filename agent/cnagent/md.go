@@ -1891,6 +1891,11 @@ func markLegRows(
 // the assembly that started it.
 const msgForcedStart = "forced start"
 
+// msgForcedStartRefused is the Warn record of a forced start refused for
+// refusals no override of the mark passes (CN12): it names the group, the
+// leg and each such refusal whole, its kind's word first.
+const msgForcedStartRefused = "forced start refused"
+
 // forcedStartPass is ensureGroup's part while the group's forced-start mark
 // stands and no array of the group runs (CN12): an array of the group that
 // does not run — broken, or inactive — is stopped first (stopGroupArray),
@@ -2342,7 +2347,7 @@ func (s *CnAgentServer) forcedStartNamed(
 			return nil
 		}
 	}
-	fp, err := s.planForcedStart(ctx, gp, s.readAvailability(ctx, plan, gp))
+	fp, _, err := s.planForcedStart(ctx, gp, s.readAvailability(ctx, plan, gp))
 	if err != nil {
 		return nil
 	}
@@ -2370,54 +2375,101 @@ func (fp *forcedStartPlan) update() string {
 	return mdUpdateUuid
 }
 
+// forcedStartRefusal is one refusal of CN12's forced start that an
+// override passes: its kind and what it says.
+type forcedStartRefusal struct {
+	override pb.ForcedStartOverride
+	text     string
+}
+
+// forcedStartWords are the words that name each kind of refusal an override
+// passes, in a row's text and in the record of a refused start.
+var forcedStartWords = map[pb.ForcedStartOverride]string{
+	pb.ForcedStartOverride_FORCED_START_OVERRIDE_OLDER_LEG:  "older-leg",
+	pb.ForcedStartOverride_FORCED_START_OVERRIDE_BAD_BLOCKS: "bad-blocks",
+	pb.ForcedStartOverride_FORCED_START_OVERRIDE_PARTIAL:    "partial",
+}
+
+// forcedStartPasses reports whether the group's mark passes a refusal of
+// the kind override: the mark carries the operator's force, which passes
+// every kind.
+func forcedStartPasses(gp *grpPlan, override pb.ForcedStartOverride) bool {
+	return gp.mark.GetForce()
+}
+
+// forcedStartRefused is the group's error of a forced start whose checks
+// all held but for refusals the mark does not pass: its text names their
+// kinds first, each once, then each refusal, so a row cut to the text cap
+// keeps the kinds at its head (agent.CutAgentText).
+type forcedStartRefused struct {
+	refusals []forcedStartRefusal
+}
+
+func (e *forcedStartRefused) Error() string {
+	var words, texts []string
+	for _, r := range e.refusals {
+		if word := forcedStartWords[r.override]; !slices.Contains(words, word) {
+			words = append(words, word)
+		}
+		texts = append(texts, r.text)
+	}
+	return fmt.Sprintf("forced start refused (%s): %s",
+		strings.Join(words, ", "), strings.Join(texts, "; "))
+}
+
 // planForcedStart is the checks of CN12's forced start, with no mdadm
 // command and no write, for the mark the group's plan carries: the named
 // leg is a member the forced start keeps (forcedStartLegs), other than the
 // bad leg of a STARTED repair (isStartedBadLeg), available, and its
 // superblock read (ReadMember) answers and shows a full member, one md held
-// in a place with no copy position (mdSuperblock.notFullMember), and carries
-// no bad-block list unless the mark carries the operator's force
-// (badBlocksRefusal); every other
+// in a place with no copy position (mdSuperblock.notFullMember); every other
 // member the forced start keeps but the open repair's bad leg is available
-// and its read answers, each read before any is zeroed; and none of them is
-// a full member of the named leg's identity with a higher change count,
-// unless the mark carries the operator's force (olderNamedLeg). The first
-// check that does not hold is its error, the group's. The real start
-// (forceStartGroup) and the dry run of InspectGrp both run it, so a broken
-// check fails the tests of both.
+// and its read answers, each read before any is zeroed. The first of these
+// that does not hold is its error, the group's, and ends the checks. On the
+// way it meets the refusals an override passes and goes on past each: a
+// named leg that carries a bad-block list (badBlocksRefusal), and each other
+// member that is a full member of the named leg's identity with a higher
+// change count (olderNamedLeg). refusals are every such refusal met before
+// the checks ended, passed or not, in that order; when every check held and
+// the mark does not pass one of them (forcedStartPasses), the error is
+// forcedStartRefused, naming those. The real start (forceStartGroup) and
+// the dry run of InspectGrp both run it, so a broken check fails the tests
+// of both.
 func (s *CnAgentServer) planForcedStart(
 	ctx context.Context,
 	gp *grpPlan,
 	available map[uint64]bool,
-) (*forcedStartPlan, error) {
+) (*forcedStartPlan, []forcedStartRefusal, error) {
 	named, kept := gp.forcedStartLegs()
 	if named == nil && gp.isStartedBadLeg(gp.mark.GetLegId()) {
-		return nil, fmt.Errorf(
+		return nil, nil, fmt.Errorf(
 			"forced start names leg %#x, the bad leg of group %#x's "+
 				"started repair, which the finish retires",
 			gp.mark.GetLegId(), gp.grpId)
 	}
 	if named == nil {
-		return nil, fmt.Errorf(
+		return nil, nil, fmt.Errorf(
 			"forced start names leg %#x, which group %#x does not keep",
 			gp.mark.GetLegId(), gp.grpId)
 	}
 	if !available[named.legId] {
-		return nil, errForcedStartWaits(named)
+		return nil, nil, errForcedStartWaits(named)
 	}
 	reading := s.md.ReadMember(ctx, named.path)
 	if reading.Err != nil {
-		return nil, fmt.Errorf("forced start: leg %#x: %w", named.legId,
-			reading.Err)
+		return nil, nil, fmt.Errorf("forced start: leg %#x: %w",
+			named.legId, reading.Err)
 	}
 	sb := reading.Sb
 	if gap := sb.notFullMember(); gap != "" {
-		return nil, fmt.Errorf(
+		return nil, nil, fmt.Errorf(
 			"forced start: leg %#x is not a full member: %s",
 			named.legId, gap)
 	}
-	if refusal := badBlocksRefusal(gp, named, sb); refusal != "" {
-		return nil, errors.New(refusal)
+	var refusals []forcedStartRefusal
+	if text := badBlocksRefusal(named, sb); text != "" {
+		refusals = append(refusals, forcedStartRefusal{
+			pb.ForcedStartOverride_FORCED_START_OVERRIDE_BAD_BLOCKS, text})
 	}
 	fp := &forcedStartPlan{named: named, sb: sb, blank: map[uint64]bool{}}
 	for _, lp := range kept {
@@ -2425,23 +2477,32 @@ func (s *CnAgentServer) planForcedStart(
 			continue
 		}
 		if !available[lp.legId] {
-			return nil, errForcedStartWaits(lp)
+			return nil, refusals, errForcedStartWaits(lp)
 		}
 		other := s.md.ReadMember(ctx, lp.path)
 		if other.Err != nil {
-			return nil, fmt.Errorf("forced start: member leg %#x: %w",
-				lp.legId, other.Err)
+			return nil, refusals, fmt.Errorf(
+				"forced start: member leg %#x: %w", lp.legId, other.Err)
 		}
-		if refusal := olderNamedLeg(gp, named, sb, lp,
-			other.Sb); refusal != "" {
-			return nil, errors.New(refusal)
+		if text := olderNamedLeg(named, sb, lp, other.Sb); text != "" {
+			refusals = append(refusals, forcedStartRefusal{
+				pb.ForcedStartOverride_FORCED_START_OVERRIDE_OLDER_LEG, text})
 		}
 		fp.zero = append(fp.zero, lp)
 		if other.Sb == nil {
 			fp.blank[lp.legId] = true
 		}
 	}
-	return fp, nil
+	var refused []forcedStartRefusal
+	for _, r := range refusals {
+		if !forcedStartPasses(gp, r.override) {
+			refused = append(refused, r)
+		}
+	}
+	if len(refused) > 0 {
+		return nil, refusals, &forcedStartRefused{refusals: refused}
+	}
+	return fp, refusals, nil
 }
 
 // forceStartGroup is CN12's forced start, which replaces the assembly while
@@ -2467,7 +2528,19 @@ func (s *CnAgentServer) forceStartGroup(
 	walk *MdWalk,
 	available map[uint64]bool,
 ) error {
-	fp, err := s.planForcedStart(ctx, gp, available)
+	fp, _, err := s.planForcedStart(ctx, gp, available)
+	var refused *forcedStartRefused
+	if errors.As(err, &refused) {
+		texts := make([]string, 0, len(refused.refusals))
+		for _, r := range refused.refusals {
+			texts = append(texts, forcedStartWords[r.override]+": "+r.text)
+		}
+		slog.WarnContext(ctx, msgForcedStartRefused,
+			append(s.cntlrIdAttrs(plan),
+				slog.Uint64("grp_id", gp.grpId),
+				slog.Uint64("leg_id", gp.mark.GetLegId()),
+				slog.Any("refusals", texts))...)
+	}
 	if err != nil {
 		return err
 	}
@@ -2504,51 +2577,42 @@ func (s *CnAgentServer) forceStartGroup(
 }
 
 // badBlocksRefusal is CN12's refusal of a named leg that carries a bad-block
-// list, "" when none holds: the leg's superblock read shows a list and the
-// mark carries no force. The start drops the list (forcedStartPlan.update),
-// and md then serves the regions it listed as written, from what the leg
-// holds there — on a half-copied leg md marked in sync by mistake, the
-// regions it never copied, another pool's bytes among them. With the force
-// the drop is the operator's choice, which the inspect call's list length
-// and the dry run's update show first.
-func badBlocksRefusal(
-	gp *grpPlan,
-	named *legPlan,
-	namedSb *mdSuperblock,
-) string {
-	if gp.mark.GetForce() || namedSb.BadBlocks == 0 {
+// list, "" when the leg's superblock read shows none. The start drops the
+// list (forcedStartPlan.update), and md then serves the regions it listed
+// as written, from what the leg holds there — on a half-copied leg md
+// marked in sync by mistake, the regions it never copied, another pool's
+// bytes among them. Past it the drop is the operator's choice, which the
+// inspect call's list length and the dry run's update show first.
+func badBlocksRefusal(named *legPlan, namedSb *mdSuperblock) string {
+	if namedSb.BadBlocks == 0 {
 		return ""
 	}
-	return fmt.Sprintf("forced start: named leg %#x carries a bad-block "+
-		"list of %d entries, which the start drops, so md would serve the "+
-		"regions it lists as written; a forced start with force goes on",
-		named.legId, namedSb.BadBlocks)
+	return fmt.Sprintf("named leg %#x carries a bad-block list of %d "+
+		"entries, which the start drops, so md would serve the regions it "+
+		"lists as written", named.legId, namedSb.BadBlocks)
 }
 
 // olderNamedLeg is CN12's refusal of a named leg older than a member the
 // forced start would zero, "" when none holds: the other member is a full
-// member of the named leg's identity with a higher change count, and the
-// mark carries no force. Within one identity md raises the count on every
-// change of the array, so such a member holds newer data than the named
-// leg, which the zero and the copy from the named leg would lose; across
-// identities the counts mean nothing, and a member that is not full (a
-// half-copied one, a spare) holds no whole copy, so neither is compared.
+// member of the named leg's identity with a higher change count. Within one
+// identity md raises the count on every change of the array, so such a
+// member holds newer data than the named leg, which the zero and the copy
+// from the named leg would lose; across identities the counts mean nothing,
+// and a member that is not full (a half-copied one, a spare) holds no whole
+// copy, so neither is compared.
 func olderNamedLeg(
-	gp *grpPlan,
 	named *legPlan,
 	namedSb *mdSuperblock,
 	other *legPlan,
 	otherSb *mdSuperblock,
 ) string {
-	if gp.mark.GetForce() || otherSb == nil ||
-		otherSb.notFullMember() != "" || otherSb.Uuid != namedSb.Uuid ||
-		otherSb.Events <= namedSb.Events {
+	if otherSb == nil || otherSb.notFullMember() != "" ||
+		otherSb.Uuid != namedSb.Uuid || otherSb.Events <= namedSb.Events {
 		return ""
 	}
-	return fmt.Sprintf("forced start: leg %#x is a full member with md "+
-		"change count %d, above the %d of named leg %#x, so its newer "+
-		"data would be copied over; force goes on", other.legId,
-		otherSb.Events, namedSb.Events, named.legId)
+	return fmt.Sprintf("leg %#x is a full member with md change count %d, "+
+		"above the %d of named leg %#x, so its newer data would be copied "+
+		"over", other.legId, otherSb.Events, namedSb.Events, named.legId)
 }
 
 // forcedAssemble is the assembly of CN12's forced start (forceStartGroup):

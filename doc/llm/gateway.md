@@ -1605,8 +1605,9 @@ pool's repairs, retired legs and groups still answer.
   `SpRev`; with a leg in the request, it makes `ForceStartGroup`'s
   planning refusals of a write from that leg — the pool being deleted,
   the level, a clone being deleted, `forceStartLegChecks` — keeping the
-  first for the reply instead of failing the call (`forceStartRefusal`);
-  and it finds the primary and its CN (`grpPrimaryTarget`), a pool with
+  first for the reply instead of failing the call, and its refusal of a
+  partial leg, which the force passes, as a listed refusal
+  (`forceStartRefusal`); and it finds the primary and its CN (`grpPrimaryTarget`), a pool with
   none being `FAILED_PRECONDITION`. Then one connection to the primary's
   agent: `GetCntlrInfo`, for each leg's row, the report's stamp and the
   revision of the request the agent holds, and `InspectGrp` (`cnagent.md`
@@ -1615,9 +1616,14 @@ pool's repairs, retired legs and groups still answer.
   agent's read of it, or with no read when the agent's held request does
   not name it yet, its disk node and health epochs and its row; the
   array's state; the retired legs' ids; the stamp; both revisions; and
-  the dry run: the first planning refusal, else `ForceStartGroup`'s
-  judgement of the group's row (`grpRowRefusal`), each in the gateway's
-  own words, else the agent's dry run as the agent wrote it. Nothing is
+  the dry run (`inspectDryRun`): the first refusal `ForceStartGroup` would
+  answer — the first planning refusal, the partial leg when the request's
+  force does not pass it, then its judgement of the group's row
+  (`grpRowRefusal`) — in the gateway's own words with no zeroes, update or
+  stop, else the agent's dry run as the agent wrote it; and either way the
+  list of refusals the force passes, the partial leg's first, its text cut
+  to the row text cap as the agent cuts its own (`common.CutRowText`;
+  `architecture.md`, Live-state reporting), then the agent's. Nothing is
   written.
 * **UpdateRetiredLegKeep** — DeleteRetiredLeg's planning read with no conf
   gate, then `model.SetRetiredLegKeep` with the request's value, which

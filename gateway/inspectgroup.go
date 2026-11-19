@@ -6,6 +6,7 @@ import (
 
 	"google.golang.org/grpc/status"
 
+	"github.com/distributed-nvme/distributed-nvme/common"
 	"github.com/distributed-nvme/distributed-nvme/etcdutil"
 	"github.com/distributed-nvme/distributed-nvme/model"
 	"github.com/distributed-nvme/distributed-nvme/pb"
@@ -21,8 +22,11 @@ const notInRequest = "not read: the primary's held request does not name " +
 
 // inspectRecords is what InspectGroup's snapshot reads of a group: the
 // primary to ask, the pool's revision, each leg's record, in order, the
-// group's retired legs, and the first refusal ForceStartGroup would answer
-// from its planning read for the dry run's leg, nil when it has none.
+// group's retired legs, the first refusal no override passes that
+// ForceStartGroup would answer from its planning read for the dry run's
+// leg, nil when it has none, and its refusal of a partial leg, which an
+// override passes, its text whole as ForceStartGroup answers it, nil when
+// the leg carries no partial mark.
 type inspectRecords struct {
 	tgt          grpReportTarget
 	spRevision   uint64
@@ -30,6 +34,7 @@ type inspectRecords struct {
 	legs         map[uint64]*pb.Leg
 	retired      []uint64
 	startRefusal error
+	partial      *pb.ForcedStartRefusal
 }
 
 // InspectGroup is the InspectGroup of architecture.md, Repairs: a read-only
@@ -41,7 +46,9 @@ type inspectRecords struct {
 // primary (grpPrimaryTarget); with a leg in the request it makes the
 // refusals ForceStartGroup's planning read would make of a write from that
 // leg — a pool being deleted, the level, a clone being deleted, the leg —
-// keeping the first for the dry run instead of failing the call. Then two
+// keeping the first for the dry run instead of failing the call, and the
+// refusal of a partial leg, which an override passes, for the dry run's
+// list (inspectDryRun). Then two
 // calls to the primary's agent: GetCntlrInfo, for each leg's row, the
 // report's stamp and the revision of the request the agent holds, whose
 // group row ForceStartGroup's check of the array judges too
@@ -136,17 +143,54 @@ func (s *Server) InspectGroup(
 	if req.GetLegId() == 0 {
 		return reply, nil
 	}
-	refusal := rec.startRefusal
-	if refusal == nil {
-		refusal = grpRowRefusal(info, req.GetGrpId())
-	}
-	if refusal != nil {
-		// ForceStartGroup would write no mark, so nothing would be stopped.
-		reply.DryRun = &pb.ForcedStartDryRun{
-			Refusal: status.Convert(refusal).Message(),
-		}
-	}
+	reply.DryRun = inspectDryRun(rec, agentReply.GetDryRun(),
+		grpRowRefusal(info, req.GetGrpId()))
 	return reply, nil
+}
+
+// inspectDryRun is InspectGroup's dry run from the agent's (agentDry) and
+// the gateway's own refusals: the list of refusals an override passes holds
+// the gateway's partial mark first, its text cut to the row text cap as
+// the agent cuts its own (common.CutRowText), then the agent's list, as the
+// call meets the partial mark before it writes a mark and the agent the
+// rest after. The first refusal ForceStartGroup would answer, in its order — a
+// refusal of its planning read that no override passes, a partial mark the
+// request does not pass, the group's row in the report (rowRefusal) — is
+// the dry run's refusal, whole, word for word the call's, with no zeroes,
+// update or stop beside it, since the call would write no mark, so nothing
+// would be stopped; the agent's dry run stands otherwise.
+func inspectDryRun(
+	rec inspectRecords,
+	agentDry *pb.ForcedStartDryRun,
+	rowRefusal error,
+) *pb.ForcedStartDryRun {
+	list := agentDry.GetRefusalList()
+	if rec.partial != nil {
+		list = append([]*pb.ForcedStartRefusal{{
+			Override:   rec.partial.GetOverride(),
+			Text:       common.CutRowText(rec.partial.GetText()),
+			Overridden: rec.partial.GetOverridden(),
+		}}, list...)
+	}
+	refusal := ""
+	switch {
+	case rec.startRefusal != nil:
+		refusal = status.Convert(rec.startRefusal).Message()
+	case rec.partial != nil && !rec.partial.GetOverridden():
+		refusal = rec.partial.GetText()
+	case rowRefusal != nil:
+		refusal = status.Convert(rowRefusal).Message()
+	}
+	if refusal != "" {
+		return &pb.ForcedStartDryRun{Refusal: refusal, RefusalList: list}
+	}
+	return &pb.ForcedStartDryRun{
+		Refusal:       agentDry.GetRefusal(),
+		ZeroLegIdList: agentDry.GetZeroLegIdList(),
+		Update:        agentDry.GetUpdate(),
+		StopsArray:    agentDry.GetStopsArray(),
+		RefusalList:   list,
+	}
 }
 
 // inspectGroupChecks is InspectGroup's snapshot read (InspectGroup).
@@ -194,7 +238,7 @@ func inspectGroupChecks(
 		}
 	}
 	if req.GetLegId() != 0 {
-		rec.startRefusal = forceStartRefusal(stm, sc, loc, req)
+		rec.partial, rec.startRefusal = forceStartRefusal(stm, sc, loc, req)
 	}
 	rec.tgt, err = grpPrimaryTarget(stm, sc, spName, req.GetGrpId(),
 		"whose agent could read the members of group %d")
@@ -204,29 +248,40 @@ func inspectGroupChecks(
 	return rec, nil
 }
 
-// forceStartRefusal is the first refusal ForceStartGroup's planning read
-// (forceStartChecks) would make of a write naming the request's leg with
-// its force, after the resolution InspectGroup has made: a pool being
-// deleted, the level that builds no group array, a clone being deleted, and
-// the leg (forceStartLegChecks); nil when it makes none.
+// forceStartRefusal is the first refusal no override passes that
+// ForceStartGroup's planning read (forceStartChecks) would make of a write
+// naming the request's leg, after the resolution InspectGroup has made: a
+// pool being deleted, the level that builds no group array, a clone being
+// deleted, and the leg (forceStartLegChecks), nil when it makes none; and,
+// once the leg's checks held, its refusal of a leg that carries the partial
+// mark (errPartialLeg), which an override passes, as the dry run lists it,
+// nil when the leg carries none.
 func forceStartRefusal(
 	stm etcdutil.STM,
 	sc *spScope,
 	loc grpLocation,
 	req *pb.InspectGroupRequest,
-) error {
+) (*pb.ForcedStartRefusal, error) {
 	spName := req.GetSpName()
 	if sc.Conf.GetDeleting() {
-		return errPrecondition("storage pool %q is being deleted", spName)
+		return nil, errPrecondition("storage pool %q is being deleted", spName)
 	}
 	if level := sc.Conf.GetSpLevel(); level >= pb.SpLevel_SP_LEVEL_NO_REDUND {
-		return errPrecondition(
+		return nil, errPrecondition(
 			"storage pool %q is at %s, where no group array is built",
 			spName, level)
 	}
 	if err := refuseDeletingClone(loc); err != nil {
-		return err
+		return nil, err
 	}
-	return forceStartLegChecks(
-		stm, sc, loc.Grp, req.GetLegId(), req.GetForce())
+	partial, err := forceStartLegChecks(stm, sc, loc.Grp, req.GetLegId())
+	if err != nil || !partial {
+		return nil, err
+	}
+	return &pb.ForcedStartRefusal{
+		Override: pb.ForcedStartOverride_FORCED_START_OVERRIDE_PARTIAL,
+		Text: status.Convert(
+			errPartialLeg(req.GetLegId(), loc.Grp.GetRepName())).Message(),
+		Overridden: req.GetForce(),
+	}, nil
 }

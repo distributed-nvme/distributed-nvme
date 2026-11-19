@@ -97,21 +97,28 @@ The dry run is a forced start that only says what it would do:
 the start would wipe, whether it would stop the array first, and its update:
 `uuid`, or `uuid,force-no-bbl` when the start drops the named leg's
 bad-block list. Or it says why the start would refuse, in the same words as
-the real start. Add `--force` to see what a start with the force flag would
-do. The dry run stops at the first refusal it meets, so it shows one refusal
-at most. Of the three refusals the force flag passes, it meets first a leg a
-repair took back after md wrote onto it, then a bad-block list, then a named
-leg whose change count is below that of a leg it wipes; with `--force` it
-shows none of them. So before you add `--force` for one refusal, compare by
-hand in `dnvctl group inspect` the change counts of the named leg and of
-every leg it wipes (rule 2 below). The dry run runs nothing.
+the real start. Beside that, its `refusal_list` lists each of the three
+refusals the force flag passes that it meets, in this order: a leg a repair
+took back after md wrote onto it (`FORCED_START_OVERRIDE_PARTIAL`), a
+bad-block list on the named leg (`FORCED_START_OVERRIDE_BAD_BLOCKS`), and
+each full member of the named leg's identity that it wipes whose change
+count is above the named leg's (`FORCED_START_OVERRIDE_OLDER_LEG`). It
+compares no other leg: a leg of another identity (rule 5), a half-copied
+leg and a leg with no superblock are never listed, whatever they hold.
+Each entry says whether the request
+passes it (`overridden`). So the dry run without `--force` shows every
+refusal the force flag would pass; add `--force` to see what a start with
+the flag would do. A refusal the flag does not pass, such as a leg that
+does not serve, ends the dry run's checks, and the list then holds only the
+refusals met before it. The dry run runs nothing.
 
 Tested: the cn agent suite, `integtest/cnagent_test.sh`, repair case,
 stage `forced`. It runs the primary's read and dry run before a real
 start, and checks that the real start does what the dry run said. The
 dnvctl suite, `integtest/dnvctl_test.sh`, checks the command against a
 stand-in gateway. No suite runs `dnvctl group inspect` against a real
-gateway.
+gateway. The list of every refusal is tested by the unit tests of the cn
+agent and of the gateway; no suite reads it.
 
 ### Before every forced start
 
@@ -180,11 +187,13 @@ Choose the leg with these rules:
 Safe steps:
 
 1. Do the steps "Before every forced start".
-2. Run the dry run from the leg you chose, without `--force`. When it
-   refuses the named leg for its bad-block list, or as older than a leg it
-   wipes, and you choose to go on (rules 2 to 4), first compare by hand the
-   change counts of the named leg and of every leg it would wipe, since the
-   dry run shows only the first refusal it meets. Then run it again with
+2. Run the dry run from the leg you chose, without `--force`, and read
+   every refusal its list holds. Then compare by hand, in
+   `dnvctl group inspect`, the named leg with every leg the start would
+   wipe that is of another identity (rule 5): the list never holds such a
+   leg. When it lists the named leg's bad-block
+   list, or a leg it wipes that is newer than the named leg, and you choose
+   to go on past every one of them (rules 2 to 4), run it again with
    `--force` and read what it would wipe and drop.
 3. Write the mark:
    `dnvctl group force-start --grp <group id> --leg <leg id>`, with
@@ -219,9 +228,8 @@ Steps that can lose data:
 - The force flag also drops the named leg's bad-block list. If two legs have
   the same change count and you force the wrong one, hosts read the regions
   md never copied as whatever that leg's disk held, with no error. A flag
-  given for the list also passes an older named leg in the same start, and
-  the dry run without the flag shows only the list's refusal then. So
-  compare the change counts by hand first (rule 2).
+  given for the list also passes an older named leg in the same start; the
+  dry run without the flag lists both, so read its whole list first.
 - A start from an older copy restores this group alone. The pool's other
   groups keep their newer state, so the pool's volumes can mix old and new
   blocks. A block first written since that copy can read another pool's
@@ -304,9 +312,10 @@ Safe steps:
 5. Run the dry run from that leg, then write the mark naming it:
    `dnvctl group force-start --grp <group id> --leg <retired leg id>`. If
    md once wrote onto that leg, as a repair that was cancelled can leave
-   it, the gateway refuses the mark unless you add `--force`. Such a leg is
-   no longer the copy it was: stop instead. If the dry run refuses the leg
-   for its bad-block list, read rule 4 of "Which leg to choose". A retired
+   it, the gateway refuses the mark unless you add `--force`, and the dry
+   run lists that refusal first. Such a leg is no longer the copy it was:
+   stop instead. If the dry run lists a bad-block list on the leg, read
+   rule 4 of "Which leg to choose". A retired
    leg can carry such a list from its time in the array, for example when
    md recorded bad blocks on it before a repair replaced it. The force flag
    drops the list, and md then serves those regions from what the leg holds

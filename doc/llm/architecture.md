@@ -4268,23 +4268,30 @@ connects, so none is read; the report's stamp; the revision of the request
 the primary holds and the pool's revision, so a reader sees a request
 still on its way; and, with `leg_id`, the dry run: what a forced start
 from that leg would do, with `force` as `ForceStartGroup`'s force — the
-first refusal `ForceStartGroup` would make (a pool being deleted, the
-level, a clone being deleted, the leg, the partial mark among the leg's,
-the group's row in the report reading `OK` or absent), else the agent's
-dry run, its refusal word for word the real start's, both cut alike to
-the row text cap (Live-state reporting) (the refusal of an
-array that runs aside, which is the dry run's own, as the real start
-leaves the mark waiting), or the members it
-would zero, in order, a member already blank counted among them, the
-assembly's update and whether it stops an array
-that does not run first (`cnagent.md` CN12, CN31). Nothing is written and
-no mdadm command runs. Reasons: the choice of a forced start's leg rests
+first refusal `ForceStartGroup` would make, in its order (a pool being
+deleted, the level, a clone being deleted, the leg, the partial mark when
+`force` is not set, the group's row in the report reading `OK` or absent),
+else the agent's dry run, its refusal word for word the real start's,
+both cut alike to the row text cap (Live-state reporting) (the refusal of
+an array that runs aside, which is the dry run's own, as the real start
+leaves the mark waiting), or the members it would zero, in order, a
+member already blank counted among them, the assembly's update and
+whether it stops an array that does not run first; and, beside either,
+the list of every refusal the force passes that the checks met, passed or
+not, in the order they meet them: the partial mark first, the gateway's,
+then the agent's, the named leg's bad-block list and each older member,
+each with its kind, its text cut to the row text cap and whether the
+request's force passes it (`cnagent.md` CN12, CN31). A refusal no force
+passes ends the agent's checks, so the agent lists what they met before
+it. Nothing is written and no mdadm command runs. Reasons: the choice of a forced start's leg rests
 on the members' superblocks, which no row shows, and the dry run runs the
 start's own checks, so what it says is what the start does with the node
 and the request as they are at the read, save that a leg the converge
 would connect first reads as not serving, so the dry run says the start
 waits for it; it recommends no leg, since the choice weighs what the
-operator knows of the outage.
+operator knows of the outage. Reason for the list: a force given for one
+refusal passes the others of the same start, so one dry run must show
+every refusal the force would pass, not the first alone.
 
 **GetRepair** — STM read of the `Repair` named; `NOT_FOUND` for a name not
 in `repair_name_list`, and a listed name whose key is missing is `ABORTED`
@@ -4923,18 +4930,24 @@ with `ResStatus`:
 **The row text cap.** Every text an agent writes into a row or beside one
 is at most `AgentTextMax` bytes: a row's `details`, a cntlr report's group
 reading refusal and its repair verdict's refusal and waits, an
-`InspectGrp` dry run's refusal, and the `details` of every `AgentReply`
-but the leftover answer. A longer text keeps its head, which says what
+`InspectGrp` dry run's refusal and each text of its list of refusals, and
+the `details` of every `AgentReply` but the leftover answer. A longer text keeps its head, which says what
 failed and names the object, and its end, where a command's cause is,
-with "..." between (`agent.CutAgentText`); what the cut takes out is the
-middle, a command line or a long output, which the agent's log record of
-the command keeps whole (`log.md`, OS commands and file IO). A note a pass puts in front of a row's own text, as a
+with "..." between (`agent.CutAgentText`, over `common.CutRowText`); what
+the cut takes out is the middle, a command line or a long output, which the
+agent's log record of the command keeps whole (`log.md`, OS commands and
+file IO). The gateway cuts the text of its own refusal it lists beside the
+agent's in a dry run's list of refusals with the same cut (Repairs,
+`InspectGroup`). A note a pass puts in front of a row's own text, as a
 failed step's error in front of a dm-clone row's raw status line, is cut
 to the room that text leaves (`agent.JoinNote`), so the line the gateway
 and the worker parse stays whole. The leftover answer is bounded by its
 construction instead (Teardown by sweep), so its head and its names stay
 whole. The texts the agents compose from ids, md change counts and md
-identities alone fit the cap uncut at full widths; a text that carries a
+identities alone fit the cap uncut at full widths, but for the error of a
+forced start refused for two refusals or more, whose head names their
+kinds and whose refusals the dry run lists and the agent's record of the
+refused start keeps whole (`cnagent.md` CN12); a text that carries a
 command's text or output, or a name of unbounded length such as a disk's
 path, can be cut. Reason: the widest cntlr
 inspect reply, every such text at the cap, then fits `GrpcMaxMsgSize` at
@@ -6587,17 +6600,23 @@ bad-block list dropped, keeping the identity the first run wrote, so the
 array never starts under its old identity, and serves no IO errors over
 regions the leg holds unless the stop between the two runs fails
 (`cnagent.md`, Known limits). A named leg that is not available, whose read does
-not answer or that is not a full member of the old array; a named leg that
-carries a bad-block list, which the start drops, unless the mark carries
-the operator's force (`ForcedStart.force`); another member
-that is not available or whose read does not answer; or another member that
-is a full member of the named leg's identity with a higher change count,
-which holds newer data, unless the mark carries the force, is the group's
-error for the pass, before anything
-is zeroed; a zero that the read back does not prove is the group's error
-before the assembly. One force passes both refusals, and a mark that
-names a taken-back leg with the partial mark (`ForceStartGroup`), as one
-operator's choice. Reason for the list's refusal: with the list dropped,
+not answer or that is not a full member of the old array, or another
+member that is not available or whose read does not answer, is the
+group's error for the pass, before anything is zeroed, and ends its
+checks. Two refusals do not end them: a named leg that carries a
+bad-block list, which the start drops, and each other member that is a
+full member of the named leg's identity with a higher change count, which
+holds newer data. The checks go on past each, and once every other check
+holds, those the mark does not pass are the group's error, before
+anything is zeroed: the row names their kinds first and then each, as far
+as the row text cap allows, and the agent's record of the refused start
+names each whole (`cnagent.md` CN12); a zero that the read back does not
+prove is the group's error before the assembly. The operator's force on
+the mark (`ForcedStart.force`) passes both refusals, and a mark that names
+a taken-back leg with the partial mark (`ForceStartGroup`), as one
+operator's choice. Reason for going on: an
+operator who forces past the first refusal passes the others too, so the
+start, its row and the dry run name them all at once. Reason for the list's refusal: with the list dropped,
 md serves the regions it lists from what the named leg holds there, which
 on a half-copied leg md marked in sync are regions it never copied (Known
 limits), and only the operator can tell that leg from the one that kept

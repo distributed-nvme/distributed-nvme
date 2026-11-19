@@ -2302,10 +2302,10 @@ dm-clone (CN18).
      writes a copy position on a member it was copying onto, so a
      half-copied leg is refused here, and md starts no array from one alone
      anyway; and a read that fails is no answer, never "no superblock".
-     The read must also show no bad-block list, unless the mark carries the
-     operator's force (`ForcedStart.force`, `badBlocksRefusal`): the row
-     then names the leg and the list's length and says the force goes on,
-     and nothing is zeroed. Reason: the start drops the list (step 5), and
+     A bad-block list on the read is a refusal the operator's force passes
+     (`badBlocksRefusal`): it does not end the checks, which go on to step
+     3, and it is judged with step 3's at its end. Reason: the start drops
+     the list (step 5), and
      md then serves the regions it listed from what the leg holds there; on
      a half-copied leg that md marked in sync by mistake (Known limits)
      those are regions it never copied, another pool's bytes among them, so
@@ -2316,11 +2316,22 @@ dm-clone (CN18).
   3. Every other member the forced start keeps, the open repair's bad leg
      excepted, is available this pass and its superblock read answers, each read
      before step 4 zeroes any; otherwise the row names the first that is
-     not, and the pass ends for the group with nothing zeroed. None of them
-     may be a full member of the named leg's identity with a higher change
-     count, unless the mark carries the operator's force
-     (`ForcedStart.force`): the row names that member, both counts and the
-     force, and nothing is zeroed. The bad leg is excepted, neither read
+     not, and the pass ends for the group with nothing zeroed. Each of them
+     that is a full member of the named leg's identity with a higher change
+     count is a refusal the force passes (`olderNamedLeg`), which names that
+     member and both counts; the checks go on past it. Once every such
+     member is available and its read answers, the refusals of step 2 and of
+     this step that the mark does not pass — all of them unless it carries the operator's force
+     (`ForcedStart.force`) — are the group's error (`forcedStartRefused`),
+     and nothing is zeroed: "forced start refused (", the kinds' words
+     ("bad-blocks", "older-leg"), each once in the order met, "): ", then
+     each refusal, joined by "; ", so the row, cut to the row text cap
+     (`architecture.md`, Live-state reporting), keeps the kinds at its
+     head; and a Warn record, `forced start refused`, names the group, the
+     named leg and each such refusal whole, its kind's word first. Reason
+     for meeting them all: a force given for one refusal passes the others
+     of the same start, so the row, the record and the dry run (CN31) show
+     every one before the operator chooses. The bad leg is excepted, neither read
      nor zeroed, because the repair replaces it: the finish retires it with
      its data kept, and the move to ABORTED ends the open repair with the
      leg still in `leg_list` as it is, where the identity check of the
@@ -5030,10 +5041,17 @@ mark waiting over a running array and the read's error ends the real
 start; an array that is there and does not run is stopped first, so the
 reply says so, unless it holds a member that is no leg wrapper of this
 pool, which the real start refuses to stop (`MdDetail.strangerErr`), word
-for word; then the start's checks, whose first that does not hold is the
-refusal, word for word the real start's, both cut alike to the row text
-cap (`architecture.md`, Live-state reporting), or else the members it would
-zero, in order, and the assembly's update. The real start and this dry run
+for word; then the start's checks, whose first that does not hold, or else
+whose refusals the force does not pass, is the refusal, word for word the
+real start's, both cut alike to the row text cap (`architecture.md`,
+Live-state reporting), or else the members it would zero, in order, and
+the assembly's update; and, beside either, the list of every refusal the
+force passes that the checks met (CN12, step 2's bad-block list and step
+3's older members), passed or not, in that order, each with its kind
+(`ForcedStartOverride`), its text cut to the row text cap and whether the
+request's force passes it, so one dry run shows them all, where the row
+of a start they refuse is cut to the cap with their kinds at its head. The
+real start and this dry run
 run one function (`planForcedStart`), so a broken check fails the tests of
 both. It runs no mdadm command and writes nothing, the mark of its own
 included, which no request carries and nothing keeps. It recommends no

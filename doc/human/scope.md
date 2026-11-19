@@ -448,12 +448,13 @@ The entries:
   instead, hosts read, over the regions md never copied, whatever that
   leg's disk held there, possibly another pool's bytes, with no error. Both
   legs show the same change count. One force flag also passes the forced
-  start's other refusals in the same start. State: accepted, the force is
-  the operator's choice; procedure written,
+  start's other refusals in the same start; its dry run without the flag
+  lists each of them beside this one. State: accepted, the force is the
+  operator's choice; procedure written,
   [the forced-start guide](operations.md#the-forced-start-guide): name the
   leg md copied from, not the new leg it copied onto; `dnvctl group
-  inspect` shows each leg's bad-block count and md's view of it, and its
-  dry run without the flag shows the refusal. Seen in the lab.
+  inspect` shows each leg's bad-block count and md's view of it. Seen in
+  the lab.
 - **A failed stop during a forced start keeps a bad-block list.** When the
   named leg carries a bad-block list, the forced start starts the array,
   stops it at once, and starts it again with the list dropped. If that stop

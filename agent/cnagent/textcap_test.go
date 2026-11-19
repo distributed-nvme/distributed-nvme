@@ -90,7 +90,8 @@ func TestForcedStartDryRunCutsItsRefusal(t *testing.T) {
 }
 
 // TestComposedTextsFitTheCapUncut pins that the longest texts the cn agent
-// composes, a forced start's refusals, a take-back's refusals and the
+// composes, a forced start's refusals, alone and as the error of a start
+// refused for one of them, a take-back's refusals and the
 // assembly's refusal of two identities, fit common.AgentTextMax uncut with
 // every id, md change count and list length at its widest and md's
 // identities in their 35-character spelling: such a text is cut only when
@@ -103,11 +104,21 @@ func TestComposedTextsFitTheCapUncut(t *testing.T) {
 	named := &legPlan{legId: id, grp: gp}
 	other := &legPlan{legId: id - 1, grp: gp}
 	texts := map[string]string{
-		"an older named leg": olderNamedLeg(gp, named,
+		"an older named leg": olderNamedLeg(named,
 			&mdSuperblock{Uuid: uuidA, Events: math.MaxUint64 - 1}, other,
 			&mdSuperblock{Uuid: uuidA, Events: math.MaxUint64}),
-		"a named leg with a bad-block list": badBlocksRefusal(gp, named,
+		"a named leg with a bad-block list": badBlocksRefusal(named,
 			&mdSuperblock{Uuid: uuidA, BadBlocks: math.MaxInt}),
+	}
+	for _, kind := range []string{"an older named leg",
+		"a named leg with a bad-block list"} {
+		override := pb.ForcedStartOverride_FORCED_START_OVERRIDE_OLDER_LEG
+		if kind != "an older named leg" {
+			override = pb.ForcedStartOverride_FORCED_START_OVERRIDE_BAD_BLOCKS
+		}
+		texts["the start refused for "+kind] = (&forcedStartRefused{
+			refusals: []forcedStartRefusal{{override, texts[kind]}},
+		}).Error()
 	}
 	gp.rep = &repPlan{repId: id, rep: &pb.Repair{}}
 	texts["a taken-back leg of another identity"] = takeBackRefusal(gp,

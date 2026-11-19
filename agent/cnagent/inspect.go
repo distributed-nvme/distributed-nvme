@@ -293,8 +293,10 @@ func (s *CnAgentServer) inspectMember(
 // it holds a member that is no leg wrapper of this pool, which the real
 // start refuses to stop (MdDetail.strangerErr); a read of the array that
 // failed is the refusal, as it is the real start's error (ensureGroup).
-// Every refusal is cut to the row text cap as the real start's row is
-// (agent.CutAgentText), so the two read the same.
+// Every refusal an override passes that the checks met is listed, passed or
+// not, so one dry run shows them all (planForcedStart). Every refusal and
+// each listed text is cut to the row text cap as the real start's row is
+// (agent.CutAgentText), so the dry run's refusal and the row read the same.
 func (s *CnAgentServer) forcedStartDryRun(
 	ctx context.Context,
 	look *inspectLook,
@@ -321,7 +323,14 @@ func (s *CnAgentServer) forcedStartDryRun(
 		dry.StopsArray = true
 	}
 	gp.mark = &pb.ForcedStart{LegId: legId, Force: force}
-	fp, err := s.planForcedStart(ctx, gp, look.serves)
+	fp, refusals, err := s.planForcedStart(ctx, gp, look.serves)
+	for _, r := range refusals {
+		dry.RefusalList = append(dry.RefusalList, &pb.ForcedStartRefusal{
+			Override:   r.override,
+			Text:       agent.CutAgentText(r.text),
+			Overridden: forcedStartPasses(gp, r.override),
+		})
+	}
 	if err != nil {
 		// The real start stops the array before these checks
 		// (forcedStartPass), so stops_array stands beside the refusal.

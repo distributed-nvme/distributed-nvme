@@ -313,6 +313,32 @@ message ForcedStart {
     bool force = 3;
 }
 
+// The kind of a forced-start refusal an operator may choose to pass
+// (cnagent.md CN12; architecture.md, Repair, Forced start). Appended, never
+// renumbered.
+enum ForcedStartOverride {
+    // Names no refusal.
+    FORCED_START_OVERRIDE_NONE = 0;
+    // A full member of the named leg's identity that the start would zero
+    // holds a higher md change count, so newer data.
+    FORCED_START_OVERRIDE_OLDER_LEG = 1;
+    // The named leg carries a bad-block list, which the start drops.
+    FORCED_START_OVERRIDE_BAD_BLOCKS = 2;
+    // The named leg is a new leg the group's repair took back from a retired
+    // leg that carries the partial mark (Repair.new_leg_id_to_partial).
+    FORCED_START_OVERRIDE_PARTIAL = 3;
+}
+
+// One refusal of a forced start that an override passes, as the dry run
+// lists it (ForcedStartDryRun.refusal_list).
+message ForcedStartRefusal {
+    ForcedStartOverride override = 1;
+    // What the refusal says, cut to the row text cap.
+    string text = 2;
+    // The request passes it, so the start goes on over it.
+    bool overridden = 3;
+}
+
 message Namespace {
     uint64 ns_id = 1;
     uint32 ns_idx = 2;
@@ -2588,6 +2614,10 @@ message ForcedStartDryRun {
     // it first, before the checks a refusal may come from; false when the
     // gateway's own refusal stands, as no mark would be written.
     bool stops_array = 4;
+    // Every refusal an override passes that the start's checks met, passed
+    // or not, in the order they meet them: the gateway's partial mark first,
+    // then the named leg's bad-block list, then each older member.
+    repeated ForcedStartRefusal refusal_list = 5;
 }
 
 message InspectGrpRequest {

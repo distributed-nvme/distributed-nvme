@@ -868,10 +868,13 @@ func forceStartChecks(
 	if cancel {
 		return sc, loc, grpReportTarget{}, nil
 	}
-	if err := forceStartLegChecks(
-		stm, sc, loc.Grp, req.GetLegId(), req.GetForce(),
-	); err != nil {
+	partial, err := forceStartLegChecks(stm, sc, loc.Grp, req.GetLegId())
+	if err != nil {
 		return nil, grpLocation{}, grpReportTarget{}, err
+	}
+	if partial && !req.GetForce() {
+		return nil, grpLocation{}, grpReportTarget{},
+			errPartialLeg(req.GetLegId(), loc.Grp.GetRepName())
 	}
 	tgt, err := grpPrimaryTarget(stm, sc, spName, grpId,
 		"whose report could show that the array of group %d does not run")
@@ -948,25 +951,25 @@ func primaryTarget(
 // the mark was withdrawn must not leave the group with no leg to start from
 // (architecture.md, Repair, Forced start; cnagent.md CN12); and so is the
 // bad leg of a STARTED repair, which left the array before md began copying
-// onto the new leg and which the finish retires. With no force, a new leg
-// the repair took back that carries the partial mark is FAILED_PRECONDITION
-// (errPartialLeg). model.ForceStartGroup makes the same tests in its own STM
+// onto the new leg and which the finish retires. partial reports a new leg
+// the repair took back that carries the partial mark, a refusal an override
+// passes, which the caller makes (errPartialLeg) or lists. model.
+// ForceStartGroup makes the same tests in its own STM
 // (model.ReasonLegNotNamable, model.ReasonLegPartial).
 func forceStartLegChecks(
 	stm etcdutil.STM,
 	sc *spScope,
 	grp *pb.Group,
 	legId uint64,
-	force bool,
-) error {
+) (partial bool, err error) {
 	rep, err := grpRepair(stm, sc, grp)
 	if err != nil {
-		return err
+		return false, err
 	}
 	if grpLegOf(grp, legId) != nil {
 		if rep.GetRepStage() == pb.RepStage_REP_STAGE_STARTED &&
 			slices.Contains(rep.GetBadLegIdList(), legId) {
-			return errPrecondition(
+			return false, errPrecondition(
 				"leg %d is the bad leg of the repair %q, which is "+
 					"REP_STAGE_STARTED: the leg left the array before md "+
 					"began copying onto the new leg, and the finish "+
@@ -974,25 +977,22 @@ func forceStartLegChecks(
 					"name it",
 				legId, grp.GetRepName(), grp.GetGrpId())
 		}
-		return nil
+		return false, nil
 	}
 	for _, leg := range rep.GetNewLegList() {
 		if leg.GetLegId() != legId {
 			continue
 		}
 		if rep.GetRepStage() == pb.RepStage_REP_STAGE_ABORTED {
-			return errPrecondition(
+			return false, errPrecondition(
 				"leg %d is the new leg of the repair %q, which is %s: "+
 					"the abort took it out of group %d, so the forced "+
 					"start may not name it", legId,
 				grp.GetRepName(), rep.GetRepStage(), grp.GetGrpId())
 		}
-		if !force && rep.GetNewLegIdToPartial()[legId] {
-			return errPartialLeg(legId, grp.GetRepName())
-		}
-		return nil
+		return rep.GetNewLegIdToPartial()[legId], nil
 	}
-	return errNotFound(
+	return false, errNotFound(
 		"leg %d is neither in the leg_list of group %d nor a new leg of "+
 			"its repair", legId, grp.GetGrpId())
 }

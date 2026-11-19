@@ -1171,3 +1171,133 @@ func TestInspectGroupListsAnOpenRepairsNewLeg(t *testing.T) {
 		})
 	}
 }
+
+// TestInspectGroupListsThePartialMark pins the dry run's list of refusals an
+// override passes (architecture.md, Repairs, InspectGroup): a named new leg
+// the repair took back that carries the partial mark is the list's first
+// entry, the gateway's, before the agent's own. With no force it is the dry
+// run's refusal, as ForceStartGroup would write no mark, before the refusal
+// of a running array, which the call meets after it: the agent's entries
+// stay listed beside it, and nothing the start would do is shown. With the
+// force it is listed as passed, and the agent's dry run stands.
+func TestInspectGroupListsThePartialMark(t *testing.T) {
+	env := newVolEnv(t)
+	agent := fsPrimary(env)
+	fsReport(agent, volDataGrpId, pb.ResStatus_RES_STATUS_ERROR)
+	created := repCreate(env, "rep-a", volDataLegA, volDnC)
+	newLegId := created.GetNewLegId()
+	rep := env.repair("rep-a")
+	rep.NewLegIdToRetiredEpoch = map[uint64]uint64{newLegId: 11}
+	rep.NewLegIdToPartial = map[uint64]bool{newLegId: true}
+	mustPut(env.t, env.cli, model.RepairKey(env.cid, volSpId, "rep-a"), rep)
+	badBlocks := pb.ForcedStartOverride_FORCED_START_OVERRIDE_BAD_BLOCKS
+	partial := pb.ForcedStartOverride_FORCED_START_OVERRIDE_PARTIAL
+	bbl := "named leg carries a bad-block list of 2 entries"
+	inspect := func(force bool, dry *pb.ForcedStartDryRun) *pb.ForcedStartDryRun {
+		t.Helper()
+		agent.mu.Lock()
+		agent.inspectGrp = &pb.InspectGrpReply{DryRun: dry}
+		agent.mu.Unlock()
+		reply, err := env.srv.InspectGroup(env.ctx, &pb.InspectGroupRequest{
+			ClusterName: env.cluster, SpName: volSpName, GrpId: volDataGrpId,
+			LegId: newLegId, Force: force,
+		})
+		if err != nil {
+			t.Fatalf("InspectGroup: %v", err)
+		}
+		return reply.GetDryRun()
+	}
+	wantList := func(label string, dry *pb.ForcedStartDryRun, passed bool) {
+		t.Helper()
+		list := dry.GetRefusalList()
+		if len(list) != 2 || list[0].GetOverride() != partial ||
+			!strings.Contains(list[0].GetText(), "is partial") ||
+			list[0].GetOverridden() != passed ||
+			list[1].GetOverride() != badBlocks ||
+			list[1].GetText() != bbl || list[1].GetOverridden() != passed {
+			t.Errorf("%s: the list is %v, want the partial mark, then the "+
+				"agent's list, passed %v", label, list, passed)
+		}
+	}
+
+	dry := inspect(false, &pb.ForcedStartDryRun{
+		Refusal:     "forced start refused (bad-blocks): " + bbl,
+		StopsArray:  true,
+		RefusalList: []*pb.ForcedStartRefusal{{Override: badBlocks, Text: bbl}},
+	})
+	if !strings.Contains(dry.GetRefusal(), "is partial") ||
+		len(dry.GetZeroLegIdList()) != 0 || dry.GetStopsArray() {
+		t.Errorf("the dry run with no force: %v, want the partial mark's "+
+			"refusal, nothing stopped or zeroed", dry)
+	}
+	wantList("with no force", dry, false)
+	// Over a running array the partial mark still comes first, as
+	// ForceStartGroup refuses it before it reads the report.
+	fsReport(agent, volDataGrpId, pb.ResStatus_RES_STATUS_OK)
+	dry = inspect(false, &pb.ForcedStartDryRun{
+		RefusalList: []*pb.ForcedStartRefusal{{Override: badBlocks, Text: bbl}},
+	})
+	if !strings.Contains(dry.GetRefusal(), "is partial") {
+		t.Errorf("the dry run over a running array refuses %q, want the "+
+			"partial mark first", dry.GetRefusal())
+	}
+	wantList("over a running array", dry, false)
+	fsReport(agent, volDataGrpId, pb.ResStatus_RES_STATUS_ERROR)
+
+	dry = inspect(true, &pb.ForcedStartDryRun{
+		ZeroLegIdList: []uint64{volDataLegB},
+		Update:        "uuid,force-no-bbl",
+		StopsArray:    true,
+		RefusalList: []*pb.ForcedStartRefusal{
+			{Override: badBlocks, Text: bbl, Overridden: true}},
+	})
+	if dry.GetRefusal() != "" || dry.GetUpdate() != "uuid,force-no-bbl" ||
+		!dry.GetStopsArray() ||
+		!slices.Equal(dry.GetZeroLegIdList(), []uint64{volDataLegB}) {
+		t.Errorf("the dry run with the force: %v, want the agent's", dry)
+	}
+	wantList("with the force", dry, true)
+}
+
+// TestInspectGroupCutsThePartialEntry pins the cut of the gateway's own
+// entry in the dry run's list (architecture.md, Repairs, InspectGroup): a
+// partial leg's refusal that a long repair name makes longer than the row
+// text cap is listed cut by the agents' cut (common.CutRowText), while the
+// dry run's refusal keeps it whole, word for word what ForceStartGroup
+// answers.
+func TestInspectGroupCutsThePartialEntry(t *testing.T) {
+	env := newVolEnv(t)
+	agent := fsPrimary(env)
+	fsReport(agent, volDataGrpId, pb.ResStatus_RES_STATUS_ERROR)
+	name := strings.Repeat("r", common.MaxStrSize)
+	created := repCreate(env, name, volDataLegA, volDnC)
+	newLegId := created.GetNewLegId()
+	rep := env.repair(name)
+	rep.NewLegIdToRetiredEpoch = map[uint64]uint64{newLegId: 11}
+	rep.NewLegIdToPartial = map[uint64]bool{newLegId: true}
+	mustPut(env.t, env.cli, model.RepairKey(env.cid, volSpId, name), rep)
+	_, err := env.srv.ForceStartGroup(env.ctx, fsRequest(env, newLegId))
+	whole := volWantCode(t, err, codes.FailedPrecondition)
+	if len(whole) <= common.AgentTextMax {
+		t.Fatalf("the refusal %q is %d bytes, within the cap: the test "+
+			"needs a longer one", whole, len(whole))
+	}
+	reply, err := env.srv.InspectGroup(env.ctx, &pb.InspectGroupRequest{
+		ClusterName: env.cluster, SpName: volSpName, GrpId: volDataGrpId,
+		LegId: newLegId,
+	})
+	if err != nil {
+		t.Fatalf("InspectGroup: %v", err)
+	}
+	dry := reply.GetDryRun()
+	if dry.GetRefusal() != whole {
+		t.Errorf("the dry run refuses %q, want the call's %q",
+			dry.GetRefusal(), whole)
+	}
+	list := dry.GetRefusalList()
+	if len(list) == 0 || list[0].GetText() != common.CutRowText(whole) ||
+		len(list[0].GetText()) > common.AgentTextMax {
+		t.Errorf("the list is %v, want the partial entry cut to %d bytes",
+			list, common.AgentTextMax)
+	}
+}
