@@ -12,7 +12,7 @@ import (
 )
 
 // TestServerOverridesEveryRpc pins Server's claim that it overrides each of
-// the 70 methods of service Gateway, so the embedded
+// the 71 methods of service Gateway, so the embedded
 // pb.UnimplementedGatewayServer never answers a request: a handler that is
 // missing compiles and answers UNIMPLEMENTED. Each method's generated handler
 // is called with an empty request under a context cancelled before the call,
@@ -29,8 +29,8 @@ func TestServerOverridesEveryRpc(t *testing.T) {
 		t.Fatalf("Range: %v", err)
 	}
 	methods := pb.Gateway_ServiceDesc.Methods
-	if len(methods) != 70 {
-		t.Fatalf("service Gateway has %d methods, want 70", len(methods))
+	if len(methods) != 71 {
+		t.Fatalf("service Gateway has %d methods, want 71", len(methods))
 	}
 	for _, method := range methods {
 		switch method.MethodName {

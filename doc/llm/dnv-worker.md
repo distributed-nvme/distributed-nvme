@@ -406,6 +406,9 @@ prefix and are decoded by a prefix trim at the caller (`pageNames` in
 `model` parser. The families: `ClusterConfKey` and `ClusterConfPrefix`; the
 three globals (`DnGlobalKey` and its siblings); the rev keys per shard,
 `DnRevKey`, `DnRevPrefix` and `ParseDnRevKey` — likewise for `Cn*` and `Sp*`;
+`DnRevKindPrefix` and `CnRevKindPrefix`, every shard's node rev keys at
+once, which only the gateway's status read ranges, keys only (`gateway.md`
+GW20);
 `DnConfKey` and `CnConfKey` with `DnConfPrefix` and `CnConfPrefix`, the
 gateway's `ListDiskNodes` and `ListControllerNodes` page ranges (`gateway.md`
 GW10) and its `GetClusterCapacity` ranges, scanned by no worker; `DnCapacityKey`, `DnCapacityPrefix` and
@@ -488,7 +491,9 @@ that a list of the `SpConf` names stops the sp role's fan-out and the rest
 of its pass after the gates until it is back (RW14, AR1); past a node record, which no list names, and past
 any record of a latched SP the fan-out drives what it can, RW14 leaving
 idle the children the snapshot cannot resolve and logging the keys, and a
-latched SP's drain judges the keys it needs itself (SPD12). `SpRevision` is the revision the loaded
+latched SP's drain judges the keys it needs itself (SPD12). The gateway's
+status read loads with `LoadSp` too, and lists each `Missing` key and an
+absent rev key as a lost record (`gateway.md` GW20). `SpRevision` is the revision the loaded
 state belongs to, for RW14's revision guard; the rev key is not a listed
 sub-object, so an absent one is no `Missing` entry. `LoadSpWithoutNodes` is the
 same load without the node records, the reaction pass's (AR1): it leaves
@@ -4153,6 +4158,16 @@ and, for data, not covered, since the covered test comes first and logs
 `model.GrpListFull`, and ends the pass, as its in-STM `grow_pending` does
 (AR2).
 
+**The status read mirrors these checks.** The pending rule, the covered
+rule (`model.DataCovered`), the group's size with its refusals
+(`model.GrowExtCnt`: `grp_list_full`, `meta_ladder_cap` and
+`no_data_group`) and the CN budget are `model`'s, and the gateway's status
+read applies them in the pass's order — pending, covered, the group's
+size, the CN budget, then the plain scan — to list a grow the pass cannot
+run, under the same reasons (`architecture.md`, Clusters,
+GetClusterStatus; `gateway.md` GW20). A change to this order, or to the
+scan, changes the read's too.
+
 **The withdrawal of a stuck grow.** The pool never counts a new group that
 holds a leg that never provisions: no cntlr builds a group with a leg whose
 every side is still not provisioned (`cnagent.md` CN9), so the pool's total
@@ -5059,6 +5074,8 @@ group's row when it reads other than `RES_STATUS_OK`, its status and
 details, since the primary adds a new leg and confirms an abort only on a
 running array and gives no verdict for a group whose array does not run
 (`cnagent.md` CN28). A take-back's refusal is AR11's record, not this one.
+The text is `model.RepairWaitReason`'s, which the gateway's status read
+lists for the repair too (`architecture.md`, Clusters, GetClusterStatus).
 The record is written once per change of the repair's `rep_id`, its stage
 or the text: the coordinator keeps the last record per repair name in
 memory, through passes that find no text and passes with no report of the

@@ -95,8 +95,10 @@ through viper (Components: invocation reference):
   group's array does not run (Repairs) and behind `GetThinDeviceBitmap`'s
   check that the volume's namespaces are parked, `GetThinDeviceBm` for
   that read (Bitmap reads), `GetCntlrInfo` and `InspectGrp` behind
-  `InspectGroup`, and `GetCntlrInfo` behind `CreateRepair`'s read of the
-  bad leg's row (Repairs). The worker never calls `Get*Info`: it watches through
+  `InspectGroup`, `GetCntlrInfo` behind `CreateRepair`'s read of the
+  bad leg's row (Repairs), and `GetCntlrInfo` of each pool's primary and
+  `GetSideInfo` of a migration's destination behind `GetClusterStatus`
+  (Clusters). The worker never calls `Get*Info`: it watches through
   `Check*` (Check streams, dn / cn roles). `gateway.md` owns it.
 * `dnv-worker` is one binary with the roles `dn`, `cn` and `sp`, any subset
   per instance. It watches the revision keys in etcd, shards the work by
@@ -1487,7 +1489,10 @@ the `cluster_id` its prefix is built from (cluster_id derivation).
 `ListThinDevices` and `ListSubsystems` take no page arguments and are each
 one STM snapshot read (Thin devices; Subsystems, namespaces; `gateway.md`
 GW5). `ListWorkers` takes no page arguments either and is one plain range
-of the worker registry, outside any STM (Worker registry).
+of the worker registry, outside any STM (Worker registry). The status read,
+`GetClusterStatus`, pages a cluster's pools as `ListStoragePools` does, by
+the same token, and then reads each pool of its page in a snapshot of its
+own (Clusters).
 
 ### STM discipline
 
@@ -2524,6 +2529,129 @@ controller nodes' budgets (Size → extents) as well as by its disk nodes.
 Each record is decoded through the etcd door, which logs it as it logs
 every decoded value, so on a cluster at the node ceilings this is a heavy
 read meant for an occasional poll, not a hot path.
+
+**GetClusterStatus** — the status read: what is wrong in a cluster, a page
+of pools at a time, computed at the read from etcd and the latest reports
+of the pools' primaries. It stores nothing and writes nothing; a pool's
+detail is the inspects'.
+Errors: `INVALID_ARGUMENT` on a bad `count` or token, before the cluster
+read; `NOT_FOUND` cluster; `ABORTED` for a failed read of the cluster's
+conf, of the page's range or of the first page's cluster rows, and for a
+stored cluster conf the readers refuse (Common validation). An agent that
+does not answer, a pool whose records do not load and every other fault
+the read meets in a pool is a row, never the call's error.
+Defaults: a zero `count` takes `DefaultListCnt`; the token is empty.
+Action: no STM. A plain `ClusterConf` read derives `cluster_id`, and the
+page is a page of the cluster's pools as `ListStoragePools` pages them
+(page_token). The first page, the one asked with no token, also carries
+the cluster rows: a worker role with no registration, which leaves the
+role's work undone in every cluster; a registration whose epoch trails the
+gateway's clock by more than twice `DefaultVoteWorkerInterval`, a hint
+only, since the epoch is its writer's clock and the gateway knows no
+worker's own interval (Worker registry); a node whose health epoch is set;
+a node whose revision key is absent, which no worker drives; and a node
+record that does not decode. Each pool
+of the page is loaded as the sp worker loads it, in a snapshot of its own
+(`dnv-worker.md` MD3), and its primary's latest report is read with one
+`GetCntlrInfo`, beside a `GetSideInfo` of each migration's destination past
+its cutover; no standby and no other side is called, so a standby's and a
+side's trouble shows by their health epochs, and their inspects give the
+rest. A pool's rows are:
+
+* a lost record: a key the pool's lists name that etcd does not hold, a
+  node record a side or a cntlr names, or the pool's revision key, absent,
+  each of which leaves the pool undriven or waiting for an operator; and
+  the pool's id-to-name record (Key table) absent or naming another pool,
+  without which the worker's write of a cntlr's health epoch cannot
+  rewrite the pool's discovery entries;
+* the report, status `RES_STATUS_UNKNOWN`: no primary; the primary's node
+  record absent; its agent did not answer, holds no state of the cntlr, is
+  starting, or answers a code other than OK and leftover; it holds no
+  observation of the cntlr yet; its observation is older than
+  `ObsMaxAgeIntervals` times the cluster's `cntlr_interval`, which says
+  either that no check round asks the primary for a read or that the
+  agent's read of the cntlr does not end, which the worker counts as a
+  missed round, so the cntlr's health epoch shows beside it
+  (`dnv-worker.md` HL7); or its report is of a revision older than the
+  pool's while its health epoch is set, which is either a syncup still on
+  its way or one its agent refuses or fails, as one whose store refuses its
+  saves does (`dnv-worker.md` HL9): an info read answers from the agent's
+  last observation, made before a syncup in flight and kept past a refused
+  one, so the read cannot tell the two apart, and the worker's log names
+  which. The rows of an old or behind report are still listed. An answer with no report reads
+  unknown, never healthy;
+* the pool as a whole: being deleted, which is its one row, with no agent
+  call; a stored conf the sp worker refuses, a `bdev_conf` the readers
+  refuse or a group whose counts give its sides no length to zero
+  (`dnv-worker.md` AR1); a level above read-write;
+  a disabled primary, and none of its cntlrs enabled, which no failover
+  can follow;
+* a slice's thin pool whose row reads OK and whose status line says it is
+  out of data space, or read-only without needs_check, that is out of
+  metadata space, whatever its grow;
+* a grow of a slice past its mark that the worker cannot run, by the
+  checks of the sp worker's grow in their order (`dnv-worker.md` AR6): a
+  pending grow, a data grow the pool's volumes do not need and a grow the
+  disk nodes have room for are not listed; a full group list, the
+  metadata ceiling, a slice with no data group, a controller node short of
+  budget and no disk node with room are;
+* a report row that reads `RES_STATUS_ERROR`, a leg's row with an identity
+  reason, and a clone's row that waits for its source (Live-state
+  reporting);
+* a health epoch of a cntlr, a leg, a side, a clone meta group's leg or
+  side, a repair's new leg or its side, or a retired leg's side; a leg's
+  row is one row with its sides' epochs, its report row and the bad blocks
+  md records on its member;
+* a group whose array is not whole, unless every leg of its list that md
+  does not hold in sync has a row of its own; a group whose add the primary
+  refuses; the operator in charge of a group's repair; a forced-start mark
+  that stands;
+* an open repair, with its stage, what the primary's report says it waits
+  for and who acts next: the worker's drive step for a repair of the
+  worker's in a pool whose reactions run, and otherwise the operator's
+  cancel or finish — for an operator's repair, and for a worker's in a pool
+  at a level that stops reactions or under a stored conf the worker refuses
+  (`dnv-worker.md` AR1, AR3) — and it says when a worker's repair's finish
+  is refused because every retired leg of the group carries keep at the
+  bound (Repairs);
+* a migration whose cutover is pending, with the primary's path row to
+  the new side, and past its cutover one whose copy is whole and waits for
+  its finish, whose copy row reads `RES_STATUS_ERROR`, or whose
+  destination gives no reading of its copy — a copy that runs is not
+  listed;
+* a clone being deleted;
+* a torn thin device (Thin devices).
+
+A pool's rows are ordered by what they say — lost records, the report,
+the pool, its thin pools' space, their error rows and grows, its cntlrs'
+health, its legs, its groups, its repairs, migrations and clones, its other
+error rows, its torn devices — so that a leg's row comes before every
+group's, and a node's fault shows by the legs it holds before the groups
+they touch; then oldest first. At most
+`MaxStatusRowPerSp` rows of a pool are listed, then one row that counts the
+rest. A row carries its pool, its kind, its object in words and as ids and
+names, the status of the report row it shows, its reason, its text cut to
+the row text cap (Live-state reporting) and its age where a time records
+it: a report row's by the node's clock, a health epoch's and a
+registration's by the gateway's. No record holds the time of a repair, a
+migration, a clone, a lost record or a refused grow, so such a row carries
+an age only where it shows a report row: a pending cutover's path row, a
+clone's row that waits for its source. The reply carries the defaulted name, the rows, the token, the
+count of pools read and the gateway's clock at the read. The read bounds
+its agent calls per request (`gateway.md` GW20): a node that does not
+answer costs one agent budget per read, and under a client's deadline a
+page ends early rather than answering nothing: a pool whose work the
+read's own deadline cut is left for the next page, the token going before
+it, save the page's first, which is kept, so that a page always moves on;
+there each read the deadline cut, and no other, says the read's time ran
+out. A healthy cluster at rest lists
+nothing; a change in flight lists itself while it runs: a pool or a cntlr
+just made, whose primary holds no state or observation of it yet, a
+primary just disabled until its failover, a migration whose cutover is
+pending, an open repair, and a pool or a clone being deleted until its
+drain ends. Reason: computed at the read, with no status key, nothing can
+go stale and no write path gains a write; it lists what an operator acts
+on; and the cap keeps a page within `GrpcMaxMsgSize` (Known limits).
 
 ### Worker registry
 
@@ -4997,8 +5125,9 @@ SH29), which never allocate and never start or stop the goroutine
 with `ResStatus`:
 
 * `RES_STATUS_UNKNOWN` — no answer from the node, or one from an
-  observation too old (`dnv-worker.md` HL7); set by *workers*, never by
-  the agent itself.
+  observation too old (`dnv-worker.md` HL7); set by *workers*, and by the
+  gateway's status read for a pool whose primary it cannot read (Clusters,
+  GetClusterStatus), never by the agent itself.
 * `RES_STATUS_MISSING` — the agent has not created it, a build still to
   come or a resource its pool's level suppresses (`cnagent.md` CN19). A
   row alone brings no new `Syncup*`: the worker re-sends one on a reply's
@@ -5061,7 +5190,10 @@ path, can be cut. Reason: the widest cntlr
 inspect reply, every such text at the cap, then fits `GrpcMaxMsgSize` at
 the limits of Cardinality limits and Common validation (Known limits), the
 cap being the largest round value at which it does, and every reply and
-read that passes agent text on carries it cut.
+read that passes agent text on carries it cut. The gateway's status read
+cuts a text it composes around an agent's by the same cut
+(`common.CutRowText`), so a row of it holds no more (Clusters,
+GetClusterStatus).
 
 `epoch` is the unix seconds of the last status change; a change of
 `details` or of `reason` alone does not move it. The `revision`
@@ -8343,8 +8475,9 @@ document and only pointed to here.
   times the slices and with the migrations, two path rows each (Live-state
   reporting); every dnv gRPC server and client takes messages
   up to `GrpcMaxMsgSize` (`grpc.md`, Wiring), and unit tests hold the three
-  under it at the limits of Cardinality limits and Common validation, and
-  the reply of a cntlr's inspect call too, the report beside an entry of
+  under it at the limits of Cardinality limits and Common validation, the
+  widest page of the status read too, whose rows a cap per pool bounds
+  (Clusters, GetClusterStatus), and the reply of a cntlr's inspect call, the report beside an entry of
   block counters per leg and per namespace device (`cnagent.md` CN23), whose
   error texts the agent cuts to `IoStatErrorMax` so that it fits with the
   rows' text, which with every text beside the rows the agent cuts to
@@ -8512,6 +8645,19 @@ document and only pointed to here.
   of the group's surviving leg where distinct names would have offered the
   other machine (Disk nodes). The cntlrs of a pool, at its
   create and at a cntlr replacement, can share a machine the same way.
+* **The status read sees only what etcd and the primaries hold.** It
+  calls each pool's primary and a migration's destination alone (Clusters,
+  GetClusterStatus), so a standby's or a side's own trouble shows only once
+  the worker sets its health epoch; a worker that is gone shows only as a
+  hint by the gateway's clock at the default vote interval, since the
+  registry's epochs decide nothing (Worker registry); no record holds the
+  time of a repair, a migration, a clone, a lost record or a refused grow,
+  so their rows carry no age but a report row's; and a pool shows at most
+  `MaxStatusRowPerSp` rows, with a count of the rest. Its bounds are per
+  request (`gateway.md` GW20): a read holds up to `StatusFanOut` primary
+  reports at once, each as wide as a cntlr report at the limits, so reads
+  that run at once add up, and a read loads every pool of its page as the
+  sp worker's pass loads it.
 * **Nothing limits recovery load across pools.** The reaction pass takes
   one action per pool per interval and holds nothing across pools
   (`dnv-worker.md` AR2): a dead disk node starts a repair, a full copy onto

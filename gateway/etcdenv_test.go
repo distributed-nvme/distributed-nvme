@@ -486,6 +486,9 @@ type fakeAgent struct {
 	// none, which reads as code OK: the UnknownObject refusal of an agent
 	// that does not hold the cntlr (cnagent.md CN23) is one a test installs.
 	cntlrReply *pb.AgentReply
+	// sideReply is the AgentReply every GetSideInfo reply carries, nil for
+	// none, as cntlrReply is GetCntlrInfo's.
+	sideReply *pb.AgentReply
 	// stamp is the ObsStamp every *Info reply carries: the agent answers
 	// from its latest observation (architecture.md, Live-state reporting),
 	// and every Inspect* reply passes the stamp on with its age.
@@ -578,6 +581,14 @@ func (f *fakeAgent) setCntlrReply(reply *pb.AgentReply) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.cntlrReply = reply
+}
+
+// setSideReply installs the AgentReply the GetSideInfo replies carry from
+// now on.
+func (f *fakeAgent) setSideReply(reply *pb.AgentReply) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.sideReply = reply
 }
 
 // setStamp installs the ObsStamp the *Info replies carry from now on.
@@ -674,9 +685,10 @@ func (f *fakeDnServer) GetSideInfo(
 	f.agent.mu.Lock()
 	defer f.agent.mu.Unlock()
 	return &pb.GetSideInfoReply{
-		Revision: fakeAgentRevision,
-		SideInfo: f.agent.sideInfo,
-		ObsStamp: f.agent.stamp,
+		AgentReply: f.agent.sideReply,
+		Revision:   fakeAgentRevision,
+		SideInfo:   f.agent.sideInfo,
+		ObsStamp:   f.agent.stamp,
 	}, nil
 }
 

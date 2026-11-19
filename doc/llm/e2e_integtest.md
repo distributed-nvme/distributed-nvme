@@ -1308,7 +1308,11 @@ A run that fails an assertion dumps instead of cleaning, so everything stays in
 place; a run failed by its end cleanup dumps what that cleanup left. The
 control-plane guest goes first, as its dump holds the failing dnvctl call's
 streams, which a later read would overwrite, and every dump is tolerant and
-bounded, as a guest command hangs exactly when something is wrong. A
+bounded, as a guest command hangs exactly when something is wrong. Once
+setup is done, and while the gateway and etcd run, the dump then reads the
+cluster through dnvctl, the status read's table first (`architecture.md`,
+Clusters, GetClusterStatus), which names what is wrong across the cluster,
+then the cluster, the pool and the inspects of its cntlrs and nodes. A
 node's dump, on a controller node and on a disk node alike, prints its
 kernel log first. Last come the two reads that can wait in the kernel there.
 One is the status of every device-mapper device, read with the `--noflush`

@@ -986,8 +986,10 @@ Measured times are in [the introduction](introduction.md#status-and-limits-of-01
   lists the names of its volumes and its other objects. When the record of
   one of them is gone from etcd, the worker sends the pool nothing.
   Removing that name from the pool's list makes the primary delete a
-  volume's data for good. State: procedure to write, how
-  to restore one record from the etcd backup; never remove the name.
+  volume's data for good. The status read names the lost record's key
+  ([the operations doc](operations.md#read-what-is-wrong)). State:
+  procedure to write, how to restore one record from the etcd backup;
+  never remove the name.
 - **A node deleted before its sweep keeps leftovers.** A node delete asks
   no agent. A reused disk is refused, since its header block, where dnv
   records the disk, still names the old node, until that block is zeroed
@@ -1236,7 +1238,8 @@ a node. "Doc" names the document with the steps. The two
 tutorials are [dnv on one machine](tutorial_all_in_one.md) and
 [dnv under Kubernetes on one machine](tutorial_csi.md). "Operations doc"
 names [the operations doc](operations.md), the procedures an operator
-follows by hand, which holds the forced-start guide, the steps for a pool
+follows by hand, which holds how to read what is wrong across the cluster,
+the forced-start guide, the steps for a pool
 made before the stripe bound, for a pool made before the block bound, for
 a new volume refused for a thin id that holds data and for a pool left by
 a Kubernetes volume whose name held "..", a planned restart of an agent, a
@@ -1302,7 +1305,7 @@ steps; the section "Steps known today" below gives the longer ones.
 | Upgrade | every program at once; `--version` on each program, and the version each running program logs when it starts | this page, below | procedure to write. Rolling upgrades are not yet. A downgrade is not supported. |
 | Run while the control plane is down | nothing to do; the data plane serves | none | procedure to write |
 | Handle the logs | none; JSON on stderr, no rotation | this page, below | procedure to write |
-| See what is wrong across the cluster | none; the worker's log | none | fix decided: one gateway read, with its dnvctl command, lists what is wrong in every pool |
+| See what is wrong across the cluster | `dnvctl cluster get-status` | the operations doc, Read what is wrong | done |
 | Give hosts the cdc addresses; front the gateways | none | the tutorials, for one host | procedure to write |
 | Change the check intervals or a node's budget | none | — | not yet |
 
@@ -1585,9 +1588,13 @@ yourself: a disk the logs fill is one the stores and etcd cannot write.
 ## 9. What cannot be seen
 
 - **No metrics, no alerts.** The worker's log is the only alert. The logs go
-  to stderr as JSON with no rotation. An auto-grow refused for budget, a
-  subsystem no cdc serves, a frozen worker watch and a stuck repair show in
-  a log line or not at all. A slow leg shows only when a person asks:
+  to stderr as JSON with no rotation. The status read, `dnvctl cluster
+  get-status`, shows what is wrong when a person asks: error rows, health
+  epochs, an auto-grow that cannot run, a full thin pool, a repair, a
+  migration or a clone that waits, a lost record and a worker that seems
+  gone ([the operations doc](operations.md#read-what-is-wrong)). A
+  subsystem no cdc serves and a frozen worker watch still show in a log
+  line or not at all. A slow leg shows only when a person asks:
   `dnvctl cntlr inspect` prints each leg's last test write and read times
   and the IO counters of each leg and of each namespace's device, and
   `dnvctl dn inspect` the counters of a disk node's disk, read when asked;
@@ -1597,8 +1604,23 @@ yourself: a disk the logs fill is one the stores and etcd cannot write.
   serves metrics, profiles or health over a port, though the CSI driver's
   manifests add a helper container that answers Kubernetes' health checks on
   port 9808 or 9809. State: not yet; log handling goes into the operations
-  doc. Fix decided: one gateway read, with its dnvctl command, lists what is
-  wrong across the cluster.
+  doc.
+- **The status read sees what etcd and the primaries hold.** The status
+  read asks each pool's primary and a migration's new side, and no
+  standby and no other side. A standby's or a side's own trouble shows
+  only once the worker sets its health epoch; the inspects show the rest.
+  A failover with no enabled standby to take the role, a leg repair the
+  worker cannot create and a cntlr replacement that finds no controller
+  node show only as a health line whose age grows; the worker's log names
+  why.
+  A worker that seems gone is a hint: the record a running worker writes
+  in etcd every few seconds is older, by the gateway's clock, than twice
+  the default time between two writes, and the gateway does not know a
+  worker's own time between writes. No record keeps the time of a repair, a migration, a clone, a
+  lost record or a refused grow, so their lines show no age, save the age
+  of a row of the primary's report that a line shows. A pool shows
+  a fixed number of lines at most, then one line that counts the rest.
+  State: accepted.
 - **A retired leg's partial mark can miss a short stay in the array.** A
   repair can take a retired leg back as its new leg. When md has counted
   that leg as a member but not copied all of it, the worker marks the leg

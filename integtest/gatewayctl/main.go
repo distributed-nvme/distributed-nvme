@@ -490,6 +490,7 @@ var commands = []command{
 	{"delete-cluster", setupDeleteCluster},
 	{"get-cluster", setupGetCluster},
 	{"get-cluster-capacity", setupGetClusterCapacity},
+	{"get-cluster-status", setupGetClusterStatus},
 	{"list-clusters", setupListClusters},
 	{"advance-cluster-ids", setupAdvanceClusterIds},
 	// worker

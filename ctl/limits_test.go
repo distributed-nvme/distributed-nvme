@@ -51,13 +51,18 @@ import (
 const limitsTraceId = "it-limits"
 
 // runLeaf runs one leaf, named by its `<group> <verb>` path, under the
-// suite's global prefix and limitsTraceId.
+// suite's global prefix and limitsTraceId. A leaf that prints a table by
+// default, `cluster get-status`, is run with its --json, so the walks read
+// its one CT4 document as they read every other leaf's (wantAccepted).
 func runLeaf(
 	t *testing.T, client *recordingClient, path string, argv ...string,
 ) cliResult {
 	t.Helper()
 	full := append([]string{"--trace-id", limitsTraceId},
 		strings.Fields(path)...)
+	if findLeaf(t, NewRootCmd(), path).Flags().Lookup("json") != nil {
+		full = append(full, "--json")
+	}
 	return runCLI(t, client, globalArgv(append(full, argv...)...)...)
 }
 

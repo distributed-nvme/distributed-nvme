@@ -32,10 +32,15 @@
 package ctl
 
 import (
+	"bytes"
 	"context"
 	"fmt"
+	"strings"
+	"text/tabwriter"
+	"time"
 
 	"github.com/spf13/cobra"
+	"google.golang.org/protobuf/types/known/durationpb"
 
 	"github.com/distributed-nvme/distributed-nvme/common"
 	"github.com/distributed-nvme/distributed-nvme/pb"
@@ -50,6 +55,7 @@ func registerCluster(root *cobra.Command) {
 		clusterListCmd(),
 		clusterAdvanceIdsCmd(),
 		clusterGetCapacityCmd(),
+		clusterGetStatusCmd(),
 	))
 }
 
@@ -274,4 +280,126 @@ func clusterGetCapacityCmd() *cobra.Command {
 		fmt.Sprintf("slice_cnt — slices a pool has (0 = the gateway "+
 			"default, %d)", common.DefaultSliceCntPerSp))
 	return cmd
+}
+
+// clusterGetStatusCmd drives GetClusterStatus, the status read of
+// architecture.md, Clusters: what is wrong in the cluster, a page of pools at
+// a time. Its pages are ListStoragePools' pages, so it takes the page flags,
+// and like `cluster get` it names its cluster with --name and falls back to
+// the global --cluster. It prints a table by default (statusTable) and the
+// reply as the CT4 document with --json, the one leaf flag of the CLI that
+// fills no request field (dnvctl.md, Conventions); both reach stdout
+// through the one checked write.
+func clusterGetStatusCmd() *cobra.Command {
+	cmd := leaf("get-status",
+		"list what is wrong in a cluster, a page of pools at a time "+
+			"(GetClusterStatus)",
+		func() (job, error) {
+			req := &pb.GetClusterStatusRequest{
+				ClusterName: clusterNameOf(),
+				Count:       u32Of("count"),
+				PageToken:   strOf("page-token"),
+			}
+			asJson := boolOf("json")
+			return func(
+				ctx context.Context, client pb.GatewayClient,
+			) (any, error) {
+				reply, err := client.GetClusterStatus(ctx, req)
+				if err != nil || asJson {
+					return reply, err
+				}
+				return statusTable{reply}, nil
+			}, nil
+		})
+	clusterNameFlag(cmd)
+	pageFlags(cmd.Flags())
+	cmd.Flags().Bool("json", false,
+		"print the reply as one JSON document instead of the table")
+	return cmd
+}
+
+// statusTable is a status reply that renders as the table of `cluster
+// get-status` (dnvctl.md CT4): a header, one line per row, the count of
+// pools read, and the next page's flag when there is one; a page with no
+// row is one line that says how many pools were read. The table shows a
+// row's pool ("-" for a cluster row), its object, its kind with its status
+// and reason where it has them, its age ("-" where none is known) and its
+// text, a newline or a tab in it shown as " | " so a row stays one line;
+// the ids and names a script reads are in the object, and --json gives
+// them as fields.
+type statusTable struct {
+	reply *pb.GetClusterStatusReply
+}
+
+// render is the table's bytes.
+func (st statusTable) render() []byte {
+	var out bytes.Buffer
+	reply := st.reply
+	if len(reply.GetRowList()) == 0 {
+		fmt.Fprintf(&out, "nothing is wrong in the %s\n",
+			poolsRead(reply.GetSpCnt()))
+	} else {
+		w := tabwriter.NewWriter(&out, 0, 0, 2, ' ', 0)
+		fmt.Fprintln(w, "POOL\tOBJECT\tSTATUS\tAGE\tTEXT")
+		for _, row := range reply.GetRowList() {
+			fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\n",
+				orDash(oneLine(row.GetSpName())),
+				oneLine(row.GetObject()), statusCell(row),
+				ageCell(row.GetAge()), oneLine(row.GetText()))
+		}
+		_ = w.Flush()
+		fmt.Fprintf(&out, "%s\n", poolsRead(reply.GetSpCnt()))
+	}
+	if token := reply.GetPageToken(); token != "" {
+		fmt.Fprintf(&out, "next page: --page-token %s\n", token)
+	}
+	return out.Bytes()
+}
+
+// statusCell is a row's kind, then its status and its reason where it has
+// them, each as its lower-case short name: "row/error/pool_needs_check",
+// "health", "lost-record".
+func statusCell(row *pb.StatusRow) string {
+	cell := strings.ReplaceAll(strings.ToLower(strings.TrimPrefix(
+		row.GetKind().String(), "STATUS_KIND_")), "_", "-")
+	if row.Status != nil {
+		cell += "/" + strings.ToLower(strings.TrimPrefix(
+			row.GetStatus().String(), "RES_STATUS_"))
+	}
+	if reason := row.GetReason(); reason != pb.ResReason_RES_REASON_NONE {
+		cell += "/" + strings.ToLower(strings.TrimPrefix(
+			reason.String(), "RES_REASON_"))
+	}
+	return cell
+}
+
+// ageCell is an age to the second, "-" when the row has none.
+func ageCell(age *durationpb.Duration) string {
+	if age == nil {
+		return "-"
+	}
+	return age.AsDuration().Round(time.Second).String()
+}
+
+// oneLine shows a newline, a carriage return or a tab as " | ", so a cell
+// keeps its row on one line and its column in place.
+func oneLine(text string) string {
+	return strings.NewReplacer("\r\n", " | ", "\n", " | ", "\r", " | ",
+		"\t", " | ").Replace(text)
+}
+
+// poolsRead counts the pools a page read: "1 pool read", "3 pools read".
+func poolsRead(cnt uint32) string {
+	if cnt == 1 {
+		return "1 pool read"
+	}
+	return fmt.Sprintf("%d pools read", cnt)
+}
+
+// orDash is text, or "-" when it is empty.
+func orDash(text string) string {
+	if text == "" {
+		return "-"
+	}
+	return text
 }

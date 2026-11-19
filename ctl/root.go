@@ -488,6 +488,9 @@ func writeResult(out []byte) error {
 // stable spacing, proto field names, proto3 defaults visible, uint64 as JSON
 // strings. The bitmap read's map renders through it too.
 func render(result any) ([]byte, error) {
+	if table, ok := result.(statusTable); ok {
+		return table.render(), nil
+	}
 	value := result
 	if msg, ok := result.(proto.Message); ok {
 		raw, err := marshalOpts.Marshal(msg)

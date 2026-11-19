@@ -25,6 +25,7 @@ const (
 	Gateway_ListClusters_FullMethodName                    = "/Gateway/ListClusters"
 	Gateway_AdvanceClusterIds_FullMethodName               = "/Gateway/AdvanceClusterIds"
 	Gateway_GetClusterCapacity_FullMethodName              = "/Gateway/GetClusterCapacity"
+	Gateway_GetClusterStatus_FullMethodName                = "/Gateway/GetClusterStatus"
 	Gateway_ListWorkers_FullMethodName                     = "/Gateway/ListWorkers"
 	Gateway_CreateDiskNode_FullMethodName                  = "/Gateway/CreateDiskNode"
 	Gateway_DeleteDiskNode_FullMethodName                  = "/Gateway/DeleteDiskNode"
@@ -101,6 +102,7 @@ type GatewayClient interface {
 	ListClusters(ctx context.Context, in *ListClustersRequest, opts ...grpc.CallOption) (*ListClustersReply, error)
 	AdvanceClusterIds(ctx context.Context, in *AdvanceClusterIdsRequest, opts ...grpc.CallOption) (*AdvanceClusterIdsReply, error)
 	GetClusterCapacity(ctx context.Context, in *GetClusterCapacityRequest, opts ...grpc.CallOption) (*GetClusterCapacityReply, error)
+	GetClusterStatus(ctx context.Context, in *GetClusterStatusRequest, opts ...grpc.CallOption) (*GetClusterStatusReply, error)
 	ListWorkers(ctx context.Context, in *ListWorkersRequest, opts ...grpc.CallOption) (*ListWorkersReply, error)
 	CreateDiskNode(ctx context.Context, in *CreateDiskNodeRequest, opts ...grpc.CallOption) (*CreateDiskNodeReply, error)
 	DeleteDiskNode(ctx context.Context, in *DeleteDiskNodeRequest, opts ...grpc.CallOption) (*DeleteDiskNodeReply, error)
@@ -229,6 +231,16 @@ func (c *gatewayClient) GetClusterCapacity(ctx context.Context, in *GetClusterCa
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(GetClusterCapacityReply)
 	err := c.cc.Invoke(ctx, Gateway_GetClusterCapacity_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *gatewayClient) GetClusterStatus(ctx context.Context, in *GetClusterStatusRequest, opts ...grpc.CallOption) (*GetClusterStatusReply, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(GetClusterStatusReply)
+	err := c.cc.Invoke(ctx, Gateway_GetClusterStatus_FullMethodName, in, out, cOpts...)
 	if err != nil {
 		return nil, err
 	}
@@ -885,6 +897,7 @@ type GatewayServer interface {
 	ListClusters(context.Context, *ListClustersRequest) (*ListClustersReply, error)
 	AdvanceClusterIds(context.Context, *AdvanceClusterIdsRequest) (*AdvanceClusterIdsReply, error)
 	GetClusterCapacity(context.Context, *GetClusterCapacityRequest) (*GetClusterCapacityReply, error)
+	GetClusterStatus(context.Context, *GetClusterStatusRequest) (*GetClusterStatusReply, error)
 	ListWorkers(context.Context, *ListWorkersRequest) (*ListWorkersReply, error)
 	CreateDiskNode(context.Context, *CreateDiskNodeRequest) (*CreateDiskNodeReply, error)
 	DeleteDiskNode(context.Context, *DeleteDiskNodeRequest) (*DeleteDiskNodeReply, error)
@@ -976,6 +989,9 @@ func (UnimplementedGatewayServer) AdvanceClusterIds(context.Context, *AdvanceClu
 }
 func (UnimplementedGatewayServer) GetClusterCapacity(context.Context, *GetClusterCapacityRequest) (*GetClusterCapacityReply, error) {
 	return nil, status.Error(codes.Unimplemented, "method GetClusterCapacity not implemented")
+}
+func (UnimplementedGatewayServer) GetClusterStatus(context.Context, *GetClusterStatusRequest) (*GetClusterStatusReply, error) {
+	return nil, status.Error(codes.Unimplemented, "method GetClusterStatus not implemented")
 }
 func (UnimplementedGatewayServer) ListWorkers(context.Context, *ListWorkersRequest) (*ListWorkersReply, error) {
 	return nil, status.Error(codes.Unimplemented, "method ListWorkers not implemented")
@@ -1294,6 +1310,24 @@ func _Gateway_GetClusterCapacity_Handler(srv interface{}, ctx context.Context, d
 	}
 	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
 		return srv.(GatewayServer).GetClusterCapacity(ctx, req.(*GetClusterCapacityRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _Gateway_GetClusterStatus_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(GetClusterStatusRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(GatewayServer).GetClusterStatus(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Gateway_GetClusterStatus_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(GatewayServer).GetClusterStatus(ctx, req.(*GetClusterStatusRequest))
 	}
 	return interceptor(ctx, in, info, handler)
 }
@@ -2480,6 +2514,10 @@ var Gateway_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "GetClusterCapacity",
 			Handler:    _Gateway_GetClusterCapacity_Handler,
+		},
+		{
+			MethodName: "GetClusterStatus",
+			Handler:    _Gateway_GetClusterStatus_Handler,
 		},
 		{
 			MethodName: "ListWorkers",

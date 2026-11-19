@@ -23,15 +23,16 @@
 # needed on the VM — both binaries are built here and scp'd.
 #
 # What it proves (Integration test plan, What the suite proves): (a) every one
-# of the 70 commands marshals its argv into exactly the intended request
+# of the 71 commands marshals its argv into exactly the intended request
 # proto, asserted FIELD FOR FIELD against the fake's state.json — a
 # whole-object comparison, so an unexpected key fails as loudly as a wrong
 # value, which is what makes "no sp_rev key" and "no dm_raid0_conf key"
 # provable rather than asserted; (b) the CT3 token trio — absent / `--rev 0` /
 # `--rev 0x1f` — reaches the wire as absent message / present-and-empty /
 # revision 31; (c) replies render per CT4, with byte-exact goldens for the
-# sweep case's three representatives; (d) failures render per CT5 and usage
-# errors issue no RPC at all; (e) trace ids arrive on the wire, minted when not
+# sweep case's three representatives and the status read's table; (d)
+# failures render per CT5 and usage errors issue no RPC at all; (e) trace
+# ids arrive on the wire, minted when not
 # given; (f) a number is decimal or hex after 0x, an id typed empty is a usage
 # error, and a result stdout refuses is exit 3 after one RPC (the errors
 # case's stages 8-10). Correctness only: the transport case's two timing
@@ -51,7 +52,7 @@
 #
 # Round trips: ctl_exec does ONE ssh per dnvctl invocation and brings back five
 # things — state.json before, the exit code, stderr, stdout, state.json after.
-# That is what keeps a 70-step sweep to 70 ssh calls, and it is why every
+# That is what keeps a 71-step sweep to 71 ssh calls, and it is why every
 # ctl_ok/ctl_fail/ctl_usage MUST run in the PARENT shell: the five results land
 # in globals, and a subshell would drop them (and would swallow a die).
 #
@@ -105,6 +106,14 @@ GOLD_CLUSTER_GET='{"cluster_conf":null,"cluster_id":"0","cluster_name":"","cn_gl
 SP_GET_REV=9007199254740993
 GOLD_SP_GET='{"cntlr_list":[],"slice_list":[],"sp_conf":null,"sp_name":"","sp_rev":{"revision":"9007199254740993","sp_name":"sp0"}}'
 GOLD_TD_BM='{"bitmap_hex":"a5","byte_cnt":1}'
+# The status read's table (dnvctl.md, `cluster` — `ctl/cluster.go`), for
+# the reply the sweep injects for GetClusterStatus: a cluster row and a pool
+# row, one pool read, a next page. $( ) drops the last newline of stdout.
+GOLD_STATUS_TABLE='POOL  OBJECT                                STATUS  AGE    TEXT
+-     worker role sp                        worker  -      no worker of the role is registered
+sp0   cntlr 1 (primary, cn 127.0.0.1:9100)  health  1m30s  health epoch set
+1 pool read
+next page: --page-token dG9r'
 
 # The base64 rendering of the --bm-hex value in the fake's records
 # (Integration test plan, The fake gateway). protojson renders a bytes field
@@ -908,7 +917,13 @@ case_sweep() {
 	set_behavior <<EOF
 {"methods":{
   "GetStoragePool":{"reply":{"sp_rev":{"sp_name":"$SP","revision":"$SP_GET_REV"}}},
-  "GetThinDeviceBitmap":{"reply":{"bitmap":"$BM_A5_B64"}}
+  "GetThinDeviceBitmap":{"reply":{"bitmap":"$BM_A5_B64"}},
+  "GetClusterStatus":{"reply":{"sp_cnt":1,"page_token":"dG9r","row_list":[
+    {"kind":"STATUS_KIND_WORKER","object":"worker role sp",
+     "text":"no worker of the role is registered","obj_name":"sp"},
+    {"sp_name":"sp0","kind":"STATUS_KIND_HEALTH",
+     "object":"cntlr 1 (primary, cn 127.0.0.1:9100)",
+     "text":"health epoch set","age":"90s","cntlr_id":"1"}]}}
 }}
 EOF
 
@@ -926,8 +941,8 @@ EOF
 	# to the 0/4/8/12 ladder either way (ctl/request_test.go's
 	# TestClusterCreateExtentSize says the same, and also carries the "no
 	# --extent-size sends no dn_bin_conf" half).
-	# The step keeps its number because the audit below pins 70 steps over
-	# 70 distinct RPCs.
+	# The step keeps its number because the audit below pins 71 steps over
+	# 71 distinct RPCs.
 	sweep_step 01 CreateCluster \
 		'{"cluster_name":"c1","dn_bin_conf":{"extent_size":"67108864"}}' \
 		cluster create --name c1 --extent-size 67108864
@@ -1322,13 +1337,33 @@ EOF
 		"{\"cluster_name\":\"$CLUSTER\",\"sp_name\":\"$SP\"}" \
 		sp inspect
 
+	# --- `cluster` — `ctl/cluster.go`: the status read ------------------
+	# Step 71 sits after `sp inspect` so no step is renumbered. --json
+	# chooses the CT4 document and reaches no request field; the page flags
+	# fill count and page_token, and --name falls back to the global
+	# --cluster.
+	sweep_step 71 GetClusterStatus \
+		"{\"cluster_name\":\"$CLUSTER\",\"count\":3,\"page_token\":\"pt1\"}" \
+		cluster get-status --count 3 --page-token pt1 --json
+	assert_field "$CTL_OUT" '.row_list | length' "2" \
+		"--json prints the injected reply's two rows"
+	# Without --json the leaf prints its table, the one other deviation of
+	# CT4 beside the bitmap's hex map, through the same checked write: no
+	# JSON, so ctl_exec and not ctl_ok. Not a sweep step: the audit below
+	# counts one call per RPC.
+	stage 71t "the status read's table — dnvctl cluster get-status"
+	ctl_exec cluster get-status
+	assert_eq "$CTL_RC" "0" "exit code of the table"
+	assert_eq "$CTL_ERR" "" "stderr of the table must be empty (CT7)"
+	assert_eq "$CTL_OUT" "$GOLD_STATUS_TABLE" "golden: the status table"
+
 	# -------------------------------------------------------------------
-	stage audit "all 70 steps left one request record under their trace id"
+	stage audit "all 71 steps left one request record under their trace id"
 	# -------------------------------------------------------------------
 	# CT1's completeness claim, made on the WIRE rather than from a table:
-	# 70 distinct RPCs, 70 distinct trace ids, one interceptor record each.
-	# One log read serves all 70 assertions.
-	assert_eq "${#SWEEP_TRACES[@]}" "70" "the sweep ran 70 steps"
+	# 71 distinct RPCs, 71 distinct trace ids, one interceptor record each.
+	# One log read serves all 71 assertions.
+	assert_eq "${#SWEEP_TRACES[@]}" "71" "the sweep ran 71 steps"
 	local records idx want
 	records=$(recsr "$(fgw_log)" \
 		'select(.msg == "grpc server request") | .trace_id + " " + .method')
@@ -1339,7 +1374,7 @@ EOF
 	done
 	local distinct
 	distinct=$(printf '%s\n' "${SWEEP_RPCS[@]}" | sort -u | grep -c . || true)
-	assert_eq "$distinct" "70" "the 70 steps drove 70 DISTINCT RPCs"
+	assert_eq "$distinct" "71" "the 71 steps drove 71 DISTINCT RPCs"
 }
 
 # ---------------------------------------------------------------------------

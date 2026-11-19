@@ -9,8 +9,9 @@
 # truth read back through integtest/workerctl (read-only, plus the
 # worker-role writes — the flips set-created/set-provisioned, the cutover
 # start-cutover, a leg's health epoch set-epoch, the repair stage moves
-# set-repair-stage and the drains drain-sp/drain-clone — of gateway.md,
-# Integration test plan, The etcd verification, `workerctl`).
+# set-repair-stage and the drains drain-sp/drain-clone — and the one lost
+# record the status read is shown, a pool's revision key deleted by del-rev,
+# of gateway.md, Integration test plan, The etcd verification, `workerctl`).
 #
 #   bash integtest/gateway_test.sh [--only <case>] [--cleanup-only] user@ip
 #
@@ -5467,6 +5468,130 @@ faults_agent_battery() {
 	assert_field "$out" '.cn_info' "null" "cn2: CnInfo after the restart"
 }
 
+# faults_status_rows prints the rows of one reply of a kind, of one pool or,
+# with an empty pool, of the cluster, as a JSON list.
+faults_status_rows() { # <reply> <kind suffix> <sp name or "">
+	jq_of "$1" "[ .row_list[]
+		| select(.kind == \"STATUS_KIND_$2\" and .sp_name == \"$3\") ]"
+}
+
+# faults_status_stage is stage 6 of the faults case: the status read of
+# architecture.md, Clusters, GetClusterStatus, against planted faults. No
+# dnv-worker runs in this suite, so every first page carries one row per
+# worker role; sp0, clean, carries none until a fault is planted. The fault
+# levers are the fake's rows and hang levers on the primary's cntlr, a leg's
+# health epoch (workerctl set-epoch) and, last, the pool's revision key
+# deleted (workerctl del-rev), the lost record that leaves sp0 undriven.
+faults_status_stage() { # <primary cn dir> <sp_id> <cntlr_id> <slice> <leg>
+	local dir=$1 spId=$2 cntlrId=$3 slice=$4 leg=$5
+	local cnId out rows start secs shard token
+	cnId=$(cn_id_of "$(sp_primary_cntlr sp0 | cut -d' ' -f2)")
+	clear_behavior "$dir"
+	set_state "$dir" <<EOF
+{"objects":{
+  "cn":{"revision":1,"request":{"cluster_id":"$CID","cn_id":"$cnId",
+        "revision":"1","cntlr_pointer_list":[
+          {"sp_id":"$spId","cntlr_id":"$cntlrId"}]}},
+  "cntlr $spId:$cntlrId":{"revision":1,"request":{
+        "cluster_id":"$CID","cn_id":"$cnId",
+        "cntlr_pointer":{"sp_id":"$spId","cntlr_id":"$cntlrId"},
+        "revision":"1","cntlr":{"primary":true},
+        "id_to_slice":$(jq_of "$(sp_json sp0)" '.slices')}}}}
+EOF
+	out=$(gw get-cluster-status)
+	assert_eq "$(jq_of "$(faults_status_rows "$out" WORKER "")" 'length')" \
+		"3" "no worker runs: one worker row per role"
+	assert_eq "$(jq_of "$out" '[.row_list[] | select(.sp_name == "sp0")]
+		| length')" "0" "sp0, clean, lists nothing"
+	assert_field "$out" '.sp_cnt' "1" "the page read one pool"
+	assert_field "$out" '.page_token' "" "one pool is the last page"
+
+	# A leg the worker found unhealthy whose row the primary reads ERROR:
+	# one row of the leg, the epoch and the row merged.
+	wctl set-epoch leg --sp sp0 --slice "$slice" --id "$leg" --age 60 \
+		>/dev/null
+	set_behavior "$dir" <<EOF
+{"objects":{"cntlr $spId:$cntlrId":{"rows":{
+  "leg_id_to_leg.$leg":{"status":"ERROR","details":"io error"}}}}}
+EOF
+	rows=$(faults_status_rows "$(gw get-cluster-status)" ROW sp0)
+	assert_eq "$(jq_of "$rows" 'length')" "1" "the leg gives one row"
+	assert_field "$rows" '.[0].leg_id' "$leg" "the row names the leg"
+	assert_field "$rows" '.[0].status' "RES_STATUS_ERROR" \
+		"the row carries the leg row's status"
+	assert_field "$rows" '.[0].text | test("io error")' "true" \
+		"the row carries the leg row's details"
+	wctl set-epoch leg --sp sp0 --slice "$slice" --id "$leg" --clear \
+		>/dev/null
+
+	# A thin pool that needs a check, then one out of data space, which the
+	# primary reports OK with its mode word.
+	set_behavior "$dir" <<EOF
+{"objects":{"cntlr $spId:$cntlrId":{"rows":{
+  "slice_id_to_dm_pool.$slice":{"status":"ERROR","reason":"POOL_NEEDS_CHECK",
+  "details":"0 1024 thin-pool 3 12/4096 5/62 - ro needs_check 1024"}}}}}
+EOF
+	rows=$(faults_status_rows "$(gw get-cluster-status)" ROW sp0)
+	assert_eq "$(jq_of "$rows" 'length')" "1" "needs_check gives one row"
+	assert_field "$rows" '.[0].reason' "RES_REASON_POOL_NEEDS_CHECK" \
+		"the row carries the pool row's reason"
+	set_behavior "$dir" <<EOF
+{"objects":{"cntlr $spId:$cntlrId":{"rows":{
+  "slice_id_to_dm_pool.$slice":{"status":"OK","details":
+  "0 1024 thin-pool 3 12/4096 62/62 - out_of_data_space discard_passdown queue_if_no_space - 1024"}}}}}
+EOF
+	rows=$(faults_status_rows "$(gw get-cluster-status)" SPACE sp0)
+	assert_eq "$(jq_of "$rows" 'length')" "1" "a full pool gives one row"
+	assert_field "$rows" '.[0].slice_id' "$slice" "the row names the slice"
+
+	# The primary's agent hangs: one UNKNOWN row, and the read ends within
+	# the status read's agent budget (StatusAgentTimeout), well inside the
+	# gateway's default one (DefaultGatewayAgentTimeout).
+	set_behavior "$dir" <<EOF
+{"objects":{"cntlr $spId:$cntlrId":{"hang":true}}}
+EOF
+	start=$SECONDS
+	rows=$(faults_status_rows "$(gw get-cluster-status)" REPORT sp0)
+	secs=$((SECONDS - start))
+	clear_behavior "$dir"
+	assert_eq "$(jq_of "$rows" 'length')" "1" "a hung primary gives one row"
+	assert_field "$rows" '.[0].status' "RES_STATUS_UNKNOWN" \
+		"a hung primary's row reads unknown"
+	assert_between "$secs" 2 8 \
+		"the hung primary bounds the read at the status read's budget"
+
+	# Pages of one pool each over two pools: the cluster rows on the
+	# first page alone, and the token to the second.
+	gw create-sp --sp sp1 --cntlr-cnt "$SP_CNTLR_CNT" \
+		--slice-cnt "$SP_SLICE_CNT" --init-ext-cnt "$SP_INIT_EXT" \
+		--raid1 >/dev/null
+	out=$(gw get-cluster-status --count 1)
+	assert_field "$out" '.sp_cnt' "1" "page 1 reads one pool"
+	token=$(jq_of "$out" '.page_token')
+	assert_ne "$token" "" "page 1 of two carries a token"
+	assert_eq "$(jq_of "$(faults_status_rows "$out" WORKER "")" 'length')" \
+		"3" "page 1 carries the cluster rows"
+	out=$(gw get-cluster-status --count 1 --page-token "$token")
+	assert_field "$out" '.sp_cnt' "1" "page 2 reads the other pool"
+	assert_eq "$(jq_of "$(faults_status_rows "$out" WORKER "")" 'length')" \
+		"0" "page 2 carries no cluster row"
+	token=$(jq_of "$out" '.page_token')
+	out=$(gw get-cluster-status --count 1 --page-token "$token")
+	assert_field "$out" '.sp_cnt' "0" "the empty last page reads no pool"
+	assert_field "$out" '.page_token' "" "the empty last page ends it"
+
+	# A lost record: sp0's revision key deleted, which leaves the pool
+	# undriven; its row names the key. Last in the case, whose next case's
+	# wipe takes the pools away.
+	shard=$(printf '%02x' "$(sp_shard sp0)")
+	wctl del-rev sp --id "$spId" --shard "$shard" >/dev/null
+	rows=$(faults_status_rows "$(gw get-cluster-status)" LOST_RECORD sp0)
+	assert_eq "$(jq_of "$rows" 'length')" "1" \
+		"the lost revision key gives one row"
+	assert_field "$rows" '.[0].object | test(" sp_rev ")' "true" \
+		"the row names the pool's revision key"
+}
+
 # ---------------------------------------------------------------------------
 # The case
 # ---------------------------------------------------------------------------
@@ -5487,7 +5612,8 @@ case_faults() {
 	# "a live pool": the td-size rule, the ns_idx probe and every precondition
 	# need stored state to be checked against, so the whole fixture is arranged
 	# first and the five numbered steps below are then exactly the five
-	# batteries that case describes.
+	# batteries that case describes; a sixth reads the status read over
+	# planted faults.
 	new_cluster
 	make_nodes
 	# The capacity read (architecture.md, Clusters) sees every node as
@@ -6099,6 +6225,14 @@ case_faults() {
 	start_fake dn "$forceDnDir" "$forceDnAddr" "--size $DN_SIZE"
 	wait_until "$WAIT_SHORT" "$forceDnDir's port to listen again" ports_up \
 		"${forceDnAddr##*:}"
+
+	# -----------------------------------------------------------------
+	stage 6 "the status read: the rows of planted faults, its pages"
+	# -----------------------------------------------------------------
+	# The status read (architecture.md, Clusters, GetClusterStatus) lists
+	# what is wrong, from etcd and the primary's latest report; its rows
+	# for each planted fault, and its pages.
+	faults_status_stage "$cnDir" "$spId" "$cntlrId" "$slice" "$dataLeg"
 
 	# Leave every fake this case touched exactly as case_reset would: the
 	# next case wipes etcd but a stale behavior file would outlive it.

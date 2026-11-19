@@ -293,6 +293,12 @@ const (
 	MinCnCap       = 1024
 	DefaultListCnt = 64
 	MaxListCnt     = 1024
+	// MaxStatusRowPerSp is the most rows the status read lists for one pool
+	// (architecture.md, Clusters, GetClusterStatus); a pool with more gets
+	// one row more that counts what was left out. It keeps a page of
+	// MaxListCnt pools, every row at its widest, within GrpcMaxMsgSize
+	// (gateway's TestStatusWidestReplyFits).
+	MaxStatusRowPerSp = 32
 
 	DnvPrefix = "dnv"
 	DmPrefix  = "dnv"
@@ -958,16 +964,18 @@ const (
 	WorkerRoleSp = "sp"
 
 	// dnv-gateway (gateway.md, Constants this document owns). That section
-	// adds four constants and two land here, DefaultGatewayAgentTimeout and
-	// MaxCandidateRoundCnt: CloneBmChunkBytes sits beside MaxCloneBmCnt
-	// above, and EtcdMaxTxnOps in the dnv-worker block, whose header says so.
+	// adds six constants and four land here, DefaultGatewayAgentTimeout,
+	// MaxCandidateRoundCnt, StatusAgentTimeout and StatusFanOut:
+	// CloneBmChunkBytes sits beside MaxCloneBmCnt above, and EtcdMaxTxnOps
+	// in the dnv-worker block, whose header says so.
 	//
 	// DefaultGatewayAgentTimeout is the per-call budget of the gateway's
 	// agent RPCs (GetDnSize/GetCnSize, the Get*Info behind Inspect*, behind
 	// the force = false checks of DeleteClone/FinishMigration, behind
 	// ForceStartGroup's check of the group's array and behind CreateRepair's
 	// read of the bad leg's row, the Get*Bm bitmap reads, and the
-	// GetCntlrInfo and InspectGrp behind InspectGroup), in seconds. Applied with context.WithTimeout around each dial and its
+	// GetCntlrInfo and InspectGrp behind InspectGroup), in seconds; the
+	// status read's calls take StatusAgentTimeout instead. Applied with context.WithTimeout around each dial and its
 	// calls (AG2), so InspectGroup's two calls share one budget; chosen equal to DefaultEtcdOpTimeout so a
 	// hung agent and a hung etcd bound an RPC alike. A Get*Info answers from
 	// the agent's latest observation and reads nothing of the node
@@ -983,6 +991,16 @@ const (
 	// and it is well above the rounds the gateway suite's ten parallel pool
 	// creates can need.
 	MaxCandidateRoundCnt = 32
+	// StatusAgentTimeout is the per-call budget, in seconds, of the status
+	// read's agent calls (gateway.md GW20), in place of
+	// DefaultGatewayAgentTimeout: short enough that a page with a node
+	// that does not answer still answers inside dnvctl's default deadline,
+	// since the read calls an address that failed once in a read no more.
+	StatusAgentTimeout = 3
+	// StatusFanOut is how many pools one status read loads and calls at
+	// once (gateway.md GW20): a bound per request, which keeps the replies
+	// a read holds at once to a few primary reports.
+	StatusFanOut = 4
 
 	// dnv-cdc (cdc.md, Constants this document owns).
 	//

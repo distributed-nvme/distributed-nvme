@@ -237,6 +237,7 @@ func TestCommandsCoverEveryRpc(t *testing.T) {
 		"CreateCluster": "create-cluster", "DeleteCluster": "delete-cluster",
 		"GetCluster": "get-cluster", "ListClusters": "list-clusters",
 		"GetClusterCapacity": "get-cluster-capacity",
+		"GetClusterStatus":   "get-cluster-status",
 		"AdvanceClusterIds":  "advance-cluster-ids",
 		"ListWorkers":        "list-workers",
 		"CreateDiskNode":     "create-dn", "DeleteDiskNode": "delete-dn",
@@ -301,8 +302,8 @@ func TestCommandsCoverEveryRpc(t *testing.T) {
 		"UpdateGroupOperatorInCharge":     "set-grp-operator-in-charge",
 		"GetThinDeviceBitmap":             "get-td-bm",
 	}
-	if len(pb.Gateway_ServiceDesc.Methods) != 70 {
-		t.Fatalf("service Gateway has %d methods, want 70",
+	if len(pb.Gateway_ServiceDesc.Methods) != 71 {
+		t.Fatalf("service Gateway has %d methods, want 71",
 			len(pb.Gateway_ServiceDesc.Methods))
 	}
 	for _, method := range pb.Gateway_ServiceDesc.Methods {

@@ -166,6 +166,25 @@ func setupGetClusterCapacity(fs *flag.FlagSet) job {
 	}
 }
 
+// setupGetClusterStatus drives GetClusterStatus, the status read of
+// architecture.md, Clusters: the same --name override as get-cluster, and
+// the page flags of list-sps, since its pages are pools.
+func setupGetClusterStatus(fs *flag.FlagSet) job {
+	name := clusterNameFlag(fs)
+	count := fs.Uint("count", 0, "pools per page; 0 asks for the default of 64")
+	pageToken := fs.String("page-token", "",
+		"page_token returned by the previous page")
+	return func(
+		ctx context.Context, client pb.GatewayClient, g *globals,
+	) (any, error) {
+		return client.GetClusterStatus(ctx, &pb.GetClusterStatusRequest{
+			ClusterName: clusterNameOf(g, *name),
+			Count:       uint32(*count),
+			PageToken:   *pageToken,
+		})
+	}
+}
+
 // setupListClusters drives ListClusters. The request is cluster-independent —
 // with ListWorkers' it is one of the two RPCs of this file with no
 // cluster_name field — so it takes only the page flags; --page-token also

@@ -3,8 +3,9 @@
 This document holds the procedures an operator follows by hand. The words
 are those of the [core glossary](core_glossary.md). [The scope
 page](scope.md) says what dnv promises and which limits each procedure
-works around. The first procedures are the forced-start guide: how to bring
-back a group whose legs all failed.
+works around. The first procedure is how to read what is wrong across a
+cluster, the place to start; then comes the forced-start guide: how to
+bring back a group whose legs all failed.
 
 A procedure has these parts, each where it applies: the symptom, or when to
 use the procedure; how to confirm it; what dnv does alone and how long it
@@ -26,8 +27,140 @@ ends with exit status 3 was done by the gateway, and any change it asked
 for was made, but its output was lost. Read the state again before you run
 the command again.
 
-`dnvctl sp get` also lists the pool's cntlrs. The one marked primary is the
-group's primary. `dnvctl cntlr inspect --id <cntlr id>` shows its rows.
+`dnvctl cluster get-status` lists what is wrong across the cluster
+([Read what is wrong](#read-what-is-wrong)). `dnvctl sp get` also lists
+the pool's cntlrs. The one marked primary is the group's primary.
+`dnvctl cntlr inspect --id <cntlr id>` shows its rows.
+
+## Read what is wrong
+
+Words: the **status read** is `dnvctl cluster get-status`, one read of the
+gateway that lists what is wrong in a cluster, a page of storage pools at
+a time; it reads etcd and the latest report of each pool's primary, and it
+changes nothing. A **page token** is the text the read prints after
+`--page-token` when pools are left to read; the next run with it reads the
+next page.
+
+When to use: first, whenever something seems wrong — a volume is slow or
+stops, a host loses a path, or a command is refused for a reason you do
+not see. Then follow the line that names the problem to the guide for it.
+
+How to read it:
+
+1. Run `dnvctl cluster get-status`. Each line is one thing that is wrong:
+   the pool ("-" for a line about the workers or the nodes, which only
+   the first page has), the object, named with its id (`cntlr 3`,
+   `leg 17 (group 5, slice 2; side 18 on dn ...)`, `repair r1`), the
+   STATUS column, the age — how long it has been so, "-" where nothing
+   records the time — and a text.
+2. When the last line is `next page: --page-token <token>`, run the read
+   again with `--page-token <token>`, until that line does not come. A
+   page that meets a node that does not answer can end early; its token
+   still leads on.
+3. `nothing is wrong in the N pools read` on every page means the read
+   found nothing wrong. A healthy cluster at rest lists nothing; a change
+   in flight lists itself for a few seconds while it runs: a pool or a
+   cntlr just made, whose primary has not reported on it yet
+   (`report/unknown`), a primary just disabled until its failover, a
+   migration whose cutover is pending, and a pool or a clone being
+   deleted until its drain ends. A repair lists itself until it ends.
+4. `--json` prints the same page as one JSON document, with each object's
+   ids as fields, for a script.
+
+The first word of the STATUS column says what kind of line it is; the
+status and the reason of the row it shows follow where it has them:
+
+- `lost-record`: a record the pool or a node needs is gone from etcd, the
+  record that maps the pool's id to its name names another pool, or a
+  node's record does not read. The object is the record's key.
+- `report/unknown`: the read could not get the pool's state: its records
+  do not read, it has no primary, or the primary's agent does not answer,
+  holds nothing or is starting; or the primary's report is too old, which
+  says either that no worker asks it for a read or that the agent's read
+  does not end, and then a `health` line of the cntlr shows too; or the
+  primary's report is behind the pool's latest change while its health
+  epoch is set: either the change is still on its way to the primary, or
+  its node refuses it, as when it cannot save what the worker sends; the
+  read cannot tell which, and the worker's log names it.
+- `pool`: the pool as a whole: being deleted, its level above read-write,
+  its primary disabled, or a stored setting the worker refuses, such as a
+  group whose sizes give its sides nothing to zero.
+- `space`: a slice's thin pool is out of data space, so a write that needs
+  a new block waits and then fails, or out of metadata space, so the pool
+  is read-only.
+- `grow`: auto-grow cannot add a group to a slice that is filling up; the
+  text says why, for example that no disk node has room or that a
+  controller node's budget, the extents it may still give the pools it
+  serves, is short.
+- `row`, as in `row/error`: a row of the primary's report reads
+  `RES_STATUS_ERROR`, or a leg is kept out of its array; the text is the
+  row's text.
+- `health`: the worker has set a health epoch; the age is how long ago.
+- `group`: a group's array is not whole, the primary refuses to add a leg,
+  the operator is in charge of the group's repair, a forced-start mark
+  stands, or md records bad blocks on a leg's member.
+- `repair`, `migration`, `clone`: one that waits; the text says for what,
+  and for a repair who acts next: the worker at its next pass, or the
+  operator with `dnvctl repair cancel` or `dnvctl repair finish` — for the
+  operator's own repairs, and for the worker's in a pool at a level that
+  stops the worker's reactions or with a setting the worker refuses.
+- `torn`: a thin device whose slices hold its data from different points
+  in time.
+- `worker`: no worker of a role (dn, cn or sp) has its record in etcd,
+  the record a running worker writes again every few seconds; or one
+  worker has not written its record for twice the default time between
+  two writes, by the gateway's clock. This is only a hint: the gateway
+  does not know a worker's own time between writes.
+- `more`: the pool has more lines than the read shows for one pool; read
+  them with `dnvctl sp get`, `dnvctl cntlr inspect` and
+  `dnvctl group inspect`.
+
+What dnv does alone: the read changes nothing, and dnv does not act on
+it. The worker acts on the same facts by itself, each in its own time
+([the scope page](scope.md), section 6), save the cases the end of this
+section names: a health epoch on the primary
+leads to a failover once the primary's event threshold passes; on a
+standby, to a cntlr replacement once the cntlr's threshold passes; on a
+leg of a RAID1 group, to leg repair once the leg's threshold passes, or
+once its side has also been unhealthy for the side's threshold. A grow
+refused for room waits until a disk node or a controller node has room;
+one refused at a ceiling, a full list of groups or the metadata's
+largest size, stays refused. A lost record, a `worker` line and a
+`report/unknown` line get no reaction.
+
+Safe steps: the read itself, any number of times. For a node named in
+`report/unknown` or `health` lines, run `dnvctl cn inspect` or
+`dnvctl dn inspect` on it, and look at the node and its agent. For a
+`row` line, `dnvctl cntlr inspect --id <primary cntlr id>` shows the
+whole report. For a `group` or a `repair` line, the forced-start guide
+starts at [Reading a group](#reading-a-group).
+
+Steps that can lose data: none in the read. Never remove a name from a
+pool's lists to clear a `lost-record` line: the primary then deletes that
+volume's data for good ([the scope page](scope.md), section 6.1, a pool
+with a lost record).
+
+When to stop: a `lost-record` line, or a `report/unknown` line that does
+not go away while the node answers its inspect: ask for help before any
+write to that pool.
+
+What the read does not show: a standby's or a side's own trouble before
+the worker sets its health epoch, since the read asks only the primaries
+and a migration's new side; why the worker does not react: a failover
+with no enabled standby to take the role, a leg repair the worker cannot
+create, for want of a disk node with room or of a healthy leg, and a cntlr
+replacement that finds no controller node show only as a `health` line
+whose age grows, and the worker's log names the reason; a subsystem no cdc
+serves; and a worker that
+runs but whose watch has stopped. The scope page, section 9, lists these.
+
+Tested: the gateway's unit tests plant each kind of line and check it,
+the order of a pool's lines and their cap, a node that hangs, the pages
+and a page cut short by a client's deadline. The gateway suite's faults
+case plants a leg fault, a thin pool that needs a check, a full thin pool,
+a hung primary and a lost revision record, and reads the pages; the dnvctl
+suite checks the table's shape; the e2e suite prints the table when a case
+fails. These stages are written and have not yet run in the lab.
 
 ## The forced-start guide
 

@@ -184,6 +184,20 @@ func CnRevPrefix(shard uint32) string {
 	return prefixOf(common.DnvPrefix, kindCnRev, shardField(shard))
 }
 
+// DnRevKindPrefix and CnRevKindPrefix are the prefixes of every DN's and
+// every CN's revision record, every shard and every cluster at once (MD2):
+// the keys-only ranges by which the gateway's status read finds a node
+// whose revision record is absent (gateway.md GW20). No worker ranges or
+// watches them; each shard worker keeps to its DnRevPrefix or CnRevPrefix.
+func DnRevKindPrefix() string {
+	return prefixOf(common.DnvPrefix, kindDnRev)
+}
+
+// CnRevKindPrefix is DnRevKindPrefix for the CNs.
+func CnRevKindPrefix() string {
+	return prefixOf(common.DnvPrefix, kindCnRev)
+}
+
 // SpRevKey is the key of one SP's revision record (MD2).
 func SpRevKey(shard uint32, cid uint64, spId uint64) string {
 	return joinKey(

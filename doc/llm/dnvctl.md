@@ -27,8 +27,8 @@ Out of scope, each deliberately:
 * TLS and authentication: dnv is plaintext gRPC end to end;
 * multi-gateway failover: dnvctl dials the one `--gateway-address`, and
   operators front the gateways themselves;
-* table or human output modes: every result is one canonical JSON document
-  (CT4);
+* table or human output modes but one: every result is one canonical JSON
+  document, save the status read's table (CT4);
 * token auto-fetch, and the warning on disabling the last enabled cntlr:
   dnvctl issues no RPC the operator did not type (CT8; `cntlr` —
   `ctl/cntlr.go`);
@@ -174,13 +174,16 @@ sorted keys, stable spacing, proto field names, proto3 defaults visible and
 uint64 fields as JSON strings, save that a proto3 `optional` field that is
 not set, such as `probe_times.read_ms` after a failed write or
 `last_success_age_ms` before any round succeeded, is left out, as protojson
-leaves out every member of a oneof that is not set. The bitmap read,
-`td get-bm`, is the one deviation, because protojson renders a bytes field
-as base64: it prints a document of two keys, `bitmap_hex`, the bitmap as
-lowercase hex with no prefix, and `byte_cnt`, its length in bytes
-(`hexBitmapResult`). Every result reaches stdout the same way: `render`
-makes the document and its newline, and `writeResult` writes them in one
-checked write, the package's only write to stdout, under the exemption
+leaves out every member of a oneof that is not set. Two leaves
+deviate. The bitmap read, `td get-bm`, because protojson renders a bytes
+field as base64: it prints a document of two keys, `bitmap_hex`, the
+bitmap as lowercase hex with no prefix, and `byte_cnt`, its length in
+bytes (`hexBitmapResult`). And the status read, `cluster get-status`,
+which is read by a person in an incident: it prints a table by default
+and the document only with `--json` (`statusTable`; `cluster` —
+`ctl/cluster.go`). Every result reaches stdout the same way: `render`
+makes the document and its newline, or the table, and `writeResult`
+writes them in one checked write, the package's only write to stdout, under the exemption
 `log.md` R1 makes for CLI results. A reply that cannot be rendered, or a
 write that fails or ends short, is CT5's exit 3, never a silent exit 0.
 Nothing else is ever printed to stdout on an RPC path; the only other texts
@@ -198,8 +201,8 @@ silences are the client interceptors'.
 
 CT5. **Errors and exit codes.** dnvctl exits with one of four codes:
 
-* 0 — the RPC returned OK: stdout carries the CT4 document and stderr is
-  empty; also `--help`, cobra's `help` and `completion` commands, and
+* 0 — the RPC returned OK: stdout carries the CT4 document, or the
+  status read's table, and stderr is empty; also `--help`, cobra's `help` and `completion` commands, and
   `dnvctl --version`, which prints "dnvctl" and the build version
   (`architecture.md`, Components: invocation reference), each with no RPC.
 * 1 — the RPC or its connection failed: stdout is empty and stderr carries
@@ -218,7 +221,8 @@ CT5. **Errors and exit codes.** dnvctl exits with one of four codes:
   the same reason, with stderr the one line "dnvctl: message".
 * 3 — the RPC returned OK, and its result was not written: the reply could
   not be rendered (CT4), or the write to stdout failed or ended short, as on
-  a full disk under a redirect. stdout holds no complete document, and stderr
+  a full disk under a redirect. stdout holds no complete document or
+  table, and stderr
   carries one line, "dnvctl: the call returned OK, but its result was not
   written: error (trace_id ID)". The call ran to its end, so any change it
   asked for was made, and a script reads the state again before it repeats
@@ -338,7 +342,9 @@ these exceptions:
   bin shifts of `dn_bin_conf` (`cluster` — `ctl/cluster.go`), and
   `sp create`'s `bdev_conf.bdev_feature_list` (In scope / out of scope).
 
-A leaf has a flag only where its request has a field. An
+A leaf has a flag only where its request has a field, save
+`cluster get-status`'s `--json`, which chooses how the reply is printed
+(`cluster` — `ctl/cluster.go`). An
 optional sub-message follows the "not given" convention: it is sent only
 when one of its flags holds a non-zero value, a zero meaning the member was
 not given, except for the token messages (CT3) and where a group below says
@@ -521,6 +527,29 @@ can still place, with the limit the cluster reaches first. `--leg-cnt`,
 zero takes the gateway's default as on `sp create`. It names its cluster
 with `--name`, falling back to the global `--cluster`, and carries no
 token, as every read does (CT3).
+
+`cluster get-status` is the status read of `architecture.md`, Clusters:
+what is wrong in the cluster, a page of pools at a time. It names its
+cluster as `cluster get-capacity` does, and takes the page flags, since its
+pages are `sp list`'s. It prints a table by default, for a person in an
+incident, and the CT4 document with `--json`, for a script: the header
+`POOL OBJECT STATUS AGE TEXT`, then one line per row — the row's pool, "-"
+for a cluster row; its object; its kind, and its status and its reason
+where it has them, each as its lower-case short name, as `row/error` or
+`lost-record`; its age to the second, "-" where none is known; and its
+text, a newline or a tab in it shown as " | " so the row stays one line —
+then a line that counts the pools the page read, and `next page:
+--page-token TOKEN` when the reply carries a token. A page with no row is
+one line that says nothing is wrong in the pools it read. The ids and names
+a row
+carries for a script stand in its object; `--json` gives them as fields,
+with the read's time and the cluster's name. The table goes through
+`render` and `writeResult` as every result does (CT4), so a write that
+fails is exit 3 (CT5). One invocation is one RPC (CT8): dnvctl never walks
+the pages itself. Reason for the default: the read exists for a person in
+an incident, who reads a table faster than a document, while a script
+names `--json`. The unit tests' walks of every number flag run the leaf
+with `--json`, so they read its document as every other leaf's.
 
 ### `dn` — `ctl/dn.go`
 
@@ -828,7 +857,9 @@ stand-in for the gateway that records the one request a command line
 produces and answers it from the test, with an injected status, an injected
 reply, or a verdict it takes from the request itself, as the gateway's
 validation and paging would. Against it they prove the field and flag rules
-of every leaf, the tokens of CT3, the rendering of CT4, the exit codes and
+of every leaf, the tokens of CT3, the rendering of CT4, the status read's
+table cell by cell, with every field of its reply either shown or named as
+left out, the exit codes and
 failure lines of CT5, exit 3 on a stdout that refuses the write and on a
 reply that cannot be rendered among them, and the binding of CT9, and CT8
 at the limits of the count, size, name and NQN flags. A number its flag
@@ -878,7 +909,8 @@ they exercise, on the wire, CT1 with one step per RPC in tree order, save
 `sp inspect`, which runs last so that the steps before it keep their
 numbers, CT2's
 trace id and deadline, CT3's token on exactly its carriers and its refusal on
-one leaf that carries none, CT4's goldens, CT5's failure line and codes, exit
+one leaf that carries none, CT4's goldens, the status read's table among
+them, CT5's failure line and codes, exit
 3 on a stdout that refuses the write among them, CT7's empty stderr, CT8's
 parse-only refusals, a number with a leading zero on an id flag and on a pflag
 number, an id typed empty, and a word `--override` does not know and a
@@ -909,7 +941,8 @@ absent key and `--rev 0` an empty object, and uint64 fields compare as
 strings, protojson's doing. A count is a delta between two state snapshots
 taken in the same round trip as the call, so nothing can slip in between; a
 usage error passes only with the count unmoved, and exit 3 only with it moved
-by one. Every success parses stdout, and goldens compare byte-exact. The token
+by one. Every success but the status read's table parses stdout, and the
+goldens, that table's among them, compare byte-exact. The token
 assertions are request-side — what dnvctl put on the wire — so they hold
 whatever a gateway does with the token. Waits are bounded polls for process
 start and exit only: every dnvctl call is synchronous. The fake's log is read

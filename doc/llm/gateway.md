@@ -3,7 +3,7 @@
 This document owns the `dnv-gateway` binary: package `gateway`, the
 stateless server of the `Gateway` gRPC service, with its serving and
 lifecycle (GW1 to GW3), the handler pattern every RPC follows (GW4 to GW12
-and GW14), the mechanism of each handler by resource group (GW15 to GW19
+and GW14), the mechanism of each handler by resource group (GW15 to GW20
 among them), the agent calls
 (AG1 to AG4), the `cmd/dnv-gateway` command (CM1 to CM3), its log records
 (LG1 to LG3) and the intent of the gateway integration suite. It owns how the
@@ -26,9 +26,11 @@ agents only for `GetDnSize` and `GetCnSize`, the `Get*Info` behind its
 `DeleteClone` and `FinishMigration`, behind `ForceStartGroup`'s check of
 the group's array, behind `CreateRepair`'s read of the bad leg's row and
 behind `GetThinDeviceBitmap`'s check of the parks, the `GetThinDeviceBm`
-bitmap read, and the `InspectGrp` read behind `InspectGroup` (Agent
-calls). It is one of the three co-located control-plane processes —
-gateway, worker, cdc — that any number of control-plane servers may run.
+bitmap read, the `InspectGrp` read behind `InspectGroup`, and the
+primaries' `GetCntlrInfo` and the migration destinations' `GetSideInfo`
+behind the status read, `GetClusterStatus` (Agent calls). It is one of
+the three co-located control-plane processes — gateway, worker, cdc —
+that any number of control-plane servers may run.
 This document covers `gateway/` and `cmd/dnv-gateway` only: `dnvctl` is a
 separate component with its own document (`dnvctl.md`), and the integration
 suite drives the gateway with a dedicated test client, `gatewayctl`, not
@@ -79,13 +81,15 @@ etcd key kind: it writes only kinds of `architecture.md`, Key table, and
 nothing that describes itself (GW1). The `model` exports it rests on are
 stated beside the rules that call them — `SpNextId` (GW12, GW19) and
 `TakeSpIds` (GW12), the revision bump helpers and the expected revision of
-the shared mutations (GW6), the list-range prefixes (GW10), and the
-conf resolvers and stored-conf validators (GW11); `model` itself is
+the shared mutations (GW6), the list-range prefixes (GW10), the
+conf resolvers and stored-conf validators (GW11), and, for the status
+read, `LoadSp`, the grow and repair-wait rules it shares with the sp
+worker and the revision keys' kind prefixes (GW20); `model` itself is
 `dnv-worker.md`'s (MD1 to MD9).
 
 ### Constants this document owns
 
-Four constants are this document's, and `common/constants.go` is
+Six constants are this document's, and `common/constants.go` is
 authoritative for their comments.
 
 `DefaultGatewayAgentTimeout` is the per-call budget, in seconds, of the
@@ -98,6 +102,17 @@ read, and the `GetCntlrInfo` and `InspectGrp` behind `InspectGroup` —
 applied as a timeout around each dial and its calls (AG2), so
 `InspectGroup`'s two calls share one budget. It equals
 `DefaultEtcdOpTimeout`, so a hung agent and a hung etcd bound an RPC alike.
+The status read's calls take `StatusAgentTimeout` instead.
+
+`StatusAgentTimeout` is the per-call budget, in seconds, of the status
+read's agent calls (GW20). It is shorter than `DefaultGatewayAgentTimeout`
+because one read calls many nodes: with a node that does not answer, a
+page still answers inside dnvctl's default deadline, since the read calls
+an address that failed once in a read no more.
+
+`StatusFanOut` is how many pools one status read loads and calls at once
+(GW20): a bound of one request, which keeps the primary reports a read
+holds at once to a few, each as wide as a cntlr report at the limits.
 
 `CloneBmChunkBytes` is the fixed capacity of ONE clone bitmap chunk and the
 quantum that positions it; the chunk rule it sizes is `architecture.md`,
@@ -184,7 +199,8 @@ nothing to etcd that describes itself. `gateway.Server` holds exactly one
 piece of state — the `*etcdutil.Client` — beside the mandatory
 `pb.UnimplementedGatewayServer` embed. Handlers keep no in-process state,
 take no locks and impose no concurrency limit — all coordination is
-etcd's. Two requests racing inside one instance and across two instances are
+etcd's. The status read's bounds on its own agent calls (GW20) are the
+request's own, held for its length and shared with no other request. Two requests racing inside one instance and across two instances are
 the same case by construction.
 
 GW2. **Serving.** `gateway.Run` takes the etcd client and a `gateway.Config`
@@ -752,6 +768,11 @@ and field-level rules stay in the cited section of `architecture.md`,
   `bdev_conf` (`legCntOf`), and `model.ClusterSpaceOf` computes the space
   answer from the decoded records. Reply the defaulted name, the extent
   size, the two entry maps and the space (`architecture.md`, Clusters).
+* **GetClusterStatus** — validate the name and the page arguments (GW4,
+  GW10); GW20's reads and calls, with no STM. Reply the defaulted name, the
+  rows of the cluster on the first page and of each pool read, the token,
+  the count of pools read and the read's time (`architecture.md`,
+  Clusters).
 
 GW19. **The id step.** `AdvanceClusterIds` runs the transactions of
 `architecture.md`, Clusters, which owns their order and their reasons. One
@@ -767,6 +788,61 @@ error), and that transaction puts nothing. The pool transactions read no
 `ClusterConf`: the first transaction's cluster id names their keys, and a
 pool of a recreated cluster lives under another id. No transaction reads or
 bumps a rev key. An error in any transaction ends the RPC there.
+
+GW20. **The status read.** `GetClusterStatus` (`gateway/status.go`) is the
+one handler that calls agents for many objects in one request, so it bounds
+those calls itself, for its own request alone. It validates the name and
+the page arguments (GW4, GW10), reads the `ClusterConf` plainly and judges
+it with `model.ValidateClusterConf`, as every reader that computes from it
+does, since the read takes the cntlr interval, the extent size and the
+batch from it, and pages the pools with `pageNames`. The first page's
+cluster rows come from plain ranges outside any STM: the worker registry,
+the cluster's `dn_conf` and `cn_conf` prefixes, and, for the revision keys,
+one keys-only range of each node kind's whole prefix
+(`model.DnRevKindPrefix`, `model.CnRevKindPrefix`), since those keys are
+sharded and a cluster has no prefix of its own there; a key of another
+cluster is passed over. Each pool is loaded with `model.LoadSp`, its own
+snapshot, as the sp worker loads it, so its lost records are the ones the
+worker meets (`dnv-worker.md` MD3); a pool whose `SpConf` went since the
+page's range is passed over, and one whose load fails gives one row of
+status UNKNOWN. A deleting pool gives one row and is called for nothing.
+Beside the load, one point read of the pool's id-to-name record
+(`model.SpNameKey`), which no list names and so `LoadSp` does not report
+missing, gives its lost-record row; the sp worker's gate on its groups'
+lengths to zero (`model.SideZeroBytes`, `model.CloneMetaSideZeroBytes`;
+`dnv-worker.md` AR1) gives the pool's row of a conf the worker refuses,
+and then no grow is judged.
+Then the pool's calls run at once: the primary's `GetCntlrInfo`, without
+the block counters, and each migration destination's `GetSideInfo` past
+its cutover. The rows are computed from the state and the answers
+(`statusPoolRows`), the grow's checks from `model`'s own rules —
+`GrowPending`, `DataCovered`, `GrowExtCnt`, `SpCnCharges` and
+`CnBudgetShort` — in the order the sp worker's grow takes them
+(`dnv-worker.md` AR6), the disk node scan last, its answer kept for the
+request by the extent and leg counts; a repair's wait comes from
+`model.RepairWaitReason`, the worker's own rule (`dnv-worker.md` AR17).
+Every text goes through `common.CutRowText`, the agents' cut of the row
+text cap. The bounds, each the request's own: `StatusFanOut`
+pools are read at once; each agent call takes `StatusAgentTimeout`; and the
+first call of the request to an address runs alone (`statusGate`): the
+pools that need the same address wait for it and skip the address with an
+UNKNOWN row when it failed, the deadline included, or call themselves
+once it answered, so a node that hangs costs one budget per read whatever
+it holds. An agent's code is an answer, never a failure of the address.
+Under a request deadline the read starts no pool once less than one agent
+budget and `statusReplyMargin` are left, the page's first pool aside so
+that a page always moves on, and ends each pool's work the margin before
+the deadline. A pool whose work that deadline ended, its own calls or its
+wait at the gate cut by the read and not by its agent, is left off the
+page with every pool after it, the page's first aside. Each call records
+whether the read's deadline ended it, and the first pool's rows say the
+read's time ran out for such a call, the name read and the grow's disk node
+scan, and blame its agent for any other failure; the token is the key of
+the last pool the page
+keeps, a key of the pool prefix as GW10's tokens are, so the next page
+reads the pool the deadline cut. An agent that fails is a row,
+never the call's error (AG3); only the cluster's own reads answer
+`ABORTED`. Nothing is written.
 
 ### Worker registry
 
@@ -1709,7 +1785,8 @@ is ALREADY `deleting` answers in phase 1 and makes no agent call at all
 (Clones), and neither does a `ForceStartGroup` with `cancel` (Repairs and
 retired legs) or a `CreateRepair` in a pool with no primary, which judges
 the bad leg on its record alone (`architecture.md`, Repairs, A leg of
-another identity). The two pre-STM size calls take the cluster id from a
+another identity), nor `GetClusterStatus` for a pool being deleted or with
+no primary (GW20). The two pre-STM size calls take the cluster id from a
 plain pre-read of `ClusterConf`, the in-STM read staying authoritative; the
 calls after resolution take it from the resolving transaction.
 
@@ -1723,7 +1800,9 @@ interceptors and the limit are mandatory on every dnv connection
 (`grpc.md` T3). The gateway dials per call and closes after the call: it
 keeps no connection cache like the worker's (`dnv-worker.md` RW7). One
 handler, `InspectGroup`, makes two calls on one dial, under the one
-timeout of that dial (InspectGroup, below).
+timeout of that dial (InspectGroup, below). `GetClusterStatus` bounds each
+of its calls by `StatusAgentTimeout` instead, inside the same per-call
+dial (GW20).
 
 AG3. **Failure mapping.** A transport or non-OK status maps to the code the
 RPC's specification names: `ABORTED` everywhere except the `force` false
@@ -1744,7 +1823,9 @@ reads the bad leg's row, a reply with no info giving it no reason, and a `GetCnt
 reply with no info, as the `UnknownObject` refusal of an agent that does not
 hold the cntlr carries (`cnagent.md` CN23), reads to it as a report with no
 row for the group, which it refuses as it refuses an agent that does not
-answer (`architecture.md`, Repairs).
+answer (`architecture.md`, Repairs). `GetClusterStatus` maps no failure
+to a code either: an agent that fails or answers a code is a row of its
+reply (GW20).
 
 AG4. **Two-phase rule.** Any handler with a mid-flight agent call re-runs
 **full resolution and the token check** in its deciding STM, save that the
@@ -1777,6 +1858,7 @@ The complete call matrix:
 | `CreateRepair`, when the pool has a primary | `GetCntlrInfo` | between the snapshot and the op, every round |
 | `InspectGroup` | `GetCntlrInfo`, then `InspectGrp` | after the snapshot |
 | `GetThinDeviceBitmap` | `GetCntlrInfo`, when a namespace exports the td, then `GetThinDeviceBm` | after the STM |
+| `GetClusterStatus` | `GetCntlrInfo` of each pool's primary, and `GetSideInfo` of each migration's destination past its cutover | after each pool's snapshot |
 
 No other `service Gateway` RPC leaves etcd — the matrix is complete.
 
@@ -2040,9 +2122,16 @@ gateway, never through `workerctl`.
   twice it is accepted with its threshold stored as sent, the pool then
   deleted and drained so that every node gets back what its create took;
   agent faults — a hung agent bounded by the agent-call budget, a closed
-  port refused fast, inspects of hung and stopped fakes; and the hydration
+  port refused fast, inspects of hung and stopped fakes; the hydration
   checks of `DeleteClone` and `FinishMigration` refusing on incomplete
-  hydration and on an unreachable agent, `force` skipping them.
+  hydration and on an unreachable agent, `force` skipping them; and the
+  status read over planted faults (GW20) — one row per worker role, since
+  no worker runs, and none of the clean pool; a leg whose health epoch is
+  set and whose row the primary reads ERROR, listed as one row; a thin
+  pool that needs a check; a thin pool out of data space; a primary that
+  hangs, listed as one UNKNOWN row within the status read's budget; pages
+  of one pool, the cluster rows on the first alone; and, last, the pool's
+  revision key deleted, listed as a lost record.
 * restart (kill under load) — one gateway is killed with SIGKILL while it
   provably holds a create in its handler; every pool of the wave is then
   either complete or absent, never partial, and the accounting matches the
@@ -2080,9 +2169,9 @@ bitmap reads, the trace-id chain of GW2 and AG2, and the listing rule of
 the parallel case GW9 — candidate units that lose a pick and run again,
 invisibly — and GW12 under concurrency; the contention case GW6 as fence
 and as liveness loop, GW8 and GW12 (a loser burns no id); the faults
-case GW4, GW7 throughout, AG2's budget, AG3, and of AG4 only that
+case GW4, GW7 throughout, AG2's budget, AG3, of AG4 only that
 `DeleteClone` and `FinishMigration` run their agent call between the
-phases, and the primary
+phases, GW20's rows, budget and pages, and the primary
 threshold's floor of `architecture.md`, Common validation, from both
 sides, with GW11's `event_threshold` stored as sent; the restart
 case GW1, with the atomicity of one STM per RPC (GW8); and the ceiling
@@ -2182,12 +2271,13 @@ only writes it performs here are the worker-role ones, the suite playing
 the worker: the flips `set-created` and `set-provisioned`, the cutover
 `start-cutover`, a leg's health epoch `set-epoch` and the repair stage
 moves `set-repair-stage`, at exactly the stages where a gateway
-precondition waits on the worker — before every migration finish the
+precondition or the status read waits on the worker — before every migration finish the
 destination's provisioned flip and then the cutover, which runs the
 worker's own operation (`dnv-worker.md` MD6), before a repair's create the
 bad leg's health epoch, cleared again once no repair needs it, and before
 its finish or its cancel the move to STARTED or to ABORTED, which runs the
-worker's own stage move —, and the
+worker's own stage move, and for the status read a leg's health epoch,
+cleared again after it —, the
 drains `drain-sp` and `drain-clone`, standing in for the sp coordinator
 after a latch the gateway committed (`dnv-worker.md`, The sp drain and The
 clone drain). A health epoch moves no revision, as the worker's own does
@@ -2196,8 +2286,11 @@ the cutover, every stage move and every drain step move `SpRev` as the
 worker's own would: each bumps it, except
 the sp drain's last step, which deletes the key, and a clone drain's
 batch, which leaves it alone (`dnv-worker.md` CLD8); the script's token
-bookkeeping counts them. Any other `workerctl` write would test
-`workerctl` rather than the gateway and is forbidden here; the store wipe
+bookkeeping counts them. One more write plants a fault no worker
+makes: the faults case's status read deletes a pool's revision key with
+`del-rev`, the lost record it must list, last in its case. Any other
+`workerctl` write would test `workerctl` rather than the gateway and is
+forbidden here; the store wipe
 between cases and the store-revision probe of the refusal brackets go
 through `etcdctl`. The drain stand-ins run `model`'s own drain ops in a
 loop with no pass and no wake-up, and a step bound lets the worker suite

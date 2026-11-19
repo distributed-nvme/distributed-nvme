@@ -1355,6 +1355,106 @@ message GetClusterCapacityReply {
     ClusterSpace space = 5;
 }
 
+// GetClusterStatusRequest asks for one page of the status read
+// (architecture.md, Clusters): the pools are paged as ListStoragePools pages
+// them.
+message GetClusterStatusRequest {
+    string cluster_name = 1;
+    uint32 count = 2;
+    string page_token = 3;
+}
+
+// StatusKind is why the status read lists a row (architecture.md, Clusters,
+// GetClusterStatus). Appended values only, never renumbered.
+enum StatusKind {
+    // Never sent.
+    STATUS_KIND_NONE = 0;
+    // A record a pool's or a node's records name is absent from etcd: a key
+    // the pool's lists name, a node record a side or a cntlr points at, a
+    // pool's or a node's revision key, or a pool's id-to-name record, which
+    // may also name another pool; or a node record that does not decode.
+    STATUS_KIND_LOST_RECORD = 1;
+    // The read holds no state of the pool to judge it by: records that do
+    // not load, no primary, a primary's agent that did not answer, holds
+    // no state of the cntlr or is starting, an observation older than the
+    // worker accepts, or a report behind the pool's revision while the
+    // primary's health epoch is set, which is a syncup still on its way or
+    // one its agent refuses or fails, the read cannot tell which. Its
+    // status is RES_STATUS_UNKNOWN.
+    STATUS_KIND_REPORT = 2;
+    // The pool as a whole: being deleted, a level above read-write, its
+    // primary disabled, or a stored conf the worker refuses.
+    STATUS_KIND_POOL = 3;
+    // A slice's thin pool out of data space or out of metadata space.
+    STATUS_KIND_SPACE = 4;
+    // A grow of a slice past its mark that the worker cannot run.
+    STATUS_KIND_GROW = 5;
+    // A row of the primary's report that reads RES_STATUS_ERROR, or a leg's
+    // row with an identity reason.
+    STATUS_KIND_ROW = 6;
+    // A health epoch the worker set.
+    STATUS_KIND_HEALTH = 7;
+    // A group's reading or mark: an array not whole, a refused add, the
+    // operator in charge, a forced-start mark, a member with bad blocks.
+    STATUS_KIND_GROUP = 8;
+    // An open repair.
+    STATUS_KIND_REPAIR = 9;
+    // A migration that waits for its cutover or its finish, or whose copy
+    // fails.
+    STATUS_KIND_MIGRATION = 10;
+    // A clone being deleted or waiting for its source.
+    STATUS_KIND_CLONE = 11;
+    // A torn thin device.
+    STATUS_KIND_TORN = 12;
+    // A worker role with no registration, or a registration not refreshed
+    // by the gateway's clock.
+    STATUS_KIND_WORKER = 13;
+    // The rows a pool's cap left out: how many, and where to read them.
+    STATUS_KIND_MORE = 14;
+}
+
+// StatusRow is one thing the status read finds wrong (architecture.md,
+// Clusters, GetClusterStatus). The id and name fields name the object for a
+// script, each zero or empty where it does not apply; object says the same
+// for people.
+message StatusRow {
+    // The pool the row belongs to, empty for a cluster row.
+    string sp_name = 1;
+    StatusKind kind = 2;
+    string object = 3;
+    // The status of the report row the row shows, RES_STATUS_UNKNOWN where
+    // the read got no answer; absent where the row shows no report row.
+    optional ResStatus status = 4;
+    ResReason reason = 5;
+    string text = 6;
+    // How long the thing has been so, where a time records it; absent
+    // otherwise.
+    google.protobuf.Duration age = 7;
+    uint64 cntlr_id = 8;
+    uint64 slice_id = 9;
+    uint64 grp_id = 10;
+    uint64 leg_id = 11;
+    uint64 side_id = 12;
+    // The name of a thin device, a repair, a migration, a clone or a
+    // transfer the row names, or a worker role.
+    string obj_name = 13;
+    // The node the row names or reaches.
+    string addr_port = 14;
+}
+
+// GetClusterStatusReply is one page of the status read: the cluster rows on
+// the first page, then each read pool's rows in key order.
+message GetClusterStatusReply {
+    string cluster_name = 1;
+    repeated StatusRow row_list = 2;
+    string page_token = 3;
+    // The pools this page read.
+    uint32 sp_cnt = 4;
+    // The gateway's clock when the read began, which the ages of health
+    // epochs and worker registrations are taken against.
+    google.protobuf.Timestamp read_time = 5;
+}
+
 // ListWorkersRequest names nothing: the worker registry is cluster-independent
 // (architecture.md, Key table), so the read takes no cluster_name.
 message ListWorkersRequest {}
@@ -2280,6 +2380,7 @@ service Gateway {
     rpc ListClusters(ListClustersRequest) returns (ListClustersReply) {}
     rpc AdvanceClusterIds(AdvanceClusterIdsRequest) returns (AdvanceClusterIdsReply) {}
     rpc GetClusterCapacity(GetClusterCapacityRequest) returns (GetClusterCapacityReply) {}
+    rpc GetClusterStatus(GetClusterStatusRequest) returns (GetClusterStatusReply) {}
 
     rpc ListWorkers(ListWorkersRequest) returns (ListWorkersReply) {}
 

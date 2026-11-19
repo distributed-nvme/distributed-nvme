@@ -356,7 +356,7 @@ TD_SLICE_BYTES=1048576
 
 # `sp create --init-ext-cnt`: extents per data group. 0 is refused by the
 # gateway, and this value also fixes AR6's grow size — a data grow appends a
-# group of the FIRST data group's ext_cnt (growExtCnt (worker/reaction.go)).
+# group of the FIRST data group's ext_cnt (GrowExtCnt (model/ops.go)).
 INIT_EXT_CNT=1
 
 # `sp create --cntlr-cnt`: one primary and one standby, on two of the three CN
@@ -8595,6 +8595,10 @@ diagnostics() {
 	if [ "$SETUP_DONE" = 1 ] && [ "${RUNNING[gateway]:-0}" = 1 ] &&
 		[ "${RUNNING[etcd]:-0}" = 1 ]; then
 		diag_banner "control plane (dnvctl reads)"
+		# The status read first: what the gateway finds wrong across the
+		# cluster, as its table (architecture.md, Clusters,
+		# GetClusterStatus), before the reads that give the detail.
+		diag_ctl cluster get-status
 		diag_ctl cluster get
 		# `sp get` is read through diag_ctl_out because the dump also parses
 		# it; diag_ctl's own reply would be stranded in its subshell.
@@ -21277,7 +21281,7 @@ react_grow() {
 		"the grow APPENDED: data_grp_list[0] is still the group setup created"
 	ext0=$(sp_field "$COPY_GRP0.ext_cnt")
 	msg="a data grow appends the slice's FIRST data group's ext_cnt"
-	msg="$msg (growExtCnt (worker/reaction.go), and model.GrowSlice recomputes it)"
+	msg="$msg (GrowExtCnt (model/ops.go), and model.GrowSlice recomputes it)"
 	assert_field "$SP_JSON" "$REACT_GRP1.ext_cnt" "$ext0" "$msg"
 	assert_field "$SP_JSON" "$REACT_GRP1.leg_list | length" "$LEGS" \
 		"the new group has $LEGS leg(s)"
