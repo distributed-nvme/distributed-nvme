@@ -51,6 +51,7 @@ const (
 	Gateway_UpdateCntlrEnabled_FullMethodName              = "/Gateway/UpdateCntlrEnabled"
 	Gateway_InspectCntlr_FullMethodName                    = "/Gateway/InspectCntlr"
 	Gateway_InspectSide_FullMethodName                     = "/Gateway/InspectSide"
+	Gateway_InspectStoragePool_FullMethodName              = "/Gateway/InspectStoragePool"
 	Gateway_CreateThinDevice_FullMethodName                = "/Gateway/CreateThinDevice"
 	Gateway_DeleteThinDevice_FullMethodName                = "/Gateway/DeleteThinDevice"
 	Gateway_ListThinDevices_FullMethodName                 = "/Gateway/ListThinDevices"
@@ -126,6 +127,7 @@ type GatewayClient interface {
 	UpdateCntlrEnabled(ctx context.Context, in *UpdateCntlrEnabledRequest, opts ...grpc.CallOption) (*UpdateCntlrEnabledReply, error)
 	InspectCntlr(ctx context.Context, in *InspectCntlrRequest, opts ...grpc.CallOption) (*InspectCntlrReply, error)
 	InspectSide(ctx context.Context, in *InspectSideRequest, opts ...grpc.CallOption) (*InspectSideReply, error)
+	InspectStoragePool(ctx context.Context, in *InspectStoragePoolRequest, opts ...grpc.CallOption) (*InspectStoragePoolReply, error)
 	CreateThinDevice(ctx context.Context, in *CreateThinDeviceRequest, opts ...grpc.CallOption) (*CreateThinDeviceReply, error)
 	DeleteThinDevice(ctx context.Context, in *DeleteThinDeviceRequest, opts ...grpc.CallOption) (*DeleteThinDeviceReply, error)
 	ListThinDevices(ctx context.Context, in *ListThinDevicesRequest, opts ...grpc.CallOption) (*ListThinDevicesReply, error)
@@ -487,6 +489,16 @@ func (c *gatewayClient) InspectSide(ctx context.Context, in *InspectSideRequest,
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(InspectSideReply)
 	err := c.cc.Invoke(ctx, Gateway_InspectSide_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *gatewayClient) InspectStoragePool(ctx context.Context, in *InspectStoragePoolRequest, opts ...grpc.CallOption) (*InspectStoragePoolReply, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(InspectStoragePoolReply)
+	err := c.cc.Invoke(ctx, Gateway_InspectStoragePool_FullMethodName, in, out, cOpts...)
 	if err != nil {
 		return nil, err
 	}
@@ -899,6 +911,7 @@ type GatewayServer interface {
 	UpdateCntlrEnabled(context.Context, *UpdateCntlrEnabledRequest) (*UpdateCntlrEnabledReply, error)
 	InspectCntlr(context.Context, *InspectCntlrRequest) (*InspectCntlrReply, error)
 	InspectSide(context.Context, *InspectSideRequest) (*InspectSideReply, error)
+	InspectStoragePool(context.Context, *InspectStoragePoolRequest) (*InspectStoragePoolReply, error)
 	CreateThinDevice(context.Context, *CreateThinDeviceRequest) (*CreateThinDeviceReply, error)
 	DeleteThinDevice(context.Context, *DeleteThinDeviceRequest) (*DeleteThinDeviceReply, error)
 	ListThinDevices(context.Context, *ListThinDevicesRequest) (*ListThinDevicesReply, error)
@@ -1041,6 +1054,9 @@ func (UnimplementedGatewayServer) InspectCntlr(context.Context, *InspectCntlrReq
 }
 func (UnimplementedGatewayServer) InspectSide(context.Context, *InspectSideRequest) (*InspectSideReply, error) {
 	return nil, status.Error(codes.Unimplemented, "method InspectSide not implemented")
+}
+func (UnimplementedGatewayServer) InspectStoragePool(context.Context, *InspectStoragePoolRequest) (*InspectStoragePoolReply, error) {
+	return nil, status.Error(codes.Unimplemented, "method InspectStoragePool not implemented")
 }
 func (UnimplementedGatewayServer) CreateThinDevice(context.Context, *CreateThinDeviceRequest) (*CreateThinDeviceReply, error) {
 	return nil, status.Error(codes.Unimplemented, "method CreateThinDevice not implemented")
@@ -1746,6 +1762,24 @@ func _Gateway_InspectSide_Handler(srv interface{}, ctx context.Context, dec func
 	}
 	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
 		return srv.(GatewayServer).InspectSide(ctx, req.(*InspectSideRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _Gateway_InspectStoragePool_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(InspectStoragePoolRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(GatewayServer).InspectStoragePool(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Gateway_InspectStoragePool_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(GatewayServer).InspectStoragePool(ctx, req.(*InspectStoragePoolRequest))
 	}
 	return interceptor(ctx, in, info, handler)
 }
@@ -2550,6 +2584,10 @@ var Gateway_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "InspectSide",
 			Handler:    _Gateway_InspectSide_Handler,
+		},
+		{
+			MethodName: "InspectStoragePool",
+			Handler:    _Gateway_InspectStoragePool_Handler,
 		},
 		{
 			MethodName: "CreateThinDevice",

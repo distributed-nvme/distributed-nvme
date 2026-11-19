@@ -268,8 +268,10 @@ loss in the sense of this document. The application knows. Two cases:
   blocks keep serving. Under the CSI driver the cluster can be
   over-committed. `dnvctl cluster get-capacity` says what the cluster can
   still give pools and which limit it reaches first ([the operations
-  doc](operations.md#the-clusters-capacity)). State: accepted. An alert
-  for it is not yet.
+  doc](operations.md#the-clusters-capacity)), and `dnvctl sp inspect` how
+  full each thin pool of a pool is and how far its volumes overcommit it
+  ([the operations doc](operations.md#a-pools-space)). State: accepted. An
+  alert for it is not yet.
 - **Writes wait for the kernel's timers when a disk node dies.** Over
   NVMe/TCP a dead disk node is noticed by the keep-alive alone. In the lab
   the controller node dropped its connections to the dead node 6 to 10
@@ -1269,7 +1271,8 @@ steps; the section "Steps known today" below gives the longer ones.
 | Action | Tool today | Doc today | State |
 |---|---|---|---|
 | Create and delete a pool | `dnvctl sp create`, `dnvctl sp delete` | the tutorials | done |
-| Grow a slice | the worker grows it by itself; `dnvctl sp grow-slice` | none | procedure to write, one line: when to grow by hand |
+| Grow a slice | the worker grows it by itself; `dnvctl sp grow-slice` | the operations doc, A pool's space | procedure written |
+| See how full a pool is and how far its volumes overcommit it | `dnvctl sp inspect` | the operations doc, A pool's space | procedure written |
 | Change a pool's level | `dnvctl sp set-level` | none | procedure to write, with the thin pool repair |
 | Move a leg to another disk node | `dnvctl migr create`, `migr finish`, `migr cancel`; the worker reads and hands over the leg's list itself | none; the introduction explains the flow | procedure to write: the whole flow |
 | Repair a leg by hand | `dnvctl repair create`, `repair finish`, `repair cancel`, `repair abort`; the worker repairs by itself | none | procedure to write |

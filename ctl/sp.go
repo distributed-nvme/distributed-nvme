@@ -126,6 +126,7 @@ func registerSp(root *cobra.Command) {
 		spFindNamesCmd(),
 		spGrowSliceCmd(),
 		spInspectSideCmd(),
+		spInspectCmd(),
 	))
 }
 
@@ -487,4 +488,28 @@ func spInspectSideCmd() *cobra.Command {
 		})
 	cmd.Flags().String("id", "", "side_id to inspect")
 	return cmd
+}
+
+// spInspectCmd is InspectStoragePool: the pool's space, each slice's data
+// space from the records and, from the primary's report, how much of each
+// thin pool is in use, with the pool's thin devices summed against its data
+// space (architecture.md, Storage pools). It names the pool by the global
+// --sp, takes no flag of its own and carries no token, as every read does
+// (CT3).
+func spInspectCmd() *cobra.Command {
+	return leaf("inspect",
+		"read a storage pool's space and its thin pools' use from its "+
+			"primary (InspectStoragePool)",
+		func() (job, error) {
+			req := &pb.InspectStoragePoolRequest{
+				ClusterName: clusterOf(),
+				SpName:      spOf(),
+			}
+			return func(
+				ctx context.Context,
+				client pb.GatewayClient,
+			) (any, error) {
+				return client.InspectStoragePool(ctx, req)
+			}, nil
+		})
 }

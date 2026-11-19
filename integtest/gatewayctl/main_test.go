@@ -262,6 +262,7 @@ func TestCommandsCoverEveryRpc(t *testing.T) {
 		"UpdateCntlrEnabled":              "set-cntlr-enabled",
 		"InspectCntlr":                    "inspect-cntlr",
 		"InspectSide":                     "inspect-side",
+		"InspectStoragePool":              "inspect-sp",
 		"CreateThinDevice":                "create-td",
 		"DeleteThinDevice":                "delete-td",
 		"ListThinDevices":                 "list-tds",
@@ -300,8 +301,8 @@ func TestCommandsCoverEveryRpc(t *testing.T) {
 		"UpdateGroupOperatorInCharge":     "set-grp-operator-in-charge",
 		"GetThinDeviceBitmap":             "get-td-bm",
 	}
-	if len(pb.Gateway_ServiceDesc.Methods) != 69 {
-		t.Fatalf("service Gateway has %d methods, want 69",
+	if len(pb.Gateway_ServiceDesc.Methods) != 70 {
+		t.Fatalf("service Gateway has %d methods, want 70",
 			len(pb.Gateway_ServiceDesc.Methods))
 	}
 	for _, method := range pb.Gateway_ServiceDesc.Methods {

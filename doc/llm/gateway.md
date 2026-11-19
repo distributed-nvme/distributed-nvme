@@ -607,7 +607,8 @@ destination's metadata units are sized by the cluster's `extent_size`
 (`migrMetaUnitsOf`), and in `CreateClone`'s plan and STM before its clone
 meta group is laid out from that `extent_size` (`planCloneGrp`);
 `model.ValidateBdevConf` in `GrowSlice`, in `CreateThinDevice` (before
-sizing against the stripe), in `CreateClone`'s plan and STM before its
+sizing against the stripe), in `InspectStoragePool` (before it sizes the
+data space by the block size), in `CreateClone`'s plan and STM before its
 clone meta group is laid out and its metadata bounded by the SP's block
 size (`planCloneGrp`), and in `CreateMigration` before a migration's
 metadata units are sized by that block size (`migrMetaUnitsOf`: a zero
@@ -1083,6 +1084,18 @@ set.
   (`architecture.md`, Cntlrs). It is the one `GetCntlrInfo` caller that
   sets `read_io_stats`: the others read rows alone, and cost the agent no
   read of the node (`cnagent.md` CN23).
+* **InspectStoragePool** — validate the names (GW4); one `Snapshot`:
+  resolve (`openSpRead`, no token, a deleting pool read as any other); the
+  stored-conf gate on the pool's `bdev_conf` (GW11); every slice
+  (`loadSlices`) and every thin device of `td_name_list`, a missing key
+  `ABORTED`; the primary and its controller node's `cn_id`
+  (`openBitmapTarget`, as the bitmap read resolves them: no primary is
+  `FAILED_PRECONDITION`). After the snapshot, `GetCntlrInfo` about the
+  primary at its address, with no `read_io_stats`; a failure is `ABORTED`.
+  Reply the primary's `cntlr_id`, `applied_revision`, `obs_stamp` and
+  `obs_age` as `InspectCntlr` replies them, and the space
+  `model.PoolSpaceOf` computes from the records and the agent's rows
+  (`architecture.md`, Storage pools).
 * **InspectSide** — STM: resolve; find the side by scanning the SP's slices
   (bounded, `architecture.md`, Cntlrs) for `side_id`, only when no slice
   holds it the clones' clone meta groups (`findCloneSide`), and only when no
@@ -1757,6 +1770,7 @@ The complete call matrix:
 | `InspectControllerNode` | `GetCnInfo` | after the STM |
 | `InspectCntlr` | `GetCntlrInfo` | after the STM |
 | `InspectSide` | `GetSideInfo` | after the STM |
+| `InspectStoragePool` | `GetCntlrInfo` | after the snapshot |
 | `DeleteClone` with `force` false | `GetCntlrInfo` | between the STMs |
 | `FinishMigration` with `force` false | `GetSideInfo` | between the STMs |
 | `ForceStartGroup` without `cancel` | `GetCntlrInfo` | between the STMs |
@@ -1923,8 +1937,10 @@ gateway, never through `workerctl`.
   but `md_check_conf` and `start_hold_conf`, which the Go cases pin;
   paging with its empty last page and a malformed token; the inspects passing
   the agent's report and revision through verbatim, a revision the pool's rev
-  key has passed, and the bitmap read passing its bitmap through, which the
-  fake replies empty, having no setting for its bytes, so the case proves the
+  key has passed, the pool's space read turning a thin pool row the fake
+  reports into the pool's sizes and use beside the records' data space,
+  thin devices and footprint, and the bitmap read passing its bitmap
+  through, which the fake replies empty, having no setting for its bytes, so the case proves the
   reply's shape and not that the bytes cross unchanged (GW14), refused with
   nothing written for a td whose namespace the desired state does not keep
   suspended — the primary's report of a park is staged by no case — and

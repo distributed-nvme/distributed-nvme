@@ -523,6 +523,7 @@ var commands = []command{
 	{"set-cntlr-enabled", setupSetCntlrEnabled},
 	{"inspect-cntlr", setupInspectCntlr},
 	{"inspect-side", setupInspectSide},
+	{"inspect-sp", setupInspectSp},
 	// td
 	{"create-td", setupCreateTd},
 	{"delete-td", setupDeleteTd},

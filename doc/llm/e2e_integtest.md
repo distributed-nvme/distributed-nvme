@@ -509,7 +509,10 @@ build whose reactions changed its legs, which leaves a repair, a retired leg or
 a side count other than the create's, a leg's side may not be the one the
 create placed over the pattern, so the disk-node half is skipped and logged.
 The random pattern written through the namespace then gives the digest every
-later step compares.
+later step compares, and the pool's space read (`architecture.md`, Storage
+pools, InspectStoragePool) then shows every slice read from the primary's
+report, at least the pattern's bytes in use, and the thin device's size as
+the pool's virtual size.
 
 **smoke** has setup as its subject: the widest pool comes up whole, and
 deleting it gives every extent back and leaves nothing behind, the two

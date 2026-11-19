@@ -1728,8 +1728,9 @@ migration copies counts on both of its disk nodes, and a retired leg counts
 until it is deleted. Every leg of a pool needs a disk node of its own, so
 when a few disk nodes hold most of the free space, pools of small groups use
 up the disk nodes before the space, and fewer bytes fit than
-`placeable_bytes`. When no pool of the shape fits at all, because no
-controller node or no set of disk nodes has room for even the smallest pool,
+`placeable_bytes`. When no pool of the shape fits at all, because fewer
+controller nodes than the pool has cntlrs, or too few disk nodes, have room
+for even the smallest pool,
 `placeable_bytes` and `largest_init_ext_cnt` are 0 and `limit` names the
 side that has no room.
 
@@ -1772,6 +1773,73 @@ settings; the gateway suite's faults case checks the answer over its fake
 nodes before and after its pool is made, and the csi suite's volume case
 checks that the capacity Kubernetes shows for its storage class is the
 gateway's answer. Neither suite has yet run in the lab with this answer.
+
+## A pool's space
+
+`dnvctl sp inspect` shows how full the thin pools of a pool are, as the
+pool's primary last read them, beside the space the pool's records give
+it, and how far its volumes overcommit it.
+
+When: a host's writes to a volume of the pool wait and fail; before you
+make more volumes or snapshots in a pool; when the worker skips an
+auto-grow of the pool.
+
+Symptoms:
+
+- Writes from a host to a volume of the pool wait for the kernel's
+  no-space timeout and then fail, while reads still work.
+- The worker's log has a `reaction skipped` line for an auto-grow of the
+  pool.
+
+How to confirm: run `dnvctl sp inspect`. In `space`:
+
+- `slice_list` has one entry for each slice. `data_bytes` is the data space
+  the slice's data groups give its thin pool. When `read` is true,
+  `pool_data_bytes` and `used_data_bytes` are the thin pool's data size and
+  the data in use, and `pool_meta_bytes` and `used_meta_bytes` the same for
+  its metadata, as the primary last read them. When `read` is false, the
+  primary's report has no line it can read for that thin pool: the pool is
+  not built yet, or it failed, or the primary's agent has no reading of the
+  cntlr yet. In the last case every slice is unread, `applied_revision` is
+  0 and `obs_age` is absent: the agent is starting, as right after its
+  restart, or it does not hold the cntlr yet, as right after a failover
+  moves the primary while the command runs. Run the command again a little
+  later.
+- `td_cnt` and `virtual_bytes` are the pool's thin devices, snapshots
+  included, and their sizes added up. `overcommit_pct` is `virtual_bytes`
+  over `data_bytes`, in percent: above 100, the volumes can be given more
+  data than the pool holds now.
+- `footprint_ext_cnt` is the extents of all the pool's groups, which each of
+  its cntlrs takes from the budget of its controller node ([The cluster's
+  capacity](#the-clusters-capacity)).
+- `obs_age` is the age of the primary's reading.
+
+What dnv does alone: auto-grow adds a group to a slice whose thin pool is
+filling up, while a disk node and every controller node of the pool have
+room for it; when they have none, the worker skips the grow, logs it, and
+tries again on its next round.
+
+Safe steps:
+
+1. Give the cluster room for auto-grow: [The cluster's
+   capacity](#the-clusters-capacity) says which limit it reaches and what to
+   add.
+2. Grow a slice by hand: `dnvctl sp grow-slice --slice <slice id> --ext
+   <extents>`, with the slice id of `slice_list`.
+
+Steps that lose data: deleting a thin device or a snapshot to free blocks of
+the thin pool deletes its data.
+
+When to stop: a slice stays unread, run after run, while the pool is built
+and the agent has a reading of the cntlr (`obs_age` is there), or the line of
+its thin pool in `dnvctl cntlr inspect --id <primary cntlr id>`, the row under
+`slice_id_to_dm_pool`, carries `ro` or `needs_check`: the thin pool needs a
+repair whose procedure is not written yet. Ask for help.
+
+Tested: the Go tests of the answer on hand-made rows, and of the gateway's
+read with a fake agent; the gateway suite's smoke case checks it over a fake
+agent's row, and the e2e suite's setup over real agents after host0 writes
+its pattern. Neither suite has yet run in the lab with this read.
 
 ## Gather a node's state for a bug report
 

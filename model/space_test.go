@@ -5,6 +5,8 @@ import (
 	"slices"
 	"testing"
 
+	"google.golang.org/protobuf/proto"
+
 	"github.com/distributed-nvme/distributed-nvme/common"
 	"github.com/distributed-nvme/distributed-nvme/pb"
 )
@@ -211,5 +213,82 @@ func TestSpreadIsTheLargestEvenShare(t *testing.T) {
 		if got := spread(slices.Clone(values), k); got != want {
 			t.Fatalf("spread(%v, %d) = %d, want %d", values, k, got, want)
 		}
+	}
+}
+
+// TestPoolSpaceOf pins the space answer of architecture.md, Storage pools,
+// InspectStoragePool: each slice's data space from its data groups' blocks,
+// its thin pool's sizes and use from the primary's row, a row that does not
+// parse leaving its slice unread while the records' half stays, and the
+// pool's sums, overcommit and footprint.
+func TestPoolSpaceOf(t *testing.T) {
+	const block = uint64(2) << 20
+	conf := &pb.SpConf{
+		SliceIdList: []uint64{11, 12},
+		BdevConf: &pb.BdevConf{
+			DmPoolConf: &pb.DmPoolConf{DataBlockSize: block},
+		},
+	}
+	slices := []*pb.Slice{
+		{
+			SliceIdx:    0,
+			MetaGrpList: []*pb.Group{{ExtCnt: 1, DataBlocks: 509}},
+			DataGrpList: []*pb.Group{
+				{ExtCnt: 4, DataBlocks: 2045},
+				{ExtCnt: 2, DataBlocks: 1021},
+			},
+		},
+		{
+			SliceIdx:    1,
+			MetaGrpList: []*pb.Group{{ExtCnt: 1, DataBlocks: 509}},
+			DataGrpList: []*pb.Group{{ExtCnt: 4, DataBlocks: 2045}},
+		},
+	}
+	tds := []*pb.ThinDevice{{Size: 10 << 30}, {Size: 10 << 30}, {Size: 4 << 30}}
+	info := &pb.CntlrInfo{SliceIdToDmPool: map[uint64]*pb.ResInfo{
+		11: {Status: pb.ResStatus_RES_STATUS_OK,
+			Details: "0 25116672 thin-pool 3 300/129024 1000/3066 - rw " +
+				"discard_passdown queue_if_no_space - 1024"},
+		12: {Status: pb.ResStatus_RES_STATUS_ERROR,
+			Details: "0 16752640 thin-pool Fail"},
+	}}
+	got := PoolSpaceOf(conf, slices, tds, info)
+	want := &pb.PoolSpace{
+		SliceList: []*pb.SliceSpace{
+			{
+				SliceId: 11, SliceIdx: 0, DataGrpCnt: 2,
+				DataBytes:     (2045 + 1021) * block,
+				Read:          true,
+				PoolDataBytes: 3066 * block,
+				UsedDataBytes: 1000 * block,
+				PoolMetaBytes: 129024 * common.ThinMetaBlockSize,
+				UsedMetaBytes: 300 * common.ThinMetaBlockSize,
+			},
+			// A failed pool's line does not parse: the slice is unread,
+			// its data space still the records'.
+			{SliceId: 12, SliceIdx: 1, DataGrpCnt: 1, DataBytes: 2045 * block},
+		},
+		TdCnt:           3,
+		VirtualBytes:    24 << 30,
+		DataBytes:       (2045 + 1021 + 2045) * block,
+		UsedDataBytes:   1000 * block,
+		OvercommitPct:   (24 << 30) * 100 / ((2045 + 1021 + 2045) * block),
+		FootprintExtCnt: 1 + 4 + 2 + 1 + 4,
+	}
+	if !proto.Equal(got, want) {
+		t.Errorf("PoolSpaceOf:\n got %v\nwant %v", got, want)
+	}
+
+	// No report at all: every slice unread, the records' half whole.
+	got = PoolSpaceOf(conf, slices, tds, nil)
+	if got.GetUsedDataBytes() != 0 || got.GetSliceList()[0].GetRead() ||
+		got.GetDataBytes() != want.GetDataBytes() ||
+		got.GetFootprintExtCnt() != want.GetFootprintExtCnt() {
+		t.Errorf("with no report: %v", got)
+	}
+	// No data space: no overcommit, rather than a division by zero.
+	if got := PoolSpaceOf(conf, nil, tds, nil); got.GetOvercommitPct() != 0 ||
+		got.GetVirtualBytes() != 24<<30 {
+		t.Errorf("with no slice: %v", got)
 	}
 }

@@ -1278,7 +1278,8 @@ message GetClusterCapacityRequest {
 // (architecture.md, Clusters, GetClusterCapacity), judged in this order: the
 // pool ceiling, too few controller nodes, too few disk nodes, disk nodes in
 // too few locations, then whichever side holds less: disk space or the
-// controller nodes' budgets.
+// controller nodes' budgets; when no pool of the shape fits, the side that
+// has no room.
 enum CapacityLimit {
     CAPACITY_LIMIT_UNSPECIFIED = 0;
     CAPACITY_LIMIT_POOL_CEILING = 1;
@@ -1679,6 +1680,66 @@ message InspectSideReply {
     // The observation's age when the agent answered: its answer time less
     // its observation time. Unset while the agent holds no observation.
     google.protobuf.Duration obs_age = 4;
+}
+
+// SliceSpace is one slice's space as InspectStoragePool reads it
+// (architecture.md, Storage pools, InspectStoragePool): the data space its
+// data groups give its thin pool, from the records, and what the primary's
+// report of that thin pool says it holds and uses.
+message SliceSpace {
+    uint64 slice_id = 1;
+    uint32 slice_idx = 2;
+    uint32 data_grp_cnt = 3;
+    // The data groups' data blocks times the pool's block size.
+    uint64 data_bytes = 4;
+    // Whether the primary's report holds a row of the slice's thin pool that
+    // parses; the four sizes below are zero when it does not.
+    bool read = 5;
+    // From that row: the thin pool's data size and its data in use, in
+    // bytes of the pool's blocks, and its metadata size and metadata in use,
+    // in bytes of dm-thin's metadata blocks.
+    uint64 pool_data_bytes = 6;
+    uint64 used_data_bytes = 7;
+    uint64 pool_meta_bytes = 8;
+    uint64 used_meta_bytes = 9;
+}
+
+// PoolSpace is a storage pool's space as InspectStoragePool reads it
+// (architecture.md, Storage pools, InspectStoragePool).
+message PoolSpace {
+    repeated SliceSpace slice_list = 1;
+    // The pool's thin devices, snapshots included, and their sizes summed:
+    // what its volumes may hold.
+    uint32 td_cnt = 2;
+    uint64 virtual_bytes = 3;
+    // The slices' data space and their data in use summed; a slice the
+    // report does not give adds no use.
+    uint64 data_bytes = 4;
+    uint64 used_data_bytes = 5;
+    // virtual_bytes over data_bytes as a whole percent, rounded down; zero
+    // when data_bytes is.
+    uint64 overcommit_pct = 6;
+    // The extents every group of every slice holds: what each cntlr of the
+    // pool takes from its controller node's budget.
+    uint64 footprint_ext_cnt = 7;
+}
+
+message InspectStoragePoolRequest {
+    string cluster_name = 1;
+    string sp_name = 2;
+}
+
+message InspectStoragePoolReply {
+    // The cntlr whose controller node answered.
+    uint64 primary_cntlr_id = 1;
+    // The revision the agent held when its observation's reading started.
+    uint64 applied_revision = 2;
+    // The stamp of the agent's reply, passed through.
+    ObsStamp obs_stamp = 3;
+    // The observation's age when the agent answered: its answer time less
+    // its observation time. Unset while the agent holds no observation.
+    google.protobuf.Duration obs_age = 4;
+    PoolSpace space = 5;
 }
 
 message CreateThinDeviceRequest {
@@ -2252,6 +2313,7 @@ service Gateway {
 
     rpc InspectCntlr(InspectCntlrRequest) returns (InspectCntlrReply) {}
     rpc InspectSide(InspectSideRequest) returns (InspectSideReply) {}
+    rpc InspectStoragePool(InspectStoragePoolRequest) returns (InspectStoragePoolReply) {}
 
     rpc CreateThinDevice(CreateThinDeviceRequest) returns (CreateThinDeviceReply) {}
     rpc DeleteThinDevice(DeleteThinDeviceRequest) returns (DeleteThinDeviceReply) {}

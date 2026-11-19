@@ -928,6 +928,12 @@ func (g *fakeGateway) InspectSide(
 	return serve[*pb.InspectSideReply](g, ctx, "InspectSide", req)
 }
 
+func (g *fakeGateway) InspectStoragePool(
+	ctx context.Context, req *pb.InspectStoragePoolRequest,
+) (*pb.InspectStoragePoolReply, error) {
+	return serve[*pb.InspectStoragePoolReply](g, ctx, "InspectStoragePool", req)
+}
+
 func (g *fakeGateway) CreateThinDevice(
 	ctx context.Context, req *pb.CreateThinDeviceRequest,
 ) (*pb.CreateThinDeviceReply, error) {

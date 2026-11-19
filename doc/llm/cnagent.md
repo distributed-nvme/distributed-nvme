@@ -2932,8 +2932,9 @@ removes it from the request before any array is built from it. The
 serving pool's `slice_id_to_dm_pool` row reads by its mode (above) —
 `RES_STATUS_OK` for a pool that writes — and carries its raw
 `dmsetup status` line throughout: the auto-grow of `architecture.md`,
-Automatic reactions, parses that line, and a `PROVISIONING` pool row would silently switch
-auto-grow off. In the pool layers `PROVISIONING` marks only the deferred
+Automatic reactions, parses that line, as does the gateway's read of a
+pool's space (`architecture.md`, Storage pools, InspectStoragePool), and a
+`PROVISIONING` pool row would silently switch auto-grow off. In the pool layers `PROVISIONING` marks only the deferred
 resources, never the live ones. A concat may only ever grow, and the agent
 enforces that rather than trusting the plan: when the live table totals more sectors
 than the desired one, `ensureDmMulti` refuses the reload, and the refusal

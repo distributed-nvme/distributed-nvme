@@ -461,3 +461,20 @@ func setupInspectSide(fs *flag.FlagSet) job {
 		})
 	}
 }
+
+// setupInspectSp drives InspectStoragePool, the read of a pool's space
+// (architecture.md, Storage pools): the records' half and the primary's
+// thin pool rows, read through the primary's CN agent.
+func setupInspectSp(fs *flag.FlagSet) job {
+	spName := fs.String("sp", "", "sp_name of the storage pool")
+	return func(
+		ctx context.Context,
+		client pb.GatewayClient,
+		g *globals,
+	) (any, error) {
+		return client.InspectStoragePool(ctx, &pb.InspectStoragePoolRequest{
+			ClusterName: g.cluster,
+			SpName:      *spName,
+		})
+	}
+}

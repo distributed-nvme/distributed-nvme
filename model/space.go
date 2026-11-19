@@ -2,6 +2,8 @@ package model
 
 import (
 	"cmp"
+	"math"
+	"math/bits"
 	"slices"
 
 	"github.com/distributed-nvme/distributed-nvme/common"
@@ -216,4 +218,79 @@ func spread(values []uint64, k int) uint64 {
 		best = min(best, rest/uint64(k-j))
 	}
 	return best
+}
+
+// PoolSpaceOf is the space answer of architecture.md, Storage pools,
+// InspectStoragePool: per slice, the data space its data groups give its
+// thin pool, their data blocks times the pool's block size, and, from the
+// primary's report, the thin pool's data and metadata sizes and use, read
+// off the row of the slice's thin pool by common.ParseThinPoolStatus; for
+// the pool, its thin devices and their summed size, its data space, the data
+// in use of the slices the report gives, the first over the second as a whole
+// percent, and the extents its groups hold, which each cntlr takes from its
+// controller node's budget. conf has passed ValidateBdevConf, slices are the
+// pool's in slice_id_list order, tds its thin devices, and info the
+// primary's report, nil when it holds none; a row that is absent or does not
+// parse, a failed pool's among them, leaves its slice unread.
+func PoolSpaceOf(
+	conf *pb.SpConf,
+	slices []*pb.Slice,
+	tds []*pb.ThinDevice,
+	info *pb.CntlrInfo,
+) *pb.PoolSpace {
+	block := PoolBlockSize(conf.GetBdevConf())
+	space := &pb.PoolSpace{TdCnt: uint32(len(tds))}
+	for _, td := range tds {
+		space.VirtualBytes = addSat(space.VirtualBytes, td.GetSize())
+	}
+	for idx, slice := range slices {
+		sliceSpace := &pb.SliceSpace{
+			SliceIdx:   slice.GetSliceIdx(),
+			DataGrpCnt: uint32(len(slice.GetDataGrpList())),
+		}
+		if idx < len(conf.GetSliceIdList()) {
+			sliceSpace.SliceId = conf.GetSliceIdList()[idx]
+		}
+		dataBlocks := uint64(0)
+		for _, grp := range slice.GetDataGrpList() {
+			dataBlocks = addSat(dataBlocks, grp.GetDataBlocks())
+			space.FootprintExtCnt = addSat(space.FootprintExtCnt, grp.GetExtCnt())
+		}
+		for _, grp := range slice.GetMetaGrpList() {
+			space.FootprintExtCnt = addSat(space.FootprintExtCnt, grp.GetExtCnt())
+		}
+		sliceSpace.DataBytes = mulSat(dataBlocks, block)
+		row := info.GetSliceIdToDmPool()[sliceSpace.GetSliceId()]
+		if st, ok := common.ParseThinPoolStatus(row.GetDetails()); ok {
+			sliceSpace.Read = true
+			sliceSpace.PoolDataBytes = mulSat(st.TotalDataBlocks, block)
+			sliceSpace.UsedDataBytes = mulSat(st.UsedDataBlocks, block)
+			sliceSpace.PoolMetaBytes = mulSat(st.TotalMetaBlocks,
+				common.ThinMetaBlockSize)
+			sliceSpace.UsedMetaBytes = mulSat(st.UsedMetaBlocks,
+				common.ThinMetaBlockSize)
+		}
+		space.DataBytes = addSat(space.DataBytes, sliceSpace.GetDataBytes())
+		space.UsedDataBytes = addSat(space.UsedDataBytes,
+			sliceSpace.GetUsedDataBytes())
+		space.SliceList = append(space.SliceList, sliceSpace)
+	}
+	if space.GetDataBytes() != 0 {
+		hi, lo := bits.Mul64(space.GetVirtualBytes(), 100)
+		if hi >= space.GetDataBytes() {
+			space.OvercommitPct = math.MaxUint64
+		} else {
+			space.OvercommitPct, _ = bits.Div64(hi, lo, space.GetDataBytes())
+		}
+	}
+	return space
+}
+
+// addSat is a plus b, or math.MaxUint64 when the sum is past uint64.
+func addSat(a uint64, b uint64) uint64 {
+	sum, carry := bits.Add64(a, b, 0)
+	if carry != 0 {
+		return math.MaxUint64
+	}
+	return sum
 }

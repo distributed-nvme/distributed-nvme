@@ -10870,6 +10870,30 @@ setup_io_baseline() {
 	assert_eq "$got" "$SHA0" \
 		"host0's read-back of the first $BASELINE_MIB MiB of $dev (SHA0)"
 	log "  SHA0 = $SHA0 ($BASELINE_MIB MiB at offset 0 of $dev)"
+
+	# The pool's space (architecture.md, Storage pools, InspectStoragePool),
+	# read from the real primary: once its report has read the thin pools
+	# since the write, every slice is read and the data in use covers the
+	# baseline; the pool's one thin device is its whole virtual size. A
+	# bounded wait, since the report is the agent's latest observation.
+	wait_until "$WAIT_PROVISION" \
+		"sp inspect to show $BASELINE_MIB MiB in use over $SLICE_CNT read slices" \
+		sp_inspect_used "$((BASELINE_MIB * 1048576))"
+	assert_field "$CTL_OUT" '.space.td_cnt' 1 "sp inspect: one thin device"
+	assert_field "$CTL_OUT" '.space.virtual_bytes' "$TD0_SIZE" \
+		"sp inspect: the thin device's size is the pool's virtual size"
+	log "  sp inspect: $(jq_of "$CTL_OUT" '.space.used_data_bytes') of" \
+		"$(jq_of "$CTL_OUT" '.space.data_bytes') data bytes in use"
+}
+
+# sp_inspect_used answers whether `sp inspect` reads every slice of $SP from
+# the primary's report with at least <bytes> of data in use over them, the
+# reply left in CTL_OUT.
+sp_inspect_used() { # <bytes>
+	ctl_try sp inspect || return 1
+	[ "$(jq_of "$CTL_OUT" '[.space.slice_list[] | select(.read)] | length')" = \
+		"$SLICE_CNT" ] || return 1
+	[ "$(jq_of "$CTL_OUT" '.space.used_data_bytes | tonumber')" -ge "$1" ]
 }
 
 # ---------------------------------------------------------------------------

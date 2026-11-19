@@ -11,7 +11,7 @@
 // nobody listed fails here.
 //
 // The sweep table is the sweep case's (dnvctl.md, Integration test plan),
-// argv for argv. The integration suite asserts the same 69 invocations
+// argv for argv. The integration suite asserts the same 70 invocations
 // against a real wire, so a row changed here and not there — or the other way
 // round — shows up as a disagreement between the two suites rather than as a
 // quiet gap.
@@ -662,9 +662,17 @@ var sweepRows = []sweepRow{
 		// No field at all: the registry belongs to no cluster, so the global
 		// --cluster and --sp of the prefix reach nothing.
 		&pb.ListWorkersRequest{}},
+
+	// ---- sp, the space read ----
+	{70, "InspectStoragePool",
+		[]string{"sp", "inspect"},
+		// A read of the pool the global --sp names; no flag of its own and
+		// no token. The step is last, after `worker list`, so that the
+		// steps before it keep their numbers.
+		&pb.InspectStoragePoolRequest{ClusterName: itCluster, SpName: itSp}},
 }
 
-// TestSweepArgvToRequest runs the sweep case's 69 steps against the recording
+// TestSweepArgvToRequest runs the sweep case's 70 steps against the recording
 // client.
 func TestSweepArgvToRequest(t *testing.T) {
 	for _, row := range sweepRows {
@@ -675,12 +683,12 @@ func TestSweepArgvToRequest(t *testing.T) {
 	}
 }
 
-// TestSweepCoversEveryCommand keeps the table honest: 69 rows, one per RPC,
+// TestSweepCoversEveryCommand keeps the table honest: 70 rows, one per RPC,
 // no duplicates. Without it a row could be deleted and the sweep would still
-// be green over the 68 that remain.
+// be green over the 69 that remain.
 func TestSweepCoversEveryCommand(t *testing.T) {
-	if len(sweepRows) != 69 {
-		t.Errorf("sweepRows has %d rows, want 69", len(sweepRows))
+	if len(sweepRows) != 70 {
+		t.Errorf("sweepRows has %d rows, want 70", len(sweepRows))
 	}
 	seen := map[string]bool{}
 	for _, row := range sweepRows {
@@ -706,7 +714,7 @@ func TestSweepCoversEveryCommand(t *testing.T) {
 
 // TestGlobalsFillEveryRequestThatHasThem pins how many requests carry the
 // fields that the scope global flags (dnvctl.md, Global flags, env, config)
-// fill: cluster_name in 67 of the 69, sp_name in 48. It reads the field off
+// fill: cluster_name in 68 of the 70, sp_name in 49. It reads the field off
 // every request type. A command that stopped filling a field from its global
 // flag would show up as a mismatch in the sweep; a command whose REQUEST
 // stopped carrying the field shows up here.
@@ -725,11 +733,11 @@ func TestGlobalsFillEveryRequestThatHasThem(t *testing.T) {
 			}
 		}
 	}
-	if clusterFields != 67 {
-		t.Errorf("%d requests carry cluster_name, want 67", clusterFields)
+	if clusterFields != 68 {
+		t.Errorf("%d requests carry cluster_name, want 68", clusterFields)
 	}
-	if spFields != 48 {
-		t.Errorf("%d requests carry sp_name, want 48", spFields)
+	if spFields != 49 {
+		t.Errorf("%d requests carry sp_name, want 49", spFields)
 	}
 }
 
@@ -922,8 +930,8 @@ func TestRevOnATokenlessCommandIsAUsageError(t *testing.T) {
 			}
 		})
 	}
-	if tokenless != 31 {
-		t.Errorf("%d requests carry no revision token, want 31", tokenless)
+	if tokenless != 32 {
+		t.Errorf("%d requests carry no revision token, want 32", tokenless)
 	}
 }
 

@@ -2483,7 +2483,8 @@ pointers — and the space answer for the shape, computed from those records
   so at most its counting disk nodes or the pool's group count, whichever
   is fewer, and the locations together give fewer than the pool's legs;
   then whichever holds less, disk space or the controller nodes' budgets,
-  disk space on a tie;
+  disk space on a tie, or, when no pool of the shape fits, the side that
+  has no room;
 * the placeable bytes, zero when a count limit is reached or when the
   largest first data group below is zero, so that no pool of the shape
   fits, the limit then naming the side whose bound is zero: the group
@@ -2925,6 +2926,30 @@ reply map. **Ids omitted from the reply are unknown ids** — the caller
 reads absence as "no such `sp_id`", and the call itself never fails on
 unknown ids. This is the reverse lookup admin tooling and log analysis
 use, since keys and device names carry `sp_id`, not `sp_name`.
+
+**InspectStoragePool** — the read of a pool's space: how full its thin
+pools are and how far its thin devices overcommit it.
+Errors: `NOT_FOUND` pool or cluster; `ABORTED` for a stored `bdev_conf` its
+validator refuses (Common validation), a missing listed key, or an agent
+failure; `FAILED_PRECONDITION` when no cntlr is primary.
+Action: one snapshot reads the `SpConf`, judges its `bdev_conf`, reads every
+`Slice` of `slice_id_list` and every `ThinDevice` of `td_name_list`, and
+resolves the primary cntlr and its controller node as the bitmap read does
+(Bitmap reads); outside it, one `ControllerNodeAgent.GetCntlrInfo` about the
+primary, with no counters. The reply carries the primary's `cntlr_id`, the
+agent's `applied_revision`, `obs_stamp` and `obs_age` as `InspectCntlr`
+replies them, and the space (`model.PoolSpaceOf`): per slice, the data
+space its data groups give its thin pool, their `data_blocks` times the
+pool's block size, and, from the primary's row of that thin pool, its data
+and metadata sizes and use, read off the row's `dmsetup status` line, the
+slice unread when the row is absent or does not parse, a failed pool's
+among them; for the pool, its thin devices, snapshots included, and their
+summed size, the data space of its slices, the data in use of the slices
+read, the summed size over the data space as a whole percent, the
+overcommit, and the extents its groups hold, its footprint, which each
+cntlr takes from its controller node's budget (Size → extents). The reply of an agent that holds
+no observation of the cntlr is not refused: its slices are unread and the
+records' half is whole. Nothing is written.
 
 ### GrowSlice
 

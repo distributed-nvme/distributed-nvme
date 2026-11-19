@@ -3427,6 +3427,44 @@ EOF
 	out=$(gw inspect-cntlr --sp sp0 --id "$primaryId")
 	assert_field "$out" ".cntlr_info.grp_id_to_md_raid[\"$dataGrp\"].status" \
 		"RES_STATUS_OK" "the seeded primary reports the data group's row OK"
+	# The space read (architecture.md, Storage pools, InspectStoragePool):
+	# the records' half from the store, and the primary's thin pool row,
+	# planted here as a dmsetup status line whose data size is the slice's
+	# data blocks with 5 of them in use, turned into bytes of the pool's
+	# block. The behavior is cleared after, as it was before.
+	local spaceBlock spaceData spaceExt spaceTds
+	spaceBlock=$(jq_of "$(sp_json sp0)" \
+		'.sp_conf.bdev_conf.dm_pool_conf.data_block_size')
+	spaceData=$(jq_of "$(sp_json sp0)" \
+		'[.slices[] | .data_grp_list[] | .data_blocks | tonumber] | add')
+	spaceExt=$(jq_of "$(sp_json sp0)" \
+		'[.slices[] | (.meta_grp_list[], .data_grp_list[]) | .ext_cnt | tonumber] | add')
+	spaceTds=$(gw list-tds --sp sp0)
+	set_behavior "$primaryDir" <<EOF
+{"objects":{"cntlr $spId:$primaryId":{"rows":{
+  "slice_id_to_dm_pool.$slice":{"details":"0 2097152 thin-pool 3 12/4096 5/$spaceData - rw discard_passdown queue_if_no_space - 1024"}}}}}
+EOF
+	out=$(gw inspect-sp --sp sp0)
+	assert_field "$out" '.primary_cntlr_id' "$primaryId" \
+		"inspect-sp names the primary"
+	assert_field "$out" '.applied_revision' "7" \
+		"inspect-sp applied_revision is the seeded agent revision"
+	assert_field "$out" '.space.slice_list[0].read' "true" \
+		"inspect-sp parsed the planted thin pool row"
+	assert_field "$out" '.space.slice_list[0].used_data_bytes' \
+		"$((5 * spaceBlock))" "inspect-sp: the row's data in use"
+	assert_field "$out" '.space.slice_list[0].pool_data_bytes' \
+		"$((spaceData * spaceBlock))" "inspect-sp: the row's data size"
+	assert_field "$out" '.space.data_bytes' "$((spaceData * spaceBlock))" \
+		"inspect-sp: the data groups' data space"
+	assert_field "$out" '.space.td_cnt' \
+		"$(jq_of "$spaceTds" '.name_to_td | length')" "inspect-sp: the thin devices"
+	assert_field "$out" '.space.virtual_bytes' \
+		"$(jq_of "$spaceTds" '[.name_to_td[] | .size | tonumber] | add')" \
+		"inspect-sp: the thin devices' summed size"
+	assert_field "$out" '.space.footprint_ext_cnt' "$spaceExt" \
+		"inspect-sp: the footprint is every group's extents"
+	clear_behavior "$primaryDir"
 	# The refusals, each writing nothing: a leg with the cancel flag, an
 	# unknown group, a leg the mark may not name, the level that stops group
 	# arrays, and an array that runs. The seeded report reads the data

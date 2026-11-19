@@ -2074,7 +2074,8 @@ func TestRaceSameNameCreatesHaveOneWinner(t *testing.T) {
 // devices' counters at the call (cnagent.md CN23; dnagent.md DN16): of the
 // gateway's GetCntlrInfo callers — the bitmap park check, the clone delete
 // check, InspectGroup, the forced start's array check, the repair create's
-// read of its bad leg's row and InspectCntlr — only
+// read of its bad leg's row, InspectStoragePool's read of the thin pool
+// rows and InspectCntlr — only
 // InspectCntlr sets read_io_stats, and of its GetDnInfo callers only
 // InspectDiskNode does, so no RPC that runs on another's path makes an
 // agent read the node. It reads the package's sources, so a new caller is
@@ -2133,6 +2134,7 @@ func TestOnlyTheInspectsAskForCounters(t *testing.T) {
 	want := []string{
 		"GetCntlrInfoRequest in InspectCntlr",
 		"GetCntlrInfoRequest in InspectGroup",
+		"GetCntlrInfoRequest in InspectStoragePool",
 		"GetCntlrInfoRequest in checkCloneHydrated",
 		"GetCntlrInfoRequest in checkGrpArrayDown",
 		"GetCntlrInfoRequest in checkVolumeParked",

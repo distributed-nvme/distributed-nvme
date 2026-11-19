@@ -307,7 +307,8 @@ is the gateway's idempotent no-write (`gateway.md` GW6), not a flip back, so
 the leaf is safe to script. An inspect RPC is an `inspect` leaf
 (`sp inspect-side` for a side), a read the gateway answers from the agent
 that hosts the object, out of that agent's latest observation of it, not
-from etcd; `dn inspect` and `cntlr inspect` add the block counters the agent
+from etcd, and `sp inspect` from the agent of the pool's primary beside the
+pool's records; `dn inspect` and `cntlr inspect` add the block counters the agent
 reads at the call (`dnagent.md` DN16, `cnagent.md` CN23), and
 `group inspect` is the one whose agent reads the group's members then and
 there, beside the records' view (`architecture.md`, Repairs). The bitmap
@@ -587,6 +588,10 @@ level name, an `SP_LEVEL_*` name or a raw number — the number so that an
 undeclared enum value is forwarded for the gateway to refuse (CT8) — and
 `--level` defaults to read-write, the enum's zero. `sp grow-slice`'s
 `--meta` and `--ext` do not constrain each other client-side (CT8).
+`sp inspect` takes no flag of its own: it reads the pool `--sp` names, its
+data space per slice from the records and its thin pools' use from the
+primary's report, with the overcommit as a whole percent
+(`architecture.md`, Storage pools, InspectStoragePool).
 
 ### `cntlr` — `ctl/cntlr.go`
 
@@ -869,7 +874,9 @@ before and after the call.
 **Cases.** The cases run in a fixed order and fail fast, each against a
 restarted fake whose behavior file is reset and whose state file holds only
 the reset's own readiness probe, so counters are read only as deltas. Together
-they exercise, on the wire, CT1 with one step per RPC in tree order, CT2's
+they exercise, on the wire, CT1 with one step per RPC in tree order, save
+`sp inspect`, which runs last so that the steps before it keep their
+numbers, CT2's
 trace id and deadline, CT3's token on exactly its carriers and its refusal on
 one leaf that carries none, CT4's goldens, CT5's failure line and codes, exit
 3 on a stdout that refuses the write among them, CT7's empty stderr, CT8's
