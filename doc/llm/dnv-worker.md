@@ -2603,7 +2603,12 @@ every stage (`architecture.md`, Repair), and `leg_fast_io_fail_tmo`, the
 `SpConf`'s `event_threshold` member resolved by `model.ResolveEventThreshold`
 (`architecture.md`, Common validation), so a pool stored without it sends
 `DefaultNvmeFastIoFailTmo` and never a zero, which the cn agent connects
-the pool's legs with (`cnagent.md` CN10). Every cntlr of the SP receives the
+the pool's legs with (`cnagent.md` CN10), and `retired_leg_id_to_side_id`,
+the side id of each retired leg the load holds, by its leg id, from its
+`RetiredLeg` record, which the cn agent keeps for the restore check's
+count of the layout's sides and builds nothing from (`cnagent.md` CN32;
+`architecture.md`, Controller nodes, CheckControllerNodeRestore). Every
+cntlr of the SP receives the
 full state (`architecture.md`, sp role) — less any clone whose `deleting` is
 set, which is absent from every cntlr's `clone_list` (CLD5), and less the
 repair of such a clone's group, which the clone drain's final transaction
@@ -6356,7 +6361,12 @@ line, which BM7's read waits for; each cntlr reports a path row per side
 of a slice's leg that has two sides, live once that side is provisioned
 (RW18); a lever's row overrides them, its reason included. A cntlr
 answers `GetLegBm` with its `leg_bm_hex` lever's bytes for any leg, and
-with an empty bitmap without it (BM7). A cntlr also reports, for each clone its request carries, a
+with an empty bitmap without it (BM7). A cn fake answers `GetCnStore`,
+which the gateway suite's restore check reads, as the cn agent does
+(`cnagent.md` CN32): its node's last accepted request and a summary of each
+cntlr request that request's pointer list names, an unknown object for any
+other cluster or node, its node's `reply_code` and `Starting` levers
+setting the code. A cntlr also reports, for each clone its request carries, a
 group row and a leg row per leg of the clone's clone meta
 group, as for a slice's group, the kinds of row the cn agent reports for a
 group (`cnagent.md` CN28), so that a Go case can stage HL2's leg rows and

@@ -53,7 +53,8 @@ func newRootCmd() *cobra.Command {
 			"CLIs. It reads and writes etcd, and calls an agent only " +
 			"where gateway.md, Agent calls, lists: the node size reads, " +
 			"the reports behind its inspects and behind the checks of " +
-			"some calls, and the bitmap reads.",
+			"some calls, the bitmap reads, and the held state behind " +
+			"the restore check.",
 		SilenceUsage: true,
 		// main reports the error on stderr and exits 1; without this cobra
 		// would print the very same line a second time.

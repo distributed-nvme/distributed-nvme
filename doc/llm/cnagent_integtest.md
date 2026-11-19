@@ -13,10 +13,12 @@ The suite proves that a real `dnv-agent cn` — nvme-tcp legs, md-raid1,
 dm-thin, dm-clone, dm-flakey, nvmet configfs — behaves as `cnagent.md`
 specifies on two lab VMs driven over gRPC from the developer machine, with
 real `dnv-agent dn` instances behind the sides, the dn role having its own
-suite. It exercises every `ControllerNodeAgent` RPC but `GetCnInfo`, whose
-reading `CheckCn` answers the same way (`cnagent.md` CN23, CN24) and which
-the unit tests and the e2e suite's `InspectControllerNode` call, and reads
-the kernel state beside the agent's report. It also pins two of the md
+suite. It exercises every `ControllerNodeAgent` RPC but two, and reads the
+kernel state beside the agent's report. The two: `GetCnInfo`, whose reading
+`CheckCn` answers the same way (`cnagent.md` CN23, CN24) and which the unit
+tests and the e2e suite's `InspectControllerNode` call; and `GetCnStore`,
+which reads only the requests the agent holds and nothing of the node
+(`cnagent.md` CN32), so that the unit tests hold it whole. It also pins two of the md
 assembly rules the cross-leg half of failover safety rests on, the refusal
 before redund builds its pool and the kick in its late flip
 (`architecture.md`, [D16]); another, a start from equal superblocks copying

@@ -442,10 +442,11 @@ func checkDnClean(ctx context.Context, addrPort string, plan *nodePlan) error {
 // observation must exist, and it must be of the plan's revision. A non-zero
 // code is a leftover the node's latest sweep or read names, a failure, a
 // refused conf, an unknown node or an agent that still starts (dnagent.md
-// SH33), and its details pass on cut to the row text cap (common.CutRowText;
-// architecture.md, Live-state reporting). A revision below the stored one is a node whose
-// latest desired state the agent has not applied, so the sweep that removes
-// what the state no longer names may not have run; one above it is an agent
+// SH33), and its details pass on cut to the row text cap
+// (common.CutRowText; architecture.md, Live-state reporting). A revision
+// below the stored one is a node whose latest desired state the agent has
+// not applied, so the sweep that removes what the state no longer names may
+// not have run; one above it is an agent
 // that holds a newer state than etcd, as after an etcd restore.
 func nodeObsRefusal(
 	kind string,

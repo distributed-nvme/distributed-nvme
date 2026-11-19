@@ -1,15 +1,16 @@
 // cn.go is the `cn` group (dnvctl.md, `cn` — `ctl/cn.go`): the six
-// ControllerNode RPCs.
+// ControllerNode RPCs and the restore check.
 //
 // dnvctl.md, `cn` — `ctl/cn.go`, defines the group as mirroring `dn`
 // exactly, with "the same verbs and the same flags", and that is literal:
 // the DN and CN message families differ on the wire only in their names and
 // in which revision token they carry (CnRev here, DnRev there), so every
 // verb, every flag spelling and every default matches ctl/dn.go row for row.
-// A change to one is a change to both.
+// A change to one is a change to both. The one exception is `cn
+// check-restore`, which has no `dn` twin.
 //
 // The only package-level name this file adds beyond registerCn is cnAddrFlag,
-// which five of the six leaves need. It carries the group prefix on purpose:
+// which six of the seven leaves need. It carries the group prefix on purpose:
 // dn.go declares the identical --addr flag for its own leaves and the two
 // files share one package, so an unprefixed nodeAddrFlag would collide the
 // moment both land (dnvctl.md, Files).
@@ -201,6 +202,29 @@ func registerCn(root *cobra.Command) {
 		})
 	cnAddrFlag(inspect.Flags())
 
+	// cn check-restore — CheckControllerNodeRestore, the one leaf with no
+	// `dn` twin: the restore check after an etcd restore (dnvctl.md, `cn` —
+	// `ctl/cn.go`). A read, so it carries no token. The gateway reads each
+	// pool the node holds, so a node of many pools needs a --timeout that
+	// covers them.
+	checkRestore := leaf("check-restore",
+		"compare what a controller node's agent holds with the restored "+
+			"etcd, pool by pool (CheckControllerNodeRestore)",
+		func() (job, error) {
+			cluster := clusterOf()
+			addr := strOf("addr")
+			return func(
+				ctx context.Context, client pb.GatewayClient,
+			) (any, error) {
+				return client.CheckControllerNodeRestore(
+					ctx, &pb.CheckControllerNodeRestoreRequest{
+						ClusterName: cluster,
+						AddrPort:    addr,
+					})
+			}, nil
+		})
+	cnAddrFlag(checkRestore.Flags())
+
 	root.AddCommand(group("cn", "controller node commands",
-		create, del, get, list, setDisabled, inspect))
+		create, del, get, list, setDisabled, inspect, checkRestore))
 }

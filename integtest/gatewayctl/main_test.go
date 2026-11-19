@@ -250,6 +250,7 @@ func TestCommandsCoverEveryRpc(t *testing.T) {
 		"ListControllerNodes":             "list-cns",
 		"UpdateControllerNodeDisabled":    "set-cn-disabled",
 		"InspectControllerNode":           "inspect-cn",
+		"CheckControllerNodeRestore":      "check-restore",
 		"CreateStoragePool":               "create-sp",
 		"DeleteStoragePool":               "delete-sp",
 		"GetStoragePool":                  "get-sp",
@@ -302,8 +303,8 @@ func TestCommandsCoverEveryRpc(t *testing.T) {
 		"UpdateGroupOperatorInCharge":     "set-grp-operator-in-charge",
 		"GetThinDeviceBitmap":             "get-td-bm",
 	}
-	if len(pb.Gateway_ServiceDesc.Methods) != 71 {
-		t.Fatalf("service Gateway has %d methods, want 71",
+	if len(pb.Gateway_ServiceDesc.Methods) != 72 {
+		t.Fatalf("service Gateway has %d methods, want 72",
 			len(pb.Gateway_ServiceDesc.Methods))
 	}
 	for _, method := range pb.Gateway_ServiceDesc.Methods {

@@ -98,9 +98,11 @@ through viper (Components: invocation reference):
   check that the volume's namespaces are parked, `GetThinDeviceBm` for
   that read (Bitmap reads), `GetCntlrInfo` and `InspectGrp` behind
   `InspectGroup`, `GetCntlrInfo` behind `CreateRepair`'s read of the
-  bad leg's row (Repairs), and `GetCntlrInfo` of each pool's primary and
+  bad leg's row (Repairs), `GetCntlrInfo` of each pool's primary and
   `GetSideInfo` of a migration's destination behind `GetClusterStatus`
-  (Clusters). The worker never calls `Get*Info`: it watches through
+  (Clusters), and `GetCnStore` behind `CheckControllerNodeRestore`, the
+  restore check (Controller nodes). The worker never calls `Get*Info`: it
+  watches through
   `Check*` (Check streams, dn / cn roles). `gateway.md` owns it.
 * `dnv-worker` is one binary with the roles `dn`, `cn` and `sp`, any subset
   per instance. It watches the revision keys in etcd, shards the work by
@@ -1517,12 +1519,16 @@ they make that read in a planning snapshot, `CreateRepair` with a fresh new
 leg in a fresh one each round of its candidate unit (`gateway.md` GW5,
 GW9). `AdvanceClusterIds` commits one
 transaction for its cluster and then one per pool, which take the cluster
-id the first one derived (Clusters). Network calls to agents (`GetDnSize` and
+id the first one derived (Clusters). `CheckControllerNodeRestore`, a read,
+reads the cluster and the node in one snapshot, then each pool in a
+snapshot of its own and the thin devices of some pools in a plain range
+(Controller nodes). Network calls to agents (`GetDnSize` and
 `GetCnSize`, the `Get*Info` behind `Inspect*`, behind the `force` false
 proof of the node deletes (Disk nodes, Controller nodes), behind the
 `force` false hydration checks of Clones and Migrations and behind
 `ForceStartGroup`'s check of the group's array (Repairs), the bitmap
-reads, the inspect of a group) must happen
+reads, the inspect of a group, the restore check's `GetCnStore`) must
+happen
 **outside** the STM, before or after it; when such a call needs
 `cluster_id`, a plain pre-read of `ClusterConf` provides it and the in-STM
 read stays authoritative.
@@ -2871,6 +2877,121 @@ and `CnGlobal`, with these differences:
   cluster id, the `cn_id` and the revision the planning snapshot read.
   With `force` it asks no agent. Either way the agent keeps the node's
   request in its local store (`cnagent.md` CN2).
+* **CheckControllerNodeRestore** is the restore check (etcd backup and
+  restore): a read that compares the desired state the agent at
+  `addr_port` holds with the restored state, cntlr by cntlr. Errors:
+  `NOT_FOUND` cluster; `FAILED_PRECONDITION` when the agent does not
+  answer, answers that it starts, or answers a code other than zero and
+  `ReplyCodeUnknownObject`; `ABORTED` for a restored node with no `CnRev`
+  and for a failure of etcd. No token, no write, no revision. Action: one
+  snapshot resolves the cluster and reads the restored `CnConf` at
+  `addr_port` with its `CnRev`, both absent for a node added after the
+  backup, whose agent is asked all the same; then, outside any STM, one
+  `GetCnStore` (service ControllerNodeAgent) asks for every controller
+  node of the cluster the agent holds, and an agent that holds none, as
+  after its store was lost, gives no held row, so every cntlr the
+  restored node names reads not held; then each pool is read in a
+  snapshot of its own, its `sp_id_to_name` record, `SpConf` and `SpRev`,
+  and, for a pool held at a revision above the restored one, its `Slice`,
+  `Clone` and `Repair` records and the `RetiredLeg` record of each retired
+  leg its counted groups list (MAY_BREAK, below), and the thin devices of
+  such a pool in one range of their prefix outside any STM. Reply: the
+  held nodes with their revisions, the restored node's id and revision,
+  and a row per cntlr a held node's pointer list names and per cntlr the
+  restored node names that the agent does not hold, each with the pool's
+  `sp_id`, the `cntlr_id`, the node, the pool's name, the held and the
+  restored revision, the held role and NQNs, whether the restored node
+  names the cntlr, the largest side id and the count of sides of the held
+  and, for a pool held ahead, of the restored layout, whether the held
+  request lacks the side id of a retired leg, and a verdict. A verdict is the
+  cntlr's: a standby can hold an older request than its primary, and its
+  lists then name as lost a thin device deleted later. A pool is read from
+  its row, on any controller node, with the highest held revision, the
+  cntlr the worker told last; a row behind, not loaded or not held holds
+  nothing of the pool to read.
+  * SAME: the held revision is the restored one: what this cntlr was told
+    does not change.
+  * OLDER: the held revision is above it, over the same set of sides. The
+    restore loses every change of the pool since the backup, and the
+    layout stands. The row lists the thin devices lost, each with its thin
+    id and whether that id is at or above the restored `next_dev_id`, so
+    that a new volume of the pool can take it again (Known limits, A
+    restore can hand out a pool's thin ids again), and the thin devices of
+    the restored pool the agent does not hold, which come back as records
+    whose thin ids the primary's sweep deleted after their delete, so they
+    read as lost thin ids with no data until deleted again (`cnagent.md`
+    CN14).
+  * MAY_BREAK: as OLDER, over another set of sides, so the restored layout
+    may break. The set counts every place a side sits: every leg of the
+    slices' meta and data groups and of the meta group of each clone that
+    is not latched, the clones the worker sends a cntlr (`dnv-worker.md`
+    CLD5); the new legs of each open repair whose parent group is one of
+    those, the repairs the worker sends a cntlr; and the side of each
+    retired leg those groups list, which sits outside the group's legs, by
+    its side id: the worker carries each retired leg's side id in the cntlr
+    request (`retired_leg_id_to_side_id`), the agent keeps it with the
+    request (`cnagent.md` CN32), and the check reads it from the restored
+    `RetiredLeg` record. Side, leg and group ids come from one counter per
+    pool, which only counts up. So a side made after the backup — by a
+    grow, a repair, a migration or a clone — raises the largest side id,
+    in a group's legs or retired with its leg; a side removed after it — by
+    a finished or a cancelled migration, a deleted or given-back retired
+    leg or a drained clone — lowers the count unless a side was also made;
+    and a repair's finish, which moves its new leg into its group and the
+    bad leg to the retired legs, and a retired leg taken back as a repair's
+    new leg move a side inside the set, which stands and reads older. A
+    held request that lacks the side id of a retired leg its groups list,
+    as one from a worker before `retired_leg_id_to_side_id`, marks its row
+    (`held_side_ids_incomplete`) and reads may break when held ahead, since
+    its largest side id can miss a side made after the backup and retired
+    since. The verdict is cautious: a migration made after the backup and
+    not yet cut over gives it, although its source side still holds every
+    write.
+  * NEW: the restored state has no pool of the `sp_id`: the pool and
+    every thin device the agent holds of it are lost. The row lists them,
+    and its NQNs name the Kubernetes volume of a pool the CSI driver made
+    (`csi.md`).
+  * BEHIND: the held revision is below the restored one: the cntlr was
+    behind its pool at the backup and the worker has not told it since, or
+    the agent's local store was put back from an older copy. An agent that
+    lost its store holds nothing, so its rows read not held, until the
+    worker sends it the current state again, which is not older. Nothing
+    is compared.
+  * NOT_LOADED: the held node names the cntlr, and the agent holds no
+    request of it: the startup reload skipped its file (`cnagent.md` CN2),
+    or the request never arrived. The node's request names a cntlr before
+    the cntlr's first syncup (`cnagent.md` CN8), and the worker holds a
+    cntlr's syncup until the pool's sides apply the state, for up to one
+    interval (`dnv-worker.md` RW14), so a cntlr made just before the
+    failure, often of a pool made after the backup, can read not
+    loaded.
+  * NOT_HELD: the restored node names a cntlr the agent does not hold:
+    the pool was deleted, or the cntlr moved to another node, after the
+    backup, and it comes back; or the agent holds no node of the cluster,
+    as after its store was lost, and the reply lists no held node. A pool
+    was deleted after the backup only when every row of its `sp_id`, on
+    every controller node, reads not held, and every one of those nodes'
+    replies lists its node as held at a revision at or above that reply's
+    restored revision: a node held below it was never told of a cntlr the
+    backup names.
+  * RECORD_LOST: a record of the restored pool the row reads is missing or
+    does not decode — its `sp_id_to_name`, `SpConf` or `SpRev` record,
+    for a pool held ahead a `Slice`, `Clone`, `Repair`, `RetiredLeg` or
+    thin device record, a name
+    of `td_name_list` with no record among them, and for a cntlr of the
+    restored node a pool the restored state names nowhere; the row stands
+    for the pool, and the other pools are judged. A pool at the restored
+    revision reads no `Slice` record, so its lost one is not seen.
+  Reasons: per controller node, since only the controller nodes know a
+  pool made after the backup, which with the CSI driver is every
+  Kubernetes volume made since, and one node's held state bounds the call
+  and its reply; thin devices and the layout read only where the
+  revisions differ, since the same revision of one cntlr is the same
+  request; a snapshot per pool, since nothing writes during a restore and
+  one transaction over every pool of a node would hold hundreds of
+  thousands of reads. A pool none of whose controller nodes answers is not
+  seen, and a pool whose every row is behind, not loaded or not held shows
+  no loss (etcd backup and restore).
 * **UpdateControllerNodeDisabled**: as `UpdateDiskNodeDisabled` against
   `CnConf` and `CnCapacity`, with the `CnRev` token; reply `cn_id`.
 * **InspectControllerNode** calls `ControllerNodeAgent.GetCnInfo`; reply
@@ -4821,7 +4942,8 @@ its pad bits in the middle of the chunk and shift every later bit. So
   the one thing that never rides in a `Syncup*` request; they travel only
   over the dedicated `Push*Bitmap` RPCs (Bitmap push protocol).
 * **RPC shapes.** `Syncup*`, `Push*Bitmap`, `Get*Info`, `GetDnSize` and
-  `GetCnSize`, and `GetThinDeviceBm` and `GetLegBm` are unary; the four
+  `GetCnSize`, `GetThinDeviceBm` and `GetLegBm`, `InspectGrp` and
+  `GetCnStore` are unary; the four
   `Check*` RPCs are the only bidirectional streams (Check streams).
   `Syncup*`, `Push*Bitmap`, `Get*Info` and `Check*` replies embed
   `AgentReply` with its `code` and `details` (zero is OK). `Syncup*`,
@@ -4839,14 +4961,17 @@ its pad bits in the middle of the chunk and shift every later bit. So
   which every such reply carries, is when the agent saved the request
   (`dnagent.md` SH28). The exact reply fields are listed per RPC under
   `service DiskNodeAgent` and `service ControllerNodeAgent`.
-  `PushMigrBitmapReply` and `PushCloneBitmapReply` carry only `AgentReply`;
+  `PushMigrBitmapReply` and `PushCloneBitmapReply` carry only `AgentReply`,
+  and `GetCnStoreReply` an `AgentReply` beside the held state, with no
+  `*Info`, `revision` or stamp, since it reports no observation;
   `GetDnSize`, `GetCnSize`, `GetThinDeviceBm`, `GetLegBm` and `InspectGrp`
   return only their payload (`size` and `host_name`, `bitmap`, the members'
   reads) and report failure through the gRPC status, but for a failed read
   of the host name, which leaves `host_name` empty and fails nothing
   (`dnagent.md` SH34). While the agent starts, every
-  `Syncup*`, `Push*Bitmap`, `Get*Info` and `Check*` reply carries
-  `ReplyCodeStarting` and no observation, a `Syncup*`, `Get*Info` or
+  `Syncup*`, `Push*Bitmap`, `Get*Info`, `Check*` and `GetCnStore` reply
+  carries `ReplyCodeStarting`, the first four no observation and the last
+  no CN, a `Syncup*`, `Get*Info` or
   `Check*` one a zero `revision` and no `*Info` whatever request the agent
   holds, and `GetThinDeviceBm`, `GetLegBm` and `InspectGrp` end with gRPC's
   Unavailable (`dnagent.md` SH33). A worker issues the `Syncup*` calls for
@@ -4960,9 +5085,12 @@ its pad bits in the middle of the chunk and shift every later bit. So
 * `SyncupCntlr` carries one `cntlr_pointer`, `revision`, `bdev_conf`
   (`dm_pool_conf.low_water_mark_pct` included, Primary cntlr), `sp_level`,
   `cntlr`, `id_to_slice` (keyed by the `slice_id` rendered with `IdKeyFmt`),
-  `td_list`, `nqn_to_subsystem`, `clone_list`, `xfer_list` and
+  `td_list`, `nqn_to_subsystem`, `clone_list`, `xfer_list`,
   `name_to_repair`, the pool's repairs by name, save the repair of a
-  deleting clone's group (Repair). It converges Primary cntlr or Standby
+  deleting clone's group (Repair), and `retired_leg_id_to_side_id`, each
+  retired leg's side id, which the agent keeps for the restore check and
+  builds nothing from (Controller nodes, CheckControllerNodeRestore). It
+  converges Primary cntlr or Standby
   cntlr; a primary-to-standby or standby-to-primary flip follows Failover
   exactly, and a clone's dm-clone is created again over the metadata its
   clone meta group holds by Clone metadata durability. Reply `agent_reply`,
@@ -4997,6 +5125,13 @@ its pad bits in the middle of the chunk and shift every later bit. So
   cntlr, with the protocol of Check streams. Request: the ids, `revision`,
   `show_info` and `trace_id` (the sending round's id); reply:
   `agent_reply`, `revision`, `cn_info` or `cntlr_info`, and `obs_stamp`.
+* `GetCnStore` serves the gateway's restore check (Controller nodes,
+  CheckControllerNodeRestore): the desired state the agent holds for one
+  CN, or every CN of a cluster for a zero `cn_id` — each CN's `revision`
+  and `cntlr_pointer_list`, and a summary of each held cntlr request, its
+  `revision`, role, `td_list`, NQNs, and the largest side id and the count
+  of sides of its layout (`cnagent.md` CN32). It reads nothing of the node. Reply `agent_reply` and
+  `cn_list`.
 
 ### Side provisioning protocol
 
@@ -7441,12 +7576,15 @@ agents' stores, the disks and the kernels hold what was built after the
 backup, and the id counters (Globals: id allocation + shard buckets) are
 back at values the cluster has handed out since.
 
-Before the restore every worker, every cdc and every gateway stops, and the
+Before the restore every worker, every cdc, every gateway and the
+controller plugin of every CSI driver that calls the gateways stop, and the
 agents keep serving their nodes: a worker would hand out ids from the
 restored counters, since a grow, a leg repair and a cntlr replacement all
-take new ids. Then, in this order:
+take new ids, and a controller plugin would retry a volume create as soon
+as a gateway answers, before the id step. Then, in this order:
 
-1. Restore etcd and start it as every etcd serving dnv is deployed
+1. Restore etcd with etcd's restore tool (`etcdutl snapshot restore` on
+   etcd 3.6) and start it as every etcd serving dnv is deployed
    (Components: invocation reference), then start the gateways.
 2. Run the id step, `AdvanceClusterIds` (Clusters), for every cluster
    before any other call but `ListClusters`, which names the clusters, and
@@ -7458,15 +7596,34 @@ take new ids. Then, in this order:
    the backup while a node still holds that object's remains — a side
    record on a disk, a thin id in a pool, a device or an export — and the
    node would take those remains, data included, for the new object's.
-3. For each agent: stop it, delete the files of its local store (Agent
-   local-store paths), start it. A kept store refuses every syncup until
-   etcd's revision reaches the agent's (`dnv-worker.md` RW5); a cleared one
-   accepts the restored revision. The startup reconcile of a cleared store
-   converges nothing, since the store holds no file (`dnagent.md` DN2;
-   `cnagent.md` CN2): the agent rebuilds from the restored desired state
-   when the workers of step 4 send their syncups (`dnv-worker.md` RW4,
-   RW5).
-4. Start the workers and the cdc, let clients call the gateways again, and
+   A cluster created after the backup is not in the restored state: no
+   call names it, and every pool of it is lost unseen.
+3. Run the restore check, `CheckControllerNodeRestore` (Controller nodes),
+   for every controller node of the restored state and every one added
+   since the backup, which the restored state does not name, while the
+   agents still hold their pre-restore requests. Its rows say which pools
+   are the same, which lose thin devices, which may break, which are lost
+   whole, and which cntlrs come back; a pool is read from its row with the
+   highest held revision. A pool none of whose controller nodes
+   answers is not seen, a pool whose every row is behind, not loaded or
+   not held shows no loss, and no row lists the sides a disk node frees at
+   step 5 (below). A volume that is to be kept can be read off while
+   the agents still serve it: no worker runs, so each node keeps the
+   devices and exports of its pre-restore requests and a host connected to
+   the pool still reads it, which no test has shown. Kubernetes keeps its
+   records of every volume of a pool that is lost whole, every volume made
+   since the backup with the CSI driver; the operator deletes them or makes
+   the volumes again.
+4. For each agent: stop it, copy the files of its local store (Agent
+   local-store paths) aside, the only record of what the node was told
+   before the restore, delete them, start it. A kept store refuses every
+   syncup until etcd's revision reaches the agent's (`dnv-worker.md` RW5);
+   a cleared one accepts the restored revision. The startup reconcile of a
+   cleared store converges nothing, since the store holds no file
+   (`dnagent.md` DN2; `cnagent.md` CN2): the agent rebuilds from the
+   restored desired state when the workers of step 5 send their syncups
+   (`dnv-worker.md` RW4, RW5).
+5. Start the workers and the cdc, let clients call the gateways again, and
    take a new backup: a later restore of a backup from before this id step
    would take the counters back below the ids handed out since, and its own
    step would hand those out again.
@@ -7537,7 +7694,9 @@ A restore loses or breaks what changed after the backup:
 Reason: the order and the id step close the one hazard that could show a
 pool another pool's data; the others follow from restoring an older
 desired state over newer nodes, and are stated so that an operator can
-weigh a restore against them.
+weigh a restore against them; the restore check names, pool by pool, what
+the restore loses on the pools it sees, before step 4 removes the last
+record of it.
 
 ### Upgrade in lockstep
 
@@ -7645,7 +7804,13 @@ into every controller-node syncup and nothing enforces it (Controller node,
 common). A cluster conf with no `md_check_conf` reads as no md check, and
 one with no `start_hold_conf` as the default hold (Common validation); a
 cntlr request with no `leg_fast_io_fail_tmo` connects with the default
-timeout, as the build that wrote it did (`cnagent.md` CN10). A `Cntlr` that
+timeout, as the build that wrote it did (`cnagent.md` CN10), and one with
+no `retired_leg_id_to_side_id`, which no agent builds from, gives the
+restore check no side id for its retired legs, so a pool held ahead with a
+retired leg reads may break until a change of the pool sends the cntlr a
+request from the upgraded worker, which re-sends one only for a revision
+or a code (`dnv-worker.md` RW4) (Controller nodes,
+CheckControllerNodeRestore). A `Cntlr` that
 carries no `demoted_revision` names no demotion that waits for its hold,
 which is how the build that wrote it stood after any worker restart
 (`dnv-worker.md` RW22). A group that carries no `array_made` reads as one
@@ -9681,7 +9846,10 @@ document and only pointed to here.
   other cntlr, such as one the restored state makes a standby or does not
   name, that sweep only removes the volume. An id that no thin volume maps
   stays in the pool until a sweep of the pool's ids deletes it
-  (`cnagent.md` CN14).
+  (`cnagent.md` CN14). The restore check names, before the agents' stores
+  are reset, each thin device a restore loses and whether a new volume of
+  its pool can take its thin id again (Controller nodes,
+  CheckControllerNodeRestore).
 * **One cntlid slot can serve most subsystems of a kernel.** nvmet draws
   every controller id from one id space per kernel, a subsystem's range
   being bounds inside it (cntlid slots), every new side but a migration

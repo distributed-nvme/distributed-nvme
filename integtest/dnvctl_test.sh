@@ -23,7 +23,7 @@
 # needed on the VM — both binaries are built here and scp'd.
 #
 # What it proves (Integration test plan, What the suite proves): (a) every one
-# of the 71 commands marshals its argv into exactly the intended request
+# of the 72 commands marshals its argv into exactly the intended request
 # proto, asserted FIELD FOR FIELD against the fake's state.json — a
 # whole-object comparison, so an unexpected key fails as loudly as a wrong
 # value, which is what makes "no sp_rev key" and "no dm_raid0_conf key"
@@ -52,7 +52,7 @@
 #
 # Round trips: ctl_exec does ONE ssh per dnvctl invocation and brings back five
 # things — state.json before, the exit code, stderr, stdout, state.json after.
-# That is what keeps a 71-step sweep to 71 ssh calls, and it is why every
+# That is what keeps a 72-step sweep to 72 ssh calls, and it is why every
 # ctl_ok/ctl_fail/ctl_usage MUST run in the PARENT shell: the five results land
 # in globals, and a subshell would drop them (and would swallow a die).
 #
@@ -941,8 +941,8 @@ EOF
 	# to the 0/4/8/12 ladder either way (ctl/request_test.go's
 	# TestClusterCreateExtentSize says the same, and also carries the "no
 	# --extent-size sends no dn_bin_conf" half).
-	# The step keeps its number because the audit below pins 71 steps over
-	# 71 distinct RPCs.
+	# The step keeps its number because the audit below pins 72 steps over
+	# 72 distinct RPCs.
 	sweep_step 01 CreateCluster \
 		'{"cluster_name":"c1","dn_bin_conf":{"extent_size":"67108864"}}' \
 		cluster create --name c1 --extent-size 67108864
@@ -1357,13 +1357,21 @@ EOF
 	assert_eq "$CTL_ERR" "" "stderr of the table must be empty (CT7)"
 	assert_eq "$CTL_OUT" "$GOLD_STATUS_TABLE" "golden: the status table"
 
+	# --- the restore check — `ctl/cn.go` ---------------------------------
+	# The one `cn` leaf with no `dn` twin: a read, so no token travels, and
+	# the global --sp reaches nothing. Step 72, last, so no step before it
+	# moves.
+	sweep_step 72 CheckControllerNodeRestore \
+		"{\"cluster_name\":\"$CLUSTER\",\"addr_port\":\"$CN_ADDR\"}" \
+		cn check-restore --addr "$CN_ADDR"
+
 	# -------------------------------------------------------------------
-	stage audit "all 71 steps left one request record under their trace id"
+	stage audit "all 72 steps left one request record under their trace id"
 	# -------------------------------------------------------------------
 	# CT1's completeness claim, made on the WIRE rather than from a table:
-	# 71 distinct RPCs, 71 distinct trace ids, one interceptor record each.
-	# One log read serves all 71 assertions.
-	assert_eq "${#SWEEP_TRACES[@]}" "71" "the sweep ran 71 steps"
+	# 72 distinct RPCs, 72 distinct trace ids, one interceptor record each.
+	# One log read serves all 72 assertions.
+	assert_eq "${#SWEEP_TRACES[@]}" "72" "the sweep ran 72 steps"
 	local records idx want
 	records=$(recsr "$(fgw_log)" \
 		'select(.msg == "grpc server request") | .trace_id + " " + .method')
@@ -1374,7 +1382,7 @@ EOF
 	done
 	local distinct
 	distinct=$(printf '%s\n' "${SWEEP_RPCS[@]}" | sort -u | grep -c . || true)
-	assert_eq "$distinct" "71" "the 71 steps drove 71 DISTINCT RPCs"
+	assert_eq "$distinct" "72" "the 72 steps drove 72 DISTINCT RPCs"
 }
 
 # ---------------------------------------------------------------------------

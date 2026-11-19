@@ -2381,6 +2381,133 @@ message GetThinDeviceBitmapReply {
     bytes bitmap = 1;
 }
 
+message CheckControllerNodeRestoreRequest {
+    string cluster_name = 1;
+    // The controller node whose agent is asked: one the restored state
+    // names, or one added after the backup, which it does not.
+    string addr_port = 2;
+}
+
+// RestoreVerdict is what an etcd restore does to one pool a controller node
+// holds a cntlr of, judged from the desired state its agent holds of that
+// cntlr and the restored state (architecture.md, Controller nodes,
+// CheckControllerNodeRestore); a pool is read from its row with the highest
+// held revision.
+enum RestoreVerdict {
+    RESTORE_VERDICT_UNSPECIFIED = 0;
+    // The agent holds the restored revision of the cntlr: what this cntlr
+    // was told does not change.
+    RESTORE_VERDICT_SAME = 1;
+    // The agent holds a newer revision over the same set of sides as the
+    // restored layout: the restore loses every change since, the thin
+    // devices of lost_td_list among them, and the layout stands.
+    RESTORE_VERDICT_OLDER = 2;
+    // As OLDER, and the held set of sides differs from the restored one,
+    // so the pool may break: with every place a side sits counted by its
+    // side id, a retired leg's from SyncupCntlrRequest.
+    // retired_leg_id_to_side_id and the restored RetiredLeg record, a side
+    // made after the backup (a grow, a repair, a migration, a clone) gives
+    // a higher largest side id, in a group's legs or retired since, since
+    // side ids only grow, and a side removed after it (a finished or
+    // cancelled migration, a deleted or given-back retired leg, a drained
+    // clone) a smaller count; a repair's finish or a take-back of a retired
+    // leg moves a side inside the set. A held request that lacks a retired
+    // leg's side id (Pool.held_side_ids_incomplete) also reads MAY_BREAK.
+    RESTORE_VERDICT_MAY_BREAK = 3;
+    // The restored state has no pool of this sp_id: the pool and every thin
+    // device the agent holds of it are lost.
+    RESTORE_VERDICT_NEW = 4;
+    // The restored node holds a cntlr of the pool the agent does not hold:
+    // deleted, or moved to another node, after the backup, and it comes
+    // back; or the agent holds no node of the cluster. A pool was deleted
+    // only when every row of its sp_id on every node reads NOT_HELD and
+    // every one of those nodes is held at or above its reply's
+    // restored_revision: a node held below it was never told of a cntlr
+    // the backup names.
+    RESTORE_VERDICT_NOT_HELD = 5;
+    // The agent holds an older revision than the restored one: the cntlr
+    // was behind the pool at the backup and was not told since, or the
+    // agent's store was put back from an older copy; an agent that lost its
+    // store holds nothing and reads NOT_HELD until the worker sends it the
+    // current state again. Nothing can be compared.
+    RESTORE_VERDICT_BEHIND = 6;
+    // The agent's node names the cntlr, but the agent holds no request of
+    // it: its file was skipped at the reload (cnagent.md CN2), or the
+    // request never came, as for a cntlr made just before the failure,
+    // whose pointer the node's request carries before its first syncup
+    // (cnagent.md CN8), which the worker holds until the pool's sides apply
+    // the state (dnv-worker.md RW14).
+    RESTORE_VERDICT_NOT_LOADED = 7;
+    // A record of the restored pool the check reads is missing or does not
+    // decode, a RetiredLeg record of a pool held ahead among them.
+    RESTORE_VERDICT_RECORD_LOST = 8;
+}
+
+message CheckControllerNodeRestoreReply {
+    // A controller node of the cluster the agent holds.
+    message HeldCn {
+        uint64 cn_id = 1;
+        uint64 revision = 2;
+    }
+    // A thin device the agent holds that the restored pool lacks.
+    message LostTd {
+        uint64 td_id = 1;
+        uint32 dev_id = 2;
+        uint32 ori_id = 3;
+        uint64 size = 4;
+        bool created = 5;
+        // dev_id is at or above the restored pool's next_dev_id, so a new
+        // thin device of the pool can take this thin id after the restore.
+        bool id_may_return = 6;
+    }
+    // A thin device of the restored pool the agent does not hold: deleted
+    // after the backup, its record comes back with no data, its thin id
+    // deleted by the primary's sweep. ListThinDevices names it by its
+    // td_id.
+    message ReturningTd {
+        uint64 td_id = 1;
+        uint32 dev_id = 2;
+    }
+    message Pool {
+        uint64 sp_id = 1;
+        uint64 cntlr_id = 2;
+        // The held node the cntlr is under, or, for NOT_HELD, the restored
+        // node's.
+        uint64 cn_id = 3;
+        RestoreVerdict verdict = 4;
+        // Empty when the restored state names no pool of sp_id.
+        string sp_name = 5;
+        uint64 held_revision = 6;
+        uint64 restored_revision = 7;
+        bool primary = 8;
+        // The restored node at addr_port names this cntlr under cn_id.
+        bool cntlr_in_restored_state = 9;
+        // The NQNs of the pool's subsystems the agent holds: a Kubernetes
+        // volume's carries its name.
+        repeated string nqn_list = 10;
+        uint64 held_max_side_id = 11;
+        uint64 restored_max_side_id = 12;
+        repeated LostTd lost_td_list = 13;
+        repeated ReturningTd returning_td_list = 14;
+        // The sides of the held and of the restored layout, counted as
+        // StoredCntlr.side_cnt counts them; the restored count only for a
+        // pool held at a newer revision. Appended, never renumbered.
+        uint64 held_side_cnt = 15;
+        uint64 restored_side_cnt = 16;
+        // The held request lacks the side id of a retired leg, so the held
+        // largest side id is not exact; a pool held ahead then reads
+        // MAY_BREAK. Appended, never renumbered.
+        bool held_side_ids_incomplete = 17;
+    }
+    // Empty when the agent holds no controller node of the cluster.
+    repeated HeldCn held_cn_list = 1;
+    // The restored node at addr_port; zero when the restored state has
+    // none.
+    uint64 restored_cn_id = 2;
+    uint64 restored_revision = 3;
+    repeated Pool pool_list = 4;
+}
+
 service Gateway {
     rpc CreateCluster(CreateClusterRequest) returns (CreateClusterReply) {}
     rpc DeleteCluster(DeleteClusterRequest) returns (DeleteClusterReply) {}
@@ -2468,6 +2595,8 @@ service Gateway {
     rpc InspectGroup(InspectGroupRequest) returns (InspectGroupReply) {}
 
     rpc GetThinDeviceBitmap(GetThinDeviceBitmapRequest) returns (GetThinDeviceBitmapReply) {}
+
+    rpc CheckControllerNodeRestore(CheckControllerNodeRestoreRequest) returns (CheckControllerNodeRestoreReply) {}
 }
 
 message GetDnSizeRequest {
@@ -2710,6 +2839,12 @@ message SyncupCntlrRequest {
     // CN10). Zero, as a request from a worker without the field carries
     // it, is DefaultNvmeFastIoFailTmo. Appended, never renumbered.
     uint32 leg_fast_io_fail_tmo = 15;
+    // The side id of each retired leg of the pool, by its leg id, from its
+    // RetiredLeg record. The cn agent builds nothing from it: it keeps it
+    // with the held request, for the restore check's count of the sides of
+    // the layout (cnagent.md CN32). A request from a worker without the
+    // field carries none. Appended, never renumbered.
+    map<uint64, uint64> retired_leg_id_to_side_id = 16;
 }
 
 message SyncupCntlrReply {
@@ -2915,6 +3050,50 @@ message CheckCntlrReply {
     ObsStamp obs_stamp = 4;
 }
 
+// GetCnStoreRequest asks a cn agent for the desired state it holds
+// (cnagent.md CN32); a cn_id of zero asks for every controller node of the
+// cluster it holds.
+message GetCnStoreRequest {
+    uint64 cluster_id = 1;
+    uint64 cn_id = 2;
+}
+
+message GetCnStoreReply {
+    // One cntlr the agent holds, summed up from its held SyncupCntlrRequest.
+    message StoredCntlr {
+        CntlrPointer cntlr_pointer = 1;
+        uint64 revision = 2;
+        bool primary = 3;
+        repeated ThinDevice td_list = 4;
+        // The keys of the request's nqn_to_subsystem.
+        repeated string nqn_list = 5;
+        // The largest side id of every leg of the meta and data groups of
+        // id_to_slice, of the meta group of each clone of clone_list and of
+        // the new legs of each repair of name_to_repair, and of each
+        // retired leg those groups list, by its side id in
+        // retired_leg_id_to_side_id.
+        uint64 max_side_id = 6;
+        // The sides of those legs, and one for each retired leg those
+        // groups list. Appended, never renumbered.
+        uint64 side_cnt = 7;
+        // A retired leg those groups list has no side id in the request, as
+        // in a request from a worker without retired_leg_id_to_side_id:
+        // the largest id misses its side. Appended, never renumbered.
+        bool retired_side_id_missing = 8;
+    }
+    // One controller node the agent holds, from its held SyncupCnRequest:
+    // cntlr_list sums up the cntlrs its pointer list names that the agent
+    // holds a request of.
+    message StoredCn {
+        uint64 cn_id = 1;
+        uint64 revision = 2;
+        repeated CntlrPointer cntlr_pointer_list = 3;
+        repeated StoredCntlr cntlr_list = 4;
+    }
+    AgentReply agent_reply = 1;
+    repeated StoredCn cn_list = 2;
+}
+
 service ControllerNodeAgent {
     rpc GetCnSize(GetCnSizeRequest) returns (GetCnSizeReply) {}
     rpc SyncupCn(SyncupCnRequest) returns (SyncupCnReply) {}
@@ -2927,6 +3106,7 @@ service ControllerNodeAgent {
     rpc InspectGrp(InspectGrpRequest) returns (InspectGrpReply) {}
     rpc CheckCn(stream CheckCnRequest) returns (stream CheckCnReply) {}
     rpc CheckCntlr(stream CheckCntlrRequest) returns (stream CheckCntlrReply) {}
+    rpc GetCnStore(GetCnStoreRequest) returns (GetCnStoreReply) {}
 }
 
 // agent-local on-disk metadata ([D13]); never sent over any RPC.

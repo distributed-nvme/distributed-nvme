@@ -10,8 +10,11 @@
 package cnagent
 
 import (
+	"cmp"
 	"context"
 	"fmt"
+	"maps"
+	"slices"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -665,4 +668,143 @@ func unknownCn(cnId uint64) *pb.AgentReply {
 func unknownCntlr(ptr *pb.CntlrPointer) *pb.AgentReply {
 	return agent.UnknownObjectReply(
 		"unknown cntlr %s", cntlrPointerText(ptr))
+}
+
+// GetCnStore answers the desired state the agent holds (CN32): for each CN
+// of the request's cluster it holds — the one cn_id names, or every one for
+// a zero cn_id — the held SyncupCnRequest's revision and pointer list, and
+// a summary of each held SyncupCntlrRequest that list names. It reads the
+// requests the states hold, which are atomic pointers, under the leaf mutex
+// alone, takes no lock of CN1, reads nothing of the node and changes
+// nothing. A pointer whose cntlr the agent holds no request of, as when the
+// startup reload skipped its file (CN2), is in the pointer list only. While
+// the agent starts it answers ReplyCodeStarting, since the reload is still
+// filling the states (dnagent.md SH33); with no CN of the cluster held it
+// answers ReplyCodeUnknownObject.
+func (s *CnAgentServer) GetCnStore(
+	ctx context.Context,
+	req *pb.GetCnStoreRequest,
+) (*pb.GetCnStoreReply, error) {
+	if s.startup.Starting() {
+		return &pb.GetCnStoreReply{AgentReply: agent.StartingReply()}, nil
+	}
+	cnReqs, cntlrReqs := s.heldRequests(req.GetClusterId(), req.GetCnId())
+	if len(cnReqs) == 0 {
+		return &pb.GetCnStoreReply{
+			AgentReply: agent.UnknownObjectReply(
+				"no cn of cluster %d held", req.GetClusterId()),
+		}, nil
+	}
+	slices.SortFunc(cnReqs, func(a, b *pb.SyncupCnRequest) int {
+		return cmp.Compare(a.GetCnId(), b.GetCnId())
+	})
+	reply := &pb.GetCnStoreReply{AgentReply: agent.OkReply()}
+	for _, cnReq := range cnReqs {
+		stored := &pb.GetCnStoreReply_StoredCn{
+			CnId:             cnReq.GetCnId(),
+			Revision:         cnReq.GetRevision(),
+			CntlrPointerList: cnReq.GetCntlrPointerList(),
+		}
+		for _, ptr := range cnReq.GetCntlrPointerList() {
+			cntlrReq := cntlrReqs[cntlrKey(cnReq.GetClusterId(),
+				cnReq.GetCnId(), ptr.GetSpId(), ptr.GetCntlrId())]
+			if cntlrReq != nil {
+				stored.CntlrList = append(stored.CntlrList,
+					storedCntlr(cntlrReq))
+			}
+		}
+		reply.CnList = append(reply.CnList, stored)
+	}
+	return reply, nil
+}
+
+// heldRequests is the requests of the CNs of one cluster the agent holds,
+// one CN's or every one's for a zero cnId, and of their cntlrs by cntlr key,
+// read under the leaf mutex.
+func (s *CnAgentServer) heldRequests(
+	clusterId uint64,
+	cnId uint64,
+) ([]*pb.SyncupCnRequest, map[string]*pb.SyncupCntlrRequest) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	var cnReqs []*pb.SyncupCnRequest
+	held := map[uint64]bool{}
+	for _, st := range s.cns {
+		cnReq := st.loadReq()
+		if cnReq.GetClusterId() != clusterId ||
+			(cnId != 0 && cnReq.GetCnId() != cnId) {
+			continue
+		}
+		cnReqs = append(cnReqs, cnReq)
+		held[cnReq.GetCnId()] = true
+	}
+	cntlrReqs := map[string]*pb.SyncupCntlrRequest{}
+	for key, st := range s.cntlrs {
+		cntlrReq := st.loadReq()
+		if cntlrReq.GetClusterId() == clusterId && held[cntlrReq.GetCnId()] {
+			cntlrReqs[key] = cntlrReq
+		}
+	}
+	return cnReqs, cntlrReqs
+}
+
+// storedCntlr sums up one held cntlr request for GetCnStore: its pointer,
+// revision and role, its thin devices with their thin ids, the NQNs of its
+// subsystems in order, and the largest side id and the count of the sides
+// of its layout: every leg of the slices' meta and data groups, of the meta
+// group of each clone the request carries and the new legs of each of its
+// repairs, and each retired leg those groups list, by the side id the
+// request's retired_leg_id_to_side_id gives it. A retired leg with no side
+// id there, as in a request from a worker without the map, is counted and
+// marks the summary as missing one. The gateway counts the restored layout
+// the same way (architecture.md, Controller nodes,
+// CheckControllerNodeRestore). A stored request is never modified, so the
+// summary shares its messages.
+func storedCntlr(req *pb.SyncupCntlrRequest) *pb.GetCnStoreReply_StoredCntlr {
+	nqns := slices.Sorted(maps.Keys(req.GetNqnToSubsystem()))
+	var grps []*pb.Group
+	for _, slice := range req.GetIdToSlice() {
+		grps = append(grps, slice.GetMetaGrpList()...)
+		grps = append(grps, slice.GetDataGrpList()...)
+	}
+	for _, clone := range req.GetCloneList() {
+		if clone.GetMetaGrp() != nil {
+			grps = append(grps, clone.GetMetaGrp())
+		}
+	}
+	var legs []*pb.Leg
+	for _, rep := range req.GetNameToRepair() {
+		legs = append(legs, rep.GetNewLegList()...)
+	}
+	var maxSideId, sideCnt uint64
+	missing := false
+	for _, grp := range grps {
+		legs = append(legs, grp.GetLegList()...)
+		for _, legId := range grp.GetRetiredLegIdList() {
+			sideCnt++
+			sideId, ok := req.GetRetiredLegIdToSideId()[legId]
+			if !ok {
+				missing = true
+				continue
+			}
+			maxSideId = max(maxSideId, sideId)
+		}
+	}
+	for _, leg := range legs {
+		for _, side := range leg.GetSideList() {
+			maxSideId = max(maxSideId, side.GetSideId())
+			sideCnt++
+		}
+	}
+	return &pb.GetCnStoreReply_StoredCntlr{
+		CntlrPointer: req.GetCntlrPointer(),
+		Revision:     req.GetRevision(),
+		Primary:      req.GetCntlr().GetPrimary(),
+		TdList:       req.GetTdList(),
+		NqnList:      nqns,
+		MaxSideId:    maxSideId,
+		SideCnt:      sideCnt,
+
+		RetiredSideIdMissing: missing,
+	}
 }

@@ -233,6 +233,11 @@ func TestPrefixesEndInOneSpace(t *testing.T) {
 			"dnv retired_leg ebada5168620c5fe 0000000000000011 ",
 		},
 		{
+			"ThinDevicePrefix",
+			ThinDevicePrefix(goldenCid, goldenSpId),
+			"dnv thin_device ebada5168620c5fe 0000000000000011 ",
+		},
+		{
 			"WorkerRegPrefix",
 			WorkerRegPrefix(common.WorkerRoleDn),
 			"dnv worker dn ",
@@ -299,6 +304,11 @@ func TestPrefixIsPrefixOfKey(t *testing.T) {
 			"retired_leg",
 			RetiredLegPrefix(goldenCid, goldenSpId),
 			RetiredLegKey(goldenCid, goldenSpId, 22),
+		},
+		{
+			"thin_device",
+			ThinDevicePrefix(goldenCid, goldenSpId),
+			ThinDeviceKey(goldenCid, goldenSpId, "td0"),
 		},
 		{
 			"worker",

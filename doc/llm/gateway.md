@@ -28,10 +28,12 @@ hydration checks of `DeleteClone` and `FinishMigration`, behind
 `ForceStartGroup`'s check of the group's array, behind `CreateRepair`'s
 read of the bad leg's row and behind `GetThinDeviceBitmap`'s check of the
 parks, the `GetThinDeviceBm` bitmap read, the `InspectGrp` read behind
-`InspectGroup`, and the primaries' `GetCntlrInfo` and the migration
-destinations' `GetSideInfo` behind the status read, `GetClusterStatus`
-(Agent calls). It is one of the three co-located control-plane processes —
-gateway, worker, cdc — that any number of control-plane servers may run.
+`InspectGroup`, the primaries' `GetCntlrInfo` and the migration
+destinations' `GetSideInfo` behind the status read, `GetClusterStatus`,
+and the `GetCnStore` read behind the restore check,
+`CheckControllerNodeRestore` (Agent calls). It is one of the three
+co-located control-plane processes — gateway, worker, cdc — that any number
+of control-plane servers may run.
 This document covers `gateway/` and `cmd/dnv-gateway` only: `dnvctl` is a
 separate component with its own document (`dnvctl.md`), and the integration
 suite drives the gateway with a dedicated test client, `gatewayctl`, not
@@ -507,6 +509,9 @@ generated uuids) are written to closure-captured variables that the closure
 itself (re)assigns. The deciding STM is the one that commits the mutation;
 for a two-phase RPC (AG4) it is the second one. `AdvanceClusterIds` is the
 one RPC that commits in several: the globals' STM, then one per pool (GW19).
+`CheckControllerNodeRestore` commits nothing and reads in several: one
+snapshot for the node, one per pool and a plain range of a pool's thin
+devices (Controller nodes).
 
 GW9. **Candidate unit retry.** Allocating RPCs (`CreateStoragePool`,
 `GrowSlice`, `CreateCntlr`, `CreateMigration`, `CreateRepair`,
@@ -951,7 +956,35 @@ which needs no `ClusterConf` because a CN capacity key carries no bin index
 `InspectControllerNode` calls `GetCnInfo`, which takes no `read_io_stats`,
 and its reply carries no block counters: a controller node's counters are
 per cntlr, in `InspectCntlr`. The same six RPCs: create, delete, get, list,
-update-disabled and inspect.
+update-disabled and inspect; and a seventh with no disk node twin:
+
+* **CheckControllerNodeRestore** — the restore check (`architecture.md`,
+  Controller nodes). One `Snapshot`: resolve; the `CnConf` at `addr_port`,
+  absent being no error, and, when present, its `CnRev` through the token
+  check with no token (missing is `ABORTED`). Then `heldCnStore` calls
+  `GetCnStore` with the cluster id and a zero `cn_id`, and answers
+  `FAILED_PRECONDITION` for an agent that does not answer, that starts or
+  that answers any code but zero and `ReplyCodeUnknownObject`, its details
+  cut to the row text cap by `common.CutRowText`; the unknown object reads
+  as no node held. Then `judgeHeldCntlr` makes the row of each pointer of
+  each held node and the handler one per pointer of the restored node that
+  no held node of its id names: `readRestoredPool` reads the pool in a
+  `Snapshot` of its own, its Slice, Clone and Repair records, and the
+  RetiredLeg record of each retired leg its counted groups list, only when
+  the restored revision is below the held one, a repair counted only when
+  its parent group is a slice's or the meta group of a clone that is not
+  latched, as the worker's `cntlrRepairs` sends it, and `layoutSides`
+  counts the restored layout's sides as the agent counts the held one, a
+  retired leg by the side id of its record; a held layout with a higher
+  largest side id or another count, or one whose summary says a retired
+  leg's side id is missing, which also sets the row's
+  `held_side_ids_incomplete`, reads `RESTORE_VERDICT_MAY_BREAK`. `restoredTds` ranges `ThinDevicePrefix`
+  with no STM for a pool held above the restored revision. A record the
+  row reads that is missing or does not decode, a name of `td_name_list`
+  with no record, and a cntlr of the restored node, held or not, whose
+  pool the restored state names nowhere make the row
+  `RESTORE_VERDICT_RECORD_LOST`, never the answer's error. Rows are ordered by `sp_id`,
+  `cntlr_id` and node, thin devices by `td_id`. Nothing is written.
 
 ### Storage pools and GrowSlice
 
@@ -1825,17 +1858,18 @@ of its calls by `StatusAgentTimeout` instead, inside the same per-call
 dial (GW20).
 
 AG3. **Failure mapping.** A transport or non-OK status maps to the code the
-RPC's specification names: `ABORTED` everywhere except the `force` false
-checks of `DeleteClone` and `FinishMigration`, where an unreachable agent is
-`FAILED_PRECONDITION` (the caller cannot prove hydration is done), the
-`force` false proof of the node deletes, where it is `FAILED_PRECONDITION`
-too (the caller cannot prove the node clean), and that proof also refuses
-a reply with a non-zero code,
-`ForceStartGroup`'s check of the group's array, where it is
-`FAILED_PRECONDITION` too (the caller cannot prove the array does not run),
-and `GetThinDeviceBitmap`'s check of the parks, where it is
-`FAILED_PRECONDITION` as well (the caller cannot prove the volume takes no
-writes); that check also refuses a reply with a non-zero code.
+RPC's specification names: `ABORTED` everywhere except the calls whose
+answer a caller needs as proof, where an unreachable agent is
+`FAILED_PRECONDITION`, since silence proves nothing: the `force` false
+checks of `DeleteClone` and `FinishMigration` (hydration is not proven
+done); the `force` false proof of the node deletes (the node is not proven
+clean), which also refuses a reply with a non-zero code; the restore
+check's `GetCnStore` (what the restore loses is not known), which also
+refuses a reply with any code but zero and the unknown object of an agent
+that holds no node of the cluster; `ForceStartGroup`'s check of the
+group's array (the array is not proven down); and `GetThinDeviceBitmap`'s
+check of the parks (the volume is not proven to take no writes), which
+also refuses a reply with a non-zero code.
 `CreateRepair`'s read of the bad leg's row maps no failure at all: an agent
 that does not answer leaves the answer the leg's record gives, so a dead
 leg's repair never waits on a silent primary (`architecture.md`, Repairs).
@@ -1887,6 +1921,7 @@ The complete call matrix:
 | `InspectGroup` | `GetCntlrInfo`, then `InspectGrp` | after the snapshot |
 | `GetThinDeviceBitmap` | `GetCntlrInfo`, when a namespace exports the td, then `GetThinDeviceBm` | after the STM |
 | `GetClusterStatus` | `GetCntlrInfo` of each pool's primary, and `GetSideInfo` of each migration's destination past its cutover | after each pool's snapshot |
+| `CheckControllerNodeRestore` | `GetCnStore` | after the first snapshot, before the per-pool reads |
 
 No other `service Gateway` RPC leaves etcd — the matrix is complete.
 
@@ -2121,7 +2156,18 @@ gateway, never through `workerctl`.
   pool down, the id step runs on the live pool: every counter moves by its
   stride, in one store revision for the globals and one for the pool, no rev
   key moves, and a thin device created after it draws its ids from the moved
-  counters, above every old one.
+  counters, above every old one. Then the restore check runs on the store
+  the id step left, over the primary's controller node, whose fake is
+  given what an agent would hold: the pool at its stored revision reads
+  the same; one revision ahead over the stored layout, the pool holding
+  no open repair and no retired leg, which the planted held layout leaves
+  out, holding a thin
+  device the store lacks at the pool's next thin id and not one the store
+  has, the pool reads older, the two layouts counting the same sides with
+  no retired side id missing, the
+  lost thin device listed with its thin id marked as one that may return
+  and the other listed as coming back, beside a pool the store lacks, read
+  as new with its NQN; nothing is written.
 * parallel (three gateways, disjoint resources) — waves of concurrent
   creates and deletes across all three instances all succeed, the minted
   ids forming the expected sets and the accounting exact: every free count
@@ -2200,7 +2246,8 @@ gateway, never through `workerctl`.
 every resource group, GW14's bitmap reads only on the empty bitmap the fake
 replies (above), GW5's `deleting` gate on a latched pool, GW10's
 paging, GW11's write-time resolution, AG1 and AG3 on the inspects and the
-bitmap reads, the trace-id chain of GW2 and AG2, and the listing rule of
+bitmap reads, AG1 on the restore check, the trace-id chain of GW2 and AG2,
+and the listing rule of
 `architecture.md` [D18] on the `CdcEntry` transport lists it reads back;
 the parallel case GW9 — candidate units that lose a pick and run again,
 invisibly — and GW12 under concurrency; the contention case GW6 as fence

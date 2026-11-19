@@ -95,12 +95,15 @@ func widestCounts() map[protoreflect.FullName]int {
 		"SyncupCntlrRequest.clone_list":       common.MaxCloneCntPerSp,
 		"SyncupCntlrRequest.xfer_list":        common.MaxXferCntPerSp,
 		"SyncupCntlrRequest.name_to_repair":   repsPerSp,
-		"GetStoragePoolReply.cntlr_list":      common.MaxCntlrCntPerSp,
-		"GetStoragePoolReply.slice_list":      common.MaxSliceCntPerSp,
-		"Slice.meta_grp_list":                 common.MaxGrpCntPerSlice,
-		"Slice.data_grp_list":                 common.MaxGrpCntPerSlice,
-		"Group.leg_list":                      common.MaxAllocLegPerGrp,
-		"Group.retired_leg_id_list":           common.MaxRetiredLegPerGrp,
+		// A side id per retired leg of the pool, as SpConf lists them.
+		"SyncupCntlrRequest.retired_leg_id_to_side_id": grpsPerSp *
+			common.MaxRetiredLegPerGrp,
+		"GetStoragePoolReply.cntlr_list": common.MaxCntlrCntPerSp,
+		"GetStoragePoolReply.slice_list": common.MaxSliceCntPerSp,
+		"Slice.meta_grp_list":            common.MaxGrpCntPerSlice,
+		"Slice.data_grp_list":            common.MaxGrpCntPerSlice,
+		"Group.leg_list":                 common.MaxAllocLegPerGrp,
+		"Group.retired_leg_id_list":      common.MaxRetiredLegPerGrp,
 		// A forced-start mark passes each kind of refusal at most once and
 		// never NONE, as the gateway refuses either (architecture.md,
 		// Repairs, ForceStartGroup).
@@ -948,5 +951,71 @@ func TestFlipProvisionedAtTheSliceCeiling(t *testing.T) {
 	if side := findSideOfLeg(got, refs[0].LegId, refs[0].SideId); !side.GetProvisioned() {
 		t.Errorf("the first slice's side reads %v after the flip, want "+
 			"provisioned", side)
+	}
+}
+
+// TestRestoreCheckRepliesFitGrpcMaxMsgSize holds the two replies of the
+// restore check (architecture.md, Controller nodes,
+// CheckControllerNodeRestore) to half the message limit at the cardinality
+// limits: a cn agent's GetCnStore answer for one controller node at its
+// MaxCntlrCntPerCn cntlrs, each with a pool's MaxTdCntPerSp thin devices
+// and MaxSsCntPerSp NQNs, and the gateway's answer for that node, a row per
+// held cntlr, each listing every held thin device as lost and every
+// restored one as coming back, and a row with no list per cntlr the
+// restored node names that the agent does not hold. An agent holds one
+// controller node of a cluster but for a node deleted and made again at
+// its address, whose old pointer list a delete that proved it clean left
+// empty.
+func TestRestoreCheckRepliesFitGrpcMaxMsgSize(t *testing.T) {
+	b := &widestBuilder{
+		t: t,
+		counts: map[protoreflect.FullName]int{
+			"GetCnStoreReply.cn_list":                                1,
+			"GetCnStoreReply.StoredCn.cntlr_pointer_list":            common.MaxCntlrCntPerCn,
+			"GetCnStoreReply.StoredCn.cntlr_list":                    common.MaxCntlrCntPerCn,
+			"GetCnStoreReply.StoredCntlr.td_list":                    common.MaxTdCntPerSp,
+			"GetCnStoreReply.StoredCntlr.nqn_list":                   common.MaxSsCntPerSp,
+			"CheckControllerNodeRestoreReply.held_cn_list":           1,
+			"CheckControllerNodeRestoreReply.pool_list":              common.MaxCntlrCntPerCn,
+			"CheckControllerNodeRestoreReply.Pool.nqn_list":          common.MaxSsCntPerSp,
+			"CheckControllerNodeRestoreReply.Pool.lost_td_list":      common.MaxTdCntPerSp,
+			"CheckControllerNodeRestoreReply.Pool.returning_td_list": common.MaxTdCntPerSp,
+		},
+		strLens: map[protoreflect.FullName]int{
+			"GetCnStoreReply.StoredCntlr.nqn_list":          common.MaxNqnLength,
+			"CheckControllerNodeRestoreReply.Pool.nqn_list": common.MaxNqnLength,
+		},
+		keyLens:  map[protoreflect.FullName]int{},
+		rowNames: map[protoreflect.FullName]int{},
+		used:     map[protoreflect.FullName]bool{},
+		strs:     map[int]string{},
+		key:      math.MaxUint64,
+	}
+	store := &pb.GetCnStoreReply{}
+	b.build(store)
+	check := &pb.CheckControllerNodeRestoreReply{}
+	b.build(check)
+	notHeld := proto.Clone(check.GetPoolList()[0]).(*pb.CheckControllerNodeRestoreReply_Pool)
+	notHeld.NqnList, notHeld.LostTdList, notHeld.ReturningTdList = nil, nil, nil
+	for range common.MaxCntlrCntPerCn {
+		check.PoolList = append(check.PoolList, notHeld)
+	}
+	if unused := unusedByAll(b); len(unused) > 0 {
+		t.Errorf("table entries no field of the two replies reaches: %v",
+			unused)
+	}
+	for _, c := range []struct {
+		name string
+		msg  proto.Message
+	}{
+		{"the GetCnStore reply", store},
+		{"the CheckControllerNodeRestore reply", check},
+	} {
+		size := proto.Size(c.msg)
+		t.Logf("%s: %s", c.name, mib(size))
+		if 2*size > common.GrpcMaxMsgSize {
+			t.Errorf("%s is %s; twice it must fit GrpcMaxMsgSize, %s",
+				c.name, mib(size), mib(common.GrpcMaxMsgSize))
+		}
 	}
 }

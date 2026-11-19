@@ -449,6 +449,21 @@ func setupInspectCn(fs *flag.FlagSet) job {
 	}
 }
 
+// setupCheckRestore drives CheckControllerNodeRestore, the restore check of
+// the controller node at --addr: a read, so no token message.
+func setupCheckRestore(fs *flag.FlagSet) job {
+	addr := nodeAddrFlag(fs)
+	return func(
+		ctx context.Context, client pb.GatewayClient, g *globals,
+	) (any, error) {
+		return client.CheckControllerNodeRestore(
+			ctx, &pb.CheckControllerNodeRestoreRequest{
+				ClusterName: g.cluster,
+				AddrPort:    *addr,
+			})
+	}
+}
+
 // ---------------------------------------------------------------------------
 // harness
 // ---------------------------------------------------------------------------

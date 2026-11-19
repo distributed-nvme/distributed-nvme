@@ -243,6 +243,7 @@ var commands = []command{
 	{"get-td-bm", cmdGetTdBm},
 	{"get-leg-bm", cmdGetLegBm},
 	{"inspect-grp", cmdInspectGrp},
+	{"get-cn-store", cmdGetCnStore},
 	{"wait-hydrated", cmdWaitHydrated},
 	{"md-name", cmdMdName},
 	{"host-id", cmdHostId},
@@ -511,6 +512,31 @@ func cmdGetCnInfo(args []string) {
 	}
 	emit(reply)
 	noteStamp("GetCnInfo", reply.GetObsStamp())
+	g.checkReply(reply.GetAgentReply())
+}
+
+// cmdGetCnStore reads the desired state the agent holds (cnagent.md CN32):
+// the --cn node of the --cluster, every node of it the agent holds when
+// --cn is 0.
+func cmdGetCnStore(args []string) {
+	var g globals
+	fs := newFlagSet("get-cn-store", &g)
+	fs.Parse(args)
+
+	conn, client, err := g.dial()
+	if err != nil {
+		die("%v", err)
+	}
+	defer conn.Close()
+	ctx, cancel := g.rpcCtx()
+	defer cancel()
+
+	reply, err := client.GetCnStore(ctx, &pb.GetCnStoreRequest{
+		ClusterId: uint64(g.cluster), CnId: uint64(g.cn)})
+	if err != nil {
+		die("GetCnStore failed: %v", err)
+	}
+	emit(reply)
 	g.checkReply(reply.GetAgentReply())
 }
 

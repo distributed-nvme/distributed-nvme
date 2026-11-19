@@ -90,6 +90,7 @@ const (
 	Gateway_UpdateRetiredLegKeep_FullMethodName            = "/Gateway/UpdateRetiredLegKeep"
 	Gateway_InspectGroup_FullMethodName                    = "/Gateway/InspectGroup"
 	Gateway_GetThinDeviceBitmap_FullMethodName             = "/Gateway/GetThinDeviceBitmap"
+	Gateway_CheckControllerNodeRestore_FullMethodName      = "/Gateway/CheckControllerNodeRestore"
 )
 
 // GatewayClient is the client API for Gateway service.
@@ -167,6 +168,7 @@ type GatewayClient interface {
 	UpdateRetiredLegKeep(ctx context.Context, in *UpdateRetiredLegKeepRequest, opts ...grpc.CallOption) (*UpdateRetiredLegKeepReply, error)
 	InspectGroup(ctx context.Context, in *InspectGroupRequest, opts ...grpc.CallOption) (*InspectGroupReply, error)
 	GetThinDeviceBitmap(ctx context.Context, in *GetThinDeviceBitmapRequest, opts ...grpc.CallOption) (*GetThinDeviceBitmapReply, error)
+	CheckControllerNodeRestore(ctx context.Context, in *CheckControllerNodeRestoreRequest, opts ...grpc.CallOption) (*CheckControllerNodeRestoreReply, error)
 }
 
 type gatewayClient struct {
@@ -887,6 +889,16 @@ func (c *gatewayClient) GetThinDeviceBitmap(ctx context.Context, in *GetThinDevi
 	return out, nil
 }
 
+func (c *gatewayClient) CheckControllerNodeRestore(ctx context.Context, in *CheckControllerNodeRestoreRequest, opts ...grpc.CallOption) (*CheckControllerNodeRestoreReply, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(CheckControllerNodeRestoreReply)
+	err := c.cc.Invoke(ctx, Gateway_CheckControllerNodeRestore_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // GatewayServer is the server API for Gateway service.
 // All implementations must embed UnimplementedGatewayServer
 // for forward compatibility.
@@ -962,6 +974,7 @@ type GatewayServer interface {
 	UpdateRetiredLegKeep(context.Context, *UpdateRetiredLegKeepRequest) (*UpdateRetiredLegKeepReply, error)
 	InspectGroup(context.Context, *InspectGroupRequest) (*InspectGroupReply, error)
 	GetThinDeviceBitmap(context.Context, *GetThinDeviceBitmapRequest) (*GetThinDeviceBitmapReply, error)
+	CheckControllerNodeRestore(context.Context, *CheckControllerNodeRestoreRequest) (*CheckControllerNodeRestoreReply, error)
 	mustEmbedUnimplementedGatewayServer()
 }
 
@@ -1184,6 +1197,9 @@ func (UnimplementedGatewayServer) InspectGroup(context.Context, *InspectGroupReq
 }
 func (UnimplementedGatewayServer) GetThinDeviceBitmap(context.Context, *GetThinDeviceBitmapRequest) (*GetThinDeviceBitmapReply, error) {
 	return nil, status.Error(codes.Unimplemented, "method GetThinDeviceBitmap not implemented")
+}
+func (UnimplementedGatewayServer) CheckControllerNodeRestore(context.Context, *CheckControllerNodeRestoreRequest) (*CheckControllerNodeRestoreReply, error) {
+	return nil, status.Error(codes.Unimplemented, "method CheckControllerNodeRestore not implemented")
 }
 func (UnimplementedGatewayServer) mustEmbedUnimplementedGatewayServer() {}
 func (UnimplementedGatewayServer) testEmbeddedByValue()                 {}
@@ -2484,6 +2500,24 @@ func _Gateway_GetThinDeviceBitmap_Handler(srv interface{}, ctx context.Context, 
 	return interceptor(ctx, in, info, handler)
 }
 
+func _Gateway_CheckControllerNodeRestore_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(CheckControllerNodeRestoreRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(GatewayServer).CheckControllerNodeRestore(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Gateway_CheckControllerNodeRestore_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(GatewayServer).CheckControllerNodeRestore(ctx, req.(*CheckControllerNodeRestoreRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 // Gateway_ServiceDesc is the grpc.ServiceDesc for Gateway service.
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
@@ -2774,6 +2808,10 @@ var Gateway_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "GetThinDeviceBitmap",
 			Handler:    _Gateway_GetThinDeviceBitmap_Handler,
+		},
+		{
+			MethodName: "CheckControllerNodeRestore",
+			Handler:    _Gateway_CheckControllerNodeRestore_Handler,
 		},
 	},
 	Streams:  []grpc.StreamDesc{},
@@ -3149,6 +3187,7 @@ const (
 	ControllerNodeAgent_InspectGrp_FullMethodName      = "/ControllerNodeAgent/InspectGrp"
 	ControllerNodeAgent_CheckCn_FullMethodName         = "/ControllerNodeAgent/CheckCn"
 	ControllerNodeAgent_CheckCntlr_FullMethodName      = "/ControllerNodeAgent/CheckCntlr"
+	ControllerNodeAgent_GetCnStore_FullMethodName      = "/ControllerNodeAgent/GetCnStore"
 )
 
 // ControllerNodeAgentClient is the client API for ControllerNodeAgent service.
@@ -3166,6 +3205,7 @@ type ControllerNodeAgentClient interface {
 	InspectGrp(ctx context.Context, in *InspectGrpRequest, opts ...grpc.CallOption) (*InspectGrpReply, error)
 	CheckCn(ctx context.Context, opts ...grpc.CallOption) (grpc.BidiStreamingClient[CheckCnRequest, CheckCnReply], error)
 	CheckCntlr(ctx context.Context, opts ...grpc.CallOption) (grpc.BidiStreamingClient[CheckCntlrRequest, CheckCntlrReply], error)
+	GetCnStore(ctx context.Context, in *GetCnStoreRequest, opts ...grpc.CallOption) (*GetCnStoreReply, error)
 }
 
 type controllerNodeAgentClient struct {
@@ -3292,6 +3332,16 @@ func (c *controllerNodeAgentClient) CheckCntlr(ctx context.Context, opts ...grpc
 // This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
 type ControllerNodeAgent_CheckCntlrClient = grpc.BidiStreamingClient[CheckCntlrRequest, CheckCntlrReply]
 
+func (c *controllerNodeAgentClient) GetCnStore(ctx context.Context, in *GetCnStoreRequest, opts ...grpc.CallOption) (*GetCnStoreReply, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(GetCnStoreReply)
+	err := c.cc.Invoke(ctx, ControllerNodeAgent_GetCnStore_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // ControllerNodeAgentServer is the server API for ControllerNodeAgent service.
 // All implementations must embed UnimplementedControllerNodeAgentServer
 // for forward compatibility.
@@ -3307,6 +3357,7 @@ type ControllerNodeAgentServer interface {
 	InspectGrp(context.Context, *InspectGrpRequest) (*InspectGrpReply, error)
 	CheckCn(grpc.BidiStreamingServer[CheckCnRequest, CheckCnReply]) error
 	CheckCntlr(grpc.BidiStreamingServer[CheckCntlrRequest, CheckCntlrReply]) error
+	GetCnStore(context.Context, *GetCnStoreRequest) (*GetCnStoreReply, error)
 	mustEmbedUnimplementedControllerNodeAgentServer()
 }
 
@@ -3349,6 +3400,9 @@ func (UnimplementedControllerNodeAgentServer) CheckCn(grpc.BidiStreamingServer[C
 }
 func (UnimplementedControllerNodeAgentServer) CheckCntlr(grpc.BidiStreamingServer[CheckCntlrRequest, CheckCntlrReply]) error {
 	return status.Error(codes.Unimplemented, "method CheckCntlr not implemented")
+}
+func (UnimplementedControllerNodeAgentServer) GetCnStore(context.Context, *GetCnStoreRequest) (*GetCnStoreReply, error) {
+	return nil, status.Error(codes.Unimplemented, "method GetCnStore not implemented")
 }
 func (UnimplementedControllerNodeAgentServer) mustEmbedUnimplementedControllerNodeAgentServer() {}
 func (UnimplementedControllerNodeAgentServer) testEmbeddedByValue()                             {}
@@ -3547,6 +3601,24 @@ func _ControllerNodeAgent_CheckCntlr_Handler(srv interface{}, stream grpc.Server
 // This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
 type ControllerNodeAgent_CheckCntlrServer = grpc.BidiStreamingServer[CheckCntlrRequest, CheckCntlrReply]
 
+func _ControllerNodeAgent_GetCnStore_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(GetCnStoreRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(ControllerNodeAgentServer).GetCnStore(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: ControllerNodeAgent_GetCnStore_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(ControllerNodeAgentServer).GetCnStore(ctx, req.(*GetCnStoreRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 // ControllerNodeAgent_ServiceDesc is the grpc.ServiceDesc for ControllerNodeAgent service.
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
@@ -3589,6 +3661,10 @@ var ControllerNodeAgent_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "InspectGrp",
 			Handler:    _ControllerNodeAgent_InspectGrp_Handler,
+		},
+		{
+			MethodName: "GetCnStore",
+			Handler:    _ControllerNodeAgent_GetCnStore_Handler,
 		},
 	},
 	Streams: []grpc.StreamDesc{

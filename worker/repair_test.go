@@ -1265,6 +1265,13 @@ func TestSpRepairSidePlans(t *testing.T) {
 			t.Errorf("cntlr %d request name_to_repair = %v, want r0",
 				cntlrId, got)
 		}
+		// Every cntlr is told each retired leg's side id, which the cn
+		// agent keeps for the restore check's count (cnagent.md CN32).
+		sides := cp.req.GetRetiredLegIdToSideId()
+		if len(sides) != 1 || sides[spRetiredLeg] != spRetiredSide {
+			t.Errorf("cntlr %d request retired_leg_id_to_side_id = %v, "+
+				"want %d: %d", cntlrId, sides, spRetiredLeg, spRetiredSide)
+		}
 	}
 
 	// A provisioned new side's request says provisioned, without which its

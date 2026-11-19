@@ -333,6 +333,15 @@ func ThinDeviceKey(cid uint64, spId uint64, tdName string) string {
 	)
 }
 
+// ThinDevicePrefix is the prefix of every thin device of an SP, which the
+// gateway's restore check ranges in one read (architecture.md, Controller
+// nodes, CheckControllerNodeRestore).
+func ThinDevicePrefix(cid uint64, spId uint64) string {
+	return prefixOf(
+		common.DnvPrefix, kindThinDevice, idField(cid), idField(spId),
+	)
+}
+
 // SubsystemKey is the key of one subsystem of an SP (MD2); its namespaces are
 // embedded in the value.
 func SubsystemKey(cid uint64, spId uint64, nqn string) string {

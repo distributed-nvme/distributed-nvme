@@ -2125,6 +2125,16 @@ func (w *spWorker) buildCntlrPlans(
 	// cntlr, the only component that talks to them, which finds a group's
 	// repair through Group.rep_name.
 	repairs := cntlrRepairs(state)
+	// Each retired leg's side id, which the cn agent keeps with the
+	// request for the restore check's count of the layout's sides
+	// (cnagent.md CN32) and builds nothing from.
+	var retiredSides map[uint64]uint64
+	for legId, retired := range state.RetiredLegs {
+		if retiredSides == nil {
+			retiredSides = make(map[uint64]uint64, len(state.RetiredLegs))
+		}
+		retiredSides[legId] = retired.GetSide().GetSideId()
+	}
 	// The legs' fast IO fail timeout, resolved as every reader of the
 	// pool's thresholds resolves them (architecture.md, Common validation),
 	// so a pool stored without it connects its legs as before it existed.
@@ -2154,17 +2164,18 @@ func (w *spWorker) buildCntlrPlans(
 					SpId:    spId,
 					CntlrId: cntlrId,
 				},
-				Revision:         w.desired.revision,
-				BdevConf:         conf.GetBdevConf(),
-				SpLevel:          conf.GetSpLevel(),
-				Cntlr:            cntlr,
-				IdToSlice:        idToSlice,
-				TdList:           state.Tds,
-				NqnToSubsystem:   state.Subsystems,
-				CloneList:        clones,
-				XferList:         xfers,
-				NameToRepair:     repairs,
-				LegFastIoFailTmo: legFastIoFail,
+				Revision:             w.desired.revision,
+				BdevConf:             conf.GetBdevConf(),
+				SpLevel:              conf.GetSpLevel(),
+				Cntlr:                cntlr,
+				IdToSlice:            idToSlice,
+				TdList:               state.Tds,
+				NqnToSubsystem:       state.Subsystems,
+				CloneList:            clones,
+				XferList:             xfers,
+				NameToRepair:         repairs,
+				LegFastIoFailTmo:     legFastIoFail,
+				RetiredLegIdToSideId: retiredSides,
 			},
 			sliceIds: sliceIds,
 		}

@@ -267,8 +267,9 @@ hands it the `rootCtx` its background work derives from (SH27) and marks it
 listener and serves, and then runs the startup reconcile (SH1); the agent
 is starting until that reconcile ends. While it starts, every check round
 and every info read, of any object, answers `ReplyCodeStarting` with no
-observation, and every `Syncup*` and push is refused with that code, and a
-bitmap read or the cn's `InspectGrp` (`cnagent.md` CN31) with gRPC's
+observation, every `Syncup*` and push is refused with that code, the cn's
+`GetCnStore` (`cnagent.md` CN32) answers it with no CN, and a bitmap read
+or the cn's `InspectGrp` (`cnagent.md` CN31) is refused with gRPC's
 Unavailable, its reply carrying no code (an inspect call's `GetDnInfo` or
 `GetCntlrInfo` is an info read, and answers `ReplyCodeStarting`): none of
 them takes a lock, touches the node or starts a read (SH29). Every reply's

@@ -581,7 +581,12 @@ same verbs and the same flags, the requests differing only in carrying
 `cn_rev` where the `dn` ones carry `dn_rev`, `cn create` reaching the CN
 agent's `GetCnSize` as `dn create` reaches `GetDnSize`, and `cn delete`
 reaching its `GetCnInfo`, unless `--force` is typed, as `dn delete` reaches
-`GetDnInfo`. A change to one group is a change to both.
+`GetDnInfo`. A change to one group is a change to both. The one exception
+is `cn check-restore`, which has no `dn` twin: the restore check of
+`architecture.md`, Controller nodes, run after an etcd restore for the
+node at `--addr`, which the restored state need not name. It is a read and
+carries no token. The gateway reads each pool the node holds, so a node of
+many pools needs a `--timeout` that covers them all.
 
 ### `sp` — `ctl/sp.go`
 
@@ -915,8 +920,8 @@ before and after the call.
 restarted fake whose behavior file is reset and whose state file holds only
 the reset's own readiness probe, so counters are read only as deltas. Together
 they exercise, on the wire, CT1 with one step per RPC in tree order, save
-`sp inspect`, which runs last so that the steps before it keep their
-numbers, CT2's
+`sp inspect`, `cluster get-status` and `cn check-restore`, which run last,
+in that order, so that the steps before them keep their numbers, CT2's
 trace id and deadline, CT3's token on exactly its carriers and its refusal on
 one leaf that carries none, CT4's goldens, the status read's table among
 them, CT5's failure line and codes, exit

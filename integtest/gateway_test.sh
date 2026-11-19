@@ -3816,6 +3816,11 @@ EOF
 		"delete-td t9 reply td_id"
 
 	# -------------------------------------------------------------------
+	stage restore "check-restore: what an agent holds, against the store"
+	# -------------------------------------------------------------------
+	smoke_restore_check "$spId" "$t0Id" "$t1Id"
+
+	# -------------------------------------------------------------------
 	stage 20 "reverse teardown down to an empty store"
 	# -------------------------------------------------------------------
 	out=$(gw delete-ns --sp sp0 --rev "$SP_REV" --nqn "$nqn" --idx 1)
@@ -3972,6 +3977,104 @@ EOF
 	out=$(gw delete-cluster)
 	assert_field "$out" '.cluster_id' "$CID" "delete-cluster echoes the cluster_id"
 	assert_eq "$(key_count dnv)" "0" "the whole dnv prefix is empty"
+}
+
+# smoke_restore_check is the restore check of architecture.md, Controller
+# nodes, CheckControllerNodeRestore, on the store as the id step of stage 19
+# leaves it, which is where an operator runs it after an etcd restore: the
+# primary's controller node fake is planted with the desired state an agent
+# would hold, since no worker runs to send it one, and the check is read
+# back. First the agent holds sp0 at its stored revision: the pool is the
+# same. Then it holds sp0 one revision ahead, over the stored layout (its
+# slices and the clones that are not latched, as the worker sends them; sp0
+# has no open repair by then),
+# with t0, a thin device the store lacks at the pool's next thin id and not
+# t1, and a cntlr of a pool the store does not have: sp0 is older, its lost
+# thin device listed with its thin id, which a new volume of the pool can
+# take, and t1 listed as coming back; the other pool is new, its
+# subsystem's NQN passed on. The check writes nothing.
+smoke_restore_check() { # <sp0 id> <t0 td_id> <t1 td_id>
+	local spId=$1 t0Id=$2 t1Id=$3
+	local primary cntlrId cnAddr cnDir cnId sp nextDev out row
+	primary=$(sp_primary_cntlr sp0)
+	cntlrId=${primary%% *}
+	cnAddr=${primary##* }
+	cnDir=$(faults_cn_dir "$cnAddr")
+	cnId=$(cn_id_of "$cnAddr")
+	sp=$(sp_json sp0)
+	nextDev=$(smoke_jq "$sp" '.sp_conf.next_dev_id')
+	# The held layout planted below is the stored slices and clones alone:
+	# the check counts the new legs of open repairs and the side id of each
+	# retired leg too, which the pool read does not give, and sp0 has
+	# neither left by now.
+	assert_eq "$(smoke_jq "$sp" '.sp_conf.repair_name_list | length')" "0" \
+		"check-restore: sp0 holds no open repair"
+	assert_eq "$(smoke_jq "$sp" '.sp_conf.retired_leg_id_list | length')" \
+		"0" "check-restore: sp0 holds no retired leg"
+	set_state "$cnDir" <<EOF
+{"objects":{
+  "cn":{"revision":1,"request":{"cluster_id":"$CID","cn_id":"$cnId",
+        "revision":"1",
+        "cntlr_pointer_list":[{"sp_id":"$spId","cntlr_id":"$cntlrId"}]}},
+  "cntlr $spId:$cntlrId":{"revision":$SP_REV,"request":{
+        "cluster_id":"$CID","cn_id":"$cnId",
+        "cntlr_pointer":{"sp_id":"$spId","cntlr_id":"$cntlrId"},
+        "revision":"$SP_REV","cntlr":{"primary":true}}}}}
+EOF
+	assert_no_write "check-restore of a node whose agent holds the store" \
+		faults_gwx_out OK check-restore --addr "$cnAddr"
+	out=$FAULTS_OUT
+	assert_field "$out" '.restored_cn_id' "$cnId" "check-restore restored node"
+	assert_field "$out" '.pool_list | length' "1" "check-restore: one pool"
+	assert_field "$out" '.pool_list[0].verdict' "RESTORE_VERDICT_SAME" \
+		"check-restore: sp0 at its stored revision is the same"
+	assert_field "$out" '.pool_list[0].sp_name' "sp0" "check-restore sp_name"
+
+	set_state "$cnDir" <<EOF
+{"objects":{
+  "cn":{"revision":2,"request":{"cluster_id":"$CID","cn_id":"$cnId",
+        "revision":"2",
+        "cntlr_pointer_list":[{"sp_id":"$spId","cntlr_id":"$cntlrId"},
+                              {"sp_id":"4242","cntlr_id":"1"}]}},
+  "cntlr $spId:$cntlrId":{"revision":$((SP_REV + 1)),"request":{
+        "cluster_id":"$CID","cn_id":"$cnId",
+        "cntlr_pointer":{"sp_id":"$spId","cntlr_id":"$cntlrId"},
+        "revision":"$((SP_REV + 1))","cntlr":{"primary":true},
+        "id_to_slice":$(smoke_jq "$sp" '.slices'),
+        "clone_list":$(smoke_jq "$sp" '[.clones[] | select(.deleting | not)]'),
+        "td_list":[{"td_id":"$t0Id","size":"$TD_SIZE"},
+                   {"td_id":"999999","dev_id":$nextDev,"size":"$TD_SIZE"}]}},
+  "cntlr 4242:1":{"revision":3,"request":{
+        "cluster_id":"$CID","cn_id":"$cnId",
+        "cntlr_pointer":{"sp_id":"4242","cntlr_id":"1"},"revision":"3",
+        "td_list":[{"td_id":"1","dev_id":1,"size":"$TD_SIZE"}],
+        "nqn_to_subsystem":{"$NQN_PREFIX:pvc-gone":{}}}}}}
+EOF
+	assert_no_write "check-restore of a node whose agent holds more" \
+		faults_gwx_out OK check-restore --addr "$cnAddr"
+	out=$FAULTS_OUT
+	assert_field "$out" '.pool_list | length' "2" "check-restore: two pools"
+	row=$(jq_of "$out" ".pool_list[] | select(.sp_id == \"$spId\") | @json")
+	assert_field "$row" '.verdict' "RESTORE_VERDICT_OLDER" \
+		"check-restore: sp0 one revision ahead is older"
+	assert_field "$row" '.held_side_cnt == .restored_side_cnt and
+		(.held_side_cnt | tonumber) > 0' "true" \
+		"check-restore: sp0's held layout counts the stored sides"
+	assert_field "$row" '.held_side_ids_incomplete // false' "false" \
+		"check-restore: sp0's held request lacks no retired side id"
+	assert_field "$row" '[.lost_td_list[] | "\(.td_id) \(.dev_id) \(.id_may_return)"] | @json' \
+		"[\"999999 $nextDev true\"]" \
+		"check-restore: the lost thin device, its thin id may return"
+	assert_field "$row" '[.returning_td_list[] | .td_id] | @json' \
+		"[\"$t1Id\"]" "check-restore: t1 comes back"
+	row=$(jq_of "$out" '.pool_list[] | select(.sp_id == "4242") | @json')
+	assert_field "$row" '.verdict' "RESTORE_VERDICT_NEW" \
+		"check-restore: a pool the store lacks is new"
+	assert_field "$row" '.nqn_list | @json' "[\"$NQN_PREFIX:pvc-gone\"]" \
+		"check-restore: the new pool's NQN"
+	assert_field "$row" '.lost_td_list | length' "1" \
+		"check-restore: the new pool's thin device is lost"
+	reset_state "$cnDir"
 }
 
 # ---------------------------------------------------------------------------

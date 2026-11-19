@@ -509,6 +509,7 @@ var commands = []command{
 	{"list-cns", setupListCns},
 	{"set-cn-disabled", setupSetCnDisabled},
 	{"inspect-cn", setupInspectCn},
+	{"check-restore", setupCheckRestore},
 	// sp
 	{"create-sp", setupCreateSp},
 	{"delete-sp", setupDeleteSp},

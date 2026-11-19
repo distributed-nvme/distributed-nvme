@@ -6,6 +6,8 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"maps"
+	"slices"
 	"time"
 
 	"google.golang.org/grpc"
@@ -1309,6 +1311,120 @@ func (a *Agent) GetLegBm(
 		bitmap = append([]byte(nil), ob.LegBm...)
 	}
 	return &pb.GetLegBmReply{Bitmap: bitmap}, nil
+}
+
+// GetCnStore answers the desired state the fake holds, as the cn agent does
+// (cnagent.md CN32): its node's last accepted SyncupCnRequest, when it is of
+// the asked cluster and, for a non-zero cn_id, of that node, with a summary
+// of each cntlr its pointer list names that holds a request; any other ask
+// is an unknown object. The node's Starting lever answers the starting
+// code and its reply_code lever forces the code, with no node, and its hang
+// lever holds the call. The call is recorded as an info read of the node.
+func (a *Agent) GetCnStore(
+	ctx context.Context, req *pb.GetCnStoreRequest,
+) (*pb.GetCnStoreReply, error) {
+	gen, err := a.arrive(ctx, MethodGetCnStore, CnKey, recvInfoRead, req)
+	if err != nil {
+		return nil, err
+	}
+	if err := a.hangUnary(ctx, CnKey); err != nil {
+		return nil, err
+	}
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if err := a.liveLocked(ctx, gen); err != nil {
+		return nil, err
+	}
+	a.reloadStateLocked(ctx)
+	if _, ok := a.startingStampLocked(CnKey); ok {
+		return &pb.GetCnStoreReply{AgentReply: agentReply(
+			common.ReplyCodeStarting, detailsStarting)}, nil
+	}
+	if code := a.forcedCodeLocked(CnKey); code != 0 {
+		return &pb.GetCnStoreReply{
+			AgentReply: agentReply(code, detailsForcedCode)}, nil
+	}
+	cnReq, _ := a.requestLocked(CnKey).(*pb.SyncupCnRequest)
+	if cnReq == nil || cnReq.GetClusterId() != req.GetClusterId() ||
+		(req.GetCnId() != 0 && cnReq.GetCnId() != req.GetCnId()) {
+		return &pb.GetCnStoreReply{AgentReply: agentReply(
+			common.ReplyCodeUnknownObject, fmt.Sprintf(
+				"no cn of cluster %d held", req.GetClusterId()))}, nil
+	}
+	stored := &pb.GetCnStoreReply_StoredCn{
+		CnId:             cnReq.GetCnId(),
+		Revision:         cnReq.GetRevision(),
+		CntlrPointerList: cnReq.GetCntlrPointerList(),
+	}
+	for _, ptr := range cnReq.GetCntlrPointerList() {
+		cntlrReq, _ := a.requestLocked(cntlrObjKey(ptr)).(*pb.SyncupCntlrRequest)
+		if cntlrReq != nil {
+			stored.CntlrList = append(stored.CntlrList,
+				storedCntlrOf(cntlrReq))
+		}
+	}
+	return &pb.GetCnStoreReply{
+		AgentReply: agentReply(0, ""),
+		CnList:     []*pb.GetCnStoreReply_StoredCn{stored},
+	}, nil
+}
+
+// storedCntlrOf sums up one cntlr's last accepted request as the cn agent
+// does for GetCnStore (cnagent.md CN32): its pointer, revision and role, its
+// thin devices, its subsystems' NQNs in order, and the largest side id and
+// the count of the sides of every leg of the slices' meta and data groups,
+// of each clone's meta group and of each repair's new legs, and of each
+// retired leg those groups list by its side id in the request, a retired
+// leg with none marking the summary as missing one.
+func storedCntlrOf(
+	req *pb.SyncupCntlrRequest,
+) *pb.GetCnStoreReply_StoredCntlr {
+	nqns := slices.Sorted(maps.Keys(req.GetNqnToSubsystem()))
+	var grps []*pb.Group
+	for _, slice := range req.GetIdToSlice() {
+		grps = append(grps, slice.GetMetaGrpList()...)
+		grps = append(grps, slice.GetDataGrpList()...)
+	}
+	for _, clone := range req.GetCloneList() {
+		if clone.GetMetaGrp() != nil {
+			grps = append(grps, clone.GetMetaGrp())
+		}
+	}
+	var legs []*pb.Leg
+	for _, rep := range req.GetNameToRepair() {
+		legs = append(legs, rep.GetNewLegList()...)
+	}
+	var maxSideId, sideCnt uint64
+	missing := false
+	for _, grp := range grps {
+		legs = append(legs, grp.GetLegList()...)
+		for _, legId := range grp.GetRetiredLegIdList() {
+			sideCnt++
+			sideId, ok := req.GetRetiredLegIdToSideId()[legId]
+			if !ok {
+				missing = true
+				continue
+			}
+			maxSideId = max(maxSideId, sideId)
+		}
+	}
+	for _, leg := range legs {
+		for _, side := range leg.GetSideList() {
+			maxSideId = max(maxSideId, side.GetSideId())
+			sideCnt++
+		}
+	}
+	return &pb.GetCnStoreReply_StoredCntlr{
+		CntlrPointer: req.GetCntlrPointer(),
+		Revision:     req.GetRevision(),
+		Primary:      req.GetCntlr().GetPrimary(),
+		TdList:       req.GetTdList(),
+		NqnList:      nqns,
+		MaxSideId:    maxSideId,
+		SideCnt:      sideCnt,
+
+		RetiredSideIdMissing: missing,
+	}
 }
 
 // CheckCn serves the CN health stream, one reply per request.

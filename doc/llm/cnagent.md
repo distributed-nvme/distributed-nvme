@@ -300,7 +300,8 @@ ids); one background read of a CN — node read; `GetCnSize`, `GetCnInfo`,
 `GetCntlrInfo` and one `CheckCn` or `CheckCntlr` round — no lock, since
 the last four answer from the object's latest observation (`dnagent.md`
 SH28), and the counters an inspect call's `GetCntlrInfo` reads beside it
-take none either (CN23). How a syncup cancels a read and how every other holder waits for
+take none either (CN23); `GetCnStore` — no lock either, since it reads
+the requests the states hold (CN32). How a syncup cancels a read and how every other holder waits for
 one is `dnagent.md` SH30. While the agent starts, every RPC above that
 takes a lock is refused before it takes one, and no background read
 starts (`dnagent.md` SH33), so no RPC queues behind the startup
@@ -4847,6 +4848,43 @@ never creates, changes or removes an object of the node, though a
 cntlr's read makes the kernel commit the metadata of each dm-clone it
 reads whole; its other status reads, of thin pools and of every dm-clone
 whose copy does not read whole, commit nothing (`dnagent.md` SH17).
+
+### `GetCnStore`
+
+CN32. Answer the desired state the agent holds, for the gateway's restore
+check (`architecture.md`, Controller nodes, CheckControllerNodeRestore):
+for each CN of the request's cluster it holds — the one `cn_id` names, or
+every one for a zero `cn_id` — the held `SyncupCnRequest`'s `revision` and
+`cntlr_pointer_list`, and, for each pointer whose cntlr it holds a request
+of, a summary of that request: its pointer, `revision`, `cntlr.primary`,
+`td_list`, the keys of `nqn_to_subsystem` in order, and the largest side
+id and the count of the sides of its layout: every leg of the meta and
+data groups of `id_to_slice`, of the meta group of each clone of
+`clone_list` and the new legs of each repair of `name_to_repair`, and each
+retired leg those groups list, by the side id the request's
+`retired_leg_id_to_side_id` gives it. A retired leg with no side id there,
+as in a request from a worker before the map, is counted and makes the
+summary say a side id is missing (`retired_side_id_missing`), since the
+largest id can then miss its side. The agent builds nothing from
+`retired_leg_id_to_side_id`: it keeps the map with the request it holds,
+for this summary alone, so the map changes no converge, gate, sweep or
+reply of the agent. A pointer
+whose cntlr the agent holds no request of, as when the startup reload
+skipped its file (CN2), is in the pointer list only. It reads the requests
+the states hold, the atomic pointers of Server type and lock mapping,
+under the server's leaf mutex alone: it takes no lock of CN1, reads
+nothing of the node, starts no read and changes nothing. While the agent
+starts it answers `ReplyCodeStarting` and no CN (`dnagent.md` SH33), since
+the startup reload is still filling the states; with no CN of the cluster
+held, `ReplyCodeUnknownObject`. Reasons: after an etcd restore, what each
+node was told before the restore is what the restore loses, no observation
+holds it, and for a pool made after the backup only the controller nodes
+know it; a summary rather than the whole requests, which at
+`MaxCntlrCntPerCn` cntlrs do not fit one reply; and the gateway counts the
+restored layout over the same places, so that a side made and a side
+removed since the backup each show, and a side moved inside the set does
+not (`architecture.md`, Controller nodes, CheckControllerNodeRestore,
+MAY_BREAK).
 
 ### `CheckCn` / `CheckCntlr`
 

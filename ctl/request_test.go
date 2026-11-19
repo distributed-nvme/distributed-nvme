@@ -11,7 +11,7 @@
 // nobody listed fails here.
 //
 // The sweep table is the sweep case's (dnvctl.md, Integration test plan),
-// argv for argv. The integration suite asserts the same 71 invocations
+// argv for argv. The integration suite asserts the same 72 invocations
 // against a real wire, so a row changed here and not there — or the other way
 // round — shows up as a disagreement between the two suites rather than as a
 // quiet gap.
@@ -686,9 +686,18 @@ var sweepRows = []sweepRow{
 			Count:       3,
 			PageToken:   "pt1",
 		}},
+
+	// ---- the restore check ----
+	{72, "CheckControllerNodeRestore",
+		[]string{"cn", "check-restore", "--addr", itCnAddr},
+		// A read: no token field, and the global --sp reaches nothing. The
+		// step is last, after `cluster get-status`, so no step before it
+		// moves.
+		&pb.CheckControllerNodeRestoreRequest{
+			ClusterName: itCluster, AddrPort: itCnAddr}},
 }
 
-// TestSweepArgvToRequest runs the sweep case's 71 steps against the recording
+// TestSweepArgvToRequest runs the sweep case's 72 steps against the recording
 // client.
 func TestSweepArgvToRequest(t *testing.T) {
 	for _, row := range sweepRows {
@@ -699,12 +708,12 @@ func TestSweepArgvToRequest(t *testing.T) {
 	}
 }
 
-// TestSweepCoversEveryCommand keeps the table honest: 71 rows, one per RPC,
+// TestSweepCoversEveryCommand keeps the table honest: 72 rows, one per RPC,
 // no duplicates. Without it a row could be deleted and the sweep would still
-// be green over the 70 that remain.
+// be green over the 71 that remain.
 func TestSweepCoversEveryCommand(t *testing.T) {
-	if len(sweepRows) != 71 {
-		t.Errorf("sweepRows has %d rows, want 71", len(sweepRows))
+	if len(sweepRows) != 72 {
+		t.Errorf("sweepRows has %d rows, want 72", len(sweepRows))
 	}
 	seen := map[string]bool{}
 	for _, row := range sweepRows {
@@ -730,7 +739,7 @@ func TestSweepCoversEveryCommand(t *testing.T) {
 
 // TestGlobalsFillEveryRequestThatHasThem pins how many requests carry the
 // fields that the scope global flags (dnvctl.md, Global flags, env, config)
-// fill: cluster_name in 69 of the 71, sp_name in 49. It reads the field off
+// fill: cluster_name in 70 of the 72, sp_name in 49. It reads the field off
 // every request type. A command that stopped filling a field from its global
 // flag would show up as a mismatch in the sweep; a command whose REQUEST
 // stopped carrying the field shows up here.
@@ -749,8 +758,8 @@ func TestGlobalsFillEveryRequestThatHasThem(t *testing.T) {
 			}
 		}
 	}
-	if clusterFields != 69 {
-		t.Errorf("%d requests carry cluster_name, want 69", clusterFields)
+	if clusterFields != 70 {
+		t.Errorf("%d requests carry cluster_name, want 70", clusterFields)
 	}
 	if spFields != 49 {
 		t.Errorf("%d requests carry sp_name, want 49", spFields)
@@ -946,8 +955,8 @@ func TestRevOnATokenlessCommandIsAUsageError(t *testing.T) {
 			}
 		})
 	}
-	if tokenless != 33 {
-		t.Errorf("%d requests carry no revision token, want 33", tokenless)
+	if tokenless != 34 {
+		t.Errorf("%d requests carry no revision token, want 34", tokenless)
 	}
 }
 

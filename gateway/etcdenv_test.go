@@ -449,7 +449,7 @@ func mustPut(
 // One fake serves BOTH generated agent services on one listener, because the
 // two halves of the gateway's agent surface (AG1/AG2) are configured and
 // asserted the same way and a test that needs a DN and a CN should not need
-// two vocabularies. Only the eight methods the gateway actually calls are
+// two vocabularies. Only the methods the gateway actually calls are
 // overridden; anything else stays UNIMPLEMENTED, so an RPC that reaches for a
 // call it is not supposed to make fails loudly instead of getting a zero
 // value.
@@ -510,6 +510,11 @@ type fakeAgent struct {
 	nodeRevision uint64
 	dnInfoReqs   []*pb.GetDnInfoRequest
 	cnInfoReqs   []*pb.GetCnInfoRequest
+	// cnStore is the reply every GetCnStore call gets, an unknown-object
+	// answer while nil, and cnStoreReqs every GetCnStore request, in call
+	// order (the restore check, architecture.md, Controller nodes).
+	cnStore     *pb.GetCnStoreReply
+	cnStoreReqs []*pb.GetCnStoreRequest
 }
 
 // enter is what every fake method runs first: it records the call and the T3
@@ -584,6 +589,21 @@ func (f *fakeAgent) setNodeAnswer(reply *pb.AgentReply, revision uint64) {
 	defer f.mu.Unlock()
 	f.nodeReply = reply
 	f.nodeRevision = revision
+}
+
+// setCnStore installs the reply the GetCnStore calls get from now on.
+func (f *fakeAgent) setCnStore(reply *pb.GetCnStoreReply) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.cnStore = reply
+}
+
+// cnStoreReqList is every GetCnStore request the fake answered, in call
+// order.
+func (f *fakeAgent) cnStoreReqList() []*pb.GetCnStoreRequest {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]*pb.GetCnStoreRequest(nil), f.cnStoreReqs...)
 }
 
 // dnInfoReqList and cnInfoReqList are every GetDnInfo and GetCnInfo request
@@ -815,6 +835,23 @@ func (f *fakeCnServer) InspectGrp(
 		return &pb.InspectGrpReply{}, nil
 	}
 	return f.agent.inspectGrp, nil
+}
+
+func (f *fakeCnServer) GetCnStore(
+	ctx context.Context,
+	req *pb.GetCnStoreRequest,
+) (*pb.GetCnStoreReply, error) {
+	if err := f.agent.enter(ctx, "GetCnStore"); err != nil {
+		return nil, err
+	}
+	f.agent.mu.Lock()
+	defer f.agent.mu.Unlock()
+	f.agent.cnStoreReqs = append(f.agent.cnStoreReqs, req)
+	if f.agent.cnStore == nil {
+		return &pb.GetCnStoreReply{AgentReply: &pb.AgentReply{
+			Code: common.ReplyCodeUnknownObject}}, nil
+	}
+	return f.agent.cnStore, nil
 }
 
 func (f *fakeCnServer) GetThinDeviceBm(

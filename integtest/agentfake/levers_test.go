@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"google.golang.org/grpc/metadata"
+	"google.golang.org/protobuf/proto"
 
 	"github.com/distributed-nvme/distributed-nvme/common"
 	"github.com/distributed-nvme/distributed-nvme/pb"
@@ -1167,5 +1168,107 @@ func TestReadLeftoverLever(t *testing.T) {
 		row.Status == nil || *row.Status != missing || !row.WhenPrimary {
 		t.Errorf("parsed read leftover = %d, read rows %+v", ob.ReadLeftover,
 			ob.ReadRows)
+	}
+}
+
+// TestGetCnStoreAnswersTheStoredRequests pins the fake's GetCnStore
+// (dnv-worker.md, Integration test plan, The fake agent): it answers its
+// node's last accepted SyncupCnRequest and a summary of each cntlr the
+// pointer list names that holds a request, as the cn agent does
+// (cnagent.md CN32): the thin devices, the NQNs in order, and the largest
+// side id and the count of the sides of the slices' groups, the clone's
+// meta group and the repair's new leg, the count also counting a retired
+// leg a group lists; another
+// cluster or node is an unknown object; the Starting and reply_code levers
+// set the code.
+func TestGetCnStoreAnswersTheStoredRequests(t *testing.T) {
+	agent := newTestAgent(t)
+	_, cnClient := startAgent(t, agent)
+	ctx := context.Background()
+	store := func(clusterId, cnId uint64) *pb.GetCnStoreReply {
+		t.Helper()
+		reply, err := cnClient.GetCnStore(ctx, &pb.GetCnStoreRequest{
+			ClusterId: clusterId, CnId: cnId})
+		if err != nil {
+			t.Fatalf("GetCnStore: %v", err)
+		}
+		return reply
+	}
+	if code := store(1, 0).GetAgentReply().GetCode(); code !=
+		common.ReplyCodeUnknownObject {
+		t.Fatalf("a fake that holds nothing: code %d, want unknown", code)
+	}
+
+	req := cntlrFixture(true)
+	req.TdList = []*pb.ThinDevice{{TdId: 7, DevId: 3, Size: 1 << 30}}
+	req.NqnToSubsystem = map[string]*pb.Subsystem{"nqn.b": {}, "nqn.a": {}}
+	slice := req.GetIdToSlice()[fmt.Sprintf(common.IdKeyFmt, 1)]
+	slice.GetMetaGrpList()[0].GetLegList()[0].SideList =
+		[]*pb.Side{{SideId: 501}}
+	slice.GetDataGrpList()[0].GetLegList()[1].SideList =
+		[]*pb.Side{{SideId: 502}, {SideId: 509}}
+	slice.GetDataGrpList()[0].RetiredLegIdList = []uint64{105, 107}
+	req.RetiredLegIdToSideId = map[uint64]uint64{105: 9000}
+	req.NameToRepair = map[string]*pb.Repair{"r": {NewLegList: []*pb.Leg{
+		{LegId: 106, SideList: []*pb.Side{{SideId: 520}}}}}}
+	syncupCntlrRequest(t, cnClient, req)
+	if _, err := cnClient.SyncupCn(ctx, &pb.SyncupCnRequest{
+		ClusterId: 1, CnId: 1, Revision: 2,
+		CntlrPointerList: []*pb.CntlrPointer{cntlrPtr(1, 1), cntlrPtr(2, 1)},
+	}); err != nil {
+		t.Fatalf("SyncupCn: %v", err)
+	}
+	want := &pb.GetCnStoreReply{
+		AgentReply: &pb.AgentReply{},
+		CnList: []*pb.GetCnStoreReply_StoredCn{{
+			CnId:     1,
+			Revision: 2,
+			CntlrPointerList: []*pb.CntlrPointer{
+				cntlrPtr(1, 1), cntlrPtr(2, 1)},
+			CntlrList: []*pb.GetCnStoreReply_StoredCntlr{{
+				CntlrPointer: cntlrPtr(1, 1),
+				Revision:     5,
+				Primary:      true,
+				TdList:       req.GetTdList(),
+				NqnList:      []string{"nqn.a", "nqn.b"},
+				// The clone's meta group sides 7111 to 7131 count; the
+				// slices hold 501, 502 and 509 and the retired legs 105
+				// (side 9000) and 107 (no side id in the request), and the
+				// repair its new leg's 520.
+				MaxSideId: 9000,
+				SideCnt:   9,
+
+				RetiredSideIdMissing: true,
+			}},
+		}},
+	}
+	for _, cnId := range []uint64{0, 1} {
+		if got := store(1, cnId); !proto.Equal(got, want) {
+			t.Errorf("cn_id %d:\n got %v\nwant %v", cnId, got, want)
+		}
+	}
+	for _, ask := range [][2]uint64{{2, 0}, {1, 2}} {
+		if code := store(ask[0], ask[1]).GetAgentReply().GetCode(); code !=
+			common.ReplyCodeUnknownObject {
+			t.Errorf("cluster %d, cn %d: code %d, want unknown", ask[0],
+				ask[1], code)
+		}
+	}
+
+	update(t, agent, CnKey, func(ob *Object) { ob.ReplyCode = 4 })
+	if got := store(1, 0); got.GetAgentReply().GetCode() != 4 ||
+		len(got.GetCnList()) != 0 {
+		t.Errorf("the reply_code lever: %v, want code 4 and no node", got)
+	}
+	update(t, agent, CnKey, func(ob *Object) {
+		ob.ReplyCode = 0
+		ob.Starting = time.Now()
+	})
+	if code := store(1, 0).GetAgentReply().GetCode(); code !=
+		common.ReplyCodeStarting {
+		t.Errorf("the Starting lever: code %d, want starting", code)
+	}
+	if got := agent.Calls(MethodGetCnStore); got != 7 {
+		t.Errorf("GetCnStore counted %d calls, want 7", got)
 	}
 }

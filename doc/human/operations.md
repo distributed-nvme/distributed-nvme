@@ -2085,6 +2085,171 @@ refusals and `--force` over fake agents, and its smoke case deletes every
 node of its cluster over fake agents that answer clean. No test removes a
 node from real agents, and no test runs the loop of step 5.
 
+## Restore etcd from a backup
+
+Words: a **backup** is etcd's own snapshot of its data, made with
+`etcdctl snapshot save` on a schedule. A **restore** is etcd's restore tool
+run on a backup: `etcdutl snapshot restore` on etcd 3.6. A **thin id** is
+dm-thin's device number of a volume inside its pool. The **restore check**,
+`dnvctl cn check-restore`, compares what one controller node's agent holds
+with the restored etcd, pool by pool. An agent's local files are as [Remove
+a node](#remove-a-node) says.
+
+When: etcd lost its data, or holds data that cannot be used, and a backup
+is the copy of the desired state left.
+
+How to confirm: etcd does not start on its data, or `dnvctl cluster list`
+lists none of the clusters it held.
+
+What dnv does alone:
+
+- Nothing restores etcd by itself. While etcd is down the data plane goes
+  on: each node keeps what it built, hosts keep their IO, and the workers
+  change nothing.
+- A restore brings the desired state back to the backup's time. What was
+  made after the backup is lost: disk nodes free the sides the restored
+  state does not name, data included, and primaries delete the volumes it
+  does not name, data included. A pool that grew, or whose legs moved,
+  since the backup can break. What was deleted since comes back. A node
+  added since is unknown to the restored state.
+- Each agent's local files hold what its node was told before the restore.
+  An agent that keeps them refuses a syncup of the restored state until the
+  pool's or the node's revision climbs back to the one it holds, and then
+  applies it, so keeping the files only delays the losses above. Deleting
+  them lets the restored state reach the node at once.
+
+Safe steps:
+
+1. Stop every worker, every cdc and every gateway, and the controller
+   plugin of every CSI driver that calls the gateways, for example with
+   `kubectl -n dnv-csi scale deployment dnv-csi-controller --replicas=0`.
+   Keep every agent running. A worker would hand out ids from the restored
+   counters, and the controller plugin would retry a volume create as soon
+   as a gateway answers.
+2. Restore etcd into a new data directory,
+   `etcdutl snapshot restore <backup file> --data-dir <new directory>`, and
+   start etcd on it with the request caps and the automatic compaction of
+   the etcd command in [dnv on one machine](tutorial_all_in_one.md), as
+   [the requirements](introduction.md#requirements) say. Start the
+   gateways.
+3. For every cluster, before any other call but `dnvctl cluster list`,
+   which names the clusters, run `dnvctl cluster advance-ids --name
+   <cluster>`. Without this step a new object can take the ids, and with
+   them the data on the nodes, of an object made after the backup. Even
+   with it, a pool that created more than 1,048,576 volumes, snapshots
+   included, after the backup can hand one of their thin ids, with its data,
+   to a new volume ([a new volume refused for a thin id that holds
+   data](#a-new-volume-refused-for-a-thin-id-that-holds-data)).
+4. Run the restore check for every controller node: each address
+   `dnvctl cn list` prints, and each controller node added after the
+   backup, which the list does not hold:
+   `dnvctl --timeout 120 cn check-restore --addr <addr>`. A node of many
+   pools needs a longer `--timeout`. Each row is one cntlr of a pool, and
+   its `verdict` says what the restore does to what that cntlr was told. A
+   standby can hold an older state than its primary, and its row then
+   lists as lost a volume that was deleted later. So read each pool from
+   its row with the highest `held_revision`, on any controller node: the
+   cntlr the worker told last. `held_cn_list` lists the controller nodes
+   the agent holds; when it is empty, the agent lost its local files, and
+   every cntlr its node had in the backup reads not held.
+   - `RESTORE_VERDICT_SAME`: this cntlr was told nothing since the
+     backup.
+   - `RESTORE_VERDICT_OLDER`: the pool loses every change since the
+     backup, and its layout stays as it is. `lost_td_list` lists its
+     volumes that are lost, by `td_id` and thin id. `returning_td_list`
+     lists the volumes deleted since the backup: their records come back,
+     but the primary deleted their data when they were deleted, so they
+     come back as errors with no data. `dnvctl td list` names them.
+   - `RESTORE_VERDICT_MAY_BREAK`: as older, and the pool's layout changed
+     since the backup, so the pool may not come back working: a part of it
+     was made since (a grow, a repair, a migration, a clone), or removed
+     since (a migration finished or cancelled, a retired leg deleted, a
+     clone drained). A side made since counts even when a later repair
+     made its leg a retired leg. A repair that only finished since moves
+     its new leg into the group, and a repair that took back a retired leg
+     moves that leg back; both read older. `held_side_cnt` and
+     `restored_side_cnt` count the sides of the two layouts. It can be a
+     false alarm: a migration made after the backup and not yet at its
+     cutover gives it too, while its old side still holds every write. A
+     row whose `held_side_ids_incomplete` is true was told by an older
+     version of the worker, which did not send the side of each retired
+     leg. The check then cannot see every change, so the row reads may
+     break whenever the cntlr holds a newer state than the backup.
+   - `RESTORE_VERDICT_NEW`: the pool is not in the backup and is lost
+     whole, with each volume `lost_td_list` lists. `nqn_list` names its
+     subsystems; the NQN of a Kubernetes volume's subsystem carries the
+     volume's name.
+   - `RESTORE_VERDICT_BEHIND`: the agent holds an older state than the
+     backup, because this cntlr was behind its pool at the backup and was
+     not told since, or because its local files were put back from an
+     older copy; nothing can be compared. An agent that lost its local
+     files holds nothing, and its rows read not held, until the worker
+     tells it the current state again.
+   - `RESTORE_VERDICT_NOT_HELD`: a cntlr of the backup that the node no
+     longer holds, because the pool was deleted or the cntlr moved to
+     another node after the backup, or because the agent lost its local
+     files (`held_cn_list` is empty); it comes back.
+   - `RESTORE_VERDICT_NOT_LOADED`: the agent names the cntlr but holds
+     none of its state: it could not load the cntlr's file, or the cntlr
+     was made just before the failure and its state never came, which is
+     often a cntlr of a pool made after the backup. Nothing can be
+     compared.
+   - `RESTORE_VERDICT_RECORD_LOST`: a record of the pool in the backup is
+     missing or broken, or the backup's node names a cntlr of a pool the
+     backup does not hold.
+   A lost volume whose `id_may_return` is true has a thin id that a new
+   volume of its pool can take after the restore.
+5. To keep a lost volume, copy its data off now, through a host that still
+   has a path to it. No worker runs, so each node still serves what it held
+   before the restore. No test has shown this step.
+6. For each agent: stop it, copy its local files aside, delete them, and
+   start it again. The copy is the last record of what the node was told
+   before the restore.
+7. Start the workers and the cdc, let clients call the gateways again,
+   start the CSI controller plugin again with its former count of copies,
+   and take a new backup: a later restore of a backup from before step 3
+   would hand out again the ids handed out since.
+8. Kubernetes still holds its record of each volume whose pool step 4
+   found new: delete the record, or make the volume again. Delete again
+   each volume step 4 listed in `returning_td_list`: it holds no data. A
+   pool deleted after the backup comes back: it is one whose rows of its
+   `sp_id`, on every controller node, all read
+   `RESTORE_VERDICT_NOT_HELD`, from checks whose `held_cn_list` each lists
+   their node with a `revision` at or above that check's
+   `restored_revision`. Delete it again. A node held at a lower revision
+   was never told of a cntlr the backup names, so its rows do not show a
+   delete. A pool that has any other row lives on another node, and one
+   seen only by a node whose agent lost its local files, or only by nodes
+   held at a lower revision, is not known to be deleted; delete neither.
+
+Steps that can lose data: step 6 makes every loss of step 4 happen, with no
+undo; an agent whose files are kept meets the same losses later, once the
+revisions climb back. Step 6 before step 3, or a worker started before step 3, can give a
+new object the remains of one made after the backup, data included. A
+volume made in a cluster created after the backup is lost unseen: no call
+names that cluster.
+
+When to stop and ask for help, before step 6: a node whose agent does not
+answer the check, since a pool none of whose controller nodes answers is
+not seen; a node whose check lists no held node while its node in the
+backup names cntlrs, since its agent lost what the node was told; a pool
+with a `RESTORE_VERDICT_BEHIND` or `RESTORE_VERDICT_NOT_LOADED` row and no
+row read `RESTORE_VERDICT_SAME`, `RESTORE_VERDICT_OLDER`,
+`RESTORE_VERDICT_MAY_BREAK` or `RESTORE_VERDICT_NEW`, whose losses are
+then not known; a row read `RESTORE_VERDICT_MAY_BREAK` or
+`RESTORE_VERDICT_RECORD_LOST`; a lost volume that must be kept and that no
+host can reach. A pool whose every row is not held, from nodes whose
+agents hold their nodes at or above the restored revision, was deleted
+after the backup: step 8 deletes it again. The check lists no disk node's sides: the sides a disk
+node frees at step 6 belong to the pools the check finds new, older or
+breaking, and to the pools it does not see.
+
+Tested: the gateway's Go tests check every verdict against planted records
+and a fake agent, and the cn agent's tests check what it answers; the
+gateway suite's smoke case runs the check over a fake controller node after
+its id step. No test runs the whole procedure, a real `etcdutl` restore or
+the check against a real agent.
+
 ## Gather a node's state for a bug report
 
 Words: the **gather** is `dnv-agent collect`, a run of the agent program

@@ -353,6 +353,7 @@ const (
 	MethodGetLegBm        = "GetLegBm"
 	MethodCheckCn         = "CheckCn"
 	MethodCheckCntlr      = "CheckCntlr"
+	MethodGetCnStore      = "GetCnStore"
 )
 
 // Record is what an agent received about one object, each list in arrival

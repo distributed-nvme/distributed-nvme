@@ -30,8 +30,9 @@ no repair, no forced start, no take-over and no cut of a migrating leg's path:
   clone copies and after it (`architecture.md`, Clones), are within that
   bound, at every slice count the run builds.
 * **The operator surface works against a real control plane.** Every `Gateway`
-  RPC but the cluster and node deletions and listings, the id step and the
-  capacity read of the layer above, `GetClusterCapacity`, is issued by the
+  RPC but the cluster and node deletions and listings, the id step, the
+  restore check and the capacity read of the layer above,
+  `GetClusterCapacity`, is issued by the
   shipped `dnvctl` against a real gateway, etcd and agents, and no echoed id is
   the whole of an assertion: a mutation is read back from its record and, where
   the device is the point, from its agent, or, for a few, proved by its effect,
@@ -116,11 +117,13 @@ no repair, no forced start, no take-over and no cut of a migrating leg's path:
   configuration of it back byte for byte.
 
 **What it does not prove.** The RPCs it never issues, the deletions and
-listings of clusters, disk nodes and controller nodes, the id step and the
-capacity read `GetClusterCapacity` (`architecture.md`, Clusters): the gateway
-suite issues each of them, the dnvctl suite each against its fake gateway, and
-the csi suite reaches the capacity read through dnv-csi and through `dnvctl`,
-whose answer it compares with the driver's; this run discards the
+listings of clusters, disk nodes and controller nodes, the id step, the
+restore check `CheckControllerNodeRestore` (`architecture.md`, Controller
+nodes) and the capacity read `GetClusterCapacity` (`architecture.md`,
+Clusters): the gateway suite issues each of them, the dnvctl suite each
+against its fake gateway, and the csi suite reaches the capacity read
+through dnv-csi and through `dnvctl`, whose answer it compares with the
+driver's; this run discards the
 whole cluster between cases. Error paths, beyond the few refusals the ops case
 asserts on purpose, the copy case's refused abort and cancel of a started
 repair, react's refused forced start of a group whose array runs and its

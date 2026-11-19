@@ -511,10 +511,14 @@ No case is known today.
   build the volume again before then (a failover, a reboot of the primary's
   controller node, or a step of the pool's level down to `NO_THINPOOL` or
   further and back), makes that primary refuse the volume's own id. Both
-  stay inside one pool. State: accepted. Procedure:
+  stay inside one pool. Before the agents' local files are reset, the
+  restore check (`dnvctl cn check-restore`) names each volume the restore
+  loses and whether a new volume of its pool can take its thin id again.
+  State: accepted. Procedure:
   [a new volume refused for a thin id that holds data](operations.md#a-new-volume-refused-for-a-thin-id-that-holds-data),
-  which tells the two cases apart; section 7 has the restore's steps known
-  today. Not seen in the lab.
+  which tells the two cases apart, and
+  [restore etcd from a backup](operations.md#restore-etcd-from-a-backup).
+  Not seen in the lab.
 - **Making the old primary the primary again right after a failed fence
   can write old data.** Silent. A fence that suspends the old primary's
   path and then fails to load the error target leaves that path suspended
@@ -1254,8 +1258,8 @@ a Kubernetes volume whose name held "..", a planned restart of an agent, a
 slow leg, the install of the udev rules on a node, the node check, the
 choice of a node's location, the removal of a node, the gather of a node's
 state, a Kubernetes volume the node plugin will not format, a change of the
-cdc addresses of the Kubernetes driver and a Kubernetes node plugin that
-does not start so far, and
+cdc addresses of the Kubernetes driver, a Kubernetes node plugin that does
+not start and the restore of etcd from a backup so far, and
 gets the others as they are written. Every row with no tool
 or no doc carries its note. Section 6.1 and the tables give some short
 steps; the section "Steps known today" below gives the longer ones.
@@ -1309,7 +1313,7 @@ steps; the section "Steps known today" below gives the longer ones.
 
 | Action | Tool today | Doc today | State |
 |---|---|---|---|
-| Back up and restore etcd | etcd's own tools; `dnvctl cluster advance-ids` after a restore | this page, below; [operations](operations.md#a-new-volume-refused-for-a-thin-id-that-holds-data) for a refused thin id | procedure to write. A new volume over a restored thin id that holds data is refused. |
+| Back up and restore etcd | etcd's own tools; `dnvctl cluster advance-ids` after a restore; `dnvctl cn check-restore`, which says pool by pool what the restore loses, before the agents' local files are reset | the operations doc, [Restore etcd from a backup](operations.md#restore-etcd-from-a-backup), and [a new volume refused for a thin id that holds data](operations.md#a-new-volume-refused-for-a-thin-id-that-holds-data) | procedure written; it has not run on real agents. The check does not see a pool none of whose controller nodes answers, and lists no disk node's sides. A new volume over a restored thin id that holds data is refused. |
 | Upgrade | every program at once; `--version` on each program, and the version each running program logs when it starts | this page, below | procedure to write. Rolling upgrades are not yet. A downgrade is not supported. |
 | Run while the control plane is down | nothing to do; the data plane serves | none | procedure to write |
 | Handle the logs | none; JSON on stderr, no rotation | this page, below | procedure to write |
@@ -1336,31 +1340,12 @@ steps; the section "Steps known today" below gives the longer ones.
 These are the longer steps written so far. [The operations doc](operations.md)
 will hold the full procedures.
 
-**Back up and restore etcd.** Back up etcd with its own backup command,
-`etcdctl snapshot save`, on a schedule. dnv adds nothing to etcd's backup
-or restore. A restore brings the desired state back to the backup's time,
-so what was created after it is lost with its data, and a pool whose
-layout changed since breaks. A restore needs dnv's steps around etcd's:
-
-1. Stop every worker, cdc and gateway. The agents keep serving.
-2. Restore etcd, and start it with the request caps and the automatic
-   compaction of the etcd command in
-   [dnv on one machine](tutorial_all_in_one.md), as
-   [the requirements](introduction.md#requirements) say.
-3. Start the gateways. For every cluster, before any other call but
-   `dnvctl cluster list`, which names the clusters, run
-   `dnvctl cluster advance-ids`. Without this step a new object can take
-   the ids, and with them the data on the nodes, of an object made after
-   the backup. Even with it, a pool that created more than 1,048,576 thin
-   devices, snapshots included, after the backup can hand one of their ids,
-   with its data, to a new thin device.
-4. Stop each agent, delete the files of its local store, the directory in
-   which it keeps the desired state it last accepted, and start it again.
-5. Start the workers and the cdc, let clients call the gateways again, and
-   take a new backup.
-
-The suites and the tutorials run etcd as one member, so an etcd of several
-members is untested.
+**Back up and restore etcd.** The steps are in the operations doc,
+[restore etcd from a backup](operations.md#restore-etcd-from-a-backup). A
+restore brings the desired state back to the backup's time, so what was
+created after it is lost with its data, and a pool whose layout changed
+since can break. The suites and the tutorials run etcd as one member, so an
+etcd of several members is untested.
 
 **Upgrade.** Upgrades are lockstep. Every dnv program of one etcd
 installation stops: its gateways, workers and cdc, the agents of every

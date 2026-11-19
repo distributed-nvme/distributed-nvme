@@ -1162,6 +1162,12 @@ func (g *fakeGateway) GetThinDeviceBitmap(
 	return serve[*pb.GetThinDeviceBitmapReply](g, ctx, "GetThinDeviceBitmap", req)
 }
 
+func (g *fakeGateway) CheckControllerNodeRestore(
+	ctx context.Context, req *pb.CheckControllerNodeRestoreRequest,
+) (*pb.CheckControllerNodeRestoreReply, error) {
+	return serve[*pb.CheckControllerNodeRestoreReply](g, ctx, "CheckControllerNodeRestore", req)
+}
+
 // ---------------------------------------------------------------------------
 // main
 // ---------------------------------------------------------------------------
