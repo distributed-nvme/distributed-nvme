@@ -73,7 +73,7 @@ func TestASnapshotWhoseCreateFailsOnceIsNamedAndResent(t *testing.T) {
 		t.Fatalf("the re-send sent no create message under the round's " +
 			"trace id")
 	}
-	if got := node.files[anaPath(testNqn, 2)]; got != "1" {
+	if got := node.fileOf(anaPath(testNqn, 2)); got != "1" {
 		t.Fatalf("after the re-send the snapshot's namespace has "+
 			"ana_grpid %q, want 1", got)
 	}

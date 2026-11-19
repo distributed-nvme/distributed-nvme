@@ -266,7 +266,7 @@ func TestCloneAutoResumeOverridesSuspended(t *testing.T) {
 	if dev.suspended {
 		t.Fatalf("the serving ns-dev is dm-suspended")
 	}
-	if got := node.files[anaPath(testNqn, 1)]; got != "1" {
+	if got := node.fileOf(anaPath(testNqn, 1)); got != "1" {
 		t.Fatalf("ana_grpid is %q, want 1 (optimized)", got)
 	}
 
@@ -282,7 +282,7 @@ func TestCloneAutoResumeOverridesSuspended(t *testing.T) {
 		t.Fatalf("auto_resume=false: %v", err)
 	}
 	assertParked(t, srv, node, testNs, testTd, "auto_resume=false")
-	if got := node.files[anaPath(testNqn, 1)]; got != "3" {
+	if got := node.fileOf(anaPath(testNqn, 1)); got != "3" {
 		t.Fatalf("ana_grpid is %q, want 3 (inaccessible)", got)
 	}
 }

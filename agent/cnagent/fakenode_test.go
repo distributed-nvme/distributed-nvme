@@ -1083,6 +1083,25 @@ func (f *fakeNode) inProcessHookErr(line string, failed error) error {
 	return nil
 }
 
+// fileOf is the content of the fake file at path, read under f.mu: a test
+// checks a file while the agent's background work (the path watcher's cut, a
+// sweep's background disconnect) can write the map, and an unlocked read of a
+// map that another goroutine writes stops the test binary.
+func (f *fakeNode) fileOf(path string) string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.files[path]
+}
+
+// fileHas reports whether the fake file at path exists, read under f.mu
+// as fileOf reads.
+func (f *fakeNode) fileHas(path string) bool {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	_, ok := f.files[path]
+	return ok
+}
+
 func (f *fakeNode) writeFile(
 	ctx context.Context, path string, data string,
 ) error {

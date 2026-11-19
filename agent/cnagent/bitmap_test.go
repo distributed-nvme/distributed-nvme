@@ -160,7 +160,7 @@ func TestThinDumpGoesThroughAFile(t *testing.T) {
 	if n := len(node.callsMatching("read " + file)); n != 1 {
 		t.Fatalf("the dump file was read %d times, want 1", n)
 	}
-	if _, ok := node.files[file]; ok {
+	if node.fileHas(file) {
 		t.Fatalf("the dump file %s was left behind", file)
 	}
 
@@ -174,7 +174,7 @@ func TestThinDumpGoesThroughAFile(t *testing.T) {
 		t.Fatalf("a dump that did not answer must fail the RPC")
 	}
 	assertNoCall(t, node, "read "+file)
-	if _, ok := node.files[file]; ok {
+	if node.fileHas(file) {
 		t.Fatalf("a killed dump left its file %s behind", file)
 	}
 
@@ -202,7 +202,7 @@ func TestThinDumpGoesThroughAFile(t *testing.T) {
 			"cancelled dump, want 1", n)
 	}
 	assertOrder(t, node, "cmd rm -f "+file, release)
-	if _, ok := node.files[file]; ok {
+	if node.fileHas(file) {
 		t.Fatalf("a dump whose caller went away left its file %s behind",
 			file)
 	}

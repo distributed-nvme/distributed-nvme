@@ -1614,7 +1614,7 @@ func TestGroupAssembleRefusalIsAnError(t *testing.T) {
 			}
 			if !tc.noTd {
 				assertNoCall(t, node, "writedirect "+anaPath(testNqn, 1)+"=1")
-				if got := node.files[anaPath(testNqn, 1)]; got != "3" {
+				if got := node.fileOf(anaPath(testNqn, 1)); got != "3" {
 					t.Fatalf("ana_grpid is %q over the unbuilt stack, "+
 						"want 3", got)
 				}
@@ -1648,7 +1648,7 @@ func TestGroupAssembleRefusalIsAnError(t *testing.T) {
 			assertOk(t, resent.GetCntlrInfo().GetGrpIdToMdRaid()[testMetaGrp],
 				"grp meta after the re-send")
 			if !tc.noTd {
-				if got := node.files[anaPath(testNqn, 1)]; got != "1" {
+				if got := node.fileOf(anaPath(testNqn, 1)); got != "1" {
 					t.Fatalf("ana_grpid is %q after the re-send, want 1",
 						got)
 				}
@@ -6684,19 +6684,19 @@ func TestTransferAutoSuspendRetiresOrigin(t *testing.T) {
 	assertOk(t, info.GetXferIdToNamespace()[testXfer], "xfer namespace")
 
 	xferNqn := srv.nf.XferNqn(testCluster, testSp, testXfer)
-	if got := node.files[agent.NvmetRoot+"/subsystems/"+xferNqn+
-		"/attr_serial"]; got != fmt.Sprintf(common.IdKeyFmt, testXfer) {
+	if got := node.fileOf(agent.NvmetRoot + "/subsystems/" + xferNqn +
+		"/attr_serial"); got != fmt.Sprintf(common.IdKeyFmt, testXfer) {
 		t.Fatalf("xfer attr_serial is %q", got)
 	}
 	// [D2] applied to the xfer (CN17): every cntlr presents the one model, so
 	// a destination clone connecting through several of them sees one device.
-	if got := node.files[agent.NvmetRoot+"/subsystems/"+xferNqn+
-		"/attr_model"]; got != common.NvmeModel {
+	if got := node.fileOf(agent.NvmetRoot + "/subsystems/" + xferNqn +
+		"/attr_model"); got != common.NvmeModel {
 		t.Fatalf("xfer attr_model is %q, want %q", got, common.NvmeModel)
 	}
 	// The xfer namespace carries the origin's identity, on the primary in
 	// the optimized group.
-	if got := node.files[anaPath(xferNqn, 1)]; got != "1" {
+	if got := node.fileOf(anaPath(xferNqn, 1)); got != "1" {
 		t.Fatalf("xfer ana_grpid is %q, want 1", got)
 	}
 }
@@ -7958,7 +7958,7 @@ func TestDeferredTdNamespaceIsInaccessible(t *testing.T) {
 		unprovisionedDataLeg: true})
 
 	assertNoCall(t, node, "writedirect "+anaPath(testNqn, 1)+"=1")
-	if got := node.files[anaPath(testNqn, 1)]; got != "3" {
+	if got := node.fileOf(anaPath(testNqn, 1)); got != "3" {
 		t.Fatalf("ana_grpid is %q, want 3", got)
 	}
 	table := node.dms[nsDevName(srv, testNs)].table
@@ -7977,7 +7977,7 @@ func TestDeferredTdNamespaceIsInaccessible(t *testing.T) {
 		cntlrReq(reqOpts{revision: 3, primary: true})); err != nil {
 		t.Fatalf("after the flip: %v", err)
 	}
-	if got := node.files[anaPath(testNqn, 1)]; got != "1" {
+	if got := node.fileOf(anaPath(testNqn, 1)); got != "1" {
 		t.Fatalf("ana_grpid is %q after the flip, want 1", got)
 	}
 }

@@ -492,7 +492,7 @@ func TestEmptyingAllowedHostsRevokesEveryHost(t *testing.T) {
 	if _, ok := node.links[link]; !ok {
 		t.Fatalf("the host was never linked")
 	}
-	if got := node.files[attr]; got != "0" {
+	if got := node.fileOf(attr); got != "0" {
 		t.Fatalf("attr_allow_any_host is %q after the build, want 0", got)
 	}
 	assertNoCall(t, node, "writedirect "+attr+"=1")
@@ -507,7 +507,7 @@ func TestEmptyingAllowedHostsRevokesEveryHost(t *testing.T) {
 		t.Fatalf("the retired host link survived")
 	}
 	assertNoCall(t, node, "writedirect "+attr)
-	if got := node.files[attr]; got != "0" {
+	if got := node.fileOf(attr); got != "0" {
 		t.Fatalf("attr_allow_any_host is %q, want 0", got)
 	}
 	assertOk(t, reply.GetCntlrInfo().GetSsIdToSubsystem()[testSs],
@@ -541,7 +541,7 @@ func TestAnOpenSubsystemIsClosedBeforeAnyHostLink(t *testing.T) {
 			if err != nil {
 				t.Fatalf("SyncupCntlr: %v", err)
 			}
-			if got := node.files[attr]; got != "0" {
+			if got := node.fileOf(attr); got != "0" {
 				t.Fatalf("attr_allow_any_host is %q, want 0", got)
 			}
 			assertNoCall(t, node, "writedirect "+attr+"=1")

@@ -479,7 +479,7 @@ func TestAReusedNamespaceIdIsNotDisabledOverASuspendedDevice(t *testing.T) {
 	node.Reset()
 	syncupCntlrUntilClean(t, srv, reqOpts{revision: 3, primary: true,
 		subsys: sub})
-	if got := strings.TrimSpace(node.files[nsPath+"/device_path"]); got !=
+	if got := strings.TrimSpace(node.fileOf(nsPath + "/device_path")); got !=
 		"/dev/mapper/"+newDev {
 		t.Fatalf("the namespace is over %q, want its new ns-dev %s", got,
 			newDev)

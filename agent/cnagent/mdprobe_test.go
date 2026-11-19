@@ -206,7 +206,7 @@ func TestMdDetailInactiveArray(t *testing.T) {
 	mdDir := sysfsBlockDir + "/" + strings.TrimPrefix(node.mdNode(dev), "/dev/") +
 		"/md"
 	for _, attr := range []string{"degraded", "sync_action", "sync_completed"} {
-		if _, ok := node.files[mdDir+"/"+attr]; ok {
+		if node.fileHas(mdDir + "/" + attr) {
 			t.Fatalf("the fake publishes md/%s for an inactive array, "+
 				"which the kernel does not", attr)
 		}

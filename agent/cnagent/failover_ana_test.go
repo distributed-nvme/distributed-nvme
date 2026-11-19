@@ -30,7 +30,7 @@ func devNoOf(node *fakeNode, name string) string {
 // assertAna is the fixture namespace's live ana_grpid.
 func assertAna(t *testing.T, node *fakeNode, nqn, want, label string) {
 	t.Helper()
-	if got := node.files[anaPath(nqn, 1)]; got != want {
+	if got := node.fileOf(anaPath(nqn, 1)); got != want {
 		t.Fatalf("%s: ana_grpid is %q, want %q", label, got, want)
 	}
 }
@@ -1394,7 +1394,7 @@ func TestAServedTransferWhoseDeviceStepFailsIsNamed(t *testing.T) {
 			xfer := xferName(srv, testXfer)
 			xferNqn := srv.nf.XferNqn(testCluster, testSp, testXfer)
 			xferAna := "writedirect " + anaPath(xferNqn, 1) + "="
-			before := node.files[anaPath(xferNqn, 1)]
+			before := node.fileOf(anaPath(xferNqn, 1))
 			disarm := tc.fault(srv, node)
 
 			node.Reset()
@@ -1416,7 +1416,7 @@ func TestAServedTransferWhoseDeviceStepFailsIsNamed(t *testing.T) {
 				reply.GetCntlrInfo().GetXferIdToDmLinear()[testXfer],
 				pb.ResStatus_RES_STATUS_ERROR, "the transfer device row")
 			assertNoCall(t, node, xferAna+"1")
-			if got := node.files[anaPath(xferNqn, 1)]; got != before {
+			if got := node.fileOf(anaPath(xferNqn, 1)); got != before {
 				t.Fatalf("the failed step moved the transfer from %q to %q",
 					before, got)
 			}

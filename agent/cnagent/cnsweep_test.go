@@ -1801,12 +1801,12 @@ func TestUnansweredListingStillMovesAnaBeforeThePark(t *testing.T) {
 				srv, node := newTestServer(t)
 				syncupBoth(t, srv, shape.from)
 				xferNqn := srv.nf.XferNqn(testCluster, testSp, testXfer)
-				if got := node.files[anaPath(testNqn, 1)]; got != "1" {
+				if got := node.fileOf(anaPath(testNqn, 1)); got != "1" {
 					t.Fatalf("fixture: ana_grpid is %q before the pass, "+
 						"want 1", got)
 				}
 				if shape.xfer {
-					if got := node.files[anaPath(xferNqn, 1)]; got != "1" {
+					if got := node.fileOf(anaPath(xferNqn, 1)); got != "1" {
 						t.Fatalf("fixture: the transfer's ana_grpid is %q "+
 							"before the pass, want 1", got)
 					}
@@ -1843,7 +1843,7 @@ func TestUnansweredListingStillMovesAnaBeforeThePark(t *testing.T) {
 				}
 				assertOrder(t, node, nsAna+"3",
 					"cmd dmsetup reload "+nsDevName(srv, testNs))
-				if got := node.files[anaPath(testNqn, 1)]; got != "3" {
+				if got := node.fileOf(anaPath(testNqn, 1)); got != "3" {
 					t.Fatalf("ana_grpid is %q after the pass, want 3", got)
 				}
 				assertParked(t, srv, node, testNs, testTd, shape.name)
@@ -1966,7 +1966,7 @@ func TestUnansweredNamespaceListingRemovesNoNamespace(t *testing.T) {
 	srv, node := newTestServer(t)
 	syncupBoth(t, srv, reqOpts{
 		revision: 2, primary: true, raid1: true, subsys: twoNs})
-	if got := node.files[anaPath(testNqn, 2)]; got != "1" {
+	if got := node.fileOf(anaPath(testNqn, 2)); got != "1" {
 		t.Fatalf("fixture: nsid 2's ana_grpid is %q, want 1", got)
 	}
 	nsPath := agent.NvmetRoot + "/subsystems/" + testNqn + "/namespaces/2"
@@ -2058,7 +2058,7 @@ func TestUnansweredListingLeavesADroppedNamespaceToTheSweep(t *testing.T) {
 			// Inaccessible already, as the suspend left it: L1's move
 			// finds nothing to write, and none of the passes below may
 			// move it anywhere else.
-			if got := node.files[anaPath(testNqn, 1)]; got != "3" {
+			if got := node.fileOf(anaPath(testNqn, 1)); got != "3" {
 				t.Fatalf("fixture: ana_grpid is %q, want 3", got)
 			}
 			ana := "writedirect " + anaPath(testNqn, 1) + "="
@@ -2237,7 +2237,7 @@ func TestUnansweredListingKeepsTheNsDevOffALeavingClone(t *testing.T) {
 							"want it live on the %s: %q", ns.nsId, dev.table,
 							dev.suspended, ns.on, linear(on[ns.on]))
 					}
-					got := node.files[anaPath(testNqn, ns.nsIdx)]
+					got := node.fileOf(anaPath(testNqn, ns.nsIdx))
 					if got != ns.ana {
 						t.Fatalf("nsid %d's ana_grpid is %q, want %q",
 							ns.nsIdx, got, ns.ana)
@@ -2288,7 +2288,7 @@ func TestUnansweredListingKeepsTheNsDevOffALeavingClone(t *testing.T) {
 						t.Fatalf("ns %#x's ns-dev is %q after the pass, "+
 							"want it on the raid0", ns.nsId, table)
 					}
-					got := node.files[anaPath(testNqn, ns.nsIdx)]
+					got := node.fileOf(anaPath(testNqn, ns.nsIdx))
 					if got != "1" {
 						t.Fatalf("nsid %d's ana_grpid is %q after the "+
 							"pass, want 1", ns.nsIdx, got)
@@ -2485,7 +2485,7 @@ func TestALeftDmCloneKeepsTheNsDevOffItsRaid0(t *testing.T) {
 				t.Fatalf("the ns-dev is %+v, want it live on the %s: %q",
 					dev, route.on, linear(on[route.on]))
 			}
-			if got := node.files[ana]; got != route.ana {
+			if got := node.fileOf(ana); got != route.ana {
 				t.Fatalf("ana_grpid is %q, want %q", got, route.ana)
 			}
 			// P2 moves the namespace before its park, which failed or not;
@@ -2545,7 +2545,7 @@ func TestALeftDmCloneKeepsTheNsDevOffItsRaid0(t *testing.T) {
 				t.Fatalf("the ns-dev is %q after the pass, want it on the "+
 					"raid0", got)
 			}
-			if got := node.files[ana]; got != "1" {
+			if got := node.fileOf(ana); got != "1" {
 				t.Fatalf("ana_grpid is %q after the pass, want 1", got)
 			}
 			assertOk(t, reply.GetCntlrInfo().GetNsIdToDmLinear()[testNs],
@@ -2605,7 +2605,7 @@ func TestAHeldNsDevIsRedrivenWithoutARevision(t *testing.T) {
 				t.Fatalf("the ns-dev is %q, want it held on the dm-error",
 					got)
 			}
-			if got := node.files[ana]; got != "3" {
+			if got := node.fileOf(ana); got != "3" {
 				t.Fatalf("ana_grpid is %q, want 3", got)
 			}
 			assertErrorDetails(t,
@@ -2637,7 +2637,7 @@ func TestAHeldNsDevIsRedrivenWithoutARevision(t *testing.T) {
 				t.Fatalf("the reload did not run once under the round's " +
 					"trace id")
 			}
-			if got := node.files[ana]; got != "1" {
+			if got := node.fileOf(ana); got != "1" {
 				t.Fatalf("ana_grpid is %q after the re-send, want 1", got)
 			}
 			round, resent = resendRound(t, srv, held, "after-the-re-send")
@@ -3059,7 +3059,7 @@ func TestALingeringCloneHoldsOnlyItsTd(t *testing.T) {
 					t.Fatalf("ns %#x's ns-dev is %+v, want it live on the "+
 						"%s: %q", ns.nsId, dev, ns.want.on, want)
 				}
-				if got := node.files[anaPath(testNqn, ns.nsIdx)]; got !=
+				if got := node.fileOf(anaPath(testNqn, ns.nsIdx)); got !=
 					ns.want.ana {
 					t.Fatalf("nsid %d's ana_grpid is %q, want %q",
 						ns.nsIdx, got, ns.want.ana)

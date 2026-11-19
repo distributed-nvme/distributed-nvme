@@ -156,7 +156,7 @@ func TestAParkWhoseLoadFails(t *testing.T) {
 			if !node.dirs[nsPath] {
 				t.Fatalf("the namespace was removed by a stopped pass")
 			}
-			if got := node.files[anaPath(testNqn, 1)]; got != "3" {
+			if got := node.fileOf(anaPath(testNqn, 1)); got != "3" {
 				t.Fatalf("ana_grpid is %q after the stopped pass, want 3",
 					got)
 			}
