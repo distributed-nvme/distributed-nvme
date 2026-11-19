@@ -46,13 +46,15 @@ var (
 
 // checkVolumeName holds a volume name to the gateway's rule for a name
 // (architecture.md, Common validation) and keeps the id separator out of
-// it, so the volume id splits.
+// it, so the volume id splits, and ".." too: the subsystem's NQN carries the
+// name, and the gateway refuses an NQN holding "..", which names a configfs
+// directory, so a volume under such a name could never be made.
 func checkVolumeName(name string) error {
 	if name == "" {
 		return status.Error(codes.InvalidArgument, "the volume name is required")
 	}
 	if len(name) > common.MaxStrSize || !validName.MatchString(name) ||
-		strings.Contains(name, volumeIdSep) {
+		strings.Contains(name, volumeIdSep) || strings.Contains(name, "..") {
 		return status.Errorf(codes.InvalidArgument,
 			"the volume name %q is not a name dnv accepts", name)
 	}
@@ -60,11 +62,13 @@ func checkVolumeName(name string) error {
 }
 
 // dnvNameOf is the dnv name of a volume (csi.md, The volume model): the
-// name Kubernetes gives it when dnv takes that name as it is, else its
-// leading bytes, each made acceptable, and a hash of the whole name. The
+// name Kubernetes gives it when the driver takes that name as it is
+// (checkVolumeName), else its leading bytes, each made acceptable, the
+// second dot of each ".." among them, and a hash of the whole name. The
 // spec lets a caller send names of 128 bytes, twice dnv's limit. The same
 // name always gives the same dnv name, so a repeated create finds its
-// objects, and the result is one dnv takes, so the volume id splits.
+// objects, and the result is one the driver takes, so the volume id splits
+// and the subsystem's NQN holds no "..".
 func dnvNameOf(name string) string {
 	if checkVolumeName(name) == nil {
 		return name
@@ -77,7 +81,7 @@ func dnvNameOf(name string) string {
 	}
 	prefix := []byte(name[:keep])
 	for i, b := range prefix {
-		if !acceptableByte(b) {
+		if !acceptableByte(b) || b == '.' && i > 0 && prefix[i-1] == '.' {
 			prefix[i] = '-'
 		}
 	}

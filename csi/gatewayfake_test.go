@@ -3,6 +3,7 @@ package csi
 import (
 	"context"
 	"net"
+	"strings"
 	"sync"
 	"testing"
 
@@ -489,7 +490,10 @@ func (g *fakeGateway) CreateSubsystem(
 	if err != nil {
 		return nil, err
 	}
-	if common.IsDnvNqn(req.GetNqn()) || !validNqn.MatchString(req.GetNqn()) {
+	// The gateway's NQN rule (architecture.md, Common validation): the
+	// pattern, no "..", and outside the dnv-owned namespace.
+	if common.IsDnvNqn(req.GetNqn()) || !validNqn.MatchString(req.GetNqn()) ||
+		strings.Contains(req.GetNqn(), "..") {
 		return nil, status.Errorf(codes.InvalidArgument, "nqn %q", req.GetNqn())
 	}
 	if p.ss[req.GetNqn()] != nil {

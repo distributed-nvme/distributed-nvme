@@ -2,6 +2,8 @@ package csi
 
 import (
 	"context"
+	"maps"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -629,6 +631,29 @@ func TestCreateVolumeWithANameDnvDoesNotTake(t *testing.T) {
 		VolumeId: first.GetVolume().GetVolumeId(),
 	})
 	wantCode(t, err, codes.OK, "a delete by the id")
+}
+
+// TestCreateVolumeWithANameHoldingDots pins the mapping of a name holding
+// ".." (csi.md, The volume model): the gateway refuses such an NQN, so the
+// name is mapped before any create, and every object of the volume is made
+// under the mapped name; no pool is made under the name as sent.
+func TestCreateVolumeWithANameHoldingDots(t *testing.T) {
+	c, g := newTestController(t)
+	ctx := t.Context()
+	reply, err := c.CreateVolume(ctx, createReq("a..b", gib))
+	wantCode(t, err, codes.OK, "a name holding \"..\"")
+	_, name, err := parseVolumeId(reply.GetVolume().GetVolumeId())
+	if err != nil || name != dnvNameOf("a..b") || strings.Contains(name, "..") {
+		t.Fatalf("volume id %q names %q, %v, want the mapped name",
+			reply.GetVolume().GetVolumeId(), name, err)
+	}
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	pools := g.clusters[fakeClusterOne].pools
+	if pools["a..b"] != nil || pools[name] == nil {
+		t.Errorf("the fake holds pools %v, want %q alone of the two names",
+			slices.Collect(maps.Keys(pools)), name)
+	}
 }
 
 // TestControllerGetCapabilities pins the three capabilities advertised.

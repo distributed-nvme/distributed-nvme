@@ -64,6 +64,31 @@ func TestDnvNameOf(t *testing.T) {
 	if dnvNameOf(long) == dnvNameOf(longer) {
 		t.Error("two long names share a dnv name")
 	}
+	// A name holding "..", which the spec allows and dnv's set does, is
+	// mapped too: a subsystem's NQN names a configfs directory, so the
+	// gateway refuses an NQN holding ".." (architecture.md, Common
+	// validation), and a volume under that name could never be made.
+	for _, name := range []string{"a..b", "..", "pvc..x",
+		"v" + strings.Repeat("..", 20) + strings.Repeat("w", 59)} {
+		got := dnvNameOf(name)
+		if got == name || strings.Contains(got, "..") {
+			t.Errorf("dnvNameOf(%q) = %q, want a mapped name with no \"..\"",
+				name, got)
+		}
+		if err := checkVolumeName(got); err != nil {
+			t.Errorf("dnvNameOf(%q) = %q, not a name the driver takes: %v",
+				name, got, err)
+		}
+		if nqn := subsystemNqnOf(got); strings.Contains(nqn, "..") ||
+			!validNqn.MatchString(nqn) {
+			t.Errorf("the NQN of %q, %q, is not one the gateway accepts",
+				got, nqn)
+		}
+		if _, _, err := parseVolumeId(fakeClusterOne + "/" + name); err == nil {
+			t.Errorf("parseVolumeId took a volume name %q holding \"..\"",
+				name)
+		}
+	}
 	if got := dnvNameOf(long); len(got) != common.MaxStrSize || !strings.HasPrefix(got, "vvv") {
 		t.Errorf("dnvNameOf(long) = %q, want the leading bytes and a hash at the limit", got)
 	}

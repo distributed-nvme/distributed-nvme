@@ -976,6 +976,47 @@ reads the refusal, deletes the id and sees the volume build. A unit test
 of the cn agent makes the device by hand over the refused id and sees it
 taken. Case 2 itself is not tested.
 
+## A pool left by a Kubernetes volume whose name held ".."
+
+Words: the CSI driver, dnv's driver for Kubernetes, makes each Kubernetes
+volume a storage pool of its own, named after the volume. A **volume id**
+is the name Kubernetes keeps for such a volume: the cluster name, a slash
+and the pool's name.
+
+Symptom: a cluster that ran dnv 0.1 holds a storage pool whose name holds
+two dots in a row (".."), with one thin device and no subsystem, and no
+Kubernetes volume uses it. Under 0.1 the driver gave a volume whose name
+held ".." a pool of that name and a thin device, and then the gateway
+refused the subsystem, whose name may not hold "..", so the create failed
+at each try. The driver now gives such a volume a name of its own, as it
+does a name too long for dnv, so the volume is made under that name. What
+the failed tries made stays, and holds its space on the disk nodes.
+
+Confirm: `dnvctl sp list` names the pool. `dnvctl --sp '<pool name>' ss list`
+shows no subsystem, and `dnvctl --sp '<pool name>' td list` one thin device.
+No Kubernetes volume names it:
+`kubectl get pv -o custom-columns=ID:.spec.csi.volumeHandle` lists every
+volume id, and none holds "..".
+
+What dnv does alone: nothing. The pool keeps its space until it is
+deleted.
+
+Safe steps:
+
+1. Delete its thin device:
+   `dnvctl --sp '<pool name>' td delete --name '<td name>'`.
+2. Delete the pool: `dnvctl --sp '<pool name>' sp delete`. The worker then
+   removes its parts in the background (its drain).
+
+Steps that can lose data: none. No host was given a namespace of this
+pool, so it holds no data.
+
+When to stop: when the pool holds a subsystem, or a volume id names the
+pool: then it is not one a failed create left.
+
+Tested: no. The driver's unit tests make a volume whose name holds ".."
+under the driver's own name for it.
+
 ## A planned restart of an agent
 
 Words: when an agent starts, it first runs its **startup pass**: it reads

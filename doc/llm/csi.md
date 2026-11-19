@@ -23,10 +23,13 @@ subsystem's NQN carry the volume's dnv name, the namespace uuid derives
 from it, and the volume id Kubernetes stores names the cluster and that
 name. The dnv name is the name Kubernetes gives the volume when dnv takes
 it as a name (`architecture.md`, Common validation) free of the id's
-separator; any other name, longer than dnv's names or with a character
-outside their set, which the spec lets a caller send, becomes its leading
-characters, each made acceptable, and a hash of the whole name, the same
-for the same name, so a repeated create finds its objects. So every object
+separator and of "..", which the gateway refuses in the subsystem's NQN
+(`architecture.md`, Common validation); any other name, longer than dnv's
+names, with a character outside their set or holding "..", which the spec
+lets a caller send, becomes its leading characters, each made acceptable
+and the second dot of each ".." among them a dash, and a hash of the whole
+name, the same for the same name, so a repeated create finds its objects;
+so every name the spec allows makes a volume, mapped before any create. So every object
 of a volume is found by one name, the per-pool limits on subsystems,
 namespaces and hosts never bind, and the tenant promise of dnv holds per volume
 (`architecture.md`, System overview). A volume costs the cluster what a pool

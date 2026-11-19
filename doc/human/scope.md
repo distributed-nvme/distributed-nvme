@@ -1133,8 +1133,9 @@ tutorials are [dnv on one machine](tutorial_all_in_one.md) and
 [dnv under Kubernetes on one machine](tutorial_csi.md). "Operations doc"
 names [the operations doc](operations.md), the procedures an operator
 follows by hand, which holds the forced-start guide, the steps for a pool
-made before the stripe bound, for a pool made before the block bound and
-for a new volume refused for a thin id that holds data, a planned restart of an agent, a slow leg, the install
+made before the stripe bound, for a pool made before the block bound, for
+a new volume refused for a thin id that holds data and for a pool left by
+a Kubernetes volume whose name held "..", a planned restart of an agent, a slow leg, the install
 of the udev rules on a node, the node check, the gather of a node's
 state and a Kubernetes volume the node plugin will not format so far, and
 gets the others as they are written. Every row with no tool
@@ -1715,8 +1716,6 @@ design:
   and every program caps how many commands and file operations it runs at
   once. State: accepted, by
   design.
-- **CSI: a volume name with ".." leaves a pool with no volume id.** State:
-  fix decided, refuse such a name before any create.
 - **xfs volumes need kernel 5.19 or newer on the node.** State: accepted;
   a requirement. Fix decided: the node plugin formats xfs for a stated
   minimum node kernel.
