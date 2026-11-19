@@ -78,7 +78,8 @@ attach (`--cdc-addresses`) and the bound on one gateway call
 (`--gateway-timeout`); a cdc address is an IP literal and a port, an IPv6
 address in brackets, since the node connects to it as the kernel's
 discovery address. The identity service
-reports the driver's name and version and advertises the controller service
+reports the driver's name and its build version (`common.BuildVersion`) and
+advertises the controller service
 and the accessibility constraints (CSI13) from both plugins, since a
 capability describes the driver, not the process that answers: the
 conformance test reads it off the node plugin's socket before it drives a
@@ -414,7 +415,7 @@ names the subcommand. The plugin passes the makers no feature option, so they
 format with the image's defaults, and the xfs maker of that release formats
 with nrext64, which needs kernel 5.19 or newer, so a node that mounts an xfs
 volume runs that kernel or a newer one. The manifests name the image by the
-driver's version, with no registry, and pull it only when it is absent, so a
+release's version, with no registry, and pull it only when it is absent, so a
 lab imports it into every node under that name, and a user who publishes it in
 a registry names it there in the controller and node manifests or maps that
 name to the registry in every node's container runtime.
@@ -474,9 +475,10 @@ names the suite's cluster, RAID1 and two cntlrs.
 ## Log records
 
 The controller plugin logs `csi controller starting` with its endpoint,
-gateway address, cdc addresses and version, `csi controller serving` once
-it listens, and `csi controller stopping` when it ends; the node plugin
-logs `csi node starting` with its endpoint and node id, `csi node serving`
+gateway address, cdc addresses and build version (`common.BuildVersion`),
+`csi controller serving` once it listens, and `csi controller stopping` when
+it ends; the node plugin logs `csi node starting` with its endpoint, node
+id, cdc addresses and build version, `csi node serving`
 and `csi node stopping` the same way, and, since those are the moments the
 failover contract turns on, `csi path connected` and `csi path dropped`
 with the subsystem and the cntlr address, `csi discovery connection opened`

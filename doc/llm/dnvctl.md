@@ -72,9 +72,12 @@ Info (`grpc.md` L1).
 
 ### Global flags, env, config
 
-A command line is "dnvctl <group> <verb> [flags]", and the root's persistent
-flags are the global flags; `--help` lists them with their types and
-defaults. `--gateway-address` is required and has no default, because
+A command line is "dnvctl <group> <verb> [flags]", or "dnvctl --version",
+and the root's persistent flags are the global flags; `--help` lists them
+with their types and defaults. `--version` is the root's own flag, not a
+persistent one: a group or a verb refuses it as a usage error, and nothing
+binds it into viper (`architecture.md`, Components: invocation reference).
+`--gateway-address` is required and has no default, because
 dnvctl has no lab address worth baking in, and it is one address, with no
 multi-gateway failover list, because operators front the gateways
 themselves. `--cluster` and `--sp` are the scope global flags: they fill
@@ -180,9 +183,11 @@ makes the document and its newline, and `writeResult` writes them in one
 checked write, the package's only write to stdout, under the exemption
 `log.md` R1 makes for CLI results. A reply that cannot be rendered, or a
 write that fails or ends short, is CT5's exit 3, never a silent exit 0.
-Nothing else is ever printed to stdout on an RPC path; the only other text
-there is cobra's own, its stock help and completion, which cobra writes
-itself and does not check. There is no quiet or verbose mode. The error
+Nothing else is ever printed to stdout on an RPC path; the only other texts
+there are printed outside `writeResult`: cobra's own, its stock help and
+completion, which cobra writes itself and does not check, and the root's
+`--version` line (CT5), whose write cobra does check, a failed one being
+CT5's exit 2. There is no quiet or verbose mode. The error
 lines of CT5 are the package's only other direct writes, to stderr from
 `Execute`, and `ctl/` calls slog nowhere at all — the records CT7's Warn
 level silences are the client interceptors'.
@@ -192,7 +197,9 @@ level silences are the client interceptors'.
 CT5. **Errors and exit codes.** dnvctl exits with one of four codes:
 
 * 0 — the RPC returned OK: stdout carries the CT4 document and stderr is
-  empty.
+  empty; also `--help`, and `dnvctl --version`, which prints "dnvctl" and the
+  build version (`architecture.md`, Components: invocation reference), each
+  with no RPC.
 * 1 — the RPC or its connection failed: stdout is empty and stderr carries
   one line, "dnvctl: CODE: message (trace_id ID)".
 * 2 — a usage error: an unknown command or flag, an unparsable flag value,
@@ -201,7 +208,11 @@ CT5. **Errors and exit codes.** dnvctl exits with one of four codes:
   from the environment or the config file that is not a number, a NaN or
   infinite `--timeout` from any carrier, or a `--rev` on a command whose
   request carries no token. stdout is empty, stderr carries
-  "dnvctl: message", and no RPC is issued.
+  "dnvctl: message", and no RPC is issued. A failed write of the root's
+  `--version` line exits 2 too: it is no usage error, but like one it
+  issued no RPC, so a repeat changes nothing. Its stdout holds none or part
+  of the line, and stderr two lines, cobra's of the write's error and then
+  "dnvctl: message".
 * 3 — the RPC returned OK, and its result was not written: the reply could
   not be rendered (CT4), or the write to stdout failed or ended short, as on
   a full disk under a redirect. stdout holds no complete document, and stderr

@@ -199,8 +199,9 @@ passes through those shapes while it is being built.
 
 CN-CM2. `runCn` has the shape of `runDn` (`dnagent.md` CM4), with three cn
 differences. Its start record (`agent.LogStartVersions`) carries, beside
-the kernel release, the version line of the mdadm the agent runs, the mdadm
-its model of mdadm's start rests on (`mdadmStarts`; Known limits); a read
+the build version and the kernel release, the version line of the mdadm
+the agent runs, the mdadm its model of mdadm's start rests on
+(`mdadmStarts`; Known limits); a read
 that fails is logged and the start goes on, since no version the agent
 reads stops its start (its flags' checks do, `dnagent.md` CM3):
 `dnv-agent check cn` reports a version other than the tested one, and its

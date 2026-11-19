@@ -379,9 +379,9 @@ func TestDiskMetaCorruptHeaderRefused(t *testing.T) {
 	}
 }
 
-// A disk whose header carries another version of the format, under a valid
-// magic and a valid CRC, is refused by every call and never formatted over:
-// it is re-created to take this format.
+// A disk whose header carries a version of the format this build does not
+// read, under a valid magic and a valid CRC, is refused by every call and
+// never formatted over (architecture.md, [D13]).
 func TestDiskMetaRefusesAVersion1Header(t *testing.T) {
 	_, node := formatted(t)
 	ctx := context.Background()

@@ -31,8 +31,9 @@ with these modules and are not listed.
   `pflag.FlagSet` (`dnvctl.md`, Conventions); it arrives with cobra and
   cannot be avoided.
 * `github.com/spf13/viper` — the binding of flags, config file and
-  environment: every daemon flag is also a config key and an environment
-  variable (`architecture.md`, Components: invocation reference), and so is
+  environment: every daemon flag but `--version` is also a config key and an
+  environment variable (`architecture.md`, Components: invocation
+  reference), and so is
   each env-backed dnvctl global flag (`dnvctl.md` CT9).
 * `github.com/container-storage-interface/spec` — the Container Storage
   Interface: the generated Go code of the services `dnv-csi` serves to

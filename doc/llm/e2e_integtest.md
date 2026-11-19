@@ -1151,7 +1151,8 @@ its gate and before the first setup write, since port checks taken before the
 cleanup would judge the last run's corpses, and the cleanup writes no suite
 state; a cleanup-only run does neither. Preflight dies on the first failure,
 naming the guest and the fix. It proves that the driver has its tools, the
-binaries, the tree's constants (E2E12) and a pinned etcd release; that every
+binaries, whose build versions it prints, the tree's constants (E2E12) and
+a pinned etcd release; that every
 guest answers passwordless ssh; that a node guest has what the sweeps and the
 agents need — sudo, the tools of both roles (on a controller node, also the
 thin metadata reader the cn agent runs, those of the copy case's clone

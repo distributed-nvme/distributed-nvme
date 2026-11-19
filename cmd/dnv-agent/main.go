@@ -31,7 +31,8 @@ import (
 	"github.com/distributed-nvme/distributed-nvme/pb"
 )
 
-// envPrefix makes every flag settable as DNV_AGENT_<FLAG_WITH_UNDERSCORES>.
+// envPrefix makes every flag but --version settable as
+// DNV_AGENT_<FLAG_WITH_UNDERSCORES>.
 const envPrefix = "DNV_AGENT"
 
 // requiredCommon are the values both roles must have. They are validated
@@ -80,7 +81,20 @@ func newRootCmd() *cobra.Command {
 		SilenceUsage: true,
 	}
 	root.AddCommand(newDnCmd(), newCnCmd(), newCheckCmd(), newCollectCmd())
+	addVersionFlag(root)
 	return root
+}
+
+// addVersionFlag gives the root alone --version (architecture.md,
+// Components: invocation reference): cobra prints "<program> <version>" on
+// stdout and returns before it binds a flag or runs a command. The flag is
+// declared here so cobra adds no -v, which reads as verbose, and on the root
+// alone, never inherited, so a subcommand refuses it rather than starting
+// what it starts.
+func addVersionFlag(root *cobra.Command) {
+	root.Version = common.BuildVersion()
+	root.SetVersionTemplate("{{.Name}} {{.Version}}\n")
+	root.Flags().Bool("version", false, "print this program's build version and exit")
 }
 
 func newDnCmd() *cobra.Command {
@@ -459,8 +473,8 @@ func runDn(cmd *cobra.Command, args []string) error {
 	nf := common.NewNameFmt(localStore)
 	// The process's single OsClient, shared by every wrapper (osclient.md).
 	oc := common.NewLimitedOsClient(0)
-	// The start record: the kernel release; a failed read is logged, and
-	// the start goes on (CM4; log.md, Agent start).
+	// The start record: the build version and the kernel release; a failed
+	// read is logged, and the start goes on (CM4; log.md, Agent start).
 	agent.LogStartVersions(ctx, oc, false)
 	srv := dnagent.NewDnAgentServer(
 		oc, nf, localStore, viper.GetString("disk"), trConfFromViper(),
@@ -507,9 +521,9 @@ func runCn(cmd *cobra.Command, args []string) error {
 	nf := common.NewNameFmt(localStore)
 	// The process's single OsClient, shared by every wrapper (osclient.md).
 	oc := common.NewLimitedOsClient(0)
-	// The start record: the kernel release and the version of the mdadm the
-	// agent runs; a failed read is logged, and the start goes on (CM4,
-	// CN-CM2; log.md, Agent start).
+	// The start record: the build version, the kernel release and the
+	// version of the mdadm the agent runs; a failed read is logged, and the
+	// start goes on (CM4, CN-CM2; log.md, Agent start).
 	agent.LogStartVersions(ctx, oc, true)
 	srv := cnagent.NewCnAgentServer(oc, nf, localStore,
 		capacity, trConfFromViper(), portId, qidMax)

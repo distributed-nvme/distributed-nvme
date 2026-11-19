@@ -1581,14 +1581,18 @@ one failed command left unbuilt or wrong would stay so.
 CM1. The binary is a cobra root command `dnv-agent` with four
 subcommands: `dn` and `cn`, which serve the two agents (CM2 to CM4); `check`,
 whose two subcommands `check dn` and `check cn` are the node check (CM5);
-and `collect`, the gather (CM6). The node check and the gather are one-shot
-tools of package `nodecheck`: they start no server, and no agent runs them.
+and `collect`, the gather (CM6). The root itself takes one flag, the
+`--version` every program answers, which no subcommand takes
+(`architecture.md`, Components: invocation reference). The node check and
+the gather are one-shot tools of package `nodecheck`: they start no server,
+and no agent runs them.
 cobra and viper live in `cmd/` and in `ctl/`, dnvctl's command tree
 (`dnvctl.md`, Files); both are direct dependencies (`dependencies.md`,
 Direct dependencies).
 
 CM2. Flags (`architecture.md`, Components: invocation reference; every flag
-is also settable via config file and environment through viper). Both roles
+of the two roles is also settable via config file and environment through
+viper). Both roles
 take `--grpc-network` (the listen network) and `--grpc-address` (the gRPC
 endpoint, required; the control plane stores it as the `addr_port` of
 `DnConf`/`CnConf`); the four transport flags `--tr-type`, `--adr-fam`,
@@ -1676,7 +1680,8 @@ daemon's second signal does (`signalContext`, `watchSignals`), skipping
 SH27's join of background work; construct `common.NewNameFmt` over the
 local store and the process's **single** `common.NewLimitedOsClient` (with
 the default limit); log the start record, `agent.LogStartVersions`
-(`log.md`, Agent start): the kernel release, and for the cn the version of
+(`log.md`, Agent start): the build version of the binary
+(`common.BuildVersion`), the kernel release, and for the cn the version of
 the mdadm it runs (`cnagent.md` CN-CM2), a read that fails logged in the
 record, and the start going on, since no version the agent reads stops its
 start (the kernel and the tools are the node check's to judge, CM5), unlike
@@ -2235,8 +2240,10 @@ probe-first (SH16), building `DnInfo` as it goes:
   in the table and in each side and clone-metadata record, as the slot held
   it: a read keeps the fields it does not know, and every mutation writes a
   copy of the table it read with its one change. Reason: the format lets a
-  later build add a field with no new version ([D13]), and a rewrite that
-  dropped it would take from the table what this build cannot judge.
+  later build add a field with no new version ([D13]); a build meets such a
+  field only when it replaces a newer one, a downgrade dnv does not support
+  (`architecture.md`, Upgrade in lockstep), and even then its rewrite drops
+  nothing it cannot judge, though the field keeps the value it had.
 
   The identity check is what makes the volume table this node's to build on
   and to change: handing out a record it already holds (`AllocSide`,

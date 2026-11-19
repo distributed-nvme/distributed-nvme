@@ -188,7 +188,8 @@ the same case by construction.
 
 GW2. **Serving.** `gateway.Run` takes the etcd client and a `gateway.Config`
 holding the gRPC network, the gRPC address and the etcd endpoints. `Run`
-emits `gateway starting` as its first record and `gateway stopping` on the
+emits `gateway starting`, with the build version, as its first record and
+`gateway stopping` on the
 way out, closes the client as the last step of its drain (so `main` does
 not, CM3), and serves: it listens on the configured network and address;
 builds the gRPC server from `serverOptions`, which carries the message limit
@@ -1689,8 +1690,8 @@ and `cmd/dnv-cdc` structurally — cobra and viper, an environment prefix,
 two-signal handling, a thin `main` — and it is the only binary needing both
 the gRPC-server flags (from `cmd/dnv-agent`) and the etcd flags (from
 `cmd/dnv-worker`). It has a package doc comment naming this spec; every
-flag is also a config key and an environment variable under the prefix
-`DNV_GATEWAY_`; `main` executes `newRootCmd`; one root command, no
+flag but `--version` is also a config key and an environment variable under
+the prefix `DNV_GATEWAY_`; `main` executes `newRootCmd`; one root command, no
 subcommands, cobra's own usage and error printing silenced, no positional
 arguments; `addFlags` and `bindViper` (the flags bound through viper, the
 environment prefix, a dash-to-underscore key replacer, automatic
@@ -1701,7 +1702,9 @@ environment lookup, an optional `--config` file); an I/O-free
 CM2. **Flags.** The gRPC flags are the agent command's network and address
 pair, the etcd flags the worker command's endpoints and dial timeout, and
 the optional config file is the one both carry; the gateway adds no flag of
-its own, and each flag keeps its sibling's default and required status.
+its own beyond the `--version` every program answers (`architecture.md`,
+Components: invocation reference), and each flag keeps its sibling's
+default and required status.
 Deliberately no etcd operation-timeout flag (`dnv-worker.md` EU5) and no
 default gRPC port: the address is required exactly as the agent's is, and
 no default-port constant exists.

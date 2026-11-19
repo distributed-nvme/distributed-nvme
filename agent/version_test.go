@@ -109,8 +109,9 @@ func startRecord(t *testing.T, buf *bytes.Buffer) map[string]any {
 	return found
 }
 
-// The cn agent's start record carries the kernel release and mdadm's
-// version line; the dn agent's the kernel release alone.
+// The cn agent's start record carries the build version, the kernel release
+// and mdadm's version line; the dn agent's the build version and the kernel
+// release.
 func TestLogStartVersions(t *testing.T) {
 	oc := &common.FakeOsClient{
 		ReadFileFn: func(_ context.Context, path string) (string, error) {
@@ -128,6 +129,7 @@ func TestLogStartVersions(t *testing.T) {
 	LogStartVersions(context.Background(), oc, true)
 	rec := startRecord(t, buf)
 	if rec["level"] != "INFO" ||
+		rec["version"] != common.BuildVersion() ||
 		rec["kernel_release"] != "7.0.0-42-generic" ||
 		rec["mdadm_version"] != "mdadm - v4.5" ||
 		rec["error"] != nil {
@@ -136,8 +138,8 @@ func TestLogStartVersions(t *testing.T) {
 	buf = captureLog(t)
 	LogStartVersions(context.Background(), oc, false)
 	rec = startRecord(t, buf)
-	if _, ok := rec["mdadm_version"]; ok {
-		t.Errorf("dn start record names mdadm: %v", rec)
+	if _, ok := rec["mdadm_version"]; ok || rec["version"] != common.BuildVersion() {
+		t.Errorf("dn start record names mdadm or lacks the build version: %v", rec)
 	}
 }
 

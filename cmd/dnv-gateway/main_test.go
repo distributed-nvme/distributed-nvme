@@ -32,14 +32,16 @@ var exampleArgs = []string{
 	"--etcd-endpoints", "127.0.0.1:15379",
 }
 
-// cm2Flags is the CM2 flag set, verbatim. There is deliberately no
-// --etcd-op-timeout (EU5) and no default gRPC port (CM2).
+// cm2Flags is the CM2 flag set, verbatim, with the --version every program
+// answers (architecture.md, Components: invocation reference). There is
+// deliberately no --etcd-op-timeout (EU5) and no default gRPC port (CM2).
 var cm2Flags = []string{
 	"config",
 	"etcd-dial-timeout",
 	"etcd-endpoints",
 	"grpc-address",
 	"grpc-network",
+	"version",
 }
 
 // parse binds one invocation's flags into a fresh viper, exactly as

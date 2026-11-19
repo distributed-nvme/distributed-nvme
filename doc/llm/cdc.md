@@ -637,9 +637,10 @@ every host is already tested against.
 ## `cmd/dnv-cdc`
 
 CM1. **Flags.** A cobra root command with viper and no subcommands: the
-environment prefix is `DNV_CDC_`, every flag is also a config-file key and
-an environment variable, and the optional `--config` file is read when it
-is named. `--etcd-endpoints` and `--tr-addr` are required. `--range`
+environment prefix is `DNV_CDC_`, every flag but the `--version` every
+program answers (`architecture.md`, Components: invocation reference) is
+also a config-file key and an environment variable, and the optional
+`--config` file is read when it is named. `--etcd-endpoints` and `--tr-addr` are required. `--range`
 defaults to `CdcRangeAll`, every range, mirroring the worker's `--roles`
 defaulting to all three roles: a single-instance deployment needs no
 sharding flag. The flags, their types and their defaults are the code's,
@@ -654,7 +655,8 @@ which runs the watcher, the listener and the view registry. No interceptors
 (`grpc.md`, Wiring). The `init` of `common/log.go` installs the JSON logger
 (`log.md` R3).
 
-CM4. **Lifecycle logs, the start half.** `cdc starting` first. Then the
+CM4. **Lifecycle logs, the start half.** `cdc starting` first, with the
+build version (`common.BuildVersion`). Then the
 start order: the listener opens (a busy port fails the process before the
 watcher exists, with the etcd client closed first; a close that fails logs
 an Error record), the watcher starts, and the accept loop starts only once

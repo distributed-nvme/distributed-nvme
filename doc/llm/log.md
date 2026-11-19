@@ -234,9 +234,11 @@ follows the same rules as the records above.
 ### Agent start
 
 An agent's start logs `agent node versions` (`agent.LogStartVersions`),
-before it serves (`dnagent.md` CM4), with `kernel_release` (the running
-kernel's release) and, for the cn role, `mdadm_version` (the version line
-of the mdadm the agent runs; `cnagent.md` CN-CM2). A read that failed
+before it serves (`dnagent.md` CM4), with `version` (the build version of
+the running binary, `common.BuildVersion`; `architecture.md`, Components:
+invocation reference), `kernel_release` (the running kernel's release) and,
+for the cn role, `mdadm_version` (the version line of the mdadm the agent
+runs; `cnagent.md` CN-CM2). A read that failed
 leaves its attribute empty and adds `error`, the failed reads' errors
 joined, and the record is then at Warn; the start goes on either way.
 

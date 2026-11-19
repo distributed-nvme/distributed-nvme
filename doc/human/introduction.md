@@ -538,7 +538,10 @@ make build
 ```
 
 The version is stamped into every binary and `go version -m <binary>` prints
-it, v0.1.0 for a release build; no program has a version flag.
+it, v0.1.0 for a release build. A build of later code also prints it with
+`--version`, such as `dnv-agent --version`, and each agent, gateway,
+worker, cdc and CSI plugin logs it when it starts; the programs of v0.1.0
+have no such flag.
 
 etcd is not in the archive. Fetch etcd v3.6.14 for linux-amd64 from
 https://github.com/etcd-io/etcd/releases/tag/v3.6.14, the file

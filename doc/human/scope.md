@@ -498,6 +498,23 @@ No case is known today.
   fails. Then a change makes that controller node the primary again
   before the syncup of the next check round fences the path. State: fix
   later. Not seen in the lab.
+- **An older build started after a newer one can lose data.** Silent. No
+  program checks which build its peers run, and a build reads only what
+  older builds wrote. An older build ignores what a newer one added. An
+  agent of a controller node from a build that does not know the mark a
+  newer build sets once a group's array has run, for one, can create a new
+  RAID1 array over legs whose md superblocks a forced start cleared, and so
+  lose the data those legs hold. State: accepted: a downgrade is not
+  supported. Not seen in the lab.
+- **A leg an older build took back into a leg repair it then cancelled
+  can read as a whole copy.** A leg repair can take back a leg that an
+  earlier leg repair removed from the group and kept. The cancel of such a
+  repair marks the leg it gives back, since md has written on it, but a
+  build from before that mark gave it back with no mark. A later build
+  reads that leg as whole. If a leg repair takes it back again, a forced
+  start may start the group from it without the operator's force. State:
+  accepted: a later build cannot tell such a leg apart. Not seen in the
+  lab.
 - **A change without a revision token overwrites another operator's
   change.** A revision token is the revision the caller last read, which
   dnvctl sends with `--rev`; the gateway refuses the change if the
@@ -533,6 +550,23 @@ Measured times are in [the introduction](introduction.md#status-and-limits-of-01
 
 ### 6.1 Cases where dnv does not come back alone today
 
+- **A leg repair an older build left open can wait for the operator after
+  an upgrade.** A repair can take back a leg that an earlier leg repair
+  removed from the group and kept. If that leg carries the md identity of
+  an older array, as after a forced start from another leg, the primary of
+  a later build does not add it, since it may hold data the array lacks,
+  unless the repair carries the operator's force. An older build added it,
+  and md copied the array over it, only when its md change count was not
+  above that of the leg that keeps the data; when the count was above, it
+  refused the leg as holding newer data, and the repair waited already. A
+  repair created by a build from before that force carries none, so it
+  waits, and the primary's report names the refusal. The operator aborts it
+  with `dnvctl repair abort`, cancels it with `dnvctl repair cancel` and
+  creates it again with `--force`. With the force, md copies the array over
+  the leg whatever its count, even one the older build kept out as holding
+  newer data. The same check keeps out an aborted repair's bad leg of an
+  older identity. State: accepted: refusing is the safe reading, and the
+  operator decides. Not seen in the lab.
 - **A broken array that the pool holds is not re-assembled in place.**
   When every leg of a group fails under IO, md marks the array broken.
   When the legs return, the primary stops the array and assembles it
@@ -1170,7 +1204,7 @@ steps; the section "Steps known today" below gives the longer ones.
 | Action | Tool today | Doc today | State |
 |---|---|---|---|
 | Back up and restore etcd | etcd's own tools; `dnvctl cluster advance-ids` after a restore | this page, below; [operations](operations.md#a-new-volume-refused-for-a-thin-id-that-holds-data) for a refused thin id | procedure to write. A new volume over a restored thin id that holds data is refused. |
-| Upgrade | none; every program at once | this page, below | procedure to write. Rolling upgrades are not yet. Fix decided: every program gets a version flag. |
+| Upgrade | every program at once; `--version` on each program, and the version each running program logs when it starts | this page, below | procedure to write. Rolling upgrades are not yet. A downgrade is not supported. |
 | Run while the control plane is down | nothing to do; the data plane serves | none | procedure to write |
 | Handle the logs | none; JSON on stderr, no rotation | this page, below | procedure to write |
 | See what is wrong across the cluster | none; the worker's log | none | fix decided: one gateway read, with its dnvctl command, lists what is wrong in every pool |
@@ -1231,7 +1265,14 @@ carries a build version, and two builds that differ in a message would
 misread each other with no error. A disk node's disk keeps the format it
 was made with across every upgrade, and each new build reads it as it is,
 unless the new release's notes say that the disks must be made again;
-making a disk again loses every side it holds.
+making a disk again loses every side it holds. Before the workers start
+again, check that every program runs the new build. `--version` on each
+program prints the version of the file on the machine, such as
+`dnv-agent --version`. The record each agent, gateway, worker, cdc and CSI
+plugin logs when it starts carries the version of the program that runs; a
+program that was not stopped still runs the old one. The introduction says
+which builds have `--version`. No build may replace a newer one: section
+5.5 says why.
 
 **Logs.** The programs log to stderr as JSON, one record per line, at one
 level, with no level flag and no rotation. Keep the logs on a filesystem

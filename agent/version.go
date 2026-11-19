@@ -99,8 +99,9 @@ func leadingVersion(
 }
 
 // LogStartVersions logs an agent's start record, "agent node versions"
-// (log.md, Agent start): the kernel release, and, when withMdadm is set,
-// as for the cn role, the version line of the mdadm the agent runs. A read
+// (log.md, Agent start): the build version of the running binary
+// (common.BuildVersion), the kernel release, and, when withMdadm is set, as
+// for the cn role, the version line of the mdadm the agent runs. A read
 // that fails leaves its attribute empty and puts its error in the record,
 // which is then a warning; the start goes on either way, since no version
 // the agent reads stops its start: the kernel and the tools are the node
@@ -112,7 +113,10 @@ func LogStartVersions(ctx context.Context, oc common.OsClient, withMdadm bool) {
 	if err != nil {
 		errs = append(errs, err)
 	}
-	attrs := []any{slog.String("kernel_release", release)}
+	attrs := []any{
+		slog.String("version", common.BuildVersion()),
+		slog.String("kernel_release", release),
+	}
 	if withMdadm {
 		line, err := MdadmVersion(ctx, oc, "mdadm")
 		if err != nil {

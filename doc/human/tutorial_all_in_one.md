@@ -250,8 +250,8 @@ sudo nohup ./dnv-agent cn --grpc-address 127.0.0.1:29950 \
 ```
 
 Check: five agents have started, a second after the starts. An agent
-first logs "agent node versions", the kernel release and, for the cn
-agent, the mdadm version; then "agent serving" as soon as it answers calls, and "agent started" once
+first logs "agent node versions", the version of the program, the kernel
+release and, for the cn agent, the mdadm version; then "agent serving" as soon as it answers calls, and "agent started" once
 it has rebuilt the node from its local files; until then it answers the
 worker's check rounds with "starting". A new node has nothing to rebuild,
 so the two lines come together here.

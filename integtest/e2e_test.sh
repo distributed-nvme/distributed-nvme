@@ -6587,6 +6587,14 @@ preflight_driver() {
 		"$DNVCTL_BIN"; do
 		[ -x "$bin" ] || die "missing: $bin after make build"
 	done
+	# Each program's build version, as its --version prints it
+	# (architecture.md, Components: invocation reference), so the run's log
+	# names the build it ran. A driver that cannot run a linux/amd64 binary
+	# prints that instead; nothing here stops the run.
+	for bin in "$AGENT_BIN" "$GATEWAY_BIN" "$WORKER_BIN" "$CDC_BIN" \
+		"$DNVCTL_BIN"; do
+		log "  $("$bin" --version 2>&1 || echo "${bin##*/}: --version did not run")"
+	done
 	log "  building integtest/bin/{workerctl,cnagentctl}"
 	(cd "$REPO_ROOT" && CGO_ENABLED=0 GOOS=linux GOARCH=amd64 \
 		go build -o "$WORKERCTL_BIN" ./integtest/workerctl >&2) ||

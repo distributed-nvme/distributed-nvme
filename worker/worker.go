@@ -363,6 +363,7 @@ func run(
 	d.conf = newConfCache(d)
 
 	slog.InfoContext(ctx, msgWorkerStarting,
+		slog.String("version", common.BuildVersion()),
 		slog.Any("roles", cfg.Roles),
 		slog.String("seed", seed),
 		slog.Any("endpoints", cfg.Endpoints),

@@ -178,6 +178,7 @@ type deps struct {
 func Run(ctx context.Context, cli *etcdutil.Client, cfg Config) error {
 	d := &deps{cfg: cfg, store: cli, clk: realClock{}}
 	slog.InfoContext(ctx, msgCdcStarting,
+		slog.String("version", common.BuildVersion()),
 		slog.Any("ranges", cfg.rangeStrings()),
 		slog.Any("endpoints", cfg.Endpoints),
 		slog.String("tr_addr", cfg.TrAddr),

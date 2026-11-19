@@ -1194,8 +1194,10 @@ etcd binary of EU7, and without one the package's tests fail as EU7 says.
 
 ## `cmd/dnv-worker`
 
-CM1. **Flags.** One cobra root command, no subcommands; every flag is also a
-config key and an environment variable under the prefix `DNV_WORKER_`. The
+CM1. **Flags.** One cobra root command, no subcommands; every flag but the
+`--version` every program answers (`architecture.md`, Components:
+invocation reference) is also a config key and an environment variable
+under the prefix `DNV_WORKER_`. The
 flags name the etcd endpoints (required), the roles this process carries
 (every role by default, each registered and driven independently, VW10), the
 three vote timers — the vote interval (VW2), a join's grace and a leave's
@@ -1255,8 +1257,9 @@ immediately with status 1. Both ways out share this one order. A last
 peer has taken its shard: the overlap an ownership change accepts (VW7).
 
 CM6. **Logging.** JSON on stderr, Info level by default (`log.md`, R2 and R6).
-The `worker starting` record carries `roles`, `seed`, `endpoints`,
-`vote_interval`, `grace_time` and `leave_grace_time`; `worker stopping` carries `seed`. Every
+The `worker starting` record carries `version`, the build version
+(`common.BuildVersion`), `roles`, `seed`, `endpoints`, `vote_interval`,
+`grace_time` and `leave_grace_time`; `worker stopping` carries `seed`. Every
 round, syncup, push, flip and reaction runs under a trace id minted per RW10,
 so the seed prefix in an agent's `trace_id` attributes the request to this
 process. The parts of an incarnation that outlive one unit of work hold an

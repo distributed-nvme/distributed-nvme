@@ -108,6 +108,7 @@ func serverOptions() []grpc.ServerOption {
 // fails before serving.
 func Run(ctx context.Context, cli *etcdutil.Client, cfg Config) error {
 	slog.InfoContext(ctx, msgGatewayStarting,
+		slog.String("version", common.BuildVersion()),
 		slog.String("grpc_network", cfg.GrpcNetwork),
 		slog.String("grpc_address", cfg.GrpcAddress),
 		slog.Any("etcd_endpoints", cfg.Endpoints),

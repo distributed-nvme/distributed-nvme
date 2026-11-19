@@ -26,7 +26,8 @@ import (
 	"github.com/distributed-nvme/distributed-nvme/csi"
 )
 
-// envPrefix makes every flag settable as DNV_CSI_<FLAG_WITH_UNDERSCORES>.
+// envPrefix makes every flag but --version settable as
+// DNV_CSI_<FLAG_WITH_UNDERSCORES>.
 const envPrefix = "DNV_CSI"
 
 func main() {
@@ -48,7 +49,20 @@ func newRootCmd() *cobra.Command {
 		SilenceErrors: true,
 	}
 	root.AddCommand(newControllerCmd(), newNodeCmd())
+	addVersionFlag(root)
 	return root
+}
+
+// addVersionFlag gives the root alone --version (architecture.md,
+// Components: invocation reference): cobra prints "<program> <version>" on
+// stdout and returns before it binds a flag or runs a command. The flag is
+// declared here so cobra adds no -v, which reads as verbose, and on the root
+// alone, never inherited, so a subcommand refuses it rather than starting
+// what it starts.
+func addVersionFlag(root *cobra.Command) {
+	root.Version = common.BuildVersion()
+	root.SetVersionTemplate("{{.Name}} {{.Version}}\n")
+	root.Flags().Bool("version", false, "print this program's build version and exit")
 }
 
 func newNodeCmd() *cobra.Command {

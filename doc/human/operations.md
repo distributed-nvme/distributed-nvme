@@ -1205,8 +1205,9 @@ Safe steps:
    it could not remove.
 
 What dnv does alone: nothing. An agent starts whatever the check would
-report. It logs the kernel release and, on a controller node, the mdadm
-version once when it starts, as the record `agent node versions`.
+report. It logs the version of the program, the kernel release and, on a
+controller node, the mdadm version once when it starts, as the record
+`agent node versions`.
 
 When to stop: the check exits 2 as root, or the md replay names something
 it could not remove. Ask for help; remove what the replay names by hand

@@ -143,9 +143,12 @@ func codeName(c codes.Code) string {
 
 // Execute runs the CLI and returns the process exit code (CT5):
 //
-//	0  the RPC returned OK; the CT4 document is on stdout, stderr is empty
+//	0  the RPC returned OK; the CT4 document is on stdout, stderr is empty;
+//	   or --help or the root's --version printed its text, with no RPC
 //	1  the RPC or the connection failed; stdout is empty, stderr is one line
-//	2  a usage error; stdout is empty, no RPC was issued
+//	2  a usage error; stdout is empty, no RPC was issued; or the root's
+//	   --version line could not be written, cobra's line of the error on
+//	   stderr before Execute's
 //	3  the RPC returned OK, its result was not written; stdout holds no
 //	   complete document, stderr is one line
 func Execute() int {
@@ -222,8 +225,21 @@ func NewRootCmd() *cobra.Command {
 	registerRetiredLeg(root)
 	registerGroup(root)
 	registerWorker(root)
+	addVersionFlag(root)
 	checkNumberFlags(root)
 	return root
+}
+
+// addVersionFlag gives the root alone --version (architecture.md,
+// Components: invocation reference): cobra prints "<program> <version>" on
+// stdout and returns before it binds a flag or runs a command. The flag is
+// declared here so cobra adds no -v, which reads as verbose, and on the root
+// alone, never inherited, so a subcommand refuses it rather than starting
+// what it starts.
+func addVersionFlag(root *cobra.Command) {
+	root.Version = common.BuildVersion()
+	root.SetVersionTemplate("{{.Name}} {{.Version}}\n")
+	root.Flags().Bool("version", false, "print this program's build version and exit")
 }
 
 // addGlobalFlags declares the persistent flags, the global flags of

@@ -7028,7 +7028,23 @@ arrives and read as zero when it is missing; with one build at a time, only
 what the nodes and etcd hold, and what the CSI plugins handed Kubernetes —
 a volume's id and its publish and volume contexts (`csi.md`, The volume
 model, CSI10) — crosses from one build to the next, and the rules below
-keep it readable.
+keep it readable. Nothing checks a build: neither the worker nor the gateway
+asks an agent for its version, and no program refuses a peer of another
+build. Reason: an agent that refused a worker for its build would read to
+that worker as a node that misses its rounds, and the worker's reactions
+would fail over primaries and replace cntlrs as for a failed node
+(Automatic reactions); the operator checks the build instead, below.
+
+No build replaces a newer one: a downgrade is not supported, and it can
+lose data. An older build ignores the fields a newer one added, in what it
+reads and in what it rewrites, which keeps such a field with the value it
+had; and the newer build may have written what the older one cannot read
+at all. A cn agent of v0.1.0, for one, ignores a group's `array_made` and
+can create an array over legs a forced start zeroed, which hold data
+(`cnagent.md` CN12; `dnv-worker.md` AR15). Reason: each rule below lets a
+build read what an older build wrote, and none lets a build read what a
+newer one wrote; a check of the build would be the only way to refuse the
+older one, and there is none (Known limits).
 
 Every worker stops before any agent does, and the workers start last, once
 the agents have started again, their startup reconciles ended
@@ -7036,7 +7052,12 @@ the agents have started again, their startup reconciles ended
 instances stop and start in any order. Reason: to a running worker a
 stopped agent is a failed node, and its reactions would fail over
 primaries, replace cntlrs and repair legs that only wait for their agent
-(Automatic reactions; `dnv-worker.md` AR10).
+(Automatic reactions; `dnv-worker.md` AR10). Before the workers start, the
+operator checks that every program runs the new build: each binary's
+`--version` shows the build the node holds, and each process's start record
+the build it runs (Components: invocation reference). Reason: a program
+whose process was not restarted still runs the old build from a file the
+new one replaced, so `--version` alone cannot show it.
 
 Every agent keeps its local store across the upgrade and, at start,
 rebuilds from it what its node should hold, probe-first, as after any
@@ -7087,7 +7108,40 @@ leg over to serve it again. A `ClusterConf` is write-once, so a cluster
 keeps a `qos_ratio` an older build stored even where it is not all zero,
 which `CreateCluster` refuses (Common validation): the worker copies it
 into every controller-node syncup and nothing enforces it (Controller node,
-common). An older build kept a migration's bitmap in etcd, under keys of
+common). A cluster conf with no `md_check_conf` reads as no md check, and
+one with no `start_hold_conf` as the default hold (Common validation); a
+cntlr request with no `leg_fast_io_fail_tmo` connects with the default
+timeout, as the build that wrote it did (`cnagent.md` CN10). A `Cntlr` that
+carries no `demoted_revision` names no demotion that waits for its hold,
+which is how the build that wrote it stood after any worker restart
+(`dnv-worker.md` RW22). A group that carries no `array_made` reads as one
+whose array has not run until the sp worker sets the flag at the group's
+first OK row (`dnv-worker.md` AR15); until then its primary may create an
+array over legs that read no superblock, as the build that wrote it could.
+A forced-start mark that carries no `force` meets every refusal of
+`cnagent.md` CN12, some of which the build that wrote it lacked, so a start
+it was asked for can be refused after the upgrade, until the operator asks
+for it again with the force. A `Repair` that carries no `force` meets the
+identity checks of `cnagent.md` CN12, which the build that wrote it lacked:
+a new leg it takes back from a retired leg whose superblock carries another
+array's identity is not added, and the repair waits, its verdict naming the
+refusal, where that build's primary added such a leg when its md change
+count was not above that of the member that keeps the data, md copying the
+array over it, and refused it as holding newer data, the repair waiting
+already, when the count was above; and once such a repair is ABORTED, its
+bad leg of another identity is not added back, and stays out after the
+cancel as any member of another identity does. So a repair that build left
+open can wait after the upgrade until the operator aborts it, cancels it
+and creates it again with the force, and the force has the primary copy the
+array over such a leg at any count, one above the keeper's included, which
+that build kept out (Known limits). A retired leg that carries no `partial`, and a
+repair's new leg that `new_leg_id_to_partial` does not name, read as a
+whole copy, yet a leg an older build took back from the retired legs into a
+repair it then cancelled holds what md wrote on it; once a repair takes it
+back again, a forced start may name it without the force (Known limits).
+Every other stored field added since v0.1.0 reads, at zero, as that build
+behaved: no keep, no md check under way. An older build kept a
+migration's bitmap in etcd, under keys of
 the kind migration_bitmap, one per chunk at an index below
 `model.LegacyMigrBmCnt`, the bound its gateway held the chunks to. This
 design neither writes nor reads that kind; the transaction that ends a
@@ -7169,12 +7223,29 @@ discovery controller it reads lists it (Known limits).
 
 Each binary is a thin `main` over its library package (`layout.md`,
 `cmd/` wiring) and binds flags, an optional config file and the
-environment through viper, so every daemon flag is also a config key and
-an environment variable. The flags, their defaults and the environment
-prefixes are the code's and each binary's `--help`'s; the component
-documents state the ones their rules depend on. The three control-plane
-processes run co-located on any number of control-plane servers (fig.
-`070Cluster`).
+environment through viper, so every daemon flag but `--version` is also a
+config key and an environment variable. The flags, their defaults and the
+environment prefixes are the code's and each binary's `--help`'s; the
+component documents state the ones their rules depend on. The three
+control-plane processes run co-located on any number of control-plane
+servers (fig. `070Cluster`).
+
+**The version.** Every program answers `--version` on its root command
+alone with one line on stdout, its name and its build's version, and exits
+0 before it binds a flag, reads a config or dials anything. The version is
+`common.BuildVersion`: the module version Go stamps into the binary, the
+one `go version -m` prints — the tag for a release build, a pseudo-version
+naming the commit for another build from a checkout — or "(devel)" for a
+build that carries none. The flag has no short form, since `-v` reads as
+verbose, and no subcommand takes it, so `dnv-agent dn --version` starts no
+agent but is refused; no config key or environment variable sets it. Every
+daemon's start record carries the same version (`log.md`, Agent start;
+`dnv-worker.md` CM6; `gateway.md` GW2; `cdc.md` CM4; `csi.md`, Log
+records). Reason: before the workers start again after an upgrade, the
+operator checks with `--version` that every node holds the new binary and
+with the start records that every process runs it (Upgrade in lockstep);
+`--version` reads the file on disk, and a process started before its file
+was replaced still runs the old build.
 
 * `dnv-gateway` (`gateway.md`) — the stateless server of the `Gateway`
   gRPC service: it listens for users and CLIs, reads and writes etcd, and
@@ -9000,3 +9071,24 @@ document and only pointed to here.
   The deleted node's request stays in the agent's local store and is converged
   at every start (`dnagent.md` DN2; `cnagent.md` CN2) until the store is
   deleted (Disk nodes).
+* **A downgrade can lose data** (Upgrade in lockstep): no build replaces a
+  newer one, yet nothing checks a build, so an older build started over
+  what a newer one wrote runs. It ignores the fields the newer build added,
+  and keeps them unchanged in a record it rewrites; a cn agent of v0.1.0
+  can create an array over legs a forced start zeroed, which hold data,
+  since it ignores `array_made`.
+* **A leg repair v0.1.0 left open can wait for the operator** (Upgrade in
+  lockstep): it carries no `force`, so the primary refuses a new leg it
+  takes back from a retired leg of another array identity, and, once it is
+  ABORTED, its bad leg of another identity (`cnagent.md` CN12). v0.1.0 let
+  md copy over the bad leg, and over the taken-back leg when its md change
+  count was not above the keeper's, refusing it otherwise. The repair waits,
+  its verdict naming the refusal, until the operator aborts it, cancels it
+  and creates it again with the force, which copies over such a leg at any
+  count, one v0.1.0 kept out as holding newer data included; the bad leg of
+  an aborted one stays out, as any member of another identity does.
+* **A leg v0.1.0 took back into a repair it then cancelled reads as a
+  whole copy** (Upgrade in lockstep): that build put no `partial` mark on
+  the retired leg the cancel gave back, though md wrote its superblock and
+  possibly part of the array on it, so once a repair takes it back again a
+  forced start may name it without the force (`cnagent.md` CN12).

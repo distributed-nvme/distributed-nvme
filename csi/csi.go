@@ -30,8 +30,6 @@ const (
 	// driver): the reverse-domain form of the project's NQN domain. Every
 	// storage class of dnv carries it.
 	DriverName = "csi.dnv.io"
-	// Version is the vendor version the identity service reports.
-	Version = "0.1.0"
 	// DefaultGatewayTimeout bounds one gateway call of the controller
 	// plugin. The provisioner sidecar gives a whole CreateVolume about ten
 	// seconds, and a create makes several gateway calls, so each is held
@@ -39,6 +37,12 @@ const (
 	// bound is for a gateway that does not answer at all.
 	DefaultGatewayTimeout = 5 * time.Second
 )
+
+// Version is the vendor version the identity service reports and the start
+// records carry: the build version of the running binary
+// (common.BuildVersion), a release build's tag such as "v0.2.0". The v0.1.0
+// driver reported the constant "0.1.0" in its place.
+var Version = common.BuildVersion()
 
 // The lifecycle and call records of csi.md, Log records.
 const (

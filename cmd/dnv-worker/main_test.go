@@ -29,12 +29,14 @@ var exampleArgs = []string{
 	"--etcd-dial-timeout", "5",
 }
 
-// cm1Flags is the CM1 flag set, verbatim.
+// cm1Flags is the CM1 flag set, verbatim, with the --version every program
+// answers (architecture.md, Components: invocation reference).
 var cm1Flags = []string{
 	"config",
 	"etcd-dial-timeout",
 	"etcd-endpoints",
 	"roles",
+	"version",
 	"vote-grace-time",
 	"vote-interval",
 	"vote-leave-grace-time",

@@ -32,7 +32,8 @@ var exampleArgs = []string{
 	"--tr-svc-id", "8009",
 }
 
-// cm1Flags is the CM1 flag set, verbatim.
+// cm1Flags is the CM1 flag set, verbatim, with the --version every program
+// answers (architecture.md, Components: invocation reference).
 var cm1Flags = []string{
 	"adr-fam",
 	"config",
@@ -42,6 +43,7 @@ var cm1Flags = []string{
 	"tr-addr",
 	"tr-svc-id",
 	"tr-type",
+	"version",
 }
 
 // minArgs is the shortest invocation CM2 accepts: the two required flags,
@@ -558,6 +560,7 @@ type startingRecord struct {
 	Endpoints []string `json:"endpoints"`
 	TrAddr    string   `json:"tr_addr"`
 	TrSvcId   string   `json:"tr_svc_id"`
+	Version   string   `json:"version"`
 }
 
 // CM3/CM4: run itself binds viper, validates and hands the built cdc.Config
@@ -565,7 +568,8 @@ type startingRecord struct {
 // the options struct alone cannot prove. The listen port is one this test
 // already holds, so the hand-off fails at bind and run returns instead of
 // serving forever; `cdc starting` is emitted first, before that bind, and
-// carries the ranges, the etcd endpoints and the listen endpoint.
+// carries the ranges, the etcd endpoints, the listen endpoint and the build
+// version.
 func TestRunHandsTheOptionsToCdcRun(t *testing.T) {
 	port := reservePort(t)
 	buf := captureRecords(t)
@@ -612,6 +616,7 @@ func TestRunHandsTheOptionsToCdcRun(t *testing.T) {
 		},
 		TrAddr:  "127.0.0.1",
 		TrSvcId: port,
+		Version: common.BuildVersion(),
 	}
 	if !reflect.DeepEqual(got, want) {
 		t.Errorf("first record = %+v, want %+v", got, want)
