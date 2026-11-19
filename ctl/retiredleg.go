@@ -66,7 +66,7 @@ func retiredLegKeepCmd() *cobra.Command {
 			}, nil
 		})
 	flags := cmd.Flags()
-	flags.String("leg", "", "leg_id of the retired leg (base 0)")
+	flags.String("leg", "", "leg_id of the retired leg (decimal, or hex after 0x)")
 	flags.Bool("clear", false, "clear the keep flag instead of setting it")
 	return cmd
 }
@@ -118,6 +118,6 @@ func retiredLegDeleteCmd() *cobra.Command {
 				return client.DeleteRetiredLeg(ctx, req)
 			}, nil
 		})
-	cmd.Flags().String("leg", "", "leg_id of the retired leg (base 0)")
+	cmd.Flags().String("leg", "", "leg_id of the retired leg (decimal, or hex after 0x)")
 	return cmd
 }

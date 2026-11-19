@@ -33,9 +33,11 @@ const (
 	replayBitmapChunkBlocks = 128
 	// replayArrayName has the form of dnv's array names
 	// (common.CnMdArrayNameGlob), so the md assembly mask keeps the node's
-	// udev off the replay's legs, as off an agent's; its fields, 0xfe, are
-	// no agent array's, whose slice field is below 0xa0 and whose clone
-	// field is 0xff.
+	// udev off the replay's legs, as off an agent's. It is no agent array's
+	// name: its sp field is zero, and sp ids start at one (architecture.md,
+	// Globals: id allocation + shard buckets); its fields, 0xfe, also sort
+	// after a pool's last meta group's and differ from the clone field 0xff
+	// (TestReplayArrayNameIsMasked).
 	replayArrayName = common.DnvPrefix + "-0000000000000000-fe-fe"
 	replayDevPath   = "/dev/md/" + replayArrayName
 	// replayWait bounds each wait for md to take or let go of a leg.

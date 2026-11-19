@@ -1,11 +1,13 @@
 // The error surface (dnvctl.md CT5).
 //
-// CT5 is three exit codes, and every row below is a promise an operator's
+// CT5 is four exit codes, and every row below is a promise an operator's
 // script depends on:
 //
 //	0  the CT4 document on stdout, stderr empty
 //	1  RPC or connection failure: stdout EMPTY, one line on stderr
 //	2  usage error: stdout empty, and NO RPC WAS ISSUED
+//	3  the RPC returned OK and its result was not written: one RPC, no
+//	   complete document on stdout, one line on stderr
 //
 // The third row is the one a careless test gets wrong. Asserting the exit
 // code alone proves nothing about whether a request went out — a command that
@@ -17,6 +19,7 @@ package ctl
 import (
 	"context"
 	"fmt"
+	"os"
 	"regexp"
 	"strings"
 	"testing"
@@ -219,6 +222,28 @@ func TestUsageErrorsIssueNoRpc(t *testing.T) {
 			[]string{"cluster", "list", "--count", "-1"}},
 		{"malformed --timeout",
 			[]string{"cluster", "list", "--timeout", "soon"}},
+		// A number is decimal or hex after 0x (dnvctl.md, Conventions,
+		// Value types): a leading zero is refused, never read as octal, so
+		// a padded hex id copied without its 0x names no other object.
+		{"--id with a leading zero",
+			[]string{"cntlr", "delete", "--id", "017"}},
+		{"--grp copied padded, without 0x",
+			[]string{"group", "inspect", "--grp", "0000000000000011"}},
+		{"--idx with a leading zero",
+			[]string{"ns", "delete", "--nqn", "x", "--idx", "010"}},
+		{"--slots item with a leading zero",
+			[]string{"sp", "set-cntlid-slots", "--slots", "0,01"}},
+		{"--level with a plus sign",
+			[]string{"sp", "set-level", "--level", "+16"}},
+		{"--level negative with a leading zero",
+			[]string{"sp", "set-level", "--level", "-016"}},
+		// An id typed empty, as from an unset shell variable, never goes
+		// out as zero, which here would ask for a fresh leg.
+		{"typed empty --retired-leg",
+			[]string{"repair", "create", "--name", "r1", "--grp", "5",
+				"--bad-legs", "7", "--retired-leg="}},
+		{"--grp of spaces",
+			[]string{"repair", "create", "--name", "r1", "--grp", "  "}},
 		// --gateway-address has no default, and its absence is a usage error
 		// rather than a dial to nowhere.
 		{"missing --gateway-address", nil},
@@ -247,6 +272,74 @@ func TestUsageErrorsIssueNoRpc(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestUndeliveredResultIsExitThree is CT5's exit 3: the call returned OK,
+// and its result did not reach stdout, because the write failed or the reply
+// could not be rendered. The call took effect, so it is neither exit 1,
+// which tells a script to repeat a create, nor exit 2, which says no call
+// was made: one RPC is counted, nothing complete is on stdout, and stderr is
+// one line that names the trace id.
+func TestUndeliveredResultIsExitThree(t *testing.T) {
+	line := regexp.MustCompile(`^dnvctl: the call returned OK, but its ` +
+		`result was not written: [^\n]+ \(trace_id it-deliver\)\n$`)
+	check := func(t *testing.T, res cliResult, client *recordingClient) {
+		t.Helper()
+		if res.code != 3 {
+			t.Errorf("exit code = %d, want 3 (stderr %q)", res.code,
+				res.stderr)
+		}
+		if client.calls != 1 {
+			t.Errorf("the client saw %d calls, want 1", client.calls)
+		}
+		if res.stdout != "" {
+			t.Errorf("stdout = %q, want empty", res.stdout)
+		}
+		if !line.MatchString(res.stderr) {
+			t.Errorf("stderr = %q, want the one exit-3 line", res.stderr)
+		}
+	}
+	dial := func(client *recordingClient) dialFunc {
+		return func(_ context.Context, _ string) (
+			pb.GatewayClient, func() error, error,
+		) {
+			return client, func() error { return nil }, nil
+		}
+	}
+	argv := globalArgv("--trace-id", "it-deliver", "cluster", "list")
+
+	// A stdout the process closed, and /dev/full, which answers every write
+	// with ENOSPC, as a full disk under a redirect does.
+	t.Run("closed stdout", func(t *testing.T) {
+		closed, err := os.CreateTemp(t.TempDir(), "stdout")
+		if err != nil {
+			t.Fatal(err)
+		}
+		_ = closed.Close()
+		client := &recordingClient{want: "ListClusters"}
+		check(t, runCLIOnStdout(t, dial(client), closed, argv...), client)
+	})
+	t.Run("full device", func(t *testing.T) {
+		full, err := os.OpenFile("/dev/full", os.O_WRONLY, 0)
+		if err != nil {
+			t.Skipf("no /dev/full: %v", err)
+		}
+		defer full.Close()
+		client := &recordingClient{want: "ListClusters"}
+		check(t, runCLIOnStdout(t, dial(client), full, argv...), client)
+	})
+
+	// A reply protojson refuses to render: a string field that is not
+	// UTF-8. gRPC's own decoder refuses the same bytes, so only an injected
+	// reply reaches this branch.
+	t.Run("reply not rendered", func(t *testing.T) {
+		client := &recordingClient{
+			want:  "GetCluster",
+			reply: &pb.GetClusterReply{ClusterName: "\xff"},
+		}
+		check(t, runCLI(t, client, globalArgv(
+			"--trace-id", "it-deliver", "cluster", "get")...), client)
+	})
 }
 
 // TestUnknownVerbIsAUsageError pins CT5's "unknown command" row on the shape

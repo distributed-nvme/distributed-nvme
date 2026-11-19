@@ -42,12 +42,13 @@ Out of scope, each deliberately:
 `ctl/root.go` holds everything the groups share: the cobra root and its
 global flags, the viper binding (CT9), the dial (CT2), the per-invocation
 trace id (Trace ids), the readers of leaf values and the shared flag helpers
-(Conventions), the token builders (CT3), the emit pipeline (CT4), and the
-error rendering and exit codes (CT5). There is one file per noun group,
-named after the group, each declaring its group's register function
-(`registerCluster` and its siblings), its job funcs and any parser or flag
-helper kept beside them, under names carrying the group's name, so the sibling
-files share no package-level flag names. The command tree and its viper
+(Conventions), the token builders (CT3), the rendering of a result and its
+one checked write to stdout (CT4), and the error rendering and exit codes
+(CT5). There is one file per noun group, named after the group, each
+declaring its group's register function (`registerCluster` and its
+siblings), its job funcs and any parser or flag helper kept beside them,
+under names carrying the group's name, so the sibling files share no
+package-level flag names. The command tree and its viper
 binding live in `ctl/`, never in `cmd/dnvctl`, and what `ctl/` and
 `cmd/dnvctl` may import is `layout.md`, Dependency rules; `cmd/dnvctl/main.go`
 is a thin wrapper that sets the log level (CT7) and exits with the code
@@ -111,7 +112,8 @@ revision token is per object and per write, never ambient context.
 Reading leaf values off the command line also keeps viper's silent numeric
 casts out of every request: text that is not a number never reads back as
 zero. A leaf value that can be malformed is parsed before the dial — by
-pflag, with the command line, for the flags declared as pflag numbers or
+pflag, with the command line, for the flags declared as pflag numbers,
+after dnvctl's check of their spelling (Conventions, Value types), or as
 booleans, and by dnvctl's own parsers for the id flags, `--ids`,
 `--bad-legs`, `--slots`, `--bm-hex`, `--level` and `--redund`, which are
 declared as strings (Conventions, CT8) — so text that does not fit its
@@ -173,42 +175,59 @@ leaves out every member of a oneof that is not set. The bitmap read,
 `td get-bm`, is the one deviation, because protojson renders a bytes field
 as base64: it prints a document of two keys, `bitmap_hex`, the bitmap as
 lowercase hex with no prefix, and `byte_cnt`, its length in bytes
-(`hexBitmapResult`). Nothing else is ever printed to stdout on an RPC path;
-cobra's stock help and completion write their text there too. There is no
-quiet or verbose mode. The emit path is the package's only caller of
-fmt.Print*, under the exemption `log.md` R1 makes for CLI results; the two
-error lines of CT5 are the package's only other direct writes, to stderr
-from `Execute`, and `ctl/` calls slog nowhere at all — the records CT7's
-Warn level silences are the client interceptors'.
+(`hexBitmapResult`). Every result reaches stdout the same way: `render`
+makes the document and its newline, and `writeResult` writes them in one
+checked write, the package's only write to stdout, under the exemption
+`log.md` R1 makes for CLI results. A reply that cannot be rendered, or a
+write that fails or ends short, is CT5's exit 3, never a silent exit 0.
+Nothing else is ever printed to stdout on an RPC path; the only other text
+there is cobra's own, its stock help and completion, which cobra writes
+itself and does not check. There is no quiet or verbose mode. The error
+lines of CT5 are the package's only other direct writes, to stderr from
+`Execute`, and `ctl/` calls slog nowhere at all — the records CT7's Warn
+level silences are the client interceptors'.
 
 ### Errors and exit codes
 
-CT5. **Errors and exit codes.** dnvctl exits with one of three codes:
+CT5. **Errors and exit codes.** dnvctl exits with one of four codes:
 
 * 0 — the RPC returned OK: stdout carries the CT4 document and stderr is
   empty.
 * 1 — the RPC or its connection failed: stdout is empty and stderr carries
   one line, "dnvctl: CODE: message (trace_id ID)".
-* 2 — a usage error: an unknown command or flag, an unparsable flag value, a
-  `--timeout` from the environment or the config file that is not a number,
-  a NaN or infinite `--timeout` from any carrier, or a `--rev` on a command
-  whose request carries no token. stdout is empty, stderr carries
+* 2 — a usage error: an unknown command or flag, an unparsable flag value,
+  such as a number spelled other than in decimal or in hex after `0x`, or
+  an id or `--rev` typed empty (Conventions, Value types), a `--timeout`
+  from the environment or the config file that is not a number, a NaN or
+  infinite `--timeout` from any carrier, or a `--rev` on a command whose
+  request carries no token. stdout is empty, stderr carries
   "dnvctl: message", and no RPC is issued.
+* 3 — the RPC returned OK, and its result was not written: the reply could
+  not be rendered (CT4), or the write to stdout failed or ended short, as on
+  a full disk under a redirect. stdout holds no complete document, and stderr
+  carries one line, "dnvctl: the call returned OK, but its result was not
+  written: error (trace_id ID)". The call ran to its end, so any change it
+  asked for was made, and a script reads the state again before it repeats
+  the command. It is a code of its own because exit 1 would tell a script the
+  call failed, and a repeated create would then meet ALREADY_EXISTS, while
+  exit 2 says no call was made. A stdout that is a pipe whose reader has gone
+  never reaches this code: Go ends the process with SIGPIPE at the write,
+  which a shell reports as status 141.
 
 The message of a usage error is cobra's or pflag's (an unknown command or
-flag, a value pflag cannot parse), viper's (a `--config` file it cannot
-read) or dnvctl's own: a missing `--gateway-address`; `dnvctl` or a group
-typed without a verb; an "invalid --flag" message for a value dnvctl parses
-itself — an id, `--ids`, `--bad-legs`, `--slots`, `--bm-hex`, `--level`,
-`--redund`, `--rev`, a `--timeout` from the environment or the config
-file, a NaN or infinite `--timeout` from any carrier; and, for a `--rev` on
-a command whose request carries no token, whatever its value, an
-"invalid --rev" message naming the command as one that takes no revision
-token. CODE is the gRPC code in its UPPER_SNAKE wire spelling —
-NOT_FOUND, ABORTED, DEADLINE_EXCEEDED, UNAVAILABLE and the rest — from the
-`codeNames` table, because the code's own string form is CamelCase and
-operators grep for the wire spelling; message is the status message
-verbatim, such as "stale revision". A dial that cannot resolve, or is
+flag, a value pflag cannot parse or dnvctl's spelling check refuses before
+pflag reads it), viper's (a `--config` file it cannot read) or dnvctl's own: a
+missing `--gateway-address`; `dnvctl` or a group typed without a verb; an
+"invalid --flag" message for a value dnvctl parses itself — an id, `--ids`,
+`--bad-legs`, `--slots`, `--bm-hex`, `--level`, `--redund`, `--rev`, a
+`--timeout` from the environment or the config file, a NaN or infinite
+`--timeout` from any carrier; and, for a `--rev` on a command whose request
+carries no token, whatever its value, an "invalid --rev" message naming the
+command as one that takes no revision token. CODE is the gRPC code in its
+UPPER_SNAKE wire spelling — NOT_FOUND, ABORTED, DEADLINE_EXCEEDED, UNAVAILABLE
+and the rest — from the `codeNames` table, because the code's own string form
+is CamelCase and operators grep for the wire spelling; message is the status
+message verbatim, such as "stale revision". A dial that cannot resolve, or is
 refused, maps to whatever code gRPC reports — UNAVAILABLE for a refused
 connection; dnvctl adds no translation layer.
 
@@ -223,8 +242,8 @@ none; an operator reads the tokens with `dn get`, `cn get` and `sp get`.
 dnvctl sends exactly what was typed:
 
 * `--rev` not given: the token field is absent, a nil message.
-* `--rev` with a value, parsed with Go's base-0 rule, so decimal and
-  `0x`-prefixed hex both work: the token message is present with `revision`
+* `--rev` with a value, written in decimal or in hex after `0x`
+  (Conventions, Value types): the token message is present with `revision`
   set to it and nothing else set (Conventions: the echo field is never
   sent).
 * `--rev 0`: the message is present with revision zero — proto3 message
@@ -319,26 +338,44 @@ reads the whole registry. `sp inspect-side` takes its side id as
 `--id`, deliberately the same spelling as the `cntlr` group's, as in
 gatewayctl: the RPC, not the flag, says what the id means.
 
-**Value types.** A number that fills a request field is parsed at the width
-of that field: every value the field holds parses, and a value past either
-end of the field fails to parse, a usage error. A wider parse would cut
-such a value and send a number nobody typed; a narrower one would refuse
-values the gateway should judge, the client-side check CT8 forbids. An
-id — `--id`, `--slice`, `--leg`, `--src-side`, `--grp`, `--retired-leg` —
-is declared as a string and parsed by dnvctl with Go's base-0 rule, so a `0x`
-prefix is accepted and a leading zero without one selects octal: an id copied
-from a device name, which spells ids as zero-padded hex digits with no prefix
-(`architecture.md`, Naming), needs the `0x` prefix, since the padded form
-parses as octal with no error where its digits allow and is refused where they
-do not, and a hex id typed without its zeros and without the prefix parses as
-decimal where its digits allow and is refused otherwise. `--slots`, `--ids` and
-`--bad-legs` are comma-separated numeric lists; `--hosts` and the selector
-flags are comma-separated string lists. An empty list flag is the empty list.
-Any other value is split at each comma: a string list sends every item as
-typed, spaces and empty items included, and a numeric list trims each item and
-parses it with the same base-0 rule, so an empty item is a usage error and an
-id copied from a device name needs the `0x` prefix in `--ids` and `--bad-legs`
-as it does in an id flag. No item is dropped, because a comma list whose items
+**Value types.** Every whole number that fills a request field — a flag
+declared as a pflag number, an id, an item of a numeric list, `--rev` and the
+number form of `--level` — is written in decimal, or in hex after `0x`
+(either case, zeros after it allowed), and in no other form: a leading zero
+without the prefix (0 itself is decimal), `0o`, `0b`, an underscore and a
+sign fail to parse, a usage error, save one minus before a `--level` number,
+whose field is a signed enum (`sp` — `ctl/sp.go`). Go's base-0 parse, pflag's
+too, reads a leading zero as octal and takes the other forms; an id copied
+from a device name or an NQN, which spell ids as zero-padded hex digits with
+no prefix (`architecture.md`, Naming), would then name another object with no
+error. dnvctl's own JSON prints ids in decimal, so an id is typed as printed,
+or with `0x` before the hex of a name. A padded id starts with a zero until
+an id needs all sixteen hex digits, which only many id steps
+(`AdvanceClusterIds`, `architecture.md`, Clusters) could bring about, so its
+copy without `0x` is refused; a hex id typed by hand without its zeros and
+without `0x` still parses as decimal where its digits allow, which no rule
+can tell apart. `dnv-agent --capacity` refuses a leading zero too, since Go
+reads it as octal, and refuses `0x` as well (`dnagent.md` CM3); dnvctl keeps
+`0x` because an id has a hex source, a device name or an NQN, and a size has
+none. `--timeout` is a deadline, not a request field, and keeps Go's float
+parse (CT9).
+
+A number that fills a request field is parsed at the width of that field:
+every value the field holds parses, and a value past either end of the
+field fails to parse, a usage error. A wider parse would cut such a value
+and send a number nobody typed; a narrower one would refuse values the
+gateway should judge, the client-side check CT8 forbids. An id — `--id`,
+`--slice`, `--leg`, `--src-side`, `--grp`, `--retired-leg` — is declared as
+a string and parsed by dnvctl. An id flag left out sends zero, for the
+gateway to judge (CT8); one typed with an empty value, or with spaces
+alone, is a usage error, as a typed empty `--rev` is (CT3): an unset shell
+variable must not send zero, which `repair create` reads as a fresh leg.
+`--slots`, `--ids` and `--bad-legs` are comma-separated numeric lists;
+`--hosts` and the selector flags are comma-separated string lists. An empty
+list flag is the empty list. Any other value is split at each comma: a
+string list sends every item as typed, spaces and empty items included, and
+a numeric list trims each item and parses it by the rule above, so an empty
+item is a usage error. No item is dropped, because a comma list whose items
 are all unset shell variables, such as `$A,$B`, would otherwise shrink to
 nothing and revoke every host of a subsystem (`architecture.md`, Primary cntlr)
 or drop a white list (`architecture.md`, Finding DN candidates), while the
@@ -371,14 +408,16 @@ A flag default is not a hidden RPC (CT8).
   and the page token to the paged list leaves.
 
 CT8. **No client-side validation.** dnvctl rejects only what fails to parse
-(exit 2) — a malformed `--bm-hex`, a non-numeric id, a `--timeout` that is
-not a finite number of seconds (CT9) — plus a `--rev` on a command whose
-request has no token field to carry it (CT3). Every parsed value is sent as
-typed, and the gateway's validation (`architecture.md`, Common validation)
-answers: empty required fields, contradictory flags and unknown enum numbers
-are all forwarded. Nor does dnvctl issue an RPC the operator did not type:
-no token auto-fetch, no pre-read behind a warning (`cntlr` —
-`ctl/cntlr.go`), no poller behind a latching delete (`sp` — `ctl/sp.go`).
+(exit 2) — a malformed `--bm-hex`, a non-numeric id, a number written with a
+leading zero or in any form but decimal and hex after `0x`, an id typed empty
+(Value types), a `--timeout` that is not a finite number of seconds (CT9) —
+plus a `--rev` on a command whose request has no token field to carry it
+(CT3). Every parsed value is sent as typed, and the gateway's validation
+(`architecture.md`, Common validation) answers: empty required fields,
+contradictory flags and unknown enum numbers are all forwarded. Nor does
+dnvctl issue an RPC the operator did not type: no token auto-fetch, no
+pre-read behind a warning (`cntlr` — `ctl/cntlr.go`), no poller behind a
+latching delete (`sp` — `ctl/sp.go`).
 
 CT1. **Completeness.** The leaves are exhaustive: one per RPC of
 `service Gateway`, none left out and none doubled. A leaf carries the
@@ -747,10 +786,14 @@ produces and answers it from the test, with an injected status, an injected
 reply, or a verdict it takes from the request itself, as the gateway's
 validation and paging would. Against it they prove the field and flag rules
 of every leaf, the tokens of CT3, the rendering of CT4, the exit codes and
-failure line of CT5 and the binding of CT9, and CT8 at the limits of the
-count, size, name and NQN flags. A number its flag cannot hold does not
-parse, so it is a usage error that issues no RPC (CT5, CT8). The ranges the
-gateway sets on a count or a size and the lengths it allows a name or an NQN
+failure lines of CT5, exit 3 on a stdout that refuses the write and on a
+reply that cannot be rendered among them, and the binding of CT9, and CT8
+at the limits of the count, size, name and NQN flags. A number its flag
+cannot hold does not parse, so it is a usage error that issues no RPC (CT5,
+CT8). Walks of the command tree find every whole-number flag and hold each
+to the spelling of Conventions, Value types, and each one but the numeric
+lists to the refusal of a typed empty value. The ranges the gateway sets on
+a count or a size and the lengths it allows a name or an NQN
 (`architecture.md`, Common validation) are never checked by dnvctl: the
 value goes out as typed and the gateway's verdict comes back, a full page
 rendered whole with its page token reaching the next request verbatim, a
@@ -787,21 +830,23 @@ before and after the call.
 
 **Cases.** The cases run in a fixed order and fail fast, each against a
 restarted fake whose behavior file is reset and whose state file holds only
-the reset's own readiness probe, so counters are read only as deltas.
-Together they exercise, on the wire, CT1 with one step per RPC in tree
-order, CT2's trace id and deadline, CT3's token on exactly its carriers and its
-refusal on one leaf that carries none, CT4's goldens, CT5's failure line and
-codes, CT7's empty stderr, CT8's parse-only refusals, CT9's precedence of flag
-over environment, and the field and flag rules of Conventions. What one step
-per RPC has no room for is left to the unit tests: the transport conf's nil
-rule and a clone's empty source list, a bare `cluster create` sending no
+the reset's own readiness probe, so counters are read only as deltas. Together
+they exercise, on the wire, CT1 with one step per RPC in tree order, CT2's
+trace id and deadline, CT3's token on exactly its carriers and its refusal on
+one leaf that carries none, CT4's goldens, CT5's failure line and codes, exit
+3 on a stdout that refuses the write among them, CT7's empty stderr, CT8's
+parse-only refusals, a number with a leading zero on an id flag and on a pflag
+number and an id typed empty among them, CT9's precedence of flag over
+environment, and the field and flag rules of Conventions. What one step per
+RPC has no room for is left to the unit tests: the transport conf's nil rule
+and a clone's empty source list, a bare `cluster create` sending no
 `dn_bin_conf`, no `md_check_conf` and no `start_hold_conf`, a typed
-`--md-check-days` or `--start-hold-seconds` sent as typed (its zero
-included), the silence of the environment and the config
-file on leaf flags (CT9), `--timeout` refused or clamped from every carrier, the code name of
-every gRPC code (CT5), and the `--rev` refusal on the leaves with no token
-field other than the one the suite types it on, which the unit tests pin
-on every such leaf (CT1).
+`--md-check-days` or `--start-hold-seconds` sent as typed (its zero included),
+the silence of the environment and the config file on leaf flags (CT9),
+`--timeout` refused or clamped from every carrier, the code name of every gRPC
+code (CT5), and the `--rev` refusal on the leaves with no token field other
+than the one the suite types it on, which the unit tests pin on every such
+leaf (CT1).
 
 Out of scope: real-gateway runs, which are the gateway suite's harness;
 concurrency, which stays with gatewayctl's barrier runner; performance; and
@@ -816,12 +861,12 @@ records a request without its unpopulated fields, so an absent `--rev` is an
 absent key and `--rev 0` an empty object, and uint64 fields compare as
 strings, protojson's doing. A count is a delta between two state snapshots
 taken in the same round trip as the call, so nothing can slip in between; a
-usage error passes only with the count unmoved. Every success parses stdout,
-and goldens compare byte-exact. The token assertions are request-side — what
-dnvctl put on the wire — so they hold whatever a gateway does with the
-token. Waits are bounded polls for process start and exit only: every dnvctl call
-is synchronous. The fake's log is read through a filter that drops a line
-torn by a concurrent append.
+usage error passes only with the count unmoved, and exit 3 only with it moved
+by one. Every success parses stdout, and goldens compare byte-exact. The token
+assertions are request-side — what dnvctl put on the wire — so they hold
+whatever a gateway does with the token. Waits are bounded polls for process
+start and exit only: every dnvctl call is synchronous. The fake's log is read
+through a filter that drops a line torn by a concurrent append.
 
 **Cleanup.** Cleanup runs unconditionally at the start of every run, and at
 the end only on success; a cleanup-only run does it alone and then verifies

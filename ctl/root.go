@@ -6,14 +6,17 @@
 //
 // This file owns everything the fifteen group files share: the cobra root and
 // its persistent flags, the viper binding (CT9), the dial block (CT2), the
-// per-invocation trace id (CT2), the result-emit pipeline (CT4), the error
-// rendering and the exit codes (CT5).
+// per-invocation trace id (CT2), the rendering of a result and its one
+// checked write to stdout (CT4), the error rendering and the exit codes
+// (CT5).
 //
 // Two rules shape the whole package:
 //
 //   - CT8 — no client-side validation. dnvctl rejects only what fails to
 //     PARSE (exit 2), which for --timeout, a deadline rather than a request
-//     value, includes NaN and ±Inf (timeoutOf), plus a --rev typed on a
+//     value, includes NaN and ±Inf (timeoutOf), and for a whole number of a
+//     request field includes every spelling but decimal and hex after 0x,
+//     and an empty value typed (numberSyntax), plus a --rev typed on a
 //     command whose request has no token field to put it in (run, CT3);
 //     every parsed value is sent as typed and the gateway's validation is
 //     the only validator. Empty required fields, contradictory flags and
@@ -23,9 +26,10 @@
 //     variable or a --config file supplies one just as the flag does. --rev
 //     and every leaf flag are read off the parsed command line and nothing
 //     else (CT9): a token, a force or a name is typed per command, and a
-//     leaf value is parsed before the dial — by pflag, or by the readers
-//     below and spParseLevel/spRedundConf for the flags pflag holds as
-//     strings — so text that does not fit its field is exit 2, never a cast
+//     leaf value is parsed before the dial — by pflag through numberValue,
+//     or by the readers below and spParseLevel/spRedundConf for the flags
+//     pflag holds as strings — so text that does not fit its field is exit
+//     2, never a cast
 //     that reads back as zero (dnvctl.md, Conventions, Value types). The
 //     comma-split list flags below stay plain strings for the
 //     replace-on-each-occurrence rule (dnvctl.md, Conventions), which
@@ -40,6 +44,8 @@ import (
 	"fmt"
 	"math"
 	"os"
+	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -79,8 +85,9 @@ type job func(ctx context.Context, client pb.GatewayClient) (any, error)
 // ---------------------------------------------------------------------------
 
 // rpcFailure is the exit-1 class: the RPC, or the connection carrying it,
-// failed. Everything else that reaches Execute is a usage error and exits 2,
-// which is what keeps "no RPC was issued" provable from the exit code alone.
+// failed. resultFailure is exit 3. Everything else that reaches Execute is a
+// usage error and exits 2, which is what keeps "no RPC was issued" provable
+// from the exit code alone.
 type rpcFailure struct {
 	err     error
 	traceId string
@@ -88,6 +95,19 @@ type rpcFailure struct {
 
 func (e *rpcFailure) Error() string { return e.err.Error() }
 func (e *rpcFailure) Unwrap() error { return e.err }
+
+// resultFailure is the exit-3 class: the RPC returned OK, and its result was
+// not written, because the reply could not be rendered or the write to
+// stdout failed. The call ran to its end, so any change it asked for was
+// made, and the class is neither exit 1, which would have a script repeat a
+// create, nor exit 2, which says no call was made.
+type resultFailure struct {
+	err     error
+	traceId string
+}
+
+func (e *resultFailure) Error() string { return e.err.Error() }
+func (e *resultFailure) Unwrap() error { return e.err }
 
 // codeNames spells every gRPC code the way the wire and the specs do —
 // UPPER_SNAKE — because codes.Code.String() is CamelCase and operators grep
@@ -126,6 +146,8 @@ func codeName(c codes.Code) string {
 //	0  the RPC returned OK; the CT4 document is on stdout, stderr is empty
 //	1  the RPC or the connection failed; stdout is empty, stderr is one line
 //	2  a usage error; stdout is empty, no RPC was issued
+//	3  the RPC returned OK, its result was not written; stdout holds no
+//	   complete document, stderr is one line
 func Execute() int {
 	root := NewRootCmd()
 	err := root.Execute()
@@ -138,6 +160,13 @@ func Execute() int {
 		fmt.Fprintf(os.Stderr, "dnvctl: %s: %s (trace_id %s)\n",
 			codeName(st.Code()), st.Message(), failure.traceId)
 		return 1
+	}
+	var unwritten *resultFailure
+	if errors.As(err, &unwritten) {
+		fmt.Fprintf(os.Stderr, "dnvctl: the call returned OK, but its "+
+			"result was not written: %v (trace_id %s)\n",
+			unwritten.err, unwritten.traceId)
+		return 3
 	}
 	fmt.Fprintf(os.Stderr, "dnvctl: %v\n", err)
 	return 2
@@ -193,6 +222,7 @@ func NewRootCmd() *cobra.Command {
 	registerRetiredLeg(root)
 	registerGroup(root)
 	registerWorker(root)
+	checkNumberFlags(root)
 	return root
 }
 
@@ -208,9 +238,9 @@ func addGlobalFlags(root *cobra.Command) {
 	flags.String("sp", "",
 		"sp_name of every request that has one")
 	flags.String("rev", "",
-		"revision token (base 0; command line only; omitted sends no "+
-			"token message at all; a usage error on a command whose "+
-			"request carries no token)")
+		"revision token (decimal, or hex after 0x; command line only; "+
+			"omitted sends no token message at all; a usage error on a "+
+			"command whose request carries no token)")
 	flags.Float64("timeout", defaultTimeout,
 		"per-invocation deadline, seconds")
 	flags.String("trace-id", "",
@@ -286,11 +316,12 @@ func dial(_ context.Context, address string) (
 var dialer dialFunc = dial
 
 // run is every leaf command's RunE body: resolve the global flags, build
-// the traced and deadlined context, dial, invoke, render.
+// the traced and deadlined context, dial, invoke, render and write.
 //
-// A returned *rpcFailure is exit 1; every other error is a usage error and
-// exit 2. The ordering matters: everything that can fail to PARSE is done
-// BEFORE the dial, so a usage error provably issues no RPC (CT5, CT8).
+// A returned *rpcFailure is exit 1 and a *resultFailure exit 3; every other
+// error is a usage error and exit 2. The ordering matters: everything that
+// can fail to PARSE is done BEFORE the dial, so a usage error provably
+// issues no RPC (CT5, CT8).
 func run(cmd *cobra.Command, build func() (job, error)) error {
 	address := strings.TrimSpace(viper.GetString("gateway-address"))
 	if address == "" {
@@ -339,7 +370,10 @@ func run(cmd *cobra.Command, build func() (job, error)) error {
 	if err != nil {
 		return &rpcFailure{err: err, traceId: traceId}
 	}
-	return emit(result)
+	if err := emit(result); err != nil {
+		return &resultFailure{err: err, traceId: traceId}
+	}
+	return nil
 }
 
 // leaf builds one RPC command. Every RPC leaf has this shape:
@@ -409,19 +443,39 @@ var marshalOpts = protojson.MarshalOptions{
 	EmitUnpopulated: true,
 }
 
-// emit prints one canonical JSON document on stdout. protojson deliberately
-// varies its whitespace, so the reply is re-parsed and re-encoded through
-// encoding/json: sorted keys, stable spacing, proto field names, proto3
-// defaults visible, uint64 as JSON strings.
-//
-// This is the only fmt.Print* in the package, the bitmap reads printing
-// through it too — the log.md R1 exemption for CLI results (CT4).
+// emit puts one result on stdout: render, then the one checked write. Its
+// error, either half's, is the exit-3 class run reports (CT5).
 func emit(result any) error {
+	out, err := render(result)
+	if err != nil {
+		return err
+	}
+	return writeResult(out)
+}
+
+// writeResult is the package's one write of a result to stdout, under the
+// log.md R1 exemption for CLI results (CT4): every result reaches stdout
+// through it, in one write, and a write that fails or ends short is an
+// error, never a silent exit 0. A broken pipe never gets here: Go ends the
+// process with SIGPIPE on a write to a closed pipe on stdout.
+func writeResult(out []byte) error {
+	if _, err := os.Stdout.Write(out); err != nil {
+		return fmt.Errorf("writing the result: %w", err)
+	}
+	return nil
+}
+
+// render turns a result into the bytes stdout gets: one canonical JSON
+// document and its newline. protojson deliberately varies its whitespace, so
+// the reply is re-parsed and re-encoded through encoding/json: sorted keys,
+// stable spacing, proto field names, proto3 defaults visible, uint64 as JSON
+// strings. The bitmap reads render through it too.
+func render(result any) ([]byte, error) {
 	value := result
 	if msg, ok := result.(proto.Message); ok {
 		raw, err := marshalOpts.Marshal(msg)
 		if err != nil {
-			return fmt.Errorf("marshaling the reply: %w", err)
+			return nil, fmt.Errorf("rendering the reply: %w", err)
 		}
 		// Into a FRESH any, never into `value`: `value` still holds the
 		// concrete *pb.XxxReply pointer, and unmarshaling through that would
@@ -430,16 +484,15 @@ func emit(result any) error {
 		// undoes both EmitUnpopulated and the uint64-as-string rendering.
 		var decoded any
 		if err := json.Unmarshal(raw, &decoded); err != nil {
-			return fmt.Errorf("re-parsing the reply: %w", err)
+			return nil, fmt.Errorf("re-parsing the reply: %w", err)
 		}
 		value = decoded
 	}
 	out, err := json.Marshal(value)
 	if err != nil {
-		return fmt.Errorf("marshaling the reply: %w", err)
+		return nil, fmt.Errorf("rendering the reply: %w", err)
 	}
-	fmt.Println(string(out))
-	return nil
+	return append(out, '\n'), nil
 }
 
 // hexBitmapResult is CT4's one deviation. protojson renders a bytes field as
@@ -539,7 +592,7 @@ func boolOf(name string) bool {
 	return leafValue(name, (*pflag.FlagSet).GetBool)
 }
 
-// u64Of is one plain uint64 (a size or a count), decimal.
+// u64Of is one plain uint64 (a size or a count), off a Uint64 flag.
 func u64Of(name string) uint64 {
 	return leafValue(name, (*pflag.FlagSet).GetUint64)
 }
@@ -550,15 +603,21 @@ func u32Of(name string) uint32 {
 	return leafValue(name, (*pflag.FlagSet).GetUint32)
 }
 
-// hexOf is an id value: Go base-0, so 17 and 0x11 are the same number. An
-// unset flag is the empty string and reads as 0; a malformed one is a usage
-// error (exit 2), which is all the checking dnvctl does on an id (CT8).
+// hexOf is an id value, in decimal or in hex after 0x (parseNumber), so 17
+// and 0x11 are the same number. A flag left out reads as 0. One typed must
+// parse, an empty value included: an id fed an unset shell variable is a
+// usage error (exit 2), never a zero sent, which is all the checking dnvctl
+// does on an id (CT8).
 func hexOf(name string) (uint64, error) {
-	raw := strings.TrimSpace(strOf(name))
-	if raw == "" {
+	if !invoked.Changed(name) {
 		return 0, nil
 	}
-	value, err := strconv.ParseUint(raw, 0, 64)
+	raw := strings.TrimSpace(strOf(name))
+	if raw == "" {
+		return 0, fmt.Errorf(
+			"invalid --%s: typed empty; leave the flag out to send zero", name)
+	}
+	value, err := parseNumber(raw, 64)
 	if err != nil {
 		return 0, fmt.Errorf("invalid --%s: %w", name, err)
 	}
@@ -580,9 +639,10 @@ func strListOf(name string) []string {
 	return strings.Split(raw, ",")
 }
 
-// idListOf is a comma-split base-0 numeric list (--ids, --bad-legs). An
-// empty flag is an empty list; otherwise each item is trimmed and parsed, so
-// an empty item is a usage error (dnvctl.md, Conventions, Value types).
+// idListOf is a comma-split numeric list (--ids, --bad-legs). An empty flag
+// is an empty list; otherwise each item is trimmed and parsed by
+// parseNumber, so an empty item is a usage error (dnvctl.md, Conventions,
+// Value types).
 func idListOf(name string) ([]uint64, error) {
 	raw := strOf(name)
 	if raw == "" {
@@ -590,7 +650,7 @@ func idListOf(name string) ([]uint64, error) {
 	}
 	var out []uint64
 	for _, item := range strings.Split(raw, ",") {
-		value, err := strconv.ParseUint(strings.TrimSpace(item), 0, 64)
+		value, err := parseNumber(strings.TrimSpace(item), 64)
 		if err != nil {
 			return nil, fmt.Errorf("invalid --%s: %w", name, err)
 		}
@@ -599,8 +659,8 @@ func idListOf(name string) ([]uint64, error) {
 	return out, nil
 }
 
-// u32ListOf is a comma-split base-0 numeric list of 32-bit values (--slots),
-// read as idListOf reads its list.
+// u32ListOf is a comma-split numeric list of 32-bit values (--slots), read
+// as idListOf reads its list.
 func u32ListOf(name string) ([]uint32, error) {
 	raw := strOf(name)
 	if raw == "" {
@@ -608,13 +668,74 @@ func u32ListOf(name string) ([]uint32, error) {
 	}
 	var out []uint32
 	for _, item := range strings.Split(raw, ",") {
-		value, err := strconv.ParseUint(strings.TrimSpace(item), 0, 32)
+		value, err := parseNumber(strings.TrimSpace(item), 32)
 		if err != nil {
 			return nil, fmt.Errorf("invalid --%s: %w", name, err)
 		}
 		out = append(out, uint32(value))
 	}
 	return out, nil
+}
+
+// numberSyntax is the one spelling of a whole number dnvctl puts in a
+// request field (dnvctl.md, Conventions, Value types): decimal with no
+// leading zero, or hex after 0x, in either case. Go's base-0 parse, which
+// strconv and pflag use, also reads a leading zero as octal and takes 0o,
+// 0b, underscores and a sign; an id copied from a device name or an NQN,
+// which spell ids as zero-padded hex with no prefix, would then name
+// another object with no error.
+var numberSyntax = regexp.MustCompile(`^(0|[1-9][0-9]*|0[xX][0-9a-fA-F]+)$`)
+
+// errNumberSyntax is the refusal of a spelling numberSyntax does not take.
+// It does not repeat the value: pflag's own message, which numberValue's
+// refusal goes into, already quotes it.
+var errNumberSyntax = errors.New("type it in decimal, or in hex after 0x")
+
+// parseNumber reads one whole number of the given width: numberSyntax
+// first, then strconv's base-0 parse, which on such text reads exactly
+// decimal or hex and refuses a value past the width.
+func parseNumber(text string, bits int) (uint64, error) {
+	if !numberSyntax.MatchString(text) {
+		return 0, fmt.Errorf("%q: %w", text, errNumberSyntax)
+	}
+	return strconv.ParseUint(text, 0, bits)
+}
+
+// numberValue holds a pflag number flag to numberSyntax: its Set refuses
+// any other spelling before the wrapped value, which parses base 0, reads
+// it. Type and String are the wrapped value's, so pflag's typed getters
+// (u32Of, u64Of) and --help see the flag as before.
+type numberValue struct{ pflag.Value }
+
+func (v numberValue) Set(text string) error {
+	if !numberSyntax.MatchString(text) {
+		return errNumberSyntax
+	}
+	return v.Value.Set(text)
+}
+
+// numberFlagTypes are the pflag value types numberValue wraps: the unsigned
+// integers, every whole-number flag the tree declares being one of them (the
+// float --timeout fills no request field and stays outside).
+var numberFlagTypes = []string{"uint", "uint8", "uint16", "uint32", "uint64"}
+
+// checkNumberFlags wraps every pflag number flag of the command tree in
+// numberValue, once, after the tree is built, so a number flag a group file
+// declares is held to numberSyntax without an edit of its own.
+func checkNumberFlags(cmd *cobra.Command) {
+	wrap := func(flag *pflag.Flag) {
+		if _, done := flag.Value.(numberValue); done {
+			return
+		}
+		if slices.Contains(numberFlagTypes, flag.Value.Type()) {
+			flag.Value = numberValue{flag.Value}
+		}
+	}
+	cmd.Flags().VisitAll(wrap)
+	cmd.PersistentFlags().VisitAll(wrap)
+	for _, sub := range cmd.Commands() {
+		checkNumberFlags(sub)
+	}
 }
 
 // hexBytesOf parses a lowercase-or-uppercase hex bitmap. An EMPTY value is
@@ -675,16 +796,21 @@ func spOf() string { return viper.GetString("sp") }
 // "Given" is pflag's Changed bit — the flag was typed on this command line —
 // never a value from some other carrier: --rev has none (CT9), so an
 // exported DNVCTL_REV cannot put a token on a write nobody typed it for. A
-// typed --rev must parse, an empty one included (`--rev "$REV"` with REV
-// unset is a usage error, not an ungated write). Calling it records the read
-// (revRead): a typed --rev that no build reads is refused by run.
+// typed --rev must parse, by parseNumber, an empty one included (`--rev
+// "$REV"` with REV unset is a usage error, not an ungated write). Calling it
+// records the read (revRead): a typed --rev that no build reads is refused
+// by run.
 func revToken() (uint64, bool, error) {
 	revRead = true
 	raw := strings.TrimSpace(strOf("rev"))
 	if !invoked.Changed("rev") {
 		return 0, false, nil
 	}
-	value, err := strconv.ParseUint(raw, 0, 64)
+	if raw == "" {
+		return 0, false, errors.New(
+			"invalid --rev: typed empty; leave the flag out to send no token")
+	}
+	value, err := parseNumber(raw, 64)
 	if err != nil {
 		return 0, false, fmt.Errorf("invalid --rev: %w", err)
 	}

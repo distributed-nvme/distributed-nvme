@@ -90,10 +90,10 @@ func groupInspectCmd() *cobra.Command {
 			}, nil
 		})
 	flags := cmd.Flags()
-	flags.String("grp", "", "grp_id of the group (base 0)")
+	flags.String("grp", "", "grp_id of the group (decimal, or hex after 0x)")
 	flags.String("leg", "",
 		"leg_id of the leg a forced start would start from; the dry run "+
-			"(base 0; none for the read alone)")
+			"(decimal, or hex after 0x; none for the read alone)")
 	flags.Bool("force", false,
 		"the dry run with the forced start's force")
 	return cmd
@@ -159,10 +159,11 @@ func groupForceStartCmd() *cobra.Command {
 			}, nil
 		})
 	flags := cmd.Flags()
-	flags.String("grp", "", "grp_id of the group started (base 0)")
+	flags.String("grp", "",
+		"grp_id of the group started (decimal, or hex after 0x)")
 	flags.String("leg", "",
-		"leg_id of the leg the array starts from alone (base 0; none with "+
-			"--cancel)")
+		"leg_id of the leg the array starts from alone (decimal, or hex "+
+			"after 0x; none with --cancel)")
 	flags.Bool("cancel", false,
 		"withdraw the group's forced-start mark instead of writing one")
 	flags.Bool("force", false,
@@ -221,7 +222,8 @@ func groupSetOperatorInChargeCmd() *cobra.Command {
 		})
 	flags := cmd.Flags()
 	flags.String("grp", "",
-		"grp_id of the group taken over or given back (base 0)")
+		"grp_id of the group taken over or given back (decimal, or hex "+
+			"after 0x)")
 	flags.Bool("operator-in-charge", true,
 		"the new operator_in_charge flag; write --operator-in-charge=false "+
 			"to give the group back to the sp worker")

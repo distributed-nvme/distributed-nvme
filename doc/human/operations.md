@@ -18,6 +18,14 @@ prints it as `sp_rev.revision`. With `--rev`, the gateway refuses the
 change if the pool changed since you read it. Most writes move the
 revision, so read it again before the next write.
 
+Type an id as `dnvctl` prints it, in decimal. An id copied from a device
+name or an NQN is in hex: type `0x` in front of it. `dnvctl` refuses a
+number with zeros in front and no `0x`, such as `017` or
+`0000000000000011`, and an id typed with an empty value. A command that
+ends with exit status 3 was done by the gateway, and any change it asked
+for was made, but its output was lost. Read the state again before you run
+the command again.
+
 `dnvctl sp get` also lists the pool's cntlrs. The one marked primary is the
 group's primary. `dnvctl cntlr inspect --id <cntlr id>` shows its rows.
 

@@ -4,12 +4,15 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"log/slog"
 	"os"
 	"os/exec"
+	"runtime"
 	"strings"
 	"sync"
 	"testing"
+	"unicode/utf8"
 
 	"github.com/distributed-nvme/distributed-nvme/pb"
 )
@@ -232,6 +235,65 @@ func TestTruncForLog(t *testing.T) {
 	binary := string([]byte{0x00, 0xff, 0xfe, 0x41})
 	if got := TruncForLog(binary); got != "<binary 4 bytes>" {
 		t.Errorf("TruncForLog(binary) = %q, want <binary 4 bytes>", got)
+	}
+}
+
+// truncByRunes is the reference TruncForLog must equal, written the plain
+// way: the whole string as runes, the first LogStrDataLimit of them kept.
+func truncByRunes(s string) string {
+	if !utf8.ValidString(s) {
+		return fmt.Sprintf("<binary %d bytes>", len(s))
+	}
+	runes := []rune(s)
+	if len(runes) <= LogStrDataLimit {
+		return s
+	}
+	return fmt.Sprintf("%s...(%d chars total)",
+		string(runes[:LogStrDataLimit]), len(runes))
+}
+
+// TestTruncForLogCopiesOnlyWhatItKeeps holds TruncForLog to the cost of
+// what it keeps: a file read logs the file's data through it (log.md R11),
+// and the cn agent reads a thin_dump document of tens of MB that way, so a
+// copy of the whole input per call is a large allocation on every read. The
+// output is the reference's, byte for byte, on each kind of input.
+func TestTruncForLogCopiesOnlyWhatItKeeps(t *testing.T) {
+	limit := LogStrDataLimit
+	mixed := strings.Repeat("a世", limit)
+	for name, s := range map[string]string{
+		"empty":              "",
+		"ascii at the limit": strings.Repeat("x", limit),
+		"ascii one over":     strings.Repeat("x", limit+1),
+		"ascii 1 MiB":        strings.Repeat("x", 1<<20),
+		"wide one over":      strings.Repeat("世", limit+1),
+		"wide 300":           strings.Repeat("世", 300),
+		"mixed":              mixed,
+		"mixed cut inside":   "z" + mixed,
+		"binary":             string([]byte{0x00, 0xff, 0xfe, 0x41}),
+		"binary at the end":  strings.Repeat("x", 300) + "\xff",
+	} {
+		if got, want := TruncForLog(s), truncByRunes(s); got != want {
+			t.Errorf("%s: TruncForLog = %q, want %q", name, got, want)
+		}
+	}
+
+	// TotalAlloc counts every goroutine's allocations, so the bound sits
+	// far from both sides: a quarter of the input, against a copy of four
+	// bytes per character above it and a kept part of 128 characters below.
+	big := strings.Repeat("y", 4<<20)
+	_ = TruncForLog(big)
+	runtime.GC()
+	var before, after runtime.MemStats
+	runtime.ReadMemStats(&before)
+	const calls = 4
+	for i := 0; i < calls; i++ {
+		_ = TruncForLog(big)
+	}
+	runtime.ReadMemStats(&after)
+	perCall := (after.TotalAlloc - before.TotalAlloc) / calls
+	if perCall > uint64(len(big)/4) {
+		t.Errorf("TruncForLog of %d bytes allocated %d bytes a call, want "+
+			"at most %d", len(big), perCall, len(big)/4)
 	}
 }
 

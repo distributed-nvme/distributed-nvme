@@ -413,7 +413,7 @@ func TestRootPersistentFlags(t *testing.T) {
 	// The global flags' defaults. --timeout is the only one that is not empty.
 	// --rev's empty default is not what makes "not given" (CT3) — that is
 	// pflag's Changed bit, read in revToken — but a string flag keeps the
-	// value's base-0 parse, and its usage error, next to that rule.
+	// value's parse, and its usage error, next to that rule.
 	for name, want := range map[string]string{
 		"gateway-address": "",
 		"cluster":         "",

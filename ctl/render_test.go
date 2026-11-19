@@ -4,8 +4,9 @@
 // keys, stable spacing, proto field names, proto3 defaults visible, uint64 as
 // JSON strings. Every clause of that is a property of the four-step pipeline
 // in emit — protojson.Marshal with UseProtoNames+EmitUnpopulated, re-parse
-// through encoding/json into `any`, json.Marshal that, fmt.Println — and each
-// step can silently undo the one before it. Re-parsing into the generated
+// through encoding/json into `any`, json.Marshal that (render), and one
+// write of it and its newline (writeResult) — and each step can silently
+// undo the one before it. Re-parsing into the generated
 // struct instead of into a fresh `any`, for instance, re-encodes through the
 // struct's own `omitempty` tags and quietly drops both EmitUnpopulated and
 // the uint64-as-string rendering while still printing plausible JSON.

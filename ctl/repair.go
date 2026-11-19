@@ -87,11 +87,14 @@ func repairCreateCmd() *cobra.Command {
 		})
 	flags := cmd.Flags()
 	flags.String("name", "", "rep_name")
-	flags.String("grp", "", "grp_id of the group repaired (base 0)")
+	flags.String("grp", "",
+		"grp_id of the group repaired (decimal, or hex after 0x)")
 	flags.String("bad-legs", "",
-		"comma-separated bad_leg_id_list (base 0, so 0x11 is accepted)")
+		"comma-separated bad_leg_id_list (each in decimal, or in hex "+
+			"after 0x)")
 	flags.String("retired-leg", "",
-		"retired_leg_id taken back as the new leg (base 0; 0 = a fresh leg)")
+		"retired_leg_id taken back as the new leg (decimal, or hex "+
+			"after 0x; 0 or left out = a fresh leg)")
 	selectorFlags(flags, "dn")
 	flags.Bool("force", false,
 		"copy over a leg of another md array, the retired leg taken back "+

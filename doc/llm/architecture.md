@@ -1134,7 +1134,10 @@ sweep).
 hash of the two ids, each rendered with `IdKeyFmt` and concatenated. The
 slice field of both md names of a slice's group is the group's slice index
 with its high bit set when the group is a **meta** group, the plain slice
-index otherwise; slice and group fields are two hex digits each.
+index otherwise; slice and group fields are two hex digits each. A slice
+index stays below that bit, so a data group's slice field is never a meta
+group's, and a test fails if `MaxSliceCntPerSp` is raised until a slice
+index reaches it.
 
 * `CnMdDevName` of a cluster, cn, sp, slice index, group index and meta flag
   is {short}{sp}{slice}{grp}: the short id of the cluster and the cn in

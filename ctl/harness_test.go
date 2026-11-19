@@ -167,6 +167,17 @@ func runCLI(t *testing.T, client pb.GatewayClient, argv ...string) cliResult {
 // trace-id tests (CT2) need one that reaches a real gRPC server.
 func runCLIWithDial(t *testing.T, d dialFunc, argv ...string) cliResult {
 	t.Helper()
+	return runCLIOnStdout(t, d, nil, argv...)
+}
+
+// runCLIOnStdout is runCLIWithDial with the process's stdout replaced by
+// `stdout` for the run, when it is not nil: the CT5 test of exit 3 hands it
+// a file that refuses the write. The captured stdout is then what reached
+// the capture's pipe, which is nothing.
+func runCLIOnStdout(
+	t *testing.T, d dialFunc, stdout *os.File, argv ...string,
+) cliResult {
+	t.Helper()
 	resetViper(t)
 
 	prevDialer := dialer
@@ -178,7 +189,12 @@ func runCLIWithDial(t *testing.T, d dialFunc, argv ...string) cliResult {
 	t.Cleanup(func() { os.Args = prevArgs })
 
 	var res cliResult
-	res.stdout, res.stderr = captureOutput(t, func() { res.code = Execute() })
+	res.stdout, res.stderr = captureOutput(t, func() {
+		if stdout != nil {
+			os.Stdout = stdout
+		}
+		res.code = Execute()
+	})
 	return res
 }
 
@@ -293,7 +309,7 @@ func TestRecordingClientGuardsTheMethod(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 // captureOutput redirects the process's stdout and stderr around fn. The two
-// streams are the CLI's contract (CT5), and emit writes to os.Stdout
+// streams are the CLI's contract (CT5), and writeResult writes to os.Stdout
 // directly, so a pipe over the file descriptors is the only faithful way to
 // read what an operator would see.
 //

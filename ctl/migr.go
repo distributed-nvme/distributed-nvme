@@ -72,7 +72,8 @@ func migrCreateCmd() *cobra.Command {
 	flags := cmd.Flags()
 	flags.String("name", "", "migr_name")
 	flags.String("src-side", "",
-		"src_side_id, the side being moved away from (base 0)")
+		"src_side_id, the side being moved away from (decimal, or "+
+			"hex after 0x)")
 	selectorFlags(flags, "dn")
 	dmCloneConfFlags(flags)
 	return cmd

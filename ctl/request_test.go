@@ -1357,6 +1357,10 @@ func TestSpLevelSpellings(t *testing.T) {
 		{"16", pb.SpLevel_SP_LEVEL_READONLY},
 		{"0x10", pb.SpLevel_SP_LEVEL_READONLY},
 		{"17", pb.SpLevel(17)},
+		// The enum is signed, so a raw number may carry a minus, the one
+		// sign a number takes (dnvctl.md, Conventions, Value types).
+		{"-16", pb.SpLevel(-16)},
+		{"-0x10", pb.SpLevel(-16)},
 	}
 	for _, tc := range cases {
 		t.Run(tc.spec, func(t *testing.T) {
@@ -1807,13 +1811,20 @@ func TestBadNumericEnvIsAUsageError(t *testing.T) {
 	})
 }
 
-// TestIdFlagsAcceptBase0 pins the id rule of dnvctl.md, Conventions, across
-// the groups that declare one: 17 and 0x11 name the same object.
-func TestIdFlagsAcceptBase0(t *testing.T) {
+// TestIdFlagsAcceptDecimalAndHex pins the id rule of dnvctl.md,
+// Conventions, Value types, across the groups that declare one: 17 and 0x11
+// name the same object, and so does 0x0000000000000011, the padded form a
+// device name or an NQN spells, typed with its 0x.
+func TestIdFlagsAcceptDecimalAndHex(t *testing.T) {
 	cntlr := runArgv(t, "DeleteCntlr",
 		"cntlr", "delete", "--id", "0x11").(*pb.DeleteCntlrRequest)
 	if cntlr.CntlrId != 17 {
 		t.Errorf("--id 0x11 sent %d, want 17", cntlr.CntlrId)
+	}
+	padded := runArgv(t, "DeleteCntlr", "cntlr", "delete",
+		"--id", "0x0000000000000011").(*pb.DeleteCntlrRequest)
+	if padded.CntlrId != 17 {
+		t.Errorf("--id 0x0000000000000011 sent %d, want 17", padded.CntlrId)
 	}
 
 	side := runArgv(t, "InspectSide",

@@ -217,6 +217,25 @@ func TestCloneMdNamesNeverMatchASlicesNames(t *testing.T) {
 	}
 }
 
+// TestSliceIndexStaysBelowTheMetaBit is the tripwire of the meta bit
+// (architecture.md, md names): a meta group's slice field is its slice
+// index with the high bit set, so a slice index that reaches that bit gives
+// a data group the slice field of another slice's meta group, and both
+// groups the same two md names on one controller node. Raising
+// MaxSliceCntPerSp past 128 fails here; at 128, the last meta field is the
+// clone field, which TestCloneMdNamesNeverMatchASlicesNames fails.
+func TestSliceIndexStaysBelowTheMetaBit(t *testing.T) {
+	const metaBit = 0x80
+	lastSlice := uint32(MaxSliceCntPerSp - 1)
+	if lastSlice >= metaBit {
+		nf := NewNameFmt("")
+		t.Fatalf("the last slice index %#x reaches the meta bit %#x: slice "+
+			"%#x's data group and slice 0's meta group are both %q",
+			lastSlice, metaBit, metaBit,
+			nf.CnMdArrayName(testSp, metaBit, 0, false))
+	}
+}
+
 // TestMdNamesAtTheGroupCeiling is the tripwire of MaxGrpCntPerSlice
 // (architecture.md, md names):
 // the last group index a slice's list can hold must still format as the two

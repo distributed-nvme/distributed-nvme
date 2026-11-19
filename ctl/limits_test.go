@@ -7,6 +7,9 @@
 // declared as pflag numbers, which pflag parses with the command line, and
 // one over the flags declared as strings that dnvctl parses as numbers
 // itself — the ids, the id and slot lists, the level and the global --rev.
+// The same walks hold every such number to its one spelling, decimal or hex
+// after 0x, and every one but the numeric lists to the refusal of a typed
+// empty value.
 // Every other limit is the gateway's (architecture.md, Common validation),
 // the bounds on a count or a size and the lengths of a name or an NQN alike,
 // and dnvctl forwards the value without looking at it (CT8): an accepted
@@ -1077,5 +1080,114 @@ func TestTextNumbersParseAtTheirFieldWidth(t *testing.T) {
 					"dnvctl: invalid --"+flag.name+":")
 			}
 		})
+	}
+}
+
+// ---------------------------------------------------------------------------
+// The spelling of a number: decimal, or hex after 0x
+// ---------------------------------------------------------------------------
+
+// wholeNumber is one flag whose value fills a whole-number field of the
+// request, found by either width walk.
+type wholeNumber struct {
+	path string
+	name string
+	// pflagNumber is a flag declared as a pflag number, whose refusal is
+	// pflag's "invalid argument" message rather than dnvctl's own.
+	pflagNumber bool
+}
+
+// wholeNumberFlags is every flag both width walks find: the pflag numbers
+// and the numbers held as strings.
+func wholeNumberFlags(t *testing.T, cmdToRpc map[string]string) []wholeNumber {
+	t.Helper()
+	var out []wholeNumber
+	for _, flag := range numericLeafFlags(t) {
+		out = append(out, wholeNumber{flag.path, flag.name, true})
+	}
+	for _, flag := range textNumberFlags(t, cmdToRpc) {
+		out = append(out, wholeNumber{flag.path, flag.name, false})
+	}
+	return out
+}
+
+// refusalPrefix is the start of the usage error a value of this flag that
+// does not parse gets: pflag's for a pflag number, dnvctl's own otherwise.
+func (n wholeNumber) refusalPrefix(text string) string {
+	if n.pflagNumber {
+		return fmt.Sprintf("dnvctl: invalid argument %q for %q flag",
+			text, "--"+n.name)
+	}
+	return "dnvctl: invalid --" + n.name + ":"
+}
+
+// TestNumbersTakeDecimalOrHexOnly walks every whole number dnvctl puts in a
+// request field (dnvctl.md, Conventions, Value types). Each takes hex after
+// 0x, in either case and padded with zeros, and reaches exactly one field as
+// the number the hex spells. Every other spelling Go's base-0 parse takes is
+// a usage error that issues no RPC: a leading zero, which base 0 reads as
+// octal, so a padded hex id copied from a device name or an NQN without its
+// 0x would name another object; 0o and 0b; an underscore; and a plus sign.
+// Decimal itself is the width walks' (textProbe and the field ends).
+func TestNumbersTakeDecimalOrHexOnly(t *testing.T) {
+	cmdToRpc := rpcOfCmd()
+	for _, flag := range wholeNumberFlags(t, cmdToRpc) {
+		t.Run(flag.path+" --"+flag.name, func(t *testing.T) {
+			for _, text := range []string{"0xc9", "0X00C9"} {
+				client := &recordingClient{want: cmdToRpc[flag.path]}
+				res := runLeaf(t, client, flag.path, "--"+flag.name, text)
+				wantAccepted(t, res, client)
+				if client.req == nil {
+					continue
+				}
+				kinds := fieldsHolding(client.req.ProtoReflect(), textProbe)
+				if len(kinds) != 1 {
+					t.Errorf("--%s %s reached %d fields as %s, want one",
+						flag.name, text, len(kinds), textProbe)
+				}
+			}
+			for _, text := range []string{
+				"0201", "00", "0o311", "0b11001001", "2_01", "0x_c9", "+201",
+			} {
+				client := &recordingClient{}
+				res := runLeaf(t, client, flag.path, "--"+flag.name, text)
+				wantUnparsed(t, res, client, flag.name, text,
+					flag.refusalPrefix(text))
+			}
+		})
+	}
+}
+
+// TestTypedEmptyNumberIsAUsageError holds every whole-number flag but the
+// three numeric lists to the rule of a typed empty value (dnvctl.md,
+// Conventions, Value types): typed with an empty value, or with spaces
+// alone, it is a usage error that issues no RPC, as an id fed an unset
+// shell variable must not go out as zero. Left out, an id flag still sends
+// zero, which `repair create` reads as a fresh leg. A list typed empty is
+// the empty list (TestListFlagsReplaceOnSet).
+func TestTypedEmptyNumberIsAUsageError(t *testing.T) {
+	cmdToRpc := rpcOfCmd()
+	lists := []string{"ids", "bad-legs", "slots"}
+	for _, flag := range wholeNumberFlags(t, cmdToRpc) {
+		if slices.Contains(lists, flag.name) {
+			continue
+		}
+		for _, text := range []string{"", "  "} {
+			t.Run(fmt.Sprintf("%s --%s=%q", flag.path, flag.name, text),
+				func(t *testing.T) {
+					client := &recordingClient{}
+					res := runLeaf(t, client, flag.path,
+						"--"+flag.name+"="+text)
+					wantUnparsed(t, res, client, flag.name, strconv.Quote(text),
+						flag.refusalPrefix(text))
+				})
+		}
+	}
+
+	req := runArgv(t, "CreateRepair", "repair", "create", "--name", "r1",
+		"--grp", "5", "--bad-legs", "7").(*pb.CreateRepairRequest)
+	if req.RetiredLegId != 0 {
+		t.Errorf("repair create with no --retired-leg sent %d, want 0",
+			req.RetiredLegId)
 	}
 }

@@ -22,28 +22,29 @@ import (
 )
 
 // cntlrIdFlag declares the group's identity flag, the cntlr_id (dnvctl.md,
-// Conventions). It is a string flag read back through hexOf so that Go
-// base-0 parsing applies — 3 and 0x3 name the same controller, so an id
-// copied from a device name or an NQN, which spell ids in zero-padded hex,
-// is typed with the 0x, and one copied from dnvctl's JSON, a log record's id
-// attribute or a gateway message, which print ids in decimal, without it —
-// and so that a malformed value is a usage error (exit 2) before any RPC is
-// issued rather than an INVALID_ARGUMENT from the gateway.
+// Conventions). It is a string flag read back through hexOf so that decimal
+// and hex after 0x both apply — 3 and 0x3 name the same controller, so an
+// id copied from a device name or an NQN, which spell ids in zero-padded
+// hex, is typed with the 0x, and one copied from dnvctl's JSON, a log
+// record's id attribute or a gateway message, which print ids in decimal,
+// without it — and so that a malformed or typed-empty value is a usage error
+// (exit 2) before any RPC is issued rather than an INVALID_ARGUMENT from the
+// gateway.
 //
 // The spelling matches `sp inspect-side --id` on purpose even though that one
 // is a side id: the RPC decides what the id means, as in gatewayctl
 // (dnvctl.md, Conventions).
 func cntlrIdFlag(flags *pflag.FlagSet) {
-	flags.String("id", "", "cntlr_id (base 0; 0x accepted)")
+	flags.String("id", "", "cntlr_id (decimal, or hex after 0x)")
 }
 
 // registerCntlr builds the `cntlr` group and hangs it off the root
 // (dnvctl.md, `cntlr` — `ctl/cntlr.go`).
 func registerCntlr(root *cobra.Command) {
 	// cntlr create — CreateCntlr. --slot is the cntlid_slot the new
-	// controller takes; it is a plain decimal index, not an id, so it is a
-	// uint32 flag rather than a base-0 string (the same split gatewayctl
-	// draws between --slot and --id).
+	// controller takes; it is an index, not an id, so it is a uint32 flag
+	// rather than a string read by hexOf (the same split gatewayctl draws
+	// between --slot and --id); both take decimal and hex after 0x.
 	//
 	// --cn-black/--cn-white become the CnSelector that steers which CN the
 	// gateway places the controller on; both empty yields a nil selector,

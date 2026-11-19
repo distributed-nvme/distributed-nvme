@@ -503,10 +503,6 @@ No case is known today.
   fails. Then a change makes that controller node the primary again
   before the syncup of the next check round fences the path. State: fix
   later. Not seen in the lab.
-- **dnvctl parses an id with leading zeros as octal.** An id copied from a
-  device name can name another object. A forced start or a delete can act
-  on the wrong group or leg. State: fix decided, dnvctl refuses such an
-  id. Not seen in the lab.
 - **A change without a revision token overwrites another operator's
   change.** A revision token is the revision the caller last read, which
   dnvctl sends with `--rev`; the gateway refuses the change if the

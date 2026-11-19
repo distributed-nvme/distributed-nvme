@@ -32,8 +32,10 @@
 # revision 31; (c) replies render per CT4, with byte-exact goldens for the
 # sweep case's three representatives; (d) failures render per CT5 and usage
 # errors issue no RPC at all; (e) trace ids arrive on the wire, minted when not
-# given. Correctness only: the transport case's two timing assertions bound a
-# deadline, not a latency.
+# given; (f) a number is decimal or hex after 0x, an id typed empty is a usage
+# error, and a result stdout refuses is exit 3 after one RPC (the errors
+# case's stages 8-10). Correctness only: the transport case's two timing
+# assertions bound a deadline, not a latency.
 #
 # Log reading: fakegateway.log is one JSON object per line, and a log being
 # appended to while we `cat` it can end in a torn line, so every read goes
@@ -141,6 +143,12 @@ CTL_ADDR="127.0.0.1:$FGW_PORT"
 CTL_TRACE=1
 CTL_CLUSTER=1
 CTL_ENV=""
+
+# CTL_SINK, when not empty, is the device dnvctl's stdout goes to instead of
+# $WORK/last.out, which ctl_exec then empties so the stdout section reads
+# empty: the errors case's stage 10 sends a result to /dev/full. Never cat
+# the device, which reads zeros forever. ctl_defaults clears it.
+CTL_SINK=""
 
 # The five results of the last ctl_exec. They are globals on purpose: see the
 # "Round trips" paragraph in the header.
@@ -333,6 +341,7 @@ ctl_defaults() {
 	CTL_TRACE=1
 	CTL_CLUSTER=1
 	CTL_ENV=""
+	CTL_SINK=""
 }
 
 # ctl_prefix is the global argv prefix, built from the four levers.
@@ -380,11 +389,15 @@ ctl_section() { # <framed> <n>
 # separable, and it leaves the last invocation's raw output on the VM for the
 # diagnostics (Integration test plan, Cleanup).
 ctl_exec() { # <args…>
-	local quoted remote framed
+	local quoted remote framed out="$WORK/last.out" empty=""
 	quoted=$(printf '%q ' "$@")
+	if [ -n "$CTL_SINK" ]; then
+		out=$CTL_SINK
+		empty=": >$WORK/last.out;"
+	fi
 	remote="$(ctl_snapshot); echo $FRAME;"
-	remote="$remote $CTL_ENV$(ctl_prefix) $quoted"
-	remote="$remote >$WORK/last.out 2>$WORK/last.err; echo \$? >$WORK/last.rc;"
+	remote="$remote $empty $CTL_ENV$(ctl_prefix) $quoted"
+	remote="$remote >$out 2>$WORK/last.err; echo \$? >$WORK/last.rc;"
 	remote="$remote cat $WORK/last.rc; echo $FRAME;"
 	remote="$remote cat $WORK/last.err; echo $FRAME;"
 	remote="$remote cat $WORK/last.out; echo $FRAME;"
@@ -756,6 +769,10 @@ preflight_server() {
 	missing=$(sshw "for b in bash nohup pkill ss df awk sed; do" \
 		"command -v \$b >/dev/null || echo \$b; done")
 	[ -z "$missing" ] || die "missing on $TARGET: $missing"
+	# The errors case's stage 10 sends a result to /dev/full, the device
+	# that refuses every write with ENOSPC.
+	sshw "[ -c /dev/full ] && [ -w /dev/full ]" ||
+		die "/dev/full is not a writable character device on $TARGET"
 	local free
 	free=$(sshw "df -Pk /var/tmp | awk 'NR==2 { print \$4 }'")
 	assert_ge "$free" 1048576 "/var/tmp free space in KiB on $TARGET"
@@ -1345,7 +1362,7 @@ case_behavior() {
 		"--rev 0 must render as a present, empty sp_rev"
 
 	# -------------------------------------------------------------------
-	stage 3 "td create --rev 0x1f: base-0 parse, revision 31"
+	stage 3 "td create --rev 0x1f: hex after 0x, revision 31"
 	# -------------------------------------------------------------------
 	ctl_ok td create --name t0 --rev 0x1f
 	assert_req CreateThinDevice \
@@ -1355,7 +1372,7 @@ case_behavior() {
 	# revision ever stops being a uint64-as-string (Integration test plan,
 	# What a pass means).
 	assert_field "$(state_req "$CTL_POST" CreateThinDevice)" \
-		'.sp_rev.revision' "31" "0x1f parsed base-0 into revision 31"
+		'.sp_rev.revision' "31" "0x1f parsed as hex into revision 31"
 
 	# -------------------------------------------------------------------
 	stage 4 "sp create --redund none: the other arm of the oneof"
@@ -1550,6 +1567,57 @@ EOF
 	ctl_usage DeleteCluster cluster delete --name c1 --rev 7
 	assert_ne "$(printf '%s\n' "$CTL_ERR" | grep -c -e '--rev' || true)" \
 		"0" "the refusal must name --rev: got '$CTL_ERR'"
+
+	# -------------------------------------------------------------------
+	stage 8 "a number with a leading zero is exit 2 and issues NO RPC"
+	# -------------------------------------------------------------------
+	# A number is decimal or hex after 0x (Conventions, Value types). A
+	# padded hex id copied from a device name without its 0x would read as
+	# octal, 0000000000000011 as 9 where the id is 17, so it is refused,
+	# on an id flag and on a pflag number alike; typed with its 0x, the
+	# same padded id goes out as 17.
+	ctl_usage DeleteCntlr cntlr delete --id 0000000000000011
+	assert_ne "$(printf '%s\n' "$CTL_ERR" | grep -c -e '--id' || true)" \
+		"0" "the refusal must name --id: got '$CTL_ERR'"
+	ctl_usage DeleteNamespace ns delete --nqn "$NQN" --idx 010
+	assert_ne "$(printf '%s\n' "$CTL_ERR" | grep -c -e '--idx' || true)" \
+		"0" "the refusal must name --idx: got '$CTL_ERR'"
+	ctl_ok cntlr delete --id 0x0000000000000011
+	assert_count_delta DeleteCntlr 1 "the padded id with its 0x is one RPC"
+	assert_req DeleteCntlr \
+		"{\"cluster_name\":\"$CLUSTER\",\"sp_name\":\"$SP\",\"cntlr_id\":\"17\"}"
+
+	# -------------------------------------------------------------------
+	stage 9 "an id typed empty is exit 2 and issues NO RPC"
+	# -------------------------------------------------------------------
+	# An unset shell variable after an id flag must not go out as zero,
+	# which a repair create reads as a fresh leg (Conventions, Value types).
+	ctl_usage CreateRepair \
+		repair create --name r1 --grp 5 --bad-legs 7 --retired-leg=
+	assert_ne "$(printf '%s\n' "$CTL_ERR" |
+		grep -c -e '--retired-leg' || true)" \
+		"0" "the refusal must name --retired-leg: got '$CTL_ERR'"
+
+	# -------------------------------------------------------------------
+	stage 10 "a result stdout refuses is exit 3, after the one RPC"
+	# -------------------------------------------------------------------
+	# /dev/full answers the write with ENOSPC. The call took effect, so it
+	# is neither exit 1 nor exit 2 (CT5): one RPC counted, and one stderr
+	# line under the stage's trace id.
+	CTL_SINK=/dev/full
+	ctl_exec cluster list
+	ctl_defaults
+	assert_eq "$CTL_RC" "3" "exit code of a result /dev/full refused"
+	assert_eq "$CTL_OUT" "" "the stdout section must be empty"
+	assert_count_delta ListClusters 1 "the call was made"
+	local lines matched want
+	lines=$(printf '%s\n' "$CTL_ERR" | grep -c . || true)
+	assert_eq "$lines" "1" "stderr of exit 3 must be exactly one line"
+	want="^dnvctl: the call returned OK, but its result was not written: "
+	want="$want.* (trace_id $TRACE)\$"
+	matched=$(printf '%s\n' "$CTL_ERR" | grep -c "$want" || true)
+	assert_ne "$matched" "0" \
+		"stderr must be the exit-3 line under $TRACE, got '$CTL_ERR'"
 }
 
 # ---------------------------------------------------------------------------

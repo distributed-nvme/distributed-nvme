@@ -10,7 +10,8 @@
 //     common's init() logs there and stdout is reserved for the command
 //     result (dnvctl.md CT7).
 //  2. runs the command tree and exits with its code: 0 OK, 1 RPC or
-//     connection failure, 2 usage error (dnvctl.md CT5).
+//     connection failure, 2 usage error, 3 the RPC returned OK and its
+//     result was not written (dnvctl.md CT5).
 //
 // dnvctl never links etcd (CT6): its only server-side dependency is pb plus
 // common.

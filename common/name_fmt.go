@@ -301,7 +301,8 @@ func (nf *NameFmt) CnMdArrayName(
 // carry it: their slice field is a slice index below MaxSliceCntPerSp, the
 // meta bit set or not, and their group field an index below
 // MaxGrpCntPerSlice (TestCloneMdNamesNeverMatchASlicesNames is the
-// tripwire).
+// tripwire). A slice index stays below the meta bit, so a data group's
+// slice field is never a meta group's (TestSliceIndexStaysBelowTheMetaBit).
 const cnCloneMdField = 0xff
 
 // getCloneShortId folds a cluster, a cn and an sp into 32 bits, as

@@ -56,16 +56,23 @@ var spLevels = map[string]pb.SpLevel{
 // RAW NUMBER — the last of those is not a convenience but CT8: dnvctl must
 // not second-guess an enum, so `--level 17`, a value the enum does not
 // declare, is forwarded as typed and the gateway's validateSpLevel is the one
-// that refuses it. Only a spelling that is neither a known name nor a number
-// fails to parse (exit 2).
+// that refuses it. The number is spelled as every whole number dnvctl sends
+// (numberSyntax), save that the enum is an int32, so one minus may lead it.
+// Only a spelling that is neither a known name nor such a number fails to
+// parse (exit 2).
 func spParseLevel(spec string) (pb.SpLevel, error) {
-	name := strings.ToUpper(strings.TrimSpace(spec))
-	if level, ok := spLevels[strings.TrimPrefix(name, "SP_LEVEL_")]; ok {
+	text := strings.TrimSpace(spec)
+	if level, ok := spLevels[strings.TrimPrefix(
+		strings.ToUpper(text), "SP_LEVEL_")]; ok {
 		return level, nil
 	}
-	value, err := strconv.ParseInt(strings.TrimSpace(spec), 0, 32)
+	if !numberSyntax.MatchString(strings.TrimPrefix(text, "-")) {
+		return 0, fmt.Errorf("invalid --level: unknown sp_level %q: a "+
+			"name, or a number in decimal or in hex after 0x", spec)
+	}
+	value, err := strconv.ParseInt(text, 0, 32)
 	if err != nil {
-		return 0, fmt.Errorf("invalid --level: unknown sp_level %q", spec)
+		return 0, fmt.Errorf("invalid --level: %w", err)
 	}
 	return pb.SpLevel(value), nil
 }
@@ -407,7 +414,7 @@ func spFindNamesCmd() *cobra.Command {
 			}, nil
 		})
 	cmd.Flags().String("ids", "",
-		"comma-separated sp_id_list (base 0, so 0x11 is accepted)")
+		"comma-separated sp_id_list (each in decimal, or in hex after 0x)")
 	return cmd
 }
 

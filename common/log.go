@@ -116,20 +116,27 @@ func init() {
 
 // TruncForLog prepares string file data for logging: valid UTF-8 is truncated
 // to the first LogStrDataLimit characters; anything else is reduced to its
-// size (log.md R11).
+// size (log.md R11). It counts the characters in place and copies only the
+// ones it keeps, since a file read logs its whole data through it and the
+// cn agent reads a thin_dump document of tens of MB that way (readThinDump,
+// agent/cnagent/thinbm.go).
 func TruncForLog(s string) string {
 	if !utf8.ValidString(s) {
 		return fmt.Sprintf("<binary %d bytes>", len(s))
 	}
-	runes := []rune(s)
-	if len(runes) <= LogStrDataLimit {
+	total := utf8.RuneCountInString(s)
+	if total <= LogStrDataLimit {
 		return s
 	}
-	return fmt.Sprintf(
-		"%s...(%d chars total)",
-		string(runes[:LogStrDataLimit]),
-		len(runes),
-	)
+	cut, kept := 0, 0
+	for i := range s {
+		if kept == LogStrDataLimit {
+			cut = i
+			break
+		}
+		kept++
+	}
+	return fmt.Sprintf("%s...(%d chars total)", s[:cut], total)
 }
 
 // PbToLogValue renders a protobuf message as a JSON-marshalable value for
