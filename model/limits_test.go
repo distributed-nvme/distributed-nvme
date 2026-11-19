@@ -101,6 +101,10 @@ func widestCounts() map[protoreflect.FullName]int {
 		"Slice.data_grp_list":                 common.MaxGrpCntPerSlice,
 		"Group.leg_list":                      common.MaxAllocLegPerGrp,
 		"Group.retired_leg_id_list":           common.MaxRetiredLegPerGrp,
+		// A forced-start mark passes each kind of refusal at most once and
+		// never NONE, as the gateway refuses either (architecture.md,
+		// Repairs, ForceStartGroup).
+		"ForcedStart.override_list": len(pb.ForcedStartOverride_name) - 1,
 		// One bad leg and one new leg per repair, and the retired time of
 		// a new leg taken from a retired leg.
 		"Repair.new_leg_list":                1,

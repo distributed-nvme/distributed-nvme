@@ -313,7 +313,8 @@ func TestForceStartGroupNamesARepairsNewLeg(t *testing.T) {
 // TestForceStartGroupRefusesAPartialLeg pins the refusal of a partial leg
 // (architecture.md, Repairs, ForceStartGroup): a mark naming a new leg the
 // repair took back, which carries the partial mark, is FAILED_PRECONDITION
-// with nothing written, and goes through with the force.
+// with nothing written, the overrides of the other two kinds passing
+// nothing of it, and goes through with the override partial.
 func TestForceStartGroupRefusesAPartialLeg(t *testing.T) {
 	env := newVolEnv(t)
 	agent := fsPrimary(env)
@@ -336,15 +337,34 @@ func TestForceStartGroupRefusesAPartialLeg(t *testing.T) {
 		t.Errorf("the refusal's message %q does not say that leg of the "+
 			"repair \"rep-a\" is partial", msg)
 	}
+	if !strings.Contains(msg, "the override partial passes it") {
+		t.Errorf("the refusal's message %q does not name its override", msg)
+	}
 	env.wantNoWrite("the refused ForceStartGroup", before)
 	req := fsRequest(env, newLegId)
-	req.Force = true
+	req.OverrideList = []pb.ForcedStartOverride{
+		pb.ForcedStartOverride_FORCED_START_OVERRIDE_OLDER_LEG,
+		pb.ForcedStartOverride_FORCED_START_OVERRIDE_BAD_BLOCKS,
+	}
+	_, err = env.srv.ForceStartGroup(env.ctx, req)
+	if msg := volWantCode(t, err, codes.FailedPrecondition); !strings.Contains(
+		msg, "is partial") {
+		t.Errorf("with the other two overrides: %q, want the partial leg "+
+			"refused", msg)
+	}
+	env.wantNoWrite("the refused ForceStartGroup with the other overrides",
+		before)
+	req = fsRequest(env, newLegId)
+	req.OverrideList = []pb.ForcedStartOverride{
+		pb.ForcedStartOverride_FORCED_START_OVERRIDE_PARTIAL}
 	if _, err := env.srv.ForceStartGroup(env.ctx, req); err != nil {
-		t.Fatalf("the forced mark on the partial leg: %v", err)
+		t.Fatalf("the mark on the partial leg with its override: %v", err)
 	}
 	if mark := fsMark(env, volDataGrpId); mark.GetLegId() != newLegId ||
-		!mark.GetForce() {
-		t.Errorf("the mark: got %v, want leg %d with force", mark, newLegId)
+		!slices.Equal(mark.GetOverrideList(), req.GetOverrideList()) ||
+		mark.GetForce() {
+		t.Errorf("the mark: got %v, want leg %d with the override partial "+
+			"and no force", mark, newLegId)
 	}
 }
 
@@ -982,34 +1002,69 @@ func TestForceStartGroupResolvesThePool(t *testing.T) {
 	env.wantNoWrite("the refused calls", before)
 }
 
-// TestForceStartGroupCarriesTheForce pins the operator's force of the call
-// (cnagent.md CN12): a write with force puts it on the mark, and a cancel
-// with force is INVALID_ARGUMENT before any read, with nothing written.
-func TestForceStartGroupCarriesTheForce(t *testing.T) {
+// TestForceStartGroupCarriesTheOverrides pins the refusals the call passes
+// (cnagent.md CN12): a write puts the request's overrides on the mark as
+// given and never a force; a cancel with an override, an override that names
+// no refusal or a number no refusal has, and one named twice are each
+// INVALID_ARGUMENT before any read, with nothing written.
+func TestForceStartGroupCarriesTheOverrides(t *testing.T) {
 	env := newVolEnv(t)
 	agent := fsPrimary(env)
 	fsReport(agent, volDataGrpId, pb.ResStatus_RES_STATUS_ERROR)
+	older := pb.ForcedStartOverride_FORCED_START_OVERRIDE_OLDER_LEG
+	badBlocks := pb.ForcedStartOverride_FORCED_START_OVERRIDE_BAD_BLOCKS
 	req := fsRequest(env, volDataLegA)
-	req.Force = true
+	req.OverrideList = []pb.ForcedStartOverride{badBlocks, older}
 	if _, err := env.srv.ForceStartGroup(env.ctx, req); err != nil {
-		t.Fatalf("ForceStartGroup with force: %v", err)
+		t.Fatalf("ForceStartGroup with two overrides: %v", err)
 	}
-	if mark := fsMark(env, volDataGrpId); !mark.GetForce() {
-		t.Fatalf("the mark %v carries no force", mark)
+	if mark := fsMark(env, volDataGrpId); mark.GetForce() ||
+		!slices.Equal(mark.GetOverrideList(), req.GetOverrideList()) {
+		t.Fatalf("the mark %v, want the request's two overrides and no "+
+			"force", mark)
 	}
 	dump := env.dump()
-	cancel := fsCancel(env)
-	cancel.Force = true
-	_, err := env.srv.ForceStartGroup(env.ctx, cancel)
-	if status.Code(err) != codes.InvalidArgument ||
-		!strings.Contains(err.Error(), "force is set with cancel") {
-		t.Fatalf("a cancel with force: %v, want INVALID_ARGUMENT", err)
+	for _, tc := range []struct {
+		name string
+		req  func() *pb.ForceStartGroupRequest
+		want string
+	}{
+		{"a cancel with an override", func() *pb.ForceStartGroupRequest {
+			cancel := fsCancel(env)
+			cancel.OverrideList = []pb.ForcedStartOverride{older}
+			return cancel
+		}, "override_list is set with cancel"},
+		{"an override of no refusal", func() *pb.ForceStartGroupRequest {
+			bad := fsRequest(env, volDataLegA)
+			bad.OverrideList = []pb.ForcedStartOverride{
+				pb.ForcedStartOverride_FORCED_START_OVERRIDE_NONE}
+			return bad
+		}, "override_list[0] names no refusal"},
+		{"an unknown override", func() *pb.ForceStartGroupRequest {
+			bad := fsRequest(env, volDataLegA)
+			bad.OverrideList = []pb.ForcedStartOverride{older, 9}
+			return bad
+		}, "override_list[1] names no refusal"},
+		{"an override named twice", func() *pb.ForceStartGroupRequest {
+			bad := fsRequest(env, volDataLegA)
+			bad.OverrideList = []pb.ForcedStartOverride{older, badBlocks,
+				older}
+			return bad
+		}, "names FORCED_START_OVERRIDE_OLDER_LEG twice"},
+	} {
+		_, err := env.srv.ForceStartGroup(env.ctx, tc.req())
+		if status.Code(err) != codes.InvalidArgument ||
+			!strings.Contains(err.Error(), tc.want) {
+			t.Errorf("%s: %v, want INVALID_ARGUMENT %q", tc.name, err,
+				tc.want)
+		}
+		env.wantNoWrite(tc.name, dump)
 	}
-	env.wantNoWrite("a cancel with force", dump)
 }
 
 // TestInspectGroup pins InspectGroup (architecture.md, Repairs): it asks the
-// primary's agent for the group's members with the request's leg and force,
+// primary's agent for the group's members with the request's leg and
+// overrides,
 // adds each leg's disk node and health epochs from the records and its row
 // from the primary's report, lists the retired legs, passes the agent's dry
 // run through, carries the gateway's own refusal of the leg in the dry run
@@ -1041,7 +1096,8 @@ func TestInspectGroup(t *testing.T) {
 	before := env.dump()
 	reply, err := env.srv.InspectGroup(env.ctx, &pb.InspectGroupRequest{
 		ClusterName: env.cluster, SpName: volSpName, GrpId: volDataGrpId,
-		LegId: volDataLegA, Force: true,
+		LegId: volDataLegA, OverrideList: []pb.ForcedStartOverride{
+			pb.ForcedStartOverride_FORCED_START_OVERRIDE_OLDER_LEG},
 	})
 	if err != nil {
 		t.Fatalf("InspectGroup: %v", err)
@@ -1051,8 +1107,10 @@ func TestInspectGroup(t *testing.T) {
 	reqs := agent.inspectReqs
 	agent.mu.Unlock()
 	if len(reqs) != 1 || reqs[0].GetGrpId() != volDataGrpId ||
-		reqs[0].GetLegId() != volDataLegA || !reqs[0].GetForce() {
-		t.Fatalf("InspectGrp requests %v, want the group, leg and force",
+		reqs[0].GetLegId() != volDataLegA ||
+		!slices.Equal(reqs[0].GetOverrideList(), []pb.ForcedStartOverride{
+			pb.ForcedStartOverride_FORCED_START_OVERRIDE_OLDER_LEG}) {
+		t.Fatalf("InspectGrp requests %v, want the group, leg and override",
 			reqs)
 	}
 	if reply.GetArrayState() != "broken" || len(reply.GetLegList()) != 2 {
@@ -1175,11 +1233,13 @@ func TestInspectGroupListsAnOpenRepairsNewLeg(t *testing.T) {
 // TestInspectGroupListsThePartialMark pins the dry run's list of refusals an
 // override passes (architecture.md, Repairs, InspectGroup): a named new leg
 // the repair took back that carries the partial mark is the list's first
-// entry, the gateway's, before the agent's own. With no force it is the dry
-// run's refusal, as ForceStartGroup would write no mark, before the refusal
-// of a running array, which the call meets after it: the agent's entries
-// stay listed beside it, and nothing the start would do is shown. With the
-// force it is listed as passed, and the agent's dry run stands.
+// entry, the gateway's, before the agent's own. With no override partial it
+// is the dry run's refusal, as ForceStartGroup would write no mark, before
+// the refusal of a running array, which the call meets after it: the
+// agent's entries stay listed beside it, and nothing the start would do is
+// shown. With the override it is listed as passed, and the agent's dry run
+// stands. The overrides are checked as ForceStartGroup's are, and one with
+// no leg, which no dry run reads, is refused.
 func TestInspectGroupListsThePartialMark(t *testing.T) {
 	env := newVolEnv(t)
 	agent := fsPrimary(env)
@@ -1193,14 +1253,17 @@ func TestInspectGroupListsThePartialMark(t *testing.T) {
 	badBlocks := pb.ForcedStartOverride_FORCED_START_OVERRIDE_BAD_BLOCKS
 	partial := pb.ForcedStartOverride_FORCED_START_OVERRIDE_PARTIAL
 	bbl := "named leg carries a bad-block list of 2 entries"
-	inspect := func(force bool, dry *pb.ForcedStartDryRun) *pb.ForcedStartDryRun {
+	inspect := func(
+		overrides []pb.ForcedStartOverride,
+		dry *pb.ForcedStartDryRun,
+	) *pb.ForcedStartDryRun {
 		t.Helper()
 		agent.mu.Lock()
 		agent.inspectGrp = &pb.InspectGrpReply{DryRun: dry}
 		agent.mu.Unlock()
 		reply, err := env.srv.InspectGroup(env.ctx, &pb.InspectGroupRequest{
 			ClusterName: env.cluster, SpName: volSpName, GrpId: volDataGrpId,
-			LegId: newLegId, Force: force,
+			LegId: newLegId, OverrideList: overrides,
 		})
 		if err != nil {
 			t.Fatalf("InspectGroup: %v", err)
@@ -1220,21 +1283,21 @@ func TestInspectGroupListsThePartialMark(t *testing.T) {
 		}
 	}
 
-	dry := inspect(false, &pb.ForcedStartDryRun{
+	dry := inspect([]pb.ForcedStartOverride{badBlocks}, &pb.ForcedStartDryRun{
 		Refusal:     "forced start refused (bad-blocks): " + bbl,
 		StopsArray:  true,
 		RefusalList: []*pb.ForcedStartRefusal{{Override: badBlocks, Text: bbl}},
 	})
 	if !strings.Contains(dry.GetRefusal(), "is partial") ||
 		len(dry.GetZeroLegIdList()) != 0 || dry.GetStopsArray() {
-		t.Errorf("the dry run with no force: %v, want the partial mark's "+
-			"refusal, nothing stopped or zeroed", dry)
+		t.Errorf("the dry run with the override bad-blocks alone: %v, want "+
+			"the partial mark's refusal, nothing stopped or zeroed", dry)
 	}
-	wantList("with no force", dry, false)
+	wantList("with the override bad-blocks alone", dry, false)
 	// Over a running array the partial mark still comes first, as
 	// ForceStartGroup refuses it before it reads the report.
 	fsReport(agent, volDataGrpId, pb.ResStatus_RES_STATUS_OK)
-	dry = inspect(false, &pb.ForcedStartDryRun{
+	dry = inspect(nil, &pb.ForcedStartDryRun{
 		RefusalList: []*pb.ForcedStartRefusal{{Override: badBlocks, Text: bbl}},
 	})
 	if !strings.Contains(dry.GetRefusal(), "is partial") {
@@ -1244,7 +1307,7 @@ func TestInspectGroupListsThePartialMark(t *testing.T) {
 	wantList("over a running array", dry, false)
 	fsReport(agent, volDataGrpId, pb.ResStatus_RES_STATUS_ERROR)
 
-	dry = inspect(true, &pb.ForcedStartDryRun{
+	dry = inspect([]pb.ForcedStartOverride{partial, badBlocks}, &pb.ForcedStartDryRun{
 		ZeroLegIdList: []uint64{volDataLegB},
 		Update:        "uuid,force-no-bbl",
 		StopsArray:    true,
@@ -1254,9 +1317,36 @@ func TestInspectGroupListsThePartialMark(t *testing.T) {
 	if dry.GetRefusal() != "" || dry.GetUpdate() != "uuid,force-no-bbl" ||
 		!dry.GetStopsArray() ||
 		!slices.Equal(dry.GetZeroLegIdList(), []uint64{volDataLegB}) {
-		t.Errorf("the dry run with the force: %v, want the agent's", dry)
+		t.Errorf("the dry run with both overrides: %v, want the agent's",
+			dry)
 	}
-	wantList("with the force", dry, true)
+	wantList("with both overrides", dry, true)
+
+	// The overrides are checked as ForceStartGroup checks them, and only a
+	// dry run reads them.
+	for _, tc := range []struct {
+		name string
+		req  *pb.InspectGroupRequest
+		want string
+	}{
+		{"an override with no leg", &pb.InspectGroupRequest{
+			ClusterName: env.cluster, SpName: volSpName,
+			GrpId: volDataGrpId, OverrideList: []pb.ForcedStartOverride{
+				partial},
+		}, "override_list is set with no leg_id"},
+		{"an override of no refusal", &pb.InspectGroupRequest{
+			ClusterName: env.cluster, SpName: volSpName,
+			GrpId: volDataGrpId, LegId: newLegId,
+			OverrideList: []pb.ForcedStartOverride{partial, 0},
+		}, "override_list[1] names no refusal"},
+	} {
+		_, err := env.srv.InspectGroup(env.ctx, tc.req)
+		if status.Code(err) != codes.InvalidArgument ||
+			!strings.Contains(err.Error(), tc.want) {
+			t.Errorf("%s: %v, want INVALID_ARGUMENT %q", tc.name, err,
+				tc.want)
+		}
+	}
 }
 
 // TestInspectGroupCutsThePartialEntry pins the cut of the gateway's own

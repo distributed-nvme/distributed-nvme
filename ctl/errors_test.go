@@ -216,6 +216,19 @@ func TestUsageErrorsIssueNoRpc(t *testing.T) {
 			[]string{"group", "force-start", "--grp", "1", "--leg", "leg0"}},
 		{"malformed --level",
 			[]string{"sp", "set-level", "--level", "bogus"}},
+		// --override takes its words alone (dnvctl.md, `group` —
+		// `ctl/group.go`), so no other word, an empty item included,
+		// reaches the gateway as a refusal to pass, and the forced start's
+		// retired --force is no flag at all.
+		{"unknown --override word",
+			[]string{"group", "force-start", "--grp", "1", "--leg", "2",
+				"--override", "older-leg,everything"}},
+		{"empty --override item",
+			[]string{"group", "inspect", "--grp", "1", "--leg", "2",
+				"--override", "bad-blocks,"}},
+		{"the removed --force of force-start",
+			[]string{"group", "force-start", "--grp", "1", "--leg", "2",
+				"--force"}},
 		{"malformed --redund",
 			[]string{"sp", "create", "--redund", "raid5"}},
 		{"malformed --count",

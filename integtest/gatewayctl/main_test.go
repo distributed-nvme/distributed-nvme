@@ -479,7 +479,9 @@ func TestCreateRepairRequest(t *testing.T) {
 // TestForceStartGrpRequest pins the request force-start-grp builds: the
 // group, the leg, the cancel flag, and a token message that is present, a
 // zero one when --rev is not given; a cancel carries the leg as typed, so
-// the suite can send the pair the gateway refuses.
+// the suite can send the pair the gateway refuses; --override sends each
+// word as its kind and a number as typed, so the suite can send a value
+// that names no refusal, on force-start-grp and inspect-grp alike.
 func TestForceStartGrpRequest(t *testing.T) {
 	req := runArgv(t, "force-start-grp",
 		"--sp", "sp0", "--rev", "7", "--grp", "0x11", "--leg", "0x12",
@@ -503,6 +505,28 @@ func TestForceStartGrpRequest(t *testing.T) {
 	if cancel.SpRev == nil || cancel.GetSpRev().GetRevision() != 0 {
 		t.Errorf("no --rev sent sp_rev %v, want a present zero token",
 			cancel.SpRev)
+	}
+	overridden := runArgv(t, "force-start-grp", "--sp", "sp0",
+		"--grp", "0x11", "--leg", "5", "--override", "older-leg, partial,0,9",
+	).(*pb.ForceStartGroupRequest)
+	if want := []pb.ForcedStartOverride{
+		pb.ForcedStartOverride_FORCED_START_OVERRIDE_OLDER_LEG,
+		pb.ForcedStartOverride_FORCED_START_OVERRIDE_PARTIAL,
+		0, 9,
+	}; !reflect.DeepEqual(overridden.GetOverrideList(), want) {
+		t.Errorf("--override sent %v, want %v",
+			overridden.GetOverrideList(), want)
+	}
+	dry := runArgv(t, "inspect-grp", "--sp", "sp0", "--grp", "0x11",
+		"--leg", "5", "--override", "bad-blocks",
+	).(*pb.InspectGroupRequest)
+	if got := dry.GetOverrideList(); len(got) != 1 || got[0] !=
+		pb.ForcedStartOverride_FORCED_START_OVERRIDE_BAD_BLOCKS {
+		t.Errorf("inspect-grp --override sent %v, want bad-blocks", got)
+	}
+	var list overrideList
+	if err := list.Set("older-leg,everything"); err == nil {
+		t.Errorf("--override took an unknown word: %v", list)
 	}
 }
 

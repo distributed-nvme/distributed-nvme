@@ -749,6 +749,26 @@ func validateSpLevel(level pb.SpLevel) error {
 	return nil
 }
 
+// validateOverrideList refuses a forced start's list of overrides
+// (architecture.md, Repairs, ForceStartGroup) that holds a kind naming no
+// refusal, NONE or a number the enum does not declare (GW7's "bad enum"
+// row), or that names one kind twice.
+func validateOverrideList(field string, list []pb.ForcedStartOverride) error {
+	seen := make(map[pb.ForcedStartOverride]bool, len(list))
+	for i, override := range list {
+		if _, ok := pb.ForcedStartOverride_name[int32(override)]; !ok ||
+			override == pb.ForcedStartOverride_FORCED_START_OVERRIDE_NONE {
+			return errInvalid("%s[%d] names no refusal: %d", field, i,
+				int32(override))
+		}
+		if seen[override] {
+			return errInvalid("%s names %s twice", field, override)
+		}
+		seen[override] = true
+	}
+	return nil
+}
+
 // validateNodeSelector checks the two address lists of a NodeSelector.
 func validateNodeSelector(field string, selector *pb.NodeSelector) error {
 	if selector == nil {

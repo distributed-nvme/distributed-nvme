@@ -4262,8 +4262,8 @@ func mdCheckShapeSuits(grp *pb.Group) bool {
 // copies, so a leg md holds but not in sync is no longer the copy it was
 // taken back as, while one it holds in sync holds the array's whole data;
 // the cancel gives the leg back as a retired leg with the mark, and a forced
-// start refuses to name a marked leg unless forced (architecture.md, Retired
-// legs). The mark follows only the report a pass reads: a hold md begins
+// start refuses to name a marked leg unless its overrides name PARTIAL
+// (architecture.md, Retired legs). The mark follows only the report a pass reads: a hold md begins
 // and ends between two passes leaves none (architecture.md, Known limits).
 // A repair of a deleting clone, or one the snapshot does not hold, is passed
 // over: the clone drain gives its legs back. A write logs `repair leg

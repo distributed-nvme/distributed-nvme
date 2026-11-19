@@ -4151,12 +4151,15 @@ repair whose flag is already set is answered OK with no write and no bump, a
 token the request carried still being checked first (`gateway.md` GW6).
 Reply `rep_id`.
 
-**ForceStartGroup** — inputs `grp_id`, `leg_id`, `cancel` and `force`: the
-forced start of the group's array from the leg `leg_id` names (Repair,
-Forced start), with the operator's force when `force` is set, or, with
-`cancel`, the withdrawal of the group's mark. Errors, in
+**ForceStartGroup** — inputs `grp_id`, `leg_id`, `cancel` and
+`override_list`: the forced start of the group's array from the leg
+`leg_id` names (Repair, Forced start), passing the kinds of refusal
+`override_list` names (`ForcedStartOverride`: `OLDER_LEG`, `BAD_BLOCKS`,
+`PARTIAL`), or, with `cancel`, the withdrawal of the group's mark. Errors, in
 the order a request meets them: `INVALID_ARGUMENT` when `leg_id` is set with
-`cancel`, or zero without it, and when `force` is set with `cancel`; `FAILED_PRECONDITION` at an `sp_level` at or
+`cancel`, or zero without it, when an entry of `override_list` names no
+refusal (`NONE` or a number the enum does not declare) or a kind is named
+twice, and when `override_list` is set with `cancel`; `FAILED_PRECONDITION` at an `sp_level` at or
 above `SP_LEVEL_NO_REDUND`, where no group array is built, so no primary
 could start one; `INVALID_ARGUMENT` when the pool is `RedundNone`, whose
 groups have no array; `NOT_FOUND` when `grp_id` is in no group of the pool's
@@ -4166,10 +4169,10 @@ the new leg of the group's repair; `FAILED_PRECONDITION` when it is the new
 leg of a `REP_STAGE_ABORTED` repair, which the abort took out of the group
 (Repair, Forced start); `FAILED_PRECONDITION`
 when it is the bad leg of a `REP_STAGE_STARTED` repair, which the mark may
-not name (Repair, Forced start); `FAILED_PRECONDITION`, unless `force` is
-set, when it is a new leg the group's repair took back that carries the
-`partial` mark (Retired legs), since md wrote onto it once and it is no
-longer the whole copy it was; `FAILED_PRECONDITION`
+not name (Repair, Forced start); `FAILED_PRECONDITION`, unless
+`override_list` names `PARTIAL`, when it is a new leg the group's repair
+took back that carries the `partial` mark (Retired legs), since md wrote
+onto it once and it is no longer the whole copy it was; `FAILED_PRECONDITION`
 when the pool has no primary cntlr; `FAILED_PRECONDITION` when the
 primary's latest report reads the group's row `RES_STATUS_OK`, its array
 running, when that report holds no row of the group, or when the primary's
@@ -4203,12 +4206,15 @@ is the guard that sees the node. A cancel names no leg and reads no report,
 so it takes every level and a pool with no primary: a mark that stands acts
 once the level is lowered, so it must be possible to withdraw it where it
 cannot be written. No confirm flag guards the call: its name, and its help in
-`dnvctl`, say what it destroys, as for the delete calls; `force` lets the
-start go on over a member that holds newer data of the same array (Repair,
-Forced start), and lets the mark name a taken-back leg that carries the
-partial mark (Retired legs). Action: STM:
+`dnvctl`, say what it destroys, as for the delete calls; `OLDER_LEG` lets
+the start go on over a member that holds newer data of the same array,
+`BAD_BLOCKS` over a named leg's bad-block list, which the start drops
+(Repair, Forced start), and `PARTIAL` lets the mark name a taken-back leg
+that carries the partial mark (Retired legs), each only when named.
+Action: STM:
 without `cancel`, set the group's `forced_start` to the leg's id, the
-`SpRev` revision the same STM's bump writes and the force, replacing a mark
+`SpRev` revision the same STM's bump writes and `override_list` as the
+request names it, never a force, replacing a mark
 that stands, and set `keep` on every retired leg the group lists, `keep`
 for each new leg the group's repair took back from a retired leg, at any
 stage, so `CancelRepair` gives it back kept, and `keep_bad_legs` on that
@@ -4244,11 +4250,14 @@ the start of each pass (`dnv-worker.md` AR1) and sees it there too. A token
 a caller holds is stale after the write, as after any write that bumps
 `SpRev`. Reply `grp_id`.
 
-**InspectGroup** — inputs `grp_id`, and `leg_id` and `force` for the dry
-run: a read-only look at an md-raid1 group's members through its primary,
-for an operator choosing the leg of a forced start. It takes no token and
-runs at every `sp_level` and on a pool being deleted, as a read does.
-Errors: `INVALID_ARGUMENT` when the pool is `RedundNone`; `NOT_FOUND`
+**InspectGroup** — inputs `grp_id`, and `leg_id` and `override_list` for
+the dry run: a read-only look at an md-raid1 group's members through its
+primary, for an operator choosing the leg of a forced start. It takes no
+token and runs at every `sp_level` and on a pool being deleted, as a read
+does. Errors: `INVALID_ARGUMENT` for an entry of `override_list` that
+names no refusal or a kind named twice, as `ForceStartGroup` refuses it,
+and for an `override_list` set with no `leg_id`, since only a dry run reads
+it; `INVALID_ARGUMENT` when the pool is `RedundNone`; `NOT_FOUND`
 when `grp_id` is in no group of the pool's slices or clones;
 `FAILED_PRECONDITION` when the pool has no primary cntlr; `ABORTED` when
 the primary's agent does not answer, refuses the read or does not end it
@@ -4267,31 +4276,32 @@ with no read; the array's state; the retired legs' ids, which no cntlr
 connects, so none is read; the report's stamp; the revision of the request
 the primary holds and the pool's revision, so a reader sees a request
 still on its way; and, with `leg_id`, the dry run: what a forced start
-from that leg would do, with `force` as `ForceStartGroup`'s force — the
-first refusal `ForceStartGroup` would make, in its order (a pool being
-deleted, the level, a clone being deleted, the leg, the partial mark when
-`force` is not set, the group's row in the report reading `OK` or absent),
+from that leg would do, passing the kinds `override_list` names as
+`ForceStartGroup` passes them — the first refusal `ForceStartGroup` would
+make, in its order (a pool being deleted, the level, a clone being
+deleted, the leg, the partial mark when `override_list` does not name
+`PARTIAL`, the group's row in the report reading `OK` or absent),
 else the agent's dry run, its refusal word for word the real start's,
 both cut alike to the row text cap (Live-state reporting) (the refusal of
 an array that runs aside, which is the dry run's own, as the real start
 leaves the mark waiting), or the members it would zero, in order, a
 member already blank counted among them, the assembly's update and
 whether it stops an array that does not run first; and, beside either,
-the list of every refusal the force passes that the checks met, passed or
-not, in the order they meet them: the partial mark first, the gateway's,
-then the agent's, the named leg's bad-block list and each older member,
-each with its kind, its text cut to the row text cap and whether the
-request's force passes it (`cnagent.md` CN12, CN31). A refusal no force
-passes ends the agent's checks, so the agent lists what they met before
-it. Nothing is written and no mdadm command runs. Reasons: the choice of a forced start's leg rests
+the list of every refusal an override passes that the checks met, passed
+or not, in the order they meet them: the partial mark first, the
+gateway's, then the agent's, the named leg's bad-block list and each older
+member, each with its kind, its text cut to the row text cap and whether
+the request's `override_list` names its kind (`cnagent.md` CN12, CN31). A
+refusal no override passes ends the agent's checks, so the agent lists
+what they met before it. Nothing is written and no mdadm command runs. Reasons: the choice of a forced start's leg rests
 on the members' superblocks, which no row shows, and the dry run runs the
 start's own checks, so what it says is what the start does with the node
 and the request as they are at the read, save that a leg the converge
 would connect first reads as not serving, so the dry run says the start
 waits for it; it recommends no leg, since the choice weighs what the
-operator knows of the outage. Reason for the list: a force given for one
-refusal passes the others of the same start, so one dry run must show
-every refusal the force would pass, not the first alone.
+operator knows of the outage. Reason for the list: the operator names each
+override, so one dry run must show every refusal the start would meet,
+not the first alone.
 
 **GetRepair** — STM read of the `Repair` named; `NOT_FOUND` for a name not
 in `repair_name_list`, and a listed name whose key is missing is `ABORTED`
@@ -4322,7 +4332,7 @@ its pass reads, and clears the mark once md holds the leg in sync, when it
 holds the array's whole data (`dnv-worker.md` AR11); the cancel gives the
 leg back with the mark, a repair that takes it back again carries the
 mark, and a forced start refuses to name a new leg that carries it unless
-forced (Repairs, `ForceStartGroup`). The mark is a guard at the gateway,
+its overrides name `PARTIAL` (Repairs, `ForceStartGroup`). The mark is a guard at the gateway,
 but not the last one: the agent's own read of the leg's superblock at a
 forced start refuses a leg md left half copied or as a spare, marked or
 not (`cnagent.md` CN12; Known limits). A retired leg that carries `keep` is never
@@ -6564,8 +6574,8 @@ primary does).
 shows what the primary reads from each member and, from a named leg, what
 the start would do (Repairs). `ForceStartGroup` writes the group's
 forced-start mark,
-the leg it names, the operator's force and the `SpRev` revision its write
-committed, in the group's record, so the fan-out hands it to every cntlr; a new primary after
+the leg it names, the kinds of refusal the operator passes and the `SpRev`
+revision its write committed, in the group's record, so the fan-out hands it to every cntlr; a new primary after
 a failover or a cntlr replacement acts on it as it finds its own node, which
 holds no array of the group until that primary builds one (Known limits). A
 primary acts on a mark only from a request that counts as delivered
@@ -6611,12 +6621,18 @@ holds, those the mark does not pass are the group's error, before
 anything is zeroed: the row names their kinds first and then each, as far
 as the row text cap allows, and the agent's record of the refused start
 names each whole (`cnagent.md` CN12); a zero that the read back does not
-prove is the group's error before the assembly. The operator's force on
-the mark (`ForcedStart.force`) passes both refusals, and a mark that names
-a taken-back leg with the partial mark (`ForceStartGroup`), as one
-operator's choice. Reason for going on: an
-operator who forces past the first refusal passes the others too, so the
-start, its row and the dry run name them all at once. Reason for the list's refusal: with the list dropped,
+prove is the group's error before the assembly. A mark passes a refusal
+only when its overrides name the refusal's kind
+(`ForcedStart.override_list`): `BAD_BLOCKS` the list, `OLDER_LEG` the older
+members, and `PARTIAL` a mark naming a taken-back leg with the partial mark
+(`ForceStartGroup`), each the operator's choice. A mark an older gateway
+wrote with its force (`ForcedStart.force`) passes every kind, since marks
+stay in etcd across a lockstep upgrade (Upgrade in lockstep); no build
+writes the force. Reason for naming each: an override given for
+one refusal passes no other, so passing a bad-block list never also
+passes a member with newer data. Reason for going on: the start, its row
+and the dry run name every refusal at once, so the operator names each
+override knowing all of them. Reason for the list's refusal: with the list dropped,
 md serves the regions it lists from what the named leg holds there, which
 on a half-copied leg md marked in sync are regions it never copied (Known
 limits), and only the operator can tell that leg from the one that kept
@@ -7366,10 +7382,14 @@ which is how the build that wrote it stood after any worker restart
 whose array has not run until the sp worker sets the flag at the group's
 first OK row (`dnv-worker.md` AR15); until then its primary may create an
 array over legs that read no superblock, as the build that wrote it could.
-A forced-start mark that carries no `force` meets every refusal of
-`cnagent.md` CN12, some of which the build that wrote it lacked, so a start
-it was asked for can be refused after the upgrade, until the operator asks
-for it again with the force. A `Repair` that carries no `force` meets the
+A forced-start mark that carries neither `force` nor `override_list` meets
+every refusal of `cnagent.md` CN12, some of which the build that wrote it
+lacked, so a start it was asked for can be refused after the upgrade, until
+the operator asks for it again passing those refusals by name. A mark that
+carries `force`, which a build before `override_list` wrote, passes every
+kind of refusal, as that build's primary passed it; no build that has
+`override_list` writes it, and a request's `force`, reserved with its
+number, reads as an unknown field and passes nothing. A `Repair` that carries no `force` meets the
 identity checks of `cnagent.md` CN12, which the build that wrote it lacked:
 a new leg it takes back from a retired leg whose superblock carries another
 array's identity is not added, and the repair waits, its verdict naming the
@@ -7386,7 +7406,8 @@ that build kept out (Known limits). A retired leg that carries no `partial`, and
 repair's new leg that `new_leg_id_to_partial` does not name, read as a
 whole copy, yet a leg an older build took back from the retired legs into a
 repair it then cancelled holds what md wrote on it; once a repair takes it
-back again, a forced start may name it without the force (Known limits).
+back again, a forced start may name it without the override `PARTIAL`
+(Known limits).
 Every other stored field added since v0.1.0 reads, at zero, as that build
 behaved: no keep, no md check under way. An older build kept a
 migration's bitmap in etcd, under keys of
@@ -8940,8 +8961,8 @@ document and only pointed to here.
   CN30), starting the array
   from the named leg, which may be stale by then, unless a member the start
   would zero is a full member of the named leg's identity with a higher
-  change count, which refuses the start without the mark's force (Repairs,
-  `ForceStartGroup`; Repair, Forced start). A failover or a cntlr
+  change count, which refuses the start unless the mark passes `OLDER_LEG`
+  (Repairs, `ForceStartGroup`; Repair, Forced start). A failover or a cntlr
   replacement (`dnv-worker.md` AR5, AR7) while such a mark stands hands it
   to a new primary whose node holds no array of the group, which acts on it
   at its first converge, though the old primary's array ran.
@@ -8952,9 +8973,9 @@ document and only pointed to here.
   leg and marking the leg in sync, and the stop writes a bad-block list onto
   the leg that kept the data too, both with the same change count
   (`cnagent.md`, Known limits). The forced start refuses a named leg with
-  a list unless the mark carries the force, and with the force drops the
+  a list unless the mark passes `BAD_BLOCKS`, and passing it drops the
   list (Repair, Forced start), which is right for the leg that kept the
-  data; forced on the new leg, it serves the regions md never copied as
+  data; passed on the new leg, it serves the regions md never copied as
   whatever that leg held there. Which leg died last is the operator's to
   read in the leg rows, and the list's length per member in
   `InspectGroup`.
@@ -9463,7 +9484,7 @@ document and only pointed to here.
   copy** (Upgrade in lockstep): that build put no `partial` mark on the
   retired leg the cancel gave back, though md wrote its superblock and
   possibly part of the array on it, so once a repair takes it back again a
-  forced start may name it without the force (Repairs, ForceStartGroup;
-  Repair, Forced start), and only the agent's read of its superblock then
+  forced start may name it without the override `PARTIAL` (Repairs,
+  ForceStartGroup; Repair, Forced start), and only the agent's read of its superblock then
   stands between it and the start (`cnagent.md` CN12), as for a taken-back
   leg md held only briefly (above).

@@ -443,14 +443,14 @@ The entries:
   bad-block list, when the leg that died comes back before the broken array
   is stopped. The leg that died gets a bad-block list too. The forced
   start refuses a named leg that carries a bad-block list unless the mark
-  carries the force flag, and with the flag drops the list, which is right
-  for the leg that died. When a forced mark names the half-copied leg
-  instead, hosts read, over the regions md never copied, whatever that
-  leg's disk held there, possibly another pool's bytes, with no error. Both
-  legs show the same change count. One force flag also passes the forced
-  start's other refusals in the same start; its dry run without the flag
-  lists each of them beside this one. State: accepted, the force is the
-  operator's choice; procedure written,
+  passes that refusal by name (`--override bad-blocks`), and then drops the
+  list, which is right for the leg that died. When such a mark names the
+  half-copied leg instead, hosts read, over the regions md never copied,
+  whatever that leg's disk held there, possibly another pool's bytes, with
+  no error. Both legs show the same change count. The override passes no
+  other refusal of the start, and the dry run lists each refusal the start
+  meets. State: accepted, the override is the operator's choice; procedure
+  written,
   [the forced-start guide](operations.md#the-forced-start-guide): name the
   leg md copied from, not the new leg it copied onto; `dnvctl group
   inspect` shows each leg's bad-block count and md's view of it. Seen in
@@ -532,7 +532,8 @@ No case is known today.
   repair marks the leg it gives back, since md has written on it, but a
   build from before that mark gave it back with no mark. A later build
   reads that leg as whole. If a leg repair takes it back again, a forced
-  start may start the group from it without the operator's force. State:
+  start may start the group from it with no `--override partial`, which a
+  marked leg needs. State:
   accepted: a later build cannot tell such a leg apart. Not seen in the
   lab.
 - **A clone an older build stored with namespace number 0 copies the first
@@ -1573,7 +1574,8 @@ yourself: a disk the logs fill is one the stores and etcd cannot write.
 - **A retired leg's partial mark can miss a short stay in the array.** A
   repair can take a retired leg back as its new leg. When md has counted
   that leg as a member but not copied all of it, the worker marks the leg
-  partial, and a forced start then refuses to name it unless forced. The
+  partial, and a forced start then refuses to name it unless the mark
+  passes `partial` (`--override partial`). The
   worker sees this only in the primary's reports, which it reads every few
   seconds. When md counts the leg and lets it go between two such reads,
   or a failed add still wrote md's record onto the leg, the leg gets no

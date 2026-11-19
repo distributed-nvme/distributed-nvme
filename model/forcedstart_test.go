@@ -1,6 +1,7 @@
 package model
 
 import (
+	"slices"
 	"testing"
 
 	"google.golang.org/protobuf/proto"
@@ -22,7 +23,7 @@ import (
 func (e *opsEnv) forceStart(grpId, legId uint64, cancel bool) (uint64, error) {
 	e.t.Helper()
 	return ForceStartGroup(e.ctx, e.cli, e.cid, opsShard, opsSpId,
-		opsSpName, noExpectRev, opsSliceParent, grpId, legId, cancel, false)
+		opsSpName, noExpectRev, opsSliceParent, grpId, legId, cancel, nil)
 }
 
 // mustForceStart is forceStart failing the test on an error.
@@ -126,19 +127,19 @@ func TestForceStartGroupTakesTheToken(t *testing.T) {
 	env := newOpsEnv(t)
 	if _, err := ForceStartGroup(env.ctx, env.cli, env.cid, opsShard,
 		opsSpId, opsSpName, env.spRev(), opsSliceParent, opsDataGrpId,
-		opsDataLegA, false, false); err != nil {
+		opsDataLegA, false, nil); err != nil {
 		t.Fatalf("ForceStartGroup with the token: %v", err)
 	}
 	for _, cancel := range []bool{false, true} {
 		before := env.storeRev()
 		_, err := ForceStartGroup(env.ctx, env.cli, env.cid, opsShard,
 			opsSpId, opsSpName, env.spRev()+9, opsSliceParent, opsDataGrpId,
-			opsDataLegB, cancel, false)
+			opsDataLegB, cancel, nil)
 		env.wantNoWrite(err, opForceStartGroup, ReasonStaleRevision, before)
 	}
 	if _, err := ForceStartGroup(env.ctx, env.cli, env.cid, opsShard,
 		opsSpId, opsSpName, env.spRev(), opsSliceParent, opsDataGrpId, 0,
-		true, false); err != nil || env.mark(opsDataGrpId) != nil {
+		true, nil); err != nil || env.mark(opsDataGrpId) != nil {
 		t.Errorf("the cancel with the token: %v, mark %v", err,
 			env.mark(opsDataGrpId))
 	}
@@ -312,7 +313,7 @@ func TestForceStartGroupPreconditions(t *testing.T) {
 			before := env.storeRev()
 			_, err := ForceStartGroup(env.ctx, env.cli, env.cid, opsShard,
 				opsSpId, opsSpName, c.expectRev, c.parent, c.grpId, c.legId,
-				false, false)
+				false, nil)
 			env.wantNoWrite(err, opForceStartGroup, tc.reason, before)
 		})
 	}
@@ -412,7 +413,7 @@ func TestForceStartGroupCancelPreconditions(t *testing.T) {
 			parent, grpId := tc.setup(env)
 			before := env.storeRev()
 			_, err := ForceStartGroup(env.ctx, env.cli, env.cid, opsShard,
-				opsSpId, opsSpName, noExpectRev, parent, grpId, 0, true, false)
+				opsSpId, opsSpName, noExpectRev, parent, grpId, 0, true, nil)
 			env.wantNoWrite(err, opForceStartGroup, tc.reason, before)
 		})
 	}
@@ -605,7 +606,7 @@ func TestForcedStartOfACloneMetaGroup(t *testing.T) {
 	slice := env.slice()
 	revision, err := ForceStartGroup(env.ctx, env.cli, env.cid, opsShard,
 		opsSpId, opsSpName, noExpectRev, parent, opsCloneGrpId,
-		opsCloneLegB, false, false)
+		opsCloneLegB, false, nil)
 	if err != nil {
 		t.Fatalf("ForceStartGroup of the clone's group: %v", err)
 	}
@@ -631,7 +632,7 @@ func TestForcedStartOfACloneMetaGroup(t *testing.T) {
 			err)
 	}
 	_, err = ForceStartGroup(env.ctx, env.cli, env.cid, opsShard, opsSpId,
-		opsSpName, noExpectRev, parent, opsCloneGrpId, opsCloneLegA, false, false)
+		opsSpName, noExpectRev, parent, opsCloneGrpId, opsCloneLegA, false, nil)
 	env.wantNoWrite(err, opForceStartGroup, "clone deleting", before)
 	clone.Deleting = false
 	mustPut(t, env.cli, CloneKey(env.cid, opsSpId, opsCloneName), clone)
@@ -645,24 +646,29 @@ func TestForcedStartOfACloneMetaGroup(t *testing.T) {
 	}
 }
 
-// TestForceStartGroupCarriesTheForce: the mark carries the operator's force
-// as the call gives it (cnagent.md CN12), and a later write without it
-// replaces the mark with one that carries none.
-func TestForceStartGroupCarriesTheForce(t *testing.T) {
+// TestForceStartGroupCarriesTheOverrides: the mark carries the kinds of
+// refusal the call passes, as given, and never a force (cnagent.md CN12);
+// a later write without them replaces the mark with one that carries none.
+func TestForceStartGroupCarriesTheOverrides(t *testing.T) {
 	env := newOpsEnv(t)
+	overrides := []pb.ForcedStartOverride{
+		pb.ForcedStartOverride_FORCED_START_OVERRIDE_BAD_BLOCKS,
+		pb.ForcedStartOverride_FORCED_START_OVERRIDE_OLDER_LEG,
+	}
 	revision, err := ForceStartGroup(env.ctx, env.cli, env.cid, opsShard,
 		opsSpId, opsSpName, noExpectRev, opsSliceParent, opsDataGrpId,
-		opsDataLegA, false, true)
+		opsDataLegA, false, overrides)
 	if err != nil {
-		t.Fatalf("ForceStartGroup with force: %v", err)
+		t.Fatalf("ForceStartGroup with two overrides: %v", err)
 	}
-	if mark := env.mark(opsDataGrpId); !mark.GetForce() ||
+	if mark := env.mark(opsDataGrpId); mark.GetForce() ||
+		!slices.Equal(mark.GetOverrideList(), overrides) ||
 		mark.GetLegId() != opsDataLegA || mark.GetRevision() != revision {
-		t.Fatalf("the forced mark: %v, want leg %d at %d with force", mark,
-			opsDataLegA, revision)
+		t.Fatalf("the mark: %v, want leg %d at %d with the overrides %v "+
+			"and no force", mark, opsDataLegA, revision, overrides)
 	}
 	env.mustForceStart(opsDataGrpId, opsDataLegA)
-	if mark := env.mark(opsDataGrpId); mark.GetForce() {
-		t.Fatalf("the replacing mark keeps the force: %v", mark)
+	if mark := env.mark(opsDataGrpId); len(mark.GetOverrideList()) != 0 {
+		t.Fatalf("the replacing mark keeps the overrides: %v", mark)
 	}
 }

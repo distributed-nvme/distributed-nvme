@@ -135,6 +135,36 @@ func (h *hexUint) Set(s string) error {
 	return nil
 }
 
+// overrideList is a forced start's comma list of refusals to pass
+// (ForceStartGroupRequest.override_list): each item dnvctl's word (older-leg,
+// bad-blocks, partial) or a raw number, so the suite can send a value that
+// names no refusal and see the gateway refuse it.
+type overrideList []pb.ForcedStartOverride
+
+func (o *overrideList) String() string { return fmt.Sprint([]pb.ForcedStartOverride(*o)) }
+
+func (o *overrideList) Set(s string) error {
+	words := map[string]pb.ForcedStartOverride{
+		"older-leg":  pb.ForcedStartOverride_FORCED_START_OVERRIDE_OLDER_LEG,
+		"bad-blocks": pb.ForcedStartOverride_FORCED_START_OVERRIDE_BAD_BLOCKS,
+		"partial":    pb.ForcedStartOverride_FORCED_START_OVERRIDE_PARTIAL,
+	}
+	*o = nil
+	for _, item := range strings.Split(s, ",") {
+		item = strings.TrimSpace(item)
+		if override, ok := words[item]; ok {
+			*o = append(*o, override)
+			continue
+		}
+		value, err := strconv.ParseInt(item, 0, 32)
+		if err != nil {
+			return fmt.Errorf("%q is no override word or number", item)
+		}
+		*o = append(*o, pb.ForcedStartOverride(value))
+	}
+	return nil
+}
+
 // optUint32 is a uint32 flag whose presence reaches the request: ptr stays nil
 // unless the flag was given, so a given 0 is a real value. The two append
 // drivers send a page's position through it only when the suite names one

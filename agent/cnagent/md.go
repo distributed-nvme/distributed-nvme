@@ -1892,8 +1892,9 @@ func markLegRows(
 const msgForcedStart = "forced start"
 
 // msgForcedStartRefused is the Warn record of a forced start refused for
-// refusals no override of the mark passes (CN12): it names the group, the
-// leg and each such refusal whole, its kind's word first.
+// refusals the mark does not pass (CN12): it names the group, the leg, each
+// such refusal whole, its kind's word first, and the words of the kinds the
+// mark passed among those the checks met.
 const msgForcedStartRefused = "forced start refused"
 
 // forcedStartPass is ensureGroup's part while the group's forced-start mark
@@ -2319,8 +2320,8 @@ func errForcedStartDue(named *legPlan) error {
 // (forcedStartPass); and the forced start's checks (planForcedStart), run
 // with the read's availability (readAvailability), return a plan. So it names
 // nothing for the refusals that last — a named leg that is no full member,
-// carries a bad-block list under a mark without the force, or is older than
-// another, a member that is no leg of this pool, a device above that holds
+// carries a bad-block list or is older than another under a mark that does
+// not pass it, a member that is no leg of this pool, a device above that holds
 // the array — and nothing while a member the start keeps is not available, a
 // kept new leg that is still provisioning among them, whose provisioned flip
 // raises the pool's revision. A process that holds the array open shows in no
@@ -2391,10 +2392,11 @@ var forcedStartWords = map[pb.ForcedStartOverride]string{
 }
 
 // forcedStartPasses reports whether the group's mark passes a refusal of
-// the kind override: the mark carries the operator's force, which passes
-// every kind.
+// the kind override: its override_list names the kind, or it carries the
+// force a mark an older gateway wrote may carry, which passes every kind.
 func forcedStartPasses(gp *grpPlan, override pb.ForcedStartOverride) bool {
-	return gp.mark.GetForce()
+	return gp.mark.GetForce() ||
+		slices.Contains(gp.mark.GetOverrideList(), override)
 }
 
 // forcedStartRefused is the group's error of a forced start whose checks
@@ -2528,18 +2530,27 @@ func (s *CnAgentServer) forceStartGroup(
 	walk *MdWalk,
 	available map[uint64]bool,
 ) error {
-	fp, _, err := s.planForcedStart(ctx, gp, available)
+	fp, met, err := s.planForcedStart(ctx, gp, available)
 	var refused *forcedStartRefused
 	if errors.As(err, &refused) {
 		texts := make([]string, 0, len(refused.refusals))
 		for _, r := range refused.refusals {
 			texts = append(texts, forcedStartWords[r.override]+": "+r.text)
 		}
+		passed := []string{}
+		for _, r := range met {
+			word := forcedStartWords[r.override]
+			if forcedStartPasses(gp, r.override) &&
+				!slices.Contains(passed, word) {
+				passed = append(passed, word)
+			}
+		}
 		slog.WarnContext(ctx, msgForcedStartRefused,
 			append(s.cntlrIdAttrs(plan),
 				slog.Uint64("grp_id", gp.grpId),
 				slog.Uint64("leg_id", gp.mark.GetLegId()),
-				slog.Any("refusals", texts))...)
+				slog.Any("refusals", texts),
+				slog.Any("overridden", passed))...)
 	}
 	if err != nil {
 		return err

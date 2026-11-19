@@ -312,9 +312,9 @@ var renderCases = []renderCase{
 	{
 		// A slice group's forced-start mark and operator-in-charge flag as
 		// stored (dnvctl.md, `group` — `ctl/group.go`): the named leg and the
-		// revision as strings and the flag true on the group that carries
-		// them, and null and false, both still visible, on the group that
-		// carries neither.
+		// revision as strings, its overrides by their enum names, and the
+		// flag true on the group that carries them, and null and false,
+		// both still visible, on the group that carries neither.
 		name: "sp get, a slice group's forced-start mark and flag",
 		rpc:  "GetStoragePool",
 		argv: []string{"sp", "get"},
@@ -323,15 +323,22 @@ var renderCases = []renderCase{
 			SliceList: []*pb.Slice{{
 				MetaGrpList: []*pb.Group{{GrpId: 1}},
 				DataGrpList: []*pb.Group{{
-					GrpId:            2,
-					ForcedStart:      &pb.ForcedStart{LegId: 5, Revision: 12},
+					GrpId: 2,
+					ForcedStart: &pb.ForcedStart{
+						LegId: 5, Revision: 12,
+						OverrideList: []pb.ForcedStartOverride{
+							pb.ForcedStartOverride_FORCED_START_OVERRIDE_BAD_BLOCKS,
+						},
+					},
 					OperatorInCharge: true,
 				}},
 			}},
 		},
 		want: `{"cntlr_list":[],"slice_list":[{"data_grp_list":[` +
 			`{"array_made":false,"data_blocks":"0","ext_cnt":"0",` +
-			`"forced_start":{"force":false,"leg_id":"5","revision":"12"},` +
+			`"forced_start":{"force":false,"leg_id":"5",` +
+			`"override_list":["FORCED_START_OVERRIDE_BAD_BLOCKS"],` +
+			`"revision":"12"},` +
 			`"grp_id":"2",` +
 			`"leg_list":[],"md_check":null,"meta_blocks":"0",` +
 			`"operator_in_charge":true,` +

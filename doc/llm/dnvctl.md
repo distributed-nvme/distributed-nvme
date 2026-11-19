@@ -744,15 +744,20 @@ group's array (`architecture.md`, Repairs). It names the group by `--grp`
 alone, with no flag for the slice or clone that holds it, because the
 gateway finds the group's parent itself, and the leg the array starts from
 by `--leg`. With `--cancel` it withdraws the group's mark instead and names
-no leg. `--force` puts the operator's force on the mark, so that the start
-goes on from a named leg whose change count is below that of a full member
-of the same array, which it overwrites, and from a named leg that carries a
-bad-block list, which it drops (`architecture.md`, Repair, Forced
-start), and so that the mark may name a taken-back leg that carries the
-partial mark (`architecture.md`, Retired legs); one force passes all three,
-which the leaf's help says. dnvctl checks none of the pairings: a non-zero `--leg` or a
-`--force` beside `--cancel`, and a write with no `--leg`, reach the gateway,
-which refuses them (CT8).
+no leg. `--override` names the refusals the start passes, a comma list of
+words each sent as its kind in `override_list`, in the order typed:
+`older-leg`, so that the start goes on from a named leg whose change count
+is below that of a full member of the same array, which it overwrites;
+`bad-blocks`, from a named leg that carries a bad-block list, which it
+drops (`architecture.md`, Repair, Forced start); and `partial`, so that
+the mark may name a taken-back leg that carries the partial mark
+(`architecture.md`, Retired legs). A start passes a refusal only when its
+word is named, which the leaf's help says. An item that is no word, an
+empty one included, is a usage error (exit 2, CT5), since the field takes
+the enum's values alone; there is no `--force`. dnvctl checks none of the
+pairings: a non-zero `--leg` or an `--override` beside `--cancel`, a word
+typed twice, and a write with no `--leg`, reach the gateway, which refuses
+them (CT8).
 The forced start overwrites the other members it keeps, the open repair's
 bad leg excepted, with a full copy of the named leg (`architecture.md`,
 Repair, Forced start), and a start from an older copy restores that group
@@ -767,12 +772,13 @@ shows a slice group's mark as stored and `clone get` a clone meta group's
 primary reads each member the group keeps, its md superblock and md's view
 of it, and the reply adds each leg's row and health (`architecture.md`,
 Repairs). With `--leg` it is the dry run of `group force-start` from that
-leg, `--force` as that leaf's: the reply says what the start would do, or
-the refusal it would meet, and lists every refusal the force passes that
-the start's checks met, each with whether the request passes it; nothing
-runs. The dry run is this leaf and
+leg, `--override` as that leaf's: the reply says what the start would do,
+or the refusal it would meet, and lists every refusal an override passes
+that the start's checks met, each with whether the request passes it;
+nothing runs. The dry run is this leaf and
 not a `--dry-run` of `group force-start`, since a leaf sends one RPC
-(CT1). dnvctl checks nothing (CT8).
+(CT1). dnvctl checks nothing but the words of `--override` (CT8); an
+`--override` with no `--leg` reaches the gateway, which refuses it.
 
 `group set-operator-in-charge` sends `UpdateGroupOperatorInCharge`, which
 sets or clears the group's operator-in-charge flag, the operator's take-over
@@ -860,7 +866,9 @@ trace id and deadline, CT3's token on exactly its carriers and its refusal on
 one leaf that carries none, CT4's goldens, CT5's failure line and codes, exit
 3 on a stdout that refuses the write among them, CT7's empty stderr, CT8's
 parse-only refusals, a number with a leading zero on an id flag and on a pflag
-number and an id typed empty among them, CT9's precedence of flag over
+number, an id typed empty, and a word `--override` does not know and a
+`--force` on `group force-start`, which has no such flag, among them, CT9's
+precedence of flag over
 environment, and the field and flag rules of Conventions. What one step per
 RPC has no room for is left to the unit tests: the transport conf's nil rule
 and a clone's empty source list, a bare `cluster create` sending no

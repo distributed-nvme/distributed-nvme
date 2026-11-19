@@ -1357,8 +1357,9 @@ func TestForcedStartZeroEndsThePass(t *testing.T) {
 // read names the forced start (forcedStartNamed), runs the first form
 // again. Both runs failing is the group's error with both outputs; a run
 // killed after the kernel started the array, of either form, is taken as
-// started. The mark carries the force, which a named leg with a list needs
-// (badBlocksRefusal).
+// started. The mark carries the force an older gateway's mark can carry,
+// which passes the named leg's list as the override bad-blocks does
+// (badBlocksRefusal, forcedStartPasses).
 func TestForcedStartFallsBackToForceNoBbl(t *testing.T) {
 	// refused scripts the named leg's bad-block log the kernel refuses.
 	refused := func(f *repFix) {

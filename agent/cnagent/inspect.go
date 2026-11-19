@@ -120,7 +120,8 @@ func (s *CnAgentServer) InspectGrp(
 	}
 	done := make(chan *pb.InspectGrpReply, 1)
 	go func() {
-		done <- s.inspectRead(ctx, look, req.GetLegId(), req.GetForce())
+		done <- s.inspectRead(ctx, look, req.GetLegId(),
+			req.GetOverrideList())
 	}()
 	select {
 	case reply := <-done:
@@ -215,7 +216,7 @@ func (s *CnAgentServer) inspectRead(
 	ctx context.Context,
 	look *inspectLook,
 	legId uint64,
-	force bool,
+	overrides []pb.ForcedStartOverride,
 ) *pb.InspectGrpReply {
 	reply := &pb.InspectGrpReply{}
 	var held map[string]MdMember
@@ -231,7 +232,7 @@ func (s *CnAgentServer) inspectRead(
 			s.inspectMember(ctx, look, lp, held))
 	}
 	if legId != 0 {
-		reply.DryRun = s.forcedStartDryRun(ctx, look, legId, force)
+		reply.DryRun = s.forcedStartDryRun(ctx, look, legId, overrides)
 	}
 	return reply
 }
@@ -284,8 +285,8 @@ func (s *CnAgentServer) inspectMember(
 }
 
 // forcedStartDryRun is InspectGrp's dry run: what CN12's forced start would
-// do from a mark naming legId, with the operator's force when force is set,
-// from the same checks the real start runs (forcedStartPass,
+// do from a mark naming legId and passing the kinds of refusal overrides
+// names, from the same checks the real start runs (forcedStartPass,
 // planForcedStart) on a mark of the call's own, which no request carries
 // and nothing keeps. An array of the group that runs is the refusal, since
 // the primary leaves a mark waiting while it runs (ensureGroup); one
@@ -301,7 +302,7 @@ func (s *CnAgentServer) forcedStartDryRun(
 	ctx context.Context,
 	look *inspectLook,
 	legId uint64,
-	force bool,
+	overrides []pb.ForcedStartOverride,
 ) *pb.ForcedStartDryRun {
 	gp, detail, plan := look.gp, look.detail, look.plan
 	dry := &pb.ForcedStartDryRun{}
@@ -322,7 +323,7 @@ func (s *CnAgentServer) forcedStartDryRun(
 		}
 		dry.StopsArray = true
 	}
-	gp.mark = &pb.ForcedStart{LegId: legId, Force: force}
+	gp.mark = &pb.ForcedStart{LegId: legId, OverrideList: overrides}
 	fp, refusals, err := s.planForcedStart(ctx, gp, look.serves)
 	for _, r := range refusals {
 		dry.RefusalList = append(dry.RefusalList, &pb.ForcedStartRefusal{

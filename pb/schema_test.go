@@ -252,6 +252,64 @@ func TestRetiredCnMetadataFieldsStayReserved(t *testing.T) {
 	}
 }
 
+// TestForcedStartForceStaysReservedOnTheRequests pins the retired force of
+// the forced start's three requests (cnagent.md CN12): each reserves the
+// force's number and name, so an older client's force decodes as an unknown
+// field and passes no refusal, and no field takes either; the mark keeps
+// its force, which a mark an older gateway stored carries, beside its
+// override list. The kinds' numbers are pinned too, since the mark stores
+// them as numbers. The test reads the descriptors and decodes nothing.
+func TestForcedStartForceStaysReservedOnTheRequests(t *testing.T) {
+	for _, tc := range []struct {
+		md     protoreflect.MessageDescriptor
+		number protoreflect.FieldNumber
+		list   protoreflect.FieldNumber
+	}{
+		{(&pb.ForceStartGroupRequest{}).ProtoReflect().Descriptor(), 7, 8},
+		{(&pb.InspectGroupRequest{}).ProtoReflect().Descriptor(), 5, 6},
+		{(&pb.InspectGrpRequest{}).ProtoReflect().Descriptor(), 7, 8},
+	} {
+		if !tc.md.ReservedRanges().Has(tc.number) ||
+			!tc.md.ReservedNames().Has("force") {
+			t.Errorf("%s does not reserve force and its number %d",
+				tc.md.FullName(), tc.number)
+		}
+		if fd := tc.md.Fields().ByNumber(tc.number); fd != nil {
+			t.Errorf("%s has field %s at the force's number %d",
+				tc.md.FullName(), fd.Name(), tc.number)
+		}
+		fd := tc.md.Fields().ByName("override_list")
+		if fd == nil || fd.Number() != tc.list || !fd.IsList() ||
+			fd.Kind() != protoreflect.EnumKind ||
+			fd.Enum().FullName() != "ForcedStartOverride" {
+			t.Errorf("%s.override_list is %v, want a list of "+
+				"ForcedStartOverride at %d", tc.md.FullName(), fd, tc.list)
+		}
+	}
+	mark := (&pb.ForcedStart{}).ProtoReflect().Descriptor()
+	if fd := mark.Fields().ByName("force"); fd == nil || fd.Number() != 3 ||
+		fd.Kind() != protoreflect.BoolKind {
+		t.Errorf("ForcedStart.force is %v, want the bool at 3", fd)
+	}
+	if fd := mark.Fields().ByName("override_list"); fd == nil ||
+		fd.Number() != 4 || !fd.IsList() ||
+		fd.Kind() != protoreflect.EnumKind {
+		t.Errorf("ForcedStart.override_list is %v, want the enum list at 4",
+			fd)
+	}
+	values := (pb.ForcedStartOverride(0)).Descriptor().Values()
+	for name, number := range map[protoreflect.Name]protoreflect.EnumNumber{
+		"FORCED_START_OVERRIDE_NONE":       0,
+		"FORCED_START_OVERRIDE_OLDER_LEG":  1,
+		"FORCED_START_OVERRIDE_BAD_BLOCKS": 2,
+		"FORCED_START_OVERRIDE_PARTIAL":    3,
+	} {
+		if v := values.ByName(name); v == nil || v.Number() != number {
+			t.Errorf("ForcedStartOverride.%s is %v, want %d", name, v, number)
+		}
+	}
+}
+
 // TestRepairFieldNumbers pins the numbers, kinds and cardinalities of the
 // repair records and of the fields that carry them: the Repair and RetiredLeg
 // messages, which are stored, the group's and the pool's links to them, the

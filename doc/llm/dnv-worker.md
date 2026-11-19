@@ -992,8 +992,8 @@ list; the flip, which reads the repair's key alone, and
   its own, so a flip over every repair of a pool would be as wide as the
   pool's groups.
 * `ForceStartGroup`, the body of the gateway's call of that name, takes the
-  group's parent and id, the leg, the cancel flag and the force, and
-  requires the
+  group's parent and id, the leg, the cancel flag and the kinds of refusal
+  the start passes (`ForcedStartOverride`), and requires the
   expected revision; the any-level SP checks; for a write, an `sp_level`
   below `SP_LEVEL_NO_REDUND` ("sp level builds no group array"); the pool
   `RedundMdRaid1`; the parent holding the group, a clone parent not
@@ -1003,9 +1003,10 @@ list; the flip, which reads the repair's key alone, and
   the repair the group names while it is CREATED or STARTED, whatever its
   abort flag says (`ReasonLegNotNamable`), the repair read through the
   pool's list as every op reads one whenever the group names one, and,
-  with no force, not a new leg that carries the repair's partial mark
-  (`ReasonLegPartial`); it sets the
-  group's `forced_start` to the leg, the force and the revision its own
+  unless the kinds name `PARTIAL`, not a new leg that carries the repair's
+  partial mark (`ReasonLegPartial`); it sets the
+  group's `forced_start` to the leg, the kinds as given in its
+  `override_list`, no force, and the revision its own
   `SpRev` bump writes, replacing a mark that stands, sets `keep` on every
   retired leg the group lists, `keep` in `new_leg_id_to_keep` for each new
   leg the group's repair took back from a retired leg, at any stage, and
@@ -4821,8 +4822,8 @@ a member at its add, and part of the array while it copies, so a leg md
 holds but not in sync is no longer the copy it was taken back as, while
 one it holds in sync holds the array's whole data, as after a forced start
 from it; the cancel gives the leg back as a retired leg with the mark, and
-a forced start refuses to name a marked leg unless forced
-(`architecture.md`, Retired legs). The mark follows the report the pass
+a forced start refuses to name a marked leg unless its overrides name
+`PARTIAL` (`architecture.md`, Retired legs). The mark follows the report the pass
 reads alone, so a hold md begins and ends between two passes leaves none
 (`architecture.md`, Known limits). A fresh new leg is never marked: its
 cancel gives its side back. The repair of a deleting clone, or of a clone
@@ -4925,7 +4926,7 @@ memory alone — stays until the operator withdraws it or the array's next stop
 (`architecture.md`, Known limits): while it stands leg repair holds the
 group (AR8), and at the array's next stop the primary acts on it,
 refusing a named leg older than a member it would zero unless the mark
-carries the force (`cnagent.md` CN12), after which the clear above
+passes `OLDER_LEG` (`cnagent.md` CN12), after which the clear above
 applies. Reason for any leg: after the
 start the named leg can die while the array runs on another member md
 holds in sync on a leg that serves, which needs no forced start. Reason

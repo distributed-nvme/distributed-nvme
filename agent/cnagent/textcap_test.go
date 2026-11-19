@@ -85,7 +85,7 @@ func TestForcedStartDryRunCutsItsRefusal(t *testing.T) {
 	s := &CnAgentServer{}
 	gp := &grpPlan{grpId: 101, raid1: true}
 	dry := s.forcedStartDryRun(context.Background(),
-		&inspectLook{gp: gp, detailErr: long}, 11, false)
+		&inspectLook{gp: gp, detailErr: long}, 11, nil)
 	textcapWantCut(t, "the dry run's refusal", dry.GetRefusal(), long.Error())
 }
 

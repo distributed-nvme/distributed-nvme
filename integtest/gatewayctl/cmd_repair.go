@@ -219,25 +219,27 @@ func setupKeepRetiredLeg(fs *flag.FlagSet) job {
 }
 
 // setupInspectGrp drives InspectGroup. --grp is the group's grp_id; --leg,
-// when given, asks for the forced start's dry run from that leg, with
-// --force as the forced start's force.
+// when given, asks for the forced start's dry run from that leg, passing the
+// refusals --override names (overrideList).
 func setupInspectGrp(fs *flag.FlagSet) job {
 	spName := fs.String("sp", "", "sp_name")
 	var grp, leg hexUint
 	fs.Var(&grp, "grp", "grp_id of the group")
 	fs.Var(&leg, "leg", "leg_id of the dry run's named leg (optional)")
-	force := fs.Bool("force", false, "the dry run with the force")
+	var overrides overrideList
+	fs.Var(&overrides, "override",
+		"override_list: older-leg,bad-blocks,partial or raw numbers")
 	return func(
 		ctx context.Context,
 		client pb.GatewayClient,
 		g *globals,
 	) (any, error) {
 		return client.InspectGroup(ctx, &pb.InspectGroupRequest{
-			ClusterName: g.cluster,
-			SpName:      *spName,
-			GrpId:       uint64(grp),
-			LegId:       uint64(leg),
-			Force:       *force,
+			ClusterName:  g.cluster,
+			SpName:       *spName,
+			GrpId:        uint64(grp),
+			LegId:        uint64(leg),
+			OverrideList: overrides,
 		})
 	}
 }
@@ -245,7 +247,8 @@ func setupInspectGrp(fs *flag.FlagSet) job {
 // setupForceStartGrp drives ForceStartGroup. --grp is the group's grp_id and
 // --leg the leg its array starts from; --cancel withdraws the group's mark
 // instead and is sent with --leg as typed, so the suite can send a leg with
-// a cancel and see it refused.
+// a cancel and see it refused; --override is the refusals the start passes
+// (overrideList), sent as typed.
 func setupForceStartGrp(fs *flag.FlagSet) job {
 	spName := fs.String("sp", "", "sp_name")
 	var rev hexUint
@@ -256,18 +259,22 @@ func setupForceStartGrp(fs *flag.FlagSet) job {
 		"leg_id the group's array starts from (0 with --cancel)")
 	cancel := fs.Bool("cancel", false,
 		"cancel — withdraw the group's forced-start mark")
+	var overrides overrideList
+	fs.Var(&overrides, "override",
+		"override_list: older-leg,bad-blocks,partial or raw numbers")
 	return func(
 		ctx context.Context,
 		client pb.GatewayClient,
 		g *globals,
 	) (any, error) {
 		return client.ForceStartGroup(ctx, &pb.ForceStartGroupRequest{
-			ClusterName: g.cluster,
-			SpName:      *spName,
-			SpRev:       &pb.SpRev{Revision: uint64(rev)},
-			GrpId:       uint64(grp),
-			LegId:       uint64(leg),
-			Cancel:      *cancel,
+			ClusterName:  g.cluster,
+			SpName:       *spName,
+			SpRev:        &pb.SpRev{Revision: uint64(rev)},
+			GrpId:        uint64(grp),
+			LegId:        uint64(leg),
+			Cancel:       *cancel,
+			OverrideList: overrides,
 		})
 	}
 }

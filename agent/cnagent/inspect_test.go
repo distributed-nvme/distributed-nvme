@@ -16,16 +16,17 @@ import (
 )
 
 // inspect is InspectGrp of the fixture's data group, with a dry run from
-// legId when it is not zero.
+// legId when it is not zero, passing the kinds of refusal overrides names.
 func (f *repFix) inspect(
 	t *testing.T,
 	legId uint64,
-	force bool,
+	overrides ...pb.ForcedStartOverride,
 ) *pb.InspectGrpReply {
 	t.Helper()
 	reply, err := f.srv.InspectGrp(f.ctx, &pb.InspectGrpRequest{
 		ClusterId: testCluster, CnId: testCn, SpId: testSp,
-		CntlrId: testCntlr, GrpId: testDataGrp, LegId: legId, Force: force,
+		CntlrId: testCntlr, GrpId: testDataGrp, LegId: legId,
+		OverrideList: overrides,
 	})
 	if err != nil {
 		t.Fatalf("InspectGrp: %v", err)
@@ -54,7 +55,7 @@ func TestInspectGrpReadsEveryMember(t *testing.T) {
 	f.syncup(t, repairReq(3, pb.RepStage_REP_STAGE_CREATED, false))
 	before := f.members()
 	f.node.Reset()
-	reply := f.inspect(t, 0, false)
+	reply := f.inspect(t, 0)
 	if !strings.Contains(reply.GetArrayState(), "clean") &&
 		!strings.Contains(reply.GetArrayState(), "active") {
 		t.Errorf("array state %q, want the running array's",
@@ -92,7 +93,7 @@ func TestInspectGrpReadsEveryMember(t *testing.T) {
 	if after := f.members(); !slices.Equal(after, before) {
 		t.Errorf("the inspect changed the array's members to %v", after)
 	}
-	dry := f.inspect(t, testDataLeg2, false).GetDryRun()
+	dry := f.inspect(t, testDataLeg2).GetDryRun()
 	if !strings.Contains(dry.GetRefusal(), "runs") ||
 		len(dry.GetZeroLegIdList()) != 0 {
 		t.Errorf("the dry run over the running array: %v, want refused", dry)
@@ -117,13 +118,13 @@ func TestInspectGrpDryRunMatchesTheStart(t *testing.T) {
 		t.Fatalf("the first start: %q, want refused", refusal)
 	}
 	f.node.Reset()
-	dry := f.inspect(t, testDataLeg2, false).GetDryRun()
+	dry := f.inspect(t, testDataLeg2).GetDryRun()
 	if dry.GetRefusal() == "" ||
 		!strings.Contains(refusal, dry.GetRefusal()) {
 		t.Errorf("the dry run from leg 2 refuses %q, want the start's own "+
 			"refusal %q", dry.GetRefusal(), refusal)
 	}
-	dry = f.inspect(t, testDataLeg, false).GetDryRun()
+	dry = f.inspect(t, testDataLeg).GetDryRun()
 	if dry.GetRefusal() != "" ||
 		!slices.Equal(dry.GetZeroLegIdList(), []uint64{testDataLeg2}) ||
 		dry.GetUpdate() != mdUpdateUuid || dry.GetStopsArray() {
@@ -137,12 +138,12 @@ func TestInspectGrpDryRunMatchesTheStart(t *testing.T) {
 	assertNoCall(t, f.node, zeroOf(f.leg1))
 }
 
-// TestInspectGrpDryRunCarriesTheForce pins the dry run's force (cnagent.md
-// CN31): a named leg whose change count is below that of a full member of
-// its identity the start would zero is refused without the force, as the
-// real start refuses it, and with the force the dry run names that member
-// zeroed.
-func TestInspectGrpDryRunCarriesTheForce(t *testing.T) {
+// TestInspectGrpDryRunCarriesTheOverrides pins the dry run's overrides
+// (cnagent.md CN31): a named leg whose change count is below that of a full
+// member of its identity the start would zero is refused without the
+// override older-leg, as the real start refuses it, and with it the dry run
+// names that member zeroed.
+func TestInspectGrpDryRunCarriesTheOverrides(t *testing.T) {
 	f := downNoRepair(t)
 	f.node.setSuperblock(f.leg2, fakeSuperblock{events: 10})
 	f.node.setSuperblock(f.leg1, fakeSuperblock{events: 50})
@@ -154,15 +155,17 @@ func TestInspectGrpDryRunCarriesTheForce(t *testing.T) {
 		t.Fatalf("the start: %q, want the older leg refused", refusal)
 	}
 	f.node.Reset()
-	dry := f.inspect(t, testDataLeg2, false).GetDryRun()
+	dry := f.inspect(t, testDataLeg2).GetDryRun()
 	if dry.GetRefusal() == "" || !strings.Contains(refusal, dry.GetRefusal()) {
-		t.Errorf("the dry run with no force refuses %q, want the start's %q",
+		t.Errorf("the dry run with no override refuses %q, want the start's %q",
 			dry.GetRefusal(), refusal)
 	}
-	dry = f.inspect(t, testDataLeg2, true).GetDryRun()
+	dry = f.inspect(t, testDataLeg2,
+		pb.ForcedStartOverride_FORCED_START_OVERRIDE_OLDER_LEG).GetDryRun()
 	if dry.GetRefusal() != "" ||
 		!slices.Equal(dry.GetZeroLegIdList(), []uint64{testDataLeg}) {
-		t.Errorf("the dry run with the force: %v, want leg 1 zeroed", dry)
+		t.Errorf("the dry run with the override older-leg: %v, want leg 1 "+
+			"zeroed", dry)
 	}
 	assertNoCall(t, f.node, "cmd mdadm")
 }
@@ -178,7 +181,7 @@ func TestInspectGrpDryRunOverAnArrayThatDoesNotRun(t *testing.T) {
 		f.syncup(t, quietLevel(3))
 		f.node.setArrayState(f.mdDev, "broken")
 		f.node.Reset()
-		dry := f.inspect(t, testDataLeg2, false).GetDryRun()
+		dry := f.inspect(t, testDataLeg2).GetDryRun()
 		if dry.GetRefusal() != "" || !dry.GetStopsArray() ||
 			!slices.Equal(dry.GetZeroLegIdList(), []uint64{testDataLeg}) {
 			t.Fatalf("dry run %v, want the stop first and leg 1 zeroed", dry)
@@ -198,7 +201,7 @@ func TestInspectGrpDryRunOverAnArrayThatDoesNotRun(t *testing.T) {
 		f.node.seedArray(f.mdDev, name, held...)
 		f.node.setArrayState(f.mdDev, "inactive")
 		f.node.Reset()
-		dry := f.inspect(t, testDataLeg2, false).GetDryRun()
+		dry := f.inspect(t, testDataLeg2).GetDryRun()
 		if !strings.Contains(dry.GetRefusal(), "which is no leg of this sp") {
 			t.Fatalf("dry run %v, want the real start's refusal to stop "+
 				"the array", dry)
@@ -212,7 +215,7 @@ func TestInspectGrpDryRunOverAnArrayThatDoesNotRun(t *testing.T) {
 func TestInspectGrpLeavesAnAbortedRepairsLegOut(t *testing.T) {
 	f := newRepFix(t, allLegs...)
 	f.syncup(t, repairReq(3, pb.RepStage_REP_STAGE_ABORTED, true))
-	reply := f.inspect(t, 0, false)
+	reply := f.inspect(t, 0)
 	if m := memberOf(reply, repNewLeg); m != nil {
 		t.Fatalf("the aborted repair's new leg is listed: %v", m)
 	}
@@ -261,7 +264,7 @@ func TestInspectGrpReadsMembersOverAFailedArrayRead(t *testing.T) {
 	f.node.failReadAlways["/md/array_state"] = true
 	f.node.mu.Unlock()
 	f.node.Reset()
-	reply := f.inspect(t, testDataLeg2, false)
+	reply := f.inspect(t, testDataLeg2)
 	if !strings.HasPrefix(reply.GetArrayState(), "not read: ") {
 		t.Errorf("array state %q, want the read's error",
 			reply.GetArrayState())
@@ -286,7 +289,7 @@ func TestInspectGrpReadsNoLegThatDoesNotServe(t *testing.T) {
 	f.newLegUnreachable()
 	f.syncup(t, repairReq(3, pb.RepStage_REP_STAGE_CREATED, false))
 	f.node.Reset()
-	m := memberOf(f.inspect(t, 0, false), repNewLeg)
+	m := memberOf(f.inspect(t, 0), repNewLeg)
 	if m.GetAvailable() || m.GetHasSuperblock() ||
 		!strings.Contains(m.GetReadError(), "does not serve") {
 		t.Errorf("the unreachable new leg reads %v, want not serving", m)

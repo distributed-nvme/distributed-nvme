@@ -48,7 +48,9 @@ type inspectRecords struct {
 // leg — a pool being deleted, the level, a clone being deleted, the leg —
 // keeping the first for the dry run instead of failing the call, and the
 // refusal of a partial leg, which an override passes, for the dry run's
-// list (inspectDryRun). Then two
+// list (inspectDryRun). The pure checks before the snapshot are the names
+// and the overrides, as ForceStartGroup's (validateOverrideList), which only
+// a dry run reads, so a list with no leg is INVALID_ARGUMENT. Then two
 // calls to the primary's agent: GetCntlrInfo, for each leg's row, the
 // report's stamp and the revision of the request the agent holds, whose
 // group row ForceStartGroup's check of the array judges too
@@ -66,6 +68,15 @@ func (s *Server) InspectGroup(
 	}
 	if err := validateName("sp_name", req.GetSpName()); err != nil {
 		return nil, err
+	}
+	if err := validateOverrideList(
+		"override_list", req.GetOverrideList(),
+	); err != nil {
+		return nil, err
+	}
+	if req.GetLegId() == 0 && len(req.GetOverrideList()) > 0 {
+		return nil, errInvalid("override_list is set with no leg_id: " +
+			"only the dry run reads it")
 	}
 	var rec inspectRecords
 	err := s.cli.Snapshot(ctx, func(stm etcdutil.STM) error {
@@ -93,13 +104,13 @@ func (s *Server) InspectGroup(
 				return err
 			}
 			agentReply, err = client.InspectGrp(ctx, &pb.InspectGrpRequest{
-				ClusterId: rec.tgt.ClusterId,
-				CnId:      rec.tgt.CnId,
-				SpId:      rec.tgt.SpId,
-				CntlrId:   rec.tgt.CntlrId,
-				GrpId:     req.GetGrpId(),
-				LegId:     req.GetLegId(),
-				Force:     req.GetForce(),
+				ClusterId:    rec.tgt.ClusterId,
+				CnId:         rec.tgt.CnId,
+				SpId:         rec.tgt.SpId,
+				CntlrId:      rec.tgt.CntlrId,
+				GrpId:        req.GetGrpId(),
+				LegId:        req.GetLegId(),
+				OverrideList: req.GetOverrideList(),
 			})
 			return err
 		})
@@ -282,6 +293,7 @@ func forceStartRefusal(
 		Override: pb.ForcedStartOverride_FORCED_START_OVERRIDE_PARTIAL,
 		Text: status.Convert(
 			errPartialLeg(req.GetLegId(), loc.Grp.GetRepName())).Message(),
-		Overridden: req.GetForce(),
+		Overridden: slices.Contains(req.GetOverrideList(),
+			pb.ForcedStartOverride_FORCED_START_OVERRIDE_PARTIAL),
 	}, nil
 }

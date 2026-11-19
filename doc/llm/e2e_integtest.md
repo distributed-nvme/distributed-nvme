@@ -889,10 +889,11 @@ dead, which leaves that leg's superblock as md last wrote it, with no
 record of the regions md could not copy (`cnagent.md`, Known limits); once
 the leg is back, the named leg's bad-block list is read from
 `group inspect`, as whether md wrote one depends on the run: when the leg
-carries one, the dry run with no force must refuse it, the one with the
-force must name the drop, and the mark is written again with the force
-(`cnagent.md` CN12); the second forced start reads its named leg's list the
-same way before its mark. Then the primary's own log must show the other
+carries one, the dry run with no override must refuse it, list it among
+its refusals and pass none of them, the one passing every kind it lists
+must refuse nothing and name the drop, and the mark is written again
+passing those kinds (`cnagent.md` CN12); the second forced start reads its
+named leg's list the same way before its mark. Then the primary's own log must show the other
 leg's superblock zeroed, the array assembled from the named leg alone —
 with the new identity's update, and when the record names the list's drop
 too, assembled once more with that update, after a stop of the array when

@@ -1292,12 +1292,13 @@ EOF
 	# value reaches the wire as operator_in_charge true beside the token.
 	# The leaf without the flag, which sends the same true, and the =false
 	# spelling that gives the group back are behavior stage 9.
-	# The inspect of a group, a read: no token, and --leg with --force asks
-	# for the forced start's dry run.
+	# The inspect of a group, a read: no token, and --leg with --override
+	# asks for the forced start's dry run passing the kind the word names.
 	sweep_step 67 InspectGroup \
 		"{\"cluster_name\":\"$CLUSTER\",\"sp_name\":\"$SP\",\"grp_id\":\"1\",
-		  \"leg_id\":\"2\",\"force\":true}" \
-		group inspect --grp 1 --leg 2 --force
+		  \"leg_id\":\"2\",
+		  \"override_list\":[\"FORCED_START_OVERRIDE_OLDER_LEG\"]}" \
+		group inspect --grp 1 --leg 2 --override older-leg
 	sweep_step 68 UpdateGroupOperatorInCharge \
 		"{\"cluster_name\":\"$CLUSTER\",\"sp_name\":\"$SP\",
 		  \"sp_rev\":{\"revision\":\"7\"},\"grp_id\":\"1\",
@@ -1505,6 +1506,28 @@ EOF
 		  \"sp_rev\":{\"revision\":\"7\"},\"rep_name\":\"r0\",
 		  \"grp_id\":\"1\",\"bad_leg_id_list\":[\"2\"],
 		  \"force_undecided\":true}"
+
+	# -------------------------------------------------------------------
+	stage 12 "group force-start --override: each word its kind; no other word"
+	# -------------------------------------------------------------------
+	# --override names the refusals the start passes (`group` —
+	# `ctl/group.go`): each word reaches the wire as its kind, in the order
+	# typed. A word dnvctl does not know is a usage error that sends
+	# nothing, and so is --force, which the leaf does not have: no spelling
+	# passes every refusal at once.
+	ctl_ok group force-start --grp 1 --leg 2 --override bad-blocks,older-leg \
+		--rev 7
+	assert_count_delta ForceStartGroup 1 "the start is one RPC"
+	assert_req ForceStartGroup \
+		"{\"cluster_name\":\"$CLUSTER\",\"sp_name\":\"$SP\",
+		  \"sp_rev\":{\"revision\":\"7\"},\"grp_id\":\"1\",\"leg_id\":\"2\",
+		  \"override_list\":[\"FORCED_START_OVERRIDE_BAD_BLOCKS\",
+		  \"FORCED_START_OVERRIDE_OLDER_LEG\"]}"
+	ctl_usage ForceStartGroup \
+		group force-start --grp 1 --leg 2 --override older-leg,everything
+	assert_ne "$(printf '%s\n' "$CTL_ERR" | grep -c -e '--override' || true)" \
+		"0" "the refusal must name --override: got '$CTL_ERR'"
+	ctl_usage ForceStartGroup group force-start --grp 1 --leg 2 --force
 }
 
 # ---------------------------------------------------------------------------

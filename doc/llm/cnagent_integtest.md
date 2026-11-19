@@ -759,9 +759,10 @@ a bad block on the new leg of the third repair, in sync beside leg 1,
 through md's own bad-block file of that member, and md writes it into the
 leg's superblock; at the level that stops group arrays, and
 then the one that builds no thin pool, a mark naming that leg with no
-force is refused for its list, its row naming the list, with nothing
-zeroed or assembled, and the dry run refuses alike and, with the force,
-names the drop; the same mark with the force reads its
+override is refused for its list, its row naming the list, with nothing
+zeroed or assembled, and the dry run refuses alike, listing the list
+alone and not passed, and, passing bad-blocks, names the drop and lists
+it passed; the same mark passing bad-blocks reads its
 superblock and its list, zeroes leg 1, starts the array from the leg under
 a new identity, stops it and starts it again with the list dropped, then
 adds leg 1, under one record naming both updates, and the leg's superblock
@@ -769,14 +770,19 @@ shows no list; the host reads its data unchanged. Then an older named leg:
 leg 1 dies for the primary alone and the host's write of its first block,
 its own bytes again, makes md fail it, so the other leg's change count
 moves past leg 1's; with the arrays stopped and leg 1 back, both
-superblocks of one identity, a mark naming leg 1 is refused, the row
-naming the change count, with nothing zeroed or assembled, and the same
-mark with the operator's force zeroes the other leg and starts the array
-from leg 1; the host reads its data unchanged (`cnagent.md` CN12). The marks that name a leg whose bad-block list depends
-on the run — the forced start from the leg that kept the data, and the one
-from the retired leg taken back — read the named leg's list at run time and,
-when it carries one, meet the refusal with no force and go on with the
-force. Then
+superblocks of one identity, a mark naming leg 1 is refused for the older
+leg alone, the row naming that kind and the change count, with nothing
+zeroed or assembled, and the same mark passing older-leg zeroes the other
+leg and starts the array from leg 1; when leg 1 carries a bad-block list
+at run time, both marks pass bad-blocks too, so the refusal still names
+the older leg alone; the host reads its data unchanged (`cnagent.md`
+CN12). The marks that name a leg whose bad-block list depends on the run
+— the forced start from the leg that kept the data, and the one from the
+retired leg taken back — read the named leg's list at run time and, when
+it carries one, meet the refusal with no override and go on passing
+bad-blocks; the first also reads the dry run, which lists that list alone
+before the mark passes it. The other leg of each is half-copied or of
+another identity, so no older-leg refusal arises. Then
 the re-assembly, the way the forced-start guide gives an operator: both
 legs' exports to the primary error every IO, and a host write to a region
 it wrote before fails, which leaves the data group's array broken under

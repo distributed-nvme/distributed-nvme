@@ -70,11 +70,15 @@ everything the wiped legs hold that the named leg does not hold.
   not wipe, such as the open repair's bad leg or a retired leg, keeps the
   old identity. Change counts can be compared only between legs of the
   same identity.
-- The **force flag** of a mark lets the start go on past three refusals:
-  a named leg whose change count is below that of a leg it wipes, a named
-  leg that carries a bad-block list, which the start drops, and a named
-  leg that a repair took back after md wrote onto it. One flag passes all
-  three, so a flag given for one passes the others too.
+- An **override** of a mark lets the start go on past one kind of
+  refusal. There are three kinds, each named by a word: `older-leg`, a
+  full member of the named leg's identity that the start wipes has a
+  higher change count than the named leg (a leg of another identity, a
+  half-copied leg or a leg with no superblock is never compared);
+  `bad-blocks`, the named leg carries a bad-block list, which the start
+  drops; and `partial`, a repair took the named leg back after md wrote
+  onto it. A start passes a refusal only when the mark names its word, so
+  an override given for one kind passes no other.
 - The **keep flag** of a retired leg keeps the worker from deleting it.
 - The **operator-in-charge flag** of a group is the operator's mark that
   keeps the worker's repairs off the group.
@@ -97,28 +101,32 @@ The dry run is a forced start that only says what it would do:
 the start would wipe, whether it would stop the array first, and its update:
 `uuid`, or `uuid,force-no-bbl` when the start drops the named leg's
 bad-block list. Or it says why the start would refuse, in the same words as
-the real start. Beside that, its `refusal_list` lists each of the three
-refusals the force flag passes that it meets, in this order: a leg a repair
-took back after md wrote onto it (`FORCED_START_OVERRIDE_PARTIAL`), a
-bad-block list on the named leg (`FORCED_START_OVERRIDE_BAD_BLOCKS`), and
-each full member of the named leg's identity that it wipes whose change
-count is above the named leg's (`FORCED_START_OVERRIDE_OLDER_LEG`). It
-compares no other leg: a leg of another identity (rule 5), a half-copied
-leg and a leg with no superblock are never listed, whatever they hold.
-Each entry says whether the request
-passes it (`overridden`). So the dry run without `--force` shows every
-refusal the force flag would pass; add `--force` to see what a start with
-the flag would do. A refusal the flag does not pass, such as a leg that
-does not serve, ends the dry run's checks, and the list then holds only the
-refusals met before it. The dry run runs nothing.
+the real start. Beside that, its `refusal_list` lists each refusal an
+override passes that it meets, in this order: a leg a repair took back
+after md wrote onto it (`FORCED_START_OVERRIDE_PARTIAL`, the word
+`partial`), a bad-block list on the named leg
+(`FORCED_START_OVERRIDE_BAD_BLOCKS`, `bad-blocks`), and each full member
+of the named leg's identity that it wipes whose change count is above the
+named leg's (`FORCED_START_OVERRIDE_OLDER_LEG`, `older-leg`). It compares
+no other leg: a leg of another identity (rule 5), a half-copied leg and a
+leg with no superblock are never listed, whatever they hold. Each entry
+says whether the request passes it (`overridden`). Add `--override` with a
+comma list of words, such as `--override bad-blocks`, to see what a start
+that passes those refusals would do. A refusal no override passes, such
+as a leg that does not serve, ends the dry run's checks, and the list then
+holds only the refusals met before it. The dry run runs nothing.
 
 Tested: the cn agent suite, `integtest/cnagent_test.sh`, repair case,
 stage `forced`. It runs the primary's read and dry run before a real
 start, and checks that the real start does what the dry run said. The
 dnvctl suite, `integtest/dnvctl_test.sh`, checks the command against a
-stand-in gateway. No suite runs `dnvctl group inspect` against a real
-gateway. The list of every refusal is tested by the unit tests of the cn
-agent and of the gateway; no suite reads it.
+stand-in gateway. The end-to-end suite's react case runs
+`dnvctl group inspect` against a real gateway, its dry run only when the
+named leg carries a bad-block list. The cn agent suite's stage `badstart` reads the list of
+refusals, and so do its stage `forced` and the end-to-end suite's react
+case when the named leg carries a bad-block list; a start that names one
+override and is refused for another kind is tested by the unit tests of
+the cn agent alone.
 
 ### Before every forced start
 
@@ -170,8 +178,8 @@ Choose the leg with these rules:
    it copied onto is the new leg of the group's latest repair; the legs'
    rows and health epochs, read while the legs were down, show which leg
    died while md copied. If you cannot tell, stop.
-4. A named leg with a bad-block list is refused unless the mark carries
-   the force flag. The start drops the list, and md then serves the listed
+4. A named leg with a bad-block list is refused unless the mark passes
+   `bad-blocks`. The start drops the list, and md then serves the listed
    regions from what the leg holds there. That is right for the leg md
    copied from, whose list the array's stop wrote, and wrong for the leg it
    copied onto. `dnvctl group inspect` shows each leg's list length.
@@ -187,17 +195,18 @@ Choose the leg with these rules:
 Safe steps:
 
 1. Do the steps "Before every forced start".
-2. Run the dry run from the leg you chose, without `--force`, and read
+2. Run the dry run from the leg you chose, with no `--override`, and read
    every refusal its list holds. Then compare by hand, in
    `dnvctl group inspect`, the named leg with every leg the start would
    wipe that is of another identity (rule 5): the list never holds such a
-   leg. When it lists the named leg's bad-block
-   list, or a leg it wipes that is newer than the named leg, and you choose
-   to go on past every one of them (rules 2 to 4), run it again with
-   `--force` and read what it would wipe and drop.
+   leg. For each listed refusal you choose to go on past (rules 2 to 4),
+   add its word to `--override`, run the dry run again with that list, and
+   read what it would wipe and drop. Name no word whose refusal the list
+   does not hold.
 3. Write the mark:
    `dnvctl group force-start --grp <group id> --leg <leg id>`, with
-   `--force` only when step 2 needed it.
+   `--override` and the words of the last dry run of step 2, only when
+   step 2 needed them.
    The gateway refuses it while the primary reads the group's array
    running. It also refuses it while the primary's report has no row for
    the group, or the primary does not answer. Then try again after a few
@@ -207,8 +216,8 @@ Safe steps:
    the array runs with a member in sync on a leg whose row reads ok.
 5. Read the group again. md is copying onto the other legs. Wait until
    every leg is in sync. Check that no leg shows a bad-block list. If the
-   named leg's list is still there after a start with the force flag, the
-   start's second run, which drops it, did not happen, and hosts get IO
+   named leg's list is still there after a start that passed `bad-blocks`,
+   the start's second run, which drops it, did not happen, and hosts get IO
    errors over the list's regions. No procedure for this is tested: stop.
    No such case was seen in the lab.
 6. Step the level back:
@@ -222,14 +231,12 @@ Steps that can lose data:
   of its open repair included. Whatever only they held is lost.
 - A mark naming a leg of another identity wipes the legs of the current
   identity with no refusal: their newer data is lost.
-- The force flag (`--force`) starts the array from a leg older than a leg
-  it wipes. That leg serves and holds newer data, and you choose to give
-  that data up. Use it only when the newer data is known to be bad.
-- The force flag also drops the named leg's bad-block list. If two legs have
-  the same change count and you force the wrong one, hosts read the regions
-  md never copied as whatever that leg's disk held, with no error. A flag
-  given for the list also passes an older named leg in the same start; the
-  dry run without the flag lists both, so read its whole list first.
+- `--override older-leg` starts the array from a leg older than a leg it
+  wipes. That leg serves and holds newer data, and you choose to give that
+  data up. Use it only when the newer data is known to be bad.
+- `--override bad-blocks` drops the named leg's bad-block list. If two legs
+  have the same change count and you name the wrong one, hosts read the
+  regions md never copied as whatever that leg's disk held, with no error.
 - A start from an older copy restores this group alone. The pool's other
   groups keep their newer state, so the pool's volumes can mix old and new
   blocks. A block first written since that copy can read another pool's
@@ -241,12 +248,14 @@ tell which one md copied from.
 
 Tested: the cn agent suite, repair case, stages `refuse` (a half-copied
 leg refused, nothing wiped), `forced` (a start from the leg that kept the
-data), `older` and `olderstart` (an older leg refused, then started with
-the force flag), and `badblocks` and `badstart` (the named leg's
-bad-block list refused with no force flag, nothing wiped, then dropped
-with it). The end-to-end suite, `integtest/e2e_test.sh`, react case: its
-first forced start, which reads the named leg's list length first and,
-when the leg has a list, checks the refusal and then forces.
+data), `older` and `olderstart` (an older leg refused, then started
+passing `older-leg`), and `badblocks` and `badstart` (the named leg's
+bad-block list refused with no override, nothing wiped, the dry run
+listing it alone, then dropped passing `bad-blocks`). The end-to-end
+suite, `integtest/e2e_test.sh`, react case: its first forced start, which
+reads the named leg's list length first and, when the leg has a list,
+checks the refusal and the dry run's list, then passes the kinds that list
+holds.
 
 ### A group whose in-sync leg died during a copy
 
@@ -278,7 +287,7 @@ apart.
 
 Steps that can lose data: if md has already marked the half-copied leg in
 sync, a mark naming it is refused for its bad-block list only while it
-carries no force flag. With the flag, hosts read the regions md never
+does not pass `bad-blocks`. Passing it, hosts read the regions md never
 copied as whatever that leg's disk held.
 
 When to stop: the leg that kept the data will never come back. A retired
@@ -312,15 +321,15 @@ Safe steps:
 5. Run the dry run from that leg, then write the mark naming it:
    `dnvctl group force-start --grp <group id> --leg <retired leg id>`. If
    md once wrote onto that leg, as a repair that was cancelled can leave
-   it, the gateway refuses the mark unless you add `--force`, and the dry
-   run lists that refusal first. Such a leg is no longer the copy it was:
-   stop instead. If the dry run lists a bad-block list on the leg, read
-   rule 4 of "Which leg to choose". A retired
-   leg can carry such a list from its time in the array, for example when
-   md recorded bad blocks on it before a repair replaced it. The force flag
-   drops the list, and md then serves those regions from what the leg holds
-   there. Add `--force` to the dry run and to the mark only if you accept
-   that; otherwise stop.
+   it, the gateway refuses the mark unless you add `--override partial`,
+   and the dry run lists that refusal first. Such a leg is no longer the
+   copy it was: stop instead. If the dry run lists a bad-block list on the
+   leg, read rule 4 of "Which leg to choose". A retired leg can carry such
+   a list from its time in the array, for example when md recorded bad
+   blocks on it before a repair replaced it. `--override bad-blocks` drops
+   the list, and md then serves those regions from what the leg holds
+   there. Add `--override bad-blocks` to the dry run and to the mark only
+   if you accept that; otherwise stop.
 6. Once the array runs and `dnvctl repair get --name <name>` shows the
    repair started, finish it: `dnvctl repair finish --name <name>`. The
    new leg then takes the bad leg's place in the list.
@@ -333,7 +342,7 @@ groups keep their newer state. Blocks first written since can read another
 pool's bytes.
 
 When to stop: as in steps 2, 4 and 5, the refusal for a bad-block list
-included when you do not accept what the force flag does.
+included when you do not accept what `--override bad-blocks` does.
 
 Tested: the cn agent suite, repair case, stage `restore`; the end-to-end
 suite, react case, its second forced start.

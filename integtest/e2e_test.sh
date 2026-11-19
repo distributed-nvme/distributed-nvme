@@ -20137,10 +20137,11 @@ react_fs_mark_of() { # <json>
 # operator would retry it. Every other failure dies at once, any other
 # refusal included: the level, the leg's place and the primary that the
 # call's other refusals read do not change while the step waits. Each
-# refusal is logged as it changes.
-react_fs_try_start() { # <leg id> [force]
+# refusal is logged as it changes. <words> is the call's --override, the
+# refusals the start passes (cnagent.md CN12), none when left out.
+react_fs_try_start() { # <leg id> [words]
 	local extra=()
-	[ "${2:-}" = force ] && extra=(--force)
+	[ -n "${2:-}" ] && extra=(--override "$2")
 	if ctl_try group force-start --grp "$REACT_GRP_ID" --leg "$1" \
 		"${extra[@]}"; then
 		return 0
@@ -20172,9 +20173,10 @@ react_fs_try_start() { # <leg id> [force]
 # pass at the least, so the read right after the call finds it; should the
 # clear have come first, the worker's record of it must be in its log
 # instead. It fills REACT_FS_MARK_REV, REACT_FS_CN_MARK and REACT_FS_WK_MARK.
-# With "force" the mark carries the operator's force (cnagent.md CN12), which
-# a named leg with a bad-block list needs (react_fs_list_forced).
-react_fs_mark() { # <leg id> [force]
+# <words>, dnvctl's --override, names the refusals the mark passes
+# (cnagent.md CN12), as a named leg with a bad-block list needs
+# (react_fs_list_forced).
+react_fs_mark() { # <leg id> [words]
 	local mark recs n
 	REACT_FS_CN_MARK=$(react_cn_log_mark)
 	REACT_FS_WK_MARK=$(worker_log_mark)
@@ -20229,33 +20231,47 @@ react_fs_bbl() { # <leg id>
 
 # react_fs_list_forced reads, just before the forced start from <leg id>
 # runs, whether that leg carries a bad-block list, and when it does checks
-# the refusal with no force and writes the mark again with the force
-# (cnagent.md CN12): whether md wrote a list depends on the run's timing, so
-# the choice is made at run time. The dry run with no force must name the
-# list, and the one with the force must drop it. It returns 0 when it wrote
-# the mark with the force, 1 when the leg carries no list.
+# the refusal with no override and writes the mark again passing the kinds
+# the dry run lists (cnagent.md CN12): whether md wrote a list depends on the
+# run's timing, so the choice is made at run time. The dry run with no
+# override must refuse the list and list it among its refusals, none passed;
+# the one passing the listed kinds must refuse nothing and drop the list.
+# Every other kind it lists is logged. It returns 0 when it wrote the mark
+# again, 1 when the leg carries no list.
 react_fs_list_forced() { # <leg id>
-	local bbl refusal
+	local bbl refusal words
 	bbl=$(react_fs_bbl "$1")
 	case "$bbl" in
 	'' | *[!0-9]*) die "leg $1's bad-block list reads '$bbl'" ;;
 	esac
 	if [ "$bbl" -eq 0 ]; then
-		log "  leg $1 carries no bad-block list: the start needs no force"
+		log "  leg $1 carries no bad-block list: the start passes no refusal"
 		return 1
 	fi
-	log "  leg $1 carries a bad-block list of $bbl entries: the start is" \
-		"refused with no force, then forced"
 	ctl_ok group inspect --grp "$REACT_GRP_ID" --leg "$1"
 	refusal=$(jq_of "$CTL_OUT" '.dry_run.refusal // ""')
 	case "$refusal" in
 	*"carries a bad-block list"*) ;;
-	*) die "the dry run from leg $1 with no force refuses '$refusal'" ;;
+	*) die "the dry run from leg $1 with no override refuses '$refusal'" ;;
 	esac
-	ctl_ok group inspect --grp "$REACT_GRP_ID" --leg "$1" --force
+	assert_field "$CTL_OUT" \
+		'[.dry_run.refusal_list[]? | select(.overridden // false)] | length' 0 \
+		"the refusals the dry run from leg $1 passes with no override"
+	words=$(jq_of "$CTL_OUT" '[.dry_run.refusal_list[]?.override
+		| ascii_downcase | ltrimstr("forced_start_override_") | gsub("_"; "-")]
+		| unique | join(",")')
+	case ",$words," in
+	*,bad-blocks,*) ;;
+	*) die "the dry run from leg $1 lists '$words', want bad-blocks among them" ;;
+	esac
+	log "  leg $1 carries a bad-block list of $bbl entries: the dry run" \
+		"lists $words, which the mark then passes"
+	ctl_ok group inspect --grp "$REACT_GRP_ID" --leg "$1" --override "$words"
+	assert_field "$CTL_OUT" '.dry_run.refusal // ""' "" \
+		"the dry run from leg $1 passing $words"
 	assert_field "$CTL_OUT" '.dry_run.update' uuid,force-no-bbl \
-		"the dry run from leg $1 with the force"
-	react_fs_mark "$1" force
+		"the dry run from leg $1 passing $words"
+	react_fs_mark "$1" "$words"
 	return 0
 }
 
@@ -22844,9 +22860,9 @@ react_fs_data_leg() {
 		"leg $data to read healthy with its disk node back (dnv-worker.md HL2)" \
 		copy_rep_leg_epoch "$pos" "$data" healthy
 	# The start runs only now, with the leg back to read: a list on it is
-	# refused with no force, the mark then written again with the force.
+	# refused with no override, the mark then written again passing it.
 	if react_fs_list_forced "$data"; then
-		log "  the forced start from leg $data carries the force"
+		log "  the forced start from leg $data passes the dry run's refusals"
 	fi
 	REACT_FS_LAST=""
 	msg="the primary to start group $REACT_GRP_ID's array from leg $data and"
@@ -23120,7 +23136,7 @@ react_fs_restore() {
 	# The forced start from the repair's new leg, the repair's start and
 	# finish, the worker's clear, and the group whole on the retired leg
 	# taken back and the fresh leg. A list on the leg, read at run time, has
-	# the mark carry the force (react_fs_list_forced).
+	# the mark pass it (react_fs_list_forced).
 	if ! react_fs_list_forced "$old"; then
 		react_fs_mark "$old"
 	fi

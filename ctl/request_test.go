@@ -628,14 +628,16 @@ var sweepRows = []sweepRow{
 			LegId:       2,
 		}},
 	{67, "InspectGroup",
-		[]string{"group", "inspect", "--grp", "1", "--leg", "2", "--force"},
-		// A read: no token, and --leg with --force is the dry run.
+		[]string{"group", "inspect", "--grp", "1", "--leg", "2",
+			"--override", "older-leg"},
+		// A read: no token, and --leg with --override is the dry run.
 		&pb.InspectGroupRequest{
 			ClusterName: itCluster,
 			SpName:      itSp,
 			GrpId:       1,
 			LegId:       2,
-			Force:       true,
+			OverrideList: []pb.ForcedStartOverride{
+				pb.ForcedStartOverride_FORCED_START_OVERRIDE_OLDER_LEG},
 		}},
 	{68, "UpdateGroupOperatorInCharge",
 		[]string{"group", "set-operator-in-charge", "--grp", "1",
@@ -1898,28 +1900,38 @@ func TestForceStartCancelIsSentAsTyped(t *testing.T) {
 	})
 }
 
-// TestForceFlagsAreSent covers the operator's force of `group force-start`
-// and `repair create` (dnvctl.md, `group` — `ctl/group.go`, `repair` —
-// `ctl/repair.go`): --force sends force true, a leaf without it false, and a
-// --force beside --cancel is sent as typed for the gateway to refuse (CT8).
+// TestForceFlagsAreSent covers the refusals `group force-start` passes and
+// the operator's force of `repair create` (dnvctl.md, `group` —
+// `ctl/group.go`, `repair` — `ctl/repair.go`): --override sends each word as
+// its kind in the order typed, spaces around a word aside, a word typed
+// twice twice and a leaf without it none; an --override beside --cancel is
+// sent as typed for the gateway to refuse (CT8); --force on `repair create`
+// sends force true.
 func TestForceFlagsAreSent(t *testing.T) {
 	start := runArgv(t, "ForceStartGroup", "group", "force-start",
-		"--grp", "1", "--leg", "2", "--force")
+		"--grp", "1", "--leg", "2",
+		"--override", "partial, bad-blocks,older-leg,partial")
 	wantRequest(t, start, &pb.ForceStartGroupRequest{
 		ClusterName: itCluster,
 		SpName:      itSp,
 		GrpId:       1,
 		LegId:       2,
-		Force:       true,
+		OverrideList: []pb.ForcedStartOverride{
+			pb.ForcedStartOverride_FORCED_START_OVERRIDE_PARTIAL,
+			pb.ForcedStartOverride_FORCED_START_OVERRIDE_BAD_BLOCKS,
+			pb.ForcedStartOverride_FORCED_START_OVERRIDE_OLDER_LEG,
+			pb.ForcedStartOverride_FORCED_START_OVERRIDE_PARTIAL,
+		},
 	})
 	both := runArgv(t, "ForceStartGroup", "group", "force-start",
-		"--grp", "1", "--cancel", "--force")
+		"--grp", "1", "--cancel", "--override", "older-leg")
 	wantRequest(t, both, &pb.ForceStartGroupRequest{
 		ClusterName: itCluster,
 		SpName:      itSp,
 		GrpId:       1,
 		Cancel:      true,
-		Force:       true,
+		OverrideList: []pb.ForcedStartOverride{
+			pb.ForcedStartOverride_FORCED_START_OVERRIDE_OLDER_LEG},
 	})
 	rep := runArgv(t, "CreateRepair", "repair", "create", "--name", "r",
 		"--grp", "1", "--bad-legs", "2", "--retired-leg", "3", "--force")

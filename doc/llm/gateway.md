@@ -1552,25 +1552,30 @@ pool's repairs, retired legs and groups still answer.
   forced-start mark names the repair's new leg (`architecture.md`,
   Repairs); the op's reasons answer as FinishRepair's do. Reply `rep_id`.
 * **ForceStartGroup** — two-phase (AG4). The pure checks first (GW4): the
-  names, a `leg_id` that is set with `cancel` or zero without it, and a
-  `force` set with `cancel`, each `INVALID_ARGUMENT`.
+  names, a `leg_id` that is set with `cancel` or zero without it, an
+  `override_list` entry that names no refusal or a kind named twice
+  (`validateOverrideList`), and an `override_list` set with `cancel`, each
+  `INVALID_ARGUMENT`.
   Then the planning read (`forceStartChecks`) behind `openSp` makes the
   refusals of `architecture.md`, Repairs, in its order: the level gate at
   `SP_LEVEL_NO_REDUND`, a `RedundNone` pool, the group through
   `locateGrp`, a deleting clone through `refuseDeletingClone`, the leg
   through the group's `leg_list` and the repair it names (`grpRepair`;
   `forceStartLegChecks`), a new leg the repair took back that carries the
-  partial mark refused with no force (`errPartialLeg`), and the primary, whose `CnConf` it reads for the
+  partial mark refused unless `override_list` names `PARTIAL`
+  (`errPartialLeg`), and the primary, whose `CnConf` it reads for the
   agent call, a primary's CN that is missing being `ABORTED` as in
   `DeleteClone`. Outside any STM, `checkGrpArrayDown` reads the
   primary's report (Agent calls). Last `model.ForceStartGroup` with the
-  group's parent, the leg, the cancel flag and the force, which writes the
-  mark, the force in it, with the revision its own bump commits, and
+  group's parent, the leg, the cancel flag and `override_list`, which
+  writes the mark, the list in it as named and no force, with the revision
+  its own bump commits, and
   re-checks the token, the pool, the
   group and the leg in its STM. The gateway makes no refusal of a named
   leg's bad-block list: the primary reads the leg's superblock at the start
-  and refuses a list with no force (`cnagent.md` CN12), as it refuses an
-  older named leg. Its `model.ReasonLegNotNamable`, a leg a
+  and refuses a list unless the mark passes `BAD_BLOCKS` (`cnagent.md`
+  CN12), as it refuses an older named leg unless the mark passes
+  `OLDER_LEG`. Its `model.ReasonLegNotNamable`, a leg a
   write took away after the planning read, and its
   `model.ReasonLegPartial`, a leg a write marked partial since, are
   answered `FAILED_PRECONDITION` in the gateway's words (`modelReason`). A cancel
@@ -1597,7 +1602,9 @@ pool's repairs, retired legs and groups still answer.
   conf gate, then `model.DeleteRetiredLeg`, which gives the side back through
   the drains' DN ledger with one `BumpDnRev`;
   `model.ReasonRetiredLegNotFound` is `NOT_FOUND`. Reply `leg_id`.
-* **InspectGroup** — read-only. The pure checks (GW4): the names. One
+* **InspectGroup** — read-only. The pure checks (GW4): the names,
+  `override_list` as ForceStartGroup checks it, and an `override_list` set
+  with no leg, which only a dry run reads, each `INVALID_ARGUMENT`. One
   snapshot behind `openSpRead`, with no token and no deleting gate, makes
   the refusals of `architecture.md`, Repairs, in its order: a `RedundNone`
   pool, the group through `locateGrp`; then reads the group's legs, its
@@ -1606,23 +1613,23 @@ pool's repairs, retired legs and groups still answer.
   planning refusals of a write from that leg — the pool being deleted,
   the level, a clone being deleted, `forceStartLegChecks` — keeping the
   first for the reply instead of failing the call, and its refusal of a
-  partial leg, which the force passes, as a listed refusal
+  partial leg, which the override `PARTIAL` passes, as a listed refusal
   (`forceStartRefusal`); and it finds the primary and its CN (`grpPrimaryTarget`), a pool with
   none being `FAILED_PRECONDITION`. Then one connection to the primary's
   agent: `GetCntlrInfo`, for each leg's row, the report's stamp and the
   revision of the request the agent holds, and `InspectGrp` (`cnagent.md`
-  CN31), with the request's leg and force; a transport failure or an
+  CN31), with the request's leg and `override_list`; a transport failure or an
   agent's error is `ABORTED`. Reply each leg of the records with the
   agent's read of it, or with no read when the agent's held request does
   not name it yet, its disk node and health epochs and its row; the
   array's state; the retired legs' ids; the stamp; both revisions; and
   the dry run (`inspectDryRun`): the first refusal `ForceStartGroup` would
   answer — the first planning refusal, the partial leg when the request's
-  force does not pass it, then its judgement of the group's row
+  `override_list` does not name `PARTIAL`, then its judgement of the group's row
   (`grpRowRefusal`) — in the gateway's own words with no zeroes, update or
   stop, else the agent's dry run as the agent wrote it; and either way the
-  list of refusals the force passes, the partial leg's first, its text cut
-  to the row text cap as the agent cuts its own (`common.CutRowText`;
+  list of refusals an override passes, the partial leg's first, its text
+  cut to the row text cap as the agent cuts its own (`common.CutRowText`;
   `architecture.md`, Live-state reporting), then the agent's. Nothing is
   written.
 * **UpdateRetiredLegKeep** — DeleteRetiredLeg's planning read with no conf
@@ -1950,7 +1957,10 @@ gateway, never through `workerctl`.
   another group, the level that stops group arrays and an array the
   primary's report, seeded in the fake, shows running, then, with the
   report showing the array broken, written with the revision its own bump
-  committed, replaced, and cancelled, a cancel of no mark writing nothing;
+  committed, replaced, replaced again passing two kinds of refusal, which
+  the mark stores as named and with no force, refused with nothing written
+  for an override that names no refusal, a kind named twice and an override
+  beside a cancel, and cancelled, a cancel of no mark writing nothing;
   a repair of a leg with no health epoch (`architecture.md`, Repairs, A
   leg of another identity) — refused while the primary's report names no
   identity on its row, created with no flag once the report marks it of

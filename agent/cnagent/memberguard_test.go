@@ -13,7 +13,8 @@ import (
 // the identity check of a taken-back leg's add and of a leg_list member's
 // add.
 
-// withForcedMark is withMark with the operator's force on the mark.
+// withForcedMark is withMark with the force on the mark that a mark an
+// older gateway wrote can carry, which passes every kind of refusal.
 func withForcedMark(
 	req *pb.SyncupCntlrRequest,
 	legId uint64,
@@ -41,7 +42,8 @@ func (f *repFix) identity(dev, id string) {
 // that the start would zero (olderNamedLeg): nothing is zeroed or
 // assembled, and the row names both legs. The refusal lasts, so the read,
 // whose dry run meets it too (forcedStartNamed), names nothing, and nothing
-// runs between the worker's calls. With the mark's force the start goes on. A higher count on a member of
+// runs between the worker's calls. With the force an older gateway's mark
+// carries the start goes on. A higher count on a member of
 // another identity, or on one that is not full, is not compared.
 func TestForcedStartRefusesAnOlderNamedLeg(t *testing.T) {
 	t.Run("refused", func(t *testing.T) {
@@ -197,8 +199,9 @@ func TestForcedStartProvesEachZero(t *testing.T) {
 // array under its new identity with the list, so the pass stops it and
 // starts it again with the list dropped, keeping the new identity; the
 // record names both updates. A stop that fails is the group's error. The
-// mark carries the force, which a named leg with a list needs
-// (badBlocksRefusal).
+// mark carries the force an older gateway's mark can carry, which passes the
+// named leg's list as the override bad-blocks does (badBlocksRefusal,
+// forcedStartPasses).
 func TestForcedStartDropsABadBlockList(t *testing.T) {
 	t.Run("dropped", func(t *testing.T) {
 		f := downNoRepair(t)
@@ -253,10 +256,11 @@ func TestForcedStartDropsABadBlockList(t *testing.T) {
 
 // TestForcedStartRefusesANamedLegWithABadBlockList pins CN12's refusal of
 // a named leg whose reading shows a bad-block list (badBlocksRefusal): with
-// no force nothing is zeroed or assembled, the row names the leg and the
+// no override nothing is zeroed or assembled, the row names the leg and the
 // list's length, the dry run refuses alike, and the read names no forced
-// start, so nothing runs between the worker's calls; with the force the dry
-// run names the drop and the start goes on.
+// start, so nothing runs between the worker's calls; with the override
+// bad-blocks the dry run names the drop, and the start goes on under a mark
+// that passes it, here the force of a mark an older gateway wrote.
 func TestForcedStartRefusesANamedLegWithABadBlockList(t *testing.T) {
 	f := downNoRepair(t)
 	f.node.setSuperblock(f.leg2, fakeSuperblock{badBlocks: 3})
@@ -270,14 +274,16 @@ func TestForcedStartRefusesANamedLegWithABadBlockList(t *testing.T) {
 	assertNoCall(t, f.node, "--zero-superblock")
 
 	f.node.Reset()
-	dry := f.inspect(t, testDataLeg2, false).GetDryRun()
+	dry := f.inspect(t, testDataLeg2).GetDryRun()
 	if !strings.Contains(dry.GetRefusal(), "carries a bad-block list") {
-		t.Fatalf("the dry run with no force: %v, want the refusal", dry)
+		t.Fatalf("the dry run with no override: %v, want the refusal", dry)
 	}
-	dry = f.inspect(t, testDataLeg2, true).GetDryRun()
+	dry = f.inspect(t, testDataLeg2,
+		pb.ForcedStartOverride_FORCED_START_OVERRIDE_BAD_BLOCKS).GetDryRun()
 	if dry.GetRefusal() != "" ||
 		dry.GetUpdate() != mdUpdateUuid+","+mdUpdateForceNoBbl {
-		t.Fatalf("the dry run with the force: %v, want the list dropped", dry)
+		t.Fatalf("the dry run with the override bad-blocks: %v, want the "+
+			"list dropped", dry)
 	}
 	assertNoCall(t, f.node, "cmd mdadm")
 

@@ -34,11 +34,53 @@ package ctl
 
 import (
 	"context"
+	"fmt"
+	"strings"
 
 	"github.com/spf13/cobra"
 
 	"github.com/distributed-nvme/distributed-nvme/pb"
 )
+
+// groupOverrideWords are the words of --override, each naming one kind of
+// forced-start refusal the start passes (cnagent.md CN12): an older named
+// leg, a bad-block list on the named leg, and a partial taken-back leg.
+var groupOverrideWords = map[string]pb.ForcedStartOverride{
+	"older-leg":  pb.ForcedStartOverride_FORCED_START_OVERRIDE_OLDER_LEG,
+	"bad-blocks": pb.ForcedStartOverride_FORCED_START_OVERRIDE_BAD_BLOCKS,
+	"partial":    pb.ForcedStartOverride_FORCED_START_OVERRIDE_PARTIAL,
+}
+
+// groupOverridesOf is --override, a comma-split list of groupOverrideWords
+// sent as override_list in the order typed. An empty flag is an empty list;
+// an item that is no word, an empty one included, is a usage error (exit 2,
+// CT8), since the field is an enum and dnvctl has no other spelling to send.
+// A word typed twice is sent twice, for the gateway to refuse (CT8).
+func groupOverridesOf() ([]pb.ForcedStartOverride, error) {
+	raw := strOf("override")
+	if raw == "" {
+		return nil, nil
+	}
+	var out []pb.ForcedStartOverride
+	for _, item := range strings.Split(raw, ",") {
+		override, ok := groupOverrideWords[strings.TrimSpace(item)]
+		if !ok {
+			return nil, fmt.Errorf("invalid --override %q: want a comma "+
+				"list of older-leg, bad-blocks and partial", item)
+		}
+		out = append(out, override)
+	}
+	return out, nil
+}
+
+// groupOverrideHelp is the help of --override on both leaves.
+const groupOverrideHelp = "comma list of the forced-start refusals to " +
+	"pass, override_list: older-leg, a member the start overwrites holds " +
+	"a higher md change count of the same array, so newer data, which is " +
+	"lost; bad-blocks, the named leg carries a bad-block list, which the " +
+	"start drops, so md serves the listed regions as written; partial, the " +
+	"named leg is a taken-back leg md once wrote onto. A start passes only " +
+	"the kinds named"
 
 // registerGroup adds the `group` noun to the root. The two writes carry an
 // `sp_rev` token when --rev is given (CT3); the inspect, a read, carries
@@ -57,10 +99,11 @@ func registerGroup(root *cobra.Command) {
 // groupInspectCmd is InspectGroup: the group's primary reads each member
 // the group keeps — its md superblock, md's view of it, its leg's row and
 // health — so an operator can choose the leg of a forced start; with --leg
-// the reply also says what a forced start from that leg would do, with
-// --force as `group force-start --force` would, and runs nothing (the dry
-// run). It writes nothing and recommends no leg. dnvctl checks nothing
-// (CT8).
+// the reply also says what a forced start from that leg would do, passing
+// the refusals --override names as `group force-start --override` would,
+// lists every refusal an override passes that the start meets, and runs
+// nothing (the dry run). It writes nothing and recommends no leg. dnvctl
+// checks nothing but the words of --override (CT8).
 func groupInspectCmd() *cobra.Command {
 	cmd := leaf(
 		"inspect",
@@ -76,12 +119,16 @@ func groupInspectCmd() *cobra.Command {
 			if err != nil {
 				return nil, err
 			}
+			overrides, err := groupOverridesOf()
+			if err != nil {
+				return nil, err
+			}
 			req := &pb.InspectGroupRequest{
-				ClusterName: clusterOf(),
-				SpName:      spOf(),
-				GrpId:       grpId,
-				LegId:       legId,
-				Force:       boolOf("force"),
+				ClusterName:  clusterOf(),
+				SpName:       spOf(),
+				GrpId:        grpId,
+				LegId:        legId,
+				OverrideList: overrides,
 			}
 			return func(
 				ctx context.Context, client pb.GatewayClient,
@@ -94,8 +141,7 @@ func groupInspectCmd() *cobra.Command {
 	flags.String("leg", "",
 		"leg_id of the leg a forced start would start from; the dry run "+
 			"(decimal, or hex after 0x; none for the read alone)")
-	flags.Bool("force", false,
-		"the dry run with the forced start's force")
+	flags.String("override", "", "the dry run's "+groupOverrideHelp)
 	return cmd
 }
 
@@ -106,15 +152,16 @@ func groupInspectCmd() *cobra.Command {
 // the leg the array starts from: a leg of the group's leg list other than
 // the bad leg of a started repair, or the new leg of its open repair while
 // that repair is created or started, as the gateway's refusal says. --cancel withdraws the group's mark instead of
-// writing one. --force puts the operator's force on the mark: the start goes
-// on from a named leg whose md change count is below that of a full member
-// of the same array the start would zero, and from a named leg that carries
-// a bad-block list, which the start drops (cnagent.md CN12), and the mark may
-// name a taken-back leg that carries the partial mark (architecture.md,
-// Retired legs); one force passes all three. dnvctl checks
-// none of the pairings: a --cancel with a non-zero --leg or with --force,
-// and a write with no --leg, are forwarded, and the gateway refuses them
-// (CT8).
+// writing one. --override names the refusals the start passes, each by its
+// word (groupOverrideWords): older-leg, a named leg whose md change count is
+// below that of a full member of the same array the start would zero;
+// bad-blocks, a named leg that carries a bad-block list, which the start
+// drops (cnagent.md CN12); partial, a taken-back leg that carries the
+// partial mark (architecture.md, Retired legs). A start passes a refusal
+// only when its word is named, so an override given for one passes no
+// other. dnvctl checks the words alone and none of the pairings: a
+// --cancel with a non-zero --leg or with --override, a word typed twice and
+// a write with no --leg are forwarded, and the gateway refuses them (CT8).
 //
 // The forced start destroys what every other leg the forced start keeps
 // holds, an open repair's bad leg excepted, and dnvctl asks for no
@@ -143,14 +190,18 @@ func groupForceStartCmd() *cobra.Command {
 			if err != nil {
 				return nil, err
 			}
+			overrides, err := groupOverridesOf()
+			if err != nil {
+				return nil, err
+			}
 			req := &pb.ForceStartGroupRequest{
-				ClusterName: clusterOf(),
-				SpName:      spOf(),
-				SpRev:       rev,
-				GrpId:       grpId,
-				LegId:       legId,
-				Cancel:      boolOf("cancel"),
-				Force:       boolOf("force"),
+				ClusterName:  clusterOf(),
+				SpName:       spOf(),
+				SpRev:        rev,
+				GrpId:        grpId,
+				LegId:        legId,
+				Cancel:       boolOf("cancel"),
+				OverrideList: overrides,
 			}
 			return func(
 				ctx context.Context, client pb.GatewayClient,
@@ -166,13 +217,7 @@ func groupForceStartCmd() *cobra.Command {
 			"after 0x; none with --cancel)")
 	flags.Bool("cancel", false,
 		"withdraw the group's forced-start mark instead of writing one")
-	flags.Bool("force", false,
-		"start even when a member the start overwrites holds a higher md "+
-			"change count of the same array, so newer data, which is lost, "+
-			"when the named leg carries a bad-block list, which the start "+
-			"drops, so md serves the listed regions as written, or when the "+
-			"named leg is a taken-back leg md once wrote onto (partial); one "+
-			"force passes all three")
+	flags.String("override", "", groupOverrideHelp)
 	return cmd
 }
 

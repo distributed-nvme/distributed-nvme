@@ -342,9 +342,9 @@ var leafFlags = map[string][]string{
 	"retired-leg delete": {"leg"},
 	"retired-leg keep":   {"leg", "clear"},
 	// group
-	"group force-start":            {"grp", "leg", "cancel", "force"},
+	"group force-start":            {"grp", "leg", "cancel", "override"},
 	"group set-operator-in-charge": {"grp", "operator-in-charge"},
-	"group inspect":                {"grp", "leg", "force"},
+	"group inspect":                {"grp", "leg", "override"},
 	// worker
 	"worker list": {},
 }

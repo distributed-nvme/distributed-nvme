@@ -55,6 +55,30 @@ func (h *hexUint) Set(s string) error {
 	return nil
 }
 
+// overrideList is a forced start's comma list of refusals to pass, each by
+// dnvctl's word (older-leg, bad-blocks, partial), as InspectGrp's
+// override_list (cnagent.md CN31); an unknown word is a parse error.
+type overrideList []pb.ForcedStartOverride
+
+func (o *overrideList) String() string { return fmt.Sprint([]pb.ForcedStartOverride(*o)) }
+
+func (o *overrideList) Set(s string) error {
+	words := map[string]pb.ForcedStartOverride{
+		"older-leg":  pb.ForcedStartOverride_FORCED_START_OVERRIDE_OLDER_LEG,
+		"bad-blocks": pb.ForcedStartOverride_FORCED_START_OVERRIDE_BAD_BLOCKS,
+		"partial":    pb.ForcedStartOverride_FORCED_START_OVERRIDE_PARTIAL,
+	}
+	*o = nil
+	for _, item := range strings.Split(s, ",") {
+		override, ok := words[strings.TrimSpace(item)]
+		if !ok {
+			return fmt.Errorf("%q is no override word", item)
+		}
+		*o = append(*o, override)
+	}
+	return nil
+}
+
 // cntlrPtrList collects repeated --cntlr sp:cntlr flags into the declarative
 // full list SyncupCn expects.
 type cntlrPtrList []*pb.CntlrPointer
@@ -671,7 +695,7 @@ func cmdGetLegBm(args []string) {
 
 // cmdInspectGrp reads a group's members through the primary (InspectGrp,
 // cnagent.md), with the forced start's dry run from --leg when it is given,
-// and prints the reply as JSON.
+// passing the refusals --override names, and prints the reply as JSON.
 func cmdInspectGrp(args []string) {
 	var g globals
 	fs := newFlagSet("inspect-grp", &g)
@@ -679,7 +703,9 @@ func cmdInspectGrp(args []string) {
 	var grp, leg hexUint
 	fs.Var(&grp, "grp", "group id")
 	fs.Var(&leg, "leg", "the dry run's named leg (optional)")
-	force := fs.Bool("force", false, "the dry run with the force")
+	var overrides overrideList
+	fs.Var(&overrides, "override",
+		"the dry run's refusals to pass: older-leg,bad-blocks,partial")
 	fs.Parse(args)
 
 	conn, client, err := g.dial()
@@ -691,13 +717,13 @@ func cmdInspectGrp(args []string) {
 	defer cancel()
 
 	reply, err := client.InspectGrp(ctx, &pb.InspectGrpRequest{
-		ClusterId: uint64(g.cluster),
-		CnId:      uint64(g.cn),
-		SpId:      uint64(*sp),
-		CntlrId:   uint64(*cntlr),
-		GrpId:     uint64(grp),
-		LegId:     uint64(leg),
-		Force:     *force,
+		ClusterId:    uint64(g.cluster),
+		CnId:         uint64(g.cn),
+		SpId:         uint64(*sp),
+		CntlrId:      uint64(*cntlr),
+		GrpId:        uint64(grp),
+		LegId:        uint64(leg),
+		OverrideList: overrides,
 	})
 	if err != nil {
 		die("InspectGrp failed: %v", err)

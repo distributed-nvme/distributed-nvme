@@ -3473,6 +3473,33 @@ EOF
 	assert_field "$fsMark" '.leg_id' "$fsLegB" "the replaced mark names leg B"
 	assert_field "$fsMark" '.revision' "$SP_REV" \
 		"the replaced mark carries its own revision"
+	assert_field "$fsMark" '(.override_list // []) | length' "0" \
+		"the replaced mark passes no refusal"
+	# The refusals a mark passes (cnagent.md CN12): each kind the request
+	# names, as named, and never a force. A value that names no refusal, a
+	# kind named twice and an override beside a cancel are INVALID_ARGUMENT
+	# with nothing written.
+	spRevBefore=$SP_REV
+	gw force-start-grp --sp sp0 --rev "$SP_REV" --grp "$dataGrp" \
+		--leg "$fsLegB" --override older-leg,bad-blocks >/dev/null
+	refresh_rev sp0
+	assert_eq "$SP_REV" "$((spRevBefore + 1))" \
+		"the mark with two overrides bumps SpRev exactly once"
+	fsMark=$(smoke_grp_field sp0 "$dataGrp" forced_start)
+	assert_field "$fsMark" '.override_list | join(",")' \
+		"FORCED_START_OVERRIDE_OLDER_LEG,FORCED_START_OVERRIDE_BAD_BLOCKS" \
+		"the mark passes the two kinds named"
+	assert_field "$fsMark" '.force // false' "false" \
+		"the mark carries no force"
+	assert_no_write "force-start-grp with an override of no refusal" \
+		gwx INVALID_ARGUMENT force-start-grp --sp sp0 --rev "$SP_REV" \
+		--grp "$dataGrp" --leg "$fsLegB" --override older-leg,0
+	assert_no_write "force-start-grp with a kind named twice" \
+		gwx INVALID_ARGUMENT force-start-grp --sp sp0 --rev "$SP_REV" \
+		--grp "$dataGrp" --leg "$fsLegB" --override partial,partial
+	assert_no_write "force-start-grp --cancel with an override" \
+		gwx INVALID_ARGUMENT force-start-grp --sp sp0 --rev "$SP_REV" \
+		--grp "$dataGrp" --cancel --override partial
 	gw set-sp-level --sp sp0 --rev "$SP_REV" --level READWRITE >/dev/null
 	refresh_rev sp0
 	# The cancel withdraws it, and a cancel with no mark writes nothing.

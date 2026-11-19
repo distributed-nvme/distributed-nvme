@@ -2302,36 +2302,41 @@ dm-clone (CN18).
      writes a copy position on a member it was copying onto, so a
      half-copied leg is refused here, and md starts no array from one alone
      anyway; and a read that fails is no answer, never "no superblock".
-     A bad-block list on the read is a refusal the operator's force passes
-     (`badBlocksRefusal`): it does not end the checks, which go on to step
-     3, and it is judged with step 3's at its end. Reason: the start drops
+     A bad-block list on the read is a refusal an override passes, of the
+     kind `BAD_BLOCKS` (`badBlocksRefusal`): it does not end the checks,
+     which go on to step 3, and it is judged with step 3's at its end. Reason: the start drops
      the list (step 5), and
      md then serves the regions it listed from what the leg holds there; on
      a half-copied leg that md marked in sync by mistake (Known limits)
      those are regions it never copied, another pool's bytes among them, so
      the drop is the operator's choice, which `InspectGrp`'s list length per
-     member and the dry run's update show first. One force passes this
-     refusal, step 3's and a mark that names a taken-back leg with the
-     partial mark alike (`architecture.md`, Repair, Forced start).
+     member and the dry run's update show first.
   3. Every other member the forced start keeps, the open repair's bad leg
      excepted, is available this pass and its superblock read answers, each read
      before step 4 zeroes any; otherwise the row names the first that is
      not, and the pass ends for the group with nothing zeroed. Each of them
      that is a full member of the named leg's identity with a higher change
-     count is a refusal the force passes (`olderNamedLeg`), which names that
-     member and both counts; the checks go on past it. Once every such
-     member is available and its read answers, the refusals of step 2 and of
-     this step that the mark does not pass — all of them unless it carries the operator's force
-     (`ForcedStart.force`) — are the group's error (`forcedStartRefused`),
-     and nothing is zeroed: "forced start refused (", the kinds' words
+     count is a refusal an override passes, of the kind `OLDER_LEG`
+     (`olderNamedLeg`), which names that member and both counts; the checks
+     go on past it. Once every such member is available and its read
+     answers, the refusals of step 2 and of this step that the mark does not
+     pass are the group's error (`forcedStartRefused`). The mark passes a
+     refusal when its `override_list` names the refusal's kind, and passes
+     every kind when it carries the force a mark an older gateway wrote
+     can carry (`ForcedStart.force`; `forcedStartPasses`; `architecture.md`,
+     Upgrade in lockstep); the gateway alone judges `PARTIAL`, at the
+     mark's write. Nothing is zeroed. The error reads "forced start
+     refused (", the kinds' words
      ("bad-blocks", "older-leg"), each once in the order met, "): ", then
      each refusal, joined by "; ", so the row, cut to the row text cap
      (`architecture.md`, Live-state reporting), keeps the kinds at its
      head; and a Warn record, `forced start refused`, names the group, the
-     named leg and each such refusal whole, its kind's word first. Reason
-     for meeting them all: a force given for one refusal passes the others
-     of the same start, so the row, the record and the dry run (CN31) show
-     every one before the operator chooses. The bad leg is excepted, neither read
+     named leg, each such refusal whole, its kind's word first, and the
+     words of the kinds the mark passed among those met. Reason for meeting
+     them all: the operator names each override, so the row, the record and
+     the dry run (CN31) show every refusal before the operator chooses; and
+     an override given for one kind passes no other, so passing a bad-block
+     list never also passes a member with newer data. The bad leg is excepted, neither read
      nor zeroed, because the repair replaces it: the finish retires it with
      its data kept, and the move to ABORTED ends the open repair with the
      leg still in `leg_list` as it is, where the identity check of the
@@ -2452,8 +2457,9 @@ dm-clone (CN18).
   and the checks of steps 2 and 3, run over the members the read finds
   serving (`planForcedStart`), hold. Reason: the read runs the converge's
   own checks, so it names nothing for a refusal that lasts — a named leg
-  that is no full member, carries a bad-block list under a mark without the
-  force, or is older than a member the start would zero, a member that is no
+  that is no full member, carries a bad-block list under a mark that does
+  not pass `BAD_BLOCKS`, or is older than a member the start would zero
+  under a mark that does not pass `OLDER_LEG`, a member that is no
   leg of this pool, a device above that holds the array — nor while the
   named leg or a member the start would zero is not available, a kept new
   leg still provisioning among them, whose sides' provisioned flip raises
@@ -5034,22 +5040,22 @@ group's array that is there. It reports the array's state, none when no
 array of the group is there, and the read's error when that read fails,
 the members being read all the same. With a leg in the request it also
 runs the forced start's checks (CN12, the forced start) on a mark of its
-own naming that leg, with the operator's force when the request sets it,
-and reports what the start would do: an array of the group that runs, or
+own naming that leg and passing the kinds of refusal the request's
+`override_list` names, and reports what the start would do: an array of the group that runs, or
 a read of the array that failed, is the refusal, as the primary leaves a
 mark waiting over a running array and the read's error ends the real
 start; an array that is there and does not run is stopped first, so the
 reply says so, unless it holds a member that is no leg wrapper of this
 pool, which the real start refuses to stop (`MdDetail.strangerErr`), word
-for word; then the start's checks, whose first that does not hold, or else
-whose refusals the force does not pass, is the refusal, word for word the
+for word; then the start's checks: the first that does not hold, or else
+the refusals the request does not pass, make the refusal, word for word the
 real start's, both cut alike to the row text cap (`architecture.md`,
-Live-state reporting), or else the members it would zero, in order, and
-the assembly's update; and, beside either, the list of every refusal the
-force passes that the checks met (CN12, step 2's bad-block list and step
+Live-state reporting), or else the reply names the members it would zero,
+in order, and the assembly's update; and, beside either, the list of every refusal an
+override passes that the checks met (CN12, step 2's bad-block list and step
 3's older members), passed or not, in that order, each with its kind
 (`ForcedStartOverride`), its text cut to the row text cap and whether the
-request's force passes it, so one dry run shows them all, where the row
+request names its kind, so one dry run shows them all, where the row
 of a start they refuse is cut to the cap with their kinds at its head. The
 real start and this dry run
 run one function (`planForcedStart`), so a broken check fails the tests of
@@ -5988,9 +5994,9 @@ listing shows no device above it; and the forced start's checks
 absent array, hold. A read of the holders or of a superblock that did not
 answer names nothing; the next read reads again. So it names nothing for a
 refusal that lasts — a named leg that is no full member, carries a bad-block
-list under a mark without the force, or is older than a member the start
-would zero, a member that is no leg of this pool, a device above that holds
-the array — nor while the named leg or a member the start would zero is not
+list under a mark that does not pass it, or is older than a member the start
+would zero under a mark that does not pass that, a member that is no leg
+of this pool, a device above that holds the array — nor while the named leg or a member the start would zero is not
 available, a kept new leg still provisioning among them (the open repair's
 bad leg is not tested: CN12 step 3), nor over an array that reads running,
 where the mark waits; a process that holds the array open shows in no
@@ -6386,14 +6392,14 @@ stores instead is CN23's.
   Lab facts). The forced start's superblock read then takes it for a full
   member, and the leg that kept the data carries a bad-block list too, as
   the stop writes one onto it, both with the same change count. The forced
-  start refuses a named leg with a list unless the mark carries the force,
-  and with it drops the list (CN12). That is right for the leg that kept
-  the data. When the mark names the new leg with the force, the array
-  serves the regions md never copied onto it as whatever that leg held
-  there, with no error. The leg md copied from holds the data, not the new
-  leg it copied onto, and only the operator can tell them apart; the force
-  is their choice, which the list's length per member in `InspectGrp`
-  shows first. A mark written while the leg that kept the data is still
+  start refuses a named leg with a list unless the mark passes
+  `BAD_BLOCKS`, and passing it drops the list (CN12). That is right for the
+  leg that kept the data. When the mark names the new leg and passes the
+  list, the array serves the regions md never copied onto it as whatever
+  that leg held there, with no error. The leg md copied from holds the
+  data, not the new leg it copied onto, and only the operator can tell them
+  apart; the override is their choice, which the list's length per member
+  in `InspectGrp` shows first. A mark written while the leg that kept the data is still
   dead avoids the case: the forced start then stops the broken array before
   that leg is back, waits for it, and starts from it once it is back (CN12,
   the forced start).

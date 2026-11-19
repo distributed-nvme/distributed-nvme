@@ -10,7 +10,7 @@ import (
 // worker's write once md held the leg (SetNewLegsPartial), the cancel that
 // gives the leg back partial, the take-back that carries the mark into a new
 // repair, and the forced start that refuses to name a partial leg unless
-// forced.
+// the call passes PARTIAL.
 
 // takeBack creates the operator's repair of leg B that takes the fixture's
 // retired leg back, and returns its rep_id.
@@ -122,13 +122,14 @@ func TestPartialRidesTheCancelAndTheTakeBack(t *testing.T) {
 }
 
 // TestForceStartGroupRefusesAPartialLeg: a mark naming a taken-back new leg
-// that carries the partial mark is refused with nothing written, unless
-// forced; the same leg unmarked is named with no force.
+// that carries the partial mark is refused with nothing written, with no
+// override and with the other two kinds alike, unless the call passes
+// PARTIAL; the same leg unmarked is named with no override.
 func TestForceStartGroupRefusesAPartialLeg(t *testing.T) {
-	force := func(env *opsEnv, on bool) error {
+	force := func(env *opsEnv, overrides ...pb.ForcedStartOverride) error {
 		_, err := ForceStartGroup(env.ctx, env.cli, env.cid, opsShard,
 			opsSpId, opsSpName, noExpectRev, opsSliceParent, opsDataGrpId,
-			opsRetiredLeg, false, on)
+			opsRetiredLeg, false, overrides)
 		return err
 	}
 	env := newOpsEnv(t)
@@ -139,10 +140,14 @@ func TestForceStartGroupRefusesAPartialLeg(t *testing.T) {
 		t.Fatalf("SetNewLegsPartial: %v", err)
 	}
 	before := env.storeRev()
-	env.wantNoWrite(force(env, false), opForceStartGroup, ReasonLegPartial,
-		before)
-	if err := force(env, true); err != nil {
-		t.Fatalf("the forced mark on the partial leg: %v", err)
+	env.wantNoWrite(force(env), opForceStartGroup, ReasonLegPartial, before)
+	env.wantNoWrite(force(env,
+		pb.ForcedStartOverride_FORCED_START_OVERRIDE_OLDER_LEG,
+		pb.ForcedStartOverride_FORCED_START_OVERRIDE_BAD_BLOCKS),
+		opForceStartGroup, ReasonLegPartial, before)
+	if err := force(env,
+		pb.ForcedStartOverride_FORCED_START_OVERRIDE_PARTIAL); err != nil {
+		t.Fatalf("the mark on the partial leg passing PARTIAL: %v", err)
 	}
 	if got := env.mark(opsDataGrpId).GetLegId(); got != opsRetiredLeg {
 		t.Errorf("the mark names leg %d, want %d", got, opsRetiredLeg)
@@ -152,7 +157,8 @@ func TestForceStartGroupRefusesAPartialLeg(t *testing.T) {
 	env.putRetired(opsDataGrpId, opsRetiredLeg, opsRetiredSide, opsDnC, 1,
 		opsRetiredEpoch)
 	env.takeBack()
-	if err := force(env, false); err != nil {
-		t.Fatalf("a mark on the unmarked taken-back leg: %v", err)
+	if err := force(env); err != nil {
+		t.Fatalf("a mark with no override on the unmarked taken-back leg: %v",
+			err)
 	}
 }

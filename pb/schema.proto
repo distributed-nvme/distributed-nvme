@@ -298,19 +298,23 @@ message MdCheck {
 
 // The mark of a forced start (Group.forced_start): the leg the primary
 // starts the group's array from alone, a leg of its leg_list or the new leg
-// of its open repair, and the SpRev revision the write of the mark committed,
-// from which on a report can clear it (dnv-worker.md AR13).
+// of its open repair, the SpRev revision the write of the mark committed,
+// from which on a report can clear it (dnv-worker.md AR13), and the
+// refusals the operator chose to pass.
 message ForcedStart {
     uint64 leg_id = 1;
     uint64 revision = 2;
-    // The operator's force (ForceStartGroupRequest.force): the start goes on
-    // from a named leg whose md change count is below that of a full member
-    // of the same identity the start would zero, and from a named leg that
-    // carries a bad-block list, which the start drops (cnagent.md CN12), and
-    // the mark may name a taken-back leg that carries the partial mark
-    // (Repair.new_leg_id_to_partial). One force passes all three. Appended,
-    // never renumbered.
+    // The force of a mark an older gateway wrote, which passes every kind of
+    // refusal an override names; no build writes it, and a mark stored with
+    // it passes all three, since marks stay in etcd across a lockstep
+    // upgrade (cnagent.md CN12). Appended, never renumbered.
     bool force = 3;
+    // The kinds of refusal the start passes (ForceStartGroupRequest.
+    // override_list), each named once: OLDER_LEG and BAD_BLOCKS, which the
+    // primary meets (cnagent.md CN12), and PARTIAL, which lets the mark name
+    // a taken-back leg that carries the partial mark (Repair.
+    // new_leg_id_to_partial). Appended, never renumbered.
+    repeated ForcedStartOverride override_list = 4;
 }
 
 // The kind of a forced-start refusal an operator may choose to pass
@@ -335,7 +339,8 @@ message ForcedStartRefusal {
     ForcedStartOverride override = 1;
     // What the refusal says, cut to the row text cap.
     string text = 2;
-    // The request passes it, so the start goes on over it.
+    // The request's override_list names its kind, so the start goes on over
+    // it.
     bool overridden = 3;
 }
 
@@ -1180,8 +1185,8 @@ message RetiredLeg {
     // possibly part of the array onto it, so it is no longer the whole copy
     // it was. CancelRepair copies it from Repair.new_leg_id_to_partial, and
     // CreateRepair copies it back into the repair that takes the leg back.
-    // A forced start refuses to name such a leg unless forced. Appended,
-    // never renumbered.
+    // A forced start refuses to name such a leg unless its overrides name
+    // PARTIAL. Appended, never renumbered.
     bool partial = 8;
 }
 
@@ -2042,12 +2047,17 @@ message ForceStartGroupRequest {
     uint64 leg_id = 5;
     // Withdraw the group's mark instead of writing one.
     bool cancel = 6;
-    // Start from the named leg even when a full member the start would zero
-    // holds a higher md change count of the same identity, when the leg
-    // carries a bad-block list, which the start drops, or when the leg is a
-    // taken-back leg that carries the partial mark (ForcedStart.force); one
-    // force passes all three; false with cancel. Appended, never renumbered.
-    bool force = 7;
+    reserved 7;
+    reserved "force";  // retired with its number, never reused: an older
+                       // client's force, which passed every refusal,
+                       // decodes as unknown and passes none.
+    // The kinds of refusal the start passes, each named once, none NONE:
+    // OLDER_LEG, a full member the start would zero that holds a higher md
+    // change count of the named leg's identity; BAD_BLOCKS, a bad-block list
+    // on the named leg, which the start drops; PARTIAL, a named taken-back
+    // leg that carries the partial mark. Empty with cancel. Appended, never
+    // renumbered.
+    repeated ForcedStartOverride override_list = 8;
 }
 
 message ForceStartGroupReply {
@@ -2090,9 +2100,12 @@ message InspectGroupRequest {
     string sp_name = 2;
     uint64 grp_id = 3;
     // With a leg id, the reply says what a forced start from that leg would
-    // do (the dry run), with the operator's force when force is set.
+    // do (the dry run), passing the refusals override_list names, as
+    // ForceStartGroupRequest.override_list; empty with no leg id.
     uint64 leg_id = 4;
-    bool force = 5;
+    reserved 5;
+    reserved "force";  // retired with its number, never reused
+    repeated ForcedStartOverride override_list = 6;
 }
 
 // One leg of a group as InspectGroup shows it: the primary's read of the
@@ -2627,9 +2640,11 @@ message InspectGrpRequest {
     uint64 cntlr_id = 4;
     uint64 grp_id = 5;
     // With a leg id, the reply also says what a forced start from that leg
-    // would do, with the operator's force when force is set.
+    // would do, passing the refusals override_list names.
     uint64 leg_id = 6;
-    bool force = 7;
+    reserved 7;
+    reserved "force";  // retired with its number, never reused
+    repeated ForcedStartOverride override_list = 8;
 }
 
 message InspectGrpReply {

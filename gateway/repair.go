@@ -747,8 +747,10 @@ type grpReportTarget struct {
 // start the array from the one leg the request names (architecture.md,
 // Repair), or, with cancel, its withdrawal.
 //
-// It is two-phase (AG4). The pure checks come first (GW4): the names, and a
-// leg_id that matches the flag, zero with cancel and named without it. The
+// It is two-phase (AG4). The pure checks come first (GW4): the names, a
+// leg_id that matches the flag, zero with cancel and named without it, and
+// the overrides: each a kind of refusal, none twice
+// (validateOverrideList), and none with cancel. The
 // planning snapshot then makes the refusals of architecture.md, Repairs, in
 // their order, behind openSp's resolution, deleting gate and token: the
 // level, a RedundNone pool, the group's look-up — slices first, then clones
@@ -782,9 +784,14 @@ func (s *Server) ForceStartGroup(
 		return nil, errInvalid(
 			"leg_id must name the leg the group's array starts from")
 	}
-	if req.GetCancel() && req.GetForce() {
-		return nil, errInvalid("force is set with cancel: a cancel " +
-			"starts nothing")
+	if err := validateOverrideList(
+		"override_list", req.GetOverrideList(),
+	); err != nil {
+		return nil, err
+	}
+	if req.GetCancel() && len(req.GetOverrideList()) > 0 {
+		return nil, errInvalid("override_list is set with cancel: a " +
+			"cancel starts nothing")
 	}
 	var sc *spScope
 	var loc grpLocation
@@ -805,7 +812,7 @@ func (s *Server) ForceStartGroup(
 	revision, err := model.ForceStartGroup(
 		ctx, s.cli, sc.Cid, sc.Shard(), sc.SpId(), req.GetSpName(),
 		req.GetSpRev().GetRevision(), loc.parent(), req.GetGrpId(),
-		req.GetLegId(), req.GetCancel(), req.GetForce(),
+		req.GetLegId(), req.GetCancel(), req.GetOverrideList(),
 	)
 	if modelReason(err) == model.ReasonLegPartial {
 		return nil, errPartialLeg(req.GetLegId(), "")
@@ -872,7 +879,8 @@ func forceStartChecks(
 	if err != nil {
 		return nil, grpLocation{}, grpReportTarget{}, err
 	}
-	if partial && !req.GetForce() {
+	if partial && !slices.Contains(req.GetOverrideList(),
+		pb.ForcedStartOverride_FORCED_START_OVERRIDE_PARTIAL) {
 		return nil, grpLocation{}, grpReportTarget{},
 			errPartialLeg(req.GetLegId(), loc.Grp.GetRepName())
 	}
@@ -997,12 +1005,12 @@ func forceStartLegChecks(
 			"its repair", legId, grp.GetGrpId())
 }
 
-// errPartialLeg is the forced start's refusal, with no force, of a new leg
-// the repair repName took back from a retired leg and that carries the
-// partial mark (architecture.md, Repairs, ForceStartGroup): md held the leg
-// once and wrote its superblock and possibly part of the array onto it, so
-// it is no longer the whole copy it was. repName is "" when the deciding STM
-// found the mark after the planning read.
+// errPartialLeg is the forced start's refusal, with no override PARTIAL, of
+// a new leg the repair repName took back from a retired leg and that
+// carries the partial mark (architecture.md, Repairs, ForceStartGroup): md
+// held the leg once and wrote its superblock and possibly part of the array
+// onto it, so it is no longer the whole copy it was. repName is "" when the
+// deciding STM found the mark after the planning read.
 func errPartialLeg(legId uint64, repName string) error {
 	of := "its repair"
 	if repName != "" {
@@ -1011,7 +1019,7 @@ func errPartialLeg(legId uint64, repName string) error {
 	return errPrecondition(
 		"leg %d, the new leg %s took back from a retired leg, is partial: "+
 			"md held it once and wrote onto it, so it is no longer the "+
-			"whole copy it was; a forced start with force names it anyway",
+			"whole copy it was; the override partial passes it",
 		legId, of)
 }
 
