@@ -2,9 +2,9 @@
 # carry tenants' data: no rule of the system may probe them, link them by
 # content, scan them for LVM or register them with bcache. 55-dm.rules has
 # set the device's name before this file. The /dev/mapper link stays: the
-# agents use it. systemd reads such a device as not ready; nothing of dnv
-# waits for its device unit. Install on every node that runs a dnv agent
-# (architecture.md, Components: invocation reference).
+# agents use it. Whether systemd reads such a device as ready depends on its
+# version; nothing of dnv waits for its device unit. Install on every node
+# that runs a dnv agent (architecture.md, Components: invocation reference).
 SUBSYSTEM!="block", GOTO="dnv_dm_end"
 KERNEL!="dm-[0-9]*", GOTO="dnv_dm_end"
 ACTION!="add|change", GOTO="dnv_dm_end"

@@ -837,11 +837,14 @@ func (s *CnAgentServer) build(
 // failed (suspendSnapOrigin): its messages still go, and when they make ids
 // in two or more slices, those may date from different instants too, so the
 // run tears the snapshot.
-// Reason: a run that sent no message would wait for a re-send that never
-// comes, as the verdict leaves a waiting snapshot's rows unnamed
-// (snapsLackingADevice), and naming them would stall the origin's host IO
-// every second round. One id made alone tears nothing: a later run that
-// makes another beside it marks the tear by the first rule.
+// Reason: a run that sent no message would leave the snapshot unmade for as
+// long as the quiesce keeps failing, since a cntlr's read names the
+// snapshot whatever the quiesce (snapshotDue), so the converge each name
+// brings, every second round at most, would fail the same way; a run that
+// sends the messages makes the snapshot, and the torn mark flags it
+// whenever its slices' ids may date from different instants. One id made
+// alone tears nothing: a later run that makes another beside it marks the
+// tear by the first rule.
 func (s *CnAgentServer) snapshotPrePass(
 	ctx context.Context,
 	plan *cntlrPlan,

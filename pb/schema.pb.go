@@ -280,9 +280,9 @@ const (
 	// identity than the array's (cnagent.md CN12). The cn agent sets it on
 	// both channels, on the leg's row while that row reads RES_STATUS_OK,
 	// its status and details kept; the running array tells which identity
-	// is current, so
-	// wave 7's repair create may take such a leg with no force. No health
-	// rule reads it, and the verdict does not name the row.
+	// is current, and the reason tells the operator why the leg stays out.
+	// No health rule and no control-plane call reads it, and the verdict
+	// does not name the row.
 	ResReason_RES_REASON_OTHER_IDENTITY ResReason = 10
 	// A leg of the group whose md superblock carries one of two identities
 	// the legs of its first tier carry while no array of the group runs, so
@@ -290,9 +290,9 @@ const (
 	// current (cnagent.md CN12). The cn agent sets it on the row of every
 	// such leg, on a converge whose assembly meets the two and on a read of
 	// the absent array, the row's status and details kept; the group's row
-	// names both identities. A repair create that would replace such a leg
-	// must ask for the force. No health rule reads it, and the verdict does
-	// not name the row.
+	// names both identities. No health rule and no control-plane call reads
+	// it, so a repair that replaces such a leg rests on the operator's
+	// judgement alone, and the verdict does not name the row.
 	ResReason_RES_REASON_IDENTITY_UNDECIDED ResReason = 11
 )
 

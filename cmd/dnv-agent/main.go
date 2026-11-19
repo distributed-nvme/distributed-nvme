@@ -328,18 +328,18 @@ func nvmetQidMaxFromViper() (int, error) {
 }
 
 // capacityFromViper resolves --capacity and refuses, naming the value as
-// given, a value from the flag (a string flag for this), the environment
-// or a config file's string that is not a plain unsigned decimal number
-// that fits 64 bits: digits alone, with no leading zero but in "0" itself.
-// A leading zero is refused, not read as decimal, since the flag's former
-// uint64 parse read it as octal, so its meaning would change with no word.
-// A config file's YAML number reaches it as YAML decoded it, written out in
-// decimal ("1e12" as 1000000000000, "0x100" as 256, "0100" as 64), so it is
-// taken by its value, and one that is no whole number, as 1.5 or -1, is
-// refused. viper.GetUint64 would turn "500GiB" or "-1" into 0, which the
-// control plane reads as no local opinion and replaces with its default, so
-// a typo would size the node with no word (CM3). Its range is the control
-// plane's to judge (cnagent.md CN3).
+// given, a value from the flag (a string flag for this), the environment or a
+// config file's string that is not a plain unsigned decimal number that fits
+// 64 bits: digits alone, with no leading zero but in "0" itself. A leading
+// zero is refused, not read as decimal, since Go integer syntax, which pflag
+// takes, and a YAML number both read it as octal, so reading it as decimal
+// would give one spelling two values. A config file's YAML number reaches it
+// as YAML decoded it, written out in decimal ("1e12" as 1000000000000,
+// "0x100" as 256, "0100" as 64), so it is taken by its value, and one that is
+// no whole number, as 1.5 or -1, is refused. viper.GetUint64 would turn
+// "500GiB" or "-1" into 0, which the control plane reads as no local opinion
+// and replaces with its default, so a typo would size the node with no word
+// (CM3). Its range is the control plane's to judge (cnagent.md CN3).
 func capacityFromViper() (uint64, error) {
 	raw := strings.TrimSpace(viper.GetString("capacity"))
 	capacity, err := strconv.ParseUint(raw, 10, 64)

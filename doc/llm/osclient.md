@@ -35,35 +35,38 @@ it.
   of whether their nvmet port's directory is there, for the dn's read of its
   disk's device number, for both roles' reads of a device's number for an
   inspect call's block counters (`cnagent.md` CN23, `dnagent.md` DN16), for
-  both roles' discards on a dm-clone, for the
-  cn's direct read of an md member's superblock area, for the cn's dial of
-  a side's address before a connect (`cnagent.md` CN10), for its node
-  check's reads and the md replay's commands and block reads (`dnagent.md`
-  CM5), for its gather's reads, the detached children among them, and the
-  archive's write (`dnagent.md` CM6), and for persisting the `Local*Path`
-  protobuf state files; and `dnv-csi`'s node plugin, for its nvme-cli, blkid, filesystem
-  maker and mount commands, its sysfs and mount table reads and its read of
-  a volume's device link (`csi.md`, The node plugin). **All** OS command execution, detached child start, directory listing, modification-time
-  read, device-number read, discard, TCP connect made to test whether an
-  address answers (DialTcp) and disk file IO in
+  both roles' discards on a dm-clone and the cn sweep's discard of a thin
+  volume whose id it deletes (`cnagent.md` CN14), for the cn's direct read
+  of an md member's superblock area, for the cn's dial of a side's or a
+  clone source's address before a connect (`cnagent.md` CN10), for its node
+  check's reads and the md replay's commands and block reads and writes
+  (`dnagent.md` CM5), for its gather's reads, the detached children among
+  them, and the archive's write (`dnagent.md` CM6), and for persisting the
+  `Local*Path` protobuf state files; and `dnv-csi`'s node plugin, for its
+  nvme-cli, blkid, filesystem maker and mount commands, its sysfs and mount
+  table reads and its read of a volume's device link (`csi.md`, The node
+  plugin). **All** OS command execution, detached child start, directory
+  listing, modification-time read, device-number read, discard, TCP connect
+  made to test whether an address answers (DialTcp) and disk file IO in
   production code goes through an `OsClient` — never call `os/exec` or
   `os.ReadFile`/`os.WriteFile`, and never read a directory, stat a path or
-  make such a test connect, directly outside this file. This is what makes the logging rules of
-  `log.md` R8 (its first, second, fifth, sixth, seventh, eighth and ninth items)
-  enforceable and
-  makes every consumer unit-testable via `FakeOsClient`. There is exactly **one** sanctioned exception in
-  production code, recorded under "Exported raw helpers and the probe-IO
-  carve-out": the CN11 leg-health probers call the package-level helpers
-  `WriteBlockAt` / `ReadBlockDirectAt` directly — outside the semaphore,
-  never under a lock — and log their own records. Test fixtures that spawn a
-  helper process for their own package (the etcd fixtures that start a real
-  etcd binary, and the tests that re-run the test binary itself) are outside
-  the rule, not exceptions to it: no production code path spawns them, so
-  routing them through an `OsClient` would buy neither the logging nor the
-  `FakeOsClient` testability the rule exists for. The connections of the
-  gRPC clients and servers (`grpc.md`) and of the etcd clients are outside
-  the rule too, not exceptions to it: they carry dnv's own calls, whose
-  rules are `grpc.md`'s and `dnv-worker.md` EU1's, and are no OS work.
+  make such a test connect, directly outside this file. This is what makes
+  the logging rules of `log.md` R8 (its first, second, fifth, sixth,
+  seventh, eighth and ninth items) enforceable and makes every consumer
+  unit-testable via `FakeOsClient`. There is exactly **one** sanctioned
+  exception in production code, recorded under "Exported raw helpers and the
+  probe-IO carve-out": the CN11 leg-health probers call the package-level
+  helpers `WriteBlockAt` / `ReadBlockDirectAt` directly — outside the
+  semaphore, never under a lock — and log their own records. Test fixtures
+  that spawn a helper process for their own package (the etcd fixtures that
+  start a real etcd binary, and the tests that re-run the test binary
+  itself) are outside the rule, not exceptions to it: no production code
+  path spawns them, so routing them through an `OsClient` would buy neither
+  the logging nor the `FakeOsClient` testability the rule exists for. The
+  connections of the gRPC clients and servers (`grpc.md`) and of the etcd
+  clients are outside the rule too, not exceptions to it: they carry dnv's
+  own calls, whose rules are `grpc.md`'s and `dnv-worker.md` EU1's, and are
+  no OS work.
 * Dependencies: the semaphore and protobuf modules of `dependencies.md`,
   Direct dependencies; the command's `Cancel` and `WaitDelay` fields come
   with the Go version `go.mod` pins.
@@ -135,8 +138,8 @@ the method set is exactly the following, each taking the caller's ctx:
 
 * `NewLimitedOsClient` takes the limit; a limit of zero or less means "use
   `DefaultOsClientLimit`", the default cap on in-flight operations
-  (commands, directory listings, modification-time reads, device-number
-  reads, discards, dials, file IO and proto IO combined) that
+  (commands, detached starts, directory listings, modification-time reads,
+  device-number reads, discards, dials, file IO and proto IO combined) that
   `constants.go` holds. Its reason: during convergence an agent fans out
   many dmsetup, mdadm, nvme and blkdiscard invocations plus state-file
   writes, and the default bounds fork and disk pressure while leaving ample
@@ -335,14 +338,15 @@ the method set is exactly the following, each taking the caller's ctx:
   a sysfs class or block directory is such a link.
 * It reads the names alone: it opens and stats no entry.
 * It returns every name but "." and "..", untrimmed, names that start with a
-  dot included, which `ls` leaves out. dnv makes no such name, the local
-  store keeps only the names of its kinds (`dnagent.md` SH6), and sysfs
-  holds none where dnv lists, but nvmet refuses none in configfs: a link
-  made by hand under a subsystem's `allowed_hosts` with such a name admits
-  its host, and the listing now shows it, so a converge unlinks it and a
-  probe names it like any other entry (`dnagent.md` SH18). The names are
-  sorted in byte order, the order `ls` prints in the C locale. The order is fixed because callers take the first match, such as
-  a lookup that stops at the first subsystem entry naming its NQN.
+  dot included, which `ls` leaves out. dnv makes no such name in a directory
+  it lists, the local store keeps only the names of its kinds (`dnagent.md`
+  SH6), and sysfs holds none where dnv lists, but nvmet refuses none in
+  configfs: a link made by hand under a subsystem's `allowed_hosts` with
+  such a name admits its host, and the listing shows it, so a converge
+  unlinks it and a probe names it like any other entry (`dnagent.md` SH18).
+  The names are sorted in byte order, the order `ls` prints in the C locale.
+  The order is fixed because callers take the first match, such as a lookup
+  that stops at the first subsystem entry naming its NQN.
 * A missing directory is absent: the error wraps `fs.ErrNotExist`. Every
   other failure — a path that is not a directory, a read that fails part-way
   through — is an error that comes with no names, and the caller reads it as
@@ -383,17 +387,20 @@ the method set is exactly the following, each taking the caller's ctx:
 
 * `ReadDevNo` reads the number of a block device in the caller's own
   process; no child process runs. The dn reads its disk's number this way,
-  to read the disk's size from sysfs, which names each block device by its
-  number, for the reason the probing conventions give (`dnagent.md` SH17);
-  both roles read a device's number this way, the cn a leg wrapper's or an
-  ns-dev's and the dn its disk's, to read that device's block counters
-  from sysfs for an inspect call (`cnagent.md` CN23, `dnagent.md` DN16).
-* It returns the number and nothing else, as "major:minor", the form
-  sysfs and dm tables print. Reason: the disk node's size read and the
-  inspect calls' counter reads are the callers that use the number, each
-  to find the device's directory in sysfs — the node plugin calls it too,
-  to test that a block device is there, and drops the number (Scope and
-  placement) — and a general stat would add surface no caller needs.
+  to read the disk's size and logical block size from sysfs, which names
+  each block device by its number, for the reason the probing conventions
+  give (`dnagent.md` SH17); both roles read a device's number this way, the
+  cn a leg wrapper's or an ns-dev's and the dn its disk's, to read that
+  device's block counters from sysfs for an inspect call (`cnagent.md` CN23,
+  `dnagent.md` DN16).
+* It returns the number and nothing else, as "major:minor", the form sysfs
+  and dm tables print. Reason: the disk node's size reads (the agent's, and
+  the node check's, which also reads the disk's IO sizes) and the inspect
+  calls' counter reads use the number to find the device's directory in
+  sysfs, and the gather prints it to name the array each `/dev/md` link
+  leads to (`dnagent.md` CM5, CM6) — the node plugin calls it too, to test
+  that a block device is there, and drops the number (Scope and placement) —
+  and a general stat would add surface no caller needs.
 * Like `ReadMtime`, it holds one semaphore slot and checks the ctx error
   after acquiring it. That is its last cancellation point: the read itself
   is not cancelable, and one the kernel holds returns only when the kernel
@@ -469,19 +476,22 @@ How the cn agent reads an md member's superblock area (`cnagent.md` CN12,
 The superblock read): metadata another writer puts on the device with IO of
 its own, past any page cache — the kernel writes an md superblock with bios
 of its own — so a buffered read could answer an old copy from the page
-cache.
+cache. The md replay reads its legs' superblock areas the same way, and
+reads back past the page cache the block it wrote through its array
+(`dnagent.md` CM5).
 
 * It takes one semaphore slot, checks the ctx error after acquiring it,
   and runs the body of the probe's helper `ReadBlockDirectAt`: the
   alignment check before the open, an O_RDONLY, O_DIRECT and O_CLOEXEC open,
   one pread into an aligned buffer, a short read an error, the close.
 * It cannot be cut off once the pread has started: it waits for as long as
-  the device holds the IO, and holds its slot until then, as a command
-  whose child sits in an uninterruptible kernel wait does (RunCommand).
-  Its one caller reads only a leg that serves, but a disk node that stalls
-  while the leg's path stays live holds the read without limit, and with
-  it the slot; the leg probe, whose IO waits by design, never uses it
-  (Exported raw helpers and the probe-IO carve-out).
+  the device holds the IO, and holds its slot until then, as a command whose
+  child sits in an uninterruptible kernel wait does (RunCommand). Its
+  callers read a leg that serves, or the md replay's loop devices and its
+  array over them; but a disk node that stalls while the leg's path stays
+  live holds the superblock read without limit, and with it the slot; the
+  leg probe, whose IO waits by design, never uses it (Exported raw helpers
+  and the probe-IO carve-out).
 * One `os read block direct` record covers the call, with `path`, `offset`
   and `length` — **never** `data` (`log.md`, OS commands and file IO).
 

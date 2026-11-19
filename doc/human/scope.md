@@ -375,12 +375,14 @@ the host.
   saves the mark at once in its local store, the directory where it keeps
   its own state on its node. Every cntlr reports a mark it holds, as the
   primary or not, and the worker records the mark from the first report,
-  before or after the snapshot is recorded as created. The mark is lost
-  only when the controller node that saw the tear never comes back or
-  loses its local store, when its agent dies in the moment between the
-  first slice's step and the save, or when the save fails and the agent
-  restarts before the worker records the mark. A lost mark leaves no sign. Delete and
-  re-create a snapshot reported torn. State: accepted. Not seen in the lab.
+  before or after the snapshot is recorded as created. The mark is lost only
+  when the controller node that saw the tear never comes back or loses its
+  local store, when its agent dies in the moment between the first slice's
+  step and the save, when the save fails and the agent restarts before the
+  worker records the mark, or when that cntlr is deleted before it reports
+  the mark again, as by a cntlr replacement while its node is down. A lost
+  mark leaves no sign. Delete and re-create a snapshot reported torn. State:
+  accepted. Not seen in the lab.
 
 ### 5.2 The forced start
 
@@ -1392,21 +1394,21 @@ yourself: a disk the logs fill is one the stores and etcd cannot write.
 
 ## 9. What cannot be seen
 
-- **No metrics, no alerts.** The worker's log is the only alert. The logs
-  go to stderr as JSON with no rotation. An auto-grow refused for budget, a
-  subsystem no cdc serves, a frozen worker watch and a stuck repair show
-  in a log line or not at all. A slow leg shows only when a person asks:
+- **No metrics, no alerts.** The worker's log is the only alert. The logs go
+  to stderr as JSON with no rotation. An auto-grow refused for budget, a
+  subsystem no cdc serves, a frozen worker watch and a stuck repair show in
+  a log line or not at all. A slow leg shows only when a person asks:
   `dnvctl cntlr inspect` prints each leg's last test write and read times
-  and the IO counters of each leg and each volume's device, and `dnvctl dn
-  inspect` the counters of a disk node's disk, read when asked; nothing
-  keeps them or alerts on them. A disk's own health is for the usual tools
-  of the node, such as smartd and node_exporter. The worker's log records the
-  reactions it applied and the ones it skipped. No dnv program serves
-  metrics, profiles or health over a port, though the CSI driver's
-  manifests add a helper container that answers Kubernetes' health checks
-  on port 9808 or 9809. State: not yet; log
-  handling goes into the operations doc. Fix decided: one gateway read,
-  with its dnvctl command, lists what is wrong across the cluster.
+  and the IO counters of each leg and of each namespace's device, and
+  `dnvctl dn inspect` the counters of a disk node's disk, read when asked;
+  nothing keeps them or alerts on them. A disk's own health is for the usual
+  tools of the node, such as smartd and node_exporter. The worker's log
+  records the reactions it applied and the ones it skipped. No dnv program
+  serves metrics, profiles or health over a port, though the CSI driver's
+  manifests add a helper container that answers Kubernetes' health checks on
+  port 9808 or 9809. State: not yet; log handling goes into the operations
+  doc. Fix decided: one gateway read, with its dnvctl command, lists what is
+  wrong across the cluster.
 - **A retired leg's partial mark can miss a short stay in the array.** A
   repair can take a retired leg back as its new leg. When md has counted
   that leg as a member but not copied all of it, the worker marks the leg

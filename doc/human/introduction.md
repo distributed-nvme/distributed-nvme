@@ -334,31 +334,32 @@ feature they use.
 
 Run the node check, `dnv-agent check dn --disk <disk>` on a disk node and
 `dnv-agent check cn` on a controller node, as root, before a node joins
-([operations](operations.md#check-a-node-before-it-joins)). It fails a
-node the agent cannot work on or whose setup a failover or a repair is not
-safe on: a kernel older than 6.1, a udev older than systemd 253's, a
-missing tool or module, native NVMe multipath off, one of dnv's three udev
-rules missing or masked, no mask of the system's md assembly that the
-check counts (dnv's md rule exactly as shipped, or mdadm.conf's AUTO line
-refusing every format, as `AUTO -all` does, with no `homehost` on it, no
-POLICY line that sets `auto=`, no ARRAY line of a dnv array and none that
-names devices but no uuid),
-`nvme_core.io_timeout` at its largest value on a controller node, or a
-disk without 512-byte blocks. It warns for five kinds of fact. Node
-settings to fix: lvm2 able to read dnv's own devices, mdadm.conf not set
-as the node settings below say, a module a reboot would not load again, a
-controller node's kernel older than 6.19, where every controller node of
-the cluster must run one kernel series (below), and
-`nvme_core.io_timeout` at its largest value on a disk node. A known
-limit: a disk whose best IO size is above 4 MiB, to which a controller
-node's write can be refused. A feature nothing uses yet: no way to cut a
-removed host's connection on a controller node. What dnv was not tested
-with: a kernel outside the 7.0 series, on a controller node an mdadm
-other than 4.5 or `nvme_core.io_timeout` other than 30 seconds, and a
-udev rule of dnv's with another text. And a fact the check could not
-read, which the operator then reads by hand. On a spare machine,
-`dnv-agent check cn --md-replay` also runs md's start rules, which a
-failover rests on, with that machine's mdadm and kernel.
+([operations](operations.md#check-a-node-before-it-joins)). It fails a node
+the agent cannot work on or whose setup a failover or a repair is not safe
+on: a kernel older than 6.1, a udev older than systemd 253's, a missing tool
+or module, nvmet's configfs tree missing (configfs not mounted), native NVMe
+multipath off, one of dnv's three udev rules missing or masked, no mask of
+the system's md assembly that the check counts (dnv's md rule exactly as
+shipped, or mdadm.conf's AUTO line refusing every format, as `AUTO -all`
+does, with no `homehost` on it, no POLICY line that sets `auto=`, no ARRAY
+line of a dnv array and none that names devices but no uuid),
+`nvme_core.io_timeout` at its largest value on a controller node, or a disk
+without 512-byte blocks. It warns for five kinds of fact. Node settings to
+fix: lvm2 able to read dnv's own devices, mdadm.conf not set as the node
+settings below say, a module a reboot would not load again, a controller
+node's kernel older than 6.19, where every controller node of the cluster
+must run one kernel series (below), and `nvme_core.io_timeout` at its
+largest value on a disk node. A known limit: a disk whose best IO size is
+above 4 MiB, to which a controller node's write can be refused. A feature
+nothing uses yet: no way to cut a removed host's connection on a controller
+node. What dnv was not tested with: a kernel outside the 7.0 series, on a
+controller node an mdadm other than 4.5 or `nvme_core.io_timeout` other than
+30 seconds, and a udev rule of dnv's with another text. And a fact the check
+could not read, which the operator then reads by hand; a failed read of a
+fact the agent needs, such as the kernel release, the disk's block size,
+udev's version or the module lists, fails the node instead. On a spare
+machine, `dnv-agent check cn --md-replay` also runs md's start rules, which
+a failover rests on, with that machine's mdadm and kernel.
 
 Tools: nvme-cli, mdadm, nvme-stas, a 2.x version with its daemons stafd and
 stacd, dmsetup, and thin-provisioning-tools, whose thin_dump the agents run,

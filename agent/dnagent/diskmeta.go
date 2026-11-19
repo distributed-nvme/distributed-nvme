@@ -664,16 +664,17 @@ func (d *DiskMeta) provisioningSideCntLocked() uint64 {
 }
 
 // ProbeHeader re-reads only the 4 KiB header — cheap enough for the reads the
-// health rounds start, at any interval — and verifies magic, version, CRC and
-// identity.
+// health rounds start, at any interval — and verifies magic, version, CRC,
+// the three layout fields against this build's constants (parseDnHeader)
+// and identity.
 //
 // What it reads is also this cache's view of the disk (DN18). A header that
-// is not the one the table in memory was loaded under — blank, corrupt, or
-// valid with another identity or another format — drops that table, so the
-// next call re-reads the disk rather than serving the old extent map. A read
-// that did not answer changes nothing: it says nothing about what the disk
-// holds. The probe confirms nothing itself; its lazy load is one more read
-// that confirmedLocked can compare.
+// is not the one the table in memory was loaded under — blank, corrupt, of
+// another layout, or valid with another identity or another format — drops
+// that table, so the next call re-reads the disk rather than serving the old
+// extent map. A read that did not answer changes nothing: it says nothing
+// about what the disk holds. The probe confirms nothing itself; its lazy load
+// is one more read that confirmedLocked can compare.
 func (d *DiskMeta) ProbeHeader(
 	ctx context.Context,
 	clusterId uint64,

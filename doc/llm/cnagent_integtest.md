@@ -9,40 +9,42 @@ decisions it cites, and `dnagent_integtest.md`, whose harness it shares.
 
 ## Goal and scope
 
-The suite proves that a real `dnv-agent cn` — nvme-tcp legs, md-raid1, dm-thin,
-dm-clone, dm-flakey, nvmet configfs — behaves as `cnagent.md` specifies on two
-lab VMs driven over gRPC from the developer machine, with real `dnv-agent dn`
-instances behind the sides, the dn role having its own suite. It exercises
-every `ControllerNodeAgent` RPC but `GetCnInfo`, whose reading `CheckCn`
-answers the same way (`cnagent.md` CN23, CN24) and which the unit tests and the
-e2e suite's `InspectControllerNode` call, and reads the kernel state beside the
-agent's report. It also pins two of the md assembly rules the cross-leg
-half of failover safety rests on, the refusal before redund builds its pool
-and the kick in its late flip (`architecture.md`, [D16]); another, a start
-from equal superblocks copying the member in the lowest slot, which the
-worker's fence round rests on, no case pins: only
-`integtest/md_fence_order.sh` does (`layout.md`, Directory tree). It proves
-the happy path;
-error paths are out of scope but for the stale probe, the dead leg, a
-host's md, LVM and bcache signatures at an array's start and a newer md
-superblock at its legs' end, the promotion that outruns the sides' flip, md's refusal to start an array from one
-clean leg, md's check over sectors that fail reads, and over sectors that fail
-writes too, a repair's bad leg that does not serve, the leg that keeps the data
-dying while md copies onto a repair's new leg, where a forced start refuses the
-half-copied leg and starts from the leg that died, a take-back refused for a
-retired leg of another identity, a forced start that drops the named leg's
-bad-block list and one refused for a named leg older than a member it would
-zero, then forced, a broken array whose legs come back assembled again
-with no mark, a group whose array has run whose legs all read blank,
-the clone's source lost and given back, a new volume over a thin id that
-holds data, a disk node that dies under a host's writes, and
-the leftover, an accepted request reporting residue (`cnagent.md` CN20). The
-cases run in a fixed order, fail-fast — nodecheck, smoke, redund, repair,
-teardown, thinbm, torn, discard, clone_xfer, restart, pause — nodecheck
-building no pool and each other case under pool ids of its own, and each
-leaving nothing of its pools, a teardown per case and per stage that
-also keeps the run inside a DN's data area, which the cases together would
-overdraw.
+The suite proves that a real `dnv-agent cn` — nvme-tcp legs, md-raid1,
+dm-thin, dm-clone, dm-flakey, nvmet configfs — behaves as `cnagent.md`
+specifies on two lab VMs driven over gRPC from the developer machine, with
+real `dnv-agent dn` instances behind the sides, the dn role having its own
+suite. It exercises every `ControllerNodeAgent` RPC but `GetCnInfo`, whose
+reading `CheckCn` answers the same way (`cnagent.md` CN23, CN24) and which
+the unit tests and the e2e suite's `InspectControllerNode` call, and reads
+the kernel state beside the agent's report. It also pins two of the md
+assembly rules the cross-leg half of failover safety rests on, the refusal
+before redund builds its pool and the kick in its late flip
+(`architecture.md`, [D16]); another, a start from equal superblocks copying
+the member in the lowest slot, which the worker's fence round rests on, no
+case pins: only `integtest/md_fence_order.sh` does (`layout.md`, Directory
+tree). It proves the happy path; error paths are out of scope but for the
+stale probe, the dead leg, a host's md, LVM and bcache signatures at an
+array's start and a newer md superblock at its legs' end, the promotion that
+outruns the sides' flip, md's refusal to start an array from one clean leg,
+md's check over sectors that fail reads, and over sectors that fail writes
+too, a repair's bad leg that does not serve, the leg that keeps the data
+dying while md copies onto a repair's new leg, where a forced start refuses
+the half-copied leg and starts from the leg that died, a take-back refused
+for a retired leg of another identity, a forced start that drops the named
+leg's bad-block list and one refused for a named leg older than a member it
+would zero, then forced, a broken array whose legs come back assembled again
+with no mark, a group whose array has run whose legs all read blank, the
+clone's source lost and given back, a new volume over a thin id that holds
+data, a snapshot torn by a primary stopped between its slices' steps, a disk
+node that dies under a host's writes, a disk node that leaves new
+connections unanswered, a node whose mdadm does not keep its degraded gate,
+an md array stalled under the gather, and the leftover, an accepted request
+reporting residue (`cnagent.md` CN20). The cases run in a fixed order,
+fail-fast — nodecheck, smoke, redund, repair, teardown, thinbm, torn,
+discard, clone_xfer, restart, pause — nodecheck building no pool and each
+other case under pool ids of its own, and each leaving nothing of its pools,
+a teardown per case and per stage that also keeps the run inside a DN's data
+area, which the cases together would overdraw.
 
 Beside the suite, the Go tests of `agent/cnagent` run a real cn agent the way
 the dn agent's run (`dnagent_integtest.md`, Goal and scope), driven by a fake
@@ -80,19 +82,20 @@ dm-clone and dm-flakey, and accept passwordless ssh and sudo. The preflight
 installs nothing on the VMs — on the machine that runs the suite it builds
 `gojq` into `integtest/bin` when that machine has no `jq` (`layout.md`,
 Directory tree) — and fails fast, its per-VM half after the start-of-run
-cleanup, since free agent ports mean something only once a crashed run's agents
-are gone. It loads the kernel modules and mounts configfs, neither of which the
-agent does, then checks each module loaded or built in; the tools, lvm2's and
-bcache-tools' only for redund's foreign stage, which makes a host's
-signatures with them, as the agents run no LVM (`architecture.md`, [D13],
-[D14]); nvmet configfs, md support, native multipath, the stock udev rules the
-rules of `deploy/udev/` sort against, the stock assembly rule's honouring of
-the systemd-ready property the md mask sets, and udevadm's acceptance of the
-rules of `deploy/udev/`; and the free space and punch-hole support of the work
-directory's filesystem and the free memory.
-iptables and tc are left to the stages that use them, the partition stages and
-clone_xfer's slowed copy, so a VM without one fails in the stage that needs it
-rather than a run that might never reach one.
+cleanup, since free agent ports mean something only once a crashed run's
+agents are gone. It loads the kernel modules and mounts configfs, neither of
+which the agent does, then checks each module loaded or built in; the tools,
+lvm2's and bcache-tools' only for redund's foreign stage, which makes a
+host's signatures with them, as the agents run no LVM (`architecture.md`,
+[D13], [D14]); nvmet configfs, md support, native multipath, the stock udev
+rules the rules of `deploy/udev/` sort against, the stock assembly rule's
+honouring of the systemd-ready property the md mask sets, and udevadm's
+acceptance of the rules of `deploy/udev/`; and the free space and punch-hole
+support of the work directory's filesystem and the free memory. iptables and
+tc are left to the stages that use them, the partition stages, redund's dial
+and slow leg stages, pause's cut and clone_xfer's slowed copy, so a VM
+without one fails in the stage that needs it rather than a run that might
+never reach one.
 
 ## Lab facts
 
@@ -184,16 +187,19 @@ measures as the dn suite's does; and on the dm-clone table. This suite adds:
   whatever the other pieces' reads do, so a source that goes between the
   reads of one region leaves part of a block that the region's next copy
   writes again whole. A copy whose reads all fail writes nothing.
-* A new dm-clone is read through its source at once, as udev probes the
-  device, and a discard on it would wait for those reads, so the apply
-  sends no discard while they are in flight (`architecture.md`, Bitmap push
-  protocol, The apply pauses the writers): over a slowed source the chunk
-  would not land.
-  clone_xfer therefore slows its copy on the write side: a VM's cn agent
-  reaches the sides of the dn agent beside it over the loopback device, and
-  a token bucket there, kept to the nvme-tcp port, slows what its legs send
-  those sides, the copy's writes into the destination among them, and none
-  of the source's reads.
+* On a node without the dm rule of `deploy/udev/`, a new dm-clone is read
+  through its source at once, as udev probes the device, and a discard on it
+  would wait for those reads, so the apply sends no discard while they are
+  in flight (`architecture.md`, Bitmap push protocol, The apply pauses the
+  writers): over a slowed source the chunk would not land. The suite
+  installs that rule, which keeps udev's probe off every dnv dm device
+  (`architecture.md`, Components: invocation reference), and whether a new
+  dm-clone is still read through its source with the rule in place is not
+  measured, so clone_xfer slows its copy on the write side, which holds
+  either way: a VM's cn agent reaches the sides of the dn agent beside it
+  over the loopback device, and a token bucket there, kept to the nvme-tcp
+  port, slows what its legs send those sides, the copy's writes into the
+  destination among them, and none of the source's reads.
 * md holds a member added to an array whose every place holds a member in
   sync without a place, its "slot" none, and copies nothing onto it:
   repair's abort stage gives the converge a new leg held without a place
@@ -358,12 +364,12 @@ that asks for the counters, which reads them at the call as
   redund, repair and clone_xfer flip after their first primary build, so
   their promotions, the forced starts whose levels take the thin pool down,
   and clone_xfer's rebuild after the wipe build a created td over the data
-  the host or the copy wrote. thinbm and torn set `created` by hand, and keep
-  a td not created where the stage is about that state: thinbm's snapshot,
-  and torn's refused volume and half-made snapshot. smoke, teardown,
-  discard and restart send `created` false throughout, since none builds a
-  written td's thin volume again: they run no failover, wipe no kernel
-  state, and the restart case keeps the kernel's devices.
+  the host or the copy wrote. thinbm and torn set `created` by hand, and
+  keep a td not created where the stage is about that state: thinbm's
+  snapshot, and torn's refused volume and half-made snapshot. smoke,
+  teardown, discard, restart and pause send `created` false throughout,
+  since none builds a written td's thin volume again: they run no failover,
+  wipe no kernel state, and the restart case keeps the kernel's devices.
 * **Negatives are exact.** Provisioning and pending are healthy statuses, so an
   error row compares against error, never "not OK", and a suppressed one also
   reads the level's details and its reason. A failed read taken for an absence
@@ -506,161 +512,160 @@ subsystem but the two made by hand that it leaves alone, which the stage then
 removes itself, and a fresh `CheckCn` round replying clean (CN30).
 
 **redund** first pins, with no agent and no NVMe-oF path, the refusal the
-cross-leg half of failover safety rests on (`architecture.md`, [D16]): on one
-VM, a clean two-leg array over two loop devices, built and stopped with the
-agent's create and stop commands under a dnv name the md udev mask matches (Lab
-facts), so that both superblocks still count both legs at one event count.
-Started from one leg with the agent's assemble command (`cnagent.md` CN12's
-assembly case), mdadm refuses, its own message saying it needs every member to
-start the array, writes nothing to that leg's superblock and leaves no array
-holding either leg; started from both legs, the array runs clean, both members
-in sync, with nothing to rebuild. With one leg then failed and the array
-stopped, the survivor's superblock counts itself alone and the failed leg's
-still counts both: the failed leg alone is refused, and the survivor alone
-starts the array, degraded, its member in sync, the fact the early fail
-rests on (`cnagent.md` CN12, The early fail). The command is the agent's: the promotion
-below holds each assemble command the agent runs from both legs to the
-arguments the same rule builds for that group, and the unit tests hold the
-agent's start from one leg to the same rule. It then builds md-raid1 groups
-across both DNs under a primary and a standby. The primary creates both with
-`--assume-clean`: provisioning zeroed every leg's meta region, so none carries
-a superblock, and no read reaches a data block the pool has not written
-(`cnagent.md` CN12's create case; `architecture.md`, [D15]); the standby keeps
-every leg connected and non-optimized, assembles no two-member array, and backs
-its ns-dev with the td's dm-error, the namespace inaccessible (CN10, CN11,
-CN16's standby rule); each CN's subsystem admits exactly the host's NQN (CN16).
-With new connections from the standby's VM to DN1's port dropped there, and
-the standby's controllers of its two legs into DN1 disconnected, a converge
-of the standby dials DN1's address once and runs no `nvme connect` into it:
-both legs read `ERROR` with the dial's timeout, every other row reads OK, and
-the converge takes at least the dial's timeout and no more than one dial
-timeout plus a second over a converge that connects nothing (CN10). With the rule taken away, the next
-converge connects both legs again and a fresh check round names nothing;
-its dials leave no nvmet-tcp error in DN1's kernel log (`osclient.md`,
-DialTcp).
-Before the host writes, the foreign stage plants, one at a time, a host's md
-version-1.2 superblock, an LVM physical volume with a volume group and a
-volume, a bcache superblock and an ext4 file system at the start of the data
-group's array on the primary, where a fresh pool's first host write lands,
-each made with a host's tools on a scratch device that a rule of the stage's
-own keeps the system's rules off, and sends the array a change event, as its
-assembly does: a low-level blkid probe reads each signature, and udev's
-record of the array carries the md array rule's type, with nothing holding
-the array but dnv's devices, no link by uuid or label leading to it, no
-volume of the planted group active, no physical volume recorded online and
-no bcache device (`architecture.md`, Components: invocation reference); the
-array's start is zeroed again after each. It then writes the end of an md
-1.0 array made just then over the end of both data legs, through the
-primary's leg devices, as a host can make one at its volume's end; the
-standby's paths end in dm-error on the disk nodes (`dnagent.md` DN10), so
-only the primary's reach the legs. Through each VM's leg devices once they
-serve — the primary's at once, the standby's after the flip — mdadm's plain
-examine of each leg reads that newer superblock, the examine naming the 1.2
-format reads dnv's (Lab facts), and a change event leaves each leg's NVMe
-device marked not ready under dnv's name by the md mask, held by nothing but
-dnv's leg device. Before that event the stage drops the NVMe device's page
-cache: its writes reach the leg through the leg device above it, past that
-cache, which keeps an earlier read's data while the leg device holds the
-NVMe device open, and udev's probe reads through it (Lab facts).
-The demote moves ANA before the park (CN9's ANA pre-step before its park
-pre-step), stops the arrays and keeps the legs; the promote assembles both
-(CN12's assembly case), each with the arguments the first stage's rule builds
-for its own group, the data surviving, the data group's from both legs,
-which the newer 1.0 superblocks would make a plain assembly refuse (CN12, The
-superblock format). After the failover neither VM holds an array, a volume
-group or a bcache device made from the planted signatures, and the stage
-zeroes the legs' ends again through the new primary's leg devices.
-With what the primary's machine
-sends to DN1's port delayed (`tc netem`, no device changed), the
-primary's inspect read reports a write half of the probe of each of DN1's
-legs, from a round made under the delay, at no less than the delay, and
-of DN2's legs, once each has a round, below it; every leg's row reads OK on
-a fresh round, and
+cross-leg half of failover safety rests on (`architecture.md`, [D16]): on
+one VM, a clean two-leg array over two loop devices, built and stopped with
+the agent's create and stop commands under a dnv name the md udev mask
+matches (Lab facts), so that both superblocks still count both legs at one
+event count. Started from one leg with the agent's assemble command
+(`cnagent.md` CN12's assembly case), mdadm refuses, its own message saying
+it needs every member to start the array, writes nothing to that leg's
+superblock and leaves no array holding either leg; started from both legs,
+the array runs clean, both members in sync, with nothing to rebuild. With
+one leg then failed and the array stopped, the survivor's superblock counts
+itself alone and the failed leg's still counts both: the failed leg alone is
+refused, and the survivor alone starts the array, degraded, its member in
+sync, the fact the early fail rests on (`cnagent.md` CN12, The early fail).
+The command is the agent's: the promotion below holds each assemble command
+the agent runs from both legs to the arguments the same rule builds for that
+group, and the unit tests hold the agent's start from one leg to the same
+rule. It then builds md-raid1 groups across both DNs under a primary and a
+standby. The primary creates both with `--assume-clean`: provisioning zeroed
+every leg's meta region, so none carries a superblock, and no read reaches a
+data block the pool has not written (`cnagent.md` CN12's create case;
+`architecture.md`, [D15]); the standby keeps every leg connected and
+non-optimized, assembles no two-member array, and backs its ns-dev with the
+td's dm-error, the namespace inaccessible (CN10, CN11, CN16's standby rule);
+each CN's subsystem admits exactly the host's NQN (CN16). With new
+connections from the standby's VM to DN1's port dropped there, and the
+standby's controllers of its two legs into DN1 disconnected, a converge of
+the standby dials DN1's address once and runs no `nvme connect` into it:
+both legs read `ERROR` with the dial's timeout, every other row reads OK,
+and the converge takes at least the dial's timeout and no more than one dial
+timeout plus a second over a converge that connects nothing (CN10). With the
+rule taken away, the next converge connects both legs again and a fresh
+check round names nothing; its dials leave no nvmet-tcp error in DN1's
+kernel log (`osclient.md`, DialTcp). Before the host writes, the foreign
+stage plants, one at a time, a host's md version-1.2 superblock, an LVM
+physical volume with a volume group and a volume, a bcache superblock and an
+ext4 file system at the start of the data group's array on the primary,
+where a fresh pool's first host write lands, each made with a host's tools,
+the md and LVM ones on a scratch loop device that a rule of the stage's own
+keeps the system's rules off and the bcache and ext4 ones in a plain file
+udev never sees, and sends the array a change event, as its assembly does: a
+low-level blkid probe reads each signature, and udev's record of the array
+carries the md array rule's type, with nothing holding the array but dnv's
+devices, no link by uuid or label leading to it, no volume of the planted
+group active, no physical volume recorded online and no bcache device
+(`architecture.md`, Components: invocation reference); the array's start is
+zeroed again after each. It then writes the end of an md 1.0 array made just
+then over the end of both data legs, through the primary's leg devices, as a
+host can make one at its volume's end; the standby's paths end in dm-error
+on the disk nodes (`dnagent.md` DN10), so only the primary's reach the legs.
+Through each VM's leg devices once they serve — the primary's at once, the
+standby's after the flip — mdadm's plain examine of each leg reads that
+newer superblock, the examine naming the 1.2 format reads dnv's (Lab facts),
+and a change event leaves each leg's NVMe device marked not ready under
+dnv's name by the md mask, held by nothing but dnv's leg device. Before that
+event the stage drops the NVMe device's page cache: its writes reach the leg
+through the leg device above it, past that cache, which keeps an earlier
+read's data while the leg device holds the NVMe device open, and udev's
+probe reads through it (Lab facts). The demote moves ANA before the park
+(CN9's ANA pre-step before its park pre-step), stops the arrays and keeps
+the legs; the promote assembles both (CN12's assembly case), each with the
+arguments the first stage's rule builds for its own group, the data
+surviving, the data group's from both legs, which the newer 1.0 superblocks
+would make a plain assembly refuse (CN12, The superblock format). After the
+failover neither VM holds an array, a volume group or a bcache device made
+from the planted signatures, and the stage zeroes the legs' ends again
+through the new primary's leg devices. With what the primary's machine sends
+to DN1's port delayed (`tc netem`, no device changed), the primary's inspect
+read reports a write half of the probe of each of DN1's legs, from a round
+made under the delay, at no less than the delay, and of DN2's legs, once
+each has a round, below it; every leg's row reads OK on a fresh round, and
 DN1's legs' counters, read at the call, have moved (CN11, CN23); with the
-delay gone, a later round of DN1's legs is fast again.
-With the primary's legs into one DN cut
-under a host write, every fresh check round reads both md rows OK until the
-data row reports degraded and the dead legs' rows error (CN12, CN28, CN29);
-once a dead leg's probe has failed enough rounds, a round may also name,
-with the leftover code, a member of that leg md still holds in its place,
-since the early fail would fail it (CN12, CN30); no converge of that stage
-runs, and the round names nothing else.
-The stage first checks that the host write is stuck on the dead member; if
-it is not, the stage prints each md member's state, each controller's state
-and the partition rule's packet counters before it fails, which tell a
-partition that did not take from a member md had failed before the write.
-Once the write completes on the surviving leg, the agent's log holds no mdadm
-command under the stage's trace id, under which each read those rounds start
-logs (`dnagent.md` SH29): that covers every such read that has ended by then,
-but not the read the last fresh round leaves running, which the stage does not
+delay gone, a later round of DN1's legs is fast again. With the primary's
+legs into one DN cut under a host write, every fresh check round reads both
+md rows OK until the data row reports degraded and the dead legs' rows error
+(CN12, CN28, CN29); once a dead leg's probe has failed enough rounds, a
+round may also name, with the leftover code, a member of that leg md still
+holds in its place, since the early fail would fail it (CN12, CN30); no
+converge of that stage runs, and the round names nothing else. The stage
+first checks that the host write is stuck on the dead member; if it is not,
+the stage prints each md member's state, each controller's state and the
+partition rule's packet counters before it fails, which tell a partition
+that did not take from a member md had failed before the write. Once the
+write completes on the surviving leg, the agent's log holds no mdadm command
+under the stage's trace id, under which each read those rounds start logs
+(`dnagent.md` SH29): that covers every such read that has ended by then, but
+not the read the last fresh round leaves running, which the stage does not
 wait for. The leg rows recover once the partition lifts, and the write reads
 back. A fresh check round then names the member md failed, with the leftover
 code, and the `SyncupCntlr` re-sent as the worker would puts it back: the
 arrays read clean and the member is in sync with its failfast flag (CN12,
-CN30). The same put-back of a member failed by hand, on a whole array with no
-IO while the member is out, is one converge whose only mdadm commands are the
-remove and then the add, and the sectors it writes to the member are a small
-part of the array: that count, never a time, tells md's re-add from its bitmap
-from the full copy mdadm makes when it cannot re-add. With the same legs cut
-again and no IO to the arrays — the cut waits until md's write-intent bitmap
-on every member reads no dirty chunk and both arrays read clean, since md
-clears the bitmap a few seconds after a copy ends in a write to every
-member, which a cut leg would fail — a fresh check round names each member md has
-not failed by itself once its leg's probe has failed twice (CN11, CN30), the
-stage logging how long after the cut, and the `SyncupCntlr` re-sent as the
-worker would fails each named member in md once and removes none (CN12, The
-early fail): both md rows read OK, and the survivor's superblock records the
-death, its array state counting itself alone. While the cut holds, the agent
-runs no command under a trace id of its own (CN10, No converge in the
-background; CN30): no converge can make the late members serve, and no read
-names them. With the legs back,
-the `SyncupCntlr` re-sent on the rounds that name the members puts them back
+CN30). The same put-back of a member failed by hand, on a whole array with
+no IO while the member is out, is one converge whose only mdadm commands are
+the remove and then the add, and the sectors it writes to the member are a
+small part of the array: that count, never a time, tells md's re-add from
+its bitmap from the full copy mdadm makes when it cannot re-add. With the
+same legs cut again and no IO to the arrays — the cut waits until md's
+write-intent bitmap on every member reads no dirty chunk and both arrays
+read clean, since md clears the bitmap a few seconds after a copy ends in a
+write to every member, which a cut leg would fail — a fresh check round
+names each member md has not failed by itself once its leg's probe has
+failed twice (CN11, CN30), the stage logging how long after the cut, and the
+`SyncupCntlr` re-sent as the worker would fails each named member in md once
+and removes none (CN12, The early fail): both md rows read OK, and the
+survivor's superblock records the death, its array state counting itself
+alone. While the cut holds, the agent runs no command under a trace id of
+its own (CN10, No converge in the background; CN30): no converge can make
+the late members serve, and no read names them. With the legs back, the
+`SyncupCntlr` re-sent on the rounds that name the members puts them back
 under the stage's trace id, and the data member takes back a small part of
-the array, counted in sectors as before. With the port link of one
-of the primary's data sides taken away on its DN while the port listens, the
-primary's reconnect is refused with DNR and its kernel deletes the controller;
-with the link back, a fresh check round names the side with no controller
-(CN10, CN30), and the `SyncupCntlr` re-sent as the worker would connects it,
-after which the arrays read clean again; a member md fails some seconds later,
-once IO reaches it, is named by a later round and put back by the request
-re-sent on that round's code. Read-only fails writes through dm-flakey (CN16's
-read-only rule, CN19; `architecture.md`, [D11]); the data array's member on the
-DN the partition cut is then failed by hand, so the stage's last write reaches
-the other leg alone, and no converge of the primary puts it back before the
-late flip demotes it. The late flip promotes before any side flips, so the
-promotion assembles no array and builds no raid0: both md rows read "no
-available leg", the ns-dev stays parked with its row in error, and the
-promotion writes no optimized group, so the host's path stays inaccessible and
-its IO would wait rather than fail; the namespace row reads OK on the converge
-and alike in the observation a fresh round then reports, made after the
-converge by a read, which names nothing a converge could act on, and the agent
-runs no command under a trace id of its own while the members are late (CN12,
-CN16's ANA rule, CN28, CN30). Once the sides flip, a read names both groups'
-absent arrays, which the assembly would start, and nothing else; the
-`SyncupCntlr` re-sent on that code, the second the primary gets, assembles
-both arrays, puts the ns-dev on the raid0 and moves the namespace optimized,
-all under the stage's trace id. A block only the newer leg holds reads as
-that leg's, the stale member kicked (CN12, CN30; `architecture.md`, [D16]).
-The stale member goes back in the first converge after the flips whose copy
-source's leg row no longer reads `ERROR` (CN12): the probers start at the
-promotion and their rounds through the standby's dm-error export fail
-(CN11), so that is the re-send's own converge when a probe round of the
-newer leg made after the flips has passed by then, and otherwise a converge
-the stage brings once a read names the put-back, after the stale leg's row
-reads `OK` on such a round. Either way the add runs under the stage's trace
-id, and the stage plays the worker for a bounded number of re-sends until a
-round answers zero with both arrays whole and the member in sync; through
-it all the agent runs no command under an id of its own.
-Last, md's check (CN12, The md check): eight sectors of one data side fail in
-its disk node's export to the primary alone, and the suite, playing the
-worker, puts an md check request on the data group and reads the cntlr until
-its reading names the request done. Over sectors that fail reads and take
-writes (dm-flakey), the check rewrites them and records no bad-block range:
-the reading names it done, which needs md to run it to its end with the array
-whole, so it read those sectors and md failed no member; the leg's row stays
-OK. Sectors that fail both (dm error)
-leave a bad-block range on the member, which the reading counts (CN28), the
-leg's row still OK. The export's table comes back after; the range stays with the array,
+the array, counted in sectors as before. With the port link of one of the
+primary's data sides taken away on its DN while the port listens, the
+primary's reconnect is refused with DNR and its kernel deletes the
+controller; with the link back, a fresh check round names the side with no
+controller (CN10, CN30), and the `SyncupCntlr` re-sent as the worker would
+connects it, after which the arrays read clean again; a member md fails some
+seconds later, once IO reaches it, is named by a later round and put back by
+the request re-sent on that round's code. Read-only fails writes through
+dm-flakey (CN16's read-only rule, CN19; `architecture.md`, [D11]); the data
+array's member on the DN the partition cut is then failed by hand, so the
+stage's last write reaches the other leg alone, and no converge of the
+primary puts it back before the late flip demotes it. The late flip promotes
+before any side flips, so the promotion assembles no array and builds no
+raid0: both md rows read "no available leg", the ns-dev stays parked with
+its row in error, and the promotion writes no optimized group, so the host's
+path stays inaccessible and its IO would wait rather than fail; the
+namespace row reads OK on the converge and alike in the observation a fresh
+round then reports, made after the converge by a read, which names nothing a
+converge could act on, and the agent runs no command under a trace id of its
+own while the members are late (CN12, CN16's ANA rule, CN28, CN30). Once the
+sides flip, a read names both groups' absent arrays, which the assembly
+would start, and nothing else; the `SyncupCntlr` re-sent on that code, the
+second the primary gets, assembles both arrays, puts the ns-dev on the raid0
+and moves the namespace optimized, all under the stage's trace id. A block
+only the newer leg holds reads as that leg's, the stale member kicked (CN12,
+CN30; `architecture.md`, [D16]). The stale member goes back in the first
+converge after the flips whose copy source's leg row no longer reads `ERROR`
+(CN12): the probers start at the promotion and their rounds through the
+standby's dm-error export fail (CN11), so that is the re-send's own converge
+when a probe round of the newer leg made after the flips has passed by then,
+and otherwise a converge the stage brings once a read names the put-back,
+after the stale leg's row reads `OK` on such a round. Either way the add
+runs under the stage's trace id, and the stage plays the worker for a
+bounded number of re-sends until a round answers zero with both arrays whole
+and the member in sync; through it all the agent runs no command under an id
+of its own. Last, md's check (CN12, The md check): eight sectors of one data
+side fail in its disk node's export to the primary alone, and the suite,
+playing the worker, puts an md check request on the data group and reads the
+cntlr until its reading names the request done. Over sectors that fail reads
+and take writes (dm-flakey), the check rewrites them and records no
+bad-block range: the reading names it done, which needs md to run it to its
+end with the array whole, so it read those sectors and md failed no member;
+the leg's row stays OK. Sectors that fail both (dm error) leave a bad-block
+range on the member, which the reading counts (CN28), the leg's row still
+OK. The export's table comes back after; the range stays with the array,
 which the teardown removes.
 
 **repair** proves on real md the cn agent's part of a repair
@@ -820,45 +825,46 @@ dm-thin pool that a bare `dmsetup create` attaches the existing ids, both
 mappings intact, with no suspend and no create, snapshot or delete message, the
 activation sweep sending its reserve and release once each (CN14, CN21).
 
-**torn** builds a pool of two slices on DN1, each the S shape's two RedundNone
-groups, so a volume stripes over two thin volumes (`cnagent.md` CN14). A thin
-id planted by hand in slice 1's pool, one block written through a device made
-by hand and then removed, as an etcd restore can leave it, makes a new volume
-over that id read `RES_STATUS_ERROR` with `RES_REASON_THIN_ID_NOT_ADOPTED` and
-the block in its details in that slice, with no thin volume built over it and
-one header read of that pool, while the other slice builds; the converge's
-reply names nothing, and a read names the absent volume (CN30). Once the id
-is removed by hand, the re-send builds the volume. A snapshot's id made by
-hand in slice 2's pool, inside the origin's per-slice quiesce, then an agent
+**torn** builds a pool of two slices on DN1, each the S shape's two
+RedundNone groups (the S shape is smoke's pool: one RedundNone meta group
+and one RedundNone data group on DN1), so a volume stripes over two thin
+volumes (`cnagent.md` CN14). A thin id planted by hand in slice 1's pool,
+one block written through a device made by hand and then removed, as an etcd
+restore can leave it, makes a new volume over that id read
+`RES_STATUS_ERROR` with `RES_REASON_THIN_ID_NOT_ADOPTED` and the block in
+its details in that slice, with no thin volume built over it and one header
+read of that pool, while the other slice builds; the converge's reply names
+nothing, and a read names the absent volume (CN30). Once the id is removed
+by hand, the re-send builds the volume. A snapshot's id made by hand in
+slice 2's pool, inside the origin's per-slice quiesce, then an agent
 restart, stand for a primary that stopped between the two slices' steps: the
-next converge makes slice 1's id beside it and reports the snapshot torn, the
-torn marks file of the cntlr is in the local store, a fresh read after a
+next converge makes slice 1's id beside it and reports the snapshot torn,
+the torn marks file of the cntlr is in the local store, a fresh read after a
 second restart still reports the mark, and a request that lists the snapshot
 torn clears the mark and the file (CN2, CN14; `dnv-worker.md` RW19 is the
 worker's half).
 
-**discard** proves that a host's discard and a deleted volume's discard
-reach the thin pool and the disk node through the whole stack, on the S
-shape on DN1 with one slice, a data group many extents long and a volume
-of a gibibyte, which maps nothing it was not written. An 8 MiB host write
-raises the pool's used data blocks by eight; an aligned 4 MiB
+**discard** proves that a host's discard reaches the thin pool and that a
+deleted volume's discard reaches the thin pool and the disk node through the
+whole stack, on the S shape on DN1 with one slice, a data group many extents
+long and a volume of a gibibyte, which maps nothing it was not written. An 8
+MiB host write raises the pool's used data blocks by eight; an aligned 4 MiB
 `blkdiscard` drops them by four and a 512 KiB one by none, as one slice
-hands the thin volume each discard whole (`architecture.md`, Known
-limits, the entry on a host discard). A request that drops the volume and
-its namespace then brings the discard of `cnagent.md` CN14: the agent's
-log shows the volume's discard, one chunk from the end of its highest
-mapped block down to its first sector, before its removal, which comes
-before its id's delete; the pool's used blocks go back to their baseline, and DN1's side
-device counts among its discards at least the blocks the volume still
-mapped. The case plays the worker's re-send of that request, since a
-removal that fails busy leaves the volume to the next pass (CN14), and
-takes the first reply clean or naming the volume alone. It
-logs the pool's status with its discard passdown word, the discard
-counters of the side device and of the per-CN dm-linear above it, the
-backing file's allocated blocks before and after, and the agent's record
-of the discard with its time. With `DISCARD_MODE=measure` the host writes
-the whole volume before the delete, so that record times the discard of a
-written gibibyte.
+hands the thin volume each discard whole (`architecture.md`, Known limits,
+the entry on a host discard). A request that drops the volume and its
+namespace then brings the discard of `cnagent.md` CN14: the agent's log
+shows the volume's discard, one chunk from the end of its highest mapped
+block down to its first sector, before its removal, which comes before its
+id's delete; the pool's used blocks go back to their baseline, and DN1's
+side device counts among its discards at least the blocks the volume still
+mapped. The case plays the worker's re-send of that request, since a removal
+that fails busy leaves the volume to the next pass (CN14), and takes the
+first reply clean or naming the volume alone. It logs the pool's status with
+its discard passdown word, the discard counters of the side device and of
+the per-CN dm-linear above it, the backing file's allocated blocks before
+and after, and the agent's record of the discard with its time. With
+`DISCARD_MODE=measure` the host writes the whole volume before the delete,
+so that record times the discard of a written gibibyte.
 
 **clone_xfer** proves `architecture.md`, Transfer + clone = cross-SP live
 migration, and Clone metadata durability, between pools on different nodes
@@ -979,28 +985,29 @@ normal reply (`dnagent.md` SH8, SH9; CN4).
 
 **pause** is the write pause when a disk node dies (`architecture.md`, Known
 limits, the entry on a disk node that dies): DN1's VM is cut off from CN2's
-both ways, so DN1 answers nothing, as a dead node does, under a host
-writing on CN2's VM. It builds redund's pool with the primary on CN2 and the
-standby on CN1, its requests setting the legs' fast IO fail timeout below the
-default (`cnagent.md` CN10), and connects the host to both. Every time is
-read on CN2's VM, one clock for the writer, the sampler of CN2's leg paths
-and md members, the kernel log and the agent's stamps, and the case refuses
-a clock chrony reads as off, since chrony slews a clock that is far off and
-a slewed clock runs fast or slow by several percent. A writer of synced
-4 KiB blocks, one at a time, writes over a window it wrote first, so no
-write maps a new block. Through the cut the case plays the worker: check
-rounds at the check interval, and the `SyncupCntlr` re-sent once CN2's
-paths into DN1 have left live. Each of CN2's leg controllers reads the
-request's timeout, no write fails, and the longest write stays under the
-teardown's bound plus the timeout plus a margin; once the cut lifts, the
-paths come back and the members md failed are put back, as in redund. With
-`PAUSE_MODE=measure` and `--only pause` the case is the measurement instead:
-it first logs what a controller nvme-cli connects with a fast IO fail
-timeout of zero reads, then cuts the pool at the agent's default and with
-the leg controllers' timeout written shorter and longer in sysfs, then cuts
-a `RedundNone` pool at the default and at the longer timeout, timing the
-write that fails, and prints and keeps each cut's writes, samples, kernel
-logs, rounds and summary on the driver.
+both ways, so DN1 answers nothing, as a dead node does, under a host writing
+on CN2's VM. It builds redund's pool with the primary on CN2 and the standby
+on CN1, its requests setting the legs' fast IO fail timeout below the
+default (`cnagent.md` CN10), and connects the host to both. The writer, the
+sampler of CN2's leg paths and md members, CN2's kernel log and the agent's
+stamps read CN2's VM's clock; the rounds and the cut are timed by the
+driver's clock, the cut also by vm1's, and vm1's kernel log by vm1's; the
+case refuses a clock chrony reads as off on either VM, since chrony slews a
+clock that is far off and a slewed clock runs fast or slow by several
+percent. A writer of synced 4 KiB blocks, one at a time, writes over a
+window it wrote first, so no write maps a new block. Through the cut the
+case plays the worker: check rounds at the check interval, and the
+`SyncupCntlr` re-sent once CN2's paths into DN1 have left live. Each of
+CN2's leg controllers reads the request's timeout, no write fails, and the
+longest write stays under the teardown's bound plus the timeout plus a
+margin; once the cut lifts, the paths come back and the members md failed
+are put back, as in redund. With `PAUSE_MODE=measure` and `--only pause` the
+case is the measurement instead: it first logs what a controller nvme-cli
+connects with a fast IO fail timeout of zero reads, then cuts the pool at
+the agent's default and with the leg controllers' timeout written shorter
+and longer in sysfs, then cuts a `RedundNone` pool at the default and at the
+longer timeout, timing the write that fails, and prints and keeps each cut's
+writes, samples, kernel logs, rounds and summary on the driver.
 
 **What a pass means.** Exit status zero and PASS mean every assertion held in a
 run that stops at the first failure: data checked against patterns the agents
@@ -1023,44 +1030,44 @@ made of the foreign signatures removes it.
 
 ## Teardown and cleanup
 
-Cleanup runs unconditionally at the start of every run and at its end only on
-success; a failing run leaves its debris and dumps the agents' logs, both VMs'
-dm, md, nvmet and host state, each read bounded, and the failing stage's trace
-id, but for clone_xfer's token bucket, which it removes, as the bucket would
-slow any suite that runs on the VMs before the next cleanup, and pause's cut
-and its writer, which it removes and stops, as the cut would black-hole
-another suite's connections, redund's drop of new connections, which it
-removes for the same reason, and nodecheck's stalled array and mdadm
-wrapper, which it resumes and removes, as a suspended member wedges another
-suite's udev and LVM scans. A cleanup-only
-run does the scrub alone. It takes every `dnv-agent` and
-every dnv dm device, md array and nvmet subsystem on the node, of either
-role, which is why one dnv suite runs at a
+Cleanup runs unconditionally at the start of every run and at its end only
+on success; a failing run leaves its debris and dumps the agents' logs, both
+VMs' dm, md, nvmet and host state, each read bounded, and the failing
+stage's trace id, but for clone_xfer's token bucket, which it removes, as
+the bucket would slow any suite that runs on the VMs before the next
+cleanup, and pause's cut and its writer, which it removes and stops, as the
+cut would black-hole another suite's connections, redund's drop of new
+connections, which it removes for the same reason, and its netem delay,
+which it removes for the bucket's reason, and nodecheck's stalled array and
+mdadm wrapper, which it resumes and removes, as a suspended member wedges
+another suite's udev and LVM scans. A cleanup-only run does the scrub alone.
+It takes every `dnv-agent` and every dnv dm device, md array and nvmet
+subsystem on the node, of either role, which is why one dnv suite runs at a
 time in the lab (`layout.md`, Directory tree) — but for two blind spots the
-wipe exists for: its dm steps see only names with a role-lettered kind, and its
-md stop skips an inactive array over unreadable members, which neither udev nor
-mdadm names. Each step is best-effort, and the order is load-bearing on one
-principle, a holder goes before what it holds, across both VMs at once: the
-agents, their retries and probers with them, before the devices; the fault
-injections and clone_xfer's token bucket unconditionally, as each outlives
-its stage and would pass for another fault next run; host connections before
-the subsystems they hold,
-exports inside out, cn devices top-down and the dn objects in the dn suite's
-order (`dnagent_integtest.md`, Teardown and cleanup); a dm-clone while its
-source is still connected (`cnagent.md` L3), which makes the cleanup two phases
-across both VMs, every clone of either VM gone before any transfer, as a clone
-flushes through a source the other VM exports; each disk's header block
-zeroed (`architecture.md`, [D13]) and the udev rules removed last; and before
-the arrays stop, whatever the system made of redund's foreign signatures, an
-array, an active volume or a bcache device over one of them, should a rule
-have failed, together with the stage's scratch devices. Every
+wipe exists for: its dm steps see only names with a role-lettered kind, and
+its md stop skips an inactive array over unreadable members, which neither
+udev nor mdadm names. Each step is best-effort, and the order is
+load-bearing on one principle, a holder goes before what it holds, across
+both VMs at once: the agents, their retries and probers with them, before
+the devices; the fault injections and clone_xfer's token bucket
+unconditionally, as each outlives its stage and would pass for another fault
+next run; host connections before the subsystems they hold, exports inside
+out, cn devices top-down and the dn objects in the dn suite's order
+(`dnagent_integtest.md`, Teardown and cleanup); a dm-clone while its source
+is still connected (`cnagent.md` L3), which makes the cleanup two phases
+across both VMs, every clone of either VM gone before any transfer, as a
+clone flushes through a source the other VM exports; each disk's header
+block zeroed (`architecture.md`, [D13]) and the udev rules removed last; and
+before the arrays stop, whatever the system made of redund's foreign
+signatures, an array, an active volume or a bcache device over one of them,
+should a rule have failed, together with the stage's scratch devices. Every
 suspended dnv device is resumed before anything over it is removed, as one
 wedges its removal, the namespace disable above it and any block scan
-(`architecture.md`, [D12]). md arrays are named through udev, else by mdadm's
-export, never by its scan, which prints no name on these guests; only a
-dnv-named one is stopped, but for an array over the loop devices of redund's
-md-refusal stage, which is found by what holds those devices, whatever its
-name or state, and stopped before they are detached.
+(`architecture.md`, [D12]). md arrays are named through udev, else by
+mdadm's export, never by its scan, which prints no name on these guests;
+only a dnv-named one is stopped, but for an array over the loop devices of
+redund's md-refusal stage, which is found by what holds those devices,
+whatever its name or state, and stopped before they are detached.
 
 The wipe is a separate flag that runs no case. Kind-blind, it takes every
 dnv-named dm device, every dnv nvmet subsystem and md array, an array named
@@ -1072,48 +1079,48 @@ any dm or nvmet residue fails it, since reporting it is not success.
 
 ## Out of scope
 
-Error paths beyond those that Goal and scope lists; QoS, not enforced (`cnagent.md` CN6);
-`GrowSlice`; a leg gaining or losing a second side, whose disk node part the dn
-suite's migrations prove, but for a cancel, which only the e2e suite's
-cancelled migration exercises, and whose cn agent part — the connect per side,
-the disconnect of a dead path by device and the cut of a migrating leg's path
-(`cnagent.md` CN10) — the unit tests prove, the e2e suite's migrations
-exercising it, and the path rows of a leg with two sides (`cnagent.md` CN28),
-which the unit tests cover; levels but
+Error paths beyond those that Goal and scope lists; QoS, not enforced
+(`cnagent.md` CN6); `GrowSlice`; a leg gaining or losing a second side,
+whose disk node part the dn suite's migrations prove, but for a cancel,
+which only the e2e suite's cancelled migration exercises, and whose cn agent
+part — the connect per side, the disconnect of a dead path by device and the
+cut of a migrating leg's path (`cnagent.md` CN10) — the unit tests prove,
+the e2e suite's migrations exercising it, and the path rows of a leg with
+two sides (`cnagent.md` CN28), which the unit tests cover; levels but
 read-write, read-only and the no-clone gate, save what repair's forced-start
-stages read of the two levels they use to free the data array: the pool row the
-level that builds no thin pool suppresses, and the group array the level that
-builds no group array stops (`cnagent.md` CN19); more than one slice; several
-namespaces per subsystem; snapshots of snapshots; `UpdateNamespaceDev`; a
-host-facing namespace or subsystem dropped short of a cntlr teardown, leaving
-the park before its removal (`cnagent.md` CN21's park before every layer and
-its nvmet layer L1) to the unit tests; cntlid-slot exhaustion; the cdc; TLS and
-authentication; performance; faults beyond those the Cases name; provisioning
-deferral (`cnagent.md` CN9), a clone's for its clone meta group's sides
-included; a clone meta group under md-raid1 or one that is not ready, and a
-dm-clone whose metadata is not in read-write mode, all of which the unit tests
-cover (CN18); of a repair, the put-back of a new leg md has failed, a bad leg
-that md holds without a place once its repair has started in md, the add's wait
-for a member that keeps the data, a half-copied new leg after a failover, a new
-leg that is not available, which is no late member short of a forced start's
-wait and no candidate of an assembly, a converge's read of the array again that
-fails or finds it not running, an aborted repair's new leg as an extra and a
-repair on a clone meta group, all of which the unit tests cover (CN12); of a
-forced start, a second run of its assembly after a first run that failed, the stop a pool's concat
-refuses, a zero that fails or is killed or that its read back does not
-prove, a superblock read that fails, a new leg of a CREATED repair whose
-abort flag is set, which it does not zero and starts from only when the
-mark names it, a STARTED repair's new
-leg, which it keeps whatever the flag says, its wait for a late member and
-its other errors, and of the take-back check, a new leg with no
-superblock, a STARTED repair's add with no member to compare with, a keeper
-whose superblock read finds none and a superblock read that did not answer,
-and the identity check of a `leg_list` member's add with the reasons it
-and an assembly of two identities put on the legs' rows, all of
+stages read of the two levels they use to free the data array: the pool row
+the level that builds no thin pool suppresses, and the group array the level
+that builds no group array stops (`cnagent.md` CN19); more than one slice
+but torn's two RedundNone slices on one disk node; several namespaces per
+subsystem; snapshots of snapshots; `UpdateNamespaceDev`; a host-facing
+namespace or subsystem dropped short of a cntlr teardown, leaving the park
+before its removal (`cnagent.md` CN21's park before every layer and its
+nvmet layer L1) to the unit tests; cntlid-slot exhaustion; the cdc; TLS and
+authentication; performance; faults beyond those the Cases name;
+provisioning deferral (`cnagent.md` CN9), a clone's for its clone meta
+group's sides included; a clone meta group under md-raid1 or one that is not
+ready, and a dm-clone whose metadata is not in read-write mode, all of which
+the unit tests cover (CN18); of a repair, the put-back of a new leg md has
+failed, a bad leg that md holds without a place once its repair has started
+in md, the add's wait for a member that keeps the data, a half-copied new
+leg after a failover, a new leg that is not available, which is no late
+member short of a forced start's wait and no candidate of an assembly, a
+converge's read of the array again that fails or finds it not running, an
+aborted repair's new leg as an extra and a repair on a clone meta group, all
+of which the unit tests cover (CN12); of a forced start, a second run of its
+assembly after a first run that failed, the stop a pool's concat refuses, a
+zero that fails or is killed or that its read back does not prove, a
+superblock read that fails, a new leg of a CREATED repair whose abort flag
+is set, which it does not zero and starts from only when the mark names it,
+a STARTED repair's new leg, which it keeps whatever the flag says, its wait
+for a late member and its other errors, and of the take-back check, a new
+leg with no superblock, a STARTED repair's add with no member to compare
+with, a keeper whose superblock read finds none and a superblock read that
+did not answer, and the identity check of a `leg_list` member's add with the
+reasons it and an assembly of two identities put on the legs' rows, all of
 which the unit tests cover (CN12); a snapshot torn by a quiesce that fails,
 and a header read that waits or fails, whose rules the unit tests cover
-(CN14); the lingering-clone hold's scope per
-thin device, left to the unit tests (CN18); the other states of the clone's
-shared row rule (CN18); and whether a refused request leaves a lock entry
-(`dnagent.md`, Concurrency — `locks.go`; `cnagent.md` CN7), left to the unit
-tests.
+(CN14); the lingering-clone hold's scope per thin device, left to the unit
+tests (CN18); the other states of the clone's shared row rule (CN18); and
+whether a refused request leaves a lock entry (`dnagent.md`, Concurrency —
+`locks.go`; `cnagent.md` CN7), left to the unit tests.

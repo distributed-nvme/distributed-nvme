@@ -217,11 +217,11 @@ env-backed global flags that way, in `ctl/` (`dnvctl.md` CT9). Specifics:
   `check` and `collect` subcommands (`dnagent.md` CM1), dispatching to
   `agent/dnagent`, `agent/cnagent` or `agent/nodecheck`; the node check and
   the gather set the log level to Warn (`log.md` R6) and end with an exit
-  status of their own (`dnagent.md` CM5). Both roles share `agent` for the server bootstrap and the
-  `--local-store` handling, and the process builds a single
-  `LimitedOsClient` (`dnagent.md` CM4), which the CN11 leg probers
-  deliberately bypass (`osclient.md`, Exported raw helpers and the probe-IO
-  carve-out).
+  status of their own (`dnagent.md` CM5, CM6). Both roles share `agent` for
+  the server bootstrap and the `--local-store` handling, and the process
+  builds a single `LimitedOsClient` (`dnagent.md` CM4), which the CN11 leg
+  probers deliberately bypass (`osclient.md`, Exported raw helpers and the
+  probe-IO carve-out).
 * `cmd/dnv-worker/main.go`, `cmd/dnv-gateway/main.go` and
   `cmd/dnv-cdc/main.go` each build a cobra root command without subcommands
   (`dnv-worker.md` CM1, `gateway.md` CM1, `cdc.md` CM1), build the

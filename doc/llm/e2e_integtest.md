@@ -537,224 +537,226 @@ and a checksum of its content, in requests within `MaxNvmeTcpCmdBytes`, and
 reads back whole with fio's verify, through any device that keeps the
 offsets. Before the transfer host0 writes a fio stamp over the first half of
 the origin's thin device and reads it back. The case then reads the digest
-again and holds every later read to it in place of setup's, as the fio
-stamp overwrites setup's pattern: all of it at two slices or more, and its
-first half at one. The device's second half stays as setup left it: never
-written at two slices or more, and at one slice setup's pattern, which
-there fills the whole device, so that at one slice no part of the device
-is left unwritten and the digest covers all of it. A transfer,
-auto-suspended, parks the origin namespace and carries its identity, so
-host1, the only host connected to it, reads the origin through it
-(`architecture.md`, Transfers; `cnagent.md` CN17). Before the clone is
-created the origin's bitmap is read, slice by slice, once the primary
-reports the origin parked, a
-wait the case polls, for every source slice one destination region spans,
-and right after the create those bitmaps are appended as the clone's chunks,
-one per slice, so that a region a narrowed stripe spreads over several slices
-can still be skipped (`architecture.md`, raid0 bitmap math). The reads need
-no clone, so they all come before the create and the appends follow it at
-once, as a small copy can be whole within seconds of the create. The worker
-latches the clone once its copy is whole (`dnv-worker.md` CLD13), and a
-latched clone refuses a write (`dnv-worker.md` CLD1), so one of the case's
-writes to the clone, a chunk or its transport sent again, can be refused.
-The case accepts such a refusal only with the clone gone and one more latch
-in the worker's log, logs it, sends the clone nothing more and waits for no
-hydration: either refusal leaves the transport sent again untested, and a
-refused chunk the skip too. A chunk the gateway accepts reaches the clone
-only through the worker's push (`dnv-worker.md` BM2), and dm-clone drops a
-discard of a region it has copied (`cnagent.md` CN18), so a chunk pushed
-once the copy is whole lets the clone skip nothing, which no step checks or
-logs. The fallback's source, a namespace the clone reads through and so
-never parked, is refused its read and appends none (`architecture.md`,
-Bitmap reads). A clone pulls the origin through the
-transfer into a fresh thin device, whose namespace the case creates once the
-copy is whole, through the dm-clone or the raid0 as the worker's pass falls
-(`cnagent.md` CN16's clone rule, CN18), host0's IO sizes for it within
-`MaxNvmeTcpCmdBytes` then and again once the clone is gone (`architecture.md`,
-Clones); once the primary reports the copy whole
-the worker latches the clone and drains it with no operator's delete, its log
-holding the latch (`dnv-worker.md` CLD13), the destination namespace staying
-optimized, and with the transfer aborted the destination, read through its own
-raid0 with no source left to read through, holds what hydration copied
-(`architecture.md`, Transfer + clone = cross-SP live migration, [D3]): when
-the origin is the source, the destination reads the fio stamp back with
-fio's verify, and the rest of the device, never written, as zeros, the
-regions the appended bitmaps let the clone skip among them; a source on the
-primary's own kernel that fails routes to a second pool on another
-controller node (Known limits), whose source carries no fio stamp and is
-held to its digest alone; and whichever the source, the origin then reads
-the fio stamp back again. Before the first migration host0 writes a fio
-stamp over the whole of a thin device of its own, exported as a namespace
-of its own, and reads it back, once the primary's report
-of slice 0's pool shows room for the stamp's blocks under the mark of
-auto-grow (`dnv-worker.md` AR6), as a grow would change every later count:
-thin allocates the stamp's blocks after the origin's, so the leg's copy
-reaches them last, and a thin device and namespace of its own keep the
-case's digest and every later stage as they were. Over the lab's network a
-leg's copy is whole before the worker's bitmap pieces reach the new side,
-so no piece would keep a region from being copied; so before the create the
-source side's disk node gets a token bucket on what that side's nvmet port
-sends to the other disk-node guests, among which the new side lies, at a suite
-rate of about a second a region, which leaves the controller nodes' paths to
-the side alone. The new side reads a region it has not copied yet from the old
-one, for its copy and for udev's reads of the dm-clone and of each device its
-cutover pass puts over it alike, and the device-mapper command that put a
-device there waits for udev's reads of it. Under the bucket a fair queue
-serves each connection in turn, so such a read waits only behind a region
-in flight on its own connection; that wait can still stop the cutover's
-pass and fail the case through the gap check below (Known limits). A
-migration moves a side to a disk node outside its group, on a distinct
-cntlid slot; its cutover comes only once the primary
-holds a live path to the new side, and the worker's record of it names the
-primary and a reply of the primary's at a revision no older than the new side's
+again and holds every later read to it in place of setup's, as the fio stamp
+overwrites setup's pattern: all of it at two slices or more, and its first
+half at one. The device's second half stays as setup left it: never written
+at two slices or more, and at one slice setup's pattern, which there fills
+the whole device, so that at one slice no part of the device is left
+unwritten and the digest covers all of it. A transfer, auto-suspended, parks
+the origin namespace and carries its identity, so host1, the only host
+connected to it, reads the origin through it (`architecture.md`, Transfers;
+`cnagent.md` CN17). Before the clone is created the origin's bitmap is read,
+slice by slice, once the primary reports the origin parked, a wait the case
+polls, for every source slice one destination region spans, and right after
+the create those bitmaps are appended as the clone's chunks, one per slice,
+so that a region a narrowed stripe spreads over several slices can still be
+skipped (`architecture.md`, raid0 bitmap math). The reads need no clone, so
+they all come before the create and the appends follow it at once, as a
+small copy can be whole within seconds of the create. The worker latches the
+clone once its copy is whole (`dnv-worker.md` CLD13), and a latched clone
+refuses a write (`dnv-worker.md` CLD1), so one of the case's writes to the
+clone, a chunk or its transport sent again, can be refused. The case accepts
+such a refusal only with the clone gone and one more latch in the worker's
+log, logs it, sends the clone nothing more and waits for no hydration:
+either refusal leaves the transport sent again untested, and a refused chunk
+the skip too. A chunk the gateway accepts reaches the clone only through the
+worker's push (`dnv-worker.md` BM2), and dm-clone drops a discard of a
+region it has copied (`cnagent.md` CN18), so a chunk pushed once the copy is
+whole lets the clone skip nothing, which no step checks or logs. The
+fallback's source, a namespace the clone reads through and so never parked,
+is refused its read and appends none (`architecture.md`, Bitmap reads). A
+clone pulls the origin through the transfer into a fresh thin device, whose
+namespace the case creates once the copy is whole, through the dm-clone or
+the raid0 as the worker's pass falls (`cnagent.md` CN16's clone rule, CN18),
+host0's IO sizes for it within `MaxNvmeTcpCmdBytes` then and again once the
+clone is gone (`architecture.md`, Clones); once the primary reports the copy
+whole the worker latches the clone and drains it with no operator's delete,
+its log holding the latch (`dnv-worker.md` CLD13), the destination namespace
+staying optimized, and with the transfer aborted the destination, read
+through its own raid0 with no source left to read through, holds what
+hydration copied (`architecture.md`, Transfer + clone = cross-SP live
+migration, [D3]): when the origin is the source, the destination reads the
+fio stamp back with fio's verify, and the rest of the device, never written,
+as zeros, the regions the appended bitmaps let the clone skip among them; a
+source on the primary's own kernel that fails routes to a second pool on
+another controller node (Known limits), whose source carries no fio stamp
+and is held to its digest alone; and whichever the source, the origin then
+reads the fio stamp back again. Before the first migration host0 writes a
+fio stamp over the whole of a thin device of its own, exported as a
+namespace of its own, and reads it back, once the primary's report of slice
+0's pool shows room for the stamp's blocks under the mark of auto-grow
+(`dnv-worker.md` AR6), as a grow would change every later count: thin
+allocates the stamp's blocks after the origin's, so the leg's copy reaches
+them last, and a thin device and namespace of its own keep the case's digest
+and every later stage as they were. Over the lab's network a leg's copy is
+whole before the worker's bitmap pieces reach the new side, so no piece
+would keep a region from being copied; so before the create the source
+side's disk node gets a token bucket on what that side's nvmet port sends to
+the other disk-node guests, among which the new side lies, at a suite rate
+of about a second a region, which leaves the controller nodes' paths to the
+side alone. The new side reads a region it has not copied yet from the old
+one, for its copy and for any other read of the dm-clone alike. On a node
+without the dm rule of `deploy/udev/`, udev reads the dm-clone and each
+device its cutover pass puts over it, and the device-mapper command that put
+a device there waits for those reads (`cnagent_integtest.md`, Lab facts);
+the suite installs that rule, which keeps udev's probe off every dnv dm
+device (`architecture.md`, Components: invocation reference), and whether
+any read of the pass still waits so with the rule in place is not measured.
+Under the bucket a fair queue serves each connection in turn, so such a read
+waits only behind a region in flight on its own connection; that wait can
+still stop the cutover's pass and fail the case through the gap check below
+(Known limits). A migration moves a side to a disk node outside its group,
+on a distinct cntlid slot; its cutover comes only once the primary holds a
+live path to the new side, and the worker's record of it names the primary
+and a reply of the primary's at a revision no older than the new side's
 provisioned flip (`dnv-worker.md` RW18). The case prints the migration gap,
 read from both dn agents' logs — from the old side's first write of the
-inaccessible group to the primary's export of the leg to the new side's write
-of the optimized group — with no time limit on it, and fails when either write
-failed or when the new side's does not come from its cutover request: that
-request's pass waits for the old side's own pass only as long as its connect
-budget (`dnagent.md` DN13), so an old side's pass that outlasts the budget, or
-any other step of the new side's pass that stops, leaves the gap to a later
-pass and fails the case. With raid1 the case fails the moving leg's md member
-on the primary by hand — the drop md's failfast IO makes when it meets the old
-side just after its export turns inaccessible (`architecture.md`, Known
-limits), which no run can force — after the gap check, so that the syncup the
-drop brings lies outside the window that check reads, and, as any converge of
-the primary puts the member back, with the primary at the pool's latest
-revision and, as the case checks, running no converge of its own (`cnagent.md`
-CN10), so that the converge that puts the member back is the re-send the
-naming verdict brings; the member must come back in
-sync with its failfast flag and the array must read clean, and the logs must
-join the verdict to that converge through trace ids: the read whose verdict
-named the member, logged under the id of the round that started it
-(`dnagent.md` SH29); the worker's `syncup result` record of the `SyncupCntlr`
-it re-sent on the code of a later round that answered from that read's
-observation, which names the read's id as the observation's trace id while the
-re-send runs under that later round's own id; and the converge's remove and
-then add of the member under the re-send's id (`cnagent.md` CN12, CN30;
-`dnv-worker.md` RW4, RW10). The worker reads the leg's bitmap itself, once,
-from the primary, once the cutover is clear, the new side reports its
-dm-clone at the desired revision and the primary reports a live path to it
-(`dnv-worker.md` BM7), and every piece of it must reach the new side's disk
-node, whose apply must mark never-written regions copied on its dm-clone; the
-record names the leg and the piece count, and the dm-clone's copied count,
-read on its disk node right after the apply, must leave regions to copy: a
-copy already whole when the pieces landed fails the case rather than
-passing, as no piece would then have kept a region from being copied, and a
-fault in the pieces would pass with it (`dnv-worker.md` BM7; `dnagent.md`
-DN15). The bucket then comes off. The migration finishes under the same leg id
-with an optimized path before any read (`architecture.md`, Migration;
-`dnagent.md` DN12, DN13), and host0 reads the migration's fio stamp back
-whole through the moved leg's new side: with raid1 md reads a group's data from
-either member, so for that read the group's other leg's member carries md's
-write-mostly flag on the primary, which leaves md the moved leg to read from;
-the flag must still stand once the read is done and is cleared before the read
-is judged, so a read that fails leaves no flag behind. The fio stamp's
-namespace and thin device are then deleted. A second migration, once its
-cutover has started, is refused a plain cancel and ended by a forced one, its
-source
-serving again, the primary's path to it optimized, with the time from the
-cancel to that path logged, and the volume reading as before, since no host
-IO ran in between (`architecture.md`, Migrations); the case relies on leg
-repair leaving a two-sided leg alone (`dnv-worker.md` AR8). Two of an operator's repairs (raid1 only) work on one
-group, each replacing a leg whose disk node dies as in react, its agent killed
-and its nvmet port removed (`architecture.md`, Repairs, Repair, Retired legs);
-each dying disk node carries no other side of the pool — for the first leg `sp
-get` shows that, since it leaves out only the sides of repairs, retired legs
-and clones and the pool then holds none of them, and for the second the node's
-own record does — so its death takes down one leg and its record's side count
-can be checked. The first repair takes a fresh new leg, placed outside the
-group's disk nodes (E2E4), once the primary's probe has given the dead leg the
-health epoch a create requires; it must reach STARTED, read through `repair
-get` alone, as the worker follows the primary's report (`dnv-worker.md` AR11;
-`cnagent.md` CN12, CN28), refuse an abort and a cancel, each refusal naming its
-stage, and its finish, made while md still copies onto the new leg, must put
-the new leg in the bad leg's place with the bad leg's `leg_idx` and keep the
-bad leg as the pool's one retired leg, its side still in its disk node's
-record, while the primary reports the group degraded, in sync on the leg that
-stayed alone. The second repair takes that retired leg back once the first
-repair's new leg has died in the middle of md's copy onto it, so that the group
-has stayed degraded since the retired leg left, the one whole copy on the leg
+inaccessible group to the primary's export of the leg to the new side's
+write of the optimized group — with no time limit on it, and fails when
+either write failed or when the new side's does not come from its cutover
+request: that request's pass waits for the old side's own pass only as long
+as its connect budget (`dnagent.md` DN13), so an old side's pass that
+outlasts the budget, or any other step of the new side's pass that stops,
+leaves the gap to a later pass and fails the case. With raid1 the case fails
+the moving leg's md member on the primary by hand — the drop md's failfast
+IO makes when it meets the old side just after its export turns inaccessible
+(`architecture.md`, Known limits), which no run can force — after the gap
+check, so that the syncup the drop brings lies outside the window that check
+reads, and, as any converge of the primary puts the member back, with the
+primary at the pool's latest revision and, as the case checks, running no
+converge of its own (`cnagent.md` CN10), so that the converge that puts the
+member back is the re-send the naming verdict brings; the member must come
+back in sync with its failfast flag and the array must read clean, and the
+logs must join the verdict to that converge through trace ids: the read
+whose verdict named the member, logged under the id of the round that
+started it (`dnagent.md` SH29); the worker's `syncup result` record of the
+`SyncupCntlr` it re-sent on the code of a later round that answered from
+that read's observation, which names the read's id as the observation's
+trace id while the re-send runs under that later round's own id; and the
+converge's remove and then add of the member under the re-send's id
+(`cnagent.md` CN12, CN30; `dnv-worker.md` RW4, RW10). The worker reads the
+leg's bitmap itself, once, from the primary, once the cutover is clear, the
+new side reports its dm-clone at the desired revision and the primary
+reports a live path to it (`dnv-worker.md` BM7), and every piece of it must
+reach the new side's disk node, whose apply must mark never-written regions
+copied on its dm-clone; the record names the leg and the piece count, and
+the dm-clone's copied count, read on its disk node right after the apply,
+must leave regions to copy: a copy already whole when the pieces landed
+fails the case rather than passing, as no piece would then have kept a
+region from being copied, and a fault in the pieces would pass with it
+(`dnv-worker.md` BM7; `dnagent.md` DN15). The bucket then comes off. The
+migration finishes under the same leg id with an optimized path before any
+read (`architecture.md`, Migration; `dnagent.md` DN12, DN13), and host0
+reads the migration's fio stamp back whole through the moved leg's new side:
+with raid1 md reads a group's data from either member, so for that read the
+group's other leg's member carries md's write-mostly flag on the primary,
+which leaves md the moved leg to read from; the flag must still stand once
+the read is done and is cleared before the read is judged, so a read that
+fails leaves no flag behind. The fio stamp's namespace and thin device are
+then deleted. A second migration, once its cutover has started, is refused a
+plain cancel and ended by a forced one, its source serving again, the
+primary's path to it optimized, with the time from the cancel to that path
+logged, and the volume reading as before, since no host IO ran in between
+(`architecture.md`, Migrations); the case relies on leg repair leaving a
+two-sided leg alone (`dnv-worker.md` AR8). Two of an operator's repairs
+(raid1 only) work on one group, each replacing a leg whose disk node dies as
+in react, its agent killed and its nvmet port removed (`architecture.md`,
+Repairs, Repair, Retired legs); each dying disk node carries no other side
+of the pool — for the first leg `sp get` shows that, since it leaves out
+only the sides of repairs, retired legs and clones and the pool then holds
+none of them, and for the second the node's own record does — so its death
+takes down one leg and its record's side count can be checked. The first
+repair takes a fresh new leg, placed outside the group's disk nodes (E2E4),
+once the primary's probe has given the dead leg the health epoch a create
+requires; it must reach STARTED, read through `repair get` alone, as the
+worker follows the primary's report (`dnv-worker.md` AR11; `cnagent.md`
+CN12, CN28), refuse an abort and a cancel, each refusal naming its stage,
+and its finish, made while md still copies onto the new leg, must put the
+new leg in the bad leg's place with the bad leg's `leg_idx` and keep the bad
+leg as the pool's one retired leg, its side still in its disk node's record,
+while the primary reports the group degraded, in sync on the leg that stayed
+alone. The second repair takes that retired leg back once the first repair's
+new leg has died in the middle of md's copy onto it, so that the group has
+stayed degraded since the retired leg left, the one whole copy on the leg
 that stayed: md's copy onto that new leg is slowed on the primary until its
 disk node has died, the case failing rather than passing when the copy has
-ended before the kill; the group's `operator_in_charge` flag stands from before
-the kill to the step's end, since md records a bad-block range on the new leg
-when its disk node dies in md's copy, which makes that leg a candidate of the
-worker's own leg repair at once (`dnv-worker.md` AR8, A leg with bad-block
-ranges), and the flag holds off the worker's create alone, not the
-operator's repair; a create from a retired leg
-needs the retired side's health epoch clear, so the retired leg's disk node
-returns first; the repair
-keeps the retired time for a cancel, must reach STARTED, and its finish must
-put the retired leg back in its place, with its own `leg_idx` and side, and
-retire the leg that died; md must then hold the group whole, by the array's
-state words and by the whole flag and in-sync list the primary reports beside
-its rows, and how md took the leg back is logged (Known limits). Across the two
-repairs no cntlr may hold a retired leg; host0 reads its data while each leg is
-dead, while md copies, once the group is whole and at the end, and its kernel
-log, marked before the first disk node dies, must report no failed IO, as md
-fails a member whose IO errs and serves the read from the other (`cnagent.md`
-CN12); no failover may happen. The second retired leg's delete must take its
-side out of its disk node's record with the group's extents; that node's
-returning agent must then remove the side no record names (`dnagent.md` DN6)
-until its counts agree with its record (`dnagent.md` DN18), and the primary
-must hold every leg again. The quiet thresholds keep the worker's own leg
-repair off the first dead leg, and the group's `operator_in_charge` flag keeps
-it off the first repair's new leg once that leg dies, as md's bad-block ranges
-make it a candidate with no threshold, so that the worker's repair cannot race
-the operator's creates (`dnv-worker.md` AR8), and the retire timer deletes
-only an old retired leg
-(`dnv-worker.md` AR12), so the worker only moves the repairs' stages and every
-other step is the operator's. A second clone's copy survives a failover of the
-primary in its middle (`architecture.md`, Clone metadata durability): its
-source is a second pool's, on a controller node with no cntlr of the case's
-pool, so that the failover moves the clone and not its source, and of one
-slice with the case's pool's stripe, so that the optimal IO size the
-clone's dm-clone reports stays within `MaxNvmeTcpCmdBytes` at every slice
-count (`architecture.md`, Clones); host0's IO sizes for the destination are
-read within that bound while it copies; host1 writes a few MiB at the source's
-start, which keeps its pool below the mark of auto-grow (`dnv-worker.md` AR6),
-and no bitmap chunk is pushed, so every region is copied and no discard on the
-dm-clone waits for reads of the slowed source (`cnagent_integtest.md`, Lab
-facts); a token bucket on the source's controller
-node, kept to the source's address and port, slows what the source sends to a
-rate at which the copy takes about the same time at every slice count, one
-region in flight, since a copy of a few MiB over the lab's network would
-otherwise end in well under a second. Over the slowed source a device-mapper
-command after which udev reads the dm-clone, its create or the resume of a
-namespace device above it, can outlast the agent's command timeout, as it waits
-for udev's reads, which go through the source, and the converge of the
-`SyncupCntlr` the worker re-sends on the next round, which the converge's own
-name of the failed step brings, then finishes the build (`cnagent.md` CN16,
-CN18, CN30), so the case waits for the
-dm-clone to serve before it reads a count; the destination's namespace exists,
-suspended, before the clone, as in a live migration (`architecture.md`,
-Transfer + clone = cross-SP live migration), and the case logs the host's wait
-at the clone's creation — the time from the create to host0 reading that
-namespace optimized, and within it, when a poll sees it first, the time to
-every side of the clone meta group provisioned — with no limit on either, such
-a command lengthening the wait by that round and the re-sent converge. The
-primary is disabled once a
-quarter of the copy's regions are copied, which fails it over at once
-(`dnv-worker.md` AR5); the new primary's first count must be at least the last
-count read on the old one and leave a region to copy; with the bucket gone
-and the copy whole, the new primary's destination raid0, which its promotion
-created, must have had at most the regions the old primary's last count left
-written into it, where a dm-clone over new metadata would copy every region
-again, and at least the regions the new primary's first count left, which a
-write count that sees the copy reads, read on the raid0 whose number the
-dm-clone named while it served, since the worker latches a whole copy and the
-drain removes the dm-clone (`dnv-worker.md` CLD13); the clone's unforced
-delete must be accepted, or answer `NOT_FOUND` once the worker has drained the
-clone, and the whole destination must read the whole source's digest, which
-host1 read before the clone. The worker logs that one failover, the old primary
-returns as a standby once enabled, both cntlrs are listed again, and host0
-still reads its data. A controller node keeps its connection to the source
-after the clone has gone until its node-level sweep, which a read of the node
-that names the source brings, disconnects it (`cnagent.md` CN21), so the
-removal of the second pool, here as after the fallback, drops it on every
-controller node before the pool's subsystem goes, rather than wait for that
-sweep.
+ended before the kill; the group's `operator_in_charge` flag stands from
+before the kill to the step's end, since md records a bad-block range on the
+new leg when its disk node dies in md's copy, which makes that leg a
+candidate of the worker's own leg repair at once (`dnv-worker.md` AR8, A leg
+with bad-block ranges), and the flag holds off the worker's create alone,
+not the operator's repair; a create from a retired leg needs the retired
+side's health epoch clear, so the retired leg's disk node returns first; the
+repair keeps the retired time for a cancel, must reach STARTED, and its
+finish must put the retired leg back in its place, with its own `leg_idx`
+and side, and retire the leg that died; md must then hold the group whole,
+by the array's state words and by the whole flag and in-sync list the
+primary reports beside its rows, and how md took the leg back is logged
+(Known limits). Across the two repairs no cntlr may hold a retired leg;
+host0 reads its data while each leg is dead, while md copies, once the group
+is whole and at the end, and its kernel log, marked before the first disk
+node dies, must report no failed IO, as md fails a member whose IO errs and
+serves the read from the other (`cnagent.md` CN12); no failover may happen.
+The second retired leg's delete must take its side out of its disk node's
+record with the group's extents; that node's returning agent must then
+remove the side no record names (`dnagent.md` DN6) until its counts agree
+with its record (`dnagent.md` DN18), and the primary must hold every leg
+again. The quiet thresholds keep the worker's own leg repair off the first
+dead leg, and the group's `operator_in_charge` flag keeps it off the first
+repair's new leg once that leg dies, as md's bad-block ranges make it a
+candidate with no threshold, so that the worker's repair cannot race the
+operator's creates (`dnv-worker.md` AR8), and the retire timer deletes only
+an old retired leg (`dnv-worker.md` AR12), so the worker only moves the
+repairs' stages and every other step is the operator's. A second clone's
+copy survives a failover of the primary in its middle (`architecture.md`,
+Clone metadata durability): its source is a second pool's, on a controller
+node with no cntlr of the case's pool, so that the failover moves the clone
+and not its source, and of one slice with the case's pool's stripe, so that
+the optimal IO size the clone's dm-clone reports stays within
+`MaxNvmeTcpCmdBytes` at every slice count (`architecture.md`, Clones);
+host0's IO sizes for the destination are read within that bound while it
+copies; host1 writes a few MiB at the source's start, which keeps its pool
+below the mark of auto-grow (`dnv-worker.md` AR6), and no bitmap chunk is
+pushed, so every region is copied and no discard on the dm-clone waits for
+reads of the slowed source (`cnagent_integtest.md`, Lab facts); a token
+bucket on the source's controller node, kept to the source's address and
+port, slows what the source sends to a rate at which the copy takes about
+the same time at every slice count, one region in flight, since a copy of a
+few MiB over the lab's network would otherwise end in well under a second.
+On a node without the dm rule of `deploy/udev/`, which the suite installs,
+over the slowed source a device-mapper command after which udev reads the
+dm-clone, its create or the resume of a namespace device above it, can
+outlast the agent's command timeout, as it waits for udev's reads, which go
+through the source, and the converge of the `SyncupCntlr` the worker
+re-sends on the next round, which the converge's own name of the failed step
+brings, then finishes the build (`cnagent.md` CN16, CN18, CN30), so the case
+waits for the dm-clone to serve before it reads a count; the destination's
+namespace exists, suspended, before the clone, as in a live migration
+(`architecture.md`, Transfer + clone = cross-SP live migration), and the
+case logs the host's wait at the clone's creation — the time from the create
+to host0 reading that namespace optimized, and within it, when a poll sees
+it first, the time to every side of the clone meta group provisioned — with
+no limit on either, such a command lengthening the wait by that round and
+the re-sent converge. The primary is disabled once a quarter of the copy's
+regions are copied, which fails it over at once (`dnv-worker.md` AR5); the
+new primary's first count must be at least the last count read on the old
+one and leave a region to copy; with the bucket gone and the copy whole, the
+new primary's destination raid0, which its promotion created, must have had
+at most the regions the old primary's last count left written into it, where
+a dm-clone over new metadata would copy every region again, and at least the
+regions the new primary's first count left, which a write count that sees
+the copy reads, read on the raid0 whose number the dm-clone named while it
+served, since the worker latches a whole copy and the drain removes the
+dm-clone (`dnv-worker.md` CLD13); the clone's unforced delete must be
+accepted, or answer `NOT_FOUND` once the worker has drained the clone, and
+the whole destination must read the whole source's digest, which host1 read
+before the clone. The worker logs that one failover, the old primary returns
+as a standby once enabled, both cntlrs are listed again, and host0 still
+reads its data. A controller node keeps its connection to the source after
+the clone has gone until its node-level sweep, which a read of the node that
+names the source brings, disconnects it (`cnagent.md` CN21), so the removal
+of the second pool, here as after the fallback, drops it on every controller
+node before the pool's subsystem goes, rather than wait for that sweep.
 
 **react** proves the four reactions on real faults, that a planned restart
 of the primary's cn agent moves nothing, an operator's forced start of a
@@ -1178,13 +1180,15 @@ The node check (`dnagent.md` CM5) runs later, as a stage of the first setup,
 since the guests get the binary and the md assembly mask only in the setup's
 first stages: once every agent started and before the pool create,
 `dnv-agent check dn` on each disk node guest, over the loop device of its
-first agent, as a guest's loop devices are made alike, and `dnv-agent check
-cn` on each controller node guest. A check that does not exit zero, or a
-report with a failed result, fails the run with the report's failures; each
-warning is logged. It runs once a run, not before each case, since nothing
-between the cases changes a guest's kernel or tools; hosts and the
-control-plane guest run no agent and no check. The guest checks above stay:
-they run before anything is written and guard the start sweep's tools.
+first agent, as a guest's loop devices are made alike, and
+`dnv-agent check cn` on each controller node guest. A check that does not
+exit zero, or a report with a failed result, fails the run with the report's
+failures; each warning is logged. It runs once a run, not before each case,
+since nothing between the cases changes a guest's kernel or tools; hosts and
+the control-plane guest run no agent and no check. The guest checks above
+stay, run before the first setup builds anything: they guard the tools of
+the sweeps after them, between the cases and at the end, not the start
+sweep's, which runs before them.
 
 ## Cleanup, and why the order is what it is
 
@@ -1354,14 +1358,18 @@ the connect attempted.
   only for a block the copy had not reached when they landed. md's
   write-mostly flag is read before and after that read, not during it.
 * **The migration's bucket can stop the new side's cutover pass.** The fair
-  queue under it splits connections, not the requests of one connection, so a
-  udev read that shares the connection of a region in flight waits behind that
-  region, and a device-mapper command of the pass that waits for enough such
-  reads outlasts the dn agent's command timeout (`architecture.md`, Common
-  validation), which stops the pass (`dnagent.md` DN13). The case then fails
-  on the migration gap rather than passing. How often this happens
-  under the suite's rate is not measured; such a stop shows in the new side's
-  dn log as a killed command under the trace of its cutover request.
+  queue under it splits connections, not the requests of one connection, so
+  a udev read that shares the connection of a region in flight waits behind
+  that region, and a device-mapper command of the pass that waits for enough
+  such reads outlasts the dn agent's command timeout (`architecture.md`,
+  Common validation), which stops the pass (`dnagent.md` DN13). That holds
+  on a node without the dm rule of `deploy/udev/` (`cnagent_integtest.md`,
+  Lab facts); the suite installs the rule, which keeps udev's probe off the
+  new side's devices, and whether any read of the pass still waits so with
+  the rule in place is not measured. The case then fails on the migration
+  gap rather than passing. How often this happens under the suite's rate is
+  not measured; such a stop shows in the new side's dn log as a killed
+  command under the trace of its cutover request.
 * **An array both inactive and over members mdadm cannot read is named by
   neither source**, so the cleanup skips it and an operator must find it.
 * **A host controller outlives a target that stops listening**

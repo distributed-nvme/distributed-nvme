@@ -799,15 +799,15 @@ to no cluster (`architecture.md`, Worker registry).
   agent request and the log line; the resolving `Snapshot` supplies the
   cluster id, so there is no plain pre-read — and no `DnRev` read: a client
   that wants the desired-state token calls `GetDiskNode`); **after** the STM
-  call `GetDnInfo` with the cluster id, `dn_id` and `read_io_stats`, the
-  one caller that sets it (`dnagent.md` DN16); an agent failure is
-  `ABORTED`. Reply `applied_revision`, `dn_info`, `obs_stamp` and
-  `disk_io_stats`, all from the agent's reply, which answers from its latest observation of the node,
-  or with none while the agent starts (`dnagent.md` SH33), its code not
-  passed on,
+  call `GetDnInfo` with the cluster id, `dn_id` and `read_io_stats`, the one
+  caller that sets it (`dnagent.md` DN16); an agent failure is `ABORTED`.
+  Reply `applied_revision`, `dn_info` and `obs_stamp` from the agent's
+  reply, which answers from its latest observation of the node, or with none
+  while the agent starts (`dnagent.md` SH33), its code not passed on,
+  `disk_io_stats`, which the agent reads at the call (`dnagent.md` DN16),
   and `obs_age`, which `obsAge` derives from that stamp (`architecture.md`,
-  Disk nodes — deliberately the observation's revision, never the stored
-  rev key).
+  Disk nodes — deliberately the observation's revision, never the stored rev
+  key).
 
 ### Controller nodes
 

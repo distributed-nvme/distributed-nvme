@@ -84,13 +84,17 @@ It also shows the state of the array and the group's retired legs.
 
 The dry run is a forced start that only says what it would do:
 `dnvctl group inspect --grp <group id> --leg <leg id>`. It says which legs
-the start would wipe, whether it would stop the array first, and its
-update: `uuid`, or `uuid,force-no-bbl` when the start drops the named
-leg's bad-block list. Or it says why the start would refuse, in the same
-words as the real start. Add `--force` to see what a start with the force
-flag would do. The dry run with `--force` shows no refusal the flag
-passes: run it without `--force` first, to see each one. The dry run runs
-nothing.
+the start would wipe, whether it would stop the array first, and its update:
+`uuid`, or `uuid,force-no-bbl` when the start drops the named leg's
+bad-block list. Or it says why the start would refuse, in the same words as
+the real start. Add `--force` to see what a start with the force flag would
+do. The dry run stops at the first refusal it meets, so it shows one refusal
+at most. Of the three refusals the force flag passes, it meets first a leg a
+repair took back after md wrote onto it, then a bad-block list, then a named
+leg whose change count is below that of a leg it wipes; with `--force` it
+shows none of them. So before you add `--force` for one refusal, compare by
+hand in `dnvctl group inspect` the change counts of the named leg and of
+every leg it wipes (rule 2 below). The dry run runs nothing.
 
 Tested: the cn agent suite, `integtest/cnagent_test.sh`, repair case,
 stage `forced`. It runs the primary's read and dry run before a real
@@ -168,7 +172,9 @@ Safe steps:
 1. Do the steps "Before every forced start".
 2. Run the dry run from the leg you chose, without `--force`. When it
    refuses the named leg for its bad-block list, or as older than a leg it
-   wipes, and you choose to go on (rules 2 to 4), run it again with
+   wipes, and you choose to go on (rules 2 to 4), first compare by hand the
+   change counts of the named leg and of every leg it would wipe, since the
+   dry run shows only the first refusal it meets. Then run it again with
    `--force` and read what it would wipe and drop.
 3. Write the mark:
    `dnvctl group force-start --grp <group id> --leg <leg id>`, with
@@ -200,11 +206,12 @@ Steps that can lose data:
 - The force flag (`--force`) starts the array from a leg older than a leg
   it wipes. That leg serves and holds newer data, and you choose to give
   that data up. Use it only when the newer data is known to be bad.
-- The force flag also drops the named leg's bad-block list. If two legs
-  have the same change count and you force the wrong one, hosts read the
-  regions md never copied as whatever that leg's disk held, with no
-  error. A flag given for the list also passes an older named leg in the
-  same start, so read the dry run without the flag first.
+- The force flag also drops the named leg's bad-block list. If two legs have
+  the same change count and you force the wrong one, hosts read the regions
+  md never copied as whatever that leg's disk held, with no error. A flag
+  given for the list also passes an older named leg in the same start, and
+  the dry run without the flag shows only the list's refusal then. So
+  compare the change counts by hand first (rule 2).
 - A start from an older copy restores this group alone. The pool's other
   groups keep their newer state, so the pool's volumes can mix old and new
   blocks. A block first written since that copy can read another pool's
@@ -692,9 +699,13 @@ keeps the blocks of each thin id until the id is deleted. A volume is
 Symptom: a new volume, `created` false, does not come up. In
 `dnvctl cntlr inspect --id <primary cntlr id>`, a row of the volume in
 `td_id_to_thin_info` reads `RES_STATUS_ERROR` with the reason
-`RES_REASON_THIN_ID_NOT_ADOPTED`. Its details say that the thin id exists
-in the slice's pool and maps some blocks. Details that name a failed read
-instead are covered under When to stop.
+`RES_REASON_THIN_ID_NOT_ADOPTED`. Its details say that the thin id exists in
+the slice's pool and maps some blocks. Details that name a failed read
+instead are covered under When to stop. The row reads so only in the report
+of a converge that the syncup brings. Between two such converges the row
+reads `RES_STATUS_MISSING`, with no details and no reason. If you see that,
+run the command again a few seconds later, until the row reads
+`RES_STATUS_ERROR` with the reason.
 
 Confirm: the row's details name the pool and the block count. Two cases
 give this row, and the steps differ:
@@ -932,12 +943,12 @@ Confirm:
    leg probe, and `dev.stat`, the counters of the leg's device on the
    controller node.
 2. A slow leg shows a `probe_times.write_ms`, and a `read_ms`, well above
-   those of the other legs. Between the two runs, divide the growth of
-   its `write_ticks_ms` by the growth of its `write_ios`: that is the
-   average time of one write, which is well above that of the other legs.
-   The `round_age_ms` says how old the probe is; a probe still running is
-   not shown until it ends, and one that runs longer than the stall bound
-   turns the leg's row to `RES_STATUS_ERROR` anyway.
+   those of the other legs. Between the two runs, divide the growth of its
+   `write_ticks_ms` by the growth of its `write_ios`: that is the average
+   time of one write, which is well above that of the other legs. The
+   `round_age_ms` says how old the probe is; a probe still running is not
+   shown until it ends, and one that runs longer than 15 seconds turns the
+   leg's row to `RES_STATUS_ERROR` anyway.
 3. Find the leg: `cntlr_info.leg_id_to_leg` gives its device name for the
    same leg id, and `dnvctl sp get` lists the slices, their groups and
    their legs, with each leg's side and the disk node that holds it.
@@ -968,11 +979,11 @@ and the disk's counters look normal, which points at the network between
 the nodes rather than the disk. Ask for help before a migration in that
 case: the new side may be just as slow.
 
-Tested: a unit test of the cn agent checks that the inspect read carries
-the probe times and the counters, and that no check round carries them.
-The cn suite's slow leg stage, which delays one disk node's traffic with
-tc netem and reads a higher write time on its legs while their rows stay
-ok, is written and has not yet run in the lab.
+Tested: a unit test of the cn agent checks that the inspect read carries the
+probe times and the counters, and that no check round carries them. The cn
+suite's slow leg stage, which delays one disk node's traffic with tc netem
+and reads a higher write time on its legs while their rows stay ok, runs in
+the suite's redund case and passes on the lab VMs.
 
 ## Install the udev rules on a node
 
@@ -982,11 +993,11 @@ assemble an md array from it, scan it for LVM, or register it as a bcache
 device. dnv ships three rule files in the folder `deploy/udev/` of the
 release:
 
-- `58-dnv-dm.rules` keeps the system's rules off every device mapper
-  device of dnv, whose name starts with `dnv-`. Such a device holds what
-  hosts wrote, and the node must never read that as a file system, an LVM
-  volume, an md array or a cache. The device keeps its name under
-  `/dev/mapper`, which dnv uses. systemd shows such a device as not ready.
+- `58-dnv-dm.rules` keeps the system's rules off every device mapper device
+  of dnv, whose name starts with `dnv-`. Such a device holds what hosts
+  wrote, and the node must never read that as a file system, an LVM volume,
+  an md array or a cache. The device keeps its name under `/dev/mapper`,
+  which dnv uses. Some versions of systemd show such a device as not ready.
   That does no harm: dnv mounts nothing on it and waits for no systemd
   device unit.
 - `63-dnv-md.rules` keeps the system's md assembly off the members of
@@ -1149,18 +1160,23 @@ Safe steps:
      Read the fact by hand, or do first what the `fix:` line says, and run
      the check again.
 4. For a new kernel or mdadm on controller nodes, run the md replay on a
-   spare machine with that kernel and mdadm, never on a node in service:
-   `dnv-agent check cn --md-replay`. It refuses to start on a node that
-   holds any dnv device, array, subsystem or local store file. Each of its
-   steps is one more line of the report; a failed step means that mdadm or
-   the kernel does not keep a rule dnv's failover rests on, and that
-   kernel or mdadm must not run on a controller node. The replay removes
-   what it made, also after Ctrl-C, and names anything it could not
-   remove.
+   spare machine with that kernel and mdadm, never on a node in service.
+   First install the udev rules on the machine ([Install the udev rules on a
+   node](#install-the-udev-rules-on-a-node), steps 1 and 2): the replay does
+   not start while the check finds no mask of the system's md assembly. Then
+   run `dnv-agent check cn --md-replay`. It refuses to start on a node that
+   holds any dnv device, array, subsystem or file of an agent's local store,
+   the folder where an agent keeps the desired state it last accepted. An
+   `md replay` line that reads `not started` names a reason on the machine,
+   not a fault of mdadm or the kernel. Each of its steps is one more line of
+   the report; a failed step means that mdadm or the kernel does not keep a
+   rule dnv's failover rests on, and that kernel or mdadm must not run on a
+   controller node. The replay removes what it made, also after Ctrl-C, and
+   names anything it could not remove.
 
-What dnv does alone: nothing. An agent refuses nothing at its start. It
-logs the kernel release and, on a controller node, the mdadm version once
-when it starts, as the record `agent node versions`.
+What dnv does alone: nothing. An agent starts whatever the check would
+report. It logs the kernel release and, on a controller node, the mdadm
+version once when it starts, as the record `agent node versions`.
 
 When to stop: the check exits 2 as root, or the md replay names something
 it could not remove. Ask for help; remove what the replay names by hand
@@ -1189,18 +1205,21 @@ or to keep the node's state before you change anything.
 
 Safe steps:
 
-1. On the node, as root: `dnv-agent collect --log-file <the agent's log
-   file>`, or `--journal-unit <unit>` when systemd keeps the agent's log.
-   `--deadline` sets the time limit of the reads that can wait (20 seconds
-   when not given), and `--out` the archive's path; by default it is
-   `dnv-collect-<host>-<time>.tar.gz` in the current directory; an
-   `--out` that names a directory, or a link to one, is refused before
-   anything is read. The archive takes the end
-   of the agent's log: the last 16 MiB of the file, or the last 100000
-   records of the unit, newest first. A log read that runs out of its time
-   limit, which is as long as `--deadline`, keeps what it read and ends
-   with the line `[cut at the bound ...]`; for the unit that is the newest
-   records. Keep an older part by hand if the trouble began earlier.
+1. On the node, as root:
+   `dnv-agent collect --log-file <the agent's log file>`, or
+   `--journal-unit <unit>` when systemd keeps the agent's log. Add
+   `--local-store` with the agent's own value when the agent does not use
+   the default, /var/lib/dnv; otherwise the archive lists the default
+   folder, not the agent's local store. `--deadline` sets the time limit of
+   the reads that can wait (20 seconds when not given), and `--out` the
+   archive's path; by default it is `dnv-collect-<host>-<time>.tar.gz` in
+   the current directory; an `--out` that names a directory, or a link to
+   one, is refused before anything is read. The archive takes the end of the
+   agent's log: the last 16 MiB of the file, or the last 100000 records of
+   the unit, newest first. A log read that runs out of its time limit, which
+   is as long as `--deadline`, keeps what it read and ends with the line
+   `[cut at the bound ...]`; for the unit that is the newest records. Keep
+   an older part by hand if the trouble began earlier.
 2. It prints the archive's path, then each read that did not finish. A
    read that did not finish is a fact for the report: it shows what the
    kernel waits on. The reads stay stopped in the kernel until what they

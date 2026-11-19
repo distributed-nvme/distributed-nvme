@@ -1105,28 +1105,28 @@ The leg wrapper of Primary cntlr is agent-internal — it is CN dm kind `c9`,
 `CnLegName` in `cnagent.md`, Names and constants in `common` — and, like
 kind `ca`, is not part of the cross-component contract [D1].
 
-`common.ParseDmName` is the reverse of this table, and `common.ParseNqn`
-the reverse of the NQN table (NQNs); a sweep reads through them the owner
-a name the kernel handed back carries. Both are strict on purpose: their
-own prefix, a kind this build knows, and exactly the id count that kind
-carries, each a full `IdKeyFmt` field. A name that does not decode exactly
-is "not a dnv name" rather than a partly-read one, because the caller's next
-move is a removal. A subsystem in a cn's nvmet tree whose NQN does not
-decode is a host-facing one, which the cn agent attributes by the held
-request that still names it or else by the namespaces it is built out of,
-and with none of those, at node level only, by its hosts and port links,
-then its model when it has one and its age when it has neither; one dnv did not make that holds a namespace or
-a link, an operator's own export on the same kernel, is foreign and never
-touched (`cnagent.md` CN21); one carrying the dnv prefix is touched only
-while a held request names it (dm-device kinds); a connection on the cn
-whose NQN is in no dnv namespace, or is a transfer of another cluster, is
-judged at node level only, by its controllers' host NQN, and one in the dnv
-namespace that does not decode is never judged (`cnagent.md` CN21); and any
-NQN on the dn that does not decode is left alone and never judged
-(`dnagent.md` DN6). Every dm kind of both roles carries the **sp id
-first**,
-which is what lets a sweep group a node's devices by storage pool without
-consulting any stored plan (Teardown by sweep).
+`common.ParseDmName` is the reverse of this table, and `common.ParseNqn` the
+reverse of the NQN table (NQNs); a sweep reads through them the owner a name
+the kernel handed back carries. Both are strict on purpose: their own
+prefix, a kind this build knows, and exactly the id count that kind carries,
+each a full `IdKeyFmt` field. A name that does not decode exactly is "not a
+dnv name" rather than a partly-read one, because the caller's next move is a
+removal. A subsystem in a cn's nvmet tree whose NQN does not decode is a
+host-facing one, which the cn agent attributes by the held request that
+still names it or else by the namespaces it is built out of, and with none
+of those, at node level only, by its hosts and port links, then its model
+when it has one and its age when it has neither; one dnv did not make that
+holds a namespace device, an allowed host or a port link, an operator's own
+export on the same kernel, is foreign and never touched (`cnagent.md` CN21);
+one carrying the dnv prefix is touched only while a held request names it
+(dm-device kinds); a connection on the cn whose NQN is in no dnv namespace,
+or is a transfer of another cluster, is judged at node level only, by its
+controllers' host NQN, and one in the dnv namespace that does not decode is
+never judged (`cnagent.md` CN21); and any NQN on the dn that does not decode
+is left alone and never judged (`dnagent.md` DN6). Every dm kind of both
+roles carries the **sp id first**, which is what lets a sweep group a node's
+devices by storage pool without consulting any stored plan (Teardown by
+sweep).
 
 ### md names
 
@@ -4767,38 +4767,39 @@ read it (Clones, Migrations).
 decision reads: `RES_REASON_NONE` on a row no rule gives a reason;
 `RES_REASON_THIN_ID_LOST`, which `cnagent.md` CN14 sets on an `ERROR` row
 and `dnv-worker.md` HL2 reads; `RES_REASON_OTHER_IDENTITY` and
-`RES_REASON_IDENTITY_UNDECIDED`, which `cnagent.md` CN12 sets on a leg's row,
-its status and details kept, for a leg the running array does not add for
-another identity and for the legs of two identities an assembly meets,
-which no health rule reads and a repair create is to read
-(Repair); `RES_REASON_THIN_ID_NOT_ADOPTED`, which
-`cnagent.md` CN14 sets on the `ERROR` thin row of a new volume whose thin id
-it does not adopt and `dnv-worker.md` HL2 reads; `RES_REASON_POOL_NEEDS_CHECK` and
-`RES_REASON_POOL_FAILED`, which `cnagent.md` CN13 sets on an `ERROR` pool row
-whose status line carries needs_check, or `Fail` or `Error` in place of its
-numbers, the first of which `dnv-worker.md` HL2 reads; `RES_REASON_AWAITING_CUTOVER`, which
-`dnagent.md` DN13 sets on a migration destination's two `PROVISIONING`
-migration rows and `dnv-worker.md` RW18 reads; `RES_REASON_SP_LEVEL`, which
-`cnagent.md` CN19 sets on every `MISSING` row its pool's level suppresses;
-and `RES_REASON_SOURCE_FAULT`, which `cnagent.md` CN18 sets on the clone
-rows the cn agent keeps `MISSING` because it does not read the clone's
-source as ready, CN18 saying which; the settle of `dnv-worker.md` HL2
-reads these two; `RES_REASON_PARKED`, which `cnagent.md` CN28 sets on
-the `OK` ns-dev row of an effectively suspended namespace and the
-gateway's `GetThinDeviceBitmap` reads (Bitmap reads); and
-`RES_REASON_DIFFERS`, which both agents set on an
-`OK` row of an object that is there and differs without leaving a primary
-short of its optimized path. There are two such objects: a namespace
-wanted non-optimized or inaccessible whose ANA group differs, as one still
-optimized after a failed move to inaccessible, where one wanted optimized
-that is not leaves the primary without its optimized path and reads
-`RES_STATUS_ERROR` instead (`dnagent.md` DN18, SH31; `cnagent.md` CN28);
-and a thin pool whose metadata total is short of its metadata device,
-which a reload finishes, or that holds a metadata snapshot no live
-reader made, which a release ends (`cnagent.md` CN13). The object's verdict names a `RES_REASON_DIFFERS` row, so the
-worker re-sends its `Syncup*` (`dnagent.md` SH31); no health rule reads
-it, so such a row is healthy. An agent sets a reason from what its own pass
-established, never from a row's text: `cnagent.md` CN29 says how the cn
+`RES_REASON_IDENTITY_UNDECIDED`, which `cnagent.md` CN12 sets on a leg's
+row, its status and details kept, for a leg the running array does not add
+for another identity and for the legs of two identities an assembly meets,
+which no health rule and no control-plane decision reads: they tell the
+operator why the leg stays out (`cnagent.md` CN12);
+`RES_REASON_THIN_ID_NOT_ADOPTED`, which `cnagent.md` CN14 sets on the
+`ERROR` thin row of a new volume whose thin id it does not adopt and
+`dnv-worker.md` HL2 reads; `RES_REASON_POOL_NEEDS_CHECK` and
+`RES_REASON_POOL_FAILED`, which `cnagent.md` CN13 sets on an `ERROR` pool
+row whose status line carries needs_check, or `Fail` or `Error` in place of
+its numbers, the first of which `dnv-worker.md` HL2 reads;
+`RES_REASON_AWAITING_CUTOVER`, which `dnagent.md` DN13 sets on a migration
+destination's two `PROVISIONING` migration rows and `dnv-worker.md` RW18
+reads; `RES_REASON_SP_LEVEL`, which `cnagent.md` CN19 sets on every
+`MISSING` row its pool's level suppresses; and `RES_REASON_SOURCE_FAULT`,
+which `cnagent.md` CN18 sets on the clone rows the cn agent keeps `MISSING`
+because it does not read the clone's source as ready, CN18 saying which; the
+settle of `dnv-worker.md` HL2 reads these two; `RES_REASON_PARKED`, which
+`cnagent.md` CN28 sets on the `OK` ns-dev row of an effectively suspended
+namespace and the gateway's `GetThinDeviceBitmap` reads (Bitmap reads); and
+`RES_REASON_DIFFERS`, which both agents set on an `OK` row of an object that
+is there and differs without leaving a primary short of its optimized path.
+There are two such objects: a namespace wanted non-optimized or inaccessible
+whose ANA group differs, as one still optimized after a failed move to
+inaccessible, where one wanted optimized that is not leaves the primary
+without its optimized path and reads `RES_STATUS_ERROR` instead
+(`dnagent.md` DN18, SH31; `cnagent.md` CN28); and a thin pool whose metadata
+total is short of its metadata device, which a reload finishes, or that
+holds a metadata snapshot no live reader made, which a release ends
+(`cnagent.md` CN13). The object's verdict names a `RES_REASON_DIFFERS` row,
+so the worker re-sends its `Syncup*` (`dnagent.md` SH31); no health rule
+reads it, so such a row is healthy. An agent sets a reason from what its own
+pass established, never from a row's text: `cnagent.md` CN29 says how the cn
 agent does, `dnagent.md` DN13 how the dn agent does.
 
 `CntlrInfo.leg_id_to_leg` reflects the health check of Group on-leg
@@ -7210,12 +7211,13 @@ devices keep their stock handling:
   rules, which set a device's name: for a dm device whose name carries
   `DmPrefix` and a dash it sets the flags that keep the disk rules (udev's
   content probe and the links by content), the other rules (lvm2's and
-  bcache's) and the persistent-storage rules off, with no watch, so a
-  host's data in a thin volume, a raid0 or a side is never probed. It never
-  sets the flag that drops the device's `/dev/mapper` link, which the
-  agents use. The flags also make systemd read the device as not ready, its
-  device unit inactive; nothing dnv runs waits for a dm device's unit or
-  mounts one, so that costs nothing.
+  bcache's) and the persistent-storage rules off, with no watch, so a host's
+  data in a thin volume, a raid0 or a side is never probed. It never sets
+  the flag that drops the device's `/dev/mapper` link, which the agents use.
+  Whether systemd then reads the device as ready, its device unit active,
+  depends on its version's rules, as systemd 255's mark a flagged device not
+  ready on its add event alone; nothing dnv runs waits for a dm device's
+  unit or mounts one, so either way costs nothing.
 * the md assembly mask, `63-dnv-md.rules` (md assembly, below).
 * the md array rule, `63-zz-dnv-md-array.rules`, ordered after the stock
   "63-md-raid-arrays.rules", which reads an md array's name, probes its

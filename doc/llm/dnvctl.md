@@ -271,13 +271,15 @@ is the gateway's idempotent no-write (`gateway.md` GW6), not a flip back, so
 the leaf is safe to script. An inspect RPC is an `inspect` leaf
 (`sp inspect-side` for a side), a read the gateway answers from the agent
 that hosts the object, out of that agent's latest observation of it, not
-from etcd; `group inspect` is the one whose agent reads the group's
-members then and there, beside the records' view (`architecture.md`,
-Repairs). The bitmap RPCs are `get-bm` and `append-bm`;
-every other leaf keeps its RPC's verb (`cluster advance-ids`,
-`cluster get-capacity`, `sp find-names`, `sp grow-slice`, `migr finish`, `migr cancel`,
-`group force-start`), save one: `repair abort` is `TryToAbortRepair`, the
-one leaf whose verb is not its RPC's (`repair` — `ctl/repair.go`).
+from etcd; `dn inspect` and `cntlr inspect` add the block counters the agent
+reads at the call (`dnagent.md` DN16, `cnagent.md` CN23), and
+`group inspect` is the one whose agent reads the group's members then and
+there, beside the records' view (`architecture.md`, Repairs). The bitmap
+RPCs are `get-bm` and `append-bm`; every other leaf keeps its RPC's verb
+(`cluster advance-ids`, `cluster get-capacity`, `sp find-names`,
+`sp grow-slice`, `migr finish`, `migr cancel`, `group force-start`), save
+one: `repair abort` is `TryToAbortRepair`, the one leaf whose verb is not
+its RPC's (`repair` — `ctl/repair.go`).
 
 **Fields and flags.** Every request field maps to exactly one flag, with
 these exceptions:

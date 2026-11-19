@@ -148,7 +148,7 @@ The vocabulary of dnv in alphabetical order, one entry per term, with synonyms s
 
 **desired state** — What etcd records a node or a pool should look like, carried whole in every syncup request. Agents converge to it, and removal is derived from the difference between it and what the node holds.
 
-**dial** — The cn agent's TCP connect to a side's address, in its own process, before each `nvme connect` (`NvmeHost.Dial`): one the address does not answer within its timeout marks the address dead for the rest of the pass, so no connect there takes the kernel's one connect at a time; the connection a dial opened is closed a moment later, sending nothing (see `cnagent.md` CN10; `osclient.md`, DialTcp).
+**dial** — The cn agent's TCP connect, in its own process, to the address of a side or of a clone source before each `nvme connect` over TCP (`NvmeHost.Dial`; another transport is not dialled): one the address does not answer within its timeout marks the address dead for the rest of the pass, so no connect there takes the kernel's one connect at a time; the connection a dial opened is closed a moment later, sending nothing (see `cnagent.md` CN10; `osclient.md`, DialTcp).
 
 **did not answer, unanswered** — The outcome of a probe that told the caller nothing: a command killed at a command timeout, never started, cancelled or refused an OS client slot; a sysfs or configfs read, or a directory listing in the agent's own process, that failed with any error but ENOENT; or a whole-node device-mapper listing whose command never reported, or that printed nothing the agent can read. A whole-node listing that exits non-zero after printing lines that parse is partial and counts as an answer. An unanswered probe is never "absent": it reads as unknown and counts as still present (`Reported`; see `osclient.md`, RunCommand).
 
@@ -164,7 +164,7 @@ The vocabulary of dnv in alphabetical order, one entry per term, with synonyms s
 
 **dm kind** — The role letter plus hex digit in every dnv dm-device name that says which agent role and which device kind it is (`DmKind`, `ParseDmName`): `d` kinds for the dn role, `c` kinds for the cn role. A sweep attributes a device by it, and a name that does not decode exactly is not a dnv name (see `architecture.md`, dm-device kinds).
 
-**dm udev rule** — The udev rule of `deploy/udev/` every node running a dnv agent carries so that the system's own rules never probe, link by content, scan for LVM or register with bcache a dm device whose name carries the dnv prefix; it keeps the device's `/dev/mapper` link, and systemd reads such a device as not ready (see `architecture.md`, Components: invocation reference).
+**dm udev rule** — The udev rule of `deploy/udev/` every node running a dnv agent carries so that the system's own rules never probe, link by content, scan for LVM or register with bcache a dm device whose name carries the dnv prefix; it keeps the device's `/dev/mapper` link, and nothing of dnv waits for its systemd device unit, which a systemd version may read as not ready (see `architecture.md`, Components: invocation reference).
 
 **dm-error, reload target** — The permanent error device every dnv stack reloads a path onto to take it out of service: per thin device on a controller node, where parked ns-devs point (`CnErrorName`), and per cntlr on a side, where a standby's dm-linear points (`DnErrorName`). A reload onto it fails IO instead of replaying it.
 

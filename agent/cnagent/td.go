@@ -657,13 +657,15 @@ func objectAnaGrpId(state *agent.NsState) int {
 // port link. A namespace that left `ns_list` while the subsystem stays is not
 // its business: CN21's L1 removes it, inaccessible first, and only from an
 // enumeration that answered — and nothing does under a subsystem whose NQN
-// carries the dnv prefix but decodes to nothing, which the sweep never
-// attributes (cnagent.md CN16). Each namespace's step leaves its error in
+// decodes as a dnv kind other than a transfer of this cluster, which the
+// sweep never attributes, claimed or not, while one that carries the dnv
+// prefix but decodes to nothing is attributed by the held request that names
+// it (nvmetOwner; cnagent.md CN16). Each namespace's step leaves its error in
 // nsErrs, from which reportNamespaces writes the namespace rows after the
 // build's ANA loop; a subsystem whose own step fails steps none of its
 // namespaces, and they get no row. A step that failed goes to a row, and the
-// converge's verdict and a read's both name it (cntlrRowVerdict; CN16,
-// CN30), so the worker's re-send runs it again (dnv-worker.md RW4).
+// converge's verdict and a read's both name it (cntlrRowVerdict; CN16, CN30),
+// so the worker's re-send runs it again (dnv-worker.md RW4).
 func (s *CnAgentServer) ensureSubsystem(
 	ctx context.Context,
 	st *cntlrState,

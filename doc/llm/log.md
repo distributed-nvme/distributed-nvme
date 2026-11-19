@@ -124,7 +124,10 @@ R8. The following events MUST be logged at **Info** level, with the record
        the ranges asked for, the ranges done) — implemented once inside
        `LimitedOsClient`;
     9. every detached child started (the command, its process id, its
-       output file) — implemented once inside `LimitedOsClient`.
+       output file) — implemented once inside `LimitedOsClient`;
+   10. every TCP dial made in the caller's own process (the address, the
+       timeout, how long it took) — implemented once inside
+       `LimitedOsClient`.
 
 R9. Each logging point emits exactly **one** record per operation, on
     completion, so the record can carry the outcome (exit code, error); a

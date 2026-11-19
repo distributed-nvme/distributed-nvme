@@ -2312,16 +2312,16 @@ func errForcedStartDue(named *legPlan) error {
 // wrapper of this pool (MdDetail.strangerErr) and md's holders listing of it
 // answers with no holder, so no layer above blocks the forced start's stop
 // (forcedStartPass); and the forced start's checks (planForcedStart), run
-// with the read's availability (readAvailability), return a plan. So it
-// names nothing for the refusals that last — a named leg that is no full
-// member or is older than another, a member that is no leg of this pool, a
-// device above that holds the array — and nothing while a member the start
-// keeps is not available, a kept new leg that is still provisioning among
-// them, whose provisioned flip raises the pool's revision. A process that
-// holds the array open shows in no holders listing, and the stop it refuses
-// is named on every read (cnagent.md, Known limits). A read of the holders
-// or of a superblock that did not answer names nothing; the next read reads
-// again.
+// with the read's availability (readAvailability), return a plan. So it names
+// nothing for the refusals that last — a named leg that is no full member,
+// carries a bad-block list under a mark without the force, or is older than
+// another, a member that is no leg of this pool, a device above that holds
+// the array — and nothing while a member the start keeps is not available, a
+// kept new leg that is still provisioning among them, whose provisioned flip
+// raises the pool's revision. A process that holds the array open shows in no
+// holders listing, and the stop it refuses is named on every read
+// (cnagent.md, Known limits). A read of the holders or of a superblock that
+// did not answer names nothing; the next read reads again.
 func (s *CnAgentServer) forcedStartNamed(
 	ctx context.Context,
 	st *cntlrState,
