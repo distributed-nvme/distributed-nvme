@@ -1402,6 +1402,39 @@ func SetRepairAbort(
 	return repId, nil
 }
 
+// RepairWaitReason is why the primary's latest report info says it holds the
+// repair rep back (dnv-worker.md AR17), "" when it does not: nothing while
+// its verdict says started or abort confirmed, which moves the repair (AR11);
+// the verdict's waits text when it carries one (cnagent.md CN12, Why a repair
+// waits); and otherwise, for a CREATED repair, the group's row when it reads
+// other than RES_STATUS_OK, since the primary adds a new leg and confirms an
+// abort only on a running array and sends no verdict for a group whose array
+// does not run. A take-back's refusal is the verdict's refusal, not this.
+// The sp worker logs it as its `repair waits` record, and the gateway's
+// status read lists it as the repair's row (architecture.md, Clusters,
+// GetClusterStatus), so the two readers of one report give one reason.
+func RepairWaitReason(info *pb.CntlrInfo, rep *pb.Repair) string {
+	verdict := info.GetRepIdToRepairInfo()[rep.GetRepId()]
+	if verdict.GetStarted() || verdict.GetAbortConfirmed() {
+		return ""
+	}
+	if waits := verdict.GetWaits(); waits != "" {
+		return waits
+	}
+	if rep.GetRepStage() != pb.RepStage_REP_STAGE_CREATED {
+		return ""
+	}
+	row, ok := info.GetGrpIdToMdRaid()[rep.GetGrpId()]
+	if !ok || row.GetStatus() == pb.ResStatus_RES_STATUS_OK {
+		return ""
+	}
+	reason := "the group's row reads " + row.GetStatus().String()
+	if details := row.GetDetails(); details != "" {
+		reason += ": " + details
+	}
+	return reason
+}
+
 // SetRepairStage moves the CREATED repair repName to stage, STARTED or
 // ABORTED: the sp worker's move from the primary's verdict on the repair.
 // repId is the rep_id the verdict named, and a repair that carries another

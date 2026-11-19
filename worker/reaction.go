@@ -159,7 +159,8 @@ const (
 	// reasonMetaLadderCap is the dm-thin metadata ceiling of architecture.md,
 	// GrowSlice (model's metaSizeCap), reached before model.GrowSlice is even
 	// called because the allocator has to search for the ladder's size first.
-	reasonMetaLadderCap = "meta_ladder_cap"
+	// It is model's string, which the gateway's status read names too.
+	reasonMetaLadderCap = model.ReasonMetaLadderCap
 	// reasonGrpListFull is the group ceiling of architecture.md, GrowSlice: the
 	// slice's list of that kind already holds common.MaxGrpCntPerSlice groups,
 	// which model.GrowSlice refuses. It is model's string, for the reason
@@ -167,10 +168,8 @@ const (
 	reasonGrpListFull = model.ReasonGrpListFull
 	// reasonDataCovered is a slice whose data groups already hold what the
 	// pool's thin devices can use in it (AR6's covered rule): a data grow
-	// would add room no volume can write.
-	reasonDataCovered = "data_covered"
-	// reasonNoDataGroup is a slice with no data group to size a data grow by.
-	reasonNoDataGroup = "no_data_group"
+	// would add room no volume can write. It is model's string.
+	reasonDataCovered = model.ReasonDataCovered
 	// reasonOpFailed is a transient failure — an etcd error, a scan that did
 	// not complete — as opposed to a precondition that did not hold. The
 	// record then carries an "error" attribute as well.
@@ -2337,13 +2336,13 @@ func (w *spWorker) runGrow(
 		// every other reaction, is untouched. A meta grow on a pool at the
 		// cap is not pending and goes on to a ceiling of architecture.md,
 		// GrowSlice (the ladder cap, or the group ceiling on a full list),
-		// which refuses it (growExtCnt).
+		// which refuses it (model.GrowExtCnt).
 		if growPending(slice, isMeta, usage, blockSize) {
 			w.reactionSkipped(ctx, kind, reasonGrowPending, sliceAttr)
 			return false
 		}
 	}
-	if !isMeta && dataCovered(p.state, slice, blockSize) {
+	if !isMeta && model.DataCovered(p.state, slice, blockSize) {
 		// AR6's covered rule: the slice's data groups already hold what the
 		// pool's thin devices can use, so a data grow would add room nothing
 		// can write. It holds until a thin device is created, and the pass
@@ -2355,7 +2354,7 @@ func (w *spWorker) runGrow(
 	// inside its STM, which is what makes this pre-check ask the allocator
 	// for the ext_cnt the transaction will then demand.
 	extentSize := p.cc.GetDnBinConf().GetExtentSize()
-	extCnt, reason := growExtCnt(slice, isMeta, extentSize)
+	extCnt, reason := model.GrowExtCnt(slice, isMeta, extentSize)
 	if reason != "" {
 		// grp_list_full, meta_ladder_cap and no_data_group are all
 		// permanent for this slice and this kind: there is no grow to run,
@@ -2559,82 +2558,6 @@ func growPending(
 	blockSize uint64,
 ) bool {
 	return model.GrowPending(slice, isMeta, poolTotal(usage, isMeta), blockSize)
-}
-
-// dataCovered is AR6's covered rule as the pass's pre-check: a data grow is
-// skipped once the data blocks of all the slice's data groups, the newest
-// included, reach the sum over the pool's thin devices of the blocks each can
-// use in one slice — its size divided by the slice count, rounded up to whole
-// data blocks. The gateway makes every size a multiple of the slice count
-// times the stripe, so the division is exact. A snapshot counts in full: it
-// shares blocks with its origin only until they diverge, so the sum is an
-// upper bound of the need and the rule may let a pool grow further than
-// strictly needed, never less. A thin device the state lists but holds no
-// record of makes the rule hold off, since a need computed without it would
-// undercount. Unlike the pending rule, which model.GrowSlice applies in its
-// STM too, this one binds only the worker's own grow: an operator's GrowSlice
-// is explicit intent (architecture.md, GrowSlice), and reading every thin
-// device inside the transaction would approach EtcdMaxTxnOps at the
-// thin-device ceiling.
-func dataCovered(
-	state *model.SpState,
-	slice *pb.Slice,
-	blockSize uint64,
-) bool {
-	if blockSize == 0 ||
-		len(state.Tds) != len(state.Conf.GetTdNameList()) {
-		return false
-	}
-	sliceCnt := uint64(len(state.Conf.GetSliceIdList()))
-	if sliceCnt == 0 {
-		return false
-	}
-	need := uint64(0)
-	for _, td := range state.Tds {
-		perSlice := td.GetSize() / sliceCnt
-		need += (perSlice + blockSize - 1) / blockSize
-	}
-	held := uint64(0)
-	for _, grp := range slice.GetDataGrpList() {
-		held += grp.GetDataBlocks()
-	}
-	return held >= need
-}
-
-// growExtCnt is the ext_cnt of the group a grow would append (architecture.md,
-// GrowSlice). The worker computes it because the allocator must search for
-// exactly that size BEFORE model.GrowSlice recomputes it inside its own STM: a
-// data grow uses the slice's first data group's ext_cnt — the original
-// allocation unit — and a meta grow the ladder value, which doubles the slice's
-// meta total. A list already at the group ceiling of architecture.md,
-// GrowSlice, has no group to size at all, and is checked first, as
-// model.GrowSlice checks it ahead of its own sizing.
-//
-// The second return value is a `reaction skipped` reason, empty on success.
-func growExtCnt(
-	slice *pb.Slice,
-	isMeta bool,
-	extentSize uint64,
-) (uint64, string) {
-	if model.GrpListFull(slice, isMeta) {
-		return 0, reasonGrpListFull
-	}
-	if !isMeta {
-		grps := slice.GetDataGrpList()
-		if len(grps) == 0 || grps[0].GetExtCnt() == 0 {
-			return 0, reasonNoDataGroup
-		}
-		return grps[0].GetExtCnt(), ""
-	}
-	total := uint64(0)
-	for _, grp := range slice.GetMetaGrpList() {
-		total += grp.GetExtCnt()
-	}
-	extCnt, ok := model.MetaLadderExtCnt(total, extentSize)
-	if !ok {
-		return 0, reasonMetaLadderCap
-	}
-	return extCnt, ""
 }
 
 // ---------------------------------------------------------------------------
@@ -3961,7 +3884,7 @@ func (w *spWorker) logMemberAddRefusals(ctx context.Context, p *spPass) {
 // operator's or the worker's own, at any stage, that the pass did not move
 // and whose group is not a deleting clone's, nor a clone's the snapshot
 // does not hold (repairCloneDeleting), the reason the current primary's
-// latest report gives that it holds the repair back (repairWaitReason) is
+// latest report gives that it holds the repair back (model.RepairWaitReason) is
 // logged `repair waits`, naming the repair, its stage, the text as waits,
 // the primary and its report's revision, once per change of the repair's
 // rep_id, its stage or the text: the memo (reactor.waits) keeps a repair's
@@ -3985,7 +3908,7 @@ func (w *spWorker) logRepairWaits(ctx context.Context, p *spPass) {
 			continue
 		}
 		kept[repName] = true
-		reason := repairWaitReason(p, rep)
+		reason := model.RepairWaitReason(p.info, rep)
 		if reason == "" {
 			continue
 		}
@@ -4009,36 +3932,6 @@ func (w *spWorker) logRepairWaits(ctx context.Context, p *spPass) {
 			delete(memo, repName)
 		}
 	}
-}
-
-// repairWaitReason is why the current primary's latest report says it holds
-// the repair rep back (AR17), "" when it does not: nothing while its verdict
-// says started or abort confirmed, which moves the repair (AR11); the
-// verdict's waits text when it carries one (cnagent.md CN12, Why a repair
-// waits); and otherwise, for a CREATED repair, the group's row when it reads
-// other than RES_STATUS_OK, since the primary adds a new leg and confirms an
-// abort only on a running array and sends no verdict for a group whose
-// array does not run. A take-back's refusal is AR11's record, not this one.
-func repairWaitReason(p *spPass, rep *pb.Repair) string {
-	verdict := p.info.GetRepIdToRepairInfo()[rep.GetRepId()]
-	if verdict.GetStarted() || verdict.GetAbortConfirmed() {
-		return ""
-	}
-	if waits := verdict.GetWaits(); waits != "" {
-		return waits
-	}
-	if rep.GetRepStage() != pb.RepStage_REP_STAGE_CREATED {
-		return ""
-	}
-	row, ok := p.info.GetGrpIdToMdRaid()[rep.GetGrpId()]
-	if !ok || row.GetStatus() == pb.ResStatus_RES_STATUS_OK {
-		return ""
-	}
-	reason := "the group's row reads " + row.GetStatus().String()
-	if details := row.GetDetails(); details != "" {
-		reason += ": " + details
-	}
-	return reason
 }
 
 // markArrayMade is AR15: for an md-raid1 SP, the groups of its slices and

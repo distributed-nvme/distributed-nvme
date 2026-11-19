@@ -239,9 +239,9 @@ func TestCloneFailed(t *testing.T) {
 }
 
 // TestParseThinPoolStatus pins the thin-pool line's four counts, its
-// needs_check flag, its held metadata root and its ro mode word, with and
-// without the device's name and range ahead of the target, and a failed
-// pool's line, which does not parse.
+// needs_check flag, its held metadata root and its two mode words, ro and
+// out_of_data_space, with and without the device's name and range ahead of
+// the target, and a failed pool's line, which does not parse.
 func TestParseThinPoolStatus(t *testing.T) {
 	for _, tc := range []struct {
 		name string
@@ -250,22 +250,22 @@ func TestParseThinPoolStatus(t *testing.T) {
 	}{
 		{"a bare line", "0 1024 thin-pool 3 12/4096 5/62 - rw " +
 			"discard_passdown queue_if_no_space - 1024",
-			&ThinPoolStatus{12, 4096, 5, 62, false, false, false}},
+			&ThinPoolStatus{12, 4096, 5, 62, false, false, false, false}},
 		{"a held root", "0 1024 thin-pool 3 12/4096 5/62 123 rw " +
 			"discard_passdown queue_if_no_space - 1024",
-			&ThinPoolStatus{12, 4096, 5, 62, false, true, false}},
+			&ThinPoolStatus{12, 4096, 5, 62, false, true, false, false}},
 		{"named, with needs_check", "pool: 0 1024 thin-pool 3 12/4096 5/62 " +
 			"- ro discard_passdown queue_if_no_space needs_check 1024",
-			&ThinPoolStatus{12, 4096, 5, 62, true, false, true}},
+			&ThinPoolStatus{12, 4096, 5, 62, true, false, true, false}},
 		{"read-only without needs_check, a held root",
 			"0 1024 thin-pool 3 4096/4096 5/62 77 ro discard_passdown " +
 				"queue_if_no_space - 1024",
-			&ThinPoolStatus{4096, 4096, 5, 62, false, true, true}},
+			&ThinPoolStatus{4096, 4096, 5, 62, false, true, true, false}},
 		{"out of data space", "0 1024 thin-pool 3 12/4096 62/62 - " +
 			"out_of_data_space discard_passdown queue_if_no_space - 1024",
-			&ThinPoolStatus{12, 4096, 62, 62, false, false, false}},
+			&ThinPoolStatus{12, 4096, 62, 62, false, false, false, true}},
 		{"no mode word", "0 1024 thin-pool 3 12/4096 5/62",
-			&ThinPoolStatus{12, 4096, 5, 62, false, false, false}},
+			&ThinPoolStatus{12, 4096, 5, 62, false, false, false, false}},
 		{"a failed pool", "0 1024 thin-pool Fail", nil},
 		{"a status read that failed", "0 1024 thin-pool Error", nil},
 		{"no pool", "0 1024 linear 8:0 0", nil},

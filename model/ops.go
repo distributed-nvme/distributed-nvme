@@ -2269,6 +2269,100 @@ func GrpListFull(slice *pb.Slice, isMeta bool) bool {
 	return len(grps) >= common.MaxGrpCntPerSlice
 }
 
+// The reasons of AR6's refusals that GrowSlice never meets in its STM: the
+// covered rule's (DataCovered) and GrowExtCnt's. The sp worker's pass logs
+// each as the reason of its `reaction skipped` record (dnv-worker.md AR6),
+// and the gateway's status read names each as the reason of a grow it lists
+// as refused (architecture.md, Clusters, GetClusterStatus), so the two
+// readers of one refusal print one string.
+const (
+	// ReasonDataCovered is a slice whose data groups already hold what the
+	// pool's thin devices can use in it (DataCovered): a data grow would add
+	// room no volume can write.
+	ReasonDataCovered = "data_covered"
+	// ReasonMetaLadderCap is the dm-thin metadata ceiling of architecture.md,
+	// GrowSlice (metaSizeCap), which GrowExtCnt meets before GrowSlice is
+	// called because the allocator has to search for the ladder's size first.
+	ReasonMetaLadderCap = "meta_ladder_cap"
+	// ReasonNoDataGroup is a slice with no data group to size a data grow by.
+	ReasonNoDataGroup = "no_data_group"
+)
+
+// DataCovered is AR6's covered rule (dnv-worker.md AR6): a data grow is
+// skipped once the data blocks of all the slice's data groups, the newest
+// included, reach the sum over the pool's thin devices of the blocks each can
+// use in one slice — its size divided by the slice count, rounded up to whole
+// data blocks. The gateway makes every size a multiple of the slice count
+// times the stripe, so the division is exact. A snapshot counts in full: it
+// shares blocks with its origin only until they diverge, so the sum is an
+// upper bound of the need and the rule may let a pool grow further than
+// strictly needed, never less. A thin device the state lists but holds no
+// record of makes the rule hold off, since a need computed without it would
+// undercount. Unlike the pending rule, which GrowSlice applies in its STM
+// too, this one binds only the worker's own grow: an operator's GrowSlice is
+// explicit intent (architecture.md, GrowSlice), and reading every thin device
+// inside the transaction would approach EtcdMaxTxnOps at the thin-device
+// ceiling. The worker's pass applies it, and the gateway's status read
+// applies it to tell a grow that is not needed from a refused one.
+func DataCovered(state *SpState, slice *pb.Slice, blockSize uint64) bool {
+	if blockSize == 0 ||
+		len(state.Tds) != len(state.Conf.GetTdNameList()) {
+		return false
+	}
+	sliceCnt := uint64(len(state.Conf.GetSliceIdList()))
+	if sliceCnt == 0 {
+		return false
+	}
+	need := uint64(0)
+	for _, td := range state.Tds {
+		perSlice := td.GetSize() / sliceCnt
+		need += (perSlice + blockSize - 1) / blockSize
+	}
+	held := uint64(0)
+	for _, grp := range slice.GetDataGrpList() {
+		held += grp.GetDataBlocks()
+	}
+	return held >= need
+}
+
+// GrowExtCnt is the ext_cnt of the group a grow would append (architecture.md,
+// GrowSlice). The worker computes it because the allocator must search for
+// exactly that size BEFORE GrowSlice recomputes it inside its own STM: a data
+// grow uses the slice's first data group's ext_cnt — the original allocation
+// unit — and a meta grow the ladder value, which doubles the slice's meta
+// total. A list already at the group ceiling of architecture.md, GrowSlice,
+// has no group to size at all, and is checked first, as GrowSlice checks it
+// ahead of its own sizing.
+//
+// The second return value is the refusal's reason, ReasonGrpListFull,
+// ReasonNoDataGroup or ReasonMetaLadderCap, empty on success: the reason of
+// the worker's `reaction skipped` record and of the gateway's status row.
+func GrowExtCnt(
+	slice *pb.Slice,
+	isMeta bool,
+	extentSize uint64,
+) (uint64, string) {
+	if GrpListFull(slice, isMeta) {
+		return 0, ReasonGrpListFull
+	}
+	if !isMeta {
+		grps := slice.GetDataGrpList()
+		if len(grps) == 0 || grps[0].GetExtCnt() == 0 {
+			return 0, ReasonNoDataGroup
+		}
+		return grps[0].GetExtCnt(), ""
+	}
+	total := uint64(0)
+	for _, grp := range slice.GetMetaGrpList() {
+		total += grp.GetExtCnt()
+	}
+	extCnt, ok := MetaLadderExtCnt(total, extentSize)
+	if !ok {
+		return 0, ReasonMetaLadderCap
+	}
+	return extCnt, ""
+}
+
 // hasDuplicateAddr reports whether two picks name the same node. Two legs of
 // one group on one DN would defeat the redundancy the group exists for, and
 // one node charged twice in one STM would leave its capacity key wrong.
