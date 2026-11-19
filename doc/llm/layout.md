@@ -45,7 +45,7 @@ Unit tests are colocated `_test.go` files inside each package.
 | `doc/human/` | the human docs (Human docs and LLM docs): `introduction.md`, what dnv is for, its programs, its make-up and its behaviour with diagrams, its requirements, the status of the release and how to get it; `core_glossary.md`, the core words of dnv in plain language; `scope.md`, what dnv promises, the data loss it accepts, what it does not do and every known limit of dnv beyond the test suites and the enforced sizes, with its state; `operations.md`, the procedures an operator follows by hand, each with its symptom, its check, what dnv does alone, the safe steps, the steps that can lose data, when to stop and the test that checked it, starting with the forced-start guide; and the two tutorials, user guides that run the system on one machine with every command complete: dnv alone, with a host connected over nvme-stas, and dnv under a one-node Kubernetes through the CSI driver |
 | `doc/llm/` | the LLM docs (Human docs and LLM docs), the design documents the code follows: `README.md`, the entry point, with what each document owns, the suites and the rules for docs and code comments; `architecture.md` for the system as a whole; one document per component and per shared piece; the repository-level documents (this one and `dependencies.md`); the documents of the on-hardware suites; and `glossary.md`, the project vocabulary |
 | `bin/`, `_out/`, `integtest/bin/` | build outputs, never committed: the binaries of `cmd/` in `bin/`, the release archive, its checksum file and the folder it is made from in `_out/`, and in `integtest/bin/` the built drivers, the etcd download cache the suites and the unit tests share, safe for fetches started at once (`dnv-worker.md` EU7), the gojq fallback a suite installs when the machine running it has no jq, csi-sanity, which the csi suite builds, and the runner's output, one directory for each time it runs |
-| `pb/` | package `pb`: the protobuf schema `pb/schema.proto` and the Go code generated from it, committed (Protobuf generation), beside tests that read the schema's descriptors |
+| `pb/` | package `pb`: the protobuf schema `pb/schema.proto` and the Go code generated from it, committed (Protobuf generation), beside tests that read the schema's descriptors, and under `pb/testdata/` each release's schema layout and the v0.1.0 samples of what it stored, which the freeze and sample tests read (Protobuf generation) |
 | `common/` | the shared leaf package: the constants, the dm, md, NQN and local-store name formats, the name format of a worker's repair with its reserved prefix (`architecture.md`, Common validation), the strict parsers of the dm-name and NQN formats, the metadata-unit formula the gateway and the dn agent share (`architecture.md`, Metadata units), the dm line parser and the dm-clone status parser the gateway, both agents and the two agent drivers share (`architecture.md`, Live-state reporting), logging (`log.md`), the OS client and its fake (`osclient.md`), and the gRPC interceptors, the message-limit options and the keepalive options (`grpc.md`) |
 | `etcdutil/` | the one door to etcd: typed reads, writes, scans and watches and the STM runners over one client, with the protobuf (un)marshaling and the etcd log records inside (`dnv-worker.md`, EU1 to EU7) |
 | `model/` | the etcd data model as Go, shared by the gateway, the worker and dnv-cdc: key formats and their parsers, the `cluster_id` derivation, the typed SP snapshot loader, capacity-key maintenance, the allocator's candidate scans, the mutations the gateway and the worker share, and the worker's sp-drain and clone-drain steps (`dnv-worker.md`, MD1 to MD9) |
@@ -198,6 +198,23 @@ only when `schema.proto` changes, and its output is committed with that
 change. The `fmt` target formats the Go sources with gofmt and the schema
 with clang-format, in the style `.clang-format` pins; run it before committing
 a proto change.
+
+**Release layouts and samples.** `pb/testdata/<tag>/` holds what a release
+wrote, made once by that release's own code in a copy of its tag, by
+throwaway tests that are not committed, and never refreshed: its
+`schema.binpb`, the file descriptor of its schema as its generated code
+embeds it, and, for v0.1.0, samples of what it stored: the etcd records of
+one cluster, the local stores of a disk node and a controller node, that disk
+node's disk header and volume table, beside v0.1.0's CSI volume ids and
+contexts in the `csi` package's tests; `pb/samples_test.go` says how each was
+made. The freeze test of `pb` holds the schema to every release's layout,
+and the sample tests read the samples through today's decoders, key builders,
+pool loader, disk reader and agent startups, so the schema and the readers
+keep the rules of `architecture.md`, Upgrade in lockstep. Once a release is
+tagged, its directory joins `pb/testdata/` with its schema's layout at least.
+Reason: protobuf decodes a renumbered, retyped or removed field with no
+error, so only a comparison with what a release wrote shows the break, and a
+layout regenerated from today's schema would agree with any change.
 
 ## `cmd/` wiring
 

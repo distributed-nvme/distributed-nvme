@@ -7055,10 +7055,19 @@ same (`dnv-worker.md` MD6); and a clone whose `src_nqn` lies in the dnv
 namespace and decodes as no transfer NQN, which an older gateway took, is
 refused by the cn agent's cntlr gate (`cnagent.md` CN8), so every cntlr of
 that pool refuses its requests until `DeleteClone` takes the clone out of
-them (`dnv-worker.md` CLD5). It changes a stored message only by adding
-fields and removing them, never by renumbering a field or an enum value or
-giving a new one the number of a removed one: a stored value would then
-decode silently into the wrong field, or into none. A field it adds reads
+them (`dnv-worker.md` CLD5). It changes a message of the schema only by
+adding fields, enum values and messages and by removing them, never by
+renumbering a field or an enum value, giving a new one the number of a
+removed one, or changing a field's name, type, cardinality, presence or
+oneof: a stored value would then decode silently into the wrong field, or
+into none, and a renamed field changes the JSON dnvctl prints. A removed
+field or enum value keeps its number and its name reserved, and a removed
+message is one no build reads any more. Every message of the schema is held
+so, not only those etcd stores: an agent stores its syncup requests, which
+carry most of the others, and dnvctl prints the rest by their field names.
+The freeze test holds the schema to each release's layout, and the sample
+tests read what v0.1.0 wrote through today's readers (`layout.md`, Protobuf
+generation). A field it adds reads
 zero in what an older build wrote, so it adds only a field whose zero is
 right there: a count it adds starts at zero. A migration whose record
 carries no `meta_units` thus counts as zero units and adds nothing to any

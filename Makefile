@@ -80,7 +80,8 @@ fetch-etcd:
 # entries, the commit time of HEAD as every entry's time, and gzip without a
 # timestamp, so a rebuild on the same commit with the same Go and Go
 # settings, tar and gzip, and no file git ignores under deploy/, gives the
-# same checksum.
+# same checksum. Once a release is tagged, its schema's layout joins
+# pb/testdata/<tag>/ (layout.md, Protobuf generation).
 ifneq ($(origin VERSION),command line)
 VERSION := $(shell git describe --tags --exact-match 2>/dev/null)
 endif
