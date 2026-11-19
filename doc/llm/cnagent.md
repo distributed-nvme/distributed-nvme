@@ -1544,14 +1544,13 @@ dm-clone (CN18).
      `RES_REASON_IDENTITY_UNDECIDED` on its row, the row's status and
      details kept, on the converge whose assembly meets them and on a read
      of the absent array (`absentArrayNamed`): the agent cannot decide which
-     identity is current, and no control-plane call reads the reason, so a
-     repair that replaces such a leg rests on the operator's judgement alone
-     (Known limits). The operator ends it with a forced start, which names
-     the leg to start from, or with a repair whose bad leg is the leg of the
-     identity not wanted, which moves that leg to the last set and keeps its
-     data at the finish, once that leg carries a health epoch, since
-     `CreateRepair` refuses a bad leg with none (`architecture.md`,
-     Repairs). Reason: mdadm refuses an assembly handed members of two
+     identity is current, so a repair that replaces such a leg rests on the
+     operator's judgement alone, which `CreateRepair` asks for with its
+     `force_undecided` (`architecture.md`, Repairs, A leg of another
+     identity; Known limits). The operator ends it with a forced start,
+     which names the leg to start from, or with a repair whose bad leg is
+     the leg of the identity not wanted, which moves that leg to the last
+     set and keeps its data at the finish. Reason: mdadm refuses an assembly handed members of two
      identities, in any order (`cnagent_integtest.md`, Lab facts), as a
      forced start leaves them when it starts the array from one leg under a
      new identity while the repair's bad leg keeps the old one, or a
@@ -1969,8 +1968,10 @@ dm-clone (CN18).
   the row's status and details kept, the probe's (`markLegRows`), on a
   converge whose reconciliation then fails too, or whose read of the array
   after its member changes does not answer: the running array tells which
-  identity is current, and the reason only tells the operator, in the
-  primary's report, why the leg stays out: no control-plane call reads it. A
+  identity is current, and the reason tells the operator, in the
+  primary's report, why the leg stays out, and lets `CreateRepair` take
+  the leg as a repair's bad leg with no health epoch (`architecture.md`,
+  Repairs, A leg of another identity); no health rule reads it. A
   row that does not read `OK` carries no reason, since a read makes the
   check only for a leg whose row reads `OK` and that serves
   (`putBackNames`), and a converge that a failed command or superblock read
@@ -1979,11 +1980,12 @@ dm-clone (CN18).
   rule moves, and the read's verdict does not name it (CN30), so no syncup
   comes for it on every round. It stays out while the array runs: the
   gateway refuses a forced-start mark while the primary reads the array
-  running, and `CreateRepair` refuses a bad leg with no health epoch, which
-  a leg that serves and passes its probe never gets (`architecture.md`,
-  Repairs). Once the array is down with two identities, as after a failover,
-  the operator's forced start from the leg wanted takes the group back
-  (Known limits). Reason: a member of another identity is of an older
+  running; an operator's repair whose bad leg is that leg replaces it, which
+  `CreateRepair` takes by the row's reason though the leg has no health
+  epoch (`architecture.md`, Repairs, A leg of another identity). Once the
+  array is down with two identities, as after a failover, the operator's
+  forced start from the leg wanted, or a repair of the leg not wanted, takes
+  the group back (Known limits). Reason: a member of another identity is of an older
   history, as a forced start from another leg leaves the open repair's bad
   leg, which the move of the repair to ABORTED then makes a member like any
   other; it can hold data the array lacks, and md's copy would overwrite it
@@ -6389,12 +6391,12 @@ stores instead is CN23's.
   `RES_REASON_IDENTITY_UNDECIDED` on both channels, since the agent cannot
   tell which identity is current, until the operator acts: a forced start
   from the leg wanted, or a repair whose bad leg is the leg of the identity
-  not wanted, which `CreateRepair` refuses while that leg has no health
-  epoch, as a leg that serves and passes its probe does not. Nothing holds
-  such a repair back: `CreateRepair` takes it without the force once the leg
-  carries a health epoch, and once the wrong leg is repaired away, the array
-  assembles from the other, hosts read its older data and write onto it, and
-  going back loses those writes (the limit's state is `scope.md`'s).
+  not wanted, which `CreateRepair` takes only with `force_undecided`,
+  whatever the leg's health epoch (`architecture.md`, Repairs, A leg of
+  another identity). Once the wrong leg is repaired away under that flag,
+  the array assembles from the other, hosts read its older data and write
+  onto it, and going back loses those writes (`operations.md`, A leg of
+  another identity that the primary does not add).
 * An operator's own empty subsystem on a controller node — one with no
   namespace device, no allowed host and no port link, that no held request
   names — is removed by the node-level sweep once it is older than

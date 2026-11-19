@@ -440,8 +440,9 @@ func runArgv(t *testing.T, name string, argv ...string) proto.Message {
 }
 
 // TestCreateRepairRequest pins the request create-repair builds: the bad leg
-// list as typed, the retired leg id, the selector, and a token message that
-// is present, a zero one when --rev is not given (GW6's always-stale probe).
+// list as typed, the retired leg id, the selector, the two force flags each
+// sent only when typed, and a token message that is present, a zero one when
+// --rev is not given (GW6's always-stale probe).
 func TestCreateRepairRequest(t *testing.T) {
 	req := runArgv(t, "create-repair",
 		"--sp", "sp0", "--rev", "7", "--name", "r0", "--grp", "0x11",
@@ -464,6 +465,14 @@ func TestCreateRepairRequest(t *testing.T) {
 	if bare.SpRev == nil || bare.GetSpRev().GetRevision() != 0 {
 		t.Errorf("no --rev sent sp_rev %v, want a present zero token",
 			bare.SpRev)
+	}
+	if bare.GetForce() || bare.GetForceUndecided() {
+		t.Errorf("a create with neither flag sent %v", bare)
+	}
+	forced := runArgv(t, "create-repair", "--sp", "sp0", "--name", "r0",
+		"--force", "--force-undecided").(*pb.CreateRepairRequest)
+	if !forced.GetForce() || !forced.GetForceUndecided() {
+		t.Errorf("--force --force-undecided sent %v, want both set", forced)
 	}
 }
 

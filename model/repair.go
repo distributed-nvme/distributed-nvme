@@ -400,6 +400,16 @@ type RepairNewLeg struct {
 	// no record holds (dnv-worker.md AR8): the op then takes a bad leg with
 	// no health epoch, under the worker's reserved name only.
 	BadBlocks bool
+	// IdentityRefused says that the primary's latest report marks the bad
+	// leg's row with an identity reason, which no record holds either: a
+	// leg the running array does not take back
+	// (RES_REASON_OTHER_IDENTITY), or one of an assembly's two identities
+	// the operator names the stale copy (RES_REASON_IDENTITY_UNDECIDED with
+	// force_undecided; architecture.md, Repairs). The op then takes a bad
+	// leg with no health epoch, under an operator's name only, and records
+	// keep_bad_legs, so the finish retires that leg with keep set: it can
+	// hold data the array lacks.
+	IdentityRefused bool
 }
 
 // CreateRepair creates the repair repName of the group grpId, which parent
@@ -418,7 +428,11 @@ type RepairNewLeg struct {
 // must hold no repair (ReasonGrpHasRepair). The bad leg must be in the
 // group's leg_list, with exactly one side — a second one is a migration's
 // destination, and a migration holds its leg — and an err_epoch set: a
-// healthy leg is moved with a migration, not repaired.
+// healthy leg is moved with a migration, not repaired. Two causes the
+// primary's report names and no record holds stand in for the epoch:
+// md's bad-block ranges on the member, under the worker's reserved name
+// (RepairNewLeg.BadBlocks), and an identity reason on the leg's row, under
+// an operator's (RepairNewLeg.IdentityRefused).
 //
 // The new leg comes from newLeg. A retired leg of the group is taken as it
 // is, and only under an operator's name: the worker's repair always takes a
@@ -459,7 +473,8 @@ type RepairNewLeg struct {
 // free leg_idx of the group; its side is unprovisioned until the sp worker's
 // provisioned flip.
 //
-// It writes the Repair, CREATED with its flag clear and newLeg's force, the
+// It writes the Repair, CREATED with its flag clear, newLeg's force and,
+// for a bad leg taken for an identity reason, keep_bad_legs, the
 // parent with the group's rep_name set, the SpConf with the name listed and next_id moved,
 // the disk node's bookkeeping for a fresh leg, and bumps SpRev.
 func CreateRepair(
@@ -552,7 +567,8 @@ func createRepairIn(
 		if len(bad.GetSideList()) != 1 {
 			return fail(opCreateRepair, "bad leg has no single side")
 		}
-		if bad.GetErrEpoch() == 0 && !(reserved && newLeg.BadBlocks) {
+		if bad.GetErrEpoch() == 0 && !(reserved && newLeg.BadBlocks) &&
+			!(!reserved && newLeg.IdentityRefused) {
 			return fail(opCreateRepair,
 				"bad leg is healthy: use a migration")
 		}
@@ -563,6 +579,10 @@ func createRepairIn(
 			SliceId:      parent.SliceId,
 			CloneName:    parent.CloneName,
 			Force:        newLeg.Force,
+			// A leg taken for an identity reason can hold data the array
+			// lacks, the newer copy of two identities included, so the
+			// finish retires it with keep, as after a forced start.
+			KeepBadLegs: !reserved && newLeg.IdentityRefused,
 		}
 		if newLeg.RetiredLegId != 0 {
 			if reserved {
@@ -954,8 +974,9 @@ type FinishRepairResult struct {
 // side, as it is, keeps its pointer and its extents on its disk node, with
 // the group's id, its leg_idx, the parent, now as its retired_epoch, and
 // keep when the repair carries keep_bad_legs, which a forced start of the
-// group sets (ForceStartGroup); the bad leg's own err_epoch goes with the
-// leg. The Repair key and its list
+// group sets (ForceStartGroup), as CreateRepair does for an operator's
+// repair whose bad leg it took for an identity reason (createRepairIn); the
+// bad leg's own err_epoch goes with the leg. The Repair key and its list
 // entry go, the group's rep_name is cleared, the retired leg joins the
 // group's and the pool's lists, and SpRev is bumped. A forced-start mark of
 // the group that names the bad leg goes too, since the finish retires the

@@ -331,7 +331,7 @@ var leafFlags = map[string][]string{
 	"migr get":    {"name"},
 	// repair
 	"repair create": {"name", "grp", "bad-legs", "retired-leg",
-		"dn-black", "dn-white", "force"},
+		"dn-black", "dn-white", "force", "force-undecided"},
 	"repair finish": {"name"},
 	"repair cancel": {"name"},
 	"repair abort":  {"name"},

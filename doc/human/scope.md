@@ -902,23 +902,6 @@ Measured times are in [the introduction](introduction.md#status-and-limits-of-01
   operator's forced start from the new leg waits too, for the leg of the
   list that is not the repair's bad leg. State: procedure written, one line in
   [the forced-start guide](operations.md#the-forced-start-guide). Not seen in the lab.
-- **After a forced start, a leg of the old identity can keep the group
-  down.** A forced start from another leg leaves the repair's bad leg with
-  the array's old identity. The primary does not add that leg back, since
-  it may hold data the array lacks. After the repair is cancelled, the next
-  assembly, as after a failover or a restart, finds legs of two identities
-  and leaves the group down, its row in error. A repair that would keep
-  that leg's data is refused while the leg reads healthy, which it does,
-  and a forced start from the leg wanted wipes it. While the array runs,
-  the primary's report names that leg on its row as a leg of another
-  identity. Once the group is down with two identities, the report names
-  every leg of either identity as one dnv cannot decide on, since only the
-  operator can tell which identity is current. State: fix decided, a
-  repair may take as its bad leg a leg the report names while the array
-  runs, and must ask for the force flag for a leg named undecided, since a
-  wrong choice serves older data and loses the writes made since; until
-  then [the forced-start guide](operations.md#the-forced-start-guide) says
-  to stop and ask for help. Not seen in the lab.
 - **A primary that keeps a leaving member is failed over, and the new
   primary leaves that member out.** The primary never fails a member that
   is leaving the group while no member that stays is in sync on a working
@@ -1184,7 +1167,7 @@ steps; the section "Steps known today" below gives the longer ones.
 | Move a leg to another disk node | `dnvctl migr create`, `migr finish`, `migr cancel`; the worker reads and hands over the leg's list itself | none; the introduction explains the flow | procedure to write: the whole flow |
 | Repair a leg by hand | `dnvctl repair create`, `repair finish`, `repair cancel`, `repair abort`; the worker repairs by itself | none | procedure to write |
 | Force-start a group | `dnvctl group inspect` shows what the primary reads from each member, and with `--leg` says what a start from that leg would do or why it would refuse; `dnvctl group force-start`, `dnvctl group set-operator-in-charge` | [the forced-start guide](operations.md#the-forced-start-guide) | none |
-| Delete or keep a retired leg | `dnvctl retired-leg list`, `dnvctl retired-leg delete`, `dnvctl retired-leg keep`; a forced start keeps the group's retired legs by itself | [the forced-start guide](operations.md#the-forced-start-guide), "Keeping the old copies", for a forced start | procedure to write: when to keep a leg apart from a forced start |
+| Delete or keep a retired leg | `dnvctl retired-leg list`, `dnvctl retired-leg delete`, `dnvctl retired-leg keep`; a forced start keeps the group's retired legs by itself, and an operator's repair of a leg the primary keeps out for another identity keeps that leg once the repair finishes | [the forced-start guide](operations.md#the-forced-start-guide), "Keeping the old copies", for a forced start, and [a leg of another identity that the primary does not add](operations.md#a-leg-of-another-identity-that-the-primary-does-not-add) for that repair | procedure to write: when to keep a leg apart from these two cases |
 | Replace a cntlr by hand | `dnvctl cntlr set-enabled`, `dnvctl cntlr delete`, `dnvctl cntlr create` | none | procedure to write |
 | Change a pool's cntlid slots, the ranges of NVMe controller ids its exports use | `dnvctl sp set-cntlid-slots` | none | procedure to write, one line |
 | Change a pool's thresholds | none | — | not yet |
@@ -1611,8 +1594,9 @@ design:
   refused with the reason. The default block is 1 MiB. A pool made before
   this bound keeps its block, since a pool's layout never changes: the
   gateway refuses a migration in it, as it refuses a clone into it. A
-  repair replaces only a leg that failed, so a leg of such a pool that
-  still works cannot be moved where it is, not to leave a slow disk and
+  repair replaces only a leg that failed, or one the primary keeps out
+  for another identity, so a leg of such a pool that still works cannot
+  be moved where it is, not to leave a slow disk and
   not to empty a disk node. The way out is to move the pool's volumes to
   a new pool by a transfer and a clone, which the old block does not
   stop. A cluster made before the bound with a block above 4 MiB refuses

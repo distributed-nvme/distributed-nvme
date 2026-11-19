@@ -46,7 +46,11 @@ func registerRepair(root *cobra.Command) {
 // the --dn-black / --dn-white selector steers (nil when both are empty).
 // --force lets the primary copy over a leg of another md array: the retired
 // leg taken back, and the bad leg once the repair is aborted (cnagent.md
-// CN12).
+// CN12). --force-undecided is another flag: it lets the gateway take a bad
+// leg whose row the primary's report marks as one of two identities the
+// assembly cannot decide between, naming it the stale copy; the repair keeps
+// nothing of it, so an abort leaves the leg as it is (architecture.md,
+// Repairs).
 func repairCreateCmd() *cobra.Command {
 	cmd := leaf(
 		"create",
@@ -69,15 +73,16 @@ func repairCreateCmd() *cobra.Command {
 				return nil, err
 			}
 			req := &pb.CreateRepairRequest{
-				ClusterName:  clusterOf(),
-				SpName:       spOf(),
-				SpRev:        rev,
-				RepName:      strOf("name"),
-				GrpId:        grpId,
-				BadLegIdList: badLegIds,
-				RetiredLegId: retiredLegId,
-				DnSelector:   selectorOf("dn"),
-				Force:        boolOf("force"),
+				ClusterName:    clusterOf(),
+				SpName:         spOf(),
+				SpRev:          rev,
+				RepName:        strOf("name"),
+				GrpId:          grpId,
+				BadLegIdList:   badLegIds,
+				RetiredLegId:   retiredLegId,
+				DnSelector:     selectorOf("dn"),
+				Force:          boolOf("force"),
+				ForceUndecided: boolOf("force-undecided"),
 			}
 			return func(
 				ctx context.Context, client pb.GatewayClient,
@@ -99,6 +104,9 @@ func repairCreateCmd() *cobra.Command {
 	flags.Bool("force", false,
 		"copy over a leg of another md array, the retired leg taken back "+
 			"and the bad leg after an abort, losing what it holds")
+	flags.Bool("force-undecided", false,
+		"take a bad leg of two md identities the primary cannot decide "+
+			"between, naming it the stale copy; an abort keeps it")
 	return cmd
 }
 

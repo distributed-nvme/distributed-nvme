@@ -450,37 +450,77 @@ Tested: no.
 
 ### A leg of another identity that the primary does not add
 
+Words: a leg's **identity** is the array identity in its md superblock. A
+forced start gives the array a new one, so a leg from before it keeps the
+old one.
+
 Symptom: after a forced start from one leg, a leg that kept the old
 identity, often a repair's bad leg, is never added back. After the next
 failover or restart the group can stay down, its row naming two
 identities.
 
 Confirm: `dnvctl cntlr inspect --id <primary's cntlr id>` shows the
-refusal in the primary's report for the group, and the leg's row there
-carries the reason `RES_REASON_OTHER_IDENTITY` while the array runs and
-the row reads `RES_STATUS_OK`; once
-the group is down with two identities, each leg of either identity carries
-`RES_REASON_IDENTITY_UNDECIDED`, since dnv cannot tell which identity is
-the current one. `dnvctl group inspect --grp <group id>` shows the two
-identities.
+refusal in the primary's report for the group. While the array runs, the
+leg's row reads `RES_STATUS_OK` with the reason
+`RES_REASON_OTHER_IDENTITY`. Once the group is down with two identities,
+each leg of either identity carries `RES_REASON_IDENTITY_UNDECIDED`, since
+dnv cannot tell which identity is the current one.
+`dnvctl group inspect --grp <group id>` shows each leg's identity.
 
 What dnv does alone: the primary leaves that leg out, since it may hold
-data the array lacks, and names it by that reason. A repair that replaces
-such a leg, with no health epoch on it, is decided and not yet built:
-while the array runs, the running array tells which leg is the old one;
-once the group is down, that repair will ask for the force flag, since a
-wrong choice serves older data and loses the writes made since.
+data the array lacks, and names it by that reason. The worker does not
+replace it: the leg has no health epoch, and its leg repair waits for one.
 
-Safe steps: none is tested. While the array runs, the gateway refuses a
-mark, and a repair whose bad leg is that leg is refused while the leg
-reads healthy, which it does. Stop and ask for help.
+Safe steps while the array runs, the leg's reason `RES_REASON_OTHER_IDENTITY`:
 
-Steps that can lose data: a forced start from the leg you want wipes the
-other leg and what only it holds.
+1. Replace the leg with a repair, with no force flag:
+   `dnvctl repair create --name <name> --grp <group id> --bad-legs <leg id>`.
+   The gateway reads the primary's report and takes the leg as the bad leg
+   though it has no health epoch. The running array tells which identity
+   is current, so the choice is dnv's.
+2. Follow the repair as usual: the primary adds the new leg and md copies
+   onto it; when `dnvctl repair get --name <name>` shows the repair
+   started, run `dnvctl repair finish --name <name>`. The finish keeps the
+   old leg as a retired leg, with its data and with keep set, so the
+   worker never deletes it: it stays until you clear keep with
+   `dnvctl retired-leg keep --leg <leg id> --clear`, after which the worker
+   deletes it once it is old enough, or delete it with
+   `dnvctl retired-leg delete`.
 
-When to stop: always, for now.
+Safe steps once the group is down, each leg's reason
+`RES_REASON_IDENTITY_UNDECIDED`:
 
-Tested: no. The cn agent suite's stage `takeback` checks a related
+1. Decide which leg is the stale copy. A leg of another identity is from
+   before an earlier forced start (rule 5 of the forced-start guide). The
+   primary's log record `forced start` of the last start names the leg it
+   started the array from. The legs of that leg's identity hold the data
+   the array served since; a leg of the other identity is the stale copy,
+   unless the people who use the volumes say they need its data. If you
+   cannot tell, stop.
+2. Repair the stale leg, naming it with the flag the gateway asks for:
+   `dnvctl repair create --name <name> --grp <group id> --bad-legs <stale leg id> --force-undecided`.
+   Without `--force-undecided` the gateway refuses that leg. The primary
+   then assembles the array from the other identity's legs, and the repair
+   adds a new leg in place of the stale one.
+3. Follow the repair as in step 2 above. An abort of this repair leaves
+   the stale leg as it is: the repair does not keep the flag.
+
+Steps that can lose data: naming the wrong leg with `--force-undecided`
+serves the older copy and loses every write made since on the other leg.
+`--force` is another flag: with it, an abort of the repair copies over the
+bad leg. A forced start from the leg you want wipes the other legs and
+what only they hold.
+
+When to stop: when the log does not tell which leg the last forced start
+started from and the people who use the volumes cannot say which data they
+need, or when a repair stays created and `dnvctl repair get` shows a wait
+you do not understand.
+
+Tested: the gateway's suite on fake agents, whose smoke case creates the
+repair of a leg of another identity with no flag, and of an undecided one
+with `--force-undecided`; unit tests of the gateway and of the cn agent,
+which adds the new leg in place of a bad leg of another identity. Not run
+on real agents. The cn agent suite's stage `takeback` checks a related
 refusal: a repair that takes back a retired leg of another identity.
 
 ### A group whose every leg was wiped
@@ -726,7 +766,9 @@ What dnv does alone: nothing for a leg that works. In a RAID1 pool, a leg
 that fails is still replaced by leg repair, which copies the data through
 md on the controller node and not through a migration, so the block does
 not stop it. `dnvctl repair create` likewise replaces only a leg that
-failed. A pool without RAID has no repair.
+failed, or one the primary keeps out for another identity (see "A leg of
+another identity that the primary does not add"), and refuses a leg that
+works, naming the way out below. A pool without RAID has no repair.
 
 Safe steps, to move every volume of the pool to a new pool:
 

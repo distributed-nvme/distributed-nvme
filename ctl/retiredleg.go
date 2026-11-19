@@ -2,8 +2,9 @@
 // RPCs of retired legs (architecture.md, Retired legs). A retired leg is the
 // leg a finished repair replaced; its side keeps its data on its disk node
 // until it is deleted here, by the sp worker's retire timer, or taken back by
-// `repair create --retired-leg`, and its keep flag, set here or by a forced
-// start of its group, keeps it from the timer.
+// `repair create --retired-leg`, and its keep flag, set here, by a forced
+// start of its group, or by the finish of an operator's repair whose bad leg
+// `repair create` took for an identity reason, keeps it from the timer.
 //
 // The identity flag is `--leg`, the retired leg's own leg id, read through
 // hexOf like every id (CT8).

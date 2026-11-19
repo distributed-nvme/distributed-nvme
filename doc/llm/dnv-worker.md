@@ -858,7 +858,9 @@ list; the flip, which reads the repair's key alone, and
   `err_epoch` set ("bad leg is healthy: use a migration"), save for a
   reserved name whose create says it repairs the leg for md's bad-block
   ranges, which the primary's reading names and no record holds (AR8, A leg
-  with bad-block ranges). From a retired
+  with bad-block ranges), and for an operator's name whose create says the
+  primary's report marks the leg with an identity reason, which no record
+  holds either (`architecture.md`, Repairs, A leg of another identity). From a retired
   leg it requires a name without the reserved prefix, since the worker's
   repair always takes a fresh leg; the leg listed in the pool's and the
   group's lists and of this group, with a side whose `err_epoch` is clear,
@@ -885,8 +887,11 @@ list; the flip, which reads the repair's key alone, and
   that order —, gives the `Leg` the next unused `leg_idx` of the group and
   a `Side` (`provisioned` false, `cntlid_slot` the first of
   `cntlid_slot_list`), and does the DN bookkeeping plus `DnRev`. Either way
-  it writes the `Repair`, `REP_STAGE_CREATED` with its flag clear and its
-  parent's field set; the parent with the group's `rep_name`; the `SpConf`
+  it writes the `Repair`, `REP_STAGE_CREATED` with its flag clear, its
+  parent's field set and, for an operator's name whose bad leg the create
+  takes for an identity reason, `keep_bad_legs` set, so the finish retires
+  that leg with `keep` (`architecture.md`, Retired legs); the parent with
+  the group's `rep_name`; the `SpConf`
   with the name listed; a `SpRev` bump; and returns the `rep_id` and the
   new leg's id. No metadata units, no CN.
 * `FinishRepair` takes the name, `now` and the cluster conf, and requires

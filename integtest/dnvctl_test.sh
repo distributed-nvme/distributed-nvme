@@ -1488,6 +1488,23 @@ EOF
 	assert_count_delta UpdateRetiredLegKeep 1 "the clear is one RPC"
 	assert_req UpdateRetiredLegKeep \
 		"{\"cluster_name\":\"$CLUSTER\",\"sp_name\":\"$SP\",\"leg_id\":\"3\"}"
+
+	# -------------------------------------------------------------------
+	stage 11 "repair create --force-undecided: the flag alone, never force"
+	# -------------------------------------------------------------------
+	# The sweep's step 57 sends neither force flag. --force-undecided names
+	# the bad leg the stale copy of two md identities (`repair` —
+	# `ctl/repair.go`): it reaches the wire as force_undecided true, and
+	# force, which the repair keeps and which makes an abort copy over the
+	# bad leg, stays unsent.
+	ctl_ok repair create --name r0 --grp 1 --bad-legs 2 --force-undecided \
+		--rev 7
+	assert_count_delta CreateRepair 1 "the create is one RPC"
+	assert_req CreateRepair \
+		"{\"cluster_name\":\"$CLUSTER\",\"sp_name\":\"$SP\",
+		  \"sp_rev\":{\"revision\":\"7\"},\"rep_name\":\"r0\",
+		  \"grp_id\":\"1\",\"bad_leg_id_list\":[\"2\"],
+		  \"force_undecided\":true}"
 }
 
 # ---------------------------------------------------------------------------

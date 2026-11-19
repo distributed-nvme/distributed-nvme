@@ -23,7 +23,10 @@ import (
 // setupCreateRepair drives CreateRepair. --bad-legs is the bad_leg_id_list,
 // sent as typed so the suite can send a count other than one; --retired-leg
 // takes a retired leg of the group back as the new leg, and when it is zero
-// the selector steers the fresh new leg's DN.
+// the selector steers the fresh new leg's DN. --force and --force-undecided
+// set the request's two flags (architecture.md, Repairs): the smoke case
+// sends --force-undecided to take a leg the primary's report marks of an
+// undecided identity.
 func setupCreateRepair(fs *flag.FlagSet) job {
 	spName := fs.String("sp", "", "sp_name")
 	var rev hexUint
@@ -36,20 +39,26 @@ func setupCreateRepair(fs *flag.FlagSet) job {
 	fs.Var(&retiredLeg, "retired-leg",
 		"retired_leg_id taken back as the new leg (0 = a fresh leg)")
 	dnSelector := dnSelectorFlags(fs)
+	force := fs.Bool("force", false,
+		"force: copy over a leg of another md identity")
+	forceUndecided := fs.Bool("force-undecided", false,
+		"force_undecided: take a bad leg of an undecided identity")
 	return func(
 		ctx context.Context,
 		client pb.GatewayClient,
 		g *globals,
 	) (any, error) {
 		return client.CreateRepair(ctx, &pb.CreateRepairRequest{
-			ClusterName:  g.cluster,
-			SpName:       *spName,
-			SpRev:        &pb.SpRev{Revision: uint64(rev)},
-			RepName:      *repName,
-			GrpId:        uint64(grp),
-			BadLegIdList: badLegs,
-			RetiredLegId: uint64(retiredLeg),
-			DnSelector:   dnSelector(),
+			ClusterName:    g.cluster,
+			SpName:         *spName,
+			SpRev:          &pb.SpRev{Revision: uint64(rev)},
+			RepName:        *repName,
+			GrpId:          uint64(grp),
+			BadLegIdList:   badLegs,
+			RetiredLegId:   uint64(retiredLeg),
+			DnSelector:     dnSelector(),
+			Force:          *force,
+			ForceUndecided: *forceUndecided,
 		})
 	}
 }

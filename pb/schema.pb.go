@@ -281,8 +281,9 @@ const (
 	// both channels, on the leg's row while that row reads RES_STATUS_OK,
 	// its status and details kept; the running array tells which identity
 	// is current, and the reason tells the operator why the leg stays out.
-	// No health rule and no control-plane call reads it, and the verdict
-	// does not name the row.
+	// No health rule reads it, and the verdict does not name the row;
+	// CreateRepair reads it to take the leg as a repair's bad leg though it
+	// has no health epoch (architecture.md, Repairs).
 	ResReason_RES_REASON_OTHER_IDENTITY ResReason = 10
 	// A leg of the group whose md superblock carries one of two identities
 	// the legs of its first tier carry while no array of the group runs, so
@@ -290,9 +291,10 @@ const (
 	// current (cnagent.md CN12). The cn agent sets it on the row of every
 	// such leg, on a converge whose assembly meets the two and on a read of
 	// the absent array, the row's status and details kept; the group's row
-	// names both identities. No health rule and no control-plane call reads
-	// it, so a repair that replaces such a leg rests on the operator's
-	// judgement alone, and the verdict does not name the row.
+	// names both identities. No health rule reads it, and the verdict does
+	// not name the row; CreateRepair reads it and takes the leg as a
+	// repair's bad leg only with force_undecided, the operator's judgement
+	// of which copy is stale (architecture.md, Repairs).
 	ResReason_RES_REASON_IDENTITY_UNDECIDED ResReason = 11
 )
 
@@ -5115,11 +5117,13 @@ type Repair struct {
 	// which md copies over (cnagent.md CN12). Never set on a worker's
 	// repair. Appended, never renumbered.
 	Force bool `protobuf:"varint,10,opt,name=force,proto3" json:"force,omitempty"`
-	// Set by ForceStartGroup on the group's open repair: FinishRepair makes
-	// each bad leg a retired leg with keep set, since after a forced start
-	// from another leg the leg it replaces can hold newer data than the
-	// array (architecture.md, Repair, Forced start). Appended, never
-	// renumbered.
+	// Set by ForceStartGroup on the group's open repair, and by CreateRepair
+	// on an operator's repair whose bad leg it takes for an identity reason:
+	// FinishRepair makes each bad leg a retired leg with keep set, since
+	// after a forced start from another leg the leg it replaces can hold
+	// newer data than the array, and a leg of another identity can hold
+	// data the array lacks (architecture.md, Repair, Forced start; Repairs,
+	// A leg of another identity). Appended, never renumbered.
 	KeepBadLegs bool `protobuf:"varint,11,opt,name=keep_bad_legs,json=keepBadLegs,proto3" json:"keep_bad_legs,omitempty"`
 	// The keep flag of each new leg taken from a retired leg that carried
 	// it, keyed by its leg id, true alone: CancelRepair gives such a leg
@@ -12413,9 +12417,15 @@ type CreateRepairRequest struct {
 	// Let the primary copy over a leg of another md identity: the new leg
 	// taken from retired_leg_id, and the bad legs once the repair is
 	// aborted (Repair.force). Appended, never renumbered.
-	Force         bool `protobuf:"varint,9,opt,name=force,proto3" json:"force,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
+	Force bool `protobuf:"varint,9,opt,name=force,proto3" json:"force,omitempty"`
+	// Take a bad leg whose row the primary's latest report marks
+	// RES_REASON_IDENTITY_UNDECIDED: the operator names it the stale copy
+	// of the two identities. The Repair keeps nothing of it, so an abort
+	// leaves the leg as it is (architecture.md, Repairs). Appended, never
+	// renumbered.
+	ForceUndecided bool `protobuf:"varint,10,opt,name=force_undecided,json=forceUndecided,proto3" json:"force_undecided,omitempty"`
+	unknownFields  protoimpl.UnknownFields
+	sizeCache      protoimpl.SizeCache
 }
 
 func (x *CreateRepairRequest) Reset() {
@@ -12507,6 +12517,13 @@ func (x *CreateRepairRequest) GetDnSelector() *NodeSelector {
 func (x *CreateRepairRequest) GetForce() bool {
 	if x != nil {
 		return x.Force
+	}
+	return false
+}
+
+func (x *CreateRepairRequest) GetForceUndecided() bool {
+	if x != nil {
+		return x.ForceUndecided
 	}
 	return false
 }
@@ -19397,7 +19414,7 @@ const file_pb_schema_proto_rawDesc = "" +
 	"\tmigr_name\x18\x03 \x01(\tR\bmigrName\"3\n" +
 	"\x11GetMigrationReply\x12\x1e\n" +
 	"\x04migr\x18\x01 \x01(\v2\n" +
-	".MigrationR\x04migr\"\xb5\x02\n" +
+	".MigrationR\x04migr\"\xde\x02\n" +
 	"\x13CreateRepairRequest\x12!\n" +
 	"\fcluster_name\x18\x01 \x01(\tR\vclusterName\x12\x17\n" +
 	"\asp_name\x18\x02 \x01(\tR\x06spName\x12\x1d\n" +
@@ -19408,7 +19425,9 @@ const file_pb_schema_proto_rawDesc = "" +
 	"\x0eretired_leg_id\x18\a \x01(\x04R\fretiredLegId\x12.\n" +
 	"\vdn_selector\x18\b \x01(\v2\r.NodeSelectorR\n" +
 	"dnSelector\x12\x14\n" +
-	"\x05force\x18\t \x01(\bR\x05force\"H\n" +
+	"\x05force\x18\t \x01(\bR\x05force\x12'\n" +
+	"\x0fforce_undecided\x18\n" +
+	" \x01(\bR\x0eforceUndecided\"H\n" +
 	"\x11CreateRepairReply\x12\x15\n" +
 	"\x06rep_id\x18\x01 \x01(\x04R\x05repId\x12\x1c\n" +
 	"\n" +

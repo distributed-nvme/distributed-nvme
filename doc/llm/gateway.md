@@ -1490,8 +1490,17 @@ pool's repairs, retired legs and groups still answer.
   name through `model.CreateRepairLevelGate` (`architecture.md`, Repairs);
   the group through `locateGrp`, a deleting clone through
   `refuseDeletingClone`, a bad leg with two sides in `errMigrRunning`'s
-  words, a retired leg through `retired_leg_id_list` (a listed key missing
-  is `ABORTED`), and the retired-leg bound in `errRetiredListFull`'s words.
+  words (`repairBadLegChecks`); the pool's primary (`primaryTarget`, none
+  for a pool with none, a primary whose CN is missing `ABORTED`); and the
+  new leg's checks (`repairNewLegChecks`), a retired leg through
+  `retired_leg_id_list` (a listed key missing is `ABORTED`) and the
+  retired-leg bound in `errRetiredListFull`'s words, whose refusal the
+  round holds back. The round then reads the primary's latest report for
+  the bad leg's row (`repairBadLegReason`, an agent call between the
+  snapshot and the op, AG1) and judges the bad leg's health
+  (`repairBadLegVerdict`, `architecture.md`, Repairs, A leg of another
+  identity), and only then answers the new leg's refusal, so the order is
+  the one `architecture.md`, Repairs, gives.
   A fresh new leg is then placed by `architecture.md`, Per-operation
   allocation, CreateRepair: the group's DN set (`grpDnAddrs`, the group
   having no repair) as the black list and the plan, their locations as
@@ -1500,7 +1509,9 @@ pool's repairs, retired legs and groups still answer.
   Last the call of `model.CreateRepair` with the group's
   parent, the bad leg and the new leg — the retired leg's id, or the pick
   and the plan — with the request's `force`, which the record keeps
-  (`architecture.md`, Repair), whose candidate changed sends the round
+  (`architecture.md`, Repair), and the verdict's identity reason
+  (`model.RepairNewLeg.IdentityRefused`); the request's `force_undecided`
+  is read by the verdict alone. Its candidate changed sends the round
   back (GW9) and
   whose `model.ReasonRepairExists`, `model.ReasonRetiredLegNotFound` and
   `model.ReasonRetiredListFull`, met by a write committed after the
@@ -1667,19 +1678,23 @@ checks of `DeleteClone` and `FinishMigration`, where an unreachable agent is
 and `GetThinDeviceBitmap`'s check of the parks, where it is
 `FAILED_PRECONDITION` as well (the caller cannot prove the volume takes no
 writes); that check also refuses a reply with a non-zero code.
+`CreateRepair`'s read of the bad leg's row maps no failure at all: an agent
+that does not answer leaves the answer the leg's record gives, so a dead
+leg's repair never waits on a silent primary (`architecture.md`, Repairs).
 The agent-side `AgentReply.code` convention does not apply to `Get*Size`,
 `Get*Info` or `Get*Bm` beyond what their replies define: `ForceStartGroup`'s
-check reads the group's row whatever the reply's code, and a `GetCntlrInfo`
+check reads the group's row whatever the reply's code, as `CreateRepair`
+reads the bad leg's row, a reply with no info giving it no reason, and a `GetCntlrInfo`
 reply with no info, as the `UnknownObject` refusal of an agent that does not
 hold the cntlr carries (`cnagent.md` CN23), reads to it as a report with no
 row for the group, which it refuses as it refuses an agent that does not
 answer (`architecture.md`, Repairs).
 
 AG4. **Two-phase rule.** Any handler with a mid-flight agent call re-runs
-**full resolution and the token check** in its deciding STM, save that one
-whose deciding STM is a `model` op — `ForceStartGroup` — re-reads the pool
-under the cluster id its planning snapshot resolved and never reads
-`ClusterConf` again (GW5). No facts from phase 1 are trusted in phase 2
+**full resolution and the token check** in its deciding STM, save that the
+ones whose deciding STM is a `model` op — `ForceStartGroup` and
+`CreateRepair` — re-read the pool under the cluster id their planning
+snapshot resolved and never read `ClusterConf` again (GW5). No facts from phase 1 are trusted in phase 2
 except as hints; for a request that carries a token, the token check makes
 any interleaved mutation visible as `ABORTED` ("stale revision"), which is
 what keeps such a two-phase RPC exactly as safe as a one-STM RPC. A
@@ -1702,6 +1717,7 @@ The complete call matrix:
 | `DeleteClone` with `force` false | `GetCntlrInfo` | between the STMs |
 | `FinishMigration` with `force` false | `GetSideInfo` | between the STMs |
 | `ForceStartGroup` without `cancel` | `GetCntlrInfo` | between the STMs |
+| `CreateRepair` | `GetCntlrInfo` | between the snapshot and the op, every round |
 | `InspectGroup` | `GetCntlrInfo`, then `InspectGrp` | after the snapshot |
 | `GetThinDeviceBitmap` | `GetCntlrInfo`, when a namespace exports the td, then `GetThinDeviceBm` | after the STM |
 
@@ -1907,6 +1923,13 @@ gateway, never through `workerctl`.
   primary's report, seeded in the fake, shows running, then, with the
   report showing the array broken, written with the revision its own bump
   committed, replaced, and cancelled, a cancel of no mark writing nothing;
+  a repair of a leg with no health epoch (`architecture.md`, Repairs, A
+  leg of another identity) — refused while the primary's report names no
+  identity on its row, created with no flag once the report marks it of
+  another identity, and, marked of an undecided identity, refused without
+  `force_undecided` and created with it, neither keeping a force and
+  each marked to retire its bad leg with keep, each
+  aborted and cancelled with every disk node given back what it took;
   a group's operator-in-charge flag (`architecture.md`, Repairs) — set,
   read back on the group's record and through the gateway's own read of
   the pool, and cleared, at the level that stops group arrays too, each

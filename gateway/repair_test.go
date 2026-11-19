@@ -909,11 +909,16 @@ func repRefusals() []repRefusal {
 
 // TestCreateRepairRefusals pins every refusal of CreateRepair
 // (architecture.md, Repairs), its code and its words, each against a fresh
-// fixture, and that it writes nothing anywhere in the cluster.
+// fixture, and that it writes nothing anywhere in the cluster. The pool's
+// primary sits on a fake agent whose report names no identity reason, which
+// CreateRepair reads before it judges the bad leg's health, so the health's
+// refusal keeps its place in the order: after the bad leg's sides, before
+// the new leg's own checks.
 func TestCreateRepairRefusals(t *testing.T) {
 	for _, tc := range repRefusals() {
 		t.Run(tc.name, func(t *testing.T) {
 			env := newVolEnv(t)
+			fsPrimary(env)
 			repSetLegEpoch(env, volDataGrpId, volDataLegA, repEpoch)
 			req := repRequest(env)
 			tc.setup(env, req)

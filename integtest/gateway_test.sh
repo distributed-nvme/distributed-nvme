@@ -3459,6 +3459,70 @@ EOF
 		--cancel
 	assert_eq "$(sp_rev_of sp0)" "$SP_REV" \
 		"a cancel of a group with no mark bumps no SpRev"
+
+	# The repair of a leg of another identity (architecture.md, Repairs):
+	# CreateRepair reads the primary's latest report for the bad leg,
+	# whatever its health epoch. Leg A carries no epoch, so the create is
+	# refused while the report names no identity on its row; a row the
+	# primary marks of another identity, a leg the running array does not
+	# take back, is taken with no flag; one of an undecided identity only
+	# with --force-undecided. Neither repair keeps a force, so an abort
+	# would leave the leg as it is, and each carries keep_bad_legs, so a
+	# finish would retire the leg with keep. Each is aborted, moved to ABORTED as the
+	# worker's verdict would, and cancelled, and every disk node gets back
+	# what it took.
+	local idRep idCase idReason idLedgers
+	wctl set-epoch leg --sp sp0 --slice "$slice" --id "$fsLegA" --clear \
+		>/dev/null
+	assert_no_write "create-repair of a healthy leg the report names nothing on" \
+		smoke_gwx_out FAILED_PRECONDITION create-repair --sp sp0 \
+		--rev "$SP_REV" --name ri --grp "$dataGrp" --bad-legs "$fsLegA"
+	assert_field "$SMOKE_OUT" '.message | test("use a migration")' "true" \
+		"with no identity on its row, a healthy leg is still refused"
+	for idCase in other undecided; do
+		idReason=OTHER_IDENTITY
+		[ "$idCase" = undecided ] && idReason=IDENTITY_UNDECIDED
+		set_behavior "$primaryDir" <<EOF
+{"objects":{"cntlr $spId:$primaryId":{"rows":{
+  "leg_id_to_leg.$fsLegA":{"reason":"$idReason"}}}}}
+EOF
+		if [ "$idCase" = undecided ]; then
+			assert_no_write "create-repair of an undecided leg with no flag" \
+				smoke_gwx_out FAILED_PRECONDITION create-repair --sp sp0 \
+				--rev "$SP_REV" --name ri --grp "$dataGrp" \
+				--bad-legs "$fsLegA"
+			assert_field "$SMOKE_OUT" \
+				'.message | test("force_undecided")' "true" \
+				"the refusal of an undecided leg names the flag"
+		fi
+		idLedgers=$(smoke_dn_ledgers | awk '{print $1, $2}')
+		if [ "$idCase" = undecided ]; then
+			out=$(gw create-repair --sp sp0 --rev "$SP_REV" --name ri \
+				--grp "$dataGrp" --bad-legs "$fsLegA" --force-undecided)
+		else
+			out=$(gw create-repair --sp sp0 --rev "$SP_REV" --name ri \
+				--grp "$dataGrp" --bad-legs "$fsLegA")
+		fi
+		refresh_rev sp0
+		idRep=$(raw_key "$DNV_PREFIX repair $cidHex $spIdHex ri")
+		assert_field "$idRep" '.bad_leg_id_list | @json' "[\"$fsLegA\"]" \
+			"ri ($idCase): leg A is the bad leg"
+		assert_field "$idRep" '.force // false' "false" \
+			"ri ($idCase): the repair keeps no force"
+		assert_field "$idRep" '.keep_bad_legs // false' "true" \
+			"ri ($idCase): the finish would retire leg A with keep"
+		gw abort-repair --sp sp0 --rev "$SP_REV" --name ri >/dev/null
+		refresh_rev sp0
+		wctl set-repair-stage --sp sp0 --name ri --stage aborted >/dev/null
+		refresh_rev sp0
+		gw cancel-repair --sp sp0 --rev "$SP_REV" --name ri >/dev/null
+		refresh_rev sp0
+		assert_eq "$(key_count repair)" "0" \
+			"ri ($idCase): no repair key after the cancel"
+		assert_eq "$(smoke_dn_ledgers | awk '{print $1, $2}')" \
+			"$idLedgers" \
+			"ri ($idCase): every disk node got back what the repair took"
+	done
 	clear_behavior "$primaryDir"
 
 	# -------------------------------------------------------------------

@@ -3,6 +3,7 @@ package gateway
 import (
 	"context"
 	"errors"
+	"fmt"
 	"slices"
 	"strconv"
 	"time"
@@ -230,7 +231,10 @@ func modelReason(err error) string {
 // operator's name, a RedundNone pool, a name in use, the group's look-up —
 // slices first, then clones (locateGrp) — a clone being deleted, a group with
 // a repair, the bad leg's membership, its two sides and its health, and then
-// the new leg's own checks. model.CreateRepair makes all of them again in its
+// the new leg's own checks. The bad leg's health is judged on the primary's
+// latest report as well as on the record (repairBadLegVerdict), so the round
+// reads the report after the snapshot, which defers the new leg's refusals
+// behind the health's to keep that order. model.CreateRepair makes all of them again in its
 // STM, where they are authoritative, but model raises every precondition as
 // FAILED_PRECONDITION, so the snapshot is what gives the INVALID_ARGUMENT,
 // ALREADY_EXISTS, NOT_FOUND and RESOURCE_EXHAUSTED answers their codes; of
@@ -276,17 +280,29 @@ func (s *Server) CreateRepair(
 		repId, newLegId = 0, 0
 		var sc *spScope
 		var loc grpLocation
+		var plan repairBadLegPlan
 		err := s.cli.Snapshot(ctx, func(stm etcdutil.STM) error {
 			var err error
-			sc, loc, err = repairCreateChecks(stm, req)
+			sc, loc, plan, err = repairCreateChecks(stm, req)
 			return err
 		})
 		if err != nil {
 			return mapStmErr(err)
 		}
+		badLegId := req.GetBadLegIdList()[0]
+		reason, readErr := repairBadLegReason(ctx, plan.Primary, badLegId)
+		identity, err := repairBadLegVerdict(badLegId, plan, reason,
+			readErr, req.GetForceUndecided())
+		if err != nil {
+			return err
+		}
+		if plan.NewLegErr != nil {
+			return plan.NewLegErr
+		}
 		newLeg := model.RepairNewLeg{
-			RetiredLegId: req.GetRetiredLegId(),
-			Force:        req.GetForce(),
+			RetiredLegId:    req.GetRetiredLegId(),
+			Force:           req.GetForce(),
+			IdentityRefused: identity,
 		}
 		if newLeg.RetiredLegId == 0 {
 			// The group has no repair, the snapshot's refusal, so its DN
@@ -342,10 +358,148 @@ func (s *Server) CreateRepair(
 	return &pb.CreateRepairReply{RepId: repId, NewLegId: newLegId}, nil
 }
 
+// repairBadLegPlan is what CreateRepair's planning read hands the round for
+// the bad leg's health, judged after it (repairBadLegVerdict): the leg's
+// health epoch, the pool's name and stored data block, the primary whose
+// latest report the round reads, nil for a pool with no primary, and the new
+// leg's own refusal, nil for none, which the round answers only once the
+// health passes.
+type repairBadLegPlan struct {
+	BadEpoch  uint64
+	SpName    string
+	Block     uint64
+	Primary   *grpReportTarget
+	NewLegErr error
+}
+
 // repairCreateChecks is CreateRepair's planning read inside the caller's
-// snapshot, its refusals in the order of architecture.md, Repairs. It returns
-// the scope and the group, which the round plans from.
+// snapshot, its refusals in the order of architecture.md, Repairs, up to the
+// bad leg's sides. It returns the scope and the group, which the round plans
+// from, and the plan of the bad leg's health, which the round judges after
+// its read of the primary's report, ahead of the new leg's checks, which it
+// makes here and hands over (repairBadLegPlan).
 func repairCreateChecks(
+	stm etcdutil.STM,
+	req *pb.CreateRepairRequest,
+) (*spScope, grpLocation, repairBadLegPlan, error) {
+	sc, loc, err := repairBadLegChecks(stm, req)
+	if err != nil {
+		return nil, grpLocation{}, repairBadLegPlan{}, err
+	}
+	tgt, ok, err := primaryTarget(stm, sc)
+	if err != nil {
+		return nil, grpLocation{}, repairBadLegPlan{}, err
+	}
+	plan := repairBadLegPlan{
+		BadEpoch:  grpLegOf(loc.Grp, req.GetBadLegIdList()[0]).GetErrEpoch(),
+		SpName:    req.GetSpName(),
+		Block:     model.PoolBlockSize(spBdevConf(sc.Conf)),
+		NewLegErr: repairNewLegChecks(stm, sc, loc.Grp, req),
+	}
+	if ok {
+		plan.Primary = &tgt
+	}
+	return sc, loc, plan, nil
+}
+
+// repairBadLegReason is the reason the primary's latest report gives the
+// bad leg's row (architecture.md, Repairs): GetCntlrInfo answers from the
+// agent's latest observation and reads nothing of the node
+// (architecture.md, Live-state reporting). A report with no row of the leg,
+// or a reply with no info, gives none. The error says why no report was
+// read: a pool with no primary, or an agent that did not answer.
+func repairBadLegReason(
+	ctx context.Context,
+	tgt *grpReportTarget,
+	legId uint64,
+) (pb.ResReason, error) {
+	if tgt == nil {
+		return pb.ResReason_RES_REASON_NONE,
+			errors.New("the pool has no primary cntlr")
+	}
+	reason := pb.ResReason_RES_REASON_NONE
+	err := withCnAgent(ctx, tgt.AddrPort,
+		func(ctx context.Context, client pb.ControllerNodeAgentClient) error {
+			reply, err := client.GetCntlrInfo(ctx, &pb.GetCntlrInfoRequest{
+				ClusterId: tgt.ClusterId,
+				CnId:      tgt.CnId,
+				CntlrPointer: &pb.CntlrPointer{
+					SpId:    tgt.SpId,
+					CntlrId: tgt.CntlrId,
+				},
+			})
+			if err != nil {
+				return err
+			}
+			reason = reply.GetCntlrInfo().GetLegIdToLeg()[legId].GetReason()
+			return nil
+		})
+	if err != nil {
+		return pb.ResReason_RES_REASON_NONE, fmt.Errorf(
+			"controller node %q did not answer: %w", tgt.AddrPort, err)
+	}
+	return reason, nil
+}
+
+// repairBadLegVerdict judges the bad leg's health for an operator's
+// CreateRepair (architecture.md, Repairs) from its health epoch and the
+// reason the primary's latest report gives its row, read whatever the epoch,
+// and says whether the leg is taken for an identity reason, which no record
+// holds (model.RepairNewLeg.IdentityRefused). A leg the running array does
+// not take back (RES_REASON_OTHER_IDENTITY) is taken: the running array
+// tells which identity is current. A leg of an assembly's two identities
+// (RES_REASON_IDENTITY_UNDECIDED) is taken only with force_undecided, the
+// operator's word that it is the stale copy, its epoch set or not: the
+// repair puts it out of the assembly's first tier, so the array then
+// assembles from the other leg's copy. Otherwise the epoch decides as the
+// record always did, and a report that was not read leaves that answer, so
+// a dead leg's repair never waits on a silent primary; the refusal of a
+// healthy leg then says why the report could not speak for it. In a pool
+// stored with a data block over the block's bound the refusal of a healthy
+// leg names the move of the pool's volumes to a new pool, since that pool
+// refuses every migration too (migrPoolChecks).
+func repairBadLegVerdict(
+	legId uint64,
+	plan repairBadLegPlan,
+	reason pb.ResReason,
+	readErr error,
+	forceUndecided bool,
+) (bool, error) {
+	switch reason {
+	case pb.ResReason_RES_REASON_OTHER_IDENTITY:
+		return true, nil
+	case pb.ResReason_RES_REASON_IDENTITY_UNDECIDED:
+		if forceUndecided {
+			return true, nil
+		}
+		return false, errPrecondition(
+			"leg %d carries one of the group's two md identities, and the "+
+				"primary cannot tell which is current: a repair of it "+
+				"assembles the array from the other leg's copy; with "+
+				"force_undecided you name it the stale copy", legId)
+	}
+	if plan.BadEpoch != 0 {
+		return false, nil
+	}
+	way := "use a migration to move it"
+	if plan.Block > common.MaxNvmeTcpCmdBytes {
+		way = fmt.Sprintf("storage pool %q's data_block_size %d is over %d, "+
+			"so no migration moves it either: move the pool's volumes to a "+
+			"new pool, by a transfer and a clone", plan.SpName, plan.Block,
+			common.MaxNvmeTcpCmdBytes)
+	}
+	if readErr != nil {
+		return false, errPrecondition(
+			"leg %d is healthy: %s (the primary's report, which could name "+
+				"another identity on it, was not read: %v)", legId, way,
+			readErr)
+	}
+	return false, errPrecondition("leg %d is healthy: %s", legId, way)
+}
+
+// repairBadLegChecks is CreateRepair's planning read up to the bad leg's
+// sides, its refusals in the order of architecture.md, Repairs.
+func repairBadLegChecks(
 	stm etcdutil.STM,
 	req *pb.CreateRepairRequest,
 ) (*spScope, grpLocation, error) {
@@ -399,30 +553,42 @@ func repairCreateChecks(
 	if len(bad.GetSideList()) != 1 {
 		return nil, grpLocation{}, errMigrRunning(bad)
 	}
-	if bad.GetErrEpoch() == 0 {
-		return nil, grpLocation{}, errPrecondition(
-			"leg %d is healthy: use a migration to move it", badLegId)
-	}
+	return sc, loc, nil
+}
+
+// repairNewLegChecks is CreateRepair's checks of the new leg, in the order
+// of architecture.md, Repairs, made in the planning read and answered by the
+// round once the bad leg's health passes (repairCreateChecks): a fresh leg
+// for a group at the retired-leg bound, and a retired leg's record, group
+// and side.
+func repairNewLegChecks(
+	stm etcdutil.STM,
+	sc *spScope,
+	grp *pb.Group,
+	req *pb.CreateRepairRequest,
+) error {
+	grpId := req.GetGrpId()
+	badLegId := req.GetBadLegIdList()[0]
 	retiredId := req.GetRetiredLegId()
 	if retiredId == 0 {
 		if len(grp.GetRetiredLegIdList()) >= common.MaxRetiredLegPerGrp {
-			return nil, grpLocation{}, errRetiredListFull(grpId)
+			return errRetiredListFull(grpId)
 		}
-		return sc, loc, nil
+		return nil
 	}
 	retired, err := loadListedRetiredLeg(stm, sc, retiredId)
 	if err != nil {
-		return nil, grpLocation{}, err
+		return err
 	}
 	if retired.GetGrpId() != grpId ||
 		!containsId(grp.GetRetiredLegIdList(), retiredId) {
-		return nil, grpLocation{}, errPrecondition(
+		return errPrecondition(
 			"retired leg %d is not a retired leg of group %d",
 			retiredId, grpId)
 	}
 	side := retired.GetSide()
 	if epoch := side.GetErrEpoch(); epoch != 0 {
-		return nil, grpLocation{}, errPrecondition(
+		return errPrecondition(
 			"the side of retired leg %d is unhealthy (err_epoch %d)",
 			retiredId, epoch)
 	}
@@ -435,14 +601,14 @@ func repairCreateChecks(
 		}
 		for _, legSide := range leg.GetSideList() {
 			if legSide.GetAddrPort() == side.GetAddrPort() {
-				return nil, grpLocation{}, errPrecondition(
+				return errPrecondition(
 					"the side of retired leg %d is on disk node %q, which "+
 						"holds leg %d of group %d", retiredId,
 					side.GetAddrPort(), leg.GetLegId(), grpId)
 			}
 		}
 	}
-	return sc, loc, nil
+	return nil
 }
 
 // FinishRepair is the FinishRepair of architecture.md, Repairs: the new leg
@@ -728,14 +894,31 @@ func grpPrimaryTarget(
 	grpId uint64,
 	why string,
 ) (grpReportTarget, error) {
-	cntlrs, err := loadCntlrs(stm, sc.Cid, sc.Conf)
+	tgt, ok, err := primaryTarget(stm, sc)
 	if err != nil {
 		return grpReportTarget{}, err
 	}
-	cntlrId, cntlr, ok := primaryCntlr(sc.Conf, cntlrs)
 	if !ok {
 		return grpReportTarget{}, errPrecondition(
 			"storage pool %q has no primary cntlr "+why, spName, grpId)
+	}
+	return tgt, nil
+}
+
+// primaryTarget is the pool's primary cntlr and its CN inside the caller's
+// snapshot, false for a pool with no primary; a primary whose CN is missing
+// is ABORTED.
+func primaryTarget(
+	stm etcdutil.STM,
+	sc *spScope,
+) (grpReportTarget, bool, error) {
+	cntlrs, err := loadCntlrs(stm, sc.Cid, sc.Conf)
+	if err != nil {
+		return grpReportTarget{}, false, err
+	}
+	cntlrId, cntlr, ok := primaryCntlr(sc.Conf, cntlrs)
+	if !ok {
+		return grpReportTarget{}, false, nil
 	}
 	cn := &pb.CnConf{}
 	cnKey := model.CnConfKey(sc.Cid, cntlr.GetAddrPort())
@@ -743,7 +926,7 @@ func grpPrimaryTarget(
 		// A live cntlr names its CN, and DeleteControllerNode refuses a CN
 		// that hosts one, so the CN's absence is a lost invariant key
 		// (architecture.md, UNEXPECTED_ERROR → `ABORTED`).
-		return grpReportTarget{}, errAborted(
+		return grpReportTarget{}, false, errAborted(
 			"cn_conf key %q is missing", cnKey)
 	}
 	return grpReportTarget{
@@ -752,7 +935,7 @@ func grpPrimaryTarget(
 		CntlrId:   cntlrId,
 		CnId:      cn.GetCnId(),
 		AddrPort:  cntlr.GetAddrPort(),
-	}, nil
+	}, true, nil
 }
 
 // forceStartLegChecks refuses a leg the forced-start mark may not name

@@ -232,8 +232,9 @@ func migrCntBelowCeiling(conf *pb.SpConf, spName string) error {
 // sides would make a dm-clone whose region is that block, which reports at
 // least one region as its optimal IO size: the controller node would send
 // the new side commands its disk node refuses. No call moves a healthy leg
-// of such a pool in place — a repair replaces only a leg with a health
-// epoch, and a RedundNone pool has none — so the message
+// of such a pool in place — a repair replaces only a leg with a health epoch
+// or one whose row the primary's report marks of another identity, and a
+// RedundNone pool has none — so the message
 // names the way out, a move of the pool's volumes into a new pool by a
 // transfer and a clone (architecture.md, Common validation, the block's
 // bound). The planning read and the deciding STM both run it, ahead of the

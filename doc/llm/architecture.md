@@ -2142,8 +2142,9 @@ harmless. A migration destination takes its run before it zeroes
   every migration of one of its sides (Migrations). Reason for refusing the
   migration rather than warning: a refusal keeps the pool's IO from the
   commands the kernel refuses, by default. So no call moves a healthy leg
-  of such a pool in place: a repair replaces only an unhealthy leg
-  (Repairs), and a `RedundNone` pool has no repair. The way out is to
+  of such a pool in place: a repair replaces only an unhealthy leg, or one
+  whose row the primary's report marks of another identity (Repairs), and
+  a `RedundNone` pool has no repair. The way out is to
   move the pool's volumes into a new pool within the bound, by a transfer
   in the old pool and a clone in the new one (Transfer + clone = cross-SP
   live migration), which the old pool's block does not stop:
@@ -3879,10 +3880,12 @@ create its repair.
 **CreateRepair** — inputs `rep_name`, `grp_id`, `bad_leg_id_list`, for
 the new leg either `retired_leg_id`, a retired leg of the group, or, when
 that is zero, `dn_selector`, the `NodeSelector` whose lists filter the
-fresh new leg's scan (Finding DN candidates, Per-operation allocation), and
+fresh new leg's scan (Finding DN candidates, Per-operation allocation),
 `force`, the operator's force, which the `Repair` record keeps: the primary
 then copies over a leg of another md identity, the new leg taken back and
-the bad leg once the repair is aborted (Repair, What the primary does).
+the bad leg once the repair is aborted (Repair, What the primary does), and
+`force_undecided`, which the record does not keep: it takes a bad leg the
+primary cannot tell the identity of (A leg of another identity, below).
 Errors, in the order a request meets them: `INVALID_ARGUMENT` when
 `rep_name` breaks Common validation, the reserved prefix included, or
 `bad_leg_id_list` holds other than one leg id; `FAILED_PRECONDITION` at an
@@ -3900,11 +3903,18 @@ one repair per group, since two would race for one place in its array,
 which the group's `rep_name` lets the transaction check without a scan —;
 `NOT_FOUND` when the bad leg is not in the
 group's `leg_list`; `FAILED_PRECONDITION` when the bad leg has two sides
-(a migration holds the leg), or when its `err_epoch` is zero, the message
-saying to use a migration: a healthy leg is moved, not repaired — save a
-worker's repair whose create says it repairs the leg for md's bad-block
-ranges, which the primary's reading names and no record holds (The md
-check; `dnv-worker.md` MD6). Then,
+(a migration holds the leg); then the bad leg's health, judged on its
+record and on the primary's latest report (A leg of another identity,
+below): `FAILED_PRECONDITION` for a leg the report marks of an undecided
+identity when the request does not set `force_undecided`, the message
+naming the flag, and for any leg the report marks with no identity reason
+whose `err_epoch` is zero, the message saying to use a migration: a
+healthy leg is moved, not repaired — or, in a pool stored with a data block
+over the block's bound, which refuses every migration (Common validation),
+to move the pool's volumes to a new pool —, save a worker's repair whose create
+says it repairs the leg for md's bad-block ranges, which the primary's
+reading names and no record holds (The md check; `dnv-worker.md` MD6).
+Then,
 for a new leg from a retired leg: `FAILED_PRECONDITION` for a worker's
 repair, which always takes a fresh new leg, since md writes onto the new
 leg, so taking a retired leg back writes over its kept copy, and only an
@@ -3920,10 +3930,40 @@ message saying to delete one (Retired legs), or when no DN is a candidate
 that bound too: the worker does not wait at the create for an operator to
 free room, and its finish gives back the group's oldest retired leg that
 does not carry `keep` (FinishRepair), or waits while every one carries
-it. `CreateRepair` reads no report, so the group's row cannot gate an
-operator's create: a repair of a group whose array does not run waits in
-CREATED until it runs, and the operator aborts it if they change their mind
-(Repair).
+it. `CreateRepair` reads the report's row of the bad leg alone, never the
+group's, so the group's row cannot gate an operator's create: a repair of
+a group whose array does not run waits in CREATED until it runs, and the
+operator aborts it if they change their mind (Repair).
+
+**A leg of another identity.** `CreateRepair` reads the primary's latest
+report (`GetCntlrInfo`, which answers from the agent's observation) for
+the bad leg's row, whatever its health epoch, after the planning read and
+before the op, every round of its candidate unit (`gateway.md` GW9); the
+new leg's refusals then come after the health's, as the order above
+says. A leg the running array does not take back for another identity
+reads with `RES_REASON_OTHER_IDENTITY` and carries no health epoch
+(`cnagent.md` CN12): the running array tells which identity is current,
+so the leg is taken as the bad leg with no flag, and the repair gives the
+group a fresh copy in its place; the leg keeps its own copy on its side,
+retired at the finish with `keep`, which the create records on the repair
+(`keep_bad_legs`), so neither the retire timer nor a worker's finish at the
+bound gives it back (Retired legs). A leg of an assembly's two identities reads with
+`RES_REASON_IDENTITY_UNDECIDED`: the agent cannot tell which identity is
+current, and a repair moves the leg to the bad leg's tier, which an
+assembly decides by last (`cnagent.md` CN12), so the array assembles from
+the other leg's copy and serves that copy's data. Such a leg is taken only
+with `force_undecided`, the operator's word that it is the stale copy, and
+whatever its epoch: an epoch from a short fault after a forced start must
+not let the other copy win unasked. The record keeps nothing of the flag,
+since `force`, which it keeps, makes an abort copy over the bad leg, while
+an operator who aborts such a repair wants the leg back as it is. A report
+that cannot be read — a pool with no primary, or an agent that does not
+answer — leaves the record's answer, so a dead leg's repair never waits on
+a silent primary; the refusal of a healthy leg then says the report was
+not read. The report is read outside the op's transaction (Known limits).
+Reason: no record holds a leg's identity, only the primary's reading of
+its superblock, and an operator's repair is the one way to give such a
+group its redundancy back without a forced start.
 
 Action. A new leg from a retired leg allocates nothing: the retired leg's
 record and its entries in the group's and the pool's lists go, and its leg —
@@ -3964,7 +4004,9 @@ leg's `leg_idx`, keeping its own leg id, side and `err_epoch`; puts the
 bad leg as a `RetiredLeg` under its own leg id, with its side as it is,
 the group's id, its `leg_idx`, the repair's parent, the time as its
 `retired_epoch` and `keep` when the repair carries `keep_bad_legs`, which a
-forced start of the group sets (Repair, Forced start), and lists it in the
+forced start of the group sets (Repair, Forced start), and so does an
+operator's create of a repair whose bad leg it takes for an identity
+reason (A leg of another identity, above), and lists it in the
 group's and the pool's
 `retired_leg_id_list`; deletes the `Repair` and its `repair_name_list`
 entry; clears the group's `rep_name`, and its forced-start mark when the
@@ -4210,7 +4252,10 @@ its group sets it on every retired leg the group lists, `CancelRepair`
 gives back a taken-back leg the forced start kept with it, and the finish
 of a repair whose bad legs the forced start kept sets it on the bad leg, since
 after a start from another leg any of them can hold newer data than the
-restored array, and an operator sets or clears it with
+restored array; the finish of an operator's repair whose bad leg
+`CreateRepair` took for an identity reason sets it too, since such a leg
+can hold data the array lacks, the newer copy of two identities included
+(Repairs, A leg of another identity); and an operator sets or clears it with
 `UpdateRetiredLegKeep`; only the operator's delete, a take-back or a
 drain ends such a leg. It is no leg: no migration moves it
 (Migrations) and the leg bitmap read does not find it (Bitmap reads). A group holds at most `MaxRetiredLegPerGrp` of them: a retired
@@ -4892,8 +4937,9 @@ and `dnv-worker.md` HL2 reads; `RES_REASON_OTHER_IDENTITY` and
 `RES_REASON_IDENTITY_UNDECIDED`, which `cnagent.md` CN12 sets on a leg's
 row, its status and details kept, for a leg the running array does not add
 for another identity and for the legs of two identities an assembly meets,
-which no health rule and no control-plane decision reads: they tell the
-operator why the leg stays out (`cnagent.md` CN12);
+which no health rule reads: they tell the operator why the leg stays out
+(`cnagent.md` CN12), and `CreateRepair` reads them to take such a leg as a
+repair's bad leg with no health epoch (Repairs, A leg of another identity);
 `RES_REASON_THIN_ID_NOT_ADOPTED`, which `cnagent.md` CN14 sets on the
 `ERROR` thin row of a new volume whose thin id it does not adopt and
 `dnv-worker.md` HL2 reads; `RES_REASON_POOL_NEEDS_CHECK` and
@@ -8146,7 +8192,8 @@ document and only pointed to here.
   `CreateMigration` refuses every migration of one of its sides and
   `CreateClone` every clone into it. No call then moves a healthy leg of
   such a pool in place, to leave a slow disk or to empty a disk node,
-  since a repair replaces only an unhealthy leg and a `RedundNone` pool has
+  since a repair replaces only an unhealthy leg, or one of another
+  identity, and a `RedundNone` pool has
   none; the operator moves the pool's volumes into a new pool within the
   bound by a transfer and a clone instead (`operations.md`, A pool made
   before the block bound). A cluster that stores a block over the bound
@@ -8647,8 +8694,9 @@ document and only pointed to here.
   since. Worked out from md's and dm-thin's code; the outage under host IO
   is not measured.
 * **A repair waits while its array does not run or its bad leg serves.**
-  `CreateRepair` reads no report, so it accepts a repair of a group whose
-  array is stopped or broken; such a repair, and one whose pool is raised
+  `CreateRepair` reads the primary's report for its bad leg's row alone,
+  so it accepts a repair of a group whose array is stopped or broken; such
+  a repair, and one whose pool is raised
   to a level that builds no group device, waits in CREATED until the array
   runs, which an operator's forced start can bring about (Repair, Forced
   start), and an abort of it is confirmed only then, since only a running
@@ -8664,6 +8712,10 @@ document and only pointed to here.
   md failed it, or does not hold, as after an assembly left it out, holds
   the repair back in no way: the add removes it if md holds it and adds the
   new leg, even when the bad leg reads healthy again (`cnagent.md` CN12).
+  `CreateRepair` reads the bad leg's row outside the op's transaction, so a
+  leg that joins the running array between the read and the op, as after a
+  forced start, gets a repair that waits as one whose bad leg md holds in
+  its place and serves; no data is lost.
   Meanwhile a waiting repair is the group's one repair, and the worker's
   leg repair creates no other for the group (`dnv-worker.md` AR8).
 * **A retired leg taken back is copied whole unless the array stayed
@@ -8706,10 +8758,11 @@ document and only pointed to here.
   it, and the group stays down, its row `ERROR`, until the operator
   force-starts the group from the leg wanted, which wipes the other leg,
   or creates a repair whose bad leg is the leg of the identity not wanted,
-  which keeps its data at the finish; `CreateRepair` refuses that create
-  while the leg has no health epoch, which a leg that serves and passes
-  its probe does not get, so for such a leg the forced start is the one
-  way (`cnagent.md` CN12).
+  which keeps its data at the finish. `CreateRepair` takes such a leg
+  though it has no health epoch, by the reason the primary's report gives
+  its row, with no flag while the array runs and only with
+  `force_undecided` once the group is down, since then only the operator
+  can tell which identity is current (Repairs, A leg of another identity).
 * **A forced start and the re-assembly wait on a primary whose layers
   above hold the broken array.** At a level that builds thin pools, a slice's group array that
   does not run is held open by the devices its slice's pool is built over,

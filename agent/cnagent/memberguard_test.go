@@ -757,3 +757,34 @@ func TestNoCreateOnceTheArrayRan(t *testing.T) {
 			"grp data after the re-send")
 	}
 }
+
+// TestRepairOfALegOfAnotherIdentityAddsTheNewLeg pins the agent's half of an
+// operator's repair of a leg_list leg the running array does not take back
+// for another identity (architecture.md, Repairs; CN12): the bad leg is
+// outside the array, so the converge of a CREATED repair adds the new leg
+// and takes nothing out — md holds nothing on the bad leg — and the
+// verdict reads started once the new leg holds a place, as the sp worker's
+// stage move needs; the bad leg's superblock is left as it is.
+func TestRepairOfALegOfAnotherIdentityAddsTheNewLeg(t *testing.T) {
+	f := newRepFix(t, allLegs...)
+	f.node.mu.Lock()
+	array := f.node.arrays[f.mdDev]
+	var kept []string
+	for _, member := range array.members {
+		if member != f.leg1 {
+			kept = append(kept, member)
+		}
+	}
+	array.members = kept
+	array.degraded = 1
+	f.node.publishArray(array)
+	f.node.memberArray[f.leg1] = "older"
+	f.node.mu.Unlock()
+	f.node.Reset()
+	info := f.syncup(t, repairReq(3, pb.RepStage_REP_STAGE_CREATED, false))
+	f.assertMdCalls(t, "the converge", f.add(f.newLegDev))
+	assertVerdict(t, info, "the repair", true, false)
+	if got := f.legUuid(f.leg1); got != "older" {
+		t.Fatalf("the bad leg's identity is %q, want it left as it was", got)
+	}
+}

@@ -706,7 +706,12 @@ a fresh leg the `--dn-black` and `--dn-white` selector steers; `--force`
 lets the primary copy over a leg that carries another md identity, when
 the retired leg taken back or the bad leg after an abort does
 (`architecture.md`, Repair), and
-its help says that what such a leg holds is lost. dnvctl
+its help says that what such a leg holds is lost. `--force-undecided` is
+another flag, never `--force`: it sends `force_undecided`, which lets the
+gateway take a bad leg the primary's report marks of an undecided md
+identity, the operator naming it the stale copy, and which the repair does
+not keep, so an abort leaves that leg as it is (`architecture.md`, Repairs,
+A leg of another identity). dnvctl
 checks no stage: a call the repair's stage does not allow is the gateway's
 refusal, which names the stage (`architecture.md`, Repairs).
 `repair finish` prints the reply as it is, `given_back_leg_id` included

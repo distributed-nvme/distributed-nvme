@@ -172,6 +172,91 @@ func TestCreateRepairOfALegWithRanges(t *testing.T) {
 	}
 }
 
+// TestCreateRepairOfALegOfAnotherIdentity: under an operator's name, a
+// create that says the primary's report names the bad leg by an identity
+// reason (RepairNewLeg.IdentityRefused), which no record holds, takes a bad
+// leg with no health epoch; under the worker's reserved name the same flag
+// takes nothing, since the worker repairs a leg of another identity never.
+func TestCreateRepairOfALegOfAnotherIdentity(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		repName string
+		ok      bool
+	}{
+		{"an operator's name", "rep-identity", true},
+		{"the worker's reserved name", opsWorkerRepName, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			env := newOpsEnv(t)
+			env.setLegErr(opsDataLegB, 0)
+			newLeg := RepairNewLeg{Dn: env.dnCand(opsDnC),
+				GrpDnAddrs:      env.grpDnAddrs(opsDataGrpId),
+				IdentityRefused: true}
+			before := env.storeRev()
+			_, _, err := CreateRepair(env.ctx, env.cli, env.cid, opsShard,
+				opsSpId, opsSpName, noExpectRev, tc.repName, opsSliceParent,
+				opsDataGrpId, opsDataLegB, newLeg, env.cc)
+			if tc.ok {
+				if err != nil {
+					t.Fatalf("CreateRepair of a leg of another identity: %v",
+						err)
+				}
+				return
+			}
+			env.wantNoWrite(err, opCreateRepair,
+				"bad leg is healthy: use a migration", before)
+		})
+	}
+}
+
+// TestARepairOfALegOfAnotherIdentityKeepsIt: an operator's repair that takes
+// its bad leg for an identity reason (RepairNewLeg.IdentityRefused) records
+// keep_bad_legs, so the finish retires that leg with keep set, as after a
+// forced start, and the sp worker's retire timer never gives it back: such a
+// leg can hold data the array lacks, the newer copy among two identities
+// included. A repair of a leg with a health epoch keeps nothing.
+func TestARepairOfALegOfAnotherIdentityKeepsIt(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		identity bool
+	}{
+		{"a leg of another identity", true},
+		{"a leg with a health epoch", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			env := newOpsEnv(t)
+			env.chargeFixture()
+			epoch := uint64(0)
+			if !tc.identity {
+				epoch = opsBadEpoch
+			}
+			env.setLegErr(opsDataLegB, epoch)
+			newLeg := RepairNewLeg{Dn: env.dnCand(opsDnC),
+				GrpDnAddrs:      env.grpDnAddrs(opsDataGrpId),
+				IdentityRefused: tc.identity}
+			repId, _, err := CreateRepair(env.ctx, env.cli, env.cid, opsShard,
+				opsSpId, opsSpName, noExpectRev, opsRepName, opsSliceParent,
+				opsDataGrpId, opsDataLegB, newLeg, env.cc)
+			if err != nil {
+				t.Fatalf("CreateRepair: %v", err)
+			}
+			if got := env.repair(opsRepName).GetKeepBadLegs(); got != tc.identity {
+				t.Errorf("keep_bad_legs: got %v, want %v", got, tc.identity)
+			}
+			env.toStage(opsRepName, repId, pb.RepStage_REP_STAGE_STARTED)
+			if _, err := FinishRepair(env.ctx, env.cli, env.cid, opsShard,
+				opsSpId, opsSpName, noExpectRev, opsRepName, opsFinishNow,
+				env.cc); err != nil {
+				t.Fatalf("FinishRepair: %v", err)
+			}
+			if got := env.retired(opsDataLegB).GetKeep(); got != tc.identity {
+				t.Errorf("the retired leg's keep: got %v, want %v", got,
+					tc.identity)
+			}
+		})
+	}
+}
+
 // toStage moves the repair name to stage through the ops: the abort flag
 // first for ABORTED.
 func (e *opsEnv) toStage(name string, repId uint64, stage pb.RepStage) {
