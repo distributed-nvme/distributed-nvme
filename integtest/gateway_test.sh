@@ -5095,6 +5095,36 @@ faults_validation_battery() { # <the cluster's stored cntlr_interval>
 		--slots 0,0,1
 	gwx INVALID_ARGUMENT set-cntlid-slots --sp sp0 --rev "$SP_REV" --slots 8
 
+	# An extent size is a whole number of 4096 bytes, and a data block is at
+	# most 4 MiB, the most data one NVMe/TCP command may carry, at a
+	# cluster's create and at a pool's (architecture.md, Common validation):
+	# each refused before any read, so neither cluster is created.
+	gwx INVALID_ARGUMENT create-cluster --name itgwext \
+		--extent-size 100000000
+	gwx INVALID_ARGUMENT create-cluster --name itgwblk \
+		--block-size 8388608
+	gwx INVALID_ARGUMENT create-sp --sp spblk --cntlr-cnt "$SP_CNTLR_CNT" \
+		--slice-cnt "$SP_SLICE_CNT" --init-ext-cnt "$SP_INIT_EXT" \
+		--block-size 8388608
+
+	# NVMe reserves NSID 0xFFFFFFFF, which names every namespace, and a
+	# clone source's namespace id of 0 names none in particular
+	# (architecture.md, Subsystems, namespaces and Clones). Both are refused
+	# before any read, so a thin device that does not exist is never looked
+	# up.
+	gwx INVALID_ARGUMENT create-ns --sp sp0 --rev "$SP_REV" \
+		--nqn "$NQN_PREFIX:ss0" --idx 4294967295 --td tnone
+	gwx INVALID_ARGUMENT create-clone --sp sp0 --rev "$SP_REV" --name clbad \
+		--dst-td tnone --src-nqn "$NQN_PREFIX:src0" --src-idx 0 \
+		--src-slices 1 --src-stripe 65536 --src-block 1048576
+
+	# dnv serves NVMe/TCP only: a node's tr_type is "tcp" in lower case and
+	# its adr_fam "ipv4" or "ipv6" (architecture.md, Common validation),
+	# judged before the gateway asks the agent its size, so an address no
+	# agent listens on hears the rule and not the agent's silence.
+	gwx INVALID_ARGUMENT create-cn --addr 127.0.0.1:29998 --tr-type TCP
+	gwx INVALID_ARGUMENT create-dn --addr 127.0.0.1:29998 --adr-fam IPv4
+
 	# GW10 pagination: a count above MaxListCnt is REFUSED, never
 	# silently capped, and a page token that is not base64 is malformed
 	# input, not an empty page.
@@ -5302,14 +5332,18 @@ case_faults() {
 	assert_eq "$(jq_of "$out" '[.addr_port_to_cn[] | .cntlr_cnt] | add')" \
 		"$SP_CNTLR_CNT" "capacity: the cntlrs of sp0 are charged"
 
-	# Four thin devices with three different roles. t0 is never flipped, so
+	# Five thin devices with four different roles. t0 is never flipped, so
 	# it is both the namespace's backing device and step 3's uncreated
-	# snapshot origin; tp IS flipped and carries the uncreated snapshot ts.
+	# snapshot origin; tp IS flipped and carries the uncreated snapshot ts;
+	# t2 is twice t0's size, which step 3 refuses to move the namespace to.
 	gw create-td --sp sp0 --rev "$SP_REV" --name t0 --size "$TD_SIZE" \
 		>/dev/null
 	refresh_rev sp0
 	gw create-td --sp sp0 --rev "$SP_REV" --name t1 --size "$TD_SIZE" \
 		>/dev/null
+	refresh_rev sp0
+	gw create-td --sp sp0 --rev "$SP_REV" --name t2 \
+		--size "$((2 * TD_SIZE))" >/dev/null
 	refresh_rev sp0
 	gw create-td --sp sp0 --rev "$SP_REV" --name tp --size "$TD_SIZE" \
 		>/dev/null
@@ -5327,8 +5361,8 @@ case_faults() {
 	refresh_rev sp0
 
 	out=$(sp_json sp0)
-	assert_field "$out" '.tds | keys | @json' '["t0","t1","tp","ts"]' \
-		"sp0: the four thin devices"
+	assert_field "$out" '.tds | keys | @json' '["t0","t1","t2","tp","ts"]' \
+		"sp0: the five thin devices"
 	assert_field "$out" '.tds.tp.created' "true" "tp: created after the flip"
 	assert_field "$out" '.tds.t0.created' "false" "t0: still uncreated"
 	assert_field "$out" '.tds.ts.created' "false" "ts: still uncreated"
@@ -5337,7 +5371,7 @@ case_faults() {
 	assert_field "$out" '.tds.ts.ori_id == .tds.tp.dev_id' "true" \
 		"ts: ori_id is tp's dev_id"
 	assert_field "$(gw list-tds --sp sp0)" '.name_to_td | keys | @json' \
-		'["t0","t1","tp","ts"]' "list-tds read-back agrees"
+		'["t0","t1","t2","tp","ts"]' "list-tds read-back agrees"
 
 	# One subsystem with one namespace on t0: step 2 needs a live nqn to
 	# probe a missing ns_idx in, and step 3 needs both the "subsystem still
@@ -5548,6 +5582,22 @@ case_faults() {
 	assert_no_write "create-migr on a leg that already has two sides" \
 		gwx FAILED_PRECONDITION create-migr --sp sp0 --rev "$SP_REV" \
 		--name m1 --src-side "$srcSide"
+	# A re-send of m0 hears its name taken, which the planning read answers
+	# ahead of the source leg's two sides and of the scan (architecture.md,
+	# Migrations).
+	assert_no_write "create-migr re-sent under m0's name" \
+		gwx ALREADY_EXISTS create-migr --sp sp0 --rev "$SP_REV" \
+		--name m0 --src-side "$srcSide"
+
+	# A namespace moves only to a thin device of its own size
+	# (architecture.md, Subsystems, namespaces): its hosts keep the size
+	# they read. t2 is twice t0's, and the refusal names both sizes.
+	assert_no_write "set-ns-dev onto a thin device of another size" \
+		faults_gwx_out FAILED_PRECONDITION set-ns-dev --sp sp0 \
+		--rev "$SP_REV" --nqn "$ssNqn" --idx 1 --td t2
+	assert_field "$FAULTS_OUT" \
+		"(.message | contains(\"$TD_SIZE\")) and (.message | contains(\"$((2 * TD_SIZE))\"))" \
+		"true" "the size refusal names both sizes"
 
 	# A migration whose cutover has not started cannot finish, with force or
 	# without (architecture.md, Migrations): m0's cutover is pending until
@@ -5577,7 +5627,7 @@ case_faults() {
 		'.message | test("a migration is running on it")' "true" \
 		"the refused repair names the running migration"
 
-	# The fifteenth guard of this stage — an SP-level mutator refused
+	# The seventeenth guard of this stage — an SP-level mutator refused
 	# because the SP is `deleting` — has no probe HERE on purpose: `delete-sp`
 	# sets the flag
 	# (gateway.md, Storage pools and GrowSlice), and stage 20 of case S drives
@@ -5590,7 +5640,7 @@ case_faults() {
 	# nothing, so every call above was made with a token that was still
 	# current when the next one went out.
 	assert_eq "$(sp_rev_of sp0)" "$SP_REV" \
-		"step 3: SpRev is untouched by fourteen refusals"
+		"step 3: SpRev is untouched by sixteen refusals"
 
 	# -----------------------------------------------------------------
 	stage 4 "agent faults: hung, closed and stopped agents are ABORTED"

@@ -229,9 +229,12 @@ substituting that default is GW11's job on the write path, never this
 one's. `md_check_conf.interval_days` and `start_hold_conf.seconds` are
 the two exceptions: the zero of each in a present message is kept, as no
 md check and as no start hold (GW11). `validate.go` also refuses a
-`bdev_feature_list` that is not empty and a `qos_ratio` that is not all
-zero, and it checks the `bdev_conf` geometry rules, which `CreateCluster`
-judges once more on its resolved conf, still before any read (Clusters).
+`bdev_feature_list` that is not empty, a `qos_ratio` that is not all
+zero, an extent size that is not a whole number of `DnExtSizeUnit` and a
+transport conf whose `tr_type` or `adr_fam` is not one dnv takes, and it
+checks the `bdev_conf` geometry rules and the block's bound, which
+`CreateCluster` judges once more on its resolved conf, still before any
+read (Clusters).
 The list `count` is the one bounded
 numeric GW11 does not cover, because it reaches no stored message at all:
 `pageLimit` refuses a value above `MaxListCnt` (`INVALID_ARGUMENT`, never a
@@ -518,7 +521,10 @@ read, right behind GW6's token check, and a group's retired legs at
 `MaxRetiredLegPerGrp` for an operator's `CreateRepair` with a fresh new leg
 and `GrowSlice`'s group ceiling from the planning snapshot. A caller at a
 ceiling then hears the ceiling rather than a scan's shortfall, and no scan
-is run for a create that cannot commit. `GrowSlice` is the one allocating
+is run for a create that cannot commit. `CreateMigration` answers its name,
+its pool's block, its source side and its slot from the same planning read,
+in that order behind the ceiling, so a re-send of a created migration hears
+`ALREADY_EXISTS` rather than a scan's shortfall (Migrations). `GrowSlice` is the one allocating
 RPC whose op keeps a stale pick's own refusal: a record that is gone, a DN
 no longer allocatable or one short of extents is `FAILED_PRECONDITION`
 (GW7) with no further round (`dnv-worker.md` MD5), where every other
@@ -530,7 +536,11 @@ cap included, without allocating: its scan is the plan's walk for uncreated
 snapshots, and its STM fails candidate-changed when the SP it resolves is
 not the one the plan walked or its `SpRev.revision` is no longer the one the
 plan read — though a request carrying the token that finds the revision
-moved fails GW6 first, `ABORTED` (Thin devices).
+moved fails GW6 first, `ABORTED` (Thin devices). `UpdateNamespaceDev` runs
+it too: its scan is the plan's walk for the td its namespace points at,
+and its STM fails candidate-changed when the SP it resolves is not the one
+the plan walked or the namespace no longer points at that td (Subsystems
+and namespaces).
 
 GW10. **Pagination.** The token, the page and the plain reads of the paged
 lists are `architecture.md`, page_token; `pageNames` carries them out. It
@@ -1145,9 +1155,10 @@ are those of `architecture.md`, Subsystems, namespaces.
   the listing rule as every writer does (`architecture.md` [D18]); a
   `CdcEntry` whose key is missing is rebuilt as `CreateSubsystem` writes it
   (`rebuildCdcEntry`) and written with the new hosts. Reply `ss_id`.
-* **CreateNamespace** — `ns_idx` non-zero, judged with the rest of the
-  validation before any read (GW4), so that a full subsystem never answers
-  it with its ceiling; STM: the subsystem by NQN; the `MaxNsCntPerSs`
+* **CreateNamespace** — `ns_idx` neither zero nor `NvmeNsidAll`, judged
+  with the rest of the validation before any read (GW4), so that a full
+  subsystem never answers it with its ceiling; STM: the subsystem by NQN;
+  the `MaxNsCntPerSs`
   ceiling; `ns_idx` unused in this subsystem; no transfer naming the place
   as its origin (`nsTransferRef`); the td by `td_name`; no transfer whose
   origin namespace lies on that td (`tdTransferRef`); mint
@@ -1158,9 +1169,20 @@ are those of `architecture.md`, Subsystems, namespaces.
 * **DeleteNamespace** — the NQN checked for length alone, as for
   `DeleteSubsystem`; locate by NQN and `ns_idx`; no transfer naming it as
   its origin (`nsTransferRef`); remove from `ns_list`. Reply `ns_id`.
-* **UpdateNamespaceDev** — locate the namespace; no transfer naming it as
-  its origin (`nsTransferRef`); resolve the new `td_name`; no transfer whose
-  origin namespace lies on that td (`tdTransferRef`); repoint the
+* **UpdateNamespaceDev** — a plan, then a deciding STM, looped as a GW9
+  unit; why the walk stays out of the deciding transaction is
+  `architecture.md`, Subsystems, namespaces. Plan, one read-only
+  `Snapshot`: resolve; token; locate the namespace (`NOT_FOUND`); walk
+  `td_name_list` for the td whose `td_id` the namespace holds
+  (`tdNameById`; a listed key missing, or no td found, is `ABORTED`) and
+  keep its name, its id, the resolved cluster id and `sp_id`. STM:
+  resolve; token; a cluster id or `sp_id` other than the plan's is
+  candidate changed; locate the namespace; no transfer naming it as its
+  origin (`nsTransferRef`); resolve the new `td_name`; no transfer whose
+  origin namespace lies on that td (`tdTransferRef`); a namespace that no
+  longer points at the plan's td is candidate changed, re-plan; that td by
+  the plan's name, holding the plan's `td_id` (else `ABORTED`); a new td of
+  another `size` is `FAILED_PRECONDITION` naming both sizes; repoint the
   namespace's td reference. Reply `ns_id`.
 * **UpdateNamespaceSuspended** — locate the namespace; set `suspended`.
   Reply `ns_id`.
@@ -1347,14 +1369,16 @@ that refusal, may.
 
 The codes are those of `architecture.md`, Migrations.
 
-* **CreateMigration** — the `MaxMigrCntPerSp` ceiling, right behind the
-  token in each round's planning read (`migrCntBelowCeiling`, GW9); locate
+* **CreateMigration** — the `MaxMigrCntPerSp` ceiling, the name free and
+  the pool's block within the block's bound, right behind the token in each
+  round's planning read (`migrPoolChecks`, GW9); locate
   `src_side_id` by a slice scan, and, only when no slice holds it, among the
   sides of the clones' clone meta groups, where a find is
   `FAILED_PRECONDITION` naming the clone (`migrSrcLocation`, in the plan and
   in the STM alike); a side of the bad leg of the group's repair, read through
   the group's `rep_name` (`grpRepair`), is refused `FAILED_PRECONDITION`, and
-  its leg already holding two sides is refused; a candidate unit for one DN
+  its leg already holding two sides is refused; the destination's slot
+  (`migrDstCntlidSlot`, GW18), in the planning read too; a candidate unit for one DN
   (`pickDns`, with the black list and the two tiers of `architecture.md`,
   Per-operation allocation, both over the group's DN set, its repair's new
   legs included (`grpDnAddrs`); the group's DN locations are read outside
@@ -1365,8 +1389,8 @@ The codes are those of `architecture.md`, Migrations.
   locations — before it scans). The scan passes over a DN without room for
   those units (`architecture.md`, Metadata units), and a round left with no
   DN for that reason alone answers `RESOURCE_EXHAUSTED` saying no DN has
-  metadata room. STM: resolve; token; the ceiling again; re-verify the
-  topology; the units
+  metadata room. STM: resolve; token; the ceiling, the name and the block
+  again (`migrPoolChecks`); re-verify the topology and the slot; the units
   computed again from what this STM reads; the gain check of
   `architecture.md`, Per-operation allocation — the group as this STM reads
   it, with its repair's new legs, holding a DN the round's read of it did
@@ -1906,9 +1930,15 @@ gateway, never through `workerctl`.
   present zero token are refused — and, through the documented client retry
   on "stale revision", as a liveness loop that converges.
 * faults (one gateway) — the refusal batteries on a live pool: validation,
-  not-found and precondition classes — a finish of a migration whose cutover
-  is pending among them, refused with `force` and without —, each refusal
-  provably writing nothing; the primary threshold's floor of
+  not-found and precondition classes — among them an extent size off its
+  unit and a data block over the block's bound at a cluster's and a pool's
+  create, the NSID that names every namespace, a clone source's namespace
+  id of zero, a node's `tr_type` of "TCP" and `adr_fam` of "IPv4", each
+  refused before any read or agent call, a namespace moved to a thin
+  device of another size, a migration re-sent under a taken name, which
+  hears `ALREADY_EXISTS` ahead of its leg's two sides, and a finish of a
+  migration whose cutover is pending, refused with `force` and without —,
+  each refusal provably writing nothing; the primary threshold's floor of
   `architecture.md`, Common validation, from both sides — the validation
   battery refuses a pool whose primary threshold is one second under twice
   the cluster's stored `cntlr_interval`, and the same request at exactly

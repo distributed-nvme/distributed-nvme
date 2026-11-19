@@ -339,6 +339,13 @@ type recordingClient struct {
 	req proto.Message
 }
 
+func (c *recordingClient) CreateCluster(
+	ctx context.Context, in *pb.CreateClusterRequest, _ ...grpc.CallOption,
+) (*pb.CreateClusterReply, error) {
+	c.req = in
+	return &pb.CreateClusterReply{ClusterId: 1}, nil
+}
+
 func (c *recordingClient) CreateStoragePool(
 	ctx context.Context, in *pb.CreateStoragePoolRequest, _ ...grpc.CallOption,
 ) (*pb.CreateStoragePoolReply, error) {
@@ -553,6 +560,32 @@ func TestSetGrpOperatorInChargeRequest(t *testing.T) {
 	if off.GetOperatorInCharge() {
 		t.Errorf("--operator-in-charge=false built %v, want the flag clear",
 			off)
+	}
+}
+
+// TestCreateClusterRequest pins the request create-cluster builds: a bare
+// one carries no conf at all, the pure-defaults request every cluster of the
+// suite is made with, and --extent-size and --block-size each send only
+// their own member.
+func TestCreateClusterRequest(t *testing.T) {
+	bare := runArgv(t, "create-cluster").(*pb.CreateClusterRequest)
+	if !proto.Equal(bare, &pb.CreateClusterRequest{
+		ClusterName: defaultCluster,
+	}) {
+		t.Errorf("bare create-cluster built %v, want the name alone", bare)
+	}
+	req := runArgv(t, "create-cluster",
+		"--extent-size", "100000000", "--block-size", "8388608",
+	).(*pb.CreateClusterRequest)
+	want := &pb.CreateClusterRequest{
+		ClusterName: defaultCluster,
+		DnBinConf:   &pb.DnBinConf{ExtentSize: 100000000},
+		BdevConf: &pb.BdevConf{
+			DmPoolConf: &pb.DmPoolConf{DataBlockSize: 8388608},
+		},
+	}
+	if !proto.Equal(req, want) {
+		t.Errorf("request:\n got %v\nwant %v", req, want)
 	}
 }
 

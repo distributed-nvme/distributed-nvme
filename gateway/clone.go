@@ -337,6 +337,15 @@ func (s *Server) CreateClone(
 	if err := validateCloneSrcNqn("src_nqn", req.GetSrcNqn()); err != nil {
 		return nil, err
 	}
+	// The primary looks the source namespace up by its NSID, and reads 0 as
+	// any namespace (NvmeHost.nsidIs, agent/nvmehost.go), so a 0 would copy
+	// whichever namespace the source lists first; common.NvmeNsidAll names
+	// none, and the clone would wait for it for ever.
+	if idx := req.GetSrcNsIdx(); idx == 0 || idx == common.NvmeNsidAll {
+		return nil, errInvalid("src_ns_idx %#x names no one namespace of "+
+			"the source: 0 and %#x are reserved by NVMe", idx,
+			uint32(common.NvmeNsidAll))
+	}
 	if err := validateCloneGeometry(
 		req.GetSrcSliceCnt(), req.GetSrcStripeSize(), req.GetSrcBlockSize(),
 	); err != nil {

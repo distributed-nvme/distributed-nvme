@@ -465,10 +465,10 @@ but proto3's "unset", accepted as the one exception, while any other
 non-ladder set is INVALID_ARGUMENT — and falls back to the default ladder as
 a whole set, never shift by shift (`architecture.md`, DN bins;
 `architecture.md`, Clusters); a flag for a single shift could only build a
-set that changes nothing or one the gateway refuses. The bound on a non-zero
-size is the gateway's (`architecture.md`, Common validation): dnvctl
-range-checks nothing (CT8), and neither end applies an alignment or
-power-of-two rule. The command line is the flag's only carrier, like every
+set that changes nothing or one the gateway refuses. The bounds on a non-zero
+size, and its unit, a whole number of `DnExtSizeUnit`, are the gateway's
+(`architecture.md`, Common validation): dnvctl range-checks nothing (CT8),
+and no end applies a power-of-two rule. The command line is the flag's only carrier, like every
 leaf flag's (CT9), which matters most here because the value is write-once:
 `DNVCTL_EXTENT_SIZE` and an `extent-size` key in the `--config` file reach
 no request, so no stale variable sizes every cluster created under it, and

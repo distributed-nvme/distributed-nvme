@@ -2,6 +2,7 @@ package gateway
 
 import (
 	"context"
+	"fmt"
 	"math"
 
 	"google.golang.org/grpc/status"
@@ -291,7 +292,12 @@ func resolveSpBdevConf(
 // The stripe's bound on its product with the slice count is judged here as
 // the guard of what is stored; a stripe the request did not name is narrowed
 // to meet it, so only a named one can break it, and the pure check before
-// any read refuses that one first.
+// any read refuses that one first. The block's bound is judged here too
+// (validateBdevConf): a block the request names is refused before any read,
+// so only the cluster's can break it here, which only a cluster created
+// before the bound stores, and it is refused with the way out named, never
+// narrowed — a narrowed block would change the pool's md bitmap chunk and
+// the operator's geometry unasked.
 func validateMergedBdevConf(
 	bdev *pb.BdevConf,
 	req *pb.BdevConf,
@@ -308,8 +314,13 @@ func validateMergedBdevConf(
 	hint := ""
 	block := bdev.GetDmPoolConf().GetDataBlockSize()
 	stripe := bdev.GetDmRaid0Conf().GetStripeSize()
-	if req.GetDmRaid0Conf().GetStripeSize() == 0 && stripe != 0 &&
-		block%stripe != 0 {
+	switch {
+	case req.GetDmPoolConf().GetDataBlockSize() == 0 &&
+		block > common.MaxNvmeTcpCmdBytes:
+		hint = fmt.Sprintf("; the data_block_size is the cluster's: "+
+			"name one of at most %d", common.MaxNvmeTcpCmdBytes)
+	case req.GetDmRaid0Conf().GetStripeSize() == 0 && stripe != 0 &&
+		block%stripe != 0:
 		hint = "; the stripe_size is the cluster's, narrowed to the " +
 			"slice count where its product needs it: name one that " +
 			"divides the data_block_size"

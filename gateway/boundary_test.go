@@ -1324,38 +1324,33 @@ func bndGeomCluster(t *testing.T, s *Server, extentSize uint64) string {
 	return cluster
 }
 
-// TestGroupHoldsItsMetaBlocksExactly pins the group geometry rule of
-// architecture.md, Group on-leg layout: meta region, data region, health
-// block, at its edge, through CreateStoragePool on 1 GiB pool blocks. A group
-// one block larger than its meta blocks is the smallest that is accepted and
-// stores one data block; a group of exactly its meta blocks is refused
-// INVALID_ARGUMENT and writes no pool. A RedundNone group needs one meta block,
-// so 2 GiB extents are accepted and 1 GiB extents refused; an md-raid1 group
-// with one-block bitmap chunks needs three (the md superblock block, one
-// bitmap block, the health block), so 4 GiB extents are accepted and 3 GiB
-// extents refused. The one-extent meta group and the one-extent data group
-// meet the edge together.
+// TestGroupHoldsItsMetaBlocksExactly pins, through CreateStoragePool, that
+// every group a create can make holds data blocks beside its meta blocks
+// (architecture.md, Group on-leg layout: meta region, data region, health
+// block): the smallest extent, MinDnExtSize, at the largest block the block's
+// bound takes, MaxNvmeTcpCmdBytes, is 16 blocks, and a group needs at most
+// three meta blocks. A RedundNone group keeps one (the health block) and 15
+// data blocks; an md-raid1 group with one-block bitmap chunks keeps three
+// (the md superblock block, one bitmap block, the health block) and 13. So
+// GroupBlocks' refusal of a group too small for its meta blocks is reached by
+// no create, and model's TestGroupBlocksAtTheMetaEdge pins that edge.
 func TestGroupHoldsItsMetaBlocksExactly(t *testing.T) {
-	const gib = uint64(1) << 30
 	for _, tc := range []struct {
-		label      string
-		extentSize uint64
-		raid1      bool
-		wantCode   codes.Code
-		wantMeta   uint64
+		label    string
+		raid1    bool
+		wantMeta uint64
 	}{
-		{"RedundNone, one data block", 2 * gib, false, codes.OK, 1},
-		{"RedundNone, no data block", 1 * gib, false,
-			codes.InvalidArgument, 0},
-		{"md-raid1, one data block", 4 * gib, true, codes.OK, 3},
-		{"md-raid1, no data block", 3 * gib, true, codes.InvalidArgument, 0},
+		{"RedundNone", false, 1},
+		{"md-raid1", true, 3},
 	} {
 		t.Run(tc.label, func(t *testing.T) {
 			s := newTestServer(t)
 			ctx := context.Background()
-			cluster := bndGeomCluster(t, s, tc.extentSize)
+			cluster := bndGeomCluster(t, s, common.MinDnExtSize)
 			bdev := &pb.BdevConf{
-				DmPoolConf: &pb.DmPoolConf{DataBlockSize: gib},
+				DmPoolConf: &pb.DmPoolConf{
+					DataBlockSize: common.MaxNvmeTcpCmdBytes,
+				},
 			}
 			if tc.raid1 {
 				bdev.RedundConf = &pb.RedundConf{
@@ -1374,19 +1369,6 @@ func TestGroupHoldsItsMetaBlocksExactly(t *testing.T) {
 				InitExtCnt:  1,
 				BdevConf:    bdev,
 			})
-			if tc.wantCode != codes.OK {
-				bndWantMsg(t, err, tc.wantCode, "meta blocks", tc.label)
-				reply, err := s.ListStoragePools(ctx,
-					&pb.ListStoragePoolsRequest{ClusterName: cluster})
-				if err != nil {
-					t.Fatalf("ListStoragePools: %v", err)
-				}
-				if len(reply.GetSpName()) != 0 {
-					t.Errorf("the refusal wrote a pool: %v",
-						reply.GetSpName())
-				}
-				return
-			}
 			wantCode(t, err, codes.OK, tc.label)
 			reply, err := s.GetStoragePool(ctx, &pb.GetStoragePoolRequest{
 				ClusterName: cluster,
@@ -1395,14 +1377,16 @@ func TestGroupHoldsItsMetaBlocksExactly(t *testing.T) {
 			if err != nil {
 				t.Fatalf("GetStoragePool: %v", err)
 			}
+			total := uint64(common.MinDnExtSize / common.MaxNvmeTcpCmdBytes)
 			for _, slice := range reply.GetSliceList() {
 				for _, grp := range append(slice.GetMetaGrpList(),
 					slice.GetDataGrpList()...) {
 					if grp.GetMetaBlocks() != tc.wantMeta ||
-						grp.GetDataBlocks() != 1 {
-						t.Errorf("group %d: meta %d data %d, want %d and 1",
+						grp.GetDataBlocks() != total-tc.wantMeta {
+						t.Errorf("group %d: meta %d data %d, want %d and %d",
 							grp.GetGrpId(), grp.GetMetaBlocks(),
-							grp.GetDataBlocks(), tc.wantMeta)
+							grp.GetDataBlocks(), tc.wantMeta,
+							total-tc.wantMeta)
 					}
 				}
 			}

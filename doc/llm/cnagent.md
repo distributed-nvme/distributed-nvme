@@ -1059,7 +1059,9 @@ sides the pass tries to connect, and each such leg reads
 `RES_STATUS_ERROR` with the dial's text; a leg that still holds its
 controller to that node, connecting, is not dialled (Known limits). The
 mark goes with the plan: the next pass dials again. Only a `DialTransport`
-side is dialled; a side of another transport is connected with no dial.
+side is dialled; a side of another transport, which only a record stored
+before the gateway took TCP alone can carry (`architecture.md`, Common
+validation), is connected with no dial.
 
 **No converge in the background.** A connect failure marks that leg
 `RES_STATUS_ERROR`, and nothing in the agent runs the converge again by

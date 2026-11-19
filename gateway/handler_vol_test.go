@@ -5,6 +5,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"math"
 	"reflect"
 	"regexp"
 	"strings"
@@ -2336,6 +2337,15 @@ func TestCreateNamespaceRefusals(t *testing.T) {
 			want: codes.InvalidArgument,
 		},
 		{
+			// 0xFFFFFFFF addresses every namespace of a controller in
+			// NVMe, and nvmet refuses to make a namespace of it.
+			name: "ns_idx 0xFFFFFFFF names every namespace",
+			req: &pb.CreateNamespaceRequest{
+				NsIdx: math.MaxUint32, TdName: "vol",
+			},
+			want: codes.InvalidArgument,
+		},
+		{
 			name: "ns_idx already used",
 			setup: func(env *volEnv) {
 				subsystem := env.subsystem(volNqn)
@@ -2392,6 +2402,156 @@ func TestCreateNamespaceRefusals(t *testing.T) {
 			volWantCode(t, err, tc.want)
 			env.wantUntouched(before, beforeRev)
 		})
+	}
+}
+
+// TestCreateNamespaceRefusesTheTwoReservedIdsBeforeAnyRead pins that both
+// NSIDs NVMe reserves, 0 and 0xFFFFFFFF, are refused with the rest of the
+// validation (GW4): a pool that does not exist still answers
+// INVALID_ARGUMENT, not NOT_FOUND.
+func TestCreateNamespaceRefusesTheTwoReservedIdsBeforeAnyRead(t *testing.T) {
+	env := newVolEnv(t)
+	for _, idx := range []uint32{0, math.MaxUint32} {
+		_, err := env.srv.CreateNamespace(env.ctx, &pb.CreateNamespaceRequest{
+			ClusterName: env.cluster,
+			SpName:      "no-such-pool",
+			Nqn:         volNqn,
+			NsIdx:       idx,
+			TdName:      "vol",
+		})
+		msg := volWantCode(t, err, codes.InvalidArgument)
+		if !strings.Contains(msg, "ns_idx") {
+			t.Errorf("ns_idx %#x: message %q does not name ns_idx", idx, msg)
+		}
+	}
+}
+
+// TestUpdateNamespaceDevRefusesAnotherSize pins the size rule of
+// architecture.md, Subsystems, namespaces: a namespace is repointed only at a
+// thin device of the size of the one it points at, since the host keeps the
+// size it read and nvmet is not told of another, so a smaller device fails
+// the host's IO past its end. A td of another size is FAILED_PRECONDITION
+// naming both sizes, and nothing is written; a snapshot of the origin, which
+// inherits its size, and the namespace's own td are taken.
+func TestUpdateNamespaceDevRefusesAnotherSize(t *testing.T) {
+	env := newVolEnv(t)
+	env.putSubsystem(volNqn, 501, []*pb.Namespace{{
+		NsId: 601, NsIdx: 1, TdId: 900,
+	}})
+	env.putTd("vol", 900, 7, 0, true)
+	env.putTd("snap", 901, 8, 7, true)
+	for _, tc := range []struct {
+		name string
+		size uint64
+	}{
+		{"smaller", volTdSize / 2},
+		{"larger", volTdSize * 2},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			other := "other-" + tc.name
+			env.putTd(other, 910+uint64(len(tc.name)), 20+uint32(len(tc.name)), 0, true)
+			td := env.td(other)
+			td.Size = tc.size
+			mustPut(t, env.cli,
+				model.ThinDeviceKey(env.cid, volSpId, other), td)
+			before := env.dump()
+			_, err := env.srv.UpdateNamespaceDev(env.ctx,
+				&pb.UpdateNamespaceDevRequest{
+					ClusterName: env.cluster,
+					SpName:      volSpName,
+					SpRev:       env.token(),
+					Nqn:         volNqn,
+					NsIdx:       1,
+					TdName:      other,
+				})
+			msg := volWantCode(t, err, codes.FailedPrecondition)
+			for _, want := range []string{
+				fmt.Sprint(tc.size), fmt.Sprint(volTdSize),
+			} {
+				if !strings.Contains(msg, want) {
+					t.Errorf("message %q does not name the size %s",
+						msg, want)
+				}
+			}
+			if changed := sptChangedKeys(before, env.dump()); len(
+				changed) != 0 {
+				t.Errorf("a refusal wrote %v", changed)
+			}
+		})
+	}
+	for _, name := range []string{"snap", "snap", "vol"} {
+		if _, err := env.srv.UpdateNamespaceDev(env.ctx,
+			&pb.UpdateNamespaceDevRequest{
+				ClusterName: env.cluster,
+				SpName:      volSpName,
+				SpRev:       env.token(),
+				Nqn:         volNqn,
+				NsIdx:       1,
+				TdName:      name,
+			}); err != nil {
+			t.Fatalf("UpdateNamespaceDev to %s, of the same size: %v",
+				name, err)
+		}
+		if got, want := findNs(env.subsystem(volNqn), 1).GetTdId(),
+			env.td(name).GetTdId(); got != want {
+			t.Errorf("after the repoint to %s: td_id %d, want %d",
+				name, got, want)
+		}
+	}
+}
+
+// TestUpdateNamespaceDevAtTheTdCeiling is the repoint's half of the txn
+// budget, committed against the real etcd this package starts with
+// --max-txn-ops=common.EtcdMaxTxnOps: in a pool of MaxTdCntPerSp thin
+// devices, a namespace on the LAST td of td_name_list is repointed. The size
+// rule finds the namespace's current td by its id, which no key names, so it
+// walks td_name_list; a deciding STM that walked it would compare every td
+// it read and be refused here, and the namespace could never move. The walk
+// is the plan's, a read-only Snapshot, and the deciding STM reads the one td
+// the plan found (TestUpdateNamespaceDevTxnBudget pins the arithmetic).
+func TestUpdateNamespaceDevAtTheTdCeiling(t *testing.T) {
+	env := newVolEnv(t)
+	name := func(idx int) string { return fmt.Sprintf("ceiling-%04d", idx) }
+	rev := env.spRev()
+	for idx := 0; idx < common.MaxTdCntPerSp; idx++ {
+		_, err := env.srv.CreateThinDevice(env.ctx, &pb.CreateThinDeviceRequest{
+			ClusterName: env.cluster,
+			SpName:      volSpName,
+			SpRev:       &pb.SpRev{Revision: rev},
+			TdName:      name(idx),
+			Size:        volTdSize,
+		})
+		if err != nil {
+			t.Fatalf("CreateThinDevice %d of %d: %v",
+				idx+1, common.MaxTdCntPerSp, err)
+		}
+		rev++
+	}
+	last := env.td(name(common.MaxTdCntPerSp - 1))
+	env.putSubsystem(volNqn, 501, []*pb.Namespace{{
+		NsId: 601, NsIdx: 1, TdId: last.GetTdId(),
+	}})
+	rev = env.spRev()
+	if _, err := env.srv.UpdateNamespaceDev(env.ctx,
+		&pb.UpdateNamespaceDevRequest{
+			ClusterName: env.cluster,
+			SpName:      volSpName,
+			SpRev:       &pb.SpRev{Revision: rev},
+			Nqn:         volNqn,
+			NsIdx:       1,
+			TdName:      name(0),
+		}); err != nil {
+		t.Fatalf("UpdateNamespaceDev from the last of %d thin devices: %v "+
+			"(\"etcdserver: too many operations in txn request\" here "+
+			"means the deciding transaction reads the pool's thin devices)",
+			common.MaxTdCntPerSp, err)
+	}
+	if got, want := findNs(env.subsystem(volNqn), 1).GetTdId(),
+		env.td(name(0)).GetTdId(); got != want {
+		t.Errorf("td_id: got %d, want %d", got, want)
+	}
+	if got := env.spRev(); got != rev+1 {
+		t.Errorf("sp_rev: got %d, want %d", got, rev+1)
 	}
 }
 
@@ -3213,6 +3373,7 @@ func TestCreateCloneRefusesASecondCloneOnOneTd(t *testing.T) {
 		CloneName:     "clone-b",
 		SrcTrConf:     []*pb.NvmeTrConf{volTrConf(volCnA)},
 		SrcNqn:        volSrcNqn,
+		SrcNsIdx:      1,
 		SrcSliceCnt:   volCloneSrcSliceCnt,
 		SrcStripeSize: 64 * 1024,
 		SrcBlockSize:  1024 * 1024,
@@ -3224,6 +3385,75 @@ func TestCreateCloneRefusesASecondCloneOnOneTd(t *testing.T) {
 			msg)
 	}
 	env.wantUntouched(before, beforeRev)
+}
+
+// TestCreateCloneRefusesASourceNsIdxOfNoNamespace pins the src_ns_idx rule of
+// architecture.md, Clones: 0 and 0xFFFFFFFF name no one namespace of the
+// source, so the primary would copy whichever namespace the source lists
+// first, or wait for ever for one. Both are INVALID_ARGUMENT before any read,
+// so a pool that does not exist still hears it, and nothing is written.
+func TestCreateCloneRefusesASourceNsIdxOfNoNamespace(t *testing.T) {
+	env := newVolEnv(t)
+	env.putTd("dst", 900, 7, 0, true)
+	for _, idx := range []uint32{0, math.MaxUint32} {
+		for _, pool := range []string{volSpName, "no-such-pool"} {
+			req := volCloneRequest(env, "clone-a", "dst")
+			req.SpName = pool
+			req.SrcNsIdx = idx
+			before := env.dump()
+			_, err := env.srv.CreateClone(env.ctx, req)
+			msg := volWantCode(t, err, codes.InvalidArgument)
+			if !strings.Contains(msg, "src_ns_idx") {
+				t.Errorf("src_ns_idx %#x in %s: message %q does not name "+
+					"src_ns_idx", idx, pool, msg)
+			}
+			if changed := sptChangedKeys(before, env.dump()); len(
+				changed) != 0 {
+				t.Errorf("a refusal wrote %v", changed)
+			}
+		}
+	}
+}
+
+// TestCloneRefusesASourceOfAnotherTransport pins the transport rule of
+// architecture.md, Common validation, on the two clone calls that carry a
+// source's transport list: an entry whose tr_type is not tcp is
+// INVALID_ARGUMENT naming src_tr_conf, since the primary hands it to the
+// kernel, which knows tcp only in lower case.
+func TestCloneRefusesASourceOfAnotherTransport(t *testing.T) {
+	env := newVolEnv(t)
+	env.putTd("dst", 900, 7, 0, true)
+	rdma := volTrConf(volCnA)
+	rdma.TrType = "rdma"
+	req := volCloneRequest(env, "clone-a", "dst")
+	req.SrcTrConf = []*pb.NvmeTrConf{volTrConf(volCnA), rdma}
+	before := env.dump()
+	_, err := env.srv.CreateClone(env.ctx, req)
+	if msg := volWantCode(t, err, codes.InvalidArgument); !strings.Contains(
+		msg, "src_tr_conf.tr_type") {
+		t.Errorf("CreateClone: message %q does not name src_tr_conf.tr_type",
+			msg)
+	}
+	if changed := sptChangedKeys(before, env.dump()); len(changed) != 0 {
+		t.Errorf("a refused CreateClone wrote %v", changed)
+	}
+	volCreateClone(env, "clone-a", "dst")
+	before = env.dump()
+	_, err = env.srv.UpdateCloneTrConf(env.ctx, &pb.UpdateCloneTrConfRequest{
+		ClusterName: env.cluster,
+		SpName:      volSpName,
+		SpRev:       env.token(),
+		CloneName:   "clone-a",
+		SrcTrConf:   []*pb.NvmeTrConf{rdma},
+	})
+	if msg := volWantCode(t, err, codes.InvalidArgument); !strings.Contains(
+		msg, "src_tr_conf.tr_type") {
+		t.Errorf("UpdateCloneTrConf: message %q does not name "+
+			"src_tr_conf.tr_type", msg)
+	}
+	if changed := sptChangedKeys(before, env.dump()); len(changed) != 0 {
+		t.Errorf("a refusal wrote %v", changed)
+	}
 }
 
 // TestAppendCloneBitmapPairAddressing pins the two rules architecture.md,
@@ -5052,6 +5282,79 @@ func TestCreateMigrationRefusals(t *testing.T) {
 	}
 }
 
+// TestCreateMigrationAnswersBeforeItsScan pins the order of architecture.md,
+// Migrations, and GW9: the name, the source's two-sided leg and the slot are
+// answered from the planning read, before the scan, so a selector that leaves
+// no disk node — which the scan would answer RESOURCE_EXHAUSTED — does not
+// hide them. A re-send of a created migration hears ALREADY_EXISTS, and a
+// pool whose slot list has no second slot hears so whatever its disk nodes.
+func TestCreateMigrationAnswersBeforeItsScan(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		setup func(env *volEnv)
+		migr  string
+		want  codes.Code
+		says  string
+	}{
+		{
+			name: "a taken name",
+			setup: func(env *volEnv) {
+				conf := env.spConf()
+				conf.MigrNameList = []string{"migr-b"}
+				env.putSpConf(conf)
+			},
+			migr: "migr-b",
+			want: codes.AlreadyExists,
+			says: "already exists",
+		},
+		{
+			name: "a re-send of a created migration",
+			setup: func(env *volEnv) {
+				volCreateMigration(env, "migr-a")
+			},
+			migr: "migr-a",
+			want: codes.AlreadyExists,
+			says: "already exists",
+		},
+		{
+			name: "a slot list with no second slot",
+			setup: func(env *volEnv) {
+				conf := env.spConf()
+				conf.CntlidSlotList = []uint32{volSlot}
+				env.putSpConf(conf)
+			},
+			migr: "migr-b",
+			want: codes.FailedPrecondition,
+			says: "cntlid_slot_list",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			env := newVolEnv(t)
+			tc.setup(env)
+			before := env.dump()
+			_, err := env.srv.CreateMigration(
+				env.ctx, &pb.CreateMigrationRequest{
+					ClusterName: env.cluster,
+					SpName:      volSpName,
+					SpRev:       env.token(),
+					MigrName:    tc.migr,
+					SrcSideId:   volDataSideA,
+					// dn-a already carries a leg of the group, so the
+					// scan would find no disk node.
+					DnSelector: volDnSelector(volDnA),
+				})
+			msg := volWantCode(t, err, tc.want)
+			if !strings.Contains(msg, tc.says) {
+				t.Errorf("message %q does not say %q", msg, tc.says)
+			}
+			if changed := sptChangedKeys(before, env.dump()); len(
+				changed) != 0 {
+				t.Errorf("a refusal wrote %v", changed)
+			}
+		})
+	}
+}
+
 // TestGetMigration pins the read of architecture.md, Migrations: the record is
 // replied verbatim, cutover_pending as stored: set from the create, clear once
 // the cutover has cleared it.
@@ -5321,6 +5624,7 @@ func volTokenCases() []volTokenCase {
 						SpRev: rev, CloneName: "clone-x",
 						SrcTrConf:   []*pb.NvmeTrConf{volTrConf(volCnA)},
 						SrcNqn:      volSrcNqn,
+						SrcNsIdx:    1,
 						SrcSliceCnt: 1, SrcStripeSize: 64 * 1024,
 						SrcBlockSize: 1024 * 1024, DstTdName: "vol",
 					})

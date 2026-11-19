@@ -975,16 +975,16 @@ func TestCreateStoragePoolBdevConfMergeRungs(t *testing.T) {
 // CNs: the merge is judged before the scans, so that must still be
 // INVALID_ARGUMENT and not the CN scan's RESOURCE_EXHAUSTED.
 //
-// The created pool is the converse: a 16 MiB block would be a 2 GiB bitmap
-// chunk under the 128-block constant, above the 1 GiB ceiling, and is legal
-// only through the INHERITED one-block chunk, so a handler that judged against
-// the constants would refuse it. Then an illegal merge sent under the name
+// The created pool is the converse: a 4 MiB block, the largest the block's
+// bound takes, is stored with the INHERITED one-block chunk and the cluster's
+// 1 MiB stripe, where a handler that resolved against the constants would
+// store the 128-block one. Then an illegal merge sent under the name
 // that pool now holds is still INVALID_ARGUMENT, not ALREADY_EXISTS: the
 // geometry is judged before the existence check. Last, with the cluster's
 // stored chunk count zeroed, a request that would inherit it is ABORTED with
 // model's message (architecture.md, UNEXPECTED_ERROR → `ABORTED`): the stored
 // conf is checked before the merge could resolve that zero into a constant and
-// blame the request for the result.
+// store the pool with it.
 func TestCreateStoragePoolJudgesTheMergedGeometry(t *testing.T) {
 	const kib = uint64(1024)
 	const mib = 1024 * kib
@@ -1089,13 +1089,13 @@ func TestCreateStoragePoolJudgesTheMergedGeometry(t *testing.T) {
 		})
 	}
 	got := env.createSpBdev(t, &pb.BdevConf{
-		DmPoolConf: &pb.DmPoolConf{DataBlockSize: 16 * mib},
+		DmPoolConf: &pb.DmPoolConf{DataBlockSize: 4 * mib},
 		RedundConf: raid1(0),
 	})
-	if got.GetDmPoolConf().GetDataBlockSize() != 16*mib ||
+	if got.GetDmPoolConf().GetDataBlockSize() != 4*mib ||
 		got.GetDmRaid0Conf().GetStripeSize() != mib ||
 		got.GetRedundConf().GetRedundMdRaid1().GetBitmapChunkBlockCnt() != 1 {
-		t.Errorf("stored %v: want the request's 16 MiB block with the "+
+		t.Errorf("stored %v: want the request's 4 MiB block with the "+
 			"cluster's 1 MiB stripe and one-block chunk", got)
 	}
 	t.Run("an illegal merge under a name already taken", func(t *testing.T) {
@@ -1107,7 +1107,7 @@ func TestCreateStoragePoolJudgesTheMergedGeometry(t *testing.T) {
 	// judged against it (architecture.md, UNEXPECTED_ERROR → `ABORTED`). With the
 	// cluster's chunk count zeroed, the
 	// merge would resolve the request's unset count to the 128-block
-	// constant, and the 2 GiB chunk that makes would blame the request.
+	// constant and store the pool with a chunk nobody asked for.
 	t.Run("a stored conf with its chunk count zeroed", func(t *testing.T) {
 		key := model.ClusterConfKey(env.name)
 		cc := &pb.ClusterConf{}
@@ -1122,7 +1122,7 @@ func TestCreateStoragePoolJudgesTheMergedGeometry(t *testing.T) {
 		defer mustPut(t, env.srv.cli, key, healthy)
 		req := sptDefaultSpec("sparse").req(env.name)
 		req.BdevConf = &pb.BdevConf{
-			DmPoolConf: &pb.DmPoolConf{DataBlockSize: 16 * mib},
+			DmPoolConf: &pb.DmPoolConf{DataBlockSize: 4 * mib},
 			RedundConf: raid1(0),
 		}
 		before := dump(t)

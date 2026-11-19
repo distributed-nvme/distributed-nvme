@@ -529,6 +529,34 @@ func TestDeleteThinDeviceBudget(t *testing.T) {
 	}
 }
 
+// TestUpdateNamespaceDevTxnBudget is UpdateNamespaceDev's tripwire. Its size
+// rule compares the target td with the td the namespace points at, which
+// only its td_id names: finding it means walking td_name_list, the walk
+// DeleteThinDevice keeps out of its deciding STM for the same reason. The
+// walk is the plan's, a read-only Snapshot, and the deciding STM reads only
+// the one td the plan found, after checking that the namespace still points
+// at it, so no td but those two is ever in a committed read set: there is no
+// per-td factor, and MaxTdCntPerSp is deliberately not among the terms.
+// TestUpdateNamespaceDevAtTheTdCeiling commits the shape at the td ceiling.
+func TestUpdateNamespaceDevTxnBudget(t *testing.T) {
+	txnShape{
+		name: "UpdateNamespaceDev",
+		stm:  "subsystem.go's decideUpdateNamespaceDev",
+		// ClusterConf, SpConf, SpRev, the namespace's Subsystem, the target
+		// td and the td the namespace points at.
+		fixedReads: 6,
+		// The Subsystem and SpRev puts.
+		fixedWrites: 2,
+		terms: []txnTerm{
+			// nsTransferRef and tdTransferRef: the Transfer key, read by
+			// both, and its origin's Subsystem.
+			{"transfer", 2, common.MaxXferCntPerSp, 4},
+		},
+		maxCompares: 16,
+		overDefault: false,
+	}.check(t)
+}
+
 // mdNameMaxSliceIdx is the widest slice INDEX common/name_fmt.go's two md name
 // formats can carry. Both CnMdDevName and CnMdArrayName fold the meta flag
 // into bit 7 of the index — `if isMeta { sliceIdx |= 0x80 }` — and render the

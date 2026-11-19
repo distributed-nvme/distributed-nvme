@@ -19,6 +19,14 @@ const (
 	// validation). The cdc's log page code keeps the width of its own and
 	// does not build when this bound is raised past it.
 	MaxTrSvcIdLength = 32
+	// NvmeTrTypeTcp is the one NvmeTrConf.tr_type the gateway takes, and
+	// NvmeAdrFamIpv4 and NvmeAdrFamIpv6 the two adr_fam values
+	// (architecture.md, Common validation): the agents hand tr_type to the
+	// kernel, which matches the transport's name exactly, and dnv-cdc
+	// renders no other words into a discovery log entry (cdc.md DS3).
+	NvmeTrTypeTcp  = "tcp"
+	NvmeAdrFamIpv4 = "ipv4"
+	NvmeAdrFamIpv6 = "ipv6"
 
 	ShardBucketSize = 256
 	ShardCodeFmt    = "%02x"
@@ -30,6 +38,11 @@ const (
 	DefaultDnBin1Shift = 4
 	DefaultDnBin2Shift = 8
 	DefaultDnBin3Shift = 12
+	// DnExtSizeUnit is the unit an extent size comes in: CreateCluster
+	// refuses one that is not a whole number of it (architecture.md, Common
+	// validation), so every run of a side starts and ends on a sector and on
+	// a 4 KiB physical block, and the runs of a side sum to the side.
+	DnExtSizeUnit = 4096
 
 	MaxHealthCheckInterval     = 3600
 	MinHealthCheckInterval     = 1
@@ -79,7 +92,9 @@ const (
 
 	// CreateClone checks a source's stripe and block size against these same
 	// bounds (architecture.md, raid0 bitmap math), so every legal pool is a
-	// legal clone source.
+	// legal clone source. A pool's own block is held further, to
+	// MaxNvmeTcpCmdBytes (architecture.md, Common validation, the block's
+	// bound), so MaxDmPoolDataBlockSize bounds a clone source's block alone.
 	MaxDmPoolDataBlockSize     = 1 * 1024 * 1024 * 1024
 	MinDmPoolDataBlockSize     = 64 * 1024
 	DefaultDmPoolDataBlockSize = 1 * 1024 * 1024
@@ -377,6 +392,13 @@ const (
 	DefaultSideUnhealthy       = 600
 	DefaultLegUnhealthy        = 1200
 	DefaultPoolLowWatermarkPct = 50
+
+	// NvmeNsidAll is the NSID that addresses every namespace of a
+	// controller in NVMe; nvmet makes no namespace of it, nor of 0, so
+	// CreateNamespace refuses both as an ns_idx and CreateClone both as a
+	// source's src_ns_idx (architecture.md, Subsystems, namespaces and
+	// Clones).
+	NvmeNsidAll = 0xFFFFFFFF
 
 	// DefaultNvmeFastIoFailTmo is the fast IO fail timeout, in seconds, of
 	// every connection an agent makes (dnagent.md SH20) but a leg's whose

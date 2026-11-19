@@ -668,8 +668,13 @@ func (s *DnAgentServer) ensureSideDm(
 
 // sideRunSectors converts a record's extent runs into dm table geometry: run
 // r starts at byte DnDataOffset + r.start*extent_size and is r.count extents
-// long. DnDataOffset is 1 MiB-aligned, so every legal extent size lands the
-// runs on whole sectors.
+// long. DnDataOffset is 1 MiB-aligned and the gateway takes only an extent
+// size that is a whole number of common.DnExtSizeUnit (architecture.md,
+// Common validation), so every run lands on whole sectors and the runs sum
+// to the side. A size stored before that rule that is not a whole number of
+// sectors can floor runs short, so that the runs of a side sum less than the
+// side and its upper tables are longer than it (architecture.md, Known
+// limits); no reader judges a stored size.
 func sideRunSectors(
 	rec *pb.DnDiskTable_SideRecord,
 	extentSize uint64,

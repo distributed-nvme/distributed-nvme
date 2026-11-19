@@ -503,7 +503,8 @@ proven against fakes alone.
 | Retired legs per group, the replaced legs a group keeps with their data after its repairs | 2 | 2 | retired legs made, taken back into a group by a repair, and deleted |
 | Bitmap chunks, the pieces of the list of blocks a copy must take: per source slice of a clone, which an operator appends; per migration, which the worker cuts from its own read, 4 MiB each | 16; 16 | 16; 16 | 2; 2 on real agents; 13, written to etcd directly, and 1 in a suite on fake agents |
 | Thin ids per pool, one taken from a counter by every thin device the pool creates, snapshots included | 16,777,215 | the counter set to the limit by hand, one create at it, the next refused | no test reaches it |
-| Extent size | 64 MiB to 1 TiB | pools created on 5 GiB extents; 1 TiB checked by validation alone | 64 MiB and 1 GiB; no run at 1 TiB |
+| Extent size | 64 MiB to 1 TiB, a whole number of 4 KiB | pools created on 5 GiB extents; 1 TiB checked by validation alone | 64 MiB and 1 GiB; no run at 1 TiB |
+| Data block of a pool | 64 KiB to 4 MiB, a power of two | pools created on 4 MiB blocks; the next power of two refused | the default 1 MiB; 64 KiB in a suite on fake agents |
 | Controller node budget | one extent to 64 TiB, set once per node: a larger `--capacity` is cut to 64 TiB, one smaller than an extent is refused, and one under 1 KiB counts as unset | the bounds, through the create with a fake agent | the default on real nodes; a budget of about 12 TiB on fake agents in a suite |
 
 To measure dnv fairly, write the whole volume first, since a thin device

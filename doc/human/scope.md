@@ -200,7 +200,9 @@ the reason. Section 5 lists the data-loss defects known today.
    leg there. The data of the pool is gone. No repair exists for such a
    leg. A migration can move a side that still reads but is sick. An
    operator must start that migration. No migration moves a side of a
-   clone meta group, the group of the pool made for one clone. In a RAID1
+   clone meta group, the group of the pool made for one clone, nor a side
+   of a pool made before dnv bounded the data block at 4 MiB (section 10):
+   such a pool's volumes move to a new pool instead. In a RAID1
    pool a repair replaces such a leg; in a pool without RAID nothing can
    move it today. State: fix later, small.
 3. **A clone loses its whole source pool or its whole destination pool
@@ -1148,8 +1150,8 @@ tutorials are [dnv on one machine](tutorial_all_in_one.md) and
 [dnv under Kubernetes on one machine](tutorial_csi.md). "Operations doc"
 names [the operations doc](operations.md), the procedures an operator
 follows by hand, which holds the forced-start guide, the steps for a pool
-made before the stripe bound and for a new volume refused for a thin id
-that holds data, a planned restart of an agent, a slow leg, the install
+made before the stripe bound, for a pool made before the block bound and
+for a new volume refused for a thin id that holds data, a planned restart of an agent, a slow leg, the install
 of the udev rules on a node, the node check, the gather of a node's
 state and a Kubernetes volume the node plugin will not format so far, and
 gets the others as they are written. Every row with no tool
@@ -1194,7 +1196,7 @@ steps; the section "Steps known today" below gives the longer ones.
 | Create, snapshot and delete a volume | `dnvctl td create`, with `--ori` for a snapshot; `dnvctl td delete` | the tutorials, for the create and the delete | done; procedure to write, one line on snapshots |
 | Export a volume to hosts; change its hosts | `dnvctl ss create`, `dnvctl ns create`, `dnvctl ss set-hosts` | the tutorials, for the export | done for the export; procedure to write, one line on `ss set-hosts`. Fix decided: a removed host is cut. |
 | Park a namespace | `dnvctl ns set-suspended`, `dnvctl ns set-dev` | none | procedure to write |
-| Move a volume to another pool | `dnvctl xfer create` on the source; `dnvctl clone create`, `clone append-bm` on the destination | none; the introduction explains the flow | procedure to write: the whole flow. |
+| Move a volume to another pool | `dnvctl xfer create` on the source; `dnvctl clone create`, `clone append-bm` on the destination | the introduction explains the flow; the operations doc, A pool made before the block bound, gives the order of the moves out of a pool and when each old volume may go | procedure to write: the whole flow. |
 | Clone from a source outside this cluster | `dnvctl clone create`, `clone set-tr` | none; the introduction explains the flow | procedure to write |
 | Read a volume's written blocks | `dnvctl td get-bm` | none | procedure to write, with the move to another pool |
 | Grow a volume; revert a volume to a snapshot | none | — | not yet |
@@ -1593,14 +1595,36 @@ design:
   when either pool was created before the bound above with more than four
   slices of the default stripe. State: accepted; a device layer that keeps
   the clone's best IO size at the destination's is fix later.
-- **A migration in a pool whose block is above 4 MiB can be sent commands
-  its new side refuses.** During a migration the device on the new side's
-  disk node that pulls the data from the old side tells the controller node a best IO size of at least one
-  block, so the controller node's path to it can carry commands up to the
-  block, above what the disk node's kernel takes. Read from the kernel's
-  code, not seen in the lab. The default block is 1 MiB. State: fix
-  decided: the block is bounded at 4 MiB at cluster and pool create; a
-  pool made before the bound keeps its block.
+- **A pool made before dnv bounded the block keeps a block above 4 MiB,
+  and no migration moves its legs.** During a migration the device on the
+  new side's disk node that pulls the data from the old side tells the
+  controller node a best IO size of at least one block, so the controller
+  node's path to it can carry commands up to the block, above what the
+  disk node's kernel takes. Read from the kernel's code, not seen in the
+  lab. So a cluster or pool create that names a block above 4 MiB is
+  refused with the reason. The default block is 1 MiB. A pool made before
+  this bound keeps its block, since a pool's layout never changes: the
+  gateway refuses a migration in it, as it refuses a clone into it. A
+  repair replaces only a leg that failed, so a leg of such a pool that
+  still works cannot be moved where it is, not to leave a slow disk and
+  not to empty a disk node. The way out is to move the pool's volumes to
+  a new pool by a transfer and a clone, which the old block does not
+  stop. A cluster made before the bound with a block above 4 MiB refuses
+  every pool create that names no block, every volume create of the CSI
+  driver on it included, since that driver names no block. State:
+  accepted; procedure written,
+  [a pool made before the block bound](operations.md#a-pool-made-before-the-block-bound).
+- **A cluster made before dnv held the extent size to whole 4 KiB keeps
+  its extent size.** A cluster create refuses an extent size that is not
+  a whole number of 4 KiB. With a size that is not a whole number of
+  512 bytes, a side whose extents lie in two or more separate ranges of
+  the disk can come out one or more sectors short, as the size and the
+  range lengths fall, and the disk node cannot build it. With a whole
+  number of 512 bytes that is not one of 4 KiB, every side builds, but
+  its pieces do not start on the disk's 4 KiB blocks. No call
+  changes a cluster's extent size, so such a cluster keeps it. No dnv
+  tool or tutorial sets such a size. Read from the code, not seen in the
+  lab. State: accepted.
 - **A disk whose best IO size is above 4 MiB can be sent commands it
   refuses.** A disk can tell the kernel a best IO size, as a hardware RAID
   volume does from its stripe. The disk node passes it on to the

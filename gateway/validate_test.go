@@ -525,6 +525,23 @@ func TestValidateDnBinConf(t *testing.T) {
 			codes.InvalidArgument,
 		},
 		{
+			// Inside the bounds and off whole sectors: a side's runs would
+			// each round down to a sector and could sum short of the side.
+			"100000000, off whole 4 KiB blocks",
+			&pb.DnBinConf{ExtentSize: 100000000},
+			codes.InvalidArgument,
+		},
+		{
+			"MinDnExtSize + 512, whole sectors but not whole 4 KiB blocks",
+			&pb.DnBinConf{ExtentSize: common.MinDnExtSize + 512},
+			codes.InvalidArgument,
+		},
+		{
+			"MinDnExtSize + 4096",
+			&pb.DnBinConf{ExtentSize: common.MinDnExtSize + 4096},
+			codes.OK,
+		},
+		{
 			// The all-zero set the "empty" and "nil" rows above also carry,
 			// spelled out beside an explicit ladder so the two arms of the
 			// rule sit next to each other: this one asks for the default.
@@ -575,6 +592,19 @@ func TestValidateDnBinConf(t *testing.T) {
 			validateWantCode(t, "validateDnBinConf",
 				validateDnBinConf(item.conf), item.want)
 		})
+	}
+	// The refusal names the field and the unit, and both bounds are whole
+	// units, so the bound rows above judge the bounds alone.
+	validateWantMsg(t, "validateDnBinConf",
+		validateDnBinConf(&pb.DnBinConf{ExtentSize: 100000000}),
+		"dn_bin_conf.extent_size 100000000 is not a multiple of 4096")
+	for _, bound := range []uint64{
+		common.MinDnExtSize, common.MaxDnExtSize, common.DefaultDnExtSize,
+	} {
+		if bound%4096 != 0 {
+			t.Errorf("extent size bound or default %d is not a whole "+
+				"number of 4096 bytes", bound)
+		}
 	}
 }
 
@@ -824,12 +854,44 @@ func TestValidateTrConf(t *testing.T) {
 		{"no tr_svc_id", &pb.NvmeTrConf{TrType: "tcp", AdrFam: "ipv4",
 			TrAddr: "192.168.0.17"}, codes.InvalidArgument},
 	}
+	// The two words dnv serves: tr_type tcp in lower case, which the kernel
+	// matches exactly, and adr_fam ipv4 or ipv6, the two the cdc renders.
+	for _, words := range []struct {
+		trType, adrFam string
+		want           codes.Code
+	}{
+		{"tcp", "ipv6", codes.OK},
+		{"TCP", "ipv4", codes.InvalidArgument},
+		{"rdma", "ipv4", codes.InvalidArgument},
+		{"fc", "ipv4", codes.InvalidArgument},
+		{"tcp", "IPv4", codes.InvalidArgument},
+		{"tcp", "ib", codes.InvalidArgument},
+	} {
+		conf := good()
+		conf.TrType, conf.AdrFam = words.trType, words.adrFam
+		cases = append(cases, struct {
+			name string
+			conf *pb.NvmeTrConf
+			want codes.Code
+		}{"tr_type " + words.trType + ", adr_fam " + words.adrFam, conf,
+			words.want})
+	}
 	for _, item := range cases {
 		t.Run(item.name, func(t *testing.T) {
 			validateWantCode(t, "validateTrConf",
 				validateTrConf("nvme_tr_conf", item.conf), item.want)
 		})
 	}
+	// A wrong word is named with the words dnv takes.
+	upper := good()
+	upper.TrType = "TCP"
+	validateWantMsg(t, "tr_type TCP", validateTrConf("nvme_tr_conf", upper),
+		`nvme_tr_conf.tr_type "TCP" is not tcp`)
+	family := good()
+	family.AdrFam = "IPv4"
+	validateWantMsg(t, "adr_fam IPv4",
+		validateTrConf("nvme_tr_conf", family),
+		`nvme_tr_conf.adr_fam "IPv4" is neither ipv4 nor ipv6`)
 	// A blank member is named, so the operator fills the right one.
 	for member, conf := range map[string]*pb.NvmeTrConf{
 		"tr_type": {AdrFam: "ipv4", TrAddr: "192.168.0.17", TrSvcId: "4420"},
@@ -932,6 +994,12 @@ func TestValidateTrConfList(t *testing.T) {
 				TrSvcId: "4420"}},
 			codes.InvalidArgument,
 		},
+		{
+			"an entry of another transport",
+			[]*pb.NvmeTrConf{good, {TrType: "rdma", AdrFam: "ipv4",
+				TrAddr: "10.0.0.1", TrSvcId: "4420"}},
+			codes.InvalidArgument,
+		},
 	}
 	for _, item := range cases {
 		t.Run(item.name, func(t *testing.T) {
@@ -1003,11 +1071,27 @@ func TestValidateBdevConf(t *testing.T) {
 			codes.InvalidArgument,
 		},
 		{
-			"data_block_size at max",
+			// The bounds table's maximum is a clone source's; a pool's own
+			// block is held to the block's bound below it.
+			"data_block_size at MaxDmPoolDataBlockSize, over the block's bound",
 			&pb.BdevConf{DmPoolConf: &pb.DmPoolConf{
 				DataBlockSize: common.MaxDmPoolDataBlockSize,
 			}},
+			codes.InvalidArgument,
+		},
+		{
+			"data_block_size at the block's bound, MaxNvmeTcpCmdBytes",
+			&pb.BdevConf{DmPoolConf: &pb.DmPoolConf{
+				DataBlockSize: common.MaxNvmeTcpCmdBytes,
+			}},
 			codes.OK,
+		},
+		{
+			"data_block_size the next power of two over the block's bound",
+			&pb.BdevConf{DmPoolConf: &pb.DmPoolConf{
+				DataBlockSize: 2 * common.MaxNvmeTcpCmdBytes,
+			}},
+			codes.InvalidArgument,
 		},
 		{
 			"data_block_size above max",
@@ -1229,24 +1313,30 @@ func TestBdevConfGeometryRules(t *testing.T) {
 			bdev(mib, 0, raid1(1024)), codes.OK,
 		},
 		{
-			"bitmap chunk 1 x 1 GiB = 1 GiB, the ceiling",
-			bdev(gib, 0, raid1(1)), codes.OK,
+			"bitmap chunk 256 x 4 MiB = 1 GiB, the ceiling",
+			bdev(4*mib, 0, raid1(256)), codes.OK,
 		},
 		{
-			"bitmap chunk 2 x 1 GiB = 2 GiB, above the ceiling",
-			bdev(gib, 0, raid1(2)), codes.InvalidArgument,
+			"bitmap chunk 512 x 4 MiB = 2 GiB, above the ceiling",
+			bdev(4*mib, 0, raid1(512)), codes.InvalidArgument,
 		},
 		{
 			"bitmap chunk 1024 x 4 MiB = 4 GiB, which mdadm wraps to zero",
 			bdev(4*mib, 0, raid1(1024)), codes.InvalidArgument,
 		},
 		{
-			"bitmap chunk 4 x 1 GiB = 4 GiB",
-			bdev(gib, 0, raid1(4)), codes.InvalidArgument,
+			"a 4 MiB block under redund_none has no bitmap chunk",
+			bdev(4*mib, 64*kib, none), codes.OK,
+		},
+		// The block's bound: at most the most data one NVMe/TCP command
+		// carries, under every redundancy.
+		{
+			"a 1 GiB block under redund_none, over the block's bound",
+			bdev(gib, 64*kib, none), codes.InvalidArgument,
 		},
 		{
-			"a 1 GiB block under redund_none has no bitmap chunk",
-			bdev(gib, 64*kib, none), codes.OK,
+			"bitmap chunk 1 x 8 MiB, a block over the block's bound",
+			bdev(8*mib, 0, raid1(1)), codes.InvalidArgument,
 		},
 		// A rule between two members waits for the request to state both.
 		{
@@ -1254,8 +1344,8 @@ func TestBdevConfGeometryRules(t *testing.T) {
 			bdev(0, 192*kib, nil), codes.OK,
 		},
 		{
-			"a 16 MiB block under md-raid1 with the chunk count unset",
-			bdev(16*mib, 0, raid1(0)), codes.OK,
+			"a 4 MiB block under md-raid1 with the chunk count unset",
+			bdev(4*mib, 0, raid1(0)), codes.OK,
 		},
 		{
 			"1000 chunk blocks with data_block_size unset",
@@ -1281,10 +1371,6 @@ func TestBdevConfGeometryRules(t *testing.T) {
 		{
 			"a 192 KiB stripe over the 1 MiB default block",
 			bdev(0, 192*kib, nil), "stripe_size",
-		},
-		{
-			"a 16 MiB block under md-raid1 with the default 128-block chunk",
-			bdev(16*mib, 0, raid1(0)), "bitmap_chunk_block_cnt",
 		},
 		{
 			"1000 chunk blocks of the 1 MiB default block",
@@ -1335,17 +1421,21 @@ func TestBdevConfGeometryRules(t *testing.T) {
 			}
 		})
 	}
-	t.Run("as sent: a 96 KiB block", func(t *testing.T) {
-		err := validateClusterConfInput(
-			&pb.CreateClusterRequest{BdevConf: bdev(96*kib, 0, nil)})
-		validateWantCode(t, "validateClusterConfInput", err,
-			codes.InvalidArgument)
-		if msg := status.Convert(err).Message(); strings.HasPrefix(
-			msg, resolvedPrefix) {
-			t.Errorf("message %q blames the defaults for a value the "+
-				"request sent", msg)
-		}
-	})
+	for _, block := range []uint64{96 * kib, 8 * mib} {
+		t.Run(fmt.Sprintf("as sent: a %d-byte block", block), func(
+			t *testing.T,
+		) {
+			err := validateClusterConfInput(
+				&pb.CreateClusterRequest{BdevConf: bdev(block, 0, nil)})
+			validateWantCode(t, "validateClusterConfInput", err,
+				codes.InvalidArgument)
+			if msg := status.Convert(err).Message(); strings.HasPrefix(
+				msg, resolvedPrefix) {
+				t.Errorf("message %q blames the defaults for a value the "+
+					"request sent", msg)
+			}
+		})
+	}
 	// Every refusal names the member to fix: the message is all an operator
 	// sees (architecture.md, Common validation).
 	for _, item := range []struct {
@@ -1358,19 +1448,21 @@ func TestBdevConfGeometryRules(t *testing.T) {
 		{bdev(mib, 192*kib, nil), "stripe_size"},
 		{bdev(mib, 0, raid1(1000)), "bitmap_chunk_block_cnt"},
 		{bdev(4*mib, 0, raid1(1024)), "bitmap_chunk_block_cnt"},
+		{bdev(8*mib, 0, nil), "data_block_size"},
 	} {
 		validateWantMsg(t, "validateBdevConf",
 			validateBdevConf(item.conf), item.field)
 	}
 	// The raid0 half of the rules IS CreateClone's source rule set, and the
-	// block rule adds only the power of two dm-clone demands of a region:
-	// over a grid that straddles every unit and both ceilings, a geometry is
-	// a legal pool exactly when it is a legal clone source whose block is a
-	// power of two. So no pool the gateway admits is refused as the source
-	// of a clone.
+	// block rules add only the power of two dm-clone demands of a region and
+	// the block's bound: over a grid that straddles every unit and every
+	// ceiling, a geometry is a legal pool exactly when it is a legal clone
+	// source whose block is a power of two at most MaxNvmeTcpCmdBytes. So no
+	// pool the gateway admits is refused as the source of a clone, and a
+	// source block above the pool's bound stays a legal source.
 	t.Run("a legal pool is a legal clone source", func(t *testing.T) {
 		var blocks []uint64
-		for block := 32 * kib; block <= 4*mib; block += 32 * kib {
+		for block := 32 * kib; block <= 8*mib; block += 32 * kib {
 			blocks = append(blocks, block)
 		}
 		blocks = append(blocks, gib-64*kib, gib, gib+64*kib)
@@ -1383,10 +1475,12 @@ func TestBdevConfGeometryRules(t *testing.T) {
 						"as a clone source", block, stripe)
 				}
 				pow2 := bits.OnesCount64(block) == 1
-				if pool != (clone && pow2) {
+				bounded := block <= common.MaxNvmeTcpCmdBytes
+				if pool != (clone && pow2 && bounded) {
 					t.Fatalf("block %d stripe %d: legal pool %v, legal "+
-						"clone source %v, power-of-two block %v",
-						block, stripe, pool, clone, pow2)
+						"clone source %v, power-of-two block %v, within "+
+						"the block's bound %v",
+						block, stripe, pool, clone, pow2, bounded)
 				}
 			}
 		}

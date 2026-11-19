@@ -215,8 +215,11 @@ func validateBound(field string, value uint64, min uint64, max uint64) error {
 // (cdc.md DS3), and the one rule holds for every transport conf. The pattern
 // needs a character, so a message with any member set must have all four:
 // a partly blank address is stored for good, since no call changes a node's
-// address. An entirely empty message is accepted here; the RPCs that
-// require one say so themselves.
+// address. tr_type is NvmeTrTypeTcp and adr_fam NvmeAdrFamIpv4 or
+// NvmeAdrFamIpv6, in every conf alike: an agent hands a DN's, a CN's or a
+// clone source's tr_type to the kernel, which matches the name exactly, and
+// the cdc renders no other words. An entirely empty message is accepted
+// here; the RPCs that require one say so themselves.
 func validateTrConf(field string, conf *pb.NvmeTrConf) error {
 	if trConfEmpty(conf) {
 		return nil
@@ -236,6 +239,15 @@ func validateTrConf(field string, conf *pb.NvmeTrConf) error {
 		); err != nil {
 			return err
 		}
+	}
+	if conf.GetTrType() != common.NvmeTrTypeTcp {
+		return errInvalid("%s.tr_type %q is not %s: dnv serves NVMe/TCP "+
+			"only", field, conf.GetTrType(), common.NvmeTrTypeTcp)
+	}
+	if fam := conf.GetAdrFam(); fam != common.NvmeAdrFamIpv4 &&
+		fam != common.NvmeAdrFamIpv6 {
+		return errInvalid("%s.adr_fam %q is neither %s nor %s", field, fam,
+			common.NvmeAdrFamIpv4, common.NvmeAdrFamIpv6)
 	}
 	if len(conf.GetTrSvcId()) > common.MaxTrSvcIdLength {
 		return errInvalid("%s.tr_svc_id is %d bytes, the maximum is %d",
@@ -276,8 +288,18 @@ func validateTrConfList(field string, list []*pb.NvmeTrConf) error {
 }
 
 // validateDnBinConf checks a DnBinConf against architecture.md, Common
-// validation: extent_size's bounds, and the shift ladder of architecture.md,
-// DN bins.
+// validation: extent_size's bounds and its unit, and the shift ladder of
+// architecture.md, DN bins.
+//
+// An extent size is a whole number of DnExtSizeUnit: a side's runs are each
+// floored to sectors on their own (sideRunSectors, agent/dnagent) while the
+// side is sized whole, so at a size that is not a whole number of 512 bytes
+// the runs of a side of two or more runs can sum a sector or more short of
+// the side, as the size and the runs' extent counts fall, and the kernel
+// refuses its upper tables; at a whole number of 512 bytes that is not one
+// of 4096 every side builds, but its runs do not sit on 4 KiB physical
+// blocks. A cluster's extent size never changes, so nothing judges a stored
+// one.
 //
 // The four shifts are all-or-nothing. All four zero is the proto3 "unset" that
 // asks for the 0/4/8/12 default, and is accepted. Any other set must already
@@ -296,6 +318,11 @@ func validateDnBinConf(conf *pb.DnBinConf) error {
 		common.MinDnExtSize, common.MaxDnExtSize,
 	); err != nil {
 		return err
+	}
+	if size := conf.GetExtentSize(); size%common.DnExtSizeUnit != 0 {
+		return errInvalid(
+			"dn_bin_conf.extent_size %d is not a multiple of %d",
+			size, common.DnExtSizeUnit)
 	}
 	bin0, bin1 := conf.GetBin0Shift(), conf.GetBin1Shift()
 	bin2, bin3 := conf.GetBin2Shift(), conf.GetBin3Shift()
@@ -391,7 +418,8 @@ func validateDmCloneConf(field string, conf *pb.DmCloneConf) error {
 
 // validateBdevConf checks the bounds of a BdevConf (architecture.md, Common
 // validation), its four geometry
-// rules, and the two structural rules: bdev_feature_list must be empty, and
+// rules, the block's bound, and the two structural rules: bdev_feature_list
+// must be empty, and
 // RedundConf accepts only redund_none and redund_md_raid1 (the
 // proto oneof has no third case, so an unset oneof is the only other shape and
 // means redund_none).
@@ -406,6 +434,12 @@ func validateDmCloneConf(field string, conf *pb.DmCloneConf) error {
 //     the dm-clone region of every clone into the pool and of every migration
 //     of one of its sides, which dm-clone refuses unless it is a power of two
 //     ("Region size is not a power of 2").
+//   - data_block_size is at most common.MaxNvmeTcpCmdBytes, the block's
+//     bound: a migration's dm-clone reports at least one region as its
+//     optimal IO size, so the controller node's path to the new side would
+//     send commands up to a block, which the disk node's kernel refuses over
+//     TCP above that bound. MaxDmPoolDataBlockSize stays the bounds table's
+//     maximum, the one a clone source is held to (validateCloneGeometry).
 //   - stripe_size is a multiple of 4 KiB and at most 1 MiB by its bound, and
 //     data_block_size is a multiple of it: CreateClone's source rules
 //     (architecture.md, raid0 bitmap math),
@@ -441,6 +475,16 @@ func validateBdevConf(conf *pb.BdevConf) error {
 		return errInvalid(
 			"bdev_conf.dm_pool_conf.data_block_size %d is not a power of two",
 			blockSize)
+	}
+	if blockSize > common.MaxNvmeTcpCmdBytes {
+		return errInvalid(
+			"bdev_conf.dm_pool_conf.data_block_size %d is over %d, the "+
+				"most data one NVMe/TCP command may carry: a migration of "+
+				"one of the pool's sides copies in regions of one block and "+
+				"reports at least one block as its optimal IO size, and the "+
+				"controller node would send the new side commands its disk "+
+				"node refuses",
+			blockSize, common.MaxNvmeTcpCmdBytes)
 	}
 	if lwm := conf.GetDmPoolConf().GetLowWaterMarkPct(); lwm != 0 && lwm < 1 {
 		// Unreachable for a uint32, kept as the explicit statement of the
@@ -480,7 +524,7 @@ func validateBdevConf(conf *pb.BdevConf) error {
 			return err
 		}
 		// Both factors are bounded by now, so the product is at most
-		// 1024 × 1 GiB and cannot overflow; it is zero while either is unset.
+		// 1024 × 4 MiB and cannot overflow; it is zero while either is unset.
 		chunk := chunkBlockCnt * blockSize
 		if chunk != 0 && bits.OnesCount64(chunk) != 1 {
 			return errInvalid(

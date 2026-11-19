@@ -222,6 +222,44 @@ func migrCntBelowCeiling(conf *pb.SpConf, spName string) error {
 	return nil
 }
 
+// migrPoolChecks is what CreateMigration answers from the pool's own record,
+// in its order, behind the resolution and the token check openSp makes: the
+// MaxMigrCntPerSp ceiling, ahead of the name so a pool at the ceiling hears
+// the ceiling (GW9); the name free, so a re-send of a created migration hears
+// ALREADY_EXISTS; and the pool's block within the block's bound of
+// architecture.md, Common validation, FAILED_PRECONDITION otherwise. A pool
+// made before that bound keeps its block, and a migration of one of its
+// sides would make a dm-clone whose region is that block, which reports at
+// least one region as its optimal IO size: the controller node would send
+// the new side commands its disk node refuses. No call moves a healthy leg
+// of such a pool in place — a repair replaces only a leg with a health
+// epoch, and a RedundNone pool has none — so the message
+// names the way out, a move of the pool's volumes into a new pool by a
+// transfer and a clone (architecture.md, Common validation, the block's
+// bound). The planning read and the deciding STM both run it, ahead of the
+// source side, so a refusal reached in either has the same words and the
+// planning read answers each ahead of the scan.
+func migrPoolChecks(conf *pb.SpConf, spName string, migrName string) error {
+	if err := migrCntBelowCeiling(conf, spName); err != nil {
+		return err
+	}
+	if containsName(conf.GetMigrNameList(), migrName) {
+		return errExists("migration %q already exists", migrName)
+	}
+	if block := model.PoolBlockSize(spBdevConf(conf)); block >
+		common.MaxNvmeTcpCmdBytes {
+		return errPrecondition(
+			"storage pool %q has a data_block_size of %d, over %d, the most "+
+				"data one NVMe/TCP command may carry: a migration copies in "+
+				"regions of one block and reports at least one block as its "+
+				"optimal IO size, so the controller node would send the new "+
+				"side commands its disk node refuses; move the pool's "+
+				"volumes to a new pool instead, by a transfer and a clone",
+			spName, block, common.MaxNvmeTcpCmdBytes)
+	}
+	return nil
+}
+
 // getMigration reads one migration of the SP by name inside the caller's
 // transaction; an absent record is NOT_FOUND (GW7).
 //
@@ -265,7 +303,8 @@ func getMigration(
 // side and re-verifies both the pick's capacity key and the plan the pick was
 // scanned against: the group, as that STM reads it, must occupy no DN the
 // plan's read of it did not. The same read answers the MaxMigrCntPerSp
-// ceiling ahead of the scan, and the deciding STM answers it again (GW9).
+// ceiling, the name, the pool's block (migrPoolChecks), the source side and
+// the slot ahead of the scan, and the deciding STM answers each again (GW9).
 //
 // The destination's dm-clone run takes room in its DN's metadata area
 // (migrMetaUnitsOf; architecture.md, Metadata units). The scan skips every DN
@@ -335,12 +374,13 @@ func (s *Server) CreateMigration(
 			if err != nil {
 				return err
 			}
-			// The count ceiling before the scan (GW9), right behind the
-			// token: a pool with every migration it may run in flight is
-			// told so, not that no DN is free. The deciding STM checks it
-			// again for a migration committed since.
-			if err := migrCntBelowCeiling(
-				sc.Conf, req.GetSpName(),
+			// The count ceiling, the name and the block before the scan
+			// (GW9), right behind the token: a pool with every migration it
+			// may run in flight is told so, not that no DN is free, and a
+			// re-send of a created migration hears ALREADY_EXISTS. The
+			// deciding STM checks them again for a write committed since.
+			if err := migrPoolChecks(
+				sc.Conf, req.GetSpName(), req.GetMigrName(),
 			); err != nil {
 				return err
 			}
@@ -351,6 +391,13 @@ func (s *Server) CreateMigration(
 			loc, rep, err := migrSrcLocation(
 				stm, sc, slices, req.GetSpName(), req.GetSrcSideId())
 			if err != nil {
+				return err
+			}
+			// The slot too: a pool whose slot list offers no second slot
+			// starts no migration, whatever its disk nodes (GW18).
+			if _, err := migrDstCntlidSlot(
+				sc.Conf, loc.Side.GetCntlidSlot(),
+			); err != nil {
 				return err
 			}
 			units, err := migrMetaUnitsOf(sc.Cc, sc.Conf, loc.Grp)
@@ -396,16 +443,10 @@ func (s *Server) CreateMigration(
 			if err != nil {
 				return err
 			}
-			if err := migrCntBelowCeiling(
-				sc.Conf, req.GetSpName(),
+			if err := migrPoolChecks(
+				sc.Conf, req.GetSpName(), req.GetMigrName(),
 			); err != nil {
 				return err
-			}
-			if containsName(
-				sc.Conf.GetMigrNameList(), req.GetMigrName(),
-			) {
-				return errExists(
-					"migration %q already exists", req.GetMigrName())
 			}
 			// The topology is re-verified inside the transaction, not
 			// carried over from the plan: a side that moved between the two

@@ -703,6 +703,145 @@ namespace created on the controller node while the host was connected
 over two paths had both its path devices set, and an 8 MiB direct read
 of it passed. Step 3 is not tested.
 
+## A pool made before the block bound
+
+Words: a pool's **data block** is the unit in which its thin pools give
+out space. dnv keeps a new pool's data block at 4 MiB or less, the most
+data one command over TCP may carry to a node. A pool made before dnv
+kept that bound keeps its block, since a pool's layout never changes. A
+**migration** of such a pool's side would make its new disk node take
+commands up to one block, which that node's kernel refuses, so dnv
+refuses the migration.
+
+Symptom: `dnvctl migr create` of a side of the pool is refused with the
+error code FAILED_PRECONDITION, and the message names the pool's data
+block, the bound 4194304 and the way out. It matters when a side must
+move while its leg still works: a slow leg (see "A slow leg"), or a disk
+node to empty before its delete.
+
+Confirm: `dnvctl sp get` shows the pool's
+`sp_conf.bdev_conf.dm_pool_conf.data_block_size` above 4194304.
+
+What dnv does alone: nothing for a leg that works. In a RAID1 pool, a leg
+that fails is still replaced by leg repair, which copies the data through
+md on the controller node and not through a migration, so the block does
+not stop it. `dnvctl repair create` likewise replaces only a leg that
+failed. A pool without RAID has no repair.
+
+Safe steps, to move every volume of the pool to a new pool:
+
+1. Create a new pool with `dnvctl sp create` and these flags:
+   - `--block-size` of 4194304 or less, such as 1048576. A cluster made
+     before the bound can keep a larger block as the default of its
+     pools, and then refuses a pool create that names no block.
+   - `--slice-cnt` and `--stripe-size` as the old pool's, when the old
+     pool's stripe times its slice count is 4 MiB or less: a clone between
+     pools whose stripes do not combine within 4 MiB is refused, and the
+     refusal names both stripes times slice counts
+     ([the scope page](scope.md), section 10).
+   - `--dn-black` with the address of the slow disk node, or of the disk
+     node to empty, as `dnvctl dn get --addr` takes it, so that no leg of
+     the new pool lands on it at its create. The list binds only the
+     create: a later grow or leg repair of either pool may still place a
+     leg there. Before the create, mark that disk node disabled with
+     `dnvctl dn set-disabled --addr <disk node> --disabled`, which keeps
+     every new allocation of every pool off it and leaves what it holds
+     running.
+   - `--cn-black` with the addresses of the controller nodes of the old
+     pool's cntlrs, and `--slots` with cntlid slots, the ranges of NVMe
+     controller ids a pool's exports use, that none of the old pool's
+     cntlrs uses. `dnvctl sp get` of the old pool shows each cntlr's
+     `addr_port` and `cntlid_slot`. The two pools export the same
+     subsystem names to the same hosts: a controller node has one
+     subsystem of each name, which the cntlrs of both pools would claim,
+     and a host refuses a second path to a subsystem whose controller id
+     another of its paths already uses. So the cluster needs controller
+     nodes beyond those of the old pool.
+2. Move the volumes one at a time, or a few at once: a pool holds at most
+   four transfers, and a fifth `dnvctl xfer create` is refused with the
+   error code RESOURCE_EXHAUSTED. For each volume:
+   1. Start its move: a transfer in the old pool, `dnvctl xfer create`
+      with `--auto-suspend`, and a clone of it in the new pool,
+      `dnvctl clone create` with `--auto-resume`, into a new, empty volume
+      that a namespace of the same subsystem name and the same identity,
+      its nguid and uuid, exports, as [the introduction](introduction.md#transfer-and-clone)
+      explains. Create that namespace before the transfer, with
+      `dnvctl ns create --suspended`, at the old namespace's `--idx`, on a
+      new volume of the old one's size: a namespace that is not suspended
+      serves its empty volume to hosts at once beside the old one, a
+      namespace at another index is refused by the host as a second copy
+      of one identity, and a smaller volume is copied short. The old pool's data block does not stop this: a transfer
+      judges no block, and a clone takes a source block up to 1 GiB. The
+      full steps of one move, such as the names and the hosts the two
+      pools must share, are a procedure still to write
+      ([the scope page](scope.md), section 7).
+   2. Wait until the copy is complete. Hosts use the new pool's path from
+      the moment the clone serves, but the clone reads every region it
+      has not copied yet from the old volume, through the transfer. The
+      copy is complete only when the clone has left by itself:
+      `dnvctl clone get --name <clone>` in the new pool fails with the
+      error code NOT_FOUND. Run it once right after the create too, and
+      see that it shows the clone, so that a wrong name does not read as
+      done. Meanwhile, in `dnvctl cntlr inspect --id <primary cntlr id>`
+      of the new pool, the details of the clone's row in
+      `cntlr_info.clone_id_to_dm_clone`, keyed by the `clone_id` that
+      `dnvctl clone get` shows, carry dm-clone's status line, whose count
+      of hydrated regions, the regions copied so far, out of all regions
+      shows how far the copy is.
+   3. Then end the transfer in the old pool, without `--force`:
+      `dnvctl xfer delete --name <transfer>`. The old namespace stays
+      parked, ANA inaccessible on every cntlr, until it is deleted.
+   4. Then delete, in the old pool, that volume's namespace with
+      `dnvctl ns delete` and the volume with `dnvctl td delete`, and the
+      subsystem with `dnvctl ss delete` once it holds no namespace.
+
+   A transfer exports a namespace, so a volume that no namespace exports,
+   such as a snapshot, moves only once a namespace of the old pool exports
+   it. In the new pool it is a volume of its own, which shares no block
+   with its origin.
+3. Once the old pool holds no volume, subsystem or transfer, delete it
+   with `dnvctl sp delete`, which refuses a pool that still holds any.
+
+Steps that can lose data:
+
+- Creating the new pool's namespace without `--suspended`: hosts read its
+  empty volume beside the old one under the same name and identity, and
+  their writes to it before the clone serves are later copied over.
+- Deleting a transfer while its clone still copies, that is before
+  `dnvctl clone get` in the new pool answers NOT_FOUND, with or without
+  `--force`, takes from the clone its only source of every region not yet
+  copied. The deletes of the old namespace and volume, which the old pool
+  refuses while the transfer stands, then delete the last copy of those
+  regions.
+- `dnvctl xfer delete --force` ends a transfer as an abort: the old
+  namespace serves again, ANA optimized, under the same subsystem name and
+  the same identity as the new one, so hosts that keep the new pool's path
+  reach two copies that differ. Run it only to abort the move, and only
+  once the new pool's namespace is deleted with `dnvctl ns delete` and its
+  clone, if there is one, with `dnvctl clone delete --force`. Even then
+  every write made through the new pool is lost, since the old volume
+  lacks it.
+- A clone refused after its transfer is made leaves the old volume's
+  namespace parked, with no path that serves IO, until
+  `dnvctl xfer delete --force` in the old pool; so check the two pools'
+  stripes before the transfer.
+
+When to stop: the clone is refused for the two pools' stripes and no
+slice count of the new pool fits; then copy the data at the file level
+from a host into a volume of the new pool, as step 3 of
+[a pool made before the stripe bound](#a-pool-made-before-the-stripe-bound)
+says. Or the clone does not leave, and its count of hydrated regions stops
+growing or its row reads `RES_STATUS_ERROR`: delete nothing in the old
+pool, and ask for help.
+
+Tested: the gateway's unit tests refuse the migration and name the way
+out. The e2e suite runs a transfer and a clone within one pool: the clone
+leaves by itself once its copy is complete, and the transfer is then
+ended by an abort, `xfer delete --force`. The move into a new pool under
+the same subsystem name and identity, its end by `xfer delete` without
+`--force`, the deletes of the old volume and of the old pool, and a move
+out of a pool over the bound are not tested.
+
 ## A new volume refused for a thin id that holds data
 
 Words: a volume's **thin id** is dm-thin's number for the volume inside the
@@ -991,7 +1130,10 @@ migration: `dnvctl migr create` with the side's id as `--src-side`, and
 `dnvctl sp inspect-side`; then `dnvctl migr finish`. The scope page lists
 the whole migration flow as a procedure still to write; the introduction
 explains it. When the disk node's disk is the cause, move every side it
-holds the same way, and then fix or replace the disk.
+holds the same way, and then fix or replace the disk. A pool whose data
+block is above 4 MiB refuses every migration: move that pool's volumes
+instead, as [a pool made before the block bound](#a-pool-made-before-the-block-bound)
+says.
 
 When to stop: the counters do not read, and the entry shows a
 `read_error` instead of `stat`; or every leg into one disk node is slow

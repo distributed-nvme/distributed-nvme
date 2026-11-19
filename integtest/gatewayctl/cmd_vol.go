@@ -194,7 +194,8 @@ func setupSetSsHosts(fs *flag.FlagSet) job {
 // --idx is the NVMe NSID the host will see and is the user's to choose, so it
 // has no useful default; 0 is reserved and the gateway refuses it ("ns_idx
 // must not be 0"); no suite stage sends it, and TestCreateNamespaceRefusals
-// pins that refusal.
+// pins that refusal. The faults case sends 0xFFFFFFFF, the other NSID NVMe
+// reserves, which the gateway refuses too.
 //
 // --uuid and --nguid stay empty by default because an empty dev_uuid /
 // dev_nguid is the documented "mint one" request (CreateNamespace's Defaults,

@@ -705,6 +705,47 @@ func TestGroupBlocks(t *testing.T) {
 	}
 }
 
+// TestGroupBlocksAtTheMetaEdge pins the group geometry rule of
+// architecture.md, Group on-leg layout: meta region, data region, health
+// block, at its edge, on 1 GiB pool blocks, which a pool made before the
+// block's bound may still store (no create reaches this edge any more). A
+// group one block larger than its meta blocks is the smallest that holds one
+// data block; a group of exactly its meta blocks is refused. A RedundNone
+// group needs one meta block, so 2 GiB is taken and 1 GiB refused; an
+// md-raid1 group with one-block bitmap chunks needs three (the md superblock
+// block, one bitmap block, the health block), so 4 GiB is taken and 3 GiB
+// refused.
+func TestGroupBlocksAtTheMetaEdge(t *testing.T) {
+	const gib = uint64(1) << 30
+	none := testBdevConf(gib)
+	raid1 := testRaid1BdevConf(gib, 1)
+	for _, tc := range []struct {
+		label    string
+		extSize  uint64
+		conf     *pb.BdevConf
+		wantMeta uint64
+	}{
+		{"RedundNone, one data block", 2 * gib, none, 1},
+		{"RedundNone, no data block", gib, none, 0},
+		{"md-raid1, one data block", 4 * gib, raid1, 3},
+		{"md-raid1, no data block", 3 * gib, raid1, 0},
+	} {
+		meta, data, err := GroupBlocks(1, tc.extSize, tc.conf)
+		if tc.wantMeta == 0 {
+			if err == nil || !strings.Contains(err.Error(),
+				"cannot hold") {
+				t.Errorf("%s: got meta %d data %d err %v, want the meta "+
+					"refusal", tc.label, meta, data, err)
+			}
+			continue
+		}
+		if err != nil || meta != tc.wantMeta || data != 1 {
+			t.Errorf("%s: got meta %d data %d err %v, want %d and 1",
+				tc.label, meta, data, err, tc.wantMeta)
+		}
+	}
+}
+
 // TestGroupBlocksRefusesAZero pins that the three numbers the group geometry
 // (architecture.md, Group on-leg layout: meta region, data region, health
 // block) needs are stored values, concrete since the create RPC wrote them

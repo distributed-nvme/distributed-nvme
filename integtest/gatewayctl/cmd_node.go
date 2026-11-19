@@ -86,18 +86,34 @@ func nodeCreateFlags(fs *flag.FlagSet) (
 // cluster (architecture.md, Clusters)
 // ---------------------------------------------------------------------------
 
-// setupCreateCluster drives CreateCluster. It registers no conf flags at all:
-// every cluster this suite creates takes the gateway's pure defaults (case S
-// stage 1 asserts those defaults verbatim against etcd, GW11), so the only
-// knob is --name, for the pg0..pg4 clusters of the pagination step.
+// setupCreateCluster drives CreateCluster. Every cluster this suite creates
+// takes the gateway's pure defaults (case S stage 1 asserts those defaults
+// verbatim against etcd, GW11), so its knob is --name, for the pg0..pg4
+// clusters of the pagination step. Its two conf flags, --extent-size and
+// --block-size, send nothing at zero, their default; the faults case sends
+// them only to watch the gateway refuse an extent size off its unit and a
+// block over its bound (architecture.md, Common validation).
 func setupCreateCluster(fs *flag.FlagSet) job {
 	name := clusterNameFlag(fs)
+	extentSize := fs.Uint64("extent-size", 0,
+		"dn_bin_conf.extent_size in bytes; 0 sends none")
+	blockSize := fs.Uint64("block-size", 0,
+		"bdev_conf.dm_pool_conf.data_block_size in bytes; 0 sends none")
 	return func(
 		ctx context.Context, client pb.GatewayClient, g *globals,
 	) (any, error) {
-		return client.CreateCluster(ctx, &pb.CreateClusterRequest{
+		req := &pb.CreateClusterRequest{
 			ClusterName: clusterNameOf(g, *name),
-		})
+		}
+		if *extentSize != 0 {
+			req.DnBinConf = &pb.DnBinConf{ExtentSize: *extentSize}
+		}
+		if *blockSize != 0 {
+			req.BdevConf = &pb.BdevConf{
+				DmPoolConf: &pb.DmPoolConf{DataBlockSize: *blockSize},
+			}
+		}
+		return client.CreateCluster(ctx, req)
 	}
 }
 

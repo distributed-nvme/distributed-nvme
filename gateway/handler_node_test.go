@@ -532,6 +532,75 @@ func TestCreateClusterRefusesANonLadderShiftSet(t *testing.T) {
 	}
 }
 
+// TestCreateClusterRefusesAnExtentSizeOffWholeBlocks pins the extent rule of
+// architecture.md, Common validation: an extent size inside its bounds that
+// is not a whole number of 4096 bytes is INVALID_ARGUMENT, naming the size
+// and the unit, and nothing is written. At a size off whole sectors, as
+// 100000000, a side of two or more runs can round its runs down to sectors
+// and sum short of the side, which the kernel refuses as the side's upper
+// tables; at whole sectors off whole 4 KiB blocks, as MinDnExtSize + 512,
+// the runs miss the 4 KiB physical blocks; and the extent size never
+// changes.
+func TestCreateClusterRefusesAnExtentSizeOffWholeBlocks(t *testing.T) {
+	s := newTestServer(t)
+	ctx := context.Background()
+	for _, size := range []uint64{100000000, common.MinDnExtSize + 512} {
+		name := hnodeName("extunit")
+		_, err := s.CreateCluster(ctx, &pb.CreateClusterRequest{
+			ClusterName: name,
+			DnBinConf:   &pb.DnBinConf{ExtentSize: size},
+		})
+		wantCode(t, err, codes.InvalidArgument, "CreateCluster")
+		hnodeWantMsg(t, err, fmt.Sprintf(
+			"dn_bin_conf.extent_size %d is not a multiple of 4096", size),
+			"CreateCluster")
+		if hnodeExists(t, s, model.ClusterConfKey(name)) {
+			t.Errorf("a refused CreateCluster of extent size %d left a "+
+				"cluster_conf behind", size)
+		}
+	}
+	name := hnodeName("extunit")
+	if _, err := s.CreateCluster(ctx, &pb.CreateClusterRequest{
+		ClusterName: name,
+		DnBinConf:   &pb.DnBinConf{ExtentSize: common.MinDnExtSize + 4096},
+	}); err != nil {
+		t.Fatalf("CreateCluster of a whole number of 4096 bytes: %v", err)
+	}
+}
+
+// TestCreateClusterRefusesABlockOverTheBound pins the block's bound of
+// architecture.md, Common validation, at CreateCluster: a data block over
+// MaxNvmeTcpCmdBytes is INVALID_ARGUMENT, naming the block, the bound and
+// the reason, and nothing is written; a block at the bound is stored.
+func TestCreateClusterRefusesABlockOverTheBound(t *testing.T) {
+	s := newTestServer(t)
+	ctx := context.Background()
+	name := hnodeName("blockbound")
+	_, err := s.CreateCluster(ctx, &pb.CreateClusterRequest{
+		ClusterName: name,
+		BdevConf: &pb.BdevConf{DmPoolConf: &pb.DmPoolConf{
+			DataBlockSize: 2 * common.MaxNvmeTcpCmdBytes,
+		}},
+	})
+	wantCode(t, err, codes.InvalidArgument, "CreateCluster")
+	hnodeWantMsg(t, err, fmt.Sprintf(
+		"data_block_size %d is over %d", 2*common.MaxNvmeTcpCmdBytes,
+		common.MaxNvmeTcpCmdBytes), "CreateCluster")
+	hnodeWantMsg(t, err, "migration", "CreateCluster")
+	if hnodeExists(t, s, model.ClusterConfKey(name)) {
+		t.Errorf("a refused CreateCluster left a cluster_conf behind")
+	}
+	name = hnodeName("blockbound")
+	if _, err := s.CreateCluster(ctx, &pb.CreateClusterRequest{
+		ClusterName: name,
+		BdevConf: &pb.BdevConf{DmPoolConf: &pb.DmPoolConf{
+			DataBlockSize: common.MaxNvmeTcpCmdBytes,
+		}},
+	}); err != nil {
+		t.Fatalf("CreateCluster with a block at the bound: %v", err)
+	}
+}
+
 // TestCreateClusterNameCollisionWritesNothing pins the ALREADY_EXISTS of
 // architecture.md, Clusters,
 // and the rule behind every refusal in this file: the closure returns before
@@ -1214,6 +1283,53 @@ func TestNodeCreateRefusesAPartlyBlankAddress(t *testing.T) {
 	hnodeWantMsg(t, err, "nvme_tr_conf.tr_svc_id", "CreateControllerNode")
 	if hnodeExists(t, s, model.CnConfKey(cid, addr)) {
 		t.Errorf("the refused CreateControllerNode wrote a cn_conf")
+	}
+}
+
+// TestNodeCreateRefusesAnotherTransport pins the transport rule of
+// architecture.md, Common validation, on both node creates: a tr_type other
+// than tcp, upper case included, and an adr_fam other than ipv4 or ipv6 are
+// INVALID_ARGUMENT, naming the member, before the agent is called and before
+// anything is written. The agent listens and is never asked its size.
+func TestNodeCreateRefusesAnotherTransport(t *testing.T) {
+	s := newTestServer(t)
+	ctx := context.Background()
+	cluster := hnodeName("transport")
+	cid := mustCluster(t, s, cluster)
+	addr := fakeAddrPort(t, "transport")
+	agent := startFakeAgent(t, addr, 16<<30)
+	for _, tc := range []struct {
+		trType, adrFam, member string
+	}{
+		{"TCP", "ipv4", "tr_type"},
+		{"rdma", "ipv4", "tr_type"},
+		{"tcp", "IPv4", "adr_fam"},
+	} {
+		conf := testTrConf(addr)
+		conf.TrType, conf.AdrFam = tc.trType, tc.adrFam
+		label := tc.trType + "/" + tc.adrFam
+		_, err := s.CreateDiskNode(ctx, &pb.CreateDiskNodeRequest{
+			ClusterName: cluster, AddrPort: addr, NvmeTrConf: conf,
+		})
+		wantCode(t, err, codes.InvalidArgument, "CreateDiskNode "+label)
+		hnodeWantMsg(t, err, "nvme_tr_conf."+tc.member,
+			"CreateDiskNode "+label)
+		_, err = s.CreateControllerNode(ctx, &pb.CreateControllerNodeRequest{
+			ClusterName: cluster, AddrPort: addr, NvmeTrConf: conf,
+		})
+		wantCode(t, err, codes.InvalidArgument, "CreateControllerNode "+label)
+		hnodeWantMsg(t, err, "nvme_tr_conf."+tc.member,
+			"CreateControllerNode "+label)
+	}
+	if hnodeExists(t, s, model.DnConfKey(cid, addr)) ||
+		hnodeExists(t, s, model.CnConfKey(cid, addr)) {
+		t.Errorf("a refused node create wrote a node")
+	}
+	for _, method := range []string{"GetDnSize", "GetCnSize"} {
+		if got := agent.callCount(method); got != 0 {
+			t.Errorf("%s called %d times, want none before the refusal",
+				method, got)
+		}
 	}
 }
 

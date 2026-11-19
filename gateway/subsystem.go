@@ -390,10 +390,11 @@ func (s *Server) UpdateSubsystemHosts(
 // namespaces.
 //
 // ns_idx is the NVMe NSID the host will see, so it is the user's to choose and
-// only two things can be wrong with it: 0, which NVMe reserves, and a value
-// this subsystem already uses. Both are INVALID_ARGUMENT and not
-// ALREADY_EXISTS — a namespace is not a key, it is a field of the subsystem,
-// and architecture.md, Subsystems, namespaces, spells the code out.
+// only three things can be wrong with it: 0 and common.NvmeNsidAll, which
+// NVMe reserves and nvmet makes no namespace of, and a value this subsystem
+// already uses. All three are INVALID_ARGUMENT and not ALREADY_EXISTS — a
+// namespace is not a key, it is a field of the subsystem, and
+// architecture.md, Subsystems, namespaces, spells the code out.
 //
 // The td is resolved to its td_id here and the id is what is stored: renaming
 // or recreating a thin device must never silently repoint a live namespace,
@@ -426,11 +427,16 @@ func (s *Server) CreateNamespace(
 	); err != nil {
 		return nil, err
 	}
-	// NVMe reserves NSID 0. The request alone shows it, so it is refused
-	// with the rest of the validation, before any read (GW4): a full
-	// subsystem must not answer it with its namespace ceiling.
+	// NVMe reserves NSID 0 and common.NvmeNsidAll, which addresses every
+	// namespace. The request alone shows it, so it is refused with the rest
+	// of the validation, before any read (GW4): a full subsystem must not
+	// answer it with its namespace ceiling.
 	if req.GetNsIdx() == 0 {
 		return nil, errInvalid("ns_idx must not be 0")
+	}
+	if req.GetNsIdx() == common.NvmeNsidAll {
+		return nil, errInvalid("ns_idx must not be %#x, which names every "+
+			"namespace", uint32(common.NvmeNsidAll))
 	}
 	var nsId uint64
 	err := s.cli.RunSTM(ctx, func(stm etcdutil.STM) error {
@@ -577,12 +583,25 @@ func (s *Server) DeleteNamespace(
 // namespaces: it repoints a namespace at another thin device, which is how a
 // snapshot is exposed in place of its origin.
 //
-// The switch is invisible to the host — every cntlr reloads the namespace's
-// own dm-linear onto the new td's raid0 and the nvmet device_path never
-// changes — so nothing here needs to touch the subsystem's identity, its
+// The switch is invisible to the host only at one size — every cntlr reloads
+// the namespace's own dm-linear onto the new td's raid0 and the nvmet
+// device_path never changes, so nvmet is not told of a new size and the host
+// keeps the one it read — so a td of another size than the one the namespace
+// points at is FAILED_PRECONDITION naming both: a smaller one would fail the
+// host's IO past its end. Nothing here touches the subsystem's identity, its
 // allowed hosts or the CdcEntry. A live transfer's origin is refused
 // (nsTransferRef): the primary's xfer stack maps the td it points at where
 // it serves the transfer.
+//
+// The namespace holds only its td's td_id, and no key names a td by id, so
+// the td it points at is found by a walk of td_name_list. That walk is the
+// PLAN, a read-only Snapshot, run in the candidate unit's loop as
+// DeleteThinDevice's is (GW9): a deciding STM that walked the list would
+// compare every td it read and pass EtcdMaxTxnOps toward MaxTdCntPerSp, and
+// the namespace could then never be repointed. The deciding STM reads the one
+// td the plan found, after checking that the namespace still points at it; a
+// namespace repointed since is candidate changed, and the unit plans again.
+// TestUpdateNamespaceDevTxnBudget holds the arithmetic.
 func (s *Server) UpdateNamespaceDev(
 	ctx context.Context,
 	req *pb.UpdateNamespaceDevRequest,
@@ -602,12 +621,101 @@ func (s *Server) UpdateNamespaceDev(
 		return nil, err
 	}
 	var nsId uint64
-	err := s.cli.RunSTM(ctx, func(stm etcdutil.STM) error {
+	err := candidateUnit(ctx, func() error {
+		nsId = 0
+		plan, err := planUpdateNamespaceDev(ctx, s.cli, req)
+		if err != nil {
+			return err
+		}
+		nsId, err = decideUpdateNamespaceDev(ctx, s.cli, req, plan)
+		return err
+	})
+	if err != nil {
+		return nil, mapStmErr(err)
+	}
+	return &pb.UpdateNamespaceDevReply{NsId: nsId}, nil
+}
+
+// nsDevPlan is what UpdateNamespaceDev's plan hands its deciding STM: the SP
+// incarnation it read, and the td the namespace pointed at, by id and name.
+type nsDevPlan struct {
+	Cid       uint64
+	SpId      uint64
+	CurTdId   uint64
+	CurTdName string
+}
+
+// planUpdateNamespaceDev is UpdateNamespaceDev's plan: one read-only Snapshot
+// that opens with openSp, so a stale token is ABORTED before any other state
+// check (GW6), locates the namespace, NOT_FOUND as in the deciding STM, and
+// walks td_name_list for the td whose td_id the namespace holds (tdNameById).
+// None is a lost invariant, ABORTED: DeleteThinDevice refuses a td a
+// namespace points at.
+func planUpdateNamespaceDev(
+	ctx context.Context,
+	cli *etcdutil.Client,
+	req *pb.UpdateNamespaceDevRequest,
+) (nsDevPlan, error) {
+	var plan nsDevPlan
+	err := cli.Snapshot(ctx, func(stm etcdutil.STM) error {
+		plan = nsDevPlan{}
+		sc, err := openSp(stm, req.GetClusterName(), req.GetSpName(),
+			req.GetSpRev())
+		if err != nil {
+			return err
+		}
+		_, ns, err := namespaceByIdx(stm, sc, req.GetNqn(), req.GetNsIdx())
+		if err != nil {
+			return err
+		}
+		name, found, err := tdNameById(stm, sc, ns.GetTdId())
+		if err != nil {
+			return err
+		}
+		if !found {
+			return errAborted("namespace %d of subsystem %s points at "+
+				"td_id %d, which no thin device of the pool holds",
+				req.GetNsIdx(), req.GetNqn(), ns.GetTdId())
+		}
+		plan = nsDevPlan{
+			Cid:       sc.Cid,
+			SpId:      sc.SpId(),
+			CurTdId:   ns.GetTdId(),
+			CurTdName: name,
+		}
+		return nil
+	})
+	if err != nil {
+		return nsDevPlan{}, mapStmErr(err)
+	}
+	return plan, nil
+}
+
+// decideUpdateNamespaceDev is UpdateNamespaceDev's deciding STM. A plan read
+// of another SP incarnation, or a namespace that no longer points at the td
+// the plan found, is errCandidateChanged, which the candidate unit answers
+// with a new plan (GW9); a request that carries a token meets openSp's GW6
+// check first, since every repoint bumps SpRev. The td the plan found is read
+// by its name, and must still hold the plan's td_id: td ids are never reused
+// and a td a namespace points at is never deleted, so another one there is a
+// lost invariant, ABORTED. Its size never changes, which is what lets the
+// size rule read it once here.
+func decideUpdateNamespaceDev(
+	ctx context.Context,
+	cli *etcdutil.Client,
+	req *pb.UpdateNamespaceDevRequest,
+	plan nsDevPlan,
+) (uint64, error) {
+	var nsId uint64
+	err := cli.RunSTM(ctx, func(stm etcdutil.STM) error {
 		nsId = 0
 		sc, err := openSp(stm, req.GetClusterName(), req.GetSpName(),
 			req.GetSpRev())
 		if err != nil {
 			return err
+		}
+		if sc.Cid != plan.Cid || sc.SpId() != plan.SpId {
+			return errCandidateChanged
 		}
 		subsystem, ns, err := namespaceByIdx(
 			stm, sc, req.GetNqn(), req.GetNsIdx())
@@ -633,6 +741,25 @@ func (s *Server) UpdateNamespaceDev(
 		} else if found {
 			return errTdOfTransfer(req.GetTdName(), xferName)
 		}
+		if ns.GetTdId() != plan.CurTdId {
+			return errCandidateChanged
+		}
+		curKey := model.ThinDeviceKey(sc.Cid, sc.SpId(), plan.CurTdName)
+		cur := &pb.ThinDevice{}
+		if !stm.Get(curKey, cur) || cur.GetTdId() != plan.CurTdId {
+			return errAborted("thin device key %q no longer holds td_id "+
+				"%d, which namespace %d of subsystem %s points at",
+				curKey, plan.CurTdId, req.GetNsIdx(), req.GetNqn())
+		}
+		if td.GetSize() != cur.GetSize() {
+			return errPrecondition(
+				"thin device %s is %d bytes and namespace %d of subsystem "+
+					"%s is on %s, of %d bytes: a namespace moves only to a "+
+					"thin device of its own size, since its hosts keep the "+
+					"size they read",
+				req.GetTdName(), td.GetSize(), req.GetNsIdx(),
+				req.GetNqn(), plan.CurTdName, cur.GetSize())
+		}
 		nsId = ns.GetNsId()
 		ns.TdId = td.GetTdId()
 		stm.Put(
@@ -640,9 +767,9 @@ func (s *Server) UpdateNamespaceDev(
 		return bumpSp(stm, opUpdateNamespaceDev, sc)
 	})
 	if err != nil {
-		return nil, mapStmErr(err)
+		return 0, err
 	}
-	return &pb.UpdateNamespaceDevReply{NsId: nsId}, nil
+	return nsId, nil
 }
 
 // UpdateNamespaceSuspended is the UpdateNamespaceSuspended of architecture.md,

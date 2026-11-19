@@ -584,6 +584,30 @@ func tdCloneRef(
 	return "", false, nil
 }
 
+// tdNameById finds the td whose td_id is tdId by a walk of td_name_list,
+// stopping at the first match: a namespace and a clone hold only a td's id,
+// and no key names a td by id. The walk reads up to MaxTdCntPerSp keys, so it
+// is a plan's, run in a read-only Snapshot and never in a deciding
+// transaction, as tdUncreatedSnapshots is (UpdateNamespaceDev). A listed key
+// that is missing is ABORTED.
+func tdNameById(
+	stm etcdutil.STM,
+	sc *spScope,
+	tdId uint64,
+) (string, bool, error) {
+	for _, name := range sc.Conf.GetTdNameList() {
+		key := model.ThinDeviceKey(sc.Cid, sc.SpId(), name)
+		td := &pb.ThinDevice{}
+		if !stm.Get(key, td) {
+			return "", false, errAborted("thin device key %q is missing", key)
+		}
+		if td.GetTdId() == tdId {
+			return name, true, nil
+		}
+	}
+	return "", false, nil
+}
+
 // tdUncreatedSnapshots is the third delete guard of architecture.md, Thin
 // devices: the names, among names, of the snapshots of devId that have not
 // materialized yet, in the order given.

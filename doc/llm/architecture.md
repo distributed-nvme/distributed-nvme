@@ -1878,6 +1878,16 @@ harmless. A migration destination takes its run before it zeroes
   host only cut short. The rule holds for every transport conf a request
   carries, a DN's and a clone source's as well: each names an NVMe/TCP
   service the same way, and one check covers them all.
+* `NvmeTrConf.tr_type` is in addition `NvmeTrTypeTcp`, "tcp" in lower
+  case, and `adr_fam` is `NvmeAdrFamIpv4` or `NvmeAdrFamIpv6`, in every
+  transport conf a request carries, a DN's, a CN's and a clone source's
+  alike (`INVALID_ARGUMENT` otherwise, the message naming the member).
+  Reason: dnv serves and tests NVMe over TCP only; an agent hands a DN's
+  or a clone source's `tr_type` to the kernel with every connect, and the
+  kernel matches the transport's name exactly, so "TCP" fails every
+  connect; and dnv-cdc renders no other words into a discovery log entry
+  (`cdc.md` DS3). A conf stored before the rule keeps its words (Known
+  limits).
 * NQNs (every NQN field but the `nqn` of `DeleteNamespace` and
   `DeleteSubsystem`, below): at most `MaxNqnLength` bytes, no "..", and a
   match for `ValidNqnPattern` — "nqn.", a date, a lower-case domain, a ":"
@@ -1970,15 +1980,27 @@ harmless. A migration destination takes its run before it zeroes
   follows a cluster's block and, for a pool, its cluster's stored stripe
   and its slice count (below), and a clone's hydration defaults, which are
   the dm-clone target's own:
-  * `dn_bin_conf.extent_size`: `MinDnExtSize` to `MaxDnExtSize`, default
-    `DefaultDnExtSize`;
+  * `dn_bin_conf.extent_size`: `MinDnExtSize` to `MaxDnExtSize`, a whole
+    number of `DnExtSizeUnit`, default `DefaultDnExtSize`. Reason
+    for the unit: a disk node builds a side's device from its runs of
+    extents, each run floored to sectors on its own while the side's upper
+    devices are sized whole, so at a size that is not a whole number of
+    sectors the runs of a side of two or more runs can sum a sector or more
+    short of the side, as the size and the runs' extent counts fall, and
+    the kernel refuses its upper tables, and at a whole number of sectors
+    that is not one of 4 KiB the runs miss the 4 KiB physical blocks; the
+    unit puts every run on whole sectors and on a 4 KiB physical block, and
+    no caller sends another size. A cluster's extent
+    size never changes, and no reader judges a stored one (Known limits);
   * `alloc_conf.dn_batch_size`: `MinAllocDnBatchSize` to
     `MaxAllocDnBatchSize`, default `DefaultAllocDnBatchSize`, and
     `alloc_conf.cn_batch_size` likewise with `MinAllocCnBatchSize`,
     `MaxAllocCnBatchSize` and `DefaultAllocCnBatchSize`;
   * `dm_pool_conf.data_block_size`, a power of two:
-    `MinDmPoolDataBlockSize` to `MaxDmPoolDataBlockSize`, default
-    `DefaultDmPoolDataBlockSize`;
+    `MinDmPoolDataBlockSize` to `MaxDmPoolDataBlockSize`, a pool's own block
+    at most `MaxNvmeTcpCmdBytes` as well (the block's bound below), default
+    `DefaultDmPoolDataBlockSize`. `MaxDmPoolDataBlockSize` is the bound a
+    clone source's block is held to (Clones);
   * `dm_pool_conf.low_water_mark_pct`: no bounds; default
     `DefaultPoolLowWatermarkPct`, which a zero selects. It is never
     rejected: a value above 100 is accepted and switches the auto-grow of
@@ -2098,6 +2120,36 @@ harmless. A migration destination takes its run before it zeroes
   keeps it, as it keeps the rest of its geometry, and no RPC judges it but
   `CreateClone`, which refuses a clone into or out of it wherever its
   dm-clone would report more (Clones; Known limits).
+* **The block's bound.** `CreateCluster` and `CreateStoragePool` hold
+  `data_block_size` to at most `MaxNvmeTcpCmdBytes` (`INVALID_ARGUMENT`
+  otherwise), the message naming the block, the bound and the reason.
+  Reason: the block is the region of every migration of one of the pool's
+  sides, and that migration's dm-clone reports at least one region as its
+  optimal IO size (Clones), which its export passes to the controller
+  node's leg path; that path then lets one request grow to the block,
+  which the disk node's kernel refuses over TCP above the bound (Known
+  limits). It is judged with the geometry rules: on the request, so a
+  block the request names is refused before any read, and on the conf the
+  create stores. A block a pool inherits from its cluster is refused, never
+  narrowed, the message saying the block is the cluster's and to name one:
+  only a cluster created before the bound stores a larger block, and a
+  narrowed block would change the pool's md bitmap chunk in bytes and the
+  geometry its operator chose. So such a cluster refuses every pool create
+  that names no block, every create of the CSI driver included, since a
+  storage class names no block (`csi.md` CSI12). A pool stored
+  before the bound keeps its block, as it keeps the rest of its geometry:
+  `CreateClone` refuses every clone into it (Clones) and `CreateMigration`
+  every migration of one of its sides (Migrations). Reason for refusing the
+  migration rather than warning: a refusal keeps the pool's IO from the
+  commands the kernel refuses, by default. So no call moves a healthy leg
+  of such a pool in place: a repair replaces only an unhealthy leg
+  (Repairs), and a `RedundNone` pool has no repair. The way out is to
+  move the pool's volumes into a new pool within the bound, by a transfer
+  in the old pool and a clone in the new one (Transfer + clone = cross-SP
+  live migration), which the old pool's block does not stop:
+  `CreateTransfer` judges no geometry, and `CreateClone` holds a source's
+  block to `MaxDmPoolDataBlockSize` alone, beside the clone's optimal IO
+  size (Clones; Known limits).
 * `EventThreshold.leg_unhealthy` must be greater than
   `EventThreshold.side_unhealthy` after the defaults above are resolved
   (`INVALID_ARGUMENT` otherwise): the leg repair of Automatic reactions
@@ -2247,7 +2299,9 @@ any of the `DnGlobal`, `CnGlobal` and `SpGlobal` of the `cluster_id`
 exists (the hash-collision guard), checked inside the STM;
 `INVALID_ARGUMENT` when `dn_bin_conf`'s shifts are set to anything that is
 not a ladder (DN bins — all four zero asks for the default and is
-accepted), when the resolved `bdev_conf` breaks a geometry rule of
+accepted), when `dn_bin_conf.extent_size` is not a whole number of
+`DnExtSizeUnit` or `data_block_size` is over the block's bound (Common
+validation), when the resolved `bdev_conf` breaks a geometry rule of
 Common validation (a member the request omitted is judged as its
 default, its constant or, for the stripe, the stripe its block gives, and
 the message says the defaults were filled in), or when
@@ -2550,7 +2604,10 @@ rules being judged on the merged conf the SP stores as well, and
 `primary_unhealthy` against the cluster's `cntlr_interval` (step 2); and
 when a `stripe_size` the request names times the slice count is over
 `MaxNvmeTcpCmdBytes`, judged before any read (Common validation, the
-stripe's product).
+stripe's product); and when `data_block_size` is over
+`MaxNvmeTcpCmdBytes`, a named one before any read and an inherited one on
+the merged conf, whose message says the block is the cluster's (Common
+validation, the block's bound).
 Defaults: `cntlr_cnt` is `DefaultCntlrCntPerSp`; `slice_cnt` is
 `DefaultSliceCntPerSp`; `cntlid_slot_list` is every slot below
 `CnCntlidSlotCnt`; `bdev_conf` is taken member-wise from
@@ -3129,7 +3186,9 @@ rebuilt as `CreateSubsystem` writes it, with the new hosts. Reply `ss_id`.
 
 **CreateNamespace** — Errors: `NOT_FOUND` nqn or td; `RESOURCE_EXHAUSTED`
 when `ns_list` holds `MaxNsCntPerSs` namespaces or more;
-`INVALID_ARGUMENT` `ns_idx` zero, `ns_idx` already used in this subsystem,
+`INVALID_ARGUMENT` `ns_idx` zero or `NvmeNsidAll`, the two NSIDs NVMe
+reserves (the second names every namespace, and nvmet makes a namespace of
+neither), judged before any read, `ns_idx` already used in this subsystem,
 or a supplied `dev_uuid` or `dev_nguid` malformed; `FAILED_PRECONDITION`
 for a place (`nqn`, `ns_idx`) a transfer still names as its origin, and for
 a td that a transfer's origin namespace lies on (Transfers, The origin is
@@ -3158,12 +3217,24 @@ node-local groups of [D4].
 **UpdateNamespaceDev** — repoints the namespace at another td
 (`td_name`), for example to expose a snapshot in place of the origin.
 Errors: `NOT_FOUND` nqn, `ns_idx` or td; `FAILED_PRECONDITION` while a
-transfer names the namespace as its origin, and for a td a transfer's
-origin namespace lies on (Transfers).
+transfer names the namespace as its origin, for a td a transfer's
+origin namespace lies on (Transfers), and for a td whose `size` is not the
+size of the td the namespace points at, the message naming both sizes.
 STM: update `td_id`, bump `SpRev`; agents reload the namespace's own
 `CnNsDevName` onto the new td's raid0 (a dm reload — the nvmet
-"device_path" never changes, so the switch is invisible to the host).
-Reply `ns_id`.
+"device_path" never changes, so the switch is invisible to the host at
+one size). Reason for the size rule: nvmet is not told of a new size and
+the host keeps the size it read, so a smaller td would fail the host's IO
+past its end; telling nvmet takes its revalidation on every cntlr at every
+converge, which belongs to growing a volume, a step dnv does not have. A
+snapshot of the namespace's td made with no `size` takes that td's size
+(Thin devices), so it passes; one made larger is exposed through a
+namespace of its own. The namespace holds its td by `td_id`, which no key
+names, so a plan walks `td_name_list` for it in a
+read-only snapshot, and the deciding STM reads that one td, after checking
+that the namespace still points at it, and plans again when it does not
+(`gateway.md` GW9): a walk inside the STM would compare every td of the
+pool and pass `EtcdMaxTxnOps` toward `MaxTdCntPerSp`. Reply `ns_id`.
 
 **UpdateNamespaceSuspended** — STM: set `suspended`, bump `SpRev`.
 Suspended ⇒ every cntlr parks the namespace's `CnNsDevName` on its td's
@@ -3234,9 +3305,13 @@ would report an optimal IO size over `MaxNvmeTcpCmdBytes` (the optimal IO
 size paragraph below), the message naming both products, the size, the
 pool's block and the bound; `INVALID_ARGUMENT` when
 `src_tr_conf` is empty or longer than `MaxCntlrCntPerSp` or has an entry
-that is empty or has a member left blank (Common validation), `src_nqn` is
+that is empty, has a member left blank or names a transport dnv does not
+take (Common validation), `src_nqn` is
 invalid or lies in the dnv namespace and is no transfer NQN (Common
-validation), `src_slice_cnt` is outside one to `MaxSliceCntPerSp` (unlike
+validation), `src_ns_idx` is zero or `NvmeNsidAll`, neither of which names
+one namespace of the source (the primary reads zero as whichever
+namespace the source lists first, and the other names none, so the copy
+would wait for ever), `src_slice_cnt` is outside one to `MaxSliceCntPerSp` (unlike
 `CreateStoragePool`'s own `slice_cnt`, a
 `src_slice_cnt` of zero is refused, not defaulted — it describes a source
 that already exists), `src_stripe_size` is not a positive multiple of
@@ -3599,21 +3674,26 @@ devices. Reply `xfer_id`.
 The data-plane procedure and its figure, fig. `080Migration`, are under
 Migration.
 
-**CreateMigration** — Errors: `ALREADY_EXISTS` for a name already in
-`migr_name_list`; `NOT_FOUND` when `src_side_id` is in no leg of the SP
+**CreateMigration** — Errors, in this order, every one but the last
+answered before the scan for a DN: `RESOURCE_EXHAUSTED` at
+`MaxMigrCntPerSp`; `ALREADY_EXISTS` for a name already in
+`migr_name_list`, so a re-send of a created migration hears it;
+`FAILED_PRECONDITION` when the pool's `data_block_size` is over
+`MaxNvmeTcpCmdBytes`, which only a pool stored before the block's bound has
+(Common validation), the message naming the block and the bound;
+`NOT_FOUND` when `src_side_id` is in no leg of the SP
 — a repair's new leg is no leg of its group before
 its finish, and a retired leg is no leg, so their sides are not found
 (Repairs, Retired legs); `FAILED_PRECONDITION` when it is a side of a clone
 meta group, which no migration moves (Clones), or of the bad leg of a
-repair, which the repair replaces (Repair); `RESOURCE_EXHAUSTED` at
-`MaxMigrCntPerSp` or when no DN is a candidate (Per-operation allocation)
-— a DN without room in its clone-metadata area for the migration's units is
-no candidate, and a refusal for want of that room says no DN has metadata
-room (Metadata units); `FAILED_PRECONDITION` when the owning leg already
-has two sides (a migration is already running on it), or when
-`cntlid_slot_list` holds no slot different from the source side's (cntlid
-slots: such an SP cannot migrate this leg at all; `gateway.md`,
-Migrations).
+repair, which the repair replaces (Repair), or when the owning leg already
+has two sides (a migration is already running on it); `FAILED_PRECONDITION`
+when `cntlid_slot_list` holds no slot different from the source side's
+(cntlid slots: such an SP cannot migrate this leg at all; `gateway.md`,
+Migrations); `RESOURCE_EXHAUSTED` when no DN is a candidate
+(Per-operation allocation) — a DN without room in its clone-metadata area
+for the migration's units is no candidate, and a refusal for want of that
+room says no DN has metadata room (Metadata units).
 
 Action: allocate one DN (Per-operation allocation). The deciding STM drops a
 pick when the group, as that STM reads it, occupies a DN the scan's read of
@@ -4592,9 +4672,10 @@ the length to zero when it builds a side's request, from the group it
 holds and the pool's `block_size`, and sends it as `side_conf.zero_bytes`
 (sp role; `dnv-worker.md` RW15). The length of a side of a slice's meta
 group is its leg span rather than its `ext_cnt` extents: the span is whole
-blocks, which are multiples of `DnZeroAlign`, while `extent_size` need not
-be a multiple of it (Common validation), and the span needs no extent
-size, so the sp worker reads no cluster conf for it. The gateway stores
+blocks, which are multiples of `DnZeroAlign`, as an `extent_size` is only
+in a cluster created under its unit rule (Common validation), and the span
+needs no extent size, so the sp worker reads no cluster conf for it. The
+gateway stores
 nothing for the length, and no agent carries a second copy of the leg
 layout rule. A stored group whose block counts give no length, a clone
 meta group included, is refused like an invalid stored geometry: the sp
@@ -8025,15 +8106,41 @@ document and only pointed to here.
   the lab; the operator's steps are `operations.md`, A pool made before
   the stripe bound); and a clone into or out of it is refused wherever
   its dm-clone would report more (Clones).
-* **A migration's destination in a pool whose block is over
-  `MaxNvmeTcpCmdBytes` can be sent commands it refuses.** A migration's
+* **A pool made before the block's bound keeps a block over
+  `MaxNvmeTcpCmdBytes`, and no migration moves its legs.** A migration's
   dm-clone on the destination disk node has the pool's block as its region
   (Migration) and so reports an optimal IO size of at least one block
   (Clones), which its export passes to the controller node's leg path;
-  that path then lets one request grow to the block, past the bound. No rule bounds the block
-  by it, since that would change the block rule every pool's geometry
-  rests on; the default block is within it. Read in the kernel's sources,
-  not seen in the lab. Every clone into such a pool is refused (Clones).
+  that path then lets one request grow to the block, past the bound. Read
+  in the kernel's sources, not seen in the lab. So the block is bounded at
+  create (Common validation, the block's bound), and a pool stored before
+  the bound keeps its block, since a stored geometry never changes:
+  `CreateMigration` refuses every migration of one of its sides and
+  `CreateClone` every clone into it. No call then moves a healthy leg of
+  such a pool in place, to leave a slow disk or to empty a disk node,
+  since a repair replaces only an unhealthy leg and a `RedundNone` pool has
+  none; the operator moves the pool's volumes into a new pool within the
+  bound by a transfer and a clone instead (`operations.md`, A pool made
+  before the block bound). A cluster that stores a block over the bound
+  refuses every pool create that names no block, the CSI driver's
+  included.
+* **A record stored before a request rule keeps what the rule refuses.**
+  No call changes a cluster's extent size, a node's address or a
+  namespace's `ns_idx`, and no reader judges them again (Common
+  validation). An extent size that is not a whole number of sectors
+  builds a side of one run of extents, but a side of two or more runs can
+  floor its runs to sectors on their own and sum a sector or more short of
+  the side, as the size and the runs' extent counts fall, so the disk
+  node's upper tables of the side are longer than it, which the kernel
+  refuses, and the side is never provisioned. A size that is a whole
+  number of sectors but not of `DnExtSizeUnit` builds every side, its runs
+  off the 4 KiB physical blocks. A node whose `tr_type` is not
+  `tcp` cannot be connected to, as a disk node, and has its discovery
+  entries skipped, as a controller node (`cdc.md` DS3), as has one whose
+  `adr_fam` is neither `ipv4` nor `ipv6`; such a node is deleted and
+  created again. A namespace at `NvmeNsidAll` is made by no nvmet, so its
+  rows read an error until `DeleteNamespace` removes it. Read in the code,
+  not seen in the lab.
 * **A disk whose best or minimum IO size is over `MaxNvmeTcpCmdBytes` can
   be sent commands its disk node refuses.** A side's dm-linear takes the
   disk's best and minimum IO size, as a hardware RAID volume's stripe can

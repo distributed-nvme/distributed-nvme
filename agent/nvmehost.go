@@ -70,8 +70,9 @@ func (h *NvmeHost) Connect(
 		"--ctrl-loss-tmo", "-1")
 }
 
-// DialTransport is the one transport Dial dials.
-const DialTransport = "tcp"
+// DialTransport is the one transport Dial dials, the one the gateway takes
+// (architecture.md, Common validation).
+const DialTransport = common.NvmeTrTypeTcp
 
 // Dial opens a TCP connection to tr's address and lets it go, waiting at
 // most timeout for the address to answer (cnagent.md CN10): the test before
@@ -79,7 +80,8 @@ const DialTransport = "tcp"
 // `nvme connect` would hold the kernel's one fabrics connect at a time while
 // its SYNs go unanswered. An address that did not answer is an error wrapping
 // common.ErrDialTimeout (osclient.md, DialTcp). A transport other than
-// DialTransport is not dialled: nil at once.
+// DialTransport, which only a node or clone stored before the gateway took
+// TCP alone can carry, is not dialled: nil at once.
 func (h *NvmeHost) Dial(
 	ctx context.Context,
 	tr TrConf,
