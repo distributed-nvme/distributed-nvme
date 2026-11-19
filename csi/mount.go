@@ -12,10 +12,19 @@ import (
 )
 
 // The node's side of filesystems and mounts (csi.md CSI17), all through the
-// OS client: blkid, the filesystem makers, mount and umount, the kernel's
-// mount table and the filesystem totals.
+// OS client: blkid, the direct read of a device's start, the filesystem
+// makers, mount and umount, the kernel's mount table and the filesystem
+// totals.
 const (
 	mountInfoPath = "/proc/self/mountinfo"
+	// blankProofBytes is how much of a device's start a stage reads before
+	// it formats the device (csi.md CSI17): the first MiB holds the
+	// signatures of ext4 and xfs, the two filesystems the driver makes, and
+	// of almost every other filesystem and partition table.
+	blankProofBytes = 1 << 20
+	// directReadAlign is the alignment of a direct read's offset and length
+	// (osclient.md, ReadBlockDirect).
+	directReadAlign = 4096
 )
 
 type mounter struct {
@@ -107,15 +116,17 @@ func (m *mounter) mountAt(ctx context.Context, target string) (*mountEntry, erro
 }
 
 // probe reads what a device carries, straight from the device: its
-// filesystem and its partition table, both empty for a blank device.
+// filesystem and its partition table, both empty when blkid finds neither.
 func (m *mounter) probe(ctx context.Context, dev string) (string, string, error) {
 	stdout, stderr, code, err := m.oc.RunCommand(ctx, "blkid",
 		[]string{"-p", "-s", "TYPE", "-s", "PTTYPE", "-o", "export", dev}, "")
 	if err != nil {
-		// blkid answers 2 with nothing on stdout for a device with no
-		// recognizable content: a blank device. It answers 2 as well for a
-		// device it cannot open, with a message on stderr, which is no
-		// answer.
+		// blkid answers 2 with nothing printed when it found no
+		// recognizable content, and also when a read of the device failed,
+		// so this answer is "found nothing or did not read": the read of
+		// the device's start (readStart) decides before any format. It
+		// answers 2 as well for a device it cannot open, with a message on
+		// stderr, which is no answer.
 		if code == 2 && strings.TrimSpace(stdout) == "" && strings.TrimSpace(stderr) == "" {
 			return "", "", nil
 		}
@@ -132,6 +143,30 @@ func (m *mounter) probe(ctx context.Context, dev string) (string, string, error)
 		}
 	}
 	return fsType, ptType, nil
+}
+
+// readStart reads the start of a device past the page cache, as the device
+// holds it now: the first blankProofBytes, or the whole device in whole 4 KiB
+// blocks when it is smaller, since a direct read past the end fails. It
+// returns no bytes for a device smaller than one block.
+func (m *mounter) readStart(ctx context.Context, dev string) ([]byte, error) {
+	size, err := m.blockSize(ctx, dev)
+	if err != nil {
+		return nil, err
+	}
+	n := min(uint64(blankProofBytes), size) / directReadAlign * directReadAlign
+	if n == 0 {
+		return nil, nil
+	}
+	data, err := m.oc.ReadBlockDirect(ctx, dev, 0, n)
+	if err != nil {
+		return nil, err
+	}
+	if uint64(len(data)) != n {
+		return nil, fmt.Errorf("a direct read of %s returned %d bytes, want %d",
+			dev, len(data), n)
+	}
+	return data, nil
 }
 
 // mkfs formats a blank device with the one of the two filesystems named.

@@ -294,7 +294,8 @@ subsystem's allowed hosts. The kubelet then asks the node plugin to stage
 the volume: the plugin connects to the cdc, reads in its discovery log
 that the controller node at 127.0.0.1 port 4420 exports the subsystem,
 connects to it as the machine's host, waits for the volume's device,
-formats it with ext4, since it is blank, mounts it under the kubelet's
+formats it with ext4, since blkid finds nothing on it and its first MiB
+reads as zeros, mounts it under the kubelet's
 directory and bind-mounts it into the pod. The plugin keeps its discovery
 connection and follows the log while the volume is staged, so that a
 failover would move its path.

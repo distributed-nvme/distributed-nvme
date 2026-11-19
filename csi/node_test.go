@@ -44,6 +44,9 @@ type fakeNode struct {
 	refuse   map[string]int        // endpoint -> connects still refused
 	noNs     map[string]bool       // endpoints whose paths show no namespace yet
 	sizes    map[string]uint64     // blockdev --getsize64 per device
+	startOf  map[string][]byte     // a device's first bytes; zeros after them
+	readErr  map[string]error      // the direct read of a device fails
+	reads    []string              // every direct read, "<path> <offset> <length>"
 	mountErr bool                  // a mount of a device fails
 	calls    []string              // every command, joined
 	statLine string                // stat -f's answer
@@ -79,6 +82,8 @@ func newFakeNode() *fakeNode {
 		refuse:   map[string]int{},
 		noNs:     map[string]bool{},
 		sizes:    map[string]uint64{},
+		startOf:  map[string][]byte{},
+		readErr:  map[string]error{},
 		statLine: "4096 1000 500 400 100 50",
 	}
 	return f
@@ -266,6 +271,26 @@ func (f *fakeNode) client() common.OsClient {
 			}
 			f.files[path] = data
 			return nil
+		},
+		// A direct read answers what the device holds: startOf's bytes,
+		// zeros after them, and a short read past the device's size is an
+		// error, as ReadBlockDirectAt's is.
+		ReadBlockDirectFn: func(ctx context.Context, path string, offset uint64,
+			length uint64) ([]byte, error) {
+			f.mu.Lock()
+			defer f.mu.Unlock()
+			f.reads = append(f.reads, fmt.Sprintf("%s %d %d", path, offset, length))
+			if err := f.readErr[path]; err != nil {
+				return nil, err
+			}
+			if offset+length > f.sizes[path] {
+				return nil, fmt.Errorf("read block direct: %s: short read", path)
+			}
+			data := make([]byte, length)
+			if start := f.startOf[path]; uint64(len(start)) > offset {
+				copy(data, start[offset:])
+			}
+			return data, nil
 		},
 	}
 }
@@ -595,6 +620,92 @@ func TestNodeStageRefuses(t *testing.T) {
 	n.deviceWait = time.Second
 	_, err = n.NodeStageVolume(ctx, other)
 	wantCode(t, err, codes.Unavailable, "a volume no cdc lists")
+}
+
+// TestNodeStageFormatsADeviceWhoseStartIsZero pins csi.md CSI17's proof of
+// a blank device: blkid finds nothing, and the first MiB of the device, read
+// past the page cache, is all zero, so the device is formatted.
+func TestNodeStageFormatsADeviceWhoseStartIsZero(t *testing.T) {
+	n, f := newTestNode(t)
+	dev := devicePath(namespaceUuidOf(testVolume))
+	_, err := n.NodeStageVolume(t.Context(), stageReq(mountCap(fsExt4, rwo)))
+	wantCode(t, err, codes.OK, "stage of a device whose start is zero")
+	if f.count("mkfs.ext4") != 1 {
+		t.Errorf("mkfs.ext4 ran %d times, want 1", f.count("mkfs.ext4"))
+	}
+	if want := dev + " 0 1048576"; strings.Join(f.reads, ";") != want {
+		t.Errorf("direct reads %q, want %q: the first MiB, before the format",
+			f.reads, want)
+	}
+}
+
+// TestNodeStageReadsASmallDeviceWhole pins the size of CSI17's read: a
+// device smaller than a MiB is read whole, in whole 4 KiB blocks, since a
+// direct read past its end fails.
+func TestNodeStageReadsASmallDeviceWhole(t *testing.T) {
+	n, f := newTestNode(t)
+	dev := devicePath(namespaceUuidOf(testVolume))
+	f.sizes[dev] = 512<<10 + 100
+	_, err := n.NodeStageVolume(t.Context(), stageReq(mountCap(fsExt4, rwo)))
+	wantCode(t, err, codes.OK, "stage of a small device")
+	if want := dev + " 0 524288"; strings.Join(f.reads, ";") != want {
+		t.Errorf("direct reads %q, want %q", f.reads, want)
+	}
+	if f.count("mkfs.ext4") != 1 {
+		t.Errorf("mkfs.ext4 ran %d times, want 1", f.count("mkfs.ext4"))
+	}
+}
+
+// TestNodeStageRefusesAFailedStartRead pins CSI17's answer to a read of the
+// device's start that fails: no format, and UNAVAILABLE, so the kubelet
+// stages the volume again and the follower keeps its paths (CSI16); the
+// next stage whose read works formats the device.
+func TestNodeStageRefusesAFailedStartRead(t *testing.T) {
+	n, f := newTestNode(t)
+	ctx := t.Context()
+	dev := devicePath(namespaceUuidOf(testVolume))
+	nqn := subsystemNqnOf(testVolume)
+	f.readErr[dev] = fmt.Errorf("read %s: input/output error", dev)
+	_, err := n.NodeStageVolume(ctx, stageReq(mountCap(fsExt4, rwo)))
+	wantCode(t, err, codes.Unavailable, "a stage whose start read fails")
+	if f.count("mkfs") != 0 || f.count("mount") != 0 {
+		t.Errorf("a device whose start could not be read was formatted or "+
+			"mounted: %v", f.calls)
+	}
+	if !n.follow.staged[nqn] || len(f.paths(nqn)) != 2 {
+		t.Errorf("staged %v, paths %v: the stage the kubelet repeats lost "+
+			"its paths", n.follow.staged, f.paths(nqn))
+	}
+	delete(f.readErr, dev)
+	_, err = n.NodeStageVolume(ctx, stageReq(mountCap(fsExt4, rwo)))
+	wantCode(t, err, codes.OK, "the stage once the read works")
+	if f.count("mkfs.ext4") != 1 {
+		t.Errorf("mkfs.ext4 ran %d times, want 1", f.count("mkfs.ext4"))
+	}
+}
+
+// TestNodeStageRefusesDataAtTheStart pins CSI17's other refusal: a device
+// whose start holds a byte that is not zero, where blkid finds nothing, is
+// FAILED_PRECONDITION and never formatted, wherever in the first MiB the
+// byte is.
+func TestNodeStageRefusesDataAtTheStart(t *testing.T) {
+	for _, at := range []int{0, 4096, 1<<20 - 1} {
+		t.Run(fmt.Sprintf("byte %d", at), func(t *testing.T) {
+			n, f := newTestNode(t)
+			dev := devicePath(namespaceUuidOf(testVolume))
+			start := make([]byte, at+1)
+			start[at] = 0x5a
+			f.startOf[dev] = start
+			_, err := n.NodeStageVolume(t.Context(),
+				stageReq(mountCap(fsExt4, rwo)))
+			wantCode(t, err, codes.FailedPrecondition,
+				"a device with data at its start")
+			if f.count("mkfs") != 0 || f.count("mount") != 0 {
+				t.Errorf("a device with data was formatted or mounted: %v",
+					f.calls)
+			}
+		})
+	}
 }
 
 // TestNodePublishAndUnpublish pins csi.md CSI17 for a filesystem and a

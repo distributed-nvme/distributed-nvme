@@ -1274,3 +1274,182 @@ read is the one that flushes nothing, and that the gather never reads
 cn suite's nodecheck case stalls an md array on a lab VM and checks that
 the gather returns by its time limit and names the /proc/mdstat read as
 not finished, and it passes there.
+
+## A Kubernetes volume the node plugin will not format
+
+Words: the **node plugin** is the part of dnv's Kubernetes driver that runs
+on each Kubernetes node. A **pod** is the Kubernetes unit of one or more
+containers. A **filesystem volume** is one the plugin formats and mounts
+for a pod; a **raw block volume** is one a pod gets as a bare block device.
+A **claim** is a pod's request for a volume, and a **persistent volume** is
+Kubernetes' record of the volume that serves a claim; its handle names the
+dnv volume. A **workload** is the Kubernetes record that keeps pods
+running, such as a Deployment or a StatefulSet, and makes a new pod at once
+when one of its pods is deleted. A **Kubernetes namespace** is a named
+group of Kubernetes records, such as claims and pods; it is not an NVMe
+namespace. A persistent volume's **reclaim policy** says what deleting it
+does to the volume under it: `Retain` keeps the volume. Before a pod can
+use a volume, the kubelet, the Kubernetes program on each node, asks the
+node plugin to make the volume ready there: the plugin connects the node to
+the volume and, for a filesystem volume, formats it when it is new and
+mounts it. The plugin formats a volume only when blkid finds nothing on it
+and its first MiB, read straight from the device, is all zeros. A new
+volume reads as zeros, since a thin device reads zeros where nothing was
+written.
+
+Symptom: a pod that uses a filesystem volume stays in `ContainerCreating`.
+`kubectl describe pod <pod>` shows events with the plugin's refusal, which
+is one of two:
+
+1. **The read failed**: "reading the start of the device <device> ... the
+   driver formats only a device whose start it has read".
+2. **Data at the start**: "the device <device> of the volume holds data at
+   byte N of its first M bytes and no filesystem or partition table blkid
+   knows; the driver never formats over it".
+
+The text tells the two apart. `<device>` is
+`/dev/disk/by-id/nvme-uuid.<uuid>` on the node that runs the pod.
+
+What dnv does alone: the kubelet asks again and again, waiting longer each
+time, up to about two minutes between tries. After a failed read the node
+keeps its paths to the volume, and each try reads again, so the volume is
+formatted and mounted once a read works. After data at the start the
+plugin disconnects the node from the volume, since Kubernetes never asks it
+to undo a refused try, and every try connects, reads, refuses and
+disconnects again: nothing changes by itself.
+
+### The read failed
+
+Confirm, as root on the node: `nvme list-subsys` shows the volume's paths
+and their state, and the kernel log (`dmesg`) shows any IO errors of the
+device.
+
+Safe steps: check that the volume's pool serves. `dnvctl sp get` lists the
+pool's cntlrs; `dnvctl cntlr inspect --id <primary cntlr id>` shows the
+primary's rows. The node reconnects its paths by itself; once a path
+serves, the next try formats the volume.
+
+When to stop: the read keeps failing while the pool's cntlrs serve, which
+is a fault only the host sees ([the scope page](scope.md), section 6.1).
+Ask for help.
+
+### Data at the start
+
+Between tries the node holds no path to the volume, so `<device>` does not
+exist there. Do not run blkid, hexdump or dd on it on the node: blkid
+answers a missing path as it answers an empty device, and `dd of=` a
+missing path makes a plain file and leaves the volume as it was. Reach the
+volume through a pod that gets it as a raw block volume, as below. Two
+causes are known:
+
+1. **A first format cut off part way.** The plugin started `mkfs` on the
+   new volume and the try ended before `mkfs` did: the kubelet's time for
+   one try ran out, or the plugin restarted. The bytes `mkfs` had written
+   are no filesystem blkid takes. Such a volume never held a pod's data.
+   The plugin logs one `os command` record when a command ends. For this
+   cause its log shows the device's `mkfs` ending with an error, or the
+   plugin restarted during the `mkfs`: `kubectl -n dnv-csi get pods` counts
+   a restart of the node's plugin pod.
+2. **The volume held data already.** Someone wrote to the volume before:
+   through a raw block volume, or by hand, and then gave it to Kubernetes
+   as a filesystem volume. That data is someone's.
+
+Safe steps:
+
+1. Stop the tries: scale the workload that owns the pod to zero; delete
+   the pod only when no workload owns it, since a workload makes a new pod
+   with the same claim at once. Wait until `kubectl get volumeattachment` lists no
+   attachment of the claim's persistent volume (`kubectl get pvc <claim>`
+   names it). A try still running would disconnect the node from the volume
+   under the steps below.
+2. Read the volume's handle:
+   `kubectl get pv <pv> -o jsonpath='{.spec.csi.volumeHandle}'`.
+3. Give the same volume to a pod as a raw block volume, through a second
+   persistent volume over that handle. `Retain` is what keeps the second
+   one's delete from deleting the dnv volume:
+
+   ```
+   kubectl apply -f - <<'EOF'
+   apiVersion: v1
+   kind: PersistentVolume
+   metadata:
+     name: inspect-<pv>
+   spec:
+     capacity:
+       storage: 1Gi
+     accessModes: [ReadWriteOnce]
+     volumeMode: Block
+     persistentVolumeReclaimPolicy: Retain
+     storageClassName: ""
+     csi:
+       driver: csi.dnv.io
+       volumeHandle: <the handle from step 2>
+   ---
+   apiVersion: v1
+   kind: PersistentVolumeClaim
+   metadata:
+     name: inspect-<pv>
+     namespace: <the claim's Kubernetes namespace>
+   spec:
+     accessModes: [ReadWriteOnce]
+     volumeMode: Block
+     storageClassName: ""
+     volumeName: inspect-<pv>
+     resources:
+       requests:
+         storage: 1Gi
+   ---
+   apiVersion: v1
+   kind: Pod
+   metadata:
+     name: inspect-<pv>
+     namespace: <the claim's Kubernetes namespace>
+   spec:
+     containers:
+       - name: inspect
+         image: busybox:1.37.0
+         command: ["sleep", "86400"]
+         volumeDevices:
+           - name: vol
+             devicePath: /dev/vol
+     volumes:
+       - name: vol
+         persistentVolumeClaim:
+           claimName: inspect-<pv>
+   EOF
+   ```
+
+   The plugin connects the node and gives the pod the device; it formats
+   nothing for a raw block volume.
+4. Look at the start:
+   `kubectl exec -n <Kubernetes namespace> inspect-<pv> -- hexdump -C -n 1048576 /dev/vol | head -n 20`.
+5. Keep a copy before you change anything:
+   `kubectl exec -n <Kubernetes namespace> inspect-<pv> -- head -c 1048576 /dev/vol > <volume>.start`
+   copies the first MiB to the machine you run kubectl on. To keep the
+   whole volume, use `cat /dev/vol` in place of `head -c 1048576 /dev/vol`.
+6. Delete the pod, then the claim, then the persistent volume of step 3.
+   Each delete leaves the dnv volume as it is.
+7. Start the workload again. If the start still holds data, the next try
+   refuses it again.
+
+Steps that can lose data: zeroing the start, between steps 5 and 6:
+`kubectl exec -n <Kubernetes namespace> inspect-<pv> -- dd if=/dev/zero of=/dev/vol bs=1M count=1 conv=fsync`.
+It erases what the first MiB holds; the try after step 7 then formats the
+volume, which erases the rest of any filesystem on it. Do it only for a
+volume that never held data, as after a first format cut off part way.
+`wipefs -a` is no help here: it erases only what blkid knows, and blkid
+knows nothing on this device. A `mkfs` by hand loses the data the same way
+as the zeroing. Deleting the second persistent volume with any reclaim
+policy but `Retain` deletes the dnv volume and all its data.
+
+When to stop: you cannot tell who wrote the data. Keep the workload
+stopped, keep the copy, and ask for help; do not zero the volume.
+
+Tested: unit tests of the node plugin check that a failed read formats
+nothing and keeps the volume's paths, that a byte that is not zero in the
+first MiB formats nothing, that an all-zero start is formatted, and that a
+volume smaller than a MiB is read whole. No suite case fails a read under
+a Kubernetes volume or puts data at the start of one, and the steps of
+"Data at the start", the second persistent volume over the same handle
+above all, have not been run. The Kubernetes suite's volume case shows that
+a new volume is still formatted and that a raw block volume reaches its pod.

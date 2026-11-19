@@ -44,8 +44,9 @@ it.
   children among them, and the archive's write (`dnagent.md` CM6), and for
   persisting the `Local*Path` protobuf state files; and `dnv-csi`'s node
   plugin, for its nvme-cli, blkid, filesystem maker and mount commands, its
-  sysfs and mount table reads and its read of a volume's device link
-  (`csi.md`, The node plugin). **All** OS command execution, detached child
+  sysfs and mount table reads, its read of a volume's device link and its
+  direct read of a volume's start before a format (`csi.md`, The node
+  plugin, CSI17). **All** OS command execution, detached child
   start, directory listing, modification-time read, device-number read,
   discard, TCP connect made to test whether an address answers (DialTcp)
   and disk file IO in production code goes through an `OsClient` — never
@@ -478,7 +479,9 @@ its own, past any page cache — the kernel writes an md superblock with bios
 of its own — so a buffered read could answer an old copy from the page
 cache. The md replay reads its legs' superblock areas the same way, and
 reads back past the page cache the block it wrote through its array
-(`dnagent.md` CM5).
+(`dnagent.md` CM5). The CSI node plugin reads a volume's start the same way
+before it formats it (`csi.md` CSI17), so the bytes it judges are the
+device's own now, never a page the cache kept.
 
 * It takes one semaphore slot, checks the ctx error after acquiring it,
   and runs the body of the probe's helper `ReadBlockDirectAt`: the
@@ -491,7 +494,10 @@ reads back past the page cache the block it wrote through its array
   array over them; but a disk node that stalls while the leg's path stays
   live holds the superblock read without limit, and with it the slot; the
   leg probe, whose IO waits by design, never uses it (Exported raw helpers
-  and the probe-IO carve-out).
+  and the probe-IO carve-out). The node plugin's read of a volume's start
+  waits the same way when every path of the volume goes between blkid and
+  the read: its paths reconnect without end, so the IO waits (`csi.md`
+  CSI14), and the read holds that stage and its slot until a path returns.
 * One `os read block direct` record covers the call, with `path`, `offset`
   and `length` — **never** `data` (`log.md`, OS commands and file IO).
 
@@ -697,8 +703,9 @@ prefix is load-bearing: the cn suite's mutation grep (`mutations` in
 `integtest/cnagent_test.sh`; `cnagent_integtest.md`, Conventions) names
 `os write block` explicitly, and the continuous health probes must fall out
 of that grep **by construction** rather than by a path-based exemption; an
-`os read block direct` record is the cn agent's superblock read
-(ReadBlockDirect), a read and never a probe's. `os write block` is the dn
+`os read block direct` record is a ReadBlockDirect read, the cn agent's
+superblock read, the md replay's or the CSI node plugin's read of a volume's
+start, and never a probe's. `os write block` is the dn
 agent's `diskmeta.go` record, so a "probe …" record and an "os …" record can
 never be confused for one another.
 

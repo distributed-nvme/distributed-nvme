@@ -207,6 +207,9 @@ func (n *node) stageDevice(
 			"the device of the volume carries a %s partition table and no "+
 				"filesystem; the driver never formats over it", ptType)
 	case existing == "":
+		if err := n.proveBlank(ctx, dev); err != nil {
+			return err
+		}
 		if err := n.mnt.mkfs(ctx, fsType, dev); err != nil {
 			return status.Error(codes.Internal, err.Error())
 		}
@@ -221,6 +224,37 @@ func (n *node) stageDevice(
 	}
 	if err := n.mnt.mount(ctx, dev, staging, fsType, mnt.Mount.GetMountFlags()); err != nil {
 		return status.Error(codes.Internal, err.Error())
+	}
+	return nil
+}
+
+// proveBlank is CSI17's proof that a device blkid finds nothing on is blank:
+// its start, read past the page cache, is all zero, as a thin device reads
+// where nobody wrote. blkid gives the same silent answer when its read
+// failed, so that answer alone formats nothing. A read that fails is
+// UNAVAILABLE, a code after which the kubelet stages the volume again and
+// the follower keeps its paths (CSI16); a byte that is not zero is
+// FAILED_PRECONDITION, as any other content the driver will not format over.
+func (n *node) proveBlank(ctx context.Context, dev string) error {
+	start, err := n.mnt.readStart(ctx, dev)
+	if err != nil {
+		return status.Errorf(codes.Unavailable,
+			"reading the start of the device %s: %v; the driver formats only "+
+				"a device whose start it has read", dev, err)
+	}
+	if len(start) == 0 {
+		return status.Errorf(codes.FailedPrecondition,
+			"the device %s is smaller than one 4 KiB block; the driver "+
+				"formats no device so small", dev)
+	}
+	for i, b := range start {
+		if b != 0 {
+			return status.Errorf(codes.FailedPrecondition,
+				"the device %s of the volume holds data at byte %d of its "+
+					"first %d bytes and no filesystem or partition table "+
+					"blkid knows; the driver never formats over it", dev, i,
+				len(start))
+		}
 	}
 	return nil
 }

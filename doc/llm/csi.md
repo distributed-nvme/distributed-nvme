@@ -234,7 +234,8 @@ the controller plugin takes (`--cdc-addresses`), the two identity files
 (`--device-wait`) and the follower's period (`--sync-period`). Everything it
 does to the node goes through the OS client, the one path to the operating
 system (`osclient.md`): nvme-cli for what the kernel takes as a command, the
-mount tools, blkid, the filesystem makers, the sysfs and mount table reads.
+mount tools, blkid, the direct read of a volume's start, the filesystem
+makers, the sysfs and mount table reads.
 Only the kernel's event socket is the plugin's own, since the OS client has no
 socket. The plugin reports nothing to dnv, and the worker's reactions read the
 agents' reports and the stored records, never a host (`architecture.md`,
@@ -370,12 +371,27 @@ attaches named and keeps the configured ones.
 
 CSI17. **Format only what is blank, mount by binding, repeat for free.** A
 stage of a filesystem volume reads the device's filesystem and partition
-table straight from the device: a blank device, one in which blkid finds
-nothing and reports no error, is formatted with the capability's filesystem,
-ext4 when none is named, a device that carries that filesystem is mounted as
-it is, and a device that carries another, or a partition table and no
-filesystem, is FAILED_PRECONDITION, since formatting it would destroy data;
-a block volume is never formatted or mounted at stage. Publish bind-mounts
+table straight from the device: a device that carries the capability's
+filesystem is mounted as it is, and a device that carries another, or a
+partition table and no filesystem, is FAILED_PRECONDITION, since formatting
+it would destroy data. A device in which blkid finds nothing and reports no
+error is formatted with the capability's filesystem, ext4 when none is
+named, only once it is proven blank: its start, the first MiB or the whole
+of a smaller device, read past the page cache, is all zero. A read that
+fails is UNAVAILABLE, so the kubelet stages the volume again and the
+follower keeps its paths (CSI16), and a byte that is not zero is
+FAILED_PRECONDITION. The reason: blkid gives the same silent answer when a
+read of its probe fails as when it finds nothing, so that answer alone
+would format over data; a thin device reads zeros where nobody wrote, so a
+new volume passes; and the start holds the signatures of ext4 and xfs, the
+two filesystems the driver makes, and of almost every other format. What
+it leaves: a device whose data lies only past its first MiB, in a form
+blkid does not know, is formatted; and a first format cut off part way, by
+the end of the stage's time or a restart of the plugin, can leave bytes at
+the start that blkid does not take for a filesystem, so every later stage
+of that volume is refused until an operator zeroes its start
+(`operations.md`, A Kubernetes volume the node plugin will not format). A
+block volume is never formatted or mounted at stage. Publish bind-mounts
 the staging path at the target, read-only when asked, and for a block volume
 makes a file at the target and bind-mounts the device node onto it.
 Unpublish unmounts the target and removes it, a directory with a plain
