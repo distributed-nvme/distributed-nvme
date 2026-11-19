@@ -64,7 +64,16 @@ const MsgSweepLeftover = "sweep leftover"
 // the Syncup* whose converge acts on it (LeftoverReply).
 type SweepResult struct {
 	leftovers []string
-	failures  []string
+	failures  []SweepFailure
+}
+
+// SweepFailure is one failure of a pass: What names what failed, an
+// enumeration or the object a read, a removal or a condition is about, and
+// Cause is the error's text. They are kept apart so the reply can cut the
+// cause alone and keep the name whole (LeftoverReply).
+type SweepFailure struct {
+	What  string
+	Cause string
 }
 
 // Clean is the whole definition of "this scope is done". An enumeration that
@@ -86,7 +95,7 @@ func (r *SweepResult) Add(kind string, name string) {
 // there may be no object to name, or the object that a read, a removal or a
 // condition is about.
 func (r *SweepResult) Fail(what string, err error) {
-	r.failures = append(r.failures, what+": "+err.Error())
+	r.failures = append(r.failures, SweepFailure{What: what, Cause: err.Error()})
 }
 
 // Log emits MsgSweepLeftover when the pass was not clean. ids are the
@@ -96,11 +105,15 @@ func (r *SweepResult) Log(ctx context.Context, ids ...any) {
 		return
 	}
 	sort.Strings(r.leftovers)
+	failures := make([]string, 0, len(r.failures))
+	for _, failure := range r.failures {
+		failures = append(failures, failure.What+": "+failure.Cause)
+	}
 	attrs := append([]any{}, ids...)
 	attrs = append(attrs,
 		slog.Int("leftover_cnt", len(r.leftovers)),
 		slog.String("leftovers", strings.Join(r.leftovers, " ")),
-		slog.String("failures", strings.Join(r.failures, "; ")))
+		slog.String("failures", strings.Join(failures, "; ")))
 	slog.InfoContext(ctx, MsgSweepLeftover, attrs...)
 }
 

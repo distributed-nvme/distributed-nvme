@@ -86,6 +86,14 @@ func (f *repFix) arrayName() string {
 	return f.srv.nf.CnMdArrayName(testSp, 0, 0, false)
 }
 
+// assertRanOnce asserts one command of the fixture's node carried part.
+func (f *repFix) assertRanOnce(t *testing.T, part string) {
+	t.Helper()
+	if calls := f.node.callsMatching(part); len(calls) != 1 {
+		t.Fatalf("commands with %q: %v, want one", part, calls)
+	}
+}
+
 // forced is the forced assembly of the data group's array from member with
 // one superblock update.
 func (f *repFix) forced(member, update string) string {
@@ -1414,8 +1422,12 @@ func TestForcedStartFallsBackToForceNoBbl(t *testing.T) {
 		logs := captureLogs(t)
 		info := f.syncup(t, withForcedMark(noRepairReq(4), testDataLeg2))
 		row := info.GetGrpIdToMdRaid()[testDataGrp]
-		assertErrorDetails(t, row, "--update="+mdUpdateUuid, "grp data")
+		// The row keeps the head of the run's error and the stop's at its
+		// end; the run's update, in the middle of its command line, the
+		// row text cap takes out, so the calls show it.
+		assertErrorDetails(t, row, "mdadm --assemble ", "grp data")
 		assertErrorDetails(t, row, "Cannot get exclusive access", "grp data")
+		f.assertRanOnce(t, "--update="+mdUpdateUuid)
 		assertNoCall(t, f.node, "--update="+mdUpdateForceNoBbl)
 		assertNoCall(t, f.node, f.add(f.leg1))
 		if f.node.arrayGone(f.mdDev) {
@@ -1458,7 +1470,7 @@ func TestForcedStartFallsBackToForceNoBbl(t *testing.T) {
 		logs := captureLogs(t)
 		info := f.syncup(t, withForcedMark(quietReq(4), testDataLeg2))
 		assertErrorDetails(t, info.GetGrpIdToMdRaid()[testDataGrp],
-			"--update="+mdUpdateUuid, "grp data")
+			"Device or resource busy", "grp data")
 		assertOrder(t, f.node,
 			f.forced(f.leg2, mdUpdateUuid),
 			examineOf(f.leg2))
@@ -1493,9 +1505,14 @@ func TestForcedStartFallsBackToForceNoBbl(t *testing.T) {
 		logs := captureLogs(t)
 		info := f.syncup(t, withForcedMark(noRepairReq(4), testDataLeg2))
 		row := info.GetGrpIdToMdRaid()[testDataGrp]
-		assertErrorDetails(t, row, "--update="+mdUpdateUuid, "grp data")
-		assertErrorDetails(t, row, "--update="+mdUpdateForceNoBbl,
+		// The row keeps the head of the first run's error and the end of
+		// the second's; each run's update, in the middle of its command
+		// line, the row text cap takes out, so the calls show them.
+		assertErrorDetails(t, row, "mdadm --assemble ", "grp data")
+		assertErrorDetails(t, row, "Not enough devices to start the array",
 			"grp data")
+		f.assertRanOnce(t, "--update="+mdUpdateUuid)
+		f.assertRanOnce(t, "--update="+mdUpdateForceNoBbl)
 		assertNoCall(t, f.node, f.add(f.leg1))
 		if n := len(logs.msgRecords(t, msgForcedStart)); n != 0 {
 			t.Fatalf("%d forced start records for a start that failed", n)

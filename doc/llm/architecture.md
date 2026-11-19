@@ -2253,7 +2253,8 @@ harmless. A migration destination takes its run before it zeroes
 * `CmdSoftTimeout` and `CmdHardTimeout` bound the shell commands an agent
   runs, a child blocked in an uninterruptible kernel wait aside. A command
   they end did not answer: its resource reports `RES_STATUS_ERROR` with
-  the command's output in `details`, never an absence (`dnagent.md` SH15).
+  the command's output in `details`, cut to the row text cap (Live-state
+  reporting), never an absence (`dnagent.md` SH15).
   `osclient.md`, RunCommand, owns the two signals and the caveat.
 
 ## `service Gateway` — RPC specifications
@@ -4156,7 +4157,8 @@ from that leg would do, with `force` as `ForceStartGroup`'s force — the
 first refusal `ForceStartGroup` would make (a pool being deleted, the
 level, a clone being deleted, the leg, the partial mark among the leg's,
 the group's row in the report reading `OK` or absent), else the agent's
-dry run, its refusal word for word the real start's (the refusal of an
+dry run, its refusal word for word the real start's, both cut alike to
+the row text cap (Live-state reporting) (the refusal of an
 array that runs aside, which is the dry run's own, as the real start
 leaves the mark waiting), or the members it
 would zero, in order, a member already blank counted among them, the
@@ -4777,7 +4779,8 @@ with `ResStatus`:
   neither.
 * `RES_STATUS_ERROR` — tried and failed, or there and unable to serve IO,
   a dm device left suspended among them; `details` says why, or carries
-  the command output — *needs intervention*.
+  the command output, cut to the row text cap below — *needs
+  intervention*.
 * `RES_STATUS_OK` — there and serving; with `RES_REASON_DIFFERS` it is
   there and differs from what the desired state wants in a way a converge
   rewrites and that leaves no primary without its optimized path, the
@@ -4796,6 +4799,28 @@ with `ResStatus`:
   side whose only row not ok is pending reads as a clean round
   (`dnv-worker.md` HL2). The side's verdict names the pending row, so the
   worker sends its `SyncupSide` again (`dnagent.md` DN16).
+
+**The row text cap.** Every text an agent writes into a row or beside one
+is at most `AgentTextMax` bytes: a row's `details`, a cntlr report's group
+reading refusal and its repair verdict's refusal and waits, an
+`InspectGrp` dry run's refusal, and the `details` of every `AgentReply`
+but the leftover answer. A longer text keeps its head, which says what
+failed and names the object, and its end, where a command's cause is,
+with "..." between (`agent.CutAgentText`); what the cut takes out is the
+middle, a command line or a long output, which the agent's log record of
+the command keeps whole (`log.md`, OS commands and file IO). A note a pass puts in front of a row's own text, as a
+failed step's error in front of a dm-clone row's raw status line, is cut
+to the room that text leaves (`agent.JoinNote`), so the line the gateway
+and the worker parse stays whole. The leftover answer is bounded by its
+construction instead (Teardown by sweep), so its head and its names stay
+whole. The texts the agents compose from ids, md change counts and md
+identities alone fit the cap uncut at full widths; a text that carries a
+command's text or output, or a name of unbounded length such as a disk's
+path, can be cut. Reason: the widest cntlr
+inspect reply, every such text at the cap, then fits `GrpcMaxMsgSize` at
+the limits of Cardinality limits and Common validation (Known limits), the
+cap being the largest round value at which it does, and every reply and
+read that passes agent text on carries it cut.
 
 `epoch` is the unix seconds of the last status change; a change of
 `details` or of `reason` alone does not move it. The `revision`
@@ -5351,7 +5376,9 @@ device is there, the next enumeration finds it.
   answers from it, with whatever that reconcile's sweep left on the node,
   unless a later converge has stored another; a round during the reconcile
   answers that the agent is starting (`dnagent.md` SH33). `details` names
-  the leftovers, at most `maxLeftoverNames` of them, and reports an
+  the leftovers, at most `maxLeftoverNames` of them, and reports, in at
+  most as many failure lines, each naming what failed whole and its error
+  cut to `AgentTextMax` (Live-state reporting), an
   enumeration that did not answer the same way — an answer the agent cannot
   trust cannot prove the node clean — as it does each role's conditions
   that only a `Syncup*` cures (`dnagent.md` SH31, DN16; `cnagent.md` CN30).
@@ -8059,8 +8086,9 @@ document and only pointed to here.
   the reply of a cntlr's inspect call too, the report beside an entry of
   block counters per leg and per namespace device (`cnagent.md` CN23), whose
   error texts the agent cuts to `IoStatErrorMax` so that it fits with the
-  rows' text. Three parts have no such limit: a row's text, which a failed command fills with
-  its output; a bitmap read's reply, which grows with the blocks it asks
+  rows' text, which with every text beside the rows the agent cuts to
+  `AgentTextMax` (Live-state reporting). Two parts have no such limit: a
+  bitmap read's reply, which grows with the blocks it asks
   for, so a caller pages through a large volume (Bitmap reads), and a
   leg's, which the worker reads whole and which fails once it passes
   `GrpcMaxMsgSize`, a leg of more than `MaxMigrBmCnt` times

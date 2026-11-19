@@ -7,7 +7,6 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
-	"unicode/utf8"
 
 	"github.com/distributed-nvme/distributed-nvme/common"
 	"github.com/distributed-nvme/distributed-nvme/pb"
@@ -867,21 +866,10 @@ func (d *Dm) DevIoStats(ctx context.Context, dev string) *pb.DevIoStats {
 	return &pb.DevIoStats{Read: &pb.DevIoStats_Stat{Stat: stat}}
 }
 
-// ioStatErrorCut is what ioStatError puts in front of a text it cut.
-const ioStatErrorCut = "..."
-
-// ioStatError is text cut to common.IoStatErrorMax bytes by its start, so
-// the cause at its end stays; a cut text begins with ioStatErrorCut, and a
-// cut never splits a UTF-8 sequence.
+// ioStatError is text cut to common.IoStatErrorMax bytes by its start
+// (CutText), so the cause at its end stays.
 func ioStatError(text string) string {
-	if len(text) <= common.IoStatErrorMax {
-		return text
-	}
-	keep := text[len(text)-(common.IoStatErrorMax-len(ioStatErrorCut)):]
-	for len(keep) > 0 && !utf8.RuneStart(keep[0]) {
-		keep = keep[1:]
-	}
-	return ioStatErrorCut + keep
+	return CutText(text, common.IoStatErrorMax)
 }
 
 // diskSectors reads the "size" file of the block device whose sysfs
@@ -1093,13 +1081,9 @@ func CloneTable(
 // line survives the note for every reader that scans the details line by
 // line: common.ParseCloneStatus, which the gateway's hydration checks use,
 // skips a note that holds no dm line and reads the status line
-// (architecture.md, Live-state reporting).
+// (architecture.md, Live-state reporting). A note too long to sit beside the
+// line within the row text cap is cut to the room the line leaves
+// (JoinNote).
 func CloneStatusDetails(note, raw string) string {
-	switch {
-	case raw == "":
-		return note
-	case note == "":
-		return raw
-	}
-	return note + "\n" + raw
+	return JoinNote(note, raw)
 }

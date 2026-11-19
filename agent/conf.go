@@ -150,10 +150,10 @@ func ValidateExtentSize(extentSize uint64) error {
 // whose validator lives in package dnagent because it copies no model rule.
 // It is the revision gate's sibling: the request is not applied, nothing is
 // converged, and the worker retries with whatever the control plane stores
-// next round.
+// next round. Its details are cut to the row text cap (CutAgentText).
 func InvalidConfReply(format string, args ...any) *pb.AgentReply {
 	return &pb.AgentReply{
 		Code:    common.ReplyCodeInvalidConf,
-		Details: fmt.Sprintf(format, args...),
+		Details: CutAgentText(fmt.Sprintf(format, args...)),
 	}
 }

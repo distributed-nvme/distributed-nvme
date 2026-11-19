@@ -73,8 +73,8 @@ func (s *DnAgentServer) pushMigrBitmap(
 			slog.String("error", err.Error()))
 		return &pb.PushMigrBitmapReply{AgentReply: &pb.AgentReply{
 			Code: common.ReplyCodeSaveFailed,
-			Details: fmt.Sprintf("removing the chunks at bm_idx %d "+
-				"and above failed: %v", req.GetBmIdx(), err),
+			Details: agent.CutAgentText(fmt.Sprintf("removing the chunks "+
+				"at bm_idx %d and above failed: %v", req.GetBmIdx(), err)),
 		}}
 	}
 	path := s.nf.LocalMigrBmPath(req.GetClusterId(), req.GetDnId(),
@@ -96,8 +96,9 @@ func (s *DnAgentServer) pushMigrBitmap(
 			slog.String("error", err.Error()))
 		return &pb.PushMigrBitmapReply{AgentReply: &pb.AgentReply{
 			Code: common.ReplyCodeSaveFailed,
-			Details: fmt.Sprintf("saving the chunk at bm_idx %d failed: %v",
-				req.GetBmIdx(), err),
+			Details: agent.CutAgentText(fmt.Sprintf(
+				"saving the chunk at bm_idx %d failed: %v",
+				req.GetBmIdx(), err)),
 		}}
 	}
 	st.chunkMigrId = req.GetMigrId()

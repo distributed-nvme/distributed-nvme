@@ -111,7 +111,10 @@ func (t *ResTracker) Set(
 // changes, whatever the details and the reason do, and the caller gets a
 // copy of the whole stored row, every field of it, so no caller can reach
 // the state. A pass that is cut off gets the row and records nothing
-// (ResTracker).
+// (ResTracker). It is the one writer of every row, so it is where the row
+// text cap is kept: details over common.AgentTextMax are cut in their middle,
+// their head and their end kept (CutAgentText), and the row is recorded and
+// returned with the cut text.
 func (t *ResTracker) SetReason(
 	key string,
 	resName string,
@@ -130,7 +133,7 @@ func (t *ResTracker) SetReason(
 	cur := &pb.ResInfo{
 		ResName: resName,
 		Status:  status,
-		Details: details,
+		Details: CutAgentText(details),
 		Epoch:   epoch,
 		Reason:  reason,
 	}

@@ -415,6 +415,18 @@ const (
 	// an entry per leg beside the cntlr report, fits GrpcMaxMsgSize at the
 	// cardinality limits.
 	IoStatErrorMax = 128
+	// AgentTextMax bounds every text an agent writes into a row or beside
+	// one (architecture.md, Live-state reporting): a row's details, a group
+	// reading's refusal, a repair verdict's refusal and waits, a forced
+	// start dry run's refusal, the error of each failure line of a leftover
+	// answer and every other AgentReply's details. A longer text keeps its
+	// head, what failed, and its end, where a command's cause is; the
+	// agent's log record of a command keeps the command's text whole. The
+	// value is the largest round one at which a cntlr's inspect
+	// reply, every such text at the cap, fits GrpcMaxMsgSize at the
+	// cardinality limits (model's TestWidestMessagesFitGrpcMaxMsgSize); the
+	// longest texts the agents compose from ids fit it uncut.
+	AgentTextMax = 224
 
 	// Default cap on the number of in-flight OsClient operations
 	// (commands + directory listings + modification-time reads +

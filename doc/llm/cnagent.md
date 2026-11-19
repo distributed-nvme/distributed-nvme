@@ -2758,7 +2758,8 @@ wherever the pool has not written ([D15]), so it counts those regions too
 (`repSteps`) and the take-back check after it (`takeBackStep`) name one
 reason they hold the repair back, from the same reading and the same tests
 they decide by, and the repair's verdict carries the text as `waits`
-(CN28), on a read and on a converge alike. The reasons, in the order the
+(CN28), cut to the row text cap of `architecture.md`, Live-state
+reporting, on a read and on a converge alike. The reasons, in the order the
 tests meet them: for a STARTED repair, or a CREATED one whose abort
 flag the request does not carry, the first new leg the array lacks that the
 step cannot add — its side not provisioned yet, or the leg not available
@@ -4260,8 +4261,10 @@ this cntlr's sweep was not clean — the node still holds an object of this
 sp that the desired state does not want, or one of the enumerations did
 not answer — and zero otherwise. The details list the leftovers by kind
 and name, a bounded number of them with a tail saying how many more,
-plus one "enumeration failed" entry naming each unanswered enumeration;
-the full list goes to the agent log from every pass and every read whose
+plus an "enumeration failed" entry naming each unanswered enumeration,
+at most `maxLeftoverNames` of them, each error cut to `AgentTextMax`, and
+a "[+k more failures]" tail for the rest (`architecture.md`, Teardown by
+sweep); the full list goes to the agent log from every pass and every read whose
 verdict is not clean, in the leftover record of `log.md`, Leftovers, so
 a lingering leftover is visible on every pass and every read that still
 finds it, not only once. The code means accepted with residue, not a rejection
@@ -5024,7 +5027,8 @@ start; an array that is there and does not run is stopped first, so the
 reply says so, unless it holds a member that is no leg wrapper of this
 pool, which the real start refuses to stop (`MdDetail.strangerErr`), word
 for word; then the start's checks, whose first that does not hold is the
-refusal, word for word the real start's, or else the members it would
+refusal, word for word the real start's, both cut alike to the row text
+cap (`architecture.md`, Live-state reporting), or else the members it would
 zero, in order, and the assembly's update. The real start and this dry run
 run one function (`planForcedStart`), so a broken check fails the tests of
 both. It runs no mdadm command and writes nothing, the mark of its own
@@ -5507,7 +5511,9 @@ that keeps the data, empty when nothing holds the add back;
 state, ascending, since md has written its superblock onto each, which
 the worker records as a taken-back leg's partial mark (`dnv-worker.md`
 AR11); and `waits`, why the primary holds the repair back, empty when
-nothing does (CN12, Why a repair waits). The
+nothing does (CN12, Why a repair waits). The reading's refusal and the
+verdict's refusal and `waits` are cut to the row text cap of
+`architecture.md`, Live-state reporting, as a row's details are. The
 refusal is text for people: the worker logs a CREATED repair's verdict
 that carries one and moves no stage for it (`dnv-worker.md` AR11), no rule
 decides anything on its text, and it is never the group's error (CN12). An
@@ -5527,7 +5533,8 @@ that a read leaves empty, and the two can name different waits.
 
 CN29. Error capture (`architecture.md`, Common agent rules): a failed
 command marks that resource `RES_STATUS_ERROR` with the command output in
-its details and the converge pass continues with the remaining resources.
+its details, cut to the row text cap of `architecture.md`, Live-state
+reporting, and the converge pass continues with the remaining resources.
 Two things qualify that. The details are for people: where the worker must
 tell one cause of a row's status from another, the row says so in its reason
 (`architecture.md`, Live-state reporting), never in the text. The cn agent

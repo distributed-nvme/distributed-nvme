@@ -371,4 +371,6 @@ it again (`dnagent.md` SH28). A clean pass or read emits nothing;
 agent's record carries the FULL list, while `details` — in the reply and
 therefore in `syncup leftover` — shows at most `maxLeftoverNames` leftover
 names before a "[+k more]" tail, so that one stuck node cannot fill the
-reply with names; the failure lines that follow them are not capped.
+reply with names, and at most as many failure lines, each with its error
+cut to `AgentTextMax` (`architecture.md`, Live-state reporting), before a
+"[+k more failures]" tail.

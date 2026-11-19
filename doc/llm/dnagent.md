@@ -693,7 +693,9 @@ SH14. A per-object in-memory tracker (`ResTracker`) turns probe outcomes
 into a `pb.ResInfo` of `res_name`, `status`, `details`, `reason` and
 `epoch` per `architecture.md`, Live-state reporting: `epoch` is the unix
 seconds of the last **status** change (a change of `details` or of
-`reason` alone does not bump it); the
+`reason` alone does not bump it); `details` is cut to the row text cap
+there (`agent.CutAgentText`), so the tracker records and returns the cut
+text; the
 agent emits `RES_STATUS_MISSING`, `RES_STATUS_ERROR`, `RES_STATUS_OK` and
 `RES_STATUS_PROVISIONING`, the cn agent also `RES_STATUS_PENDING` on a
 primary's leg rows (`cnagent.md` CN11) and the dn agent on the primary's
@@ -809,8 +811,10 @@ suspension holds only as far as the reloads succeed.
 
 **A refusal a caller decides by is typed.** A command that fails comes back
 as an error of its own type (`CmdError`): its text is the command line and
-the tool's own output, word for word, for the rows' details and the logs,
-and it also carries the exit status and, for a dmsetup refusal, the errno
+the tool's own output, word for word, for the logs and, cut to the row
+text cap of `architecture.md`, Live-state reporting, for the rows'
+details, and it also carries the exit status and, for a dmsetup refusal,
+the errno
 the output names. That errno is read from the output in one place, the
 wrapper's own table of the tool's words in the C locale, the one every
 command runs in (`osclient.md`, RunCommand), and a caller asks the type
@@ -4423,7 +4427,8 @@ and "side provisioning" otherwise.
 
 DN19. Error capture (`architecture.md`, Common agent rules): a failed
 command marks that resource `RES_STATUS_ERROR` with the command output in
-`details` and the converge pass **continues** with the remaining resources
+`details`, cut to the row text cap of `architecture.md`, Live-state
+reporting (SH14), and the converge pass **continues** with the remaining resources
 — the agent converges as much as it can — except for a layer a gate holds
 back on purpose, which the pass reports instead: the per-CN stacks and the
 migration roles above a side device short of ready (DN9, DN10), the
@@ -4445,7 +4450,9 @@ could not remove everything, or whose enumeration did not answer, replies
 `ReplyCodeLeftover` with `details` listing the leftovers as "kind:name"
 entries with their count — at most `maxLeftoverNames` names, then a "[+k
 more]" tail — and an "enumeration failed" entry naming what did not answer
-and the error, for each such listing (`LeftoverReply`). Four dn checks that
+and the error, for each such listing, at most `maxLeftoverNames` of them,
+each error cut to the row text cap of `architecture.md`, Live-state
+reporting, then a "[+k more failures]" tail (`LeftoverReply`). Four dn checks that
 are not listings are folded into the same outcome, in that same form, so
 that they drive the same re-send: DN6's record step on a disk whose
 identity is not confirmed; a record of a side, or of the clone-metadata

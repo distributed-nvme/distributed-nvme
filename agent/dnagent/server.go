@@ -436,11 +436,10 @@ func (s *DnAgentServer) readDisk(ctx context.Context) diskRead {
 		read.formatErr = fmt.Errorf("logical block size not read: %w", err)
 	case block != common.DnLogicalBlockSize:
 		read.formatErr = fmt.Errorf("disk %s has a logical block size of "+
-			"%d bytes, not %d: format it to %d-byte blocks with nvme "+
-			"format, or set its loop device up with losetup without -b "+
-			"and without --direct-io, or with -b %d",
+			"%d bytes, not %d: use nvme format, or a loop device set up "+
+			"by losetup without -b and without --direct-io, or with -b %d",
 			s.disk, block, common.DnLogicalBlockSize,
-			common.DnLogicalBlockSize, common.DnLogicalBlockSize)
+			common.DnLogicalBlockSize)
 		read.err = errors.Join(err, read.formatErr)
 	}
 	return read

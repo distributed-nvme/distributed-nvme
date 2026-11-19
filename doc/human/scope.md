@@ -1498,6 +1498,13 @@ yourself: a disk the logs fill is one the stores and etcd cannot write.
   node with a full store disk reads ok and is offered for new sides. The
   first refused request marks it. State: accepted; a small window. Not
   seen in the lab.
+- **A row's text shows only the start and the end of a long error.** An
+  agent cuts every text it puts in a row of its report, or beside one, to
+  a fixed length, so that the largest report still fits in one message.
+  A longer text, such as a failed command with its whole output, keeps its
+  start, which says what failed, and its end, which says why, with "..."
+  between. The agent's log keeps the failed command and its whole output.
+  State: accepted, by design.
 - **Log records that say less than they seem.** A call that gives up
   after its rounds (section 10) fails with the error code ABORTED, and the
   message does not say which node changed. A cdc write timeout and a
@@ -1524,11 +1531,10 @@ design:
   for the create, and once when the worker marks the volume created.
   State: accepted.
 - **Larger counts make larger messages and more connections and kernel
-  objects.** A row's text from a failed command and the answer of a
-  volume's written-block list read have no cap. A migration reads a leg's
-  list in one answer of at most 64 MiB, so a leg of more than 512 Mi
-  blocks gets no list, and its copy copies every block. State: accepted.
-  Fix decided: a cap on a row's text.
+  objects.** The answer of a volume's written-block list read has no cap.
+  A migration reads a leg's list in one answer of at most 64 MiB, so a leg
+  of more than 512 Mi blocks gets no list, and its copy copies every
+  block. State: accepted.
 - **The controller nodes' budgets cap a cluster's space.** A budget is the
   pool space a controller node may serve to hosts. Every cntlr of a pool,
   primary or standby, charges its controller node the full size of the

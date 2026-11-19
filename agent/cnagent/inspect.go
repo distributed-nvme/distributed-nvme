@@ -9,6 +9,7 @@ import (
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 
+	"github.com/distributed-nvme/distributed-nvme/agent"
 	"github.com/distributed-nvme/distributed-nvme/pb"
 )
 
@@ -292,6 +293,8 @@ func (s *CnAgentServer) inspectMember(
 // it holds a member that is no leg wrapper of this pool, which the real
 // start refuses to stop (MdDetail.strangerErr); a read of the array that
 // failed is the refusal, as it is the real start's error (ensureGroup).
+// Every refusal is cut to the row text cap as the real start's row is
+// (agent.CutAgentText), so the two read the same.
 func (s *CnAgentServer) forcedStartDryRun(
 	ctx context.Context,
 	look *inspectLook,
@@ -302,17 +305,17 @@ func (s *CnAgentServer) forcedStartDryRun(
 	dry := &pb.ForcedStartDryRun{}
 	switch {
 	case look.detailErr != nil:
-		dry.Refusal = look.detailErr.Error()
+		dry.Refusal = agent.CutAgentText(look.detailErr.Error())
 		return dry
 	case detail.Exists && mdRunning(detail.State):
-		dry.Refusal = fmt.Sprintf("the array of group %#x runs (%s): the "+
-			"primary leaves a mark waiting while it runs", gp.grpId,
-			detail.State)
+		dry.Refusal = agent.CutAgentText(fmt.Sprintf("the array of group "+
+			"%#x runs (%s): the primary leaves a mark waiting while it "+
+			"runs", gp.grpId, detail.State))
 		return dry
 	case detail.Exists:
 		if err := detail.strangerErr(
 			plan.clusterId, plan.cnId, plan.spId); err != nil {
-			dry.Refusal = err.Error()
+			dry.Refusal = agent.CutAgentText(err.Error())
 			return dry
 		}
 		dry.StopsArray = true
@@ -322,7 +325,7 @@ func (s *CnAgentServer) forcedStartDryRun(
 	if err != nil {
 		// The real start stops the array before these checks
 		// (forcedStartPass), so stops_array stands beside the refusal.
-		dry.Refusal = err.Error()
+		dry.Refusal = agent.CutAgentText(err.Error())
 		return dry
 	}
 	for _, lp := range fp.zero {

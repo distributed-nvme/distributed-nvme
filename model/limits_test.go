@@ -24,13 +24,6 @@ import (
 // later schema adds is sized here before it ships.
 
 const (
-	// rowTextAllowance is the text this file allows on every row of a cntlr
-	// report. A row whose command failed carries that command's output, and
-	// nothing cuts it (architecture.md, Known limits); a row that reads OK
-	// can carry short text too, such as a pool's or a dm-clone's status
-	// line, an array's state or a standby leg's path states (cnagent.md
-	// CN28).
-	rowTextAllowance = 256
 	// dmNameMax is the longest dm device name, the kernel's DM_NAME_LEN less
 	// its terminating NUL: the bound of every cntlr report row a dm device
 	// names.
@@ -51,6 +44,35 @@ const (
 // idKeyLen is the length of an id rendered as a key field (common.IdKeyFmt),
 // the keys of a cntlr syncup's slice map and a subsystem's serial.
 var idKeyLen = len(fmt.Sprintf(common.IdKeyFmt, uint64(math.MaxUint64)))
+
+// leftoverReplyMax bounds the details of the one AgentReply that is not cut
+// to common.AgentTextMax, the leftover answer, by its construction
+// (agent.LeftoverReply): its head, at most leftoverNamesShown names, their
+// tail, and at most as many failure lines, each naming what failed whole
+// and its error cut to the cap, then their tail.
+var leftoverReplyMax = len("leftover(18446744073709551615): ") +
+	leftoverNamesShown*(leftoverNameMax+len(", ")) +
+	len(" [+18446744073709551615 more]") +
+	leftoverNamesShown*(len("; enumeration failed: ")+leftoverWhatMax+
+		len(": ")+common.AgentTextMax) +
+	len("; [+18446744073709551615 more failures]")
+
+// leftoverNameMax is the widest name a leftover answer gives an object, a
+// kind and the object: a namespace of an nvmet subsystem, "nvmet_ns:", the
+// subsystem's NQN, "/" and its nsid, a uint32 in decimal (cnagent's sweep);
+// a dm name or an md device path is narrower.
+var leftoverNameMax = len("nvmet_ns:") + common.MaxNqnLength + len("/") + 10
+
+// leftoverWhatMax is the widest text a failure line names what failed with:
+// a clone source's endpoint that has no controller, its NQN, " at ", its
+// tr_addr and ":" and its tr_svc_id (cnagent's sweep); an nvmet namespace's
+// "nvmet <nqn> ns <nsid> device_path" is narrower.
+var leftoverWhatMax = common.MaxNqnLength + len(" at ") + common.MaxStrSize +
+	len(":") + common.MaxTrSvcIdLength
+
+// leftoverNamesShown is agent.maxLeftoverNames, the names and the failure
+// lines a leftover answer shows.
+const leftoverNamesShown = 8
 
 // widestCounts is the entry count of every list and map the three widest
 // messages reach: the cntlr syncup, the pool get reply and the cntlr report.
@@ -212,7 +234,8 @@ func widestRowNames() map[protoreflect.FullName]int {
 
 // widestBuilder fills messages as wide as the limits let them be, from the
 // four tables above. rowText is the text of every row of a cntlr report and
-// of its agent reply.
+// of every text the agent writes beside the rows, zero or common.AgentTextMax,
+// the cap the agents cut each to (architecture.md, Live-state reporting).
 type widestBuilder struct {
 	t        *testing.T
 	counts   map[protoreflect.FullName]int
@@ -425,11 +448,19 @@ func (b *widestBuilder) strLen(
 		}
 		b.used[in] = true
 		return n
-	case "ResInfo.details", "AgentReply.details",
-		"CntlrInfo.RepairInfo.refusal":
-		// A repair verdict's refusal is agent text beside the rows, which
-		// no limit cuts either (cnagent.md CN12).
+	case "ResInfo.details", "CntlrInfo.GrpInfo.refusal",
+		"CntlrInfo.RepairInfo.refusal", "CntlrInfo.RepairInfo.waits":
+		// A row's text and the texts beside the rows, a group reading's
+		// refusal and a repair verdict's refusal and waits, which the agent
+		// cuts to the cap (cnagent.md CN12, CN28).
 		return b.rowText
+	case "AgentReply.details":
+		// The reply's text, cut to the cap but in a leftover answer, which
+		// its construction bounds; one a reply.
+		if b.rowText == 0 {
+			return 0
+		}
+		return leftoverReplyMax
 	case "DevIoStats.read_error":
 		// A counter read's error, which the agent cuts (cnagent.md CN23):
 		// text only where the report has text.
@@ -651,13 +682,16 @@ func mib(n int) string {
 // GrpcMaxMsgSize, the message limit of every dnv gRPC server and client
 // (grpc.md, Wiring): the cntlr syncup and the pool get reply of a pool at the
 // limits, whose every group has its repair (widestCounts), and the report of a
-// cntlr of that pool, with no row text and with rowTextAllowance of text on
-// every row, and the reply of a cntlr's inspect call, that report beside the
-// counters the agent reads at the call (cnagent.md CN23). The first three
-// fit in half the limit; the report with text fits, and so does the inspect
-// reply with that text, whose counter reads' errors the agent cuts to
-// IoStatErrorMax. A row's text is the one part of the report no limit
-// bounds (architecture.md, Known limits).
+// cntlr of that pool, with no row text and with common.AgentTextMax of text
+// on every row and in every text beside the rows, and the reply of a cntlr's
+// inspect call, that report beside the counters the agent reads at the call
+// (cnagent.md CN23), as the agent sends it, its agent reply included, and as
+// the gateway passes it on. The first three fit in half the limit; the
+// report with text fits, and so do both replies of the inspect call with
+// that text, whose counter reads' errors the agent cuts to IoStatErrorMax.
+// The agents cut every such text to the cap (architecture.md, Live-state
+// reporting), which is the largest round value those replies fit at: 256
+// does not.
 func TestWidestMessagesFitGrpcMaxMsgSize(t *testing.T) {
 	if common.EtcdMaxRequestBytes > common.GrpcMaxMsgSize {
 		t.Errorf("EtcdMaxRequestBytes %d is above GrpcMaxMsgSize %d: a value "+
@@ -754,7 +788,7 @@ func checkWidestMessages(t *testing.T, b *widestBuilder) {
 	}
 
 	withText := &pb.SyncupCntlrReply{}
-	textBuilder := newWidestBuilder(t, rowTextAllowance)
+	textBuilder := newWidestBuilder(t, common.AgentTextMax)
 	textBuilder.build(withText)
 	// An inspect call's reply: the cntlr report and, beside it, the
 	// counters the agent read at the call (cnagent.md CN23), as the agent
@@ -765,6 +799,11 @@ func checkWidestMessages(t *testing.T, b *widestBuilder) {
 	b.build(inspect)
 	inspectText := &pb.InspectCntlrReply{}
 	textBuilder.build(inspectText)
+	// The agent's reply to that call with every text at the cap: the
+	// widest message dnv sends, since beside the inspect reply's fields it
+	// carries the agent reply and its leftover answer.
+	infoReplyText := &pb.GetCntlrInfoReply{}
+	textBuilder.build(infoReplyText)
 	if got, want := len(inspect.GetIoStats().GetLegIdToIo()),
 		len(info.GetLegIdToLeg()); got != want {
 		t.Errorf("the inspect reply holds %d leg entries, want one per leg "+
@@ -781,14 +820,17 @@ func checkWidestMessages(t *testing.T, b *widestBuilder) {
 		{"the pool get reply", poolGet, 2},
 		{"the cntlr report with no row text", noText, 2},
 		{fmt.Sprintf("the cntlr report with %d bytes of text per row",
-			rowTextAllowance), withText, 1},
+			common.AgentTextMax), withText, 1},
 		// The replies of an inspect call fit as the report with text does,
 		// not in half the limit: the counters add an entry per leg.
 		{"the cntlr info reply with its counters", infoReply, 1},
 		{"the cntlr inspect reply with its counters", inspect, 1},
 		{fmt.Sprintf("the cntlr inspect reply with %d bytes of text per "+
-			"row and its counter reads' errors cut", rowTextAllowance),
+			"row and its counter reads' errors cut", common.AgentTextMax),
 			inspectText, 1},
+		{fmt.Sprintf("the cntlr info reply with its counters, %d bytes "+
+			"of text per row and its leftover answer at its bound",
+			common.AgentTextMax), infoReplyText, 1},
 	} {
 		size := proto.Size(c.msg)
 		t.Logf("%s: %s", c.name, mib(size))

@@ -23,20 +23,22 @@ func GateRevision(stored uint64, incoming uint64) *pb.AgentReply {
 }
 
 // UnknownObjectReply builds the SH9 rejection for an object the agent does
-// not know; details names the missing pointer/id.
+// not know; details names the missing pointer/id, cut to the row text cap
+// (CutAgentText).
 func UnknownObjectReply(format string, args ...any) *pb.AgentReply {
 	return &pb.AgentReply{
 		Code:    common.ReplyCodeUnknownObject,
-		Details: fmt.Sprintf(format, args...),
+		Details: CutAgentText(fmt.Sprintf(format, args...)),
 	}
 }
 
 // SaveFailedReply refuses a request the gates admitted whose save to the
-// local store failed (SH5): details carry err, the save's error.
+// local store failed (SH5): details carry err, the save's error, cut to the
+// row text cap (CutAgentText).
 func SaveFailedReply(err error) *pb.AgentReply {
 	return &pb.AgentReply{
 		Code:    common.ReplyCodeSaveFailed,
-		Details: fmt.Sprintf("saving the request failed: %v", err),
+		Details: CutAgentText(fmt.Sprintf("saving the request failed: %v", err)),
 	}
 }
 
@@ -90,9 +92,14 @@ func OkReply() *pb.AgentReply {
 // "re-sync while the code is non-zero" rule is the whole retry machinery for
 // a leftover.
 //
-// details names at most maxLeftoverNames objects so one stuck object cannot
-// produce an unbounded reply; the agent log carries the full list every pass.
-func LeftoverReply(leftovers []string, failures []string) *pb.AgentReply {
+// details is bounded by its construction, not by the row text cap, so its
+// head, "leftover(N): ", and its names stay whole: it names at most
+// maxLeftoverNames objects and shows at most as many failure lines, each
+// naming what failed whole and its error cut to the row text cap
+// (CutAgentText), the rest counted in a tail, so one stuck node cannot
+// produce an unbounded reply; the agent log carries every leftover and
+// every failure whole every pass (SweepResult.Log).
+func LeftoverReply(leftovers []string, failures []SweepFailure) *pb.AgentReply {
 	var parts []string
 	if len(leftovers) > 0 {
 		shown := leftovers
@@ -105,8 +112,14 @@ func LeftoverReply(leftovers []string, failures []string) *pb.AgentReply {
 		parts = append(parts, fmt.Sprintf("leftover(%d): %s%s",
 			len(leftovers), strings.Join(shown, ", "), suffix))
 	}
-	for _, failure := range failures {
-		parts = append(parts, "enumeration failed: "+failure)
+	for idx, failure := range failures {
+		if idx == maxLeftoverNames {
+			parts = append(parts, fmt.Sprintf("[+%d more failures]",
+				len(failures)-maxLeftoverNames))
+			break
+		}
+		parts = append(parts, "enumeration failed: "+failure.What+": "+
+			CutAgentText(failure.Cause))
 	}
 	return &pb.AgentReply{
 		Code:    common.ReplyCodeLeftover,
@@ -114,5 +127,6 @@ func LeftoverReply(leftovers []string, failures []string) *pb.AgentReply {
 	}
 }
 
-// maxLeftoverNames bounds LeftoverReply's details.
+// maxLeftoverNames bounds LeftoverReply's details: the names it shows and
+// the failure lines.
 const maxLeftoverNames = 8

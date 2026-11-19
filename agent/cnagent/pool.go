@@ -450,8 +450,8 @@ func (s *CnAgentServer) adoptThinId(
 		return &thinHeadersHeld{err: read.err}
 	case read.err != nil:
 		return &thinIdNotAdopted{text: fmt.Sprintf(
-			"the create of thin id %d in pool %s failed, and the pool's "+
-				"header read failed: %v", devId, sp.poolFinalName, read.err)}
+			"the create of thin id %d failed, and its pool's header read "+
+				"failed: %v", devId, read.err)}
 	}
 	if mapped := read.mapped[devId]; mapped > 0 {
 		return &thinIdNotAdopted{text: fmt.Sprintf(

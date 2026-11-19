@@ -8022,7 +8022,7 @@ repair_forced_start() {
 	# The refusal names Y with its identity, which nothing writes while md
 	# does not hold Y, and the leg that keeps the data with the array's, as
 	# mdadm's examine reads both (cnagent.md CN28).
-	assert_eq "$refusal" "leg $yleg taken from a retired leg carries another array's superblock, $uuy, beside the $uuo of leg ${A_DLEG[1]}, so it may hold data the array lacks; a repair with force copies over it" \
+	assert_eq "$refusal" "leg $yleg taken from a retired leg carries another array's superblock, $uuy, not the $uuo of leg ${A_DLEG[1]}: it may hold data the array lacks" \
 		"repair takeback: the refusal's text"
 	# A read tests the add's conditions as a read can, Y's own leg row OK
 	# among them (cnagent.md CN30), so it reports the refusal once Y's

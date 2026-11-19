@@ -1842,8 +1842,7 @@ func assemblyIdentity(gp *grpPlan, cands []assemblyCand) (string, error) {
 			return "", &identityConflict{legIds: legs, text: fmt.Sprintf(
 				"members of two identities: leg %#x carries %s and "+
 					"leg %#x %s; a forced start names the leg to start "+
-					"group %#x from", first.legId, uuid, other.legId,
-				otherUuid, gp.grpId)}
+					"from", first.legId, uuid, other.legId, otherUuid)}
 		}
 		if uuid != "" {
 			return uuid, nil
@@ -2547,10 +2546,9 @@ func olderNamedLeg(
 		return ""
 	}
 	return fmt.Sprintf("forced start: leg %#x is a full member with md "+
-		"change count %d, above the %d of named leg %#x of the same "+
-		"array, so it holds newer data, which the start would copy over; "+
-		"a forced start with force goes on", other.legId, otherSb.Events,
-		namedSb.Events, named.legId)
+		"change count %d, above the %d of named leg %#x, so its newer "+
+		"data would be copied over; force goes on", other.legId,
+		otherSb.Events, namedSb.Events, named.legId)
 }
 
 // forcedAssemble is the assembly of CN12's forced start (forceStartGroup):
@@ -3526,9 +3524,9 @@ func takeBackRefusal(
 			return ""
 		}
 		return fmt.Sprintf("leg %#x taken from a retired leg carries "+
-			"another array's superblock, %s, beside the %s of leg %#x, so "+
-			"it may hold data the array lacks; a repair with force copies "+
-			"over it", lp.legId, sb.Uuid, keeperSb.Uuid, keeper.legId)
+			"another array's superblock, %s, not the %s of leg %#x: it may "+
+			"hold data the array lacks", lp.legId, sb.Uuid, keeperSb.Uuid,
+			keeper.legId)
 	}
 	if sb.Events > keeperSb.Events {
 		return fmt.Sprintf("leg %#x taken from a retired leg holds newer "+
@@ -3889,7 +3887,7 @@ func reportGrpReading(
 	held := heldMembers(detail)
 	reading := &pb.CntlrInfo_GrpInfo{
 		Whole:               detail.Degraded == 0,
-		Refusal:             refusals.grp,
+		Refusal:             agent.CutAgentText(refusals.grp),
 		ForcedStartRevision: acted,
 		MdCheckDoneEpoch:    mdDone,
 	}
@@ -3979,8 +3977,8 @@ func repairVerdict(
 	return &pb.CntlrInfo_RepairInfo{
 		Started:          started,
 		AbortConfirmed:   confirmed,
-		Refusal:          refusal,
+		Refusal:          agent.CutAgentText(refusal),
 		HeldNewLegIdList: heldNew,
-		Waits:            waits,
+		Waits:            agent.CutAgentText(waits),
 	}
 }

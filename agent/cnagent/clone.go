@@ -81,16 +81,12 @@ func (s *CnAgentServer) reportCloneNoGrp(
 }
 
 // withNote puts a converge's failure in front of a row's own details, on a
-// line of its own. The failure decides nothing: the row's status is what the
-// pass read of the node, and the failure only rides along (CN29).
+// line of its own, the failure cut to the room the details leave within the
+// row text cap (agent.JoinNote). The failure decides nothing: the row's
+// status is what the pass read of the node, and the failure only rides
+// along (CN29).
 func withNote(note, details string) string {
-	switch {
-	case note == "":
-		return details
-	case details == "":
-		return note
-	}
-	return note + "\n" + details
+	return agent.JoinNote(note, details)
 }
 
 // ---------------------------------------------------------------------------

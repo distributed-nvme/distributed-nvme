@@ -923,7 +923,7 @@ func TestIoStatErrorKeepsTheEnd(t *testing.T) {
 		": stat: no such file or directory"
 	got := ioStatError(long)
 	if len(got) != common.IoStatErrorMax ||
-		!strings.HasPrefix(got, ioStatErrorCut) ||
+		!strings.HasPrefix(got, TextCutMark) ||
 		!strings.HasSuffix(got, ": stat: no such file or directory") {
 		t.Fatalf("the cut text is %q (%d bytes), want %d bytes, the mark "+
 			"and the cause", got, len(got), common.IoStatErrorMax)
