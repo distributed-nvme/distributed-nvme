@@ -8,6 +8,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -50,6 +51,23 @@ type fakeNode struct {
 	mountErr bool                  // a mount of a device fails
 	calls    []string              // every command, joined
 	statLine string                // stat -f's answer
+	// optimized, when set, is the one endpoint whose path makes the
+	// device link appear, as the path to the primary does.
+	optimized string
+	// connectErr makes every connect to an endpoint fail with nvme-cli's
+	// message, whatever the node holds.
+	connectErr map[string]string
+	// remountFail is how many read-only remounts still fail.
+	remountFail int
+	// readFail makes ReadFile of a path fail with an error that is not
+	// "not there".
+	readFail map[string]error
+	// disconnectFail makes the disconnect of a controller fail, by name,
+	// and leaves the controller in place.
+	disconnectFail map[string]bool
+	// deadlines holds, for every nvme command, the call and how long its
+	// ctx had left, or "none" for a ctx without a deadline.
+	deadlines []string
 	// onCommand, when set, runs before every command, outside the lock,
 	// so a test can act in the middle of an operation.
 	onCommand func(name string, args []string)
@@ -68,8 +86,11 @@ func newFakeNode() *fakeNode {
 		files: map[string]string{
 			DefaultHostNqnPath: testNodeA + "\n",
 			DefaultHostIdPath:  "1a788e0a-02bd-4ae9-9a4b-e4aad8b04c26\n",
+			// A kernel the node plugin serves on (csi.md CSI13).
+			multipathParam: "Y\n",
+			fabricsDevice:  "10:122\n",
 		},
-		dirs:     map[string]bool{},
+		dirs:     map[string]bool{nvmeCoreModule: true},
 		ctrls:    map[string]ctrl{},
 		links:    map[string]bool{},
 		uuidOf:   map[string]string{},
@@ -85,6 +106,10 @@ func newFakeNode() *fakeNode {
 		startOf:  map[string][]byte{},
 		readErr:  map[string]error{},
 		statLine: "4096 1000 500 400 100 50",
+
+		connectErr:     map[string]string{},
+		readFail:       map[string]error{},
+		disconnectFail: map[string]bool{},
 	}
 	return f
 }
@@ -102,7 +127,7 @@ func (f *fakeNode) addCtrlAs(subNqn string, ep endpoint, hostNqn string) string 
 	f.nextCtrl++
 	f.ctrls[name] = ctrl{name: name, subNqn: subNqn, trAddr: ep.trAddr,
 		trSvcId: ep.trSvcId, state: "live", hostNqn: hostNqn}
-	if uuid, ok := f.uuidOf[subNqn]; ok {
+	if uuid, ok := f.uuidOf[subNqn]; ok && (f.optimized == "" || f.optimized == ep.String()) {
 		f.links[devicePath(uuid)] = true
 	}
 	return name
@@ -192,11 +217,18 @@ func (f *fakeNode) client() common.OsClient {
 		ReadFileFn: func(ctx context.Context, path string) (string, error) {
 			f.mu.Lock()
 			defer f.mu.Unlock()
+			if err := f.readFail[path]; err != nil {
+				return "", err
+			}
 			if path == mountInfoPath {
 				var b strings.Builder
 				for i, m := range f.mounts {
-					fmt.Fprintf(&b, "%d 1 0:1 / %s rw - %s %s rw\n", 100+i,
-						m.target, m.fsType, m.source)
+					opts := "rw,relatime"
+					if m.readOnly {
+						opts = "ro,relatime"
+					}
+					fmt.Fprintf(&b, "%d 1 0:1 / %s %s - %s %s rw\n", 100+i,
+						m.target, opts, m.fsType, m.source)
 				}
 				return b.String(), nil
 			}
@@ -310,11 +342,19 @@ func (f *fakeNode) runCommand(
 	}
 	switch name {
 	case nvmeBin:
+		left := "none"
+		if d, ok := ctx.Deadline(); ok {
+			left = time.Until(d).String()
+		}
+		f.deadlines = append(f.deadlines, strings.Join(args, " ")+" | "+left)
 		switch args[0] {
 		case "connect":
 			ep := endpoint{trAddr: argument(args, "-a"), trSvcId: argument(args, "-s")}
 			if argument(args, "--hostnqn") != testNodeA || argument(args, "--hostid") == "" {
 				return fail(1, "the connect carries no node identity")
+			}
+			if msg := f.connectErr[ep.String()]; msg != "" {
+				return fail(1, msg)
 			}
 			if f.refuse[ep.String()] > 0 {
 				f.refuse[ep.String()]--
@@ -360,6 +400,9 @@ func (f *fakeNode) runCommand(
 			return "", "", 0, nil
 		case "disconnect":
 			if dev := argument(args, "-d"); dev != "" {
+				if f.disconnectFail[dev] {
+					return fail(1, "signal: terminated")
+				}
 				f.dropCtrl(dev)
 				return "", "", 0, nil
 			}
@@ -396,14 +439,32 @@ func (f *fakeNode) runCommand(
 	case "mount":
 		switch {
 		case args[0] == "--bind":
-			f.mounts = append(f.mounts, mountEntry{target: args[2], source: args[1], fsType: "bind"})
+			// A bind mount takes the source mount's read-only flag.
+			bind := mountEntry{target: args[2], source: args[1], fsType: "bind"}
+			for _, m := range f.mounts {
+				if m.target == args[1] {
+					bind.readOnly = m.readOnly
+				}
+			}
+			f.mounts = append(f.mounts, bind)
 		case args[0] == "-o" && strings.HasPrefix(args[1], "remount"):
+			if f.remountFail > 0 {
+				f.remountFail--
+				return fail(32, "mount: "+args[2]+": cannot remount read-only")
+			}
+			for i := len(f.mounts) - 1; i >= 0; i-- {
+				if f.mounts[i].target == args[2] {
+					f.mounts[i].readOnly = strings.HasSuffix(args[1], ",ro")
+					break
+				}
+			}
 		case f.mountErr:
 			return fail(32, "mount: wrong fs type, bad option")
 		default:
 			f.mounts = append(f.mounts, mountEntry{
 				target: args[len(args)-1], source: args[len(args)-2],
-				fsType: argument(args, "-t"),
+				fsType:   argument(args, "-t"),
+				readOnly: slices.Contains(strings.Split(argument(args, "-o"), ","), "ro"),
 			})
 		}
 		return "", "", 0, nil
@@ -429,8 +490,8 @@ func (f *fakeNode) runCommand(
 	return fail(127, "unknown command "+name)
 }
 
-// newTestNode builds a node plugin over a fake node whose cdc lists the
-// test volume on two cntlrs.
+// newTestNode builds a node plugin over a fake node whose cdc, the one its
+// configuration names, lists the test volume on two cntlrs.
 func newTestNode(t *testing.T) (*node, *fakeNode) {
 	t.Helper()
 	f := newFakeNode()
@@ -451,7 +512,7 @@ func newTestNode(t *testing.T) (*node, *fakeNode) {
 	n := &node{
 		id:         id,
 		host:       host,
-		follow:     newFollower(host, time.Hour, nil),
+		follow:     newFollower(host, time.Hour, []endpoint{mustEndpoint(fakeCdcA)}),
 		mnt:        &mounter{oc: oc},
 		deviceWait: 3 * time.Second,
 	}
@@ -510,8 +571,14 @@ func TestReadIdentity(t *testing.T) {
 	}
 	f.files[DefaultHostIdPath] = "x"
 	f.files[DefaultHostNqnPath] = "not-an-nqn"
+	// Each refusal names the file and both fixes: the identity the node's
+	// connections carry, and the commands that generate a new pair.
 	if _, err := readIdentity(ctx, f.client(), DefaultHostNqnPath, DefaultHostIdPath); err == nil ||
-		!strings.Contains(err.Error(), "host NQN") {
+		!strings.Contains(err.Error(), "host NQN") ||
+		!strings.Contains(err.Error(), DefaultHostNqnPath) ||
+		!strings.Contains(err.Error(), "/sys/class/nvme/nvme*/hostnqn") ||
+		!strings.Contains(err.Error(), "nvme gen-hostnqn") ||
+		!strings.Contains(err.Error(), "uuidgen") {
 		t.Errorf("a host NQN file without an NQN: %v", err)
 	}
 }
@@ -583,10 +650,10 @@ func TestNodeStageRefuses(t *testing.T) {
 	_, err = n.NodeStageVolume(ctx, stageReq(mountCap(fsExt4,
 		csi.VolumeCapability_AccessMode_MULTI_NODE_MULTI_WRITER)))
 	wantCode(t, err, codes.FailedPrecondition, "a multi-node mode")
-	noCdc := stageReq(mountCap(fsExt4, rwo))
-	noCdc.PublishContext = map[string]string{ctxNqn: "x", ctxUuid: "y"}
-	_, err = n.NodeStageVolume(ctx, noCdc)
-	wantCode(t, err, codes.InvalidArgument, "no cdc address")
+	noNqn := stageReq(mountCap(fsExt4, rwo))
+	noNqn.PublishContext = map[string]string{ctxUuid: "y", ctxCdc: fakeCdcA}
+	_, err = n.NodeStageVolume(ctx, noNqn)
+	wantCode(t, err, codes.InvalidArgument, "no subsystem NQN")
 	// The device carries another filesystem: never reformatted.
 	f.fsOf[devicePath(namespaceUuidOf(testVolume))] = fsXfs
 	_, err = n.NodeStageVolume(ctx, stageReq(mountCap(fsExt4, rwo)))
@@ -801,6 +868,113 @@ func TestNodePublishAndUnpublish(t *testing.T) {
 	})
 }
 
+// TestNodePublishFinishesAReadOnlyRemount pins csi.md CSI17: a read-only
+// publish binds and then remounts read-only, so a remount that failed left
+// a read-write bind, which the repeat finishes; a read-only target is done
+// for a repeat; and a read-write publish over a staging mount that is
+// read-only, which the bind copies, is done for its repeat too.
+func TestNodePublishFinishesAReadOnlyRemount(t *testing.T) {
+	const remount = "mount -o remount,bind,ro"
+	publish := func(t *testing.T, n *node, req *csi.NodeStageVolumeRequest,
+		target string, readOnly bool) error {
+		t.Helper()
+		_, err := n.NodePublishVolume(t.Context(), &csi.NodePublishVolumeRequest{
+			VolumeId:          req.GetVolumeId(),
+			StagingTargetPath: req.GetStagingTargetPath(),
+			TargetPath:        target,
+			VolumeCapability:  req.GetVolumeCapability(),
+			PublishContext:    req.GetPublishContext(),
+			Readonly:          readOnly,
+		})
+		return err
+	}
+	for _, cap := range []*csi.VolumeCapability{mountCap(fsExt4, rwo), blockCap(rwo)} {
+		_, block := cap.GetAccessType().(*csi.VolumeCapability_Block)
+		name := map[bool]string{false: "filesystem", true: "block"}[block]
+		t.Run(name, func(t *testing.T) {
+			n, f := newTestNode(t)
+			req := stageReq(cap)
+			_, err := n.NodeStageVolume(t.Context(), req)
+			wantCode(t, err, codes.OK, "stage")
+			target := "/var/lib/kubelet/pods/p1/volumes/kubernetes.io~csi/" + testVolume + "/mount"
+			f.mu.Lock()
+			f.remountFail = 1
+			f.mu.Unlock()
+			wantCode(t, publish(t, n, req, target, true), codes.Internal,
+				"a read-only publish whose remount fails")
+			if m := f.mounted(target); m == nil || m.readOnly {
+				t.Fatalf("target %+v, want the read-write bind the failed remount left", m)
+			}
+			wantCode(t, publish(t, n, req, target, true), codes.OK, "the repeat")
+			if m := f.mounted(target); m == nil || !m.readOnly {
+				t.Errorf("target %+v after the repeat, want read-only", m)
+			}
+			if got := f.count(remount); got != 2 {
+				t.Errorf("%d remounts, want 2: the failed one and the repeat's", got)
+			}
+			wantCode(t, publish(t, n, req, target, true), codes.OK, "a repeat over a read-only target")
+			if got := f.count(remount) + f.count("mount --bind"); got != 3 {
+				t.Errorf("%d binds and remounts, want 3: the repeat over a read-only "+
+					"target did work again", got)
+			}
+		})
+	}
+	t.Run("read-write over a read-only staging mount", func(t *testing.T) {
+		n, f := newTestNode(t)
+		cap := mountCap(fsExt4, rwo)
+		cap.GetMount().MountFlags = []string{"ro"}
+		req := stageReq(cap)
+		_, err := n.NodeStageVolume(t.Context(), req)
+		wantCode(t, err, codes.OK, "a read-only stage")
+		target := "/var/lib/kubelet/pods/p2/volumes/kubernetes.io~csi/" + testVolume + "/mount"
+		wantCode(t, publish(t, n, req, target, false), codes.OK, "a read-write publish")
+		if m := f.mounted(target); m == nil || !m.readOnly {
+			t.Fatalf("target %+v, want the bind read-only as its source", m)
+		}
+		wantCode(t, publish(t, n, req, target, false), codes.OK, "its repeat")
+	})
+}
+
+// TestNodeStageFormatsXfsForTheKernelFloor pins csi.md CSI17: xfs is made
+// with the maker's profile of the oldest kernel series a node may run, and
+// ext4 with the maker's defaults.
+func TestNodeStageFormatsXfsForTheKernelFloor(t *testing.T) {
+	dev := devicePath(namespaceUuidOf(testVolume))
+	for fs, want := range map[string]string{
+		fsXfs:  "mkfs.xfs -q -f -c options=" + xfsProfile + " " + dev,
+		fsExt4: "mkfs.ext4 -q -F " + dev,
+	} {
+		t.Run(fs, func(t *testing.T) {
+			n, f := newTestNode(t)
+			_, err := n.NodeStageVolume(t.Context(), stageReq(mountCap(fs, rwo)))
+			wantCode(t, err, codes.OK, "stage")
+			f.mu.Lock()
+			defer f.mu.Unlock()
+			var got []string
+			for _, call := range f.calls {
+				if strings.HasPrefix(call, "mkfs") {
+					got = append(got, call)
+				}
+			}
+			if len(got) != 1 || got[0] != want {
+				t.Errorf("formats %q, want %q", got, want)
+			}
+		})
+	}
+}
+
+// TestTheImageCarriesTheXfsProfile holds the image to the profile the node
+// plugin names (csi.md CSI17): its build fails on a base without it.
+func TestTheImageCarriesTheXfsProfile(t *testing.T) {
+	data, err := os.ReadFile(filepath.Join("..", "deploy", "Dockerfile"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(data), "\nRUN test -f "+xfsProfile+"\n") {
+		t.Errorf("deploy/Dockerfile does not check for %s", xfsProfile)
+	}
+}
+
 // TestNodeUnstage pins csi.md CSI16: the unmount, the drop of every path,
 // the drop of the discovery connections once nothing is staged, and a
 // repeat that is done.
@@ -834,21 +1008,31 @@ func TestNodeUnstage(t *testing.T) {
 
 // TestFollowerFollowsTheCdc pins csi.md CSI15: a cntlr that appears in the
 // log gains a path, a cntlr the log withdraws loses its path, a log that
-// cannot be read holds every drop off, and the union of two cdcs counts.
+// cannot be read holds every drop off, and the union of the configured
+// cdcs counts.
 func TestFollowerFollowsTheCdc(t *testing.T) {
 	n, f := newTestNode(t)
 	ctx := t.Context()
 	nqn := subsystemNqnOf(testVolume)
+	n.follow = newFollower(n.host, time.Hour,
+		[]endpoint{mustEndpoint(fakeCdcA), mustEndpoint(fakeCdcB)})
+	// both sets the log of the two cdcs alike.
+	both := func(entries ...logEntry) {
+		f.mu.Lock()
+		defer f.mu.Unlock()
+		f.logs[fakeCdcA] = entries
+		f.logs[fakeCdcB] = entries
+	}
+	both(f.logs[fakeCdcA]...)
 	_, err := n.NodeStageVolume(ctx, stageReq(blockCap(rwo)))
 	wantCode(t, err, codes.OK, "stage")
+	if got := f.paths(common.NvmeDiscoveryNqn); len(got) != 2 {
+		t.Errorf("discovery connections %v, want both configured cdcs", got)
+	}
 
 	// A failover replaced cn0 by cn2.
-	f.mu.Lock()
-	f.logs[fakeCdcA] = []logEntry{
-		{subNqn: nqn, ep: mustEndpoint(fakeCn1)},
-		{subNqn: nqn, ep: mustEndpoint(fakeCn2)},
-	}
-	f.mu.Unlock()
+	both(logEntry{subNqn: nqn, ep: mustEndpoint(fakeCn1)},
+		logEntry{subNqn: nqn, ep: mustEndpoint(fakeCn2)})
 	if err := syncDrained(ctx, n); err != nil {
 		t.Fatalf("sync: %v", err)
 	}
@@ -857,8 +1041,8 @@ func TestFollowerFollowsTheCdc(t *testing.T) {
 	}
 
 	// A cdc that does not answer holds the drops off.
+	both(logEntry{subNqn: nqn, ep: mustEndpoint(fakeCn2)})
 	f.mu.Lock()
-	f.logs[fakeCdcA] = []logEntry{{subNqn: nqn, ep: mustEndpoint(fakeCn2)}}
 	f.logFail[fakeCdcA] = true
 	f.mu.Unlock()
 	_ = syncDrained(ctx, n)
@@ -875,14 +1059,13 @@ func TestFollowerFollowsTheCdc(t *testing.T) {
 		t.Errorf("paths %v after the log shrank, want cn2 alone", got)
 	}
 
-	// A second cdc lists cn1 as well: the union keeps both.
+	// The second cdc lists cn1 as well: the union keeps both.
 	f.mu.Lock()
 	f.logs[fakeCdcB] = []logEntry{{subNqn: nqn, ep: mustEndpoint(fakeCn1)}}
 	f.mu.Unlock()
-	req := stageReq(blockCap(rwo))
-	req.PublishContext[ctxCdc] = fakeCdcA + "," + fakeCdcB
-	_, err = n.NodeStageVolume(ctx, req)
-	wantCode(t, err, codes.OK, "stage with two cdcs")
+	if err := syncDrained(ctx, n); err != nil {
+		t.Fatalf("sync: %v", err)
+	}
 	if got := f.paths(nqn); strings.Join(got, " ") != fakeCn1+" "+fakeCn2 {
 		t.Errorf("paths %v with two cdcs, want cn1 and cn2", got)
 	}
@@ -895,15 +1078,16 @@ func TestFollowerFollowsTheCdc(t *testing.T) {
 // subsystems are read back from sysfs, and the follower's discovery
 // connections are those under the node's host NQN to the configured cdcs,
 // which it knows from the start; a configured cdc that cannot be read holds
-// the drops off as before a restart. Another tool's connections are neither
-// used nor dropped.
+// the drops off as before a restart. A discovery connection to an address
+// the configuration does not name, one a configuration since changed named
+// among them, is another tool's: neither read, nor followed, nor dropped.
 func TestFollowerRecovers(t *testing.T) {
 	n, f := newTestNode(t)
 	ctx := t.Context()
 	nqn := subsystemNqnOf(testVolume)
 	const (
 		foreignCdc = "10.0.0.9:8009"   // another storage's discovery service
-		retiredCdc = "10.0.0.10:18030" // a cdc an attach named, since dropped from the configuration
+		retiredCdc = "10.0.0.10:18030" // a cdc an earlier configuration named
 	)
 	foreignNqn := "nqn.2024-01.io.dnv-it:e2e:ss0"
 	n.follow = newFollower(n.host, time.Hour,
@@ -911,8 +1095,8 @@ func TestFollowerRecovers(t *testing.T) {
 	f.mu.Lock()
 	f.addCtrl(common.NvmeDiscoveryNqn, mustEndpoint(fakeCdcA))
 	f.addCtrl(common.NvmeDiscoveryNqn, mustEndpoint(fakeCdcB))
-	f.addCtrl(common.NvmeDiscoveryNqn, mustEndpoint(foreignCdc))
-	f.addCtrl(common.NvmeDiscoveryNqn, mustEndpoint(retiredCdc))
+	foreign := f.addCtrl(common.NvmeDiscoveryNqn, mustEndpoint(foreignCdc))
+	retired := f.addCtrl(common.NvmeDiscoveryNqn, mustEndpoint(retiredCdc))
 	f.addCtrlAs(common.NvmeDiscoveryNqn, mustEndpoint(fakeCdcA), testNodeB)
 	f.addCtrl(nqn, mustEndpoint(fakeCn0))
 	f.addCtrl(nqn, mustEndpoint(fakeCn1))
@@ -922,7 +1106,11 @@ func TestFollowerRecovers(t *testing.T) {
 		{subNqn: nqn, ep: mustEndpoint(fakeCn2)},
 	}
 	f.logs[fakeCdcB] = f.logs[fakeCdcA]
-	f.logs[retiredCdc] = f.logs[fakeCdcA]
+	// The retired cdc still lists cn1: followed, it would keep cn1's path.
+	f.logs[retiredCdc] = []logEntry{
+		{subNqn: nqn, ep: mustEndpoint(fakeCn0)},
+		{subNqn: nqn, ep: mustEndpoint(fakeCn1)},
+	}
 	f.logs[foreignCdc] = []logEntry{{subNqn: foreignNqn, ep: mustEndpoint(fakeCn1)}}
 	f.logFail[fakeCdcB] = true
 	f.mu.Unlock()
@@ -932,10 +1120,8 @@ func TestFollowerRecovers(t *testing.T) {
 	if !n.follow.staged[nqn] || len(n.follow.staged) != 1 {
 		t.Errorf("staged %v, want the driver's subsystem alone", n.follow.staged)
 	}
-	// The retired cdc's log lists the staged subsystem: it is followed;
-	// the foreign one's lists none: it is not.
-	if _, ok := n.follow.cdcs[retiredCdc]; !ok || len(n.follow.cdcs) != 3 {
-		t.Errorf("cdcs %v, want the two configured and the retired one", n.follow.cdcs)
+	if len(n.follow.conf) != 2 {
+		t.Errorf("cdcs %v, want the two configured alone", n.follow.conf)
 	}
 	// The second cdc cannot be read: the new cntlr is connected, and cn1,
 	// which the readable cdc no longer lists, keeps its path.
@@ -955,19 +1141,24 @@ func TestFollowerRecovers(t *testing.T) {
 	if got := f.paths(foreignNqn); len(got) != 1 {
 		t.Errorf("the foreign subsystem's path was touched: %v", got)
 	}
-	// The last unstage drops the follower's discovery connections, the
-	// retired cdc's with them, and leaves the other tool's and the other
-	// host NQN's; the configured cdcs stay known.
+	// The last unstage drops the follower's discovery connections and
+	// leaves the other tool's, the retired address's and the other host
+	// NQN's.
 	if err := n.follow.unstage(ctx, nqn); err != nil {
 		t.Fatal(err)
 	}
 	if got := f.paths(common.NvmeDiscoveryNqn); strings.Join(got, " ") !=
-		fakeCdcA+" "+foreignCdc {
+		retiredCdc+" "+fakeCdcA+" "+foreignCdc {
 		t.Errorf("discovery connections %v after the unstage, want the "+
-			"foreign one and the other host's", got)
+			"foreign one, the retired one and the other host's", got)
 	}
-	if len(n.follow.cdcs) != 2 {
-		t.Errorf("cdcs %v after the unstage, want the configured two", n.follow.cdcs)
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	for _, call := range f.calls {
+		if call == nvmeBin+" discover -d "+retired+" -o json" ||
+			call == nvmeBin+" discover -d "+foreign+" -o json" {
+			t.Errorf("the follower read a cdc its configuration does not name: %s", call)
+		}
 	}
 }
 
@@ -1008,21 +1199,19 @@ func TestFollowerSplitRangesAcrossARestart(t *testing.T) {
 
 // TestFollowerHoldsDropsWithoutAnswer pins the rule that a sync hearing from
 // no cdc drops nothing (csi.md CSI15): a restart that finds a volume's paths
-// and no discovery connection, and a known cdc that cannot be reached, both
+// and no cdc to follow, and a configured cdc that cannot be reached, both
 // leave every path in place.
 func TestFollowerHoldsDropsWithoutAnswer(t *testing.T) {
 	n, f := newTestNode(t)
 	ctx := t.Context()
 	nqn := subsystemNqnOf(testVolume)
+	n.follow = newFollower(n.host, time.Hour, nil)
 	f.mu.Lock()
 	f.addCtrl(nqn, mustEndpoint(fakeCn0))
 	f.addCtrl(nqn, mustEndpoint(fakeCn1))
 	f.mu.Unlock()
 	if err := n.follow.recover(ctx); err != nil {
 		t.Fatal(err)
-	}
-	if len(n.follow.cdcs) != 0 {
-		t.Fatalf("cdcs %v, want none", n.follow.cdcs)
 	}
 	_ = syncDrained(ctx, n)
 	if got := f.paths(nqn); len(got) != 2 {
@@ -1033,9 +1222,10 @@ func TestFollowerHoldsDropsWithoutAnswer(t *testing.T) {
 	f.discFail[fakeCdcA] = true
 	f.logs[fakeCdcA] = nil
 	f.mu.Unlock()
-	n.follow.mu.Lock()
-	n.follow.cdcs[fakeCdcA] = mustEndpoint(fakeCdcA)
-	n.follow.mu.Unlock()
+	n.follow = newFollower(n.host, time.Hour, []endpoint{mustEndpoint(fakeCdcA)})
+	if err := n.follow.recover(ctx); err != nil {
+		t.Fatal(err)
+	}
 	if err := syncDrained(ctx, n); err == nil {
 		t.Error("a sync that reached no cdc answered no error")
 	}
@@ -1096,9 +1286,6 @@ func TestFollowerUnstageRacesStage(t *testing.T) {
 	if got := f.paths(common.NvmeDiscoveryNqn); strings.Join(got, " ") != fakeCdcA {
 		t.Errorf("discovery connections %v, want the cdc", got)
 	}
-	if _, ok := n.follow.cdcs[fakeCdcA]; !ok {
-		t.Errorf("cdcs %v: the new volume is not followed", n.follow.cdcs)
-	}
 }
 
 // TestFollowerOneCdcDown pins csi.md CSI15 for cdc twins: a cdc that cannot
@@ -1108,12 +1295,13 @@ func TestFollowerOneCdcDown(t *testing.T) {
 	n, f := newTestNode(t)
 	ctx := t.Context()
 	nqn := subsystemNqnOf(testVolume)
+	n.follow = newFollower(n.host, time.Hour,
+		[]endpoint{mustEndpoint(fakeCdcA), mustEndpoint(fakeCdcB)})
 	f.mu.Lock()
 	f.logs[fakeCdcB] = f.logs[fakeCdcA]
 	f.discFail[fakeCdcB] = true
 	f.mu.Unlock()
 	req := stageReq(blockCap(rwo))
-	req.PublishContext[ctxCdc] = fakeCdcA + "," + fakeCdcB
 	_, err := n.NodeStageVolume(ctx, req)
 	wantCode(t, err, codes.OK, "stage with one cdc down")
 	if got := f.paths(nqn); len(got) != 2 {
@@ -1240,18 +1428,33 @@ func TestParsers(t *testing.T) {
 		entries[0].ep.String() != "10.0.0.125:4300" {
 		t.Errorf("parseDiscoveryLog = %v, %v", entries, err)
 	}
-	if entries, err := parseDiscoveryLog(""); err != nil || len(entries) != 0 {
-		t.Errorf("an empty log = %v, %v", entries, err)
+	// A log that lists nothing is a document with an empty list; an output
+	// that is empty or a document without its records cannot be read
+	// (csi.md CSI15).
+	if entries, err := parseDiscoveryLog(`{"genctr":4,"records":[]}`); err != nil ||
+		len(entries) != 0 {
+		t.Errorf("a log with no record = %v, %v", entries, err)
 	}
-	if _, err := parseDiscoveryLog("not json"); err == nil {
-		t.Error("garbage was taken as a log")
+	for _, out := range []string{"", " \n", `{"genctr":1}`, `{"device":"nvme0"}`,
+		`{"genctr":1,"records":null}`, "not json"} {
+		if entries, err := parseDiscoveryLog(out); err == nil {
+			t.Errorf("parseDiscoveryLog(%q) = %v, nil: taken as a log", out, entries)
+		}
 	}
 	mounts := parseMountInfo("36 35 98:0 /mnt1 /mnt2 rw,noatime master:1 - ext3 /dev/root rw,errors=continue\n" +
 		"40 35 0:36 / /var/lib/kubelet/pods/a\\040b/m rw - ext4 /dev/nvme0n1 rw\n" +
+		"41 35 0:36 / /pods/p/m ro,relatime shared:3 - ext4 /dev/nvme0n1 rw\n" +
+		"42 35 0:36 / /pods/q/m rw,errors=ro - ext4 /dev/nvme0n1 ro\n" +
 		"garbage line\n")
-	if len(mounts) != 2 || mounts[0].target != "/mnt2" || mounts[0].fsType != "ext3" ||
+	if len(mounts) != 4 || mounts[0].target != "/mnt2" || mounts[0].fsType != "ext3" ||
 		mounts[0].source != "/dev/root" || mounts[1].target != "/var/lib/kubelet/pods/a b/m" {
 		t.Errorf("parseMountInfo = %+v", mounts)
+	}
+	// The mount's own options say read-only, an option that holds "ro"
+	// and the filesystem's options aside.
+	if len(mounts) == 4 && (mounts[0].readOnly || mounts[1].readOnly ||
+		!mounts[2].readOnly || mounts[3].readOnly) {
+		t.Errorf("parseMountInfo read-only flags = %+v", mounts)
 	}
 }
 

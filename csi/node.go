@@ -15,8 +15,10 @@ import (
 // volume by connecting the node to its subsystem through the follower and
 // waiting for the device, formats a blank device and mounts it, publishes
 // the staged volume to a pod as a filesystem or a block device, and reports
-// the used space. It never talks to the gateway: everything it needs comes
-// in the publish context, and the rest it derives from the volume id.
+// the used space. It never talks to the gateway: the subsystem NQN and the
+// namespace uuid come in the publish context, the rest it derives from the
+// volume id, and the cdcs it follows come from its own configuration
+// (csi.md CSI15).
 type node struct {
 	csi.UnimplementedNodeServer
 	id         hostIdentity
@@ -26,11 +28,13 @@ type node struct {
 	deviceWait time.Duration
 }
 
-// publishContext is what the controller plugin handed the node at attach.
+// publishContext is what the node reads of the context the controller
+// plugin handed it at attach: the subsystem NQN and the namespace uuid.
+// The context's cdc addresses are not read: the node follows the cdcs of
+// its own configuration alone (csi.md CSI15).
 type publishContext struct {
 	nqn  string
 	uuid string
-	cdcs []endpoint
 }
 
 // readPublishContext reads the attach's context; a volume staged before a
@@ -40,22 +44,6 @@ func readPublishContext(m map[string]string) (publishContext, error) {
 	if pc.nqn == "" || pc.uuid == "" {
 		return publishContext{}, status.Error(codes.InvalidArgument,
 			"the publish context must carry the subsystem NQN and the namespace uuid")
-	}
-	for _, raw := range strings.Split(m[ctxCdc], cdcSep) {
-		raw = strings.TrimSpace(raw)
-		if raw == "" {
-			continue
-		}
-		ep, err := parseEndpoint(raw)
-		if err != nil {
-			return publishContext{}, status.Errorf(codes.InvalidArgument,
-				"the publish context's cdc address %q is not ip:port", raw)
-		}
-		pc.cdcs = append(pc.cdcs, ep)
-	}
-	if len(pc.cdcs) == 0 {
-		return publishContext{}, status.Error(codes.InvalidArgument,
-			"the publish context names no cdc address")
 	}
 	return pc, nil
 }
@@ -131,14 +119,16 @@ func (n *node) NodeStageVolume(
 	// The connects, retried within the device wait until the node holds a
 	// path to the subsystem: the cdc lists a subsystem before its cntlrs
 	// have built it, and a cntlr that has not built it refuses the connect;
-	// one still refusing then is the follower's to retry.
+	// one still refusing then is the follower's loop's to retry, whose pass
+	// that fails arms its retry timer (csi.md CSI14, CSI15).
 	deadline := time.Now().Add(n.deviceWait)
 	for {
-		err := n.follow.stage(ctx, pc.nqn, pc.cdcs)
+		err := n.follow.stage(ctx, pc.nqn)
 		if err == nil {
 			break
 		}
 		if held, herr := n.follow.hasPath(ctx, pc.nqn); herr == nil && held {
+			n.follow.trigger()
 			break
 		}
 		if time.Now().After(deadline) {
@@ -318,7 +308,13 @@ func (n *node) NodeUnstageVolume(
 
 // NodePublishVolume gives a staged volume to a pod: a bind mount of the
 // staging path for a filesystem volume, read-only when asked, and a bind
-// mount of the device node onto a file for a block volume.
+// mount of the device node onto a file for a block volume. A target already
+// mounted is done, but for a read-only request over a read-write mount: a
+// read-only publish binds first and remounts read-only after, so a remount
+// that failed, or a plugin stopped between the two, left a read-write bind
+// in the plugin's own view, which the repeat finishes, so that the answer
+// matches what the plugin did. The pod's read-only access is Kubernetes'
+// flag on the container's mount, not this remount (csi.md CSI17).
 func (n *node) NodePublishVolume(
 	ctx context.Context,
 	req *csi.NodePublishVolumeRequest,
@@ -348,6 +344,11 @@ func (n *node) NodePublishVolume(
 		return nil, status.Error(codes.Internal, err.Error())
 	}
 	if entry != nil {
+		if req.GetReadonly() && !entry.readOnly {
+			if err := n.mnt.remountReadOnly(ctx, target); err != nil {
+				return nil, status.Error(codes.Internal, err.Error())
+			}
+		}
 		return &csi.NodePublishVolumeResponse{}, nil
 	}
 	if _, ok := cap.GetAccessType().(*csi.VolumeCapability_Block); ok {

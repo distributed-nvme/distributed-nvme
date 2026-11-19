@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
+	"slices"
 	"strconv"
 	"strings"
 
@@ -25,6 +26,12 @@ const (
 	// directReadAlign is the alignment of a direct read's offset and length
 	// (osclient.md, ReadBlockDirect).
 	directReadAlign = 4096
+	// xfsProfile is the xfs maker's profile of the oldest kernel series a
+	// Kubernetes node may run (csi.md CSI17): it names every feature the
+	// maker knows, on or off, so the maker of the image formats nothing
+	// that kernel cannot mount, whatever its own defaults. The image's
+	// build checks that the file is there (deploy/Dockerfile).
+	xfsProfile = "/usr/share/xfsprogs/mkfs/lts_6.1.conf"
 )
 
 type mounter struct {
@@ -42,11 +49,12 @@ func (m *mounter) run(ctx context.Context, name string, args ...string) (string,
 }
 
 // mountEntry is one line of the mount table: where something is mounted,
-// what and of which filesystem.
+// what, of which filesystem, and whether the mount itself is read-only.
 type mountEntry struct {
-	target string
-	source string
-	fsType string
+	target   string
+	source   string
+	fsType   string
+	readOnly bool
 }
 
 // mounts reads the kernel's mount table.
@@ -58,9 +66,10 @@ func (m *mounter) mounts(ctx context.Context) ([]mountEntry, error) {
 	return parseMountInfo(data), nil
 }
 
-// parseMountInfo reads mountinfo lines: the mount point is the fifth field,
-// and after the separator come the filesystem type and the source. A space
-// in a path is escaped as an octal sequence.
+// parseMountInfo reads mountinfo lines: the mount point is the fifth field
+// and the mount's own options the sixth, and after the separator come the
+// filesystem type and the source. A space in a path is escaped as an octal
+// sequence.
 func parseMountInfo(data string) []mountEntry {
 	var out []mountEntry
 	for _, line := range strings.Split(data, "\n") {
@@ -70,13 +79,14 @@ func parseMountInfo(data string) []mountEntry {
 		}
 		fields := strings.Fields(before)
 		tail := strings.Fields(after)
-		if len(fields) < 5 || len(tail) < 2 {
+		if len(fields) < 6 || len(tail) < 2 {
 			continue
 		}
 		out = append(out, mountEntry{
-			target: unescapeMount(fields[4]),
-			fsType: tail[0],
-			source: unescapeMount(tail[1]),
+			target:   unescapeMount(fields[4]),
+			fsType:   tail[0],
+			source:   unescapeMount(tail[1]),
+			readOnly: slices.Contains(strings.Split(fields[5], ","), "ro"),
 		})
 	}
 	return out
@@ -169,14 +179,16 @@ func (m *mounter) readStart(ctx context.Context, dev string) ([]byte, error) {
 	return data, nil
 }
 
-// mkfs formats a blank device with the one of the two filesystems named.
+// mkfs formats a blank device with the one of the two filesystems named:
+// ext4 with the maker's defaults, which the oldest kernel series a node may
+// run mounts, and xfs with the profile of that series (xfsProfile).
 func (m *mounter) mkfs(ctx context.Context, fsType string, dev string) error {
 	var err error
 	switch fsType {
 	case fsExt4:
 		_, err = m.run(ctx, "mkfs.ext4", "-q", "-F", dev)
 	case fsXfs:
-		_, err = m.run(ctx, "mkfs.xfs", "-q", "-f", dev)
+		_, err = m.run(ctx, "mkfs.xfs", "-q", "-f", "-c", "options="+xfsProfile, dev)
 	default:
 		return fmt.Errorf("the driver formats %s and %s, not %q", fsExt4, fsXfs, fsType)
 	}
@@ -220,6 +232,11 @@ func (m *mounter) bindMount(ctx context.Context, source string, target string, r
 	if !readOnly {
 		return nil
 	}
+	return m.remountReadOnly(ctx, target)
+}
+
+// remountReadOnly makes a bind mount read-only.
+func (m *mounter) remountReadOnly(ctx context.Context, target string) error {
 	_, err := m.run(ctx, "mount", "-o", "remount,bind,ro", target)
 	return err
 }

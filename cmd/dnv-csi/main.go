@@ -85,8 +85,9 @@ func newNodeCmd() *cobra.Command {
 		"seconds between two follows of the cdc, the safety net under the "+
 			"kernel's change notification")
 	flags.String("cdc-addresses", "",
-		"comma-separated ip:port list of the dnv cdc endpoints, the same list "+
-			"the controller plugin hands to the node at attach (required)")
+		"comma-separated ip:port list of the dnv cdc endpoints the node "+
+			"follows, and no other: a cdc of every range that serves "+
+			"this cluster's volumes; read once at start (required)")
 	flags.String("config", "", "optional viper config file")
 	return cmd
 }
@@ -106,8 +107,8 @@ func newControllerCmd() *cobra.Command {
 	flags.String("gateway-address", "",
 		"host:port of the dnv gateway (required)")
 	flags.String("cdc-addresses", "",
-		"comma-separated ip:port list of the dnv cdc endpoints, handed to "+
-			"the node plugin at attach (required)")
+		"comma-separated ip:port list of the dnv cdc endpoints, put in the "+
+			"publish context at attach (required)")
 	flags.Int("gateway-timeout", int(csi.DefaultGatewayTimeout/time.Second),
 		"seconds one gateway call may take")
 	flags.String("config", "", "optional viper config file")

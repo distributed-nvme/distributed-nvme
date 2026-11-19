@@ -18,7 +18,8 @@
 #
 #   optional: [--only <case>] [--cleanup-only] [--slice-cnt N] [--keep-logs DIR]
 #
-# Cases, in order: k8s, volume, failover, many, sanity. `--only` picks one.
+# Cases, in order: k8s, volume, failover, restart, many, sanity. `--only`
+# picks one.
 # Cleanup runs at the START and, on success only, at the END (CSI5): a
 # failing run leaves its pods, pools, processes and work directories in place
 # and dumps diagnostics instead.
@@ -102,11 +103,13 @@ K3S_API_PORT=6443
 
 # The driver as the manifests deploy it: its name, its namespace, its image
 # (read from the controller manifest, so the suite and the manifests agree),
-# and the storage class and namespace the cases use.
+# and the storage classes and namespace the cases use: the cases' class, and
+# one that asks for xfs.
 DRIVER_NAME=csi.dnv.io
 DRIVER_NS=dnv-csi
 TEST_NS=dnv-csi-test
 SC_NAME=dnv-csi-it
+SC_XFS=dnv-csi-it-xfs
 IMAGE=$(awk '/image: dnv-csi:/ {print $2; exit}' "$DEPLOY_DIR/controller.yaml")
 IMAGE_REF="docker.io/library/$IMAGE"
 # The smoke image of the k8s case.
@@ -129,6 +132,11 @@ ETCD_CLIENT_PORT=17379
 ETCD_PEER_PORT=17380
 GW_PORT=29870
 CDC_PORT=18030
+# A port on the control-plane guest no cdc listens on: the failover case
+# puts it in the controller plugin's cdc list, so every attach's publish
+# context names a dead cdc, which the node plugin must not follow (csi.md
+# CSI15).
+DEAD_CDC_PORT=18039
 DN_GRPC_PORT=28900
 DN_TRSVCID=4400
 DN_PORT_ID=1
@@ -168,6 +176,14 @@ WAIT_CAPACITY=180 # the provisioner polls the capacity every minute
 WAIT_POD=300
 WAIT_DRAIN=300
 WAIT_FAILOVER=180
+# How long a host may keep its path to a failed-over primary once the
+# primary has moved: the cdc's change notice starts the node plugin's pass
+# at once (csi.md CSI15).
+WAIT_PATH_DROP=60
+# How long a node plugin that comes back after a failover it missed may take
+# to drop the old primary's path: its first pass runs at its start, and its
+# timer, which would otherwise find the change, is 30 s away (csi.md CSI15).
+RESTART_DROP=10
 WAIT_NS_GONE=300
 WAIT_HOST_CLEAN=120
 SANITY_TIMEOUT=2400
@@ -179,7 +195,7 @@ FRAME=@@csi-frame@@
 SSH_OPTS=(-o BatchMode=yes -o ConnectTimeout=10 -o ServerAliveInterval=15
 	-o ServerAliveCountMax=4 -o LogLevel=ERROR)
 
-CASES=(k8s volume failover many sanity)
+CASES=(k8s volume failover restart many sanity)
 
 # ---------------------------------------------------------------------------
 # State
@@ -972,6 +988,24 @@ loss_tmos() {
 	return 0
 }
 
+# ctrl_addrs <nqn prefix> prints the traddr of every controller to the
+# subsystems of one NQN prefix, one per line.
+ctrl_addrs() {
+	local ctrl nqn addr
+	for ctrl in /sys/class/nvme/nvme*; do
+		[ -e "$ctrl/subsysnqn" ] || continue
+		nqn=$(cat "$ctrl/subsysnqn" 2>/dev/null) || continue
+		case "$nqn" in
+		"$1"*)
+			addr=$(cat "$ctrl/address" 2>/dev/null) || continue
+			addr=${addr#*traddr=}
+			printf '%s\n' "${addr%%,*}"
+			;;
+		esac
+	done
+	return 0
+}
+
 # disconnect_discovery drops the discovery controllers pointing at one cdc
 # address, by device: every discovery controller shares one NQN.
 disconnect_discovery() { # <traddr>
@@ -1629,7 +1663,8 @@ preflight_guests() {
 	ids=$(fact_of "$out" machine_id)
 	missing=$(helper_cp tools ss curl) || die "cp: listing its tools failed"
 	[ -z "$missing" ] || die "cp: missing tool(s): $(printf '%s' "$missing" | tr '\n' ' ')"
-	busy=$(helper_cp ports_busy "$ETCD_CLIENT_PORT" "$ETCD_PEER_PORT" "$GW_PORT" "$CDC_PORT") ||
+	busy=$(helper_cp ports_busy "$ETCD_CLIENT_PORT" "$ETCD_PEER_PORT" "$GW_PORT" "$CDC_PORT" \
+		"$DEAD_CDC_PORT") ||
 		die "cp: reading its ports failed"
 	[ -z "$busy" ] || die "cp: port(s) already listening: $(printf '%s' "$busy" | tr '\n' ' ')"
 	log "  cp: hostname $CP_NAME"
@@ -2050,6 +2085,22 @@ parameters:
 reclaimPolicy: Delete
 volumeBindingMode: Immediate
 EOF
+	# The same class with xfs, through the key Kubernetes reserves for the
+	# filesystem of a class's volumes (csi.md CSI12).
+	kc_apply <<EOF || die "applying the xfs storage class failed"
+apiVersion: storage.k8s.io/v1
+kind: StorageClass
+metadata:
+  name: $SC_XFS
+provisioner: $DRIVER_NAME
+parameters:
+  cluster: $CLUSTER
+  redundancy: raid1
+  cntlrs: "2"
+  csi.storage.k8s.io/fstype: xfs
+reclaimPolicy: Delete
+volumeBindingMode: Immediate
+EOF
 	kc -n "$DRIVER_NS" rollout status "deploy/dnv-csi-controller" "--timeout=${WAIT_ROLLOUT}s" >/dev/null ||
 		die "the controller plugin did not roll out"
 	kc -n "$DRIVER_NS" rollout status "ds/dnv-csi-node" "--timeout=${WAIT_ROLLOUT}s" >/dev/null ||
@@ -2081,7 +2132,7 @@ driver_down() {
 		log "WARNING: the namespace $TEST_NS is still there after ${WAIT_NS_GONE}s"
 		CLEANUP_DIRTY=1
 	fi
-	kc_ok delete storageclass "$SC_NAME" --ignore-not-found >/dev/null 2>&1
+	kc_ok delete storageclass "$SC_NAME" "$SC_XFS" --ignore-not-found >/dev/null 2>&1
 	kc_ok delete namespace "$DRIVER_NS" --ignore-not-found --wait=false >/dev/null 2>&1
 	if ! wait_cleanup "$WAIT_NS_GONE" k8s_ns_gone "$DRIVER_NS"; then
 		log "WARNING: the namespace $DRIVER_NS is still there after ${WAIT_NS_GONE}s"
@@ -2180,7 +2231,7 @@ diagnostics() {
 	log "--- driver pod logs"
 	kc_ok -n "$DRIVER_NS" logs deploy/dnv-csi-controller -c dnv-csi --tail=60 >&2
 	kc_ok -n "$DRIVER_NS" logs deploy/dnv-csi-controller -c csi-provisioner --tail=30 >&2
-	kc_ok -n "$DRIVER_NS" logs ds/dnv-csi-node -c dnv-csi --tail=60 >&2
+	kc_ok -n "$DRIVER_NS" logs -l app=dnv-csi-node -c dnv-csi --prefix --tail=60 >&2
 	log "--- dnvctl sp list"
 	# In a subshell: ctl_exec dies when cp cannot run dnvctl, and a dump
 	# must not.
@@ -2235,8 +2286,8 @@ pod_marked() { # <pod> <marker path>
 	[ "$(kc_exec "$1" sh -c "cat $2 2>/dev/null" 2>/dev/null)" = done ]
 }
 
-# claim applies one claim of the suite's class.
-claim() { # <name> <size> <Filesystem|Block>
+# claim applies one claim of the suite's class, or of the class named.
+claim() { # <name> <size> <Filesystem|Block> [class]
 	kc_apply <<EOF || die "applying the claim $1 failed"
 apiVersion: v1
 kind: PersistentVolumeClaim
@@ -2245,7 +2296,7 @@ metadata:
   namespace: $TEST_NS
 spec:
   accessModes: [ReadWriteOnce]
-  storageClassName: $SC_NAME
+  storageClassName: ${4:-$SC_NAME}
   volumeMode: $3
   resources:
     requests:
@@ -2323,6 +2374,14 @@ dd if=/tmp/pattern of=/dev/dnv bs=1M count=$1 conv=fsync status=none
 want=\$(sha256sum < /tmp/pattern | cut -d' ' -f1)
 got=\$(dd if=/dev/dnv bs=1M count=$1 status=none | sha256sum | cut -d' ' -f1)
 if [ "\$want" = "\$got" ]; then echo done > /tmp/marker; else echo failed > /tmp/marker; fi
+exec sleep 1000000
+EOF
+}
+
+# hold_script holds the claim and writes nothing.
+hold_script() {
+	cat <<'EOF'
+echo done > /data/marker
 exec sleep 1000000
 EOF
 }
@@ -2496,9 +2555,38 @@ case_volume() {
 	run_pod wb b0 0 Block "$(write_block_script 16)" /tmp/marker
 	delete_pod wb
 
-	stage 04 "every delete, and nothing left"
+	# The node plugin formats xfs with the maker's profile of kernel 6.1
+	# (csi.md CSI17), which turns off two features the image's maker turns
+	# on by default: both off shows the profile was used. xfs_info needs the
+	# mount's device node, which an ordinary pod's /dev lacks, so it runs in
+	# host0's node plugin container: privileged, with the host's /dev and
+	# the kubelet's pods directory, in whose mount table the plugin's bind
+	# at the pod's target stands, and with the image's xfsprogs.
+	stage 04 "an xfs claim, formatted with the profile of kernel 6.1"
+	claim x0 1Gi Filesystem "$SC_XFS"
+	wait_until "$WAIT_PVC" "claim x0 Bound" pvc_bound x0
+	run_pod wx x0 0 Filesystem "$(hold_script)"
+	local info xpv uid plugin
+	xpv=$(pvc_volume x0)
+	uid=$(kc get pod -n "$TEST_NS" wx -o 'jsonpath={.metadata.uid}') || die "reading the uid of pod wx failed"
+	plugin=$(node_plugin_pod 0) || die "reading host0's node plugin pod failed"
+	[ -n "$uid" ] && [ -n "$plugin" ] || die "pod wx has no uid ($uid) or host0 no node plugin pod ($plugin)"
+	info=$(QUIET=1 kc -n "$DRIVER_NS" exec "$plugin" -c dnv-csi -- \
+		xfs_info "/var/lib/kubelet/pods/$uid/volumes/kubernetes.io~csi/$xpv/mount" 2>&1) ||
+		die "xfs_info of x0 in host0's node plugin failed: $info"
+	printf '%s\n' "$info" | sed 's/^/  /' >&2
+	printf '%s\n' "$info" | grep -q 'nrext64=' ||
+		die "xfs_info of x0 names no nrext64 feature: $info"
+	printf '%s\n' "$info" | grep -qw 'nrext64=0' ||
+		die "the xfs volume x0 has nrext64 on: it was not formatted with the 6.1 profile"
+	printf '%s\n' "$info" | grep -qw 'rmapbt=0' ||
+		die "the xfs volume x0 has rmapbt on: it was not formatted with the 6.1 profile"
+	delete_pod wx
+
+	stage 05 "every delete, and nothing left"
 	delete_claim v0
 	delete_claim b0
+	delete_claim x0
 	nothing_left
 	log "=== $CASE: PASS"
 }
@@ -2526,13 +2614,45 @@ cn_index_of() { # <addr_port>
 	return 1
 }
 
+# has_path_to answers whether a host holds a path of the driver's volumes to
+# one address; no_path_to whether it holds none.
+has_path_to() { # <h> <traddr>
+	local out
+	out=$(QUIET=1 helper_host "$1" ctrl_addrs "$NQN_CSI:") || return 1
+	printf '%s\n' "$out" | grep -qxF "$2"
+}
+
+no_path_to() { # <h> <traddr>
+	local out
+	out=$(QUIET=1 helper_host "$1" ctrl_addrs "$NQN_CSI:") || return 1
+	! printf '%s\n' "$out" | grep -qxF "$2"
+}
+
+# controller_cdcs sets the cdc list of the controller plugin alone: it
+# patches the config map and restarts the controller plugin, which reads the
+# map at its start. The node plugins keep the list they started with, since
+# the environment of a running pod does not follow its config map.
+controller_cdcs() { # <ip:port,…>
+	kc -n "$DRIVER_NS" patch configmap dnv-csi-config --type merge \
+		-p "{\"data\":{\"cdcAddresses\":\"$1\"}}" >/dev/null ||
+		die "patching the cdc list of the config map failed"
+	kc -n "$DRIVER_NS" rollout restart deploy/dnv-csi-controller >/dev/null ||
+		die "restarting the controller plugin failed"
+	kc -n "$DRIVER_NS" rollout status deploy/dnv-csi-controller "--timeout=${WAIT_ROLLOUT}s" >/dev/null ||
+		die "the controller plugin did not roll out"
+}
+
 # case_failover: a pod writes in a loop while the primary's cn agent is cut
-# off; after the failover the writer has failed nothing, the stall is
-# reported, and the pattern written before checks out (csi.md, The
-# cases).
+# off; after the failover the writer has failed nothing, host0 drops its
+# path to the old primary, the stall is reported, and the pattern written
+# before checks out (csi.md, The cases). The controller plugin's cdc list
+# names a dead cdc for the case, so every attach's publish context does:
+# the node plugin follows its own list alone (csi.md CSI15), and a node that
+# followed the context's would hold every drop.
 case_failover() {
 	CASE=failover
-	stage 01 "a claim and a pod on host0 writing a pattern, then a write loop"
+	stage 01 "a dead cdc in the controller plugin's list; a claim and a pod on host0 writing a pattern, then a write loop"
+	controller_cdcs "$CP_IP:$CDC_PORT,$CP_IP:$DEAD_CDC_PORT"
 	claim f0 1Gi Filesystem
 	wait_until "$WAIT_PVC" "claim f0 Bound" pvc_bound f0
 	local pv old v stat count fail max
@@ -2569,6 +2689,8 @@ EOF
 	assert_eq "$stat" "state=T" "cn$v: the agent is stopped"
 	wait_until "$WAIT_FAILOVER" "the primary of $pv to move away from $old" primary_moved "$pv" "$old"
 	log "  the primary moved to $(primary_of "$pv")"
+	wait_until "$WAIT_PATH_DROP" "host0 to drop its path to the old primary at ${CN_IP[$v]}" \
+		no_path_to 0 "${CN_IP[$v]}"
 	# IO goes on against the new primary for a while before the loop stops.
 	sleep 20
 	kc_exec wf sh -c 'touch /data/stop' >/dev/null || die "stopping the write loop failed"
@@ -2588,10 +2710,92 @@ EOF
 		"the pattern survives the failover"
 	delete_pod rf
 
-	stage 04 "give the agent back, delete, and nothing left"
+	stage 04 "give the agent back, delete, the controller plugin's list back, and nothing left"
 	stat=$(helper_cn "$v" sig_pidfile "$WORK/cn/pid" CONT) || die "cn$v: sig_pidfile failed"
 	log "  cn$v agent $stat"
 	delete_claim f0
+	controller_cdcs "$CP_IP:$CDC_PORT"
+	nothing_left
+	log "=== $CASE: PASS"
+}
+
+# node_plugin_pod prints the name of the node plugin pod on a host, empty
+# when there is none; node_plugin_gone answers whether there is none;
+# node_plugin_ready whether there is one, with its plugin container ready.
+node_plugin_pod() { # <h>
+	kc get pods -n "$DRIVER_NS" -l app=dnv-csi-node \
+		--field-selector "spec.nodeName=${HOST_NAME[$1]}" \
+		-o 'jsonpath={.items[*].metadata.name}' 2>/dev/null
+}
+
+node_plugin_gone() { # <h>
+	local out
+	out=$(kc get pods -n "$DRIVER_NS" -l app=dnv-csi-node \
+		--field-selector "spec.nodeName=${HOST_NAME[$1]}" \
+		-o 'jsonpath={.items[*].metadata.name}' 2>/dev/null) || return 1
+	[ -z "$out" ]
+}
+
+node_plugin_ready() { # <h>
+	[ "$(kc get pods -n "$DRIVER_NS" -l app=dnv-csi-node \
+		--field-selector "spec.nodeName=${HOST_NAME[$1]}" \
+		-o 'jsonpath={.items[*].status.containerStatuses[?(@.name=="dnv-csi")].ready}' 2>/dev/null)" = true ]
+}
+
+# case_restart: host0's node plugin is away while its volume's primary fails
+# over, so it misses the cdc's change notice and host0 keeps the old
+# primary's path; when the plugin comes back, its first pass drops that path
+# at once, well before the plugin's timer would (csi.md CSI15). The old
+# primary's cntlr is not replaced within the case (the cntlr threshold is
+# minutes), so no later change notice reaches host0 to start a pass.
+case_restart() {
+	CASE=restart
+	local pv old v ip stat
+	stage 01 "a claim and a pod on host0 that holds it"
+	claim s0 1Gi Filesystem
+	wait_until "$WAIT_PVC" "claim s0 Bound" pvc_bound s0
+	pv=$(pvc_volume s0)
+	run_pod ws s0 0 Filesystem "$(hold_script)"
+	old=$(primary_of "$pv") || die "reading the primary of $pv failed"
+	v=$(cn_index_of "$old") || die "the primary $old is on no --cn guest"
+	ip=${CN_IP[$v]}
+	log "  the primary of $pv is $old (cn$v)"
+	wait_until "$WAIT_SHORT" "host0 to hold a path to the primary at $ip" has_path_to 0 "$ip"
+
+	stage 02 "take the node plugin off host0; host0 keeps its paths and the mount"
+	kc -n "$DRIVER_NS" patch ds dnv-csi-node --type merge \
+		-p "{\"spec\":{\"template\":{\"spec\":{\"nodeSelector\":{\"kubernetes.io/hostname\":\"${HOST_NAME[1]}\"}}}}}" \
+		>/dev/null || die "keeping the node plugin to host1 failed"
+	wait_until "$WAIT_POD" "the node plugin to leave host0" node_plugin_gone 0
+	has_path_to 0 "$ip" || die "host0 lost its path to the primary when its node plugin stopped"
+
+	stage 03 "cut the primary's cn agent off (SIGSTOP); host0 keeps the old path through the failover"
+	stat=$(helper_cn "$v" sig_pidfile "$WORK/cn/pid" STOP) || die "cn$v: sig_pidfile failed"
+	assert_eq "$stat" "state=T" "cn$v: the agent is stopped"
+	wait_until "$WAIT_FAILOVER" "the primary of $pv to move away from $old" primary_moved "$pv" "$old"
+	log "  the primary moved to $(primary_of "$pv")"
+	# The failover's own write takes the old primary out of the discovery
+	# records; the cdc's notice of it reaches no plugin on host0.
+	sleep 5
+	has_path_to 0 "$ip" || die "host0 dropped the old primary's path with no node plugin on it"
+
+	stage 04 "the node plugin back on host0: its first pass drops the old path"
+	kc -n "$DRIVER_NS" patch ds dnv-csi-node --type json \
+		-p '[{"op":"remove","path":"/spec/template/spec/nodeSelector"}]' >/dev/null ||
+		die "giving the node plugin back to host0 failed"
+	wait_until "$WAIT_POD" "the node plugin to run on host0" node_plugin_ready 0
+	wait_until "$RESTART_DROP" "host0 to drop its path to the old primary at $ip within ${RESTART_DROP}s of its node plugin's start" \
+		no_path_to 0 "$ip"
+	kc_exec ws sh -c 'echo after > /data/after && sync' >/dev/null ||
+		die "the pod cannot write its volume through the new primary"
+	kc -n "$DRIVER_NS" rollout status ds/dnv-csi-node "--timeout=${WAIT_ROLLOUT}s" >/dev/null ||
+		die "the node plugin did not roll out"
+
+	stage 05 "give the agent back, delete, and nothing left"
+	stat=$(helper_cn "$v" sig_pidfile "$WORK/cn/pid" CONT) || die "cn$v: sig_pidfile failed"
+	log "  cn$v agent $stat"
+	delete_pod ws
+	delete_claim s0
 	nothing_left
 	log "=== $CASE: PASS"
 }

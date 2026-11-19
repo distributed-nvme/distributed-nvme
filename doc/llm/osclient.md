@@ -174,7 +174,9 @@ the method set is exactly the following, each taking the caller's ctx:
 * Timeout and kill semantics (implements the command timeouts of
   `architecture.md`, Common validation): the **caller** owns the deadline —
   agents wrap the ctx with the `CmdSoftTimeout` deadline (`agent.CmdCtx`;
-  `dnagent.md` SH15) before calling. `LimitedOsClient` adds no deadline of
+  `dnagent.md` SH15) before calling, and the CSI node plugin does the same
+  for its connects and discovery reads, never for a disconnect (`csi.md`
+  CSI14). `LimitedOsClient` adds no deadline of
   its own, but configures:
   * SIGTERM when the ctx fires (the soft timeout), through the command's
     `Cancel`;

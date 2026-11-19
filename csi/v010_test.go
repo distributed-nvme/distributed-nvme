@@ -2,7 +2,6 @@ package csi
 
 import (
 	"maps"
-	"strings"
 	"testing"
 )
 
@@ -33,7 +32,8 @@ var v010Volumes = []struct {
 // cluster and volume and is rebuilt as it is, a repeated create of the same
 // Kubernetes name finds the same volume, the volume's subsystem NQN and
 // namespace uuid are the ones the contexts carry, and the node plugin reads
-// the publish context.
+// the publish context's NQN and uuid; it reads none of its cdc addresses,
+// since it follows the cdcs of its own configuration alone (csi.md CSI15).
 func TestV010VolumeIdsAndContexts(t *testing.T) {
 	for _, v := range v010Volumes {
 		if got := dnvNameOf(v.coName); got != v.name {
@@ -60,13 +60,8 @@ func TestV010VolumeIdsAndContexts(t *testing.T) {
 			t.Errorf("volume %s: readPublishContext: %v", v.name, err)
 			continue
 		}
-		var cdcs []string
-		for _, ep := range pc.cdcs {
-			cdcs = append(cdcs, ep.String())
-		}
-		if pc.nqn != want[ctxNqn] || pc.uuid != want[ctxUuid] ||
-			strings.Join(cdcs, cdcSep) != v.publishContext[ctxCdc] {
-			t.Errorf("volume %s: the publish context reads as %q, %q, %v", v.name, pc.nqn, pc.uuid, cdcs)
+		if pc.nqn != want[ctxNqn] || pc.uuid != want[ctxUuid] {
+			t.Errorf("volume %s: the publish context reads as %q, %q", v.name, pc.nqn, pc.uuid)
 		}
 	}
 }

@@ -13,6 +13,7 @@ import (
 	"google.golang.org/grpc/status"
 
 	"github.com/distributed-nvme/distributed-nvme/common"
+	"github.com/distributed-nvme/distributed-nvme/pb"
 )
 
 const (
@@ -181,6 +182,44 @@ func TestCreateVolumeIsRepeatable(t *testing.T) {
 	g.drain(fakeClusterOne, testVolume)
 	_, err = c.CreateVolume(ctx, createReq(testVolume, 10*gib))
 	wantCode(t, err, codes.OK, "create after the drain")
+}
+
+// TestCreateVolumeRefusesAPoolOfAnotherShape pins csi.md CSI9: a pool
+// found under the volume's name with a slice count other than one, or a
+// stripe other than the cluster's, in whose units the volume's size is
+// counted, is ALREADY_EXISTS, as one of another redundancy is.
+func TestCreateVolumeRefusesAPoolOfAnotherShape(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		slices uint32
+		stripe uint64
+		want   string
+	}{
+		{"two slices", 2, 0, "2 slices"},
+		{"another stripe", 1, 2 * fakeStripe, "stripe"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			c, g := newTestController(t)
+			bdev := &pb.BdevConf{RedundConf: params{redundancy: redundancyRaid1}.redundConf()}
+			if tc.stripe != 0 {
+				bdev.DmRaid0Conf = &pb.DmRaid0Conf{StripeSize: tc.stripe}
+			}
+			if _, err := g.CreateStoragePool(t.Context(), &pb.CreateStoragePoolRequest{
+				ClusterName: fakeClusterOne, SpName: testVolume, BdevConf: bdev,
+				CntlrCnt: 2, SliceCnt: tc.slices, InitExtCnt: 1,
+			}); err != nil {
+				t.Fatal(err)
+			}
+			_, err := c.CreateVolume(t.Context(), createReq(testVolume, 10*gib))
+			wantCode(t, err, codes.AlreadyExists, "a pool of "+tc.name)
+			if err != nil && !strings.Contains(err.Error(), tc.want) {
+				t.Errorf("the refusal %q does not name %q", err, tc.want)
+			}
+			if len(g.pool(fakeClusterOne, testVolume).tds) != 0 {
+				t.Error("a thin device was made in a pool of another shape")
+			}
+		})
+	}
 }
 
 // TestCreateVolumeCompletesAHalfMadeVolume pins the repeat of csi.md CSI9:

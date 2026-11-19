@@ -59,13 +59,12 @@ Attach sets the subsystem's allowed hosts to the node's host NQN alone;
 detach empties the list, which closes the subsystem to new connections
 (`architecture.md`, Primary cntlr) and hides it from discovery (`cdc.md` DS4).
 The node plugin follows the discovery log as a host must (`architecture.md`,
-Host view): it holds a persistent discovery connection to every cdc address,
-connects every listed cntlr of the subsystems it has staged, drops a path the
-cdc withdraws, and touches no connection but those CSI15 names its own. It
-never talks to the gateway: the controller plugin hands it the subsystem NQN,
-the namespace uuid and the cdc addresses at attach time, and the plugin knows
-the cdc addresses from its own configuration as well, so that a restart knows
-them.
+Host view): it holds a persistent discovery connection to every cdc address
+of its own configuration, and to no other, connects every listed cntlr of the
+subsystems it has staged, drops a path the cdc withdraws, and touches no
+connection but those CSI15 names its own. It never talks to the gateway: the
+controller plugin hands it the subsystem NQN and the namespace uuid at attach
+time (CSI10).
 
 ## The driver
 
@@ -76,11 +75,11 @@ main over the library package `csi`: flags, a config file and the
 environment are one thing, bound under the prefix `DNV_CSI`, as for every
 daemon (`architecture.md`, Components: invocation reference). The controller
 plugin takes the socket to serve (`--csi-address`), the gateway's address
-(`--gateway-address`), the cdc addresses it hands to the node plugin at
-attach (`--cdc-addresses`) and the bound on one gateway call
+(`--gateway-address`), the cdc addresses it puts in the publish context at
+attach (`--cdc-addresses`; CSI10) and the bound on one gateway call
 (`--gateway-timeout`); a cdc address is an IP literal and a port, an IPv6
-address in brackets, since the node connects to it as the kernel's
-discovery address. The identity service
+address in brackets, since the node connects to the addresses of its own list
+as the kernel's discovery address. The identity service
 reports the driver's name and its build version (`common.BuildVersion`) and
 advertises the controller service
 and the accessibility constraints (CSI13) from both plugins, since a
@@ -126,7 +125,9 @@ Common validation). The subsystem with the volume's NQN and no host. The
 namespace at index one with the volume's uuid. A step that finds its object
 there reads it back and goes on when it matches; a pool of
 another redundancy is ALREADY_EXISTS, the spec's word for an incompatible
-volume of the same name, and so are a thin device of another size and a
+volume of the same name, and so are a pool of a slice count other than one or
+of a stripe other than the one the create read from the cluster, since the thin
+device is sized in that stripe's units, a thin device of another size and a
 namespace that is not the volume's; a pool's cntlr count is not compared, since
 an operator may add or delete cntlrs; a pool still being deleted under the name
 is ABORTED, so the caller retries once the drain has removed it. The create
@@ -153,10 +154,13 @@ done; an empty list is set to the node; another node in it is
 FAILED_PRECONDITION, the spec's word for a volume published elsewhere under
 single-node access, naming that node. The reply's publish context carries the
 subsystem NQN, the namespace uuid as the record holds it, and the cdc addresses
-joined by commas; the volume context of a create carries the NQN and the uuid
-as well. Detach takes the node out of the list, which empties it, or empties it
-outright when no node is named; a node not in the list, a subsystem or a pool
-that is gone, and an id of another form are all done. Each of the two reads the
+of the controller plugin's configuration joined by commas, which the node
+plugin does not read (CSI15); the key stays, so that every publish context
+Kubernetes holds keeps one form. The volume context of a create carries the
+NQN and the uuid as well. Detach takes the node out of the list, which
+empties it, or empties it outright when no node is named; a node not in the
+list, a subsystem or a pool that is gone, and an id of another form are all
+done. Each of the two reads the
 pool's revision, then the subsystem, and, when the list changes, writes it with
 that revision as its token (`gateway.md` GW6): a write the gateway refuses as
 stale ran over another change of the pool, another attach or detach among them,
@@ -232,8 +236,8 @@ expansion and modification are not served.
 ## The node plugin
 
 The node subcommand runs on every Kubernetes node that may mount a volume. It
-takes the socket to serve (`--csi-address`), the cdc addresses, the same list
-the controller plugin takes (`--cdc-addresses`), the two identity files
+takes the socket to serve (`--csi-address`), the cdc addresses it follows
+(`--cdc-addresses`; CSI15), the two identity files
 (`--hostnqn-file`, `--hostid-file`), the bound on a stage's wait for the device
 (`--device-wait`) and the follower's period (`--sync-period`). Everything it
 does to the node goes through the OS client, the one path to the operating
@@ -259,8 +263,23 @@ follower drops the node's last path and the mount does not survive it (CSI14).
 CSI13. **The node id is the host NQN, and every node is in one topology
 segment.** The plugin reads the node's identity files at start and refuses
 to start when either is missing, empty or not a host NQN, naming the file
-and the commands that generate the pair. Every connect carries both the host
-NQN and the host id, since the kernel keeps a one-to-one map between them.
+and the fix: on a node whose connections carry an identity, the one they
+carry, which sysfs shows, and on a node with no connection the commands that
+generate the pair, since a plugin under a new host NQN hears from the cdcs no
+path of the volumes attached under the old one and drops their paths as
+after a detach. It then reads the node's kernel as sysfs shows it and
+refuses to start, with one error that names each fact it read wrong and its
+fix, when native NVMe multipath is off or not built, since
+without it the loss of one path takes the device the mount uses, or when the
+NVMe over Fabrics device is missing, through which every connect goes and
+which nothing loads on demand; a read of either that fails refuses as well.
+It does not read the NVMe/TCP module, which the kernel loads at the first
+connect, as the agents' node check counts it (`dnagent.md` CM5), and it loads
+nothing: from the pod a module the kernel could load cannot be told from one
+it lacks, and a module named at boot is the one fix that holds after a reboot
+(`operations.md`, A Kubernetes node plugin that does not start). Every connect
+carries both the host NQN and the host id, since the kernel keeps a one-to-one
+map between them.
 The files are the operator's; the plugin never writes them. With its id the
 plugin reports one topology segment, the same on every node, since a dnv
 volume is reachable from every node that runs the plugin: the segment says
@@ -297,72 +316,125 @@ lists before its agent has exported the subsystem, keeps the old path until the
 new one has joined the device, as long as the old path's reconnects are not
 refused before then. Each path holds at most the cn agent's IO queue cap of IO
 queues, one per CPU up to the cap, plus its admin queue, when the cap is above
-zero (`dnagent.md` SH32): the cap binds this connect too. The plugin reports no
-volume health, so nothing in the driver or in Kubernetes acts on a dead mount,
-and the operator deletes the pod. A stage connects to every cntlr the cdcs list
+zero (`dnagent.md` SH32): the cap binds this connect too. Each connect and
+each of the two discovery reads of CSI15 runs under the agents' command bound
+(`architecture.md`, Common validation), since the follower runs them one at a
+time and one that hangs would hold up every stage of the node. The bound ends
+a hang of nvme-cli and a wait the kernel lets a signal end, as the TCP connect
+and the first message of a connection, and no wait the kernel holds whatever
+the signal: the Connect command of a path or of a discovery connection to a
+cntlr or a cdc that took the TCP connection and does not answer, which lasts
+up to the kernel's admin timeout, and the discovery log read, a command on the
+persistent discovery connection that a cdc which keeps that connection and
+does not answer holds until the kernel's error recovery of the connection
+ends it: once the connection's keep-alive fails, or, while the cdc still
+answers the keep-alives, once the read's own admin timeout passes, the
+distribution kernel the lab runs starting that recovery half a keep-alive
+period late, so the wait comes to about a minute or a little more (CSI15). A
+disconnect has no bound, the stop's included: the kernel's delete runs to its
+end whatever the signal, and a kill would only make a delete that was done
+look failed. A connect that fails, or that the bound ends, counts as
+made when sysfs then shows a controller of the subsystem at the cntlr's
+address under the node's host NQN that is not being deleted or dead, one for
+which the kernel would refuse a second connect, whatever nvme-cli printed; the
+plugin reads none of nvme-cli's words. The plugin reports no volume health,
+so nothing in the driver or in Kubernetes acts on a dead mount, and the
+operator deletes the pod. A stage connects to every cntlr the cdcs list
 for the volume's subsystem and repeats the connects, since the cdc lists a
 subsystem before its cntlrs have built it, until a pass ends with no error or
 the node holds a path to the subsystem, a standby's included, and a stage whose
 wait runs out first is UNAVAILABLE; a cntlr still refusing when the connects
-end is left to the follower's passes (CSI15), each of which retries it, the
-next within a timer period, so the wait the stage has left covers that retry
-only while the follower's period stays well below it, as at the defaults when
-the connects end early in the wait; the stage then waits for the volume's
-device link by uuid under the disk-by-id directory, which appears once a path
-is live and optimized. A volume whose link does not come within the wait is
-UNAVAILABLE, and the kubelet calls again.
+end is handed to the follower's loop at once, whose retry timer tries it again
+a second later and then at delays that double up to the follower's period
+(CSI15), so the wait the stage has left covers those retries while they come
+within it, as the first ones do at the defaults; the stage then waits for the
+volume's device link by uuid under the disk-by-id directory, which appears
+once a path is live and optimized. A volume whose link does not come within
+the wait is UNAVAILABLE, and the kubelet calls again.
 
 CSI15. **The follower.** The plugin keeps the set of subsystems it has staged
-and the cdcs it follows, the configured ones and those the attaches named,
-holds one persistent discovery connection to each cdc, and on every trigger
-reads the discovery log through each of them, then for every staged subsystem
-connects a listed cntlr the node has no path to and drops, by controller, a
-path to a cntlr no cdc lists any more, which is the node's part of the failover
-contract (`architecture.md`, Host view). It drops such a path only once the
-node holds a path to a listed cntlr under which the kernel shows the volume's
-namespace, a path connected in the same pass counting from the next one and
-a path being dropped not counting, or
-when the cdcs list no cntlr for the subsystem, which a detach leaves (CSI10): a
-cntlr that replaced the withdrawn one but still refuses the connect, or whose
-path has not yet joined the multipath device, does not cost the volume its last
-path. The triggers are a stage, the kernel's device events, read off its event
-socket, among them the discovery-log-change notification, and a timer as the
-safety net. A stage, a pass, an unstage's forget and drop of the discovery
-connections, and the stop's drop run one at a time, so an unstage that empties
-the set never forgets the cdcs under a stage of another volume. The path drops
-run outside that order, tracked by controller, at most a fixed number at once,
-since an `nvme disconnect` of a target that vanished can wait out the kernel's
-admin timeout: no other volume's stage waits for them, a pass does not start a
+and follows the cdcs of its own configuration, read once at its start, and no
+other; it holds one persistent discovery connection to each, and on every
+trigger reads the discovery log through each of them, then for every staged
+subsystem connects a listed cntlr the node has no path to and drops, by
+controller, a path to a cntlr no cdc lists any more, which is the node's part
+of the failover contract (`architecture.md`, Host view). It drops such a path
+only once the node holds a path to a listed cntlr under which the kernel shows
+the volume's namespace, a path connected in the same pass counting from the
+next one and a path being dropped not counting, or when the cdcs list no cntlr
+for the subsystem, which a detach leaves (CSI10): a cntlr that replaced the
+withdrawn one but still refuses the connect, or whose path has not yet joined
+the multipath device, does not cost the volume its last path.
+
+The triggers are a stage; one pass when the loop starts, so a plugin that
+restarted acts at once on a log that changed while it was away; the kernel's
+change events of an nvme controller, read off its event socket: the
+discovery-log-change notification and the notice of a controller's connect or
+reconnect, but not a controller's add or remove event, which a connect that
+fails makes, so a refused connect does not start the next pass at once; a
+retry timer; and a timer of the follower's period as the safety net.
+The retry timer runs one more pass after a pass that failed, a cdc it could not
+reach or read included, or that held a drop back only because no listed path
+shows the namespace yet, for which no event comes: a path's namespace device
+sends none. Its delay starts at a second, doubles after each such pass up to
+the period, and starts again from a second after a pass that a stage or an
+event began, since news can end what held the passes back, and after a pass
+that leaves nothing to retry. The event socket survives a receive overflow,
+which starts a pass, since events were lost, and any other failure, which
+starts a pass as well and after which the socket is opened again after a
+pause that doubles up to the period, its opening starting one more pass for
+the events lost meanwhile; each receive returns within a second, so the loop
+sees its stop, and a failure of the socket logs a sync error.
+
+A stage, a pass, an unstage's forget and drop of the discovery connections, and
+the stop's drop run one at a time, so an unstage that empties the set never
+drops the discovery connections under a stage of another volume, whose pass
+would read no log and hear no change notice until a later pass opened them
+again. The connects, the discovery connects and log reads, and the last
+unstage's drop of the discovery connections run inside that order, so a wait
+the kernel holds whatever the signal (CSI14), a Connect command or a log read
+to a cntlr or a cdc that keeps its TCP connection and does not answer, or the
+delete of a connection to one, holds every stage and every pass of the node
+for about a minute or a little more, and a cdc twin whose machine stops
+without closing its connections costs every node one such wait besides holding
+its drops (`architecture.md`, Known limits). The path drops run outside that
+order, tracked by controller, at most a fixed number at once, since an
+`nvme disconnect` of a target that vanished can wait out the kernel's admin
+timeout: no other volume's stage waits for them, a pass does not start a
 second drop of a controller being dropped, an unstage waits for the drops of
 its own volume and then disconnects the subsystem outside the order too, a
 disconnect neither tracked by controller nor counted in that number, and a
-stage of a volume whose unstage still runs waits for it. A cdc that cannot be
-reached, or whose log cannot be read, holds every drop off and leaves the
-connects to the others, since twins exist so that one can be down; a pass that
-read no log drops nothing: an answer that is missing is not an answer that the
-cntlr is gone. The plugin's discovery connections are those under the node's
-host NQN to a cdc it follows, and it uses and drops no other; a connection
-another tool made to the same cdc under the same host NQN cannot be told apart
-from the plugin's. After a restart the plugin reads the staged subsystems back
-from sysfs, those of the driver's NQN prefix, and follows the configured cdcs
-from the start, so a configured cdc that cannot be read holds the drops off
-after a restart as before one, whichever shard codes each cdc serves. A
-discovery connection under the node's host NQN to another address is followed
-as well when its log lists a staged subsystem, since an attach named that cdc
-before the configuration changed; it only adds a cdc that must answer, and one
-whose log cannot be read at the restart stays another tool's. A cdc an attach
-named leaves the set only when the drop of the discovery connections forgets it
-(CSI16) or when a restart does not find its log listing a staged subsystem, and
-a stage brings it back from the volume's publish context, so an address a cdc
-left for good can return with the next stage of a volume attached before the
-cdc moved and hold every drop off until the discovery connections are dropped
-or the plugin restarts, while the connects go on through the others; the
-warning on every pass is what shows it (`architecture.md`, Known limits). The
-plugin touches no path of a subsystem that is not its own.
+stage of a volume whose unstage still runs waits for it.
+
+A cdc that cannot be reached, or whose log cannot be read, holds every drop off
+and leaves the connects to the others, since twins exist so that one can be
+down; a pass that read no log drops nothing: an answer that is missing is not
+an answer that the cntlr is gone. A log whose output is empty, or is not
+nvme-cli's JSON with its list of records, cannot be read: every dnv cdc lists
+itself first in every log (`cdc.md` DS12), so a real answer is never empty. The
+plugin's discovery connections are those under the node's host NQN to a cdc of
+its configuration, and it uses and drops no other; a connection another tool
+made to the same cdc under the same host NQN cannot be told apart from the
+plugin's. After a restart the plugin reads the staged subsystems back from
+sysfs, those of the driver's NQN prefix, and follows the configured cdcs from
+the start, so a configured cdc that cannot be read holds the drops off after a
+restart as before one, whichever shard codes each cdc serves. A discovery
+connection under the node's host NQN to an address the configuration does not
+name, as one the plugin opened before its configuration changed, is another
+tool's: the plugin neither reads nor drops it. The list is the node's alone and
+is read once: a change of it takes a restart of the plugin, since the
+environment of a running pod does not follow its config map, and a list that
+omits a cdc serving staged volumes drops their paths at the first pass in which
+the listed cdcs answer, since they list no cntlr for those subsystems, which
+reads as a detach; so the list names a cdc of every range that serves the
+cluster's volumes (`architecture.md`, Known limits; `operations.md`, Change the
+cdc addresses of the Kubernetes driver). The plugin touches no path of a
+subsystem that is not its own.
 
 CSI16. **Nothing staged, nothing connected.** The last unstage drops the
-subsystem's paths and the persistent discovery connections with them, and
-so does a stop of the plugin with nothing staged; a stop with volumes staged
+subsystem's paths and the persistent discovery connections with them, each
+discovery connection even when the drop of another fails, and so does a stop
+of the plugin with nothing staged; a stop with volumes staged
 leaves every connection in place, since the data path must outlive the
 plugin's pod. A stage that fails with a final code, after which the kubelet
 counts the volume as not staged and never unstages it, leaves the set at once,
@@ -370,8 +442,7 @@ with its paths, and with the discovery connections when nothing else is staged,
 as the last unstage does; a code after which the stage may still be running
 keeps it, as does a mount at the staging path, which an earlier stage made, and
 a mount table that cannot be read, since a missing answer is not an answer that
-nothing is mounted. A drop of the discovery connections forgets the cdcs the
-attaches named and keeps the configured ones.
+nothing is mounted.
 
 CSI17. **Format only what is blank, mount by binding, repeat for free.** A
 stage of a filesystem volume reads the device's filesystem and partition
@@ -394,17 +465,35 @@ blkid does not know, is formatted; and a first format cut off part way, by
 the end of the stage's time or a restart of the plugin, can leave bytes at
 the start that blkid does not take for a filesystem, so every later stage
 of that volume is refused until an operator zeroes its start
-(`operations.md`, A Kubernetes volume the node plugin will not format). A
-block volume is never formatted or mounted at stage. Publish bind-mounts
-the staging path at the target, read-only when asked, and for a block volume
-makes a file at the target and bind-mounts the device node onto it.
-Unpublish unmounts the target and removes it, a directory with a plain
-rmdir, never recursively; unstage unmounts the staging path. Every step
-reads the mount table first, so a repeat is done, as the spec asks, and a
-capability the driver does not serve is FAILED_PRECONDITION at stage and
-publish, the spec's word for a capability the volume does not support. The
-used-space report reads a mounted filesystem's totals in bytes and inodes
-through the OS client, and a block volume's size alone.
+(`operations.md`, A Kubernetes volume the node plugin will not format). The
+plugin makes xfs with the maker's profile of the oldest kernel series a node
+may run (`xfsProfile`; Deployment), which names every feature the maker
+knows, on or off, so the image's maker makes nothing that kernel cannot
+mount, whatever its own defaults, and ext4 with the maker's defaults, which
+that kernel mounts. A device already formatted is never formatted again, so
+a volume keeps the features it was made with. The xfs maker refuses a device
+smaller than 300 MiB, so such a volume's stage fails. A block volume is never
+formatted or mounted at stage. Publish bind-mounts the staging path at the
+target, read-only when asked, and for a block volume makes a file at the
+target and bind-mounts the device node onto it. A read-only bind takes a
+second mount, a remount of the bind read-only, so a publish whose remount
+failed, or a plugin stopped between the two, leaves the bind read-write in the
+plugin's own mount table: a repeat of a read-only publish that finds it so
+runs the remount and answers its result, so that the plugin answers done only
+for what it did. The remount changes the plugin's own mount alone: the copy of
+the bind that reaches the host through the kubelet's directory, mounted both
+ways, keeps the flags it had, and a write to a device node passes a read-only
+bind, so what keeps a pod from writing is the read-only flag Kubernetes puts
+on the container's mount. A read-write publish whose target is read-only is
+done: a bind takes the read-only flag of its source, and the volume's mount
+options can make the staging mount read-only. Unpublish unmounts the target
+and removes it, a directory with a plain rmdir, never recursively; unstage
+unmounts the staging path. Every step reads the mount table first, so a
+repeat is done, as the spec asks, and a capability the driver does not serve
+is FAILED_PRECONDITION at stage and publish, the spec's word for a capability
+the volume does not support. The used-space report reads a mounted
+filesystem's totals in bytes and inodes through the OS client, and a block
+volume's size alone.
 
 ## Deployment
 
@@ -414,10 +503,14 @@ Kubernetes 1.34 and newer; the lab proves it on the k3s release the suite
 pins, with the sidecar images the manifests name.
 The image is the Ubuntu release the lab runs with nvme-cli, the mount tools,
 blkid and the two filesystem makers, plus the one binary; the pod's command
-names the subcommand. The plugin passes the makers no feature option, so they
-format with the image's defaults, and the xfs maker of that release formats
-with nrext64, which needs kernel 5.19 or newer, so a node that mounts an xfs
-volume runs that kernel or a newer one. The manifests name the image by the
+names the subcommand. Every Kubernetes node that runs the node plugin runs a
+kernel of the 6.1 series or newer, the agents' floor too: the plugin formats
+xfs with the maker's profile of that series (CSI17), and the image's build
+fails on a base whose xfs maker has no such profile; the plugin reads no
+kernel release, since an older kernel refuses an xfs mount with its own error
+and loses nothing. Native NVMe multipath is on, and the NVMe over Fabrics
+module, which nvme-tcp brings, loads at boot, since the plugin refuses to
+start without either (CSI13). The manifests name the image by the
 release's version, with no registry, and pull it only when it is absent, so a
 lab imports it into every node under that name, and a user who publishes it in
 a registry names it there in the controller and node manifests or maps that
@@ -488,7 +581,8 @@ and `csi node stopping` the same way, and, since those are the moments the
 failover contract turns on, `csi path connected` and `csi path dropped`
 with the subsystem and the cntlr address, `csi discovery connection opened`
 and `csi discovery connection dropped` with the cdc address, and
-`csi follower sync error` with what failed when a follow could not finish.
+`csi follower sync error` with what failed when a follow could not finish or
+the kernel's event socket failed.
 Every CSI call but a successful probe logs `csi request` with the method
 and `csi reply` with the method, the code, the duration and, on a failure,
 the error, under the trace id the interceptor minted (CSI8). The gateway
@@ -519,9 +613,13 @@ installed, an image built on the suite's machine reaches every node
 without a registry, and a pod runs from it on each host and is then
 removed. On that floor it proves the driver: a claim becomes a pool that
 a pod reads and writes on either host, as a filesystem and as a raw block
-device; a failover under IO fails no write and the data written before it
-reads back, for one pool at a time, since no case stops the cn agent of a
-controller node that holds many pools; eight volumes live at once; the
+device, and an xfs volume is formatted with the profile of the oldest kernel
+series a node may run; a failover under IO fails no write, the host drops its
+path to the old primary though every attach names a dead cdc, and the data
+written before it reads back, for one pool at a time, since no case stops the
+cn agent of a controller node that holds many pools; a node plugin away during
+a failover drops the old primary's path at its start; eight volumes live at
+once; the
 upstream conformance test passes; and every delete leaves nothing behind.
 No case reads back a write made during a failover, which a failover can lose
 in the cases that `architecture.md`, Known limits, A failover while the
@@ -571,7 +669,7 @@ name come from their public registry, which each node pulls from once.
 
 CSI5. **Cleanup removes what the suite started and nothing else.** The test
 namespace and the driver's namespace are deleted and waited for, the
-driver's cluster-wide objects and the storage class with them; then the
+driver's cluster-wide objects and the storage classes with them; then the
 hosts' connections of the driver's and dnv's and the discovery connections
 to the suite's cdc go, with the hosts' mask of nvme-cli's autoconnector, then
 the controller nodes' and the disk nodes' devices, exports, agents and udev
@@ -606,17 +704,37 @@ zero; a filesystem claim becomes a pool of one slice and two cntlrs; a pod on
 host0 writes a pattern and its digest; the same claim under a pod on host1
 checks the digest, while every path host1 holds to it shows a controller-loss
 timeout of "off" (CSI14); a raw block claim is written and read back through
-the device by a pod on host0; then every delete, and nothing left.
+the device by a pod on host0; a claim of a second class that names xfs is
+formatted with the profile of the 6.1 series (CSI17), which the filesystem's
+own report shows, read in host0's node plugin container at the target of a
+pod that holds the claim, since only a container with the host's devices can
+read it: two features the image's maker turns on by default are off; then
+every delete, and nothing left.
 
-**failover.** A pod on host0 writes a pattern, then writes in a loop with
-fsync, counting failures and the longest write. The suite reads which
-controller node holds the volume's primary and stops that cn agent, as the
-e2e suite's cutoff case does, so that every kernel object it built goes on
-serving until the fence; the primary moves; the loop runs on against the
-new primary and is stopped; it has failed nothing, and the longest write is
-reported. The pod goes, and a pod on host1 reads the pattern back through
-the new primary, since host0's page cache holds it. The agent is given
-back, then every delete, and nothing left.
+**failover.** The controller plugin's cdc list names a dead address beside
+the cdc for the case, so the publish context of every attach does, while the
+node plugins keep the list they started with (CSI15). A pod on host0 writes a
+pattern, then writes in a loop with fsync, counting failures and the longest
+write. The suite reads which controller node holds the volume's primary and
+stops that cn agent, as the e2e suite's cutoff case does, so that every
+kernel object it built goes on serving until the fence; the primary moves;
+host0 drops its path to the old primary within a bound, which a node that
+followed the dead cdc of the context would never do; the loop runs on
+against the new primary and is stopped; it has failed nothing, and the
+longest write is reported. The pod goes, and a pod on host1 reads the
+pattern back through the new primary, since host0's page cache holds it.
+The agent is given back, then every delete, the controller plugin's list
+back, and nothing left.
+
+**restart.** A pod on host0 holds a claim and writes nothing. The node plugin
+is taken off host0 by a node selector on its daemon set, which leaves host0's
+paths and mount in place (CSI16), and the primary's cn agent is stopped: the
+primary moves while no plugin runs on host0, which keeps its path to the old
+primary. The plugin comes back, and within a bound well under its timer's
+period host0 holds no path to the old primary, since the plugin's first pass
+runs at its start (CSI15); the pod still writes its volume. No change notice
+starts that pass: the old primary is not replaced within the case. The agent
+is given back, then every delete, and nothing left.
 
 **many.** Eight claims and eight pods at once, four per host, each writing
 a pattern and checking it; the cluster holds eight pools; then every

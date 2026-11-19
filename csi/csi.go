@@ -68,10 +68,10 @@ type Config struct {
 	Endpoint string
 	// GatewayAddress is the gateway's host:port (the controller plugin).
 	GatewayAddress string
-	// CdcAddresses are the cdc endpoints, ip:port each: the controller
-	// plugin hands them to the node plugin at attach (csi.md, Attach and
-	// detach), and the node plugin's follower knows them from its start, so
-	// that a restart knows its discovery connections (csi.md CSI15).
+	// CdcAddresses are the cdc endpoints, ip:port each: the node plugin's
+	// follower follows these and no other, from its start (csi.md CSI15),
+	// and the controller plugin puts them in the publish context at attach
+	// (csi.md CSI10), where the node plugin does not read them.
 	CdcAddresses []string
 	// GatewayTimeout bounds one gateway call; zero takes
 	// DefaultGatewayTimeout.
@@ -117,11 +117,12 @@ func RunController(ctx context.Context, cfg Config) error {
 }
 
 // RunNode serves the identity service and the node plugin on cfg.Endpoint
-// until ctx ends. It refuses to start without the node's identity files
-// (csi.md CSI13), reads its state back from sysfs, runs the follower beside
-// the server, and stops both at the end: the follower drops the discovery
-// connections when nothing is staged and leaves every connection in place
-// otherwise.
+// until ctx ends. It refuses to start without the node's identity files,
+// and on a kernel with native NVMe multipath off or no NVMe over Fabrics
+// device (csi.md CSI13), reads its state back from sysfs, runs the follower
+// beside the server, and stops both at the end: the follower drops the
+// discovery connections when nothing is staged and leaves every connection
+// in place otherwise.
 func RunNode(ctx context.Context, cfg Config) error {
 	oc := cfg.OsClient
 	if oc == nil {
@@ -136,6 +137,9 @@ func RunNode(ctx context.Context, cfg Config) error {
 	}
 	id, err := readIdentity(ctx, oc, nqnPath, idPath)
 	if err != nil {
+		return err
+	}
+	if err := checkHostKernel(ctx, oc); err != nil {
 		return err
 	}
 	deviceWait := cfg.DeviceWait

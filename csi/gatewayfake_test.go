@@ -312,15 +312,35 @@ func (g *fakeGateway) GetStoragePool(
 	if err := g.enter("GetStoragePool"); err != nil {
 		return nil, err
 	}
+	c, err := g.cluster(req.GetClusterName())
+	if err != nil {
+		return nil, err
+	}
 	p, err := g.livePool(req.GetClusterName(), req.GetSpName(), false)
 	if err != nil {
 		return nil, err
 	}
+	// The pool's conf as the gateway stores it: the stripe resolved, the
+	// cluster's when the create named none, and one id per slice.
+	bdev := proto.Clone(p.req.GetBdevConf()).(*pb.BdevConf)
+	if bdev == nil {
+		bdev = &pb.BdevConf{}
+	}
+	if bdev.GetDmRaid0Conf().GetStripeSize() == 0 {
+		bdev.DmRaid0Conf = &pb.DmRaid0Conf{
+			StripeSize: c.conf.GetBdevConf().GetDmRaid0Conf().GetStripeSize(),
+		}
+	}
+	slices := make([]uint64, p.req.GetSliceCnt())
+	for i := range slices {
+		slices[i] = uint64(i + 1)
+	}
 	return &pb.GetStoragePoolReply{
 		SpName: req.GetSpName(),
 		SpConf: &pb.SpConf{
-			Deleting: p.deleting,
-			BdevConf: p.req.GetBdevConf(),
+			Deleting:    p.deleting,
+			BdevConf:    bdev,
+			SliceIdList: slices,
 		},
 		SpRev: &pb.SpRev{Revision: p.rev},
 	}, nil

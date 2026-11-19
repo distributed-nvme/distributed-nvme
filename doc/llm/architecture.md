@@ -2282,6 +2282,9 @@ harmless. A migration destination takes its run before it zeroes
   they end did not answer: its resource reports `RES_STATUS_ERROR` with
   the command's output in `details`, cut to the row text cap (Live-state
   reporting), never an absence (`dnagent.md` SH15).
+  The CSI node plugin bounds its connects and its discovery reads the same
+  way, never a disconnect; a command the bound ends is a failed call, and a
+  connect is then judged by what sysfs shows (`csi.md` CSI14).
   `osclient.md`, RunCommand, owns the two signals and the caveat.
 
 ## `service Gateway` — RPC specifications
@@ -9067,11 +9070,40 @@ document and only pointed to here.
   deleted Node object or the out-of-service taint, while the host is cut off
   from Kubernetes and from a cdc the plugin follows, can leave the old host
   writing beside the host the volume moves to, and dnv reports no error for it.
-* **A cdc address an old attach named can hold every path drop on a host**
-  (`csi.md` CSI15). The address returns with the next stage of a volume
-  attached before the cdc moved, and until the node drops its discovery
-  connections (`csi.md` CSI16) or the plugin restarts, the plugin's passes drop
-  no path on that host, a fenced old primary's among them.
+* **A Kubernetes node's cdc list that leaves out a cdc drops the paths of
+  that cdc's volumes** (`csi.md` CSI15). The node plugin follows the cdcs of
+  its own configuration alone, so a list that leaves out every cdc of a range
+  that serves volumes staged on the node reads, once the listed cdcs answer,
+  as a detach of each of those volumes: the plugin drops their paths, and
+  their mounts do not survive it (A mount does not survive the loss of its
+  last path, below). A listed cdc whose range narrows does the same to the
+  volumes that leave its range while a node's list names no cdc that took
+  them. The list names a cdc of every range, and a change of it takes a
+  restart of both plugins, so a change of the cdcs starts the new cdcs with
+  their ranges while the old ones still serve every volume, puts them in the
+  list and restarts the plugins, and only then narrows an old cdc's range or
+  stops it (`operations.md`, Change the cdc addresses of the Kubernetes
+  driver).
+* **A kernel wait on a cntlr or a cdc that does not answer stalls every
+  stage on a Kubernetes node.** The node plugin runs its connects, its
+  discovery connects and log reads, and the last unstage's drop of the
+  discovery connections one at a time (`csi.md` CSI14, CSI15). The command
+  bound of its connects and reads ends a TCP connect and the wait for a
+  connection's first message, and no wait the kernel holds whatever the
+  signal: a Connect command to a cntlr or a cdc that takes the TCP connection
+  and does not answer, a discovery log read on a persistent discovery
+  connection whose cdc keeps the connection and does not answer, and the
+  delete of a connection to such a cdc. Each holds every stage and every pass
+  of the node for up to the kernel's admin timeout, a log read until the
+  error recovery of its connection ends it, once the connection's
+  keep-alive fails or, while the cdc still answers the keep-alives, once the
+  read's admin timeout passes; the distribution kernel the lab runs starts
+  that recovery half a keep-alive period late, where the kernel's own source
+  starts it at once, so such a wait comes to about a minute or a little
+  more. So a cdc twin whose machine stops without closing its connections
+  costs every node one such wait, besides holding the drops while it is
+  away, and a cntlr or a cdc process that answers keep-alives and nothing
+  else costs it once per pass.
 * **A mount does not survive the loss of its last path.** The node
   plugin's connect never gives up reconnecting, so its mount survives an
   outage of every path, the kernel holding its IO and reconnecting onto the
@@ -9122,9 +9154,8 @@ document and only pointed to here.
   blocking above) applies it only after the sides have fenced its legs,
   and until then answers IO errors on its still-optimized path to every
   host still on that path — a host of A stale discovery view keeps a
-  withdrawn path, A path that nothing following the discovery log manages
-  is never dropped or A cdc address an old attach named can hold every path
-  drop on a host, above, or one whose discovery-log follower drops the path
+  withdrawn path or A path that nothing following the discovery log manages
+  is never dropped, above, or one whose discovery-log follower drops the path
   later than the demotion hold ends (Failover). Such a host can also lose
   an acknowledged write (A failover while the old primary serves can lose
   an acknowledged write, above).

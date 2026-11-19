@@ -435,10 +435,16 @@ discovery log such as nvme-stas, which drops a failed-over primary's path; a
 path that no follower manages is never dropped.
 
 To build: Go 1.26.5 or newer. For the CSI driver: Kubernetes 1.34 or newer,
-k3s in its tutorial, and docker to build the driver's image; a Kubernetes node
-that mounts an xfs volume runs a kernel of 5.19 or newer, since the driver's
-image formats xfs with a filesystem feature that kernels before 5.19 cannot
-mount.
+k3s in its tutorial, and docker to build the driver's image. Every Kubernetes
+node that mounts dnv volumes runs a kernel of the 6.1 series or newer, the
+series whose xfs features the driver formats with, so that every such node
+mounts every xfs volume the driver makes; an xfs volume made by 0.1 needs
+5.19 or newer, which the same floor covers. Such a node also needs native
+NVMe multipath on and the module nvme-fabrics loaded at boot, which naming
+nvme-tcp in `/etc/modules-load.d` does, since nvme-tcp loads nvme-fabrics:
+the node plugin refuses to start without either, and names the fix
+([operations](operations.md#a-kubernetes-node-plugin-that-does-not-start)).
+The tutorials load nvme-tcp by hand, which lasts until a reboot.
 
 ## Status and limits of 0.1
 

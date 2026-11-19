@@ -1,7 +1,12 @@
-# The addresses the controller plugin needs (csi.md, Deployment): the gateway
-# it calls and the cdc endpoints it hands to the node plugin at attach. The
-# values below are placeholders; put the addresses of the dnv control plane
-# that serves this cluster before applying.
+# The addresses the two plugins need (csi.md, Deployment): the gateway the
+# controller plugin calls, and the cdc endpoints, the list each node plugin
+# follows and no other (csi.md CSI15), which the controller plugin also puts
+# in the publish context at attach. The list names a cdc of every range that
+# serves this cluster's volumes: a node drops the paths of a volume no listed
+# cdc lists. The plugins read this map only at their start, so a change of
+# it takes a restart of both. The values below are placeholders; put the
+# addresses of the dnv control plane that serves this cluster before
+# applying.
 apiVersion: v1
 kind: ConfigMap
 metadata:

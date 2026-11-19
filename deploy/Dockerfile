@@ -17,6 +17,12 @@ RUN apt-get update && \
         nvme-cli util-linux e2fsprogs xfsprogs coreutils && \
     rm -rf /var/lib/apt/lists/*
 
+# The node plugin formats xfs with the xfs maker's profile of the oldest
+# kernel series a Kubernetes node may run, 6.1 (csi.md CSI17; xfsProfile in
+# csi/mount.go): a base whose xfsprogs lacks it fails the build here rather
+# than every xfs stage.
+RUN test -f /usr/share/xfsprogs/mkfs/lts_6.1.conf
+
 COPY dnv-csi /usr/local/bin/dnv-csi
 
 ENTRYPOINT ["/usr/local/bin/dnv-csi"]

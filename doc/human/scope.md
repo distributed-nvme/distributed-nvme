@@ -1072,16 +1072,14 @@ Measured times are in [the introduction](introduction.md#status-and-limits-of-01
   connection to the cdc again, start stacd. State: procedure to write,
   the restart order.
 - **A host keeps a withdrawn path.** A path connected by hand is never
-  dropped. A cdc cut off from etcd keeps listing a failed-over primary. The
-  Kubernetes node plugin keeps a cdc address an old attach named. Such a
-  host writes to the fenced old primary and gets IO errors in the failover
+  dropped. A cdc cut off from etcd keeps listing a failed-over primary. Such
+  a host writes to the fenced old primary and gets IO errors in the failover
   window, and, in the cases section 5.1 lists, can lose a write it was
   told was done. While a host still holds the path of a cntlr that was
   lost, it also gets no path to the cntlr that replaces it, which takes the
   same controller id; the host must drop the old path first, as nvme-stas
   does once the cdc stops naming it (seen in the lab). State: procedure to
-  write for the first two; fix decided for the plugin, which takes the cdc
-  list from its deployment on every pass.
+  write.
 - **A Kubernetes mount waits for ever when no cntlr of its volume comes
   back.** The node plugin's connect keeps reconnecting through an outage
   of every path, however long, and the IO waits. So the mount survives a
@@ -1096,6 +1094,20 @@ Measured times are in [the introduction](introduction.md#status-and-limits-of-01
   last connection is gone, the mount keeps the dead device, and a later
   connect makes a new device that the mount does not follow, until the pod
   is deleted and made again. State: procedure to write; no fix.
+- **A Kubernetes node whose cdc list leaves out a cdc drops that cdc's
+  volumes.** The node plugin follows the cdc addresses of its own
+  configuration and no other. When the list leaves out every cdc that serves
+  some pools, the listed cdcs list no path for those pools' volumes, and the
+  plugin drops their paths on that node as after a detach: their mounts
+  fail, and their pods must be deleted and started again. A listed cdc that
+  is restarted to serve fewer pools does the same to the pools it gives up,
+  until the list names a cdc that took them. A change of the list reaches a
+  plugin only when it starts again. So the order of a change is: start the
+  new cdcs first, while the old ones still serve every pool; then change the
+  list and restart the plugins; only then make an old cdc serve fewer pools
+  or stop it. State: accepted; the list is configuration. Procedure written:
+  [the operations
+  doc](operations.md#change-the-cdc-addresses-of-the-kubernetes-driver).
 - **A cntlr replacement on a one-cntlr pool can cost the volume its path.**
   This happens when the old path's reconnect is refused with "do not
   retry" before the new path joins. State: accepted; use two cntlrs per
@@ -1205,8 +1217,10 @@ made before the stripe bound, for a pool made before the block bound, for
 a new volume refused for a thin id that holds data and for a pool left by
 a Kubernetes volume whose name held "..", a planned restart of an agent, a
 slow leg, the install of the udev rules on a node, the node check, the
-choice of a node's location, the gather of a node's state and a Kubernetes
-volume the node plugin will not format so far, and
+choice of a node's location, the gather of a node's state, a Kubernetes
+volume the node plugin will not format, a change of the cdc addresses of the
+Kubernetes driver and a Kubernetes node plugin that does not start so far,
+and
 gets the others as they are written. Every row with no tool
 or no doc carries its note. Section 6.1 and the tables give some short
 steps; the section "Steps known today" below gives the longer ones.
@@ -1274,8 +1288,10 @@ steps; the section "Steps known today" below gives the longer ones.
 | Connect a host with nvme-stas | nvme-stas | the all-in-one tutorial | done |
 | Connect a Kubernetes cluster | the CSI driver | the CSI tutorial | done |
 | Restart nvme-stas | none | this page, section 6.1; [dnv on one machine](tutorial_all_in_one.md) | procedure to write: stop stacd first, restart stafd, and start stacd once stafd holds its connection to the cdc again |
-| Recover a host that keeps a withdrawn path | none | none | procedure to write. Fix decided for the node plugin. |
+| Recover a host that keeps a withdrawn path | none | none | procedure to write |
 | Recover a Kubernetes mount after the loss of its last path | none; `nvme disconnect -n`, then delete the pod | this page, section 6.1 | procedure to write; no fix |
+| Change the cdc addresses of the Kubernetes driver | the config map and a restart of both plugins | the operations doc, Change the cdc addresses of the Kubernetes driver | procedure written; the Kubernetes suite changes the list of the controller plugin alone, and no suite restarts the node plugins with a new list |
+| Start a Kubernetes node plugin that refuses to start | none; the plugin's log names the fact and its fix | the operations doc, A Kubernetes node plugin that does not start | procedure written; not tested in a suite |
 | Recover a Kubernetes volume the node plugin will not format | none; the plugin formats only a volume whose first MiB reads as zeros; for data at the start, an operator reaches the volume through a pod that gets it as a raw block device, and zeroes the start by hand for a volume that never held data | the operations doc, A Kubernetes volume the node plugin will not format | procedure written; its steps for data at the start are not tested |
 | Recover from a fault only a host sees | disable the primary | this page, section 6.1 | procedure to write. Fix later. |
 
@@ -1316,8 +1332,12 @@ cluster it holds, and every CSI driver that talks to its gateways: its
 controller plugin, the part that calls the gateway, and its node plugins.
 A stopped node plugin leaves the connections and mounts of its volumes in place. Every binary is replaced,
 `dnvctl` included, and only then does any program start again. The workers
-stop first and start last. There is no rolling upgrade, since no message
-carries a build version, and two builds that differ in a message would
+stop first and start last. Before an upgrade from 0.1, check every
+Kubernetes node: the node plugin of a later release starts only with native
+NVMe multipath on and the module nvme-fabrics loaded, which nvme-tcp loads,
+and one that does not start unmounts nothing ([the operations
+doc](operations.md#a-kubernetes-node-plugin-that-does-not-start)). There is
+no rolling upgrade, since no message carries a build version, and two builds that differ in a message would
 misread each other with no error. A disk node's disk keeps the format it
 was made with across every upgrade, and each new build reads it as it is,
 unless the new release's notes say that the disks must be made again;
@@ -1382,6 +1402,22 @@ yourself: a disk the logs fill is one the stores and etcd cannot write.
 
 ## 8. Waits a host can see
 
+- **A cntlr or a cdc that does not answer holds up a Kubernetes node.** The
+  node plugin makes its connects and its reads of the cdcs' answers one at a
+  time and bounds each by a few seconds, but no signal ends some waits in
+  the kernel: the first command of a new connection, a read of a cdc's
+  answer on a connection that stays open, and the close of a connection to
+  a cdc that does not answer. A cntlr or a cdc that keeps its connection
+  open and does not answer holds up every new volume and every path change
+  on that node for about a minute, or a little more. A cdc whose machine
+  stops costs each Kubernetes node one such wait, until the kernel finds the
+  connection dead: 45 to 60 seconds on the Ubuntu kernels dnv is tested on,
+  which wait half a keep-alive period before they end a dead connection, and
+  30 to 45 seconds on a kernel without that delay. A cdc that still answers
+  the kernel's keep-alive messages and not the read costs the kernel's admin
+  timeout, 60 seconds at its default, plus that delay of 15 seconds, on each
+  try. A cntlr that does not answer the first command of a connection costs
+  up to the admin timeout. Not seen in the lab. State: accepted.
 - **A pool commit in a migration gap waits for the gap to end.** The gap is
   the time with no usable path from the primary to the moving leg. The gap
   ends by the disk nodes' steps or by a forced cancel. Measured at 32 slices: one
@@ -1793,9 +1829,6 @@ design:
   and every program caps how many commands and file operations it runs at
   once. State: accepted, by
   design.
-- **xfs volumes need kernel 5.19 or newer on the node.** State: accepted;
-  a requirement. Fix decided: the node plugin formats xfs for a stated
-  minimum node kernel.
 - **Build time at the widest slice count.** A primary's build at 32 slices
   is bounded by the time to start its commands. Short thresholds then
   start failover after failover. A connect that reaches a grown group's

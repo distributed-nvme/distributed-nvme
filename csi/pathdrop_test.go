@@ -282,7 +282,7 @@ func TestAStageWaitsForTheVolumesUnstage(t *testing.T) {
 	<-entered
 	staged := make(chan error, 1)
 	go func() {
-		staged <- n.follow.stage(ctx, nqn, []endpoint{mustEndpoint(fakeCdcA)})
+		staged <- n.follow.stage(ctx, nqn)
 	}()
 	select {
 	case err := <-staged:

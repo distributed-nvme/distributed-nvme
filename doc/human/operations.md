@@ -1821,3 +1821,165 @@ a Kubernetes volume or puts data at the start of one, and the steps of
 "Data at the start", the second persistent volume over the same handle
 above all, have not been run. The Kubernetes suite's volume case shows that
 a new volume is still formatted and that a raw block volume reaches its pod.
+
+## Change the cdc addresses of the Kubernetes driver
+
+Words: the **node plugin**, a **pod** and a **Kubernetes namespace** are as
+in [A Kubernetes volume the node plugin will not format](#a-kubernetes-volume-the-node-plugin-will-not-format).
+The **controller plugin** is the part of dnv's Kubernetes driver that calls
+the gateway; it runs in one pod. To **attach** a volume to a Kubernetes
+node, the controller plugin puts the node's host NQN in the allowed hosts of
+the volume's subsystem; to **detach** it, it empties that list, and the cdcs
+then list no path of the volume to any host. The **config map**
+`dnv-csi-config`, in the Kubernetes namespace `dnv-csi`, holds the cdc
+addresses both plugins start with: its key `cdcAddresses` is a list of
+`ip:port` joined by commas. A **range** is the part of the pools one cdc
+serves, set by its `--range` flag; two cdcs of one range are **twins**,
+which serve the same pools.
+
+When: a cdc moves to another address, a cdc is added or removed, or the
+pools are split among cdcs in another way.
+
+What dnv does alone: each node plugin follows the cdc addresses it read
+from the config map when it started, and no other. A change of the config
+map reaches a plugin only when the plugin starts again. A listed cdc that
+cannot be reached, or whose answer cannot be read, keeps the node plugin
+from dropping any path on its node, so a node keeps its paths while a cdc
+is away; the plugin logs `csi follower sync error` naming that cdc on each
+try. But when every listed cdc answers and none lists a path of a volume,
+as when the only listed cdc of the volume's pool no longer serves that
+pool, the node plugin takes it as a detach and drops the volume's paths. A node plugin that restarts
+leaves the paths and the mounts of its node in place.
+
+Safe steps, in this order:
+
+1. Start the new cdcs, each with its range, while the old cdcs still serve
+   every pool they served. Do not yet stop an old cdc or restart it with a
+   narrower range.
+2. Write the new list: every cdc address of every range that serves the
+   pools of this cluster, so that a cdc of the list serves each pool. Edit
+   the config map, `kubectl -n dnv-csi edit configmap dnv-csi-config`, or
+   apply the edited `deploy/config.yaml`.
+3. Start both plugins again:
+   `kubectl -n dnv-csi rollout restart deployment/dnv-csi-controller daemonset/dnv-csi-node`,
+   and wait for `kubectl -n dnv-csi rollout status daemonset/dnv-csi-node`.
+4. Check each node plugin: `kubectl -n dnv-csi logs <node plugin pod> -c dnv-csi`
+   shows `csi node starting` with the new list, and on a node that holds a
+   dnv volume, `csi discovery connection opened` for each new address, and
+   no `csi follower sync error` after it.
+5. Only now stop an old cdc, or restart it with its narrower range.
+6. On each node, drop the connection to an address the new list leaves out,
+   since the node plugin leaves a connection to an address outside its list
+   alone. As root on the node, `grep -H . /sys/class/nvme/nvme*/address`
+   shows the address of each NVMe connection; for the one at the old cdc
+   address whose `subsysnqn` file in the same folder reads
+   `nqn.2014-08.org.nvmexpress.discovery`, run `nvme disconnect -d nvmeN`
+   with its folder's name. It carries no volume's IO.
+
+Steps that can lose a mount: a cdc that a node's list names, restarted with
+a narrower range while no other cdc of that list serves the pools it gives
+up, as before step 4 ends on that node; and a list that leaves out the only
+cdcs of a range that serves volumes on a node. Once the listed cdcs answer,
+none of them lists a path for those volumes, which the node plugin takes as
+a detach: it drops their paths, their mounts fail, and their pods must be
+deleted and started again ([the scope page](scope.md), section 6.1). No
+data on the disks is lost, but a write a pod had not yet flushed is. A
+listed cdc that is stopped, by contrast, only holds the drops while it
+cannot be reached. Keep the order of the steps, and check the new list
+against every range before step 3.
+
+When to stop: after step 3 a node logs `csi follower sync error` naming a
+cdc of the list on every try: the address is wrong or the cdc is down. Fix
+the list or the cdc before step 5 and before any volume fails over.
+
+Tested: unit tests of the node plugin check that it follows its own list
+alone, and not an address the controller plugin passes at attach; that it
+reads its volumes back at a restart; and that it leaves a connection to an
+address outside its list alone. The Kubernetes suite's failover case changes
+the list in the config map and restarts the controller plugin alone, so that
+every attach passes on a dead cdc address, and checks that the node still
+drops its path to the old primary. No suite case restarts the node plugins
+with a new list or runs steps 1, 4, 5 and 6.
+
+## A Kubernetes node plugin that does not start
+
+Words: the **node plugin**, a **pod** and a **Kubernetes namespace** are as
+in [A Kubernetes volume the node plugin will not format](#a-kubernetes-volume-the-node-plugin-will-not-format),
+and **attach** and **detach** as in [Change the cdc addresses of the
+Kubernetes driver](#change-the-cdc-addresses-of-the-kubernetes-driver). Native NVMe
+**multipath** is the kernel's joining of a host's paths to one volume into
+one device, which the setting `nvme_core.multipath` switches on. The **NVMe
+over Fabrics device**, `/dev/nvme-fabrics`, is the file through which every
+NVMe-oF connection of the host is made; the kernel module nvme-fabrics makes
+it, and the module nvme-tcp loads nvme-fabrics with it.
+
+Symptom: `kubectl -n dnv-csi get pods -o wide` shows the node plugin pod of
+a node in `CrashLoopBackOff`, or its `dnv-csi` container restarting. Pods
+on that node that use a dnv volume stay in `ContainerCreating`; pods that
+already run keep their volumes.
+
+Confirm: `kubectl -n dnv-csi logs <pod> -c dnv-csi --previous` ends with the
+plugin's refusal, which names each fact it read wrong and its fix:
+
+1. "the node's identity file ...": the host NQN or host id file is missing,
+   empty or holds no host NQN. The refusal names both fixes of step 1.
+2. "native NVMe multipath is off" or "native NVMe multipath is not built
+   into this kernel": without multipath, the loss of one path of a volume
+   takes the device its mount uses.
+3. "the NVMe over Fabrics device is not there": nvme-fabrics is not loaded.
+4. "... cannot be read: ...": a read of the kernel's facts failed.
+
+The plugin does not ask for nvme-tcp itself: the kernel loads it at the
+first connect.
+
+What dnv does alone: nothing; the worker reads no Kubernetes node.
+Kubernetes starts the container again and again, waiting longer each time,
+up to five minutes between tries.
+
+Safe steps:
+
+1. Fix what the refusal names, as root on the node.
+   - The identity files, on a node that holds a dnv volume, connected as
+     `nvme list-subsys` shows: write back the host NQN and host id its
+     connections carry, which the kernel shows for each connection:
+     `cat /sys/class/nvme/nvme*/hostnqn 2>/dev/null | sort -u` prints one
+     host NQN, to put in `/etc/nvme/hostnqn`, and
+     `cat /sys/class/nvme/nvme*/hostid 2>/dev/null | sort -u` one host id,
+     to put in `/etc/nvme/hostid`. Stop if either prints more than one line.
+   - The identity files, on a node that holds no dnv volume and has no NVMe
+     connection: `nvme gen-hostnqn > /etc/nvme/hostnqn` and
+     `uuidgen > /etc/nvme/hostid`, only for a file that is missing or empty.
+   - Multipath: add `nvme_core.multipath=Y` to the kernel's command line and
+     reboot the node; a kernel built without native NVMe multipath must be
+     replaced.
+   - The fabrics device: `modprobe nvme-tcp`, and name nvme-tcp in a file
+     under `/etc/modules-load.d`, such as `/etc/modules-load.d/nvme-tcp.conf`,
+     so that it loads at boot.
+2. Delete the node plugin pod, `kubectl -n dnv-csi delete pod <pod>`, so
+   that Kubernetes starts it at once rather than after its wait. Its log
+   then shows `csi node serving`.
+
+Before an upgrade from 0.1, whose node plugin started without these checks,
+check every Kubernetes node: `cat /sys/module/nvme_core/parameters/multipath`
+prints `Y`, `/sys/class/misc/nvme-fabrics` exists, and nvme-tcp is named under
+`/etc/modules-load.d`. A node plugin that refuses to start leaves the paths
+and the mounts of its node in place, but it unmounts nothing: a pod on that
+node that stops stays `Terminating`, and a `kubectl drain` of the node, which
+moves its pods to other nodes, waits, until the plugin starts.
+
+Steps that can lose data: new identity files on a node that holds dnv
+volumes. The host NQN is the node's name to dnv: an attach lets that name
+alone into the volume's subsystem, and the node's connections carry it. A
+node plugin that starts under a new host NQN hears from the cdcs no path of
+the volumes attached under the old one, takes that as a detach of each, and
+drops all their paths: their mounts fail, and writes their pods had not
+flushed are lost. Make new identity files only on a node with no NVMe
+connection, after a `kubectl drain` of the node has moved its pods away.
+
+When to stop: the log names none of these facts, the plugin still refuses
+after the fix, or the node's connections carry more than one host NQN.
+Ask for help.
+
+Tested: unit tests of the node plugin check each refusal, and that the
+plugin starts on a node where nvme-tcp is not loaded. No suite case starts
+the plugin on a node that lacks one of these.

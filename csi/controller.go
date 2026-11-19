@@ -228,7 +228,7 @@ func (c *controller) CreateVolume(
 		return nil, fromGateway("CreateStoragePool", err)
 	}
 	if err != nil {
-		if err := c.checkPool(ctx, p, name); err != nil {
+		if err := c.checkPool(ctx, p, name, unit); err != nil {
 			return nil, err
 		}
 	}
@@ -288,9 +288,11 @@ func (c *controller) clusterConf(
 // checkPool reads back the pool a repeated create found under the volume's
 // name (csi.md CSI9): one still being deleted is ABORTED, so the caller
 // retries once the drain has removed the name, and one of another
-// redundancy is ALREADY_EXISTS. Its cntlr count is not compared, since an
+// redundancy, of a slice count other than one or of a stripe other than
+// the cluster's, unit, is ALREADY_EXISTS: the volume's size is counted in
+// units of one slice's stripe. Its cntlr count is not compared, since an
 // operator may add or delete cntlrs.
-func (c *controller) checkPool(ctx context.Context, p params, name string) error {
+func (c *controller) checkPool(ctx context.Context, p params, name string, unit uint64) error {
 	gctx, cancel := c.gwCtx(ctx)
 	reply, err := c.gw.GetStoragePool(gctx, &pb.GetStoragePoolRequest{
 		ClusterName: p.cluster,
@@ -308,10 +310,20 @@ func (c *controller) checkPool(ctx context.Context, p params, name string) error
 		return status.Errorf(codes.Aborted,
 			"volume %q is still being deleted; retry later", name)
 	}
-	_, none := reply.GetSpConf().GetBdevConf().GetRedundConf().GetRedunKind().(*pb.RedundConf_RedundNone)
+	conf := reply.GetSpConf()
+	_, none := conf.GetBdevConf().GetRedundConf().GetRedunKind().(*pb.RedundConf_RedundNone)
 	if none != (p.redundancy == redundancyNone) {
 		return status.Errorf(codes.AlreadyExists,
 			"volume %q exists with another redundancy", name)
+	}
+	if n := len(conf.GetSliceIdList()); n != 1 {
+		return status.Errorf(codes.AlreadyExists,
+			"volume %q exists with %d slices, not 1", name, n)
+	}
+	if stripe := conf.GetBdevConf().GetDmRaid0Conf().GetStripeSize(); stripe != unit {
+		return status.Errorf(codes.AlreadyExists,
+			"volume %q exists with a stripe of %d bytes, not the cluster's %d",
+			name, stripe, unit)
 	}
 	return nil
 }
@@ -573,8 +585,8 @@ func (c *controller) poolDeletingOrGone(
 // and detach). The node already alone in the list is done; another node in
 // it is FAILED_PRECONDITION, the spec's word for a volume published
 // elsewhere under single-node access. The publish context carries what the
-// node plugin needs: the subsystem NQN, the namespace uuid and the cdc
-// addresses.
+// node plugin needs, the subsystem NQN and the namespace uuid, and the cdc
+// addresses, which the node plugin does not read (csi.md CSI10).
 func (c *controller) ControllerPublishVolume(
 	ctx context.Context,
 	req *csi.ControllerPublishVolumeRequest,
