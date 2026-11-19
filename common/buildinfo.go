@@ -13,8 +13,10 @@ var readBuildInfo = debug.ReadBuildInfo
 // Go stamps into it, the one `go version -m` prints — the tag for a release
 // build, a pseudo-version naming the commit for any other build from a
 // checkout, with "+dirty" when that checkout had changes — and "(devel)"
-// when the build carries none. Every program prints it for --version and
-// logs it in its start record; no message carries it.
+// when the build carries none. Every program prints it for --version, every
+// daemon logs it in its start record, and the CSI identity service reports
+// it as the driver's vendor version (csi.Version); no message between dnv
+// programs carries it.
 func BuildVersion() string {
 	info, ok := readBuildInfo()
 	if !ok || info == nil || info.Main.Version == "" {

@@ -282,16 +282,18 @@ record is per connection rather than in the host's view because it names
 the address the connection reached, and one host can reach one instance at
 two addresses while holding one view (DS7). The address comes from the
 connection, since a listener on a wildcard address has no address a host
-can dial, and nvme-stas drops a record that names a wildcard or no
-address; behind address translation (a published container port, a
-Kubernetes service) the connection's local address is the cdc's own, which
-the host may not reach, and that costs nothing, since no host connects
-through this record. EFLAGS departs from nvmet, whose record sets no flag:
-a host that keeps a discovery connection only to a controller that
-advertises explicit persistent connections would otherwise drop it, and
-DS6's notices need that connection (NP9 names the specs' rule the flag
-meets). TREQ says what this controller honors (NP4), as nvmet's own record
-says it of nvmet.
+can dial, and nvme-stas drops a record that names a wildcard or no address;
+behind address translation (a published container port, a Kubernetes
+service) the connection's local address is the cdc's own, which the host
+may not reach, and that costs nothing, since no host connects through this
+record. EFLAGS departs from nvmet, whose record sets no flag: a host that
+keeps a discovery connection only to a controller that advertises explicit
+persistent connections would otherwise drop it, and DS6's notices need that
+connection; such a host gets them only when it sets the
+discovery-log-change bit of the Asynchronous Event Configuration itself, as
+a Linux host does, since the cdc leaves that bit clear at Connect where the
+specs would have it set for the connection the flag claims (NP9). TREQ says
+what this controller honors (NP4), as nvmet's own record says it of nvmet.
 
 ## The etcd watcher
 

@@ -199,12 +199,13 @@ the reason. Section 5 lists the data-loss defects known today.
 2. **A pool without RAID loses a disk or its disk node.** A group has one
    leg there. The data of the pool is gone. No repair exists for such a
    leg. A migration can move a side that still reads but is sick. An
-   operator must start that migration. No migration moves a side of a
-   clone meta group, the group of the pool made for one clone, nor a side
-   of a pool made before dnv bounded the data block at 4 MiB (section 10):
-   such a pool's volumes move to a new pool instead. In a RAID1
-   pool a repair replaces such a leg; in a pool without RAID nothing can
-   move it today. State: fix later, small.
+   operator must start that migration. No migration moves a side of a clone
+   meta group, the group of the pool made for one clone, nor a side of a
+   pool whose data block is above 4 MiB, which only a pool made before dnv
+   bounded the data block at 4 MiB can have (section 10): such a pool's
+   volumes move to a new pool instead. In a RAID1 pool a repair replaces
+   such a leg; in a pool without RAID nothing can move it today. State: fix
+   later, small.
 3. **A clone loses its whole source pool or its whole destination pool
    before the copy is complete.** With the source gone, the copy stops.
    A host's read of a block not yet copied waits or fails. With the
@@ -517,6 +518,18 @@ No case is known today.
   start may start the group from it without the operator's force. State:
   accepted: a later build cannot tell such a leg apart. Not seen in the
   lab.
+- **A clone an older build stored with namespace number 0 copies the first
+  namespace of its source.** Silent. A clone names the namespace it copies
+  by the number the source subsystem gives it, and dnvctl sends 0 when the
+  operator leaves the number out. A build from before the gateway refused 0
+  could store such a clone. The primary reads 0 as any namespace, so such a
+  clone copies whichever namespace the source subsystem lists first. A
+  transfer's subsystem holds one namespace, so a clone of a dnv volume
+  copies the right one, but a source with several namespaces can give the
+  volume the data of another namespace. A clone stored with the number
+  0xFFFFFFFF, which names no namespace, waits for ever. No call changes the
+  number: the clone is deleted and made again. State: accepted. Read in the
+  code, not seen in the lab.
 - **A change without a revision token overwrites another operator's
   change.** A revision token is the revision the caller last read, which
   dnvctl sends with `--rev`; the gateway refuses the change if the
@@ -902,6 +915,25 @@ Measured times are in [the introduction](introduction.md#status-and-limits-of-01
   operator's forced start from the new leg waits too, for the leg of the
   list that is not the repair's bad leg. State: procedure written, one line in
   [the forced-start guide](operations.md#the-forced-start-guide). Not seen in the lab.
+- **After a forced start, a leg of the old identity can keep the group
+  down.** A forced start gives the array a new identity, the number md
+  gives each array, and leaves the open repair's bad leg with the old one.
+  The primary does not add that leg back, since it may hold data the array
+  lacks. Once the repair is cancelled, the next assembly, as after a
+  failover or a restart, finds legs of two identities and leaves the group
+  down, its row in error. The worker does not replace such a leg by itself,
+  since the leg has no health epoch. The operator replaces it with a
+  repair: with no flag while the array runs, and with the flag
+  `--force-undecided` once the group is down, since only the operator can
+  tell which identity is current, and a wrong choice serves the older copy
+  and loses the writes made since. The gateway asks for that flag only
+  when the primary's report names the leg's identity as undecided: while
+  the primary's agent is still starting, it takes a leg that has a health
+  epoch without the flag, and once that repair finishes the worker may
+  delete the old leg when it is old enough.
+  State: procedure written,
+  [a leg of another identity that the primary does not add](operations.md#a-leg-of-another-identity-that-the-primary-does-not-add),
+  not run on real agents. Not seen in the lab.
 - **A primary that keeps a leaving member is failed over, and the new
   primary leaves that member out.** The primary never fails a member that
   is leaving the group while no member that stays is in sync on a working
@@ -1585,25 +1617,25 @@ design:
   when either pool was created before the bound above with more than four
   slices of the default stripe. State: accepted; a device layer that keeps
   the clone's best IO size at the destination's is fix later.
-- **A pool made before dnv bounded the block keeps a block above 4 MiB,
-  and no migration moves its legs.** During a migration the device on the
-  new side's disk node that pulls the data from the old side tells the
+- **A pool made before dnv bounded the block can keep a block above 4 MiB,
+  and then no migration moves its legs.** During a migration the device on
+  the new side's disk node that pulls the data from the old side tells the
   controller node a best IO size of at least one block, so the controller
-  node's path to it can carry commands up to the block, above what the
-  disk node's kernel takes. Read from the kernel's code, not seen in the
-  lab. So a cluster or pool create that names a block above 4 MiB is
-  refused with the reason. The default block is 1 MiB. A pool made before
-  this bound keeps its block, since a pool's layout never changes: the
-  gateway refuses a migration in it, as it refuses a clone into it. A
-  repair replaces only a leg that failed, or one the primary keeps out
-  for another identity, so a leg of such a pool that still works cannot
-  be moved where it is, not to leave a slow disk and
-  not to empty a disk node. The way out is to move the pool's volumes to
-  a new pool by a transfer and a clone, which the old block does not
-  stop. A cluster made before the bound with a block above 4 MiB refuses
-  every pool create that names no block, every volume create of the CSI
-  driver on it included, since that driver names no block. State:
-  accepted; procedure written,
+  node's path to it can carry commands up to the block, above what the disk
+  node's kernel takes. Read from the kernel's code, not seen in the lab. So
+  a cluster or pool create that names a block above 4 MiB is refused with
+  the reason. The default block is 1 MiB. A pool made before this bound
+  keeps its block, since a pool's layout never changes. When that block is
+  above 4 MiB, the gateway refuses a migration in the pool, as it refuses a
+  clone into it. An operator's repair replaces only a leg that failed, or
+  one the primary keeps out for another identity, so an operator cannot
+  move a leg of such a pool that still works, not to leave a slow disk and
+  not to empty a disk node. The way out is to move the pool's volumes to a
+  new pool by a transfer and a clone, which the old block does not stop. A
+  cluster made before the bound with a block above 4 MiB refuses every pool
+  create that names no block, every volume create of the CSI driver on it
+  included, since that driver names no block. State: accepted; procedure
+  written,
   [a pool made before the block bound](operations.md#a-pool-made-before-the-block-bound).
 - **A cluster made before dnv held the extent size to whole 4 KiB keeps
   its extent size.** A cluster create refuses an extent size that is not

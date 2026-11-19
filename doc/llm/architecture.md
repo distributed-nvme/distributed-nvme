@@ -94,8 +94,9 @@ through viper (Components: invocation reference):
   (Clones, Migrations), behind `ForceStartGroup`'s check that the
   group's array does not run (Repairs) and behind `GetThinDeviceBitmap`'s
   check that the volume's namespaces are parked, `GetThinDeviceBm` for
-  that read (Bitmap reads), and `GetCntlrInfo` and `InspectGrp` behind
-  `InspectGroup` (Repairs). The worker never calls `Get*Info`: it watches through
+  that read (Bitmap reads), `GetCntlrInfo` and `InspectGrp` behind
+  `InspectGroup`, and `GetCntlrInfo` behind `CreateRepair`'s read of the
+  bad leg's row (Repairs). The worker never calls `Get*Info`: it watches through
   `Check*` (Check streams, dn / cn roles). `gateway.md` owns it.
 * `dnv-worker` is one binary with the roles `dn`, `cn` and `sp`, any subset
   per instance. It watches the revision keys in etcd, shards the work by
@@ -3678,24 +3679,25 @@ Migration.
 
 **CreateMigration** — Errors, in this order, every one but the last
 answered before the scan for a DN: `RESOURCE_EXHAUSTED` at
-`MaxMigrCntPerSp`; `ALREADY_EXISTS` for a name already in
-`migr_name_list`, so a re-send of a created migration hears it;
-`FAILED_PRECONDITION` when the pool's `data_block_size` is over
-`MaxNvmeTcpCmdBytes`, which only a pool stored before the block's bound has
-(Common validation), the message naming the block and the bound;
-`NOT_FOUND` when `src_side_id` is in no leg of the SP
-— a repair's new leg is no leg of its group before
-its finish, and a retired leg is no leg, so their sides are not found
-(Repairs, Retired legs); `FAILED_PRECONDITION` when it is a side of a clone
-meta group, which no migration moves (Clones), or of the bad leg of a
-repair, which the repair replaces (Repair), or when the owning leg already
-has two sides (a migration is already running on it); `FAILED_PRECONDITION`
-when `cntlid_slot_list` holds no slot different from the source side's
-(cntlid slots: such an SP cannot migrate this leg at all; `gateway.md`,
-Migrations); `RESOURCE_EXHAUSTED` when no DN is a candidate
-(Per-operation allocation) — a DN without room in its clone-metadata area
-for the migration's units is no candidate, and a refusal for want of that
-room says no DN has metadata room (Metadata units).
+`MaxMigrCntPerSp`; `ALREADY_EXISTS` for a name already in `migr_name_list`,
+so a re-send of a created migration hears it rather than a refusal of its
+leg or a scan's shortfall, unless that migration filled the pool to
+`MaxMigrCntPerSp`, when the ceiling answers first; `FAILED_PRECONDITION`
+when the pool's `data_block_size` is over `MaxNvmeTcpCmdBytes`, which only
+a pool stored before the block's bound has (Common validation), the message
+naming the block and the bound; `NOT_FOUND` when `src_side_id` is in no leg
+of the SP — a repair's new leg is no leg of its group before its finish,
+and a retired leg is no leg, so their sides are not found (Repairs, Retired
+legs); `FAILED_PRECONDITION` when it is a side of a clone meta group, which
+no migration moves (Clones), or of the bad leg of a repair, which the
+repair replaces (Repair), or when the owning leg already has two sides (a
+migration is already running on it); `FAILED_PRECONDITION` when
+`cntlid_slot_list` holds no slot different from the source side's (cntlid
+slots: such an SP cannot migrate this leg at all; `gateway.md`,
+Migrations); `RESOURCE_EXHAUSTED` when no DN is a candidate (Per-operation
+allocation) — a DN without room in its clone-metadata area for the
+migration's units is no candidate, and a refusal for want of that room says
+no DN has metadata room (Metadata units).
 
 Action: allocate one DN (Per-operation allocation). The deciding STM drops a
 pick when the group, as that STM reads it, occupies a DN the scan's read of
@@ -3833,25 +3835,31 @@ allow is refused `FAILED_PRECONDITION` with the stage in its message
 
 A repair whose `rep_name` starts with the reserved prefix (Common
 validation) is the sp worker's repair; any other is an operator's repair.
-Four rules tell them apart. First, `CreateRepair`'s
-level gate: it refuses a worker's repair at an `sp_level` at or above
-`SP_LEVEL_NO_THINPOOL`, and an operator's only at or above
-`SP_LEVEL_NO_REDUND`. Reason: the worker's create is a reaction, and no
-reaction runs at the levels where reactions stop (Automatic reactions); an
-operator's own call is no reaction, and it needs only a group array for
-the new leg to join, which every level below `SP_LEVEL_NO_REDUND` builds
-(SpLevel). Second, `CreateRepair` refuses a worker's repair while its
-group's `operator_in_charge` flag is set (`model.ReasonGrpOperatorInCharge`),
-and never refuses an operator's repair for the flag. Reason: the sp
-worker's pass holds its create under the flag (`dnv-worker.md` AR8), and a
-pass built from a snapshot older than the flag must not slip through.
-Third, a worker's repair always takes a fresh new leg, and may take one
-while its group is at the retired-leg bound. Fourth, the finish of a
-worker's repair at that bound gives back the group's oldest retired leg
-that does not carry `keep`, and is refused when every one carries it
-(FinishRepair). The other calls that address a repair take a pool at
-every level and a repair of either kind, so that an operator can still
-finish, abort or cancel any repair at the levels where reactions stop.
+Five rules tell them apart. First, `CreateRepair`'s level gate: it refuses
+a worker's repair at an `sp_level` at or above `SP_LEVEL_NO_THINPOOL`, and
+an operator's only at or above `SP_LEVEL_NO_REDUND`. Reason: the worker's
+create is a reaction, and no reaction runs at the levels where reactions
+stop (Automatic reactions); an operator's own call is no reaction, and it
+needs only a group array for the new leg to join, which every level below
+`SP_LEVEL_NO_REDUND` builds (SpLevel). Second, `CreateRepair` refuses a
+worker's repair while its group's `operator_in_charge` flag is set
+(`model.ReasonGrpOperatorInCharge`), and never refuses an operator's repair
+for the flag. Reason: the sp worker's pass holds its create under the flag
+(`dnv-worker.md` AR8), and a pass built from a snapshot older than the flag
+must not slip through. Third, a worker's repair always takes a fresh new
+leg, and may take one while its group is at the retired-leg bound. Fourth,
+the finish of a worker's repair at that bound gives back the group's oldest
+retired leg that does not carry `keep`, and is refused when every one
+carries it (FinishRepair). Fifth, the bad leg's health: a worker's repair
+may take a bad leg with no health epoch when the primary's report names
+md's bad-block ranges on its member (The md check), and an operator's
+repair one whose row the report gives an identity reason, whatever its
+epoch (an undecided one only with `force_undecided`), which its create
+records as `keep_bad_legs` so that the finish retires the leg with `keep`
+(A leg of another identity). The other calls that address a repair take a
+pool at every level and a repair of either kind, so that an operator can
+still finish, abort or cancel any repair at the levels where reactions
+stop.
 
 An operator takes a group over from the worker with the group's
 `operator_in_charge` flag (UpdateGroupOperatorInCharge): they set the flag,
@@ -3936,34 +3944,39 @@ a group whose array does not run waits in CREATED until it runs, and the
 operator aborts it if they change their mind (Repair).
 
 **A leg of another identity.** `CreateRepair` reads the primary's latest
-report (`GetCntlrInfo`, which answers from the agent's observation) for
-the bad leg's row, whatever its health epoch, after the planning read and
+report (`GetCntlrInfo`, which answers from the agent's observation) for the
+bad leg's row, whatever its health epoch, after the planning read and
 before the op, every round of its candidate unit (`gateway.md` GW9); the
-new leg's refusals then come after the health's, as the order above
-says. A leg the running array does not take back for another identity
-reads with `RES_REASON_OTHER_IDENTITY` and carries no health epoch
-(`cnagent.md` CN12): the running array tells which identity is current,
-so the leg is taken as the bad leg with no flag, and the repair gives the
-group a fresh copy in its place; the leg keeps its own copy on its side,
-retired at the finish with `keep`, which the create records on the repair
+new leg's refusals then come after the health's, as the order above says. A
+leg the running array does not take back for another identity reads with
+`RES_REASON_OTHER_IDENTITY` and carries no health epoch (`cnagent.md`
+CN12): the running array tells which identity is current, so the leg is
+taken as the bad leg with no flag, and the repair gives the group a fresh
+copy in its place; the leg keeps its own copy on its side, retired at the
+finish with `keep`, which the create records on the repair
 (`keep_bad_legs`), so neither the retire timer nor a worker's finish at the
-bound gives it back (Retired legs). A leg of an assembly's two identities reads with
-`RES_REASON_IDENTITY_UNDECIDED`: the agent cannot tell which identity is
-current, and a repair moves the leg to the bad leg's tier, which an
-assembly decides by last (`cnagent.md` CN12), so the array assembles from
-the other leg's copy and serves that copy's data. Such a leg is taken only
-with `force_undecided`, the operator's word that it is the stale copy, and
-whatever its epoch: an epoch from a short fault after a forced start must
-not let the other copy win unasked. The record keeps nothing of the flag,
-since `force`, which it keeps, makes an abort copy over the bad leg, while
-an operator who aborts such a repair wants the leg back as it is. A report
-that cannot be read — a pool with no primary, or an agent that does not
-answer — leaves the record's answer, so a dead leg's repair never waits on
-a silent primary; the refusal of a healthy leg then says the report was
-not read. The report is read outside the op's transaction (Known limits).
-Reason: no record holds a leg's identity, only the primary's reading of
-its superblock, and an operator's repair is the one way to give such a
-group its redundancy back without a forced start.
+bound gives it back (Retired legs). A leg of an assembly's two identities
+reads with `RES_REASON_IDENTITY_UNDECIDED`: the agent cannot tell which
+identity is current, and a repair moves the leg to the bad leg's tier,
+which an assembly decides by last (`cnagent.md` CN12), so the array
+assembles from the other leg's copy and serves that copy's data. Such a leg
+is taken only with `force_undecided`, the operator's word that it is the
+stale copy, and whatever its epoch: an epoch from a short fault after a
+forced start must not let the other copy win unasked. The record keeps
+nothing of the flag, since `force`, which it keeps, makes an abort copy
+over the bad leg, while an operator who aborts such a repair wants the leg
+back as it is. A report that cannot be read — a pool with no primary, or an
+agent that does not answer — leaves the record's answer, so a dead leg's
+repair never waits on a silent primary; the refusal of a healthy leg then
+says the report was not read. A reply that carries no `CntlrInfo`, as from
+an agent still in its startup pass, or no row for the leg gives no reason
+and leaves the record's answer too, with no word of it in a refusal; a leg
+of two identities with a health epoch is then taken with no
+`force_undecided` and retired without `keep` (Known limits). The report is
+read outside the op's transaction (Known limits). Reason: no record holds a
+leg's identity, only the primary's reading of its superblock, and an
+operator's repair is the one way to give such a group its redundancy back
+without a forced start.
 
 Action. A new leg from a retired leg allocates nothing: the retired leg's
 record and its entries in the group's and the pool's lists go, and its leg —
@@ -7166,28 +7179,28 @@ stops — its gateways, workers and cdc instances, the agents of every
 cluster it holds, and the controller plugin and the node plugins of every
 CSI driver that talks to its gateways, a stopped node plugin leaving the
 connections of its staged volumes in place (`csi.md` CSI16), and their
-mounts, which a stop never touches, so that those volumes serve through
-the upgrade — every binary is
-replaced by the one of the new build, `dnvctl` included, and only then
-does any program start again. The
-installation is the unit, not a cluster, because its gateways, workers and
-cdc instances serve every cluster it holds (`dnv-worker.md` SW6; `cdc.md`
-DS1). etcd is no dnv program and keeps its data, and before any program of
-the new build starts, it runs as that build requires (Components: invocation
-reference). There is no rolling upgrade, and no two builds ever run in one
-etcd installation at once. Reason: no message carries a build version and
-nothing checks one, so two builds that differ in a message would misread
-each other with no error — a field one of them lacks is ignored when it
-arrives and read as zero when it is missing; with one build at a time, only
-what the nodes and etcd hold, and what the CSI plugins handed Kubernetes —
-a volume's id and its publish and volume contexts (`csi.md`, The volume
-model, CSI10) — crosses from one build to the next, and the rules below
-keep it readable. Nothing checks a build: neither the worker nor the gateway
-asks an agent for its version, and no program refuses a peer of another
-build. Reason: an agent that refused a worker for its build would read to
-that worker as a node that misses its rounds, and the worker's reactions
-would fail over primaries and replace cntlrs as for a failed node
-(Automatic reactions); the operator checks the build instead, below.
+mounts, which a stop never touches, so that those volumes serve through the
+upgrade — every binary is replaced by the one of the new build, `dnvctl`
+included, and only then does any program start again. The installation is
+the unit, not a cluster, because its gateways, workers and cdc instances
+serve every cluster it holds (`dnv-worker.md` SW6; `cdc.md` DS1). etcd is
+no dnv program and keeps its data, and before any program of the new build
+starts, it runs as that build requires (Components: invocation reference).
+There is no rolling upgrade, and no two builds ever run in one etcd
+installation at once. Reason: no message between dnv programs carries a
+build version and nothing checks one, so two builds that differ in a
+message would misread each other with no error — a field one of them lacks
+is ignored when it arrives and read as zero when it is missing; with one
+build at a time, only what the nodes and etcd hold, and what the CSI
+plugins handed Kubernetes — a volume's id and its publish and volume
+contexts (`csi.md`, The volume model, CSI10) — crosses from one build to
+the next, and the rules below keep it readable. Nothing checks a build:
+neither the worker nor the gateway asks an agent for its version, and no
+program refuses a peer of another build. Reason: an agent that refused a
+worker for its build would read to that worker as a node that misses its
+rounds, and the worker's reactions would fail over primaries and replace
+cntlrs as for a failed node (Automatic reactions); the operator checks the
+build instead, below.
 
 No build replaces a newer one: a downgrade is not supported, and it can
 lose data. An older build ignores the fields a newer one added, in what it
@@ -7332,14 +7345,14 @@ makes.
 The dnv disk format is the one stored layout with a version of its own,
 which its header carries ([D13]). A field joins it with no new version only
 where its zero is right in what an older build wrote, as in every other
-stored message; any other change takes a new version. A disk keeps the
-version it was formatted with for its whole life, so a build reads every
-version a disk the build before it served can carry, or its release notes
-say that disks are made again. A dn agent refuses a disk of a version its
-build does not read and never formats it over, and a rewrite of the volume
-table keeps the fields its build does not know (`dnagent.md` DN5). So a
-build takes over every disk the build before it served, however many
-upgrades ago it was formatted, unless its release notes say otherwise.
+stored message; the other changes [D13] names take a new version. A disk
+keeps the version it was formatted with for its whole life, so a build
+reads every version a disk the build before it served can carry, or its
+release notes say that disks are made again. A dn agent refuses a disk of a
+version its build does not read and never formats it over, and a rewrite of
+the volume table keeps the fields its build does not know (`dnagent.md`
+DN5). So a build takes over every disk the build before it served, however
+many upgrades ago it was formatted, unless its release notes say otherwise.
 
 ## dnv-cdc
 
@@ -8200,22 +8213,28 @@ document and only pointed to here.
   refuses every pool create that names no block, the CSI driver's
   included.
 * **A record stored before a request rule keeps what the rule refuses.**
-  No call changes a cluster's extent size, a node's address or a
-  namespace's `ns_idx`, and no reader judges them again (Common
-  validation). An extent size that is not a whole number of sectors
+  No call changes a cluster's extent size, a node's address, a namespace's
+  `ns_idx` or a clone's `src_ns_idx`, and no reader judges them again
+  (Common validation). An extent size that is not a whole number of sectors
   builds a side of one run of extents, but a side of two or more runs can
   floor its runs to sectors on their own and sum a sector or more short of
   the side, as the size and the runs' extent counts fall, so the disk
   node's upper tables of the side are longer than it, which the kernel
-  refuses, and the side is never provisioned. A size that is a whole
-  number of sectors but not of `DnExtSizeUnit` builds every side, its runs
-  off the 4 KiB physical blocks. A node whose `tr_type` is not
-  `tcp` cannot be connected to, as a disk node, and has its discovery
-  entries skipped, as a controller node (`cdc.md` DS3), as has one whose
-  `adr_fam` is neither `ipv4` nor `ipv6`; such a node is deleted and
-  created again. A namespace at `NvmeNsidAll` is made by no nvmet, so its
-  rows read an error until `DeleteNamespace` removes it. Read in the code,
-  not seen in the lab.
+  refuses, and the side is never provisioned. A size that is a whole number
+  of sectors but not of `DnExtSizeUnit` builds every side, its runs off the
+  4 KiB physical blocks. A node whose `tr_type` is not `tcp` cannot be
+  connected to, as a disk node, and has its discovery entries skipped, as a
+  controller node (`cdc.md` DS3), as has one whose `adr_fam` is neither
+  `ipv4` nor `ipv6`; such a node is deleted and created again. A clone
+  source whose stored `src_tr_conf` names a `tr_type` other than `tcp`
+  fails every connect until `UpdateCloneTrConf`, which judges the new conf,
+  replaces it. A namespace at `NvmeNsidAll` is made by no nvmet, so its
+  rows read an error until `DeleteNamespace` removes it. A clone stored
+  with a `src_ns_idx` of zero copies whichever namespace its source lists
+  first, the right one for a transfer's subsystem, which exports one
+  namespace, and one at `NvmeNsidAll` waits for ever; such a clone is
+  deleted and created again (Clones, CreateClone). Read in the code, not
+  seen in the lab.
 * **A disk whose best or minimum IO size is over `MaxNvmeTcpCmdBytes` can
   be sent commands its disk node refuses.** A side's dm-linear takes the
   disk's best and minimum IO size, as a hardware RAID volume's stripe can
@@ -8747,22 +8766,27 @@ document and only pointed to here.
   that set the flag would close that case, and would keep a group whose array never ran from its first
   create for good once a mark the primary refused, as one naming a leg
   with no superblock, had been written on it.
-* **After a forced start, a leg of the old identity can keep the group
-  down at the next assembly.** A forced start from another leg leaves the
-  open repair's bad leg with the array's old identity (Repair, Forced
-  start), and the primary refuses its add while the array runs (Repair,
-  What the primary does). While the repair stands, an assembly ranks that
-  leg last and leaves it out; once a cancel has made it a leg of the
-  `leg_list` like any other, the next assembly, after a failover, a
-  restart or a level step, finds two identities among the legs that decide
-  it, and the group stays down, its row `ERROR`, until the operator
-  force-starts the group from the leg wanted, which wipes the other leg,
-  or creates a repair whose bad leg is the leg of the identity not wanted,
-  which keeps its data at the finish. `CreateRepair` takes such a leg
-  though it has no health epoch, by the reason the primary's report gives
-  its row, with no flag while the array runs and only with
-  `force_undecided` once the group is down, since then only the operator
-  can tell which identity is current (Repairs, A leg of another identity).
+* **After a forced start, a leg of the old identity can keep the group down
+  at the next assembly.** A forced start from another leg leaves the open
+  repair's bad leg with the array's old identity (Repair, Forced start),
+  and the primary refuses its add while the array runs (Repair, What the
+  primary does). While the repair stands, an assembly ranks that leg last
+  and leaves it out; once a cancel has made it a leg of the `leg_list` like
+  any other, the next assembly, after a failover, a restart or a level
+  step, finds two identities among the legs that decide it, and the group
+  stays down, its row `ERROR`, until the operator force-starts the group
+  from the leg wanted, which wipes the other leg, or creates a repair whose
+  bad leg is the leg of the identity not wanted, which keeps its data at
+  the finish. `CreateRepair` takes such a leg though it has no health
+  epoch, by the reason the primary's report gives its row, with no flag
+  while the array runs and only with `force_undecided` once the group is
+  down, since then only the operator can tell which identity is current
+  (Repairs, A leg of another identity). That flag guards only a create that
+  reads the reason: while the primary's agent is still in its startup pass,
+  or its report holds no row for the leg, the report gives none, and a
+  create that names a leg of either identity that carries a health epoch,
+  from a short fault after the start, say, takes it with no flag, so a
+  wrong name goes unchecked, and the leg is retired without `keep`.
 * **A forced start and the re-assembly wait on a primary whose layers
   above hold the broken array.** At a level that builds thin pools, a slice's group array that
   does not run is held open by the devices its slice's pool is built over,
@@ -9275,8 +9299,11 @@ document and only pointed to here.
   and creates it again with the force, which copies over such a leg at any
   count, one v0.1.0 kept out as holding newer data included; the bad leg of
   an aborted one stays out, as any member of another identity does.
-* **A leg v0.1.0 took back into a repair it then cancelled reads as a
-  whole copy** (Upgrade in lockstep): that build put no `partial` mark on
-  the retired leg the cancel gave back, though md wrote its superblock and
+* **A leg v0.1.0 took back into a repair it then cancelled reads as a whole
+  copy** (Upgrade in lockstep): that build put no `partial` mark on the
+  retired leg the cancel gave back, though md wrote its superblock and
   possibly part of the array on it, so once a repair takes it back again a
-  forced start may name it without the force (`cnagent.md` CN12).
+  forced start may name it without the force (Repairs, ForceStartGroup;
+  Repair, Forced start), and only the agent's read of its superblock then
+  stands between it and the start (`cnagent.md` CN12), as for a taken-back
+  leg md held only briefly (above).

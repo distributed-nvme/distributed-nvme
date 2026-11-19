@@ -36,13 +36,16 @@ import (
 // both kinds of group: what differs is the key the parent is written under.
 //
 // A repair whose name carries common.RepNameReservedPrefix is the sp
-// worker's own; any other name is an operator's. Four rules tell them
+// worker's own; any other name is an operator's. Five rules tell them
 // apart: the level gate of the create (CreateRepairLevelGate), the create's
 // refusal of the worker's under the group's operator_in_charge flag
 // (ReasonGrpOperatorInCharge), the create's new leg, always fresh and
-// allowed at the retired-leg bound for the worker's, and the finish of the
+// allowed at the retired-leg bound for the worker's, the finish of the
 // worker's, which gives back the group's oldest retired leg that is not kept
-// at the bound.
+// at the bound, and the cause that stands in for a bad leg's health epoch,
+// md's bad-block ranges for the worker's (RepairNewLeg.BadBlocks) and an
+// identity reason for an operator's, kept at the finish
+// (RepairNewLeg.IdentityRefused).
 //
 // Each operation names the check of the pool it makes. CreateRepair takes a
 // pool that is not being deleted below its level gate. The others take a

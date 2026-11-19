@@ -91,12 +91,13 @@ authoritative for their comments.
 `DefaultGatewayAgentTimeout` is the per-call budget, in seconds, of the
 gateway's agent RPCs — `GetDnSize` and `GetCnSize`, the `Get*Info` behind
 `Inspect*`, behind the `force` false checks of `DeleteClone` and
-`FinishMigration`, behind `ForceStartGroup`'s check of the group's
-array and behind `GetThinDeviceBitmap`'s check of the parks, the
-`GetThinDeviceBm` bitmap read, and the `GetCntlrInfo` and `InspectGrp`
-behind `InspectGroup` — applied as a timeout around each dial and its
-calls (AG2), so `InspectGroup`'s two calls share one budget. It equals `DefaultEtcdOpTimeout`, so a hung agent and
-a hung etcd bound an RPC alike.
+`FinishMigration`, behind `ForceStartGroup`'s check of the group's array,
+behind `CreateRepair`'s read of the bad leg's row and behind
+`GetThinDeviceBitmap`'s check of the parks, the `GetThinDeviceBm` bitmap
+read, and the `GetCntlrInfo` and `InspectGrp` behind `InspectGroup` —
+applied as a timeout around each dial and its calls (AG2), so
+`InspectGroup`'s two calls share one budget. It equals
+`DefaultEtcdOpTimeout`, so a hung agent and a hung etcd bound an RPC alike.
 
 `CloneBmChunkBytes` is the fixed capacity of ONE clone bitmap chunk and the
 quantum that positions it; the chunk rule it sizes is `architecture.md`,
@@ -524,8 +525,10 @@ ceiling then hears the ceiling rather than a scan's shortfall, and no scan
 is run for a create that cannot commit. `CreateMigration` answers its name,
 its pool's block, its source side and its slot from the same planning read,
 in that order behind the ceiling, so a re-send of a created migration hears
-`ALREADY_EXISTS` rather than a scan's shortfall (Migrations). `GrowSlice` is the one allocating
-RPC whose op keeps a stale pick's own refusal: a record that is gone, a DN
+`ALREADY_EXISTS` rather than a scan's shortfall, unless that migration
+filled the pool to `MaxMigrCntPerSp`, when the ceiling answers first
+(Migrations). `GrowSlice` is the one allocating RPC whose op keeps a stale
+pick's own refusal: a record that is gone, a DN
 no longer allocatable or one short of extents is `FAILED_PRECONDITION`
 (GW7) with no further round (`dnv-worker.md` MD5), where every other
 allocating RPC answers "candidate changed", and only a key gone under a
@@ -1653,9 +1656,11 @@ AG1. **Placement.** Agent calls happen outside STMs (`architecture.md`, STM
 discipline); the matrix below places each one. A `DeleteClone` whose clone
 is ALREADY `deleting` answers in phase 1 and makes no agent call at all
 (Clones), and neither does a `ForceStartGroup` with `cancel` (Repairs and
-retired legs). The two pre-STM size calls take the cluster id from a plain
-pre-read of `ClusterConf`, the in-STM read staying authoritative; the calls
-after resolution take it from the resolving transaction.
+retired legs) or a `CreateRepair` in a pool with no primary, which judges
+the bad leg on its record alone (`architecture.md`, Repairs, A leg of
+another identity). The two pre-STM size calls take the cluster id from a
+plain pre-read of `ClusterConf`, the in-STM read staying authoritative; the
+calls after resolution take it from the resolving transaction.
 
 AG2. **Connection.** Per call (`withAgentConn`): a ctx derived from the
 request's with `DefaultGatewayAgentTimeout` as its timeout, one plaintext
@@ -1717,7 +1722,7 @@ The complete call matrix:
 | `DeleteClone` with `force` false | `GetCntlrInfo` | between the STMs |
 | `FinishMigration` with `force` false | `GetSideInfo` | between the STMs |
 | `ForceStartGroup` without `cancel` | `GetCntlrInfo` | between the STMs |
-| `CreateRepair` | `GetCntlrInfo` | between the snapshot and the op, every round |
+| `CreateRepair`, when the pool has a primary | `GetCntlrInfo` | between the snapshot and the op, every round |
 | `InspectGroup` | `GetCntlrInfo`, then `InspectGrp` | after the snapshot |
 | `GetThinDeviceBitmap` | `GetCntlrInfo`, when a namespace exports the td, then `GetThinDeviceBm` | after the STM |
 

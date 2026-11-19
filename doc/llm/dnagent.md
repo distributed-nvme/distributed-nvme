@@ -54,6 +54,10 @@ startup state — whether the startup pass still runs, the start time every
 reply's stamp carries — and the starting refusal (SH33), `sweep.go` the
 part of DN6's sweep both roles share (the leftover kinds, the result value
 a pass accumulates, its log record and the `AgentReply` it becomes),
+`text.go` the cuts of texts (`CutAgentText`, the row text cap of
+`architecture.md`, Live-state reporting, which keeps a text's head and end;
+`JoinNote`, which cuts a note to the room a row's own text leaves; and
+`CutText`, which keeps the end alone, for the errors of the counter reads),
 `version.go` the version reads the start record and the node check share
 (`KernelRelease`, `MdadmVersion`) and the start record itself
 (`LogStartVersions`; CM4, CM5), and `waitbudget.go` the `WaitBudget`, the

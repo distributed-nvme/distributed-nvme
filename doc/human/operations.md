@@ -65,9 +65,11 @@ everything the wiped legs hold that the named leg does not hold.
   the data onto it.
 - md keeps a **bad-block list** for each member: the sectors of the member
   that md could not read or write.
-- A forced start gives the array a new **identity**. A leg from before it
-  keeps the old identity. Change counts can be compared only between legs
-  of the same identity.
+- A forced start gives the array a new **identity**. The legs it wipes
+  join under the new identity once md copies onto them, and a leg it does
+  not wipe, such as the open repair's bad leg or a retired leg, keeps the
+  old identity. Change counts can be compared only between legs of the
+  same identity.
 - The **force flag** of a mark lets the start go on past three refusals:
   a named leg whose change count is below that of a leg it wipes, a named
   leg that carries a bad-block list, which the start drops, and a named
@@ -451,8 +453,9 @@ Tested: no.
 ### A leg of another identity that the primary does not add
 
 Words: a leg's **identity** is the array identity in its md superblock. A
-forced start gives the array a new one, so a leg from before it keeps the
-old one.
+forced start gives the array a new one. The legs it wipes join under the
+new one once md copies onto them, and a leg it does not wipe, such as the
+open repair's bad leg, keeps the old one.
 
 Symptom: after a forced start from one leg, a leg that kept the old
 identity, often a repair's bad leg, is never added back. After the next
@@ -477,7 +480,11 @@ Safe steps while the array runs, the leg's reason `RES_REASON_OTHER_IDENTITY`:
    `dnvctl repair create --name <name> --grp <group id> --bad-legs <leg id>`.
    The gateway reads the primary's report and takes the leg as the bad leg
    though it has no health epoch. The running array tells which identity
-   is current, so the choice is dnv's.
+   is current, so the choice is dnv's. The gateway refuses the repair while
+   the group holds two retired legs, and its message says to delete one. A
+   retired leg can hold a copy you need, and the write of a forced start's
+   mark sets the keep flag on the group's retired legs ("Keeping the old
+   copies"): stop rather than delete one you cannot judge.
 2. Follow the repair as usual: the primary adds the new leg and md copies
    onto it; when `dnvctl repair get --name <name>` shows the repair
    started, run `dnvctl repair finish --name <name>`. The finish keeps the
@@ -492,16 +499,24 @@ Safe steps once the group is down, each leg's reason
 
 1. Decide which leg is the stale copy. A leg of another identity is from
    before an earlier forced start (rule 5 of the forced-start guide). The
-   primary's log record `forced start` of the last start names the leg it
-   started the array from. The legs of that leg's identity hold the data
-   the array served since; a leg of the other identity is the stale copy,
-   unless the people who use the volumes say they need its data. If you
-   cannot tell, stop.
+   log record `forced start` of the last start names in `leg_id` the leg
+   it started the array from. The cn agent of the controller node whose
+   cntlr was the primary at that start wrote it, so read that node's log:
+   after a failover it is not the current primary's node. The legs of that
+   leg's identity hold the data the array served since; a leg of the other
+   identity is the stale copy, unless the people who use the volumes say
+   they need its data. If you cannot tell, stop.
 2. Repair the stale leg, naming it with the flag the gateway asks for:
    `dnvctl repair create --name <name> --grp <group id> --bad-legs <stale leg id> --force-undecided`.
-   Without `--force-undecided` the gateway refuses that leg. The primary
-   then assembles the array from the other identity's legs, and the repair
-   adds a new leg in place of the stale one.
+   Without `--force-undecided` the gateway refuses that leg while the
+   primary's report names its reason; while the primary's agent is still
+   starting, or its report has no row for the leg, the gateway takes a leg
+   that has a health epoch without the flag, so name only the leg you
+   chose in step 1. The primary then assembles the array from the other
+   identity's legs, and the repair adds a new leg in place of the stale
+   one. As while the array runs, the gateway refuses the repair while the
+   group holds two retired legs: stop rather than delete one you cannot
+   judge.
 3. Follow the repair as in step 2 above. An abort of this repair leaves
    the stale leg as it is: the repair does not keep the flag.
 
@@ -513,8 +528,13 @@ what only they hold.
 
 When to stop: when the log does not tell which leg the last forced start
 started from and the people who use the volumes cannot say which data they
-need, or when a repair stays created and `dnvctl repair get` shows a wait
-you do not understand.
+need; when the gateway refuses the repair at two retired legs and you
+cannot tell which retired leg holds a copy you may need; or when a repair
+stays created and the primary's report,
+`dnvctl cntlr inspect --id <primary's cntlr id>`, shows a `waits` or
+`refusal` text you do not understand in `cntlr_info.rep_id_to_repair_info`
+under the repair's `rep_id`, which `dnvctl repair get --name <name>`
+shows.
 
 Tested: the gateway's suite on fake agents, whose smoke case creates the
 repair of a leg of another identity with no flag, and of an undecided one
@@ -798,7 +818,19 @@ Safe steps, to move every volume of the pool to a new pool:
      subsystem of each name, which the cntlrs of both pools would claim,
      and a host refuses a second path to a subsystem whose controller id
      another of its paths already uses. So the cluster needs controller
-     nodes beyond those of the old pool.
+     nodes beyond those of the old pool. This list too binds only the
+     create: a cntlr replacement of either pool may later place a cntlr on
+     a controller node of the other pool. Before each move of step 2,
+     compare the `addr_port` of the cntlrs that `dnvctl sp get` shows for
+     both pools. If two share a controller node, stop moving and move one
+     of them. Disable it with
+     `dnvctl cntlr set-enabled --id <cntlr id> --enabled=false`. If it was
+     the primary, wait until `dnvctl sp get` shows another cntlr as the
+     primary, since the gateway refuses to delete the primary. Then delete
+     it with `dnvctl cntlr delete --id <cntlr id>`, and create it again
+     with
+     `dnvctl cntlr create --slot <its cntlid slot> --cn-black <the other pool's controller nodes>`,
+     the addresses separated by commas.
 2. Move the volumes one at a time, or a few at once: a pool holds at most
    four transfers, and a fifth `dnvctl xfer create` is refused with the
    error code RESOURCE_EXHAUSTED. For each volume:
@@ -992,9 +1024,12 @@ at each try. The driver now gives such a volume a name of its own, as it
 does a name too long for dnv, so the volume is made under that name. What
 the failed tries made stays, and holds its space on the disk nodes.
 
-Confirm: `dnvctl sp list` names the pool. `dnvctl --sp '<pool name>' ss list`
-shows no subsystem, and `dnvctl --sp '<pool name>' td list` one thin device.
-No Kubernetes volume names it:
+Confirm: `dnvctl sp list --count 1024` names the pool. One reply holds at
+most that many names; while a reply carries a `page_token` that is not
+empty, run the command again with `--page-token <that token>` for the next
+names. `dnvctl --sp '<pool name>' ss list` shows no subsystem, and
+`dnvctl --sp '<pool name>' td list` one thin device. No Kubernetes volume
+names it:
 `kubectl get pv -o custom-columns=ID:.spec.csi.volumeHandle` lists every
 volume id, and none holds "..".
 
@@ -1524,8 +1559,8 @@ volume reads as zeros, since a thin device reads zeros where nothing was
 written.
 
 Symptom: a pod that uses a filesystem volume stays in `ContainerCreating`.
-`kubectl describe pod <pod>` shows events with the plugin's refusal, which
-is one of two:
+`kubectl describe pod <pod>` shows events with the plugin's refusal. This
+section covers the two refusals of the check that the volume is blank:
 
 1. **The read failed**: "reading the start of the device <device> ... the
    driver formats only a device whose start it has read".
@@ -1534,7 +1569,14 @@ is one of two:
    knows; the driver never formats over it".
 
 The text tells the two apart. `<device>` is
-`/dev/disk/by-id/nvme-uuid.<uuid>` on the node that runs the pod.
+`/dev/disk/by-id/nvme-uuid.<uuid>` on the node that runs the pod. A
+refusal that names a partition table ("carries a ... partition table and
+no filesystem"), or a filesystem other than the one the claim asks for
+("carries ..., not ...; the driver never reformats"), means that the
+volume holds someone's content, which the plugin never formats over; it
+disconnects the node from the volume after each such try, as after data at
+the start. Reach the volume and keep a copy as under "Data at the start",
+steps 1 to 6, and ask for help.
 
 What dnv does alone: the kubelet asks again and again, waiting longer each
 time, up to about two minutes between tries. After a failed read the node

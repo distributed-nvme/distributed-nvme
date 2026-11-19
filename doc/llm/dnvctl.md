@@ -184,22 +184,24 @@ checked write, the package's only write to stdout, under the exemption
 `log.md` R1 makes for CLI results. A reply that cannot be rendered, or a
 write that fails or ends short, is CT5's exit 3, never a silent exit 0.
 Nothing else is ever printed to stdout on an RPC path; the only other texts
-there are printed outside `writeResult`: cobra's own, its stock help and
-completion, which cobra writes itself and does not check, and the root's
-`--version` line (CT5), whose write cobra does check, a failed one being
-CT5's exit 2. There is no quiet or verbose mode. The error
-lines of CT5 are the package's only other direct writes, to stderr from
-`Execute`, and `ctl/` calls slog nowhere at all — the records CT7's Warn
-level silences are the client interceptors'.
+there are printed outside `writeResult`, all cobra's: its stock help and
+the answers of its hidden command for the shell's completion requests,
+whose writes cobra does not check; the scripts of its `completion` leaves,
+whose write error cobra returns, so a failed one is CT5's exit 2; and the
+root's `--version` line (CT5), whose write cobra checks too, a failed one
+being CT5's exit 2. There is no quiet or verbose mode. The error lines of
+CT5 are the package's only other direct writes, to stderr from `Execute`,
+and `ctl/` calls slog nowhere at all — the records CT7's Warn level
+silences are the client interceptors'.
 
 ### Errors and exit codes
 
 CT5. **Errors and exit codes.** dnvctl exits with one of four codes:
 
 * 0 — the RPC returned OK: stdout carries the CT4 document and stderr is
-  empty; also `--help`, and `dnvctl --version`, which prints "dnvctl" and the
-  build version (`architecture.md`, Components: invocation reference), each
-  with no RPC.
+  empty; also `--help`, cobra's `help` and `completion` commands, and
+  `dnvctl --version`, which prints "dnvctl" and the build version
+  (`architecture.md`, Components: invocation reference), each with no RPC.
 * 1 — the RPC or its connection failed: stdout is empty and stderr carries
   one line, "dnvctl: CODE: message (trace_id ID)".
 * 2 — a usage error: an unknown command or flag, an unparsable flag value,
@@ -212,7 +214,8 @@ CT5. **Errors and exit codes.** dnvctl exits with one of four codes:
   `--version` line exits 2 too: it is no usage error, but like one it
   issued no RPC, so a repeat changes nothing. Its stdout holds none or part
   of the line, and stderr two lines, cobra's of the write's error and then
-  "dnvctl: message".
+  "dnvctl: message". So does a failed write of a `completion` script, for
+  the same reason, with stderr the one line "dnvctl: message".
 * 3 — the RPC returned OK, and its result was not written: the reply could
   not be rendered (CT4), or the write to stdout failed or ended short, as on
   a full disk under a redirect. stdout holds no complete document, and stderr
@@ -699,25 +702,24 @@ finish can succeed yet.
 primary's answer moves the repair to ABORTED, or to STARTED when it had
 already added the new leg (`architecture.md`, Repair), so the leaf keeps
 the operator's short verb and `repair get` shows the outcome.
-`repair create` sends `--bad-legs` as the list it is, so a count other
-than one reaches the gateway, which refuses it (CT8), and its new leg is
-the retired leg `--retired-leg` names or, when that is zero or not given,
-a fresh leg the `--dn-black` and `--dn-white` selector steers; `--force`
-lets the primary copy over a leg that carries another md identity, when
-the retired leg taken back or the bad leg after an abort does
-(`architecture.md`, Repair), and
-its help says that what such a leg holds is lost. `--force-undecided` is
-another flag, never `--force`: it sends `force_undecided`, which lets the
-gateway take a bad leg the primary's report marks of an undecided md
-identity, the operator naming it the stale copy, and which the repair does
-not keep, so an abort leaves that leg as it is (`architecture.md`, Repairs,
-A leg of another identity). dnvctl
-checks no stage: a call the repair's stage does not allow is the gateway's
-refusal, which names the stage (`architecture.md`, Repairs).
-`repair finish` prints the reply as it is, `given_back_leg_id` included
-when it is zero (CT4), so the operator always sees whether the finish of a
-worker's repair gave a retired leg back (`architecture.md`, Repairs).
-`repair list` is not paged.
+`repair create` sends `--bad-legs` as the list it is, so a count other than
+one reaches the gateway, which refuses it (CT8), and its new leg is the
+retired leg `--retired-leg` names or, when that is zero or not given, a
+fresh leg the `--dn-black` and `--dn-white` selector steers; `--force` lets
+the primary copy over a leg that carries another md identity, when the
+retired leg taken back or the bad leg after an abort does
+(`architecture.md`, Repair), and its help says that what such a leg holds
+is lost. `--force-undecided` is another flag, never `--force`: it sends
+`force_undecided`, which lets the gateway take a bad leg the primary's
+report marks of an undecided md identity, the operator naming it the stale
+copy, and which the repair does not keep, so an abort leaves that leg as it
+is unless `--force` was typed too (`architecture.md`, Repairs, A leg of
+another identity). dnvctl checks no stage: a call the repair's stage does
+not allow is the gateway's refusal, which names the stage
+(`architecture.md`, Repairs). `repair finish` prints the reply as it is,
+`given_back_leg_id` included when it is zero (CT4), so the operator always
+sees whether the finish of a worker's repair gave a retired leg back
+(`architecture.md`, Repairs). `repair list` is not paged.
 
 ### `retired-leg` — `ctl/retiredleg.go`
 

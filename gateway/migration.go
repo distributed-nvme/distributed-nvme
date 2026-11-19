@@ -225,18 +225,19 @@ func migrCntBelowCeiling(conf *pb.SpConf, spName string) error {
 // migrPoolChecks is what CreateMigration answers from the pool's own record,
 // in its order, behind the resolution and the token check openSp makes: the
 // MaxMigrCntPerSp ceiling, ahead of the name so a pool at the ceiling hears
-// the ceiling (GW9); the name free, so a re-send of a created migration hears
-// ALREADY_EXISTS; and the pool's block within the block's bound of
-// architecture.md, Common validation, FAILED_PRECONDITION otherwise. A pool
-// made before that bound keeps its block, and a migration of one of its
-// sides would make a dm-clone whose region is that block, which reports at
-// least one region as its optimal IO size: the controller node would send
-// the new side commands its disk node refuses. No call moves a healthy leg
-// of such a pool in place — a repair replaces only a leg with a health epoch
-// or one whose row the primary's report marks of another identity, and a
-// RedundNone pool has none — so the message
-// names the way out, a move of the pool's volumes into a new pool by a
-// transfer and a clone (architecture.md, Common validation, the block's
+// the ceiling (GW9); the name free, so a re-send of a created migration
+// hears ALREADY_EXISTS, unless that migration filled the pool to the
+// ceiling, when the ceiling answers first; and the pool's block within the
+// block's bound of architecture.md, Common validation, FAILED_PRECONDITION
+// otherwise. A pool made before that bound keeps its block, and a migration
+// of one of its sides would make a dm-clone whose region is that block,
+// which reports at least one region as its optimal IO size: the controller
+// node would send the new side commands its disk node refuses. No call
+// moves a healthy leg of such a pool in place — an operator's repair
+// replaces only a leg with a health epoch or one whose row the primary's
+// report marks of another identity, and a RedundNone pool has none — so the
+// message names the way out, a move of the pool's volumes into a new pool by
+// a transfer and a clone (architecture.md, Common validation, the block's
 // bound). The planning read and the deciding STM both run it, ahead of the
 // source side, so a refusal reached in either has the same words and the
 // planning read answers each ahead of the scan.

@@ -6121,32 +6121,34 @@ stores instead is CN23's.
   deadline, but each read it leaves behind keeps one `OsClient` slot
   until the IO ends, so repeated inspects of a stalled leg each hold one
   more slot.
-* A member md keeps failing while its leg's probe passes is put back
-  again after every failure: md fails a member with the failfast flag on
-  any read error from it outside md's own check (CN12, The md check), so
-  one bad sector outside the health
-  block is enough, while the CN11 probe, which reads the health block
-  alone, passes, and the leg can take the member back, unless CN12's
-  in-sync guard holds over its array. Each failure then
+* A member md keeps failing while its leg's probe passes is put back again
+  after every failure: md fails a member with the failfast flag on any read
+  error from it outside md's own check (CN12, The md check), so one bad
+  sector outside the health block is enough, while the CN11 probe, which
+  reads the health block alone, passes, and the leg can take the member
+  back, unless CN12's in-sync guard holds over its array. Each failure then
   costs one `SyncupCntlr` and one converge of the cntlr, which holds the
   cntlr's reads off while it runs (CN1), and a resync of what md's bitmap
   marks. Nothing limits how often, since a limit would need the agent to
   remember past attempts (`architecture.md`, Teardown by sweep); it shows
-  as the agent's leftover record naming the same member after each
-  failure, each followed by the worker's re-sent `SyncupCntlr` (`log.md`,
+  as the agent's leftover record naming the same member after each failure,
+  each followed by the worker's re-sent `SyncupCntlr` (`log.md`,
   Leftovers). It lasts until an md check of the group (CN12, The md check;
   `dnv-worker.md` AR16) reaches the sector before a host read fails the
-  member again — a member failure stops the check, and the next starts
-  from the array's start — and rewrites the sector from the other member: a sector whose rewrite lands is healed, and one whose rewrite
-  fails becomes a bad-block range on the member, which the group's reading
-  counts, so leg repair then replaces the leg while another leg is clean of
-  ranges. Until that check the leg repair does not act on it, since the
-  leg's row reads `OK` (`dnv-worker.md` AR8). An operator's repair cannot
-  act on it before the check or after it: it refuses a bad leg with no
-  health epoch, the waiver for bad-block ranges being the worker's alone
-  (`dnv-worker.md` AR8), and points the operator to a migration of the
-  leg's side instead (`architecture.md`, Repairs). In a cluster whose
-  check is off it lasts for good.
+  member again — a member failure stops the check, and the next starts from
+  the array's start — and rewrites the sector from the other member: a
+  sector whose rewrite lands is healed, and one whose rewrite fails becomes
+  a bad-block range on the member, which the group's reading counts, so leg
+  repair then replaces the leg while another leg is clean of ranges. Until
+  that check the leg repair does not act on it, since the leg's row reads
+  `OK` (`dnv-worker.md` AR8). An operator's repair cannot act on it before
+  the check or after it: it refuses a bad leg with no health epoch, the
+  waiver for bad-block ranges being the worker's alone (`dnv-worker.md`
+  AR8), and points the operator to a migration of the leg's side instead
+  or, in a pool stored with a data block over the block's bound, which
+  refuses every migration, to a move of the pool's volumes to a new pool
+  (`architecture.md`, Repairs; Common validation). In a cluster whose check
+  is off it lasts for good.
 * A primary leg that has no prober yet — after a restart or a promotion,
   or a new leg — whose step fails, on a pass whose read of the leg's
   wrapper does not answer either, gets no prober (CN11), and no read names
@@ -6159,18 +6161,21 @@ stores instead is CN23's.
 * The leg probe reports failed or stalled, never slow: the CN11 probe reads
   `ERROR` on an attempt that fails or on one in flight longer than
   `CnLegProbeStallSeconds`, `PENDING` before its first attempt completes,
-  and `OK` otherwise, so a leg whose IO
-  completes slowly, inside that bound, reads `OK` on every round while md
-  waits on it for every write of the group, since a RAID1 write completes
-  only once every member has taken it, and no reaction acts: the leg has
-  no health epoch (`dnv-worker.md` HL2), so leg repair creates no repair
-  for it (`dnv-worker.md` AR8), and an operator's repair refuses a leg with
-  no health epoch. The prober times each round and an inspect read shows
-  the last round's times and every leg's block counters (CN11, CN23), but
-  no health rule reads them and nothing alerts on them; the operator's
-  action is a migration of the leg's side (`architecture.md`, Repairs: a
-  healthy leg is moved, not repaired). A standby runs no prober, so its
-  legs show counters and no times.
+  and `OK` otherwise, so a leg whose IO completes slowly, inside that
+  bound, reads `OK` on every round while md waits on it for every write of
+  the group, since a RAID1 write completes only once every member has taken
+  it, and no reaction acts: the leg has no health epoch (`dnv-worker.md`
+  HL2), so leg repair creates no repair for it (`dnv-worker.md` AR8), and
+  an operator's repair refuses a leg with no health epoch. The prober times
+  each round and an inspect read shows the last round's times and every
+  leg's block counters (CN11, CN23), but no health rule reads them and
+  nothing alerts on them; the operator's action is a migration of the leg's
+  side (`architecture.md`, Repairs: a healthy leg is moved, not repaired)
+  or, in a pool stored with a data block over the block's bound, which
+  refuses every migration, a move of the pool's volumes to a new pool
+  (`architecture.md`, Common validation; `operations.md`, A pool made
+  before the block bound). A standby runs no prober, so its legs show
+  counters and no times.
 * A member can be named on every read on a leg whose converge fails:
   the verdict tests only the parts of the leg's availability a read can
   read (CN30). A leg with two sides, a migration in flight, whose path
@@ -6384,19 +6389,23 @@ stores instead is CN23's.
 * After a forced start, a group whose `leg_list` legs that decide its
   assembly carry two identities stays down at its next assembly (CN12, case
   2): a leg the forced start left as it was, the bad leg of a repair since
-  cancelled among them, whose add the identity check refused while the array
-  ran, its row reading `RES_REASON_OTHER_IDENTITY`. On every primary the
-  group's row reads `ERROR` naming both in each converge's reply and
+  cancelled among them, whose add the identity check refused while the
+  array ran, its row reading `RES_REASON_OTHER_IDENTITY`. On every primary
+  the group's row reads `ERROR` naming both in each converge's reply and
   `RES_STATUS_MISSING` on a read, and each such leg's row reads
   `RES_REASON_IDENTITY_UNDECIDED` on both channels, since the agent cannot
   tell which identity is current, until the operator acts: a forced start
   from the leg wanted, or a repair whose bad leg is the leg of the identity
   not wanted, which `CreateRepair` takes only with `force_undecided`,
-  whatever the leg's health epoch (`architecture.md`, Repairs, A leg of
-  another identity). Once the wrong leg is repaired away under that flag,
-  the array assembles from the other, hosts read its older data and write
-  onto it, and going back loses those writes (`operations.md`, A leg of
-  another identity that the primary does not add).
+  whatever the leg's health epoch, while the primary's latest report names
+  that reason: a report not read, a reply that carries no `CntlrInfo`, as
+  from an agent still in its startup pass, or one with no row for the leg
+  leaves the record's answer, so a leg with a health epoch is then taken
+  with no flag and retired without `keep` (`architecture.md`, Repairs, A
+  leg of another identity). Once the wrong leg is repaired away under that
+  flag, the array assembles from the other, hosts read its older data and
+  write onto it, and going back loses those writes (`operations.md`, A leg
+  of another identity that the primary does not add).
 * An operator's own empty subsystem on a controller node — one with no
   namespace device, no allowed host and no port link, that no held request
   names — is removed by the node-level sweep once it is older than
