@@ -77,8 +77,8 @@ const envPrefix = "DNVCTL"
 const defaultTimeout = 10.0
 
 // job is one RPC invocation. It returns whatever should be rendered on
-// stdout: a reply message for every command but the two bitmap reads, which
-// return a plain map[string]any (CT4).
+// stdout: a reply message for every command but the bitmap read, td
+// get-bm, which returns a plain map[string]any (CT4).
 type job func(ctx context.Context, client pb.GatewayClient) (any, error)
 
 // ---------------------------------------------------------------------------
@@ -486,7 +486,7 @@ func writeResult(out []byte) error {
 // document and its newline. protojson deliberately varies its whitespace, so
 // the reply is re-parsed and re-encoded through encoding/json: sorted keys,
 // stable spacing, proto field names, proto3 defaults visible, uint64 as JSON
-// strings. The bitmap reads render through it too.
+// strings. The bitmap read's map renders through it too.
 func render(result any) ([]byte, error) {
 	value := result
 	if msg, ok := result.(proto.Message); ok {
@@ -514,9 +514,9 @@ func render(result any) ([]byte, error) {
 
 // hexBitmapResult is CT4's one deviation. protojson renders a bytes field as
 // base64, which is neither what an operator wants to read nor what the suite
-// asserts, so the two bitmap reads return this map instead of their reply
-// message. byte_cnt travels with it so a length check needs no arithmetic on
-// the hex string.
+// asserts, so the bitmap read, td get-bm, returns this map instead of its
+// reply message. byte_cnt travels with it so a length check needs no
+// arithmetic on the hex string.
 func hexBitmapResult(bitmap []byte) map[string]any {
 	return map[string]any{
 		"bitmap_hex": hex.EncodeToString(bitmap),

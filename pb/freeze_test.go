@@ -27,9 +27,9 @@ import (
 //
 // Every message is held, not only the ones etcd stores: an agent stores its
 // syncup requests, which carry most of the others, and dnvctl prints the
-// rest as JSON by their field names. Services are not compared: no message is
-// stored by the call that carries it, and the lockstep upgrade replaces every
-// caller with its server.
+// rest as JSON by their field names. Services are not compared: a store
+// keeps a message and never the call that carried it, and the lockstep
+// upgrade replaces every caller with its server.
 
 // retiredMessages are the messages a release had that the schema has
 // removed, each with the reason no build reads it any more. A message

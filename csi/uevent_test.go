@@ -10,9 +10,9 @@ import (
 	"time"
 )
 
-// fakeUevents is a scripted event socket (csi.md, Integration test plan):
-// each receive takes the next item pushed, or answers EAGAIN after a short
-// wait, as the kernel's socket does at its receive timeout.
+// fakeUevents is a scripted event socket in place of the kernel's (csi.md
+// CSI15): each receive takes the next item pushed, or answers EAGAIN after
+// a short wait, as the kernel's socket does at its receive timeout.
 type fakeUevents struct {
 	items  chan fakeUevent
 	closed atomic.Bool

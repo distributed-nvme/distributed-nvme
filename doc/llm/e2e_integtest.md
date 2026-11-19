@@ -1008,27 +1008,26 @@ host0's kernel log since a mark taken before the silence must report no
 failed IO, host0 reads its data unchanged, and no failover may happen
 across the stage. The loss of a machine runs last: the primary's
 controller-node guest is reset through the kernel's sysrq trigger, with no
-sync, which drops every kernel object of the guest as a power loss does,
-and the hypervisor starts it again; the guest must answer again under a new
-boot id within a bound. Nothing of the old primary survives to advertise a
-path, so host0 keeps every path it holds through the failover: the standby
-must become primary and build the stack (`dnv-worker.md` AR5), and host0
-must read its data through the path it already held, now optimized. Once
-the cdc's records no longer name the reset node, host0 drops its path to
-it, as a host that follows the discovery log does, and must hold none; it
-does so before it connects the replacement, which keeps the lost cntlr's
-cntlid slot, so that a retrying controller of the same controller id
-does not make the kernel refuse the new one (`architecture.md`, Known
-limits). The lost cntlr must be replaced on the controller node that held
-none (`dnv-worker.md` AR7), host0 must connect the replacement through the
-cdc, its kernel log since a mark taken before the reset must report no
-failed IO, and the worker must have applied one failover and one
-replacement. Only then does the guest get its
-per-boot preparation again, the module loads and the configfs mount of
-Preflight, and its cn agent, started from its store, must converge to a
+sync, which drops every kernel object of the guest as a power loss does, and
+the hypervisor starts it again; the guest must answer again under a new boot
+id within a bound. Nothing of the old primary survives to advertise a path,
+so host0 keeps every path it holds through the failover: the standby must
+become primary and build the stack (`dnv-worker.md` AR5), and host0 must
+read its data through the path it already held, now optimized. Once the
+cdc's records no longer name the reset node, host0 drops its path to it, as
+a host that follows the discovery log does, and must hold none; it does so
+before it connects the replacement, which keeps the lost cntlr's cntlid
+slot, so that a retrying controller of the same controller id does not make
+the kernel refuse the new one (`architecture.md`, Known limits). The lost
+cntlr must be replaced on a controller node that held none (`dnv-worker.md`
+AR7), host0 must connect the replacement through the cdc, its kernel log
+since a mark taken before the reset must report no failed IO, and the worker
+must have applied one failover and one replacement. Only then does the guest
+get its per-boot preparation again, the module loads and the configfs mount
+of Preflight, and its cn agent, started from its store, must converge to a
 node with no cntlr of the pool and no dnv object (`cnagent.md` CN7): an
-agent back before the replacement would answer its rounds and keep the
-cntlr it rebuilds.
+agent back before the replacement would answer its rounds and keep the cntlr
+it rebuilds.
 
 **cutoff** proves that a primary cut off from the control plane fails over as
 a pause for a host that follows the discovery log (`architecture.md`,

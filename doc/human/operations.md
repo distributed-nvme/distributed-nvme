@@ -195,10 +195,12 @@ Choose the leg with these rules:
 6. The named leg may be dead when you write the mark. The primary then
    waits for it and starts from it when it comes back, unless the start
    then meets a refusal the mark does not pass (step 4 of the safe steps).
-   While the named leg does not serve, the dry run says only that the
-   start waits for it, and its list is empty. In the same way, while a leg
-   the start would wipe does not serve (rule 7), the list can lack a
-   refusal that the start meets once that leg serves.
+   While the named leg does not serve, the primary checks nothing past
+   it: the dry run's list holds no refusal but `partial`, which the
+   gateway judges from the leg's record, and the dry run says that the
+   start waits for the leg, or refuses it for `partial`. In the same way,
+   while a leg the start would wipe does not serve (rule 7), the list can
+   lack a refusal that the start meets once that leg serves.
 7. The start waits for every other leg it would wipe. A leg that will
    never come back blocks it: see "A forced start that waits".
 
@@ -224,12 +226,18 @@ Safe steps:
 4. Wait until the group's row reads ok and the mark is gone. The worker
    clears the mark once the primary reports that it acted on it, and that
    the array runs with a member in sync on a leg whose row reads ok. If
-   the group's row reads error with a text that starts
-   `forced start refused`, the start met a refusal the mark does not pass,
-   as when the named leg came back with a bad-block list (rule 6), and it
-   wiped nothing. Run the dry run again and follow step 2. To go on past
-   what it lists, write the mark again with those words, as in step 3: a
-   new mark replaces the one that stands.
+   the mark stays while the named leg serves, run the dry run again, with
+   the words the mark carries in `--override` (`dnvctl sp get` shows the
+   mark's `override_list`, in the names the dry run's list uses). When its
+   refusal starts `forced start refused`, the start meets a refusal the
+   mark does not pass, as when the named leg came back with a bad-block
+   list (rule 6), and it wipes nothing. Do not wait for the group's row
+   to say so: it carries that text at most from a start the primary tried
+   until its next check round, which finds no array of the group and
+   reads the row missing. The primary's cn agent logs each such try as the
+   record `forced start refused`. Follow step 2. To go on past what it
+   lists, write the mark again with those words, as in step 3: a new mark
+   replaces the one that stands.
 5. Read the group again. md is copying onto the other legs. Wait until
    every leg is in sync. Check that no leg shows a bad-block list. If the
    named leg's list is still there after a start that passed `bad-blocks`,
@@ -450,14 +458,16 @@ Causes and steps:
   need, so stop instead. Not tested.
 - A start from a repair's new leg waits the same way for the leg of the
   list that is not the repair's bad leg.
-- The group's row reads error with a text that starts
-  `forced start refused`. The start met a refusal the mark does not pass,
-  such as a bad-block list on a named leg that was dead when the mark was
-  written, and it wiped nothing. Follow step 4 of the safe steps of "Which
-  leg to choose". Tested: the cn agent suite, repair case, stages `older`
-  and `olderstart`, a start refused for an older leg and then passed; the
-  end-to-end suite's react case writes the mark again, from the dry run,
-  when a dead named leg comes back with a list.
+- The dry run from the named leg, with the mark's words in `--override`,
+  refuses with a text that starts `forced start refused`. The start meets
+  a refusal the mark does not pass, such as a bad-block list on a named
+  leg that was dead when the mark was written, and it wipes nothing. The
+  group's row shows that text at most until the primary's next check
+  round, which reads the row missing. Follow step 4 of the safe steps of
+  "Which leg to choose". Tested: the cn agent suite, repair case, stages
+  `older` and `olderstart`, a start refused for an older leg and then
+  passed; the end-to-end suite's react case writes the mark again, from
+  the dry run, when a dead named leg comes back with a list.
 
 Steps that can lose data: a mark left standing over a running array (see
 above).
@@ -1559,15 +1569,17 @@ Symptoms:
 - `dnvctl sp create` of a RAID1 pool fails with RESOURCE_EXHAUSTED, and
   the text says "disk nodes with ... free extents in distinct locations,
   need 2": the disk nodes with room are in fewer locations than a group
-  has legs, for example all on one machine.
+  has legs, for example all on one machine, or too few for every leg of
+  the pool to have a disk node of its own ([the scope page](scope.md),
+  section 10, A RAID1 pool needs four disk nodes per slice at create).
 
 How to confirm: `dnvctl dn get --addr <addr>` and `dnvctl cn get --addr
 <addr>` show each node's `location`. `cat /proc/sys/kernel/hostname` on
 the machine shows the name its agents report; compare it across the
 machines, since two machines with one name are one location. A location
 equal to the node's own address is one that 0.1 gave a node created with
-no location. For the second symptom, count the locations of the disk
-nodes that have free extents.
+no location. For the second symptom, count the disk nodes that have free
+extents and their locations.
 
 What dnv does alone: it reads the host name at each create that names no
 location, and nothing more. A location stored once never follows a later
@@ -1981,8 +1993,12 @@ plugin's refusal, which names each fact it read wrong and its fix:
 3. "the NVMe over Fabrics device is not there": nvme-fabrics is not loaded.
 4. "... cannot be read: ...": a read of the kernel's facts failed.
 
-The plugin does not ask for nvme-tcp itself: the kernel loads it at the
-first connect.
+The plugin reads the host NQN file first, then the host id file, then the
+kernel's facts, and it stops at the first identity file it finds wrong. So
+a refusal of an identity file names that file alone, and only once both
+files are right does a refusal name every fact of the kernel it read
+wrong. The plugin does not ask for nvme-tcp itself: the kernel loads it at
+the first connect.
 
 What dnv does alone: nothing; the worker reads no Kubernetes node.
 Kubernetes starts the container again and again, waiting longer each time,
@@ -2012,7 +2028,8 @@ Safe steps:
      so that it loads at boot.
 2. Delete the node plugin pod, `kubectl -n dnv-csi delete pod <pod>`, so
    that Kubernetes starts it at once rather than after its wait. Its log
-   then shows `csi node serving`.
+   then shows `csi node serving`, or a refusal of another fact, as of the
+   host id file once the host NQN file is fixed: go back to step 1 for it.
 
 Before an upgrade from 0.1, whose node plugin started without these checks,
 check every Kubernetes node: `cat /sys/module/nvme_core/parameters/multipath`
@@ -2032,8 +2049,8 @@ flushed are lost. Make new identity files only on a node with no NVMe
 connection, after a `kubectl drain` of the node has moved its pods away.
 
 When to stop: the log names none of these facts, the plugin still refuses
-after the fix, or the node's connections carry more than one host NQN.
-Ask for help.
+for a fact you fixed, or the node's connections carry more than one host
+NQN. Ask for help.
 
 Tested: unit tests of the node plugin check each refusal, and that the
 plugin starts on a node where nvme-tcp is not loaded. No suite case starts

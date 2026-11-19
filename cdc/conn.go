@@ -766,8 +766,8 @@ func (c *conn) handleIdentify(s sqe) error {
 }
 
 // The Identify Controller field offsets this controller fills in: the fields
-// NP7 pins and MAXCMD. Everything not named here stays zero, as nvmet's
-// discovery identify leaves it (NP14).
+// NP7 pins, CNTLID, the id Connect assigned (NP5), and MAXCMD. Everything
+// not named here stays zero, as nvmet's discovery identify leaves it (NP14).
 const (
 	idOffSerial    = 4
 	idLenSerial    = 20
@@ -819,8 +819,9 @@ const (
 )
 
 // buildIdentify renders the Identify Controller data structure (NP7). Fields
-// NP7 does not pin follow nvmet's discovery controller (NP14): MAXCMD is
-// nvmet's MQES + 1 over NP6's queue size, and everything unnamed is zero.
+// NP7 does not pin follow nvmet's discovery controller (NP14): CNTLID is the
+// id Connect assigned (NP5), MAXCMD is nvmet's MQES + 1 over NP6's queue
+// size, and everything unnamed is zero.
 func buildIdentify(cntlId uint16, serial string) []byte {
 	buf := make([]byte, identifyLen)
 	putAscii(buf[idOffSerial:idOffSerial+idLenSerial], serial)

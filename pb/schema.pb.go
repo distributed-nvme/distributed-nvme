@@ -2332,9 +2332,9 @@ type ForcedStart struct {
 	LegId    uint64                 `protobuf:"varint,1,opt,name=leg_id,json=legId,proto3" json:"leg_id,omitempty"`
 	Revision uint64                 `protobuf:"varint,2,opt,name=revision,proto3" json:"revision,omitempty"`
 	// The force of a mark an older gateway wrote, which passes every kind of
-	// refusal an override names; no build writes it, and a mark stored with
-	// it passes all three, since marks stay in etcd across a lockstep
-	// upgrade (cnagent.md CN12). Appended, never renumbered.
+	// refusal an override names; this build never writes it, and a mark
+	// stored with it still passes all three, since marks stay in etcd across
+	// a lockstep upgrade (cnagent.md CN12). Appended, never renumbered.
 	Force bool `protobuf:"varint,3,opt,name=force,proto3" json:"force,omitempty"`
 	// The kinds of refusal the start passes (ForceStartGroupRequest.
 	// override_list), each named once: OLDER_LEG and BAD_BLOCKS, which the

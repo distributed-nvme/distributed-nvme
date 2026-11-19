@@ -124,7 +124,8 @@ func TestFollowerRetriesAFailedPass(t *testing.T) {
 		time.Sleep(700 * time.Millisecond)
 		stop()
 		// Passes at the start, at the kick, then 100, 200 and 400 ms
-		// apart: at least the timer's first, at most five in 700 ms.
+		// apart: at least the timer's first, at most five in 700 ms, and
+		// one more allowed for the scheduler's slack.
 		if got := connectsTo(f, fakeCn1); got < 3 || got > 6 {
 			t.Errorf("%d connects to the refusing cn1 in 700 ms, want 3 to 6: "+
 				"a retry after the delay, and no pass per event", got)

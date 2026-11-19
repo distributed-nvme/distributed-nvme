@@ -214,7 +214,8 @@ func TestCreateRepairOfALegOfAnotherIdentity(t *testing.T) {
 // keep_bad_legs, so the finish retires that leg with keep set, as after a
 // forced start, and the sp worker's retire timer never gives it back: such a
 // leg can hold data the array lacks, the newer copy among two identities
-// included. A repair of a leg with a health epoch keeps nothing.
+// included. A repair that takes its bad leg for a health epoch alone keeps
+// nothing.
 func TestARepairOfALegOfAnotherIdentityKeepsIt(t *testing.T) {
 	for _, tc := range []struct {
 		name     string

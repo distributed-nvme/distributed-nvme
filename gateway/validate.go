@@ -240,10 +240,11 @@ func validateBound(field string, value uint64, min uint64, max uint64) error {
 // needs a character, so a message with any member set must have all four:
 // a partly blank address is stored for good, since no call changes a node's
 // address. tr_type is NvmeTrTypeTcp and adr_fam NvmeAdrFamIpv4 or
-// NvmeAdrFamIpv6, in every conf alike: an agent hands a DN's, a CN's or a
-// clone source's tr_type to the kernel, which matches the name exactly, and
-// the cdc renders no other words. An entirely empty message is accepted
-// here; the RPCs that require one say so themselves.
+// NvmeAdrFamIpv6, in every conf alike: an agent hands a DN's or a clone
+// source's tr_type to the kernel with every connect, and the kernel matches
+// the name exactly, and the cdc renders no other words of a CN's into a
+// discovery log entry. An entirely empty message is accepted here; the RPCs
+// that require one say so themselves.
 func validateTrConf(field string, conf *pb.NvmeTrConf) error {
 	if trConfEmpty(conf) {
 		return nil

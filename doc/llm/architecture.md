@@ -8390,11 +8390,13 @@ document and only pointed to here.
   that tier 1 leaves short takes a leg in that `location` at tier 2, as
   every group of two legs does on a cluster of two machines that each run
   disk nodes, and a pool the preferred scans refuse is placed by the plain
-  scans, which keep no `location` out. Nothing else looks at the primary's
-  `location`: a failover makes a standby primary wherever the legs are
+  scans, which keep no `location` out. Nothing else keeps a leg and the
+  primary apart: a failover makes a standby primary wherever the legs are
   (`dnv-worker.md` AR5), and a cntlr replacement (`dnv-worker.md` AR7), an
   operator's `CreateCntlr`, a grow, a clone's clone meta group, a repair
-  and a migration each place by their own rules. A controller node whose
+  and a migration each place by their own rules, which keep a cntlr out of
+  the other cntlrs' `location`s and a leg out of its group's, never one out
+  of the other's (Per-operation allocation). A controller node whose
   `location` no disk node shares gives the preference nothing to keep the
   legs from: one created under a rack name its machine's disk nodes do not
   carry, or one v0.1.0 created with no `location`, whose `location` is its
@@ -9138,10 +9140,14 @@ document and only pointed to here.
   volumes that leave its range while a node's list names no cdc that took
   them. The list names a cdc of every range, and a change of it takes a
   restart of both plugins, so a change of the cdcs starts the new cdcs with
-  their ranges while the old ones still serve every volume, puts them in the
-  list and restarts the plugins, and only then narrows an old cdc's range or
-  stops it (`operations.md`, Change the cdc addresses of the Kubernetes
-  driver).
+  their ranges while the old ones still serve every volume, writes the list
+  of every cdc that still serves after the change, the new ones and the old
+  ones that stay, restarts the plugins, and only then narrows an old cdc's
+  range or stops it (`operations.md`, Change the cdc addresses of the
+  Kubernetes driver). The list leaves out each cdc the change stops: a
+  listed cdc that cannot be reached holds every path drop on the node, a
+  failed-over primary's among them (A detach does not cut a connected host,
+  above).
 * **A kernel wait on a cntlr or a cdc that does not answer stalls every
   stage on a Kubernetes node.** The node plugin runs its connects, its
   discovery connects and log reads, and the last unstage's drop of the

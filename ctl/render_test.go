@@ -419,7 +419,7 @@ var renderCases = []renderCase{
 	},
 	{
 		// CT4's one deviation: protojson would render `bitmap` as base64, so
-		// the two bitmap reads print a hex map instead. This is the sweep
+		// the bitmap read prints a hex map instead. This is the sweep
 		// golden for step 35.
 		name: "td get-bm, the hex map",
 		rpc:  "GetThinDeviceBitmap",
@@ -514,8 +514,8 @@ func TestEmitIsCanonical(t *testing.T) {
 }
 
 // TestEmitHexBitmapResult covers hexBitmapResult on its own, including the
-// nil slice the two bitmap commands hand it when a reply carries no bitmap
-// at all.
+// nil slice the bitmap read hands it when a reply carries no bitmap at
+// all.
 func TestEmitHexBitmapResult(t *testing.T) {
 	cases := []struct {
 		in   []byte

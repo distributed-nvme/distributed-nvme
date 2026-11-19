@@ -890,7 +890,8 @@ func TestHostNqnAtItsLimits(t *testing.T) {
 // many entries' records as fill it, is read whole by one command. One more
 // entry in etcd makes the log one record longer: one command for all of it
 // is refused with invalid field, and the host reads it in two, at LPO 0 and
-// at the bound, the second one past the end answered with zeros (DS9).
+// at the bound, which lies inside the log, the second read's bytes past the
+// log's end answered with zeros (DS9).
 func TestLogOfExactlyOnePageAndOneMore(t *testing.T) {
 	cli := newTestClient(t)
 	env := newPlantEnv(t, cli)

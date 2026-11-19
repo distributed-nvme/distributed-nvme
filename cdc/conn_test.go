@@ -1032,9 +1032,10 @@ func TestIdentifyOtherCnsRefused(t *testing.T) {
 }
 
 // TestIdentifyLeavesUnpinnedFieldsZero proves NP7's "every unlisted field
-// per NP14": outside the fields NP7 lists and MAXCMD, which follows nvmet's
-// formula over NP6's queue size, every byte of the Identify data is zero, as
-// nvmet's discovery identify leaves it. The specs reserve SQES, CQES, IOCCSZ
+// per NP14": outside the fields NP7 lists, CNTLID, the id Connect assigned
+// (NP5), and MAXCMD, which follows nvmet's formula over NP6's queue size,
+// every byte of the Identify data is zero, as nvmet's discovery identify
+// leaves it. The specs reserve SQES, CQES, IOCCSZ
 // and IORCSZ for a discovery controller, and nvmet sets no CTRATT.
 func TestIdentifyLeavesUnpinnedFieldsZero(t *testing.T) {
 	ts := startServer(t)

@@ -225,23 +225,26 @@ func modelReason(err error) string {
 //
 // The pure checks come first: the rep_name rule with its reserved prefix and
 // exactly one bad leg id, INVALID_ARGUMENT. Then a GW9 candidate unit, each
-// round of which plans from its own snapshot. The snapshot makes every refusal
+// round of which plans from its own snapshot. The round makes every refusal
 // of architecture.md, Repairs, in the order a request meets them there, behind
 // openSp's resolution, deleting gate and token: the sp_level gate of an
 // operator's name, a RedundNone pool, a name in use, the group's look-up —
 // slices first, then clones (locateGrp) — a clone being deleted, a group with
 // a repair, the bad leg's membership, its two sides and its health, and then
-// the new leg's own checks. The bad leg's health is judged on the primary's
-// latest report as well as on the record (repairBadLegVerdict), so the round
-// reads the report after the snapshot, which defers the new leg's refusals
-// behind the health's to keep that order. model.CreateRepair makes all of them again in its
-// STM, where they are authoritative, but model raises every precondition as
-// FAILED_PRECONDITION, so the snapshot is what gives the INVALID_ARGUMENT,
-// ALREADY_EXISTS, NOT_FOUND and RESOURCE_EXHAUSTED answers their codes; of
-// those, the op's STM can still meet a name taken, a retired leg gone and the
-// retired list filled after the snapshot, and their exported reasons are
-// answered with the same refusals. The snapshot also keeps a create that
-// cannot commit from paying for a candidate scan.
+// the new leg's own checks. The snapshot makes all but the health, which is
+// judged on the primary's latest report as well as on the record
+// (repairBadLegVerdict), so the round reads the report after the snapshot
+// and judges the health there, and answers the new leg's refusals, which the
+// snapshot made, only behind it, to keep that order. model.CreateRepair
+// makes all of them again in its STM, where they are authoritative, the
+// report's verdict handed over by the round
+// (model.RepairNewLeg.IdentityRefused), but model raises every precondition
+// as FAILED_PRECONDITION, so the snapshot is what gives the
+// INVALID_ARGUMENT, ALREADY_EXISTS, NOT_FOUND and RESOURCE_EXHAUSTED answers
+// their codes; of those, the op's STM can still meet a name taken, a retired
+// leg gone and the retired list filled after the snapshot, and their
+// exported reasons are answered with the same refusals. The snapshot also
+// keeps a create that cannot commit from paying for a candidate scan.
 //
 // A fresh new leg is placed as architecture.md, Per-operation allocation,
 // places a repair's: the group's DN set — its legs, since it has no repair yet
@@ -755,7 +758,8 @@ type grpReportTarget struct {
 // their order, behind openSp's resolution, deleting gate and token: the
 // level, a RedundNone pool, the group's look-up — slices first, then clones
 // (locateGrp) — a clone being deleted, the leg the mark may name
-// (forceStartLegChecks) and the primary. Outside any STM the primary's
+// (forceStartLegChecks), a partial leg the overrides do not pass
+// (errPartialLeg) and the primary. Outside any STM the primary's
 // report is read (checkGrpArrayDown), and model.ForceStartGroup, the deciding
 // STM, makes its own checks again, the token first (GW6); a leg a write took
 // away since the snapshot is its model.ReasonLegNotNamable, answered in the
@@ -961,8 +965,8 @@ func primaryTarget(
 // bad leg of a STARTED repair, which left the array before md began copying
 // onto the new leg and which the finish retires. partial reports a new leg
 // the repair took back that carries the partial mark, a refusal an override
-// passes, which the caller makes (errPartialLeg) or lists. model.
-// ForceStartGroup makes the same tests in its own STM
+// passes, which the caller makes (errPartialLeg) or lists.
+// model.ForceStartGroup makes the same tests in its own STM
 // (model.ReasonLegNotNamable, model.ReasonLegPartial).
 func forceStartLegChecks(
 	stm etcdutil.STM,

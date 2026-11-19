@@ -305,9 +305,9 @@ message ForcedStart {
     uint64 leg_id = 1;
     uint64 revision = 2;
     // The force of a mark an older gateway wrote, which passes every kind of
-    // refusal an override names; no build writes it, and a mark stored with
-    // it passes all three, since marks stay in etcd across a lockstep
-    // upgrade (cnagent.md CN12). Appended, never renumbered.
+    // refusal an override names; this build never writes it, and a mark
+    // stored with it still passes all three, since marks stay in etcd across
+    // a lockstep upgrade (cnagent.md CN12). Appended, never renumbered.
     bool force = 3;
     // The kinds of refusal the start passes (ForceStartGroupRequest.
     // override_list), each named once: OLDER_LEG and BAD_BLOCKS, which the

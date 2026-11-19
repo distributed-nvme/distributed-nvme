@@ -83,11 +83,11 @@ gateway call (`--gateway-timeout`). A cdc address, in either plugin's
 list, is an IP literal and a port, an IPv6 address in brackets, since the
 node connects to the addresses of its own list as the kernel's discovery
 address, and the manifests give both plugins their list from one config
-map (CSI19). The identity service reports the driver's name and its build version
-(`common.BuildVersion`) and advertises the controller service and the
+map (CSI19). The identity service reports the driver's name and its build
+version (`common.BuildVersion`) and advertises the controller service and the
 accessibility constraints (CSI13) from both plugins, since a capability
-describes the driver, not the process that answers: the conformance test
-reads it off the node plugin's socket before it drives a volume through the
+describes the driver, not the process that answers: the conformance test reads
+it off the node plugin's socket before it drives a volume through the
 controller plugin, and the sidecars read it off the controller plugin's.
 
 CSI7. **The gateway is the controller plugin's only peer.** It holds one
@@ -318,10 +318,10 @@ lists before its agent has exported the subsystem, keeps the old path until
 the new one has joined the device, as long as the old path's reconnects are
 not refused before then; the new one cannot join while the old path holds the
 CNTLID the replacement's controller node gives the connect, and the old path
-then stays, its IO waiting, until a reconnect of it is refused or the operator
-disconnects it (`architecture.md`, Known limits). Each path holds at most the
-cn agent's IO queue cap of IO queues, one per CPU up to the cap, plus its
-admin queue, when the cap is above zero (`dnagent.md` SH32): the cap binds
+then stays, its IO waiting, until a reconnect of it is refused with DNR or the
+operator disconnects it (`architecture.md`, Known limits). Each path holds at
+most the cn agent's IO queue cap of IO queues, one per CPU up to the cap, plus
+its admin queue, when the cap is above zero (`dnagent.md` SH32): the cap binds
 this connect too. Each connect and each of the two discovery reads of CSI15
 runs under the agents' command bound (`architecture.md`, Common validation),
 since the follower runs them one at a time and one that hangs would hold up
@@ -342,21 +342,21 @@ and a kill would only make a delete that was done look failed. A connect that
 fails, or that the bound ends, counts as made when sysfs then shows a
 controller of the subsystem at the cntlr's address under the node's host NQN
 that is not being deleted or dead, one for which the kernel would refuse a
-second connect, whatever nvme-cli printed; the connect reads none of nvme-cli's
-words. The plugin reports no volume health, so nothing in the driver or in
-Kubernetes acts on a dead mount, and the operator deletes the pod. A stage
-connects to every cntlr the cdcs list for the volume's subsystem and repeats
-the connects, since the cdc lists a subsystem before its cntlrs have built it,
-until a pass ends with no error or the node holds a path to the subsystem, a
-standby's included, and a stage whose wait runs out first is UNAVAILABLE; a
-cntlr still refusing when the connects end is handed to the follower's loop at
-once, whose retry timer tries it again a second later and then at delays that
-double up to the follower's period (CSI15), so the wait the stage has left
-covers those retries while they come within it, as the first ones do at the
-defaults; the stage then waits for the volume's device link by uuid under the
-disk-by-id directory, which appears once a path is live and optimized. A
-volume whose link does not come within the wait is UNAVAILABLE, and the
-kubelet calls again.
+second connect, whatever nvme-cli printed; the connect reads none of
+nvme-cli's words. The plugin reports no volume health, so nothing in the
+driver or in Kubernetes acts on a dead mount, and the operator deletes the
+pod. A stage connects to every cntlr the cdcs list for the volume's subsystem
+and repeats the connects, since the cdc lists a subsystem before its cntlrs
+have built it, until a pass ends with no error or the node holds a path to the
+subsystem, a standby's included, and a stage whose wait runs out first is
+UNAVAILABLE; a cntlr still refusing when the connects end is handed to the
+follower's loop at once, whose retry timer tries it again a second later and
+then at delays that double up to the follower's period (CSI15), so the wait
+the stage has left covers those retries while they come within it, as the
+first ones do at the defaults; the stage then waits for the volume's device
+link by uuid under the disk-by-id directory, which appears once a path is live
+and optimized. A volume whose link does not come within the wait is
+UNAVAILABLE, and the kubelet calls again.
 
 CSI15. **The follower.** The plugin keeps the set of subsystems it has staged
 and follows the cdcs of its own configuration, read once at its start, and no
@@ -707,17 +707,17 @@ node. It applies one pod per host, each pinned to its host by node selector
 and never pulling. Each pod is Running on its host, each log is the one
 line, and the pods go.
 
-**volume.** The class's capacity object is published with a capacity above
-zero; a filesystem claim becomes a pool of one slice and two cntlrs; a pod on
-host0 writes a pattern and its digest; the same claim under a pod on host1
-checks the digest, while every path host1 holds to it shows a controller-loss
-timeout of "off" (CSI14); a raw block claim is written and read back through
-the device by a pod on host0; a claim of a second class that names xfs is
-formatted with the profile of the 6.1 series (CSI17), which the filesystem's
-own report shows, read in host0's node plugin container at the target of a
-pod that holds the claim, since only a container with the host's devices can
-read it: two features the image's maker turns on by default are off; then
-every delete, and nothing left.
+**volume.** The first class's capacity object is published with a capacity
+above zero; a filesystem claim becomes a pool of one slice and two cntlrs; a
+pod on host0 writes a pattern and its digest; the same claim under a pod on
+host1 checks the digest, while every path host1 holds to it shows a
+controller-loss timeout of "off" (CSI14); a raw block claim is written and
+read back through the device by a pod on host0; a claim of a second class that
+names xfs is formatted with the profile of the 6.1 series (CSI17), which the
+filesystem's own report shows, read in host0's node plugin container at the
+target of a pod that holds the claim, since only a container with the host's
+devices can read it: two features the image's maker turns on by default are
+off; then every delete, and nothing left.
 
 **failover.** The controller plugin's cdc list names a dead address beside
 the cdc for the case, so the publish context of every attach does, while the
@@ -734,15 +734,15 @@ pattern back through the new primary, since host0's page cache holds it.
 The agent is given back, then every delete, the controller plugin's list
 back, and nothing left.
 
-**restart.** A pod on host0 holds a claim and writes nothing. The node plugin
-is taken off host0 by a node selector on its daemon set, which leaves host0's
-paths and mount in place (CSI16), and the primary's cn agent is stopped: the
-primary moves while no plugin runs on host0, which keeps its path to the old
-primary. The plugin comes back, and within a bound well under its timer's
-period host0 holds no path to the old primary, since the plugin's first pass
-runs at its start (CSI15); the pod still writes its volume. No change notice
-starts that pass: the old primary is not replaced within the case. The agent
-is given back, then every delete, and nothing left.
+**restart.** A pod on host0 holds a claim and runs no write loop. The node
+plugin is taken off host0 by a node selector on its daemon set, which leaves
+host0's paths and mount in place (CSI16), and the primary's cn agent is
+stopped: the primary moves while no plugin runs on host0, which keeps its path
+to the old primary. The plugin comes back, and within a bound well under its
+timer's period host0 holds no path to the old primary, since the plugin's
+first pass runs at its start (CSI15); the pod still writes its volume. No
+change notice starts that pass: the old primary is not replaced within the
+case. The agent is given back, then every delete, and nothing left.
 
 **many.** Eight claims and eight pods at once, four per host, each writing
 a pattern and checking it; the cluster holds eight pools; then every

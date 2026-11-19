@@ -15,10 +15,11 @@ import (
 // Live-state reporting: the texts beside the rows, a group reading's refusal
 // and a repair verdict's refusal and waits, are cut to common.AgentTextMax
 // keeping their head and their end, as a row's text is; the forced start's
-// dry run cuts its
-// refusal as the real start's row does, so the two read the same; and the
-// longest texts the agent composes from ids, md change counts and md
-// identities fit the cap uncut at full widths.
+// dry run cuts its refusal as the real start's row does, so the two read the
+// same; and the longest texts the agent composes from ids, md change counts
+// and md identities fit the cap uncut at full widths, but for the error of a
+// start refused for two refusals or more, whose head names their kinds
+// (cnagent.md CN12).
 
 // textcapWantCut asserts got is text cut to the cap: a head of text and its
 // end around "...", within the cap.
@@ -91,11 +92,13 @@ func TestForcedStartDryRunCutsItsRefusal(t *testing.T) {
 
 // TestComposedTextsFitTheCapUncut pins that the longest texts the cn agent
 // composes, a forced start's refusals, alone and as the error of a start
-// refused for one of them, a take-back's refusals and the
-// assembly's refusal of two identities, fit common.AgentTextMax uncut with
-// every id, md change count and list length at its widest and md's
-// identities in their 35-character spelling: such a text is cut only when
-// it carries a command's output.
+// refused for one of them, a take-back's refusals and the assembly's
+// refusal of two identities, fit common.AgentTextMax uncut with every id,
+// md change count and list length at its widest and md's identities in
+// their 35-character spelling: such a text is cut only when it carries a
+// command's output. The error of a start refused for two refusals or more
+// can be cut, its head naming their kinds, and the dry run's list and the
+// agent's record of the refused start keep each refusal (cnagent.md CN12).
 func TestComposedTextsFitTheCapUncut(t *testing.T) {
 	const id = uint64(math.MaxUint64)
 	uuidA := "ffffffff:ffffffff:ffffffff:fffffff0"

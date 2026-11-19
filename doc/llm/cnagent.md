@@ -2315,36 +2315,35 @@ dm-clone (CN18).
      the drop is the operator's choice, which `InspectGrp`'s list length per
      member and the dry run's update show first.
   3. Every other member the forced start keeps, the open repair's bad leg
-     excepted, is available this pass and its superblock read answers, each read
-     before step 4 zeroes any; otherwise the row names the first that is
+     excepted, is available this pass and its superblock read answers, each
+     read before step 4 zeroes any; otherwise the row names the first that is
      not, and the pass ends for the group with nothing zeroed. Each of them
      that is a full member of the named leg's identity with a higher change
      count is a refusal an override passes, of the kind `OLDER_LEG`
-     (`olderNamedLeg`), which names that member and both counts; the checks
-     go on past it. Once every such member is available and its read
-     answers, the refusals of step 2 and of this step that the mark does not
-     pass are the group's error (`forcedStartRefused`). The mark passes a
-     refusal when its `override_list` names the refusal's kind, and passes
-     every kind when it carries the force a mark an older gateway wrote
-     can carry (`ForcedStart.force`; `forcedStartPasses`; `architecture.md`,
-     Upgrade in lockstep); the gateway alone judges `PARTIAL`, at the
-     mark's write. Nothing is zeroed. The error reads "forced start
-     refused (", the kinds' words
-     ("bad-blocks", "older-leg"), each once in the order met, "): ", then
-     each refusal, joined by "; ", so the row, cut to the row text cap
-     (`architecture.md`, Live-state reporting), keeps the kinds at its
-     head; and a Warn record, `forced start refused`, names the group, the
-     named leg, each such refusal whole, its kind's word first, and the
-     words of the kinds the mark passed among those met. Reason for
-     meeting them all: the operator names each override, so the record and
-     the dry run (CN31) show every refusal, and the row the kinds of all
-     of them at its head, before the operator chooses; and an override
-     given for one kind passes no other, so passing a bad-block list never
-     also passes a member with newer data. The bad leg is excepted,
-     neither read nor zeroed, because the repair replaces it: the finish
-     retires it with its data kept, and the move to ABORTED ends the open
-     repair with the leg still in `leg_list` as it is, where the identity
-     check of the member reconciliation refuses its add (Member
+     (`olderNamedLeg`), which names that member and both counts; the checks go
+     on past it. Once every such member is available and its read answers, the
+     refusals of step 2 and of this step that the mark does not pass are the
+     group's error (`forcedStartRefused`). The mark passes a refusal when its
+     `override_list` names the refusal's kind, and passes every kind when it
+     carries the force a mark an older gateway wrote can carry
+     (`ForcedStart.force`; `forcedStartPasses`; `architecture.md`, Upgrade in
+     lockstep); the gateway alone judges `PARTIAL`, at the mark's write.
+     Nothing is zeroed. The error reads "forced start refused (", the kinds'
+     words ("bad-blocks", "older-leg"), each once in the order met, joined by
+     ", ", then "): ", then each refusal, joined by "; ", so the row, cut to
+     the row text cap (`architecture.md`, Live-state reporting), keeps the
+     kinds at its head; and a Warn record, `forced start refused`, names the
+     group, the named leg, each such refusal whole, its kind's word first, and
+     the words of the kinds the mark passed among those met. Reason for
+     meeting them all: the operator names each override, so the dry run (CN31)
+     shows every refusal, passed or not, and the record and the row every one
+     the mark does not pass, the row with their kinds at its head, before the
+     operator chooses; and an override given for one kind passes no other, so
+     passing a bad-block list never also passes a member with newer data. The
+     bad leg is excepted, neither read nor zeroed, because the repair replaces
+     it: the finish retires it with its data kept, and the move to ABORTED
+     ends the open repair with the leg still in `leg_list` as it is, where the
+     identity check of the member reconciliation refuses its add (Member
      reconciliation, above).
      Reason for the count: within one identity md raises the count on
      every change of the array, so such a member holds newer data than the
