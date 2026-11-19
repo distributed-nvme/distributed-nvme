@@ -1228,7 +1228,10 @@ A stopped node plugin leaves the connections and mounts of its volumes in place.
 `dnvctl` included, and only then does any program start again. The workers
 stop first and start last. There is no rolling upgrade, since no message
 carries a build version, and two builds that differ in a message would
-misread each other with no error.
+misread each other with no error. A disk node's disk keeps the format it
+was made with across every upgrade, and each new build reads it as it is,
+unless the new release's notes say that the disks must be made again;
+making a disk again loses every side it holds.
 
 **Logs.** The programs log to stderr as JSON, one record per line, at one
 level, with no level flag and no rotation. Keep the logs on a filesystem

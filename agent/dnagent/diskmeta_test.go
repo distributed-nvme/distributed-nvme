@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"google.golang.org/protobuf/encoding/protowire"
 	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/reflect/protoreflect"
 
@@ -1712,6 +1713,94 @@ func TestDiskMetaRecordSnapshots(t *testing.T) {
 		t.Errorf("the live table was disturbed: %d records", len(got))
 	}
 	_ = snapshot
+}
+
+// TestDiskMetaKeepsFieldsItDoesNotKnow pins the keep rule of the disk
+// format (dnagent.md DN5; architecture.md, [D13]): a volume table that
+// carries fields this build does not know, on the table, on a side record
+// and on a clone-metadata record, keeps every one of them, byte for byte,
+// through a reload and a rewrite by each kind of mutation — a zeroed count,
+// an allocation, a free of another side and a free of another clone-metadata
+// record — and a second reload.
+func TestDiskMetaKeepsFieldsItDoesNotKnow(t *testing.T) {
+	meta, node := formatted(t)
+	ctx := context.Background()
+	const (
+		keptSide, freedSide, newSide = uint64(0x41), uint64(0x42), uint64(0x43)
+		keptMigr, freedMigr          = uint64(0x51), uint64(0x52)
+	)
+	for _, side := range []uint64{keptSide, freedSide} {
+		if _, err := meta.AllocSide(ctx, testSp, side, 2, 2*metaExtentSize); err != nil {
+			t.Fatalf("AllocSide %x: %v", side, err)
+		}
+	}
+	for _, migr := range []uint64{keptMigr, freedMigr} {
+		if _, err := meta.AllocCloneMeta(ctx, testSp, migr, 2); err != nil {
+			t.Fatalf("AllocCloneMeta %x: %v", migr, err)
+		}
+	}
+	// Fields a later build might add, at numbers this one leaves free: a
+	// varint on the table, bytes on the side record, a fixed64 on the
+	// clone-metadata record.
+	tableUnknown := protowire.AppendVarint(protowire.AppendTag(nil, 100, protowire.VarintType), 7)
+	sideUnknown := protowire.AppendBytes(protowire.AppendTag(nil, 101, protowire.BytesType), []byte("later"))
+	metaUnknown := protowire.AppendFixed64(protowire.AppendTag(nil, 102, protowire.Fixed64Type), 0x0102030405060708)
+	meta.mu.Lock()
+	next := proto.Clone(meta.table).(*pb.DnDiskTable)
+	next.ProtoReflect().SetUnknown(tableUnknown)
+	findSide(next, testSp, keptSide).ProtoReflect().SetUnknown(sideUnknown)
+	findCloneMeta(next, testSp, keptMigr).ProtoReflect().SetUnknown(metaUnknown)
+	err := meta.save(ctx, next)
+	meta.mu.Unlock()
+	if err != nil {
+		t.Fatalf("save: %v", err)
+	}
+
+	again := reopen(node)
+	if err := again.EnsureFormatted(ctx, testCluster, testDn, metaExtentSize, mayFormat); err != nil {
+		t.Fatalf("EnsureFormatted: %v", err)
+	}
+	if err := again.SetSideZeroed(ctx, testSp, keptSide, 0, metaExtentSize); err != nil {
+		t.Fatalf("SetSideZeroed: %v", err)
+	}
+	if _, err := again.AllocSide(ctx, testSp, newSide, 1, metaExtentSize); err != nil {
+		t.Fatalf("AllocSide: %v", err)
+	}
+	if err := again.FreeSide(ctx, testSp, freedSide); err != nil {
+		t.Fatalf("FreeSide: %v", err)
+	}
+	if err := again.FreeCloneMeta(ctx, testSp, freedMigr); err != nil {
+		t.Fatalf("FreeCloneMeta: %v", err)
+	}
+
+	last := reopen(node)
+	if err := last.EnsureFormatted(ctx, testCluster, testDn, metaExtentSize, mayFormat); err != nil {
+		t.Fatalf("EnsureFormatted: %v", err)
+	}
+	last.mu.Lock()
+	defer last.mu.Unlock()
+	table := last.table
+	kept := findSide(table, testSp, keptSide)
+	keptMeta := findCloneMeta(table, testSp, keptMigr)
+	if kept == nil || keptMeta == nil || findSide(table, testSp, newSide) == nil ||
+		findSide(table, testSp, freedSide) != nil || findCloneMeta(table, testSp, freedMigr) != nil {
+		t.Fatalf("the mutations did not land: %v", table)
+	}
+	if kept.GetZeroedBytes() != metaExtentSize {
+		t.Errorf("side %x zeroed %d, want %d", keptSide, kept.GetZeroedBytes(), metaExtentSize)
+	}
+	for _, c := range []struct {
+		what      string
+		got, want []byte
+	}{
+		{"the table", table.ProtoReflect().GetUnknown(), tableUnknown},
+		{"the side record", kept.ProtoReflect().GetUnknown(), sideUnknown},
+		{"the clone-metadata record", keptMeta.ProtoReflect().GetUnknown(), metaUnknown},
+	} {
+		if string(c.got) != string(c.want) {
+			t.Errorf("%s keeps unknown bytes %x, want %x", c.what, c.got, c.want)
+		}
+	}
 }
 
 // The envelope: the magics, the version, the seq and the format_uuid that

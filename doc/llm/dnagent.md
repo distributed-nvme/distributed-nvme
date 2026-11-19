@@ -2212,10 +2212,14 @@ probe-first (SH16), building `DnInfo` as it goes:
   `architecture.md`, Disk node's) — slot-A-before-header is what lets a load
   read a valid header with no valid slot as corruption, since a crash
   between the two writes leaves an inert slot rather than a header with no
-  table. Magic present but version or CRC wrong ⇒ **error**, and every later
-  operation errors too — a corrupt header is never formatted over, and
-  neither is one written under another version of the format: such a disk is
-  refused until it is re-created. A header whose three layout fields are not
+  table. Magic present but CRC wrong, or a version this build does not read
+  ⇒ **error**, and every later operation errors too — a corrupt header is
+  never formatted over, and neither is one written under a version of the
+  format this build does not read (`architecture.md`, [D13]): such a disk is
+  refused until a build that reads its version serves it, or it is made
+  again. The header is written here alone, so a disk keeps the version it
+  was formatted with, and every table write keeps the disk's own version
+  ([D13]). A header whose three layout fields are not
   this build's constants (`DnDataOffset`, `DnCloneMetaOffset`,
   `DnCloneMetaSize`) is refused the same way, naming the field, its value
   and the constant (`parseDnHeader`): every reader takes the layout from the
@@ -2226,6 +2230,13 @@ probe-first (SH16), building `DnInfo` as it goes:
   **never** overwritten. `extent_size` is therefore immutable for the life
   of a format. A re-call on an already-converged disk issues **zero** writes
   (SH16).
+
+  A rewrite of the volume table keeps every field this build does not know,
+  in the table and in each side and clone-metadata record, as the slot held
+  it: a read keeps the fields it does not know, and every mutation writes a
+  copy of the table it read with its one change. Reason: the format lets a
+  later build add a field with no new version ([D13]), and a rewrite that
+  dropped it would take from the table what this build cannot judge.
 
   The identity check is what makes the volume table this node's to build on
   and to change: handing out a record it already holds (`AllocSide`,

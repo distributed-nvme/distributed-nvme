@@ -480,7 +480,8 @@ Per DN, once (created by the dn agent at the first `SyncupDn`):
      64-bit `format_uuid` and the three layout fields `data_offset`,
      `clone_meta_offset` and `clone_meta_size`, which a read holds to the
      constants: a header whose layout fields differ is refused like one of
-     another format version, and never formatted over (`dnagent.md` DN5);
+     a format version the build does not read, and never formatted over
+     (`dnagent.md` DN5);
    * the two alternating **volume-table** slots at `DnTableSlotAOffset` and
      `DnTableSlotBOffset`, each `DnTableSlotSize` bytes — a magic, the
      header's `format_uuid`, a monotonic `seq`, a checksum and a
@@ -512,8 +513,8 @@ Per DN, once (created by the dn agent at the first `SyncupDn`):
    header with no valid slot is a hard error, never a silently empty table.
    A header that names another cluster, dn or extent size is a foreign
    disk, which is never overwritten, and a corrupt header, or one written
-   under another format version, is never formatted over either
-   (`dnagent.md` DN5 is the procedure).
+   under a format version the build does not read ([D13]), is never
+   formatted over either (`dnagent.md` DN5 is the procedure).
 
    The on-disk table — not the agent's local store — is authoritative for
    extent placement, so a node that loses `--local-store` but keeps its disk
@@ -7120,12 +7121,17 @@ then the mount. Reason: they hold nothing a build reads, a node restart
 clears them, and code that knows their names would serve objects no build
 makes.
 
-The dnv disk format is the one exception, the one stored layout with a
-version of its own: any change to it is a new version ([D13]), a dn agent
-reads only the version of its build, and a disk of another version is
-refused and never formatted over, until it is re-created
-(`dnagent.md` DN5). A build with a new format version therefore takes
-over no disk an older build formatted.
+The dnv disk format is the one stored layout with a version of its own,
+which its header carries ([D13]). A field joins it with no new version only
+where its zero is right in what an older build wrote, as in every other
+stored message; any other change takes a new version. A disk keeps the
+version it was formatted with for its whole life, so a build reads every
+version a disk the build before it served can carry, or its release notes
+say that disks are made again. A dn agent refuses a disk of a version its
+build does not read and never formats it over, and a rewrite of the volume
+table keeps the fields its build does not know (`dnagent.md` DN5). So a
+build takes over every disk the build before it served, however many
+upgrades ago it was formatted, unless its release notes say otherwise.
 
 ## dnv-cdc
 
@@ -7547,9 +7553,26 @@ document and the component documents cite it by its id.
   volume), and that refusal is enforced at the metadata layer: an
   unconfirmed disk rejects every mutation, because a failed `SyncupDn`
   does not stop the `SyncupSide` calls that follow it (Common agent rules;
-  `dnagent.md` DN5). Changing any layout constant, or what a volume-table
-  record holds, is a header-version bump, not a tweak: a disk written
-  under another version is refused, never formatted over (Disk node).
+  `dnagent.md` DN5). The format changes by one rule. A field joins
+  `DnDiskHeader` or `DnDiskTable` with no new format version only where its
+  zero is the right reading in a record an older build wrote; renumbering a
+  field, giving a field the number of a removed one, removing a field whose
+  absence changes the meaning, changing what a field means and changing a
+  layout constant each take a new version. A disk keeps the version it was
+  formatted with for its whole life: the header is written once, at the
+  format, and a build writes a disk's volume table in that disk's version.
+  So a build reads every version that a disk the build before it served can
+  carry, which is every version written since the last release whose notes
+  said that disks are made again, or its own release notes say that disks
+  are made again; a disk of a version the build does not read is refused,
+  never formatted over (Disk node). A rewrite of the volume table
+  keeps every field the build does not know, in the table and in each
+  record, as it read them (`dnagent.md` DN5). Reason: a disk node's disk
+  holds the data of every side on it, so a build that cannot read it takes
+  that data away from every pool with a leg there unless the disk is made
+  again first; and a field whose zero reads as a wrong but valid state in an
+  older record could have a serving side zeroed again, or a side never
+  zeroed served.
 * **[D14] The CN uses no LVM either; a clone's dm-clone metadata lives on
   DNs.** A volume group would bring onto the CN exactly the failure class
   [D13] (a) keeps off the DN: a bare vgs or lvs label scan reads every block

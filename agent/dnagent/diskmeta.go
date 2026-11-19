@@ -71,9 +71,14 @@ type DiskMeta struct {
 const (
 	dnHeaderMagic = "DNVDISK1"
 	dnTableMagic  = "DNVTABL1"
-	// dnHeaderVersion is the format this agent reads and writes. A header
-	// whose magic matches but whose version is another is refused, never
-	// formatted over: such a disk is re-created to take this format.
+	// dnHeaderVersion is the format version this agent writes, and the one
+	// version it reads. By the rule of the disk format (architecture.md,
+	// [D13]), a disk keeps the version it was formatted with, since only the
+	// format writes the header, so a build that writes a new version reads
+	// every version a disk the build before it served can carry, and writes
+	// a disk's table in that disk's version, or its release notes say that
+	// disks are made again; a header whose magic matches but whose version
+	// this build does not read is refused, never formatted over.
 	dnHeaderVersion = 2
 
 	// Header block: magic[0:8] version[8:12] len[12:16] proto[16:16+N]
@@ -244,6 +249,9 @@ func (d *DiskMeta) readSlot(
 	if dnSlotCrc(head[:dnSlotCrcOff], body) != want {
 		return nil, 0, false, nil
 	}
+	// A plain Unmarshal keeps every field this build does not know, and every
+	// mutation writes a clone of the table it read, so a rewrite keeps them
+	// as they were (DN5).
 	table := &pb.DnDiskTable{}
 	if err := proto.Unmarshal(body, table); err != nil {
 		return nil, 0, false, nil
@@ -254,10 +262,10 @@ func (d *DiskMeta) readSlot(
 // parseDnHeader validates the header block. ok is false — with no error —
 // only when the magic is absent, i.e. the disk is unformatted. A header whose
 // three layout fields — data_offset, clone_meta_offset and clone_meta_size —
-// are not this build's constants is refused like one of another format
-// version (DN5; architecture.md, [D13]): every reader of the disk takes the
-// layout from the constants, so a disk laid out otherwise would be read and
-// written at the wrong places. It is never formatted over.
+// are not this build's constants is refused like one of a format version
+// this build does not read (DN5; architecture.md, [D13]): every reader of the
+// disk takes the layout from the constants, so a disk laid out otherwise
+// would be read and written at the wrong places. It is never formatted over.
 func parseDnHeader(raw []byte) (*pb.DnDiskHeader, bool, error) {
 	if len(raw) < common.DnHeaderSize {
 		return nil, false, fmt.Errorf(
