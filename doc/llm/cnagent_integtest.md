@@ -480,36 +480,40 @@ The stage then resumes the member and removes what it built, and
 exit, release the stall and remove the mdadm wrapper (Teardown and
 cleanup).
 
-**smoke** proves the plumbing: the pointer before the `SyncupCntlr` that builds
-a `RedundNone` primary stack (`cnagent.md` CN8 to CN16), all rows OK but the
-legs, pending until their probers' first round (CN11); admission on real
-nvmet (CN16): built with no allowed host the subsystem admits none, probes
-clean and refuses the emulated host's connect; granted, it admits exactly that
-host; the host's path and the CN's leg paths each hold the cap's IO queues
-and the admin queue (`dnagent.md` SH32); revoked again, the connected host keeps its path and its next connect is
-refused; host IO; clean check rounds, the namespace identity included
-(`dnagent.md` SH17); the raw thin-pool status line the auto-grow parses (CN28);
-a raid0 suspended by hand, which a check round's read names with the leftover
-code and the `SyncupCntlr` sent again resumes (CN30); four subsystems made by
-hand (CN21): one with a namespace over a device that is no ns-dev, one empty
-with the kernel's default model, one with dnv's model and a namespace whose
-device was never written, and one empty with the kernel's default model and an
-allowed host. Through the grace the cntlr is read every round and those reads
-leave the directories' times where they were, and the node's read while they
-are young names none; past the grace the node's read names the two with no
-host and no port link, and a fifth made just then with dnv's model and an
-allowed host, which its model alone decides with no age, and the `SyncupCn`
-that brings removes the three and leaves the other two. A subsystem made by hand on the other VM, which is no transfer
-of the cluster, connected from the CN once with the cn agent's host NQN and
-once with another: the node's read names it, and the `SyncupCn` that brings
-disconnects the controller of the cn's host NQN and leaves the other's (CN21).
-A subsystem whose NQN carries dnv's prefix and decodes to nothing, which the
-request names: the namespace the request drops goes, and the subsystem, once
-the request no longer names it, stays, as the known limit says, until the
-stage removes it. Then a teardown by an empty pointer list, re-sent while it
-replies leftover (CN7, CN21), leaving the CN no dm device or host-facing
-subsystem but the two made by hand that it leaves alone, which the stage then
-removes itself, and a fresh `CheckCn` round replying clean (CN30).
+**smoke** proves the plumbing: the pointer before the `SyncupCntlr` that
+builds a `RedundNone` primary stack (`cnagent.md` CN8 to CN16), all rows OK
+but the legs, pending until their probers' first round (CN11); admission on
+real nvmet (CN16): built with no allowed host the subsystem admits none,
+probes clean and refuses the emulated host's connect; granted, it admits
+exactly that host; the host's path and the CN's leg paths each hold the
+cap's IO queues and the admin queue (`dnagent.md` SH32); revoked again, the
+connected host keeps its path and its next connect is refused; host IO;
+clean check rounds, the namespace identity included (`dnagent.md` SH17);
+the raw thin-pool status line the auto-grow parses (CN28); a raid0
+suspended by hand, which a check round's read names with the leftover code
+and the `SyncupCntlr` sent again resumes (CN30); four subsystems made by
+hand (CN21): one with a namespace over a device that is no ns-dev, one
+empty with the kernel's default model, one with dnv's model and a namespace
+whose device was never written, and one empty with the kernel's default
+model and an allowed host. Through the grace the cntlr is read every round
+and those reads leave the times of the empty one and of the one with an
+unwritten device where they were, and the node's read while they are young
+names none; past the grace the node's read names those two, the ones with
+no namespace device and no host or port link, and a fifth made just then
+with dnv's model and an allowed host, which its model alone decides with no
+age, and the `SyncupCn` that brings removes the three and leaves the other
+two. A subsystem made by hand on the other VM, which is no transfer of the
+cluster, connected from the CN once with the cn agent's host NQN and once
+with another: the node's read names it, and the `SyncupCn` that brings
+disconnects the controller of the cn's host NQN and leaves the other's
+(CN21). A subsystem whose NQN carries dnv's prefix and decodes to nothing,
+which the request names: the namespace the request drops goes, and the
+subsystem, once the request no longer names it, stays, as the known limit
+says, until the stage removes it. Then a teardown by an empty pointer list,
+re-sent while it replies leftover (CN7, CN21), leaving the CN no dm device
+or host-facing subsystem but the two made by hand that it leaves alone,
+which the stage then removes itself, and a fresh `CheckCn` round replying
+clean (CN30).
 
 **redund** first pins, with no agent and no NVMe-oF path, the refusal the
 cross-leg half of failover safety rests on (`architecture.md`, [D16]): on
@@ -1019,14 +1023,16 @@ and the case fails unless the copy holds once its source goes and the wipe
 comes in the middle of it.
 
 **What the stock rules do without the rules of `deploy/udev/`** is a manual
-check the suite never runs, as it never removes rules it did not install: on
-a pair of lab VMs, after setup, the files of `deploy/udev/` are removed from
-the rules directory and udev reloaded, and redund's foreign stage is run with
-its checks of udev's records left out. What each stock rule then makes of
-each signature — an array over the data group's array or a leg's NVMe device,
-an active volume of the planted group, a physical volume recorded online, a
-bcache device — is read from the node; the cleanup's sweep of what the system
-made of the foreign signatures removes it.
+check the suite never runs, since it lets the system's own rules build
+arrays, volumes or bcache devices over dnv's devices on lab VMs other
+suites share: on a pair of lab VMs, after setup, the files of
+`deploy/udev/` are removed from the rules directory and udev reloaded, and
+redund's foreign stage is run with its checks of udev's records left out.
+What each stock rule then makes of each signature — an array over the data
+group's array or a leg's NVMe device, an active volume of the planted
+group, a physical volume recorded online, a bcache device — is read from
+the node; the cleanup's sweep of what the system made of the foreign
+signatures removes it.
 
 ## Teardown and cleanup
 
@@ -1082,45 +1088,47 @@ any dm or nvmet residue fails it, since reporting it is not success.
 Error paths beyond those that Goal and scope lists; QoS, not enforced
 (`cnagent.md` CN6); `GrowSlice`; a leg gaining or losing a second side,
 whose disk node part the dn suite's migrations prove, but for a cancel,
-which only the e2e suite's cancelled migration exercises, and whose cn agent
-part — the connect per side, the disconnect of a dead path by device and the
-cut of a migrating leg's path (`cnagent.md` CN10) — the unit tests prove,
-the e2e suite's migrations exercising it, and the path rows of a leg with
-two sides (`cnagent.md` CN28), which the unit tests cover; levels but
-read-write, read-only and the no-clone gate, save what repair's forced-start
-stages read of the two levels they use to free the data array: the pool row
-the level that builds no thin pool suppresses, and the group array the level
-that builds no group array stops (`cnagent.md` CN19); more than one slice
-but torn's two RedundNone slices on one disk node; several namespaces per
-subsystem; snapshots of snapshots; `UpdateNamespaceDev`; a host-facing
-namespace or subsystem dropped short of a cntlr teardown, leaving the park
-before its removal (`cnagent.md` CN21's park before every layer and its
-nvmet layer L1) to the unit tests; cntlid-slot exhaustion; the cdc; TLS and
-authentication; performance; faults beyond those the Cases name;
-provisioning deferral (`cnagent.md` CN9), a clone's for its clone meta
-group's sides included; a clone meta group under md-raid1 or one that is not
-ready, and a dm-clone whose metadata is not in read-write mode, all of which
-the unit tests cover (CN18); of a repair, the put-back of a new leg md has
-failed, a bad leg that md holds without a place once its repair has started
-in md, the add's wait for a member that keeps the data, a half-copied new
-leg after a failover, a new leg that is not available, which is no late
-member short of a forced start's wait and no candidate of an assembly, a
-converge's read of the array again that fails or finds it not running, an
-aborted repair's new leg as an extra and a repair on a clone meta group, all
-of which the unit tests cover (CN12); of a forced start, a second run of its
-assembly after a first run that failed, the stop a pool's concat refuses, a
-zero that fails or is killed or that its read back does not prove, a
-superblock read that fails, a new leg of a CREATED repair whose abort flag
-is set, which it does not zero and starts from only when the mark names it,
-a STARTED repair's new leg, which it keeps whatever the flag says, its wait
-for a late member and its other errors, and of the take-back check, a new
-leg with no superblock, a STARTED repair's add with no member to compare
-with, a keeper whose superblock read finds none and a superblock read that
-did not answer, and the identity check of a `leg_list` member's add with the
-reasons it and an assembly of two identities put on the legs' rows, all of
-which the unit tests cover (CN12); a snapshot torn by a quiesce that fails,
-and a header read that waits or fails, whose rules the unit tests cover
-(CN14); the lingering-clone hold's scope per thin device, left to the unit
-tests (CN18); the other states of the clone's shared row rule (CN18); and
-whether a refused request leaves a lock entry (`dnagent.md`, Concurrency —
-`locks.go`; `cnagent.md` CN7), left to the unit tests.
+which only the e2e suite's cancelled migration exercises, and whose cn
+agent part — the connect per side, the disconnect of a dead path by device
+and the cut of a migrating leg's path (`cnagent.md` CN10) — the unit tests
+prove, the e2e suite's migrations exercising it, and the path rows of a leg
+with two sides (`cnagent.md` CN28), which the unit tests cover; levels but
+read-write, read-only and the no-clone gate, save what repair's
+forced-start stages read of the two levels they use to free the data array:
+the pool row the level that builds no thin pool suppresses, and the group
+array the level that builds no group array stops (`cnagent.md` CN19); more
+than one slice but torn's two RedundNone slices on one disk node; several
+namespaces per subsystem; snapshots of snapshots; `UpdateNamespaceDev`; the
+park before the removal of a host-facing namespace or subsystem dropped
+short of a cntlr teardown (`cnagent.md` CN21's park before every layer and
+its nvmet layer L1), which smoke's undecodable stage and discard drop
+without checking the park, left to the unit tests; cntlid-slot exhaustion;
+the cdc; TLS and authentication; performance; faults beyond those the Cases
+name; provisioning deferral (`cnagent.md` CN9), a clone's for its clone
+meta group's sides included; a clone meta group under md-raid1 or one that
+is not ready, and a dm-clone whose metadata is not in read-write mode, all
+of which the unit tests cover (CN18); of a repair, the put-back of a new
+leg md has failed, a bad leg that md holds without a place once its repair
+has started in md, the add's wait for a member that keeps the data, a
+half-copied new leg after a failover, a new leg that is not available,
+which is no late member short of a forced start's wait and no candidate of
+an assembly, a converge's read of the array again that fails or finds it
+not running, an aborted repair's new leg as an extra and a repair on a
+clone meta group, all of which the unit tests cover (CN12); of a forced
+start, a second run of its assembly after a first run that failed, the stop
+a pool's concat refuses, a zero that fails or is killed or that its read
+back does not prove, a superblock read that fails, a new leg of a CREATED
+repair whose abort flag is set, which it does not zero and starts from only
+when the mark names it, a STARTED repair's new leg, which it keeps whatever
+the flag says, its wait for a late member and its other errors, and of the
+take-back check, a new leg with no superblock, a STARTED repair's add with
+no member to compare with, a keeper whose superblock read finds none and a
+superblock read that did not answer, and the identity check of a `leg_list`
+member's add with the reasons it and an assembly of two identities put on
+the legs' rows, all of which the unit tests cover (CN12); a snapshot torn
+by a quiesce that fails, and a header read that waits or fails, whose rules
+the unit tests cover (CN14); the lingering-clone hold's scope per thin
+device, left to the unit tests (CN18); the other states of the clone's
+shared row rule (CN18); and whether a refused request leaves a lock entry
+(`dnagent.md`, Concurrency — `locks.go`; `cnagent.md` CN7), left to the
+unit tests.

@@ -145,10 +145,11 @@ func validateHostFacingNqn(field string, value string) error {
 // clone's source, CreateClone's src_nqn (architecture.md, Common
 // validation): one in the dnv namespace is taken only when it decodes as a
 // transfer NQN (common.IsCloneSrcNqn). The cn agent removes a clone source
-// once its clone has gone only when it is a transfer, judged by its NQN, or
-// in no dnv namespace, judged by its controllers' host NQN (cnagent.md
-// CN21), so any other source in the dnv namespace would stay connected on
-// every controller node that read it, for good.
+// once its clone has gone only when it is a transfer of this cluster, judged
+// by its NQN, or a transfer of another cluster or one in no dnv namespace,
+// judged at node level by its controllers' host NQN (cnagent.md CN21), so
+// any other source in the dnv namespace would stay connected on every
+// controller node that read it, for good.
 func validateCloneSrcNqn(field string, value string) error {
 	if err := validateNqn(field, value); err != nil {
 		return err

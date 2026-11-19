@@ -1886,47 +1886,48 @@ harmless. A migration destination takes its run before it zeroes
 * A subsystem's NQN must in addition lie outside the dnv namespace where a
   user picks one, `CreateSubsystem.nqn`, and where a transfer is built on
   one, `CreateTransfer.ori_nqn`: an NQN that starts with `NqnPrefix` and a
-  ":" (`IsDnvNqn`, NQNs) is `INVALID_ARGUMENT` there. The agents attribute a
-  subsystem by parsing its NQN (Teardown by sweep), so such a name would be
-  judged as one dnv minted: the cn agent would never sweep one shaped like
-  a side export's NQN after `DeleteSubsystem`, and would sweep one shaped
-  like a transfer NQN naming another SP of this cluster as that SP's
-  transfer export while a host still uses it. `CreateClone.src_nqn`, in turn,
-  may lie in the dnv namespace only when it decodes as a transfer NQN
+  ":" (`IsDnvNqn`, NQNs) is `INVALID_ARGUMENT` there. The agents attribute
+  a subsystem by parsing its NQN (Teardown by sweep), so such a name would
+  be judged as one dnv minted: the cn agent would never sweep one shaped
+  like a side export's NQN after `DeleteSubsystem`, and would sweep one
+  shaped like a transfer NQN naming another SP of this cluster as that SP's
+  transfer export while a host still uses it. `CreateClone.src_nqn`, in
+  turn, may lie in the dnv namespace only when it decodes as a transfer NQN
   (`XferNqn`, `IsCloneSrcNqn`; another SP's, NQNs), and the cn agent's
   cntlr gate holds a stored clone to the same rule (`cnagent.md` CN8): the
   cn agent removes a clone source once its clone has gone only when it is a
-  transfer, judged by its NQN, or in no dnv namespace, judged by its
+  transfer of this cluster, judged by its NQN, or a transfer of another
+  cluster or one in no dnv namespace, judged at node level by its
   controllers' host NQN (`cnagent.md` CN21), so any other source in the dnv
   namespace would stay connected for good. Host NQNs
   (`Transfer.allowed_hosts` carries `CnHostNqn`s) and the `nqn` of
-  `UpdateSubsystemHosts`,
-  `CreateNamespace`, `UpdateNamespaceDev` and `UpdateNamespaceSuspended`,
-  which address an existing subsystem, take only the NQN rule above. A
-  subsystem already stored in the dnv namespace can therefore still be
-  updated if its NQN passes the NQN rule, and emptied and deleted in any
-  case (next bullet); only a transfer cannot be built on it. The rule does
-  not change how the cn agent judges such a subsystem, though (Teardown by
-  sweep). When its NQN decodes to nothing, the cn agent attributes it by a
-  claim alone: while a cntlr request it holds names the subsystem, the
-  subsystem is that cntlr's SP's, so the sweep — the only remover of a
-  namespace that left `ns_list` (`cnagent.md` CN21) — removes a namespace
-  `DeleteNamespace` takes out of it, and the whole subsystem at
-  `SP_LEVEL_DISABLE` (SpLevel). One that decodes as any dnv kind other than
-  a transfer of this cluster, such as one shaped like a side export's NQN,
-  is never attributed, claimed or not. Such a subsystem, and one that
-  decodes to nothing once no cntlr request the agent holds names it —
-  after `DeleteSubsystem`, or when that cntlr leaves the CN — is removed
-  by no sweep of the cn agent, nor is a namespace in it: a namespace
-  `DeleteNamespace` takes out of one that decodes stays enabled on every
-  CN that had it, and the cn agent leaves its nvmet subsystem there, still
-  linked to that CN's port and holding every namespace it still has. Each
-  such namespace keeps its ns-dev open, so that SP's sweep on that CN stops at
-  the ns-dev layer on every pass and leaves the SP's unwanted objects in
-  every lower layer in place (Teardown by sweep); once that cntlr or the SP
-  is deleted, that is the rest of that SP's stack on that CN. And one that
-  decodes as a transfer NQN of this cluster naming another SP is still
-  swept as that SP's transfer export while a host uses it.
+  `UpdateSubsystemHosts`, `CreateNamespace`, `UpdateNamespaceDev` and
+  `UpdateNamespaceSuspended`, which address an existing subsystem, take
+  only the NQN rule above. A subsystem already stored in the dnv namespace
+  can therefore still be updated if its NQN passes the NQN rule, and
+  emptied and deleted in any case (next bullet); only a transfer cannot be
+  built on it. The rule does not change how the cn agent judges such a
+  subsystem, though (Teardown by sweep). When its NQN decodes to nothing,
+  the cn agent attributes it by a claim alone: while a cntlr request it
+  holds names the subsystem, the subsystem is that cntlr's SP's, so the
+  sweep — the only remover of a namespace that left `ns_list` (`cnagent.md`
+  CN21) — removes a namespace `DeleteNamespace` takes out of it, and the
+  whole subsystem at `SP_LEVEL_DISABLE` (SpLevel). One that decodes as any
+  dnv kind other than a transfer of this cluster, such as one shaped like a
+  side export's NQN, is never attributed, claimed or not. Such a subsystem,
+  and one that decodes to nothing once no cntlr request the agent holds
+  names it — after `DeleteSubsystem`, or when that cntlr leaves the CN — is
+  removed by no sweep of the cn agent, nor is a namespace in it: a
+  namespace `DeleteNamespace` takes out of one that decodes stays enabled
+  on every CN that had it, and the cn agent leaves its nvmet subsystem
+  there, still linked to that CN's port and holding every namespace it
+  still has. Each such namespace keeps its ns-dev open, so that SP's sweep
+  on that CN stops at the ns-dev layer on every pass and leaves the SP's
+  unwanted objects in every lower layer in place (Teardown by sweep); once
+  that cntlr or the SP is deleted, that is the rest of that SP's stack on
+  that CN. And one that decodes as a transfer NQN of this cluster naming
+  another SP is still swept as that SP's transfer export while a host uses
+  it.
 * `DeleteNamespace.nqn` and `DeleteSubsystem.nqn` take neither rule, only
   the length check: non-empty and at most `MaxNqnLength` bytes. Each names
   an exact subsystem key, and a string no subsystem is stored under is
@@ -2930,28 +2931,30 @@ set — plus the raid0 and the dm-error of Primary cntlr; namespace devices
 are per `Namespace` and appear with it (Subsystems, namespaces).
 
 **Snapshot point-in-time.** A td is striped across every slice, so a
-snapshot is crash-consistent only if all `slice_cnt` `create_snap`
-messages capture one instant. The primary therefore quiesces the origin
-td's raid0 (`CnRaid0Name`) around the whole per-slice sequence, so that no
-host write lands between two slices' messages; `cnagent.md` CN14 is the
-agent-side spec, bounds of the suspension included ([D12]). A snapshot
-whose messages one pass did not all send — the primary stopped between two
-of them, or the pass skipped a slice or a slice's message failed — is
-finished by a later pass and is **torn**: its slices date from different
-instants. The cn agent marks it torn in its report when one pass makes a
-slice's thin id while another slice's id already exists, or makes ids in
-two slices without the quiesce, which failed; a message the soft timeout
-killed counts as one that made its id (`cnagent.md` CN14). It saves
-the mark in its local store at once and reports it in any role until the
-request shows it, and the sp worker writes it into `ThinDevice.torn` from
-the first drain of reports that shows it, created or not, and the created
-flip keeps it (sp role; `dnv-worker.md` RW19): `torn` is set at most once and
-never cleared, and `ListThinDevices` returns it. The one remedy is to
-delete and re-create the snapshot. The mark is lost only with the cntlr
-that saw the tear, by a crash between the run's first message and the
-save, or by a save that fails followed by an agent restart before the
-worker records it; the snapshot then reads `torn` false (Known limits). Reason: nothing
-else tells the operator which snapshot needs the remedy.
+snapshot is crash-consistent only if all `slice_cnt` `create_snap` messages
+capture one instant. The primary therefore quiesces the origin td's raid0
+(`CnRaid0Name`) around the whole per-slice sequence, so that no host write
+lands between two slices' messages; `cnagent.md` CN14 is the agent-side
+spec, bounds of the suspension included ([D12]). A snapshot whose messages
+one pass did not all send — the primary stopped between two of them, or the
+pass skipped a slice or a slice's message failed — is finished by a later
+pass and is **torn**: its slices date from different instants. The cn agent
+marks it torn in its report when one pass makes a slice's thin id while
+another slice's id already exists, or makes ids in two slices without the
+quiesce, which failed; a message the soft timeout killed counts as one that
+made its id (`cnagent.md` CN14). It saves the mark in its local store at
+once and reports it in any role until the request shows it, and the sp
+worker writes it into `ThinDevice.torn` from the first drain of reports
+that shows it, created or not, and the created flip keeps it (sp role;
+`dnv-worker.md` RW19): `torn` is set at most once and never cleared, and
+`ListThinDevices` returns it. The one remedy is to delete and re-create the
+snapshot. The mark is lost when the cntlr that saw the tear never reports
+again, when its agent crashes between the run's last message, once every
+slice holds the id, and the save (a crash earlier in the run leaves a slice
+to make, and the run that makes it marks the tear again), or when a save
+that fails is followed by an agent restart before the worker records it;
+the snapshot then reads `torn` false (Known limits). Reason: nothing else tells the
+operator which snapshot needs the remedy.
 
 **Materialization.** `ThinDevice.created` is written false here and set
 true exactly once by the sp worker, when a cntlr has reported that td's
@@ -3364,15 +3367,17 @@ cntlr's `clone_list` and from the primary's chunk-push plans, so the cn
 agent's sweep (Teardown by sweep) removes its stack, the array or group
 device and the legs of its clone meta group included, and its
 `LocalCloneBmPath` files by name and disconnects a source no other clone on
-the node uses when the source is a transfer of the cluster (`cnagent.md`
-CN21; `dnv-worker.md` CLD5), while the worker deletes the chunk keys in
-batches and then the `Clone` key together with its `clone_name_list` entry,
-giving the sides of its clone meta group back to their DNs in that
-transaction, the sides of the group's repair and retired legs with them, as
-it deletes their records, which takes their pointers out of the DNs'
-records. The sp worker drives those sides until then, and each DN's agent
-then sees its side's pointer disappear and tears the side down
-(`dnv-worker.md` CLD5, CLD9).
+the node uses: a transfer of the cluster by its NQN, and at node level a
+source in no dnv namespace or a transfer of another cluster that one of its
+controllers opened with the node's host NQN (`cnagent.md` CN21;
+`dnv-worker.md` CLD5), while the worker deletes the chunk keys in batches
+and then the `Clone` key together with its `clone_name_list` entry, giving
+the sides of its clone meta group back to their DNs in that transaction,
+the sides of the group's repair and retired legs with them, as it deletes
+their records, which takes their pointers out of the DNs' records. The sp
+worker drives those sides until then, and each DN's agent then sees its
+side's pointer disappear and tears the side down (`dnv-worker.md` CLD5,
+CLD9).
 
 No migration moves a leg of a clone meta group: `CreateMigration` refuses
 one of its sides `FAILED_PRECONDITION` naming the clone (Migrations), and
@@ -4763,8 +4768,10 @@ it, whatever the row's status, so hydration progress is visible through
 `Inspect*` and the hydration checks of `DeleteClone` and `FinishMigration`
 read it (Clones, Migrations).
 
-`reason` (`ResReason`) is the cause of a row's status that a control-plane
-decision reads: `RES_REASON_NONE` on a row no rule gives a reason;
+`reason` (`ResReason`) is the cause of a row's status, or of a leg's
+staying out, where a rule gives one; a control-plane decision reads it
+where the list below says so, and otherwise it tells the operator:
+`RES_REASON_NONE` on a row no rule gives a reason;
 `RES_REASON_THIN_ID_LOST`, which `cnagent.md` CN14 sets on an `ERROR` row
 and `dnv-worker.md` HL2 reads; `RES_REASON_OTHER_IDENTITY` and
 `RES_REASON_IDENTITY_UNDECIDED`, which `cnagent.md` CN12 sets on a leg's
@@ -4783,24 +4790,25 @@ destination's two `PROVISIONING` migration rows and `dnv-worker.md` RW18
 reads; `RES_REASON_SP_LEVEL`, which `cnagent.md` CN19 sets on every
 `MISSING` row its pool's level suppresses; and `RES_REASON_SOURCE_FAULT`,
 which `cnagent.md` CN18 sets on the clone rows the cn agent keeps `MISSING`
-because it does not read the clone's source as ready, CN18 saying which; the
-settle of `dnv-worker.md` HL2 reads these two; `RES_REASON_PARKED`, which
-`cnagent.md` CN28 sets on the `OK` ns-dev row of an effectively suspended
-namespace and the gateway's `GetThinDeviceBitmap` reads (Bitmap reads); and
-`RES_REASON_DIFFERS`, which both agents set on an `OK` row of an object that
-is there and differs without leaving a primary short of its optimized path.
-There are two such objects: a namespace wanted non-optimized or inaccessible
-whose ANA group differs, as one still optimized after a failed move to
-inaccessible, where one wanted optimized that is not leaves the primary
-without its optimized path and reads `RES_STATUS_ERROR` instead
-(`dnagent.md` DN18, SH31; `cnagent.md` CN28); and a thin pool whose metadata
-total is short of its metadata device, which a reload finishes, or that
-holds a metadata snapshot no live reader made, which a release ends
-(`cnagent.md` CN13). The object's verdict names a `RES_REASON_DIFFERS` row,
-so the worker re-sends its `Syncup*` (`dnagent.md` SH31); no health rule
-reads it, so such a row is healthy. An agent sets a reason from what its own
-pass established, never from a row's text: `cnagent.md` CN29 says how the cn
-agent does, `dnagent.md` DN13 how the dn agent does.
+because it does not read the clone's source as ready, CN18 saying which;
+the settle of `dnv-worker.md` HL2 reads these two; `RES_REASON_PARKED`,
+which `cnagent.md` CN28 sets on the `OK` ns-dev row of an effectively
+suspended namespace and the gateway's `GetThinDeviceBitmap` reads (Bitmap
+reads); and `RES_REASON_DIFFERS`, which both agents set on an `OK` row of
+an object that is there and differs without leaving a primary short of its
+optimized path. There are two such objects: a namespace wanted
+non-optimized or inaccessible whose ANA group differs, as one still
+optimized after a failed move to inaccessible, where one wanted optimized
+that is not leaves the primary without its optimized path and reads
+`RES_STATUS_ERROR` instead (`dnagent.md` DN18, SH31; `cnagent.md` CN28);
+and a thin pool whose metadata total is short of its metadata device, which
+a reload finishes, or that holds a metadata snapshot no live reader made,
+which a release ends (`cnagent.md` CN13). The object's verdict names a
+`RES_REASON_DIFFERS` row, so the worker re-sends its `Syncup*`
+(`dnagent.md` SH31); no health rule reads it, so such a row is healthy. An
+agent sets a reason from what its own pass established, never from a row's
+text: `cnagent.md` CN29 says how the cn agent does, `dnagent.md` DN13 how
+the dn agent does.
 
 `CntlrInfo.leg_id_to_leg` reflects the health check of Group on-leg
 layout: meta region, data region, health block — the block-probe IO on the
@@ -7027,58 +7035,61 @@ desired state an agent rebuilds from while it starts (Common agent rules).
 So a build takes over whatever an older build left of the kinds of object
 it builds, as it is: it finds what the nodes hold and etcd's records by the
 names of Naming and the keys of etcd data model, which it keeps for those
-kinds; it reads every message the older build
-stored, in etcd or in a local store, and every volume id and context an
-older build's plugins handed Kubernetes; and neither its conf gates nor its
-readers refuse a value the older build stored (Common validation), with
-one exception: a `Clone` with no `meta_grp`, which no released build
-writes, is refused by the worker's writes of its legs' and sides' health
-epochs and skipped by its passes, while the clone drain's batches and its
-final transaction take it all the same (`dnv-worker.md` MD6). It
-changes a stored message only by adding fields and removing them, never by
-renumbering a field or an enum value or giving a new one the number of a
-removed one: a stored value would then decode silently into the wrong
-field, or into none. A field it adds reads zero in what an older build
-wrote, so it adds only a field whose zero is right there: a count it adds
-starts at zero. A migration whose record carries no `meta_units` thus
-counts as zero units and adds nothing to any charge or release, while the
-DN that builds it still takes a run for it: until such migrations are gone,
-a DN's count reads below what its area holds, and a migration the count
-admits may wait as provisioning for room (Metadata units).
-A DN record or a DN capacity value with no `used_meta_units` counts
-nothing used. A `Migration` that carries no `cutover_pending` reads it false, a
-cutover that has started, which is how the build that wrote it ran its
-sides: one whose destination still zeroes at the upgrade has its source
-cut its paths at the provisioned flip, with no wait for the primary's path
-(Migration). Reason for the flag's sense: a field set once the cutover
-started would read not started in such a record, and an upgraded worker
-would then tell a source that had already handed the leg over to serve it
-again. A `ClusterConf` is write-once, so a cluster keeps a `qos_ratio` an
-older build stored even where it is not all zero, which `CreateCluster`
-refuses (Common validation): the worker copies it into every
-controller-node syncup and nothing enforces it (Controller node, common).
-An older build kept a migration's bitmap in etcd, under keys of the kind
-migration_bitmap, one per chunk at an index below `model.LegacyMigrBmCnt`,
-the bound its gateway held the chunks to. This design neither writes nor
-reads that kind; the transaction that ends a migration, a finish or a cancel of the
-gateway or of the worker, deletes those keys of its migration with the
-record (`dnv-worker.md` MD2, MD6). Reason: every way a migration ends runs
-that one write, and a delete inside it cannot be lost to a crash, which a
-delete by prefix after it could be, as these transactions offer none.
-A migration under way at the upgrade keeps the chunks its destination
-already holds, of whatever lengths the older build was given, which the
-agent reloads at startup, re-applies at the places that build gave them
-and lists as applied (`dnagent.md` DN2). The worker pushes every piece of
-its own read right after the read, whatever that set lists, and counts a
-piece as delivered only once it has pushed it itself (`dnv-worker.md` BM2,
-BM7); before it saves a piece, the agent takes out every chunk at the
-piece's index and above it, files and set alike (`dnagent.md` DN15). So
-the first piece it saves removes every older chunk from there on, and no
-piece is placed behind an older chunk of another length, where a later
-bit would land at the wrong place and the copy could skip a block the
-source wrote: an older chunk stays only behind pieces equal to the older
-chunks before it byte for byte, at the place that build gave it, so its
-bits mean there what they meant to that build.
+kinds; it reads every message the older build stored, in etcd or in a local
+store, and every volume id and context an older build's plugins handed
+Kubernetes; and neither its conf gates nor its readers refuse a value the
+older build stored (Common validation), with two exceptions: a `Clone` with
+no `meta_grp`, which no released build writes, is refused by the worker's
+writes of its legs' and sides' health epochs and skipped by its passes,
+while the clone drain's batches and its final transaction take it all the
+same (`dnv-worker.md` MD6); and a clone whose `src_nqn` lies in the dnv
+namespace and decodes as no transfer NQN, which an older gateway took, is
+refused by the cn agent's cntlr gate (`cnagent.md` CN8), so every cntlr of
+that pool refuses its requests until `DeleteClone` takes the clone out of
+them (`dnv-worker.md` CLD5). It changes a stored message only by adding
+fields and removing them, never by renumbering a field or an enum value or
+giving a new one the number of a removed one: a stored value would then
+decode silently into the wrong field, or into none. A field it adds reads
+zero in what an older build wrote, so it adds only a field whose zero is
+right there: a count it adds starts at zero. A migration whose record
+carries no `meta_units` thus counts as zero units and adds nothing to any
+charge or release, while the DN that builds it still takes a run for it:
+until such migrations are gone, a DN's count reads below what its area
+holds, and a migration the count admits may wait as provisioning for room
+(Metadata units). A DN record or a DN capacity value with no
+`used_meta_units` counts nothing used. A `Migration` that carries no
+`cutover_pending` reads it false, a cutover that has started, which is how
+the build that wrote it ran its sides: one whose destination still zeroes
+at the upgrade has its source cut its paths at the provisioned flip, with
+no wait for the primary's path (Migration). Reason for the flag's sense: a
+field set once the cutover started would read not started in such a record,
+and an upgraded worker would then tell a source that had already handed the
+leg over to serve it again. A `ClusterConf` is write-once, so a cluster
+keeps a `qos_ratio` an older build stored even where it is not all zero,
+which `CreateCluster` refuses (Common validation): the worker copies it
+into every controller-node syncup and nothing enforces it (Controller node,
+common). An older build kept a migration's bitmap in etcd, under keys of
+the kind migration_bitmap, one per chunk at an index below
+`model.LegacyMigrBmCnt`, the bound its gateway held the chunks to. This
+design neither writes nor reads that kind; the transaction that ends a
+migration, a finish or a cancel of the gateway or of the worker, deletes
+those keys of its migration with the record (`dnv-worker.md` MD2, MD6).
+Reason: every way a migration ends runs that one write, and a delete inside
+it cannot be lost to a crash, which a delete by prefix after it could be,
+as these transactions offer none. A migration under way at the upgrade
+keeps the chunks its destination already holds, of whatever lengths the
+older build was given, which the agent reloads at startup, re-applies at
+the places that build gave them and lists as applied (`dnagent.md` DN2).
+The worker pushes every piece of its own read right after the read,
+whatever that set lists, and counts a piece as delivered only once it has
+pushed it itself (`dnv-worker.md` BM2, BM7); before it saves a piece, the
+agent takes out every chunk at the piece's index and above it, files and
+set alike (`dnagent.md` DN15). So the first piece it saves removes every
+older chunk from there on, and no piece is placed behind an older chunk of
+another length, where a later bit would land at the wrong place and the
+copy could skip a block the source wrote: an older chunk stays only behind
+pieces equal to the older chunks before it byte for byte, at the place that
+build gave it, so its bits mean there what they meant to that build.
 
 A kind of object a build does not build, it does not take over either: a
 dm device, a loop device or a mount that an older build left under a name
@@ -7224,17 +7235,17 @@ devices keep their stock handling:
   start and adds links by what it found there, and before every "64-" file:
   for an array whose name has the exact form of dnv's (md names), and each
   partition the kernel finds on one, it sets the file system type to one no
-  stock rule matches and clears its usage, so md's incremental assembly, btrfs's,
-  bcache's and lvm2's rules skip it; it takes away the links by uuid, label,
-  partition uuid and partition label the stock rule added, and puts any
-  other link the array shares with a device of the node's own below that
-  device. Reason: a data group's array starts with the first block a host
-  writes through the slice's thin pool, which can hold a host's md
-  superblock, LVM label, bcache superblock, file system or partition table,
-  and a link by a file system's label or uuid that a host chose could
-  otherwise lead a mount of the node's own to the host's data; a type
-  cleared instead would have bcache's rule probe the array, as it probes a
-  device of no type.
+  stock rule matches and clears its usage, so md's incremental assembly,
+  btrfs's, bcache's and lvm2's rules skip it; it takes away the links by
+  uuid, label and partition uuid the stock rule added, and any by partition
+  label, and puts any other link the array shares with a device of the
+  node's own below that device. Reason: a data group's array starts with
+  the first block a host writes through the slice's thin pool, which can
+  hold a host's md superblock, LVM label, bcache superblock, file system or
+  partition table, and a link by a file system's label or uuid that a host
+  chose could otherwise lead a mount of the node's own to the host's data;
+  a type cleared instead would have bcache's rule probe the array, as it
+  probes a device of no type.
 
 The rules need systemd 253 or newer, the first udev that takes away a link
 an earlier rule added (`SYMLINK-=`, which the md array rule uses): an older
@@ -8174,13 +8185,13 @@ document and only pointed to here.
   snapshot saves the mark and reports it in any role, and the sp worker
   records it in `ThinDevice.torn` (Thin devices). The mark is lost when the
   cntlr that saw the tear never reports again — its node never comes back,
-  or loses its local store — when that agent dies between the run's first
-  message and the save, and when the save fails and the agent restarts
-  before the worker records the mark; the snapshot then reads `torn` false
-  (`cnagent.md`, Known limits): a snapshot that reads `torn` false is not
-  proven whole. `ThinDevice.created` certifies materialization, not
-  point-in-time consistency: a torn snapshot still flips to `created` once
-  every slice's volume exists.
+  or loses its local store — when that agent dies between the run's last
+  message, once every slice holds the id, and the save, and when the save
+  fails and the agent restarts before the worker records the mark; the
+  snapshot then reads `torn` false (`cnagent.md`, Known limits): a snapshot
+  that reads `torn` false is not proven whole. `ThinDevice.created`
+  certifies materialization, not point-in-time consistency: a torn snapshot
+  still flips to `created` once every slice's volume exists.
 * **A write that needs a new block is durable only after a flush or a
   commit.** dm-thin completes a write that provisions a block — to a block
   never written, or to one a snapshot shares — before it commits the
@@ -8827,22 +8838,24 @@ document and only pointed to here.
   some of them out again after the restore. A new plain thin device that
   takes such an id while its pool still holds it is refused while the id
   maps blocks, whatever its create message answered, and while the pool's
-  records of its ids cannot be read: the primary does not adopt the id,
-  and the volume waits for an operator (`cnagent.md` CN14). A new snapshot that takes such an id is
-  not refused, since a snapshot's id maps its origin's blocks anyway, and
-  serves the old id's blocks, data included. The refusal has a false case
-  of its own: a host write to a new volume between its build and its
-  created flip, then a failover, makes the new primary meet the volume's
-  own id with data and refuse it; `operations.md`, A new volume refused for
-  a thin id that holds data, tells the two cases apart. Both stay inside
-  one pool.
-  On a cntlr that holds the pool
-  (`cnagent.md` CN14), the cn agent deletes the thin id of each thin volume
-  the restored state does not name, but only once the sweep that removes
-  the volume gets through (`cnagent.md` CN21); on any other cntlr, such as
-  one the restored state makes a standby or does not name, that sweep only
-  removes the volume. An id that no thin volume maps stays in the pool
-  until a sweep of the pool's ids deletes it (`cnagent.md` CN14).
+  records of its ids cannot be read: the primary does not adopt the id, and
+  the volume waits for an operator (`cnagent.md` CN14). A new snapshot that
+  takes such an id is not refused, since a snapshot's id maps its origin's
+  blocks anyway, and serves the old id's blocks, data included. The refusal
+  has a false case of its own: a host write to a new volume between its
+  build and its created flip, followed by anything that makes a primary
+  build the volume again before the flip — a failover, a reboot of the
+  primary's node, or a level that drops the pool and is raised again —
+  makes that primary meet the volume's own id with data and refuse it;
+  `operations.md`, A new volume refused for a thin id that holds data,
+  tells the two cases apart. Both stay inside one pool. On a cntlr that
+  holds the pool (`cnagent.md` CN14), the cn agent deletes the thin id of
+  each thin volume the restored state does not name, but only once the
+  sweep that removes the volume gets through (`cnagent.md` CN21); on any
+  other cntlr, such as one the restored state makes a standby or does not
+  name, that sweep only removes the volume. An id that no thin volume maps
+  stays in the pool until a sweep of the pool's ids deletes it
+  (`cnagent.md` CN14).
 * **One cntlid slot can serve most subsystems of a kernel.** nvmet draws
   every controller id from one id space per kernel, a subsystem's range
   being bounds inside it (cntlid slots), every new side but a migration

@@ -72,15 +72,19 @@ var validNqn = regexp.MustCompile(common.ValidNqnPattern)
 // agent builds configfs paths from the subsystem and host NQNs and hands
 // the clone's source NQN to the kernel's connect, so a "/" or ".." would let
 // a request reach paths outside its directory and a "," would add options to
-// the connect; every NQN a released gateway stored passes it. Only a store
-// written before the gateway held NQNs to the rule, or by hand, can carry one
-// it refuses. A clone's src_nqn in the dnv namespace must also decode as a
+// the connect. Every NQN a released gateway stored passes this NQN rule;
+// only a store written before the gateway held NQNs to it, or by hand,
+// breaks it. A clone's src_nqn in the dnv namespace must also decode as a
 // transfer NQN (XferNqn), the gateway's rule for CreateClone
 // (validateCloneSrcNqn, gateway/validate.go): the cn agent removes a clone
-// source once its clone has gone only when it is a transfer, judged by its
-// NQN, or in no dnv namespace, judged by its controllers' host NQN
+// source once its clone has gone only when it is a transfer of this
+// cluster, judged by its NQN, or a transfer of another cluster or one in no
+// dnv namespace, judged at node level by its controllers' host NQN
 // (cnagent.md CN21), so any other source in the dnv namespace would stay
-// connected for good. The first refusal, in a fixed order, is the error.
+// connected for good. A gateway from before this rule, the released one
+// among them, took any src_nqn that passes the NQN rule, so its store can
+// carry a clone source this rule refuses. The first refusal, in a fixed
+// order, is the error.
 func ValidateCntlrNqns(req *pb.SyncupCntlrRequest) error {
 	check := func(field, nqn string) error {
 		switch {
@@ -141,7 +145,7 @@ func ValidateExtentSize(extentSize uint64) error {
 	return nil
 }
 
-// InvalidConfReply builds the refusal the two validators above feed, and the
+// InvalidConfReply builds the refusal the three validators above feed, and the
 // dn agent's side conf gate on side_conf.zero_bytes too (dnagent.md DN8),
 // whose validator lives in package dnagent because it copies no model rule.
 // It is the revision gate's sibling: the request is not applied, nothing is

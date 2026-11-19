@@ -213,10 +213,11 @@ func (s *DnAgentServer) zeroLoop(
 		if s.getSide(key) != st {
 			return
 		}
-		// DN9: zeroing never writes a side the held request says is
+		// DN9: zeroing starts no batch on a side the held request says is
 		// provisioned. The converge then takes a short count as complete
-		// (ensureSideDev); a loop the side's provisioning started stops
-		// before its next batch.
+		// (ensureSideDev), after it cancels a batch still in flight and
+		// waits for it (stopZeroing); a loop the side's provisioning
+		// started stops before its next batch.
 		if st.req.Load().GetSideConf().GetProvisioned() {
 			return
 		}

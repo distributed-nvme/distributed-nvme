@@ -1052,12 +1052,13 @@ func mdStateLine(d *MdDetail) string {
 // writes (cnagent.md CN12, The superblock format).
 const mdMetadata = "--metadata=1.2"
 
-// mdFormatArgs is the argument list of every mdadm call that reads or writes
-// a member's superblock, the create, the two assemblies and the zero: lead,
+// mdFormatArgs is the argument list of the mdadm calls that name the
+// superblock format, the create, the two assemblies and the zero: lead,
 // then mdMetadata, then rest. lead is the mode word and, for a create or an
 // assembly, the md device, so the members stay at the line's end. An add, a
 // fail, a remove and a stop take no format: mdadm refuses the flag in manage
-// mode, and a stop reads no member. Reason: without the flag mdadm reads,
+// mode, where an add writes the array's own format onto its member, and a
+// stop reads no member. Reason: without the flag mdadm reads,
 // among every superblock format it finds on a member, the one created last,
 // and a host's 0.90 or 1.0 superblock at a leg's end, newer than dnv's, then
 // makes a plain assembly refuse the member for its name.

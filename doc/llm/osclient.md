@@ -30,43 +30,43 @@ it.
   `constants.go` and `name_fmt.go` (the `Local*Path` files that go through
   `ReadProto` and `WriteProto`).
 * Consumers: `dnv-agent` in both roles, for its dmsetup, mdadm, nvme and
-  nvmet-configfs work, for its listings of sysfs and of its local store, for
-  the dn's read of an nvmet subsystem directory's age, for both roles' read
-  of whether their nvmet port's directory is there, for the dn's read of its
-  disk's device number, for both roles' reads of a device's number for an
-  inspect call's block counters (`cnagent.md` CN23, `dnagent.md` DN16), for
-  both roles' discards on a dm-clone and the cn sweep's discard of a thin
-  volume whose id it deletes (`cnagent.md` CN14), for the cn's direct read
-  of an md member's superblock area, for the cn's dial of a side's or a
-  clone source's address before a connect (`cnagent.md` CN10), for its node
-  check's reads and the md replay's commands and block reads and writes
-  (`dnagent.md` CM5), for its gather's reads, the detached children among
-  them, and the archive's write (`dnagent.md` CM6), and for persisting the
-  `Local*Path` protobuf state files; and `dnv-csi`'s node plugin, for its
-  nvme-cli, blkid, filesystem maker and mount commands, its sysfs and mount
-  table reads and its read of a volume's device link (`csi.md`, The node
-  plugin). **All** OS command execution, detached child start, directory
-  listing, modification-time read, device-number read, discard, TCP connect
-  made to test whether an address answers (DialTcp) and disk file IO in
-  production code goes through an `OsClient` — never call `os/exec` or
-  `os.ReadFile`/`os.WriteFile`, and never read a directory, stat a path or
-  make such a test connect, directly outside this file. This is what makes
-  the logging rules of `log.md` R8 (its first, second, fifth, sixth,
-  seventh, eighth and ninth items) enforceable and makes every consumer
-  unit-testable via `FakeOsClient`. There is exactly **one** sanctioned
-  exception in production code, recorded under "Exported raw helpers and the
-  probe-IO carve-out": the CN11 leg-health probers call the package-level
-  helpers `WriteBlockAt` / `ReadBlockDirectAt` directly — outside the
-  semaphore, never under a lock — and log their own records. Test fixtures
-  that spawn a helper process for their own package (the etcd fixtures that
-  start a real etcd binary, and the tests that re-run the test binary
-  itself) are outside the rule, not exceptions to it: no production code
-  path spawns them, so routing them through an `OsClient` would buy neither
-  the logging nor the `FakeOsClient` testability the rule exists for. The
-  connections of the gRPC clients and servers (`grpc.md`) and of the etcd
-  clients are outside the rule too, not exceptions to it: they carry dnv's
-  own calls, whose rules are `grpc.md`'s and `dnv-worker.md` EU1's, and are
-  no OS work.
+  nvmet-configfs work, for its listings of sysfs and of its local store,
+  for the dn's read of an nvmet subsystem directory's age, for both roles'
+  read of whether their nvmet port's directory is there, for the dn's read
+  of its disk's device number, for both roles' reads of a device's number
+  for an inspect call's block counters (`cnagent.md` CN23, `dnagent.md`
+  DN16), for both roles' discards on a dm-clone and the cn sweep's discard
+  of a thin volume whose id it deletes (`cnagent.md` CN14), for the cn's
+  direct read of an md member's superblock area, for the cn's dial of a
+  side's or a clone source's address before a connect (`cnagent.md` CN10),
+  for its node check's reads and the md replay's commands and block reads
+  and writes (`dnagent.md` CM5), for its gather's reads, the detached
+  children among them, and the archive's write (`dnagent.md` CM6), and for
+  persisting the `Local*Path` protobuf state files; and `dnv-csi`'s node
+  plugin, for its nvme-cli, blkid, filesystem maker and mount commands, its
+  sysfs and mount table reads and its read of a volume's device link
+  (`csi.md`, The node plugin). **All** OS command execution, detached child
+  start, directory listing, modification-time read, device-number read,
+  discard, TCP connect made to test whether an address answers (DialTcp)
+  and disk file IO in production code goes through an `OsClient` — never
+  call `os/exec` or `os.ReadFile`/`os.WriteFile`, and never read a
+  directory, stat a path or make such a test connect, directly outside this
+  file. This is what makes the logging rules of `log.md` R8 (its first,
+  second, fifth, sixth, seventh, eighth, ninth and tenth items) enforceable
+  and makes every consumer unit-testable via `FakeOsClient`. There is
+  exactly **one** sanctioned exception in production code, recorded under
+  "Exported raw helpers and the probe-IO carve-out": the CN11 leg-health
+  probers call the package-level helpers `WriteBlockAt` /
+  `ReadBlockDirectAt` directly — outside the semaphore, never under a lock
+  — and log their own records. Test fixtures that spawn a helper process
+  for their own package (the etcd fixtures that start a real etcd binary,
+  and the tests that re-run the test binary itself) are outside the rule,
+  not exceptions to it: no production code path spawns them, so routing
+  them through an `OsClient` would buy neither the logging nor the
+  `FakeOsClient` testability the rule exists for. The connections of the
+  gRPC clients and servers (`grpc.md`) and of the etcd clients are outside
+  the rule too, not exceptions to it: they carry dnv's own calls, whose
+  rules are `grpc.md`'s and `dnv-worker.md` EU1's, and are no OS work.
 * Dependencies: the semaphore and protobuf modules of `dependencies.md`,
   Direct dependencies; the command's `Cancel` and `WaitDelay` fields come
   with the Go version `go.mod` pins.

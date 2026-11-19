@@ -292,10 +292,16 @@ Safe steps:
 4. Read the group. If the taken-back leg's superblock is of another
    identity and you cannot tell how old it is, stop.
 5. Run the dry run from that leg, then write the mark naming it:
-   `dnvctl group force-start --grp <group id> --leg <retired leg id>`.
-   If md once wrote onto that leg, as a repair that was cancelled can leave
+   `dnvctl group force-start --grp <group id> --leg <retired leg id>`. If
+   md once wrote onto that leg, as a repair that was cancelled can leave
    it, the gateway refuses the mark unless you add `--force`. Such a leg is
-   no longer the copy it was: stop instead.
+   no longer the copy it was: stop instead. If the dry run refuses the leg
+   for its bad-block list, read rule 4 of "Which leg to choose". A retired
+   leg can carry such a list from its time in the array, for example when
+   md recorded bad blocks on it before a repair replaced it. The force flag
+   drops the list, and md then serves those regions from what the leg holds
+   there. Add `--force` to the dry run and to the mark only if you accept
+   that; otherwise stop.
 6. Once the array runs and `dnvctl repair get --name <name>` shows the
    repair started, finish it: `dnvctl repair finish --name <name>`. The
    new leg then takes the bad leg's place in the list.
@@ -307,7 +313,8 @@ written to the group since the leg retired is lost, while the pool's other
 groups keep their newer state. Blocks first written since can read another
 pool's bytes.
 
-When to stop: as in steps 2, 4 and 5.
+When to stop: as in steps 2, 4 and 5, the refusal for a bad-block list
+included when you do not accept what the force flag does.
 
 Tested: the cn agent suite, repair case, stage `restore`; the end-to-end
 suite, react case, its second forced start.
@@ -712,14 +719,19 @@ give this row, and the steps differ:
 
 1. **After an etcd restore.** The cluster's etcd was restored from a
    backup, and the volume was created after the restore. The id holds the
-   data of a volume made after the backup, which the restore lost. Only a
-   pool that created more than 1,048,576 thin devices after the backup
-   meets this ([the scope page](scope.md), section 7).
-2. **After a failover, in the volume's first moments.** No restore
-   happened. A host wrote to the volume before it was recorded as
-   created, and the primary then failed over. The id holds the volume's
-   own data. `dnvctl sp get` shows another cntlr as the primary than the
-   one that built the volume, and the worker's log shows the failover.
+   data of a volume made after the backup, which the restore lost. When the
+   restore ran `dnvctl cluster advance-ids`, only a pool that created more
+   than 1,048,576 thin devices after the backup meets this. After a restore
+   that skipped that step, any new volume can meet it
+   ([the scope page](scope.md), section 7).
+2. **In the volume's first moments.** No restore happened. A host wrote to
+   the volume before it was recorded as created, and then a primary built
+   the volume again. The id holds the volume's own data. One of these shows
+   it: `dnvctl sp get` shows another cntlr as the primary than the one that
+   built the volume, and the worker's log shows the failover; the primary's
+   controller node booted after the volume was created (`uptime -s`); or an
+   operator stepped the pool's level down to `NO_THINPOOL` or further and
+   back while the volume was not yet recorded as created.
 
 What dnv does alone: the primary builds the volume in every slice whose
 thin id maps no block, and builds nothing over the id that holds data. It
@@ -1161,18 +1173,22 @@ Safe steps:
      the check again.
 4. For a new kernel or mdadm on controller nodes, run the md replay on a
    spare machine with that kernel and mdadm, never on a node in service.
-   First install the udev rules on the machine ([Install the udev rules on a
-   node](#install-the-udev-rules-on-a-node), steps 1 and 2): the replay does
-   not start while the check finds no mask of the system's md assembly. Then
-   run `dnv-agent check cn --md-replay`. It refuses to start on a node that
-   holds any dnv device, array, subsystem or file of an agent's local store,
-   the folder where an agent keeps the desired state it last accepted. An
-   `md replay` line that reads `not started` names a reason on the machine,
-   not a fault of mdadm or the kernel. Each of its steps is one more line of
-   the report; a failed step means that mdadm or the kernel does not keep a
+   First install the udev rules on the machine
+   ([Install the udev rules on a node](#install-the-udev-rules-on-a-node),
+   steps 1 and 2): the replay does not start while the check finds no mask
+   of the system's md assembly. Then run `dnv-agent check cn --md-replay`.
+   It refuses to start on a node that holds any dnv device, array,
+   subsystem or file of an agent's local store, the folder where an agent
+   keeps the desired state it last accepted. An `md replay` line that reads
+   `not started` names a reason on the machine, not a fault of mdadm or the
+   kernel. Each of its steps is one more line of the report, named
+   `md replay: <step>`. A failed step other than `build`, in a run you did
+   not stop with Ctrl-C, means that mdadm or the kernel does not keep a
    rule dnv's failover rests on, and that kernel or mdadm must not run on a
-   controller node. The replay removes what it made, also after Ctrl-C, and
-   names anything it could not remove.
+   controller node. A failed `build` names a fault of the machine, such as
+   no free loop device or a full `/var/tmp`, whatever its `fix:` line says.
+   The replay removes what it made, also after Ctrl-C, and names anything
+   it could not remove.
 
 What dnv does alone: nothing. An agent starts whatever the check would
 report. It logs the kernel release and, on a controller node, the mdadm

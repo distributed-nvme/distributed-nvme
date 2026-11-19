@@ -2661,52 +2661,55 @@ HL7 lets give a verdict, as the provisioned flip does (above). After the
 cutovers of a drain the coordinator offers the destination side's child the
 read of the migration's bitmap (BM7).
 
-RW19. **Created flip.** Every `SyncupCntlrReply`
-and `CheckCntlrReply` with an accepted code (RW18: code zero or
-`ReplyCodeLeftover`) is scanned: a td of the loaded state with `created` false
-is a candidate when `cntlr_info.td_id_to_thin_info` holds its `td_id`, that
-entry's `slice_id_to_dm_thin` key set equals the SP's slice ids exactly, and
-every row is `RES_STATUS_OK`. The `torn` mark, the cn agent's report that
-the snapshot is torn (`cnagent.md` CN14), travels with the candidate, and
+RW19. **Created flip.** Every `SyncupCntlrReply` and `CheckCntlrReply` with
+an accepted code (RW18: code zero or `ReplyCodeLeftover`) is scanned: a td
+of the loaded state with `created` false is a candidate when
+`cntlr_info.td_id_to_thin_info` holds its `td_id`, that entry's
+`slice_id_to_dm_thin` key set equals the SP's slice ids exactly, and every
+row is `RES_STATUS_OK`. The `torn` mark, the cn agent's report that the
+snapshot is torn (`cnagent.md` CN14), travels with the candidate, and
 `model.FlipCreated` sets the record's `torn` in the put that sets
 `created`, keeping a mark set before (MD6; `architecture.md`, Thin
 devices): the td is flipped torn when any reply the drain folds into the
 call marks it — the one that completes it, another that completes it too,
 or one that completes nothing, such as a standby's. **The torn mark's
-record.** Every accepted reply of any
-cntlr, in any role, is read for torn marks too, whatever its rows: a cntlr
-that is not the primary reports a mark in an entry with no rows. A td the
-reply marks, whose loaded record reads `torn` false, `created` or not, and
-which no reply of the drain completes, goes to `model.MarkTdTorn` (MD6)
-after the created flip, in one call per drain; the tds it writes leave the
-coordinator's set of such tds until the next load, so a later report of the
-mark costs no transaction. A call that fails is logged and tried again by
-the next report that carries the mark: the agent reports it until a request
-lists the td `torn`, which the call's bump brings. A `SyncupCntlrReply` and
-a `CheckCntlrReply` carry the mark alike. Reason: after a failover only the
-old primary knows the tear, its node may come back after the new primary's
-created flip, and the thin device record is the one place an operator
-reads the mark from (`ListThinDevices`). Candidates go to
-`model.FlipCreated`; a drain whose replies complete no td makes no created
-flip, and no etcd traffic unless one of its replies marks a td for the
-torn mark's record (above). The created flip's call commits them
-`MaxFlipCreatedPerTxn` at a time, in list order, one STM each, and each STM
-that wrote bumps `SpRev` once: the coordinator folds every td one drain of its
-reports completed into one call, a set only `MaxTdCntPerSp` bounds, and one
-STM over all of it would exceed `EtcdMaxTxnOps` long before that bound and be
-refused on every round. One such STM compares every key it read and every key
-it wrote — a get of each candidate's td key, a put of each one it flips, and
-`SpRev`'s read and put — so it costs at most two compares per candidate plus
-two, which `MaxFlipCreatedPerTxn` keeps within `EtcdMaxTxnOps`. A pending
-provisioned flip of the same SP MAY share one of those STMs; that STM then
-also reads the record that holds each side the provisioned flip lists, a
-`Slice`, a `Clone` or a `Repair`, and writes each record it changes, up to
-two compares per record over the count above. This one does not take it: RW18's
-provisioned flips each run in STMs of their own, before the created flip's.
-When a call fails at its second STM or a later one, the coordinator logs that
-failure and no `flip applied` record (Log records), not even for the tds the
-earlier STMs committed: those stay `created` in etcd, and the refs
-`model.FlipCreated` returns with the error go unlogged.
+record.** Every accepted reply of any cntlr, in any role, is read for torn
+marks too, whatever its rows: a cntlr that is not the primary reports a
+mark in an entry with no rows. A td the reply marks, whose loaded record
+reads `torn` false, `created` or not, and which the drain's created flip
+does not take, goes to `model.MarkTdTorn` (MD6) after the created flip, in
+one call per drain: the flip takes only a td that a reply of the drain
+completes while its loaded record reads `created` false, so a created td
+goes to `MarkTdTorn` whatever the replies' rows; the tds it writes leave
+the coordinator's set of such tds until the next load, so a later report of
+the mark costs no transaction. A call that fails is logged and tried again
+by the next report that carries the mark: the agent reports it until a
+request lists the td `torn`, which the call's bump brings. A
+`SyncupCntlrReply` and a `CheckCntlrReply` carry the mark alike. Reason:
+after a failover only the old primary knows the tear, its node may come
+back after the new primary's created flip, and the thin device record is
+the one place an operator reads the mark from (`ListThinDevices`).
+Candidates go to `model.FlipCreated`; a drain whose replies complete no td
+makes no created flip, and no etcd traffic unless one of its replies marks
+a td for the torn mark's record (above). The created flip's call commits
+them `MaxFlipCreatedPerTxn` at a time, in list order, one STM each, and
+each STM that wrote bumps `SpRev` once: the coordinator folds every td one
+drain of its reports completed into one call, a set only `MaxTdCntPerSp`
+bounds, and one STM over all of it would exceed `EtcdMaxTxnOps` long before
+that bound and be refused on every round. One such STM compares every key
+it read and every key it wrote — a get of each candidate's td key, a put of
+each one it flips, and `SpRev`'s read and put — so it costs at most two
+compares per candidate plus two, which `MaxFlipCreatedPerTxn` keeps within
+`EtcdMaxTxnOps`. A pending provisioned flip of the same SP MAY share one of
+those STMs; that STM then also reads the record that holds each side the
+provisioned flip lists, a `Slice`, a `Clone` or a `Repair`, and writes each
+record it changes, up to two compares per record over the count above. This
+one does not take it: RW18's provisioned flips each run in STMs of their
+own, before the created flip's. When a call fails at its second STM or a
+later one, the coordinator logs that failure and no `flip applied` record
+(Log records), not even for the tds the earlier STMs committed: those stay
+`created` in etcd, and the refs `model.FlipCreated` returns with the error
+go unlogged.
 
 RW20. Health of sides and cntlrs per HL2; pushes per Bitmap pushes; the
 reaction pass runs on the coordinator's own ticker (AR1).
@@ -2943,54 +2946,59 @@ standby's.
 **Row classes.** The `ERROR` rows a cntlr is judged by — every map of rows
 but `leg_id_to_leg` and `side_id_to_path` — are of two classes. A
 **shared-state** row is one of two kinds. It belongs to the stack of a td
-whose `created` is set and whose thin row, in some slice, reads `ERROR` with
-the reason `RES_REASON_THIN_ID_LOST` (`architecture.md`, Live-state
+whose `created` is set and whose thin row, in some slice, reads `ERROR`
+with the reason `RES_REASON_THIN_ID_LOST` (`architecture.md`, Live-state
 reporting): the cn agent sets it when dm-thin refuses a created td's thin
 table with ENODATA because the slice's pool has lost its id (`cnagent.md`
 CN14); or to the stack of a td, created or not, whose thin row, in some
 slice, reads `ERROR` with the reason `RES_REASON_THIN_ID_NOT_ADOPTED`: the
-cn agent sets it when a new volume's thin id is in the slice's pool and maps
-blocks, or the pool's header read that would tell failed other than for a
-metadata snapshot already held, which reads `MISSING` and is re-sent
-(`cnagent.md` CN14), and every new primary meets the same id in the same
-pool, so a failover would only bring the next one to it. Or it is the pool
-row of a slice that reads `ERROR` with the reason
+cn agent sets it when a new volume's thin id is in the slice's pool and
+maps blocks, or the pool's header read that would tell failed other than
+for a metadata snapshot already held, which reads `MISSING` and is re-sent
+(`cnagent.md` CN14). For an id that maps blocks, every new primary meets
+the same id in the same pool, so a failover would only bring the next one
+to it. A header read that failed is held the same way, though a cause of
+its node alone, such as a missing tool or option or a timeout, would not
+follow the role: the class reads the reason, not the cause, so a failover
+does not repeat a read that can fail on every node, and the node check
+reports a missing tool or option before a node joins (`dnagent.md` CM5). Or
+it is the pool row of a slice that reads `ERROR` with the reason
 `RES_REASON_POOL_NEEDS_CHECK`, a thin row of that slice, or a row of the
-stack of a td whose thin row in that slice does not read `OK`: dm-thin keeps
-needs_check in the pool's metadata, so the pool opens read-only on every
-node until an operator repairs it, and a thin volume it cannot make fails
-there alike (`cnagent.md` CN13). The class reads those fields, never a row's
-details: a control-plane decision does not parse a tool's English. The stack
-is the td's own rows — its thin rows, its raid0 and its dm-error — and every
-row of an object that exists for it alone: the ns-dev and the nvmet
-namespace of each of its namespaces, the three rows of a transfer out of one
-of them, the two of a clone onto it. The pool lives on the SP's legs, so
-whichever cntlr holds the primary role reads the same rows, and no failover
-brings the td or the pool back: an operator does (`architecture.md`, Known
-limits). A pool row that carries `RES_REASON_POOL_FAILED` — dm-thin failed
-the loaded pool, or a status read could not read its metadata — is not of
-the class: the failure is a state of the loaded pool alone, and a new
-primary opens the pool from its last commit; where needs_check reached the
-metadata it opens read-only, which the class then holds, so a failover over
-a failed pool can cure it and is not repeated over a pool that opens with
-needs_check. A pool whose metadata no primary can read fails its build
-instead, a row of no reason, and only AR5's and AR7's second refusals bound
-what that costs. Every other `ERROR` row is the cntlr's **own**. Both
-classes set `Cntlr.err_epoch` as the rules above say — the row stays visible
-and the epoch set — and the class steers AR5 and AR7 alone: a report whose
-`ERROR` rows are all shared-state is no failover trigger, nor a replacement
-one for a primary with no failover candidate. Only a converge's observation
-carries the lost thin id's reason and the reason of a thin id not adopted
-(`dnagent.md` SH28); both channels carry needs_check's. A background read's
-probe finds the volume absent and reads it `MISSING` with empty details and
-no reason, while the raid0 over it still reads `ERROR`, so a report from a
-read's observation of the same loss holds own rows only, unless that slice's
-pool reads needs_check, which holds the stack of every td whose thin row
-there does not read `OK`. It is the second refusals that bound what those
-rows cost: AR5's keeps the role from moving back and forth over them, and
-AR7's, once a primary with no failover candidate has been replaced over
-them, keeps its replacement, which reads the same rows, from being replaced
-in turn (Known limits).
+stack of a td whose thin row in that slice does not read `OK`: dm-thin
+keeps needs_check in the pool's metadata, so the pool opens read-only on
+every node until an operator repairs it, and a thin volume it cannot make
+fails there alike (`cnagent.md` CN13). The class reads those fields, never
+a row's details: a control-plane decision does not parse a tool's English.
+The stack is the td's own rows — its thin rows, its raid0 and its dm-error
+— and every row of an object that exists for it alone: the ns-dev and the
+nvmet namespace of each of its namespaces, the three rows of a transfer out
+of one of them, the two of a clone onto it. The pool lives on the SP's
+legs, so whichever cntlr holds the primary role reads the same rows, and no
+failover brings the td or the pool back: an operator does
+(`architecture.md`, Known limits). A pool row that carries
+`RES_REASON_POOL_FAILED` — dm-thin failed the loaded pool, or a status read
+could not read its metadata — is not of the class: the failure is a state
+of the loaded pool alone, and a new primary opens the pool from its last
+commit; where needs_check reached the metadata it opens read-only, which
+the class then holds, so a failover over a failed pool can cure it and is
+not repeated over a pool that opens with needs_check. A pool whose metadata
+no primary can read fails its build instead, a row of no reason, and only
+AR5's and AR7's second refusals bound what that costs. Every other `ERROR`
+row is the cntlr's **own**. Both classes set `Cntlr.err_epoch` as the rules
+above say — the row stays visible and the epoch set — and the class steers
+AR5 and AR7 alone: a report whose `ERROR` rows are all shared-state is no
+failover trigger, nor a replacement one for a primary with no failover
+candidate. Only a converge's observation carries the lost thin id's reason
+and the reason of a thin id not adopted (`dnagent.md` SH28); both channels
+carry needs_check's. A background read's probe finds the volume absent and
+reads it `MISSING` with empty details and no reason, while the raid0 over
+it still reads `ERROR`, so a report from a read's observation of the same
+loss holds own rows only, unless that slice's pool reads needs_check, which
+holds the stack of every td whose thin row there does not read `OK`. It is
+the second refusals that bound what those rows cost: AR5's keeps the role
+from moving back and forth over them, and AR7's, once a primary with no
+failover candidate has been replaced over them, keeps its replacement,
+which reads the same rows, from being replaced in turn (Known limits).
 
 **The settle.** `Cntlr.settling` is set by the op that makes the cntlr primary
 (`Failover`, a primary `ReplaceCntlr`, MD6; the gateway's `CreateStoragePool`
@@ -3972,18 +3980,19 @@ does (AR7, Known limits):
 
 * **Shared state.** Every `ERROR` row of its latest report that HL2 judges
   it by (every map of rows but `leg_id_to_leg` and `side_id_to_path`) is of
-  HL2's shared-state class:
-  `reaction skipped` (`shared_state`, with the primary's `cntlr_id` and the
-  smallest `slice_id` whose pool reads needs_check, or with none, the
-  smallest `td_id` whose thin id is lost or not adopted), judged ahead of the candidate, so
-  a primary with none logs this rather than `no candidate`; nor does AR7
-  replace such a primary once it is due for replacement (AR7). The next
-  primary would read the same rows from the same pool: failing over would
-  move the host paths and nothing else, and the promoted cntlr, never
+  HL2's shared-state class: `reaction skipped` (`shared_state`, with the
+  primary's `cntlr_id` and the smallest `slice_id` whose pool reads
+  needs_check, or with none, the smallest `td_id` whose thin id is lost or
+  not adopted), judged ahead of the candidate, so a primary with none logs
+  this rather than `no candidate`; nor does AR7 replace such a primary once
+  it is due for replacement (AR7). The next primary would read the same
+  rows from the same pool, but for a header read that failed for a cause of
+  the primary's node alone, which HL2 holds all the same: failing over
+  would move the host paths and nothing else, and the promoted cntlr, never
   settling, would lose the role again at `cntlr_unhealthy` — to the peer
   whose standby report had cleared its `err_epoch` — once per window, for
-  as long as the td stayed lost, its new id held data or the pool kept its
-  needs_check.
+  as long as the td stayed lost, its new id held data or its header read
+  kept failing, or the pool kept its needs_check.
 * **The same error.** The failover this coordinator last applied took the
   role from the candidate, the primary's `err_epoch` was set less than
   `cntlr_unhealthy` after that failover, and every `ERROR` row of the

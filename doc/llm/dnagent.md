@@ -52,12 +52,14 @@ background read, and the converge marks (SH28 to SH30), `startup.go` the
 startup state — whether the startup pass still runs, the start time every
 reply's stamp carries — and the starting refusal (SH33), `sweep.go` the
 part of DN6's sweep both roles share (the leftover kinds, the result value
-a pass accumulates, its log record and the `AgentReply` it becomes) and
-`waitbudget.go` the `WaitBudget`, the bounded wait one converge pass may
-spend on the node catching up with what that pass asked of it: DN13's two,
-the retries of the connect to the migration source export and the wait for
-the source's namespace, and the cn connect step's pass budget (`cnagent.md`
-CN10 and CN18).
+a pass accumulates, its log record and the `AgentReply` it becomes),
+`version.go` the version reads the start record and the node check share
+(`KernelRelease`, `MdadmVersion`) and the start record itself
+(`LogStartVersions`; CM4, CM5), and `waitbudget.go` the `WaitBudget`, the
+bounded wait one converge pass may spend on the node catching up with what
+that pass asked of it: DN13's two, the retries of the connect to the
+migration source export and the wait for the source's namespace, and the cn
+connect step's pass budget (`cnagent.md` CN10 and CN18).
 
 `conf.go` is a **deliberate second copy** of `model`'s stored-conf rules.
 `layout.md`, Dependency rules, forbids the agent packages from importing
@@ -121,22 +123,25 @@ The constants this document relies on, whose values and comments
   applies nothing and reads nothing. `ReplyCodeInvalidConf` refuses a
   request whose conf carries a value the control plane cannot have written
   — a proto3 zero where `architecture.md`, Common validation, requires a
-  concrete geometry, or a side's length to zero outside the bounds of DN8's
-  side conf gate; the object is known and the revision is current, it is
-  the conf that is unusable, which is why it is neither of the first two.
-  `ReplyCodeSaveFailed` refuses a request the gates admitted whose save to
-  the local store failed (SH5): the request is current and its conf usable,
-  and the agent cannot keep it, which is why it is none of the other three;
-  a dn agent also refuses with it a migration piece whose push could not
-  first remove the chunks stored at its index and above, or could not then
-  save the piece (DN15). `ReplyCodeLeftover` reports an **accepted**
-  request with residue: the desired state is stored and the converge built
-  what it could, but the node still holds objects the desired state does
-  not want, or an enumeration of what exists did not answer. It is the one
-  thing that travels in `agent_reply` rather than in the `*Info` rows,
-  because a leftover by definition has no row — nothing wanted names it. An
-  agent also reports a few conditions this way so that the worker re-sends
-  the `Syncup*` whose converge acts on them (`architecture.md`, Teardown by
+  concrete geometry, a side's length to zero outside the bounds of DN8's
+  side conf gate, or, on a cn, a cntlr request's NQN that the gateway's
+  rules refuse (SH9, `ValidateCntlrNqns`), which only a store written
+  before those rules, or by hand, can carry; the object is known and the
+  revision is current, it is the conf that is unusable, which is why it is
+  neither of the first two. `ReplyCodeSaveFailed` refuses a request the
+  gates admitted whose save to the local store failed (SH5): the request is
+  current and its conf usable, and the agent cannot keep it, which is why
+  it is none of the other three; a dn agent also refuses with it a
+  migration piece whose push could not first remove the chunks stored at
+  its index and above, or could not then save the piece (DN15).
+  `ReplyCodeLeftover` reports an **accepted** request with residue: the
+  desired state is stored and the converge built what it could, but the
+  node still holds objects the desired state does not want, or an
+  enumeration of what exists did not answer. It is the one thing that
+  travels in `agent_reply` rather than in the `*Info` rows, because a
+  leftover by definition has no row — nothing wanted names it. An agent
+  also reports a few conditions this way so that the worker re-sends the
+  `Syncup*` whose converge acts on them (`architecture.md`, Teardown by
   sweep): on a dn a disk identity not yet confirmed, a side with bytes
   still to zero and nothing zeroing it, save a migration destination whose
   side device row reads the clone-metadata area's refusal of its run, a
@@ -257,26 +262,27 @@ listener and serves, and then runs the startup reconcile (SH1); the agent
 is starting until that reconcile ends. While it starts, every check round
 and every info read, of any object, answers `ReplyCodeStarting` with no
 observation, and every `Syncup*` and push is refused with that code, and a
-bitmap read or an inspect call with gRPC's Unavailable, its reply carrying
-no code: none of them takes a lock, touches the node or starts a read
-(SH29). Every reply's stamp carries the start time
-(`ObsStamp.agent_start_time`), by the node's clock, during the start and
-after it. A round or an info read reads whether the agent is starting
-before it reads the object's observation, and the reconcile ends the start
-only after it has stored its last observation, so one that finds the start
-ended answers from every observation the reconcile made. Reason: the
-startup reconcile holds the node write lock while it converges every
-object, at many pools for minutes, and a worker's round to an agent whose
-gRPC listener is not yet open is a missed round, two of which fail a
-primary over (`dnv-worker.md` AR10); an agent that answers that it starts
-lets the worker hold its verdict for a bounded time (`dnv-worker.md` HL8),
-and the start time lets it bound that hold by the node's clock across a
-worker restart. Every object answers starting, not only the ones the
-reconcile has not converged yet: no read runs while the reconcile holds the
-node write lock, so an object converged early would answer from an
-observation that ages for the rest of the pass. A listen that fails comes
-before the reconcile, so a second agent on a gRPC address already in use
-ends before it touches the node.
+bitmap read or the cn's `InspectGrp` (`cnagent.md` CN31) with gRPC's
+Unavailable, its reply carrying no code (an inspect call's `GetDnInfo` or
+`GetCntlrInfo` is an info read, and answers `ReplyCodeStarting`): none of
+them takes a lock, touches the node or starts a read (SH29). Every reply's
+stamp carries the start time (`ObsStamp.agent_start_time`), by the node's
+clock, during the start and after it. A round or an info read reads whether
+the agent is starting before it reads the object's observation, and the
+reconcile ends the start only after it has stored its last observation, so
+one that finds the start ended answers from every observation the reconcile
+made. Reason: the startup reconcile holds the node write lock while it
+converges every object, at many pools for minutes, and a worker's round to
+an agent whose gRPC listener is not yet open is a missed round, two of
+which fail a primary over (`dnv-worker.md` AR10); an agent that answers
+that it starts lets the worker hold its verdict for a bounded time
+(`dnv-worker.md` HL8), and the start time lets it bound that hold by the
+node's clock across a worker restart. Every object answers starting, not
+only the ones the reconcile has not converged yet: no read runs while the
+reconcile holds the node write lock, so an object converged early would
+answer from an observation that ages for the rest of the pass. A listen
+that fails comes before the reconcile, so a second agent on a gRPC address
+already in use ends before it touches the node.
 
 SH27. **Background tasks and process exit.** (Its number is out of order
 because rule ids never shift: code comments cite them.) A role server MAY
@@ -800,26 +806,29 @@ the wrappers', so it holds for every reload of either role, the ones that
 fence nothing — a grow, a repoint — included, and [D12]'s bound on a
 suspension holds only as far as the reloads succeed.
 
-**A refusal a caller decides by is typed.** A command that fails comes
-back as an error of its own type (`CmdError`): its text is the command
-line and the tool's own output, word for word, for the rows' details and
-the logs, and it also carries the exit status and, for a dmsetup refusal,
-the errno the output names. That errno is read from the output in one
-place, the wrapper's own table of the tool's words in the C locale, the
-one every command runs in (`osclient.md`, RunCommand), and a caller asks
-the type (`IsNoData`, `IsExists`, `IsBusy`, `IsNoDevice`), never the text:
-ENODATA, with which dm-thin refuses a thin table whose id its pool does
-not hold (`cnagent.md` CN14); EEXIST, with which a thin create or snapshot
-message meets an id the pool holds already (`cnagent.md` CN14); EBUSY,
-with which a metadata-snapshot reserve meets a reservation already held
-(`cnagent.md` CN25); and ENXIO, the kernel's answer to a `dmsetup info` of
-a name no device has, which dmsetup words in its own line, "Device does
-not exist.": the one failure `Dm.Info` and `Dm.InfoDevNo` read as a device
-that is not there (SH15). A run that never reported — killed, or never
-started — refused nothing and carries no errno, whatever it printed
-first. No caller reads a refusal's text to decide. Reason: a tool's
-wording is no contract; one wrapper maps it, and a change of it is fixed
-there, while a decision built on the text goes wrong silently.
+**A refusal a caller decides by is typed.** A command that fails comes back
+as an error of its own type (`CmdError`): its text is the command line and
+the tool's own output, word for word, for the rows' details and the logs,
+and it also carries the exit status and, for a dmsetup refusal, the errno
+the output names. That errno is read from the output in one place, the
+wrapper's own table of the tool's words in the C locale, the one every
+command runs in (`osclient.md`, RunCommand), and a caller asks the type
+(`IsNoData`, `IsExists`, `IsBusy`, `IsNoDevice`), never the text: ENODATA,
+with which dm-thin refuses a thin table whose id its pool does not hold
+(`cnagent.md` CN14); EEXIST, with which a thin create or snapshot message
+meets an id the pool holds already (`cnagent.md` CN14); EBUSY, with which a
+metadata-snapshot reserve meets a reservation already held (`cnagent.md`
+CN25); and ENXIO, the kernel's answer to a `dmsetup info` of a name no
+device has, which dmsetup words in its own line, "Device does not exist.":
+the one failure `Dm.Info` and `Dm.InfoDevNo` read as a device that is not
+there (SH15). A run that never reported — killed, or never started —
+refused nothing and carries no errno, whatever it printed first. No caller
+of the agent reads a refusal's text to decide. Reason: a tool's wording is
+no contract; one wrapper maps it, and a change of it is fixed there, while
+a decision built on the text goes wrong silently. The one exception is the
+md replay (CM5), which tests mdadm itself: it judges a refused start by
+mdadm's own words for its degraded gate (`mdadmGateWords`), and a change of
+those words fails the replay loudly rather than silently.
 
 SH15. Every wrapper call wraps its ctx with a deadline of `CmdSoftTimeout`
 before calling the `OsClient` (the soft/hard timeout contract of
@@ -828,36 +837,41 @@ SIGTERM and SIGKILL). A role package that calls the `OsClient` directly
 instead of through a wrapper — `cnagent.md` CN25's read of the `thin_dump`
 file, and the dn's raw-device `ReadBlock`/`WriteBlock` calls of the [D13]
 disk metadata (`DiskMeta`) — takes the same bound from the exported
-`agent.CmdCtx`. `Dm.DiscardRanges` is the one wrapper call that passes its
-caller's ctx on unchanged, and `cnagent.md` CN14's discard of a deleted
-thin volume, which calls `OsClient.DiscardRanges` directly for the count of
-chunks it sent, passes its pass's ctx on unchanged too: the `OsClient`
-bounds its wait for a slot, and waits for each discard it sends as long as
-the kernel takes (`osclient.md`, DiscardRanges), so a deadline would only
-cut the list between chunks, which the pass's chunk count already bounds.
-The bound holds in full only for a child the signals end.
-A dial (`NvmeHost.Dial`) runs in the agent's own process and ends at the
+`agent.CmdCtx`. Of the shared wrappers, `Dm.DiscardRanges` is the one call
+that passes its caller's ctx on unchanged, and `cnagent.md` CN14's discard
+of a deleted thin volume, which calls `OsClient.DiscardRanges` directly for
+the count of chunks it sent, passes its pass's ctx on unchanged too: the
+`OsClient` bounds its wait for a slot, and waits for each discard it sends
+as long as the kernel takes (`osclient.md`, DiscardRanges), so a deadline
+would only cut the list between chunks, which the pass's chunk count
+already bounds. The cn's md wrapper passes its caller's ctx on unchanged to
+its in-process calls as well — the superblock reads of `Md.ReadMember` and
+the md sysfs writes of `Md.SetSyncAction` and `Md.SetSyncMin` (`cnagent.md`
+CN12) — where a deadline would bound only the wait before the syscall
+starts (below). The bound holds in full only for a child the signals end. A
+dial (`NvmeHost.Dial`) runs in the agent's own process and ends at the
 timeout its caller passes or at the deadline, whichever comes first
 (`osclient.md`, DialTcp). The node check and the gather take the same bound
-from `agent.CmdCtx` for their reads and commands (CM5, CM6), but for three
-that can take longer than the soft timeout and run under a bound of their
-own: the gather's detached children (`osclient.md`, StartDetached), which
-nothing waits for, under the gather's deadline, its read of the agent's
-log, under a second bound of that length, and the md replay's wait for
-udev after each mdadm call, under the wait's own timeout.
-An in-process `OsClient` call — a directory listing, a modification-time
-read, a device-number read, a file, proto or block read or write — is
-bounded only until its syscall starts: its ctx is checked once, before it
-(`osclient.md`, ReadFile / WriteFile / WriteFileDirect; for a listing,
-`osclient.md`, ReadDir; for a modification-time read, `osclient.md`,
-ReadMtime; for a device-number read, `osclient.md`, ReadDevNo). A child
-blocked in an uninterruptible kernel wait is not bounded at all: both
-signals are delivered, and the call returns, and gives back its `OsClient`
-slot, only when the kernel does (an `nvme disconnect` whose target vanishes
-mid-delete waits out the kernel's admin timeout; `cnagent.md` CN10 runs the
-cn sweep's off the locks, while the cn build's dead-path disconnect and the
-dn sweep's source-connection disconnect still run under them — Known
-limits).
+from `agent.CmdCtx` for their reads and commands (CM5, CM6), but for the md
+replay's superblock reads, which `Md.ReadMember` makes on the check's ctx
+unchanged, as above, and for three that can take longer than the soft
+timeout and run under a bound of their own: the gather's detached children
+(`osclient.md`, StartDetached), which nothing waits for, under the gather's
+deadline, its read of the agent's log, under a second bound of that length,
+and the md replay's wait for udev after each mdadm call, under the wait's
+own timeout. An in-process `OsClient` call — a directory listing, a
+modification-time read, a device-number read, a file, proto or block read
+or write — is bounded only until its syscall starts: its ctx is checked
+once, before it (`osclient.md`, ReadFile / WriteFile / WriteFileDirect; for
+a listing, `osclient.md`, ReadDir; for a modification-time read,
+`osclient.md`, ReadMtime; for a device-number read, `osclient.md`,
+ReadDevNo). A child blocked in an uninterruptible kernel wait is not
+bounded at all: both signals are delivered, and the call returns, and gives
+back its `OsClient` slot, only when the kernel does (an `nvme disconnect`
+whose target vanishes mid-delete waits out the kernel's admin timeout;
+`cnagent.md` CN10 runs the cn sweep's off the locks, while the cn build's
+dead-path disconnect and the dn sweep's source-connection disconnect still
+run under them — Known limits).
 
 **A command that was killed did not answer, and "did not answer" is not
 "absent".** `OsClient.RunCommand` returns an exit code of -1 with a non-nil
@@ -1657,13 +1671,14 @@ carried on to the constructor; a ctx the first SIGINT or SIGTERM cancels,
 which starts `Serve`'s bounded stop (Bootstrap and lifecycle), while a
 second one ends the process at once with exit status 1, as every other dnv
 daemon's second signal does (`signalContext`, `watchSignals`), skipping
-SH27's join of background work; construct `common.NewNameFmt` over the local
-store and the process's **single** `common.NewLimitedOsClient` (with the
-default limit); log the start record, `agent.LogStartVersions` (`log.md`,
-Agent start): the kernel release, and for the cn the version of the mdadm it
-runs (`cnagent.md` CN-CM2), a read that fails logged in the record, and the
-start going on, since nothing an agent reads of its node stops its start,
-unlike CM3's checks of its values; build the role server
+SH27's join of background work; construct `common.NewNameFmt` over the
+local store and the process's **single** `common.NewLimitedOsClient` (with
+the default limit); log the start record, `agent.LogStartVersions`
+(`log.md`, Agent start): the kernel release, and for the cn the version of
+the mdadm it runs (`cnagent.md` CN-CM2), a read that fails logged in the
+record, and the start going on, since no version the agent reads stops its
+start (the kernel and the tools are the node check's to judge, CM5), unlike
+CM3's checks of its values; build the role server
 (`dnagent.NewDnAgentServer` / `cnagent.NewCnAgentServer`); call
 `agent.Serve` with the role's prepare step (SH33) and reconcile, a register
 func that calls `pb.RegisterDiskNodeAgentServer` (resp.
@@ -1671,8 +1686,8 @@ func that calls `pb.RegisterDiskNodeAgentServer` (resp.
 waiter — the dn passes its `WaitBackground`, the cn passes nil (its probers
 are cancelled, never joined, and neither its sweep's background
 `nvme disconnect` nor its background reads are joined — SH27). Transport is
-plaintext (`grpc.md`, Wiring); log level stays the default Info (`log.md` R6
-— the agent calls nothing). No flag is marked required through cobra:
+plaintext (`grpc.md`, Wiring); log level stays the default Info (`log.md`
+R6 — the agent calls nothing). No flag is marked required through cobra:
 "required" is checked after the viper binding, so a config file or env var
 satisfies it too (CM2, CM3).
 
@@ -1816,31 +1831,33 @@ by default, on a spare machine: on two small loop devices, with the cn
 agent's own `Md` calls, it creates an array, stops it, has one clean leg's
 assembly refused with its superblock unchanged, assembles both, fails one
 and stops the array, has the failed leg alone refused, starts the survivor
-degraded and writes a block through it, has the array started from both legs
-read that block, then zeroes the failed leg and starts the survivor alone
-with the forced start's form; at each assembly the agent's model of mdadm's
-start (`mdadmStarts`) must agree with what mdadm did, a refusal must be
-mdadm's degraded gate's, and at each read of the legs the agent's superblock
-reader (`Md.ReadMember`) must agree with mdadm's examine of each, after the
-zero too, where both must find none. The examine names the 1.2 format after
-its mode words, as the agent's other mdadm calls that read or write a
-member's superblock do (`cnagent.md` CN12, The superblock format), and is
-judged by what it prints: named so, mdadm answers a leg with no 1.2
-superblock with exit status 0 and nothing on its output, and no output of a
-run whose exit status is not 0 is trusted. No read of the replay names a
-format to `--examine-bitmap` or `--examine-badblocks`, on which mdadm 4.5
-aborts or crashes with nothing on its output. It refuses to start on a node
-that holds an md array over a dnv dm device, an earlier replay's array, a
-dnv dm device, an nvmet subsystem under dnv's NQN prefix or a file in the
-local store `--local-store` names, and when the mask row failed; it stops at
-the first step that fails, always tears down, and names what a teardown
-could not remove. The check and the gather catch SIGINT, SIGTERM, SIGHUP and
-SIGQUIT (`toolSignals`): the first stops the replay at its next step, later
-ones are ignored, so a hang-up of the session that runs it still leaves its
-teardown to run; the teardown also finds by its file a loop device losetup
-attached and did not print. Each step is one result. It covers neither the
-bitmap re-add's range nor the fence order of `integtest/md_fence_order.sh`,
-which need a writer in flight (`architecture.md`, Known limits).
+degraded and writes a block through it, has the array started from both
+legs read that block, then zeroes the failed leg and starts the survivor
+alone with the forced start's form; at each assembly the agent's model of
+mdadm's start (`mdadmStarts`) must agree with what mdadm did, a refusal
+must be mdadm's degraded gate's, and at each read of the legs the agent's
+superblock reader (`Md.ReadMember`) must agree with mdadm's examine of
+each, after the zero too, where both must find none. The examine names the
+1.2 format after its mode words, as the agent's create, assemblies and zero
+do (`cnagent.md` CN12, The superblock format; an add, which writes a
+member's superblock too, names none, since mdadm refuses the flag in its
+manage mode), and is judged by what it prints: named so, mdadm answers a
+leg with no 1.2 superblock with exit status 0 and nothing on its output,
+and no output of a run whose exit status is not 0 is trusted. No read of
+the replay names a format to `--examine-bitmap` or `--examine-badblocks`,
+on which mdadm 4.5 aborts or crashes with nothing on its output. It refuses
+to start on a node that holds an md array over a dnv dm device, an earlier
+replay's array, a dnv dm device, an nvmet subsystem under dnv's NQN prefix
+or a file in the local store `--local-store` names, and when the mask row
+failed; it stops at the first step that fails, always tears down, and names
+what a teardown could not remove. The check and the gather catch SIGINT,
+SIGTERM, SIGHUP and SIGQUIT (`toolSignals`): the first stops the replay at
+its next step, later ones are ignored, so a hang-up of the session that
+runs it still leaves its teardown to run; the teardown also finds by its
+file a loop device losetup attached and did not print. Each step is one
+result. It covers neither the bitmap re-add's range nor the fence order of
+`integtest/md_fence_order.sh`, which need a writer in flight
+(`architecture.md`, Known limits).
 
 CM6. **The gather.** `dnv-agent collect` gathers, as root, the node's state
 into one tar.gz built in memory and written once through the `OsClient`
@@ -2023,23 +2040,25 @@ pointer is absent from its DN's stored `side_pointer_list` is dropped, then
 each usable DN's node-level sweep removes what those sides left behind by
 name, then the remaining `side-*` files re-run the `SyncupSide` converge
 (DN8 to DN14) from the stored request — a converge that finds bytes of the
-side still to zero (re)starts that side's DN9 zeroing goroutine, which is
-how provisioning resumes after a restart (on a migration destination that
-has not provisioned, only once it holds its run in the clone-metadata area:
-a converge refused the run starts none, and the converge that takes the
-run, which a re-sent `SyncupSide` brings, starts it, DN13), and one whose
-stored length to zero DN8's side conf gate refuses converges and sweeps
-nothing of that side. Then every chunk that was kept is re-applied (SH21 to
-SH23); that step deletes nothing. The chunks an older build left for a
-migration under way at the upgrade are loaded and re-applied like any
-other, at the places that build gave them; the first piece of the worker's
-that this agent saves, one that is not byte for byte the chunk it holds at
-that index, takes out every chunk at its index or above before its save
-(DN15). A chunk whose side is not loaded is no orphan while a `side-*` file
-does not load and the chunk's loaded DN still names its side: that file
-names no side, so it may be this side's, and the chunk is skipped like the
-files of a DN that did not load — neither loaded nor deleted. The chunk's
-side is then where a lost `--local-store` leaves one, as above, until its
+side still to zero while the request says `provisioned` false (re)starts
+that side's DN9 zeroing goroutine, which is how provisioning resumes after
+a restart (on a migration destination, only once it holds its run in the
+clone-metadata area: a converge refused the run starts none, and the
+converge that takes the run, which a re-sent `SyncupSide` brings, starts
+it, DN13); one under `provisioned` true takes the count as complete and
+writes it to its end, zeroing nothing (DN9, row 5); and one whose stored
+length to zero DN8's side conf gate refuses converges and sweeps nothing of
+that side. Then every chunk that was kept is re-applied (SH21 to SH23);
+that step deletes nothing. The chunks an older build left for a migration
+under way at the upgrade are loaded and re-applied like any other, at the
+places that build gave them; the first piece of the worker's that this
+agent saves, one that is not byte for byte the chunk it holds at that
+index, takes out every chunk at its index or above before its save (DN15).
+A chunk whose side is not loaded is no orphan while a `side-*` file does
+not load and the chunk's loaded DN still names its side: that file names no
+side, so it may be this side's, and the chunk is skipped like the files of
+a DN that did not load — neither loaded nor deleted. The chunk's side is
+then where a lost `--local-store` leaves one, as above, until its
 `SyncupSide` rewrites its file and the worker pushes the chunk again. A
 chunk whose loaded DN no longer names its side is an orphan whatever
 `side-*` file failed to decode: the side has left the list, and its chunks
@@ -3035,11 +3054,12 @@ disk cannot hold (`dnv-worker.md` HL2, AR8).
   and whether the side is done, only the record decides). Every new
   goroutine for the side, a restart's included, starts again at
   `DnZeroBatchMaxBytes` with no kills counted.
-* zeroing runs at **every** `sp_level`, `SP_LEVEL_DISABLE` included
-  (DN11): it is bottom-layer provisioning. It never writes a side whose
-  held request says `provisioned`: the goroutine stops before its next
-  batch once the request does (`zeroLoop`), and the converge of row 5 starts
-  none.
+* zeroing runs at **every** `sp_level`, `SP_LEVEL_DISABLE` included (DN11):
+  it is bottom-layer provisioning. It starts no batch on a side whose held
+  request says `provisioned`: the goroutine checks the request before each
+  batch (`zeroLoop`), and the converge of row 5 cancels a batch still in
+  flight and waits for it (`stopZeroing`) before it writes the count, and
+  starts none.
 * cancellation: the drop of a side whose pointer left the list (DN6, which
   is also where a cancelled migration lands — `CancelMigration` reaches
   the agent as the side pointer leaving the list) **cancels the goroutine

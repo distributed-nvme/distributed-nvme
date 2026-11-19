@@ -36,7 +36,7 @@ import (
 // directly outside this file (osclient.md, Scope and placement). The
 // connections of the gRPC and etcd clients carry dnv's own calls and are
 // outside this rule. That is what makes the logging rules
-// of log.md R8.1, R8.2, R8.5, R8.6, R8.7, R8.8 and R8.9 enforceable, and every consumer
+// of log.md R8.1, R8.2, R8.5, R8.6, R8.7, R8.8, R8.9 and R8.10 enforceable, and every consumer
 // unit-testable through FakeOsClient.
 //
 // One carve-out is recorded (osclient.md, Exported raw helpers and the

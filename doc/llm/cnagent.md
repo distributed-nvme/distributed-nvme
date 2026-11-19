@@ -43,10 +43,10 @@ the cn role runs — mdadm, the thin-metadata reader — is not promoted into
 and lives in `agent/cnagent/` (`md.go`, `thinbm.go`). There is no LVM
 anywhere in dnv (`architecture.md`, [D14]), and the CN keeps no clone's
 metadata: a clone keeps its dm-clone metadata on its clone meta group, on
-DNs (CN18). Agents never talk to etcd
-(`layout.md`, Dependency rules). The gRPC server carries the server
-interceptors and the message limit of `grpc.md`, Wiring; the cn agent's
-outbound connections are only `nvme connect`s, never gRPC.
+DNs (CN18). Agents never talk to etcd (`layout.md`, Dependency rules). The
+gRPC server carries the server interceptors and the message limit of
+`grpc.md`, Wiring; the cn agent's outbound connections are its
+`nvme connect`s and the TCP dial before each (CN10), never gRPC.
 
 ## The cn's part of the shared packages
 
@@ -188,22 +188,22 @@ neither and is older than the grace, and another cn agent's subsystem
 passes through those shapes while it is being built.
 
 CN-CM2. `runCn` has the shape of `runDn` (`dnagent.md` CM4), with three cn
-differences. Its start record (`agent.LogStartVersions`) carries, beside the
-kernel release, the version line of the mdadm the agent runs, the mdadm its
-model of mdadm's start rests on (`mdadmStarts`; Known limits); a read that
-fails is logged and the start goes on, since nothing an agent reads of its
-node stops its start (its flags' checks do, `dnagent.md` CM3):
-`dnv-agent check cn` reports a version other than the tested one, and its md
-replay checks the model against the node's mdadm (`dnagent.md` CM5).
+differences. Its start record (`agent.LogStartVersions`) carries, beside
+the kernel release, the version line of the mdadm the agent runs, the mdadm
+its model of mdadm's start rests on (`mdadmStarts`; Known limits); a read
+that fails is logged and the start goes on, since no version the agent
+reads stops its start (its flags' checks do, `dnagent.md` CM3):
+`dnv-agent check cn` reports a version other than the tested one, and its
+md replay checks the model against the node's mdadm (`dnagent.md` CM5).
 `--capacity` is optional, since zero is a value (CN3), and a value from the
-flag, the environment or a config file's string that is not a plain unsigned
-decimal number, with no leading zero, is refused at start; a config file's
-YAML number is taken by the value YAML decodes, and one that is no whole
-number is refused (`capacityFromViper`, `dnagent.md` CM3). And `agent.Serve`
-gets no `dnagent.md` SH27 background waiter: the cn joins no background task
-— its CN11 probers, its CN10 path watchers, its sweep's background
-`nvme disconnect` (CN10) and its background reads are cancelled at `rootCtx`
-and never joined, for the reasons `dnagent.md` SH27 gives.
+flag, the environment or a config file's string that is not a plain
+unsigned decimal number, with no leading zero, is refused at start; a
+config file's YAML number is taken by the value YAML decodes, and one that
+is no whole number is refused (`capacityFromViper`, `dnagent.md` CM3). And
+`agent.Serve` gets no `dnagent.md` SH27 background waiter: the cn joins no
+background task — its CN11 probers, its CN10 path watchers, its sweep's
+background `nvme disconnect` (CN10) and its background reads are cancelled
+at `rootCtx` and never joined, for the reasons `dnagent.md` SH27 gives.
 
 ## The cn role — package `cnagent`
 
@@ -542,68 +542,70 @@ reply, holds that code and that `cn_info`.
 
 ### `SyncupCntlr`
 
-CN8. Gating. The pointer must be present in the `cntlr_pointer_list`
-of the `SyncupCnRequest` this process holds for the CN (`dnagent.md` SH8)
-— else `ReplyCodeUnknownObject`
-(`SyncupCn` introduces pointers first; `architecture.md`, Common agent
-rules). Then the `dnagent.md` SH8 revision gate against the `SyncupCntlrRequest` this
-process holds — zero while it holds none, as for a cntlr whose file CN2's
-reload did not load or skipped, whatever revision that file carries.
-Then, last and still with zero side effects, the conf gate of
-`architecture.md`, Common validation: `agent.ValidateBdevConf`
-(`dnagent.md`, Files) refuses a request whose `dm_pool_conf` carries a
-zero `data_block_size` or `low_water_mark_pct`, whose `dm_raid0_conf`
-carries a zero `stripe_size`, or whose `redund_conf` selected md-raid1
-with a zero `bitmap_chunk_block_cnt`. The control plane resolves all four
-when it writes the conf, so a zero here is a geometry no agent may invent
-a replacement for — those values become the thin-pool's, the raid0's and
-the md bitmap's own arguments (CN12, CN13, CN15), and a geometry this
-node guessed is one the rest of the cluster does not share. The same gate
-holds every NQN the agent builds a path or a connect from — each key of
-`nqn_to_subsystem`, each subsystem's and each transfer's `allowed_hosts`
-and each clone's `src_nqn` — to the gateway's rule, `ValidNqnPattern`
-within `MaxNqnLength` and no "..", copied as `conf.go` copies `model`'s
-(`agent.ValidateCntlrNqns`; `validateCntlrConf`): the configfs paths of
-`SubsysPath`, `HostPath` and the port links are built from the first two,
-so a "/" or ".." would reach outside the subsystem's directory, and the
-source NQN goes into the kernel's connect, whose options a "," would add
-to. A clone's `src_nqn` in the dnv namespace must also decode as a transfer
-NQN (`IsCloneSrcNqn`), the gateway's rule for `CreateClone`: the sweep
-removes a clone source once its clone has gone only when it is a transfer,
-or in no dnv namespace (CN21), so any other source in the dnv namespace
-would stay connected for good. Every NQN a released gateway stored passes
-the NQN rule; only a store written
-before the gateway held NQNs to the rule, or by hand, can carry one it
-refuses, and such a pool takes no new request until the record that
-carries the NQN is removed or replaced. The gateway keeps a way for each:
-`DeleteNamespace` and `DeleteSubsystem` check a stored subsystem NQN for
-its length alone, so such a subsystem can be emptied and deleted;
-`UpdateSubsystemHosts` replaces a subsystem's host list, and
-`UpdateTransferHosts` a transfer's (`architecture.md`, `service Gateway` —
-RPC specifications); and the worker leaves a deleting clone, and its source
-NQN, out of the request (`dnv-worker.md` CLD5). Each bumps the pool's revision,
-and the agent holds no memory of the refusal, so the next request, which
-no longer carries the NQN, is taken. The refusal is `ReplyCodeInvalidConf` (`dnagent.md` SH9) carrying the validator's
-message, and the reply echoes the stored revision, not the request's, so
-the worker sees that the request was not accepted. One Error record, msg
-"invalid stored conf", names the ids and the field. A request the three
-gates admit is persisted at once, before it becomes the cntlr's desired
-state and before its converge (`dnagent.md` SH5). A request whose save
-fails is refused with `ReplyCodeSaveFailed` (`dnagent.md` SH5). Such a
-call for a cntlr the process does not hold leaves its lock entry
+CN8. Gating. The pointer must be present in the `cntlr_pointer_list` of the
+`SyncupCnRequest` this process holds for the CN (`dnagent.md` SH8) — else
+`ReplyCodeUnknownObject` (`SyncupCn` introduces pointers first;
+`architecture.md`, Common agent rules). Then the `dnagent.md` SH8 revision
+gate against the `SyncupCntlrRequest` this process holds — zero while it
+holds none, as for a cntlr whose file CN2's reload did not load or skipped,
+whatever revision that file carries. Then, last and still with zero side
+effects, the conf gate of `architecture.md`, Common validation:
+`agent.ValidateBdevConf` (`dnagent.md`, Files) refuses a request whose
+`dm_pool_conf` carries a zero `data_block_size` or `low_water_mark_pct`,
+whose `dm_raid0_conf` carries a zero `stripe_size`, or whose `redund_conf`
+selected md-raid1 with a zero `bitmap_chunk_block_cnt`. The control plane
+resolves all four when it writes the conf, so a zero here is a geometry no
+agent may invent a replacement for — those values become the thin-pool's,
+the raid0's and the md bitmap's own arguments (CN12, CN13, CN15), and a
+geometry this node guessed is one the rest of the cluster does not share.
+The same gate holds every NQN the agent builds a path or a connect from —
+each key of `nqn_to_subsystem`, each subsystem's and each transfer's
+`allowed_hosts` and each clone's `src_nqn` — to the gateway's rule,
+`ValidNqnPattern` within `MaxNqnLength` and no "..", copied as `conf.go`
+copies `model`'s (`agent.ValidateCntlrNqns`; `validateCntlrConf`): the
+configfs paths of `SubsysPath`, `HostPath` and the port links are built
+from the first two, so a "/" or ".." would reach outside the subsystem's
+directory, and the source NQN goes into the kernel's connect, whose options
+a "," would add to. A clone's `src_nqn` in the dnv namespace must also
+decode as a transfer NQN (`IsCloneSrcNqn`), the gateway's rule for
+`CreateClone`: the sweep removes a clone source once its clone has gone
+only when it is a transfer, or in no dnv namespace (CN21), so any other
+source in the dnv namespace would stay connected for good. Every NQN a
+released gateway stored passes the NQN rule, and only a store written
+before the gateway held NQNs to that rule, or by hand, breaks it; but a
+gateway from before the transfer rule, the released one among them, took
+any `src_nqn` that passes the NQN rule, so a stored clone can carry a
+source in the dnv namespace that is no transfer. A pool with such a record
+takes no new request until the record that carries the NQN is removed or
+replaced. The gateway keeps a way for each: `DeleteNamespace` and
+`DeleteSubsystem` check a stored subsystem NQN for its length alone, so
+such a subsystem can be emptied and deleted; `UpdateSubsystemHosts`
+replaces a subsystem's host list, and `UpdateTransferHosts` a transfer's
+(`architecture.md`, `service Gateway` — RPC specifications); and the worker
+leaves a deleting clone, and its source NQN, out of the request
+(`dnv-worker.md` CLD5). Each bumps the pool's revision, and the agent holds
+no memory of the refusal, so the next request, which no longer carries the
+NQN, is taken. The refusal is `ReplyCodeInvalidConf` (`dnagent.md` SH9)
+carrying the validator's message, and the reply echoes the stored revision,
+not the request's, so the worker sees that the request was not accepted.
+One Error record, msg "invalid stored conf", names the ids and the field. A
+request the three gates admit is persisted at once, before it becomes the
+cntlr's desired state and before its converge (`dnagent.md` SH5). A request
+whose save fails is refused with `ReplyCodeSaveFailed` (`dnagent.md` SH5).
+Such a call for a cntlr the process does not hold leaves its lock entry
 (`dnagent.md`, Concurrency — `locks.go`; CN7).
 
-Placement is load-bearing: the gate sits before the local-store persist
-and before the request becomes this cntlr's desired state, so it skips the
+Placement is load-bearing: the gate sits before the local-store persist and
+before the request becomes this cntlr's desired state, so it skips the
 persist, the desired-state promotion and the whole converge — whose sweep
 phase alone rewrites ANA states, reloads ns-dev linears and removes dm
 devices; the skipped persist is what keeps a refused request from being
 replayed by the next startup reconcile. The same check is repeated in the
 converge itself for the one entrance that does not come through this RPC,
 the CN2 startup reconcile, which converges from a file that may have been
-persisted with zeros, or with an NQN a store from before the gateway's
-rule holds, and again in a cntlr's read (`readCntlr`).
-There it returns an empty `CntlrInfo`,
+persisted with zeros, or with an NQN that a store from before the gateway's
+rules holds, a released gateway's clone source among them, and again in a
+cntlr's read (`readCntlr`). There it returns an empty `CntlrInfo`,
 enumerates nothing and converges nothing — and it carries no leftover
 verdict either (CN30), because a cntlr this agent deliberately did not
 build must not have its objects named as removable; a read takes no
@@ -2507,22 +2509,23 @@ the assemblies right after the md device, the zero right after its mode
 word, so that each command ends with its members. An add, a fail, a remove
 and a stop name none: mdadm refuses the flag in its manage mode, where an
 add writes the array's own format, and a stop reads no member
-(`cnagent_integtest.md`, Lab facts). Reason: without the flag mdadm reads, of every superblock
-format it finds on a member, the one whose array was created last, and the
-0.90 and 1.0 formats sit at a device's end, which on a leg holds a host's
-data or a recycled extent's old bytes. A superblock there of an array
-created after the leg's own — one a host makes on a volume whose end maps
-there, or one a host of an earlier pool left on an extent that a repair
-gives to a new leg of an older array, whose superblock carries that array's
-first creation time — makes a plain assembly refuse the leg for the name it
-reads, and makes the md assembly mask's examine read the host's name, so
-that the stock incremental assembly may take the leg (`architecture.md`,
-Components: invocation reference); a plain create or add over such a leg
-goes through (`cnagent_integtest.md`, Lab facts). With the flag mdadm reads only dnv's superblock, where
-the agent's own read reads it (The superblock read, below). The flag also
-changes the zero: it removes only the 1.2 superblock and fails on a member
-that carries none, which the forced start allows for (the forced start,
-above).
+(`cnagent_integtest.md`, Lab facts). Reason: without the flag mdadm reads,
+of every superblock format it finds on a member, the one whose array was
+created last, and the 0.90 and 1.0 formats sit at a device's end, which on
+a leg holds a host's data or a recycled extent's old bytes. A superblock
+there of an array created after the leg's own — one a host makes on a
+volume whose end maps there, or one a host of an earlier pool left on an
+extent that a repair gives to a new leg of an older array, whose superblock
+carries that array's first creation time — makes a plain assembly refuse
+the leg for the name it reads, and would make a plain examine read the
+host's name and so let the stock incremental assembly take the leg, which
+is why the md assembly mask's examine names the format too
+(`architecture.md`, Components: invocation reference); a plain create or
+add over such a leg goes through (`cnagent_integtest.md`, Lab facts). With
+the flag mdadm reads only dnv's superblock, where the agent's own read
+reads it (The superblock read, below). The flag also changes the zero: it
+removes only the 1.2 superblock and fails on a member that carries none,
+which the forced start allows for (the forced start, above).
 
 **The superblock read.** The assembly, the forced start, the re-assembly,
 the inspect (CN31), the take-back
@@ -2985,36 +2988,40 @@ pass. An id that maps blocks is not adopted: the row reads
 `RES_STATUS_ERROR` with the reason `RES_REASON_THIN_ID_NOT_ADOPTED` and the
 blocks in its details, and no thin volume is built over it. An id that maps
 none is adopted, and the `dmsetup create` that follows decides; so it does
-for an id the headers do not list at all, which the create's message did not
-make and the thin table's create then refuses. A reserve refused because a
-metadata snapshot is already held, after CN25's release and retry, is a
-wait: the row reads `RES_STATUS_MISSING` with the refusal's text and no
-reason, which the converge's verdict names, so the worker's re-send tries
-again (CN30). Any other failure of the read — a timeout, a tool or option
-that is missing, a document that does not parse, a reserve refused by a pool
-that takes no message, as its create was — reads `RES_STATUS_ERROR` with
-`RES_REASON_THIN_ID_NOT_ADOPTED` and the read's text. The verdict names no
-row of that reason (CN30), and the worker counts it, for a td created or
-not, among the faults a failover cannot cure (`dnv-worker.md` HL2): the pool
-and its ids live on the sp's legs, so every new primary meets the same id. A
-read finds such a volume absent and names it, so the worker re-sends every
-second round, as for a lost id (Known limits), and each re-send's converge
-reads the headers again: a read that then answers decides as above;
-otherwise the volume waits for the operator. Reasons: a full dump walks
-every mapping of the pool under the `dnagent.md` SH15 command limit, which
-on a large pool even the agent's own empty id would never get through; a
-probe device over the id is a thin device, which the sweep deletes by id
-when it removes it over a wanted pool. Cost: a promotion over uncreated
-volumes in S slices runs at most S header reads ahead of the namespaces' ANA
-step under the cntlr's lock, each up to eight commands and one file read in
-the agent's own process, every one under a command limit of its own — the
-dump directory's mkdir and stat, the reserve, with a release and a second
-reserve when it is refused as held, the dump, the file's read and removal,
-and the release. What the refusal does not cover: a snapshot's id maps its
-origin's blocks, so a snapshot after an etcd restore can still take an old
-volume's id; and a host write between a new volume's build and its created
-flip, then a failover, makes the new primary refuse the pool's own volume
-(`architecture.md`, Known limits). Both stay inside one pool.
+for an id the headers do not list at all, which the create's message did
+not make and the thin table's create then refuses. A reserve refused
+because a metadata snapshot is already held, after CN25's release and
+retry, is a wait: the row reads `RES_STATUS_MISSING` with the refusal's
+text and no reason, which the converge's verdict names, so the worker's
+re-send tries again (CN30). Any other failure of the read — a timeout, a
+tool or option that is missing, a document that does not parse, a reserve
+refused by a pool that takes no message, as its create was — reads
+`RES_STATUS_ERROR` with `RES_REASON_THIN_ID_NOT_ADOPTED` and the read's
+text. The verdict names no row of that reason (CN30), and the worker counts
+it, for a td created or not, among the faults a failover cannot cure
+(`dnv-worker.md` HL2): the pool and its ids live on the sp's legs, so every
+new primary meets the same id. A read finds such a volume absent and names
+it, so the worker re-sends every second round, as for a lost id (Known
+limits), and each re-send's converge reads the headers again: a read that
+then answers decides as above; otherwise the volume waits for the operator.
+Reasons: a full dump walks every mapping of the pool under the `dnagent.md`
+SH15 command limit, which on a large pool even the agent's own empty id
+would never get through; a probe device over the id is a thin device, which
+the sweep deletes by id when it removes it over a wanted pool. Cost: a
+promotion over uncreated volumes in S slices runs at most S header reads
+ahead of the namespaces' ANA step under the cntlr's lock, each up to eight
+commands and one file read in the agent's own process, every one under a
+command limit of its own — the dump directory's mkdir and stat, the
+reserve, with a release and a second reserve when it is refused as held,
+the dump, the file's read and removal, and the release. What the refusal
+does not cover: a snapshot's id maps its origin's blocks, so a snapshot
+after an etcd restore can still take an old volume's id; and a host write
+between a new volume's build and its created flip, followed by anything
+that makes a primary build the volume again before the flip — a failover, a
+reboot of the primary's node, or a level that drops the pool and is raised
+again, since the build keeps no memory of an earlier one — makes that
+primary refuse the pool's own volume (`architecture.md`, Known limits).
+Both stay inside one pool.
 
 **Cross-slice point-in-time.** The per-slice suspend quiesces one pool's
 origin only; a striped td snapshots atomically only if no host write
@@ -3163,9 +3170,14 @@ delete and re-create the snapshot, and nothing else tells the operator
 which one.
 
 The persisted `SyncupCntlrRequest` carries `created` too (`dnagent.md`
-SH5). Between a td's materialization and the flip's re-sync the stored
-copy still says false, which is harmless — the devices exist, so nothing
-messages — and is corrected by the bump's higher-revision request.
+SH5). Between a td's materialization and the flip's re-sync the stored copy
+still says false. While the devices stand that is harmless, since nothing
+messages, and the bump's higher-revision request corrects it. After a node
+reboot the startup reconcile converges the copy over absent devices: its
+create meets the id, and a volume a host has written to is refused (A new
+volume's thin id) until the bump's request, which carries `created`, builds
+it; a reboot before the worker's flip leaves the volume to an operator,
+since the flip waits for rows that read OK (`dnv-worker.md` RW19).
 
 A td leaving `td_list` is deleted by the sweep (CN21), which is where its
 layer order already puts the pieces: its namespaces, ns-devs, raid0 and
@@ -3264,36 +3276,36 @@ A pass sends at most `CnThinDiscardPassChunks` chunks over all its
 volumes.
 
 A slice's volume is the td's size over the slice count, a whole number of
-stripes, and a stripe can be smaller than the pool's block, so a volume
-can end inside its last block. dm-thin unmaps only the blocks a discard
-covers whole and completes a shorter discard with nothing unmapped, so
-that part-block, once written, stays mapped until the delete: the range
-stops at the last whole block, and a volume whose status reads that
-part-block alone mapped gets no discard. What a volume keeps undiscarded —
-skipped, past the pass's count, behind a chunk that failed, or a mapped
-part-block — is logged with its bytes and why, and nothing of it stops the
-removal or the delete; once the volume is removed no pass discards it
-again, since the delete ends the volume and nothing remembers what was
-left. The dm udev rule takes udev's watch off every dnv dm device
-(`architecture.md`, Components: invocation reference), so the discard's
-close brings no udev probe of the volume, and its removal follows in the
-same pass. A removal that fails all the same, busy under another opener,
-stops the layer, as a layer that leaves anything does, and the re-send's
-pass reads the volume's status again and discards from there. The
-top-first order is what makes that pass go on: the status names only the
-highest mapped sector, which a pass's top chunks lower as they unmap the
-top, so after a pass the count cut the next one starts below where it
-stopped, and after a whole discard the volume maps no whole block, so the
-next pass sends nothing and removes it.
-A mapped
-part-block keeps the highest sector at the volume's end, so there a re-send
-after a pass the count cut starts again at the last whole block and sends
-the same top chunks again. Not taken: one discard of the whole volume,
-whose time under the locks has no bound; holding the delete until the
-volume reads unmapped, which keeps a large volume's deletion going for
-many passes; and a disk node's discard of the extents its sweep frees,
-which frees space behind the disk and changes nothing a host reads, since
-a thin volume never shows a host a block it has not written.
+stripes, and a stripe can be smaller than the pool's block, so a volume can
+end inside its last block. dm-thin unmaps only the blocks a discard covers
+whole and completes a shorter discard with nothing unmapped, so that
+part-block, once written, stays mapped until the delete: the range stops at
+the last whole block, and a volume whose status reads that part-block alone
+mapped gets no discard. What a volume keeps undiscarded — skipped, past the
+pass's count, behind a chunk that failed, or a mapped part-block — is
+logged with its bytes and why, and nothing of it stops the removal or the
+delete; once the volume is removed no pass discards it again, since the
+delete ends the volume and nothing remembers what was left. The dm udev
+rule takes udev's watch off every dnv dm device (`architecture.md`,
+Components: invocation reference), so the discard's close brings no udev
+probe of the volume, and its removal follows in the same pass. A removal
+that fails all the same, busy under another opener, leaves the volume
+behind while the layer goes on with its other volumes, and the chain goes
+no lower than L7, as with any layer that leaves anything (the stop rule,
+CN21); the re-send's pass reads the volume's status again and discards from
+there. The top-first order is what makes that pass go on: the status names
+only the highest mapped sector, which a pass's top chunks lower as they
+unmap the top, so after a pass the count cut the next one starts below
+where it stopped, and after a whole discard the volume maps no whole block,
+so the next pass sends nothing and removes it. A mapped part-block keeps
+the highest sector at the volume's end, so there a re-send after a pass the
+count cut starts again at the last whole block and sends the same top
+chunks again. Not taken: one discard of the whole volume, whose time under
+the locks has no bound; holding the delete until the volume reads unmapped,
+which keeps a large volume's deletion going for many passes; and a disk
+node's discard of the extents its sweep frees, which frees space behind the
+disk and changes nothing a host reads, since a thin volume never shows a
+host a block it has not written.
 
 A whole sp leaving this CN — the pointer removed, or `SP_LEVEL_DISABLE` —
 instead only deactivates: the pool is unwanted too, so by the rule above
@@ -4179,22 +4191,23 @@ cn behavior per level, each holding at that level and above:
   (CN21: a source is in use while any stored cntlr's `clone_list` names it,
   which `sp_level` does not shorten, or a live dm-clone table maps it), so
   it is disconnected only once the clone leaves `clone_list` or the cntlr's
-  stored state goes — a transfer NQN of this cluster by the cntlr's L5 or
-  the node-level pass, and by the node-level pass alone once the cntlr's
-  stored state has gone; one in no dnv namespace or a transfer of another
-  cluster by the node-level pass alone, through its controllers of this cn's
-  host NQN (CN21); the ns-devs of clone-target tds go on `CnErrorName` (CN16
-  rule 4), so an `auto_resume` clone's destination namespace stays exported
-  and optimized and its host takes IO errors instead of queueing (CN16). A
-  clone's clone meta group is a group, so its array or group device stays
-  under the group gate until `SP_LEVEL_NO_REDUND`, and its legs under the
-  leg gate: the metadata it holds is there when the level is lowered, and
-  the dm-clone the build creates over it goes on from where the copy was
-  (CN18 step 3). Lowering the level leaves a destination namespace optimized
-  over the dm-error until the pass that builds the dm-clone moves its ns-dev
-  onto it; one whose build does not finish in that pass goes inaccessible at
-  the end of it (CN16). One whose clone's clone meta group still provisions
-  is deferred instead (CN9, CN16 rule 0): the first pass after the level is
+  stored state goes — a transfer NQN of this cluster by the L5 of any
+  cntlr's converge on this CN or by the node-level pass, whether or not
+  this cntlr's stored state remains; one in no dnv namespace or a transfer
+  of another cluster by the node-level pass alone, through its controllers
+  of this cn's host NQN (CN21); the ns-devs of clone-target tds go on
+  `CnErrorName` (CN16 rule 4), so an `auto_resume` clone's destination
+  namespace stays exported and optimized and its host takes IO errors
+  instead of queueing (CN16). A clone's clone meta group is a group, so its
+  array or group device stays under the group gate until
+  `SP_LEVEL_NO_REDUND`, and its legs under the leg gate: the metadata it
+  holds is there when the level is lowered, and the dm-clone the build
+  creates over it goes on from where the copy was (CN18 step 3). Lowering
+  the level leaves a destination namespace optimized over the dm-error
+  until the pass that builds the dm-clone moves its ns-dev onto it; one
+  whose build does not finish in that pass goes inaccessible at the end of
+  it (CN16). One whose clone's clone meta group still provisions is
+  deferred instead (CN9, CN16 rule 0): the first pass after the level is
   lowered builds no dm-clone and moves the namespace to inaccessible at its
   start (CN9's pre-step 1), and it waits there until a dm-clone built after
   the sides' provisioned flip serves (CN16 rule 5).
@@ -4461,32 +4474,33 @@ touched. Calling anything unowned assumes at most one cn agent per kernel
 (`cmd/dnv-agent cn`); a co-hosted dn agent is fine, because its NQNs are all
 dnv-format dn kinds, which never reach that arm.
 
-**P0, before every layer, the park step.** First every unwanted
-namespace moves to `AnaGrpIdInaccessible` — one dropped under a subsystem
-that stays, and every namespace of a subsystem that left the request,
-listed for it — so nvmet refuses new host IO to it, the order a planned
-park has too (CN16). Then every suspended device of ours below an unwanted
-ns-dev or transfer device of the chain is resumed, on whatever table is
-live, children before their parent. Then each unwanted ns-dev and each
-unwanted transfer device is parked. A park has no plan — nothing wanted
-names the device, and its td may be leaving in the same pass — so it is
-derived from the device's own live table. For an ns-dev only one backing
-names a td: a raid0 (`CnRaid0Name`), whose ids are also its td's dm-error's
-(`CnErrorName`), so there the target is CN16's own. Anywhere else — a
-table this build never wrote, an ns-dev over a dm-clone, a transfer device,
-whose shape off service is an error table of its size (CN17) — the device
-is reloaded onto an error table of its own size, which is the same thing
-one indirection shorter; a load onto the td's dm-error that fails is
-followed at once by the plain error table, since an error target names no
-device that can have gone since the read. A device already parked is left
-alone but resumed if it is suspended. Each step matters: L1's disable of an
-nvmet namespace waits, unkillable, for every request in flight on it, and
-a suspended dm device under it never completes one, so the pass would hold
-its CN1 locks in the kernel for as long as the device stays so; the
-reload's own flushing suspend is what completes the in-flight host IO
-instead of replaying it at resume onto a stack that is about to go; and a
-suspended device below holds the IO that suspend waits for. Nothing on a
-controller node stays suspended across passes on purpose
+**P0, before every layer, the park step.** First every unwanted namespace
+moves to `AnaGrpIdInaccessible` — one dropped under a subsystem that stays,
+and every namespace of a subsystem that left the request, listed for it —
+so nvmet refuses new host IO to it, the order a planned park has too
+(CN16). Then every suspended dm device of ours that the live dm tables
+below an unwanted ns-dev or transfer device of the chain lead to is
+resumed, on whatever table is live, children before their parent; the walk
+ends at an md array, whose members it does not read (Known limits). Then
+each unwanted ns-dev and each unwanted transfer device is parked. A park
+has no plan — nothing wanted names the device, and its td may be leaving in
+the same pass — so it is derived from the device's own live table. For an
+ns-dev only one backing names a td: a raid0 (`CnRaid0Name`), whose ids are
+also its td's dm-error's (`CnErrorName`), so there the target is CN16's
+own. Anywhere else — a table this build never wrote, an ns-dev over a
+dm-clone, a transfer device, whose shape off service is an error table of
+its size (CN17) — the device is reloaded onto an error table of its own
+size, which is the same thing one indirection shorter; a load onto the td's
+dm-error that fails is followed at once by the plain error table, since an
+error target names no device that can have gone since the read. A device
+already parked is left alone but resumed if it is suspended. Each step
+matters: L1's disable of an nvmet namespace waits, unkillable, for every
+request in flight on it, and a suspended dm device under it never completes
+one, so the pass would hold its CN1 locks in the kernel for as long as the
+device stays so; the reload's own flushing suspend is what completes the
+in-flight host IO instead of replaying it at resume onto a stack that is
+about to go; and a suspended device below holds the IO that suspend waits
+for. Nothing on a controller node stays suspended across passes on purpose
 (`architecture.md`, Namespace suspend semantics), so a suspended device of
 ours below — a raid0, a thin volume — was left so by a reload or a quiesce
 that failed or was cut off, and a bare resume releases its IO where it was
@@ -4494,16 +4508,15 @@ going, as the dn's P0 does (`dnagent.md` DN6). One `dmsetup info` listing
 of the node comes first, and when it answered whole and reads no device of
 ours suspended but the ones being parked, no table below is read: the
 common case costs one command whatever the stacks' depth. **A device the
-park cannot prove out of suspension stops the chain before L1**, as a
-layer that left something behind does: proved out means absent, never
-suspended, or its reload or resume went through; a `dmsetup info` that did
-not answer proves nothing, nor does a suspended device whose table did not
-read, as a bare resume would replay its IO onto the stack being retired
-(CN16). The layers below report their objects untouched, so the reply
-names the device, and the converge the worker's re-send brings
-(`dnv-worker.md` RW4) parks it again. A failed ANA move, or a failed read
-or resume below, stops nothing: the park's own result is what the chain
-stops on.
+park cannot prove out of suspension stops the chain before L1**, as a layer
+that left something behind does: proved out means absent, never suspended,
+or its reload or resume went through; a `dmsetup info` that did not answer
+proves nothing, nor does a suspended device whose table did not read, as a
+bare resume would replay its IO onto the stack being retired (CN16). The
+layers below report their objects untouched, so the reply names the device,
+and the converge the worker's re-send brings (`dnv-worker.md` RW4) parks it
+again. A failed ANA move, or a failed read or resume below, stops nothing:
+the park's own result is what the chain stops on.
 
 **Layers, strictly top-down.** Within one sp's chain:
 
@@ -4850,36 +4863,41 @@ fixed name in a world-writable directory, another local user could create
 the file first, own it through the dump and rewrite it before it is read
 back, and a forged dump forges the bitmaps `GetThinDeviceBm` and `GetLegBm`
 answer, which mark regions of another pool's clone, or of a migration,
-copied that never were. Nobody else can create an entry in such a
-directory, and only root can create, replace or rename an entry of its
-parent, the system's runtime directory, which is root's. That parent is the
-runtime directory and not a world-writable temp directory because nothing
-repairs an entry that fails the check: `mkdir -p` leaves an existing
-directory's owner and mode as they are. A local user who created the name
-first in a world-writable directory would then fail every dump on the node
-until an operator removed it — the bitmap reads and CN14's sweeps of a
-pool's thin ids. In the runtime directory only root can have made such an
-entry. That directory is a tmpfs, so until its `rm` the file holds as much
-memory as the document, which the command timeouts bound. The file is read
-back under the soft timeout, and once `thin_dump` has run an `rm -f` of it
-follows whatever the outcome, before the release and, like it, on a context
-the caller's cancellation does not reach — a dump that did not answer
-included, whether the soft timeout killed it or the caller went away, since
-a killed `thin_dump` may already have written it. Only an `rm` that fails,
-or an agent that dies between the dump and the `rm`, leaves the file
-behind; the name is fixed, so the pool's next dump overwrites it, and one
-whose pool is gone stays until a reboot clears the runtime directory. The
-command timeouts of `architecture.md`, Common validation, bound the dump; a
-pool whose metadata outgrows what `thin_dump` emits inside `CmdSoftTimeout`
-fails the RPC, and the caller falls back to a full copy — a bitmap read
-when `architecture.md`, Clones or Migration, says is an optimization, never
-a correctness input; the worker reads a leg's bitmap again on a later round
-(`dnv-worker.md` BM7). CN14's sweeps of a pool's thin ids — the activation
-sweep and the sweep after a failed delete — share this reservation
-machinery and its `CmdSoftTimeout` bound: metadata too large to dump inside
-the bound fails a sweep the same way it fails a bitmap read; an armed
-activation sweep retries on later converges, and the sweep after a failed
-delete does not (CN14).
+copied that never were, and forges CN14's header read (`readThinHeaders`),
+which would let a new volume take a thin id that holds another volume's
+data. Nobody else can create an entry in such a directory, and only root
+can create, replace or rename an entry of its parent, the system's runtime
+directory, which is root's. That parent is the runtime directory and not a
+world-writable temp directory because nothing repairs an entry that fails
+the check: `mkdir -p` leaves an existing directory's owner and mode as they
+are. A local user who created the name first in a world-writable directory
+would then fail every dump on the node until an operator removed it — the
+bitmap reads, CN14's sweeps of a pool's thin ids and its header read after
+a failed thin create. In the runtime directory only root can have made such
+an entry. That directory is a tmpfs, so until its `rm` the file holds as
+much memory as the document, which the command timeouts bound. The file is
+read back under the soft timeout, and once `thin_dump` has run an `rm -f`
+of it follows whatever the outcome, before the release and, like it, on a
+context the caller's cancellation does not reach — a dump that did not
+answer included, whether the soft timeout killed it or the caller went
+away, since a killed `thin_dump` may already have written it. Only an `rm`
+that fails, or an agent that dies between the dump and the `rm`, leaves the
+file behind; the name is fixed, so the pool's next dump overwrites it, and
+one whose pool is gone stays until a reboot clears the runtime directory.
+The command timeouts of `architecture.md`, Common validation, bound the
+dump; a pool whose metadata outgrows what `thin_dump` emits inside
+`CmdSoftTimeout` fails the RPC, and the caller falls back to a full copy —
+a bitmap read when `architecture.md`, Clones or Migration, says is an
+optimization, never a correctness input; the worker reads a leg's bitmap
+again on a later round (`dnv-worker.md` BM7). CN14's sweeps of a pool's
+thin ids — the activation sweep and the sweep after a failed delete — and
+its header read after a failed thin create share this reservation machinery
+and its `CmdSoftTimeout` bound: metadata too large to dump inside the bound
+fails a sweep the same way it fails a bitmap read; an armed activation
+sweep retries on later converges, and the sweep after a failed delete does
+not (CN14). The header read skips the mappings, so only a pool whose thin
+devices alone outgrow the bound fails it, and a read that fails refuses the
+id (CN14).
 
 CN26. `GetThinDeviceBm`: from the `slice_idx` pool's dump, the mapping
 bitmap of the td's thin volume (its `dev_id` looked up in the stored
@@ -6689,11 +6707,14 @@ stores instead is CN23's.
 * A clone source in the dnv namespace that is no transfer stays connected
   once its clone has gone, on every controller node whose build connected
   it before CN8's gate held a clone's `src_nqn` to `IsCloneSrcNqn`: the
-  node-level pass never judges a connection in the dnv namespace that is
-  no transfer (CN21), and from then on the gate refuses every request
-  that carries such a source, the stored one at startup and in a read too.
-  Only a request stored before the gateway held `CreateClone` to the rule,
-  or written by hand, carries one; an operator disconnects the source.
+  node-level pass never judges as a clone source, by its controllers' host
+  NQN, a connection in the dnv namespace that is no transfer (CN21,
+  `hostNqnJudged`; one whose NQN reads as a leg of this controller node is
+  its pool's chain's, judged as a leg), and from then on the gate refuses
+  every request that carries such a source, the stored one at startup and
+  in a read too. Only a request stored before the gateway held
+  `CreateClone` to the rule, or written by hand, carries one; an operator
+  disconnects the source.
 * A connection made by hand with this controller node's host NQN to a
   subsystem that is not dnv's, which no held request names, is taken by the
   node-level sweep for a clone source of ours whose clone has gone (CN21),
@@ -6717,6 +6738,16 @@ stores instead is CN23's.
   an entry freed since the walk (CN10); the reads are listings and file
   reads in the agent's own process, which start no process, and only a
   converge that connects many connections makes them.
+* P0's release of suspended devices (CN21) follows the live dm tables and
+  ends at an md array, whose members it does not read, so a leg wrapper
+  (`CnLegName`) that a failed reload left suspended under a raid1 group is
+  not resumed there. md's write to that member waits in it, the flushing
+  suspend of the park of an ns-dev above waits for that write until the
+  soft timeout, the park fails, and the chain stops before L1. A leg the
+  request still wants has its wrapper resumed by its build
+  (`dmStepResume`); an unwanted one, as in the node-level chain of a pool
+  that left, is resumed by nothing, so the same stop comes back on every
+  pass until an operator resumes the wrapper.
 * A thin `delete` message that fails after its volume's removal is
   re-driven only once, by the sweep of that pool's ids its own pass runs
   under a request that counts as delivered (CN8, CN14), and nothing of it
@@ -6776,20 +6807,22 @@ stores instead is CN23's.
   long as the id holds data or its header read fails; a failing read is not
   left out of the read's name, since the agent keeps no memory of a
   converge's failure.
-* A torn snapshot's mark is lost only with the cntlr that saw the tear.
-  CN14 saves it in the local store right after the pre-pass run that saw
-  it, so an agent restart keeps it, and every cntlr reports a mark it holds
-  in any role until a request lists the td `torn`, so a demoted primary,
-  or one whose node comes back after the new primary's created flip,
-  reports it and the worker records it (`dnv-worker.md` RW19). It is lost
-  when the cntlr that saw the tear never reports again — its node never
-  comes back, its local store is lost, or its pointer leaves the CN's list
-  first — and when the agent dies between the run's first message and the
-  save, a window of the rest of one pre-pass: a primary whose run then
-  finds every slice's id made sees no tear. The snapshot then reads `torn`
-  false (`architecture.md`, Known limits). A save that fails keeps the mark
-  in memory and logs, so an agent restart before the worker records it, and
-  before another write of the file, loses it too.
+* A torn snapshot's mark is kept across an agent restart and a role move,
+  and lost in three cases. CN14 saves it in the local store right after the
+  pre-pass run that saw it, so an agent restart keeps it, and every cntlr
+  reports a mark it holds in any role until a request lists the td `torn`,
+  so a demoted primary, or one whose node comes back after the new
+  primary's created flip, reports it and the worker records it
+  (`dnv-worker.md` RW19). It is lost when the cntlr that saw the tear never
+  reports again — its node never comes back, its local store is lost, or
+  its pointer leaves the CN's list first — and when the agent dies between
+  the run's last message, once every slice's pool holds the id, and the
+  save: a primary whose run then finds every slice's id made sees no tear.
+  A death earlier in the run leaves a slice to make, and the run that makes
+  it marks the tear again. A save that fails keeps the mark in memory and
+  logs, so an agent restart before the worker records it, and before
+  another write of the file, loses it too. A lost mark leaves the snapshot
+  reading `torn` false (`architecture.md`, Known limits).
 * While the CN's store disk refuses writes, the agent keeps the last
   requests it accepted for the CN and its cntlrs: every `SyncupCn` and
   `SyncupCntlr` the gates admit is refused until a save holds (`dnagent.md`

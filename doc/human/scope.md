@@ -375,14 +375,14 @@ the host.
   saves the mark at once in its local store, the directory where it keeps
   its own state on its node. Every cntlr reports a mark it holds, as the
   primary or not, and the worker records the mark from the first report,
-  before or after the snapshot is recorded as created. The mark is lost only
-  when the controller node that saw the tear never comes back or loses its
-  local store, when its agent dies in the moment between the first slice's
-  step and the save, when the save fails and the agent restarts before the
-  worker records the mark, or when that cntlr is deleted before it reports
-  the mark again, as by a cntlr replacement while its node is down. A lost
-  mark leaves no sign. Delete and re-create a snapshot reported torn. State:
-  accepted. Not seen in the lab.
+  before or after the snapshot is recorded as created. The mark is lost
+  only when the controller node that saw the tear never comes back or loses
+  its local store, when its agent dies in the moment between the last
+  slice's step and the save, when the save fails and the agent restarts
+  before the worker records the mark, or when that cntlr is deleted before
+  it reports the mark again, as by a cntlr replacement while its node is
+  down. A lost mark leaves no sign. Delete and re-create a snapshot
+  reported torn. State: accepted. Not seen in the lab.
 
 ### 5.2 The forced start
 
@@ -629,26 +629,29 @@ Measured times are in [the introduction](introduction.md#status-and-limits-of-01
   that read. State: accepted. The window is short, but the operator's
   level step can hold it open as long as the level stays. Not seen in the
   lab.
-- **A subsystem or a connection with dnv's prefix that names no dnv
-  object can stay.** A subsystem's name starts with dnv's prefix, but this
-  build of dnv reads no pool from it. While a cntlr asks for it, the sweep
-  treats it as that pool's subsystem. Once no cntlr asks for it, the sweep
-  leaves it and its namespaces alone, since a newer build of dnv may have
-  made it, and the pool's devices under those namespaces stay too. A
-  controller node's connection to a clone's source whose name has dnv's
-  prefix but is no transfer stays the same way once the clone has gone:
-  the sweep never judges such a connection. The gateway refuses such a
-  subsystem name, and the gateway and the cn agent refuse such a source
-  for a clone, so only a desired state written by hand, or one stored
-  before those checks, makes either. An operator removes it by hand.
-  State: accepted. Not seen in the lab.
+- **A subsystem or a connection whose name has dnv's prefix but names no
+  dnv object can stay.** dnv's prefix is `nqn.2024-01.io.dnv:`, the start
+  of every NQN dnv makes; a name such as `nqn.2024-01.io.dnv.csi:...` does
+  not have it. A subsystem's name starts with that prefix, but this build
+  of dnv reads no pool from it. While a cntlr asks for it, the sweep treats
+  it as that pool's subsystem. Once no cntlr asks for it, the sweep leaves
+  it and its namespaces alone, since a newer build of dnv may have made it,
+  and the pool's devices under those namespaces stay too. A controller
+  node's connection to a clone's source whose name has dnv's prefix but is
+  no transfer stays the same way once the clone has gone: the sweep never
+  judges such a connection as a clone source. The gateway refuses such a
+  subsystem name, and the gateway and the cn agent refuse such a source for
+  a clone, so only a desired state written by hand, or one stored before
+  those checks, makes either. An operator removes it by hand. State:
+  accepted. Not seen in the lab.
 - **A controller node's sweep removes two things that may be an
-  operator's.** A subsystem that is not dnv's and has no namespace, no
-  host and no port, once it is 30 s old: a build or a removal of dnv cut
-  short leaves the same shape, and nothing else tells the two apart. And a
-  connection opened by hand with the host NQN that the cn agent uses, once
-  no clone reads through it: dnv takes it for the source of a clone that
-  has gone. State: accepted; a requirement, which
+  operator's.** A subsystem that is not dnv's and has no namespace that
+  names a device, no host and no port, once it is 30 s old: a build or a
+  removal of dnv cut short leaves the same shape, and nothing else tells
+  the two apart. A namespace made but never given a device does not keep
+  it. And a connection opened by hand with the host NQN that the cn agent
+  uses, once no clone reads through it: dnv takes it for the source of a
+  clone that has gone. State: accepted; a requirement, which
   [the introduction](introduction.md#requirements) names. Not seen in the
   lab.
 - **What a host wrote in a clone's source reaches the controller node.**

@@ -102,9 +102,10 @@ func leadingVersion(
 // (log.md, Agent start): the kernel release, and, when withMdadm is set,
 // as for the cn role, the version line of the mdadm the agent runs. A read
 // that fails leaves its attribute empty and puts its error in the record,
-// which is then a warning; the start goes on either way, since nothing an
-// agent reads of its node stops its start, only its flags' checks do
-// (dnagent.md CM3, CM4; cnagent.md CN-CM2).
+// which is then a warning; the start goes on either way, since no version
+// the agent reads stops its start: the kernel and the tools are the node
+// check's to judge, and of the start's own checks only its flags' do
+// (dnagent.md CM3, CM4, CM5; cnagent.md CN-CM2).
 func LogStartVersions(ctx context.Context, oc common.OsClient, withMdadm bool) {
 	var errs []error
 	release, err := KernelRelease(ctx, oc)
