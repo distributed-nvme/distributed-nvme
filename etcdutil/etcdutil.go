@@ -166,6 +166,9 @@ func appendErr(attrs []any, err error) []any {
 
 // logGet emits an "etcd get" record (log.md, etcd). value is logged decoded,
 // never as raw bytes, and only when the key was found and could be decoded.
+// A get that answered, found or not, is a read at Debug, one that failed is
+// at Info (common.ReadLevel), and the value is rendered only when the level
+// is on.
 func logGet(
 	ctx context.Context,
 	key string,
@@ -173,6 +176,10 @@ func logGet(
 	msg proto.Message,
 	err error,
 ) {
+	level := common.ReadLevel(err)
+	if !common.LogEnabled(ctx, level) {
+		return
+	}
 	attrs := []any{
 		slog.String("key", key),
 		slog.Bool("found", found),
@@ -180,7 +187,7 @@ func logGet(
 	if found && msg != nil {
 		attrs = append(attrs, slog.Any("value", common.PbToLogValue(msg)))
 	}
-	slog.InfoContext(ctx, msgGet, appendErr(attrs, err)...)
+	slog.Log(ctx, level, msgGet, appendErr(attrs, err)...)
 }
 
 // logPut emits an "etcd put" record (log.md, etcd).
@@ -293,11 +300,13 @@ func (c *Client) scan(
 	if resp != nil {
 		count = len(resp.Kvs)
 	}
-	attrs := []any{
-		slog.String("prefix", prefix),
-		slog.Int("count", count),
+	if level := common.ReadLevel(err); common.LogEnabled(ctx, level) {
+		attrs := []any{
+			slog.String("prefix", prefix),
+			slog.Int("count", count),
+		}
+		slog.Log(ctx, level, msgRange, appendErr(attrs, err)...)
 	}
-	slog.InfoContext(ctx, msgRange, appendErr(attrs, err)...)
 	if err != nil {
 		return nil, fmt.Errorf("etcd range %s: %w", prefix, err)
 	}
@@ -391,9 +400,10 @@ func (c *Client) RangeKeys(
 }
 
 // Decode unmarshals one scanned value (EU2) and logs it as an "etcd get"
-// record with found = true, so that every value a caller actually reads is
-// logged individually even though the range that produced it logged only a
-// count (log.md, etcd).
+// record with found = true, so that at the debug log level every value a
+// caller actually reads is logged individually even though the range that
+// produced it logged only a count; at Info only a value that did not decode
+// is logged (log.md, etcd).
 func (c *Client) Decode(ctx context.Context, kv KV, msg proto.Message) error {
 	if err := proto.Unmarshal(kv.Value, msg); err != nil {
 		logGet(ctx, kv.Key, true, nil, err)
@@ -564,11 +574,15 @@ func decodeEvent(
 		Key: key,
 		Rev: rawEvent.Kv.ModRevision,
 	}
+	// A watch event is a read of a change, at Debug; one whose value did not
+	// decode is at Info with its error (log.md, etcd).
 	attrs := []any{slog.String("key", key)}
 	if rawEvent.Type == clientv3.EventTypeDelete {
 		event.Type = EventDelete
-		attrs = append(attrs, slog.String("type", EventDelete.String()))
-		slog.InfoContext(ctx, msgWatchEvent, attrs...)
+		if common.LogEnabled(ctx, slog.LevelDebug) {
+			attrs = append(attrs, slog.String("type", EventDelete.String()))
+			slog.DebugContext(ctx, msgWatchEvent, attrs...)
+		}
 		return event, nil
 	}
 	event.Type = EventPut
@@ -579,8 +593,10 @@ func decodeEvent(
 		return Event{}, fmt.Errorf("etcd watch event %s: unmarshal: %w", key, err)
 	}
 	event.Msg = msg
-	attrs = append(attrs, slog.Any("value", common.PbToLogValue(msg)))
-	slog.InfoContext(ctx, msgWatchEvent, attrs...)
+	if common.LogEnabled(ctx, slog.LevelDebug) {
+		attrs = append(attrs, slog.Any("value", common.PbToLogValue(msg)))
+		slog.DebugContext(ctx, msgWatchEvent, attrs...)
+	}
 	return event, nil
 }
 

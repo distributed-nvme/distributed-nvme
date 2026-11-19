@@ -8,7 +8,8 @@
 // pair of cmd/dnv-agent and the etcd pair of cmd/dnv-worker (CM1).
 //
 // main itself is deliberately thin (layout.md, `cmd/` wiring): it never
-// touches etcd, it logs only the CM3 signal records, and the "gateway
+// touches etcd, it logs only the CM3 signal records and the log level
+// changes of log.md R13, and the "gateway
 // starting" / "gateway serving" / "gateway stopping" records of LG2 are
 // emitted by gateway.Run, which is why the endpoints travel to it in
 // gateway.Config.
@@ -99,6 +100,9 @@ func addFlags(cmd *cobra.Command) {
 		"comma-separated host:port list of the etcd cluster (required)")
 	flags.Int("etcd-dial-timeout", common.DefaultEtcdDialTimeout,
 		"seconds to wait for the initial etcd dial (0 = the built-in default)")
+	flags.String("log-level", common.LogLevelInfo,
+		"log level: debug, info or warn; SIGUSR1 sets debug while the "+
+			"process runs and SIGUSR2 sets this level again")
 	flags.String("config", "", "optional viper config file")
 }
 
@@ -134,6 +138,9 @@ type options struct {
 	// value is passed through: etcdutil.New substitutes
 	// common.DefaultEtcdDialTimeout for it.
 	dialTimeout time.Duration
+	// logLevel is the parsed --log-level, set before the first record
+	// (log.md R6).
+	logLevel slog.Level
 }
 
 // optionsFromViper reads and validates the CM2 values after the binding. It
@@ -152,12 +159,17 @@ func optionsFromViper() (*options, error) {
 	if len(endpoints) == 0 {
 		return nil, errors.New("missing required flag: --etcd-endpoints")
 	}
+	logLevel, err := common.ParseLogLevel(viper.GetString("log-level"))
+	if err != nil {
+		return nil, err
+	}
 	return &options{
 		grpcNetwork: grpcNetwork,
 		grpcAddress: grpcAddress,
 		endpoints:   endpoints,
 		dialTimeout: time.Duration(viper.GetInt("etcd-dial-timeout")) *
 			time.Second,
+		logLevel: logLevel,
 	}, nil
 }
 
@@ -178,9 +190,10 @@ func splitList(raw string) []string {
 }
 
 // run is the CM3 startup path. The default JSON logger is already installed by
-// common's init and the gateway keeps level Info by doing nothing (log.md R6),
-// so the only work here is: bind, validate, mint the startup trace id, arm the
-// two-signal handling, build the etcd client and hand off to gateway.Run.
+// common's init (log.md R3), so the only work here is: bind, validate, set the
+// --log-level (log.md R6), mint the startup trace id, arm the log level's
+// signals (log.md R13) and the two-signal handling, build the etcd client and
+// hand off to gateway.Run.
 //
 // Startup never fails because etcd is unreachable: etcdutil.New dials lazily,
 // and a gateway with no etcd simply answers ABORTED until one appears. Only a
@@ -194,12 +207,18 @@ func run(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return err
 	}
+	common.SetLogLevel(opts.logLevel)
 
 	// The startup trace id. Every REQUEST gets its own — the server
 	// interceptor adopts the caller's when there is one and gateway.Run's
 	// server chain mints one otherwise (gateway/traceid.go; GW2, grpc.md
 	// T4) — so this id only ever labels the process's own lifecycle records.
 	ctx := common.WithTraceId(context.Background(), common.NewTraceId())
+	// log.md R13: SIGUSR1 sets Debug, SIGUSR2 the level the process started
+	// with, until the process ends; the watch has the startup ctx, which no
+	// stop signal cancels, so it lasts through the drain.
+	stopLogLevel := common.WatchLogLevel(ctx, opts.logLevel)
+	defer stopLogLevel()
 
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
@@ -217,12 +236,16 @@ func run(cmd *cobra.Command, args []string) error {
 	}
 	// gateway.Run closes the client as the last step of its drain (GW2), so
 	// it is deliberately not closed here.
-	return gateway.Run(ctx, cli, gateway.Config{
+	return runGateway(ctx, cli, gateway.Config{
 		GrpcNetwork: opts.grpcNetwork,
 		GrpcAddress: opts.grpcAddress,
 		Endpoints:   opts.endpoints,
 	})
 }
+
+// runGateway is gateway.Run, the hand-off; a seam, so a test of the startup
+// path can see what run set before the hand-off and while it runs.
+var runGateway = gateway.Run
 
 // watchSignals implements CM3's two-signal handling: the first SIGINT/SIGTERM
 // cancels ctx, which makes gateway.Run call GracefulStop and let in-flight
@@ -253,7 +276,7 @@ func watchSignals(
 	if !ok {
 		return
 	}
-	slog.WarnContext(ctx, "second signal, exiting without a clean drain",
+	slog.InfoContext(ctx, "second signal, exiting without a clean drain",
 		slog.String("signal", second.String()),
 	)
 	exit(1)

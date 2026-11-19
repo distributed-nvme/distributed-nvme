@@ -256,11 +256,13 @@ func (w *shardWorker) applyEvent(event etcdutil.Event) {
 }
 
 // parseKey turns one rev key into a revObjKey (SW2). A key this shard's kind
-// cannot parse, or one that belongs to another shard, is logged and skipped.
+// cannot parse, or one that belongs to another shard, is logged and skipped,
+// at Warn: its object goes undriven until an operator mends the record, and
+// the record comes once per scan or watch event (log.md R6).
 func (w *shardWorker) parseKey(key string) (revObjKey, bool) {
 	shard, cid, id, ok := w.kind.parseKey(key)
 	if !ok || shard != w.shard {
-		slog.InfoContext(w.ctx, "rev key malformed",
+		slog.WarnContext(w.ctx, "rev key malformed",
 			slog.String("role", w.kind.role),
 			slog.String("shard", shardCode(w.shard)),
 			slog.String("key", key),
@@ -271,13 +273,14 @@ func (w *shardWorker) parseKey(key string) (revObjKey, bool) {
 }
 
 // parseValue turns one rev value into the RW3 desired state (SW2). A value of
-// the wrong message type is logged and skipped.
+// the wrong message type is logged and skipped, at Warn, as a key that does
+// not parse is.
 func (w *shardWorker) parseValue(
 	key string,
 	msg proto.Message,
 ) (desiredState, bool) {
 	if msg == nil {
-		slog.InfoContext(w.ctx, "rev value malformed",
+		slog.WarnContext(w.ctx, "rev value malformed",
 			slog.String("role", w.kind.role),
 			slog.String("shard", shardCode(w.shard)),
 			slog.String("key", key),
@@ -286,7 +289,7 @@ func (w *shardWorker) parseValue(
 	}
 	desired, ok := w.kind.desired(msg)
 	if !ok {
-		slog.InfoContext(w.ctx, "rev value malformed",
+		slog.WarnContext(w.ctx, "rev value malformed",
 			slog.String("role", w.kind.role),
 			slog.String("shard", shardCode(w.shard)),
 			slog.String("key", key),

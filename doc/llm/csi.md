@@ -79,8 +79,16 @@ daemon (`architecture.md`, Components: invocation reference). The
 controller plugin takes the socket to serve (`--csi-address`), the
 gateway's address (`--gateway-address`), the cdc addresses it puts in the
 publish context at attach (`--cdc-addresses`; CSI10) and the bound on one
-gateway call (`--gateway-timeout`). A cdc address, in either plugin's
-list, is an IP literal and a port, an IPv6 address in brackets, since the
+gateway call (`--gateway-timeout`). Both plugins take `--log-level`, one of
+the three words of `log.md` R6, `info` by default, and change the log level on
+SIGUSR1 and SIGUSR2 while they run (`log.md` R13). In a pod the plugin is
+the first process of its container, and the signal is sent to it from the
+pod's node, as root, at the pid the container runtime reports for the
+container: a `kill` from a `kubectl exec` in a controller copy's container
+is refused by the container runtime's AppArmor profile under the copy's
+least rights, though the process runs as the same user. Whether a `kubectl
+exec` in a node pod, which is privileged, may signal its plugin has not
+been checked. A cdc address, in either plugin's list, is an IP literal and a port, an IPv6 address in brackets, since the
 node connects to the addresses of its own list as the kernel's discovery
 address, and the manifests give both plugins their list from one config
 map (CSI19). The identity service reports the driver's name and its build
@@ -106,8 +114,14 @@ chain of their own, under the shared message limit as every server of the
 tree: it mints a trace id for each call, since the kubelet
 and the sidecars send none, logs the method on the way in and the method,
 the code and the duration on the way out, and never logs a request or a
-reply, so nothing the kubelet may send as a secret reaches a log. The
-liveness probe's successes are left out of those records. The minted id
+reply, so nothing the kubelet may send as a secret reaches a log. The calls
+Kubernetes repeats on a timer — the liveness probe's, the provisioner's
+capacity poll (`GetCapacity`), and the kubelet's volume stats of each
+mounted volume (`NodeGetVolumeStats`) with the capability call it makes
+before them (`NodeGetCapabilities`) — log both records at Debug while they
+succeed and their reply at Info when they fail, as a read is logged
+(`log.md` R6, R9), so at the default log level a node plugin with mounted
+volumes logs no record per volume per minute. The minted id
 travels to the gateway on the shared client chain, so the gateway's records
 of the calls a CSI call makes carry it.
 
@@ -654,12 +668,18 @@ failover contract turns on, `csi path connected` and `csi path dropped`
 with the subsystem and the cntlr address, `csi discovery connection opened`
 and `csi discovery connection dropped` with the cdc address, and
 `csi follower sync error` with what failed when a follow could not finish or
-the kernel's event socket failed.
-Every CSI call but a successful probe logs `csi request` with the method
-and `csi reply` with the method, the code, the duration and, on a failure,
-the error, under the trace id the interceptor minted (CSI8). The gateway
-calls a CSI call makes are the shared client chain's records under the same
-id.
+the kernel's event socket failed: at Warn for a listed cdc it cannot reach
+or whose log it cannot read, naming the cdc, since every drop waits and a
+path that cdc alone lists is never learned until the cdc comes back or the
+list is fixed, and at Info for every failure its next pass, its timer or the
+stage's own retry clears (`log.md` R6).
+Every CSI call logs `csi request` with the method and `csi reply` with the
+method, the code, the duration and, on a failure, the error, under the
+trace id the interceptor minted, at Info, but for the calls Kubernetes
+repeats on a timer, whose records are at Debug while they succeed (CSI8).
+The gateway calls a CSI call makes are the shared client chain's records
+under the same id, at Info, the one `GetClusterCapacity` of a capacity poll
+among them; both plugins log `log level changed` too (`log.md` R13).
 
 ## The Kubernetes lab
 
@@ -769,16 +789,22 @@ host.
 
 Every case runs on the suite's dnv stack with the driver deployed from the
 manifests, the config map and the storage classes of the suite in place of
-the examples; the IO pods run the driver's own image, since it carries the
-tools they need and is already on every node. The deploy pulls the sidecar
-images a node lacks, on every node, so that a controller copy that moves
-starts at once, and checks the driver's shape: two controller copies on two
-nodes, both leases held by controller pods, the critical priorities the pods
-were given, and the node probe listening on the loopback alone; the test
-namespace then carries the example network policy, so every case runs under
-it. Each case that creates volumes ends with the check that nothing is left:
-no pool in the cluster, no dm device, array or export on a node, no connection
-of the driver's on a host.
+the examples, and both plugins at `--log-level debug`, as every program a
+suite runs logs at Debug; the IO pods run the driver's own image, since it
+carries the tools they need and is already on every node. The deploy pulls
+the sidecar images a node lacks, on every node, so that a controller copy
+that moves starts at once, and checks the driver's shape: two controller
+copies on two nodes, both leases held by controller pods, the critical
+priorities the pods were given, and the node probe listening on the
+loopback alone; the test namespace then carries the example network
+policy, so every case runs under it. Before the cases, the suite sends
+SIGUSR1 and then SIGUSR2 to one controller plugin copy, from that copy's
+node as root, at the pid `crictl` reports for its plugin container, as the
+operations doc's step for a pod does (`operations.md`, The logs), and each
+must show as one `log level changed` record of that copy, both naming
+debug, the plugin's start log level (`log.md` R13). Each case that creates volumes ends with the check that
+nothing is left: no pool in the cluster, no dm device, array or export on a
+node, no connection of the driver's on a host.
 
 **k8s.** The suite writes a program that prints one line and sleeps, builds
 it static, wraps it in an image from scratch and imports it into every

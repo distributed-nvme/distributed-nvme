@@ -847,6 +847,45 @@ prepull() { # <ref…>
 	return 0
 }
 
+# csi_signal sends a signal, as root, to the dnv-csi container's first
+# process of one pod on this node: crictl names the container by its pod's
+# and its own names and reports its pid, whose command line must be the
+# plugin's. A kubectl exec cannot send it: the container runtime's AppArmor
+# profile refuses a signal from inside a controller copy's container to its
+# first process (csi.md, Integration test plan). Prints the pid signalled.
+csi_signal() { # <pod name> <signal>
+	local cid n pid cmd
+	cid=$(k3s crictl ps -q --label "io.kubernetes.pod.name=$1" \
+		--label io.kubernetes.container.name=dnv-csi 2>/dev/null) || {
+		echo "csi_signal: crictl ps did not answer" >&2
+		return 1
+	}
+	n=$(printf '%s\n' "$cid" | grep -c .)
+	[ "$n" = 1 ] || {
+		echo "csi_signal: $n dnv-csi containers of pod $1 on this node" >&2
+		return 1
+	}
+	pid=$(k3s crictl inspect --output go-template \
+		--template '{{.info.pid}}' "$cid" 2>/dev/null) || pid=""
+	case "$pid" in
+	'' | *[!0-9]* | 0)
+		echo "csi_signal: no pid for container $cid: '$pid'" >&2
+		return 1
+		;;
+	esac
+	cmd=$(tr '\0' ' ' <"/proc/$pid/cmdline" 2>/dev/null) || cmd=""
+	case "$cmd" in
+	*/dnv-csi\ *) ;;
+	*)
+		echo "csi_signal: pid $pid runs '$cmd', not the plugin" >&2
+		return 1
+		;;
+	esac
+	kill -"$2" "$pid" || return 1
+	echo "$pid"
+	return 0
+}
+
 # --- processes -------------------------------------------------------------------
 
 kill_pidfile() { # <pidfile> [secs]
@@ -1386,7 +1425,7 @@ dn_up() {
 			--tr-type tcp --adr-fam ipv4 \
 			--tr-addr "$ip" --tr-svc-id "$svcid" \
 			--nvmet-port-id "$portid" \
-			--local-store "$store" --disk "$dev" \
+			--local-store "$store" --disk "$dev" --log-level debug \
 			>>"$log" 2>&1 </dev/null &
 		pid=$!
 		sleep 0.5
@@ -1458,7 +1497,7 @@ cn_up() {
 			--grpc-network tcp --grpc-address "$ip:$gport" \
 			--tr-type tcp --adr-fam ipv4 \
 			--tr-addr "$ip" --tr-svc-id "$svcid" \
-			--local-store "$store" --capacity 0 \
+			--local-store "$store" --capacity 0 --log-level debug \
 			>>"$log" 2>&1 </dev/null &
 		pid=$!
 		sleep 0.5
@@ -1626,10 +1665,12 @@ sanity_start() {
 	# each, and treats a directory that is already there as an error.
 	mkdir -p "$dir" || return 1
 	nohup "$WORK/bin/dnv-csi" controller --csi-address "$dir/ctl.sock" \
-		--gateway-address "$1" --cdc-addresses "$2" >>"$dir/ctl.log" 2>&1 </dev/null &
+		--gateway-address "$1" --cdc-addresses "$2" --log-level debug \
+		>>"$dir/ctl.log" 2>&1 </dev/null &
 	echo $! >"$dir/ctl.pid"
 	nohup "$WORK/bin/dnv-csi" node --csi-address "$dir/node.sock" \
-		--cdc-addresses "$2" >>"$dir/node.log" 2>&1 </dev/null &
+		--cdc-addresses "$2" --log-level debug \
+		>>"$dir/node.log" 2>&1 </dev/null &
 	echo $! >"$dir/node.pid"
 	local i
 	for ((i = 0; i < 40; i++)); do
@@ -1939,15 +1980,18 @@ start_cp_daemons() {
 	remote_start "$CP" gateway gateway.log \
 		"$WORK/bin/dnv-gateway --grpc-network tcp" \
 		"--grpc-address $CP_IP:$GW_PORT" \
-		"--etcd-endpoints 127.0.0.1:$ETCD_CLIENT_PORT"
+		"--etcd-endpoints 127.0.0.1:$ETCD_CLIENT_PORT" \
+		"--log-level debug"
 	wait_until "$WAIT_SHORT" "the gateway to listen on $GW_PORT" cp_port_up "$GW_PORT"
 	remote_start "$CP" worker worker.log \
 		"$WORK/bin/dnv-worker --etcd-endpoints 127.0.0.1:$ETCD_CLIENT_PORT" \
 		"--roles ${WORKER_ROLES// /,}" \
-		"--vote-interval $VOTE_INTERVAL --vote-grace-time $VOTE_GRACE"
+		"--vote-interval $VOTE_INTERVAL --vote-grace-time $VOTE_GRACE" \
+		"--log-level debug"
 	remote_start "$CP" cdc cdc.log \
 		"$WORK/bin/dnv-cdc --etcd-endpoints 127.0.0.1:$ETCD_CLIENT_PORT" \
-		"--tr-type tcp --adr-fam ipv4 --tr-addr $CP_IP --tr-svc-id $CDC_PORT"
+		"--tr-type tcp --adr-fam ipv4 --tr-addr $CP_IP --tr-svc-id $CDC_PORT" \
+		"--log-level debug"
 	wait_until "$WAIT_SHORT" "the cdc to listen on $CDC_PORT" cp_port_up "$CDC_PORT"
 }
 
@@ -2168,8 +2212,22 @@ image_import() { # <image>
 	done
 }
 
+# with_debug_log prints the plugin manifest on stdin with --log-level=debug
+# added to the dnv-csi container's arguments, the line after its subcommand,
+# at that line's indent, so the plugins run at debug as every program a suite
+# runs does; it fails when the manifest has no such line.
+with_debug_log() {
+	awk '
+	    { print }
+	    !done && /^[[:space:]]*- (controller|node)$/ {
+	        sub(/- .*/, "- --log-level=debug"); print; done = 1
+	    }
+	    END { exit done ? 0 : 1 }'
+}
+
 # driver_up applies the manifests, with a config map and a storage class of
-# the suite's own in place of the examples, and waits for both plugins.
+# the suite's own in place of the examples, and the plugins at debug, and
+# waits for both plugins.
 driver_up() {
 	stage 06 "build the image and import it into every node, and pull the sidecars on every node"
 	image_build
@@ -2197,8 +2255,11 @@ data:
   gatewayAddress: "$CP_IP:$GW_PORT"
   cdcAddresses: "$CP_IP:$CDC_PORT"
 EOF
+	local manifest
 	for f in controller node; do
-		kc_apply <"$DEPLOY_DIR/$f.yaml" || die "applying $f.yaml failed"
+		manifest=$(with_debug_log <"$DEPLOY_DIR/$f.yaml") ||
+			die "$f.yaml has no dnv-csi subcommand line to add --log-level to"
+		kc_apply <<<"$manifest" || die "applying $f.yaml failed"
 	done
 	kc_apply <<EOF || die "applying the storage class failed"
 apiVersion: storage.k8s.io/v1
@@ -2264,6 +2325,9 @@ EOF
 	# The test namespace's pods are kept off every dnv machine, which the
 	# policy case proves and every later case runs under (csi.md CSI20).
 	policy_apply "$TEST_NS"
+
+	stage 09 "a controller plugin copy, its container's first process, takes SIGUSR1 and SIGUSR2"
+	plugin_signals
 }
 
 # leases_held answers whether both sidecar leases name a controller copy
@@ -2321,6 +2385,66 @@ policy_apply() { # <namespace>
 }
 
 k8s_ns_gone() { ! kc get namespace "$1" >/dev/null 2>&1; }
+
+# level_changes_of <pod> — the "log level changed" records the dnv-csi
+# container of one driver pod has logged, one line each with the old level,
+# the new one and the signal (log.md R13); none when the log does not read,
+# which the caller's wait asks again.
+level_changes_of() {
+	{ kc -n "$DRIVER_NS" logs "$1" -c dnv-csi --tail=-1 2>/dev/null || true; } |
+		"$JQ" -Rr 'fromjson? | objects | select(.msg == "log level changed")
+		    | "\(.from) \(.log_level) \(.signal)"'
+}
+
+# plugin_signals sends SIGUSR1, then SIGUSR2, to one controller plugin copy,
+# the first process of its container, as the operations doc's Kubernetes step
+# does: from the copy's node, as root (csi_signal), since the container
+# runtime's AppArmor profile refuses the signal from a kubectl exec in the
+# copy's container. It waits for the "log level changed" record of each in
+# that copy's log: the plugin runs at debug, so both name debug, SIGUSR2 its
+# start log level (log.md R13). The copy is picked by label among the running
+# ones; each copy's plugin takes the signals alike.
+plugin_signals() {
+	local pod node sig before n i want out g
+	out=$(kc -n "$DRIVER_NS" get pods -l app=dnv-csi-controller \
+		--field-selector status.phase=Running \
+		-o 'jsonpath={.items[0].metadata.name} {.items[0].spec.nodeName}') ||
+		die "reading the controller plugin pods failed"
+	read -r pod node <<<"$out"
+	[ -n "$pod" ] && [ -n "$node" ] || die "no running controller plugin pod"
+	g=""
+	if [ "$node" = "$CP_NAME" ]; then
+		g=cp
+	else
+		for i in "${!HOST[@]}"; do
+			[ "${HOST_NAME[$i]}" = "$node" ] && g=$i
+		done
+	fi
+	[ -n "$g" ] || die "the controller copy $pod runs on $node, no guest of this run"
+	log "  signalling $pod on $node"
+	for sig in USR1 USR2; do
+		before=$(level_changes_of "$pod" | wc -l)
+		if [ "$g" = cp ]; then
+			out=$(helper_cp csi_signal "$pod" "$sig")
+		else
+			out=$(helper_host "$g" csi_signal "$pod" "$sig")
+		fi || die "SIG$sig to the controller copy $pod on $node failed: $out"
+		n=$before
+		for ((i = 0; i < 20; i++)); do
+			n=$(level_changes_of "$pod" | wc -l)
+			[ "$n" -gt "$before" ] && break
+			sleep 1
+		done
+		[ "$n" -gt "$before" ] ||
+			die "the controller plugin logged no level change after SIG$sig"
+		case $sig in
+		USR1) want="debug debug user defined signal 1" ;;
+		USR2) want="debug debug user defined signal 2" ;;
+		esac
+		assert_eq "$(level_changes_of "$pod" | tail -n 1)" "$want" \
+			"the controller plugin's level change on SIG$sig"
+	done
+}
 
 # driver_down removes the driver and the suite's Kubernetes objects; a
 # cluster without k3s has nothing to remove. It reports, never dies.

@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"log/slog"
 	"net"
 	"os"
@@ -214,6 +215,106 @@ func appendErr(attrs []any, err error) []any {
 	return attrs
 }
 
+// pathReadLevel is the level of an in-process read of a path (log.md R9):
+// ReadLevel, but a path found absent is an answer, not a failure, so it is
+// Debug too. Callers decide by that answer (an absent file reads as "no such
+// object"), and a dn's background read finds a whole disk's partition file
+// absent on every round.
+func pathReadLevel(err error) slog.Level {
+	if errors.Is(err, fs.ErrNotExist) {
+		return slog.LevelDebug
+	}
+	return ReadLevel(err)
+}
+
+// devNoLevel is the level of an "os read devno" record: pathReadLevel's,
+// and a path that holds no block device is an answer too, so it is Debug:
+// the CSI node plugin tells a block volume from a mounted filesystem by it on
+// every stats call Kubernetes makes (NodeGetVolumeStats (csi/node.go)).
+func devNoLevel(err error) slog.Level {
+	if errors.Is(err, syscall.ENOTBLK) {
+		return slog.LevelDebug
+	}
+	return pathReadLevel(err)
+}
+
+// commandLevel is the level of an "os command" record (log.md R9): Debug for
+// a command of the read list (commandReadsOnly) that succeeded, Info for any
+// other command and for a read that failed or answered "no".
+func commandLevel(name string, args []string, err error) slog.Level {
+	if err == nil && commandReadsOnly(name, args) {
+		return slog.LevelDebug
+	}
+	return slog.LevelInfo
+}
+
+// commandReadsOnly is the read list of log.md R9: the commands, named with
+// the argument that makes them reads, that change nothing on the node. A
+// command not named here logs at Info, so a new command cannot hide below
+// the default level by being left out.
+//   - dmsetup info, ls, table, status, deps, version and targets;
+//   - mdadm whose first option is an examine, detail, query or version
+//     option (the device-first form, mdadm <md> --add, has --add first);
+//   - nvme list, list-subsys, id-ctrl, id-ns, show-hostnqn and version, and
+//     nvme discover over a kept controller (-d or --device; a discover by
+//     address makes a controller);
+//   - blockdev whose every option is a --get one;
+//   - lsblk, blkid, stat, findmnt and uname, which never write.
+func commandReadsOnly(name string, args []string) bool {
+	first := ""
+	if len(args) > 0 {
+		first = args[0]
+	}
+	switch filepath.Base(name) {
+	case "dmsetup":
+		switch first {
+		case "info", "ls", "table", "status", "deps", "version", "targets":
+			return true
+		}
+	case "mdadm":
+		for _, arg := range args {
+			if !strings.HasPrefix(arg, "-") {
+				continue
+			}
+			switch arg {
+			case "--examine", "-E", "--detail", "-D", "--query", "-Q",
+				"--version", "-V", "--examine-bitmap", "-X",
+				"--examine-badblocks":
+				return true
+			}
+			return false
+		}
+	case "nvme":
+		switch first {
+		case "list", "list-subsys", "id-ctrl", "id-ns", "show-hostnqn",
+			"version":
+			return true
+		case "discover":
+			for _, arg := range args {
+				if arg == "-d" || arg == "--device" ||
+					strings.HasPrefix(arg, "--device=") {
+					return true
+				}
+			}
+		}
+	case "blockdev":
+		gets := 0
+		for _, arg := range args {
+			if !strings.HasPrefix(arg, "-") {
+				continue
+			}
+			if !strings.HasPrefix(arg, "--get") {
+				return false
+			}
+			gets++
+		}
+		return gets > 0
+	case "lsblk", "blkid", "stat", "findmnt", "uname":
+		return true
+	}
+	return false
+}
+
 func (c *LimitedOsClient) RunCommand(
 	ctx context.Context,
 	name string,
@@ -253,15 +354,17 @@ func (c *LimitedOsClient) RunCommand(
 		}
 	}
 
-	attrs := []any{
-		slog.String("cmd", name),
-		slog.Any("args", args),
-		slog.String("stdin", stdinInput),
-		slog.String("stdout", stdout.String()),
-		slog.String("stderr", stderr.String()),
-		slog.Int("exit_code", exitCode),
+	if level := commandLevel(name, args, err); LogEnabled(ctx, level) {
+		attrs := []any{
+			slog.String("cmd", name),
+			slog.Any("args", args),
+			slog.String("stdin", stdinInput),
+			slog.String("stdout", stdout.String()),
+			slog.String("stderr", stderr.String()),
+			slog.Int("exit_code", exitCode),
+		}
+		slog.Log(ctx, level, "os command", appendErr(attrs, err)...)
 	}
-	slog.InfoContext(ctx, "os command", appendErr(attrs, err)...)
 
 	return stdout.String(), stderr.String(), exitCode, err
 }
@@ -281,12 +384,14 @@ func (c *LimitedOsClient) ReadFile(
 	rawData, err := os.ReadFile(path)
 	data := string(rawData)
 
-	attrs := []any{
-		slog.String("path", path),
-		slog.Int("size", len(rawData)),
-		slog.String("data", TruncForLog(data)),
+	if level := pathReadLevel(err); LogEnabled(ctx, level) {
+		attrs := []any{
+			slog.String("path", path),
+			slog.Int("size", len(rawData)),
+			slog.String("data", TruncForLog(data)),
+		}
+		slog.Log(ctx, level, "os read file", appendErr(attrs, err)...)
 	}
-	slog.InfoContext(ctx, "os read file", appendErr(attrs, err)...)
 
 	return data, err
 }
@@ -305,18 +410,20 @@ func (c *LimitedOsClient) ReadDir(
 
 	names, err := readDirNames(path)
 
-	// log.md R8: every name, never truncated, and an array even when the
-	// listing returned none.
-	logged := names
-	if logged == nil {
-		logged = []string{}
+	if level := pathReadLevel(err); LogEnabled(ctx, level) {
+		// log.md R8: every name, never truncated, and an array even when
+		// the listing returned none.
+		logged := names
+		if logged == nil {
+			logged = []string{}
+		}
+		attrs := []any{
+			slog.String("path", path),
+			slog.Int("count", len(names)),
+			slog.Any("names", logged),
+		}
+		slog.Log(ctx, level, "os read dir", appendErr(attrs, err)...)
 	}
-	attrs := []any{
-		slog.String("path", path),
-		slog.Int("count", len(names)),
-		slog.Any("names", logged),
-	}
-	slog.InfoContext(ctx, "os read dir", appendErr(attrs, err)...)
 
 	return names, err
 }
@@ -340,11 +447,13 @@ func (c *LimitedOsClient) ReadMtime(
 		mtime = info.ModTime()
 	}
 
-	attrs := []any{
-		slog.String("path", path),
-		slog.Time("mtime", mtime),
+	if level := pathReadLevel(err); LogEnabled(ctx, level) {
+		attrs := []any{
+			slog.String("path", path),
+			slog.Time("mtime", mtime),
+		}
+		slog.Log(ctx, level, "os read mtime", appendErr(attrs, err)...)
 	}
-	slog.InfoContext(ctx, "os read mtime", appendErr(attrs, err)...)
 
 	return mtime, err
 }
@@ -363,11 +472,13 @@ func (c *LimitedOsClient) ReadDevNo(
 
 	devNo, err := readDevNo(path)
 
-	attrs := []any{
-		slog.String("path", path),
-		slog.String("devno", devNo),
+	if level := devNoLevel(err); LogEnabled(ctx, level) {
+		attrs := []any{
+			slog.String("path", path),
+			slog.String("devno", devNo),
+		}
+		slog.Log(ctx, level, "os read devno", appendErr(attrs, err)...)
 	}
-	slog.InfoContext(ctx, "os read devno", appendErr(attrs, err)...)
 
 	return devNo, err
 }
@@ -516,12 +627,14 @@ func (c *LimitedOsClient) ReadBlock(
 
 	data, err := readBlockAt(path, offset, length)
 
-	attrs := []any{
-		slog.String("path", path),
-		slog.Uint64("offset", offset),
-		slog.Uint64("length", length),
+	if level := ReadLevel(err); LogEnabled(ctx, level) {
+		attrs := []any{
+			slog.String("path", path),
+			slog.Uint64("offset", offset),
+			slog.Uint64("length", length),
+		}
+		slog.Log(ctx, level, "os read block", appendErr(attrs, err)...)
 	}
-	slog.InfoContext(ctx, "os read block", appendErr(attrs, err)...)
 
 	return data, err
 }
@@ -549,12 +662,14 @@ func (c *LimitedOsClient) ReadBlockDirect(
 
 	data, err := ReadBlockDirectAt(path, offset, length)
 
-	attrs := []any{
-		slog.String("path", path),
-		slog.Uint64("offset", offset),
-		slog.Uint64("length", length),
+	if level := ReadLevel(err); LogEnabled(ctx, level) {
+		attrs := []any{
+			slog.String("path", path),
+			slog.Uint64("offset", offset),
+			slog.Uint64("length", length),
+		}
+		slog.Log(ctx, level, "os read block direct", appendErr(attrs, err)...)
 	}
-	slog.InfoContext(ctx, "os read block direct", appendErr(attrs, err)...)
 
 	return data, err
 }
@@ -727,12 +842,14 @@ func (c *LimitedOsClient) DialTcp(
 	if err == nil {
 		go holdThenClose(conn, dialHold)
 	}
-	attrs := []any{
-		slog.String("address", address),
-		slog.Int64("timeout_ms", timeout.Milliseconds()),
-		slog.Int64("duration_ms", took.Milliseconds()),
+	if level := ReadLevel(err); LogEnabled(ctx, level) {
+		attrs := []any{
+			slog.String("address", address),
+			slog.Int64("timeout_ms", timeout.Milliseconds()),
+			slog.Int64("duration_ms", took.Milliseconds()),
+		}
+		slog.Log(ctx, level, "os dial", appendErr(attrs, err)...)
 	}
-	slog.InfoContext(ctx, "os dial", appendErr(attrs, err)...)
 	return err
 }
 
@@ -1022,12 +1139,14 @@ func (c *LimitedOsClient) ReadProto(
 		err = proto.Unmarshal(rawData, target)
 	}
 
-	attrs := []any{
-		slog.String("path", path),
-		slog.Int("size", len(rawData)),
-		slog.Any("data", PbToLogValue(target)),
+	if level := pathReadLevel(err); LogEnabled(ctx, level) {
+		attrs := []any{
+			slog.String("path", path),
+			slog.Int("size", len(rawData)),
+			slog.Any("data", PbToLogValue(target)),
+		}
+		slog.Log(ctx, level, "os read proto", appendErr(attrs, err)...)
 	}
-	slog.InfoContext(ctx, "os read proto", appendErr(attrs, err)...)
 
 	return err
 }

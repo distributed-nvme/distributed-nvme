@@ -879,11 +879,15 @@ type logCapture struct {
 	buf *syncBuffer
 }
 
+// captureLogs captures at Debug, so a test sees every record a worker at
+// --log-level debug writes, the etcd reads and the round records among them
+// (log.md R6, R9).
 func captureLogs(t *testing.T) *logCapture {
 	t.Helper()
 	buf := &syncBuffer{}
 	handler := &common.TraceIdHandler{
-		Handler: slog.NewJSONHandler(buf, nil),
+		Handler: slog.NewJSONHandler(buf,
+			&slog.HandlerOptions{Level: slog.LevelDebug}),
 	}
 	prev := slog.Default()
 	slog.SetDefault(slog.New(handler))

@@ -339,6 +339,9 @@ that asks for the counters, which reads them at the call as
 
 ## Conventions
 
+* **Log level.** Both agents on each VM run at `--log-level debug`, so their
+  logs hold the reads and the commands the cases read, read-only ones
+  included (`log.md` R6, R9).
 * **Revisions.** One monotonic counter per node, which on a CN feeds both
   `SyncupCn` and `SyncupCntlr`, though the worker labels them with `CnRev` and
   with the pool's `SpRev` (`dnv-worker.md` RW13, RW14); each RPC is gated

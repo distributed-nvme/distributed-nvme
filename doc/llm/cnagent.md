@@ -2525,9 +2525,10 @@ dm-clone (CN18).
   clear is named by nothing, and the read's verdict brings the converge
   once it is.
   An array that reads inactive, as a refused assembly leaves it, is not
-  re-assembled: the same assembly would be refused again. A Warn record
+  re-assembled: the same assembly would be refused again. An Info record
   ("broken array assembled again") names the group, the node stopped and
-  the node started, once the assembled array is there.
+  the node started, once the assembled array is there: the agent mended the
+  group alone (`log.md` R6).
 
   A group whose `leg_list` holds a provisioning leg (CN9) is
   **deferred**: no superblock read is taken and none of `--create`,

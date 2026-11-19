@@ -13,8 +13,9 @@ write of a block), the exported raw
 helpers and the probe-IO
 carve-out that is the one sanctioned bypass, and what emitting the record of
 each operation requires. It leans on `log.md` for the helpers it reuses
-(`PbToLogValue`, `TruncForLog`, `LogStrDataLimit`), for its rules on Info
-records, typed attributes and ctx propagation, and for the names and
+(`PbToLogValue`, `TruncForLog`, `LogStrDataLimit`, `ReadLevel`,
+`LogEnabled`), for its rules on levels, records, typed attributes and ctx
+propagation, and for the names and
 attributes of the records (`log.md`, OS commands and file IO); on
 `architecture.md`, Common validation, for the command timeouts, and Common
 agent rules for the local-store write protocol this client makes automatic;
@@ -690,17 +691,27 @@ checks) applies to the helpers and to the prober's records unchanged.
 
 ### Logging
 
-One `slog.InfoContext` record per call, emitted on completion, under the
-`msg` strings and attributes `log.md` owns (R8, and OS commands and file IO:
-each `OsClient` method emits the "os …" record assigned to it there, and
-`error` is appended only when the error is non-nil). `ReadProto` and
-`WriteProto` log the decoded message through `PbToLogValue` rather than the
-file bytes (`log.md` R11).
+One record per call, emitted on completion, under the `msg` strings and
+attributes `log.md` owns (R8, and OS commands and file IO: each `OsClient`
+method emits the "os …" record assigned to it there, and `error` is
+appended only when the error is non-nil), at the log level `log.md` R9 gives:
+Debug for a read that succeeded — and for an in-process path read that
+found its path absent (`pathReadLevel`), an error wrapping `fs.ErrNotExist`
+that its callers decide by (Interface), and for a `ReadDevNo` that found no
+block device at its path (`devNoLevel`), by which the CSI node plugin tells
+a block volume from a mounted filesystem on every stats call — and for a
+command of the read list (`commandReadsOnly`) that succeeded; Info for every other outcome and
+every write. A call works out its log level first and builds the record's
+attributes only when the process logs that log level, so a dropped read pays
+no `TruncForLog` or `PbToLogValue`. `ReadProto` and `WriteProto` log the
+decoded message through `PbToLogValue` rather than the file bytes
+(`log.md` R11).
 
 The CN11 leg probers do **not** call an `OsClient`. They call the
 package-level helpers and emit the two "probe …" records of `log.md`,
 OS commands and file IO, themselves, one per probe half, under the attempt's fresh trace id — same
-attributes as the block records, same "never `data`" rule. The "probe …"
+attributes as the block records, same "never `data`" rule, at Debug when the
+half succeeded and at Info when it failed. The "probe …"
 prefix is load-bearing: the cn suite's mutation grep (`mutations` in
 `integtest/cnagent_test.sh`; `cnagent_integtest.md`, Conventions) names
 `os write block` explicitly, and the continuous health probes must fall out

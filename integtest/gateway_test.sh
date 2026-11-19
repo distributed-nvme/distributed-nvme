@@ -682,7 +682,8 @@ start_gw() { # <index>
 	remote_start "$dir" gateway.log \
 		"$WORK/bin/dnv-gateway --grpc-network tcp" \
 		"--grpc-address $(gw_addr "$1")" \
-		"--etcd-endpoints 127.0.0.1:$ETCD_CLIENT_PORT"
+		"--etcd-endpoints 127.0.0.1:$ETCD_CLIENT_PORT" \
+		"--log-level debug"
 }
 
 stop_gw() { # <index>

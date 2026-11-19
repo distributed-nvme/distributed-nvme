@@ -4,11 +4,12 @@
 // main is deliberately thin (layout.md, `cmd/` wiring) — the whole CLI lives
 // in ctl/. It does exactly two things, in this order:
 //
-//  1. drops the log level to Warn (log.md R6). Every record the client
-//     interceptors of grpc.md, Wiring, emit is Info, so dnvctl's own gRPC
-//     logging is silenced by design; what survives lands on stderr, because
-//     common's init() logs there and stdout is reserved for the command
-//     result (dnvctl.md CT7).
+//  1. drops the log level to Warn (log.md R6) before the command tree parses
+//     anything; the tree then sets its --log-level, warn by default. Every
+//     record the client interceptors of grpc.md, Wiring, emit is Info, so
+//     dnvctl's own gRPC logging is silenced by default; what a lower level
+//     shows lands on stderr, because common's init() logs there and stdout
+//     is reserved for the command result (dnvctl.md CT7).
 //  2. runs the command tree and exits with its code: 0 OK, 1 RPC or
 //     connection failure, 2 usage error, 3 the RPC returned OK and its
 //     result was not written (dnvctl.md CT5).

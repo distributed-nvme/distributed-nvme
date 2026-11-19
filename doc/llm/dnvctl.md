@@ -60,13 +60,17 @@ fake is `integtest/fakegateway` (Integration test plan).
 CT6. **etcd-free.** dnvctl links no etcd code; the import rules that keep
 it so are `layout.md`, Dependency rules.
 
-CT7. **Log level Warn, logs to stderr.** dnvctl logs at Warn, set as the
-first statement of its `main` (`log.md` R6), and that is the whole of its
-logging setup: `ctl/` installs no logger of its own, because the init of
-`common` already puts every record on stderr as JSON (`log.md` R2, R3),
-which leaves stdout reserved for the one result document (CT4). The records
-the Warn level silences are the client interceptors', every one of them
-Info (`grpc.md` L1).
+CT7. **Log level Warn by default, logs to stderr.** dnvctl logs at Warn, set
+as the first statement of its `main`, and then at its `--log-level`, `warn`
+by default, which the root sets once the binding of CT9 has resolved it and
+before anything is dialled, a word other than `debug`, `info` or `warn`
+being a usage error (`log.md` R6; CT5). That is the whole of its logging
+setup: `ctl/` installs no logger of its own, because the init of `common`
+already puts every record on stderr as JSON (`log.md` R2, R3), which leaves
+stdout reserved for the one result document (CT4). The records the Warn
+log level silences are the client interceptors', every one of them Info, since
+dnvctl makes only unary calls (`grpc.md` L1); `--log-level info` shows them
+on stderr.
 
 ## Invocation model
 
@@ -87,7 +91,8 @@ neither is a leaf flag (Conventions). `--rev` is the revision token (CT3):
 only the token-carrying mutators take it, it is a usage error on every other
 leaf, and it is read off the command line alone. The rest steer the
 invocation itself: `--timeout` is the per-invocation deadline in seconds,
-`--trace-id` overrides the per-invocation trace-id mint (Trace ids), and
+`--trace-id` overrides the per-invocation trace-id mint (Trace ids),
+`--log-level` sets the level of the records on stderr (CT7), and
 `--config` names an optional viper config file, which supplies the
 env-backed global flags only.
 
@@ -981,7 +986,8 @@ command sends. It serves every method of `service Gateway`, all unary,
 behind the real server interceptors, so its log carries a request and a
 reply record for every call under the caller's trace id — the record of
 which RPC dnvctl issued and under which id (`grpc.md`, Drivers and fakes);
-it installs no logger of its own and prints nothing on stdout. It mirrors
+it installs no logger of its own, sets its log level to Debug as the fakes do,
+and prints nothing on stdout. It mirrors
 the behavior-file and state-file contract of the worker suite's fake agent
 (`dnv-worker.md`, Integration test plan), keyed per method rather than per
 object, because it models no cluster state. Every call is recorded first —

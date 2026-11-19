@@ -1699,7 +1699,7 @@ func (s *CnAgentServer) discardThin(
 	id thinId,
 ) {
 	stayed := func(bytes uint64, why string) {
-		slog.WarnContext(ctx, "thin volume not discarded in full",
+		slog.InfoContext(ctx, "thin volume not discarded in full",
 			slog.String("dm", name),
 			slog.String("pool", id.pool),
 			slog.Uint64("bytes_left", bytes),

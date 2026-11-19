@@ -56,10 +56,17 @@ const (
 	msgReply              = "csi reply"
 )
 
-// probeMethod is the liveness probe's call, which arrives every few seconds
-// and says nothing, so its successes are left out of the call records
-// (csi.md, Log records).
-const probeMethod = "/csi.v1.Identity/Probe"
+// polledMethods are the calls Kubernetes repeats on a timer: the liveness
+// probe's, every few seconds; the provisioner's capacity poll; and the
+// kubelet's volume stats of each mounted volume with the capability call it
+// makes before them. Each says nothing new while it succeeds, so its records
+// are reads, at Debug, and a failed one is at Info (csi.md, Log records).
+var polledMethods = map[string]bool{
+	"/csi.v1.Identity/Probe":           true,
+	"/csi.v1.Controller/GetCapacity":   true,
+	"/csi.v1.Node/NodeGetVolumeStats":  true,
+	"/csi.v1.Node/NodeGetCapabilities": true,
+}
 
 // Config is what a plugin needs to serve.
 type Config struct {
@@ -252,15 +259,17 @@ func unaryInterceptor() grpc.UnaryServerInterceptor {
 		handler grpc.UnaryHandler,
 	) (any, error) {
 		ctx = common.WithTraceId(ctx, common.NewTraceId())
-		quiet := info.FullMethod == probeMethod
-		if !quiet {
-			slog.InfoContext(ctx, msgRequest,
-				slog.String("method", info.FullMethod))
+		requestLevel := slog.LevelInfo
+		if polledMethods[info.FullMethod] {
+			requestLevel = slog.LevelDebug
 		}
+		slog.LogAttrs(ctx, requestLevel, msgRequest,
+			slog.String("method", info.FullMethod))
 		start := time.Now()
 		reply, err := handler(ctx, req)
-		if quiet && err == nil {
-			return reply, nil
+		replyLevel := requestLevel
+		if err != nil {
+			replyLevel = slog.LevelInfo
 		}
 		attrs := []slog.Attr{
 			slog.String("method", info.FullMethod),
@@ -270,7 +279,7 @@ func unaryInterceptor() grpc.UnaryServerInterceptor {
 		if err != nil {
 			attrs = append(attrs, slog.String("error", err.Error()))
 		}
-		slog.LogAttrs(ctx, slog.LevelInfo, msgReply, attrs...)
+		slog.LogAttrs(ctx, replyLevel, msgReply, attrs...)
 		return reply, err
 	}
 }

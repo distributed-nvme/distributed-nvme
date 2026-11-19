@@ -1191,7 +1191,9 @@ func (v *voteWorker) fence(inc *incarnation, reason string) {
 		)
 		return
 	}
-	slog.InfoContext(inc.ctx, msgWorkerFenced,
+	// At Warn: the control plane fencing itself is a record an operator must
+	// look at, though the worker joins again alone (log.md R6).
+	slog.WarnContext(inc.ctx, msgWorkerFenced,
 		slog.String("reason", reason),
 		slog.String("old_seed", inc.seed),
 		slog.String("new_seed", seed),

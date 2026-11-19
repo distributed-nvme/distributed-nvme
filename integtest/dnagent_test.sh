@@ -8,7 +8,8 @@
 #       [--wipe] user1@ip1 user2@ip2
 #
 # Cases: smoke, zeroing, sides, migr_full, migr_bitmap, teardown, restart,
-# store_full, blocksize (dnagent_integtest.md, Cases; for `teardown`, also
+# loglevel, store_full, blocksize (dnagent_integtest.md, Cases; for
+# `teardown`, also
 # architecture.md, Teardown by sweep). Cleanup runs
 # unconditionally at the start and, on success only, at the end: a failing run
 # leaves every dm/nvmet object and both agent logs in place and dumps
@@ -160,8 +161,8 @@ SETUP_DONE=0
 # empty otherwise.
 STORE_VM=""
 
-CASES=(smoke zeroing sides migr_full migr_bitmap teardown restart store_full
-	blocksize)
+CASES=(smoke zeroing sides migr_full migr_bitmap teardown restart loglevel
+	store_full blocksize)
 
 # ---------------------------------------------------------------------------
 # Logging, assertions, failure handling
@@ -1949,6 +1950,32 @@ lab_wipe() {
 	return 0
 }
 
+# trace_levels <trace> — the name and the level of every record the agent
+# logged under one trace id, one "<msg>|<level>" line each, in log order.
+trace_levels() {
+	jq -rn --arg t "$1" '
+	    inputs | select(.trace_id == $t) | .msg + "|" + .level' \
+		"$WORK/agent.log"
+}
+
+# level_changes <to> <from> — how many "log level changed" records the agent
+# log holds that name the level <to> and the level <from> (log.md R13).
+level_changes() {
+	jq -rn --arg to "$1" --arg from "$2" '
+	    [ inputs | select(.msg == "log level changed"
+	        and .log_level == $to and .from == $from) ] | length' \
+		"$WORK/agent.log"
+}
+
+# agent_pid — the pid of the one dnv-agent this VM runs; fails unless there
+# is exactly one.
+agent_pid() {
+	local pids
+	pids=$(pgrep -x dnv-agent) || return 1
+	[ "$(printf '%s\n' "$pids" | wc -l)" -eq 1 ] || return 1
+	echo "$pids"
+}
+
 diag() {
 	echo "--- agent.log (last 120 lines) ---"
 	tail -n 120 "$WORK/agent.log" 2>/dev/null
@@ -2159,12 +2186,17 @@ preflight_vms() {
 # Setup (dnagent_integtest.md, Cases, the setup paragraph)
 # ---------------------------------------------------------------------------
 
-start_agent() { # <idx>
-	local idx=$1
+# start_agent <idx> [<log level>] launches one VM's agent at --log-level
+# debug, or at the level a second argument names, or with no --log-level at
+# all when that argument is empty (dnagent_integtest.md, Conventions, Log
+# level).
+start_agent() {
+	local idx=$1 level=${2-debug} flag=""
+	[ -z "$level" ] || flag="--log-level $level"
 	sshv "$idx" "setsid nohup $WORK/dnv-agent dn \
 --grpc-network tcp --grpc-address ${IP[$idx]}:$GRPC_PORT \
 --tr-type tcp --adr-fam ipv4 --tr-addr ${IP[$idx]} --tr-svc-id $TR_SVC_ID \
---local-store $WORK/store --disk ${LOOP[$idx]} \
+--local-store $WORK/store --disk ${LOOP[$idx]} $flag \
 >> $WORK/agent.log 2>&1 < /dev/null & echo launched"
 }
 
@@ -4589,6 +4621,102 @@ case_restart() {
 }
 
 # ---------------------------------------------------------------------------
+# Case — loglevel (dnagent_integtest.md, Cases)
+# ---------------------------------------------------------------------------
+#
+# The one case at the default log level (log.md R6, R9, R13): dn1's agent,
+# started with no --log-level, logs no record of a check round that changes
+# nothing, still logs a request's write, and SIGUSR1 and SIGUSR2 change its
+# level while it runs. dn2 and vm2 take no part.
+
+# signal_level <dn> <signal> <to> <from> sends the signal to the VM's agent
+# and waits for its "log level changed" record naming <to> and <from>.
+signal_level() {
+	local dn=$1 sig=$2 to=$3 from=$4 before pid i
+	before=$(helper "$dn" "level_changes $to $from") ||
+		die "$CASE: the agent log of dn$dn did not answer"
+	pid=$(helper "$dn" agent_pid) ||
+		die "$CASE: dn$dn runs no single dnv-agent"
+	sshv "$dn" "kill -$sig $pid"
+	for ((i = 0; i < 20; i++)); do
+		[ "$(helper "$dn" "level_changes $to $from")" -gt "$before" ] &&
+			return 0
+		sleep 0.5
+	done
+	die "$CASE: no 'log level changed' to $to from $from after SIG$sig"
+}
+
+# assert_round_quiet <dn> <label> sends a fresh round and holds that its
+# trace id names no record but the stream's open and close: at the default
+# level a round that changes nothing logs none of its reads and none of its
+# messages (log.md R9; grpc.md L6).
+assert_round_quiet() {
+	local dn=$1 label=$2 recs
+	ctl "$dn" check-dn --fresh --revision "${DNREV[$dn]}" >/dev/null
+	flush_reads "$dn" 0
+	recs=$(helper "$dn" "trace_levels '$TRACE'") ||
+		die "$label: the agent log of dn$dn did not answer"
+	grep -qx 'grpc server stream open|INFO' <<<"$recs" ||
+		die "$label: no stream open under the round's trace id:"$'\n'"$recs"
+	recs=$(grep -vx -e 'grpc server stream open|INFO' \
+		-e 'grpc server stream close|INFO' <<<"$recs" || true)
+	[ -z "$recs" ] ||
+		die "$label: the round logged at the default level:"$'\n'"$recs"
+}
+
+case_loglevel() {
+	CASE=loglevel
+	local dn=1 out recs want
+
+	stage default "restart dn$dn's agent with no --log-level"
+	stop_agent "$dn"
+	start_agent "$dn" ""
+	out=$(ctl "$dn" get-dn-size --wait 20)
+	assert_eq "$(jq_of "$out" .size)" "$DATA_SIZE" "loglevel dn$dn size"
+
+	stage quiet "a round that changes nothing logs no read and no message"
+	assert_round_quiet "$dn" "loglevel at the default level"
+
+	stage write "a request still logs its save and its call"
+	bump_dn_rev "$dn"
+	out=$(ctl "$dn" syncup-dn --revision "${REV[$dn]}" \
+		--extent-size "$EXTENT_SIZE")
+	assert_dn_info_ok "$out" "loglevel syncup-dn"
+	recs=$(helper "$dn" "trace_levels '$TRACE'") ||
+		die "loglevel: the agent log of dn$dn did not answer"
+	for want in 'grpc server request|INFO' 'grpc server reply|INFO' \
+		'os write proto|INFO'; do
+		grep -qx "$want" <<<"$recs" ||
+			die "loglevel: no '$want' record under the request:"$'\n'"$recs"
+	done
+	! grep -q '|DEBUG$' <<<"$recs" ||
+		die "loglevel: a debug record at the default level:"$'\n'"$recs"
+
+	stage usr1 "SIGUSR1 sets debug: the round's reads and messages are logged"
+	signal_level "$dn" USR1 debug info
+	ctl "$dn" check-dn --fresh --revision "${DNREV[$dn]}" >/dev/null
+	flush_reads "$dn" 0
+	recs=$(helper "$dn" "trace_levels '$TRACE'") ||
+		die "loglevel: the agent log of dn$dn did not answer"
+	for want in 'grpc server recv|DEBUG' 'grpc server send|DEBUG'; do
+		grep -qx "$want" <<<"$recs" ||
+			die "loglevel: no '$want' record at debug:"$'\n'"$recs"
+	done
+	grep -qE '^os (read [a-z ]+|command)\|DEBUG$' <<<"$recs" ||
+		die "loglevel: no read of the node logged at debug:"$'\n'"$recs"
+
+	stage usr2 "SIGUSR2 sets the start level again: the round is quiet"
+	signal_level "$dn" USR2 info debug
+	assert_round_quiet "$dn" "loglevel after SIGUSR2"
+
+	stage back "restart dn$dn's agent at --log-level debug for the cases after"
+	stop_agent "$dn"
+	start_agent "$dn"
+	out=$(ctl "$dn" get-dn-size --wait 20)
+	assert_eq "$(jq_of "$out" .size)" "$DATA_SIZE" "loglevel dn$dn size at debug"
+}
+
+# ---------------------------------------------------------------------------
 # Case F — store_full (dnagent_integtest.md, Cases)
 # ---------------------------------------------------------------------------
 #
@@ -4890,7 +5018,7 @@ bs_agent_start() {
 setsid nohup $WORK/dnv-agent dn \
 --grpc-network tcp --grpc-address ${IP[1]}:$BS_GRPC_PORT \
 --tr-type tcp --adr-fam ipv4 --tr-addr ${IP[1]} --tr-svc-id $BS_TR_SVC_ID \
---nvmet-port-id $BS_PORT_ID --local-store $2 --disk $1 \
+--nvmet-port-id $BS_PORT_ID --local-store $2 --disk $1 --log-level debug \
 >> $WORK/bs-agent.log 2>&1 < /dev/null & echo \$!"
 }
 

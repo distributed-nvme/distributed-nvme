@@ -1382,6 +1382,10 @@ func (h *reactHarness) wantSkipped(kind string, reason string) {
 	h.t.Helper()
 	for _, rec := range h.logs.withMsg(msgReactionSkipped) {
 		if rec["kind"] == kind && rec["reason"] == reason {
+			if want := pinnedSkipLevel(reason); rec["level"] != want {
+				h.t.Fatalf("`reaction skipped` kind=%s reason=%s is at %v, "+
+					"want %s", kind, reason, rec["level"], want)
+			}
 			return
 		}
 	}

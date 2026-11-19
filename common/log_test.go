@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"os"
@@ -11,7 +12,9 @@ import (
 	"runtime"
 	"strings"
 	"sync"
+	"syscall"
 	"testing"
+	"time"
 	"unicode/utf8"
 
 	"github.com/distributed-nvme/distributed-nvme/pb"
@@ -100,9 +103,13 @@ func (c *logCapture) msgs(t *testing.T) []string {
 }
 
 // captureLogs installs a capturing logger as the process default for the
-// duration of the test, using the same handler chain as init() (log.md R2).
+// duration of the test, using the same handler chain as init() (log.md R2),
+// and sets the process log level to Debug for that time, so the capture
+// holds every record a daemon at --log-level debug writes; a test of the
+// level itself sets the level it needs after the capture (atLogLevel).
 func captureLogs(t *testing.T) *logCapture {
 	t.Helper()
+	atLogLevel(t, slog.LevelDebug)
 	buf := &syncBuffer{}
 	handler := &TraceIdHandler{
 		Handler: slog.NewJSONHandler(
@@ -534,5 +541,201 @@ func TestDefaultLoggerWritesStderr(t *testing.T) {
 		if err := json.Unmarshal([]byte(line), &rec); err != nil {
 			t.Fatalf("non-JSON line on stderr: %q", line)
 		}
+	}
+}
+
+// ---------------------------------------------------------------------------
+// The log level and its change by signal (log.md R6, R9, R13)
+// ---------------------------------------------------------------------------
+
+// atLogLevel sets the process log level for the duration of the test and puts
+// back the level it found.
+func atLogLevel(t *testing.T, level slog.Level) {
+	t.Helper()
+	prev := logLevel.Level()
+	logLevel.Set(level)
+	t.Cleanup(func() { logLevel.Set(prev) })
+}
+
+// R6: --log-level takes debug, info and warn, in any case, and nothing else;
+// the refusal names the three words and the value as given.
+func TestParseLogLevel(t *testing.T) {
+	for raw, want := range map[string]slog.Level{
+		"debug":   slog.LevelDebug,
+		"info":    slog.LevelInfo,
+		"warn":    slog.LevelWarn,
+		"DEBUG":   slog.LevelDebug,
+		"Warn":    slog.LevelWarn,
+		" info\n": slog.LevelInfo,
+	} {
+		got, err := ParseLogLevel(raw)
+		if err != nil || got != want {
+			t.Errorf("ParseLogLevel(%q) = %v, %v, want %v", raw, got, err, want)
+		}
+	}
+	for _, raw := range []string{"error", "", "trace", "info+1", "warning",
+		"-4", "0"} {
+		_, err := ParseLogLevel(raw)
+		if err == nil {
+			t.Errorf("ParseLogLevel(%q) was accepted", raw)
+			continue
+		}
+		want := fmt.Sprintf("--log-level must be debug, info or warn, got %q", raw)
+		if err.Error() != want {
+			t.Errorf("ParseLogLevel(%q) = %q, want %q", raw, err, want)
+		}
+	}
+}
+
+// R6: each level's word reads back as the word the flag takes.
+func TestLogLevelName(t *testing.T) {
+	for _, word := range []string{LogLevelDebug, LogLevelInfo, LogLevelWarn} {
+		level, err := ParseLogLevel(word)
+		if err != nil {
+			t.Fatalf("ParseLogLevel(%q): %v", word, err)
+		}
+		if got := LogLevelName(level); got != word {
+			t.Errorf("LogLevelName(%v) = %q, want %q", level, got, word)
+		}
+	}
+}
+
+// R9: a read that succeeded is Debug, one that failed Info.
+func TestReadLevel(t *testing.T) {
+	if got := ReadLevel(nil); got != slog.LevelDebug {
+		t.Errorf("ReadLevel(nil) = %v, want DEBUG", got)
+	}
+	if got := ReadLevel(errors.New("boom")); got != slog.LevelInfo {
+		t.Errorf("ReadLevel(err) = %v, want INFO", got)
+	}
+}
+
+// R9: LogEnabled answers what the process default logger would write, so a
+// logging point can skip building a record the level drops.
+func TestLogEnabled(t *testing.T) {
+	captureLogs(t)
+	ctx := context.Background()
+	atLogLevel(t, slog.LevelInfo)
+	if LogEnabled(ctx, slog.LevelDebug) || !LogEnabled(ctx, slog.LevelInfo) {
+		t.Errorf("at Info: debug enabled %v, info enabled %v, want false, true",
+			LogEnabled(ctx, slog.LevelDebug), LogEnabled(ctx, slog.LevelInfo))
+	}
+	SetLogLevel(slog.LevelDebug)
+	if !LogEnabled(ctx, slog.LevelDebug) {
+		t.Error("at Debug, a debug record is not enabled")
+	}
+	if got := LogLevel(); got != slog.LevelDebug {
+		t.Errorf("LogLevel() = %v after SetLogLevel(Debug)", got)
+	}
+}
+
+// R13: SIGUSR1 sets Debug, SIGUSR2 the start level, both outright; every
+// signal logs one "log level changed" record at WARN with the new level, the
+// old one and the signal; the watch ends with its ctx.
+func TestWatchLogLevelSignals(t *testing.T) {
+	capture := captureLogs(t)
+	atLogLevel(t, slog.LevelInfo)
+	ctx, cancel := context.WithCancel(
+		WithTraceId(context.Background(), "watch-trace"))
+	sigCh := make(chan os.Signal)
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		watchLogLevel(ctx, slog.LevelInfo, sigCh)
+	}()
+
+	steps := []struct {
+		sig       os.Signal
+		want      slog.Level
+		wantWords [2]string // log_level, from
+	}{
+		{syscall.SIGUSR1, slog.LevelDebug, [2]string{"debug", "info"}},
+		{syscall.SIGUSR1, slog.LevelDebug, [2]string{"debug", "debug"}},
+		{syscall.SIGUSR2, slog.LevelInfo, [2]string{"info", "debug"}},
+		{syscall.SIGUSR2, slog.LevelInfo, [2]string{"info", "info"}},
+	}
+	for i, step := range steps {
+		sigCh <- step.sig
+		waitFor(t, func() bool {
+			return len(capture.withMsg(t, MsgLogLevelChanged)) == i+1
+		})
+		if got := LogLevel(); got != step.want {
+			t.Errorf("step %d (%v): level %v, want %v", i, step.sig, got,
+				step.want)
+		}
+		rec := capture.withMsg(t, MsgLogLevelChanged)[i]
+		if rec["level"] != "WARN" || rec["log_level"] != step.wantWords[0] ||
+			rec["from"] != step.wantWords[1] ||
+			rec["signal"] != step.sig.String() ||
+			rec[TraceIdLogKey] != "watch-trace" {
+			t.Errorf("step %d: record %v, want WARN, log_level %s, from %s, "+
+				"signal %s, the ctx's trace id", i, rec, step.wantWords[0],
+				step.wantWords[1], step.sig)
+		}
+	}
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the watch did not end with its ctx")
+	}
+}
+
+// R13: a daemon started at Warn goes back to Warn, not to Info, on SIGUSR2.
+func TestWatchLogLevelGoesBackToTheStartLevel(t *testing.T) {
+	captureLogs(t)
+	atLogLevel(t, slog.LevelWarn)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	sigCh := make(chan os.Signal)
+	go watchLogLevel(ctx, slog.LevelWarn, sigCh)
+	sigCh <- syscall.SIGUSR1
+	waitFor(t, func() bool { return LogLevel() == slog.LevelDebug })
+	sigCh <- syscall.SIGUSR2
+	waitFor(t, func() bool { return LogLevel() == slog.LevelWarn })
+}
+
+// R13 with real signals: WatchLogLevel takes SIGUSR1 and SIGUSR2 sent to the
+// process, and once stopped a signal changes nothing and ends nothing (the Go
+// runtime catches both and takes no action when no channel is notified).
+func TestWatchLogLevelRealSignal(t *testing.T) {
+	capture := captureLogs(t)
+	atLogLevel(t, slog.LevelInfo)
+	stop := WatchLogLevel(context.Background(), slog.LevelInfo)
+	if err := syscall.Kill(os.Getpid(), syscall.SIGUSR1); err != nil {
+		t.Fatalf("kill USR1: %v", err)
+	}
+	waitFor(t, func() bool { return LogLevel() == slog.LevelDebug })
+	if err := syscall.Kill(os.Getpid(), syscall.SIGUSR2); err != nil {
+		t.Fatalf("kill USR2: %v", err)
+	}
+	waitFor(t, func() bool {
+		return len(capture.withMsg(t, MsgLogLevelChanged)) == 2
+	})
+	if got := LogLevel(); got != slog.LevelInfo {
+		t.Errorf("after USR2: level %v, want INFO", got)
+	}
+	stop()
+	if err := syscall.Kill(os.Getpid(), syscall.SIGUSR1); err != nil {
+		t.Fatalf("kill USR1 after stop: %v", err)
+	}
+	time.Sleep(100 * time.Millisecond)
+	if got := LogLevel(); got != slog.LevelInfo {
+		t.Errorf("a USR1 after stop set the level to %v", got)
+	}
+	if got := len(capture.withMsg(t, MsgLogLevelChanged)); got != 2 {
+		t.Errorf("%d change records after stop, want 2", got)
+	}
+}
+
+// waitFor polls cond for up to five seconds.
+func waitFor(t *testing.T, cond func() bool) {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for !cond() {
+		if time.Now().After(deadline) {
+			t.Fatal("condition not met within 5s")
+		}
+		time.Sleep(5 * time.Millisecond)
 	}
 }

@@ -7,6 +7,9 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"os/signal"
+	"strings"
+	"syscall"
 	"unicode/utf8"
 
 	"google.golang.org/protobuf/proto"
@@ -83,15 +86,126 @@ func (h *TraceIdHandler) WithGroup(name string) slog.Handler {
 	return &TraceIdHandler{Handler: h.Handler.WithGroup(name)}
 }
 
-// logLevel's zero value is slog.LevelInfo, the level used by dnv-gateway,
-// dnv-worker, dnv-agent, dnv-cdc and dnv-csi (log.md R6).
+// logLevel's zero value is slog.LevelInfo, the default of --log-level on
+// dnv-gateway, dnv-worker, dnv-agent, dnv-cdc and dnv-csi (log.md R6).
 var logLevel = new(slog.LevelVar)
 
 // SetLogLevel changes the process-wide log level. dnvctl calls
-// SetLogLevel(slog.LevelWarn) as the first statement of main(); the daemons
-// do not call it.
+// SetLogLevel(slog.LevelWarn) as the first statement of main() and then sets
+// its --log-level; each daemon sets its --log-level before its first record;
+// the node check and the gather set Warn (log.md R6).
 func SetLogLevel(l slog.Level) {
 	logLevel.Set(l)
+}
+
+// LogLevel is the process-wide log level now.
+func LogLevel() slog.Level {
+	return logLevel.Level()
+}
+
+// The three words --log-level takes (log.md R6). There is no "error": a Warn
+// record is one an operator must look at, and a level that hid it would also
+// hide the "log level changed" record of WatchLogLevel.
+const (
+	LogLevelDebug = "debug"
+	LogLevelInfo  = "info"
+	LogLevelWarn  = "warn"
+)
+
+// ParseLogLevel reads a --log-level value, from a flag, the environment or a
+// config file alike: one of the three words, in any case, spaces around it
+// ignored. Anything else is refused with an error that names the words and
+// the value as given.
+func ParseLogLevel(raw string) (slog.Level, error) {
+	switch strings.ToLower(strings.TrimSpace(raw)) {
+	case LogLevelDebug:
+		return slog.LevelDebug, nil
+	case LogLevelInfo:
+		return slog.LevelInfo, nil
+	case LogLevelWarn:
+		return slog.LevelWarn, nil
+	}
+	return 0, fmt.Errorf("--log-level must be %s, %s or %s, got %q",
+		LogLevelDebug, LogLevelInfo, LogLevelWarn, raw)
+}
+
+// LogLevelName is the word of a level, as --log-level spells it.
+func LogLevelName(l slog.Level) string {
+	return strings.ToLower(l.String())
+}
+
+// LogEnabled says whether a record at level reaches the log. A logging point
+// asks it before it builds its attributes, so a record the level drops costs
+// no rendering (log.md R9).
+func LogEnabled(ctx context.Context, level slog.Level) bool {
+	return slog.Default().Enabled(ctx, level)
+}
+
+// ReadLevel is the level of a read's record (log.md R9): Debug when the read
+// succeeded, Info when it failed, so a failure shows at the default level.
+func ReadLevel(err error) slog.Level {
+	if err == nil {
+		return slog.LevelDebug
+	}
+	return slog.LevelInfo
+}
+
+// MsgLogLevelChanged is the record of a log level change by signal (log.md
+// R13).
+const MsgLogLevelChanged = "log level changed"
+
+// WatchLogLevel is a daemon's change of its log level while it runs (log.md
+// R13): SIGUSR1 sets Debug and SIGUSR2 sets start, the level the daemon
+// started with. Each signal logs MsgLogLevelChanged at Warn, a level every
+// --log-level shows, under ctx's trace id. The returned stop ends the watch
+// and waits for its goroutine; after it a SIGUSR1 or SIGUSR2 does nothing,
+// as before the watch, since the Go runtime catches both and takes no action
+// when no channel is notified.
+func WatchLogLevel(ctx context.Context, start slog.Level) (stop func()) {
+	sigCh := make(chan os.Signal, 4)
+	signal.Notify(sigCh, syscall.SIGUSR1, syscall.SIGUSR2)
+	wctx, cancel := context.WithCancel(ctx)
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		watchLogLevel(wctx, start, sigCh)
+	}()
+	return func() {
+		signal.Stop(sigCh)
+		cancel()
+		<-done
+	}
+}
+
+// watchLogLevel is WatchLogLevel's loop over the signals sigCh delivers,
+// until ctx ends. Both signals set a level outright rather than a step up or
+// down, so the result never depends on a level the operator cannot see: two
+// SIGUSR1 still mean Debug, and SIGUSR2 always goes back to start. Every
+// signal is logged, a repeat too, so the operator can see that the signal
+// reached the process.
+func watchLogLevel(
+	ctx context.Context,
+	start slog.Level,
+	sigCh <-chan os.Signal,
+) {
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case sig := <-sigCh:
+			to := start
+			if sig == syscall.SIGUSR1 {
+				to = slog.LevelDebug
+			}
+			from := logLevel.Level()
+			logLevel.Set(to)
+			slog.WarnContext(ctx, MsgLogLevelChanged,
+				slog.String("log_level", LogLevelName(to)),
+				slog.String("from", LogLevelName(from)),
+				slog.String("signal", sig.String()),
+			)
+		}
+	}
 }
 
 // init installs the one handler chain every dnv binary logs through. The

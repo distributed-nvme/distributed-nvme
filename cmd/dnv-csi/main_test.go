@@ -25,6 +25,7 @@ var controllerFlags = []string{
 	"csi-address",
 	"gateway-address",
 	"gateway-timeout",
+	"log-level",
 }
 
 var exampleArgs = []string{
@@ -88,6 +89,7 @@ var nodeFlags = []string{
 	"device-wait",
 	"hostid-file",
 	"hostnqn-file",
+	"log-level",
 	"sync-period",
 }
 

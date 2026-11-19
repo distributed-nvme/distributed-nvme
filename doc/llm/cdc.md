@@ -642,7 +642,10 @@ CM1. **Flags.** A cobra root command with viper and no subcommands: the
 environment prefix is `DNV_CDC_`, every flag but the `--version` every
 program answers (`architecture.md`, Components: invocation reference) is
 also a config-file key and an environment variable, and the optional
-`--config` file is read when it is named. `--etcd-endpoints` and `--tr-addr` are required. `--range`
+`--config` file is read when it is named. `--log-level` is one of the three
+words of `log.md` R6, `info` by default, and SIGUSR1 and SIGUSR2 change the
+log level while the process runs (`log.md` R13). `--etcd-endpoints` and
+`--tr-addr` are required. `--range`
 defaults to `CdcRangeAll`, every range, mirroring the worker's `--roles`
 defaulting to all three roles: a single-instance deployment needs no
 sharding flag. The flags, their types and their defaults are the code's,
@@ -650,7 +653,8 @@ and `--help` lists them.
 
 CM2. **Validation.** Refuse to start on a `--range` element outside
 [0-9a-f], a duplicate element, a `--tr-type` other than tcp, an unparsable
-`--adr-fam`, `--tr-addr` or `--tr-svc-id`, or an empty `--etcd-endpoints`.
+`--adr-fam`, `--tr-addr` or `--tr-svc-id`, a `--log-level` other than the
+three words, or an empty `--etcd-endpoints`.
 
 CM3. **Wiring.** Build the `etcdutil` client and hand off to `cdc.Run`,
 which runs the watcher, the listener and the view registry. No interceptors
@@ -661,7 +665,8 @@ CM4. **Lifecycle logs, the start half.** `cdc starting` first, with the
 build version (`common.BuildVersion`). Then the
 start order: the listener opens (a busy port fails the process before the
 watcher exists, with the etcd client closed first; a close that fails logs
-an Error record), the watcher starts, and the accept loop starts only once
+an Info record, a stop-time event `dnv-cdc` cannot act on, as in the gateway
+and the worker), the watcher starts, and the accept loop starts only once
 the watcher's first scan has landed. Before that scan the registry holds no
 state at all — empty, not "no subsystems" — yet a host answered out of it
 would be told there are no subsystems. After a control-plane restart in
@@ -673,9 +678,9 @@ Error. A SIGTERM or SIGINT while waiting still ends the process (CM5).
 
 CM5. **Lifecycle logs, the stop half.** `cdc stopping` on SIGTERM or
 SIGINT, after the listener and the watcher have stopped and the etcd
-client is closed; a close that fails logs an Error record and stops
+client is closed; a close that fails logs an Info record (CM4) and stops
 nothing. A second signal
-during that stop exits at once with status 1, after a Warn record and
+during that stop exits at once with status 1, after an Info record and
 with no `cdc stopping`, as the gateway and the worker do (`gateway.md`
 CM3; `dnv-worker.md` CM5).
 
@@ -689,13 +694,14 @@ with its own `--tr-addr`, and omits `--range`, whose default is every range
 ## Log records
 
 The records of `dnv-cdc` are JSON records under the rules of `log.md`, R1
-to R12, at Info unless stated. Record names and attribute names are
+to R13, at Info unless stated. Record names and attribute names are
 normative, and so are the reason values of `cdc entry skipped` and
 `host disconnected`, so that the cdc suite can read them (Integration test
 plan); the normative record names and those reasons are constants in
 `cdc`, never formatted. The "etcd …" records `etcdutil` emits for every
-scan, decode and watch event come on top (`log.md`, etcd), and `dnv-cdc`
-has no gRPC records (`grpc.md`, Wiring). The normative records and the
+scan, decode and watch event come on top, at Debug while they succeed
+(`log.md`, etcd), and so does `log level changed`, at Warn (`log.md` R13);
+`dnv-cdc` has no gRPC records (`grpc.md`, Wiring). The normative records and the
 decision each marks:
 
 * `cdc starting` and `cdc stopping`, the two ends of the lifecycle (CM4,
@@ -705,7 +711,9 @@ decision each marks:
   compaction included (WV4);
 * `cdc entry applied`, a put or a delete folded into the held state (WV3);
 * `cdc entry skipped`, with the reason: a malformed key or value dropped
-  (WV2), or a transport element the record cannot name (DS3);
+  (WV2), at Warn, since the entry is gone from every host until an operator
+  mends the record (`log.md` R6), or a transport element the record cannot
+  name (DS3), at Info, the entry's other elements served;
 * `host connected` and `host disconnected`, the latter with the reason, the
   life of a connection that completed Connect (NP5, NP13);
 * `view changed`, once per impacted host, with its new GENCTR (DS6);
@@ -713,9 +721,9 @@ decision each marks:
 * `pdu error`, a terminal PDU error: a framing fault (NP2), a PDU out of
   sequence (NP3) or a capsule out of sequence (NP4).
 
-The Error and Warn records — the wait for the first scan (CM4), a failed
-accept (NP1), the second signal (CM5) and a failed client close (CM4, CM5)
-— and the signal record are diagnostics, not normative: they exist so a
+The Error records — the wait for the first scan (CM4) and a failed accept
+(NP1) — and the Info records of a failed client close (CM4, CM5) and of the
+first and the second signal (CM5) are diagnostics, not normative: they exist so a
 failure is visible, and the suite keys off none of them.
 
 ## Integration test plan
@@ -785,7 +793,8 @@ one etcd, configured with the request caps every etcd serving dnv must have
 `EtcdMaxRequestBytes`, which the suite reads from the `workerctl` it builds
 instead of copying the numbers), four `dnv-cdc`
 instances — two twins of the low half of the shard-code space and two of
-the high half — and `cdcctl`. The second server, with passwordless sudo, is
+the high half — each at `--log-level debug`, as every program a suite runs
+logs at Debug, and `cdcctl`. The second server, with passwordless sudo, is
 the nvmet target that stands in for the controller nodes: a handful of
 test subsystems, each with one dm-zero namespace, linked to several nvmet
 ports, one of them on two ports so that one subsystem has two paths. The

@@ -207,7 +207,10 @@ func NewRootCmd() *cobra.Command {
 		// ParseFlags does before PersistentPreRunE runs — so cmd.Flags()
 		// here holds the global flags bindViper looks up.
 		PersistentPreRunE: func(cmd *cobra.Command, _ []string) error {
-			return bindViper(cmd)
+			if err := bindViper(cmd); err != nil {
+				return err
+			}
+			return setLogLevel()
 		},
 	}
 	addGlobalFlags(root)
@@ -262,6 +265,8 @@ func addGlobalFlags(root *cobra.Command) {
 		"per-invocation deadline, seconds")
 	flags.String("trace-id", "",
 		"override the per-invocation trace id mint")
+	flags.String("log-level", common.LogLevelWarn,
+		"log level on stderr: debug, info or warn")
 	flags.String("config", "",
 		"optional viper config file for the env-backed global flags")
 }
@@ -272,7 +277,20 @@ func addGlobalFlags(root *cobra.Command) {
 // would stamp one number on every later write that carries a token; it is
 // read off the command line alone, like every leaf flag (see invoked).
 var envGlobals = []string{
-	"gateway-address", "cluster", "sp", "timeout", "trace-id", "config",
+	"gateway-address", "cluster", "sp", "timeout", "trace-id", "log-level",
+	"config",
+}
+
+// setLogLevel sets --log-level, warn by default (CT7; log.md R6), once the
+// binding has resolved it and before anything is dialled, so a word other
+// than debug, info or warn is a usage error that issues no RPC (CT5).
+func setLogLevel() error {
+	level, err := common.ParseLogLevel(viper.GetString("log-level"))
+	if err != nil {
+		return err
+	}
+	common.SetLogLevel(level)
+	return nil
 }
 
 // bindViper wires flags, config file and environment together the way the

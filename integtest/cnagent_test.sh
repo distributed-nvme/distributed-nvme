@@ -4842,13 +4842,15 @@ preflight_vms() {
 # Setup (cnagent_integtest.md, Cases, the setup paragraph)
 # ---------------------------------------------------------------------------
 
+# Both agents run at --log-level debug, as every program a suite runs does:
+# the cases read the agents' reads (cnagent_integtest.md, Conventions).
 start_dn_agent() { # <idx>
 	local idx=$1
 	sshv "$idx" "setsid nohup $WORK/dnv-agent dn \
 --grpc-network tcp --grpc-address ${IP[$idx]}:$DN_GRPC_PORT \
 --tr-type tcp --adr-fam ipv4 --tr-addr ${IP[$idx]} --tr-svc-id $TR_SVC_ID \
 --local-store $WORK/dn-store --disk ${LOOP[$idx]} --nvmet-qid-max $QID_MAX \
->> $DN_LOG 2>&1 < /dev/null & echo launched"
+--log-level debug >> $DN_LOG 2>&1 < /dev/null & echo launched"
 }
 
 # The cn agent takes the same --tr-* flags as the dn one: both converge the
@@ -4861,7 +4863,7 @@ start_cn_agent() { # <idx>
 --grpc-network tcp --grpc-address ${IP[$idx]}:$CN_GRPC_PORT \
 --tr-type tcp --adr-fam ipv4 --tr-addr ${IP[$idx]} --tr-svc-id $TR_SVC_ID \
 --local-store $WORK/cn-store --capacity $CN_CAPACITY --nvmet-qid-max $QID_MAX \
->> $CN_LOG 2>&1 < /dev/null & echo launched"
+--log-level debug >> $CN_LOG 2>&1 < /dev/null & echo launched"
 }
 
 setup() {

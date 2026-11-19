@@ -94,6 +94,9 @@ func addFlags(cmd *cobra.Command) {
 		"address family of the listen endpoint: ipv4 or ipv6")
 	flags.String("tr-addr", "", "listen address (required)")
 	flags.String("tr-svc-id", common.DefaultCdcTrSvcId, "listen port")
+	flags.String("log-level", common.LogLevelInfo,
+		"log level: debug, info or warn; SIGUSR1 sets debug while the "+
+			"process runs and SIGUSR2 sets this level again")
 	flags.String("config", "", "optional viper config file")
 }
 
@@ -133,6 +136,9 @@ type options struct {
 	adrFam  string
 	trAddr  string
 	trSvcId string
+	// logLevel is the parsed --log-level, set before the first record
+	// (log.md R6).
+	logLevel slog.Level
 }
 
 // optionsFromViper reads and validates the CM1 values after the binding above.
@@ -171,15 +177,20 @@ func optionsFromViper() (*options, error) {
 	if err := checkTrSvcId(trSvcId); err != nil {
 		return nil, err
 	}
+	logLevel, err := common.ParseLogLevel(viper.GetString("log-level"))
+	if err != nil {
+		return nil, err
+	}
 	return &options{
 		endpoints: endpoints,
 		dialTimeout: time.Duration(viper.GetInt("etcd-dial-timeout")) *
 			time.Second,
-		ranges:  ranges,
-		trType:  trType,
-		adrFam:  adrFam,
-		trAddr:  trAddr,
-		trSvcId: trSvcId,
+		ranges:   ranges,
+		trType:   trType,
+		adrFam:   adrFam,
+		trAddr:   trAddr,
+		trSvcId:  trSvcId,
+		logLevel: logLevel,
 	}, nil
 }
 
@@ -269,7 +280,8 @@ func checkTrSvcId(trSvcId string) error {
 
 // run is the CM3/CM4 startup path. The default JSON logger is already
 // installed by common's init (log.md R3), so the only work here is: bind,
-// validate, mint the startup trace id, arm the CM5 signal handling, build the
+// validate, set the --log-level (log.md R6), mint the startup trace id, arm
+// the log level's signals (log.md R13) and the CM5 signal handling, build the
 // etcd client and hand off to cdc.Run.
 //
 // Startup never fails because etcd is unreachable: etcdutil.New dials lazily,
@@ -285,8 +297,14 @@ func run(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return err
 	}
+	common.SetLogLevel(opts.logLevel)
 
 	ctx := common.WithTraceId(context.Background(), common.NewTraceId())
+	// log.md R13: SIGUSR1 sets Debug, SIGUSR2 the level the process started
+	// with, until the process ends; the watch has the startup ctx, which no
+	// stop signal cancels, so it lasts through the drain.
+	stopLogLevel := common.WatchLogLevel(ctx, opts.logLevel)
+	defer stopLogLevel()
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 	// Capacity 2: the first signal starts the CM5 drain, the second aborts
@@ -303,7 +321,7 @@ func run(cmd *cobra.Command, args []string) error {
 	}
 	// cdc.Run closes the client as the last step of its CM5 drain, so it is
 	// deliberately not closed here.
-	return cdc.Run(ctx, cli, cdc.Config{
+	return runCdc(ctx, cli, cdc.Config{
 		Ranges:    opts.ranges,
 		TrType:    opts.trType,
 		AdrFam:    opts.adrFam,
@@ -312,6 +330,10 @@ func run(cmd *cobra.Command, args []string) error {
 		Endpoints: opts.endpoints,
 	})
 }
+
+// runCdc is cdc.Run, the hand-off; a seam, so a test of the startup path can
+// see what run set before the hand-off and while it runs.
+var runCdc = cdc.Run
 
 // watchSignals implements CM5: the first SIGINT/SIGTERM cancels ctx, which
 // stops the listener, closes every connection and stops the watcher; a second
@@ -341,7 +363,7 @@ func watchSignals(
 	if !ok {
 		return
 	}
-	slog.WarnContext(ctx, "second signal, exiting without a clean drain",
+	slog.InfoContext(ctx, "second signal, exiting without a clean drain",
 		slog.String("signal", second.String()),
 	)
 	exit(1)

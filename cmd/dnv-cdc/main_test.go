@@ -39,6 +39,7 @@ var cm1Flags = []string{
 	"config",
 	"etcd-dial-timeout",
 	"etcd-endpoints",
+	"log-level",
 	"range",
 	"tr-addr",
 	"tr-svc-id",

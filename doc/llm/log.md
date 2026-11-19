@@ -2,18 +2,20 @@
 
 This document owns the JSON logging every dnv binary shares: the handler
 chain and the stream it writes to, the trace id that joins the records of one
-operation across processes, the per-binary log levels, the attribute
-discipline, the shared rendering helpers, and the records each subsystem must
-emit. `osclient.md` and `grpc.md` build on the helpers defined here;
+operation across processes, the log levels, the flag that sets one and the
+signals that change it while a daemon runs, the attribute discipline, the
+shared rendering helpers, and the records each subsystem must emit.
+`osclient.md` and `grpc.md` build on the helpers defined here;
 `architecture.md` gives the system context and `dnvctl.md` the CLI's output
 contract that the choice of stream serves.
 
 ## Placement
 
-All logging code is shared and lives in package `common`, in `common/log.go`.
-Every dnv binary (`dnv-gateway`, `dnv-worker`, `dnv-agent`, `dnv-cdc`,
-`dnv-csi`, `dnvctl`) imports `common`, so its `init` installs the default logger before
-any `main` runs. `NewTraceId` relies on `rand.Read` of `crypto/rand` never
+All logging code is shared and lives in package `common`, in `common/log.go`:
+the handler chain, the level, its parse and the watch of the signals that
+change it. Every dnv binary (`dnv-gateway`, `dnv-worker`, `dnv-agent`,
+`dnv-cdc`, `dnv-csi`, `dnvctl`) imports `common`, so its `init` installs the
+default logger before any `main` runs. `NewTraceId` relies on `rand.Read` of `crypto/rand` never
 failing, a guarantee of the Go version `go.mod` pins; the protobuf rendering
 helper uses the protobuf module `go.mod` requires.
 
@@ -38,21 +40,23 @@ R2. The handler chain is `TraceIdHandler` wrapping a `slog.NewJSONHandler` on
     error there as plain text — and no dnv record comes from anything but
     `log/slog`. All handler options stay at their defaults except `Level`
     (see R6), the one deliberate deviation from nil options, required by the
-    per-binary level rule.
+    level rules.
 
 R3. `common`'s `init` calls `slog.SetDefault` with that chain, and that call
     is the only `slog.SetDefault` in the repository outside test files. The
     dnv binaries do not build their own loggers: the chain's handler holds
-    `logLevel`, a `slog.LevelVar`, so `SetLogLevel` (R6) still bites after
-    `init` has run, which is precisely what a second handler built around a
-    static level would throw away. The `integtest/` drivers are not dnv
+    `logLevel`, a `slog.LevelVar`, so `SetLogLevel` (R6) and the signals of
+    R13 still bite after `init` has run, which is precisely what a second
+    handler built around a static level would throw away. The `integtest/` drivers are not dnv
     binaries, and they build no logger either: they inherit this stderr
     default, which is exactly what keeps their stdout the result channel the
     suites parse.
 
-R4. Every log call uses the context-aware form — `slog.InfoContext`,
-    `slog.WarnContext`, `slog.ErrorContext` — and passes the request-scoped
-    ctx. Use `context.Background` explicitly only when no operation context
+R4. Every log call uses the context-aware form — `slog.DebugContext`,
+    `slog.InfoContext`, `slog.WarnContext`, `slog.ErrorContext`, or
+    `slog.Log` and `slog.LogAttrs` with a ctx for a level the call works out
+    at run time — and passes the request-scoped ctx. Use
+    `context.Background` explicitly only when no operation context
     exists. **Always propagate the request ctx down** into `OsClient` calls,
     etcd calls and gRPC calls; the trace id rides on it (see R5 and
     `grpc.md`, T1 to T3).
@@ -82,17 +86,47 @@ R5. The trace id is carried in the context under an unexported key and
     nested inside that group rather than at the top level — see R12 — so a
     consumer that greps `trace_id` positionally must account for it.
 
-R6. Log levels per binary: the five daemons — `dnv-gateway`, `dnv-worker`,
-    `dnv-agent` in both roles, `dnv-cdc` and `dnv-csi` — log at Info; `dnvctl` logs at
-    Warn, and so do `dnv-agent`'s node check and gather, the one-shot tools
-    `check` and `collect` (`dnagent.md` CM5, CM6). Implemented with a
-    package-level `slog.LevelVar`, whose zero value is Info, plus
-    `SetLogLevel`. The five daemons do nothing; `dnvctl` calls
-    `SetLogLevel` with `slog.LevelWarn` as the first statement of its `main`,
-    and the node check and the gather as the first statement of their
-    `RunE`. Because all the R8 logging points are Info, they are
-    automatically silenced in dnvctl and in the two tools — this is
-    intended: what the tools read is in their report and their archive.
+R6. **What each level holds.** Debug holds what repeats every interval and
+    changes nothing: a read that succeeded, or answered "absent" where R9
+    says so, a check round's stream messages, the worker's record of a
+    late round that passed (`dnv-worker.md`, Log records), and the CSI
+    driver's records of the calls Kubernetes repeats on a timer while they
+    succeed (`csi.md`, Log records). Info holds a change, an event and a
+    failure: every write, every request and reply of a dnv service's unary
+    call (`grpc.md` L1), every other read that failed, and a failure the
+    program clears alone, as its next pass or its retry does, so that a
+    fault that heals sets off no alert. Warn holds a record an operator must
+    look at: a fault, a refusal or a lost redundancy that holds until an
+    operator acts or a lost program comes back (`dnv-worker.md`, Log
+    records), a sign that a node's saved state was lost or changed behind
+    the agent's back, such as a zeroed count a save rolled back
+    (`dnagent.md` DN9), the outcome of a forced start, which chooses the
+    copy a group keeps (`cnagent.md` CN12), or the control plane fencing
+    itself, which the worker ends alone but an operator must know of.
+    `log level changed` is the one Warn record that is no fault: it is at
+    Warn only so that every `--log-level` shows it (R13), and an alert on
+    Warn leaves it out. Error
+    holds a fault the program could not carry out or must not pass over.
+    Warn and Error are the records to alert on.
+
+    **The flag.** The five daemons — `dnv-gateway`, `dnv-worker`,
+    `dnv-agent` in both roles, `dnv-cdc` and `dnv-csi` — and `dnvctl` take
+    `--log-level` with one of three words, `debug`, `info` or `warn`, in any
+    case, through the same flag, environment and config binding as their
+    other flags; anything else is refused before the program starts, naming
+    the three words (`ParseLogLevel`). There is no `error`: a level that hid
+    Warn would hide what an operator must look at, and the change records of
+    R13. The daemons default to `info` and set the level before their first
+    record. `dnvctl` defaults to `warn` (`dnvctl.md` CT7): its `main` sets
+    Warn as its first statement and the command tree then sets its
+    `--log-level`, so by default all the R8 logging points stay silent in
+    dnvctl. `dnv-agent`'s node check takes the flag with its role's other
+    flags, so an agent's command line serves its check, and reads no value
+    of it; the gather takes none. Both log at Warn, set as the first
+    statement of their `RunE` (`dnagent.md` CM5, CM6), since what they read
+    is in their report and their archive. The level lives in a
+    package-level `slog.LevelVar`, whose zero value is Info, set with
+    `SetLogLevel` and read with `LogLevel`.
 
 R7. Attributes are always built with the strongly-typed constructors of
     `log/slog` — `slog.String`, `slog.Int`, `slog.Int64`, `slog.Uint64`,
@@ -100,8 +134,8 @@ R7. Attributes are always built with the strongly-typed constructors of
     alternating key, value arguments. Use `slog.Any` only for slices, maps
     and the `PbToLogValue` output.
 
-R8. The following events MUST be logged at **Info** level, with the record
-    names and attributes of "Record obligations by subsystem" below:
+R8. The following events MUST be logged, at the level R9 gives, with the
+    record names and attributes of "Record obligations by subsystem" below:
     1. every OS command execution (stdin, stdout, stderr, exit code) —
        implemented once inside `LimitedOsClient` (`osclient.md`, Logging);
     2. every file read/write (full path; string data truncated to the first
@@ -133,10 +167,25 @@ R9. Each logging point emits exactly **one** record per operation, on
     completion, so the record can carry the outcome (exit code, error); a
     unary call's request record, logged before the call (`grpc.md` L3), and
     the record of a put or delete that an STM holds back for its commit (etcd,
-    below) carry no outcome. When the operation failed, the same Info record
-    additionally carries an `error` attribute holding the error's text. These
-    logging points do not use other levels; failures still reach the caller
-    through the returned error.
+    below) carry no outcome. When the operation failed, the same record
+    additionally carries an `error` attribute holding the error's text.
+    The level follows R6. At Debug: a read that succeeded — a file, block,
+    proto, modification-time or device-number read, a directory listing, a
+    dial that connected, an etcd get, range or watch event, a command of the
+    read list, which is `commandReadsOnly` (`common/osclient.go`), a check
+    round's stream message — and a leg probe's half that succeeded, the
+    probe being a read of the leg's health though its first half writes
+    (`ReadLevel`); and a file, proto, modification-time or device-number
+    read or a directory listing that found its path absent, and a
+    device-number read that found no block device at its path, since its
+    caller decides by that answer, the CSI node plugin's stats call by the
+    second. At Info: a read that failed otherwise, every
+    write, every command not on the read list, every request and reply of a
+    dnv service's unary call, and a stream's open and close (`grpc.md` L1).
+    These logging points use no other level; failures still reach the caller
+    through the returned error. A point works out its level first and builds
+    its attributes only when the process logs that level (`LogEnabled`), so
+    a dropped record costs no rendering.
 
 R10. Protobuf messages are rendered for logging exclusively through
      `PbToLogValue`, which replaces every `bytes` field, at any nesting depth
@@ -164,6 +213,23 @@ R12. `TraceIdHandler` MUST override `WithAttrs` and `WithGroup` to re-wrap
      own logging points never open a group, so where a record carries
      `trace_id` it is at the top level.
 
+R13. **The change while a daemon runs.** Each of the five daemons watches
+     SIGUSR1 and SIGUSR2 from its start to its end (`WatchLogLevel`): SIGUSR1
+     sets Debug, and SIGUSR2 sets the level the daemon started with. Both set
+     a level outright, never one step up or down, so the result does not hang
+     on a level the operator cannot see. Each signal logs `log level
+     changed` at Warn, which every `--log-level` shows, with `log_level` (the
+     new level's word), `from` (the old one's) and `signal`, a repeat of the
+     same level too, so the operator sees that the signal arrived; the
+     record carries the trace id the daemon's start mints for it. A change
+     lasts until the next signal or the end of the process. `dnvctl`, the
+     node check and the gather watch neither signal, and the Go runtime then
+     takes no action on one. A child process a daemon started has the
+     kernel's default action, which ends it, so an operator signals the main
+     process only (`operations.md`, The logs). The two signals are the
+     whole interface: no file is polled for a level, no call sets one, and
+     SIGHUP keeps its default action.
+
 ## Record obligations by subsystem
 
 Record names and attribute names are normative: the integration suites grep
@@ -172,8 +238,8 @@ returned a non-nil error (R9).
 
 ### OS commands and file IO
 
-`LimitedOsClient` emits one record per operation; `osclient.md`, Logging,
-implements them:
+`LimitedOsClient` emits one record per operation, at the level R9 gives it;
+`osclient.md`, Logging, implements them:
 
 * a command run logs `os command` with `cmd`, `args`, `stdin`, `stdout`,
   `stderr`, `exit_code` and "error?";
@@ -227,9 +293,11 @@ write and an fsync) and "error?" — **never** `data`. They are "probe …" and 
 on purpose: the cn suite's mutation grep names `os write block` explicitly
 (`cnagent_integtest.md`, Conventions), and the continuous health probes must
 fall out of that list by construction rather than by a path-based exemption.
-Everything else about them — one Info record per operation, emitted on
-completion, under the caller's trace id, with "error?" only on failure —
-follows the same rules as the records above.
+Everything else about them — one record per operation, emitted on
+completion, under the caller's trace id, with "error?" only on failure, at
+Debug when the half succeeded and at Info when it failed, as a read's (R9),
+since the probe runs every probe interval on every leg — follows the same
+rules as the records above.
 
 ### Agent start
 
@@ -248,8 +316,8 @@ Every request and reply message of the dnv-internal services (`Gateway`,
 `DiskNodeAgent`, `ControllerNodeAgent`) is logged by the shared interceptors
 with `method` (the full method string) and `data` (the message as
 `PbToLogValue` renders it), so a bitmap push logs its `bitmap` as a byte
-count instead of the payload. `grpc.md` owns the record names, the ordering
-and the stream rules (L1 to L6).
+count instead of the payload. `grpc.md` owns the record names, their levels,
+the ordering and the stream rules (L1 to L6).
 
 ### etcd
 
@@ -259,7 +327,9 @@ All etcd access, plain client and STM alike, goes through the central
 helpers of the `etcdutil` package (`dnv-worker.md`, EU1 to EU4), which do
 the proto (un)marshal **and** the logging. Direct `clientv3` or STM
 `Get`/`Put` calls with ad-hoc marshaling elsewhere are forbidden — otherwise
-the rule cannot be enforced. The records, all Info, via `slog.InfoContext`:
+the rule cannot be enforced. The records, at the levels of R9 — a get and a
+range at Debug when they answered and at Info when they failed, a watch
+event at Debug unless its value did not decode, a put and a delete at Info:
 
 * a point read logs `etcd get` with `key`, `found`, `value` (the decoded
   message as `PbToLogValue` renders it; present only when the key was found

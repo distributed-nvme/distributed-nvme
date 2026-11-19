@@ -419,6 +419,7 @@ start_cdc() { # <instance index 0..3>
 		"--range $(cdc_range "$1")" \
 		"--tr-type tcp --adr-fam ipv4 --tr-addr $IP1" \
 		"--tr-svc-id $(cdc_port "$1")" \
+		"--log-level debug" \
 		">> $WORK/$dir/cdc.log 2>&1 < /dev/null &" \
 		"echo \$! > $WORK/$dir/pid; cat $WORK/$dir/pid")
 	[ -n "$pid" ] || die "starting $dir produced no pid"

@@ -187,8 +187,10 @@ func Run(ctx context.Context, cli *etcdutil.Client, cfg Config) error {
 	reg := newRegistry()
 	srv, err := newServer(ctx, d, reg)
 	if err != nil {
+		// At Info here and at the stop below: a stop-time event dnv-cdc
+		// cannot act on (log.md R6).
 		if closeErr := cli.Close(); closeErr != nil {
-			slog.ErrorContext(ctx, "etcd client close failed",
+			slog.InfoContext(ctx, "etcd client close failed",
 				slog.String("error", closeErr.Error()),
 			)
 		}
@@ -197,7 +199,7 @@ func Run(ctx context.Context, cli *etcdutil.Client, cfg Config) error {
 	runInstance(ctx, srv)
 
 	if err := cli.Close(); err != nil {
-		slog.ErrorContext(ctx, "etcd client close failed",
+		slog.InfoContext(ctx, "etcd client close failed",
 			slog.String("error", err.Error()),
 		)
 	}

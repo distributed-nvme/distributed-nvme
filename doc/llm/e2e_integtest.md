@@ -176,7 +176,10 @@ case, which the suite refuses otherwise, run many `dnv-agent dn` instances
 each, every one on its own loop device and its own nvmet port and service id,
 as two ports cannot listen on one address, all registered at their guest's
 location (E2E4). Two hosts run only the kernel's nvme-tcp stack and nvme-cli,
-but for nvme-stas on host0 inside the cutoff case (E2E10).
+but for nvme-stas on host0 inside the cutoff case (E2E10). Every dnv daemon
+runs at `--log-level debug`, so a failed run's logs hold the reads a fault
+needs and the steps that read a converge's commands see its reads too
+(`log.md` R6, R9).
 
 The control plane has a guest of its own, as in a deployment
 (`architecture.md`, System overview): it holds no kernel state and runs without
@@ -521,7 +524,14 @@ the pool's virtual size.
 deleting it gives every extent back and leaves nothing behind, the two
 statements the other cases assume. Its counts are absolute, so a moved side
 count, or any repair or retired leg, is a reaction under the quiet thresholds
-and a finding about the lab. It runs first, so a lab that cannot build the
+and a finding about the lab. Before the teardown it judges the default log
+level by the level field every record carries, with no run at that log level:
+in an idle window of five check intervals, the primary's cn agent logs no
+check round message, read, command, dial or leg probe above Debug, and the
+worker no round message or etcd read above Debug, while both log round
+messages at Debug (`log.md` R6, R9; `grpc.md` L6); the bytes of the window
+and of its records above Debug, what the default log level would keep, are
+logged and not asserted. It runs first, so a lab that cannot build the
 shape fails after one build.
 
 **ops** proves the pool-scoped mutators and readers that setup, copy and the

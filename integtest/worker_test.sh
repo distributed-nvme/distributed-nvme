@@ -780,7 +780,8 @@ start_worker() { # <w>
 		"$WORK/bin/dnv-worker --etcd-endpoints 127.0.0.1:$ETCD_CLIENT_PORT" \
 		"--roles dn,cn,sp --vote-interval $VOTE_INTERVAL" \
 		"--vote-grace-time $VOTE_GRACE" \
-		"--vote-leave-grace-time $VOTE_LEAVE_GRACE"
+		"--vote-leave-grace-time $VOTE_LEAVE_GRACE" \
+		"--log-level debug"
 	seen_worker "$1"
 }
 

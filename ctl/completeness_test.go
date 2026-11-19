@@ -397,8 +397,8 @@ func TestLeafFlagsMatchTable(t *testing.T) {
 // flag that drifted onto the root would be silently accepted on every one of
 // the 72 commands.
 func TestRootPersistentFlags(t *testing.T) {
-	want := []string{"cluster", "config", "gateway-address", "rev", "sp",
-		"timeout", "trace-id"}
+	want := []string{"cluster", "config", "gateway-address", "log-level",
+		"rev", "sp", "timeout", "trace-id"}
 	var got []string
 	defaults := map[string]string{}
 	NewRootCmd().PersistentFlags().VisitAll(func(f *pflag.Flag) {
@@ -420,7 +420,8 @@ func TestRootPersistentFlags(t *testing.T) {
 		t.Errorf("the env-backed global flags are %v, want %v", gotEnv, envBacked)
 	}
 
-	// The global flags' defaults. --timeout is the only one that is not empty.
+	// The global flags' defaults. --timeout and --log-level are the only
+	// ones that are not empty.
 	// --rev's empty default is not what makes "not given" (CT3) — that is
 	// pflag's Changed bit, read in revToken — but a string flag keeps the
 	// value's parse, and its usage error, next to that rule.
@@ -432,6 +433,7 @@ func TestRootPersistentFlags(t *testing.T) {
 		"trace-id":        "",
 		"config":          "",
 		"timeout":         "10",
+		"log-level":       "warn",
 	} {
 		if defaults[name] != want {
 			t.Errorf("--%s defaults to %q, want %q",

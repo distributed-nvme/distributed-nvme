@@ -984,7 +984,7 @@ func (s *CnAgentServer) awaitNsHead(
 		}
 		if !budget.Pause(ctx, pause) {
 			if ctx.Err() == nil {
-				slog.WarnContext(ctx, msgHeadWaitSpent,
+				slog.InfoContext(ctx, msgHeadWaitSpent,
 					slog.String("nqn", nqn),
 					slog.String("head", view.nsDev),
 					slog.Int("scan_pauses", scanPauses),
@@ -1000,8 +1000,9 @@ func (s *CnAgentServer) awaitNsHead(
 	}
 }
 
-// msgHeadWaitSpent is the Warn record of a head wait (awaitNsHead) that the
-// pass's budget stopped (CN10): it names the subsystem, the head the last
+// msgHeadWaitSpent is the Info record of a head wait (awaitNsHead) that the
+// pass's budget stopped (CN10), at Info since the next converge waits again
+// (log.md R6): it names the subsystem, the head the last
 // lookup picked ("" when none) and the pauses the wait took of each kind. A
 // leg whose number read then fails on a head that was not complete, or a
 // clone whose step 3 fails on its source's, is the kept case of the budget,

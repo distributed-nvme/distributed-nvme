@@ -4274,8 +4274,17 @@ type sptRecordHook struct {
 	counted atomic.Int64
 }
 
+// Enabled takes every level: a read's record is at Debug (log.md, etcd), and
+// etcdutil builds no record the default logger does not take, so a hook that
+// answered as the wrapped handler does would never see a read below its
+// level.
+func (h *sptRecordHook) Enabled(context.Context, slog.Level) bool {
+	return true
+}
+
 // Handle runs the actor on the watched request's first triggering record and
-// counts, then hands the record on to the handler it wraps.
+// counts, then hands the record on to the handler it wraps when that one
+// takes its level.
 func (h *sptRecordHook) Handle(ctx context.Context, rec slog.Record) error {
 	if ctx.Value(sptHookKey{}) != nil {
 		if h.count(rec) {
@@ -4284,6 +4293,9 @@ func (h *sptRecordHook) Handle(ctx context.Context, rec slog.Record) error {
 		if h.trigger(rec) && h.fired.CompareAndSwap(false, true) {
 			h.actor()
 		}
+	}
+	if !h.Handler.Enabled(ctx, rec.Level) {
+		return nil
 	}
 	return h.Handler.Handle(ctx, rec)
 }

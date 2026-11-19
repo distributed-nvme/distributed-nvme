@@ -5,13 +5,14 @@ chains, the message limit every such connection and server sets, and the
 keepalive of the worker's agent connections with the ping policy every
 server applies: the
 trace-id propagation between context and gRPC metadata, the logging of
-every request and reply message with its record names and ordering, the
+every request and reply message with its record names, levels and
+ordering, the
 wiring rule that puts both chains and the limit on every dnv client
 connection and server, and the conventions the integration-test drivers and
 fakes follow instead. It leans
 on `log.md` for the helpers it reuses (`WithTraceId`, `TraceIdFromCtx`,
-`TraceIdMetadataKey`, `PbToLogValue`) and for its rules on Info records and
-typed attributes, on `schema.proto` for the
+`TraceIdMetadataKey`, `PbToLogValue`) and for its rules on levels, records
+and typed attributes, on `schema.proto` for the
 three services (`Gateway`, `DiskNodeAgent`, `ControllerNodeAgent`), and on
 `architecture.md`, System overview, for who calls whom.
 
@@ -69,7 +70,9 @@ T3. Propagation is transitive end to end by construction: dnvctl sets an id
     it answers from the agent's latest observation of the object
     (`dnagent.md` SH25) — but the background read it starts runs under the
     round's id (`dnagent.md` SH29), so that read's `os command` and file
-    records carry it. The reply's stamp carries the trace id of the
+    records carry it; the round's messages and that read's records are at
+    Debug while they succeed (L1, `log.md` R9), so they show at
+    `--log-level debug`. The reply's stamp carries the trace id of the
     converge or read that made the observation it answers from (`dnagent.md`
     SH28), and the worker's `syncup result` record of a re-send the round
     brings names that id beside the round's own (`dnv-worker.md` RW10). The
@@ -104,8 +107,12 @@ T4. Minting trace ids is the entry points' job, never the interceptors':
 
 ## Message logging
 
-L1. Every request and reply **message** is logged at Info with
-    `slog.InfoContext` using the trace-enriched ctx. Attributes: `method`
+L1. Every request and reply **message** is logged using the trace-enriched
+    ctx: a unary call's request and reply, and a stream's open and close, at
+    Info; a stream message that went through at Debug, a read of its node
+    every round (L6), and one whose send or receive failed at Info
+    (`log.md` R6, R9). A stream message is rendered only when the process
+    logs Debug. Attributes: `method`
     (the full method string), `data` (`slog.Any` of the message as
     `PbToLogValue` renders it), and "error?" (only when the call or step
     failed). `PbToLogValue` guarantees that `bytes` fields — the `bitmap`
@@ -150,7 +157,11 @@ L6. The long-lived `Check*` streams (`architecture.md`, Check streams) carry
     round produces its own records, just as every unary `Syncup*` and
     `Push*Bitmap` call produces one request and one reply record — which is
     exactly the intent of the "all grpc client/server request/reply" rule
-    (`log.md` R8).
+    (`log.md` R8). The stream messages are the only ones at Debug (L1): a
+    round repeats every interval for every object, so at the default log level
+    a round that succeeds logs no message on either end, while a unary call
+    changes or reads on an operator's or the worker's demand and stays at
+    Info.
 
 ## Wiring
 
@@ -230,7 +241,9 @@ The `integtest/` drivers are scoped out of the wiring rule on purpose.
   reads for which RPC dnvctl put on the wire and under which trace id — it
   selects `grpc server request` records by `trace_id` and `method`; the
   request payloads it asserts come from the fake's `state.json`
-  (`dnvctl.md`, Integration test plan).
+  (`dnvctl.md`, Integration test plan). Both fakes set their log level to Debug
+  as the first statement of `main`, as every program a suite runs logs at
+  Debug, so the fake agent's log holds the `Check*` stream messages (L1).
 * The message limit is no part of that scoping out: `gatewayctl`,
   `cnagentctl`, `dnagentctl` and both fakes set it as Wiring says, so a
   driver takes any reply the daemon it calls sends, and a fake any request
@@ -241,8 +254,9 @@ The `integtest/` drivers are scoped out of the wiring rule on purpose.
   default chain, which is what keeps its stdout the result channel
   the suites parse (`log.md` R3). The only log records reaching a driver's
   stderr are the `etcd *` ones `etcdutil` emits under `workerctl` and
-  `cdcctl` — `gatewayctl` calls nothing that logs, and `dnagentctl` and
-  `cnagentctl` never call `slog` — while each driver's die, usage and
+  `cdcctl`, at the default log level its puts and deletes and its reads that
+  failed (`log.md`, etcd) — `gatewayctl` calls nothing that logs, and
+  `dnagentctl` and `cnagentctl` never call `slog` — while each driver's die, usage and
   progress diagnostics share that stream as plain text, among them, from
   `dnagentctl` and `cnagentctl`, the age of the observation a reply answered
   from and how many rounds a command in fresh mode sent. `fakeagent` and

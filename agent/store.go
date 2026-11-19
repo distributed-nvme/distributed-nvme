@@ -136,7 +136,7 @@ func (s *Store) List(
 	if len(leftovers) > 0 {
 		sort.Strings(leftovers)
 		for _, path := range leftovers {
-			slog.WarnContext(ctx, "removing an interrupted local store write",
+			slog.InfoContext(ctx, "removing an interrupted local store write",
 				slog.String("path", path))
 		}
 		if err := s.Remove(ctx, leftovers...); err != nil {

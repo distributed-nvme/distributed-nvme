@@ -66,7 +66,8 @@ func parse(t *testing.T, use string, args []string) *cobra.Command {
 // CM1: the command tree. dn and cn serve the agents; check dn and check cn
 // are the node check with their roles' flags; collect is the gather.
 // --disk belongs to the dn role's two commands alone, --capacity to the cn
-// role's, and --md-replay to check cn.
+// role's, --md-replay to check cn, and --log-level to the roles and their
+// checks, not to the gather.
 func TestSubcommands(t *testing.T) {
 	root := newRootCmd()
 	if root.Use != "dnv-agent" {
@@ -99,11 +100,16 @@ func TestSubcommands(t *testing.T) {
 		t.Errorf("command tree = %v, want %v", tree, want)
 	}
 	flags := map[string]map[string]bool{
-		"dn":       {"disk": true, "capacity": false, "md-replay": false},
-		"cn":       {"disk": false, "capacity": true, "md-replay": false},
-		"check dn": {"disk": true, "capacity": false, "md-replay": false},
-		"check cn": {"disk": false, "capacity": true, "md-replay": true},
-		"collect":  {"disk": false, "log-file": true, "journal-unit": true},
+		"dn": {"disk": true, "capacity": false, "md-replay": false,
+			"log-level": true},
+		"cn": {"disk": false, "capacity": true, "md-replay": false,
+			"log-level": true},
+		"check dn": {"disk": true, "capacity": false, "md-replay": false,
+			"log-level": true},
+		"check cn": {"disk": false, "capacity": true, "md-replay": true,
+			"log-level": true},
+		"collect": {"disk": false, "log-file": true, "journal-unit": true,
+			"log-level": false},
 	}
 	for path, want := range flags {
 		cmd, _, err := root.Find(strings.Fields(path))

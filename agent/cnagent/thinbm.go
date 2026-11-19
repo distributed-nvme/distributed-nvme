@@ -402,8 +402,9 @@ func (s *CnAgentServer) readThinDump(
 
 func (s *CnAgentServer) removeThinDump(ctx context.Context, path string) {
 	if err := s.cmd.RunOk(ctx, "rm", "-f", path); err != nil {
-		// The pool's next dump overwrites and removes it: a record only.
-		slog.WarnContext(ctx, "removing the thin_dump file failed",
+		// The pool's next dump overwrites and removes it: a record only, at
+		// Info, as the agent clears it alone (log.md R6).
+		slog.InfoContext(ctx, "removing the thin_dump file failed",
 			slog.String("path", path),
 			slog.String("error", err.Error()))
 	}
@@ -443,8 +444,10 @@ func (s *CnAgentServer) releaseMetadataSnap(
 ) {
 	if err := s.dm.Message(
 		ctx, sp.poolFinalName, 0, "release_metadata_snap"); err != nil {
-		// Releasing nothing is benign; anything else is worth a record.
-		slog.WarnContext(ctx, "releasing the thin metadata snapshot failed",
+		// Releasing nothing is benign; anything else is worth a record, at
+		// Info: the next reservation releases a held one and tries again
+		// (reserveMetadataSnap), so the agent clears it alone (log.md R6).
+		slog.InfoContext(ctx, "releasing the thin metadata snapshot failed",
 			slog.String("pool", sp.poolFinalName),
 			slog.String("error", err.Error()))
 	}

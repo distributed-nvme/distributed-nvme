@@ -2250,6 +2250,125 @@ gateway suite's smoke case runs the check over a fake controller node after
 its id step. No test runs the whole procedure, a real `etcdutl` restore or
 the check against a real agent.
 
+## The logs
+
+Words: each dnv program writes its **log** to stderr as JSON, one record
+per line; every record names its time, its log level, its message and the
+trace id of the call it belongs to. The **log level** is the least serious
+kind of record a program writes: `debug`, `info` or `warn`; `error`
+records are always written. At `info`, the default of every program but
+`dnvctl`, a program writes each change, each failure and each event, and
+leaves out the reads it repeats: a check round that finds nothing to do,
+and the reads of the node behind it, write nothing. One repeated read is
+written at `info` all the same: the capacity read the CSI driver's
+controller plugin makes for Kubernetes, once a minute per storage class.
+Both the plugin and the gateway write its request and its reply, and the
+reply names every disk node and controller node of the cluster, about 100
+bytes each, so at 1,000 nodes each poll writes about 100 KB to each of the
+two logs, about 140 MB a day per storage class. At `debug` a program also
+writes each read, each message of a check round and each leg probe. The
+records at `warn` and `error` are the ones an operator must look at, with
+one exception: `log level changed`, which a signal writes at `warn` so that
+every log level shows it.
+
+When: a log grows fast or a disk fills; a fault needs more detail than the
+default log level writes; or you are about to reproduce a fault for a bug
+report.
+
+Confirm:
+
+1. Look at the size of each log file, and at what fills it:
+   `jq -R -r 'fromjson? | .level' <log file> | sort | uniq -c` counts the
+   records of each log level, and
+   `jq -R -r 'fromjson? | .msg' <log file> | sort | uniq -c | sort -rn | head`
+   the records of each message. `-R` with `fromjson?` skips a line that is
+   not JSON, such as the `nohup: ignoring input` line `nohup` puts first
+   when started from a terminal, or the trace of a program that crashed;
+   without it, `jq` stops at that line.
+2. The log level a running program writes at is the `log_level` of its
+   last `log level changed` record; with none, it is the log level it
+   started with, its `--log-level`, or `info` when none was given.
+
+What dnv does alone: nothing. No program rotates, cuts or compresses its
+log, and a log level a signal set stays until the next signal or until the
+program ends.
+
+Safe steps:
+
+1. Start every program at `--log-level info`, the default, or set it with
+   the environment variable of the program: `DNV_AGENT_LOG_LEVEL`,
+   `DNV_WORKER_LOG_LEVEL`, `DNV_GATEWAY_LOG_LEVEL`, `DNV_CDC_LOG_LEVEL` or
+   `DNV_CSI_LOG_LEVEL`. `dnvctl` writes `warn` by default; with
+   `--log-level info` it also prints each call it makes to stderr.
+2. Keep the logs on a filesystem apart from the agents' local stores and
+   from etcd's data. Rotate them yourself: logrotate with `copytruncate`,
+   since a program keeps its log file open, or journald with a size cap.
+3. For more detail, send SIGUSR1 to the program's main process:
+   `kill -USR1 <pid>`. It writes a `log level changed` record at `warn`,
+   and from then on writes `debug` records. `kill -USR2 <pid>` takes it
+   back to the log level it started with, with one more such record. Under
+   systemd, signal the main process alone:
+   `kill -USR1 $(systemctl show -p MainPID --value <unit>)`. In Kubernetes,
+   the CSI plugin runs in each of the two controller copies' pods and in
+   each node's pod, and each pod is signalled on its own
+   (`kubectl -n dnv-csi get pods -o wide` lists them and their nodes).
+   Send the signal on the pod's node, as root, to the pid the container
+   runtime reports for the pod's `dnv-csi` container; on k3s:
+   `cid=$(k3s crictl ps -q --label io.kubernetes.pod.name=<pod> --label io.kubernetes.container.name=dnv-csi)`,
+   then `kill -USR1 $(k3s crictl inspect --output go-template --template '{{.info.pid}}' $cid)`.
+   A `kubectl exec <pod> -c dnv-csi -- kill -USR1 1` does not work for a
+   controller copy: the container runtime's AppArmor profile refuses the
+   signal under the copy's least rights. For a node pod, which runs
+   privileged, that way has not been checked.
+   `dnvctl`, `dnv-agent check` and `dnv-agent collect` take no signal; give
+   `dnvctl` its `--log-level` instead.
+4. Before you reproduce a fault for a bug report, send SIGUSR1 to the
+   agent, reproduce the fault, then
+   [gather the node's state](#gather-a-nodes-state-for-a-bug-report); the
+   archive then holds the agent's reads of the node. Send SIGUSR2 after.
+5. Alert on the records at `warn` and `error` but `log level changed`, for
+   example with
+   `jq -R -c 'fromjson? | select((.level == "WARN" or .level == "ERROR") and .msg != "log level changed")'`.
+   A failure a program clears alone, such as a path connect a controller
+   node refuses before it has built the volume, is an `info` record, so it
+   sets off no alert; a cdc a node plugin cannot reach or read is a `warn`
+   record, as it holds until the cdc comes back or the list is fixed.
+
+Steps that can stop the data path:
+
+- A log on the filesystem of an agent's local store: once the log fills
+  that filesystem, the agent cannot save a syncup and refuses it, a
+  failover's among them, so a failover that needs that node waits until
+  space is free. The worker logs each refusal as `syncup rejected` at
+  `error`.
+- A signal to the program's whole process group, or to every process of
+  its systemd unit, which is what `systemctl kill` does by default, also
+  reaches the commands an agent is running at that moment, such as
+  `blkdiscard` or `nvme disconnect`, and ends them, since they do not
+  catch it. The agent then sees a failed command, and its work waits for
+  the next try.
+- At `debug`, each agent writes several records per object on every check
+  round, so a long time at `debug` fills a disk fast. Go back with SIGUSR2.
+
+When to stop: the program writes no `log level changed` record after a
+signal. Check that the signal went to the main process of the right
+program, not to a shell or a wrapper, before you send another.
+
+Tested: unit tests check the log level of the records every program shares
+(the reads and the writes of the node, the messages of a check round, the
+records of etcd and of the leg probe), of the worker's skipped reactions,
+its fence and its late rounds, of the CSI driver's calls and of its records
+for a cdc it cannot reach; that every program but the agent's node check
+and gather parses `--log-level` and refuses a word other than the three;
+and that SIGUSR1 and SIGUSR2 change the log level of a running program. On the lab VMs, the dn suite's loglevel
+case restarts an agent at the default log level, checks that a check round
+writes no record of its reads or of its messages and that a request still
+writes its call and its save, and sends SIGUSR1 and SIGUSR2; the e2e suite's
+smoke case checks, by the log level of each record, that an idle primary cn
+agent and the worker write no record of their check rounds at `info`; and
+the Kubernetes suite sends SIGUSR1 and SIGUSR2 to one CSI controller copy's
+plugin from that copy's node, as above.
+
 ## Gather a node's state for a bug report
 
 Words: the **gather** is `dnv-agent collect`, a run of the agent program
@@ -2260,7 +2379,10 @@ of those apart, under one time limit, and names in the archive each one
 that did not finish.
 
 When: a node or a pool on it behaves wrongly and you want to report it,
-or to keep the node's state before you change anything.
+or to keep the node's state before you change anything. An agent at the
+default log level leaves its reads of the node out of its log; to have
+them in the archive, send it SIGUSR1 before you reproduce the fault
+([the logs](#the-logs)).
 
 Safe steps:
 
@@ -2382,8 +2504,11 @@ causes are known:
    new volume and the try ended before `mkfs` did: the kubelet's time for
    one try ran out, or the plugin restarted. The bytes `mkfs` had written
    are no filesystem blkid takes. Such a volume never held a pod's data.
-   The plugin logs one `os command` record when a command ends. For this
-   cause its log shows the device's `mkfs` ending with an error, or the
+   The plugin logs one `os command` record when a command ends, at the
+   `info` log level for a command that writes, such as `mkfs`, or that
+   fails, and at `debug` only for a read that succeeds
+   ([the logs](#the-logs)). For this cause its log shows the device's
+   `mkfs` ending with an error, or the
    plugin restarted during the `mkfs`: `kubectl -n dnv-csi get pods` counts
    a restart of the node's plugin pod.
 2. **The volume held data already.** Someone wrote to the volume before:

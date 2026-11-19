@@ -264,7 +264,7 @@ func (f *follower) dropPathLocked(
 		delete(f.dropping, name)
 		f.mu.Unlock()
 		if err != nil {
-			slog.WarnContext(dropCtx, msgFollowerSyncError,
+			slog.InfoContext(dropCtx, msgFollowerSyncError,
 				slog.String("nqn", nqn), slog.String("endpoint", key),
 				slog.String("error", err.Error()))
 			return
@@ -354,6 +354,11 @@ func (f *follower) syncLocked(ctx context.Context) (bool, error) {
 			continue
 		}
 		if err := f.host.connectDiscovery(ctx, ep); err != nil {
+			// At Warn, as is a log read that fails below: while a listed
+			// cdc does not answer, every drop is held back and a path the
+			// cdc alone lists is never learned, which lasts until the cdc
+			// comes back or the operator fixes the list, and this record,
+			// naming the cdc, is its only sign (log.md R6).
 			slog.WarnContext(ctx, msgFollowerSyncError,
 				slog.String("cdc", key), slog.String("error", err.Error()))
 			keep(err)
@@ -434,7 +439,7 @@ func (f *follower) syncLocked(ctx context.Context) (bool, error) {
 				// A cntlr the cdc lists before it has built the subsystem
 				// refuses the connect; the retry timer tries again, as
 				// does the stage's own retry until the node holds a path.
-				slog.WarnContext(ctx, msgFollowerSyncError,
+				slog.InfoContext(ctx, msgFollowerSyncError,
 					slog.String("nqn", nqn), slog.String("endpoint", key),
 					slog.String("error", err.Error()))
 				keep(err)
@@ -473,7 +478,7 @@ func (f *follower) pass(ctx context.Context) bool {
 	defer f.mu.Unlock()
 	joining, err := f.syncLocked(ctx)
 	if err != nil && ctx.Err() == nil {
-		slog.WarnContext(ctx, msgFollowerSyncError,
+		slog.InfoContext(ctx, msgFollowerSyncError,
 			slog.String("error", err.Error()))
 	}
 	return err != nil || joining
@@ -523,7 +528,7 @@ func (f *follower) run(ctx context.Context) {
 	// pass's own connects are read.
 	conn, err := openUevents()
 	if err != nil {
-		slog.WarnContext(ctx, msgFollowerSyncError,
+		slog.InfoContext(ctx, msgFollowerSyncError,
 			slog.String("error", "the kernel's event socket: open: "+err.Error()))
 		conn = nil
 	}
@@ -555,7 +560,7 @@ func (f *follower) run(ctx context.Context) {
 			f.mu.Lock()
 			if len(f.staged) == 0 {
 				if err := f.dropDiscoveryLocked(stopCtx); err != nil {
-					slog.WarnContext(stopCtx, msgFollowerSyncError,
+					slog.InfoContext(stopCtx, msgFollowerSyncError,
 						slog.String("error", err.Error()))
 				}
 			}

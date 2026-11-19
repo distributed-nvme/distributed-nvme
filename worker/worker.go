@@ -393,8 +393,9 @@ func run(
 	confCancel()
 	confWg.Wait()
 
+	// At Info: a stop-time event the worker cannot act on (log.md R6).
 	if err := cli.Close(); err != nil {
-		slog.ErrorContext(ctx, "etcd client close failed",
+		slog.InfoContext(ctx, "etcd client close failed",
 			slog.String("error", err.Error()),
 		)
 	}

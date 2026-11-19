@@ -120,8 +120,10 @@ func (w *watcher) scan(ctx context.Context, prefix string) (int64, bool) {
 		msg := &pb.CdcEntry{}
 		if err := w.deps.store.Decode(ctx, kv, msg); err != nil {
 			// The etcdutil record carries the decode error; this one says
-			// what dnv-cdc did about it (WV2).
-			slog.InfoContext(ctx, msgEntrySkipped,
+			// what dnv-cdc did about it (WV2), at Warn: the entry is gone
+			// from every host until an operator mends the record, once per
+			// scan or event (log.md R6).
+			slog.WarnContext(ctx, msgEntrySkipped,
 				slog.String("key", kv.Key),
 				slog.String("reason", skipMalformedValue),
 			)
@@ -183,7 +185,7 @@ func (w *watcher) applyEvent(ctx context.Context, event etcdutil.Event) {
 	}
 	msg, ok := event.Msg.(*pb.CdcEntry)
 	if !ok || msg == nil {
-		slog.InfoContext(ctx, msgEntrySkipped,
+		slog.WarnContext(ctx, msgEntrySkipped,
 			slog.String("key", event.Key),
 			slog.String("reason", skipMalformedValue),
 		)
@@ -203,7 +205,7 @@ func (w *watcher) applyEvent(ctx context.Context, event etcdutil.Event) {
 func (w *watcher) parseKey(ctx context.Context, key string) (entryKey, bool) {
 	cid, shard, spId, ssId, ok := model.ParseCdcEntryKey(key)
 	if !ok {
-		slog.InfoContext(ctx, msgEntrySkipped,
+		slog.WarnContext(ctx, msgEntrySkipped,
 			slog.String("key", key),
 			slog.String("reason", skipMalformedKey),
 		)

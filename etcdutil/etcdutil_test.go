@@ -473,13 +473,15 @@ func (c *logCapture) withMsg(t *testing.T, msg string) []map[string]any {
 }
 
 // captureLogs installs a capturing logger with the production handler chain
-// for the duration of the test.
+// for the duration of the test. It captures at Debug, the level of every
+// read's record (log.md, etcd), so a test sees what a daemon at
+// --log-level debug writes.
 func captureLogs(t *testing.T) *logCapture {
 	t.Helper()
 	buf := &syncBuffer{}
 	handler := &common.TraceIdHandler{
 		Handler: slog.NewJSONHandler(buf, &slog.HandlerOptions{
-			Level: slog.LevelInfo,
+			Level: slog.LevelDebug,
 		}),
 	}
 	prev := slog.Default()

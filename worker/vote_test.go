@@ -1126,6 +1126,11 @@ func fenceRecord(t *testing.T, h *voteHarness) map[string]any {
 	if len(recs) == 0 {
 		t.Fatalf("no worker fenced record")
 	}
+	// log.md R6: the control plane fencing itself is a record an operator
+	// must look at.
+	if recs[0]["level"] != "WARN" {
+		t.Fatalf("the worker fenced record is at %v, want WARN", recs[0]["level"])
+	}
 	return recs[0]
 }
 

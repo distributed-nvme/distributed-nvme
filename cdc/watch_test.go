@@ -334,6 +334,23 @@ func TestWatchScanBuildsOwnedMap(t *testing.T) {
 	if !reflect.DeepEqual(reasons, want) {
 		t.Errorf("cdc entry skipped records = %v, want %v", reasons, want)
 	}
+	// log.md R6: a malformed key or value withdraws the entry from every
+	// host until an operator mends the record, so it is at Warn; an element
+	// the entry still serves around is at Info.
+	levels := make(map[string]string)
+	for _, rec := range h.logs.find(msgEntrySkipped) {
+		levels[watchAttrString(t, rec, "key")] =
+			watchAttrString(t, rec, "level")
+	}
+	wantLevels := map[string]string{
+		badKey:        "WARN",
+		badValueKey:   "WARN",
+		mixedKey:      "INFO",
+		foreignFamKey: "INFO",
+	}
+	if !reflect.DeepEqual(levels, wantLevels) {
+		t.Errorf("cdc entry skipped levels = %v, want %v", levels, wantLevels)
+	}
 	// WV2's silence, spelled out: the unowned shard code is never reported.
 	if _, ok := reasons[foreignShardKey]; ok {
 		t.Errorf("unowned shard code %q was logged, want silence",
@@ -525,6 +542,9 @@ func TestWatchAppliesEvents(t *testing.T) {
 	if got := watchAttrString(t, skipped[0], "reason"); got != skipMalformedKey {
 		t.Errorf("cdc entry skipped reason = %q, want %q",
 			got, skipMalformedKey)
+	}
+	if got := watchAttrString(t, skipped[0], "level"); got != "WARN" {
+		t.Errorf("cdc entry skipped level = %q, want WARN (log.md R6)", got)
 	}
 	h.assertView(watchHostNqn, 3, 2)
 	if !poked(c) {

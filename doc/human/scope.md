@@ -1326,7 +1326,7 @@ steps; the section "Steps known today" below gives the longer ones.
 | Back up and restore etcd | etcd's own tools; `dnvctl cluster advance-ids` after a restore; `dnvctl cn check-restore`, which says pool by pool what the restore loses, before the agents' local files are reset | the operations doc, [Restore etcd from a backup](operations.md#restore-etcd-from-a-backup), and [a new volume refused for a thin id that holds data](operations.md#a-new-volume-refused-for-a-thin-id-that-holds-data) | procedure written; it has not run on real agents. The check does not see a pool none of whose controller nodes answers, and lists no disk node's sides. A new volume over a restored thin id that holds data is refused. |
 | Upgrade | every program at once; `--version` on each program, and the version each running program logs when it starts | this page, below | procedure to write. Rolling upgrades are not yet. A downgrade is not supported. |
 | Run while the control plane is down | nothing to do; the data plane serves | none | procedure to write |
-| Handle the logs | none; JSON on stderr, no rotation | this page, below | procedure to write |
+| Handle the logs | `--log-level` on every program; SIGUSR1 and SIGUSR2 to a running program; JSON on stderr, no rotation | [the operations doc](operations.md#the-logs) | procedure written. A paragraph on reading the logs: procedure to write. |
 | See what is wrong across the cluster | `dnvctl cluster get-status` | the operations doc, Read what is wrong | done |
 | Give hosts the cdc addresses; front the gateways | none | the tutorials, for one host | procedure to write |
 | Change the check intervals or a node's budget | none | — | not yet |
@@ -1415,10 +1415,16 @@ get-capacity` can name the budget as the limit sooner than the new default
 suggests; only emptying, deleting and creating it again gives it another
 budget ([the operations doc](operations.md#the-clusters-capacity)).
 
-**Logs.** The programs log to stderr as JSON, one record per line, at one
-level, with no level flag and no rotation. Keep the logs on a filesystem
-apart from the agents' local stores and etcd's data, and rotate them
-yourself: a disk the logs fill is one the stores and etcd cannot write.
+**Logs.** The programs log to stderr as JSON, one record per line, with no
+rotation. Each program takes `--log-level`, the log level: the least serious
+kind of record it writes, debug, info or warn. A running gateway, worker,
+cdc, agent or CSI driver writes debug records from a SIGUSR1 on and goes
+back to the log level it started with on a SIGUSR2. Keep the logs on a
+filesystem apart from the agents' local stores and etcd's data, and rotate
+them yourself: a disk the logs fill is one the stores and etcd cannot
+write, and an agent whose store cannot be written refuses every syncup, a
+failover's among them.
+[The operations doc](operations.md#the-logs) gives the steps.
 
 ### Notes on the maintenance tools
 
@@ -1616,8 +1622,9 @@ yourself: a disk the logs fill is one the stores and etcd cannot write.
 
 ## 9. What cannot be seen
 
-- **No metrics, no alerts.** The worker's log is the only alert. The logs go
-  to stderr as JSON with no rotation. The status read, `dnvctl cluster
+- **No metrics, no alerts.** The logs are the only alert: the records at the
+  warn and error log levels are the ones an operator must look at. The logs
+  go to stderr as JSON with no rotation. The status read, `dnvctl cluster
   get-status`, shows what is wrong when a person asks: error rows, health
   epochs, an auto-grow that cannot run, a full thin pool, a repair, a
   migration or a clone that waits, a lost record and a worker that seems
@@ -1634,7 +1641,7 @@ yourself: a disk the logs fill is one the stores and etcd cannot write.
   manifests add a helper container that answers Kubernetes' health checks:
   on port 9808 at the address of each controller plugin copy's own pod, and
   on port 9809 on each Kubernetes node's loopback alone. State: not yet; log
-  handling goes into the operations doc.
+  handling is in [the operations doc](operations.md#the-logs).
 - **The status read sees what etcd and the primaries hold.** The status
   read asks each pool's primary and a migration's new side, and no
   standby and no other side. A standby's or a side's own trouble shows
@@ -1914,7 +1921,13 @@ design:
 - **A retired leg taken back is copied whole unless the array stayed
   degraded.** State: accepted.
 - **Steady control-plane cost.** The reaction pass reads the whole pool
-  from etcd every interval. Every check round logs two records per object.
+  from etcd every interval. At the debug log level every check round logs
+  two records per object; at the default log level, info, a round that
+  passes logs none. The CSI driver's capacity read, once a minute per
+  storage class, is logged at info by the driver's controller plugin and by
+  the gateway, and its reply names every node of the cluster, about 100
+  bytes each: at 1,000 nodes, about 140 MB a day per storage class in each
+  of the two logs.
   On a controller node that is also a host, every read of the node also
   reads the host NQN of each controller of a connection that is not dnv's,
   one read per controller. State: accepted.

@@ -88,6 +88,7 @@ func newNodeCmd() *cobra.Command {
 		"comma-separated ip:port list of the dnv cdc endpoints the node "+
 			"follows, and no other: a cdc of every range that serves "+
 			"this cluster's volumes; read once at start (required)")
+	addLogLevelFlag(cmd)
 	flags.String("config", "", "optional viper config file")
 	return cmd
 }
@@ -111,8 +112,21 @@ func newControllerCmd() *cobra.Command {
 			"publish context at attach (required)")
 	flags.Int("gateway-timeout", int(csi.DefaultGatewayTimeout/time.Second),
 		"seconds one gateway call may take")
+	addLogLevelFlag(cmd)
 	flags.String("config", "", "optional viper config file")
 	return cmd
+}
+
+// addLogLevelFlag adds the --log-level both plugins take (log.md R6).
+func addLogLevelFlag(cmd *cobra.Command) {
+	cmd.Flags().String("log-level", common.LogLevelInfo,
+		"log level: debug, info or warn; SIGUSR1 sets debug while the "+
+			"process runs and SIGUSR2 sets this level again")
+}
+
+// logLevelFromViper reads and validates --log-level after the binding.
+func logLevelFromViper() (slog.Level, error) {
+	return common.ParseLogLevel(viper.GetString("log-level"))
 }
 
 // bindViper wires flags, config file and environment together as every dnv
@@ -260,8 +274,9 @@ func runNode(cmd *cobra.Command, args []string) error {
 	return runPlugin(cmd, nodeOptionsFromViper, csi.RunNode)
 }
 
-// runPlugin is the startup path both subcommands share: bind, validate,
-// mint the startup trace id, arm the signal handling and hand off.
+// runPlugin is the startup path both subcommands share: bind, validate, set
+// the --log-level (log.md R6), mint the startup trace id, arm the log
+// level's signals (log.md R13) and the stop signals, and hand off.
 func runPlugin(
 	cmd *cobra.Command,
 	options func() (csi.Config, error),
@@ -274,7 +289,17 @@ func runPlugin(
 	if err != nil {
 		return err
 	}
+	level, err := logLevelFromViper()
+	if err != nil {
+		return err
+	}
+	common.SetLogLevel(level)
 	ctx := common.WithTraceId(context.Background(), common.NewTraceId())
+	// log.md R13: SIGUSR1 sets Debug, SIGUSR2 the level the plugin started
+	// with, until the plugin ends; the watch has the startup ctx, which no
+	// stop signal cancels, so it lasts through the drain.
+	stopLogLevel := common.WatchLogLevel(ctx, level)
+	defer stopLogLevel()
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 	// Capacity 2: the first signal starts the drain, the second aborts it.
@@ -312,7 +337,7 @@ func watchSignals(
 	if !ok {
 		return
 	}
-	slog.WarnContext(ctx, "second signal, exiting without a clean drain",
+	slog.InfoContext(ctx, "second signal, exiting without a clean drain",
 		slog.String("signal", second.String()),
 	)
 	exit(1)

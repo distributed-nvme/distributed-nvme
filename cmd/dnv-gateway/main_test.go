@@ -41,6 +41,7 @@ var cm2Flags = []string{
 	"etcd-endpoints",
 	"grpc-address",
 	"grpc-network",
+	"log-level",
 	"version",
 }
 

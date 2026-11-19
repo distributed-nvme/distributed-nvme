@@ -232,10 +232,14 @@ dnvctl binds only its env-backed global flags that way, in `ctl/`
 (`dnvctl.md` CT9). Every root command, dnvctl's included, takes
 `--version`, declared on the root alone, never inherited, with its version
 read from `common.BuildVersion` (`architecture.md`, Components: invocation
-reference). Specifics:
+reference). Every daemon parses its `--log-level` with
+`common.ParseLogLevel`, sets it with `SetLogLevel` before its first record
+and watches SIGUSR1 and SIGUSR2 with `common.WatchLogLevel` until it ends
+(`log.md` R6, R13). Specifics:
 
 * `cmd/dnvctl/main.go` sets the log level to Warn with `SetLogLevel` as its
-  first statement (`log.md` R6), then hands off to `ctl.Execute`.
+  first statement (`log.md` R6), then hands off to `ctl.Execute`, whose
+  root sets the `--log-level` (`dnvctl.md` CT7).
 * `cmd/dnv-agent/main.go` is a cobra root command with the `dn`, `cn`,
   `check` and `collect` subcommands (`dnagent.md` CM1), dispatching to
   `agent/dnagent`, `agent/cnagent` or `agent/nodecheck`; the node check and

@@ -5,10 +5,11 @@
 // the vote worker (VW1 to VW11) and everything below it.
 //
 // main itself is deliberately thin (layout.md, `cmd/` wiring): it never
-// touches etcd, it logs nothing but the CM3 warning and the two CM5 signal
-// records, and the "worker starting" / "worker stopping" records of
-// dnv-worker.md, Log records, are emitted by worker.Run, which is why the
-// endpoints travel to it in worker.Config (CM6).
+// touches etcd, it logs nothing but the CM3 warning, the two CM5 signal
+// records and the log level changes of log.md R13, and the "worker
+// starting" / "worker stopping" records of dnv-worker.md, Log records, are
+// emitted by worker.Run, which is why the endpoints travel to it in
+// worker.Config (CM6).
 package main
 
 import (
@@ -102,6 +103,9 @@ func addFlags(cmd *cobra.Command) {
 			"more than the vote interval plus the etcd operation timeout")
 	flags.Int("etcd-dial-timeout", common.DefaultEtcdDialTimeout,
 		"seconds to wait for the initial etcd dial (0 = the built-in default)")
+	flags.String("log-level", common.LogLevelInfo,
+		"log level: debug, info or warn; SIGUSR1 sets debug while the "+
+			"process runs and SIGUSR2 sets this level again")
 	flags.String("config", "", "optional viper config file")
 }
 
@@ -142,6 +146,9 @@ type options struct {
 	// value is passed through: etcdutil.New substitutes
 	// common.DefaultEtcdDialTimeout for it.
 	dialTimeout time.Duration
+	// logLevel is the parsed --log-level, set before the first record
+	// (log.md R6).
+	logLevel slog.Level
 	// graceTooShort records the CM3 SHOULD that was not met — a grace window
 	// no longer than the dead threshold (2 x the vote interval) is legal but
 	// pointless. The caller logs a warning; it is never a rejection.
@@ -157,6 +164,10 @@ func optionsFromViper() (*options, error) {
 		return nil, errors.New("missing required flag: --etcd-endpoints")
 	}
 	roles, err := parseRoles(viper.GetString("roles"))
+	if err != nil {
+		return nil, err
+	}
+	logLevel, err := common.ParseLogLevel(viper.GetString("log-level"))
 	if err != nil {
 		return nil, err
 	}
@@ -189,6 +200,7 @@ func optionsFromViper() (*options, error) {
 		leaveGraceTime: time.Duration(leaveGraceTime) * time.Second,
 		dialTimeout: time.Duration(viper.GetInt("etcd-dial-timeout")) *
 			time.Second,
+		logLevel:      logLevel,
 		graceTooShort: graceTime <= 2*voteInterval,
 	}, nil
 }
@@ -242,7 +254,8 @@ func isWorkerRole(role string) bool {
 
 // run is the CM4 startup path. The default JSON logger is already installed
 // by common's init (log.md R3), so the only work here is: bind, validate,
-// mint the startup trace id, arm the CM5 signal handling, build the etcd
+// set the --log-level (log.md R6), mint the startup trace id, arm the log
+// level's signals (log.md R13) and the CM5 signal handling, build the etcd
 // client and hand off to worker.Run.
 //
 // Startup never fails because etcd is unreachable: etcdutil.New dials lazily
@@ -257,10 +270,16 @@ func run(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return err
 	}
+	common.SetLogLevel(opts.logLevel)
 
 	// The startup trace id; every unit of work below, and every part of an
 	// incarnation that outlives one, mints its own from the seed (RW10).
 	ctx := common.WithTraceId(context.Background(), common.NewTraceId())
+	// log.md R13: SIGUSR1 sets Debug, SIGUSR2 the level the process started
+	// with, until the process ends; the watch has the startup ctx, which no
+	// stop signal cancels, so it lasts through the drain.
+	stopLogLevel := common.WatchLogLevel(ctx, opts.logLevel)
+	defer stopLogLevel()
 	if opts.graceTooShort {
 		slog.WarnContext(ctx, "grace time does not exceed the dead threshold",
 			slog.Float64("vote_interval", opts.voteInterval.Seconds()),
@@ -286,7 +305,7 @@ func run(cmd *cobra.Command, args []string) error {
 	}
 	// worker.Run closes the client as the last step of its CM5 drain, so it
 	// is deliberately not closed here.
-	return worker.Run(ctx, cli, worker.Config{
+	return runWorker(ctx, cli, worker.Config{
 		Roles:          opts.roles,
 		VoteInterval:   opts.voteInterval,
 		GraceTime:      opts.graceTime,
@@ -294,6 +313,10 @@ func run(cmd *cobra.Command, args []string) error {
 		Endpoints:      opts.endpoints,
 	})
 }
+
+// runWorker is worker.Run, the hand-off; a seam, so a test of the startup
+// path can see what run set before the hand-off and while it runs.
+var runWorker = worker.Run
 
 // watchSignals implements CM5: the first SIGINT/SIGTERM cancels ctx, which
 // starts worker.Run's ordered drain (stop the heartbeat, tell every shard
@@ -326,7 +349,7 @@ func watchSignals(
 	if !ok {
 		return
 	}
-	slog.WarnContext(ctx, "second signal, exiting without a clean drain",
+	slog.InfoContext(ctx, "second signal, exiting without a clean drain",
 		slog.String("signal", second.String()),
 	)
 	exit(1)

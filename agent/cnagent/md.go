@@ -2111,15 +2111,16 @@ func (s *CnAgentServer) reassemblePass(
 	if err != nil {
 		return nil, err
 	}
-	slog.WarnContext(ctx, msgReassembly, append(s.cntlrIdAttrs(plan),
+	slog.InfoContext(ctx, msgReassembly, append(s.cntlrIdAttrs(plan),
 		slog.Uint64("grp_id", gp.grpId),
 		slog.String("stopped", detail.Dev),
 		slog.String("started", found.Dev))...)
 	return found, nil
 }
 
-// msgReassembly is the Warn record of CN12's re-assembly, made once the
-// array it assembled again is there: it names the group, the broken
+// msgReassembly is the Info record of CN12's re-assembly, made once the
+// array it assembled again is there, at Info since the agent mended the
+// group alone (log.md R6): it names the group, the broken
 // array's node it stopped and the node the assembly started.
 const msgReassembly = "broken array assembled again"
 

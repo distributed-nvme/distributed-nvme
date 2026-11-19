@@ -118,7 +118,7 @@ func Run(ctx context.Context, cli *etcdutil.Client, cfg Config) error {
 		// whole lifetime, and the last handler has returned by the time
 		// GracefulStop lets Serve return.
 		if err := cli.Close(); err != nil {
-			slog.WarnContext(ctx, "etcd client close failed",
+			slog.InfoContext(ctx, "etcd client close failed",
 				slog.String("error", err.Error()))
 		}
 		slog.InfoContext(ctx, msgGatewayStopping)

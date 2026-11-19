@@ -267,7 +267,7 @@ func (n *node) forgetFailedStage(ctx context.Context, staging string, nqn string
 		return
 	}
 	if uerr := n.follow.unstage(ctx, nqn); uerr != nil {
-		slog.WarnContext(ctx, msgFollowerSyncError,
+		slog.InfoContext(ctx, msgFollowerSyncError,
 			slog.String("nqn", nqn), slog.String("error", uerr.Error()))
 	}
 }

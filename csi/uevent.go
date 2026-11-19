@@ -109,7 +109,7 @@ func listenUevents(
 		}
 	}
 	warn := func(what string, err error) {
-		slog.WarnContext(ctx, msgFollowerSyncError,
+		slog.InfoContext(ctx, msgFollowerSyncError,
 			slog.String("error", "the kernel's event socket: "+what+": "+err.Error()))
 	}
 	buf := make([]byte, ueventBufBytes)

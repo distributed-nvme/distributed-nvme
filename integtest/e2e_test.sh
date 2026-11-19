@@ -4294,7 +4294,7 @@ dn_up() {
 			--tr-type tcp --adr-fam ipv4 \
 			--tr-addr "$ip" --tr-svc-id "$svcid" \
 			--nvmet-port-id "$portid" \
-			--local-store "$store" --disk "$dev" \
+			--local-store "$store" --disk "$dev" --log-level debug \
 			>>"$log" 2>&1 </dev/null &
 		pid=$!
 		sleep 0.5
@@ -5113,7 +5113,7 @@ cn_up() { # <dir> <store> <log> <ip> <grpc_port> <trsvcid> <capacity>
 			--grpc-network tcp --grpc-address "$ip:$gport" \
 			--tr-type tcp --adr-fam ipv4 \
 			--tr-addr "$ip" --tr-svc-id "$svcid" \
-			--local-store "$store" --capacity "$cap" \
+			--local-store "$store" --capacity "$cap" --log-level debug \
 			>>"$log" 2>&1 </dev/null &
 		pid=$!
 		sleep 0.5
@@ -6840,7 +6840,8 @@ start_gateway() {
 	remote_start "$CP" gateway gateway.log \
 		"$WORK/bin/dnv-gateway --grpc-network tcp" \
 		"--grpc-address $CP_IP:$GW_PORT" \
-		"--etcd-endpoints 127.0.0.1:$ETCD_CLIENT_PORT"
+		"--etcd-endpoints 127.0.0.1:$ETCD_CLIENT_PORT" \
+		"--log-level debug"
 }
 
 # One worker with all three role loops. --vote-interval, --vote-grace-time
@@ -6852,7 +6853,8 @@ start_worker() {
 		"$WORK/bin/dnv-worker --etcd-endpoints 127.0.0.1:$ETCD_CLIENT_PORT" \
 		"--roles ${WORKER_ROLES// /,}" \
 		"--vote-interval $VOTE_INTERVAL --vote-grace-time $VOTE_GRACE" \
-		"--vote-leave-grace-time $VOTE_LEAVE_GRACE"
+		"--vote-leave-grace-time $VOTE_LEAVE_GRACE" \
+		"--log-level debug"
 }
 
 # One cdc, serving every shard: --range is left at its default
@@ -6863,7 +6865,8 @@ start_worker() {
 start_cdc() {
 	remote_start "$CP" cdc cdc.log \
 		"$WORK/bin/dnv-cdc --etcd-endpoints 127.0.0.1:$ETCD_CLIENT_PORT" \
-		"--tr-type tcp --adr-fam ipv4 --tr-addr $CP_IP --tr-svc-id $CDC_PORT"
+		"--tr-type tcp --adr-fam ipv4 --tr-addr $CP_IP --tr-svc-id $CDC_PORT" \
+		"--log-level debug"
 }
 
 # cp_port_up is the readiness predicate the launches need between them. It
@@ -11647,6 +11650,70 @@ case_finish() {
 	case_dn_counts
 }
 
+# --- the default log level (e2e_integtest.md, The cases, smoke) -------------
+#
+# Every program of the suite runs at --log-level debug, and every record
+# carries its level, so one idle window shows what the default level, info,
+# would keep without a run at it (log.md R6, R9): on the primary's cn agent
+# and on the worker, the records of a check round's messages, of a read, of
+# a command, of a dial and of the leg probe are all at DEBUG, so at info an
+# idle round logs none of them.
+
+# levels_above_debug <lines> <regex> — "<count> <msg> <level>" for each
+# record of <lines> above DEBUG whose msg matches <regex>; `fromjson?` drops
+# a line torn by a write still in progress.
+levels_above_debug() {
+	printf '%s\n' "$1" | "$JQ" -R -r --arg re "$2" '
+	    fromjson? // empty | objects
+	    | select(.level != "DEBUG" and (.msg | test($re)))
+	    | .msg + " " + .level' | sort | uniq -c
+}
+
+# debug_count <lines> <msg> — how many records of <lines> named <msg> are at
+# DEBUG.
+debug_count() {
+	printf '%s\n' "$1" | "$JQ" -R -r --arg m "$2" '
+	    fromjson? // empty | objects
+	    | select(.level == "DEBUG" and .msg == $m) | .msg' | grep -c . || true
+}
+
+case_smoke_log_levels() {
+	stage 02 "the default log level: an idle window logs no round message, read or command above debug on the primary's cn agent and the worker"
+	local window=10 cn_mark w_mark cn_lines w_lines bad bytes kept
+	cn_mark=$(ssh_cn "$PRIMARY_CN" "wc -l < $(cn_log)") ||
+		die "cannot count the lines of cn$PRIMARY_CN's agent log"
+	case "$cn_mark" in
+	'' | *[!0-9]*) die "cn$PRIMARY_CN's agent log line count read '$cn_mark'" ;;
+	esac
+	w_mark=$(worker_log_mark)
+	# Five check intervals of every object at the default interval
+	# (common.DefaultHealthCheckInterval), and two leg probes.
+	sleep "$window"
+	cn_lines=$(ssh_cn "$PRIMARY_CN" "tail -n +$((cn_mark + 1)) $(cn_log)") ||
+		die "cannot read cn$PRIMARY_CN's agent log"
+	w_lines=$(ssh_cp "tail -n +$((w_mark + 1)) $WORK/worker/worker.log") ||
+		die "cannot read the worker's log"
+
+	bad=$(levels_above_debug "$cn_lines" \
+		'^(grpc server (recv|send)|os read |os command$|os dial$|probe )')
+	[ -z "$bad" ] || die "cn$PRIMARY_CN logged above debug in an idle window:"$'\n'"$bad"
+	[ "$(debug_count "$cn_lines" "grpc server recv")" -gt 0 ] ||
+		die "cn$PRIMARY_CN logged no round message at debug in ${window}s"
+	bad=$(levels_above_debug "$w_lines" \
+		'^(grpc client (send|recv)|etcd (get|range|watch event))$')
+	[ -z "$bad" ] || die "the worker logged above debug in an idle window:"$'\n'"$bad"
+	[ "$(debug_count "$w_lines" "grpc client send")" -gt 0 ] ||
+		die "the worker logged no round message at debug in ${window}s"
+
+	# What the default level would keep of the window, logged, not asserted.
+	bytes=$(printf '%s\n' "$cn_lines" | wc -c)
+	kept=$({ grep -vF '"level":"DEBUG"' <<<"$cn_lines" || true; } | wc -c)
+	log "  cn$PRIMARY_CN: ${window}s idle, $bytes bytes at debug, $kept above debug"
+	bytes=$(printf '%s\n' "$w_lines" | wc -c)
+	kept=$({ grep -vF '"level":"DEBUG"' <<<"$w_lines" || true; } | wc -c)
+	log "  the worker: ${window}s idle, $bytes bytes at debug, $kept above debug"
+}
+
 # ---------------------------------------------------------------------------
 # Case: smoke (e2e_integtest.md, The cases, smoke)
 # ---------------------------------------------------------------------------
@@ -11684,6 +11751,7 @@ case_smoke() {
 		"retired legs (no repair has finished)"
 	assert_field "$SP_JSON" '.sp_conf.sp_level' SP_LEVEL_READWRITE "sp_level"
 	check_sha0 "before the teardown"
+	case_smoke_log_levels
 	case_finish
 }
 
@@ -14502,7 +14570,10 @@ copy_member_in_sync() { # <dm name>
 
 # copy_drop_quiet is true when the primary's cn agent runs no `os command`
 # under a trace id it minted itself for a window of a few seconds: no
-# converge of its own has then run, as none should (cnagent.md, CN10). The
+# converge of its own has then run, as none should (cnagent.md, CN10). It
+# rests on the agent's --log-level debug, the suite's, at which every command
+# a converge runs is logged, its reads too; at the default level a converge
+# that changed nothing would log none (log.md R9). The
 # agent mints such an id as
 # common.NewTraceId's bare hex output, where the worker's ids carry its
 # seed's prefix and a dash (dnv-worker.md, RW10) and the case's own is

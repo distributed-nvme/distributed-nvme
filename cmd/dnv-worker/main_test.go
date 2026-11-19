@@ -35,6 +35,7 @@ var cm1Flags = []string{
 	"config",
 	"etcd-dial-timeout",
 	"etcd-endpoints",
+	"log-level",
 	"roles",
 	"version",
 	"vote-grace-time",

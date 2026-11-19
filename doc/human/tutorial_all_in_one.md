@@ -44,7 +44,14 @@ The logs share the working directory with the agents' stores, the `store-`
 directories in which each agent keeps the desired state it last accepted,
 and with etcd's data, which fits a tutorial. In a deployment the logs go on
 a filesystem of their own and are rotated, since dnv rotates nothing and a
-disk the logs fill is one the stores and etcd cannot write.
+disk the logs fill is one the stores and etcd cannot write
+([the operations doc](operations.md#the-logs)). Every program but `dnvctl`
+writes at the `info` log level, the least serious kind of record it writes,
+unless its `--log-level` says `debug` or `warn`. To see the agents' reads of
+the node while they run, send them SIGUSR1 with
+`sudo pkill -USR1 -x dnv-agent`, which signals the five agent processes and
+not the `sudo` that started each, and `sudo pkill -USR2 -x dnv-agent` to go
+back.
 
 The fixed names and identities:
 

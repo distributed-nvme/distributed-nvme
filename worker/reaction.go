@@ -184,6 +184,41 @@ const (
 	reasonGrpHasRepair = model.ReasonGrpHasRepair
 )
 
+// warnSkipReasons are the reasons of a skip record (`reaction skipped`, and
+// a pass step's, such as `repair stage skipped`) that hold until an operator
+// acts, so the record is at Warn (log.md R6; dnv-worker.md, Log records): no
+// failover can happen (no candidate, and AR5's three refusals); nothing is
+// left to allocate, or the pool cannot grow (the meta ladder's and the group
+// list's ceilings, a CN budget too short, no id left); a group with no copy
+// (redund_none) or with no other healthy leg (no_healthy_leg) has a bad leg;
+// a repair holds its finish while every retired leg of its group carries
+// keep; the primary refuses a take-back's leg. Every other reason is at
+// Info: a wait the worker ends alone, a hold an operator set, a transient
+// failure. The skip repeats each pass while the reason holds, at the same
+// level.
+var warnSkipReasons = map[string]bool{
+	reasonNoCandidate:           true,
+	reasonSharedState:           true,
+	reasonSameError:             true,
+	reasonCandidateRefuses:      true,
+	reasonNoHealthyLeg:          true,
+	reasonRedundNone:            true,
+	reasonMetaLadderCap:         true,
+	reasonGrpListFull:           true,
+	model.ReasonCnBudgetShort:   true,
+	model.ReasonNoIdLeft:        true,
+	model.ReasonRetiredLegsKept: true,
+	reasonTakeBackRefused:       true,
+}
+
+// skipLevel is the level of a skip record with reason (warnSkipReasons).
+func skipLevel(reason string) slog.Level {
+	if warnSkipReasons[reason] {
+		return slog.LevelWarn
+	}
+	return slog.LevelInfo
+}
+
 // The "trigger" attribute of a try-to-abort's `reaction applied` record
 // (AR8): which of the three tests on a CREATED worker's repair asked for the
 // abort (abortTrigger).
@@ -4635,7 +4670,7 @@ func (w *spWorker) stepSkipped(
 	for _, id := range ids {
 		attrs = append(attrs, id)
 	}
-	slog.InfoContext(ctx, msg, attrs...)
+	slog.Log(ctx, skipLevel(reason), msg, attrs...)
 }
 
 // repairStageSkipped is stepSkipped for a stage move.
@@ -4797,7 +4832,8 @@ func (w *spWorker) reactionApplied(
 }
 
 // reactionSkipped logs the `reaction skipped` record (dnv-worker.md, Log
-// records): the reaction was applicable but did not run.
+// records): the reaction was applicable but did not run. Its level is the
+// reason's (skipLevel).
 func (w *spWorker) reactionSkipped(
 	ctx context.Context,
 	kind string,
@@ -4813,7 +4849,7 @@ func (w *spWorker) reactionSkipped(
 	for _, id := range ids {
 		attrs = append(attrs, id)
 	}
-	slog.InfoContext(ctx, msgReactionSkipped, attrs...)
+	slog.Log(ctx, skipLevel(reason), msgReactionSkipped, attrs...)
 }
 
 // reactionFailed turns one op error into a `reaction skipped` record (AR2): a

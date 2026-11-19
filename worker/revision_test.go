@@ -1823,6 +1823,18 @@ func TestObservationAgeBound(t *testing.T) {
 				t.Fatalf("%d late observation records, want late %t",
 					len(late), c.late)
 			}
+			// log.md R6: a round that passed is a read of its node, at
+			// Debug; a stale one, which fails the round, at Info.
+			if len(late) == 1 {
+				want := "DEBUG"
+				if c.stale {
+					want = "INFO"
+				}
+				if late[0]["level"] != want {
+					t.Fatalf("the late observation record is at %v, want %s",
+						late[0]["level"], want)
+				}
+			}
 			failed := h.logs.withMsg("check round failed")
 			if c.stale != (len(failed) == 1) || len(failed) > 1 {
 				t.Fatalf("%d failed rounds, want stale %t", len(failed),

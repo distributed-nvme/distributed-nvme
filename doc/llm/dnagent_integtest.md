@@ -20,10 +20,10 @@ store_full's full local store and blocksize's disks of another block size,
 and a leftover reply is no exception, being an accepted request with residue
 (`dnagent.md` SH9, DN19).
 The cases run in a fixed order, fail-fast — smoke, zeroing, sides, migr_full,
-migr_bitmap, teardown, restart, store_full, blocksize — each that builds a
-pool under storage-pool ids of its own, and each ends with neither node
-holding anything of its pool; blocksize builds none, and ends with nothing
-of its own left on its node.
+migr_bitmap, teardown, restart, loglevel, store_full, blocksize — each that
+builds a pool under storage-pool ids of its own, and each ends with neither
+node holding anything of its pool; loglevel and blocksize build none, and
+blocksize ends with nothing of its own left on its node.
 
 Beside the suite, the Go tests of `agent/dnagent` run a real dn agent inside
 the test process, behind the real server interceptors over an in-memory gRPC
@@ -191,6 +191,10 @@ their progress in. The info-read commands are plain memory reads.
   after its drops, and store_full sends one plain round right after a
   refused request, which answers from the observation the agent held before
   it.
+* **Log level.** Every agent of the suite runs at `--log-level debug`, the
+  blocksize case's too, so its log holds its reads, which the cases read
+  (`log.md` R6, R9), but in the loglevel case, the one case at the default
+  log level.
 * **Observed, never asserted.** The provisioning and read-through windows are
   races a loop device usually wins; the cutover window lasts `SuspendSeconds`
   and is sampled once right after the cutover reply, which a slow step can
@@ -363,6 +367,17 @@ times and trace id and so differ by nature; the chunk is still applied (SH21);
 unchanged re-sends leave the new log free of any mutating command or block or
 configfs write (SH16, SH17, DN5, DN9); and a revision below the one those
 re-sends stored is refused as stale in a normal reply (SH8, SH9, DN4).
+
+**loglevel** proves at the default level what a log holds (`log.md` R6, R9,
+R13; `grpc.md` L6): one node's agent restarts with no `--log-level`; a fresh
+round that changes nothing logs, under its trace id, no record but its
+stream's open and close — none of its messages and none of the reads it
+starts; a disk node request still logs its call and its save to the local
+store at Info, and no Debug record; SIGUSR1 to the agent's process logs one
+`log level changed` record naming debug and info, after which a fresh round
+logs its messages and its reads at Debug; SIGUSR2 logs one naming info and
+debug, after which a round is quiet again. The agent then restarts at
+`--log-level debug` for the cases after it. The other node takes no part.
 
 **store_full** proves on a real local store that a request whose save fails is
 refused, that the node's store row reads the refusal until a probe holds, and

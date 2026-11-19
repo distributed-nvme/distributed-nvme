@@ -1165,7 +1165,9 @@ func (w *revWorker) logSyncupResult(
 // interval behind. The record names whether the round is stale, no_obs when
 // the reply has no observation, the age judged when the reply carries an
 // answer time, the interval, the observation's trace id and, while a
-// converge of the object runs, how long it has run.
+// converge of the object runs, how long it has run. A round that is not
+// stale passed: its record is a read of the node, at Debug, as the round's
+// messages are; a stale one fails the round and is at Info (log.md R6).
 func (w *revWorker) logLateObservation(
 	ctx context.Context,
 	reply *replyState,
@@ -1174,6 +1176,13 @@ func (w *revWorker) logLateObservation(
 	age time.Duration,
 	known bool,
 ) {
+	level := slog.LevelInfo
+	if !stale {
+		level = slog.LevelDebug
+	}
+	if !common.LogEnabled(ctx, level) {
+		return
+	}
 	attrs := append(w.idAttrs(), slog.Bool("stale", stale))
 	if reply.obsTime.IsZero() {
 		attrs = append(attrs, slog.Bool("no_obs", true))
@@ -1189,7 +1198,7 @@ func (w *revWorker) logLateObservation(
 		attrs = append(attrs, slog.Int64("converge_ms",
 			reply.answerTime.Sub(reply.convergeStart).Milliseconds()))
 	}
-	slog.InfoContext(ctx, msgLateObservation, attrs...)
+	slog.Log(ctx, level, msgLateObservation, attrs...)
 }
 
 // logSyncupRejected emits the "syncup rejected" record (RW5; dnv-worker.md, Log

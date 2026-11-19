@@ -115,12 +115,15 @@ func (c *logCapture) onlyMsg(t *testing.T, msg string) map[string]any {
 
 // captureLogs installs a capturing logger as the process default for the
 // duration of the test, using the production handler chain (log.md R2) so the
-// trace id lands on the record exactly as it does in the agent.
+// trace id lands on the record exactly as it does in the agent. It captures
+// at Debug, the level of a probe half that succeeded (log.md, OS commands
+// and file IO).
 func captureLogs(t *testing.T) *logCapture {
 	t.Helper()
 	capture := &logCapture{}
 	logger := slog.New(&common.TraceIdHandler{
-		Handler: slog.NewJSONHandler(capture, nil),
+		Handler: slog.NewJSONHandler(capture,
+			&slog.HandlerOptions{Level: slog.LevelDebug}),
 	})
 	prev := slog.Default()
 	slog.SetDefault(logger)
@@ -626,6 +629,55 @@ func TestWedgedProbeDoesNotBlockAConverge(t *testing.T) {
 	<-probeDone
 	if _, completed, _ := prober.snapshot(); !completed {
 		t.Fatalf("the released probe never completed")
+	}
+}
+
+// TestDirectProbeIoLevels pins the level of CN11's records: a half that
+// succeeded is a read of the leg's health, at DEBUG, since it runs every
+// probe interval on every leg; a half that failed is at INFO with its error.
+func TestDirectProbeIoLevels(t *testing.T) {
+	capture := captureLogs(t)
+	dir := t.TempDir()
+	path := filepath.Join(dir, "leg-wrapper")
+	if err := os.WriteFile(path, make([]byte, common.LegHealthBlockSize),
+		0o600); err != nil {
+		t.Fatalf("stage the device stand-in: %v", err)
+	}
+	ctx := context.Background()
+	var io LegProbeIO = directLegProbeIO{}
+	if err := io.Write(ctx, path, 0, healthBlockPayload(testCn, 1)); err != nil {
+		t.Fatalf("write the health block: %v", err)
+	}
+	if rec := capture.onlyMsg(t, "probe write block"); rec["level"] != "DEBUG" {
+		t.Errorf("a write that succeeded is at %v, want DEBUG", rec["level"])
+	}
+	missing := filepath.Join(dir, "no-such-device")
+	if _, err := io.ReadDirect(ctx, missing, 0,
+		common.LegHealthBlockSize); err == nil {
+		t.Fatal("reading a missing device succeeded")
+	}
+	if rec := capture.onlyMsg(t, "probe read block direct"); rec["level"] != "INFO" {
+		t.Errorf("a read that failed is at %v, want INFO", rec["level"])
+	}
+	if err := io.Write(ctx, filepath.Join(missing, "x"), 0,
+		healthBlockPayload(testCn, 1)); err == nil {
+		t.Fatal("writing under a missing directory succeeded")
+	}
+	writes := capture.msgRecords(t, "probe write block")
+	if len(writes) != 2 || writes[1]["level"] != "INFO" ||
+		writes[1]["error"] == nil {
+		t.Errorf("the write records %v, want the failed one at INFO with "+
+			"its error", writes)
+	}
+	// O_DIRECT is not supported on every filesystem a test may run on, so
+	// the read that succeeds is judged only where it does.
+	if _, err := io.ReadDirect(ctx, path, 0,
+		common.LegHealthBlockSize); err == nil {
+		reads := capture.msgRecords(t, "probe read block direct")
+		if len(reads) != 2 || reads[1]["level"] != "DEBUG" {
+			t.Errorf("the read records %v, want the one that succeeded at "+
+				"DEBUG", reads)
+		}
 	}
 }
 

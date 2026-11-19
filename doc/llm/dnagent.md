@@ -13,8 +13,8 @@ with the migration source and destination roles and the fence, bitmap
 pushes, the info and check handlers, and probing. `cnagent.md` adds the cn
 role to the same mechanism and command and does not restate them. This
 document leans on `log.md`, `osclient.md` and `grpc.md` for the rules it
-builds on (one Info record per operation, `OsClient`-only OS access, trace-id
-propagation and the four shared interceptors), on `schema.proto` for the
+builds on (one record per operation at its log level, `OsClient`-only OS access,
+trace-id propagation and the four shared interceptors), on `schema.proto` for the
 service and its messages, and on `architecture.md` for the disk-node device
 stack, the names, the agent local-store paths, the common agent rules, the
 migration procedure, the levels, the cntlid slots and the decisions [D4],
@@ -1630,7 +1630,8 @@ queue cap the agent writes on each subsystem before it links it to the port
 (SH32; `NvmetQidMax` by default, 0 writes none, and a value outside 0 to
 `NvmetQidMaxLimit` is refused, CM3); `--local-store`, the
 `localStorPrefix` of `common.NewNameFmt` (`DefaultLocalStorPrefix` by
-default; the directory must exist before the agent starts, SH3); and
+default; the directory must exist before the agent starts, SH3);
+`--log-level`, one of the three words of `log.md` R6, `info` by default; and
 `--config`, an optional viper config file. The dn alone takes `--disk`, the
 raw block device that carries the dnv disk format ([D13]; `diskmeta.go`),
 required. The cn alone takes `--capacity` (`cnagent.md`, `cmd/dnv-agent cn`).
@@ -1654,15 +1655,17 @@ automatic environment reads, and when `--config` is set read that config
 file. All value reads go through viper (so file and environment win per
 viper precedence).
 
-Four checks run **after** that resolution rather than through cobra's own
+Five checks run **after** that resolution rather than through cobra's own
 flag machinery, so that a config file or an environment variable is subject
 to the same rule as a flag: `requireValues` over `requiredCommon` (the
 values both roles must have, plus `--disk` for dn), the `--nvmet-port-id`
 floor (`nvmetPortIdFromViper`), the `--nvmet-qid-max` range
-(`nvmetQidMaxFromViper`) and, for the cn, a `--capacity` from the flag, the
+(`nvmetQidMaxFromViper`), for the cn a `--capacity` from the flag, the
 environment or a config file's string that is a plain unsigned decimal
 number that fits 64 bits: digits alone, with no leading zero but in "0"
-itself (`capacityFromViper`). A port id below one makes the subcommand's
+itself (`capacityFromViper`), and the `--log-level` word
+(`common.ParseLogLevel`, `log.md` R6). A port id below one makes the
+subcommand's
 `RunE` return an error naming the floor and the value it got, a queue cap
 outside 0 to `NvmetQidMaxLimit` one naming the range and the value as it was
 given, and a capacity from those three sources that is not such a number, as
@@ -1696,7 +1699,10 @@ dashes replaced by underscores.
 CM4. The `RunE` of `dn` and of `cn`: bind viper, then run CM3's checks —
 `requireValues`, then the `--nvmet-port-id` floor and the `--nvmet-qid-max`
 range, and for the cn the `--capacity` number, whose resolved values are
-carried on to the constructor; a ctx the first SIGINT or SIGTERM cancels,
+carried on to the constructor, then the `--log-level` word; set that level,
+and watch SIGUSR1 and SIGUSR2 until the agent ends, under a trace id of the
+watch's own, as the role's startup id is minted inside `agent.Serve`
+(`log.md` R13); a ctx the first SIGINT or SIGTERM cancels,
 which starts `Serve`'s bounded stop (Bootstrap and lifecycle), while a
 second one ends the process at once with exit status 1, as every other dnv
 daemon's second signal does (`signalContext`, `watchSignals`), skipping
@@ -1716,8 +1722,7 @@ func that calls `pb.RegisterDiskNodeAgentServer` (resp.
 waiter — the dn passes its `WaitBackground`, the cn passes nil (its probers
 are cancelled, never joined, and neither its sweep's background
 `nvme disconnect` nor its background reads are joined — SH27). Transport is
-plaintext (`grpc.md`, Wiring); log level stays the default Info (`log.md`
-R6 — the agent calls nothing). No flag is marked required through cobra:
+plaintext (`grpc.md`, Wiring). No flag is marked required through cobra:
 "required" is checked after the viper binding, so a config file or env var
 satisfies it too (CM2, CM3).
 
@@ -1739,8 +1744,9 @@ kernel series, the mdadm version, a dnv udev rule's text, a cn's
 check could not read, whose detail starts "not read" and whose fix line
 says how to read it by hand or what to do first. Each takes its role's
 flags, bound through `bindViper` as the role binds them, so the agent's
-own config file serves its check; it runs no `requireValues` and needs no
-cluster value; `check dn` reads the one disk `--disk` names. It prints
+own config file and command line serve its check; it runs no
+`requireValues`, reads no `--log-level` and needs no cluster value;
+`check dn` reads the one disk `--disk` names. It prints
 text, or with `--output json` one JSON report for the suites. It exits
 `nodecheck.ExitOk` when nothing failed, warnings allowed,
 `nodecheck.ExitFailed` when a result failed, and `nodecheck.ExitNotRun`

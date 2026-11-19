@@ -77,6 +77,13 @@ func (directLegProbeIO) Write(
 	start := time.Now()
 	err := common.WriteBlockAt(path, offset, data)
 	took := time.Since(start)
+	// A half that succeeded is at Debug, as a read is: the probe is the
+	// check behind the leg's row, every interval on every leg, and a failed
+	// half stays at Info (log.md, OS commands and file IO).
+	level := common.ReadLevel(err)
+	if !common.LogEnabled(ctx, level) {
+		return err
+	}
 	// The health block is device content; only its shape is ever logged,
 	// and how long the half took: a buffered write and an fsync.
 	attrs := []any{
@@ -88,7 +95,7 @@ func (directLegProbeIO) Write(
 	if err != nil {
 		attrs = append(attrs, slog.String("error", err.Error()))
 	}
-	slog.InfoContext(ctx, "probe write block", attrs...)
+	slog.Log(ctx, level, "probe write block", attrs...)
 	return err
 }
 
@@ -103,6 +110,10 @@ func (directLegProbeIO) ReadDirect(
 	start := time.Now()
 	data, err := common.ReadBlockDirectAt(path, offset, length)
 	took := time.Since(start)
+	level := common.ReadLevel(err)
+	if !common.LogEnabled(ctx, level) {
+		return data, err
+	}
 	attrs := []any{
 		slog.String("path", path),
 		slog.Uint64("offset", offset),
@@ -112,7 +123,7 @@ func (directLegProbeIO) ReadDirect(
 	if err != nil {
 		attrs = append(attrs, slog.String("error", err.Error()))
 	}
-	slog.InfoContext(ctx, "probe read block direct", attrs...)
+	slog.Log(ctx, level, "probe read block direct", attrs...)
 	return data, err
 }
 

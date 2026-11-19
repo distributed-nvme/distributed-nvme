@@ -22,7 +22,8 @@
 //   - stdout carries exactly one JSON document per invocation — except `list`,
 //     which prints one "<key>\t<protojson>" line per entry, and an
 //     empty prefix therefore prints nothing at all.
-//   - The records etcdutil emits (log.md, etcd: "etcd get", "etcd put", …) go
+//   - The records etcdutil emits (log.md, etcd: at the default level "etcd
+//     put", "etcd delete" and a read that failed, every read too at Debug) go
 //     to STDERR, where common/log.go's init() handler puts every record, so
 //     that they never interleave with the JSON the script pipes into jq.
 //     They carry --trace-id, so a failing run still correlates every write of

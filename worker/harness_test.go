@@ -836,8 +836,9 @@ func (r *logRouter) addFenceSeed(w *harnessWorker, seed string) {
 	w.h.mu.Unlock()
 }
 
-// routeHandler is the slog.Handler over the router, Info and up, as the
-// worker's own default level is (log.md R6).
+// routeHandler is the slog.Handler over the router, Debug and up, as a worker
+// at --log-level debug writes (log.md R6): the harness hooks on the etcd
+// reads, which are at Debug, and reads the round records a test asks for.
 type routeHandler struct {
 	r     *logRouter
 	attrs []slog.Attr
@@ -845,7 +846,7 @@ type routeHandler struct {
 }
 
 func (h *routeHandler) Enabled(_ context.Context, level slog.Level) bool {
-	return level >= slog.LevelInfo
+	return level >= slog.LevelDebug
 }
 
 func (h *routeHandler) Handle(ctx context.Context, rec slog.Record) error {

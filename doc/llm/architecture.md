@@ -2535,9 +2535,10 @@ free space, pools of small groups use the disk nodes up before the space
 and place less than the share; and a cntlr charges its
 controller node the pool's footprint, so a cluster's room is bounded by its
 controller nodes' budgets (Size → extents) as well as by its disk nodes.
-Each record is decoded through the etcd door, which logs it as it logs
-every decoded value, so on a cluster at the node ceilings this is a heavy
-read meant for an occasional poll, not a hot path.
+Each record is decoded through the etcd door, which at the debug log level
+logs it as it logs every decoded value (`log.md`, etcd), so on a cluster at
+the node ceilings this is a heavy read meant for an occasional poll, not a
+hot path.
 
 **GetClusterStatus** — the status read: what is wrong in a cluster, a page
 of pools at a time, computed at the read from etcd and the latest reports
@@ -7950,6 +7951,14 @@ operator checks with `--version` that every node holds the new binary and
 with the start records that every process runs it (Upgrade in lockstep);
 `--version` reads the file on disk, and a process started before its file
 was replaced still runs the old build.
+
+**The log level.** Every daemon and `dnvctl` take `--log-level` (`debug`,
+`info` or `warn`; `info` for a daemon, `warn` for `dnvctl`), and a daemon
+sets Debug on SIGUSR1 and its start log level again on SIGUSR2 while it
+runs, logging each such signal at Warn (`log.md` R6, R13). Reason: at the
+default log level a check round that changes nothing logs nothing, so a log
+holds the changes, the events and the faults, and an operator who needs a
+node's reads turns them on in the running process, with no restart.
 
 * `dnv-gateway` (`gateway.md`) — the stateless server of the `Gateway`
   gRPC service: it listens for users and CLIs, reads and writes etcd, and

@@ -358,6 +358,8 @@ The vocabulary of dnv in alphabetical order, one entry per term, with synonyms s
 
 **lockstep** — The way dnv is upgraded: every dnv program of an etcd installation, the agents of every cluster it holds and the plugins of every CSI driver that talks to its gateways included, stops and every binary is replaced before any program starts again, so no two builds ever run in one etcd installation at once (see `architecture.md`, Upgrade in lockstep).
 
+**log level** — The least severity a program writes a record at: debug, info or warn, set by `--log-level` and, in a daemon, by SIGUSR1 and SIGUSR2 while it runs; written in full in every doc but `log.md`, whose only level it is, since "level" alone is the sp level (see `log.md` R6, R13).
+
 **log record** — One JSON line on stderr per operation, written on completion with its outcome and the trace id, by every dnv binary through the one shared handler chain; stdout stays the result channel. Record names and attributes are normative, since the suites match them.
 
 **low water mark** — The pool-usage fraction above which auto-grow fires (`low_water_mark_pct`); a mark that cannot be reached disables auto-grow for the pool.

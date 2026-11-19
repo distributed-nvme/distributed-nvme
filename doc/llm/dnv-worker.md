@@ -206,7 +206,7 @@ the background; the worker's vote layer stays fenced until its first
 successful put (VW8).
 
 EU2. **Typed plain operations.** All take a ctx, log the record of their kind
-with `slog.InfoContext` as `log.md`, Record obligations by subsystem,
+at the log level and in the shape `log.md`, Record obligations by subsystem,
 specifies for etcd, and (un)marshal binary protobuf. `Get` is the point
 read, leaving its message untouched when the key is not found, and logs
 `etcd get`. `Put` writes and logs `etcd put`. `Delete` deletes, an absent
@@ -228,8 +228,9 @@ compacted revision being an error as well, for MD3's ranges of a pool's
 repairs and retired legs: it returns each key with its value and logs the
 one `etcd range` record, each value being logged as its caller decodes it.
 `Decode` unmarshals one scanned value and logs it as an `etcd get` with
-`found` true, so every value a caller actually reads is logged
-individually, as `log.md`, etcd, requires.
+`found` true, so at the debug log level every value a caller actually reads
+is logged individually, as `log.md`, etcd, requires; at Info only a value
+that did not decode is.
 
 EU3. **Typed watch.** `WatchTyped` opens one prefix watch starting at the
 revision it is given, with a constructor for the prefix's message type.
@@ -1216,8 +1217,9 @@ under the prefix `DNV_WORKER_`. The
 flags name the etcd endpoints (required), the roles this process carries
 (every role by default, each registered and driven independently, VW10), the
 three vote timers — the vote interval (VW2), a join's grace and a leave's
-grace (VW5) — the etcd dial timeout (EU1) and an optional viper config file;
-`cmd/dnv-worker` holds their names and defaults. The vote timers exist as
+grace (VW5) — the etcd dial timeout (EU1), the log level (`log.md` R6) and
+an optional viper config file; `cmd/dnv-worker` holds their names and
+defaults. The vote timers exist as
 flags so the worker suite can run membership cases in seconds; production
 runs the defaults.
 
@@ -1233,7 +1235,8 @@ duplicate-free subset of the three roles; `--vote-interval` and
 `--vote-interval` (a warning is logged otherwise — a join's grace window
 not longer than the dead threshold is legal but pointless);
 `--vote-leave-grace-time` MUST exceed `--vote-interval` plus
-`DefaultEtcdOpTimeout`, the start being refused otherwise. The leave grace
+`DefaultEtcdOpTimeout`, the start being refused otherwise; `--log-level`
+one of `log.md` R6's three words. The leave grace
 is a safety bound. A worker cut off from etcd fences itself (VW8 (a)) no
 later than one dead threshold, one vote interval and the etcd budget of one
 put after the start of its last tick whose puts all succeeded. Its peers
@@ -1244,8 +1247,10 @@ first: a peer takes the shards of a worker that has stopped starting work
 on them, while its calls in flight may still finish, the overlap VW7
 accepts.
 
-CM4. **Startup.** Install the default JSON logger (`common`'s `init`), mint
-a startup trace id, build the `etcdutil` client (EU1), then call
+CM4. **Startup.** Install the default JSON logger (`common`'s `init`), set
+the `--log-level`, mint a startup trace id, watch SIGUSR1 and SIGUSR2 under
+it until the process ends (`log.md` R13), build the `etcdutil` client
+(EU1), then call
 `worker.Run` with the client and a `Config` carrying the endpoints, the
 roles and the three vote timers (the endpoints feed the `worker starting` record's
 `endpoints` attribute). `Run` starts the `ClusterConf` cache (RW21) and the
@@ -1271,7 +1276,9 @@ immediately with status 1. Both ways out share this one order. A last
 `Syncup*` or `Push*` can still finish after the deletes, possibly after a
 peer has taken its shard: the overlap an ownership change accepts (VW7).
 
-CM6. **Logging.** JSON on stderr, Info level by default (`log.md`, R2 and R6).
+CM6. **Logging.** JSON on stderr, at `--log-level`, Info by default, which
+SIGUSR1 and SIGUSR2 change while the process runs (`log.md`, R2, R6 and
+R13).
 The `worker starting` record carries `version`, the build version
 (`common.BuildVersion`), `roles`, `seed`, `endpoints`, `vote_interval`,
 `grace_time` and `leave_grace_time`; `worker stopping` carries `seed`. Every
@@ -1562,7 +1569,9 @@ the vote worker (VW9). Its prefix is `DnRevPrefix`, `CnRevPrefix` or
 
 SW2. **Start.** A `Range` of the prefix yields the revision; every key is
 decoded (`Decode`) and parsed (`ParseDnRevKey` and its siblings; a
-malformed key or value is logged and skipped); one revision worker per
+malformed key or value is logged at Warn, `rev key malformed` or `rev value
+malformed`, and skipped, since its object goes undriven until an operator
+mends the record, `log.md` R6); one revision worker per
 cluster id and object id is started with the initial desired state — the
 value's revision and handle (RW3); then a `WatchTyped` from that revision
 plus one.
@@ -5598,7 +5607,7 @@ proven whole earlier is still whole.
 
 ## Log records
 
-The worker's records are JSON records under the rules of `log.md`, R1 to R12,
+The worker's records are JSON records under the rules of `log.md`, R1 to R13,
 carrying a trace id: the one RW10 gives the unit of work that wrote the
 record; or else the one RW10 gives the part of the incarnation that wrote
 it for that part's life, so that one id groups, for example, every
@@ -5623,9 +5632,12 @@ every commit that changes the effective membership (VW3, VW6);
 `role under two workers`, at Warn, a role this worker serves with fewer than
 two effective members (VW9); `shard owned`
 and `shard released` the ownership diff, the owner being the logging worker
-itself and a release logged after the join (VW9, SW5); `worker fenced` the
-fence, its `reason` naming the cause as VW8 lists them and the record naming
-the old and the new seed (VW8); `worker reg watch restarting` a registry
+itself and a release logged after the join (VW9, SW5); `worker fenced`, at
+Warn, the fence, its `reason` naming the cause as VW8 lists them and the
+record naming the old and the new seed (VW8): the worker joins again alone,
+but a fence means its heartbeat, its watch or its registration failed and
+its shards went undriven for a while, which an operator must know of
+(`log.md` R6); `worker reg watch restarting` a registry
 watch that ended on an error or a compaction and is reopened with a rescan
 (VW3, EU3).
 
@@ -5648,7 +5660,9 @@ judges whose observation's age, counted from no earlier than the first
 round after a pause, exceeds one interval, or whose reply carries no
 answer time, too old or not, but for the leave HL7 gives the round right
 after a `Syncup*` reply (HL7), the record telling a round whose reply
-carries no observation from one that answers from an observation;
+carries no observation from one that answers from an observation, at Debug
+while the round is not stale, as a passing round's messages are, and at
+Info once it is (`log.md` R6);
 `agent starting` the starting answer of a DN's or a CN's loop that
 begins a start series, within the start hold or past it, with the
 agent's start time; `agent started` each round that ends a start, with
@@ -5726,7 +5740,13 @@ and whether the child gave the bitmap up (`given_up`, BM7).
 **Reactions and drains.** `reaction applied` a reaction whose op call
 succeeded and `reaction skipped` a reaction the pass does not take, with its
 reason (AR2; for AR8's gate, the status of the group's row it read, or
-that its report is older than the snapshot),
+that its report is older than the snapshot), at Warn when the reason holds
+until an operator acts and at Info otherwise (`warnSkipReasons`; `log.md`
+R6) — no failover can happen (`no candidate` and AR5's three refusals),
+nothing is left to allocate or the pool cannot grow (a grow's ceilings, a
+CN budget too short, no id left), a group with no copy or no other healthy
+leg has a bad leg (AR8, AR9), or a repair holds its finish while every retired
+leg of its group carries keep (AR8) —
 and with the op's name as `op` when a `model` op refused it
 (`ErrPrecondition`, MD7): one reason can come from the pass's own check or
 from the op, and only the op's refusal always ends the pass, save a refusal
@@ -5755,7 +5775,8 @@ kind, the two totals and the seconds (AR6);
 skipped` a move AR11 finds due and does not make, with its reason, the
 op's name as `op` when the op refused it, or its error, and a CREATED
 repair's verdict that carries the primary's refusal of a take-back, with
-`take_back_refused` and the refusal's text as `refusal` (AR11); `repair
+`take_back_refused` and the refusal's text as `refusal`, at Warn, since the
+repair waits for the operator, and the other reasons at Info (AR11); `repair
 leg partial` a write of the partial marks of taken-back new legs whose
 call wrote, naming the repair, the legs it marks and clears, the primary
 and its report's revision, and `repair leg partial kept` a write whose
@@ -5767,11 +5788,11 @@ op's name as `op` when the op refused the delete, or its error (AR12);
 `forced start cleared` a clear of a forced-start mark whose call wrote,
 with the revision its own STM committed, and `forced start kept` a clear
 AR13 finds due and does not make, with its reason, the op's name as `op`
-when the op refused it, or its error (AR13); `member add refused` a
-group whose primary refuses a `leg_list` member's add, naming the group,
-the primary, its report's revision and the refusal's text (AR14); `groups
-array made` a write of the flag that a group's array has run whose call
-wrote, naming the groups, the primary and its report's revision, with how
+when the op refused it, or its error (AR13); `member add refused`, at
+Warn, a group whose primary refuses a `leg_list` member's add, naming the
+group, the primary, its report's revision and the refusal's text (AR14);
+`groups array made` a write of the flag that a group's array has run whose
+call wrote, naming the groups, the primary and its report's revision, with how
 many it set and the revision its own STM committed, and `groups array made
 kept` a write whose call failed, with its error, or with its reason and
 `op` when the op refused it (AR15); `md checks scheduled` a write of the md
@@ -5925,7 +5946,9 @@ role in it. The hold case shortens every interval but `cntlr_interval`, the
 bound of the sides-first hold (RW14), which it lengthens so that a hold that
 runs to its bound and one its sides end lie seconds apart in the fakes'
 records, which carry the server's clock; its thresholds are long enough
-that nothing reacts on health. The
+that nothing reacts on health. Every worker runs at `--log-level debug` and
+every fake logs at Debug (`grpc.md`, Drivers and fakes), so the logs hold
+the rounds' messages and the etcd reads the cases read. The
 driver reads every worker and fake log over ssh and asserts on it; a fake's
 gRPC records carry each request's trace id, whose seed prefix names the
 worker that sent it (RW10).
@@ -7186,12 +7209,17 @@ which no suite case sets, so no suite case runs RW13's count compare.
   to name exactly its side pointer list — a side its sweep cannot remove,
   or a listed side the disk never allocates — is never compared, and no
   record says that the compare is not running.
-* **Log volume**: every round logs a client send and receive record pair per
-  object (`grpc.md`, L6) and every heartbeat an `etcd put`; with thousands of
-  objects this is the dominant log stream of the control plane, as it is for
-  the agents. A DN or CN that neither syncs nor changes health adds HL3's
-  re-read of its record per `nodeRecordMaxAge` — an `etcd get`, and for a DN
-  a second one of its `DnRev` (RW13) — and that re-read again at each
+* **Log volume**: at `--log-level debug` every round logs a client send and
+  receive record pair per object (`grpc.md`, L1, L6), every pass and every
+  re-read its etcd reads, and every heartbeat an `etcd put`; with thousands
+  of objects this is the dominant log stream of the control plane, as it is
+  for the agents. At the default log level a round that passes logs no message
+  and the reads log nothing (`log.md` R9), so the heartbeat's `etcd put`
+  and the records below are what an idle worker logs; a busy pool's log is
+  still led by its `Syncup*` calls, whose request and reply stay at Info. A
+  DN or CN that neither syncs nor changes health adds HL3's re-read of its
+  record per `nodeRecordMaxAge` — an `etcd get`, at Debug, and for a DN a
+  second one of its `DnRev` (RW13) — and that re-read again at each
   verdict while it fails. The worker's own per-object records are
   mostly event-driven: health transitions (`health changed`, the `unreachable`
   reason included — the `RES_STATUS_UNKNOWN` marking itself is in-memory and
@@ -7212,12 +7240,14 @@ which no suite case sets, so no suite case runs RW13's count compare.
   that re-sends the refused request (RW5); a
   `dn conf missing` or `cn conf missing` while the node's
   `DnConf` or `CnConf` is absent or names another node (RW13); a `late observation` while an
-  object's observations stay older than an interval (HL7), which as a
+  object's observations stay older than an interval (HL7), at Debug while
+  the round passes and at Info once it is stale, which as a
   rule comes once per round beside each `syncup rejected` of an object
   the agent holds, a stale revision's and a failed save's among them,
   since a refused reply carries no observation (HL7); and a
   `health write failed` while a health write keeps failing (RW12). The sp
-  coordinator's pass adds its own, in these amounts: failover's once per
+  coordinator's pass adds its own, at Warn for a reason that holds until an
+  operator acts (Log records), in these amounts: failover's once per
   pool — AR5's `reaction skipped` with `no candidate`, say, for as long as a
   primary due for failover has no eligible candidate, or `shared_state`,
   `same_error` or `candidate_refuses` for as long as the error or the

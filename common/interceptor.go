@@ -110,6 +110,21 @@ func GrpcStreamClientInterceptor() grpc.StreamClientInterceptor {
 	}
 }
 
+// logMessage logs a stream message that went through, at Debug (grpc.md L1,
+// L6): the only streams are the Check* rounds, a read of each node every
+// interval, so at the default level a round that succeeds logs nothing and
+// a failed message keeps its Info record. The message is rendered only when
+// the level is on (log.md R9).
+func logMessage(ctx context.Context, msg string, method string, m any) {
+	if !LogEnabled(ctx, slog.LevelDebug) {
+		return
+	}
+	slog.DebugContext(ctx, msg,
+		slog.String("method", method),
+		pbLogAttr("data", m),
+	)
+}
+
 type loggingClientStream struct {
 	grpc.ClientStream
 	ctx    context.Context
@@ -125,10 +140,7 @@ func (s *loggingClientStream) SendMsg(m any) error {
 		)
 		return err
 	}
-	slog.InfoContext(s.ctx, "grpc client send",
-		slog.String("method", s.method),
-		pbLogAttr("data", m),
-	)
+	logMessage(s.ctx, "grpc client send", s.method, m)
 	return nil
 }
 
@@ -144,10 +156,7 @@ func (s *loggingClientStream) RecvMsg(m any) error {
 		)
 		return err
 	}
-	slog.InfoContext(s.ctx, "grpc client recv",
-		slog.String("method", s.method),
-		pbLogAttr("data", m),
-	)
+	logMessage(s.ctx, "grpc client recv", s.method, m)
 	return nil
 }
 
@@ -242,10 +251,7 @@ func (s *loggingServerStream) RecvMsg(m any) error {
 		)
 		return err
 	}
-	slog.InfoContext(s.ctx, "grpc server recv",
-		slog.String("method", s.method),
-		pbLogAttr("data", m),
-	)
+	logMessage(s.ctx, "grpc server recv", s.method, m)
 	return nil
 }
 
@@ -258,10 +264,7 @@ func (s *loggingServerStream) SendMsg(m any) error {
 		)
 		return err
 	}
-	slog.InfoContext(s.ctx, "grpc server send",
-		slog.String("method", s.method),
-		pbLogAttr("data", m),
-	)
+	logMessage(s.ctx, "grpc server send", s.method, m)
 	return nil
 }
 

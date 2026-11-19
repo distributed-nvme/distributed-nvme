@@ -45,8 +45,9 @@
 //   - stdout carries exactly one JSON document per invocation — protojson for
 //     a read, the ids and revisions it assigned for a mutation — except
 //     list-keys (one key per line) and list-workers (one object per line).
-//   - The etcd records etcdutil emits (log.md, etcd: "etcd get", "etcd put",
-//     …) go to STDERR, where common/log.go's init() handler puts every
+//   - The etcd records etcdutil emits (log.md, etcd: at the default level
+//     "etcd put", "etcd delete" and a read that failed, every read too at
+//     Debug) go to STDERR, where common/log.go's init() handler puts every
 //     record, so that they never interleave with the JSON the script pipes
 //     into jq.
 //     They carry --trace-id, so a failing run still correlates every write of

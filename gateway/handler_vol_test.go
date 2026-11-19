@@ -4362,12 +4362,24 @@ type volReadHook struct {
 	fired atomic.Bool
 }
 
+// Enabled takes every level: an "etcd get" is at Debug (log.md, etcd), and
+// etcdutil builds no record the default logger does not take, so a hook that
+// answered as the wrapped handler does would never see the read it waits
+// for.
+func (h *volReadHook) Enabled(context.Context, slog.Level) bool {
+	return true
+}
+
 // Handle runs the actor on the watched request's first "etcd get" of the key,
-// then hands the record on to the handler it wraps.
+// then hands the record on to the handler it wraps when that one takes its
+// level.
 func (h *volReadHook) Handle(ctx context.Context, rec slog.Record) error {
 	if ctx.Value(volReadHookKey{}) != nil && rec.Message == "etcd get" &&
 		volRecordKey(rec) == h.key && h.fired.CompareAndSwap(false, true) {
 		h.actor()
+	}
+	if !h.Handler.Enabled(ctx, rec.Level) {
+		return nil
 	}
 	return h.Handler.Handle(ctx, rec)
 }

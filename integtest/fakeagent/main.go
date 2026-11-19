@@ -261,6 +261,10 @@ func (p *program) serve(ctx context.Context, lis net.Listener) error {
 }
 
 func main() {
+	// The fake logs at Debug, as every program a suite runs does: the
+	// worker suite reads the Check* stream messages from its log, and those
+	// are Debug records (grpc.md, Drivers and fakes).
+	common.SetLogLevel(slog.LevelDebug)
 	opts, err := parseArgs(os.Args[1:], os.Stderr)
 	if err != nil {
 		var exit *exitError

@@ -187,7 +187,7 @@ func newCheckCmd() *cobra.Command {
 
 // runCheck runs the node check for role: viper binds the role's flags, and
 // no value is required, since the check reads the node, not a cluster (CM5).
-// It logs at Warn, as dnvctl does (log.md R6).
+// It logs at Warn, as dnvctl does, whatever --log-level says (log.md R6).
 func runCheck(cmd *cobra.Command, role string) error {
 	common.SetLogLevel(slog.LevelWarn)
 	if err := bindViper(cmd); err != nil {
@@ -275,6 +275,10 @@ func addCommonFlags(cmd *cobra.Command) {
 			common.NvmetQidMaxLimit))
 	flags.String("local-store", common.DefaultLocalStorPrefix,
 		"prefix of the agent's local state files")
+	flags.String("log-level", common.LogLevelInfo,
+		"log level: debug, info or warn; SIGUSR1 sets debug while the "+
+			"agent runs and SIGUSR2 sets this level again (the node "+
+			"check takes it and logs at warn)")
 	flags.String("config", "", "optional viper config file")
 }
 
@@ -364,6 +368,16 @@ func capacityFromViper() (uint64, error) {
 	return capacity, nil
 }
 
+// startLogLevel sets the role's --log-level (log.md R6) and arms its change
+// by SIGUSR1 and SIGUSR2 (log.md R13) under a trace id of its own, since the
+// role's startup id is minted inside agent.Serve; the returned stop ends the
+// watch.
+func startLogLevel(level slog.Level) (stop func()) {
+	common.SetLogLevel(level)
+	return common.WatchLogLevel(
+		common.WithTraceId(context.Background(), common.NewTraceId()), level)
+}
+
 // signalContext is the agent's stop by signal (CM4): the first SIGINT or
 // SIGTERM cancels the context, which starts Serve's bounded stop; a second
 // one ends the process at once with status 1, as every other dnv program's
@@ -437,7 +451,7 @@ func watchSignals(
 	if !ok {
 		return
 	}
-	slog.WarnContext(ctx, "second signal, exiting without a clean stop",
+	slog.InfoContext(ctx, "second signal, exiting without a clean stop",
 		slog.String("signal", second.String()))
 	exit(1)
 }
@@ -466,6 +480,12 @@ func runDn(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return err
 	}
+	level, err := common.ParseLogLevel(viper.GetString("log-level"))
+	if err != nil {
+		return err
+	}
+	stopLogLevel := startLogLevel(level)
+	defer stopLogLevel()
 	ctx, stop := signalContext()
 	defer stop()
 
@@ -514,6 +534,12 @@ func runCn(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return err
 	}
+	level, err := common.ParseLogLevel(viper.GetString("log-level"))
+	if err != nil {
+		return err
+	}
+	stopLogLevel := startLogLevel(level)
+	defer stopLogLevel()
 	ctx, stop := signalContext()
 	defer stop()
 

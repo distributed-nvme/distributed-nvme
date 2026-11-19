@@ -1944,23 +1944,25 @@ environment lookup, an optional `--config` file); an I/O-free
 CM2. **Flags.** The gRPC flags are the agent command's network and address
 pair, the etcd flags the worker command's endpoints and dial timeout, and
 the optional config file is the one both carry; the gateway adds no flag of
-its own beyond the `--version` every program answers (`architecture.md`,
-Components: invocation reference), and each flag keeps its sibling's
-default and required status.
+its own beyond the `--version` and the `--log-level` every daemon answers
+(`architecture.md`, Components: invocation reference; `log.md` R6), and
+each flag keeps its sibling's default and required status.
 Deliberately no etcd operation-timeout flag (`dnv-worker.md` EU5) and no
 default gRPC port: the address is required exactly as the agent's is, and
 no default-port constant exists.
 
-CM3. **Startup.** `run` binds viper, reads the options, mints a startup
-trace id (`common.WithTraceId` of a fresh `common.NewTraceId`), derives a
-cancelable ctx, arms the two-signal `watchSignals` pattern — a signal
+CM3. **Startup.** `run` binds viper, reads the options, sets the
+`--log-level`, mints a startup trace id (`common.WithTraceId` of a fresh
+`common.NewTraceId`), watches SIGUSR1 and SIGUSR2 under it until the process
+ends (`log.md` R13), derives a cancelable ctx, arms the two-signal
+`watchSignals` pattern — a signal
 channel that holds both signals; the first SIGINT or SIGTERM cancels the
 ctx, and a second one exits with status 1 without a clean drain — builds
 the client with `etcdutil.New` (a lazy dial: startup never fails on an
 unreachable etcd), and returns `gateway.Run` of the ctx, the client and the
 `gateway.Config`. `Run` closes the client (GW2), so `main` does not.
-Logging setup: none — `common`'s `init` installs the JSON logger, and the
-gateway keeps level Info by doing nothing (`log.md` R6).
+Logging setup: `common`'s `init` installs the JSON logger, and `run` sets
+its log level (`log.md` R6).
 
 ## Log records
 
@@ -1979,7 +1981,7 @@ forms, are normative: `gateway starting` and `gateway stopping` from
 `gateway.Run`, with `etcd client close failed` between them when GW2's
 deferred close of the client fails; `gateway serving` just before serving;
 `signal received` and `second signal, exiting without a clean drain` from
-`main`'s `watchSignals`.
+`main`'s `watchSignals`; and `log level changed` of `log.md` R13.
 
 LG3. Protobuf in any gateway-authored record goes through
 `common.PbToLogValue` (`log.md` R10); `bytes` fields, the bitmaps, therefore
@@ -2051,7 +2053,8 @@ cluster's), a DN's metadata ceiling `DnCloneMetaUnitCnt` and its unit size
 `DnCloneMetaUnit`, for the area the ceiling case fills, and the id step's
 strides `IdStepStride` and `ThinIdStepStride`, which its smoke case checks
 the moved counters against); three gateway instances on one launch line that
-differs only in the gRPC address; four fake DNs and three fake CNs, the DNs
+differs only in the gRPC address, each at `--log-level debug`, as every
+program a suite runs logs at Debug; four fake DNs and three fake CNs, the DNs
 in four distinct locations and the CNs in three of them, each CN in its DN
 twin's, since the CN scan dedupes locations too and a CN that shares a
 location with a DN shows the first preference of the pool create's DN

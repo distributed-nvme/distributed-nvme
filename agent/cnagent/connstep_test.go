@@ -523,10 +523,10 @@ func TestHeadWaitStopsWhenTheBudgetIsSpent(t *testing.T) {
 			recs)
 	}
 	rec := recs[0]
-	if rec["level"] != "WARN" || rec["nqn"] != dataNqn ||
+	if rec["level"] != "INFO" || rec["nqn"] != dataNqn ||
 		rec["head"] != "/dev/"+head || rec["head_pauses"] != float64(2) ||
 		rec["scan_pauses"] != float64(0) {
-		t.Fatalf("record %v, want WARN naming %s, /dev/%s, 2 short pauses "+
+		t.Fatalf("record %v, want INFO naming %s, /dev/%s, 2 short pauses "+
 			"and no scan pause", rec, dataNqn, head)
 	}
 
@@ -589,10 +589,10 @@ func TestHeadWaitSpentBeforeAnyHeadIsListed(t *testing.T) {
 			recs)
 	}
 	rec := recs[0]
-	if rec["level"] != "WARN" || rec["nqn"] != dataNqn ||
+	if rec["level"] != "INFO" || rec["nqn"] != dataNqn ||
 		rec["head"] != "" || rec["scan_pauses"] != float64(2) ||
 		rec["head_pauses"] != float64(0) {
-		t.Fatalf("record %v, want WARN naming %s, no head, 2 scan pauses "+
+		t.Fatalf("record %v, want INFO naming %s, no head, 2 scan pauses "+
 			"and no short pause", rec, dataNqn)
 	}
 
