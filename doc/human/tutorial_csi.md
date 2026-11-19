@@ -18,17 +18,23 @@ One machine runs:
 - k3s, a small Kubernetes in one program: the one node is the API server
   and the kubelet, the program that runs pods, at once;
 - the dnv CSI driver, `dnv-csi`: a CSI driver is what Kubernetes calls to
-  make, attach and mount volumes. Its controller plugin runs in one pod and
-  talks to the gateway: a volume is one storage pool with one thin device,
-  one subsystem and one namespace, and attaching it to a node puts the
-  node's host NQN in the subsystem's allowed hosts. Its node plugin runs in
-  one pod per node, on the machine's own network: it asks the cdc where the
-  subsystem is, connects, formats and mounts;
+  make, attach and mount volumes. Its controller plugin runs as two
+  copies, two pods, both on this one machine here, whose two helper
+  programs each act in one copy at a time, and it talks to the gateway: a
+  volume is one storage pool with one thin device, one subsystem and one
+  namespace, and attaching it to a node puts the node's host NQN in the
+  subsystem's allowed hosts. Its node plugin runs in one pod per node, on
+  the machine's own network: it asks the cdc where the subsystem is,
+  connects, formats and mounts;
 - a storage class, the Kubernetes object that names the driver and the
   cluster, the redundancy and the cntlr count a volume gets;
 - a claim (a persistent volume claim), the request for a volume of a size
   from a class, and a pod, the smallest thing Kubernetes runs, which mounts
-  the claim at `/data`.
+  the claim at `/data`;
+- a network policy, a Kubernetes record that limits the connections of the
+  pods of one Kubernetes namespace: it keeps the pods of the Kubernetes
+  namespace `default`, where the demo pod runs, off every address of the
+  machine, so that they cannot reach dnv's ports.
 
 The fixed names:
 
@@ -72,7 +78,8 @@ addresses. This bind is a demo: the gateway checks no caller, so bound to
 every address it is open to every pod and to the LAN; a deployment blocks
 that traffic to all but the controller plugin and the operator's `dnvctl`,
 with a firewall rule or a network policy that the cluster's network software
-enforces.
+enforces, as the section [Keep other pods off dnv](#keep-other-pods-off-dnv)
+below does for one Kubernetes namespace.
 
 ```
 nohup ./dnv-gateway --grpc-address 0.0.0.0:29527 --etcd-endpoints 127.0.0.1:2379 \
@@ -150,16 +157,18 @@ It prints `docker.io/library/dnv-csi:0.1.0`.
 
 ## The driver
 
-The manifests under `deploy/` are applied as they are, except two: the
-config map, which carries the addresses the two plugins need, and the
-storage class. The controller plugin runs on the pod network, where
-127.0.0.1 is the pod itself, so it reaches the gateway through the
-machine's address; the node plugin runs on the machine's network, so it
-reaches the cdc at 127.0.0.1, where the all-in-one tutorial started it.
-The command below reads the machine's address off its default route.
+The manifests under `deploy/` are applied as they are, except three: the
+config map, which carries the addresses the two plugins need, the storage
+class, and the network policy, which the section [Keep other pods off
+dnv](#keep-other-pods-off-dnv) fills in. The controller plugin runs on the
+pod network, where 127.0.0.1 is the pod itself, so it reaches the gateway
+through the machine's address; the node plugin runs on the machine's
+network, so it reaches the cdc at 127.0.0.1, where the all-in-one tutorial
+started it. The command below reads the machine's address off its default
+route.
 
 ```
-sudo k3s kubectl apply -f deploy/namespace.yaml -f deploy/csidriver.yaml -f deploy/controller-serviceaccount.yaml -f deploy/node-serviceaccount.yaml -f deploy/controller-clusterrole.yaml -f deploy/controller-clusterrolebinding.yaml
+sudo k3s kubectl apply -f deploy/namespace.yaml -f deploy/csidriver.yaml -f deploy/controller-serviceaccount.yaml -f deploy/node-serviceaccount.yaml -f deploy/controller-clusterrole.yaml -f deploy/controller-clusterrolebinding.yaml -f deploy/controller-role.yaml -f deploy/controller-rolebinding.yaml
 sed "s/192.0.2.10:29527/$(ip -4 route get 1.1.1.1 | sed -n 's/.* src \([0-9.]*\).*/\1/p'):29527/; s/192.0.2.10:8009/127.0.0.1:8009/" deploy/config.yaml | sudo k3s kubectl apply -f -
 sudo k3s kubectl apply -f deploy/controller.yaml -f deploy/node.yaml
 ```
@@ -181,9 +190,10 @@ asks for one cntlr.
 sed 's/cluster: default/cluster: c0/; s/cntlrs: "2"/cntlrs: "1"/' deploy/storageclass.yaml | sudo k3s kubectl apply -f -
 ```
 
-Check: the two plugins run. k3s pulls the sidecar images, the small
-programs that run beside each plugin and talk to Kubernetes for it, which
-takes a minute the first time; the two commands wait for it.
+Check: the two plugins run, the controller plugin as two copies. k3s pulls
+the sidecar images, the small programs that run beside each plugin and talk
+to Kubernetes for it, which takes a minute the first time; the two commands
+wait for it.
 
 ```
 sudo k3s kubectl -n dnv-csi rollout status deploy/dnv-csi-controller --timeout=300s
@@ -193,6 +203,22 @@ sudo k3s kubectl -n dnv-csi logs ds/dnv-csi-node -c dnv-csi | grep -c '"csi node
 ```
 
 The first two end with `successfully rolled out`, the last two print `1`.
+
+Check: the two copies of the controller plugin share the work through two
+leases. Its two sidecars that act on volumes, the provisioner and the
+attacher, each act in one copy at a time: the copy that holds that sidecar's
+lease, a Kubernetes record that the copy renews every few seconds and that
+the other copy takes when the first stops. Here both copies run on the one
+machine.
+
+```
+sudo k3s kubectl -n dnv-csi get pods -l app=dnv-csi-controller
+sudo k3s kubectl -n dnv-csi get lease
+```
+
+The first prints two pods, `4/4` and `Running`; the second prints the two
+leases, `csi-dnv-io` and `external-attacher-leader-csi-dnv-io`, each held by
+one of those pods.
 
 Check: Kubernetes knows the free space of the class. The provisioner
 sidecar asks the controller plugin, which asks the gateway what the cluster
@@ -215,6 +241,61 @@ sure of, capped at the free space. Both are free space, not a
 promise: nothing is held for a volume, and a create can build a larger
 claim too, since a volume takes only one extent for its metadata and an
 eighth of its size for data at the start.
+
+## Keep other pods off dnv
+
+The gateway listens on every address of this machine and checks no caller,
+and every pod of the cluster reaches the machine's addresses: the one on
+its network, and the addresses of the bridges that k3s and docker made,
+on which a program bound to every address answers too. The example network
+policy of the driver keeps the pods of one Kubernetes namespace off every
+address it lists, and lets them reach the API server of Kubernetes, which
+runs on this machine too. k3s's own policy controller enforces it; a cluster
+whose network software enforces no policy gets no effect from it. The
+driver's own Kubernetes namespace takes no copy: its pods must reach dnv,
+the controller plugin the gateway and the node plugin the cdc, and the node
+plugin runs on the machine's own network, which no policy holds. Since this
+machine is also the Kubernetes node, the policy keeps the pods of `default`
+off the machine's own services too, such as the kubelet; so put no copy in
+a Kubernetes namespace of Kubernetes' own, such as `kube-system`, whose pods
+need them.
+
+The policy for the Kubernetes namespace `default`, with every address of
+the machine in its list. The first command writes the list to a file, the
+second puts it and the machine's address into the example and applies it:
+
+```
+ip -4 -o addr show scope global | awk '{split($4, a, "/"); print "              - " a[1] "/32"}' > dnv-addrs.txt
+sed -e '/192.0.2.10\/32 # every address/{r dnv-addrs.txt' -e 'd}' -e "s|192.0.2.10/32 # the API server.*|$(ip -4 route get 1.1.1.1 | sed -n 's/.* src \([0-9.]*\).*/\1/p')/32|" deploy/networkpolicy.yaml | sudo k3s kubectl apply -n default -f -
+```
+
+Check: the policy lists the machine's addresses.
+
+```
+sudo k3s kubectl -n default get networkpolicy dnv-keep-off -o jsonpath='{.spec.egress[0].to[0].ipBlock.except}{"\n"}'
+```
+
+It prints each address of `ip -4 -o addr show scope global`, with `/32`.
+
+Check: a pod in `default` cannot reach the gateway at any of the machine's
+addresses, and a pod in a Kubernetes namespace without the policy can.
+Each command starts a pod of the driver's image that tries the gateway's
+port on every address of the machine and prints one line per address; the
+policy holds for a new pod about a second after it starts, so the pod
+waits two seconds first.
+
+```
+sudo k3s kubectl run probe -n default --rm -i --restart=Never --image=dnv-csi:0.1.0 --image-pull-policy=Never --command -- bash -c 'sleep 2; for a in "$@"; do timeout 3 bash -c "</dev/tcp/$a/29527" 2>/dev/null && echo "$a open" || echo "$a closed"; done' probe $(ip -4 -o addr show scope global | awk '{split($4, a, "/"); print a[1]}')
+sudo k3s kubectl create namespace policy-check
+sudo k3s kubectl run probe -n policy-check --rm -i --restart=Never --image=dnv-csi:0.1.0 --image-pull-policy=Never --command -- bash -c 'sleep 2; for a in "$@"; do timeout 3 bash -c "</dev/tcp/$a/29527" 2>/dev/null && echo "$a open" || echo "$a closed"; done' probe $(ip -4 -o addr show scope global | awk '{split($4, a, "/"); print a[1]}')
+sudo k3s kubectl delete namespace policy-check
+```
+
+The first prints `closed` for every address, the second `open` for every
+address. Kubernetes prints two notes about the session before them, and a
+line that the pod was deleted after them. The demo pod below runs in `default` under the policy:
+its volume needs no connection of its own, since the node plugin connects the
+machine.
 
 ## A volume
 
@@ -409,13 +490,14 @@ In the order a holder goes before what it holds. The driver's pods first,
 which stop with nothing staged, then k3s as a whole: its uninstall script
 stops the service and removes its program, its containers and most of its
 state.
-Then the image and its build directory.
+Then the image, its build directory and the policy's address list.
 
 ```
+sudo k3s kubectl -n default delete networkpolicy dnv-keep-off
 sudo k3s kubectl delete -f deploy/node.yaml -f deploy/controller.yaml
 sudo /usr/local/bin/k3s-uninstall.sh
 sudo docker image rm dnv-csi:0.1.0 ubuntu:26.04
-rm -rf image
+rm -rf image dnv-addrs.txt
 ```
 
 The nodes and the cluster. A node delete asks the node's agent to show

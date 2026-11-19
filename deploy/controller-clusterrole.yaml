@@ -1,6 +1,7 @@
-# The rights of the controller pod's sidecars (csi.md, Deployment): the
-# provisioner and the attacher watch and write the volume objects, and the
-# provisioner owns the capacity objects.
+# The cluster-wide rights of the controller pod's sidecars (csi.md CSI19):
+# the provisioner and the attacher watch and write the volume objects. The
+# rights within the driver's namespace, the leases, the capacity objects and
+# the owner lookup, are the namespaced role's (controller-role.yaml).
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
 metadata:
@@ -34,17 +35,5 @@ rules:
     resources: ["volumeattachments/status"]
     verbs: ["patch"]
   - apiGroups: ["storage.k8s.io"]
-    resources: ["csistoragecapacities"]
-    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
-  - apiGroups: [""]
-    resources: ["pods"]
-    verbs: ["get"]
-  - apiGroups: ["apps"]
-    resources: ["replicasets"]
-    verbs: ["get"]
-  - apiGroups: ["storage.k8s.io"]
     resources: ["volumeattributesclasses"]
     verbs: ["get", "list", "watch"]
-  - apiGroups: ["coordination.k8s.io"]
-    resources: ["leases"]
-    verbs: ["get", "watch", "list", "delete", "update", "create"]

@@ -1,0 +1,14 @@
+# Gives the controller pod's account the namespaced role (csi.md CSI19).
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: dnv-csi-controller
+  namespace: dnv-csi
+subjects:
+  - kind: ServiceAccount
+    name: dnv-csi-controller
+    namespace: dnv-csi
+roleRef:
+  kind: Role
+  name: dnv-csi-controller
+  apiGroup: rbac.authorization.k8s.io

@@ -4,9 +4,11 @@
 # in the publish context at attach. The list names a cdc of every range that
 # serves this cluster's volumes: a node drops the paths of a volume no listed
 # cdc lists. The plugins read this map only at their start, so a change of
-# it takes a restart of both. The values below are placeholders; put the
-# addresses of the dnv control plane that serves this cluster before
-# applying.
+# it takes a restart of both. The gateway and the cdcs named here check no
+# caller: keep the cluster's other pods off them, and off every dnv machine,
+# with a copy of networkpolicy.yaml in each of their namespaces (csi.md
+# CSI20). The values below are placeholders; put the addresses of the dnv
+# control plane that serves this cluster before applying.
 apiVersion: v1
 kind: ConfigMap
 metadata:

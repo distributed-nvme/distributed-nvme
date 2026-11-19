@@ -1,0 +1,59 @@
+# An example network policy that keeps a namespace's pods off dnv (csi.md
+# CSI20). dnv checks no caller of its gateway, agents, cdc and etcd and no
+# host beyond its NQN (architecture.md, Known limits), and every pod reaches
+# those ports through its machine unless a policy stops it. Apply one copy in
+# every namespace whose pods are not dnv's, kube-system aside where a dnv
+# machine is also a Kubernetes node (below), after putting this
+# installation's addresses in place of the placeholders:
+#
+#   kubectl apply -n <namespace> -f networkpolicy.yaml
+#
+# The driver's own namespace takes none: its pods must reach dnv, the
+# controller copies the gateway and the node pods the cdcs and the cntlrs,
+# and the node pods run on the host network, which no network policy holds.
+# A policy binds only where the cluster's network software enforces egress
+# policies: k3s's embedded policy controller does, and flannel alone does
+# not.
+#
+# Rule 1 lets the pods reach every IPv4 address but those of the dnv
+# machines. List every address of every machine that runs a dnv program: a
+# program bound to 0.0.0.0 answers on all of them, a Kubernetes node's pod
+# bridge (cni0) and overlay (flannel.1) addresses and a docker bridge
+# (docker0) included, as `ip -4 -o addr show scope global` prints them on
+# each machine; or bind every dnv program to one address and list that one.
+# A cluster with IPv6 pods adds a rule for ::/0 with the machines' IPv6
+# addresses excepted the same way, since the policy refuses whatever no rule
+# allows.
+#
+# The policy names addresses, not ports, so it keeps the pods off every port
+# of a dnv machine, not only dnv's. Rule 2 lets them reach the Kubernetes API
+# server where it runs on a dnv machine, by its address and port, which the
+# policy sees after the cluster translates the API server's service address;
+# leave it out where no dnv machine runs it. Where a dnv machine is also a
+# Kubernetes node, the pods lose that node's own services as well: its
+# kubelet, which a metrics service in kube-system reads, any service on the
+# node's host network, and a node-local name cache, whose addresses sit on
+# the node and so stand in rule 1's list. So kube-system takes no copy
+# there, and a namespace whose pods need such a service gets a rule like
+# rule 2 for its address and port. Otherwise the cluster's name service
+# needs no rule: it runs in pods, whose addresses rule 1 allows.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: dnv-keep-off
+spec:
+  podSelector: {}
+  policyTypes:
+    - Egress
+  egress:
+    - to:
+        - ipBlock:
+            cidr: 0.0.0.0/0
+            except:
+              - 192.0.2.10/32 # every address of every dnv machine
+    - to:
+        - ipBlock:
+            cidr: 192.0.2.10/32 # the API server's address on a dnv machine
+      ports:
+        - protocol: TCP
+          port: 6443

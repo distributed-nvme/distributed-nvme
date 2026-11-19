@@ -513,40 +513,115 @@ a registry names it there in the controller and node manifests or maps that
 name to the registry in every node's container runtime.
 The kubelet directory is the one value of the node manifest an operator changes
 per distribution, in its mounts and in the registrar's registration path, since
-a distribution may keep the kubelet elsewhere. Of dnv's services, the
-controller pod reaches the gateway alone (CSI7) and the node pods the cdcs and
-the cntlrs' ports; every other pod of the cluster reaches those ports, and the
-agents' and etcd's, through its machine as well unless the operator blocks it,
-and dnv authenticates no user and no host beyond its NQN (`architecture.md`,
-Known limits), so a gateway bound to every address of its machine is open to
-every pod and to the machine's network.
+a distribution may keep the kubelet elsewhere; the manifest's header says where
+it stands. The driver's namespace asks Kubernetes' pod security admission for
+its privileged level, the one level that admits the node pods (CSI18), since a
+cluster whose default level is stricter would refuse them with no sign but the
+daemon set's events. The pods take the critical priority classes, which k3s
+admits in any namespace; a cluster that admits them in kube-system alone
+refuses the pods until the operator removes the class from the manifests or
+allows it in the driver's namespace. Of dnv's services, the controller pod
+reaches the gateway alone (CSI7) and the node pods the cdcs and the cntlrs'
+ports; every other pod of the cluster reaches those ports, and the agents' and
+etcd's, through its machine as well unless a network policy or the operator's
+firewall blocks it (CSI20), and dnv authenticates no user and no host beyond
+its NQN (`architecture.md`, Known limits), so a gateway bound to every address
+of its machine is open to every pod and to the machine's network.
 
 CSI18. **The node pods run privileged on the host's network.** The kernel
-keeps an NVMe/TCP connection in the network namespace of the process that
-made it, so a connect from a pod's own namespace would die with the pod.
-The kubelet's pod and plugin directories are mounted both ways, so the
-mounts the plugin makes reach the host and the pods; the device and sysfs
-trees give the plugin the volumes' devices and the controllers' state; the
-host's nvme directory, read-only, gives it the node's identity, and is made
-empty where it is absent, so that the plugin starts and its own refusal
-names the missing files (CSI13). The
-registrar sidecar announces the socket to the kubelet, and the liveness
-probe sidecar answers the kubelet's health checks for both plugins.
+keeps an NVMe/TCP connection in the network namespace of the process that made
+it, so a connect from a pod's own namespace would die with the pod. The
+kubelet's pod and plugin directories are mounted both ways, so the mounts the
+plugin makes reach the host and the pods; the device and sysfs trees give the
+plugin the volumes' devices and the controllers' state; the host's nvme
+directory, read-only, gives it the node's identity, and is made empty where it
+is absent, so that the plugin starts and its own refusal names the missing
+files (CSI13). The registrar sidecar announces the socket to the kubelet, and
+the liveness probe sidecar answers the kubelet's health checks for the node
+plugin, on the node's loopback alone, so the node pod opens no port to the
+network; the controller copy's probe answers at its pod's own address (CSI20).
+The two run as root, the owner of the plugin's socket and of the kubelet's
+registration directory, so they need no capability, and have none, no
+privilege escalation, the runtime's default system call filter and a read-only
+root; no container of the pod talks to the API server, so the pod mounts no
+account token. The node pods take the node-critical priority, so that the
+scheduler makes room for them and the kubelet's eviction under resource
+pressure passes them by, and every container of the driver requests a little
+CPU and memory and has no limit: a memory limit could kill the plugin in the
+middle of a stage, and a CPU limit would slow the follower.
 
-CSI19. **The controller pod runs anywhere and tolerates the control-plane
-taint.** It holds the plugin, the provisioner, the attacher and the liveness
-probe around one socket. The plugin reads the gateway address and the cdc
-addresses from a config map, as environment, and the node plugin reads the
-cdc addresses from the same map, so the manifests of a cluster differ from the
-examples in that map, in the storage classes, which name the operator's
-clusters, in the kubelet directory where a distribution keeps the kubelet
-elsewhere, and in the driver's image name where a registry serves the image
-(Deployment). The driver object asks for attach, no pod information
-on mount, the persistent lifecycle and capacity tracking, since the plugin
-answers capacity; the provisioner polls it and owns the capacity objects,
-for every class of the driver, those with immediate binding included, since
-no scheduler needs those but the capacity objects are the one place
-Kubernetes shows dnv's free space.
+CSI19. **The controller plugin runs as two copies, each sidecar leading in one
+copy at a time.** Each copy is one pod with the plugin, the provisioner, the
+attacher and the liveness probe around one socket, and both plugins serve: the
+plugin keeps no state of its own, a create is repeatable by name (CSI9), and
+an attach or a detach writes under the pool's revision (CSI10). The
+provisioner and the attacher watch Kubernetes' objects and would act twice on
+each, so each elects one leader through a lease in the driver's namespace; the
+two leaders can sit in different copies, and a leader whose lease runs out
+stops, its container starting again as a follower. A lease is no fence: at a
+handover the old leader acts until its own renewal deadline passes, a few
+seconds in which both copies can act, which CSI9's create by name and CSI10's
+revision cover. When a machine is lost, the other copy takes both leases
+within one lease time and one retry, about 20 seconds on the lab. The copies
+prefer two machines, as a preference and no rule, so that a cluster of one
+machine and a rolling update on two still run both; they tolerate the
+control-plane taint, and leave a machine Kubernetes cannot reach after 30
+seconds rather than the default 300, so that a second copy runs elsewhere
+soon, about 75 seconds after the loss on the lab, and a second loss finds two
+copies again. They take the cluster-critical priority, for CSI18's reason.
+Every container of the pod runs as one unprivileged user, the owner of the
+socket they share, with no capability, no privilege escalation, the runtime's
+default system call filter and a read-only root. The pod keeps its account
+token, which the sidecars need, and the plugin's container keeps it too:
+hiding it from one container takes a token volume written by hand in the
+others, and the plugin holds the gateway, the larger power. The sidecars'
+rights within the driver's namespace, the leases, the capacity objects and the
+lookup of the pod's owner, which every provisioner makes at its start, are a
+namespaced role; their rights over the volume objects are a cluster role. The
+plugin reads the gateway address and the cdc addresses from a config map, as
+environment, and the node plugin reads the cdc addresses from the same map, so
+the manifests of a cluster differ from the examples in that map, in the
+storage classes, which name the operator's clusters, in the kubelet directory
+where a distribution keeps the kubelet elsewhere, and in the driver's image
+name where a registry serves the image (Deployment). The driver object asks
+for attach, no pod information on mount, the persistent lifecycle and capacity
+tracking, since the plugin answers capacity; the leading provisioner polls it
+and owns the capacity objects, for every class of the driver, those with
+immediate binding included, since no scheduler needs those but the capacity
+objects are the one place Kubernetes shows dnv's free space.
+
+CSI20. **The driver opens one port per pod, and an example policy keeps other
+pods off dnv.** The plugins serve their unix sockets alone; the controller
+copy's liveness probe answers on its pod's own address, which the kubelet
+probes, and the node pod's on the node's loopback (CSI18). Every other pod of
+the cluster reaches dnv's ports through its machine unless something stops it,
+and dnv checks no caller (`architecture.md`, Known limits).
+`deploy/networkpolicy.yaml` is the example: one copy in every namespace whose
+pods are not dnv's, `kube-system` aside where a dnv machine is a Kubernetes
+node (below), an egress policy that lets the namespace's pods reach every IPv4
+address but those of the dnv machines, and the API server's address and port
+where a dnv machine runs it. The except list names every address of each dnv
+machine, a Kubernetes node's pod bridge and overlay addresses and a docker
+bridge included, since a dnv program bound to every address answers on each.
+The policy is per namespace and allows only, so it allows all but dnv's
+addresses. It names addresses, not ports, which keeps the list short and
+closes a dnv program on whatever port it listens on, and so every other port
+of a dnv machine too: the API server rule is the one way through, and it names
+the API server's endpoint, which the policy sees after the cluster translates
+the service address. Where a dnv machine is also a Kubernetes node, the
+namespace's pods lose that node's own services with it: its kubelet, which a
+metrics service in `kube-system` reads, any service on the node's host
+network, and a node-local name cache, whose addresses sit on the node and so
+stand in the except list. So `kube-system` takes no copy there, and a
+namespace whose pods need such a service adds a rule for its address and port,
+as the API server rule does. The cluster's name service otherwise needs no
+rule: it runs in pods, whose addresses the first rule allows. The driver's
+namespace takes no copy: its pods must reach dnv, the controller copies the
+gateway and the node pods the cdcs and the cntlrs, and the node pods run on
+the host network, which no policy holds. On k3s, whose embedded controller
+enforces egress policies, the policy holds for a new pod within about a second
+of its start, so its first connects can pass; network software that enforces
+no egress policy, flannel alone, gives it no effect.
 
 ## The suite's dnv stack
 
@@ -616,8 +691,13 @@ path to the old primary though every attach names a dead cdc, and the data
 written before it reads back, for one pool at a time, since no case stops the
 cn agent of a controller node that holds many pools; a node plugin away during
 a failover drops the old primary's path at its start; eight volumes live at
-once; the
-upstream conformance test passes; and every delete leaves nothing behind.
+once; the two controller copies lead through two leases, and when the machine
+of the copy that leads is cut off, the other copy takes both leases and
+serves a new volume, and a new copy runs elsewhere while that machine stays
+cut; the example network policy keeps the test namespace's pods off the
+gateway's, the cdc's and the agents' ports, which a pod of an open namespace
+reaches, and leaves them the API server and the name service; the upstream
+conformance test passes; and every delete leaves nothing behind.
 No case reads back a write made during a failover, which a failover can lose
 in the cases that `architecture.md`, Known limits, A failover while the
 old primary serves can lose an acknowledged write, lists.
@@ -664,7 +744,9 @@ pipes them into the k3s image store of every node, so no pod pulls them and
 no registry of the suite's takes part. The sidecar images the manifests
 name come from their public registry, which each node pulls from once.
 
-CSI5. **Cleanup removes what the suite started and nothing else.** The test
+CSI5. **Cleanup removes what the suite started and nothing else.** The
+machine case's cut of a host goes first, since Kubernetes cannot confirm the
+deletes of a cut host's pods; then the test namespace, the policy case's open
 namespace and the driver's namespace are deleted and waited for, the
 driver's cluster-wide objects and the storage classes with them; then the
 hosts' connections of the driver's and dnv's and the discovery connections
@@ -674,7 +756,10 @@ rules, with the controller nodes' nvmet entries of the two hosts that
 attaches made, then the control plane's processes, the imported images and the
 work directories, holder first. Cleanup runs at the start of every run and, on
 success only, at its end; a failing run leaves everything in place and dumps
-diagnostics. k3s, the hostnames and the identity files stay.
+diagnostics, but for the cut, which it removes after the diagnostics, and
+which a timer on the host removes in any case once the cut's time limit has
+passed, so that no cut outlives a run killed before its cleanup. k3s, the
+hostnames and the identity files stay.
 
 CSI6. **Test pods run on the hosts.** The control-plane node carries a
 no-schedule taint the suite ensures on every run, and every pod names its
@@ -685,16 +770,35 @@ host.
 Every case runs on the suite's dnv stack with the driver deployed from the
 manifests, the config map and the storage classes of the suite in place of
 the examples; the IO pods run the driver's own image, since it carries the
-tools they need and is already on every node. Each case that creates
-volumes ends with the check that nothing is left: no pool in the cluster,
-no dm device, array or export on a node, no connection of the driver's on
-a host.
+tools they need and is already on every node. The deploy pulls the sidecar
+images a node lacks, on every node, so that a controller copy that moves
+starts at once, and checks the driver's shape: two controller copies on two
+nodes, both leases held by controller pods, the critical priorities the pods
+were given, and the node probe listening on the loopback alone; the test
+namespace then carries the example network policy, so every case runs under
+it. Each case that creates volumes ends with the check that nothing is left:
+no pool in the cluster, no dm device, array or export on a node, no connection
+of the driver's on a host.
 
 **k8s.** The suite writes a program that prints one line and sleeps, builds
 it static, wraps it in an image from scratch and imports it into every
 node. It applies one pod per host, each pinned to its host by node selector
 and never pulling. Each pod is Running on its host, each log is the one
 line, and the pods go.
+
+**policy.** A pod of the driver's image on host0 in the test namespace, under
+the policy, and one in a namespace of the case's own without it, try the
+ports of the dnv stack's programs: the gateway and the cdc, a controller
+node's agent and a disk node's agent. Each port is open from the open
+namespace, else its closing would prove nothing, and closed from the test
+namespace, which the case waits for within a bound, since the policy holds
+for a new pod only after about a second. The policy closes a machine's
+address whole, so an agent's port stands for every port of its machine, the
+NVMe/TCP port included, which is not tried: an nvmet port listens only once
+a subsystem is linked to it, and no pool exists when the case runs. etcd
+listens on the loopback alone and is not tried either. From the test
+namespace the API server's service address answers and the cluster's name
+service resolves a name. The pods and the open namespace go.
 
 **volume.** The first class's capacity object is published with a capacity
 above zero, and comes to hold the gateway's placeable bytes for the class's
@@ -743,6 +847,22 @@ case. The agent is given back, then every delete, and nothing left.
 a pattern and checking it; the cluster holds eight pools; then every
 delete, and nothing left.
 
+**machine.** Every driver container has run without a restart so far,
+which the case checks before it cuts anything, since a sidecar that loses its
+lease exits by design. Both leases are brought to the copy on one host H,
+never the control-plane guest: the other copy is given a lower deletion cost
+and the controller scaled to one copy, which the ReplicaSet makes by deleting
+it, and once H's copy holds both leases, back to two, the new copy on a node
+other than H. H is then cut off the network by a firewall table that keeps
+the suite's ssh and removes itself after a time limit; a new claim and a pod
+on the other host follow at once. Within a bound the copy that is not cut
+holds both leases, and the claim is bound and its pod writes and reads its
+pattern; within a second bound, which the default 300 seconds of the
+copies' toleration would pass, a new copy runs Ready on a node other than H
+while H stays cut. H is healed, comes back Ready with two copies and its
+node pod, and no lease names the copy that was cut; then every delete, and
+nothing left.
+
 **sanity.** csi-sanity, the upstream conformance test, built on the suite's
 machine from its pinned module in a module of its own, runs on host0 against
 both plugins started there as plain processes with the lab's gateway and
@@ -759,8 +879,9 @@ worker's constants printer, and the pinned etcd release. Then the helper is
 shipped and the start cleanup runs, before any guest check, so that a port
 check never judges what a failed run left in place. Then the guest checks:
 passwordless sudo on every guest; on the three Kubernetes guests the
-hostnames and machine-ids distinct (CSI2), native multipath and the memory
-floor on the hosts, and the hosts' identities present and different; on the
+hostnames and machine-ids distinct (CSI2), native multipath, the memory
+floor and the firewall and timer tools of the machine case on the hosts, and
+the hosts' identities present and different; on the
 node guests the agents' tools and modules and this suite's ports free. Then
 k3s: present at the pin or installed (CSI1), every node Ready at the pin,
 the taint (CSI6), and the cluster's own name service available. Then the
@@ -769,6 +890,9 @@ dnv stack and the driver.
 ### Diagnostics on failure
 
 A failing run prints the nodes, every pod, the pods and events of the
-suite's namespace, and from each guest its facts, its k3s state, its
-memory and the tail of its k3s journal. A run asked to keep its logs copies
-the k3s journal of each guest to the suite's machine at its end.
+suite's namespace, the state of the machine case's cut on each host, the
+sidecars' leases, the logs of both controller copies and every node plugin,
+with the previous run of a sidecar that restarted, and from each guest its
+facts, its k3s state, its memory and the tail of its k3s journal. A run asked
+to keep its logs copies the k3s journal of each guest to the suite's machine
+at its end.

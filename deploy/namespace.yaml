@@ -1,5 +1,11 @@
-# The namespace the driver's pods run in (csi.md, Deployment).
+# The namespace the driver's pods run in (csi.md, Deployment). The node pods
+# run privileged on the host's network, which only the privileged level of
+# Kubernetes' pod security admits, so the namespace asks for that level: a
+# cluster whose default level is stricter would otherwise refuse the node
+# pods with no sign but the daemon set's events.
 apiVersion: v1
 kind: Namespace
 metadata:
   name: dnv-csi
+  labels:
+    pod-security.kubernetes.io/enforce: privileged

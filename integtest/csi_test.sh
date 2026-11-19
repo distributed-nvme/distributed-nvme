@@ -18,8 +18,8 @@
 #
 #   optional: [--only <case>] [--cleanup-only] [--slice-cnt N] [--keep-logs DIR]
 #
-# Cases, in order: k8s, volume, failover, restart, many, sanity. `--only`
-# picks one.
+# Cases, in order: k8s, policy, volume, failover, restart, many, machine,
+# sanity. `--only` picks one.
 # Cleanup runs at the START and, on success only, at the END (CSI5): a
 # failing run leaves its pods, pools, processes and work directories in place
 # and dumps diagnostics instead.
@@ -110,6 +110,18 @@ DRIVER_NS=dnv-csi
 TEST_NS=dnv-csi-test
 SC_NAME=dnv-csi-it
 SC_XFS=dnv-csi-it-xfs
+# The namespace of the policy case's control pod: no network policy holds
+# it, so a port it reaches is open, and the test namespace's policy is what
+# closes it there (csi.md, The cases, policy).
+OPEN_NS=dnv-csi-open
+# The sidecar images the manifests name, which driver_up pulls on every node
+# so that a controller copy that moves starts without a pull.
+SIDECARS=$(awk '/image: registry.k8s.io/ {print $2}' "$DEPLOY_DIR/controller.yaml" "$DEPLOY_DIR/node.yaml" | sort -u | tr '\n' ' ')
+# The machine case's cut of a host: its nft table and the systemd unit that
+# removes it after CUT_LIMIT seconds, whatever becomes of the run.
+CUT_TABLE=dnv_csi_cut
+CUT_UNIT=dnv-csi-cut-undo
+CUT_LIMIT=600
 IMAGE=$(awk '/image: dnv-csi:/ {print $2; exit}' "$DEPLOY_DIR/controller.yaml")
 IMAGE_REF="docker.io/library/$IMAGE"
 # The smoke image of the k8s case.
@@ -184,6 +196,18 @@ WAIT_PATH_DROP=60
 # to drop the old primary's path: its first pass runs at its start, and its
 # timer, which would otherwise find the change, is 30 s away (csi.md CSI15).
 RESTART_DROP=10
+# How long a namespace's network policy may take to hold for a new pod
+# (about a second on the lab's k3s); the policy case retries within it.
+WAIT_POLICY=30
+# How long the controller copy that is not cut off may take to hold both
+# leases after the cut: one lease time and one retry period of the sidecars'
+# election, about 20 s on the lab, with a margin.
+WAIT_LEASE=60
+# How long a new controller copy may take to run on another node while its
+# host stays cut: the node controller's grace before it marks the node
+# unreachable (40 s on the lab's k3s), the copies' 30 s toleration of that
+# mark, and a start; the default toleration, 300 s, would pass it.
+WAIT_REPLACE=150
 WAIT_NS_GONE=300
 WAIT_HOST_CLEAN=120
 SANITY_TIMEOUT=2400
@@ -195,7 +219,7 @@ FRAME=@@csi-frame@@
 SSH_OPTS=(-o BatchMode=yes -o ConnectTimeout=10 -o ServerAliveInterval=15
 	-o ServerAliveCountMax=4 -o LogLevel=ERROR)
 
-CASES=(k8s volume failover restart many sanity)
+CASES=(k8s policy volume failover restart many machine sanity)
 
 # ---------------------------------------------------------------------------
 # State
@@ -219,6 +243,7 @@ TRACE="-"
 CASE="-"
 SETUP_DONE=0
 CLEANUP_DIRTY=0
+CUT_TRIED=0
 RUN_CASES=()
 CP_NAME=""
 HOST_NAME=()
@@ -292,6 +317,11 @@ on_exit() {
 		log ""
 		log "########## diagnostics ##########"
 		diagnostics || true
+		# A failing run leaves its debris in place, but never the machine
+		# case's cut: a host cut off breaks every later run (CSI5).
+		if [ "$CUT_TRIED" -eq 1 ]; then
+			uncut_hosts
+		fi
 		log ""
 		if [ "$CLEANUP_DIRTY" -eq 1 ]; then
 			log "the cleanup did not finish; see the WARNING lines above"
@@ -657,6 +687,8 @@ TRSVCID_MAX="$TRSVCID_MAX"
 K3S_INSTALL_URL="$K3S_INSTALL_URL"
 SMOKE_IMAGE_REF="$SMOKE_IMAGE_REF"
 IMAGE_REF="$IMAGE_REF"
+CUT_TABLE="$CUT_TABLE"
+CUT_UNIT="$CUT_UNIT"
 DISC_NQN=nqn.2014-08.org.nvmexpress.discovery
 EOF
 	udev_rules_source || return 1
@@ -735,6 +767,83 @@ ports_busy() { # <port…>
 	for p in "$@"; do
 		listening "$p" && printf '%s\n' "$p"
 	done
+	return 0
+}
+
+# listen_addrs <port> prints the local address of every socket that listens
+# on the port, one per line.
+listen_addrs() { # <port>
+	ss -ltnH "sport = :$1" 2>/dev/null | awk '{print $4}' | sed 's/:[0-9]*$//' | sort -u
+	return 0
+}
+
+# --- the machine case's cut (csi.md, The cases, machine) ---------------------
+
+# net_cut drops every packet of the machine but the loopback's and ssh's, so
+# that Kubernetes loses the node and the suite keeps its shell, and schedules
+# the cut's own removal after <secs> seconds through a systemd timer, so that
+# a run killed before its cleanup leaves no cut behind. It refuses on a guest
+# that is not a k3s agent, so the k3s server is never cut. The three verbs of
+# the cut carry the net_ prefix: a helper function named after a command,
+# such as cut, would shadow that command in every verb (ship_helpers refuses
+# such a name).
+net_cut() { # <secs>
+	if ! systemctl is-active --quiet k3s-agent || systemctl is-active --quiet k3s; then
+		echo "net_cut: refused: this guest is not a k3s agent" >&2
+		return 1
+	fi
+	net_uncut >/dev/null
+	systemd-run --quiet --unit="$CUT_UNIT" --on-active="$1" \
+		/usr/sbin/nft delete table inet "$CUT_TABLE" || return 1
+	nft -f - <<NFT || return 1
+table inet $CUT_TABLE {
+	chain input {
+		type filter hook input priority -400; policy drop;
+		iif "lo" accept
+		tcp dport 22 accept
+	}
+	chain output {
+		type filter hook output priority -400; policy drop;
+		oif "lo" accept
+		tcp sport 22 accept
+	}
+	chain forward {
+		type filter hook forward priority -400; policy drop;
+	}
+}
+NFT
+	echo cut
+	return 0
+}
+
+# net_uncut removes the cut and its timer; a guest with none is done.
+net_uncut() {
+	nft delete table inet "$CUT_TABLE" >/dev/null 2>&1 || true
+	systemctl stop "$CUT_UNIT.timer" >/dev/null 2>&1 || true
+	systemctl reset-failed "$CUT_UNIT.timer" "$CUT_UNIT.service" >/dev/null 2>&1 || true
+	echo uncut
+	return 0
+}
+
+# net_cut_state prints "cut" while the cut's table stands, "none" otherwise.
+net_cut_state() {
+	if nft list table inet "$CUT_TABLE" >/dev/null 2>&1; then echo cut; else echo none; fi
+	return 0
+}
+
+# prepull pulls images into the k3s image store, those it lacks alone, so
+# that a controller copy that moves to this node starts without a pull and a
+# registry that does not answer stops no run whose images are there.
+prepull() { # <ref…>
+	local r
+	for r in "$@"; do
+		k3s crictl inspecti "$r" >/dev/null 2>&1 && continue
+		k3s crictl pull "$r" >/dev/null 2>&1 || {
+			echo "prepull: pulling $r failed" >&2
+			return 1
+		}
+	done
+	echo pulled
 	return 0
 }
 
@@ -1592,6 +1701,17 @@ ship_helpers() {
 	tmp=$(mktemp) || die "mktemp on the driver failed"
 	helper_source >"$tmp" || die "generating the helper failed"
 	bash -n "$tmp" || die "the generated helper is not valid bash"
+	# A helper function named after a command or a builtin would shadow it
+	# in every verb that calls it, so no function may take such a name. The
+	# child ends with exit 0, since a name that is no command fails its
+	# `type -t`, and the last such failure would otherwise be the child's
+	# status and end this script under set -e.
+	local fns clash
+	fns=$(sed -n 's/^\([A-Za-z_][A-Za-z0-9_]*\)() {.*/\1/p' "$tmp")
+	clash=$(env -i PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin \
+		bash --norc --noprofile -c 'for f; do t=$(type -t "$f") && printf "%s (%s) " "$f" "$t"; done; exit 0' _ $fns) ||
+		die "checking the generated helper's function names failed"
+	[ -z "$clash" ] || die "the generated helper names functions after commands or builtins, which it would shadow: $clash"
 	for target in "$CP" "${HOST[@]}" "${CN[@]}" "${DN[@]}"; do
 		scp -q "${SSH_OPTS[@]}" "$tmp" "$target:$HELPER" ||
 			die "scp of the helper to ${target##*@} failed"
@@ -1685,7 +1805,7 @@ preflight_guests() {
 		assert_eq "$(fact_of "$out" multipath)" Y "host$h: nvme_core.multipath"
 		mem=$(fact_of "$out" mem_total_kib)
 		assert_ge "$mem" 3000000 "host$h: MemTotal in KiB (raise the guest's memory)"
-		missing=$(helper_host "$h" tools nvme uuidgen systemctl udevadm) ||
+		missing=$(helper_host "$h" tools nvme uuidgen systemctl udevadm nft systemd-run ss) ||
 			die "host$h: listing its tools failed"
 		[ -z "$missing" ] || die "host$h: missing tool(s): $(printf '%s' "$missing" | tr '\n' ' ')"
 		missing=$(helper_host "$h" modules nvme-tcp) || die "host$h: modprobe failed"
@@ -2051,14 +2171,20 @@ image_import() { # <image>
 # driver_up applies the manifests, with a config map and a storage class of
 # the suite's own in place of the examples, and waits for both plugins.
 driver_up() {
-	stage 06 "build the image and import it into every node"
+	stage 06 "build the image and import it into every node, and pull the sidecars on every node"
 	image_build
 	image_import "$IMAGE"
+	local out h
+	out=$(helper_cp prepull $SIDECARS) || die "cp: pulling the sidecar images failed: $out"
+	for h in "${!HOST[@]}"; do
+		out=$(helper_host "$h" prepull $SIDECARS) || die "host$h: pulling the sidecar images failed: $out"
+	done
 
 	stage 07 "deploy the driver: $DRIVER_NAME in $DRIVER_NS"
 	local f
 	for f in namespace csidriver controller-serviceaccount node-serviceaccount \
-		controller-clusterrole controller-clusterrolebinding; do
+		controller-clusterrole controller-clusterrolebinding controller-role \
+		controller-rolebinding; do
 		kc_apply <"$DEPLOY_DIR/$f.yaml" || die "applying $f.yaml failed"
 	done
 	kc_apply <<EOF || die "applying the config map failed"
@@ -2115,6 +2241,83 @@ metadata:
 EOF
 	log "  driver pods:"
 	kc -n "$DRIVER_NS" get pods -o wide >&2 || true
+
+	stage 08 "the driver's shape: two controller copies leading through two leases, critical priority, the node probe on the loopback"
+	wait_until "$WAIT_LEASE" "both leases held by controller pods" leases_held
+	local nodes
+	nodes=$(kc -n "$DRIVER_NS" get pods -l app=dnv-csi-controller \
+		-o 'jsonpath={range .items[*]}{.spec.nodeName}{"\n"}{end}') ||
+		die "reading the controller copies' nodes failed"
+	assert_eq "$(printf '%s\n' "$nodes" | grep -c .)" 2 "controller copies"
+	assert_eq "$(printf '%s\n' "$nodes" | sort -u | grep -c .)" 2 \
+		"distinct nodes of the controller copies ($(printf '%s' "$nodes" | tr '\n' ' '))"
+	assert_eq "$(pods_priority app=dnv-csi-controller)" \
+		"$(kc get priorityclass system-cluster-critical -o 'jsonpath={.value}')" \
+		"the controller copies' priority"
+	assert_eq "$(pods_priority app=dnv-csi-node)" \
+		"$(kc get priorityclass system-node-critical -o 'jsonpath={.value}')" \
+		"the node pods' priority"
+	for h in "${!HOST[@]}"; do
+		assert_eq "$(helper_host "$h" listen_addrs 9809 | tr '\n' ' ')" "127.0.0.1 " \
+			"host$h: the addresses the node plugin's probe listens on"
+	done
+	# The test namespace's pods are kept off every dnv machine, which the
+	# policy case proves and every later case runs under (csi.md CSI20).
+	policy_apply "$TEST_NS"
+}
+
+# leases_held answers whether both sidecar leases name a controller copy
+# that runs.
+leases_held() {
+	local holders pods l
+	holders=$(lease_holders) || return 1
+	pods=$(kc -n "$DRIVER_NS" get pods -l app=dnv-csi-controller \
+		--field-selector status.phase=Running -o 'jsonpath={.items[*].metadata.name}') || return 1
+	[ "$(printf '%s\n' "$holders" | grep -c .)" = 2 ] || return 1
+	for l in $holders; do
+		case " $pods " in *" $l "*) ;; *) return 1 ;; esac
+	done
+}
+
+# lease_holders prints the holder of each of the two sidecar leases, one per
+# line: the provisioner's and the attacher's.
+lease_holders() {
+	local l
+	for l in csi-dnv-io external-attacher-leader-csi-dnv-io; do
+		kc -n "$DRIVER_NS" get lease "$l" -o 'jsonpath={.spec.holderIdentity}{"\n"}' 2>/dev/null || return 1
+	done
+}
+
+# pods_priority prints the distinct priorities of the driver's pods of one
+# label.
+pods_priority() { # <label selector>
+	kc -n "$DRIVER_NS" get pods -l "$1" -o 'jsonpath={range .items[*]}{.spec.priority}{"\n"}{end}' |
+		sort -u | tr -d '\n'
+}
+
+# policy_apply applies the example network policy to a namespace, with every
+# address of the suite's dnv machines in its except list and the API server's
+# address in its second rule. Every dnv program of the suite listens on its
+# guest's one address (etcd on the loopback), so those addresses are all the
+# policy must list here.
+policy_apply() { # <namespace>
+	local addrs a
+	addrs=$(printf '%s\n' "$CP_IP" "${CN_IP[@]}" "${DN_IP[@]}" | sort -u)
+	awk -v addrs="$addrs" -v api="$CP_IP" '
+		/192\.0\.2\.10\/32 # every address/ {
+			n = split(addrs, a, "\n")
+			for (i = 1; i <= n; i++) if (a[i] != "") print "              - " a[i] "/32"
+			next
+		}
+		/192\.0\.2\.10\/32 # the API server/ { sub(/192\.0\.2\.10\/32 #.*/, api "/32") }
+		{ print }
+	' "$DEPLOY_DIR/networkpolicy.yaml" |
+		ssh "${SSH_OPTS[@]}" "$CP" "sudo -n k3s kubectl apply -n $1 -f -" >/dev/null ||
+		die "applying the network policy to $1 failed"
+	a=$(kc -n "$1" get networkpolicy dnv-keep-off -o 'jsonpath={.spec.egress[0].to[0].ipBlock.except}') ||
+		die "reading the network policy of $1 failed"
+	assert_eq "$(printf '%s' "$a" | grep -o '/32' | wc -l)" "$(printf '%s\n' "$addrs" | grep -c .)" \
+		"the addresses the policy of $1 keeps its pods off"
 }
 
 k8s_ns_gone() { ! kc get namespace "$1" >/dev/null 2>&1; }
@@ -2129,11 +2332,14 @@ driver_down() {
 		log "  cp: no running k3s server, nothing to delete in Kubernetes"
 		return 0
 	fi
-	kc_ok delete namespace "$TEST_NS" --ignore-not-found --wait=false >/dev/null 2>&1
-	if ! wait_cleanup "$WAIT_NS_GONE" k8s_ns_gone "$TEST_NS"; then
-		log "WARNING: the namespace $TEST_NS is still there after ${WAIT_NS_GONE}s"
-		CLEANUP_DIRTY=1
-	fi
+	local ns
+	for ns in "$TEST_NS" "$OPEN_NS"; do
+		kc_ok delete namespace "$ns" --ignore-not-found --wait=false >/dev/null 2>&1
+		if ! wait_cleanup "$WAIT_NS_GONE" k8s_ns_gone "$ns"; then
+			log "WARNING: the namespace $ns is still there after ${WAIT_NS_GONE}s"
+			CLEANUP_DIRTY=1
+		fi
+	done
 	kc_ok delete storageclass "$SC_NAME" "$SC_XFS" --ignore-not-found >/dev/null 2>&1
 	kc_ok delete namespace "$DRIVER_NS" --ignore-not-found --wait=false >/dev/null 2>&1
 	if ! wait_cleanup "$WAIT_NS_GONE" k8s_ns_gone "$DRIVER_NS"; then
@@ -2187,6 +2393,9 @@ cleanup_verb() { # <label> <sentinel> <ssh wrapper> [<index>] <verb…>
 cleanup_all() {
 	local h v
 	CLEANUP_DIRTY=0
+	# The machine case's cut first: with a host cut off, Kubernetes cannot
+	# confirm the deletes of its pods, and the namespaces would not go.
+	uncut_hosts
 	# Holder first: the pods and the driver, then the hosts' connections, then
 	# the controller nodes, the disk nodes and the control plane.
 	driver_down
@@ -2217,9 +2426,22 @@ cleanup_all() {
 # Diagnostics and kept logs
 # ---------------------------------------------------------------------------
 
+# uncut_hosts removes the machine case's cut from both hosts, whatever
+# state the run left them in.
+uncut_hosts() {
+	local h
+	for h in "${!HOST[@]}"; do
+		cleanup_verb "host$h" uncut ssh_host "$h" net_uncut || true
+	done
+}
+
 diagnostics() {
 	local h v
 	QUIET=1
+	log "--- the machine case's cut on the hosts"
+	for h in "${!HOST[@]}"; do log "  host$h: $(helper_host_ok "$h" net_cut_state 2>/dev/null)"; done
+	log "--- the sidecars' leases"
+	kc_ok -n "$DRIVER_NS" get lease -o wide >&2
 	log "--- kubectl get nodes -o wide"
 	kc_ok get nodes -o wide >&2
 	log "--- kubectl get pods -A -o wide"
@@ -2231,8 +2453,13 @@ diagnostics() {
 	log "--- kubectl get events -n $TEST_NS"
 	kc_ok get events -n "$TEST_NS" --sort-by=.lastTimestamp >&2
 	log "--- driver pod logs"
-	kc_ok -n "$DRIVER_NS" logs deploy/dnv-csi-controller -c dnv-csi --tail=60 >&2
-	kc_ok -n "$DRIVER_NS" logs deploy/dnv-csi-controller -c csi-provisioner --tail=30 >&2
+	kc_ok -n "$DRIVER_NS" logs -l app=dnv-csi-controller -c dnv-csi --prefix --tail=60 >&2
+	kc_ok -n "$DRIVER_NS" logs -l app=dnv-csi-controller -c csi-provisioner --prefix --tail=30 >&2
+	kc_ok -n "$DRIVER_NS" logs -l app=dnv-csi-controller -c csi-attacher --prefix --tail=30 >&2
+	# A sidecar that lost its lease exits, and its last words are in the
+	# container's previous run.
+	kc_ok -n "$DRIVER_NS" logs -l app=dnv-csi-controller -c csi-provisioner --prefix --previous --tail=10 >&2
+	kc_ok -n "$DRIVER_NS" logs -l app=dnv-csi-controller -c csi-attacher --prefix --previous --tail=10 >&2
 	kc_ok -n "$DRIVER_NS" logs -l app=dnv-csi-node -c dnv-csi --prefix --tail=60 >&2
 	log "--- dnvctl sp list"
 	# In a subshell: ctl_exec dies when cp cannot run dnvctl, and a dump
@@ -2510,6 +2737,101 @@ EOF
 		assert_eq "$out" "$SMOKE_LINE" "the log of $pod"
 		delete_pod "$pod"
 	done
+	log "=== $CASE: PASS"
+}
+
+# probe_pod applies a pod of the driver's image on host0 in a namespace,
+# which sleeps so that the policy case can run its connects in it.
+probe_pod() { # <namespace> <pod>
+	kc_apply <<EOF || die "applying the probe pod $2 in $1 failed"
+apiVersion: v1
+kind: Pod
+metadata:
+  name: $2
+  namespace: $1
+spec:
+  nodeSelector:
+    kubernetes.io/hostname: ${HOST_NAME[0]}
+  restartPolicy: Never
+  terminationGracePeriodSeconds: 1
+  containers:
+    - name: probe
+      image: $IMAGE
+      imagePullPolicy: IfNotPresent
+      command: ["sleep", "1000000"]
+EOF
+	kc -n "$1" wait --for=condition=Ready "pod/$2" "--timeout=${WAIT_POD}s" >/dev/null ||
+		die "the probe pod $2 in $1 did not run"
+}
+
+# port_probe prints "open" when a pod reaches an address and port within
+# three seconds, "closed" when it does not, and nothing when the try itself
+# failed, as when the exec into the pod did, so that a failed try is never
+# read as either answer.
+port_probe() { # <namespace> <pod> <ip> <port>
+	local out
+	out=$(QUIET=1 kc -n "$1" exec "$2" -- bash -c \
+		"timeout 3 bash -c '</dev/tcp/$3/$4' 2>/dev/null; echo rc=\$?" 2>/dev/null) || true
+	case "$out" in
+	*rc=0*) echo open ;;
+	*rc=[1-9]*) echo closed ;;
+	esac
+}
+
+port_open() { [ "$(port_probe "$@")" = open ]; }
+port_closed() { [ "$(port_probe "$@")" = closed ]; }
+
+# case_policy: the example network policy, applied to the test namespace,
+# keeps its pods off the gateway's, the cdc's and the agents' ports, which a
+# pod of a namespace without the policy reaches, and leaves them the API
+# server and the cluster's name service (csi.md, The cases, policy). etcd
+# listens on the loopback alone in the suite, where no pod reaches it with or
+# without the policy, so it is not probed.
+case_policy() {
+	CASE=policy
+	local t ip port api
+	stage 01 "a probe pod on host0 in the test namespace, under the policy, and one in a namespace without it"
+	kc_apply <<EOF || die "creating the namespace $OPEN_NS failed"
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: $OPEN_NS
+EOF
+	probe_pod "$OPEN_NS" open-probe
+	probe_pod "$TEST_NS" test-probe
+	# The agents' ports stand for their machines' addresses, which the policy
+	# closes whole. The NVMe/TCP ports are not probed: an nvmet port listens
+	# only once a subsystem is linked to it, and no pool exists yet.
+	local targets=("$CP_IP:$GW_PORT" "$CP_IP:$CDC_PORT"
+		"${CN_IP[0]}:$CN_GRPC_PORT" "${DN_IP[0]}:$DN_GRPC_PORT")
+
+	stage 02 "the gateway's, the cdc's and the agents' ports open from the open namespace and closed from the test one"
+	for t in "${targets[@]}"; do
+		ip=${t%:*}
+		port=${t#*:}
+		wait_until "$WAIT_SHORT" "$t open from $OPEN_NS, without which its closing proves nothing" \
+			port_open "$OPEN_NS" open-probe "$ip" "$port"
+		# A new pod's first connects can pass before the policy holds for
+		# it, about a second on the lab's k3s, so the closed answer is
+		# waited for.
+		wait_until "$WAIT_POLICY" "$t closed from $TEST_NS" port_closed "$TEST_NS" test-probe "$ip" "$port"
+		log "  $t: open from $OPEN_NS, closed from $TEST_NS"
+	done
+
+	stage 03 "the API server and the name service stay open from the test namespace"
+	api=$(kc -n default get service kubernetes -o 'jsonpath={.spec.clusterIP}') ||
+		die "reading the API server's service address failed"
+	wait_until "$WAIT_SHORT" "the API server's service $api:443 open from $TEST_NS" \
+		port_open "$TEST_NS" test-probe "$api" 443
+	kc -n "$TEST_NS" exec test-probe -- getent hosts kubernetes.default.svc.cluster.local >/dev/null ||
+		die "the cluster's name service does not answer from $TEST_NS"
+
+	stage 04 "the probe pods go"
+	kc delete pod -n "$OPEN_NS" open-probe --ignore-not-found --wait=false >/dev/null || true
+	kc delete pod -n "$TEST_NS" test-probe --ignore-not-found --wait=false >/dev/null || true
+	wait_until "$WAIT_POD" "pod test-probe gone" pod_gone test-probe
+	kc delete namespace "$OPEN_NS" --ignore-not-found --wait=false >/dev/null || true
+	wait_until "$WAIT_NS_GONE" "the namespace $OPEN_NS gone" k8s_ns_gone "$OPEN_NS"
 	log "=== $CASE: PASS"
 }
 
@@ -2869,6 +3191,169 @@ case_many() {
 	for i in $(seq 0 7); do delete_claim "m$i"; done
 	nothing_left
 	log "=== $CASE: PASS"
+}
+
+# restarts_zero answers whether no container of the driver's pods has
+# restarted. A sidecar that loses its lease exits, so the check runs before
+# the machine case cuts a host.
+restarts_zero() {
+	local out
+	out=$(kc -n "$DRIVER_NS" get pods \
+		-o 'jsonpath={range .items[*]}{range .status.containerStatuses[*]}{.restartCount}{"\n"}{end}{end}') ||
+		return 1
+	[ -n "$out" ] && ! printf '%s\n' "$out" | grep -qvx 0
+}
+
+# live_copies prints the name and the node of each controller copy that is
+# not being deleted, one per line: a copy the ReplicaSet or the case deleted
+# stays listed while it terminates, and must not count as a copy.
+live_copies() {
+	kc -n "$DRIVER_NS" get pods -l app=dnv-csi-controller \
+		-o 'jsonpath={range .items[*]}{.metadata.name} del={.metadata.deletionTimestamp} {.spec.nodeName}{"\n"}{end}' 2>/dev/null |
+		awk '$2 == "del=" {print $1, $3}'
+}
+
+# copy_on prints the name of each controller copy on a node that is not
+# being deleted, one per line, nothing for none.
+copy_on() { # <node name>
+	live_copies | awk -v n="$1" '$2 == n {print $1}'
+}
+
+# copies_ready answers whether exactly <n> controller copies that are not
+# being deleted run, each of them Ready.
+copies_ready() { # <n>
+	local out
+	out=$(kc -n "$DRIVER_NS" get pods -l app=dnv-csi-controller \
+		-o 'jsonpath={range .items[*]}{.metadata.name} del={.metadata.deletionTimestamp} {.status.conditions[?(@.type=="Ready")].status}{"\n"}{end}' 2>/dev/null) ||
+		return 1
+	[ "$(printf '%s\n' "$out" | awk '$2 == "del="' | wc -l)" = "$1" ] &&
+		[ "$(printf '%s\n' "$out" | awk '$2 == "del=" && $3 == "True"' | wc -l)" = "$1" ]
+}
+
+# leases_on answers whether both leases name one pod.
+leases_on() { # <pod>
+	[ "$(lease_holders | grep -cx "$1")" = 2 ]
+}
+
+node_ready() { # <node name>
+	[ "$(kc get node "$1" -o 'jsonpath={.status.conditions[?(@.type=="Ready")].status}' 2>/dev/null)" = True ]
+}
+
+# replaced_off answers whether a Ready controller copy that is not being
+# deleted runs on a node other than the cut host, other than the copy that
+# took the leases.
+replaced_off() { # <cut node> <surviving pod>
+	kc -n "$DRIVER_NS" get pods -l app=dnv-csi-controller \
+		-o 'jsonpath={range .items[*]}{.metadata.name} {.spec.nodeName} {.status.conditions[?(@.type=="Ready")].status} {.metadata.deletionTimestamp}{"\n"}{end}' 2>/dev/null |
+		awk -v h="$1" -v s="$2" '$1 != s && $2 != h && $3 == "True" && NF == 3 { f = 1 } END { exit !f }'
+}
+
+# case_machine: the controller plugin's two copies survive the loss of the
+# machine of the copy that leads (csi.md CSI19). Both leases are brought to
+# the copy on one host H, which is then cut off the network by a firewall
+# table: the other copy takes both leases within a lease time and serves a
+# new volume on the other host, and a new copy runs on a third node while H
+# stays cut, after the copies' short toleration. H is then healed. cp0, the
+# k3s server and dnv's control plane, is never cut.
+case_machine() {
+	CASE=machine
+	local h hn other pod keep t0 out pv
+	stage 01 "two controller copies Ready, both leases held, and no driver container restarted"
+	wait_until "$WAIT_ROLLOUT" "two controller copies Ready, none being deleted" copies_ready 2
+	wait_until "$WAIT_LEASE" "both leases held by controller pods" leases_held
+	restarts_zero || {
+		kc_ok -n "$DRIVER_NS" get pods -o wide >&2
+		die "a driver container restarted before the machine case"
+	}
+
+	stage 02 "both leases on the copy of one host H: the other copy deleted first, then scaled back"
+	h=""
+	for hn in 0 1; do
+		if [ -n "$(copy_on "${HOST_NAME[$hn]}")" ]; then
+			h=$hn
+			break
+		fi
+	done
+	[ -n "$h" ] || die "no controller copy runs on a host"
+	other=$((1 - h))
+	keep=$(copy_on "${HOST_NAME[$h]}" | awk 'NR == 1') || die "reading the copy on ${HOST_NAME[$h]} failed"
+	log "  H is host$h (${HOST_NAME[$h]}), its copy $keep"
+	for pod in $(kc -n "$DRIVER_NS" get pods -l app=dnv-csi-controller -o 'jsonpath={.items[*].metadata.name}'); do
+		if [ "$pod" = "$keep" ]; then
+			kc -n "$DRIVER_NS" annotate pod "$pod" --overwrite \
+				controller.kubernetes.io/pod-deletion-cost=1000 >/dev/null || die "annotating $pod failed"
+		else
+			kc -n "$DRIVER_NS" annotate pod "$pod" --overwrite \
+				controller.kubernetes.io/pod-deletion-cost=-1000 >/dev/null || die "annotating $pod failed"
+		fi
+	done
+	kc -n "$DRIVER_NS" scale deploy/dnv-csi-controller --replicas=1 >/dev/null || die "scaling to one copy failed"
+	wait_until "$WAIT_LEASE" "both leases on $keep, the one copy left" leases_on "$keep"
+	kc -n "$DRIVER_NS" scale deploy/dnv-csi-controller --replicas=2 >/dev/null || die "scaling to two copies failed"
+	# The copies are read without the deleted one, which can still be
+	# terminating: counted, it would stand for the second copy.
+	wait_until "$WAIT_ROLLOUT" "two controller copies Ready, none being deleted" copies_ready 2
+	out=$(live_copies) || die "reading the controller copies failed"
+	log "  copies: $(printf '%s' "$out" | tr '\n' ',')"
+	pod=$(printf '%s\n' "$out" | awk -v k="$keep" '$1 != k {print $1}')
+	if [ "$(printf '%s\n' "$out" | awk -v k="$keep" '$1 != k {print $2}')" = "${HOST_NAME[$h]}" ]; then
+		# The new copy landed on H too: delete it, so that its replacement
+		# goes elsewhere. It holds no lease.
+		kc -n "$DRIVER_NS" delete pod "$pod" --wait=false >/dev/null || die "deleting $pod failed"
+		wait_until "$WAIT_ROLLOUT" "two controller copies Ready, none being deleted" copies_ready 2
+		out=$(live_copies) || die "reading the controller copies failed"
+		pod=$(printf '%s\n' "$out" | awk -v k="$keep" '$1 != k {print $1}')
+	fi
+	[ "$(printf '%s\n' "$out" | grep -c .)" = 2 ] && [ "$(printf '%s\n' "$pod" | grep -c .)" = 1 ] &&
+		[ "$(printf '%s\n' "$out" | awk -v p="$pod" '$1 == p {print $2}')" != "${HOST_NAME[$h]}" ] ||
+		die "the second copy is not one copy on a node other than H: $out"
+	leases_on "$keep" || die "the leases left $keep while the second copy started"
+
+	stage 03 "cut H off the network; a new claim and a pod on the other host"
+	CUT_TRIED=1
+	out=$(helper_host "$h" net_cut "$CUT_LIMIT") || die "host$h: the cut failed: $out"
+	assert_eq "$out" cut "host$h: the cut"
+	t0=$SECONDS
+	claim mc 1Gi Filesystem
+	io_pod wm mc "$other" Filesystem "$(write_fs_script 16)"
+
+	stage 04 "the copy $pod takes both leases"
+	wait_until "$WAIT_LEASE" "both leases on $pod" leases_on "$pod"
+	log "  both leases on $pod $((SECONDS - t0)) s after the cut"
+
+	stage 05 "the claim is served by the copy that took over"
+	wait_until "$WAIT_PVC" "claim mc Bound" pvc_bound mc
+	pv=$(pvc_volume mc)
+	wait_until "$WAIT_POD" "pod wm Running" pod_settled wm
+	pod_running wm || die "pod wm ended with phase $(pod_phase wm)"
+	wait_until "$WAIT_POD" "pod wm to finish its step" pod_marked wm /data/marker
+	assert_eq "$(kc_exec wm sh -c 'sha256sum -c /data/sha 2>&1')" "/data/pattern: OK" "pod wm reads its pattern"
+	log "  volume $pv written and read $((SECONDS - t0)) s after the cut"
+
+	stage 06 "a new controller copy Ready off H while H stays cut"
+	wait_until "$WAIT_REPLACE" "a new controller copy Ready off ${HOST_NAME[$h]}" replaced_off "${HOST_NAME[$h]}" "$pod"
+	log "  a new copy Ready $((SECONDS - t0)) s after the cut"
+	assert_eq "$(helper_host "$h" net_cut_state)" cut "host$h: the cut still stands"
+
+	stage 07 "heal H; two copies, the node plugins, and no lease on H"
+	out=$(helper_host "$h" net_uncut) || die "host$h: the uncut failed: $out"
+	wait_until "$WAIT_NODES" "${HOST_NAME[$h]} Ready" node_ready "${HOST_NAME[$h]}"
+	wait_until "$WAIT_ROLLOUT" "two controller copies Ready, none being deleted" copies_ready 2
+	kc -n "$DRIVER_NS" rollout status ds/dnv-csi-node "--timeout=${WAIT_ROLLOUT}s" >/dev/null ||
+		die "the node plugin did not come back"
+	wait_until "$WAIT_POD" "the old copy $keep gone" copy_gone "$keep"
+	leases_held || die "the leases are not held by running controller copies after the heal"
+	! lease_holders | grep -qx "$keep" || die "the cut copy $keep holds a lease after the heal"
+
+	stage 08 "delete, and nothing left"
+	delete_pod wm
+	delete_claim mc
+	nothing_left
+	log "=== $CASE: PASS"
+}
+
+copy_gone() { # <pod>
+	! kc -n "$DRIVER_NS" get pod "$1" >/dev/null 2>&1
 }
 
 # sanity_build builds csi-sanity once from its pinned module, in a module of

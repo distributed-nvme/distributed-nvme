@@ -456,7 +456,26 @@ NVMe multipath on and the module nvme-fabrics loaded at boot, which naming
 nvme-tcp in `/etc/modules-load.d` does, since nvme-tcp loads nvme-fabrics:
 the node plugin refuses to start without either, and names the fix
 ([operations](operations.md#a-kubernetes-node-plugin-that-does-not-start)).
-The tutorials load nvme-tcp by hand, which lasts until a reboot.
+The tutorials load nvme-tcp by hand, which lasts until a reboot. The
+driver's pods, the Kubernetes units of one or more containers that run its
+plugins, live in a Kubernetes namespace of their own, `dnv-csi`: a named
+group of Kubernetes objects such as pods. The driver's file for it under
+`deploy/` asks Kubernetes' pod security admission, the check that refuses a
+pod that wants more rights than its Kubernetes namespace allows, to allow
+privileged pods there, since the node plugin's pods are privileged. The
+driver's pods take Kubernetes' critical priority classes, which make
+Kubernetes find room for them first and stop them last when a machine runs
+short of memory. k3s allows those classes in any Kubernetes namespace; a
+Kubernetes cluster that allows them only in `kube-system`, Kubernetes' own
+Kubernetes namespace, refuses the driver's pods until the operator takes the
+classes out of the driver's files. Where other pods share the Kubernetes
+cluster and its network software enforces network policies, give every
+Kubernetes namespace of theirs a copy of the driver's example network
+policy, a Kubernetes record that limits where the pods of one Kubernetes
+namespace may connect. Where a dnv machine is also a Kubernetes machine,
+leave `kube-system` out, since the policy keeps its pods off that machine's
+own services too ([the CSI
+tutorial](tutorial_csi.md#keep-other-pods-off-dnv)).
 
 ## Status and limits of 0.1
 

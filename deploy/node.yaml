@@ -6,7 +6,16 @@
 # controllers' state; the host's nvme directory gives it the node's identity,
 # made empty where it is absent so that the plugin's own refusal names the
 # missing files. The cdc addresses it follows come from the same config map
-# as the controller's, read at the plugin's start.
+# as the controller's, read at the plugin's start. The registrar and the
+# liveness probe run as root, the owner of the plugin's socket and of the
+# kubelet's registration directory, with no capability and a read-only root;
+# the probe answers on the loopback alone; no container talks to the API
+# server, so the pod mounts no account token (CSI18).
+#
+# The kubelet's directory, /var/lib/kubelet, is the one value of this file
+# an operator changes per distribution: it stands in the two mount paths and
+# the registration path below and in four host paths, and one
+# `sed 's|/var/lib/kubelet|<dir>|g'` changes them together.
 apiVersion: apps/v1
 kind: DaemonSet
 metadata:
@@ -22,6 +31,8 @@ spec:
         app: dnv-csi-node
     spec:
       serviceAccountName: dnv-csi-node
+      automountServiceAccountToken: false
+      priorityClassName: system-node-critical
       hostNetwork: true
       dnsPolicy: ClusterFirstWithHostNet
       containers:
@@ -39,15 +50,17 @@ spec:
                   key: cdcAddresses
           securityContext:
             privileged: true
-          ports:
-            - name: healthz
-              containerPort: 9809
           livenessProbe:
             httpGet:
+              host: 127.0.0.1
               path: /healthz
-              port: healthz
+              port: 9809
             initialDelaySeconds: 10
             periodSeconds: 10
+          resources:
+            requests:
+              cpu: 10m
+              memory: 32Mi
           volumeMounts:
             - name: socket-dir
               mountPath: /csi
@@ -70,6 +83,18 @@ spec:
             - --csi-address=/csi/csi.sock
             - --kubelet-registration-path=/var/lib/kubelet/plugins/csi.dnv.io/csi.sock
             - --v=2
+          securityContext:
+            runAsUser: 0
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: [ALL]
+            seccompProfile:
+              type: RuntimeDefault
+          resources:
+            requests:
+              cpu: 10m
+              memory: 16Mi
           volumeMounts:
             - name: socket-dir
               mountPath: /csi
@@ -79,7 +104,19 @@ spec:
           image: registry.k8s.io/sig-storage/livenessprobe:v2.20.0
           args:
             - --csi-address=/csi/csi.sock
-            - --http-endpoint=:9809
+            - --http-endpoint=127.0.0.1:9809
+          securityContext:
+            runAsUser: 0
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: [ALL]
+            seccompProfile:
+              type: RuntimeDefault
+          resources:
+            requests:
+              cpu: 10m
+              memory: 16Mi
           volumeMounts:
             - name: socket-dir
               mountPath: /csi

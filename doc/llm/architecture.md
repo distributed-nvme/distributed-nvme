@@ -8941,7 +8941,11 @@ document and only pointed to here.
   claim any host NQN, so the allow-lists bind no one who holds a host.
 * **In a Kubernetes cluster every pod reaches dnv's ports unless the
   operator blocks it** (`csi.md`, Deployment): the trust in the network
-  above is then trust in every pod of the cluster.
+  above is then trust in every pod of the cluster. The example network
+  policy keeps the pods of each namespace that applies it off every address
+  of the dnv machines, where the cluster's network software enforces egress
+  policies (`csi.md` CSI20); a namespace without it, or a pod on the host
+  network, still reaches them.
 * **A pool commit in a migration gap waits for the gap to end.** A migration
   gap is the time in which the primary has no usable path to a migrating
   leg: from src step 1, which moves the source's per-CN namespaces to
@@ -9562,8 +9566,14 @@ document and only pointed to here.
   volume's IO waits with no error until that path ends, by a reconnect
   refused with DNR or the operator's `nvme disconnect -d` of that
   controller, and the mount does not survive that end (A mount does not
-  survive the loss of its last path, below). A path connected by hand
-  stays (above).
+  survive the loss of its last path, below). The way out is the
+  operator's: that disconnect on the node, after which the follower's next
+  pass connects the replacement, and a delete of the pod, whose mount does
+  not follow the new device (`operations.md`, A one-cntlr Kubernetes volume
+  after a cntlr replacement). A fix, a drop of a withdrawn path whose
+  controller is not live when no other path exists, or a fresh range of
+  controller ids for a replacement, is a later change. A path connected by
+  hand stays (above).
 * **A detach does not cut a connected host.** The CSI driver's detach empties
   the subsystem's allowed hosts (`csi.md` CSI10), which closes it to new
   connections only (Primary cntlr), so a host already connected keeps its

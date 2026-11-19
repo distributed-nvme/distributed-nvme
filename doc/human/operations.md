@@ -2495,7 +2495,9 @@ a new volume is still formatted and that a raw block volume reaches its pod.
 Words: the **node plugin**, a **pod** and a **Kubernetes namespace** are as
 in [A Kubernetes volume the node plugin will not format](#a-kubernetes-volume-the-node-plugin-will-not-format).
 The **controller plugin** is the part of dnv's Kubernetes driver that calls
-the gateway; it runs in one pod. To **attach** a volume to a Kubernetes
+the gateway; it runs as two copies, two pods, and each of its two helper
+programs, which watch Kubernetes for it, acts in one copy at a time ([A
+Kubernetes machine is lost](#a-kubernetes-machine-is-lost)). To **attach** a volume to a Kubernetes
 node, the controller plugin puts the node's host NQN in the allowed hosts of
 the volume's subsystem; to **detach** it, it empties that list, and the cdcs
 then list no path of the volume to any host. The **config map**
@@ -2663,3 +2665,118 @@ NQN. Ask for help.
 Tested: unit tests of the node plugin check each refusal, and that the
 plugin starts on a node where nvme-tcp is not loaded. No suite case starts
 the plugin on a node that lacks one of these.
+
+## A Kubernetes machine is lost
+
+Words: the **node plugin**, a **pod**, a **workload** and a **Kubernetes
+namespace** are as in [A Kubernetes volume the node plugin will not
+format](#a-kubernetes-volume-the-node-plugin-will-not-format), and the
+**controller plugin**, **attach** and **detach** as in [Change the cdc
+addresses of the Kubernetes driver](#change-the-cdc-addresses-of-the-kubernetes-driver).
+A **node**, in Kubernetes' words, is a machine of the Kubernetes cluster, and
+its **Node object** is Kubernetes' record of it. The controller plugin runs as
+two **copies**, two pods on two machines where the cluster has two. Each of
+its two helper programs, the provisioner and the attacher, acts in one copy
+at a time: the copy that holds that program's **lease**, a Kubernetes record
+that the copy renews every few seconds and that the other copy takes once it
+runs out.
+
+Symptom: `kubectl get nodes` shows a node `NotReady`, and the pods on it
+show `Terminating` or `Unknown`.
+
+Confirm: `kubectl get nodes`; `kubectl -n dnv-csi get pods -o wide` shows
+where the controller plugin's copies run; `kubectl -n dnv-csi get lease`
+shows which copy holds the two leases, `csi-dnv-io` and
+`external-attacher-leader-csi-dnv-io`.
+
+What dnv does alone:
+- If the lost machine ran the copy that held one lease or both, the other copy
+  takes them within about 20 seconds and goes on creating, deleting, attaching
+  and detaching volumes. Kubernetes gives up on the lost machine's copy after
+  about 70 seconds and starts a new one on another machine, which needs its
+  images there: the first time, a pull of about 15 seconds.
+- The pods of other workloads on the lost machine stay `Terminating`, and
+  their volumes stay attached to the lost machine, for as long as Kubernetes
+  keeps the Node object: Kubernetes does not detach a volume while it cannot
+  tell whether the machine still writes to it. Their workloads' new pods on
+  other machines wait for those volumes.
+- If the machine comes back, its kubelet stops the pods Kubernetes gave up
+  on, and the volumes detach and move by themselves.
+
+Safe steps, for a machine that does not come back. Check "When to stop"
+below before step 1.
+1. Make sure the machine cannot write to a volume any more: power it off,
+   or cut it from the network that reaches the controller nodes.
+2. Mark it out of service:
+   `kubectl taint nodes <node> node.kubernetes.io/out-of-service=nodeshutdown:NoExecute`.
+   Kubernetes deletes its pods and detaches their volumes; the workloads'
+   new pods attach them on other machines.
+3. Once the machine is back and clean, or replaced, remove the mark:
+   `kubectl taint nodes <node> node.kubernetes.io/out-of-service-`.
+
+Steps that can lose data: the out-of-service mark, a forced delete of the lost
+machine's pods (`kubectl delete pod --force --grace-period=0`), or a delete of
+its Node object, while the machine still runs and reaches the controller
+nodes. A detach does not cut a host that is connected ([the scope
+page](scope.md), section 5.4): the machine keeps its connections to the
+volumes and can write beside the machine the volumes move to.
+
+When to stop: before step 1, the machine answers, by ssh or on its console,
+while Kubernetes shows it `NotReady`: that is a fault of its network or of
+its kubelet, not a lost machine. Fix that and do not mark it. A machine that
+you cut from the network yourself in step 1 still answers on its console:
+that is no reason to stop, and step 2 marks it.
+
+Tested: the Kubernetes suite's machine case cuts the host of the copy that
+holds the leases off the network and checks the controller plugin's part:
+the other copy takes both leases, serves a new volume on the other host,
+and a new copy runs elsewhere while the host stays cut. The move of a pod's
+volume after a loss and the out-of-service mark are not tested.
+
+## A one-cntlr Kubernetes volume after a cntlr replacement
+
+Words: as in [A Kubernetes machine is lost](#a-kubernetes-machine-is-lost).
+A **controller id** is the number the target gives each connection of a
+subsystem; one host's kernel refuses two connections of one subsystem with
+the same number.
+
+Symptom: a pod's IO to a volume of a storage class with one cntlr waits
+with no end, after the worker replaced the volume's cntlr, the reaction that
+follows the loss of the cntlr's controller node by the pool's cntlr
+threshold, 600 seconds at the default.
+
+Confirm:
+- `dnvctl sp get` for the volume's pool, whose name is the persistent
+  volume's (`kubectl get pvc <claim>` names it), lists one cntlr, on another
+  controller node than before.
+- On the node of the pod, as root, `nvme list-subsys` shows the volume's
+  subsystem with one path, to the old controller node's address, in the
+  state `connecting`, and `dmesg` shows "Duplicate cntlid" for the
+  subsystem.
+- The node plugin's log, `kubectl -n dnv-csi logs <node plugin pod> -c dnv-csi`,
+  shows `csi follower sync error` for the connect to the new controller
+  node's address on each try.
+
+What dnv does alone: nothing ends it. The new cntlr took the old one's
+controller id, which the old path holds; the node plugin keeps the old path
+until a path to the new cntlr shows the volume, and its connect to the new
+cntlr is refused while the old path holds the id.
+
+Safe steps:
+1. On the node, as root, find the old path:
+   `grep -l <subsystem NQN> /sys/class/nvme/nvme*/subsysnqn`, and among those
+   folders the one whose `address` file names the old controller node.
+2. Drop it: `nvme disconnect -d nvmeN`, with that folder's name.
+3. Within a minute the node plugin connects the new cntlr: `nvme
+   list-subsys` shows the new path `live`.
+4. The pod's mount does not follow the new device: delete the pod. Its
+   workload makes a new one, whose start mounts the volume again.
+
+Steps that can lose data: step 2 fails the IO that waits on the old path,
+so writes the pod had not yet flushed to the volume are lost.
+
+When to stop: the pool lists more than one cntlr, or the kernel log shows no
+"Duplicate cntlid": that is another fault. Ask for help.
+
+Tested: not tested. The suites give every volume two cntlrs, where the
+failover's new primary serves while the old path goes.

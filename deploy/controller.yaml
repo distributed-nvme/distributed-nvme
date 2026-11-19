@@ -1,13 +1,20 @@
-# The controller plugin (csi.md, Deployment): one pod with the plugin, the
-# provisioner, the attacher and the liveness probe, sharing the plugin's
-# socket. It runs on any node and tolerates the control-plane taint.
+# The controller plugin (csi.md CSI19): two copies of one pod with the
+# plugin, the provisioner, the attacher and the liveness probe, sharing the
+# plugin's socket. Both plugins serve; the provisioner and the attacher each
+# act in one copy at a time, the one that holds its lease in this namespace,
+# so the other copy takes over within a lease time when a machine is lost.
+# The copies prefer two machines, tolerate the control-plane taint, and
+# leave a machine Kubernetes cannot reach after 30 s rather than the default
+# 300 s, so that a second copy runs again soon. Every container runs as one
+# unprivileged user, the owner of the socket they share, with no capability
+# and a read-only root.
 apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: dnv-csi-controller
   namespace: dnv-csi
 spec:
-  replicas: 1
+  replicas: 2
   selector:
     matchLabels:
       app: dnv-csi-controller
@@ -17,10 +24,34 @@ spec:
         app: dnv-csi-controller
     spec:
       serviceAccountName: dnv-csi-controller
+      priorityClassName: system-cluster-critical
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        seccompProfile:
+          type: RuntimeDefault
+      affinity:
+        podAntiAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 100
+              podAffinityTerm:
+                labelSelector:
+                  matchLabels:
+                    app: dnv-csi-controller
+                topologyKey: kubernetes.io/hostname
       tolerations:
         - key: node-role.kubernetes.io/control-plane
           operator: Exists
           effect: NoSchedule
+        - key: node.kubernetes.io/unreachable
+          operator: Exists
+          effect: NoExecute
+          tolerationSeconds: 30
+        - key: node.kubernetes.io/not-ready
+          operator: Exists
+          effect: NoExecute
+          tolerationSeconds: 30
       containers:
         - name: dnv-csi
           image: dnv-csi:0.1.0
@@ -48,6 +79,15 @@ spec:
               port: healthz
             initialDelaySeconds: 10
             periodSeconds: 10
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: [ALL]
+          resources:
+            requests:
+              cpu: 10m
+              memory: 32Mi
           volumeMounts:
             - name: socket-dir
               mountPath: /csi
@@ -56,6 +96,7 @@ spec:
           args:
             - --csi-address=/csi/csi.sock
             - --v=2
+            - --leader-election
             - --enable-capacity
             - --capacity-ownerref-level=2
             - --capacity-poll-interval=1m
@@ -69,6 +110,15 @@ spec:
               valueFrom:
                 fieldRef:
                   fieldPath: metadata.namespace
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: [ALL]
+          resources:
+            requests:
+              cpu: 10m
+              memory: 64Mi
           volumeMounts:
             - name: socket-dir
               mountPath: /csi
@@ -77,6 +127,16 @@ spec:
           args:
             - --csi-address=/csi/csi.sock
             - --v=2
+            - --leader-election
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: [ALL]
+          resources:
+            requests:
+              cpu: 10m
+              memory: 32Mi
           volumeMounts:
             - name: socket-dir
               mountPath: /csi
@@ -85,6 +145,15 @@ spec:
           args:
             - --csi-address=/csi/csi.sock
             - --http-endpoint=:9808
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: [ALL]
+          resources:
+            requests:
+              cpu: 10m
+              memory: 16Mi
           volumeMounts:
             - name: socket-dir
               mountPath: /csi

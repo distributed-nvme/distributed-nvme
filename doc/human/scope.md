@@ -116,12 +116,18 @@ md never trusts an old superblock.
   network section of [the operations doc](operations.md), the document of
   procedures an operator follows by hand, with a table of who connects to whom and a firewall
   example.
-- **In Kubernetes every pod reaches dnv's ports.** Every pod reaches the gateway, the
-  agents, etcd, the cdc and the NVMe/TCP ports through its machine's
-  network. Only the operator's firewall rule blocks it, or a network policy
-  that the cluster's network software enforces. The trust dnv puts in the network is then trust in
-  every pod. State: procedure to write, a network policy example in the
-  CSI tutorial.
+- **In Kubernetes every pod reaches dnv's ports.** Every pod reaches the
+  gateway, the agents, etcd, the cdc and the NVMe/TCP ports through its
+  machine's network. Only the operator's firewall rule blocks it, or a network
+  policy, a Kubernetes record that limits the connections of the pods of one
+  Kubernetes namespace, that the cluster's network software enforces. The
+  trust dnv puts in the network is then trust in every pod. The CSI driver
+  ships an example policy,
+  [`deploy/networkpolicy.yaml`](../../deploy/networkpolicy.yaml), that keeps
+  the pods of a Kubernetes namespace off every address of the dnv machines; a
+  Kubernetes namespace without it, or a pod on its machine's own network,
+  still reaches them. State: procedure written, [the CSI
+  tutorial](tutorial_csi.md#keep-other-pods-off-dnv).
 
 **Steps of a caller that can break the promise.** A migration and a clone
 can skip the blocks a volume never wrote. For a migration the worker
@@ -1148,7 +1154,10 @@ Measured times are in [the introduction](introduction.md#status-and-limits-of-01
   holds: the new path cannot join, and the mount waits until the old path
   ends (A Kubernetes mount waits for ever when no cntlr of its volume
   comes back, above). State: accepted; use two cntlrs per volume.
-  Procedure to write, one line in the CSI tutorial.
+  Procedure to write, one line in the CSI tutorial. For a Kubernetes
+  volume whose new path cannot join: procedure written, [the operations
+  doc](operations.md#a-one-cntlr-kubernetes-volume-after-a-cntlr-replacement);
+  fix later.
 - **A primary that never reports its stack built waits for the longer
   threshold.** It is failed over or replaced only after the longer of the
   primary and the cntlr thresholds, 600 seconds at the defaults. The pool
@@ -1259,7 +1268,8 @@ slow leg, the install of the udev rules on a node, the node check, the
 choice of a node's location, the removal of a node, the gather of a node's
 state, a Kubernetes volume the node plugin will not format, a change of the
 cdc addresses of the Kubernetes driver, a Kubernetes node plugin that does
-not start and the restore of etcd from a backup so far, and
+not start, the loss of a Kubernetes machine, a one-cntlr Kubernetes volume
+after a cntlr replacement and the restore of etcd from a backup so far, and
 gets the others as they are written. Every row with no tool
 or no doc carries its note. Section 6.1 and the tables give some short
 steps; the section "Steps known today" below gives the longer ones.
@@ -1332,6 +1342,9 @@ steps; the section "Steps known today" below gives the longer ones.
 | Recover a Kubernetes mount after the loss of its last path | none; `nvme disconnect -n`, then delete the pod | this page, section 6.1 | procedure to write; no fix |
 | Change the cdc addresses of the Kubernetes driver | the config map and a restart of both plugins | the operations doc, Change the cdc addresses of the Kubernetes driver | procedure written; the Kubernetes suite changes the list of the controller plugin alone, and no suite restarts the node plugins with a new list |
 | Start a Kubernetes node plugin that refuses to start | none; the plugin's log names the fact and its fix | the operations doc, A Kubernetes node plugin that does not start | procedure written; not tested in a suite |
+| Keep a Kubernetes cluster's pods off dnv | the example network policy, [`deploy/networkpolicy.yaml`](../../deploy/networkpolicy.yaml) | [the CSI tutorial](tutorial_csi.md#keep-other-pods-off-dnv) | procedure written; the Kubernetes suite's policy case tries the ports of the gateway, the cdc and two agents, not the NVMe/TCP ports, which listen only once a pool uses them |
+| Handle the loss of a Kubernetes machine | the controller plugin's second copy; the out-of-service mark of Kubernetes | the operations doc, A Kubernetes machine is lost | procedure written; the Kubernetes suite checks the controller plugin's part, not the move of a pod's volume |
+| Recover a one-cntlr Kubernetes volume after a cntlr replacement | `nvme disconnect -d` of the old path, then delete the pod | the operations doc, A one-cntlr Kubernetes volume after a cntlr replacement | procedure written; not tested |
 | Recover a Kubernetes volume the node plugin will not format | none; the plugin formats only a volume whose first MiB reads as zeros; for data at the start, an operator reaches the volume through a pod that gets it as a raw block device, and zeroes the start by hand for a volume that never held data | the operations doc, A Kubernetes volume the node plugin will not format | procedure written; its steps for data at the start are not tested |
 | Recover from a fault only a host sees | disable the primary | this page, section 6.1 | procedure to write. Fix later. |
 
@@ -1353,13 +1366,36 @@ cluster it holds, and every CSI driver that talks to its gateways: its
 controller plugin, the part that calls the gateway, and its node plugins.
 A stopped node plugin leaves the connections and mounts of its volumes in place. Every binary is replaced,
 `dnvctl` included, and only then does any program start again. The workers
-stop first and start last. Before an upgrade from 0.1, check every
-Kubernetes node: the node plugin of a later release starts only with native
-NVMe multipath on and the module nvme-fabrics loaded, which nvme-tcp loads,
-and one that does not start unmounts nothing ([the operations
+stop first and start last. For the CSI driver, apply these files of the new
+release's `deploy/` folder by name: `namespace.yaml`, `csidriver.yaml`,
+`controller-serviceaccount.yaml`, `node-serviceaccount.yaml`,
+`controller-clusterrole.yaml`, `controller-clusterrolebinding.yaml`,
+`controller-role.yaml`, `controller-rolebinding.yaml`, `controller.yaml` and
+`node.yaml`, each with your own changes of it made again, such as another
+driver image name, or another directory of the kubelet, the Kubernetes
+program on each machine. Do not apply `config.yaml`, `storageclass.yaml` or
+`networkpolicy.yaml`: they are examples that hold placeholders, addresses in
+`config.yaml` and `networkpolicy.yaml` and a cluster name in
+`storageclass.yaml`, and you keep your own copies of them. Applied, the
+example `config.yaml` would point both plugins at the placeholder addresses,
+so that every create and attach fails; the example storage class would name
+the placeholder cluster, or be refused where your class of its name names
+another, since Kubernetes lets no one change a storage class's settings; and
+the example policy, which names no Kubernetes namespace, would replace your
+own copy in the current Kubernetes namespace. From this release on, the
+rights of the controller plugin within its Kubernetes namespace are a file
+of their own, `controller-role.yaml`, and the new
+`controller-clusterrole.yaml`, its rights across the Kubernetes cluster,
+applied without it takes them away, after which the controller plugin's
+provisioner, the helper program that asks it for volumes, stops at its
+start. Before an upgrade from 0.1, check every Kubernetes node: the node
+plugin of a later release starts only with native NVMe multipath on and the
+module nvme-fabrics loaded, which nvme-tcp loads, and one that does not
+start unmounts nothing ([the operations
 doc](operations.md#a-kubernetes-node-plugin-that-does-not-start)). There is
-no rolling upgrade, since no message carries a build version, and two builds that differ in a message would
-misread each other with no error. A disk node's disk keeps the format it
+no rolling upgrade, since no message carries a build version, and two builds
+that differ in a message would misread each other with no error. A disk
+node's disk keeps the format it
 was made with across every upgrade, and each new build reads it as it is,
 unless the new release's notes say that the disks must be made again;
 making a disk again loses every side it holds. Before the workers start
@@ -1595,9 +1631,10 @@ yourself: a disk the logs fill is one the stores and etcd cannot write.
   tools of the node, such as smartd and node_exporter. The worker's log
   records the reactions it applied and the ones it skipped. No dnv program
   serves metrics, profiles or health over a port, though the CSI driver's
-  manifests add a helper container that answers Kubernetes' health checks on
-  port 9808 or 9809. State: not yet; log handling goes into the operations
-  doc.
+  manifests add a helper container that answers Kubernetes' health checks:
+  on port 9808 at the address of each controller plugin copy's own pod, and
+  on port 9809 on each Kubernetes node's loopback alone. State: not yet; log
+  handling goes into the operations doc.
 - **The status read sees what etcd and the primaries hold.** The status
   read asks each pool's primary and a migration's new side, and no
   standby and no other side. A standby's or a side's own trouble shows
