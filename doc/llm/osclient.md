@@ -1,21 +1,20 @@
 # osclient.md — OS client
 
 This document owns the one path every dnv binary takes to the operating
-system: the `OsClient` interface for OS commands, for detached children,
-for directory listings, for modification-time reads, for device-number
-reads, for discards, for TCP dials and for file, protobuf and raw block IO, its production implementation `LimitedOsClient` with its
-concurrency limit, its command timeouts and kill rule, the guarantees of each
-operation (a listing's names, all of them in byte order or none; the time of
-the path itself, never of what a link names; the number of the block device
-a path leads to, links followed; the dial's timeout told from a refusal; the
-atomic replace and fsync of a file write; the exact-length read and fsynced
-write of a block), the exported raw
-helpers and the probe-IO
-carve-out that is the one sanctioned bypass, and what emitting the record of
-each operation requires. It leans on `log.md` for the helpers it reuses
-(`PbToLogValue`, `TruncForLog`, `LogStrDataLimit`, `ReadLevel`,
-`LogEnabled`), for its rules on levels, records, typed attributes and ctx
-propagation, and for the names and
+system: the `OsClient` interface for OS commands, for detached children, for
+directory listings, for modification-time reads, for device-number reads, for
+discards, for TCP dials and for file, protobuf and raw block IO, its
+production implementation `LimitedOsClient` with its concurrency limit, its
+command timeouts and kill rule, the guarantees of each operation (a listing's
+names, all of them in byte order or none; the time of the path itself, never
+of what a link names; the number of the block device a path leads to, links
+followed; the dial's timeout told from a refusal; the atomic replace and fsync
+of a file write; the exact-length read and fsynced write of a block), the
+exported raw helpers and the probe-IO carve-out that is the one sanctioned
+bypass, and what emitting the record of each operation requires. It leans on
+`log.md` for the helpers it reuses (`PbToLogValue`, `TruncForLog`,
+`LogStrDataLimit`, `ReadLevel`, `LogEnabled`), for its rules on log levels,
+records, typed attributes and ctx propagation, and for the names and
 attributes of the records (`log.md`, OS commands and file IO); on
 `architecture.md`, Common validation, for the command timeouts, and Common
 agent rules for the local-store write protocol this client makes automatic;
@@ -702,11 +701,13 @@ found no block device at its path (`devNoLevel`), by which the CSI node
 plugin tells a block volume from a mounted filesystem on every stats call;
 and a command of the read list (`commandReadsOnly`) that succeeded. Info:
 every other outcome, a block read that finds its device absent among them,
-and every write. A call works out its log level first and builds the
-record's attributes only when the process logs that log level, so a dropped
-read pays no `TruncForLog` or `PbToLogValue`. `ReadProto` and `WriteProto`
-log the decoded message through `PbToLogValue` rather than the file bytes
-(`log.md` R11).
+and every write. A call that can log at Debug — a read, a listing, a dial
+or a command — works out its log level first and builds the record's
+attributes only when the process logs that log level, so a dropped read
+pays no `TruncForLog` or `PbToLogValue`; a write, a discard and a detached
+start are always at Info and build their record as they log it (`log.md`
+R9). `ReadProto` and `WriteProto` log the decoded message through
+`PbToLogValue` rather than the file bytes (`log.md` R11).
 
 The CN11 leg probers do **not** call an `OsClient`. They call the
 package-level helpers and emit the two "probe …" records of `log.md`,

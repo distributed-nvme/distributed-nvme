@@ -77,8 +77,9 @@ const envPrefix = "DNVCTL"
 const defaultTimeout = 10.0
 
 // job is one RPC invocation. It returns whatever should be rendered on
-// stdout: a reply message for every command but the bitmap read, td
-// get-bm, which returns a plain map[string]any (CT4).
+// stdout: a reply message for every command but two, the bitmap read, td
+// get-bm, which returns a plain map[string]any, and the status read,
+// cluster get-status, which without --json returns a statusTable (CT4).
 type job func(ctx context.Context, client pb.GatewayClient) (any, error)
 
 // ---------------------------------------------------------------------------
@@ -536,7 +537,8 @@ func render(result any) ([]byte, error) {
 	return append(out, '\n'), nil
 }
 
-// hexBitmapResult is CT4's one deviation. protojson renders a bytes field as
+// hexBitmapResult is one of CT4's two deviations, the other being the
+// status read's table (statusTable). protojson renders a bytes field as
 // base64, which is neither what an operator wants to read nor what the suite
 // asserts, so the bitmap read, td get-bm, returns this map instead of its
 // reply message. byte_cnt travels with it so a length check needs no

@@ -295,12 +295,13 @@ to etcd.
 E2E2. **The control path is the shipped `dnvctl` only.** Every control-plane
 read and write is the shipped `dnvctl`, never a `workerctl` or `gatewayctl`
 write or a direct etcd write, one ssh to the control-plane guest per
-invocation, its status and both streams framed apart: a success exits zero with
-an empty stderr and one JSON document, a refusal with one stderr line naming
-its code and trace id (`dnvctl.md` CT4, CT5). `workerctl` runs on the driver
-only to print the tree's constants, `cnagentctl` is built for a host-id helper
-no step calls, and etcd's client is shipped for read-only diagnostics and never
-invoked.
+invocation, its status and both streams framed apart: a success exits zero
+with an empty stderr and one JSON document, or, for the failure dump's status
+read, its table (Diagnostics on failure), a refusal with one stderr line
+naming its code and trace id (`dnvctl.md` CT4, CT5). `workerctl` runs on the
+driver only to print the tree's constants, `cnagentctl` is built for a host-id
+helper no step calls, and etcd's client is shipped for read-only diagnostics
+and never invoked.
 
 E2E3. **The dn agents per disk-node guest default to the placement bound.** An
 override below it is a warning naming the demand it risks, never an error; a

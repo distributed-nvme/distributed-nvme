@@ -419,9 +419,10 @@ var renderCases = []renderCase{
 		want:  `{"nqn_to_subsystem":{}}` + "\n",
 	},
 	{
-		// CT4's one deviation: protojson would render `bitmap` as base64, so
-		// the bitmap read prints a hex map instead. This is the sweep
-		// golden for step 35.
+		// One of CT4's two deviations, the other being the status read's
+		// table: protojson would render `bitmap` as base64, so the bitmap
+		// read prints a hex map instead. This is the sweep golden for step
+		// 35.
 		name: "td get-bm, the hex map",
 		rpc:  "GetThinDeviceBitmap",
 		argv: []string{"td", "get-bm", "--name", "t0"},

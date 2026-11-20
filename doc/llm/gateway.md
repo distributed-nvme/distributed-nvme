@@ -814,16 +814,17 @@ is loaded with `model.LoadSp`, its own snapshot, as the sp worker loads it,
 so its lost records are the ones the worker meets (`dnv-worker.md` MD3); a
 pool whose `SpConf` went since the page's range is passed over, and one
 whose load fails gives one row of status UNKNOWN. A deleting pool gives one
-row and is called for nothing. Beside the load, one point read of the pool's
-id-to-name record (`model.SpNameKey`), which no list names and so `LoadSp`
-does not report missing, gives its lost-record row; the sp worker's gate on
-its groups' lengths to zero (`model.SideZeroBytes`,
+row and is called for nothing. Then the pool's calls run at once: the
+primary's `GetCntlrInfo`, without the block counters, and each migration
+destination's `GetSideInfo` past its cutover. After them, one point read of
+the pool's id-to-name record (`model.SpNameKey`), which no list names and so
+`LoadSp` does not report missing, gives its lost-record row; it is not made
+when the calls have used up the pool's time. The rows are computed from the
+state and the answers (`statusPoolRows`): the sp worker's gate on its
+groups' lengths to zero (`model.SideZeroBytes`,
 `model.CloneMetaSideZeroBytes`; `dnv-worker.md` AR1) gives the pool's row of
-a conf the worker refuses, and then no grow is judged. Then the pool's calls
-run at once: the primary's `GetCntlrInfo`, without the block counters, and
-each migration destination's `GetSideInfo` past its cutover. The rows are
-computed from the state and the answers (`statusPoolRows`), the grow's
-checks from `model`'s own rules — `GrowPending`, `DataCovered`,
+a conf the worker refuses, and then no grow is judged; the grow's checks
+come from `model`'s own rules — `GrowPending`, `DataCovered`,
 `GrowExtCnt`, `SpCnCharges` and `CnBudgetShort` — in the order the sp
 worker's grow takes them (`dnv-worker.md` AR6), the disk node scan last, its
 answer kept for the request by the extent and leg counts; a repair's wait
@@ -2056,8 +2057,8 @@ cluster's), a DN's metadata ceiling `DnCloneMetaUnitCnt` and its unit size
 `DnCloneMetaUnit`, for the area the ceiling case fills, and the id step's
 strides `IdStepStride` and `ThinIdStepStride`, which its smoke case checks
 the moved counters against); three gateway instances on one launch line that
-differs only in the gRPC address, each at `--log-level debug`, as every
-program a suite runs logs at Debug; four fake DNs and three fake CNs, the DNs
+differs only in the gRPC address, each at `--log-level debug`, the log
+level a suite gives every dnv daemon it runs; four fake DNs and three fake CNs, the DNs
 in four distinct locations and the CNs in three of them, each CN in its DN
 twin's, since the CN scan dedupes locations too and a CN that shares a
 location with a DN shows the first preference of the pool create's DN

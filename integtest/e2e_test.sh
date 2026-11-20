@@ -11652,7 +11652,7 @@ case_finish() {
 
 # --- the default log level (e2e_integtest.md, The cases, smoke) -------------
 #
-# Every program of the suite runs at --log-level debug, and every record
+# Every dnv daemon of the suite runs at --log-level debug, and every record
 # carries its level, so one idle window shows what the default level, info,
 # would keep without a run at it (log.md R6, R9): on the primary's cn agent
 # and on the worker, the records of a check round's messages, of a read, of

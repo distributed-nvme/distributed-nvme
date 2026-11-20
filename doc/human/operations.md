@@ -80,7 +80,10 @@ status and the reason of the row it shows follow where it has them:
 
 - `lost-record`: a record the pool or a node needs is gone from etcd, the
   record that maps the pool's id to its name names another pool, or a
-  node's record does not read. The object is the record's key.
+  node's record does not read. On a pool's line the object is the record's
+  key. On a line about a node's own records, whose pool is "-", the object
+  is `dn <address>` or `cn <address>`, and the text names the node's
+  revision key when that key is gone.
 - `report/unknown`: the read could not get the pool's state: its records
   do not read, it has no primary, or the primary's agent does not answer,
   holds nothing or is starting; or the primary's report is too old, which
@@ -157,13 +160,15 @@ write to that pool.
 
 What the read does not show: a standby's or a side's own trouble before
 the worker sets its health epoch, since the read asks only the primaries
-and a migration's new side; why the worker does not react: a failover
-with no enabled standby to take the role, a leg repair the worker cannot
-create, for want of a disk node with room or of a healthy leg, and a cntlr
-replacement that finds no controller node show only as a `health` line
-whose age grows, and the worker's log names the reason; a subsystem no cdc
-serves; and a worker that
-runs but whose watch has stopped. The scope page, section 9, lists these.
+and a migration's new side; why the worker does not react: a failover of
+an unhealthy primary with no enabled standby to take the role, a leg
+repair the worker cannot create, for want of a disk node with room or of
+a healthy leg, and a cntlr replacement that finds no controller node show
+only as a `health` line whose age grows, and the worker's log names the
+reason, while a disabled primary shows as a `pool` line, which says when
+no cntlr of the pool is enabled; a subsystem no cdc serves; and a worker
+that runs but whose watch has stopped. The scope page, section 9, lists
+these.
 
 Tested: the gateway's unit tests plant each kind of line and check it,
 the order of a pool's lines and their cap, a node that hangs, the pages
@@ -1869,8 +1874,10 @@ How to confirm: run `dnvctl cluster get-capacity --leg-cnt 2 --cntlr-cnt 2
   health epoch and a node that holds the most sides or cntlrs it can is in
   the whole space only, not in the free space: it is the whole space less
   the space taken less the free space.
-- `addr_port_to_dn` and `addr_port_to_cn` list each node's record: its
-  location, its flags, its extents and how many sides or cntlrs it holds.
+
+Beside `space`, the reply's `addr_port_to_dn` and `addr_port_to_cn` list
+each node's record: its location, whether it is disabled, its health
+epoch, its extents and how many sides or cntlrs it holds.
 
 The answer is an estimate, read from the records of the nodes. A leg that a
 migration copies counts on both of its disk nodes, and a retired leg counts
@@ -1942,7 +1949,10 @@ Symptoms:
 - The worker's log has a `reaction skipped` line for an auto-grow of the
   pool.
 
-How to confirm: run `dnvctl sp inspect`. In `space`:
+How to confirm: run `dnvctl sp inspect`. Beside `space`, the reply's
+`applied_revision` is the revision the primary's agent held when it made
+its reading, and `obs_age` is the age of that reading, `null` while the
+agent holds no reading. In `space`:
 
 - `slice_list` has one entry for each slice. `data_bytes` is the data space
   the slice's data groups give its thin pool. When `read` is true,
@@ -1951,12 +1961,13 @@ How to confirm: run `dnvctl sp inspect`. In `space`:
   its metadata, as the primary last read them. When `read` is false, the
   primary's report has no line it can read for that thin pool: the pool is
   not built yet, or it failed, or the primary's agent has no reading of the
-  cntlr yet. In the last case every slice is unread, `applied_revision` is
-  0 and `obs_age` is absent: the agent is starting, as right after its
-  restart, or it does not hold the cntlr yet, as right after the pool's
-  create or the replacement of a pool's one cntlr. Right after a failover,
-  the new primary has not built the thin pools yet: its slices are unread
-  while `obs_age` is there. Run the command again a little later.
+  cntlr yet. In the last case every slice is unread, and the reply's
+  `applied_revision` is 0 and its `obs_age` is `null`: the agent is
+  starting, as right after its restart, or it does not hold the cntlr yet,
+  as right after the pool's create or the replacement of a pool's one
+  cntlr. Right after a failover, the new primary has not built the thin
+  pools yet: its slices are unread while `obs_age` is not `null`. Run the
+  command again a little later.
 - `td_cnt` and `virtual_bytes` are the pool's thin devices, snapshots
   included, and their sizes added up. `overcommit_pct` is `virtual_bytes`
   over `data_bytes`, in percent: above 100, the volumes can be given more
@@ -1964,7 +1975,6 @@ How to confirm: run `dnvctl sp inspect`. In `space`:
 - `footprint_ext_cnt` is the extents of all the pool's groups, which each of
   its cntlrs takes from the budget of its controller node ([The cluster's
   capacity](#the-clusters-capacity)).
-- `obs_age` is the age of the primary's reading.
 
 What dnv does alone: auto-grow adds a group to a slice whose thin pool is
 filling up, while a disk node and every controller node of the pool have
@@ -1987,10 +1997,10 @@ Steps that lose data: deleting a thin device or a snapshot to free blocks of
 the thin pool deletes its data.
 
 When to stop: a slice stays unread, run after run, while the pool is built
-and the agent has a reading of the cntlr (`obs_age` is there), or the line of
-its thin pool in `dnvctl cntlr inspect --id <primary cntlr id>`, the row under
-`slice_id_to_dm_pool`, carries `ro` or `needs_check`: the thin pool needs a
-repair whose procedure is not written yet. Ask for help.
+and the agent has a reading of the cntlr (`obs_age` is not `null`), or the
+line of its thin pool in `dnvctl cntlr inspect --id <primary cntlr id>`,
+the row under `slice_id_to_dm_pool`, carries `ro` or `needs_check`: the
+thin pool needs a repair whose procedure is not written yet. Ask for help.
 
 Tested: the Go tests of the answer on hand-made rows, and of the gateway's
 read with a fake agent; the gateway suite's smoke case checks it over a fake
@@ -2058,13 +2068,33 @@ Safe steps:
    pool's retired legs; delete each one on the node with
    `dnvctl retired-leg delete` once you no longer want its copy.
 3. Empty a controller node: delete the storage pools that have a cntlr on
-   it, or give each such pool a cntlr on another controller node with
-   `dnvctl cntlr create`, then disable the old one with
-   `dnvctl cntlr set-enabled --id <cntlr id> --enabled=false` and delete it
-   with `dnvctl cntlr delete --id <cntlr id>`. A disabled primary fails
-   over to an enabled standby with no health epoch first, as [A planned
-   restart of an agent](#a-planned-restart-of-an-agent), step 3, says; a
-   primary is never deleted.
+   it, or move each cntlr on it to another controller node, one at a time:
+   1. Give the pool a new cntlr with `dnvctl cntlr create --slot <slot>`.
+      The slot is a cntlid slot, a range of NVMe controller ids: one of
+      the pool's `sp_conf.cntlid_slot_list` in `dnvctl sp get` that no
+      cntlr of the pool uses as its `cntlid_slot`.
+   2. Wait until the new cntlr is built. `dnvctl sp get` shows it with
+      `err_epoch` 0, and `dnvctl cntlr inspect --id <new cntlr id>` shows
+      `applied_revision`, the revision its agent has applied, equal to the
+      pool's `sp_rev.revision` in `dnvctl sp get`, and each row under
+      `cntlr_info.leg_id_to_leg` as `RES_STATUS_OK`. The worker can make a
+      new cntlr the primary before it is built, and the pool then serves
+      no IO until it is built.
+   3. Disable the old cntlr with
+      `dnvctl cntlr set-enabled --id <cntlr id> --enabled=false`. If it is
+      the primary, the worker moves the role to an enabled standby with no
+      health epoch. Then wait, as [A planned restart of an
+      agent](#a-planned-restart-of-an-agent), step 3, says, until
+      `dnvctl sp get` shows another cntlr as the primary with `settling`
+      false, which says the new primary reports its devices built. If no
+      other cntlr becomes primary within a few check rounds, or the new
+      primary still shows `settling` true a minute after it became
+      primary, give the pool its IO back as that step says, starting with
+      `dnvctl cntlr set-enabled --id <cntlr id>` on the old cntlr, and ask
+      for help. Do not delete the old cntlr then: it is the one that can
+      take the role back.
+   4. Then delete the old cntlr with `dnvctl cntlr delete --id <cntlr id>`.
+      A primary and an enabled cntlr are never deleted.
 4. Check that the node is empty, as above.
 5. Delete the node, and run the delete again until it passes:
 

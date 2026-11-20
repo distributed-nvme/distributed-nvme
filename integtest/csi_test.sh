@@ -2214,8 +2214,8 @@ image_import() { # <image>
 
 # with_debug_log prints the plugin manifest on stdin with --log-level=debug
 # added to the dnv-csi container's arguments, the line after its subcommand,
-# at that line's indent, so the plugins run at debug as every program a suite
-# runs does; it fails when the manifest has no such line.
+# at that line's indent, so the plugins run at debug as every dnv daemon a
+# suite runs does; it fails when the manifest has no such line.
 with_debug_log() {
 	awk '
 	    { print }

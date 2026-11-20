@@ -368,9 +368,9 @@ unchanged re-sends leave the new log free of any mutating command or block or
 configfs write (SH16, SH17, DN5, DN9); and a revision below the one those
 re-sends stored is refused as stale in a normal reply (SH8, SH9, DN4).
 
-**loglevel** proves at the default level what a log holds (`log.md` R6, R9,
-R13; `grpc.md` L6): one node's agent restarts with no `--log-level`; a fresh
-round that changes nothing logs, under its trace id, no record but its
+**loglevel** proves at the default log level what a log holds (`log.md` R6,
+R9, R13; `grpc.md` L6): one node's agent restarts with no `--log-level`; a
+fresh round that changes nothing logs, under its trace id, no record but its
 stream's open and close — none of its messages and none of the reads it
 starts; a disk node request still logs its call and its save to the local
 store at Info, and no Debug record; SIGUSR1 to the agent's process logs one

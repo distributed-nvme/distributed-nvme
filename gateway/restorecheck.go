@@ -28,18 +28,18 @@ import (
 // A snapshot resolves the cluster and reads the restored node at addr_port,
 // which may be absent: a node added after the backup is not in the restored
 // state, and its agent is asked all the same. Then, outside any STM (AG1),
-// one GetCnStore asks the agent for every controller node of the cluster
-// it holds (heldCnStore); an agent that does not answer, still starts or
+// one GetCnStore asks the agent for every controller node of the cluster it
+// holds (heldCnStore); an agent that does not answer, still starts or
 // answers any code but zero and the unknown object is FAILED_PRECONDITION
 // (AG3), and the unknown object of an agent that holds no node of the
 // cluster reads as no node held, so the check answers OK with every
-// restored pointer NOT_HELD. Then each pool is read in a snapshot of its
-// own, and the thin devices of a pool whose held revision is above the
-// restored one in one range of their prefix outside any STM: during a
-// restore nothing writes, and one transaction over every pool of a node
-// would hold hundreds of thousands of reads (architecture.md, STM
-// discipline). A pool whose records are lost gives its row, never the
-// answer's error.
+// restored pointer NOT_HELD, or RECORD_LOST where the restored pool's
+// records are lost. Then each pool is read in a snapshot of its own, and
+// the thin devices of a pool whose held revision is above the restored one
+// in one range of their prefix outside any STM: during a restore nothing
+// writes, and one transaction over every pool of a node would hold hundreds
+// of thousands of reads (architecture.md, STM discipline). A pool whose
+// records are lost gives its row, never the answer's error.
 func (s *Server) CheckControllerNodeRestore(
 	ctx context.Context,
 	req *pb.CheckControllerNodeRestoreRequest,

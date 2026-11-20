@@ -92,7 +92,7 @@ only the token-carrying mutators take it, it is a usage error on every other
 leaf, and it is read off the command line alone. The rest steer the
 invocation itself: `--timeout` is the per-invocation deadline in seconds,
 `--trace-id` overrides the per-invocation trace-id mint (Trace ids),
-`--log-level` sets the level of the records on stderr (CT7), and
+`--log-level` sets the log level of the records on stderr (CT7), and
 `--config` names an optional viper config file, which supplies the
 env-backed global flags only.
 
@@ -198,10 +198,11 @@ the answers of its hidden command for the shell's completion requests,
 whose writes cobra does not check; the scripts of its `completion` leaves,
 whose write error cobra returns, so a failed one is CT5's exit 2; and the
 root's `--version` line (CT5), whose write cobra checks too, a failed one
-being CT5's exit 2. There is no quiet or verbose mode. The error lines of
-CT5 are the package's only other direct writes, to stderr from `Execute`,
-and `ctl/` calls slog nowhere at all — the records CT7's Warn level
-silences are the client interceptors'.
+being CT5's exit 2. There is no quiet or verbose mode of stdout:
+`--log-level` changes only which records reach stderr (CT7). The error
+lines of CT5 are the package's only other direct writes, to stderr from
+`Execute`, and `ctl/` calls slog nowhere at all — the records CT7's Warn
+log level silences are the client interceptors'.
 
 ### Errors and exit codes
 

@@ -8,9 +8,10 @@
 // device and window the reads. The two mutators carry `sp_rev` from the
 // global --rev, presence-based per CT3; the two reads carry no token at all.
 //
-// `td get-bm` is the whole CLI's only deviation from CT4's "print the reply
-// message" — it prints hexBitmapResult instead, because protojson renders a
-// bytes field as base64 (CT4).
+// `td get-bm` is one of the CLI's two deviations from CT4's "print the reply
+// message", the other being `cluster get-status`'s table — it prints
+// hexBitmapResult instead, because protojson renders a bytes field as
+// base64 (CT4).
 package ctl
 
 import (

@@ -793,8 +793,8 @@ one etcd, configured with the request caps every etcd serving dnv must have
 `EtcdMaxRequestBytes`, which the suite reads from the `workerctl` it builds
 instead of copying the numbers), four `dnv-cdc`
 instances — two twins of the low half of the shard-code space and two of
-the high half — each at `--log-level debug`, as every program a suite runs
-logs at Debug, and `cdcctl`. The second server, with passwordless sudo, is
+the high half — each at `--log-level debug`, the log level a suite gives
+every dnv daemon it runs, and `cdcctl`. The second server, with passwordless sudo, is
 the nvmet target that stands in for the controller nodes: a handful of
 test subsystems, each with one dm-zero namespace, linked to several nvmet
 ports, one of them on two ports so that one subsystem has two paths. The

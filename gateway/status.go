@@ -998,13 +998,13 @@ func (b *statusBuilder) poolRows() {
 // reportRows are the rows that say the read has no state of the pool to
 // judge by, status UNKNOWN, and returns the primary's report when it has
 // one to read: an answer with code zero or a leftover, whose observation
-// may be old or behind the pool's revision (a row says so, and its rows
-// are still listed). An info read answers from the agent's last
-// observation, made before a syncup in flight and kept past a refused one,
-// so an agent that refuses the pool's syncups, as one whose store refuses
-// its saves, shows only as a report behind the pool's revision beside the
-// cntlr's health epoch, as a syncup still on its way does too; the row says
-// both.
+// may be old, which a row says, or behind the pool's revision, which a
+// row says only while the primary's health epoch is set; its rows are
+// still listed. An info read answers from the agent's last observation,
+// made before a syncup in flight and kept past a refused one, so an agent
+// that refuses the pool's syncups, as one whose store refuses its saves,
+// shows only as a report behind the pool's revision beside the cntlr's
+// health epoch, as a syncup still on its way does too; the row says both.
 func (b *statusBuilder) reportRows() *pb.CntlrInfo {
 	in := b.in
 	unknown := func(text string) {
@@ -1103,8 +1103,10 @@ func (b *statusBuilder) reportRows() *pb.CntlrInfo {
 // leg's health epoch, its sides', its row of the primary's report that
 // reads ERROR or carries an identity reason, and the bad blocks md records
 // on its member, merged into one row. The legs are the slices' groups', the
-// clone meta groups' of clones not being deleted, the repairs' new legs and
-// the retired legs.
+// clone meta groups' of clones not being deleted, the new legs of repairs
+// not of such a clone (repairOfDeletingClone), and the retired legs whose
+// side carries a health epoch, a deleting clone's among them until the
+// drain's final step deletes them (model.FinishCloneDelete).
 func (b *statusBuilder) healthAndLegRows(info *pb.CntlrInfo) {
 	in, state := b.in, b.in.state
 	for _, id := range state.Conf.GetCntlrIdList() {

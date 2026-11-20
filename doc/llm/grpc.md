@@ -3,18 +3,16 @@
 This document owns the four gRPC interceptors every dnv connection and server
 chains, the message limit every such connection and server sets, and the
 keepalive of the worker's agent connections with the ping policy every
-server applies: the
-trace-id propagation between context and gRPC metadata, the logging of
-every request and reply message with its record names, levels and
-ordering, the
-wiring rule that puts both chains and the limit on every dnv client
-connection and server, and the conventions the integration-test drivers and
-fakes follow instead. It leans
-on `log.md` for the helpers it reuses (`WithTraceId`, `TraceIdFromCtx`,
-`TraceIdMetadataKey`, `PbToLogValue`) and for its rules on levels, records
-and typed attributes, on `schema.proto` for the
-three services (`Gateway`, `DiskNodeAgent`, `ControllerNodeAgent`), and on
-`architecture.md`, System overview, for who calls whom.
+server applies: the trace-id propagation between context and gRPC metadata,
+the logging of every request and reply message with its record names, log
+levels and ordering, the wiring rule that puts both chains and the limit on
+every dnv client connection and server, and the conventions the
+integration-test drivers and fakes follow instead. It leans on `log.md` for
+the helpers it reuses (`WithTraceId`, `TraceIdFromCtx`, `TraceIdMetadataKey`,
+`PbToLogValue`) and for its rules on log levels, records and typed
+attributes, on `schema.proto` for the three services (`Gateway`,
+`DiskNodeAgent`, `ControllerNodeAgent`), and on `architecture.md`, System
+overview, for who calls whom.
 
 ## Placement
 
@@ -241,9 +239,11 @@ The `integtest/` drivers are scoped out of the wiring rule on purpose.
   reads for which RPC dnvctl put on the wire and under which trace id — it
   selects `grpc server request` records by `trace_id` and `method`; the
   request payloads it asserts come from the fake's `state.json`
-  (`dnvctl.md`, Integration test plan). Both fakes set their log level to Debug
-  as the first statement of `main`, as every program a suite runs logs at
-  Debug, so the fake agent's log holds the `Check*` stream messages (L1).
+  (`dnvctl.md`, Integration test plan). Both fakes set their log level to
+  Debug as the first statement of `main`, the log level a suite gives
+  every dnv daemon it runs, so the fake agent's log holds the `Check*`
+  stream messages (L1); `dnvctl` and the drivers keep their default log
+  levels.
 * The message limit is no part of that scoping out: `gatewayctl`,
   `cnagentctl`, `dnagentctl` and both fakes set it as Wiring says, so a
   driver takes any reply the daemon it calls sends, and a fake any request

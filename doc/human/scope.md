@@ -77,7 +77,7 @@ pools, subsystems and hosts serve each user.
 | Reverting a volume to a snapshot | not yet; Cinder asks for it |
 | Changing a pool's thresholds or the cluster's check intervals after creation | not yet |
 | Changing a controller node's budget, the pool space it may serve, after creation | not yet |
-| Changing a node's location after creation | not yet; empty the node, delete it and create it again; the steps that empty a node are not written yet ([the operations doc](operations.md#choose-a-nodes-location)) |
+| Changing a node's location after creation | not yet; empty the node, delete it and create it again ([the operations doc](operations.md#remove-a-node)); the steps that use a disk node's disk again are not written yet (section 7, Reuse a disk from an old node) |
 | Rolling upgrades | not yet; every program is upgraded at once |
 | Transports other than NVMe/TCP | not yet |
 | Disks of logical blocks other than 512 bytes, such as 4 KiB disks | not yet; the dn agent refuses such a disk ([the introduction](introduction.md#requirements)) |
@@ -1260,18 +1260,18 @@ tutorials are [dnv on one machine](tutorial_all_in_one.md) and
 [dnv under Kubernetes on one machine](tutorial_csi.md). "Operations doc"
 names [the operations doc](operations.md), the procedures an operator
 follows by hand, which holds how to read what is wrong across the cluster,
-the forced-start guide, the steps for a pool
-made before the stripe bound, for a pool made before the block bound, for
-a new volume refused for a thin id that holds data and for a pool left by
-a Kubernetes volume whose name held "..", a planned restart of an agent, a
-slow leg, the install of the udev rules on a node, the node check, the
-choice of a node's location, the removal of a node, the gather of a node's
-state, a Kubernetes volume the node plugin will not format, a change of the
-cdc addresses of the Kubernetes driver, a Kubernetes node plugin that does
-not start, the loss of a Kubernetes machine, a one-cntlr Kubernetes volume
-after a cntlr replacement and the restore of etcd from a backup so far, and
-gets the others as they are written. Every row with no tool
-or no doc carries its note. Section 6.1 and the tables give some short
+the forced-start guide, the steps for a pool made before the stripe bound,
+for a pool made before the block bound, for a new volume refused for a
+thin id that holds data and for a pool left by a Kubernetes volume whose
+name held "..", a planned restart of an agent, a slow leg, the install of
+the udev rules on a node, the node check, the choice of a node's location,
+the cluster's capacity, a pool's space, the removal of a node, the logs,
+the gather of a node's state, a Kubernetes volume the node plugin will not
+format, a change of the cdc addresses of the Kubernetes driver, a
+Kubernetes node plugin that does not start, the loss of a Kubernetes
+machine, a one-cntlr Kubernetes volume after a cntlr replacement and the
+restore of etcd from a backup so far, and gets the others as they are
+written. Every row with no tool or no doc carries its note. Section 6.1 and the tables give some short
 steps; the section "Steps known today" below gives the longer ones.
 
 ### Nodes
@@ -1645,21 +1645,21 @@ failover's among them.
   on port 9809 on each Kubernetes node's loopback alone. State: not yet; log
   handling is in [the operations doc](operations.md#the-logs).
 - **The status read sees what etcd and the primaries hold.** The status
-  read asks each pool's primary and a migration's new side, and no
-  standby and no other side. A standby's or a side's own trouble shows
-  only once the worker sets its health epoch; the inspects show the rest.
-  A failover with no enabled standby to take the role, a leg repair the
-  worker cannot create and a cntlr replacement that finds no controller
-  node show only as a health line whose age grows; the worker's log names
-  why.
-  A worker that seems gone is a hint: the record a running worker writes
-  in etcd every few seconds is older, by the gateway's clock, than twice
-  the default time between two writes, and the gateway does not know a
-  worker's own time between writes. No record keeps the time of a repair, a migration, a clone, a
-  lost record or a refused grow, so their lines show no age, save the age
-  of a row of the primary's report that a line shows. A pool shows
-  a fixed number of lines at most, then one line that counts the rest.
-  State: accepted.
+  read asks each pool's primary and a migration's new side, and no standby
+  and no other side. A standby's or a side's own trouble shows only once
+  the worker sets its health epoch; the inspects show the rest. A failover
+  of an unhealthy primary with no enabled standby to take the role, a leg
+  repair the worker cannot create and a cntlr replacement that finds no
+  controller node show only as a health line whose age grows; the worker's
+  log names why. A disabled primary shows as a pool line, which says when
+  no cntlr of the pool is enabled. A worker that seems gone is a hint: the
+  record a running worker writes in etcd every few seconds is older, by
+  the gateway's clock, than twice the default time between two writes, and
+  the gateway does not know a worker's own time between writes. No record
+  keeps the time of a repair, a migration, a clone, a lost record or a
+  refused grow, so their lines show no age, save the age of a row of the
+  primary's report that a line shows. A pool shows a fixed number of lines
+  at most, then one line that counts the rest. State: accepted.
 - **A retired leg's partial mark can miss a short stay in the array.** A
   repair can take a retired leg back as its new leg. When md has counted
   that leg as a member but not copied all of it, the worker marks the leg

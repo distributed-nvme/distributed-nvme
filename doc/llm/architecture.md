@@ -2636,12 +2636,18 @@ rest. A pool's rows are:
   destination gives no reading of its copy — a copy that runs is not
   listed;
 * a clone being deleted, its one row standing for its teardown, so no
-  other row of it is listed: neither the primary's rows of it, of its meta
-  group or of its legs, its repairs' new legs among them, nor their health
-  epochs, nor its repairs or its group's marks; its drain runs ahead of
-  the pass's gates (`dnv-worker.md` CLD7), so of the cases that stop the
-  worker's pass only an absent revision key, which leaves the pool no
-  worker, holds it, and the row says so;
+  other row of it is listed — neither the primary's rows of it, of its
+  meta group or of its legs, its repairs' new legs among them, nor their
+  health epochs, nor its repairs or its group's marks — save the health
+  epoch of the side of a retired leg of its group, which lists until the
+  drain's final step deletes the leg; its drain runs ahead of the pass's
+  gates (`dnv-worker.md` CLD7), so of the cases that stop the worker's
+  pass two hold it: an absent revision key, which leaves the pool no
+  worker, and the row says the drain waits for one; and a missing repair
+  or retired leg record of the clone's meta group, which the pool's lists
+  name too, so a lost-record row names its key, and which the drain's
+  final step refuses (`dnv-worker.md` MD6), and the row says nothing of
+  that wait;
 * a torn thin device (Thin devices).
 
 A pool's rows are ordered by what they say — lost records, the report,

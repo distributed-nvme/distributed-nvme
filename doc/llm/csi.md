@@ -792,8 +792,8 @@ host.
 
 Every case runs on the suite's dnv stack with the driver deployed from the
 manifests, the config map and the storage classes of the suite in place of
-the examples, and both plugins at `--log-level debug`, as every program a
-suite runs logs at Debug; the IO pods run the driver's own image, since it
+the examples, and both plugins at `--log-level debug`, the log level a
+suite gives every dnv daemon it runs; the IO pods run the driver's own image, since it
 carries the tools they need and is already on every node. The deploy pulls
 the sidecar images a node lacks, on every node, so that a controller copy
 that moves starts at once, and checks the driver's shape: two controller
