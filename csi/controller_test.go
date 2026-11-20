@@ -26,7 +26,10 @@ const (
 
 var testCdc = []string{"192.168.122.78:18030", "192.168.122.79:18030"}
 
-// newTestController wires a controller to a fresh fake gateway.
+// newTestController wires a controller to a fresh fake gateway. A detach's
+// wait polls every few milliseconds and gives up after a few seconds, so a
+// test whose fake never answers the ok row fails fast; a test of the bound
+// sets its own.
 func newTestController(t *testing.T) (*controller, *fakeGateway) {
 	t.Helper()
 	g := newFakeGateway()
@@ -34,6 +37,8 @@ func newTestController(t *testing.T) (*controller, *fakeGateway) {
 		CdcAddresses:   testCdc,
 		GatewayTimeout: 2 * time.Second,
 	})
+	c.detachWait = 5 * time.Second
+	c.detachPoll = 2 * time.Millisecond
 	return c, g
 }
 

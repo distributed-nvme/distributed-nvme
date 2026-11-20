@@ -3,6 +3,7 @@ package csi
 import (
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/container-storage-interface/spec/lib/go/csi"
 	"google.golang.org/grpc/codes"
@@ -87,11 +88,13 @@ func TestAStaleDetachLeavesTheNextAttach(t *testing.T) {
 	}
 }
 
-// The refusals of a host write: a stale revision runs the attempt again, up
-// to hostsAttempts, and then the call is ABORTED, a detach included, which
-// must never answer done while its node stays in the list; any other
-// refusal, an ABORTED of another cause among them, is passed on after one
-// write with the gateway's own message.
+// The refusals of a host write: a stale revision runs the attempt again.
+// A detach does so up to hostsAttempts, and is then ABORTED, since it must
+// never answer done while its node stays in the list; an attach whose write
+// waits for the cut does so until its call's one bound, DEADLINE_EXCEEDED,
+// since the worker moves the pool's revision several times during a first
+// build. Any other refusal, an ABORTED of another cause among them, is
+// passed on after one write with the gateway's own message.
 func TestHostWriteRefusals(t *testing.T) {
 	c, g := newTestController(t)
 	ctx := t.Context()
@@ -134,10 +137,22 @@ func TestHostWriteRefusals(t *testing.T) {
 	delete(g.fail, "UpdateSubsystemHosts")
 	g.alwaysStale = true
 	g.mu.Unlock()
-	wantCode(t, publish(), codes.Aborted, "every write stale")
-	if n := writes() - before; n != hostsAttempts {
-		t.Errorf("%d writes, want %d", n, hostsAttempts)
+	// Each attempt ends stale, and the next one still keeps the poll
+	// period apart from the last poll.
+	c.detachWait = 200 * time.Millisecond
+	c.detachPoll = 20 * time.Millisecond
+	inspects := g.methodCalls("InspectCntlr")
+	wantCode(t, publish(), codes.DeadlineExceeded, "every write stale")
+	if n := writes() - before; n <= hostsAttempts {
+		t.Errorf("%d writes of an attach within its bound, want more than %d",
+			n, hostsAttempts)
 	}
+	if n, most := g.methodCalls("InspectCntlr")-inspects,
+		int(c.detachWait/c.detachPoll)+2; n > most {
+		t.Errorf("%d polls within the bound, want at most %d", n, most)
+	}
+	c.detachWait = 5 * time.Second
+	c.detachPoll = 2 * time.Millisecond
 
 	g.mu.Lock()
 	g.alwaysStale = false
@@ -146,7 +161,11 @@ func TestHostWriteRefusals(t *testing.T) {
 	g.mu.Lock()
 	g.alwaysStale = true
 	g.mu.Unlock()
+	before = writes()
 	_, err = c.ControllerUnpublishVolume(ctx,
 		&csi.ControllerUnpublishVolumeRequest{VolumeId: id, NodeId: testNodeA})
 	wantCode(t, err, codes.Aborted, "a detach whose every write is stale")
+	if n := writes() - before; n != hostsAttempts {
+		t.Errorf("%d writes of a detach, want %d", n, hostsAttempts)
+	}
 }

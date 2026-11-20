@@ -1378,7 +1378,7 @@ steps; the section "Steps known today" below gives the longer ones.
 | Change the cdc addresses of the Kubernetes driver | the config map, the Kubernetes record that holds the cdc addresses both plugins start with, and a restart of both plugins | the operations doc, Change the cdc addresses of the Kubernetes driver | procedure written; the Kubernetes suite changes the list of the controller plugin, the part of the driver that calls the gateway, alone, and no suite restarts the node plugins with a new list |
 | Start a Kubernetes node plugin that refuses to start | none; the plugin's log names the fact and its fix | the operations doc, A Kubernetes node plugin that does not start | procedure written; not tested in a suite |
 | Keep a Kubernetes cluster's pods off dnv | the example network policy, [`deploy/networkpolicy.yaml`](../../deploy/networkpolicy.yaml) | [the CSI tutorial](tutorial_csi.md#keep-other-pods-off-dnv) | procedure written; the Kubernetes suite's policy case tries the ports of the gateway, the cdc and two agents, not the NVMe/TCP ports, which listen only once a pool uses them |
-| Handle the loss of a Kubernetes machine | the controller plugin's second copy; the out-of-service mark of Kubernetes, which an operator puts on a machine that is gone so that Kubernetes moves its volumes | the operations doc, A Kubernetes machine is lost | procedure written; the Kubernetes suite checks the controller plugin's part, not the move of a pod's volume |
+| Handle the loss of a Kubernetes machine | the controller plugin's second copy; the out-of-service mark of Kubernetes, which an operator puts on a machine that is gone so that Kubernetes moves its volumes | the operations doc, A Kubernetes machine is lost | procedure written; the Kubernetes suite checks the controller plugin's part, and the move of a pod's volume after the out-of-service mark, of a machine cut off from Kubernetes but not from the controller nodes, on controller nodes that end its connections |
 | Recover a one-cntlr Kubernetes volume after a cntlr replacement | `nvme disconnect -d` of the old path, then delete the pod | the operations doc, A one-cntlr Kubernetes volume after a cntlr replacement | procedure written; not tested |
 | Recover a Kubernetes volume the node plugin will not format | none; the plugin formats only a volume whose first MiB reads as zeros; for data at the start, an operator reaches the volume through a pod that gets it as a raw block device, and zeroes the start by hand for a volume that never held data | the operations doc, A Kubernetes volume the node plugin will not format | procedure written; its steps for data at the start are not tested |
 | Recover from a fault only a host sees | disable the primary | this page, section 6.1 | procedure to write. Fix later. |
@@ -1514,6 +1514,39 @@ failover's among them.
 
 ## 8. Waits a host can see
 
+- **A detach of the Kubernetes driver, and the attach that follows it,
+  wait until the primary has ended the old host's connection.** A detach
+  takes a Kubernetes node off a volume's list of hosts, and then waits until
+  the cn agent of the volume's primary reports the row of the volume's
+  subsystem ok at that change's revision or a later one, which it does once
+  no host off the list keeps a connection to the subsystem there: one
+  converge of the primary, a second or two in the common case. An attach
+  that puts a node on the empty list waits for that report at the revision
+  it read before it writes the node, and reads again when the pool's
+  revision moves on: Kubernetes, once a detach call has failed, may already
+  ask to attach the volume to another node, and that attach is what keeps
+  the other node out until the old host's connection has ended. Kubernetes
+  gives each call 15 seconds, then tries it again, with a pause between
+  tries that grows from one second up to five minutes; the driver bounds a
+  call to two minutes, or to its caller's limit when that is shorter. A
+  primary whose cn agent does not answer, or whose connection to the old
+  host does not end, holds both until the cn agent answers, the connection
+  ends or another controller node becomes the primary, so the volume's new
+  pod waits. A connection that does not end reads pending and starts no
+  failover, except under a lockdown, the mode Secure Boot switches on,
+  which reports an error as a node that cannot read its connections does,
+  and the worker fails the primary over. An operator who disables the
+  primary's cntlr moves the primary ([the operations
+  doc](operations.md#a-kubernetes-machine-is-lost)). Where the primary's cn
+  agent runs with `--ignore-host-disconnection` on a kernel that cannot end
+  a connection, both waits end at its first report at that revision and
+  end no connection (section 5.4). State: accepted: the attach's wait keeps
+  a second machine out until the primary has ended the old machine's
+  connection, and the detach's wait makes a finished detach mean that the
+  old machine's connection on the primary is gone. An attach that did not
+  wait would let both machines write at once, and a new pod that waits
+  loses no data. The Kubernetes suite's detach case checks both waits, with
+  the worker stopped so that no cn agent converges.
 - **A cntlr or a cdc that does not answer holds up a Kubernetes node.** The
   node plugin makes its connects and its reads of the cdcs' answers one at a
   time and bounds each by a few seconds, but no signal ends some waits in

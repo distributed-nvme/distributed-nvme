@@ -3092,25 +3092,60 @@ What dnv does alone:
 Safe steps, for a machine that does not come back. Check "When to stop"
 below before step 1.
 1. Make sure the machine cannot write to a volume any more: power it off,
-   or cut it from the network that reaches the controller nodes.
+   or cut it from the network that reaches the controller nodes. This step
+   is needed where a controller node's cn agent runs with
+   `--ignore-host-disconnection`, on a kernel that cannot end a host's
+   connection; that agent logs the warning "agent host cut disabled" at its
+   start. Where the controller nodes can end a host's connection, the
+   detach of step 2 waits until the volume's primary has ended the
+   machine's connection, an attach to another machine waits for the same
+   end, so the other machine gets the volume only after it, and a standby
+   ends the machine's connection before it ever serves; this step only
+   adds a second guard.
 2. Mark it out of service:
    `kubectl taint nodes <node> node.kubernetes.io/out-of-service=nodeshutdown:NoExecute`.
    Kubernetes deletes its pods and detaches their volumes; the workloads'
-   new pods attach them on other machines.
+   new pods attach them on other machines. Each detach takes the machine
+   off the list of hosts that may connect to the volume, and then waits
+   until the cn agent of the volume's primary has ended the machine's
+   connection to the volume at its next converge, which takes a second or
+   two. Once a detach call has failed, Kubernetes may already ask to attach
+   the volume to another machine; that attach waits for the same end, and
+   it is this wait that keeps the other machine out. A primary whose cn
+   agent does not answer holds the detach and the attach, and so does a
+   connection that does not end: Kubernetes gives each call 15 seconds and
+   then tries it again, with a pause between tries that grows
+   from one second up to five minutes, so the volume moves only once that
+   cn agent answers, once the connection ends, or once another controller
+   node becomes the primary, and then up to one pause later. A controller
+   node that cannot read its connections, or that a lockdown, the kernel
+   mode that Secure Boot switches on, keeps from ending them, reports an
+   error, and the worker fails the primary over to another controller
+   node. A connection that does not end for any other reason starts no
+   failover: the cn agent reports it as pending, as when the machine's IO
+   is held on the controller node. To serve the volume from another node
+   meanwhile, disable the primary's cntlr with
+   `dnvctl cntlr set-enabled --id <cntlr id> --enabled=false`: a disabled
+   cntlr is never the primary, so the worker makes another cntlr the
+   primary without its usual wait, and that cntlr ends the machine's
+   connection there before it serves. Enable the old cntlr again once its
+   connection has ended, with `dnvctl cntlr set-enabled --id <cntlr id>`.
 3. Once the machine is back and clean, or replaced, remove the mark:
    `kubectl taint nodes <node> node.kubernetes.io/out-of-service-`.
 
 Steps that can lose data: the out-of-service mark, a forced delete of the lost
 machine's pods (`kubectl delete pod --force --grace-period=0`), or a delete of
-its Node object, while the machine still runs and reaches the controller
-nodes. A detach takes the machine off the volume's list, and the cn agents
-end its connections only at their next converge, after the detach has
-returned, where the controller nodes can end them; where a controller
-node's kernel cannot and its cn agent runs with
-`--ignore-host-disconnection`, nothing ends them ([the scope
-page](scope.md#54-hosts-and-the-kubernetes-driver)). Until then the
-machine keeps its connections to the volumes and can write beside the
-machine the volumes move to.
+its Node object, while the machine still runs and reaches a controller node
+whose cn agent runs with `--ignore-host-disconnection`. A detach takes the
+machine off the volume's list and waits for the primary's cn agent to end
+the machine's connection at its next converge, and the attach to another
+machine waits for the same end, where the controller node can end it;
+where its kernel cannot and its cn agent runs with
+`--ignore-host-disconnection`, nothing ends the connection and neither
+waits for it ([the scope
+page](scope.md#54-hosts-and-the-kubernetes-driver)): the machine keeps its
+connections to the volumes there and can write beside the machine the
+volumes move to.
 
 When to stop: before step 1, the machine answers, by ssh or on its console,
 while Kubernetes shows it `NotReady`: that is a fault of its network or of
@@ -3119,10 +3154,21 @@ you cut from the network yourself in step 1 still answers on its console:
 that is no reason to stop, and step 2 marks it.
 
 Tested: the Kubernetes suite's machine case cuts the host of the copy that
-holds the leases off the network and checks the controller plugin's part:
-the other copy takes both leases, serves a new volume on the other host,
-and a new copy runs elsewhere while the host stays cut. The move of a pod's
-volume after a loss and the out-of-service mark are not tested.
+holds the leases off the network and checks the controller plugin's part: the
+other copy takes both leases, serves a new volume on the other host, and a new
+copy runs elsewhere while the host stays cut. Its detach case cuts a host that
+writes to a volume off the machine of the Kubernetes server alone, so that the
+host still reaches the controller nodes. It stops the worker, so that no cn
+agent converges, and marks the host out of service. For 20 seconds the volume
+stays attached to the host, and the host stays connected to the primary.
+Kubernetes asks to attach the volume to the other host meanwhile, and that
+attach waits too. Once the worker runs again, the primary's cn agent ends the
+host's connection, and only then do the detach and the attach end. The host's
+writes then fail, and the volume's new pod on the other host reads what the
+host wrote and writes. Both cases run on controller nodes that can end a host's
+connection; a machine lost while a cn agent runs with
+`--ignore-host-disconnection` is not tested, and neither is a connection that
+does not end.
 
 ## A one-cntlr Kubernetes volume after a cntlr replacement
 

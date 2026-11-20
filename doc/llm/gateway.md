@@ -1214,7 +1214,11 @@ set.
   `InspectDiskNode` replies its own, and the agent's `io_stats`
   (`architecture.md`, Cntlrs). It is the one `GetCntlrInfo` caller that
   sets `read_io_stats`: the others read rows alone, and cost the agent no
-  read of the node (`cnagent.md` CN23).
+  read of the node (`cnagent.md` CN23). Beside a person, through `dnvctl`,
+  the CSI driver's controller plugin polls it during a detach's and an
+  attach's wait for the primary's report of the volume's subsystem
+  (`csi.md` CSI10), so each inspect costs that agent one read of its
+  counters and the gateway's log the whole reply.
 * **InspectStoragePool** — validate the names (GW4); one `Snapshot`:
   resolve (`openSpRead`, no token, a deleting pool read as any other); the
   stored-conf gate on the pool's `bdev_conf` (GW11); every slice

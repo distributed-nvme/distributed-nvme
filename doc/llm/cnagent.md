@@ -3927,7 +3927,10 @@ kernel's check before a list change can show its connection after the
 cut, and the next read names it and the re-send cuts it. Reason for the
 wait in the converge: a connection's directory goes a fraction of a
 second after its write, so the converge's own row and code say held in
-the common case, and no re-send is needed for it.
+the common case, and no re-send is needed for it, and a reader of that
+row, such as the CSI driver's detach and attach (`csi.md` CSI10), finds the
+cut held in that converge's own row, with no wait for a check round's
+re-send.
 
 **Safe.** A subsystem is **safe** in a pass when its list step held, or
 failed while the strict read finds the kernel admitting no host off the

@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"slices"
 	"strings"
 	"time"
 
@@ -31,6 +32,28 @@ const (
 // range at all, which the CSI spec leaves to the plugin.
 const defaultVolumeSize = 1 << 30
 
+// The detach's and the attach's wait for the primary's cut (csi.md CSI10,
+// CSI7).
+const (
+	// detachWaitMax is the one bound of a detach or an attach, from the
+	// call's start, when the caller's deadline is later or absent: every
+	// attempt and every wait of the call share it. Kubernetes' attacher
+	// gives every call a deadline of its own, far shorter, so this bound is
+	// for a caller with none, a tool or the conformance test, whose attach
+	// right after a create waits for the primary's first converge at the
+	// pool's revision, and reads and waits again at each move the worker
+	// makes to that revision while it builds the pool.
+	detachWaitMax = 2 * time.Minute
+	// detachPollPeriod is the least time between two polls of one call,
+	// whatever ended its attempts. A poll is one GetStoragePool and at most
+	// one InspectCntlr, of the primary the pool names, when that read does
+	// not end the wait (the pool gone or deleting, the subsystem off its
+	// list, or the pool past an attach's revision): the inspect makes the
+	// primary's agent read its devices' counters, and each whole reply is
+	// logged at Info, in the driver and in the gateway.
+	detachPollPeriod = time.Second
+)
+
 // controller is the CSI controller service (csi.md, The volume model; Attach
 // and detach; Capacity): a gRPC client of the gateway.
 type controller struct {
@@ -38,6 +61,10 @@ type controller struct {
 	gw      pb.GatewayClient
 	timeout time.Duration
 	cdc     []string
+	// detachWait and detachPoll are detachWaitMax and detachPollPeriod,
+	// which tests set short.
+	detachWait time.Duration
+	detachPoll time.Duration
 }
 
 func newController(gw pb.GatewayClient, cfg Config) *controller {
@@ -45,7 +72,13 @@ func newController(gw pb.GatewayClient, cfg Config) *controller {
 	if timeout <= 0 {
 		timeout = DefaultGatewayTimeout
 	}
-	return &controller{gw: gw, timeout: timeout, cdc: cfg.CdcAddresses}
+	return &controller{
+		gw:         gw,
+		timeout:    timeout,
+		cdc:        cfg.CdcAddresses,
+		detachWait: detachWaitMax,
+		detachPoll: detachPollPeriod,
+	}
 }
 
 // gwCtx bounds one gateway call. The ctx carries the trace id the
@@ -584,9 +617,11 @@ func (c *controller) poolDeletingOrGone(
 // subsystem's allowed hosts to the node's host NQN alone (csi.md, Attach
 // and detach). The node already alone in the list is done; another node in
 // it is FAILED_PRECONDITION, the spec's word for a volume published
-// elsewhere under single-node access. The publish context carries what the
-// node plugin needs, the subsystem NQN and the namespace uuid, and the cdc
-// addresses, which the node plugin does not read (csi.md CSI10).
+// elsewhere under single-node access; an empty list is written once the
+// primary's cut at the revision read has held (awaitCut). The publish
+// context carries what the node plugin needs, the subsystem NQN and the
+// namespace uuid, and the cdc addresses, which the node plugin does not
+// read (csi.md CSI10).
 func (c *controller) ControllerPublishVolume(
 	ctx context.Context,
 	req *csi.ControllerPublishVolumeRequest,
@@ -614,7 +649,21 @@ func (c *controller) ControllerPublishVolume(
 			"node %q is unknown to this driver: a node id is a host NQN", node)
 	}
 	nqn := subsystemNqnOf(name)
-	ss, err := c.updateHosts(ctx, cluster, name, nqn,
+	// One bound for the whole call, every attempt and every wait of it.
+	ctx, cancel := context.WithTimeout(ctx, c.detachWait)
+	defer cancel()
+	// The write that lets the node in waits for the primary's cut at the
+	// revision its attempt read: a host the list held before, which a
+	// detach took off, may still hold an nvmet connection, and Kubernetes'
+	// forced detach attaches the next node once a detach call has failed,
+	// while that detach's own wait still runs (csi.md CSI10).
+	what := "the attach to node " + node
+	st := &cutState{}
+	beforeWrite := func(ss *pb.Subsystem, rev uint64) error {
+		return c.awaitCut(ctx, cluster, name, nqn, what,
+			cutWait{ssId: ss.GetSsId(), rev: rev, revKnown: true, exact: true}, st)
+	}
+	res, err := c.updateHosts(ctx, cluster, name, nqn, beforeWrite,
 		func(ss *pb.Subsystem) ([]string, bool, error) {
 			if namespaceOf(ss) == nil {
 				return nil, false, status.Errorf(codes.NotFound,
@@ -638,9 +687,9 @@ func (c *controller) ControllerPublishVolume(
 				strings.Join(others, cdcSep))
 		})
 	if err != nil {
-		return nil, err
+		return nil, c.callErr(ctx, name, what, st, err)
 	}
-	ns := namespaceOf(ss)
+	ns := namespaceOf(res.ss)
 	return &csi.ControllerPublishVolumeResponse{
 		PublishContext: map[string]string{
 			ctxNqn:  nqn,
@@ -652,9 +701,10 @@ func (c *controller) ControllerPublishVolume(
 
 // ControllerUnpublishVolume detaches a volume from a node, or from every
 // node when none is named: it takes the node out of the subsystem's allowed
-// hosts, which empties the list. A node not in the list, a subsystem or a
-// pool that is gone, and an id that names no volume of this driver are all
-// done.
+// hosts, which empties the list, and then waits for the primary's cut
+// (awaitCut). A node not in the list writes nothing and waits all the same.
+// A subsystem or a pool that is gone, an id that names no volume of this
+// driver and a node id that is no host NQN are done at once.
 func (c *controller) ControllerUnpublishVolume(
 	ctx context.Context,
 	req *csi.ControllerUnpublishVolumeRequest,
@@ -669,7 +719,15 @@ func (c *controller) ControllerUnpublishVolume(
 	}
 	nqn := subsystemNqnOf(name)
 	node := req.GetNodeId()
-	_, err = c.updateHosts(ctx, cluster, name, nqn,
+	// One bound for the whole call, its write's attempts and its wait.
+	ctx, cancel := context.WithTimeout(ctx, c.detachWait)
+	defer cancel()
+	what := "the detach from node " + node
+	if node == "" {
+		what = "the detach from every node"
+	}
+	st := &cutState{}
+	res, err := c.updateHosts(ctx, cluster, name, nqn, nil,
 		func(ss *pb.Subsystem) ([]string, bool, error) {
 			var hosts []string
 			found := node == ""
@@ -687,14 +745,291 @@ func (c *controller) ControllerUnpublishVolume(
 			}
 			return hosts, true, nil
 		})
-	if err != nil && codeOf(err) != codes.NotFound {
-		return nil, err
+	if err != nil {
+		if codeOf(err) == codes.NotFound {
+			return done, nil
+		}
+		return nil, c.callErr(ctx, name, what, st, err)
+	}
+	if node != "" && !isNodeId(node) {
+		// No attach of this driver put such an id on a list, so no
+		// connection of it waits for a cut.
+		return done, nil
+	}
+	w := cutWait{ssId: res.ss.GetSsId(), rev: res.rev, revKnown: res.wrote}
+	if err := c.awaitCut(ctx, cluster, name, nqn, what, w, st); err != nil {
+		return nil, c.callErr(ctx, name, what, st, err)
 	}
 	return done, nil
 }
 
-// hostsAttempts bounds updateHosts' attempts: a pool that moves under every
-// one of them is ABORTED, which the caller retries.
+// awaitCut is a detach's or an attach's wait for the primary's cut (csi.md
+// CSI10; cnagent.md CN33): it polls until a report of the pool's primary
+// cntlr reads the subsystem's row OK at the wait's revision, which an agent
+// that cuts answers once no host off the list keeps an nvmet connection to
+// the subsystem. A detach's revision is the one its write made, and a
+// report at a later one counts too, since the worker sends the primary the
+// latest revision alone (dnv-worker.md RW3); a detach that wrote nothing
+// takes the pool's revision its first poll reads, after the subsystem read,
+// so a change that landed between the two reads, another detach of the
+// node among them, is in it. A pool or a subsystem that is gone and a pool
+// being deleted, which holds no subsystem, end a detach's wait as done. An
+// attach's revision is the one its attempt read before its write, whose
+// list is empty, and its wait is exact: a poll that reads the pool, or a
+// report, past that revision, or the pool or its subsystem gone, or the
+// pool deleting, ends the wait as errPoolMoved, since the write that would
+// follow has no OK report at its token's revision; the attach's next
+// attempt reads and decides again. Polls of one call keep detachPoll apart
+// across its attempts (st). Anything else polls again, until ctx ends,
+// which is the call's one bound (the caller's deadline or detachWait from
+// the call's start, whichever comes first): errBoundEnded, which the call
+// answers as callErr does. Standbys are not asked: they serve no IO, and a
+// standby that becomes the primary cuts before it serves.
+func (c *controller) awaitCut(
+	ctx context.Context,
+	cluster string,
+	name string,
+	nqn string,
+	what string,
+	w cutWait,
+	st *cutState,
+) error {
+	timer := time.NewTimer(st.untilNextPoll(c.detachPoll))
+	defer timer.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return errBoundEnded
+		case <-timer.C:
+		}
+		st.lastPoll = time.Now()
+		res, seen, failed := c.pollCut(ctx, cluster, name, nqn, &w)
+		if failed {
+			st.failure = seen
+		} else if seen != "" {
+			st.answer, st.failure = seen, ""
+		}
+		switch res {
+		case pollDone:
+			return nil
+		case pollMoved:
+			return errPoolMoved
+		}
+		timer.Reset(c.detachPoll)
+	}
+}
+
+// cutState is what the waits of one call carry from attempt to attempt:
+// what the last poll the gateway answered saw, and the gateway call that
+// failed after it, if one did, for the bound's error, and the time of the
+// last poll, so that no two polls of the call come closer than the poll
+// period, however its attempts end.
+type cutState struct {
+	answer   string
+	failure  string
+	lastPoll time.Time
+}
+
+// untilNextPoll is the pause before a wait's first poll: none for the
+// call's first poll, else what is left of the poll period since the last.
+func (st *cutState) untilNextPoll(period time.Duration) time.Duration {
+	if st.lastPoll.IsZero() {
+		return 0
+	}
+	return max(0, period-time.Since(st.lastPoll))
+}
+
+// last is the state the bound's error names: the last answer and, after
+// it, a gateway call that failed; the wait's own end can cut the last
+// poll's call short, and the state before it is the one worth naming.
+func (st *cutState) last() string {
+	switch {
+	case st.answer == "" && st.failure == "":
+		return "no poll ran"
+	case st.answer == "":
+		return st.failure
+	case st.failure != "":
+		return st.answer + "; then " + st.failure
+	}
+	return st.answer
+}
+
+// errBoundEnded is a wait that its call's bound ended.
+var errBoundEnded = errors.New("the call's bound ended the wait")
+
+// callErr is a detach's or an attach's answer for an error of its write or
+// its wait. Once the call's bound has ended, on every path, it is the
+// bound's own: DEADLINE_EXCEEDED, or CANCELED when the caller ended the
+// call, naming the volume, what waited (what, as "the detach from node X")
+// and the last state the polls saw, and after it any error that ended the
+// call; before the bound, any other error passes as it is.
+func (c *controller) callErr(
+	ctx context.Context,
+	name string,
+	what string,
+	st *cutState,
+	err error,
+) error {
+	// A gateway call can fail at the deadline a moment before ctx says so.
+	d, ok := ctx.Deadline()
+	ended := ctx.Err() != nil || (ok && !time.Now().Before(d))
+	if !ended && !errors.Is(err, errBoundEnded) {
+		return err
+	}
+	if !errors.Is(err, errBoundEnded) {
+		st.failure = err.Error()
+	}
+	code := codes.DeadlineExceeded
+	if ctx.Err() != nil {
+		code = status.FromContextError(ctx.Err()).Code()
+	}
+	return status.Errorf(code, "volume %q: %s ran out of time; last seen: %s",
+		name, what, st.last())
+}
+
+// errPoolMoved ends an attach's exact wait that cannot end OK at its
+// attempt's revision: the pool or a report past it, or the pool or its
+// subsystem gone, or the pool deleting; the attach reads and decides
+// again.
+var errPoolMoved = errors.New("the pool moved past the attempt's revision")
+
+// cutWait is what a detach's or an attach's wait polls for: the
+// subsystem's row and the revision a report must be at or past, known once
+// the call wrote or read the pool before its write, or else at its first
+// poll's read of the pool; exact, an attach's, ends the wait as moved when
+// it cannot end OK at that revision: the pool or a report past it, or the
+// pool or its subsystem gone, or the pool deleting.
+type cutWait struct {
+	ssId     uint64
+	rev      uint64
+	revKnown bool
+	exact    bool
+}
+
+// ended is what a poll that finds the pool or the subsystem gone, or the
+// pool deleting, answers: a detach's wait is done, as what is gone serves
+// no host, and an attach's exact wait has moved, so that its next attempt
+// reads again and no write goes out with no OK report at its token.
+func (w *cutWait) ended() pollResult {
+	if w.exact {
+		return pollMoved
+	}
+	return pollDone
+}
+
+// pollResult is what one poll of awaitCut found: poll again, the wait is
+// done, or an exact wait has moved (cutWait).
+type pollResult int
+
+const (
+	pollAgain pollResult = iota
+	pollDone
+	pollMoved
+)
+
+// pollCut is one poll of awaitCut: the pool, its primary, and the
+// primary's report. It answers what it found, the state it saw, and
+// whether that is a gateway call that failed. An exact wait, an attach's,
+// answers pollMoved where a detach's is done (the pool or the subsystem
+// gone, the pool deleting), and for a pool or a report past its revision.
+func (c *controller) pollCut(
+	ctx context.Context,
+	cluster string,
+	name string,
+	nqn string,
+	w *cutWait,
+) (pollResult, string, bool) {
+	gctx, cancel := c.gwCtx(ctx)
+	pool, err := c.gw.GetStoragePool(gctx, &pb.GetStoragePoolRequest{
+		ClusterName: cluster,
+		SpName:      name,
+	})
+	cancel()
+	if err != nil {
+		if codeOf(err) == codes.NotFound {
+			return w.ended(), "the pool is gone", false
+		}
+		return pollAgain, fromGateway("GetStoragePool", err).Error(), true
+	}
+	conf := pool.GetSpConf()
+	if conf.GetDeleting() {
+		return w.ended(), "the pool is being deleted", false
+	}
+	if !slices.Contains(conf.GetNqnList(), nqn) {
+		return w.ended(), "the pool holds no such subsystem", false
+	}
+	if !w.revKnown {
+		w.rev, w.revKnown = pool.GetSpRev().GetRevision(), true
+	}
+	if w.exact && pool.GetSpRev().GetRevision() > w.rev {
+		return pollMoved, fmt.Sprintf("the pool moved from revision %d to "+
+			"%d", w.rev, pool.GetSpRev().GetRevision()), false
+	}
+	id, ok := primaryOf(pool)
+	if !ok {
+		return pollAgain, fmt.Sprintf("the pool has no primary cntlr; the "+
+			"wait is for revision %d", w.rev), false
+	}
+	gctx, cancel = c.gwCtx(ctx)
+	reply, err := c.gw.InspectCntlr(gctx, &pb.InspectCntlrRequest{
+		ClusterName: cluster,
+		SpName:      name,
+		CntlrId:     id,
+	})
+	cancel()
+	if err != nil {
+		return pollAgain, fmt.Sprintf("primary cntlr %d: %v; the wait is "+
+			"for revision %d", id, fromGateway("InspectCntlr", err),
+			w.rev), true
+	}
+	got := reply.GetAppliedRevision()
+	if w.exact && got > w.rev {
+		return pollMoved, fmt.Sprintf("primary cntlr %d reported revision "+
+			"%d, past the attempt's %d", id, got, w.rev), false
+	}
+	if got < w.rev {
+		return pollAgain, fmt.Sprintf("primary cntlr %d reported revision %d; "+
+			"the wait is for revision %d", id, got, w.rev), false
+	}
+	row := reply.GetCntlrInfo().GetSsIdToSubsystem()[w.ssId]
+	if row == nil {
+		return pollAgain, fmt.Sprintf("primary cntlr %d reported no row of the "+
+			"subsystem at revision %d", id, got), false
+	}
+	if row.GetStatus() != pb.ResStatus_RES_STATUS_OK {
+		return pollAgain, fmt.Sprintf("primary cntlr %d at revision %d reads "+
+			"the subsystem %s: %s", id, got, statusWord(row.GetStatus()),
+			row.GetDetails()), false
+	}
+	return pollDone, fmt.Sprintf("primary cntlr %d at revision %d reads the "+
+		"subsystem ok", id, got), false
+}
+
+// primaryOf is the id of a pool's primary cntlr: its cntlr list paired by
+// index with the conf's cntlr id list, as the gateway pairs them
+// (primaryCntlr, gateway/common.go).
+func primaryOf(pool *pb.GetStoragePoolReply) (uint64, bool) {
+	ids := pool.GetSpConf().GetCntlrIdList()
+	for i, cntlr := range pool.GetCntlrList() {
+		if cntlr.GetPrimary() && i < len(ids) {
+			return ids[i], true
+		}
+	}
+	return 0, false
+}
+
+// statusWord is a row status as dnvctl prints it: "pending" for
+// RES_STATUS_PENDING.
+func statusWord(st pb.ResStatus) string {
+	return strings.ToLower(strings.TrimPrefix(st.String(), "RES_STATUS_"))
+}
+
+// hostsAttempts bounds updateHosts' attempts of a write that waits for
+// nothing: a pool that moves under every one of them is ABORTED, which the
+// caller retries. An attach whose write waits for the cut is bounded by its
+// call's one bound instead: its attempts end on every move of the pool's
+// revision, which the worker makes several times during a pool's first
+// build.
 const hostsAttempts = 4
 
 // gwStaleRevision is the gateway's fixed message for a token that no longer
@@ -702,24 +1037,38 @@ const hostsAttempts = 4
 // runs again; any other ABORTED is passed on with its own message.
 const gwStaleRevision = "stale revision"
 
+// hostsResult is what updateHosts did: the subsystem the deciding attempt
+// read and, when it wrote, the pool revision the write made, which is the
+// token's plus one: a write the token check let through found the stored
+// revision equal to the token, and the write bumps it once
+// (architecture.md, Revision keys and the sync fan-out).
+type hostsResult struct {
+	ss    *pb.Subsystem
+	wrote bool
+	rev   uint64
+}
+
 // updateHosts is one attach's or detach's change of a subsystem's allowed
 // hosts under the pool's revision token (csi.md CSI10; gateway.md GW6):
 // each attempt reads the pool's revision, then the subsystem, then decide
-// says the list to write, if any, and the write carries the revision read
-// first. A write the gateway refuses as stale ran over a change made after
-// that read, another attach or detach among them, so the attempt runs
-// again and decides afresh on what that change left; any other refusal is
-// passed on. It returns the
-// subsystem the deciding attempt read; a pool or subsystem that is gone is
-// NOT_FOUND.
+// says the list to write, if any, beforeWrite, when set, runs with the
+// subsystem and the revision read and may refuse, and the write carries
+// that revision. A write the gateway refuses as stale ran over a change
+// made after that read, another attach or detach among them, so the
+// attempt runs again and decides afresh on what that change left; any
+// other refusal is passed on. With beforeWrite set, a stale refusal and a
+// beforeWrite that answers errPoolMoved start a new attempt that counts
+// against no limit, so ctx alone bounds the call; without it, the attempts
+// are hostsAttempts. A pool or subsystem that is gone is NOT_FOUND.
 func (c *controller) updateHosts(
 	ctx context.Context,
 	cluster string,
 	name string,
 	nqn string,
+	beforeWrite func(ss *pb.Subsystem, rev uint64) error,
 	decide func(ss *pb.Subsystem) ([]string, bool, error),
-) (*pb.Subsystem, error) {
-	for attempt := 0; attempt < hostsAttempts; attempt++ {
+) (hostsResult, error) {
+	for attempt := 0; attempt < hostsAttempts; {
 		gctx, cancel := c.gwCtx(ctx)
 		pool, err := c.gw.GetStoragePool(gctx, &pb.GetStoragePoolRequest{
 			ClusterName: cluster,
@@ -728,18 +1077,30 @@ func (c *controller) updateHosts(
 		cancel()
 		if err != nil {
 			if codeOf(err) == codes.NotFound {
-				return nil, status.Errorf(codes.NotFound,
+				return hostsResult{}, status.Errorf(codes.NotFound,
 					"volume %q does not exist", name)
 			}
-			return nil, fromGateway("GetStoragePool", err)
+			return hostsResult{}, fromGateway("GetStoragePool", err)
 		}
 		ss, err := c.subsystem(ctx, cluster, name, nqn)
 		if err != nil {
-			return nil, err
+			return hostsResult{}, err
 		}
 		hosts, write, err := decide(ss)
-		if err != nil || !write {
-			return ss, err
+		if err != nil {
+			return hostsResult{}, err
+		}
+		if !write {
+			return hostsResult{ss: ss}, nil
+		}
+		if beforeWrite != nil {
+			err := beforeWrite(ss, pool.GetSpRev().GetRevision())
+			if errors.Is(err, errPoolMoved) {
+				continue
+			}
+			if err != nil {
+				return hostsResult{}, err
+			}
 		}
 		gctx, cancel = c.gwCtx(ctx)
 		_, err = c.gw.UpdateSubsystemHosts(gctx, &pb.UpdateSubsystemHostsRequest{
@@ -752,20 +1113,27 @@ func (c *controller) updateHosts(
 		cancel()
 		switch codeOf(err) {
 		case codes.OK:
-			return ss, nil
+			return hostsResult{
+				ss:    ss,
+				wrote: true,
+				rev:   pool.GetSpRev().GetRevision() + 1,
+			}, nil
 		case codes.Aborted:
 			if status.Convert(err).Message() == gwStaleRevision {
+				if beforeWrite == nil {
+					attempt++
+				}
 				continue
 			}
-			return nil, fromGateway("UpdateSubsystemHosts", err)
+			return hostsResult{}, fromGateway("UpdateSubsystemHosts", err)
 		case codes.NotFound:
-			return nil, status.Errorf(codes.NotFound,
+			return hostsResult{}, status.Errorf(codes.NotFound,
 				"volume %q does not exist", name)
 		default:
-			return nil, fromGateway("UpdateSubsystemHosts", err)
+			return hostsResult{}, fromGateway("UpdateSubsystemHosts", err)
 		}
 	}
-	return nil, status.Errorf(codes.Aborted,
+	return hostsResult{}, status.Errorf(codes.Aborted,
 		"volume %q: its pool changed under every one of %d attempts; retry",
 		name, hostsAttempts)
 }

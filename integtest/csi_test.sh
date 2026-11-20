@@ -18,8 +18,8 @@
 #
 #   optional: [--only <case>] [--cleanup-only] [--slice-cnt N] [--keep-logs DIR]
 #
-# Cases, in order: k8s, policy, volume, failover, restart, many, machine,
-# sanity. `--only` picks one.
+# Cases, in order: k8s, policy, volume, failover, restart, detach, many,
+# machine, sanity. `--only` picks one.
 # Cleanup runs at the START and, on success only, at the END (CSI5): a
 # failing run leaves its pods, pools, processes and work directories in place
 # and dumps diagnostics instead.
@@ -117,11 +117,17 @@ OPEN_NS=dnv-csi-open
 # The sidecar images the manifests name, which driver_up pulls on every node
 # so that a controller copy that moves starts without a pull.
 SIDECARS=$(awk '/image: registry.k8s.io/ {print $2}' "$DEPLOY_DIR/controller.yaml" "$DEPLOY_DIR/node.yaml" | sort -u | tr '\n' ' ')
-# The machine case's cut of a host: its nft table and the systemd unit that
+# The cut of a host, the machine case's whole one and the detach case's from
+# the control-plane guest alone: its nft table and the systemd unit that
 # removes it after CUT_LIMIT seconds, whatever becomes of the run.
 CUT_TABLE=dnv_csi_cut
 CUT_UNIT=dnv-csi-cut-undo
 CUT_LIMIT=600
+# The taint by which the detach case tells Kubernetes that a node it cannot
+# reach is out of service: Kubernetes then force-deletes the node's pods and
+# detaches their volumes without waiting for the node.
+OOS_TAINT_KEY=node.kubernetes.io/out-of-service
+OOS_TAINT=$OOS_TAINT_KEY=nodeshutdown:NoExecute
 IMAGE=$(awk '/image: dnv-csi:/ {print $2; exit}' "$DEPLOY_DIR/controller.yaml")
 IMAGE_REF="docker.io/library/$IMAGE"
 # The smoke image of the k8s case.
@@ -136,6 +142,10 @@ SMOKE_LINE="dnv-csi smoke ok"
 WORK=/var/tmp/dnv-csi
 HELPER=/var/tmp/dnv-csi-helper.sh
 NVMET=/sys/kernel/config/nvmet
+# nvmet's debug directory, one directory per subsystem and one ctrl<cntlid>
+# per host's nvmet connection, which a kernel built with
+# CONFIG_NVME_TARGET_DEBUGFS shows once nvmet is loaded.
+DBG_NVMET=/sys/kernel/debug/nvmet
 
 # The dnv stack's ports: this suite's own block, bound by no other suite
 # (e2e_test.sh's inventory lists theirs). k3s holds its own well-known ports
@@ -208,6 +218,26 @@ WAIT_LEASE=60
 # unreachable (40 s on the lab's k3s), the copies' 30 s toleration of that
 # mark, and a start; the default toleration, 300 s, would pass it.
 WAIT_REPLACE=150
+# How long a host cut off from the control plane may take to read NotReady:
+# the node controller's grace, 40 s on the lab's k3s, with a margin.
+WAIT_NODE_LOST=150
+# How long the detach case's forced detach may take, from the out-of-service
+# taint to its write and, once the worker goes on, to the VolumeAttachment's
+# end: the pod's force delete, then the attacher's calls, each of which waits
+# for the primary's cut and is repeated with a backoff when its own deadline
+# passes.
+WAIT_DETACH=240
+# How long the detach case keeps the worker stopped once the detach has
+# taken host0 off the list, so that no cn agent cuts: longer than one call
+# of the attacher, whose deadline is 15 s by default, so that the detach is
+# seen to wait through a repeat too, and the attach to host1, which
+# Kubernetes asks for once that call has failed, is seen waiting.
+HOLD_CUT=20
+# How long the cut-off host's writes may go on after the primary's cut ends
+# its nvmet connection: its reconnect, after the kernel's default delay of
+# 10 s, is refused for good, and its controllers go, about 12 s after the cut
+# on the lab, with a margin.
+WAIT_HOST_IO_FAIL=90
 WAIT_NS_GONE=300
 WAIT_HOST_CLEAN=120
 SANITY_TIMEOUT=2400
@@ -219,7 +249,7 @@ FRAME=@@csi-frame@@
 SSH_OPTS=(-o BatchMode=yes -o ConnectTimeout=10 -o ServerAliveInterval=15
 	-o ServerAliveCountMax=4 -o LogLevel=ERROR)
 
-CASES=(k8s policy volume failover restart many machine sanity)
+CASES=(k8s policy volume failover restart detach many machine sanity)
 
 # ---------------------------------------------------------------------------
 # State
@@ -244,6 +274,7 @@ CASE="-"
 SETUP_DONE=0
 CLEANUP_DIRTY=0
 CUT_TRIED=0
+TAINT_TRIED=0
 RUN_CASES=()
 CP_NAME=""
 HOST_NAME=()
@@ -317,8 +348,14 @@ on_exit() {
 		log ""
 		log "########## diagnostics ##########"
 		diagnostics || true
-		# A failing run leaves its debris in place, but never the machine
-		# case's cut: a host cut off breaks every later run (CSI5).
+		# A failing run leaves its debris in place, but never a cut or the
+		# out-of-service taint: a host cut off or tainted breaks every later
+		# run (CSI5). The taint goes first, while the node is still cut, so
+		# that the node never comes back under it, which would evict its
+		# pods.
+		if [ "$TAINT_TRIED" -eq 1 ]; then
+			untaint_hosts
+		fi
 		if [ "$CUT_TRIED" -eq 1 ]; then
 			uncut_hosts
 		fi
@@ -689,6 +726,7 @@ SMOKE_IMAGE_REF="$SMOKE_IMAGE_REF"
 IMAGE_REF="$IMAGE_REF"
 CUT_TABLE="$CUT_TABLE"
 CUT_UNIT="$CUT_UNIT"
+DBG_NVMET="$DBG_NVMET"
 DISC_NQN=nqn.2014-08.org.nvmexpress.discovery
 EOF
 	udev_rules_source || return 1
@@ -777,16 +815,16 @@ listen_addrs() { # <port>
 	return 0
 }
 
-# --- the machine case's cut (csi.md, The cases, machine) ---------------------
+# --- the cuts of a host (csi.md, The cases, machine and detach) ---------------
 
 # net_cut drops every packet of the machine but the loopback's and ssh's, so
 # that Kubernetes loses the node and the suite keeps its shell, and schedules
 # the cut's own removal after <secs> seconds through a systemd timer, so that
 # a run killed before its cleanup leaves no cut behind. It refuses on a guest
-# that is not a k3s agent, so the k3s server is never cut. The three verbs of
-# the cut carry the net_ prefix: a helper function named after a command,
-# such as cut, would shadow that command in every verb (ship_helpers refuses
-# such a name).
+# that is not a k3s agent, so the k3s server is never cut. Every verb of the
+# cuts (net_cut, net_cut_peer, net_uncut, net_cut_state) carries the net_
+# prefix: a helper function named after a command, such as cut, would shadow
+# that command in every verb (ship_helpers refuses such a name).
 net_cut() { # <secs>
 	if ! systemctl is-active --quiet k3s-agent || systemctl is-active --quiet k3s; then
 		echo "net_cut: refused: this guest is not a k3s agent" >&2
@@ -829,6 +867,70 @@ net_uncut() {
 net_cut_state() {
 	if nft list table inet "$CUT_TABLE" >/dev/null 2>&1; then echo cut; else echo none; fi
 	return 0
+}
+
+# net_cut_peer drops every packet between this machine and one peer, the
+# control-plane guest, but ssh's, and keeps every other: the node's kubelet
+# and k3s agent lose the API server there, so Kubernetes loses the node, and
+# the node loses the cdc there too, while it keeps its paths to the
+# controller nodes and the suite its ssh. It is the detach case's cut, in
+# the machine case's table and under its timer, so net_uncut and
+# net_cut_state serve both, and it refuses where net_cut does.
+net_cut_peer() { # <secs> <peer ip>
+	if ! systemctl is-active --quiet k3s-agent || systemctl is-active --quiet k3s; then
+		echo "net_cut_peer: refused: this guest is not a k3s agent" >&2
+		return 1
+	fi
+	case "$2" in
+	'' | *[!0-9.]*)
+		echo "net_cut_peer: refused: '$2' is no IPv4 address" >&2
+		return 1
+		;;
+	esac
+	net_uncut >/dev/null
+	systemd-run --quiet --unit="$CUT_UNIT" --on-active="$1" \
+		/usr/sbin/nft delete table inet "$CUT_TABLE" || return 1
+	nft -f - <<NFT || return 1
+table inet $CUT_TABLE {
+	chain input {
+		type filter hook input priority -400; policy accept;
+		tcp dport 22 accept
+		ip saddr $2 drop
+	}
+	chain output {
+		type filter hook output priority -400; policy accept;
+		tcp sport 22 accept
+		ip daddr $2 drop
+	}
+}
+NFT
+	echo cut
+	return 0
+}
+
+# container_cat prints a file of a running container of one pod on this
+# node, through the container runtime, which answers on the node however its
+# link to the API server stands: the detach case reads its writer this way
+# while the node is cut off from the control plane, and after Kubernetes
+# deleted the pod, which goes on running on the node.
+container_cat() { # <namespace> <pod> <container> <path>
+	local cid
+	cid=$(k3s crictl ps -q --state running --label "io.kubernetes.pod.namespace=$1" \
+		--label "io.kubernetes.pod.name=$2" \
+		--label "io.kubernetes.container.name=$3" 2>/dev/null | head -n 1) || {
+		echo "container_cat: crictl ps did not answer" >&2
+		return 1
+	}
+	if [ -z "$cid" ]; then
+		echo "container_cat: no running container $3 of pod $1/$2" >&2
+		return 1
+	fi
+	k3s crictl exec "$cid" cat "$4"
+}
+
+# now_ns prints the guest's clock in nanoseconds, the clock its pods read.
+now_ns() {
+	date +%s%N
 }
 
 # prepull pulls images into the k3s image store, those it lacks alone, so
@@ -1294,6 +1396,83 @@ nvmet_tree() {
 	return 0
 }
 
+# nvmet_cut_facts prints "ok" when this guest's kernel lets a cn agent end
+# the nvmet connection of a host taken off a subsystem's list (cnagent.md
+# CN33), else each fact that fails, joined by "; ": debugfs mounted at
+# /sys/kernel/debug, nvmet's debug directory there, which the kernel option
+# CONFIG_NVME_TARGET_DEBUGFS makes once nvmet is loaded, and no lockdown in
+# force, under which the kernel refuses to open a connection's state file.
+# A missing lockdown file reads as no lockdown, as the agent's start check
+# reads it. These are the facts the cn agent's start check reads
+# (cnagent.md CN-CM2), read here in shell, as the guests get the agent
+# binary only at setup; the cn and e2e suites read them with the same
+# lines.
+nvmet_cut_facts() {
+	local why="" mode
+	if [ ! -r /proc/mounts ]; then
+		why="$why; /proc/mounts not read"
+	elif ! awk '$2 == "/sys/kernel/debug" && $3 == "debugfs" { f = 1 }
+		END { exit !f }' /proc/mounts; then
+		why="$why; debugfs is not mounted at /sys/kernel/debug"
+	fi
+	[ -d "$DBG_NVMET" ] ||
+		why="$why; no $DBG_NVMET: nvmet is built without CONFIG_NVME_TARGET_DEBUGFS or is not loaded"
+	if [ -e /sys/kernel/security/lockdown ]; then
+		mode=$(sed -n 's/.*\[\([a-z]*\)\].*/\1/p' /sys/kernel/security/lockdown 2>/dev/null)
+		[ "$mode" = none ] || why="$why; lockdown is '${mode:-unread}'"
+	fi
+	if [ -z "$why" ]; then echo ok; else echo "${why#; }"; fi
+	return 0
+}
+
+# nvmet_conns prints the nvmet connections of one subsystem, from its
+# directory under nvmet's debug directory: one line "ctrl<cntlid> <hostnqn>"
+# each, sorted, nothing when it holds none. A connection whose directory goes
+# between the listing and the read of its hostnqn is one that is gone; a read
+# that fails while the directory is still there is made once more, since the
+# kernel answers EIO for a file it removed after its open, as the cn agent's
+# listing reads it. It fails, saying so, when the subsystem has no debug
+# directory or a read fails twice, so that a read that did not answer never
+# passes for no connection.
+nvmet_conns() { # <subsystem nqn>
+	local d="$DBG_NVMET/$1" c h out=""
+	if [ ! -d "$d" ]; then
+		echo "nvmet_conns: no debug directory $d" >&2
+		return 1
+	fi
+	for c in "$d"/ctrl*; do
+		[ -d "$c" ] || continue
+		if ! h=$(cat "$c/hostnqn" 2>/dev/null) && [ -d "$c" ] &&
+			! h=$(cat "$c/hostnqn" 2>/dev/null); then
+			[ -d "$c" ] || continue
+			echo "nvmet_conns: reading $c/hostnqn failed" >&2
+			return 1
+		fi
+		[ -d "$c" ] || [ -n "$h" ] || continue
+		out="$out${c##*/} $h"$'\n'
+	done
+	printf '%s' "$out" | LC_ALL=C sort
+	return 0
+}
+
+# nvmet_conns_all prints every nvmet connection of this guest's nvmet, one
+# line "<subsystem nqn> ctrl<cntlid> <hostnqn>" each, for the diagnostics; a
+# guest with no debug directory says so.
+nvmet_conns_all() {
+	local c s h
+	if [ ! -d "$DBG_NVMET" ]; then
+		echo "no $DBG_NVMET"
+		return 0
+	fi
+	for c in "$DBG_NVMET"/*/ctrl*; do
+		[ -d "$c" ] || continue
+		s=${c%/*}
+		h=$(cat "$c/hostnqn" 2>/dev/null) || h="(gone or unread)"
+		printf '%s %s %s\n' "${s##*/}" "${c##*/}" "$h"
+	done
+	return 0
+}
+
 # --- md --------------------------------------------------------------------------
 
 md_name_of() { # <md device>
@@ -1708,6 +1887,8 @@ diag() {
 	cat /proc/mdstat 2>/dev/null || true
 	echo "--- $(hostname): nvmet"
 	nvmet_tree
+	echo "--- $(hostname): nvmet connections"
+	nvmet_conns_all
 	echo "--- $(hostname): loop"
 	losetup -a 2>/dev/null || true
 	echo "--- $(hostname): memory"
@@ -1811,7 +1992,8 @@ fact_of() { # <facts output> <key>
 # built: passwordless sudo everywhere; on the three Kubernetes guests unique
 # hostnames and machine-ids, the memory floor and native multipath on the
 # hosts, the hosts' identities present and different (CSI2); on the node
-# guests the tools and modules of the agents and this suite's ports free.
+# guests the tools and modules of the agents and this suite's ports free, and
+# on the controller-node guests the kernel option the cn agent's cut needs.
 preflight_guests() {
 	STAGE="preflight (guests)"
 	log ""
@@ -1878,6 +2060,20 @@ preflight_guests() {
 		missing=$(helper_cn "$v" modules nvmet nvmet-tcp nvme-tcp dm-thin-pool raid1) ||
 			die "cn$v: modprobe failed"
 		[ -z "$missing" ] || die "cn$v: module(s) missing: $(printf '%s' "$missing" | tr '\n' ' ')"
+		# The kernel option the cn agent's cut of a removed host's nvmet
+		# connection needs (cnagent.md CN33), read once nvmet is loaded:
+		# without it the agent refuses to start (cnagent.md CN-CM2), as
+		# cn_up's start line takes no --ignore-host-disconnection, and the
+		# detach case needs the cut (csi.md, Preflight).
+		out=$(helper_cn "$v" nvmet_cut_facts) ||
+			die "cn$v: reading the facts of the cut did not answer"
+		[ "$out" = ok ] ||
+			die "cn$v: the cn agent cannot cut a removed host's nvmet" \
+				"connection here: $out. The lab tool" \
+				"integtest/nvmet_debugfs.sh builds and installs nvmet" \
+				"modules with CONFIG_NVME_TARGET_DEBUGFS, and" \
+				"'bash integtest/nvmet_debugfs.sh check ${CN[$v]}' reads" \
+				"these facts again"
 		busy=$(helper_cn "$v" ports_busy "$CN_GRPC_PORT" "$CN_TRSVCID") || die "cn$v: ports"
 		[ -z "$busy" ] || die "cn$v: port(s) already listening: $(printf '%s' "$busy" | tr '\n' ' ')"
 	done
@@ -2518,9 +2714,15 @@ cleanup_verb() { # <label> <sentinel> <ssh wrapper> [<index>] <verb…>
 cleanup_all() {
 	local h v
 	CLEANUP_DIRTY=0
-	# The machine case's cut first: with a host cut off, Kubernetes cannot
-	# confirm the deletes of its pods, and the namespaces would not go.
+	# The detach case's out-of-service taint first, so that no host comes
+	# back under it, which would evict its pods; then the cut of either
+	# case: with a host cut off, Kubernetes cannot confirm the deletes of its
+	# pods, and the namespaces would not go. Then a worker the detach case
+	# left stopped goes on: no cn agent converges without it, so every
+	# detach of the deletes below would wait for a cut that never comes.
+	untaint_hosts
 	uncut_hosts
+	QUIET=1 helper_cp_ok sig_pidfile "$WORK/worker/pid" CONT >/dev/null 2>&1
 	# Holder first: the pods and the driver, then the hosts' connections, then
 	# the controller nodes, the disk nodes and the control plane.
 	driver_down
@@ -2551,7 +2753,7 @@ cleanup_all() {
 # Diagnostics and kept logs
 # ---------------------------------------------------------------------------
 
-# uncut_hosts removes the machine case's cut from both hosts, whatever
+# uncut_hosts removes the cut of either case from both hosts, whatever
 # state the run left them in.
 uncut_hosts() {
 	local h
@@ -2560,11 +2762,35 @@ uncut_hosts() {
 	done
 }
 
+# untaint_hosts removes the detach case's out-of-service taint from both
+# hosts' nodes. A guest whose name the run has not read yet is asked, and a
+# cluster that does not answer, as before k3s is installed, holds no taint
+# of the suite's; a taint that stays makes the cleanup dirty.
+untaint_hosts() {
+	local h name out
+	for h in "${!HOST[@]}"; do
+		name=${HOST_NAME[$h]:-}
+		if [ -z "$name" ]; then
+			out=$(QUIET=1 helper_host_ok "$h" facts 2>/dev/null)
+			name=$(fact_of "$out" hostname)
+		fi
+		[ -n "$name" ] || continue
+		out=$(QUIET=1 kc get node "$name" \
+			-o "jsonpath={.spec.taints[?(@.key==\"$OOS_TAINT_KEY\")].key}" 2>/dev/null) || continue
+		[ -n "$out" ] || continue
+		if ! QUIET=1 kc taint node "$name" "$OOS_TAINT_KEY-" >/dev/null 2>&1; then
+			log "WARNING: host$h: removing the out-of-service taint of $name failed"
+			CLEANUP_DIRTY=1
+		fi
+	done
+}
+
 diagnostics() {
 	local h v
 	QUIET=1
-	log "--- the machine case's cut on the hosts"
+	log "--- the cut on the hosts, and the nodes' taints"
 	for h in "${!HOST[@]}"; do log "  host$h: $(helper_host_ok "$h" net_cut_state 2>/dev/null)"; done
+	kc_ok get nodes -o 'jsonpath={range .items[*]}{.metadata.name}: {.spec.taints[*].key}{"\n"}{end}' >&2
 	log "--- the sidecars' leases"
 	kc_ok -n "$DRIVER_NS" get lease -o wide >&2
 	log "--- kubectl get nodes -o wide"
@@ -3284,6 +3510,479 @@ case_restart() {
 	delete_claim s0
 	nothing_left
 	log "=== $CASE: PASS"
+}
+
+# va_on answers whether a VolumeAttachment of a volume to a node stands: 0 it
+# does, 1 it does not, 2 the listing did not answer, which never passes for
+# "does not".
+va_on() { # <pv> <node name>
+	local out
+	out=$(kc get volumeattachments \
+		-o 'jsonpath={range .items[*]}{.spec.source.persistentVolumeName} {.spec.nodeName}{"\n"}{end}') ||
+		return 2
+	printf '%s\n' "$out" | awk -v p="$1" -v n="$2" '$1 == p && $2 == n { f = 1 } END { exit !f }'
+}
+
+# host_conn_on answers whether a host holds an nvmet connection to one
+# subsystem on a controller-node guest, read from nvmet's debug directory
+# there: 0 it does, 1 it does not, 2 the listing did not answer, which never
+# passes for "does not".
+host_conn_on() { # <cn index> <subsystem nqn> <host nqn>
+	local out
+	out=$(QUIET=1 helper_cn "$1" nvmet_conns "$2" 2>/dev/null) || return 2
+	printf '%s\n' "$out" | awk -v h="$3" '$2 == h { f = 1 } END { exit !f }'
+}
+
+# off_list answers whether the gateway's record of a subsystem no longer
+# names a host among its allowed hosts, as once a detach's write landed; a
+# record that lacks the subsystem, or a read that fails, answers no.
+off_list() { # <pool> <subsystem nqn> <host nqn>
+	local out
+	ctl_try ss list --sp "$1" || return 1
+	out=$(jq_of "$CTL_OUT" ".nqn_to_subsystem[\"$2\"].allowed_hosts | if . == null then \"MISSING\" else .[] end") ||
+		return 1
+	[ "$out" != MISSING ] && ! printf '%s\n' "$out" | grep -qxF "$3"
+}
+
+# detach_stat reads the detach case's writer on host0 through the node's
+# container runtime: "<writes> <failed> <last ok, ns> <first failure, ns>
+# <start of a write in flight, ns, or 0>", host0's clock.
+detach_stat() {
+	QUIET=1 helper_host 0 container_cat "$TEST_NS" wd io /tmp/stat 2>/dev/null
+}
+
+# The detach case's writer: a pattern and its digest, then a small synced
+# write every half second, its count, its failures and their times kept in
+# the container's own /tmp, which the suite reads over ssh through the
+# node's container runtime, since host0 is cut off from the API server when
+# it matters. Its marker is in /tmp too, so that the volume carries none for
+# the next pod's wait.
+detach_writer_script() {
+	cat <<'EOF'
+dd if=/dev/urandom of=/data/pattern bs=1M count=8 conv=fsync status=none || exit 1
+sha256sum /data/pattern > /data/sha || exit 1
+sync
+echo done > /tmp/marker
+i=0; fail=0; lastok=0; firstfail=0
+while :; do
+  s=$(date +%s%N)
+  echo "$i $fail $lastok $firstfail $s" > /tmp/stat.tmp && mv /tmp/stat.tmp /tmp/stat
+  if dd if=/dev/zero of=/data/w bs=4k count=1 conv=fsync status=none 2>/dev/null; then
+    lastok=$(date +%s%N)
+  else
+    fail=$((fail+1)); [ "$firstfail" -ne 0 ] || firstfail=$(date +%s%N)
+  fi
+  i=$((i+1))
+  echo "$i $fail $lastok $firstfail 0" > /tmp/stat.tmp && mv /tmp/stat.tmp /tmp/stat
+  sleep 0.5
+done
+EOF
+}
+
+# The script of the claim's new pod on host1: it checks the pattern host0
+# wrote, which host1's page cache never held, then writes a pattern of its
+# own and checks it.
+detach_read_script() {
+	cat <<'EOF'
+set -e
+sha256sum -c /data/sha > /tmp/check 2>&1 || true
+dd if=/dev/urandom of=/data/after bs=1M count=16 conv=fsync status=none
+sha256sum /data/after > /data/sha-after
+sync
+sha256sum -c /data/sha-after > /tmp/check-after 2>&1 || true
+echo done > /tmp/marker
+exec sleep 1000000
+EOF
+}
+
+# va_attached answers whether a VolumeAttachment of a volume to a node reads
+# attached: 0 it does, 1 it does not or there is none, 2 the listing did not
+# answer.
+va_attached() { # <pv> <node name>
+	local out
+	out=$(kc get volumeattachments \
+		-o 'jsonpath={range .items[*]}{.spec.source.persistentVolumeName} {.spec.nodeName} {.status.attached}{"\n"}{end}') ||
+		return 2
+	printf '%s\n' "$out" | awk -v p="$1" -v n="$2" '$1 == p && $2 == n && $3 == "true" { f = 1 } END { exit !f }'
+}
+
+# call_replies prints the controller plugin's replies to one CSI method, of
+# the last <secs> seconds, from the log of one controller copy: the time, the
+# code and the duration of each.
+call_replies() { # <pod> <secs> <method>
+	kc -n "$DRIVER_NS" logs "$1" -c dnv-csi "--since=${2}s" 2>/dev/null |
+		"$JQ" -R -r --arg m "$3" 'fromjson? | objects | select(.msg == "csi reply" and (.method // "" | endswith($m))) | "\(.time) \(.code) \(.duration_ms) ms"' 2>/dev/null |
+		tail -n 12
+}
+
+# call_records prints the controller plugin's requests and replies of one
+# CSI method, of the last <secs> seconds, so that a call still waiting shows
+# as a request with no reply after it.
+call_records() { # <pod> <secs> <method>
+	kc -n "$DRIVER_NS" logs "$1" -c dnv-csi "--since=${2}s" 2>/dev/null |
+		"$JQ" -R -r --arg m "$3" 'fromjson? | objects | select((.msg == "csi request" or .msg == "csi reply") and (.method // "" | endswith($m))) | "\(.time) \(.msg) \(.trace_id) \(.code // "") \(.duration_ms // "")"' 2>/dev/null |
+		tail -n 16
+}
+
+# host_listed answers whether the gateway's record of a subsystem names a
+# host among its allowed hosts: 0 it does, 1 it does not, 2 the read did not
+# answer or the record lacks the subsystem.
+host_listed() { # <pool> <subsystem nqn> <host nqn>
+	local out
+	ctl_try ss list --sp "$1" || return 2
+	out=$(jq_of "$CTL_OUT" ".nqn_to_subsystem[\"$2\"].allowed_hosts | if . == null then \"MISSING\" else .[] end") ||
+		return 2
+	[ "$out" != MISSING ] || return 2
+	printf '%s\n' "$out" | grep -qxF "$3"
+}
+
+# case_detach: a detach Kubernetes forces while the old host still reaches
+# the controller nodes ends only once that host's nvmet connection on the
+# primary is gone (csi.md CSI10). A pod on host0 writes in a loop; host0's
+# node plugin is taken away, so that nothing on host0 drops its paths; one
+# controller copy, off host0, holds both leases; host0 is cut off from the
+# control-plane guest alone and reads NotReady. The worker is stopped, so
+# that no cn agent converges and the primary cannot cut, and host0 takes the
+# out-of-service taint: Kubernetes force-deletes the pod and detaches the
+# volume, the detach takes host0 off the list, and its VolumeAttachment
+# stays while host0's connection does, through a call of the attacher that
+# runs out of time and its repeat; the attach to host1, which Kubernetes
+# makes once that call has failed, waits for the same cut and stays
+# unattached. The worker is given back: the primary cuts host0, and then
+# the detach ends and host1 is attached. The detach does not wait for the
+# standby (csi.md CSI10), but host0's writes, which its container goes on
+# making, fail only once every cntlr has ended host0's connection, the
+# standby's included (cnagent.md CN33), since IO queues while a standby's
+# path is left (csi.md, The node plugin); then each reconnect is refused
+# with DNR and its controller deleted (csi.md CSI14). The claim's new pod on
+# host1 reads host0's pattern and writes and reads its own. The taint and the
+# cut go at the end, and on every failure (CSI5).
+case_detach() {
+	CASE=detach
+	local pv nqn old v sv keep pod out rc t0 h0ns end now late both taint_at started a b word
+	local standbys="" sbend="" sbheld="" toff="" tres="" tcut="" tva="" tatt="" tfail="" thost1=""
+	local stat count fail lastok firstfail inflight
+	stage 01 "a claim and a pod on host0 that writes a pattern, then writes in a loop"
+	claim d0 1Gi Filesystem
+	wait_until "$WAIT_PVC" "claim d0 Bound" pvc_bound d0
+	pv=$(pvc_volume d0)
+	nqn=$(kc get pv "$pv" -o 'jsonpath={.spec.csi.volumeAttributes.nqn}') ||
+		die "reading the subsystem NQN of $pv failed"
+	[ -n "$nqn" ] || die "the volume $pv names no subsystem NQN"
+	run_pod wd d0 0 Filesystem "$(detach_writer_script)" /tmp/marker
+	old=$(primary_of "$pv") || die "reading the primary of $pv failed"
+	v=$(cn_index_of "$old") || die "the primary $old is on no --cn guest"
+	ctl_try sp get --sp "$pv" || die "reading the pool $pv failed"
+	for out in $(jq_of "$CTL_OUT" '.cntlr_list[] | select(.primary != true) | .addr_port'); do
+		sv=$(cn_index_of "$out") || die "the standby $out is on no --cn guest"
+		standbys="$standbys $sv"
+	done
+	log "  the primary of $pv is $old (cn$v), the standby on cn${standbys# }, its subsystem $nqn"
+	wait_until "$WAIT_SHORT" "host0's writer to write" writer_wrote
+	# The positive control of the cut: host0's nvmet connection is there
+	# before anything is cut.
+	rc=0
+	host_conn_on "$v" "$nqn" "${HOST_NQN[0]}" || rc=$?
+	[ "$rc" = 0 ] || die "cn$v: host0 holds no nvmet connection to $nqn before the cut (rc $rc)"
+
+	stage 02 "take the node plugin off host0; host0 keeps its paths and the mount"
+	kc -n "$DRIVER_NS" patch ds dnv-csi-node --type merge \
+		-p "{\"spec\":{\"template\":{\"spec\":{\"nodeSelector\":{\"kubernetes.io/hostname\":\"${HOST_NAME[1]}\"}}}}}" \
+		>/dev/null || die "keeping the node plugin to host1 failed"
+	wait_until "$WAIT_POD" "the node plugin to leave host0" node_plugin_gone 0
+	has_path_to 0 "${CN_IP[$v]}" || die "host0 lost its path to the primary when its node plugin stopped"
+
+	stage 03 "one controller copy, off host0, holds both leases"
+	wait_until "$WAIT_ROLLOUT" "two controller copies Ready, none being deleted" copies_ready 2
+	keep=$(live_copies | awk -v n="${HOST_NAME[0]}" '$2 != n {print $1; exit}')
+	[ -n "$keep" ] || die "no controller copy runs off host0: $(live_copies | tr '\n' ',')"
+	for pod in $(kc -n "$DRIVER_NS" get pods -l app=dnv-csi-controller -o 'jsonpath={.items[*].metadata.name}'); do
+		if [ "$pod" = "$keep" ]; then
+			kc -n "$DRIVER_NS" annotate pod "$pod" --overwrite \
+				controller.kubernetes.io/pod-deletion-cost=1000 >/dev/null || die "annotating $pod failed"
+		else
+			kc -n "$DRIVER_NS" annotate pod "$pod" --overwrite \
+				controller.kubernetes.io/pod-deletion-cost=-1000 >/dev/null || die "annotating $pod failed"
+		fi
+	done
+	kc -n "$DRIVER_NS" scale deploy/dnv-csi-controller --replicas=1 >/dev/null || die "scaling to one copy failed"
+	wait_until "$WAIT_ROLLOUT" "one controller copy Ready, none being deleted" copies_ready 1
+	wait_until "$WAIT_LEASE" "both leases on $keep, the one copy left" leases_on "$keep"
+	log "  both leases on $keep, on $(live_copies | awk -v k="$keep" '$1 == k {print $2}')"
+
+	stage 04 "cut host0 off from the control-plane guest alone; host0 reads NotReady"
+	CUT_TRIED=1
+	out=$(helper_host 0 net_cut_peer "$CUT_LIMIT" "$CP_IP") || die "host0: the cut failed: $out"
+	assert_eq "$out" cut "host0: the cut from $CP_IP"
+	wait_until "$WAIT_NODE_LOST" "${HOST_NAME[0]} not Ready" not_ready "${HOST_NAME[0]}"
+	has_path_to 0 "${CN_IP[$v]}" || die "host0 lost its path to the primary with the cut from $CP_IP"
+	rc=0
+	host_conn_on "$v" "$nqn" "${HOST_NQN[0]}" || rc=$?
+	[ "$rc" = 0 ] || die "cn$v: host0's nvmet connection went with the cut from $CP_IP alone (rc $rc)"
+	writer_wrote || die "host0's writer failed a write or stopped with the cut from $CP_IP: $(detach_stat)"
+
+	stage 05 "the worker stopped and the out-of-service taint: the detach takes host0 off the list and waits while host0's connection stands"
+	# No cn agent converges while the worker is stopped, so the primary
+	# cannot cut: a detach that did not wait for the cut would end here.
+	# The positive control of the hold: the attachment to host0 reads as
+	# standing before anything detaches.
+	rc=0
+	QUIET=1 va_on "$pv" "${HOST_NAME[0]}" || rc=$?
+	[ "$rc" = 0 ] || die "the VolumeAttachment of $pv to host0 does not read as standing before the taint (rc $rc)"
+	out=$(helper_cp sig_pidfile "$WORK/worker/pid" STOP) || die "cp: sig_pidfile failed"
+	assert_eq "$out" "state=T" "cp: the worker is stopped"
+	h0ns=$(QUIET=1 helper_host 0 now_ns) || die "host0: reading its clock failed"
+	TAINT_TRIED=1
+	kc taint node "${HOST_NAME[0]}" "$OOS_TAINT" >/dev/null || die "tainting ${HOST_NAME[0]} out of service failed"
+	t0=$SECONDS
+	# kubectl stamps a NoExecute taint with its time, which host1's pod's
+	# start is measured against.
+	taint_at=$(kc get node "${HOST_NAME[0]}" \
+		-o "jsonpath={.spec.taints[?(@.key==\"$OOS_TAINT_KEY\")].timeAdded}") || taint_at=""
+	# The claim's new pod on host1: Kubernetes asks to attach it once a
+	# detach call has failed, while host0's attachment still stands, and
+	# that attach waits for the same cut.
+	io_pod rd d0 1 Filesystem "$(detach_read_script)"
+	wait_until "$WAIT_DETACH" "the detach to take host0 off the list of $nqn" \
+		off_list "$pv" "$nqn" "${HOST_NQN[0]}"
+	toff=$((SECONDS - t0))
+	log "  host0 off the list of $nqn +${toff}s"
+	# A pass proves the hold only when both reads answered; the hold ends
+	# once it has lasted HOLD_CUT seconds, a pass of its last 5 s, after the
+	# attacher's first call ran out of time, read both standing, and a pass
+	# read the attach to host1 asked for and waiting. Once that call has
+	# failed, Kubernetes asks to attach the volume to host1 while the detach
+	# still runs; that attach waits for the same cut, so no pass may read
+	# host1 attached or on the subsystem's list.
+	end=$((SECONDS + HOLD_CUT))
+	both=0
+	late=0
+	asked=0
+	while :; do
+		now=$SECONDS
+		b=0
+		QUIET=1 va_attached "$pv" "${HOST_NAME[1]}" || b=$?
+		[ "$b" != 0 ] || die "the attach of $pv to host1 ended while the worker is stopped, so before any cut"
+		rc=0
+		QUIET=1 va_on "$pv" "${HOST_NAME[1]}" || rc=$?
+		# The positive control of the attach's wait: Kubernetes has asked
+		# for it, and it has not ended.
+		[ "$rc" != 0 ] || [ "$b" != 1 ] || asked=1
+		rc=0
+		QUIET=1 host_listed "$pv" "$nqn" "${HOST_NQN[1]}" || rc=$?
+		[ "$rc" != 0 ] || die "host1 is on the list of $nqn while the worker is stopped, so before any cut"
+		rc=0
+		QUIET=1 va_on "$pv" "${HOST_NAME[0]}" || rc=$?
+		[ "$rc" != 1 ] || die "the detach of $pv from host0 ended while the worker is stopped, so before any cut"
+		a=0
+		host_conn_on "$v" "$nqn" "${HOST_NQN[0]}" || a=$?
+		[ "$a" != 1 ] || die "cn$v: host0's nvmet connection went while the worker is stopped"
+		if [ "$rc" = 0 ] && [ "$a" = 0 ]; then
+			both=$((both + 1))
+			[ "$now" -lt $((end - 5)) ] || late=1
+		fi
+		[ "$SECONDS" -lt "$end" ] || [ "$late" = 0 ] || [ "$asked" = 0 ] || break
+		[ "$SECONDS" -lt $((end + 30)) ] ||
+			die "the hold ran past its end with a pass of its last 5 s reading both the attachment and host0's connection" \
+				"$([ "$late" = 1 ] && echo yes || echo no) ($both passes did), and the attach to host1 read asked and waiting" \
+				"$([ "$asked" = 1 ] && echo yes || echo no)"
+		sleep 2
+	done
+	log "  for ${HOLD_CUT}s with host0 off the list, its VolumeAttachment stood, and so did its connection on the primary" \
+		"($both passes read both); the attach to host1 was asked for and stayed unattached, host1 off the list"
+	# A call the attacher's own deadline ends replies CANCELED, as the
+	# attacher cancels it, or DEADLINE_EXCEEDED.
+	out=$(call_replies "$keep" $((SECONDS - t0 + 10)) ControllerUnpublishVolume) || true
+	printf '%s\n' "$out" | grep -q ' Canceled \| DeadlineExceeded ' ||
+		die "no detach call ran out of time while the worker was stopped; the controller plugin's detach replies since the taint:" \
+			"${out:-none read}"
+	out=$(call_records "$keep" $((SECONDS - t0 + 10)) ControllerPublishVolume) || true
+	log "  the controller plugin's attach requests and replies while the worker was stopped:"
+	printf '%s\n' "${out:-none read}" | sed 's/^/    /' >&2
+
+	stage 06 "the worker back: the primary cuts host0, and only then the detach ends"
+	out=$(helper_cp sig_pidfile "$WORK/worker/pid" CONT) || die "cp: sig_pidfile failed"
+	case $out in
+	state=T | state=none) die "cp: the worker did not go on: $out" ;;
+	esac
+	tres=$((SECONDS - t0))
+	# Each pass reads the attachments first and the primary's connections
+	# second, so an attachment to host0 gone, or one to host1 attached,
+	# while host0 is still connected on the primary is a detach or an
+	# attach that ended before the cut. A connection read that does not
+	# answer proves nothing: once the cut was read, a refused host cannot
+	# come back, so the pass stands; before, the next pass reads again.
+	while :; do
+		b=0
+		QUIET=1 va_attached "$pv" "${HOST_NAME[1]}" || b=$?
+		rc=0
+		QUIET=1 va_on "$pv" "${HOST_NAME[0]}" || rc=$?
+		a=0
+		host_conn_on "$v" "$nqn" "${HOST_NQN[0]}" || a=$?
+		if [ "$a" = 1 ] && [ -z "$tcut" ]; then
+			tcut=$((SECONDS - t0))
+			log "  host0's nvmet connection on the primary gone +${tcut}s"
+		fi
+		if [ "$a" = 2 ] && [ -z "$tcut" ]; then
+			[ $((SECONDS - t0)) -lt "$WAIT_DETACH" ] ||
+				die "timed out after ${WAIT_DETACH}s waiting for the detach of $pv from host0 (connection unread)"
+			sleep 1
+			continue
+		fi
+		if [ "$b" = 0 ]; then
+			[ "$a" != 0 ] ||
+				die "the attach of $pv to host1 ended while host0's nvmet connection on the primary cn$v is still there"
+			if [ -z "$tatt" ]; then
+				tatt=$((SECONDS - t0))
+				log "  host1 attached +${tatt}s"
+			fi
+		fi
+		# A pass whose read of the attachments did not answer proves
+		# nothing; the next one reads again.
+		if [ "$rc" = 1 ]; then
+			[ "$a" != 0 ] ||
+				die "the detach of $pv from host0 ended while host0's nvmet connection on the primary cn$v is still there"
+			tva=$((SECONDS - t0))
+			log "  the detach done, its VolumeAttachment gone +${tva}s"
+			# The detach does not wait for the standbys (CSI10): their
+			# connections at its end are logged.
+			for sv in $standbys; do
+				rc=0
+				host_conn_on "$sv" "$nqn" "${HOST_NQN[0]}" || rc=$?
+				case $rc in
+				0) word="still there" ;;
+				1) word=gone ;;
+				*) word=unread ;;
+				esac
+				sbend="$sbend; the standby cn$sv: host0's nvmet connection $word"
+			done
+			log "  at the detach's end${sbend:-; no standby}"
+			break
+		fi
+		[ $((SECONDS - t0)) -lt "$WAIT_DETACH" ] ||
+			die "timed out after ${WAIT_DETACH}s waiting for the detach of $pv from host0 (connection rc $a)"
+		sleep 1
+	done
+	out=$(call_replies "$keep" $((SECONDS - t0 + 10)) ControllerUnpublishVolume) || true
+	log "  the controller plugin's detach replies since the taint:"
+	printf '%s\n' "${out:-none read}" | sed 's/^/    /' >&2
+	# The last call, a repeat of one that ran out of time, ended OK.
+	printf '%s\n' "$out" | tail -n 1 | grep -q ' OK ' ||
+		die "the last detach reply since the taint is not OK: $(printf '%s\n' "$out" | tail -n 1)"
+	# The attach to host1, whose wait the cut now lets through.
+	wait_until "$WAIT_DETACH" "the attach of $pv to host1" va_attached "$pv" "${HOST_NAME[1]}"
+	[ -n "$tatt" ] || tatt=$((SECONDS - t0))
+
+	stage 07 "host0's writes fail, and host0 holds no controller of the volume"
+	wait_until "$WAIT_HOST_IO_FAIL" "host0's writer to fail a write" writer_failed_or_waits
+	stat=$(detach_stat) || die "reading host0's writer failed"
+	read -r count fail lastok firstfail inflight <<<"$stat"
+	if [ "$fail" -eq 0 ]; then
+		# host0's IO queues while any of its paths is left, the standby's
+		# included (csi.md, The node plugin): name each cntlr that still
+		# holds host0's connection.
+		for sv in $v $standbys; do
+			rc=0
+			host_conn_on "$sv" "$nqn" "${HOST_NQN[0]}" || rc=$?
+			[ "$rc" = 1 ] || sbheld="$sbheld; cn$sv still shows host0's nvmet connection (rc $rc)"
+		done
+		[ -n "$sbheld" ] || sbheld="; no cntlr shows host0's nvmet connection"
+		die "host0's write waits instead of failing: in flight since" \
+			"+$(((inflight - h0ns) / 1000000)) ms after the taint on host0's clock, $count writes," \
+			"the last one ok +$(((lastok - h0ns) / 1000000)) ms$sbheld"
+	fi
+	tfail=$(((firstfail - h0ns) / 1000000))
+	log "  host0: $count writes, $fail failed, the first +${tfail} ms after the taint on host0's clock"
+	wait_until "$WAIT_HOST_IO_FAIL" "host0 to hold no controller of $nqn" no_ctrl_of 0 "$nqn"
+	# With no controller left on host0, no cntlr holds its connection: the
+	# standby's cut ended its path there, as nothing on host0 drops one.
+	for sv in $standbys; do
+		wait_until "$WAIT_SHORT" "cn$sv to show no nvmet connection of host0" conn_gone "$sv" "$nqn" "${HOST_NQN[0]}"
+	done
+
+	stage 08 "the claim's new pod on host1 reads host0's pattern, then writes and reads its own"
+	wait_until "$WAIT_POD" "pod rd Running on host1" pod_settled rd
+	pod_running rd || die "pod rd ended with phase $(pod_phase rd)"
+	assert_eq "$(pod_node rd)" "${HOST_NAME[1]}" "the node of rd"
+	started=$(kc get pod -n "$TEST_NS" rd \
+		-o 'jsonpath={.status.containerStatuses[0].state.running.startedAt}') || started=""
+	if [ -n "$started" ] && [ -n "$taint_at" ] &&
+		a=$(date -d "$started" +%s 2>/dev/null) && b=$(date -d "$taint_at" +%s 2>/dev/null); then
+		thost1="+$((a - b))s"
+	else
+		thost1="+$((SECONDS - t0))s or less (as seen)"
+	fi
+	wait_until "$WAIT_POD" "pod rd to finish its step" pod_marked rd /tmp/marker
+	assert_eq "$(kc_exec rd cat /tmp/check)" "/data/pattern: OK" "pod rd reads host0's pattern"
+	assert_eq "$(kc_exec rd cat /tmp/check-after)" "/data/after: OK" "pod rd reads its own pattern"
+	log "  times after the taint: host0 off the list +${toff}s, the worker back +${tres}s," \
+		"host0's connection on the primary gone +${tcut}s, the detach done +${tva}s," \
+		"host1 attached +${tatt}s, host0's first failed write +${tfail} ms (host0's clock)," \
+		"host1's pod running $thost1"
+
+	stage 09 "the taint and the cut go; host0, its node plugin and two copies back; delete, and nothing left"
+	kc taint node "${HOST_NAME[0]}" "$OOS_TAINT_KEY-" >/dev/null || die "removing the out-of-service taint failed"
+	TAINT_TRIED=0
+	out=$(helper_host 0 net_uncut) || die "host0: the uncut failed: $out"
+	CUT_TRIED=0
+	wait_until "$WAIT_NODES" "${HOST_NAME[0]} Ready" node_ready "${HOST_NAME[0]}"
+	kc -n "$DRIVER_NS" patch ds dnv-csi-node --type json \
+		-p '[{"op":"remove","path":"/spec/template/spec/nodeSelector"}]' >/dev/null ||
+		die "giving the node plugin back to host0 failed"
+	wait_until "$WAIT_POD" "the node plugin to run on host0" node_plugin_ready 0
+	kc -n "$DRIVER_NS" rollout status ds/dnv-csi-node "--timeout=${WAIT_ROLLOUT}s" >/dev/null ||
+		die "the node plugin did not roll out"
+	kc -n "$DRIVER_NS" scale deploy/dnv-csi-controller --replicas=2 >/dev/null || die "scaling to two copies failed"
+	wait_until "$WAIT_ROLLOUT" "two controller copies Ready, none being deleted" copies_ready 2
+	wait_until "$WAIT_LEASE" "both leases held by controller pods" leases_held
+	delete_pod rd
+	delete_claim d0
+	nothing_left
+	log "=== $CASE: PASS"
+}
+
+# writer_wrote answers whether the detach case's writer has made a write
+# that held and has failed none.
+writer_wrote() {
+	local stat count fail lastok
+	stat=$(detach_stat) || return 1
+	read -r count fail lastok _ <<<"$stat"
+	[ "${lastok:-0}" -gt 0 ] && [ "${fail:-0}" -eq 0 ]
+}
+
+# writer_failed_or_waits answers once the writer has failed a write, or a
+# write of it has been in flight for more than a minute, which reads as a
+# write that waits; the stage tells the two apart.
+writer_failed_or_waits() {
+	local stat count fail lastok firstfail inflight now
+	stat=$(detach_stat) || return 1
+	read -r count fail lastok firstfail inflight <<<"$stat"
+	[ "${fail:-0}" -gt 0 ] && return 0
+	[ "${inflight:-0}" -gt 0 ] || return 1
+	now=$(QUIET=1 helper_host 0 now_ns) || return 1
+	[ $(((now - inflight) / 1000000000)) -ge 60 ]
+}
+
+# no_ctrl_of answers whether a host holds no controller of one subsystem.
+no_ctrl_of() { # <h> <subsystem nqn>
+	local out
+	out=$(QUIET=1 helper_host "$1" ctrl_addrs "$2") || return 1
+	[ -z "$out" ]
+}
+
+# conn_gone answers whether a cntlr's nvmet debug directory answered and
+# shows no connection of the host.
+conn_gone() { # <cn index> <subsystem nqn> <host nqn>
+	local rc=0
+	host_conn_on "$1" "$2" "$3" || rc=$?
+	[ "$rc" = 1 ]
+}
+
+# not_ready answers whether a node reads anything but Ready.
+not_ready() { # <node name>
+	local st
+	st=$(kc get node "$1" -o 'jsonpath={.status.conditions[?(@.type=="Ready")].status}' 2>/dev/null) || return 1
+	[ -n "$st" ] && [ "$st" != True ]
 }
 
 # case_many: eight claims and eight pods at once, four per host, each

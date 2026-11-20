@@ -9683,7 +9683,8 @@ document and only pointed to here.
   runs without the cut (`cnagent.md` CN-CM2). On such a controller node a
   host the CSI driver's detach takes off the list (`csi.md` CSI10) keeps
   its controller and its IO until its node plugin drops the path (`csi.md`
-  CSI15) or it disconnects. A
+  CSI15) or it disconnects, and, where that node is the primary, the
+  detach's wait and the next attach's pass with no cut (`csi.md` CSI10). A
   plugin that cannot run, or cannot read a cdc, drops no path on its own,
   so there a detach Kubernetes forces by a force-deleted pod, a deleted
   Node object or the out-of-service taint, while the host is cut off from

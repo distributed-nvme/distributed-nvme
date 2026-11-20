@@ -20,7 +20,7 @@ The vocabulary of dnv in alphabetical order, one entry per term, with synonyms s
 
 **array made** — The flag that an md-raid1 group's array has run, `Group.array_made`. The sp worker sets it, in one write over every group due, from the first report of the primary that reads the group's row `OK`, since a row reads `OK` only while the array runs and a group id is never used again; nothing clears it, and no other write sets it. The primary never creates an array for a group that carries it: a member of such a group that reads no superblock was zeroed by a forced start and holds data (see `dnv-worker.md` AR15; `cnagent.md` CN12).
 
-**attach, detach** — Kubernetes' binding of a volume to one node, and its undo, through the CSI driver's controller plugin, which sets the volume's subsystem's allowed hosts to that node's host NQN alone, and empties them (see `csi.md` CSI10).
+**attach, detach** — Kubernetes' binding of a volume to one node, and its undo, through the CSI driver's controller plugin, which sets the volume's subsystem's allowed hosts to that node's host NQN alone, and empties them; a detach returns, and an attach to an empty list writes, only once the pool's primary cntlr has ended the nvmet connections of every host off the list, where its kernel can (see `csi.md` CSI10).
 
 **attribution** — The sweep's test of which agent, cluster, node and storage pool a kernel object belongs to, by its parsed dm name or NQN, or for a nameless object by what it is built from. An object that is another agent's is foreign and is never touched; one nobody claims is unowned.
 

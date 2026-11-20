@@ -2,7 +2,9 @@ package csi
 
 import (
 	"context"
+	"maps"
 	"net"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -20,10 +22,11 @@ import (
 
 // fakeGateway is the gateway stand-in of the controller plugin's tests
 // (csi.md, Integration test plan): the calls the plugin makes, answered with
-// the gateway's codes from clusters, pools, thin devices and subsystems kept
-// in maps, and from each cluster's planted space answer for the capacity
-// read. It is not the dnvctl suite's fake gateway, which answers one canned
-// reply per method and keeps no state.
+// the gateway's codes from clusters, pools, thin devices, subsystems and
+// cntlr lists kept in maps, from each cluster's planted space answer for the
+// capacity read, and from an ok report of the primary, or a test's own, for
+// the detach's wait. It is not the dnvctl suite's fake gateway, which
+// answers one canned reply per method and keeps no state.
 type fakeGateway struct {
 	pb.UnimplementedGatewayServer
 	mu       sync.Mutex
@@ -32,8 +35,8 @@ type fakeGateway struct {
 	fail map[string]codes.Code
 	// calls is every method called, in order.
 	calls []string
-	// alwaysStale refuses every host write as stale, as a pool that moves
-	// under every attempt would.
+	// alwaysStale refuses every host write as stale and moves the pool's
+	// revision, as a pool that moves under every attempt would.
 	alwaysStale bool
 	// afterList runs once, outside the lock, after a ListSubsystems has
 	// read the hosts: a test's other attach or detach lands between that
@@ -41,6 +44,22 @@ type fakeGateway struct {
 	afterList func()
 	// capReqs is every GetClusterCapacity request, in order.
 	capReqs []*pb.GetClusterCapacityRequest
+	// poolRead, when set, runs under the lock at every GetStoragePool of a
+	// pool that exists, before the reply is made: a test changes the pool
+	// it is handed there, its primary or its revision, between two reads.
+	poolRead func(p *fakePool)
+	// inspect, when set, answers every InspectCntlr of a cntlr the pool
+	// lists, under the lock, in the fake's place: a test steps the
+	// primary's report with it (an older revision, a row that is not OK, no
+	// rows, a refusal) and may change the pool it is handed. Unset, the
+	// report is ok: every subsystem's row OK at the pool's revision.
+	inspect func(p *fakePool, req *pb.InspectCntlrRequest) (*pb.InspectCntlrReply, error)
+	// inspected is the cntlr id of every InspectCntlr, in order.
+	inspected []uint64
+	// hostWrite, when set, runs under the lock at every
+	// UpdateSubsystemHosts of a pool that exists, before the token check:
+	// a test reads the token each write carries.
+	hostWrite func(p *fakePool, req *pb.UpdateSubsystemHostsRequest)
 }
 
 type fakeCluster struct {
@@ -56,13 +75,20 @@ type fakePool struct {
 	req      *pb.CreateStoragePoolRequest
 	deleting bool
 	// rev is the pool's revision, which a token must match (gateway.md
-	// GW6). The fake moves it on a host write only; the gateway moves it on
+	// GW6). The fake moves it on a host write only, and a test's hook may
+	// move it as another change of the pool would; the gateway moves it on
 	// every change of what the agents build.
 	rev    uint64
 	tds    map[string]*pb.ThinDevice
 	nextTd uint64
 	ss     map[string]*pb.Subsystem
 	nextSs uint64
+	// cntlrIds is the pool's cntlr id list, and primary the index of its
+	// primary in it, -1 for none: GetStoragePool answers the cntlr list in
+	// the id list's order with the primary flag on that index alone, as the
+	// gateway does.
+	cntlrIds []uint64
+	primary  int
 }
 
 // The fixture's geometry: 64 MiB extents, 64 KiB stripes, 1 MiB blocks.
@@ -71,6 +97,9 @@ const (
 	fakeStripe     = uint64(64) << 10
 	fakeBlock      = uint64(1) << 20
 	fakeClusterOne = "c0"
+	// fakeCntlrIdBase is the id before a pool's first cntlr: the ids stay
+	// apart from the slice ids, which count from one.
+	fakeCntlrIdBase = uint64(100)
 )
 
 func newFakeGateway() *fakeGateway {
@@ -283,13 +312,19 @@ func (g *fakeGateway) CreateStoragePool(
 		return nil, status.Errorf(codes.AlreadyExists, "sp %q exists",
 			req.GetSpName())
 	}
+	cntlrIds := make([]uint64, max(req.GetCntlrCnt(), 1))
+	for i := range cntlrIds {
+		cntlrIds[i] = fakeCntlrIdBase + uint64(i) + 1
+	}
 	c.pools[req.GetSpName()] = &fakePool{
-		rev:    1,
-		req:    proto.Clone(req).(*pb.CreateStoragePoolRequest),
-		tds:    map[string]*pb.ThinDevice{},
-		nextTd: 1,
-		ss:     map[string]*pb.Subsystem{},
-		nextSs: 1,
+		rev:      1,
+		req:      proto.Clone(req).(*pb.CreateStoragePoolRequest),
+		tds:      map[string]*pb.ThinDevice{},
+		nextTd:   1,
+		ss:       map[string]*pb.Subsystem{},
+		nextSs:   1,
+		cntlrIds: cntlrIds,
+		primary:  0,
 	}
 	return &pb.CreateStoragePoolReply{SpId: uint64(len(c.pools))}, nil
 }
@@ -310,8 +345,12 @@ func (g *fakeGateway) GetStoragePool(
 	if err != nil {
 		return nil, err
 	}
+	if g.poolRead != nil {
+		g.poolRead(p)
+	}
 	// The pool's conf as the gateway stores it: the stripe resolved, the
-	// cluster's when the create named none, and one id per slice.
+	// cluster's when the create named none, one id per slice, the cntlr ids
+	// and the subsystems' NQNs.
 	bdev := proto.Clone(p.req.GetBdevConf()).(*pb.BdevConf)
 	if bdev == nil {
 		bdev = &pb.BdevConf{}
@@ -321,19 +360,69 @@ func (g *fakeGateway) GetStoragePool(
 			StripeSize: c.conf.GetBdevConf().GetDmRaid0Conf().GetStripeSize(),
 		}
 	}
-	slices := make([]uint64, p.req.GetSliceCnt())
-	for i := range slices {
-		slices[i] = uint64(i + 1)
+	sliceIds := make([]uint64, p.req.GetSliceCnt())
+	for i := range sliceIds {
+		sliceIds[i] = uint64(i + 1)
+	}
+	cntlrs := make([]*pb.Cntlr, len(p.cntlrIds))
+	for i := range cntlrs {
+		cntlrs[i] = &pb.Cntlr{Primary: i == p.primary}
 	}
 	return &pb.GetStoragePoolReply{
 		SpName: req.GetSpName(),
 		SpConf: &pb.SpConf{
 			Deleting:    p.deleting,
 			BdevConf:    bdev,
-			SliceIdList: slices,
+			SliceIdList: sliceIds,
+			CntlrIdList: slices.Clone(p.cntlrIds),
+			NqnList:     slices.Sorted(maps.Keys(p.ss)),
 		},
-		SpRev: &pb.SpRev{Revision: p.rev},
+		SpRev:     &pb.SpRev{Revision: p.rev},
+		CntlrList: cntlrs,
 	}, nil
+}
+
+// InspectCntlr is the gateway's read of one cntlr's report: NOT_FOUND for a
+// pool that does not exist or a cntlr it does not list, as after a cntlr
+// replacement, and otherwise the test's report or an ok one. A deleting
+// pool is read as any other.
+func (g *fakeGateway) InspectCntlr(
+	ctx context.Context, req *pb.InspectCntlrRequest,
+) (*pb.InspectCntlrReply, error) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	g.inspected = append(g.inspected, req.GetCntlrId())
+	if err := g.enter("InspectCntlr"); err != nil {
+		return nil, err
+	}
+	p, err := g.livePool(req.GetClusterName(), req.GetSpName(), false)
+	if err != nil {
+		return nil, err
+	}
+	if !slices.Contains(p.cntlrIds, req.GetCntlrId()) {
+		return nil, status.Errorf(codes.NotFound, "cntlr %d not found",
+			req.GetCntlrId())
+	}
+	if g.inspect != nil {
+		return g.inspect(p, req)
+	}
+	return okReport(p), nil
+}
+
+// okReport is the report of a primary that has converged the pool's
+// revision: every subsystem's row OK.
+func okReport(p *fakePool) *pb.InspectCntlrReply {
+	rows := map[uint64]*pb.ResInfo{}
+	for nqn, ss := range p.ss {
+		rows[ss.GetSsId()] = &pb.ResInfo{
+			ResName: nqn,
+			Status:  pb.ResStatus_RES_STATUS_OK,
+		}
+	}
+	return &pb.InspectCntlrReply{
+		AppliedRevision: p.rev,
+		CntlrInfo:       &pb.CntlrInfo{SsIdToSubsystem: rows},
+	}
 }
 
 // DeleteStoragePool is the gateway's: refused while a user-created object
@@ -565,8 +654,15 @@ func (g *fakeGateway) UpdateSubsystemHosts(
 	if err != nil {
 		return nil, err
 	}
-	if g.alwaysStale || (req.GetSpRev() != nil &&
-		req.GetSpRev().GetRevision() != p.rev) {
+	if g.hostWrite != nil {
+		g.hostWrite(p, req)
+	}
+	if g.alwaysStale {
+		// Another change of the pool won the race: it moved the revision.
+		p.rev++
+		return nil, status.Error(codes.Aborted, "stale revision")
+	}
+	if req.GetSpRev() != nil && req.GetSpRev().GetRevision() != p.rev {
 		return nil, status.Error(codes.Aborted, "stale revision")
 	}
 	ss := p.ss[req.GetNqn()]
