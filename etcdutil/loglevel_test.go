@@ -10,7 +10,7 @@ import (
 )
 
 // log.md, etcd: a get, a range and a watch event that succeed are reads at
-// DEBUG; a put and a delete, plain or inside an STM, stay at INFO.
+// DEBUG; a put, plain or inside an STM, and a delete stay at INFO.
 func TestRecordLevels(t *testing.T) {
 	cli := newTestClient(t)
 	ctx := common.WithTraceId(context.Background(), common.NewTraceId())

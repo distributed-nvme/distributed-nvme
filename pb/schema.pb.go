@@ -554,12 +554,14 @@ const (
 	// may also name another pool; or a node record that does not decode.
 	StatusKind_STATUS_KIND_LOST_RECORD StatusKind = 1
 	// The read holds no state of the pool to judge it by: records that do
-	// not load, no primary, a primary's agent that did not answer, holds
-	// no state of the cntlr or is starting, an observation older than the
-	// worker accepts, or a report behind the pool's revision while the
-	// primary's health epoch is set, which is a syncup still on its way or
-	// one its agent refuses or fails, the read cannot tell which. Its
-	// status is RES_STATUS_UNKNOWN.
+	// not load, an id-to-name record not read, no primary, a primary whose
+	// node record is absent, a primary's agent that did not answer, holds
+	// no state of the cntlr, is starting, answers a code other than OK and
+	// leftover, sends no report or holds no observation of the cntlr yet,
+	// an observation older than the worker accepts, or a report behind the
+	// pool's revision while the primary's health epoch is set, which is a
+	// syncup still on its way or one its agent refuses or fails, the read
+	// cannot tell which. Its status is RES_STATUS_UNKNOWN.
 	StatusKind_STATUS_KIND_REPORT StatusKind = 2
 	// The pool as a whole: being deleted, a level above read-write, its
 	// primary disabled, or a stored conf the worker refuses.
@@ -578,8 +580,8 @@ const (
 	StatusKind_STATUS_KIND_GROUP StatusKind = 8
 	// An open repair.
 	StatusKind_STATUS_KIND_REPAIR StatusKind = 9
-	// A migration that waits for its cutover or its finish, or whose copy
-	// fails.
+	// A migration that waits for its cutover or its finish, whose copy
+	// fails, or whose destination gives no reading of its copy.
 	StatusKind_STATUS_KIND_MIGRATION StatusKind = 10
 	// A clone being deleted or waiting for its source.
 	StatusKind_STATUS_KIND_CLONE StatusKind = 11
@@ -7025,8 +7027,10 @@ type StatusRow struct {
 	SpName string     `protobuf:"bytes,1,opt,name=sp_name,json=spName,proto3" json:"sp_name,omitempty"`
 	Kind   StatusKind `protobuf:"varint,2,opt,name=kind,proto3,enum=StatusKind" json:"kind,omitempty"`
 	Object string     `protobuf:"bytes,3,opt,name=object,proto3" json:"object,omitempty"`
-	// The status of the report row the row shows, RES_STATUS_UNKNOWN where
-	// the read got no answer; absent where the row shows no report row.
+	// The status of the report row the row shows; RES_STATUS_UNKNOWN on a
+	// row the read has no reading for (every STATUS_KIND_REPORT row, and a
+	// migration's whose destination gives no reading of its copy); absent
+	// where the row shows no report row.
 	Status *ResStatus `protobuf:"varint,4,opt,name=status,proto3,enum=ResStatus,oneof" json:"status,omitempty"`
 	Reason ResReason  `protobuf:"varint,5,opt,name=reason,proto3,enum=ResReason" json:"reason,omitempty"`
 	Text   string     `protobuf:"bytes,6,opt,name=text,proto3" json:"text,omitempty"`
@@ -7039,7 +7043,7 @@ type StatusRow struct {
 	LegId   uint64               `protobuf:"varint,11,opt,name=leg_id,json=legId,proto3" json:"leg_id,omitempty"`
 	SideId  uint64               `protobuf:"varint,12,opt,name=side_id,json=sideId,proto3" json:"side_id,omitempty"`
 	// The name of a thin device, a repair, a migration, a clone or a
-	// transfer the row names, or a worker role.
+	// transfer the row names, a subsystem's NQN, or a worker role.
 	ObjName string `protobuf:"bytes,13,opt,name=obj_name,json=objName,proto3" json:"obj_name,omitempty"`
 	// The node the row names or reaches.
 	AddrPort      string `protobuf:"bytes,14,opt,name=addr_port,json=addrPort,proto3" json:"addr_port,omitempty"`
@@ -17012,9 +17016,9 @@ type SyncupCntlrRequest struct {
 	LegFastIoFailTmo uint32 `protobuf:"varint,15,opt,name=leg_fast_io_fail_tmo,json=legFastIoFailTmo,proto3" json:"leg_fast_io_fail_tmo,omitempty"`
 	// The side id of each retired leg of the pool, by its leg id, from its
 	// RetiredLeg record. The cn agent builds nothing from it: it keeps it
-	// with the held request, for the restore check's count of the sides of
-	// the layout (cnagent.md CN32). A request from a worker without the
-	// field carries none. Appended, never renumbered.
+	// with the held request, for the largest side id of the layout the
+	// restore check reads (cnagent.md CN32). A request from a worker without
+	// the field carries none. Appended, never renumbered.
 	RetiredLegIdToSideId map[uint64]uint64 `protobuf:"bytes,16,rep,name=retired_leg_id_to_side_id,json=retiredLegIdToSideId,proto3" json:"retired_leg_id_to_side_id,omitempty" protobuf_key:"varint,1,opt,name=key" protobuf_val:"varint,2,opt,name=value"`
 	unknownFields        protoimpl.UnknownFields
 	sizeCache            protoimpl.SizeCache
@@ -19630,8 +19634,9 @@ type CheckControllerNodeRestoreReply_Pool struct {
 	state   protoimpl.MessageState `protogen:"open.v1"`
 	SpId    uint64                 `protobuf:"varint,1,opt,name=sp_id,json=spId,proto3" json:"sp_id,omitempty"`
 	CntlrId uint64                 `protobuf:"varint,2,opt,name=cntlr_id,json=cntlrId,proto3" json:"cntlr_id,omitempty"`
-	// The held node the cntlr is under, or, for NOT_HELD, the restored
-	// node's.
+	// The held node the cntlr is under, or, for a cntlr only the
+	// restored node names (NOT_HELD, or RECORD_LOST when its pool's
+	// records are lost), the restored node's.
 	CnId    uint64         `protobuf:"varint,3,opt,name=cn_id,json=cnId,proto3" json:"cn_id,omitempty"`
 	Verdict RestoreVerdict `protobuf:"varint,4,opt,name=verdict,proto3,enum=RestoreVerdict" json:"verdict,omitempty"`
 	// Empty when the restored state names no pool of sp_id.

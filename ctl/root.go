@@ -501,10 +501,12 @@ func writeResult(out []byte) error {
 }
 
 // render turns a result into the bytes stdout gets: one canonical JSON
-// document and its newline. protojson deliberately varies its whitespace, so
-// the reply is re-parsed and re-encoded through encoding/json: sorted keys,
-// stable spacing, proto field names, proto3 defaults visible, uint64 as JSON
-// strings. The bitmap read's map renders through it too.
+// document and its newline, or, for the status read's default, its table
+// (statusTable; dnvctl.md CT4). protojson deliberately varies its
+// whitespace, so the reply is re-parsed and re-encoded through
+// encoding/json: sorted keys, stable spacing, proto field names, proto3
+// defaults visible, uint64 as JSON strings. The bitmap read's map renders
+// through it too.
 func render(result any) ([]byte, error) {
 	if table, ok := result.(statusTable); ok {
 		return table.render(), nil

@@ -2126,8 +2126,8 @@ func (w *spWorker) buildCntlrPlans(
 	// repair through Group.rep_name.
 	repairs := cntlrRepairs(state)
 	// Each retired leg's side id, which the cn agent keeps with the
-	// request for the restore check's count of the layout's sides
-	// (cnagent.md CN32) and builds nothing from.
+	// request for the largest side id of the layout the restore check
+	// reads (cnagent.md CN32) and builds nothing from.
 	var retiredSides map[uint64]uint64
 	for legId, retired := range state.RetiredLegs {
 		if retiredSides == nil {

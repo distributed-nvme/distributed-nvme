@@ -27,10 +27,12 @@ func levelOf(t *testing.T, capture *logCapture, msg string) string {
 	return level
 }
 
-// R9: an in-process read that succeeds, or that finds its path absent, logs
-// at DEBUG, and so does a device-number read that finds no block device at
-// its path; one that fails otherwise logs at INFO with its error; every write
-// logs at INFO whatever its outcome.
+// R9: a read that succeeds logs at DEBUG, and so does a file, proto,
+// modification-time or device-number read or a directory listing that finds
+// its path absent, and a device-number read that finds no block device at
+// its path; any other failure logs at INFO with its error, a raw block read
+// of an absent path among them; every write logs at INFO whatever its
+// outcome.
 func TestOsClientReadRecordsAreDebug(t *testing.T) {
 	ctx := context.Background()
 	dir := t.TempDir()

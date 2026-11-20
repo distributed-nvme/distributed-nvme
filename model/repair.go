@@ -1411,7 +1411,7 @@ func SetRepairAbort(
 // abort only on a running array and sends no verdict for a group whose array
 // does not run. A take-back's refusal is the verdict's refusal, not this.
 // The sp worker logs it as its `repair waits` record, and the gateway's
-// status read lists it as the repair's row (architecture.md, Clusters,
+// status read lists it in the repair's row (architecture.md, Clusters,
 // GetClusterStatus), so the two readers of one report give one reason.
 func RepairWaitReason(info *pb.CntlrInfo, rep *pb.Repair) string {
 	verdict := info.GetRepIdToRepairInfo()[rep.GetRepId()]

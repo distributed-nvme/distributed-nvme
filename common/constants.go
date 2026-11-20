@@ -971,13 +971,18 @@ const (
 	//
 	// DefaultGatewayAgentTimeout is the per-call budget of the gateway's
 	// agent RPCs (GetDnSize/GetCnSize, the Get*Info behind Inspect*, behind
-	// the force = false checks of DeleteClone/FinishMigration, behind
-	// ForceStartGroup's check of the group's array and behind CreateRepair's
-	// read of the bad leg's row, the Get*Bm bitmap reads, and the
-	// GetCntlrInfo and InspectGrp behind InspectGroup), in seconds; the
-	// status read's calls take StatusAgentTimeout instead. Applied with context.WithTimeout around each dial and its
-	// calls (AG2), so InspectGroup's two calls share one budget; chosen equal to DefaultEtcdOpTimeout so a
-	// hung agent and a hung etcd bound an RPC alike. A Get*Info answers from
+	// the force = false proof of DeleteDiskNode/DeleteControllerNode that
+	// the node is clean, behind the force = false checks of
+	// DeleteClone/FinishMigration, behind ForceStartGroup's check of the
+	// group's array, behind CreateRepair's read of the bad leg's row and
+	// behind GetThinDeviceBitmap's check of the parks, the Get*Bm bitmap
+	// reads, the GetCntlrInfo and InspectGrp behind InspectGroup, and the
+	// GetCnStore behind CheckControllerNodeRestore), in seconds; the status
+	// read's calls take StatusAgentTimeout instead. Applied with
+	// context.WithTimeout around each dial and its calls (AG2), so
+	// InspectGroup's two calls share one budget; chosen equal to
+	// DefaultEtcdOpTimeout so a hung agent and a hung etcd bound an RPC
+	// alike. A Get*Info answers from
 	// the agent's latest observation and reads nothing of the node
 	// (dnagent.md SH28), so for it the budget bounds the dial and a hung
 	// agent; the size probes and the bitmap reads still do their work inside

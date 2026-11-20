@@ -450,9 +450,9 @@ func mustPut(
 // two halves of the gateway's agent surface (AG1/AG2) are configured and
 // asserted the same way and a test that needs a DN and a CN should not need
 // two vocabularies. Only the methods the gateway actually calls are
-// overridden; anything else stays UNIMPLEMENTED, so an RPC that reaches for a
-// call it is not supposed to make fails loudly instead of getting a zero
-// value.
+// overridden, and GetLegBm, which no handler calls; anything else stays
+// UNIMPLEMENTED, so an RPC that reaches for a call it is not supposed to
+// make fails loudly instead of getting a zero value.
 
 // fakeAgent is one fake node: the knobs a test turns and the record of what
 // the gateway asked it. Every field is behind mu because the gateway dials it
@@ -874,12 +874,12 @@ func (f *fakeCnServer) GetLegBm(
 	return &pb.GetLegBmReply{}, nil
 }
 
-// fakeAgentRevision is the `revision` every fake *Info reply carries, and —
+// fakeAgentRevision is the `revision` every fake *Info reply carries, the
+// node's own info reads until a test sets another (setNodeAnswer), and —
 // architecture.md, Disk nodes and Cntlrs — the number every Inspect* reply
 // MUST carry back as its `applied_revision`. A rev key starts at 1 and is
-// bumped one at a
-// time, so a value no plausible bump sequence reaches makes a handler that
-// regressed to the stored revision unmistakable.
+// bumped one at a time, so a value no plausible bump sequence reaches makes
+// a handler that regressed to the stored revision unmistakable.
 const fakeAgentRevision = uint64(0xfa5e)
 
 // fakeAgentObsAge is the age of the observation fakeAgentStamp describes:

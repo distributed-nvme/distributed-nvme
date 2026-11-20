@@ -67,7 +67,8 @@ func nodeAddrFlag(fs *flag.FlagSet) *string {
 // the node in its machine's location.
 // The four transport flags default through trConfFlags to the
 // tcp/ipv4/127.0.0.1/4420 the fake agents of the suite's topology listen on,
-// for the same reason (gateway.md, Integration test plan, Topology).
+// so such a create still sends a whole nvme_tr_conf (gateway.md, Integration
+// test plan, Topology).
 func nodeCreateFlags(fs *flag.FlagSet) (
 	addr *string,
 	location *string,

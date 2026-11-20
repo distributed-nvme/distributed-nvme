@@ -32,7 +32,8 @@ One machine runs:
   from a class, and a pod, the smallest thing Kubernetes runs, which mounts
   the claim at `/data`;
 - a network policy, a Kubernetes record that limits the connections of the
-  pods of one Kubernetes namespace: it keeps the pods of the Kubernetes
+  pods of one Kubernetes namespace, a named group of Kubernetes records
+  such as pods, not an NVMe namespace: it keeps the pods of the Kubernetes
   namespace `default`, where the demo pod runs, off every address of the
   machine, so that they cannot reach dnv's ports.
 

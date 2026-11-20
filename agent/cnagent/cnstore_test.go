@@ -190,20 +190,21 @@ func TestStoredCntlrCountsTheSidesOfTheLayout(t *testing.T) {
 	}
 }
 
-// TestStoredCntlrCountsRetiredSidesById pins the third review's three held
-// layouts (architecture.md, Controller nodes, CheckControllerNodeRestore,
+// TestStoredCntlrCountsRetiredSidesById pins three held layouts
+// (architecture.md, Controller nodes, CheckControllerNodeRestore,
 // MAY_BREAK): a side made after the backup that a take-back's finish
 // retired stays in the largest id, by its side id, and a take-back moves a
-// side and keeps the numbers. At the backup the group held legs 0x30 (side
-// 0x31) and 0x34 (side 0x35) and the retired leg 0x32 (side 0x33).
+// side and keeps the numbers. At the backup, A's and B's group held legs
+// 0x30 (side 0x31) and 0x34 (side 0x35) and the retired leg 0x32 (side
+// 0x33).
 //   - A: a migration moved 0x35 to 0x40, then a take-back of 0x32 retired
 //     leg 0x34 with side 0x40: largest 0x40 over three sides.
 //   - B: a repair put the new leg 0x40 (side 0x41) in place of 0x34, a
 //     take-back of 0x32 retired 0x40, and 0x34 was deleted: 0x41 over
 //     three.
-//   - C: from legs 0x31 and 0x33 and the retired leg 0x36 (side 0x37), a
-//     take-back of 0x36 retired 0x32: the same three sides, 0x37 over
-//     three.
+//   - C: from legs 0x30 (side 0x31) and 0x32 (side 0x33) and the retired
+//     leg 0x36 (side 0x37), a take-back of 0x36 retired 0x32: the same
+//     three sides, 0x37 over three.
 func TestStoredCntlrCountsRetiredSidesById(t *testing.T) {
 	leg := func(legId, sideId uint64) *pb.Leg {
 		return &pb.Leg{LegId: legId, SideList: []*pb.Side{{SideId: sideId}}}

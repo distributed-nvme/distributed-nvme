@@ -1,10 +1,10 @@
 // The cluster subcommands of dnvctl
-// (dnvctl.md, `cluster` — `ctl/cluster.go`): the six RPCs that address a
+// (dnvctl.md, `cluster` — `ctl/cluster.go`): the seven RPCs that address a
 // cluster as a whole. This is the one group whose commands do not simply
-// take the global --cluster: `create`, `delete`, `get`, `get-capacity` and
-// `advance-ids` declare their own --name, which WINS when non-empty and falls back to the
-// global flag when empty (the field→flag rule of dnvctl.md, Conventions;
-// gatewayctl's clusterNameOf).
+// take the global --cluster: `create`, `delete`, `get`, `advance-ids`,
+// `get-capacity` and `get-status` declare their own --name, which WINS when
+// non-empty and falls back to the global flag when empty (the field→flag
+// rule of dnvctl.md, Conventions; gatewayctl's clusterNameOf).
 // root.go's clusterNameOf implements that fallback; the flag itself is
 // declared here because only this group has it.
 //
@@ -321,12 +321,12 @@ func clusterGetStatusCmd() *cobra.Command {
 // statusTable is a status reply that renders as the table of `cluster
 // get-status` (dnvctl.md CT4): a header, one line per row, the count of
 // pools read, and the next page's flag when there is one; a page with no
-// row is one line that says how many pools were read. The table shows a
-// row's pool ("-" for a cluster row), its object, its kind with its status
-// and reason where it has them, its age ("-" where none is known) and its
-// text, a newline or a tab in it shown as " | " so a row stays one line;
-// the ids and names a script reads are in the object, and --json gives
-// them as fields.
+// row has, in place of the header, the rows and the count, one line that
+// says how many pools were read. The table shows a row's pool ("-" for a
+// cluster row), its object, its kind with its status and reason where it
+// has them, its age ("-" where none is known) and its text, a newline or a
+// tab in it shown as " | " so a row stays one line; the ids and names a
+// script reads are in the object, and --json gives them as fields.
 type statusTable struct {
 	reply *pb.GetClusterStatusReply
 }

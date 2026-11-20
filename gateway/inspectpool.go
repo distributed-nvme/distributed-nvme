@@ -9,7 +9,7 @@ import (
 )
 
 // This file is architecture.md, Storage pools, InspectStoragePool / gateway.md,
-// Storage pools and GrowSlice: the read of one pool's space.
+// Cntlrs and inspects: the read of one pool's space.
 
 // opInspectStoragePool is the op the agent-failure message cites.
 const opInspectStoragePool = "InspectStoragePool"

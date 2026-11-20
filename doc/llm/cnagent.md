@@ -2898,59 +2898,59 @@ a pool's row `RES_STATUS_OK` with `RES_REASON_DIFFERS`, its details still
 the raw status line, so its verdict names the row (CN30) and the worker
 sends the `SyncupCntlr` whose converge reloads it.
 
-A converge that reads that status also releases a metadata snapshot the
-pool holds, whose held metadata root the line shows
+A converge that reads that status also releases a metadata snapshot the pool
+holds, whose held metadata root the line shows
 (`common.ThinPoolStatus.HeldRoot`): it sends `release_metadata_snap`
 (`poolHeldSnap`). Every reserve of the pool runs under this cntlr's object
 lock or inside its converge (CN1, CN14, CN25), so a snapshot a converge
 finds held is no live reader's: an agent died between a reserve and its
-release, or the release failed. dm-thin keeps it in the pool's metadata,
-so it outlives the process, and a pool created over that metadata — on
-the next primary, or after a reboot — comes up holding it: so a converge
-that creates the pool reads its status right after the create and
-releases a snapshot it finds held the same way. Held, it pins the pool's
-metadata blocks until a later reserve meets it, which may never come. A
-release that fails is logged. The pool's row
-reads `RES_STATUS_OK` with `RES_REASON_DIFFERS` while a snapshot is held,
-on a converge and a read alike, its details still the raw status line, so
-the verdict names the row (CN30): a converge that reloads the pool for a
-grown concat, and reads no status before it, or whose release failed, and
-a read, bring the worker's `SyncupCntlr` whose converge releases it. A
-line that does not parse, or whose mode reads `ro` — under needs_check, or
-out of metadata space — is not judged: dm-thin serves no pool message to
-such a pool, so a release there would fail on every pass. A deferred group (CN9) is left
-out of both concats and out of the pool sizing until it clears, and so
-is every group after it in the same list — the concat takes each list's
-leading run of non-deferred groups, never a filtered subset, because a
-target's offset is the sum of the lengths before it and a re-inserted
-middle target would move every later group's data under a live pool.
-Concat and pool tables are therefore built and probed at the effective
-size, so a not-yet-grown pool is `RES_STATUS_OK` and not a mismatch, and
-the grow completes on the converge that follows the last leg's
-provisioning — out-of-order provisioning of two appended groups simply
-waits for the earlier one. A grown group whose leg never provisions can be
+release, or the release failed. dm-thin keeps it in the pool's metadata, so
+it outlives the process, and a pool created over that metadata — on the next
+primary, or after a reboot — comes up holding it: so a converge that creates
+the pool reads its status right after the create and releases a snapshot it
+finds held the same way. Held, it pins the pool's metadata blocks until a
+later reserve meets it, which may never come. A release that fails is
+logged. The pool's row reads `RES_STATUS_OK` with `RES_REASON_DIFFERS` while
+a snapshot is held, on a converge and a read alike, its details still the
+raw status line, so the verdict names the row (CN30): a converge that
+reloads the pool for a grown concat, and reads no status before it, or whose
+release failed, and a read, bring the worker's `SyncupCntlr` whose converge
+releases it. A line that does not parse, or whose mode reads `ro` — under
+needs_check, or out of metadata space — is not judged: dm-thin serves no
+pool message to such a pool, so a release there would fail on every pass. A
+deferred group (CN9) is left out of both concats and out of the pool sizing
+until it clears, and so is every group after it in the same list — the
+concat takes each list's leading run of non-deferred groups, never a
+filtered subset, because a target's offset is the sum of the lengths before
+it and a re-inserted middle target would move every later group's data under
+a live pool. Concat and pool tables are therefore built and probed at the
+effective size, so a not-yet-grown pool is `RES_STATUS_OK` and not a
+mismatch, and the grow completes on the converge that follows the last leg's
+provisioning — out-of-order provisioning of two appended groups simply waits
+for the earlier one. A grown group whose leg never provisions can be
 withdrawn by the worker under the conditions of `dnv-worker.md` AR6, which
-removes it from the request before any array is built from it. The
-serving pool's `slice_id_to_dm_pool` row reads by its mode (above) —
-`RES_STATUS_OK` for a pool that writes — and carries its raw
-`dmsetup status` line throughout: the auto-grow of `architecture.md`,
-Automatic reactions, parses that line, as does the gateway's read of a
-pool's space (`architecture.md`, Storage pools, InspectStoragePool), and a
-`PROVISIONING` pool row would silently switch auto-grow off. In the pool layers `PROVISIONING` marks only the deferred
-resources, never the live ones. A concat may only ever grow, and the agent
-enforces that rather than trusting the plan: when the live table totals more sectors
-than the desired one, `ensureDmMulti` refuses the reload, and the refusal
-is reported the way any unbuildable concat is — "refusing to shrink the
-concat" with the live and desired sizes, as an `ERROR` on
-`slice_id_to_meta` or `slice_id_to_data`, and "pool concat missing" on
-`slice_id_to_dm_pool` — because the target list is the physical layout
-of every block the pool above has already allocated: reloading a shorter
-one remaps live pool data, after which dm-thin either refuses the resume
-and leaves the pool suspended or accepts it and serves the wrong device.
-That shape can only mean the effective state lost a group that is
+removes it from the request before any array is built from it. The serving
+pool's `slice_id_to_dm_pool` row reads by its mode (above) — `RES_STATUS_OK`
+for a pool that writes — and carries its raw `dmsetup status` line
+throughout: the auto-grow of `architecture.md`, Automatic reactions, parses
+that line, as do the gateway's read of a pool's space (`architecture.md`,
+Storage pools, InspectStoragePool) and its status read (`architecture.md`,
+Clusters, GetClusterStatus), and a `PROVISIONING` pool row would silently
+switch auto-grow off. In the pool layers `PROVISIONING` marks only the
+deferred resources, never the live ones. A concat may only ever grow, and
+the agent enforces that rather than trusting the plan: when the live table
+totals more sectors than the desired one, `ensureDmMulti` refuses the
+reload, and the refusal is reported the way any unbuildable concat is —
+"refusing to shrink the concat" with the live and desired sizes, as an
+`ERROR` on `slice_id_to_meta` or `slice_id_to_data`, and "pool concat
+missing" on `slice_id_to_dm_pool` — because the target list is the physical
+layout of every block the pool above has already allocated: reloading a
+shorter one remaps live pool data, after which dm-thin either refuses the
+resume and leaves the pool suspended or accepts it and serves the wrong
+device. That shape can only mean the effective state lost a group that is
 already serving, which the provisioning deferral is never allowed to
-produce, so the refusal leaves the live concat untouched for the
-reactions or an operator to repair the group.
+produce, so the refusal leaves the live concat untouched for the reactions
+or an operator to repair the group.
 
 CN14. Thin volumes (`pool.go`; primary only). Per td and slice:
 `CnThinDevName`, with the td's size divided evenly over the slices as its
@@ -4853,39 +4853,38 @@ whose copy does not read whole, commit nothing (`dnagent.md` SH17).
 ### `GetCnStore`
 
 CN32. Answer the desired state the agent holds, for the gateway's restore
-check (`architecture.md`, Controller nodes, CheckControllerNodeRestore):
-for each CN of the request's cluster it holds — the one `cn_id` names, or
-every one for a zero `cn_id` — the held `SyncupCnRequest`'s `revision` and
+check (`architecture.md`, Controller nodes, CheckControllerNodeRestore): for
+each CN of the request's cluster it holds — the one `cn_id` names, or every
+one for a zero `cn_id` — the held `SyncupCnRequest`'s `revision` and
 `cntlr_pointer_list`, and, for each pointer whose cntlr it holds a request
 of, a summary of that request: its pointer, `revision`, `cntlr.primary`,
-`td_list`, the keys of `nqn_to_subsystem` in order, and the largest side
-id and the count of the sides of its layout: every leg of the meta and
-data groups of `id_to_slice`, of the meta group of each clone of
-`clone_list` and the new legs of each repair of `name_to_repair`, and each
-retired leg those groups list, by the side id the request's
-`retired_leg_id_to_side_id` gives it. A retired leg with no side id there,
-as in a request from a worker before the map, is counted and makes the
-summary say a side id is missing (`retired_side_id_missing`), since the
-largest id can then miss its side. The agent builds nothing from
-`retired_leg_id_to_side_id`: it keeps the map with the request it holds,
-for this summary alone, so the map changes no converge, gate, sweep or
-reply of the agent. A pointer
-whose cntlr the agent holds no request of, as when the startup reload
-skipped its file (CN2), is in the pointer list only. It reads the requests
-the states hold, the atomic pointers of Server type and lock mapping,
-under the server's leaf mutex alone: it takes no lock of CN1, reads
-nothing of the node, starts no read and changes nothing. While the agent
-starts it answers `ReplyCodeStarting` and no CN (`dnagent.md` SH33), since
-the startup reload is still filling the states; with no CN of the cluster
-held, `ReplyCodeUnknownObject`. Reasons: after an etcd restore, what each
-node was told before the restore is what the restore loses, no observation
-holds it, and for a pool made after the backup only the controller nodes
-know it; a summary rather than the whole requests, which at
-`MaxCntlrCntPerCn` cntlrs do not fit one reply; and the gateway counts the
-restored layout over the same places, so that a side made and a side
-removed since the backup each show, and a side moved inside the set does
-not (`architecture.md`, Controller nodes, CheckControllerNodeRestore,
-MAY_BREAK).
+`td_list`, the keys of `nqn_to_subsystem` in order, and the largest side id
+and the count of the sides of its layout: every leg of the meta and data
+groups of `id_to_slice`, of the meta group of each clone of `clone_list` and
+the new legs of each repair of `name_to_repair`, and each retired leg those
+groups list, by the side id the request's `retired_leg_id_to_side_id` gives
+it. A retired leg with no side id there, as in a request from a worker that
+sends no map, is counted and makes the summary say a side id is missing
+(`retired_side_id_missing`), since the largest id can then miss its side.
+The agent builds nothing from `retired_leg_id_to_side_id`: it keeps the map
+with the request it holds, for this summary alone, so the map changes no
+converge, gate, sweep or other reply of the agent. A pointer whose cntlr the
+agent holds no request of, as when the startup reload skipped its file
+(CN2), is in the pointer list only. It reads the requests the states hold,
+the atomic pointers of Server type and lock mapping, under the server's leaf
+mutex alone: it takes no lock of CN1, reads nothing of the node, starts no
+read and changes nothing. While the agent starts it answers
+`ReplyCodeStarting` and no CN (`dnagent.md` SH33), since the startup reload
+is still filling the states; with no CN held that the request asks for —
+none of the cluster, or not the one a non-zero `cn_id` names —
+`ReplyCodeUnknownObject`. Reasons: after an etcd restore, what each node was
+told before the restore is what the restore loses, no observation holds it,
+and for a pool made after the backup only the controller nodes know it; a
+summary rather than the whole requests, which at `MaxCntlrCntPerCn` cntlrs
+do not fit one reply; and the gateway counts the restored layout over the
+same places, so that a side made and a side removed since the backup each
+show, and a side moved inside the set does not (`architecture.md`,
+Controller nodes, CheckControllerNodeRestore, MAY_BREAK).
 
 ### `CheckCn` / `CheckCntlr`
 

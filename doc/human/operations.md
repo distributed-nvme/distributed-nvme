@@ -39,7 +39,12 @@ gateway that lists what is wrong in a cluster, a page of storage pools at
 a time; it reads etcd and the latest report of each pool's primary, and it
 changes nothing. A **page token** is the text the read prints after
 `--page-token` when pools are left to read; the next run with it reads the
-next page.
+next page. A **repair** is the record of one replacement of a bad leg of a
+group with a new leg: the worker makes one for each leg repair, and an
+operator can make one with `dnvctl repair create`. A **forced-start mark**
+is the operator's mark on a group that tells the primary to start the
+group's array from one leg ([the forced-start
+guide](#the-forced-start-guide)).
 
 When to use: first, whenever something seems wrong — a volume is slow or
 stops, a host loses a path, or a command is refused for a reason you do
@@ -49,21 +54,24 @@ How to read it:
 
 1. Run `dnvctl cluster get-status`. Each line is one thing that is wrong:
    the pool ("-" for a line about the workers or the nodes, which only
-   the first page has), the object, named with its id (`cntlr 3`,
-   `leg 17 (group 5, slice 2; side 18 on dn ...)`, `repair r1`), the
-   STATUS column, the age — how long it has been so, "-" where nothing
-   records the time — and a text.
+   the first page has), the object, named with its id
+   (`cntlr 3 (primary, cn ...)`,
+   `leg 17 (group 5, slice 2; side 18 on dn ...)`,
+   `repair r1 (group 5, slice 2)`), the STATUS column, the age — how long
+   it has been so, "-" where nothing records the time — and a text.
 2. When the last line is `next page: --page-token <token>`, run the read
    again with `--page-token <token>`, until that line does not come. A
    page that meets a node that does not answer can end early; its token
    still leads on.
 3. `nothing is wrong in the N pools read` on every page means the read
    found nothing wrong. A healthy cluster at rest lists nothing; a change
-   in flight lists itself for a few seconds while it runs: a pool or a
-   cntlr just made, whose primary has not reported on it yet
-   (`report/unknown`), a primary just disabled until its failover, a
+   in flight lists itself for a few seconds while it runs: a pool just
+   made, or a cntlr made as its pool's primary, as when the worker
+   replaces the cntlr of a pool with one cntlr, until its agent reports on
+   it (`report/unknown`), a primary just disabled until its failover, a
    migration whose cutover is pending, and a pool or a clone being
-   deleted until its drain ends. A repair lists itself until it ends.
+   deleted until its drain ends. A new standby lists nothing, since the
+   read asks only the primaries. A repair lists itself until it ends.
 4. `--json` prints the same page as one JSON document, with each object's
    ids as fields, for a script.
 
@@ -98,7 +106,7 @@ status and the reason of the row it shows follow where it has them:
 - `health`: the worker has set a health epoch; the age is how long ago.
 - `group`: a group's array is not whole, the primary refuses to add a leg,
   the operator is in charge of the group's repair, a forced-start mark
-  stands, or md records bad blocks on a leg's member.
+  stands, or md records bad blocks on a leg.
 - `repair`, `migration`, `clone`: one that waits; the text says for what,
   and for a repair who acts next: the worker at its next pass, or the
   operator with `dnvctl repair cancel` or `dnvctl repair finish` — for the
@@ -160,7 +168,8 @@ and a page cut short by a client's deadline. The gateway suite's faults
 case plants a leg fault, a thin pool that needs a check, a full thin pool,
 a hung primary and a lost revision record, and reads the pages; the dnvctl
 suite checks the table's shape; the e2e suite prints the table when a case
-fails. These stages are written and have not yet run in the lab.
+fails. The gateway and dnvctl suites passed in the lab with these stages
+on 2026-11-19; the e2e suite has not yet run in the lab with its print.
 
 ## The forced-start guide
 
@@ -1785,8 +1794,9 @@ no redundancy), the number of cntlrs of a pool, `--cntlr-cnt`, and its
 number of slices, `--slice-cnt`. A flag left out, or 0, takes what a pool
 create takes: the legs of the cluster's own redundancy, and the default
 counts. The answer is under `space`. The CSI driver gives Kubernetes the
-same answer for a storage class, with the class's legs and cntlrs and one
-slice.
+same answer for a storage class, the Kubernetes record that names the
+cluster, the legs of a group and the cntlrs of each volume's pool, with
+the class's legs and cntlrs and one slice.
 
 A controller node has a budget: the most pool space its cntlrs may serve,
 given in bytes to `--capacity` of its cn agent and read once, when the node
@@ -1800,8 +1810,9 @@ node the largest budget, 64 TiB. A controller node that 0.1 created with no
 `total_ext_cnt` under `addr_port_to_cn` shows it.
 
 When: before you make pools or Kubernetes volumes in a cluster; when a pool
-create is refused for want of room; when a Kubernetes claim waits for
-capacity; when the worker skips an auto-grow.
+create is refused for want of room; when a Kubernetes claim, the request
+for a volume of a size from a storage class, waits for capacity; when the
+worker skips an auto-grow.
 
 Symptoms:
 
@@ -1811,10 +1822,11 @@ Symptoms:
 - A Kubernetes claim of a storage class with `volumeBindingMode:
   WaitForFirstConsumer` waits, and `kubectl get csistoragecapacities -A`
   shows its class a `maximumVolumeSize` below the claim's size: the
-  scheduler compares the claim with that field, which the CSI driver always
-  sets. A class with `Immediate` binding, as `deploy/storageclass.yaml`
-  has, never waits on capacity: a create that does not fit is refused
-  instead.
+  scheduler, the Kubernetes program that chooses the machine where the
+  claim's user runs, compares the claim with that field, which the CSI
+  driver always sets. A class with `Immediate` binding, as
+  `deploy/storageclass.yaml` has, never waits on capacity: a create that
+  does not fit is refused instead.
 - The worker's log has a `reaction skipped` line for an auto-grow with the
   reason `cn free_ext_cnt too low`: a controller node of the pool has no
   budget left for the new group.
@@ -1887,9 +1899,10 @@ Safe steps:
    controller nodes, their cn agents started with the `--capacity` you want
    or with none for the largest budget. No command changes the budget of a
    controller node that exists ([the scope page](scope.md)): a node that 0.1
-   made with its 4 TiB default gets a larger one only once it is emptied,
-   deleted and created again, and those steps are not written yet (the
-   scope page, section 7, Remove a node).
+   made with its 4 TiB default gets a larger one only once it is emptied
+   and deleted, as [Remove a node](#remove-a-node) says, and created again
+   with its cn agent started anew, with no local files and the
+   `--capacity` you want.
 4. Make the pool with fewer cntlrs or fewer slices, if the shape that
    fits is one you can use: run the command again with that shape first.
 
@@ -1906,7 +1919,8 @@ gateway's read, its refusals and its check of the cluster's stored
 settings; the gateway suite's faults case checks the answer over its fake
 nodes before and after its pool is made, and the csi suite's volume case
 checks that the capacity Kubernetes shows for its storage class is the
-gateway's answer. Neither suite has yet run in the lab with this answer.
+gateway's answer. Both suites passed in the lab with these checks on
+2026-11-19.
 
 ## A pool's space
 
@@ -1936,9 +1950,10 @@ How to confirm: run `dnvctl sp inspect`. In `space`:
   not built yet, or it failed, or the primary's agent has no reading of the
   cntlr yet. In the last case every slice is unread, `applied_revision` is
   0 and `obs_age` is absent: the agent is starting, as right after its
-  restart, or it does not hold the cntlr yet, as right after a failover
-  moves the primary while the command runs. Run the command again a little
-  later.
+  restart, or it does not hold the cntlr yet, as right after the pool's
+  create or the replacement of a pool's one cntlr. Right after a failover,
+  the new primary has not built the thin pools yet: its slices are unread
+  while `obs_age` is there. Run the command again a little later.
 - `td_cnt` and `virtual_bytes` are the pool's thin devices, snapshots
   included, and their sizes added up. `overcommit_pct` is `virtual_bytes`
   over `data_bytes`, in percent: above 100, the volumes can be given more
@@ -1958,8 +1973,12 @@ Safe steps:
 1. Give the cluster room for auto-grow: [The cluster's
    capacity](#the-clusters-capacity) says which limit it reaches and what to
    add.
-2. Grow a slice by hand: `dnvctl sp grow-slice --slice <slice id> --ext
-   <extents>`, with the slice id of `slice_list`.
+2. Grow a slice by hand: `dnvctl sp grow-slice --slice <slice id> --ext 1`,
+   with the slice id of `slice_list`, adds a data group. Any `--ext` above
+   0 asks for a data group, and the new group always takes the size of the
+   slice's first data group, whatever number you give. `--meta`, with no
+   `--ext`, adds a meta group instead, as large as the slice's meta groups
+   together.
 
 Steps that lose data: deleting a thin device or a snapshot to free blocks of
 the thin pool deletes its data.
@@ -1973,7 +1992,8 @@ repair whose procedure is not written yet. Ask for help.
 Tested: the Go tests of the answer on hand-made rows, and of the gateway's
 read with a fake agent; the gateway suite's smoke case checks it over a fake
 agent's row, and the e2e suite's setup over real agents after host0 writes
-its pattern. Neither suite has yet run in the lab with this read.
+its pattern. The gateway suite passed in the lab with its check on
+2026-11-19; the e2e suite has not yet run in the lab with this read.
 
 ## Remove a node
 
@@ -2028,9 +2048,12 @@ Safe steps:
 2. Empty a disk node: delete the storage pools that have a leg on it, or
    move each such leg to another disk node with a migration
    (`dnvctl migr create`, then `dnvctl migr finish`; the steps of that flow
-   are not written yet). `dnvctl retired-leg list` shows the pool's retired
-   legs; delete each one on the node with `dnvctl retired-leg delete` once
-   you no longer want its copy.
+   are not written yet). No migration moves a leg of a clone meta group,
+   the group that holds a clone's copy records: wait until the clone's copy
+   is complete and the clone leaves by itself, or, in a RAID1 pool,
+   replace that leg with a repair. `dnvctl retired-leg list` shows the
+   pool's retired legs; delete each one on the node with
+   `dnvctl retired-leg delete` once you no longer want its copy.
 3. Empty a controller node: delete the storage pools that have a cntlr on
    it, or give each such pool a cntlr on another controller node with
    `dnvctl cntlr create`, then disable the old one with
@@ -2057,18 +2080,20 @@ Safe steps:
    disk again, which also zero its header block, are not written yet (the
    scope page, section 7, Reuse a disk from an old node).
 
-Steps that can lose data or leave state behind: `--force`. `dnvctl dn
-delete --force` and `dnvctl cn delete --force` delete the node without
-asking its agent. Use them only for a node whose agent is gone for good, or
-whose disk is dead or names another node, since such a node never passes
-the check. A node with a side or a cntlr on it is refused with `--force`
-too. The node keeps every device, export and connection its last sweep had
-not removed, and its agent builds again, each time it starts, what its local
-files still name: NVMe-oF exports included, open to the hosts and
-controller nodes they named, over disk space that the cluster counts as
-free. So after a forced delete, stop that agent and delete its local files,
-remove by hand what it built, and on a disk node zero the header block
-before the disk is used again.
+Steps that can lose data or leave state behind: the pool deletes of steps
+2 and 3, which delete every volume of the pool with its data; the retired
+leg deletes of step 2, which delete the copy each leg held; and `--force`.
+`dnvctl dn delete --force` and `dnvctl cn delete --force` delete the node
+without asking its agent. Use them only for a node whose agent is gone for
+good, or whose disk is dead or names another node, since such a node never
+passes the check. A node with a side or a cntlr on it is refused with
+`--force` too. The node keeps every device, export and connection its last
+sweep had not removed, and its agent builds again, each time it starts,
+what its local files still name: NVMe-oF exports included, open to the
+hosts and controller nodes they named, over disk space that the cluster
+counts as free. So after a forced delete, stop that agent and delete its
+local files, remove by hand what it built, and on a disk node zero the
+header block before the disk is used again.
 
 When to stop and ask for help: a refusal that names the same leftover for
 several minutes, while the agent's log keeps showing `sweep leftover`
@@ -2121,7 +2146,8 @@ What dnv does alone:
 Safe steps:
 
 1. Stop every worker, every cdc and every gateway, and the controller
-   plugin of every CSI driver that calls the gateways, for example with
+   plugin of every CSI driver that calls the gateways, the part of the
+   driver that calls the gateway, for example with
    `kubectl -n dnv-csi scale deployment dnv-csi-controller --replicas=0`.
    Keep every agent running. A worker would hand out ids from the restored
    counters, and the controller plugin would retry a volume create as soon
@@ -2287,7 +2313,8 @@ Confirm:
    without it, `jq` stops at that line.
 2. The log level a running program writes at is the `log_level` of its
    last `log level changed` record; with none, it is the log level it
-   started with, its `--log-level`, or `info` when none was given.
+   started with: its `--log-level` or the environment variable of safe
+   step 1, or `info` when neither was given.
 
 What dnv does alone: nothing. No program rotates, cuts or compresses its
 log, and a log level a signal set stays until the next signal or until the
@@ -2309,8 +2336,10 @@ Safe steps:
    back to the log level it started with, with one more such record. Under
    systemd, signal the main process alone:
    `kill -USR1 $(systemctl show -p MainPID --value <unit>)`. In Kubernetes,
-   the CSI plugin runs in each of the two controller copies' pods and in
-   each node's pod, and each pod is signalled on its own
+   the CSI driver runs in pods, the Kubernetes units of one or more
+   containers: its controller plugin in two copies, two pods, and its node
+   plugin, the part that runs on each Kubernetes node, in one pod per node.
+   Each pod is signalled on its own
    (`kubectl -n dnv-csi get pods -o wide` lists them and their nodes).
    Send the signal on the pod's node, as root, to the pid the container
    runtime reports for the pod's `dnv-csi` container; on k3s:

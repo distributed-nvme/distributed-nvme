@@ -5846,9 +5846,10 @@ case_faults() {
 	# The faults case of Integration test plan, Cases, runs its batteries on
 	# "a live pool": the td-size rule, the ns_idx probe and every precondition
 	# need stored state to be checked against, so the whole fixture is arranged
-	# first and the five numbered steps below are then exactly the five
-	# batteries that case describes; a sixth reads the status read over
-	# planted faults.
+	# first, with the capacity read's space answer before and after sp0's
+	# create; the first five numbered steps below are then the refusal,
+	# agent and hydration batteries that case describes, a sixth the node
+	# deletes' battery and a seventh the status read over planted faults.
 	new_cluster
 	make_nodes
 	# The capacity read (architecture.md, Clusters) sees every node as

@@ -24,10 +24,10 @@ import (
 //
 // It is the one handler that calls agents for many objects in one request,
 // so it bounds them itself: StatusFanOut pools at once, StatusAgentTimeout a
-// call, and one call at a time to an address until one answers (statusGate),
-// so a node that hangs costs one budget per read. An agent that does not
-// answer is a row, never the RPC's error; only the cluster's own reads
-// answer ABORTED.
+// call, and the first call to an address alone, the others skipping the
+// address when that call fails (statusGate), so a node that hangs costs one
+// budget per read. An agent that does not answer is a row, never the RPC's
+// error; only the cluster's own reads answer ABORTED.
 
 // The status read's bounds (gateway.md GW20), variables so a test can
 // shorten them: the budget of one agent call, the pools read at once, and
@@ -51,9 +51,10 @@ var (
 // has a deadline, the read starts no pool once less than one agent budget
 // and the reply margin is left, the page's first pool aside, ends each
 // pool's work the margin before the deadline, and leaves off the page a
-// pool whose work that deadline cut (readPools); a page cut so carries the
-// token after the last pool it keeps, which is a key of the pool prefix, so
-// the next page starts at the first pool it did not finish.
+// pool whose work that deadline cut and every pool after it, the first again
+// aside (readPools); a page cut so carries the token after the last pool it
+// keeps, which is a key of the pool prefix, so the next page starts at the
+// first pool it did not finish.
 func (s *Server) GetClusterStatus(
 	ctx context.Context,
 	req *pb.GetClusterStatusRequest,
@@ -612,8 +613,9 @@ type statusRoomKey struct {
 // dnRoom says whether the disk nodes have room for one new group of extCnt
 // extents on legs nodes, by the scan AR6's grow runs (dnv-worker.md AR6):
 // the plain scan, the batch the cluster stores, no black list and no
-// location excluded. The answer is kept for the request, so pools that ask
-// the same scan ask etcd once.
+// location excluded. The answer is kept for the request, so a pool that asks
+// a scan another pool has run reads its answer; two pools that ask one scan
+// at once both run it.
 func (r *statusRead) dnRoom(
 	ctx context.Context,
 	extCnt uint64,
@@ -796,8 +798,10 @@ type statusBuilder struct {
 	answer time.Time
 	// legRowed holds the legs that got a row of their own.
 	legRowed map[uint64]bool
-	// badConf says the pool's stored bdev_conf is one the readers refuse,
-	// so no grow is judged from it.
+	// badConf says the pool's stored conf is one the sp worker's pass
+	// refuses (poolRows): a bdev_conf the readers refuse, or a group whose
+	// counts give its sides no length to zero. No grow is judged from it,
+	// and the worker drives none of its repairs (repairRows).
 	badConf bool
 }
 
@@ -818,9 +822,11 @@ func (b *statusBuilder) rowAge(row *pb.ResInfo) *durationpb.Duration {
 }
 
 // lostRows are the pool's lost records (architecture.md, Clusters,
-// GetClusterStatus): each key LoadSp found named and absent, and an absent
+// GetClusterStatus): each key LoadSp found named and absent, the pool's
+// id-to-name record absent or naming another pool (spNameRow), and an absent
 // revision key, which LoadSp reads as revision zero and a create never
-// writes.
+// writes. A failed read of the id-to-name record is a row of status UNKNOWN
+// instead.
 func (b *statusBuilder) lostRows() {
 	state := b.in.state
 	dnPfx, cnPfx := model.DnConfPrefix(b.in.cid), model.CnConfPrefix(b.in.cid)
@@ -1545,8 +1551,9 @@ func (b *statusBuilder) repairRows(info *pb.CntlrInfo) {
 		worker := common.HasRepNameReservedPrefix(name)
 		// The worker finishes and cancels its own repairs by a reaction
 		// (dnv-worker.md AR8's drive step), which it runs neither at a
-		// level that stops reactions (AR3) nor for a pool whose stored
-		// conf its pass refuses (AR1): the operator then drives them.
+		// level that stops reactions (dnv-worker.md AR3) nor for a pool
+		// whose stored conf its pass refuses (dnv-worker.md AR1): the
+		// operator then drives them.
 		workerDrives := worker && !b.badConf &&
 			state.Conf.GetSpLevel() < pb.SpLevel_SP_LEVEL_NO_THINPOOL
 		switch {
@@ -1650,7 +1657,9 @@ func repairOfDeletingClone(state *model.SpState, rep *pb.Repair) bool {
 // migrationRows are the migrations that wait: for their cutover, with the
 // primary's path row to the new side, or past it for their finish, once the
 // new side's copy is whole; and one whose copy reads ERROR, or whose new
-// side's agent did not answer. A copy that runs is not listed.
+// side gives no reading of its copy: no leg of the pool holds the side, its
+// agent did not answer or answers a code, or it reports no copy. A copy that
+// runs is not listed.
 func (b *statusBuilder) migrationRows(info *pb.CntlrInfo) {
 	state := b.in.state
 	for _, name := range state.Conf.GetMigrNameList() {
@@ -1786,10 +1795,12 @@ func (b *statusBuilder) tornRows() {
 	}
 }
 
-// errorRows are the rows of the primary's report that read ERROR and no
-// row above already shows: the slices' thin pools and their devices, the
-// thin volumes, the namespaces and subsystems, the transfers, the clones'
-// rows, the path rows and any leg or group the state does not hold.
+// errorRows are the rows of the primary's report that read ERROR, a leg's
+// also when it carries an identity reason (legRowListed), and that no row
+// above already shows: the slices' thin pools and their devices, the thin
+// volumes, the namespaces and subsystems, the transfers, the clones' rows
+// but a deleting clone's, the path rows, and each leg or group no row above
+// walks, one the state does not hold or one of a clone being deleted.
 func (b *statusBuilder) errorRows(info *pb.CntlrInfo) {
 	state := b.in.state
 	tdName := map[uint64]string{}

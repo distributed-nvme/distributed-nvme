@@ -2269,12 +2269,14 @@ func GrpListFull(slice *pb.Slice, isMeta bool) bool {
 	return len(grps) >= common.MaxGrpCntPerSlice
 }
 
-// The reasons of AR6's refusals that GrowSlice never meets in its STM: the
-// covered rule's (DataCovered) and GrowExtCnt's. The sp worker's pass logs
-// each as the reason of its `reaction skipped` record (dnv-worker.md AR6),
-// and the gateway's status read names each as the reason of a grow it lists
-// as refused (architecture.md, Clusters, GetClusterStatus), so the two
-// readers of one refusal print one string.
+// The reasons of AR6's refusals that no GrowSlice carries: the covered
+// rule's (DataCovered), which GrowSlice does not apply, and two of
+// GrowExtCnt's, whose conditions GrowSlice's STM refuses in words of its own
+// (growExtCnt). The sp worker's pass logs each as the reason of its
+// `reaction skipped` record (dnv-worker.md AR6); the gateway's status read
+// names GrowExtCnt's as the reason of a grow it lists as refused and lists
+// no row for a covered grow, which is not needed (architecture.md, Clusters,
+// GetClusterStatus), so the two readers of one refusal print one string.
 const (
 	// ReasonDataCovered is a slice whose data groups already hold what the
 	// pool's thin devices can use in it (DataCovered): a data grow would add

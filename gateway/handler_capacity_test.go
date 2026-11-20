@@ -13,9 +13,9 @@ import (
 
 // TestGetClusterCapacityCopiesEveryRecord pins the read of architecture.md,
 // Clusters, GetClusterCapacity: one entry per node of the cluster, every
-// field the record's own, the pointer lists reduced to their counts, and
-// nothing computed — a disabled or unhealthy node is reported as its record
-// says, not left out.
+// field the record's own, the pointer lists reduced to their counts, and no
+// entry field computed — a disabled or unhealthy node is reported as its
+// record says, not left out.
 func TestGetClusterCapacityCopiesEveryRecord(t *testing.T) {
 	env := sptNewEnv(t, 3, 2, 500)
 

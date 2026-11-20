@@ -27,7 +27,9 @@ import (
 //     is a budget read through the CN rule of architecture.md, Size → extents
 //     (cnCapBudget) rather than a measured disk size used verbatim;
 //   - the per-cluster ceiling is `common.MaxCnCntPerCluster`;
-//   - delete's occupancy precondition is `cntlr_ptr_list`;
+//   - delete's occupancy precondition is `cntlr_ptr_list`, and its proof
+//     without force (checkCnClean) calls `GetCnInfo` and reads no counts,
+//     since a controller node holds no disk;
 //   - capacity maintenance is `model.MaintainCnCapacity`, which takes no
 //     ClusterConf because a CN capacity key carries no bin index
 //     (architecture.md, Finding CN candidates), so DeleteControllerNode and

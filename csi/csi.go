@@ -59,8 +59,9 @@ const (
 // polledMethods are the calls Kubernetes repeats on a timer: the liveness
 // probe's, every few seconds; the provisioner's capacity poll; and the
 // kubelet's volume stats of each mounted volume with the capability call it
-// makes before them. Each says nothing new while it succeeds, so its records
-// are reads, at Debug, and a failed one is at Info (csi.md, Log records).
+// makes before them. Each says nothing new while it succeeds, so it is
+// logged as a read is: its request record at Debug, and its reply record at
+// Debug while it succeeds and at Info when it fails (csi.md CSI8).
 var polledMethods = map[string]bool{
 	"/csi.v1.Identity/Probe":           true,
 	"/csi.v1.Controller/GetCapacity":   true,

@@ -513,13 +513,15 @@ func (f *follower) trigger() {
 var retryBase = connectRetry
 
 // run is the follower's loop: one pass at its start, then a pass on every
-// kick, every change event of an nvme controller and every period, and,
-// after a pass that failed or held a drop back for a path whose namespace
-// has not shown, one more when the retry timer fires, until ctx ends. The
-// timer's delay starts at retryBase, doubles after each such pass up to the
-// period, and starts again from retryBase after a pass a kick or an event
-// began, since news may have ended what held the passes back, and after a
-// pass that leaves nothing to retry. At the end, with nothing staged, the
+// kick, every signal of the event socket's reader (listenUevents: a change
+// event of an nvme controller, and the overflow, failure or reopen of the
+// socket, after which events may be lost) and every period, and, after a
+// pass that failed or held a drop back for a path whose namespace has not
+// shown, one more when the retry timer fires, until ctx ends. The timer's
+// delay starts at retryBase, doubles after each such pass up to the period,
+// and starts again from retryBase after a pass a kick or a signal began,
+// since news may have ended what held the passes back, and after a pass
+// that leaves nothing to retry. At the end, with nothing staged, the
 // discovery connections are dropped, and with volumes staged every
 // connection stays, since the data path must outlive the plugin.
 func (f *follower) run(ctx context.Context) {

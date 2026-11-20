@@ -20,8 +20,9 @@ import (
 // asked once after it, about the primary cntlr and with no counters, its
 // thin pool rows turned into sizes and use, a row that does not parse
 // leaving its slice unread, and nothing written; then the refusals: an
-// agent that fails, a pool with no primary, a pool that does not exist, and
-// a stored bdev_conf its validator refuses, before any agent call.
+// agent that fails, a stored bdev_conf its validator refuses, before any
+// agent call, a pool with no primary, a pool that does not exist, and a
+// request that names no pool.
 func TestInspectStoragePool(t *testing.T) {
 	env := newVolEnv(t)
 	agent := fsPrimary(env)

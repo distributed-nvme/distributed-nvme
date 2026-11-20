@@ -96,15 +96,15 @@ invocation itself: `--timeout` is the per-invocation deadline in seconds,
 `--config` names an optional viper config file, which supplies the
 env-backed global flags only.
 
-CT9. **Environment and config binding, global flags only.** Before a leaf runs,
-the root binds every global flag but `--rev` — the env-backed ones — into
-viper the way the five daemons bind their flags (`bindViper`), except that
-it binds those flags one by one, each looked up in the invoked command's
-flag set, where a daemon binds its whole flag set; the environment prefix is
-`DNVCTL`, a dash in a flag name becomes an underscore, every bound key is
-looked up in the environment, and the optional `--config` file is read.
-Those global flags are read back through viper — flag over environment over
-config file over default, viper's standard order — so `DNVCTL_CLUSTER`,
+CT9. **Environment and config binding, global flags only.** Before a leaf
+runs, the root binds every global flag but `--rev` — the env-backed ones —
+into viper the way the five daemons bind their flags (`bindViper`), except
+that it binds those flags one by one, each looked up in the invoked
+command's flag set, where a daemon binds its whole flag set; the environment
+prefix is `DNVCTL`, a dash in a flag name becomes an underscore, every bound
+key is looked up in the environment, and the optional `--config` file is
+read. Those global flags are read back through viper — flag over environment
+over config file over default, viper's standard order — so `DNVCTL_CLUSTER`,
 `DNVCTL_SP` and `DNVCTL_GATEWAY_ADDRESS` work as ambient context. `--rev`
 and every leaf flag are read off the parsed command line and never through
 viper: `DNVCTL_REV`, `DNVCTL_FORCE`, `DNVCTL_NAME` — any environment
@@ -112,10 +112,11 @@ variable named after a leaf flag — and a config-file key of the same name
 reach no request. Binding every flag would let one exported variable decide
 requests nobody typed it for: `DNVCTL_REV` would put its revision on every
 token-carrying write typed without `--rev`, `DNVCTL_FORCE` would force each
-`dn delete`, `cn delete`, `clone delete`, `migr finish` and `migr cancel`
-typed without `--force` and turn such an `xfer delete` into an abort, and `DNVCTL_NAME` would stand in for every
-untyped `--name`, redirecting a bare `cluster get` or `cluster delete`. A
-revision token is per object and per write, never ambient context.
+`dn delete`, `cn delete`, `clone delete`, `migr finish`, `migr cancel` and
+`repair create` typed without `--force` and turn such an `xfer delete` into
+an abort, and `DNVCTL_NAME` would stand in for every untyped `--name`,
+redirecting a bare `cluster get` or `cluster delete`. A revision token is
+per object and per write, never ambient context.
 
 Reading leaf values off the command line also keeps viper's silent numeric
 casts out of every request: text that is not a number never reads back as
@@ -213,17 +214,18 @@ CT5. **Errors and exit codes.** dnvctl exits with one of four codes:
 * 1 — the RPC or its connection failed: stdout is empty and stderr carries
   one line, "dnvctl: CODE: message (trace_id ID)".
 * 2 — a usage error: an unknown command or flag, an unparsable flag value,
-  such as a number spelled other than in decimal or in hex after `0x`, or
-  an id or `--rev` typed empty (Conventions, Value types), a `--timeout`
-  from the environment or the config file that is not a number, a NaN or
-  infinite `--timeout` from any carrier, or a `--rev` on a command whose
-  request carries no token. stdout is empty, stderr carries
-  "dnvctl: message", and no RPC is issued. A failed write of the root's
-  `--version` line exits 2 too: it is no usage error, but like one it
-  issued no RPC, so a repeat changes nothing. Its stdout holds none or part
-  of the line, and stderr two lines, cobra's of the write's error and then
-  "dnvctl: message". So does a failed write of a `completion` script, for
-  the same reason, with stderr the one line "dnvctl: message".
+  such as a number spelled other than in decimal or in hex after `0x`, or an
+  id or `--rev` typed empty (Conventions, Value types), a `--timeout` from
+  the environment or the config file that is not a number, a NaN or infinite
+  `--timeout` from any carrier, a `--log-level` from any carrier that is not
+  one of its three words (CT7), or a `--rev` on a command whose request
+  carries no token. stdout is empty, stderr carries "dnvctl: message", and
+  no RPC is issued. A failed write of the root's `--version` line exits 2
+  too: it is no usage error, but like one it issued no RPC, so a repeat
+  changes nothing. Its stdout holds none or part of the line, and stderr two
+  lines, cobra's of the write's error and then "dnvctl: message". So does a
+  failed write of a `completion` script, for the same reason, with stderr
+  the one line "dnvctl: message".
 * 3 — the RPC returned OK, and its result was not written: the reply could
   not be rendered (CT4), or the write to stdout failed or ended short, as on
   a full disk under a redirect. stdout holds no complete document or
@@ -239,21 +241,24 @@ CT5. **Errors and exit codes.** dnvctl exits with one of four codes:
 
 The message of a usage error is cobra's or pflag's (an unknown command or
 flag, a value pflag cannot parse or dnvctl's spelling check refuses before
-pflag reads it), viper's (a `--config` file it cannot read) or dnvctl's own: a
-missing `--gateway-address`; `dnvctl` or a group typed without a verb; an
+pflag reads it), viper's (a `--config` file it cannot read) or dnvctl's own:
+a missing `--gateway-address`; `dnvctl` or a group typed without a verb; an
 "invalid --flag" message for a value dnvctl parses itself — an id, `--ids`,
 `--bad-legs`, `--slots`, `--bm-hex`, `--level`, `--redund`, `--override`,
 `--rev`, a `--timeout` from the environment or the config file, a NaN or
-infinite `--timeout` from any carrier; and, for a `--rev` on a command
-whose request carries no token, whatever its value, an "invalid --rev"
-message naming the command as one that takes no revision token. CODE is
-the gRPC code in its UPPER_SNAKE wire spelling — NOT_FOUND, ABORTED,
-DEADLINE_EXCEEDED, UNAVAILABLE and the rest — from the `codeNames` table,
-because the code's own string form is CamelCase and operators grep for the
-wire spelling; message is the status message verbatim, such as "stale
-revision". A dial that cannot resolve, or is refused, maps to whatever
-code gRPC reports — UNAVAILABLE for a refused connection; dnvctl adds no
-translation layer.
+infinite `--timeout` from any carrier; a `--log-level` message that names
+the three words and the value as given (`log.md` R6); and, for a `--rev` on
+a command whose request carries no token, whatever its value, an "invalid
+--rev" message naming the command as one that takes no revision token. The
+stderr each code above names is the one of the default log level: a
+`--log-level` of `info` or `debug` writes the client interceptors' records
+there too, before the one line (CT7). CODE is the gRPC code in its
+UPPER_SNAKE wire spelling — NOT_FOUND, ABORTED, DEADLINE_EXCEEDED,
+UNAVAILABLE and the rest — from the `codeNames` table, because the code's
+own string form is CamelCase and operators grep for the wire spelling;
+message is the status message verbatim, such as "stale revision". A dial
+that cannot resolve, or is refused, maps to whatever code gRPC reports —
+UNAVAILABLE for a refused connection; dnvctl adds no translation layer.
 
 ## Revision tokens
 
@@ -533,28 +538,28 @@ zero takes the gateway's default as on `sp create`. It names its cluster
 with `--name`, falling back to the global `--cluster`, and carries no
 token, as every read does (CT3).
 
-`cluster get-status` is the status read of `architecture.md`, Clusters:
-what is wrong in the cluster, a page of pools at a time. It names its
-cluster as `cluster get-capacity` does, and takes the page flags, since its
-pages are `sp list`'s. It prints a table by default, for a person in an
-incident, and the CT4 document with `--json`, for a script: the header
-`POOL OBJECT STATUS AGE TEXT`, then one line per row — the row's pool, "-"
-for a cluster row; its object; its kind, and its status and its reason
-where it has them, each as its lower-case short name, as `row/error` or
-`lost-record`; its age to the second, "-" where none is known; and its
-text, a newline or a tab in it shown as " | " so the row stays one line —
-then a line that counts the pools the page read, and `next page:
---page-token TOKEN` when the reply carries a token. A page with no row is
-one line that says nothing is wrong in the pools it read. The ids and names
-a row
+`cluster get-status` is the status read of `architecture.md`, Clusters: what
+is wrong in the cluster, a page of pools at a time. It names its cluster as
+`cluster get-capacity` does, and takes the page flags, since its pages are
+`sp list`'s. It prints a table by default, for a person in an incident, and
+the CT4 document with `--json`, for a script: the header `POOL OBJECT STATUS
+AGE TEXT`, then one line per row — the row's pool, "-" for a cluster row;
+its object; its kind, and its status and its reason where it has them, each
+as its lower-case short name, as `row/error` or `lost-record`; its age to
+the second, "-" where none is known; and its text, a newline or a tab in it
+shown as " | " so the row stays one line — then a line that counts the pools
+the page read, and `next page: --page-token TOKEN` when the reply carries a
+token. A page with no row gives, in place of the header, the rows and the
+count, one line that says nothing is wrong in the pools it read, still
+followed by the next page's line when there is one. The ids and names a row
 carries for a script stand in its object; `--json` gives them as fields,
-with the read's time and the cluster's name. The table goes through
-`render` and `writeResult` as every result does (CT4), so a write that
-fails is exit 3 (CT5). One invocation is one RPC (CT8): dnvctl never walks
-the pages itself. Reason for the default: the read exists for a person in
-an incident, who reads a table faster than a document, while a script
-names `--json`. The unit tests' walks of every number flag run the leaf
-with `--json`, so they read its document as every other leaf's.
+with the read's time and the cluster's name. The table goes through `render`
+and `writeResult` as every result does (CT4), so a write that fails is exit
+3 (CT5). One invocation is one RPC (CT8): dnvctl never walks the pages
+itself. Reason for the default: the read exists for a person in an incident,
+who reads a table faster than a document, while a script names `--json`. The
+unit tests' walks of every number flag run the leaf with `--json`, so they
+read its document as every other leaf's.
 
 ### `dn` — `ctl/dn.go`
 

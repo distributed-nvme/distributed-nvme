@@ -29,14 +29,14 @@ no repair, no forced start, no take-over and no cut of a migrating leg's path:
   head device and every path device, and for a clone's namespace while the
   clone copies and after it (`architecture.md`, Clones), are within that
   bound, at every slice count the run builds.
-* **The operator surface works against a real control plane.** Every `Gateway`
-  RPC but the cluster and node deletions and listings, the id step, the
-  restore check and the capacity read of the layer above,
-  `GetClusterCapacity`, is issued by the
-  shipped `dnvctl` against a real gateway, etcd and agents, and no echoed id is
-  the whole of an assertion: a mutation is read back from its record and, where
-  the device is the point, from its agent, or, for a few, proved by its effect,
-  which is what the suite observes.
+* **The operator surface works against a real control plane.** Every
+  `Gateway` RPC but the cluster and node deletions and listings, the id
+  step, the restore check, the status read, which only a failed run's dump
+  issues, and the capacity read of the layer above, `GetClusterCapacity`, is
+  issued by the shipped `dnvctl` against a real gateway, etcd and agents,
+  and no echoed id is the whole of an assertion: a mutation is read back
+  from its record and, where the device is the point, from its agent, or,
+  for a few, proved by its effect, which is what the suite observes.
 * **Data survives every operation.** A random pattern written through host0 at
   setup is re-read after every step a case marks and keeps its digest, or,
   in the copy case, the digest read again once the clone's fio stamp has
@@ -119,44 +119,46 @@ no repair, no forced start, no take-over and no cut of a migrating leg's path:
 **What it does not prove.** The RPCs it never issues, the deletions and
 listings of clusters, disk nodes and controller nodes, the id step, the
 restore check `CheckControllerNodeRestore` (`architecture.md`, Controller
-nodes) and the capacity read `GetClusterCapacity` (`architecture.md`,
-Clusters): the gateway suite issues each of them, the dnvctl suite each
-against its fake gateway, and the csi suite reaches the capacity read
-through dnv-csi and through `dnvctl`, whose answer it compares with the
-driver's; this run discards the
-whole cluster between cases. Error paths, beyond the few refusals the ops case
-asserts on purpose, the copy case's refused abort and cancel of a started
-repair, react's refused forced start of a group whose array runs and its
-refused repair that takes back a retired leg newer than the array, the
-`NOT_FOUND` reads after the copy and react cases' deletions and the read the
-cutoff case sees refused while etcd is down; validation and CLI semantics are
-the gateway and dnvctl suites'. Concurrency: one dnvctl call and one case at a
+nodes), the status read `GetClusterStatus`, which a failed run's dump issues
+and nothing asserts (Diagnostics on failure), and the capacity read
+`GetClusterCapacity` (`architecture.md`, Clusters): the gateway suite issues
+each of them, the dnvctl suite each against its fake gateway, and the csi
+suite reaches the capacity read through dnv-csi and through `dnvctl`, whose
+answer it compares with the driver's; this run discards the whole cluster
+between cases. Error paths, beyond the few refusals the ops case asserts on
+purpose, the copy case's refused abort and cancel of a started repair,
+react's refused forced start of a group whose array runs and its refused
+repair that takes back a retired leg newer than the array, the `NOT_FOUND`
+reads after the copy and react cases' deletions and the read the cutoff case
+sees refused while etcd is down; validation and CLI semantics are the
+gateway and dnvctl suites'. Concurrency: one dnvctl call and one case at a
 time, and never a revision token, since a present token changes what the
-gateway checks (`gateway.md` GW6; `dnvctl.md` CT3). ANA path selection between
-two usable controllers (Known limits). Auto-grow, cntlr replacement, leg
-repair, a failover after the primary's cn agent is killed, the forced start and
-the take-over of a group's repair, on a pool at the ceiling (`dnv-worker.md`
-AR5 to AR8, AR13; `cnagent.md` CN12; `architecture.md`, Repairs), as react's
-pool has at most `REACT_SLICE_CAP` slices (Known limits); the cutoff case's
-failover, after that agent is stopped, runs at the run's slice count. A
-demotion hold that the old primary's report ends early (`dnv-worker.md` RW22):
-react's and cutoff's failovers lose an agent that answers nothing, one killed
-and one stopped, and copy's disabled primary answers, but the case only logs
-which of the two ended its hold, the report or the timer. The worker's own
-try-to-abort of a repair of its own, and its cancel of one, which react's
-take-over sees only when it comes before the operator's (`dnv-worker.md`, Leg
-repair; `architecture.md`, Repair); and the retire timer, as no run waits out a
-retired leg's age (`dnv-worker.md` AR12). Guest distinctness of a repair's
-fresh new leg in the react case at as many disk-node guests as a group has
-legs, where no guest lies outside the group's, and for a leg repair whose fresh
-leg react's steer pushes to the second tier (E2E4); and the destination of the
-copy case's second migration, cancelled with force after its cutover, which
-the case does not check at all. The default location and the pool create's
-first preference (`architecture.md`, Disk nodes, Per-operation allocation):
-every node passes its guest's role as its location, and no controller node
-shares one with a disk node; the Go tests prove both, the gateway suite the
-first preference, and the dn and cn suites the host name each agent reports.
-The cut of a migrating leg's path while its source serves, and leg repair's
+gateway checks (`gateway.md` GW6; `dnvctl.md` CT3). ANA path selection
+between two usable controllers (Known limits). Auto-grow, cntlr replacement,
+leg repair, a failover after the primary's cn agent is killed, the forced
+start and the take-over of a group's repair, on a pool at the ceiling
+(`dnv-worker.md` AR5 to AR8, AR13; `cnagent.md` CN12; `architecture.md`,
+Repairs), as react's pool has at most `REACT_SLICE_CAP` slices (Known
+limits); the cutoff case's failover, after that agent is stopped, runs at
+the run's slice count. A demotion hold that the old primary's report ends
+early (`dnv-worker.md` RW22): react's and cutoff's failovers lose an agent
+that answers nothing, one killed and one stopped, and copy's disabled
+primary answers, but the case only logs which of the two ended its hold, the
+report or the timer. The worker's own try-to-abort of a repair of its own,
+and its cancel of one, which react's take-over sees only when it comes
+before the operator's (`dnv-worker.md`, Leg repair; `architecture.md`,
+Repair); and the retire timer, as no run waits out a retired leg's age
+(`dnv-worker.md` AR12). Guest distinctness of a repair's fresh new leg in
+the react case at as many disk-node guests as a group has legs, where no
+guest lies outside the group's, and for a leg repair whose fresh leg react's
+steer pushes to the second tier (E2E4); and the destination of the copy
+case's second migration, cancelled with force after its cutover, which the
+case does not check at all. The default location and the pool create's first
+preference (`architecture.md`, Disk nodes, Per-operation allocation): every
+node passes its guest's role as its location, and no controller node shares
+one with a disk node; the Go tests prove both, the gateway suite the first
+preference, and the dn and cn suites the host name each agent reports. The
+cut of a migrating leg's path while its source serves, and leg repair's
 cancel of a migration whose cutover is pending and its wait on a copy not
 shown whole (`cnagent.md` CN10; `dnv-worker.md` AR8): react's migrating leg
 loses its destination after the cutover, with its copy whole.

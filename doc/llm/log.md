@@ -88,26 +88,27 @@ R5. The trace id is carried in the context under an unexported key and
 
 R6. **What each level holds.** Debug holds what repeats every interval and
     changes nothing: a read that succeeded, or answered "absent" where R9
-    says so, a check round's stream messages, the worker's record of a
-    late round that passed (`dnv-worker.md`, Log records), and the CSI
-    driver's records of the calls Kubernetes repeats on a timer while they
-    succeed (`csi.md`, Log records). Info holds a change, an event and a
-    failure: every write, every request and reply of a dnv service's unary
-    call (`grpc.md` L1), every other read that failed, and a failure the
-    program clears alone, as its next pass or its retry does, so that a
-    fault that heals sets off no alert. Warn holds a record an operator must
-    look at: a fault, a refusal or a lost redundancy that holds until an
-    operator acts or a lost program comes back (`dnv-worker.md`, Log
-    records), a sign that a node's saved state was lost or changed behind
-    the agent's back, such as a zeroed count a save rolled back
-    (`dnagent.md` DN9), the outcome of a forced start, which chooses the
-    copy a group keeps (`cnagent.md` CN12), or the control plane fencing
-    itself, which the worker ends alone but an operator must know of.
-    `log level changed` is the one Warn record that is no fault: it is at
-    Warn only so that every `--log-level` shows it (R13), and an alert on
-    Warn leaves it out. Error
-    holds a fault the program could not carry out or must not pass over.
-    Warn and Error are the records to alert on.
+    says so, a check round's stream messages, the worker's record of a late
+    round that passed (`dnv-worker.md`, Log records), the cn agent sweep's
+    note of a subsystem in dnv's NQN space whose name it cannot decode and
+    leaves alone (`cnagent.md` CN21), and the CSI driver's records of the
+    calls Kubernetes repeats on a timer while they succeed (`csi.md`, Log
+    records). Info holds a change, an event and a failure: every write,
+    every request and reply of a dnv service's unary call (`grpc.md` L1),
+    every other read that failed, and a failure the program clears alone, as
+    its next pass or its retry does, so that a fault that heals sets off no
+    alert. Warn holds a record an operator must look at: a fault, a refusal
+    or a lost redundancy that holds until an operator acts or a lost program
+    comes back (`dnv-worker.md`, Log records), a sign that a node's saved
+    state was lost or changed behind the agent's back, such as a zeroed
+    count a save rolled back (`dnagent.md` DN9), the outcome of a forced
+    start, which chooses the copy a group keeps (`cnagent.md` CN12), or the
+    control plane fencing itself, which the worker ends alone but an
+    operator must know of. `log level changed` is the one Warn record that
+    is no fault: it is at Warn only so that every `--log-level` shows it
+    (R13), and an alert on Warn leaves it out. Error holds a fault the
+    program could not carry out or must not pass over. Warn and Error are
+    the records to alert on.
 
     **The flag.** The five daemons — `dnv-gateway`, `dnv-worker`,
     `dnv-agent` in both roles, `dnv-cdc` and `dnv-csi` — and `dnvctl` take
@@ -166,26 +167,28 @@ R8. The following events MUST be logged, at the level R9 gives, with the
 R9. Each logging point emits exactly **one** record per operation, on
     completion, so the record can carry the outcome (exit code, error); a
     unary call's request record, logged before the call (`grpc.md` L3), and
-    the record of a put or delete that an STM holds back for its commit (etcd,
-    below) carry no outcome. When the operation failed, the same record
-    additionally carries an `error` attribute holding the error's text.
-    The level follows R6. At Debug: a read that succeeded — a file, block,
-    proto, modification-time or device-number read, a directory listing, a
-    dial that connected, an etcd get, range or watch event, a command of the
-    read list, which is `commandReadsOnly` (`common/osclient.go`), a check
-    round's stream message — and a leg probe's half that succeeded, the
-    probe being a read of the leg's health though its first half writes
-    (`ReadLevel`); and a file, proto, modification-time or device-number
-    read or a directory listing that found its path absent, and a
-    device-number read that found no block device at its path, since its
-    caller decides by that answer, the CSI node plugin's stats call by the
-    second. At Info: a read that failed otherwise, every
-    write, every command not on the read list, every request and reply of a
-    dnv service's unary call, and a stream's open and close (`grpc.md` L1).
-    These logging points use no other level; failures still reach the caller
-    through the returned error. A point works out its level first and builds
-    its attributes only when the process logs that level (`LogEnabled`), so
-    a dropped record costs no rendering.
+    the record of a put or delete that an STM holds back for its commit
+    (etcd, below) carry no outcome. When the operation failed, the same
+    record additionally carries an `error` attribute holding the error's
+    text. The level follows R6. At Debug: a read that succeeded — a file,
+    block, proto, modification-time or device-number read, a directory
+    listing, a dial that connected, an etcd get, range or watch event, a
+    command of the read list, which is `commandReadsOnly`
+    (`common/osclient.go`), a check round's stream message — and a leg
+    probe's half that succeeded, the probe being a read of the leg's health
+    though its first half writes (`ReadLevel`); and a file, proto,
+    modification-time or device-number read or a directory listing that
+    found its path absent, and a device-number read that found no block
+    device at its path, since its caller decides by that answer, the CSI
+    node plugin's stats call by the second. At Info: a read that failed
+    otherwise, every write, every command not on the read list, every
+    request and reply of a dnv service's unary call, and a stream's open and
+    close (`grpc.md` L1). These logging points use no other level; failures
+    still reach the caller through the returned error. A point that can log
+    at Debug works out its level first and builds its attributes only when
+    the process logs that level (`LogEnabled`), so a dropped Debug record
+    costs no rendering; a point that is always at Info builds its record as
+    it logs it.
 
 R10. Protobuf messages are rendered for logging exclusively through
      `PbToLogValue`, which replaces every `bytes` field, at any nesting depth

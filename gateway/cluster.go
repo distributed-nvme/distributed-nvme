@@ -12,8 +12,8 @@ import (
 	"github.com/distributed-nvme/distributed-nvme/pb"
 )
 
-// This file is architecture.md, Clusters / gateway.md, Clusters: the six
-// cluster RPCs.
+// This file is architecture.md, Clusters / gateway.md, Clusters: the cluster
+// RPCs but GetClusterStatus (gateway/status.go).
 //
 // The cluster is the one resource whose identity is derived rather than
 // stored: `ClusterConf` is the only name-keyed message and
@@ -418,8 +418,9 @@ func (s *Server) AdvanceClusterIds(
 // between them is the kind of change such a read is allowed to straddle.
 // Each entry carries the counts and flags its record holds, with the pointer
 // list reduced to its count. Each record is decoded through the etcd door,
-// which logs it as it logs every decoded value, so on a cluster at the node
-// ceilings this is a heavy read meant for an occasional poll.
+// which at the debug log level logs it as it logs every decoded value
+// (log.md, etcd), so on a cluster at the node ceilings this is a heavy read
+// meant for an occasional poll.
 func (s *Server) GetClusterCapacity(
 	ctx context.Context,
 	req *pb.GetClusterCapacityRequest,

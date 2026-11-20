@@ -58,15 +58,12 @@ The packages this document owns — `etcdutil`, `model`, `worker` and
 may import is `layout.md`, Dependency rules.
 
 Out of scope here: the gateway (request validation, the public RPCs, and
-the agent calls it makes: the `Get*Info` info reads, which serve its
-inspects, its node deletes' proof that the node is clean, its hydration
-checks, its forced start's check of a group's array and its bitmap read's
-check of the parks, and the `Get*Size` calls
-and `GetThinDeviceBm`),
-`dnv-cdc`, `dnvctl`. Where the
-worker performs an "internal" variant of a gateway mutation (Automatic
-reactions), the STM body lives in `model` and the gateway adds only
-validation and reply mapping on top (MD8).
+every agent call it makes, `gateway.md`, Agent calls: the `Get*Info` info
+reads, the `Get*Size` calls, `GetThinDeviceBm`, and the cn's `InspectGrp`
+and `GetCnStore`), `dnv-cdc`, `dnvctl`. Where the worker performs an
+"internal" variant of a gateway mutation (Automatic reactions), the STM
+body lives in `model` and the gateway adds only validation and reply
+mapping on top (MD8).
 
 ## Constants and schema
 
@@ -388,53 +385,63 @@ run the same transaction bodies (MD8).
 
 MD1. **Files.** `keys.go` (key formats, parsers, `ClusterId`), `stm.go` (the
 SP snapshot loader), `capacity.go` (the capacity keys), `space.go` (the
-space answer of the gateway's capacity read, `model.ClusterSpaceOf`,
-computed from node records as the allocator places pools:
-`architecture.md`, Clusters, GetClusterCapacity), `alloc.go` (the
-allocator of `architecture.md`, Finding DN candidates, and `architecture.md`,
-Finding CN candidates), `ops.go` (the internal mutations of MD6),
-`repair.go` (MD6's repair and retired-leg ops, `architecture.md`, Repair),
+space answers of the gateway's two space reads: `model.ClusterSpaceOf`,
+its capacity read's, computed from node records as the allocator places
+pools, `architecture.md`, Clusters, GetClusterCapacity; and
+`model.PoolSpaceOf`, its per-pool read's, computed from the pool's records
+and its primary's report, `architecture.md`, Storage pools,
+InspectStoragePool), `alloc.go` (the allocator of `architecture.md`,
+Finding DN candidates, and `architecture.md`, Finding CN candidates),
+`ops.go` (the internal mutations of MD6, and the grow rules AR6's pass and
+the gateway's status read share, `model.DataCovered` and
+`model.GrowExtCnt` among them), `repair.go` (MD6's repair and retired-leg
+ops, `architecture.md`, Repair, and AR17's text, `model.RepairWaitReason`),
 `forcedstart.go` (MD6's forced-start ops, `architecture.md`, Repair),
 `arraymade.go` (MD6's write of the flag that a group's array has run,
-AR15), `drain.go` (MD6's sp-drain ops, The sp drain), `clonedrain.go` (MD6's
-clone-drain ops, The clone drain). Unit tests are colocated.
+AR15), `mdcheck.go` (MD6's write of the md check schedule, AR16),
+`migration.go` (MD6's migration ends, AR8), `withdrawgrow.go` (MD6's
+withdrawal of a stuck grow, AR6), `drain.go` (MD6's sp-drain ops, The sp
+drain), `clonedrain.go` (MD6's clone-drain ops, The clone drain). Unit
+tests are colocated.
 
 MD2. **Keys.** One function per key of `architecture.md`, Key table, one per
-prefix a component scans or watches, and a parser for every key whose fields a
-component reads back out of it (the rev, registry, capacity, bitmap-chunk and
-cdc keys); the list-range and `ClusterConf` keys carry one name after their
-prefix and are decoded by a prefix trim at the caller (`pageNames` in
+prefix a component scans or watches, and a parser for every key whose fields
+a component reads back out of it (the rev, registry, capacity, bitmap-chunk
+and cdc keys); the list-range and `ClusterConf` keys carry one name after
+their prefix and are decoded by a prefix trim at the caller (`pageNames` in
 `gateway/common.go`, `clusterConfName` in `worker/clusterconf.go`), not by a
 `model` parser. The families: `ClusterConfKey` and `ClusterConfPrefix`; the
 three globals (`DnGlobalKey` and its siblings); the rev keys per shard,
-`DnRevKey`, `DnRevPrefix` and `ParseDnRevKey` — likewise for `Cn*` and `Sp*`;
-`DnRevKindPrefix` and `CnRevKindPrefix`, every shard's node rev keys at
-once, which only the gateway's status read ranges, keys only (`gateway.md`
-GW20);
-`DnConfKey` and `CnConfKey` with `DnConfPrefix` and `CnConfPrefix`, the
-gateway's `ListDiskNodes` and `ListControllerNodes` page ranges (`gateway.md`
-GW10) and its `GetClusterCapacity` ranges, scanned by no worker; `DnCapacityKey`, `DnCapacityPrefix` and
-`ParseDnCapacityKey` — MD5's scan reads the candidate out of the key itself —
-and `CnCapacityKey`, `CnCapacityPrefix` and `ParseCnCapacityKey`;
-`CdcEntryKey`, `CdcEntryPrefix` and `ParseCdcEntryKey`, a prefix and parser
-pair no worker uses (like the three list-range prefixes): `dnv-cdc` scans and
-watches the prefix and decodes the keys off it (`cdc.md`, The etcd watcher);
-`SpConfKey`, `SpNameKey` and `SpConfPrefix`, the `ListStoragePools` page range
-(`gateway.md` GW10) and the keys-only range `AdvanceClusterIds` walks to
-visit every pool (`gateway.md` GW19), scanned by no worker; `CntlrKey` and
-`SliceKey`;
-`ThinDeviceKey` and `SubsystemKey`; `CloneKey` and `CloneBitmapKey` — the
-seven-field key, BOTH indexes rendered with `BmIdxFmt` —, `CloneBitmapPrefix`
-and `ParseCloneBmKey`; `TransferKey`; `MigrationKey`;
-`LegacyMigrBitmapKey`, the key under which an older build kept one chunk
-of a migration's bitmap, at an index below `LegacyMigrBmCnt`, of a kind
-this design neither writes nor reads: only `EndMigrationIn` names it, to
-delete it
-(`architecture.md`, Upgrade in lockstep); `RepairKey` and `RetiredLegKey`, with `RepairPrefix` and
-`RetiredLegPrefix`, the prefixes MD3's load ranges; `WorkerRegKey`,
-`WorkerRegPrefix` and `ParseWorkerRegKey`; and `WorkerRegistryPrefix`, the
-whole registry, every role at once, which only the gateway's `ListWorkers`
-ranges (`gateway.md`, Worker registry).
+`DnRevKey`, `DnRevPrefix` and `ParseDnRevKey` — likewise for `Cn*` and
+`Sp*`; `DnRevKindPrefix` and `CnRevKindPrefix`, every shard's node rev keys
+at once, which only the gateway's status read ranges, keys only
+(`gateway.md` GW20); `DnConfKey` and `CnConfKey` with `DnConfPrefix` and
+`CnConfPrefix`, the gateway's `ListDiskNodes` and `ListControllerNodes` page
+ranges (`gateway.md` GW10), its `GetClusterCapacity` ranges and its status
+read's (`gateway.md` GW20), scanned by no worker; `DnCapacityKey`,
+`DnCapacityPrefix` and `ParseDnCapacityKey` — MD5's scan reads the candidate
+out of the key itself — and `CnCapacityKey`, `CnCapacityPrefix` and
+`ParseCnCapacityKey`; `CdcEntryKey`, `CdcEntryPrefix` and
+`ParseCdcEntryKey`, a prefix and parser pair no worker uses (like the three
+list-range prefixes): `dnv-cdc` scans and watches the prefix and decodes the
+keys off it (`cdc.md`, The etcd watcher); `SpConfKey`, `SpNameKey` and
+`SpConfPrefix`, the `ListStoragePools` page range (`gateway.md` GW10) and
+the keys-only range `AdvanceClusterIds` walks to visit every pool
+(`gateway.md` GW19), scanned by no worker; `CntlrKey` and `SliceKey`;
+`ThinDeviceKey` and `SubsystemKey`; `ThinDevicePrefix`, a pool's thin
+devices, which only the gateway's restore check ranges (`architecture.md`,
+Controller nodes, CheckControllerNodeRestore); `CloneKey` and
+`CloneBitmapKey` — the seven-field key, BOTH indexes rendered with
+`BmIdxFmt` —, `CloneBitmapPrefix` and `ParseCloneBmKey`; `TransferKey`;
+`MigrationKey`; `LegacyMigrBitmapKey`, the key under which an older build
+kept one chunk of a migration's bitmap, at an index below `LegacyMigrBmCnt`,
+of a kind this design neither writes nor reads: only `EndMigrationIn` names
+it, to delete it (`architecture.md`, Upgrade in lockstep); `RepairKey` and
+`RetiredLegKey`, with `RepairPrefix` and `RetiredLegPrefix`, the prefixes
+MD3's load ranges; `WorkerRegKey`, `WorkerRegPrefix` and
+`ParseWorkerRegKey`; and `WorkerRegistryPrefix`, the whole registry, every
+role at once, which only the gateway's `ListWorkers` ranges (`gateway.md`,
+Worker registry).
 
 `ClusterId` is the derivation of `architecture.md`, cluster_id derivation,
 verbatim. Formats are exactly those of `architecture.md`, Key grammar:
@@ -2614,8 +2621,8 @@ every stage (`architecture.md`, Repair), and `leg_fast_io_fail_tmo`, the
 `DefaultNvmeFastIoFailTmo` and never a zero, which the cn agent connects
 the pool's legs with (`cnagent.md` CN10), and `retired_leg_id_to_side_id`,
 the side id of each retired leg the load holds, by its leg id, from its
-`RetiredLeg` record, which the cn agent keeps for the restore check's
-count of the layout's sides and builds nothing from (`cnagent.md` CN32;
+`RetiredLeg` record, which the cn agent keeps for the largest side id of
+the layout the restore check reads and builds nothing from (`cnagent.md` CN32;
 `architecture.md`, Controller nodes, CheckControllerNodeRestore). Every
 cntlr of the SP receives the
 full state (`architecture.md`, sp role) — less any clone whose `deleting` is

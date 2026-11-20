@@ -15,7 +15,9 @@ import (
 // sliceCnt slices can still place, computed from a cluster's disk node and
 // controller node records, its stored conf and its pool count. The counts
 // arrive resolved, each at least one, and cc has passed
-// ValidateClusterConf: the gateway does both before it reads a record.
+// ValidateClusterConf: the gateway runs the validator before it reads a
+// node record, and resolves the counts once it has read them all, before
+// this call.
 //
 // A disk node counts when DnAllocatable holds, a controller node when
 // CnAllocatable does: those are the nodes a scan can offer (architecture.md,

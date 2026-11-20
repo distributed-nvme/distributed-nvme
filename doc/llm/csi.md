@@ -10,10 +10,10 @@ the plugin API Kubernetes uses to create, attach and mount volumes, in
 must do to follow a pool's cntlrs. Its Kubernetes words are the glossary's:
 CSI driver, controller plugin, node plugin, storage class, persistent volume
 claim, attach, stage, publish, sidecar, capacity object, topology segment,
-dnv name, follower and k3s. Here "the driver" is dnv-csi, the machine a
-suite runs on is the suite's machine, and a stage is the node plugin's
-call, not a step of a suite case, as the glossary's entries for driver and
-stage say.
+lease, network policy, dnv name, follower and k3s. Here "the driver" is
+dnv-csi, the machine a suite runs on is the suite's machine, and a stage is
+the node plugin's call, not a step of a suite case, as the glossary's
+entries for driver and stage say.
 
 ## The volume model
 
@@ -596,13 +596,14 @@ plugin reads the gateway address and the cdc addresses from a config map, as
 environment, and the node plugin reads the cdc addresses from the same map, so
 the manifests of a cluster differ from the examples in that map, in the
 storage classes, which name the operator's clusters, in the kubelet directory
-where a distribution keeps the kubelet elsewhere, and in the driver's image
-name where a registry serves the image (Deployment). The driver object asks
-for attach, no pod information on mount, the persistent lifecycle and capacity
-tracking, since the plugin answers capacity; the leading provisioner polls it
-and owns the capacity objects, for every class of the driver, those with
-immediate binding included, since no scheduler needs those but the capacity
-objects are the one place Kubernetes shows dnv's free space.
+where a distribution keeps the kubelet elsewhere, in the driver's image name
+where a registry serves the image (Deployment), and in the addresses of the
+example network policy, which stand as placeholders (CSI20). The driver object
+asks for attach, no pod information on mount, the persistent lifecycle and
+capacity tracking, since the plugin answers capacity; the leading provisioner
+polls it and owns the capacity objects, for every class of the driver, those
+with immediate binding included, since no scheduler needs those but the
+capacity objects are the one place Kubernetes shows dnv's free space.
 
 CSI20. **The driver opens one port per pod, and an example policy keeps other
 pods off dnv.** The plugins serve their unix sockets alone; the controller
@@ -671,8 +672,10 @@ and `csi discovery connection dropped` with the cdc address, and
 the kernel's event socket failed: at Warn for a listed cdc it cannot reach
 or whose log it cannot read, naming the cdc, since every drop waits and a
 path that cdc alone lists is never learned until the cdc comes back or the
-list is fixed, and at Info for every failure its next pass, its timer or the
-stage's own retry clears (`log.md` R6).
+list is fixed, and at Info for every other failure, which its next pass, its
+timer, the stage's own retry or the socket's reopening clears, but for a
+failed drop after a stage that failed or at the stop, which nothing retries
+(`log.md` R6).
 Every CSI call logs `csi request` with the method and `csi reply` with the
 method, the code, the duration and, on a failure, the error, under the
 trace id the interceptor minted, at Info, but for the calls Kubernetes
@@ -915,10 +918,15 @@ dnv stack and the driver.
 
 ### Diagnostics on failure
 
-A failing run prints the nodes, every pod, the pods and events of the
-suite's namespace, the state of the machine case's cut on each host, the
-sidecars' leases, the logs of both controller copies and every node plugin,
-with the previous run of a sidecar that restarted, and from each guest its
-facts, its k3s state, its memory and the tail of its k3s journal. A run asked
-to keep its logs copies the k3s journal of each guest to the suite's machine
-at its end.
+A failing run prints the nodes, every pod, the claims, volumes and
+attachments, the pods and events of the suite's namespace, the state of the
+machine case's cut on each host, the sidecars' leases, the logs of both
+controller copies and every node plugin, with the previous run of a sidecar
+that restarted, dnvctl's list of pools, and from each guest its facts, its
+k3s state, its dnv processes, its NVMe subsystems and discovery
+connections, its dm, md, nvmet and loop state, its memory, and the tails
+of its k3s journal and of its programs' logs. A run asked to keep its logs
+copies to the suite's machine at its end the k3s journal of the
+control-plane guest and of each host, the logs of the control plane's
+programs and of the agents, one controller plugin's and one node plugin's
+log, and the conformance test's logs, its plugins' included.

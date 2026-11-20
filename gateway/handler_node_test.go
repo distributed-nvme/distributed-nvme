@@ -1095,7 +1095,8 @@ func TestCreateDiskNodeWritesFourKeys(t *testing.T) {
 	for _, tc := range []struct {
 		label    string
 		location string
-		// hostName is what the fake agent reports as its machine's name.
+		// hostName, when set, is what the fake agent reports as its
+		// machine's name; unset, the fake reports its own address.
 		hostName  string
 		size      uint64
 		disabled  bool

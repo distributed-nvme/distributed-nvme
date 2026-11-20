@@ -138,12 +138,13 @@ func serveTraceWith(t *testing.T, srv *traceServer) dialFunc {
 	}
 }
 
-// quietLogging installs the logger cmd/dnvctl/main.go installs — level Warn,
-// --log-level's default, nothing on stdout — over a buffer the test can
-// inspect, and restores the process default afterwards. Every record of a
-// unary call's client chain is Info (grpc.md L1), and dnvctl makes only
-// unary calls, so the buffer staying empty is log.md's "dnvctl's own gRPC
-// logging is silenced by default" (CT7), asserted rather than assumed.
+// quietLogging installs, over a buffer the test can inspect, the logging
+// dnvctl runs with by default — common's handler chain at level Warn, which
+// cmd/dnvctl/main.go sets and --log-level defaults to, nothing on stdout —
+// and restores the process default afterwards. Every record of a unary
+// call's client chain is Info (grpc.md L1), and dnvctl makes only unary
+// calls, so the buffer staying empty is CT7's silence of dnvctl's own gRPC
+// logging at its default level, asserted rather than assumed.
 func quietLogging(t *testing.T) *bytes.Buffer {
 	t.Helper()
 	var buf bytes.Buffer

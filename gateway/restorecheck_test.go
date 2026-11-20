@@ -398,9 +398,10 @@ func TestCheckControllerNodeRestoreJudgesEachPool(t *testing.T) {
 
 // TestCheckControllerNodeRestoreRefusesAnUnprovenAgent pins the check's
 // agent arms (AG3): an agent that does not answer, or answers that it
-// starts, or with another code, proves nothing, FAILED_PRECONDITION; one
-// that holds no node of the cluster answers OK, every cntlr the restored
-// node names not held (second reader B-3).
+// starts, or with another code, proves nothing, FAILED_PRECONDITION; the
+// unknown object of an agent that holds no node of the cluster reads as no
+// node held, and the check answers OK, every cntlr the restored node names
+// not held.
 func TestCheckControllerNodeRestoreRefusesAnUnprovenAgent(t *testing.T) {
 	e := rcMakeEnv(t)
 	e.putPool(t, rcPool{spId: 0x201, name: "p", revision: 3,

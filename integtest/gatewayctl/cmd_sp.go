@@ -1,8 +1,8 @@
 // The storage pool and controller subcommands of gatewayctl (gateway.md,
 // Integration test plan, The driver, `gatewayctl`): the eight SP-scoped RPCs
 // of gateway.md, Storage pools and GrowSlice, including GrowSlice
-// (architecture.md, GrowSlice), and the five cntlr RPCs of
-// gateway.md, Cntlrs and inspects, including the two inspects.
+// (architecture.md, GrowSlice), and the six RPCs of gateway.md, Cntlrs and
+// inspects, including the three inspects.
 //
 // Every setup here obeys the main.go contract: it registers its own flags on
 // the flag set it is handed and returns the job closure that reads the flag

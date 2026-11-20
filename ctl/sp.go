@@ -1,7 +1,7 @@
-// The storage-pool group of dnvctl (dnvctl.md, `sp` — `ctl/sp.go`). Five
+// The storage-pool group of dnvctl (dnvctl.md, `sp` — `ctl/sp.go`). Six
 // commands are the pool object's own RPCs — create, delete, get, list,
-// set-level — and the other four are the RPCs that dnvctl.md, Conventions,
-// homes here rather than giving each a group of its own:
+// set-level, inspect — and the other four are the RPCs that dnvctl.md,
+// Conventions, homes here rather than giving each a group of its own:
 // UpdateStoragePoolCntlidSlotList, FindStoragePoolNames, GrowSlice and
 // InspectSide. Everything else under an SP (cntlr, td, ss, ns, clone, xfer,
 // migr, repair, retired-leg, group) is its own group file.
@@ -14,7 +14,7 @@
 //     `sp find-names` have no sp_name field at all, so for those two the
 //     global flag is simply ignored.
 //   - Four commands carry a token: delete, set-cntlid-slots, set-level and
-//     grow-slice call spRev. The four reads carry none, and neither does
+//     grow-slice call spRev. The five reads carry none, and neither does
 //     `sp create` — there is no SP yet to have a revision. `sp get` is where
 //     the operator read the number they pass back as --rev (CT3).
 //   - The two parse helpers below are prefixed `sp` because ctl/ is a single
@@ -113,7 +113,7 @@ func spRedundConf(spec string, chunkBlocks uint64) (*pb.RedundConf, error) {
 	}
 }
 
-// registerSp adds the `sp` group and its nine leaves
+// registerSp adds the `sp` group and its ten leaves
 // (dnvctl.md, `sp` — `ctl/sp.go`).
 func registerSp(root *cobra.Command) {
 	root.AddCommand(group("sp", "storage pools",

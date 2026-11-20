@@ -1340,10 +1340,10 @@ steps; the section "Steps known today" below gives the longer ones.
 | Restart nvme-stas | none | this page, section 6.1; [dnv on one machine](tutorial_all_in_one.md) | procedure to write: stop stacd first, restart stafd, and start stacd once stafd holds its connection to the cdc again |
 | Recover a host that keeps a withdrawn path | none | none | procedure to write |
 | Recover a Kubernetes mount after the loss of its last path | none; `nvme disconnect -n`, then delete the pod | this page, section 6.1 | procedure to write; no fix |
-| Change the cdc addresses of the Kubernetes driver | the config map and a restart of both plugins | the operations doc, Change the cdc addresses of the Kubernetes driver | procedure written; the Kubernetes suite changes the list of the controller plugin alone, and no suite restarts the node plugins with a new list |
+| Change the cdc addresses of the Kubernetes driver | the config map, the Kubernetes record that holds the cdc addresses both plugins start with, and a restart of both plugins | the operations doc, Change the cdc addresses of the Kubernetes driver | procedure written; the Kubernetes suite changes the list of the controller plugin, the part of the driver that calls the gateway, alone, and no suite restarts the node plugins with a new list |
 | Start a Kubernetes node plugin that refuses to start | none; the plugin's log names the fact and its fix | the operations doc, A Kubernetes node plugin that does not start | procedure written; not tested in a suite |
 | Keep a Kubernetes cluster's pods off dnv | the example network policy, [`deploy/networkpolicy.yaml`](../../deploy/networkpolicy.yaml) | [the CSI tutorial](tutorial_csi.md#keep-other-pods-off-dnv) | procedure written; the Kubernetes suite's policy case tries the ports of the gateway, the cdc and two agents, not the NVMe/TCP ports, which listen only once a pool uses them |
-| Handle the loss of a Kubernetes machine | the controller plugin's second copy; the out-of-service mark of Kubernetes | the operations doc, A Kubernetes machine is lost | procedure written; the Kubernetes suite checks the controller plugin's part, not the move of a pod's volume |
+| Handle the loss of a Kubernetes machine | the controller plugin's second copy; the out-of-service mark of Kubernetes, which an operator puts on a machine that is gone so that Kubernetes moves its volumes | the operations doc, A Kubernetes machine is lost | procedure written; the Kubernetes suite checks the controller plugin's part, not the move of a pod's volume |
 | Recover a one-cntlr Kubernetes volume after a cntlr replacement | `nvme disconnect -d` of the old path, then delete the pod | the operations doc, A one-cntlr Kubernetes volume after a cntlr replacement | procedure written; not tested |
 | Recover a Kubernetes volume the node plugin will not format | none; the plugin formats only a volume whose first MiB reads as zeros; for data at the start, an operator reaches the volume through a pod that gets it as a raw block device, and zeroes the start by hand for a volume that never held data | the operations doc, A Kubernetes volume the node plugin will not format | procedure written; its steps for data at the start are not tested |
 | Recover from a fault only a host sees | disable the primary | this page, section 6.1 | procedure to write. Fix later. |
@@ -1363,28 +1363,31 @@ etcd of several members is untested.
 **Upgrade.** Upgrades are lockstep. Every dnv program of one etcd
 installation stops: its gateways, workers and cdc, the agents of every
 cluster it holds, and every CSI driver that talks to its gateways: its
-controller plugin, the part that calls the gateway, and its node plugins.
-A stopped node plugin leaves the connections and mounts of its volumes in place. Every binary is replaced,
-`dnvctl` included, and only then does any program start again. The workers
-stop first and start last. For the CSI driver, apply these files of the new
-release's `deploy/` folder by name: `namespace.yaml`, `csidriver.yaml`,
-`controller-serviceaccount.yaml`, `node-serviceaccount.yaml`,
-`controller-clusterrole.yaml`, `controller-clusterrolebinding.yaml`,
-`controller-role.yaml`, `controller-rolebinding.yaml`, `controller.yaml` and
-`node.yaml`, each with your own changes of it made again, such as another
-driver image name, or another directory of the kubelet, the Kubernetes
-program on each machine. Do not apply `config.yaml`, `storageclass.yaml` or
-`networkpolicy.yaml`: they are examples that hold placeholders, addresses in
-`config.yaml` and `networkpolicy.yaml` and a cluster name in
-`storageclass.yaml`, and you keep your own copies of them. Applied, the
-example `config.yaml` would point both plugins at the placeholder addresses,
-so that every create and attach fails; the example storage class would name
-the placeholder cluster, or be refused where your class of its name names
-another, since Kubernetes lets no one change a storage class's settings; and
-the example policy, which names no Kubernetes namespace, would replace your
-own copy in the current Kubernetes namespace. From this release on, the
-rights of the controller plugin within its Kubernetes namespace are a file
-of their own, `controller-role.yaml`, and the new
+controller plugin, the part that calls the gateway, and its node plugins. A
+stopped node plugin leaves the connections and mounts of its volumes in
+place. Every binary is replaced, `dnvctl` included, and only then does any
+program start again. The workers stop first and start last. For the CSI
+driver, apply these files of the new release's `deploy/` folder by name:
+`namespace.yaml`, `csidriver.yaml`, `controller-serviceaccount.yaml`,
+`node-serviceaccount.yaml`, `controller-clusterrole.yaml`,
+`controller-clusterrolebinding.yaml`, `controller-role.yaml`,
+`controller-rolebinding.yaml`, `controller.yaml` and `node.yaml`, each with
+your own changes of it made again, such as another driver image name, or
+another directory of the kubelet, the Kubernetes program on each machine. Do
+not apply `config.yaml`, `storageclass.yaml` or `networkpolicy.yaml`: they
+are examples that hold placeholders, addresses in `config.yaml` and
+`networkpolicy.yaml` and a cluster name in `storageclass.yaml`, and you keep
+your own copies of them. Applied, the example `config.yaml` would point both
+plugins at the placeholder addresses, so that every create of a volume and
+every attach, the step that lets a Kubernetes node into a volume's
+subsystem, fails; the example storage class, the Kubernetes record that
+names the cluster, the redundancy and the cntlr count of each new volume,
+would name the placeholder cluster, or be refused where your class of its
+name names another, since Kubernetes lets no one change a storage class's
+settings; and the example policy, which names no Kubernetes namespace, would
+replace your own copy in the current Kubernetes namespace. From this release
+on, the rights of the controller plugin within its Kubernetes namespace are
+a file of their own, `controller-role.yaml`, and the new
 `controller-clusterrole.yaml`, its rights across the Kubernetes cluster,
 applied without it takes them away, after which the controller plugin's
 provisioner, the helper program that asks it for volumes, stops at its
@@ -1395,25 +1398,24 @@ start unmounts nothing ([the operations
 doc](operations.md#a-kubernetes-node-plugin-that-does-not-start)). There is
 no rolling upgrade, since no message carries a build version, and two builds
 that differ in a message would misread each other with no error. A disk
-node's disk keeps the format it
-was made with across every upgrade, and each new build reads it as it is,
-unless the new release's notes say that the disks must be made again;
-making a disk again loses every side it holds. Before the workers start
-again, check that every program runs the new build. `--version` on each
-program prints the version of the file on the machine, such as
-`dnv-agent --version`. The record each agent, gateway, worker, cdc and CSI
-plugin logs when it starts carries the version of the program that runs; a
-program that was not stopped still runs the old one. The introduction says
-which builds have `--version`. No build may replace a newer one: section
-5.5 says why. A node that 0.1 created with no location keeps its address
-as its location after the upgrade; only emptying, deleting and creating it
-again puts it in its machine's location
-([the operations doc](operations.md#choose-a-nodes-location)). A
-controller node that 0.1 created with no budget keeps the 4 TiB 0.1 gave
-it after the upgrade, not the 64 TiB a new node gets, so `dnvctl cluster
-get-capacity` can name the budget as the limit sooner than the new default
-suggests; only emptying, deleting and creating it again gives it another
-budget ([the operations doc](operations.md#the-clusters-capacity)).
+node's disk keeps the format it was made with across every upgrade, and each
+new build reads it as it is, unless the new release's notes say that the
+disks must be made again; making a disk again loses every side it holds.
+Before the workers start again, check that every program runs the new build.
+`--version` on each program prints the version of the file on the machine,
+such as `dnv-agent --version`. The record each agent, gateway, worker, cdc
+and CSI plugin logs when it starts carries the version of the program that
+runs; a program that was not stopped still runs the old one. The
+introduction says which builds have `--version`. No build may replace a
+newer one: section 5.5 says why. A node that 0.1 created with no location
+keeps its address as its location after the upgrade; only emptying, deleting
+and creating it again puts it in its machine's location ([the operations
+doc](operations.md#choose-a-nodes-location)). A controller node that 0.1
+created with no budget keeps the 4 TiB 0.1 gave it after the upgrade, not
+the 64 TiB a new node gets, so `dnvctl cluster get-capacity` can name the
+budget as the limit sooner than the new default suggests; only emptying,
+deleting and creating it again gives it another budget ([the operations
+doc](operations.md#the-clusters-capacity)).
 
 **Logs.** The programs log to stderr as JSON, one record per line, with no
 rotation. Each program takes `--log-level`, the log level: the least serious

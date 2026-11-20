@@ -215,11 +215,12 @@ func appendErr(attrs []any, err error) []any {
 	return attrs
 }
 
-// pathReadLevel is the level of an in-process read of a path (log.md R9):
-// ReadLevel, but a path found absent is an answer, not a failure, so it is
-// Debug too. Callers decide by that answer (an absent file reads as "no such
-// object"), and a dn's background read finds a whole disk's partition file
-// absent on every round.
+// pathReadLevel is the level of a file, proto, modification-time or
+// device-number read or a directory listing (log.md R9): ReadLevel, but a
+// path found absent is an answer, not a failure, so it is Debug too; a raw
+// block read takes ReadLevel alone. Callers decide by that answer (an absent
+// file reads as "no such object"), and a dn's background read finds a whole
+// disk's partition file absent on every round.
 func pathReadLevel(err error) slog.Level {
 	if errors.Is(err, fs.ErrNotExist) {
 		return slog.LevelDebug

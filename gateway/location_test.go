@@ -27,7 +27,7 @@ import (
 // name; and a host name that is no valid location — none, the kernel's
 // "(none)" of a machine never named, one over the name size limit — refuses
 // the create FAILED_PRECONDITION with the advice to pass a location, and
-// writes nothing: no record, no capacity key, no id minted.
+// writes no record and mints no id: the node global's revision stands.
 func TestNodeCreateTakesTheHostNameAsLocation(t *testing.T) {
 	ctx := context.Background()
 	s := newTestServer(t)
@@ -239,9 +239,10 @@ func locPool(
 // four disk nodes whose agents all report one host name, created with no
 // location, are one location, so an md-raid1 pool, whose groups each need
 // two locations, is refused RESOURCE_EXHAUSTED, the message saying the disk
-// nodes it found are in distinct locations. Four disk nodes of the same
-// machine created with four locations build the pool, each group's legs in
-// two of them.
+// nodes it found are in distinct locations. Four more disk nodes of the same
+// machine, created with four locations, build the pool, each group's legs in
+// two distinct locations: the first four, still one location, may hold one
+// leg of a group.
 func TestCreateStoragePoolRefusesOneHostForRaid1(t *testing.T) {
 	s := newTestServer(t)
 	cluster := hnodeName("onehost")
@@ -389,9 +390,11 @@ func TestCreateStoragePoolKeepsLegsOffThePrimaryLocation(t *testing.T) {
 // controller node, all registered under the machine's name: a pool of two
 // slices needs four groups, eight legs on eight disk nodes in pairs of
 // distinct locations. The preferred scans give the first groups the two
-// other machines until those are full, and the last group then finds only
-// the primary's machine, every time; the plain pick places such a pool about
-// eight times in nine. Of twenty creates, at least one must build its pool.
+// other machines until each of their disk nodes holds a leg of the pool, and
+// the black list keeps those disk nodes from the last group, which then
+// finds only the primary's machine, every time; the plain pick places such a
+// pool about eight times in nine. Of twenty creates, at least one must build
+// its pool.
 func TestCreateStoragePoolFallsBackToThePlainPick(t *testing.T) {
 	s := newTestServer(t)
 	cluster := hnodeName("fallback")

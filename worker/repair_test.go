@@ -1266,7 +1266,8 @@ func TestSpRepairSidePlans(t *testing.T) {
 				cntlrId, got)
 		}
 		// Every cntlr is told each retired leg's side id, which the cn
-		// agent keeps for the restore check's count (cnagent.md CN32).
+		// agent keeps for the restore check's largest side id (cnagent.md
+		// CN32).
 		sides := cp.req.GetRetiredLegIdToSideId()
 		if len(sides) != 1 || sides[spRetiredLeg] != spRetiredSide {
 			t.Errorf("cntlr %d request retired_leg_id_to_side_id = %v, "+

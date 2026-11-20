@@ -20,7 +20,7 @@ import (
 
 // statusReplyOf is a status page of three rows: a cluster row, a report row
 // with a status and a reason whose text holds a newline and a tab, and a
-// pool row with no status and no age.
+// pool's lost-record row with no status and no age.
 func statusReplyOf(token string) *pb.GetClusterStatusReply {
 	errStatus := pb.ResStatus_RES_STATUS_ERROR
 	return &pb.GetClusterStatusReply{
@@ -135,8 +135,9 @@ func TestStatusTableNothingWrong(t *testing.T) {
 	}
 }
 
-// TestStatusJsonPrintsTheDocument pins --json: the reply as the one CT4
-// document, every field shown.
+// TestStatusJsonPrintsTheDocument pins --json: the reply as one CT4
+// document on one line, read back with its three rows and its count of
+// pools read.
 func TestStatusJsonPrintsTheDocument(t *testing.T) {
 	client := &recordingClient{
 		want: "GetClusterStatus", reply: statusReplyOf(""),
@@ -158,8 +159,8 @@ func TestStatusJsonPrintsTheDocument(t *testing.T) {
 
 // statusTableFields are the fields the table shows, and statusLeftOut the
 // ones it leaves out, each with its reason; every field of StatusRow and of
-// GetClusterStatusReply is in exactly one of the two (item 343: a table
-// shows each field or says why not).
+// GetClusterStatusReply is in exactly one of the two, so the table shows
+// each field or says why not.
 var (
 	statusTableFields = map[string]bool{
 		"StatusRow.sp_name": true, "StatusRow.kind": true,

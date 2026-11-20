@@ -1375,12 +1375,14 @@ enum StatusKind {
     // may also name another pool; or a node record that does not decode.
     STATUS_KIND_LOST_RECORD = 1;
     // The read holds no state of the pool to judge it by: records that do
-    // not load, no primary, a primary's agent that did not answer, holds
-    // no state of the cntlr or is starting, an observation older than the
-    // worker accepts, or a report behind the pool's revision while the
-    // primary's health epoch is set, which is a syncup still on its way or
-    // one its agent refuses or fails, the read cannot tell which. Its
-    // status is RES_STATUS_UNKNOWN.
+    // not load, an id-to-name record not read, no primary, a primary whose
+    // node record is absent, a primary's agent that did not answer, holds
+    // no state of the cntlr, is starting, answers a code other than OK and
+    // leftover, sends no report or holds no observation of the cntlr yet,
+    // an observation older than the worker accepts, or a report behind the
+    // pool's revision while the primary's health epoch is set, which is a
+    // syncup still on its way or one its agent refuses or fails, the read
+    // cannot tell which. Its status is RES_STATUS_UNKNOWN.
     STATUS_KIND_REPORT = 2;
     // The pool as a whole: being deleted, a level above read-write, its
     // primary disabled, or a stored conf the worker refuses.
@@ -1399,8 +1401,8 @@ enum StatusKind {
     STATUS_KIND_GROUP = 8;
     // An open repair.
     STATUS_KIND_REPAIR = 9;
-    // A migration that waits for its cutover or its finish, or whose copy
-    // fails.
+    // A migration that waits for its cutover or its finish, whose copy
+    // fails, or whose destination gives no reading of its copy.
     STATUS_KIND_MIGRATION = 10;
     // A clone being deleted or waiting for its source.
     STATUS_KIND_CLONE = 11;
@@ -1422,8 +1424,10 @@ message StatusRow {
     string sp_name = 1;
     StatusKind kind = 2;
     string object = 3;
-    // The status of the report row the row shows, RES_STATUS_UNKNOWN where
-    // the read got no answer; absent where the row shows no report row.
+    // The status of the report row the row shows; RES_STATUS_UNKNOWN on a
+    // row the read has no reading for (every STATUS_KIND_REPORT row, and a
+    // migration's whose destination gives no reading of its copy); absent
+    // where the row shows no report row.
     optional ResStatus status = 4;
     ResReason reason = 5;
     string text = 6;
@@ -1436,7 +1440,7 @@ message StatusRow {
     uint64 leg_id = 11;
     uint64 side_id = 12;
     // The name of a thin device, a repair, a migration, a clone or a
-    // transfer the row names, or a worker role.
+    // transfer the row names, a subsystem's NQN, or a worker role.
     string obj_name = 13;
     // The node the row names or reaches.
     string addr_port = 14;
@@ -2471,8 +2475,9 @@ message CheckControllerNodeRestoreReply {
     message Pool {
         uint64 sp_id = 1;
         uint64 cntlr_id = 2;
-        // The held node the cntlr is under, or, for NOT_HELD, the restored
-        // node's.
+        // The held node the cntlr is under, or, for a cntlr only the
+        // restored node names (NOT_HELD, or RECORD_LOST when its pool's
+        // records are lost), the restored node's.
         uint64 cn_id = 3;
         RestoreVerdict verdict = 4;
         // Empty when the restored state names no pool of sp_id.
@@ -2841,9 +2846,9 @@ message SyncupCntlrRequest {
     uint32 leg_fast_io_fail_tmo = 15;
     // The side id of each retired leg of the pool, by its leg id, from its
     // RetiredLeg record. The cn agent builds nothing from it: it keeps it
-    // with the held request, for the restore check's count of the sides of
-    // the layout (cnagent.md CN32). A request from a worker without the
-    // field carries none. Appended, never renumbered.
+    // with the held request, for the largest side id of the layout the
+    // restore check reads (cnagent.md CN32). A request from a worker without
+    // the field carries none. Appended, never renumbered.
     map<uint64, uint64> retired_leg_id_to_side_id = 16;
 }
 

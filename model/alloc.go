@@ -282,10 +282,11 @@ func (r *freeRun) take(
 //
 // In a default deployment a node's location is its machine's host name
 // (architecture.md, Disk nodes), so tier 1 keeps the candidates off the
-// machines the caller's group already holds, and tier 2 is what places a
-// leg on one of them once no other machine has a DN with room — the second
-// tier of architecture.md, Per-operation allocation, which a cluster of few
-// machines reaches (architecture.md, Known limits).
+// machines excludeLocs names (those the caller's group already holds, or a
+// pool create's first primary's), and tier 2 is what places a leg on one of
+// them once no other machine has a DN with room — the second tier of
+// architecture.md, Per-operation allocation, which a cluster of few machines
+// reaches (architecture.md, Known limits).
 func FindDnCandidatesAntiAffine(
 	ctx context.Context,
 	cli *etcdutil.Client,

@@ -1525,13 +1525,13 @@ snapshot of its own and the thin devices of some pools in a plain range
 (Controller nodes). Network calls to agents (`GetDnSize` and
 `GetCnSize`, the `Get*Info` behind `Inspect*`, behind the `force` false
 proof of the node deletes (Disk nodes, Controller nodes), behind the
-`force` false hydration checks of Clones and Migrations and behind
-`ForceStartGroup`'s check of the group's array (Repairs), the bitmap
-reads, the inspect of a group, the restore check's `GetCnStore`) must
-happen
-**outside** the STM, before or after it; when such a call needs
-`cluster_id`, a plain pre-read of `ClusterConf` provides it and the in-STM
-read stays authoritative.
+`force` false hydration checks of Clones and Migrations, behind
+`ForceStartGroup`'s check of the group's array and behind `CreateRepair`'s
+read of the bad leg's row (Repairs), the bitmap reads, the inspect of a
+group, the status read's calls (Clusters), the restore check's
+`GetCnStore`) must happen **outside** the STM, before or after it; when
+such a call needs `cluster_id`, a plain pre-read of `ClusterConf` provides
+it and the in-STM read stays authoritative.
 
 ### UNEXPECTED_ERROR → `ABORTED`
 
@@ -2535,10 +2535,10 @@ free space, pools of small groups use the disk nodes up before the space
 and place less than the share; and a cntlr charges its
 controller node the pool's footprint, so a cluster's room is bounded by its
 controller nodes' budgets (Size → extents) as well as by its disk nodes.
-Each record is decoded through the etcd door, which at the debug log level
-logs it as it logs every decoded value (`log.md`, etcd), so on a cluster at
-the node ceilings this is a heavy read meant for an occasional poll, not a
-hot path.
+The read ranges and decodes every node record of the cluster and replies
+an entry per node, and at the debug log level the etcd door logs each
+record it decodes (`log.md`, etcd), so on a cluster at the node ceilings
+this is a heavy read meant for an occasional poll, not a hot path.
 
 **GetClusterStatus** — the status read: what is wrong in a cluster, a page
 of pools at a time, computed at the read from etcd and the latest reports
@@ -2588,8 +2588,8 @@ rest. A pool's rows are:
   saves does (`dnv-worker.md` HL9): an info read answers from the agent's
   last observation, made before a syncup in flight and kept past a refused
   one, so the read cannot tell the two apart, and the worker's log names
-  which. The rows of an old or behind report are still listed. An answer with no report reads
-  unknown, never healthy;
+  which. The rows of an old or behind report are still listed. An answer
+  with no report reads unknown, never healthy;
 * the pool as a whole: being deleted, which is its one row, with no agent
   call; a stored conf the sp worker refuses, a `bdev_conf` the readers
   refuse or a group whose counts give its sides no length to zero
@@ -2617,13 +2617,15 @@ rest. A pool's rows are:
   refuses; the operator in charge of a group's repair; a forced-start mark
   that stands;
 * an open repair, with its stage, what the primary's report says it waits
-  for and who acts next: the worker's drive step for a repair of the
-  worker's in a pool whose reactions run, and otherwise the operator's
-  cancel or finish — for an operator's repair, and for a worker's in a pool
-  at a level that stops reactions or under a stored conf the worker refuses
-  (`dnv-worker.md` AR1, AR3) — and it says when a worker's repair's finish
-  is refused because every retired leg of the group carries keep at the
-  bound (Repairs);
+  for and who acts next: for a created one, the primary, then the worker's
+  stage move (`dnv-worker.md` AR11); for a started or an aborted one, the
+  worker's drive step for a repair of the worker's in a pool whose
+  reactions run, and otherwise the operator's cancel or finish — for an
+  operator's repair, and for a worker's in a pool at a level that stops
+  reactions or under a stored conf the worker refuses (`dnv-worker.md`
+  AR1, AR3) — and it says when a worker's repair's finish is refused
+  because every retired leg of the group carries keep at the bound
+  (Repairs);
 * a migration whose cutover is pending, with the primary's path row to
   the new side, and past its cutover one whose copy is whole and waits for
   its finish, whose copy row reads `RES_STATUS_ERROR`, or whose
@@ -2646,22 +2648,23 @@ it: a report row's by the node's clock, a health epoch's and a
 registration's by the gateway's. No record holds the time of a repair, a
 migration, a clone, a lost record or a refused grow, so such a row carries
 an age only where it shows a report row: a pending cutover's path row, a
-clone's row that waits for its source. The reply carries the defaulted name, the rows, the token, the
-count of pools read and the gateway's clock at the read. The read bounds
-its agent calls per request (`gateway.md` GW20): a node that does not
-answer costs one agent budget per read, and under a client's deadline a
-page ends early rather than answering nothing: a pool whose work the
-read's own deadline cut is left for the next page, the token going before
-it, save the page's first, which is kept, so that a page always moves on;
-there each read the deadline cut, and no other, says the read's time ran
-out. A healthy cluster at rest lists
-nothing; a change in flight lists itself while it runs: a pool or a cntlr
-just made, whose primary holds no state or observation of it yet, a
+clone's row that waits for its source. The reply carries the defaulted
+name, the rows, the token, the count of pools read and the gateway's clock
+at the read. The read bounds its agent calls per request (`gateway.md`
+GW20): a node that does not answer costs one agent budget per read, and
+under a client's deadline a page ends early rather than answering nothing:
+a pool whose work the read's own deadline cut is left for the next page,
+the token going before it, save the page's first, which is kept, so that a
+page always moves on; there each read the deadline cut, and no other, says
+the read's time ran out. A healthy cluster at rest lists nothing; a change
+in flight lists itself while it runs: a pool just made, or a cntlr just
+made its primary, whose agent holds no state or observation of it yet, a
 primary just disabled until its failover, a migration whose cutover is
 pending, an open repair, and a pool or a clone being deleted until its
-drain ends. Reason: computed at the read, with no status key, nothing can
-go stale and no write path gains a write; it lists what an operator acts
-on; and the cap keeps a page within `GrpcMaxMsgSize` (Known limits).
+drain ends. A standby just made lists nothing, since the read asks no
+standby. Reason: computed at the read, with no status key, nothing can go
+stale and no write path gains a write; it lists what an operator acts on;
+and the cap keeps a page within `GrpcMaxMsgSize` (Known limits).
 
 ### Worker registry
 
@@ -2904,24 +2907,25 @@ and `CnGlobal`, with these differences:
   restored revision, the held role and NQNs, whether the restored node
   names the cntlr, the largest side id and the count of sides of the held
   and, for a pool held ahead, of the restored layout, whether the held
-  request lacks the side id of a retired leg, and a verdict. A verdict is the
-  cntlr's: a standby can hold an older request than its primary, and its
-  lists then name as lost a thin device deleted later. A pool is read from
-  its row, on any controller node, with the highest held revision, the
-  cntlr the worker told last; a row behind, not loaded or not held holds
-  nothing of the pool to read.
+  request lacks the side id of a retired leg, and a verdict. A verdict is
+  the cntlr's: a standby can hold an older request than its primary, and
+  its lists then name as lost a thin device deleted later. A pool is read
+  from its row, on any controller node, with the highest held revision,
+  the cntlr the worker told last; a row behind, not loaded or not held
+  holds nothing of the pool to read.
   * SAME: the held revision is the restored one: what this cntlr was told
     does not change.
   * OLDER: the held revision is above it, over the same set of sides. The
     restore loses every change of the pool since the backup, and the
     layout stands. The row lists the thin devices lost, each with its thin
-    id and whether that id is at or above the restored `next_dev_id`, so
-    that a new volume of the pool can take it again (Known limits, A
-    restore can hand out a pool's thin ids again), and the thin devices of
-    the restored pool the agent does not hold, which come back as records
-    whose thin ids the primary's sweep deleted after their delete, so they
-    read as lost thin ids with no data until deleted again (`cnagent.md`
-    CN14).
+    id and whether that id is at or above the pool's `next_dev_id` as the
+    id step left it (etcd backup and restore), so that a new volume of the
+    pool can take it again (Known limits, A restore can hand out a pool's
+    thin ids again), and the thin devices of the restored pool the agent
+    does not hold, deleted since, which come back as records: one whose
+    thin id the primary's sweep has deleted reads as a lost thin id with no
+    data until deleted again (`cnagent.md` CN14), and one whose thin id the
+    pool still holds comes back working (etcd backup and restore).
   * MAY_BREAK: as OLDER, over another set of sides, so the restored layout
     may break. The set counts every place a side sits: every leg of the
     slices' meta and data groups and of the meta group of each clone that
@@ -2936,11 +2940,13 @@ and `CnGlobal`, with these differences:
     pool, which only counts up. So a side made after the backup — by a
     grow, a repair, a migration or a clone — raises the largest side id,
     in a group's legs or retired with its leg; a side removed after it — by
-    a finished or a cancelled migration, a deleted or given-back retired
-    leg or a drained clone — lowers the count unless a side was also made;
-    and a repair's finish, which moves its new leg into its group and the
-    bad leg to the retired legs, and a retired leg taken back as a repair's
-    new leg move a side inside the set, which stands and reads older. A
+    a finished or a cancelled migration, a cancelled repair's fresh new
+    leg, a withdrawn grow, a deleted or given-back retired leg or a drained
+    clone — lowers the count unless a side was also made; and a repair's
+    finish, which moves its new leg into its group and the bad leg to the
+    retired legs, a retired leg taken back as a repair's new leg, and one
+    the repair's cancel gives back as a retired leg move a side inside the
+    set, which stands and reads older. A
     held request that lacks the side id of a retired leg its groups list,
     as one from a worker before `retired_leg_id_to_side_id`, marks its row
     (`held_side_ids_incomplete`) and reads may break when held ahead, since
@@ -2960,12 +2966,13 @@ and `CnGlobal`, with these differences:
     is compared.
   * NOT_LOADED: the held node names the cntlr, and the agent holds no
     request of it: the startup reload skipped its file (`cnagent.md` CN2),
-    or the request never arrived. The node's request names a cntlr before
-    the cntlr's first syncup (`cnagent.md` CN8), and the worker holds a
-    cntlr's syncup until the pool's sides apply the state, for up to one
-    interval (`dnv-worker.md` RW14), so a cntlr made just before the
-    failure, often of a pool made after the backup, can read not
-    loaded.
+    the agent refused every request of it, at its gates or for a failed
+    save (`dnagent.md` SH5), or the request never arrived. The node's
+    request names a cntlr before the cntlr's first syncup (`cnagent.md`
+    CN8), and the worker holds a cntlr's syncup until the pool's sides
+    apply the state, for up to one interval (`dnv-worker.md` RW14), so a
+    cntlr made just before the failure, often of a pool made after the
+    backup, can read not loaded.
   * NOT_HELD: the restored node names a cntlr the agent does not hold:
     the pool was deleted, or the cntlr moved to another node, after the
     backup, and it comes back; or the agent holds no node of the cluster,
@@ -2976,19 +2983,22 @@ and `CnGlobal`, with these differences:
     restored revision: a node held below it was never told of a cntlr the
     backup names.
   * RECORD_LOST: a record of the restored pool the row reads is missing or
-    does not decode — its `sp_id_to_name`, `SpConf` or `SpRev` record,
-    for a pool held ahead a `Slice`, `Clone`, `Repair`, `RetiredLeg` or
-    thin device record, a name
-    of `td_name_list` with no record among them, and for a cntlr of the
-    restored node a pool the restored state names nowhere; the row stands
-    for the pool, and the other pools are judged. A pool at the restored
-    revision reads no `Slice` record, so its lost one is not seen.
+    does not decode — its `SpConf`, or one that names another `sp_id`, its
+    `SpRev`, its `sp_id_to_name` record when that does not decode, for a
+    pool held ahead a `Slice`, `Clone`, `Repair`, `RetiredLeg` or thin
+    device record, a name of `td_name_list` with no record among them —
+    and, for a cntlr of the restored node, a pool the restored state names
+    nowhere, with no `sp_id_to_name` record of its `sp_id`, which on any
+    other row reads new; the row stands for the pool, and the other pools
+    are judged. A row not held ahead reads no `Slice` record, so a lost one
+    is not seen there.
   Reasons: per controller node, since only the controller nodes know a
   pool made after the backup, which with the CSI driver is every
   Kubernetes volume made since, and one node's held state bounds the call
-  and its reply; thin devices and the layout read only where the
-  revisions differ, since the same revision of one cntlr is the same
-  request; a snapshot per pool, since nothing writes during a restore and
+  and its reply; thin devices and the layout read only where the held
+  revision is above the restored one, since the same revision of one cntlr
+  is the same request and a lower one holds no change made after the
+  backup; a snapshot per pool, since nothing writes during a restore and
   one transaction over every pool of a node would hold hundreds of
   thousands of reads. A pool none of whose controller nodes answers is not
   seen, and a pool whose every row is behind, not loaded or not held shows
@@ -3233,9 +3243,9 @@ among them; for the pool, its thin devices, snapshots included, and their
 summed size, the data space of its slices, the data in use of the slices
 read, the summed size over the data space as a whole percent, the
 overcommit, and the extents its groups hold, its footprint, which each
-cntlr takes from its controller node's budget (Size → extents). The reply of an agent that holds
-no observation of the cntlr is not refused: its slices are unread and the
-records' half is whole. Nothing is written.
+cntlr takes from its controller node's budget (Size → extents). The reply
+of an agent that holds no observation of the cntlr is not refused: its
+slices are unread and the records' half is whole. Nothing is written.
 
 ### GrowSlice
 
@@ -5074,8 +5084,9 @@ its pad bits in the middle of the chunk and shift every later bit. So
 ### `service ControllerNodeAgent`
 
 * `GetCnSize` returns the capacity budget in bytes this CN is willing to
-  host, zero meaning "use the default", the largest; typically from local config
-  (`cnagent.md` CN3); and the machine's host name, as `GetDnSize` does.
+  host, zero meaning "use the default", the largest; typically from local
+  config (`cnagent.md` CN3); and the machine's host name, as `GetDnSize`
+  does.
 * `SyncupCn` carries `revision`, `qos_ratio` and `cntlr_pointer_list`. It
   ensures the base state of Controller node, common — the single nvmet
   port; it accepts and persists
@@ -5130,9 +5141,11 @@ its pad bits in the middle of the chunk and shift every later bit. So
   CheckControllerNodeRestore): the desired state the agent holds for one
   CN, or every CN of a cluster for a zero `cn_id` — each CN's `revision`
   and `cntlr_pointer_list`, and a summary of each held cntlr request, its
-  `revision`, role, `td_list`, NQNs, and the largest side id and the count
-  of sides of its layout (`cnagent.md` CN32). It reads nothing of the node. Reply `agent_reply` and
-  `cn_list`.
+  `revision`, role, `td_list`, NQNs, the largest side id and the count of
+  sides of its layout, and whether a retired leg of it lacks its side id
+  (`cnagent.md` CN32). It reads nothing of the node; an agent that holds no
+  CN the request asks for answers `ReplyCodeUnknownObject`. Reply
+  `agent_reply` and `cn_list`.
 
 ### Side provisioning protocol
 
@@ -5298,8 +5311,11 @@ with `ResStatus`:
 
 * `RES_STATUS_UNKNOWN` — no answer from the node, or one from an
   observation too old (`dnv-worker.md` HL7); set by *workers*, and by the
-  gateway's status read for a pool whose primary it cannot read (Clusters,
-  GetClusterStatus), never by the agent itself.
+  gateway's status read on a row it has no current reading for: a pool or
+  its id-to-name record it cannot read, a pool with no primary, a primary
+  or a migration's destination it cannot read, a primary's report too old,
+  or one behind its pool while its health epoch is set (Clusters,
+  GetClusterStatus); never by the agent itself.
 * `RES_STATUS_MISSING` — the agent has not created it, a build still to
   come or a resource its pool's level suppresses (`cnagent.md` CN19). A
   row alone brings no new `Syncup*`: the worker re-sends one on a reply's
@@ -7658,16 +7674,17 @@ A restore loses or breaks what changed after the backup:
   sides away, and the conflicting side itself goes with its pool's delete,
   by a repair, an operator's or leg repair's, whose finish makes its leg a
   retired leg, followed by a delete of that retired leg, since a migration
-  of it never copies, its roles
-  converging only behind the gate that refuses it (`dnagent.md` DN9). Then
-  delete the disk node, which is refused while it holds a side and, without
-  `force`, until its agent proves it clean (Disk nodes); stop its agent; zero the disk's header block by hand, since the agent formats only
-  a disk whose header carries no magic (`dnagent.md` DN5); delete the
-  agent's local store, start it, and add the node again. An agent started
-  with its old store formats the blank disk under the old node's identity
-  (`dnagent.md` DN2) or, while that store still holds a provisioned side
-  its stored node still lists, refuses to format it (`dnagent.md` DN5). A controller node holds no disk,
-  so the conflict never arises on one.
+  of it never copies, its roles converging only behind the gate that
+  refuses it (`dnagent.md` DN9). Then delete the disk node, which is
+  refused while it holds a side and, without `force`, until its agent
+  proves it clean (Disk nodes); stop its agent; zero the disk's header
+  block by hand, since the agent formats only a disk whose header carries
+  no magic (`dnagent.md` DN5); delete the agent's local store, start it,
+  and add the node again. An agent started with its old store formats the
+  blank disk under the old node's identity (`dnagent.md` DN2) or, while
+  that store still holds a provisioned side its stored node still lists,
+  refuses to format it (`dnagent.md` DN5). A controller node holds no
+  disk, so the conflict never arises on one.
 * A node added after the backup is not in the restored state, and what it
   built stays on it until removed by hand. Added again it takes a new id,
   so a disk node's agent refuses its disk, whose header names the old id,
@@ -7683,10 +7700,10 @@ A restore loses or breaks what changed after the backup:
   disk. It is resolved as the conflict above is, every side on it going the
   way the conflicting side goes there, since its agent serves none, the
   node then deleted with `force`, since an agent that refuses its disk
-  never proves it clean, and what
-  the node added again built on the disk is removed by hand before the
-  header block is zeroed, since the agent formats no disk that a side device
-  or a clone-metadata wrapper maps (`dnagent.md` DN5).
+  never proves it clean, and what the node added again built on the disk
+  is removed by hand before the header block is zeroed, since the agent
+  formats no disk that a side device or a clone-metadata wrapper maps
+  (`dnagent.md` DN5).
 * A revision token taken before the restore can match a restored `SpRev`,
   `DnRev` or `CnRev` once that revision climbs back to the same number, and
   the token check compares numbers only (`gateway.md` GW6), so every client
@@ -7696,8 +7713,9 @@ Reason: the order and the id step close the one hazard that could show a
 pool another pool's data; the others follow from restoring an older
 desired state over newer nodes, and are stated so that an operator can
 weigh a restore against them; the restore check names, pool by pool, what
-the restore loses on the pools it sees, before step 4 removes the last
-record of it.
+the restore loses on the pools it sees while the agents still hold it:
+once step 4 clears their stores, no call reads it, the copies set aside
+included.
 
 ### Upgrade in lockstep
 
@@ -8688,17 +8706,20 @@ document and only pointed to here.
   reporting); every dnv gRPC server and client takes messages
   up to `GrpcMaxMsgSize` (`grpc.md`, Wiring), and unit tests hold the three
   under it at the limits of Cardinality limits and Common validation, the
-  widest page of the status read too, whose rows a cap per pool bounds
-  (Clusters, GetClusterStatus), and the reply of a cntlr's inspect call, the report beside an entry of
-  block counters per leg and per namespace device (`cnagent.md` CN23), whose
-  error texts the agent cuts to `IoStatErrorMax` so that it fits with the
-  rows' text, which with every text beside the rows the agent cuts to
-  `AgentTextMax` (Live-state reporting). Two parts have no such limit: a
-  bitmap read's reply, which grows with the blocks it asks
-  for, so a caller pages through a large volume (Bitmap reads), and a
-  leg's, which the worker reads whole and which fails once it passes
-  `GrpcMaxMsgSize`, a leg of more than `MaxMigrBmCnt` times
-  `MigrBmPieceBytes` bytes of bitmap (`dnv-worker.md` BM7).
+  widest page of the status read too, whose rows a cap per pool and the
+  node ceilings bound, the worker rows aside, one per registration that
+  reads gone, which the registry's keys alone bound (Clusters,
+  GetClusterStatus; Worker registry), and the reply of a cntlr's inspect
+  call, the report beside an entry of block counters per leg and per
+  namespace device (`cnagent.md` CN23), whose error texts the agent cuts to
+  `IoStatErrorMax` so that it fits with the rows' text, which with every
+  text beside the rows the agent cuts to `AgentTextMax` (Live-state
+  reporting). Two parts have no such limit: a bitmap read's reply, which
+  grows with the blocks it asks for, so a caller pages through a large
+  volume (Bitmap reads), and a leg's, which the worker reads whole and
+  which fails once it passes `GrpcMaxMsgSize`, a leg of more than
+  `MaxMigrBmCnt` times `MigrBmPieceBytes` bytes of bitmap (`dnv-worker.md`
+  BM7).
   One etcd request grows with the slices and clones it writes; the widest,
   the worker's write of `array_made` over every slice and clone, a little
   above a provisioned flip over every slice, sizes `EtcdMaxRequestBytes`
@@ -8869,7 +8890,8 @@ document and only pointed to here.
   request (`gateway.md` GW20): a read holds up to `StatusFanOut` primary
   reports at once, each as wide as a cntlr report at the limits, so reads
   that run at once add up, and a read loads every pool of its page as the
-  sp worker's pass loads it.
+  sp worker's fan-out loads it, node records included (`dnv-worker.md`
+  MD3).
 * **Nothing limits recovery load across pools.** The reaction pass takes
   one action per pool per interval and holds nothing across pools
   (`dnv-worker.md` AR2): a dead disk node starts a repair, a full copy onto
@@ -8952,9 +8974,10 @@ document and only pointed to here.
   operator blocks it** (`csi.md`, Deployment): the trust in the network
   above is then trust in every pod of the cluster. The example network
   policy keeps the pods of each namespace that applies it off every address
-  of the dnv machines, where the cluster's network software enforces egress
-  policies (`csi.md` CSI20); a namespace without it, or a pod on the host
-  network, still reaches them.
+  of the dnv machines but the API server's port where a dnv machine runs
+  it, where the cluster's network software enforces egress policies
+  (`csi.md` CSI20); a namespace without it, or a pod on the host network,
+  still reaches them.
 * **A pool commit in a migration gap waits for the gap to end.** A migration
   gap is the time in which the primary has no usable path to a migrating
   leg: from src step 1, which moves the source's per-CN namespaces to
@@ -9579,10 +9602,7 @@ document and only pointed to here.
   operator's: that disconnect on the node, after which the follower's next
   pass connects the replacement, and a delete of the pod, whose mount does
   not follow the new device (`operations.md`, A one-cntlr Kubernetes volume
-  after a cntlr replacement). A fix, a drop of a withdrawn path whose
-  controller is not live when no other path exists, or a fresh range of
-  controller ids for a replacement, is a later change. A path connected by
-  hand stays (above).
+  after a cntlr replacement). A path connected by hand stays (above).
 * **A detach does not cut a connected host.** The CSI driver's detach empties
   the subsystem's allowed hosts (`csi.md` CSI10), which closes it to new
   connections only (Primary cntlr), so a host already connected keeps its
@@ -9829,13 +9849,14 @@ document and only pointed to here.
   over the cntlr count. A controller node v0.1.0 created with no budget
   keeps that build's smaller default, as no code rewrites a stored
   `total_ext_cnt`: only emptying, deleting and creating the node again
-  gives it another budget. The capacity read names the budget when it is the
-  limit a cluster reaches first (Clusters, GetClusterCapacity); an
-  auto-grow refused for want of budget shows only as
-  the worker's `reaction skipped` record (`dnv-worker.md` AR6), the pass
-  going on to the reactions after it when its own check finds the
-  shortfall (`dnv-worker.md` AR2), while an operator's `GrowSlice` is
-  refused `RESOURCE_EXHAUSTED` (GrowSlice).
+  gives it another budget. The capacity read names the budget when it is
+  the limit a cluster reaches first (Clusters, GetClusterCapacity); an
+  auto-grow refused for want of budget shows as the worker's `reaction
+  skipped` record (`dnv-worker.md` AR6) and as a grow row of the status
+  read (Clusters, GetClusterStatus), the pass going on to the reactions
+  after it when its own check finds the shortfall (`dnv-worker.md` AR2),
+  while an operator's `GrowSlice` is refused `RESOURCE_EXHAUSTED`
+  (GrowSlice).
 * **A pool's thin ids run out.** dm-thin takes no thin id above
   `MaxThinDevId`, and a pool hands out each thin id once, the restore of the
   next bullet aside, so a pool creates a bounded number of thin devices over
@@ -9866,9 +9887,9 @@ document and only pointed to here.
   name, that sweep only removes the volume. An id that no thin volume maps
   stays in the pool until a sweep of the pool's ids deletes it
   (`cnagent.md` CN14). The restore check names, before the agents' stores
-  are reset, each thin device a restore loses and whether a new volume of
-  its pool can take its thin id again (Controller nodes,
-  CheckControllerNodeRestore).
+  are reset, each thin device a restore loses on the pools it sees and
+  whether a new volume of its pool can take its thin id again (Controller
+  nodes, CheckControllerNodeRestore).
 * **One cntlid slot can serve most subsystems of a kernel.** nvmet draws
   every controller id from one id space per kernel, a subsystem's range
   being bounds inside it (cntlid slots), every new side but a migration
@@ -9955,8 +9976,9 @@ document and only pointed to here.
   blind spot: on a controller node, an empty subsystem with no host and no
   port link, younger than `CnSubsysOrphanGrace`, is left alone by the
   node-level sweep and named by no verdict (`cnagent.md` CN21), so the proof
-  does not see it; it exports nothing, and the agent's next start, whose
-  converge of the stored request sweeps the node, removes it. The deleted
+  does not see it; it exports nothing, and the first start of the agent
+  once it reads older than that, whose converge of the stored request
+  sweeps the node (`cnagent.md` CN2), removes it. The deleted
   node's request stays in the agent's local store either way, and is
   converged at every start until the store is deleted.
 * **A downgrade can lose data** (Upgrade in lockstep): no build replaces a

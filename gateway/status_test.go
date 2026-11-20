@@ -543,9 +543,9 @@ func TestStatusPrimaryUnreachable(t *testing.T) {
 
 // TestStatusReportRows pins the answers that give the read no state to
 // judge by: an observation older than the worker accepts, an agent that
-// holds no state of the cntlr, one that is starting, one that refuses the
-// primary's request, and a pool with no primary; and that the rows of an
-// old observation are still listed.
+// holds no observation of the cntlr yet, one that holds no state of it, one
+// that is starting, and a pool with no primary; and that the rows of an old
+// observation are still listed.
 func TestStatusReportRows(t *testing.T) {
 	interval := time.Duration(
 		common.DefaultHealthCheckInterval*common.ObsMaxAgeIntervals) *
@@ -659,7 +659,9 @@ func TestStatusLostRecord(t *testing.T) {
 // asked and not confirmed, and, each of an operator and of the worker, an
 // ABORTED one and a STARTED one, the text naming who acts: the operator's
 // cancel or finish, the worker's next pass, or the worker's finish refused
-// at the retired-leg bound with every retired leg kept.
+// at the retired-leg bound with every retired leg kept; and the worker's
+// own in a pool at a level that stops reactions or under a conf its pass
+// refuses, which the operator drives.
 func TestStatusRepairs(t *testing.T) {
 	worker := common.WorkerRepName(1, stDataGrp, 7)
 	for _, tc := range []struct {
@@ -946,12 +948,12 @@ func stPoolLine(usedMeta, totalMeta, usedData, totalData uint64,
 		usedMeta, totalMeta, usedData, totalData, mode)
 }
 
-// TestStatusGrowRefused pins the grows the read lists as refused, in AR6's
-// order (dnv-worker.md AR6): a controller node short of budget, no disk
-// node with room, a full group list and the metadata ceiling; and the ones
-// it does not list: a data grow the volumes do not need, a pending grow and
-// a grow the disk nodes have room for. A pool out of data or metadata space
-// gives a row of its own whatever its grow.
+// TestStatusGrowRefused pins the grows the read lists as refused by AR6's
+// checks (dnv-worker.md AR6), one refusal a case: a full group list, the
+// metadata ceiling, a controller node short of budget and no disk node with
+// room; and the ones it does not list: a pending grow, a data grow the
+// volumes do not need and a grow the disk nodes have room for. A pool out of
+// data or metadata space gives a row of its own whatever its grow.
 func TestStatusGrowRefused(t *testing.T) {
 	bigTd := map[string]*pb.ThinDevice{"vol": {Size: 1 << 40}}
 	for _, tc := range []struct {

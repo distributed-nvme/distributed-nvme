@@ -20,9 +20,10 @@ import (
 
 // fakeGateway is the gateway stand-in of the controller plugin's tests
 // (csi.md, Integration test plan): the calls the plugin makes, answered with
-// the gateway's codes from clusters, pools, thin devices, subsystems and
-// nodes kept in maps. It is not the dnvctl suite's fake gateway, which
-// answers one canned reply per method and keeps no state.
+// the gateway's codes from clusters, pools, thin devices and subsystems kept
+// in maps, and from each cluster's planted space answer for the capacity
+// read. It is not the dnvctl suite's fake gateway, which answers one canned
+// reply per method and keeps no state.
 type fakeGateway struct {
 	pb.UnimplementedGatewayServer
 	mu       sync.Mutex

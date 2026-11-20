@@ -1177,10 +1177,10 @@ func TestReadLeftoverLever(t *testing.T) {
 // pointer list names that holds a request, as the cn agent does
 // (cnagent.md CN32): the thin devices, the NQNs in order, and the largest
 // side id and the count of the sides of the slices' groups, the clone's
-// meta group and the repair's new leg, the count also counting a retired
-// leg a group lists; another
-// cluster or node is an unknown object; the Starting and reply_code levers
-// set the code.
+// meta group, the repair's new leg and each retired leg a group lists, by
+// the side id the request gives it, one with none counted and marking the
+// summary as missing one; another cluster or node is an unknown object; the
+// Starting and reply_code levers set the code.
 func TestGetCnStoreAnswersTheStoredRequests(t *testing.T) {
 	agent := newTestAgent(t)
 	_, cnClient := startAgent(t, agent)

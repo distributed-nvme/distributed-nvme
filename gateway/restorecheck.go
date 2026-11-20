@@ -29,13 +29,15 @@ import (
 // which may be absent: a node added after the backup is not in the restored
 // state, and its agent is asked all the same. Then, outside any STM (AG1),
 // one GetCnStore asks the agent for every controller node of the cluster
-// it holds; an agent that does not answer or still starts is
-// FAILED_PRECONDITION (AG3), and one that holds no node of the cluster
-// answers OK with every restored pointer NOT_HELD. Then each pool is read
-// in a snapshot of its own, and the thin devices of a pool whose held
-// revision is above the restored one in one range of their prefix outside
-// any STM: during a restore nothing writes, and one transaction over every
-// pool of a node would hold hundreds of thousands of reads (STM
+// it holds (heldCnStore); an agent that does not answer, still starts or
+// answers any code but zero and the unknown object is FAILED_PRECONDITION
+// (AG3), and the unknown object of an agent that holds no node of the
+// cluster reads as no node held, so the check answers OK with every
+// restored pointer NOT_HELD. Then each pool is read in a snapshot of its
+// own, and the thin devices of a pool whose held revision is above the
+// restored one in one range of their prefix outside any STM: during a
+// restore nothing writes, and one transaction over every pool of a node
+// would hold hundreds of thousands of reads (architecture.md, STM
 // discipline). A pool whose records are lost gives its row, never the
 // answer's error.
 func (s *Server) CheckControllerNodeRestore(
@@ -444,9 +446,10 @@ func (s *Server) judgeHeldCntlr(
 }
 
 // restoredTds reads every thin device of one restored pool in one range of
-// their prefix, outside any STM (STM discipline); lost is a record that does
-// not decode, or a name of the pool's td_name_list with no record, which
-// the worker's read of the pool would refuse after the restore.
+// their prefix, outside any STM (architecture.md, STM discipline); lost is a
+// record that does not decode, or a name of the pool's td_name_list with no
+// record, which the worker's read of the pool would refuse after the
+// restore.
 func (s *Server) restoredTds(
 	ctx context.Context,
 	cid uint64,

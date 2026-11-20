@@ -1943,8 +1943,8 @@ func TestForceStartCancelIsSentAsTyped(t *testing.T) {
 // word as its kind in the order typed, spaces around a word aside, a word
 // typed twice twice and a leaf without it none; an --override beside
 // --cancel is sent as typed for the gateway to refuse (CT8); --force on
-// `repair create` and on the node deletes sends force true, a node delete
-// without it false.
+// `repair create` sends force true, and a node delete without --force sends
+// it false (the sweep rows send a node delete's --force as true).
 func TestForceFlagsAreSent(t *testing.T) {
 	// The sweep rows type --force on the node deletes; the bare leaves
 	// send none.

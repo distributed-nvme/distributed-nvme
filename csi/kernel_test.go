@@ -13,9 +13,9 @@ import (
 // TestRunNodeRefusesAKernelWithoutWhatAConnectNeeds pins csi.md CSI13: the
 // node plugin refuses to start, before it serves, on a kernel whose native
 // NVMe multipath is off or not built, or with no NVMe over Fabrics device,
-// and when it cannot read one of those facts, naming the fact and its fix;
-// it starts without the NVMe/TCP module, which the kernel loads at the
-// first connect.
+// naming the fact and its fix, and when it cannot read one of those facts,
+// naming the file and the error; it starts without the NVMe/TCP module,
+// which the kernel loads at the first connect.
 func TestRunNodeRefusesAKernelWithoutWhatAConnectNeeds(t *testing.T) {
 	for _, tc := range []struct {
 		name   string

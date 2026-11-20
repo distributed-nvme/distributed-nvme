@@ -187,7 +187,8 @@ func newCheckCmd() *cobra.Command {
 
 // runCheck runs the node check for role: viper binds the role's flags, and
 // no value is required, since the check reads the node, not a cluster (CM5).
-// It logs at Warn, as dnvctl does, whatever --log-level says (log.md R6).
+// It logs at Warn, dnvctl's default level, whatever --log-level says
+// (log.md R6).
 func runCheck(cmd *cobra.Command, role string) error {
 	common.SetLogLevel(slog.LevelWarn)
 	if err := bindViper(cmd); err != nil {
@@ -229,7 +230,8 @@ func newCollectCmd() *cobra.Command {
 	return cmd
 }
 
-// runCollect runs the gather. It logs at Warn, as dnvctl does (log.md R6).
+// runCollect runs the gather. It logs at Warn, dnvctl's default level
+// (log.md R6).
 func runCollect(cmd *cobra.Command, _ []string) error {
 	common.SetLogLevel(slog.LevelWarn)
 	flags := cmd.Flags()

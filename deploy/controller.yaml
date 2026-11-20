@@ -2,12 +2,12 @@
 # plugin, the provisioner, the attacher and the liveness probe, sharing the
 # plugin's socket. Both plugins serve; the provisioner and the attacher each
 # act in one copy at a time, the one that holds its lease in this namespace,
-# so the other copy takes over within a lease time when a machine is lost.
-# The copies prefer two machines, tolerate the control-plane taint, and
-# leave a machine Kubernetes cannot reach after 30 s rather than the default
-# 300 s, so that a second copy runs again soon. Every container runs as one
-# unprivileged user, the owner of the socket they share, with no capability
-# and a read-only root.
+# so the other copy takes over within one lease time and one retry when a
+# machine is lost. The copies prefer two machines, tolerate the
+# control-plane taint, and leave a machine Kubernetes cannot reach after
+# 30 s rather than the default 300 s, so that a second copy runs again soon.
+# Every container runs as one unprivileged user, the owner of the socket
+# they share, with no capability and a read-only root.
 apiVersion: apps/v1
 kind: Deployment
 metadata:

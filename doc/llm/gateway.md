@@ -97,11 +97,13 @@ authoritative for their comments.
 
 `DefaultGatewayAgentTimeout` is the per-call budget, in seconds, of the
 gateway's agent RPCs — `GetDnSize` and `GetCnSize`, the `Get*Info` behind
-`Inspect*`, behind the `force` false checks of `DeleteClone` and
-`FinishMigration`, behind `ForceStartGroup`'s check of the group's array,
-behind `CreateRepair`'s read of the bad leg's row and behind
-`GetThinDeviceBitmap`'s check of the parks, the `GetThinDeviceBm` bitmap
-read, and the `GetCntlrInfo` and `InspectGrp` behind `InspectGroup` —
+`Inspect*`, behind the `force` false proof of `DeleteDiskNode` and
+`DeleteControllerNode` that the node is clean, behind the `force` false
+checks of `DeleteClone` and `FinishMigration`, behind `ForceStartGroup`'s
+check of the group's array, behind `CreateRepair`'s read of the bad leg's
+row and behind `GetThinDeviceBitmap`'s check of the parks, the
+`GetThinDeviceBm` bitmap read, the `GetCntlrInfo` and `InspectGrp` behind
+`InspectGroup`, and the `GetCnStore` behind `CheckControllerNodeRestore` —
 applied as a timeout around each dial and its calls (AG2), so
 `InspectGroup`'s two calls share one budget. It equals
 `DefaultEtcdOpTimeout`, so a hung agent and a hung etcd bound an RPC alike.
@@ -280,41 +282,44 @@ that make the `ClusterConf` read in a planning snapshot — is
 discipline. GW11's resolution of conf defaults is a different operation, and
 the text says which it means. `resolveCluster` makes the first read of every
 handler's STM and planning snapshot, except `CreateCluster`'s,
-`ListClusters`' and `ListWorkers`' — the three RPCs that resolve no
-cluster — the pool
-transactions of `AdvanceClusterIds` (GW19), and the later transactions of
-the RPCs named below: `model.ClusterConfKey` of the `cluster_name`,
-defaulted to `common.DefaultClusterName`, yielding the `ClusterConf` and the
-cluster id, `model.ClusterId` of the name and the stored creation epoch,
-which prefixes every further key. `resolveSp` then reads `model.SpConfKey`
-of the cluster id and the `sp_name` and applies the `deleting` gate when its
-caller asks for it. The SP-scoped handlers open with one of three wrappers
-over that pair: `openSp` — resolution with the gate, then the `SpRev` read
-and GW6's token check — opens every planning snapshot and the deciding STM
-of every SP-scoped mutator but `DeleteStoragePool` and those whose deciding
-STM is a `model` op; `openSpRead` — resolution without the gate and
-without the token check — opens every SP-scoped read-only RPC and
-`DeleteClone`'s phase 1 (Clones); `openSpFlags` is `openSp` with the gate
-selectable, and `DeleteStoragePool` is its one caller with the gate off
-(Storage pools and GrowSlice). `GrowSlice` and the eight repair calls that
-run a `model` op — `CreateRepair`, `FinishRepair`, `CancelRepair`,
-`TryToAbortRepair`, `DeleteRetiredLeg`, `ForceStartGroup`,
-`UpdateGroupOperatorInCharge` and `UpdateRetiredLegKeep` — resolve in their planning `Snapshot` only
-(Storage pools and GrowSlice, Repairs and retired legs) —
-`CreateRepair` in a fresh one each round of its candidate unit (GW9): their
-later transactions — the deciding STM, which is their `model` op (Scope and
-placement), and `GrowSlice`'s CN-budget pre-check — take the cluster id, and
-the `ClusterConf` where they use it, from that snapshot and never read
-`ClusterConf` themselves. The **paged** `List*` RPCs use plain
-reads, not an STM (`architecture.md`, page_token; GW10). So does
-`GetClusterCapacity`, whose plain `SpGlobal` read and two ranges follow the
-same plain `ClusterConf` read the cluster-scoped lists make (Clusters), and
-so does `ListWorkers`,
-whose one range needs no `ClusterConf` read (Worker registry).
-`ListThinDevices`,
-`ListSubsystems`, `ListRepairs`, `ListRetiredLegs` and the single-object
-`Get*` RPCs are one-STM consistency reads (Thin devices, Subsystems and
-namespaces, Clones, Repairs and retired legs).
+`ListClusters`' and `ListWorkers`' — the three RPCs that resolve no cluster
+— the pool transactions of `AdvanceClusterIds` (GW19), the per-pool
+snapshots of `GetClusterStatus` (`model.LoadSp`, GW20) and of
+`CheckControllerNodeRestore` (`readRestoredPool`, Controller nodes), which
+take the cluster id from the request's first read, and the later
+transactions of the RPCs named below: `model.ClusterConfKey` of the
+`cluster_name`, defaulted to `common.DefaultClusterName`, yielding the
+`ClusterConf` and the cluster id, `model.ClusterId` of the name and the
+stored creation epoch, which prefixes every further key. `resolveSp` then
+reads `model.SpConfKey` of the cluster id and the `sp_name` and applies the
+`deleting` gate when its caller asks for it. The SP-scoped handlers open
+with one of three wrappers over that pair: `openSp` — resolution with the
+gate, then the `SpRev` read and GW6's token check — opens every planning
+snapshot and the deciding STM of every SP-scoped mutator but
+`DeleteStoragePool` and those whose deciding STM is a `model` op;
+`openSpRead` — resolution without the gate and without the token check —
+opens every SP-scoped read-only RPC and `DeleteClone`'s phase 1 (Clones);
+`openSpFlags` is `openSp` with the gate selectable, and `DeleteStoragePool`
+is its one caller with the gate off (Storage pools and GrowSlice).
+`GrowSlice` and the eight repair calls that run a `model` op —
+`CreateRepair`, `FinishRepair`, `CancelRepair`, `TryToAbortRepair`,
+`DeleteRetiredLeg`, `ForceStartGroup`, `UpdateGroupOperatorInCharge` and
+`UpdateRetiredLegKeep` — resolve in their planning `Snapshot` only (Storage
+pools and GrowSlice, Repairs and retired legs) — `CreateRepair` in a fresh
+one each round of its candidate unit (GW9): their later transactions — the
+deciding STM, which is their `model` op (Scope and placement), and
+`GrowSlice`'s CN-budget pre-check — take the cluster id, and the
+`ClusterConf` where they use it, from that snapshot and never read
+`ClusterConf` themselves. The **paged** `List*` RPCs use plain reads, not an
+STM (`architecture.md`, page_token; GW10). So does `GetClusterCapacity`,
+whose plain `SpGlobal` read and two ranges follow the same plain
+`ClusterConf` read the cluster-scoped lists make (Clusters), so does
+`GetClusterStatus` for that read, its page of pools and its cluster rows
+(GW20), and so does `ListWorkers`, whose one range needs no `ClusterConf`
+read (Worker registry). `ListThinDevices`, `ListSubsystems`, `ListRepairs`,
+`ListRetiredLegs` and the single-object `Get*` RPCs are one-STM consistency
+reads (Thin devices, Subsystems and namespaces, Clones, Repairs and retired
+legs).
 
 GW6. **Token check, presence-based.** The token is the request's revision
 token: its `DnRev`, `CnRev` or `SpRev` message. The contract — presence,
@@ -587,55 +592,53 @@ GW11. **Defaults resolved at WRITE time.** The rule, its two reasons, its
 order after the request validation and the two stored messages it exempts
 are `architecture.md`, Common validation, and its order after
 `CreateStoragePool`'s merge is `architecture.md`, Storage pools; the rungs
-are a member from the request, else from the owning
-`ClusterConf`, else from a constant of `common/constants.go` or, for the
-stripe, from the block, all applied by
-the RPC that writes the conf; a pool's stripe from its cluster is then
-narrowed where its product with the slice count is over the bound
-(`architecture.md`, Common validation, the stripe's product). This
-rule is where each handler carries that out. `CreateCluster` stores `model.ResolveClusterConf` of its request, which
-settles `bdev_conf`, `dn_bin_conf`, `alloc_conf`, `health_check_conf`,
-`md_check_conf` and `start_hold_conf` (Clusters); `CreateStoragePool` stores `resolveSpBdevConf`'s
-conf, `model.ResolveSpBdevConf` of the merge `mergeSpBdevConf` makes over
-the cluster's conf (`architecture.md`, Storage pools; Storage pools and
-GrowSlice). A handler that then COMPUTES with a
+are a member from the request, else from the owning `ClusterConf`, else from
+a constant of `common/constants.go` or, for the stripe, from the block, all
+applied by the RPC that writes the conf; a pool's stripe from its cluster is
+then narrowed where its product with the slice count is over the bound
+(`architecture.md`, Common validation, the stripe's product). This rule is
+where each handler carries that out. `CreateCluster` stores
+`model.ResolveClusterConf` of its request, which settles `bdev_conf`,
+`dn_bin_conf`, `alloc_conf`, `health_check_conf`, `md_check_conf` and
+`start_hold_conf` (Clusters); `CreateStoragePool` stores
+`resolveSpBdevConf`'s conf, `model.ResolveSpBdevConf` of the merge
+`mergeSpBdevConf` makes over the cluster's conf (`architecture.md`, Storage
+pools; Storage pools and GrowSlice). A handler that then COMPUTES with a
 stored member validates it first and REFUSES rather than guessing around a
 zero: `model.ValidateClusterConf` in `CreateDiskNode` and
 `CreateControllerNode` (before dividing a reported size by `extent_size`),
-in `DeleteDiskNode` and `UpdateDiskNodeDisabled` (before their first
-write, the last of their checks of the request and the store, because the
-one capacity key each moves is named by shifting the STORED ladder), in `CreateStoragePool` (on its plain pre-read,
-before the merge that gives its scans their leg count and that the geometry
-rules of `architecture.md`, Common validation, judge, and again in its STM
-before any group geometry) and the `GrowSlice` handler (before any group
-geometry), in `newDnLedger` (the DN ledger `CreateStoragePool`,
-`CreateClone` and `CreateMigration` build before staging their first
-write, for the same capacity-key reason), at the top of
-`model.EndMigrationIn` for `FinishMigration` and `CancelMigration`,
-in the planning read of `FinishRepair`, `CancelRepair` and
-`DeleteRetiredLeg` (`releaseConfGate`), whose `model` ops give a side back
-through the drains' ledger by the same capacity keys (`FinishRepair`'s op
-gives back the side of the oldest retired leg that is not kept when a worker's
-repair finishes at the retired-leg bound, and the gate runs whether or not
-a side goes back),
-and in the scans `pickDns` and `pickCn`
-(where a zero batch size would silently make the scan width zero and turn
-every allocation into `RESOURCE_EXHAUSTED`), in `GetClusterCapacity`
-right after its `ClusterConf` read (its space answer counts disk nodes by
-the stored ladder and turns extents into bytes by the stored extent size),
-in `CreateMigration`'s plan
-and STM before the
-destination's metadata units are sized by the cluster's `extent_size`
-(`migrMetaUnitsOf`), and in `CreateClone`'s plan and STM before its clone
-meta group is laid out from that `extent_size` (`planCloneGrp`);
-`model.ValidateBdevConf` in `GrowSlice`, in `CreateThinDevice` (before
-sizing against the stripe), in `InspectStoragePool` (before it sizes the
-data space by the block size), in `CreateClone`'s plan and STM before its
-clone meta group is laid out and its metadata bounded by the SP's block
-size (`planCloneGrp`), and in `CreateMigration` before a migration's
-metadata units are sized by that block size (`migrMetaUnitsOf`: a zero
-there would size every migration at one unit, `architecture.md`, Metadata
-units). Such a zero is a lost
+in `DeleteDiskNode` and `UpdateDiskNodeDisabled` (before their first write,
+the last of their checks of the request and the store, because the one
+capacity key each moves is named by shifting the STORED ladder), in
+`CreateStoragePool` (on its plain pre-read, before the merge that gives its
+scans their leg count and that the geometry rules of `architecture.md`,
+Common validation, judge, and again in its STM before any group geometry)
+and the `GrowSlice` handler (before any group geometry), in `newDnLedger`
+(the DN ledger `CreateStoragePool`, `CreateClone` and `CreateMigration`
+build before staging their first write, for the same capacity-key reason),
+at the top of `model.EndMigrationIn` for `FinishMigration` and
+`CancelMigration`, in the planning read of `FinishRepair`, `CancelRepair`
+and `DeleteRetiredLeg` (`releaseConfGate`), whose `model` ops give a side
+back through the drains' ledger by the same capacity keys (`FinishRepair`'s
+op gives back the side of the oldest retired leg that is not kept when a
+worker's repair finishes at the retired-leg bound, and the gate runs whether
+or not a side goes back), and in the scans `pickDns` and `pickCn` (where a
+zero batch size would silently make the scan width zero and turn every
+allocation into `RESOURCE_EXHAUSTED`), in `GetClusterCapacity` right after
+its `ClusterConf` read (its space answer counts disk nodes by the stored
+ladder and turns extents into bytes by the stored extent size), in
+`GetClusterStatus` right after its `ClusterConf` read (GW20), in
+`CreateMigration`'s plan and STM before the destination's metadata units are
+sized by the cluster's `extent_size` (`migrMetaUnitsOf`), and in
+`CreateClone`'s plan and STM before its clone meta group is laid out from
+that `extent_size` (`planCloneGrp`); `model.ValidateBdevConf` in
+`GrowSlice`, in `CreateThinDevice` (before sizing against the stripe), in
+`InspectStoragePool` (before it sizes the data space by the block size), in
+`CreateClone`'s plan and STM before its clone meta group is laid out and its
+metadata bounded by the SP's block size (`planCloneGrp`), and in
+`CreateMigration` before a migration's metadata units are sized by that
+block size (`migrMetaUnitsOf`: a zero there would size every migration at
+one unit, `architecture.md`, Metadata units). Such a zero is a lost
 invariant, not a bad request, so every one of those gates is GW7's `ABORTED`
 and never `INVALID_ARGUMENT`. `model.GrowSlice` re-runs both validators
 inside its own STM and can report that refusal only as an `ErrPrecondition`,
@@ -797,58 +800,55 @@ bumps a rev key. An error in any transaction ends the RPC there.
 
 GW20. **The status read.** `GetClusterStatus` (`gateway/status.go`) is the
 one handler that calls agents for many objects in one request, so it bounds
-those calls itself, for its own request alone. It validates the name and
-the page arguments (GW4, GW10), reads the `ClusterConf` plainly and judges
-it with `model.ValidateClusterConf`, as every reader that computes from it
-does, since the read takes the cntlr interval, the extent size and the
-batch from it, and pages the pools with `pageNames`. The first page's
-cluster rows come from plain ranges outside any STM: the worker registry,
-the cluster's `dn_conf` and `cn_conf` prefixes, and, for the revision keys,
-one keys-only range of each node kind's whole prefix
-(`model.DnRevKindPrefix`, `model.CnRevKindPrefix`), since those keys are
-sharded and a cluster has no prefix of its own there; a key of another
-cluster is passed over. Each pool is loaded with `model.LoadSp`, its own
-snapshot, as the sp worker loads it, so its lost records are the ones the
-worker meets (`dnv-worker.md` MD3); a pool whose `SpConf` went since the
-page's range is passed over, and one whose load fails gives one row of
-status UNKNOWN. A deleting pool gives one row and is called for nothing.
-Beside the load, one point read of the pool's id-to-name record
-(`model.SpNameKey`), which no list names and so `LoadSp` does not report
-missing, gives its lost-record row; the sp worker's gate on its groups'
-lengths to zero (`model.SideZeroBytes`, `model.CloneMetaSideZeroBytes`;
-`dnv-worker.md` AR1) gives the pool's row of a conf the worker refuses,
-and then no grow is judged.
-Then the pool's calls run at once: the primary's `GetCntlrInfo`, without
-the block counters, and each migration destination's `GetSideInfo` past
-its cutover. The rows are computed from the state and the answers
-(`statusPoolRows`), the grow's checks from `model`'s own rules —
-`GrowPending`, `DataCovered`, `GrowExtCnt`, `SpCnCharges` and
-`CnBudgetShort` — in the order the sp worker's grow takes them
-(`dnv-worker.md` AR6), the disk node scan last, its answer kept for the
-request by the extent and leg counts; a repair's wait comes from
-`model.RepairWaitReason`, the worker's own rule (`dnv-worker.md` AR17).
-Every text goes through `common.CutRowText`, the agents' cut of the row
-text cap. The bounds, each the request's own: `StatusFanOut`
-pools are read at once; each agent call takes `StatusAgentTimeout`; and the
-first call of the request to an address runs alone (`statusGate`): the
-pools that need the same address wait for it and skip the address with an
-UNKNOWN row when it failed, the deadline included, or call themselves
-once it answered, so a node that hangs costs one budget per read whatever
-it holds. An agent's code is an answer, never a failure of the address.
-Under a request deadline the read starts no pool once less than one agent
-budget and `statusReplyMargin` are left, the page's first pool aside so
-that a page always moves on, and ends each pool's work the margin before
-the deadline. A pool whose work that deadline ended, its own calls or its
-wait at the gate cut by the read and not by its agent, is left off the
-page with every pool after it, the page's first aside. Each call records
-whether the read's deadline ended it, and the first pool's rows say the
-read's time ran out for such a call, the name read and the grow's disk node
-scan, and blame its agent for any other failure; the token is the key of
-the last pool the page
-keeps, a key of the pool prefix as GW10's tokens are, so the next page
-reads the pool the deadline cut. An agent that fails is a row,
-never the call's error (AG3); only the cluster's own reads answer
-`ABORTED`. Nothing is written.
+those calls itself, for its own request alone. It validates the name and the
+page arguments (GW4, GW10), reads the `ClusterConf` plainly and judges it
+with `model.ValidateClusterConf`, as every reader that computes from it
+does, since the read takes the cntlr interval, the extent size and the batch
+from it, and pages the pools with `pageNames`. The first page's cluster rows
+come from plain ranges outside any STM: the worker registry, the cluster's
+`dn_conf` and `cn_conf` prefixes, and, for the revision keys, one keys-only
+range of each node kind's whole prefix (`model.DnRevKindPrefix`,
+`model.CnRevKindPrefix`), since those keys are sharded and a cluster has no
+prefix of its own there; a key of another cluster is passed over. Each pool
+is loaded with `model.LoadSp`, its own snapshot, as the sp worker loads it,
+so its lost records are the ones the worker meets (`dnv-worker.md` MD3); a
+pool whose `SpConf` went since the page's range is passed over, and one
+whose load fails gives one row of status UNKNOWN. A deleting pool gives one
+row and is called for nothing. Beside the load, one point read of the pool's
+id-to-name record (`model.SpNameKey`), which no list names and so `LoadSp`
+does not report missing, gives its lost-record row; the sp worker's gate on
+its groups' lengths to zero (`model.SideZeroBytes`,
+`model.CloneMetaSideZeroBytes`; `dnv-worker.md` AR1) gives the pool's row of
+a conf the worker refuses, and then no grow is judged. Then the pool's calls
+run at once: the primary's `GetCntlrInfo`, without the block counters, and
+each migration destination's `GetSideInfo` past its cutover. The rows are
+computed from the state and the answers (`statusPoolRows`), the grow's
+checks from `model`'s own rules — `GrowPending`, `DataCovered`,
+`GrowExtCnt`, `SpCnCharges` and `CnBudgetShort` — in the order the sp
+worker's grow takes them (`dnv-worker.md` AR6), the disk node scan last, its
+answer kept for the request by the extent and leg counts; a repair's wait
+comes from `model.RepairWaitReason`, the worker's own rule (`dnv-worker.md`
+AR17). Every text that carries a record's, an error's or an agent's words
+goes through `common.CutRowText`, the agents' cut of the row text cap. The
+bounds, each the request's own: `StatusFanOut` pools are read at once; each
+agent call takes `StatusAgentTimeout`; and the first call of the request to
+an address runs alone (`statusGate`): the pools that need the same address
+wait for it and skip the address with an UNKNOWN row when it failed, the
+deadline included, or call themselves once it answered, so a node that hangs
+costs one budget per read whatever it holds. An agent's code is an answer,
+never a failure of the address. Under a request deadline the read starts no
+pool once less than one agent budget and `statusReplyMargin` are left, the
+page's first pool aside so that a page always moves on, and ends each pool's
+work the margin before the deadline. A pool whose work that deadline ended,
+its own calls or its wait at the gate cut by the read and not by its agent,
+is left off the page with every pool after it, the page's first aside. Each
+call records whether the read's deadline ended it, and the first pool's rows
+say the read's time ran out for such a call, the name read and the grow's
+disk node scan, and blame its agent for any other failure; the token is the
+key of the last pool the page keeps, a key of the pool prefix as GW10's
+tokens are, so the next page reads the pool the deadline cut. An agent that
+fails is a row, never the call's error (AG3); only the cluster's own reads
+answer `ABORTED`. Nothing is written.
 
 ### Worker registry
 
@@ -973,18 +973,20 @@ update-disabled and inspect; and a seventh with no disk node twin:
   RetiredLeg record of each retired leg its counted groups list, only when
   the restored revision is below the held one, a repair counted only when
   its parent group is a slice's or the meta group of a clone that is not
-  latched, as the worker's `cntlrRepairs` sends it, and `layoutSides`
-  counts the restored layout's sides as the agent counts the held one, a
-  retired leg by the side id of its record; a held layout with a higher
-  largest side id or another count, or one whose summary says a retired
-  leg's side id is missing, which also sets the row's
-  `held_side_ids_incomplete`, reads `RESTORE_VERDICT_MAY_BREAK`. `restoredTds` ranges `ThinDevicePrefix`
-  with no STM for a pool held above the restored revision. A record the
-  row reads that is missing or does not decode, a name of `td_name_list`
-  with no record, and a cntlr of the restored node, held or not, whose
-  pool the restored state names nowhere make the row
-  `RESTORE_VERDICT_RECORD_LOST`, never the answer's error. Rows are ordered by `sp_id`,
-  `cntlr_id` and node, thin devices by `td_id`. Nothing is written.
+  latched, as the worker's `cntlrRepairs` sends it, and `layoutSides` counts
+  the restored layout's sides as the agent counts the held one, a retired
+  leg by the side id of its record; a held layout with a higher largest side
+  id or another count, or one whose summary says a retired leg's side id is
+  missing, which also sets the row's `held_side_ids_incomplete`, reads
+  `RESTORE_VERDICT_MAY_BREAK`. `restoredTds` ranges `ThinDevicePrefix` with
+  no STM for a pool held above the restored revision. A record the row reads
+  that does not decode, or that is missing past the pool's id-to-name
+  record, whose absence alone reads as a pool made after the backup, a name
+  of `td_name_list` with no record, and a cntlr of the restored node, held
+  or not, whose pool the restored state names nowhere make the row
+  `RESTORE_VERDICT_RECORD_LOST`, never the answer's error. Rows are ordered
+  by `sp_id`, `cntlr_id` and node, thin devices by `td_id`. Nothing is
+  written.
 
 ### Storage pools and GrowSlice
 
@@ -1835,13 +1837,14 @@ AG1. **Placement.** Agent calls happen outside STMs (`architecture.md`, STM
 discipline); the matrix below places each one. A `DeleteClone` whose clone
 is ALREADY `deleting` answers in phase 1 and makes no agent call at all
 (Clones), and neither does a `ForceStartGroup` with `cancel` (Repairs and
-retired legs), a `CreateRepair` in a pool with no primary, which judges
-the bad leg on its record alone (`architecture.md`, Repairs, A leg of
-another identity), nor `GetClusterStatus` for a pool being deleted or with
-no primary (GW20), nor a node delete with `force` (Disk nodes). The two
-pre-STM size calls take the cluster id from a
-plain pre-read of `ClusterConf`, the in-STM read staying authoritative; the
-calls after resolution take it from the resolving transaction.
+retired legs), a `CreateRepair` in a pool with no primary, which judges the
+bad leg on its record alone (`architecture.md`, Repairs, A leg of another
+identity), nor `GetClusterStatus` for a pool being deleted, which for a pool
+with no primary calls only the destinations of its migrations past their
+cutover (GW20), nor a node delete with `force` (Disk nodes). The two pre-STM
+size calls take the cluster id from a plain pre-read of `ClusterConf`, the
+in-STM read staying authoritative; the calls after resolution take it from
+the resolving transaction.
 
 AG2. **Connection.** Per call (`withAgentConn`): a ctx derived from the
 request's with `DefaultGatewayAgentTimeout` as its timeout, one plaintext
@@ -2184,38 +2187,37 @@ gateway, never through `workerctl`.
 * faults (one gateway) — first, the capacity read's space answer for the
   shape of the case's pool, before the pool is made and after it
   (`architecture.md`, Clusters): the disk side's share as the limit, the
-  largest first data group, and after the create the pool's legs charged
-  to the disk nodes and its footprint to each cntlr's controller node;
-  then the refusal batteries on a live pool: validation,
-  not-found and precondition classes — among them an extent size off its
-  unit and a data block over the block's bound at a cluster's and a pool's
-  create, the NSID that names every namespace, a clone source's namespace
-  id of zero, a node's `tr_type` of "TCP" and `adr_fam` of "IPv4", each
-  refused before any read or agent call, a namespace moved to a thin
-  device of another size, a migration re-sent under a taken name, which
-  hears `ALREADY_EXISTS` ahead of its leg's two sides, and a finish of a
-  migration whose cutover is pending, refused with `force` and without —,
-  each refusal provably writing nothing; the primary threshold's floor of
-  `architecture.md`, Common validation, from both sides — the validation
-  battery refuses a pool whose primary threshold is one second under twice
-  the cluster's stored `cntlr_interval`, and the same request at exactly
-  twice it is accepted with its threshold stored as sent, the pool then
-  deleted and drained so that every node gets back what its create took;
-  agent faults — a hung agent bounded by the agent-call budget, a closed
-  port refused fast, inspects of hung and stopped fakes; the hydration
-  checks of `DeleteClone` and `FinishMigration` refusing on incomplete
-  hydration and on an unreachable agent, `force` skipping them; the node
-  deletes' proof, on a disk node and a controller node made for it
-  late in the case, refusing an agent behind the node, a leftover
-  the agent names, a side record the disk's table still holds and a
-  stopped agent, `force` deleting the node, and refusing with `force` too
-  a disk node that still hosts a side; and the
-  status read over planted faults (GW20) — one row per worker role, since
-  no worker runs, and none of the clean pool; a leg whose health epoch is
-  set and whose row the primary reads ERROR, listed as one row; a thin
+  largest first data group, and after the create the pool's legs charged to
+  the disk nodes and its footprint to each cntlr's controller node; then the
+  refusal batteries on a live pool: validation, not-found and precondition
+  classes — among them an extent size off its unit and a data block over the
+  block's bound at a cluster's and a pool's create, the NSID that names
+  every namespace, a clone source's namespace id of zero, a node's `tr_type`
+  of "TCP" and `adr_fam` of "IPv4", each refused before any read or agent
+  call, a namespace moved to a thin device of another size, a migration
+  re-sent under a taken name, which hears `ALREADY_EXISTS` ahead of its
+  leg's two sides, and a finish of a migration whose cutover is pending,
+  refused with `force` and without —, each refusal provably writing nothing;
+  the primary threshold's floor of `architecture.md`, Common validation,
+  from both sides — the validation battery refuses a pool whose primary
+  threshold is one second under twice the cluster's stored `cntlr_interval`,
+  and the same request at exactly twice it is accepted with its threshold
+  stored as sent, the pool then deleted and drained so that every node gets
+  back what its create took; agent faults — a hung agent bounded by the
+  agent-call budget, a closed port refused fast, inspects of hung and
+  stopped fakes; the hydration checks of `DeleteClone` and `FinishMigration`
+  refusing on incomplete hydration and on an unreachable agent, `force`
+  skipping them; the node deletes' proof, on a disk node and a controller
+  node made for it late in the case, refusing an agent behind the node, a
+  leftover the agent names, a side record the disk's table still holds and a
+  stopped agent, and `force` deleting the node, while the precondition
+  battery refuses with `force` too a disk node that still hosts a side; and
+  the status read over planted faults (GW20) — one row per worker role,
+  since no worker runs, and none of the clean pool; a leg whose health epoch
+  is set and whose row the primary reads ERROR, listed as one row; a thin
   pool that needs a check; a thin pool out of data space; a primary that
-  hangs, listed as one UNKNOWN row within the status read's budget; pages
-  of one pool, the cluster rows on the first alone; and, last, the pool's
+  hangs, listed as one UNKNOWN row within the status read's budget; pages of
+  one pool, the cluster rows on the first alone; and, last, the pool's
   revision key deleted, listed as a lost record.
 * restart (kill under load) — one gateway is killed with SIGKILL while it
   provably holds a create in its handler; every pool of the wave is then

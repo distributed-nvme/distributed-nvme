@@ -422,21 +422,22 @@ lvm2 set to read only the node's own physical volumes; `AUTO -all` in
 `/etc/mdadm/mdadm.conf`, after an ARRAY line for each md array of the node's
 own, so that md assembles by itself only those; and, on a controller node,
 the node's own file systems mounted by device path, never by a label or a
-uuid a tenant could copy. Every machine has a host name of its own, which
-is the location of each node created on it with no location, so the nodes
-of one machine are one location; a machine whose host name is not a valid
+uuid a tenant could copy. [The operations
+doc](operations.md#install-the-udev-rules-on-a-node) has the steps. The
+tutorials install the udev rules, and mask the nvmf-connect unit, so that
+nvme-stas is the only program that connects to what a discovery change
+announces. The node check fails a node where one of the three udev rules is
+missing or masked, and warns when lvm2 can read dnv's own devices or
+mdadm.conf is not set this way. It judges no udev rule of the node's own: a
+rule that does the work of dnv's md rule does not count. It cannot tell
+whether lvm2 reads a leg's NVMe device or a clone's source, which carry no
+dnv name, and it does not read how the node's file systems are mounted.
+
+Host names: every machine has a host name of its own, which is the
+location of each node created on it with no location, so the nodes of one
+machine are one location; a machine whose host name is not a valid
 location, as the kernel's `(none)`, needs a location at each node create
 ([operations](operations.md#choose-a-nodes-location)).
-[The operations doc](operations.md#install-the-udev-rules-on-a-node) has
-the steps. The tutorials install the udev rules, and mask the nvmf-connect
-unit, so that nvme-stas is the only program that connects to what a
-discovery change announces. The node check fails a node where one of the
-three udev rules is missing or masked, and warns when lvm2 can read dnv's
-own devices or mdadm.conf is not set this way. It judges no udev rule of
-the node's own: a rule that does the work of dnv's md rule does not count.
-It cannot tell whether lvm2 reads a leg's NVMe device or a clone's source,
-which carry no dnv name, and it does not read how the node's file systems
-are mounted.
 
 etcd: a release of 3.5.13 or later, run with the request caps and automatic
 compaction the tutorial's etcd command shows; the tutorial and the suites use
@@ -546,7 +547,7 @@ proven against fakes alone.
 | Thin ids per pool, one taken from a counter by every thin device the pool creates, snapshots included | 16,777,215 | the counter set to the limit by hand, one create at it, the next refused | no test reaches it |
 | Extent size | 64 MiB to 1 TiB, a whole number of 4 KiB | pools created on 5 GiB extents; 1 TiB checked by validation alone | 64 MiB and 1 GiB; no run at 1 TiB |
 | Data block of a pool | 64 KiB to 4 MiB, a power of two | pools created on 4 MiB blocks; the next power of two refused | the default 1 MiB; 64 KiB in a suite on fake agents |
-| Controller node budget | one extent to 64 TiB, set once per node: a larger `--capacity` is cut to 64 TiB, one smaller than an extent is refused, and one unset or under 1 KiB is 64 TiB | the bounds, through the create with a fake agent | 4 TiB, the default of 0.1, on real nodes and on fake agents in a suite; 64 TiB not yet run |
+| Controller node budget | one extent to 64 TiB, set once per node: a larger `--capacity` is cut to 64 TiB, one smaller than an extent is refused, and one unset or under 1 KiB is 64 TiB | the bounds, through the create with a fake agent | 64 TiB, the default, on real nodes in the Kubernetes suite and on fake agents in the gateway suite |
 
 To measure dnv fairly, write the whole volume first, since a thin device
 returns zeros for a block it has not written without reading any disk; run

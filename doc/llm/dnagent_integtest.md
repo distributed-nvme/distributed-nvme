@@ -193,8 +193,8 @@ their progress in. The info-read commands are plain memory reads.
   it.
 * **Log level.** Every agent of the suite runs at `--log-level debug`, the
   blocksize case's too, so its log holds its reads, which the cases read
-  (`log.md` R6, R9), but in the loglevel case, the one case at the default
-  log level.
+  (`log.md` R6, R9), save one node's agent in the loglevel case, the one
+  case at the default log level.
 * **Observed, never asserted.** The provisioning and read-through windows are
   races a loop device usually wins; the cutover window lasts `SuspendSeconds`
   and is sampled once right after the cutover reply, which a slow step can
