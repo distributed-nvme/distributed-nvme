@@ -102,7 +102,8 @@ func (rd *cnReading) mdWalks() *mdWalkOnce {
 // judges the node the rows read. The verdict also names the md members the
 // rows show the converge would put back, add or remove for a repair
 // (putBackNames, CN30), the absent arrays it would start and the forced
-// starts it would carry through (absentArrayNamed, forcedStartNamed, CN30),
+// starts it would carry through, or the stops of arrays they begin with
+// (absentArrayNamed, forcedStartNamed, CN30),
 // and the sides of wanted legs the converge would connect (sidesToConnect,
 // CN30).
 //

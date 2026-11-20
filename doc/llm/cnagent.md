@@ -1085,9 +1085,10 @@ what only a read sees: the sides and clone source endpoints with no
 controller (below; CN18), a migrating leg's path to cut (The cut of a
 migrating leg's path, below), the md members to fail early, put back, add
 or remove, a broken array to assemble again, an absent array the assembly
-would start, a forced start a converge would carry through and an md check
-a converge would start, stop or adopt (CN12), the forced-start marks of a
-held request that does not count as delivered (CN8), and an uncreated
+would start, a forced start a converge would carry through or the stop of
+an array it begins with, and an md check a converge would start, stop or
+adopt (CN12), the forced-start marks of a held request that does not count
+as delivered (CN8), and an uncreated
 snapshot whose create message the pre-pass would send (CN14). Some states
 no converge cures are named by nothing and cost nothing: a late member
 whose controller the kernel keeps reconnecting, once the early fail has
@@ -1647,7 +1648,11 @@ dm-clone (CN18).
   (CN10, The cut of a migrating leg's path), and for the early fail's one
   name of a member md still holds in its place and does not show faulty,
   once its leg is dead (The early fail, below), which costs one
-  `SyncupCntlr` and one `mdadm --fail`. Past those such a member costs no
+  `SyncupCntlr` and one `mdadm --fail`, and for the stop a forced start
+  that waits for the member begins with, which a read names while an array
+  of the group is there, does not run, passes the stop's member test and
+  shows no holder, until a converge makes the stop (the forced start,
+  below, step 1; CN30). Past those such a member costs no
   `SyncupCntlr` and no command, and the leg repair (`dnv-worker.md` AR8) or
   the operator ends a member that stays late. A side whose controller the
   kernel deleted is named by the sides with no controller (CN10, CN30).
@@ -1688,8 +1693,11 @@ dm-clone (CN18).
   mark stands and its array does not run, a member the forced start keeps
   (below) that is not available is late too, a repair's new leg among them:
   the forced start waits for it, and a read names the forced start only
-  once the named leg and every member the start would zero serve (CN30). A
-  provisioning new leg is not late even then: its sides' provisioned flip
+  once the named leg and every member the start would zero serve, short of
+  the stop the forced start begins with, which a read names, whether or
+  not they serve, while an array of the group is there that the forced
+  start would stop (CN30). A provisioning new leg is not late even then:
+  its sides' provisioned flip
   raises the pool's revision, whose fan-out brings the converge
   (`dnv-worker.md` RW18). A `RedundNone` group's leg counts too, and its
   dm-linear (above) is created or reloaded only over an available leg: the
@@ -2263,15 +2271,23 @@ dm-clone (CN18).
      retries a copy (`cnagent_integtest.md`, Lab facts), so a pass cannot
      tell such an array from one that runs. A read names the forced start
      once it reads no array of the group running, a broken array read
-     between two such writes among them (CN30), and the converge that name
-     brings acts on the mark when it too reads the array not running, and
-     leaves it waiting otherwise; while a read of a request that counts as
-     delivered finds the array running it names nothing for the mark, and
-     no converge runs for it. A read of a held request that does not count
-     names the mark as stored whether or not the array runs (above; CN8,
-     CN30), and the converge that name brings leaves the mark waiting while
-     the array runs. An array that holds a member that is not a dm device,
-     read broken, meets the refusal below, which no read names. The mark
+     between two such writes among them (CN30): the start when the checks
+     of steps 2 and 3 hold, and otherwise, while an array of the group is
+     there that this step would stop, this step's stop alone. The converge
+     that name brings acts on the mark when it too reads the array not
+     running, and leaves it waiting otherwise, and the next read that reads
+     the array not running names it again. Reason for the stop's name: a
+     mark written while the leg that kept the data is still dead is meant
+     to stop the broken array before that leg is back (Known limits), and
+     the checks do not hold while it is dead, so without the name a pass
+     that read the array running would leave the stop to the leg's return.
+     While a read of a request that counts as delivered finds the array
+     running it names nothing for the mark, and no converge runs for it. A
+     read of a held request that does not count names the mark as stored
+     whether or not the array runs (above; CN8, CN30), and the converge
+     that name brings leaves the mark waiting while the array runs. An
+     array that holds a member that is not a dm device, read broken, meets
+     the refusal below, which no read names. The mark
      waits until a converge acts on it, or until a request hands the agent
      none: the worker's clear (`dnv-worker.md` AR13), the operator's
      withdrawal of the mark (`architecture.md`, Repairs,
@@ -2435,13 +2451,16 @@ dm-clone (CN18).
   tell whether the array runs. Nothing in the agent runs the converge
   again for it (CN10, No converge in the background): a read names the
   forced start once its checks pass and the named leg and every member the
-  start would zero serve (CN30), and the converge of the worker's re-send
-  tries again from the first step. That covers a step that failed for a passing reason, such
+  start would zero serve, and, while an array of the group that does not
+  run is there, step 1's stop whatever the checks say (CN30), and the
+  converge of the worker's re-send tries again from the first step. That
+  covers a step that failed for a passing reason, such
   as a run killed at the soft timeout, a stop that went through
   unverified, a first assembly that left the old identity or a member
-  that serves again. An error that lasts, such as a named leg that is no
-  full member or a stop a layer above refuses, is named by nothing, and
-  neither is a member that stays dead, short of a stop refused by a
+  that serves again. Once no array of the group is there, an error that
+  lasts, such as a named leg that is no full member, is named by nothing,
+  and neither is a member that stays dead; a stop a layer above refuses is
+  named by nothing either, short of a stop refused by a
   process that holds the array open: md's holders listing does not show
   that process, so every read names the forced start (Known limits). A pass whose forced start
   starts the array leaves nothing for the mark: the array then
@@ -2462,18 +2481,29 @@ dm-clone (CN18).
   of the group that is there passes step 1's member test and its holders
   listing shows no device above it, so no layer above blocks step 1's stop,
   and the checks of steps 2 and 3, run over the members the read finds
-  serving (`planForcedStart`), hold. Reason: the read runs the converge's
-  own checks, so it names nothing for a refusal that lasts — a named leg
+  serving (`planForcedStart`), hold. While those checks do not hold, the
+  read names step 1's stop alone, by the same name, where a converge would
+  make it: the mark stands as above, and an array of the group is there,
+  does not run, passes step 1's member test and shows no holder. Once the
+  stop is made, no array of the group is there and the read names nothing
+  until the checks hold, so the stop's name brings at most one converge for
+  each read that finds the array not running, and none over an array that
+  reads running. Reason: the read runs the converge's own checks and step
+  1's member test, and reads the holders that would refuse step 1's stop,
+  so it names nothing for a member that is no leg of this pool or a device
+  above that holds the array, and, with no array of the group there,
+  nothing for a refusal that lasts — a named leg
   that is no full member, carries a bad-block list under a mark that does
   not pass `BAD_BLOCKS`, or is older than a member the start would zero
-  under a mark that does not pass `OLDER_LEG`, a member that is no
-  leg of this pool, a device above that holds the array — nor while the
+  under a mark that does not pass `OLDER_LEG` — nor while the
   named leg or a member the start would zero is not available, a kept new
   leg still provisioning among them, whose sides' provisioned flip raises
   the pool's revision (`dnv-worker.md` RW18); the open repair's bad leg,
   which step 3 neither reads nor zeroes, is not tested; and a name brings a
-  converge that acts, short of a stop refused by a process that holds the
-  array open, which no holders listing shows (Known limits).
+  converge that acts when it too reads the array not running (step 1),
+  short of a stop refused by a process that holds the array open, which no
+  holders listing shows (Known limits). Reason for the stop's name: step
+  1, above.
 
   **The re-assembly.** A group's array that reads broken, with no
   forced-start mark in the group's record and the group's
@@ -5672,7 +5702,11 @@ absent array the converge's assembly would start (CN12): its group's row
 reads `RES_STATUS_MISSING`, and the verdict names the array; and a forced
 start the converge would carry through (CN12, The forced start): the
 group's row reads `RES_STATUS_MISSING`, or `ERROR` with the state of an
-array that does not run, and the verdict names the group's forced start.
+array that does not run, and the verdict names the group's forced start;
+and so does the stop of an array that does not run, which the forced start
+begins with: the group's row reads `ERROR` with the array's state, or
+`RES_STATUS_MISSING` while it reads clear, and the verdict names the
+group's forced start.
 
 ### The read-only verdict
 
@@ -6036,18 +6070,32 @@ converge acts on, and no array of which runs; an array of the group that is
 there holds no member that is not a leg wrapper of this pool and its holders
 listing shows no device above it; and the forced start's checks
 (`planForcedStart`), run over the members the read finds available as for an
-absent array, hold. A read of the holders or of a superblock that did not
-answer names nothing; the next read reads again. So it names nothing for a
-refusal that lasts — a named leg that is no full member, carries a bad-block
-list under a mark that does not pass it, or is older than a member the start
-would zero under a mark that does not pass that, a member that is no leg
-of this pool, a device above that holds the array — nor while the named leg or a member the start would zero is not
-available, a kept new leg still provisioning among them (the open repair's
-bad leg is not tested: CN12 step 3), nor over an array that reads running,
-where the mark waits; a process that holds the array open shows in no
-holders listing, and a stop it refuses is in Known limits. Reason: as for
-the absent array, and a read cannot act on a mark, while a group whose array
-does not run changes no desired state.
+absent array, hold. Where all of that holds but the checks, and an array of
+the group is there, the verdict names, by the same name, the stop the
+forced start begins with (CN12 step 1), the array's node after the group,
+that it does not run and that a converge stops it; a converge that reads
+the array not running stops it before any check, so the read after that
+converge finds no array of the group and names nothing until the checks
+hold. A read of the holders that did not answer
+names nothing, and so does a read of a superblock that did not answer while
+no array of the group is there; the next read reads again. So it names
+nothing for a member that is no leg of this pool, a device above that holds
+the array, or an array that reads running, where the mark waits, and, with
+no array of the group there, nothing for a refusal that lasts — a named leg
+that is no full member, carries a bad-block list under a mark that does not
+pass it, or is older than a member the start would zero under a mark that
+does not pass that — nor while the named leg or a member the start would
+zero is not available, a kept new leg still provisioning among them (the
+open repair's bad leg is not tested: CN12 step 3); a process that holds the
+array open shows in no holders listing, and a stop it refuses is in Known
+limits. Reason: as for the absent array, and a read cannot act on a mark,
+while a group whose array does not run changes no desired state. Reason for
+the stop's name: md moves a broken array between broken and running states
+while it retries a copy whose only source is dead, so the converge a mark
+brings can read the array running and leave the mark waiting, and while the
+named leg is dead the checks do not hold; the name brings the stop before
+that leg is back (CN12 step 1), at the cost of one converge for each read
+that finds the array not running until a converge stops it.
 
 A cntlr's read-only verdict also names each forced-start mark of the
 request the agent holds while that request does not count as delivered
@@ -6084,9 +6132,10 @@ live path the converge would cut, a leg wrapper, a `RedundNone` group's
 dm-linear or a dm-clone that a converge would create, reload, resume or
 finish where the last converge stopped short of that step, an md member to
 fail early, put back, add or remove, a broken array to assemble again, an
-absent array to start, a forced start to carry through, an md check to
-start, stop or adopt, an uncreated snapshot to message, a piece of the base
-state and a stored forced-start mark (all above) — brings by itself the
+absent array to start, a forced start to carry through or its stop to
+make, an md check to start, stop or adopt, an uncreated snapshot to
+message, a piece of the base state and a stored forced-start mark (all
+above) — brings by itself the
 `Syncup*` on every second round at most (`dnv-worker.md` RW4 step 5, and
 RW5 for the subsystem directory) while the agent accepts it; while the
 agent's saves fail, the `Syncup*` is refused and stores no observation, so
@@ -6393,9 +6442,10 @@ stores instead is CN23's.
   process that holds the array open shows in no holders listing, and md
   refuses to stop an array that has a personality, as a broken one does,
   while any process holds it open, and an inactive one while a process
-  holds it open exclusively; the read then names the forced start or the
-  re-assembly (CN30), and each `SyncupCntlr` it brings fails at the stop
-  again, one every second round, until the process lets go.
+  holds it open exclusively; the read then names the forced start, or the
+  stop it begins with, or the re-assembly (CN30), and each `SyncupCntlr`
+  it brings fails at the stop again, one every second round, until the
+  process lets go.
 * A mark the primary did not act on stays until the operator withdraws it
   or the array stops: the worker clears only a mark the group's reading
   names as the acted mark (CN28; `dnv-worker.md` AR13), which the agent
@@ -6407,11 +6457,13 @@ stores instead is CN23's.
   broken between its reads of write-pending or active, both of which CN12
   counts as running (`cnagent_integtest.md`, Lab facts). While such a mark
   stands the worker creates no repair of the group (`dnv-worker.md` AR8),
-  and nothing names it while the array reads running (next); at the
-  array's next stop, as when md's retry ends in broken, a read names the
-  forced start where its checks pass, and the converge it brings acts on
-  the mark; a named leg older than a member it would zero is named by
-  nothing, and a converge refuses it (CN12, CN30).
+  and nothing names it while the array reads running (next); once a read
+  reads the array not running, as between md's retries or when they end
+  in broken, it names the forced start where its checks pass and the stop
+  the start begins with where they do not, and the converge it brings acts
+  on the mark when it too reads the array not running; once that converge
+  has stopped the array, a named leg older than a member it would zero is
+  named by nothing, and a converge refuses it (CN12, CN30).
 * A mark over an array that runs waits, and no converge runs for it but
   the one the read's name of the stored mark brings after an agent
   restart, which leaves it waiting (CN8, CN30): a pass that finds the
@@ -6444,10 +6496,16 @@ stores instead is CN23's.
   that leg held there, with no error. The leg md copied from holds the
   data, not the new leg it copied onto, and only the operator can tell them
   apart; the override is their choice, which the list's length per member
-  in `InspectGrp` shows first. A mark written while the leg that kept the data is still
-  dead avoids the case: the forced start then stops the broken array before
-  that leg is back, waits for it, and starts from it once it is back (CN12,
-  the forced start).
+  in `InspectGrp` shows first. A mark written while the leg that kept the
+  data is still dead avoids the case if that leg stays dead until a
+  converge has stopped the array: the forced start then stops the broken
+  array before that leg is back — a read that finds the array not running
+  names that stop until a converge makes it, which can take several check
+  rounds while md retries, since a converge that reads the array running
+  leaves the mark waiting (CN12 step 1, CN30) — waits for it, and starts
+  from it once it is back (CN12, the forced start). The operator's wait for
+  no array state before the leg comes back is for this (`operations.md`, A
+  group whose in-sync leg died during a copy).
 * A stop between the two runs of a forced assembly that fails leaves the
   array running from the named leg under its new identity with the leg's
   bad-block list (CN12, the forced start): the pass ends in the group's
@@ -6522,10 +6580,14 @@ stores instead is CN23's.
   down, which a read names while another member is in sync and the path
   watcher or the converge cuts (CN10, The cut of a migrating leg's path),
   and for the early fail's one name of a member md still holds in its place
-  and does not show faulty (CN12, The early fail), so past those it costs
-  no `SyncupCntlr` and no command, and nothing in the cn agent ends it
-  either. On members that are genuinely dead the worker's leg repair
-  (`dnv-worker.md` AR8) ends it, one step per pass of the SP
+  and does not show faulty (CN12, The early fail), and for the stop a
+  forced start that waits for the member begins with, which a read names
+  while an array of the group is there, does not run, passes the stop's
+  member test and shows no holder, until a converge makes the stop (CN12
+  step 1, CN30), so past those it costs no `SyncupCntlr` and no command,
+  and nothing in the cn agent ends it either. On members that are
+  genuinely dead the worker's leg repair (`dnv-worker.md` AR8) ends it,
+  one step per pass of the SP
   (`dnv-worker.md` AR2): for a dead DN, the side-unhealthy threshold, then,
   for each of the SP's `leg_list` legs on that DN, a repair's create, at
   least one pass each. The member stays late with no bound when the leg

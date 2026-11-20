@@ -7708,10 +7708,11 @@ repair_forced_start() {
 	# waiting, and the next stages' counts would then read a converge that
 	# did nothing. The agent never writes sync_action; the freeze only holds
 	# still the state that md's retries keep moving, which a read's name of
-	# the forced start handles in production: a read names it only once it
-	# reads no array of the group running, and the worker's re-send on that
-	# code brings the converge that acts on the mark (cnagent.md CN12,
-	# CN30).
+	# the forced start handles in production: a read names it, or, while the
+	# leg the mark names is dead, the stop of the array it begins with, only
+	# once it reads no array of the group running, and the worker's re-send
+	# on that code brings a converge that acts on the mark when it too reads
+	# the array not running (cnagent.md CN12, CN30).
 	assert_eq "$(helper 1 "dm_error_load $ylin")" loaded \
 		"repair copydeath: Y's export to cn2 erroring"
 	deadline=$((SECONDS + 180))

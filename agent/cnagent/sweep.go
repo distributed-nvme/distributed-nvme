@@ -2508,7 +2508,8 @@ func (s *CnAgentServer) nodeUnownedSrcs(
 // the converge would assemble again (reassemblyNamed; CN30), each absent
 // array, by its group's row name, the converge's assembly would start
 // (absentArrayNamed), and, as failures, each forced start the converge
-// would carry through (forcedStartNamed), each group whose md check the
+// would carry through, or the stop of an array it begins with
+// (forcedStartNamed), each group whose md check the
 // converge would start, stop or adopt (mdCheckDue), and each uncreated
 // snapshot whose create message the converge would send (snapshotDue):
 // what the call's

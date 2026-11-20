@@ -78,7 +78,8 @@ type legSide struct {
 // cloneDmName), which the verdict names (cntlrRowVerdict). Among the md
 // conditions it returns are also each absent array the converge's
 // assembly would start (absentArrayNamed) and each forced start the
-// converge would carry through (forcedStartNamed), the second as a failure,
+// converge would carry through, or the stop of an array it begins with
+// (forcedStartNamed), the second as a failure,
 // and as failures too each uncreated snapshot whose create message the
 // converge's pre-pass would send (snapshotDue) and each group whose md check
 // the converge would start, stop or adopt (mdCheckDue).
@@ -203,7 +204,8 @@ func (s *CnAgentServer) probeCntlr(
 					kind: agent.LeftoverKindMdBroken, name: broken.Dev})
 			}
 			// An absent array the converge's assembly would start, and a
-			// forced start the converge would carry through (CN30).
+			// forced start the converge would carry through, or the stop
+			// of an array it begins with (CN30).
 			named, conflict := s.absentArrayNamed(ctx, st, plan, gp, found)
 			if named {
 				putBack = append(putBack, verdictName{

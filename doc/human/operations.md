@@ -456,7 +456,15 @@ Safe steps, in this order:
 1. Step the level to `NO_THINPOOL` at once, before the dead leg comes
    back.
 2. Write the mark naming the dead leg that kept the data, while it is
-   still dead. The primary stops the broken array and waits for that leg.
+   still dead. The gateway refuses the mark while the primary's report
+   reads the group's row ok, as it can for short moments while md retries
+   its copy; then try again after a few seconds, while the leg is still
+   dead, as in step 3 of "Which leg to choose". The primary stops the
+   broken array and waits for that leg. The stop can take a few check
+   rounds: md keeps retrying its copy, and the array reads as running for
+   short moments while it does. Wait until
+   `dnvctl group inspect --grp <group id>` shows no array state: the
+   primary has stopped the array.
 3. Bring the leg back. The primary starts the array from it and wipes the
    half-copied leg. md copies onto it again. If the leg comes back with a
    bad-block list, the start is refused instead and wipes nothing: see

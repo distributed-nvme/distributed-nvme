@@ -73,17 +73,17 @@ func (s *CnAgentServer) syncupCntlr(
 		// data. So no converge acts on a mark of the held request
 		// (dropForcedStartMarks), and the cntlr's reads name its marks as
 		// stored (storedMarks), not as a forced start a converge would carry
-		// through (forcedStartNamed), and report none acted on (actedMark):
-		// the name brings the worker's re-send of the refused request, and
-		// only a SyncupCntlr whose save holds brings a converge that acts on
-		// a mark. CN14's thin id sweeps, behind the same gate, do not run
-		// from the held request either. A refused request at the held
-		// revision leaves reqFromRpc as it is: the clear and the withdrawal
-		// of a mark each raise SpRev, so a request at the held revision
-		// clears no mark the held request carries. A cntlr the agent does
-		// not hold has no state, and nothing changes. The object lock this
-		// call holds orders the write before every later converge and read
-		// of the cntlr (cntlrState.reqFromRpc).
+		// through or its stop (forcedStartNamed), and report none acted on
+		// (actedMark): the name brings the worker's re-send of the refused
+		// request, and only a SyncupCntlr whose save holds brings a converge
+		// that acts on a mark. CN14's thin id sweeps, behind the same gate,
+		// do not run from the held request either. A refused request at the
+		// held revision leaves reqFromRpc as it is: the clear and the
+		// withdrawal of a mark each raise SpRev, so a request at the held
+		// revision clears no mark the held request carries. A cntlr the
+		// agent does not hold has no state, and nothing changes. The object
+		// lock this call holds orders the write before every later converge
+		// and read of the cntlr (cntlrState.reqFromRpc).
 		if st != nil && req.GetRevision() > stored {
 			st.reqFromRpc = false
 		}

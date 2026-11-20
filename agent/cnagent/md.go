@@ -98,13 +98,16 @@ var mdBlockEntryPattern = regexp.MustCompile(`^md([0-9]+|_.+)$`)
 // is stuck on a dead member; readonly and read-auto are a read-only array.
 // Everything else — inactive (assembled, not started), broken, clear, a value
 // this list does not know — is not running. array_state reads broken only
-// while the array is otherwise clean: md writes the superblock of a broken
-// array that keeps retrying a copy onto a half-copied member to the dead
-// member too, and the state reads write-pending during each such write, so a
-// pass can read a broken array running: a pass that reads it running while
-// the group's forced-start mark stands runs no forced start, and a read names
-// the forced start once it reads no array of the group running
-// (forcedStartNamed; cnagent.md CN12).
+// while the array is otherwise clean, so one read of broken proves the array
+// broken, while one of write-pending, active or active-idle does not prove
+// it whole: md writes the superblock of a broken array that keeps retrying a
+// copy onto a half-copied member to the dead member too, and the state reads
+// write-pending during each such write, so a pass can read a broken array
+// running. A pass that reads it running while the group's forced-start mark
+// stands runs no forced start, and a read names the forced start once it
+// reads no array of the group running, or only the stop of the array that
+// the start begins with while the start's checks do not hold, as while the
+// named leg is dead (forcedStartNamed; cnagent.md CN12).
 var mdRunningStates = map[string]bool{
 	"clean":         true,
 	"active":        true,
@@ -1242,10 +1245,13 @@ func (m *Md) Stop(ctx context.Context, devPath string) error {
 // array is reconciled as without a mark, which leaves the mark waiting for
 // the sp worker's clear (dnv-worker.md AR13); a broken array can read
 // running (mdRunningStates), and a read names the forced start once it reads
-// no array of the group running (forcedStartNamed), so the worker's re-send
-// brings the converge that acts on the mark. One that holds a member that is
-// not a dm device is the group's error (runningArrayErr), as without a mark:
-// the same array read broken ends the forced start in that error
+// no array of the group running, or the stop alone while the forced start's
+// checks do not hold (forcedStartNamed), so the worker's re-send brings a
+// converge that acts on the mark if it too reads the array not running;
+// each read and each pass reads the array afresh and carries no earlier
+// reading into a later read or pass. One that holds a member that is not a
+// dm device is the group's error (runningArrayErr), as without a mark: the
+// same array read broken ends the forced start in that error
 // (MdDetail.strangerErr), and a read names nothing for it.
 func (s *CnAgentServer) ensureGroup(
 	ctx context.Context,
@@ -2309,26 +2315,48 @@ func errForcedStartDue(named *legPlan) error {
 		"it from leg %#x", named.legId)
 }
 
+// errForcedStartStopDue is the failure a cntlr's read names a group's forced
+// start by (forcedStartNamed) when a converge would stop the array dev of
+// the group, which does not run, and the forced start's checks would then
+// not hold: the stop alone.
+func errForcedStartStopDue(dev string) error {
+	return fmt.Errorf("array %s of the group does not run, and a converge "+
+		"stops it", dev)
+}
+
 // forcedStartNamed is the failure by which a cntlr's read names the group's
-// forced start (CN30), nil for none: a converge acts on the group's mark
-// (actsOnMark), the group is a wanted RedundMdRaid1 group that is not
-// deferred, found, the array the read's md walk matched to it (probeGroup),
-// answered and no array of the group runs, and the converge's forced start
-// would go through to its zeroes and its assembly. That is, an array of the
-// group that is there and does not run holds no member that is not a leg
-// wrapper of this pool (MdDetail.strangerErr) and md's holders listing of it
-// answers with no holder, so no layer above blocks the forced start's stop
-// (forcedStartPass); and the forced start's checks (planForcedStart), run
-// with the read's availability (readAvailability), return a plan. So it names
-// nothing for the refusals that last — a named leg that is no full member,
-// carries a bad-block list or is older than another under a mark that does
-// not pass it, a member that is no leg of this pool, a device above that holds
-// the array — and nothing while a member the start keeps is not available, a
-// kept new leg that is still provisioning among them, whose provisioned flip
-// raises the pool's revision. A process that holds the array open shows in no
-// holders listing, and the stop it refuses is named on every read
-// (cnagent.md, Known limits). A read of the holders or of a superblock that
-// did not answer names nothing; the next read reads again.
+// forced start (CN30), nil for none. It names one only when a converge acts
+// on the group's mark (actsOnMark), the group is a wanted RedundMdRaid1
+// group that is not deferred, found, the array the read's md walk matched
+// to it (probeGroup), answered and no array of the group runs, and an array
+// of the group that is there holds no member that is not a leg wrapper of
+// this pool (MdDetail.strangerErr) and md's holders listing of it answers
+// with no holder, so no layer above blocks the forced start's stop
+// (forcedStartPass). Then it names the start (errForcedStartDue) when the
+// forced start's checks (planForcedStart), run with the read's availability
+// (readAvailability), return a plan, so the converge goes through to its
+// zeroes and its assembly; otherwise the stop alone (errForcedStartStopDue)
+// when such an array is there, which the converge stops before any check;
+// and otherwise nothing. Reason for the stop's name: md moves a broken
+// array between broken and running states while it retries a copy whose
+// only source is dead (mdRunningStates), so the converge a mark brings can
+// read the array running and leave the mark waiting; while the named leg is
+// dead the checks do not hold, and without the name nothing would stop the
+// array before that leg is back. Once the stop is made no array of the
+// group is there, and the read names nothing until the checks hold, so each
+// read that finds the array not running brings at most one converge, and a
+// read that finds it running brings none. So it names nothing for an array
+// of the group that holds a member that is no leg of this pool or that a
+// device above holds; and, with no array of the group there, nothing for
+// the refusals that last — a named leg that is no full member, carries a
+// bad-block list or is older than another under a mark that does not pass
+// it — and nothing while a member the start keeps is not available, a kept
+// new leg that is still provisioning among them, whose provisioned flip
+// raises the pool's revision. A process that holds the array open shows in
+// no holders listing, and the stop it refuses is named on every read
+// (cnagent.md, Known limits). A read of the holders that did not answer
+// names nothing, and so does a read of a superblock that did not answer
+// while no array of the group is there; the next read reads again.
 func (s *CnAgentServer) forcedStartNamed(
 	ctx context.Context,
 	st *cntlrState,
@@ -2350,10 +2378,13 @@ func (s *CnAgentServer) forcedStartNamed(
 		}
 	}
 	fp, _, err := s.planForcedStart(ctx, gp, s.readAvailability(ctx, plan, gp))
-	if err != nil {
-		return nil
+	switch {
+	case err == nil:
+		return errForcedStartDue(fp.named)
+	case found.Exists:
+		return errForcedStartStopDue(found.Dev)
 	}
-	return errForcedStartDue(fp.named)
+	return nil
 }
 
 // forcedStartPlan is what CN12's forced start would do from its checks
@@ -2742,7 +2773,10 @@ func (s *CnAgentServer) stopStartedArray(
 // errForcedStartWaits is the group's error while CN12's forced start waits
 // for a member it needs that is not available this pass. A read names the
 // forced start once that member serves (forcedStartNamed), which brings the
-// worker's re-send.
+// worker's re-send. The pass has stopped an array of the group that did not
+// run before the wait (forcedStartPass); while such an array is there, as
+// one the read finds after a pass that read it running, the read names that
+// stop alone, whatever the wait (errForcedStartStopDue).
 func errForcedStartWaits(lp *legPlan) error {
 	return fmt.Errorf("forced start waits for leg %#x, which is not available",
 		lp.legId)

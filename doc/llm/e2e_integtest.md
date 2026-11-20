@@ -897,8 +897,10 @@ only once md on the primary has read the array down and the primary's
 report has read the group's row down, both on every poll for several of the
 primary's check rounds, since while md retries a copy whose only source is
 dead the array's state moves between running and broken, and a pass of the
-primary's that reads it running leaves the mark waiting (`cnagent.md`,
-Known limits). In the first, a forced start made while the array still runs
+primary's that reads it running leaves the mark waiting for the converge
+that a later read's name of the forced start, or of the stop of the array
+it begins with, brings (`cnagent.md` CN12, CN30; Known limits). In the
+first, a forced start made while the array still runs
 is refused (`architecture.md`, Repairs); one from the dead leg that held
 the data, retried while the gateway still refuses it, as the primary's
 latest report can read the array running (`architecture.md`, Known limits)

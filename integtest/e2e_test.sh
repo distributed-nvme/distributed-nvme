@@ -18505,11 +18505,13 @@ REACT_FS_REFUSAL=""
 # facts); a converge of the primary's in that swing leaves the mark waiting,
 # and the forced start then runs in the converge of the SyncupCntlr the
 # worker re-sends once a read finds the array not running and names the
-# forced start (cnagent.md CN12, CN30). The hold spans several of the
-# primary's check rounds, as a cntlr's rounds come at cntlr_interval, and
-# makes it likely that the mark's own converge runs the forced start; the
-# step's proof reads the agent's log from a line, not a trace id, so a start
-# a re-send runs passes it too. A count of this suite's choosing, not a
+# forced start, or, while the leg the mark names is dead, the stop of the
+# array the start begins with (cnagent.md CN12, CN30). The hold spans
+# several of the primary's check rounds, as a cntlr's rounds come at
+# cntlr_interval, and makes it likely that the mark's own converge runs the
+# forced start, or its stop; the step's proofs read the agent's log from a
+# line and md's state on the primary, not a trace id, so a start or a stop
+# a re-send runs passes them too. A count of this suite's choosing, not a
 # constant of the tree.
 REACT_FS_HOLD_ROUNDS=5
 REACT_FS_DOWN_SINCE=-1
