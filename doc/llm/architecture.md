@@ -2624,30 +2624,32 @@ rest. A pool's rows are:
   aborted one, the worker's drive step for a repair of the worker's in a
   pool whose reactions run, and otherwise the operator's cancel or finish
   — for an operator's repair, and for a worker's in a pool at a level that
-  stops reactions or one the worker runs no pass for: under a stored conf
-  the pass refuses, with a record the pool's lists name missing, or with
-  its revision key absent, which leaves the pool no worker (`dnv-worker.md`
-  AR1, AR3, MD3) — and it says when a worker's repair's finish is refused
-  because every retired leg of the group carries keep at the bound
-  (Repairs);
+  stops reactions or one whose pass the worker refuses, under a stored
+  conf the pass refuses or with a record the pool's lists name missing
+  (`dnv-worker.md` AR1, AR3, MD3) — save in a pool whose revision key is
+  absent, which leaves the pool no worker and which the gateway's cancel
+  and finish read first and refuse without (`gateway.md` GW6), so there a
+  started or an aborted repair, the worker's or the operator's, waits for
+  the key; and it says when a worker's repair's finish is refused because
+  every retired leg of the group carries keep at the bound (Repairs);
 * a migration whose cutover is pending, with the primary's path row to
   the new side, and past its cutover one whose copy is whole and waits for
   its finish, whose copy row reads `RES_STATUS_ERROR`, or whose
   destination gives no reading of its copy — a copy that runs is not
   listed;
-* a clone being deleted, its one row standing for its teardown, so no
-  other row of it is listed — neither the primary's rows of it, of its
-  meta group or of its legs, its repairs' new legs among them, nor their
-  health epochs, nor its repairs or its group's marks — save the health
-  epoch of the side of a retired leg of its group, which lists until the
-  drain's final step deletes the leg; its drain runs ahead of the pass's
-  gates (`dnv-worker.md` CLD7), so of the cases that stop the worker's
-  pass two hold it: an absent revision key, which leaves the pool no
-  worker, and the row says the drain waits for one; and a missing repair
-  or retired leg record of the clone's meta group, which the pool's lists
-  name too, so a lost-record row names its key, and which the drain's
-  final step refuses (`dnv-worker.md` MD6), and the row says nothing of
-  that wait;
+* a clone being deleted, its one row standing for its teardown: the read
+  lists none of the primary's rows of it, of its meta group, of its legs
+  or of its repairs' new legs, none of those legs' health epochs, none of
+  its repairs and none of its group's rows and marks, while the health
+  epochs of its group's retired legs, until the drain's final step deletes
+  them, and the report's path rows are listed as in any pool; its drain
+  runs ahead of the pass's gates (`dnv-worker.md` CLD7), so of the cases
+  that stop the pass two alone hold it: an absent revision key, which
+  leaves the pool no worker and which the clone's row names, and a missing
+  record the drain's last step reads, the repair its group names or a
+  retired leg its group lists (`dnv-worker.md` CLD9, MD6), which that
+  record's lost-record row names while the clone's row says nothing of the
+  wait;
 * a torn thin device (Thin devices).
 
 A pool's rows are ordered by what they say — lost records, the report,

@@ -660,11 +660,13 @@ func TestStatusLostRecord(t *testing.T) {
 // ABORTED one and a STARTED one, the text naming who acts: the operator's
 // cancel or finish, the worker's next pass, or the worker's finish refused
 // at the retired-leg bound with every retired leg kept; the worker's own in
-// a pool at a level that stops reactions, under a conf its pass refuses,
-// with a record a list of the pool names missing, or with no revision key,
-// which the operator drives; and a CREATED one whose verdict says started
-// in a pool whose pass is refused, which the worker moves only once it
-// drives the pool again.
+// a pool at a level that stops reactions, under a conf its pass refuses or
+// with a record a list of the pool names missing, which the operator
+// drives; a STARTED or ABORTED one, the worker's or the operator's, in a
+// pool with no revision key, which waits for the key, since neither the
+// worker's pass nor the gateway's cancel or finish acts without it; and a
+// CREATED one whose verdict says started in a pool whose pass is refused,
+// which the worker moves only once it drives the pool again.
 func TestStatusRepairs(t *testing.T) {
 	worker := common.WorkerRepName(1, stDataGrp, 7)
 	for _, tc := range []struct {
@@ -726,7 +728,13 @@ func TestStatusRepairs(t *testing.T) {
 		{"the worker's aborted with no revision key", worker,
 			&pb.Repair{RepId: 50, RepStage: pb.RepStage_REP_STAGE_ABORTED},
 			&pb.CntlrInfo_RepairInfo{AbortConfirmed: true},
-			false, []string{"operator's repair cancel"}, 0, "norev"},
+			false, []string{"aborted", "revision key is back",
+				"neither the worker's pass nor a repair cancel or finish"},
+			0, "norev"},
+		{"an operator's started with no revision key", "r1",
+			&pb.Repair{RepId: 50, RepStage: pb.RepStage_REP_STAGE_STARTED},
+			&pb.CntlrInfo_RepairInfo{Started: true},
+			false, []string{"started", "revision key is back"}, 0, "norev"},
 		{"a created one with a lost record", "r1", &pb.Repair{RepId: 50},
 			&pb.CntlrInfo_RepairInfo{Started: true},
 			false, []string{"moves it to started", "drives the pool again"},
@@ -783,6 +791,13 @@ func TestStatusRepairs(t *testing.T) {
 			rows := stRowsOf(env.status(0, ""), "p0")
 			row := stOne(t, rows, pb.StatusKind_STATUS_KIND_REPAIR, tc.label,
 				tc.fragments...)
+			// Without the revision key the gateway refuses the operator's
+			// cancel and finish too (checkSpToken): no row may name them.
+			if tc.refused == "norev" &&
+				strings.Contains(row.GetText(), "operator's repair") {
+				t.Errorf("%s: text %q names an operator step the gateway "+
+					"refuses", tc.label, row.GetText())
+			}
 			if row.GetObjName() != tc.name || row.GetGrpId() != stDataGrp {
 				t.Errorf("row %v: want repair %s of group %d",
 					row, tc.name, stDataGrp)
@@ -1006,7 +1021,8 @@ func TestStatusClone(t *testing.T) {
 // gives its one CLONE row and none of the primary's rows of it: neither its
 // tables' rows, nor its meta group's, nor its legs', nor its repair's new
 // leg's, though each reads ERROR, since they are its teardown's, which the
-// CLONE row stands for, as its legs' health and its group rows are.
+// CLONE row stands for, as its legs' health and its group rows are. A
+// retired leg of its group still gives its health row, as in any pool.
 func TestStatusDeletingCloneRowsAreItsDrains(t *testing.T) {
 	env := newStEnv(t)
 	cn, fake := env.addCn("cn")
@@ -1015,9 +1031,13 @@ func TestStatusDeletingCloneRowsAreItsDrains(t *testing.T) {
 	pool.clones["c1"] = &pb.Clone{CloneId: 80, Deleting: true,
 		MetaGrp: &pb.Group{
 			GrpId: 90, ExtCnt: 4, MetaBlocks: 3, DataBlocks: 2045,
-			ArrayMade: true,
-			LegList:   []*pb.Leg{stLegOf(91, 0, dns[0]), stLegOf(93, 1, dns[1])},
+			ArrayMade:        true,
+			LegList:          []*pb.Leg{stLegOf(91, 0, dns[0]), stLegOf(93, 1, dns[1])},
+			RetiredLegIdList: []uint64{97},
 		}}
+	pool.retired[97] = &pb.RetiredLeg{GrpId: 90, CloneName: "c1",
+		Side: &pb.Side{SideId: 98, AddrPort: dns[2],
+			ErrEpoch: uint64(time.Now().Add(-time.Minute).Unix())}}
 	pool.repairs["r1"] = &pb.Repair{RepId: 50, GrpId: 90, CloneName: "c1",
 		BadLegIdList: []uint64{91},
 		NewLegList:   []*pb.Leg{stLegOf(95, 2, dns[2])}}
@@ -1035,8 +1055,15 @@ func TestStatusDeletingCloneRowsAreItsDrains(t *testing.T) {
 	rows := stRowsOf(env.status(0, ""), "p0")
 	stOne(t, rows, pb.StatusKind_STATUS_KIND_CLONE, "the deleting clone",
 		"being deleted")
-	if len(rows) != 1 {
-		t.Errorf("%d rows, want the clone's one: %v", len(rows), rows)
+	retired := stOne(t, rows, pb.StatusKind_STATUS_KIND_HEALTH,
+		"its group's retired leg", "health epoch")
+	if retired.GetLegId() != 97 ||
+		!strings.HasPrefix(retired.GetObject(), "retired leg 97") {
+		t.Errorf("row %v: want retired leg 97", retired)
+	}
+	if len(rows) != 2 {
+		t.Errorf("%d rows, want the clone's and its retired leg's: %v",
+			len(rows), rows)
 	}
 }
 

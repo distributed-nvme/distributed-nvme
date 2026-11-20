@@ -819,7 +819,10 @@ type statusBuilder struct {
 	noPass bool
 	// noWorker says the pool's revision key is absent, so no sp worker runs
 	// for the pool (lostRows): not even the clone drain, which runs ahead
-	// of the pass's gates (dnv-worker.md CLD7).
+	// of the pass's gates (dnv-worker.md CLD7). The gateway's repair cancel
+	// and finish read the key first and refuse while it is absent
+	// (checkSpToken, gateway/common.go), so a started or aborted repair
+	// waits for the key, whoever's it is (repairRows).
 	noWorker bool
 }
 
@@ -1582,16 +1585,24 @@ func (b *statusBuilder) repairRows(info *pb.CntlrInfo) {
 		// The worker finishes and cancels its own repairs by a reaction
 		// (dnv-worker.md AR8's drive step), which it runs neither at a
 		// level that stops reactions (dnv-worker.md AR3) nor for a pool it
-		// runs no pass for (noPass): the operator then drives them. Its
-		// stage moves (dnv-worker.md AR11) run at every level, but in a
-		// pass too.
+		// runs no pass for (noPass): the operator then drives them, save
+		// in a pool with no revision key, where nothing can (noWorker).
+		// Its stage moves (dnv-worker.md AR11) run at every level, but in
+		// a pass too.
 		workerDrives := worker && !b.noPass &&
 			state.Conf.GetSpLevel() < pb.SpLevel_SP_LEVEL_NO_THINPOOL
 		again := ""
 		if b.noPass {
 			again = " once it drives the pool again"
 		}
+		const noKey = "it waits until the pool's revision key is back: " +
+			"until then neither the worker's pass nor a repair cancel or " +
+			"finish can act"
 		switch {
+		case rep.GetRepStage() == pb.RepStage_REP_STAGE_ABORTED && b.noWorker:
+			text = "aborted: " + noKey
+		case rep.GetRepStage() == pb.RepStage_REP_STAGE_STARTED && b.noWorker:
+			text = "started: " + noKey
 		case rep.GetRepStage() == pb.RepStage_REP_STAGE_ABORTED &&
 			workerDrives:
 			text = "aborted: the worker cancels it at its next pass"
@@ -1839,8 +1850,9 @@ func (b *statusBuilder) tornRows() {
 // above already shows: the slices' thin pools and their devices, the thin
 // volumes, the namespaces and subsystems, the transfers, the clones' rows,
 // the path rows, and each leg or group no row above walks, one the state
-// does not hold. A clone being deleted gives none: neither its tables'
-// rows, nor its meta group's, its legs' or its repairs' new legs'.
+// does not hold. A clone being deleted gives none of its tables' rows, its
+// meta group's, its legs' or its repairs' new legs'; the path rows are
+// listed whatever side they reach.
 func (b *statusBuilder) errorRows(info *pb.CntlrInfo) {
 	state := b.in.state
 	tdName := map[uint64]string{}
@@ -1879,7 +1891,8 @@ func (b *statusBuilder) errorRows(info *pb.CntlrInfo) {
 	// The rows of a clone being deleted are its teardown's, which its CLONE
 	// row stands for, as it stands for its legs' health and its group rows
 	// (healthAndLegRows, eachGroup): the rows of its tables, of its meta
-	// group and of its legs, its repairs' new legs among them.
+	// group and of its legs, its repairs' new legs among them. Its group's
+	// retired legs still give their health rows (healthAndLegRows).
 	deletingClone := func(id uint64) bool {
 		return state.Clones[cloneName[id]].GetDeleting()
 	}
