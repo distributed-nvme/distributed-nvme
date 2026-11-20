@@ -235,17 +235,17 @@ the method set is exactly the following, each taking the caller's ctx:
   there and for a read that failed, so they answer "absent" only for the
   typed refusal that says the device does not exist, and an error for
   every other failure (`dnagent.md` SH15). The agents list no directory by
-  a command: `Nvmet` lists the nvmet configfs tree, and `Cmd.ListDir`
-  sysfs, in the agent's own process through `ReadDir`, and both answer
-  "absent" only for `fs.ErrNotExist` (`dnagent.md` SH18); so do
-  `Nvmet.SubsysMtime`, which reads a subsystem directory's age through
-  `ReadMtime`, and the port probe's test of whether
-  the port's directory is there (`Nvmet.ProbePort`,
-  `Nvmet.ProbePortState`), read the same way. Of the probe's attribute
-  reads, only those of `Nvmet.ProbePortState` keep that split;
-  `Nvmet.ProbePort` reads them loosely, so a read that failed for any
-  reason makes the port read as not matching. `dnagent.md` SH15 names the
-  primitives whose callers act on either "absent".
+  a command: `Nvmet` lists the nvmet configfs tree and its debug directory,
+  and `Cmd.ListDir` sysfs, in the agent's own process through `ReadDir`,
+  and both answer "absent" only for `fs.ErrNotExist` (`dnagent.md` SH18);
+  so do `Nvmet.SubsysMtime`, which reads a subsystem directory's age
+  through `ReadMtime`, and the port probe's test of whether the port's
+  directory is there (`Nvmet.ProbePort`, `Nvmet.ProbePortState`), read the
+  same way. Of the probe's attribute reads, only those of
+  `Nvmet.ProbePortState` keep that split; `Nvmet.ProbePort` reads them
+  loosely, so a read that failed for any reason makes the port read as not
+  matching. `dnagent.md` SH15 names the primitives whose callers act on
+  either "absent".
   `Dm.BlkZeroout` applies the predicate as well and is not a probe: it
   returns the verdict as answered, so the `dnagent.md` DN9 zeroing loop
   can tell a batch the soft timeout killed from one the tool refused. The
@@ -317,11 +317,10 @@ the method set is exactly the following, each taking the caller's ctx:
   create only ever worked on a path that left them for a real file system,
   where it made a file at a path a request's name chose. It exists for
   kernel virtual filesystems (nvmet configfs, sysfs, and the cn agent's
-  write of "fatal" to an nvmet connection's "state" in debugfs,
-  `cnagent.md` CN33), where the atomic replace is impossible: configfs
-  forbids creating arbitrary files, so `WriteFile` can never succeed there,
-  and a debugfs file that is gone is an nvmet connection that has gone.
-  Use it **only** for such attribute writes; the agents' local-store state files keep using
+  write of "fatal" to an nvmet connection's "state" in debugfs, `cnagent.md`
+  CN33), where the atomic replace is impossible: none of the three lets a
+  file be created, so `WriteFile` can never succeed there. Use it **only**
+  for such attribute writes; the agents' local-store state files keep using
   `WriteFile`/`WriteProto` (`dnagent.md` SH18).
 
 ### ReadDir
@@ -331,8 +330,8 @@ the method set is exactly the following, each taking the caller's ctx:
   read or converge, and starting a process for each listing costs far more
   than the listing itself; and its error tells a directory that is not
   there from a listing that failed, which the exit status of `ls` does not.
-  The agents list sysfs, their local store and the nvmet configfs tree
-  this way (`dnagent.md` SH17, SH18).
+  The agents list sysfs, nvmet's debug directory, their local store and
+  the nvmet configfs tree this way (`dnagent.md` SH17, SH18).
 * Like `ReadFile`, it holds one semaphore slot and checks the ctx error after
   acquiring it. That is its last cancellation point: the listing itself is
   not cancelable, and one the kernel holds returns only when the kernel does

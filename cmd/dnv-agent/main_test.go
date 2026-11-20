@@ -261,8 +261,14 @@ func TestCheckCannotRun(t *testing.T) {
 	for _, args := range [][]string{
 		{"check", "cn"},
 		{"check", "dn", "--no-such-flag"},
+		{"check", "cn", "--md-replay", "false"},
+		{"check", "dn", "extra"},
+		{"check"},
+		{"check", "cm"},
+		{"check", "--no-such-flag"},
 		{"collect"},
 		{"collect", "--deadline", "soon"},
+		{"collect", "foo"},
 	} {
 		var printed strings.Builder
 		err := executeRoot(args, &printed)
@@ -827,12 +833,12 @@ func kernelCuts(t *testing.T) {
 	t.Cleanup(func() { hostCutCauses = old })
 }
 
-// The cn agent's start check (cnagent.md CN-CM2): where the kernel can end
-// an nvmet connection the agent starts in cut mode, with the flag or
-// without it; where it cannot, the start ends before it serves, with an
-// error that names every cause and the flag, unless the flag is set, from
-// the command line or the environment, and then the agent logs one
-// warning with the causes and starts in no cut mode.
+// The cn agent's start check (cnagent.md CN-CM2): where the check finds no
+// cause the agent starts in cut mode, with the flag or without it; where
+// it finds one, the start ends before it serves, with an error that names
+// every cause and the flag, unless the flag is set, from the command line
+// or the environment, and then the agent logs one warning with the causes
+// and starts in no cut mode.
 func TestCnStartCheck(t *testing.T) {
 	oldServe, oldCauses, oldNew := serveAgent, hostCutCauses, newCnServer
 	t.Cleanup(func() {
@@ -973,8 +979,9 @@ func logRecords(t *testing.T, text string) []map[string]any {
 }
 
 // check cn carries --ignore-host-disconnection to the node check, from the
-// command line or the environment, which judges its host cut row by it: on
-// a node that cannot cut, the row fails without the flag and warns with it.
+// command line or the environment, which judges its host cut row by it:
+// where the start check's read finds a cause, the row fails without the
+// flag and warns with it.
 func TestCheckCnTakesIgnoreHostDisconnection(t *testing.T) {
 	oldEnv := nodeEnv
 	t.Cleanup(func() {
@@ -986,20 +993,25 @@ func TestCheckCnTakesIgnoreHostDisconnection(t *testing.T) {
 		return nodeTestEnv(t, map[string]string{})
 	}
 	const row = "nvmet host cut (debugfs)"
+	// A word the bool parse does not take, from the environment, reads
+	// false, the safe side (cnagent.md CN-CM1): the row fails as with no
+	// flag.
 	for _, tc := range []struct {
 		name  string
 		flag  bool
-		env   bool
+		env   string
 		level nodecheck.Level
 	}{
-		{"without the flag", false, false, nodecheck.LevelFail},
-		{"with the flag", true, false, nodecheck.LevelWarn},
-		{"from the environment", false, true, nodecheck.LevelWarn},
+		{"without the flag", false, "", nodecheck.LevelFail},
+		{"with the flag", true, "", nodecheck.LevelWarn},
+		{"from the environment", false, "true", nodecheck.LevelWarn},
+		{"an unknown word from the environment", false, "yes",
+			nodecheck.LevelFail},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			os.Unsetenv("DNV_AGENT_IGNORE_HOST_DISCONNECTION")
-			if tc.env {
-				os.Setenv("DNV_AGENT_IGNORE_HOST_DISCONNECTION", "true")
+			if tc.env != "" {
+				os.Setenv("DNV_AGENT_IGNORE_HOST_DISCONNECTION", tc.env)
 			}
 			args := []string{"check", "cn", "--output", "json"}
 			if tc.flag {
@@ -1023,5 +1035,32 @@ func TestCheckCnTakesIgnoreHostDisconnection(t *testing.T) {
 			}
 			t.Fatalf("no %q row: %v", row, rep.Results)
 		})
+	}
+}
+
+// Every subcommand that runs takes no argument and refuses one. pflag reads
+// a bool flag given with no "=" as true and leaves the next word as an
+// argument, so without the refusal "cn --ignore-host-disconnection false"
+// would start with the flag on, the side the operator wrote against
+// (dnagent.md CM1; cnagent.md CN-CM1). The refusal is checked on each
+// command's own argument rule, so no command runs here.
+func TestSubcommandsRefuseAnArgument(t *testing.T) {
+	root := newRootCmd()
+	for _, path := range [][]string{
+		{"dn"}, {"cn"}, {"check", "dn"}, {"check", "cn"}, {"collect"},
+	} {
+		name := strings.Join(path, " ")
+		cmd, rest, err := root.Find(path)
+		if err != nil || len(rest) != 0 || cmd.CommandPath() !=
+			"dnv-agent "+name {
+			t.Fatalf("%q: found %q, rest %q, err %v", name,
+				cmd.CommandPath(), rest, err)
+		}
+		if err := cmd.ValidateArgs([]string{"false"}); err == nil {
+			t.Errorf("%q takes the word %q as an argument", name, "false")
+		}
+		if err := cmd.ValidateArgs(nil); err != nil {
+			t.Errorf("%q refuses no argument: %v", name, err)
+		}
 	}
 }

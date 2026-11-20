@@ -405,8 +405,8 @@ func (c *checker) ioTimeoutRow(ctx context.Context) Result {
 
 // hostCutRow is the cut of a removed host's nvmet connection (cnagent.md
 // CN33), read through agent.HostCutCauses, the read of the cn agent's start
-// check (cnagent.md CN-CM2), so the two never disagree. A kernel that cannot
-// cut fails, since the agent refuses to start on it; where the check is
+// check (cnagent.md CN-CM2), so the two never disagree. A cause it finds
+// fails the row, since the agent refuses to start there; where the check is
 // given --ignore-host-disconnection, as the agent would be, it warns, a
 // known limit: the agent then runs without the cut.
 func (c *checker) hostCutRow(ctx context.Context) Result {
@@ -428,8 +428,9 @@ func (c *checker) hostCutRow(ctx context.Context) Result {
 		return res
 	}
 	res.Fix = "run an nvmet built with CONFIG_NVME_TARGET_DEBUGFS on a " +
-		"kernel of 6.11 or newer, load it, mount debugfs at " +
-		agent.DebugfsDir + " and boot without lockdown; or start the cn " +
+		"kernel of 6.11 or newer, load it, mount configfs at " +
+		"/sys/kernel/config and debugfs at " + agent.DebugfsDir +
+		", and boot without lockdown; or start the cn " +
 		"agent with --ignore-host-disconnection, under which a removed " +
 		"host keeps its connection until it disconnects"
 	if c.opts.IgnoreHostDisconnection {

@@ -398,20 +398,30 @@ that an IO never times out: it is the only bound on a write to a disk that
 stalls while its disk node still answers the keep-alives of the connection,
 the messages by which the kernel finds a silent target.
 
-A controller node ends the connection of a host taken off a subsystem's
-list, so that the host's IO fails and another host can take the volume over.
-The kernel can end one host's connection when it is 6.11 or newer, its NVMe
-target is built with the kernel option `CONFIG_NVME_TARGET_DEBUGFS`, debugfs
-is mounted at /sys/kernel/debug, and the kernel is not under lockdown, the
-mode that Secure Boot switches on; nvmet must be loaded and debugfs mounted
-before the cn agent starts. The kernels of most distributions, Ubuntu,
-Debian and Fedora among them, are built without the option, and dnv gives no
-way to build it. On a kernel that cannot, the cn agent starts only with
-`--ignore-host-disconnection`, and a host taken off a list then keeps its
+A controller node ends the connection of a host taken off a subsystem's list,
+so that the host's IO fails and another host can take the volume over. The
+kernel can end one host's connection when it is 6.11 or newer, its NVMe target
+is built with the kernel option `CONFIG_NVME_TARGET_DEBUGFS` and loaded,
+configfs is mounted, debugfs is mounted at /sys/kernel/debug, and the kernel
+is not under lockdown, the mode that Secure Boot switches on. The kernels of
+most distributions, Ubuntu, Debian and Fedora among them, are built without
+the option, and dnv gives no way to build it. Where the cn agent finds, when
+it starts, that the kernel cannot, or cannot read whether it can, it starts
+only with `--ignore-host-disconnection`, and then ends no connection until it
+is started again, even once the kernel can: a host taken off a list keeps its
 connection and its IO until it disconnects ([the scope
-page](scope.md#54-hosts-and-the-kubernetes-driver)). The end of a connection
-is tested on 7.0.0-43-generic with the NVMe target modules rebuilt with the
-option.
+page](scope.md#54-hosts-and-the-kubernetes-driver)). So load nvmet, and mount
+configfs and debugfs, before the cn agent starts. Where the cn agent started
+without such a finding, debugfs must stay mounted while it runs, or that
+controller node serves none of its volumes, save a namespace whose move to ANA
+inaccessible fails ([the scope
+page](scope.md#61-cases-where-dnv-does-not-come-back-alone-today)). A lockdown
+on a node where /sys/kernel/security is not mounted is the exception: the cn
+agent cannot see it and starts without the flag, and the kernel then refuses
+to end a connection ([the scope
+page](scope.md#61-cases-where-dnv-does-not-come-back-alone-today)). The end of
+a connection is tested on 7.0.0-43-generic with the NVMe target modules
+rebuilt with the option.
 
 Disks: the disk of a disk node, a whole disk or a partition, has 512-byte
 logical blocks. A disk of another block size, such as 4 KiB, cannot become

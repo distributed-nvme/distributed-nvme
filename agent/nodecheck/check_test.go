@@ -584,7 +584,8 @@ func TestEachRowAtEachLevel(t *testing.T) {
 
 		// The cut of a removed host's nvmet connection, on a controller
 		// node: the check is given no --ignore-host-disconnection, so a
-		// kernel that cannot cut fails (TestHostCutRowWarnsWithTheFlag).
+		// cause the start check's read finds fails
+		// (TestHostCutRowWarnsWithTheFlag).
 		{"no debugfs", []string{RoleCn}, setFile(agent.ProcMountsPath,
 			"sysfs /sys sysfs rw 0 0\n"), "nvmet host cut (debugfs)",
 			LevelFail},
@@ -982,8 +983,8 @@ func TestReplayOnlyWhenAskedAndMasked(t *testing.T) {
 
 // TestHostCutRowWarnsWithTheFlag: the host cut row reads the facts the cn
 // agent's start check reads (agent.HostCutCauses) and judges them as the
-// agent would: ok where the kernel can cut, with or without the flag; a
-// failure where it cannot, since the agent then refuses to start; and,
+// agent would: ok where the read finds no cause, with or without the flag;
+// a failure where it finds one, since the agent then refuses to start; and,
 // given --ignore-host-disconnection, a warning, under which the agent runs
 // without the cut. Each names the cause.
 func TestHostCutRowWarnsWithTheFlag(t *testing.T) {

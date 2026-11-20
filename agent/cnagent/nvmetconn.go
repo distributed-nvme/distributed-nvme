@@ -30,7 +30,8 @@ import (
 // failed says the connections could not be read, or a lockdown the lockdown
 // file shows keeps a stray from being ended, which the row reports as
 // RES_STATUS_ERROR; a stray still listed otherwise, after the wait, a
-// refused write or a failed "state" read, is RES_STATUS_PENDING.
+// refused write or a failed "state" read, or in a read's one listing
+// (readStrays), is RES_STATUS_PENDING.
 type cutResult struct {
 	held   bool
 	failed bool
@@ -248,9 +249,10 @@ func (s *CnAgentServer) cutStrays(
 
 // The cut's log records (`log.md`, The cut of a removed host): a write of
 // "fatal" the kernel took, a write the kernel refused, the only record of
-// the cut that names the refusal, and a cut whose wait the pass's budget
-// spent with a stray still listed, at Info since the next converge cuts
-// again (log.md R6).
+// the cut that names the refusal, and a cut whose wait ended with a stray
+// still listed, the pass's budget spent or the converge's ctx ended
+// (WaitBudget.Pause), at Info since the next converge cuts again (log.md
+// R6).
 const (
 	msgStrayEnded     = "stray connection ended"
 	msgStrayEndFailed = "ending a stray connection failed"

@@ -417,8 +417,8 @@ func TestAFailedSubsystemStepAtAPromotionKeepsInaccessible(t *testing.T) {
 }
 
 // TestNoCutModeReadsNothingOfTheDebugDirectory: where the agent runs with
-// no cut (the kernel cannot cut and --ignore-host-disconnection let it
-// start), neither a converge nor a read reads or writes nvmet's debug
+// no cut (its start check found a cause and --ignore-host-disconnection let
+// it start), neither a converge nor a read reads or writes nvmet's debug
 // directory, even on a node that shows one, and a removed host keeps its
 // connection with every row OK.
 func TestNoCutModeReadsNothingOfTheDebugDirectory(t *testing.T) {

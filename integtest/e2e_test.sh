@@ -4651,8 +4651,9 @@ power_reset() {
 # A missing lockdown file reads as no lockdown, as the agent's start check
 # reads it; the file is a securityfs file, so a lockdown on a node without
 # securityfs mounted shows only as a refused cut. These are the facts the cn
-# agent's start check reads (cnagent.md CN-CM2), read here in shell, as the
-# guests get the agent binary only at setup. Copied from nvmet_cut_facts
+# agent's start check reads (cnagent.md CN-CM2) save nvmet's configfs tree,
+# which preflight checks on its own, read here in shell, as the guests get
+# the agent binary only at setup. Copied from nvmet_cut_facts
 # (integtest/cnagent_test.sh).
 nvmet_cut_facts() {
 	local why="" mode dbg=/sys/kernel/debug/nvmet

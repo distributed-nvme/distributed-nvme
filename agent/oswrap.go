@@ -483,9 +483,9 @@ func (b *osBase) readDevNo(ctx context.Context, path string) (string, error) {
 	return devNo, nil
 }
 
-// dirExists says whether a directory of the nvmet configfs tree exists, by
-// listDir's listing (SH18), with its split: a listing that failed is an
-// error, never an absence.
+// dirExists says whether a directory of the nvmet configfs tree or of
+// nvmet's debug directory exists, by listDir's listing (SH18), with its
+// split: a listing that failed is an error, never an absence.
 func (b *osBase) dirExists(ctx context.Context, path string) (bool, error) {
 	_, ok, err := b.listDir(ctx, path)
 	return ok, err

@@ -118,9 +118,9 @@ type OsClient interface {
 	// WriteFileDirect writes data straight into the existing file at path
 	// with a plain open/truncate/write/close — no temp file, no rename, no
 	// create: a missing file is an error wrapping fs.ErrNotExist. It exists
-	// for kernel virtual filesystems (nvmet configfs, sysfs), where the
-	// atomic-replace protocol of WriteFile is impossible: configfs forbids
-	// creating arbitrary files, so a temp file + rename can never succeed
+	// for kernel virtual filesystems (nvmet configfs, sysfs, debugfs), where
+	// the atomic-replace protocol of WriteFile is impossible: none of them
+	// lets a file be created, so a temp file + rename can never succeed
 	// there. Use WriteFile for every regular-file write; use
 	// WriteFileDirect only for virtual-filesystem attribute writes
 	// (dnagent.md SH18).

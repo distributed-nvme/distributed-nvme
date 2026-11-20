@@ -313,12 +313,12 @@ runs; `cnagent.md` CN-CM2). A read that failed
 leaves its attribute empty and adds `error`, the failed reads' errors
 joined, and the record is then at Warn; the start goes on either way.
 
-A cn agent whose kernel cannot end an nvmet connection and which
-`--ignore-host-disconnection` lets start logs, after that record and
+A cn agent whose start check finds a cause (`agent.HostCutCauses`), and
+which `--ignore-host-disconnection` lets start, logs, after that record and
 before it serves, one Warn record `agent host cut disabled` with `causes`,
 the start check's causes joined by "; " (`cnagent.md` CN-CM2); without the
 flag the start ends with the error and no record of its own (`dnagent.md`
-CM3). An agent that can cut logs neither.
+CM3). An agent whose check finds no cause logs neither.
 
 ### The cut of a removed host
 
@@ -340,8 +340,9 @@ read ("nvmet connections not read"), and one refused an `OsClient` slot
 has no record at all (`osclient.md`, Logging) and shows only in the row's
 text, when that names it; and `stray connection wait spent` at Info, with
 `host_nqn` of the first stray connection still listed and `strays`, their
-count, when the pass's budget ended the wait before the cut held, since the
-next converge cuts again (R6). The names are apart from the cut of a
+count, when the pass's budget, or the end of the converge's own context
+(its caller gone, or the agent shutting down), ended the wait before the
+cut held, since the next converge cuts again (R6). The names are apart from the cut of a
 migrating leg's path, `leg path cut` (`cnagent.md` CN10).
 
 ### gRPC messages
@@ -429,10 +430,14 @@ logs for the same thing.
   and a dm-clone a converge would change among them (rendered "absent" or
   "differs" with the row's words), and on a cntlr a subsystem with a stray
   connection still there (rendered "pending" with the row's words,
-  `cnagent.md` CN33), or the node's nvmet port in a state one
-  would rewrite (`dnagent.md` SH31, DN16), or, on a cntlr, a side of a
-  wanted leg or an entry of a clone's source with no controller that the
-  converge would connect, a migrating leg's path the converge would cut, a
+  `cnagent.md` CN33) and, on a read alone, a subsystem whose nvmet
+  connections could not be read or that a lockdown the lockdown file shows
+  keeps from being ended (rendered "differs" with the row's words,
+  `cnagent.md` CN30, CN33), which a re-send may not cure, or the node's
+  nvmet port in a state one would rewrite (`dnagent.md` SH31, DN16), or, on
+  a cntlr, a side of a wanted leg or an entry of a clone's source with no
+  controller that the converge would connect, a migrating leg's path the
+  converge would cut, a
   forced-start mark of the request the agent holds while that request does
   not count as delivered, a group's forced start its converge would carry
   through, a group's md check its converge would start, stop or adopt, or

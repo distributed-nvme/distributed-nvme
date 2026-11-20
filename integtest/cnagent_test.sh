@@ -163,12 +163,18 @@ HOST2_NQN=nqn.2024-01.io.dnv-it:host:1
 # converge that cuts a stray connection the stage waits for its directory to
 # leave nvmet's debug directory; the converge itself waits a few seconds for
 # it, so this only covers a cut that holds just after the reply. CUT_FAIL_SECS:
-# how long after the cut the cut host's next synced write must fail and its
-# controller go: the host reconnects after its kernel's reconnect delay, 10 s,
-# nvmet refuses it by admission with DNR, and the host's kernel then deletes
-# the controller and fails the IO it held. CUT_KEEP_SECS: the longest a write
-# of the host that stays on the list may take across the cut, below that
-# reconnect delay, which a write would wait out were its connection ended too.
+# how long each wait after the connection went may take, counted from its own
+# start: smoke's wait for the cut host's next synced write to fail, and each
+# wait for the cut host's controller to go. The host reconnects after its
+# kernel's reconnect delay, 10 s, nvmet refuses it by admission with DNR, and
+# the host's kernel then deletes the controller and fails the IO it held. The
+# end of the failed write and the controller's absence that the stages log
+# are counted by the cut host's clock from just before the converge (in
+# redund, from just before the first of its two converges); the
+# connection's absence is counted from the converge's reply.
+# CUT_KEEP_SECS: the longest a write of the host that stays on the list may
+# take across the cut, below that reconnect delay, which a write would wait
+# out were its connection ended too.
 CUT_GONE_SECS=15
 CUT_FAIL_SECS=45
 CUT_KEEP_SECS=5
@@ -225,8 +231,8 @@ TRACE="it-setup"
 STAGE="(startup)"
 SETUP_DONE=0
 DIAG_CNTLRS=()
-# The VM on which clone_xfer slows what is sent to its own nvme-tcp port
-# (throttle_to), 0 while none is: on_exit takes the throttle off even when a
+# The VM that holds clone_xfer's throttle (throttle_to) or redund's slowleg
+# delay (delay_to), 0 while none does: on_exit takes either off even when a
 # run fails.
 THROTTLED=0
 # The VM that holds the pause case's two-way cut (blackhole_from), and the
@@ -242,8 +248,10 @@ SYNDROPPED=0
 # 0 while none does: on_exit removes both even when a run fails.
 NCG_VM=0
 # The VMs that run a cut stage's host writer (hostw_start), each set while
-# its writer may run: on_exit stops them even when a run fails, as a writer
-# left running holds a namespace open across the next case.
+# its writer may run: on_exit stops them even when a run fails, as the VMs
+# are shared: a writer left running writes on and holds its namespace open
+# for whatever runs on them before the next run's cleanup
+# (cnagent_integtest.md, Teardown and cleanup).
 HOSTW_VMS=(0 0 0)
 # What cut_converge read of the converge it sent: its time in ms and its
 # code.
@@ -561,10 +569,11 @@ on_exit() {
 		log ""
 		log "########## diagnostics (cnagent_integtest.md, Teardown and cleanup) ##########"
 		diagnostics || true
-		# The one injector a failed run does not leave in place: the next
-		# run's cleanup would remove it, but the VMs are shared, and another
-		# suite run before that would find its traffic slowed
-		# (cnagent_integtest.md, Teardown and cleanup).
+		# clone_xfer's token bucket and redund's netem delay, which
+		# unthrottle removes alike and which a failed run does not leave in
+		# place: the next run's cleanup would remove them, but the VMs are
+		# shared, and another suite run before that would find its traffic
+		# slowed (cnagent_integtest.md, Teardown and cleanup).
 		if [ "$THROTTLED" -ne 0 ]; then
 			helper_ok "$THROTTLED" unthrottle >&2
 		fi
@@ -1743,8 +1752,9 @@ kmsg_refused() {
 # which the kernel refuses to open a connection's state file. A missing
 # lockdown file reads as no lockdown, as the agent's start check reads it;
 # the file is a securityfs file, so a lockdown on a node without securityfs
-# mounted shows only as a refused cut. These are the facts the cn agent's start
-# check reads (cnagent.md CN-CM2), read here in shell, as the agent binary
+# mounted shows only as a refused cut. These are the facts the cn agent's
+# start check reads (cnagent.md CN-CM2) save nvmet's configfs tree, which
+# preflight checks on its own, read here in shell, as the agent binary
 # reaches the VMs only at setup.
 nvmet_cut_facts() {
 	local why="" mode
@@ -4100,8 +4110,9 @@ cleanup_phase1() { # <cn16> [other vm ip]
 	kill_role dn >/dev/null
 
 	# The fault injectors (case T's three, the partition case A's degrade
-	# stage reuses, clone_xfer's throttle, the pause case's two-way cut
-	# and its writer and sampler, smoke's host writers, and the nodecheck
+	# stage reuses, clone_xfer's throttle, redund's drop of new
+	# connections and its netem delay, the pause case's two-way cut and
+	# its writer and sampler, smoke's host writers, and the nodecheck
 	# case's stalled array and mdadm wrapper), first and unconditionally.
 	# Each of them outlives the stage that installed it and each would be
 	# diagnosed as something else entirely: a pin makes the dm passes below
@@ -5937,16 +5948,20 @@ secs_between() { awk -v a="$1" -v b="$2" 'BEGIN { printf "%.2f", a - b }'; }
 
 # cut_converge sends the converge that cuts the stray connection of
 # <hostnqn>: the request file, its list already edited, at a new revision.
-# Its code is zero once the cut held within the converge's own wait, and
-# otherwise the leftover code with the subsystem's row PENDING naming the
-# host (cnagent.md CN33), which is no failure: the worker, and the stage in
-# its place, re-sends on that code. With <strict> 1 only zero passes: a cut
-# that does not hold within the wait moves every namespace of the
-# subsystem inaccessible on the node, so a stage whose kept host must write
-# on needs the cut held in the converge. Any other reply fails the stage.
-# It sets CUT_MS, the converge's time in ms, and CUT_CODE; it bumps the
-# revision, so it runs in the parent shell (cnagent_integtest.md,
-# Conventions, Revisions).
+# Its code is zero with the subsystem's row OK once the cut held within the
+# converge's own wait. A stray still listed after the wait gives the
+# leftover code with the row PENDING naming the host (cnagent.md CN33),
+# which is no failure: the worker, and the stage in its place, re-sends on
+# that code. A cut whose connections could not be read, or that a lockdown
+# the lockdown file shows refuses, answers zero with the row ERROR, a name
+# only a read gives (cnagent.md CN30), which the zero branch's row check
+# fails. With <strict> 1 only zero with the row OK passes: a cut that does
+# not hold within the wait moves every namespace of the subsystem
+# inaccessible on the node, so a stage whose kept host must write on needs
+# the cut held in the converge. Any other reply fails the stage. It sets
+# CUT_MS, the converge's time in ms, and CUT_CODE; it bumps the revision,
+# so it runs in the parent shell (cnagent_integtest.md, Conventions,
+# Revisions).
 cut_converge() { # cnidx req ssid hostnqn label [strict]
 	local out t0
 	bump_cn_rev "$1"
@@ -5974,25 +5989,27 @@ cut_converge() { # cnidx req ssid hostnqn label [strict]
 	esac
 }
 
-# smoke_cut is the body of smoke's cut and revoke stages (cnagent_integtest.md,
-# Cases, smoke): the host <hostnqn> on vm<hv>, connected to the subsystem
-# <nqn> of cn<cn> and writing through its host writer, is taken off the
-# list, which then holds <list>, a JSON array; the host <keepnqn> on vm<kv>,
-# when given, stays on it and writes on through its own. In this order: the
-# CN's debug directory lists one nvmet connection of each host, and each
-# host's writer writes; the converge, clean, or with no kept host also the
-# leftover code naming the pending row (cut_converge's strict form); the
+# smoke_cut is the body of smoke's cut and revoke stages
+# (cnagent_integtest.md, Cases, smoke): the host <hostnqn> on vm<hv>,
+# connected to the subsystem <nqn> of cn<cn> and writing through its host
+# writer, is taken off the list, which then holds <list>, a JSON array; the
+# host <keepnqn> on vm<kv>, when given, stays on it and writes on through
+# its own. In this order: the CN's debug directory lists one nvmet
+# connection of each host, and each host's writer writes; the converge,
+# clean where a host stays on the list (cut_converge's strict form), and
+# with no kept host clean or the leftover code naming the pending row; the
 # cut host's connection gone from that directory, and the kept host's the
-# same connection still; the cut host's next synced write failed within
-# CUT_FAIL_SECS, after the converge began, its controller gone, and nvmet's
-# record that it refused the host's reconnect by admission behind a mark
-# made before the converge; the kept host's writes going on, none failed and
-# none longer than CUT_KEEP_SECS, which a write held across a reconnect of
-# its own would pass; then a connect of the cut host refused. It logs the
-# times: the converge, the connection gone after it, and, counted by the cut
-# host's clock from just before the converge, the end of its failed write
-# and its controller gone; and the kept host's writes across the cut and the
-# longest of them.
+# same connection still; the cut host's next synced write failed, within
+# CUT_FAIL_SECS of the wait's start and after the converge began, then its
+# controller gone within CUT_FAIL_SECS more, and nvmet's record that it
+# refused the host's reconnect by admission behind a mark made before the
+# converge; the kept host's writes going on, none failed and none longer
+# than CUT_KEEP_SECS, which a write held across a reconnect of its own would
+# pass; then a connect of the cut host refused. It logs the times: the
+# converge, the connection gone after it, and, counted by the cut host's
+# clock from just before the converge, the end of its failed write and its
+# controller gone; and the kept host's writes across the cut and the longest
+# of them.
 smoke_cut() { # cn ssid req nqn hv hostnqn list label [kv keepnqn]
 	local cn=$1 ss=$2 req=$3 nqn=$4 hv=$5 hnqn=$6 list=$7 label=$8
 	local kv=${9:-0} knqn=${10:-} conns kconn got mark ta gone line fail ctrl
@@ -7985,10 +8002,11 @@ case_redund() {
 # CN's debug directory lists the host's nvmet connection before its converge
 # and not after it, the host's controllers of both go, and each CN's kernel
 # log holds nvmet's refusal of the host's reconnect by admission behind a
-# mark made before the converges; then each CN's check round, re-sent on
-# while it names the pending row, is clean. It logs each converge's time and
-# when each connection and each controller was gone. The revisions it
-# converges at are the CNs' counters, which the caller reads after it.
+# mark made before the converges; then each CN's check round, the
+# SyncupCntlr re-sent while it answers the leftover code, is clean. It logs
+# each converge's time and when each connection and each controller was
+# gone. The revisions it converges at are the CNs' counters, which the
+# caller reads after it.
 redund_host_cut() { # sp c1 c2 req1 req2 nqn hv
 	local sp=$1 nqn=$6 hv=$7 i conns got mark ta gone ctrl
 	local -a cntlr=("" "$2" "$3") req=("" "$4" "$5")

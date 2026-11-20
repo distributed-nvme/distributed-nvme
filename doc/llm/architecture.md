@@ -844,33 +844,41 @@ clones' clone meta groups (Terminology and object model):
 6. **Host-facing nvmet**: per `Subsystem` an nvmet subsystem on the CN's
    port, with "attr_cntlid_min" and "attr_cntlid_max" from
    `Cntlr.cntlid_slot`, `serial` and `model` from the etcd `Subsystem`, and
-   the allowed hosts as configured. The allowed hosts are the only
-   admission gate of every subsystem dnv builds, host-facing or
-   dnv-internal, a transfer subsystem included, whose record's list is
-   used verbatim: a subsystem admits exactly the hosts its list names, and
-   an empty list admits no host. A storage export defaults to deny: a
-   `Subsystem` created without hosts, to have its namespaces attached
-   before any host is let in, stays closed, its `CdcEntry` shown to no host
-   (`cdc.md` DS4), until its hosts are granted. nvmet checks the list only
-   when a host connects, so every converge of every cntlr, primary or
-   standby, also ends each nvmet connection of a pool's or a transfer's
-   subsystem whose host is off its list, where the kernel can (the cut,
-   `cnagent.md` CN33): an empty list closes the subsystem to every new
-   connection, and the next converge ends the connections still there,
-   before its ns-dev and transfer device steps. A cntlr on which that subsystem is not
-   safe — its kernel list still admits a removed host, or its cut did not
-   hold — moves every namespace of the subsystem to inaccessible and keeps
-   it there for that converge (`cnagent.md` CN16, CN33). On a controller node whose agent runs without the cut
-   (`--ignore-host-disconnection`, `cnagent.md` CN-CM1) a host already
-   connected keeps its controller until it disconnects (Known limits).
-   Host-facing and internal subsystems share one rule. dnv
-   never sets "attr_allow_any_host", a mode no dnv flow needs: an agent
-   writes it
-   "0" before it links a subsystem's hosts, because nvmet refuses a new host
-   link while it is set, and the same write closes a subsystem found with
-   it set (`EnsureSubsystem`). Per `Namespace`: an nvmet namespace whose
-   nsid is `ns_idx`, whose "device_path" is the namespace's own
-   `CnNsDevName`, whose "uuid" and "nguid" come from the etcd record, and
+   the allowed hosts as configured. The allowed hosts are the only admission
+   gate of every subsystem dnv builds, host-facing or dnv-internal, a
+   transfer subsystem included, whose record's list is used verbatim: a
+   subsystem admits exactly the hosts its list names, and an empty list
+   admits no host. A storage export defaults to deny: a `Subsystem` created
+   without hosts, to have its namespaces attached before any host is let in,
+   stays closed, its `CdcEntry` shown to no host (`cdc.md` DS4), until its
+   hosts are granted. nvmet checks the list only when a host connects, so
+   every converge of every cntlr, primary or standby, also ends each nvmet
+   connection of each subsystem it steps, the pool's or a transfer's, whose
+   host is off its list, where the agent runs in cut mode, which its start
+   check decides by the causes it finds (the cut, `cnagent.md` CN33; a
+   transfer whose origin the request no longer names is not stepped, its
+   device demoted to an error table, `cnagent.md` CN17): an empty list
+   closes the subsystem to every new connection, and the next converge ends
+   the connections still there, before its ns-dev and transfer device steps,
+   save one that shows only after that converge's last listing, which the
+   following converge ends (`cnagent.md` CN33, Known limits). A cntlr on
+   which that subsystem is not safe — its kernel list may admit a host off
+   the list, or its cut did not hold — moves every namespace of the
+   subsystem to inaccessible and keeps it there for that converge, save one
+   whose move fails, which keeps its group with no data put under it, so on
+   a serving primary it keeps serving, a removed host still connected
+   included, until a later converge cuts that host or moves the namespace
+   (`cnagent.md` CN16, CN33, Known limits). On a controller node whose
+   agent runs without the cut (`--ignore-host-disconnection`, `cnagent.md`
+   CN-CM1) a host already connected keeps its controller until it
+   disconnects (Known limits). Host-facing and internal subsystems share
+   one rule. dnv never sets "attr_allow_any_host", a mode no dnv flow
+   needs: an agent writes it "0" before it links a subsystem's hosts,
+   because nvmet refuses a new host link while it is set, and the same
+   write closes a subsystem found with it set (`EnsureSubsystem`). Per
+   `Namespace`: an nvmet namespace whose nsid is `ns_idx`, whose
+   "device_path" is the namespace's own `CnNsDevName`, whose "uuid" and
+   "nguid" come from the etcd record, and
    which is a member of the fixed optimized ANA group [D4] only on an
    enabled primary below `SP_LEVEL_DISABLE`, and only while it is not
    effectively suspended and its td's backing chain is not
@@ -5384,22 +5392,23 @@ with `ResStatus`:
   (`dnagent.md` DN9), waiting for a free run in a DN's metadata area
   (Metadata units), or waiting for a migration's cutover (Migration):
   **healthy, not ready, no action needed**.
-* `RES_STATUS_PENDING` — waiting on something else before it can be
-  judged or built: on a cntlr's leg, the primary's prober for the leg has
-  not completed a round, or none is registered yet (`cnagent.md` CN11);
-  on a side, the primary's dm-linear, whose path stays closed until every
-  other dm-linear of the side is proven fenced (`dnagent.md` DN10); on a
-  cntlr's subsystem row, the pool's or a transfer's, a host the desired
-  state removed is still connected after the cut's wait, after a write of
-  "fatal" the kernel refused or after a failed read of a written
-  connection's "state", while the rest of the row is ok (`cnagent.md`
-  CN33). A subsystem whose nvmet connections the agent cannot read, or
-  whose stray connection a lockdown the lockdown file shows keeps from
-  being ended, reads `RES_STATUS_ERROR` instead; only a read names that
-  row, so its rounds count and the worker fails such a primary over to
-  another node (`cnagent.md` CN30; `dnv-worker.md` AR5).
-  It sets no health epoch: on a leg it neither sets nor clears one, and a
-  side or a cntlr whose only row not ok is pending reads as a clean round
+* `RES_STATUS_PENDING` — waiting on something else before it can be judged
+  or built: on a cntlr's leg, the primary's prober for the leg has not
+  completed a round, or none is registered yet (`cnagent.md` CN11); on a
+  side, the primary's dm-linear, whose path stays closed until every other
+  dm-linear of the side is proven fenced (`dnagent.md` DN10), or a migration
+  source's export, whose link waits until every per-CN dm-linear of the side
+  is proven fenced (`dnagent.md` DN12); on a cntlr's subsystem row, the
+  pool's or a transfer's, a host the desired state removed is still
+  connected after the cut's wait, after a write of "fatal" the kernel
+  refused, after a failed read of a written connection's "state", or at a
+  read whose listing shows it, while the rest of the row is ok (`cnagent.md`
+  CN33). A subsystem whose nvmet connections the agent cannot read, or whose
+  stray connection a lockdown the lockdown file shows keeps from being
+  ended, reads `RES_STATUS_ERROR` instead; only a read names that row, so
+  its check rounds count (`cnagent.md` CN30; `dnv-worker.md` AR5, AR10). It
+  sets no health epoch: on a leg it neither sets nor clears one, and a side
+  or a cntlr whose only row not ok is pending reads as a clean round
   (`dnv-worker.md` HL2). The side's verdict names the pending row, so the
   worker sends its `SyncupSide` again (`dnagent.md` DN16), and so does a
   cntlr's verdict a pending subsystem row, for its `SyncupCntlr`
@@ -6351,21 +6360,27 @@ revision):
    dm-clone over the metadata it holds, and the dm-clone serves (Clone
    metadata durability).
 4. Move each namespace from inaccessible to optimized once step 3 has put
-   its `CnNsDevName` on the raid0 or on a dm-clone that serves —
-   on the dm-error only at the levels that remove the thin pools or the
-   clone stacks (SpLevel) — and not before (`cnagent.md` CN16); nor while
-   the namespace's subsystem is not safe in that converge: its list step
-   and the cut of the hosts the list no longer names come before the
-   ns-devs and a transfer's device, and a subsystem whose list still admits
-   a removed host, or whose cut did not hold, has every namespace moved to
-   inaccessible and kept there, one whose move fails getting no data put
-   under it, so a host removed while the new primary was a standby is
-   served nothing (`cnagent.md` CN16, CN33). A
-   converge in which a member not yet available (step 1) kept the stack
-   from being built leaves the namespaces inaccessible, and host IO waits
-   on the path until a later converge (step 1) has built the stack
-   (`cnagent.md` CN10, CN30; `cnagent.md`, Known limits); a transfer the
-   new primary serves waits the same way (`cnagent.md` CN17).
+   its `CnNsDevName` on the raid0 or on a dm-clone that serves — on the
+   dm-error only at the levels that remove the thin pools or the clone
+   stacks (SpLevel) — and not before (`cnagent.md` CN16); nor while the
+   namespace's subsystem is not safe in that converge: its list step and the
+   cut of the hosts the list no longer names come before the ns-devs and a
+   transfer's device, and a subsystem whose list may admit a host off it, or
+   whose cut did not hold, has every namespace moved to inaccessible and
+   kept there, one whose move fails getting no data put under it, so where
+   the agent cuts, a host removed while the new primary was a standby is
+   served nothing, save a host whose connection shows only after that
+   converge's last listing, served until the next converge cuts it
+   (`cnagent.md` CN16, CN33; `cnagent.md`, Known limits); where it runs
+   without the cut (`--ignore-host-disconnection`, `cnagent.md` CN-CM2),
+   such a host keeps its nvmet connection and is served once the namespaces
+   move (Known limits, A removed host keeps its connection where the cn
+   agent runs without the cut). A converge in which a member not yet
+   available (step 1) kept the stack from being built leaves the namespaces
+   inaccessible, and host IO waits on the path until a later converge
+   (step 1) has built the stack (`cnagent.md` CN10, CN30; `cnagent.md`,
+   Known limits); a transfer the new primary serves waits the same way
+   (`cnagent.md` CN17).
 
 The failover's own transaction writes its revision into the old primary's
 `demoted_revision`, which the sp role's demotion hold reads (sp role), and
@@ -8062,9 +8077,10 @@ node's reads turns them on in the running process, with no restart.
   per-node input
   of the CN extent count (Size → extents; `cnagent.md`,
   `cmd/dnv-agent cn`), and `--ignore-host-disconnection`, without which it
-  refuses to start on a kernel that cannot end a removed host's nvmet
-  connection, and with which it runs there without the cut (Primary
-  cntlr, step 6; `cnagent.md` CN-CM1, CN-CM2). A node may run a dn agent and a cn agent side by
+  refuses to start where its start check finds a cause
+  (`agent.HostCutCauses`), and with which it runs there without the cut of
+  a removed host's nvmet connection (Primary cntlr, step 6; `cnagent.md`
+  CN-CM1, CN-CM2). A node may run a dn agent and a cn agent side by
   side: the pair co-owns one nvmet port at the default port id, with
   identical transport flags, and both use the default local-store prefix,
   since the two roles' store kinds are disjoint
@@ -8947,20 +8963,24 @@ document and only pointed to here.
   of the group's surviving leg where distinct names would have offered the
   other machine (Disk nodes). The cntlrs of a pool, at its
   create and at a cntlr replacement, can share a machine the same way.
-* **The status read sees only what etcd and the primaries hold.** It
-  calls each pool's primary and a migration's destination alone (Clusters,
+* **The status read sees only what etcd and the primaries hold.** It calls
+  each pool's primary and a migration's destination alone (Clusters,
   GetClusterStatus), so a standby's or a side's own trouble shows only once
   the worker sets its health epoch; a worker that is gone shows only as a
   hint by the gateway's clock at the default vote interval, since the
   registry's epochs decide nothing (Worker registry); no record holds the
   time of a repair, a migration, a clone, a lost record or a refused grow,
-  so their rows carry no age but a report row's; and a pool shows at most
+  so their rows carry no age but a report row's; it lists a subsystem's row
+  only when it reads `ERROR`, so a subsystem whose row reads `PENDING` while
+  a host taken off its list keeps its connection gives no row, and no health
+  epoch is set, though a converge that leaves the row so has made the
+  subsystem dark on the primary, save a namespace whose move failed
+  (`cnagent.md` CN33, Known limits); and a pool shows at most
   `MaxStatusRowPerSp` rows, with a count of the rest. Its bounds are per
   request (`gateway.md` GW20): a read holds up to `StatusFanOut` primary
   reports at once, each as wide as a cntlr report at the limits, so reads
-  that run at once add up, and a read loads every pool of its page as the
-  sp worker's fan-out loads it, node records included (`dnv-worker.md`
-  MD3).
+  that run at once add up, and a read loads every pool of its page as the sp
+  worker's fan-out loads it, node records included (`dnv-worker.md` MD3).
 * **Nothing limits recovery load across pools.** The reaction pass takes
   one action per pool per interval and holds nothing across pools
   (`dnv-worker.md` AR2): a dead disk node starts a repair, a full copy onto
@@ -9674,23 +9694,24 @@ document and only pointed to here.
   after a cntlr replacement). A path connected by hand stays (above).
 * **A removed host keeps its connection where the cn agent runs without the
   cut.** nvmet checks a subsystem's list only when a host connects. A cn
-  agent ends the nvmet connection of a host taken off the list at its next
-  converge where the kernel can (Primary cntlr, step 6; `cnagent.md` CN33),
-  which takes nvmet's debug directory (`CONFIG_NVME_TARGET_DEBUGFS`, a
-  kernel of 6.11 or newer), debugfs mounted and no lockdown; most
-  distributions build their kernels without that option. A cn agent
-  started with `--ignore-host-disconnection` on a kernel that cannot cut
-  runs without the cut (`cnagent.md` CN-CM2). On such a controller node a
-  host the CSI driver's detach takes off the list (`csi.md` CSI10) keeps
-  its controller and its IO until its node plugin drops the path (`csi.md`
-  CSI15) or it disconnects, and, where that node is the primary, the
-  detach's wait and the next attach's pass with no cut (`csi.md` CSI10). A
-  plugin that cannot run, or cannot read a cdc, drops no path on its own,
-  so there a detach Kubernetes forces by a force-deleted pod, a deleted
-  Node object or the out-of-service taint, while the host is cut off from
-  Kubernetes and from a cdc the plugin follows, can leave the old host
-  writing beside the host the volume moves to, and dnv reports no error
-  for it.
+  agent whose start check finds no cause runs in cut mode, and ends the
+  nvmet connection of a host taken off the list while the kernel can
+  (Primary cntlr, step 6; `cnagent.md` CN33), which takes nvmet's debug
+  directory (`CONFIG_NVME_TARGET_DEBUGFS`, a kernel of 6.11 or newer), nvmet
+  loaded, debugfs mounted and no lockdown; most distributions build their
+  kernels without that option. One whose check finds a cause, started with
+  `--ignore-host-disconnection`, runs without the cut until it is started
+  again, even once the cause is gone (`cnagent.md` CN-CM2, CN33). On such a
+  controller node a host the CSI driver's detach takes off the list
+  (`csi.md` CSI10) keeps its controller and its IO until its node plugin
+  drops the path (`csi.md` CSI15) or it disconnects, and, where that node is
+  the primary, the detach's wait and the next attach's pass with no cut
+  (`csi.md` CSI10). A plugin that cannot run, or cannot read a cdc, drops no
+  path on its own, so there a detach Kubernetes forces by a force-deleted
+  pod, a deleted Node object or the out-of-service taint, while the host is
+  cut off from Kubernetes and from a cdc the plugin follows, can leave the
+  old host writing beside the host the volume moves to, and dnv reports no
+  error for it.
 * **A Kubernetes node's cdc list that leaves out a cdc drops the paths of
   that cdc's volumes** (`csi.md` CSI15). The node plugin follows the cdcs of
   its own configuration alone, so a list that leaves out every cdc of a range

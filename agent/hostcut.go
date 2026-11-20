@@ -33,10 +33,11 @@ const (
 // of its NVMe target: nvmet loaded (NvmetRoot there), debugfs mounted at
 // DebugfsDir, nvmet's debug directory there (NvmetDebugRoot), which needs
 // the kernel option CONFIG_NVME_TARGET_DEBUGFS and a kernel of 6.11 or
-// newer, and no lockdown in force. It answers nil when the kernel can, and
-// otherwise every cause it found, in that order. A read that does not answer
-// is a cause, never a pass. The debug directory is judged only once nvmet is
-// loaded and debugfs mounted: before that its absence says nothing more.
+// newer, and no lockdown LockdownPath shows. It answers nil when it finds
+// no cause, and otherwise every cause it found, in that order. A read that
+// does not answer is a cause, never a pass. The debug directory is judged
+// only once nvmet is loaded and debugfs mounted: before that its absence
+// says nothing more.
 func HostCutCauses(ctx context.Context, oc common.OsClient) []string {
 	var causes []string
 	b := osBase{oc: oc}
@@ -97,9 +98,9 @@ func debugfsMounted(ctx context.Context, b osBase) (bool, error) {
 
 // LockdownMode is the lockdown mode in force on this node, as the start
 // check reads it (lockdownMode): "" with no lockdown file, "none" with no
-// lockdown. The cn agent's cut reads it to tell a node that cannot end a
-// stray connection from one whose connection has not gone yet (cnagent.md
-// CN33).
+// lockdown. The cn agent's cut and its reads use it to tell a node that
+// cannot end a stray connection from one whose connection has not gone yet
+// (cnagent.md CN33).
 func (n *Nvmet) LockdownMode(ctx context.Context) (string, error) {
 	return lockdownMode(ctx, n.osBase)
 }

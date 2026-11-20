@@ -766,8 +766,8 @@ func (c *controller) ControllerUnpublishVolume(
 // awaitCut is a detach's or an attach's wait for the primary's cut (csi.md
 // CSI10; cnagent.md CN33): it polls until a report of the pool's primary
 // cntlr reads the subsystem's row OK at the wait's revision, which an agent
-// that cuts answers once no host off the list keeps an nvmet connection to
-// the subsystem. A detach's revision is the one its write made, and a
+// that cuts answers once its last listing shows no host off the list
+// connected. A detach's revision is the one its write made, and a
 // report at a later one counts too, since the worker sends the primary the
 // latest revision alone (dnv-worker.md RW3); a detach that wrote nothing
 // takes the pool's revision its first poll reads, after the subsystem read,
@@ -907,8 +907,8 @@ type cutWait struct {
 }
 
 // ended is what a poll that finds the pool or the subsystem gone, or the
-// pool deleting, answers: a detach's wait is done, as what is gone serves
-// no host, and an attach's exact wait has moved, so that its next attempt
+// pool deleting, answers: a detach's wait is done, as what is gone takes no
+// attach, and an attach's exact wait has moved, so that its next attempt
 // reads again and no write goes out with no OK report at its token.
 func (w *cutWait) ended() pollResult {
 	if w.exact {

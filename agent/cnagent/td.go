@@ -211,11 +211,12 @@ func nsAnaMove(np *nsPlan, outcome nsDevOutcome) (int, bool) {
 // parked (nsDevHeldParked) — and a new one starts parked on the td's
 // dm-error. The caller reports a held ns-dev's row ERROR, which the
 // converge's verdict and a read's both name (CN30), so the worker re-sends
-// the request; it moves a serving namespace to its desired group and a
-// parked one inaccessible (nsAnaMove). The first pass that leaves no such
-// dm-clone live — its listing names none, or its L3 removed it, parking
-// first an ns-dev still over it — reloads it. The ns-devs of a td whose raid0 no such
-// dm-clone writes into converge as usual.
+// the request; where its subsystem is safe (CN33), it moves a serving
+// namespace to its desired group and a parked one inaccessible (nsAnaMove).
+// The first pass that leaves no such dm-clone live — its listing names none,
+// or its L3 removed it, parking first an ns-dev still over it — reloads it.
+// The ns-devs of a td whose raid0 no such dm-clone writes into converge as
+// usual.
 //
 // A step that fails, whatever read or command failed, reads the ns-dev's
 // live table afterwards (failedNsDev) — the number of a raid0 that is not
@@ -264,10 +265,12 @@ func (s *CnAgentServer) convergeNsDev(
 	hold := np.td != nil && np.backingName == np.td.raid0Name &&
 		lingering.holds(np.td.raid0Name)
 	// A namespace its unsafe subsystem's move could not make inaccessible
-	// gets no data put under it (CN33): its ns-dev is made or changed only to
-	// park it on the td's dm-error, or to put the read-only level's
-	// error-writes table over the device it maps (wrapsLive), and otherwise
-	// keeps what it maps.
+	// gets no data put under it (CN33): its ns-dev is created, or gets a
+	// table other than the one it has, only to park it on the td's dm-error,
+	// or to put the read-only level's error-writes table over the device it
+	// maps (wrapsLive), and otherwise keeps what it maps; one already on the
+	// table the rules select is still resumed or made writable below, which
+	// moves no data.
 	fenced := np.undarkened &&
 		!(np.td != nil && np.backingName == np.td.errorName)
 	// The td's dm-error is ensured again here, probe-first: the build's td
@@ -548,11 +551,12 @@ func onDevice(targets []common.DmTarget, devNo string) bool {
 // pass removes — goes inaccessible before the reload (CN16), and so does one
 // whose ns-dev the park finds parked already. Its hosts then queue their IO
 // through the park rather than read IO errors from an optimized path; the
-// build moves it back in the pass that puts the ns-dev on its serving
-// device, or that finds it still serving after a park whose load failed
-// (CN18's hold). A move that fails is logged and the park goes on: the park
-// guards the data, the move only spares the hosts IO errors. Rules 3 and 4
-// park onto the dm-error they select, with no move.
+// build moves it back in a pass in which its subsystem is safe (CN33) and
+// that puts the ns-dev on its serving device, or finds it still serving
+// after a park whose load failed (CN18's hold). A move that fails is logged
+// and the park goes on: the park guards the data, the move only spares the
+// hosts IO errors. Rules 3 and 4 park onto the dm-error they select, with no
+// move.
 func (s *CnAgentServer) parkNsDev(
 	ctx context.Context,
 	np *nsPlan,
@@ -845,8 +849,8 @@ func (s *CnAgentServer) probeNsDev(
 		}
 	}
 	// A namespace of an unsafe subsystem that is not inaccessible gets no
-	// change but a park, or the read-only level's error-writes table over
-	// the device it maps, as the converge's ns-dev step makes none (CN33).
+	// new table but a park, or the read-only level's error-writes table over
+	// the device it maps, as the converge's ns-dev step loads none (CN33).
 	fenced := func() bool {
 		return !np.ss.safe && np.backingName != "" &&
 			!(np.td != nil && np.backingName == np.td.errorName) &&

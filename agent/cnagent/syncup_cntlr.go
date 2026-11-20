@@ -652,11 +652,12 @@ func (s *CnAgentServer) build(
 	}
 	// The list step of each pool subsystem and its cut (CN33) come before
 	// the transfers' device steps and the ns-dev loop: a subsystem that is
-	// not safe has every namespace moved
-	// inaccessible at once, and the last loop below leaves them there, so no
-	// device step of the pass puts data under a namespace of it; one whose
-	// move failed keeps what its device maps (undarkened), and a serving
-	// one keeps serving until a re-send's move holds (darkenSubsys; CN33,
+	// not safe has every namespace moved inaccessible at once, and the last
+	// loops below leave them there, so no device step of the pass serves a
+	// host new data through a namespace of it; one whose move failed gets no
+	// data put under it, keeping what its device maps (undarkened), and a
+	// serving one keeps serving, a removed host still connected too, until a
+	// re-send cuts that host or moves the namespace (darkenSubsys; CN33,
 	// Known limits).
 	// cutBudget: the waits of this pass's cuts, of the transfers' subsystems
 	// and the pool's alike.

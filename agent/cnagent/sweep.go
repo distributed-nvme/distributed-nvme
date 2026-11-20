@@ -2900,9 +2900,9 @@ func nameCntlrRow(row *pb.ResInfo, res *agent.SweepResult) {
 		}
 		err = errRowDiffers
 	case pb.ResStatus_RES_STATUS_PENDING:
-		// A subsystem with a stray connection still there after the cut's
-		// wait (CN33), the one row the verdict reads that can be pending:
-		// the re-send cuts again.
+		// A subsystem with a stray connection still listed after the cut
+		// or at a read (CN33), the one row the verdict reads that can be
+		// pending: the re-send cuts again.
 		err = errRowPending
 	default:
 		return
@@ -3084,12 +3084,10 @@ func (s *CnAgentServer) cntlrPreSteps(
 	//
 	// The park of an ns-dev whose rules want a serving device — one still
 	// mapping a dm-clone the plan dropped, say — moves its namespace
-	// inaccessible first (parkNsDev), so its hosts queue until the build puts
-	// the ns-dev on that serving device, or finds it serving on through a
-	// park that failed (CN18's hold); the park of rules 0-4 moves nothing,
-	// since P1 has moved every namespace the desired state wants
-	// inaccessible, and rules 3 and 4 keep theirs optimized over the dm-error
-	// they select.
+	// inaccessible first (parkNsDev), so its hosts queue rather than read IO
+	// errors; the park of rules 0-4 moves nothing, since P1 has moved every
+	// namespace the desired state wants inaccessible, and rules 3 and 4 keep
+	// theirs optimized over the dm-error they select.
 	for _, np := range plan.namespaces {
 		if np.td == nil || !plan.wantAny {
 			continue

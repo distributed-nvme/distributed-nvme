@@ -28,16 +28,16 @@
 # target is refused, before its modules or packages change (its copy of the
 # built files is already in place), when its nvmet holds a subsystem, a port
 # or a host entry (a suite's cleanup removes them; a stopped agent leaves its
-# own), when a module of the six is in use, or when its kernel is under
-# lockdown or enforces module signatures, since either refuses the built
-# modules. install then loads nvmet and nvmet-tcp, holds the kernel's meta
-# packages that were not held yet (every new kernel needs a new build; a
-# kernel with no generic or virtual meta package gets a warning) and ends
-# with the check.
+# own), when a module of the six is in use, or when its lockdown file shows
+# a lockdown or its kernel enforces module signatures, since either refuses
+# the built modules. install then loads nvmet and nvmet-tcp, holds the
+# kernel's meta packages that were not held yet (every new kernel needs a
+# new build; a kernel with no generic or virtual meta package gets a
+# warning) and ends with the check.
 #
 # check exits 0 when every target's nvmet, loaded by modprobe, shows the
-# debug directory, debugfs is mounted at /sys/kernel/debug and the kernel is
-# not under lockdown; it prints one line per target. restore does nothing on
+# debug directory, debugfs is mounted at /sys/kernel/debug and the lockdown
+# file shows no lockdown; it prints one line per target. restore does nothing on
 # a target with neither built modules for any kernel nor a hold list;
 # elsewhere it removes the built modules of every kernel version and lifts
 # the holds install recorded, and where the running kernel has them, or its

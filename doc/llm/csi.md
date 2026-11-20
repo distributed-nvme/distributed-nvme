@@ -59,14 +59,15 @@ limits).
 
 Attach sets the subsystem's allowed hosts to the node's host NQN alone, and
 writes the node into an empty list only once the primary cntlr has ended the
-nvmet connections of every host off the list, where its kernel can; detach
-empties the list, which closes the subsystem to new connections
-(`architecture.md`, Primary cntlr) and hides it from discovery (`cdc.md` DS4),
-and returns once the primary cntlr has ended the old node's nvmet connections,
-where its kernel can, or once the subsystem's record is gone (CSI10). The
-attach's wait, not the detach's return, keeps the next node out while an old
-one is still connected: Kubernetes may attach the next node before a detach
-has returned.
+nvmet connections of every host off the list, where its agent runs in cut
+mode (`cnagent.md` CN33), save a connection that shows only after the cut's
+last listing; detach empties the list, which closes the subsystem to new
+connections (`architecture.md`, Primary cntlr) and hides it from discovery
+(`cdc.md` DS4), and returns once the primary cntlr has ended the old node's
+nvmet connections, where its agent runs in cut mode, with the same exception,
+or once the subsystem's record is gone (CSI10). The attach's wait, not the
+detach's return, keeps the next node out while an old one is still
+connected: Kubernetes may attach the next node before a detach has returned.
 The node plugin follows the discovery log as a host must (`architecture.md`,
 Host view): it holds a persistent discovery connection to every cdc address
 of its own configuration, and to no other, connects every listed cntlr of the
@@ -236,39 +237,50 @@ inspects); the wait ends once a report made at the wait's revision, or for a
 detach a later one, reads the volume's subsystem row OK, which on an agent that
 cuts means the cut held (`cnagent.md` CN33), a later revision counting for a
 detach since the worker sends the primary the latest revision alone
-(`dnv-worker.md` RW3). A report older than the revision, a row that is not OK
-or is missing, an agent that answers no rows, a pool with no primary, a failed
-inspect, its NOT_FOUND for a cntlr replaced during the wait among them, and a
-pool read that fails but with NOT_FOUND each mean another poll, and the polls
-of one call keep the poll period apart across its attempts, so a pool that
-moves often, or a report ahead of the pool's revision, makes no busy loop. Each
-poll takes the primary afresh, so the wait follows a failover, and a standby
-that becomes the primary cuts before it serves (`cnagent.md` CN33); standbys
-are not waited for, since they serve no IO. A pool or a subsystem that is gone
-and a pool being deleted end a detach's wait as done: what is gone takes no
-attach, and a pool is deleting only once it holds no subsystem (CSI9); an
-attach's exact wait reads them as a move instead, so that its next attempt's
-own reads answer NOT_FOUND and no write goes out without an OK report at its
-token's revision; the cn agents' sweep takes down a subsystem whose record is
-gone, its namespaces at the cntlr's next converge (`cnagent.md` CN21), and the
-sp drain takes down the rest of a deleting pool (`dnv-worker.md`, The sp
-drain), so a host still connected can keep its IO until then. The call's one
-bound (CSI7) ends the call wherever it is, in a wait or in a gateway call of an
-attempt, with DEADLINE_EXCEEDED, or CANCELED where the caller ended the call
-first, as the attacher sidecar does at its own deadline, naming the volume, the
-call, the node and the last state the polls saw, the last report and any
-gateway call that failed after it, and Kubernetes repeats the call, which waits
-again. So a pool whose primary's agent does not answer holds the detach until
-the agent answers or a failover makes another cntlr the primary, and the attach
-to another node waits as long, so no other node gets the volume meanwhile. A
-primary whose agent runs with `--ignore-host-disconnection` on a kernel that
-cannot end an nvmet connection (`cnagent.md` CN-CM1) reads the row OK with no
-cut, so the wait passes at its first report at the revision, and a host already
-connected keeps its controller and its IO (`architecture.md`, Primary cntlr)
-until it disconnects or its own node plugin drops the path, which it does once
-the cdcs list no cntlr of the subsystem to it (CSI15); a detach Kubernetes
-forces while that plugin does not run, or cannot read a cdc it follows, then
-lets the old host write on beside the host the volume moves to
+(`dnv-worker.md` RW3). A host whose connect passed nvmet's check before the
+list step took it off, and whose connection shows only after the cut's last
+listing, leaves that row OK too, so a wait, a detach's or an attach's, ends
+with that host still connected, and the primary serves it until its next
+converge cuts it. After an attach, that is the converge of the attach's own
+write, whose list step lets the attach's node in and whose cut, right after
+that step and before its ns-dev loop, ends the host's connection, so the two
+hosts are let in together only for that cut's wait; with no later change of the
+pool, it is the converge of the worker's re-send, once the primary's next read
+names the connection (`cnagent.md`, Known limits). A report older than the
+revision, a row that is not OK or is missing, an agent that answers no rows, a
+pool with no primary, a failed inspect, its NOT_FOUND for a cntlr replaced
+during the wait among them, and a pool read that fails but with NOT_FOUND each
+mean another poll, and the polls of one call keep the poll period apart across
+its attempts, so a pool that moves often, or a report ahead of the pool's
+revision, makes no busy loop. Each poll takes the primary afresh, so the wait
+follows a failover, and a standby that becomes the primary cuts before it
+serves (`cnagent.md` CN33); standbys are not waited for, since they serve no
+IO. A pool or a subsystem that is gone and a pool being deleted end a detach's
+wait as done: what is gone takes no attach, and a pool is deleting only once it
+holds no subsystem (CSI9); an attach's exact wait reads them as a move instead,
+so that its next attempt's own reads answer NOT_FOUND and no write goes out
+without an OK report at its token's revision; the cn agents' sweep takes down a
+subsystem whose record is gone, its namespaces at the cntlr's next converge
+(`cnagent.md` CN21), and the sp drain takes down the rest of a deleting pool
+(`dnv-worker.md`, The sp drain), so a host still connected can keep its IO
+until then. The call's one bound (CSI7) ends the call wherever it is, in a wait
+or in a gateway call of an attempt, with DEADLINE_EXCEEDED, or CANCELED where
+the caller ended the call first, as the attacher sidecar does at its own
+deadline, naming the volume, the call, the node and the last state the polls
+saw, the last report and any gateway call that failed after it, and Kubernetes
+repeats the call, which waits again. So a pool whose primary's agent does not
+answer holds the detach until the agent answers or a failover makes another
+cntlr the primary, and the attach to another node waits as long, so no other
+node gets the volume meanwhile. A primary whose agent runs in no cut mode —
+started with `--ignore-host-disconnection` while its start check found a cause
+(`agent.HostCutCauses`), a mode it keeps until it is started again, even once
+the cause is gone (`cnagent.md` CN-CM1, CN-CM2, CN33) — reads the row OK with
+no cut, so either wait passes at its first report at the revision, and a host
+already connected keeps its controller and its IO (`architecture.md`, Primary
+cntlr) until it disconnects or its own node plugin drops the path, which it
+does once the cdcs list no cntlr of the subsystem to it (CSI15); a detach
+Kubernetes forces while that plugin does not run, or cannot read a cdc it
+follows, then lets the old host write on beside the host the volume moves to
 (`architecture.md`, Known limits).
 
 ## Capacity
@@ -1004,17 +1016,17 @@ detach reply, a repeat, OK; the standby's connection at the detach's end is
 logged, as no detach waits for it. Within a bound host0's writes, which its
 container goes on making, fail: they fail only once every cntlr of the pool has
 ended host0's connection, the standby's included (`cnagent.md` CN33), since IO
-queues while a standby's path is left (The node plugin), and then each
-reconnect is refused with DNR and its controller deleted (CSI14), so a write
-that waits instead fails the case naming each cntlr that still shows host0's
-connection. Then host0 holds no controller of the volume, and so no cntlr shows
-its connection. The claim's new pod on host1 checks the pattern host0 wrote,
-then writes and checks its own. The case logs the controller plugin's detach
-replies and its attach requests and replies, and the times from the taint:
-host0 off the list, the worker back, the cut on the primary, the detach's end,
-host1's attach, host0's first failed write and the new pod's start. The taint
-and the cut go, host0 comes back Ready with its node plugin, the controller is
-scaled back to two copies, then every delete, and nothing left.
+queues while a standby's path is left (The node plugin), and each reconnect has
+been refused with DNR and its controller deleted (CSI14), so a write that waits
+instead fails the case naming each cntlr that still shows host0's connection.
+Then host0 holds no controller of the volume, and so no cntlr shows its
+connection. The claim's new pod on host1 checks the pattern host0 wrote, then
+writes and checks its own. The case logs the controller plugin's detach replies
+and its attach requests and replies, and the times from the taint: host0 off
+the list, the worker back, the cut on the primary, the detach's end, host1's
+attach, host0's first failed write and the new pod's start. The taint and the
+cut go, host0 comes back Ready with its node plugin, the controller is scaled
+back to two copies, then every delete, and nothing left.
 
 **many.** Eight claims and eight pods at once, four per host, each writing
 a pattern and checking it; the cluster holds eight pools; then every
@@ -1059,13 +1071,16 @@ the agents' tools and modules and this suite's ports free, and on a
 controller-node guest, once nvmet is loaded, the facts the cn agent's start
 check reads (`cnagent.md` CN-CM2): debugfs mounted at /sys/kernel/debug,
 nvmet's debug directory there, which the kernel option
-`CONFIG_NVME_TARGET_DEBUGFS` makes, and no lockdown in force, as no start
-line of the suite takes `--ignore-host-disconnection` and the detach case
-needs the cut, a failure naming `integtest/nvmet_debugfs.sh`, the lab tool
-that builds and installs nvmet modules with the option (`layout.md`,
-Directory tree). Then k3s: present at the pin or installed (CSI1), every
-node Ready at the pin, the taint (CSI6), and the cluster's own name service
-available. Then the dnv stack and the driver.
+`CONFIG_NVME_TARGET_DEBUGFS` makes, and no lockdown the lockdown file
+shows, as no start line of the suite takes `--ignore-host-disconnection` and
+the detach case needs the cut, a failure naming `integtest/nvmet_debugfs.sh`,
+the lab tool that builds and installs nvmet modules with the option
+(`layout.md`, Directory tree). The start check's other fact, configfs
+mounted, is read by no guest check, so a guest without it fails at the cn
+agent's start. Then k3s:
+present at the pin or installed (CSI1), every node Ready at the pin, the
+taint (CSI6), and the cluster's own name service available. Then the dnv
+stack and the driver.
 
 ### Diagnostics on failure
 

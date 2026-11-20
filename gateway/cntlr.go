@@ -542,10 +542,10 @@ func (s *Server) UpdateCntlrEnabled(
 // agent for its devices' counters and its legs' probe times too
 // (read_io_stats), which the agent reads at the call (cnagent.md CN23), and
 // passes them through: InspectCntlr serves a person, and the CSI driver's
-// detach, which polls it for the primary's subsystem row (csi.md CSI10) and
-// pays the counters' read on every inspect; it is the only one of the
-// gateway's GetCntlrInfo callers that asks, so the others, which read rows
-// alone, cost the agent no read of the node.
+// detach and attach, which poll it for the primary's subsystem row (csi.md
+// CSI10) and pay the counters' read on every inspect; it is the only one of
+// the gateway's GetCntlrInfo callers that asks, so the others, which read
+// rows alone, cost the agent no read of the node.
 //
 // The agent's reply is passed through as it comes: only a transport failure
 // or a non-OK gRPC status is this RPC's ABORTED, because AG3 exempts the

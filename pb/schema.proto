@@ -406,17 +406,20 @@ enum ResStatus {
     // has not completed a round since it started (at the leg's build, a
     // promotion or an agent restart), or no prober is registered yet
     // (cnagent.md CN11); on a side, the primary's dm-linear, whose path
-    // stays closed until every other dm-linear of the side is proven
-    // fenced (dnagent.md DN10); on a cntlr's subsystem row, pool or
-    // transfer, a host the desired state removed is still connected while
-    // the lockdown file shows no mode in force, after the cut's wait, after
-    // a write the kernel refused, or after a failed read of a written
-    // connection's "state", while the rest of the row reads OK (cnagent.md
-    // CN33). It sets no health epoch: on a
-    // leg it neither sets nor clears one, and a side or a cntlr whose only
-    // row not OK is pending reads as a clean round (dnv-worker.md HL2).
-    // The side's and the cntlr's verdicts name such a row, so the worker
-    // re-sends the SyncupSide or the SyncupCntlr.
+    // stays closed until every other dm-linear of the side is proven fenced
+    // (dnagent.md DN10), or a migration source's export, whose link waits
+    // until every per-CN dm-linear of the side is proven fenced (dnagent.md
+    // DN12); on a cntlr's subsystem row, pool or transfer, a host the
+    // desired state removed is still connected while the lockdown file
+    // shows no mode in force, after the cut's wait, after a write the
+    // kernel refused, after a failed read of a written connection's
+    // "state", or at a read whose listing shows it, while the rest of the
+    // row reads OK (cnagent.md CN33). It sets no health epoch: on a leg it
+    // neither sets nor clears one, and a side or a cntlr whose only row not
+    // OK is pending reads as a clean round (dnv-worker.md HL2). The side's
+    // verdict names its pending row and the cntlr's a pending subsystem
+    // row, never a pending leg row, so the worker re-sends the SyncupSide
+    // or the SyncupCntlr.
     RES_STATUS_PENDING = 5;
 }
 

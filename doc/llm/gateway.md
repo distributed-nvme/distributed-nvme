@@ -1329,7 +1329,7 @@ are those of `architecture.md`, Subsystems, namespaces.
   `CdcEntry` whose key is missing is rebuilt as `CreateSubsystem` writes it
   (`rebuildCdcEntry`) and written with the new hosts. Reply `ss_id`, at once:
   the cut of a host the call takes off the list, where a controller node's
-  kernel can end its connection, follows at the agents' next converge
+  agent runs in cut mode, follows at the agents' next converge
   (`cnagent.md` CN33).
 * **CreateNamespace** — `ns_idx` neither zero nor `NvmeNsidAll`, judged
   with the rest of the validation before any read (GW4), so that a full

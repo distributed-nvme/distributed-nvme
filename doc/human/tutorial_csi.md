@@ -430,20 +430,25 @@ a new pod attaches and stages it again, and finds the filesystem it
 carries.
 
 The detach, the step that takes the node out of the allowed hosts, then
-waits for the controller node. On a kernel that can end a host's
-connection to the controller node, the cn agent ends the connection of
-every host that is not allowed any more at its next converge, and the
-detach returns once it has. An attach of the volume to another machine
-waits for the same end before it lets that machine in, even when
-Kubernetes asks for it before the detach has returned, as it can for a
-machine it has lost: so a lost machine that still reaches the controller
-node cannot write on beside the machine the volume moves to. This
-tutorial's cn agent runs with `--ignore-host-disconnection`, so that it
-starts on a kernel that cannot end a connection, as Ubuntu's cannot. On
-such a kernel the detach and the attach wait only for the cn agent's next
-report and end no connection: it is the node plugin's
-drop of the path that ends this machine's connection, and a machine that
-runs no node plugin any more would keep its connection.
+waits for the controller node. Where the cn agent logged no warning "agent
+host cut disabled" when it started and the kernel lets it end a host's
+connection, it ends the connection of every host that is not allowed any
+more at its next converge, and the detach returns once it has. An attach of
+the volume to another machine waits for the same end before it lets that
+machine in, even when Kubernetes asks for it before the detach has returned,
+as it can for a machine it has lost: so a lost machine that still reaches
+the controller node cannot write on beside the machine the volume moves to.
+A connection that shows only after that converge has looked is the
+exception: the converge that the attach's write brings lets the other
+machine in and ends that connection right after, and with no attach a later
+check round finds it and ends it ([the scope
+page](scope.md#54-hosts-and-the-kubernetes-driver)). This tutorial's cn
+agent runs with `--ignore-host-disconnection`, so that it starts on a kernel
+that cannot end a connection, as Ubuntu's cannot. It then logs that warning,
+and the detach and the attach wait only for the cn agent's next report and
+end no connection: it is the node plugin's drop of the path that ends this
+machine's connection, and a machine that runs no node plugin any more would
+keep its connection.
 
 ```
 sudo k3s kubectl delete pod demo

@@ -148,9 +148,11 @@ func (t *ResTracker) SetReason(
 // report. The fifth, RES_STATUS_PENDING, has no helper: the cn agent's
 // primary leg report and a subsystem row with a stray connection still
 // listed while the lockdown file shows no mode in force — after the cut's
-// wait, after a write the kernel refused, or after a failed read of a
-// written connection's "state" — and the dn agent's primary dm-linear row
-// produce it, through Set (cnagent.md CN11, CN33, dnagent.md DN10).
+// wait, after a write the kernel refused, after a failed read of a written
+// connection's "state", or at a read whose listing shows it — and the dn
+// agent's primary dm-linear row and its migration source's export row, each
+// waiting for the fence, produce it, through Set (cnagent.md CN11, CN33,
+// dnagent.md DN10, DN12).
 func (t *ResTracker) Ok(key, resName, details string) *pb.ResInfo {
 	return t.Set(key, resName, pb.ResStatus_RES_STATUS_OK, details)
 }

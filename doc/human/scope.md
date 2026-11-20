@@ -499,26 +499,42 @@ No case is known today.
   controller node cannot end it.** Silent. `dnvctl ss set-hosts` takes a
   host off a subsystem's list, and so does a detach, the step of the
   Kubernetes driver that takes a Kubernetes node off a volume's list. The
-  kernel checks the list only when a host connects. Where the kernel of a
-  controller node can end one host's connection, its cn agent ends the
-  connection of every host that is off the list at its next converge, on the
-  primary and on every standby, and while such a connection is still there
-  after a short wait, or the node cannot read or end the connections, that
-  cntlr serves no namespace of the subsystem, the primary included (section
-  6.1). A kernel can do this when it is 6.11 or newer, its NVMe target is
-  built with the kernel option `CONFIG_NVME_TARGET_DEBUGFS`, debugfs is
-  mounted at /sys/kernel/debug, and the kernel is not under lockdown, the
-  mode that Secure Boot switches on. Where it cannot, the cn agent starts
-  only with `--ignore-host-disconnection`. On such a node a connected host
-  keeps its path after it leaves the list, and two hosts can write the same
-  volume. State: accepted. The option is off in the kernels of most
-  distributions, Ubuntu, Debian and Fedora among them, and dnv gives no way
-  to build it, since an NVMe target built by hand is not meant for
-  production. `dnv-agent check cn` says whether a controller node can end a
-  connection ([the operations
-  doc](operations.md#check-a-node-before-it-joins)). The cn agent suite
-  shows the end of a connection on controller nodes whose NVMe target is
-  built with the option.
+  kernel checks the list only when a host connects. Where the cn agent of a
+  controller node finds, when it starts, that the kernel can end one host's
+  connection, that agent ends the connection of every host that is off the
+  list at its next converge, on the primary and on every standby, and while
+  such a connection is still there after a short wait, or the node cannot
+  read or end the connections, that cntlr serves no namespace of the
+  subsystem, the primary included (section 6.1), save a namespace whose move
+  to ANA inaccessible fails, which the cn agent logs as
+  `ana transition failed`: on a serving primary such a namespace can go on
+  serving, the host taken off included, until a later converge ends that
+  host's connection or moves the namespace, so two hosts can write the same
+  volume meanwhile. A kernel can do this when it is 6.11 or newer, its NVMe
+  target is built with the kernel option `CONFIG_NVME_TARGET_DEBUGFS` and
+  loaded, configfs is mounted, debugfs is mounted at /sys/kernel/debug, and
+  the kernel is not under lockdown, the mode that Secure Boot switches on.
+  Where it cannot, or the cn agent's read of these facts fails, the cn agent
+  starts only with `--ignore-host-disconnection`, and then ends no connection
+  until it is started again, even once the kernel can. On such a node a
+  connected host keeps its path after it leaves the list, and two hosts can
+  write the same volume. A lockdown on a node where /sys/kernel/security is
+  not mounted is the exception: the cn agent cannot see it and starts without
+  the flag, the kernel refuses every end of a connection, and while such a
+  connection lasts that cntlr serves no namespace of the subsystem, save one
+  whose move fails as above (section 6.1). Where the cn agent ends
+  connections, a host that connects just as it leaves the list can show its
+  connection only after that agent's converge has looked: the cntlr then
+  serves it until its next converge ends it, the one that a later change of
+  the pool brings, such as an attach to another host, or the one that a later
+  check round brings once it finds the connection. State: accepted. The
+  option is off in the kernels of most distributions, Ubuntu, Debian and
+  Fedora among them, and dnv gives no way to build it, since an NVMe target
+  built by hand is not meant for production. `dnv-agent check cn` says
+  whether a controller node can end a connection ([the operations
+  doc](operations.md#check-a-node-before-it-joins)). The cn agent suite shows
+  the end of a connection on controller nodes whose NVMe target is built with
+  the option.
 
 ### 5.5 Records and tools
 
@@ -803,21 +819,39 @@ Measured times are in [the introduction](introduction.md#status-and-limits-of-01
 - **A host's connection that does not end takes the subsystem's volumes off
   that controller node.** Where the cn agent ends connections (section 5.4),
   each converge ends the connections of hosts that are off a subsystem's
-  list before it changes any device, and waits a few seconds for them to go.
-  While one is still there after that wait, or while the node cannot read or
-  end the connections, every namespace of that subsystem on that controller
-  node moves to ANA inaccessible, a serving primary's included, so that no
-  host is served through that node, the hosts left on the list among them. A
-  connection still there keeps the subsystem's row pending: no failover
+  list before it changes the device under any of the subsystem's namespaces,
+  and waits about two seconds at most for them to go. While one is still
+  there after that wait, or while the node cannot read or end the
+  connections, every namespace of that subsystem on that controller node
+  moves to ANA inaccessible, a serving primary's included, so that no host
+  is served through that node, the hosts left on the list among them. A move
+  to ANA inaccessible that fails, which the cn agent logs as
+  `ana transition failed`, can leave that namespace where it was: on a
+  serving primary it then goes on serving, the host taken off included,
+  until a later converge ends that host's connection or moves the namespace.
+  A connection still there keeps the subsystem's row pending: no failover
   comes, `dnvctl cluster get-status` does not list the row, and the hosts
   wait until the connection ends, which it does once the removed host's IO
   held on the node ends, as on a device that does not resume. A node that
-  cannot read or end the connections, after debugfs is unmounted, after the
-  NVMe target is loaded again without the option, or under a lockdown raised
-  while the agent runs, reads the row in error, and the worker fails the
-  primary over to another controller node at the pool's threshold. State:
-  procedure written ([the operations
-  doc](operations.md#change-a-volumes-hosts)). Not seen in the lab.
+  cannot read the connections, after debugfs is unmounted or the NVMe target
+  is loaded again without the option, reads the row of every subsystem there
+  in error, with a host taken off or none, so that node serves none of its
+  volumes. Under a lockdown raised while the agent runs, the row of a
+  subsystem with a host still connected that is off its list reads in error.
+  Where the pool has an enabled standby with no health epoch, the worker then
+  fails the primary over to it at the pool's threshold; a pool with no such
+  standby, such as a pool with one cntlr, waits for the cntlr replacement,
+  which comes after the pool's `cntlr_unhealthy`, 600 seconds at the default.
+  The agent cannot see a lockdown on a node where /sys/kernel/security is not
+  mounted: there the row reads pending, no failover comes, and the kernel
+  refuses the cn agent's end of that one connection until a reboot without
+  the lockdown. Before then, only the host's own disconnect, the host's loss
+  of power or of its network, which the NVMe target sees when the host's
+  keep-alive messages stop, or the removal of the subsystem from that
+  controller node, as at the delete of that cntlr, ends it: that removal ends
+  every connection of the subsystem there. State: procedure written ([the
+  operations doc](operations.md#change-a-volumes-hosts)). Not seen in the
+  lab.
 - **A step only a check round names costs a converge every second check
   round while the converge keeps failing it.** Some work is named only by a
   check round, not by the converge's own answer: a leg to put back into its
@@ -1300,14 +1334,15 @@ for a pool made before the block bound, for a new volume refused for a
 thin id that holds data and for a pool left by a Kubernetes volume whose
 name held "..", a planned restart of an agent, a slow leg, the install of
 the udev rules on a node, the node check, the choice of a node's location,
-the cluster's capacity, a pool's space, the removal of a node, the logs,
-the gather of a node's state, a Kubernetes volume the node plugin will not
-format, a change of the cdc addresses of the Kubernetes driver, a
-Kubernetes node plugin that does not start, the loss of a Kubernetes
-machine, a one-cntlr Kubernetes volume after a cntlr replacement and the
-restore of etcd from a backup so far, and gets the others as they are
-written. Every row with no tool or no doc carries its note. Section 6.1 and the tables give some short
-steps; the section "Steps known today" below gives the longer ones.
+the cluster's capacity, a pool's space, a change of a volume's hosts, the
+removal of a node, the logs, the gather of a node's state, a Kubernetes
+volume the node plugin will not format, a change of the cdc addresses of
+the Kubernetes driver, a Kubernetes node plugin that does not start, the
+loss of a Kubernetes machine, a one-cntlr Kubernetes volume after a cntlr
+replacement and the restore of etcd from a backup so far, and gets the
+others as they are written. Every row with no tool or no doc carries its
+note. Section 6.1 and the tables give some short steps; the section "Steps
+known today" below gives the longer ones.
 
 ### Nodes
 
@@ -1347,7 +1382,7 @@ steps; the section "Steps known today" below gives the longer ones.
 | Action | Tool today | Doc today | State |
 |---|---|---|---|
 | Create, snapshot and delete a volume | `dnvctl td create`, with `--ori` for a snapshot; `dnvctl td delete` | the tutorials, for the create and the delete | done; procedure to write, one line on snapshots |
-| Export a volume to hosts; change its hosts | `dnvctl ss create`, `dnvctl ns create`, `dnvctl ss set-hosts`; a host taken off the list loses its connection at the next converge where the controller node's kernel can end it (section 5.4) | the tutorials, for the export; the operations doc, [Change a volume's hosts](operations.md#change-a-volumes-hosts) | done |
+| Export a volume to hosts; change its hosts | `dnvctl ss create`, `dnvctl ns create`, `dnvctl ss set-hosts`; a host taken off the list loses its connection where the controller node's cn agent ends connections (section 5.4) | the tutorials, for the export; the operations doc, [Change a volume's hosts](operations.md#change-a-volumes-hosts) | done |
 | Park a namespace | `dnvctl ns set-suspended`, `dnvctl ns set-dev` | none | procedure to write |
 | Move a volume to another pool | `dnvctl xfer create` on the source; `dnvctl clone create`, `clone append-bm` on the destination | the introduction explains the flow; the operations doc, A pool made before the block bound, gives the order of the moves out of a pool and when each old volume may go | procedure to write: the whole flow. |
 | Clone from a source outside this cluster | `dnvctl clone create`, `clone set-tr` | none; the introduction explains the flow | procedure to write |
@@ -1378,7 +1413,7 @@ steps; the section "Steps known today" below gives the longer ones.
 | Change the cdc addresses of the Kubernetes driver | the config map, the Kubernetes record that holds the cdc addresses both plugins start with, and a restart of both plugins | the operations doc, Change the cdc addresses of the Kubernetes driver | procedure written; the Kubernetes suite changes the list of the controller plugin, the part of the driver that calls the gateway, alone, and no suite restarts the node plugins with a new list |
 | Start a Kubernetes node plugin that refuses to start | none; the plugin's log names the fact and its fix | the operations doc, A Kubernetes node plugin that does not start | procedure written; not tested in a suite |
 | Keep a Kubernetes cluster's pods off dnv | the example network policy, [`deploy/networkpolicy.yaml`](../../deploy/networkpolicy.yaml) | [the CSI tutorial](tutorial_csi.md#keep-other-pods-off-dnv) | procedure written; the Kubernetes suite's policy case tries the ports of the gateway, the cdc and two agents, not the NVMe/TCP ports, which listen only once a pool uses them |
-| Handle the loss of a Kubernetes machine | the controller plugin's second copy; the out-of-service mark of Kubernetes, which an operator puts on a machine that is gone so that Kubernetes moves its volumes | the operations doc, A Kubernetes machine is lost | procedure written; the Kubernetes suite checks the controller plugin's part, and the move of a pod's volume after the out-of-service mark, of a machine cut off from Kubernetes but not from the controller nodes, on controller nodes that end its connections |
+| Handle the loss of a Kubernetes machine | the controller plugin's second copy; the out-of-service mark of Kubernetes, which an operator puts on a machine that is gone so that Kubernetes moves its volumes | the operations doc, A Kubernetes machine is lost | procedure written; the Kubernetes suite checks the controller plugin's part, and its detach case the move of a pod's volume after the out-of-service mark, of a machine cut off from Kubernetes but not from the controller nodes, on controller nodes that end its connections; both passed in the lab on 2026-11-20 |
 | Recover a one-cntlr Kubernetes volume after a cntlr replacement | `nvme disconnect -d` of the old path, then delete the pod | the operations doc, A one-cntlr Kubernetes volume after a cntlr replacement | procedure written; not tested |
 | Recover a Kubernetes volume the node plugin will not format | none; the plugin formats only a volume whose first MiB reads as zeros; for data at the start, an operator reaches the volume through a pod that gets it as a raw block device, and zeroes the start by hand for a volume that never held data | the operations doc, A Kubernetes volume the node plugin will not format | procedure written; its steps for data at the start are not tested |
 | Recover from a fault only a host sees | disable the primary | this page, section 6.1 | procedure to write. Fix later. |
@@ -1450,14 +1485,20 @@ created with no budget keeps the 4 TiB 0.1 gave it after the upgrade, not
 the 64 TiB a new node gets, so `dnvctl cluster get-capacity` can name the
 budget as the limit sooner than the new default suggests; only emptying,
 deleting and creating it again gives it another budget ([the operations
-doc](operations.md#the-clusters-capacity)). From this release on, a cn
-agent does not start on a kernel that cannot end a host's connection to
-the controller node (section 5.4), unless it runs with
-`--ignore-host-disconnection`. Before an upgrade from 0.1, run the new
-build's `dnv-agent check cn` on every controller node, with the flags its
-agent will run with: a `FAIL` on its `nvmet host cut (debugfs)` line means
-that the new cn agent would refuse to start there
-([the operations doc](operations.md#check-a-node-before-it-joins)).
+doc](operations.md#the-clusters-capacity)). From this release on, a cn agent
+that finds, when it starts, that the kernel cannot end a host's connection
+to the controller node, or that cannot read whether it can, starts only with
+`--ignore-host-disconnection` (section 5.4). Before an upgrade from 0.1, run
+the new build's `dnv-agent check cn` on every controller node, with the
+flags its agent will run with: a `FAIL` on its `nvmet host cut (debugfs)`
+line means that the new cn agent would refuse to start there ([the
+operations doc](operations.md#check-a-node-before-it-joins)). Where the new
+cn agent ends connections, its first converge of each cntlr ends the
+connection of every host that is off a subsystem's list but still connected,
+which 0.1 left in place, and that host's writes fail. Before the upgrade,
+run `nvme list-subsys` on each host and compare it with `dnvctl ss list`; on
+each host that is off a list, stop the volume's users and run
+`nvme disconnect -n <subsystem nqn>`.
 
 **Logs.** The programs log to stderr as JSON, one record per line, with no
 rotation. Each program takes `--log-level`, the log level: the least serious
@@ -1514,39 +1555,51 @@ failover's among them.
 
 ## 8. Waits a host can see
 
-- **A detach of the Kubernetes driver, and the attach that follows it,
-  wait until the primary has ended the old host's connection.** A detach
-  takes a Kubernetes node off a volume's list of hosts, and then waits until
-  the cn agent of the volume's primary reports the row of the volume's
-  subsystem ok at that change's revision or a later one, which it does once
-  no host off the list keeps a connection to the subsystem there: one
-  converge of the primary, a second or two in the common case. An attach
-  that puts a node on the empty list waits for that report at the revision
-  it read before it writes the node, and reads again when the pool's
-  revision moves on: Kubernetes, once a detach call has failed, may already
-  ask to attach the volume to another node, and that attach is what keeps
-  the other node out until the old host's connection has ended. Kubernetes
-  gives each call 15 seconds, then tries it again, with a pause between
-  tries that grows from one second up to five minutes; the driver bounds a
-  call to two minutes, or to its caller's limit when that is shorter. A
-  primary whose cn agent does not answer, or whose connection to the old
-  host does not end, holds both until the cn agent answers, the connection
-  ends or another controller node becomes the primary, so the volume's new
-  pod waits. A connection that does not end reads pending and starts no
-  failover, except under a lockdown, the mode Secure Boot switches on,
-  which reports an error as a node that cannot read its connections does,
-  and the worker fails the primary over. An operator who disables the
-  primary's cntlr moves the primary ([the operations
+- **A detach of the Kubernetes driver, and the attach that follows it, wait
+  until the primary has ended the old host's connection.** A detach takes a
+  Kubernetes node off a volume's list of hosts, and then waits until the cn
+  agent of the volume's primary reports the row of the volume's subsystem ok at
+  that change's revision or a later one, which it does once no host off the
+  list keeps a connection to the subsystem there: one converge of the primary,
+  a second or two in the common case. An attach that puts a node on the empty
+  list waits for that report at the revision it read before it writes the node,
+  and reads again when the pool's revision moves on: Kubernetes, once a detach
+  call has failed, may already ask to attach the volume to another node, and
+  that attach is what keeps the other node out until the old host's connection
+  has ended. A host that connects just as it leaves the list can show its
+  connection only after that converge has looked: the detach and the attach
+  then end while that host is still connected. The converge that the attach's
+  write brings lets the new node in and ends that connection right after. With
+  no attach, a later check round finds the connection, and the converge it
+  brings ends it (section 5.4). Kubernetes gives each call 15 seconds, then
+  tries it again, with a pause between tries that grows from one second up to
+  five minutes; the driver bounds a call to two minutes, or to its caller's
+  limit when that is shorter. A primary whose cn agent does not answer, or
+  whose connection to the old host does not end, holds both until the cn agent
+  answers, the connection ends or another controller node becomes the primary,
+  so the volume's new pod waits. A connection that does not end reads pending
+  and starts no failover, except under a lockdown, the mode Secure Boot
+  switches on, on a node where /sys/kernel/security is mounted, which reports
+  an error as a node that cannot read its connections does. The worker then
+  fails the primary over where the pool has an enabled standby with no health
+  epoch; a pool with no such standby, such as a pool with one cntlr, waits for
+  the cntlr replacement, which comes after the pool's `cntlr_unhealthy`, 600
+  seconds at the default. Where /sys/kernel/security is not mounted, the cn
+  agent cannot see the lockdown, and the row reads pending. An operator who
+  disables the primary's cntlr moves the primary to such a standby, where the
+  pool has one ([the operations
   doc](operations.md#a-kubernetes-machine-is-lost)). Where the primary's cn
-  agent runs with `--ignore-host-disconnection` on a kernel that cannot end
-  a connection, both waits end at its first report at that revision and
-  end no connection (section 5.4). State: accepted: the attach's wait keeps
-  a second machine out until the primary has ended the old machine's
-  connection, and the detach's wait makes a finished detach mean that the
-  old machine's connection on the primary is gone. An attach that did not
-  wait would let both machines write at once, and a new pod that waits
-  loses no data. The Kubernetes suite's detach case checks both waits, with
-  the worker stopped so that no cn agent converges.
+  agent started with `--ignore-host-disconnection` and found one of the causes
+  that the `nvmet host cut (debugfs)` line of `dnv-agent check cn` names ([the
+  operations doc](operations.md#check-a-node-before-it-joins)), both waits end
+  at its first report at that revision and end no connection (section 5.4).
+  State: accepted: the attach's wait keeps a second machine out until the
+  primary has ended the old machine's connection, and the detach's wait makes a
+  finished detach mean that the old machine's connection on the primary is
+  gone. An attach that did not wait would let both machines write at once, and
+  a new pod that waits loses no data. The Kubernetes suite's detach case checks
+  both waits, with the worker stopped so that no cn agent converges, and passed
+  in the lab on 2026-11-20.
 - **A cntlr or a cdc that does not answer holds up a Kubernetes node.** The
   node plugin makes its connects and its reads of the cdcs' answers one at a
   time and bounds each by a few seconds, but no signal ends some waits in
@@ -1719,22 +1772,27 @@ failover's among them.
   on port 9808 at the address of each controller plugin copy's own pod, and
   on port 9809 on each Kubernetes node's loopback alone. State: not yet; log
   handling is in [the operations doc](operations.md#the-logs).
-- **The status read sees what etcd and the primaries hold.** The status
-  read asks each pool's primary and a migration's new side, and no standby
-  and no other side. A standby's or a side's own trouble shows only once
-  the worker sets its health epoch; the inspects show the rest. A failover
-  of an unhealthy primary with no enabled standby to take the role, a leg
-  repair the worker cannot create and a cntlr replacement that finds no
-  controller node show only as a health line whose age grows; the worker's
-  log names why. A disabled primary shows as a pool line, which says when
-  no cntlr of the pool is enabled. A worker that seems gone is a hint: the
-  record a running worker writes in etcd every few seconds is older, by
-  the gateway's clock, than twice the default time between two writes, and
-  the gateway does not know a worker's own time between writes. No record
-  keeps the time of a repair, a migration, a clone, a lost record or a
-  refused grow, so their lines show no age, save the age of a row of the
-  primary's report that a line shows. A pool shows a fixed number of lines
-  at most, then one line that counts the rest. State: accepted.
+- **The status read sees what etcd and the primaries hold.** The status read
+  asks each pool's primary and a migration's new side, and no standby and no
+  other side. A standby's or a side's own trouble shows only once the worker
+  sets its health epoch; the inspects show the rest. A failover of an
+  unhealthy primary with no enabled standby to take the role, a leg repair
+  the worker cannot create and a cntlr replacement that finds no controller
+  node show only as a health line whose age grows; the worker's log names
+  why. A disabled primary shows as a pool line, which says when no cntlr of
+  the pool is enabled. A subsystem whose row on the primary reads pending
+  while a host taken off its list keeps its connection shows no line, and no
+  health epoch is set, although, once a converge has left the row so, the
+  primary serves the subsystem's volumes to no host, save a namespace whose
+  move to ANA inaccessible failed (section 6.1); `dnvctl cntlr inspect`
+  shows the row. A worker that seems gone is a hint: the record a running
+  worker writes in etcd every few seconds is older, by the gateway's clock,
+  than twice the default time between two writes, and the gateway does not
+  know a worker's own time between writes. No record keeps the time of a
+  repair, a migration, a clone, a lost record or a refused grow, so their
+  lines show no age, save the age of a row of the primary's report that a
+  line shows. A pool shows a fixed number of lines at most, then one line
+  that counts the rest. State: accepted.
 - **A retired leg's partial mark can miss a short stay in the array.** A
   repair can take a retired leg back as its new leg. When md has counted
   that leg as a member but not copied all of it, the worker marks the leg

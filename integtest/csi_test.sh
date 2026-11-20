@@ -1403,9 +1403,11 @@ nvmet_tree() {
 # CONFIG_NVME_TARGET_DEBUGFS makes once nvmet is loaded, and no lockdown in
 # force, under which the kernel refuses to open a connection's state file.
 # A missing lockdown file reads as no lockdown, as the agent's start check
-# reads it. These are the facts the cn agent's start check reads
-# (cnagent.md CN-CM2), read here in shell, as the guests get the agent
-# binary only at setup; the cn and e2e suites read them with the same
+# reads it; the file is a securityfs file, so a lockdown on a node without
+# securityfs mounted shows only as a refused cut. These are the facts the cn
+# agent's start check reads (cnagent.md CN-CM2) save configfs's mount, which
+# no check of this suite reads, read here in shell, as the guests get the
+# agent binary only at setup; the cn and e2e suites read them with the same
 # lines.
 nvmet_cut_facts() {
 	local why="" mode
@@ -3653,10 +3655,10 @@ host_listed() { # <pool> <subsystem nqn> <host nqn>
 # standby (csi.md CSI10), but host0's writes, which its container goes on
 # making, fail only once every cntlr has ended host0's connection, the
 # standby's included (cnagent.md CN33), since IO queues while a standby's
-# path is left (csi.md, The node plugin); then each reconnect is refused
-# with DNR and its controller deleted (csi.md CSI14). The claim's new pod on
-# host1 reads host0's pattern and writes and reads its own. The taint and the
-# cut go at the end, and on every failure (CSI5).
+# path is left (csi.md, The node plugin), and host0's reconnect to each has
+# been refused with DNR, which deletes that controller (csi.md CSI14). The
+# claim's new pod on host1 reads host0's pattern and writes and reads its
+# own. The taint and the cut go at the end, and on every failure (CSI5).
 case_detach() {
 	CASE=detach
 	local pv nqn old v sv keep pod out rc t0 h0ns end now late both taint_at started a b word

@@ -699,38 +699,38 @@ worker judges that observation's age (`dnv-worker.md` HL7).
 ### `ResInfo` tracking — `resinfo.go`
 
 SH14. A per-object in-memory tracker (`ResTracker`) turns probe outcomes
-into a `pb.ResInfo` of `res_name`, `status`, `details`, `reason` and
-`epoch` per `architecture.md`, Live-state reporting: `epoch` is the unix
-seconds of the last **status** change (a change of `details` or of
-`reason` alone does not bump it); `details` is cut to the row text cap
-there (`agent.CutAgentText`), so the tracker records and returns the cut
-text; the
+into a `pb.ResInfo` of `res_name`, `status`, `details`, `reason` and `epoch`
+per `architecture.md`, Live-state reporting: `epoch` is the unix seconds of
+the last **status** change (a change of `details` or of `reason` alone does
+not bump it); `details` is cut to the row text cap there
+(`agent.CutAgentText`), so the tracker records and returns the cut text; the
 agent emits `RES_STATUS_MISSING`, `RES_STATUS_ERROR`, `RES_STATUS_OK` and
 `RES_STATUS_PROVISIONING`, the cn agent also `RES_STATUS_PENDING` on a
 primary's leg rows (`cnagent.md` CN11) and on a subsystem row with a stray
 connection still listed while the lockdown file shows no mode in force,
-after the cut's wait, after a write the kernel refused, or after a failed
-read of a written connection's "state" (`cnagent.md` CN33), and the dn agent
-on the primary's dm-linear whose path waits for the fence (DN10), and never
-`RES_STATUS_UNKNOWN` (worker-only). `RES_STATUS_PENDING` means *waiting on
-something else before it can be judged or built — no health verdict*: on a leg
-row, the primary's prober for the leg has not completed a round since it
-started (a build, a promotion or an agent restart), and it neither sets nor
-clears `Leg.err_epoch` (`architecture.md`, Live-state reporting and sp
-role).
-`RES_STATUS_PROVISIONING` means *healthy, not ready, no action needed*,
-with the meaning `architecture.md`, Live-state reporting, gives it (DN18
-and `cnagent.md` CN28 say which rows carry it), and unlike
-`RES_STATUS_ERROR` it never feeds `err_epoch` (`architecture.md`,
-Live-state reporting, dn / cn roles, sp role and Automatic reactions). A resource that leaves the desired state must lose its
-history, or the next object built with the same id would inherit a dead
-one's epoch and read as unchanged since. An object whose own converge
-derives a per-resource key set — a side (DN6), a cntlr (`cnagent.md` CN9) —
-therefore has its tracker pruned the way its devices are: `Keep` drops
-every key the wanted set does not name, derived from the wanted set rather
-than from a diff against a remembered plan. Tracker state is in-memory;
-after a restart epochs restart at the reconcile time — acceptable, the
-epoch means "last observed change".
+after the cut's wait, after a write the kernel refused, after a failed read
+of a written connection's "state", or at a read whose listing shows it
+(`cnagent.md` CN33), and the dn agent on the primary's dm-linear whose path
+waits for the fence (DN10) and on a migration source's export whose link
+waits for the fence (DN12), and never `RES_STATUS_UNKNOWN` (worker-only).
+`RES_STATUS_PENDING` means *waiting on something else before it can be
+judged or built — no health verdict*: on a leg row, the primary's prober for
+the leg has not completed a round since it started (a build, a promotion or
+an agent restart), and it neither sets nor clears `Leg.err_epoch`
+(`architecture.md`, Live-state reporting and sp role).
+`RES_STATUS_PROVISIONING` means *healthy, not ready, no action needed*, with
+the meaning `architecture.md`, Live-state reporting, gives it (DN18 and
+`cnagent.md` CN28 say which rows carry it), and unlike `RES_STATUS_ERROR` it
+never feeds `err_epoch` (`architecture.md`, Live-state reporting, dn / cn
+roles, sp role and Automatic reactions). A resource that leaves the desired
+state must lose its history, or the next object built with the same id would
+inherit a dead one's epoch and read as unchanged since. An object whose own
+converge derives a per-resource key set — a side (DN6), a cntlr
+(`cnagent.md` CN9) — therefore has its tracker pruned the way its devices
+are: `Keep` drops every key the wanted set does not name, derived from the
+wanted set rather than from a diff against a remembered plan. Tracker state
+is in-memory; after a restart epochs restart at the reconcile time —
+acceptable, the epoch means "last observed change".
 
 A pass that is cut off — a background read a syncup cancels (SH30), or a
 converge whose call was cut off — stores no observation (SH28, SH29), but
@@ -1573,8 +1573,13 @@ holds back on purpose — a side still zeroing, a cntlr's layer whose own
 layer below is not there (`cnagent.md` CN30), what the level switches off
 — and no state a converge
 does not cure, such as a dm-clone whose metadata is read-only (DN13). A
-disk whose identity is not confirmed is named by DN6's record step, for
-its own reason.
+cntlr's cut error rows depart from this and from both channels naming a
+row: a subsystem whose nvmet connections cannot be read, or that a
+lockdown the lockdown file shows keeps from being ended, is named by a
+read alone, though no converge cures a lockdown, so that the read's round
+counts toward the failover the error row should bring (`cnagent.md` CN30,
+CN33). A disk whose identity is not confirmed is named by DN6's record
+step, for its own reason.
 
 For a DN and a CN only the read names what this rule adds, a DN's in
 DN16 and a CN's in `cnagent.md` CN30. The node's nvmet port follows one
@@ -1616,7 +1621,13 @@ and `collect`, the gather (CM6). The root itself takes one flag, the
 `--version` every program answers, which no subcommand takes
 (`architecture.md`, Components: invocation reference). The node check and
 the gather are one-shot tools of package `nodecheck`: they start no server,
-and no agent runs them.
+and no agent runs them. The five subcommands that run, `dn`, `cn`,
+`check dn`, `check cn` and `collect`, take no argument and refuse one, as
+the other daemons do; the check and the gather refuse it with
+`nodecheck.ExitNotRun` (CM5, CM6). A bool flag's value goes after `=`: a
+word after a space is no value of the flag, so `check cn --md-replay false`
+and `cn --ignore-host-disconnection false` are refused for the word
+`false`, not run with the flag on (`cnagent.md` CN-CM1).
 cobra and viper live in `cmd/` and in `ctl/`, dnvctl's command tree
 (`dnvctl.md`, Files); both are direct dependencies (`dependencies.md`,
 Direct dependencies).
@@ -1691,22 +1702,22 @@ file's YAML number is the one source with a syntax of its own: it reaches
 the check as YAML decoded it, written out in decimal, so `capacity: 1e12`
 there is taken as 1000000000000, `capacity: 0x100` as 256 and
 `capacity: 0100` as 64, and one that is no whole number, as `capacity: 1.5`,
-is refused. The cn's start check, a kernel that cannot end an nvmet
-connection while `--ignore-host-disconnection` is not set, is a refusal of
-the same form, after these checks and the start record (`cnagent.md`
-CN-CM2). The root command sets `SilenceUsage`, so `dnv-agent` exits
-non-zero with no usage dump, printing that message **twice** — cobra's own
-error line plus `main`'s own print to stderr — which is what anything
-grepping the output sees. For the port id and the queue cap it is the same
-rule, not the same validation: a non-numeric `--nvmet-port-id` or
-`--nvmet-qid-max` **flag** never reaches its check, because pflag rejects it
-at parse time, while viper's integer read turns any non-numeric env or
-config value into zero, which the port-id floor then reports as zero. The
-queue-cap check parses the resolved value itself, so such a value is refused
-there rather than read as zero, which would turn the cap off without a word.
-An **empty** env var is ignored by viper, so an empty variable leaves the
-default standing. Every flag's env spelling is the prefix plus the flag with
-dashes replaced by underscores.
+is refused. The cn's start check, a cause it finds while
+`--ignore-host-disconnection` is not set, is a refusal of the same form,
+after these checks and the start record (`cnagent.md` CN-CM2). The root
+command sets `SilenceUsage`, so `dnv-agent` exits non-zero with no usage
+dump, printing that message **twice** — cobra's own error line plus
+`main`'s own print to stderr — which is what anything grepping the output
+sees. For the port id and the queue cap it is the same rule, not the same
+validation: a non-numeric `--nvmet-port-id` or `--nvmet-qid-max` **flag**
+never reaches its check, because pflag rejects it at parse time, while
+viper's integer read turns any non-numeric env or config value into zero,
+which the port-id floor then reports as zero. The queue-cap check parses the
+resolved value itself, so such a value is refused there rather than read as
+zero, which would turn the cap off without a word. An **empty** env var is
+ignored by viper, so an empty variable leaves the default standing. Every
+flag's env spelling is the prefix plus the flag with dashes replaced by
+underscores.
 
 CM4. The `RunE` of `dn` and of `cn`: bind viper, then run CM3's checks —
 `requireValues`, then the `--nvmet-port-id` floor and the `--nvmet-qid-max`
@@ -1752,10 +1763,9 @@ setting the check warns for rather than fails, which must still be set
 where every controller node of the cluster must run one kernel series, and
 a dn's `nvme_core.io_timeout` at the value that never times out); a known
 limit, a disk whose IO size is above what nvmet-tcp takes, and a cn whose
-kernel cannot end an nvmet connection, checked with
-`--ignore-host-disconnection` (`architecture.md`, Known limits); a fact
-outside what dnv is tested with (the
-kernel series, the mdadm version, a dnv udev rule's text, a cn's
+host cut row finds a cause, checked with `--ignore-host-disconnection`
+(`architecture.md`, Known limits); a fact outside what dnv is tested with
+(the kernel series, the mdadm version, a dnv udev rule's text, a cn's
 `nvme_core.io_timeout` other than the kernel's default); and a fact the
 check could not read, whose detail starts "not read" and whose fix line
 says how to read it by hand or what to do first. Each takes its role's
@@ -1767,8 +1777,9 @@ text, or with `--output json` one JSON report for the suites. It exits
 `nodecheck.ExitOk` when nothing failed, warnings allowed,
 `nodecheck.ExitFailed` when a result failed, and `nodecheck.ExitNotRun`
 when it could not run — not root, an output form it does not know, a flag
-it cannot parse — by a `nodecheck.ExitError`, which `main` turns into the
-exit status in place of cobra's error print. It logs at Warn (`log.md`
+it cannot parse, a word given as an argument, or a bare `check` or a word
+after it that names no role — by a `nodecheck.ExitError`, which `main`
+turns into the exit status in place of cobra's error print. It logs at Warn (`log.md`
 R6). Apart from the cn's md replay it changes nothing on the node. The
 rows, by role:
 
@@ -1871,11 +1882,12 @@ rows, by role:
   on a cn another value than the kernel's default warns;
 - cn only, the cut of a removed host's nvmet connection, read as the cn
   agent's start check reads it (`agent.HostCutCauses`; `cnagent.md`
-  CN-CM2): nvmet not loaded, debugfs not mounted at /sys/kernel/debug,
-  nvmet without its debug directory, a lockdown in force or a read of
-  these that did not answer fails, since the agent refuses to start there,
-  and warns when the check is given `--ignore-host-disconnection`, under
-  which the agent starts without the cut;
+  CN-CM2): nvmet not loaded or configfs not mounted, debugfs not mounted at
+  /sys/kernel/debug, nvmet without its debug directory, a lockdown the
+  lockdown file shows or a read of these that did not answer fails, since
+  the agent refuses to start there, and warns when the check is given
+  `--ignore-host-disconnection`, under which the agent starts without the
+  cut;
 - dn only, the disk's logical block size, read as the agent reads it
   (`Dm.DiskSizes`): any but `DnLogicalBlockSize` fails, as DN3 refuses it;
   and its best and minimum IO size (`Dm.IoSizes`): above
@@ -1964,7 +1976,8 @@ into it; an `--out` that names a directory, or a link to one, fails the
 gather before it reads anything. It prints the archive's path, a warning
 that the archive names hosts, NQNs and addresses, and each read that did not
 finish; it exits `nodecheck.ExitOk` once the archive is written and
-`nodecheck.ExitNotRun` when it could not run or write it; it logs at Warn
+`nodecheck.ExitNotRun` when it could not run or write it, a flag it cannot
+parse or a word given as an argument among them; it logs at Warn
 (`log.md` R6). It does not call the gateway: an agent never does
 (`layout.md`, Dependency rules).
 

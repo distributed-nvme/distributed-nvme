@@ -105,6 +105,7 @@ func newDnCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "dn",
 		Short: "serve DiskNodeAgent for this disk node",
+		Args:  cobra.NoArgs,
 		RunE:  runDn,
 	}
 	addCommonFlags(cmd)
@@ -116,6 +117,7 @@ func newCnCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "cn",
 		Short: "serve ControllerNodeAgent for this controller node",
+		Args:  cobra.NoArgs,
 		RunE:  runCn,
 	}
 	addCommonFlags(cmd)
@@ -126,17 +128,19 @@ func newCnCmd() *cobra.Command {
 
 // addIgnoreHostDisconnectionFlag adds the cn role's
 // --ignore-host-disconnection (cnagent.md CN-CM1): it lets the agent start
-// on a kernel that cannot end an nvmet connection, and then a removed host
-// keeps its connection; where the kernel can, the agent cuts with it or
-// without it. A bool, read through viper, so a word it does not take reads
-// false: the agent then refuses on a kernel that cannot cut, naming the
-// flag.
+// where its start check finds a cause (startCut, agent.HostCutCauses), and
+// then a removed host keeps its connection; where the check finds none, the
+// agent cuts with it or without it. A bool: its value goes after "=", where
+// pflag refuses a word it does not take; a word after a space is no value of
+// it, and the command refuses that word as an argument (dnagent.md CM1).
+// From the environment, or as a config file's string, a word pflag does not
+// take reads false, and the agent then refuses where the check finds a
+// cause, naming the flag; a config file's number reads true unless it is 0.
 func addIgnoreHostDisconnectionFlag(cmd *cobra.Command) {
 	cmd.Flags().Bool("ignore-host-disconnection", false,
-		"start even where the kernel cannot end the connection of a "+
-			"host taken off a subsystem's list (no "+
-			"CONFIG_NVME_TARGET_DEBUGFS, debugfs not mounted, or "+
-			"lockdown); such a host then keeps its connection")
+		"start even where the start check finds a cause, which its "+
+			"refusal names, and then end no connection of a host taken "+
+			"off a subsystem's list: such a host keeps its connection")
 }
 
 // addDiskFlag adds the dn role's --disk.
@@ -157,22 +161,45 @@ func addCapacityFlag(cmd *cobra.Command) {
 			"budget of its own: the gateway takes the largest")
 }
 
-// notRunOnFlagError makes a flag a check or a gather cannot parse end it
-// with nodecheck.ExitNotRun, as any other way it cannot run does (CM5).
-func notRunOnFlagError(cmd *cobra.Command) {
+// notRunOnBadInput makes a flag a check or a gather cannot parse, and a
+// word it is given as an argument, which it takes none of (CM1), end it with
+// nodecheck.ExitNotRun, as any other way it cannot run does (CM5, CM6).
+func notRunOnBadInput(cmd *cobra.Command) {
 	cmd.SetFlagErrorFunc(func(_ *cobra.Command, err error) error {
 		return &nodecheck.ExitError{Code: nodecheck.ExitNotRun, Err: err}
 	})
+	cmd.Args = func(c *cobra.Command, args []string) error {
+		if err := cobra.NoArgs(c, args); err != nil {
+			return &nodecheck.ExitError{Code: nodecheck.ExitNotRun, Err: err}
+		}
+		return nil
+	}
 }
 
 // newCheckCmd is the node check (CM5): check dn and check cn, each with its
 // role's flags, bound as the role binds them, so the agent's own --config
-// serves the check too.
+// serves the check too. A bare check, or check with a word that names no
+// role, ran no check, so it ends with nodecheck.ExitNotRun rather than
+// cobra's help and a status of 0, which a script would read as a pass.
 func newCheckCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "check",
 		Short: "check a node before it joins: dn or cn",
+		Args:  cobra.ArbitraryArgs,
+		RunE: func(c *cobra.Command, args []string) error {
+			err := fmt.Errorf("name a role: %q or %q", "dn", "cn")
+			if len(args) > 0 {
+				err = fmt.Errorf("unknown command %q for %q", args[0],
+					c.CommandPath())
+			}
+			return &nodecheck.ExitError{Code: nodecheck.ExitNotRun, Err: err}
+		},
+		SilenceErrors: true,
+		SilenceUsage:  true,
 	}
+	cmd.SetFlagErrorFunc(func(_ *cobra.Command, err error) error {
+		return &nodecheck.ExitError{Code: nodecheck.ExitNotRun, Err: err}
+	})
 	dn := &cobra.Command{
 		Use:   "dn",
 		Short: "check this node for a disk node agent",
@@ -200,7 +227,7 @@ func newCheckCmd() *cobra.Command {
 	for _, sub := range []*cobra.Command{dn, cn} {
 		sub.Flags().String("output", nodecheck.OutputText,
 			"report form: text or json")
-		notRunOnFlagError(sub)
+		notRunOnBadInput(sub)
 		cmd.AddCommand(sub)
 	}
 	return cmd
@@ -248,7 +275,7 @@ func newCollectCmd() *cobra.Command {
 			"together")
 	flags.String("out", "", "the archive to write; by default "+
 		"dnv-collect-<host>-<time>.tar.gz in the working directory")
-	notRunOnFlagError(cmd)
+	notRunOnBadInput(cmd)
 	return cmd
 }
 
@@ -601,29 +628,32 @@ func runCn(cmd *cobra.Command, args []string) error {
 // startCut is the cn agent's start check (cnagent.md CN-CM2): it reads
 // whether the kernel can end an nvmet connection (agent.HostCutCauses, the
 // read the node check's host cut row makes) and answers the cut mode
-// (cnagent.md CN33). Where the kernel can, the mode is cut, whatever
-// --ignore-host-disconnection says. Where it cannot, the start ends with an
-// error that names every cause and the flag, printed as a flag's is (CM3),
-// before any listener opens; with the flag, the agent logs one warning,
-// "agent host cut disabled", with the causes, and runs in no cut mode.
+// (cnagent.md CN33). Where the check finds no cause, the mode is cut,
+// whatever --ignore-host-disconnection says. Where it finds one, the start
+// ends with an error that names the flag and every cause the check found,
+// printed as a flag's is (CM3), before any listener opens; the check judges
+// nvmet's debug directory only once nvmet is loaded and debugfs mounted, so
+// a start can be refused again for that directory once those are fixed.
+// With the flag, the agent logs one warning, "agent host cut disabled",
+// with the causes, and runs in no cut mode.
 func startCut(ctx context.Context, oc common.OsClient) (bool, error) {
 	causes := hostCutCauses(ctx, oc)
 	if len(causes) == 0 {
 		return true, nil
 	}
 	if !viper.GetBool("ignore-host-disconnection") {
-		return false, fmt.Errorf("this kernel cannot end the nvmet "+
-			"connection of a host taken off a subsystem's list: %s; fix "+
-			"that, or start with --ignore-host-disconnection, under which "+
-			"such a host keeps its connection",
-			strings.Join(causes, "; "))
+		return false, fmt.Errorf("the start check found what keeps this "+
+			"cn agent from ending the nvmet connection of a host taken off "+
+			"a subsystem's list: %s; fix that, or start with "+
+			"--ignore-host-disconnection, under which such a host keeps "+
+			"its connection", strings.Join(causes, "; "))
 	}
 	slog.WarnContext(ctx, msgHostCutDisabled,
 		slog.String("causes", strings.Join(causes, "; ")))
 	return false, nil
 }
 
-// msgHostCutDisabled is the cn agent's start warning where the kernel cannot
-// end an nvmet connection and --ignore-host-disconnection let it start
+// msgHostCutDisabled is the cn agent's start warning where the start check
+// finds a cause and --ignore-host-disconnection let the agent start
 // (log.md, Agent start).
 const msgHostCutDisabled = "agent host cut disabled"

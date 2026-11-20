@@ -1225,17 +1225,18 @@ Components: invocation reference), hole punching, memory and free space, none
 of this run's ports listening, and no conflicting nvmet port, as a configfs
 port does not listen until a subsystem is linked and an agent would adopt and
 rewrite an existing port of its id (`dnagent.md` SH19), and on a controller
-node, once nvmet is loaded, the facts the cn agent's start check reads
+node, once nvmet is loaded, the other facts the cn agent's start check reads
 (`cnagent.md` CN-CM2): debugfs mounted at /sys/kernel/debug, nvmet's debug
 directory there, which the kernel option `CONFIG_NVME_TARGET_DEBUGFS` makes,
-and no lockdown in force, as no start line of the suite takes
-`--ignore-host-disconnection`, a failure naming `integtest/nvmet_debugfs.sh`,
-the lab tool that builds and installs nvmet modules with the option
-(`layout.md`, Directory tree); that a host is a clean
-initiator — sudo, nvme-tcp and multipath, its identity files, generated if
-absent and never overwritten, nvme-stas inactive and the masked autoconnector
-(E2E10); that host0, when the copy case is in the run, has the tools of its
-fio stamps, fio, cmp, readlink and pkill; that host0, when the copy or the
+and no lockdown the lockdown file shows, as no start line of the suite takes
+`--ignore-host-disconnection`, a failure naming
+`integtest/nvmet_debugfs.sh`, the lab tool that builds and installs nvmet
+modules with the option (`layout.md`, Directory tree); that a host is a
+clean initiator — sudo, nvme-tcp and multipath, its identity files,
+generated if absent and never overwritten, nvme-stas inactive and the masked
+autoconnector (E2E10); that host0, when the copy case is in the run, has the
+tools of its fio stamps, fio, cmp, readlink and pkill; that host0, when the
+copy or the
 react case runs with md-raid1, has
 the tool of the kernel-log witness their repairs read, and, when the react
 case runs with md-raid1 and more DN VMs than legs, the tools of the write

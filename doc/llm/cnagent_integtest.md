@@ -101,17 +101,17 @@ host's signatures with them, as the agents run no LVM (`architecture.md`,
 [D13], [D14]); nvmet configfs, md support, native multipath, the stock udev
 rules the rules of `deploy/udev/` sort against, the stock assembly rule's
 honouring of the systemd-ready property the md mask sets, and udevadm's
-acceptance of the rules of `deploy/udev/`; the facts the cn agent's start
-check reads (`cnagent.md` CN-CM2), read in shell once nvmet is loaded, as
-the agent binary reaches the VMs only at setup: debugfs mounted at
+acceptance of the rules of `deploy/udev/`; the other facts the cn agent's
+start check reads (`cnagent.md` CN-CM2), read in shell once nvmet is loaded,
+as the agent binary reaches the VMs only at setup: debugfs mounted at
 /sys/kernel/debug, nvmet's debug directory there, which the kernel option
-`CONFIG_NVME_TARGET_DEBUGFS` makes, and no lockdown in force, a failure
-naming `integtest/nvmet_debugfs.sh`, the lab tool that builds and installs
-nvmet modules with the option and checks them (`layout.md`, Directory
-tree); and the free space and punch-hole support of the work directory's
-filesystem and the free memory. No start line of the suite takes
-`--ignore-host-disconnection`, so the suite runs only on VMs that hold
-those modules, as the lab's controller node VMs do; on any other pair its
+`CONFIG_NVME_TARGET_DEBUGFS` makes, and no lockdown the lockdown file shows,
+a failure naming `integtest/nvmet_debugfs.sh`, the lab tool that builds and
+installs nvmet modules with the option and checks them (`layout.md`,
+Directory tree); and the free space and punch-hole support of the work
+directory's filesystem and the free memory. No start line of the suite takes
+`--ignore-host-disconnection`, so the suite runs only on VMs that hold those
+modules, as the lab's controller node VMs do; on any other pair its
 preflight fails. iptables and
 tc are left to the stages that use them, the partition stages, redund's dial
 and slow leg stages, pause's cut and clone_xfer's slowed copy, so a VM
@@ -142,8 +142,9 @@ measures as the dn suite's does; and on the dm-clone table. This suite adds:
   cntlr), so removing a host's link from a subsystem leaves the host's
   controller to it live until the cn agent cuts its nvmet connection
   (`cnagent.md` CN33). The connection's directory then leaves nvmet's debug
-  directory a fraction of a second after the write; the host reconnects
-  after its reconnect delay, about ten seconds; nvmet refuses that
+  directory a fraction of a second after the cut's write of "fatal" to the
+  connection's "state" file; the host reconnects after its reconnect
+  delay, about ten seconds; nvmet refuses that
   reconnect by admission, with its record (above), and with a status that
   forbids a retry, so the host's kernel deletes the controller and fails the
   IO it held, a synced write among them. In smoke and redund the cutting
@@ -449,10 +450,12 @@ that asks for the counters, which reads them at the call as
   checks that md holds no new leg after the abort and no bad leg after the
   add, and takeback's check that md does not hold the refused leg, take a
   read that failed for a member md does not hold, beside the converge's
-  verdict and its commands; so
-  do the no-path check after an admission refusal and the check that a
-  subsystem lists no host, both backed by the refusal record; and the array counts redund's later stages and the teardown
-  case read from /proc/mdstat, the standby's no-array check and the md part
+  verdict and its commands; so do the no-path check after an admission
+  refusal, the check that a subsystem lists no host and the cut stages'
+  waits for the cut host's controller to go (smoke's cut and revoke,
+  redund's hostcut), all backed by the refusal record; and the array
+  counts redund's later stages and the teardown case read from
+  /proc/mdstat, the standby's no-array check and the md part
   of the residue check take a failure for no array. A log that was read can
   still hold none of a stage's records, so restart's zero-mutation and mdadm
   checks, repair's check that the converge of a started repair ran no mdadm
@@ -1225,9 +1228,9 @@ device, left to the unit tests (CN18); of the cut of a removed host
 of "fatal" the kernel refuses, a debug directory that does not answer, the
 namespaces of a subsystem whose cut has not held moved inaccessible before
 any device step, a serving primary's included, a freed connection name
-another host takes, and no cut mode, in which
-the agent starts with `--ignore-host-disconnection` on a kernel that cannot
-cut, all of which the unit tests cover; the other states of the clone's
-shared row rule (CN18); and whether a refused request leaves a lock entry
+another host takes, and no cut mode, in which the agent starts with
+`--ignore-host-disconnection` where its start check finds a cause, all of
+which the unit tests cover; the other states of the clone's shared row rule
+(CN18); and whether a refused request leaves a lock entry
 (`dnagent.md`, Concurrency — `locks.go`; `cnagent.md` CN7), left to the
 unit tests.

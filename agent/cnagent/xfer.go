@@ -113,9 +113,10 @@ const (
 	// xferRowsNamespace: ensureXfer converged the export, and its namespace
 	// row comes from the namespace step's error or a read of the namespace.
 	xferRowsNamespace
-	// xferRowsExport: the device step failed, so ensureXfer left the export
-	// alone, and its subsystem and namespace rows are what a read of them
-	// finds, as in a read.
+	// xferRowsExport: the device step failed, so ensureXfer left the rest of
+	// the export alone after its list step: its subsystem row comes from that
+	// list step and a read of its port link, and its namespace row from a
+	// read of the namespace (reportXferExport).
 	xferRowsExport
 )
 
@@ -226,8 +227,9 @@ func (s *CnAgentServer) ensureXfer(
 			// A namespace that may still be optimized gets no data put under
 			// it: the device gets no linear over the origin unless it already
 			// maps that linear, which ensureDmLinear then leaves as it is,
-			// or resumes where an interrupted reload left it suspended
-			// (CN17, CN33).
+			// resumes where an interrupted reload left it suspended, or
+			// reloads onto the same linear and makes writable where it reads
+			// read-only (CN17, CN33).
 			off, offErr := s.xferOffOrigin(ctx, nil, xp)
 			switch {
 			case offErr != nil:
@@ -342,7 +344,8 @@ func (s *CnAgentServer) xferDevOnError(
 // xferOffOrigin reports whether a served transfer's device is off the
 // linear over its origin's raid0 — not there, or another table — from rd, a
 // read's reading, or live with none; a read that does not answer is its
-// error. A device suspended on that linear is on it (CN33).
+// error. A device suspended on that linear, or read-only on it, is on it
+// (CN33).
 func (s *CnAgentServer) xferOffOrigin(
 	ctx context.Context,
 	rd *cnReading,

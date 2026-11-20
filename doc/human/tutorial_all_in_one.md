@@ -228,8 +228,8 @@ of most distributions cannot, Ubuntu's among them: their NVMe target is
 built without the debug option that shows each host's connection. What is
 lost: a host that you take off a subsystem's list with
 `dnvctl ss set-hosts` keeps its connection and its IO until it
-disconnects, so two hosts can write one volume. On a kernel that can end
-connections the flag changes nothing, and the cn agent ends them.
+disconnects, so two hosts can write one volume. Where the check's
+`nvmet host cut (debugfs)` line reads `ok`, the flag changes nothing.
 
 Each must end with `0 failures`; fix any `FAIL` line by its `fix:` line
 before you go on. Some `WARN` lines are normal on a machine like this one,
@@ -271,18 +271,18 @@ sudo nohup ./dnv-agent cn --grpc-address 127.0.0.1:29950 \
   > cn0.log 2>&1 & echo $! > cn0.pid
 ```
 
-Check: five agents have started, a second after the starts. An agent
-first logs "agent node versions", the version of the program, the kernel
-release and, for the cn agent, the mdadm version. On a kernel that cannot
-end a host's connection, the cn agent then logs one warning, "agent host cut
-disabled", with what the kernel lacks: it runs without ending the
-connections of hosts taken off a list, as the flag allows. Without the flag
-it would not start there, and its log would hold an error that names the
-same causes. Then an
-agent logs "agent serving" as soon as it answers calls, and "agent started" once
-it has rebuilt the node from its local files; until then it answers the
-worker's check rounds with "starting". A new node has nothing to rebuild,
-so the two lines come together here.
+Check: five agents have started, a second after the starts. An agent first
+logs "agent node versions", the version of the program, the kernel release
+and, for the cn agent, the mdadm version. Where the check's
+`nvmet host cut (debugfs)` line warned, the cn agent then logs one
+warning, "agent host cut disabled", with the same causes: it runs without
+ending the connections of hosts taken off a list, as the flag allows.
+Without the flag it would not start there, and its log would hold an error
+that names the same causes. Then an agent logs "agent serving" as soon as
+it answers calls, and "agent started" once it has rebuilt the node from
+its local files; until then it answers the worker's check rounds with
+"starting". A new node has nothing to rebuild, so the two lines come
+together here.
 
 ```
 grep -l '"agent started"' dn0.log dn1.log dn2.log dn3.log cn0.log

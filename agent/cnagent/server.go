@@ -42,9 +42,9 @@ type CnAgentServer struct {
 	capacity uint64
 	port     agent.PortConf
 	// strayCut is the cut mode the agent decided at its start (CN33,
-	// CN-CM2): set where the kernel can end an nvmet connection, and then
-	// every converge cuts and every read reads the stray connections of the
-	// subsystems it steps; clear where it cannot and
+	// CN-CM2): set where the start check found no cause, and then every
+	// converge cuts and every read reads the stray connections of the
+	// subsystems it steps; clear where it found one and
 	// --ignore-host-disconnection let the agent run, and then nothing reads
 	// the debug directory. It never changes while the agent runs.
 	strayCut bool

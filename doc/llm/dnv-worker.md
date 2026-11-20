@@ -2966,20 +2966,23 @@ read `OK`, every promotion's fresh probers would clear a dead leg's
 (`dnagent.md` DN10): the side's code names it, so the round sends the
 `SyncupSide` again (RW4), and the dm-linear that could not be fenced reads
 `ERROR`. On a cntlr, `PENDING` is also a subsystem's row, the pool's or a
-transfer's, while a host the desired state removed is still connected to
-it after the cut's wait (`cnagent.md` CN33): the cntlr's code names it, so
-the round sends the `SyncupCntlr` again (RW4), and the row counts toward
-no failover, while every namespace of that subsystem stays inaccessible on
-that cntlr. A subsystem whose nvmet connections the agent cannot read, or
-that a lockdown the lockdown file shows keeps from being ended, reads
-`ERROR` instead, a name only
-the agent's read gives (`cnagent.md` CN30): the converge's code stays
-zero for it, so the next round's read is not cancelled, and its round
-counts (RW23), as any error row does, so a primary that cannot cut fails
-over (AR5, AR10); a write the kernel refuses with no such lockdown shown
-reads `PENDING`. A round that
-answers from an observation no round asked for sets and clears none of the
-three, whatever its rows (HL7).
+transfer's, while a host the desired state removed is still connected to it
+with no lockdown the lockdown file shows — after the cut's wait, after a
+write the kernel refused, after a failed read of a written connection's
+"state", or at a read whose listing shows it (`cnagent.md` CN33): the
+cntlr's code names it, so the round sends the `SyncupCntlr` again (RW4), and
+the row counts toward no failover. A converge that leaves the row pending
+has moved every namespace of that subsystem to inaccessible on that cntlr
+and keeps them there, one whose move fails keeping its group with no data
+put under it; a read moves nothing, and the converge its name brings cuts
+first and moves the namespaces only where that cut does not hold
+(`cnagent.md` CN33, Known limits). A subsystem whose nvmet connections the
+agent cannot read, or that a lockdown the lockdown file shows keeps from
+being ended, reads `ERROR` instead, a name only the agent's read gives
+(`cnagent.md` CN30): the converge's code stays zero for it, so the next
+round's read is not cancelled, and its round counts (RW23), as any error row
+does (AR5, AR10). A round that answers from an observation no round asked
+for sets and clears none of the three, whatever its rows (HL7).
 `ReplyCodeLeftover` is not a rejection: its rows are evaluated exactly as a
 code-zero reply's — here, and in the RW18 and RW19 reports the same replies
 carry — for HL1's reason. The **primary** of the `Leg.err_epoch` row is the

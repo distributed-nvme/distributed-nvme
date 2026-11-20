@@ -169,17 +169,22 @@ When to stop: a `lost-record` line, or a `report/unknown` line that does
 not go away while the node answers its inspect: ask for help before any
 write to that pool.
 
-What the read does not show: a standby's or a side's own trouble before
-the worker sets its health epoch, since the read asks only the primaries
-and a migration's new side; why the worker does not react: a failover of
-an unhealthy primary with no enabled standby to take the role, a leg
-repair the worker cannot create, for want of a disk node with room or of
-a healthy leg, and a cntlr replacement that finds no controller node show
-only as a `health` line whose age grows, and the worker's log names the
-reason, while a disabled primary shows as a `pool` line, which says when
-no cntlr of the pool is enabled; a subsystem no cdc serves; and a worker
-that runs but whose watch has stopped. The scope page, section 9, lists
-these.
+What the read does not show: a standby's or a side's own trouble before the
+worker sets its health epoch, since the read asks only the primaries and a
+migration's new side; why the worker does not react: a failover of an
+unhealthy primary with no enabled standby to take the role, a leg repair the
+worker cannot create, for want of a disk node with room or of a healthy leg,
+and a cntlr replacement that finds no controller node show only as a
+`health` line whose age grows, and the worker's log names the reason, while
+a disabled primary shows as a `pool` line, which says when no cntlr of the
+pool is enabled; a subsystem no cdc serves; and a worker that runs but whose
+watch has stopped. Nor does it show a subsystem whose row on the primary
+reads `RES_STATUS_PENDING` while a host taken off its list keeps its
+connection, and no health epoch is set, though once a converge has left the
+row so, the primary serves the subsystem's volumes to no host, save a
+namespace whose move to ANA inaccessible failed; `dnvctl cntlr inspect`
+shows that row ([Change a volume's hosts](#change-a-volumes-hosts)). The
+scope page, section 9, lists these.
 
 Tested: the gateway's unit tests plant each kind of line and check it,
 the order of a pool's lines and their cap, a node that hangs, the pages
@@ -1349,8 +1354,18 @@ Safe steps:
    in `sp_conf.event_threshold`. A pool that `dnvctl sp create` made with
    no `--thr-*` flag shows `event_threshold` as null, and a threshold that
    the create did not set shows 0. Both mean the default.
-2. Have the command that starts the agent ready before you stop it, so
-   that the stop lasts only as long as the restart itself.
+2. Have the command that starts the agent ready before you stop it, so that
+   the stop lasts only as long as the restart itself. On a controller node,
+   also run `dnv-agent check cn` with the agent's flags while the old agent
+   still runs ([Check a node before it
+   joins](#check-a-node-before-it-joins)). A `FAIL` on its
+   `nvmet host cut (debugfs)` line means that the new agent will refuse to
+   start, and the stop then lasts until you fix the cause: fix it first, or
+   do step 3. A `WARN` on that line, which the check gives in place of the
+   `FAIL` when it has `--ignore-host-disconnection`, means that the new
+   agent will start and end no host's connection. If the old agent did not
+   log the warning `agent host cut disabled` when it started, it ends
+   connections, and the new one would not: fix the cause first.
 3. If the agent of a controller node that holds a primary may stay stopped
    longer than step 1 allows, move each primary off the node first. For
    each cntlr on the node that `dnvctl sp get` shows as primary, first
@@ -1385,7 +1400,8 @@ Safe steps:
    without its clean stop, as SIGKILL would, and on a disk node a zeroing
    command it started can then go on after it.
 5. Start the agent again at once with the same addresses, port id and
-   `--local-store` as before.
+   `--local-store` as before, and on a controller node with
+   `--ignore-host-disconnection` if the old agent ran with it.
 6. In the agent's log, find the record `agent serving` and after it the
    record `agent started`. Its `startup_ms` is how long the startup pass
    took. It must be well under the start hold. In one lab measurement, of
@@ -1638,21 +1654,37 @@ Safe steps:
    for a `WARN` or a `FAIL` a `fix:` line under it. The last line counts
    the failures and the warnings. The exit status is 0 with no failure, 1
    with one, and 2 when the check could not run, as when not root.
-3. Fix every `FAIL` before the node joins: the agent cannot work there, or
-   a failover or a repair can lose data there. On a controller node the
-   `nvmet host cut (debugfs)` line fails where the kernel cannot end the
-   connection of a host taken off a subsystem's list, since the cn agent
-   then refuses to start; its text names each cause: the NVMe target not
-   loaded, debugfs not mounted at /sys/kernel/debug, no debug folder of the
-   NVMe target there, which needs a kernel of 6.11 or newer built with the
-   kernel option `CONFIG_NVME_TARGET_DEBUGFS`, or a lockdown in force, the
-   mode of the kernel that Secure Boot switches on. Run a kernel that
-   can, or choose to run without the end of such connections: give both
-   the check and the cn agent `--ignore-host-disconnection`. A host taken
-   off a list then keeps its connection and its IO until it disconnects,
-   so two hosts can write one volume
-   ([the scope page](scope.md#54-hosts-and-the-kubernetes-driver)). A
-   `WARN` is one of four kinds.
+3. Fix every `FAIL` before the node joins: the agent cannot work there, or a
+   failover or a repair can lose data there. On a controller node the
+   `nvmet host cut (debugfs)` line, on whether the node can end the
+   connection of a host taken off a subsystem's list, fails where the cn
+   agent would refuse to start; its text names each cause: the NVMe target
+   not loaded or configfs not mounted, debugfs not mounted at
+   /sys/kernel/debug, no debug folder of the NVMe target there, which needs
+   a kernel of 6.11 or newer built with the kernel option
+   `CONFIG_NVME_TARGET_DEBUGFS`, a lockdown in force, the mode of the kernel
+   that Secure Boot switches on, or a read of one of these facts that
+   failed, whose text names the fact and then `not read:`, which fails the
+   line too. The check looks for the debug folder only once the NVMe target
+   is loaded and debugfs is mounted, so a check that names either of those
+   can name the missing folder when it runs again. Under a lockdown on a
+   node where /sys/kernel/security is not mounted the line reads `ok`, since
+   neither the check nor the cn agent can see that lockdown: its text then
+   says that it found no lockdown file, and the kernel refuses to end a
+   connection all the same ([the scope
+   page](scope.md#61-cases-where-dnv-does-not-come-back-alone-today)). When
+   the text says that it found no lockdown file, mount the kernel's security
+   file system there, `mount -t securityfs securityfs /sys/kernel/security`,
+   and run the check again: a lockdown in force then fails the line, and the
+   cn agent sees it too. Keep it mounted, as with a line in /etc/fstab. A
+   text that still says it found no lockdown file is a kernel with no
+   lockdown. To fix a `FAIL` of this line, mend each cause its text names,
+   or choose to run without the end of such connections: give both the check
+   and the cn agent `--ignore-host-disconnection`. A host taken off a list
+   then keeps its connection and its IO until it disconnects, so two hosts
+   can write one volume ([the scope
+   page](scope.md#54-hosts-and-the-kubernetes-driver)). A `WARN` is one of
+   four kinds.
    - Node settings to fix. The `lvm2 scan` and `mdadm.conf AUTO -all`
      warnings are the node settings of
      [Install the udev rules on a node](#install-the-udev-rules-on-a-node)
@@ -1667,16 +1699,15 @@ Safe steps:
      it is at its largest value, 4294967295, so a migration's write to a
      stalled disk never times out; set it to 30. The check warns for these
      rather than fails, and they must be fixed all the same.
-   - A known limit. The `disk best IO size` warning says the disk's best
-     or minimum IO size is above 4 MiB, so a controller node's write to
-     the disk can be refused
-     ([the scope page](scope.md#10-sizes-and-performance)).
-     Use another disk, or give it a smaller stripe, or accept the limit.
-     The `nvmet host cut (debugfs)` warning, given only to a check with
-     `--ignore-host-disconnection`, says the controller node cannot end
-     the connection of a host taken off a subsystem's list, and that the
-     cn agent with that flag runs without it. Run a kernel that can, or
-     accept the limit.
+   - A known limit. The `disk best IO size` warning says the disk's best or
+     minimum IO size is above 4 MiB, so a controller node's write to the
+     disk can be refused ([the scope
+     page](scope.md#10-sizes-and-performance)). Use another disk, or give it
+     a smaller stripe, or accept the limit. The `nvmet host cut (debugfs)`
+     warning, given only to a check with `--ignore-host-disconnection`,
+     names the causes of step 3 that the check found, and says that the cn
+     agent with that flag ends no connection of a host taken off a
+     subsystem's list. Mend each cause its text names, or accept the limit.
    - Facts outside what dnv was tested with: a kernel outside the 7.0
      series, an mdadm other than 4.5 on a controller node, a udev rule of
      dnv's with another text, and `nvme_core.io_timeout` other than 30
@@ -1721,12 +1752,12 @@ Tested: unit tests check each line of the report at each level on modelled
 nodes, the exit statuses, and the md replay against a stand-in mdadm,
 including one that starts a lone leg. Unit tests also check the cn agent's
 refusal to start and its warning with the flag; no suite runs a cn agent
-with the flag. The e2e suite runs the check on
-every disk node and controller node guest before it creates its pool, and
-fails the run on a failure; that stage is written and has not yet run in
-the lab. The cn suite's nodecheck case runs the check, the md replay, and
-the md replay with an mdadm that starts a lone leg on the lab VMs, and it
-passes there.
+with the flag. The e2e suite runs the check, without
+`--ignore-host-disconnection`, on every disk node and controller node guest
+before it creates its pool, and fails the run on a failure; it passed in the
+lab on 2026-11-20. The cn suite's nodecheck case runs the check, the md
+replay, and the md replay with an mdadm that starts a lone leg on the lab
+VMs, and it passes there.
 
 ## Choose a node's location
 
@@ -2058,48 +2089,64 @@ through.
 
 When: a host must stop using a volume, or another host must start.
 
-How to confirm the change: `dnvctl ss list` shows each subsystem by its
-NQN, with its `ss_id` and its list, `allowed_hosts`. After the change, read
-the pool's revision with `dnvctl sp get`, `sp_rev.revision`, and its
-cntlrs. Then run `dnvctl cntlr inspect --id <cntlr id>` for each cntlr,
-primary and standby. Once its `applied_revision` is that revision or a
-later one, the subsystem's row, under `ss_id_to_subsystem` at the
-subsystem's `ss_id`, reads `RES_STATUS_OK` when no host that is off the
-list is still connected to that controller node. It reads
-`RES_STATUS_PENDING`, with the details `host <nqn> still connected`, while
-the connection of such a host is still there after the cn agent's wait. It
-reads `RES_STATUS_ERROR` when the node cannot read or end the connections:
-its details start `nvmet connections not read:` or
-`nvmet connections not ended:`, followed by the cause. On a controller
-node whose kernel cannot end a host's connection, where the cn agent runs with
-`--ignore-host-disconnection` and logged `agent host cut disabled` when it
-started, the row reads `RES_STATUS_OK` all the same.
+How to confirm the change: `dnvctl ss list` shows each subsystem by its NQN,
+with its `ss_id` and its list, `allowed_hosts`. After the change, read the
+pool's revision with `dnvctl sp get`, `sp_rev.revision`, and its cntlrs.
+Then run `dnvctl cntlr inspect --id <cntlr id>` for each cntlr, primary and
+standby. Once its `applied_revision` is that revision or a later one, the
+subsystem's row, under `ss_id_to_subsystem` at the subsystem's `ss_id`,
+reads `RES_STATUS_OK` when no host that is off the list is still connected
+to that controller node. It reads `RES_STATUS_PENDING`, with the details
+`host <nqn> still connected`, while the connection of such a host is still
+there after the cn agent's wait. It reads `RES_STATUS_ERROR` when the node
+cannot read the connections, or cannot end them under a lockdown the cn
+agent can see (When to stop, below): its details start
+`nvmet connections not read:` or `nvmet connections not ended:`, followed by
+the cause. On a controller node whose cn agent logged
+`agent host cut disabled` when it started, which it does when it starts with
+`--ignore-host-disconnection` and finds one of the causes that the check's
+`nvmet host cut (debugfs)` line names ([Check a node before it
+joins](#check-a-node-before-it-joins), step 3), the row reads
+`RES_STATUS_OK` all the same.
 
 What dnv does alone: the gateway writes the new list and raises the pool's
 revision, and the worker sends each cntlr its syncup. Each cn agent then
 takes the hosts off the subsystem on its node, so that the kernel refuses
 their next connect, and ends the connection of every host that is off the
-list, waiting a few seconds for each to go. It does both before it changes
-any device of the pool. While the connection of a host that is off the
-list is still there after that wait, or while the node cannot read or end
-the connections, every namespace of the subsystem on that controller node
-moves to ANA inaccessible, the primary's too, so that no host is served
-there, the hosts left on the list among them. The worker sends the syncup
-again on every check round, which ends the connections again. A pending
-row starts no failover, so the hosts wait until the connection ends. An
-error row makes the worker fail a primary over to another controller node
-at the pool's threshold, as for any error row, and in time replace a
-standby. So a standby that becomes the primary serves no host that was
-taken off. The host taken off sees its controller fail. It connects again
-after its reconnect delay, about ten seconds by default, is refused, and
-its kernel then fails the IO it held. A host left on the list keeps its
-connection and its IO. On a controller node whose kernel cannot end a
-host's connection, where the cn agent runs with
-`--ignore-host-disconnection`, nothing ends a connection: a host taken off
-keeps its connection and its IO until it disconnects, and only its next
-connect is refused ([the scope
-page](scope.md#54-hosts-and-the-kubernetes-driver)). On a kernel that can
-end connections the flag changes nothing, and the cn agent ends them.
+list. In each converge it waits for those connections to go, about two
+seconds at most for all of them together. It does both before it changes the
+device under any namespace of the subsystem, or a transfer's device. While
+the connection of a host that is off the list is still there after that
+wait, or while the node cannot read or end the connections, every namespace
+of the subsystem on that controller node moves to ANA inaccessible, the
+primary's too, so that no host is served there, the hosts left on the list
+among them. A move that fails is the exception: the cn agent logs it as
+`ana transition failed`, the namespace can stay where it was, and on a
+serving primary it then goes on serving every host still connected, the host
+taken off among them, until a later converge ends that host's connection or
+moves the namespace. While the row reads `RES_STATUS_PENDING`, the worker
+sends the syncup again on every check round, which tries to end the
+connections again. While it reads `RES_STATUS_ERROR`, the worker sends the
+syncup every second round, and that ends nothing while the cause lasts. A
+pending row starts no failover, so the hosts wait until the connection ends.
+An error row on a primary makes the worker fail it over at the pool's
+threshold, as for any error row, where the pool has an enabled standby with no
+health epoch. A pool with no such standby, such as a pool with one cntlr,
+waits for the cntlr replacement, which comes after the pool's
+`cntlr_unhealthy`, 600 seconds at the default. An error row on a standby
+brings its replacement in time. So a standby that becomes the primary serves
+no host that was taken off, save one that connected just as it was taken off
+([the scope page](scope.md#54-hosts-and-the-kubernetes-driver)). The host
+taken off sees its controller fail. It connects again after its reconnect
+delay, about ten seconds by default, is refused, and its kernel then fails the
+IO it held. A host left on the list keeps its connection and its IO. On a
+controller node whose cn agent logged `agent host cut disabled` when it
+started, the cn agent ends no connection until it is started again, even once
+the kernel can: a host taken off keeps its connection and its IO until it
+disconnects, and only its next connect is refused ([the scope
+page](scope.md#54-hosts-and-the-kubernetes-driver)). A cn agent that logged no
+such warning when it started ends them where the kernel lets it, with the flag
+or without it (When to stop, below).
 
 Safe steps:
 
@@ -2111,10 +2158,10 @@ Safe steps:
 4. On a host you took off, `nvme disconnect -n <subsystem nqn>` drops what
    is left of its paths. A host that uses nvme-stas drops them itself once
    the cdc no longer lists the subsystem to it.
-5. Where a controller node's kernel cannot end a host's connection and its
-   cn agent runs with `--ignore-host-disconnection`, a host you took off
-   keeps writing until step 4 runs on it. Run step 4 before you give the
-   volume to another host.
+5. Where a controller node's cn agent logged `agent host cut disabled` when
+   it started, a host you took off keeps writing until step 4 runs on it,
+   even if the kernel can end connections now. Run step 4 before you give
+   the volume to another host.
 
 Steps that can lose data: a host taken off while it writes has its writes
 fail. A write that failed may or may not have reached the volume, so its
@@ -2124,32 +2171,61 @@ connect again.
 
 When to stop: the row does not read `RES_STATUS_OK` a minute after the
 change. Meanwhile that controller node serves no host the subsystem's
-volumes.
+volumes. The exception is a namespace whose move to ANA inaccessible failed
+(the record `ana transition failed`): a serving primary can go on serving it
+to every host still connected.
 
 - `RES_STATUS_PENDING`, `host <nqn> still connected`: the host's IO is held
-  on the controller node, and its connection ends only once that IO ends.
-  A row of the cntlr in error, such as a namespace's device, often names
-  why; the connection ends once that row is fixed. No failover comes, so
-  the volume's hosts wait. To serve the volume from another node, disable
-  that cntlr with `dnvctl cntlr set-enabled --id <cntlr id> --enabled=false`.
+  on the controller node, and its connection ends only once that IO ends. A
+  row of the cntlr in error, such as a namespace's device, often names why;
+  the connection ends once that row is fixed. When the cn agent's log holds
+  the record `ending a stray connection failed` for that host, the kernel
+  refuses to end the connection instead: see the bullet on
+  `nvmet connections not ended:`. No failover comes, so the volume's hosts
+  wait. To serve the volume from another node, disable that cntlr with
+  `dnvctl cntlr set-enabled --id <cntlr id> --enabled=false`, but where it
+  is the primary, only once you have checked, as step 3 of [A planned
+  restart of an agent](#a-planned-restart-of-an-agent) says, that the pool
+  has an enabled standby with no health epoch: with none, no other cntlr
+  becomes the primary, and the pool's IO stops. A disabled cntlr goes on
+  ending the connection. Once its row for the subsystem reads
+  `RES_STATUS_OK` in `dnvctl cntlr inspect --id <cntlr id>`, enable it again
+  with `dnvctl cntlr set-enabled --id <cntlr id>`: it comes back as a
+  standby. Until then the pool has one cntlr fewer to fail over to.
 - `RES_STATUS_ERROR`, `nvmet connections not read:`: debugfs was unmounted,
   which `mount -t debugfs none /sys/kernel/debug` mends, or the NVMe target
-  was loaded again without the option, after which a restart of the cn
-  agent refuses to start and names the cause.
-- `RES_STATUS_ERROR`, `nvmet connections not ended:`: the kernel refused to
-  end a connection, as under a lockdown raised while the agent runs, which
-  the cn agent's log also names in the record
+  was loaded again without the option. The row of every subsystem on that
+  controller node then reads so, with a host taken off or none, and the node
+  serves none of its volumes. A restart of the cn agent without
+  `--ignore-host-disconnection` then refuses to start and names the cause. A
+  restart with the flag starts, logs `agent host cut disabled` and ends no
+  connection, so the subsystem's volumes are served there again to every
+  host still connected, the host taken off among them: mend the cause before
+  you restart the cn agent.
+- `RES_STATUS_ERROR`, `nvmet connections not ended:`: a lockdown was raised
+  while the agent runs, and the kernel refuses to end a connection under it.
+  The cn agent's log names each refusal in the record
   `ending a stray connection failed`. A check round between two converges
-  can show the same row as `RES_STATUS_PENDING`, `host <nqn> still
-  connected`, since a read does not try the end. A restart of the
-  cn agent then refuses to start and names the lockdown where
-  /sys/kernel/security is mounted; where it is not, the restart starts and
-  the row stays in error until a reboot without the lockdown.
+  shows the same row, since a read also reads the lockdown mode once it
+  finds such a connection. A restart of the cn agent without
+  `--ignore-host-disconnection` then refuses to start and names the
+  lockdown; one with the flag starts, and the volumes are served there
+  again, to the host taken off too, as in the bullet above. The cn agent
+  reads the lockdown mode from /sys/kernel/security. Where that is not
+  mounted, the agent cannot see the lockdown: the row reads
+  `RES_STATUS_PENDING`, `host <nqn> still connected`, with an
+  `ending a stray connection failed` record at each converge, a restart
+  starts, and the kernel keeps refusing until a reboot without the lockdown.
+  Run step 4 on the host taken off: its own disconnect ends the connection,
+  and the row then reads `RES_STATUS_OK`. Until then no failover comes: to
+  serve the volume from another node meanwhile, disable that cntlr as the
+  first bullet says.
 
-For both error rows the worker fails a primary on that node over to
-another controller node ([the scope
-page](scope.md#61-cases-where-dnv-does-not-come-back-alone-today)). Mend
-the cause before the node serves the pool again. Ask for help.
+For both rows that read `RES_STATUS_ERROR` the worker fails a primary on
+that node over to an enabled standby with no health epoch, where the pool
+has one, and replaces the cntlr after the pool's `cntlr_unhealthy` ([the
+scope page](scope.md#61-cases-where-dnv-does-not-come-back-alone-today)).
+Mend the cause before the node serves the pool again. Ask for help.
 
 Tested: the cn suite's smoke case, on the lab's controller nodes, whose
 NVMe target is built with the option, takes one of two hosts that write
@@ -2350,12 +2426,18 @@ What dnv does alone:
 - Nothing restores etcd by itself. While etcd is down the data plane goes
   on: each node keeps what it built, hosts keep their IO, and the workers
   change nothing.
-- A restore brings the desired state back to the backup's time. What was
-  made after the backup is lost: disk nodes free the sides the restored
-  state does not name, data included, and primaries delete the volumes it
-  does not name, data included. A pool that grew, or whose legs moved,
-  since the backup can break. What was deleted since comes back. A node
-  added since is unknown to the restored state.
+- A restore brings the desired state back to the backup's time. What was made
+  after the backup is lost: disk nodes free the sides the restored state does
+  not name, data included, and primaries delete the volumes it does not name,
+  data included. A pool that grew, or whose legs moved, since the backup can
+  break. What was deleted since comes back. A node added since is unknown to
+  the restored state. A host added to a subsystem's list since the backup is
+  off the restored list: once the workers start, each controller node whose cn
+  agent ends connections ends that host's connection, and its IO fails
+  ([Change a volume's hosts](#change-a-volumes-hosts)). A Kubernetes machine
+  that started to use a volume after the backup loses it this way. A host
+  taken off a list since the backup is on the restored list again, so it may
+  connect again. The restore check does not name such hosts.
 - Each agent's local files hold what its node was told before the restore.
   An agent that keeps them refuses a syncup of the restored state until the
   pool's or the node's revision climbs back to the one it holds, and then
@@ -2455,10 +2537,20 @@ Safe steps:
 6. For each agent: stop it, copy its local files aside, delete them, and
    start it again. The copy is the last record of what the node was told
    before the restore.
-7. Start the workers and the cdc, let clients call the gateways again,
-   start the CSI controller plugin again with its former count of copies,
-   and take a new backup: a later restore of a backup from before step 3
-   would hand out again the ids handed out since.
+7. First set each subsystem's list to exactly the hosts that use it now.
+   `dnvctl ss list` shows each list. On each host, `nvme list-subsys` shows
+   the subsystems it is connected to, and `/etc/nvme/hostnqn` holds its host
+   NQN. For a volume of the Kubernetes driver, `kubectl get volumeattachment`
+   names the one Kubernetes node the volume is attached to, and the list must
+   hold that node's host NQN alone, or nothing when the volume is attached to
+   no node: the driver attaches a volume to a node only when the list is empty
+   or names that node alone. Where a list misses a host that uses the volume,
+   or names a host that stopped using it after the backup, give the whole list
+   again, as step 2 of [Change a volume's hosts](#change-a-volumes-hosts)
+   says. Then start the workers and the cdc, let clients call the gateways
+   again, start the CSI controller plugin again with its former count of
+   copies, and take a new backup: a later restore of a backup from before step
+   3 would hand out again the ids handed out since.
 8. Kubernetes still holds its record of each volume whose pool step 4 found
    new: delete the record, or make the volume again. Delete again each
    volume step 4 listed in `returning_td_list`: it was deleted after the
@@ -2480,12 +2572,17 @@ Safe steps:
 
 Steps that can lose data: step 6 makes every loss of step 4 happen, with no
 undo; an agent whose files are kept meets the same losses later, once the
-revisions climb back. Step 6 before step 3, or a worker started before
-step 3, can give a new object the remains of one made after the backup,
-data included. Step 8 deletes again the volumes and the pools that came
-back, with any data they hold: a volume that came back working holds its
-old data. A volume made in a cluster created after the backup is lost
-unseen: no call names that cluster.
+revisions climb back. Step 7 ends the connection of each host that a restored
+list leaves out, and that host's writes fail, unless step 7 gave it back
+first. A host taken off a list after the backup that step 7 leaves on the
+restored list may connect to the volume again, as a host that uses nvme-stas
+does by itself once the cdc lists the subsystem to it, and what writes on it
+then writes beside the host that uses the volume now. Step 6 before step 3, or
+a worker started before step 3, can give a new object the remains of one made
+after the backup, data included. Step 8 deletes again the volumes and the
+pools that came back, with any data they hold: a volume that came back working
+holds its old data. A volume made in a cluster created after the backup is
+lost unseen: no call names that cluster.
 
 When to stop and ask for help, before step 6: a node whose agent does not
 answer the check, since a pool none of whose controller nodes answers is
@@ -2517,17 +2614,26 @@ kind of record a program writes: `debug`, `info` or `warn`; `error`
 records are always written. At `info`, the default of every program but
 `dnvctl`, a program writes each change, each failure and each event, and
 leaves out the reads it repeats: a check round that finds nothing to do,
-and the reads of the node behind it, write nothing. One repeated read is
-written at `info` all the same: the capacity read the CSI driver's
+and the reads of the node behind it, write nothing. Two repeated reads are
+written at `info` all the same. One is the capacity read the CSI driver's
 controller plugin makes for Kubernetes, once a minute per storage class.
 Both the plugin and the gateway write its request and its reply, and the
 reply names every disk node and controller node of the cluster, about 100
 bytes each, so at 1,000 nodes each poll writes about 100 KB to each of the
-two logs, about 140 MB a day per storage class. At `debug` a program also
-writes each read, each message of a check round and each leg probe. The
-records at `warn` and `error` are the ones an operator must look at, with
-one exception: `log level changed`, which a signal writes at `warn` so that
-every log level shows it.
+two logs, about 140 MB a day per storage class. The other is the
+controller plugin's wait in a detach, the step that takes a Kubernetes
+node off a volume's list of hosts, and in an attach that puts a node on an
+empty list: once a second while the wait lasts, it reads the volume's pool
+and the report of the pool's primary through the gateway. The plugin and
+the gateway write each request and its reply, the gateway's read of the
+report from the primary's cn agent among them, and that cn agent writes
+each read of its report, with the whole report, at `info` too. A wait
+lasts a second or two in the common case, and longer while the primary
+does not answer or its connection to the old host does not end. At `debug`
+a program also writes each read, each message of a check round and each
+leg probe. The records at `warn` and `error` are the ones an operator must
+look at, with one exception: `log level changed`, which a signal writes at
+`warn` so that every log level shows it.
 
 When: a log grows fast or a disk fills; a fault needs more detail than the
 default log level writes; or you are about to reproduce a fault for a bug
@@ -3091,61 +3197,82 @@ What dnv does alone:
 
 Safe steps, for a machine that does not come back. Check "When to stop"
 below before step 1.
-1. Make sure the machine cannot write to a volume any more: power it off,
-   or cut it from the network that reaches the controller nodes. This step
-   is needed where a controller node's cn agent runs with
-   `--ignore-host-disconnection`, on a kernel that cannot end a host's
-   connection; that agent logs the warning "agent host cut disabled" at its
-   start. Where the controller nodes can end a host's connection, the
-   detach of step 2 waits until the volume's primary has ended the
-   machine's connection, an attach to another machine waits for the same
-   end, so the other machine gets the volume only after it, and a standby
-   ends the machine's connection before it ever serves; this step only
-   adds a second guard.
+1. Make sure the machine cannot write to a volume any more: power it off, or
+   cut it from the network that reaches the controller nodes. This step is
+   needed where a controller node's cn agent does not end a host's
+   connection: one started with `--ignore-host-disconnection` that found one
+   of the causes that the check's `nvmet host cut (debugfs)` line names
+   ([Check a node before it joins](#check-a-node-before-it-joins), step 3).
+   That agent logs the warning "agent host cut disabled" at its start, and
+   it ends no connection until it is started again, even once the kernel
+   can. Where the cn agents end a host's connection, the detach of step 2
+   waits until the volume's primary has ended the machine's connection, and
+   an attach to another machine waits for the same end, so the other machine
+   gets the volume only after it, save a connection that shows only after
+   the primary's converge has looked. The converge that the attach's write
+   brings lets the other machine in and ends that connection right after;
+   with no attach, a later check round finds it and ends it ([the scope
+   page](scope.md#54-hosts-and-the-kubernetes-driver)). A standby ends its
+   own too, and in any case before it serves. There this step closes that
+   short window and adds a second guard.
 2. Mark it out of service:
    `kubectl taint nodes <node> node.kubernetes.io/out-of-service=nodeshutdown:NoExecute`.
    Kubernetes deletes its pods and detaches their volumes; the workloads'
-   new pods attach them on other machines. Each detach takes the machine
-   off the list of hosts that may connect to the volume, and then waits
-   until the cn agent of the volume's primary has ended the machine's
-   connection to the volume at its next converge, which takes a second or
-   two. Once a detach call has failed, Kubernetes may already ask to attach
-   the volume to another machine; that attach waits for the same end, and
-   it is this wait that keeps the other machine out. A primary whose cn
-   agent does not answer holds the detach and the attach, and so does a
-   connection that does not end: Kubernetes gives each call 15 seconds and
-   then tries it again, with a pause between tries that grows
-   from one second up to five minutes, so the volume moves only once that
-   cn agent answers, once the connection ends, or once another controller
-   node becomes the primary, and then up to one pause later. A controller
-   node that cannot read its connections, or that a lockdown, the kernel
-   mode that Secure Boot switches on, keeps from ending them, reports an
-   error, and the worker fails the primary over to another controller
-   node. A connection that does not end for any other reason starts no
-   failover: the cn agent reports it as pending, as when the machine's IO
-   is held on the controller node. To serve the volume from another node
-   meanwhile, disable the primary's cntlr with
+   new pods attach them on other machines. Each detach takes the machine off
+   the list of hosts that may connect to the volume, and then waits until
+   the cn agent of the volume's primary has ended the machine's connection
+   to the volume at its next converge, which takes a second or two, save a
+   connection that shows only after that converge has looked (step 1). Once
+   a detach call has failed, Kubernetes may already ask to attach the volume
+   to another machine; that attach waits for the same end, and it is this
+   wait that keeps the other machine out. A primary whose cn agent does not
+   answer holds the detach and the attach, and so does a connection that
+   does not end: Kubernetes gives each call 15 seconds and then tries it
+   again, with a pause between tries that grows from one second up to five
+   minutes, so the volume moves only once that cn agent answers, once the
+   connection ends, or once another controller node becomes the primary, and
+   then up to one pause later. A controller node that cannot read its
+   connections, or that a lockdown, the kernel mode that Secure Boot
+   switches on, keeps from ending them on a node where /sys/kernel/security
+   is mounted, reports an error. Where the pool has an enabled standby with
+   no health epoch, the worker then fails the primary over to it at the
+   pool's threshold. A pool with no such standby, such as a pool with one
+   cntlr, waits for the cntlr replacement, which comes after the pool's
+   `cntlr_unhealthy`, 600 seconds at the default, and the volume waits with
+   it. A connection that does not end for any other reason starts no
+   failover: the cn agent reports it as pending, as when the machine's IO is
+   held on the controller node, or under a lockdown on a node where
+   /sys/kernel/security is not mounted, which the cn agent cannot see. To
+   serve the volume from another node meanwhile, first check, as step 3 of
+   [A planned restart of an agent](#a-planned-restart-of-an-agent) says,
+   that `dnvctl sp get` shows another cntlr of the pool with `disabled`
+   false and `err_epoch` 0; if there is none, do not disable the primary: no
+   other cntlr becomes the primary, and the pool's IO stops. If there is
+   one, disable the primary's cntlr with
    `dnvctl cntlr set-enabled --id <cntlr id> --enabled=false`: a disabled
-   cntlr is never the primary, so the worker makes another cntlr the
-   primary without its usual wait, and that cntlr ends the machine's
-   connection there before it serves. Enable the old cntlr again once its
-   connection has ended, with `dnvctl cntlr set-enabled --id <cntlr id>`.
+   cntlr is never the primary, so the worker makes another cntlr the primary
+   without its usual wait, and that cntlr ends the machine's connection
+   there before it serves. Enable the old cntlr again once its row for the
+   volume's subsystem reads `RES_STATUS_OK` in
+   `dnvctl cntlr inspect --id <cntlr id>`, with
+   `dnvctl cntlr set-enabled --id <cntlr id>`.
 3. Once the machine is back and clean, or replaced, remove the mark:
    `kubectl taint nodes <node> node.kubernetes.io/out-of-service-`.
 
 Steps that can lose data: the out-of-service mark, a forced delete of the lost
 machine's pods (`kubectl delete pod --force --grace-period=0`), or a delete of
 its Node object, while the machine still runs and reaches a controller node
-whose cn agent runs with `--ignore-host-disconnection`. A detach takes the
-machine off the volume's list and waits for the primary's cn agent to end
-the machine's connection at its next converge, and the attach to another
-machine waits for the same end, where the controller node can end it;
-where its kernel cannot and its cn agent runs with
-`--ignore-host-disconnection`, nothing ends the connection and neither
-waits for it ([the scope
-page](scope.md#54-hosts-and-the-kubernetes-driver)): the machine keeps its
-connections to the volumes there and can write beside the machine the
-volumes move to.
+whose cn agent ends no connection (step 1). A detach takes the machine off the
+volume's list and waits for the primary's cn agent to end the machine's
+connection, and the attach to another machine waits for the same end, where
+that cn agent ends connections; where it logged "agent host cut disabled" at
+its start (step 1), nothing ends the connection and neither waits for it ([the
+scope page](scope.md#54-hosts-and-the-kubernetes-driver)): the machine keeps
+its connections to the volumes there and can write beside the machine the
+volumes move to. Without step 1, a machine whose connection shows only after
+the primary's converge has looked can also write for a moment beside the
+machine the volume moves to, until the converge that lets that machine in ends
+that connection right after (step 1).
 
 When to stop: before step 1, the machine answers, by ssh or on its console,
 while Kubernetes shows it `NotReady`: that is a fault of its network or of
@@ -3165,8 +3292,9 @@ Kubernetes asks to attach the volume to the other host meanwhile, and that
 attach waits too. Once the worker runs again, the primary's cn agent ends the
 host's connection, and only then do the detach and the attach end. The host's
 writes then fail, and the volume's new pod on the other host reads what the
-host wrote and writes. Both cases run on controller nodes that can end a host's
-connection; a machine lost while a cn agent runs with
+host wrote and writes. The detach case, and the whole Kubernetes suite with it,
+passed in the lab on 2026-11-20. Both cases run on controller nodes that can
+end a host's connection; a machine lost while a cn agent runs with
 `--ignore-host-disconnection` is not tested, and neither is a connection that
 does not end.
 

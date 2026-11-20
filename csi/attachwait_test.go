@@ -18,10 +18,8 @@ import (
 // The tests of an attach's wait for the primary's cut (csi.md CSI10): an
 // attach that puts its node on the empty list first waits for a report of
 // the pool's primary cntlr made at exactly the revision its attempt read
-// whose row of the volume's subsystem reads OK, so that no host taken off
-// the list still holds an nvmet connection when the new one is let in; a
-// poll or a report past that revision ends the attempt, which reads and
-// waits again. Kubernetes'
+// whose row of the volume's subsystem reads OK; a poll or a report past
+// that revision ends the attempt, which reads and waits again. Kubernetes'
 // forced detach attaches the next node once a detach call has failed,
 // while the detach's own wait still runs.
 

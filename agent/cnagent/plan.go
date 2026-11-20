@@ -586,9 +586,12 @@ type nsPlan struct {
 	clone *clonePlan
 	// undarkened says the namespace's subsystem is not safe in this pass and
 	// its move to the inaccessible group failed (darkenSubsys): its ns-dev
-	// step then makes no change that is not a park onto the td's dm-error,
-	// so no data is put under a namespace that may still be optimized
-	// (convergeNsDev, CN33).
+	// step then creates the ns-dev, or loads a table on it other than the one
+	// it has, only for a park onto the td's dm-error or the read-only level's
+	// error-writes wrap of the device it already maps in full (wrapsLive),
+	// and at most resumes or makes writable one already on the table the
+	// rules select, so no data is put under a namespace that may still be
+	// optimized (convergeNsDev, CN33).
 	undarkened bool
 	// deferred mirrors td.deferred, or, below SP_LEVEL_NO_CLONE (levelClone),
 	// the deferral of a clone whose destination is the td: the fourth
