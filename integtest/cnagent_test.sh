@@ -5207,7 +5207,9 @@ wait_legs_probed() { # cnidx sp cntlr secs label
 
 # leg_wait_not_error polls a cntlr with check rounds until one leg's row
 # reads anything but RES_STATUS_ERROR: the primary's prober has read the leg
-# again since its export came back (cnagent.md CN11). A converge takes a leg
+# again since its export came back, or, for a leg dead for less than a probe
+# interval, has not yet read it since it died, so a later round can still
+# turn the row ERROR (cnagent.md CN11). A converge takes a leg
 # whose row reads ERROR as no copy source (cnagent.md CN12), so a stage that
 # brings a leg back and wants it to feed a copy in its next converge waits
 # for this first. The rounds start the reads they sample, and the poll reads
@@ -8338,7 +8340,12 @@ repair_forced_start() {
 		"^mdadm $(md_forced_args "$md2dev" "$md2name" "(uuid|force-no-bbl)" \
 			"/dev/mapper/$oname")\$" \
 		"repair older: Z zeroed, then the start from O"
-	md_wait_clean 2 "$sp" "$c2" 120 "repair older" "$A_DGRP"
+	# The start adds the zeroed leg only beside a copy source whose row does
+	# not read ERROR (cnagent.md CN12); O's row can still read the error a
+	# probe round of its short death left, until its next probe (CN11), and
+	# the read then names the add (CN30), so the worker's re-send is played.
+	md_resync_until_clean 2 "$sp" "$c2" "$rev2" "$req2" 120 "repair older" \
+		"$A_DGRP"
 	for f in "$req1" "$req2"; do
 		mark_set "$f"
 		req_set "$f" '.sp_level = "SP_LEVEL_READWRITE"'

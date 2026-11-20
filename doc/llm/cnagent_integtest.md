@@ -778,7 +778,10 @@ moves past leg 1's; with the arrays stopped and leg 1 back, both
 superblocks of one identity, a mark naming leg 1 is refused for the older
 leg alone, the row naming that kind and the change count, with nothing
 zeroed or assembled, and the same mark passing older-leg zeroes the other
-leg and starts the array from leg 1; when leg 1 carries a bad-block list
+leg and starts the array from leg 1, which adds the other leg back in that
+converge, or, when leg 1's row still reads the error a probe round of its
+short death left, in the re-send the read brings once the next probe reads
+leg 1 back (`cnagent.md` CN11, CN30); when leg 1 carries a bad-block list
 at run time, both marks pass bad-blocks too, so the refusal still names
 the older leg alone; the host reads its data unchanged (`cnagent.md`
 CN12). The marks that name a leg whose bad-block list depends on the run
