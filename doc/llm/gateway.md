@@ -1844,8 +1844,9 @@ identity), nor `GetClusterStatus` for a pool being deleted, which for a pool
 with no primary calls only the destinations of its migrations past their
 cutover (GW20), nor a node delete with `force` (Disk nodes). The two pre-STM
 size calls take the cluster id from a plain pre-read of `ClusterConf`, the
-in-STM read staying authoritative; the calls after resolution take it from
-the resolving transaction.
+in-STM read staying authoritative; the status read's calls take it from its
+own plain `ClusterConf` read, the read's first (GW20); the other calls
+after resolution take it from the resolving transaction.
 
 AG2. **Connection.** Per call (`withAgentConn`): a ctx derived from the
 request's with `DefaultGatewayAgentTimeout` as its timeout, one plaintext
@@ -2058,14 +2059,16 @@ cluster's), a DN's metadata ceiling `DnCloneMetaUnitCnt` and its unit size
 strides `IdStepStride` and `ThinIdStepStride`, which its smoke case checks
 the moved counters against); three gateway instances on one launch line that
 differs only in the gRPC address, each at `--log-level debug`, the log
-level a suite gives every dnv daemon it runs; four fake DNs and three fake CNs, the DNs
-in four distinct locations and the CNs in three of them, each CN in its DN
-twin's, since the CN scan dedupes locations too and a CN that shares a
-location with a DN shows the first preference of the pool create's DN
-scans (`architecture.md`, Per-operation allocation), served by
-`fakeagent`, the worker suite's fake (`dnv-worker.md`, Integration test
-plan); and the two drivers, `gatewayctl` for the RPCs and `workerctl` for
-the etcd ground truth, both run on the server. Every stage runs under a
+level the suites run their dnv daemons at, save one dn agent in one case of
+the dn suite (`dnagent_integtest.md`, Conventions, Log level); four fake
+DNs and three fake CNs, the DNs in four distinct locations and the CNs in
+three of them, each CN in its DN twin's, since the CN scan dedupes
+locations too and a CN that shares a location with a DN shows the first
+preference of the pool create's DN scans (`architecture.md`,
+Per-operation allocation), served by `fakeagent`, the worker suite's fake
+(`dnv-worker.md`, Integration test plan); and the two drivers, `gatewayctl`
+for the RPCs and `workerctl` for the etcd ground truth, both run on the
+server. Every stage runs under a
 trace id of its own, the thread that ties a script stage to the gateway,
 agent and etcd records it caused; the suite asserts once that the id a stage
 sent reaches the fake agent the gateway called.

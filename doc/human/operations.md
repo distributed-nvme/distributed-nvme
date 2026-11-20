@@ -2067,18 +2067,49 @@ Safe steps:
 2. Empty a disk node: delete the storage pools that have a leg on it, or
    move each such leg to another disk node with a migration
    (`dnvctl migr create`, then `dnvctl migr finish`; the steps of that flow
-   are not written yet). No migration moves a leg of a clone meta group,
-   the group that holds a clone's copy records: wait until the clone's copy
-   is complete and the clone leaves by itself, or, in a RAID1 pool,
-   replace that leg with a repair. `dnvctl retired-leg list` shows the
-   pool's retired legs; delete each one on the node with
-   `dnvctl retired-leg delete` once you no longer want its copy.
+   are not written yet). `dnvctl dn get --addr <addr>` lists each side on
+   the node under `dn_conf.side_ptr_list`, with the `sp_id` of its pool,
+   its `leg_id` and its `side_id`. `dnvctl sp find-names --ids <sp_id>`
+   prints the name of the pool, the name that `--sp` takes. No migration
+   moves a leg of a clone meta group, the group that holds a clone's copy
+   records: wait until the clone's copy is complete and the clone leaves by
+   itself, or, in a RAID1 pool, replace that leg with a repair.
+   `dnvctl retired-leg list` shows the pool's retired legs; delete each one
+   on the node with `dnvctl retired-leg delete` once you no longer want its
+   copy.
 3. Empty a controller node: delete the storage pools that have a cntlr on
-   it, or move each cntlr on it to another controller node, one at a time:
+   it, or move each cntlr on it to another controller node, one at a time.
+   `dnvctl cn get --addr <addr>` lists each cntlr on the node under
+   `cn_conf.cntlr_ptr_list`, with the `sp_id` of its pool and its
+   `cntlr_id`, the id that `--id` takes below.
+   `dnvctl sp find-names --ids <sp_id>` prints the name of the pool.
+   `dnvctl sp get` lists the pool's cntlrs under `cntlr_list`, which shows
+   no ids: its entries come in the order of the ids in
+   `sp_conf.cntlr_id_list`. To move a cntlr:
    1. Give the pool a new cntlr with `dnvctl cntlr create --slot <slot>`.
       The slot is a cntlid slot, a range of NVMe controller ids: one of
       the pool's `sp_conf.cntlid_slot_list` in `dnvctl sp get` that no
-      cntlr of the pool uses as its `cntlid_slot`.
+      cntlr of the pool uses as its `cntlid_slot`. The `cntlr_id` of the
+      reply is the new cntlr's id. In this move the create can be refused
+      in three cases:
+      - The pool has four cntlrs, the most a pool can have: the refusal
+        says that the cntlr count has reached the maximum. Then do
+        sub-steps 3 and 4 for the old cntlr first, and sub-steps 1 and 2
+        after them. The pool keeps three cntlrs meanwhile.
+      - No controller node can take the new cntlr: the refusal says that
+        no controller node has the free extents. A new cntlr goes only on
+        a controller node that is enabled, healthy and has room, and that
+        holds no cntlr of the pool yet. A cluster of two controller nodes
+        whose pools have two cntlrs each is such a case. Then add a
+        controller node first. Or, if the pool has another enabled cntlr,
+        do sub-steps 3 and 4 alone: the pool then has one cntlr fewer
+        until you give it a new one, and a pool left with one cntlr has
+        no standby to take over from its primary.
+      - Every slot of the list is in use: the refusal says that the slot
+        is already used or is not in the list. Then first add a slot from
+        0 to 7 that the list lacks, with
+        `dnvctl sp set-cntlid-slots --slots <the whole new list>`, the
+        slots separated by commas.
    2. Wait until the new cntlr is built. `dnvctl sp get` shows it with
       `err_epoch` 0, and `dnvctl cntlr inspect --id <new cntlr id>` shows
       `applied_revision`, the revision its agent has applied, equal to the
@@ -2216,15 +2247,19 @@ Safe steps:
    its row with the highest `held_revision`, on any controller node: the
    cntlr the worker told last. `held_cn_list` lists the controller nodes
    the agent holds; when it is empty, the agent lost its local files, and
-   every cntlr its node had in the backup reads not held.
+   every cntlr its node had in the backup reads not held, or record lost
+   where a record of its pool in the backup is lost (both below).
    - `RESTORE_VERDICT_SAME`: this cntlr was told nothing since the
      backup.
    - `RESTORE_VERDICT_OLDER`: the pool loses every change since the
      backup, and its layout stays as it is. `lost_td_list` lists its
      volumes that are lost, by `td_id` and thin id. `returning_td_list`
-     lists the volumes deleted since the backup: their records come back,
-     but the primary deleted their data when they were deleted, so they
-     come back as errors with no data. `dnvctl td list` names them.
+     lists the volumes deleted since the backup, by `td_id`: their records
+     come back. A volume whose thin id the primary deleted comes back as
+     an error with no data. A volume whose thin id the pool still holds,
+     because its delete on the primary failed or had not yet run, comes
+     back working, with its old data. `dnvctl td list` shows each volume
+     with its name and `td_id`.
    - `RESTORE_VERDICT_MAY_BREAK`: as older, and the pool's layout changed
      since the backup, so the pool may not come back working: a part of it
      was made since (a grow, a repair, a migration, a clone), or removed
@@ -2248,8 +2283,9 @@ Safe steps:
      backup, because this cntlr was behind its pool at the backup and was
      not told since, or because its local files were put back from an
      older copy; nothing can be compared. An agent that lost its local
-     files holds nothing, and its rows read not held, until the worker
-     tells it the current state again.
+     files holds nothing, and its rows read not held, or record lost where
+     a record of the pool in the backup is lost, until the worker tells it
+     the current state again.
    - `RESTORE_VERDICT_NOT_HELD`: a cntlr of the backup that the node no
      longer holds, because the pool was deleted or the cntlr moved to
      another node after the backup, or because the agent lost its local
@@ -2274,9 +2310,15 @@ Safe steps:
    start the CSI controller plugin again with its former count of copies,
    and take a new backup: a later restore of a backup from before step 3
    would hand out again the ids handed out since.
-8. Kubernetes still holds its record of each volume whose pool step 4
-   found new: delete the record, or make the volume again. Delete again
-   each volume step 4 listed in `returning_td_list`: it holds no data. A
+8. Kubernetes still holds its record of each volume whose pool step 4 found
+   new: delete the record, or make the volume again. Delete again each
+   volume step 4 listed in `returning_td_list`: it was deleted after the
+   backup. A namespace that exported the volume at the backup comes back
+   too, and the delete is then refused with the number of that namespace
+   and the NQN of its subsystem. First delete the namespace,
+   `dnvctl ns delete --nqn <nqn> --idx <number>`, or point it at the
+   volume it used before the restore,
+   `dnvctl ns set-dev --nqn <nqn> --idx <number> --td <volume name>`. A
    pool deleted after the backup comes back: it is one whose rows of its
    `sp_id`, on every controller node, all read
    `RESTORE_VERDICT_NOT_HELD`, from checks whose `held_cn_list` each lists
@@ -2289,10 +2331,12 @@ Safe steps:
 
 Steps that can lose data: step 6 makes every loss of step 4 happen, with no
 undo; an agent whose files are kept meets the same losses later, once the
-revisions climb back. Step 6 before step 3, or a worker started before step 3, can give a
-new object the remains of one made after the backup, data included. A
-volume made in a cluster created after the backup is lost unseen: no call
-names that cluster.
+revisions climb back. Step 6 before step 3, or a worker started before
+step 3, can give a new object the remains of one made after the backup,
+data included. Step 8 deletes again the volumes and the pools that came
+back, with any data they hold: a volume that came back working holds its
+old data. A volume made in a cluster created after the backup is lost
+unseen: no call names that cluster.
 
 When to stop and ask for help, before step 6: a node whose agent does not
 answer the check, since a pool none of whose controller nodes answers is

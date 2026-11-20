@@ -791,12 +791,13 @@ the lab while it does. The first server runs, as a plain user with no sudo,
 one etcd, configured with the request caps every etcd serving dnv must have
 (its transaction-op cap at `EtcdMaxTxnOps` and its request-size cap at
 `EtcdMaxRequestBytes`, which the suite reads from the `workerctl` it builds
-instead of copying the numbers), four `dnv-cdc`
-instances — two twins of the low half of the shard-code space and two of
-the high half — each at `--log-level debug`, the log level a suite gives
-every dnv daemon it runs, and `cdcctl`. The second server, with passwordless sudo, is
-the nvmet target that stands in for the controller nodes: a handful of
-test subsystems, each with one dm-zero namespace, linked to several nvmet
+instead of copying the numbers), four `dnv-cdc` instances — two twins of the
+low half of the shard-code space and two of the high half — each at
+`--log-level debug`, the log level the suites run their dnv daemons at, save
+one dn agent in one case of the dn suite (`dnagent_integtest.md`,
+Conventions, Log level), and `cdcctl`. The second server, with passwordless
+sudo, is the nvmet target that stands in for the controller nodes: a handful
+of test subsystems, each with one dm-zero namespace, linked to several nvmet
 ports, one of them on two ports so that one subsystem has two paths. The
 last two servers are the hosts, with passwordless sudo, nvme-cli and
 nvme-stas, each connecting under its own host NQN; a third, ghost identity,

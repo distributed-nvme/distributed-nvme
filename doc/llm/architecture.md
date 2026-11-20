@@ -2644,12 +2644,15 @@ rest. A pool's rows are:
   epochs of its group's retired legs, until the drain's final step deletes
   them, and the report's path rows are listed as in any pool; its drain
   runs ahead of the pass's gates (`dnv-worker.md` CLD7), so of the cases
-  that stop the pass two alone hold it: an absent revision key, which
-  leaves the pool no worker and which the clone's row names, and a missing
-  record the drain's last step reads, the repair its group names or a
-  retired leg its group lists (`dnv-worker.md` CLD9, MD6), which that
-  record's lost-record row names while the clone's row says nothing of the
-  wait;
+  that stop the pass three alone hold it: a cluster conf the worker cannot
+  use, missing from its cache or not valid, which fails the drain's final
+  step (`dnv-worker.md` CLD7) and which no row shows, since the read does
+  not see the worker's cache and answers `ABORTED` itself on a stored conf
+  that does not validate; an absent revision key, which leaves the pool no
+  worker and which the clone's row names; and a missing record the drain's
+  last step reads, the repair its group names or a retired leg its group
+  lists (`dnv-worker.md` CLD9, MD6), which that record's lost-record row
+  names while the clone's row says nothing of the wait;
 * a torn thin device (Thin devices).
 
 A pool's rows are ordered by what they say — lost records, the report,
@@ -2912,12 +2915,14 @@ and `CnGlobal`, with these differences:
   `GetCnStore` (service ControllerNodeAgent) asks for every controller
   node of the cluster the agent holds, and an agent that holds none, as
   after its store was lost, gives no held row, so every cntlr the
-  restored node names reads not held; then each pool is read in a
-  snapshot of its own, its `sp_id_to_name` record, `SpConf` and `SpRev`,
-  and, for a pool held at a revision above the restored one, its `Slice`,
-  `Clone` and `Repair` records and the `RetiredLeg` record of each retired
-  leg its counted groups list (MAY_BREAK, below), and the thin devices of
-  such a pool in one range of their prefix outside any STM. Reply: the
+  restored node names reads not held, or record lost where the restored
+  pool's records are lost (RECORD_LOST, below); then each pool is read in
+  a snapshot of its own, its `sp_id_to_name` record, `SpConf` and
+  `SpRev`, and, for a pool held at a revision above the restored one, its
+  `Slice`, `Clone` and `Repair` records and the `RetiredLeg` record of
+  each retired leg its counted groups list (MAY_BREAK, below), and the
+  thin devices of such a pool in one range of their prefix outside any
+  STM. Reply: the
   held nodes with their revisions, the restored node's id and revision,
   and a row per cntlr a held node's pointer list names and per cntlr the
   restored node names that the agent does not hold, each with the pool's
@@ -2979,9 +2984,10 @@ and `CnGlobal`, with these differences:
   * BEHIND: the held revision is below the restored one: the cntlr was
     behind its pool at the backup and the worker has not told it since, or
     the agent's local store was put back from an older copy. An agent that
-    lost its store holds nothing, so its rows read not held, until the
-    worker sends it the current state again, which is not older. Nothing
-    is compared.
+    lost its store holds nothing, so its rows read not held, or record
+    lost where the restored pool's records are lost, until the worker
+    sends it the current state again, which is not older. Nothing is
+    compared.
   * NOT_LOADED: the held node names the cntlr, and the agent holds no
     request of it: the startup reload skipped its file (`cnagent.md` CN2),
     the agent refused every request of it, at its gates or for a failed
@@ -3007,9 +3013,10 @@ and `CnGlobal`, with these differences:
     device record, a name of `td_name_list` with no record among them —
     and, for a cntlr of the restored node, a pool the restored state names
     nowhere, with no `sp_id_to_name` record of its `sp_id`, which on any
-    other row reads new; the row stands for the pool, and the other pools
-    are judged. A row not held ahead reads no `Slice` record, so a lost one
-    is not seen there.
+    other row reads new, or not loaded where the agent holds no request of
+    the cntlr; the row stands for the pool, and the other pools are judged.
+    A row not held ahead reads no `Slice` record, so a lost one is not seen
+    there.
   Reasons: per controller node, since only the controller nodes know a
   pool made after the backup, which with the CSI driver is every
   Kubernetes volume made since, and one node's held state bounds the call

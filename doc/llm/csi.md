@@ -792,22 +792,24 @@ host.
 
 Every case runs on the suite's dnv stack with the driver deployed from the
 manifests, the config map and the storage classes of the suite in place of
-the examples, and both plugins at `--log-level debug`, the log level a
-suite gives every dnv daemon it runs; the IO pods run the driver's own image, since it
-carries the tools they need and is already on every node. The deploy pulls
-the sidecar images a node lacks, on every node, so that a controller copy
-that moves starts at once, and checks the driver's shape: two controller
-copies on two nodes, both leases held by controller pods, the critical
-priorities the pods were given, and the node probe listening on the
-loopback alone; the test namespace then carries the example network
-policy, so every case runs under it. Before the cases, the suite sends
-SIGUSR1 and then SIGUSR2 to one controller plugin copy, from that copy's
-node as root, at the pid `crictl` reports for its plugin container, as the
-operations doc's step for a pod does (`operations.md`, The logs), and each
-must show as one `log level changed` record of that copy, both naming
-debug, the plugin's start log level (`log.md` R13). Each case that creates volumes ends with the check that
-nothing is left: no pool in the cluster, no dm device, array or export on a
-node, no connection of the driver's on a host.
+the examples, and both plugins at `--log-level debug`, the log level the
+suites run their dnv daemons at, save one dn agent in one case of the dn
+suite (`dnagent_integtest.md`, Conventions, Log level); the IO pods run the
+driver's own image, since it carries the tools they need and is already on
+every node. The deploy pulls the sidecar images a node lacks, on every node,
+so that a controller copy that moves starts at once, and checks the driver's
+shape: two controller copies on two nodes, both leases held by controller
+pods, the critical priorities the pods were given, and the node probe
+listening on the loopback alone; the test namespace then carries the example
+network policy, so every case runs under it. Before the cases, the suite
+sends SIGUSR1 and then SIGUSR2 to one controller plugin copy, from that
+copy's node as root, at the pid `crictl` reports for its plugin container,
+as the operations doc's step for a pod does (`operations.md`, The logs), and
+each must show as one `log level changed` record of that copy, both naming
+debug, the plugin's start log level (`log.md` R13). Each case that creates
+volumes ends with the check that nothing is left: no pool in the cluster, no
+dm device, array or export on a node, no connection of the driver's on a
+host.
 
 **k8s.** The suite writes a program that prints one line and sleeps, builds
 it static, wraps it in an image from scratch and imports it into every

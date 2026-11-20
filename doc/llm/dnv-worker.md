@@ -440,8 +440,8 @@ it, to delete it (`architecture.md`, Upgrade in lockstep); `RepairKey` and
 `RetiredLegKey`, with `RepairPrefix` and `RetiredLegPrefix`, the prefixes
 MD3's load ranges; `WorkerRegKey`, `WorkerRegPrefix` and
 `ParseWorkerRegKey`; and `WorkerRegistryPrefix`, the whole registry, every
-role at once, which only the gateway's `ListWorkers` ranges (`gateway.md`,
-Worker registry).
+role at once, which only the gateway's `ListWorkers` and its status read
+range (`gateway.md`, Worker registry; `gateway.md` GW20).
 
 `ClusterId` is the derivation of `architecture.md`, cluster_id derivation,
 verbatim. Formats are exactly those of `architecture.md`, Key grammar:

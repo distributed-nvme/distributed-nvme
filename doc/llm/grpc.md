@@ -240,10 +240,11 @@ The `integtest/` drivers are scoped out of the wiring rule on purpose.
   selects `grpc server request` records by `trace_id` and `method`; the
   request payloads it asserts come from the fake's `state.json`
   (`dnvctl.md`, Integration test plan). Both fakes set their log level to
-  Debug as the first statement of `main`, the log level a suite gives
-  every dnv daemon it runs, so the fake agent's log holds the `Check*`
-  stream messages (L1); `dnvctl` and the drivers keep their default log
-  levels.
+  Debug as the first statement of `main`, the log level the suites run
+  their dnv daemons at, save one dn agent in one case of the dn suite
+  (`dnagent_integtest.md`, Conventions, Log level), so the fake agent's
+  log holds the `Check*` stream messages (L1); `dnvctl` and the drivers
+  keep their default log levels.
 * The message limit is no part of that scoping out: `gatewayctl`,
   `cnagentctl`, `dnagentctl` and both fakes set it as Wiring says, so a
   driver takes any reply the daemon it calls sends, and a fake any request

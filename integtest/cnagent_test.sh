@@ -4842,8 +4842,9 @@ preflight_vms() {
 # Setup (cnagent_integtest.md, Cases, the setup paragraph)
 # ---------------------------------------------------------------------------
 
-# Both agents run at --log-level debug, as every dnv daemon a suite runs
-# does: the cases read the agents' reads (cnagent_integtest.md, Conventions).
+# Both agents run at --log-level debug, as the suites run their dnv daemons,
+# save one dn agent in one case of the dn suite: the cases read the agents'
+# reads (cnagent_integtest.md, Conventions).
 start_dn_agent() { # <idx>
 	local idx=$1
 	sshv "$idx" "setsid nohup $WORK/dnv-agent dn \

@@ -19576,10 +19576,12 @@ func (x *CheckControllerNodeRestoreReply_LostTd) GetIdMayReturn() bool {
 	return false
 }
 
-// A thin device of the restored pool the agent does not hold: deleted
-// after the backup, its record comes back with no data, its thin id
-// deleted by the primary's sweep. ListThinDevices names it by its
-// td_id.
+// A thin device of the restored pool the agent does not hold, deleted
+// after the backup: its record comes back. One whose thin id the
+// primary's sweep deleted comes back with no data, and one whose thin
+// id the pool still holds comes back working (architecture.md,
+// Controller nodes, CheckControllerNodeRestore). ListThinDevices lists
+// it with this td_id.
 type CheckControllerNodeRestoreReply_ReturningTd struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	TdId          uint64                 `protobuf:"varint,1,opt,name=td_id,json=tdId,proto3" json:"td_id,omitempty"`
