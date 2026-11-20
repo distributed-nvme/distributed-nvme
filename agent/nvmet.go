@@ -4,8 +4,10 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io/fs"
 	"strconv"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/distributed-nvme/distributed-nvme/common"
@@ -13,6 +15,12 @@ import (
 
 // NvmetRoot is the configfs mount point of the kernel NVMe target.
 const NvmetRoot = "/sys/kernel/config/nvmet"
+
+// NvmetDebugRoot is the kernel NVMe target's debug directory, which a kernel
+// built with CONFIG_NVME_TARGET_DEBUGFS shows while debugfs is mounted at
+// /sys/kernel/debug: one directory per subsystem, named by its NQN, and in
+// it one directory per nvmet connection (ListNvmetConns; cnagent.md CN33).
+const NvmetDebugRoot = "/sys/kernel/debug/nvmet"
 
 // ANA state strings written into ana_groups/{id}/ana_state by EnsurePort,
 // probe-first ([D4]): a group found in another state is rewritten.
@@ -50,7 +58,9 @@ func AnaStateOf(grpId int) string {
 // (SubsysMtime) and the port probe's test of whether the port's directory is
 // there (SH18). A listing that fails is an error, never an absence; only a
 // directory that is not there reads as absent. WriteFile is never used on a
-// /sys/kernel/config path.
+// /sys/kernel/config path. The debug directory (NvmetDebugRoot) is read and
+// written the same way, by the cn agent alone (ListNvmetConns,
+// NvmetConnState, EndNvmetConn).
 type Nvmet struct {
 	osBase
 }
@@ -552,6 +562,151 @@ func (n *Nvmet) ProbeSubsystem(
 }
 
 // ---------------------------------------------------------------------------
+// Nvmet connections — the cn agent's alone (cnagent.md CN33)
+// ---------------------------------------------------------------------------
+
+// nvmetConnPrefix starts the name of an nvmet connection's directory in a
+// subsystem's debug directory: "ctrl" and the connection's cntlid.
+const nvmetConnPrefix = "ctrl"
+
+// NvmetConn is one nvmet connection of a subsystem, as its debug directory
+// shows it: the connection's directory name ("ctrl" and its cntlid), which
+// the kernel gives a new connection again once the old one has gone, and the
+// host NQN its "hostnqn" file names.
+type NvmetConn struct {
+	Name    string
+	HostNqn string
+}
+
+// SubsysDebugPath is a subsystem's debug directory.
+func (n *Nvmet) SubsysDebugPath(nqn string) string {
+	return NvmetDebugRoot + "/" + nqn
+}
+
+// ListNvmetConns lists the nvmet connections of one subsystem from its debug
+// directory, in the agent's own process: each "ctrl" entry and the host NQN
+// its "hostnqn" file names, read strictly (readConnFile). ok is false
+// when the subsystem has no debug directory. A connection that went between
+// the listing and the read of its host has gone, and is left out; any other
+// read or listing that fails is an error, never an absence. The dn agent
+// never calls it: the cut is the cn agent's (cnagent.md CN33).
+func (n *Nvmet) ListNvmetConns(
+	ctx context.Context,
+	nqn string,
+) ([]NvmetConn, bool, error) {
+	dir := n.SubsysDebugPath(nqn)
+	names, ok, err := n.readDir(ctx, dir)
+	if err != nil || !ok {
+		return nil, ok, err
+	}
+	var conns []NvmetConn
+	for _, name := range names {
+		if !strings.HasPrefix(name, nvmetConnPrefix) {
+			continue
+		}
+		hostNqn, there, err := n.readConnFile(ctx, dir+"/"+name+"/hostnqn")
+		if err != nil {
+			return nil, true, err
+		}
+		if there {
+			conns = append(conns, NvmetConn{Name: name, HostNqn: hostNqn})
+		}
+	}
+	return conns, true, nil
+}
+
+// connFileGone says whether err from a file of an nvmet connection's
+// directory is the connection that has gone: a file that is not there, or
+// EIO, which debugfs answers to a read or a write through a file the kernel
+// removed after its open (its proxy maps a removed file to ENOENT at the
+// open, and nvmet's own handlers answer no EIO).
+func connFileGone(err error) bool {
+	return errors.Is(err, fs.ErrNotExist) || errors.Is(err, syscall.EIO)
+}
+
+// readConnFile reads one file of an nvmet connection's directory strictly
+// (readAttrStrict). An EIO, from a file removed after its open, is read once
+// more: a file that is then not there is a connection that has gone (ok
+// false), and one that answers belongs to a new connection that took the
+// freed name, judged by what it says.
+func (n *Nvmet) readConnFile(
+	ctx context.Context,
+	path string,
+) (string, bool, error) {
+	value, ok, err := n.readAttrStrict(ctx, path)
+	if err != nil && errors.Is(err, syscall.EIO) {
+		value, ok, err = n.readAttrStrict(ctx, path)
+	}
+	return value, ok, err
+}
+
+// NvmetConnState reads one nvmet connection's "state" strictly
+// (readConnFile): the set bits of its controller status joined by "|", such
+// as "ready" or "ready|fatal", and nothing when no bit is set, which is a
+// connection its host has not enabled yet or has disabled for a reset. A
+// connection a write of "fatal" ends keeps reading "fatal" until it is
+// freed, unless its host enables it after the write, which sets "ready". ok
+// is false for a connection that has gone. The dn agent never
+// calls it (cnagent.md CN33).
+func (n *Nvmet) NvmetConnState(
+	ctx context.Context,
+	nqn string,
+	name string,
+) (string, bool, error) {
+	return n.readConnFile(ctx, n.SubsysDebugPath(nqn)+"/"+name+"/state")
+}
+
+// NvmetConnReadError is EndNvmetConn's failure to read the connection's host
+// before its write: a read that did not answer, not a write the kernel
+// refused.
+type NvmetConnReadError struct {
+	Err error
+}
+
+func (e *NvmetConnReadError) Error() string { return e.Err.Error() }
+
+func (e *NvmetConnReadError) Unwrap() error { return e.Err }
+
+// EndNvmetConn ends one nvmet connection a listing showed: it reads the
+// connection directory's "hostnqn" again and, while it still names conn's
+// host, writes "fatal" to its "state" through WriteFileDirect, which makes
+// the kernel end the connection and free its directory once its requests in
+// flight have completed. It says whether it wrote. A directory that is gone,
+// at the read or at the write, and one that now names another host, a new
+// connection that took the freed name, are left alone and answer false
+// with no error. A read of the host that fails otherwise answers an
+// *NvmetConnReadError, and a write that fails otherwise its error, as the
+// refusal a kernel under lockdown gives. The write goes by the directory's
+// name, so a new connection that takes the name between the read and the
+// write is the one it ends (cnagent.md, Known limits). The dn agent never
+// calls it (cnagent.md CN33).
+func (n *Nvmet) EndNvmetConn(
+	ctx context.Context,
+	nqn string,
+	conn NvmetConn,
+) (bool, error) {
+	dir := n.SubsysDebugPath(nqn) + "/" + conn.Name
+	hostNqn, there, err := n.readConnFile(ctx, dir+"/hostnqn")
+	if err != nil {
+		return false, &NvmetConnReadError{Err: err}
+	}
+	if !there || hostNqn != conn.HostNqn {
+		return false, nil
+	}
+	err = n.writeAttr(ctx, dir+"/state", NvmetConnEndWord)
+	if connFileGone(err) {
+		return false, nil
+	}
+	return err == nil, err
+}
+
+// NvmetConnEndWord is what a write to an nvmet connection's "state" file
+// must start with for the kernel to end the connection, and the bit its
+// state then reads until the connection is freed, unless its host enables
+// the connection after the write (cnagent.md CN33).
+const NvmetConnEndWord = "fatal"
+
+// ---------------------------------------------------------------------------
 // Namespace
 // ---------------------------------------------------------------------------
 
@@ -765,6 +920,43 @@ func (n *Nvmet) ListAllowedHosts(
 	nqn string,
 ) ([]string, bool, error) {
 	return n.listDir(ctx, n.SubsysPath(nqn)+"/allowed_hosts")
+}
+
+// AdmitsOnly reports whether the kernel admits to a subsystem no host off
+// allowed (cnagent.md CN33): its "attr_allow_any_host" reads 0 and every
+// host linked into its allowed_hosts is on allowed, a host of allowed that
+// is not linked included; a subsystem that is not there admits no host.
+// Every read is strict: one that does not answer is an error, never an
+// answer. When ok is false, why names the first host off the list, or the
+// open subsystem.
+func (n *Nvmet) AdmitsOnly(
+	ctx context.Context,
+	nqn string,
+	allowed []string,
+) (ok bool, why string, err error) {
+	subsysPath := n.SubsysPath(nqn)
+	exists, err := n.dirExists(ctx, subsysPath)
+	if err != nil || !exists {
+		return err == nil, "", err
+	}
+	anyHost, there, err := n.readAttrStrict(
+		ctx, subsysPath+"/attr_allow_any_host")
+	if err != nil {
+		return false, "", err
+	}
+	if !there || anyHost != "0" {
+		return false, fmt.Sprintf("attr_allow_any_host is %q", anyHost), nil
+	}
+	linked, _, err := n.listDir(ctx, subsysPath+"/allowed_hosts")
+	if err != nil {
+		return false, "", err
+	}
+	for _, hostNqn := range linked {
+		if !contains(allowed, hostNqn) {
+			return false, "allowed host " + hostNqn + " is not desired", nil
+		}
+	}
+	return true, "", nil
 }
 
 // ListSubsystems enumerates every subsystem in the target's configfs tree,

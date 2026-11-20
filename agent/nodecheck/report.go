@@ -15,13 +15,14 @@ import (
 
 // Level is how a result of the node check stands (dnagent.md CM5): a
 // failure where the agent cannot work or safety rests on the fact; a
-// warning for one of five kinds: a node setting the check warns for rather
+// warning for one of four kinds: a node setting the check warns for rather
 // than fails, which must still be set (lvm2, mdadm.conf, the modules loaded
 // at boot, a controller node's kernel before 6.19, where every controller
 // node must run one kernel series, a disk node's nvme_core.io_timeout at
 // the value that never times out); a known limit (a disk whose IO size is
-// above what nvmet-tcp takes); a feature nothing uses yet (the cut of a
-// removed host's connection); a fact outside what dnv is tested with; or a
+// above what nvmet-tcp takes, a controller node whose kernel cannot cut a
+// removed host's nvmet connection, checked with
+// --ignore-host-disconnection); a fact outside what dnv is tested with; or a
 // fact the check could not read, whose detail starts "not read".
 type Level string
 

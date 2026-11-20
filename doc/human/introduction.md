@@ -342,36 +342,41 @@ and with mdadm 4.5. The md behaviour that a failover's order of fences
 rests on was checked by hand on the first of these kernels, on one lab VM
 ([the scope page](scope.md#notes-on-the-maintenance-tools)). The agents
 need a kernel of the 6.1 series or newer, the first with every kernel
-feature they use.
+feature they use but one: on a controller node, ending the connection of a
+host taken off a subsystem's list needs 6.11 or newer, built with the
+option below, unless the cn agent runs with `--ignore-host-disconnection`.
 
 Run the node check, `dnv-agent check dn --disk <disk>` on a disk node and
 `dnv-agent check cn` on a controller node, as root, before a node joins
 ([operations](operations.md#check-a-node-before-it-joins)). It fails a node
 the agent cannot work on or whose setup a failover or a repair is not safe
 on: a kernel older than 6.1, a udev older than systemd 253's, a missing tool
-or module, nvmet's configfs tree missing (configfs not mounted), native NVMe
+or module, nvmet's configfs tree missing (configfs not mounted), on a
+controller node a kernel that cannot end a host's connection to it (below)
+unless the check is given `--ignore-host-disconnection`, native NVMe
 multipath off, one of dnv's three udev rules missing or masked, no mask of
 the system's md assembly that the check counts (dnv's md rule exactly as
 shipped, or mdadm.conf's AUTO line refusing every format, as `AUTO -all`
 does, with no `homehost` on it, no POLICY line that sets `auto=`, no ARRAY
 line of a dnv array and none that names devices but no uuid),
 `nvme_core.io_timeout` at its largest value on a controller node, or a disk
-without 512-byte blocks. It warns for five kinds of fact. Node settings to
+without 512-byte blocks. It warns for four kinds of fact. Node settings to
 fix: lvm2 able to read dnv's own devices, mdadm.conf not set as the node
 settings below say, a module a reboot would not load again, a controller
 node's kernel older than 6.19, where every controller node of the cluster
 must run one kernel series (below), and `nvme_core.io_timeout` at its
 largest value on a disk node. A known limit: a disk whose best IO size is
-above 4 MiB, to which a controller node's write can be refused. A feature
-nothing uses yet: no way to cut a removed host's connection on a controller
-node. What dnv was not tested with: a kernel outside the 7.0 series, on a
-controller node an mdadm other than 4.5 or `nvme_core.io_timeout` other than
-30 seconds, and a udev rule of dnv's with another text. And a fact the check
-could not read, which the operator then reads by hand; a failed read of a
-fact the agent needs, such as the kernel release, the disk's block size,
-udev's version or the module lists, fails the node instead. On a spare
-machine, `dnv-agent check cn --md-replay` also runs md's start rules, which
-a failover rests on, with that machine's mdadm and kernel.
+above 4 MiB, to which a controller node's write can be refused, and, with
+`--ignore-host-disconnection`, a controller node that cannot end a host's
+connection to it. What dnv was not tested with: a kernel outside the 7.0
+series, on a controller node an mdadm other than 4.5 or
+`nvme_core.io_timeout` other than 30 seconds, and a udev rule of dnv's
+with another text. And a fact the check could not read, which the operator
+then reads by hand; a failed read of a fact the agent needs, such as the
+kernel release, the disk's block size, udev's version or the module
+lists, fails the node instead. On a spare machine,
+`dnv-agent check cn --md-replay` also runs md's start rules, which a
+failover rests on, with that machine's mdadm and kernel.
 
 Tools: nvme-cli, mdadm, nvme-stas, a 2.x version with its daemons stafd and
 stacd, dmsetup, and thin-provisioning-tools, whose thin_dump the agents run,
@@ -392,6 +397,21 @@ never raised to its largest value, 4294967295, which some cloud images set so
 that an IO never times out: it is the only bound on a write to a disk that
 stalls while its disk node still answers the keep-alives of the connection,
 the messages by which the kernel finds a silent target.
+
+A controller node ends the connection of a host taken off a subsystem's
+list, so that the host's IO fails and another host can take the volume over.
+The kernel can end one host's connection when it is 6.11 or newer, its NVMe
+target is built with the kernel option `CONFIG_NVME_TARGET_DEBUGFS`, debugfs
+is mounted at /sys/kernel/debug, and the kernel is not under lockdown, the
+mode that Secure Boot switches on; nvmet must be loaded and debugfs mounted
+before the cn agent starts. The kernels of most distributions, Ubuntu,
+Debian and Fedora among them, are built without the option, and dnv gives no
+way to build it. On a kernel that cannot, the cn agent starts only with
+`--ignore-host-disconnection`, and a host taken off a list then keeps its
+connection and its IO until it disconnects ([the scope
+page](scope.md#54-hosts-and-the-kubernetes-driver)). The end of a connection
+is tested on 7.0.0-43-generic with the NVMe target modules rebuilt with the
+option.
 
 Disks: the disk of a disk node, a whole disk or a partition, has 512-byte
 logical blocks. A disk of another block size, such as 4 KiB, cannot become

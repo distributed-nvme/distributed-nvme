@@ -739,6 +739,20 @@ const (
 	CnNsHeadPause        = 5 * time.Millisecond
 	CnConnectDialTimeout = CnConnectPassBudget * 3 / 2
 
+	// The cut's wait (cnagent.md CN33). After a converge pass writes
+	// "fatal" to a subsystem's stray connections, it lists the subsystem's
+	// debug directory again, pausing CnStrayCutPause between listings,
+	// until no stray connection is left; the pauses of every cut of one
+	// pass draw on one budget of CnStrayCutPassBudget (the listings
+	// themselves are not counted), so a pass whose cuts do not hold waits
+	// that long in all, however many subsystems it steps. A kernel frees a
+	// connection's directory a fraction of a second after the write, so
+	// the pass's own row and reply say the cut held in the common case; a
+	// cut the budget does not see hold is left to the worker's re-send.
+	// time.Durations, like the five above.
+	CnStrayCutPassBudget = 2 * time.Second
+	CnStrayCutPause      = 50 * time.Millisecond
+
 	// SuspendSeconds is the src-cutover grace window (architecture.md,
 	// Migration, src step 2): a migration
 	// source's per-CN dm-linears are held suspended for at least this long

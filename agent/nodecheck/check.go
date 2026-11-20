@@ -61,9 +61,6 @@ const (
 	multipathPath    = "/sys/module/nvme_core/parameters/multipath"
 	sysModuleDir     = "/sys/module"
 	modulesDir       = "/lib/modules"
-	procMountsPath   = "/proc/mounts"
-	nvmetDebugfsDir  = "/sys/kernel/debug/nvmet"
-	lockdownPath     = "/sys/kernel/security/lockdown"
 	mdadmMaskProgram = "/sbin/mdadm"
 )
 
@@ -77,12 +74,14 @@ type Env struct {
 
 // CheckOptions are what a node check is asked for: the role, the disk node
 // agent's --disk, the agent's --local-store, and, on a controller node, the
-// md replay (MdReplay).
+// md replay (MdReplay) and the cn agent's --ignore-host-disconnection, which
+// the host cut row judges by (hostCutRow).
 type CheckOptions struct {
-	Role       string
-	Disk       string
-	LocalStore string
-	MdReplay   bool
+	Role                    string
+	Disk                    string
+	LocalStore              string
+	MdReplay                bool
+	IgnoreHostDisconnection bool
 }
 
 // RunCheck is `dnv-agent check dn|cn` (dnagent.md CM5): it runs the check,
@@ -404,65 +403,47 @@ func (c *checker) ioTimeoutRow(ctx context.Context) Result {
 	return res
 }
 
-// hostCutRow is wave 8's kernel option and lockdown: a controller node cuts
-// a removed host's connection only through nvmet's debugfs, which needs the
-// option built in, debugfs mounted and no lockdown. It warns: nothing cuts a
-// connected host today (architecture.md, Known limits).
+// hostCutRow is the cut of a removed host's nvmet connection (cnagent.md
+// CN33), read through agent.HostCutCauses, the read of the cn agent's start
+// check (cnagent.md CN-CM2), so the two never disagree. A kernel that cannot
+// cut fails, since the agent refuses to start on it; where the check is
+// given --ignore-host-disconnection, as the agent would be, it warns, a
+// known limit: the agent then runs without the cut.
 func (c *checker) hostCutRow(ctx context.Context) Result {
 	res := Result{Name: "nvmet host cut (debugfs)"}
-	var missing []string
-	mounts, _, err := c.readFile(ctx, procMountsPath)
-	if err != nil {
-		missing = append(missing, "mounts not read: "+err.Error())
-	} else if !debugfsMounted(mounts) {
-		missing = append(missing, "debugfs is not mounted")
-	}
-	if _, ok, err := c.readDir(ctx, nvmetDebugfsDir); err != nil {
-		missing = append(missing, nvmetDebugfsDir+" not read: "+err.Error())
-	} else if !ok {
-		missing = append(missing, "nvmet has no debugfs directory "+
-			"(CONFIG_NVME_TARGET_DEBUGFS)")
-	}
-	text, ok, err := c.readFile(ctx, lockdownPath)
-	switch {
-	case err != nil:
-		missing = append(missing, "lockdown not read: "+err.Error())
-	case ok && lockdownMode(text) != "none":
-		missing = append(missing, "lockdown is "+lockdownMode(text))
-	}
-	if len(missing) == 0 {
+	causes := agent.HostCutCauses(ctx, c.env.Oc)
+	if len(causes) == 0 {
 		res.Level = LevelOk
-		res.Detail = "nvmet's debugfs is there and lockdown is off"
+		res.Detail = "nvmet's debug directory is there and lockdown is off"
+		// A missing lockdown file reads as no lockdown, as the start check
+		// reads it; the row says so rather than that lockdown is off. The
+		// read changes the words alone, never the level.
+		if _, ok, err := c.readFile(ctx, agent.LockdownPath); err == nil &&
+			!ok {
+			res.Detail = "nvmet's debug directory is there; no lockdown " +
+				"file at " + agent.LockdownPath + " (securityfs not " +
+				"mounted, or no lockdown support), read as no lockdown: a " +
+				"lockdown in force then shows only as a refused cut"
+		}
 		return res
 	}
-	res.Level = LevelWarn
-	res.Detail = strings.Join(missing, "; ") + ": a removed host keeps " +
-		"its connection until it disconnects"
-	res.Fix = "run an nvmet built with CONFIG_NVME_TARGET_DEBUGFS, mount " +
-		"debugfs at /sys/kernel/debug, and boot without lockdown"
+	res.Fix = "run an nvmet built with CONFIG_NVME_TARGET_DEBUGFS on a " +
+		"kernel of 6.11 or newer, load it, mount debugfs at " +
+		agent.DebugfsDir + " and boot without lockdown; or start the cn " +
+		"agent with --ignore-host-disconnection, under which a removed " +
+		"host keeps its connection until it disconnects"
+	if c.opts.IgnoreHostDisconnection {
+		res.Level = LevelWarn
+		res.Detail = strings.Join(causes, "; ") + ": with " +
+			"--ignore-host-disconnection the cn agent runs without the " +
+			"cut, and a removed host keeps its connection until it " +
+			"disconnects"
+		return res
+	}
+	res.Level = LevelFail
+	res.Detail = strings.Join(causes, "; ") + ": the cn agent refuses to " +
+		"start here without --ignore-host-disconnection"
 	return res
-}
-
-// debugfsMounted reports whether /proc/mounts' text holds a debugfs mount.
-func debugfsMounted(mounts string) bool {
-	for _, line := range strings.Split(mounts, "\n") {
-		fields := strings.Fields(line)
-		if len(fields) >= 3 && fields[2] == "debugfs" {
-			return true
-		}
-	}
-	return false
-}
-
-// lockdownMode is the mode the lockdown file marks as in force, in
-// brackets: "none" of "[none] integrity confidentiality".
-func lockdownMode(text string) string {
-	for _, word := range strings.Fields(text) {
-		if strings.HasPrefix(word, "[") && strings.HasSuffix(word, "]") {
-			return strings.Trim(word, "[]")
-		}
-	}
-	return strings.TrimSpace(text)
 }
 
 // noDisk is the result of a disk read with no disk to read.

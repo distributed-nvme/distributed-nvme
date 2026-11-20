@@ -316,10 +316,12 @@ the method set is exactly the following, each taking the caller's ctx:
   nothing is made. Reason: configfs and sysfs have no create operation, so a
   create only ever worked on a path that left them for a real file system,
   where it made a file at a path a request's name chose. It exists for
-  kernel virtual filesystems (nvmet configfs, sysfs), where the atomic
-  replace is impossible: configfs forbids creating arbitrary files, so
-  `WriteFile` can never succeed there. Use it **only** for such attribute
-  writes; the agents' local-store state files keep using
+  kernel virtual filesystems (nvmet configfs, sysfs, and the cn agent's
+  write of "fatal" to an nvmet connection's "state" in debugfs,
+  `cnagent.md` CN33), where the atomic replace is impossible: configfs
+  forbids creating arbitrary files, so `WriteFile` can never succeed there,
+  and a debugfs file that is gone is an nvmet connection that has gone.
+  Use it **only** for such attribute writes; the agents' local-store state files keep using
   `WriteFile`/`WriteProto` (`dnagent.md` SH18).
 
 ### ReadDir

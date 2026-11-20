@@ -60,12 +60,15 @@ a pass accumulates, its log record and the `AgentReply` it becomes),
 `CutText`, which keeps the end alone, for the errors of the counter reads),
 `version.go` the version reads the start record and the node check share
 (`KernelRelease`, `MdadmVersion`) and the start record itself
-(`LogStartVersions`; CM4, CM5), `hostname.go` the host name both size
-calls report (SH34), and `waitbudget.go` the `WaitBudget`, the
-bounded wait one converge pass may spend on the node catching up with what
-that pass asked of it: DN13's two, the retries of the connect to the
-migration source export and the wait for the source's namespace, and the cn
-connect step's pass budget (`cnagent.md` CN10 and CN18).
+(`LogStartVersions`; CM4, CM5), `hostcut.go` the read of whether the
+kernel can end an nvmet connection that the cn agent's start check and the
+node check share (`HostCutCauses`; CM5, `cnagent.md` CN-CM2),
+`hostname.go` the host name both size calls report (SH34), and
+`waitbudget.go` the `WaitBudget`, the bounded wait one converge pass may
+spend on the node catching up with what that pass asked of it: DN13's two,
+the retries of the connect to the migration source export and the wait for
+the source's namespace, and the cn's pass budgets of its connect step and
+of its cut (`cnagent.md` CN10, CN18 and CN33).
 
 `conf.go` is a **deliberate second copy** of `model`'s stored-conf rules.
 `layout.md`, Dependency rules, forbids the agent packages from importing
@@ -704,8 +707,11 @@ there (`agent.CutAgentText`), so the tracker records and returns the cut
 text; the
 agent emits `RES_STATUS_MISSING`, `RES_STATUS_ERROR`, `RES_STATUS_OK` and
 `RES_STATUS_PROVISIONING`, the cn agent also `RES_STATUS_PENDING` on a
-primary's leg rows (`cnagent.md` CN11) and the dn agent on the primary's
-dm-linear whose path waits for the fence (DN10), and never
+primary's leg rows (`cnagent.md` CN11) and on a subsystem row with a stray
+connection still listed while the lockdown file shows no mode in force,
+after the cut's wait, after a write the kernel refused, or after a failed
+read of a written connection's "state" (`cnagent.md` CN33), and the dn agent
+on the primary's dm-linear whose path waits for the fence (DN10), and never
 `RES_STATUS_UNKNOWN` (worker-only). `RES_STATUS_PENDING` means *waiting on
 something else before it can be judged or built — no health verdict*: on a leg
 row, the primary's prober for the leg has not completed a round since it
@@ -1590,7 +1596,9 @@ to build them, and the read after it names them again.
 
 What a verdict adds is rendered as an enumeration that did not answer is
 (DN19): "enumeration failed" with the object's name, then "absent" or
-"differs", with the row's or the probe's words after it where it has some.
+"differs", or on a cntlr "pending" for a subsystem row with a stray
+connection still there (`cnagent.md` CN33, CN30), with the row's or the
+probe's words after it where it has some.
 A piece that can never be built — a `mkdir` refused every time, say — is
 re-sent on each round where the converge names it too, as a side's and a
 cntlr's rows; a DN's or a CN's port, which only the read names, at most
@@ -1634,7 +1642,8 @@ default; the directory must exist before the agent starts, SH3);
 `--log-level`, one of the three words of `log.md` R6, `info` by default; and
 `--config`, an optional viper config file. The dn alone takes `--disk`, the
 raw block device that carries the dnv disk format ([D13]; `diskmeta.go`),
-required. The cn alone takes `--capacity` (`cnagent.md`, `cmd/dnv-agent cn`).
+required. The cn alone takes `--capacity` and `--ignore-host-disconnection`
+(`cnagent.md` CN-CM1).
 
 Running several agents on one node takes more than distinct port ids. Each
 needs its own `--grpc-address`; two agents of the **same role** also need
@@ -1682,7 +1691,10 @@ file's YAML number is the one source with a syntax of its own: it reaches
 the check as YAML decoded it, written out in decimal, so `capacity: 1e12`
 there is taken as 1000000000000, `capacity: 0x100` as 256 and
 `capacity: 0100` as 64, and one that is no whole number, as `capacity: 1.5`,
-is refused. The root command sets `SilenceUsage`, so `dnv-agent` exits
+is refused. The cn's start check, a kernel that cannot end an nvmet
+connection while `--ignore-host-disconnection` is not set, is a refusal of
+the same form, after these checks and the start record (`cnagent.md`
+CN-CM2). The root command sets `SilenceUsage`, so `dnv-agent` exits
 non-zero with no usage dump, printing that message **twice** — cobra's own
 error line plus `main`'s own print to stderr — which is what anything
 grepping the output sees. For the port id and the queue cap it is the same
@@ -1713,8 +1725,11 @@ the default limit); log the start record, `agent.LogStartVersions`
 (`common.BuildVersion`), the kernel release, and for the cn the version of
 the mdadm it runs (`cnagent.md` CN-CM2), a read that fails logged in the
 record, and the start going on, since no version the agent reads stops its
-start (the kernel and the tools are the node check's to judge, CM5), unlike
-CM3's checks of its values; build the role server
+start (the kernel and the tools are the node check's to judge, CM5, save
+the one kernel fact of the cn's start check), unlike CM3's checks of its
+values; for the cn, run its start check, whether the
+kernel can end an nvmet connection, which can end the start and decides
+the cut mode (`cnagent.md` CN-CM2); build the role server
 (`dnagent.NewDnAgentServer` / `cnagent.NewCnAgentServer`); call
 `agent.Serve` with the role's prepare step (SH33) and reconcile, a register
 func that calls `pb.RegisterDiskNodeAgentServer` (resp.
@@ -1731,14 +1746,15 @@ read, as root and in the order of the rows below, the facts the role's
 agent needs to work and dnv's safety rests on, and print one result for
 each: what it read, its level, and for a warning or a failure one fix
 line. A failure is a fact the agent cannot work without or that safety
-rests on. A warning is one of five kinds (`nodecheck.Check`): a node
+rests on. A warning is one of four kinds (`nodecheck.Check`): a node
 setting the check warns for rather than fails, which must still be set
 (lvm2, mdadm.conf, the modules loaded at boot, a cn kernel before 6.19,
 where every controller node of the cluster must run one kernel series, and
 a dn's `nvme_core.io_timeout` at the value that never times out); a known
-limit, a disk whose IO size is above what nvmet-tcp takes
-(`architecture.md`, Known limits); a feature nothing uses yet, the cut of
-a removed host's connection; a fact outside what dnv is tested with (the
+limit, a disk whose IO size is above what nvmet-tcp takes, and a cn whose
+kernel cannot end an nvmet connection, checked with
+`--ignore-host-disconnection` (`architecture.md`, Known limits); a fact
+outside what dnv is tested with (the
 kernel series, the mdadm version, a dnv udev rule's text, a cn's
 `nvme_core.io_timeout` other than the kernel's default); and a fact the
 check could not read, whose detail starts "not read" and whose fix line
@@ -1853,8 +1869,13 @@ rows, by role:
 - `nvme_core.io_timeout`: the value that never times out fails on a cn,
   whose legs are NVMe connections, and warns on a dn, as a setting to fix;
   on a cn another value than the kernel's default warns;
-- cn only, the cut of a removed host's connection: nvmet without its
-  debugfs directory, debugfs not mounted or a lockdown in force warns;
+- cn only, the cut of a removed host's nvmet connection, read as the cn
+  agent's start check reads it (`agent.HostCutCauses`; `cnagent.md`
+  CN-CM2): nvmet not loaded, debugfs not mounted at /sys/kernel/debug,
+  nvmet without its debug directory, a lockdown in force or a read of
+  these that did not answer fails, since the agent refuses to start there,
+  and warns when the check is given `--ignore-host-disconnection`, under
+  which the agent starts without the cut;
 - dn only, the disk's logical block size, read as the agent reads it
   (`Dm.DiskSizes`): any but `DnLogicalBlockSize` fails, as DN3 refuses it;
   and its best and minimum IO size (`Dm.IoSizes`): above

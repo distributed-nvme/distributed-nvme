@@ -218,14 +218,26 @@ It starts no agent and changes nothing.
 
 ```
 sudo ./dnv-agent check dn --disk $(sudo losetup -j dn0.img | cut -d: -f1)
-sudo ./dnv-agent check cn
+sudo ./dnv-agent check cn --ignore-host-disconnection
 ```
+
+The check of the controller node takes the flag the cn agent below runs
+with. `--ignore-host-disconnection` lets the cn agent start on a kernel
+that cannot end a host's connection to the controller node, as the kernels
+of most distributions cannot, Ubuntu's among them: their NVMe target is
+built without the debug option that shows each host's connection. What is
+lost: a host that you take off a subsystem's list with
+`dnvctl ss set-hosts` keeps its connection and its IO until it
+disconnects, so two hosts can write one volume. On a kernel that can end
+connections the flag changes nothing, and the cn agent ends them.
 
 Each must end with `0 failures`; fix any `FAIL` line by its `fix:` line
 before you go on. Some `WARN` lines are normal on a machine like this one,
-such as modules that a reboot would not load again or no `AUTO -all` in
-mdadm.conf; [operations](operations.md#check-a-node-before-it-joins) says
-what each means.
+such as modules that a reboot would not load again, no `AUTO -all` in
+mdadm.conf, or, on a kernel that cannot end a host's connection,
+`nvmet host cut (debugfs)`;
+[operations](operations.md#check-a-node-before-it-joins) says what each
+means.
 
 Four dn agents, each with its own gRPC address, nvmet port id, NVMe/TCP
 port, store and disk:
@@ -255,13 +267,19 @@ an nvmet port id of its own:
 ```
 sudo nohup ./dnv-agent cn --grpc-address 127.0.0.1:29950 \
   --tr-type tcp --adr-fam ipv4 --tr-addr 127.0.0.1 --tr-svc-id 4420 --nvmet-port-id 5 \
-  --local-store ./store-cn0 \
+  --local-store ./store-cn0 --ignore-host-disconnection \
   > cn0.log 2>&1 & echo $! > cn0.pid
 ```
 
 Check: five agents have started, a second after the starts. An agent
 first logs "agent node versions", the version of the program, the kernel
-release and, for the cn agent, the mdadm version; then "agent serving" as soon as it answers calls, and "agent started" once
+release and, for the cn agent, the mdadm version. On a kernel that cannot
+end a host's connection, the cn agent then logs one warning, "agent host cut
+disabled", with what the kernel lacks: it runs without ending the
+connections of hosts taken off a list, as the flag allows. Without the flag
+it would not start there, and its log would hold an error that names the
+same causes. Then an
+agent logs "agent serving" as soon as it answers calls, and "agent started" once
 it has rebuilt the node from its local files; until then it answers the
 worker's check rounds with "starting". A new node has nothing to rebuild,
 so the two lines come together here.

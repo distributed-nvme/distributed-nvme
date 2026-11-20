@@ -40,7 +40,10 @@ whose legs all read blank, the clone's source lost and given back, a new
 volume over a thin id that holds data, a snapshot torn by a primary stopped
 between its slices' steps, a disk node that dies under a host's writes, a
 disk node that leaves new connections unanswered, a node whose mdadm does
-not keep its degraded gate, an md array stalled under the gather, and the
+not keep its degraded gate, an md array stalled under the gather, a
+connected host taken off a subsystem's list, which the cn agent cuts while
+a host left on the list writes on, and on a primary and a standby at once
+(`cnagent.md` CN33), and the
 leftover, an accepted request reporting residue (`cnagent.md` CN20). The
 cases run in a fixed order, fail-fast — nodecheck, smoke, redund, repair,
 teardown, thinbm, torn, discard, clone_xfer, restart, pause — nodecheck
@@ -74,7 +77,12 @@ identical transport values, so whichever converges second writes nothing
 (`architecture.md`, Components: invocation reference; `dnagent.md` CM2, SH19),
 and a check asserts a subsystem's membership on the port, never that it holds
 exactly a case's. The host is emulated on the VMs, under a fixed host NQN with
-its derived host id (`common.NvmeHostId`; `dnagent.md` SH20). Agents run as
+its derived host id (`common.NvmeHostId`; `dnagent.md` SH20). smoke's cut
+stages add a second host on the controller node's own VM, under a second
+host NQN with the host id derived from it, so that the host whose IO fails
+and the host whose IO goes on write through devices of two machines: the
+kernel's NVMe host can join two connections of one machine to one
+subsystem into one device, whatever their host NQNs. Agents run as
 root under one process name, so the suite stops a role by its command line, and
 a case fails a stop that leaves an agent alive to race its successor.
 
@@ -93,8 +101,18 @@ host's signatures with them, as the agents run no LVM (`architecture.md`,
 [D13], [D14]); nvmet configfs, md support, native multipath, the stock udev
 rules the rules of `deploy/udev/` sort against, the stock assembly rule's
 honouring of the systemd-ready property the md mask sets, and udevadm's
-acceptance of the rules of `deploy/udev/`; and the free space and punch-hole
-support of the work directory's filesystem and the free memory. iptables and
+acceptance of the rules of `deploy/udev/`; the facts the cn agent's start
+check reads (`cnagent.md` CN-CM2), read in shell once nvmet is loaded, as
+the agent binary reaches the VMs only at setup: debugfs mounted at
+/sys/kernel/debug, nvmet's debug directory there, which the kernel option
+`CONFIG_NVME_TARGET_DEBUGFS` makes, and no lockdown in force, a failure
+naming `integtest/nvmet_debugfs.sh`, the lab tool that builds and installs
+nvmet modules with the option and checks them (`layout.md`, Directory
+tree); and the free space and punch-hole support of the work directory's
+filesystem and the free memory. No start line of the suite takes
+`--ignore-host-disconnection`, so the suite runs only on VMs that hold
+those modules, as the lab's controller node VMs do; on any other pair its
+preflight fails. iptables and
 tc are left to the stages that use them, the partition stages, redund's dial
 and slow leg stages, pause's cut and clone_xfer's slowed copy, so a VM
 without one fails in the stage that needs it rather than a run that might
@@ -122,7 +140,22 @@ measures as the dn suite's does; and on the dm-clone table. This suite adds:
   (`cnagent.md` CN21).
 * nvmet checks admission only when a host connects (`architecture.md`, Primary
   cntlr), so removing a host's link from a subsystem leaves the host's
-  controller to it live, which smoke asserts after revoking the host.
+  controller to it live until the cn agent cuts its nvmet connection
+  (`cnagent.md` CN33). The connection's directory then leaves nvmet's debug
+  directory a fraction of a second after the write; the host reconnects
+  after its reconnect delay, about ten seconds; nvmet refuses that
+  reconnect by admission, with its record (above), and with a status that
+  forbids a retry, so the host's kernel deletes the controller and fails the
+  IO it held, a synced write among them. In smoke and redund the cutting
+  converge takes 0.1 to 0.25 s and replies with the directory gone, the
+  host's controller is gone 11.5 to 12.6 s after the converge began, and in
+  smoke the failed write ends 11.4 to 11.9 s after it. A cut that holds
+  within the converge's wait leaves another host's connection to the
+  subsystem and its IO alone.
+* The VMs' dd keeps `conv=nocreat`: a write to a path that is not there
+  fails and creates nothing. smoke's timed writers rest on it, as a write
+  after the host's device node went would otherwise leave a plain file in
+  /dev under the next device's name.
 * The suite installs the udev rules of `deploy/udev/` (`architecture.md`,
   Components: invocation reference) for the run, from the texts the VM helper
   carries, checks that each file holds its text, and removes them at cleanup,
@@ -456,7 +489,12 @@ and the VM's host name as the VM reads it (`cnagent.md` CN3, CN-CM1;
 its store row OK (CN5, CN28). As an agent's gRPC listener opens before its
 startup pass (`dnagent.md` SH1, SH33), the drivers' wait for the size reply,
 here and after every restart, goes on reading the node's info until the
-agent no longer answers that it is starting. Both agents of a VM start with
+agent no longer answers that it is starting. Each start of a cn agent, at
+setup and after every restart, also checks a moment after the start, once
+an agent that refuses to start has had time to exit, that the agent still
+runs, and otherwise fails with the last lines of its log, so that a
+refused start (`cnagent.md` CN-CM2) shows at once and not as a size wait
+that ends with no answer. Both agents of a VM start with
 an IO queue cap below the VMs' CPU count, so that the cap and not the CPU
 count sets each path's queues (`dnagent.md` CM2, SH32).
 
@@ -493,12 +531,35 @@ but the legs, pending until their probers' first round (CN11); admission on
 real nvmet (CN16): built with no allowed host the subsystem admits none,
 probes clean and refuses the emulated host's connect; granted, it admits
 exactly that host; the host's path and the CN's leg paths each hold the
-cap's IO queues and the admin queue (`dnagent.md` SH32); revoked again, the
-connected host keeps its path and its next connect is refused; host IO;
+cap's IO queues and the admin queue (`dnagent.md` SH32); host IO;
 clean check rounds, the namespace identity included (`dnagent.md` SH17);
 the raw thin-pool status line the auto-grow parses (CN28); a raid0
 suspended by hand, which a check round's read names with the leftover code
-and the `SyncupCntlr` sent again resumes (CN30); four subsystems made by
+and the `SyncupCntlr` sent again resumes (CN30); the cut of a removed host
+(CN33): a second host, on the CN's own VM under a second host NQN, granted
+beside the first, connects and writes, and both then write on through
+timed writers of their own while the list drops the first host. The CN's
+debug directory lists one nvmet connection of each host before the
+converge; the converge answers zero, the cut having held within its wait,
+as it must for the second host to write on, since a cut that does not
+hold there moves every namespace of the subsystem inaccessible on the
+node; that host's connection
+leaves the directory while the second host's stays; the first host's next
+synced write fails, after the converge began, its controller goes, and
+nvmet's record that it refused the host's reconnect stands behind a mark
+made before the converge, the controller's absence resting on that
+record; the second host's writes go on, none failing and none taking as
+long as a reconnect of its own would hold one, and its data reads back. A
+connect of the first host is refused, and a check round, the
+`SyncupCntlr` re-sent while it answers the leftover code, then reads
+clean. The stage
+logs the converge's time, how long after it the connection was gone, the
+end of the first host's failed write and the time its controller was gone,
+both by its own clock from just before the converge, and the second host's
+writes across the cut with the longest of them. The list then drops the
+second host too, which is cut the same way, and the emptied list admits no
+host: the CN lists no nvmet connection of the subsystem, and both hosts'
+connects are refused; four subsystems made by
 hand (CN21): one with a namespace over a device that is no ns-dev, one
 empty with the kernel's default model, one with dnv's model and a namespace
 whose device was never written, and one empty with the kernel's default
@@ -667,7 +728,17 @@ after the stale leg's row reads `OK` on such a round. Either way the add
 runs under the stage's trace id, and the stage plays the worker for a
 bounded number of re-sends until a round answers zero with both arrays whole
 and the member in sync; through it all the agent runs no command under an id
-of its own. Last, md's check (CN12, The md check): eight sectors of one data
+of its own. With the arrays whole, the host, connected to the primary and
+to the standby, is taken off both cntlrs' lists (CN33): each CN's debug
+directory lists one nvmet connection of the host before its converge and
+none after it, each converge answering zero or the leftover code with the
+subsystem row pending and naming the host, the host's controllers of both
+CNs go, each CN's kernel log holds nvmet's refusal of the host's reconnect
+behind a mark made before the converges, and each CN's check round, the
+request re-sent while it answers the leftover code, then reads clean; the
+stage logs each converge's time and when each connection and each
+controller was gone. Last, md's check (CN12, The md check): eight sectors
+of one data
 side fail in its disk node's export to the primary alone, and the suite,
 playing the worker, puts an md check request on the data group and reads the
 cntlr until its reading names the request done. Over sectors that fail reads
@@ -1060,9 +1131,11 @@ the bucket would slow any suite that runs on the VMs before the next
 cleanup, and pause's cut and its writer, which it removes and stops, as the
 cut would black-hole another suite's connections, redund's drop of new
 connections, which it removes for the same reason, and its netem delay,
-which it removes for the bucket's reason, and nodecheck's stalled array and
+which it removes for the bucket's reason, nodecheck's stalled array and
 mdadm wrapper, which it resumes and removes, as a suspended member wedges
-another suite's udev and LVM scans. A cleanup-only run does the scrub alone.
+another suite's udev and LVM scans, and smoke's host writers, which it
+stops, as a writer left running writes on and holds its namespace open.
+A cleanup-only run does the scrub alone.
 It takes every `dnv-agent` and every dnv dm device, md array and nvmet
 subsystem on the node, of either role, which is why one dnv suite runs at a
 time in the lab (`layout.md`, Directory tree) — but for two blind spots the
@@ -1147,7 +1220,14 @@ member's add with the reasons it and an assembly of two identities put on
 the legs' rows, all of which the unit tests cover (CN12); a snapshot torn
 by a quiesce that fails, and a header read that waits or fails, whose rules
 the unit tests cover (CN14); the lingering-clone hold's scope per thin
-device, left to the unit tests (CN18); the other states of the clone's
+device, left to the unit tests (CN18); of the cut of a removed host
+(`cnagent.md` CN33), a transfer's cut, a cut that does not hold, a write
+of "fatal" the kernel refuses, a debug directory that does not answer, the
+namespaces of a subsystem whose cut has not held moved inaccessible before
+any device step, a serving primary's included, a freed connection name
+another host takes, and no cut mode, in which
+the agent starts with `--ignore-host-disconnection` on a kernel that cannot
+cut, all of which the unit tests cover; the other states of the clone's
 shared row rule (CN18); and whether a refused request leaves a lock entry
 (`dnagent.md`, Concurrency — `locks.go`; `cnagent.md` CN7), left to the
 unit tests.

@@ -105,8 +105,9 @@ func leadingVersion(
 // that fails leaves its attribute empty and puts its error in the record,
 // which is then a warning; the start goes on either way, since no version
 // the agent reads stops its start: the kernel and the tools are the node
-// check's to judge, and of the start's own checks only its flags' do
-// (dnagent.md CM3, CM4, CM5; cnagent.md CN-CM2).
+// check's to judge, and of the start's own checks only its flags' and, on a
+// controller node, whether the kernel can cut a removed host's nvmet
+// connection do (dnagent.md CM3, CM4, CM5; cnagent.md CN-CM2).
 func LogStartVersions(ctx context.Context, oc common.OsClient, withMdadm bool) {
 	var errs []error
 	release, err := KernelRelease(ctx, oc)

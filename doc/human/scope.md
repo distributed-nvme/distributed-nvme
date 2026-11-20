@@ -495,13 +495,30 @@ No case is known today.
 
 ### 5.4 Hosts and the Kubernetes driver
 
-- **A detach does not cut a connected host.** Silent. A detach takes the
-  host off the subsystem's list. The kernel checks the list only at
-  connect. A connected host keeps its path. Two hosts can write the same
-  volume. State: fix decided. The fix needs a kernel debug option that
-  most distributions leave off. Where the kernel cannot cut a connection,
-  the cn agent starts only with a flag that accepts the limit, and the
-  limit stays. Not seen in the lab.
+- **A host taken off a subsystem's list keeps its connection where the
+  controller node cannot end it.** Silent. `dnvctl ss set-hosts` takes a
+  host off a subsystem's list, and so does a detach, the step of the
+  Kubernetes driver that takes a Kubernetes node off a volume's list. The
+  kernel checks the list only when a host connects. Where the kernel of a
+  controller node can end one host's connection, its cn agent ends the
+  connection of every host that is off the list at its next converge, on the
+  primary and on every standby, and while such a connection is still there
+  after a short wait, or the node cannot read or end the connections, that
+  cntlr serves no namespace of the subsystem, the primary included (section
+  6.1). A kernel can do this when it is 6.11 or newer, its NVMe target is
+  built with the kernel option `CONFIG_NVME_TARGET_DEBUGFS`, debugfs is
+  mounted at /sys/kernel/debug, and the kernel is not under lockdown, the
+  mode that Secure Boot switches on. Where it cannot, the cn agent starts
+  only with `--ignore-host-disconnection`. On such a node a connected host
+  keeps its path after it leaves the list, and two hosts can write the same
+  volume. State: accepted. The option is off in the kernels of most
+  distributions, Ubuntu, Debian and Fedora among them, and dnv gives no way
+  to build it, since an NVMe target built by hand is not meant for
+  production. `dnv-agent check cn` says whether a controller node can end a
+  connection ([the operations
+  doc](operations.md#check-a-node-before-it-joins)). The cn agent suite
+  shows the end of a connection on controller nodes whose NVMe target is
+  built with the option.
 
 ### 5.5 Records and tools
 
@@ -783,6 +800,24 @@ Measured times are in [the introduction](introduction.md#status-and-limits-of-01
   runs one converge of the cntlr or side at a time, with one interval
   between two, and the node's other cntlrs and sides go on. State:
   accepted. Not seen in the lab.
+- **A host's connection that does not end takes the subsystem's volumes off
+  that controller node.** Where the cn agent ends connections (section 5.4),
+  each converge ends the connections of hosts that are off a subsystem's
+  list before it changes any device, and waits a few seconds for them to go.
+  While one is still there after that wait, or while the node cannot read or
+  end the connections, every namespace of that subsystem on that controller
+  node moves to ANA inaccessible, a serving primary's included, so that no
+  host is served through that node, the hosts left on the list among them. A
+  connection still there keeps the subsystem's row pending: no failover
+  comes, `dnvctl cluster get-status` does not list the row, and the hosts
+  wait until the connection ends, which it does once the removed host's IO
+  held on the node ends, as on a device that does not resume. A node that
+  cannot read or end the connections, after debugfs is unmounted, after the
+  NVMe target is loaded again without the option, or under a lockdown raised
+  while the agent runs, reads the row in error, and the worker fails the
+  primary over to another controller node at the pool's threshold. State:
+  procedure written ([the operations
+  doc](operations.md#change-a-volumes-hosts)). Not seen in the lab.
 - **A step only a check round names costs a converge every second check
   round while the converge keeps failing it.** Some work is named only by a
   check round, not by the converge's own answer: a leg to put back into its
@@ -1312,7 +1347,7 @@ steps; the section "Steps known today" below gives the longer ones.
 | Action | Tool today | Doc today | State |
 |---|---|---|---|
 | Create, snapshot and delete a volume | `dnvctl td create`, with `--ori` for a snapshot; `dnvctl td delete` | the tutorials, for the create and the delete | done; procedure to write, one line on snapshots |
-| Export a volume to hosts; change its hosts | `dnvctl ss create`, `dnvctl ns create`, `dnvctl ss set-hosts` | the tutorials, for the export | done for the export; procedure to write, one line on `ss set-hosts`. Fix decided: a removed host is cut. |
+| Export a volume to hosts; change its hosts | `dnvctl ss create`, `dnvctl ns create`, `dnvctl ss set-hosts`; a host taken off the list loses its connection at the next converge where the controller node's kernel can end it (section 5.4) | the tutorials, for the export; the operations doc, [Change a volume's hosts](operations.md#change-a-volumes-hosts) | done |
 | Park a namespace | `dnvctl ns set-suspended`, `dnvctl ns set-dev` | none | procedure to write |
 | Move a volume to another pool | `dnvctl xfer create` on the source; `dnvctl clone create`, `clone append-bm` on the destination | the introduction explains the flow; the operations doc, A pool made before the block bound, gives the order of the moves out of a pool and when each old volume may go | procedure to write: the whole flow. |
 | Clone from a source outside this cluster | `dnvctl clone create`, `clone set-tr` | none; the introduction explains the flow | procedure to write |
@@ -1415,7 +1450,14 @@ created with no budget keeps the 4 TiB 0.1 gave it after the upgrade, not
 the 64 TiB a new node gets, so `dnvctl cluster get-capacity` can name the
 budget as the limit sooner than the new default suggests; only emptying,
 deleting and creating it again gives it another budget ([the operations
-doc](operations.md#the-clusters-capacity)).
+doc](operations.md#the-clusters-capacity)). From this release on, a cn
+agent does not start on a kernel that cannot end a host's connection to
+the controller node (section 5.4), unless it runs with
+`--ignore-host-disconnection`. Before an upgrade from 0.1, run the new
+build's `dnv-agent check cn` on every controller node, with the flags its
+agent will run with: a `FAIL` on its `nvmet host cut (debugfs)` line means
+that the new cn agent would refuse to start there
+([the operations doc](operations.md#check-a-node-before-it-joins)).
 
 **Logs.** The programs log to stderr as JSON, one record per line, with no
 rotation. Each program takes `--log-level`, the log level: the least serious

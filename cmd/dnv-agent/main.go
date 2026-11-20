@@ -60,11 +60,15 @@ func main() {
 	}
 }
 
-// The seams the command tree's tests replace: what serves an agent, and
-// what the node check and the gather read the node through.
+// The seams the command tree's tests replace: what serves an agent, what
+// the cn agent's start check reads (cnagent.md CN-CM2) and the cn server it
+// builds with the cut mode the check decided, and what the node check and
+// the gather read the node through.
 var (
-	serveAgent = agent.Serve
-	nodeEnv    = func() nodecheck.Env {
+	serveAgent    = agent.Serve
+	hostCutCauses = agent.HostCutCauses
+	newCnServer   = cnagent.NewCnAgentServer
+	nodeEnv       = func() nodecheck.Env {
 		return nodecheck.Env{
 			// The process's single OsClient (osclient.md).
 			Oc:   common.NewLimitedOsClient(0),
@@ -116,7 +120,23 @@ func newCnCmd() *cobra.Command {
 	}
 	addCommonFlags(cmd)
 	addCapacityFlag(cmd)
+	addIgnoreHostDisconnectionFlag(cmd)
 	return cmd
+}
+
+// addIgnoreHostDisconnectionFlag adds the cn role's
+// --ignore-host-disconnection (cnagent.md CN-CM1): it lets the agent start
+// on a kernel that cannot end an nvmet connection, and then a removed host
+// keeps its connection; where the kernel can, the agent cuts with it or
+// without it. A bool, read through viper, so a word it does not take reads
+// false: the agent then refuses on a kernel that cannot cut, naming the
+// flag.
+func addIgnoreHostDisconnectionFlag(cmd *cobra.Command) {
+	cmd.Flags().Bool("ignore-host-disconnection", false,
+		"start even where the kernel cannot end the connection of a "+
+			"host taken off a subsystem's list (no "+
+			"CONFIG_NVME_TARGET_DEBUGFS, debugfs not mounted, or "+
+			"lockdown); such a host then keeps its connection")
 }
 
 // addDiskFlag adds the dn role's --disk.
@@ -173,6 +193,7 @@ func newCheckCmd() *cobra.Command {
 	}
 	addCommonFlags(cn)
 	addCapacityFlag(cn)
+	addIgnoreHostDisconnectionFlag(cn)
 	cn.Flags().Bool("md-replay", false,
 		"also replay md's start rules on two loop devices (a spare "+
 			"machine only: it refuses a node that holds dnv objects)")
@@ -197,10 +218,11 @@ func runCheck(cmd *cobra.Command, role string) error {
 	ctx, stop := toolSignalContext()
 	defer stop()
 	opts := nodecheck.CheckOptions{
-		Role:       role,
-		Disk:       viper.GetString("disk"),
-		LocalStore: viper.GetString("local-store"),
-		MdReplay:   viper.GetBool("md-replay"),
+		Role:                    role,
+		Disk:                    viper.GetString("disk"),
+		LocalStore:              viper.GetString("local-store"),
+		MdReplay:                viper.GetBool("md-replay"),
+		IgnoreHostDisconnection: viper.GetBool("ignore-host-disconnection"),
 	}
 	return nodecheck.RunCheck(ctx, nodeEnv(), opts,
 		viper.GetString("output"), cmd.OutOrStdout())
@@ -514,9 +536,10 @@ func runDn(cmd *cobra.Command, args []string) error {
 		srv.WaitBackground)
 }
 
-// runCn mirrors runDn (CM4/CN-CM2): --capacity is the one cn-only value and
-// is optional, since 0 means "no local opinion" and the CP substitutes
-// DefaultCnCap.
+// runCn mirrors runDn (CM4/CN-CM2), with the cn-only values: --capacity,
+// optional, since 0 means "no local opinion" and the CP substitutes
+// DefaultCnCap, and --ignore-host-disconnection, which the start check reads
+// (startCut).
 func runCn(cmd *cobra.Command, args []string) error {
 	if err := bindViper(cmd); err != nil {
 		return err
@@ -553,8 +576,12 @@ func runCn(cmd *cobra.Command, args []string) error {
 	// version of the mdadm the agent runs; a failed read is logged, and the
 	// start goes on (CM4, CN-CM2; log.md, Agent start).
 	agent.LogStartVersions(ctx, oc, true)
-	srv := cnagent.NewCnAgentServer(oc, nf, localStore,
-		capacity, trConfFromViper(), portId, qidMax)
+	strayCut, err := startCut(ctx, oc)
+	if err != nil {
+		return err
+	}
+	srv := newCnServer(oc, nf, localStore,
+		capacity, trConfFromViper(), portId, qidMax, strayCut)
 
 	return serveAgent(ctx,
 		viper.GetString("grpc-network"), viper.GetString("grpc-address"),
@@ -570,3 +597,33 @@ func runCn(cmd *cobra.Command, args []string) error {
 		// restarted agent needs (cnagent.md CN10).
 		nil)
 }
+
+// startCut is the cn agent's start check (cnagent.md CN-CM2): it reads
+// whether the kernel can end an nvmet connection (agent.HostCutCauses, the
+// read the node check's host cut row makes) and answers the cut mode
+// (cnagent.md CN33). Where the kernel can, the mode is cut, whatever
+// --ignore-host-disconnection says. Where it cannot, the start ends with an
+// error that names every cause and the flag, printed as a flag's is (CM3),
+// before any listener opens; with the flag, the agent logs one warning,
+// "agent host cut disabled", with the causes, and runs in no cut mode.
+func startCut(ctx context.Context, oc common.OsClient) (bool, error) {
+	causes := hostCutCauses(ctx, oc)
+	if len(causes) == 0 {
+		return true, nil
+	}
+	if !viper.GetBool("ignore-host-disconnection") {
+		return false, fmt.Errorf("this kernel cannot end the nvmet "+
+			"connection of a host taken off a subsystem's list: %s; fix "+
+			"that, or start with --ignore-host-disconnection, under which "+
+			"such a host keeps its connection",
+			strings.Join(causes, "; "))
+	}
+	slog.WarnContext(ctx, msgHostCutDisabled,
+		slog.String("causes", strings.Join(causes, "; ")))
+	return false, nil
+}
+
+// msgHostCutDisabled is the cn agent's start warning where the kernel cannot
+// end an nvmet connection and --ignore-host-disconnection let it start
+// (log.md, Agent start).
+const msgHostCutDisabled = "agent host cut disabled"

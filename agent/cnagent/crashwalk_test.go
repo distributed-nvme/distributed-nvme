@@ -701,11 +701,17 @@ func crashOk(
 // fewest calls the converge makes under its trace id: a change that quietly
 // shortens it shrinks the walk, and this says so.
 type crashShape struct {
-	name     string
-	setup    func(t *testing.T, srv *CnAgentServer)
-	conv     func(ctx context.Context, srv *CnAgentServer)
-	held     crashHeld
-	minCalls int
+	name  string
+	setup func(t *testing.T, srv *CnAgentServer)
+	// nvmetDebug runs the shape on a node that models nvmet's debug
+	// directory, so its agents run in cut mode (CN33), and connect plants
+	// the nvmet connections the node holds after setup, before the
+	// converge.
+	nvmetDebug bool
+	connect    func(srv *CnAgentServer, node *fakeNode)
+	conv       func(ctx context.Context, srv *CnAgentServer)
+	held       crashHeld
+	minCalls   int
 	// minBackgroundCalls is the fewest background disconnects the converge
 	// sets going (CN10); minStartupCalls, the fewest calls the startup pass
 	// after the shape makes.
@@ -732,6 +738,20 @@ func crashRich(
 		raid1: true, twoLegs: true, twoSlices: true, tds: tds,
 		xfers: []*pb.Transfer{{XferId: testXfer, OriNqn: testNqn,
 			OriNsIdx: 1}}})
+}
+
+// crashCut33 is the rich primary's request, or its standby's, whose pool
+// subsystem and transfer admit hosts, the shape of the cut (CN33).
+func crashCut33(
+	revision uint64,
+	primary bool,
+	hosts ...string,
+) *pb.SyncupCntlrRequest {
+	return cntlrReq(reqOpts{revision: revision, primary: primary,
+		raid1: true, twoLegs: true, twoSlices: true,
+		subsys: subsysWithHosts(hosts...),
+		xfers: []*pb.Transfer{{XferId: testXfer, OriNqn: testNqn,
+			OriNsIdx: 1, AllowedHosts: hosts}}})
 }
 
 // crashCloned is a RAID1 primary with a data group of two legs, with the
@@ -823,6 +843,23 @@ func crashShapes() []crashShape {
 		minCalls:        239,
 		minStartupCalls: 242,
 		minDoubleCuts:   44,
+	}, {
+		// In cut mode: the promotion cuts the stray connections of the pool
+		// subsystem and the transfer, each before its device step and its
+		// namespace's move to optimized (CN9, CN33, CN16, CN17).
+		name:       "a standby promoted while a removed host is connected",
+		setup:      built(crashCut33(1, false, strayHost)),
+		nvmetDebug: true,
+		connect: func(srv *CnAgentServer, node *fakeNode) {
+			node.connectNvmet(testNqn, strayHost)
+			node.connectNvmet(
+				srv.nf.XferNqn(testCluster, testSp, testXfer), strayHost)
+		},
+		conv:            sendCntlr(crashCut33(2, true)),
+		held:            withCntlr(crashCut33(2, true)),
+		minCalls:        298,
+		minStartupCalls: 280,
+		minDoubleCuts:   138,
 	}, {
 		// The sweep's five leg disconnects run off the pass (CN10).
 		name:               "a node syncup that drops the cntlr",
@@ -1157,6 +1194,11 @@ func TestACrashAtEveryStepOfAConverge(t *testing.T) {
 					"than the %d it sets at least", len(bgLines),
 					sh.minBackgroundCalls)
 			}
+			if sh.connect != nil {
+				if failure := crashCutsFirst(srvNf(), lines); failure != "" {
+					t.Error(failure)
+				}
+			}
 			start := time.Now()
 			var tally crashTally
 			i := 0
@@ -1188,11 +1230,14 @@ func TestACrashAtEveryStepOfAConverge(t *testing.T) {
 	}
 }
 
-// startFresh starts an agent over a fresh node and runs its startup pass,
-// as the first process of every cut does.
-func startFresh(t *testing.T) (*fakeNode, *crashInc) {
+// startFresh starts an agent over a fresh node of the shape and runs its
+// startup pass, as the first process of every cut does.
+func (sh crashShape) startFresh(t *testing.T) (*fakeNode, *crashInc) {
 	t.Helper()
 	node := crashNode()
+	if sh.nvmetDebug {
+		node.withNvmetDebug()
+	}
 	inc := startCrashInc(node)
 	if err := inc.reconcile("startup-0"); err != nil {
 		inc.end()
@@ -1201,13 +1246,56 @@ func startFresh(t *testing.T) (*fakeNode, *crashInc) {
 	return node, inc
 }
 
+// srvNf is the name format every agent of the walk runs with.
+func srvNf() *common.NameFmt {
+	return common.NewNameFmt(common.DefaultLocalStorPrefix)
+}
+
+// crashCutsFirst fails unless the converge's calls, lines, cut each stray
+// connection of the cut shape, the pool subsystem's and the transfer's, by
+// a write of "fatal", and each before the reload that puts the
+// subsystem's ns-dev, or the transfer device, on the raid0, and before the
+// move of its namespace to optimized (CN9, CN33, CN16, CN17): the walk then
+// cuts the agent at the cut's writes and between them and the device steps
+// and the moves.
+func crashCutsFirst(nf *common.NameFmt, lines []string) string {
+	for _, sub := range []struct{ nqn, dev string }{
+		{testNqn, nf.CnNsDevName(testCluster, testCn, testSp, testNs)},
+		{nf.XferNqn(testCluster, testSp, testXfer),
+			nf.CnXferFinalName(testCluster, testCn, testSp, testXfer)},
+	} {
+		end := slices.Index(lines, endWrite(sub.nqn, "ctrl1"))
+		reload := slices.IndexFunc(lines, func(line string) bool {
+			return strings.HasPrefix(line, "cmd dmsetup reload "+sub.dev+" ")
+		})
+		move := slices.Index(lines, "writedirect "+anaPath(sub.nqn, 1)+"=1")
+		if end < 0 || reload < 0 || move < 0 || end > reload || end > move {
+			return fmt.Sprintf("%s: the cut's write at call %d, the reload "+
+				"of %s at call %d, the move to optimized at call %d; want "+
+				"all three, the write first", sub.nqn, end+1, sub.dev,
+				reload+1, move+1)
+		}
+	}
+	return ""
+}
+
+// prepare builds the shape's state before its converge: its setup, then
+// the nvmet connections it plants.
+func (sh crashShape) prepare(t *testing.T, node *fakeNode, srv *CnAgentServer) {
+	t.Helper()
+	sh.setup(t, srv)
+	if sh.connect != nil {
+		sh.connect(srv, node)
+	}
+}
+
 // reference runs the shape with no cut and returns what it leaves, the
 // converge's calls, and the disconnects it sets going, sorted.
 func (sh crashShape) reference(t *testing.T) (crashRef, []string, []string) {
 	t.Helper()
-	node, inc := startFresh(t)
+	node, inc := sh.startFresh(t)
 	defer inc.end()
-	sh.setup(t, inc.srv)
+	sh.prepare(t, node, inc.srv)
 	inc.gate.arm("cut", false, 0, false)
 	sh.conv(crashOwnCtx(context.Background(), "cut"), inc.srv)
 	lines := inc.gate.counted()
@@ -1241,9 +1329,9 @@ func (sh crashShape) cutConverge(
 	cut crashCut,
 ) crashOutcome {
 	t.Helper()
-	node, inc := startFresh(t)
+	node, inc := sh.startFresh(t)
 	defer inc.end()
-	sh.setup(t, inc.srv)
+	sh.prepare(t, node, inc.srv)
 	inc.gate.arm("cut", false, cut.k, cut.after)
 	sh.conv(crashOwnCtx(context.Background(), "cut"), inc.srv)
 	lines := inc.gate.counted()
@@ -1266,9 +1354,9 @@ func (sh crashShape) cutBackground(
 	cut crashCut,
 ) crashOutcome {
 	t.Helper()
-	node, inc := startFresh(t)
+	node, inc := sh.startFresh(t)
 	defer inc.end()
-	sh.setup(t, inc.srv)
+	sh.prepare(t, node, inc.srv)
 	inc.gate.arm("cut", true, cut.k, cut.after)
 	sh.conv(crashOwnCtx(context.Background(), "cut"), inc.srv)
 	inc.gate.release(true, len(bgLines))
@@ -1314,9 +1402,9 @@ func crashSameCalls(lines, refLines []string, k int) string {
 // the node; with settle it also drives the agent to two quiet passes.
 func (sh crashShape) buildShape(t *testing.T, settle bool) *fakeNode {
 	t.Helper()
-	node, inc := startFresh(t)
+	node, inc := sh.startFresh(t)
 	defer inc.end()
-	sh.setup(t, inc.srv)
+	sh.prepare(t, node, inc.srv)
 	sh.conv(traced("conv"), inc.srv)
 	if !crashAwaitDisconnects(inc.srv) {
 		t.Fatal("building: a disconnect never ended")
@@ -1426,9 +1514,9 @@ func TestACrashDuringTheStartupPassAfterACut(t *testing.T) {
 				// node, the ended agent's gate, and why the converge's
 				// calls are not the reference's, "" when they are.
 				cut := func() (*fakeNode, *crashGate, string) {
-					node, inc := startFresh(t)
+					node, inc := sh.startFresh(t)
 					defer inc.end()
-					sh.setup(t, inc.srv)
+					sh.prepare(t, node, inc.srv)
 					inc.gate.arm("cut", false, first.k, first.after)
 					sh.conv(crashOwnCtx(context.Background(), "cut"), inc.srv)
 					lines := inc.gate.counted()

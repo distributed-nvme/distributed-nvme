@@ -12,6 +12,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/distributed-nvme/distributed-nvme/agent"
 	"github.com/distributed-nvme/distributed-nvme/common"
 )
 
@@ -364,10 +365,10 @@ func labTree() *tree {
 	f["/etc/modules-load.d/dnv.conf"] = "# dnv\nnvmet\nnvme-tcp\n" +
 		"dm-mod\nraid1\n"
 	t.cmd("thin_dump --help", thinDumpHelp, "", 0)
-	f[procMountsPath] = "sysfs /sys sysfs rw 0 0\n" +
+	f[agent.ProcMountsPath] = "sysfs /sys sysfs rw 0 0\n" +
 		"debugfs /sys/kernel/debug debugfs rw,relatime 0 0\n"
-	t.dirs[nvmetDebugfsDir] = true
-	f[lockdownPath] = "[none] integrity confidentiality\n"
+	t.dirs[agent.NvmetDebugRoot] = true
+	f[agent.LockdownPath] = "[none] integrity confidentiality\n"
 	t.devNos[labDisk] = labDiskNo
 	disk := "/sys/dev/block/" + labDiskNo
 	f[disk+"/size"] = "4194304\n"

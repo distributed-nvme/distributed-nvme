@@ -2,6 +2,7 @@ package cnagent
 
 import (
 	"context"
+	"errors"
 	"fmt"
 
 	"github.com/distributed-nvme/distributed-nvme/agent"
@@ -119,11 +120,13 @@ const (
 )
 
 // xferStep is what ensureXfer did with one transfer: its device step's
-// outcome, the rows left to the build, and the namespace step's error.
+// outcome, the rows left to the build, the namespace step's error, and its
+// list step, which a subsystem row the build writes reads (CN33).
 type xferStep struct {
 	outcome xferDevOutcome
 	rows    xferRows
 	nsErr   error
+	list    listStep
 }
 
 func (s *CnAgentServer) xferSubsysConf(
@@ -165,17 +168,23 @@ func (s *CnAgentServer) xferNsConf(
 // nothing in this request leaves the xfer's own resources in error and the
 // pass continues (CN29) — with the device still demoted onto an error table
 // of its own live size, so that it lets go of the departed td's raid0 on a
-// pass whose sweep an unanswered listing stopped too (CN17). A device step
-// that fails leaves the export alone, and reads the device's live table
-// afterwards, so the build can tell a transfer that should serve but sits on
-// an error table — a promotion that came before the sides' switch-over
-// ([D16]) fails on the origin's raid0 — from one that may still serve.
+// pass whose sweep an unanswered listing stopped too (CN17); such a
+// transfer has no export step, and is safe (xferPlan.safe). Otherwise the
+// subsystem's list step and its cut come first, before the device step
+// (stepSubsysList, CN33), and a subsystem that is not safe has its
+// namespace moved inaccessible at once (darkenSubsys). A device step that
+// fails leaves the rest of the export alone, and reads the device's live
+// table afterwards, so the build can tell a transfer that should serve but
+// sits on an error table — a promotion that came before the sides'
+// switch-over ([D16]) fails on the origin's raid0 — from one that may still
+// serve.
 func (s *CnAgentServer) ensureXfer(
 	ctx context.Context,
 	st *cntlrState,
 	plan *cntlrPlan,
 	xp *xferPlan,
 	info *pb.CntlrInfo,
+	cutBudget *agent.WaitBudget,
 ) xferStep {
 	dmKey := resKeyOf(resKeyXferDmFmt, xp.xferId)
 	ssKey := resKeyOf(resKeyXferSsFmt, xp.xferId)
@@ -197,13 +206,37 @@ func (s *CnAgentServer) ensureXfer(
 			ssKey, xp.nqn, details)
 		info.XferIdToNamespace[xp.xferId] = st.tracker.Err(
 			nsKey, nsResName(xp.nqn, int(xp.xfer.GetOriNsIdx())), details)
+		xp.safe = true
 		return xferStep{outcome: outcome}
+	}
+
+	conf := s.xferSubsysConf(plan, xp)
+	list := s.stepSubsysList(ctx, cutBudget, conf)
+	xp.safe = list.safe
+	if !list.safe {
+		nsIdx := int(xp.xfer.GetOriNsIdx())
+		xp.undarkened = s.darkenSubsys(ctx, xp.nqn, []int{nsIdx})[nsIdx]
 	}
 
 	var err error
 	if plan.xferServed(xp) {
 		var raid0No string
 		raid0No, err = s.dmDevNo(ctx, nil, xp.ori.td.raid0Name)
+		if err == nil && xp.undarkened {
+			// A namespace that may still be optimized gets no data put under
+			// it: the device gets no linear over the origin unless it already
+			// maps that linear, which ensureDmLinear then leaves as it is,
+			// or resumes where an interrupted reload left it suspended
+			// (CN17, CN33).
+			off, offErr := s.xferOffOrigin(ctx, nil, xp)
+			switch {
+			case offErr != nil:
+				err = offErr
+			case off:
+				err = errors.New(notDarkDetails(xp.nqn,
+					int(xp.xfer.GetOriNsIdx())))
+			}
+		}
 		if err == nil {
 			err = s.ensureDmLinear(ctx, xp.finalName, xp.sectors, raid0No, 0)
 		}
@@ -220,21 +253,23 @@ func (s *CnAgentServer) ensureXfer(
 		if s.xferDevOnError(ctx, nil, xp) {
 			outcome = xferDevFailedParked
 		}
-		return xferStep{outcome: outcome, rows: xferRowsExport}
+		return xferStep{outcome: outcome, rows: xferRowsExport, list: list}
 	}
 
-	if err := s.nvmet.EnsureSubsystem(
-		ctx, s.xferSubsysConf(plan, xp)); err != nil {
+	if list.err != nil {
 		info.XferIdToSubsystem[xp.xferId] = st.tracker.Err(
-			ssKey, xp.nqn, err.Error())
+			ssKey, xp.nqn, list.err.Error())
 		return xferStep{outcome: xferDevPut}
 	}
 	nsErr := s.ensureXferNamespace(ctx, plan, xp)
 	linkErr := s.nvmet.EnsurePortLink(
 		ctx, s.port.PortId, xp.nqn, s.port.QidMax)
-	if linkErr != nil || !xp.deferred {
+	// A deferred transfer's subsystem reads PROVISIONING only where it
+	// would read OK: a cut that did not hold keeps it PENDING or ERROR, as
+	// deferredSet keeps a read's.
+	if linkErr != nil || !xp.deferred || !list.cut.held {
 		info.XferIdToSubsystem[xp.xferId] = s.linkRow(ctx, ssKey, xp.nqn,
-			s.xferSubsysConf(plan, xp), st, linkErr)
+			conf, st, linkErr, list.cut)
 	} else {
 		info.XferIdToSubsystem[xp.xferId] = deferredFromErr(
 			st.tracker, xp.deferred, ssKey, xp.nqn, "", linkErr)
@@ -245,9 +280,10 @@ func (s *CnAgentServer) ensureXfer(
 // reportXferExport writes the export rows ensureXfer left to the build, after
 // its transfer ANA loop (CN28), as reportNamespaces writes the namespaces':
 // the namespace step's error wins, and otherwise the namespace is read and
-// its group compared with xferRowAnaGrpId's for the device's live table; an
-// export a failed device step left alone has its subsystem read too. So the
-// two channels report the same rows for the same node.
+// its group compared with xferRowAnaGrpId's for the device's live table; the
+// subsystem of an export a failed device step left alone after its list
+// step has its row from that step and a read of its port link. So the two
+// channels report the same rows for the same node.
 func (s *CnAgentServer) reportXferExport(
 	ctx context.Context,
 	st *cntlrState,
@@ -261,9 +297,16 @@ func (s *CnAgentServer) reportXferExport(
 	}
 	t := st.tracker
 	if step.rows == xferRowsExport {
-		status, details := s.probeExport(ctx, s.xferSubsysConf(plan, xp))
-		info.XferIdToSubsystem[xp.xferId] = deferredSet(t, xp.deferred,
-			resKeyOf(resKeyXferSsFmt, xp.xferId), xp.nqn, status, details)
+		ssKey := resKeyOf(resKeyXferSsFmt, xp.xferId)
+		if step.list.err != nil {
+			info.XferIdToSubsystem[xp.xferId] = t.Err(
+				ssKey, xp.nqn, step.list.err.Error())
+		} else {
+			status, details := s.probePortLink(ctx, xp.nqn)
+			status, details = exportRow(status, details, step.list.cut)
+			info.XferIdToSubsystem[xp.xferId] = deferredSet(
+				t, xp.deferred, ssKey, xp.nqn, status, details)
+		}
 	}
 	nsKey := resKeyOf(resKeyXferNsFmt, xp.xferId)
 	nsName := nsResName(xp.nqn, int(xp.xfer.GetOriNsIdx()))
@@ -296,17 +339,43 @@ func (s *CnAgentServer) xferDevOnError(
 	return err == nil && len(targets) == 1 && targets[0].Type == "error"
 }
 
+// xferOffOrigin reports whether a served transfer's device is off the
+// linear over its origin's raid0 — not there, or another table — from rd, a
+// read's reading, or live with none; a read that does not answer is its
+// error. A device suspended on that linear is on it (CN33).
+func (s *CnAgentServer) xferOffOrigin(
+	ctx context.Context,
+	rd *cnReading,
+	xp *xferPlan,
+) (bool, error) {
+	raid0No, err := s.dmDevNo(ctx, rd, xp.ori.td.raid0Name)
+	if err != nil {
+		return false, err
+	}
+	shape, err := s.dmShapeOf(ctx, rd, xp.finalName, "linear", xp.sectors,
+		linearArgs(raid0No, 0), 0, false)
+	if err != nil {
+		return false, err
+	}
+	return shape == dmShapeAbsent || shape == dmShapeOther, nil
+}
+
 // xferRowAnaGrpId is the group a transfer namespace row compares the
 // namespace's "ana_grpid" with, on both channels alike (CN28): xferAnaWanted
 // for whether the transfer device's live table is an error table
 // (xferDevOnError) — read from a read's reading, or by a converge
-// after its transfer ANA loop.
+// after its transfer ANA loop — and the inaccessible group while its
+// subsystem is not safe in the pass (xferPlan.safe, CN33), as for a pool
+// namespace (nsRowAnaGrpId).
 func (s *CnAgentServer) xferRowAnaGrpId(
 	ctx context.Context,
 	rd *cnReading,
 	plan *cntlrPlan,
 	xp *xferPlan,
 ) int {
+	if !xp.safe {
+		return common.AnaGrpIdInaccessible
+	}
 	if !plan.xferServed(xp) {
 		// The table cannot change the group xferAnaWanted answers, so it
 		// is not read.
@@ -317,7 +386,13 @@ func (s *CnAgentServer) xferRowAnaGrpId(
 
 // ensureXferNamespace mirrors ensureNamespaceObject: the ANA group is left to
 // the CN9 final pass so the build order stays "objects first, ANA last", and
-// a namespace that is not enabled gets `inaccessible` before its enable.
+// a namespace that is not enabled gets `inaccessible` before its enable, as
+// does one the step disables to enable it again under another device or
+// identity, a new namespace (CN17). No request reaches that
+// last case through the gateway (the origin of a transfer cannot change
+// while the transfer holds it, a transfer's NQN comes from an xfer_id that
+// is never reused, and one cn agent runs per kernel); it guards a planted
+// state.
 func (s *CnAgentServer) ensureXferNamespace(
 	ctx context.Context,
 	plan *cntlrPlan,
@@ -328,8 +403,12 @@ func (s *CnAgentServer) ensureXferNamespace(
 	if err != nil {
 		return err
 	}
-	return s.nvmet.EnsureNamespace(
-		ctx, s.xferNsConf(plan, xp, objectAnaGrpId(state)))
+	conf := s.xferNsConf(plan, xp, objectAnaGrpId(state))
+	if conf.Disables(state) {
+		// A new namespace, as in ensureNamespaceObject.
+		conf.AnaGrpId = common.AnaGrpIdInaccessible
+	}
+	return s.nvmet.EnsureNamespace(ctx, conf)
 }
 
 func (s *CnAgentServer) dropXferKeys(st *cntlrState, xferId uint64) {

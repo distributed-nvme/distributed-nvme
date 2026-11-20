@@ -4642,6 +4642,35 @@ power_reset() {
 	echo "boot=$boot"
 }
 
+# nvmet_cut_facts prints "ok" when this guest's kernel lets a cn agent end
+# the nvmet connection of a host taken off a subsystem's list (cnagent.md
+# CN33), else each fact that fails, joined by "; ": debugfs mounted at
+# /sys/kernel/debug, nvmet's debug directory there, which the kernel option
+# CONFIG_NVME_TARGET_DEBUGFS makes once nvmet is loaded, and no lockdown in
+# force, under which the kernel refuses to open a connection's state file.
+# A missing lockdown file reads as no lockdown, as the agent's start check
+# reads it; the file is a securityfs file, so a lockdown on a node without
+# securityfs mounted shows only as a refused cut. These are the facts the cn
+# agent's start check reads (cnagent.md CN-CM2), read here in shell, as the
+# guests get the agent binary only at setup. Copied from nvmet_cut_facts
+# (integtest/cnagent_test.sh).
+nvmet_cut_facts() {
+	local why="" mode dbg=/sys/kernel/debug/nvmet
+	if [ ! -r /proc/mounts ]; then
+		why="$why; /proc/mounts not read"
+	elif ! awk '$2 == "/sys/kernel/debug" && $3 == "debugfs" { f = 1 }
+		END { exit !f }' /proc/mounts; then
+		why="$why; debugfs is not mounted at /sys/kernel/debug"
+	fi
+	[ -d "$dbg" ] ||
+		why="$why; no $dbg: nvmet is built without CONFIG_NVME_TARGET_DEBUGFS or is not loaded"
+	if [ -e /sys/kernel/security/lockdown ]; then
+		mode=$(sed -n 's/.*\[\([a-z]*\)\].*/\1/p' /sys/kernel/security/lockdown 2>/dev/null)
+		[ "$mode" = none ] || why="$why; lockdown is '${mode:-unread}'"
+	fi
+	if [ -z "$why" ]; then echo ok; else echo "${why#; }"; fi
+}
+
 # md_member_of <dm name> prints the md array node holding the dm device <dm
 # name> as a member and the member's kernel name, "<mdN> <dm-K>", found by
 # the member's directory under each array's md/; md_member_read <dm name>
@@ -7596,6 +7625,22 @@ preflight_node() { # <role: dn|cn> <index>
 	got=$("$sshw" "$v" "ls -d $NVMET 2>/dev/null || echo MISSING") ||
 		die "$label: reading $NVMET failed"
 	assert_eq "$got" "$NVMET" "$label: the nvmet configfs tree"
+
+	# On a controller node, the kernel option the cn agent's cut of a removed
+	# host's nvmet connection needs (cnagent.md CN33), read once nvmet is
+	# loaded: without it the agent refuses to start (cnagent.md CN-CM2), as
+	# cn_up's start line takes no --ignore-host-disconnection. It runs again
+	# after the react case's power reset, with the rest of this check.
+	if [ "$role" = cn ]; then
+		got=$("$helperw" "$v" nvmet_cut_facts) ||
+			die "$label: reading the facts of the cut did not answer"
+		[ "$got" = ok ] ||
+			die "$label: the cn agent cannot cut a removed host's nvmet" \
+				"connection here: $got. The lab tool" \
+				"integtest/nvmet_debugfs.sh builds and installs nvmet" \
+				"modules with CONFIG_NVME_TARGET_DEBUGFS (install) and" \
+				"reads these facts again (check $target)"
+	fi
 
 	# nvme_core.multipath is load-bearing on BOTH roles, and on the dn for a
 	# reason that is easy to miss: a migration DESTINATION is an nvme host —

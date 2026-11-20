@@ -41,6 +41,13 @@ type CnAgentServer struct {
 
 	capacity uint64
 	port     agent.PortConf
+	// strayCut is the cut mode the agent decided at its start (CN33,
+	// CN-CM2): set where the kernel can end an nvmet connection, and then
+	// every converge cuts and every read reads the stray connections of the
+	// subsystems it steps; clear where it cannot and
+	// --ignore-host-disconnection let the agent run, and then nothing reads
+	// the debug directory. It never changes while the agent runs.
+	strayCut bool
 
 	// mu guards the in-memory mirrors of the local store below — the two
 	// maps — and what mirrors nothing: in each cntlr's state the prober and
@@ -252,7 +259,8 @@ type cntlrState struct {
 // agent's nvmet port, portId the --nvmet-port-id it converges
 // (common.NvmetPortId unless the flag says otherwise) and qidMax the
 // --nvmet-qid-max IO queue cap of the subsystems it links (dnagent.md SH32;
-// 0 writes none).
+// 0 writes none), and strayCut the cut mode the start check decided
+// (CN33, CN-CM2).
 func NewCnAgentServer(
 	oc common.OsClient,
 	nf *common.NameFmt,
@@ -261,6 +269,7 @@ func NewCnAgentServer(
 	trConf *pb.NvmeTrConf,
 	portId int,
 	qidMax int,
+	strayCut bool,
 ) *CnAgentServer {
 	return &CnAgentServer{
 		oc: oc,
@@ -277,6 +286,7 @@ func NewCnAgentServer(
 		md:       NewMd(oc),
 		locks:    agent.NewLockSet(),
 		capacity: capacity,
+		strayCut: strayCut,
 		port: agent.PortConf{
 			PortId:  portId,
 			TrType:  trConf.GetTrType(),

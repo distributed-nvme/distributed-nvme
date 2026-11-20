@@ -313,6 +313,37 @@ runs; `cnagent.md` CN-CM2). A read that failed
 leaves its attribute empty and adds `error`, the failed reads' errors
 joined, and the record is then at Warn; the start goes on either way.
 
+A cn agent whose kernel cannot end an nvmet connection and which
+`--ignore-host-disconnection` lets start logs, after that record and
+before it serves, one Warn record `agent host cut disabled` with `causes`,
+the start check's causes joined by "; " (`cnagent.md` CN-CM2); without the
+flag the start ends with the error and no record of its own (`dnagent.md`
+CM3). An agent that can cut logs neither.
+
+### The cut of a removed host
+
+A cn agent's cut of a stray connection (`cnagent.md` CN33) logs, under the
+converge's trace id, with `nqn` (the subsystem), and per connection
+`connection` (its directory name) and `host_nqn`: `stray connection ended`
+at Info for each write of "fatal" the kernel took, which a connection
+that has gone before the write, its file not there or answering EIO, does
+not log; `ending a stray connection failed` at Error, with `error`, for a
+write the kernel refused, which ends the cut not held, the only record of
+the cut that names the refusal, which the row does not (it reads the
+stray still connected, or under a lockdown the lockdown file shows "nvmet connections
+not ended: lockdown <mode>"), while the record of the write itself (`os
+write file direct`) carries the error as well; a read of the debug
+directory that fails, a written connection's "state" or a host read just
+before a write among them, has no record of the cut and is in the
+`OsClient`'s record of that read, the row naming a failed listing or host
+read ("nvmet connections not read"), and one refused an `OsClient` slot
+has no record at all (`osclient.md`, Logging) and shows only in the row's
+text, when that names it; and `stray connection wait spent` at Info, with
+`host_nqn` of the first stray connection still listed and `strays`, their
+count, when the pass's budget ended the wait before the cut held, since the
+next converge cuts again (R6). The names are apart from the cut of a
+migrating leg's path, `leg path cut` (`cnagent.md` CN10).
+
 ### gRPC messages
 
 Every request and reply message of the dnv-internal services (`Gateway`,
@@ -396,7 +427,9 @@ logs for the same thing.
   or a background read found absent or different where a re-sent `Syncup*`
   would cure it, on a cntlr a leg wrapper, a `RedundNone` group's dm-linear
   and a dm-clone a converge would change among them (rendered "absent" or
-  "differs" with the row's words), or the node's nvmet port in a state one
+  "differs" with the row's words), and on a cntlr a subsystem with a stray
+  connection still there (rendered "pending" with the row's words,
+  `cnagent.md` CN33), or the node's nvmet port in a state one
   would rewrite (`dnagent.md` SH31, DN16), or, on a cntlr, a side of a
   wanted leg or an entry of a clone's source with no controller that the
   converge would connect, a migrating leg's path the converge would cut, a

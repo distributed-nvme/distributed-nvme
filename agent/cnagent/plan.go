@@ -546,6 +546,17 @@ type ssPlan struct {
 	ss         *pb.Subsystem
 	ssId       uint64
 	namespaces []*nsPlan
+	// safe says the subsystem is safe in this pass (CN33): the kernel admits
+	// no host off its desired list and, in cut mode, its cut held — by a
+	// converge's list step (stepSubsysList), or as a read finds it
+	// (readExport). While it is not, every namespace of the subsystem is
+	// moved inaccessible before the ns-dev loop and before a transfer's
+	// device step and kept there (darkenSubsys), one whose move fails
+	// keeping what its device maps (undarkened), and its namespace rows
+	// want the inaccessible group (nsRowAnaGrpId).
+	// Nothing sets it but those two, so a pass that decides nothing keeps the
+	// subsystem dark.
+	safe bool
 }
 
 type nsPlan struct {
@@ -573,6 +584,12 @@ type nsPlan struct {
 	// its live status shows hydration on and its metadata read-write
 	// (nsDevNow).
 	clone *clonePlan
+	// undarkened says the namespace's subsystem is not safe in this pass and
+	// its move to the inaccessible group failed (darkenSubsys): its ns-dev
+	// step then makes no change that is not a park onto the td's dm-error,
+	// so no data is put under a namespace that may still be optimized
+	// (convergeNsDev, CN33).
+	undarkened bool
 	// deferred mirrors td.deferred, or, below SP_LEVEL_NO_CLONE (levelClone),
 	// the deferral of a clone whose destination is the td: the fourth
 	// conjunct of the CN16 ANA rule ([D15]). The ns-dev and the nvmet
@@ -628,6 +645,18 @@ type xferPlan struct {
 	// over a device that is not there.
 	deferred bool
 	sectors  uint64
+	// undarkened says the transfer's subsystem is not safe in this pass and
+	// the move of its namespace to the inaccessible group failed
+	// (darkenSubsys): its device step then puts no linear over the origin
+	// in place of what the device maps (ensureXfer, CN33).
+	undarkened bool
+	// safe says the transfer's subsystem is safe in this pass, as
+	// ssPlan.safe does for a pool subsystem (CN17, CN33): set by ensureXfer's
+	// list step, or by a read of the export (readExport). A transfer whose
+	// origin is gone has no export step and counts as safe: once demoted,
+	// its device is an error table, which serves nothing; a failed demotion
+	// leaves the origin's raid0 mapped (CN17, Known limits).
+	safe bool
 }
 
 // ---------------------------------------------------------------------------

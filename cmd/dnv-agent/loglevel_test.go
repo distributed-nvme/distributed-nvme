@@ -30,6 +30,7 @@ func roleFlags(t *testing.T) []string {
 // warn is refused before the start.
 func TestRolesTakeTheLogLevel(t *testing.T) {
 	oldServe := serveAgent
+	kernelCuts(t)
 	t.Cleanup(func() {
 		serveAgent = oldServe
 		viper.Reset()

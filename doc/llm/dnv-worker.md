@@ -2965,7 +2965,19 @@ read `OK`, every promotion's fresh probers would clear a dead leg's
 `PENDING` is the primary's dm-linear while its path waits for the fence
 (`dnagent.md` DN10): the side's code names it, so the round sends the
 `SyncupSide` again (RW4), and the dm-linear that could not be fenced reads
-`ERROR`. A round that
+`ERROR`. On a cntlr, `PENDING` is also a subsystem's row, the pool's or a
+transfer's, while a host the desired state removed is still connected to
+it after the cut's wait (`cnagent.md` CN33): the cntlr's code names it, so
+the round sends the `SyncupCntlr` again (RW4), and the row counts toward
+no failover, while every namespace of that subsystem stays inaccessible on
+that cntlr. A subsystem whose nvmet connections the agent cannot read, or
+that a lockdown the lockdown file shows keeps from being ended, reads
+`ERROR` instead, a name only
+the agent's read gives (`cnagent.md` CN30): the converge's code stays
+zero for it, so the next round's read is not cancelled, and its round
+counts (RW23), as any error row does, so a primary that cannot cut fails
+over (AR5, AR10); a write the kernel refuses with no such lockdown shown
+reads `PENDING`. A round that
 answers from an observation no round asked for sets and clears none of the
 three, whatever its rows (HL7).
 `ReplyCodeLeftover` is not a rejection: its rows are evaluated exactly as a

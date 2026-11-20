@@ -58,7 +58,7 @@ func TestATransferSubsystemGetsItsQueueCap(t *testing.T) {
 	built := NewCnAgentServer(newFakeNode().osClient(),
 		common.NewNameFmt(common.DefaultLocalStorPrefix),
 		common.DefaultLocalStorPrefix, testCapacity, testTrConf(),
-		common.NvmetPortId, 6)
+		common.NvmetPortId, 6, false)
 	if built.port.QidMax != 6 {
 		t.Fatalf("NewCnAgentServer kept the cap %d, want 6",
 			built.port.QidMax)

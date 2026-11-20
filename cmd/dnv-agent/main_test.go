@@ -3,12 +3,14 @@ package main
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"io/fs"
 	"log/slog"
 	"net"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -21,8 +23,10 @@ import (
 	"github.com/spf13/viper"
 	"google.golang.org/grpc"
 
+	"github.com/distributed-nvme/distributed-nvme/agent/cnagent"
 	"github.com/distributed-nvme/distributed-nvme/agent/nodecheck"
 	"github.com/distributed-nvme/distributed-nvme/common"
+	"github.com/distributed-nvme/distributed-nvme/pb"
 )
 
 // An example dn invocation, with the flags of dnagent.md CM2.
@@ -65,9 +69,9 @@ func parse(t *testing.T, use string, args []string) *cobra.Command {
 
 // CM1: the command tree. dn and cn serve the agents; check dn and check cn
 // are the node check with their roles' flags; collect is the gather.
-// --disk belongs to the dn role's two commands alone, --capacity to the cn
-// role's, --md-replay to check cn, and --log-level to the roles and their
-// checks, not to the gather.
+// --disk belongs to the dn role's two commands alone, --capacity and
+// --ignore-host-disconnection to the cn role's, --md-replay to check cn, and
+// --log-level to the roles and their checks, not to the gather.
 func TestSubcommands(t *testing.T) {
 	root := newRootCmd()
 	if root.Use != "dnv-agent" {
@@ -101,13 +105,13 @@ func TestSubcommands(t *testing.T) {
 	}
 	flags := map[string]map[string]bool{
 		"dn": {"disk": true, "capacity": false, "md-replay": false,
-			"log-level": true},
+			"log-level": true, "ignore-host-disconnection": false},
 		"cn": {"disk": false, "capacity": true, "md-replay": false,
-			"log-level": true},
+			"log-level": true, "ignore-host-disconnection": true},
 		"check dn": {"disk": true, "capacity": false, "md-replay": false,
-			"log-level": true},
+			"log-level": true, "ignore-host-disconnection": false},
 		"check cn": {"disk": false, "capacity": true, "md-replay": true,
-			"log-level": true},
+			"log-level": true, "ignore-host-disconnection": true},
 		"collect": {"disk": false, "log-file": true, "journal-unit": true,
 			"log-level": false},
 	}
@@ -743,6 +747,7 @@ func TestWatchSignalsReturnsWhenCtxEnds(t *testing.T) {
 // and the start goes on to serve.
 func TestRolesLogTheirStartRecord(t *testing.T) {
 	oldServe := serveAgent
+	kernelCuts(t)
 	t.Cleanup(func() {
 		serveAgent = oldServe
 		viper.Reset()
@@ -807,5 +812,216 @@ func TestToolSignalsStopWithoutEnding(t *testing.T) {
 		}
 		time.Sleep(100 * time.Millisecond)
 		stop()
+	}
+}
+
+// kernelCuts makes the cn agent's start check read a kernel that can end an
+// nvmet connection, for a test that starts a cn agent for something else:
+// the machine running the test may not.
+func kernelCuts(t *testing.T) {
+	t.Helper()
+	old := hostCutCauses
+	hostCutCauses = func(context.Context, common.OsClient) []string {
+		return nil
+	}
+	t.Cleanup(func() { hostCutCauses = old })
+}
+
+// The cn agent's start check (cnagent.md CN-CM2): where the kernel can end
+// an nvmet connection the agent starts in cut mode, with the flag or
+// without it; where it cannot, the start ends before it serves, with an
+// error that names every cause and the flag, unless the flag is set, from
+// the command line or the environment, and then the agent logs one
+// warning with the causes and starts in no cut mode.
+func TestCnStartCheck(t *testing.T) {
+	oldServe, oldCauses, oldNew := serveAgent, hostCutCauses, newCnServer
+	t.Cleanup(func() {
+		serveAgent, hostCutCauses, newCnServer = oldServe, oldCauses, oldNew
+		viper.Reset()
+		common.SetLogLevel(slog.LevelInfo)
+		os.Unsetenv("DNV_AGENT_IGNORE_HOST_DISCONNECTION")
+	})
+	common.SetLogLevel(slog.LevelInfo)
+	var buf bytes.Buffer
+	oldLog := slog.Default()
+	slog.SetDefault(slog.New(slog.NewJSONHandler(&buf, nil)))
+	t.Cleanup(func() { slog.SetDefault(oldLog) })
+	causes := []string{"debugfs is not mounted at /sys/kernel/debug",
+		"lockdown is integrity"}
+	flags := []string{"cn", "--grpc-address", "127.0.0.1:1", "--tr-type",
+		"tcp", "--adr-fam", "ipv4", "--tr-addr", "127.0.0.1", "--tr-svc-id",
+		"4420", "--local-store", t.TempDir()}
+	for _, tc := range []struct {
+		name     string
+		canCut   bool
+		flag     bool
+		env      bool
+		refused  bool
+		strayCut bool
+	}{
+		{name: "can cut", canCut: true, strayCut: true},
+		{name: "can cut, with the flag", canCut: true, flag: true,
+			strayCut: true},
+		{name: "cannot cut", refused: true},
+		{name: "cannot cut, with the flag", flag: true},
+		{name: "cannot cut, the flag from the environment", env: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			buf.Reset()
+			os.Unsetenv("DNV_AGENT_IGNORE_HOST_DISCONNECTION")
+			if tc.env {
+				os.Setenv("DNV_AGENT_IGNORE_HOST_DISCONNECTION", "true")
+			}
+			hostCutCauses = func(context.Context, common.OsClient) []string {
+				if tc.canCut {
+					return nil
+				}
+				return causes
+			}
+			built, served, mode := false, false, false
+			newCnServer = func(oc common.OsClient, nf *common.NameFmt,
+				localStore string, capacity uint64, trConf *pb.NvmeTrConf,
+				portId, qidMax int, strayCut bool) *cnagent.CnAgentServer {
+				built, mode = true, strayCut
+				return oldNew(oc, nf, localStore, capacity, trConf, portId,
+					qidMax, strayCut)
+			}
+			serveAgent = func(context.Context, string, string,
+				func(context.Context), func(context.Context) error,
+				func(*grpc.Server), func()) error {
+				served = true
+				return nil
+			}
+			args := append([]string{}, flags...)
+			if tc.flag {
+				args = append(args, "--ignore-host-disconnection")
+			}
+			var printed strings.Builder
+			err := executeRoot(args, &printed)
+			records := logRecords(t, buf.String())
+			versions := slices.IndexFunc(records, func(r map[string]any) bool {
+				return r["msg"] == "agent node versions"
+			})
+			var warnings []int
+			for i, r := range records {
+				if r["msg"] == "agent host cut disabled" {
+					warnings = append(warnings, i)
+				}
+			}
+			warned := len(warnings) > 0
+			if versions < 0 {
+				t.Fatalf("no start record before the start check:\n%s",
+					buf.String())
+			}
+			if warned {
+				w := records[warnings[0]]
+				if len(warnings) != 1 || w["level"] != "WARN" ||
+					w["causes"] != strings.Join(causes, "; ") ||
+					warnings[0] < versions {
+					t.Fatalf("the warning records %v (start record at %d): "+
+						"want one, at WARN, with the causes, after the "+
+						"start record:\n%s", warnings, versions, buf.String())
+				}
+			}
+			if tc.refused {
+				if err == nil {
+					t.Fatal("the start went on where the kernel cannot cut")
+				}
+				for _, want := range append(causes,
+					"--ignore-host-disconnection") {
+					if !strings.Contains(err.Error(), want) {
+						t.Errorf("the refusal %q does not name %q", err,
+							want)
+					}
+				}
+				if built || served || warned {
+					t.Errorf("refused, yet built %v, served %v, warned %v",
+						built, served, warned)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("start: %v\n%s", err, printed.String())
+			}
+			if !built || !served || mode != tc.strayCut {
+				t.Errorf("built %v, served %v, cut mode %v; want a server "+
+					"in cut mode %v", built, served, mode, tc.strayCut)
+			}
+			if warned != !tc.canCut {
+				t.Errorf("the warning logged = %v, want %v:\n%s", warned,
+					!tc.canCut, buf.String())
+			}
+		})
+	}
+}
+
+// logRecords decodes a JSON log, one record a line.
+func logRecords(t *testing.T, text string) []map[string]any {
+	t.Helper()
+	var out []map[string]any
+	for _, line := range strings.Split(strings.TrimSpace(text), "\n") {
+		if line == "" {
+			continue
+		}
+		var r map[string]any
+		if err := json.Unmarshal([]byte(line), &r); err != nil {
+			t.Fatalf("log line %q: %v", line, err)
+		}
+		out = append(out, r)
+	}
+	return out
+}
+
+// check cn carries --ignore-host-disconnection to the node check, from the
+// command line or the environment, which judges its host cut row by it: on
+// a node that cannot cut, the row fails without the flag and warns with it.
+func TestCheckCnTakesIgnoreHostDisconnection(t *testing.T) {
+	oldEnv := nodeEnv
+	t.Cleanup(func() {
+		nodeEnv = oldEnv
+		viper.Reset()
+		os.Unsetenv("DNV_AGENT_IGNORE_HOST_DISCONNECTION")
+	})
+	nodeEnv = func() nodecheck.Env {
+		return nodeTestEnv(t, map[string]string{})
+	}
+	const row = "nvmet host cut (debugfs)"
+	for _, tc := range []struct {
+		name  string
+		flag  bool
+		env   bool
+		level nodecheck.Level
+	}{
+		{"without the flag", false, false, nodecheck.LevelFail},
+		{"with the flag", true, false, nodecheck.LevelWarn},
+		{"from the environment", false, true, nodecheck.LevelWarn},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			os.Unsetenv("DNV_AGENT_IGNORE_HOST_DISCONNECTION")
+			if tc.env {
+				os.Setenv("DNV_AGENT_IGNORE_HOST_DISCONNECTION", "true")
+			}
+			args := []string{"check", "cn", "--output", "json"}
+			if tc.flag {
+				args = append(args, "--ignore-host-disconnection")
+			}
+			var printed strings.Builder
+			executeRoot(args, &printed)
+			var rep nodecheck.Report
+			if err := json.Unmarshal([]byte(printed.String()),
+				&rep); err != nil {
+				t.Fatalf("report %q: %v", printed.String(), err)
+			}
+			for _, res := range rep.Results {
+				if res.Name == row {
+					if res.Level != tc.level {
+						t.Fatalf("%s is %s (%s), want %s", row, res.Level,
+							res.Detail, tc.level)
+					}
+					return
+				}
+			}
+			t.Fatalf("no %q row: %v", row, rep.Results)
+		})
 	}
 }

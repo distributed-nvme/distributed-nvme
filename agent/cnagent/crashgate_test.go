@@ -503,14 +503,19 @@ type crashInc struct {
 // startCrashInc starts an agent process the way agent.Serve does, up to its
 // startup pass: Prepare, after which the agent answers "starting"
 // (dnagent.md SH33). The settings are newCnServer's, with the probers and
-// the rounds' reads running as production runs them (probing). Nothing
-// registers a cleanup that holds the server: a walk starts thousands, and
-// each is ended by end.
+// the rounds' reads running as production runs them (probing), and the cut
+// mode its start check would decide (CN33): cut on a node that models
+// nvmet's debug directory, so every agent a walk starts over that node
+// cuts. Nothing registers a cleanup that holds the server: a walk starts
+// thousands, and each is ended by end.
 func startCrashInc(node *fakeNode) *crashInc {
 	gate := newCrashGate(node.osClient(), node.probeIO())
 	nf := common.NewNameFmt(common.DefaultLocalStorPrefix)
+	node.mu.Lock()
+	strayCut := node.nvmetDebug
+	node.mu.Unlock()
 	srv := NewCnAgentServer(gate, nf, common.DefaultLocalStorPrefix,
-		testCapacity, testTrConf(), common.NvmetPortId, 0)
+		testCapacity, testTrConf(), common.NvmetPortId, 0, strayCut)
 	srv.probeIO = gate
 	srv.sleep = func(ctx context.Context, _ time.Duration) error {
 		return ctx.Err()

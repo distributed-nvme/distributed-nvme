@@ -1046,7 +1046,8 @@ AR7), host0 must connect the replacement through the cdc, its kernel log
 since a mark taken before the reset must report no failed IO, and the worker
 must have applied one failover and one replacement. Only then does the guest
 get its per-boot preparation again, the module loads and the configfs mount
-of Preflight, and its cn agent, started from its store, must converge to a
+of Preflight with that guest's checks of Preflight, the kernel option's
+among them, and its cn agent, started from its store, must converge to a
 node with no cntlr of the pool and no dnv object (`cnagent.md` CN7): an
 agent back before the replacement would answer its rounds and keep the cntlr
 it rebuilds.
@@ -1223,7 +1224,14 @@ and a stock md assembly rule the md mask can switch off (`architecture.md`,
 Components: invocation reference), hole punching, memory and free space, none
 of this run's ports listening, and no conflicting nvmet port, as a configfs
 port does not listen until a subsystem is linked and an agent would adopt and
-rewrite an existing port of its id (`dnagent.md` SH19); that a host is a clean
+rewrite an existing port of its id (`dnagent.md` SH19), and on a controller
+node, once nvmet is loaded, the facts the cn agent's start check reads
+(`cnagent.md` CN-CM2): debugfs mounted at /sys/kernel/debug, nvmet's debug
+directory there, which the kernel option `CONFIG_NVME_TARGET_DEBUGFS` makes,
+and no lockdown in force, as no start line of the suite takes
+`--ignore-host-disconnection`, a failure naming `integtest/nvmet_debugfs.sh`,
+the lab tool that builds and installs nvmet modules with the option
+(`layout.md`, Directory tree); that a host is a clean
 initiator — sudo, nvme-tcp and multipath, its identity files, generated if
 absent and never overwritten, nvme-stas inactive and the masked autoconnector
 (E2E10); that host0, when the copy case is in the run, has the tools of its

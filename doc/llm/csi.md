@@ -185,12 +185,15 @@ the caller to retry; any other refusal is passed on. So two attaches of one
 volume to two nodes never both succeed, and a detach that runs late finds its
 node gone and leaves the next attach to another node alone; a late detach
 cannot tell an attach of its own node apart from the one it was asked to undo.
-Neither call cuts a live path: a host already connected keeps its controller
-and its IO (`architecture.md`, Primary cntlr) until it disconnects or its own
-node plugin drops the path, which it does once the cdcs list no cntlr of the
-subsystem to it (CSI15), and a detach Kubernetes forces while that plugin does
-not run, or cannot read a cdc it follows, lets the old host write on beside the
-host the volume moves to (`architecture.md`, Known limits).
+Neither call waits for the cut: a host taken off the list loses its nvmet
+connections at the cn agents' next converge, where the controller node's
+kernel can end them (`cnagent.md` CN33), and keeps its controller and its IO
+until then. Where the kernel cannot end them, it keeps both until it
+disconnects or its own node plugin drops the path, which it does once the cdcs
+list no cntlr of the subsystem to it (CSI15), and a detach Kubernetes forces
+while that plugin does not run, or cannot read a cdc it follows, lets the old
+host write on beside the host the volume moves to (`architecture.md`, Known
+limits).
 
 ## Capacity
 

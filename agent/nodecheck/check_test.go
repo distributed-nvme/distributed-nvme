@@ -8,6 +8,8 @@ import (
 	"strings"
 	"syscall"
 	"testing"
+
+	"github.com/distributed-nvme/distributed-nvme/agent"
 )
 
 func runCheck(t *testing.T, tr *tree, role string) *Report {
@@ -580,17 +582,22 @@ func TestEachRowAtEachLevel(t *testing.T) {
 			t.errs[ioTimeoutPath] = syscall.EIO
 		}, "nvme_core.io_timeout", LevelWarn},
 
-		// Wave 8's kernel option and lockdown, on a controller node.
-		{"no debugfs", []string{RoleCn}, setFile(procMountsPath,
+		// The cut of a removed host's nvmet connection, on a controller
+		// node: the check is given no --ignore-host-disconnection, so a
+		// kernel that cannot cut fails (TestHostCutRowWarnsWithTheFlag).
+		{"no debugfs", []string{RoleCn}, setFile(agent.ProcMountsPath,
 			"sysfs /sys sysfs rw 0 0\n"), "nvmet host cut (debugfs)",
-			LevelWarn},
+			LevelFail},
 		{"no nvmet debugfs", []string{RoleCn}, func(t *tree) {
-			delete(t.dirs, nvmetDebugfsDir)
-		}, "nvmet host cut (debugfs)", LevelWarn},
-		{"lockdown", []string{RoleCn}, setFile(lockdownPath,
+			delete(t.dirs, agent.NvmetDebugRoot)
+		}, "nvmet host cut (debugfs)", LevelFail},
+		{"nvmet not loaded", []string{RoleCn}, func(t *tree) {
+			delete(t.dirs, nvmetConfigDir+"/subsystems")
+		}, "nvmet host cut (debugfs)", LevelFail},
+		{"lockdown", []string{RoleCn}, setFile(agent.LockdownPath,
 			"none [integrity] confidentiality\n"),
-			"nvmet host cut (debugfs)", LevelWarn},
-		{"no lockdown file", []string{RoleCn}, dropFile(lockdownPath),
+			"nvmet host cut (debugfs)", LevelFail},
+		{"no lockdown file", []string{RoleCn}, dropFile(agent.LockdownPath),
 			"nvmet host cut (debugfs)", LevelOk},
 
 		// The disk.
@@ -969,6 +976,76 @@ func TestReplayOnlyWhenAskedAndMasked(t *testing.T) {
 		if strings.HasPrefix(line, "mktemp") || strings.HasPrefix(line,
 			"dmsetup ls") {
 			t.Errorf("a refused replay ran %q", line)
+		}
+	}
+}
+
+// TestHostCutRowWarnsWithTheFlag: the host cut row reads the facts the cn
+// agent's start check reads (agent.HostCutCauses) and judges them as the
+// agent would: ok where the kernel can cut, with or without the flag; a
+// failure where it cannot, since the agent then refuses to start; and,
+// given --ignore-host-disconnection, a warning, under which the agent runs
+// without the cut. Each names the cause.
+func TestHostCutRowWarnsWithTheFlag(t *testing.T) {
+	const row = "nvmet host cut (debugfs)"
+	noDir := func(t *tree) { delete(t.dirs, agent.NvmetDebugRoot) }
+	for _, tc := range []struct {
+		name   string
+		change func(*tree)
+		ignore bool
+		level  Level
+	}{
+		{"can cut", func(*tree) {}, false, LevelOk},
+		{"can cut, with the flag", func(*tree) {}, true, LevelOk},
+		{"cannot cut", noDir, false, LevelFail},
+		{"cannot cut, with the flag", noDir, true, LevelWarn},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			tr := labTree()
+			tc.change(tr)
+			rep, err := Check(context.Background(), tr.env(), CheckOptions{
+				Role: RoleCn, LocalStore: "/var/lib/dnv",
+				IgnoreHostDisconnection: tc.ignore})
+			if err != nil {
+				t.Fatalf("Check: %v", err)
+			}
+			res, ok := resultNamed(t, rep, row)
+			if !ok {
+				t.Fatalf("no %q row", row)
+			}
+			if res.Level != tc.level {
+				t.Fatalf("%s is %s (%s), want %s", row, res.Level,
+					res.Detail, tc.level)
+			}
+			if tc.level != LevelOk && (!strings.Contains(res.Detail,
+				agent.NvmetDebugRoot) || !strings.Contains(res.Fix,
+				"--ignore-host-disconnection")) {
+				t.Errorf("%s: detail %q, fix %q; want the cause and the "+
+					"flag", row, res.Detail, res.Fix)
+			}
+		})
+	}
+}
+
+// TestHostCutRowSaysAMissingLockdownFile: a missing lockdown file reads as
+// no lockdown, and the row passes, but it says that no file was read rather
+// than that lockdown is off.
+func TestHostCutRowSaysAMissingLockdownFile(t *testing.T) {
+	const row = "nvmet host cut (debugfs)"
+	for _, missing := range []bool{false, true} {
+		tr := labTree()
+		if missing {
+			delete(tr.files, agent.LockdownPath)
+		}
+		res, ok := resultNamed(t, runCheck(t, tr, RoleCn), row)
+		if !ok || res.Level != LevelOk {
+			t.Fatalf("missing %v: %s is %v (%s), want ok", missing, row,
+				res.Level, res.Detail)
+		}
+		off := strings.Contains(res.Detail, "lockdown is off")
+		if off == missing || missing != strings.Contains(res.Detail,
+			"no lockdown file") {
+			t.Errorf("missing %v: detail %q", missing, res.Detail)
 		}
 	}
 }

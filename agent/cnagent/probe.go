@@ -427,14 +427,31 @@ func (s *CnAgentServer) probeCntlr(
 				dmKey, xp.finalName, details)
 			info.XferIdToSubsystem[xp.xferId] = t.Err(ssKey, xp.nqn, details)
 			info.XferIdToNamespace[xp.xferId] = t.Err(nsKey, nsName, details)
+			xp.safe = true
 			continue
 		}
+		// The subsystem first: whether it is safe decides the device's row
+		// of a namespace its move could not make inaccessible (CN33).
+		ssStatus, ssDetails, safe := s.readExport(
+			ctx, s.xferSubsysConf(plan, xp))
+		xp.safe = safe
 		status, details := s.probeXferDm(ctx, plan, xp)
+		nsIdx := int(xp.xfer.GetOriNsIdx())
+		if status != pb.ResStatus_RES_STATUS_OK && plan.xferServed(xp) &&
+			!xp.safe {
+			// As the converge's device step decides it (ensureXfer): off
+			// the linear over the origin, not suspended on it, and its
+			// namespace not inaccessible.
+			off, err := s.xferOffOrigin(ctx, plan.rd, xp)
+			if err == nil && off && s.isDark(ctx, xp.nqn, nsIdx) != nil {
+				status, details = pb.ResStatus_RES_STATUS_ERROR,
+					notDarkDetails(xp.nqn, nsIdx)
+			}
+		}
 		info.XferIdToDmLinear[xp.xferId] = deferredSet(
 			t, xp.deferred, dmKey, xp.finalName, status, details)
-		status, details = s.probeExport(ctx, s.xferSubsysConf(plan, xp))
 		info.XferIdToSubsystem[xp.xferId] = deferredSet(
-			t, xp.deferred, ssKey, xp.nqn, status, details)
+			t, xp.deferred, ssKey, xp.nqn, ssStatus, ssDetails)
 		// The group CN17 wants for this reading's table of the transfer
 		// device, as the converge compares it (xferRowAnaGrpId).
 		status, details, reason := s.probeNamespaceObject(ctx, s.xferNsConf(
@@ -443,6 +460,19 @@ func (s *CnAgentServer) probeCntlr(
 			t, xp.deferred, nsKey, nsName, status, details, reason)
 	}
 
+	// Whether each subsystem is safe, read first (readExport, CN33): it
+	// decides the rows of its ns-devs and namespaces.
+	type ssRow struct {
+		status  pb.ResStatus
+		details string
+	}
+	ssRows := make(map[uint64]ssRow, len(plan.subsystems))
+	for _, ssp := range plan.subsystems {
+		var row ssRow
+		row.status, row.details, ssp.safe = s.readExport(
+			ctx, s.subsysConf(plan, ssp))
+		ssRows[ssp.ssId] = row
+	}
 	// Namespace devices, then the host-facing nvmet objects.
 	for _, np := range plan.namespaces {
 		status, details := s.probeNsDev(ctx, plan.rd, np)
@@ -451,9 +481,12 @@ func (s *CnAgentServer) probeCntlr(
 			nsDevReason(status, details))
 	}
 	for _, ssp := range plan.subsystems {
-		status, details := s.probeExport(ctx, s.subsysConf(plan, ssp))
+		// The subsystem's row, read above with whether it is safe; its
+		// namespaces' rows want the inaccessible group while it is not.
+		row := ssRows[ssp.ssId]
 		info.SsIdToSubsystem[ssp.ssId] = t.Set(
-			resKeyOf(resKeySubsysFmt, ssp.ssId), ssp.nqn, status, details)
+			resKeyOf(resKeySubsysFmt, ssp.ssId), ssp.nqn, row.status,
+			row.details)
 		for _, np := range ssp.namespaces {
 			// np.anaGrpId already carries [D15]'s fourth conjunct, so a deferred
 			// namespace matches at ana_grpid = 3 and is healthy — it is only

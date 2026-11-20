@@ -95,11 +95,15 @@ func newCnServer(node *fakeNode) *CnAgentServer {
 
 // newCnServerOnPort is newCnServer with an explicit --nvmet-port-id. Every
 // test but TestSyncupCnOnNonDefaultPort takes the default, which is what
-// keeps the recorded call paths at ports/1.
+// keeps the recorded call paths at ports/1. The server runs in no cut mode
+// (CN33), on a node that models no debug directory, whose rows and gate are
+// the ones every test of another rule pins; the cut's tests turn both on
+// (newCutServer).
 func newCnServerOnPort(node *fakeNode, portId int) *CnAgentServer {
 	nf := common.NewNameFmt(common.DefaultLocalStorPrefix)
 	srv := NewCnAgentServer(node.osClient(), nf,
-		common.DefaultLocalStorPrefix, testCapacity, testTrConf(), portId, 0)
+		common.DefaultLocalStorPrefix, testCapacity, testTrConf(), portId, 0,
+		false)
 	srv.probeIO = node.probeIO()
 	// The CN10 pass budget's pauses do not really sleep here: a fixture whose
 	// connect fails for good would otherwise spend the whole
@@ -1349,28 +1353,61 @@ func TestIdempotentReapply(t *testing.T) {
 // The primary converge order (CN9)
 // ---------------------------------------------------------------------------
 
+// TestPrimaryConvergeOrder pins CN9's build order on a primary's first
+// converge, in no cut mode and in cut mode: the subsystem's list step, and
+// in cut mode its cut, which lists the subsystem's debug directory, come
+// before the ns-dev, and the namespace object and the port link after it
+// (CN33); the move to optimized is the last mutating step either way.
 func TestPrimaryConvergeOrder(t *testing.T) {
+	for _, cut := range []bool{false, true} {
+		name := "no cut mode"
+		if cut {
+			name = "cut mode"
+		}
+		t.Run(name, func(t *testing.T) {
+			testPrimaryConvergeOrder(t, cut)
+		})
+	}
+}
+
+func testPrimaryConvergeOrder(t *testing.T, cut bool) {
 	srv, node := newTestServer(t)
+	if cut {
+		node.withNvmetDebug()
+		srv.strayCut = true
+	}
 	reply := syncupBoth(t, srv, reqOpts{revision: 2, primary: true})
 
-	assertOrder(t, node,
+	order := []string{
 		"cmd nvme connect",
-		"cmd dmsetup create "+legName(srv, testMetaLeg),
-		"cmd dmsetup create "+legName(srv, testDataLeg),
-		"cmd dmsetup create "+grpName(srv, testMetaGrp),
-		"cmd dmsetup create "+grpName(srv, testDataGrp),
-		"cmd dmsetup create "+srv.nf.CnPoolMetaName(
+		"cmd dmsetup create " + legName(srv, testMetaLeg),
+		"cmd dmsetup create " + legName(srv, testDataLeg),
+		"cmd dmsetup create " + grpName(srv, testMetaGrp),
+		"cmd dmsetup create " + grpName(srv, testDataGrp),
+		"cmd dmsetup create " + srv.nf.CnPoolMetaName(
 			testCluster, testCn, testSp, testSlice),
-		"cmd dmsetup create "+srv.nf.CnPoolDataName(
+		"cmd dmsetup create " + srv.nf.CnPoolDataName(
 			testCluster, testCn, testSp, testSlice),
-		"cmd dmsetup create "+poolName(srv),
-		"cmd dmsetup message "+poolName(srv)+" 0 create_thin 1",
-		"cmd dmsetup create "+thinName(srv, testTd),
-		"cmd dmsetup create "+raid0Name(srv, testTd),
-		"cmd dmsetup create "+nsDevName(srv, testNs),
-		"cmd mkdir -p "+agent.NvmetRoot+"/subsystems/"+testNqn,
-		"writedirect "+anaPath(testNqn, 1)+"=1",
-	)
+		"cmd dmsetup create " + poolName(srv),
+		"cmd dmsetup message " + poolName(srv) + " 0 create_thin 1",
+		"cmd dmsetup create " + thinName(srv, testTd),
+		"cmd dmsetup create " + raid0Name(srv, testTd),
+		"cmd mkdir -p " + agent.NvmetRoot + "/subsystems/" + testNqn,
+	}
+	if cut {
+		// The cut comes right after the subsystem's list step, before the
+		// ns-dev (CN9, CN33).
+		order = append(order, "list "+agent.NvmetDebugRoot+"/"+testNqn)
+	}
+	order = append(order, "cmd dmsetup create "+nsDevName(srv, testNs),
+		"cmd mkdir -p "+agent.NvmetRoot+"/subsystems/"+testNqn+
+			"/namespaces/1",
+		"cmd ln -s "+agent.NvmetRoot+"/subsystems/"+testNqn+" ",
+		"writedirect "+anaPath(testNqn, 1)+"=1")
+	assertOrder(t, node, order...)
+	if !cut {
+		assertNoCall(t, node, agent.NvmetDebugRoot)
+	}
 	// The ANA promotion is the last mutating step of the pass.
 	last := node.indexOfCall("writedirect " + anaPath(testNqn, 1) + "=1")
 	for i, call := range node.Calls() {

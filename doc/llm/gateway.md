@@ -1323,7 +1323,10 @@ are those of `architecture.md`, Subsystems, namespaces.
   `Subsystem` and its `CdcEntry`, and set that entry's transport list by
   the listing rule as every writer does (`architecture.md` [D18]); a
   `CdcEntry` whose key is missing is rebuilt as `CreateSubsystem` writes it
-  (`rebuildCdcEntry`) and written with the new hosts. Reply `ss_id`.
+  (`rebuildCdcEntry`) and written with the new hosts. Reply `ss_id`, at once:
+  the cut of a host the call takes off the list, where a controller node's
+  kernel can end its connection, follows at the agents' next converge
+  (`cnagent.md` CN33).
 * **CreateNamespace** — `ns_idx` neither zero nor `NvmeNsidAll`, judged
   with the rest of the validation before any read (GW4), so that a full
   subsystem never answers it with its ceiling; STM: the subsystem by NQN;

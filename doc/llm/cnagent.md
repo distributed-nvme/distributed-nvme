@@ -177,18 +177,28 @@ wrappers.
 
 ## `cmd/dnv-agent cn`
 
-CN-CM1. The `dnagent.md` CM2 flags gain one cn-only flag, `--capacity`: the capacity
-budget in bytes this CN is willing to host; `GetCnSize` replies it
+CN-CM1. The `dnagent.md` CM2 flags gain two cn-only flags. `--capacity`: the
+capacity budget in bytes this CN is willing to host; `GetCnSize` replies it
 verbatim, and zero means "use the control-plane default" (`DefaultCnCap`,
-the largest budget).
-It is the only cn-only flag. `--nvmet-port-id` and `--nvmet-qid-max` are
+the largest budget). `--ignore-host-disconnection`, a bool, false by
+default: it lets the agent start on a kernel that cannot end an nvmet
+connection (CN-CM2), and the agent then runs in no cut mode, under which a
+host taken off a subsystem's list keeps its connection (CN33); where the
+kernel can, the agent cuts with the flag or without it, so the flag never
+turns the cut off. Reason: not cutting where the kernel can has no use,
+and an agent that later gets a kernel that can starts to cut with no
+change of its settings. `dnv-agent check cn` takes both, as it takes every
+flag of `cn`, and judges its host cut row by the second (`dnagent.md`
+CM5). A word viper's bool parse does not take reads false, the safe side:
+the agent then refuses on a kernel that cannot cut, naming the flag. The
+dn takes neither. `--nvmet-port-id` and `--nvmet-qid-max` are
 both-roles flags and live in `dnagent.md` CM2 itself: the cn resolves and
 checks both exactly as the dn does (`dnagent.md` CM3; the queue cap's rule
 is `dnagent.md` SH32), and a cn that keeps the default port id co-owns the
 default port with a dn agent on the same node (`architecture.md`,
 Controller node, common).
 
-Run at most one cn agent per kernel: the flag is not a licence for two,
+Run at most one cn agent per kernel: `--nvmet-port-id` is not a licence for two,
 and the rule — the cn names that carry no cn id, and why placement
 does not reliably keep two cntlrs of one SP off one kernel — is
 `architecture.md`, Controller node, common. CN21's attribution assumes
@@ -198,15 +208,38 @@ when it carries dnv's model and has a host or a port link, or when it has
 neither and is older than the grace, and another cn agent's subsystem
 passes through those shapes while it is being built.
 
-CN-CM2. `runCn` has the shape of `runDn` (`dnagent.md` CM4), with three cn
+CN-CM2. `runCn` has the shape of `runDn` (`dnagent.md` CM4), with four cn
 differences. Its start record (`agent.LogStartVersions`) carries, beside
 the build version and the kernel release, the version line of the mdadm
 the agent runs, the mdadm its model of mdadm's start rests on
 (`mdadmStarts`; Known limits); a read
 that fails is logged and the start goes on, since no version the agent
-reads stops its start (its flags' checks do, `dnagent.md` CM3):
-`dnv-agent check cn` reports a version other than the tested one, and its
-md replay checks the model against the node's mdadm (`dnagent.md` CM5).
+reads stops its start (its flags' checks and the start check below do,
+`dnagent.md` CM3): `dnv-agent check cn` reports a version other than the
+tested one, and its md replay checks the model against the node's mdadm
+(`dnagent.md` CM5). After the start record and before the server is built
+and its listener opened, the start check reads whether the kernel can end
+an nvmet connection (`agent.HostCutCauses`, the one read the node check's
+host cut row makes too, `dnagent.md` CM5): nvmet loaded, debugfs mounted at
+/sys/kernel/debug, nvmet's debug directory there, which needs
+`CONFIG_NVME_TARGET_DEBUGFS` and a kernel of 6.11 or newer, and no lockdown
+in force, a missing lockdown file read as no lockdown; a read that does not
+answer counts as a cause. The lockdown file is a securityfs file, so on a
+node where securityfs is not mounted at /sys/kernel/security a lockdown in
+force shows only at the cut, as a refused write, its subsystem's row
+pending since no lockdown file shows it (CN33). Where the kernel can, the agent runs in cut mode
+(CN33). Where it cannot, the start ends with an error that names every
+cause and `--ignore-host-disconnection`, printed as a flag's refusal is
+(`dnagent.md` CM3), unless that flag is set: the agent then writes one
+warning, `agent host cut disabled`, with the causes (`log.md`, Agent
+start), and runs in no cut mode, with no row of its own for it. So, unless
+`--ignore-host-disconnection` is set, debugfs must be mounted at
+/sys/kernel/debug before a cn agent starts, and nvmet must be loaded by
+then, as every agent needs it (`dnagent.md` CM5); the agent loads and
+mounts nothing. Reason for the place: no listener is open yet,
+so a refused agent never answers a check round, and the startup
+reconcile keeps its rule that only an unreadable store is fatal
+(`dnagent.md` SH3).
 `--capacity` is optional, since zero is a value (CN3), and a value from the
 flag, the environment or a config file's string that is not a plain
 unsigned decimal number, with no leading zero, is refused at start; a
@@ -231,7 +264,9 @@ take a dm device's facts and a device's number from; `syncup_cn.go` and
 walk a cntlr's converge or read takes and the lookups in it (the walk's code
 is the one both agents share, `dnagent.md` SH20), and the wrappers;
 `healthcheck.go` the CN11 probers and their `LegProbeIO` (direct syscalls,
-never the `OsClient`); `md.go` the mdadm wrapper, the sysfs reads of the
+never the `OsClient`); `nvmetconn.go` CN33's cut of a removed host's
+nvmet connection, its read, the list step and whether a subsystem is
+safe, and the move of an unsafe subsystem's namespaces; `md.go` the mdadm wrapper, the sysfs reads of the
 arrays, the assembly cases, the member reconciliation with a group's repair
 (CN12) and what the primary reports beside a group's row (CN28);
 `mdcheck.go` CN12's md check; `mdreading.go` the agent's own read of a
@@ -263,8 +298,9 @@ process's single `OsClient`, the `NameFmt`, the shared `Cmd`, `Store`,
 `Dm`, `Nvmet` and `NvmeHost` wrappers, the cn-only `Md` wrapper, the
 `LegProbeIO` of the CN11 probers, the `LockSet` (object key: the
 `LocalCntlrPath` id tuple), the `--capacity` value, the port conf
-(`PortConf`: the transport flags, `--nvmet-port-id` and `--nvmet-qid-max`)
-and the startup state of `dnagent.md` SH33. A leaf mutex guards the
+(`PortConf`: the transport flags, `--nvmet-port-id` and `--nvmet-qid-max`),
+the cut mode the start check decided (`strayCut`, CN-CM2, CN33), which never
+changes while the agent runs, and the startup state of `dnagent.md` SH33. A leaf mutex guards the
 in-memory mirrors of the local store — two maps: cn requests, and cntlr
 states (last accepted request, `ResInfo` tracker, a per-clone
 `CloneChunkSet` keyed by the `(src_slice_idx, bm_idx)` pair) — and what
@@ -761,10 +797,15 @@ One converge pass has two phases, and the phase order is what implements
   the stop rule are CN21's; the pre-steps below are this pass's.
 * **Build phase, bottom-up** — legs (CN10) → groups (CN12) → per-slice
   pools (CN13) → thin volumes (CN14) → raid0 and error (CN15) → clones
-  (CN18) → transfers (CN17) → ns-devs plus host-facing nvmet (CN16) → ANA
-  rewrites to optimized last, each namespace and each transfer only in a
-  pass that leaves its device serving, or on the error device the desired
-  state selects (CN16, CN17).
+  (CN18) → each pool subsystem's list step and, in cut mode, its cut
+  (CN33), every namespace of a subsystem that is not safe moved to
+  inaccessible right after it → transfers (CN17), each transfer's list
+  step and cut, with that move, before its device step → ns-devs (CN16) →
+  the host-facing namespace objects and port links (CN16) → ANA rewrites
+  to optimized last, each namespace and each transfer only in a pass that
+  leaves its device serving, or on the error device the desired state
+  selects, and none of a subsystem that is not safe in the pass, whose
+  namespaces stay inaccessible to the pass's end (CN16, CN17, CN33).
   This is the new primary's part of `architecture.md`, Failover.
 
 **The wanted set** is the object-level wanted set of `architecture.md`,
@@ -3547,7 +3588,10 @@ neither; the transfer subsystem's range, CN17, moves the same way),
 "attr_serial" and "attr_model" verbatim from the record (the gateway stamped
 them, `architecture.md`, [D2]), the "attr_allow_any_host" write and the host
 links per `allowed_hosts` as `architecture.md`, Primary cntlr, states (an
-empty list admits no host); per `Namespace` an nvmet namespace whose nsid is
+empty list admits no host), and, in cut mode, the cut of each nvmet
+connection whose host is off that list, which runs with the list step
+before the ns-devs (CN9, CN33); per
+`Namespace` an nvmet namespace whose nsid is
 `ns_idx`, whose "device_path" is its own ns-dev, with "uuid" and "nguid"
 from the record. An enabled namespace whose live device or identity differs
 from the record's is disabled first, unless its live device is a dm device
@@ -3557,7 +3601,11 @@ completes. That is the namespace whose id a request gives to another
 namespace, while it still sits over the old namespace's ns-dev, which CN21's
 park step parks as unwanted and could not prove out of suspension; the step
 fails, its row names it, and the converge the worker's re-send brings parks
-the ns-dev first. A namespace that has left `ns_list` under a subsystem that
+the ns-dev first. The step enables such a namespace again, under its new
+device and identity, in the inaccessible group: it is a new namespace,
+which starts where a host queues, as a fresh one does, and the build's
+last loop moves it to optimized in the same pass where its subsystem is
+safe (CN33). A namespace that has left `ns_list` under a subsystem that
 stays is not the build's to remove: CN21's L1 alone removes it (and so
 nothing does under a subsystem whose NQN decodes as a dnv kind other than a
 transfer of this cluster, such as one shaped like a side export's NQN, which
@@ -3586,7 +3634,28 @@ the last leg's provisioning. A deferred namespace's own rows
 on the permanent dm-error, but reporting them `OK` would show a fully
 healthy `CntlrInfo` while no host can do IO.
 
-**A namespace turns optimized only over what the rules select.** The
+**A namespace turns optimized only over what the rules select, and never
+while its subsystem is not safe.** A subsystem is not safe in a pass while
+its list step failed and a strict read does not show the kernel admitting
+only desired hosts, or, in cut mode, while its cut has not held (CN33):
+every namespace of it moves to inaccessible right after the subsystem's
+list step and cut, before the ns-dev loop and before a transfer's device
+step (CN9), and the build's last loop leaves it there to the pass's end;
+its row wants the inaccessible group on both channels (CN28), and the
+subsystem's row names the cause, so the worker's re-send steps it again.
+A namespace whose move fails gets no data put under it: its ns-dev step
+makes or changes the ns-dev only to park it on the td's `CnErrorName` or
+to put the read-only level's error-writes table over the device it maps,
+and otherwise keeps what it maps. Its row reads `ERROR` "namespace
+<nqn>/<idx> not moved to inaccessible", named, only where the step would
+make any change but the park or the read-only wrap; a device already on
+what the rules select, or one the step parks or wraps read-only, reads by
+its own rules, and the subsystem's row brings the re-send (CN28, CN33). Reason: it holds by
+the order of the pass and by a failed move keeping its device off new
+data, not by tracking what a namespace served through each device change
+of it: while a removed host may still be connected, no namespace of the
+subsystem is served anything new on this cntlr, whatever the pass changes
+under it; the cost is in Known limits. Where the subsystem is safe, the
 build's last loop moves a namespace whose desired group is optimized there
 only in a converge whose ns-dev step put the ns-dev on the backing the
 rules select, or found it there — its **serving device** under rules 5 to
@@ -3639,8 +3708,11 @@ read's guess of mdadm refuses (CN12), a dm-clone whose metadata is
 read-only or failed, or a source fault no read names (rule 5, CN18), is
 named by nothing and costs nothing until a converge something else
 brings (CN30; Known limits). A failed step of a subsystem's export — its
-`EnsureSubsystem`, a namespace object's step or its port link — is a row
-both channels name. A move of the last loop that fails leaves the
+`EnsureSubsystem`, a namespace object's step or its port link — and a cut
+whose stray is still connected, pending (CN33), are a row both channels
+name; a cut whose nvmet connections cannot be read, or that a lockdown the
+lockdown file shows keeps from being ended, is a name only a read gives
+(CN30, CN33). A move of the last loop that fails leaves the
 namespace out of the group this rule gives it, even over an ns-dev on its
 serving device; its row reads the group it has against the one its
 ns-dev's table earns, which both channels name (CN28). Reasons: an IO
@@ -3668,7 +3740,8 @@ the node port: "attr_serial" from the transfer id and "attr_model"
 `NvmeModel` (the rule of `architecture.md`, [D2], applied to the
 transfer — every cntlr exports the same identity so the destination clone
 sees one multipath device), "attr_cntlid_min" and "attr_cntlid_max" from
-`Cntlr.cntlid_slot`, `allowed_hosts` from the record; one namespace whose
+`Cntlr.cntlid_slot`, `allowed_hosts` from the record and the cut of each
+nvmet connection whose host is off it (CN33); one namespace whose
 nsid is `ori_ns_idx`, with the origin namespace's "uuid" and "nguid" and
 the transfer device as its "device_path"; ANA optimized on the primary,
 inaccessible on standbys (below). The origin namespace's own retirement is
@@ -3705,7 +3778,12 @@ does at `SP_LEVEL_NO_THINPOOL`: the transfer's desired group follows the
 role, the level and deferral only, so the destination is handed IO errors
 from the error table, not a queue: an origin gone from the request is
 lost for good, a level is the operator's choice, and a wait for either
-would never end. The live table is deliberately not the
+would never end. A transfer whose origin is gone gets no export step, so
+no list step and no cut (CN33), and it counts as safe: once demoted, its
+device is an error table, which serves no data, so a host the same
+request takes off the transfer keeps its connection and reads only IO
+errors; a demotion that fails leaves the departed td's raid0 mapped
+(Known limits). The live table is deliberately not the
 plan applied last time: it is the same answer, from the kernel, with
 nothing remembered. A transfer whose origin td is provisioning-deferred
 (CN9) is deferred with it: its three rows report
@@ -3720,8 +3798,13 @@ The gateway refuses such a pair in either order (`architecture.md`,
 Transfers, Clones); a record written before those refusals can still hold
 one.
 
-**A transfer turns optimized only over what the desired state wants**, by
-CN16's rule and for its reasons. The build's transfer loop moves a
+**A transfer turns optimized only over what the desired state wants, and
+never while its subsystem is not safe**, by CN16's rules and for their
+reasons. Its subsystem's list step and, in cut mode, its cut (CN33) come
+before its device step, and a transfer whose subsystem is not safe has its
+namespace moved to inaccessible right after them and kept there to the
+pass's end; one whose move fails gets no linear over the origin in place of
+what its device maps (CN33). Where its subsystem is safe, the build's transfer loop moves a
 transfer whose desired group is optimized there only in a converge that
 put its transfer device where the desired state wants it, or found it
 there: the linear over the origin td's raid0 where the transfer is
@@ -3731,7 +3814,12 @@ not there. A transfer whose device step fails keeps its group, except a
 served one whose device's live table is an error table, which moves to
 inaccessible — at a promotion that came before the sides' ANA flips the
 origin's raid0 is not there yet. A transfer namespace the build creates,
-or finds not enabled, gets `AnaGrpIdInaccessible` before its enable. A
+or finds not enabled, gets `AnaGrpIdInaccessible` before its enable, and so
+does one the step disables to enable it again under another device or
+identity, a new namespace, a state no request reaches through the
+gateway. A device step that fails after the list step leaves the rest of
+the export alone, the namespace and the port link; the subsystem's row
+then comes from the list step and a read of the port link. A
 converge that leaves the device of a transfer whose desired group is
 optimized off what the desired state wants, a transfer's move that fails
 and a failed step of the transfer's export, its subsystem, its namespace
@@ -3749,6 +3837,177 @@ the verdict leaves out (CN30; Known limits). Reason: at a level from
 `SP_LEVEL_NO_THINPOOL` up to but excluding `SP_LEVEL_DISABLE` the raid0's
 row is the level's, which never reads `OK`, so an error-table step that
 failed there would be named by nothing.
+
+CN33. The cut of a removed host (`nvmetconn.go`; both roles;
+`architecture.md`, Primary cntlr). nvmet checks a subsystem's allowed
+hosts only when a host connects, so a host the desired state takes off a
+subsystem's list keeps its **nvmet connection** — the kernel's controller
+of that host on that subsystem — until the controller node ends it. A
+kernel built with `CONFIG_NVME_TARGET_DEBUGFS`, of 6.11 or newer, with
+debugfs mounted, shows each nvmet connection as a directory of the
+subsystem's debug directory (`agent.NvmetDebugRoot`), whose "hostnqn"
+names the host and whose "state" ends the connection on a write of
+"fatal", which a kernel under lockdown refuses; the kernel frees the
+directory once the connection's requests in flight have completed, in the
+common case a moment later. A **stray
+connection** is one whose host is not on its subsystem's list in the
+desired state. The listing with its reads of "hostnqn" is
+`agent.Nvmet.ListNvmetConns`, the read of a connection's "state" is
+`agent.Nvmet.NvmetConnState`, and the write with its read of "hostnqn"
+just before it is `agent.Nvmet.EndNvmetConn`; the dn agent never calls any
+of them. Nor does it call `agent.Nvmet.AdmitsOnly`, the strict read of
+what the kernel admits to a subsystem below.
+
+**Cut mode** is decided once, by the start check (CN-CM2): cut where the
+kernel can end a connection, no cut where it cannot and
+`--ignore-host-disconnection` let the agent start. It never changes while
+the agent runs: a kernel that gains the ability means a reboot and a new
+start, and a debug directory that goes under a running agent in cut mode
+(nvmet reloaded without the option) reads as a cut that did not hold,
+never as a pass. In no cut mode no converge and no read reads the debug
+directory, the rows and the safety of each subsystem read as if every cut
+held, and a removed host keeps its connection (`architecture.md`, Known
+limits).
+
+**The list step and the cut.** Every converge steps each subsystem's
+list, its `EnsureSubsystem`, first: a pool subsystem's before the
+transfers and the ns-devs, a transfer's before its device step (CN9). A step that fails is
+followed by a strict read of what the kernel admits
+(`agent.Nvmet.AdmitsOnly`: its "attr_allow_any_host" reads 0 and no host
+linked into its allowed_hosts is off the desired list, a subsystem that is
+not there admitting none). That read decides. The step links the new
+hosts before it unlinks the removed ones and stops at its first failure,
+so in a request that removes a host, a step that fails at a link or an
+unlink leaves that host linked, and the list is not safe. A step that
+fails in a request that removes no host is safe only when the read
+answers and finds "attr_allow_any_host" 0, as after a failed attribute
+write or a failed add of a host; a failed close of a subsystem found open,
+or a read that does not answer, is not safe. Once the list admits no host
+off the desired list, the converge in cut mode cuts: it lists the subsystem's debug directory, writes "fatal" to
+each stray connection and lists again, pausing between listings, until no
+stray connection is left or the pass's budget is spent
+(`CnStrayCutPassBudget`, one budget for every cut of the pass, so a pass
+whose cuts do not hold waits that long in all). A host the cut ends is
+then refused when it connects again. It covers every subsystem of the
+pool (CN16) and every transfer whose origin resolves (CN17), on the
+primary and on every standby. It never runs while the list still admits a
+removed host, since that host would connect again, nor for a transfer
+whose origin is gone, which has no list step, and it never reads a
+subsystem the request does
+not name: a dn agent's export, a subsystem made by hand and another
+agent's subsystem on the same kernel are never listed or cut. Each listing
+judges a connection by the host its directory names alone: the kernel
+gives a freed cntlid, and with it the directory's name, to the next
+connection at once, so a directory a new connection of an allowed host
+took over is no stray connection. The pass writes each name and host once
+while its listings keep showing that pair: a pair a listing no longer
+shows is forgotten, so one that went and came back is written again, and
+a pair still shown is written a second time only when its "state" reads
+neither "fatal" nor nothing. A written connection reads "fatal" until it is
+freed, unless its host enables it after the write, which sets "ready", and
+then the second write only repeats the end; a new connection of the same
+stray host under the freed name reads "ready" once its host has enabled it,
+and nothing before, which waits for a later listing or the next pass and
+only delays its end; a stray of another host under a freed name is a new
+pair. Each write reads the connection's host again just
+before it and leaves alone a directory that now names another host. A file
+that is not there, or that answers EIO, which debugfs gives through a file
+the kernel removed after its open, is a connection that has gone, never a
+refusal. A listing, or a read of a connection's host before a write, that
+fails otherwise, and a subsystem with no debug directory, end the cut not
+held as connections not read; a write the kernel refuses, logged, and a
+read of a written connection's "state" that fails end it with the stray
+still listed, as a wait the budget ends does. The write goes
+by the directory's name, so it can
+end an allowed host's connection that takes a freed name between that
+read and the write (Known limits). The cut
+**held** when its last listing answered and showed no stray connection.
+The cut keeps nothing: a host that passed the
+kernel's check before a list change can show its connection after the
+cut, and the next read names it and the re-send cuts it. Reason for the
+wait in the converge: a connection's directory goes a fraction of a
+second after its write, so the converge's own row and code say held in
+the common case, and no re-send is needed for it.
+
+**Safe.** A subsystem is **safe** in a pass when its list step held, or
+failed while the strict read finds the kernel admitting no host off the
+desired list, and, in cut mode, its cut held; a read that fails is not
+safe. A subsystem that is not safe has every namespace of it — the
+planned ones, and every one the kernel lists under it, which a listing
+that fails leaves to the planned ones — moved to inaccessible right after
+its list step, before the ns-dev loop and before a transfer's device step,
+each move read back strictly; one that fails, or whose group does not
+read back inaccessible, is logged, its row, which wants the inaccessible
+group, reads `OK` with `RES_REASON_DIFFERS` (CN28), and its device step
+puts no data under it: an ns-dev is made or changed only to park it on
+the td's `CnErrorName` or to put the read-only level's error-writes table
+over the device it maps (one target over that device, of the ns-dev's own
+length, so no grow), and a transfer device gets no linear over the origin
+where it is not on that linear already, each keeping what it maps (a
+transfer device suspended on that linear is resumed, as an ns-dev is),
+the device's row `ERROR` "namespace <nqn>/<idx> not moved to
+inaccessible" where the step would make any change but the park or the
+read-only wrap, and its own row on a device already on what the rules
+select or one the step parks or wraps read-only. A read
+gives the same row, from the namespace's group and
+the subsystem's safety, a held ns-dev's included (CN18), and the same
+error where the backing's number does not read; it differs in one case:
+where the move's write went through and only its read-back failed, a
+later read finds the namespace inaccessible and gives the device's own
+row: its table not the desired one, or the device missing. The build's last loops leave these namespaces there to the pass's
+end (CN16, CN17). Where the subsystem is safe no namespace of it is held
+back: the last loops move each one as CN16 and CN17 select, as before the
+cut existed. A transfer whose origin is gone has no list step and counts
+as safe: its device, once demoted, is an error table, which serves no
+data (Known limits: a demotion that fails). A read decides safety the same way: configfs
+as desired, or the strict read where it is not, and in cut mode its own
+listing. Reason: no device of the pass serves a removed host anything new,
+by the pass's order and by a failed move keeping its device off new data,
+whatever the pass changes under the namespace; the cost is that the
+allowed hosts of a subsystem stall while it is not safe (Known limits).
+
+**The read.** A read in cut mode lists, once, the debug directory of each
+subsystem it reads whose list is safe, reads the lockdown file when that
+listing shows a stray, and writes nothing. A converge
+whose transfer device step fails after the transfer's list step writes
+the subsystem's row from that step and a read of its port link.
+
+**The row and its name.** A subsystem's row, the pool's or a transfer's,
+reads, while its cut has not held and everything else of the row reads
+`OK`, one of three, which a converge and a read give alike for the same
+node: `RES_STATUS_PENDING`, "host <nqn> still connected" with the count of
+the others, while a stray connection is still listed — after the wait,
+after a write the kernel refused (logged, `log.md`, The cut of a removed
+host) or after a failed read of a written connection's "state";
+`RES_STATUS_ERROR`, "nvmet connections not ended: lockdown <mode>", in its
+place while the lockdown file shows a mode in force, which
+refuses every write that ends a connection (a read of the file that does
+not answer is read as no lockdown, and the row reads pending); and `RES_STATUS_ERROR`, "nvmet connections
+not read: " and the cause, after a listing or a read of a connection's
+host that failed, or with no debug directory. A read never writes and
+never reads "state", so the refusal and the failed "state" read are no
+part of the row: what both channels read, the listing and the lockdown
+file, decides it. An error of configfs or of the port link wins, and a
+deferred transfer's subsystem reads `RES_STATUS_PROVISIONING` only where it
+would read `OK`. The cntlr's verdict names a pending row as "<nqn>:
+pending: <its text>" on both channels (CN30), so the worker sends the
+syncup again every round until the cut holds (`dnv-worker.md` RW4), and
+leaves the namespace under it unnamed, the subsystem's name bringing the
+re-send. A pending row sets no health epoch (`dnv-worker.md` HL2), so a
+stray connection that outlasts the wait fails no cntlr over. The cut's
+error rows are a name only a read gives, "<nqn>: differs: <its text>"
+(CN30): a converge, which would only meet the same fact again, leaves them
+unnamed, so its reply's code is zero for them, the next round's read is
+not cancelled by a re-send, completes and names the row with the leftover
+code, and its round, a new observation a round asked for, counts the
+error row (`dnv-worker.md` RW4 step 5, RW23); the next round's re-send
+brings a converge, and the round after it reads again, so every second
+round counts, and the worker's threshold reaction fails the primary over
+once two counted rounds in a row read it unhealthy (`dnv-worker.md` AR5,
+AR10), and in time replaces such a standby. Reason: a node that cannot
+read its nvmet connections, or whose lockdown the lockdown file shows
+refuses every end, stays unsafe until an operator acts,
+while a stray connection ends by itself, mostly within the wait.
 
 CN18. Clones (`clone.go`; primary only; `architecture.md`, Clones;
 `sp_level` below `SP_LEVEL_NO_CLONE`). Per `clone_list` entry, in order:
@@ -4285,9 +4544,9 @@ cn behavior per level, each holding at that level and above:
   holds is there when the level is lowered, and the dm-clone the build
   creates over it goes on from where the copy was (CN18 step 3). Lowering
   the level leaves a destination namespace optimized over the dm-error
-  until the pass that builds the dm-clone moves its ns-dev onto it; one
-  whose build does not finish in that pass goes inaccessible at the end of
-  it (CN16). One whose clone's clone meta group still provisions is
+  until the pass that builds the dm-clone moves its ns-dev onto it, where
+  its subsystem is safe (CN33); one whose build does not finish in that
+  pass goes inaccessible at the end of it (CN16). One whose clone's clone meta group still provisions is
   deferred instead (CN9, CN16 rule 0): the first pass after the level is
   lowered builds no dm-clone and moves the namespace to inaccessible at its
   start (CN9's pre-step 1), and it waits there until a dm-clone built after
@@ -5316,10 +5575,15 @@ The rows, each with its `res_name` and what its probe checks:
   "attr_allow_any_host" "0" (one found with it set reports
   `RES_STATUS_ERROR`), cntlid range, serial and model (trimmed,
   `dnagent.md` SH17), allowed hosts exactly as desired, and linked to the
-  port (`probeExport`). While the node's port itself is not there the row
-  reads `RES_STATUS_ERROR` "the port is not there", on a converge too, which
-  reads the subsystem again after a link that failed (`linkRow`); the same
-  holds for a transfer's subsystem.
+  port (`probeExport`), and, in cut mode, no stray connection, read only
+  once the kernel's list admits no host off the desired one: a row those
+  reads find `OK` reads `RES_STATUS_PENDING` while a stray connection is
+  left, and `RES_STATUS_ERROR` while the subsystem's nvmet connections
+  could not be read, or on a converge could not be ended (`readExport`,
+  `exportRow`, CN33), on a converge from its cut's last listing. While the node's port itself
+  is not there the row reads `RES_STATUS_ERROR` "the port is not there", on
+  a converge too, which reads the subsystem again after a link that failed
+  (`linkRow`); the same holds for a transfer's subsystem.
 * `ns_id_to_namespace`, named by the NQN and the namespace index: the
   nvmet namespace is enabled, with the "device_path", "uuid" and "nguid"
   as desired (the identity compared through `agent.SameNsId` — configfs
@@ -5330,8 +5594,14 @@ The rows, each with its `res_name` and what its probe checks:
   `CnErrorName` and the rules want a serving device, and otherwise the
   desired group, which is inaccessible while the backing chain is
   provisioning-deferred (CN9), the row itself `RES_STATUS_PROVISIONING`
-  then. Both channels compare the group by this one rule from the
-  ns-dev's live table: a read with the table from its reading,
+  then; and the inaccessible group, whatever that rule gives, while the
+  subsystem is not safe in the pass (CN33), so a namespace kept
+  inaccessible there reads `OK`, not `ERROR`, one whose move down failed
+  reads `OK` with `RES_REASON_DIFFERS`, and the subsystem's row carries the
+  cause. Reason: a stray connection is the subsystem's state, not the
+  namespace's, and its pending row sets no health epoch, while an `ERROR`
+  namespace row would. Both channels
+  compare the group by this one rule from the ns-dev's live table: a read with the table from its reading,
   which it takes also when the backing's number cannot be read, and a
   converge after its ANA loops, with a read of the namespace and, where
   the rule depends on it, of the table, an error of the namespace
@@ -5363,7 +5633,15 @@ The rows, each with its `res_name` and what its probe checks:
   alike, which the gateway's bitmap read of the td reads (`architecture.md`,
   Bitmap reads); a dm-suspended ns-dev is `RES_STATUS_ERROR` "unexpectedly
   suspended" whatever the plan says; a provisioning-deferred one reports
-  `RES_STATUS_PROVISIONING` over its permanent dm-error.
+  `RES_STATUS_PROVISIONING` over its permanent dm-error. An ns-dev that
+  does not map, or is missing from, a backing other than the td's
+  `CnErrorName` the rules select, and is no read-only wrap of the device
+  it maps, while its subsystem is not safe and a strict read finds its
+  namespace not inaccessible, reads `RES_STATUS_ERROR` "namespace
+  <nqn>/<idx> not moved to inaccessible" on both channels, a held one's
+  included: the converge's ns-dev step makes no such change then (CN33),
+  save where the move's write went through and only its read-back failed,
+  which a later read finds inaccessible.
 * `td_id_to_raid0` and `td_id_to_dm_error`, named by the `CnRaid0Name`
   and the `CnErrorName`: `dmsetup table`. A raid0, a td's dm-error, a thin
   volume, a concat or a thin pool found dm-suspended on the table it wants
@@ -5530,10 +5808,17 @@ The rows, each with its `res_name` and what its probe checks:
   configfs, per CN17, the namespace's "ana_grpid" compared with the group
   CN17 wants for the transfer device's live table — inaccessible while a
   transfer that should serve has an error table there, the desired group
-  otherwise — on both channels alike: a converge writes the namespace row
+  otherwise, and the inaccessible group while the transfer's subsystem is
+  not safe, as for a namespace — on both channels alike: a converge writes the namespace row
   after its ANA loops from a read of the namespace and, for a transfer
   that should serve, of the transfer device's table and, when its device
-  step failed, reads the subsystem as a read does; a deferred
+  step failed, writes the subsystem's row from its list step and a read of
+  its port link; a served transfer's device that is not on the linear over
+  the origin (not there, or another table; one suspended on that linear is
+  resumed) while its subsystem is not safe and its namespace reads not
+  inaccessible reads `RES_STATUS_ERROR` "namespace <nqn>/<idx> not moved to
+  inaccessible" on both channels, save where the move's write went through
+  and only its read-back failed (CN33); a deferred
   transfer's three rows are `RES_STATUS_PROVISIONING`.
 * `clone_id_to_target`, named by the clone's `src_nqn`: the sysfs walk of
   CN10 — the subsystem whose "subsysnqn" is `src_nqn`, each controller's
@@ -5665,7 +5950,15 @@ dm-clone whose copy reads whole makes the kernel commit the clone's
 metadata, where every other status read commits nothing (`dnagent.md` SH17).
 `RES_STATUS_PROVISIONING` is never produced by this path: it is assigned by
 the CN9 gate, not by a failed command; and `RES_STATUS_PENDING` is produced
-by the CN11 registry alone, never by a failed command. The group row's probe
+by the CN11 registry and by the cut while a stray connection is still
+listed and the lockdown file shows no mode in force (CN33): after its
+wait, after a write the kernel refused, or after a failed read of a
+written connection's "state". The cut's refused write, its failed
+"state" read and a read of the lockdown file that does not answer are
+failed commands whose row reads `RES_STATUS_PENDING`, with the stray's text and not the command's output,
+which only the log record carries (`log.md`, The cut of a removed host). The cut's failed listings and host reads, a
+subsystem with no debug directory, and a stray listed while the lockdown
+file shows a mode in force read `RES_STATUS_ERROR`. The group row's probe
 opens no md member device: it is CN12's sysfs read, so a dead member of an
 array that keeps another in-sync member does not turn the row `ERROR` — it
 reads `OK`, with degraded once md has failed the member (an IO to it that
@@ -5730,7 +6023,8 @@ and their numbers from its `dmsetup info` listing, a `dmsetup table`
 listing that did not answer failing the verdict as well; the arrays from
 its md walk, under `ListArrays`' strict rule (CN12); and the connections
 from its sysfs walk, failing on any entry whose "subsysnqn" read did not
-answer. It lists the nvmet tree in configfs itself, and reads the
+answer. It lists the nvmet tree in configfs itself and, in cut mode, the
+debug directory of each subsystem it reads (CN33), and reads the
 namespace node and the number of each clone-source connection it checks
 against a live dm-clone (CN21). A partial dm listing counts as an answer
 here, where the sweep's `dmsetup ls` keeps its strict rule (`osclient.md`,
@@ -5768,7 +6062,11 @@ the dm-clones. It names a row that reads `RES_STATUS_MISSING` with no reason
 as "absent", and one that reads `RES_STATUS_ERROR`, or `RES_STATUS_OK` with
 `RES_REASON_DIFFERS` (a namespace that serves and whose ANA group differs,
 or a thin pool short of its metadata device or holding a metadata snapshot,
-CN13), as "differs". It names no row the level suppresses, no
+CN13), as "differs", a subsystem's whose nvmet connections could not be
+read, or that a lockdown the lockdown file shows keeps from being ended
+(CN33), among them, and a subsystem's that reads
+`RES_STATUS_PENDING`, a stray connection still there (CN33), as
+"pending". It names no row the level suppresses, no
 `RES_STATUS_PROVISIONING` row, no thin row a converge marks
 `RES_REASON_THIN_ID_LOST` or `RES_REASON_THIN_ID_NOT_ADOPTED` (CN14), no
 pool row that reads needs_check or failed (`RES_REASON_POOL_NEEDS_CHECK`,
@@ -5790,7 +6088,12 @@ read gives, so a create that keeps failing brings a converge every second
 round at most. A re-send the cntlr gets for another of its rows runs that
 pre-pass all the same. For a snapshot whose devices are all there the
 pre-pass sends no message and suspends nothing, and its rows are named like
-any other's. A concat the agent refuses to shrink reads the refusal on both
+any other's. A converge leaves the cut's error rows unnamed too, a
+subsystem whose nvmet connections cannot be read or that a lockdown the
+lockdown file shows keeps from being ended (`cutErrorRow`, CN33), a name only a read gives: a
+converge would only meet the same fact again, and a re-send on every round
+would cancel every read, so no round would count toward the failover the
+error row should bring. A concat the agent refuses to shrink reads the refusal on both
 channels. A read cannot tell a thin id the pool has lost from a volume not
 built yet, and names the volume (Known limits). Reason for the rows it is
 built on: a stack over a group whose array does not run waits for that
@@ -6614,7 +6917,10 @@ stores instead is CN23's.
 * A name a converge keeps failing on keeps the cntlr in converges. A row
   both channels name (CN30) — an export step, an ns-dev reload, an ANA move
   or a wrapper create that configfs or dm keeps refusing, a dm-clone create
-  the kernel refuses for good — brings a `SyncupCntlr` on every round
+  the kernel refuses for good, a cut whose stray connection never goes or
+  whose write the kernel refuses with no lockdown the lockdown file shows
+  (CN33) — brings
+  a `SyncupCntlr` on every round
   (`dnv-worker.md` RW4): each cycle is one converge and one interval, the
   cntlr's object lock held for the converge. It is bounded per cntlr: one
   syncup of it in flight at a time, a full interval between two
@@ -6639,6 +6945,91 @@ stores instead is CN23's.
   has lost (below) — brings a converge every second round at most
   (`dnv-worker.md` RW4 step 5), and one read in each cycle completes and
   counts.
+* A subsystem that is not safe (CN33) keeps every namespace of it
+  inaccessible on that cntlr, its namespace rows `OK` and its own row
+  pending or in error. A pending row, or an error of its configfs or port
+  link step, is named on both channels and keeps the cntlr's code the
+  leftover code on every round, each re-send stepping it again (the entry
+  above); the cut's error rows (`cutErrorRow`) are a name only a read gives
+  (CN30), so the leftover code comes every second round and one read in
+  each cycle completes and counts (below). Its allowed hosts stall on
+  that cntlr meanwhile, on a serving primary too. A stray connection that
+  does not go after a write the kernel took keeps the row pending: the
+  kernel frees a connection's directory only once every request on its
+  queues has completed, so this lasts while that host has IO on an ns-dev
+  that stays suspended because its reload keeps failing its load (CN16),
+  whose own row reads `ERROR`, and the cut holds on the first converge
+  after that ns-dev is resumed. A pending row sets no health epoch, so
+  nothing fails over and the gateway's status read, which lists error rows
+  only, lists nothing: the subsystem stays dark on that cntlr with no
+  reaction until the connection ends; so does a stray whose write the
+  kernel refuses with no lockdown the lockdown file shows. nvmet
+  connections that cannot be read, or that a lockdown the lockdown file
+  shows keeps from being ended, read `ERROR` instead, a name only a read gives (CN30), so
+  the read's rounds count, the error epoch is set and the worker fails the
+  primary over (`dnv-worker.md` HL2, AR5): debugfs unmounted, nvmet loaded
+  again from modules without the debug option, which hits every subsystem
+  of the node, with a removed host or none, or a lockdown raised while the
+  agent runs, read once a stray is listed; a debug directory that is not
+  there writes no record at Info or above (the `OsClient`'s record of the
+  listing is at Debug). The
+  way out follows the cause: debugfs unmounted, mount it again; nvmet
+  loaded again without the option, or a lockdown the lockdown file shows,
+  restart the agent, whose start check then refuses to start, or with
+  `--ignore-host-disconnection` starts it without the cut; a lockdown on a
+  node without securityfs, or a stray connection that does not go after a
+  write the kernel took, gives the start check no cause, so a restart cuts
+  again and the flag changes nothing: the state lasts until that
+  connection ends (its ns-dev resumed) or, for the lockdown, a reboot
+  without it, and meanwhile the operator's disable of that cntlr moves the
+  pool's primary to another node.
+* A move to inaccessible of an unsafe subsystem's namespace that fails, or
+  whose group does not read back inaccessible, is logged and leaves the
+  namespace in its group (CN33). Its device step puts no data under it, the
+  device kept where it was or parked; the device's row reads `ERROR` and
+  is named only where the step would make any change but the park or the
+  read-only wrap, while a device already on what the rules select, or one
+  the step parks or wraps read-only, reads by its own rules and the
+  subsystem's row brings the re-send that tries the move again. A serving
+  primary's namespace, already over its data, keeps serving it, to a
+  removed host still connected too, until a re-send's move goes through.
+  The read-only level's error-writes table still goes over the device the
+  ns-dev maps, which takes writes away from every host, the removed one
+  included, and moves no data under the namespace; lowering that level
+  while the move fails is refused, so every host keeps failing its writes
+  until a move holds. Its namespace row reads `OK` with
+  `RES_REASON_DIFFERS` meanwhile.
+* A host the desired state takes off a list keeps being served what it was
+  being served, on a serving primary, until the converge that steps the
+  subsystem's list and cut ends its connection; that converge's ns-dev
+  loop and the transfer's device step come after them (CN9, CN33).
+* A transfer whose origin is gone has no list step and counts as safe
+  (CN17, CN33), its device demoted onto an error table. Where that demotion
+  fails, the device still maps the departed td's raid0 and the transfer
+  namespace keeps the group it had, while a host the same request took off
+  the transfer is still linked and admitted: that host reads and writes
+  the departed volume's data until a pass whose demotion holds.
+* The cut's wait is one budget for the pass (`CnStrayCutPassBudget`).
+  Once a pass's earlier cuts have spent it, a later subsystem's cut ends
+  right after its write, with no listing after it, and a stray connection
+  takes about 10 ms to go after its write, so that subsystem reads pending
+  and stays dark for the pass, its allowed hosts with it; the next
+  converge, which the pending name brings, cuts again with a budget of its
+  own.
+* The cut writes "fatal" by the connection's directory name (CN33). It
+  reads the connection's host again just before each write and writes a
+  second time to a pair it already wrote only while that connection's
+  state reads neither "fatal" nor nothing — a new connection its host has
+  enabled, or a written one its host enabled after the write — so what
+  remains is the gap between that read and the write,
+  which includes the wait for an `OsClient` slot. A
+  stray connection that ends in that gap, on its own or as the end of the
+  cut's own earlier write, can leave its cntlid to an allowed host's new
+  connection, which the write then ends; that host connects again after
+  about 12 s, and its IO waits meanwhile, while the write's log record
+  names the stray host, not the host it ended. The agent's reads and
+  writes go by path, so none ties the write to the connection the read
+  saw.
 * A promotion that outruns the sides' ANA flips pauses its hosts until a
   later converge builds the stack: the promotion's own converge reads its legs
   before the sides' ANA flips have reached this CN's sysfs (CN12), so its

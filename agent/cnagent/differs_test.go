@@ -143,8 +143,8 @@ func TestAnUnansweredNamespaceReadMovesNothing(t *testing.T) {
 // A converge whose call is cut off leaves the rest of its build undone and
 // stores no observation; the read after it names what is missing (entry
 // 4.21), so the worker sends the syncup again, whose converge builds it. The
-// cntlr's first converge is cut off at the create of its namespace's device,
-// which the kernel finishes: the subsystem the build makes after it is left
+// cntlr's first converge is cut off at the create of its td's raid0, which
+// the kernel finishes: the subsystem the build makes after it is left
 // absent.
 func TestACutOffCntlrConvergeIsNamedByTheNextRead(t *testing.T) {
 	srv, node := newTestServer(t)
@@ -156,7 +156,7 @@ func TestACutOffCntlrConvergeIsNamedByTheNextRead(t *testing.T) {
 	subsys := agent.NvmetRoot + "/subsystems/" + testNqn
 	req := cntlrReq(reqOpts{revision: 2, primary: true})
 	cutOffSyncupCntlr(t, srv, node, req,
-		"dmsetup create "+nsDevName(srv, testNs))
+		"dmsetup create "+raid0Name(srv, testTd))
 	if node.dirs[subsys] {
 		t.Fatal("fixture is wrong: the cut-off converge made the subsystem")
 	}

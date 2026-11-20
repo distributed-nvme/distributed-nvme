@@ -146,8 +146,11 @@ func (t *ResTracker) SetReason(
 
 // Ok / Missing / Err / Provisioning are the four outcomes every agent may
 // report. The fifth, RES_STATUS_PENDING, has no helper: the cn agent's
-// primary leg report and the dn agent's primary dm-linear row produce it,
-// through Set (cnagent.md CN11, dnagent.md DN10).
+// primary leg report and a subsystem row with a stray connection still
+// listed while the lockdown file shows no mode in force — after the cut's
+// wait, after a write the kernel refused, or after a failed read of a
+// written connection's "state" — and the dn agent's primary dm-linear row
+// produce it, through Set (cnagent.md CN11, CN33, dnagent.md DN10).
 func (t *ResTracker) Ok(key, resName, details string) *pb.ResInfo {
 	return t.Set(key, resName, pb.ResStatus_RES_STATUS_OK, details)
 }

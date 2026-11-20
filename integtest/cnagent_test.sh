@@ -151,6 +151,27 @@ ZERO_TIMEOUT=120
 NQN_PREFIX=nqn.2024-01.io.dnv
 NQN_IT_PREFIX=nqn.2024-01.io.dnv-it
 HOST_NQN=nqn.2024-01.io.dnv-it:host:0
+# smoke's second host, on the controller node's own VM, for the cut stages
+# (cnagent_integtest.md, Cases, smoke): a host NQN of its own with the host id
+# derived from it. It is another machine than the first host's, so that the
+# host whose IO fails and the host whose IO goes on write through devices of
+# their own: the kernel's NVMe host can join two connections of one machine
+# to one subsystem into one device, whatever their host NQNs.
+HOST2_NQN=nqn.2024-01.io.dnv-it:host:1
+
+# The cut stages' bounds (cnagent.md CN33). CUT_GONE_SECS: how long after the
+# converge that cuts a stray connection the stage waits for its directory to
+# leave nvmet's debug directory; the converge itself waits a few seconds for
+# it, so this only covers a cut that holds just after the reply. CUT_FAIL_SECS:
+# how long after the cut the cut host's next synced write must fail and its
+# controller go: the host reconnects after its kernel's reconnect delay, 10 s,
+# nvmet refuses it by admission with DNR, and the host's kernel then deletes
+# the controller and fails the IO it held. CUT_KEEP_SECS: the longest a write
+# of the host that stays on the list may take across the cut, below that
+# reconnect delay, which a write would wait out were its connection ended too.
+CUT_GONE_SECS=15
+CUT_FAIL_SECS=45
+CUT_KEEP_SECS=5
 
 # Per-VM state, 1-indexed so "vm1"/"vm2" read directly. Each VM runs both
 # agents (cnagent_integtest.md, Topology): dn 0x1/0x2 on :29528, cn 0x11/0x12
@@ -220,6 +241,14 @@ SYNDROPPED=0
 # The VM that holds the nodecheck case's stalled array or its mdadm wrapper,
 # 0 while none does: on_exit removes both even when a run fails.
 NCG_VM=0
+# The VMs that run a cut stage's host writer (hostw_start), each set while
+# its writer may run: on_exit stops them even when a run fails, as a writer
+# left running holds a namespace open across the next case.
+HOSTW_VMS=(0 0 0)
+# What cut_converge read of the converge it sent: its time in ms and its
+# code.
+CUT_MS=0
+CUT_CODE=0
 # The file whose removal ends the pause case's background rounds
 # (pause_rounds), "" while none run: on_exit removes it.
 PAUSE_STOP=""
@@ -559,6 +588,14 @@ on_exit() {
 		if [ "$NCG_VM" -ne 0 ]; then
 			helper_ok "$NCG_VM" ncg_teardown >&2
 		fi
+		# smoke's host writers, for the pause writer's reason: a writer
+		# left running writes on and holds its namespace open.
+		local hvm
+		for hvm in 1 2; do
+			if [ "${HOSTW_VMS[$hvm]}" -ne 0 ]; then
+				helper_ok "$hvm" hostw_stop >&2
+			fi
+		done
 		[ -z "$PAUSE_STOP" ] || rm -f "$PAUSE_STOP"
 		log ""
 		log "debris left in place on both VMs; failing stage '$STAGE'"
@@ -799,7 +836,7 @@ md_zero_re() { # dm name
 
 # ---------------------------------------------------------------------------
 # Host emulation (cnagent_integtest.md, Topology): the host role is plain
-# nvme-tcp with one fixed hostnqn,
+# nvme-tcp with one fixed hostnqn, and smoke's second host a second one,
 # cross-connected from whichever VM the case names.
 # ---------------------------------------------------------------------------
 
@@ -808,31 +845,33 @@ md_zero_re() { # dm name
 # hostnqns, so the node-wide /etc/nvme/hostid must never be left implicit.
 host_id() { "$CTL_CN" host-id --hostnqn "$1"; }
 
-host_connect() { # hostvm cnidx nqn
-	local hid
-	hid=$(host_id "$HOST_NQN")
-	sshv "$1" "nvme connect -t tcp -a ${IP[$2]} -s $TR_SVC_ID -n '$3' --hostnqn '$HOST_NQN' --hostid '$hid'"
+# host_connect connects the emulated host, under HOST_NQN or the host NQN
+# given, with the host id derived from it.
+host_connect() { # hostvm cnidx nqn [hostnqn]
+	local hid hnqn=${4:-$HOST_NQN}
+	hid=$(host_id "$hnqn")
+	sshv "$1" "nvme connect -t tcp -a ${IP[$2]} -s $TR_SVC_ID -n '$3' --hostnqn '$hnqn' --hostid '$hid'"
 }
 
 host_disconnect() { # hostvm nqn
 	sshv_ok "$1" "nvme disconnect -n '$2' || true"
 }
 
-# host_refused connects the emulated host to a subsystem that must not admit
-# it and asserts the refusal by its cause, not by the connect's exit status:
-# nvmet's own kernel-log line naming this host and this subsystem, behind a
-# marker written just before the attempt, and then no path on the host. A
-# connect that fails for another reason — a subsystem off the port, a broken
-# host identity — leaves no such line, and nvme-cli's status cannot tell the
-# two apart.
-host_refused() { # hostvm cnidx nqn label
-	local mark i got=live
+# host_refused connects the emulated host, under HOST_NQN or the host NQN
+# given, to a subsystem that must not admit it and asserts the refusal by its
+# cause, not by the connect's exit status: nvmet's own kernel-log line naming
+# this host and this subsystem, behind a marker written just before the
+# attempt, and then no path on the host. A connect that fails for another
+# reason — a subsystem off the port, a broken host identity — leaves no such
+# line, and nvme-cli's status cannot tell the two apart.
+host_refused() { # hostvm cnidx nqn label [hostnqn]
+	local mark i got=live hnqn=${5:-$HOST_NQN}
 	mark="dnv-cn-it $TRACE $(date +%s%N)"
 	helper "$2" "kmsg_mark '$mark'"
-	if host_connect "$1" "$2" "$3"; then
+	if host_connect "$1" "$2" "$3" "$hnqn"; then
 		die "$4: the host connected to $3, which does not admit it"
 	fi
-	assert_eq "$(helper "$2" "kmsg_refused '$mark' '$HOST_NQN' '$3'")" yes \
+	assert_eq "$(helper "$2" "kmsg_refused '$mark' '$hnqn' '$3'")" yes \
 		"$4: nvmet refused the host by admission"
 	for ((i = 0; i < 10; i++)); do
 		got=$(host_state "$1" "$3" "$2")
@@ -1196,6 +1235,11 @@ WORK=/var/tmp/dnv-cn-integtest
 DN_LOG=$WORK/dn-agent.log
 CN_LOG=$WORK/cn-agent.log
 NVMET=/sys/kernel/config/nvmet
+# nvmet's debug directory, which a kernel built with
+# CONFIG_NVME_TARGET_DEBUGFS makes: one directory per subsystem, named by its
+# NQN, and in it one ctrl<cntlid> directory per nvmet connection, whose file
+# hostnqn names the host (cnagent.md CN33).
+DBG_NVMET=/sys/kernel/debug/nvmet
 NQN_PREFIX=nqn.2024-01.io.dnv
 NQN_IT_PREFIX=nqn.2024-01.io.dnv-it
 UDEV_DIR=/etc/udev/rules.d
@@ -1691,6 +1735,123 @@ kmsg_refused() {
 		echo no
 	fi
 }
+
+# nvmet_cut_facts — "ok" when this node's kernel lets a cn agent cut a
+# stray connection, else each fact that fails, joined by "; ": debugfs
+# mounted at /sys/kernel/debug, nvmet's debug directory there, which the
+# kernel option makes once nvmet is loaded, and no lockdown in force, under
+# which the kernel refuses to open a connection's state file. A missing
+# lockdown file reads as no lockdown, as the agent's start check reads it;
+# the file is a securityfs file, so a lockdown on a node without securityfs
+# mounted shows only as a refused cut. These are the facts the cn agent's start
+# check reads (cnagent.md CN-CM2), read here in shell, as the agent binary
+# reaches the VMs only at setup.
+nvmet_cut_facts() {
+	local why="" mode
+	if [ ! -r /proc/mounts ]; then
+		why="$why; /proc/mounts not read"
+	elif ! awk '$2 == "/sys/kernel/debug" && $3 == "debugfs" { f = 1 }
+		END { exit !f }' /proc/mounts; then
+		why="$why; debugfs is not mounted at /sys/kernel/debug"
+	fi
+	[ -d "$DBG_NVMET" ] ||
+		why="$why; no $DBG_NVMET: nvmet is built without CONFIG_NVME_TARGET_DEBUGFS or is not loaded"
+	if [ -e /sys/kernel/security/lockdown ]; then
+		mode=$(sed -n 's/.*\[\([a-z]*\)\].*/\1/p' /sys/kernel/security/lockdown 2>/dev/null)
+		[ "$mode" = none ] || why="$why; lockdown is '${mode:-unread}'"
+	fi
+	if [ -z "$why" ]; then echo ok; else echo "${why#; }"; fi
+}
+
+# nvmet_conns <nqn> — the nvmet connections of one subsystem, from its
+# directory under nvmet's debug directory: one line "ctrl<cntlid> <hostnqn>"
+# each, sorted, nothing when it holds none. A connection whose directory goes
+# between the listing and the read of its hostnqn is one that is gone. Fails,
+# saying so, when the subsystem has no debug directory or a read fails, so
+# that a read that did not answer never passes for no connection.
+nvmet_conns() {
+	local d="$DBG_NVMET/$1" c h out=""
+	if [ ! -d "$d" ]; then
+		echo "nvmet_conns: no debug directory $d" >&2
+		return 1
+	fi
+	for c in "$d"/ctrl*; do
+		[ -d "$c" ] || continue
+		if ! h=$(cat "$c/hostnqn" 2>/dev/null); then
+			[ -d "$c" ] || continue
+			echo "nvmet_conns: reading $c/hostnqn failed" >&2
+			return 1
+		fi
+		out="$out${c##*/} $h"$'\n'
+	done
+	printf '%s' "$out" | LC_ALL=C sort
+}
+
+# nvmet_conns_diag — every nvmet connection nvmet's debug directory shows,
+# for the failure dump: one line "<subsystem> <ctrl dir> <hostnqn>
+# state=<state>" each, or "no <dir>" when the kernel has no debug
+# directory. Best-effort: a read that fails leaves its field empty.
+nvmet_conns_diag() {
+	local s c
+	if [ ! -d "$DBG_NVMET" ]; then
+		echo "no $DBG_NVMET"
+		return 0
+	fi
+	for s in "$DBG_NVMET"/*/; do
+		s=${s%/}
+		for c in "$s"/ctrl*; do
+			[ -d "$c" ] || continue
+			echo "${s##*/} ${c##*/} $(cat "$c/hostnqn" 2>/dev/null)" \
+				"state=$(cat "$c/state" 2>/dev/null)"
+		done
+	done
+	return 0
+}
+
+# wait_nvmet_conn_gone <nqn> <hostnqn> <secs> — polls nvmet_conns until no
+# nvmet connection of <hostnqn> is left on the subsystem, and prints how many
+# seconds it waited. A listing that fails fails the call at once.
+wait_nvmet_conn_gone() {
+	local t0=$EPOCHREALTIME end=$((SECONDS + $3)) got
+	while :; do
+		got=$(nvmet_conns "$1") || return 1
+		if ! printf '%s\n' "$got" |
+			awk -v h="$2" '$2 == h { f = 1 } END { exit !f }'; then
+			awk -v a="$EPOCHREALTIME" -v b="$t0" \
+				'BEGIN { printf "%.2f\n", a - b }'
+			return 0
+		fi
+		if [ "$SECONDS" -ge "$end" ]; then
+			echo "an nvmet connection of $2 to $1 is still there after" \
+				"$3 s: ${got//$'\n'/; }" >&2
+			return 1
+		fi
+		sleep 0.1
+	done
+}
+
+# wait_path_gone <nqn> <traddr> <secs> — polls the path this host holds to
+# one target address until it is gone (path_field reads none), and prints the
+# time it read it gone by this VM's clock. path_field also reads none when
+# its listing fails, so a caller backs the absence with a positive read.
+wait_path_gone() {
+	local end=$((SECONDS + $3)) got
+	while :; do
+		got=$(path_field "$1" "$2" State)
+		if [ "$got" = none ]; then
+			echo "$EPOCHREALTIME"
+			return 0
+		fi
+		if [ "$SECONDS" -ge "$end" ]; then
+			echo "the path via $2 still reads '$got' after $3 s" >&2
+			return 1
+		fi
+		sleep 0.1
+	done
+}
+
+# now — this VM's clock, in seconds with microseconds.
+now() { echo "$EPOCHREALTIME"; }
 
 mdstat() { cat /proc/mdstat 2>/dev/null || true; }
 
@@ -3940,8 +4101,8 @@ cleanup_phase1() { # <cn16> [other vm ip]
 
 	# The fault injectors (case T's three, the partition case A's degrade
 	# stage reuses, clone_xfer's throttle, the pause case's two-way cut
-	# and its writer and sampler, and the nodecheck case's stalled array and
-	# mdadm wrapper), first and unconditionally.
+	# and its writer and sampler, smoke's host writers, and the nodecheck
+	# case's stalled array and mdadm wrapper), first and unconditionally.
 	# Each of them outlives the stage that installed it and each would be
 	# diagnosed as something else entirely: a pin makes the dm passes below
 	# fail on a device nothing is testing, a partition rule black-holes the
@@ -3952,6 +4113,7 @@ cleanup_phase1() { # <cn16> [other vm ip]
 	# failed.
 	stop_writer >/dev/null
 	pause_stop 0 >/dev/null
+	hostw_stop >/dev/null
 	ncg_teardown >/dev/null
 	unpin_all
 	unthrottle >/dev/null
@@ -4246,6 +4408,8 @@ diag() {
 	diag_cmd bash "$0" mdr_diag
 	echo "--- nvmet configfs ---"
 	diag_cmd ls -R "$NVMET/ports" "$NVMET/subsystems"
+	echo "--- nvmet connections (nvmet's debug directory) ---"
+	diag_cmd bash "$0" nvmet_conns_diag
 	echo "--- nvme list-subsys ---"
 	diag_cmd bash "$0" subsys_json
 	return 0
@@ -4387,6 +4551,184 @@ PAUSE_WPID=/var/tmp/dnv-it-pause-writer.pid
 PAUSE_SPID=/var/tmp/dnv-it-pause-sampler.pid
 PAUSE_WRITES=/var/tmp/dnv-it-pause.writes
 PAUSE_SAMPLES=/var/tmp/dnv-it-pause.samples
+
+# The cut stages' host writers (cnagent_integtest.md, Cases, smoke): one per
+# VM, its files under /var/tmp for the writer's reason; cleanup_phase1 stops
+# it (hostw_stop) whatever the run did.
+HOSTW_FLAG=/var/tmp/dnv-it-hostw.run
+HOSTW_PID=/var/tmp/dnv-it-hostw.pid
+HOSTW_WRITES=/var/tmp/dnv-it-hostw.writes
+
+# hostw_loop <dev> <seekMiB> — a host's timed writer: one synced 4 KiB write
+# after another into the MiB of <dev> at <seekMiB>, 0.2 s apart, each logged
+# as "<start> <end> <dd status>" by this VM's clock while the flag file
+# stands. It ends at its first write that fails, the write a cut stage reads,
+# and at a device node that is gone, logged as "<start> <end> nodev": a
+# write that found no node never reached a stack, so it is no failed write.
+# dd creates a file it is told to write, which in /dev would keep the node's
+# name from the next device, so the write takes conv=nocreat (uutils dd keeps
+# it) and a dd that could not open the node for that reason reads as nodev,
+# as does a node gone before the write. The node is the one the path names
+# at the start. The dd rule holds (conv=fsync, no oflag=).
+hostw_loop() {
+	local dev i s rc err
+	echo "$$" >"$HOSTW_PID"
+	dev=$(readlink -f "$1")
+	for ((i = 0; i < 20000; i++)); do
+		[ -e "$HOSTW_FLAG" ] || break
+		s=$EPOCHREALTIME
+		if [ ! -b "$dev" ]; then
+			echo "$s $s nodev" >>"$HOSTW_WRITES"
+			break
+		fi
+		rc=0
+		err=$(dd if=/dev/zero of="$dev" bs=4096 count=1 \
+			seek=$(($2 * 256 + i % 256)) conv=nocreat,fsync status=none \
+			2>&1 >/dev/null) || rc=$?
+		case "$rc:$err" in
+		0:*) ;;
+		*"No such file or directory"*) rc=nodev ;;
+		esac
+		echo "$s $EPOCHREALTIME $rc" >>"$HOSTW_WRITES"
+		[ "$rc" = 0 ] || break
+		sleep 0.2
+	done
+	rm -f "$HOSTW_FLAG"
+	return 0
+}
+
+# hostw_start <dev> <seekMiB> — hostw_loop, detached as start_writer
+# detaches its loop, over a fresh results file.
+hostw_start() {
+	local i
+	[ -b "$(readlink -f "$1")" ] || {
+		echo "hostw_start: $1 is no block device" >&2
+		return 1
+	}
+	rm -f "$HOSTW_PID"
+	: >"$HOSTW_WRITES"
+	: >"$HOSTW_FLAG"
+	setsid nohup bash "$0" hostw_loop "$1" "$2" </dev/null >/dev/null 2>&1 &
+	for ((i = 0; i < 50; i++)); do
+		[ -s "$HOSTW_PID" ] && break
+		sleep 0.1
+	done
+	if [ ! -s "$HOSTW_PID" ]; then
+		rm -f "$HOSTW_FLAG"
+		echo "the host writer never reported" >&2
+		return 1
+	fi
+	echo started
+}
+
+# hostw_counts — the writer's results so far, "ok=<n> failed=<m> nodev=<k>".
+# A results file that cannot be read fails the call, for writer_counts'
+# reason.
+hostw_counts() {
+	local res
+	if ! res=$(cat "$HOSTW_WRITES" 2>/dev/null); then
+		echo "the host writer's results ($HOSTW_WRITES) cannot be read" >&2
+		return 1
+	fi
+	printf '%s\n' "$res" | awk '
+	    NF == 3 && $3 == "0" { ok++ }
+	    NF == 3 && $3 ~ /^[0-9]+$/ && $3 != "0" { failed++ }
+	    NF == 3 && $3 == "nodev" { nodev++ }
+	    END { printf "ok=%d failed=%d nodev=%d\n", ok, failed, nodev }'
+}
+
+# hostw_longest — the longest write the writer has logged, end less start in
+# seconds to the hundredth, and when it started: "<secs> <start>". A results
+# file that cannot be read or that holds no write fails the call, so that a
+# writer that wrote nothing never passes for one whose writes were all fast.
+hostw_longest() {
+	local res
+	if ! res=$(cat "$HOSTW_WRITES" 2>/dev/null); then
+		echo "the host writer's results ($HOSTW_WRITES) cannot be read" >&2
+		return 1
+	fi
+	printf '%s\n' "$res" | awk '
+	    NF == 3 { n++; d = $2 - $1; if (n == 1 || d > m) { m = d; s = $1 } }
+	    END { if (n == 0) exit 1; printf "%.2f %s\n", m, s }' || {
+		echo "the host writer has logged no write" >&2
+		return 1
+	}
+}
+
+# hostw_wait_more <n> <secs> — waits until the writer has logged <n> more
+# writes that succeeded than it had at the call, and prints hostw_counts. A
+# write that failed or a device node that went fails the call at once.
+hostw_wait_more() {
+	local got ok0 ok end=$((SECONDS + $2))
+	got=$(hostw_counts) || return 1
+	ok0=${got#ok=}
+	ok0=${ok0%% *}
+	while :; do
+		got=$(hostw_counts) || return 1
+		case "$got" in
+		*" failed=0 nodev=0") ;;
+		*)
+			echo "the host writer logged a write that did not succeed: $got" >&2
+			return 1
+			;;
+		esac
+		ok=${got#ok=}
+		ok=${ok%% *}
+		if [ "$ok" -ge $((ok0 + $1)) ]; then
+			echo "$got"
+			return 0
+		fi
+		if [ "$SECONDS" -ge "$end" ]; then
+			echo "the host writer logged $got in $2 s, want $1 more good" \
+				"writes than ok=$ok0" >&2
+			return 1
+		fi
+		sleep 0.1
+	done
+}
+
+# hostw_wait_failed <secs> — waits until the writer has logged the write that
+# failed, and prints its line "<start> <end> <dd status>". A device node that
+# went before any write failed fails the call, as does a writer that logs
+# neither within <secs>.
+hostw_wait_failed() {
+	local line end=$((SECONDS + $1))
+	while :; do
+		line=$(awk 'NF == 3 && $3 != "0" { print; exit }' "$HOSTW_WRITES" \
+			2>/dev/null)
+		case "$line" in
+		*" nodev")
+			echo "the device node went before a write failed: $line" >&2
+			return 1
+			;;
+		?*)
+			echo "$line"
+			return 0
+			;;
+		esac
+		if [ "$SECONDS" -ge "$end" ]; then
+			echo "no write failed in $1 s: $(hostw_counts)" >&2
+			return 1
+		fi
+		sleep 0.1
+	done
+}
+
+# hostw_stop — takes the flag away and kills the loop by its recorded pid if
+# that pid is still the loop's, never a dd, for stop_writer's reason, and
+# prints "stopped". A loop that ended by itself leaves its pid behind, which
+# another process may hold by now.
+hostw_stop() {
+	local pid
+	rm -f "$HOSTW_FLAG"
+	pid=$(cat "$HOSTW_PID" 2>/dev/null || true)
+	if [ -n "$pid" ] &&
+		tr '\0' ' ' 2>/dev/null <"/proc/$pid/cmdline" | grep -c hostw_loop >/dev/null; then
+		kill -9 "$pid" >/dev/null 2>&1
+	fi
+	rm -f "$HOSTW_PID"
+	echo stopped
+}
 
 # leg_ctrls [traddr] — this VM's controllers of a disk node's side export
 # (kind 2 NQNs), one sysfs directory a line: the leg paths of the controller
@@ -4806,6 +5148,19 @@ preflight_vms() {
 		local got
 		got=$(sshv "$idx" "ls -d $NVMET 2>/dev/null || echo MISSING")
 		assert_eq "$got" "$NVMET" "nvmet configfs on vm$idx"
+		# The kernel option the cn agent's cut of a stray connection needs
+		# (cnagent.md CN33), read once nvmet is loaded: without it the agent
+		# refuses to start (cnagent.md CN-CM2), as no start line here takes
+		# --ignore-host-disconnection, and the lab's controller node VMs
+		# hold nvmet modules built with it (cnagent_integtest.md,
+		# Assumptions and preflight checks).
+		got=$(helper "$idx" nvmet_cut_facts) ||
+			die "vm$idx: reading the facts of the cut did not answer"
+		[ "$got" = ok ] ||
+			die "vm$idx: the cn agent cannot cut a stray connection here:" \
+				"$got. The lab tool integtest/nvmet_debugfs.sh builds and" \
+				"installs nvmet modules with CONFIG_NVME_TARGET_DEBUGFS" \
+				"(install) and reads these facts again (check ${VM[$idx]})"
 		got=$(sshv "$idx" "ls /proc/mdstat 2>/dev/null || echo MISSING")
 		assert_eq "$got" /proc/mdstat "md support on vm$idx"
 		got=$(sshv "$idx" "cat /sys/module/nvme_core/parameters/multipath")
@@ -4858,13 +5213,25 @@ start_dn_agent() { # <idx>
 # same ports/1 with the same attributes, and EnsurePort is probe-first, so
 # whichever runs first creates it and the other issues zero writes
 # (cnagent_integtest.md, Topology).
+#
+# A half second after the start the agent must still run, as the e2e suite's
+# cn_up checks: one that refused to start, as on a kernel that cannot cut a
+# stray connection (cnagent.md CN-CM2), fails here with its log's last lines,
+# not at the next size wait with none. The background job of a shell without
+# job control leads no process group, so setsid execs the agent in place and
+# `$!` names the agent.
 start_cn_agent() { # <idx>
 	local idx=$1
 	sshv "$idx" "setsid nohup $WORK/dnv-agent cn \
 --grpc-network tcp --grpc-address ${IP[$idx]}:$CN_GRPC_PORT \
 --tr-type tcp --adr-fam ipv4 --tr-addr ${IP[$idx]} --tr-svc-id $TR_SVC_ID \
 --local-store $WORK/cn-store --capacity $CN_CAPACITY --nvmet-qid-max $QID_MAX \
---log-level debug >> $CN_LOG 2>&1 < /dev/null & echo launched"
+--log-level debug >> $CN_LOG 2>&1 < /dev/null & pid=\$!; sleep 0.5; \
+if kill -0 \$pid 2>/dev/null; then echo launched; else \
+echo 'the cn agent exited at its start; the last 20 lines of $CN_LOG:' >&2; \
+tail -n 20 $CN_LOG >&2; exit 1; fi" ||
+		die "vm$idx: the cn agent did not run a half second after its start" \
+			"(its log's last lines are above)"
 }
 
 setup() {
@@ -5551,15 +5918,174 @@ case_nodecheck() {
 # Case S — smoke (cnagent_integtest.md, Cases)
 # ---------------------------------------------------------------------------
 
+# ---------------------------------------------------------------------------
+# The cut of a stray connection (cnagent.md CN33; cnagent_integtest.md,
+# Cases, smoke and redund)
+# ---------------------------------------------------------------------------
+
+# conn_of <listing> <hostnqn> — the ctrl<cntlid> name of the one nvmet
+# connection of <hostnqn> in an nvmet_conns listing, "none" when it lists
+# none and "many" when it lists more than one.
+conn_of() {
+	printf '%s\n' "$1" | awk -v h="$2" '$2 == h { n++; c = $1 }
+		END { if (n == 0) print "none"; else if (n > 1) print "many"; else print c }'
+}
+
+# secs_between <later> <earlier> — the seconds between two times of one
+# clock, to the hundredth.
+secs_between() { awk -v a="$1" -v b="$2" 'BEGIN { printf "%.2f", a - b }'; }
+
+# cut_converge sends the converge that cuts the stray connection of
+# <hostnqn>: the request file, its list already edited, at a new revision.
+# Its code is zero once the cut held within the converge's own wait, and
+# otherwise the leftover code with the subsystem's row PENDING naming the
+# host (cnagent.md CN33), which is no failure: the worker, and the stage in
+# its place, re-sends on that code. With <strict> 1 only zero passes: a cut
+# that does not hold within the wait moves every namespace of the
+# subsystem inaccessible on the node, so a stage whose kept host must write
+# on needs the cut held in the converge. Any other reply fails the stage.
+# It sets CUT_MS, the converge's time in ms, and CUT_CODE; it bumps the
+# revision, so it runs in the parent shell (cnagent_integtest.md,
+# Conventions, Revisions).
+cut_converge() { # cnidx req ssid hostnqn label [strict]
+	local out t0
+	bump_cn_rev "$1"
+	t0=$(now_ms)
+	out=$(cn_syncup_cntlr "$1" "$2" --expect-code 4 2>/dev/null || true)
+	CUT_MS=$(($(now_ms) - t0))
+	[ -n "$out" ] || die "$5: the converge printed no reply"
+	CUT_CODE=$(jq_of "$out" '.agent_reply.code // 0')
+	case "$CUT_CODE:${6:-0}" in
+	0:*) assert_map_ok "$out" ss_id_to_subsystem "$3" "$5" ;;
+	4:1)
+		die "$5: the cut did not hold within the converge's wait (code 4:" \
+			"$(jq_of "$out" '.agent_reply.details // ""')), so the" \
+			"subsystem's namespaces went inaccessible and the host left on" \
+			"the list waits"
+		;;
+	4:*)
+		assert_map_status "$out" ss_id_to_subsystem "$3" RES_STATUS_PENDING \
+			"host $4 still connected" "$5"
+		;;
+	*)
+		die "$5: the converge replied code $CUT_CODE:" \
+			"$(jq_of "$out" '.agent_reply.details // ""')"
+		;;
+	esac
+}
+
+# smoke_cut is the body of smoke's cut and revoke stages (cnagent_integtest.md,
+# Cases, smoke): the host <hostnqn> on vm<hv>, connected to the subsystem
+# <nqn> of cn<cn> and writing through its host writer, is taken off the
+# list, which then holds <list>, a JSON array; the host <keepnqn> on vm<kv>,
+# when given, stays on it and writes on through its own. In this order: the
+# CN's debug directory lists one nvmet connection of each host, and each
+# host's writer writes; the converge, clean, or with no kept host also the
+# leftover code naming the pending row (cut_converge's strict form); the
+# cut host's connection gone from that directory, and the kept host's the
+# same connection still; the cut host's next synced write failed within
+# CUT_FAIL_SECS, after the converge began, its controller gone, and nvmet's
+# record that it refused the host's reconnect by admission behind a mark
+# made before the converge; the kept host's writes going on, none failed and
+# none longer than CUT_KEEP_SECS, which a write held across a reconnect of
+# its own would pass; then a connect of the cut host refused. It logs the
+# times: the converge, the connection gone after it, and, counted by the cut
+# host's clock from just before the converge, the end of its failed write
+# and its controller gone; and the kept host's writes across the cut and the
+# longest of them.
+smoke_cut() { # cn ssid req nqn hv hostnqn list label [kv keepnqn]
+	local cn=$1 ss=$2 req=$3 nqn=$4 hv=$5 hnqn=$6 list=$7 label=$8
+	local kv=${9:-0} knqn=${10:-} conns kconn got mark ta gone line fail ctrl
+	local kept0="" kept1="" longest=""
+	conns=$(helper "$cn" "nvmet_conns '$nqn'") ||
+		die "$label: listing cn$cn's nvmet connections of $nqn failed"
+	got=$(conn_of "$conns" "$hnqn")
+	case "$got" in
+	none | many)
+		die "$label: before the cut cn$cn lists $got nvmet connection of" \
+			"$hnqn to $nqn: ${conns//$'\n'/; }"
+		;;
+	esac
+	if [ "$kv" -ne 0 ]; then
+		kconn=$(conn_of "$conns" "$knqn")
+		case "$kconn" in
+		none | many)
+			die "$label: before the cut cn$cn lists $kconn nvmet connection" \
+				"of $knqn to $nqn: ${conns//$'\n'/; }"
+			;;
+		esac
+	fi
+	# A writer is an instrument only once it is seen to write
+	# (wait_writer's reason).
+	helper "$hv" "hostw_wait_more 2 20" >/dev/null ||
+		die "$label: the writer of $hnqn on vm$hv does not write"
+	if [ "$kv" -ne 0 ]; then
+		kept0=$(helper "$kv" "hostw_wait_more 2 20") ||
+			die "$label: the writer of $knqn on vm$kv does not write"
+	fi
+	mark="dnv-cn-it $TRACE $(date +%s%N)"
+	helper "$cn" "kmsg_mark '$mark'"
+	ta=$(helper "$hv" now)
+	req_set "$req" ".nqn_to_subsystem[\"$nqn\"].allowed_hosts = $list"
+	cut_converge "$cn" "$req" "$ss" "$hnqn" "$label" "$((kv != 0))"
+	gone=$(helper "$cn" "wait_nvmet_conn_gone '$nqn' '$hnqn' $CUT_GONE_SECS") ||
+		die "$label: cn$cn's nvmet connection of $hnqn to $nqn did not go"
+	if [ "$kv" -ne 0 ]; then
+		conns=$(helper "$cn" "nvmet_conns '$nqn'") ||
+			die "$label: listing cn$cn's nvmet connections of $nqn failed"
+		assert_eq "$(conn_of "$conns" "$knqn")" "$kconn" \
+			"$label: the nvmet connection of $knqn, which stays on the list"
+	fi
+	line=$(helper "$hv" "hostw_wait_failed $CUT_FAIL_SECS") ||
+		die "$label: no synced write of $hnqn on vm$hv failed within" \
+			"${CUT_FAIL_SECS}s of the cut"
+	fail=$(printf '%s\n' "$line" | awk -v t="$ta" '{ printf "%.2f", $2 - t }')
+	awk -v f="$fail" 'BEGIN { exit !(f > 0) }' ||
+		die "$label: the write of $hnqn that failed ended before the" \
+			"converge began: $line"
+	ctrl=$(helper "$hv" "wait_path_gone '$nqn' '${IP[$cn]}' $CUT_FAIL_SECS") ||
+		die "$label: vm$hv still holds its controller of $nqn"
+	ctrl=$(secs_between "$ctrl" "$ta")
+	# The positive half of the controller gone, which path_field also reads
+	# for a listing that failed: nvmet refused the host's own reconnect.
+	assert_eq "$(helper "$cn" "kmsg_refused '$mark' '$hnqn' '$nqn'")" yes \
+		"$label: nvmet refused the reconnect of $hnqn by admission"
+	if [ "$kv" -ne 0 ]; then
+		kept1=$(helper "$kv" "hostw_wait_more 3 20") ||
+			die "$label: the writes of $knqn on vm$kv did not go on"
+		longest=$(helper "$kv" hostw_longest) ||
+			die "$label: reading the writes of $knqn on vm$kv failed"
+		awk -v d="${longest%% *}" -v b="$CUT_KEEP_SECS" \
+			'BEGIN { exit !(d < b) }' ||
+			die "$label: a write of $knqn, which stays on the list, took" \
+				"${longest%% *} s (started at ${longest#* } by vm$kv's" \
+				"clock), as long as a reconnect of its own would hold it"
+		assert_eq "$(host_state "$kv" "$nqn" "$cn")" live \
+			"$label: the path of $knqn"
+	fi
+	log "  $label: the converge took $CUT_MS ms (code $CUT_CODE), and" \
+		"$hnqn's nvmet connection was gone ${gone} s after it; from just" \
+		"before it, by vm$hv's clock, $hnqn's first failed write ended at" \
+		"${fail} s and its controller was gone at ${ctrl} s"
+	if [ "$kv" -ne 0 ]; then
+		log "  $label: $knqn's writer went from '$kept0' to '$kept1' across" \
+			"the cut, its longest write ${longest%% *} s"
+	fi
+	helper_ok "$hv" hostw_stop >/dev/null
+	HOSTW_VMS[hv]=0
+	host_refused "$hv" "$cn" "$nqn" "$label" "$hnqn"
+}
+
 case_smoke() {
 	CASE=smoke
 	DIAG_CNTLRS=()
 	SIDE_PROVISIONED=()
-	local sp=0x3a1 cntlr=0x1 cn=1 dn=1 hv=2 slot=0
+	# hv2, the second host of the cut stages, is the CN's own VM.
+	local sp=0x3a1 cntlr=0x1 cn=1 dn=1 hv=2 hv2=1 slot=0
 	local nqn="$NQN_IT_PREFIX:s:vol1"
 	local uuid=11111111-1111-4111-8111-111111111111
 	local req="$WORK/req-smoke-cn1.json"
-	local out dev want got cntlrrev name
+	local out dev want want2 got cntlrrev name
 	diag_cntlr "$cn" "$sp" "$cntlr"
 
 	stage dn "DN1 exports the meta and data sides of the S-shaped SP"
@@ -5681,22 +6207,66 @@ case_smoke() {
 	assert_eq "$(helper "$cn" "dm_state $name")" live \
 		"differs: $name resumed by the syncup sent again"
 
-	stage revoke "emptying allowed_hosts closes the subsystem to new connections"
-	req_set "$req" ".nqn_to_subsystem[\"$nqn\"].allowed_hosts = []"
+	stage hostb "a second host, on the CN's own VM under a host NQN of its own, is granted beside the first and writes"
+	req_set "$req" ".nqn_to_subsystem[\"$nqn\"].allowed_hosts = [\"$HOST_NQN\", \"$HOST2_NQN\"]"
 	bump_cn_rev "$cn"
 	cntlrrev=${CNREV[$cn]}
 	out=$(cn_syncup_cntlr "$cn" "$req")
-	assert_map_ok "$out" ss_id_to_subsystem "$S_SS" "smoke revoke"
+	assert_map_ok "$out" ss_id_to_subsystem "$S_SS" "smoke hostb"
+	got=$(helper "$cn" "allowed_hosts '$nqn'" | paste -sd' ' -)
+	assert_eq "$got" "$HOST_NQN $HOST2_NQN" "smoke hostb $nqn allowed_hosts"
+	host_connect "$hv2" "$cn" "$nqn" "$HOST2_NQN"
+	helper "$hv2" "wait_dev '$dev' 20" || die "no device node $dev on vm$hv2"
+	assert_eq "$(host_state "$hv2" "$nqn" "$cn")" live \
+		"smoke hostb: the second host's path state"
+	host_wait_ana "$hv2" "$nqn" "$cn" optimized 20
+	make_pattern "$hv2" "$WORK/pattern-smoke2.bin" 4
+	want2=$(sha_range "$hv2" "$WORK/pattern-smoke2.bin" 4)
+	write_range "$hv2" "$WORK/pattern-smoke2.bin" "$dev" 4 16
+	drop_caches "$hv2"
+	assert_eq "$(sha_range "$hv2" "$dev" 4 16)" "$want2" \
+		"smoke hostb: the second host's readback"
+	converge_check "$cn" "$sp" "$cntlr" "$cntlrrev"
+
+	# nvmet checks the list only at a connect, so a host taken off it keeps
+	# its controller until the cn agent cuts its nvmet connection, which
+	# makes nvmet end it; the host's reconnect is then refused by admission
+	# (cnagent.md CN33). Two hosts on two VMs, as one VM joins its
+	# connections to one subsystem into one device: the first host's IO
+	# fails while the second's goes on.
+	stage cut "the host taken off the list loses its nvmet connection, its writes fail and its reconnect is refused, while the host left on it writes on (CN33)"
+	HOSTW_VMS[hv]=1
+	assert_eq "$(helper "$hv" "hostw_start '$dev' 24")" started \
+		"smoke cut: the first host's writer"
+	HOSTW_VMS[hv2]=1
+	assert_eq "$(helper "$hv2" "hostw_start '$dev' 32")" started \
+		"smoke cut: the second host's writer"
+	smoke_cut "$cn" "$S_SS" "$req" "$nqn" "$hv" "$HOST_NQN" \
+		"[\"$HOST2_NQN\"]" "smoke cut" "$hv2" "$HOST2_NQN"
+	cntlrrev=${CNREV[$cn]}
+	assert_eq "$(helper "$cn" "allowed_hosts '$nqn'")" "$HOST2_NQN" \
+		"smoke cut $nqn allowed_hosts"
+	drop_caches "$hv2"
+	assert_eq "$(sha_range "$hv2" "$dev" 4 16)" "$want2" \
+		"smoke cut: the second host's data after the cut"
+	resync_until_clean "$cn" "$sp" "$cntlr" "$cntlrrev" "$req" 30 \
+		"smoke cut: the round after the cut"
+	converge_check "$cn" "$sp" "$cntlr" "$cntlrrev"
+
+	stage revoke "the last host taken off the list is cut too, and the emptied list admits no host (CN16, CN33)"
+	smoke_cut "$cn" "$S_SS" "$req" "$nqn" "$hv2" "$HOST2_NQN" "[]" \
+		"smoke revoke"
+	cntlrrev=${CNREV[$cn]}
 	assert_eq "$(helper "$cn" "ss_attr '$nqn' attr_allow_any_host")" 0 \
 		"smoke revoke $nqn attr_allow_any_host"
 	assert_eq "$(helper "$cn" "allowed_hosts '$nqn'")" "" \
 		"smoke revoke $nqn allowed_hosts"
-	# nvmet checks the list at Connect only: the controller the host already
-	# holds stays live, and it is the next connect that is refused.
-	assert_eq "$(host_state "$hv" "$nqn" "$cn")" live \
-		"smoke revoke: the connected host keeps its path"
+	got=$(helper "$cn" "nvmet_conns '$nqn'") ||
+		die "smoke revoke: listing cn$cn's nvmet connections of $nqn failed"
+	assert_eq "$got" "" "smoke revoke: the nvmet connections of $nqn"
+	resync_until_clean "$cn" "$sp" "$cntlr" "$cntlrrev" "$req" 30 \
+		"smoke revoke: the round after the cut"
 	converge_check "$cn" "$sp" "$cntlr" "$cntlrrev"
-	host_disconnect "$hv" "$nqn"
 	host_refused "$hv" "$cn" "$nqn" "smoke revoke"
 
 	stage orphans "subsystems made by hand: the cntlr's reads through the grace read none of them (CN21)"
@@ -5878,6 +6448,7 @@ case_smoke() {
 	assert_cn_info_ok "$out" "smoke base state after teardown"
 	assert_no_residue "$sp"
 	sshv_ok "$hv" "rm -f $WORK/pattern-smoke.bin"
+	sshv_ok "$hv2" "rm -f $WORK/pattern-smoke2.bin"
 }
 
 # ---------------------------------------------------------------------------
@@ -7391,6 +7962,10 @@ case_redund() {
 	converge_check 1 "$sp" "$c1" "$rev1"
 	converge_check 2 "$sp" "$c2" "$rev2"
 
+	redund_host_cut "$sp" "$c1" "$c2" "$req1" "$req2" "$nqn" "$hv"
+	rev1=${CNREV[1]}
+	rev2=${CNREV[2]}
+
 	stage mdcheck "md's check rewrites a sector that takes a write and records one that does not in the group's reading, the leg's row OK (CN12, The md check)"
 	redund_md_check "$sp" "$c1" "$c2" "$req1" "$req2"
 
@@ -7402,6 +7977,64 @@ case_redund() {
 	dn_drop 2
 	assert_no_residue "$sp"
 	sshv_ok "$hv" "rm -f $WORK/pattern-redund.bin $WORK/probe-redund.bin"
+}
+
+# redund_host_cut is redund's hostcut stage (cnagent_integtest.md, Cases,
+# redund; cnagent.md CN33): the host, connected to the primary on CN1 and to
+# the standby on CN2, is taken off both cntlrs' lists, and both cut it. Each
+# CN's debug directory lists the host's nvmet connection before its converge
+# and not after it, the host's controllers of both go, and each CN's kernel
+# log holds nvmet's refusal of the host's reconnect by admission behind a
+# mark made before the converges; then each CN's check round, re-sent on
+# while it names the pending row, is clean. It logs each converge's time and
+# when each connection and each controller was gone. The revisions it
+# converges at are the CNs' counters, which the caller reads after it.
+redund_host_cut() { # sp c1 c2 req1 req2 nqn hv
+	local sp=$1 nqn=$6 hv=$7 i conns got mark ta gone ctrl
+	local -a cntlr=("" "$2" "$3") req=("" "$4" "$5")
+	stage hostcut "the host taken off the list is cut on the primary and on the standby (CN33)"
+	for i in 1 2; do
+		conns=$(helper "$i" "nvmet_conns '$nqn'") ||
+			die "hostcut: listing cn$i's nvmet connections of $nqn failed"
+		got=$(conn_of "$conns" "$HOST_NQN")
+		case "$got" in
+		none | many)
+			die "hostcut: before the cut cn$i lists $got nvmet connection of" \
+				"the host to $nqn: ${conns//$'\n'/; }"
+			;;
+		esac
+		assert_eq "$(host_state "$hv" "$nqn" "$i")" live \
+			"hostcut: the host's path to cn$i before the cut"
+	done
+	mark="dnv-cn-it $TRACE $(date +%s%N)"
+	helper 1 "kmsg_mark '$mark'"
+	helper 2 "kmsg_mark '$mark'"
+	ta=$(helper "$hv" now)
+	for i in 1 2; do
+		req_set "${req[$i]}" ".nqn_to_subsystem[\"$nqn\"].allowed_hosts = []"
+		cut_converge "$i" "${req[$i]}" "$A_SS" "$HOST_NQN" "hostcut cn$i"
+		gone=$(helper "$i" \
+			"wait_nvmet_conn_gone '$nqn' '$HOST_NQN' $CUT_GONE_SECS") ||
+			die "hostcut: cn$i's nvmet connection of the host to $nqn did not go"
+		assert_eq "$(helper "$i" "allowed_hosts '$nqn'")" "" \
+			"hostcut cn$i $nqn allowed_hosts"
+		log "  hostcut: cn$i's converge took $CUT_MS ms (code $CUT_CODE), and" \
+			"the host's nvmet connection was gone ${gone} s after it"
+	done
+	for i in 1 2; do
+		ctrl=$(helper "$hv" "wait_path_gone '$nqn' '${IP[$i]}' $CUT_FAIL_SECS") ||
+			die "hostcut: vm$hv still holds its controller of $nqn on cn$i"
+		log "  hostcut: by vm$hv's clock, the host's controller of cn$i was" \
+			"gone $(secs_between "$ctrl" "$ta") s after the first converge" \
+			"began"
+		assert_eq "$(helper "$i" "kmsg_refused '$mark' '$HOST_NQN' '$nqn'")" \
+			yes "hostcut: cn$i refused the host's reconnect by admission"
+	done
+	for i in 1 2; do
+		resync_until_clean "$i" "$sp" "${cntlr[$i]}" "${CNREV[$i]}" \
+			"${req[$i]}" 30 "hostcut: cn$i's round after the cut"
+		converge_check "$i" "$sp" "${cntlr[$i]}" "${CNREV[$i]}"
+	done
 }
 
 # redund_md_check is redund's mdcheck stage (cnagent_integtest.md, Cases,

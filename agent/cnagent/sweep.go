@@ -2641,7 +2641,8 @@ func (s *CnAgentServer) sweepCntlr(
 	if !converge {
 		// A converge names its rows once its build has made them, and logs
 		// then (convergeCntlr).
-		cntlrRowVerdict(plan, read, s.snapsLackingADevice(ctx, plan), res)
+		cntlrRowVerdict(plan, read, s.snapsLackingADevice(ctx, plan), true,
+			res)
 		res.Log(ctx, s.cntlrIdAttrs(plan)...)
 	}
 	return res
@@ -2669,7 +2670,10 @@ func (s *CnAgentServer) sweepCntlr(
 // RES_STATUS_ERROR, or RES_STATUS_OK with RES_REASON_DIFFERS (a namespace
 // whose ANA group differs, or a thin pool short of its metadata device or
 // holding a metadata snapshot), as
-// "differs", the first line of the row's
+// "differs", a subsystem whose nvmet connections could not be read, or that
+// a lockdown the lockdown file shows keeps from being ended, among them,
+// and a subsystem row that reads RES_STATUS_PENDING, a stray connection
+// still there (CN33), as "pending", the first line of the row's
 // details after it. It names a row only while every row it is built on
 // reads RES_STATUS_OK (rowsUnder): a stack over a group whose array does not
 // run waits for that array, which the verdict's md names cover (the absent
@@ -2685,7 +2689,13 @@ func (s *CnAgentServer) sweepCntlr(
 // request no longer names, none of which a converge cures, save a new volume
 // refused because its header read failed: a later converge reads the
 // headers again and can then build it, and a read names that volume absent
-// (probeThin), so the re-send comes every second round at most.
+// (probeThin), so the re-send comes every second round at most. A
+// subsystem row the cut leaves in error, whose nvmet connections cannot be
+// read, or that a lockdown the lockdown file shows keeps from being ended
+// (cutErrorRow, CN33), is a name only a read gives (onRead):
+// a converge, which would only meet the same fact again, leaves it
+// unnamed, so the round after it runs a read, which names it and counts
+// it, and the worker's threshold reaction can fail the primary over.
 // A transfer's dm-linear rests on its origin's raid0 only where the
 // transfer is served (xferServed): elsewhere it is an error table, which
 // rests on nothing. The rest of the rows of legs, groups and clones, and
@@ -2698,6 +2708,7 @@ func cntlrRowVerdict(
 	plan *cntlrPlan,
 	info *pb.CntlrInfo,
 	snapsWaiting map[uint64]bool,
+	onRead bool,
 	res *agent.SweepResult,
 ) {
 	if info == nil {
@@ -2767,7 +2778,9 @@ func cntlrRowVerdict(
 	}
 	for _, ssp := range plan.subsystems {
 		subsys := info.GetSsIdToSubsystem()[ssp.ssId]
-		name(subsys)
+		if onRead || !cutErrorRow(subsys) {
+			name(subsys)
+		}
 		for _, np := range ssp.namespaces {
 			nsDev := info.GetNsIdToDmLinear()[np.nsId]
 			name(nsDev, nsDevUnder(np, info))
@@ -2790,7 +2803,9 @@ func cntlrRowVerdict(
 		dm := info.GetXferIdToDmLinear()[xp.xferId]
 		subsys := info.GetXferIdToSubsystem()[xp.xferId]
 		name(dm, under)
-		name(subsys)
+		if onRead || !cutErrorRow(subsys) {
+			name(subsys)
+		}
 		name(info.GetXferIdToNamespace()[xp.xferId], dm, subsys)
 	}
 }
@@ -2859,7 +2874,8 @@ func rowsUnder(under []*pb.ResInfo) bool {
 	return true
 }
 
-// nameCntlrRow records row in res when cntlrRowVerdict names it.
+// nameCntlrRow records row in res when cntlrRowVerdict names it: "absent",
+// "differs" or "pending", with the first line of its details.
 func nameCntlrRow(row *pb.ResInfo, res *agent.SweepResult) {
 	var err error
 	switch row.GetStatus() {
@@ -2883,6 +2899,11 @@ func nameCntlrRow(row *pb.ResInfo, res *agent.SweepResult) {
 			return
 		}
 		err = errRowDiffers
+	case pb.ResStatus_RES_STATUS_PENDING:
+		// A subsystem with a stray connection still there after the cut's
+		// wait (CN33), the one row the verdict reads that can be pending:
+		// the re-send cuts again.
+		err = errRowPending
 	default:
 		return
 	}
@@ -2910,11 +2931,12 @@ func shapeFailure(shape dmShape, targetType string) error {
 	return rowFailure(errRowDiffers, details)
 }
 
-// errRowAbsent and errRowDiffers are the failures cntlrRowVerdict records
-// for the rows it names.
+// errRowAbsent, errRowDiffers and errRowPending are the failures
+// cntlrRowVerdict records for the rows it names.
 var (
 	errRowAbsent  = errors.New("absent")
 	errRowDiffers = errors.New("differs")
+	errRowPending = errors.New("pending")
 )
 
 // sortedIds lists the keys of m in ascending order.

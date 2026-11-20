@@ -59,6 +59,21 @@ type fakeConfigfs struct {
 	// listed is every path listed, in order, so a test whose listing fails
 	// can check that the call under test reached it.
 	listed []string
+	// connStays holds the nvmet connections, by their debug directory, that
+	// a write of "fatal" to their "state" leaves in place: a connection
+	// whose end the kernel has not finished. Every other one goes at the
+	// write, its directory with it.
+	connStays map[string]bool
+	// stateRefusal refuses a write of an nvmet connection's "state" with
+	// EPERM, as a kernel under lockdown refuses to open the file.
+	stateRefusal bool
+	// removing holds files of nvmet connections whose next read or write
+	// answers EIO, as debugfs answers through a file the kernel removed
+	// after its open; the connection's directory goes with that answer, and
+	// reuse, by the same directory, names the host whose new connection
+	// takes the freed name at once.
+	removing map[string]bool
+	reuse    map[string]string
 }
 
 func newFakeConfigfs() *fakeConfigfs {
@@ -67,11 +82,71 @@ func newFakeConfigfs() *fakeConfigfs {
 			NvmetRoot + "/subsystems": true,
 			NvmetRoot + "/hosts":      true,
 		},
-		files:   map[string]string{},
-		links:   map[string]string{},
-		readErr: map[string]error{},
-		listErr: map[string]error{},
+		files:     map[string]string{},
+		links:     map[string]string{},
+		readErr:   map[string]error{},
+		listErr:   map[string]error{},
+		connStays: map[string]bool{},
+		removing:  map[string]bool{},
+		reuse:     map[string]string{},
 	}
+}
+
+// removed answers EIO for a file of a connection whose removal began after
+// its open (removing), and drops the connection, or gives its name to the
+// connection reuse names.
+func (c *fakeConfigfs) removed(path string) error {
+	if !c.removing[path] {
+		return nil
+	}
+	delete(c.removing, path)
+	dir := path[:strings.LastIndex(path, "/")]
+	c.rmdir(dir)
+	if host, ok := c.reuse[dir]; ok {
+		delete(c.reuse, dir)
+		c.dirs[dir] = true
+		c.files[dir+"/hostnqn"] = host
+		c.files[dir+"/state"] = "ready\n"
+	}
+	return &iofs.PathError{Op: "read", Path: path, Err: syscall.EIO}
+}
+
+// nvmetConn plants one nvmet connection of the subsystem nqn in the debug
+// tree, as the kernel shows it: the directory ctrl<cntlid>, its "hostnqn"
+// with no newline at its end, and its "state".
+func (c *fakeConfigfs) nvmetConn(nqn string, cntlid int, hostNqn string) {
+	dir := fmt.Sprintf("%s/%s/ctrl%d", NvmetDebugRoot, nqn, cntlid)
+	c.dirs[NvmetDebugRoot+"/"+nqn] = true
+	c.dirs[dir] = true
+	c.files[dir+"/hostnqn"] = hostNqn
+	c.files[dir+"/state"] = "ready\n"
+}
+
+// writeState models a write to an nvmet connection's "state", as nvmet's
+// debug handler and debugfs take it: a file that is not there fails with
+// ENOENT, a refusal with EPERM, anything that does not start with "fatal" in
+// fewer than 16 bytes with EINVAL; "fatal" ends the connection, whose
+// directory goes at once unless connStays holds it.
+func (c *fakeConfigfs) writeState(path, data string) error {
+	if err := c.removed(path); err != nil {
+		return err
+	}
+	if _, ok := c.files[path]; !ok {
+		return &iofs.PathError{Op: "open", Path: path, Err: syscall.ENOENT}
+	}
+	if c.stateRefusal {
+		return &iofs.PathError{Op: "open", Path: path, Err: syscall.EPERM}
+	}
+	if len(data) >= 16 || !strings.HasPrefix(data, "fatal") {
+		return &iofs.PathError{Op: "write", Path: path, Err: syscall.EINVAL}
+	}
+	dir := path[:strings.LastIndex(path, "/")]
+	if c.connStays[dir] {
+		c.files[path] = "fatal\n"
+		return nil
+	}
+	c.rmdir(dir)
+	return nil
 }
 
 func (c *fakeConfigfs) mkdir(path string) {
@@ -208,6 +283,9 @@ func (c *fakeConfigfs) osClient() *common.FakeOsClient {
 			if err, ok := c.readErr[path]; ok {
 				return "", err
 			}
+			if err := c.removed(path); err != nil {
+				return "", err
+			}
 			data, ok := c.files[path]
 			if !ok {
 				return "", fmt.Errorf("no such file: %s: %w", path,
@@ -219,6 +297,9 @@ func (c *fakeConfigfs) osClient() *common.FakeOsClient {
 			ctx context.Context, path string, data string,
 		) error {
 			c.changes = append(c.changes, "write "+path+"="+data)
+			if strings.HasPrefix(path, NvmetDebugRoot+"/") {
+				return c.writeState(path, data)
+			}
 			subsysPath := path[:strings.LastIndex(path, "/")]
 			if !c.dirs[subsysPath] {
 				return &iofs.PathError{Op: "write", Path: path,
@@ -972,5 +1053,262 @@ func TestAMissingConfigfsDirectoryIsAbsent(t *testing.T) {
 	if strings.HasPrefix(err.Error(), "list ") {
 		t.Errorf("the missing ports directory reads as a failed "+
 			"listing: %v", err)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Nvmet connections (cnagent.md CN33)
+// ---------------------------------------------------------------------------
+
+// TestListNvmetConnsReadsEachConnectionsHost: a subsystem's nvmet connections
+// are its debug directory's "ctrl" entries, each with the host NQN its
+// "hostnqn" names; another entry is no connection, a connection whose
+// "hostnqn" went before its read has gone, a subsystem with no debug
+// directory reads as absent, and a listing or a read that fails is an
+// error, never an absence.
+func TestListNvmetConnsReadsEachConnectionsHost(t *testing.T) {
+	ctx := context.Background()
+	cfs := newFakeConfigfs()
+	n := NewNvmet(cfs.osClient())
+	conns, ok, err := n.ListNvmetConns(ctx, admissionNqn)
+	if err != nil || ok || conns != nil {
+		t.Fatalf("no debug directory: ListNvmetConns = %v, %v, %v; want "+
+			"absent", conns, ok, err)
+	}
+	cfs.nvmetConn(admissionNqn, 1, admissionHostA)
+	cfs.nvmetConn(admissionNqn, 2, admissionHostB)
+	debugDir := n.SubsysDebugPath(admissionNqn)
+	// A connection whose directory still shows while its hostnqn is gone,
+	// as between the listing and the read of a connection that ends.
+	cfs.dirs[debugDir+"/ctrl3"] = true
+	cfs.files[debugDir+"/notes"] = "x"
+	conns, ok, err = n.ListNvmetConns(ctx, admissionNqn)
+	want := []NvmetConn{
+		{Name: "ctrl1", HostNqn: admissionHostA},
+		{Name: "ctrl2", HostNqn: admissionHostB},
+	}
+	if err != nil || !ok || !slices.Equal(conns, want) {
+		t.Fatalf("ListNvmetConns = %v, %v, %v; want %v", conns, ok, err,
+			want)
+	}
+
+	cfs.readErr[debugDir+"/ctrl2/hostnqn"] = errors.New("input/output error")
+	if conns, _, err := n.ListNvmetConns(ctx, admissionNqn); err == nil {
+		t.Errorf("a hostnqn read that failed gave %v and no error", conns)
+	}
+	delete(cfs.readErr, debugDir+"/ctrl2/hostnqn")
+	cfs.listErr[debugDir] = context.DeadlineExceeded
+	if conns, ok, err := n.ListNvmetConns(ctx, admissionNqn); err == nil ||
+		!errors.Is(err, context.DeadlineExceeded) {
+		t.Errorf("a listing that failed gave %v, %v, %v; want its error",
+			conns, ok, err)
+	}
+}
+
+// TestEndNvmetConnWritesFatal: ending an nvmet connection reads its host
+// again and writes "fatal" to its "state", which the kernel takes as the end
+// of the connection, and says it wrote. A directory that is gone, at the
+// read or at the write (EIO from a file removed after its open), and one
+// that now names another host, a new connection under the freed name, are
+// left alone with no error and no write to the new one; a refused write, as
+// under lockdown, is an error.
+func TestEndNvmetConnWritesFatal(t *testing.T) {
+	ctx := context.Background()
+	cfs := newFakeConfigfs()
+	n := NewNvmet(cfs.osClient())
+	debugDir := n.SubsysDebugPath(admissionNqn)
+	connA := NvmetConn{Name: "ctrl1", HostNqn: admissionHostA}
+	cfs.nvmetConn(admissionNqn, 1, admissionHostA)
+	wrote, err := n.EndNvmetConn(ctx, admissionNqn, connA)
+	if err != nil || !wrote {
+		t.Fatalf("EndNvmetConn = %v, %v; want a write", wrote, err)
+	}
+	if want := []string{"write " + debugDir + "/ctrl1/state=fatal"}; !slices.Equal(
+		cfs.changes, want) {
+		t.Fatalf("changes %v, want %v", cfs.changes, want)
+	}
+	if conns, _, err := n.ListNvmetConns(ctx, admissionNqn); err != nil ||
+		len(conns) != 0 {
+		t.Fatalf("after the end: %v, %v; want no connection", conns, err)
+	}
+	if wrote, err := n.EndNvmetConn(ctx, admissionNqn, connA); err != nil ||
+		wrote {
+		t.Errorf("a connection that has gone: EndNvmetConn = %v, %v; want "+
+			"no write and no error", wrote, err)
+	}
+
+	cfs.changes = nil
+	cfs.nvmetConn(admissionNqn, 1, admissionHostB)
+	if wrote, err := n.EndNvmetConn(ctx, admissionNqn, connA); err != nil ||
+		wrote || len(cfs.changes) != 0 {
+		t.Fatalf("a name another host took: EndNvmetConn = %v, %v, changes "+
+			"%v; want the new connection left alone", wrote, err, cfs.changes)
+	}
+
+	connB := NvmetConn{Name: "ctrl2", HostNqn: admissionHostA}
+	cfs.nvmetConn(admissionNqn, 2, admissionHostA)
+	cfs.removing[debugDir+"/ctrl2/state"] = true
+	if wrote, err := n.EndNvmetConn(ctx, admissionNqn, connB); err != nil ||
+		wrote {
+		t.Errorf("a state removed after its open: EndNvmetConn = %v, %v; "+
+			"want a connection that has gone", wrote, err)
+	}
+
+	for _, reuse := range []bool{false, true} {
+		// A host file removed after its open at the write's own read: gone,
+		// or a name another host's new connection took at once.
+		cfs.changes = nil
+		cfs.nvmetConn(admissionNqn, 4, admissionHostA)
+		cfs.removing[debugDir+"/ctrl4/hostnqn"] = true
+		if reuse {
+			cfs.reuse[debugDir+"/ctrl4"] = admissionHostB
+		}
+		wrote, err := n.EndNvmetConn(ctx, admissionNqn,
+			NvmetConn{Name: "ctrl4", HostNqn: admissionHostA})
+		if err != nil || wrote || len(cfs.changes) != 0 {
+			t.Errorf("reuse %v: a host file removed after its open: "+
+				"EndNvmetConn = %v, %v, changes %v; want no write", reuse,
+				wrote, err, cfs.changes)
+		}
+	}
+	cfs.nvmetConn(admissionNqn, 5, admissionHostA)
+	hostFile := debugDir + "/ctrl5/hostnqn"
+	cfs.readErr[hostFile] = &iofs.PathError{Op: "open", Path: hostFile,
+		Err: syscall.EACCES}
+	_, err = n.EndNvmetConn(ctx, admissionNqn,
+		NvmetConn{Name: "ctrl5", HostNqn: admissionHostA})
+	var readErr *NvmetConnReadError
+	if !errors.As(err, &readErr) {
+		t.Errorf("a host read that failed: EndNvmetConn = %v, want an "+
+			"NvmetConnReadError", err)
+	}
+	delete(cfs.readErr, hostFile)
+
+	cfs.nvmetConn(admissionNqn, 3, admissionHostA)
+	cfs.stateRefusal = true
+	_, err = n.EndNvmetConn(ctx, admissionNqn,
+		NvmetConn{Name: "ctrl3", HostNqn: admissionHostA})
+	if err == nil || !errors.Is(err, syscall.EPERM) {
+		t.Errorf("a refused write: EndNvmetConn = %v, want EPERM", err)
+	}
+}
+
+// TestListNvmetConnsReadsARemovedHostFileAgain: a "hostnqn" that answers EIO
+// was removed after its open: read once more, a file that is not there is a
+// connection that has gone, and one that answers is a new connection that
+// took the freed name, listed by its own host.
+func TestListNvmetConnsReadsARemovedHostFileAgain(t *testing.T) {
+	ctx := context.Background()
+	cfs := newFakeConfigfs()
+	n := NewNvmet(cfs.osClient())
+	debugDir := n.SubsysDebugPath(admissionNqn)
+	cfs.nvmetConn(admissionNqn, 1, admissionHostA)
+	cfs.nvmetConn(admissionNqn, 2, admissionHostA)
+	cfs.removing[debugDir+"/ctrl1/hostnqn"] = true
+	cfs.removing[debugDir+"/ctrl2/hostnqn"] = true
+	cfs.reuse[debugDir+"/ctrl2"] = admissionHostB
+	conns, ok, err := n.ListNvmetConns(ctx, admissionNqn)
+	want := []NvmetConn{{Name: "ctrl2", HostNqn: admissionHostB}}
+	if err != nil || !ok || !slices.Equal(conns, want) {
+		t.Fatalf("ListNvmetConns = %v, %v, %v; want %v", conns, ok, err, want)
+	}
+}
+
+// TestNvmetConnState: a connection's "state" reads the set bits of its
+// controller status, nothing when no bit is set, and a connection that has
+// gone reads as not there; a read that fails otherwise is an error.
+func TestNvmetConnState(t *testing.T) {
+	ctx := context.Background()
+	cfs := newFakeConfigfs()
+	n := NewNvmet(cfs.osClient())
+	state := n.SubsysDebugPath(admissionNqn) + "/ctrl1/state"
+	cfs.nvmetConn(admissionNqn, 1, admissionHostA)
+	for _, want := range []string{"ready", "ready|fatal", ""} {
+		cfs.files[state] = want + "\n"
+		if got, ok, err := n.NvmetConnState(ctx, admissionNqn, "ctrl1"); err !=
+			nil || !ok || got != want {
+			t.Errorf("NvmetConnState = %q, %v, %v; want %q", got, ok, err,
+				want)
+		}
+	}
+	cfs.readErr[state] = &iofs.PathError{Op: "open", Path: state,
+		Err: syscall.EPERM}
+	if _, _, err := n.NvmetConnState(ctx, admissionNqn, "ctrl1"); err == nil {
+		t.Errorf("a refused read gave no error")
+	}
+	delete(cfs.readErr, state)
+	cfs.removing[state] = true
+	if _, ok, err := n.NvmetConnState(ctx, admissionNqn, "ctrl1"); err !=
+		nil || ok {
+		t.Errorf("a state removed after its open: ok %v, %v; want gone",
+			ok, err)
+	}
+}
+
+// TestAdmitsOnly: the strict read of what a subsystem admits (cnagent.md
+// CN33) answers yes for a subsystem that links no host off the desired
+// list, a desired host not linked yet included, and for one that is not
+// there; no for one that links a host off the list or reads open; and an
+// error, never an answer, for a read that does not answer.
+func TestAdmitsOnly(t *testing.T) {
+	ctx := context.Background()
+	conf := SubsysConf{Nqn: admissionNqn,
+		AllowedHosts: []string{admissionHostA, admissionHostB}}
+	built := func(t *testing.T) (*fakeConfigfs, *Nvmet) {
+		cfs := newFakeConfigfs()
+		nvmet := NewNvmet(cfs.osClient())
+		if err := nvmet.EnsureSubsystem(ctx, conf); err != nil {
+			t.Fatalf("EnsureSubsystem: %v", err)
+		}
+		return cfs, nvmet
+	}
+	path := NewNvmet(newFakeConfigfs().osClient()).SubsysPath(admissionNqn)
+	for _, tc := range []struct {
+		name    string
+		fault   func(cfs *fakeConfigfs)
+		allowed []string
+		ok      bool
+		why     string
+		err     bool
+	}{
+		{"the desired list", nil, conf.AllowedHosts, true, "", false},
+		{"a desired host not linked yet", nil,
+			append(slices.Clone(conf.AllowedHosts),
+				"nqn.2024-01.io.dnv-it:host:c"),
+			true, "", false},
+		{"a host off the list", nil, []string{admissionHostA}, false,
+			"allowed host " + admissionHostB + " is not desired", false},
+		{"an open subsystem", func(cfs *fakeConfigfs) {
+			cfs.files[path+"/attr_allow_any_host"] = "1"
+		}, conf.AllowedHosts, false, `attr_allow_any_host is "1"`, false},
+		{"no subsystem", func(cfs *fakeConfigfs) {
+			for p := range cfs.dirs {
+				if strings.HasPrefix(p, path) {
+					delete(cfs.dirs, p)
+				}
+			}
+		}, nil, true, "", false},
+		{"a subsystem listing that does not answer", func(cfs *fakeConfigfs) {
+			cfs.listErr[path] = context.DeadlineExceeded
+		}, conf.AllowedHosts, false, "", true},
+		{"a listing that does not answer", func(cfs *fakeConfigfs) {
+			cfs.listErr[path+"/allowed_hosts"] = context.DeadlineExceeded
+		}, conf.AllowedHosts, false, "", true},
+		{"a read that does not answer", func(cfs *fakeConfigfs) {
+			cfs.readErr[path+"/attr_allow_any_host"] = &iofs.PathError{
+				Op: "read", Path: path, Err: syscall.EIO}
+		}, conf.AllowedHosts, false, "", true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cfs, nvmet := built(t)
+			if tc.fault != nil {
+				tc.fault(cfs)
+			}
+			ok, why, err := nvmet.AdmitsOnly(ctx, admissionNqn, tc.allowed)
+			if ok != tc.ok || why != tc.why || (err != nil) != tc.err {
+				t.Fatalf("AdmitsOnly = %v, %q, %v; want %v, %q, error %v",
+					ok, why, err, tc.ok, tc.why, tc.err)
+			}
+		})
 	}
 }

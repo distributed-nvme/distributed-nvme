@@ -313,7 +313,8 @@ func (s *CnAgentServer) convergeCntlr(
 	// a step that stopped in this pass runs again in the converge of the
 	// request the worker re-sends on that code (dnv-worker.md RW4). Nothing
 	// in this agent runs the converge again by itself.
-	cntlrRowVerdict(plan, info, s.snapsLackingADevice(ctx, plan), sweep)
+	cntlrRowVerdict(plan, info, s.snapsLackingADevice(ctx, plan), false,
+		sweep)
 	sweep.Log(ctx, s.cntlrIdAttrs(plan)...)
 	return info, sweep
 }
@@ -649,12 +650,43 @@ func (s *CnAgentServer) build(
 			s.reportCloneSuppressed(st, cp, info)
 		}
 	}
+	// The list step of each pool subsystem and its cut (CN33) come before
+	// the transfers' device steps and the ns-dev loop: a subsystem that is
+	// not safe has every namespace moved
+	// inaccessible at once, and the last loop below leaves them there, so no
+	// device step of the pass puts data under a namespace of it; one whose
+	// move failed keeps what its device maps (undarkened), and a serving
+	// one keeps serving until a re-send's move holds (darkenSubsys; CN33,
+	// Known limits).
+	// cutBudget: the waits of this pass's cuts, of the transfers' subsystems
+	// and the pool's alike.
+	cutBudget := s.newStrayCutBudget()
+	lists := make(map[uint64]listStep, len(plan.subsystems))
+	if plan.wantAny {
+		for _, ssp := range plan.subsystems {
+			list := s.stepSubsysList(ctx, cutBudget, s.subsysConf(plan, ssp))
+			ssp.safe = list.safe
+			if !list.safe {
+				nsIdxs := make([]int, 0, len(ssp.namespaces))
+				for _, np := range ssp.namespaces {
+					nsIdxs = append(nsIdxs, np.nsIdx)
+				}
+				failed := s.darkenSubsys(ctx, ssp.nqn, nsIdxs)
+				for _, np := range ssp.namespaces {
+					np.undarkened = failed[np.nsIdx]
+				}
+			}
+			lists[ssp.ssId] = list
+		}
+	}
 	// xferSteps: what ensureXfer did with each transfer, which decides its
-	// ANA move and the rows written after the transfer ANA loop.
+	// ANA move and the rows written after the transfer ANA loop. Each
+	// transfer's list step and cut come before its device step (ensureXfer).
 	xferSteps := make(map[uint64]xferStep, len(plan.xfers))
 	if plan.wantAny {
 		for _, xp := range plan.xfers {
-			xferSteps[xp.xferId] = s.ensureXfer(ctx, st, plan, xp, info)
+			xferSteps[xp.xferId] = s.ensureXfer(
+				ctx, st, plan, xp, info, cutBudget)
 		}
 	}
 
@@ -670,9 +702,15 @@ func (s *CnAgentServer) build(
 			key := resKeyOf(resKeyNsDevFmt, np.nsId)
 			if err == nil && outcome.held() {
 				// In the probe's words, so the converge and a read
-				// report the held ns-dev alike.
+				// report the held ns-dev alike: a read knows no hold, and
+				// names one whose namespace the pass could not make
+				// inaccessible as not moved (probeNsDev, CN33).
+				details := detailsNsDevNotDesired
+				if np.undarkened {
+					details = notDarkDetails(np.ss.nqn, np.nsIdx)
+				}
 				info.NsIdToDmLinear[np.nsId] = st.tracker.Err(
-					key, np.devName, detailsNsDevNotDesired)
+					key, np.devName, details)
 				continue
 			}
 			// A deferred namespace is built exactly as the effective plan
@@ -694,7 +732,8 @@ func (s *CnAgentServer) build(
 		// the ANA loop (reportNamespaces).
 		nsErrs := make(map[uint64]error, len(plan.namespaces))
 		for _, ssp := range plan.subsystems {
-			s.ensureSubsystem(ctx, st, plan, ssp, info, nsErrs)
+			s.ensureSubsystem(ctx, st, plan, ssp, info, nsErrs,
+				lists[ssp.ssId])
 		}
 
 		// ANA rewrites to optimized last — architecture.md, Failover,
@@ -730,8 +769,12 @@ func (s *CnAgentServer) build(
 		// suspended device still sits over the old ns-dev
 		// (ensureNamespaceObject) — and the move would send host IO to it.
 		// Its row names the step, so the worker's re-send runs it again.
+		// A namespace of a subsystem that is not safe in the pass was moved
+		// inaccessible right after its list step, before the ns-dev loop and
+		// before a transfer's device step (darkenSubsys), and stays there to
+		// the pass's end (CN33).
 		for _, np := range plan.namespaces {
-			if np.anaGrpId == common.AnaGrpIdInaccessible {
+			if np.anaGrpId == common.AnaGrpIdInaccessible || !np.ss.safe {
 				continue
 			}
 			outcome := outcomes[np.nsId]
@@ -739,8 +782,7 @@ func (s *CnAgentServer) build(
 			if !move {
 				continue
 			}
-			if nsErrs[np.nsId] != nil &&
-				grpId == common.AnaGrpIdOptimized {
+			if nsErrs[np.nsId] != nil && grpId == common.AnaGrpIdOptimized {
 				continue
 			}
 			if err := s.setAna(
@@ -763,10 +805,13 @@ func (s *CnAgentServer) build(
 		// goes inaccessible when its device is an error table, and keeps its
 		// group otherwise. A failed export step, a device left short and a
 		// move that failed are each a row both channels name (CN17, CN30),
-		// as for the namespaces.
+		// as for the namespaces. A transfer whose subsystem is not safe in
+		// the pass was moved inaccessible right after its list step, before
+		// its device step (ensureXfer), and stays there (CN33).
 		for _, xp := range plan.xfers {
 			step := xferSteps[xp.xferId]
-			if plan.xferAnaGrpId(xp) == common.AnaGrpIdInaccessible {
+			if plan.xferAnaGrpId(xp) == common.AnaGrpIdInaccessible ||
+				!xp.safe {
 				continue
 			}
 			grpId, move := plan.xferAnaMove(xp, step.outcome)

@@ -2,6 +2,7 @@ package cnagent
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strconv"
 	"strings"
@@ -262,6 +263,13 @@ func (s *CnAgentServer) convergeNsDev(
 	np = now
 	hold := np.td != nil && np.backingName == np.td.raid0Name &&
 		lingering.holds(np.td.raid0Name)
+	// A namespace its unsafe subsystem's move could not make inaccessible
+	// gets no data put under it (CN33): its ns-dev is made or changed only to
+	// park it on the td's dm-error, or to put the read-only level's
+	// error-writes table over the device it maps (wrapsLive), and otherwise
+	// keeps what it maps.
+	fenced := np.undarkened &&
+		!(np.td != nil && np.backingName == np.td.errorName)
 	// The td's dm-error is ensured again here, probe-first: the build's td
 	// loop ensures it earlier in the pass (CN15), and this retries it on a
 	// pass in which that step failed.
@@ -281,6 +289,9 @@ func (s *CnAgentServer) convergeNsDev(
 		return nsDevFailed, err
 	}
 	if dev == nil {
+		if fenced && !hold {
+			return nsDevFailed, errors.New(notDarkDetails(np.ss.nqn, np.nsIdx))
+		}
 		if hold {
 			// Created parked, on the td's dm-error.
 			if err := s.ensureDmError(
@@ -302,6 +313,11 @@ func (s *CnAgentServer) convergeNsDev(
 		targets, tableErr := s.dm.Table(ctx, np.devName)
 		if tableErr != nil {
 			return nsDevFailed, tableErr
+		}
+		if fenced && !nsDevTableMatches(targets, np, devNo) &&
+			!(hold && !onDevice(targets, devNo)) &&
+			!wrapsLive(np, targets, devNo) {
+			return nsDevFailed, errors.New(notDarkDetails(np.ss.nqn, np.nsIdx))
 		}
 		if !nsDevTableMatches(targets, np, devNo) || dev.ReadOnly {
 			if hold && !onDevice(targets, devNo) {
@@ -346,6 +362,17 @@ func (s *CnAgentServer) convergeNsDev(
 	return outcome, nil
 }
 
+// wrapsLive reports whether np's table only puts the read-only level's
+// error-writes table over the device the live table, targets, already
+// maps in full: one target over devNo, np's own length. It moves no data
+// under a namespace, so the fence of one whose move to inaccessible failed
+// lets it through (CN33); a grow, which would expose new blocks, is no such
+// wrap.
+func wrapsLive(np *nsPlan, targets []common.DmTarget, devNo string) bool {
+	return np.flakey && len(targets) == 1 && onDevice(targets, devNo) &&
+		targets[0].Length == np.sectors
+}
+
 // failedNsDev is the outcome of an ns-dev step that failed:
 // nsDevFailedParked when the ns-dev's live table, read after the failure,
 // maps the td's dm-error (nsDevParked), and nsDevFailed otherwise — a table
@@ -385,14 +412,19 @@ func (s *CnAgentServer) nsDevParked(
 // nsRowAnaGrpId is the group a namespace row compares the namespace's
 // "ana_grpid" with, on both channels alike (CN28): nsAnaWanted for whether
 // the ns-dev's live table maps the td's dm-error (nsDevParked) — read from a
-// read's reading, or by a converge after its ANA loop. So the two
-// channels decide the row by one rule from what the node holds, whatever the
-// converge's ns-dev step did.
+// read's reading, or by a converge after its ANA loop — and the
+// inaccessible group while its subsystem is not safe in the pass
+// (ssPlan.safe, CN33), where every namespace of the subsystem is kept
+// inaccessible. So the two channels decide the row by one rule from what
+// the node holds, whatever the converge's ns-dev step did.
 func (s *CnAgentServer) nsRowAnaGrpId(
 	ctx context.Context,
 	rd *cnReading,
 	np *nsPlan,
 ) int {
+	if !np.ss.safe {
+		return common.AnaGrpIdInaccessible
+	}
 	if np.anaGrpId == common.AnaGrpIdInaccessible || !np.wantsServing() {
 		// The table cannot change the group nsAnaWanted answers, so it is
 		// not read.
@@ -589,11 +621,13 @@ func (s *CnAgentServer) nsConf(np *nsPlan, anaGrpId int) agent.NsConf {
 }
 
 // ensureNamespaceObject creates or converges one nvmet namespace **without**
-// moving its ANA group: an enabled namespace keeps the group it has and the
-// CN9 final pass promotes it, and one that is not enabled — a fresh one, or
-// one a step left behind between its `mkdir` and its enable — gets
-// `inaccessible` before EnsureNamespace enables it, never the kernel's
-// default group. Folding the
+// moving the ANA group of one that serves: an enabled namespace whose device
+// and identity match the plan keeps the group it has and the CN9 final pass
+// promotes it, and one that is not enabled — a fresh one, or one a step left
+// behind between its `mkdir` and its enable — gets `inaccessible` before
+// EnsureNamespace enables it, never the kernel's default group; so does one
+// the step disables to enable it again under another device or identity, a
+// new namespace (CN16). Folding the
 // ANA write in here would both break the build's "objects first, ANA last"
 // order (CN9's ANA rewrite to optimized comes last, as ensureXferNamespace
 // keeps it too) and make an idempotent re-apply write `ana_grpid` twice.
@@ -611,6 +645,9 @@ func (s *CnAgentServer) ensureNamespaceObject(
 			return fmt.Errorf("namespace %s/%d is not disabled: %w",
 				np.ss.nqn, np.nsIdx, err)
 		}
+		// Enabled again under another device or identity, it is a new
+		// namespace (CN16): inaccessible until the last loop moves it.
+		conf.AnaGrpId = common.AnaGrpIdInaccessible
 	}
 	return s.nvmet.EnsureNamespace(ctx, conf)
 }
@@ -645,7 +682,10 @@ func (s *CnAgentServer) disableSafe(ctx context.Context, devicePath string) erro
 // enabled namespace has, and `inaccessible` for one that is absent or not
 // enabled, which EnsureNamespace writes before its enable. A namespace that
 // serves hosts is thus never moved by its object's step, and one that does
-// not yet serve starts where a host queues.
+// not yet serve starts where a host queues. A namespace the step disables
+// to enable it again under another device or identity is a new namespace:
+// its step writes `inaccessible` (ensureNamespaceObject,
+// ensureXferNamespace), so only the build's last loop moves it (CN16, CN17).
 func objectAnaGrpId(state *agent.NsState) int {
 	if state.Exists && state.Enabled && state.AnaGrpId != 0 {
 		return state.AnaGrpId
@@ -653,10 +693,14 @@ func objectAnaGrpId(state *agent.NsState) int {
 	return common.AnaGrpIdInaccessible
 }
 
-// ensureSubsystem converges one host-facing subsystem, its namespaces and its
-// port link. A namespace that left `ns_list` while the subsystem stays is not
-// its business: CN21's L1 removes it, inaccessible first, and only from an
-// enumeration that answered — and nothing does under a subsystem whose NQN
+// ensureSubsystem converges one host-facing subsystem's namespaces and its
+// port link, after the ns-dev loop, from its list step, which the build ran
+// before the ns-dev loop (list, stepSubsysList; CN33): a list step that
+// failed steps neither, and the row is its error; otherwise the row reads
+// PENDING or ERROR while a cut that did not hold is all that is wrong with
+// it (linkRow). A namespace that left `ns_list` while the subsystem stays
+// is not its business: CN21's L1 removes it, inaccessible first, and only
+// from an enumeration that answered — and nothing does under a subsystem whose NQN
 // decodes as a dnv kind other than a transfer of this cluster, which the
 // sweep never attributes, claimed or not, while one that carries the dnv
 // prefix but decodes to nothing is attributed by the held request that names
@@ -673,12 +717,12 @@ func (s *CnAgentServer) ensureSubsystem(
 	sp *ssPlan,
 	info *pb.CntlrInfo,
 	nsErrs map[uint64]error,
+	list listStep,
 ) {
 	ssKey := resKeyOf(resKeySubsysFmt, sp.ssId)
-	if err := s.nvmet.EnsureSubsystem(
-		ctx, s.subsysConf(plan, sp)); err != nil {
+	if list.err != nil {
 		info.SsIdToSubsystem[sp.ssId] = st.tracker.Err(
-			ssKey, sp.nqn, err.Error())
+			ssKey, sp.nqn, list.err.Error())
 		return
 	}
 	for _, np := range sp.namespaces {
@@ -686,12 +730,14 @@ func (s *CnAgentServer) ensureSubsystem(
 	}
 	err := s.nvmet.EnsurePortLink(ctx, s.port.PortId, sp.nqn, s.port.QidMax)
 	info.SsIdToSubsystem[sp.ssId] = s.linkRow(
-		ctx, ssKey, sp.nqn, s.subsysConf(plan, sp), st, err)
+		ctx, ssKey, sp.nqn, s.subsysConf(plan, sp), st, err, list.cut)
 }
 
 // linkRow is a subsystem's row after its port link step: OK when the step
-// held, the read's "the port is not there" when the node's port itself is
-// gone, which a SyncupCntlr cannot make and the cntlr's verdict leaves out
+// held, PENDING or ERROR with the cut's text while the cut has not held
+// (exportRow, CN33), the
+// read's "the port is not there" when the node's port itself is gone, which
+// a SyncupCntlr cannot make and the cntlr's verdict leaves out
 // (cntlrRowVerdict), and the step's error otherwise.
 func (s *CnAgentServer) linkRow(
 	ctx context.Context,
@@ -700,14 +746,17 @@ func (s *CnAgentServer) linkRow(
 	conf agent.SubsysConf,
 	st *cntlrState,
 	err error,
+	cut cutResult,
 ) *pb.ResInfo {
 	if err != nil {
 		if _, details := s.probeExport(ctx, conf); details ==
 			detailsPortMissing {
 			return st.tracker.Err(key, nqn, detailsPortMissing)
 		}
+		return st.tracker.Err(key, nqn, err.Error())
 	}
-	return st.tracker.FromErr(key, nqn, "", err)
+	status, details := exportRow(pb.ResStatus_RES_STATUS_OK, "", cut)
+	return st.tracker.Set(key, nqn, status, details)
 }
 
 // reportNamespaces writes a converge's namespace rows after its ANA loop
@@ -784,18 +833,35 @@ func (s *CnAgentServer) probeNsDev(
 	if err != nil {
 		return pb.ResStatus_RES_STATUS_ERROR, err.Error()
 	}
-	if dev == nil {
-		return pb.ResStatus_RES_STATUS_MISSING, ""
-	}
-	if np.backingName == "" {
+	if np.backingName == "" && dev != nil {
 		return pb.ResStatus_RES_STATUS_ERROR, "namespace has no thin device"
 	}
 	// The backing the converge installs, read the same way (nsDevNow): a
 	// rule-5 ns-dev parked because its dm-clone does not serve is where CN16
 	// wants it, and reports as the converge did.
-	np, err = s.nsDevNow(ctx, np)
-	if err != nil {
-		return pb.ResStatus_RES_STATUS_ERROR, err.Error()
+	if np.backingName != "" {
+		if np, err = s.nsDevNow(ctx, np); err != nil {
+			return pb.ResStatus_RES_STATUS_ERROR, err.Error()
+		}
+	}
+	// A namespace of an unsafe subsystem that is not inaccessible gets no
+	// change but a park, or the read-only level's error-writes table over
+	// the device it maps, as the converge's ns-dev step makes none (CN33).
+	fenced := func() bool {
+		return !np.ss.safe && np.backingName != "" &&
+			!(np.td != nil && np.backingName == np.td.errorName) &&
+			s.isDark(ctx, np.ss.nqn, np.nsIdx) != nil
+	}
+	if dev == nil {
+		if fenced() {
+			// The backing's number first, as the converge reads it.
+			if _, err := s.dmDevNo(ctx, rd, np.backingName); err != nil {
+				return pb.ResStatus_RES_STATUS_ERROR, err.Error()
+			}
+			return pb.ResStatus_RES_STATUS_ERROR,
+				notDarkDetails(np.ss.nqn, np.nsIdx)
+		}
+		return pb.ResStatus_RES_STATUS_MISSING, ""
 	}
 	devNo, err := s.dmDevNo(ctx, rd, np.backingName)
 	if err != nil {
@@ -806,6 +872,10 @@ func (s *CnAgentServer) probeNsDev(
 		return pb.ResStatus_RES_STATUS_ERROR, err.Error()
 	}
 	if !nsDevTableMatches(targets, np, devNo) {
+		if !wrapsLive(np, targets, devNo) && fenced() {
+			return pb.ResStatus_RES_STATUS_ERROR,
+				notDarkDetails(np.ss.nqn, np.nsIdx)
+		}
 		return pb.ResStatus_RES_STATUS_ERROR, detailsNsDevNotDesired
 	}
 	// No ns-dev is ever expected dm-suspended, whatever the plan says: an
@@ -821,27 +891,50 @@ func (s *CnAgentServer) probeNsDev(
 	return pb.ResStatus_RES_STATUS_OK, ""
 }
 
-// probeExport checks one nvmet subsystem and its port link.
+// probeExport checks one nvmet subsystem's configfs and its port link, and
+// reads none of its nvmet connections (readExport).
 func (s *CnAgentServer) probeExport(
 	ctx context.Context,
 	conf agent.SubsysConf,
 ) (pb.ResStatus, string) {
+	status, details, ok := s.probeSubsys(ctx, conf)
+	if !ok {
+		return status, details
+	}
+	return s.probePortLink(ctx, conf.Nqn)
+}
+
+// probeSubsys checks one nvmet subsystem's configfs: there, with the desired
+// attributes and allowed hosts (agent.Nvmet.ProbeSubsystem). ok says it is
+// as desired, and otherwise the status and details are its row's.
+func (s *CnAgentServer) probeSubsys(
+	ctx context.Context,
+	conf agent.SubsysConf,
+) (pb.ResStatus, string, bool) {
 	exists, err := s.nvmet.SubsysExists(ctx, conf.Nqn)
 	if err != nil {
-		return pb.ResStatus_RES_STATUS_ERROR, err.Error()
+		return pb.ResStatus_RES_STATUS_ERROR, err.Error(), false
 	}
 	if !exists {
-		return pb.ResStatus_RES_STATUS_MISSING, ""
+		return pb.ResStatus_RES_STATUS_MISSING, "", false
 	}
 	ok, details, err := s.nvmet.ProbeSubsystem(ctx, conf)
 	if err != nil {
-		return pb.ResStatus_RES_STATUS_ERROR, err.Error()
+		return pb.ResStatus_RES_STATUS_ERROR, err.Error(), false
 	}
 	if !ok {
-		return pb.ResStatus_RES_STATUS_ERROR, details
+		return pb.ResStatus_RES_STATUS_ERROR, details, false
 	}
+	return pb.ResStatus_RES_STATUS_OK, "", true
+}
+
+// probePortLink checks one subsystem's link to this agent's port.
+func (s *CnAgentServer) probePortLink(
+	ctx context.Context,
+	nqn string,
+) (pb.ResStatus, string) {
 	linked, portThere, err := s.nvmet.PortLinkedState(
-		ctx, s.port.PortId, conf.Nqn)
+		ctx, s.port.PortId, nqn)
 	switch {
 	case err != nil:
 		return pb.ResStatus_RES_STATUS_ERROR, err.Error()

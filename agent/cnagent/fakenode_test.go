@@ -362,7 +362,36 @@ type fakeNode struct {
 	// kernel 7.0 stamps the directory on every lookup of one of its
 	// attribute files (Nvmet.SubsysMtime).
 	stampAttrs func() time.Time
+
+	// nvmetDebug models nvmet's debug directory (agent.NvmetDebugRoot), the
+	// target side of the node, kept apart from the NVMe host model above:
+	// while set, the directory is there, a configfs subsystem's mkdir makes
+	// the subsystem's debug directory and its rmdir drops it with every
+	// nvmet connection in it, as the kernel makes and frees them. A test
+	// sets it with withNvmetDebug and plants connections with connectNvmet;
+	// a connection is its directory ctrl<cntlid> with "hostnqn" (no newline
+	// at its end) and "state".
+	nvmetDebug bool
+	// connEnds says, by a connection's directory, how many listings of its
+	// subsystem's debug directory still show it after a write of "fatal"
+	// to its "state" (writeConnState), connEndsNever for one that never
+	// goes; without an entry it goes at the write. connEnding counts those
+	// listings down.
+	connEnds   map[string]int
+	connEnding map[string]int
+	// connReuse names, by a connection's directory, the host whose new
+	// connection takes the same name the moment the old one goes, as the
+	// kernel gives a freed cntlid again at once.
+	connReuse map[string]string
+	// connEIO holds files of nvmet connections whose removal began after
+	// their open: the next read or write of one answers EIO, as debugfs's
+	// proxy does, and the connection's directory goes with that answer.
+	connEIO map[string]bool
 }
+
+// connEndsNever is the connEnds entry of a connection a write of "fatal"
+// never ends.
+const connEndsNever = -1
 
 type fakeDm struct {
 	table string
@@ -569,6 +598,11 @@ func newFakeNode() *fakeNode {
 		cancelCmd: make(map[string]context.CancelFunc),
 		dirStat:   make(map[string]string),
 		mtimes:    make(map[string]time.Time),
+
+		connEnds:   make(map[string]int),
+		connEnding: make(map[string]int),
+		connReuse:  make(map[string]string),
+		connEIO:    make(map[string]bool),
 	}
 	f.dirs[sysfsNvmeSubsysDir] = true
 	f.dirs[sysfsNvmeCtrlDir] = true
@@ -828,6 +862,9 @@ func (f *fakeNode) fileAnswer(path string) (string, error) {
 	if err := f.readHookErr(path); err != nil {
 		return "", err
 	}
+	if err := f.connRemoved(path); err != nil {
+		return "", err
+	}
 	if err, ok := f.errFiles[path]; ok {
 		return "", err
 	}
@@ -943,6 +980,7 @@ func (f *fakeNode) dirAnswer(line, path string) ([]string, error) {
 			fs.ErrNotExist)
 	}
 	f.countHeadListing(path)
+	f.countConnListing(path)
 	return f.children(path), nil
 }
 
@@ -1122,6 +1160,9 @@ func (f *fakeNode) writeFileDirect(
 		if strings.Contains(path+"="+data, key) {
 			return errors.New(refusal)
 		}
+	}
+	if strings.HasPrefix(path, agent.NvmetDebugRoot+"/") {
+		return f.writeConnState(path, data)
 	}
 	if !f.dirs[parentDir(path)] {
 		return fmt.Errorf("no such directory: %s", parentDir(path))
@@ -1629,7 +1670,9 @@ func (f *fakeNode) cmdMkdir(args []string) (string, int) {
 }
 
 // autoCreate mirrors configfs: creating an nvmet port or subsystem directory
-// makes the kernel populate its standard subdirectories.
+// makes the kernel populate its standard subdirectories, a subsystem its
+// debug directory, while the fake models one (nvmetDebug), and a namespace
+// its attributes at nvmet's defaults.
 func (f *fakeNode) autoCreate(path string) {
 	rest, ok := strings.CutPrefix(path, agent.NvmetRoot+"/")
 	if !ok {
@@ -1647,6 +1690,152 @@ func (f *fakeNode) autoCreate(path string) {
 		for _, child := range []string{"namespaces", "allowed_hosts"} {
 			f.dirs[path+"/"+child] = true
 		}
+		if f.nvmetDebug {
+			f.dirs[agent.NvmetDebugRoot+"/"+parts[1]] = true
+		}
+	case len(parts) == 4 && parts[0] == "subsystems" &&
+		parts[2] == "namespaces":
+		// nvmet_ns_alloc's defaults: not enabled, in group 1, with no
+		// device and a zero identity, so a step cut off after the mkdir
+		// leaves what the kernel leaves.
+		zero := "00000000-0000-0000-0000-000000000000\n"
+		f.files[path+"/enable"] = "0\n"
+		f.files[path+"/ana_grpid"] = "1\n"
+		f.files[path+"/device_path"] = agent.NsDevicePathUnset + "\n"
+		f.files[path+"/device_uuid"] = zero
+		f.files[path+"/device_nguid"] = zero
+	}
+}
+
+// withNvmetDebug turns the model of nvmet's debug directory on (nvmetDebug),
+// with a debug directory for every configfs subsystem the node holds.
+func (f *fakeNode) withNvmetDebug() {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.nvmetDebug = true
+	f.dirs[agent.NvmetDebugRoot] = true
+	prefix := agent.NvmetRoot + "/subsystems/"
+	for dir := range f.dirs {
+		if nqn, ok := strings.CutPrefix(dir, prefix); ok &&
+			!strings.Contains(nqn, "/") {
+			f.dirs[agent.NvmetDebugRoot+"/"+nqn] = true
+		}
+	}
+}
+
+// connectNvmet plants a host's nvmet connection to the subsystem nqn under
+// the lowest cntlid no connection of it holds, and returns the connection's
+// directory name. The subsystem must have its debug directory.
+func (f *fakeNode) connectNvmet(nqn, hostNqn string) string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	debugDir := agent.NvmetDebugRoot + "/" + nqn
+	if !f.dirs[debugDir] {
+		panic("connectNvmet: no debug directory " + debugDir)
+	}
+	for cntlid := 1; ; cntlid++ {
+		name := fmt.Sprintf("ctrl%d", cntlid)
+		if !f.dirs[debugDir+"/"+name] {
+			f.plantConn(debugDir+"/"+name, hostNqn)
+			return name
+		}
+	}
+}
+
+// plantConn makes the connection directory dir of host hostNqn. The caller
+// holds f.mu.
+func (f *fakeNode) plantConn(dir, hostNqn string) {
+	f.dirs[dir] = true
+	f.files[dir+"/hostnqn"] = hostNqn
+	f.files[dir+"/state"] = "ready\n"
+}
+
+// dropConn frees a connection's directory, as the kernel does at the
+// connection's last reference, and gives its name to the connection
+// connReuse names. The caller holds f.mu.
+func (f *fakeNode) dropConn(dir string) {
+	delete(f.dirs, dir)
+	delete(f.files, dir+"/hostnqn")
+	delete(f.files, dir+"/state")
+	delete(f.connEnding, dir)
+	if hostNqn, ok := f.connReuse[dir]; ok {
+		delete(f.connReuse, dir)
+		f.plantConn(dir, hostNqn)
+	}
+}
+
+// nvmetConnsOf lists the subsystem nqn's nvmet connections as
+// "<name>=<host>", sorted, for a test's assertions.
+func (f *fakeNode) nvmetConnsOf(nqn string) []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	debugDir := agent.NvmetDebugRoot + "/" + nqn
+	var out []string
+	for _, name := range f.children(debugDir) {
+		if host, ok := f.files[debugDir+"/"+name+"/hostnqn"]; ok {
+			out = append(out, name+"="+host)
+		}
+	}
+	return out
+}
+
+// writeConnState models a write to a file of nvmet's debug directory, as
+// debugfs and nvmet's handler of a connection's "state" take it: a file
+// that is not there fails wrapping fs.ErrNotExist, as the production
+// client's open does; a write to any file but a "state", or one that does
+// not start with "fatal" in fewer than 16 bytes, fails EINVAL; "fatal" ends
+// the connection, whose directory goes at once, or after the listings
+// connEnds names, or never. The caller holds f.mu.
+func (f *fakeNode) writeConnState(path, data string) error {
+	if err := f.connRemoved(path); err != nil {
+		return err
+	}
+	if _, ok := f.files[path]; !ok {
+		return &fs.PathError{Op: "open", Path: path, Err: syscall.ENOENT}
+	}
+	if !strings.HasSuffix(path, "/state") || len(data) >= 16 ||
+		!strings.HasPrefix(data, "fatal") {
+		return &fs.PathError{Op: "write", Path: path, Err: syscall.EINVAL}
+	}
+	dir := parentDir(path)
+	f.files[path] = "fatal\n"
+	switch n, ok := f.connEnds[dir]; {
+	case !ok || n == 0:
+		f.dropConn(dir)
+	case n > 0:
+		if _, ending := f.connEnding[dir]; !ending {
+			f.connEnding[dir] = n
+		}
+	}
+	return nil
+}
+
+// connRemoved answers EIO for a file of a connection whose removal began
+// after its open (connEIO), and frees the connection's directory with it.
+// The caller holds f.mu.
+func (f *fakeNode) connRemoved(path string) error {
+	if !f.connEIO[path] {
+		return nil
+	}
+	delete(f.connEIO, path)
+	f.dropConn(parentDir(path))
+	return &fs.PathError{Op: "read", Path: path, Err: syscall.EIO}
+}
+
+// countConnListing counts one listing of a subsystem's debug directory
+// against each of its connections whose end connEnds delays, and frees the
+// one whose listings are spent before this listing answers. The caller
+// holds f.mu.
+func (f *fakeNode) countConnListing(path string) {
+	for dir, left := range f.connEnding {
+		if parentDir(dir) != path {
+			continue
+		}
+		if left == 0 {
+			f.dropConn(dir)
+			continue
+		}
+		f.connEnding[dir] = left - 1
 	}
 }
 
@@ -1654,6 +1843,22 @@ func (f *fakeNode) cmdRmdir(args []string) (string, int) {
 	path := args[len(args)-1]
 	if !f.dirs[path] {
 		return "", 1
+	}
+	if nqn, ok := strings.CutPrefix(path, agent.NvmetRoot+"/subsystems/"); ok &&
+		f.nvmetDebug && !strings.Contains(nqn, "/") {
+		// The kernel frees the subsystem's debug directory with it, every
+		// nvmet connection in it gone by then.
+		debugDir := agent.NvmetDebugRoot + "/" + nqn
+		for entry := range f.dirs {
+			if entry == debugDir || strings.HasPrefix(entry, debugDir+"/") {
+				delete(f.dirs, entry)
+			}
+		}
+		for entry := range f.files {
+			if strings.HasPrefix(entry, debugDir+"/") {
+				delete(f.files, entry)
+			}
+		}
 	}
 	prefix := path + "/"
 	for entry := range f.dirs {
