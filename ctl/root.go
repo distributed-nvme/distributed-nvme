@@ -189,8 +189,9 @@ func NewRootCmd() *cobra.Command {
 		Short: "dnv operator CLI",
 		Long: "dnvctl issues every RPC of the dnv Gateway service, one " +
 			"command per RPC. It prints one canonical JSON document per " +
-			"invocation on stdout and never issues an RPC the operator did " +
-			"not type.",
+			"invocation on stdout, save cluster get-status, which prints a " +
+			"table unless --json is given, and never issues an RPC the " +
+			"operator did not type.",
 		// Usage text on an RPC failure would bury the one line that matters;
 		// Execute prints every error itself, so cobra must print none.
 		SilenceUsage:  true,

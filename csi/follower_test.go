@@ -200,6 +200,9 @@ func TestFollowerRetriesAPassWhoseLogReadFailed(t *testing.T) {
 // TestFollowerDropsEveryDiscoveryConnection pins csi.md CSI16: the last
 // unstage drops every discovery connection, going on past one whose drop
 // fails, and answers that failure, so the kubelet calls the unstage again.
+// The drop that fails is the first one the unstage meets, whichever cdc the
+// stage connected first, so a drop that stopped at the first failure would
+// leave the other one too.
 func TestFollowerDropsEveryDiscoveryConnection(t *testing.T) {
 	n, f := newTestNode(t)
 	ctx := t.Context()
@@ -212,12 +215,19 @@ func TestFollowerDropsEveryDiscoveryConnection(t *testing.T) {
 	req := stageReq(blockCap(rwo))
 	_, err := n.NodeStageVolume(ctx, req)
 	wantCode(t, err, codes.OK, "stage with two cdcs")
-	failing := ctrlTo(f, common.NvmeDiscoveryNqn, fakeCdcA)
-	if failing == "" || len(f.paths(common.NvmeDiscoveryNqn)) != 2 {
-		t.Fatalf("discovery connections %v, want both cdcs",
-			f.paths(common.NvmeDiscoveryNqn))
+	if got := f.paths(common.NvmeDiscoveryNqn); len(got) != 2 {
+		t.Fatalf("discovery connections %v, want both cdcs", got)
 	}
+	// The node's controller listing is in name order (ctrlNames), the
+	// order the unstage meets them in.
+	var failing, failingCdc string
 	f.mu.Lock()
+	for _, name := range f.ctrlNames() {
+		if c := f.ctrls[name]; c.subNqn == common.NvmeDiscoveryNqn {
+			failing, failingCdc = name, c.key()
+			break
+		}
+	}
 	f.disconnectFail[failing] = true
 	f.mu.Unlock()
 	unstage := &csi.NodeUnstageVolumeRequest{
@@ -230,8 +240,9 @@ func TestFollowerDropsEveryDiscoveryConnection(t *testing.T) {
 	if got := f.paths(nqn); len(got) != 0 {
 		t.Errorf("paths %v after the unstage, want none", got)
 	}
-	if got := f.paths(common.NvmeDiscoveryNqn); strings.Join(got, " ") != fakeCdcA {
-		t.Errorf("discovery connections %v, want the failing one alone left", got)
+	if got := f.paths(common.NvmeDiscoveryNqn); strings.Join(got, " ") != failingCdc {
+		t.Errorf("discovery connections %v, want the failing one to %s alone left",
+			got, failingCdc)
 	}
 	// The kubelet's repeat drops it once the disconnect works.
 	f.mu.Lock()

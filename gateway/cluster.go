@@ -417,10 +417,11 @@ func (s *Server) AdvanceClusterIds(
 // invariant, so the reads may straddle a write and a node created or deleted
 // between them is the kind of change such a read is allowed to straddle.
 // Each entry carries the counts and flags its record holds, with the pointer
-// list reduced to its count. Each record is decoded through the etcd door,
-// which at the debug log level logs it as it logs every decoded value
-// (log.md, etcd), so on a cluster at the node ceilings this is a heavy read
-// meant for an occasional poll.
+// list reduced to its count. The two ranges read every node record of the
+// cluster, so on a cluster at the node ceilings this is a heavy read meant
+// for an occasional poll; each record is decoded through the etcd door,
+// which logs it only at the debug log level, as it logs every decoded value
+// (log.md, etcd).
 func (s *Server) GetClusterCapacity(
 	ctx context.Context,
 	req *pb.GetClusterCapacityRequest,

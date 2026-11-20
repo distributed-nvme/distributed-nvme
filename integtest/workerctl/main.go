@@ -1114,14 +1114,16 @@ func cmdPing(g *globals, args []string) {
 // SPD13/CLD11 budgets a suite may want to size a case against, and
 // MaxSliceCntPerSp is the slice ceiling — CreateClone's src_slice_cnt bound —
 // that the gateway suite creates a clone at, which is why that suite must
-// read it rather than type it. The next five are the timers a suite sizes
+// read it rather than type it. The next six are the timers a suite sizes
 // its waits by: the default check interval a cluster created without one
 // stores, the default primary threshold a pool created without one reads,
 // the demotion hold's wait (dnv-worker.md RW22), the start hold a cluster
 // created without one reads (dnv-worker.md HL8), which the e2e suite's react
-// restart step bounds its wait by, and the age at which the
+// restart step bounds its wait by, the age at which the
 // retire timer deletes a retired leg (dnv-worker.md AR12), which the worker
-// suite's repair case plants a retired leg older than. Then the default
+// suite's repair case plants a retired leg older than, and the fast IO fail
+// timeout of a leg's connection in a pool that sets none (dnagent.md SH20),
+// which the e2e suite's react case's waits on a dead leg take. Then the default
 // thin block and the stripe a cluster conf that names none takes with it
 // (model.DefaultStripeSize), which the gateway suite's smoke case pins the
 // stored confs to; a pool that names none takes that stripe narrowed to its

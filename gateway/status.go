@@ -459,7 +459,11 @@ func (r *statusRead) readPool(ctx context.Context, name string) statusPool {
 		}()
 	}
 	wg.Wait()
-	if ctx.Err() == nil {
+	if err := ctx.Err(); err != nil {
+		// The pool's time ran out in its calls: the name read is not made,
+		// and its row says so, as a kept first pool's rows must (GW20).
+		in.nameErr, in.nameCut = err, true
+	} else {
 		in.nameErr = r.spNameRow(ctx, in)
 		in.nameCut = in.nameErr != nil && ctx.Err() != nil
 	}
@@ -722,10 +726,12 @@ type statusInput struct {
 	// work (readPools), for a read whose error then is the read's, not
 	// the store's or an agent's.
 	ended func() bool
-	// nameCut says the read's own deadline ended the name read.
+	// nameCut says the read's own deadline ended the name read, or left
+	// no time to make it.
 	nameCut bool
 	// nameLost says the pool's id-to-name record is absent or names
-	// another pool, and nameErr is the error of its read (spNameRow).
+	// another pool, and nameErr is the error of its read (spNameRow), or
+	// the pool's ctx's when the read was not made.
 	nameLost bool
 	nameErr  error
 }
@@ -800,9 +806,21 @@ type statusBuilder struct {
 	legRowed map[uint64]bool
 	// badConf says the pool's stored conf is one the sp worker's pass
 	// refuses (poolRows): a bdev_conf the readers refuse, or a group whose
-	// counts give its sides no length to zero. No grow is judged from it,
-	// and the worker drives none of its repairs (repairRows).
+	// counts give its sides no length to zero. No grow is judged from it.
 	badConf bool
+	// noPass says the sp worker runs no pass for the pool, so none of the
+	// pass's steps and reactions (dnv-worker.md AR1): its stored conf is
+	// one the pass refuses (badConf), a record a list of the pool names is
+	// missing, which the pass refuses as the fan-out does (dnv-worker.md
+	// MD3; checkListedRecords, worker/sprole.go), or no worker runs for the
+	// pool (noWorker). The operator then drives the worker's repairs
+	// (repairRows), and a stage move or a forced-start clear waits until the
+	// worker drives the pool again.
+	noPass bool
+	// noWorker says the pool's revision key is absent, so no sp worker runs
+	// for the pool (lostRows): not even the clone drain, which runs ahead
+	// of the pass's gates (dnv-worker.md CLD7).
+	noWorker bool
 }
 
 // add appends one row of the pool.
@@ -825,8 +843,8 @@ func (b *statusBuilder) rowAge(row *pb.ResInfo) *durationpb.Duration {
 // GetClusterStatus): each key LoadSp found named and absent, the pool's
 // id-to-name record absent or naming another pool (spNameRow), and an absent
 // revision key, which LoadSp reads as revision zero and a create never
-// writes. A failed read of the id-to-name record is a row of status UNKNOWN
-// instead.
+// writes. A read of the id-to-name record that failed, or that the pool's
+// time left unmade, is a row of status UNKNOWN instead.
 func (b *statusBuilder) lostRows() {
 	state := b.in.state
 	dnPfx, cnPfx := model.DnConfPrefix(b.in.cid), model.CnConfPrefix(b.in.cid)
@@ -836,6 +854,10 @@ func (b *statusBuilder) lostRows() {
 			"the name from its list"
 		addr := ""
 		switch {
+		case !strings.HasPrefix(key, dnPfx) && !strings.HasPrefix(key, cnPfx):
+			// A record a list of the pool names: the worker's pass and
+			// fan-out refuse the pool (checkListedRecords).
+			b.noPass = true
 		case strings.HasPrefix(key, dnPfx):
 			addr = strings.TrimPrefix(key, dnPfx)
 			text = "a side of the pool names this disk node and etcd " +
@@ -876,6 +898,7 @@ func (b *statusBuilder) lostRows() {
 		})
 	}
 	if state.SpRevision == 0 {
+		b.noPass, b.noWorker = true, true
 		b.add(rankLost, &pb.StatusRow{
 			Kind: pb.StatusKind_STATUS_KIND_LOST_RECORD,
 			Object: model.SpRevKey(state.Conf.GetShardCode(), b.in.cid,
@@ -932,7 +955,7 @@ func (b *statusBuilder) poolRows() {
 		err = groupZeroBytesErr(state)
 	}
 	if err != nil {
-		b.badConf = true
+		b.badConf, b.noPass = true, true
 		b.add(rankPool, &pb.StatusRow{
 			Kind:   pb.StatusKind_STATUS_KIND_POOL,
 			Object: "pool",
@@ -1345,12 +1368,17 @@ func (b *statusBuilder) markRows(
 		})
 	}
 	if mark := grp.GetForcedStart(); mark != nil {
+		// The clear is a step of the worker's pass (dnv-worker.md AR13).
+		when := "once"
+		if b.noPass {
+			when = "once it drives the pool again and"
+		}
 		b.add(rankGroup, &pb.StatusRow{
 			Kind:   pb.StatusKind_STATUS_KIND_GROUP,
 			Object: object,
 			Text: fmt.Sprintf("a forced start from leg %d stands: the "+
-				"worker clears it once the primary reports the array "+
-				"running from it", mark.GetLegId()),
+				"worker clears it %s the primary reports the array "+
+				"running from it", mark.GetLegId(), when),
 			SliceId: sliceId,
 			GrpId:   grp.GetGrpId(),
 			LegId:   mark.GetLegId(),
@@ -1551,11 +1579,16 @@ func (b *statusBuilder) repairRows(info *pb.CntlrInfo) {
 		worker := common.HasRepNameReservedPrefix(name)
 		// The worker finishes and cancels its own repairs by a reaction
 		// (dnv-worker.md AR8's drive step), which it runs neither at a
-		// level that stops reactions (dnv-worker.md AR3) nor for a pool
-		// whose stored conf its pass refuses (dnv-worker.md AR1): the
-		// operator then drives them.
-		workerDrives := worker && !b.badConf &&
+		// level that stops reactions (dnv-worker.md AR3) nor for a pool it
+		// runs no pass for (noPass): the operator then drives them. Its
+		// stage moves (dnv-worker.md AR11) run at every level, but in a
+		// pass too.
+		workerDrives := worker && !b.noPass &&
 			state.Conf.GetSpLevel() < pb.SpLevel_SP_LEVEL_NO_THINPOOL
+		again := ""
+		if b.noPass {
+			again = " once it drives the pool again"
+		}
 		switch {
 		case rep.GetRepStage() == pb.RepStage_REP_STAGE_ABORTED &&
 			workerDrives:
@@ -1575,10 +1608,10 @@ func (b *statusBuilder) repairRows(info *pb.CntlrInfo) {
 				"it waits for the operator's repair finish"
 		case verdict.GetAbortConfirmed():
 			text = "created: the primary confirms its abort, so the " +
-				"worker moves it to aborted"
+				"worker moves it to aborted" + again
 		case verdict.GetStarted():
 			text = "created: the primary has added its new legs, so the " +
-				"worker moves it to started"
+				"worker moves it to started" + again
 		case rep.GetTryToAbort():
 			text = "created, its abort asked and not confirmed yet"
 		default:
@@ -1744,10 +1777,14 @@ func (b *statusBuilder) cloneRows(info *pb.CntlrInfo) {
 		cloneId := clone.GetCloneId()
 		object := fmt.Sprintf("clone %s", name)
 		if clone.GetDeleting() {
+			text := "being deleted: the worker's drain takes its records away"
+			if b.noWorker {
+				text += " once a worker drives the pool again"
+			}
 			b.add(rankClone, &pb.StatusRow{
 				Kind:    pb.StatusKind_STATUS_KIND_CLONE,
 				Object:  object,
-				Text:    "being deleted: the worker's drain takes its records away",
+				Text:    text,
 				ObjName: name,
 			})
 			continue
@@ -1798,9 +1835,10 @@ func (b *statusBuilder) tornRows() {
 // errorRows are the rows of the primary's report that read ERROR, a leg's
 // also when it carries an identity reason (legRowListed), and that no row
 // above already shows: the slices' thin pools and their devices, the thin
-// volumes, the namespaces and subsystems, the transfers, the clones' rows
-// but a deleting clone's, the path rows, and each leg or group no row above
-// walks, one the state does not hold or one of a clone being deleted.
+// volumes, the namespaces and subsystems, the transfers, the clones' rows,
+// the path rows, and each leg or group no row above walks, one the state
+// does not hold. A clone being deleted gives none: neither its tables'
+// rows, nor its meta group's, its legs' or its repairs' new legs'.
 func (b *statusBuilder) errorRows(info *pb.CntlrInfo) {
 	state := b.in.state
 	tdName := map[uint64]string{}
@@ -1837,9 +1875,27 @@ func (b *statusBuilder) errorRows(info *pb.CntlrInfo) {
 		skip   func(id uint64) bool
 	}
 	// The rows of a clone being deleted are its teardown's, which its CLONE
-	// row stands for.
+	// row stands for, as it stands for its legs' health and its group rows
+	// (healthAndLegRows, eachGroup): the rows of its tables, of its meta
+	// group and of its legs, its repairs' new legs among them.
 	deletingClone := func(id uint64) bool {
 		return state.Clones[cloneName[id]].GetDeleting()
+	}
+	deletingGrp, deletingLeg := map[uint64]bool{}, map[uint64]bool{}
+	for _, clone := range state.Clones {
+		if grp := clone.GetMetaGrp(); clone.GetDeleting() && grp != nil {
+			deletingGrp[grp.GetGrpId()] = true
+			for _, leg := range grp.GetLegList() {
+				deletingLeg[leg.GetLegId()] = true
+			}
+		}
+	}
+	for _, rep := range state.Repairs {
+		if repairOfDeletingClone(state, rep) {
+			for _, leg := range rep.GetNewLegList() {
+				deletingLeg[leg.GetLegId()] = true
+			}
+		}
 	}
 	slice := func(what string) func(id uint64) string {
 		return func(id uint64) string {
@@ -1856,10 +1912,12 @@ func (b *statusBuilder) errorRows(info *pb.CntlrInfo) {
 		{"data", rankSliceRow, info.GetSliceIdToData(), slice("data device"), setSlice, nil},
 		{"leg", rankLeg, info.GetLegIdToLeg(),
 			func(id uint64) string { return fmt.Sprintf("leg %d", id) },
-			func(row *pb.StatusRow, id uint64) { row.LegId = id }, nil},
+			func(row *pb.StatusRow, id uint64) { row.LegId = id },
+			func(id uint64) bool { return deletingLeg[id] }},
 		{"grp", rankGroupRow, info.GetGrpIdToMdRaid(),
 			func(id uint64) string { return fmt.Sprintf("group %d", id) },
-			func(row *pb.StatusRow, id uint64) { row.GrpId = id }, nil},
+			func(row *pb.StatusRow, id uint64) { row.GrpId = id },
+			func(id uint64) bool { return deletingGrp[id] }},
 		{"ss", rankOtherRow, info.GetSsIdToSubsystem(),
 			func(id uint64) string { return named(ssName, "subsystem", id) },
 			setName(ssName), nil},

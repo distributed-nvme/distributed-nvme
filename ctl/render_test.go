@@ -1,8 +1,9 @@
 // Rendering goldens (dnvctl.md CT4).
 //
-// CT4 promises ONE canonical JSON document per invocation on stdout: sorted
-// keys, stable spacing, proto field names, proto3 defaults visible, uint64 as
-// JSON strings. Every clause of that is a property of the four-step pipeline
+// CT4 promises ONE canonical JSON document per invocation on stdout, save
+// the status read's default table (status_test.go): sorted keys, stable
+// spacing, proto field names, proto3 defaults visible, uint64 as JSON
+// strings. Every clause of that is a property of the four-step pipeline
 // in emit — protojson.Marshal with UseProtoNames+EmitUnpopulated, re-parse
 // through encoding/json into `any`, json.Marshal that (render), and one
 // write of it and its newline (writeResult) — and each step can silently

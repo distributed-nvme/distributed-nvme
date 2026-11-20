@@ -174,7 +174,7 @@ The vocabulary of dnv in alphabetical order, one entry per term, with synonyms s
 
 **dnv name** — The name a CSI volume's storage pool, thin device and subsystem carry, made from the name Kubernetes gives the volume, the same for the same name (see `csi.md`, The volume model).
 
-**dnvctl** — The operator CLI: a noun-grouped command tree with one leaf command per Gateway RPC, taking the cluster and pool names as global flags and a presence-based `--rev` token, and printing one canonical JSON result document on stdout.
+**dnvctl** — The operator CLI: a noun-grouped command tree with one leaf command per Gateway RPC, taking the cluster and pool names as global flags and a presence-based `--rev` token, and printing one canonical JSON result document on stdout, save the status read's table (`dnvctl.md` CT4).
 
 **drain, sp drain** — The sp worker's asynchronous teardown of a storage pool that `DeleteStoragePool` latched: every cntlr in one transaction, then the pool's repairs and then its retired legs, in bounded batches that never span two parents, then each slice in turn, its groups in bounded batches that never span two slices, then the final keys, each batch returning node budget in the transaction that shrinks the record describing it. A lost describing record wedges the drain for an operator rather than drifting the ledger.
 

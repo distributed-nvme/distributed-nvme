@@ -79,8 +79,8 @@ How the commands are written:
   it.
 - Every `dnvctl` command names the gateway and the cluster, and the pool
   where it acts on one: `--gateway-address 127.0.0.1:29527 --cluster c0
-  --sp sp0`. `dnvctl` prints one JSON document per command; the checks
-  below pick the field to look at with `grep`.
+  --sp sp0`. Each `dnvctl` command below prints one JSON document; the
+  checks pick the field to look at with `grep`.
 - The tutorial changes the machine: it installs packages, loads kernel
   modules, writes udev rules, masks a systemd unit and replaces the
   nvme-stas settings. Use a test machine. The teardown at the end puts

@@ -2615,15 +2615,19 @@ rest. A pool's rows are:
 * a group whose array is not whole, unless every leg of its list that md
   does not hold in sync has a row of its own; a group whose add the primary
   refuses; the operator in charge of a group's repair; a forced-start mark
-  that stands;
+  that stands, whose clear, a step of the worker's pass (`dnv-worker.md`
+  AR13), waits while the worker runs no pass for the pool;
 * an open repair, with its stage, what the primary's report says it waits
   for and who acts next: for a created one, the primary, then the worker's
-  stage move (`dnv-worker.md` AR11); for a started or an aborted one, the
-  worker's drive step for a repair of the worker's in a pool whose
-  reactions run, and otherwise the operator's cancel or finish — for an
-  operator's repair, and for a worker's in a pool at a level that stops
-  reactions or under a stored conf the worker refuses (`dnv-worker.md`
-  AR1, AR3) — and it says when a worker's repair's finish is refused
+  stage move (`dnv-worker.md` AR11), a step of the worker's pass, which
+  waits while the worker runs no pass for the pool; for a started or an
+  aborted one, the worker's drive step for a repair of the worker's in a
+  pool whose reactions run, and otherwise the operator's cancel or finish
+  — for an operator's repair, and for a worker's in a pool at a level that
+  stops reactions or one the worker runs no pass for: under a stored conf
+  the pass refuses, with a record the pool's lists name missing, or with
+  its revision key absent, which leaves the pool no worker (`dnv-worker.md`
+  AR1, AR3, MD3) — and it says when a worker's repair's finish is refused
   because every retired leg of the group carries keep at the bound
   (Repairs);
 * a migration whose cutover is pending, with the primary's path row to
@@ -2631,7 +2635,13 @@ rest. A pool's rows are:
   its finish, whose copy row reads `RES_STATUS_ERROR`, or whose
   destination gives no reading of its copy — a copy that runs is not
   listed;
-* a clone being deleted;
+* a clone being deleted, its one row standing for its teardown, so no
+  other row of it is listed: neither the primary's rows of it, of its meta
+  group or of its legs, its repairs' new legs among them, nor their health
+  epochs, nor its repairs or its group's marks; its drain runs ahead of
+  the pass's gates (`dnv-worker.md` CLD7), so of the cases that stop the
+  worker's pass only an absent revision key, which leaves the pool no
+  worker, holds it, and the row says so;
 * a torn thin device (Thin devices).
 
 A pool's rows are ordered by what they say — lost records, the report,
@@ -8707,14 +8717,20 @@ document and only pointed to here.
   up to `GrpcMaxMsgSize` (`grpc.md`, Wiring), and unit tests hold the three
   under it at the limits of Cardinality limits and Common validation, the
   widest page of the status read too, whose rows a cap per pool and the
-  node ceilings bound, the worker rows aside, one per registration that
-  reads gone, which the registry's keys alone bound (Clusters,
-  GetClusterStatus; Worker registry), and the reply of a cntlr's inspect
-  call, the report beside an entry of block counters per leg and per
-  namespace device (`cnagent.md` CN23), whose error texts the agent cuts to
-  `IoStatErrorMax` so that it fits with the rows' text, which with every
-  text beside the rows the agent cuts to `AgentTextMax` (Live-state
-  reporting). Two parts have no such limit: a bitmap read's reply, which
+  node ceilings bound, save the worker rows, one per registration that
+  reads gone, which only the registry's keys bound, so the test sizes
+  `MaxListCnt` of them per role, since every observer deletes a
+  registration it commits dead (`dnv-worker.md` VW6; Clusters,
+  GetClusterStatus; Worker registry), the restore check's two replies for
+  an agent that holds two controller nodes of the cluster, as a forced
+  delete and a create at the same address leave it while the agent's
+  local files stay, each further such delete adding a held node past that
+  bound (Controller nodes, CheckControllerNodeRestore), and the reply of a
+  cntlr's inspect call, the report beside an entry of block counters per
+  leg and per namespace device (`cnagent.md` CN23), whose error texts the
+  agent cuts to `IoStatErrorMax` so that it fits with the rows' text,
+  which with every text beside the rows the agent cuts to `AgentTextMax`
+  (Live-state reporting). Two parts have no such limit: a bitmap read's reply, which
   grows with the blocks it asks for, so a caller pages through a large
   volume (Bitmap reads), and a leg's, which the worker reads whole and
   which fails once it passes `GrpcMaxMsgSize`, a leg of more than

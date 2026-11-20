@@ -238,3 +238,16 @@ func TestStatusTableIsTheCheckedWrite(t *testing.T) {
 		t.Errorf("exit %d stdout %q, want 3 and nothing", res.code, res.stdout)
 	}
 }
+
+// TestRootHelpNamesTheStatusTable pins the root's help to CT4: it promises
+// one JSON document per invocation save the status read, whose default is a
+// table, so a script that reads the help is not told every leaf prints
+// JSON.
+func TestRootHelpNamesTheStatusTable(t *testing.T) {
+	long := NewRootCmd().Long
+	for _, want := range []string{"cluster get-status", "table", "--json"} {
+		if !strings.Contains(long, want) {
+			t.Errorf("the root's help %q does not name %q", long, want)
+		}
+	}
+}

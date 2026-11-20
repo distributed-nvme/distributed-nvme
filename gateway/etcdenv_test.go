@@ -450,9 +450,9 @@ func mustPut(
 // two halves of the gateway's agent surface (AG1/AG2) are configured and
 // asserted the same way and a test that needs a DN and a CN should not need
 // two vocabularies. Only the methods the gateway actually calls are
-// overridden, and GetLegBm, which no handler calls; anything else stays
-// UNIMPLEMENTED, so an RPC that reaches for a call it is not supposed to
-// make fails loudly instead of getting a zero value.
+// overridden; anything else stays UNIMPLEMENTED, so an RPC that reaches for a
+// call it is not supposed to make fails loudly instead of getting a zero
+// value.
 
 // fakeAgent is one fake node: the knobs a test turns and the record of what
 // the gateway asked it. Every field is behind mu because the gateway dials it
@@ -862,16 +862,6 @@ func (f *fakeCnServer) GetThinDeviceBm(
 		return nil, err
 	}
 	return &pb.GetThinDeviceBmReply{}, nil
-}
-
-func (f *fakeCnServer) GetLegBm(
-	ctx context.Context,
-	req *pb.GetLegBmRequest,
-) (*pb.GetLegBmReply, error) {
-	if err := f.agent.enter(ctx, "GetLegBm"); err != nil {
-		return nil, err
-	}
-	return &pb.GetLegBmReply{}, nil
 }
 
 // fakeAgentRevision is the `revision` every fake *Info reply carries, the

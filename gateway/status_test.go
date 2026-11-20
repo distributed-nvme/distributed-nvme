@@ -659,9 +659,12 @@ func TestStatusLostRecord(t *testing.T) {
 // asked and not confirmed, and, each of an operator and of the worker, an
 // ABORTED one and a STARTED one, the text naming who acts: the operator's
 // cancel or finish, the worker's next pass, or the worker's finish refused
-// at the retired-leg bound with every retired leg kept; and the worker's
-// own in a pool at a level that stops reactions or under a conf its pass
-// refuses, which the operator drives.
+// at the retired-leg bound with every retired leg kept; the worker's own in
+// a pool at a level that stops reactions, under a conf its pass refuses,
+// with a record a list of the pool names missing, or with no revision key,
+// which the operator drives; and a CREATED one whose verdict says started
+// in a pool whose pass is refused, which the worker moves only once it
+// drives the pool again.
 func TestStatusRepairs(t *testing.T) {
 	worker := common.WorkerRepName(1, stDataGrp, 7)
 	for _, tc := range []struct {
@@ -671,48 +674,68 @@ func TestStatusRepairs(t *testing.T) {
 		verdict   *pb.CntlrInfo_RepairInfo
 		keepAll   bool
 		fragments []string
-		// level and badConf put the pool where the worker runs no
-		// reaction, so the operator drives even the worker's repairs.
+		// level and refused put the pool where the worker runs no
+		// reaction, so the operator drives even the worker's repairs:
+		// refused is "conf" for a conf the pass refuses, "lost" for a
+		// thin device the pool's list names and etcd does not hold, and
+		// "norev" for an absent revision key.
 		level   pb.SpLevel
-		badConf bool
+		refused string
 	}{
 		{"waits", "r1", &pb.Repair{RepId: 50},
 			&pb.CntlrInfo_RepairInfo{Waits: "no member to feed a copy"},
-			false, []string{"created", "no member to feed a copy"}, 0, false},
+			false, []string{"created", "no member to feed a copy"}, 0, ""},
 		{"refused", "r1", &pb.Repair{RepId: 50},
 			&pb.CntlrInfo_RepairInfo{Refusal: "another identity"},
-			false, []string{"created", "another identity"}, 0, false},
+			false, []string{"created", "another identity"}, 0, ""},
 		{"abort asked", "r1", &pb.Repair{RepId: 50, TryToAbort: true}, nil,
-			false, []string{"abort", "not confirmed"}, 0, false},
+			false, []string{"abort", "not confirmed"}, 0, ""},
 		{"aborted", "r1",
 			&pb.Repair{RepId: 50, RepStage: pb.RepStage_REP_STAGE_ABORTED},
 			&pb.CntlrInfo_RepairInfo{AbortConfirmed: true},
-			false, []string{"aborted", "operator's repair cancel"}, 0, false},
+			false, []string{"aborted", "operator's repair cancel"}, 0, ""},
 		{"started", "r1",
 			&pb.Repair{RepId: 50, RepStage: pb.RepStage_REP_STAGE_STARTED},
 			&pb.CntlrInfo_RepairInfo{Started: true},
-			false, []string{"started", "operator's repair finish"}, 0, false},
+			false, []string{"started", "operator's repair finish"}, 0, ""},
 		{"the worker's aborted", worker,
 			&pb.Repair{RepId: 50, RepStage: pb.RepStage_REP_STAGE_ABORTED},
 			&pb.CntlrInfo_RepairInfo{AbortConfirmed: true},
-			false, []string{"aborted", "the worker cancels it"}, 0, false},
+			false, []string{"aborted", "the worker cancels it"}, 0, ""},
 		{"the worker's started", worker,
 			&pb.Repair{RepId: 50, RepStage: pb.RepStage_REP_STAGE_STARTED},
 			&pb.CntlrInfo_RepairInfo{Started: true},
-			false, []string{"started", "the worker finishes it"}, 0, false},
+			false, []string{"started", "the worker finishes it"}, 0, ""},
 		{"the worker's finish refused", worker,
 			&pb.Repair{RepId: 50, RepStage: pb.RepStage_REP_STAGE_STARTED},
 			&pb.CntlrInfo_RepairInfo{Started: true},
-			true, []string{"finish is refused", "keep"}, 0, false},
+			true, []string{"finish is refused", "keep"}, 0, ""},
 		{"the worker's aborted where reactions stop", worker,
 			&pb.Repair{RepId: 50, RepStage: pb.RepStage_REP_STAGE_ABORTED},
 			&pb.CntlrInfo_RepairInfo{AbortConfirmed: true},
 			false, []string{"operator's repair cancel"},
-			pb.SpLevel_SP_LEVEL_NO_THINPOOL, false},
+			pb.SpLevel_SP_LEVEL_NO_THINPOOL, ""},
 		{"the worker's started under a refused conf", worker,
 			&pb.Repair{RepId: 50, RepStage: pb.RepStage_REP_STAGE_STARTED},
 			&pb.CntlrInfo_RepairInfo{Started: true},
-			false, []string{"operator's repair finish"}, 0, true},
+			false, []string{"operator's repair finish"}, 0, "conf"},
+		{"the worker's started with a lost record", worker,
+			&pb.Repair{RepId: 50, RepStage: pb.RepStage_REP_STAGE_STARTED},
+			&pb.CntlrInfo_RepairInfo{Started: true},
+			false, []string{"operator's repair finish"}, 0, "lost"},
+		{"the worker's aborted with no revision key", worker,
+			&pb.Repair{RepId: 50, RepStage: pb.RepStage_REP_STAGE_ABORTED},
+			&pb.CntlrInfo_RepairInfo{AbortConfirmed: true},
+			false, []string{"operator's repair cancel"}, 0, "norev"},
+		{"a created one with a lost record", "r1", &pb.Repair{RepId: 50},
+			&pb.CntlrInfo_RepairInfo{Started: true},
+			false, []string{"moves it to started", "drives the pool again"},
+			0, "lost"},
+		{"a created one's abort under a refused conf", "r1",
+			&pb.Repair{RepId: 50, TryToAbort: true},
+			&pb.CntlrInfo_RepairInfo{AbortConfirmed: true},
+			false, []string{"moves it to aborted", "drives the pool again"},
+			0, "conf"},
 	} {
 		t.Run(tc.label, func(t *testing.T) {
 			env := newStEnv(t)
@@ -725,8 +748,11 @@ func TestStatusRepairs(t *testing.T) {
 			tc.rep.NewLegList = []*pb.Leg{stLegOf(60, 2, "dn-new:9000")}
 			pool.repairs[tc.name] = tc.rep
 			pool.conf.SpLevel = tc.level
-			if tc.badConf {
+			switch tc.refused {
+			case "conf":
 				pool.slices[stSlice].MetaGrpList[0].MetaBlocks = 0
+			case "norev":
+				pool.noRev = true
 			}
 			grp := pool.slices[stSlice].DataGrpList[0]
 			grp.RepName = tc.name
@@ -741,6 +767,10 @@ func TestStatusRepairs(t *testing.T) {
 				}
 			}
 			env.put(pool)
+			if tc.refused == "lost" {
+				pool.conf.TdNameList = append(pool.conf.TdNameList, "vol-gone")
+				mustPut(t, env.cli, model.SpConfKey(env.cid, "p0"), pool.conf)
+			}
 			info := &pb.CntlrInfo{
 				GrpIdToMdRaid: map[uint64]*pb.ResInfo{stDataGrp: stOkRow()},
 			}
@@ -834,6 +864,31 @@ func TestStatusGroups(t *testing.T) {
 	stWantNone(t, stRowsOf(env.status(0, ""), "p0"), "a RedundNone pool")
 }
 
+// TestStatusForcedStartWithNoWorker pins the forced-start mark's text in a
+// pool no worker drives, its revision key absent: the worker's clear is a
+// step of its pass (dnv-worker.md AR13), so the text says the clear waits
+// until a worker drives the pool again.
+func TestStatusForcedStartWithNoWorker(t *testing.T) {
+	env := newStEnv(t)
+	cn, fake := env.addCn("cn")
+	pool := env.newPool("p0", cn, stDns(env))
+	pool.slices[stSlice].DataGrpList[0].ForcedStart =
+		&pb.ForcedStart{LegId: stLeg, Revision: 3}
+	pool.noRev = true
+	fake.setInfo(nil, nil, nil, &pb.CntlrInfo{
+		GrpIdToMdRaid: map[uint64]*pb.ResInfo{stDataGrp: stOkRow()},
+		GrpIdToGrpInfo: map[uint64]*pb.CntlrInfo_GrpInfo{
+			stDataGrp: {Whole: true},
+		},
+	})
+	env.put(pool)
+	rows := stRowsOf(env.status(0, ""), "p0")
+	stOne(t, rows, pb.StatusKind_STATUS_KIND_GROUP, "a forced start",
+		"forced start", "drives the pool again")
+	stOne(t, rows, pb.StatusKind_STATUS_KIND_LOST_RECORD,
+		"the absent revision key", "revision key")
+}
+
 // TestStatusMigration pins the migration rows: one whose cutover is
 // pending, with the primary's path row to the new side; past the cutover,
 // one whose copy is whole and waits for its finish, read from the new
@@ -901,27 +956,34 @@ func TestStatusMigration(t *testing.T) {
 }
 
 // TestStatusClone pins the clone rows: one that waits for its source, one
-// being deleted, and none for a copy that runs.
+// being deleted, whose drain waits for a worker in a pool whose revision key
+// is absent, and none for a copy that runs.
 func TestStatusClone(t *testing.T) {
 	for _, tc := range []struct {
 		label    string
 		deleting bool
 		target   *pb.ResInfo
 		fragment string
+		// noRev leaves the pool's revision key absent, so no worker
+		// runs for the pool, its clone drain included.
+		noRev bool
 	}{
 		{"source", false, &pb.ResInfo{
 			Status:  pb.ResStatus_RES_STATUS_MISSING,
 			Reason:  pb.ResReason_RES_REASON_SOURCE_FAULT,
 			Details: "source not connected",
-		}, "source not connected"},
-		{"deleting", true, stOkRow(), "deleted"},
-		{"copying", false, stOkRow(), ""},
+		}, "source not connected", false},
+		{"deleting", true, stOkRow(), "deleted", false},
+		{"deleting, no worker", true, stOkRow(),
+			"once a worker drives the pool again", true},
+		{"copying", false, stOkRow(), "", false},
 	} {
 		t.Run(tc.label, func(t *testing.T) {
 			env := newStEnv(t)
 			cn, fake := env.addCn("cn")
 			pool := env.newPool("p0", cn, stDns(env))
 			pool.clones["c1"] = &pb.Clone{CloneId: 80, Deleting: tc.deleting}
+			pool.noRev = tc.noRev
 			fake.setInfo(nil, nil, nil, &pb.CntlrInfo{
 				CloneIdToTarget: map[uint64]*pb.ResInfo{80: tc.target},
 			})
@@ -937,6 +999,44 @@ func TestStatusClone(t *testing.T) {
 				t.Errorf("row %v: want clone c1", row)
 			}
 		})
+	}
+}
+
+// TestStatusDeletingCloneRowsAreItsDrains pins that a clone being deleted
+// gives its one CLONE row and none of the primary's rows of it: neither its
+// tables' rows, nor its meta group's, nor its legs', nor its repair's new
+// leg's, though each reads ERROR, since they are its teardown's, which the
+// CLONE row stands for, as its legs' health and its group rows are.
+func TestStatusDeletingCloneRowsAreItsDrains(t *testing.T) {
+	env := newStEnv(t)
+	cn, fake := env.addCn("cn")
+	dns := stDns(env)
+	pool := env.newPool("p0", cn, dns)
+	pool.clones["c1"] = &pb.Clone{CloneId: 80, Deleting: true,
+		MetaGrp: &pb.Group{
+			GrpId: 90, ExtCnt: 4, MetaBlocks: 3, DataBlocks: 2045,
+			ArrayMade: true,
+			LegList:   []*pb.Leg{stLegOf(91, 0, dns[0]), stLegOf(93, 1, dns[1])},
+		}}
+	pool.repairs["r1"] = &pb.Repair{RepId: 50, GrpId: 90, CloneName: "c1",
+		BadLegIdList: []uint64{91},
+		NewLegList:   []*pb.Leg{stLegOf(95, 2, dns[2])}}
+	errRow := func() *pb.ResInfo {
+		return &pb.ResInfo{Status: pb.ResStatus_RES_STATUS_ERROR,
+			Details: "teardown"}
+	}
+	fake.setInfo(nil, nil, nil, &pb.CntlrInfo{
+		GrpIdToMdRaid:    map[uint64]*pb.ResInfo{stDataGrp: stOkRow(), 90: errRow()},
+		LegIdToLeg:       map[uint64]*pb.ResInfo{91: errRow(), 95: errRow()},
+		CloneIdToTarget:  map[uint64]*pb.ResInfo{80: errRow()},
+		CloneIdToDmClone: map[uint64]*pb.ResInfo{80: errRow()},
+	})
+	env.put(pool)
+	rows := stRowsOf(env.status(0, ""), "p0")
+	stOne(t, rows, pb.StatusKind_STATUS_KIND_CLONE, "the deleting clone",
+		"being deleted")
+	if len(rows) != 1 {
+		t.Errorf("%d rows, want the clone's one: %v", len(rows), rows)
 	}
 }
 
@@ -1334,9 +1434,17 @@ func TestStatusPoolNotRead(t *testing.T) {
 // TestStatusWidestReplyFits pins that the widest page fits GrpcMaxMsgSize:
 // MaxListCnt pools, each with MaxStatusRowPerSp rows and the row that
 // counts the rest, and the cluster rows of a cluster at the node ceilings,
-// a lost revision key and a health epoch on every node; every row at once
+// a lost revision key and a health epoch on every node, and MaxListCnt
+// worker rows of each role, registrations that read gone; every row at once
 // with the widest object the read composes, a text at the row text cap, the
-// widest name in every name field and every id at its widest.
+// widest name in every name field and every id at its widest. No count
+// bounds the registry's keys, so the worker rows are sized here, not
+// bounded: every observer deletes a registration it commits dead
+// (dnv-worker.md VW6), so the gone keys a read meets are those no live
+// worker has committed dead yet, of workers that died within about one
+// dead threshold and grace window or of a role with no live worker, and
+// MaxListCnt per role is far more than a deployment runs. A worker row,
+// with no id, is narrower than the row used for every row here.
 func TestStatusWidestReplyFits(t *testing.T) {
 	const maxId = ^uint64(0)
 	name := strings.Repeat("n", common.MaxStrSize)
@@ -1387,7 +1495,8 @@ func TestStatusWidestReplyFits(t *testing.T) {
 		ReadTime:    timestamppb.Now(),
 	}
 	rowCnt := common.MaxListCnt*(common.MaxStatusRowPerSp+1) +
-		2*(common.MaxDnCntPerCluster+common.MaxCnCntPerCluster)
+		2*(common.MaxDnCntPerCluster+common.MaxCnCntPerCluster) +
+		len(listedWorkerRoles)*common.MaxListCnt
 	for idx := 0; idx < rowCnt; idx++ {
 		reply.RowList = append(reply.RowList, row)
 	}
@@ -1531,7 +1640,9 @@ func TestStatusDeadlineLeavesACutPoolOff(t *testing.T) {
 
 // TestStatusDeadlineKeepsTheFirstPool pins the page's first pool cut by the
 // read's own deadline: it stays on the page, so a page always moves on, and
-// its row says the read's time ran out, not that the agent did not answer.
+// its row says the read's time ran out, not that the agent did not answer;
+// the id-to-name read, which the cut pool never made, has its row saying
+// the same.
 func TestStatusDeadlineKeepsTheFirstPool(t *testing.T) {
 	savedBudget, savedMargin := statusAgentBudget, statusReplyMargin
 	statusAgentBudget = 2 * time.Second
@@ -1543,7 +1654,8 @@ func TestStatusDeadlineKeepsTheFirstPool(t *testing.T) {
 	cn, fake := env.addCn("hang")
 	release := fake.setBlock()
 	defer release()
-	env.put(env.newPool("pa", cn, stDns(env)))
+	pool := env.newPool("pa", cn, stDns(env))
+	env.put(pool)
 	ctx, cancel := context.WithTimeout(context.Background(),
 		300*time.Millisecond)
 	defer cancel()
@@ -1556,8 +1668,20 @@ func TestStatusDeadlineKeepsTheFirstPool(t *testing.T) {
 	if reply.GetSpCnt() != 1 {
 		t.Fatalf("sp_cnt %d, want the first pool kept", reply.GetSpCnt())
 	}
-	stOne(t, stRowsOf(reply, "pa"), pb.StatusKind_STATUS_KIND_REPORT,
-		"the first pool cut", "time ran out")
+	nameKey := model.SpNameKey(env.cid, pool.conf.GetSpId())
+	rows := stKinds(stRowsOf(reply, "pa"), pb.StatusKind_STATUS_KIND_REPORT)
+	objects := map[string]bool{}
+	for _, row := range rows {
+		objects[row.GetObject()] = true
+		if !strings.Contains(row.GetText(), "time ran out") {
+			t.Errorf("row %q: text %q does not say the read's time ran out",
+				row.GetObject(), row.GetText())
+		}
+	}
+	if len(rows) != 2 || !objects[nameKey] {
+		t.Errorf("report rows %v, want the primary's and the id-to-name "+
+			"read's %s", rows, nameKey)
+	}
 }
 
 // TestStatusPrimaryBehind pins a primary whose report is of an older
@@ -1717,7 +1841,19 @@ func TestStatusDeadlineNamesOnlyTheCallItCuts(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GetClusterStatus: %v", err)
 	}
-	rows := stRowsOf(reply, "pa")
+	// The id-to-name read, after the calls, is one the deadline cut too;
+	// the primary's row is the other report row.
+	nameKey := model.SpNameKey(env.cid, pool.conf.GetSpId())
+	var rows, nameRows []*pb.StatusRow
+	for _, row := range stRowsOf(reply, "pa") {
+		if row.GetObject() == nameKey {
+			nameRows = append(nameRows, row)
+			continue
+		}
+		rows = append(rows, row)
+	}
+	stOne(t, nameRows, pb.StatusKind_STATUS_KIND_REPORT,
+		"the name read the deadline cut", "time ran out")
 	report := stOne(t, rows, pb.StatusKind_STATUS_KIND_REPORT,
 		"the primary that refused at once", "did not answer")
 	if strings.Contains(report.GetText(), "time ran out") {

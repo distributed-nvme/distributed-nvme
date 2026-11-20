@@ -37,9 +37,12 @@ func TestNodeCreateTakesTheHostNameAsLocation(t *testing.T) {
 	kinds := []struct {
 		name   string
 		create create
-		// stored reads the node's stored location and the one its capacity
-		// key carries, found reporting whether the record exists.
-		stored    func(addr string) (conf string, index string, found bool)
+		// stored reads the node's stored location, found reporting whether
+		// the record exists, and the location its capacity key carries,
+		// keyFound reporting whether a capacity key names the address; the
+		// key is looked for whether or not the record exists.
+		stored func(addr string) (conf string, found bool,
+			index string, keyFound bool)
 		globalKey string
 	}{
 		{
@@ -53,21 +56,21 @@ func TestNodeCreateTakesTheHostNameAsLocation(t *testing.T) {
 				})
 				return err
 			},
-			stored: func(addr string) (string, string, bool) {
-				if !hnodeExists(t, s, model.DnConfKey(cid, addr)) {
-					return "", "", false
-				}
-				dn := &pb.DnConf{}
-				hnodeGet(t, s, model.DnConfKey(cid, addr), dn)
-				index := ""
+			stored: func(addr string) (string, bool, string, bool) {
+				index, keyFound := "", false
 				for _, key := range hnodeDnCapacityKeys(t, s, cid) {
 					if strings.HasSuffix(key, addr) {
 						capacity := &pb.DnCapacity{}
 						hnodeGet(t, s, key, capacity)
-						index = capacity.GetLocation()
+						index, keyFound = capacity.GetLocation(), true
 					}
 				}
-				return dn.GetLocation(), index, true
+				if !hnodeExists(t, s, model.DnConfKey(cid, addr)) {
+					return "", false, index, keyFound
+				}
+				dn := &pb.DnConf{}
+				hnodeGet(t, s, model.DnConfKey(cid, addr), dn)
+				return dn.GetLocation(), true, index, keyFound
 			},
 			globalKey: model.DnGlobalKey(cid),
 		},
@@ -83,21 +86,21 @@ func TestNodeCreateTakesTheHostNameAsLocation(t *testing.T) {
 					})
 				return err
 			},
-			stored: func(addr string) (string, string, bool) {
-				if !hnodeExists(t, s, model.CnConfKey(cid, addr)) {
-					return "", "", false
-				}
-				cn := &pb.CnConf{}
-				hnodeGet(t, s, model.CnConfKey(cid, addr), cn)
-				index := ""
+			stored: func(addr string) (string, bool, string, bool) {
+				index, keyFound := "", false
 				for _, key := range hnodeCnCapacityKeys(t, s, cid) {
 					if strings.HasSuffix(key, addr) {
 						capacity := &pb.CnCapacity{}
 						hnodeGet(t, s, key, capacity)
-						index = capacity.GetLocation()
+						index, keyFound = capacity.GetLocation(), true
 					}
 				}
-				return cn.GetLocation(), index, true
+				if !hnodeExists(t, s, model.CnConfKey(cid, addr)) {
+					return "", false, index, keyFound
+				}
+				cn := &pb.CnConf{}
+				hnodeGet(t, s, model.CnConfKey(cid, addr), cn)
+				return cn.GetLocation(), true, index, keyFound
 			},
 			globalKey: model.CnGlobalKey(cid),
 		},
@@ -124,9 +127,13 @@ func TestNodeCreateTakesTheHostNameAsLocation(t *testing.T) {
 					startFakeAgent(t, addr, 64<<30).setHostName(tc.hostName)
 					globalRev := hnodeModRev(t, s, kind.globalKey)
 					err := kind.create(addr, tc.location)
-					conf, index, found := kind.stored(addr)
+					conf, found, index, keyFound := kind.stored(addr)
 					if tc.want != "" {
 						wantCode(t, err, codes.OK, tc.name)
+						if !found || !keyFound {
+							t.Errorf("record found %v, capacity key found "+
+								"%v, want both", found, keyFound)
+						}
 						if conf != tc.want || index != tc.want {
 							t.Errorf("location %q, capacity key's %q, "+
 								"want %q in both", conf, index, tc.want)
@@ -139,7 +146,7 @@ func TestNodeCreateTakesTheHostNameAsLocation(t *testing.T) {
 					if found {
 						t.Errorf("the refused create wrote a record")
 					}
-					if index != "" {
+					if keyFound {
 						t.Errorf("the refused create wrote a capacity key")
 					}
 					if got := hnodeModRev(

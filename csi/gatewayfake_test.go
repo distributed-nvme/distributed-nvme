@@ -44,10 +44,7 @@ type fakeGateway struct {
 }
 
 type fakeCluster struct {
-	conf *pb.ClusterConf
-	// spCnt is the pool count GetCluster reports, beside the pools the
-	// fake holds, to stand for a cluster at its ceiling.
-	spCnt uint32
+	conf  *pb.ClusterConf
 	pools map[string]*fakePool
 	// space is the space answer GetClusterCapacity gives, whatever shape
 	// it is asked for; nil answers none, as a gateway older than the
@@ -238,7 +235,7 @@ func (g *fakeGateway) GetCluster(
 		ClusterName: clusterNameOf(req.GetClusterName()),
 		ClusterConf: proto.Clone(c.conf).(*pb.ClusterConf),
 		SpGlobal: &pb.SpGlobal{
-			ShardBucket: []uint32{uint32(len(c.pools)), c.spCnt},
+			ShardBucket: []uint32{uint32(len(c.pools))},
 		},
 	}, nil
 }

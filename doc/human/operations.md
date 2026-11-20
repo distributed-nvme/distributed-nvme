@@ -111,7 +111,10 @@ status and the reason of the row it shows follow where it has them:
   and for a repair who acts next: the worker at its next pass, or the
   operator with `dnvctl repair cancel` or `dnvctl repair finish` — for the
   operator's own repairs, and for the worker's in a pool at a level that
-  stops the worker's reactions or with a setting the worker refuses.
+  stops the worker's reactions, with a setting the worker refuses, or with
+  a `lost-record` line for one of the pool's own records (not a node's
+  record, nor the one that maps the pool's id to its name), since the
+  worker then finishes and cancels none of its repairs there.
 - `torn`: a thin device whose slices hold its data from different points
   in time.
 - `worker`: no worker of a role (dn, cn or sp) has its record in etcd,

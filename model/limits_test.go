@@ -957,26 +957,31 @@ func TestFlipProvisionedAtTheSliceCeiling(t *testing.T) {
 // TestRestoreCheckRepliesFitGrpcMaxMsgSize holds the two replies of the
 // restore check (architecture.md, Controller nodes,
 // CheckControllerNodeRestore) to half the message limit at the cardinality
-// limits: a cn agent's GetCnStore answer for one controller node at its
-// MaxCntlrCntPerCn cntlrs, each with a pool's MaxTdCntPerSp thin devices
-// and MaxSsCntPerSp NQNs, and the gateway's answer for that node, a row per
-// held cntlr, each listing every held thin device as lost and every
-// restored one as coming back, and a row with no list per cntlr the
-// restored node names that the agent does not hold. An agent holds one
-// controller node of a cluster but for a node deleted and made again at
-// its address, whose old pointer list a delete that proved it clean left
-// empty.
+// limits: a cn agent's GetCnStore answer for two controller nodes of the
+// cluster, each at its MaxCntlrCntPerCn cntlrs, each cntlr with a pool's
+// MaxTdCntPerSp thin devices and MaxSsCntPerSp NQNs, and the gateway's
+// answer for them, a row per held cntlr, each listing every held thin
+// device as lost and every restored one as coming back, and a row with no
+// list per cntlr the restored node names that the agent does not hold. An
+// agent holds one controller node of a cluster, and an old one beside it
+// for a node deleted and made again at its address: a delete that proved
+// the node clean left the old one's pointer list empty, while a forced
+// delete, which skips the agent, leaves it as the agent last held it until
+// the agent's local files are removed, as the forced delete's procedure
+// says. So two held nodes are sized, each at its widest; each further
+// forced delete whose files stay adds one past the bound: at three the
+// gateway's reply passes half the limit, and at five the limit.
 func TestRestoreCheckRepliesFitGrpcMaxMsgSize(t *testing.T) {
 	b := &widestBuilder{
 		t: t,
 		counts: map[protoreflect.FullName]int{
-			"GetCnStoreReply.cn_list":                                1,
+			"GetCnStoreReply.cn_list":                                2,
 			"GetCnStoreReply.StoredCn.cntlr_pointer_list":            common.MaxCntlrCntPerCn,
 			"GetCnStoreReply.StoredCn.cntlr_list":                    common.MaxCntlrCntPerCn,
 			"GetCnStoreReply.StoredCntlr.td_list":                    common.MaxTdCntPerSp,
 			"GetCnStoreReply.StoredCntlr.nqn_list":                   common.MaxSsCntPerSp,
-			"CheckControllerNodeRestoreReply.held_cn_list":           1,
-			"CheckControllerNodeRestoreReply.pool_list":              common.MaxCntlrCntPerCn,
+			"CheckControllerNodeRestoreReply.held_cn_list":           2,
+			"CheckControllerNodeRestoreReply.pool_list":              2 * common.MaxCntlrCntPerCn,
 			"CheckControllerNodeRestoreReply.Pool.nqn_list":          common.MaxSsCntPerSp,
 			"CheckControllerNodeRestoreReply.Pool.lost_td_list":      common.MaxTdCntPerSp,
 			"CheckControllerNodeRestoreReply.Pool.returning_td_list": common.MaxTdCntPerSp,

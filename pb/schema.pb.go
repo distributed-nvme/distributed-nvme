@@ -682,8 +682,10 @@ const (
 	// made after the backup (a grow, a repair, a migration, a clone) gives
 	// a higher largest side id, in a group's legs or retired since, since
 	// side ids only grow, and a side removed after it (a finished or
-	// cancelled migration, a deleted or given-back retired leg, a drained
-	// clone) a smaller count; a repair's finish or a take-back of a retired
+	// cancelled migration, a cancelled repair's fresh new leg, a withdrawn
+	// grow, a deleted or given-back retired leg, a drained clone) a smaller
+	// count; a repair's finish, a take-back of a retired leg as a repair's
+	// new leg, or a repair's cancel that gives that leg back as a retired
 	// leg moves a side inside the set. A held request that lacks a retired
 	// leg's side id (Pool.held_side_ids_incomplete) also reads MAY_BREAK.
 	RestoreVerdict_RESTORE_VERDICT_MAY_BREAK RestoreVerdict = 3
