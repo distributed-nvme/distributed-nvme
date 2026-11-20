@@ -664,9 +664,10 @@ func TestStatusLostRecord(t *testing.T) {
 // with a record a list of the pool names missing, which the operator
 // drives; a STARTED or ABORTED one, the worker's or the operator's, in a
 // pool with no revision key, which waits for the key, since neither the
-// worker's pass nor the gateway's cancel or finish acts without it; and a
-// CREATED one whose verdict says started in a pool whose pass is refused,
-// which the worker moves only once it drives the pool again.
+// worker's pass nor the gateway's cancel or finish acts without it, even
+// where the retired-leg bound refuses the finish; and a CREATED one whose
+// verdict says started in a pool whose pass is refused, which the worker
+// moves only once it drives the pool again.
 func TestStatusRepairs(t *testing.T) {
 	worker := common.WorkerRepName(1, stDataGrp, 7)
 	for _, tc := range []struct {
@@ -677,10 +678,11 @@ func TestStatusRepairs(t *testing.T) {
 		keepAll   bool
 		fragments []string
 		// level and refused put the pool where the worker runs no
-		// reaction, so the operator drives even the worker's repairs:
-		// refused is "conf" for a conf the pass refuses, "lost" for a
-		// thin device the pool's list names and etcd does not hold, and
-		// "norev" for an absent revision key.
+		// reaction, so the operator drives even the worker's repairs,
+		// save under "norev", where nothing can: refused is "conf" for a
+		// conf the pass refuses, "lost" for a thin device the pool's list
+		// names and etcd does not hold, and "norev" for an absent
+		// revision key.
 		level   pb.SpLevel
 		refused string
 	}{
@@ -735,6 +737,21 @@ func TestStatusRepairs(t *testing.T) {
 			&pb.Repair{RepId: 50, RepStage: pb.RepStage_REP_STAGE_STARTED},
 			&pb.CntlrInfo_RepairInfo{Started: true},
 			false, []string{"started", "revision key is back"}, 0, "norev"},
+		{"an operator's aborted with no revision key", "r1",
+			&pb.Repair{RepId: 50, RepStage: pb.RepStage_REP_STAGE_ABORTED},
+			&pb.CntlrInfo_RepairInfo{AbortConfirmed: true},
+			false, []string{"aborted", "revision key is back"}, 0, "norev"},
+		{"the worker's started with no revision key", worker,
+			&pb.Repair{RepId: 50, RepStage: pb.RepStage_REP_STAGE_STARTED},
+			&pb.CntlrInfo_RepairInfo{Started: true},
+			false, []string{"started", "revision key is back"}, 0, "norev"},
+		// The bound's own steps, a keep's clear and a retired leg's
+		// delete, are pool writes the gateway refuses without the key
+		// too, so the key's wait comes first.
+		{"the worker's finish refused with no revision key", worker,
+			&pb.Repair{RepId: 50, RepStage: pb.RepStage_REP_STAGE_STARTED},
+			&pb.CntlrInfo_RepairInfo{Started: true},
+			true, []string{"started", "revision key is back"}, 0, "norev"},
 		{"a created one with a lost record", "r1", &pb.Repair{RepId: 50},
 			&pb.CntlrInfo_RepairInfo{Started: true},
 			false, []string{"moves it to started", "drives the pool again"},
@@ -901,13 +918,15 @@ func TestStatusForcedStartWithNoWorker(t *testing.T) {
 	stOne(t, rows, pb.StatusKind_STATUS_KIND_GROUP, "a forced start",
 		"forced start", "drives the pool again")
 	stOne(t, rows, pb.StatusKind_STATUS_KIND_LOST_RECORD,
-		"the absent revision key", "revision key")
+		"the absent revision key", "revision key",
+		"no step the pool's other rows name runs")
 }
 
 // TestStatusMigration pins the migration rows: one whose cutover is
 // pending, with the primary's path row to the new side; past the cutover,
 // one whose copy is whole and waits for its finish, read from the new
-// side's disk node; and none for a copy still running.
+// side's disk node, and in a pool with no revision key for the key, which
+// the finish reads first; and none for a copy still running.
 func TestStatusMigration(t *testing.T) {
 	const whole = "0 2048 clone 8 12/1024 64 1024/1024 0 0 1 " +
 		"no_hydration 2 hydration_threshold 1 hydration_batch_size 1 rw"
@@ -918,10 +937,16 @@ func TestStatusMigration(t *testing.T) {
 		pending  bool
 		dmClone  string
 		fragment string
+		// noRev leaves the pool's revision key absent, which the
+		// gateway's migr finish reads first and refuses without
+		// (checkSpToken), so the row names the key's wait.
+		noRev bool
 	}{
-		{"cutover pending", true, "", "cutover"},
-		{"whole", false, whole, "migr finish"},
-		{"half", false, half, ""},
+		{"cutover pending", true, "", "cutover", false},
+		{"whole", false, whole, "it waits for migr finish", false},
+		{"whole, no revision key", false, whole, "revision key is back",
+			true},
+		{"half", false, half, "", false},
 	} {
 		t.Run(tc.label, func(t *testing.T) {
 			env := newStEnv(t)
@@ -943,6 +968,7 @@ func TestStatusMigration(t *testing.T) {
 				MigrId: 71, SrcSideId: stSide, DstSideId: 70,
 				CutoverPending: tc.pending,
 			}
+			pool.noRev = tc.noRev
 			cnFake.setInfo(nil, nil, nil, &pb.CntlrInfo{
 				SideIdToPath: map[uint64]*pb.ResInfo{70: {
 					Status: pb.ResStatus_RES_STATUS_MISSING, Details: "no ctrl",

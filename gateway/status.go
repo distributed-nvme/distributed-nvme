@@ -814,15 +814,16 @@ type statusBuilder struct {
 	// missing, which the pass refuses as the fan-out does (dnv-worker.md
 	// MD3; checkListedRecords, worker/sprole.go), or no worker runs for the
 	// pool (noWorker). The operator then drives the worker's repairs
-	// (repairRows), and a stage move or a forced-start clear waits until the
-	// worker drives the pool again.
+	// (repairRows), save with noWorker, where nothing can; and a stage move
+	// or a forced-start clear waits until the worker drives the pool again.
 	noPass bool
 	// noWorker says the pool's revision key is absent, so no sp worker runs
 	// for the pool (lostRows): not even the clone drain, which runs ahead
 	// of the pass's gates (dnv-worker.md CLD7). The gateway's repair cancel
 	// and finish read the key first and refuse while it is absent
 	// (checkSpToken, gateway/common.go), so a started or aborted repair
-	// waits for the key, whoever's it is (repairRows).
+	// waits for the key, whoever's it is (repairRows); so does the migr
+	// finish of a migration whose copy is whole (migrationRows).
 	noWorker bool
 }
 
@@ -906,8 +907,13 @@ func (b *statusBuilder) lostRows() {
 			Kind: pb.StatusKind_STATUS_KIND_LOST_RECORD,
 			Object: model.SpRevKey(state.Conf.GetShardCode(), b.in.cid,
 				state.Conf.GetSpId()),
+			// The gateway's pool writes read the key first and refuse
+			// while it is absent (checkSpToken), so this row speaks for
+			// the steps every other row of the pool names.
 			Text: "the pool's revision key is absent: no worker drives " +
-				"the pool",
+				"the pool and the gateway refuses the pool's writes, so " +
+				"no step the pool's other rows name runs until the key " +
+				"is back",
 		})
 	}
 }
@@ -1766,6 +1772,14 @@ func (b *statusBuilder) migrationRows(info *pb.CntlrInfo) {
 				row.Status = statusOf(copyRow.GetStatus())
 				row.Reason = copyRow.GetReason()
 				row.Text = "its copy reads " + rowText(copyRow)
+			case common.HydrationComplete(copyRow.GetDetails()) &&
+				b.noWorker:
+				// The gateway's migr finish reads the revision key first
+				// and refuses while it is absent (checkSpToken).
+				row.Status = statusOf(copyRow.GetStatus())
+				row.Text = "its copy is whole: its migr finish waits " +
+					"until the pool's revision key is back, since the " +
+					"gateway refuses it without the key"
 			case common.HydrationComplete(copyRow.GetDetails()):
 				row.Status = statusOf(copyRow.GetStatus())
 				row.Text = "its copy is whole: it waits for migr finish"

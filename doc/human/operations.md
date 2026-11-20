@@ -117,13 +117,18 @@ status and the reason of the row it shows follow where it has them:
   stops the worker's reactions, with a setting the worker refuses, or with
   a `lost-record` line for one of the pool's own records (not a node's
   record, nor the one that maps the pool's id to its name), since the
-  worker then finishes and cancels none of its repairs there. A
-  `lost-record` line for the pool's revision key, the etcd record that
-  holds the pool's revision, is the one exception: the worker and the
-  gateway both read that record before they act on the pool, so neither
-  the worker nor `dnvctl repair cancel` or `dnvctl repair finish` can end
-  a repair of the pool, and the text says it waits for the record. Do not
-  run them; ask for help, as When to stop below says.
+  worker then finishes and cancels none of its repairs there. With a
+  `lost-record` line, ask for help before you run them, as When to stop
+  below says: the gateway can refuse them too, for example when the lost
+  record is the slice that holds the repaired group. A `lost-record` line
+  for the pool's revision key, the etcd record that holds the pool's
+  revision, is the case where no one can act: the worker and the gateway
+  both read that record before they act on the pool, so no step another
+  line of the pool names can run until the record is back, neither the
+  worker's nor yours, such as `dnvctl repair cancel`, `dnvctl repair
+  finish` or `dnvctl migr finish`. The record's own line says so, and the
+  repair lines and the line of a migration whose copy is whole say they
+  wait for it.
 - `torn`: a thin device whose slices hold its data from different points
   in time.
 - `worker`: no worker of a role (dn, cn or sp) has its record in etcd,

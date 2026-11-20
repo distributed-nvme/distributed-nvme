@@ -2570,7 +2570,11 @@ rest. A pool's rows are:
 
 * a lost record: a key the pool's lists name that etcd does not hold, a
   node record a side or a cntlr names, or the pool's revision key, absent,
-  each of which leaves the pool undriven or waiting for an operator; and
+  each of which leaves the pool undriven or waiting for an operator — the
+  revision key's row says that no step the pool's other rows name runs
+  until the key is back, since no worker drives the pool and the gateway's
+  pool writes read the key first and refuse without it (`gateway.md`
+  GW6); and
   the pool's id-to-name record (Key table) absent or naming another pool,
   without which the worker's write of a cntlr's health epoch cannot
   rewrite the pool's discovery entries;
@@ -2630,13 +2634,16 @@ rest. A pool's rows are:
   absent, which leaves the pool no worker and which the gateway's cancel
   and finish read first and refuse without (`gateway.md` GW6), so there a
   started or an aborted repair, the worker's or the operator's, waits for
-  the key; and it says when a worker's repair's finish is refused because
-  every retired leg of the group carries keep at the bound (Repairs);
+  the key; and, outside such a pool, it says when a worker's repair's
+  finish is refused because every retired leg of the group carries keep at
+  the bound (Repairs), since the steps that bound's text names, a keep's
+  clear and a retired leg's delete, are refused without the key too;
 * a migration whose cutover is pending, with the primary's path row to
   the new side, and past its cutover one whose copy is whole and waits for
-  its finish, whose copy row reads `RES_STATUS_ERROR`, or whose
-  destination gives no reading of its copy — a copy that runs is not
-  listed;
+  its finish (in a pool whose revision key is absent, for the key, which
+  the gateway's finish reads first and refuses without), whose copy row
+  reads `RES_STATUS_ERROR`, or whose destination gives no reading of its
+  copy — a copy that runs is not listed;
 * a clone being deleted, its one row standing for its teardown: the read
   lists none of the primary's rows of it, of its meta group, of its legs
   or of its repairs' new legs, none of those legs' health epochs, none of
