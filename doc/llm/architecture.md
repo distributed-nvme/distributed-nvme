@@ -8490,7 +8490,9 @@ document and the component documents cite it by its id.
   table carries no feature arguments, "skip_block_zeroing" among them, so
   dm-thin's default holds (`cnagent.md` CN13 builds the table), and a pool
   that skipped it would hand a host whatever a recycled extent holds
-  around a partial write.
+  around a partial write, as the cn suite's isolation case shows on the
+  lab's kernel over legs that hold old bytes (`cnagent_integtest.md`,
+  Cases, isolation).
   What a recycled extent holds stays in a leg's data region, where no pool
   reads it, as long as every copy below the pool carries each block the
   pool has written: a migration skips only regions no pool block maps,
@@ -9429,8 +9431,33 @@ document and only pointed to here.
   brings the array back but not a writable pool; when it is the meta group,
   the flag cannot be written either, so a new primary's build brings the
   pool back writable as of its last commit, without the mappings made
-  since. Worked out from md's and dm-thin's code; the outage under host IO
-  is not measured.
+  since. The loss need not last: an outage of every leg's path past the
+  keep-alive's expiry breaks the array. The teardown that follows the
+  expiry fails at once md's superblock or bitmap write to that leg, which
+  md sends failfast (`cnagent.md` CN12 gives every member the flag), so md
+  fails the first member at the first leg's teardown and marks the array
+  broken at the second's, that member being the last one in sync, which
+  it leaves in sync with a write error (`cnagent.md` CN29); the fast IO
+  fail timeout and the kernel's default reconnect delay of 10 s, which the
+  agent's connection does not change, decide only when the host's waiting
+  write and the pool's commit get their error. Measured in the lab for a
+  `RAID1` data group with its meta group alive, under a host writing one
+  synced 4 KiB block at a time into blocks the pool had not mapped, at the
+  default fast IO fail timeout of 5 s, each time counted from a mark taken
+  just before the cut went in (`cnagent_integtest.md`, Cases, groupcut): a
+  cut of 3.3 s held the write in flight for 3.1 to 3.3 s over six runs, and
+  one of 3.8 s for 6.3 to 6.4 s over three, failing none, the array clean
+  and the pool writable; cuts of 8.5, 20.5 and 60.5 s each broke the array,
+  md failing the first member 9.6 to 10.2 s after the cut's mark and the
+  array reading broken 15.3 to 15.9 s after it; the first write failed 14.9
+  to 15.5 s after it and every later one at once;
+  the pool read read-only with needs_check, and every block a write of
+  which the host was told was done read back as written; and a failover
+  onto a controller node none of whose leg paths the cut reached assembled
+  both arrays from both legs and brought the pool back read-only with
+  needs_check, which only a repair by hand ends (No thin-metadata repair
+  path is specified, above).
+  The meta group's whole loss is worked out from dm-thin's code.
 * **A repair waits while its array does not run or its bad leg serves.**
   `CreateRepair` reads the primary's report for its bad leg's row alone,
   so it accepts a repair of a group whose array is stopped or broken; such
@@ -9933,8 +9960,17 @@ document and only pointed to here.
   names no stripe takes its cluster's stored stripe instead, whatever its
   own block, narrowed where its slice count times that stripe is over the
   stripe's product bound (Common validation; Storage pools), so such a pool
-  of more than four slices at the defaults has a stripe below its block. Read in the kernel's
-  dm-thin and dm-stripe sources, not in the lab.
+  of more than four slices at the defaults has a stripe below its block.
+  Measured in the lab (`cnagent_integtest.md`, Cases, discard) at a 1 MiB
+  block, every discard freeing exactly the blocks this rule gives on each
+  slice: on one slice, an aligned discard of 4 MiB freed four blocks and one
+  of 512 KiB none; on two slices with a 64 KiB stripe and with a stripe of
+  the block, and on eight slices with a 64 KiB stripe, an aligned discard of
+  four times the slice count times the block freed four blocks on every
+  slice, one a stripe short of the slice count times the block freed one
+  block on every slice but the last, and an aligned discard of one block
+  freed one block on one slice where the stripe is the block and none where
+  it is smaller.
 * **Controller node budgets cap a cluster's group space.** Every cntlr of
   a pool, a standby as much as the primary, charges its controller node
   the full size of the groups of the pool's slices (Terminology and object

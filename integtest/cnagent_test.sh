@@ -10,7 +10,8 @@
 #       [--wipe] user1@ip1 user2@ip2
 #
 # Cases (cnagent_integtest.md, Cases): nodecheck, smoke, redund, repair,
-# teardown, thinbm, torn, discard, clone_xfer, restart, pause; `nodecheck`
+# teardown, thinbm, torn, discard, isolation, clone_xfer, restart, pause,
+# groupcut; `nodecheck`
 # runs the node check, the md replay and the gather on the VMs; `teardown`,
 # the teardown-by-sweep
 # case, injects the faults (a pinned dm device, an iptables partition of the
@@ -18,7 +19,10 @@
 # partition, its `dial` stage drops new connections to the port, `clone_xfer` slows its copy with a token bucket on what the clone's node
 # sends to its own nvme-tcp port, and `pause` cuts a disk node off both ways
 # under a timed writer; PAUSE_MODE=measure makes it the measurement of the
-# write pause (cnagent_integtest.md, Cases, pause). Cleanup
+# write pause (cnagent_integtest.md, Cases, pause), and `groupcut` cuts the
+# pool's primary off from every leg of the data group both ways under a
+# writer, GCUT_MODE=measure making it the 3, 8, 20 and 60 s measurement
+# (cnagent_integtest.md, Cases, groupcut). Cleanup
 # runs unconditionally at the start and, on success only, at the end: a
 # failing run leaves every dm/md/nvmet object and all four agent logs in place
 # and dumps diagnostics (cnagent_integtest.md, Teardown and cleanup).
@@ -29,7 +33,9 @@
 # The uutils dd rule (dnagent_integtest.md, Assumptions and preflight checks)
 # is absolute: this script never passes iflag= or
 # oflag= to dd. Writes use conv=fsync, reads that must hit the media are
-# preceded by a cache drop. Do not "fix" this back to direct IO.
+# preceded by a cache drop. Do not "fix" this back to direct IO. The one IO
+# that must be direct, isolation's writes and groupcut's read back, goes
+# through GNU dd, `gnudd`, whose direct flags work.
 #
 # Both roles run from one binary named `dnv-agent`, so `pkill -x dnv-agent`
 # would kill both (cnagent_integtest.md, Topology). Every kill here is
@@ -273,8 +279,13 @@ PAUSE_STOP=""
 # The reports of the cuts this run of the pause case made, which its
 # summaries print; PAUSE_OUT can hold an earlier run's too.
 PAUSE_REPORTS=()
+# The reports of the cuts this run of the groupcut case made, which its
+# summaries print, and the record of the failover its last cut played.
+GCUT_REPORTS=()
+GCUT_FO=""
 
-CASES=(nodecheck smoke redund repair teardown thinbm torn discard clone_xfer restart pause)
+CASES=(nodecheck smoke redund repair teardown thinbm torn discard isolation
+	clone_xfer restart pause groupcut)
 
 # ---------------------------------------------------------------------------
 # Logging, assertions, failure handling
@@ -982,7 +993,9 @@ leg_wait_live() { # cnvm sp leg cn dnidx secs
 
 # ---------------------------------------------------------------------------
 # Data IO on the host VM: writes fsync, reads follow a cache drop, never
-# iflag=/oflag= (dnagent_integtest.md, Assumptions and preflight checks).
+# iflag=/oflag= with the VM's own dd (dnagent_integtest.md, Assumptions and
+# preflight checks); the IO that must be direct, isolation's writes and
+# groupcut's read back, goes through GNU dd, `gnudd`.
 # ---------------------------------------------------------------------------
 
 drop_caches() { sshv "$1" "sync; echo 3 > /proc/sys/vm/drop_caches"; }
@@ -5074,6 +5087,194 @@ pause_stop() {
 	done
 	if [ -n "$alive" ]; then echo "killed$alive"; else echo stopped; fi
 }
+
+# The group cut's writer and sampler (cnagent_integtest.md, Cases, groupcut)
+# use the pause case's files, so pause_stop stops them and the cleanup and a
+# failing run's exit with them.
+
+# gcut_block <file> <token> <block> — writes the 4 KiB a group cut's writer
+# puts into one block: 128 lines of 32 bytes, each naming the cut's token and
+# the block, so that a read can tell each block's write from every other's.
+gcut_block() {
+	local r line
+	printf -v line '%-31s' "dnv-gcut $2 $3"
+	for ((r = 0; r < 128; r++)); do printf '%s\n' "$line"; done >"$1"
+}
+
+# gcut_writer <dev> <blocks> <units> <token> — the timed writer of a group
+# cut: while the flag file stands, one 4 KiB write 4 KiB into each of the
+# first <blocks> blocks of <dev> in turn, <units> 4 KiB units a block, half
+# a second apart, each synced and logged "<start> <end> <dd status>
+# <block>". Each lands in a block no write reached before, so each maps a
+# block of the thin pool and its sync commits the pool's metadata; each
+# carries its block's own content (gcut_block), which gcut_readback reads
+# back. The dd rule holds (conv=fsync, no oflag=).
+gcut_writer() {
+	local i s rc f=/var/tmp/dnv-it-gcut.blk
+	echo "$$" >"$PAUSE_WPID"
+	for ((i = 0; i < $2; i++)); do
+		[ -e "$PAUSE_FLAG" ] || break
+		gcut_block "$f" "$4" "$i"
+		s=$EPOCHREALTIME
+		rc=0
+		dd if="$f" of="$1" bs=4096 count=1 seek=$((i * $3 + 1)) \
+			conv=fsync status=none 2>/dev/null || rc=$?
+		echo "$s $EPOCHREALTIME $rc $i" >>"$PAUSE_WRITES"
+		sleep 0.5
+	done
+	rm -f "$f"
+	return 0
+}
+
+# gcut_readback <dev> <units> <token> <secs> — reads back, with direct IO
+# through GNU dd, every block the writer's log says a write of succeeded,
+# and compares each with the content its write carried (gcut_block). The
+# reader runs detached, as a read over a path that does not serve would
+# wait past any timeout (gcut_probe), and prints "readback=<same>/<acked>
+# lost=<blocks or ->", or "readback=hung" when it has not ended after
+# <secs>.
+gcut_readback() {
+	local out=/var/tmp/dnv-it-gcut.readback i
+	rm -f "$out" "$out.done"
+	setsid nohup bash "$0" gcut_readback_run "$1" "$2" "$3" "$out" \
+		</dev/null >/dev/null 2>&1 &
+	for ((i = 0; i < $4 * 10; i++)); do
+		if [ -e "$out.done" ]; then
+			cat "$out"
+			rm -f "$out" "$out.done"
+			return 0
+		fi
+		sleep 0.1
+	done
+	echo "readback=hung"
+}
+
+# gcut_readback_run <dev> <units> <token> <out> — gcut_readback's reader.
+gcut_readback_run() {
+	local k acked=0 same=0 lost="" want=/var/tmp/dnv-it-gcut.want
+	local got=/var/tmp/dnv-it-gcut.got
+	for k in $(awk '$3 == 0 { print $4 }' "$PAUSE_WRITES"); do
+		acked=$((acked + 1))
+		gcut_block "$want" "$3" "$k"
+		if gnudd if="$1" of="$got" bs=4096 count=1 skip=$((k * $2 + 1)) \
+			iflag=direct status=none 2>/dev/null && cmp -s "$want" "$got"; then
+			same=$((same + 1))
+		else
+			lost="$lost${lost:+,}$k"
+		fi
+	done
+	rm -f "$want" "$got"
+	echo "readback=$same/$acked lost=${lost:--}" >"$4"
+	: >"$4.done"
+}
+
+# gcut_sampler <traddr> — pause_sampler with each md array's own state
+# beside its members': every 0.1 s, one line "<time> <name>=<state>…"
+# whenever one of them changes, the leg paths into <traddr>, each md
+# member and each array's "mdN:array". Every read is a sysfs attribute,
+# which takes no md mutex and waits on no IO.
+gcut_sampler() {
+	local f v d files=() names=() line last="" i j
+	echo "$$" >"$PAUSE_SPID"
+	for f in $(leg_ctrls "$1"); do
+		files+=("$f/state")
+		names+=("${f##*/}")
+	done
+	for f in /sys/block/md*/md/array_state; do
+		[ -e "$f" ] || continue
+		v=${f#/sys/block/}
+		files+=("$f")
+		names+=("${v%%/*}:array")
+	done
+	for f in /sys/block/md*/md/dev-*/state; do
+		[ -e "$f" ] || continue
+		v=${f#/sys/block/}
+		d=${f%/state}
+		d=${d##*/}
+		files+=("$f")
+		names+=("${v%%/*}:$d")
+		echo "# ${v%%/*}:$d $(cat "/sys/block/${d#dev-}/dm/name" 2>/dev/null)" \
+			>>"$PAUSE_SAMPLES"
+	done
+	for ((i = 0; i < 6000; i++)); do
+		[ -e "$PAUSE_FLAG" ] || break
+		line=""
+		for j in "${!files[@]}"; do
+			v=gone
+			{ read -r v <"${files[$j]}"; } 2>/dev/null || v=gone
+			line="$line ${names[$j]}=$v"
+		done
+		[ "$line" = "$last" ] || echo "$EPOCHREALTIME$line" >>"$PAUSE_SAMPLES"
+		last=$line
+		sleep 0.1
+	done
+	return 0
+}
+
+# gcut_start <dev> <traddr> <blocks> <units> <token> — pause_start for the
+# group cut: its sampler and its writer, detached, over fresh files.
+gcut_start() {
+	local i
+	rm -f "$PAUSE_WPID" "$PAUSE_SPID" "$PAUSE_WRITES" "$PAUSE_SAMPLES"
+	: >"$PAUSE_WRITES"
+	: >"$PAUSE_SAMPLES"
+	: >"$PAUSE_FLAG"
+	setsid nohup bash "$0" gcut_sampler "$2" </dev/null >/dev/null 2>&1 &
+	setsid nohup bash "$0" gcut_writer "$1" "$3" "$4" "$5" </dev/null >/dev/null 2>&1 &
+	for ((i = 0; i < 50; i++)); do
+		[ -s "$PAUSE_WPID" ] && [ -s "$PAUSE_SPID" ] && break
+		sleep 0.1
+	done
+	if [ ! -s "$PAUSE_WPID" ] || [ ! -s "$PAUSE_SPID" ]; then
+		rm -f "$PAUSE_FLAG"
+		echo "the group cut's writer or sampler never reported" >&2
+		return 1
+	fi
+	echo started
+}
+
+# gcut_probe <dev> <block> <units> <secs> — one 4 KiB synced write 4 KiB into
+# block <block> of <dev>, <units> 4 KiB units a block, detached, and its dd
+# status as "rc=<n>", or "hung" when it has not ended after <secs>: a write
+# the multipath head holds for a path that does not serve waits past any
+# timeout, and nothing can end it while it sleeps uninterruptibly, so the
+# helper does not wait on it (a disconnect of the host's controllers fails
+# it).
+gcut_probe() {
+	local f=/var/tmp/dnv-it-gcut-probe.rc i
+	rm -f "$f"
+	setsid nohup bash -c "dd if=/dev/urandom of='$1' bs=4096 count=1 \
+seek=$(($2 * $3 + 1)) conv=fsync status=none 2>/dev/null; echo \$? >$f" \
+		</dev/null >/dev/null 2>&1 &
+	for ((i = 0; i < $4 * 10; i++)); do
+		if [ -s "$f" ]; then
+			echo "rc=$(cat "$f")"
+			rm -f "$f"
+			return 0
+		fi
+		sleep 0.1
+	done
+	echo hung
+}
+
+# gcut_wait_back <time> <secs> — waits until the writer has logged a write
+# that started after <time>, by this VM's clock, and succeeded, and prints
+# that line; fails after <secs>, printing the writer's last line.
+gcut_wait_back() {
+	local line i
+	for ((i = 0; i < $2 * 10; i++)); do
+		line=$(awk -v t="$1" '$1 > t && $3 == 0 { print; exit }' \
+			"$PAUSE_WRITES" 2>/dev/null)
+		if [ -n "$line" ]; then
+			echo "$line"
+			return 0
+		fi
+		sleep 0.1
+	done
+	echo "no write that started after $1 succeeded in $2 s; the last:" \
+		"$(tail -n 1 "$PAUSE_WRITES" 2>/dev/null)" >&2
+	return 1
+}
 HELPER_EOF
 	udev_rules_source || return 1
 	printf '\n"$@"\n'
@@ -5245,7 +5446,7 @@ preflight_vms() {
 		# silent no-op. Note this list is reached
 		# AFTER the start-of-run cleanup_all and not at all under
 		# --cleanup-only, so those sweeps run unchecked.
-		missing=$(sshv "$idx" "for b in dmsetup nvme losetup blkdiscard lsblk dd fallocate sha256sum cmp pkill jq timeout mdadm udevadm stat thin_dump blkid blockdev truncate pvcreate vgcreate lvcreate vgremove pvremove make-bcache mkfs.ext4; do command -v \$b >/dev/null || echo \$b; done")
+		missing=$(sshv "$idx" "for b in dmsetup nvme losetup blkdiscard lsblk dd gnudd fallocate sha256sum cmp pkill jq timeout mdadm udevadm stat thin_dump blkid blockdev truncate pvcreate vgcreate lvcreate vgremove pvremove make-bcache mkfs.ext4; do command -v \$b >/dev/null || echo \$b; done")
 		[ -z "$missing" ] || die "missing: $missing on vm$idx"
 		# smoke's queue counts prove the cap only on a VM with more CPUs than
 		# QID_MAX: with no more, a host asks for no more queues than the
@@ -10788,6 +10989,157 @@ pool_wait_used() { # cnidx pool want secs label
 	done
 }
 
+# The discard case's pools of more than one slice (cnagent_integtest.md,
+# Cases, discard): "<sp> <slices> <stripe>" each, a RedundNone pool on DN1
+# whose every slice has a one-extent meta group and a one-extent data group.
+# Eight slices take the suite's stripe, which keeps the stripe times the
+# slices within the gateway's bound; two take it and a stripe of the block.
+DISCARD_WIDE=("0x422 2 $STRIPE_SIZE" "0x423 2 $BLOCK_SIZE" "0x424 8 $STRIPE_SIZE")
+# What the host writes per slice before the discards, in blocks.
+DISCARD_WIDE_BLOCKS=8
+
+# req_nwide <file> <cnidx> <dnidx> <sp> <cntlr> <nqn> <uuid> <slices>
+# <stripe> — req_wide for any slice count: slice i (from 1) takes the ids
+# 0x10*i plus 2 to 8, in req_wide's order (slice, meta group, its leg and
+# side, data group, its leg and side), and the origin td and its subsystem
+# and namespace W's.
+req_nwide() {
+	local file=$1 cn=$2 dn=$3 sp=$4 cntlr=$5 nqn=$6 uuid=$7 n=$8 stripe=$9
+	local i b slices=()
+	for ((i = 1; i <= n; i++)); do
+		b=$((0x10 * i))
+		slices+=("$(printf '"%s": {"slice_idx": %s, "meta_grp_list": [%s], "data_grp_list": [%s]}' \
+			"$(hex16 $((b + 2)))" $((i - 1)) \
+			"$(req_grp $((b + 3)) 1 "$NONE_META_BLOCKS" "$NONE_EXT1_DATA" \
+				"$(req_leg $((b + 4)) 0 "$(req_side $((b + 5)) "$dn")")")" \
+			"$(req_grp $((b + 6)) 1 "$NONE_META_BLOCKS" "$NONE_EXT1_DATA" \
+				"$(req_leg $((b + 7)) 0 "$(req_side $((b + 8)) "$dn")")")")")
+	done
+	cat >"$file" <<EOF2
+{
+  "cluster_id": "$(d16 "$CLUSTER")", "cn_id": "$(d16 "${CNID[$cn]}")",
+  "cntlr_pointer": {"sp_id": "$(d16 "$sp")", "cntlr_id": "$(d16 "$cntlr")"},
+  "revision": "0",
+  "bdev_conf": {
+    "dm_pool_conf": {"data_block_size": "$BLOCK_SIZE",
+                     "low_water_mark_pct": $LOW_WATER_PCT},
+    "dm_raid0_conf": {"stripe_size": "$stripe"},
+    "redund_conf": {"redund_none": {}}
+  },
+  "sp_level": "SP_LEVEL_READWRITE",
+  "cntlr": $(req_cntlr "$cn" 0 true),
+  "id_to_slice": {$(join_json "${slices[@]}")},
+  "td_list": [$(req_td "$W_TD" 1 0)],
+  "nqn_to_subsystem": {
+    "$nqn": $(req_subsys "$W_SS" "[\"$HOST_NQN\"]" \
+			"$(req_ns "$W_NS" 1 "$W_TD" "$uuid" false)")
+  }
+}
+EOF2
+}
+
+# discard_freed <slices> <stripe> <offset> <length> — the pool blocks a host
+# discard of <length> bytes at <offset> frees on each slice, one count a
+# slice in slice order, by dm-stripe's split and dm-thin's rule that a
+# discard frees only the blocks it covers whole on the slice
+# (architecture.md, Known limits, the entry on a host discard), within the
+# blocks the case's write mapped.
+discard_freed() {
+	awk -v n="$1" -v s="$2" -v off="$3" -v len="$4" -v bs="$BLOCK_SIZE" \
+		-v mapped="$DISCARD_WIDE_BLOCKS" 'BEGIN {
+	    for (c = off / s; c < (off + len) / s; c++) {
+	        sl = c % n; so = int(c / n) * s; cov[sl, int(so / bs)] += s }
+	    for (sl = 0; sl < n; sl++) { f = 0
+	        for (b = 0; b < mapped; b++) if (cov[sl, b] >= bs) f++
+	        printf "%s%d", (sl ? " " : ""), f }
+	    printf "\n" }'
+}
+
+# discard_wide <sp> <slices> <stripe> — one pool of more than one slice:
+# the host writes DISCARD_WIDE_BLOCKS blocks a slice from the volume's
+# start, then three discards that blkdiscard sends whole: one aligned on
+# the slices times the block, which frees blocks on every slice; one a
+# stripe short of the slices times the block, which leaves the last slice's
+# block; and one of a block, which frees a block only where the stripe is
+# the block. After each, every slice's pool maps what discard_freed says.
+discard_wide() {
+	local sp=$1 n=$2 stripe=$3 cntlr=0x1 cn=1 dn=1 hv=2 i b
+	local nqn="$NQN_IT_PREFIX:k:wide$n-$stripe"
+	local uuid=99999999-9999-4999-8999-99999999$(printf '%04x' $((sp & 0xffff)))
+	local req="$WORK/req-discard-$sp.json" out dev pools=() base=() freed
+	local want=() d off len label got
+	dev=$(host_dev "$uuid")
+	DIAG_CNTLRS=()
+	SIDE_PROVISIONED=()
+	diag_cntlr "$cn" "$sp" "$cntlr"
+	stage "wide$sp" "a $n-slice pool, stripe $stripe: a host discard frees only the blocks it covers whole on each slice"
+	local ptrs=()
+	for ((i = 1; i <= n; i++)); do
+		b=$((0x10 * i))
+		ptrs+=("$sp:$((b + 4)):$((b + 5))" "$sp:$((b + 7)):$((b + 8))")
+	done
+	dn_pointers "$dn" "${ptrs[@]}"
+	for ((i = 1; i <= n; i++)); do
+		b=$((0x10 * i))
+		dn_side "$dn" "$sp" $((b + 4)) $((b + 5)) 1 "$NONE_MGRP_ZERO_BYTES" \
+			"${CNID[$cn]}"
+		dn_side "$dn" "$sp" $((b + 7)) $((b + 8)) 1 "$NONE_DGRP_ZERO_BYTES" \
+			"${CNID[$cn]}"
+	done
+	bump_cn_sync "$cn"
+	out=$(cnctl "$cn" syncup-cn --revision "${CNREV[$cn]}" --cntlr "$sp:$cntlr")
+	assert_cn_info_ok "$out" "discard wide syncup-cn"
+	req_nwide "$req" "$cn" "$dn" "$sp" "$cntlr" "$nqn" "$uuid" "$n" "$stripe"
+	bump_cn_rev "$cn"
+	out=$(cn_syncup_cntlr "$cn" "$req")
+	for ((i = 1; i <= n; i++)); do
+		b=$((0x10 * i))
+		assert_map_ok "$out" slice_id_to_dm_pool $((b + 2)) "discard wide"
+		assert_thin_ok "$out" "$W_TD" $((b + 2)) "discard wide"
+		pools+=("$(cn_dm_name c2 "$cn" "$sp" $((b + 2)))")
+	done
+	assert_map_ok "$out" ns_id_to_namespace "$W_NS" "discard wide"
+	host_connect "$hv" "$cn" "$nqn"
+	helper "$hv" "wait_dev '$dev' 20" >/dev/null || die "no device node $dev on vm$hv"
+	host_wait_ana "$hv" "$nqn" "$cn" optimized 20
+	for ((i = 0; i < n; i++)); do
+		got=$(helper "$cn" "pool_used '${pools[$i]}'") ||
+			die "discard wide: the used blocks of ${pools[$i]} do not read"
+		base+=("$got")
+		want+=($((got + DISCARD_WIDE_BLOCKS)))
+	done
+	sshv "$hv" "dd if=/dev/urandom of=$dev bs=1M count=$((n * DISCARD_WIDE_BLOCKS)) conv=fsync status=none && sync"
+	for ((i = 0; i < n; i++)); do
+		pool_wait_used "$cn" "${pools[$i]}" "${want[$i]}" 10 \
+			"discard wide $n x $stripe: the write, slice $i"
+	done
+	for d in aligned short block; do
+		case "$d" in
+		aligned) off=0 len=$((n * 4 * BLOCK_SIZE)) ;;
+		short) off=$((n * 4 * BLOCK_SIZE)) len=$((n * BLOCK_SIZE - stripe)) ;;
+		block) off=$((n * 6 * BLOCK_SIZE)) len=$BLOCK_SIZE ;;
+		esac
+		sshv "$hv" "blkdiscard --offset $off --length $len $dev"
+		freed=($(discard_freed "$n" "$stripe" "$off" "$len"))
+		label="discard wide $n x $stripe: the $d discard of $len bytes at $off"
+		for ((i = 0; i < n; i++)); do
+			want[i]=$((want[i] - freed[i]))
+			pool_wait_used "$cn" "${pools[$i]}" "${want[$i]}" 10 \
+				"$label, slice $i"
+		done
+		log "  $label frees ${freed[*]} block(s) on the slices"
+	done
+	sleep 1
+	for ((i = 0; i < n; i++)); do
+		assert_eq "$(helper "$cn" "pool_used '${pools[$i]}'")" "${want[$i]}" \
+			"discard wide $n x $stripe: slice $i maps no more and no less a second on"
+	done
+	host_disconnect "$hv" "$nqn"
+	cn_drop "$cn"
+	dn_drop "$dn"
+	assert_no_residue "$sp"
+}
+
 case_discard() {
 	CASE=discard
 	DIAG_CNTLRS=()
@@ -10927,6 +11279,128 @@ case_discard() {
 	dn_drop "$dn"
 	assert_no_residue "$sp"
 	sshv_ok "$hv" "rm -f $WORK/pattern-k.bin"
+
+	local wide
+	for wide in "${DISCARD_WIDE[@]}"; do
+		discard_wide $wide
+	done
+}
+
+# ---------------------------------------------------------------------------
+# Case I — isolation (cnagent_integtest.md, Cases)
+# ---------------------------------------------------------------------------
+
+# The isolation case's pool: the A shape, primary on CN2. ISO_WRITES thin
+# blocks each take one 4 KiB write at a 4 KiB offset of its own within the
+# block, over legs whose data sides hold a byte pattern of each disk node's
+# own past their first data block (ISO_BYTE); ISO_CONTROL is a pool block
+# no write reaches.
+ISO_SP=0x431
+ISO_UUID=66666666-6666-4666-8666-666666666661
+ISO_WRITES=16
+ISO_CONTROL=40
+ISO_BYTE=("" 241 262)
+
+# iso_expect <file> <chunk> <offset> — on a VM, the sha256 of one pool block
+# as a host must read it after the write: zeros, but for the 4 KiB chunk
+# <chunk> of <file> at <offset> bytes.
+iso_expect() { # vm file chunk offset
+	sshv "$1" "set -o pipefail; { head -c $4 /dev/zero; dd if=$2 bs=4096 skip=$3 count=1 status=none; head -c $((BLOCK_SIZE - $4 - 4096)) /dev/zero; } | sha256sum | cut -d' ' -f1"
+}
+
+case_isolation() {
+	CASE=isolation
+	DIAG_CNTLRS=()
+	SIDE_PROVISIONED=()
+	local sp=$ISO_SP c2=0x2 hv=2 nqn="$NQN_IT_PREFIX:i:vol1"
+	local req2="$WORK/req-isolation-cn2.json" out dev l j off want got
+	local side plant=$((64 * 1048576)) leg1 leg2 lead
+	dev=$(host_dev "$ISO_UUID")
+	diag_cntlr 2 "$sp" "$c2"
+
+	stage dn "the A-shaped pool's four sides, each data side past its first data block holding an old pattern of its own"
+	dn_pointers 1 "$sp:${A_MLEG[1]}:${A_MSIDE[1]}" "$sp:${A_DLEG[1]}:${A_DSIDE[1]}"
+	dn_pointers 2 "$sp:${A_MLEG[2]}:${A_MSIDE[2]}" "$sp:${A_DLEG[2]}:${A_DSIDE[2]}"
+	lead=$((RAID1_DGRP_ZERO_BYTES / 1048576))
+	for l in 1 2; do
+		dn_side "$l" "$sp" "${A_MLEG[$l]}" "${A_MSIDE[$l]}" 1 \
+			"$RAID1_MGRP_ZERO_BYTES" "${CNID[2]}"
+		dn_side "$l" "$sp" "${A_DLEG[$l]}" "${A_DSIDE[$l]}" 2 \
+			"$RAID1_DGRP_ZERO_BYTES" "${CNID[2]}"
+		# The old bytes go in through the side device on the disk node,
+		# before any controller node reads the side: a different byte on
+		# each leg, from the end of what provisioning zeroes.
+		side=/dev/mapper/$(dn_side_name "$l" "$sp" "${A_DSIDE[$l]}")
+		sshv "$l" "head -c $plant /dev/zero | tr '\\000' '\\${ISO_BYTE[$l]}' >$WORK/iso-old.bin && dd if=$WORK/iso-old.bin of=$side bs=1M seek=$lead conv=fsync status=none && rm -f $WORK/iso-old.bin"
+	done
+
+	stage build "CN2 builds the primary stack: both arrays made over the legs as they are"
+	bump_cn_sync 2
+	out=$(cnctl 2 syncup-cn --revision "${CNREV[2]}" --cntlr "$sp:$c2")
+	assert_cn_info_ok "$out" "isolation syncup-cn"
+	req_raid1 "$req2" 2 "$sp" "$c2" 0 true "$nqn" "$ISO_UUID"
+	bump_cn_rev 2
+	out=$(cn_syncup_cntlr 2 "$req2")
+	assert_map_ok "$out" grp_id_to_md_raid "$A_MGRP" isolation
+	assert_map_ok "$out" grp_id_to_md_raid "$A_DGRP" isolation
+	assert_map_ok "$out" ns_id_to_namespace "$A_NS" isolation
+	host_connect "$hv" 2 "$nqn"
+	helper "$hv" "wait_dev '$dev' 20" >/dev/null || die "no device node $dev on vm$hv"
+	host_wait_ana "$hv" "$nqn" 2 optimized 20
+
+	stage write "4 KiB written at an offset of its own into each of $ISO_WRITES unmapped thin blocks, with direct IO"
+	# GNU dd, for its direct IO: the VM's dd is uutils, whose direct flags
+	# give false failures (dnagent_integtest.md, Assumptions and preflight
+	# checks).
+	sshv "$hv" "dd if=/dev/urandom of=$WORK/iso-new.bin bs=4096 count=$ISO_WRITES conv=fsync status=none"
+	for ((j = 0; j < ISO_WRITES; j++)); do
+		sshv "$hv" "gnudd if=$WORK/iso-new.bin of=$dev bs=4096 count=1 skip=$j seek=$((j * BLOCK_SIZE / 4096 + j + 1)) oflag=direct status=none"
+	done
+
+	stage read "each whole block reads zeros and the write, on the host and on both legs, which agree"
+	# A fresh pool maps its data blocks in order from the start (Lab facts),
+	# so thin block j is pool block j, which md puts at its data offset plus
+	# j blocks on each leg; the data offset is the group's meta region
+	# (architecture.md, Group on-leg layout: meta region, data region, health
+	# block). Pool block 0 is a leg's first
+	# data block, which provisioning zeroed; the rest lie over the old
+	# patterns.
+	drop_caches "$hv"
+	for l in 1 2; do drop_caches "$l"; done
+	for ((j = 0; j < ISO_WRITES; j++)); do
+		off=$(((j + 1) * 4096))
+		want=$(iso_expect "$hv" "$WORK/iso-new.bin" "$j" "$off")
+		got=$(sha_range "$hv" "$dev" 1 "$j")
+		[ "$got" = "$want" ] ||
+			die "isolation: the host reads block $j as another content than" \
+				"zeros and its write at $off ($got, want $want)"
+		leg1=$(sha_range 1 "/dev/mapper/$(dn_side_name 1 "$sp" "${A_DSIDE[1]}")" 1 \
+			$((RAID1_META_BLOCKS + j)))
+		leg2=$(sha_range 2 "/dev/mapper/$(dn_side_name 2 "$sp" "${A_DSIDE[2]}")" 1 \
+			$((RAID1_META_BLOCKS + j)))
+		[ "$leg1" = "$want" ] && [ "$leg2" = "$want" ] ||
+			die "isolation: pool block $j reads $leg1 on leg 1 and $leg2 on" \
+				"leg 2, want both $want"
+	done
+	# The positive control: a pool block no write reached still holds each
+	# leg's own old pattern, so the plant reached the legs and the build
+	# copied neither over the other.
+	for l in 1 2; do
+		want=$(sshv "$l" "set -o pipefail; head -c $BLOCK_SIZE /dev/zero | tr '\\000' '\\${ISO_BYTE[$l]}' | sha256sum | cut -d' ' -f1")
+		got=$(sha_range "$l" "/dev/mapper/$(dn_side_name "$l" "$sp" "${A_DSIDE[$l]}")" 1 \
+			$((RAID1_META_BLOCKS + ISO_CONTROL)))
+		assert_eq "$got" "$want" \
+			"isolation: leg $l's pool block $ISO_CONTROL, which no write reached, holds its old pattern"
+	done
+	log "isolation: $ISO_WRITES blocks read zeros and their write on the host and on both legs"
+
+	stage teardown "empty cntlr list, then empty side lists"
+	host_disconnect "$hv" "$nqn"
+	cn_drop 2
+	dn_drop 1
+	dn_drop 2
+	assert_no_residue "$sp"
+	sshv_ok "$hv" "rm -f $WORK/iso-new.bin"
 }
 
 # ---------------------------------------------------------------------------
@@ -12603,11 +13077,14 @@ pause_cut() {
 		rpid=$!
 		sleep $((2 * P_INTERVAL))
 	fi
+	# Set before the rule goes in, so that a failing run's exit lifts a cut
+	# even one whose install did not answer.
+	BLACKHOLED=1
 	got=$(helper 1 "blackhole_from ${IP[2]}")
 	date +%s.%N >"$out.cutd"
 	cut0=$SECONDS
 	case "$got" in
-	"cut "*) BLACKHOLED=1 ;;
+	"cut "*) ;;
 	*) die "pause: the two-way cut was not installed on vm1: $got" ;;
 	esac
 	printf '%s\n' "${got#cut }" >"$out.cut1"
@@ -12864,6 +13341,375 @@ case_pause() {
 	log "pause: the summaries"
 	[ "${#PAUSE_REPORTS[@]}" -eq 0 ] ||
 		cat "${PAUSE_REPORTS[@]}" 2>/dev/null | grep '^PAUSE' >&2 || true
+}
+
+# ---------------------------------------------------------------------------
+# Case G — groupcut (cnagent_integtest.md, Cases)
+# ---------------------------------------------------------------------------
+
+# GCUT_MODE picks what the groupcut case runs (cnagent_integtest.md, Cases,
+# groupcut): "gate", the default, one cut of GCUT_GATE_SECS, whose outcome
+# the case asserts; "measure", one cut of each length of GCUT_MEASURE_SECS,
+# each over a fresh pool, whose numbers the docs carry. GCUT_OUT is where
+# each cut keeps its raw files on the driver. GCUT_GATE_SECS and
+# GCUT_BACK_SECS may be set, as the gate's checks are each shown failing
+# with a cut that breaks md and with a wait for writes back too short.
+GCUT_MODE=${GCUT_MODE:-gate}
+GCUT_OUT=${GCUT_OUT:-$WORK/groupcut}
+GCUT_GATE_SECS=${GCUT_GATE_SECS:-3}
+GCUT_MEASURE_SECS="3 8 20 60"
+# One pool a cut, its thin device GCUT_BLOCKS of the pool's blocks long, the
+# writer's whole range at a write every half second.
+GCUT_SP=("" 0x441 0x442 0x443 0x444)
+GCUT_UUID=55555555-5555-4555-8555-55555555555
+GCUT_BLOCKS=120
+# How long after the cut is lifted a write must succeed for the primary to
+# count as back, and how long a read or a write the case makes itself may
+# take.
+GCUT_BACK_SECS=${GCUT_BACK_SECS:-30}
+GCUT_IO_SECS=30
+
+# gcut_build <i> <req1> <req2> <nqn> <dev> — pool <i>: the A-shaped pool
+# with both legs of its meta group on DN2 and both legs of its data group on
+# DN1, a shape the gateway never builds, so that one rule on vm1 cuts every
+# leg of the data group from the primary on CN2 and none of the meta
+# group's; the standby on CN1, whose paths into DN1 are local and stay up;
+# the host on vm2 with both paths, the thin device GCUT_BLOCKS long.
+gcut_build() {
+	local i=$1 req1=$2 req2=$3 nqn=$4 dev=$5 sp=${GCUT_SP[$1]} c1=0x1 c2=0x2
+	local out l f
+	stage "cut${i}build" "pool $i: the meta group's legs on DN2, the data group's on DN1; primary CN2, standby CN1"
+	SIDE_PROVISIONED=()
+	dn_pointers 1 "$sp:${A_DLEG[1]}:${A_DSIDE[1]}" "$sp:${A_DLEG[2]}:${A_DSIDE[2]}"
+	dn_pointers 2 "$sp:${A_MLEG[1]}:${A_MSIDE[1]}" "$sp:${A_MLEG[2]}:${A_MSIDE[2]}"
+	for l in 1 2; do
+		dn_side 2 "$sp" "${A_MLEG[$l]}" "${A_MSIDE[$l]}" 1 \
+			"$RAID1_MGRP_ZERO_BYTES" "${CNID[2]}" "${CNID[1]}"
+		dn_side 1 "$sp" "${A_DLEG[$l]}" "${A_DSIDE[$l]}" 2 \
+			"$RAID1_DGRP_ZERO_BYTES" "${CNID[2]}" "${CNID[1]}"
+	done
+	bump_cn_sync 2
+	out=$(cnctl 2 syncup-cn --revision "${CNREV[2]}" --cntlr "$sp:$c2")
+	assert_cn_info_ok "$out" "groupcut $i syncup-cn 2"
+	bump_cn_sync 1
+	out=$(cnctl 1 syncup-cn --revision "${CNREV[1]}" --cntlr "$sp:$c1")
+	assert_cn_info_ok "$out" "groupcut $i syncup-cn 1"
+	req_raid1 "$req2" 2 "$sp" "$c2" 0 true "$nqn" "$GCUT_UUID$i"
+	req_raid1 "$req1" 1 "$sp" "$c1" 1 false "$nqn" "$GCUT_UUID$i"
+	for f in "$req1" "$req2"; do
+		req_set "$f" "(.id_to_slice[].meta_grp_list[0].leg_list[0].side_list[0] =
+			$(req_side "${A_MSIDE[1]}" 2))
+			| (.id_to_slice[].data_grp_list[0].leg_list[1].side_list[0] =
+			$(req_side "${A_DSIDE[2]}" 1))
+			| .td_list[0].size = \"$((GCUT_BLOCKS * BLOCK_SIZE))\""
+	done
+	bump_cn_rev 2
+	out=$(cn_syncup_cntlr 2 "$req2")
+	assert_map_ok "$out" grp_id_to_md_raid "$A_MGRP" "groupcut $i primary"
+	assert_map_ok "$out" grp_id_to_md_raid "$A_DGRP" "groupcut $i primary"
+	assert_map_ok "$out" ns_id_to_namespace "$A_NS" "groupcut $i primary"
+	flip_created "$out" "$req2" "$req1"
+	bump_cn_rev 1
+	out=$(cn_syncup_cntlr 1 "$req1")
+	assert_map_ok "$out" ns_id_to_namespace "$A_NS" "groupcut $i standby"
+	wait_legs_probed 2 "$sp" "$c2" 20 "groupcut $i primary legs"
+	host_connect 2 2 "$nqn"
+	host_connect 2 1 "$nqn"
+	helper 2 "wait_dev '$dev' 20" >/dev/null || die "no device node $dev on vm2"
+	host_wait_ana 2 "$nqn" 2 optimized 20
+}
+
+# gcut_rows <cnidx> <sp> <cntlr> <rev> — a fresh round's md rows and pool
+# row of a cntlr, "md_data=<status>[/<reason>][<details>] md_meta=… pool=…
+# code=<code>", whatever the round's code.
+gcut_rows() {
+	local out
+	out=$(cnctl "$1" check-cntlr --fresh --show-info --revision "$4" \
+		--sp "$2" --cntlr "$3" --expect-code 4 2>/dev/null || true)
+	if [ -z "$out" ]; then
+		echo no-reply
+		return 0
+	fi
+	printf '%s' "$out" | "$JQ" -r --arg d "$(d16 "$A_DGRP")" \
+		--arg m "$(d16 "$A_MGRP")" --arg s "$(d16 "$A_SLICE")" '
+	    def row: (. // {}) | ((.status // "ABSENT") | sub("RES_STATUS_"; "")) +
+	        (if (.reason // "") == "" then ""
+	         else "/" + (.reason | sub("RES_REASON_"; "")) end) +
+	        "[" + (.details // "") + "]";
+	    "md_data=" + (.cntlr_info.grp_id_to_md_raid[$d] | row) +
+	    " md_meta=" + (.cntlr_info.grp_id_to_md_raid[$m] | row) +
+	    " pool=" + (.cntlr_info.slice_id_to_dm_pool[$s] | row) +
+	    " code=" + ((.agent_reply.code // 0) | tostring)'
+}
+
+# gcut_pool_flags <cnidx> <pool> — the thin pool's status line's mode and
+# flags ("rw", "ro needs_check", "Fail", …), read bounded (diag_cmd), as a
+# pool's status waits while a commit does.
+gcut_pool_flags() {
+	helper "$1" "diag_cmd dmsetup status --noflush '$2'" | awk '
+	    / thin-pool / { for (i = 1; i <= NF; i++) if ($i == "thin-pool") p = i
+	        # A failed pool carries Fail or Error in place of its numbers;
+	        # else the transaction, meta used/total, data used/total, the held
+	        # root, then the mode and its flags.
+	        if ($(p + 1) == "Fail" || $(p + 1) == "Error") {
+	            print $(p + 1); f = 1; exit }
+	        s = ""; for (j = p + 5; j <= NF; j++) s = s (s == "" ? "" : " ") $j
+	        print (s == "" ? "unread" : s); f = 1; exit }
+	    END { if (!f) print "unread" }'
+}
+
+# gcut_failover <i> <sp> <req1> <req2> <nqn> <dev> — the failover as redund
+# plays it, onto CN1, none of whose leg paths the cut reached: CN2 demoted, every
+# side's primary moved to CN1, then CN1 promoted. It records what CN1's
+# build brings back, its rows, its pool's status line, the host's path to
+# it and, where the pool takes writes and the path serves, one write the
+# case makes into a block no write reached; it asserts nothing, as no rule
+# promises what a new primary makes of a data group the old one saw broken.
+# Its record goes to GCUT_FO, one "failover=[…]" field.
+gcut_failover() {
+	local i=$1 sp=$2 req1=$3 req2=$4 nqn=$5 dev=$6 c1=0x1 c2=0x2 l n out
+	local rows flags ana probe=- code
+	stage "cut${i}failover" "pool $i: the failover onto CN1, none of whose leg paths the cut reached"
+	req_set "$req2" '.cntlr.primary = false'
+	bump_cn_rev 2
+	for n in 1 2 3 4; do
+		out=$(cn_syncup_cntlr 2 "$req2" --expect-code 4 2>/dev/null || true)
+		code=no-reply
+		[ -z "$out" ] || code=$(jq_of "$out" '.agent_reply.code // 0')
+		[ "$code" = 4 ] || break
+		sleep 2
+	done
+	log "  groupcut $i: the demote answers code $code after $n send(s)"
+	for l in 1 2; do
+		dn_side 2 "$sp" "${A_MLEG[$l]}" "${A_MSIDE[$l]}" 1 \
+			"$RAID1_MGRP_ZERO_BYTES" "${CNID[1]}" "${CNID[2]}"
+		dn_side 1 "$sp" "${A_DLEG[$l]}" "${A_DSIDE[$l]}" 2 \
+			"$RAID1_DGRP_ZERO_BYTES" "${CNID[1]}" "${CNID[2]}"
+	done
+	for l in 1 2; do
+		leg_wait_ana 1 "$sp" "${A_MLEG[$l]}" "${CNID[1]}" 2 optimized 30
+		leg_wait_ana 1 "$sp" "${A_DLEG[$l]}" "${CNID[1]}" 1 optimized 30
+	done
+	req_set "$req1" '.cntlr.primary = true'
+	bump_cn_rev 1
+	out=$(cn_syncup_cntlr 1 "$req1" --expect-code 4 2>/dev/null || true)
+	code=no-reply
+	[ -z "$out" ] || code=$(jq_of "$out" '.agent_reply.code // 0')
+	log "  groupcut $i: the promote answers code $code"
+	rows=$(gcut_rows 1 "$sp" "$c1" "${CNREV[1]}")
+	flags=$(gcut_pool_flags 1 "$(cn_dm_name c2 1 "$sp" "$A_SLICE")")
+	if helper 2 "wait_ana '$nqn' '${IP[1]}' optimized 30" >/dev/null 2>&1; then
+		ana=optimized
+	else
+		ana=$(helper 2 "ana_state '$nqn' '${IP[1]}'" 2>/dev/null || echo unread)
+	fi
+	case " $flags " in
+	*" rw "*)
+		if [ "$ana" = optimized ]; then
+			probe=$(helper 2 "gcut_probe '$dev' $((GCUT_BLOCKS - 1)) $((BLOCK_SIZE / 4096)) $GCUT_IO_SECS")
+		fi
+		;;
+	esac
+	log "  groupcut $i: after the failover CN1 reads $rows; its pool '$flags';" \
+		"the host's path to it $ana; a new write $probe"
+	GCUT_FO="failover=[pool=$flags path=$ana write=$probe $rows]"
+}
+
+# gcut_run <i> <secs> <req1> <req2> <nqn> <dev> — one cut over pool <i>:
+# the writer of new blocks and the sampler start on vm2, the primary's VM;
+# once the writer has written, vm1 drops every packet between vm2 and its
+# nvme-tcp port both ways (blackhole_from), which takes CN2's two data legs
+# and the host's path to the standby, inaccessible anyway, and none of the
+# meta group's legs or the standby's, which run the other way or stay on
+# one VM, for <secs>; then the rule goes, and the case waits GCUT_BACK_SECS
+# for a write that succeeds. The cut is timed on vm2's clock, the writer's
+# and the sampler's, by a mark just before the rule goes in and one just
+# after it comes out, none while it stands, and every time of the summary
+# counts from the mark before the cut; its length is vm1's, from the rule's
+# install to its removal. What the host saw, md's array state, the pool's status line
+# and CN2's rows are recorded; where no write came back, the failover is
+# played (gcut_failover); then every block whose write the host was told was
+# done is read back and compared (gcut_readback). The last line of the
+# report is the summary, "GROUPCUT …".
+gcut_run() {
+	local i=$1 secs=$2 req1=$3 req2=$4 nqn=$5 dev=$6 sp=${GCUT_SP[$1]}
+	local out="$GCUT_OUT/cut$i" mark got rules st data rows flags fo=-
+	local c2=0x2 sum rb back
+	stage "cut$i" "pool $i: every leg of the data group cut from the primary for $secs s under a writer that maps new blocks"
+	rm -f "$out".*
+	mark="dnv-cn-it groupcut $TRACE cut $i"
+	helper 2 "pause_mark '$mark'" >"$out.mark2"
+	helper 1 "pause_mark '$mark'" >"$out.mark1"
+	PAUSE_VM=2
+	assert_eq "$(helper 2 "gcut_start '$dev' '${IP[1]}' $GCUT_BLOCKS $((BLOCK_SIZE / 4096)) cut$i")" \
+		started "groupcut $i: the writer and the sampler"
+	helper 2 "pause_wait_writes 6 30" >/dev/null ||
+		die "groupcut $i: the timed writer does not write"
+	helper 2 "pause_mark 'dnv-cn-it groupcut $TRACE before cut $i'" >"$out.cutb2"
+	# Set before the rule goes in, so that a failing run's exit lifts a cut
+	# even one whose install did not answer (unblackhole_from removes
+	# nothing where there is no rule).
+	BLACKHOLED=1
+	got=$(helper 1 "blackhole_from ${IP[2]}")
+	case "$got" in
+	"cut "*) printf '%s\n' "${got#cut }" >"$out.cut1" ;;
+	*) die "groupcut $i: the two-way cut was not installed on vm1: $got" ;;
+	esac
+	# No call waits between the rule's install and its removal but the
+	# sleep, so the cut on vm1 is the length asked for and the time of the
+	# lift's own call: a mark on vm2 taken while the rule stands would
+	# lengthen it.
+	sleep "$secs"
+	got=$(helper 1 "unblackhole_from ${IP[2]}")
+	helper 2 "pause_mark 'dnv-cn-it groupcut $TRACE after lift $i'" >"$out.lifta2"
+	printf '%s\n' "${got#restored }" >"$out.lift1"
+	rules=$(helper 1 "blackhole_rules ${IP[2]}")
+	[ -z "$rules" ] || die "groupcut $i: vm1 still holds cut rules: $rules"
+	BLACKHOLED=0
+	if got=$(helper 2 "gcut_wait_back $(cat "$out.lifta2") $GCUT_BACK_SECS" 2>/dev/null); then
+		back=$(awk -v l="$(cat "$out.lifta2")" '{ printf "+%.3f", $2 - l }' <<<"$got")
+	else
+		back=none
+	fi
+	st=$(helper 2 "pause_stop 30")
+	PAUSE_VM=0
+	[ "$st" = stopped ] || log "  WARNING the writer or sampler had to be killed: $st"
+	helper 2 "cat /var/tmp/dnv-it-pause.writes" >"$out.writes"
+	helper 2 "cat /var/tmp/dnv-it-pause.samples" >"$out.samples"
+	helper 2 "kmsg_since '$mark'" >"$out.kmsg2"
+	helper 1 "kmsg_since '$mark'" >"$out.kmsg1"
+	data=$(helper 2 "md_array_state '$(cn_dm_name c9 2 "$sp" "${A_DLEG[1]}")'" ||
+		echo unread)
+	rows=$(gcut_rows 2 "$sp" "$c2" "${CNREV[2]}")
+	flags=$(gcut_pool_flags 2 "$(cn_dm_name c2 2 "$sp" "$A_SLICE")")
+	log "  groupcut $i: after the lift CN2's data array reads '$data', its" \
+		"pool '$flags', its rows $rows; the first write back $back"
+	if [ "$back" = none ]; then
+		gcut_failover "$i" "$sp" "$req1" "$req2" "$nqn" "$dev"
+		fo=$GCUT_FO
+	fi
+	# Every block a write of which the host was told was done, read back
+	# through the primary that serves now, CN2's or, after the failover,
+	# CN1's.
+	drop_caches 2
+	rb=$(helper 2 "gcut_readback '$dev' $((BLOCK_SIZE / 4096)) cut$i $GCUT_IO_SECS")
+	sum=$(gcut_summary "$out" "$secs")
+	printf 'GROUPCUT %s back=%s %s md_data=%s pool=[%s] rows=[%s] %s\n' "$sum" \
+		"$back" "$rb" "$data" "$flags" "$rows" "$fo" | tee "$out.report" >&2
+	GCUT_REPORTS+=("$out.report")
+	case "$rb" in
+	readback=*/*" lost=-") ;;
+	*) log "  groupcut $i: WARNING a write the host was told was done is lost or unread: $rb" ;;
+	esac
+	[ "$GCUT_MODE" != gate ] ||
+		gcut_gate_check "$i" "$secs" "$sum" "$back" "$flags" "$rb"
+
+	stage "cut${i}down" "pool $i torn down"
+	host_disconnect 2 "$nqn"
+	cn_drop 2
+	cn_drop 1
+	dn_drop 1
+	dn_drop 2
+	assert_no_residue "$sp"
+}
+
+# gcut_summary <out> <secs> — one cut's numbers from its raw files, by
+# vm2's clock, every time counted from the mark taken just before the cut
+# went in: the cut's length on vm1's clock, from the rule's install to its
+# removal, the writes, the longest, the failed ones and when the first
+# failed write ended, when md first held a data member faulty, and when the
+# data array, found by its members' dm names, last left its clean state
+# before it broke (a write in flight takes it out of clean), and when it
+# first read broken.
+gcut_summary() {
+	local out=$1 secs=$2 dleg
+	dleg=$(cn_dm_name c9 2 "${GCUT_SP[${out##*cut}]}" "${A_DLEG[1]}")
+	awk -v z="$(cat "$out.cutb2")" -v c1="$(cat "$out.cut1")" \
+		-v l1="$(cat "$out.lift1")" -v secs="$secs" -v dleg="$dleg" '
+	    FILENAME ~ /samples$/ && /^#/ { if ($3 == dleg) { split($2, a, ":"); md = a[1] } next }
+	    FILENAME ~ /writes$/ { n++; d = $2 - $1; if (d > max) max = d
+	        if ($3 != 0) { nf++; if (fe == "") fe = sprintf("+%.3f", $2 - z) } }
+	    FILENAME ~ /samples$/ && md != "" {
+	        for (k = 2; k <= NF; k++) { split($k, kv, "=")
+	            if (kv[1] == md ":array" && br == "") {
+	                if (kv[2] == "clean") left = ""
+	                else if (left == "") left = $1
+	                if (kv[2] ~ /^(broken|inactive)$/) br = $1 }
+	            if (kv[1] ~ ("^" md ":dev-") && kv[2] ~ /faulty/ && mf == "")
+	                mf = sprintf("+%.3f", $1 - z) } }
+	    END { printf "secs=%s cut=%.3f writes=%d longest=%.3f failed=%d " \
+	        "first_fail=%s md_faulty=%s array_left=%s array_broken=%s",
+	        secs, l1 - c1, n, max, nf, fe == "" ? "-" : fe,
+	        mf == "" ? "-" : mf,
+	        (br == "" || left == "") ? "-" : sprintf("%+.3f", left - z),
+	        br == "" ? "-" : sprintf("+%.3f", br - z) }' \
+		"$out.samples" "$out.writes"
+}
+
+# gcut_gate_check <i> <secs> <summary> <back> <pool flags> <readback> —
+# what a rule promises of a cut this short (cnagent_integtest.md, Cases,
+# groupcut): a write paused for about the cut's length, so the rule held a
+# leg path the writes need; no write failed; writes came back on CN2; every
+# acknowledged block reads back; the pool takes writes, with no
+# needs_check. Every check is read and every one that fails is named, then
+# the stage fails.
+gcut_gate_check() {
+	local i=$1 secs=$2 sum=$3 back=$4 flags=$5 rb=$6 bad=()
+	# A write that failed shows the rule held a leg path too, so the pause
+	# is read only where none failed.
+	case " $sum " in
+	*" failed=0 "*)
+		awk -v s="$secs" '{ for (k = 1; k <= NF; k++) if ($k ~ /^longest=/) {
+		        split($k, a, "="); exit !(a[2] >= s - 1) } exit 1 }' <<<"$sum" ||
+			bad+=("no write paused across the $secs s cut, so the rule did not hold a leg path the writes need")
+		;;
+	*) bad+=("writes failed across the $secs s cut") ;;
+	esac
+	[ "$back" != none ] ||
+		bad+=("no write came back on CN2 within $GCUT_BACK_SECS s")
+	case "$rb" in
+	readback=*/*" lost=-") ;;
+	*) bad+=("a block the host was told was written does not read back: $rb") ;;
+	esac
+	case " $flags " in
+	*" needs_check "* | *" ro "* | *Fail* | *Error*)
+		bad+=("CN2's pool reads '$flags' after the $secs s cut") ;;
+	*" rw "*) ;;
+	*) bad+=("CN2's pool reads '$flags', want rw") ;;
+	esac
+	[ "${#bad[@]}" -eq 0 ] && return 0
+	local b
+	for b in "${bad[@]}"; do log "  groupcut $i: GATE $b"; done
+	die "groupcut $i: the gate failed ${#bad[@]} check(s): $sum"
+}
+
+case_groupcut() {
+	CASE=groupcut
+	local i=0 secs list nqn req1 req2 dev
+	case "$GCUT_MODE" in
+	gate) list=$GCUT_GATE_SECS ;;
+	measure) list=$GCUT_MEASURE_SECS ;;
+	*) die "groupcut: GCUT_MODE is '$GCUT_MODE', want gate or measure" ;;
+	esac
+	assert_eq "$(helper 1 have_iptables)" yes \
+		"groupcut: vm1 needs iptables to cut the nvme-tcp port"
+	GCUT_REPORTS=()
+	mkdir -p "$GCUT_OUT"
+	for secs in $list; do
+		i=$((i + 1))
+		DIAG_CNTLRS=()
+		diag_cntlr 2 "${GCUT_SP[$i]}" 0x2
+		diag_cntlr 1 "${GCUT_SP[$i]}" 0x1
+		nqn="$NQN_IT_PREFIX:g:vol$i"
+		req1="$WORK/req-groupcut$i-cn1.json"
+		req2="$WORK/req-groupcut$i-cn2.json"
+		dev=$(host_dev "$GCUT_UUID$i")
+		gcut_build "$i" "$req1" "$req2" "$nqn" "$dev"
+		gcut_run "$i" "$secs" "$req1" "$req2" "$nqn" "$dev"
+	done
+	log ""
+	log "groupcut: the summaries"
+	cat "${GCUT_REPORTS[@]}" >&2
 }
 
 # ---------------------------------------------------------------------------

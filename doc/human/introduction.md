@@ -559,6 +559,20 @@ waiting for the grows: the grows, not the device, set how fast the volume
 filled. No write failed and every block read back. The longest write took
 at least 6.1 s, a write that waited for a grow.
 
+The loss of every leg of a data group at once was measured on the lab VMs
+with a 4 KiB write with a flush, one write at a time, each into a block the
+pool had not mapped, to a RAID1 pool whose data group lost every path from
+its primary while its meta group kept them, at the default fast IO fail
+timeout of 5 s; each time counts from just before the cut began. A cut of
+3.3 s held the write in flight for 3.1 to 3.3 s over six runs, and one of
+3.8 s for 6.3 to 6.4 s over three; no write failed. Cuts of 8.5, 20.5 and
+60.5 s each broke the array: md failed its first member 9.6 to 10.2 s after
+the cut began, the first write failed 14.9 to 15.5 s after it, and every
+later write failed at once. The thin pool then read
+read-only, needing a check, on its primary and after a failover to a
+controller node none of whose paths to the legs the cut reached, and every
+block the host was told was written read back as written.
+
 The limits dnv enforces, each against the largest size a test has run. The
 Go tests run the control plane against fake agents, test programs that answer
 an agent's calls with no node behind them, and the agents against a fake

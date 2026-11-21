@@ -100,7 +100,9 @@ promise.
 volume is thin. A block the volume never wrote reads as zeros, whatever
 the disk holds there. dm-thin zeroes a block before the first partial
 write lands on it. So the old bytes of a freed extent never reach a host
-through a volume. The RAID1 metadata of a new leg is zeroed before use, so
+through a volume. A suite shows this on a real kernel: 4 KiB written into
+blocks never written, over disks that held old bytes, read back as zeros
+around the write, on the host and on both legs. The RAID1 metadata of a new leg is zeroed before use, so
 md never trusts an old superblock.
 
 **What the promise does not cover.**
@@ -254,9 +256,17 @@ Three more things belong with case 1:
   primary brings the array back but not a writable thin pool. When the
   broken group is the meta group, the group that holds the slice's thin
   pool metadata, a new primary brings the pool back writable as of its
-  last commit. The blocks mapped since are gone with no error. State:
-  accepted; section 6.1 has the way back. Not seen in the lab; read from
-  the kernel's code.
+  last commit. The blocks mapped since are gone with no error. The loss
+  need not last long: a network cut just past the paths' keep-alive
+  timeout is enough, since md writes its own records to the legs in a way
+  that fails at once when a path is torn down. State: accepted; section
+  6.1 has the way back. Seen in the lab for a data group whose meta group
+  stayed, with the times in
+  [the introduction](introduction.md#status-and-limits-of-01): a short cut
+  only paused the host's writes, a longer one left the thin pool
+  read-only on its primary and after a failover, and no write the host was
+  told was done was lost. The meta group's case is read from the kernel's
+  code.
 - **A clone whose clone meta group is lost stops.** The clone meta group
   holds the dm-clone's metadata. With no cntlr able to assemble it, no dm-clone is built. The
   clone's namespaces stay inaccessible and host IO queues. State:
@@ -1840,8 +1850,8 @@ design:
   node, never across nodes. To scale out, spread the pools across
   controller nodes. State: accepted; more than one primary is not yet.
 - **No throughput or latency figures are published.** Only the failover
-  pause and the write pause when a disk node dies are measured, on the lab
-  VMs. State: accepted; the figures come
+  pause, the write pause when a disk node dies and what the loss of every
+  path of a data group does are measured, on the lab VMs. State: accepted; the figures come
   from a performance run on AWS.
 - **Every change of a pool sends the whole desired state to its sides and
   cntlrs.** A volume
@@ -2010,7 +2020,10 @@ design:
   stripe already is, or when the narrowing cuts it below the block, as at
   the defaults with more than four slices. Then a discard frees a
   block on one slice only when it covers nearly the slice count times the
-  block, and `fstrim` can report success and free nothing. Read from the kernel's code, not measured. State: accepted.
+  block, and `fstrim` can report success and free nothing. Seen in the
+  lab: with one slice an aligned 4 MiB discard freed four blocks and a
+  512 KiB one none; with two and eight slices each discard freed exactly
+  what this entry says. State: accepted.
   Procedure to write, one line on the stripe setting.
 - **A deleted volume's space can stay in use on the disks.** The delete
   of a volume frees its blocks in the thin pool alone, so the primary

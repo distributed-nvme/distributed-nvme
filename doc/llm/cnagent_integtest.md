@@ -38,7 +38,8 @@ leg older than a member it would zero, then forced, a broken array whose
 legs come back assembled again with no mark, a group whose array has run
 whose legs all read blank, the clone's source lost and given back, a new
 volume over a thin id that holds data, a snapshot torn by a primary stopped
-between its slices' steps, a disk node that dies under a host's writes, a
+between its slices' steps, a disk node that dies under a host's writes, the
+loss of every leg of a data group for seconds under a host's writes, a
 disk node that leaves new connections unanswered, a node whose mdadm does
 not keep its degraded gate, an md array stalled under the gather, a
 connected host taken off a subsystem's list, which the cn agent cuts while
@@ -46,7 +47,8 @@ a host left on the list writes on, and on a primary and a standby at once
 (`cnagent.md` CN33), and the
 leftover, an accepted request reporting residue (`cnagent.md` CN20). The
 cases run in a fixed order, fail-fast — nodecheck, smoke, redund, repair,
-teardown, thinbm, torn, discard, clone_xfer, restart, pause — nodecheck
+teardown, thinbm, torn, discard, isolation, clone_xfer, restart, pause,
+groupcut — nodecheck
 building no pool and each other case under pool ids of its own, and each
 leaving nothing of its pools, a teardown per case and per stage that also
 keeps the run inside a DN's data area, which the cases together would
@@ -96,7 +98,11 @@ Directory tree) — and fails fast, its per-VM half after the start-of-run
 cleanup, since free agent ports mean something only once a crashed run's
 agents are gone. It loads the kernel modules and mounts configfs, neither of
 which the agent does, then checks each module loaded or built in; the tools,
-lvm2's and bcache-tools' only for redund's foreign stage, which makes a
+GNU dd under the name `gnudd` among them, through which alone the suite
+makes IO with direct flags (isolation's writes and groupcut's read back),
+as the VMs' own dd gives false failures with them (`dnagent_integtest.md`,
+Assumptions and preflight checks), lvm2's and bcache-tools' only for
+redund's foreign stage, which makes a
 host's signatures with them, as the agents run no LVM (`architecture.md`,
 [D13], [D14]); nvmet configfs, md support, native multipath, the stock udev
 rules the rules of `deploy/udev/` sort against, the stock assembly rule's
@@ -114,7 +120,8 @@ directory's filesystem and the free memory. No start line of the suite takes
 modules, as the lab's controller node VMs do; on any other pair its
 preflight fails. iptables and
 tc are left to the stages that use them, the partition stages, redund's dial
-and slow leg stages, pause's cut and clone_xfer's slowed copy, so a VM
+and slow leg stages, pause's and groupcut's cuts and clone_xfer's slowed
+copy, so a VM
 without one fails in the stage that needs it rather than a run that might
 never reach one.
 
@@ -985,7 +992,37 @@ its discard passdown word, the discard counters of the side device and of
 the per-CN dm-linear above it, the backing file's allocated blocks before
 and after, and the agent's record of the discard with its time. With
 `DISCARD_MODE=measure` the host writes the whole volume before the delete,
-so that record times the discard of a written gibibyte.
+so that record times the discard of a written gibibyte. The case then builds
+three `RedundNone` pools of more than one slice on DN1, each slice with a
+meta group and a data group of one extent: two slices at the suite's stripe,
+two at a stripe of the block, which is the default shape there
+(`architecture.md`, Common validation), and eight at the suite's stripe,
+whose product with the slice count stays within the gateway's bound. The
+host writes eight blocks a slice from the volume's start, then sends three
+discards that `blkdiscard` passes whole: one aligned on the slice count
+times the block, one a stripe short of it, and one of a block. After each,
+every slice's thin pool maps what dm-stripe's split and dm-thin's whole-block
+rule leave it (`architecture.md`, Known limits, the entry on a host
+discard), which the case works out from the pool's shape: the aligned
+discard frees four blocks on every slice, the short one a block on every
+slice but the last, and the one of a block one block on one slice where the
+stripe is the block, and none where it is smaller.
+
+**isolation** proves the part of the tenant promise dm-thin keeps
+(`architecture.md`, [D15]; `cnagent.md` CN13): a first write into a block a
+pool has not mapped, shorter than the block, reads on the host and on both
+legs as zeros beside the write, never as the bytes a leg held before. Once
+the A shape's sides are provisioned, and before any controller node reads
+them, each data side takes a byte pattern of its own disk node's from the
+end of what provisioning zeroes, so that the legs differ there and md, which
+makes the array over the legs as they are (CN12), copies neither over the
+other. The host writes 4 KiB with direct IO at an offset of its own inside
+each of sixteen thin blocks never written; each whole block then reads as
+zeros and the write on the host, and the same on each leg at the pool block
+a fresh pool maps it to (Lab facts). A pool block no write reached still
+holds each leg's own pattern, the positive control that the patterns
+reached the legs. An agent whose pool table skips block zeroing fails the
+case at the first block over an old pattern.
 
 **clone_xfer** proves `architecture.md`, Transfer + clone = cross-SP live
 migration, and Clone metadata durability, between pools on different nodes
@@ -1135,6 +1172,55 @@ and longer in sysfs, then cuts a `RedundNone` pool at the default and at the
 longer timeout, timing the write that fails, and prints and keeps each cut's
 writes, samples, kernel logs, rounds and summary on the driver.
 
+**groupcut** measures what a pool does when its primary loses every leg of
+its data group for a few seconds or a minute under a host writing new
+blocks (`architecture.md`, Known limits, the entry on a group that loses
+every leg at once). Each cut builds a fresh A-shaped pool whose meta group
+has both legs on DN2 and whose data group both legs on DN1, a shape the
+gateway never builds, so that pause's rule on vm1, every packet between vm2
+and its nvme-tcp port dropped both ways, cuts the data group alone from the
+primary on CN2: it takes CN2's two data legs and the host's path to the
+standby on CN1, and none of the meta group's legs, local to CN2, or the
+standby's. A writer on vm2 writes 4 KiB synced, each block's own content,
+into one block after another that no write reached before, so each write
+maps a block and commits the pool's metadata; a sampler reads CN2's leg
+paths into DN1, md's members and each array's own state from sysfs, and
+both kernel logs are marked. The cut is timed on vm2's clock, the writer's
+and the sampler's, by a mark just before the rule goes in and one just
+after it comes out, with no call but the cut's own sleep while it stands,
+so that the cut on vm1 lasts what the case asks; every time counts from the
+mark before the cut, and the cut's length is vm1's.
+Once the rule goes, the case waits a bounded time for a write that
+succeeds. It records the host's writes, the longest, the failed ones and
+when the first failed write ended, when md first held a data member faulty
+and when the data array last left its clean state and first read broken,
+the data array's state, the pool's status line and CN2's rows after the
+lift, and, where no write came back, it plays the failover as redund does,
+onto CN1, none of whose leg paths the cut reached, recording CN1's rows,
+its pool's status line, the host's path to CN1 and, where the pool takes
+writes, one new write. Then it reads back, with direct IO, every block a
+write of which the host was told was done, through the primary that serves
+then, and compares each with its write. The default run is one cut of 3 s,
+which passes only if a write was held for about the cut's length, so the
+rule held a leg path the writes need (a rule aimed at another port fails
+it), no write failed, writes came back on CN2, every acknowledged block
+reads back and the pool reads writable with no needs_check flag; the gate
+names every check that fails, and a block rewritten behind the read back, a
+gate cut of 20 s (`GCUT_GATE_SECS`) and a wait for writes back of no time
+(`GCUT_BACK_SECS`) each fail it. With `GCUT_MODE=measure`
+and `--only groupcut` the case cuts for 3, 8, 20 and 60 s, each over a
+fresh pool, counts rather than fails a block that does not read back, and
+prints and keeps each cut's files and summary on the driver: a cut of
+3.3 s held the write in flight 3.1 to 3.3 s over six runs, and one of 3.8 s
+6.3 to 6.4 s over three, none failing; at 8.5, 20.5 and 60.5 s md failed the
+first member 9.6 to 10.2 s after the cut's mark, at the first leg's
+teardown, and marked the array broken at the second's, which leaves that
+member in sync with a write error (`cnagent.md` CN29), the array reading
+broken 15.3 to 15.9 s after the mark; writes failed from 14.9 to 15.5 s
+after it, the pool read read-only with needs_check,
+every acknowledged block read back as written, and the failover brought
+both arrays back and the pool read-only with needs_check.
+
 **What a pass means.** Exit status zero and PASS mean every assertion held in a
 run that stops at the first failure: data checked against patterns the agents
 never see, removals proved by the nodes' own listings, every stop a case makes
@@ -1164,8 +1250,8 @@ debris and dumps the agents' logs, both
 VMs' dm, md, nvmet and host state, each read bounded, and the failing
 stage's trace id, but for clone_xfer's token bucket, which it removes, as
 the bucket would slow any suite that runs on the VMs before the next
-cleanup, and pause's cut and its writer, which it removes and stops, as the
-cut would black-hole another suite's connections, redund's drop of new
+cleanup, and pause's and groupcut's cut and their writer, which it removes
+and stops, as the cut would black-hole another suite's connections, redund's drop of new
 connections, which it removes for the same reason, and its netem delay,
 which it removes for the bucket's reason, nodecheck's stalled array and
 mdadm wrapper, which it resumes and removes, as a suspended member wedges
@@ -1229,7 +1315,8 @@ read-write, read-only and the no-clone gate, save what repair's
 forced-start stages read of the two levels they use to free the data array:
 the pool row the level that builds no thin pool suppresses, and the group
 array the level that builds no group array stops (`cnagent.md` CN19); more
-than one slice but torn's two RedundNone slices on one disk node; several
+than one slice but torn's two RedundNone slices and discard's pools of two
+and eight slices on one disk node; several
 namespaces per subsystem; snapshots of snapshots; `UpdateNamespaceDev`; the
 park before the removal of a host-facing namespace or subsystem dropped
 short of a cntlr teardown (`cnagent.md` CN21's park before every layer and
