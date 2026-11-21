@@ -282,9 +282,8 @@ func setupForceStartGrp(fs *flag.FlagSet) job {
 // setupSetGrpOperatorInCharge drives UpdateGroupOperatorInCharge. --grp is
 // the group's grp_id. --operator-in-charge defaults to true, as dnvctl's
 // does, because the set is the deliberate act and the clear the undo; the
-// flag package never consumes the next argument for a bool, so the script
-// must write `--operator-in-charge=false`, never `--operator-in-charge
-// false`.
+// clear is written `--operator-in-charge=false`, since parseArgs refuses the
+// word a separate `false` would leave.
 func setupSetGrpOperatorInCharge(fs *flag.FlagSet) job {
 	spName := fs.String("sp", "", "sp_name")
 	var rev hexUint

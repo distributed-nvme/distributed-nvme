@@ -45,7 +45,7 @@
 # has its pid recorded from `$!` into $WORK/<dir>/pid, and every signal goes
 # by pid. The restart case's killer.sh is the one background process without
 # one: it exits by itself within seconds. The `pkill -f` forms appear in
-# cleanup() only.
+# cleanup() only, each matching only a program under $WORK.
 
 set -euo pipefail
 
@@ -536,18 +536,81 @@ meta_units() { # <bytes> <block size>
 	printf '%s' "$units"
 }
 
-# sp_rev_of reads the SP's current revision through the GATEWAY's own read
-# path, which is where the script refreshes its cached token from
-# (Integration test plan, What a pass means).
-sp_rev_of() { # <sp name>
-	jq_of "$(gw get-sp --sp "$1")" '.sp_rev.revision'
+# is_num dies unless its value is a decimal number: a reader that did not
+# answer prints nothing, and a failed gateway call's reply reads as null.
+is_num() { # <value> <what>
+	case "$1" in
+	'' | *[!0-9]*) die "$2 is '$1', not a number" ;;
+	esac
 }
 
-# refresh_rev updates the cached SP token. It MUST run in the parent shell.
-refresh_rev() { SP_REV=$(sp_rev_of "$1"); }
+# rev_key_of prints one revision key's revision straight out of etcd, through
+# `workerctl get-rev` (Integration test plan, The etcd verification,
+# `workerctl`), addressed by the id and the shard code of the conf <json>
+# holds at <id field> and <shard field>. It is the evidence every revision
+# count of the suite is checked against: the token the gateway hands back is
+# part of what is under test, so it cannot also be the evidence that a
+# revision moved exactly once; refresh_rev checks the cached token against it,
+# so a count against the token rests on it too, and the gateway's reply is the
+# second check. A failed read, and a value that is no number,
+# DIE; a caller assigns its answer first wherever a number it computes from
+# it, or a token it passes, would otherwise hide the failure.
+rev_key_of() { # <dn|cn|sp> <conf json> <id field> <shard field>
+	local id shard out rev
+	id=$(jq_of "$2" "$3")
+	shard=$(jq_of "$2" "$4")
+	is_num "$id" "rev_key_of: $1 $3"
+	is_num "$shard" "rev_key_of: $1 $4"
+	out=$(wctl get-rev "$1" --id "$id" --shard "$(printf '%02x' "$shard")") ||
+		die "rev_key_of: \`workerctl get-rev $1 --id $id\` failed"
+	rev=$(jq_of "$out" '.revision')
+	is_num "$rev" "rev_key_of: the revision of $1 $id"
+	printf '%s' "$rev"
+}
 
-dn_rev_of() { jq_of "$(gw get-dn --addr "$1")" '.dn_rev.revision'; }
-cn_rev_of() { jq_of "$(gw get-cn --addr "$1")" '.cn_rev.revision'; }
+# sp_rev_of, dn_rev_of and cn_rev_of read the revision key of one pool, disk
+# node or controller node through rev_key_of.
+sp_rev_of() { # <sp name>
+	local conf
+	conf=$(sp_json "$1") ||
+		die "sp_rev_of: \`workerctl get-sp --sp $1\` failed"
+	rev_key_of sp "$conf" '.sp_conf.sp_id' '.sp_conf.shard_code'
+}
+dn_rev_of() { # <addr_port>
+	local conf
+	conf=$(dn_json "$1") ||
+		die "dn_rev_of: \`workerctl get-dn --addr $1\` failed"
+	rev_key_of dn "$conf" '.dn_id' '.shard_code'
+}
+cn_rev_of() { # <addr_port>
+	local conf
+	conf=$(cn_json "$1") ||
+		die "cn_rev_of: \`workerctl get-cn --addr $1\` failed"
+	rev_key_of cn "$conf" '.cn_id' '.shard_code'
+}
+
+# gw_sp_rev reads an SP's revision through the GATEWAY's own read path,
+# GetStoragePool, which is where the script refreshes its cached token from
+# (Integration test plan, What a pass means), and where a stage checks the
+# gateway's own reply; a reply that is no number DIES.
+gw_sp_rev() { # <sp name>
+	local rev
+	rev=$(jq_of "$(gw get-sp --sp "$1")" '.sp_rev.revision')
+	is_num "$rev" "gw_sp_rev: get-sp --sp $1's sp_rev"
+	printf '%s' "$rev"
+}
+
+# refresh_rev updates the cached SP token from GetStoragePool, and checks it
+# against the revision key in etcd, so that every count the suite makes
+# against the token rests on etcd, the gateway's reply being the second
+# check. It MUST run in the parent shell, and never while a write runs.
+refresh_rev() {
+	local stored
+	SP_REV=$(gw_sp_rev "$1")
+	stored=$(sp_rev_of "$1")
+	assert_eq "$SP_REV" "$stored" \
+		"$1: GetStoragePool's token against the stored SpRev"
+}
 
 # raw_key prints one etcd value as protojson, for the assertions that name a
 # key literally (case S stage 1).
@@ -597,13 +660,15 @@ set_state() { # <agent>   (JSON on stdin)
 		 mv -f $WORK/$agent/state.json.tmp $WORK/$agent/state.json"
 }
 
-# plant_clean_node makes one fake answer a node delete's proof without force
-# (architecture.md, Disk nodes, Controller nodes): its stored request of the
-# node at the node's stored revision, with no pointer, as the node's last
-# syncup would leave it, and on a disk node the counts of an empty volume
-# table of <total> extents. This suite runs no worker, so no syncup stores a
-# request in a fake, and an unplanted fake answers revision 0, below every
-# node's.
+# plant_clean_node plants one fake's stored request of the node at
+# <revision>, with no pointer, as a syncup at that revision would leave it,
+# and on a disk node the counts of an empty volume table of <total> extents.
+# At the node's stored revision the fake answers a node delete's proof
+# without force clean (architecture.md, Disk nodes, Controller nodes); below
+# it, the fake is an agent behind the node. This suite runs no worker, so no
+# syncup stores a request in a fake, and an unplanted fake holds no request,
+# so it refuses the node as unknown at revision 0, as an agent that holds
+# nothing does.
 plant_clean_node() { # <dir> <dn|cn> <node id> <revision> [<total>]
 	set_state "$1" <<EOF
 {"objects":{"$2":{"revision":$4,"request":{"cluster_id":"$CID",
@@ -764,6 +829,7 @@ make_sp() { # <sp name>
 	gw create-sp --sp "$1" --cntlr-cnt "$SP_CNTLR_CNT" \
 		--slice-cnt "$SP_SLICE_CNT" --init-ext-cnt "$SP_INIT_EXT" --raid1
 	refresh_rev "$1"
+	assert_eq "$SP_REV" 1 "$1: SpRev after create-sp"
 }
 
 # sp_first_slice / sp_first_data_grp / sp_first_data_leg / sp_first_data_side
@@ -928,9 +994,9 @@ for i in \$(seq 1 20); do
 	sleep 0.25
 done
 for p in \$pids; do kill -KILL "\$p" 2>/dev/null || true; done
-pkill -f 'bin/dnv-gateway' 2>/dev/null || true
-pkill -f 'bin/fakeagent' 2>/dev/null || true
-pkill -f 'etcd --name dnv-gw-it' 2>/dev/null || true
+pkill -f '$WORK/bin/dnv-gateway' 2>/dev/null || true
+pkill -f '$WORK/bin/fakeagent' 2>/dev/null || true
+pkill -f '$WORK/bin/etcd --name dnv-gw-it' 2>/dev/null || true
 sleep 0.5
 rm -rf $WORK
 echo cleaned
@@ -1386,7 +1452,7 @@ smoke_cap_free() { # <dn_capacity|cn_capacity> <addr_port>
 # because the smoke case's create-sp, grow-slice and migration stages all owe
 # exactly these four facts: free = total − what the SP's groups charge, one
 # pointer per side, a capacity key that agrees with the record, and the DnRev
-# the ledger's flush left.
+# the ledger's flush left, in etcd and in GetDiskNode's reply.
 smoke_check_dn() { # <sp> <addr_port> <want dn_rev>
 	local sp=$1 addr=$2 wantRev=$3 charge sides free
 	charge=$(smoke_dn_charge "$sp" "$addr")
@@ -1402,6 +1468,9 @@ smoke_check_dn() { # <sp> <addr_port> <want dn_rev>
 	assert_eq "$(smoke_cap_free dn_capacity "$addr")" "$free" \
 		"$addr: free_ext_cnt embedded in the dn_capacity key"
 	assert_eq "$(dn_rev_of "$addr")" "$wantRev" "$addr: dn_rev"
+	# The gateway's own reply of the node's revision, the second check.
+	assert_field "$(gw get-dn --addr "$addr")" '.dn_rev.revision' "$wantRev" \
+		"$addr: get-dn dn_rev"
 }
 
 # smoke_check_cn is smoke_check_dn's CN mirror: every cntlr on the node
@@ -1422,6 +1491,9 @@ smoke_check_cn() { # <sp> <addr_port> <want cn_rev>
 	assert_eq "$(smoke_cap_free cn_capacity "$addr")" "$free" \
 		"$addr: free_ext_cnt embedded in the cn_capacity key"
 	assert_eq "$(cn_rev_of "$addr")" "$wantRev" "$addr: cn_rev"
+	# The gateway's own reply of the node's revision, the second check.
+	assert_field "$(gw get-cn --addr "$addr")" '.cn_rev.revision' "$wantRev" \
+		"$addr: get-cn cn_rev"
 }
 
 # smoke_check_cn_untouched is the CN audit around a clone's create, latch
@@ -1462,14 +1534,18 @@ smoke_check_dn_units() { # <addr_port, or "" for no DN> <units>
 # smoke_check_clone_dns. A failed read DIES: a ledger that did not answer
 # would turn every later comparison into one against nothing.
 smoke_dn_ledgers() {
-	local i addr json
+	local i addr json rev free sides
 	for i in 0 1 2 3; do
 		addr=$(dn_addr "$i")
 		json=$(dn_json "$addr") ||
 			die "smoke_dn_ledgers: \`workerctl get-dn --addr $addr\` failed"
-		printf '%s %s %s\n' "$(smoke_jq "$json" '.free_ext_cnt')" \
-			"$(smoke_jq "$json" '(.side_ptr_list // []) | length')" \
-			"$(dn_rev_of "$addr")"
+		rev=$(dn_rev_of "$addr") ||
+			die "smoke_dn_ledgers: the dn_rev of $addr did not read"
+		free=$(smoke_jq "$json" '.free_ext_cnt') ||
+			die "smoke_dn_ledgers: the free_ext_cnt of $addr did not read"
+		sides=$(smoke_jq "$json" '(.side_ptr_list // []) | length') ||
+			die "smoke_dn_ledgers: the side pointers of $addr did not read"
+		printf '%s %s %s\n' "$free" "$sides" "$rev"
 	done
 }
 
@@ -1478,7 +1554,8 @@ smoke_dn_ledgers() {
 # addr_port per line, holds <held> extents fewer and <held> side pointers
 # more than <before>, the smoke_dn_ledgers lines read before the create, its
 # capacity key agrees with the record, and its DnRev is <bumps> past
-# <before>'s; every other DN is exactly as <before> says. The sides are not
+# <before>'s, in etcd and in GetDiskNode's reply; every other DN is exactly as
+# <before> says. The sides are not
 # smoke_check_dn's to count: it walks the slices.
 smoke_check_clone_dns() { # <before> <dns> <held> <bumps> <label>
 	local before=$1 dns=$2 held=$3 bumps=$4 label=$5
@@ -1498,6 +1575,8 @@ smoke_check_clone_dns() { # <before> <dns> <held> <bumps> <label>
 			"$label: $addr side_ptr_list length"
 		assert_eq "$(dn_rev_of "$addr")" "$((rev + on * bumps))" \
 			"$label: $addr dn_rev"
+		assert_field "$(gw get-dn --addr "$addr")" '.dn_rev.revision' \
+			"$((rev + on * bumps))" "$label: $addr get-dn dn_rev"
 	done
 }
 
@@ -1506,8 +1585,8 @@ smoke_check_clone_dns() { # <before> <dns> <held> <bumps> <label>
 # in the slices, so smoke_check_dn, which walks the slices, cannot count
 # them: against <before>, the smoke_dn_ledgers lines read before the call,
 # the DN <addr> moved by <free> free extents, <sides> side pointers and
-# <revs> DnRev bumps, each signed, with its capacity key agreeing with its
-# record, and every other DN is exactly as <before> says. An empty <addr>
+# <revs> DnRev bumps, each signed, in etcd and in GetDiskNode's reply, with its
+# capacity key agreeing with its record, and every other DN is exactly as <before> says. An empty <addr>
 # asserts that no DN moved at all.
 smoke_check_dn_moves() { # <before> <addr> <free> <sides> <revs> <label>
 	local before=$1 dn=$2 dFree=$3 dSides=$4 dRevs=$5 label=$6
@@ -1527,6 +1606,8 @@ smoke_check_dn_moves() { # <before> <addr> <free> <sides> <revs> <label>
 			"$label: $addr side_ptr_list length"
 		assert_eq "$(dn_rev_of "$addr")" "$((rev + on * dRevs))" \
 			"$label: $addr dn_rev"
+		assert_field "$(gw get-dn --addr "$addr")" '.dn_rev.revision' \
+			"$((rev + on * dRevs))" "$label: $addr get-dn dn_rev"
 	done
 }
 
@@ -1946,9 +2027,10 @@ case_smoke() {
 	# every *Info it derives from "the last accepted request" is absent. That
 	# is the truthful state the agent holds, not a failure of the call (AG3),
 	# and the reply's applied_revision is the agent's — the revision of its
-	# latest observation of the node, 0 for a fake that has accepted nothing
-	# (architecture.md, Disk nodes and Controller nodes), never the stored
-	# rev key.
+	# latest observation of the node, 0 for a fake that has accepted
+	# nothing and so refuses the node as unknown, a code the inspect does
+	# not pass on (architecture.md, Disk nodes and Controller nodes), never
+	# the stored rev key.
 	out=$(gw inspect-dn --addr "$(dn_addr 0)")
 	assert_field "$out" '.applied_revision' "0" \
 		"inspect-dn applied_revision of an unsynced fake"
@@ -3335,7 +3417,8 @@ EOF
 	# and smoke_check_dn's count holds on every DN.
 	for i in 0 1 2 3; do
 		addr=$(dn_addr "$i")
-		smoke_check_dn sp0 "$addr" "$(dn_rev_of "$addr")"
+		rev=$(dn_rev_of "$addr")
+		smoke_check_dn sp0 "$addr" "$rev"
 	done
 	assert_eq "$(smoke_dn_free_sum)" "$((4 * DN_EXTENTS - 12))" \
 		"Σ DN free after the repairs (the new leg took the bad leg's extents)"
@@ -3353,8 +3436,8 @@ EOF
 	# t1 carries the namespace, which cl0's latch resumed and nothing has
 	# suspended since, so the read is refused because the desired state
 	# does not keep it suspended, with nothing written; that refusal comes
-	# before the park check, which no case reaches. A window that does not
-	# start at a multiple of 8 blocks is refused before both.
+	# before the park check, which stage 17b reaches. A window that does
+	# not start at a multiple of 8 blocks is refused before both.
 	assert_no_write "get-td-bm of a volume whose namespace is not parked" \
 		gwx FAILED_PRECONDITION get-td-bm --sp sp0 --td t1 --slice-idx 0
 	assert_no_write "get-td-bm of a window off a multiple of 8 blocks" \
@@ -3664,6 +3747,55 @@ EOF
 			"ri ($idCase): every disk node got back what the repair took"
 	done
 	clear_behavior "$primaryDir"
+
+	# -------------------------------------------------------------------
+	stage 17b "get-td-bm: the primary's report of a park"
+	# -------------------------------------------------------------------
+	# The bitmap read of a volume with a namespace needs the desired state
+	# to keep each namespace suspended and the primary to report each one
+	# parked (architecture.md, Bitmap reads): with t1's namespace suspended
+	# the read reaches the park check. The primary's fake, seeded with a
+	# request whose subsystem holds that namespace on t1, reports its
+	# dm-linear row OK with no reason, as over a namespace that still
+	# serves, so the read is refused with nothing written and a message
+	# that names the park; a row lever then gives the row the parked
+	# reason the cn agent sets on a parked namespace (cnagent.md CN16, CN28), and
+	# the read passes the agent's empty bitmap through. The namespace is
+	# resumed after, so the later stages see it as before.
+	gw set-ns-suspended --sp sp0 --rev "$SP_REV" --nqn "$nqn" --idx 1 \
+		--suspended >/dev/null
+	refresh_rev sp0
+	set_state "$primaryDir" <<EOF
+{"objects":{
+  "cn":{"revision":7,"request":{"cluster_id":"$CID","cn_id":"$primaryCnId",
+        "revision":"7","cntlr_pointer_list":[
+          {"sp_id":"$spId","cntlr_id":"$primaryId"}]}},
+  "cntlr $spId:$primaryId":{"revision":7,"request":{
+        "cluster_id":"$CID","cn_id":"$primaryCnId",
+        "cntlr_pointer":{"sp_id":"$spId","cntlr_id":"$primaryId"},
+        "revision":"7","cntlr":{"primary":true},
+        "td_list":[{"td_id":"$t1Id"}],
+        "nqn_to_subsystem":{"$nqn":{"ss_id":"$ssId","ns_list":[
+          {"ns_id":"$nsId","ns_idx":1,"td_id":"$t1Id"}]}}}}}}
+EOF
+	assert_no_write "get-td-bm of a volume the primary does not report parked" \
+		smoke_gwx_out FAILED_PRECONDITION get-td-bm --sp sp0 --td t1 \
+		--slice-idx 0
+	assert_field "$SMOKE_OUT" \
+		'.message | test("is not parked on the primary")' "true" \
+		"the refusal of a suspended namespace that serves names the park"
+	set_behavior "$primaryDir" <<EOF
+{"objects":{"cntlr $spId:$primaryId":{"rows":{
+  "ns_id_to_dm_linear.$nsId":{"status":"OK","reason":"PARKED"}}}}}
+EOF
+	out=$(gw get-td-bm --sp sp0 --td t1 --slice-idx 0)
+	assert_field "$out" '.byte_cnt' "0" "get-td-bm of a volume reported parked"
+	assert_field "$out" '.bitmap_hex' "" \
+		"get-td-bm of a volume reported parked passes the bitmap through"
+	clear_behavior "$primaryDir"
+	gw set-ns-suspended --sp sp0 --rev "$SP_REV" --nqn "$nqn" --idx 1 \
+		--suspended=false >/dev/null
+	refresh_rev sp0
 
 	# -------------------------------------------------------------------
 	stage 18 "set-grp-operator-in-charge: set, read back, repeat, clear"
@@ -4400,7 +4532,7 @@ case_parallel() {
 		verify_sp "$sp"
 		assert_field "$(parallel_sp_rev "$sp")" '.revision' "1" \
 			"$sp: sp_rev revision after creation"
-		assert_eq "$(sp_rev_of "$sp")" "1" "$sp: get-sp sp_rev read-back"
+		assert_eq "$(gw_sp_rev "$sp")" "1" "$sp: get-sp sp_rev read-back"
 	done
 	assert_eq "$(jq_of "$(gw list-sps)" '.sp_name | length')" "$PAR_CLIENTS" \
 		"list-sps after the sp wave"
@@ -4418,7 +4550,7 @@ case_parallel() {
 	wave=""
 	for i in $(seq 0 $((PAR_CLIENTS - 1))); do
 		sp=$(parallel_sp "$i")
-		rev=$(sp_rev_of "$sp")
+		rev=$(gw_sp_rev "$sp")
 		wave+=$(printf '{"op":"create-td","params":{"sp":"%s","rev":"%s","name":"t0","size":%s}}' \
 			"$sp" "$rev" "$TD_SIZE")$'\n'
 	done
@@ -4473,7 +4605,7 @@ case_parallel() {
 	wave=""
 	for i in $(seq 0 $((PAR_CLIENTS - 1))); do
 		sp=$(parallel_sp "$i")
-		rev=$(sp_rev_of "$sp")
+		rev=$(gw_sp_rev "$sp")
 		wave+=$(printf '{"op":"create-ss","params":{"sp":"%s","rev":"%s","nqn":"%s"}}' \
 			"$sp" "$rev" "$(parallel_nqn "$i")")$'\n'
 	done
@@ -4508,7 +4640,7 @@ case_parallel() {
 	wave=""
 	for i in $(seq 0 $((PAR_CLIENTS - 1))); do
 		sp=$(parallel_sp "$i")
-		rev=$(sp_rev_of "$sp")
+		rev=$(gw_sp_rev "$sp")
 		wave+=$(printf '{"op":"create-ns","params":{"sp":"%s","rev":"%s","nqn":"%s","idx":1,"td":"t0"}}' \
 			"$sp" "$rev" "$(parallel_nqn "$i")")$'\n'
 	done
@@ -4554,7 +4686,7 @@ case_parallel() {
 	wave=""
 	for i in $(seq 0 $((PAR_CLIENTS - 1))); do
 		sp=$(parallel_sp "$i")
-		rev=$(sp_rev_of "$sp")
+		rev=$(gw_sp_rev "$sp")
 		wave+=$(printf '{"op":"delete-ns","params":{"sp":"%s","rev":"%s","nqn":"%s","idx":1}}' \
 			"$sp" "$rev" "$(parallel_nqn "$i")")$'\n'
 	done
@@ -4570,7 +4702,7 @@ case_parallel() {
 	wave=""
 	for i in $(seq 0 $((PAR_CLIENTS - 1))); do
 		sp=$(parallel_sp "$i")
-		rev=$(sp_rev_of "$sp")
+		rev=$(gw_sp_rev "$sp")
 		wave+=$(printf '{"op":"delete-ss","params":{"sp":"%s","rev":"%s","nqn":"%s"}}' \
 			"$sp" "$rev" "$(parallel_nqn "$i")")$'\n'
 	done
@@ -4583,7 +4715,7 @@ case_parallel() {
 	wave=""
 	for i in $(seq 0 $((PAR_CLIENTS - 1))); do
 		sp=$(parallel_sp "$i")
-		rev=$(sp_rev_of "$sp")
+		rev=$(gw_sp_rev "$sp")
 		wave+=$(printf '{"op":"delete-td","params":{"sp":"%s","rev":"%s","name":"t0"}}' \
 			"$sp" "$rev")$'\n'
 	done
@@ -4603,7 +4735,7 @@ case_parallel() {
 	wave=""
 	for i in $(seq 0 $((PAR_CLIENTS - 1))); do
 		sp=$(parallel_sp "$i")
-		rev=$(sp_rev_of "$sp")
+		rev=$(gw_sp_rev "$sp")
 		wave+=$(printf '{"op":"delete-sp","params":{"sp":"%s","rev":"%s"}}' \
 			"$sp" "$rev")$'\n'
 	done
@@ -4754,21 +4886,6 @@ contention_stale_cnt() { # <race array>
 		| select(.message | contains("stale revision")) ] | length'
 }
 
-# contention_sp_rev_gt reads an SP's SpRev straight out of etcd — the
-# ground-truth counterpart of the harness's sp_rev_of, which asks the gateway
-# (Integration test plan, The etcd verification, `workerctl`).
-# Every "+1 exactly" count below is made against THIS reader: the token the
-# gateway hands back is part of what is under test, so it cannot also be the
-# evidence that it moved exactly once.
-contention_sp_rev_gt() { # <sp name>
-	local conf
-	conf=$(sp_json "$1")
-	jq_of "$(wctl get-rev sp \
-		--id "$(jq_of "$conf" '.sp_conf.sp_id')" \
-		--shard "$(printf '%02x' "$(jq_of "$conf" '.sp_conf.shard_code')")")" \
-		'.revision'
-}
-
 case_contention() {
 	CASE=contention
 
@@ -4904,7 +5021,7 @@ case_contention() {
 	nextIdBefore=$(jq_of "$conf" '.sp_conf.next_id')
 	devIdBefore=$(jq_of "$conf" '.sp_conf.next_dev_id')
 	tdsBefore=$(jq_of "$conf" '.tds | length')
-	rev=$(contention_sp_rev_gt sp0)
+	rev=$(sp_rev_of sp0)
 	assert_eq "$tdsBefore" "0" "step 3: tds on a fresh SP"
 	assert_eq "$devIdBefore" "1" "step 3: next_dev_id on a fresh SP"
 	# make_sp refreshed the cached token from the gateway; etcd must hold the
@@ -4956,7 +5073,7 @@ case_contention() {
 		"$((devIdBefore + 1))" "step 3: SpConf.next_dev_id advanced by exactly 1"
 	# GW6: every mutation that changes agent-visible state bumps SpRev exactly
 	# once in the same STM, so seven refusals plus one write is +1.
-	assert_eq "$(contention_sp_rev_gt sp0)" "$((rev + 1))" \
+	assert_eq "$(sp_rev_of sp0)" "$((rev + 1))" \
 		"step 3: SpRev advanced by exactly 1"
 
 	got=$(gw list-tds --sp sp0)
@@ -4979,11 +5096,11 @@ case_contention() {
 	# (b) The same call with the fresh token. This is what makes (a) evidence
 	# about the TOKEN rather than about set-sp-level: same gateway, same SP,
 	# same level, one number different.
-	rev=$(contention_sp_rev_gt sp0)
+	rev=$(sp_rev_of sp0)
 	gw set-sp-level --sp sp0 --rev "$SP_REV" --level READONLY
 	assert_field "$(sp_json sp0)" '.sp_conf.sp_level' "SP_LEVEL_READONLY" \
 		"step 4: stored sp_level"
-	assert_eq "$(contention_sp_rev_gt sp0)" "$((rev + 1))" \
+	assert_eq "$(sp_rev_of sp0)" "$((rev + 1))" \
 		"step 4: SpRev after set-sp-level"
 	assert_field "$(gw get-sp --sp sp0)" '.sp_conf.sp_level' \
 		"SP_LEVEL_READONLY" "step 4: get-sp read-back of sp_level"
@@ -4994,11 +5111,11 @@ case_contention() {
 	# enforced on the CN, [D11]), so this is not needed for the assertions to
 	# pass — it keeps the SP the case goes on to exercise in the state a reader
 	# of the trace would expect it to be in.
-	rev=$(contention_sp_rev_gt sp0)
+	rev=$(sp_rev_of sp0)
 	gw set-sp-level --sp sp0 --rev "$SP_REV" --level READWRITE
 	assert_field "$(sp_json sp0)" '.sp_conf.sp_level' "SP_LEVEL_READWRITE" \
 		"step 4: sp_level restored"
-	assert_eq "$(contention_sp_rev_gt sp0)" "$((rev + 1))" \
+	assert_eq "$(sp_rev_of sp0)" "$((rev + 1))" \
 		"step 4: SpRev after the restore"
 	refresh_rev sp0
 
@@ -5027,7 +5144,7 @@ case_contention() {
 		"[\"$winner\"]" "step 4: tds after both refusals"
 	# The two refusals bumped nothing, so the token cached before them is still
 	# the live one — steps 5 and 6 spend it without re-reading.
-	assert_eq "$(contention_sp_rev_gt sp0)" "$SP_REV" \
+	assert_eq "$(sp_rev_of sp0)" "$SP_REV" \
 		"step 4: the cached token survives the refusals"
 
 	# -----------------------------------------------------------------------
@@ -5045,7 +5162,7 @@ case_contention() {
 		"step 5: the namespace exists before the race"
 	assert_eq "$(jq_of "$conf" "${nsPath}[0].suspended")" "false" \
 		"step 5: create-ns default suspended"
-	rev=$(contention_sp_rev_gt sp0)
+	rev=$(sp_rev_of sp0)
 
 	# Two jobs, one token, and — unlike step 3 — two DIFFERENT mutators whose
 	# outcomes are mutually exclusive: a suspended namespace and a deleted one
@@ -5100,7 +5217,7 @@ case_contention() {
 	# happened — the loser did not half-apply on its way to ABORTED.
 	assert_eq "$(jq_of "$conf" ".subsystems | keys | @json")" "[\"$nqn\"]" \
 		"step 5: the subsystem survives either outcome"
-	assert_eq "$(contention_sp_rev_gt sp0)" "$((rev + 1))" \
+	assert_eq "$(sp_rev_of sp0)" "$((rev + 1))" \
 		"step 5: SpRev advanced by exactly 1"
 	refresh_rev sp0
 
@@ -5118,7 +5235,7 @@ case_contention() {
 	nextIdBefore=$(jq_of "$conf" '.sp_conf.next_id')
 	devIdBefore=$(jq_of "$conf" '.sp_conf.next_dev_id')
 	tdsBefore=$(jq_of "$conf" '.tds | length')
-	rev=$(contention_sp_rev_gt sp0)
+	rev=$(sp_rev_of sp0)
 
 	wave=""
 	for ((i = 0; i < RACE_N; i++)); do
@@ -5165,7 +5282,7 @@ case_contention() {
 		"$((tdsBefore + RACE_N))" "step 6: distinct dev_ids"
 	# Eight successful mutations, eight bumps: the retries themselves cost the
 	# SP nothing (GW6 refuses before any write).
-	assert_eq "$(contention_sp_rev_gt sp0)" "$((rev + RACE_N))" \
+	assert_eq "$(sp_rev_of sp0)" "$((rev + RACE_N))" \
 		"step 6: SpRev advanced by exactly 8"
 
 	got=$(gw list-tds --sp sp0)
@@ -5745,11 +5862,19 @@ faults_node_deletes() {
 	dnId=$(dn_id_of "$dnAddr")
 	cnId=$(cn_id_of "$cnAddr")
 
-	# An agent that has never applied the node's state: the fake holds no
-	# request, so it answers revision 0, below the node's.
+	# An agent that holds nothing of the node refuses it as unknown, and
+	# the code is passed on.
 	reset_state dn0
 	clear_behavior dn0
 	rev=$(dn_rev_of "$dnAddr")
+	assert_no_write "delete-dn of a node its agent does not hold" \
+		faults_gwx_out FAILED_PRECONDITION delete-dn --addr "$dnAddr" \
+		--rev "$rev"
+	assert_field "$FAULTS_OUT" '.message | test("answers code 2")' "true" \
+		"delete-dn: an agent that holds no node is refused for it"
+	# An agent that has not applied the node's latest state: the fake holds
+	# the node's request one revision below the node's.
+	plant_clean_node dn0 dn "$dnId" "$((rev - 1))" "$DN_EXTENTS"
 	assert_no_write "delete-dn of a node its agent has not applied" \
 		faults_gwx_out FAILED_PRECONDITION delete-dn --addr "$dnAddr" \
 		--rev "$rev"
@@ -5837,7 +5962,7 @@ case_faults() {
 	local ssNqn="$NQN_PREFIX:ss0"
 	local out spId slice dataGrp dataLeg metaGrp metaLeg srcSide dstSide
 	local primary cntlrId cnAddr cnDir cnId cloneId migrId
-	local dnAddr dnDir dnId nonPrimary
+	local dnAddr dnDir dnId dnRev nonPrimary
 	local forceCloneId forceMigrId forceDstSide forceDnAddr forceDnDir
 
 	# -----------------------------------------------------------------
@@ -6064,7 +6189,7 @@ case_faults() {
 	assert_field "$(gw get-sp --sp spthr)" \
 		'.sp_conf.event_threshold.primary_unhealthy' "$floor" \
 		"get-sp read-back agrees on primary_unhealthy"
-	thrRev=$(sp_rev_of spthr)
+	thrRev=$(gw_sp_rev spthr)
 	gw delete-sp --sp spthr --rev "$thrRev" >/dev/null
 	out=$(wctl drain-sp --sp spthr)
 	assert_field "$out" '.sp_deleted' "true" \
@@ -6102,13 +6227,13 @@ case_faults() {
 	# A DN that still hosts sides (architecture.md, Disk nodes). The token
 	# must be right, or GW6's ABORTED would fire before the guard is reached.
 	dnAddr=$(sp_side_addr sp0 data 0 0)
+	dnRev=$(dn_rev_of "$dnAddr")
 	assert_no_write "delete-dn while it still hosts sides" \
-		gwx FAILED_PRECONDITION delete-dn --addr "$dnAddr" \
-		--rev "$(dn_rev_of "$dnAddr")"
+		gwx FAILED_PRECONDITION delete-dn --addr "$dnAddr" --rev "$dnRev"
 	# Force skips the agent's proof alone, never this refusal.
 	assert_no_write "delete-dn --force while it still hosts sides" \
-		gwx FAILED_PRECONDITION delete-dn --addr "$dnAddr" \
-		--rev "$(dn_rev_of "$dnAddr")" --force
+		gwx FAILED_PRECONDITION delete-dn --addr "$dnAddr" --rev "$dnRev" \
+		--force
 
 	# An SP that still holds tds, nqns, clones, xfers or migrs (gateway.md,
 	# Storage pools and GrowSlice).
@@ -7382,6 +7507,8 @@ case_ceiling() {
 		"cn2 free after the cntlr create, the footprint alone"
 	assert_eq "$(cn_rev_of "$(cn_addr 2)")" "$((rev + 1))" \
 		"cn2 cn_rev after the cntlr create"
+	assert_field "$(gw get-cn --addr "$(cn_addr 2)")" '.cn_rev.revision' \
+		"$((rev + 1))" "cn2 get-cn cn_rev after the cntlr create"
 	gw set-cntlr-enabled --sp spE0 --rev "$SP_REV" --id "$newCntlr" \
 		--enabled=false >/dev/null
 	refresh_rev spE0
@@ -7392,6 +7519,8 @@ case_ceiling() {
 		"cn2 free after spE0's cntlr left it"
 	assert_eq "$(cn_rev_of "$(cn_addr 2)")" "$((rev + 1))" \
 		"cn2 cn_rev after the cntlr delete"
+	assert_field "$(gw get-cn --addr "$(cn_addr 2)")" '.cn_rev.revision' \
+		"$((rev + 1))" "cn2 get-cn cn_rev after the cntlr delete"
 	# The clone drain's last step gives cFit's clone meta group back to its
 	# DNs, extents and pointers, with one more DnRev bump each, and moves no
 	# CN (dnv-worker.md CLD9). No DN moved between the create and the drain.
@@ -7461,6 +7590,8 @@ case_ceiling() {
 	ceil_dn_used "$(dn_addr 1)" "$DN_META_UNITS" "dn1 after mProbe"
 	assert_eq "$(dn_rev_of "$(dn_addr 2)")" "$((rev + 1))" \
 		"dn2 dn_rev after mProbe"
+	assert_field "$(gw get-dn --addr "$(dn_addr 2)")" '.dn_rev.revision' \
+		"$((rev + 1))" "dn2 get-dn dn_rev after mProbe"
 
 	# -----------------------------------------------------------------
 	stage 5 "the cancel and the finish give every unit back"
@@ -7473,6 +7604,8 @@ case_ceiling() {
 	ceil_dn_used "$(dn_addr 2)" 0 "after the cancel"
 	assert_eq "$(dn_rev_of "$(dn_addr 2)")" "$((rev + 1))" \
 		"dn2 dn_rev after the cancel"
+	assert_field "$(gw get-dn --addr "$(dn_addr 2)")" '.dn_rev.revision' \
+		"$((rev + 1))" "dn2 get-dn dn_rev after the cancel"
 	# The finish gives dn1 back only its units, a write that moves no DnRev,
 	# and the source DN its extents, with one bump. FinishMigration refuses
 	# a migration whose cutover has not started, with force or without, so
@@ -7492,6 +7625,8 @@ case_ceiling() {
 		"dn1 dn_rev after the finish, a units-only write"
 	assert_eq "$(dn_rev_of "$srcAddr")" "$((srcRev + 1))" \
 		"the source DN's dn_rev after the finish"
+	assert_field "$(gw get-dn --addr "$srcAddr")" '.dn_rev.revision' \
+		"$((srcRev + 1))" "the source DN's get-dn dn_rev after the finish"
 	# Every DN's area is empty again.
 	for i in 0 1 2 3; do ceil_dn_used "$(dn_addr "$i")" 0 "at the end"; done
 }

@@ -627,6 +627,23 @@ func usage() {
 			"subcommands: %s\n", strings.Join(names, " "))
 }
 
+// parseArgs parses one subcommand's flags and refuses a word left after them,
+// as dnvctl's leaves refuse a positional argument: Go's flag package reads
+// `--disabled false` as `--disabled` alone and stops at `false`, so the word,
+// and every flag after it, would go unread, and a default-false flag such as
+// `--force false` would read true. No subcommand takes a positional word.
+func parseArgs(fs *flag.FlagSet, args []string) error {
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if fs.NArg() != 0 {
+		return fmt.Errorf("%s: unexpected argument %q after the flags; a "+
+			"boolean flag is written --flag or --flag=false", fs.Name(),
+			fs.Arg(0))
+	}
+	return nil
+}
+
 // runOne is the command-line path: parse, dial, call once, and turn the
 // outcome into the exit code --expect asks for.
 //
@@ -638,7 +655,7 @@ func runOne(g *globals, cmd command, args []string) {
 	fs := flag.NewFlagSet(cmd.name, flag.ExitOnError)
 	g.bind(fs)
 	run := cmd.setup(fs)
-	if err := fs.Parse(args); err != nil {
+	if err := parseArgs(fs, args); err != nil {
 		usageDie("%v", err)
 	}
 	conn, client, err := dial(g.gateway)
@@ -782,7 +799,7 @@ func runRace(g *globals, args []string) {
 	var targets stringList
 	fs.Var(&targets, "targets",
 		"comma-separated gateways to round-robin jobs over")
-	if err := fs.Parse(args); err != nil {
+	if err := parseArgs(fs, args); err != nil {
 		usageDie("%v", err)
 	}
 	if len(targets) == 0 {
@@ -829,7 +846,7 @@ func runRace(g *globals, args []string) {
 		if err != nil {
 			die("job %d (%s): %v", idx, spec.Op, err)
 		}
-		if err := jobFs.Parse(argv); err != nil {
+		if err := parseArgs(jobFs, argv); err != nil {
 			die("job %d (%s): %v", idx, spec.Op, err)
 		}
 		conn, client, err := dial(jobGlobals.gateway)

@@ -102,12 +102,15 @@ func (a *Agent) obsStamp(obs time.Time, traceId string, answer time.Time) *pb.Ob
 
 // readLocked answers one Check round (round) or one info read of an object
 // under traceId and the observation levers. listed is whether the object's
-// parent lists it, and info derives the object's *Info, told whether the
-// reply knows the object; it returns nil when the reply carries none.
+// parent lists it, true for a node, and info derives the object's *Info,
+// nil for none; it is called only for an object the reply knows.
 //
-// A reply that refuses its object as unknown — one its parent does not list,
-// or one a forced ReplyCodeUnknownObject refuses so — has no observation,
-// whatever the levers say. For an object it knows, ObsNone answers as an
+// The Starting lever answers first, as an agent whose startup pass runs
+// answers every round and info read (dnagent.md SH33). Save that, a reply
+// refuses its object as unknown (knownLocked) as an agent that holds no
+// request for it does (dnagent.md SH25, DN16; cnagent.md CN23): code
+// ReplyCodeUnknownObject, revision zero, no *Info and no observation,
+// whatever the other levers say. For an object it knows, ObsNone answers as an
 // agent that holds the object and no observation of it yet (dnagent.md
 // SH28): code zero, revision zero, no *Info and the answer time alone.
 // ObsAge answers from a new observation that ended that long before the
@@ -119,11 +122,9 @@ func (a *Agent) obsStamp(obs time.Time, traceId string, answer time.Time) *pb.Ob
 // answers as an agent's round does instead (readRoundLocked).
 func (a *Agent) readLocked(
 	key string, listed, round bool, traceId string,
-	info func(known bool) proto.Message,
+	info func() proto.Message,
 ) answer {
 	now := time.Now().Round(0)
-	known := listed &&
-		a.forcedCodeLocked(key) != common.ReplyCodeUnknownObject
 	ob := a.objLocked(key)
 	obsAt := now
 	if ob != nil && !ob.Starting.IsZero() {
@@ -137,7 +138,14 @@ func (a *Agent) readLocked(
 			noObs: true,
 		}
 	}
-	if known && ob != nil {
+	if known, details := a.knownLocked(key, listed); !known {
+		return answer{
+			code:    common.ReplyCodeUnknownObject,
+			details: details,
+			stamp:   a.obsStamp(time.Time{}, "", now),
+		}
+	}
+	if ob != nil {
 		if ob.ObsNone {
 			return answer{stamp: a.obsStamp(time.Time{}, "", now), noObs: true}
 		}
@@ -160,18 +168,14 @@ func (a *Agent) readLocked(
 	}
 	var ans answer
 	if round {
-		result := a.checkGateLocked(key, listed)
+		result := a.checkGateLocked(key)
 		ans.code, ans.details, ans.revision =
 			result.code, result.details, result.revision
 	} else {
 		ans.code, ans.details = a.infoCodeLocked(key)
 		ans.revision = a.revisionLocked(key)
 	}
-	ans.info = info(known)
-	if !known {
-		ans.stamp = a.obsStamp(time.Time{}, "", now)
-		return ans
-	}
+	ans.info = info()
 	obs := a.observeLocked(key, traceId, obsAt, time.Time{}, &ans)
 	ans.stamp = a.obsStamp(obs, traceId, now)
 	return ans
@@ -194,7 +198,7 @@ type pendingRead struct {
 // which ends at once and which the next round answers from. An object with
 // no observation yet is read at once, and the round answers from that read.
 func (a *Agent) readRoundLocked(
-	key, traceId string, now time.Time, info func(known bool) proto.Message,
+	key, traceId string, now time.Time, info func() proto.Message,
 ) answer {
 	if rd := a.reads[key]; rd != nil {
 		delete(a.reads, key)
@@ -225,7 +229,7 @@ func (a *Agent) readRoundLocked(
 // re-sends left, or code zero; the stored revision; and the *Info, with the
 // read rows applied while the leftover stands.
 func (a *Agent) readAnswerLocked(
-	key string, info func(known bool) proto.Message,
+	key string, info func() proto.Message,
 ) answer {
 	ans := answer{revision: a.revisionLocked(key)}
 	switch {
@@ -235,7 +239,7 @@ func (a *Agent) readAnswerLocked(
 		ans.code, ans.details = common.ReplyCodeLeftover, detailsReadLeftover
 	}
 	a.readingKey = key
-	ans.info = info(true)
+	ans.info = info()
 	a.readingKey = ""
 	return ans
 }
@@ -254,7 +258,7 @@ func (a *Agent) syncupStampLocked(
 	ctx context.Context, key string, code uint32, details string,
 	info proto.Message, saved bool,
 ) (*pb.ObsStamp, *timestamppb.Timestamp) {
-	if code != 0 && code != common.ReplyCodeLeftover {
+	if refusesSyncup(code) {
 		return nil, nil
 	}
 	now := time.Now().Round(0)
@@ -340,6 +344,35 @@ func (a *Agent) forcedCodeLocked(key string) uint32 {
 	return 0
 }
 
+// knownLocked reports whether a round or an info read knows its object, and
+// for one it does not, the details of its refusal. The fake knows an object
+// while it holds a request for it, as an agent does (dnagent.md DN16;
+// cnagent.md CN23) — its stored request or stored revision, a stored
+// revision with no request being what a state file can hold — while its
+// parent lists it (listed, true for a node), the fake's ordering rule, which
+// only a hand-edited state file can break, and while no reply_code lever
+// refuses it as unknown. A side or a cntlr its node's last syncup lists is
+// thus unknown until its own Syncup* is applied, though the ordering gate
+// admits that Syncup*.
+func (a *Agent) knownLocked(key string, listed bool) (bool, string) {
+	switch {
+	case a.forcedCodeLocked(key) == common.ReplyCodeUnknownObject:
+		return false, detailsForcedCode
+	case !listed:
+		return false, key + " is not in its parent's last pointer list"
+	case a.state[key] == nil:
+		return false, key + " holds no stored request or revision"
+	}
+	return true, ""
+}
+
+// refusesSyncup reports whether a Syncup* reply's code refuses its request:
+// any code but zero and ReplyCodeLeftover, which the worker reads as
+// accepted (dnagent.md SH9).
+func refusesSyncup(code uint32) bool {
+	return code != 0 && code != common.ReplyCodeLeftover
+}
+
 // leftoverLocked reports whether the leftover_rounds lever still stands for
 // an object: it has rounds left to answer with the leftover code.
 func (a *Agent) leftoverLocked(key string) bool {
@@ -372,11 +405,15 @@ func (a *Agent) gateSyncupLocked(
 	return 0, "", true
 }
 
-// syncupRevisionLocked is the revision of a Syncup* reply: the stored one, or
-// for an accepted reply (code zero or ReplyCodeLeftover) the one the
-// syncup_revision lever sets in its place.
+// syncupRevisionLocked is the revision of a Syncup* reply: the stored one;
+// none for an unknown object, as an agent's refusal of one carries
+// (dnagent.md SH28); or for an accepted reply the one the syncup_revision
+// lever sets in its place.
 func (a *Agent) syncupRevisionLocked(key string, code uint32) uint64 {
-	if code == 0 || code == common.ReplyCodeLeftover {
+	if code == common.ReplyCodeUnknownObject {
+		return 0
+	}
+	if !refusesSyncup(code) {
 		if ob := a.objLocked(key); ob != nil && ob.SyncupRevision != nil {
 			return *ob.SyncupRevision
 		}
@@ -498,18 +535,13 @@ type checkResult struct {
 	revision uint64
 }
 
-// checkGateLocked resolves a Check* round for one object: the gate's code and
-// the object's stored revision (architecture.md, Check streams — a reply
-// whose revision differs from the request's is what makes the worker re-issue
-// the object's Syncup*). A round of a known object answered while a leftover
-// stands answers ReplyCodeLeftover and spends one of the leftover's rounds.
-func (a *Agent) checkGateLocked(key string, known bool) checkResult {
-	if !known {
-		return checkResult{
-			code:    common.ReplyCodeUnknownObject,
-			details: key + " is not in its parent's last pointer list",
-		}
-	}
+// checkGateLocked resolves a Check* round for one object the round knows
+// (knownLocked): the gate's code and the object's stored revision
+// (architecture.md, Check streams — a reply whose revision differs from the
+// request's is what makes the worker re-issue the object's Syncup*). A round
+// answered while a leftover stands answers ReplyCodeLeftover and spends one
+// of the leftover's rounds.
+func (a *Agent) checkGateLocked(key string) checkResult {
 	result := checkResult{revision: a.revisionLocked(key)}
 	if code := a.forcedCodeLocked(key); code != 0 {
 		result.code = code
@@ -749,6 +781,12 @@ func (a *Agent) SyncupDn(
 		a.pruneLocked(sideObjPrefix, keep)
 		a.saveStateLocked(ctx)
 	}
+	if refusesSyncup(code) {
+		return &pb.SyncupDnReply{
+			AgentReply: agentReply(code, details),
+			Revision:   a.syncupRevisionLocked(DnKey, code),
+		}, nil
+	}
 	info := a.dnInfoLocked()
 	stamp, saveTime := a.syncupStampLocked(
 		ctx, DnKey, code, details, info, apply)
@@ -798,6 +836,12 @@ func (a *Agent) SyncupSide(
 	if apply {
 		a.applyLocked(ctx, key, req.GetRevision(), req)
 		a.saveStateLocked(ctx)
+	}
+	if refusesSyncup(code) {
+		return &pb.SyncupSideReply{
+			AgentReply: agentReply(code, details),
+			Revision:   a.syncupRevisionLocked(key, code),
+		}, nil
 	}
 	info := a.sideInfoLocked(key)
 	stamp, saveTime := a.syncupStampLocked(
@@ -866,7 +910,7 @@ func (a *Agent) GetDnInfo(
 	}
 	a.reloadStateLocked(ctx)
 	ans := a.readLocked(DnKey, true, false, callTraceId(ctx),
-		func(bool) proto.Message { return a.dnInfoLocked() })
+		func() proto.Message { return a.dnInfoLocked() })
 	info, _ := ans.info.(*pb.DnInfo)
 	return &pb.GetDnInfoReply{
 		AgentReply: agentReply(ans.code, ans.details),
@@ -895,21 +939,9 @@ func (a *Agent) GetSideInfo(
 	}
 	a.reloadStateLocked(ctx)
 
-	if stamp, ok := a.startingStampLocked(key); ok {
-		return &pb.GetSideInfoReply{
-			AgentReply: agentReply(common.ReplyCodeStarting, detailsStarting),
-			ObsStamp:   stamp,
-		}, nil
-	}
-	if !a.sideKnownLocked(req.GetSidePointer()) {
-		return &pb.GetSideInfoReply{
-			AgentReply: agentReply(common.ReplyCodeUnknownObject,
-				key+" is not in the last SyncupDn.side_pointer_list"),
-			ObsStamp: a.obsStamp(time.Time{}, "", time.Now().Round(0)),
-		}, nil
-	}
-	ans := a.readLocked(key, true, false, callTraceId(ctx),
-		func(bool) proto.Message { return a.sideInfoLocked(key) })
+	ans := a.readLocked(key, a.sideKnownLocked(req.GetSidePointer()), false,
+		callTraceId(ctx),
+		func() proto.Message { return a.sideInfoLocked(key) })
 	info, _ := ans.info.(*pb.SideInfo)
 	return &pb.GetSideInfoReply{
 		AgentReply: agentReply(ans.code, ans.details),
@@ -958,7 +990,7 @@ func (a *Agent) CheckDn(
 		}
 		a.reloadStateLocked(ctx)
 		ans := a.readLocked(DnKey, true, true, req.GetTraceId(),
-			func(bool) proto.Message { return a.dnInfoLocked() })
+			func() proto.Message { return a.dnInfoLocked() })
 		a.mu.Unlock()
 
 		reply := &pb.CheckDnReply{
@@ -1016,12 +1048,8 @@ func (a *Agent) CheckSide(
 		}
 		a.reloadStateLocked(ctx)
 		ans := a.readLocked(key, a.sideKnownLocked(req.GetSidePointer()), true,
-			req.GetTraceId(), func(known bool) proto.Message {
-				if !known {
-					return (*pb.SideInfo)(nil)
-				}
-				return a.sideInfoLocked(key)
-			})
+			req.GetTraceId(),
+			func() proto.Message { return a.sideInfoLocked(key) })
 		a.mu.Unlock()
 
 		reply := &pb.CheckSideReply{
@@ -1099,6 +1127,12 @@ func (a *Agent) SyncupCn(
 		a.pruneLocked(cntlrObjPrefix, keep)
 		a.saveStateLocked(ctx)
 	}
+	if refusesSyncup(code) {
+		return &pb.SyncupCnReply{
+			AgentReply: agentReply(code, details),
+			Revision:   a.syncupRevisionLocked(CnKey, code),
+		}, nil
+	}
 	info := a.cnInfoLocked()
 	stamp, saveTime := a.syncupStampLocked(
 		ctx, CnKey, code, details, info, apply)
@@ -1148,6 +1182,12 @@ func (a *Agent) SyncupCntlr(
 	if apply {
 		a.applyLocked(ctx, key, req.GetRevision(), req)
 		a.saveStateLocked(ctx)
+	}
+	if refusesSyncup(code) {
+		return &pb.SyncupCntlrReply{
+			AgentReply: agentReply(code, details),
+			Revision:   a.syncupRevisionLocked(key, code),
+		}, nil
 	}
 	info := a.cntlrInfoLocked(key)
 	stamp, saveTime := a.syncupStampLocked(
@@ -1214,7 +1254,7 @@ func (a *Agent) GetCnInfo(
 	}
 	a.reloadStateLocked(ctx)
 	ans := a.readLocked(CnKey, true, false, callTraceId(ctx),
-		func(bool) proto.Message { return a.cnInfoLocked() })
+		func() proto.Message { return a.cnInfoLocked() })
 	info, _ := ans.info.(*pb.CnInfo)
 	return &pb.GetCnInfoReply{
 		AgentReply: agentReply(ans.code, ans.details),
@@ -1243,21 +1283,9 @@ func (a *Agent) GetCntlrInfo(
 	}
 	a.reloadStateLocked(ctx)
 
-	if stamp, ok := a.startingStampLocked(key); ok {
-		return &pb.GetCntlrInfoReply{
-			AgentReply: agentReply(common.ReplyCodeStarting, detailsStarting),
-			ObsStamp:   stamp,
-		}, nil
-	}
-	if !a.cntlrKnownLocked(req.GetCntlrPointer()) {
-		return &pb.GetCntlrInfoReply{
-			AgentReply: agentReply(common.ReplyCodeUnknownObject,
-				key+" is not in the last SyncupCn.cntlr_pointer_list"),
-			ObsStamp: a.obsStamp(time.Time{}, "", time.Now().Round(0)),
-		}, nil
-	}
-	ans := a.readLocked(key, true, false, callTraceId(ctx),
-		func(bool) proto.Message { return a.cntlrInfoLocked(key) })
+	ans := a.readLocked(key, a.cntlrKnownLocked(req.GetCntlrPointer()),
+		false, callTraceId(ctx),
+		func() proto.Message { return a.cntlrInfoLocked(key) })
 	info, _ := ans.info.(*pb.CntlrInfo)
 	return &pb.GetCntlrInfoReply{
 		AgentReply: agentReply(ans.code, ans.details),
@@ -1464,7 +1492,7 @@ func (a *Agent) CheckCn(
 		}
 		a.reloadStateLocked(ctx)
 		ans := a.readLocked(CnKey, true, true, req.GetTraceId(),
-			func(bool) proto.Message { return a.cnInfoLocked() })
+			func() proto.Message { return a.cnInfoLocked() })
 		a.mu.Unlock()
 
 		reply := &pb.CheckCnReply{
@@ -1522,12 +1550,8 @@ func (a *Agent) CheckCntlr(
 		}
 		a.reloadStateLocked(ctx)
 		ans := a.readLocked(key, a.cntlrKnownLocked(req.GetCntlrPointer()), true,
-			req.GetTraceId(), func(known bool) proto.Message {
-				if !known {
-					return (*pb.CntlrInfo)(nil)
-				}
-				return a.cntlrInfoLocked(key)
-			})
+			req.GetTraceId(),
+			func() proto.Message { return a.cntlrInfoLocked(key) })
 		a.mu.Unlock()
 
 		reply := &pb.CheckCntlrReply{

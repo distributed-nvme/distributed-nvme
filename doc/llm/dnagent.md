@@ -1413,7 +1413,10 @@ the agent accepted carries the stamp of the observation its converge
 stored, with no converge start, and the time the agent saved the request
 to its local store (SH5), which every accepted request has. A reply that
 refuses the request, a gate's refusal or a failed save's (SH9), carries
-no rows, no stamp and no save time, and its call stores no observation;
+its code and its revision alone — the stored request's, none for an
+unknown object — with no rows, no bitmap info (`bm_info`,
+`bm_info_list`), no stamp and no save time, and its call stores no
+observation;
 the refusal of an agent still starting carries no rows and no save time
 either, and a stamp with no observation (SH33).
 An object's observation times only increase: a time not later than

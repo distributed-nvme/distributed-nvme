@@ -318,7 +318,9 @@ func TestFullShapeMostNodes(t *testing.T) {
 	// No node's record holds a health epoch, and none ever did: the worker
 	// logs every health transition (HL1), and a monitor writes its first
 	// verdict whatever the record holds (HL3), so each node's first clean
-	// round logs one with no epoch and the reason initial, not recovered.
+	// verdict, that of its first syncup's reply, since a fake that holds no
+	// request answers its first round as unknown, logs one with no epoch and
+	// the reason initial, not recovered.
 	assertMostNodeEpochs(t, h, cl, dnCnt, cnCnt)
 	assertNoEpochSetBy(t, h, w)
 	assertNoFailedRoundOf(t, h, w)

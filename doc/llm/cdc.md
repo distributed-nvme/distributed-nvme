@@ -916,7 +916,11 @@ first, which is safe because the hosts are already disconnected: a port
 unlinked under a live connection kills the host's controller and the host never
 reconnects by itself; then the first server's processes. Cleanup touches
 only what is the suite's — the test subsystems and the discovery
-controllers that point at the fleet, never every subsystem of a host —
+controllers that point at the fleet, never every subsystem of a host; on a
+host the uevent capture and the flood by the pid files they leave in the
+work directory, never a process of the host's own; on the first server its
+processes by recorded pid, with a pattern kill of the programs under the
+work directory as a safety net —
 and leaves nvme-stas installed and the kernel modules loaded; the
 end-of-run cleanup also removes the work directories and unmasks
 nvme-cli's autoconnect unit.

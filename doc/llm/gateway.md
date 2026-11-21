@@ -2105,8 +2105,9 @@ gateway, never through `workerctl`.
   through, which the fake replies empty, having no setting for its bytes, so the case proves the
   reply's shape and not that the bytes cross unchanged (GW14), refused with
   nothing written for a td whose namespace the desired state does not keep
-  suspended — the primary's report of a park is staged by no case — and
-  for a window off a multiple of 8 blocks, and no suite
+  suspended, for one whose suspended namespace the primary reports serving,
+  not parked, which a row lever then reports parked for the read to pass,
+  and for a window off a multiple of 8 blocks, and no suite
   compares the bytes with the agent's: the e2e suite reads a non-empty thin
   bitmap from the real agents and its bit for the block its setup wrote
   (`e2e_integtest.md`, The cases); the worker flip the snapshot
@@ -2219,7 +2220,8 @@ gateway, never through `workerctl`.
   stopped fakes; the hydration checks of `DeleteClone` and `FinishMigration`
   refusing on incomplete hydration and on an unreachable agent, `force`
   skipping them; the node deletes' proof, on a disk node and a controller
-  node made for it late in the case, refusing an agent behind the node, a
+  node made for it late in the case, refusing an agent that holds nothing of
+  the node, which answers it as unknown, an agent behind the node, a
   leftover the agent names, a side record the disk's table still holds and a
   stopped agent, and `force` deleting the node, while the precondition
   battery refuses with `force` too a disk node that still hosts a side; and
@@ -2322,10 +2324,18 @@ also compares a whole pool snapshot before and after each refusal battery.
 A bracket read that fails stops the run, because two failed reads would
 compare equal. Waits are bounded polls for process readiness only: the
 gateway is synchronous, so no stage ever sleeps waiting for etcd content.
-After every successful pool mutation, a worker flip included, the script
-refreshes its token from `GetStoragePool`, except where no token is left
-to send: after a `DeleteStoragePool` latch it drains at once, and after
-the sp drain, which removes the pool.
+After every successful pool mutation outside the parallel case's race
+waves, a worker flip included, the script refreshes its token from
+`GetStoragePool` and checks it against the pool's revision key in etcd, so
+that every revision count made against the token rests on etcd, with the
+gateway's reply as the second check, except where no token is left to send:
+after a `DeleteStoragePool` latch it drains at once, and after the sp drain,
+which removes the pool. Every pool token a call sends comes from the
+gateway's reply; the race waves' tokens and the threshold pool's delete
+token are not checked against etcd, since a wrong one fails the next call.
+A disk node's or a controller node's token is read from etcd; where a stage
+counts such a revision after a bump, it also reads the gateway's
+`GetDiskNode` or `GetControllerNode` reply of it as the second check.
 
 **Cleanup.** Cleanup runs unconditionally at the start of every run —
 before the server preflight, so a crashed earlier run cannot fail it — and
@@ -2335,8 +2345,8 @@ and its trace id, the tail of every process log, a full dump of the dnv
 keys and the listening ports — so the debris is what the developer reads;
 a cleanup-only run does the cleanup alone.
 Cleanup signals every daemon the suite started — etcd, the gateways and the
-fake agents — by its recorded pid with a pattern kill as a safety net, and
-removes the suite's work directory; nothing outside that directory is
+fake agents — by its recorded pid with a pattern kill of the programs under
+the work directory as a safety net, and removes the suite's work directory; nothing outside that directory is
 touched, and the suite leaves no kernel state, no packages and no users
 behind.
 
@@ -2355,7 +2365,11 @@ re-reading its pool's token — the documented client protocol, exercised end
 to end — and reports each job's code and attempt count, so a retry loop
 that does not converge shows at its budget instead of as a timeout. `race`
 measures; the script asserts. It dials without the client interceptors and
-passes its trace id as plain metadata (`grpc.md`, Drivers and fakes).
+passes its trace id as plain metadata (`grpc.md`, Drivers and fakes). It
+refuses a word left after a subcommand's flags, as dnvctl's leaves refuse a
+positional argument (`dnvctl.md`, Conventions), since Go's flag package
+would read `--force false` as `--force` and leave the flags after the word
+unread: a boolean flag is written `--flag` or `--flag=false`.
 
 **The etcd verification, `workerctl`.** Ground truth never goes through the
 code under test: after every mutating stage the script reads raw decoded

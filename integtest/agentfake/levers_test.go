@@ -3,6 +3,7 @@ package agentfake
 import (
 	"context"
 	"fmt"
+	"reflect"
 	"sync"
 	"testing"
 	"testing/synctest"
@@ -675,6 +676,81 @@ func TestParseBehaviorNewLevers(t *testing.T) {
 				t.Fatalf("ParseBehavior(%s) succeeded, want an error", tc.data)
 			}
 		})
+	}
+}
+
+// nonZeroOf is a value of type typ that is not its zero value, for a guard
+// that sets every field of a struct in turn.
+func nonZeroOf(t *testing.T, field string, typ reflect.Type) reflect.Value {
+	t.Helper()
+	switch typ.Kind() {
+	case reflect.Pointer:
+		return reflect.New(typ.Elem())
+	case reflect.Map:
+		m := reflect.MakeMap(typ)
+		m.SetMapIndex(reflect.Zero(typ.Key()), reflect.Zero(typ.Elem()))
+		return m
+	case reflect.Slice:
+		return reflect.MakeSlice(typ, 1, 1)
+	case reflect.Bool:
+		return reflect.ValueOf(true).Convert(typ)
+	case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32,
+		reflect.Int64, reflect.Uint, reflect.Uint8, reflect.Uint16,
+		reflect.Uint32, reflect.Uint64:
+		return reflect.ValueOf(1).Convert(typ)
+	case reflect.String:
+		return reflect.ValueOf("x").Convert(typ)
+	}
+	if typ == reflect.TypeOf(time.Time{}) {
+		return reflect.ValueOf(time.Now())
+	}
+	t.Fatalf("Object.%s: no non-zero value of kind %s for the guard",
+		field, typ.Kind())
+	return reflect.Value{}
+}
+
+// TestDefaultEntryTakesStatusAndDetailsAlone guards the default entry
+// (dnv-worker.md, Integration test plan, The fake agent): it is read for its
+// status and details alone, so SetBehavior refuses it with any other field
+// of Object set, each field in turn, a lever added to Object later
+// included, and takes it with the two it reads.
+func TestDefaultEntryTakesStatusAndDetailsAlone(t *testing.T) {
+	agent := newTestAgent(t)
+	typ := reflect.TypeOf(Object{})
+	for i := range typ.NumField() {
+		field := typ.Field(i)
+		ob := &Object{}
+		reflect.ValueOf(ob).Elem().Field(i).Set(
+			nonZeroOf(t, field.Name, field.Type))
+		err := agent.SetBehavior(&Behavior{Default: ob})
+		switch field.Name {
+		case "Status", "Details":
+			if err != nil {
+				t.Errorf("the default entry with %s alone refused: %v",
+					field.Name, err)
+			}
+		default:
+			if err == nil {
+				t.Errorf("the default entry with %s set accepted, want it "+
+					"refused", field.Name)
+			}
+		}
+	}
+	if _, err := ParseBehavior([]byte(
+		`{"default": {"status": "ERROR", "details": "d"}}`)); err != nil {
+		t.Errorf("ParseBehavior refused a default status and details: %v",
+			err)
+	}
+	for _, data := range []string{
+		`{"default": {"rows": {"disk_info": {"status": "ERROR"}}}}`,
+		`{"default": {"reply_code": 2}}`,
+		`{"default": {"hang": true}}`,
+		`{"default": {"thin_ok": true}}`,
+	} {
+		if _, err := ParseBehavior([]byte(data)); err == nil {
+			t.Errorf("ParseBehavior(%s) accepted, want the default entry's "+
+				"lever refused", data)
+		}
 	}
 }
 

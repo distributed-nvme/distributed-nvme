@@ -981,10 +981,14 @@ prints its diagnostics — the failing stage and its trace id, the fake's
 recent request records and its behavior-file and state-file records, both
 files verbatim, the last invocation's exit code and output, the listeners on
 the two ports and the suite's processes — so the debris is what the
-developer reads. Cleanup signals the fake by its recorded pid, with a
-pattern kill as a safety net for it and for a straggling dnvctl, which runs
-in the foreground of each step's ssh and has no pid file, then removes the
-work directory; no file outside it is removed.
+developer reads. Cleanup signals the fake by its recorded pid, only while
+the first word of that pid's command line is still a program under the work
+directory, so a pid the kernel has given to another process since is left
+alone, with a pattern kill of the programs under the work directory as a
+safety net for
+it and for a straggling dnvctl, which runs in the foreground of each step's
+ssh and has no pid file, then removes the work directory; no file outside
+it is removed, and no process another suite started is signalled.
 
 **The fake gateway, `fakegateway`.** `integtest/fakegateway` stands in for
 the whole control plane so that the suite can read the exact request a

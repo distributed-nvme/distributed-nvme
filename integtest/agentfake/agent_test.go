@@ -714,9 +714,10 @@ func TestGateOrderingUnknownChild(t *testing.T) {
 // architecture.md, Common agent rules, as the fake plays it: a side its dn's
 // node syncup no longer lists is removed with everything the fake stored of
 // it, as the real agent deletes its local files, so when a later node
-// syncup lists it again the fake holds nothing of it — revision zero and no
-// *Info on an info read and a round, no key in the state file, and a side
-// syncup at any revision applies. The cntlr twin through SyncupCn.
+// syncup lists it again the fake holds nothing of it — an info read and a
+// round refuse it as unknown, at revision zero with no *Info, no key is in
+// the state file, and a side syncup at any revision applies. The cntlr twin
+// through SyncupCn.
 func TestPruneDropsTheChildrenAParentDrops(t *testing.T) {
 	agent := newTestAgent(t)
 	dnClient, cnClient := startAgent(t, agent)
@@ -770,10 +771,12 @@ func TestPruneDropsTheChildrenAParentDrops(t *testing.T) {
 		"the cntlr's round": {cntlrRound.GetAgentReply().GetCode(),
 			cntlrRound.GetRevision(), cntlrRound.GetCntlrInfo() != nil},
 	} {
-		if reply.code != 0 || reply.rev != 0 || reply.info {
+		if reply.code != common.ReplyCodeUnknownObject || reply.rev != 0 ||
+			reply.info {
 			t.Errorf("%s after the parent dropped it and listed it again: "+
-				"code %d revision %d info %v; want 0, 0 and no info",
-				what, reply.code, reply.rev, reply.info)
+				"code %d revision %d info %v; want the unknown object at "+
+				"revision 0 with no info", what, reply.code, reply.rev,
+				reply.info)
 		}
 	}
 
@@ -1518,16 +1521,15 @@ func TestDnAndCnInfoRows(t *testing.T) {
 	dnClient, cnClient := startAgent(t, agent)
 	ctx := context.Background()
 
-	// Nothing applied yet: no info, revision 0, so the worker re-syncs.
+	// Nothing applied yet: the dn is unknown, with no info and no
+	// revision, so the worker re-syncs.
 	dnInfo, err := dnClient.GetDnInfo(ctx, &pb.GetDnInfoRequest{
 		ClusterId: 1, DnId: 1,
 	})
 	if err != nil {
 		t.Fatalf("GetDnInfo: %v", err)
 	}
-	if dnInfo.GetDnInfo() != nil || dnInfo.GetRevision() != 0 {
-		t.Errorf("GetDnInfo before any syncup = %v", dnInfo)
-	}
+	wantUnknownRead(t, "GetDnInfo before any syncup", dnInfo)
 
 	syncupDn(t, dnClient, 1)
 	dnInfo, err = dnClient.GetDnInfo(ctx, &pb.GetDnInfoRequest{
@@ -1772,86 +1774,295 @@ func TestUnknownObjectHasNoObservation(t *testing.T) {
 	}
 }
 
+// readReply is a reply of a Check* round or a Get*Info read.
+type readReply interface {
+	proto.Message
+	GetAgentReply() *pb.AgentReply
+	GetObsStamp() *pb.ObsStamp
+}
+
+// everyRead is one round and one info read of every kind, about the dn and
+// the cn of cluster 1 and the side and the cntlr given, by RPC name.
+func everyRead(
+	t *testing.T, dnClient pb.DiskNodeAgentClient,
+	cnClient pb.ControllerNodeAgentClient,
+	side *pb.SidePointer, cntlr *pb.CntlrPointer,
+) map[string]readReply {
+	t.Helper()
+	ctx := context.Background()
+	out := map[string]readReply{
+		"CheckDn": oneRound(t, dnClient.CheckDn, &pb.CheckDnRequest{
+			ClusterId: 1, DnId: 1, Revision: 1, TraceId: "r",
+		}),
+		"CheckSide": oneRound(t, dnClient.CheckSide, &pb.CheckSideRequest{
+			ClusterId: 1, DnId: 1, SidePointer: side, Revision: 1,
+			TraceId: "r",
+		}),
+		"CheckCn": oneRound(t, cnClient.CheckCn, &pb.CheckCnRequest{
+			ClusterId: 1, CnId: 1, Revision: 1, TraceId: "r",
+		}),
+		"CheckCntlr": oneRound(t, cnClient.CheckCntlr,
+			&pb.CheckCntlrRequest{
+				ClusterId: 1, CnId: 1, CntlrPointer: cntlr,
+				Revision: 5, TraceId: "r",
+			}),
+	}
+	var err error
+	if out["GetDnInfo"], err = dnClient.GetDnInfo(ctx,
+		&pb.GetDnInfoRequest{ClusterId: 1, DnId: 1}); err != nil {
+		t.Fatalf("GetDnInfo: %v", err)
+	}
+	if out["GetSideInfo"], err = dnClient.GetSideInfo(ctx,
+		&pb.GetSideInfoRequest{
+			ClusterId: 1, DnId: 1, SidePointer: side,
+		}); err != nil {
+		t.Fatalf("GetSideInfo: %v", err)
+	}
+	if out["GetCnInfo"], err = cnClient.GetCnInfo(ctx,
+		&pb.GetCnInfoRequest{ClusterId: 1, CnId: 1}); err != nil {
+		t.Fatalf("GetCnInfo: %v", err)
+	}
+	if out["GetCntlrInfo"], err = cnClient.GetCntlrInfo(ctx,
+		&pb.GetCntlrInfoRequest{
+			ClusterId: 1, CnId: 1, CntlrPointer: cntlr,
+		}); err != nil {
+		t.Fatalf("GetCntlrInfo: %v", err)
+	}
+	return out
+}
+
+// fieldsSet names the fields a reply carries, by their proto names, sorted.
+func fieldsSet(msg proto.Message) []string {
+	var names []string
+	msg.ProtoReflect().Range(
+		func(fd protoreflect.FieldDescriptor, _ protoreflect.Value) bool {
+			names = append(names, string(fd.Name()))
+			return true
+		})
+	slices.Sort(names)
+	return names
+}
+
+// wantUnknownRead fails unless the reply refuses its object as unknown as a
+// real agent does (dnagent.md SH25): the code ReplyCodeUnknownObject, no
+// revision, no *Info, and a stamp with the answer time and no observation.
+func wantUnknownRead(t *testing.T, what string, reply readReply) {
+	t.Helper()
+	if code := reply.GetAgentReply().GetCode(); code !=
+		common.ReplyCodeUnknownObject {
+		t.Errorf("%s: code %d (%s), want unknown object", what, code,
+			reply.GetAgentReply().GetDetails())
+		return
+	}
+	if got := fieldsSet(reply); !slices.Equal(got,
+		[]string{"agent_reply", "obs_stamp"}) {
+		t.Errorf("%s refusing its object as unknown carries %v, want "+
+			"agent_reply and obs_stamp alone: %v", what, got, reply)
+	}
+	stamp := reply.GetObsStamp()
+	obs, answer := obsTimes(stamp)
+	if !obs.IsZero() || stamp.GetObsTraceId() != "" || answer.IsZero() {
+		t.Errorf("%s refusing its object as unknown: stamp %v, want an "+
+			"answer time alone", what, stamp)
+	}
+}
+
+// TestUnheldObjectIsUnknown: a round or an info read of an object the fake
+// holds no stored request and no stored revision for refuses it as unknown,
+// as an agent that holds no request for an object does (dnagent.md SH25,
+// DN16; cnagent.md CN23): no revision, no *Info, no observation. A fresh fake
+// holds neither node; a side or a cntlr its node's last syncup lists stays
+// unknown until its own Syncup*, which the ordering gate admits; and a
+// revision a state file stores with no request is held.
+func TestUnheldObjectIsUnknown(t *testing.T) {
+	agent := newTestAgent(t)
+	dnClient, cnClient := startAgent(t, agent)
+	ctx := context.Background()
+	side, cntlr := sidePtr(1, 3, 5), cntlrPtr(1, 1)
+
+	for call, reply := range everyRead(t, dnClient, cnClient, side, cntlr) {
+		wantUnknownRead(t, "a fresh fake, "+call, reply)
+	}
+
+	syncupDn(t, dnClient, 1, side)
+	if _, err := cnClient.SyncupCn(ctx, &pb.SyncupCnRequest{
+		ClusterId: 1, CnId: 1, Revision: 1,
+		CntlrPointerList: []*pb.CntlrPointer{cntlr},
+	}); err != nil {
+		t.Fatalf("SyncupCn: %v", err)
+	}
+	reads := everyRead(t, dnClient, cnClient, side, cntlr)
+	for _, call := range []string{"CheckSide", "GetSideInfo",
+		"CheckCntlr", "GetCntlrInfo"} {
+		wantUnknownRead(t, "listed with no syncup of its own, "+call,
+			reads[call])
+	}
+	for _, call := range []string{"CheckDn", "GetDnInfo", "CheckCn",
+		"GetCnInfo"} {
+		reply := reads[call]
+		obs, _ := obsTimes(reply.GetObsStamp())
+		if reply.GetAgentReply().GetCode() != 0 || obs.IsZero() {
+			t.Errorf("%s after its node's syncup: %v, want code zero and "+
+				"an observation", call, reply)
+		}
+	}
+
+	if code := syncupSide(t, dnClient, side, 1, 0).GetAgentReply().
+		GetCode(); code != 0 {
+		t.Fatalf("SyncupSide of a listed side: code %d, want it admitted",
+			code)
+	}
+	if code := syncupCntlrRequest(t, cnClient, cntlrFixture(false)).
+		GetAgentReply().GetCode(); code != 0 {
+		t.Fatalf("SyncupCntlr of a listed cntlr: code %d", code)
+	}
+	for call, reply := range everyRead(t, dnClient, cnClient, side, cntlr) {
+		obs, _ := obsTimes(reply.GetObsStamp())
+		if reply.GetAgentReply().GetCode() != 0 || obs.IsZero() {
+			t.Errorf("%s once every object is held: %v, want code zero "+
+				"and an observation", call, reply)
+		}
+	}
+
+	writeStateFile(t, agent, `{"objects": {"cn": {"revision": 8}}}`)
+	reads = everyRead(t, dnClient, cnClient, side, cntlr)
+	for _, call := range []string{"CheckDn", "GetDnInfo", "CheckSide",
+		"GetSideInfo", "CheckCntlr", "GetCntlrInfo"} {
+		wantUnknownRead(t, "a state file of the cn alone, "+call,
+			reads[call])
+	}
+	for _, call := range []string{"CheckCn", "GetCnInfo"} {
+		reply := reads[call].(interface{ GetRevision() uint64 })
+		if code := reads[call].GetAgentReply().GetCode(); code != 0 ||
+			reply.GetRevision() != 8 {
+			t.Errorf("%s of a cn the state file holds at revision 8 alone: "+
+				"%v, want code zero at revision 8", call, reads[call])
+		}
+	}
+}
+
+// TestUnheldObjectIsUnknownWhateverTheLever: a fake that holds nothing for an
+// object answers its rounds and info reads as unknown whatever code a
+// reply_code lever forces on it (dnv-worker.md, Integration test plan, The
+// fake agent), as an agent that holds no request for an object answers it
+// (dnagent.md SH25): a fresh fake under the lever on every object, and a
+// side and a cntlr their node's syncup lists but no syncup of their own
+// applied, under the lever on the side and the cntlr alone. A Syncup* of that
+// side or cntlr still answers the forced code, which no read gate stands
+// ahead of.
+func TestUnheldObjectIsUnknownWhateverTheLever(t *testing.T) {
+	side, cntlr := sidePtr(1, 3, 5), cntlrPtr(1, 1)
+	for _, code := range []uint32{common.ReplyCodeStaleRevision,
+		common.ReplyCodeInvalidConf, common.ReplyCodeLeftover,
+		common.ReplyCodeSaveFailed, 77} {
+		agent := newTestAgent(t)
+		dnClient, cnClient := startAgent(t, agent)
+		ctx := context.Background()
+		setBehavior(t, agent, fmt.Sprintf(`{"objects": {
+			"dn": {"reply_code": %[1]d}, "side 1:3:5": {"reply_code": %[1]d},
+			"cn": {"reply_code": %[1]d}, "cntlr 1:1": {"reply_code": %[1]d}}}`,
+			code))
+		for call, reply := range everyRead(t, dnClient, cnClient, side,
+			cntlr) {
+			wantUnknownRead(t, fmt.Sprintf(
+				"a fresh fake under a forced code %d, %s", code, call), reply)
+		}
+
+		setBehavior(t, agent, `{}`)
+		syncupDn(t, dnClient, 1, side)
+		if _, err := cnClient.SyncupCn(ctx, &pb.SyncupCnRequest{
+			ClusterId: 1, CnId: 1, Revision: 1,
+			CntlrPointerList: []*pb.CntlrPointer{cntlr},
+		}); err != nil {
+			t.Fatalf("SyncupCn: %v", err)
+		}
+		setBehavior(t, agent, fmt.Sprintf(`{"objects": {
+			"side 1:3:5": {"reply_code": %[1]d},
+			"cntlr 1:1": {"reply_code": %[1]d}}}`, code))
+		reads := everyRead(t, dnClient, cnClient, side, cntlr)
+		for _, call := range []string{"CheckSide", "GetSideInfo",
+			"CheckCntlr", "GetCntlrInfo"} {
+			wantUnknownRead(t, fmt.Sprintf(
+				"listed with no syncup of its own, under a forced code %d, %s",
+				code, call), reads[call])
+		}
+
+		if got := syncupSide(t, dnClient, side, 1, 0).GetAgentReply().
+			GetCode(); got != code {
+			t.Errorf("SyncupSide of a listed side under a forced code %d: "+
+				"code %d", code, got)
+		}
+		reply, err := cnClient.SyncupCntlr(ctx, cntlrFixture(false))
+		if err != nil {
+			t.Fatalf("SyncupCntlr: %v", err)
+		}
+		if got := reply.GetAgentReply().GetCode(); got != code {
+			t.Errorf("SyncupCntlr of a listed cntlr under a forced code %d: "+
+				"code %d", code, got)
+		}
+	}
+}
+
+// TestUnlistedChildIsUnknownThoughHeld: the ordering rule holds for a round
+// and an info read too (dnv-worker.md, Integration test plan, The fake agent):
+// a side or a cntlr its node's stored request does not list is unknown even
+// when the fake holds a stored request for it, as a hand-edited state file
+// can leave it, while its node, which the file also holds, answers as known.
+func TestUnlistedChildIsUnknownThoughHeld(t *testing.T) {
+	agent := newTestAgent(t)
+	dnClient, cnClient := startAgent(t, agent)
+	side, cntlr := sidePtr(1, 3, 5), cntlrPtr(1, 1)
+	writeStateFile(t, agent, `{"objects": {
+	  "dn": {"revision": 2, "request": {"cluster_id": "1", "dn_id": "1",
+	    "revision": "2"}},
+	  "side 1:3:5": {"revision": 4, "request": {"cluster_id": "1",
+	    "dn_id": "1", "revision": "4",
+	    "side_pointer": {"sp_id": "1", "leg_id": "3", "side_id": "5"},
+	    "side_conf": {"ext_cnt": "2"}}},
+	  "cn": {"revision": 2, "request": {"cluster_id": "1", "cn_id": "1",
+	    "revision": "2"}},
+	  "cntlr 1:1": {"revision": 5, "request": {"cluster_id": "1",
+	    "cn_id": "1", "revision": "5",
+	    "cntlr_pointer": {"sp_id": "1", "cntlr_id": "1"}}}}}`)
+	reads := everyRead(t, dnClient, cnClient, side, cntlr)
+	for _, call := range []string{"CheckSide", "GetSideInfo", "CheckCntlr",
+		"GetCntlrInfo"} {
+		wantUnknownRead(t, "held but unlisted, "+call, reads[call])
+	}
+	for _, call := range []string{"CheckDn", "GetDnInfo", "CheckCn",
+		"GetCnInfo"} {
+		reply := reads[call]
+		rev := reply.(interface{ GetRevision() uint64 }).GetRevision()
+		if reply.GetAgentReply().GetCode() != 0 || rev != 2 {
+			t.Errorf("%s of a node the state file holds at revision 2: %v, "+
+				"want code zero at revision 2", call, reply)
+		}
+	}
+}
+
 // TestForcedUnknownObjectHasNoObservation: an object the reply_code lever
-// refuses as unknown has no observation either, though its parent
-// lists it, as the real agent sends none with that code (dnagent.md SH25): a
-// round and an info read of each kind carry an answer time alone, and once
+// refuses as unknown is answered as an object the fake does not hold,
+// though its parent lists it and the fake holds its request, as the real
+// agent answers that code (dnagent.md SH25): a round and an info read of
+// each kind carry no revision, no *Info and an answer time alone, and once
 // the lever is cleared the same calls carry an observation again.
 func TestForcedUnknownObjectHasNoObservation(t *testing.T) {
 	agent := newTestAgent(t)
 	dnClient, cnClient := startAgent(t, agent)
-	ctx := context.Background()
-	side := sidePtr(1, 3, 5)
+	side, cntlr := sidePtr(1, 3, 5), cntlrPtr(1, 1)
 	syncupDn(t, dnClient, 1, side)
 	syncupSide(t, dnClient, side, 1, 0)
 	syncupCntlrFixture(t, cnClient, false)
 
-	type stamped interface {
-		GetAgentReply() *pb.AgentReply
-		GetObsStamp() *pb.ObsStamp
-	}
-	// replies is one round and one info read of every kind.
-	replies := func() map[string]stamped {
-		out := map[string]stamped{
-			"CheckDn": oneRound(t, dnClient.CheckDn, &pb.CheckDnRequest{
-				ClusterId: 1, DnId: 1, Revision: 1, TraceId: "r",
-			}),
-			"CheckSide": oneRound(t, dnClient.CheckSide, &pb.CheckSideRequest{
-				ClusterId: 1, DnId: 1, SidePointer: side, Revision: 1,
-				TraceId: "r",
-			}),
-			"CheckCn": oneRound(t, cnClient.CheckCn, &pb.CheckCnRequest{
-				ClusterId: 1, CnId: 1, Revision: 1, TraceId: "r",
-			}),
-			"CheckCntlr": oneRound(t, cnClient.CheckCntlr,
-				&pb.CheckCntlrRequest{
-					ClusterId: 1, CnId: 1, CntlrPointer: cntlrPtr(1, 1),
-					Revision: 5, TraceId: "r",
-				}),
-		}
-		var err error
-		if out["GetDnInfo"], err = dnClient.GetDnInfo(ctx,
-			&pb.GetDnInfoRequest{ClusterId: 1, DnId: 1}); err != nil {
-			t.Fatalf("GetDnInfo: %v", err)
-		}
-		if out["GetSideInfo"], err = dnClient.GetSideInfo(ctx,
-			&pb.GetSideInfoRequest{
-				ClusterId: 1, DnId: 1, SidePointer: side,
-			}); err != nil {
-			t.Fatalf("GetSideInfo: %v", err)
-		}
-		if out["GetCnInfo"], err = cnClient.GetCnInfo(ctx,
-			&pb.GetCnInfoRequest{ClusterId: 1, CnId: 1}); err != nil {
-			t.Fatalf("GetCnInfo: %v", err)
-		}
-		if out["GetCntlrInfo"], err = cnClient.GetCntlrInfo(ctx,
-			&pb.GetCntlrInfoRequest{
-				ClusterId: 1, CnId: 1, CntlrPointer: cntlrPtr(1, 1),
-			}); err != nil {
-			t.Fatalf("GetCntlrInfo: %v", err)
-		}
-		return out
-	}
-
 	setBehavior(t, agent, `{"objects": {
 		"dn": {"reply_code": 2}, "side 1:3:5": {"reply_code": 2},
 		"cn": {"reply_code": 2}, "cntlr 1:1": {"reply_code": 2}}}`)
-	for call, reply := range replies() {
-		if code := reply.GetAgentReply().GetCode(); code !=
-			common.ReplyCodeUnknownObject {
-			t.Fatalf("%s: code %d, want the forced unknown object", call,
-				code)
-		}
-		stamp := reply.GetObsStamp()
-		obs, answer := obsTimes(stamp)
-		if !obs.IsZero() || stamp.GetObsTraceId() != "" || answer.IsZero() {
-			t.Errorf("%s refusing its object as unknown: stamp %v, want an "+
-				"answer time alone", call, stamp)
-		}
+	for call, reply := range everyRead(t, dnClient, cnClient, side, cntlr) {
+		wantUnknownRead(t, call, reply)
 	}
 
 	setBehavior(t, agent, `{}`)
-	for call, reply := range replies() {
+	for call, reply := range everyRead(t, dnClient, cnClient, side, cntlr) {
 		if code := reply.GetAgentReply().GetCode(); code != 0 {
 			t.Fatalf("%s after the clear: code %d", call, code)
 		}
@@ -1859,6 +2070,59 @@ func TestForcedUnknownObjectHasNoObservation(t *testing.T) {
 			t.Errorf("%s after the clear carries no observation", call)
 		}
 	}
+}
+
+// TestForcedRefusingCodeKeepsTheStoredRevision: a reply_code lever that forces
+// any refusing code but the unknown object — a stale revision, an invalid
+// conf, a failed save, or a code no agent knows — answers a round and an info
+// read of each kind with that code, the object's stored revision and its
+// *Info, from a new observation, as the worker suite's and the Go cases' forced
+// refusals expect of an object the fake holds; once the lever is cleared they
+// answer code zero at the same revisions.
+func TestForcedRefusingCodeKeepsTheStoredRevision(t *testing.T) {
+	agent := newTestAgent(t)
+	dnClient, cnClient := startAgent(t, agent)
+	side, cntlr := sidePtr(1, 3, 5), cntlrPtr(1, 1)
+	syncupDn(t, dnClient, 1, side)
+	syncupSide(t, dnClient, side, 1, 0)
+	syncupCntlrFixture(t, cnClient, false)
+	stored := map[string]uint64{
+		"CheckDn": 1, "GetDnInfo": 1, "CheckSide": 1, "GetSideInfo": 1,
+		"CheckCn": 1, "GetCnInfo": 1, "CheckCntlr": 5, "GetCntlrInfo": 5,
+	}
+	info := map[string]string{
+		"CheckDn": "dn_info", "GetDnInfo": "dn_info",
+		"CheckSide": "side_info", "GetSideInfo": "side_info",
+		"CheckCn": "cn_info", "GetCnInfo": "cn_info",
+		"CheckCntlr": "cntlr_info", "GetCntlrInfo": "cntlr_info",
+	}
+	check := func(what string, code uint32) {
+		t.Helper()
+		for call, reply := range everyRead(t, dnClient, cnClient, side,
+			cntlr) {
+			rev := reply.(interface{ GetRevision() uint64 }).GetRevision()
+			obs, _ := obsTimes(reply.GetObsStamp())
+			if got := reply.GetAgentReply().GetCode(); got != code ||
+				rev != stored[call] ||
+				!slices.Contains(fieldsSet(reply), info[call]) ||
+				obs.IsZero() {
+				t.Errorf("%s, %s: code %d at revision %d carrying %v, "+
+					"observation %v; want code %d at revision %d with "+
+					"%s and an observation", what, call, got, rev,
+					fieldsSet(reply), obs, code, stored[call], info[call])
+			}
+		}
+	}
+	for _, code := range []uint32{common.ReplyCodeStaleRevision,
+		common.ReplyCodeInvalidConf, common.ReplyCodeSaveFailed, 77} {
+		setBehavior(t, agent, fmt.Sprintf(`{"objects": {
+			"dn": {"reply_code": %[1]d}, "side 1:3:5": {"reply_code": %[1]d},
+			"cn": {"reply_code": %[1]d}, "cntlr 1:1": {"reply_code": %[1]d}}}`,
+			code))
+		check(fmt.Sprintf("a forced code %d", code), code)
+	}
+	setBehavior(t, agent, `{}`)
+	check("after the clear", 0)
 }
 
 // TestSyncupStampsItsSave: a Syncup* that saved its request carries the save
@@ -1906,6 +2170,11 @@ func TestSyncupStampsItsSave(t *testing.T) {
 			stale.GetSaveTime(), stale.GetObsStamp())
 	}
 
+	// The cntlr the cn lists is known once its own syncup is applied.
+	cntlr, err := cnClient.SyncupCntlr(ctx, cntlrFixture(false))
+	if err != nil || cntlr.GetAgentReply().GetCode() != 0 {
+		t.Fatalf("SyncupCntlr = %v, %v", cntlr, err)
+	}
 	last := obs
 	for i := range 2 {
 		info, err := cnClient.GetCntlrInfo(ctx, &pb.GetCntlrInfoRequest{
@@ -1936,11 +2205,14 @@ func TestSyncupStampsItsSave(t *testing.T) {
 // TestRefusedSyncupCarriesNoStamp pins the fake to the live agents on a
 // refused Syncup* (architecture.md, Live-state reporting): for every kind, a
 // reply that refuses the request — a stale revision, a code the reply_code
-// lever forces (InvalidConf), or for a side and a cntlr a pointer the
-// node's last Syncup* does not list — carries no stamp and no save time. A
-// forced ReplyCodeLeftover is no refusal (dnagent.md SH9): its reply carries
-// an observation under the call's trace id, later than the one before it,
-// and no save time, since the fake saves nothing on a forced code. Once the
+// lever forces (InvalidConf, or the unknown object), a code the syncup_code
+// lever forces (SaveFailed), or for a side and a cntlr a pointer the node's
+// last Syncup* does not list — carries its code and its revision alone: no
+// stamp, no save time, no *Info and no bitmap info. Its revision is the
+// stored one, and none for an unknown object (dnagent.md SH28). A forced
+// ReplyCodeLeftover is no refusal (dnagent.md SH9): its reply carries an
+// observation under the call's trace id, later than the one before it, and
+// no save time, since the fake saves nothing on a forced code. Once the
 // lever is cleared, an accepted request carries both again.
 func TestRefusedSyncupCarriesNoStamp(t *testing.T) {
 	agent := newTestAgent(t)
@@ -1949,9 +2221,11 @@ func TestRefusedSyncupCarriesNoStamp(t *testing.T) {
 		common.TraceIdMetadataKey, "syncup-trace")
 	side, cntlr := sidePtr(1, 3, 5), cntlrPtr(1, 1)
 	type reply interface {
+		proto.Message
 		GetAgentReply() *pb.AgentReply
 		GetObsStamp() *pb.ObsStamp
 		GetSaveTime() *timestamppb.Timestamp
+		GetRevision() uint64
 	}
 	// syncups sends one Syncup* of every kind, each object's at the
 	// revision rev names and the dn's and cn's listing listed, and returns
@@ -1980,6 +2254,11 @@ func TestRefusedSyncupCarriesNoStamp(t *testing.T) {
 				SideConf: &pb.SyncupSideRequest_SideConf{
 					ExtCnt: 2, PrimaryCnId: 1, ZeroBytes: testZeroBytes,
 				},
+				// A migration destination, so that an accepted reply
+				// carries bm_info and a refused one has one to leave out.
+				MigrDstConf: &pb.SyncupSideRequest_MigrDstConf{
+					MigrId: 30,
+				},
 			}); err != nil {
 			t.Fatalf("SyncupSide: %v", err)
 		}
@@ -2004,7 +2283,12 @@ func TestRefusedSyncupCarriesNoStamp(t *testing.T) {
 				r.GetAgentReply().GetDetails(), code)
 		}
 	}
-	wantNoStamp := func(what string, replies map[string]reply, code uint32) {
+	// wantNoStamp wants every reply refused with code at the revision rev
+	// names for its RPC, none for a missing one, carrying nothing else.
+	wantNoStamp := func(
+		what string, replies map[string]reply, code uint32,
+		rev map[string]uint64,
+	) {
 		t.Helper()
 		for call, r := range replies {
 			wantCode(what, call, r, code)
@@ -2012,10 +2296,23 @@ func TestRefusedSyncupCarriesNoStamp(t *testing.T) {
 				t.Errorf("%s, %s: stamp %v, save_time %v; want neither",
 					what, call, r.GetObsStamp(), r.GetSaveTime())
 			}
+			want := []string{"agent_reply"}
+			if rev[call] != 0 {
+				want = append(want, "revision")
+			}
+			if got := fieldsSet(r); !slices.Equal(got, want) ||
+				r.GetRevision() != rev[call] {
+				t.Errorf("%s, %s: carries %v at revision %d, want %v at "+
+					"revision %d", what, call, got, r.GetRevision(), want,
+					rev[call])
+			}
 		}
 	}
 	at := map[string]uint64{"dn": 2, "side": 2, "cn": 2, "cntlr": 5}
 	behind := map[string]uint64{"dn": 1, "side": 1, "cn": 1, "cntlr": 4}
+	// stored is each reply's stored revision, the one at.
+	stored := map[string]uint64{"SyncupDn": 2, "SyncupSide": 2,
+		"SyncupCn": 2, "SyncupCntlr": 5}
 
 	saved := syncups(at, true)
 	last := make(map[string]time.Time)
@@ -2028,16 +2325,42 @@ func TestRefusedSyncupCarriesNoStamp(t *testing.T) {
 		}
 		last[call] = obs
 	}
+	// Each accepted reply carries the bitmap info a refused one must leave
+	// out: the side's migration and the cntlr's clone.
+	if got := saved["SyncupSide"].(*pb.SyncupSideReply).GetBmInfo(); got.
+		GetResId() != 30 {
+		t.Fatalf("the first SyncupSide's bm_info = %v, want migration 30's",
+			got)
+	}
+	if got := saved["SyncupCntlr"].(*pb.SyncupCntlrReply).
+		GetBmInfoList(); len(got) != 1 || got[0].GetResId() != 41 {
+		t.Fatalf("the first SyncupCntlr's bm_info_list = %v, want clone "+
+			"41's", got)
+	}
 
 	wantNoStamp("a stale revision", syncups(behind, true),
-		common.ReplyCodeStaleRevision)
+		common.ReplyCodeStaleRevision, stored)
 
 	setBehavior(t, agent, fmt.Sprintf(`{"objects": {
 		"dn": {"reply_code": %[1]d}, "side 1:3:5": {"reply_code": %[1]d},
 		"cn": {"reply_code": %[1]d}, "cntlr 1:1": {"reply_code": %[1]d}}}`,
 		common.ReplyCodeInvalidConf))
 	wantNoStamp("a forced InvalidConf", syncups(at, true),
-		common.ReplyCodeInvalidConf)
+		common.ReplyCodeInvalidConf, stored)
+
+	setBehavior(t, agent, fmt.Sprintf(`{"objects": {
+		"dn": {"syncup_code": %[1]d}, "side 1:3:5": {"syncup_code": %[1]d},
+		"cn": {"syncup_code": %[1]d}, "cntlr 1:1": {"syncup_code": %[1]d}}}`,
+		common.ReplyCodeSaveFailed))
+	wantNoStamp("a forced SaveFailed", syncups(at, true),
+		common.ReplyCodeSaveFailed, stored)
+
+	setBehavior(t, agent, fmt.Sprintf(`{"objects": {
+		"dn": {"reply_code": %[1]d}, "side 1:3:5": {"reply_code": %[1]d},
+		"cn": {"reply_code": %[1]d}, "cntlr 1:1": {"reply_code": %[1]d}}}`,
+		common.ReplyCodeUnknownObject))
+	wantNoStamp("a forced unknown object", syncups(at, true),
+		common.ReplyCodeUnknownObject, nil)
 
 	setBehavior(t, agent, fmt.Sprintf(`{"objects": {
 		"dn": {"reply_code": %[1]d}, "side 1:3:5": {"reply_code": %[1]d},
@@ -2076,7 +2399,7 @@ func TestRefusedSyncupCarriesNoStamp(t *testing.T) {
 		delete(unlisted, call)
 	}
 	wantNoStamp("an unlisted pointer", unlisted,
-		common.ReplyCodeUnknownObject)
+		common.ReplyCodeUnknownObject, nil)
 }
 
 // oneRound sends req as the only round of a fresh Check* stream opened by

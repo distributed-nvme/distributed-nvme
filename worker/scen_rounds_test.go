@@ -589,8 +589,10 @@ func TestWholeWorkerRoundMissedRoundsSetTheEpochOnce(t *testing.T) {
 // sent (RW4 step 5). dn 3's agent is down from the worker's start, so its
 // stream is never opened and the monitor's first verdict is that one, written
 // whatever the record holds (HL3). Once the agent is back, the next round
-// opens the stream, its reply at no revision brings the first syncup, and the
-// clean round clears the epoch.
+// opens the stream. The agent holds no request for the dn, so it refuses the
+// dn as unknown (dnagent.md SH25), a reply that neither sets nor clears the
+// epoch (HL1), and that reply brings the first syncup, which runs under the
+// round's trace id; the syncup's accepted reply clears the epoch.
 func TestWholeWorkerRoundAgentDownWhenTheStreamOpens(t *testing.T) {
 	t.Parallel()
 	h := roundsHarness(t)
@@ -636,6 +638,19 @@ func TestWholeWorkerRoundAgentDownWhenTheStreamOpens(t *testing.T) {
 	clear := h.waitRoundRecord(t, 20*time.Second, w, msgHealthChanged, o, set.at, roundClear)
 	if !o.roundTraceIds()[clear.traceId] {
 		t.Errorf("dn 3's epoch was cleared under trace id %s, no round's", clear.traceId)
+	}
+	// The syncup runs under its round's trace id (RW10), so the trace ids
+	// agree whichever reply gave the verdict; the order tells them apart: the
+	// syncup's verdict is written after its result is logged, while a verdict
+	// of the unknown round would come before the syncup it brings.
+	if first := h.roundRecords(w, msgSyncupResult, o, set.at); len(first) == 0 ||
+		first[0].traceId != clear.traceId || first[0].num("code") != 0 {
+		t.Errorf("dn 3's epoch was cleared under trace id %s, want the first "+
+			"accepted syncup's: %v", clear.traceId, first)
+	} else if clear.at.Before(first[0].at) {
+		t.Errorf("dn 3's epoch was cleared at %v, before its first accepted "+
+			"syncup at %v: the unknown round gave the verdict", clear.at,
+			first[0].at)
 	}
 	h.waitUntil(t, 20*time.Second, "dn 3's first syncup", func() (bool, string) {
 		syncups := o.record().Syncups
@@ -756,12 +771,17 @@ func TestWholeWorkerRoundUnknownReplyCodeIsARefusal(t *testing.T) {
 // TestWholeWorkerRoundTooOldObservationIsAMissedRound pins HL7 and RW4 step
 // 4: a round whose observation is older than ObsMaxAgeIntervals of the
 // interval is a missed round in every way, which sets the health epoch and
-// sends no syncup whatever the reply's revision. dn 3's fake first answers
+// sends no syncup; here every stale round is at the revision the worker
+// wants, and TestWholeWorkerRoundObservationWithNoTime pins the same at
+// revision zero. dn 3's fake first answers
 // every round from its last observation, which ages until the rounds fail
-// on it. It then restarts on empty files and answers from an observation an
-// hour old at no revision: still no syncup, round after round. Once its
-// observations are fresh again, the next round brings the syncup and clears
-// the epoch.
+// on it. It then restarts on empty files, still under that age: it holds
+// no request, so it refuses the dn as unknown (dnagent.md SH25), a reply no
+// age judges, and the syncup goes at once; that syncup's accepted reply is
+// a verdict of its own, which clears the epoch. The rounds after it repeat
+// the syncup's observation, at the revision the worker wants, until it is
+// too old: they fail again, set the epoch and send no syncup. Once the
+// observations are fresh again, the next round clears the epoch.
 func TestWholeWorkerRoundTooOldObservationIsAMissedRound(t *testing.T) {
 	t.Parallel()
 	h, c, w := roundsCase(t, nil)
@@ -788,51 +808,103 @@ func TestWholeWorkerRoundTooOldObservationIsAMissedRound(t *testing.T) {
 	if !late {
 		t.Errorf("no stale late observation record of dn 3's first stale round")
 	}
+	if got := len(o.record().Syncups); got != syncups {
+		t.Fatalf("dn 3 got %d syncups while its observations were too old, "+
+			"want none", got-syncups)
+	}
 
-	// An agent restarted on empty files holds no revision, so a fresh
-	// observation of it would bring a syncup at once.
+	// An agent restarted on empty files holds no request, so it refuses the
+	// dn as unknown, and the worker sends the syncup at once.
 	o.agent.Stop()
 	if err := o.agent.Start(agentfake.DropStore); err != nil {
 		t.Fatalf("start dn 3: %v", err)
 	}
 	restartedAt := time.Now()
-	h.waitUntil(t, 30*time.Second, "three stale rounds of dn 3 after its restart",
-		func() (bool, string) {
-			n := 0
-			for _, rec := range h.roundRecords(w, "check round failed", o, restartedAt) {
-				if stale(rec) {
-					n++
-				}
-			}
-			return n >= 3, fmt.Sprintf("%d", n)
-		})
-	if got := len(o.record().Syncups); got != syncups {
-		t.Fatalf("dn 3 got %d syncups while its observations were too old, "+
-			"want none whatever their revision", got-syncups)
+	accepted := h.waitRoundRecord(t, 20*time.Second, w, msgSyncupResult, o,
+		restartedAt, nil)
+	if accepted.num("code") != 0 || accepted.str("error") != "" ||
+		accepted.num("revision") != c.dnRev(t, 3) {
+		t.Errorf("dn 3's first syncup after its restart: code %d at revision "+
+			"%d, error %q; want code zero at %d", accepted.num("code"),
+			accepted.num("revision"), accepted.str("error"), c.dnRev(t, 3))
 	}
-	if more := h.roundRecords(w, msgHealthChanged, o, set.at); len(more) != 0 {
-		t.Errorf("dn 3's health changed again while its observations were "+
-			"too old: err_epoch %d", more[0].num("err_epoch"))
+	for _, rec := range h.roundRecords(w, "check round failed", o, restartedAt) {
+		if stale(rec) && rec.at.Before(accepted.at) {
+			t.Errorf("dn 3's round under trace id %s was judged too old "+
+				"before the syncup: an unknown object's answer carries no "+
+				"observation to judge", rec.traceId)
+		}
+	}
+	cleared := h.waitRoundRecord(t, 10*time.Second, w, msgHealthChanged, o,
+		restartedAt, nil)
+	// The trace ids agree whichever reply gave the verdict (RW10); the order
+	// tells the syncup's verdict from one of the unknown round before it.
+	if !roundClear(cleared) || cleared.traceId != accepted.traceId {
+		t.Errorf("dn 3's first health change after its restart: err_epoch "+
+			"%d under trace id %s, want the clear under the syncup's %s",
+			cleared.num("err_epoch"), cleared.traceId, accepted.traceId)
+	} else if cleared.at.Before(accepted.at) {
+		t.Errorf("dn 3's epoch was cleared at %v, before the accepted "+
+			"syncup at %v: the unknown round gave the verdict", cleared.at,
+			accepted.at)
+	}
+	syncups = len(o.record().Syncups)
+
+	// The rounds after it repeat that syncup's observation until it is too
+	// old, and then fail on it again, at the revision the worker wants.
+	again := h.waitRoundRecord(t, 30*time.Second, w, "check round failed", o,
+		cleared.at, stale)
+	reset := h.waitRoundRecord(t, 10*time.Second, w, msgHealthChanged, o,
+		cleared.at, roundSet)
+	if reset.traceId != again.traceId {
+		t.Errorf("dn 3's epoch was set again under trace id %s, want the "+
+			"stale round's %s", reset.traceId, again.traceId)
+	}
+	// The stale round answered from the syncup's own observation, which it
+	// repeated until that was too old: the first stale round comes no
+	// sooner than the bound less one interval after the syncup.
+	var repeat *logRecord
+	for _, rec := range h.roundRecords(w, msgLateObservation, o, cleared.at) {
+		if rec.traceId == again.traceId {
+			repeat = &rec
+			break
+		}
+	}
+	if repeat == nil {
+		t.Fatalf("no late observation record of dn 3's stale round %s",
+			again.traceId)
+	}
+	interval := time.Duration(repeat.num("interval_ms")) * time.Millisecond
+	if repeat.str("stale") != "true" ||
+		repeat.str("obs_trace_id") != accepted.traceId {
+		t.Errorf("dn 3's stale round answered from the observation of %q, "+
+			"stale %s; want the syncup's %s, stale", repeat.str("obs_trace_id"),
+			repeat.str("stale"), accepted.traceId)
+	}
+	if early := (common.ObsMaxAgeIntervals - 1) * interval; again.at.Sub(
+		accepted.at) < early {
+		t.Errorf("dn 3's first stale round came %v after the syncup, want "+
+			"no sooner than %v: the rounds before it repeat a fresh "+
+			"observation", again.at.Sub(accepted.at), early)
+	}
+	o.noSyncupFor(t, h, 2, "dn 3's stale rounds repeat the syncup's "+
+		"observation, at the revision the worker wants")
+	if got := len(o.record().Syncups); got != syncups {
+		t.Fatalf("dn 3 got %d syncups while its repeated observation was "+
+			"too old, want none", got-syncups)
 	}
 
 	o.set(t, func(ob *agentfake.Object) { ob.ObsAge = 0 })
-	h.waitRoundRecord(t, 20*time.Second, w, msgHealthChanged, o, set.at, roundClear)
-	h.waitUntil(t, 20*time.Second, "dn 3's syncup once its observations are fresh",
-		func() (bool, string) {
-			got := o.record().Syncups[syncups:]
-			if len(got) == 0 {
-				return false, "none yet"
-			}
-			rev := got[0].(*pb.SyncupDnRequest).GetRevision()
-			return rev == c.dnRev(t, 3), fmt.Sprintf("at revision %d", rev)
-		})
+	h.waitRoundRecord(t, 20*time.Second, w, msgHealthChanged, o, reset.at, roundClear)
+	o.noSyncupFor(t, h, 2, "dn 3 answers fresh at the revision the worker wants")
 }
 
 // TestWholeWorkerRoundObservationWithNoTime pins HL7 for a reply that carries
 // no observation time: its age counts from the first round after a pause
 // alone. dn 3's fake answers every round with no observation from the
-// worker's start, at no revision. The first rounds after the loop's start
-// give no verdict and each brings the syncup; once the first round lies
+// worker's start, as unknown until the first syncup and at no revision
+// after it. The first rounds after the loop's start give no verdict and
+// each brings the syncup; once the first round lies
 // ObsMaxAgeIntervals of the interval behind, every round is a missed round:
 // it is logged late with no observation, sets the epoch and sends no syncup.
 // Once the fake answers with observations again, the next round clears the

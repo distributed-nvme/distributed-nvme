@@ -148,11 +148,10 @@ func (a *Agent) epochLocked(
 // ---------------------------------------------------------------------------
 
 // dnInfoLocked reports the disk, meta and port rows of DnInfo, and no store
-// row; nil until a SyncupDn has been applied, so the worker's revision check
-// re-issues the syncup. The disk
-// counts ride beside the rows when the levers give them and the meta row
-// reads OK, as the dn agent sends them only beside an OK meta row
-// (dnagent.md DN18).
+// row; nil while no SyncupDn request is stored, as for a revision a state
+// file holds alone. The disk counts ride beside the rows when the levers
+// give them and the meta row reads OK, as the dn agent sends them only
+// beside an OK meta row (dnagent.md DN18).
 func (a *Agent) dnInfoLocked() *pb.DnInfo {
 	req, _ := a.requestLocked(DnKey).(*pb.SyncupDnRequest)
 	if req == nil {

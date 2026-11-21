@@ -58,7 +58,8 @@
 #
 # Signals: only one process is ever started, but its pid is still recorded from
 # `$!` into $WORK/fgw/pid at launch and every signal goes by that pid. The
-# `pkill -f` forms appear in cleanup() only.
+# `pkill -f` forms appear in cleanup() only, each matching only a program
+# under $WORK.
 
 set -euo pipefail
 
@@ -640,9 +641,17 @@ cleanup_script() {
 	cat <<EOF
 set -u
 pids=""
+# A recorded pid is kept only while the first word of its command line is
+# still a program under the work directory: a pid the kernel gave to another
+# process since is left alone.
 for f in $WORK/*/pid; do
 	[ -f "\$f" ] || continue
-	pids="\$pids \$(cat "\$f" 2>/dev/null)"
+	p=\$(cat "\$f" 2>/dev/null) || continue
+	a=""
+	IFS= read -r -d '' a 2>/dev/null < "/proc/\$p/cmdline" || true
+	case "\$a" in
+	$WORK/bin/*) pids="\$pids \$p" ;;
+	esac
 done
 for p in \$pids; do kill -CONT "\$p" 2>/dev/null || true; done
 for p in \$pids; do kill -TERM "\$p" 2>/dev/null || true; done
@@ -655,8 +664,8 @@ for i in \$(seq 1 20); do
 	sleep 0.25
 done
 for p in \$pids; do kill -KILL "\$p" 2>/dev/null || true; done
-pkill -f 'bin/fakegateway' 2>/dev/null || true
-pkill -f 'bin/dnvctl' 2>/dev/null || true
+pkill -f '$WORK/bin/fakegateway' 2>/dev/null || true
+pkill -f '$WORK/bin/dnvctl' 2>/dev/null || true
 sleep 0.5
 rm -rf $WORK
 echo cleaned

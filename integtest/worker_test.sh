@@ -24,7 +24,8 @@
 #
 # Signals: the three workers share one command line, so every process's pid is
 # recorded from `$!` into $WORK/<dir>/pid at launch and every signal goes by
-# pid. The `pkill -f` forms appear in cleanup() only.
+# pid. The `pkill -f` forms appear in cleanup() only, each matching only a
+# program under $WORK.
 
 set -euo pipefail
 
@@ -908,9 +909,9 @@ for i in \$(seq 1 20); do
 	sleep 0.25
 done
 for p in \$pids; do kill -KILL "\$p" 2>/dev/null || true; done
-pkill -f 'bin/dnv-worker' 2>/dev/null || true
-pkill -f 'bin/fakeagent' 2>/dev/null || true
-pkill -f 'etcd --name dnv-it' 2>/dev/null || true
+pkill -f '$WORK/bin/dnv-worker' 2>/dev/null || true
+pkill -f '$WORK/bin/fakeagent' 2>/dev/null || true
+pkill -f '$WORK/bin/etcd --name dnv-it' 2>/dev/null || true
 sleep 0.5
 rm -rf $WORK
 echo cleaned
@@ -918,8 +919,8 @@ EOF
 }
 
 # cleanup signals every recorded pid (SIGTERM, SIGKILL after 5 s), falls back
-# to the three pkill -f forms and removes $WORK. Nothing outside $WORK is
-# touched. A SIGSTOPped worker is SIGCONTed first, or it would never see the
+# to the three pkill -f forms, each matching only a program under $WORK, and
+# removes $WORK. Nothing outside $WORK is touched. A SIGSTOPped worker is SIGCONTed first, or it would never see the
 # SIGTERM.
 cleanup() {
 	log "[server] cleanup: signal every recorded pid, then rm -rf $WORK"
@@ -1934,9 +1935,10 @@ case_health() {
 		req_ge 1 dn0 SyncupDn '(.revision | tostring) == "1"'
 	wait_until "$WAIT_SHORT" "cn0: SyncupCn revision 1" \
 		req_ge 1 cn0 SyncupCn '(.revision | tostring) == "1"'
-	# The DN's first verdict is clean, and its monitor has written nothing
-	# yet: the record of that write says initial, not recovered
-	# (dnv-worker.md, Log records).
+	# The DN's first verdict is clean — its first syncup's reply, since a
+	# fake that holds nothing answers the first round as unknown — and its
+	# monitor has written nothing yet: the record of that write says
+	# initial, not recovered (dnv-worker.md, Log records).
 	wait_until "$WAIT_SHORT" "health changed record=dn reason=initial" \
 		count_ge 1 health_changed_cnt dn initial
 	local capkey
@@ -2523,11 +2525,16 @@ active_legs() { # <sp> <slice> <meta|data> <grp id>
 }
 
 # grp_rep_name prints the rep_name of one group of a slice: the name of its
-# repair, empty while it has none (architecture.md, Repairs).
+# repair, empty while it has none (architecture.md, Repairs). A failed read
+# fails it, so every caller assigns its answer first, where set -e stops the
+# run: inside another command's arguments the failure would be lost and
+# read as "no repair".
 grp_rep_name() { # <sp> <slice> <meta|data> <grp id>
-	slice_json "$1" "$2" | "$JQ" -r --arg g "$4" "
+	local slice
+	slice=$(slice_json "$1" "$2") || return 1
+	"$JQ" -r --arg g "$4" "
 		[ .${3}_grp_list[] | select((.grp_id | tostring) == \$g)
-		  | (.rep_name // \"\") ] | first // \"\""
+		  | (.rep_name // \"\") ] | first // \"\"" <<<"$slice"
 }
 
 # repair_rec_cnt counts the `reaction applied` records of one kind of leg
@@ -3038,7 +3045,7 @@ EOF
 	g1_deadline=$(awk -v t="$(ts_epoch "$leg_row_at")" 'BEGIN { printf "%.3f", t + 6 }')
 	ts_lt "$g1_create_at" "$g1_deadline" ||
 		die "the G1 repair_create ran at $g1_create_at, not before the 6s leg threshold at $g1_deadline (leg row written at $leg_row_at)"
-	local g1_rep g1_new_side g1_new_addr
+	local g1_rep g1_new_side g1_new_addr g1_left
 	g1_rep=$(grp_rep_name sp0 1 meta 1)
 	case "$g1_rep" in
 	__internal__*) ;;
@@ -3080,7 +3087,8 @@ EOF
 		"one \`repair stage moved\` record for G1's repair"
 	repair_gone sp0 "$g1_rep" || die "G1's repair outlived its cancel"
 	assert_eq "$(dn_free 4)" 8 "dn 4 got the new leg's extents back"
-	assert_eq "$(grp_rep_name sp0 1 meta 1)" "" "G1's repair name after the cancel"
+	g1_left=$(grp_rep_name sp0 1 meta 1)
+	assert_eq "$g1_left" "" "G1's repair name after the cancel"
 	set_behavior "$prim_dir" <<EOF
 {"objects": {"cntlr 1:$prim_id": {"thin_ok": true}}}
 EOF
@@ -3605,7 +3613,7 @@ case_repair() {
 
 	stage 1 "the repair fixture: three DNs, two CNs, sp0 on dn 1 and dn 2"
 	new_cluster repair
-	local i
+	local i rep
 	for i in 1 2 3; do put_dn "$i" 8; done
 	for i in 1 2; do put_cn "$i" 64; done
 	# leg_unhealthy is long beside the operator's steps, so leg repair (AR8)
@@ -3657,7 +3665,8 @@ case_repair() {
 		reaction_skip_ge 2 repair_create grp_has_repair
 	assert_eq "$(reaction_cnt repair_create)" 0 \
 		"worker's repairs of a group with an operator's repair"
-	assert_eq "$(grp_rep_name sp0 1 data 2)" r0 "the data group's repair"
+	rep=$(grp_rep_name sp0 1 data 2)
+	assert_eq "$rep" r0 "the data group's repair"
 	# The primary reports the new leg holding a place in the array: the worker
 	# moves r0 to STARTED (AR11).
 	repair_levers "$(leg_down 3)" '"r0": {"started": true}' ''
@@ -3981,8 +3990,8 @@ EOF
 		reaction_skip_ge $((holds + 2)) repair_create grp_operator_in_charge
 	assert_eq "$(reaction_cnt repair_create)" "$creates" \
 		"worker's repairs while the flag stands"
-	assert_eq "$(grp_rep_name sp0 1 meta 1)" "" \
-		"the meta group's repair while the flag stands"
+	rep=$(grp_rep_name sp0 1 meta 1)
+	assert_eq "$rep" "" "the meta group's repair while the flag stands"
 	# The operator clears the flag, again raising the revision once, and
 	# the worker creates its repair of leg 1.
 	rev_before=$(sp_rev_num 1)
@@ -3993,7 +4002,8 @@ EOF
 		"the meta group's flag after its clear"
 	wait_until "$WAIT_SYNCUP" "the worker's repair of leg 1 created" \
 		reaction_ge $((creates + 1)) repair_create
-	[ -n "$(grp_rep_name sp0 1 meta 1)" ] ||
+	rep=$(grp_rep_name sp0 1 meta 1)
+	[ -n "$rep" ] ||
 		die "the meta group names no repair after the worker's create"
 
 	stage 10 "the md check schedule (AR16): every group stamped, a due one asked for, done and ended"

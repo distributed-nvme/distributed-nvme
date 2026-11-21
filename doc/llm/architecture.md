@@ -5478,9 +5478,10 @@ object the agent holds but has not observed yet. When the agent accepts a
 `Syncup*` request, its reply's `obs_stamp` gives the observation its
 converge stored, and its `save_time` when the agent saved the request; a
 reply that refuses the request, at a gate or because its save failed
-(Common agent rules, Revision gate), carries neither, nor does the
-refusal of an agent still starting, whose stamp gives only its answer and
-start times. The worker judges an
+(Common agent rules, Revision gate), carries neither, and no `*Info` or
+bitmap info (`dnagent.md` SH28); the refusal of an agent still starting
+carries no `*Info` and no save time either, and a stamp that gives only
+its answer and start times. The worker judges an
 observation by its age, which it takes on the node's own clock from the
 times the agent's stamps carry
 (`dnv-worker.md` HL7).

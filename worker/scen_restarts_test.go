@@ -85,9 +85,10 @@ func TestScenAgentRestartWithItsFilesGetsNoSyncup(t *testing.T) {
 }
 
 // TestScenAgentRestartWithEmptyFilesResyncs pins RW4 step 5 and RW5 for an
-// agent started again on empty files: it answers at no revision, so the worker
-// re-sends the node's syncup; its sides are unknown objects to it until that
-// syncup lists them, so every side syncup meanwhile is refused as unknown,
+// agent started again on empty files: it holds no request, so it refuses the
+// node's rounds as unknown and the worker re-sends the node's syncup; its
+// sides are unknown objects to it until that syncup lists them, so every
+// side syncup meanwhile is refused as unknown,
 // logged as `syncup rejected` and re-sent from the next round, and the first
 // side syncup accepted comes after the node's. The case holds the node's
 // syncup for a few rounds, so the refusals last as long as it wants.

@@ -1034,6 +1034,51 @@ func newFlagSet(name string, g *globals) *flag.FlagSet {
 	return fs
 }
 
+// parseArgs parses one subcommand's flags and refuses a word left after them
+// beyond its first positional ones, as dnvctl's leaves refuse a positional
+// argument: Go's flag package reads `--clear false` as `--clear` alone and
+// stops at `false`, so the word, and every flag after it, would go unread,
+// and a default-false flag would read true. Only the kind word of a
+// subcommand splitKind serves is positional.
+func parseArgs(fs *flag.FlagSet, args []string, positional int) error {
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if fs.NArg() > positional {
+		return fmt.Errorf("%s: unexpected argument %q after the flags; a "+
+			"boolean flag is written --flag or --flag=false", fs.Name(),
+			fs.Arg(positional))
+	}
+	return nil
+}
+
+// parseFlags is every subcommand's parse of its flags, which takes no
+// positional word (parseArgs).
+func parseFlags(fs *flag.FlagSet, args []string) {
+	if err := parseArgs(fs, args, 0); err != nil {
+		usageDie("%v", err)
+	}
+}
+
+// parseKindFlags is parseFlags for a subcommand with a kind word
+// (parseKindArgs).
+func parseKindFlags(fs *flag.FlagSet, args []string, kind string) {
+	if err := parseKindArgs(fs, args, kind); err != nil {
+		usageDie("%v", err)
+	}
+}
+
+// parseKindArgs is parseArgs for a subcommand with a kind word: one word
+// after the flags is its kind when splitKind found none before them
+// (kindArg), and no word is when it did.
+func parseKindArgs(fs *flag.FlagSet, args []string, kind string) error {
+	positional := 0
+	if kind == "" {
+		positional = 1
+	}
+	return parseArgs(fs, args, positional)
+}
+
 // splitKind peels the `dn|cn|sp` positional argument of bump-rev / del-rev /
 // get-rev / set-free, and the `cntlr|leg|side` one of set-epoch, off the
 // argument list. It is accepted both before the flags (worker_test.sh's
@@ -1076,7 +1121,7 @@ func requireId(id hexUint) uint64 {
 // key nothing writes, which succeeds on not-found.
 func cmdPing(g *globals, args []string) {
 	fs := newFlagSet("ping", g)
-	fs.Parse(args)
+	parseFlags(fs, args)
 
 	ctx, done, cli := g.open()
 	defer done()
@@ -1147,7 +1192,7 @@ func cmdPing(g *globals, args []string) {
 // against the binary it has just built, before any host is contacted.
 func cmdConstants(g *globals, args []string) {
 	fs := newFlagSet("constants", g)
-	fs.Parse(args)
+	parseFlags(fs, args)
 
 	emit(map[string]any{
 		"EtcdMaxTxnOps":       common.EtcdMaxTxnOps,
@@ -1218,7 +1263,7 @@ func cmdGeometry(g *globals, args []string) {
 		"the group is md-raid1 (md superblock + bitmap + health block); "+
 			"without it the group is redund_none and meta is the health "+
 			"block alone")
-	fs.Parse(args)
+	parseFlags(fs, args)
 
 	if *extCnt == 0 {
 		die("--ext-cnt is required and must not be 0")
@@ -1276,7 +1321,7 @@ func cmdMetaUnits(g *globals, args []string) {
 	copyBytes := fs.Uint64("bytes", 0, "the bytes of the copy (required)")
 	blockSize := fs.Uint64("block-size", common.DefaultDmPoolDataBlockSize,
 		"bdev_conf.dm_pool_conf.data_block_size of the copy's pool")
-	fs.Parse(args)
+	parseFlags(fs, args)
 
 	units, err := metaUnitsOf(*copyBytes, *blockSize)
 	if err != nil {
@@ -1328,7 +1373,7 @@ func cmdPutCluster(g *globals, args []string) {
 		"redund_md_raid1.bitmap_chunk_block_cnt, the geometry's bitmap chunk")
 	dnBatch := fs.Uint("dn-batch", 0, "alloc_conf.dn_batch_size")
 	cnBatch := fs.Uint("cn-batch", 0, "alloc_conf.cn_batch_size")
-	fs.Parse(args)
+	parseFlags(fs, args)
 
 	clusterName := *name
 	if clusterName == "" {
@@ -1389,7 +1434,7 @@ func cmdPutDn(g *globals, args []string) {
 	disabled := fs.Bool("disabled", false, "DnConf.disabled")
 	var sides stringList
 	fs.Var(&sides, "side", "a side pointer, "+sidePtrForm+" (repeatable)")
-	fs.Parse(args)
+	parseFlags(fs, args)
 
 	spec := plant.DnSpec{
 		Id:       requireId(id),
@@ -1445,7 +1490,7 @@ func cmdPutCn(g *globals, args []string) {
 	disabled := fs.Bool("disabled", false, "CnConf.disabled")
 	var cntlrs stringList
 	fs.Var(&cntlrs, "cntlr", "a cntlr pointer, "+cntlrPtrForm+" (repeatable)")
-	fs.Parse(args)
+	parseFlags(fs, args)
 
 	spec := plant.CnSpec{
 		Id:       requireId(id),
@@ -1498,7 +1543,7 @@ func cmdBumpRev(g *globals, args []string) {
 	fs.Var(&id, "id", "dn_id / cn_id / sp_id")
 	var shard shardFlag
 	fs.Var(&shard, "shard", "shard code, hex (00, 55, aa, ff …)")
-	fs.Parse(rest)
+	parseKindFlags(fs, rest, kind)
 	kind = kindArg(fs, kind, "dn", "cn", "sp")
 	objId := requireId(id)
 
@@ -1529,7 +1574,7 @@ func cmdMoveDn(g *globals, args []string) {
 	var shard shardFlag
 	fs.Var(&shard, "shard", "shard code, hex (00, 55, aa, ff …)")
 	addr := fs.String("addr", "", "the NEW ip:port (required)")
-	fs.Parse(args)
+	parseFlags(fs, args)
 
 	dnId := requireId(id)
 	if *addr == "" {
@@ -1563,7 +1608,7 @@ func cmdDelRev(g *globals, args []string) {
 	fs.Var(&id, "id", "dn_id / cn_id / sp_id")
 	var shard shardFlag
 	fs.Var(&shard, "shard", "shard code, hex (00, 55, aa, ff …)")
-	fs.Parse(rest)
+	parseKindFlags(fs, rest, kind)
 	kind = kindArg(fs, kind, "dn", "cn", "sp")
 	objId := requireId(id)
 
@@ -1613,7 +1658,7 @@ func cmdPutSp(g *globals, args []string) {
 	fs.Var(&groupSpecs, "group", groupForm+" (repeatable)")
 	fs.Var(&legSpecs, "leg", legForm+" (repeatable)")
 	fs.Var(&sideSpecs, "side", sideForm+" (repeatable)")
-	fs.Parse(args)
+	parseFlags(fs, args)
 
 	if *name == "" {
 		die("--name is required")
@@ -1763,7 +1808,7 @@ func cmdPutTd(g *globals, args []string) {
 	var devId hexUint
 	fs.Var(&devId, "dev-id", "dev_id (default: SpConf.next_dev_id)")
 	size := fs.Uint64("size", 0, "ThinDevice.size in bytes")
-	fs.Parse(args)
+	parseFlags(fs, args)
 
 	if *name == "" {
 		die("--name is required")
@@ -1805,7 +1850,7 @@ func cmdPutSs(g *globals, args []string) {
 	model_ := fs.String("model", "", "Subsystem.model")
 	var nsSpecs stringList
 	fs.Var(&nsSpecs, "ns", "a namespace, "+nsForm+" (repeatable)")
-	fs.Parse(args)
+	parseFlags(fs, args)
 
 	if *nqn == "" {
 		die("--nqn is required")
@@ -1869,7 +1914,7 @@ func cmdPutClone(g *globals, args []string) {
 	fs.Var(&legSpecs, "leg", cloneLegForm+
 		" of the clone meta group (repeatable, at least one)")
 	fs.Var(&sideSpecs, "side", sideForm+" of each --leg (one per leg)")
-	fs.Parse(args)
+	parseFlags(fs, args)
 
 	if *name == "" {
 		die("--name is required")
@@ -1938,7 +1983,7 @@ func cmdPutXfer(g *globals, args []string) {
 	fs.Var(&id, "id", "xfer_id (required)")
 	oriNqn := fs.String("ori-nqn", "", "Transfer.ori_nqn (required)")
 	oriNsIdx := fs.Uint("ori-ns-idx", 0, "Transfer.ori_ns_idx")
-	fs.Parse(args)
+	parseFlags(fs, args)
 
 	if *name == "" {
 		die("--name is required")
@@ -1982,7 +2027,7 @@ func cmdPutMigr(g *globals, args []string) {
 	dstSlot := fs.Uint("dst-slot", 0, "the destination side's cntlid_slot")
 	pending := fs.Bool("cutover-pending", false,
 		"write the record with cutover_pending set, as CreateMigration does")
-	fs.Parse(args)
+	parseFlags(fs, args)
 
 	spec, err := parseMigrSpec(*migr)
 	if err != nil {
@@ -2038,7 +2083,7 @@ func cmdPutBitmap(g *globals, args []string) {
 		"the source slice the chunk describes")
 	bmIdx := fs.Uint("bm-idx", 0, "the chunk index")
 	hexData := fs.String("hex", "", "the chunk payload as hex (required)")
-	fs.Parse(args)
+	parseFlags(fs, args)
 
 	if *kind != "clone" {
 		usageDie("--kind wants clone, got %q", *kind)
@@ -2106,7 +2151,7 @@ func cmdSetCntlr(g *globals, args []string) {
 	fs.Var(primary, "primary", "Cntlr.primary")
 	disabled := &triBool{}
 	fs.Var(disabled, "disabled", "Cntlr.disabled")
-	fs.Parse(args)
+	parseFlags(fs, args)
 
 	cntlrId := requireId(id)
 	if !primary.set && !disabled.set {
@@ -2137,7 +2182,7 @@ func cmdSetLevel(g *globals, args []string) {
 	fs := newFlagSet("set-level", g)
 	sp := fs.String("sp", "", "sp name or sp_id (required)")
 	levelSpec := fs.String("level", "", "sp_level, a number or a name")
-	fs.Parse(args)
+	parseFlags(fs, args)
 
 	level, err := parseSpLevel(*levelSpec)
 	if err != nil {
@@ -2167,7 +2212,7 @@ func cmdSetLwm(g *globals, args []string) {
 	fs := newFlagSet("set-lwm", g)
 	sp := fs.String("sp", "", "sp name or sp_id (required)")
 	pct := fs.Uint("pct", 0, "low_water_mark_pct")
-	fs.Parse(args)
+	parseFlags(fs, args)
 
 	ctx, done, cli := g.open()
 	defer done()
@@ -2194,7 +2239,7 @@ func cmdSetFree(g *globals, args []string) {
 	var id hexUint
 	fs.Var(&id, "id", "dn_id / cn_id")
 	freeExt := fs.Uint64("free-ext", 0, "the new free_ext_cnt")
-	fs.Parse(rest)
+	parseKindFlags(fs, rest, kind)
 	kind = kindArg(fs, kind, "dn", "cn")
 	nodeId := requireId(id)
 
@@ -2250,7 +2295,7 @@ func cmdSetEpoch(g *globals, args []string) {
 		"clone_name whose clone meta group holds the leg or the side")
 	age := fs.Uint64("age", 0, "seconds before now the err_epoch is set to")
 	clearEpoch := fs.Bool("clear", false, "set the err_epoch to 0 instead")
-	fs.Parse(rest)
+	parseKindFlags(fs, rest, kind)
 	kind = kindArg(fs, kind, "cntlr", "leg", "side")
 
 	objId := requireId(id)
@@ -2362,7 +2407,7 @@ func cmdSetCreated(g *globals, args []string) {
 	fs := newFlagSet("set-created", g)
 	sp := fs.String("sp", "", "sp name or sp_id (required)")
 	name := fs.String("name", "", "td_name (required)")
-	fs.Parse(args)
+	parseFlags(fs, args)
 
 	if strings.TrimSpace(*name) == "" {
 		usageDie("--name is required")
@@ -2400,7 +2445,7 @@ func cmdSetProvisioned(g *globals, args []string) {
 			"--slice")
 	fs.Var(&leg, "leg", "leg_id (required)")
 	fs.Var(&side, "side", "side_id (required)")
-	fs.Parse(args)
+	parseFlags(fs, args)
 
 	if (uint64(slice) == 0) == (*cloneName == "") {
 		usageDie("set-provisioned: exactly one of --slice and --clone is " +
@@ -2455,7 +2500,7 @@ func cmdStartCutover(g *globals, args []string) {
 	var cntlr hexUint
 	fs.Var(&cntlr, "cntlr",
 		"cntlr_id the op checks is the primary (default: the stored primary)")
-	fs.Parse(args)
+	parseFlags(fs, args)
 
 	if strings.TrimSpace(*name) == "" {
 		usageDie("--name is required")
@@ -2490,7 +2535,7 @@ func cmdStartCutover(g *globals, args []string) {
 func cmdSetDeleting(g *globals, args []string) {
 	fs := newFlagSet("set-deleting", g)
 	sp := fs.String("sp", "", "sp name or sp_id (required)")
-	fs.Parse(args)
+	parseFlags(fs, args)
 
 	ctx, done, cli := g.open()
 	defer done()
@@ -2523,7 +2568,7 @@ func cmdDrainSp(g *globals, args []string) {
 	// (1 + MaxSliceCntPerSp x batches + 1).
 	maxSteps := fs.Int("max-steps", 4096,
 		"run at most this many drain steps")
-	fs.Parse(args)
+	parseFlags(fs, args)
 
 	ctx, done, cli := g.open()
 	defer done()
@@ -2551,7 +2596,7 @@ func cmdSetCloneDeleting(g *globals, args []string) {
 	fs := newFlagSet("set-clone-deleting", g)
 	sp := fs.String("sp", "", "sp name or sp_id (required)")
 	name := fs.String("name", "", "clone_name (required)")
-	fs.Parse(args)
+	parseFlags(fs, args)
 
 	if strings.TrimSpace(*name) == "" {
 		usageDie("--name is required")
@@ -2582,7 +2627,7 @@ func cmdDrainClone(g *globals, args []string) {
 	sp := fs.String("sp", "", "sp name or sp_id (required)")
 	name := fs.String("name", "", "clone_name (required)")
 	maxSteps := fs.Int("max-steps", 4096, "run at most this many steps")
-	fs.Parse(args)
+	parseFlags(fs, args)
 
 	if strings.TrimSpace(*name) == "" {
 		usageDie("--name is required")
@@ -2618,7 +2663,7 @@ func cmdSetRepairStage(g *globals, args []string) {
 	sp := fs.String("sp", "", "sp name or sp_id (required)")
 	name := fs.String("name", "", "rep_name (required)")
 	stageSpec := fs.String("stage", "", "started or aborted (required)")
-	fs.Parse(args)
+	parseFlags(fs, args)
 
 	if strings.TrimSpace(*name) == "" {
 		usageDie("--name is required")
@@ -2758,7 +2803,7 @@ func cmdCreateRepair(g *globals, args []string) {
 	fs.Var(&retiredLeg, "retired-leg",
 		"leg_id of a retired leg of the group the new leg is taken from")
 	fs.Var(&dnId, "dn", "dn_id a fresh new leg is placed on")
-	fs.Parse(args)
+	parseFlags(fs, args)
 
 	if strings.TrimSpace(*name) == "" {
 		usageDie("--name is required")
@@ -2818,7 +2863,7 @@ func repairNameCmd(
 	fs := newFlagSet(cmd, g)
 	sp := fs.String("sp", "", "sp name or sp_id (required)")
 	name := fs.String("name", "", "rep_name (required)")
-	fs.Parse(args)
+	parseFlags(fs, args)
 	if strings.TrimSpace(*name) == "" {
 		usageDie("--name is required")
 	}
@@ -2906,7 +2951,7 @@ func cmdForceStart(g *globals, args []string) {
 	fs.Var(&legId, "leg", "leg_id the array starts from (required unless "+
 		"--cancel)")
 	cancel := fs.Bool("cancel", false, "withdraw the group's mark instead")
-	fs.Parse(args)
+	parseFlags(fs, args)
 
 	if err := forceStartIds(uint64(grpId), uint64(legId), *cancel); err != nil {
 		usageDie("force-start: %v", err)
@@ -2934,7 +2979,8 @@ func cmdForceStart(g *globals, args []string) {
 // model.SetGrpOperatorInCharge, the operation of the gateway's
 // UpdateGroupOperatorInCharge, with no revision token; the flag is set
 // unless --operator-in-charge=false clears it, as dnvctl's
-// group set-operator-in-charge spells it. It prints the pool's revision
+// group set-operator-in-charge spells it, and parseFlags refuses the word a
+// separate `false` would leave. It prints the pool's revision
 // after the write, which a write raises by one, so a case can check that the
 // flag's fan-out follows it (architecture.md, Repairs).
 func cmdSetOperatorInCharge(g *globals, args []string) {
@@ -2944,7 +2990,7 @@ func cmdSetOperatorInCharge(g *globals, args []string) {
 	fs.Var(&grpId, "grp", "grp_id of the group (required)")
 	on := fs.Bool("operator-in-charge", true,
 		"the flag's value; false gives the group back to the worker")
-	fs.Parse(args)
+	parseFlags(fs, args)
 
 	if uint64(grpId) == 0 {
 		usageDie("set-operator-in-charge: --grp is required")
@@ -2970,7 +3016,7 @@ func cmdSetOperatorInCharge(g *globals, args []string) {
 func cmdSetMdCheckDays(g *globals, args []string) {
 	fs := newFlagSet("set-md-check-days", g)
 	days := fs.Uint("days", 0, "md_check_conf.interval_days; 0 is off")
-	fs.Parse(args)
+	parseFlags(fs, args)
 
 	ctx, done, cli := g.open()
 	defer done()
@@ -2993,7 +3039,7 @@ func cmdSetMdCheck(g *globals, args []string) {
 		"seconds before now the next check is due (negative: ahead)")
 	requestAge := fs.Int64("request-age", -1,
 		"seconds before now the request was made (-1: no request)")
-	fs.Parse(args)
+	parseFlags(fs, args)
 
 	if uint64(grpId) == 0 {
 		usageDie("set-md-check: --grp is required")
@@ -3044,7 +3090,7 @@ func cmdDeleteRetiredLeg(g *globals, args []string) {
 	sp := fs.String("sp", "", "sp name or sp_id (required)")
 	var leg hexUint
 	fs.Var(&leg, "leg", "leg_id of the retired leg (required)")
-	fs.Parse(args)
+	parseFlags(fs, args)
 	if uint64(leg) == 0 {
 		usageDie("--leg is required")
 	}
@@ -3081,7 +3127,7 @@ func cmdPutRetiredLeg(g *globals, args []string) {
 	legIdx := fs.Uint("leg-idx", 0, "its leg_idx in the group")
 	slot := fs.Uint("slot", 0, "its side's cntlid_slot")
 	age := fs.Uint64("age", 0, "seconds before now it was retired")
-	fs.Parse(args)
+	parseFlags(fs, args)
 	for _, required := range []struct {
 		name string
 		id   hexUint
@@ -3125,7 +3171,7 @@ func cmdPutRetiredLeg(g *globals, args []string) {
 func cmdListRepairs(g *globals, args []string) {
 	fs := newFlagSet("list-repairs", g)
 	sp := fs.String("sp", "", "sp name or sp_id (required)")
-	fs.Parse(args)
+	parseFlags(fs, args)
 	ctx, done, cli := g.open()
 	defer done()
 	cl := g.loadCluster(ctx, cli)
@@ -3160,7 +3206,7 @@ func cmdListRepairs(g *globals, args []string) {
 func cmdGet(g *globals, args []string) {
 	fs := newFlagSet("get", g)
 	key := fs.String("key", "", "the full key (required)")
-	fs.Parse(args)
+	parseFlags(fs, args)
 
 	if *key == "" {
 		die("--key is required")
@@ -3189,7 +3235,7 @@ func cmdGetDn(g *globals, args []string) {
 	var id hexUint
 	fs.Var(&id, "id", "dn_id")
 	addr := fs.String("addr", "", "the dn's ip:port (skips the id lookup)")
-	fs.Parse(args)
+	parseFlags(fs, args)
 
 	ctx, done, cli := g.open()
 	defer done()
@@ -3222,7 +3268,7 @@ func cmdGetCn(g *globals, args []string) {
 	var id hexUint
 	fs.Var(&id, "id", "cn_id")
 	addr := fs.String("addr", "", "the cn's ip:port (skips the id lookup)")
-	fs.Parse(args)
+	parseFlags(fs, args)
 
 	ctx, done, cli := g.open()
 	defer done()
@@ -3257,7 +3303,7 @@ func cmdGetRev(g *globals, args []string) {
 	fs.Var(&id, "id", "dn_id / cn_id / sp_id")
 	var shard shardFlag
 	fs.Var(&shard, "shard", "shard code, hex (00, 55, aa, ff …)")
-	fs.Parse(rest)
+	parseKindFlags(fs, rest, kind)
 	kind = kindArg(fs, kind, "dn", "cn", "sp")
 	objId := requireId(id)
 	shardCode := uint32(shard)
@@ -3295,7 +3341,7 @@ func cmdGetSp(g *globals, args []string) {
 	fs := newFlagSet("get-sp", g)
 	sp := fs.String("sp", "", "sp name or sp_id (required)")
 	name := fs.String("name", "", "alias of --sp")
-	fs.Parse(args)
+	parseFlags(fs, args)
 
 	spec := *sp
 	if spec == "" {
@@ -3386,7 +3432,7 @@ func cmdGetCntlr(g *globals, args []string) {
 	sp := fs.String("sp", "", "sp name or sp_id (required)")
 	var id hexUint
 	fs.Var(&id, "id", "cntlr_id (default: every cntlr of the sp)")
-	fs.Parse(args)
+	parseFlags(fs, args)
 
 	ctx, done, cli := g.open()
 	defer done()
@@ -3424,7 +3470,7 @@ func cmdGetSlice(g *globals, args []string) {
 	sp := fs.String("sp", "", "sp name or sp_id (required)")
 	var id hexUint
 	fs.Var(&id, "id", "slice_id (default: every slice of the sp)")
-	fs.Parse(args)
+	parseFlags(fs, args)
 
 	ctx, done, cli := g.open()
 	defer done()
@@ -3461,7 +3507,7 @@ func cmdGetTd(g *globals, args []string) {
 	fs := newFlagSet("get-td", g)
 	sp := fs.String("sp", "", "sp name or sp_id (required)")
 	name := fs.String("name", "", "td_name (default: every td of the sp)")
-	fs.Parse(args)
+	parseFlags(fs, args)
 
 	ctx, done, cli := g.open()
 	defer done()
@@ -3499,7 +3545,7 @@ func cmdGetTd(g *globals, args []string) {
 func cmdListKeys(g *globals, args []string) {
 	fs := newFlagSet("list-keys", g)
 	prefix := fs.String("prefix", "", "a full key prefix or a key kind")
-	fs.Parse(args)
+	parseFlags(fs, args)
 
 	ctx, done, cli := g.open()
 	defer done()
@@ -3546,7 +3592,7 @@ func cmdListKeys(g *globals, args []string) {
 func cmdListWorkers(g *globals, args []string) {
 	fs := newFlagSet("list-workers", g)
 	role := fs.String("role", "", "dn|cn|sp (default: all three)")
-	fs.Parse(args)
+	parseFlags(fs, args)
 
 	roles := []string{
 		common.WorkerRoleDn, common.WorkerRoleCn, common.WorkerRoleSp,

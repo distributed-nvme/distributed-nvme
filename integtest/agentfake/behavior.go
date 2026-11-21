@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"maps"
+	"reflect"
 	"slices"
 	"strconv"
 	"strings"
@@ -144,7 +145,9 @@ type Object struct {
 	DropStream  bool
 
 	// ReplyCode forces agent_reply.code on every reply of the object and
-	// suppresses the apply of a Syncup* and a push.
+	// suppresses the apply of a Syncup* and a push, save a round's and an
+	// info read's of an object the fake does not hold, which refuse it as
+	// unknown whatever the lever (knownLocked).
 	ReplyCode uint32
 	// Starting, when set, answers every round and info read of the object
 	// with ReplyCodeStarting, no observation and Starting as the agent's
@@ -237,8 +240,9 @@ type Object struct {
 type Behavior struct {
 	// Size is the GetDnSize/GetCnSize reply, zero for Config.Size.
 	Size uint64
-	// Default supplies a status and details under every object's own; its
-	// other levers are refused, since each acts on one object.
+	// Default supplies a status and details under every object's own; every
+	// other lever is refused on it (validateDefault), since each acts on
+	// one object.
 	Default *Object
 	// Objects are the levers of each object, by object key.
 	Objects map[string]*Object
@@ -388,32 +392,25 @@ func (ob *Object) validate(where, key string) error {
 	return nil
 }
 
-// validateDefault refuses on the default entry every lever that acts on one
-// object's answers rather than on its rows' status and details.
+// defaultLevers are the fields of Object the default entry is read for
+// (resolveDerivedRow): a status and details under every object's own.
+var defaultLevers = map[string]bool{"Status": true, "Details": true}
+
+// validateDefault refuses on the default entry every field of Object but the
+// two it is read for: a walk over the fields, so that a lever added to
+// Object later is refused there too, where a list of names would let it
+// pass and do nothing.
 func (ob *Object) validateDefault() error {
 	if ob == nil {
 		return nil
 	}
-	if err := ob.validate("default", ""); err != nil {
-		return err
-	}
-	for _, lever := range []struct {
-		name string
-		set  bool
-	}{
-		{"obs_age_ms", ob.ObsAge != 0},
-		{"obs_none", ob.ObsNone},
-		{"syncup_revision", ob.SyncupRevision != nil},
-		{"leftover_rounds", ob.LeftoverRounds != 0},
-		{"read_leftover", ob.ReadLeftover != 0},
-		{"read_rows", ob.ReadRows != nil},
-		{"repairs", ob.Repairs != nil},
-		{"grps", ob.Grps != nil},
-	} {
-		if lever.set {
-			return fmt.Errorf(
-				"default: %s acts on one object, not on every one",
-				lever.name)
+	val := reflect.ValueOf(ob).Elem()
+	for i := range val.NumField() {
+		name := val.Type().Field(i).Name
+		if !defaultLevers[name] && !val.Field(i).IsZero() {
+			return fmt.Errorf("default: %s acts on one object, not on "+
+				"every one; the default entry takes status and details "+
+				"alone", name)
 		}
 	}
 	return nil
@@ -665,9 +662,9 @@ func parseResStatus(name string) (pb.ResStatus, error) {
 	return resStatus, nil
 }
 
-// parseResReason accepts a ResReason by its short spelling ("NONE",
-// "THIN_ID_LOST", "AWAITING_CUTOVER", "SP_LEVEL", "SOURCE_FAULT") or its full
-// proto enum name ("RES_REASON_THIN_ID_LOST"), case-insensitively.
+// parseResReason accepts any ResReason by its short spelling ("NONE",
+// "THIN_ID_LOST", "PARKED", ...) or its full proto enum name
+// ("RES_REASON_THIN_ID_LOST"), case-insensitively.
 func parseResReason(name string) (pb.ResReason, error) {
 	key := strings.ToUpper(strings.TrimSpace(name))
 	if !strings.HasPrefix(key, "RES_REASON_") {

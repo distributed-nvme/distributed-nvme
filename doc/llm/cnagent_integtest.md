@@ -384,6 +384,9 @@ re-derive: the hydration poller (`common.ParseCloneStatus`), which reads
 each sample's metadata mode and stops at a dm-clone whose metadata is not in
 read-write mode, as the agent serves no namespace through one (`cnagent.md`
 CN18); a group's hashed md names (`CnMdDevName`); and a host NQN's host id.
+It refuses a word left after a subcommand's flags, since Go's flag package
+would read `--fresh false` as `--fresh` and leave the flags after the word
+unread: a boolean flag is written `--flag` or `--flag=false`.
 It reads the agent as the dn driver does
 (`dnagent_integtest.md`, The driver: `dnagentctl`): its round commands have
 the fresh mode, its hydration poller samples with rounds on one stream, the

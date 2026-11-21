@@ -1176,6 +1176,10 @@ write_host_helper() { # <path>
 #                          open n idle TCP connections to one cdc instance,
 #                          held by one process, and print n once all are open
 #   flood_stop             close them
+#
+# The uevent capture and the flood are stopped by the pid files they write in
+# the directory this helper is shipped to, the suite's work directory, so a
+# stop never signals a process of another suite or of the host itself.
 #   flood_count <work> <tcp state>
 #                          how many of the flood's sockets are in that state
 #   many_start <work> <nqn base> <n> <ip> <p0> <p1> <p2> <p3>
@@ -1197,6 +1201,23 @@ set -uo pipefail
 
 DISC_NQN=nqn.2014-08.org.nvmexpress.discovery
 TEST_NQN_PREFIX="nqn.2024-01.io.dnv-it:"
+# HERE is the directory the suite shipped this helper to, its work directory,
+# where the uevent capture's and the flood's pid files live.
+HERE=${0%/*}
+
+# kill_recorded sends <signal> to the process a pid file names while the
+# first word of its command line is still <name>, and removes the file: a
+# pid the kernel has given to another process since is left alone.
+kill_recorded() { # <pid file> <name> <signal>
+	local pid="" argv0=""
+	[ -f "$1" ] || return 0
+	read -r pid < "$1" || true
+	IFS= read -r -d '' argv0 2>/dev/null < "/proc/$pid/cmdline" || true
+	if [ -n "$pid" ] && [ "$argv0" = "$2" ]; then
+		kill "-$3" "$pid" 2>/dev/null || true
+	fi
+	rm -f "$1"
+}
 
 disconnect_test_subsystems() {
 	local sysfs nqn
@@ -1228,8 +1249,7 @@ disconnect_discovery() {
 }
 
 uev_stop() {
-	pkill -f 'udevadm monitor --kernel --property --subsystem-match=nvme' \
-		>/dev/null 2>&1 || true
+	kill_recorded "$HERE/uev.pid" udevadm TERM
 }
 
 # The flood case's idle connections (cdc.md, Integration test plan). One
@@ -1277,10 +1297,10 @@ flood_start() { # <ip> <port> <n> <work>
 	exit 1
 }
 
-# flood_stop's pattern is anchored and bracketed, so it can match neither the
-# pkill nor the shell that runs this script.
+# flood_stop kills the flood by the pid flood_start recorded, in the work
+# directory the suite passes it, which is this helper's.
 flood_stop() {
-	pkill -KILL -f '^[d]nv-cdc-flood' >/dev/null 2>&1 || true
+	kill_recorded "$HERE/flood.pid" dnv-cdc-flood KILL
 }
 
 # flood_count counts the flood's sockets in one TCP state, by the flood's pid
@@ -1760,6 +1780,7 @@ uev_start)
 	mkdir -p "${2-}"
 	nohup udevadm monitor --kernel --property --subsystem-match=nvme \
 		> "${2-}/uevents.log" 2>&1 < /dev/null &
+	echo "$!" > "$HERE/uev.pid"
 	sleep 1
 	echo "cdc_host.sh: uevent capture started"
 	;;
@@ -1846,8 +1867,8 @@ for i in \$(seq 1 20); do
 	sleep 0.25
 done
 for p in \$pids; do kill -KILL "\$p" 2>/dev/null || true; done
-pkill -f 'bin/dnv-cdc' 2>/dev/null || true
-pkill -f 'etcd --name dnv-cdc-it' 2>/dev/null || true
+pkill -f '$WORK/bin/dnv-cdc' 2>/dev/null || true
+pkill -f '$WORK/bin/etcd --name dnv-cdc-it' 2>/dev/null || true
 sleep 0.5
 echo cleaned
 EOF

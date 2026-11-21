@@ -278,6 +278,31 @@ func newFlagSet(name string, g *globals) *flag.FlagSet {
 	return fs
 }
 
+// parseArgs parses one subcommand's flags and refuses a word left after
+// them: Go's flag package reads `--fresh false` as `--fresh` alone and stops
+// at `false`, so the word, and every flag after it, would go unread, and the
+// default-false flag would read true. No subcommand takes a positional word.
+func parseArgs(fs *flag.FlagSet, args []string) error {
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if fs.NArg() != 0 {
+		return fmt.Errorf("%s: unexpected argument %q after the flags; a "+
+			"boolean flag is written --flag or --flag=false", fs.Name(),
+			fs.Arg(0))
+	}
+	return nil
+}
+
+// parseFlags is every subcommand's parse of its flags (parseArgs): a
+// refusal exits 2, as a usage error does.
+func parseFlags(fs *flag.FlagSet, args []string) {
+	if err := parseArgs(fs, args); err != nil {
+		fmt.Fprintf(os.Stderr, "cnagentctl: %v\n", err)
+		os.Exit(2)
+	}
+}
+
 // cntlrPointerFlags registers the --sp/--cntlr pair of the object-scoped
 // RPCs.
 func cntlrPointerFlags(fs *flag.FlagSet) (*hexUint, *hexUint) {
@@ -305,7 +330,7 @@ func cmdGetCnSize(args []string) {
 	var g globals
 	fs := newFlagSet("get-cn-size", &g)
 	wait := fs.Float64("wait", 0, "seconds to retry until the agent answers")
-	fs.Parse(args)
+	parseFlags(fs, args)
 
 	conn, client, err := g.dial()
 	if err != nil {
@@ -372,7 +397,7 @@ func cmdSyncupCn(args []string) {
 	fs.Var(&revision, "revision", "request revision")
 	fs.Var(&cntlrs, "cntlr",
 		"sp:cntlr, repeatable — the full desired cntlr list")
-	fs.Parse(args)
+	parseFlags(fs, args)
 
 	conn, client, err := g.dial()
 	if err != nil {
@@ -406,7 +431,7 @@ func cmdSyncupCntlr(args []string) {
 	fs := newFlagSet("syncup-cntlr", &g)
 	reqPath := fs.String("req", "",
 		"path to the SyncupCntlrRequest as protojson (required)")
-	fs.Parse(args)
+	parseFlags(fs, args)
 
 	if *reqPath == "" {
 		die("--req is required")
@@ -455,7 +480,7 @@ func cmdPushCloneBm(args []string) {
 	bmIdx := fs.Uint("bm-idx", 0,
 		"chunk index within that slice's bitmap")
 	bitmapHex := fs.String("bitmap-hex", "", "chunk bytes as hex")
-	fs.Parse(args)
+	parseFlags(fs, args)
 
 	bitmap, err := hex.DecodeString(strings.TrimSpace(*bitmapHex))
 	if err != nil {
@@ -495,7 +520,7 @@ func cmdPushCloneBm(args []string) {
 func cmdGetCnInfo(args []string) {
 	var g globals
 	fs := newFlagSet("get-cn-info", &g)
-	fs.Parse(args)
+	parseFlags(fs, args)
 
 	conn, client, err := g.dial()
 	if err != nil {
@@ -521,7 +546,7 @@ func cmdGetCnInfo(args []string) {
 func cmdGetCnStore(args []string) {
 	var g globals
 	fs := newFlagSet("get-cn-store", &g)
-	fs.Parse(args)
+	parseFlags(fs, args)
 
 	conn, client, err := g.dial()
 	if err != nil {
@@ -546,7 +571,7 @@ func cmdGetCntlrInfo(args []string) {
 	sp, cntlr := cntlrPointerFlags(fs)
 	ioStats := fs.Bool("io-stats", false,
 		"read the devices' counters and the probe times at the call")
-	fs.Parse(args)
+	parseFlags(fs, args)
 
 	conn, client, err := g.dial()
 	if err != nil {
@@ -586,7 +611,7 @@ func cmdCheckCn(args []string) {
 	fresh := fs.Bool("fresh", false,
 		"send rounds until one answers from an observation read after "+
 			"the command began")
-	fs.Parse(args)
+	parseFlags(fs, args)
 
 	conn, client, err := g.dial()
 	if err != nil {
@@ -621,7 +646,7 @@ func cmdCheckCntlr(args []string) {
 	fresh := fs.Bool("fresh", false,
 		"send rounds until one answers from an observation read after "+
 			"the command began")
-	fs.Parse(args)
+	parseFlags(fs, args)
 
 	conn, client, err := g.dial()
 	if err != nil {
@@ -658,7 +683,7 @@ func cmdGetTdBm(args []string) {
 	sliceIdx := fs.Uint("slice-idx", 0, "slice index")
 	startBlock := fs.Uint64("start-block", 0, "first block of the window")
 	blockCnt := fs.Uint64("block-cnt", 0, "window length in blocks, 0 = all")
-	fs.Parse(args)
+	parseFlags(fs, args)
 
 	conn, client, err := g.dial()
 	if err != nil {
@@ -694,7 +719,7 @@ func cmdGetLegBm(args []string) {
 	fs.Var(&leg, "leg", "leg id")
 	startBlock := fs.Uint64("start-block", 0, "first block of the window")
 	blockCnt := fs.Uint64("block-cnt", 0, "window length in blocks, 0 = all")
-	fs.Parse(args)
+	parseFlags(fs, args)
 
 	conn, client, err := g.dial()
 	if err != nil {
@@ -732,7 +757,7 @@ func cmdInspectGrp(args []string) {
 	var overrides overrideList
 	fs.Var(&overrides, "override",
 		"the dry run's refusals to pass: older-leg,bad-blocks,partial")
-	fs.Parse(args)
+	parseFlags(fs, args)
 
 	conn, client, err := g.dial()
 	if err != nil {
@@ -811,7 +836,7 @@ func cmdWaitHydrated(args []string) {
 		"the first parseable sample must show at least this many hydrated")
 	sampleOnly := fs.Bool("sample-only", false,
 		"take exactly one fresh sample, print hydrated/total and exit")
-	fs.Parse(args)
+	parseFlags(fs, args)
 
 	conn, client, err := g.dial()
 	if err != nil {
@@ -925,7 +950,7 @@ func cmdMdName(args []string) {
 	sliceIdx := fs.Uint("slice-idx", 0, "slice index")
 	grpIdx := fs.Uint("grp-idx", 0, "group index")
 	isMeta := fs.Bool("meta", false, "the group is a meta group")
-	fs.Parse(args)
+	parseFlags(fs, args)
 
 	nf := common.NewNameFmt("")
 	devName := nf.CnMdDevName(uint64(g.cluster), uint64(g.cn), uint64(sp),
@@ -953,7 +978,7 @@ func cmdHostId(args []string) {
 	var g globals
 	fs := newFlagSet("host-id", &g)
 	hostNqn := fs.String("hostnqn", "", "host nqn to derive the id from")
-	fs.Parse(args)
+	parseFlags(fs, args)
 
 	if *hostNqn == "" {
 		die("--hostnqn is required")

@@ -335,10 +335,11 @@ func TestFleetStopAndStart(t *testing.T) {
 		reply, err := client.GetDnInfo(ctx, &pb.GetDnInfoRequest{
 			ClusterId: 1, DnId: 1,
 		})
-		if err == nil && (reply.GetRevision() != 0 ||
+		if err == nil && (reply.GetAgentReply().GetCode() !=
+			common.ReplyCodeUnknownObject || reply.GetRevision() != 0 ||
 			reply.GetDnInfo() != nil) {
-			t.Fatalf("GetDnInfo after the dropping start = %v, want "+
-				"revision 0 and no info", reply)
+			t.Fatalf("GetDnInfo after the dropping start = %v, want the "+
+				"dn unknown at revision 0 with no info", reply)
 		}
 		return err
 	})

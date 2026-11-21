@@ -6301,9 +6301,10 @@ success: a failing run leaves etcd's data, every log and every behavior file
 in place and prints its diagnostics — the failing stage and its trace id,
 the registrations, the ownership table, the tail of every log and the dnv
 keys — so the debris is what the developer reads; a cleanup-only run does
-the cleanup alone. Cleanup signals every process the suite started,
-continuing a stopped worker first so that it acts on its termination, and
-removes the suite's work directory; nothing outside that directory is
+the cleanup alone. Cleanup signals every process the suite started by its
+recorded pid, continuing a stopped worker first so that it acts on its
+termination, with a pattern kill of the programs under the work directory
+as a safety net, and removes the suite's work directory; nothing outside that directory is
 touched, and the suite leaves no kernel state, no packages and no users
 behind.
 
@@ -6357,7 +6358,11 @@ them run with no revision token,
 (MD3), and `put-retired-leg` plants a retired leg as a finish leaves one,
 at an age the case chooses, so that a case can stage a leg older than the
 retire timer's age (AR12). `set-repair-stage` is the stage move AR11
-makes, which the gateway suite plays with no worker.
+makes, which the gateway suite plays with no worker. It refuses a word left
+after a subcommand's flags, but the kind word of the commands that take one
+(`get-rev dn`, `set-epoch cntlr`), since Go's flag package would read
+`--clear false` as `--clear` and leave the flags after the word unread: a
+boolean flag is written `--flag` or `--flag=false`.
 
 **The fake agent, `fakeagent`.** The fake agent is one library,
 `integtest/agentfake`, whose levers are set in two ways, so that it cannot
@@ -6377,10 +6382,24 @@ requests it received and the streams it served, the evidence those cases
 read instead. Their wait for convergence compares etcd with the request a
 fake keeps for each object, the last one it saved, and not with the last
 one it received, which it records as it arrives, before it accepts, holds
-or refuses it. It applies the agents' revision gate per object and
-their ordering rule — a side or cntlr its node's last syncup does not list
-is an unknown object, which the worker's independent roles must survive
-(RW5) — refuses a bitmap push for a migration or a clone its object's last
+or refuses it. It keeps one disk node object and one controller node
+object, keys a side or a cntlr by its pointer alone, and reads no call's
+cluster id or node id but `GetCnStore`'s (below), where an agent keys every
+object by its cluster and node, so a fake answers about the node it holds
+whatever node a call names. It applies the agents' revision gate per object
+and their ordering rule — a side or cntlr its node's last syncup does not
+list is an unknown object, which the worker's independent roles must
+survive (RW5) — and refuses as unknown every round and info read of a disk
+node, a controller node, a side or a cntlr for which it holds no stored
+request and no stored revision, as an agent holds an object only once it
+holds a request for it (`dnagent.md` DN16; `cnagent.md` CN23), so that a
+side or cntlr its node's syncup lists stays unknown to them until its own
+syncup is applied, which that gate admits; under a forced code other than
+the unknown object's, a round or an info read of an object it holds that
+answers from a new observation answers that code with the stored revision
+and the `*Info`, while `obs_none`, a repeat under `obs_age_ms` and a round
+under `read_leftover` answer ahead of the forced code, each as its lever
+says; it refuses a bitmap push for a migration or a clone its object's last
 request does not name, drops, with each migration chunk it records, every
 chunk it recorded above that chunk's index, as the dn agent takes them out
 of its set when it saves a piece (`dnagent.md` DN15) — it keeps no chunk's
@@ -6446,10 +6465,13 @@ from a new observation, made as it answers and under the call's trace id —
 the round's own for a round — so that, unless a lever says otherwise, no
 round answers from an observation that is late, too old or already seen; a
 round or an info read that refuses its object as unknown carries no
-observation; a `Syncup*` it refuses — a stale revision, an object its
-node's last syncup does not list, or a refusing code a lever forces —
-carries no stamp, as an agent's refusal at a gate carries none
-(`architecture.md`, Live-state reporting); and a `Syncup*` that saved its request carries the
+revision, no `*Info` and no observation (`dnagent.md` SH25); a `Syncup*` it
+refuses — a stale revision, an object its node's last syncup does not
+list, or a refusing code the `reply_code` or `syncup_code` lever forces —
+carries its code and the stored revision alone, none for an unknown object,
+with no `*Info`, no bitmap info and no stamp, as an agent's refusal at a
+gate or of a failed save carries none of them (`dnagent.md` SH28), the
+`Starting` lever's refusal (below) aside; and a `Syncup*` that saved its request carries the
 save time, with its observation after it, while one whose code a lever
 forces saves nothing, so a forced `ReplyCodeLeftover` carries an
 observation and no save time.
@@ -6485,8 +6507,8 @@ applies nothing, while its rounds and info reads answer from what it last
 applied, as an agent whose gate or save refuses a request does (HL9).
 `Starting`, which only a Go call sets, answers every round and info read
 of the object with `ReplyCodeStarting`, no observation and the lever's
-time as the agent's start, an info read ahead of its check of an unknown
-object, as an agent whose startup reconcile still runs answers them
+time as the agent's start, a round and an info read alike ahead of its
+check of an unknown object, as an agent whose startup reconcile still runs answers them
 (`dnagent.md` SH33; HL8); it refuses every `Syncup*` of the object with
 that code ahead of every other gate, with only the code and a stamp of
 the answer time and that start, and every push of it with that code
@@ -6504,7 +6526,10 @@ from, and a syncup the fake accepts cancels that read; a read answers
 `ReplyCodeLeftover` for as many re-sends as it counts, each accepted syncup
 that applies its request spending one and answering code zero, and
 `read_rows` override the rows of a read that names it. It is refused beside
-`obs_age_ms`, `obs_none` and `leftover_rounds`, and on the default entry.
+`obs_age_ms`, `obs_none` and `leftover_rounds`. A behavior's default entry
+takes a status and details, which every object's rows read under the
+object's own, and refuses every other lever, since each acts on one
+object.
 `disk_counts` gives
 the dn disk counts, sent only beside an OK meta row, as the dn agent sends
 them (`dnagent.md` DN18). The fake computes no sweep verdict and no disk

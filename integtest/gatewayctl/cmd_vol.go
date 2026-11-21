@@ -203,8 +203,8 @@ func setupSetSsHosts(fs *flag.FlagSet) job {
 // the generated forms; passing them explicitly is how the cross-SP cases give
 // two SPs' namespaces the SAME identity.
 //
-// --suspended creates the namespace already retired. It is a bool, so it must
-// be written --suspended / --suspended=false and never `--suspended false`.
+// --suspended creates the namespace already retired. It is a bool, written
+// --suspended or --suspended=false; parseArgs refuses `--suspended false`.
 func setupCreateNs(fs *flag.FlagSet) job {
 	spName := fs.String("sp", "", "sp_name that owns the subsystem")
 	var rev hexUint
@@ -291,8 +291,8 @@ func setupSetNsDev(fs *flag.FlagSet) job {
 // (architecture.md, Transfer + clone = cross-SP live migration).
 //
 // --suspended defaults to TRUE because retiring is the direction the suite
-// asks for; resuming is the explicit --suspended=false, which is the only
-// spelling Go's flag package accepts for a false bool. The RPC writes and
+// asks for; resuming is the explicit --suspended=false, the only spelling
+// of a false bool that parseArgs takes. The RPC writes and
 // bumps even when the stored flag already matches, so re-sending the same
 // value is a deliberate way to produce a bump.
 func setupSetNsSuspended(fs *flag.FlagSet) job {

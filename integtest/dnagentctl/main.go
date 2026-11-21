@@ -294,6 +294,31 @@ func newFlagSet(name string, g *globals) *flag.FlagSet {
 	return fs
 }
 
+// parseArgs parses one subcommand's flags and refuses a word left after
+// them: Go's flag package reads `--fresh false` as `--fresh` alone and stops
+// at `false`, so the word, and every flag after it, would go unread, and the
+// default-false flag would read true. No subcommand takes a positional word.
+func parseArgs(fs *flag.FlagSet, args []string) error {
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if fs.NArg() != 0 {
+		return fmt.Errorf("%s: unexpected argument %q after the flags; a "+
+			"boolean flag is written --flag or --flag=false", fs.Name(),
+			fs.Arg(0))
+	}
+	return nil
+}
+
+// parseFlags is every subcommand's parse of its flags (parseArgs): a
+// refusal exits 2, as a usage error does.
+func parseFlags(fs *flag.FlagSet, args []string) {
+	if err := parseArgs(fs, args); err != nil {
+		fmt.Fprintf(os.Stderr, "dnagentctl: %v\n", err)
+		os.Exit(2)
+	}
+}
+
 // sidePointerFlags registers the --sp/--leg/--side triple of the object-scoped
 // RPCs.
 func sidePointerFlags(fs *flag.FlagSet) (*hexUint, *hexUint, *hexUint) {
@@ -323,7 +348,7 @@ func cmdGetDnSize(args []string) {
 	var g globals
 	fs := newFlagSet("get-dn-size", &g)
 	wait := fs.Float64("wait", 0, "seconds to retry until the agent answers")
-	fs.Parse(args)
+	parseFlags(fs, args)
 
 	conn, client, err := g.dial()
 	if err != nil {
@@ -388,7 +413,7 @@ func cmdSyncupDn(args []string) {
 	fs.Var(&extentSize, "extent-size", "DN VG physical extent size in bytes")
 	fs.Var(&sides, "side",
 		"sp:leg:side, repeatable — the full desired side list")
-	fs.Parse(args)
+	parseFlags(fs, args)
 
 	conn, client, err := g.dial()
 	if err != nil {
@@ -468,7 +493,7 @@ func cmdSyncupSide(args []string) {
 	fs.Var(&extCnt, "ext-cnt", "side size in DN VG extents")
 	fs.Var(&primaryCn, "primary-cn", "primary CN id")
 	fs.Var(&standbys, "standby-cn", "standby CN id, repeatable")
-	fs.Parse(args)
+	parseFlags(fs, args)
 
 	level, err := parseSpLevel(*spLevel)
 	if err != nil {
@@ -555,7 +580,7 @@ func cmdPushMigrBm(args []string) {
 	fs.Var(&migr, "migr", "migration id")
 	bmIdx := fs.Uint("bm-idx", 0, "chunk index")
 	bitmapHex := fs.String("bitmap-hex", "", "chunk bytes as hex")
-	fs.Parse(args)
+	parseFlags(fs, args)
 
 	bitmap, err := hex.DecodeString(strings.TrimSpace(*bitmapHex))
 	if err != nil {
@@ -592,7 +617,7 @@ func cmdPushMigrBm(args []string) {
 func cmdGetDnInfo(args []string) {
 	var g globals
 	fs := newFlagSet("get-dn-info", &g)
-	fs.Parse(args)
+	parseFlags(fs, args)
 
 	conn, client, err := g.dial()
 	if err != nil {
@@ -616,7 +641,7 @@ func cmdGetSideInfo(args []string) {
 	var g globals
 	fs := newFlagSet("get-side-info", &g)
 	sp, leg, side := sidePointerFlags(fs)
-	fs.Parse(args)
+	parseFlags(fs, args)
 
 	conn, client, err := g.dial()
 	if err != nil {
@@ -661,7 +686,7 @@ func cmdCheckDn(args []string) {
 	fresh := fs.Bool("fresh", false,
 		"send rounds until one answers from an observation read after "+
 			"the command began")
-	fs.Parse(args)
+	parseFlags(fs, args)
 
 	conn, client, err := g.dial()
 	if err != nil {
@@ -696,7 +721,7 @@ func cmdCheckSide(args []string) {
 	fresh := fs.Bool("fresh", false,
 		"send rounds until one answers from an observation read after "+
 			"the command began")
-	fs.Parse(args)
+	parseFlags(fs, args)
 
 	conn, client, err := g.dial()
 	if err != nil {
@@ -768,7 +793,7 @@ func cmdWaitHydrated(args []string) {
 	limit := fs.Float64("timeout", 120, "seconds to wait for full hydration")
 	minFirst := fs.Uint64("min-first", 0,
 		"the first parseable sample must show at least this many hydrated")
-	fs.Parse(args)
+	parseFlags(fs, args)
 
 	conn, client, err := g.dial()
 	if err != nil {
@@ -861,7 +886,7 @@ func cmdWaitZeroed(args []string) {
 	sp, leg, side := sidePointerFlags(fs)
 	interval := fs.Float64("interval", 0.5, "seconds between samples")
 	limit := fs.Float64("timeout", 120, "seconds to wait for the side's zeroing")
-	fs.Parse(args)
+	parseFlags(fs, args)
 
 	conn, client, err := g.dial()
 	if err != nil {
@@ -916,7 +941,7 @@ func cmdNsId(args []string) {
 	var g globals
 	fs := newFlagSet("ns-id", &g)
 	sp, leg, _ := sidePointerFlags(fs)
-	fs.Parse(args)
+	parseFlags(fs, args)
 
 	uuid, nguid := common.DnNsIdentity(
 		uint64(g.cluster), uint64(*sp), uint64(*leg))
@@ -942,7 +967,7 @@ func cmdHostId(args []string) {
 	var g globals
 	fs := newFlagSet("host-id", &g)
 	hostNqn := fs.String("hostnqn", "", "host nqn to derive the id from")
-	fs.Parse(args)
+	parseFlags(fs, args)
 
 	if *hostNqn == "" {
 		die("--hostnqn is required")

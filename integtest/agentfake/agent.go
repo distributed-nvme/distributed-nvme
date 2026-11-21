@@ -2,10 +2,13 @@
 // (dnv-worker.md, Integration test plan, The fake agent). One Agent
 // implements the generated DiskNodeAgent and ControllerNodeAgent services and
 // answers as a real agent would: it applies the agents' revision gate per
-// object and their ordering rule, refuses a bitmap push for a migration or a
-// clone it does not know, derives every *Info row from the last request it
-// accepted for the object, reports only changes on a Check stream, and stamps
-// every answer with a new observation. Levers a test sets make it misbehave.
+// object and their ordering rule, answers a round or an info read of an
+// object it holds no stored request or revision for as unknown, refuses a
+// bitmap push for a migration or a clone it does not know, derives every
+// *Info row from the last request it accepted for the object, reports only
+// changes on a Check stream, and answers every round or info read about an
+// object it knows, and every Syncup* it does not refuse, from a new
+// observation. Levers a test sets make it misbehave.
 //
 // Two fronts set the same levers, so one fake cannot drift from itself. The
 // behavior file of the fakeagent program, whose format ParseBehavior parses
@@ -17,29 +20,38 @@
 // Objects are keyed as the behavior file keys them — "dn", "cn",
 // "side <sp_id>:<leg_id>:<side_id>", "cntlr <sp_id>:<cntlr_id>", ids in plain
 // decimal (DnKey, CnKey, SideKey, CntlrKey) — and every rule and every lever
-// is per object.
+// is per object. Unlike a real agent, which keys each object by its cluster
+// and its node too, the fake keeps one dn and one cn object and reads no
+// call's cluster id or node id but GetCnStore's, so it answers about the node
+// it holds whatever node a call names.
 //
 // Every Check* and Get*Info reply, and every Syncup* reply that does not
 // refuse its request, carries an observation stamp (dnagent.md SH28) beside
 // its *Info, never inside it, so the change-only rule's fingerprint of the
-// *Info stays put: the fake observes an object at every answer, so the
-// observation's time is the answer's own, made later than the object's
-// previous observation, and its trace id is the call's — the round's own for
-// a Check* round. Every round is thus a fresh, new observation to the worker
-// (dnv-worker.md HL7, RW23), unless a lever ages it or leaves it out, or
-// answers it from the read the round before started, as the read leftover
-// does (Object.ReadLeftover). A round
-// or an info read that refuses its object as unknown — one its parent does
-// not list, or one a forced reply_code refuses so — has no observation: its
-// stamp carries only the answer time. A Syncup* that saved the request also
-// carries the save time, and its observation comes after it; one that
-// refuses the request — a stale revision, an object its parent does not
-// list, or a refusing code the reply_code lever forces — carries no stamp and
-// no save time, as a live agent's refusal carries neither (architecture.md,
-// Live-state reporting). A forced ReplyCodeLeftover is no refusal: it carries
-// an observation, and no save time, since the fake saves nothing on a forced
-// code. The times are not stored: a restarted fake stamps the time it
-// answers, as an agent's startup reconcile stores a new observation.
+// *Info stays put: the fake observes an object at every answer that knows it
+// and does not refuse it, so the observation's time is the answer's own,
+// made later than the object's previous observation, and its trace id is the
+// call's — the round's own for a Check* round. Every round of an object it
+// knows is thus a fresh, new observation to the worker (dnv-worker.md HL7,
+// RW23), unless a lever ages it or leaves it out, or answers it from the read
+// the round before started, as the read leftover does (Object.ReadLeftover).
+// A round or an info read that refuses its object as unknown — one its parent does
+// not list, one it holds no stored request or revision for, or one a forced
+// reply_code refuses so — carries no revision, no *Info and no observation:
+// its stamp carries only the answer time and the agent's start (dnagent.md
+// SH25). A Syncup* that saved the request also carries the save time, and its
+// observation comes after it; one that refuses the request — a stale
+// revision, an object its parent does not list, or a refusing code the
+// reply_code or syncup_code lever forces — carries its code and the stored
+// revision alone, none for an unknown object, with no *Info, no bitmap info,
+// no stamp and no save time, as a live agent's refusal at a gate or of a
+// failed save carries none of them (dnagent.md SH28). While the Starting lever
+// is set, every Syncup* is refused with ReplyCodeStarting ahead of every
+// gate, with no revision and a stamp of the answer time and the lever's
+// start (dnagent.md SH33). A forced ReplyCodeLeftover is no refusal: it
+// carries an observation, and no save time, since the fake saves nothing on
+// a forced code. The times are not stored: a restarted fake stamps the time
+// it answers, as an agent's startup reconcile stores a new observation.
 //
 // The stored state — each object's last accepted request and revision plus
 // the bitmap chunks it received — lives in memory, and in the state file of

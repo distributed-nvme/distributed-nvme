@@ -110,7 +110,10 @@ reflection: one subcommand per `DiskNodeAgent` RPC, each reply printed as
 protojson, and a failure on a gRPC error or an unexpected reply code. It sends
 the stage's trace id as metadata and in `Check*` requests (`grpc.md`, Drivers
 and fakes), and prints a leg's namespace identity (`common.DnNsIdentity`) and
-a host NQN's host id, which the script never derives itself.
+a host NQN's host id, which the script never derives itself. It refuses a
+word left after a subcommand's flags, since Go's flag package would read
+`--fresh false` as `--fresh` and leave the flags after the word unread: a
+boolean flag is written `--flag` or `--flag=false`.
 
 The agent answers a check round and an info read from its latest observation of
 the object, and only a round starts a read of the node (`dnagent.md` SH28,

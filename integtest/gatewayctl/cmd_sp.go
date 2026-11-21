@@ -393,9 +393,9 @@ func setupDeleteCntlr(fs *flag.FlagSet) job {
 
 // setupSetCntlrEnabled drives UpdateCntlrEnabled
 // (gateway.md, Cntlrs and inspects). --enabled defaults to true because
-// disabling is the deliberate act and re-enabling is the undo; the flag
-// package never consumes the next argument for a bool, so the script must
-// write `--enabled=false`, never `--enabled false`.
+// disabling is the deliberate act and re-enabling is the undo; the disable
+// is written `--enabled=false`, since parseArgs refuses the word a separate
+// `false` would leave.
 func setupSetCntlrEnabled(fs *flag.FlagSet) job {
 	spName := fs.String("sp", "", "sp_name of the storage pool")
 	var rev hexUint
