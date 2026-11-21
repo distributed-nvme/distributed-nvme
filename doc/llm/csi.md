@@ -833,6 +833,11 @@ every delete leaves nothing behind.
 No case reads back a write made during a failover, which a failover can lose
 in the cases that `architecture.md`, Known limits, A failover while the
 old primary serves can lose an acknowledged write, lists.
+The controller plugin's Go tests answer its gateway calls from a stand-in of
+their own, `fakeGateway`, which keeps the plugin's clusters, pools, thin
+devices, subsystems and cntlr lists in maps and answers with the gateway's
+codes; it is not the dnvctl suite's fake gateway, which keeps no state. A
+difference between that stand-in and the gateway shows only in this suite.
 
 ### Topology and parameters
 
