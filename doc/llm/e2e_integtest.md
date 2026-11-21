@@ -250,8 +250,8 @@ headroom also keeps the allocator's second tier out of reach wherever there are
 more disk-node guests than legs per group, which a run with the copy case
 needs, save where react's steer leaves no enabled side-less disk node on a
 guest outside the group's (E2E4), and as one more guest does not always lower
-the bound, a shape above the per-kernel cap is told how many disk-node guests
-it needs.
+the bound, a value above the per-kernel cap dies naming what the shape
+needs (E2E3).
 
 **Event thresholds.** Only a pool's create sets its thresholds, so each case's
 set is chosen just before its pool is built, and a case without one dies rather
@@ -305,7 +305,10 @@ and never invoked.
 
 E2E3. **The dn agents per disk-node guest default to the placement bound.** An
 override below it is a warning naming the demand it risks, never an error; a
-value above the per-kernel cap is a die naming the guest count the shape needs.
+value above the per-kernel cap is a die: an operator's value is told to come
+under the cap or go, as no guest count makes it fit, and the die names the
+guest count the shape needs when the shape's own bound is above the cap,
+and the bound when it is within it.
 
 E2E4. **Every dn agent of a guest registers that guest as its location**, so
 groups straddle guests and, with more disk-node guests than legs per group,
@@ -412,7 +415,7 @@ nvmet port it needs exists.
 E2E10. **Hosts reach namespaces through the cdc, and every path a host holds is
 the suite's own, but for nvme-stas's inside the cutoff case.** nvme-cli's
 autoconnector is masked at preflight and at every rebuild and read back, and
-nvme-stas must be inactive at preflight. The one exception is host0 inside the
+nvme-stas must not be running or starting at preflight. The one exception is host0 inside the
 cutoff case, whose subject is what a host running nvme-stas sees: there
 nvme-stas runs on the cdc suite's settings (`cdc.md`, Integration test plan)
 against this run's cdc alone, the autoconnector still masked, and host0 lets
@@ -486,7 +489,11 @@ the gateway makes for that call, never by the converge it sets off, which runs
 under the worker's ids (`dnv-worker.md` RW10). Every wait on a condition is a
 bounded poll, never a fixed sleep: a stack built from nothing gets the widest
 budget, an increment a narrower one, and a reaction its threshold plus a few
-passes.
+passes. A read that a negative rests on, a node's listing of its paths, a
+host's look for a namespace's device and the look for a control-plane
+daemon's exit, fails its poll or its assertion when it did not answer,
+through ssh, sudo or the tool itself, as a failed read taken for an absence
+would pass every negative built on it.
 
 **Setup** proves each layer before the next rests on it: the gateway serving;
 the cluster storing an extent-size-only conf on the default bin ladder
@@ -1233,8 +1240,8 @@ and no lockdown the lockdown file shows, as no start line of the suite takes
 `integtest/nvmet_debugfs.sh`, the lab tool that builds and installs nvmet
 modules with the option (`layout.md`, Directory tree); that a host is a
 clean initiator — sudo, nvme-tcp and multipath, its identity files,
-generated if absent and never overwritten, nvme-stas inactive and the masked
-autoconnector (E2E10); that host0, when the copy case is in the run, has the
+generated if absent and never overwritten, nvme-stas not running or starting
+and the masked autoconnector (E2E10); that host0, when the copy case is in the run, has the
 tools of its fio stamps, fio, cmp, readlink and pkill; that host0, when the
 copy or the
 react case runs with md-raid1, has

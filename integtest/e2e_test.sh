@@ -217,13 +217,15 @@ NVMET=/sys/kernel/config/nvmet
 # Constants: ports (E2E9; e2e_integtest.md, Topology and parameters)
 # ---------------------------------------------------------------------------
 #
-# Bound-port inventory of the six existing suites, verified against their own
+# Bound-port inventory of the seven other suites, verified against their own
 # declaration blocks: worker_test.sh 12379/12380, 29600-29603, 29700-29702;
 # gateway_test.sh 15379/15380, 29810-29812, 29820-29823, 29830-29832;
 # cdc_test.sh 13379/13380, 18009-18012, 14420-14423; cnagent_test.sh
 # 29528/29529 + trsvcid 4200; dnagent_test.sh 29528 + trsvcid 4200;
-# dnvctl_test.sh 29840/29841. Production, per those suites' comments: gateway
-# 29527, etcd 2379.
+# dnvctl_test.sh 29840/29841; csi_test.sh 17379/17380, 29870, 18030, 28900,
+# 28950 + trsvcid 4400 inside its band 4400-4449, and k3s's 6443 on its
+# Kubernetes guests (its DEAD_CDC_PORT, 18039, is a port no cdc listens on).
+# Production, per those suites' comments: gateway 29527, etcd 2379.
 #
 # Nothing below is BOUND by any of them. Two numbers do APPEAR elsewhere:
 # DN_ADDR and CN_ADDR (dnvctl_test.sh) carry 127.0.0.1:29901 and :29902 as
@@ -1887,31 +1889,51 @@ derive_params() {
 	# V this shape actually needs rather than telling anyone to add guests one
 	# at a time and try again. The bound falls to 1 as V grows, so the search
 	# always terminates inside its span.
+	#
+	# The search is for a bound above the cap, and it runs only then. A value
+	# above the cap that came from the operator's --dns-per-vm is wrong at any
+	# guest count, so that die always says to lower it or drop it, and names
+	# the guest count only when the shape's own bound is above the cap too;
+	# a bound within the cap needs no guest the run lacks (E2E3).
 	if [ "$DNS_PER_VM" -gt "$MAX_DNS_PER_VM" ]; then
-		local v d c want=0
-		for ((v = DN_VM_CNT + 1; v <= DN_VM_CNT + MAX_DNS_PER_VM; v++)); do
-			d=$((v - LEGS + 1))
-			c=$LEGS
-			[ "$d" -ge "$LEGS" ] || c=$d
-			if [ $((c * (GRP_CNT + 2) / d + 1)) -le "$MAX_DNS_PER_VM" ]; then
-				want=$v
-				break
-			fi
-		done
-		die "$DNS_PER_VM dnagents per VM exceeds MAX_DNS_PER_VM" \
-			"($MAX_DNS_PER_VM): this shape occupies up to" \
-			"$((LEGS * (GRP_CNT + 2))) distinct DNs — the create's" \
-			"$((LEGS * GRP_CNT)) plus ops step 2's two grows — spread over" \
-			"$DN_VM_CNT DN VM(s), and ops step 8 then needs $LEGS of those" \
-			"VMs to still hold a side-less one." \
-			"$(if [ "$want" -gt 0 ]; then
-				echo "It needs at least $want --dn guests at" \
-					"$SLICE_CNT slices and $REDUND; adding fewer" \
-					"may not lower the bound at all."
+		local v d c want=0 guests=""
+		if [ "$DNS_PER_VM_BOUND" -gt "$MAX_DNS_PER_VM" ]; then
+			for ((v = DN_VM_CNT + 1; v <= DN_VM_CNT + MAX_DNS_PER_VM; v++)); do
+				d=$((v - LEGS + 1))
+				c=$LEGS
+				[ "$d" -ge "$LEGS" ] || c=$d
+				if [ $((c * (GRP_CNT + 2) / d + 1)) -le "$MAX_DNS_PER_VM" ]; then
+					want=$v
+					break
+				fi
+			done
+			if [ "$want" -gt 0 ]; then
+				guests="The bound itself, $DNS_PER_VM_BOUND, is above the cap"
+				guests="$guests on $DN_VM_CNT DN VM(s): this shape occupies up"
+				guests="$guests to $((LEGS * (GRP_CNT + 2))) distinct DNs — the"
+				guests="$guests create's $((LEGS * GRP_CNT)) plus ops step 2's two"
+				guests="$guests grows — and ops step 8 then needs $LEGS VMs to"
+				guests="$guests still hold a side-less one, so it needs at least"
+				guests="$guests $want --dn guests at $SLICE_CNT slices and"
+				guests="$guests $REDUND; adding fewer may not lower the bound at all."
 			else
-				echo "Use fewer slices: no number of --dn guests" \
-					"brings this shape under the cap."
-			fi)"
+				guests="The bound itself, $DNS_PER_VM_BOUND, is above the cap,"
+				guests="$guests and no number of --dn guests brings this shape"
+				guests="$guests under it: use fewer slices."
+			fi
+		else
+			guests="This shape needs no more --dn guests: its placement bound"
+			guests="$guests on $DN_VM_CNT DN VM(s) at $SLICE_CNT slices and"
+			guests="$guests $REDUND is $DNS_PER_VM_BOUND, within the cap."
+		fi
+		if [ -n "$DNS_PER_VM_OPT" ]; then
+			die "--dns-per-vm $DNS_PER_VM exceeds MAX_DNS_PER_VM" \
+				"($MAX_DNS_PER_VM) at any guest count: give a value from 1 to" \
+				"$MAX_DNS_PER_VM (one below the bound runs with a warning), or" \
+				"drop --dns-per-vm for the bound. $guests"
+		fi
+		die "$DNS_PER_VM dnagents per VM exceeds MAX_DNS_PER_VM" \
+			"($MAX_DNS_PER_VM). $guests"
 	fi
 
 	DN_TOTAL=$((DN_VM_CNT * DNS_PER_VM))
@@ -2238,9 +2260,10 @@ host_dev() { # <uuid>
 	printf '/dev/disk/by-id/nvme-uuid.%s' "$1"
 }
 
-# host_dev_present is the predicate; wait_dev and wait_dev_gone are the bounded
-# waits. `test -e` FOLLOWS the symlink, so what it answers is "the head disk
-# exists", not "a dangling link exists".
+# host_dev_present and host_dev_absent are the predicates of wait_dev and
+# wait_dev_gone, and those two are the bounded waits (host_dev_absent's
+# comment says why its read is strict). `test -e` FOLLOWS the symlink, so
+# what both answer is "the head disk exists", not "a dangling link exists".
 #
 # THE TWO DIRECTIONS ARE NOT SYMMETRIC, and getting that backwards costs a
 # whole run in timeouts:
@@ -2264,8 +2287,16 @@ host_dev_present() { # <h> <uuid>
 	ssh_host "$1" "test -e $(host_dev "$2")"
 }
 
+# host_dev_absent is strict where host_dev_present need not be: a failed ssh
+# reads as "not there yet" to the appearing wait, which then polls again, but
+# "gone" to the disappearing one, which would pass on it. So the guest prints
+# a word for each answer of `test -e`, and only "absent" is an absence: ssh's
+# 255, sudo's refusal and an empty reply all fail the poll.
 host_dev_absent() { # <h> <uuid>
-	! host_dev_present "$1" "$2"
+	local out
+	out=$(ssh_host "$1" "if test -e $(host_dev "$2"); then echo present; else echo absent; fi") ||
+		return 1
+	[ "$out" = absent ]
 }
 
 wait_dev() { # <h> <uuid> [secs]
@@ -2347,8 +2378,8 @@ host_io_sizes_check() { # <h> <uuid> <paths> <what>
 # ---------------------------------------------------------------------------
 
 # subsys_json_of normalises `nvme list-subsys -o json` into something jq can
-# read: the command prints nothing at all when the node holds no controller,
-# and an empty string is not JSON.
+# read: an empty string is not JSON, so empty output reads as `[]`, as the
+# command itself prints on a node that holds no controller.
 subsys_json_of() { # <raw>
 	if [ -z "${1//[[:space:]]/}" ]; then
 		printf '[]'
@@ -2357,13 +2388,26 @@ subsys_json_of() { # <raw>
 	fi
 }
 
-host_subsys_json() { # <h>
-	subsys_json_of "$(ssh_host_ok "$1" "nvme list-subsys -o json 2>/dev/null")"
+# node_subsys_json is the one listing of a node's NVMe paths, read through
+# the dying ssh form <ssh fn> (ssh_host, ssh_cn): it prints the listing, `[]`
+# for a node that holds no controller, and fails, printing nothing, when the
+# read did not answer. The guest prints nvme's own exit status on a line of
+# its own after the listing, and only "rc=0" is an answer: a failed ssh or
+# sudo, and an nvme that failed or crashed with nothing on stdout, are a
+# failed read and never a node with no path, which every negative built on
+# the listing would pass on. host_subsys_json and cn_subsys_json are its two
+# roles; copy_src_released reads through cn_subsys_json.
+node_subsys_json() { # <ssh fn> <idx>
+	local raw rc
+	raw=$("$1" "$2" 'nvme list-subsys -o json 2>/dev/null; r=$?; echo; echo "rc=$r"') ||
+		return 1
+	rc=$(printf '%s\n' "$raw" | tail -n 1)
+	[ "$rc" = rc=0 ] || return 1
+	subsys_json_of "$(printf '%s\n' "$raw" | sed '$d')"
 }
 
-cn_subsys_json() { # <v>
-	subsys_json_of "$(ssh_cn_ok "$1" "nvme list-subsys -o json 2>/dev/null")"
-}
+host_subsys_json() { node_subsys_json ssh_host "$1"; } # <h>
+cn_subsys_json() { node_subsys_json ssh_cn "$1"; }     # <v>
 
 # path_field reads one field of the path a node holds to one target, e.g. State
 # (live/connecting/resetting/deleting) or Name (the nvme<X> controller). It
@@ -2386,8 +2430,20 @@ path_field() { # <json> <nqn> <traddr> <trsvcid|""> <field>
 		  | .[$f] ] | first // "none"'
 }
 
+# host_path_field and cn_path_field answer "unread" when the listing did not
+# answer (node_subsys_json), a word no field takes: a poll for "none" or
+# "live" goes round on it, a reader that would take it for an absence
+# (host_path_not_live) and the readers that would take it for a
+# controller's name (the *_ctrl_is_present pair, connect_added_ctrl, the
+# witness check of host_wait_path_not_live, and the captures of ops step 3
+# and react step 12) test for it by name.
 host_path_field() { # <h> <nqn> <traddr> <field>
-	path_field "$(host_subsys_json "$1")" "$2" "$3" "" "$4"
+	local j
+	j=$(host_subsys_json "$1") || {
+		printf 'unread'
+		return 0
+	}
+	path_field "$j" "$2" "$3" "" "$4"
 }
 
 # host_path_state is "live" once the controller is connected and "connecting"
@@ -2408,15 +2464,21 @@ host_ctrl() { # <h> <nqn> <traddr>   → nvme<X>, or "none"
 #
 # It asks for the literal "none" rather than testing for emptiness, because
 # path_field ends `first // "none"` and answers "" only when the jq did not
-# run at all (host_path_not_live's `-n` guard carries the reasoning). An empty
-# reading here means the measurement failed, and "the path is gone" is the
-# wrong way for a failed measurement to resolve.
+# run at all (host_path_not_live's `-n` guard carries the reasoning), and
+# host_path_field answers "unread" when the listing did not answer. Either
+# reading means the measurement failed, and "the path is gone" is the wrong
+# way for a failed measurement to resolve.
 host_path_is_none() { # <h> <nqn> <traddr>
 	[ "$(host_path_state "$1" "$2" "$3")" = none ]
 }
 
 cn_path_field() { # <v> <nqn> <traddr> <trsvcid> <field>
-	path_field "$(cn_subsys_json "$1")" "$2" "$3" "$4" "$5"
+	local j
+	j=$(cn_subsys_json "$1") || {
+		printf 'unread'
+		return 0
+	}
+	path_field "$j" "$2" "$3" "$4" "$5"
 }
 
 # ANA_LAST carries the state the last host_ana_is/cn_ana_is saw. wait_until's
@@ -2439,8 +2501,8 @@ cn_path_field() { # <v> <nqn> <traddr> <trsvcid> <field>
 # where the assignment would die with the subshell.
 ANA_LAST=""
 
-# ANA_CTRL is the CONTROLLER the same predicate resolved, or "none" when there
-# was not one. It exists because "none" is an answer ana_of gives for two
+# ANA_CTRL is the CONTROLLER the same predicate resolved, "none" when there
+# was not one, or "unread" when the listing did not answer. It exists because "none" is an answer ana_of gives for two
 # different faults — no controller at all, and a controller whose namespaces do
 # not include this uuid — and collapsing them sends the reader to ANA and the
 # cdc when the host holds no controller at all. host_wait_ana/cn_wait_ana split
@@ -2549,7 +2611,7 @@ host_ana_is() { # <h> <nqn> <traddr> <uuid> <want>
 host_ctrl_is_present() { # <h> <nqn> <traddr>
 	ANA_LAST=""
 	ANA_CTRL=$(host_ctrl "$1" "$2" "$3")
-	[ -n "$ANA_CTRL" ] && [ "$ANA_CTRL" != none ]
+	[ -n "$ANA_CTRL" ] && [ "$ANA_CTRL" != none ] && [ "$ANA_CTRL" != unread ]
 }
 
 # host_wait_ana bounds the wait and dies with the stage and trace id. The
@@ -2601,7 +2663,7 @@ cn_ana_is() { # <v> <nqn> <traddr> <trsvcid> <want>
 cn_ctrl_is_present() { # <v> <nqn> <traddr> <trsvcid>
 	ANA_LAST=""
 	ANA_CTRL=$(cn_path_field "$1" "$2" "$3" "$4" Name)
-	[ -n "$ANA_CTRL" ] && [ "$ANA_CTRL" != none ]
+	[ -n "$ANA_CTRL" ] && [ "$ANA_CTRL" != none ] && [ "$ANA_CTRL" != unread ]
 }
 
 # cn_wait_ana is host_wait_ana's split, one hop down and for the same reason:
@@ -5352,8 +5414,9 @@ unmask() {
 	return 0
 }
 
-# stas_state reports the two nvme-stas daemons. They must be inactive for the
-# whole run but for the cutoff case on host0: stacd connects on its own and
+# stas_state reports the two nvme-stas daemons. They must not be running or
+# starting at preflight (E2E10), and nothing in the run starts them but the
+# cutoff case on host0: stacd connects on its own and
 # stafd owns discovery controllers, and nvme-stas sends a DIM in-capsule to
 # every discovery controller it knows.
 stas_state() {
@@ -5429,12 +5492,18 @@ stas_start() { # <cdc traddr> <cdc trsvcid>
 		return 1
 	}
 	if [ ! -f "$STAS_BACKUP/.taken" ]; then
-		if systemctl is-active --quiet stafd ||
-			systemctl is-active --quiet stacd; then
-			echo "stas_start: nvme-stas is running and this suite did not" \
-				"start it" >&2
-			return 1
-		fi
+		# The words preflight refuses (preflight_host): `is-active
+		# --quiet` exits zero for active and reloading only, so a unit
+		# still activating would pass it.
+		for f in stafd stacd; do
+			case "$(systemctl is-active "$f" 2>/dev/null)" in
+			activ* | reloading)
+				echo "stas_start: nvme-stas is running or starting and" \
+					"this suite did not start it" >&2
+				return 1
+				;;
+			esac
+		done
 		mkdir -p "$STAS_BACKUP" || return 1
 		for f in stafd.conf stacd.conf; do
 			if [ -f "/etc/stas/$f" ]; then
@@ -6154,9 +6223,8 @@ discover() { # <traddr> <trsvcid> <hostnqn> <hostid>
 # at all when the node holds none. It is the question `nvme connect` and
 # `nvme connect-all` DO NOT ANSWER with their exit status (see connect_all).
 #
-# sysfs and not `nvme list-subsys`: that command prints NOTHING AT ALL on a
-# node with no controller (the driver's subsys_json_of exists for exactly that
-# shape) and no guest in this suite has a jq to parse it with. This is
+# sysfs and not `nvme list-subsys`: no guest in this suite has a jq to parse
+# that command's JSON with. This is
 # disconnect_discovery's walk with the NQN comparison turned around.
 ctrls_of() { # <nqn>
 	local ctrl nqn
@@ -6787,8 +6855,15 @@ sig_dir() { # <target> <dir> <signal>
 	ssh_to "$1" "kill -$3 \$(cat $WORK/$2/pid)"
 }
 
+# proc_gone is true once the process of <dir>'s pid file has exited, and
+# only on the guest's own word for it: the guest prints "gone", "alive" or
+# "nopid", so a failed ssh and a pid file that does not read are no answer,
+# never an exit, as for every read a negative rests on (host_dev_absent).
 proc_gone() { # <target> <dir>
-	! ssh_to "$1" "kill -0 \$(cat $WORK/$2/pid) 2>/dev/null"
+	local out
+	out=$(ssh_to "$1" "p=\$(cat $WORK/$2/pid 2>/dev/null) || { echo nopid; exit 0; }; if kill -0 \"\$p\" 2>/dev/null; then echo alive; else echo gone; fi") ||
+		return 1
+	[ "$out" = gone ]
 }
 
 # The cutoff case's outage stage calls it for etcd, a daemon it signals that
@@ -7358,9 +7433,14 @@ assert_bytes() { # <got> <floor> <label>
 # it is", requires the refusal to say that, and the answer
 # is only useful if it is derived from the suites' own declarations:
 # TR_SVC_ID (dnagent_test.sh) and TR_SVC_ID (cnagent_test.sh) are both 4200;
-# NVMET_PORT_BASE (cdc_test.sh) is 14420, for its four ports 14420..14423.
+# NVMET_PORT_BASE (cdc_test.sh) is 14420, for its four ports 14420..14423;
+# DN_TRSVCID and CN_TRSVCID (csi_test.sh) are both 4400, and TRSVCID_MIN and
+# TRSVCID_MAX (csi_test.sh), 4400..4449, are only the band in which that
+# suite's cleanup removes a port, which it never binds but at 4400.
 # gateway_test.sh's 4420/4421/4429 are payload its fake records and never
-# binds, so a real port on 4420 is the nvme-tcp default and not that suite's.
+# binds, so a real port on 4420 is the nvme-tcp default and not that suite's
+# (the arms are in that order: the default's arm comes before the csi
+# band's, which takes it in).
 port_owner_hint() { # <trsvcid>
 	case "$1" in
 	'' | none)
@@ -7383,7 +7463,20 @@ port_owner_hint() { # <trsvcid>
 		;;
 	4420 | 4421)
 		printf 'trsvcid %s is the nvme-tcp default port:' "$1"
-		printf ' a hand-made target, not a dnv suite'
+		printf ' a hand-made target, not a dnv suite; it lies inside the csi'
+		printf " suite's cleanup band 4400..4449 (TRSVCID_MIN, TRSVCID_MAX"
+		printf ' (csi_test.sh)), whose cleanup would remove it'
+		return 0
+		;;
+	4400)
+		printf 'trsvcid 4400 is the csi suite'
+		printf ' (DN_TRSVCID and CN_TRSVCID (csi_test.sh))'
+		return 0
+		;;
+	44[0-4][0-9])
+		printf "trsvcid %s lies inside the csi suite's cleanup band" "$1"
+		printf ' 4400..4449 (TRSVCID_MIN, TRSVCID_MAX (csi_test.sh)), which'
+		printf ' that suite removes but never binds'
 		return 0
 		;;
 	esac
@@ -7796,11 +7889,14 @@ preflight_host() { # <h>
 	# they run is inside the cutoff case, on host0, which starts them itself
 	# and stops them before its ending.
 	# "unknown" or "failed" is fine — the
-	# failure mode is a RUNNING one, and `active`/`activating` are the words
-	# systemctl uses for that.
+	# failure mode is a RUNNING one, and `active`, `activating` and
+	# `reloading` are the words systemctl is-active prints for a unit that
+	# runs or starts. `=activ*` takes the first two and no other word:
+	# "inactive" and "deactivating", a unit on its way down, do not start
+	# with it.
 	out=$(helper_host "$h" stas_state) || die "$label: the stas_state verb failed"
 	case "$out" in
-	*stafd=active* | *stacd=active*)
+	*stafd=activ* | *stacd=activ* | *stafd=reloading* | *stacd=reloading*)
 		die "$label: nvme-stas is running ($out). Stop it for the run:" \
 			"systemctl stop stafd stacd"
 		;;
@@ -8569,7 +8665,8 @@ diagnostics() {
 	#   * `last ctrl: none` is the no-path answer WHATEVER `last ANA` says —
 	#     that is the *_ctrl_is_present half of the wait, which takes no ANA
 	#     reading and clears ANA_LAST, so the line beside it reads
-	#     `(none read)`.
+	#     `(none read)`. `last ctrl: unread` is no answer at all: the listing
+	#     did not answer, which says nothing of the path.
 	#   * `last ANA: none` beside a CONTROLLER NAME is the other fault: the
 	#     path is up and the namespace is not on it.
 	#
@@ -8579,7 +8676,8 @@ diagnostics() {
 	log "  last ANA:   ${ANA_LAST:-(none read)}"
 	log "  last ctrl:  ${ANA_CTRL:-(none read)}"
 	# HOST_PATH_LAST is the same idea one layer out, and it is a PATH state
-	# (live / connecting / resetting / deleting / none) rather than an ANA
+	# (live / connecting / resetting / deleting / none, or unread for a
+	# listing that did not answer) rather than an ANA
 	# state — the two are read from different places and mean different things,
 	# which e2e_integtest.md, Diagnostics on failure, says. It is written
 	# only by host_path_not_live and cleared by host_wait_path_not_live at BOTH
@@ -9519,7 +9617,11 @@ disc_want_of_sp() { # <subsystem nqn> → DISC_WANT
 		cntlr_listed "$i" || continue
 		lines="$lines$1|${CNTLR_TRADDRS[$i]}|${CNTLR_TRSVCIDS[$i]}"$'\n'
 	done
-	DISC_WANT=$(printf '%s' "$lines" | sort)
+	# LC_ALL=C sorts by byte, as disc_records's jq sorts by code point: a
+	# locale's sort can order two addresses where one is the other's prefix
+	# (".12|" and ".125|") apart from jq, and the compare would then fail on
+	# the same set.
+	DISC_WANT=$(printf '%s' "$lines" | LC_ALL=C sort)
 }
 
 # sp_all_listed is the polling predicate wait_all_listed runs: true once every
@@ -9770,6 +9872,10 @@ host_connect_all() { # <h> <subnqn> [extra…]
 connect_added_ctrl() { # <h> <subnqn> <traddr>
 	local c
 	c=$(host_ctrl "$1" "$2" "$3")
+	[ "$c" != unread ] ||
+		die "host$1's \`nvme list-subsys\` did not answer after the connect" \
+			"to $2 on $3 (ssh, sudo or nvme itself failed), so whether it" \
+			"added a controller is not known"
 	if [ -z "$c" ] || [ "$c" = none ]; then
 		die "host$1 holds no nvme controller for $2 on $3 after the connect," \
 			"although it does hold one or more for $2 on OTHER transports —" \
@@ -12229,8 +12335,8 @@ cntlr_pos_of_addr() { # <addr_port> → index | -1
 # `nvme disconnect`'s status, so the wait after it is what proves the
 # disconnect landed — which is the whole reason a `none` reading is the right
 # thing to demand there. The cutoff case's stage 04, which waits for stacd's,
-# uses cut_old_path_dropped instead: a listing that failed reads as no path at
-# all, which this predicate takes for gone.
+# uses cut_old_path_dropped instead: a listing stacd catches while it deletes
+# the controller can read empty, which this predicate takes for gone.
 #
 # IT IS NOT THE PREDICATE FOR A `cntlr delete`: after a delete the control
 # plane has carried out correctly (the record gone, and on the CN both
@@ -12307,14 +12413,15 @@ host_path_not_live() { # <h> <nqn> <traddr>
 		log "  host$1's path to $3 for $2: state '$s'"
 	fi
 	# The `-n` is not decoration. path_field cannot answer "" — it ends
-	# `first // "none"` and subsys_json_of turns a node holding nothing, or an
-	# ssh that came back empty, into `[]` — so an empty reading means the jq
+	# `first // "none"` and subsys_json_of turns a node holding nothing into
+	# `[]` — so an empty reading means the jq
 	# itself did not run, and "not live" is exactly the wrong way for that to
 	# resolve. It keeps waiting instead, and the log line above says `state ''`
 	# (which is what HOST_PATH_SEEN is for: an empty reading and a cleared
 	# HOST_PATH_LAST are the same string, and before the flag this one line
-	# never printed).
-	[ -n "$s" ] && [ "$s" != live ]
+	# never printed). "unread", a listing that did not answer
+	# (host_path_field), keeps it waiting for the same reason.
+	[ -n "$s" ] && [ "$s" != live ] && [ "$s" != unread ]
 }
 
 # host_wait_path_not_live bounds that wait and closes TWO OF THE THREE ways it
@@ -12346,7 +12453,7 @@ host_wait_path_not_live() { # <h> <nqn> <traddr> <witness ctrl> <what> [secs]
 	local entry
 	HOST_PATH_LAST=""
 	HOST_PATH_SEEN=0
-	if [ -z "$4" ] || [ "$4" = none ]; then
+	if [ -z "$4" ] || [ "$4" = none ] || [ "$4" = unread ]; then
 		die "host$1: host_wait_path_not_live was given no witness controller" \
 			"for $2 on $3. Any state but 'live' ends this wait and a path that" \
 			"was never there reads 'none', so without a controller that this" \
@@ -12634,13 +12741,14 @@ ops_slots() {
 	# lines below, after the disable and the delete, with a message blaming the
 	# call site for not having captured a witness when in fact it did.
 	case "$ctrl3" in
-	'' | none)
+	'' | none | unread)
 		die "host0's third path to $traddr3 for $SS0 resolved to no nvme" \
 			"controller ('$ctrl3') while the wait above had just seen it" \
 			"live. 'none' means the path is not in \`nvme list-subsys\`;" \
 			"an EMPTY reading means the driver-side jq did not run at all," \
 			"which is a truncated or unparseable list-subsys reply and not" \
-			"a statement about the host."
+			"a statement about the host, and 'unread' a listing that did" \
+			"not answer."
 		;;
 	esac
 	assert_eq "$(host_path_state 0 "$SS0" "$PRIMARY_TRADDR")" live \
@@ -15381,15 +15489,15 @@ copy_src_sp_build() { # [<td size> <pattern MiB> <what>]
 }
 
 # copy_src_released is true once none of the CNs <v…> holds a controller to
-# the second pool's source. It reads each CN's listing with ssh_cn, not
-# cn_path_field's ssh_cn_ok, so a listing that did not answer is no answer,
-# rather than the "none" an empty reading turns into.
+# the second pool's source. It reads each CN's listing with cn_subsys_json,
+# so a listing that did not answer, by ssh or by nvme's own status, fails the
+# pass rather than reading as no controller.
 copy_src_released() { # <v…>
-	local v raw
+	local v j
 	for v in "$@"; do
-		raw=$(ssh_cn "$v" "nvme list-subsys -o json 2>/dev/null") || return 1
-		[ "$(path_field "$(subsys_json_of "$raw")" "$SS_SRC" \
-			"$SRC_TRADDR" "$SRC_TRSVCID" Name)" = none ] || return 1
+		j=$(cn_subsys_json "$v") || return 1
+		[ "$(path_field "$j" "$SS_SRC" "$SRC_TRADDR" "$SRC_TRSVCID" Name)" = none ] ||
+			return 1
 	done
 	return 0
 }
@@ -24124,12 +24232,13 @@ react_mc_cut_cnt() { # <mark> <nqn> <traddr:trsvcid>
 # <src traddr>:<src trsvcid> and still holds its path to the destination
 # <dst traddr>:<dst trsvcid>, connecting, and the primary's log holds a
 # `leg path cut` record of the source's path after line <mark>
-# (react_mc_cut_cnt). The destination's path is read in the same listing
-# because a listing that failed reads no path at all, which must not pass
-# for the cut. The readings are logged as they change.
+# (react_mc_cut_cnt). A listing that did not answer fails the poll
+# (node_subsys_json); the destination's path is read in the same listing
+# because a listing that holds no path at all, however it came to be empty,
+# must not pass for the cut either. The readings are logged as they change.
 react_mc_cut_seen() { # <mark> <nqn> <src traddr> <src trsvcid> <dst traddr> <dst trsvcid>
 	local json src dst n sig
-	json=$(cn_subsys_json "$PRIMARY_CN")
+	json=$(cn_subsys_json "$PRIMARY_CN") || return 1
 	src=$(path_field "$json" "$2" "$3" "$4" State)
 	dst=$(path_field "$json" "$2" "$5" "$6" State)
 	n=$(react_mc_cut_cnt "$1" "$2" "$3:$4") || exit 1
@@ -24822,7 +24931,7 @@ react_power_loss() {
 	stage 12 "the primary's machine loses its power: failover, replacement, host0's reads, and the machine back with no cntlr"
 	local out wmark tag t0 boot_secs old_id old_addr old_traddr old_slot
 	local old_standby idle idle_addrs ctrl_dead msg i cnt=0 idx=-1
-	local repl_id repl_addr repl_traddr hits
+	local repl_id repl_addr repl_traddr hits st
 
 	sp_refresh
 	sp_read_roles
@@ -24852,6 +24961,16 @@ react_power_loss() {
 	assert_eq "$(host_path_state 0 "$SS0" "$STANDBY_TRADDR")" live \
 		"host0's path to the standby on cn$STANDBY_CN before the reset"
 	ctrl_dead=$(host_ctrl 0 "$SS0" "$old_traddr")
+	# The capture is checked here, before the reset, as ops step 3 checks its
+	# own: the path read live just now, so no controller name is a failed read.
+	case "$ctrl_dead" in
+	'' | none | unread)
+		die "host0's path to the primary on cn$REACT_PL_CN ($old_traddr)" \
+			"resolved to no nvme controller ('$ctrl_dead') right after it" \
+			"read live: '' is a jq that did not run, 'unread' a listing" \
+			"that did not answer"
+		;;
+	esac
 
 	wmark=$(worker_log_mark)
 	tag="dnv-e2e-react-power-mark-$(hex16 "$CLUSTER_ID")"
@@ -24903,7 +25022,10 @@ react_power_loss() {
 	# host0's head turns to the path it already holds to the new primary.
 	host_wait_ana 0 "$SS0" "$PRIMARY_TRADDR" "$UUID1" optimized
 	wait_dev 0 "$UUID1"
-	assert_ne "$(host_path_state 0 "$SS0" "$old_traddr")" live \
+	st=$(host_path_state 0 "$SS0" "$old_traddr")
+	assert_ne "$st" unread \
+		"host0's listing of its paths answered (one that did not reads 'unread')"
+	assert_ne "$st" live \
 		"host0's path to the reset cn$REACT_PL_CN is not live"
 	check_sha0 "through the new primary, after the primary's machine was reset"
 
@@ -24926,10 +25048,7 @@ react_power_loss() {
 	hits=$(printf '%s\n' "$DISC_LAST" | grep -cF -- "|$old_traddr|" || true)
 	assert_eq "$hits" 0 \
 		"the reset CN's transport is out of host0's discovery log (the failover took it out)"
-	case "$ctrl_dead" in
-	'' | none) ;;
-	*) ssh_host_ok 0 "timeout 30 nvme disconnect -d $ctrl_dead >/dev/null 2>&1 || true" ;;
-	esac
+	ssh_host_ok 0 "timeout 30 nvme disconnect -d $ctrl_dead >/dev/null 2>&1 || true"
 	wait_until "$WAIT_HOST" \
 		"host0 to stop holding a path to the reset cn$REACT_PL_CN" \
 		host_path_is_none 0 "$SS0" "$old_traddr"
@@ -25104,7 +25223,7 @@ case_react() {
 #    created before the case deletes it.
 #
 # THE HOST-SIDE EXCEPTIONS, both inside this case alone. host0 runs nvme-stas,
-# where E2E10 wants it inactive: stafd and stacd on the cdc suite's settings
+# where E2E10 wants it not running or starting: stafd and stacd on the cdc suite's settings
 # against this run's cdc, nvme-cli's autoconnector still masked (rule 6),
 # host0's own stas configuration copied before and put back after. host0's
 # suite-made paths are dropped before stas starts, so stacd is the only
@@ -25688,12 +25807,13 @@ cut_stop_primary() {
 }
 
 # cut_old_path_dropped is true when one reading of host0's paths shows the old
-# primary's gone and the new primary's live. A failed ssh or a listing taken
-# while stacd deletes the controller reads as no path at all, which alone
-# would pass for "gone"; it cannot show the new path live.
+# primary's gone and the new primary's live. A listing taken while stacd
+# deletes the controller can read as no path at all, which alone would pass
+# for "gone"; it cannot show the new path live. A listing that did not answer
+# fails the poll (node_subsys_json).
 cut_old_path_dropped() {
 	local j
-	j=$(host_subsys_json 0)
+	j=$(host_subsys_json 0) || return 1
 	[ "$(path_field "$j" "$SS0" "$CUT_OLD_TRADDR" "" State)" = none ] &&
 		[ "$(path_field "$j" "$SS0" "$CUT_NEW_TRADDR" "" State)" = live ]
 }
@@ -25794,7 +25914,7 @@ cut_cont_primary() {
 	# reconnects it as a standby's path.
 	want=$(printf '%s\n%s\n' \
 		"$SS0|$CUT_OLD_TRADDR|$CUT_OLD_TRSVCID" \
-		"$SS0|$CUT_NEW_TRADDR|$CUT_NEW_TRSVCID" | sort)
+		"$SS0|$CUT_NEW_TRADDR|$CUT_NEW_TRSVCID" | LC_ALL=C sort)
 	disc_want_of_sp "$SS0"
 	assert_eq "$DISC_WANT" "$want" \
 		"the listing rule lists both cntlrs again (architecture.md [D18])"
