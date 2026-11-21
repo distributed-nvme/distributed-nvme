@@ -1174,8 +1174,9 @@ func (g *fakeGateway) CheckControllerNodeRestore(
 
 func main() {
 	// The fake logs at Debug, the log level the suites run their dnv
-	// daemons at, save one dn agent in one case of the dn suite (grpc.md,
-	// Drivers and fakes).
+	// daemons at, save one dn agent in one case of the dn suite, the
+	// tutorial suite's daemons and the e2e upgrade case's v0.1.0 programs
+	// (grpc.md, Drivers and fakes).
 	common.SetLogLevel(slog.LevelDebug)
 	fs := flag.NewFlagSet("fakegateway", flag.ExitOnError)
 	fs.Usage = usage

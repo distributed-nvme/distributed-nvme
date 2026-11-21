@@ -18,7 +18,12 @@
 # every behavior file in place and dumps the diagnostics.
 #
 # NO SUDO anywhere: nothing in this suite needs root. Everything the script
-# creates lives under $WORK on the server, and cleanup removes exactly that.
+# creates on the server lives under $WORK, and cleanup removes exactly that,
+# but for panic_plant's scratch folder in /var/tmp, which the preflight makes
+# for the crash scan's sample log and removes before it returns or dies on
+# the sample, and which the cleanup also removes by its name, as an ssh that
+# fails around the folder's making or removal can leave it
+# (/var/tmp/dnv-panic-plant-worker.*).
 #
 # Log reading: every worker/agent log is one JSON object per line, and a log
 # being appended to while we `cat` it can end in a torn line, so every read
@@ -261,7 +266,10 @@ SSH_OPTS=(-o BatchMode=yes -o StrictHostKeyChecking=accept-new
 # Logging, assertions, failure handling
 # ---------------------------------------------------------------------------
 
-log() { echo "$*" >&2; }
+# A write that fails, as to a terminal that has closed, sends the run's
+# output to /dev/null from then on, so that a log line never ends the run's
+# exit handler under set -e.
+log() { echo "$*" >&2 || exec >/dev/null 2>&1; }
 
 # stage names the step for the failure report and mints the trace id
 # `it-<case>-<step>`, which every workerctl call of the step then stamps on its
@@ -304,6 +312,20 @@ assert_field() { # <json> <filter> <want> <label>
 on_exit() {
 	local rc=$?
 	trap - EXIT
+	# A signal while this handler runs: a Ctrl-C (SIGINT) reaches the
+	# command in hand, which it ends unless that command ignores it, a read
+	# of a command's output and an ssh still connecting among them, and the
+	# dump and the removals below go on; a SIGHUP, which a terminal that
+	# closes sends twice, is ignored here and by every command below; a
+	# SIGTERM ends the run at once. Output that fails, as a terminal that
+	# has closed does, goes to /dev/null from then on, so that set -e ends
+	# the handler at no log line: this line tries a write first, and log
+	# does the same at each of its writes. rc keeps the code the run was
+	# ending with, and the run exits with it but on a SIGTERM.
+	trap - TERM
+	trap : INT
+	trap '' HUP
+	printf '\n' >&2 2>/dev/null || exec >/dev/null 2>&1
 	if [ "$rc" -eq 0 ]; then
 		if [ "$CLEANUP_ONLY" -eq 0 ] && [ "$SETUP_DONE" -eq 1 ]; then
 			log ""
@@ -498,18 +520,20 @@ panic_dump() {
 # may.
 panic_plant() {
 	local d hits want
-	d=$(sshw "mktemp -d /var/tmp/dnv-panic-plant.XXXXXX") ||
+	d=$(sshw "mktemp -d /var/tmp/dnv-panic-plant-worker.XXXXXX") ||
 		die "making the crash scan's scratch directory on $TARGET failed"
 	case "$d" in
-	/var/tmp/dnv-panic-plant.?*) ;;
+	/var/tmp/dnv-panic-plant-worker.?*) ;;
 	*) die "mktemp on $TARGET printed '$d', not a scratch directory" ;;
 	esac
 	printf '%s\n' \
 		'{"level":"ERROR","msg":"os command failed","stderr":"panic: in a field\nfatal error: in a field"}' \
 		'panic: planted by the preflight' 'goroutine 1 [running]:' \
 		'fatal error: planted by the preflight' |
-		sshw "mkdir $d/sub && cat > $d/sub/plant.log" ||
-		die "writing the crash scan's sample log on $TARGET failed"
+		sshw "mkdir $d/sub && cat > $d/sub/plant.log" || {
+			sshw "rm -rf $d" || true
+			die "writing the crash scan's sample log on $TARGET failed"
+		}
 	hits=$(panic_lines "$d") || hits="(the read failed)"
 	sshw "rm -rf $d" || true
 	want="$d/sub/plant.log:2:panic: planted by the preflight"
@@ -1041,6 +1065,7 @@ pkill -f '$WORK/bin/dnv-worker' 2>/dev/null || true
 pkill -f '$WORK/bin/fakeagent' 2>/dev/null || true
 pkill -f '$WORK/bin/etcd --name dnv-it' 2>/dev/null || true
 sleep 0.5
+rm -rf /var/tmp/dnv-panic-plant-worker.*
 rm -rf $WORK
 echo cleaned
 EOF
@@ -1048,9 +1073,11 @@ EOF
 
 # cleanup signals every recorded pid (SIGTERM, SIGKILL after 5 s), falls back
 # to the three pkill -f forms, each matching only a program under $WORK, and
-# removes $WORK. Nothing outside $WORK is touched. A SIGSTOPped process (a
-# worker, or an etcd member in the three-member mode) is SIGCONTed first, or
-# it would never see the SIGTERM.
+# removes $WORK and the crash scan's sample folder by its name. Nothing else
+# outside $WORK is touched but for a process a stale pid file names: a
+# recorded pid is signalled with no check that it still runs the suite's
+# program. A SIGSTOPped process (a worker, or an etcd member in the
+# three-member mode) is SIGCONTed first, or it would never see the SIGTERM.
 cleanup() {
 	log "[server] cleanup: signal every recorded pid, then rm -rf $WORK"
 	cleanup_script | ssh "${SSH_OPTS[@]}" "$TARGET" "bash -s" || true
@@ -6576,7 +6603,9 @@ leader_is_not() { # <member>
 	[ "$now" != "$1" ]
 }
 
-# etcd_head_rev prints the store's revision, read from one member.
+# etcd_head_rev prints the store's revision: the largest the members report,
+# as etcdctl's endpoint status reads each member it is given; it fails when a
+# member does not answer.
 etcd_head_rev() {
 	local out rev
 	out=$(etcdctl_at "$ETCD_ENDPOINTS" endpoint status -w fields) || return 1
@@ -6720,9 +6749,9 @@ case_etcd_compact() {
 	# restart as such (SW4), the cluster conf watch too (RW21); the rescan's
 	# diff is the unit tests' (dnv-worker.md, Integration test plan, Rules
 	# exercised). The member is made a follower first, since the lab saw a
-	# kill of the leader fence every worker, as a leader's stop at this
-	# case's vote interval does (case etcd_leader runs at timers of its
-	# own); a follower's restart is shorter than the dead threshold plus one
+	# kill of the leader fence every worker, as a stop of the leader of 4 s or
+	# more at this case's vote interval does (case etcd_leader runs at timers
+	# of its own); a follower's restart is shorter than the dead threshold plus one
 	# vote interval (VW8 (a)), so no worker fences.
 	local busy
 	busy=$(busiest_member)
@@ -6811,9 +6840,9 @@ case_etcd_nospace() {
 	stage 2 "compact, defragment, disarm: every worker back with no other step"
 	# The operations doc's recovery of a store at its quota (operations.md,
 	# etcd refuses writes: its store is full): a compaction to the store's
-	# head that returns once etcd has removed the old values, then a
-	# defragmentation of every member, then the alarm's disarm, each under a
-	# long command timeout. The workers need no step.
+	# head that returns once the member that answers has removed the old
+	# values, then a defragmentation of every member, the two under a long
+	# command timeout, then the alarm's disarm. The workers need no step.
 	local rev
 	rev=$(etcd_head_rev)
 	sshw "$WORK/bin/etcdctl --endpoints $ETCD_ENDPOINTS --command-timeout=60s" \
@@ -6910,6 +6939,13 @@ main() {
 	OWN_BEFORE_FILE=$(mktemp)
 	OWN_JOIN_FILE=$(mktemp)
 	trap on_exit EXIT
+	# A run killed by SIGTERM, SIGINT or SIGHUP exits with the shell's
+	# code for the signal, so on_exit reads it as the failure it is, never
+	# as a PASS. The HUP trap ignores every later SIGHUP first: a terminal
+	# that closes sends a second one right after the first.
+	trap 'exit 143' TERM
+	trap 'exit 130' INT
+	trap 'trap "" HUP; exit 129' HUP
 	log "driver: $(hostname), server: $TARGET (ip $IP)"
 
 	if [ "$CLEANUP_ONLY" -eq 1 ]; then

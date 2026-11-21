@@ -86,9 +86,9 @@ holds by the shape of a use and fails closed: a k3s install, uninstall or
 stop in any form, a removal of rancher's folders, or a `k3s server` is
 refused without being named in a list. Each block is checked once more for
 the last of these just before it runs. Reason: on the lab the CSI part runs on
-the k3s that `csi.md` CSI1 says the suites never install or remove, so a
-change of a tutorial's text that a marker no longer matches must stop the
-run, not run the command.
+the lab's k3s, which `csi.md` CSI1 says the csi suite installs only on a
+guest without it and never removes, so a change of a tutorial's text that a
+marker no longer matches must stop the run, not run the command.
 
 ## Topology
 
@@ -99,42 +99,44 @@ run would cost a VM and its disk for what preflight and cleanup give (the
 guest checked empty of dnv first, and put back after).
 
 **The CSI part** runs on the lab's k3s, on its server node, the control-plane
-guest, since a second k3s cannot run beside the lab's (`csi.md` CSI1). The
-CSI tutorial is written for one machine that is both the k3s node and the
-dnv machine; the lab's k3s has three nodes. So for the run the suite puts a
-taint of its own on the other nodes, which none of the tutorial's pods
-tolerates, and lifts the server's own control-plane taint, so that every pod
-of the tutorial lands on the server node, where the image was imported and
-the cdc listens on 127.0.0.1; it puts both taints back at cleanup. The CSI
-part first runs the prelude its tutorial asks for: the all-in-one tutorial
-from its start through "Cluster and nodes", with the CSI tutorial's gateway
-start, the block marked `replaces`, in place of the all-in-one's, which the
-transcript says where that block stands. Its k3s install block is skipped,
-and the line of its teardown that uninstalls k3s is omitted, since the k3s
-is the lab's; the plan (The markers) refuses the run if either guard no
-longer holds.
+guest, since the lab's k3s stays installed between runs (`csi.md` CSI1) and
+a second k3s cannot run beside it on one guest. The CSI tutorial is written
+for one machine that is both the k3s node and the dnv machine; the lab's k3s
+has three nodes. So for the run the suite puts a taint of its own on the other
+nodes, which none of the tutorial's pods tolerates, and lifts the server's own
+control-plane taint, so that every pod of the tutorial lands on the server
+node, where the image was imported and the cdc listens on 127.0.0.1; it puts
+both taints back at cleanup. The CSI part first runs the prelude its tutorial
+asks for: the all-in-one tutorial from its start through "Cluster and nodes",
+with the CSI tutorial's gateway start, the block marked `replaces`, in place
+of the all-in-one's, which the transcript says where that block stands. Its
+k3s install block is skipped, and the line of its teardown that uninstalls k3s
+is omitted, since the k3s is the lab's; the plan (The markers) refuses the run
+if either guard no longer holds.
 
 ## Preflight
 
 On the driver: the tools the run calls, and the parse of both tutorials. On
 the guest: passwordless sudo; no dnv device-mapper device, md array, nvmet
 object, NVMe-oF controller, dnv or etcd process or loop device of the
-suite's folder; the stock nvmet, since the tutorials are written for a kernel that cannot
-end a host's connection; every port the tutorial listens on free; and every
+suite's folder; the stock nvmet, since the tutorials are written for a
+stock kernel, whose nvmet cannot end one nvmet connection and leave the
+others; every port the tutorial listens on free, the CSI driver's node
+plugin's health port among them in the CSI part; and every
 package a tutorial installs either absent or at its candidate version, so
 that the tutorial's install never upgrades a tool the other suites run with;
 the CSI part lets it upgrade one on the k3s server node, where no other
-suite runs a node's tools, and says so. A read of the guest that fails is a
-failed preflight, never a guest that holds nothing. nvme-stas may be
-installed and running: a lab guest runs its two daemons idle, since the
-package starts them at install, and the suite saves their state and puts it
-back (Cleanup), where a refusal would need them stopped by hand before every
-run.
-In the CSI part, the lab's k3s answers on the guest and holds none of what
-the tutorial makes or a run leaves: its namespaces, driver, class, claim,
-pod and policy, a volume or an attachment of the driver's, a node with the
-suite's taint, the server without its own, the driver's image in the
-server's store.
+suite runs a node's tools, and says so. A read of the guest that fails, a
+failed listing of its devices, arrays, loop devices or processes and a failed
+read of a package or its candidate included, is a failed preflight, never a
+guest that holds nothing. nvme-stas may be installed and running: a lab guest
+runs its two daemons idle, since the package starts them at install, and the
+suite saves their state and puts it back (Cleanup), where a refusal would need
+them stopped by hand before every run. In the CSI part, the lab's k3s answers
+on the guest and holds none of what the tutorial makes or a run leaves: an
+object of the suite's list (Cleanup), a volume or an attachment of the
+driver's, a node with the suite's taint, the server without its own, the
+driver's image in the server's store.
 
 ## Cleanup
 
@@ -155,35 +157,57 @@ etcd program, a loop device of the folder, a udev rule file or a connector
 unit's mask that differs from before the run, and, for the all-in-one
 tutorial, whose teardown puts nvme-stas's files back and leaves its daemons
 stopped, a file of `/etc/stas` that differs from before the run or a daemon
-that runs. Reason: the cleanup below removes all of these, so a read after
-it cannot tell a teardown that works from one that does not.
+that runs, and on a listing or a daemon's state it could not read. Reason: the
+cleanup below removes all of these, so a read after it cannot tell a teardown
+that works from one that does not.
 
 **Cleanup.** At the end, passed or failed, the suite takes down what the run
 left in the order a holder goes first: the worker, then the agents, then
 the gateway, the cdc and the run's etcd, so that nothing rebuilds what
-follows or connects a leg again; nvme-stas; the nvmet objects, whose
-enabled namespaces hold the disk nodes' sides and the controller node's
-namespace devices open, so that no device below them can go before them;
-the host's NVMe-oF controllers; the dnv devices and the md arrays in
-rounds, each round taking what the one before freed, until none is left;
-the loop devices; and then a read of what stays. It then restores what it saved, purges every package the run
-added, deletes docker's bridge, the state folders and the group the run's
-packages left, and the images the run added to k3s's store. In the CSI part
-it first deletes from the lab's k3s every object the tutorial applied,
-waiting for the driver's volumes and attachments to go before the driver
-does, since without the driver a volume or an attachment keeps its
-finalizer, and the image it imported, puts the taints back, and reads the
-lab's k3s back as preflight reads it. The save fails, and so the run, when
-any of its readings fails, and a reading it could not keep is never
-written, so the restore deletes nothing by a list it does not have and
-reports the step; the restore then reads back every reading the save kept,
-nvme-stas's files and the udev rules, and reports each difference. Any step
-that fails and anything left, on the guest or in the lab's k3s, fails the
-run. A failed run keeps
-its programs' logs under the work folder for the runner to copy; a passed
-run leaves nothing. A run with `--cleanup-only` does the same and runs no
-block. This is what lets the suite run on a guest that other suites use:
-preflight proved the guest held none of what cleanup removes.
+follows or connects a leg again; nvme-stas, when the save is complete; the
+nvmet objects, whose enabled namespaces hold the disk nodes' sides and the
+controller node's namespace devices open, so that no device below them can go
+before them; the host's NVMe-oF controllers; the dnv devices and the md arrays
+in rounds, each round taking what the one before freed, until none is left;
+the loop devices; and then a read of what stays. It then restores what a
+complete save kept, purges every package the run added, deletes docker's
+bridge, the state folders and the group the run's packages left, and the
+images the run added to k3s's store. In the CSI part it first deletes from the
+lab's k3s every object the tutorial makes, by kind and name from the suite's
+own list and never through the release's manifests, since a run with
+`--cleanup-only` has no release folder and the lab's k3s is permanent, so
+that nothing outside the list goes; setup checks, before the first block,
+that the release's manifests hold the list's objects that name a manifest,
+and no other. It waits
+for the driver's volumes and attachments to go before the driver does, since
+without the driver a volume or an attachment keeps its finalizer, deletes
+the image it imported, puts the taints back, and reads every object of the
+list and the lab's k3s back as preflight reads it. The save
+fails, and so the run, when any of its readings fails, and a reading it could
+not keep is never written; a file is recorded as there before the run only
+once its copy reads back the same as the original, and the udev rules only as
+a whole. The restore acts only on what the save recorded: it deletes nothing,
+changes no daemon and deletes no group by a reading it could not make,
+never removes an original it has no saved copy of, and reports the step;
+it then reads back every reading the save kept, nvme-stas's files and the
+udev rules, and reports each difference, but for the network links, where
+it reports only a docker link the run added that is still there, and
+nothing when their read fails. The restore runs only after a
+complete save, which the save records last, once every other record is
+written, read back and on disk, and puts on disk before any block runs: a save
+that did not complete runs no block, so it leaves nothing to put back, and its
+records go with the work folder; a read of what the save kept that fails is a
+failed step, and the restore does not run. Any step that fails and anything
+left, on the guest or in the lab's k3s, fails the run, and a restore that
+failed or did not run for a read that failed leaves the saved state on the
+guest, which the next run's preflight refuses until a run with
+`--cleanup-only` has put the guest back. A failed run, and every run with
+`--cleanup-only`, which runs no block, keeps its programs' logs under the
+work folder for the runner to copy, and the next run's setup removes them,
+once its preflight has passed and before its first block, so that its crash
+scan reads its own logs alone; a passed run leaves nothing. This is what lets
+the suite run on a guest that other suites use: preflight proved the guest
+held none of what cleanup removes.
 
 ## Known limits
 

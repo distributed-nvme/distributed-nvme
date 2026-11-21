@@ -66,13 +66,45 @@ AIO_PKGS=(nvme-cli mdadm nvme-stas dmsetup thin-provisioning-tools)
 CSI_PKGS=(docker.io)
 # The udev rule files the tutorials install and their teardowns remove.
 UDEV_RULES=(58-dnv-dm.rules 63-dnv-md.rules 63-zz-dnv-md-array.rules)
-# Every TCP port a tutorial listens on.
+# Every TCP port the all-in-one tutorial listens on, and the one the CSI
+# tutorial adds on the server node: 9809, the health port of the CSI driver's
+# node plugin, which runs on the host's network (deploy/node.yaml).
 PORTS=(2379 2380 29527 8009 29900 29901 29902 29903 29950 4301 4302 4303 4304 4420)
+CSI_PORTS=(9809)
 # The taint by which the CSI part keeps the lab's other k3s nodes free of the
 # tutorial's pods, so that the server node is the one machine the tutorial
 # expects; the server's own taint is lifted for the run and put back.
 TUT_TAINT_KEY=dnv.io/tutorial
 CP_TAINT=node-role.kubernetes.io/control-plane:NoSchedule
+# Every Kubernetes object the CSI tutorial makes in the lab's k3s, one
+# "<source> <kind> <namespace, - for none> <name>" each: <source> is the
+# manifest of the release's deploy/ that holds it, or inline for one the
+# tutorial's text makes. The cleanup deletes these by kind and name, in this
+# order, and nothing else, as a run with --cleanup-only has no release folder
+# and the lab's k3s is permanent; setup checks, before any block, that the
+# release's manifests hold the entries that name a manifest, and no other
+# object (csi_objects_check). The probe pods the policy check runs with
+# kubectl's --rm stay when that kubectl dies first: the one in default is
+# listed, and the one in policy-check goes with its namespace.
+CSI_OBJECTS=(
+	"inline Pod default demo"
+	"inline Pod default probe"
+	"inline PersistentVolumeClaim default demo"
+	"inline Namespace - policy-check"
+	"networkpolicy.yaml NetworkPolicy default dnv-keep-off"
+	"storageclass.yaml StorageClass - dnv"
+	"node.yaml DaemonSet dnv-csi dnv-csi-node"
+	"controller.yaml Deployment dnv-csi dnv-csi-controller"
+	"controller-rolebinding.yaml RoleBinding dnv-csi dnv-csi-controller"
+	"controller-role.yaml Role dnv-csi dnv-csi-controller"
+	"controller-clusterrolebinding.yaml ClusterRoleBinding - dnv-csi-controller"
+	"controller-clusterrole.yaml ClusterRole - dnv-csi-controller"
+	"node-serviceaccount.yaml ServiceAccount dnv-csi dnv-csi-node"
+	"controller-serviceaccount.yaml ServiceAccount dnv-csi dnv-csi-controller"
+	"csidriver.yaml CSIDriver - csi.dnv.io"
+	"config.yaml ConfigMap dnv-csi dnv-csi-config"
+	"namespace.yaml Namespace - dnv-csi"
+)
 
 PART=all-in-one
 ARCHIVE=""
@@ -87,7 +119,10 @@ RELEASE_OUT=""
 SSH_OPTS=(-o BatchMode=yes -o StrictHostKeyChecking=accept-new
 	-o ConnectTimeout=15 -o ServerAliveInterval=15)
 
-log() { echo "$*" >&2; }
+# A write that fails, as to a terminal that has closed, sends the run's
+# output to /dev/null from then on, so that a log line never ends the run's
+# exit handler under set -e.
+log() { echo "$*" >&2 || exec >/dev/null 2>&1; }
 
 stage() {
 	STAGE=$1
@@ -154,19 +189,43 @@ NVMET=/sys/kernel/config/nvmet
 UDEV_RULES="58-dnv-dm.rules 63-dnv-md.rules 63-zz-dnv-md-array.rules"
 
 # state prints what preflight requires absent, one line each; empty means
-# the guest holds no dnv state.
+# the guest holds no dnv state. A listing that fails prints an "unread:"
+# line in place of its answer, so that every caller, which takes any line
+# for something left, reads a failed listing as a guest not known clean,
+# never as an empty one.
 state() {
-	local p
-	dmsetup ls 2>/dev/null | awk '$1 ~ /^dnv-/ { print "dm device " $1 }'
-	awk '/^md[0-9]/ { print "md array " $1 }' /proc/mdstat 2>/dev/null
+	local p out rc
+	if ! command -v dmsetup >/dev/null 2>&1; then
+		# No dmsetup, as on a guest the tutorial has yet to install it on:
+		# the kernel's own list of dm devices.
+		for p in /sys/block/dm-*/dm/name; do
+			[ -e "$p" ] || continue
+			awk '/^dnv-/ { print "dm device " $1 }' "$p" || echo "unread: $p"
+		done
+	elif out=$(dmsetup ls 2>&1); then
+		awk '$1 ~ /^dnv-/ { print "dm device " $1 }' <<<"$out"
+	else
+		echo "unread: dmsetup ls failed: $(echo $out)"
+	fi
+	if [ -e /proc/mdstat ]; then
+		awk '/^md[0-9]/ { print "md array " $1 }' /proc/mdstat ||
+			echo "unread: /proc/mdstat"
+	fi
 	for p in "$NVMET"/ports/* "$NVMET"/subsystems/* "$NVMET"/hosts/*; do
 		[ -e "$p" ] && echo "nvmet ${p#$NVMET/}"
 	done
 	for p in /sys/class/nvme-fabrics/ctl/nvme*; do
 		[ -e "$p" ] && echo "NVMe-oF controller ${p##*/}"
 	done
-	pgrep -a -x 'dnv-agent|dnv-gateway|dnv-worker|dnv-cdc|dnv-csi|etcd' | sed 's/^/process /'
-	losetup -a 2>/dev/null | grep "$WORK" | sed 's/^/loop /'
+	out=$(pgrep -a -x 'dnv-agent|dnv-gateway|dnv-worker|dnv-cdc|dnv-csi|etcd')
+	rc=$?
+	[ "$rc" -le 1 ] || echo "unread: pgrep failed (exit $rc)"
+	[ -z "$out" ] || sed 's/^/process /' <<<"$out"
+	if out=$(losetup -a 2>&1); then
+		grep -F "$WORK" <<<"$out" | sed 's/^/loop /'
+	else
+		echo "unread: losetup -a failed: $(echo $out)"
+	fi
 	return 0
 }
 
@@ -197,12 +256,17 @@ links_now() {
 	ip -o link show | awk -F': ' '{ print $2 }' | sed 's/@.*//' | LC_ALL=C sort
 }
 daemons_now() {
-	local u st act
+	local u out
 	for u in stafd stacd; do
-		st=$(systemctl is-enabled "$u" 2>/dev/null) || true
-		case $st in '' | not-found) st=absent ;; esac
-		act=$(systemctl is-active "$u" 2>/dev/null) || true
-		echo "$u $st ${act:-unknown}"
+		# systemctl show fails when it cannot read the manager, and names an
+		# absent unit with LoadState=not-found.
+		out=$(systemctl show -p LoadState -p UnitFileState -p ActiveState "$u") || return 1
+		awk -F= -v u="$u" '{ v[$1] = $2 }
+			END {
+				if (v["LoadState"] == "" || v["ActiveState"] == "") exit 1
+				st = v["LoadState"] == "not-found" || v["UnitFileState"] == "" ? "absent" : v["UnitFileState"]
+				print u, st, v["ActiveState"]
+			}' <<<"$out" || return 1
 	done
 }
 dirs_now() {
@@ -212,7 +276,16 @@ dirs_now() {
 	done
 }
 group_now() {
-	if getent group docker >/dev/null; then echo yes; else echo no; fi
+	# addgroup and groupdel act on /etc/group, so the reading is that file:
+	# grep exits 1 for no line and 2 when it could not read it. getent cannot
+	# tell the two apart, as it exits 2 for both.
+	local rc=0
+	grep -q '^docker:' /etc/group || rc=$?
+	case $rc in
+	0) echo yes ;;
+	1) echo no ;;
+	*) return 1 ;;
+	esac
 }
 images_now() {
 	if command -v k3s >/dev/null; then
@@ -221,42 +294,92 @@ images_now() {
 }
 READINGS="pkgs units forward links daemons dirs group images"
 
-# list_to writes a reading into its file only when the reading succeeded,
-# so that a failed one leaves no list, and restore deletes nothing by it.
+# list_to writes a reading into its file, and reads it back, only when the
+# reading succeeded, so that a failed one leaves no list, and restore deletes
+# nothing by it.
 list_to() { # <file> <reading>
-	if "$2" >"$1.tmp" 2>/dev/null; then
-		mv -f "$1.tmp" "$1"
-	else
-		rm -f "$1.tmp"
+	local out
+	out=$("$2" 2>/dev/null) || {
 		echo "saving ${1##*/} failed: $2 did not answer"
 		return 1
-	fi
+	}
+	record_to "$1" "${out:+$out$'\n'}" || {
+		echo "saving ${1##*/} failed: its record did not read back"
+		return 1
+	}
+}
+
+# record_to writes <text> into <file> and reads it back, and leaves no file
+# when either fails, so that a record exists only as it was meant.
+record_to() { # <file> <text>
+	printf '%s' "$2" >"$1.tmp" && mv -f "$1.tmp" "$1" &&
+		printf '%s' "$2" | cmp -s - "$1" && return 0
+	rm -f "$1.tmp" "$1"
+	return 1
 }
 
 # save keeps what the tutorial changes and its teardown may not put back:
 # the udev rule files, nvme-stas's files and every reading above. It fails,
-# naming it, when any of them cannot be kept.
+# naming it, when any of them cannot be kept, and then writes no "complete"
+# record. A file is recorded as there
+# before the run only once its copy reads back the same as the original, and
+# the udev rules' record (udev.saved, one "<file> present|absent" line each)
+# is written only when every rule file was kept, so that the restore acts on
+# a whole record or on none and never removes an original it has no copy of.
 save() {
-	local f bad=0
+	local f bad=0 rec=""
 	mkdir -p "$SAVED/udev" "$SAVED/stas" || return 1
 	for f in $UDEV_RULES; do
-		[ ! -e "/etc/udev/rules.d/$f" ] || cp -a "/etc/udev/rules.d/$f" "$SAVED/udev/" || {
+		if [ ! -e "/etc/udev/rules.d/$f" ]; then
+			rec+="$f absent"$'\n'
+		elif cp -a "/etc/udev/rules.d/$f" "$SAVED/udev/" &&
+			cmp -s "/etc/udev/rules.d/$f" "$SAVED/udev/$f"; then
+			rec+="$f present"$'\n'
+		else
 			echo "saving the udev rule $f failed"
 			bad=1
-		}
+		fi
 	done
+	if [ "$bad" = 0 ]; then
+		record_to "$SAVED/udev.saved" "$rec" || {
+			echo "recording the udev rules failed"
+			bad=1
+		}
+	fi
 	if [ -d /etc/stas ]; then
-		if cp -a /etc/stas/. "$SAVED/stas/"; then echo yes >"$SAVED/stas.present"; else
+		if cp -a /etc/stas/. "$SAVED/stas/" &&
+			diff -r -q /etc/stas "$SAVED/stas" >/dev/null 2>&1 &&
+			record_to "$SAVED/stas.present" yes; then :; else
+			rm -f "$SAVED/stas.present"
 			echo "saving /etc/stas failed"
 			bad=1
 		fi
 	else
-		echo no >"$SAVED/stas.present"
+		record_to "$SAVED/stas.present" no || {
+			echo "recording that /etc/stas is absent failed"
+			bad=1
+		}
 	fi
 	for f in $READINGS; do
 		list_to "$SAVED/$f" "${f}_now" || bad=1
 	done
-	return "$bad"
+	[ "$bad" = 0 ] || return 1
+	# The save's last record: the save is complete, every record above
+	# written, read back and on disk. It alone lets the wipe stop nvme-stas
+	# and the cleanup run the restore, as setup stops the run, before any
+	# block, at a save that did not complete, which so changed nothing to
+	# put back. A read-back reads the page cache, so the records go to disk
+	# before the record that vouches for them, and that one before any block
+	# runs: a reset before the write-back would leave it over empty records.
+	sync || {
+		echo "writing the records to disk failed"
+		return 1
+	}
+	record_to "$SAVED/complete" yes && sync || {
+		echo "recording the save as complete failed"
+		rm -f "$SAVED/complete"
+		return 1
+	}
 }
 
 # stop_x stops every process whose name the pattern matches, TERM first,
@@ -275,13 +398,15 @@ stop_x() { # <pgrep -x pattern>
 # wipe takes down what a run left and prints what stays. First the
 # programs, the worker first, so that no syncup rebuilds what the steps
 # after take down and no agent connects a leg again; then nvme-stas, which
-# would connect the host again; then nvmet, whose enabled namespaces hold
+# would connect the host again, when the save is complete, as only then did
+# a block run; then nvmet, whose enabled namespaces hold
 # open the disk nodes' sides and the controller node's namespace devices,
 # so that no dm device or md array below them can go before it; then the
 # host's NVMe-oF controllers, the md arrays' legs among them; then the dm
 # devices and the md arrays in rounds, each round taking what the one
-# before freed, until none is left; then the loop devices; and last the
-# read of what stays.
+# before freed, until none is left; then the loop devices and the crash
+# scan's sample folder a stopped preflight left; and last the read of what
+# stays.
 wipe() {
 	local p pid d i link f
 	stop_x dnv-worker
@@ -290,7 +415,9 @@ wipe() {
 	for pid in $(pgrep -x etcd); do
 		[ "$(readlink "/proc/$pid/cwd")" = "$(cat "$SAVED/dir" 2>/dev/null)" ] && kill "$pid"
 	done
-	for p in stacd stafd; do systemctl stop "$p" 2>/dev/null; done
+	if [ -f "$SAVED/complete" ]; then
+		for p in stacd stafd; do systemctl stop "$p" 2>/dev/null; done
+	fi
 	if [ -d "$NVMET" ]; then
 		for d in "$NVMET"/ports/*; do
 			[ -d "$d" ] || continue
@@ -334,7 +461,30 @@ wipe() {
 	for d in $(losetup -a 2>/dev/null | grep "$WORK" | cut -d: -f1); do
 		losetup -d "$d" 2>/dev/null
 	done
+	# The crash scan's sample folder of a preflight that stopped before it
+	# removed it (panic_plant).
+	rm -rf /var/tmp/dnv-panic-plant-tutorial.*
 	state
+}
+
+# udev_diff prints, one line each, a udev rule file that is not as the
+# save's record (udev.saved) has it: a kept file that differs from its copy,
+# with <how> after its name, or one the record has absent that is there; and
+# one line when the record is missing.
+udev_diff() { # <how>
+	local f st
+	if [ ! -f "$SAVED/udev.saved" ]; then
+		echo "unread: the udev rules were not saved"
+		return 0
+	fi
+	while read -r f st; do
+		case $st in
+		present)
+			cmp -s "$SAVED/udev/$f" "/etc/udev/rules.d/$f" || echo "udev rule $f $1"
+			;;
+		*) [ ! -e "/etc/udev/rules.d/$f" ] || echo "udev rule $f left" ;;
+		esac
+	done <"$SAVED/udev.saved"
 }
 
 # after prints what the tutorial's own teardown left that the tutorial
@@ -343,29 +493,34 @@ wipe() {
 # before the run, a connector unit whose mask differs from before the run,
 # and, for the all-in-one tutorial, whose teardown puts nvme-stas's files
 # back and leaves its daemons stopped, a file of /etc/stas that differs from
-# before the run and a daemon that runs. Empty means the teardown did what
-# the tutorial says.
+# before the run and a daemon that runs; a reading that fails prints a line,
+# state's and the daemons' an "unread:" one, so that no failed reading passes
+# for a teardown that did what the tutorial says. Empty means the teardown
+# did what the tutorial says.
 after() { # <all-in-one|csi>
 	local f u st cur
 	state
-	for f in $UDEV_RULES; do
-		if [ -e "$SAVED/udev/$f" ]; then
-			cmp -s "$SAVED/udev/$f" "/etc/udev/rules.d/$f" || echo "udev rule $f differs from before the run"
-		elif [ -e "/etc/udev/rules.d/$f" ]; then
-			echo "udev rule $f left"
-		fi
-	done
+	udev_diff "differs from before the run"
 	while read -r u st; do
 		cur=$(systemctl is-enabled "$u" 2>/dev/null) || true
 		[ "$cur" = "$st" ] || echo "unit $u reads ${cur:-nothing}, before the run $st"
 	done <"$SAVED/units"
 	[ "$1" = all-in-one ] || return 0
-	if [ "$(cat "$SAVED/stas.present")" = yes ]; then
+	case $(cat "$SAVED/stas.present" 2>/dev/null) in
+	yes)
 		diff -r -q "$SAVED/stas" /etc/stas >/dev/null 2>&1 ||
 			echo "/etc/stas differs from before the run: $(diff -r -q "$SAVED/stas" /etc/stas 2>&1 | head -n 3 | tr '\n' ' ')"
-	fi
+		;;
+	no) ;;
+	*) echo "unread: whether /etc/stas was there before the run" ;;
+	esac
 	for u in stafd stacd; do
-		systemctl is-active -q "$u" 2>/dev/null && echo "$u runs"
+		st=$(systemctl show -p ActiveState --value "$u" 2>/dev/null) || st=""
+		case $st in
+		inactive | failed) ;;
+		"") echo "unread: the state of $u" ;;
+		*) echo "$u runs" ;;
+		esac
 	done
 	return 0
 }
@@ -373,23 +528,27 @@ after() { # <all-in-one|csi>
 # restore puts back what save kept, purges every package the run added,
 # deletes the bridge docker made, the state folders and the group the
 # run's packages left, and the images the run added to k3s's store; a step
-# whose reading save could not keep deletes nothing and is reported. Then it
-# reads everything back (restored). It prints each step that failed and
-# each difference, and then exits non-zero.
+# whose reading save could not keep deletes nothing and is reported: it acts
+# only on what the save recorded, and never removes an original it has no
+# saved copy of. Then it reads everything back (restored). It prints each step
+# that failed and each difference, and then exits non-zero.
 restore() {
 	local f u st act new cur bad=0
 	fail() {
 		echo "$*"
 		bad=1
 	}
-	for f in $UDEV_RULES; do
-		if [ -e "$SAVED/udev/$f" ]; then
-			cp -a "$SAVED/udev/$f" /etc/udev/rules.d/ || fail "putting the udev rule $f back failed"
-		else
-			rm -f "/etc/udev/rules.d/$f" || fail "removing the udev rule $f failed"
-		fi
-	done
-	udevadm control --reload || fail "reloading udev's rules failed"
+	if [ -f "$SAVED/udev.saved" ]; then
+		while read -r f st; do
+			case $st in
+			present) cp -a "$SAVED/udev/$f" /etc/udev/rules.d/ || fail "putting the udev rule $f back failed" ;;
+			absent) rm -f "/etc/udev/rules.d/$f" || fail "removing the udev rule $f failed" ;;
+			esac
+		done <"$SAVED/udev.saved"
+		udevadm control --reload || fail "reloading udev's rules failed"
+	else
+		fail "the udev rules were not saved: left as they are"
+	fi
 	if [ -f "$SAVED/units" ]; then
 		while read -r u st; do
 			case $st in
@@ -399,10 +558,6 @@ restore() {
 		done <"$SAVED/units"
 	else
 		fail "the units' masks were not saved: left as they are"
-	fi
-	if [ "$(cat "$SAVED/stas.present" 2>/dev/null)" = yes ]; then
-		{ mkdir -p /etc/stas && find /etc/stas -mindepth 1 -maxdepth 1 -exec rm -rf {} + &&
-			cp -a "$SAVED/stas/." /etc/stas/; } || fail "putting /etc/stas back failed"
 	fi
 	if [ -f "$SAVED/pkgs" ]; then
 		if cur=$(pkgs_now); then
@@ -417,7 +572,16 @@ restore() {
 	else
 		fail "the packages were not saved: none purged"
 	fi
-	[ "$(cat "$SAVED/stas.present" 2>/dev/null)" = yes ] || rm -rf /etc/stas || fail "removing /etc/stas failed"
+	# nvme-stas's files after the purge, which can take a package's files
+	# away, and only by the save's record of them.
+	case $(cat "$SAVED/stas.present" 2>/dev/null) in
+	yes)
+		{ mkdir -p /etc/stas && find /etc/stas -mindepth 1 -maxdepth 1 -exec rm -rf {} + &&
+			cp -a "$SAVED/stas/." /etc/stas/; } || fail "putting /etc/stas back failed"
+		;;
+	no) rm -rf /etc/stas || fail "removing /etc/stas failed" ;;
+	*) fail "nvme-stas's files were not saved: left as they are" ;;
+	esac
 	if [ -f "$SAVED/dirs" ]; then
 		for f in /var/lib/docker /var/lib/containerd; do
 			[ -e "$f" ] && ! grep -qxF "$f" "$SAVED/dirs" && { rm -rf "$f" || fail "removing $f failed"; }
@@ -426,8 +590,13 @@ restore() {
 		fail "the state folders were not saved: none removed"
 	fi
 	if [ -f "$SAVED/group" ]; then
-		if [ "$(cat "$SAVED/group")" = no ] && getent group docker >/dev/null; then
-			groupdel docker || fail "deleting the group docker failed"
+		if [ "$(cat "$SAVED/group")" = no ]; then
+			cur=$(group_now) || cur=unread
+			case $cur in
+			yes) groupdel docker || fail "deleting the group docker failed" ;;
+			no) ;;
+			*) fail "reading /etc/group failed: the group docker left as it is" ;;
+			esac
 		fi
 	else
 		fail "the docker group was not saved: left as it is"
@@ -487,18 +656,12 @@ restore() {
 # link the run made. Empty means the guest is back.
 restored() {
 	local f cur
-	for f in $UDEV_RULES; do
-		if [ -e "$SAVED/udev/$f" ]; then
-			cmp -s "$SAVED/udev/$f" "/etc/udev/rules.d/$f" || echo "udev rule $f is not as before the run"
-		elif [ -e "/etc/udev/rules.d/$f" ]; then
-			echo "udev rule $f left"
-		fi
-	done
-	if [ "$(cat "$SAVED/stas.present" 2>/dev/null)" = yes ]; then
-		diff -r -q "$SAVED/stas" /etc/stas >/dev/null 2>&1 || echo "/etc/stas is not as before the run"
-	else
-		[ ! -e /etc/stas ] || echo "/etc/stas left"
-	fi
+	udev_diff "is not as before the run"
+	case $(cat "$SAVED/stas.present" 2>/dev/null) in
+	yes) diff -r -q "$SAVED/stas" /etc/stas >/dev/null 2>&1 || echo "/etc/stas is not as before the run" ;;
+	no) [ ! -e /etc/stas ] || echo "/etc/stas left" ;;
+	*) echo "nvme-stas's files were not saved" ;;
+	esac
 	for f in pkgs units forward daemons dirs group images; do
 		[ -f "$SAVED/$f" ] || continue
 		if ! cur=$("${f}_now" 2>/dev/null); then
@@ -675,18 +838,20 @@ panic_dump() {
 # may.
 panic_plant() {
 	local d hits want
-	d=$(rsh "mktemp -d /var/tmp/dnv-panic-plant.XXXXXX") ||
+	d=$(rsh "mktemp -d /var/tmp/dnv-panic-plant-tutorial.XXXXXX") ||
 		die "making the crash scan's scratch directory on the guest failed"
 	case "$d" in
-	/var/tmp/dnv-panic-plant.?*) ;;
+	/var/tmp/dnv-panic-plant-tutorial.?*) ;;
 	*) die "mktemp on the guest printed '$d', not a scratch directory" ;;
 	esac
 	printf '%s\n' \
 		'{"level":"ERROR","msg":"os command failed","stderr":"panic: in a field\nfatal error: in a field"}' \
 		'panic: planted by the preflight' 'goroutine 1 [running]:' \
 		'fatal error: planted by the preflight' |
-		rsh "mkdir $d/sub && cat > $d/sub/plant.log" ||
-		die "writing the crash scan's sample log on the guest failed"
+		rsh "mkdir $d/sub && cat > $d/sub/plant.log" || {
+			rsh "rm -rf $d" || true
+			die "writing the crash scan's sample log on the guest failed"
+		}
 	hits=$(panic_lines "$d") || hits="(the read failed)"
 	rsh "rm -rf $d" || true
 	want="$d/sub/plant.log:2:panic: planted by the preflight"
@@ -1048,7 +1213,9 @@ preflight() {
 	[ -z "$line" ] || die "the guest holds dnv state: $(echo $line)"
 	line=$(rsh "modinfo -n nvmet") || die "modinfo -n nvmet failed"
 	case $line in */updates/*) die "the guest runs a rebuilt nvmet ($line); the tutorial is for a stock kernel" ;; esac
-	for t in "${PORTS[@]}"; do
+	local ports=("${PORTS[@]}")
+	[ "$PART" != csi ] || ports+=("${CSI_PORTS[@]}")
+	for t in "${ports[@]}"; do
 		line=$(rsh "ss -Hltn 'sport = :$t'") || die "reading the listeners of port $t failed"
 		[ -z "$line" ] || die "port $t is taken on the guest"
 	done
@@ -1056,10 +1223,13 @@ preflight() {
 	[ "$PART" = csi ] && pkgs+=("${CSI_PKGS[@]}")
 	local inst cand
 	for pkg in "${pkgs[@]}"; do
-		st=$(rsh "dpkg-query -W -f '\${db:Status-Abbrev} \${Version}\n' $pkg 2>/dev/null | awk '\$1 == \"ii\" { print \$NF }'; echo; apt-cache policy $pkg | awk '/Candidate:/ { print \$2 }'") ||
+		# dpkg-query exits 1 for a package it does not know and 2 on an
+		# error; each read checks its own command's status.
+		inst=$(rsh "dpkg-query -W -f '\${db:Status-Abbrev} \${Version}\n' $pkg 2>/dev/null; [ \$? -le 1 ]") ||
 			die "reading the package $pkg failed"
-		inst=$(head -n 1 <<<"$st")
-		cand=$(tail -n 1 <<<"$st")
+		inst=$(awk '$1 == "ii" { print $NF }' <<<"$inst")
+		cand=$(rsh "apt-cache policy $pkg") || die "reading the candidate of $pkg failed"
+		cand=$(awk '/Candidate:/ { print $2 }' <<<"$cand")
 		if [ -n "$inst" ] && [ "$inst" != "$cand" ]; then
 			# The k3s server node runs no node tool for any other suite, so
 			# the CSI part lets the tutorial's install upgrade one there.
@@ -1109,45 +1279,83 @@ setup() {
 
 	stage "setup: save the guest's state, unpack the archive, put etcd beside the binaries"
 	SAVE_DONE=1
+	# The logs an earlier run kept under $WORK/logs for the runner to copy go
+	# before this run's first block, whose crash scan reads every log under
+	# $WORK, can read them as this run's.
+	rsh "sudo -n rm -rf $WORK/logs" ||
+		die "removing the logs an earlier run kept under $WORK/logs failed"
 	helper save || die "saving the guest's state failed"
 	rsh "echo $(printf '%q' "$DIR") | sudo -n tee $SAVED/dir >/dev/null" || die "recording the folder failed"
 	scp -q "${SSH_OPTS[@]}" "$ar" "$TARGET:$WORK/" || die "copying the archive failed"
 	scp -q "${SSH_OPTS[@]}" "$etcd_dir/etcd" "$TARGET:$WORK/etcd" || die "copying etcd failed"
 	rsh "cd $WORK && tar xzf $(basename "$ar") && mv etcd $(printf '%q' "$DIR")/" || die "unpacking failed"
+	[ "$PART" != csi ] || csi_objects_check "$ar"
 	SETUP_DONE=1
 }
 
 # cleanup puts the guest back: it takes down what the run left, restores
 # what setup saved, keeps the logs of a failed run under $WORK/logs and
-# removes the rest of $WORK. In the CSI part it first deletes from the lab's
-# k3s what the tutorial applied and puts the taints back. It fails when any
+# removes the rest of $WORK, but for $SAVED when the restore failed or did
+# not run for a read that failed, so that a run with --cleanup-only can
+# still put the guest back (the next run's preflight refuses until it has).
+# In the CSI part it first deletes from the lab's k3s the objects of
+# CSI_OBJECTS by kind and name, which needs no release folder, and puts the
+# taints back (csi_cleanup). It fails when any
 # step of it failed or anything is left, on the guest or in the lab's k3s.
 cleanup() { # <keep logs: 0|1>
-	local keep=$1 left n bad=0
+	local keep=$1 left n t bad=0 keep_saved=""
 	stage "cleanup: put the guest back"
 	if [ "$PART" = csi ]; then
 		csi_cleanup || bad=1
 	fi
 	left=$(helper wipe) || left="the wipe failed"
 	[ -z "$left" ] || log "WARNING: left after the wipe: $(echo $left)"
-	if rsh "sudo -n test -f $SAVED/pkgs"; then
+	# Whether the save left anything, and then whether it is complete: ssh
+	# exits 255 when it fails, test 1 for an absent file or folder, and
+	# $SAVED is readable by the plain user. A save that did not complete ran
+	# no block and changed nothing, so its records go with $WORK.
+	t=0
+	rsh "test -d $SAVED" || t=$?
+	if [ "$t" = 0 ]; then
+		rsh "test -f $SAVED/complete" || t=$?
+		[ "$t" != 1 ] ||
+			log "  the save did not complete: nothing to put back, its records go with $WORK"
+		[ "$t" != 1 ] || t=nothing
+	fi
+	case $t in
+	0)
 		helper restore >&2 || {
 			log "WARNING: restoring the guest's state failed (the steps above)"
 			bad=1
+			keep_saved="! -name saved"
 		}
-	fi
+		;;
+	1 | nothing) ;;
+	*)
+		log "WARNING: reading what the save kept failed (exit $t): nothing restored"
+		bad=1
+		keep_saved="! -name saved"
+		;;
+	esac
 	if [ "$keep" = 1 ]; then
-		rsh "cd $WORK && sudo -n mkdir -p logs && sudo -n find . -path ./logs -prune -o -name '*.log' -type f -exec cp {} logs/ \\; ; sudo -n find . -mindepth 1 -maxdepth 1 ! -name logs -exec rm -rf {} +" || {
+		rsh "cd $WORK && sudo -n mkdir -p logs && sudo -n find . -path ./logs -prune -o -name '*.log' -type f -exec cp {} logs/ \\; ; sudo -n find . -mindepth 1 -maxdepth 1 ! -name logs $keep_saved -exec rm -rf {} +" || {
 			log "WARNING: keeping the logs failed"
 			bad=1
 		}
 		log "the run's logs are kept on $TARGET under $WORK/logs"
+	elif [ -n "$keep_saved" ]; then
+		rsh "sudo -n find $WORK -mindepth 1 -maxdepth 1 $keep_saved -exec rm -rf {} +" || {
+			log "WARNING: removing $WORK but its saved state failed"
+			bad=1
+		}
 	else
 		rsh "sudo -n rm -rf $WORK" || {
 			log "WARNING: removing $WORK failed"
 			bad=1
 		}
 	fi
+	[ -z "$keep_saved" ] ||
+		log "the saved state stays on $TARGET under $SAVED: run --cleanup-only to put the guest back"
 	[ -n "$RELEASE_OUT" ] && rm -rf "$RELEASE_OUT"
 	[ -z "$left" ] || return 1
 	n=$(rsh "ls /sys/kernel/config/nvmet/ports 2>/dev/null | wc -l") || n=unknown
@@ -1159,16 +1367,16 @@ cleanup() { # <keep logs: 0|1>
 }
 
 # csi_left prints what the tutorial makes or a run leaves in the lab's k3s,
-# one line each: the tutorial's namespaces, driver, class, claim and policy,
-# a volume or an attachment of the driver's, a node with the suite's taint,
-# the server without its own, and the driver's image in the server's store.
-# Empty means none.
+# one line each: an object of CSI_OBJECTS, a volume or an attachment of the
+# driver's, a node with the suite's taint, the server without its own, and
+# the driver's image in the server's store. Empty means none.
 csi_left() {
-	local t out me
-	for t in "namespace dnv-csi" "namespace policy-check" "csidriver csi.dnv.io" \
-		"storageclass dnv" "pvc demo" "pod demo" "-n default networkpolicy dnv-keep-off"; do
-		out=$(kc get $t --ignore-not-found -o name 2>/dev/null) || return 1
-		[ -z "$out" ] || echo "$t"
+	local e src kind ns name out me
+	for e in "${CSI_OBJECTS[@]}"; do
+		read -r src kind ns name <<<"$e"
+		out=$(kc $(csi_ns "$ns") get "${kind,,}" "$name" --ignore-not-found -o name 2>/dev/null) ||
+			return 1
+		[ -z "$out" ] || echo "${kind,,} $name"
 	done
 	out=$(kc get pv -o "'jsonpath={range .items[*]}{.spec.csi.driver} {.metadata.name}{\"\\n\"}{end}'") || return 1
 	awk '$1 == "csi.dnv.io" { print "volume " $2 }' <<<"$out"
@@ -1193,19 +1401,82 @@ csi_gone() {
 	! grep -qx csi.dnv.io <<<"$out"
 }
 
-# csi_cleanup deletes the tutorial's objects from the lab's k3s, waiting for
-# the driver's volumes and attachments to go before the driver does, the
-# image it imported into the server's store and the tutorial's taints, and
-# puts the server's own taint back; then it reads the lab's k3s back
-# (csi_left). It fails when a step failed or anything is left.
+# csi_ns prints kubectl's namespace option for a CSI_OBJECTS namespace field.
+csi_ns() { [ "$1" = - ] || printf '%s' "-n $1"; }
+
+# csi_delete deletes, by kind and name and in the list's order, the
+# CSI_OBJECTS entries of kind Pod or PersistentVolumeClaim, the list's two
+# pods, demo and probe in default, and the demo pod's claim (first), or every
+# other entry (rest), and fails when a delete fails.
+csi_delete() { # <first|rest>
+	local e src kind ns name bad=0
+	for e in "${CSI_OBJECTS[@]}"; do
+		read -r src kind ns name <<<"$e"
+		case $kind in
+		Pod | PersistentVolumeClaim) [ "$1" = first ] || continue ;;
+		*) [ "$1" = rest ] || continue ;;
+		esac
+		kc $(csi_ns "$ns") delete "${kind,,}" "$name" --ignore-not-found --wait=true \
+			--timeout=120s >/dev/null || bad=1
+	done
+	return "$bad"
+}
+
+# csi_manifest_objects prints, for each object of each manifest under
+# <deploy dir>, "<file> <kind> <namespace, - for none> <name>", read from
+# the manifest's top-level kind and its metadata's name and namespace.
+csi_manifest_objects() { # <deploy dir>
+	local f
+	for f in "$1"/*.yaml; do
+		awk -v f="${f##*/}" '
+			function flush() { if (kind != "") print f, kind, (ns == "" ? "-" : ns), name; kind = ns = name = ""; meta = 0 }
+			/^---/ { flush(); next }
+			/^kind:/ { kind = $2 }
+			/^metadata:/ { meta = 1; next }
+			/^[^ #]/ { meta = 0 }
+			meta && /^  name:/ { name = $2 }
+			meta && /^  namespace:/ { ns = $2 }
+			END { flush() }' "$f" | tr -d "\"'" || return 1
+	done
+}
+
+# csi_objects_check fails, before any block, unless the manifests of the
+# release's deploy/ hold exactly the objects CSI_OBJECTS names from them: an
+# object the list lacks would be applied and never deleted. A manifest that
+# names no namespace matches the list's, as the tutorial picks it.
+csi_objects_check() { # <archive>
+	local tmp got bad
+	tmp=$(mktemp -d) || die "making a folder for the release's manifests failed"
+	tar -xzf "$1" -C "$tmp" --wildcards '*/deploy/*.yaml' ||
+		die "unpacking the release's manifests failed"
+	got=$(csi_manifest_objects "$tmp"/*/deploy) ||
+		die "reading the kinds and names of the release's manifests failed"
+	rm -rf "$tmp"
+	bad=$(awk 'FNR == NR { if ($1 != "inline") w[$1 " " $2 " " $4] = $3; next }
+		{ k = $1 " " $2 " " $4
+		  if (!(k in w)) { print "an object of no CSI_OBJECTS entry: " $0; next }
+		  if ($3 != "-" && $3 != w[k]) print "namespace " $3 " against " w[k] " in the list: " k
+		  seen[k] = 1 }
+		END { for (k in w) if (!(k in seen)) print "a CSI_OBJECTS entry no manifest holds: " k }' \
+		<(printf '%s\n' "${CSI_OBJECTS[@]}") <(printf '%s\n' "$got"))
+	[ -z "$bad" ] || die "the release's manifests and the cleanup's list differ: $(echo $bad)"
+	log "  the release's manifests hold the objects of CSI_OBJECTS, and no other"
+}
+
+# csi_cleanup deletes the tutorial's objects from the lab's k3s by kind and
+# name (CSI_OBJECTS), never through the release's manifests, the pods and the
+# claim first, waiting for the driver's volumes and attachments to go before
+# the driver does, then the image it imported into the server's store and
+# the tutorial's taints, and puts the server's own taint back; then it reads
+# the lab's k3s back (csi_left). It fails when a step failed or anything is
+# left.
 csi_cleanup() {
-	local f n i bad=0 left
+	local n i bad=0 left
 	kc get nodes >/dev/null 2>&1 || {
 		log "WARNING: the lab's k3s does not answer"
 		return 1
 	}
-	kc delete pod demo --ignore-not-found --wait=true --timeout=120s >/dev/null || bad=1
-	kc delete pvc demo --ignore-not-found --wait=true --timeout=120s >/dev/null || bad=1
+	csi_delete first || bad=1
 	# A claim's delete returns before its volume and attachment are gone,
 	# and without the driver a volume or an attachment keeps its finalizer.
 	for i in $(seq 180); do
@@ -1216,15 +1487,7 @@ csi_cleanup() {
 		log "WARNING: a volume or an attachment of the driver is still there after 180 s"
 		bad=1
 	}
-	kc delete namespace policy-check --ignore-not-found --wait=true --timeout=120s >/dev/null || bad=1
-	kc -n default delete networkpolicy dnv-keep-off --ignore-not-found >/dev/null || bad=1
-	kc delete storageclass dnv --ignore-not-found >/dev/null || bad=1
-	if rsh "test -d $(printf '%q' "$DIR")/deploy"; then
-		for f in node controller controller-rolebinding controller-role controller-clusterrolebinding \
-			controller-clusterrole node-serviceaccount controller-serviceaccount csidriver config namespace; do
-			kc delete --ignore-not-found --wait=true --timeout=120s -f "$DIR/deploy/$f.yaml" >/dev/null || bad=1
-		done
-	fi
+	csi_delete rest || bad=1
 	rsh "sudo -n k3s ctr images rm docker.io/library/dnv-csi:0.1.0 >/dev/null 2>&1; true"
 	# A node without the taint answers the removal with an error, so the
 	# read back below is the verdict.
@@ -1257,6 +1520,20 @@ csi_prepare() {
 on_exit() {
 	local rc=$?
 	trap - EXIT
+	# A signal while this handler runs: a Ctrl-C (SIGINT) reaches the
+	# command in hand, which it ends unless that command ignores it, a read
+	# of a command's output and an ssh still connecting among them, and the
+	# dump and the removals below go on; a SIGHUP, which a terminal that
+	# closes sends twice, is ignored here and by every command below; a
+	# SIGTERM ends the run at once. Output that fails, as a terminal that
+	# has closed does, goes to /dev/null from then on, so that set -e ends
+	# the handler at no log line: this line tries a write first, and log
+	# does the same at each of its writes. rc keeps the code the run was
+	# ending with, and the run exits with it but on a SIGTERM.
+	trap - TERM
+	trap : INT
+	trap '' HUP
+	printf '\n' >&2 2>/dev/null || exec >/dev/null 2>&1
 	if [ "$CLEANUP_ONLY" = 1 ]; then
 		[ "$rc" = 0 ] && log "" && log "PASS"
 		exit "$rc"
@@ -1305,6 +1582,13 @@ teardown_read() {
 }
 
 trap on_exit EXIT
+# A run killed by SIGTERM, SIGINT or SIGHUP exits with the shell's code for
+# the signal, so on_exit reads it as the failure it is, never as a PASS. The
+# HUP trap ignores every later SIGHUP first: a terminal that closes sends a
+# second one right after the first.
+trap 'exit 143' TERM
+trap 'exit 130' INT
+trap 'trap "" HUP; exit 129' HUP
 
 if [ "$CLEANUP_ONLY" = 1 ]; then
 	stage "cleanup-only"

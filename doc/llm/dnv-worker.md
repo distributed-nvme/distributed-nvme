@@ -2252,7 +2252,10 @@ order mitigates three races and is no correctness dependency
 `SyncupCntlr` outrunning the sides' ANA flips, which leaves the new
 primary's groups to the converge of the `SyncupCntlr` this worker
 re-sends once the cntlr's read names a group's absent array or a
-`RedundNone` group's dm-linear (`cnagent.md` CN10, CN30; RW4), and a
+`RedundNone` group's dm-linear (`cnagent.md` CN10, CN30; RW4), but for a
+RAID1 group whose one leg's flip it outran alone, whose array starts
+inactive, which no read names absent (`architecture.md`, Known limits,
+A promotion that outruns its sides can leave a group's array inactive), and a
 cntlr's connect to a new side outrunning that side's export (both
 `cnagent.md` CN10); and a leg
 removal's `nvme disconnect` on a CN overlapping the disk node's unlink of
@@ -5976,12 +5979,13 @@ leg taken back from a retired leg, which may sit on its bad leg's
 (`architecture.md`, Per-operation allocation). A unit case feeds the same
 check planted writes and requires a report of each rule's break. At the
 end it clears every fault, brings every worker, agent and cntlr back,
-ends every repair and migration as an operator would, and requires both
-pools to converge and stay so for two rounds of every object. Each seed
-counts, by kind, the steps that found a target and those whose act took
-effect, and a run of twenty seeds or more fails on a kind none of its
-steps took effect for. The seed fixes what each step draws, not the
-targets the state then offers, the timing of the real clock or AR1's
+ends every repair as an operator would and every migration through leg
+repair's own cancel and finish (AR8), the finish with no proof that the
+copy is whole, and requires both pools to converge and stay so for two rounds
+of every object. Each seed counts, by kind, the steps that found a target and
+those whose act took effect, and a run of twenty seeds or more fails on a kind
+none of its steps took effect for. The seed fixes what each step draws, not
+the targets the state then offers, the timing of the real clock or AR1's
 random first wait, so the case logs the seed and every step it took, and
 a person reads each failure.
 
@@ -5996,29 +6000,29 @@ nodes listening on the server's
 own address, so that every stored `addr_port` looks like a production one and
 the worker dials a real interface, and `workerctl`,
 run on the server against etcd. The vote timers are shortened through the CM1
-flags, so every membership change completes in seconds. Every case but the
-failover and hold cases shortens its intervals, and the thresholds it means
-to reach, through its cluster's and pool's stored conf, so every reaction
-completes in seconds. The failover case keeps the shipped default intervals
-and thresholds instead, since it proves the timing those defaults give; its
-cntlr, side and leg thresholds are long enough that only failovers move a
-role in it. The hold case shortens every interval but `cntlr_interval`, the
-bound of the sides-first hold (RW14), which it lengthens so that a hold that
-runs to its bound and one its sides end lie seconds apart in the fakes'
-records, which carry the server's clock; its thresholds are long enough
-that nothing reacts on health. Every worker runs at `--log-level debug` and
-every fake logs at Debug (`grpc.md`, Drivers and fakes), so the logs hold
+flags, so every membership change completes in seconds. Every case of the
+default run but the failover and hold cases shortens its intervals, and the
+thresholds it means to reach, through its cluster's and pool's stored conf, so
+every reaction completes in seconds. The failover case keeps the shipped
+default intervals and thresholds instead, since it proves the timing those
+defaults give; its cntlr, side and leg thresholds are long enough that only
+failovers move a role in it. The hold case shortens every interval but
+`cntlr_interval`, the bound of the sides-first hold (RW14), which it lengthens
+so that a hold that runs to its bound and one its sides end lie seconds apart
+in the fakes' records, which carry the server's clock; its thresholds are long
+enough that nothing reacts on health. Every worker runs at `--log-level debug`
+and every fake logs at Debug (`grpc.md`, Drivers and fakes), so the logs hold
 the rounds' messages and the etcd reads the cases read. The
 driver reads every worker and fake log over ssh and asserts on it; a fake's
 gRPC records carry each request's trace id, whose seed prefix names the
 worker that sent it (RW10).
 
-**Cases.** Each case runs in its own cluster after a restart of the worker
-fleet that also deletes every dnv key from etcd, resets every fake and
-truncates every log, so that neither membership state nor an earlier case's
-objects leak into it: an earlier case's cluster left in etcd would stay
-driven and write into this case's logs, and a fake still holding an earlier
-case's revision would refuse this case's first syncup as stale, the
+**Cases.** Each case of the default run runs in its own cluster after a
+restart of the worker fleet that also deletes every dnv key from etcd, resets
+every fake and truncates every log, so that neither membership state nor an
+earlier case's objects leak into it: an earlier case's cluster left in etcd
+would stay driven and write into this case's logs, and a fake still holding an
+earlier case's revision would refuse this case's first syncup as stale, the
 revision gate being per object and not per cluster.
 
 * smoke — one worker alone converges a new SP: the fan-out, the rounds, both
@@ -6430,9 +6434,11 @@ the cleanup alone. Cleanup signals every process the suite started by its
 recorded pid, continuing every stopped process first, a worker or, in the
 three-member mode, an etcd member, so that it acts on its
 termination, with a pattern kill of the programs under the work directory
-as a safety net, and removes the suite's work directory; nothing outside that directory is
-touched, and the suite leaves no kernel state, no packages and no users
-behind.
+as a safety net, and removes the suite's work directory and the crash
+scan's sample folder in `/var/tmp` by its name; nothing else outside that
+directory is touched but for a process a stale pid file names, as a pid is
+signalled with no check that it still runs the suite's program, and the
+suite leaves no kernel state, no packages and no users behind.
 
 **The driver, `workerctl`.** `workerctl` is the etcd driver that plays the
 gateway: it writes through `model` as a gateway's STM would, resolves the
@@ -7451,8 +7457,10 @@ caught.
   that recur every round for as long as their cause lasts: an unreachable
   object's `check stream open failed`, `check stream send failed` or
   `check round failed` (the revision loop's own records, which the Log records
-  above do not list and no suite parses, though `integtest/round_counts.sh`,
-  which no suite calls, counts them from a run's copied logs); the
+  above do not list and on which no suite asserts: `integtest/round_counts.sh`
+  counts them from a run's copied logs, and the e2e suite's many-pools case,
+  the one stage that runs it, reads them from the worker's log to log the
+  rounds of its build); the
   `syncup result`
   of each `Syncup*` that RW4 step 5 re-issues, paired with a `syncup leftover`
   or a `syncup rejected` while its reply still carries the leftover or the

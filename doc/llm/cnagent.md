@@ -6866,23 +6866,24 @@ stores instead is CN23's.
   leg holds its bytes. Four ways are tried in the cn suite, each from that
   state (`cnagent_integtest.md`, Cases, repair). The mark kept, the
   level stepped to the one that stops the group arrays and back: the
-  standing mark acts again, as no array of the group runs, and its stop
-  drops the list; but the worker clears a mark once its report reads the
+  standing mark acts again, as no array of the group runs, the stop
+  between its two runs goes through, and its second run drops the list;
+  but the worker clears a mark once its report reads the
   start done (`dnv-worker.md` AR13), which it does once the group's row
   reads OK again after the converge that adds the other members. The mark
   cleared, the same level steps: the plain assembly starts the array from
   every member with its list and the row reads OK, over which the gateway
   refuses a new mark, as it does at the level that stops the group arrays
   (`architecture.md`, Repairs, ForceStartGroup). A new mark given while the
-  row reads ERROR, the one state in which the gateway takes one, then the
-  level steps: the mark waits over the running array, the reading names no
-  mark of its revision acted, so the worker keeps it, and it acts at the
-  step up and drops the list; that state lasts only until the next
-  converge, which the worker's re-send on the failed start's reply code
-  brings. By hand, mdadm's own assembly passing force-no-bbl at the level
-  that stops the group arrays, then its stop, drops every member's list; a
-  region md never copied onto a member added under the list is then read
-  as good whatever that member holds there.
+  row reads ERROR, the one state of this sequence in which the gateway
+  takes one, as it takes one over any row but OK, then the level steps: the
+  mark waits over the running array, the reading names no mark of its revision
+  acted, so the worker keeps it, and it acts at the step up and drops the
+  list; that state lasts only until the next converge, which the worker's
+  re-send on the failed start's reply code brings. By hand, mdadm's own
+  assembly passing force-no-bbl at the level that stops the group arrays, then
+  its stop, drops every member's list; a region md never copied onto a member
+  added under the list is then read as good whatever that member holds there.
 * After a forced start, a group whose `leg_list` legs that decide its
   assembly carry two identities stays down at its next assembly (CN12, case
   2): a leg the forced start left as it was, the bad leg of a repair since
@@ -7146,7 +7147,13 @@ stores instead is CN23's.
   read, and the converge that round's re-send brings; each converge, and
   the read, grow with the slice count. No worker that drives the pool, as
   in a handoff between owners, means no re-send: the stack waits for the
-  next owner's first round (next).
+  next owner's first round (next). A promotion that outruns the flip of one
+  leg of a RAID1 group and not the other's builds no stack at all: md
+  starts the array inactive from the one member, which this agent leaves
+  as it is (CN12) and no read names absent, so no re-send comes, and the
+  pause lasts until the worker fails the pool over (`architecture.md`,
+  Known limits, A promotion that outruns its sides can leave a group's array
+  inactive).
 * The cn agent converges only in a `SyncupCntlr` and in the startup
   reconcile (CN10, No converge in the background), so while no worker
   drives the pool — a handoff between owners (`dnv-worker.md` VW7) — a

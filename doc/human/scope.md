@@ -32,7 +32,7 @@ has shown them yet. Such an entry carries the mark "not seen in the lab".
 Such a limit is named all the same, so that the reader knows of it.
 
 Sizes, measured times and the table of enforced sizes stay in
-[the introduction](introduction.md#status-and-limits-of-01). This document
+[the introduction](introduction.md#status-and-limits). This document
 links to them. The limits of the test suites are not in this document.
 
 ## 1. What dnv is
@@ -262,7 +262,7 @@ Three more things belong with case 1:
   that fails at once when a path is torn down. State: accepted; section
   6.1 has the way back. Seen in the lab for a data group whose meta group
   stayed, with the times in
-  [the introduction](introduction.md#status-and-limits-of-01): a short cut
+  [the introduction](introduction.md#status-and-limits): a short cut
   only paused the host's writes, a longer one left the thin pool
   read-only on its primary and after a failover, and no write the host was
   told was done was lost. In the end-to-end suite, with the worker
@@ -310,7 +310,7 @@ loss in the sense of this document. The application knows. Two cases:
   long. A one-leg group has no other leg: its writes and reads wait for
   the fast IO fail timeout too and return the error, and a failed commit
   leaves its thin pool read-only. The measured times are in [the
-  introduction](introduction.md#status-and-limits-of-01). State: accepted.
+  introduction](introduction.md#status-and-limits). State: accepted.
 
 **What a completed write means.** A volume tells the host, on the path to
 its primary, that it has a volatile write cache, as many disks do, so the
@@ -354,29 +354,44 @@ the host.
   the write in flight at the reset and every write after it read back.
   The last run slowed the pool's commits so that the reset could land in
   an fsync, and it still landed in a write in each of the four jobs.
-- **After a failover, a host's flush through the new primary is not
-  sent.** Silent. A volume tells the host, path by path, whether it has
-  a volatile write cache. A standby's volume has none, as it serves only
-  errors, and so has a volume whose namespace an operator suspended, or
-  that waits for its clone's copy. The host reads this when it connects,
-  and again only when it rescans the controller's volumes: when a volume
-  is added to or removed from the subsystem, or at `nvme ns-rescan`. A
-  failover moves the primary role but does not make the host rescan. So
-  the host still reads the new primary's path as having no cache. Its
-  kernel then completes each flush on that path at once without sending
-  it, and sends a write it marks FUA as a plain write. An fsync returns
-  success with nothing made durable. The pool commits on its own about
-  once a second, so a write to a new block is lost when the new primary
-  dies before that commit, though its fsync completed. A write over data
+- **A host's flush through a path it last read while its volume served
+  only errors is not sent.** Silent. A volume tells the host, path by
+  path, whether it has a volatile write cache. A volume served only by
+  errors has none. These are: a standby's volume; a volume of a disabled
+  cntlr; a volume of a new pool whose sides are still zeroing; a volume
+  whose namespace an operator suspended or that waits for its clone's
+  copy; a clone's destination volume while its pool's level builds no
+  clone; and every volume of a pool whose level builds no thin pool. The
+  host reads this when it connects. It reads it again when its connection
+  to the controller comes back after a loss or a reset, and when it
+  rescans the controller's volumes: when a volume is added to or removed
+  from the subsystem, or at `nvme ns-rescan`. A failover moves the primary
+  role but makes the host read nothing again. Neither does the end of the
+  zeroing, of the suspension, of the clone's wait, of the disable or of the
+  level step. So the host still reads the new primary's path, or the path
+  to a volume it connected to early, as having no cache. The host's kernel
+  then completes each flush on that path at once without sending it, and
+  sends a write it marks FUA as a plain write. An fsync returns success
+  with nothing made durable. The pool commits on its own about once a
+  second. So a write to a new block is lost when the serving primary dies
+  before that commit, though its fsync completed. A write over data
   already there waits in the disks' caches until something else flushes
-  them. A rescan, or a new connection, ends this until the next
-  failover. State: fix later; the question of how is open. Read from the
-  kernel's code and seen in the lab: a host's path to a volume served
-  first by an error device, then by a disk, kept reading as having no
-  cache, and the host's fsync sent no flush to the disk; after
-  `nvme ns-rescan` it did. In the end-to-end suite, the fsyncs a host made
-  through the new primary right after a failover took under a
-  millisecond.
+  them. This ends with a rescan, or with a connection made, or made again,
+  while the volume is served. It comes back the next time the host reads
+  the path while the volume serves only errors, as at the next failover. A
+  Kubernetes volume is attached without a wait for its pool's zeroing, so
+  a pod that starts with a new claim can meet this with no failover.
+  State: fix later; the question of how is open. Read from the kernel's
+  code. Seen in the lab, on one controller node and one host, outside
+  dnv's own steps: a
+  host's path to a namespace made by hand over an error device, then moved
+  onto a loop device that has a write cache, kept reading as having no
+  cache, and the host's fsync sent no flush to that device; after
+  `nvme ns-rescan` it did. Seen in the
+  end-to-end suite's fsync stage: the fsyncs a host made through the new
+  primary right after a failover took 0 ms, as fsyncs that send no flush
+  do; no suite reads the cache setting of a host's path. The cases with no
+  failover only follow from dnv's rules, and no run has shown them.
 - **A failover while the old primary still serves can lose a write the
   host was told was done, in some cases.** Silent. A host still writing
   through the old primary can have a write that lands on one leg of a
@@ -678,7 +693,7 @@ hold, which is how long the worker waits for an
 agent that is still rebuilding after a restart, in seconds, and three
 flags of the worker: `--vote-interval`, `--vote-grace-time` and
 `--vote-leave-grace-time`.
-Measured times are in [the introduction](introduction.md#status-and-limits-of-01).
+Measured times are in [the introduction](introduction.md#status-and-limits).
 
 | Fault | What dnv does by itself | The wait, where a setting controls it | By hand |
 |---|---|---|---|
@@ -757,18 +772,20 @@ Measured times are in [the introduction](introduction.md#status-and-limits-of-01
   is not this case: the first is failed over, since a new primary opens
   the pool from its last commit, and the second gets more metadata from
   the auto-grow. Corrupt thin pool metadata has no check and no repair
-  flow in dnv. State: procedure to write, the repair by hand onto fresh
-  space, with the level steps, the names of the devices involved, and the
-  tools thin_check and thin_repair. Seen in the lab: a pool with the mark
-  opened read-only, a failed pool opened again as writable, and a full one
-  became writable after its metadata grew. A suite case repairs by hand a
-  pool whose metadata needs a check, one whose metadata sits in one group:
-  the pool turned off, the check, the repair onto a new device, that
-  device's check, its copy back over the group's array, the mark cleared,
-  and the pool turned on again, writable with its data. The copy back
-  stands in for a swap of the new device, as dnv builds the pool over the
-  group's array. That metadata was intact, so a repair of corrupt metadata
-  is not tried, nor a pool whose metadata spans several groups.
+  flow in dnv. State: procedure to write, the repair by hand onto a new
+  device copied back over the metadata's group, with the level steps, the
+  names of the devices involved, and the tools thin_check and thin_repair.
+  Seen in the lab: a pool with the mark opened read-only, a failed pool opened
+  again as writable, and a full one became writable after its metadata grew. A
+  suite case repairs by hand a pool whose metadata needs a check, one whose
+  metadata sits in one group: the pool's level stepped down to the one that
+  builds no thin pool, where the group's array still runs, the check, the
+  repair onto a new device, that device's check, its copy back over the
+  group's array, the mark cleared, and the level stepped back to read-write,
+  the pool writable with its data. The copy back stands in for a swap of the
+  new device, as dnv builds the pool over the group's array. That metadata was
+  intact, so a repair of corrupt metadata is not tried, nor a pool whose
+  metadata spans several groups.
 - **A group whose in-sync leg dies during a copy waits for a forced
   start.** A repair finishes once the primary reports the new leg in place,
   while md may still copy onto it. The old leg dies during the copy. md
@@ -1771,26 +1788,31 @@ failover's among them.
   path shows the volume, and can lose a write the same way. The e2e suite
   shows the first window, with an old primary whose agent is stopped; the
   other windows and the Kubernetes case are not seen in the lab.
-- **A failover in the middle of a pool's build can leave the pool
-  unbuilt.** When the new primary builds before the disk nodes have opened
-  its paths to every copy of a group, the group's RAID1 array can start
-  inactive with one copy, and nothing starts it again: the pool serves
+- **A failover while the disk nodes are still opening a pool's paths can
+  leave the pool unbuilt.** When the new primary builds before the disk nodes
+  have opened its paths to every copy of a group, the group's RAID1 array can
+  start inactive with one copy, and nothing starts it again: the pool serves
   nothing. By dnv's rules the worker then fails the pool over to its
   standby once the error has lasted the cntlr threshold, 600 seconds at
-  the default; no run has waited that long. The e2e suite's many-pools
-  case saw it once, in one of three builds of 64 pools at once, on a pool
-  that failed over twice while it built. State: fix later; not decided
-  yet.
+  the default. The run that met it had raised that threshold to 1800
+  seconds and gave up its wait after 1200 seconds, so no run has reached
+  that failover. The e2e suite's many-pools case saw it once, in one of
+  three builds of 64 pools at once, on a pool that had finished building
+  and then failed over twice while the other pools still built, the second
+  time while the disk nodes were still opening its paths. State: fix later;
+  not decided yet.
 - **Creating many volumes at once can fail over volumes that are already
   built.** A controller node that builds many new primaries at once can
-  answer the worker's health checks of the primaries it has finished too
-  late, and the worker then fails those over, so their hosts see a pause
+  answer the worker's check rounds of the primaries it has finished with
+  reports that are too old, which the worker counts as missed rounds, and
+  the worker then fails those primaries over, so their hosts see a pause
   with no fault behind it. The e2e suite's many-pools case shows it on three
-  controller nodes at the default thresholds: 22, 25 and 18 failovers in
-  three builds of 64 pools, one in one of two builds of 32 and none at 8,
-  each of a pool that had finished building, one pool twice, and in one
-  build the pool made before the others
-  ([the introduction](introduction.md#status-and-limits-of-01) has the
+  controller nodes at the default primary threshold, with the other
+  thresholds raised: 22 and 18 failovers in the two builds of 64 pools
+  that finished, one pool failing over twice in a third, one in one of two
+  builds of 32 and none at 8, each of a pool that had finished building,
+  and in one build the pool made before the others
+  ([the introduction](introduction.md#status-and-limits) has the
   numbers). A Kubernetes cluster that creates many volumes at once has this
   shape. State: fix later; whether the threshold or the build should change
   is not decided yet.
@@ -1803,7 +1825,7 @@ failover's among them.
   node comes back before that message sends its writes there, and they fail.
   No write the host was told was done is lost. The e2e suite's many-pools
   case shows it at 32 and 64 pools
-  ([the introduction](introduction.md#status-and-limits-of-01) has the
+  ([the introduction](introduction.md#status-and-limits) has the
   numbers). State: fix later; the way is not decided yet.
 - **A node clock that steps back delays a failover.** The worker reads how
   old an agent's report is by the node's clock. After the clock steps
@@ -1948,7 +1970,7 @@ failover's among them.
 ## 10. Sizes and performance
 
 The enforced sizes and the measured figures are in
-[the introduction](introduction.md#status-and-limits-of-01). The limits of
+[the introduction](introduction.md#status-and-limits). The limits of
 design:
 
 - **One primary per pool bounds a volume's throughput.** Every volume of a
@@ -1956,14 +1978,18 @@ design:
   node, never across nodes. To scale out, spread the pools across
   controller nodes. State: accepted; more than one primary is not yet.
 - **No throughput or latency figures are published.** Only the failover
-  pause, the write pause when a disk node dies and what the loss of every
-  path of a data group does are measured, on the lab VMs. State: accepted; the figures come
-  from a performance run on AWS.
+  pause, the write pause when a disk node dies, the write pause while a
+  volume grows, what the loss of every path of a data group does, what
+  the loss of a controller node that holds many pools does, how soon the
+  workers stop when one etcd member hangs, and the times and memory of one
+  node of each role stepped to the largest counts are measured, on the lab
+  VMs. State: accepted; the figures come from a
+  performance run on AWS.
 - **The largest counts ran on small machines only.** A lab tool stepped
   one real disk node to 1024 sides and one real controller node to 256
   cntlrs, each cntlr a one-slice pool with no RAID1, on small guests; every
   call succeeded and every check round was clean.
-  [The introduction](introduction.md#status-and-limits-of-01) gives the
+  [The introduction](introduction.md#status-and-limits) gives the
   guests' sizes and the times. State: accepted; larger machines and pools
   with RAID1 come with the performance run.
 - **Every change of a pool sends the whole desired state to its sides and

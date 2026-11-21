@@ -259,7 +259,7 @@ func TestFakeAgentMatchesTheCnAgent(t *testing.T) {
 	tw.compareCn("the CN", 1)
 
 	// A cntlr the CN's syncup does not list is refused, and so is its
-	// round (CN8, CN30).
+	// round (CN8, CN23).
 	unlisted := standbyReq(1, false)
 	unlisted.CntlrPointer = fullCntlrPtr(2)
 	tw.syncupCntlr("a cntlr the CN does not list", unlisted)

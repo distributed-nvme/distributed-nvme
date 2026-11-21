@@ -130,11 +130,13 @@ func TestStrayWordIsRefused(t *testing.T) {
 }
 
 // parseCallsOutsideParseArgs reads the driver's code in dir and returns where
-// a call of a method named Parse sits outside parseArgs, but main's parse of
-// the global flags (top.Parse), and how many such calls parseArgs holds. A
-// call on an imported package's name, such as time.Parse, is no flag set's
-// and is skipped; a call inside a function literal of a top-level table
-// counts as outside.
+// a call of a method named Parse, or of flag.Parse, sits outside parseArgs, a
+// top.Parse in main excepted, which this driver does not have, since each
+// subcommand's flag set carries the global flags (newFlagSet), and how many
+// such calls parseArgs holds. A call on another imported package's name,
+// such as time.Parse, is no flag set's and is skipped, but flag.Parse, which
+// parses flag.CommandLine, counts as any other; a call inside a function
+// literal of a top-level table counts as outside.
 func parseCallsOutsideParseArgs(dir string) ([]string, int, error) {
 	names, err := filepath.Glob(filepath.Join(dir, "*.go"))
 	if err != nil {
@@ -152,6 +154,9 @@ func parseCallsOutsideParseArgs(dir string) ([]string, int, error) {
 			return nil, 0, err
 		}
 		pkgs := map[string]bool{}
+		// flagName is the name the file gives package flag, whose Parse
+		// parses flag.CommandLine and so counts.
+		flagName := ""
 		for _, imp := range f.Imports {
 			path := strings.Trim(imp.Path.Value, `"`)
 			pkgName := path[strings.LastIndex(path, "/")+1:]
@@ -159,6 +164,9 @@ func parseCallsOutsideParseArgs(dir string) ([]string, int, error) {
 				pkgName = imp.Name.Name
 			}
 			pkgs[pkgName] = true
+			if path == "flag" {
+				flagName = pkgName
+			}
 		}
 		for _, decl := range f.Decls {
 			fn := "a top-level declaration"
@@ -176,7 +184,7 @@ func parseCallsOutsideParseArgs(dir string) ([]string, int, error) {
 				}
 				recv, _ := sel.X.(*ast.Ident)
 				switch {
-				case recv != nil && pkgs[recv.Name]:
+				case recv != nil && pkgs[recv.Name] && recv.Name != flagName:
 				case fn == "parseArgs":
 					inside++
 				case fn == "main" && recv != nil && recv.Name == "top":
@@ -192,9 +200,11 @@ func parseCallsOutsideParseArgs(dir string) ([]string, int, error) {
 }
 
 // TestEveryParseGoesThroughParseArgs guards the refusal's reach: every call
-// of a Parse method in the driver's code sits inside parseArgs, which holds
-// exactly one, but main's parse of the global flags, so a subcommand added
-// later cannot parse its flags past the refusal.
+// of a Parse method or of flag.Parse in the driver's code sits inside
+// parseArgs, which holds exactly one; main parses no flags, each
+// subcommand's flag set carrying the global ones (newFlagSet), so a
+// subcommand added later that calls one cannot parse its flags past the
+// refusal; a method value such as `f := fs.Parse` is not seen.
 func TestEveryParseGoesThroughParseArgs(t *testing.T) {
 	outside, inside, err := parseCallsOutsideParseArgs(".")
 	if err != nil {
@@ -210,8 +220,9 @@ func TestEveryParseGoesThroughParseArgs(t *testing.T) {
 
 // TestTheParseGuardSeesASkip: the guard reports a parse that skips parseArgs
 // in each shape a subcommand could give it — a subcommand's own fs.Parse, a
-// flag set of another name, and one inside a function literal of a table —
-// and passes main's top.Parse and a call on an imported package's name.
+// flag set of another name, flag.Parse of the process's flag set, and one
+// inside a function literal of a table — and passes main's top.Parse and a
+// call on another imported package's name.
 func TestTheParseGuardSeesASkip(t *testing.T) {
 	dir := t.TempDir()
 	src := `package main
@@ -226,6 +237,8 @@ func parseArgs(fs *flag.FlagSet, args []string) error { return fs.Parse(args) }
 func runOne(fs *flag.FlagSet, args []string) { _ = fs.Parse(args) }
 
 func runRace(jobFs *flag.FlagSet, argv []string) { _ = jobFs.Parse(argv) }
+
+func runGlobal() { flag.Parse() }
 
 var table = []func(*flag.FlagSet, []string){
 	func(set *flag.FlagSet, args []string) { _ = set.Parse(args) },
@@ -250,7 +263,7 @@ func main() {
 		t.Errorf("the sample's parseArgs holds %d parse calls, want one",
 			inside)
 	}
-	want := []string{" in runOne", " in runRace",
+	want := []string{" in runOne", " in runRace", " in runGlobal",
 		" in a top-level declaration"}
 	if len(outside) != len(want) {
 		t.Fatalf("the guard reports %v, want %d parses outside parseArgs",

@@ -18,7 +18,7 @@
 #
 #   optional: [--only <case>] [--cleanup-only] [--slice-cnt N] [--keep-logs DIR]
 #
-# Cases, in order: k8s, policy, volume, failover, restart, detach, many,
+# Cases, in order: k8s, policy, volume, failover, restart, detach, many, fill,
 # machine, sanity. `--only` picks one.
 # Cleanup runs at the START and, on success only, at the END (CSI5): a
 # failing run leaves its pods, pools, processes and work directories in place
@@ -300,7 +300,10 @@ CLUSTER_ID=""
 # Logging, assertions, failure handling (shapes from e2e_test.sh)
 # ---------------------------------------------------------------------------
 
-log() { echo "$*" >&2; }
+# A write that fails, as to a terminal that has closed, sends the run's
+# output to /dev/null from then on, so that a log line never ends the run's
+# exit handler under set -e.
+log() { echo "$*" >&2 || exec >/dev/null 2>&1; }
 
 stage() { # <nn> <text>
 	STAGE="$CASE: $2"
@@ -335,6 +338,20 @@ assert_parses() { # <json> <label>
 on_exit() {
 	local rc=$?
 	trap - EXIT
+	# A signal while this handler runs: a Ctrl-C (SIGINT) reaches the
+	# command in hand, which it ends unless that command ignores it, a read
+	# of a command's output and an ssh still connecting among them, and the
+	# dump and the removals below go on; a SIGHUP, which a terminal that
+	# closes sends twice, is ignored here and by every command below; a
+	# SIGTERM ends the run at once. Output that fails, as a terminal that
+	# has closed does, goes to /dev/null from then on, so that set -e ends
+	# the handler at no log line: this line tries a write first, and log
+	# does the same at each of its writes. rc keeps the code the run was
+	# ending with, and the run exits with it but on a SIGTERM.
+	trap - TERM
+	trap : INT
+	trap '' HUP
+	printf '\n' >&2 2>/dev/null || exec >/dev/null 2>&1
 	[ -z "$SMOKE_DIR" ] || rm -rf "$SMOKE_DIR"
 	if [ "$CLEANUP_ONLY" -eq 0 ] && [ "$SETUP_DONE" -eq 1 ] && [ -n "$KEEP_LOGS" ]; then
 		keep_logs
@@ -1852,7 +1869,7 @@ cp_pids() {
 
 cp_cleanup() {
 	stop_all >/dev/null
-	rm -rf "$WORK"
+	rm -rf "$WORK" /var/tmp/dnv-panic-plant-csi.*
 	echo cleaned
 	return 0
 }
@@ -1898,8 +1915,11 @@ wipe() { # <cdc traddr>
 	return 0
 }
 
-# sanity_stop ends the two plugins the sanity case runs as plain processes.
+# sanity_stop ends csi-sanity, which outlives the driver's ssh when the
+# case's timeout or a signal ends that ssh, and the two plugins the sanity
+# case runs as plain processes.
 sanity_stop() {
+	pkill -f "$WORK/bin/[c]si-sanity" >/dev/null 2>&1
 	kill_pidfile "$WORK/sanity/node.pid" >/dev/null
 	kill_pidfile "$WORK/sanity/ctl.pid" >/dev/null
 	pkill -f "$WORK/bin/[d]nv-csi" >/dev/null 2>&1
@@ -2188,7 +2208,9 @@ k3s_ensure() {
 	if [ "$ver" = none ]; then
 		log "  cp: no k3s, installing the server (up to ${WAIT_K3S_INSTALL}s)"
 		# shellcheck disable=SC2086 # the server flags are separate words
-		out=$(timeout "$WAIT_K3S_INSTALL" ssh "${SSH_OPTS[@]}" "$CP" \
+		# --foreground keeps timeout in the suite's process group, as in
+		# case_sanity, so a signal to the runner's group reaches the ssh.
+		out=$(timeout --foreground "$WAIT_K3S_INSTALL" ssh "${SSH_OPTS[@]}" "$CP" \
 			"sudo -n bash $HELPER k3s_install_server $K3S_VERSION $K3S_SERVER_DISABLE --node-taint $CP_TAINT_KEY:$CP_TAINT_EFFECT" 2>&1) ||
 			die "cp: installing the k3s server failed: $out"
 		out=$(helper_cp k3s_state) || die "cp: reading the k3s state failed"
@@ -2204,7 +2226,7 @@ k3s_ensure() {
 		ver=$(k3s_version_of "$out")
 		if [ "$ver" = none ]; then
 			log "  host$h: no k3s, installing the agent (up to ${WAIT_K3S_INSTALL}s)"
-			out=$(printf '%s\n' "$token" | timeout "$WAIT_K3S_INSTALL" ssh "${SSH_OPTS[@]}" "${HOST[$h]}" \
+			out=$(printf '%s\n' "$token" | timeout --foreground "$WAIT_K3S_INSTALL" ssh "${SSH_OPTS[@]}" "${HOST[$h]}" \
 				"sudo -n bash $HELPER k3s_install_agent $K3S_VERSION https://$CP_IP:$K3S_API_PORT" 2>&1) ||
 				die "host$h: installing the k3s agent failed: $out"
 			out=$(helper_host "$h" k3s_state) || die "host$h: reading the k3s state failed"
@@ -2502,7 +2524,8 @@ image_import() { # <image>
 # with_debug_log prints the plugin manifest on stdin with --log-level=debug
 # added to the dnv-csi container's arguments, the line after its subcommand,
 # at that line's indent, so the plugins run at debug as the suites run their
-# dnv daemons, save one dn agent in one case of the dn suite; it fails when
+# dnv daemons, save one dn agent in one case of the dn suite, the tutorial
+# suite's daemons and the e2e upgrade case's v0.1.0 programs; it fails when
 # the manifest has no such line.
 with_debug_log() {
 	awk '
@@ -3057,8 +3080,9 @@ panic_scan() {
 	panic_pods
 }
 
-# panic_dump prints, on the failure path, every crash line the guests' logs
-# and the driver's containers hold, so that a crash that failed a case
+# panic_dump prints, on the failure path, the crash lines panic_guests reads,
+# up to the first guest whose logs it cannot read, which it names, and every
+# crash line the driver's containers hold, so that a crash that failed a case
 # through another check is named. It never fails.
 panic_dump() {
 	local out
@@ -3077,18 +3101,20 @@ panic_dump() {
 # the two crash lines planted after it must, and nothing else may.
 panic_plant() {
 	local d hits want
-	d=$(ssh_cp_sudo "mktemp -d /var/tmp/dnv-panic-plant.XXXXXX") ||
+	d=$(ssh_cp_sudo "mktemp -d /var/tmp/dnv-panic-plant-csi.XXXXXX") ||
 		die "making the crash scan's scratch directory on cp failed"
 	case "$d" in
-	/var/tmp/dnv-panic-plant.?*) ;;
+	/var/tmp/dnv-panic-plant-csi.?*) ;;
 	*) die "mktemp on cp printed '$d', not a scratch directory" ;;
 	esac
 	printf '%s\n' \
 		'{"level":"ERROR","msg":"os command failed","stderr":"panic: in a field\nfatal error: in a field"}' \
 		'panic: planted by the preflight' 'goroutine 1 [running]:' \
 		'fatal error: planted by the preflight' |
-		ssh_cp_sudo "mkdir $d/sub && cat > $d/sub/plant.log" ||
-		die "writing the crash scan's sample log on cp failed"
+		ssh_cp_sudo "mkdir $d/sub && cat > $d/sub/plant.log" || {
+			ssh_cp_sudo "rm -rf $d" || true
+			die "writing the crash scan's sample log on cp failed"
+		}
 	hits=$(panic_lines "$d" ssh_cp_sudo) || hits="(the read failed)"
 	ssh_cp_sudo "rm -rf $d" || true
 	want="$d/sub/plant.log:2:panic: planted by the preflight"
@@ -4569,7 +4595,11 @@ case_sanity() {
 	ssh_host_user 0 "printf 'cluster: %s\nredundancy: raid1\ncntlrs: \"2\"\n' $CLUSTER > $WORK/sanity/params.yaml" >/dev/null ||
 		die "writing the sanity parameters failed"
 	local rc=0
-	timeout "$SANITY_TIMEOUT" ssh "${SSH_OPTS[@]}" "${HOST[0]}" \
+	# --foreground keeps timeout in the suite's process group, so a signal to
+	# the runner's group reaches the ssh too and the run ends with it.
+	# Neither reaches csi-sanity on host0, which outlives the ssh;
+	# sanity_stop ends it.
+	timeout --foreground "$SANITY_TIMEOUT" ssh "${SSH_OPTS[@]}" "${HOST[0]}" \
 		"sudo -n $WORK/bin/csi-sanity --csi.endpoint unix://$WORK/sanity/node.sock --csi.controllerendpoint unix://$WORK/sanity/ctl.sock --csi.mountdir $WORK/sanity/mnt --csi.stagingdir $WORK/sanity/stage --csi.testvolumeparameters $WORK/sanity/params.yaml --csi.testvolumesize 268435456 --ginkgo.v --ginkgo.no-color > $WORK/sanity/sanity.log 2>&1" ||
 		rc=$?
 	out=$(ssh_host_user 0 "grep -E '^(Ran|FAIL|SUCCESS|\\[FAIL\\]|  \\[FAILED\\])|Summarizing' $WORK/sanity/sanity.log | head -40") || true
@@ -4596,6 +4626,13 @@ run_case() {
 main() {
 	parse_args "$@"
 	trap on_exit EXIT
+	# A run killed by SIGTERM, SIGINT or SIGHUP exits with the shell's
+	# code for the signal, so on_exit reads it as the failure it is, never
+	# as a PASS. The HUP trap ignores every later SIGHUP first: a terminal
+	# that closes sends a second one right after the first.
+	trap 'exit 143' TERM
+	trap 'exit 130' INT
+	trap 'trap "" HUP; exit 129' HUP
 	log_topology
 
 	if [ "$CLEANUP_ONLY" -eq 1 ]; then

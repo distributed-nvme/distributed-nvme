@@ -86,9 +86,10 @@ import (
 )
 
 const (
-	// defaultEndpoints is the suite's single-node etcd (dnv-worker.md,
-	// Integration test plan, Topology): it listens on the loopback of the test
-	// server, and workerctl runs there.
+	// defaultEndpoints is the client port of the suite's first etcd member,
+	// its only one but in the three-member mode, whose runs pass every member
+	// with --endpoints (dnv-worker.md, Integration test plan, Topology): it
+	// listens on the loopback of the test server, and workerctl runs there.
 	defaultEndpoints = "127.0.0.1:12379"
 	// pingKey is the key `ping` reads. It is deliberately a key nothing ever
 	// writes: the probe succeeds on not-found, so what it proves is that etcd

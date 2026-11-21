@@ -23,9 +23,10 @@
 #
 # The controller node step: one cn agent on the other guest, with its own
 # nvmet port. For each count in --cntlrs, the cntlrs grow to that count: each
-# new cntlr is the cn suite's S shape (cnagent_integtest.md, Topology), one
-# slice whose RedundNone meta and data groups each have one one-extent side on
-# the disk node, one thin device and one host-facing subsystem with one
+# new cntlr is the cn suite's S shape (cnagent_integtest.md, Cases, torn)
+# with a data group of one extent, where the S shape's has two: one slice
+# whose RedundNone meta and data groups each have one one-extent side on the
+# disk node, one thin device and one host-facing subsystem with one
 # namespace. Its two sides are provisioned first, then one SyncupCn with the
 # whole cntlr list, then one SyncupCntlr per new cntlr, then one fresh CheckCn
 # round and one fresh CheckCntlr round of the last cntlr it sent. Both
@@ -51,19 +52,28 @@
 # MIN_DISK_GIB; a check round's code is recorded, not judged. Each step
 # prints one "SIZE …" line with its times, the check rounds' codes, the
 # sample, the dm devices and fabrics controllers the guests hold and their
-# room after it; a header line gives each guest's CPU count, memory and
-# kernel.
+# room after it, but a cntlrs step that stops among its disk node sides,
+# which prints none and logs only the stop; a header line gives each guest's
+# CPU count, memory and kernel.
 #
-# It touches a guest only once both have passed its guard: a guest that
-# runs a dnv-agent, holds a dnv dm device, nvmet subsystem or fabrics
-# controller, or holds the tool's work directory is refused, and the tool
-# then exits having changed nothing on either. Run it only on guests no
-# other run holds. Once the guard has passed, everything of dnv on both
-# guests goes at the end and on any exit, which the guard makes what the
-# tool made: the agents, every dnv dm device, nvmet object and fabrics
-# controller, the loop device and its file, the udev rules it installed and
-# the shipped files; the agents' logs are first copied into --log-dir. The
-# uutils dd rule of the agent suites holds: this tool runs no dd at all.
+# A run touches a guest only once both have passed its guard: a guest that
+# runs a dnv-agent, holds a dnv dm device, nvmet subsystem, nvmet host or
+# fabrics controller, holds nvmet port 1, or holds the tool's work directory,
+# or whose process, dm device or nvmet listing fails, is refused, and the tool
+# then exits having changed nothing on either. `--cleanup-only` runs no guard
+# and no step: it runs the cleanup below on both guests, the controller node
+# first, over every dnv-agent, dnv dm device, nvmet subsystem and host of
+# dnv's names, fabrics controller to one of them and nvmet port 1 they hold,
+# whatever run made them, and the tool's own loop device, and takes away every
+# rule of deploy/udev, as a new process has no record of which rules an
+# earlier run installed. Run it only on guests no other run holds. Once the
+# guard has passed, everything of dnv on both guests goes at the end and on
+# any exit, which the guard makes what the tool made, as it refuses a guest
+# that holds any object the cleanup removes: the agents, every dnv dm device,
+# nvmet subsystem and host, nvmet port 1 and fabrics controller, the loop
+# device and its file, the udev rules it installed and the shipped files; the
+# agents' logs are first copied into --log-dir. The uutils dd rule of the
+# agent suites holds: this tool runs no dd at all.
 
 set -euo pipefail
 
@@ -97,11 +107,11 @@ DN_PREFIX=268435456
 MAX_SIDES=1024
 DISK_SIZE=$((DN_PREFIX + MAX_SIDES * EXTENT_SIZE))
 
-# The S shape's geometry at a 1 MiB block (architecture.md, Group on-leg
-# layout: meta region, data region, health block), as the cn suite works it:
-# a one-extent group holds one meta block and 63 data blocks; a meta group's
-# side zeroes its whole span, a data group's its meta block and first data
-# block.
+# This tool's geometry at a 1 MiB block (architecture.md, Group on-leg
+# layout: meta region, data region, health block), as the cn suite works it,
+# both groups of one extent: a one-extent group holds one meta block and 63
+# data blocks; a meta group's side zeroes its whole span, a data group's its
+# meta block and first data block.
 BLOCK_SIZE=1048576
 STRIPE_SIZE=65536
 META_BLOCKS=1
@@ -131,14 +141,15 @@ UDEV_SRC_NAMES=""
 UDEV_MINE=("" "" "")
 WORK_LOCAL=""
 LOG_DIR=""
-# 1 once both guests passed the guard: only then does an exit clean them.
+# 1 once both guests passed the guard, or at once under --cleanup-only, which
+# runs no guard: only then does an exit clean them.
 ARMED=0
 # Each object's last revision, which its check round names: a side's
 # SyncupSide, a cntlr's SyncupCntlr.
 declare -A SIDE_REV CNTLR_REV
 JQ=jq
 # The revisions the last SyncupDn and SyncupCn stored, which their check
-# rounds name (dnv-worker.md RW13, RW14).
+# rounds name (dnv-worker.md RW13; dnv-worker.md, cn role — `worker/cnrole.go`).
 DN_SYNC=0
 CN_SYNC=0
 # The last step's sample of rows, as check_sample read it.
@@ -410,18 +421,33 @@ on_exit() {
 trap on_exit EXIT
 
 # guard — both guests read before either is touched: each must answer with
-# passwordless sudo and hold nothing of dnv. Every reason found is named and
+# passwordless sudo and hold nothing of dnv the cleanup would remove, and a
+# listing of its processes, dm devices or nvmet objects that fails is a
+# reason too. Every reason found is named and
 # the tool exits, with nothing armed, so the exit changes neither guest.
 guard() {
 	local idx why bad=""
 	for idx in 1 2; do
 		why=$(sshv "$idx" "
-p=\$(pgrep -x dnv-agent | tr '\n' ' ')
-[ -z \"\$p\" ] || echo \"runs a dnv-agent (pid \$p)\"
-n=\$(dmsetup ls 2>/dev/null | grep -c '^dnv')
-[ \"\$n\" -eq 0 ] || echo \"holds \$n dnv dm devices\"
-n=\$(ls $NVMET/subsystems 2>/dev/null | grep -c dnv)
-[ \"\$n\" -eq 0 ] || echo \"holds \$n dnv nvmet subsystems\"
+p=\$(pgrep -x dnv-agent); rc=\$?
+[ \$rc -le 1 ] || echo \"cannot list its processes (pgrep exit \$rc)\"
+[ -z \"\$p\" ] || echo \"runs a dnv-agent (pid \$(echo \$p))\"
+if out=\$(dmsetup ls 2>&1); then
+	n=\$(printf '%s\n' \"\$out\" | grep -c '^dnv')
+	[ \"\$n\" -eq 0 ] || echo \"holds \$n dnv dm devices\"
+else
+	echo \"cannot list its dm devices: \$(echo \$out)\"
+fi
+for d in subsystems hosts; do
+	[ -d $NVMET/\$d ] || continue
+	if out=\$(ls -A $NVMET/\$d 2>&1); then
+		n=\$(printf '%s\n' \"\$out\" | grep -c '^$NQN_PREFIX')
+		[ \"\$n\" -eq 0 ] || echo \"holds \$n dnv nvmet \$d\"
+	else
+		echo \"cannot list its nvmet \$d: \$(echo \$out)\"
+	fi
+done
+[ ! -e $NVMET/ports/1 ] || echo \"holds nvmet port 1\"
 n=0
 for c in /sys/class/nvme/nvme*; do
 	case \"\$(cat \"\$c/subsysnqn\" 2>/dev/null)\" in $NQN_PREFIX*) n=\$((n + 1)) ;; esac
@@ -593,8 +619,9 @@ drop_sides() {
 		"${STOPPED:-none}"
 }
 
-# req_cntlr_file <j> <file> — cntlr j's request: the cn suite's req_none,
-# one primary cntlr of pool 0x2000+j whose meta and data groups each have
+# req_cntlr_file <j> <file> — cntlr j's request: the cn suite's req_none
+# with a data group of one extent (req_none's has two, 127 data blocks): one
+# primary cntlr of pool 0x2000+j whose meta and data groups each have
 # one side on the disk node, one thin device and one subsystem.
 req_cntlr_file() {
 	local j=$1 sp=$((0x2000 + $1)) side

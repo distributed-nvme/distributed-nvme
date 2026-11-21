@@ -333,7 +333,8 @@ func agentReply(code uint32, details string) *pb.AgentReply {
 }
 
 // forcedCodeLocked applies the reply_code lever, which forces
-// agent_reply.code on every reply of an object. A forced non-zero code also
+// agent_reply.code on an object's replies but where a gate or another lever
+// answers first (Object.ReplyCode). A forced non-zero code also
 // suppresses the apply: an agent that answers "rejected" must not have
 // stored the request, or the worker suite's "clear => the push succeeds"
 // would have nothing left to push.

@@ -26,7 +26,8 @@ import (
 // cntlr lists kept in maps, from each cluster's planted space answer for the
 // capacity read, and from an ok report of the primary, or a test's own, for
 // the detach's and the attach's waits. It is not the dnvctl suite's fake
-// gateway, which answers one canned reply per method and keeps no state.
+// gateway, which answers each method from its behavior file and keeps no
+// cluster state.
 type fakeGateway struct {
 	pb.UnimplementedGatewayServer
 	mu       sync.Mutex

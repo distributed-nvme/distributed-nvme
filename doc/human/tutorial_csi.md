@@ -55,9 +55,10 @@ How the commands are written:
   tutorial, the one that holds the binaries ([Get dnv](introduction.md#get-dnv)
   says where they come from). Before you start, make sure that directory
   holds `dnv-csi` and the `deploy/` directory, the image recipe and the
-  driver's manifests: the unpacked release folder has both already; a build
-  has them in its `bin/` and in the repository's `deploy/`, so copy them
-  from there.
+  driver's manifests: the unpacked folder of a release after 0.1 has both
+  already; a build has them in its `bin/` and in the repository's
+  `deploy/`, so copy them from there. 0.1 cannot run this tutorial
+  ([Get dnv](introduction.md#get-dnv)).
 - Every Kubernetes command runs as `sudo k3s kubectl`: k3s keeps its
   credentials readable by root alone. Commands that touch the kernel run
   with `sudo`. The control plane and `dnvctl` run as you.

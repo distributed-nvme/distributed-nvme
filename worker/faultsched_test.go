@@ -31,8 +31,9 @@ import (
 // etcd, nor AR1's random first-pass wait.
 //
 // The cluster is the standard one with five disk nodes and four controller
-// nodes, its pool sp0 and a second pool sp1 planted beside it on other
-// nodes, both converged under three whole workers. Each step draws one
+// nodes, its pool sp0 and a second pool sp1 planted beside it (plantSp1),
+// the two sharing cn 2, which holds sp0's standby and sp1's primary, and
+// dn 2, both converged under three whole workers. Each step draws one
 // action and acts on what the state offers: a worker crashed, stopped or
 // started again; a fault set or cleared on a fake, of the kinds a real agent
 // gives — every row of a cntlr ERROR, the primary's data group row or a
@@ -709,9 +710,10 @@ func (fs *faultSched) failPrimaryTargets(t *testing.T) []faultTarget {
 		func(o *agentfake.Object) { delete(o.Rows, row) })
 }
 
-// failLegTargets set one leg's row ERROR on every cntlr of its pool while
-// it is the primary, so the row bites on whichever cntlr the pool's primary
-// is.
+// failLegTargets set one leg's row ERROR, while it is the primary, on every
+// cntlr its pool holds when the step acts, so the row bites on whichever of
+// those cntlrs is the pool's primary; a cntlr a later replacement makes does
+// not carry it.
 func (fs *faultSched) failLegTargets(t *testing.T) []faultTarget {
 	var out []faultTarget
 	for _, ref := range fs.pools {
@@ -1289,8 +1291,11 @@ func (fs *faultSched) migrTargets(t *testing.T, pending bool) []faultTarget {
 }
 
 // endMigr cancels a migration whose cutover is pending or finishes one whose
-// cutover has started, through the model ends a gateway's call and leg
-// repair run (MD6).
+// cutover has started, through leg repair's ops (model.CancelMigration,
+// model.FinishMigration, AR8), which stage the end write a gateway's call
+// stages too (model.EndMigrationIn, MD6); unlike that call, they refuse a
+// pool at a level where reactions stop, and the finish reads no hydration
+// first.
 func (fs *faultSched) endMigr(ref plant.SpRef, name string, migr *pb.Migration, cancel bool) error {
 	ctx := context.Background()
 	if cancel {
@@ -1314,8 +1319,9 @@ func (fs *faultSched) finishMigrTargets(t *testing.T) []faultTarget {
 // ---------------------------------------------------------------------------
 
 // settle clears every fault and brings everything back: the workers, the
-// fakes, the cntlrs' flags and the pools' levels; ends every repair and
-// migration as an operator would; and waits until both pools converge.
+// fakes, the cntlrs' flags and the pools' levels; ends every repair as an
+// operator would and every migration through leg repair's ops (endMigr),
+// whose finish reads no hydration; and waits until both pools converge.
 func (fs *faultSched) settle(t *testing.T) {
 	t.Helper()
 	ctx := context.Background()

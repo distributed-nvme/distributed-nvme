@@ -24,8 +24,10 @@
 # (E2E11): smoke, ops, copy, react, cutoff. `--only` picks one, or one of the
 # opt-in cases of OPTIN_CASES, which only `--only` runs. Cleanup runs
 # unconditionally at the START and, on success only, at the END (E2E6): a
-# failing run leaves every process, dm/md/nvmet object, loop device, host
-# connection and log in place and dumps diagnostics instead. The START
+# failing run takes off the injectors it put on and tells host0's stamped
+# writer to start no more passes (on_exit), leaves every other process,
+# dm/md/nvmet object, loop device, host connection and log in place, and
+# dumps diagnostics instead. The START
 # cleanup tolerates finding nothing, but not a verb that never finished — that
 # stops the run at the end of the sweep (cleanup_start_gate, which lets the
 # other guests be swept first), instead of letting preflight misname the
@@ -59,9 +61,9 @@
 #     it starts it again on the same data.
 #     The cleanup's pkill sweeps run whether or not a pid file exists, so they
 #     also reach a crashed run's processes whose pid files are gone, and each
-#     pattern is qualified by $WORK, by the etcd name or, for fio's fence and
-#     stamp jobs, by a job name only this suite uses, so it never touches
-#     another suite's processes.
+#     pattern is qualified by $WORK, by the etcd name or, for fio's fence,
+#     stamp and stamped-writer (swrite) jobs, by a job name only this suite
+#     uses, so it never touches another suite's processes.
 #  4. nvmet teardown order: rmdir ports/<id>/ana_groups/3 and .../2 BEFORE
 #     rmdir ports/<id>, or the rmdir fails with "Directory not empty" and the
 #     leftover port fails the NEXT suite's setup.
@@ -73,9 +75,11 @@
 #     runs detached, with the GROUP's stdout redirected, or command
 #     substitution hangs with it. Every other dd read on a host, and every
 #     write a host makes into a device except host_write_probe's (which
-#     dm-flakey fails rather than requeues) and the cutoff case's write
-#     loop's (detached, reporting through files, as its writes are meant to
-#     queue), runs under a watchdog on the DRIVER (ssh_host_watched), whose
+#     dm-flakey fails rather than requeues) and those of the detached
+#     writers E2E7 names — the write loop, the fence writer, the stamped
+#     writer, the writer to new blocks and the fio of the many-pools case
+#     and the long run, each reporting through files, as its writes may
+#     queue — runs under a watchdog on the DRIVER (ssh_host_watched), whose
 #     child is the local ssh: IO that blocks where nothing said it would is
 #     abandoned there and the run dies with its diagnostics instead of
 #     hanging.
@@ -86,10 +90,13 @@
 #     host0's connects are nvme-stas's on purpose — that case starts stas with
 #     the autoconnector still masked, and stops it and hands host0 back
 #     before its ending.
-#  7. The udev rules of deploy/udev/ go on the CN VMs AND on the DN VMs. md
-#     runs only on a CN, but the md SUPERBLOCK that CN writes travels down the
-#     side export and lands on the DN's own storage — on the side dm device
-#     and, at the same offset, on the per-CN linear that maps the side 1:1.
+#  7. The udev rules of deploy/udev/ go on the CN VMs AND on the DN VMs
+#     before any agent of this tree's build starts there; the upgrade case's
+#     v0.1.0 half gives both roles v0.1.0's mask in their place
+#     (install_udev_v010). md runs only on a CN, but the md SUPERBLOCK that
+#     CN writes travels down the side export and lands on the DN's own
+#     storage — on the side dm device and, at the same offset, on the per-CN
+#     linear that maps the side 1:1.
 #     Without the rules udev probes them as a `linux_raid_member`, and the
 #     stock incremental rule (`mdadm -I`, which on that path WILL assemble a
 #     degraded array read-only) assembles it on the DN, and the array holds
@@ -172,10 +179,13 @@ MAX_ALLOC_LEG_PER_GRP=
 # go stale the day one moves: common.DefaultHealthCheckInterval, the
 # cntlr_interval every cluster of this suite stores (`cluster create` has no
 # flag for it), by which read_constants sizes the cutoff set and checks every
-# set's primary threshold; and two the suite only logs,
-# common.DefaultPrimaryUnhealthy, what a pool created without --thr-primary
-# reads, and common.DemotionHoldTimeout, how long a fan-out that demotes a
-# primary holds its sides for the demoted cntlr (dnv-worker.md RW22). And
+# set's primary threshold; common.DefaultPrimaryUnhealthy, what a pool
+# created without --thr-primary reads, as the upgrade case's and the long
+# run's pools are, which read_constants holds to the floor every set's
+# primary threshold is held to and the upgrade case's settle wait counts;
+# and common.DemotionHoldTimeout, how long a fan-out that demotes a primary
+# holds its sides for the demoted cntlr (dnv-worker.md RW22), from which the
+# cutoff case computes its waits on the fence writer. And
 # common.DefaultStartHoldSeconds, the start hold every cluster of this suite
 # stores, as none names one at its create (dnv-worker.md HL8): react's
 # restart step bounds its wait by it.
@@ -219,7 +229,7 @@ NVMET=/sys/kernel/config/nvmet
 # Constants: ports (E2E9; e2e_integtest.md, Topology and parameters)
 # ---------------------------------------------------------------------------
 #
-# Bound-port inventory of the seven other suites, verified against their own
+# Bound-port inventory of the eight other suites, verified against their own
 # declaration blocks: worker_test.sh 12379/12380 (and 12381-12384 in its
 # three-member mode), 29600-29603, 29700-29702;
 # gateway_test.sh 15379/15380, 29810-29812, 29820-29823, 29830-29832;
@@ -227,10 +237,16 @@ NVMET=/sys/kernel/config/nvmet
 # 29528/29529 + trsvcid 4200; dnagent_test.sh 29528 + trsvcid 4200;
 # dnvctl_test.sh 29840/29841; csi_test.sh 17379/17380, 29870, 18030, 28900,
 # 28950 + trsvcid 4400 inside its band 4400-4449, and k3s's 6443 on its
-# Kubernetes guests (its DEAD_CDC_PORT, 18039, is a port no cdc listens on).
+# Kubernetes guests (its DEAD_CDC_PORT, 18039, is a port no cdc listens on);
+# tutorial_test.sh, on the one guest it runs on, its PORTS: 2379/2380, 29527,
+# 8009, 29900-29903, 29950 and trsvcids 4301-4304 and 4420, and 9809 in its
+# CSI part (CSI_PORTS).
 # Production, per those suites' comments: gateway 29527, etcd 2379.
 #
-# Nothing below is BOUND by any of them. Two numbers do APPEAR elsewhere:
+# Nothing below is BOUND by any of them but the tutorial suite, whose
+# all-in-one tutorial binds DN_PORT_BASE..DN_PORT_BASE+3, CN_GRPC_PORT and
+# trsvcids 4301-4304 of this suite's band on the guest it runs on; one suite
+# at a time (E2E9) keeps the two apart. Two numbers do APPEAR elsewhere:
 # DN_ADDR and CN_ADDR (dnvctl_test.sh) carry 127.0.0.1:29901 and :29902 as
 # payload for its fake to record — that suite never dials them, and its own
 # port list is (29840 29841).
@@ -660,8 +676,8 @@ WAIT_HOST=60           # a host device/ANA state to appear — and the
                        # per-command watchdog of ssh_host_watched (the Host
                        # IO section names what runs under it), so a watched
                        # read, write or cache drop slower than this dies as
-                       # a wedged one; react_chunk_write adds a second per
-                       # chunk
+                       # a wedged one, unless its caller passes a budget of
+                       # its own (ssh_host_watched)
 
 # How many times setup's stage 07 will wait out a whole stack before it calls
 # the sp non-convergent. It is a COUNT and not a budget: each round is two
@@ -678,7 +694,8 @@ CASES=(smoke ops copy react cutoff)
 # The opt-in cases (e2e_integtest.md, The cases): each runs only when --only
 # names it, alone, and never in the default list above, as each holds the lab
 # far longer than a default run or needs parameters of its own. Every name
-# here also needs its arm in sp_thresholds and sp_shape, like any case.
+# here also needs its arm in sp_thresholds, like any case, and one in
+# sp_shape only when its shape is not the run's (many, soak).
 OPTIN_CASES=(many upgrade soak)
 
 # Which build's binaries ship_binaries ships and which build's start flags
@@ -688,9 +705,10 @@ OPTIN_CASES=(many upgrade soak)
 # to dn_up and cn_up as well.
 SHIP_BIN_DIR="$REPO_ROOT/bin"
 RUN_BUILD=new
-# The word install_udev_rules (or v0.1.0's mask) answered on each node guest
-# at the start of its first agent, keyed dn<v> and cn<v>: the upgrade case
-# reads it to show the new build's rules were written before its agents.
+# The word install_udev_rules, or install_udev_v010 for the upgrade case's
+# v0.1.0 half, answered on each node guest at the start of its first agent,
+# keyed dn<v> and cn<v>: the upgrade case logs it for the v0.1.0 half
+# (up_v010).
 declare -A NODE_UDEV=()
 
 # The cases this run will actually execute, in CASES order with --only applied.
@@ -746,8 +764,9 @@ DN_PAT_LAST_MIB=0
 # The two shape sets derive_params works out: the run's, at --slice-cnt, and
 # react's, at min(--slice-cnt, REACT_SLICE_CAP). SLICE_CNT, GRP_CNT,
 # SP_ZERO_BYTES, RUN_CAP_BYTES and TD_UNIT above are the ACTIVE case's shape,
-# which sp_shape copies from one of them before each case's sp is built, and
-# which every step of a case reads. The dn agents per DN VM (DNS_PER_VM,
+# which sp_shape copies from one of them (the many-pools and soak cases'
+# RUN_CAP_BYTES from MANY_RUN_CAP_BYTES and SOAK_RUN_CAP_BYTES) before each
+# case's sp is built, and which every step of a case reads. The dn agents per DN VM (DNS_PER_VM,
 # DN_TOTAL) are the run's in every case.
 RUN_SLICE_CNT=0
 RUN_GRP_CNT=0
@@ -861,7 +880,10 @@ FRAME=@@e2e-frame@@
 # assert_parses (dnvctl_test.sh))
 # ---------------------------------------------------------------------------
 
-log() { echo "$*" >&2; }
+# A write that fails, as to a terminal that has closed, sends the run's
+# output to /dev/null from then on, so that a log line never ends the run's
+# exit handler under set -e.
+log() { echo "$*" >&2 || exec >/dev/null 2>&1; }
 
 # stage names the step for the failure report and mints the trace id. Every
 # dnvctl call of the stage sends it; the gateway's records carry it, and so do
@@ -939,6 +961,20 @@ assert_parses() { # <json> <label>
 on_exit() {
 	local rc=$? dirty=0
 	trap - EXIT
+	# A signal while this handler runs: a Ctrl-C (SIGINT) reaches the
+	# command in hand, which it ends unless that command ignores it, a read
+	# of a command's output and an ssh still connecting among them, and the
+	# dump and the removals below go on; a SIGHUP, which a terminal that
+	# closes sends twice, is ignored here and by every command below; a
+	# SIGTERM ends the run at once. Output that fails, as a terminal that
+	# has closed does, goes to /dev/null from then on, so that set -e ends
+	# the handler at no log line: this line tries a write first, and log
+	# does the same at each of its writes. rc keeps the code the run was
+	# ending with, and the run exits with it but on a SIGTERM.
+	trap - TERM
+	trap : INT
+	trap '' HUP
+	printf '\n' >&2 2>/dev/null || exec >/dev/null 2>&1
 	# --keep-logs: the logs of the case that ran last, before the end cleanup
 	# removes them on a pass, and on a failure too, since the next run's start
 	# cleanup removes them then. keep_logs never dies.
@@ -989,12 +1025,13 @@ on_exit() {
 		# the flush stage's delay on a controller node would slow them, a
 		# silencing rule on a disk node would stall every connect to its
 		# port, the many-pools case's cut would keep a controller node's
-		# guest unreachable until its timer, and the long run's slow fault
-		# on a controller node, its token bucket on a disk node and its CPU
-		# cap on a controller node's agent would slow them. The diagnostics
-		# above have shown all ten. host0's stamped writer is told to stop too: it
-		# starts passes until its stop file, and would write on for as long
-		# as its pass bound allows into a lab other runs then use.
+		# guest cut off from everything but ssh until its timer, and the long
+		# run's slow fault on a controller node, its token bucket on a disk
+		# node and its CPU cap on a controller node's agent would slow them.
+		# The diagnostics above have shown all ten. host0's stamped writer is
+		# told to stop too: it starts passes until its stop file, and would
+		# write on for as long as its pass bound allows into a lab other runs
+		# then use.
 		if [ "${COPY_FO_THROTTLE_CN:--1}" -ge 0 ]; then
 			log ""
 			log "--- taking the copy case's throttle off cn$COPY_FO_THROTTLE_CN"
@@ -1554,14 +1591,20 @@ parameters:
                       covers the create AND the two grows of ops step 2,
                       whose step 8 then needs legs side-less DNs on legs
                       different VMs. Below the bound is allowed and warns.
+                      --only many defaults to what its pools' sides need,
+                      never below the bound (4 at --pool-cnt 64 on 4 DN
+                      VMs), and --only soak to the larger of the bound
+                      and its wide pool's own (E2E3).
   --only <case>       run one case: ${CASES[*]}; or one opt-in case,
-                      which no default run includes: ${OPTIN_CASES[*]:-(none)}
+                      which no default run includes: ${OPTIN_CASES[*]:-(none)};
+                      the upgrade case builds raid1 pools, so it refuses
+                      --redund none
   --pool-cnt N        the many case's pools, setup's included (default
                       $MANY_POOL_CNT_DEFAULT; 1..$MANY_POOL_CNT_MAX); that case alone takes it, and
                       it builds one-slice raid1 pools, so it refuses
                       --slice-cnt other than 1 and --redund none
   --soak-hours H       the soak case's length in hours, a decimal number
-                      (default $SOAK_HOURS_DEFAULT; at least 10 minutes); that case alone
+                      (default $SOAK_HOURS_DEFAULT; at least 30 minutes); that case alone
                       takes it, and it builds one-slice raid1 as setup's
                       pool, so it refuses --slice-cnt other than 1 and
                       --redund none
@@ -1752,9 +1795,18 @@ parse_args() {
 		'' | *[!0-9.]* | .* | *. | *.*.*) usage ;;
 		esac
 		SOAK_SECS=$(awk -v h="$SOAK_HOURS" 'BEGIN { printf "%d", h * 3600 }')
-		[ "$SOAK_SECS" -ge 600 ] || usage
+		# 30 minutes, the shortest length rehearsed (cycles of 360 s): at
+		# 10 minutes a cycle's operations outlast its 120 s and the writers'
+		# range can run out, and no length between was run.
+		[ "$SOAK_SECS" -ge 1800 ] || usage
 	elif [ -n "$SOAK_HOURS" ]; then
 		usage
+	fi
+	# The upgrade case's pools are RAID1, as only a RAID1 pool gets the array
+	# flag's write after the upgrade that makes its restore check read the
+	# untouched pool older (architecture.md, Upgrade in lockstep).
+	if [ "$ONLY" = upgrade ]; then
+		[ "$REDUND" = raid1 ] || usage
 	fi
 
 	# --redund decides LEGS, and LEGS decides how many --dn guests are the
@@ -1966,7 +2018,9 @@ derive_params() {
 	# its reject rule lists them all and refuses no connect to a live side.
 	# Step 10 steers its migration's destination the same way, so that the
 	# silence of that DN takes down the one leg, and dies when the steer
-	# leaves none on a VM outside the group's.
+	# leaves none on a VM outside the group's; and then its repair's fresh
+	# leg, so that step 14's cut of slice 0's data legs misses the meta
+	# groups' legs, and dies when the steer leaves none at all.
 	# Copy step 6 does too:
 	# it needs step 5's fresh new leg on a DN that carries no other side, so
 	# that killing that DN takes down the new leg alone. The bound does not
@@ -2047,8 +2101,9 @@ derive_params() {
 	# guests, so each guest takes LEGS x MANY_POOL_CNT x 2 / DN_VM_CNT sides
 	# on average, one extent each, and each dn agent holds MANY_EXT_PER_DN
 	# extents of its backing file. The count gives the guests a third more
-	# extents than that average, as the draw among the guests is random
-	# (architecture.md, Finding DN candidates), and is never below the bound.
+	# extents than that average, as the allocator spreads them over the
+	# guests unevenly (architecture.md, Finding DN candidates), and is never
+	# below the bound.
 	# An override is the operator's, as for any case.
 	if [ "$ONLY" = many ]; then
 		MANY_EXT_PER_DN=$(((${BACKING_SIZE%G} << 30) / EXTENT_SIZE - DN_DATA_OFFSET / EXTENT_SIZE))
@@ -2171,10 +2226,20 @@ derive_params() {
 	# would cross. On top of it, 16 MiB for each dn agent: an agent's log
 	# grows with the case's length and the sides it serves, and at the
 	# widest pool, 180 agents, the copy case's logs alone come to about
-	# 20 MiB an agent, over 3 GiB. The copy case's stamps, which are host
-	# writes, and its first clone's hydration, the copy of its source, are
-	# not in it: they grow with the slices, so copy_clone_stamp and
-	# copy_mstamp_create add them to that case's cap.
+	# 20 MiB an agent, over 3 GiB. Some of what the cases write on purpose
+	# is added to its case's cap instead, each part by the function that
+	# makes it: the copy case's fio stamps and its first clone's hydration,
+	# the copy of its source, and step 4b's crash stamp (copy_clone_stamp,
+	# copy_mstamp_create, copy_migr_crash), the range of every stamped
+	# writer (host_swrite_volume), the blocks of the react case's flush and
+	# group-cut writers (react_fsync_volume, react_group_cut) and the ops
+	# case's files with 8 MiB of its file system's tables (ops_fstrim)
+	# (e2e_integtest.md, E2E5). The rest is in the slack, among it react's
+	# chunks across the grow mark and its other patterns, the cutoff case's
+	# writers, the upgrade case's pattern and fence writer, the copy case's
+	# second pool's pattern and what md copies back onto a reset leg, setup's
+	# pattern, and what the ops case's file system allocates past those 8 MiB
+	# at more slices.
 	#
 	# The react twins of the first and the third, REACT_SP_ZERO_BYTES and
 	# REACT_RUN_CAP_BYTES, are at the end; RUN_SLACK_BYTES serves both.
@@ -2230,8 +2295,10 @@ derive_params() {
 	# parameters): react builds min(SLICE_CNT, REACT_SLICE_CAP) slices on the
 	# run's disk nodes, so the dn agents per disk-node guest stay the run's.
 	# sp_shape copies one set into the active SLICE_CNT, GRP_CNT,
-	# SP_ZERO_BYTES, RUN_CAP_BYTES and TD_UNIT. React's four numbers repeat
-	# the run's formulas above at its own slice count.
+	# SP_ZERO_BYTES, RUN_CAP_BYTES and TD_UNIT (the many-pools and soak
+	# cases' RUN_CAP_BYTES from MANY_RUN_CAP_BYTES and SOAK_RUN_CAP_BYTES).
+	# React's four numbers repeat the run's formulas above at its own
+	# slice count.
 	RUN_SLICE_CNT=$SLICE_CNT
 	RUN_GRP_CNT=$GRP_CNT
 	RUN_SP_ZERO_BYTES=$SP_ZERO_BYTES
@@ -2950,7 +3017,10 @@ cn_wait_ana() { # <v> <nqn> <traddr> <trsvcid> <want> [secs]
 
 # ssh_host_watched is ssh_host under a watchdog on the DRIVER: WAIT_HOST
 # seconds — the budget host_sha_probe gives a read too — unless the caller
-# passes its own, which only react_chunk_write does. Rule 5's point that
+# passes its own: WAIT_STAMP for one fio, python or file-system step of the
+# stamps and the writers, WAIT_HOST and a second a chunk for
+# react_chunk_write, and two a pool for many_verify_writes, and the stop wait
+# and 30 s more for swrite_stop. Rule 5's point that
 # `timeout` cannot bound a wedged read is about a timeout ON THE GUEST, whose
 # child is the reader itself; this timeout's child is the local ssh, an
 # ordinary process that dies on the TERM. Killing it abandons the session and
@@ -2987,11 +3057,15 @@ ssh_host_watched() { # <h> <cmd> [secs]
 # watchdog's into a die IN THE CALLING SHELL. The polling predicates need it:
 # to them a failed read is one more poll, and an abandoned read polled again
 # would only put a second unkillable reader beside the first. A caller that
-# dies on any failure — `|| die`, or set -e — needs nothing more. Its message
-# names WAIT_HOST because both of its callers' reads run on that budget.
-host_watch_verdict() { # <rc> <h> <what was running>
+# dies on any failure — `|| die`, or set -e — needs nothing more. A caller
+# with a message of its own chains it: `|| host_watch_verdict $? <h> <what>
+# <secs> || die <message>`; under set -e, a call of it on a line of its own
+# ends the run at its non-zero return, before any die after it. Its message
+# names the budget the caller passes, <secs>, or WAIT_HOST, ssh_host_watched's
+# default, when it passes none.
+host_watch_verdict() { # <rc> <h> <what was running> [secs]
 	[ "$1" = "$HOST_WATCH_RC" ] || return "$1"
-	die "host$2: $3 did not finish within ${WAIT_HOST}s, and its ssh" \
+	die "host$2: $3 did not finish within ${4:-$WAIT_HOST}s, and its ssh" \
 		"session was abandoned (rule 5). The likely cause is a task in D" \
 		"state on host$2 — IO to a path that went ANA-inaccessible under" \
 		"it, or to a suspended or parked device — which nothing can kill;" \
@@ -4236,8 +4310,10 @@ losetup_list() {
 # --- nftables ----------------------------------------------------------------
 
 # nft_bin prints the nft binary, or nothing on a node without one. Both node
-# roles carry one rule of the react case's: a controller node its reject rule
-# (reject_to) and a disk node its silencing rule (silence_port).
+# roles carry nftables tables of this suite's: a controller node the react
+# case's reject rule (reject_to) and group cut (cut_from) and the many-pools
+# case's cut (net_cut), and a disk node the react case's silencing rule
+# (silence_port).
 nft_bin() {
 	if command -v nft >/dev/null 2>&1; then
 		echo nft
@@ -4250,37 +4326,40 @@ nft_bin() {
 
 # --- the copy case's slowed copies (e2e_integtest.md, The cases, copy) ------
 #
-# A copy over the lab's network is too quick for two steps: a clone's of a
+# A copy over the lab's network is too quick for three steps: a clone's of a
 # few MiB ends in well under a second, too soon for copy step 7 to fail the
 # primary over in the middle of it, and a migration's of one extent is whole
-# before the worker's bitmap pieces reach the new side (copy step 4). Both
+# before the worker's bitmap pieces reach the new side (copy step 4) and
+# before copy step 4b can reset the new side's guest in the middle of it. Both
 # verbs slow what this node sends from one address and port, and nothing
 # else: a root prio qdisc on the interface that reaches the peer, whose map
 # sends every packet to the bands the stock pfifo_fast uses, beside a fourth
 # band that only a filter reaches, with a token bucket under it. Both node
 # roles carry them.
 #
-# throttle_from runs on the controller node of step 7's second-pool source
-# and slows everything the source's nvmet port sends, the copy's reads among
-# them, and leaves the node's own legs and every other port alone. The
-# bucket's queue is bounded in time, so a small reply of that port, a
-# keep-alive's or a connect's, waits behind the copy's data for about a
-# second at most.
+# throttle_from slows everything one nvmet port of this node sends and
+# leaves every other port alone. Copy step 7 runs it on the controller
+# node of its second-pool source, the copy's reads among what that port
+# sends, so the node's own legs keep their speed; the long run's token
+# bucket runs it on the disk node of a side of the RAID1 pool's data
+# group, on that side's port (soak_fault). The bucket's queue is bounded
+# in time, so a small reply of that port, a keep-alive's or a connect's,
+# waits behind the data queued before it for about a second at most.
 #
-# throttle_to runs on the disk node of step 4's migration source and slows
-# only what that side's nvmet port sends to the addresses it lists, the other
-# disk-node guests, among which the destination lies, so the controller
-# nodes' paths to the side keep their speed. Under its bucket a fair queue
-# (sfq) serves each connection in turn: the destination reads a region it has
-# not copied yet from the source, for its copy and for udev's reads of its
-# dm-clone and of every device its pass puts over it alike, and the
-# device-mapper command that put a device there waits for udev's reads of
+# throttle_to runs on the disk node of the migration source of copy steps 4
+# and 4b and slows only what that side's nvmet port sends to the addresses it
+# lists, the other disk-node guests, among which the destination lies, so the
+# controller nodes' paths to the side keep their speed. Under its bucket a
+# fair queue (sfq) serves each connection in turn: the destination reads a
+# region it has not copied yet from the source, for its copy and for udev's
+# reads of its dm-clone and of every device its pass puts over it alike, and
+# the device-mapper command that put a device there waits for udev's reads of
 # it. sfq keeps such a short read from waiting behind the region in flight
 # on another of the destination's connections, but not behind one on its own
 # connection, about a second at this suite's rate; a command that waits for
 # enough of those outlasts the dn agent's command timeout and stops the
-# cutover's pass, and copy_check_gap then fails the case (e2e_integtest.md,
-# Known limits).
+# cutover's pass, and in step 4 copy_check_gap then fails the case
+# (e2e_integtest.md, Known limits).
 #
 # The qdisc carries a handle of its own, so unthrottle takes only this
 # suite's, and every cleanup takes it first (cn_cleanup_phase1,
@@ -4740,7 +4819,7 @@ dn_up() {
 	else
 		udev=$(install_udev_rules)
 	fi || {
-		echo "dn_up: installing the udev rules of deploy/udev failed;" \
+		echo "dn_up: installing the node's udev rules failed;" \
 			"without it this guest's own udev assembles the md legs whose" \
 			"superblocks the cn writes through the side export, and the" \
 			"arrays pin the dm devices under them against dn_cleanup" >&2
@@ -4805,8 +4884,9 @@ dn_up() {
 		fi
 	fi
 	echo "$pid" >"$dir/pid"
-	# start_dn_instance reads loop= and pid= and ignores any other word, so
-	# udev= is a report and nothing asserts on it.
+	# start_dn_instance reads loop= and pid=, and udev= of instance 0 into
+	# NODE_UDEV, which up_v010 logs for the upgrade case's v0.1.0 half;
+	# nothing asserts on udev=, and any other word is ignored.
 	printf 'loop=%s pid=%s udev=%s\n' "$dev" "$pid" "$udev"
 	return 0
 }
@@ -4973,7 +5053,8 @@ unsilence() {
 
 # dn_cleanup_phase0 is the disk node's step that comes before every other
 # guest's in the cleanup (cleanup_all): the silencing rule and the copy
-# case's migration throttle go, whether or not this run set them, as the
+# case's migration throttle, or the long run's token bucket under the same
+# root qdisc, go, whether or not this run set them, as the
 # copy case's clone throttle and the react case's reject rule go first on a
 # controller node (cn_cleanup_phase1), so that the hosts and the controller
 # nodes let go of their paths to a port that answers again, and no removal
@@ -4990,7 +5071,7 @@ dn_cleanup_phase0() {
 	fi
 	left=$(throttle_rules)
 	if [ -n "$left" ]; then
-		echo "dn_cleanup_phase0: the copy case's migration throttle is still on: $left" >&2
+		echo "dn_cleanup_phase0: the copy case's migration throttle or the long run's token bucket is still on: $left" >&2
 		return 1
 	fi
 	echo phase0
@@ -5065,7 +5146,7 @@ dn_cleanup() {
 	# header loop_teardown zeroes. These are shared lab machines and the rules
 	# do not belong to them.
 	remove_udev_rules >/dev/null
-	rm -rf "$WORK"
+	rm -rf "$WORK" /var/tmp/dnv-panic-plant-e2e.*
 	echo cleaned
 	return 0
 }
@@ -5109,7 +5190,7 @@ diag() {
 	losetup_list
 	echo "--- the react case's silencing rule (empty: none) ---"
 	silence_rules
-	echo "--- the copy case's migration throttle (empty: none) ---"
+	echo "--- the copy case's migration throttle or the long run's token bucket (empty: none) ---"
 	throttle_rules
 	echo "--- df -h /var/tmp ---"
 	df -h /var/tmp 2>/dev/null
@@ -5544,7 +5625,8 @@ unreject() {
 
 # --- the react case's group cut (e2e_integtest.md, The cases, react) --------
 #
-# React step 14 cuts every leg of a group from the primary alone: cut_from
+# React step 14 cuts every leg of slice 0's data groups from the primary
+# alone: cut_from
 # puts one nftables table of this suite's own on the primary's node, whose
 # rules drop every packet the node sends to a listed IPv4 address and port
 # and every packet it receives from one, so the node's connections to those
@@ -5854,13 +5936,16 @@ md_bitmap_dirty() {
 # array_state and degraded count of the array that holds it, `none` where
 # no array does. A pool's status can still wait behind a commit that waits on
 # a cut leg (e2e_integtest.md, Diagnostics on failure), so it runs detached
-# into a file and the verb waits two seconds for it, printing
-# `pool=blocked` when it has not ended; md's words come from sysfs, which
-# answers while the legs are cut.
+# into files of this call's own and the verb waits two seconds for it,
+# printing `pool=blocked` when it has not ended; a read that ends later
+# writes only its own call's files, which the cleanup's removal of $WORK
+# takes. Each call runs in a command substitution of its own, so $BASHPID
+# names the call. md's words come from sysfs, which answers while the legs
+# are cut.
 gcut_read() {
 	local pool=$1 x where node dmk st dg line out f t
 	shift
-	f=$WORK/gcut-pool.$$
+	f=$WORK/gcut-pool.$BASHPID
 	setsid -f sh -c "timeout 5 dmsetup status --noflush $pool >$f.out 2>&1; echo \$? >$f.rc" \
 		</dev/null >/dev/null 2>&1
 	for ((t = 0; t < 20; t++)); do
@@ -5899,8 +5984,8 @@ gcut_read() {
 # cpu_uncap moves every process of that cgroup to the root cgroup and
 # removes it, and prints `uncapped`. A process started over ssh lives in its
 # session's scope, and the root's cgroup.subtree_control holds cpu on the
-# lab's guests, so the cgroup takes cpu.max (e2e_integtest.md, The cases,
-# soak). Every cleanup takes the cap off (cn_cleanup_phase1).
+# lab's guests, so the cgroup takes cpu.max. Every cleanup takes the cap off
+# (cn_cleanup_phase1).
 CPU_CG=/sys/fs/cgroup/dnv-e2e-cpu
 
 cpu_cap() { # <pidfile> <quota> <period>
@@ -6084,7 +6169,9 @@ dev_wsect() { # <major:minor>
 # in addCommonFlags (cmd/dnv-agent/main.go), which is the port cn_cleanup_phase2
 # removes. Only the
 # dn agents need distinct ids, because only they share a kernel.
-# The last argument is dn_up's: the build whose flags the agent starts with.
+# The last argument is dn_up's: the build whose flags the agent starts with,
+# and for `v010`, the first half of the upgrade case, the node gets v0.1.0's
+# mask (install_udev_v010) in place of the rules.
 cn_up() { # <dir> <store> <log> <ip> <grpc_port> <trsvcid> <capacity> [new|v010]
 	local dir=$1 store=$2 log=$3 ip=$4 gport=$5 svcid=$6 cap=$7 pid pat udev
 	local build=${8:-new}
@@ -6100,7 +6187,7 @@ cn_up() { # <dir> <store> <log> <ip> <grpc_port> <trsvcid> <capacity> [new|v010]
 	else
 		udev=$(install_udev_rules)
 	fi || {
-		echo "cn_up: installing the udev rules of deploy/udev failed;" \
+		echo "cn_up: installing the node's udev rules failed;" \
 			"starting the agent without it would let the stock udev rule" \
 			"assemble an array the agent is building" >&2
 		return 1
@@ -6125,7 +6212,8 @@ cn_up() { # <dir> <store> <log> <ip> <grpc_port> <trsvcid> <capacity> [new|v010]
 		fi
 	fi
 	echo "$pid" >"$dir/pid"
-	# `udev=` is install_udev_rules's own word — `installed` when this call
+	# `udev=` is the word of install_udev_rules, or of install_udev_v010 for
+	# `v010` — `installed` when this call
 	# wrote a rule file, `present` when all were already exactly right — and
 	# not a constant, so the line cannot claim an install that did not happen.
 	printf 'pid=%s udev=%s\n' "$pid" "$udev"
@@ -6146,9 +6234,13 @@ cn_up() { # <dir> <store> <log> <ip> <grpc_port> <trsvcid> <capacity> [new|v010]
 # could not reach the guest, leaves it behind, and a clone final removed
 # through a slowed source waits for the copy's region in flight. The react
 # case's reject rule goes with it, for the same reasons: left behind, it
-# refuses every later connect of this node to the ports it lists. The
-# readings after the removals decide the sentinel, so a throttle or a rule
-# still on leaves the verb unfinished.
+# refuses every later connect of this node to the ports it lists. The react
+# case's group cut goes too: left behind, it cuts this node from the disk
+# nodes' ports it lists. throttle_rules reads the flush stage's delay and
+# the long run's delay and loss as well, which sit under the throttle's root
+# qdisc. The many-pools case's cut and the long run's CPU cap go first of
+# all, so the node answers again. The readings after the removals decide the
+# sentinel, so a throttle or a rule still on leaves the verb unfinished.
 cn_cleanup_phase1() {
 	local left
 	net_uncut >/dev/null
@@ -6170,7 +6262,7 @@ cn_cleanup_phase1() {
 	dm_remove_kind c7 # clone final, while its :4: source connection is up
 	left=$(throttle_rules)
 	if [ -n "$left" ]; then
-		echo "cn_cleanup_phase1: the copy case's clone throttle is still on: $left" >&2
+		echo "cn_cleanup_phase1: the copy case's clone throttle, the flush stage's delay or the long run's delay or loss is still on: $left" >&2
 		return 1
 	fi
 	left=$(reject_rules)
@@ -6218,7 +6310,7 @@ cn_cleanup_phase2() { # [extra host nqn…]
 	hosts_drop "$@"
 	port_drop "$CN_PORT_ID"
 	remove_udev_rules >/dev/null
-	rm -rf "$WORK"
+	rm -rf "$WORK" /var/tmp/dnv-panic-plant-e2e.*
 	echo cleaned
 	return 0
 }
@@ -6240,8 +6332,8 @@ diag() {
 	dmesg 2>/dev/null | tail -n 100
 	echo "--- dnv-agent processes ---"
 	agent_pids cn
-	# The recorded agent's process state: T is an agent the cutoff case
-	# stopped and did not get to continue.
+	# The recorded agent's process state: T is an agent the cutoff case or
+	# the many-pools case's second cut stopped and did not get to continue.
 	echo "--- the recorded cn agent's state (T = stopped) ---"
 	ps -o pid=,stat=,etime= -p "$(cat "$WORK/cn/pid" 2>/dev/null)" 2>/dev/null ||
 		echo "(no recorded agent running)"
@@ -6257,7 +6349,7 @@ diag() {
 	nvmet_tree
 	echo "--- losetup -a ---"
 	losetup_list
-	echo "--- the copy case's clone throttle (empty: none) ---"
+	echo "--- the copy case's clone throttle, the flush stage's delay or the long run's delay or loss (empty: none) ---"
 	throttle_rules
 	echo "--- the react case's reject rule (empty: none) ---"
 	reject_rules
@@ -6265,6 +6357,9 @@ diag() {
 	cut_rules
 	echo "--- the many-pools case's cut ---"
 	net_cut_state
+	echo "--- the long run's CPU cap (empty: none) ---"
+	[ ! -d "$CPU_CG" ] ||
+		echo "$CPU_CG cpu.max=$(cat "$CPU_CG/cpu.max" 2>/dev/null) procs=$(tr '\n' ' ' <"$CPU_CG/cgroup.procs" 2>/dev/null)"
 	echo "--- df -h /var/tmp ---"
 	df -h /var/tmp 2>/dev/null
 	echo "--- space ---"
@@ -6912,7 +7007,7 @@ fwrite_stop() {
 	return 0
 }
 
-# --- the copy case's stamps, on host0 -----------------------------------------
+# --- the copy case's stamps, written on host0, read back on both hosts -------
 #
 # A stamp is data fio writes with its own verify headers: crc32c over every
 # 4 KiB, each 4 KiB stamped with its own offset, so a later read through any
@@ -7242,9 +7337,11 @@ swrite_halt() {
 # swrite_verify <uuid> <range bytes> reads the range back with the verify of
 # the last pass that passed (the fill's when none did), fio's verify_only
 # with the header seed check that verify_only leaves off by default:
-# `swrite=verified rc=<n> rbytes=<n> pass=<n> bad=<blocks fio named>`, then
-# the tail of its errors, fio naming each 4 KiB block that does not read
-# back as the pass wrote it on a line of its own.
+# `swrite=verified rc=<n> rbytes=<n> pass=<n> bad=<lines fio printed for a
+# bad block>`, then the tail of its errors. fio stops at the first block that
+# does not read back as the pass wrote it (`--continue_on_error=none`), so a
+# non-zero rc means that at least one block is bad, and bad counts only the
+# blocks named before fio stopped.
 swrite_verify() {
 	local node last rc=0 bad
 	node=$(swrite_node "$1") || return 1
@@ -7423,16 +7520,18 @@ fsync_progress() {
 # judges it against the log. In each job the first operation that waited
 # over <stall ms> is the fault's stall: a write that waited is the write in
 # flight then, an fsync that waited the fsync in flight, whose write had
-# completed. A job that stopped at a failure met the stall at its failed
-# operation. The writes before it are those whose fsync completed (or,
-# without fsync, that completed) before the stall; the writes after it came
-# after. Each block is read with direct IO and called held when it carries
-# its own header (the bytes ca ac and, at byte 16, its offset), lost when it
-# reads zeros, as a pool block no write mapped does, error when the read
-# fails, and other otherwise; other counts both. The answer is
+# completed. A failed operation ends its job and counts as failed wherever it
+# comes, its line, errno included, printed; one that comes before any such
+# wait is also the job's stall. The writes before it are those whose fsync
+# completed (or, without fsync, that completed) before the stall; the writes
+# after it came after. Each block is read with direct IO and called held when
+# it carries its own header (the bytes ca ac and, at byte 16, its offset),
+# lost when it reads zeros, as a pool block no write mapped does, error when
+# the read fails, and other otherwise; other counts both. The answer is
 # `fsync=judged writes=<n> stalled_jobs=<n> stall_ms=<the longest>
 # before=<n>/<held> inflight_write=<n>/<held> inflight_fsync=<n>/<held>
-# after=<n>/<held> failed=<n>/<held> other=<n>`, then a line for each block
+# after=<n>/<held> failed=<n>/<held> other=<n> max_ms=<the longest write or
+# fsync of any job, over the stall or not>`, then a line for each block
 # not held and for each in flight or failed, with the times this host read
 # for it.
 fsync_judge() {
@@ -7456,7 +7555,7 @@ def read(off):
     return "other"
 cls = {"before": [0, 0], "inflight_write": [0, 0], "inflight_fsync": [0, 0],
        "after": [0, 0], "failed": [0, 0]}
-lines, writes, stalled, longest, other = [], 0, 0, 0.0, 0
+lines, writes, stalled, longest, other, slowest = [], 0, 0, 0.0, 0, 0.0
 for path in sorted(glob.glob(os.path.join(d, "w.*.log"))):
     ops = []
     for ln in open(path):
@@ -7487,7 +7586,10 @@ for path in sorted(glob.glob(os.path.join(d, "w.*.log"))):
         stalled += 1
     for i, (k, seq, off, ti, tw, tf, why) in enumerate(ops):
         writes += 1
-        if cut is None or i < cut:
+        slowest = max(slowest, tw - ti, 0 if tf is None else tf - tw)
+        if k == "e":
+            c = "failed"
+        elif cut is None or i < cut:
             c = "before"
         elif i == cut:
             c = kind
@@ -7507,9 +7609,10 @@ for path in sorted(glob.glob(os.path.join(d, "w.*.log"))):
                 t += ", " + why
             lines.append("%s %s: %s offset %d, %s" %
                          (os.path.basename(path), c, r, off, t))
-print("fsync=judged writes=%d stalled_jobs=%d stall_ms=%.0f %s other=%d" % (
+print("fsync=judged writes=%d stalled_jobs=%d stall_ms=%.0f %s other=%d max_ms=%.0f" % (
     writes, stalled, longest * 1000,
-    " ".join("%s=%d/%d" % (k, v[0], v[1]) for k, v in cls.items()), other))
+    " ".join("%s=%d/%d" % (k, v[0], v[1]) for k, v in cls.items()), other,
+    slowest * 1000))
 for ln in lines:
     print(ln)
 PYEOF
@@ -7881,6 +7984,10 @@ many_fio_start() {
 	shift 4
 	many_fio_stop >/dev/null
 	mkdir -p "$MANY_DIR" || return 1
+	# fio writes its latency logs only as it exits, so a stopped generation's
+	# logs, which the long run reads before it starts the next, go first:
+	# many_fio_jobs then reads none while this writer runs.
+	rm -f "$MANY_DIR"/lat_*.log
 	: >"$MANY_DIR/jobs"
 	{
 		printf '[global]\nrw=write\nbs=4k\nioengine=psync\niodepth=1\n'
@@ -7923,9 +8030,10 @@ many_fio_start() {
 # completed> done=<completed writes> last_ms=<epoch ms of the last
 # completion, or 0> errs=<failed writes before the last completed one>
 # max_off=<offset of the last completed write, or -1>`, the last four from
-# the latency log, so 0 and -1 while fio runs; then `running=yes|no`; then,
-# with <all> given, one `err=<i> <offset> <epoch ms of the completion before
-# it>` line per such failed write.
+# the latency log, so 0 and -1 while fio runs, and, with <all> given, under
+# each job's line one `err=<i> <offset> <epoch ms of the completion before
+# it, or 0> <its place in the run of failed writes after that completion>`
+# line per such failed write (many_err_offsets); then `running=yes|no`.
 many_fio_jobs() { # [all]
 	local i uuid node off log nok last errs maxo pid running=no wios
 	[ -s "$MANY_DIR/jobs" ] || {
@@ -8188,13 +8296,14 @@ many_stop() {
 
 # host_cleanup is a holder-first sweep of its own. The write loop (the cutoff
 # case's, or the react case's migrating-leg step's), the cutoff case's fence
-# writer, a fio stamp, the stamped writer and the writer to new blocks go
-# first, so nothing writes into a device while the sweep takes its paths
-# away, and the ops case's file system is unmounted, so no mount holds a
-# device whose paths go; then the case's nvme-stas, so no stacd reconnects what `wipe` drops
-# and no stafd re-creates the discovery controller, and its config is put back
-# while $WORK still holds the copy; then the connections; and $WORK last.
-# A run that never reached those steps finds none of them and moves on.
+# writer, a fio stamp, the stamped writer, the writer to new blocks and the
+# many-pools case's writers and path sampler go first, so nothing writes into
+# a device while the sweep takes its paths away, and the ops case's file
+# system is unmounted, so no mount holds a device whose paths go; then the
+# case's nvme-stas, so no stacd reconnects what `wipe` drops and no stafd
+# re-creates the discovery controller, and its config is put back while $WORK
+# still holds the copy; then the connections; and $WORK last. A run that never
+# reached those steps finds none of them and moves on.
 #
 # A copy stas_restore could not put back keeps $WORK, which then holds the
 # only copy of the host's own two files, and the sweep ends non-zero WITHOUT
@@ -8391,7 +8500,7 @@ cp_pids() {
 
 cp_cleanup() {
 	stop_all >/dev/null
-	rm -rf "$WORK"
+	rm -rf "$WORK" /var/tmp/dnv-panic-plant-e2e.*
 	echo cleaned
 	return 0
 }
@@ -8829,9 +8938,9 @@ start_etcd() {
 }
 
 # soak_etcd_flags prints the long run's etcd flag: the automatic compaction
-# of its history a deployment runs with (architecture.md, System overview),
-# as the run lasts hours; nothing for every other case, whose etcd lives one
-# case.
+# of its history a deployment runs with (architecture.md, Components:
+# invocation reference), as the run lasts hours; nothing for every other case,
+# whose etcd lives one case.
 soak_etcd_flags() {
 	[ "$ONLY" != soak ] || printf '%s' "--auto-compaction-retention=1h"
 }
@@ -8932,7 +9041,8 @@ stop_cp_daemons() {
 # backing file dn_up has to create gets the backing pattern first (E2E5); a
 # reused one keeps what it holds.
 #
-# dn_up also installs the udev rules of deploy/udev/, as cn_up does and before
+# dn_up also installs the udev rules of deploy/udev/, or v0.1.0's mask for
+# RUN_BUILD v010 (install_udev_v010), as cn_up does and before
 # the agent for the same reason — on a DN it is the CN's leg superblocks,
 # arriving through the side export, that the stock rule would assemble (rule
 # 7). They are per guest, so every later instance on a VM finds them already
@@ -8979,7 +9089,8 @@ start_dn_vm() { # <v>
 }
 
 # start_cn_agent starts the one cn agent of a CN VM and, before it, the udev
-# rules of deploy/udev/ (cn_up does both, in that order: the stock rule would
+# rules of deploy/udev/, or v0.1.0's mask for RUN_BUILD v010 (cn_up does
+# both, in that order: the stock rule would
 # otherwise assemble an array the agent is in the middle of creating).
 # --capacity 0 means "no local opinion" and the CP substitutes its default.
 start_cn_agent() { # <v>
@@ -9232,11 +9343,14 @@ CN_TOOLS="$NODE_TOOLS mdadm udevadm thin_dump"
 # without tc cannot carry one.
 CN_COPY_TOOLS="tc ip"
 DN_COPY_TOOLS="tc ip"
-# nft: the react case's reject rule (reject_to), which preflight_node asks of
-# a CN only when that case runs with md-raid1, where its take-over step runs.
-# The cleanup's unreject needs it only where the rule can be, and a node
-# without nft cannot carry it.
+# nft: the react case's reject rule (reject_to) and group cut (cut_from), which
+# preflight_node asks of a CN only when that case runs with md-raid1, where
+# its take-over step and its group cut run. The cleanup's unreject needs it
+# only where the rule can be, and a node without nft cannot carry it.
 CN_REACT_TOOLS="nft"
+# tc and ip: the react case's flush-stage delay on the primary's controller
+# node (delay_to), at any redundancy.
+CN_FLUSH_TOOLS="tc ip"
 # nft and systemd-run: the many-pools case's cut of a controller node
 # (net_cut), whose table a systemd timer removes should the run stop first.
 CN_MANY_TOOLS="nft systemd-run"
@@ -9263,32 +9377,36 @@ DN_REACT_TOOLS="nft"
 # them for $WORK/sha-probe.err.
 HOST_TOOLS="nvme uuidgen systemctl udevadm dd sha256sum awk sed grep timeout"
 HOST_TOOLS="$HOST_TOOLS du df tail"
-# dmesg: the kernel-log witness (kmsg_mark, kmsg_errors) of the copy and
-# react cases' repair steps, which preflight_host asks of host0 only when
-# those steps run, as preflight_stas asks host0 for the cutoff case's own
-# tools.
+# dmesg: the kernel-log witness (kmsg_mark, kmsg_errors), which
+# preflight_host asks of host0 when the react case runs, whose resets of the
+# primary's machine read it at any redundancy, and when the copy case runs
+# with md-raid1, where its repair steps read it, and of both hosts when the
+# upgrade case runs, which reads their kernel logs across the upgrade.
 HOST_KMSG_TOOLS="dmesg"
 # The write loop (wloop_start) of the react case's migrating-leg step, which
 # preflight_host asks of host0 only when that case runs with md-raid1 and more
 # DN VMs than legs, where that step runs (react_migr_cut), as preflight_stas
 # asks it for the cutoff case's loop.
 HOST_WLOOP_TOOLS="nohup readlink"
-# The cutoff case's fence writer on host1 (stage 10): fio writes and verifies,
-# cmp reads the range after the first failed write.
+# The fence writer on host1, of the cutoff case (stage 10) and of the
+# upgrade case: fio writes and verifies, cmp reads the cutoff case's range
+# after the first failed write.
 HOST_FENCE_TOOLS="fio cmp nohup pkill"
 # The many-pools case's writers and path sampler on both hosts
 # (many_fio_start, many_sampler_start): fio writes and verifies, readlink
 # finds each namespace's device, nohup detaches both and pkill is
 # many_stop's.
 HOST_MANY_TOOLS="fio readlink nohup pkill"
-# The copy case's stamps on host0 (stamp_write, stamp_verify): fio writes and
+# The copy case's stamps (stamp_write on host0, stamp_verify on both hosts,
+# as host1 reads the clone's stamp through the transfer): fio writes and
 # verifies them, cmp reads the clone's unwritten part as zeros, readlink
 # finds the device of a namespace's uuid link, and pkill is stamp_stop's.
 HOST_STAMP_TOOLS="fio cmp readlink pkill"
 # The stamped writer across a procedure (swrite_start) of the copy and react
 # cases, and react's fsync and group-cut writers (fsync_start) on host0: fio
-# writes and verifies, python3 reads fio's JSON and logs and the written
-# blocks back, nohup detaches the runner.
+# writes and verifies the stamped writer's passes, python3 is the fsync and
+# group-cut writer and their judge and reads fio's JSON, nohup detaches the
+# runners.
 HOST_SWRITE_TOOLS="fio python3 readlink pkill nohup"
 # The ops case's fstrim step on host0 (trim_mkfs, trim_unfill).
 HOST_TRIM_TOOLS="mkfs.ext4 mount umount mountpoint fstrim"
@@ -9365,9 +9483,12 @@ assert_bytes() { # <got> <floor> <label>
 # DN_TRSVCID and CN_TRSVCID (csi_test.sh) are both 4400, and TRSVCID_MIN and
 # TRSVCID_MAX (csi_test.sh), 4400..4449, are only the band in which that
 # suite's cleanup removes a port, which it never binds but at 4400.
-# gateway_test.sh's 4420/4421/4429 are payload its fake records and never
-# binds, so a real port on 4420 is the nvme-tcp default and not that suite's
-# (the arms are in that order: the default's arm comes before the csi
+# PORTS (tutorial_test.sh) holds 4301..4304 and 4420, the all-in-one
+# tutorial's nvmet ports on the guest that suite runs on (dn2 in the lab, and
+# the k3s server cp0 in its CSI part, which runs the all-in-one tutorial
+# first). gateway_test.sh's 4420/4421/4429 are payload its fake records and
+# never binds, so a real port on 4420 is the nvme-tcp default and not that
+# suite's (the arms are in that order: the default's arm comes before the csi
 # band's, which takes it in).
 port_owner_hint() { # <trsvcid>
 	case "$1" in
@@ -9391,9 +9512,15 @@ port_owner_hint() { # <trsvcid>
 		;;
 	4420 | 4421)
 		printf 'trsvcid %s is the nvme-tcp default port:' "$1"
-		printf ' a hand-made target, not a dnv suite; it lies inside the csi'
-		printf " suite's cleanup band 4400..4449 (TRSVCID_MIN, TRSVCID_MAX"
-		printf ' (csi_test.sh)), whose cleanup would remove it'
+		if [ "$1" = 4420 ]; then
+			printf " the tutorial suite's cn agent (PORTS (tutorial_test.sh))"
+			printf ' on the guest it runs on, or a hand-made target;'
+		else
+			printf ' a hand-made target, not a dnv suite;'
+		fi
+		printf " it lies inside the csi suite's cleanup band 4400..4449"
+		printf ' (TRSVCID_MIN, TRSVCID_MAX (csi_test.sh)), whose cleanup would'
+		printf ' remove it'
 		return 0
 		;;
 	4400)
@@ -9414,6 +9541,12 @@ port_owner_hint() { # <trsvcid>
 		printf "trsvcid %s is inside THIS suite's own band %s..%s," \
 			"$1" "$TRSVCID_MIN" "$TRSVCID_MAX"
 		printf ' so it is a port this run left behind or could not remove'
+		case "$1" in
+		430[1-4])
+			printf ", or the tutorial suite's (PORTS (tutorial_test.sh)) on"
+			printf ' the guest it runs on'
+			;;
+		esac
 	else
 		printf 'trsvcid %s matches no dnv suite in this repo' "$1"
 	fi
@@ -9618,6 +9751,9 @@ preflight_node() { # <role: dn|cn> <index>
 		fi
 		if run_has_case react && [ "$REDUND" = raid1 ]; then
 			want_tools="$want_tools $CN_REACT_TOOLS"
+		fi
+		if run_has_case react; then
+			want_tools="$want_tools $CN_FLUSH_TOOLS"
 		fi
 		if run_has_case many; then
 			want_tools="$want_tools $CN_MANY_TOOLS"
@@ -9881,10 +10017,10 @@ preflight_host() { # <h>
 				"$(printf '%s' "$missing" | tr '\n' ' ')"
 	fi
 
-	# The stamped writer of the copy and react cases, and react's fsync and
-	# group-cut writers, run fio and python3 on host0; the ops case's fstrim
-	# step makes and mounts a file system there. Never installed by this
-	# suite either.
+	# The stamped writer of the copy and react cases runs fio and python3 on
+	# host0, and react's fsync and group-cut writers run python3; the ops
+	# case's fstrim step makes and mounts a file system there. Never
+	# installed by this suite either.
 	if [ "$h" = 0 ] && { run_has_case copy || run_has_case react; }; then
 		missing=$(ssh_host "$h" "$(tools_cmd $HOST_SWRITE_TOOLS)") ||
 			die "$label: listing the stamped writer's tools failed"
@@ -9900,19 +10036,20 @@ preflight_host() { # <h>
 				"$(printf '%s' "$missing" | tr '\n' ' ')"
 	fi
 
-	# The copy and react cases' repair steps read host0's kernel log for
-	# failed IO (host_kmsg_clean), so with md-raid1, where those steps run,
-	# host0 needs the witness's tool, as preflight_stas asks it for the cutoff
-	# case.
+	# host0's kernel log is read for failed IO by the copy case's repair
+	# steps, with md-raid1, and by the react case at any redundancy, whose
+	# two resets of the primary's machine mark it (react_power_loss) besides
+	# its repair stages, so host0 needs the witness's tool then, as
+	# preflight_stas asks it for the cutoff case.
 	# The upgrade case reads both hosts' kernel logs across the upgrade.
-	if { [ "$h" = 0 ] && [ "$REDUND" = raid1 ] &&
-		{ run_has_case copy || run_has_case react; }; } ||
+	if { [ "$h" = 0 ] && { run_has_case react ||
+		{ [ "$REDUND" = raid1 ] && run_has_case copy; }; }; } ||
 		run_has_case upgrade; then
 		missing=$(ssh_host "$h" "$(tools_cmd $HOST_KMSG_TOOLS)") ||
 			die "$label: listing the kernel-log witness's tools failed"
 		[ -z "$missing" ] ||
-			die "$label: missing tool(s) for the repair steps' kernel-log" \
-				"witness: $(printf '%s' "$missing" | tr '\n' ' ')"
+			die "$label: missing tool(s) for the kernel-log witness:" \
+				"$(printf '%s' "$missing" | tr '\n' ' ')"
 	fi
 
 	# The react case's migrating-leg step runs the write loop on host0 with
@@ -10341,7 +10478,9 @@ cleanup_verb() { # <ssh-wrapper> <index|""> <label> <sentinel> <verb…>
 # for one case name — the setup between two cases, a failure inside one —
 # goes to <case>.2, .3 and so on, never over the first. A passing run deletes
 # the logs at every cleanup, so this is the only way the round counter
-# (integtest/round_counts.sh) gets the worker's log of a passing case. It
+# (integtest/round_counts.sh) gets the worker's whole log of a passing case;
+# the many-pools case runs it on its build's records alone
+# (many_round_report). It
 # runs before each cleanup that removes the work directories: between cases
 # (setup_between_cases) and on the exit path (on_exit). Every daemon still
 # runs and writes its log while it is copied, so a log that grows under tar
@@ -10402,12 +10541,16 @@ PANIC_PAT='^(panic: |fatal error: )'
 
 # panic_lines prints, as <log>:<line>:<text>, every line of each *.log under
 # <dir> on one guest that PANIC_PAT matches, and fails when grep could not
-# read them all: a log that was not read is not a log without a crash. The
-# lines it found are printed either way.
+# read them all: a log that was not read is not a log without a crash. While
+# PANIC_TIMEOUT is set, as the failure dump sets it to DIAG_TIMEOUT, the grep
+# runs under that bound, and a grep the bound ends fails the same way; the
+# crash scan that fails a case sets none. The lines it found are printed
+# either way.
+PANIC_TIMEOUT=""
 panic_lines() { # <dir> <ssh function> [<guest index>]
 	local dir=$1
 	shift
-	"$@" "grep -rnHaE --include='*.log' '$PANIC_PAT' $dir || [ \$? -eq 1 ]"
+	"$@" "${PANIC_TIMEOUT:+timeout $PANIC_TIMEOUT }grep -rnHaE --include='*.log' '$PANIC_PAT' $dir || [ \$? -eq 1 ]"
 }
 
 # panic_label prints one guest's hits, each on its own line behind the
@@ -10423,26 +10566,28 @@ PANIC_UNREAD=""
 # panic_guests reads the logs under the work directory of the control-plane
 # guest and of each controller node and disk node guest, the guests that run
 # a dnv program (panic_lines), and leaves their hits, each behind its guest's
-# name, in PANIC_HITS; it fails on the first guest whose logs it could not
-# read all of, which it names in PANIC_UNREAD, with what it read kept in
-# PANIC_HITS. It runs in the caller's shell, for the two variables.
+# name, in PANIC_HITS. It reads every guest, past one whose logs it could not
+# read all of, names each such guest in PANIC_UNREAD, and then fails, with
+# what it read kept in PANIC_HITS: a guest that is down, as after a reset, is
+# when the other guests' crash lines are most wanted. It runs in the caller's
+# shell, for the two variables.
 panic_guests() {
 	local v hits
 	PANIC_HITS="" PANIC_UNREAD=""
-	hits=$(panic_lines "$WORK" ssh_cp) || PANIC_UNREAD="cp ($CP_IP)"
+	hits=$(panic_lines "$WORK" ssh_cp) ||
+		PANIC_UNREAD+="${PANIC_UNREAD:+, }cp ($CP_IP)"
 	PANIC_HITS+=$(panic_label "cp" "$hits")
-	[ -z "$PANIC_UNREAD" ] || return 1
 	for v in "${!CN[@]}"; do
-		hits=$(panic_lines "$WORK" ssh_cn "$v") || PANIC_UNREAD="cn$v (${CN_IP[$v]})"
+		hits=$(panic_lines "$WORK" ssh_cn "$v") ||
+			PANIC_UNREAD+="${PANIC_UNREAD:+, }cn$v (${CN_IP[$v]})"
 		PANIC_HITS+=$(panic_label "cn$v" "$hits")
-		[ -z "$PANIC_UNREAD" ] || return 1
 	done
 	for v in "${!DN[@]}"; do
-		hits=$(panic_lines "$WORK" ssh_dn "$v") || PANIC_UNREAD="dn$v (${DN_IP[$v]})"
+		hits=$(panic_lines "$WORK" ssh_dn "$v") ||
+			PANIC_UNREAD+="${PANIC_UNREAD:+, }dn$v (${DN_IP[$v]})"
 		PANIC_HITS+=$(panic_label "dn$v" "$hits")
-		[ -z "$PANIC_UNREAD" ] || return 1
 	done
-	return 0
+	[ -z "$PANIC_UNREAD" ]
 }
 
 # panic_scan fails the case when a log of a guest that runs a dnv program
@@ -10457,9 +10602,10 @@ panic_scan() {
 }
 
 # panic_dump prints, on the failure path, every crash line the guests' logs
-# hold, so that a crash that failed a case through another check is named.
-# It never fails.
+# hold, so that a crash that failed a case through another check is named,
+# and names each guest whose logs it could not read. It never fails.
 panic_dump() {
+	local PANIC_TIMEOUT=$DIAG_TIMEOUT
 	panic_guests || PANIC_HITS+=$'\n'"    (the logs on $PANIC_UNREAD could not all be read)"
 	log "--- crash lines in the program logs"
 	log "${PANIC_HITS:-    (none)}"
@@ -10473,18 +10619,20 @@ panic_dump() {
 panic_plant() { # <guest name> <ssh function> [<guest index>]
 	local name=$1 d hits want
 	shift
-	d=$("$@" "mktemp -d /var/tmp/dnv-panic-plant.XXXXXX") ||
+	d=$("$@" "mktemp -d /var/tmp/dnv-panic-plant-e2e.XXXXXX") ||
 		die "making the crash scan's scratch directory on $name failed"
 	case "$d" in
-	/var/tmp/dnv-panic-plant.?*) ;;
+	/var/tmp/dnv-panic-plant-e2e.?*) ;;
 	*) die "mktemp on $name printed '$d', not a scratch directory" ;;
 	esac
 	printf '%s\n' \
 		'{"level":"ERROR","msg":"os command failed","stderr":"panic: in a field\nfatal error: in a field"}' \
 		'panic: planted by the preflight' 'goroutine 1 [running]:' \
 		'fatal error: planted by the preflight' |
-		"$@" "mkdir $d/sub && cat > $d/sub/plant.log" ||
-		die "writing the crash scan's sample log on $name failed"
+		"$@" "mkdir $d/sub && cat > $d/sub/plant.log" || {
+			"$@" "rm -rf $d" || true
+			die "writing the crash scan's sample log on $name failed"
+		}
 	hits=$(panic_lines "$d" "$@") || hits="(the read failed)"
 	"$@" "rm -rf $d" || true
 	want="$d/sub/plant.log:2:panic: planted by the preflight"
@@ -10614,7 +10762,8 @@ reset_control_plane() {
 #
 # "Keep everything": on_exit calls this INSTEAD of the cleanup, so every
 # process, dm/md/nvmet object, loop device, host connection and log is still
-# there when this runs and stays there afterwards.
+# there when this runs, and stays there afterwards but for the injectors
+# on_exit then takes off and the stamped writer it halts (E2E6).
 #
 # Three things shape it.
 #
@@ -10625,9 +10774,11 @@ reset_control_plane() {
 #     failed.
 #  b. IT MUST NOT DIE. on_exit runs `diagnostics || true`, which suspends
 #     set -e inside it, but `die` calls `exit` and would end the run with the
-#     other eight guests undumped. Every guest call is an _ok form and every
-#     dnvctl read goes through diag_ctl, which runs in a SUBSHELL so that a
-#     die inside ctl_exec (its one die, on a failed ssh) is contained.
+#     other eight guests undumped. Every guest call is an _ok form, or one
+#     of panic_dump's reads, whose failure panic_guests records and passes
+#     on, and every dnvctl read goes through diag_ctl, which runs in a
+#     SUBSHELL so that a die inside ctl_exec (its one die, on a failed ssh)
+#     is contained.
 #  c. IT MUST BE BOUNDED. Diagnostics runs when something is already wrong,
 #     which is when a guest command hangs; each dump is `timeout
 #     $DIAG_TIMEOUT bash $HELPER …`. `timeout` cannot end a read in D state,
@@ -12283,9 +12434,11 @@ sp_thresholds() { # <case name>
 }
 
 # sp_shape selects the shape the NEXT `sp create` builds: react's set for the
-# react case, the run's for every other (derive_params works out both before a
-# guest is touched; e2e_integtest.md, Topology and parameters). It computes
-# nothing: it copies one set into the active SLICE_CNT, GRP_CNT,
+# react case, the run's for every other, with the many-pools case's and the
+# soak case's own run caps (MANY_RUN_CAP_BYTES, SOAK_RUN_CAP_BYTES) for those
+# cases (derive_params works out all of them before a guest is touched;
+# e2e_integtest.md, Topology and parameters). It
+# computes nothing: it copies one set into the active SLICE_CNT, GRP_CNT,
 # SP_ZERO_BYTES, RUN_CAP_BYTES and TD_UNIT, which the case reads from its
 # create's assertions to its space guard. main calls it right after each
 # sp_thresholds call.
@@ -13342,17 +13495,19 @@ setup_between_cases() {
 # The ending every case shares (e2e_integtest.md, The cases; E2E5)
 # ---------------------------------------------------------------------------
 #
-# Each of the five default cases ends the same way (the upgrade case alone
-# leaves it out, and the end cleanup takes what it made): delete what the
-# case built, delete the sp, wait for the sp-worker's drain to make `sp get` answer NOT_FOUND,
-# assert that nothing of the sp survives on any guest, assert the two E2E5
-# allocation caps, and assert that every disk node's agent counts its whole
-# data area free, as its record does, and that the worker logged no
-# disagreement between an agent's count and its record's. smoke IS that
-# ending — its whole content is setup plus this — and ops, copy, react and
-# cutoff put their own steps in front of it. The four pieces are
-# `case_teardown`, `case_residue`, `case_space_guard` and `case_dn_counts`,
-# and `case_finish` is the four in order.
+# Every case but the upgrade case ends the same way (the upgrade case runs
+# only the space guard, case_space_guard, and the end cleanup takes what it
+# made): check the pool's thin pools by the status read and its arrays by
+# the primary's rows while the pool stands, delete what the case built,
+# delete the sp, wait for the sp-worker's drain to make `sp get` answer
+# NOT_FOUND, assert that nothing of the sp survives on any guest, assert the
+# two E2E5 allocation caps, and assert that every disk node's agent counts
+# its whole data area free, as its record does, and that the worker logged
+# no disagreement between an agent's count and its record's. smoke IS that
+# ending — its whole content is setup plus this — and every other case
+# that ends so puts its own steps in front of it. The five pieces are
+# `case_status_check`, `case_teardown`, `case_residue`, `case_space_guard`
+# and `case_dn_counts`, and `case_finish` is the five in order.
 #
 # FOUR ORDERING FACTS:
 #
@@ -13442,8 +13597,9 @@ check_sha0() { # <what just happened>
 # host_kmsg_mark writes <tag> into host<h>'s kernel log, the marker the
 # kernel-log witness below counts from, and dies unless the helper read it
 # back (kmsg_mark): a log it cannot read must not pass for a clean one. The
-# copy case's repair steps, react's repair stages and the cutoff case mark
-# host0 with a tag of their own, minted per run from the cluster id.
+# copy case's repair steps, react's repair stages and its two resets of the
+# primary's machine, and the cutoff case mark host0 with a tag of their own,
+# and the upgrade case both hosts, minted per run from the cluster id.
 host_kmsg_mark() { # <h> <tag>
 	local out
 	out=$(helper_host "$1" kmsg_mark "$2") ||
@@ -13819,9 +13975,10 @@ case_space_guard() {
 			cap=$DN_CAP_BYTES
 			# The many-pools case's disk nodes each carry the sides of many
 			# pools, every side one extent its disk node may zero whole and
-			# that holds all a host writes into it, so each file's cap is its
-			# own: an extent for each side its disk node carried at the case's
-			# widest, the backing pattern and 16 MiB of metadata.
+			# that holds all a host writes into it, so each file's cap is the
+			# larger of DN_CAP_BYTES and its own: an extent for each side its
+			# disk node carried at the case's widest, the backing pattern and
+			# 16 MiB of metadata.
 			if [ "$CASE" = many ]; then
 				k=${path#"$WORK"/dn}
 				k=${k%%/*}
@@ -13840,7 +13997,7 @@ case_space_guard() {
 				"dn$v: allocated bytes of $path (what its DN zeroed and had written through its sides, the backing pattern and metadata)"
 			[ "$bytes" -le "$worst" ] || worst=$bytes
 		done < <(printf '%s\n' "$out")
-		log "  dn$v: largest backing file allocates $worst bytes (cap $DN_CAP_BYTES, or its own in the many-pools case)"
+		log "  dn$v: largest backing file allocates $worst bytes (cap $DN_CAP_BYTES, or its own where larger in the many-pools case, the backing file's size in the long run)"
 	done
 
 	for v in "${!DN[@]}"; do
@@ -13975,9 +14132,9 @@ case_finish() {
 #
 # STATUS_ALLOW_NEEDS_CHECK lists the slice ids whose needs_check a stage of
 # the case left on purpose and measured (react's whole-group cut), one per
-# line; the check logs each such row, and the slice's needs_check row of
-# the primary's reply, as allowed instead of failing on it. A case's setup
-# clears it.
+# line; the check logs each such row of the status read as allowed instead
+# of failing on it, and passes the slice's needs_check row of the primary's
+# reply without a line of its own. A case's setup clears it.
 STATUS_MD_WAIT=600
 STATUS_PAGE_MAX=8
 STATUS_ALLOW_NEEDS_CHECK=""
@@ -14055,9 +14212,11 @@ status_array_fault() {
 
 # status_check_samples is the check's own proof, run at every preflight: the
 # pool filter must name the fault in a saved status read that holds a
-# needs_check thin pool, and allow it only where its slice is allowed, and
-# the array filter must name a degraded and a copying array and pass a
-# clean one. A filter that stopped matching would otherwise pass every case.
+# needs_check thin pool, allow it only where its slice is allowed, and name a
+# saved space, report and more row; the pool row reader must fail a missing,
+# an unknown and an unallowed row; and the array filter must name a degraded,
+# a copying, a broken and a not whole array and pass a clean one. A filter
+# that stopped matching would otherwise pass every case.
 STATUS_SAMPLE_NEEDS_CHECK='{"cluster_name":"e2e","row_list":[{"sp_name":"sp0","kind":"STATUS_KIND_ROW","object":"slice 3 thin pool","status":"RES_STATUS_ERROR","reason":"RES_REASON_POOL_NEEDS_CHECK","text":"0 thin-pool 1 16/2048 64/4096 - ro needs_check discard_passdown queue_if_no_space - 1024","slice_id":"3"},{"sp_name":"sp0","kind":"STATUS_KIND_GROUP","object":"group 9 (slice 3)","reason":"RES_REASON_NONE","text":"the operator is in charge of its repair: the worker repairs no leg of it","slice_id":"3","grp_id":"9"}],"sp_cnt":1}'
 # The other saved rows: one of each kind the filter fails whatever it
 # names, each of which must come out a fault.
@@ -14236,12 +14395,13 @@ case_status_check() {
 
 # --- the default log level (e2e_integtest.md, The cases, smoke) -------------
 #
-# Every dnv daemon of the suite runs at --log-level debug, and every record
-# carries its level, so one idle window shows what the default level, info,
-# would keep without a run at it (log.md R6, R9): on the primary's cn agent
-# and on the worker, the records of a check round's messages, of a read, of
-# a command, of a dial and of the leg probe are all at DEBUG, so at info an
-# idle round logs none of them.
+# Every dnv daemon of the tree's build runs at --log-level debug (the upgrade
+# case's v0.1.0 programs, which lack the flag, log at their default level),
+# and every record carries its level, so one idle window shows what the
+# default level, info, would keep without a run at it (log.md R6, R9): on the
+# primary's cn agent and on the worker, the records of a check round's
+# messages, of a read, of a command, of a dial and of the leg probe are all at
+# DEBUG, so at info an idle round logs none of them.
 
 # levels_above_debug <lines> <regex> — "<count> <msg> <level>" for each
 # record of <lines> above DEBUG whose msg matches <regex>; `fromjson?` drops
@@ -14340,7 +14500,7 @@ case_smoke() {
 }
 
 # ---------------------------------------------------------------------------
-# Case: ops (e2e_integtest.md, The cases, ops) — the nine steps of case_ops
+# Case: ops (e2e_integtest.md, The cases, ops) — the ten steps of case_ops
 # ---------------------------------------------------------------------------
 #
 # Every sp-scoped mutator and reader dnvctl has, against the real gateway, on
@@ -16135,25 +16295,24 @@ ops_fstrim() {
 
 	wait_until "$WAIT_PROVISION" "sp inspect to read every slice" ops_used_at_least 0
 	used0=$OPS_USED
-	out=$(ssh_host_watched 0 "bash $HELPER trim_mkfs $UUID_TRIM" "$WAIT_STAMP") || {
-		host_watch_verdict $? 0 "the file system's make and mount"
+	out=$(ssh_host_watched 0 "bash $HELPER trim_mkfs $UUID_TRIM" "$WAIT_STAMP") ||
+		host_watch_verdict $? 0 "the file system's make and mount" \
+			"$WAIT_STAMP" ||
 		die "host0: the trim_mkfs verb failed: $out"
-	}
 	assert_eq "$out" "trim=mounted dir=$WORK/trim" "host0: ext4 made and mounted on $TD_TRIM"
 	out=$(ssh_host_watched 0 "bash $HELPER trim_fill $OPS_TRIM_FILES $OPS_TRIM_MIB" \
-		"$WAIT_STAMP") || {
-		host_watch_verdict $? 0 "the files' write"
+		"$WAIT_STAMP") ||
+		host_watch_verdict $? 0 "the files' write" "$WAIT_STAMP" ||
 		die "host0: the trim_fill verb failed: $out"
-	}
 	assert_eq "$out" "trim=filled bytes=$files" "host0: the files written and synced"
 	wait_until "$WAIT_PROVISION" \
 		"sp inspect to show the files' $files bytes in use over the $used0 before" \
 		ops_used_at_least "$((used0 + files))"
 	used1=$OPS_USED
-	out=$(ssh_host_watched 0 "bash $HELPER trim_unfill" "$WAIT_STAMP") || {
-		host_watch_verdict $? 0 "the files' removal and fstrim"
+	out=$(ssh_host_watched 0 "bash $HELPER trim_unfill" "$WAIT_STAMP") ||
+		host_watch_verdict $? 0 "the files' removal and fstrim" \
+			"$WAIT_STAMP" ||
 		die "host0: the trim_unfill verb failed: $out"
-	}
 	case "$out" in
 	trim=trimmed*) ;;
 	*) die "host0: fstrim did not run: $out" ;;
@@ -16174,7 +16333,10 @@ ops_fstrim() {
 	log "  pool data in use: $used0 before the file system, $used1 with the" \
 		"files, $used2 after fstrim: $((used1 - used2)) bytes freed of the" \
 		"files' $files, the stripe $stripe, the block $bs"
-	out=$(helper_host 0 trim_umount) || die "host0: the trim_umount verb failed"
+	out=$(ssh_host_watched 0 "bash $HELPER trim_umount" "$WAIT_STAMP") ||
+		host_watch_verdict $? 0 "the file system's unmount" \
+			"$WAIT_STAMP" ||
+		die "host0: the trim_umount verb failed: $out"
 	assert_eq "$out" trim=unmounted "host0: the file system unmounted"
 	ctl_ok ns delete --nqn "$SS0" --idx "$TRIM_IDX"
 	assert_field "$CTL_OUT" '.ns_id' "$nsid" "DeleteNamespaceReply.ns_id"
@@ -16211,11 +16373,13 @@ case_ops() {
 # Every one of them is exercised against the sp setup built, in the order the
 # dependencies force: the transfer exports $TD0, the clone copies that export
 # into a second thin device, the transfer is then aborted, the next step
-# moves one leg's side between disk nodes, the two after it replace a leg
-# whose disk node died and then, when the leg that replaced it dies during
-# md's copy, take the replaced leg back from the retired legs, and the last
-# fails the primary over in the middle of a second clone's copy, from a
-# second pool.
+# moves one leg's side between disk nodes, the next moves that side once
+# more and resets its new disk node guest in the middle of the copy, the
+# next resets that guest again under host writes md has not flushed (steps
+# 4b and 4c, raid1 only), the two after them replace a leg whose disk node
+# died and then, when the leg that replaced it dies during md's copy, take
+# the replaced leg back from the retired legs, and the last fails the
+# primary over in the middle of a second clone's copy, from a second pool.
 #
 # ===========================================================================
 # TWO CONSTRAINTS ON THIS CASE, AND WHY EACH IS FORCED
@@ -16392,11 +16556,15 @@ UUID3=2b6f0cc9-04d2-4f1a-9c3e-1d0a5e7b8c03
 # from the stored numbers and then reads on the primary.
 #
 # COPY_MIGR_RATE_KBIT is the cap on what the migration source's nvmet port
-# sends to the other disk-node guests while the first migration copies
-# (throttle_to), in tc's kbit, a suite choice: about a second for one region
-# of a DATA_BLOCK_SIZE block, so the leg's copy takes about a minute and the
-# worker's bitmap pieces, read a few check rounds after the cutover, reach
-# the destination while it copies. COPY_MIGR_THROTTLE_DN is the --dn guest
+# sends to the other disk-node guests (throttle_to): in step 4 from before
+# the first migration's create until the worker's pieces have landed, and
+# in step 4b from before its create until md holds every group whole again
+# after the reset of its destination's guest and its writes to the member
+# are checked (copy_migr_crash); in tc's kbit, a suite choice: about a
+# second for one region of a DATA_BLOCK_SIZE block, so the leg's copy takes
+# about a minute and the worker's bitmap pieces, read a few check rounds
+# after the cutover, reach the destination while it copies.
+# COPY_MIGR_THROTTLE_DN is the --dn guest
 # the cap is on, -1 while none is: on_exit takes it off even when a run
 # fails (E2E6).
 STAMP_BS=$((1 << 20))
@@ -17651,7 +17819,11 @@ host_stamp() { # <write|verify> <h> <uuid> <bytes> <what>
 # A procedure under load: host0 writes a namespace of its own in fio passes
 # (swrite_start in the host helper) from before the procedure to after it,
 # and the stage fails on a failed write, on a block a pass's verify finds
-# wrong and on the range's read after the procedure. The volume is a thin
+# wrong and on the range's read after the procedure (host_swrite_alive,
+# host_swrite_finish), save copy step 4c, which logs those and asserts only
+# that the writer ran across its reset, stopped at the end of a pass, and had
+# its range read back through the moved leg (copy_migr_crash_unflushed). The
+# volume is a thin
 # device of SWRITE_UNITS TD_UNITs, written whole before the writer starts, so
 # that every pass overwrites mapped blocks: an acknowledged overwrite must
 # survive the procedure, as the pool's commit is not involved
@@ -17701,10 +17873,10 @@ host_swrite_volume() {
 	log "  the run cap takes the writer's range on all $LEGS leg(s):" \
 		"$RUN_CAP_BYTES bytes"
 	out=$(ssh_host_watched 0 "bash $HELPER swrite_fill $uuid $SWRITE_BYTES" \
-		"$WAIT_STAMP") || {
-		host_watch_verdict $? 0 "the writer's fill of $td"
+		"$WAIT_STAMP") ||
+		host_watch_verdict $? 0 "the writer's fill of $td" \
+			"$WAIT_STAMP" ||
 		die "host0: the swrite_fill verb failed: $out"
-	}
 	line=$(printf '%s\n' "$out" | head -n 1)
 	if [ "$line" != "swrite=filled rc=0 wbytes=$SWRITE_BYTES rbytes=$SWRITE_BYTES" ]; then
 		printf '%s\n' "$out" >&2
@@ -17753,10 +17925,10 @@ host_swrite_alive() {
 host_swrite_finish() {
 	local out first line
 	SWRITE_OUT=$(ssh_host_watched 0 "bash $HELPER swrite_stop $SWRITE_STOP_WAIT" \
-		"$((SWRITE_STOP_WAIT + 30))") || {
-		host_watch_verdict $? 0 "the stop of the stamped writer"
+		"$((SWRITE_STOP_WAIT + 30))") ||
+		host_watch_verdict $? 0 "the stop of the stamped writer" \
+			"$((SWRITE_STOP_WAIT + 30))" ||
 		die "host0: the swrite_stop verb failed: $SWRITE_OUT"
-	}
 	SWRITE_RUNNING=0
 	first=$(printf '%s\n' "$SWRITE_OUT" | head -n 1)
 	out=$(printf '%s\n' "$SWRITE_OUT" | sed -n 2p)
@@ -17773,10 +17945,10 @@ host_swrite_finish() {
 	fi
 	log "  host0's stamped writer $2: $out"
 	out=$(ssh_host_watched 0 "bash $HELPER swrite_verify $1 $SWRITE_BYTES" \
-		"$WAIT_STAMP") || {
-		host_watch_verdict $? 0 "the stamped writer's verify"
+		"$WAIT_STAMP") ||
+		host_watch_verdict $? 0 "the stamped writer's verify" \
+			"$WAIT_STAMP" ||
 		die "host0: the swrite_verify verb failed: $out"
-	}
 	line=$(printf '%s\n' "$out" | head -n 1)
 	case "$line" in
 	"swrite=verified rc=0 rbytes=$SWRITE_BYTES pass="*" bad=0") ;;
@@ -17993,8 +18165,8 @@ copy_transfer() {
 	# first half reads back through the transfer with fio's verify.
 	host_stamp verify 1 "$UUID1" "$COPY_CSTAMP_BYTES" \
 		"the clone's stamp read back through the transfer's namespace"
-	log "  the transfer exports $TD0's raid0: host1 reads the same" \
-		"$BASELINE_MIB MiB host0 wrote in setup, and host0's stamp block by block"
+	log "  the transfer exports $TD0's raid0: host1 reads its first" \
+		"$BASELINE_MIB MiB as SHA0 holds them after host0's stamp, and the stamp block by block"
 }
 
 # ---------------------------------------------------------------------------
@@ -18928,11 +19100,12 @@ MIGR2=m2
 MIGR2_ID=""
 COPY_DSTAMP_UNITS=16
 COPY_DCRASH_BOOT_WAIT=180
-# How long md may take to clear the stamp's bit and write the bitmap (a few
-# daemon passes of 5 s), and the most sectors md may write to the reset leg's
-# member between the reset and the group whole again for a re-add by its
-# bitmap: superblock and bitmap pages, a few KiB, far below a member's data
-# area (61 MiB a group at one slice).
+# How long md may take to clear the stamp's bit and write the bitmap, a few
+# of its daemon passes, which the step shortens to COPY_BITMAP_TIME seconds
+# while it waits, with room to spare; and the most sectors md may write to
+# the reset leg's member from just before the reset to the group whole again
+# for a re-add by its bitmap: 1 MiB, room for its superblock and bitmap pages
+# and far below a member's data area (61 MiB a group at one slice).
 COPY_BITMAP_WAIT=120
 COPY_BITMAP_TIME=0.5
 COPY_READD_MAX_SECTORS=2048
@@ -19235,23 +19408,25 @@ copy_migr_crash() {
 # Copy step 4c — a disk node guest crash under writes md has not flushed
 # ---------------------------------------------------------------------------
 #
-# The unflushed form of step 4b's crash (plan decision 3 of change 2): the
-# leg steps 4 and 4b moved now has its one side on the guest step 4b reset.
-# host0's stamped writer runs on a volume of its own, and while a pass
-# writes, with md's array active and its bitmap dirty, so with no wait for
-# md's flush, that guest is reset again. md fails the leg's member at the
-# IO's first error and the writes go on to the other leg; once the guest
-# answers, its agents start again, the primary's path to the side reads
-# optimized and md holds every group whole on the primary again, the
-# writer stops at the end of its pass in hand, and the writer's range is
-# read back through the moved leg alone (copy_leg_swrite_read), with the
-# last pass's seeds. A block that does not read back as the pass wrote it
-# is lost on that leg: the step counts such blocks and the passes that
-# failed, and logs them with md's writes to the member across its return,
-# but asserts only that the writer ran across the reset and that the read
-# took place, as the plan asks the stage to assert on flushed writes only
-# (step 4b). The volume is made once the pool has room for it under its
-# grow mark, so that the stamp lands in the group whose leg is reset.
+# The unflushed form of step 4b's crash: the leg steps 4 and 4b moved now has
+# its one side on the guest step 4b reset. host0's stamped writer runs on a
+# volume of its own, and while a pass writes, with md's array active and its
+# bitmap dirty, so with no wait for md's flush, that guest is reset again. md
+# fails the leg's member at the IO's first error and the writes go on to the
+# other leg; once the guest answers, its agents start again, the primary's
+# path to the side reads optimized and md holds every group whole on the
+# primary again, the writer stops at the end of its pass in hand, and the
+# writer's range is read back through the moved leg alone
+# (copy_leg_swrite_read), with the seeds of the last pass that passed, so a
+# block a failed pass wrote reads as lost too. A block that does not read back
+# as that pass wrote it is lost on that leg or written by the failed pass: the
+# read stops at the first such block, so the step logs whether one was found,
+# where, and how far the read got, with the passes that failed and md's writes
+# to the member across its return, but asserts only that the writer ran across
+# the reset, stopped at the end of a pass, and that the read took place, as
+# the suite asserts on flushed writes only (step 4b). The volume is made once
+# the pool has room for it under its grow mark, so that the stamp lands in the
+# group whose leg is reset.
 COPY_UCRASH_RUN_SECS=4
 
 copy_migr_crash_unflushed() {
@@ -19263,7 +19438,7 @@ copy_migr_crash_unflushed() {
 	fi
 	stage 04c "a disk node guest crash under host writes md has not flushed: the stamped writer runs, the moved leg's guest is reset, md takes the leg back, and the writer's range is read through that leg alone"
 	local legid saddr v k legnqn straddr strsvcid member grps lwm slice0 out
-	local boot t0 secs wbefore wrote st dirty stat first passed failed line rc bad
+	local boot t0 secs wbefore wrote st dirty stat first passed failed line rc bad rbytes
 
 	sp_refresh
 	sp_read_roles
@@ -19332,10 +19507,10 @@ copy_migr_crash_unflushed() {
 		"before it, the writer's and md's copy onto the leg among them"
 
 	SWRITE_OUT=$(ssh_host_watched 0 "bash $HELPER swrite_stop $SWRITE_STOP_WAIT" \
-		"$((SWRITE_STOP_WAIT + 30))") || {
-		host_watch_verdict $? 0 "the stop of the stamped writer"
+		"$((SWRITE_STOP_WAIT + 30))") ||
+		host_watch_verdict $? 0 "the stop of the stamped writer" \
+			"$((SWRITE_STOP_WAIT + 30))" ||
 		die "host0: the swrite_stop verb failed: $SWRITE_OUT"
-	}
 	SWRITE_RUNNING=0
 	first=$(printf '%s\n' "$SWRITE_OUT" | head -n 1)
 	stat=$(printf '%s\n' "$SWRITE_OUT" | sed -n 2p)
@@ -19354,6 +19529,7 @@ copy_migr_crash_unflushed() {
 	line=$(printf '%s\n' "$COPY_LEG_SWRITE_OUT" | head -n 1)
 	rc=$(kv_of "$line" rc)
 	bad=$(kv_of "$line" bad)
+	rbytes=$(kv_of "$line" rbytes)
 	case "$line" in
 	"swrite=verified rc="*" rbytes=$SWRITE_BYTES pass="*) ;;
 	"swrite=verified rc="*)
@@ -19364,10 +19540,11 @@ copy_migr_crash_unflushed() {
 	esac
 	printf '%s\n' "$COPY_LEG_SWRITE_OUT" | sed -n '2,$p' | sed 's/^/    /'
 	COPY_UCRASH_LOST=${bad:-unread}
-	log "  unflushed crash: $COPY_UCRASH_LOST block(s) of 4 KiB read back" \
-		"through leg $legid not as the last pass wrote them (fio's verify" \
-		"$rc), the failed pass ${failed:-none}; counted, not asserted (plan" \
-		"decision 3 of change 2)"
+	log "  unflushed crash: the read back through leg $legid named" \
+		"$COPY_UCRASH_LOST block(s) of 4 KiB not as the last pass that passed" \
+		"wrote them (fio's verify rc $rc, which stops at the first such block;" \
+		"read $rbytes of $SWRITE_BYTES bytes), the failed pass ${failed:-none};" \
+		"logged, not asserted"
 	host_swrite_remove "$TD_SWRITE" "$SWRITE_IDX" "$UUID_SWRITE"
 	check_sha0 "after a disk node guest's crash under unflushed writes"
 }
@@ -19418,10 +19595,10 @@ copy_leg_swrite_read() { # <leg id> <uuid>
 		;;
 	esac
 	log "  write-mostly is off leg $other's member $name again: $mrd"
-	if [ "$rcv" != 0 ]; then
-		host_watch_verdict "$rcv" 0 "the writer's range read through leg $1"
+	[ "$rcv" = 0 ] ||
+		host_watch_verdict "$rcv" 0 "the writer's range read through leg $1" \
+			"$WAIT_STAMP" ||
 		die "host0: the swrite_verify verb failed: $COPY_LEG_SWRITE_OUT"
-	fi
 	state=${after%% *}
 	case ",${state#state=}," in
 	*,write_mostly,*) ;;
@@ -19526,7 +19703,7 @@ copy_migr_throttle() { # <v> <addr> <port>
 	esac
 	COPY_MIGR_CAPPED=$tos
 	log "  dn$1 sends from the source side's port $2:$3 to $tos at" \
-		"${COPY_MIGR_RATE_KBIT}kbit until the worker's pieces have landed"
+		"${COPY_MIGR_RATE_KBIT}kbit until the step takes the cap off"
 }
 
 # copy_migr_unthrottle takes the cap off dn<v> and reads that it is gone.
@@ -20064,9 +20241,12 @@ copy_migration() {
 # own setting and goes with the array, so a failed run needs nothing more:
 # the next cleanup stops every array.
 #
-# HOST IO. host0's kernel log is marked before the kill, and host0 reads SHA0
-# through the group while the leg is dead and while md copies onto the new
-# leg; step 6 goes on reading and checks the same log. Every member carries
+# HOST IO. host0's kernel log is marked before the kill, host0's stamped
+# writer writes a volume of its own from just after the mark to after the
+# finish and must lose no write (host_swrite_start, host_swrite_alive,
+# host_swrite_finish), and host0 reads SHA0 through the group while the leg
+# is dead and while md copies onto the new leg; step 6 goes on reading and
+# checks the same log. Every member carries
 # md's failfast flag (cnagent.md CN12), so a read that meets a dead member
 # fails that member and md serves it from the other: the host sees no error,
 # and its kernel log since the mark must report no failed IO
@@ -21145,8 +21325,10 @@ copy_reuse() {
 #      host1 read through the source's device before the clone.
 # The worker's log then holds exactly one more failover, the old primary
 # comes back as a standby once it is enabled again, both cntlrs are listed
-# again and host0 still reads SHA0, so the case's ending finds the shape it
-# expects.
+# again, host0 still reads SHA0, and host0's stamped writer, run on a volume
+# of its own from just before the disable, has lost no write
+# (host_swrite_alive, host_swrite_finish), so the case's ending finds the
+# shape it expects.
 
 # copy_fo_now_ms prints the driver's clock in milliseconds.
 copy_fo_now_ms() {
@@ -21559,7 +21741,8 @@ case_copy() {
 # Case: react — the four automatic reactions, AR5 to AR8, two forced
 # starts (AR13, CN12), an operator's take-over of a group's repair from
 # the worker (architecture.md, Repairs), a migrating leg whose serving
-# disk node goes silent (CN10, AR8) and the loss of the primary's machine
+# disk node goes silent (CN10, AR8), the loss of the primary's machine,
+# twice, under host writes, and a measured cut of a whole group
 # (e2e_integtest.md, The cases, react)
 # ---------------------------------------------------------------------------
 #
@@ -22393,10 +22576,11 @@ react_pool_grew() { # <cntlr id> <slice id> <old total>
 }
 
 # lab_disk_guard <cap bytes> <what> dies when a run's cap would leave less
-# than MANY_DISK_MARGIN free where the driver keeps the guests' disk images,
-# since every byte the guests allocate grows those files; a driver whose
-# guests' images live elsewhere has no such directory, and the guard says
-# so and passes.
+# than MANY_DISK_MARGIN free on the file system of MANY_IMAGE_DIR, where this
+# lab's guests keep their disk images, since every byte the guests allocate
+# grows those files. It reads that file system whether or not a driver keeps
+# its guests' images there; a driver without the directory is not checked,
+# and the guard says so and passes.
 lab_disk_guard() { # <cap bytes> <what>
 	local avail
 	if [ ! -d "$MANY_IMAGE_DIR" ]; then
@@ -22415,9 +22599,9 @@ lab_disk_guard() { # <cap bytes> <what>
 
 # worker_failover_cnt prints how many failovers the worker has applied so far:
 # the `reaction applied` records with kind failover in its log (dnv-worker.md,
-# Log records), of every sp: its callers, the copy and react cases, hold its
-# change across a window to none and to one, so a failover of any pool counts
-# toward it. A log that
+# Log records), of every sp: the copy, react and cutoff cases hold its change
+# across a window to none and to one, and the many-pools case logs it after
+# its build, so a failover of any pool counts toward it. A log that
 # cannot be read is fatal rather than a zero: a zero read at both ends would
 # pass the caller's unchanged-count assertion without having read the log (and
 # by react's stage 05 the count is not zero: stage 03's AR5 failover is
@@ -23326,9 +23510,10 @@ react_fs_pos() { # <leg id>
 # (react_leg_alone), and as step 9's reject rule needs, which lists every
 # disk node the fresh leg can land on and must list none that carries a
 # side. React steps 5, 7, 8 and 9 call it before the kill that
-# leads to the worker's repair, and step 6 before the return of the disk
-# node that died last, which leads to its first repair, and again between
-# its repairs; react_unsteer follows once the step's last repair exists.
+# leads to the worker's repair, step 6 before the return of the disk node
+# that died last, which leads to its first repair, and again between its
+# repairs, and step 10 before the silence that leads to its repair;
+# react_unsteer follows once the step's last repair exists.
 # The scan offers one disk node of each location outside the group's, the
 # first with room that it meets, as it reads the bins from the fullest up
 # and puts the most free first only inside one bin, and the worker draws one
@@ -27575,8 +27760,10 @@ react_take_over() {
 # step 5: a repair of its own with a fresh leg, created, started and
 # finished, the leg retired with the destination's side, and the group's
 # retired legs held to the give-back rule (react_retired_want). The fresh
-# leg is not steered, as no later step kills a disk node, so where it lands
-# is asserted as react_new_leg_placed asserts it without a steer.
+# leg is steered as steps 5 to 9 steer theirs (react_steer), from before the
+# silence until the worker's repair exists, so that it lands on a disk node
+# that holds no side: step 14 cuts slice 0's data legs by their disk nodes
+# and makes no cut where one of them also holds a meta group's leg.
 #
 # THE END. The traffic comes back once the repair is finished, before the
 # step waits on the cntlrs to drop the retired leg: a silenced port answers
@@ -27997,6 +28184,12 @@ react_migr_cut() {
 		"cn$PRIMARY_CN to apply revision $rev and md to hold group $REACT_GRP_ID whole, in sync on legs $want" \
 		copy_rep_whole "$PRIMARY_CNTLR_ID" "$REACT_GRP_ID" "$rev" "$want"
 
+	# The worker's repair after the finish takes a fresh leg, which the
+	# steer keeps off every disk node that holds a side, as steps 5 to 9
+	# do theirs: step 14's cut of slice 0's data legs must miss the meta
+	# groups' legs (react_group_cut).
+	react_steer "${stayaddr%:*},$dstvm"
+
 	# THE SILENCE, with no host IO running (see the step's header).
 	tag="dnv-e2e-react-migr-cut-mark-$(hex16 "$CLUSTER_ID")"
 	host_kmsg_mark 0 "$tag"
@@ -28096,6 +28289,8 @@ react_migr_cut() {
 	wait_until "$WAIT_REACT" "$msg" \
 		react_mc_watched "while the worker creates its repair" \
 		react_rep_open "$pos" "$legid"
+	# The repair took its fresh leg's side, so allocation is over.
+	react_unsteer
 	REACT_NEW_LEG=""
 	REACT_NEW_SIDE=""
 	REACT_NEW_ADDR=""
@@ -28150,7 +28345,6 @@ react_migr_cut() {
 		"the new leg takes leg $legid's leg_idx"
 	assert_jq "$before_retired" "([\"$newleg\"] - .) | length == 1" \
 		"the new leg $newleg is none of the group's retired legs: the worker's repair takes a fresh leg"
-	REACT_STEER_OUT=""
 	react_new_leg_placed "$pos" "$newleg" "$after_addrs" "$after_vms"
 	assert_field "$SP_JSON" "$COPY_GRP0.rep_name" "" \
 		"the group names no repair after the finish"
@@ -28435,23 +28629,27 @@ react_fsync_ended() {
 # after it must read back held, every job must have met the stall (the reset
 # came while it wrote), and a write whose fsync was in flight is logged as
 # held or lost. A non-zero exit of the writer, an error the host was told,
-# is logged with the errors it wrote. A job that ended at a failed write or
-# fsync met the stall there (fsync_judge), so its writes before it are still
-# judged.
+# is logged; the failed write or fsync and its errno are on fsync_judge's
+# line for that block, as fsync_run logs a failure in its job's log, and its
+# err file holds only a Python error. A failed write or fsync counts as
+# failed wherever it comes, logged, held or not (fsync_judge), so its job's
+# writes before it are still judged.
 react_fsync_judge() {
 	local out first rc f n h
 	wait_until "$WAIT_PROVISION" "host0's fsync writer to end its writes" \
 		react_fsync_ended
 	rc=$(swrite_stat_field "$FSYNC_OUT" rc)
 	if [ "$rc" != 0 ]; then
-		log "  host0's fsync writer ended with fio's status $rc, an error the" \
-			"host was told: $(ssh_host_ok 0 "tail -n 8 $WORK/fsync/err" | tr '\n' ' ')"
+		log "  host0's fsync writer ended with status $rc, an error the host" \
+			"was told (fsync_judge's line for its block names it); the" \
+			"writer's Python" \
+			"errors: $(ssh_host_ok 0 "tail -n 8 $WORK/fsync/err" | tr '\n' ' ')"
 	fi
 	out=$(ssh_host_watched 0 "bash $HELPER fsync_judge $UUID_FSYNC $FSYNC_STALL_MS" \
-		"$WAIT_STAMP") || {
-		host_watch_verdict $? 0 "the read-back of the fsync writer's blocks"
+		"$WAIT_STAMP") ||
+		host_watch_verdict $? 0 "the read-back of the fsync writer's blocks" \
+			"$WAIT_STAMP" ||
 		die "host0: the fsync_judge verb failed: $out"
-	}
 	printf '%s\n' "$out" | sed 's/^/  fsync: /'
 	first=$(printf '%s\n' "$out" | head -n 1)
 	case "$first" in
@@ -28514,19 +28712,37 @@ react_fsync_kmsg() { # <tag>
 # its rule dropped, what host0 saw (its longest write, the writer's error,
 # its blocks read back), what md and the pool read while the cut stands,
 # the worker's failovers and leg repairs since the cut, and the time until
-# the writer is done and md holds the groups whole on the primary again.
+# the writer is done and md holds the groups whole on the primary again, or
+# the pool reads needs_check (react_gcut_back), and after that how long the
+# groups took to be whole (react_gcut_way_back).
 # Every data group of the slice is cut, as a new block may be mapped in any
 # of them, and a commit flushes them all. The step asserts only what a rule
 # promises: a cut of 3 seconds, shorter than the leg connections'
-# keep-alive, makes no failed write and no failover; and its own proof, that
-# a write waited at least the cut's length less a second, which a cut that
-# missed the legs' packets does not make. A cut that leaves the slice's pool
-# needs_check stops the step, as no step of dnv repairs it (scope.md's entry
-# "A thin pool marked for a metadata check, or with corrupt metadata, has no
-# repair path"), and the case's status check then allows that one pool row
-# (case_status_check); a cut that leaves the pool in any other state but OK
-# stops it too, and the status check judges the pool. The meta groups and a
-# one-leg group stay out. A run without redundancy skips the step.
+# keep-alive, makes no failed write and no failover, and every write reads
+# back, at every slice count; and its own proof at one slice, that a write
+# waited at least the cut's length less a second, which a cut that missed the
+# legs' packets does not make: above one slice the writer writes every slice
+# in turn, its write to slice 0 can come late in the cut, and the pause is
+# logged, not asserted. How the step goes on after a cut is decided by
+# react_gcut_back's read of the pool, on the primary of that moment. A cut
+# that leaves the slice's pool needs_check stops the step, as no step of dnv
+# repairs it (scope.md's entry "A thin pool whose metadata needs a check, or
+# with corrupt metadata, has no repair path"), and the case's status check
+# then allows that one pool row (case_status_check); a cut that leaves the
+# pool in any other state but OK stops it too, and the status check judges the
+# pool. The meta groups stay out: a cut whose data legs share a disk node with
+# a meta group's leg is not made, and the step stops cutting there. The case
+# steers every fresh leg it places before the step onto a disk node that
+# holds no side (react_steer), and the pool's create puts every leg on a
+# disk node of its own (architecture.md, Per-operation allocation,
+# CreateStoragePool — DNs), so a data leg of slice 0 sits beside a meta leg
+# only where a placement the case does not steer, AR6's grow, which keeps
+# out no disk node (GrowSlice), or a build-time leg repair's fresh leg
+# (react_snapshot, CreateRepair), drew a guest every disk node of which held
+# a side: one the create left with as many of the pool's legs as it has disk
+# nodes, as it can on four disk-node guests in a run of three or four slices
+# at the placement bound's disk nodes per guest (E2E3, derive_params). A run
+# without redundancy, whose groups have one leg, skips the step.
 REACT_GCUT_SECS="3 8 20 60"
 REACT_GCUT_CN=-1
 REACT_GCUT_WRITES=12
@@ -28537,11 +28753,14 @@ TD_GCUT=s2
 GCUT_IDX=6
 UUID_GCUT=2b6f0cc9-04d2-4f1a-9c3e-1d0a5e7b8c08
 GCUT_LAST=""
+# The pool's line react_gcut_back last read, on the primary it read then:
+# the one read that decides how a cut's step goes on.
+GCUT_POOL=""
 
 # react_gcut_back is true once host0's writer has ended and the primary
 # reports every cut group's array OK, not degraded and with no sync
 # running, or its slice's pool needs_check, which nothing brings back. The
-# reading is logged as it changes.
+# reading is logged as it changes, and its pool line kept in GCUT_POOL.
 react_gcut_back() { # <slice id> <grp ids…>
 	local slice=$1 out g st det pool sig
 	shift
@@ -28554,6 +28773,7 @@ react_gcut_back() { # <slice id> <grp ids…>
 	ctl_try cntlr inspect --id "$PRIMARY_CNTLR_ID" || return 1
 	pool=$(jq_of "$CTL_OUT" ".cntlr_info.slice_id_to_dm_pool[\"$slice\"] |
 		\"\(.status) \(.reason) [\(.details)]\"")
+	GCUT_POOL=$pool
 	sig="primary cntlr $PRIMARY_CNTLR_ID: pool $pool"
 	local clean=1
 	for g in "$@"; do
@@ -28611,16 +28831,17 @@ react_gcut_groups_pool() { # <min rev> <slice id> <grp ids…>
 }
 
 # react_gcut_way_back brings the cut groups' arrays back after a cut that
-# left the slice's pool needs_check, which no step of dnv makes writable
-# again. First the step gives the worker REACT_GCUT_REACT_WAIT to move the
-# primary role, as a broken group's row sets the primary's health epoch,
-# and logs whether it did; a primary that holds the broken arrays with the
-# pool over them cannot stop them (architecture.md, Known limits, A forced
-# start and the re-assembly wait on a primary whose layers above hold the
-# broken array), so where the groups are still not whole the pool goes to
-# the level that builds no thin pool, where the primary's re-assembly
-# starts them again (cnagent.md CN12, The re-assembly), and back to the
-# read-write level, where the pool opens again with its needs_check mark.
+# left the slice's pool other than OK, needs_check above all, which no step
+# of dnv makes writable again. First the step gives the worker the primary
+# threshold and REACT_GCUT_REACT_WAIT more to move the primary role, as a
+# broken group's row sets the primary's health epoch, and logs whether it did;
+# a primary that holds the broken arrays with the pool over them cannot stop
+# them (architecture.md, Known limits, A forced start and the re-assembly wait
+# on a primary whose layers above hold the broken array), so where the groups
+# are still not whole the pool goes to the level that builds no thin pool,
+# where the primary's re-assembly starts them again (cnagent.md CN12, The
+# re-assembly), and back to the read-write level, where the pool opens again
+# with its needs_check mark.
 REACT_GCUT_REACT_WAIT=60
 react_gcut_way_back() { # <wmark> <slice id> <grp ids…>
 	local wmark=$1 slice=$2 t0 fo rev st
@@ -28629,11 +28850,11 @@ react_gcut_way_back() { # <wmark> <slice id> <grp ids…>
 	GCUT_LAST=""
 	if poll_for "$((THR_PRIMARY + REACT_GCUT_REACT_WAIT))" \
 		react_gcut_groups_clean "$@"; then
-		log "  the groups are whole again $((SECONDS - t0))s after the needs_check" \
+		log "  the groups are whole again $((SECONDS - t0))s after the pool's" \
 			"reading, the primary cntlr $PRIMARY_CNTLR_ID"
 	else
 		fo=$(worker_reaction_kind_cnt "$wmark" failover)
-		log "  no whole groups $((SECONDS - t0))s after the needs_check reading" \
+		log "  no whole groups $((SECONDS - t0))s after the pool's reading" \
 			"($fo failover(s) since the cut): the level step brings the" \
 			"arrays back"
 		ctl_ok sp set-level --level NO_THINPOOL
@@ -28641,7 +28862,7 @@ react_gcut_way_back() { # <wmark> <slice id> <grp ids…>
 		wait_until "$WAIT_PROVISION" \
 			"the primary's re-assembly to start slice 0's data groups again at NO_THINPOOL (cnagent.md CN12, The re-assembly)" \
 			react_gcut_groups_clean "$@"
-		log "  the arrays are whole at NO_THINPOOL $((SECONDS - t0))s after the needs_check reading"
+		log "  the arrays are whole at NO_THINPOOL $((SECONDS - t0))s after the pool's reading"
 		ctl_ok sp set-level --level READWRITE
 		sp_refresh
 		rev=$(sp_field '.sp_rev.revision')
@@ -28659,7 +28880,7 @@ react_group_cut() {
 	stage 14 "every leg of slice 0's data groups cut from the primary under writes to new blocks, 3, 8, 20 and 60 seconds in turn: what host0, md, the pool and the worker do"
 	local slice bs stripe bytes grps legs pairs v k addr ip i=0 c out rc
 	local wmark t0 line pool_name cnid legdms fo rep out2 len drop_out drop_in
-	local back first n st f stall want
+	local back first n st f stall want meta shared
 
 	if [ "$LEGS" -lt 2 ]; then
 		log "  skipped: a group of one leg has no other leg, and the step cuts" \
@@ -28713,6 +28934,17 @@ react_group_cut() {
 		case "$pairs" in
 		'' | *[!0-9.:,]*) die "sp get gives slice 0's data legs the nvmet addresses '$pairs'" ;;
 		esac
+		# The cut drops by a disk node's address and port, so a meta group's
+		# leg on one of those disk nodes would be cut too: such a cut is not
+		# made, and the step stops cutting.
+		meta=$(sp_field "[.slice_list[].meta_grp_list[].leg_list[].side_list[] | \"\\(.nvme_tr_conf.tr_addr):\\(.nvme_tr_conf.tr_svc_id)\"] | unique | join(\",\")")
+		shared=$(comm -12 <(tr ',' '\n' <<<"$pairs" | sort) <(tr ',' '\n' <<<"$meta" | sort) | tr '\n' ' ')
+		if [ -n "$shared" ]; then
+			log "  cut $((i + 1)), ${c}s, not made: slice 0's data legs (${pairs//,/ })" \
+				"share a disk node with a meta group's leg ($shared), which the" \
+				"cut would cut too; the step stops cutting"
+			break
+		fi
 		for k in "${legs[@]}"; do
 			legdms="$legdms $(cn_leg_name "$cnid" "$SP_ID" "$k")"
 		done
@@ -28759,10 +28991,10 @@ react_group_cut() {
 		back=$((SECONDS - t0 - c))
 		rc=$(swrite_stat_field "$(helper_host 0 fsync_progress)" rc)
 		out=$(ssh_host_watched 0 "bash $HELPER fsync_judge $UUID_GCUT $FSYNC_STALL_MS" \
-			"$WAIT_STAMP") || {
-			host_watch_verdict $? 0 "the read-back of the cut writer's blocks"
+			"$WAIT_STAMP") ||
+			host_watch_verdict $? 0 "the read-back of the cut writer's blocks" \
+				"$WAIT_STAMP" ||
 			die "host0: the fsync_judge verb failed: $out"
-		}
 		first=$(printf '%s\n' "$out" | head -n 1)
 		fo=$(worker_reaction_kind_cnt "$wmark" failover)
 		rep=$(worker_reaction_kind_cnt "$wmark" leg_repair)
@@ -28774,23 +29006,35 @@ react_group_cut() {
 			"pool on the primary cntlr $PRIMARY_CNTLR_ID: $st"
 		printf '%s\n' "$out" | sed -n '2,$p' | sed 's/^/    /'
 		if [ "$rc" != 0 ]; then
-			log "    the writer's errors: $(ssh_host_ok 0 "tail -n 6 $WORK/fsync/err" | tr '\n' ' ')"
+			log "    the writer's Python errors: $(ssh_host_ok 0 "tail -n 6 $WORK/fsync/err" | tr '\n' ' ')"
 		fi
 		if [ "$c" = 3 ]; then
-			# The cut's own proof: a write waited about the cut's length,
-			# which no cut that missed the legs' packets makes.
+			# The cut's own proof at one slice: a write waited about the
+			# cut's length, which no cut that missed the legs' packets
+			# makes. Above one slice the writer writes every slice in turn,
+			# so its write to slice 0 can come late in the cut, and the
+			# pause is logged, not asserted.
 			stall=$(swrite_stat_field "$first" stall_ms)
 			case "$stall" in
 			'' | *[!0-9]*) die "the 3 s cut's writer judged a stall of '$stall' ms" ;;
 			esac
-			assert_eq "$(swrite_stat_field "$first" stalled_jobs)" 1 \
-				"the 3 s cut's writer met the cut's stall (a cut that misses the legs' packets stalls nothing)"
 			want=$(awk -v l="$len" 'BEGIN { printf "%d", (l - 1) * 1000 }')
-			[ "$stall" -ge "$want" ] ||
-				die "the 3 s cut, ${len}s long, held host0's longest write" \
-					"${stall} ms, under the cut's length less a second ($want" \
-					"ms): the cut did not hold the legs' packets (dropped:" \
-					"$drop_out out, $drop_in in)"
+			if [ "$SLICE_CNT" -eq 1 ]; then
+				assert_eq "$(swrite_stat_field "$first" stalled_jobs)" 1 \
+					"the 3 s cut's writer met the cut's stall (a cut that misses the legs' packets stalls nothing)"
+				[ "$stall" -ge "$want" ] ||
+					die "the 3 s cut, ${len}s long, held host0's longest write" \
+						"${stall} ms, under the cut's length less a second ($want" \
+						"ms): the cut did not hold the legs' packets (dropped:" \
+						"$drop_out out, $drop_in in)"
+				log "  the 3 s cut held host0's longest write ${stall} ms over a" \
+					"cut of ${len}s"
+			else
+				log "  at $SLICE_CNT slices the 3 s cut's pause is logged, not" \
+					"asserted: stalled jobs $(swrite_stat_field "$first" stalled_jobs)," \
+					"longest write $(swrite_stat_field "$first" max_ms) ms against" \
+					"the cut's length less a second, $want ms"
+			fi
 			assert_eq "$rc" 0 "the writer's status across a 3 s cut (no failed write)"
 			assert_eq "$fo" 0 "failovers across a 3 s cut"
 			for f in before inflight_write after; do
@@ -28798,12 +29042,13 @@ react_group_cut() {
 				assert_eq "${n#*/}" "${n%/*}" \
 					"writes of the 3 s cut's writer that read back ($f)"
 			done
-			log "  the 3 s cut held host0's longest write ${stall} ms over a" \
-				"cut of ${len}s"
 		fi
 		out=$(helper_host 0 fsync_kill) || die "host0: the fsync_kill verb failed"
 		i=$((i + 1))
-		case "$st" in
+		# The branch goes by react_gcut_back's read, made on the primary of
+		# that moment: the inspect above can meet a primary role the worker
+		# moved since, on a standby that holds no pool.
+		case "$GCUT_POOL" in
 		"RES_STATUS_OK "*) ;;
 		*needs_check*)
 			STATUS_ALLOW_NEEDS_CHECK=$slice
@@ -28813,12 +29058,13 @@ react_group_cut() {
 			break
 			;;
 		*)
-			# Any other state of the pool is no outcome the stage allows:
-			# the cutting stops, the arrays are brought back as after a
-			# needs_check cut, and the case's status check then fails on
-			# the pool's row, with this cut's readings above.
-			log "  cut $i left slice 0's pool reading '$st', neither OK nor" \
-				"needs_check; the step stops cutting, and the status check" \
+			# Any other state of the pool ends the cutting too: the groups
+			# read clean already (react_gcut_back), react_gcut_way_back logs
+			# the pool on the primary as it then reads, and the case's
+			# status check judges the pool's row at the case's end, with this
+			# cut's readings above.
+			log "  cut $i left slice 0's pool reading '$GCUT_POOL', neither OK" \
+				"nor needs_check; the step stops cutting, and the status check" \
 				"judges the pool"
 			react_gcut_way_back "$wmark" "$slice" "${grps[@]}"
 			break
@@ -29168,17 +29414,18 @@ case_react() {
 #    host0 keeps its controllers, no write fails, and a new thin device becomes
 #    created before the case deletes it.
 #
-# THE HOST-SIDE EXCEPTIONS, both inside this case alone. host0 runs nvme-stas,
+# THE HOST-SIDE EXCEPTIONS. host0 runs nvme-stas, inside this case alone,
 # where E2E10 wants it not running or starting: stafd and stacd on the cdc suite's settings
 # against this run's cdc, nvme-cli's autoconnector still masked (rule 6),
 # host0's own stas configuration copied before and put back after. host0's
 # suite-made paths are dropped before stas starts, so stacd is the only
 # connector, and stacd's paths are dropped and the suite's own made again
-# before the ending, so case_teardown finds host0 as setup leaves it. And a
-# second detached host process, the write loop, where E2E7 runs every other
-# host write under a driver-side watchdog: its writes are meant to queue
-# through the stall, so it reports through files, as host_sha_probe's reader
-# does.
+# before the ending, so case_teardown finds host0 as setup leaves it. And two
+# of the detached host processes E2E7 names write outside the driver-side
+# watchdog: the write loop, which react's migrating-leg step runs too, whose
+# writes are meant to queue through the stall, so it reports through files,
+# as host_sha_probe's reader does, and host1's fence writer of stage 10
+# (fwrite_start).
 #
 # FROM THE STOP TO THE RESUME the driver issues no host0 device IO, not even a
 # cache drop, whose `sync` would wait on the stalled head (rule 5); everything
@@ -30448,8 +30695,11 @@ cut_fence_writer() {
 		host_path_live 1 "$SS0" "$FENCE_NEW_TRADDR"
 	host_wait_ana 1 "$SS0" "$FENCE_NEW_TRADDR" "$FENCE_UUID" optimized
 	wait_dev 1 "$FENCE_UUID"
-	out=$(helper_host 1 fwrite_verify "$FENCE_UUID" \
-		"$((FENCE_RANGE_MIB * 1048576))" "$off") ||
+	out=$(ssh_host_watched 1 \
+		"bash $HELPER fwrite_verify $FENCE_UUID $((FENCE_RANGE_MIB * 1048576)) $off" \
+		"$WAIT_STAMP") ||
+		host_watch_verdict $? 1 "the read-back of the fence writer's range" \
+			"$WAIT_STAMP" ||
 		die "host1: the fwrite_verify verb failed (its message is above)"
 	printf '%s\n' "$out" >&2
 	line=$(printf '%s\n' "$out" | head -n 1)
@@ -31022,9 +31272,9 @@ many_moved() { # <i…>
 	[ -z "$left" ]
 }
 
-# many_listed is the predicate of the wait for a cut's end: every pool holds
-# one primary, and every one of its cntlrs is in its discovery records, no
-# err_epoch left (architecture.md [D18]).
+# many_listed is the predicate of the wait for a cut's end: every enabled
+# cntlr of every pool is in its discovery records, the primary by [D18] and
+# each other with no err_epoch left (architecture.md [D18]; sp_all_listed).
 many_listed() {
 	local i
 	for i in "${!MANY_NAME[@]}"; do
@@ -31295,8 +31545,9 @@ many_cut_rows() { # <n> <how> <v> <t_cut> <t_back> <t_end> <moved i…>
 # latency logs, `lat<h>=<ms> errs<h>=<n> rerrs<h>=<n>` per host: the
 # longest write host h completed in the row's window, its failed writes sent
 # while the node was cut off, and those sent from the node's return to the
-# window's end. A failed write's send time is the completion before it and
-# one write interval per failed write between them (many_err_offsets). It
+# window's end. A failed write's send time is the completion before it plus
+# one write interval per failed write from that completion to it, itself
+# included (many_err_offsets). It
 # sets MANY_ERRS_OUT to the failed writes sent outside every window, which no
 # fault explains.
 MANY_ERRS_OUT=0
@@ -31366,10 +31617,13 @@ many_agent_stop() {
 
 # --- step 7: the writers stop, every acknowledged write reads back ----------
 #
-# Each job's range is read back up to its last write, completed or failed,
-# with fio's verify. A block whose write fio saw complete must verify; a
-# block whose write failed may read zeros or the write's own bytes, as a
-# failed write can land (architecture.md, Known limits), and is counted.
+# The writers must end on SIGINT, and no write may have failed outside the
+# two cuts' windows, each from its cut to the end of its wait after the
+# node's return (many_rows_finish), where no fault was on. Each job's range
+# is then read back, up to its last completed write, with fio's verify. A
+# block whose write fio saw complete must verify; a block whose write failed
+# may read zeros or the write's own bytes, as a failed write can land
+# (e2e_integtest.md, The cases, cutoff), and is counted.
 many_verify() {
 	stage 07 "the writers stop; every write a host saw complete reads back"
 	local h out
@@ -31415,7 +31669,8 @@ many_verify_writes() { # <seed> <range>
 		done < <(printf '%s\n' "$out")
 		out=$(ssh_host_watched "$h" "bash $HELPER many_fio_verify $off $seed ${spec[*]}" \
 			"$((WAIT_HOST + MANY_POOL_CNT * 2))") ||
-			host_watch_verdict "$?" "$h" "the writers' verify" ||
+			host_watch_verdict "$?" "$h" "the writers' verify" \
+				"$((WAIT_HOST + MANY_POOL_CNT * 2))" ||
 			die "host$h: the writers' verify failed"
 		bad=0
 		vrc=""
@@ -31608,23 +31863,28 @@ case_many() {
 # architecture.md, etcd backup and restore, with the new programs. main skips
 # `setup` for it: v0.1.0's programs lack flags setup's start lines pass, and
 # its records lack fields setup's checks read (the store row, the cluster's
-# 1 MiB stripe). Every pool is one slice, two cntlrs, the run's redundancy
-# and the shipped thresholds (sp_thresholds), whatever the run's slice count.
+# 1 MiB stripe). Every pool is one slice, two cntlrs, RAID1 and the shipped
+# thresholds (sp_thresholds), whatever the run's slice count; a run that
+# names another redundancy is a usage error, as a pool without RAID1 gets no
+# array flag write after the upgrade and its restore check reads the same
+# (architecture.md, Upgrade in lockstep).
 #
 # The pools: UP_SP_A is made before the backup and nothing touches it after;
 # UP_SP_C is made before the backup and grows after it; UP_SP_B is made after
 # the backup with two thin devices, host1 writing into the first through the
 # upgrade; UP_SP_D is made after the restore.
 
-# The tag the case upgrades from, and where the driver keeps its five
-# programs: a cache in the gitignored integtest/bin, built once from a
+# The tag the case upgrades from, and where the driver keeps the programs
+# v0.1.0's `make build` makes, the five of UP_PROGS the case ships and
+# dnv-csi, which it neither ships nor checks: a cache in the gitignored
+# integtest/bin, built once from a
 # depth-1 clone of the tag, never a git worktree, which Go stamps, as its
 # .git is a file, with the commit of a checkout around it or with no
 # version, never with the worktree's own tag (architecture.md, Components:
 # invocation reference, The version). A run reuses the cache when each
-# program in it carries the tag's module version, and builds it only when
-# the driver has UP_V010_ROOM free there; the clone goes once the build is
-# done, so the cache holds the programs alone.
+# program of UP_PROGS in it carries the tag's module version, and builds it
+# only when the driver has UP_V010_ROOM free there; the clone goes once the
+# build is done, so the cache holds the programs alone.
 UP_TAG=v0.1.0
 UP_V010_DIR="$BIN_DIR/v010"
 UP_V010_SRC="$UP_V010_DIR/src"
@@ -31637,7 +31897,9 @@ UP_PROGS="dnv-agent dnv-gateway dnv-worker dnv-cdc dnvctl"
 # before the new ones start. Both are longer than the shipped primary
 # threshold and two check intervals, so a worker left running (a wrong
 # order) would fail over a primary whose node stopped first while its
-# standby's ran, and the case's check of no reaction would read it.
+# standby's ran, and stage 14's read of each pool's cntlrs and primary
+# (up_sig) would see it: that worker's records go aside with its log at
+# stage 10 (up_logs_aside).
 UP_STOP_GAP=20
 UP_DOWN_HOLD=30
 # The digests of each program of the two builds, on the driver, which the
@@ -32239,6 +32501,9 @@ up_upgrade() {
 	stage 14 "after the upgrade: no reaction, no failed write, the data unchanged"
 	# No reaction first: a reaction of a worker left running in a wrong
 	# order may also fail host1's writes, and the run must name the order.
+	# The new worker's records come first, then each pool's cntlrs, primary
+	# and sides (up_sig), which alone show a failover by a worker left
+	# running, whose records went aside with its log at stage 10.
 	assert_eq "$(worker_msg_cnt "reaction applied")" 0 \
 		"the new worker's 'reaction applied' records"
 	for sp in "$UP_SP_A" "$UP_SP_B" "$UP_SP_C"; do
@@ -32276,7 +32541,11 @@ up_fw_ended() {
 # verify, through whatever path it holds.
 up_fw_verify() { # <when>
 	local out
-	out=$(helper_host 1 fwrite_verify_range "$UP_UUID_B" "$((UP_FW_MIB << 20))") ||
+	out=$(ssh_host_watched 1 \
+		"bash $HELPER fwrite_verify_range $UP_UUID_B $((UP_FW_MIB << 20))" \
+		"$WAIT_STAMP") ||
+		host_watch_verdict $? 1 "the read-back of host1's writer's range, $1" \
+			"$WAIT_STAMP" ||
 		die "host1: the fwrite_verify_range verb failed (its message is above)"
 	printf '%s\n' "$out" >&2
 	assert_eq "$(printf '%s\n' "$out" | head -n 1)" \
@@ -32406,7 +32675,7 @@ snapshot restore $WORK/backup/etcd.db --data-dir $WORK/etcd --name $ETCD_NAME \
 	assert_eq "$(up_verdict "$UP_SP_C")" RESTORE_VERDICT_MAY_BREAK \
 		"$UP_SP_C, grown after the backup, reads may break"
 
-	stage 17 "while no worker runs and before any store is cleared, host1 reads all of $UP_SP_B and host0 $UP_SP_A"
+	stage 17 "while no worker runs and before any store is cleared, host1 reads back its writer's whole range of $UP_SP_B and host0 $UP_SP_A's pattern"
 	up_fw_verify "before the stores are cleared"
 	host_wait_sha 0 "$(host_dev "$UP_UUID_A")" "$UP_PAT_MIB" "$UP_SHA_A" \
 		"$WAIT_HOST" "host0 to read $UP_SP_A's pattern with no worker running"
@@ -32439,7 +32708,7 @@ snapshot restore $WORK/backup/etcd.db --data-dir $WORK/etcd --name $ETCD_NAME \
 snapshot save $WORK/backup/etcd-after-restore.db" >&2 ||
 		die "the new backup failed"
 
-	stage 20 "new ids lie above every id handed out after the backup"
+	stage 20 "a new pool's id lies above the pool made after the backup, a new thin device's above every id of the grow after it"
 	SP=$UP_SP_D
 	up_pool_build "$UP_SP_D"
 	id=$(jq_of "$SP_JSON" '.sp_conf.sp_id')
@@ -32555,10 +32824,11 @@ SOAK_LOSS_PCT=1
 SOAK_CPU_MAX="10000 100000"
 SOAK_THROTTLE_RATE=8mbit
 
-# The sampler's bound: from the sample at the end of the first hour, or of
-# the first sixth of a shorter run, to the last, no program's memory or open
-# files grow by more than SOAK_GROW_PCT percent beyond a slack for small
-# counts, and etcd's database file stays under SOAK_ETCD_CEIL.
+# The sampler's bound: every program it reads stays up, and from the sample
+# at the end of the first hour, or of the first sixth of a run shorter than
+# six hours, to the last, no program's memory or open files grow by more
+# than SOAK_GROW_PCT percent beyond a slack for small counts, and etcd's
+# database file stays under SOAK_ETCD_CEIL.
 SOAK_GROW_PCT=50
 SOAK_RSS_SLACK_KIB=16384
 SOAK_FD_SLACK=16
@@ -32660,12 +32930,12 @@ soak_pools() {
 
 # --- the sampler -------------------------------------------------------------
 #
-# soak_sample reads, on every guest, each program this suite started there:
-# its resident memory, its open files and its threads (the helper's
-# proc_sample), and on the control-plane guest etcd's database file, and
-# appends one `t=<seconds into the run> <guest> <program> rss_kib=<n>
-# fds=<n> threads=<n>` row per program, and `etcd_db=<bytes>` for etcd, to
-# SOAK_SAMPLES.
+# soak_sample reads, on the control-plane guest and every node guest, each
+# program this suite started there: its resident memory, its open files and
+# its threads (the helper's proc_sample), and on the control-plane guest
+# etcd's database file, and appends one `t=<seconds into the run> <guest>
+# <program> rss_kib=<n> fds=<n> threads=<n>` row per program, and
+# `etcd_db=<bytes>` for etcd, to SOAK_SAMPLES.
 soak_sample() {
 	local t=$((SECONDS - SOAK_T_START)) v k out line args
 	out=$(helper_cp proc_sample "etcd=$WORK/etcd/pid" "gateway=$WORK/gateway/pid" \
@@ -32704,8 +32974,8 @@ soak_sample() {
 
 # soak_tick is the predicate of every wait the run spends on its clock: true
 # once SECONDS reaches <until>; until then it samples when a sample is due and
-# reads the writers every 30 s, and dies on a writer that stopped or wrote a
-# failed write outside a fault the run measures rather than bounds.
+# reads the writers every 30 s, dying on a writer that stopped; their failed
+# writes are judged when a generation stops (soak_gen_errs).
 SOAK_NEXT_READ=0
 soak_tick() { # <until>
 	if [ "$SECONDS" -ge "$SOAK_NEXT_SAMPLE" ]; then
@@ -32811,10 +33081,11 @@ soak_reactions() { # <epoch>
 		| "\(.kind) \(.sp_id) \($t)"'
 }
 
-# soak_settled is the predicate of the wait after every operation and every
-# fault: both pools list both cntlrs, no err_epoch left, and both hosts see
-# each pool optimized through its primary and inaccessible through its
-# standby on live controllers. It reads the roles again as it goes.
+# soak_settled is the predicate of the wait after every operation but the
+# snapshot and after every fault: both pools list both cntlrs, no err_epoch
+# left, and both hosts see each pool optimized through its primary and
+# inaccessible through its standby on live controllers. It reads the roles
+# again as it goes.
 soak_settled() {
 	local i h
 	for i in "${!MANY_NAME[@]}"; do
@@ -32845,8 +33116,9 @@ soak_wait_settled() { # <what>
 
 # --- the cycle's operations ---------------------------------------------------
 #
-# Each must end with both pools settled (soak_settled), and none may make the
-# worker react: every one is the operator's own act (soak_ops_check).
+# Each but the snapshot must end with both pools settled (soak_settled), and
+# none may make the worker react: every one is the operator's own act
+# (soak_ops).
 soak_grow() { # <cycle>
 	local k=$(($1 % SOAK_WIDE_SLICES)) id
 	# `--slice` takes the slice's id, sp_conf.slice_id_list's k-th, not its
@@ -32868,7 +33140,7 @@ soak_grow() { # <cycle>
 	soak_in 1 wait_until "$WAIT_PROVISION" \
 		"the primary cntlr $PRIMARY_CNTLR_ID of $SOAK_WIDE to carry $SP_GRP_TOTAL groups" \
 		cntlr_full_ready "$PRIMARY_CNTLR_ID"
-	log "  grew $SOAK_WIDE slice $k to $SP_GRP_TOTAL groups"
+	log "  grew $SOAK_WIDE slice $k by a data group, to $SP_GRP_TOTAL groups in the pool"
 }
 
 soak_snapshot_op() { # <cycle>
@@ -32929,11 +33201,12 @@ soak_migration() { # <cycle>
 }
 
 # soak_disable disables the RAID1 pool's standby and enables it again. A
-# disabled cntlr leaves the discovery records and its node removes the
-# pool's subsystem (architecture.md, Subsystems, namespaces), which ends or
-# stalls the hosts' paths to it; enabled again, it builds its standby's
-# stack and is listed again, and each host connects through the cdc to the
-# path it lost.
+# disable takes the cntlr out of the discovery records at once
+# (architecture.md, Cntlrs, UpdateCntlrEnabled), while its node keeps the
+# standby shape, the pool's subsystem exported and its namespaces
+# inaccessible (cnagent.md CN9), so the hosts keep their paths to it.
+# Enabled again, it is listed again, and each host's connect through the
+# cdc finds both of the pool's paths held.
 soak_disable() {
 	local s=${MANY_STBY[0]} h
 	many_in 0 ctl_ok cntlr set-enabled --id "$s" --enabled=false
@@ -33176,10 +33449,12 @@ soak_faults_ran() {
 }
 
 # soak_bounds logs, per program, its first sample, its sample at the end of
-# the first hour or of the first sixth of a shorter run, and its last, and
-# prints each bound the samples break: memory or open files grown by more
-# than SOAK_GROW_PCT percent and the slack from that sample to the last, or
-# etcd's database file over SOAK_ETCD_CEIL at any sample.
+# the first hour or of the first sixth of a run shorter than six hours, and
+# its last, and prints each bound the samples break: a program whose pid
+# file named no live process at a sample (proc_sample's `gone`), memory or
+# open files grown by more than SOAK_GROW_PCT percent and the slack from
+# that sample to the last, or etcd's database file over SOAK_ETCD_CEIL at
+# any sample.
 soak_bounds() {
 	local bt=$((SOAK_SECS / 6))
 	[ "$bt" -le 3600 ] || bt=3600
@@ -33225,10 +33500,12 @@ case_soak() {
 # ---------------------------------------------------------------------------
 #
 # case_space_guard (in the ending every case shares, above) is the ASSERTION
-# half of E2E5 and runs
-# inside case_finish: per backing file `stat -c '%b %B'` <= $DN_CAP_BYTES
-# through the `alloc` verb, the sum of every guest's work= <=
-# $RUN_CAP_BYTES, and the free-space floors preflight used. This is the other
+# half of E2E5 and runs inside case_finish, and alone at the upgrade case's
+# end: per backing file `stat -c '%b %B'` <= $DN_CAP_BYTES, or the
+# many-pools case's own cap per file where that is larger, the backing file's
+# size in the long run, through
+# the `alloc` verb, the sum of every guest's work= <= $RUN_CAP_BYTES, and
+# the free-space floors preflight used. This is the other
 # half — the totals printed in the run summary — and it is
 # deliberately a SEPARATE, read-only pass rather than an edit to that function:
 #
@@ -33240,15 +33517,16 @@ case_soak() {
 #     of the name and nobody would see which one ran.
 #
 # THE COST IS KNOWN AND ACCEPTED, and it is not small: this repeats, in full,
-# the sweep case_space_guard ran seconds earlier in the same case_finish — one
-# `alloc` over every backing file of each DN VM (DNS_PER_VM paths per VM, 45 at
-# the default shape) plus one `space` verb, a `du -s --block-size=1` over
-# $WORK, on all ten guests. At the header's ten-guest shape that is fourteen
-# extra ssh round trips per case (4 alloc + 4 + 3 + 2 + 1 space). It buys
-# only the independence above; anyone who decides that is not worth it should
-# have case_space_guard record its own `total` and `worst` and reduce this to
-# formatting them, and should delete this paragraph rather than leave it
-# describing a function that no longer measures anything.
+# the sweep case_space_guard ran seconds earlier, in the same case_finish or
+# as the upgrade case's last step — one `alloc` over every backing file of
+# each DN VM (DNS_PER_VM paths per VM, 45 at the default shape) plus one
+# `space` verb, a `du -s --block-size=1` over $WORK, on all ten guests. At the
+# header's ten-guest shape that is fourteen extra ssh round trips per case (4
+# alloc + 4 + 3 + 2 + 1 space). It buys only the independence above; anyone
+# who decides that is not worth it should have case_space_guard record its own
+# `total` and `worst` and reduce this to formatting them, and should delete
+# this paragraph rather than leave it describing a function that no longer
+# measures anything.
 #
 # It asserts NOTHING: every cap is case_space_guard's, and a summary that could
 # fail a run would be a second, quieter copy of the same rule.
@@ -33316,7 +33594,8 @@ space_note_case() { # <case name>
 space_summary() {
 	local row
 	log ""
-	log "=== space summary (E2E5), measured after each case's teardown"
+	log "=== space summary (E2E5), measured after each case's teardown, and" \
+		"after the upgrade case with its pools standing"
 	if [ "${#SPACE_CASE_ROWS[@]}" -eq 0 ]; then
 		log "  (no case completed, so nothing was measured)"
 		return 0
@@ -33326,7 +33605,9 @@ space_summary() {
 	done
 	log "  peak:    $SPACE_RUN_MAX_TOTAL bytes on all guests" \
 		"(cap $RUN_SHAPE_CAP_BYTES at the run's shape), largest backing file" \
-		"$SPACE_RUN_MAX_BACKING bytes (cap $DN_CAP_BYTES per file)"
+		"$SPACE_RUN_MAX_BACKING bytes (cap $DN_CAP_BYTES per file at the run's" \
+		"shape, or a many-pools file's own where that is larger, and the" \
+		"backing file's size in the long run)"
 	log "  the caps themselves are asserted by case_space_guard, per case;" \
 		"these are the readings, taken again afterwards"
 }
@@ -33406,8 +33687,9 @@ run_case() { # <case name>
 #
 # E2E6 lives in on_exit, not here: the END cleanup runs only on success, and a
 # failing run keeps every process, dm/md/nvmet object, loop device, host
-# connection and log and dumps the diagnostics of e2e_integtest.md,
-# Diagnostics on failure, instead.
+# connection and log, but for what on_exit takes off after the dump (E2E6),
+# and dumps the diagnostics of e2e_integtest.md, Diagnostics on failure,
+# instead.
 # ---------------------------------------------------------------------------
 
 # log_topology prints, once and before the first ssh, exactly what this run will
@@ -33509,6 +33791,13 @@ main() {
 	# without a cleanup pass over guests this run has never touched.
 	parse_args "$@"
 	trap on_exit EXIT
+	# A run killed by SIGTERM, SIGINT or SIGHUP exits with the shell's
+	# code for the signal, so on_exit reads it as the failure it is, never
+	# as a PASS. The HUP trap ignores every later SIGHUP first: a terminal
+	# that closes sends a second one right after the first.
+	trap 'exit 143' TERM
+	trap 'exit 130' INT
+	trap 'trap "" HUP; exit 129' HUP
 	log_topology
 
 	# The start cleanup (E2E6) on its own. ship_helpers first: a guest that has

@@ -2080,9 +2080,9 @@ thin pool needs a repair whose procedure is not written yet. Ask for help.
 
 Tested: the Go tests of the answer on hand-made rows, and of the gateway's
 read with a fake agent; the gateway suite's smoke case checks it over a fake
-agent's row, and the e2e suite's setup over real agents after host0 writes
+agent's row, and the e2e suite's setup over real agents after a host writes
 its pattern. The gateway suite passed in the lab with its check on
-2026-11-19; the e2e suite has not yet run in the lab with this read.
+2026-11-19, and the e2e suite's setup read it in the lab on 2026-11-21.
 
 ## Change a volume's hosts
 
@@ -2603,10 +2603,12 @@ Safe steps:
      because its delete on the primary failed or had not yet run, comes
      back working, with its old data. `dnvctl td list` shows each volume
      with its name and `td_id`. After an upgrade from 0.1, a backup taken
-     before the upgrade reads older for every pool, even one no call
-     touched since: the new release marks each pool's arrays as made once
-     after the upgrade. Such a pool loses only that mark, which the worker
-     sets again, and lists no lost volume.
+     before the upgrade reads older, not the same, for a RAID1 pool no
+     call touched since: the new release marks each such pool's arrays as
+     made after the upgrade, as its primary's reports first read them
+     running. Such a pool loses only that mark, which the worker sets
+     again, and lists no lost volume. A pool without RAID1 has no arrays
+     to mark and reads the same.
    - `RESTORE_VERDICT_MAY_BREAK`: as older, and the pool's layout changed
      since the backup, so the pool may not come back working: a part of it
      was made since (a grow, a repair, a migration, a clone), or removed
@@ -2651,8 +2653,9 @@ Safe steps:
    has a path to it. No worker runs, so each node still serves what it held
    before the restore. The upgrade case of the e2e suite shows it on the
    lab: with no worker running and before any agent's files are reset, a
-   host reads back a whole volume of a pool made after the backup, and
-   another the data of a pool made before it.
+   host reads back every block its writer wrote to a volume of a pool made
+   after the backup, and another host reads the data of a pool made before
+   it.
 6. For each agent: stop it, copy its local files aside, delete them, and
    start it again. The copy is the last record of what the node was told
    before the restore.
@@ -2721,13 +2724,15 @@ breaking, and to the pools it does not see.
 Tested: the gateway's Go tests check every verdict against planted records
 and a fake agent, and the cn agent's tests check what it answers; the
 gateway suite's smoke case runs the check over a fake controller node after
-its id step. The upgrade case of the e2e suite runs steps 1 to 6 and the
-start of the workers and the cdc of step 7 on the lab's real agents, from a
-backup taken under 0.1 and with the programs of a later build: a real
-`etcdutl` restore into a new folder, the id step, the check on every
-controller node, the reads of step 5 and every agent's files reset. It
-then checks that a pool made before the backup keeps its data, that new
-ids lie above every id handed out after the backup, that a pool grown after
+its run of `dnvctl cluster advance-ids`. The upgrade case of the e2e suite
+runs steps 1 to 6 and the start of the workers and the cdc of step 7 on the
+lab's real agents, from a backup taken under 0.1 and with the programs of a
+later build: a real `etcdutl` restore into a new folder, the id step of step 3
+(`dnvctl cluster advance-ids`), the check on every controller node, the reads
+of step 5 and every agent's files reset. It then checks that a pool made
+before the backup keeps its data, that a new pool's id lies above that of
+the pool made after the backup and a new volume's above every id the grow
+after the backup took, that a pool grown after
 the backup breaks, and that the disk nodes free the sides made after the
 backup. It runs one etcd member and no Kubernetes, adds or takes away no
 node after the backup, and adds no host to and takes none off the list of

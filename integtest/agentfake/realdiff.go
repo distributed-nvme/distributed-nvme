@@ -176,9 +176,11 @@ var RealDiffs = []RealDiff{
 		Rule: "the cn agent answers a converge that leaves a teardown in " +
 			"flight with ReplyCodeLeftover, which the worker takes as " +
 			"accepted and sends again (dnv-worker.md RW5); the fake names " +
-			"a leftover only under its leftover_rounds and read_leftover " +
-			"levers, by which the whole-worker cases of the re-send stage " +
-			"one",
+			"a leftover only under its leftover_rounds lever, on rounds " +
+			"under its read_leftover lever, and on a reply under a " +
+			"reply_code lever, or on a Syncup* reply under a syncup_code " +
+			"lever, that forces ReplyCodeLeftover, by which the " +
+			"whole-worker cases of the re-send stage one",
 	},
 }
 

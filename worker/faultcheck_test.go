@@ -44,8 +44,9 @@ import (
 // of a later revision arrives; sync writes a key of its own to close the
 // revision it waits for.
 
-// faultKinds are the second fields of the keys the check decodes, read from
-// the key functions of model rather than copied.
+// The faultKind* values are the message kinds of the keys the check decodes,
+// their second fields, read from the key functions of model rather than
+// copied.
 var (
 	faultKindDnRev   = keyKind(model.DnRevKey(0, 0, 0))
 	faultKindCnRev   = keyKind(model.CnRevKey(0, 0, 0))

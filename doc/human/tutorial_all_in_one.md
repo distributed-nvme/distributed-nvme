@@ -130,8 +130,10 @@ superblocks that the disk nodes' devices carry, and read what hosts write
 as file systems, LVM volumes or caches. The three rule files in
 `deploy/udev/` keep them off dnv's devices;
 [the operations doc](operations.md#install-the-udev-rules-on-a-node) says
-what each one does. The unpacked release folder holds `deploy/`; a build
-has it in the repository, so copy it from there into this directory.
+what each one does. The unpacked folder of a release after 0.1 holds
+`deploy/`; a build has it in the repository, so copy it from there into
+this directory. 0.1 cannot run this tutorial
+([Get dnv](introduction.md#get-dnv)).
 
 ```
 sudo install -m 0644 deploy/udev/*.rules /etc/udev/rules.d/

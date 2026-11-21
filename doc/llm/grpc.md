@@ -242,7 +242,9 @@ The `integtest/` drivers are scoped out of the wiring rule on purpose.
   (`dnvctl.md`, Integration test plan). Both fakes set their log level to
   Debug as the first statement of `main`, the log level the suites run
   their dnv daemons at, save one dn agent in one case of the dn suite
-  (`dnagent_integtest.md`, Conventions, Log level), so the fake agent's
+  (`dnagent_integtest.md`, Conventions, Log level), the tutorial suite's,
+  which runs the tutorial's start lines as written, and the e2e suite's v0.1.0
+  programs (`e2e_integtest.md`, Topology and parameters), so the fake agent's
   log holds the `Check*` stream messages (L1); `dnvctl` and the drivers
   keep their default log levels.
 * The message limit is no part of that scoping out: `gatewayctl`,

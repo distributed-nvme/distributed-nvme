@@ -262,9 +262,10 @@ func (p *program) serve(ctx context.Context, lis net.Listener) error {
 
 func main() {
 	// The fake logs at Debug, the log level the suites run their dnv
-	// daemons at, save one dn agent in one case of the dn suite: the worker
-	// suite reads the Check* stream messages from its log, and those are
-	// Debug records (grpc.md, Drivers and fakes).
+	// daemons at, save one dn agent in one case of the dn suite, the
+	// tutorial suite's daemons and the e2e upgrade case's v0.1.0 programs:
+	// the worker suite reads the Check* stream messages from its log, and
+	// those are Debug records (grpc.md, Drivers and fakes).
 	common.SetLogLevel(slog.LevelDebug)
 	opts, err := parseArgs(os.Args[1:], os.Stderr)
 	if err != nil {

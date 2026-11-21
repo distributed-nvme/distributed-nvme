@@ -369,21 +369,22 @@ ended (the converge that ends the window builds the export again,
 `dnagent.md` DN12), which the case asserts, the source export is yanked and
 the destination side dropped at once, so its clone comes off before the
 connection it hydrates through (`dnagent.md` L3), over a source already
-dead, which proves the removal order and, below, the release of both
-records; whether the clone's removal outlasts its pass is only observed,
-the log naming what the first pass left: on the lab it ends within the
-first pass, for a cause not read; the same revision
-is re-sent until clean, only the leftover code tolerated, nothing of the migration
-may remain on either node, and a fresh `CheckDn` round, whose verdict is
-that of a read made after the drop, replies clean, which proves its
-allocation and clone-metadata records went with their devices, an orphaned
-record being a leftover itself (DN6's record step); that a record never goes
-before its device is left to the unit tests. A removal blocked from outside
-the agent, the shape that outlasts a pass: a side device is held open and
-the side dropped; the leftover
-reply names it, the residue is exactly that device (DN6's layers), the
-verdict of a read made after the drop, which a fresh round reports, agrees,
-and the same revision, re-sent once the device is free, finishes.
+dead, an order the case runs but does not read, as it reads only what is
+left, the order itself being left to the unit tests; below, the case proves
+the release of both records; whether the clone's removal outlasts its pass is
+only observed, the log naming what the first pass left: on the lab it ends
+within the first pass, for a cause not read; the same revision is re-sent
+until clean, only the leftover code tolerated, nothing of the migration may
+remain on either node, and a fresh `CheckDn` round, whose verdict is that of a
+read made after the drop, replies clean, which proves its allocation and
+clone-metadata records went with their devices, an orphaned record being a
+leftover itself (DN6's record step); that a record never goes before its
+device is left to the unit tests. A removal blocked from outside the agent,
+the shape that outlasts a pass: a side device is held open and the side
+dropped; the leftover reply names it, the residue is exactly that device
+(DN6's layers), the verdict of a read made after the drop, which a fresh round
+reports, agrees, and the same revision, re-sent once the device is free,
+finishes.
 
 **restart** proves persistence and an idempotent reconcile (`dnagent.md` SH1,
 SH4 to SH6, DN2): with a connected side on one node and a gated destination

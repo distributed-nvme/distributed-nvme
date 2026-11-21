@@ -795,7 +795,9 @@ instead of copying the numbers), four `dnv-cdc` instances — two twins of the
 low half of the shard-code space and two of the high half — each at
 `--log-level debug`, the log level the suites run their dnv daemons at, save
 one dn agent in one case of the dn suite (`dnagent_integtest.md`,
-Conventions, Log level), and `cdcctl`. The second server, with passwordless
+Conventions, Log level), the tutorial suite's, which runs the tutorial's start
+lines as written, and the e2e suite's v0.1.0 programs (`e2e_integtest.md`,
+Topology and parameters), and `cdcctl`. The second server, with passwordless
 sudo, is the nvmet target that stands in for the controller nodes: a handful
 of test subsystems, each with one dm-zero namespace, linked to several nvmet
 ports, one of them on two ports so that one subsystem has two paths. The
@@ -866,14 +868,14 @@ The cdc reaches etcd through the same `etcdutil` client as the worker, and
 of that client the mode shows that a stopped member holds the calls sent
 to it until the etcd operation timeout (`dnv-worker.md` EU5), the path the
 cdc's scans take too, and that after a member's kill and restart a watch
-resumes from the last revision it heard and ends compacted when that lies
-under a compaction; the cdc's own part, a restart of its watch on any
-error, a compaction's included (WV4), is held by the watcher's unit tests,
-which end its watch with a compaction's error and with a broken
-connection's. No suite stages a watch stream on a member stopped with no
-TCP reset, which stays silent until the keepalive of `dnv-worker.md` EU1
-closes its connection, the cdc serving its last known state meanwhile
-(DS10). Also out of scope: TLS and in-band
+resumes from the revision after the last event it heard and ends compacted
+when that lies under a compaction; the cdc's own part, a restart of its watch
+on any error, a compaction's included (WV4), is held by the watcher's unit
+tests, which end its watch with a compaction's error and with a broken
+connection's. No suite runs a cdc whose watch stream sits on a member
+stopped with no TCP reset; such a stream stays silent until the keepalive
+of `dnv-worker.md` EU1 closes its connection, the cdc serving its last known
+state meanwhile (DS10). Also out of scope: TLS and in-band
 authentication; non-TCP transports; digests; scale past the manyhosts
 case — every shard code, more hosts than two host servers can run; mDNS
 (TP-8009); TP-8010 registration; the nvme-stas version matrix, the lab
@@ -939,11 +941,13 @@ loops die before their targets vanish; then the target, its port links
 first, which is safe because the hosts are already disconnected: a port
 unlinked under a live connection kills the host's controller and the host never
 reconnects by itself; then the first server's processes. Cleanup touches
-only what is the suite's — the test subsystems and the discovery
+only what is the suite's, but for a process a stale pid file on the first
+server names — the test subsystems and the discovery
 controllers that point at the fleet, never every subsystem of a host; on a
 host the uevent capture and the flood by the pid files they leave in the
 work directory, never a process of the host's own; on the first server its
-processes by recorded pid, with a pattern kill of the programs under the
+processes by recorded pid, with no check that a pid still runs a program
+under the work directory, and with a pattern kill of the programs under the
 work directory as a safety net —
 and leaves nvme-stas installed and the kernel modules loaded; the
 end-of-run cleanup also removes the work directories and unmasks

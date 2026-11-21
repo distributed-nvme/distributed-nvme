@@ -183,7 +183,10 @@ SSH_OPTS=(-o BatchMode=yes -o StrictHostKeyChecking=accept-new
 # and fail-fast per Integration test plan, What a pass means)
 # ---------------------------------------------------------------------------
 
-log() { echo "$*" >&2; }
+# A write that fails, as to a terminal that has closed, sends the run's
+# output to /dev/null from then on, so that a log line never ends the run's
+# exit handler under set -e.
+log() { echo "$*" >&2 || exec >/dev/null 2>&1; }
 
 # stage names the step for the failure report and mints the step's own trace
 # id `it-<case>-<step>` (Integration test plan, Topology), which every dnvctl
@@ -239,6 +242,20 @@ assert_parses() { # <json> <label>
 on_exit() {
 	local rc=$?
 	trap - EXIT
+	# A signal while this handler runs: a Ctrl-C (SIGINT) reaches the
+	# command in hand, which it ends unless that command ignores it, a read
+	# of a command's output and an ssh still connecting among them, and the
+	# dump and the removals below go on; a SIGHUP, which a terminal that
+	# closes sends twice, is ignored here and by every command below; a
+	# SIGTERM ends the run at once. Output that fails, as a terminal that
+	# has closed does, goes to /dev/null from then on, so that set -e ends
+	# the handler at no log line: this line tries a write first, and log
+	# does the same at each of its writes. rc keeps the code the run was
+	# ending with, and the run exits with it but on a SIGTERM.
+	trap - TERM
+	trap : INT
+	trap '' HUP
+	printf '\n' >&2 2>/dev/null || exec >/dev/null 2>&1
 	if [ "$rc" -eq 0 ]; then
 		if [ "$CLEANUP_ONLY" -eq 0 ] && [ "$SETUP_DONE" -eq 1 ]; then
 			log ""
@@ -375,18 +392,20 @@ panic_dump() {
 # may.
 panic_plant() {
 	local d hits want
-	d=$(sshw "mktemp -d /var/tmp/dnv-panic-plant.XXXXXX") ||
+	d=$(sshw "mktemp -d /var/tmp/dnv-panic-plant-dnvctl.XXXXXX") ||
 		die "making the crash scan's scratch directory on $TARGET failed"
 	case "$d" in
-	/var/tmp/dnv-panic-plant.?*) ;;
+	/var/tmp/dnv-panic-plant-dnvctl.?*) ;;
 	*) die "mktemp on $TARGET printed '$d', not a scratch directory" ;;
 	esac
 	printf '%s\n' \
 		'{"level":"ERROR","msg":"os command failed","stderr":"panic: in a field\nfatal error: in a field"}' \
 		'panic: planted by the preflight' 'goroutine 1 [running]:' \
 		'fatal error: planted by the preflight' |
-		sshw "mkdir $d/sub && cat > $d/sub/plant.log" ||
-		die "writing the crash scan's sample log on $TARGET failed"
+		sshw "mkdir $d/sub && cat > $d/sub/plant.log" || {
+			sshw "rm -rf $d" || true
+			die "writing the crash scan's sample log on $TARGET failed"
+		}
 	hits=$(panic_lines "$d") || hits="(the read failed)"
 	sshw "rm -rf $d" || true
 	want="$d/sub/plant.log:2:panic: planted by the preflight"
@@ -748,6 +767,7 @@ for p in \$pids; do kill -KILL "\$p" 2>/dev/null || true; done
 pkill -f '$WORK/bin/fakegateway' 2>/dev/null || true
 pkill -f '$WORK/bin/dnvctl' 2>/dev/null || true
 sleep 0.5
+rm -rf /var/tmp/dnv-panic-plant-dnvctl.*
 rm -rf $WORK
 echo cleaned
 EOF
@@ -1908,6 +1928,13 @@ parse_args() {
 main() {
 	parse_args "$@"
 	trap on_exit EXIT
+	# A run killed by SIGTERM, SIGINT or SIGHUP exits with the shell's
+	# code for the signal, so on_exit reads it as the failure it is, never
+	# as a PASS. The HUP trap ignores every later SIGHUP first: a terminal
+	# that closes sends a second one right after the first.
+	trap 'exit 143' TERM
+	trap 'exit 130' INT
+	trap 'trap "" HUP; exit 129' HUP
 	log "driver: $(hostname), server: $TARGET (ip $IP)"
 
 	if [ "$CLEANUP_ONLY" -eq 1 ]; then

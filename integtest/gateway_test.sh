@@ -22,7 +22,12 @@
 # diagnostics (Integration test plan, Cleanup).
 #
 # NO SUDO anywhere: nothing in this suite needs root. Everything the script
-# creates lives under $WORK on the server, and cleanup removes exactly that.
+# creates on the server lives under $WORK, and cleanup removes exactly that,
+# but for panic_plant's scratch folder in /var/tmp, which the preflight makes
+# for the crash scan's sample log and removes before it returns or dies on
+# the sample, and which the cleanup also removes by its name, as an ssh that
+# fails around the folder's making or removal can leave it
+# (/var/tmp/dnv-panic-plant-gateway.*).
 #
 # What it proves (Integration test plan, What the suite proves): (a) every one
 # of the RPCs of service Gateway maintains exactly the etcd schema
@@ -215,8 +220,9 @@ QUIET=0
 # specific instance use gw_at.
 GATEWAY="127.0.0.1:$GW_PORT_BASE"
 # SP_REV caches the current SpRev of the SP the case is working on, the token
-# the script refreshes after every pool mutation
-# (Integration test plan, What a pass means). Every sp_rev-consuming stage
+# the script refreshes after every pool mutation that moves its revision, but
+# where no checked token is sent next (Integration test plan, What a pass
+# means). Every sp_rev-consuming stage
 # runs in the PARENT shell, never in a subshell, or the refreshed token is
 # lost with the subshell that fetched it.
 SP_REV=0
@@ -231,7 +237,10 @@ SSH_OPTS=(-o BatchMode=yes -o StrictHostKeyChecking=accept-new
 # Logging, assertions, failure handling (verbatim from worker_test.sh)
 # ---------------------------------------------------------------------------
 
-log() { echo "$*" >&2; }
+# A write that fails, as to a terminal that has closed, sends the run's
+# output to /dev/null from then on, so that a log line never ends the run's
+# exit handler under set -e.
+log() { echo "$*" >&2 || exec >/dev/null 2>&1; }
 
 # stage names the step for the failure report and mints the stage's trace id
 # `it-<case>-<step>` (Integration test plan, Topology), which every gatewayctl
@@ -272,6 +281,20 @@ assert_field() { # <json> <filter> <want> <label>
 on_exit() {
 	local rc=$?
 	trap - EXIT
+	# A signal while this handler runs: a Ctrl-C (SIGINT) reaches the
+	# command in hand, which it ends unless that command ignores it, a read
+	# of a command's output and an ssh still connecting among them, and the
+	# dump and the removals below go on; a SIGHUP, which a terminal that
+	# closes sends twice, is ignored here and by every command below; a
+	# SIGTERM ends the run at once. Output that fails, as a terminal that
+	# has closed does, goes to /dev/null from then on, so that set -e ends
+	# the handler at no log line: this line tries a write first, and log
+	# does the same at each of its writes. rc keeps the code the run was
+	# ending with, and the run exits with it but on a SIGTERM.
+	trap - TERM
+	trap : INT
+	trap '' HUP
+	printf '\n' >&2 2>/dev/null || exec >/dev/null 2>&1
 	if [ "$rc" -eq 0 ]; then
 		if [ "$CLEANUP_ONLY" -eq 0 ] && [ "$SETUP_DONE" -eq 1 ]; then
 			log ""
@@ -443,18 +466,20 @@ panic_dump() {
 # may.
 panic_plant() {
 	local d hits want
-	d=$(sshw "mktemp -d /var/tmp/dnv-panic-plant.XXXXXX") ||
+	d=$(sshw "mktemp -d /var/tmp/dnv-panic-plant-gateway.XXXXXX") ||
 		die "making the crash scan's scratch directory on $TARGET failed"
 	case "$d" in
-	/var/tmp/dnv-panic-plant.?*) ;;
+	/var/tmp/dnv-panic-plant-gateway.?*) ;;
 	*) die "mktemp on $TARGET printed '$d', not a scratch directory" ;;
 	esac
 	printf '%s\n' \
 		'{"level":"ERROR","msg":"os command failed","stderr":"panic: in a field\nfatal error: in a field"}' \
 		'panic: planted by the preflight' 'goroutine 1 [running]:' \
 		'fatal error: planted by the preflight' |
-		sshw "mkdir $d/sub && cat > $d/sub/plant.log" ||
-		die "writing the crash scan's sample log on $TARGET failed"
+		sshw "mkdir $d/sub && cat > $d/sub/plant.log" || {
+			sshw "rm -rf $d" || true
+			die "writing the crash scan's sample log on $TARGET failed"
+		}
 	hits=$(panic_lines "$d") || hits="(the read failed)"
 	sshw "rm -rf $d" || true
 	want="$d/sub/plant.log:2:panic: planted by the preflight"
@@ -624,7 +649,9 @@ is_num() { # <value> <what>
 # `workerctl get-rev` (Integration test plan, The etcd verification,
 # `workerctl`), addressed by the id and the shard code of the conf <json>
 # holds at <id field> and <shard field>. It is the evidence every revision
-# count of the suite is checked against: the token the gateway hands back is
+# count of the suite is checked against, but for the contention case's first
+# DnRev of the disk node its creates race for, which the gateway's reply alone
+# checks: the token the gateway hands back is
 # part of what is under test, so it cannot also be the evidence that a
 # revision moved exactly once; refresh_rev checks the cached token against it,
 # so a count against the token rests on it too, and the gateway's reply is the
@@ -1075,6 +1102,7 @@ pkill -f '$WORK/bin/dnv-gateway' 2>/dev/null || true
 pkill -f '$WORK/bin/fakeagent' 2>/dev/null || true
 pkill -f '$WORK/bin/etcd --name dnv-gw-it' 2>/dev/null || true
 sleep 0.5
+rm -rf /var/tmp/dnv-panic-plant-gateway.*
 rm -rf $WORK
 echo cleaned
 EOF
@@ -7764,6 +7792,13 @@ parse_args() {
 main() {
 	parse_args "$@"
 	trap on_exit EXIT
+	# A run killed by SIGTERM, SIGINT or SIGHUP exits with the shell's
+	# code for the signal, so on_exit reads it as the failure it is, never
+	# as a PASS. The HUP trap ignores every later SIGHUP first: a terminal
+	# that closes sends a second one right after the first.
+	trap 'exit 143' TERM
+	trap 'exit 130' INT
+	trap 'trap "" HUP; exit 129' HUP
 	log "driver: $(hostname), server: $TARGET (ip $IP)"
 
 	if [ "$CLEANUP_ONLY" -eq 1 ]; then

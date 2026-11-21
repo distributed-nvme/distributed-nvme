@@ -998,8 +998,10 @@ directory, so a pid the kernel has given to another process since is left
 alone, with a pattern kill of the programs under the work directory as a
 safety net for
 it and for a straggling dnvctl, which runs in the foreground of each step's
-ssh and has no pid file, then removes the work directory; no file outside
-it is removed, and no process another suite started is signalled.
+ssh and has no pid file, then removes the work directory and the crash
+scan's sample folder in `/var/tmp` by its name; no other file outside the
+work directory is removed, and no process another suite started is
+signalled.
 
 **The fake gateway, `fakegateway`.** `integtest/fakegateway` stands in for
 the whole control plane so that the suite can read the exact request a

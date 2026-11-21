@@ -7,9 +7,11 @@
 #
 # It reads the worker's JSON-lines log files it is given; a directory stands
 # for every worker.log below it, such as the tree `e2e_test.sh --keep-logs DIR`
-# copies out (DIR/<case>/cp-<ip>/worker/worker.log). No stage of any suite
-# calls it: it is a tool for reading a run's logs afterwards — the copy case
-# at 32 slices, say — and it judges nothing, so it exits 0 whatever it counts.
+# copies out (DIR/<case>/cp-<ip>/worker/worker.log). One stage of one suite
+# runs it: the e2e suite's many-pools case, which logs what it prints over
+# the worker's records of its build (many_round_report). Otherwise it is a
+# tool for reading a run's logs afterwards — the copy case at 32 slices, say
+# — and it judges nothing, so it exits 0 whatever it counts.
 #
 # For each kind of object — a disk node (dn_id alone), a side (dn_id with
 # side_pointer), a controller node (cn_id alone) and a cntlr (cn_id with

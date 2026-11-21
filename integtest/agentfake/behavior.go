@@ -146,10 +146,17 @@ type Object struct {
 	DelayRounds time.Duration
 	DropStream  bool
 
-	// ReplyCode forces agent_reply.code on every reply of the object and
-	// suppresses the apply of a Syncup* and a push, save a round's and an
-	// info read's of an object the fake does not hold, which refuse it as
-	// unknown whatever the lever (knownLocked).
+	// ReplyCode forces agent_reply.code on the object's replies and
+	// suppresses the apply of a Syncup* and a push, but where a gate or
+	// another lever answers first: Starting answers a round, an info read
+	// and a Syncup* ahead of it, though a push answers the forced code
+	// first (gatePushLocked); a round or an info read of an object the
+	// fake does not hold, and a Syncup* of a side or a cntlr its node's
+	// last syncup does not list, answer unknown whatever the lever
+	// (knownLocked, sideKnownLocked, cntlrKnownLocked); ObsNone answers
+	// code zero, an ObsAge repeat the code of the observation it repeats,
+	// and a round under ReadLeftover the code of the read the round before
+	// it started, which carries the forced code (readAnswerLocked).
 	ReplyCode uint32
 	// Starting, when set, answers every round and info read of the object
 	// with ReplyCodeStarting, no observation and Starting as the agent's

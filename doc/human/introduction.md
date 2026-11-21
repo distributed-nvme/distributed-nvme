@@ -508,10 +508,12 @@ leave `kube-system` out, since the policy keeps its pods off that machine's
 own services too ([the CSI
 tutorial](tutorial_csi.md#keep-other-pods-off-dnv)).
 
-## Status and limits of 0.1
+## Status and limits
 
-0.1 is the first release of dnv. Every part is exercised by the integration
-suites on lab VMs and by the two tutorials. No production deployment is known.
+0.1 is the first release of dnv. These documents describe a later build of
+the repository: every part of that build is exercised by the integration
+suites on lab VMs and by the two tutorials, which 0.1 itself cannot run
+([Get dnv](#get-dnv)). No production deployment is known.
 Linux x64 is the only platform.
 
 The network and the root user of every node are trusted: dnv authenticates no
@@ -585,14 +587,14 @@ and 32 pools and 25.8 s at 64; the longest write was just under that, and
 no write failed while the node was cut off. When the node came back, a host
 whose connection to it came back before the node had made its old
 primaries standbys had its writes there fail for a few seconds: none at 8
-pools, 15 in one run at 32 and none in the other, and 112 at 64, 56 on each
-host ([dnv's scope and known limits](scope.md), section 8). Building 64
-pools at once took 332 s and made 22 failovers of pools that had finished
-building; a second build of 64 made 25, one pool failing over twice, and
-that pool's second failover left it unbuilt (section 8 of the same
-document); a third took 336 s and made 18, one of them of the pool built
-before the others. 32 pools built with one failover in one of two runs, 8
-with none.
+pools, 15 in one run at 32 and none in the other, and at 64 pools 112, 56 on
+each host, in one of the two runs that reached the cut and none in the other
+([dnv's scope and known limits](scope.md), section 8). Building 64 pools at
+once took 332 s and made 22 failovers of pools that had finished building; in
+a second build of 64 one pool failed over twice, and its second failover left
+it unbuilt (section 8 of the same document); a third took 336 s and made 18,
+one of them of the pool built before the others. 32 pools built with one
+failover in one of two runs, 8 with none.
 
 The limits dnv enforces, each against the largest size a test has run. The
 Go tests run the control plane against fake agents, test programs that answer
@@ -611,7 +613,7 @@ proven against fakes alone.
 | Storage pools per cluster | 4096 | 4096 | 64 at once on real nodes, in the e2e suite's many-pools case; 8 at once as CSI volumes; 10 at once in a suite on fake agents |
 | Slices per pool | 32 | 32, committed on a real etcd | 32; 1 under the CSI driver |
 | Cntlrs per pool | 4 | 4 | 3 |
-| Cntlrs per controller node | 256 | 256, and a real cn agent on a fake machine converged 257 | 256 on one guest of 8 CPUs and 3.3 GiB, each cntlr a one-slice pool with no RAID1, one IO queue a leg, no host, no IO; 44 with both hosts writing, in the e2e suite's many-pools case |
+| Cntlrs per controller node | 256 | 256, and a real cn agent on a fake machine converged 257 | 256 on one guest of 8 CPUs and 3.3 GiB, each cntlr a one-slice pool with no RAID1, one IO queue a leg, no host, no IO; 47 with both hosts writing, in the e2e suite's many-pools case |
 | Sides per disk node | 1024 | 1024, and a real dn agent on a fake machine converged 1025 | 1024 on one guest of 2 CPUs and 7.2 GiB, no host, no IO; 28, every extent of its disk, with both hosts writing, in the e2e suite's many-pools case |
 | Groups per slice, meta and data each | 255 | 255 data groups, grown without redundancy; a full meta list, and a full list with RAID1, only written to etcd directly | 9 data groups with RAID1, in a CSI volume filled whole; about 2 meta groups |
 | Thin devices per pool | 1024 | 1024 | a few |
@@ -629,7 +631,7 @@ CPUs and 7.2 GiB to 1024 sides and one real controller node guest of 8 CPUs
 and 3.3 GiB to 256 cntlrs, each cntlr a one-slice pool with no RAID1. Each
 leg's connection had one IO queue, no host connected and no IO ran, so the
 numbers hold for those conditions only. Every call succeeded and every
-check round answered code 0. A fresh read of a node came within the
+check round reported the node clean. A fresh read of a node came within the
 tool's floor of about 0.2 s at every step, and one cntlr's at 256 cntlrs in
 0.6 s. A cntlr's first build took about 0.4 s at 16 cntlrs and about 1 s
 past 128, the slowest 1.7 s. The controller node used about 4 MiB of memory
@@ -658,9 +660,13 @@ tar xzf dnv-v0.1.0-linux-amd64.tar.gz
 ```
 
 The archive unpacks to one folder, `dnv-v0.1.0-linux-amd64`, with the six
-binaries, the `LICENSE` file and the `deploy/` directory: the udev rules
-every node that runs a dnv agent carries, and the CSI driver's image recipe
-and manifests.
+binaries, the `LICENSE` file and the `deploy/` directory, the CSI driver's
+image recipe and manifests. 0.1 is older than these documents. It ships no
+udev rules. Its `deploy/` lacks `controller-role.yaml`,
+`controller-rolebinding.yaml` and `networkpolicy.yaml`. Its programs also
+lack commands and flags the tutorials use, such as `dnv-agent check` and the
+cn agent's `--ignore-host-disconnection`. So follow the tutorials with a
+build of the repository, below, or with a release after 0.1.
 
 Or clone the repository and build it with Go 1.26.5 or newer, which puts the
 six binaries in `bin/`:

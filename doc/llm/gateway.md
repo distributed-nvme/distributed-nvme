@@ -2067,18 +2067,19 @@ strides `IdStepStride` and `ThinIdStepStride`, which its smoke case checks
 the moved counters against); three gateway instances on one launch line that
 differs only in the gRPC address, each at `--log-level debug`, the log
 level the suites run their dnv daemons at, save one dn agent in one case of
-the dn suite (`dnagent_integtest.md`, Conventions, Log level); four fake
-DNs and three fake CNs, the DNs in four distinct locations and the CNs in
-three of them, each CN in its DN twin's, since the CN scan dedupes
-locations too and a CN that shares a location with a DN shows the first
-preference of the pool create's DN scans (`architecture.md`,
-Per-operation allocation), served by `fakeagent`, the worker suite's fake
-(`dnv-worker.md`, Integration test plan); and the two drivers, `gatewayctl`
-for the RPCs and `workerctl` for the etcd ground truth, both run on the
-server. Every stage runs under a
-trace id of its own, the thread that ties a script stage to the gateway,
-agent and etcd records it caused; the suite asserts once that the id a stage
-sent reaches the fake agent the gateway called.
+the dn suite (`dnagent_integtest.md`, Conventions, Log level), the tutorial
+suite's, which runs the tutorial's start lines as written, and the e2e suite's
+v0.1.0 programs (`e2e_integtest.md`, Topology and parameters); four fake DNs
+and three fake CNs, the DNs in four distinct locations and the CNs in three of
+them, each CN in its DN twin's, since the CN scan dedupes locations too and a
+CN that shares a location with a DN shows the first preference of the pool
+create's DN scans (`architecture.md`, Per-operation allocation), served by
+`fakeagent`, the worker suite's fake (`dnv-worker.md`, Integration test plan);
+and the two drivers, `gatewayctl` for the RPCs and `workerctl` for the etcd
+ground truth, both run on the server. Every stage runs under a trace id of its
+own, the thread that ties a script stage to the gateway, agent and etcd
+records it caused; the suite asserts once that the id a stage sent reaches the
+fake agent the gateway called.
 
 **Cases.** The cases run in a fixed order, fail-fast, each against a store
 wiped of every dnv key, with every gateway restarted and every fake reset,
@@ -2324,26 +2325,30 @@ also compares a whole pool snapshot before and after each refusal battery.
 A bracket read that fails stops the run, because two failed reads would
 compare equal. Waits are bounded polls for process readiness only: the
 gateway is synchronous, so no stage ever sleeps waiting for etcd content.
-After every successful pool mutation outside the parallel case's race
-waves, a worker flip included, the script refreshes its token from
+After every successful pool mutation outside the race waves that moves the
+pool's revision, a worker flip included, the script refreshes its token from
 `GetStoragePool` and checks it against the pool's revision key in etcd, so
 that every revision count made against the token rests on etcd, with the
-gateway's reply as the second check, except where no token is left to send:
-after a `DeleteStoragePool` latch it drains at once, and after the sp drain,
-which removes the pool. Every pool token a call sends comes from the
-gateway's reply; the race waves' tokens and the threshold pool's delete
-token are not checked against etcd, since a wrong one fails the next call.
-A disk node's or a controller node's token is read from etcd; where a stage
-counts such a revision after a bump, it also reads the gateway's
-`GetDiskNode` or `GetControllerNode` reply of it as the second check. A crash
-fails the run: as each case ends, and in the reset before each case, right
-before it truncates the logs, the suite reads every log under its work
-directory, and a line that starts as Go's report of a crash starts, `panic: `
-or `fatal error: `, fails the run with the log and the line, while a record
-that holds those words inside a field never matches; the preflight proves the
-read on a sample log it plants on the server. A crash while the cleanup at the
-end of a passing run stops a program is not read, as that cleanup removes the
-logs with the programs.
+gateway's reply as the second check, except where no checked token is sent
+next: after a `DeleteStoragePool` latch it drains at once, after the sp
+drain, which removes the pool, after the faults case's create of the second
+pool its status read pages over, whose token no call sends, and after its
+create of the threshold pool, whose delete sends the gateway's token alone;
+the restart case refreshes the pools its race wave created only before a call
+sends their token. Every pool token a call sends comes from the gateway's
+reply; the parallel case's wave tokens, the tokens `race` reads again for a
+retry and the threshold pool's delete token are not checked against etcd,
+since a wrong one fails the next call. A disk node's or a controller node's
+token is read from etcd; where a stage counts such a revision after a bump, it
+also reads the gateway's `GetDiskNode` or `GetControllerNode` reply of it as
+the second check. A crash fails the run: as each case ends, and in the reset
+before each case, right before it truncates the logs, the suite reads every
+log under its work directory, and a line that starts as Go's report of a crash
+starts, `panic: ` or `fatal error: `, fails the run with the log and the line,
+while a record that holds those words inside a field never matches; the
+preflight proves the read on a sample log it plants on the server. A crash
+while the cleanup at the end of a passing run stops a program is not read, as
+that cleanup removes the logs with the programs.
 
 **Cleanup.** Cleanup runs unconditionally at the start of every run —
 before the server preflight, so a crashed earlier run cannot fail it — and
@@ -2355,9 +2360,11 @@ keys and the listening ports — so the debris is what the developer reads;
 a cleanup-only run does the cleanup alone.
 Cleanup signals every daemon the suite started — etcd, the gateways and the
 fake agents — by its recorded pid with a pattern kill of the programs under
-the work directory as a safety net, and removes the suite's work directory; nothing outside that directory is
-touched, and the suite leaves no kernel state, no packages and no users
-behind.
+the work directory as a safety net, and removes the suite's work directory
+and the crash scan's sample folder in `/var/tmp` by its name; nothing else
+outside that directory is touched but for a process a stale pid file names,
+as a pid is signalled with no check that it still runs the suite's program,
+and the suite leaves no kernel state, no packages and no users behind.
 
 **The driver, `gatewayctl`.** `gatewayctl` is the gRPC driver of this
 suite, in the style of the agent suites' drivers: the gateway serves

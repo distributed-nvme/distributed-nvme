@@ -21,7 +21,8 @@
 # clean, and goes on. Nothing runs in parallel: the suites share guests.
 #
 # The copy comes first because the cleanup-only run deletes those logs, which
-# the suite's failure report points at. From each guest that a user@host word
+# the suite's failure report points at (the tutorial suite's keeps them, and
+# its next run removes them). From each guest that a user@host word
 # among the run's arguments names, alone or as the value of a --<flag>=, once
 # per host, it takes the *.log files at any depth under the work directory the
 # suite's first WORK=/ line names, over ssh as the suites call it and under
@@ -59,11 +60,15 @@
 # then.
 #
 # A run's result is the suite's exit status alone, and a PASS line in its
-# output is no proof of a pass: a suite interrupted by a signal can take its
-# success branch, run its end cleanup and print PASS before it exits with the
-# signal's status. When the command it waits on catches the signal, as ssh
-# does, an interrupted suite can instead fail at the stage it was in, or run
-# on to its end.
+# output is no proof of a pass, as a signal can still come once it is
+# printed. A suite interrupted by SIGINT, SIGTERM or SIGHUP, which every
+# suite traps once it has set its exit handler, ends once the command it
+# waits on has ended, through its failure branch, with 130, 143 or 129. In
+# its exit handler, a SIGTERM ends it at once, with 143, a SIGHUP changes
+# nothing and a SIGINT ends only the command in hand: so a suite that a
+# Ctrl-C reaches in its end cleanup exits with the code it was ending with,
+# 0 and PASS where that cleanup does not judge the step the Ctrl-C ended, as
+# cdc_test.sh's does not.
 
 set -uo pipefail
 
@@ -258,8 +263,10 @@ tree_state() {
 # after the banner and is not the failure's. Among the failures that print no
 # stage line, and so leave the trace id and the reason unread, are a usage
 # error, an end cleanup that did not finish (the e2e suite prints its LAB NOT
-# CLEAN banner instead), a signal that made the suite take its success branch,
-# and a kill before on_exit ran.
+# CLEAN banner instead), a kill before on_exit ran, and a SIGTERM while it
+# runs. A signal before on_exit ends a suite through its failure branch with
+# no die, so its stage line comes with no FAILED line, and the trace id and
+# the reason stay unread too.
 failure_of() { # <run index> <rc>
 	local i=$1 rc=$2 log stage last
 	log=$(log_of "$i")

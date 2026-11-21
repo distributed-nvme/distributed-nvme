@@ -11,7 +11,7 @@
 #
 # Cases (cnagent_integtest.md, Cases): nodecheck, smoke, redund, repair,
 # teardown, thinbm, torn, discard, isolation, clone_xfer, restart, pause,
-# groupcut; `nodecheck`
+# groupcut, thinrepair; `nodecheck`
 # runs the node check, the md replay and the gather on the VMs; `teardown`,
 # the teardown-by-sweep
 # case, injects the faults (a pinned dm device, an iptables partition of the
@@ -23,9 +23,11 @@
 # pool's primary off from every leg of the data group both ways under a
 # writer, GCUT_MODE=measure making it the 3, 8, 20 and 60 s measurement
 # (cnagent_integtest.md, Cases, groupcut). Cleanup
-# runs unconditionally at the start and, on success only, at the end: a
-# failing run leaves every dm/md/nvmet object and all four agent logs in place
-# and dumps diagnostics (cnagent_integtest.md, Teardown and cleanup).
+# runs unconditionally at the start and at the end on success and after a
+# failed --wipe (wipe_all): any other failing run leaves its dm/md/nvmet
+# objects and all four agent logs in place, but for nodecheck's stalled
+# array, which on_exit resumes and removes (ncg_teardown), and dumps
+# diagnostics (cnagent_integtest.md, Teardown and cleanup).
 # cleanup_phase1 releases every fault injector
 # unconditionally, so a failed run of any of those cases cannot poison the
 # next one.
@@ -33,9 +35,11 @@
 # The uutils dd rule (dnagent_integtest.md, Assumptions and preflight checks)
 # is absolute: this script never passes iflag= or
 # oflag= to dd. Writes use conv=fsync, reads that must hit the media are
-# preceded by a cache drop. Do not "fix" this back to direct IO. The one IO
-# that must be direct, isolation's writes and groupcut's read back, goes
-# through GNU dd, `gnudd`, whose direct flags work.
+# preceded by a cache drop. Do not "fix" this back to direct IO. The IO that
+# must be direct — isolation's writes, groupcut's read back, repair's badstop
+# reads of the data array (md_data_chunk) and of the host's MiB 0, and
+# thinrepair's superblock read (tr_sb_flags) — goes through GNU dd, `gnudd`,
+# whose direct flags work.
 #
 # Both roles run from one binary named `dnv-agent`, so `pkill -x dnv-agent`
 # would kill both (cnagent_integtest.md, Topology). Every kill here is
@@ -251,8 +255,8 @@ DIAG_CNTLRS=()
 # delay (delay_to), 0 while none does: on_exit takes either off even when a
 # run fails.
 THROTTLED=0
-# The VM that holds the pause case's two-way cut (blackhole_from), and the
-# VM that runs its timed writer and sampler, 0 while none does: on_exit
+# The VM that holds the pause or groupcut case's two-way cut (blackhole_from),
+# and the VM that runs its timed writer and sampler, 0 while none does: on_exit
 # lifts the cut and stops both loops even when a run fails.
 BLACKHOLED=0
 PAUSE_VM=0
@@ -295,7 +299,10 @@ CASES=(nodecheck smoke redund repair teardown thinbm torn discard isolation
 # Logging, assertions, failure handling
 # ---------------------------------------------------------------------------
 
-log() { echo "$*" >&2; }
+# A write that fails, as to a terminal that has closed, sends the run's
+# output to /dev/null from then on, so that a log line never ends the run's
+# exit handler under set -e.
+log() { echo "$*" >&2 || exec >/dev/null 2>&1; }
 
 # stage names the step for the failure report and mints the trace id the
 # driver sends (cnagent_integtest.md, The driver: `cnagentctl`): one id shared
@@ -582,6 +589,20 @@ no_ctrl_shape() {
 on_exit() {
 	local rc=$?
 	trap - EXIT
+	# A signal while this handler runs: a Ctrl-C (SIGINT) reaches the
+	# command in hand, which it ends unless that command ignores it, a read
+	# of a command's output and an ssh still connecting among them, and the
+	# dump and the removals below go on; a SIGHUP, which a terminal that
+	# closes sends twice, is ignored here and by every command below; a
+	# SIGTERM ends the run at once. Output that fails, as a terminal that
+	# has closed does, goes to /dev/null from then on, so that set -e ends
+	# the handler at no log line: this line tries a write first, and log
+	# does the same at each of its writes. rc keeps the code the run was
+	# ending with, and the run exits with it but on a SIGTERM.
+	trap - TERM
+	trap : INT
+	trap '' HUP
+	printf '\n' >&2 2>/dev/null || exec >/dev/null 2>&1
 	if [ "$rc" -eq 0 ]; then
 		if [ "$CLEANUP_ONLY" -eq 0 ] && [ "$SETUP_DONE" -eq 1 ]; then
 			log ""
@@ -602,9 +623,9 @@ on_exit() {
 		if [ "$THROTTLED" -ne 0 ]; then
 			helper_ok "$THROTTLED" unthrottle >&2
 		fi
-		# The pause case's two-way cut and its writer, for the same reason:
-		# a cut left in place black-holes another suite's connections, and
-		# the writer writes on.
+		# The pause or groupcut case's two-way cut and its writer, for the
+		# same reason: a cut left in place black-holes another suite's
+		# connections, and the writer writes on.
 		if [ "$BLACKHOLED" -ne 0 ]; then
 			helper_ok "$BLACKHOLED" \
 				"unblackhole_from ${IP[$((3 - BLACKHOLED))]}" >&2
@@ -1001,8 +1022,9 @@ leg_wait_live() { # cnvm sp leg cn dnidx secs
 # ---------------------------------------------------------------------------
 # Data IO on the host VM: writes fsync, reads follow a cache drop, never
 # iflag=/oflag= with the VM's own dd (dnagent_integtest.md, Assumptions and
-# preflight checks); the IO that must be direct, isolation's writes and
-# groupcut's read back, goes through GNU dd, `gnudd`.
+# preflight checks); the IO that must be direct, isolation's writes,
+# groupcut's read back and repair's badstop read of the host's MiB 0, goes
+# through GNU dd, `gnudd`.
 # ---------------------------------------------------------------------------
 
 drop_caches() { sshv "$1" "sync; echo 3 > /proc/sys/vm/drop_caches"; }
@@ -2216,10 +2238,12 @@ md_data_chunk() {
 	read -r node dmk <<<"$where"
 	off=$(cat "/sys/block/$node/md/dev-$dmk/offset") || return 1
 	size=$(blockdev --getsize64 "/dev/$node") || return 1
-	want=$(gnudd if="$2" bs=64K count=1 status=none | sha256sum) || return 1
+	# The helper runs without pipefail, so each read sets it for its own
+	# pipe: a failed dd fails the read, not passes as sha256sum's status.
+	want=$(set -o pipefail; gnudd if="$2" bs=64K count=1 status=none | sha256sum) || return 1
 	want=${want%% *}
 	for ((i = 0; i < size / 65536; i++)); do
-		got=$(gnudd if="/dev/$node" bs=64K skip="$i" count=1 iflag=direct \
+		got=$(set -o pipefail; gnudd if="/dev/$node" bs=64K skip="$i" count=1 iflag=direct \
 			status=none | sha256sum) || {
 			echo "md_data_chunk: reading chunk $i of /dev/$node failed" >&2
 			return 1
@@ -3278,13 +3302,14 @@ unpin_dev() {
 	echo unpinned
 }
 
-# The suite's mdadm (repair's badstop stage; cnagent_integtest.md, Cases,
-# repair): first in the cn agent's PATH (start_cn_agent), it runs the real
-# mdadm with the arguments it was given, unless the stop hold's flag file
-# stands (md_hold_arm) and the call is a stop: it then first opens the array
-# from a process of its own, whose pid it keeps as a pin's, so that unpin_all
-# ends it, and md refuses the stop for real, as it refuses the stop of any
-# array that is open. The flag goes with the first stop it meets.
+# The suite's mdadm (repair's four badstop stages, each arming one stop
+# through badstop_keep; cnagent_integtest.md, Cases, repair): first in the cn
+# agent's PATH (start_cn_agent), it runs the real mdadm with the arguments it
+# was given, unless the stop hold's flag file stands (md_hold_arm) and the
+# call is a stop: it then first opens the array from a process of its own,
+# whose pid it keeps as a pin's, so that unpin_all ends it, and md refuses the
+# stop for real, as it refuses the stop of any array that is open. The flag
+# goes with the first stop it meets.
 MD_WRAP_DIR=$WORK/mdwrap
 MD_HOLD_FLAG=/var/tmp/dnv-it-md-hold.armed
 
@@ -4359,9 +4384,11 @@ cleanup_phase1() { # <cn16> [other vm ip]
 
 	# The fault injectors (case T's three, the partition case A's degrade
 	# stage reuses, clone_xfer's throttle, redund's drop of new
-	# connections and its netem delay, the pause case's two-way cut and
-	# its writer and sampler, smoke's host writers, and the nodecheck
-	# case's stalled array and mdadm wrapper), first and unconditionally.
+	# connections and its netem delay, the pause and groupcut cases'
+	# two-way cut and their writer and sampler, smoke's host writers,
+	# repair's stop hold, whose flag goes here and whose holder goes with
+	# the pins (unpin_all), and the nodecheck case's stalled array and mdadm
+	# wrapper), first and unconditionally.
 	# Each of them outlives the stage that installed it and each would be
 	# diagnosed as something else entirely: a pin makes the dm passes below
 	# fail on a device nothing is testing, a partition rule black-holes the
@@ -4463,7 +4490,7 @@ cleanup_phase2() { # <cn16> <dn16>
 		wipefs -a "$dev" >/dev/null 2>&1
 		losetup -d "$dev" >/dev/null 2>&1
 	done
-	rm -rf "$WORK"
+	rm -rf "$WORK" /var/tmp/dnv-panic-plant-cnagent.*
 	remove_udev_rules >/dev/null
 	echo cleaned
 	return 0
@@ -5486,6 +5513,19 @@ wipe_all() {
 		"something outside dnv is holding them"
 }
 
+# helper_wait waits for the helper job <pid> to end, whatever its status.
+# cleanup_all's helpers ignore SIGINT themselves, as a background job of a
+# shell that traps SIGINT, as the exit handler does, takes it at its default
+# action, so a Ctrl-C ends none of them; the Ctrl-C ends a wait at once
+# instead, so the wait is made again until the job has ended: the handler
+# goes on, to a next phase or to its exit, only once no helper still cleans
+# a VM.
+helper_wait() { # <pid>
+	until wait "$1"; do
+		kill -0 "$1" 2>/dev/null || return 0
+	done
+}
+
 # cleanup_all runs cnagent_integtest.md, Teardown and cleanup, as two cross-VM
 # phases: within a phase the two VMs run
 # concurrently, but no VM starts phase 2 until both finished phase 1, because
@@ -5496,18 +5536,24 @@ cleanup_all() {
 		# The other VM's ip is what a partition rule names (case T's S4 on
 		# vm2, case A's degrade on vm1), and only this VM can remove it, so
 		# each VM is told which address to clear.
-		helper_ok "$idx" \
-			"cleanup_phase1 $(hex16 "${CNID[$idx]}") ${IP[$((3 - idx))]}" &
+		{
+			trap '' INT
+			helper_ok "$idx" \
+				"cleanup_phase1 $(hex16 "${CNID[$idx]}") ${IP[$((3 - idx))]}"
+		} &
 		pids+=($!)
 	done
-	for pid in "${pids[@]}"; do wait "$pid" || true; done
+	for pid in "${pids[@]}"; do helper_wait "$pid"; done
 	pids=()
 	for idx in 1 2; do
-		helper_ok "$idx" \
-			"cleanup_phase2 $(hex16 "${CNID[$idx]}") $(hex16 "${DNID[$idx]}")" &
+		{
+			trap '' INT
+			helper_ok "$idx" \
+				"cleanup_phase2 $(hex16 "${CNID[$idx]}") $(hex16 "${DNID[$idx]}")"
+		} &
 		pids+=($!)
 	done
-	for pid in "${pids[@]}"; do wait "$pid" || true; done
+	for pid in "${pids[@]}"; do helper_wait "$pid"; done
 }
 
 diagnostics() {
@@ -5595,18 +5641,20 @@ panic_dump() {
 # match, the two crash lines planted after it must, and nothing else may.
 panic_plant() {
 	local d hits want
-	d=$(sshv 1 "mktemp -d /var/tmp/dnv-panic-plant.XXXXXX") ||
+	d=$(sshv 1 "mktemp -d /var/tmp/dnv-panic-plant-cnagent.XXXXXX") ||
 		die "making the crash scan's scratch directory on vm1 failed"
 	case "$d" in
-	/var/tmp/dnv-panic-plant.?*) ;;
+	/var/tmp/dnv-panic-plant-cnagent.?*) ;;
 	*) die "mktemp on vm1 printed '$d', not a scratch directory" ;;
 	esac
 	printf '%s\n' \
 		'{"level":"ERROR","msg":"os command failed","stderr":"panic: in a field\nfatal error: in a field"}' \
 		'panic: planted by the preflight' 'goroutine 1 [running]:' \
 		'fatal error: planted by the preflight' |
-		sshv 1 "mkdir $d/sub && cat > $d/sub/plant.log" ||
-		die "writing the crash scan's sample log on vm1 failed"
+		sshv 1 "mkdir $d/sub && cat > $d/sub/plant.log" || {
+			sshv 1 "rm -rf $d" || true
+			die "writing the crash scan's sample log on vm1 failed"
+		}
 	hits=$(panic_lines 1 "$d") || hits="(the read failed)"
 	sshv 1 "rm -rf $d" || true
 	want="$d/sub/plant.log:2:panic: planted by the preflight"
@@ -5754,8 +5802,9 @@ preflight_vms() {
 # ---------------------------------------------------------------------------
 
 # Both agents run at --log-level debug, as the suites run their dnv daemons,
-# save one dn agent in one case of the dn suite: the cases read the agents'
-# reads (cnagent_integtest.md, Conventions).
+# save one dn agent in one case of the dn suite, the tutorial suite's daemons
+# and the e2e upgrade case's v0.1.0 programs: the cases read the agents' reads
+# (cnagent_integtest.md, Conventions).
 start_dn_agent() { # <idx>
 	local idx=$1
 	sshv "$idx" "setsid nohup $WORK/dnv-agent dn \
@@ -8855,7 +8904,7 @@ badstop_dropped() {
 }
 
 # badstop_recs sets BS_REC to how many forced-start records the cn agent
-# wrote under the stage's trace (cnagent.md CN12, The record).
+# wrote under the stage's trace (cnagent.md CN12, The forced start).
 badstop_recs() {
 	local rec
 	rec=$(helper 2 "cn_msg $TRACE 'forced start'") ||
@@ -8966,8 +9015,8 @@ badstop_keep() {
 
 # badstop_added <label> — after the converge that adds the other leg beside
 # the named one in the kept-list state: the array whole and clean again,
-# each leg's list as the primary reads it logged, the other's checked to be
-# a copy of the named leg's (md marks bad on a member it recovers every
+# each leg's list as the primary reads it logged, the other's checked to
+# list at least one bad block (md marks bad on a member it recovers every
 # region bad on every in-sync member), and the holder ended.
 badstop_added() {
 	local al nl
@@ -9696,7 +9745,7 @@ repair_forced_start() {
 	# with no mark the level
 	# step assembles the array again from both members, whose lists stay,
 	# and the row reads OK, over which the gateway takes no new mark
-	# (architecture.md, Repair).
+	# (architecture.md, Repairs, ForceStartGroup).
 	badstop_keep "way 2 outside the window"
 	cn_syncup_cntlr 2 "$req2" --expect-code 4 >/dev/null 2>&1 || true
 	badstop_added "way 2 outside the window"
@@ -9715,9 +9764,10 @@ repair_forced_start() {
 		"repair badstop: way 2 outside the window: the row over both lists"
 
 	stage badwindow "way 2 in the window: a new mark while the row reads ERROR, the level stepped down and up, drops both lists"
-	# Right after the failed stop the row reads ERROR, the one state in which
-	# the gateway takes a new mark below the level with no group array
-	# (architecture.md, Repair). The array runs, so the new mark does not act
+	# Right after the failed stop the row reads ERROR, the one state of this
+	# sequence in which the gateway takes a new mark, as it refuses one over a
+	# row that reads OK and at the level with no group array (architecture.md,
+	# Repairs, ForceStartGroup). The array runs, so the new mark does not act
 	# and the converge adds the other leg; the reading names no mark of the
 	# new one's revision as acted, so the worker keeps it, and it acts at
 	# the next level step up.
@@ -13895,8 +13945,9 @@ case_pause() {
 # the case asserts; "measure", one cut of each length of GCUT_MEASURE_SECS,
 # each over a fresh pool, whose numbers the docs carry. GCUT_OUT is where
 # each cut keeps its raw files on the driver. GCUT_GATE_SECS and
-# GCUT_BACK_SECS may be set, as the gate's checks are each shown failing
-# with a cut that breaks md and with a wait for writes back too short.
+# GCUT_BACK_SECS may be set, as the gate is shown failing with a cut that
+# breaks md (its failed-write, write-back and pool checks) and with a wait
+# for writes back too short (its write-back check).
 GCUT_MODE=${GCUT_MODE:-gate}
 GCUT_OUT=${GCUT_OUT:-$WORK/groupcut}
 GCUT_GATE_SECS=${GCUT_GATE_SECS:-3}
@@ -14006,8 +14057,10 @@ gcut_pool_flags() {
 # side's primary moved to CN1, then CN1 promoted. It records what CN1's
 # build brings back, its rows, its pool's status line, the host's path to
 # it and, where the pool takes writes and the path serves, one write the
-# case makes into a block no write reached; it asserts nothing, as no rule
-# promises what a new primary makes of a data group the old one saw broken.
+# case makes into the thin device's last block, which the writer reaches too
+# once it has run through its whole range, as in a 60 s cut; it asserts
+# nothing, as no rule promises what a new primary makes of a data group the
+# old one saw broken.
 # Its record goes to GCUT_FO, one "failover=[…]" field.
 gcut_failover() {
 	local i=$1 sp=$2 req1=$3 req2=$4 nqn=$5 dev=$6 c1=0x1 c2=0x2 l n out
@@ -14067,13 +14120,16 @@ gcut_failover() {
 # one VM, for <secs>; then the rule goes, and the case waits GCUT_BACK_SECS
 # for a write that succeeds. The cut is timed on vm2's clock, the writer's
 # and the sampler's, by a mark just before the rule goes in and one just
-# after it comes out, none while it stands, and every time of the summary
-# counts from the mark before the cut; its length is vm1's, from the rule's
-# install to its removal. What the host saw, md's array state, the pool's status line
-# and CN2's rows are recorded; where no write came back, the failover is
-# played (gcut_failover); then every block whose write the host was told was
-# done is read back and compared (gcut_readback). The last line of the
-# report is the summary, "GROUPCUT …".
+# after it comes out, none while it stands. Every time of the summary counts
+# from the mark before the cut, but back=, which counts from the mark after
+# the lift (lifta2), and its two lengths: cut=, vm1's, from the rule's
+# install to its removal, and longest=, a write's own, from its start to its
+# end. The kernel logs count from $mark, taken as the writer starts.
+# What the host saw, md's array state, the pool's status line and CN2's rows
+# are recorded; where no write came back, the failover is played
+# (gcut_failover); then every block whose write the host was told was done is
+# read back and compared (gcut_readback). The last line of the report is the
+# summary, "GROUPCUT …".
 gcut_run() {
 	local i=$1 secs=$2 req1=$3 req2=$4 nqn=$5 dev=$6 sp=${GCUT_SP[$1]}
 	local out="$GCUT_OUT/cut$i" mark got rules st data rows flags fo=-
@@ -14158,8 +14214,9 @@ gcut_run() {
 
 # gcut_summary <out> <secs> — one cut's numbers from its raw files, by
 # vm2's clock, every time counted from the mark taken just before the cut
-# went in: the cut's length on vm1's clock, from the rule's install to its
-# removal, the writes, the longest, the failed ones and when the first
+# went in, but for two lengths, the cut's on vm1's clock, from the rule's
+# install to its removal, and the longest write's, from its start to its end:
+# the writes, the longest, the failed ones and when the first
 # failed write ended, when md first held a data member faulty, and when the
 # data array, found by its members' dm names, last left its clean state
 # before it broke (a write in flight takes it out of clean), and when it
@@ -14194,8 +14251,9 @@ gcut_summary() {
 # groupcut): a write paused for about the cut's length, so the rule held a
 # leg path the writes need; no write failed; writes came back on CN2; every
 # acknowledged block reads back; the pool takes writes, with no
-# needs_check. Every check is read and every one that fails is named, then
-# the stage fails.
+# needs_check. Every check but the pause is read, and the pause only where
+# no write failed, as a failed write shows the rule held a leg path too;
+# every check read that fails is named, then the stage fails.
 gcut_gate_check() {
 	local i=$1 secs=$2 sum=$3 back=$4 flags=$5 rb=$6 bad=()
 	# A write that failed shows the rule held a leg path too, so the pause
@@ -14518,6 +14576,13 @@ parse_args() {
 main() {
 	parse_args "$@"
 	trap on_exit EXIT
+	# A run killed by SIGTERM, SIGINT or SIGHUP exits with the shell's
+	# code for the signal, so on_exit reads it as the failure it is, never
+	# as a PASS. The HUP trap ignores every later SIGHUP first: a terminal
+	# that closes sends a second one right after the first.
+	trap 'exit 143' TERM
+	trap 'exit 130' INT
+	trap 'trap "" HUP; exit 129' HUP
 	log "driver: $(hostname), vm1=${VM[1]} (${IP[1]}), vm2=${VM[2]} (${IP[2]})"
 
 	if [ "$WIPE" -eq 1 ]; then

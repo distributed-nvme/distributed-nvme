@@ -363,13 +363,13 @@ func sliceIdList(req *pb.SyncupCntlrRequest) []uint64 {
 }
 
 // cntlrInfoLocked derives CntlrInfo from the cntlr's last accepted request:
-// one row per object it named — per slice, per group (meta and data), per leg
-// of every group, per td, per subsystem, per namespace, per
+// on a primary, one row per object it named — per slice, per group (meta and
+// data), per leg of every group, per td, per subsystem, per namespace, per
 // clone and per xfer, a clone's being its target row and its dm-clone row,
 // the kinds of row the cn agent reports for a clone (cnagent.md CN28) — and,
 // for each clone of its clone_list, a group row for the clone's clone meta
-// group and a leg row per leg of it, as for a slice's group
-// (dnv-worker.md, Integration test plan, The fake agent). A cntlr is the
+// group, on a primary alone, and a leg row per leg of it, as for a slice's
+// group (dnv-worker.md, Integration test plan, The fake agent). A cntlr is the
 // primary here exactly when the real cn agent converges it as one: its
 // request's cntlr.primary is set and cntlr.disabled is not (cnagent.md CN9);
 // a disabled primary reports the standby shape. A standby reports no row of

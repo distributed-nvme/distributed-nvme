@@ -77,6 +77,20 @@ func TestHarnessCrashLeavesRegistrations(t *testing.T) {
 			regs := regsOf(w1)
 			return len(regs) == 0, fmt.Sprintf("%v still there", regs)
 		})
+	// The watch reports each delete from a goroutine of its own, which can
+	// trail the reads above under load, so the deletes are waited for too.
+	h.waitUntil(t, 10*time.Second, "the watch to report the deletes of "+
+		"w1's registrations", func() (bool, string) {
+		var missing []string
+		for _, role := range roles {
+			key := model.WorkerRegKey(role, w1.seed)
+			if _, ok := deletedAt(key); !ok {
+				missing = append(missing, key)
+			}
+		}
+		return len(missing) == 0,
+			fmt.Sprintf("no delete of %v reached the watch", missing)
+	})
 	for _, role := range roles {
 		key := model.WorkerRegKey(role, w1.seed)
 		at, ok := deletedAt(key)

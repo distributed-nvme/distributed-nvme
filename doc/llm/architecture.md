@@ -6471,14 +6471,16 @@ new primary's optimized flip releases it once its stack is built
 (new_primary step 1) makes the pause longer by the rounds until a read
 that starts after the flips names the group, and by the converge of the
 `SyncupCntlr` the worker re-sends on that name (`cnagent.md` CN10, CN30;
-`cnagent.md`, Known limits), and never turns it into IO
-errors: the new primary builds its groups only over available legs, so no
-stack it builds reaches a side that still exports dm-error to it
-(`cnagent.md` CN12), and it moves no namespace to optimized over the
-dm-error, except at the levels that remove the thin pools or the clone
-stacks, where hosts are meant to see IO errors (SpLevel; `cnagent.md`
-CN16). In two cases an old primary that is still running stops taking
-host IO before the sides fence it, and the worker need not know which
+`cnagent.md`, Known limits), or, where it outruns the flip of one leg of a
+RAID1 group and not the other's, leaves that array inactive and the pool
+unbuilt (Known limits, A promotion that outruns its sides can leave a group's
+array inactive), and never turns it into IO errors: the new primary builds its
+groups only over available legs, so no stack it builds reaches a side that
+still exports dm-error to it (`cnagent.md` CN12), and it moves no namespace to
+optimized over the dm-error, except at the levels that remove the thin pools
+or the clone stacks, where hosts are meant to see IO errors (SpLevel;
+`cnagent.md` CN16). In two cases an old primary that is still running stops
+taking host IO before the sides fence it, and the worker need not know which
 case it is in:
 
 * An old primary that applies its demotion inside the demotion hold (sp
@@ -7850,8 +7852,10 @@ primaries, replace cntlrs and repair legs that only wait for their agent
 new build starts on a node, the node carries the udev rules of that build's
 `deploy/udev/` (Components: invocation reference), which the operator
 installs while the node's agents are stopped wherever the new build changes
-a rule file or ships one the node lacks, as every node of v0.1.0 lacks them
-all. Reason: the new agents rebuild what the node holds and build what it
+a rule file or ships one the node lacks, as an upgrade from v0.1.0 does:
+v0.1.0 shipped no rule file, and a node set up by its tutorial carries only
+its md mask, under the name of `deploy/udev/`'s md rule but in an older
+text. Reason: the new agents rebuild what the node holds and build what it
 does not yet, and a node without the rules lets the system's own udev rules
 assemble, probe and link what they make, as Components: invocation
 reference says. Before the workers start, the
@@ -7859,7 +7863,10 @@ operator checks that every program runs the new build: each binary's
 `--version` shows the build the node holds, and each process's start record
 the build it runs (Components: invocation reference). Reason: a program
 whose process was not restarted still runs the old build from a file the
-new one replaced, so `--version` alone cannot show it.
+new one replaced, so `--version` alone cannot show it. The e2e suite's
+opt-in upgrade case upgrades a cluster of v0.1.0 to the tree's build on the
+lab in this order, its udev rules and its checks of `--version` and the
+start records included (`e2e_integtest.md`, The cases, upgrade).
 
 Every agent keeps its local store across the upgrade and, at start,
 rebuilds from it what its node should hold, probe-first, as after any
@@ -7891,9 +7898,7 @@ so, not only those etcd stores: an agent stores its syncup requests, which
 carry most of the others, and dnvctl prints the rest by their field names.
 The freeze test holds the schema to each release's layout, and the sample
 tests read what v0.1.0 wrote through today's readers (`layout.md`, Protobuf
-generation); the e2e suite's opt-in upgrade case upgrades a cluster of
-v0.1.0 to the tree's build on the lab in this order (`e2e_integtest.md`, The
-cases, upgrade). A field it adds reads
+generation). A field it adds reads
 zero in what an older build wrote, so it adds only a field whose zero is
 right there: a count it adds starts at zero. A migration whose record
 carries no `meta_units` thus counts as zero units and adds nothing to any
@@ -7928,11 +7933,14 @@ which is how the build that wrote it stood after any worker restart
 whose array has not run until the sp worker sets the flag at the group's
 first OK row (`dnv-worker.md` AR15); until then its primary may create an
 array over legs that read no superblock, as the build that wrote it could.
-The worker of the new build therefore writes every serving pool of the older
-build once after the upgrade, which raises the pool's revision: in a restore
-of a backup taken before the upgrade, a pool no call touched reads older,
-not the same, and loses only that flag, which the worker sets again
-(`e2e_integtest.md`, The cases, upgrade).
+The worker of the new build therefore writes every pool with RAID1 of the
+older build after the upgrade: one write at each report of its primary that
+first reads one or more of its groups OK, so once where they all read OK in
+one report, which raises the pool's revision: in a restore
+of a backup taken before the upgrade, such a pool that no call touched
+reads older, not the same, and loses only that flag, which the worker sets
+again (`e2e_integtest.md`, The cases, upgrade); a pool without RAID1 gets no
+such write and reads the same (`dnv-worker.md` AR15).
 A forced-start mark that carries neither `force` nor `override_list` meets
 every refusal of `cnagent.md` CN12, some of which the build that wrote it
 lacked, so a start it was asked for can be refused after the upgrade, until
@@ -9177,17 +9185,17 @@ document and only pointed to here.
   failed write to the leg, so the commit goes on; a `RedundNone` group passes
   it up, so the waiting commit fails, and dm-thin drops the block mappings made
   since the last commit and leaves the pool read-only with its needs_check flag
-  set, which nothing clears (No thin-metadata repair path is specified, above),
-  and the pool's row reads it (`cnagent.md` CN13). On such a group,
-  with no live path to the destination, a finish fails the commit and a cancel
-  ends the block with the pool intact. Meanwhile a node write queued behind the
-  blocked call, a `SyncupCn`, holds up every later call of that agent that
-  takes the node lock (the head-of-line blocking above). The worker's read
-  rule (Migration) does not keep a bitmap read out of a gap: a data leg's
-  bitmap read can still block in the gap of another leg the same pool sits
-  on, in its snapshot or in the suspend of a thin device whose writes wait
-  there, and a thin device's bitmap read can block in the gap of any leg the
-  pool it reads sits on.
+  set, which only a repair by hand ends (No thin-metadata repair path is
+  specified, above), and the pool's row reads it (`cnagent.md` CN13). On such
+  a group, with no live path to the destination, a finish fails the commit and
+  a cancel ends the block with the pool intact. Meanwhile a node write queued
+  behind the blocked call, a `SyncupCn`, holds up every later call of that
+  agent that takes the node lock (the head-of-line blocking above). The
+  worker's read rule (Migration) does not keep a bitmap read out of a gap: a
+  data leg's bitmap read can still block in the gap of another leg the same
+  pool sits on, in its snapshot or in the suspend of a thin device whose
+  writes wait there, and a thin device's bitmap read can block in the gap of
+  any leg the pool it reads sits on.
 * **A host a transfer admits can write its origin while a clone copies
   it.** A transfer exports its origin's volume read-write through its own
   subsystem to the hosts its `allowed_hosts` name (Transfers), meant to be
@@ -9300,12 +9308,15 @@ document and only pointed to here.
 * **A host's flush through a path it identified over the dm-error is not
   sent.** nvmet marks a namespace as having no volatile write cache when
   the namespace's device has none, and a host takes that mark into its
-  path when it identifies the namespace: at its connect and at each scan
-  of the controller's namespaces, which a namespace added to or removed
-  from the subsystem or an `nvme ns-rescan` brings, never at an ANA
+  path when it identifies the namespace. It does so at its connect, at
+  each reconnect or reset of its controller, and at each other scan of
+  the controller's namespaces, which a namespace added to or removed from
+  the subsystem or an `nvme ns-rescan` brings. It never does so at an ANA
   change. An ns-dev over its td's `CnErrorName` has no write cache: a
-  standby's, a parked one, a provisioning-deferred one and one whose
-  dm-clone does not serve (`cnagent.md` CN16). The reload that serves the
+  standby's, a disabled cntlr's, a parked one, a provisioning-deferred
+  one, one whose dm-clone does not serve, one at a level at or above
+  `SP_LEVEL_NO_THINPOOL`, and a clone destination's at or above
+  `SP_LEVEL_NO_CLONE` (`cnagent.md` CN16). The reload that serves the
   ns-dev from the pool gives it one, but on a live namespace the cn agent
   rewrites only its ANA group (`EnsureNamespace`), so nothing makes the
   host identify the namespace again. So after a failover the host's path
@@ -9319,17 +9330,25 @@ document and only pointed to here.
   completed (the entry above); a write over a mapped block, which leaves
   nothing to commit, reaches the legs' disks with no flush until the
   pool's next commit or another flush of its data device. A namespace a
-  host identified while it was parked, deferred or waiting for its
-  dm-clone is the same once it serves. Read in the kernel's nvmet, NVMe
-  host and block sources, and seen on the lab outside the suites (cn0 and
-  host0): a namespace over a linear on a dm-error read write-through on
-  the host's path and still did after the linear's table moved onto a loop
-  device, and a host fsync then sent no flush to that device; after an
-  `nvme ns-rescan` the path read write-back and the fsync's flush reached
-  it. In the end-to-end suite's flush stage the fsyncs of the writes the
-  host sent again to the new primary took under a millisecond
-  (`e2e_integtest.md`, Known limits, The flush stage met no fsync in
-  flight).
+  host identified while it was parked, deferred, waiting for its dm-clone,
+  on a disabled cntlr or at such a level is the same once it serves, with
+  no failover. A CSI volume whose node plugin connects before its pool's
+  sides end their zeroing is one: the driver's create returns once the
+  volume's records exist, and its attach waits only for the primary's
+  subsystem row (`csi.md` CSI10), which reads OK while the sides zero. So
+  is a one-cntlr pool's disabled primary, which the cdc lists again at its
+  enable, before its node has built the primary's stack (Cntlrs,
+  UpdateCntlrEnabled). These cases follow from CN16 and the kernel's
+  sources. No run shows them, and no suite reads the cache mode of a
+  host's path. Read in the kernel's nvmet, NVMe host and block sources,
+  and seen on the lab outside the suites (cn0 and host0): a namespace over a
+  linear on a dm-error read write-through on the host's path and still did
+  after the linear's table moved onto a loop device, and a host fsync then
+  sent no flush to that device; after an `nvme ns-rescan` the path read
+  write-back and the fsync's flush reached it. In the end-to-end suite's flush
+  stage the fsyncs of the writes the host sent again to the new primary took
+  under a millisecond, as fsyncs that send no flush do (`e2e_integtest.md`,
+  Known limits, The flush stage met no fsync in flight).
 * **A failover while the old primary serves can lose an acknowledged
   write.** An old primary that has not applied its demotion, or a primary
   a cntlr replacement deleted whose CN has not torn its stack down, goes

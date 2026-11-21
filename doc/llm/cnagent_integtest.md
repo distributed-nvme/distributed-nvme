@@ -92,8 +92,8 @@ subsystem into one device, whatever their host NQNs. Agents run as
 root under one process name, so the suite stops a role by its command line, and
 a case fails a stop that leaves an agent alive to race its successor. Each
 cn agent runs with the suite's mdadm first in its PATH, which runs the
-node's own mdadm with the same arguments, save one stop that one of
-repair's badstop stages arms: before it runs that stop, it opens the array
+node's own mdadm with the same arguments, save the one stop each of
+repair's four badstop stages arms: before it runs that stop, it opens the array
 from a process of its own, so that md refuses the stop for real (Cases,
 repair); a failed run's exit ends that process, as another suite's cleanup
 could not stop the array it holds.
@@ -109,7 +109,9 @@ cleanup, since free agent ports mean something only once a crashed run's
 agents are gone. It loads the kernel modules and mounts configfs, neither of
 which the agent does, then checks each module loaded or built in; the tools,
 GNU dd under the name `gnudd` among them, through which alone the suite
-makes IO with direct flags (isolation's writes and groupcut's read back),
+makes IO with direct flags (isolation's writes, groupcut's read back,
+repair's badstop reads of the data array and of the host's first MiB, and
+thinrepair's read of the metadata superblock),
 as the VMs' own dd gives false failures with them (`dnagent_integtest.md`,
 Assumptions and preflight checks), lvm2's and bcache-tools' only for
 redund's foreign stage, which makes a
@@ -461,24 +463,24 @@ that asks for the counters, which reads them at the call as
   passes every negative on it (`cnagent.md` CN21): a residue check's failed dm
   or nvmet listing prints a failing line, and so do a failed listing of
   clone_xfer's token bucket once it is removed and a failed listing of the
-  firewall rules once a partition stage, redund's dial or pause's cut has
-  removed them, a node with no iptables included, a status-less check reply
-  fails, the agent-log readers fail their stage on a log that is missing or
-  cannot be read, thinbm's checks, clone_xfer's enable and finalize checks
-  that a converge ran no such command and the late flip's check that its
-  promotion wrote no optimized group fail when that converge logged nothing at
-  all, the long-dead stage counts a path absent only once the same read saw it
-  live, an admission refusal needs nvmet's own refusal record behind a fresh
-  mark, the park's open check, the dead-leg "no mdadm", the bound on what
-  a rebuilt clone copies, and clone_xfer's checks that its agent's restart
-  over the held copy mutated nothing and that the source's return created no
-  dm-clone carry positive controls, the reads of the dm-clone by the
-  restart's reconcile, under a trace id of its own, and by a round of the
-  stage's after it, and the reload in the same reading, clone_xfer's
-  giveback and finalize checks that the agent ran no command under a trace
-  id of its own have the stage's own commands in the same reading (the
-  reload, and the finalize's order) — the early, late-flip and srcgone
-  checks of that kind carry none, so a log reader that stops matching
+  firewall rules once a partition stage, redund's dial, or pause's or
+  groupcut's cut has removed them, a node with no iptables included, a
+  status-less check reply fails, the agent-log readers fail their stage on a
+  log that is missing or cannot be read, thinbm's checks, clone_xfer's enable
+  and finalize checks that a converge ran no such command and the late flip's
+  check that its promotion wrote no optimized group fail when that converge
+  logged nothing at all, the long-dead stage counts a path absent only once
+  the same read saw it live, an admission refusal needs nvmet's own refusal
+  record behind a fresh mark, the park's open check, the dead-leg "no mdadm",
+  the bound on what a rebuilt clone copies, and clone_xfer's checks that its
+  agent's restart over the held copy mutated nothing and that the source's
+  return created no dm-clone carry positive controls, the reads of the
+  dm-clone by the restart's reconcile, under a trace id of its own, and by a
+  round of the stage's after it, and the reload in the same reading,
+  clone_xfer's giveback and finalize checks that the agent ran no command
+  under a trace id of its own have the stage's own commands in the same
+  reading (the reload, and the finalize's order) — the early, late-flip and
+  srcgone checks of that kind carry none, so a log reader that stops matching
   passes them — and in
   redund's md-refusal stage the checks that no array holds a leg and that no
   loop device is left fail on a read that fails and have the running array
@@ -922,14 +924,15 @@ and drops both lists. In the second the mark is cleared as the worker
 clears it, once the reading names it acted and the row reads OK; the same
 level steps assemble the array again from both legs, whose lists stay, the
 row OK. In the third a new mark is given while the row reads ERROR, the one
-state in which the gateway takes a new mark below the level that stops the
-group arrays; the array runs, so the mark waits, and the reading names no
-mark of its revision as acted (it read 0 on the lab), so the worker would
-keep it, and the level steps make it act and drop both lists. In the
-fourth, with the mark cleared, mdadm assembles the array by hand at the
-level with no group array passing force-no-bbl and stops it, and the level
-step up assembles it with no list. Before each stage that plants the block
-again, and at the end, the host reads its data unchanged.
+state of this sequence in which the gateway takes a new mark, as it refuses
+one over a row that reads OK and at the level that stops the group arrays
+(`architecture.md`, Repairs, ForceStartGroup); the array runs, so the mark
+waits, and the reading names no mark of its revision as acted (it read 0 on
+the lab), so the worker would keep it, and the level steps make it act and
+drop both lists. In the fourth, with the mark cleared, mdadm assembles the
+array by hand at the level with no group array passing force-no-bbl and stops
+it, and the level step up assembles it with no list. Before each stage that
+plants the block again, and at the end, the host reads its data unchanged.
 Then an older named leg:
 leg 1 dies for the primary alone and the host's write of its first block,
 its own bytes again, makes md fail it, so the other leg's change count
@@ -1063,17 +1066,19 @@ stripe is the block, and none where it is smaller.
 (`architecture.md`, [D15]; `cnagent.md` CN13): a first write into a block a
 pool has not mapped, shorter than the block, reads on the host and on both
 legs as zeros beside the write, never as the bytes a leg held before. Once
-the A shape's sides are provisioned, and before any controller node reads
-them, each data side takes a byte pattern of its own disk node's from the
-end of what provisioning zeroes, so that the legs differ there and md, which
-makes the array over the legs as they are (CN12), copies neither over the
-other. The host writes 4 KiB with direct IO at an offset of its own inside
-each of sixteen thin blocks never written; each whole block then reads as
-zeros and the write on the host, and the same on each leg at the pool block
-a fresh pool maps it to (Lab facts). A pool block no write reached still
-holds each leg's own pattern, the positive control that the patterns
-reached the legs. An agent whose pool table skips block zeroing fails the
-case at the first block over an old pattern.
+the A shape's sides are provisioned (the A shape is the layout of redund's
+pool: md-raid1 meta and data groups, leg 1 of each on DN1 and leg 2 on DN2;
+here its primary is on CN2 alone), and before any controller node reads them,
+each data side takes a byte pattern of its own disk node's from the end of
+what provisioning zeroes, so that the legs differ there and md, which makes
+the array over the legs as they are (CN12), copies neither over the other. The
+host writes 4 KiB with direct IO at an offset of its own inside each of
+sixteen thin blocks never written; each whole block then reads as zeros and
+the write on the host, and the same on each leg at the pool block a fresh pool
+maps it to (Lab facts). A pool block no write reached still holds each leg's
+own pattern, the positive control that the patterns reached the legs. An agent
+whose pool table skips block zeroing fails the case at the first block over an
+old pattern.
 
 **clone_xfer** proves `architecture.md`, Transfer + clone = cross-SP live
 migration, and Clone metadata durability, between pools on different nodes
@@ -1226,21 +1231,24 @@ writes, samples, kernel logs, rounds and summary on the driver.
 **groupcut** measures what a pool does when its primary loses every leg of
 its data group for a few seconds or a minute under a host writing new
 blocks (`architecture.md`, Known limits, the entry on a group that loses
-every leg at once). Each cut builds a fresh A-shaped pool whose meta group
-has both legs on DN2 and whose data group both legs on DN1, a shape the
-gateway never builds, so that pause's rule on vm1, every packet between vm2
-and its nvme-tcp port dropped both ways, cuts the data group alone from the
-primary on CN2: it takes CN2's two data legs and the host's path to the
-standby on CN1, and none of the meta group's legs, local to CN2, or the
-standby's. A writer on vm2 writes 4 KiB synced, each block's own content,
-into one block after another that no write reached before, so each write
-maps a block and commits the pool's metadata; a sampler reads CN2's leg
-paths into DN1, md's members and each array's own state from sysfs, and
-both kernel logs are marked. The cut is timed on vm2's clock, the writer's
-and the sampler's, by a mark just before the rule goes in and one just
-after it comes out, with no call but the cut's own sleep while it stands,
-so that the cut on vm1 lasts what the case asks; every time counts from the
-mark before the cut, and the cut's length is vm1's.
+every leg at once). Each cut builds a fresh pool of the A shape's two
+md-raid1 groups, but with both legs of its meta group on DN2 and both of its
+data group on DN1, a placement the gateway never builds, so that pause's rule
+on vm1, every packet between vm2 and its nvme-tcp port dropped both ways, cuts
+the data group alone from the primary on CN2: it takes CN2's two data legs and
+the host's path to the standby on CN1, and none of the meta group's legs,
+local to CN2, or the standby's. A writer on vm2 writes 4 KiB synced, each
+block's own content, into one block after another that no write reached
+before, so each write maps a block and commits the pool's metadata; a sampler
+reads CN2's leg paths into DN1, md's members and each array's own state from
+sysfs, and both kernel logs are marked. The cut is timed on vm2's clock, the
+writer's and the sampler's, by a mark just before the rule goes in and one
+just after it comes out, with no call but the cut's own sleep while it stands,
+so that the cut on vm1 lasts what the case asks; every time of the summary
+counts from the mark before the cut, but the first write back's, which
+counts from the mark after the lift, and its two lengths, the cut's, which
+is vm1's, and the longest write's, from its own start; the kept kernel logs
+count from a mark taken as the writer starts.
 Once the rule goes, the case waits a bounded time for a write that
 succeeds. It records the host's writes, the longest, the failed ones and
 when the first failed write ended, when md first held a data member faulty
@@ -1256,13 +1264,14 @@ which passes only if a write was held for about the cut's length, so the
 rule held a leg path the writes need (a rule aimed at another port fails
 it), no write failed, writes came back on CN2, every acknowledged block
 reads back and the pool reads writable with no needs_check flag; the gate
-names every check that fails, and a block rewritten behind the read back, a
-gate cut of 20 s (`GCUT_GATE_SECS`) and a wait for writes back of no time
-(`GCUT_BACK_SECS`) each fail it. With `GCUT_MODE=measure`
-and `--only groupcut` the case cuts for 3, 8, 20 and 60 s, each over a
-fresh pool, counts rather than fails a block that does not read back, and
-prints and keeps each cut's files and summary on the driver: a cut of
-3.3 s held the write in flight 3.1 to 3.3 s over six runs, and one of 3.8 s
+names every check that fails, but reads the held write only where no write
+failed, as a failed write shows the rule held a leg path too, and a block
+rewritten behind the read back, a gate cut of 20 s (`GCUT_GATE_SECS`) and a
+wait for writes back of no time (`GCUT_BACK_SECS`) each fail it. With
+`GCUT_MODE=measure` and `--only groupcut` the case cuts for 3, 8, 20 and 60 s,
+each over a fresh pool, counts rather than fails a block that does not read
+back, and prints and keeps each cut's files and summary on the driver: a cut
+of 3.3 s held the write in flight 3.1 to 3.3 s over six runs, and one of 3.8 s
 6.3 to 6.4 s over three, none failing; at 8.5, 20.5 and 60.5 s md failed the
 first member 9.6 to 10.2 s after the cut's mark, at the first leg's
 teardown, and marked the array broken at the second's, which leaves that
@@ -1339,9 +1348,11 @@ connections, which it removes for the same reason, and its netem delay,
 which it removes for the bucket's reason, nodecheck's stalled array and
 mdadm wrapper, which it resumes and removes, as a suspended member wedges
 another suite's udev and LVM scans, and smoke's host writers, which it
-stops, as a writer left running writes on and holds its namespace open;
-the cleanup also ends the process repair's held stop leaves holding an
-array, with the suite's device pins, and takes away a hold still armed.
+stops, as a writer left running writes on and holds its namespace open,
+and repair's stop hold, whose holder it ends and whose flag it takes away,
+as another suite's cleanup could not stop the array it holds; the cleanup
+also ends the process repair's held stop leaves holding an array, with the
+suite's device pins, and takes away a hold still armed.
 A cleanup-only run does the scrub alone.
 It takes every `dnv-agent` and every dnv dm device, md array and nvmet
 subsystem on the node, of either role, which is why one dnv suite runs at a
@@ -1397,10 +1408,11 @@ and the cut of a migrating leg's path (`cnagent.md` CN10) — the unit tests
 prove, the e2e suite's migrations exercising it, and the path rows of a leg
 with two sides (`cnagent.md` CN28), which the unit tests cover; levels but
 read-write, read-only and the no-clone gate, save what repair's
-forced-start stages and thinrepair read of the two levels they use to free
-the data array: the pool row the level that builds no thin pool
-suppresses, and the group array the level that builds no group array stops
-(`cnagent.md` CN19); more
+forced-start stages read of the two levels they use to free the data array,
+the pool row the level that builds no thin pool suppresses and the group
+array the level that builds no group array stops, and what thinrepair reads
+of the first, the thin pool's device gone, the data array assembled again
+and the meta group's array present (`cnagent.md` CN19); more
 than one slice but torn's two RedundNone slices and discard's pools of two
 and eight slices on one disk node; several
 namespaces per subsystem; snapshots of snapshots; `UpdateNamespaceDev`; the

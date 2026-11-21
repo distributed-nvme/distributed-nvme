@@ -836,8 +836,10 @@ old primary serves can lose an acknowledged write, lists.
 The controller plugin's Go tests answer its gateway calls from a stand-in of
 their own, `fakeGateway`, which keeps the plugin's clusters, pools, thin
 devices, subsystems and cntlr lists in maps and answers with the gateway's
-codes; it is not the dnvctl suite's fake gateway, which keeps no state. A
-difference between that stand-in and the gateway shows only in this suite.
+codes; it is not the dnvctl suite's fake gateway, which models no cluster
+state and answers each method from its behavior file (`dnvctl.md`,
+Integration test plan, The fake gateway). A difference between that stand-in
+and the gateway shows only in this suite.
 
 ### Topology and parameters
 
@@ -851,8 +853,10 @@ in. The pinned k3s version is a constant of the suite.
 The suite's work directory on every guest and its shipped helper are its
 own, named so that no other suite's is a prefix of them, and every process
 its cleanup stops or lists by a pattern is matched by its program's path
-under that directory, etcd's included, so that a cleanup never signals a
-program another suite started.
+under that directory, etcd's included, so that no pattern of a cleanup
+matches a program another suite started; a program it stops by its recorded
+pid (`stop_all`, `kill_pidfile`) is signalled with no check that the pid
+still runs a program under that directory.
 
 ### The rules
 
@@ -884,8 +888,11 @@ pipes them into the k3s image store of every node, so no pod pulls them and
 no registry of the suite's takes part. The sidecar images the manifests
 name come from their public registry, which each node pulls from once.
 
-CSI5. **Cleanup removes what the suite started and nothing else.** The
-detach case's out-of-service taint goes first, so that no host comes back
+CSI5. **Cleanup removes what the suite started and nothing else, but for a
+process a stale pid file names.** A pid file a failed run left names a pid
+the kernel may since have given to another process, which the cleanup
+signals as it signals the suite's own (Topology and parameters). The detach
+case's out-of-service taint goes first, so that no host comes back
 under it, which would evict the host's pods; then the cut of a host, the
 machine case's or the detach case's, since Kubernetes cannot confirm the
 deletes of a cut host's pods; then a worker the detach case stopped goes on,
@@ -930,13 +937,15 @@ listing and its read, is skipped and logged. A restart alone fails nothing, as
 a sidecar that loses its lease exits by design (CSI19); the read logs the
 count of each container that restarted. The preflight proves the read of the
 guests' logs on a sample log it plants on the control-plane guest. Not read: a
-container's runs before its previous one; a copy Kubernetes deletes from a cut
-host, whose lines after the cut, and whose log once deleted, the API no longer
-serves; and a crash while the cleanup at the end of a passing run stops a
-program, as that cleanup removes the logs with the programs. Each read starts
-one kubectl call per container log and reads each log from its start, about
-twenty reads of some fifteen logs in a run, which by that count adds a few
-minutes to a run.
+container's runs before its previous one; what a driver container writes
+after the read that comes right before a step of the suite deletes or
+replaces its pod, a crash while that step stops it among it, as its log goes
+with the pod; a copy Kubernetes deletes from a cut host, whose lines after the
+cut, and whose log once deleted, the API no longer serves; and a crash while
+the cleanup at the end of a passing run stops a program, as that cleanup
+removes the logs with the programs. Each read starts one kubectl call per
+container log and reads each log from its start, about twenty reads of some
+fifteen logs in a run, which by that count adds a few minutes to a run.
 
 ### The cases
 
@@ -944,7 +953,9 @@ Every case runs on the suite's dnv stack with the driver deployed from the
 manifests, the config map and the storage classes of the suite in place of
 the examples, and both plugins at `--log-level debug`, the log level the
 suites run their dnv daemons at, save one dn agent in one case of the dn
-suite (`dnagent_integtest.md`, Conventions, Log level); the IO pods run the
+suite (`dnagent_integtest.md`, Conventions, Log level), the tutorial suite's,
+which runs the tutorial's start lines as written, and the e2e suite's v0.1.0
+programs (`e2e_integtest.md`, Topology and parameters); the IO pods run the
 driver's own image, since it carries the tools they need and is already on
 every node. The deploy pulls the sidecar images a node lacks, on every node,
 so that a controller copy that moves starts at once, and checks the driver's
@@ -1121,7 +1132,9 @@ both plugins started there as plain processes with the lab's gateway and
 cdc, after the driver's pods are taken down, since two node plugins on one
 host would follow each other's subsystems. The tests of capabilities the
 driver does not advertise skip on their own; a failure names its test. Then
-the plugins stop, and nothing is left.
+the plugins stop, and nothing is left. csi-sanity runs on past the end of
+the driver's ssh when the case's timeout or a signal ends that ssh, so the
+cleanup stops it with the plugins.
 
 ### Preflight
 
@@ -1152,8 +1165,10 @@ stack and the driver.
 
 ### Diagnostics on failure
 
-A failing run prints first every crash line the guests' logs and the
-driver's container logs hold (CSI21), then the nodes, every pod, the claims,
+A failing run prints first the crash lines of the guests' logs, read guest
+by guest up to the first guest whose logs it cannot read, which it names,
+and every crash line the driver's container logs hold (CSI21), then the
+nodes, every pod, the claims,
 volumes and
 attachments, the pods and events of the suite's namespace, the state of the
 cut of the machine and detach cases on each host, the nodes' taints, the

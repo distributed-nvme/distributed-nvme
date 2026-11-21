@@ -11,9 +11,10 @@
 # loglevel, store_full, blocksize (dnagent_integtest.md, Cases; for
 # `teardown`, also
 # architecture.md, Teardown by sweep). Cleanup runs
-# unconditionally at the start and, on success only, at the end: a failing run
-# leaves every dm/nvmet object and both agent logs in place and dumps
-# diagnostics (dnagent_integtest.md, Teardown and cleanup).
+# unconditionally at the start and at the end on success and after a failed
+# --wipe (wipe_all): any other failing run leaves every dm/nvmet object and
+# both agent logs in place and dumps diagnostics (dnagent_integtest.md,
+# Teardown and cleanup).
 #
 # The uutils dd rule (dnagent_integtest.md, Assumptions and preflight checks,
 # the first lab fact) is absolute: this script never passes iflag= or
@@ -176,7 +177,10 @@ CASES=(smoke zeroing sides migr_full migr_bitmap teardown restart loglevel
 # Logging, assertions, failure handling
 # ---------------------------------------------------------------------------
 
-log() { echo "$*" >&2; }
+# A write that fails, as to a terminal that has closed, sends the run's
+# output to /dev/null from then on, so that a log line never ends the run's
+# exit handler under set -e.
+log() { echo "$*" >&2 || exec >/dev/null 2>&1; }
 
 # stage names the step for the failure report and mints the stage's trace id
 # (dnagent_integtest.md, The driver: `dnagentctl`): one id shared by the
@@ -309,6 +313,20 @@ no_ctrl_shape() {
 on_exit() {
 	local rc=$?
 	trap - EXIT
+	# A signal while this handler runs: a Ctrl-C (SIGINT) reaches the
+	# command in hand, which it ends unless that command ignores it, a read
+	# of a command's output and an ssh still connecting among them, and the
+	# dump and the removals below go on; a SIGHUP, which a terminal that
+	# closes sends twice, is ignored here and by every command below; a
+	# SIGTERM ends the run at once. Output that fails, as a terminal that
+	# has closed does, goes to /dev/null from then on, so that set -e ends
+	# the handler at no log line: this line tries a write first, and log
+	# does the same at each of its writes. rc keeps the code the run was
+	# ending with, and the run exits with it but on a SIGTERM.
+	trap - TERM
+	trap : INT
+	trap '' HUP
+	printf '\n' >&2 2>/dev/null || exec >/dev/null 2>&1
 	if [ "$rc" -eq 0 ]; then
 		if [ "$CLEANUP_ONLY" -eq 0 ] && [ "$SETUP_DONE" -eq 1 ]; then
 			log ""
@@ -1864,7 +1882,7 @@ cleanup() {
 	# A tmpfs over the local store comes off before the work directory goes
 	# (see unmount_work); the agents went first.
 	unmount_work
-	rm -rf "$WORK"
+	rm -rf "$WORK" /var/tmp/dnv-panic-plant-dnagent.*
 	remove_udev_rules >/dev/null
 	echo "cleaned"
 	return 0
@@ -2153,16 +2171,32 @@ wipe_all() {
 		"something outside dnv is holding them"
 }
 
+# helper_wait waits for the helper job <pid> to end, whatever its status.
+# cleanup_all's helpers ignore SIGINT themselves, as a background job of a
+# shell that traps SIGINT, as the exit handler does, takes it at its default
+# action, so a Ctrl-C ends none of them; the Ctrl-C ends a wait at once
+# instead, so the wait is made again until the job has ended: the handler
+# goes on, to a next phase or to its exit, only once no helper still cleans
+# a VM.
+helper_wait() { # <pid>
+	until wait "$1"; do
+		kill -0 "$1" 2>/dev/null || return 0
+	done
+}
+
 # cleanup_all runs the two VMs concurrently: dismantling one node's nvmet
 # objects kills the other's migration-source connection, so the shorter that
 # window is the better.
 cleanup_all() {
 	local idx pid pids=()
 	for idx in 1 2; do
-		helper_ok "$idx" cleanup &
+		{
+			trap '' INT
+			helper_ok "$idx" cleanup
+		} &
 		pids+=($!)
 	done
-	for pid in "${pids[@]}"; do wait "$pid" || true; done
+	for pid in "${pids[@]}"; do helper_wait "$pid"; done
 }
 
 # release_store_tmpfs takes store_full's tmpfs off the local store on the
@@ -2275,18 +2309,20 @@ panic_dump() {
 # match, the two crash lines planted after it must, and nothing else may.
 panic_plant() {
 	local d hits want
-	d=$(sshv 1 "mktemp -d /var/tmp/dnv-panic-plant.XXXXXX") ||
+	d=$(sshv 1 "mktemp -d /var/tmp/dnv-panic-plant-dnagent.XXXXXX") ||
 		die "making the crash scan's scratch directory on vm1 failed"
 	case "$d" in
-	/var/tmp/dnv-panic-plant.?*) ;;
+	/var/tmp/dnv-panic-plant-dnagent.?*) ;;
 	*) die "mktemp on vm1 printed '$d', not a scratch directory" ;;
 	esac
 	printf '%s\n' \
 		'{"level":"ERROR","msg":"os command failed","stderr":"panic: in a field\nfatal error: in a field"}' \
 		'panic: planted by the preflight' 'goroutine 1 [running]:' \
 		'fatal error: planted by the preflight' |
-		sshv 1 "mkdir $d/sub && cat > $d/sub/plant.log" ||
-		die "writing the crash scan's sample log on vm1 failed"
+		sshv 1 "mkdir $d/sub && cat > $d/sub/plant.log" || {
+			sshv 1 "rm -rf $d" || true
+			die "writing the crash scan's sample log on vm1 failed"
+		}
 	hits=$(panic_lines 1 "$d") || hits="(the read failed)"
 	sshv 1 "rm -rf $d" || true
 	want="$d/sub/plant.log:2:panic: planted by the preflight"
@@ -2465,10 +2501,12 @@ assert_no_residue() { # sp
 # Teardown by sweep).
 # The sweep removes what the desired state no longer wants, verifies every
 # removal with a probe that cannot block, and replies with the leftover code
-# while anything is still there. The first `dmsetup remove` of a dm-clone
-# whose source has just died is killed at CmdSoftTimeout; its kernel
-# operation completes when the queued hydration IO fails at fast_io_fail_tmo
-# (DefaultNvmeFastIoFailTmo), and the pass after that finds the device gone.
+# while anything is still there. A `dmsetup remove` of a dm-clone whose
+# source has just died can wait on the hydration IO queued at that source;
+# one that outlasts CmdSoftTimeout is killed, its kernel operation completes
+# when that IO fails at fast_io_fail_tmo (DefaultNvmeFastIoFailTmo), and the
+# pass after that finds the device gone. On the lab the teardown case's clone
+# removal ends within the first pass (case_teardown).
 #
 # Re-driving is the worker's own rule, and the loop is the suite playing that
 # part: in production the retry comes from the CHECK round — each CheckDn
@@ -2483,8 +2521,8 @@ assert_no_residue() { # sp
 # at once rather than after the whole budget: a refusal ran no pass of the
 # drop, and the loop waits out only the leftover that a pass reports. The
 # first reply is logged with its details: whether the very first pass was
-# already clean or reported the leftover the design predicts is the one thing
-# about this loop worth reading afterwards, and neither outcome is a failure.
+# already clean or reported a leftover is the one thing about this loop worth
+# reading afterwards, and neither outcome is a failure.
 dn_drop_until_clean() { # dnidx secs
 	local idx=$1 secs=$2 out code details deadline first=1
 	DROP_FIRST_CODE=""
@@ -4501,18 +4539,20 @@ case_migr_bitmap() {
 # `dead_source` is the DN's own shape of that forgetting. A migration
 # destination hydrates through an nvme connection to its source; the source
 # export is then yanked with the destination never told, and the destination
-# is torn down immediately. The order the sweep has to keep is the whole
-# point: the dm-clone comes off BEFORE the connection it hydrates through
-# (DN6) — pulling the source out from under a live clone strands its IO — and
-# it comes off over a source that is already dead, its copy slowed so that
-# hydration IO is in flight when the source goes. Should its removal wait on
-# that IO past the soft timeout that kills the command, the pass reports the
-# clone as left and a later pass finishes, which is why the drop is a loop
-# and not a single call; on the lab the removal ends within the first pass.
-# What may not happen in that window is any
-# forgetting: the side's allocation record and the migration's clone-metadata
-# record are freed only after their devices have been PROBED gone, so the sp's
-# extents cannot be handed to the next side while a device still maps them.
+# is torn down immediately. The order the sweep has to keep is what the case
+# runs, though it reads only what is left, the order itself being pinned by
+# the unit test TestMigrationCloneRemovedBeforeItsSourceDisconnect: the
+# dm-clone comes off BEFORE the connection it hydrates through (DN6) — pulling
+# the source out from under a live clone strands its IO — and it comes off
+# over a source that is already dead, its copy slowed so that hydration IO is
+# in flight when the source goes. Should its removal wait on that IO past the
+# soft timeout that kills the command, the pass reports the clone as left and
+# a later pass finishes, which is why the drop is a loop and not a single
+# call; on the lab the removal ends within the first pass. What may not happen
+# in that window is any forgetting: the side's allocation record and the
+# migration's clone-metadata record are freed only after their devices have
+# been PROBED gone, so the sp's extents cannot be handed to the next side
+# while a device still maps them.
 #
 # `pinned_side` pins the device-level half of the same rule with no remote
 # involved at all: an fd held outside the agent makes exactly one removal fail
@@ -5589,6 +5629,13 @@ parse_args() {
 main() {
 	parse_args "$@"
 	trap on_exit EXIT
+	# A run killed by SIGTERM, SIGINT or SIGHUP exits with the shell's
+	# code for the signal, so on_exit reads it as the failure it is, never
+	# as a PASS. The HUP trap ignores every later SIGHUP first: a terminal
+	# that closes sends a second one right after the first.
+	trap 'exit 143' TERM
+	trap 'exit 130' INT
+	trap 'trap "" HUP; exit 129' HUP
 	log "driver: $(hostname), vm1=${VM[1]} (${IP[1]}), vm2=${VM[2]} (${IP[2]})"
 
 	if [ "$WIPE" -eq 1 ]; then
