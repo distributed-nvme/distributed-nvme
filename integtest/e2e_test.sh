@@ -18,7 +18,7 @@
 #
 #   optional: [--only <case>] [--cleanup-only] [--slice-cnt N]
 #             [--redund raid1|none] [--dns-per-vm N] [--keep-logs DIR]
-#             [--pool-cnt N]
+#             [--pool-cnt N] [--soak-hours H]
 #
 # Cases, in order, each from an EMPTY etcd and a freshly built storage pool
 # (E2E11): smoke, ops, copy, react, cutoff. `--only` picks one, or one of the
@@ -679,7 +679,7 @@ CASES=(smoke ops copy react cutoff)
 # names it, alone, and never in the default list above, as each holds the lab
 # far longer than a default run or needs parameters of its own. Every name
 # here also needs its arm in sp_thresholds and sp_shape, like any case.
-OPTIN_CASES=(many upgrade)
+OPTIN_CASES=(many upgrade soak)
 
 # Which build's binaries ship_binaries ships and which build's start flags
 # the start lines carry: this tree's (`new`) for every case, and v0.1.0's
@@ -764,6 +764,9 @@ REACT_TD_UNIT=0
 # pools' sides need.
 MANY_RUN_CAP_BYTES=0
 MANY_DNS_PER_VM=0
+# The long run's own numbers (derive_params), as the many-pools case's.
+SOAK_RUN_CAP_BYTES=0
+SOAK_DNS_PER_VM=0
 
 JQ=jq
 # DISC_NQN is the well-known discovery NQN, the SUBNQN of the cdc's record of
@@ -977,7 +980,7 @@ on_exit() {
 		log ""
 		log "########## diagnostics ##########"
 		diagnostics || true
-		# The seven injectors a failed run does not leave in place (E2E6):
+		# The ten injectors a failed run does not leave in place (E2E6):
 		# the next run's cleanup would remove them, but a token bucket on a
 		# node's port would slow every suite run before that, the clone's on
 		# a controller node and the migration's on a disk node, a reject
@@ -985,9 +988,11 @@ on_exit() {
 		# nodes' ports, the group cut on a controller node would cut them,
 		# the flush stage's delay on a controller node would slow them, a
 		# silencing rule on a disk node would stall every connect to its
-		# port, and the many-pools case's cut would keep a controller node's
-		# guest unreachable until its timer. The diagnostics above have
-		# shown all seven. host0's stamped writer is told to stop too: it
+		# port, the many-pools case's cut would keep a controller node's
+		# guest unreachable until its timer, and the long run's slow fault
+		# on a controller node, its token bucket on a disk node and its CPU
+		# cap on a controller node's agent would slow them. The diagnostics
+		# above have shown all ten. host0's stamped writer is told to stop too: it
 		# starts passes until its stop file, and would write on for as long
 		# as its pass bound allows into a lab other runs then use.
 		if [ "${COPY_FO_THROTTLE_CN:--1}" -ge 0 ]; then
@@ -1024,6 +1029,21 @@ on_exit() {
 			log ""
 			log "--- taking the many-pools case's cut off cn$MANY_CUT_CN"
 			helper_cn "$MANY_CUT_CN" net_uncut >&2 || true
+		fi
+		if [ "${SOAK_SLOW_CN:--1}" -ge 0 ]; then
+			log ""
+			log "--- taking the long run's slow fault off cn$SOAK_SLOW_CN"
+			helper_cn "$SOAK_SLOW_CN" unthrottle >&2 || true
+		fi
+		if [ "${SOAK_SLOW_DN:--1}" -ge 0 ]; then
+			log ""
+			log "--- taking the long run's token bucket off dn$SOAK_SLOW_DN"
+			helper_dn "$SOAK_SLOW_DN" unthrottle >&2 || true
+		fi
+		if [ "${SOAK_CPU_CN:--1}" -ge 0 ]; then
+			log ""
+			log "--- taking the long run's CPU cap off cn$SOAK_CPU_CN"
+			helper_cn "$SOAK_CPU_CN" cpu_uncap >&2 || true
 		fi
 		if [ "${SWRITE_RUNNING:-0}" = 1 ]; then
 			log ""
@@ -1482,7 +1502,7 @@ read_constants() {
 	# would fail its case's `sp create` with INVALID_ARGUMENT two builds into
 	# the run, so it fails here instead, naming the set.
 	for val in "quiet $THR_QUIET_PRIMARY" "reacting $THR_REACT_PRIMARY" \
-		"cutoff $THR_CUT_PRIMARY"; do
+		"cutoff $THR_CUT_PRIMARY" "shipped $DEFAULT_PRIMARY_UNHEALTHY"; do
 		[ "${val#* }" -ge "$((2 * DEFAULT_HC_INTERVAL))" ] ||
 			die "the ${val%% *} threshold set's primary_unhealthy ${val#* }" \
 				"is under two of common.DefaultHealthCheckInterval" \
@@ -1506,7 +1526,7 @@ usage() {
 	cat >&2 <<EOF
 usage: bash integtest/e2e_test.sh [--only <case>] [--cleanup-only]
            [--slice-cnt N] [--redund raid1|none] [--dns-per-vm N]
-           [--keep-logs DIR] [--pool-cnt N]
+           [--keep-logs DIR] [--pool-cnt N] [--soak-hours H]
            --cp user@ip --cn user@ip … --dn user@ip … --host user@ip …
 
 roles (repeatable flags; nothing is positional, nothing is hardcoded):
@@ -1540,6 +1560,11 @@ parameters:
                       $MANY_POOL_CNT_DEFAULT; 1..$MANY_POOL_CNT_MAX); that case alone takes it, and
                       it builds one-slice raid1 pools, so it refuses
                       --slice-cnt other than 1 and --redund none
+  --soak-hours H       the soak case's length in hours, a decimal number
+                      (default $SOAK_HOURS_DEFAULT; at least 10 minutes); that case alone
+                      takes it, and it builds one-slice raid1 as setup's
+                      pool, so it refuses --slice-cnt other than 1 and
+                      --redund none
   --cleanup-only      run the start cleanup on every guest and stop
   --keep-logs DIR     before each cleanup that removes the guests' work
                       directories — between cases, and at the end of a run
@@ -1669,6 +1694,15 @@ parse_args() {
 			KEEP_LOGS=$2
 			shift 2
 			;;
+		--soak-hours)
+			[ $# -ge 2 ] || usage
+			SOAK_HOURS=$2
+			shift 2
+			;;
+		--soak-hours=*)
+			SOAK_HOURS=${1#*=}
+			shift
+			;;
 		--pool-cnt)
 			[ $# -ge 2 ] || usage
 			MANY_POOL_CNT=$2
@@ -1703,6 +1737,23 @@ parse_args() {
 		{ [ "$MANY_POOL_CNT" -ge 1 ] &&
 			[ "$MANY_POOL_CNT" -le "$MANY_POOL_CNT_MAX" ]; } || usage
 	elif [ -n "$MANY_POOL_CNT" ]; then
+		usage
+	fi
+	# The long run's RAID1 pool is setup's, one slice, and its wide pool is
+	# its own (e2e_integtest.md, The cases, soak); its length is
+	# --soak-hours, a decimal number of hours, SOAK_HOURS_DEFAULT when
+	# absent, which no other case takes.
+	if [ "$ONLY" = soak ]; then
+		{ [ "$SLICE_CNT_SET" -eq 0 ] || [ "$SLICE_CNT" = 1 ]; } || usage
+		[ "$REDUND" = raid1 ] || usage
+		SLICE_CNT=1
+		[ -n "$SOAK_HOURS" ] || SOAK_HOURS=$SOAK_HOURS_DEFAULT
+		case "$SOAK_HOURS" in
+		'' | *[!0-9.]* | .* | *. | *.*.*) usage ;;
+		esac
+		SOAK_SECS=$(awk -v h="$SOAK_HOURS" 'BEGIN { printf "%d", h * 3600 }')
+		[ "$SOAK_SECS" -ge 600 ] || usage
+	elif [ -n "$SOAK_HOURS" ]; then
 		usage
 	fi
 
@@ -2008,6 +2059,29 @@ derive_params() {
 			MANY_DNS_PER_VM=$DNS_PER_VM_BOUND
 		[ -n "$DNS_PER_VM_OPT" ] || DNS_PER_VM=$MANY_DNS_PER_VM
 	fi
+	# The long run's wide pool has no redundancy, one leg a group, and its
+	# create puts each of its 2 x SOAK_WIDE_SLICES sides on a disk node of
+	# its own, so its own placement bound, the one above at one leg and its
+	# groups, binds when it is the larger; the RAID1 pool may share those
+	# disk nodes, as each create's black list is its own.
+	if [ "$ONLY" = soak ]; then
+		local wide=$((2 * SOAK_WIDE_SLICES / DN_VM_CNT + 1))
+		SOAK_DNS_PER_VM=$DNS_PER_VM_BOUND
+		[ "$wide" -le "$SOAK_DNS_PER_VM" ] || SOAK_DNS_PER_VM=$wide
+		[ -n "$DNS_PER_VM_OPT" ] || DNS_PER_VM=$SOAK_DNS_PER_VM
+		SOAK_CYCLE_SECS=$((SOAK_SECS / ${#SOAK_FAULTS[@]}))
+		[ "$SOAK_CYCLE_SECS" -le "$SOAK_CYCLE_MAX" ] || SOAK_CYCLE_SECS=$SOAK_CYCLE_MAX
+		# A whole number of cycles, counted here and not from the clock:
+		# the run's first sample comes before cycle 0, so a loop that
+		# stopped once a cycle no longer fitted would drop the last fault.
+		SOAK_CYCLE_CNT=$((SOAK_SECS / SOAK_CYCLE_SECS))
+		SOAK_FAULT_SECS=$((SOAK_CYCLE_SECS / 3))
+		[ "$SOAK_FAULT_SECS" -le "$SOAK_FAULT_MAX" ] || SOAK_FAULT_SECS=$SOAK_FAULT_MAX
+		SOAK_RANGE=$((SOAK_IOPS * SOAK_CYCLE_SECS * 2 * 4096))
+		[ $((2 * SOAK_RANGE)) -le "$SOAK_TD_SIZE" ] ||
+			die "the long run's writers want $((2 * SOAK_RANGE)) bytes of each" \
+				"pool's thin device, which holds $SOAK_TD_SIZE"
+	fi
 
 	# The cap is a per-kernel sanity limit (E2E3), and it is also what keeps the
 	# DN gRPC block below CN_GRPC_PORT. More VMs is the remedy — but NOT
@@ -2124,6 +2198,17 @@ derive_params() {
 		MANY_CUT_SECS=$((WAIT_REACT + 2 * MANY_POOL_CNT + hosts * (WAIT_BUILD + WAIT_HOST) + 2 * MANY_POOL_CNT + MANY_TIMER_SLACK))
 		MANY_SAMPLER_SECS=$((hosts * WAIT_SHORT + MANY_CUT_SECS + WAIT_BUILD + hosts * (WAIT_BUILD + WAIT_HOST) + 2 * MANY_POOL_CNT + MANY_TIMER_SLACK))
 		lab_disk_guard "$MANY_RUN_CAP_BYTES" "--pool-cnt $MANY_POOL_CNT"
+	fi
+	# The long run's twin: the RAID1 pool's sides, the wide pool's, one data
+	# side of its meta region and first block and one meta side a slice,
+	# and per cycle an extent on every leg of a migration's destination, a
+	# grown group's side, a snapshot's and a namespace's few blocks, both
+	# hosts' writes into both pools on every leg, and 3 GiB of logs an hour
+	# beside the slack, as every agent logs each object's reads at debug
+	# (the many-pools case left some 20 MB of logs a pool a minute).
+	if [ "$ONLY" = soak ]; then
+		local cycles=$((SOAK_SECS / SOAK_CYCLE_SECS + 1))
+		SOAK_RUN_CAP_BYTES=$((SP_ZERO_BYTES + SOAK_WIDE_SLICES * (EXTENT_SIZE + 2 * DATA_BLOCK_SIZE) + cycles * (LEGS * EXTENT_SIZE + EXTENT_SIZE + (8 << 20)) + 2 * LEGS * SOAK_TD_SIZE + (SOAK_SECS / 3600 + 1) * (3 << 30) + DN_TOTAL * DN_PAT_BYTES + RUN_SLACK_BYTES))
 	fi
 
 	# CreateThinDevice (gateway/thindevice.go): a td's size must be a positive
@@ -3260,6 +3345,35 @@ sig_pidfile() { # <pidfile> <STOP|CONT>
 	return 0
 }
 
+# --- the long run's sampler (e2e_integtest.md, The cases, soak) ---------------
+#
+# proc_sample <name>=<pidfile>… prints, for each program, `<name>
+# rss_kib=<resident KiB> fds=<open files> threads=<threads>` from /proc, or
+# `<name> gone` when its pid file names no live process.
+proc_sample() {
+	local spec name f pid rss thr fds
+	for spec in "$@"; do
+		name=${spec%%=*}
+		f=${spec#*=}
+		pid=$(cat "$f" 2>/dev/null) || pid=""
+		case "$pid" in
+		'' | *[!0-9]*)
+			echo "$name gone"
+			continue
+			;;
+		esac
+		if [ ! -r "/proc/$pid/status" ]; then
+			echo "$name gone"
+			continue
+		fi
+		rss=$(awk '/^VmRSS:/ { print $2 }' "/proc/$pid/status" 2>/dev/null)
+		thr=$(awk '/^Threads:/ { print $2 }' "/proc/$pid/status" 2>/dev/null)
+		fds=$(ls "/proc/$pid/fd" 2>/dev/null | wc -l)
+		echo "$name rss_kib=${rss:-0} fds=${fds:-0} threads=${thr:-0}"
+	done
+	return 0
+}
+
 # --- ports -------------------------------------------------------------------
 
 # listening is a PREDICATE: exit 0 when something holds that TCP port. It is
@@ -4280,6 +4394,107 @@ throttle_to() {
 	fi
 	if [ "$ok" = 1 ]; then
 		echo "throttled $nic"
+	else
+		unthrottle >/dev/null
+		echo "failed: ${err//$nl/; }"
+	fi
+	return 0
+}
+
+# --- the long run's slow faults (e2e_integtest.md, The cases, soak) ---------
+#
+# netem_from and netem_to put a netem qdisc in the token bucket's place of
+# throttle_from and throttle_to, under the same root qdisc and its handle, so
+# throttle_rules reads them back and unthrottle and every cleanup take them
+# off as they take a bucket. netem_from delays or drops what this node sends
+# from one address and port to one peer, the replies of an agent's gRPC
+# server to the control-plane guest; netem_to what it sends to the listed
+# addresses, a controller node's NVMe/TCP traffic to the disk-node guests.
+# <kind> is `delay` with a value in ms or `loss` with a value in percent.
+# Each prints "slowed <interface>", or "failed:" and the failing step's
+# words, leaving no qdisc of this suite's behind.
+netem_args() { # <delay|loss> <value>
+	case "$1:$2" in
+	delay:[0-9]*) echo "delay ${2}ms" ;;
+	loss:[0-9]*) echo "loss ${2}%" ;;
+	*) return 1 ;;
+	esac
+}
+
+netem_from() { # <src ip> <src port> <peer ip> <delay|loss> <value>
+	local tc nic err args
+	tc=$(tc_bin)
+	nic=$(nic_to "$3")
+	args=$(netem_args "$4" "$5") || {
+		echo "failed: '$4 $5' is no delay or loss"
+		return 0
+	}
+	if [ -z "$tc" ] || [ -z "$nic" ]; then
+		echo "failed: tc '$tc', the interface to $3 '$nic'"
+		return 0
+	fi
+	# shellcheck disable=SC2086
+	if err=$("$tc" qdisc replace dev "$nic" root handle "$THROTTLE_HANDLE": \
+		prio bands 4 priomap 1 2 2 2 1 2 0 0 1 1 1 1 1 1 1 1 2>&1) &&
+		err=$("$tc" qdisc add dev "$nic" parent "$THROTTLE_HANDLE":4 netem \
+			$args 2>&1) &&
+		err=$("$tc" filter add dev "$nic" parent "$THROTTLE_HANDLE": \
+			protocol ip prio 1 u32 match ip src "$1"/32 \
+			match ip sport "$2" 0xffff match ip dst "$3"/32 \
+			flowid "$THROTTLE_HANDLE":4 2>&1); then
+		echo "slowed $nic"
+	else
+		unthrottle >/dev/null
+		echo "failed: $err"
+	fi
+	return 0
+}
+
+netem_to() { # <to ip>[,<to ip>…] <delay|loss> <value>
+	local tc nic n to err="" ok=1 args nl=$'\n'
+	local -a tos
+	IFS=, read -r -a tos <<<"${1:-}"
+	tc=$(tc_bin)
+	args=$(netem_args "$2" "$3") || {
+		echo "failed: '$2 $3' is no delay or loss"
+		return 0
+	}
+	if [ -z "$tc" ] || [ "${#tos[@]}" -eq 0 ]; then
+		echo "failed: tc '$tc', the addresses '${1:-}'"
+		return 0
+	fi
+	nic=$(nic_to "${tos[0]}")
+	for to in "${tos[@]}"; do
+		case "$to" in
+		'' | *[!0-9.]* | .* | *. | *..*)
+			echo "failed: '$to' names no IPv4 address"
+			return 0
+			;;
+		esac
+		n=$(nic_to "$to")
+		if [ -z "$n" ] || [ "$n" != "$nic" ]; then
+			echo "failed: the interface to $to is '$n', not '$nic'"
+			return 0
+		fi
+	done
+	# shellcheck disable=SC2086
+	if ! err=$("$tc" qdisc replace dev "$nic" root handle "$THROTTLE_HANDLE": \
+		prio bands 4 priomap 1 2 2 2 1 2 0 0 1 1 1 1 1 1 1 1 2>&1) ||
+		! err=$("$tc" qdisc add dev "$nic" parent "$THROTTLE_HANDLE":4 netem \
+			$args 2>&1); then
+		ok=0
+	else
+		for to in "${tos[@]}"; do
+			if ! err=$("$tc" filter add dev "$nic" \
+				parent "$THROTTLE_HANDLE": protocol ip prio 1 u32 \
+				match ip dst "$to"/32 flowid "$THROTTLE_HANDLE":4 2>&1); then
+				ok=0
+				break
+			fi
+		done
+	fi
+	if [ "$ok" = 1 ]; then
+		echo "slowed $nic"
 	else
 		unthrottle >/dev/null
 		echo "failed: ${err//$nl/; }"
@@ -5676,6 +5891,54 @@ gcut_read() {
 	return 0
 }
 
+# --- the long run's CPU cap (e2e_integtest.md, The cases, soak) ---------------
+#
+# cpu_cap moves the process of <pidfile> into a cgroup of this suite's own
+# under the root of the cgroup tree, whose cpu.max is <quota> <period> in
+# microseconds, and prints `capped pid=<pid> cpu.max=<what it reads>`;
+# cpu_uncap moves every process of that cgroup to the root cgroup and
+# removes it, and prints `uncapped`. A process started over ssh lives in its
+# session's scope, and the root's cgroup.subtree_control holds cpu on the
+# lab's guests, so the cgroup takes cpu.max (e2e_integtest.md, The cases,
+# soak). Every cleanup takes the cap off (cn_cleanup_phase1).
+CPU_CG=/sys/fs/cgroup/dnv-e2e-cpu
+
+cpu_cap() { # <pidfile> <quota> <period>
+	local pid
+	pid=$(cat "$1" 2>/dev/null) || pid=""
+	case "$pid" in
+	'' | *[!0-9]*)
+		echo "failed: pid file $1 holds '$pid'"
+		return 0
+		;;
+	esac
+	mkdir -p "$CPU_CG" 2>/dev/null &&
+		echo "$2 $3" >"$CPU_CG/cpu.max" 2>/dev/null &&
+		echo "$pid" >"$CPU_CG/cgroup.procs" 2>/dev/null || {
+		cpu_uncap >/dev/null
+		echo "failed: the cgroup $CPU_CG did not take pid $pid at cpu.max $2 $3"
+		return 0
+	}
+	echo "capped pid=$pid cpu.max=$(tr ' ' '/' <"$CPU_CG/cpu.max")"
+	return 0
+}
+
+cpu_uncap() {
+	local p
+	if [ -d "$CPU_CG" ]; then
+		for p in $(cat "$CPU_CG/cgroup.procs" 2>/dev/null); do
+			echo "$p" >/sys/fs/cgroup/cgroup.procs 2>/dev/null || true
+		done
+		rmdir "$CPU_CG" 2>/dev/null || true
+	fi
+	if [ -d "$CPU_CG" ]; then
+		echo "failed: $CPU_CG is still there"
+	else
+		echo uncapped
+	fi
+	return 0
+}
+
 # --- the many-pools case's cut of a whole controller node -------------------
 #
 # net_cut drops every packet this guest sends or receives but the loopback's
@@ -5889,6 +6152,7 @@ cn_up() { # <dir> <store> <log> <ip> <grpc_port> <trsvcid> <capacity> [new|v010]
 cn_cleanup_phase1() {
 	local left
 	net_uncut >/dev/null
+	cpu_uncap >/dev/null
 	unthrottle >/dev/null
 	unreject >/dev/null
 	uncut >/dev/null
@@ -5921,6 +6185,10 @@ cn_cleanup_phase1() {
 	fi
 	if [ "$(net_cut_state)" != none ]; then
 		echo "cn_cleanup_phase1: the many-pools case's cut is still on" >&2
+		return 1
+	fi
+	if [ -d "$CPU_CG" ]; then
+		echo "cn_cleanup_phase1: the long run's CPU cap is still on" >&2
 		return 1
 	fi
 	echo phase1
@@ -8556,7 +8824,16 @@ start_etcd() {
 		"--initial-advertise-peer-urls http://127.0.0.1:$ETCD_PEER_PORT" \
 		"--initial-cluster $ETCD_NAME=http://127.0.0.1:$ETCD_PEER_PORT" \
 		"--max-txn-ops=$ETCD_MAX_TXN_OPS" \
-		"--max-request-bytes=$ETCD_MAX_REQUEST_BYTES"
+		"--max-request-bytes=$ETCD_MAX_REQUEST_BYTES" \
+		"$(soak_etcd_flags)"
+}
+
+# soak_etcd_flags prints the long run's etcd flag: the automatic compaction
+# of its history a deployment runs with (architecture.md, System overview),
+# as the run lasts hours; nothing for every other case, whose etcd lives one
+# case.
+soak_etcd_flags() {
+	[ "$ONLY" != soak ] || printf '%s' "--auto-compaction-retention=1h"
 }
 
 # new_flag prints its words when the start lines carry this tree's flags and
@@ -8580,11 +8857,14 @@ start_gateway() {
 # fire faster than the vote loop, and every react bound is threshold plus a
 # few intervals.
 start_worker() {
+	local vote="--vote-interval $VOTE_INTERVAL --vote-grace-time $VOTE_GRACE"
+	vote="$vote $(new_flag --vote-leave-grace-time "$VOTE_LEAVE_GRACE")"
+	# The long run's worker runs the shipped vote timers, as a deployment's
+	# does: no flag, so each takes its default.
+	[ "$ONLY" != soak ] || vote=""
 	remote_start "$CP" worker worker.log \
 		"$WORK/bin/dnv-worker --etcd-endpoints 127.0.0.1:$ETCD_CLIENT_PORT" \
-		"--roles ${WORKER_ROLES// /,}" \
-		"--vote-interval $VOTE_INTERVAL --vote-grace-time $VOTE_GRACE" \
-		"$(new_flag --vote-leave-grace-time "$VOTE_LEAVE_GRACE")" \
+		"--roles ${WORKER_ROLES// /,}" "$vote" \
 		"$(new_flag --log-level debug)"
 }
 
@@ -8960,6 +9240,10 @@ CN_REACT_TOOLS="nft"
 # nft and systemd-run: the many-pools case's cut of a controller node
 # (net_cut), whose table a systemd timer removes should the run stop first.
 CN_MANY_TOOLS="nft systemd-run"
+# tc and ip: the long run's netem faults on a controller node (netem_from,
+# netem_to) and its token bucket on a disk node (throttle_from).
+CN_SOAK_TOOLS="tc ip"
+DN_SOAK_TOOLS="tc ip"
 # nft on a DN: the react case's silencing rule (silence_port), which
 # preflight_node asks of a DN only when that case runs with md-raid1 and more
 # DN VMs than legs, where its migrating-leg step runs (react_migr_cut), as it
@@ -9321,6 +9605,9 @@ preflight_node() { # <role: dn|cn> <index>
 			[ "$DN_VM_CNT" -gt "$LEGS" ]; then
 			want_tools="$want_tools $DN_REACT_TOOLS"
 		fi
+		if run_has_case soak; then
+			want_tools="$want_tools $DN_SOAK_TOOLS"
+		fi
 	else
 		sshw=ssh_cn
 		helperw=helper_cn
@@ -9334,6 +9621,9 @@ preflight_node() { # <role: dn|cn> <index>
 		fi
 		if run_has_case many; then
 			want_tools="$want_tools $CN_MANY_TOOLS"
+		fi
+		if run_has_case soak; then
+			want_tools="$want_tools $CN_SOAK_TOOLS"
 		fi
 	fi
 
@@ -9571,7 +9861,7 @@ preflight_host() { # <h>
 
 	# The many-pools case's writers and path sampler run on both hosts.
 	# Never installed by this suite either.
-	if run_has_case many; then
+	if run_has_case many || run_has_case soak; then
 		missing=$(ssh_host "$h" "$(tools_cmd $HOST_MANY_TOOLS)") ||
 			die "$label: listing the many-pools case's tools failed"
 		[ -z "$missing" ] ||
@@ -11963,6 +12253,17 @@ sp_thresholds() { # <case name>
 		THR_LEG=default
 		THR=""
 		;;
+	soak)
+		# The long run runs the shipped thresholds: its create names none,
+		# so the pool stores none and each resolves to its default when read
+		# (model.ResolveEventThreshold), as a CSI pool's does.
+		THR_SET=shipped
+		THR_PRIMARY=0
+		THR_CNTLR=0
+		THR_SIDE=0
+		THR_LEG=0
+		THR=""
+		;;
 	smoke | ops | copy)
 		THR_SET=quiet
 		THR_PRIMARY=$THR_QUIET_PRIMARY
@@ -12000,6 +12301,15 @@ sp_shape() { # <case name>
 			log "  react builds $REACT_SLICE_CNT slices, its cap" \
 				"REACT_SLICE_CAP, not the run's $RUN_SLICE_CNT"
 		fi
+		;;
+	soak)
+		# The run's shape, one slice for this case's RAID1 pool
+		# (parse_args), and the case's own run cap (derive_params).
+		SLICE_CNT=$RUN_SLICE_CNT
+		GRP_CNT=$RUN_GRP_CNT
+		SP_ZERO_BYTES=$RUN_SP_ZERO_BYTES
+		RUN_CAP_BYTES=$SOAK_RUN_CAP_BYTES
+		TD_UNIT=$RUN_TD_UNIT
 		;;
 	many)
 		# The run's shape, one slice for this case (parse_args), and the
@@ -12216,13 +12526,16 @@ setup_create_sp() {
 	# CreateStoragePool (gateway/storagepool.go) stores EventThreshold exactly
 	# as sent — nothing resolves it — so this is also the proof that $THR split
 	# into its eight words instead of arriving as one.
-	assert_field "$SP_JSON" '.sp_conf.event_threshold.primary_unhealthy' \
+	# A create that names no threshold sends no EventThreshold message at
+	# all (the shipped set's), which the reply renders absent, so an absent
+	# field reads as the zero it stands for.
+	assert_field "$SP_JSON" '.sp_conf.event_threshold.primary_unhealthy // 0' \
 		"$THR_PRIMARY" "event_threshold.primary_unhealthy (uint32, a bare number)"
-	assert_field "$SP_JSON" '.sp_conf.event_threshold.cntlr_unhealthy' \
+	assert_field "$SP_JSON" '.sp_conf.event_threshold.cntlr_unhealthy // 0' \
 		"$THR_CNTLR" "event_threshold.cntlr_unhealthy"
-	assert_field "$SP_JSON" '.sp_conf.event_threshold.side_unhealthy' \
+	assert_field "$SP_JSON" '.sp_conf.event_threshold.side_unhealthy // 0' \
 		"$THR_SIDE" "event_threshold.side_unhealthy"
-	assert_field "$SP_JSON" '.sp_conf.event_threshold.leg_unhealthy' \
+	assert_field "$SP_JSON" '.sp_conf.event_threshold.leg_unhealthy // 0' \
 		"$THR_LEG" "event_threshold.leg_unhealthy"
 	# The legs' fast IO fail timeout, resolved as the worker resolves it
 	# (architecture.md, Common validation): the stored member, or the
@@ -13515,6 +13828,13 @@ case_space_guard() {
 				sides=${MANY_DN_SIDES[$(dn_addr "$v" "$k")]:-0}
 				many_cap=$((sides * EXTENT_SIZE + DN_PAT_BYTES + (16 << 20)))
 				[ "$many_cap" -le "$cap" ] || cap=$many_cap
+			fi
+			# The long run moves, grows and copies for hours, and what it
+			# zeroes and writes lands on any disk node, so each of its files
+			# is held to the backing file's own size and its whole run to its
+			# run cap.
+			if [ "$CASE" = soak ]; then
+				cap=$((${BACKING_SIZE%G} << 30))
 			fi
 			assert_le "$bytes" "$cap" \
 				"dn$v: allocated bytes of $path (what its DN zeroed and had written through its sides, the backing pattern and metadata)"
@@ -32183,6 +32503,724 @@ case_upgrade() {
 }
 
 # ---------------------------------------------------------------------------
+# The long run (e2e_integtest.md, The cases, soak), an opt-in case
+# ---------------------------------------------------------------------------
+#
+# Hours at the shipped thresholds: two pools whose creates name no threshold,
+# so they store none and run the defaults, as a CSI pool does, under a worker
+# on its shipped vote timers and an etcd that compacts its history as a
+# deployment's does (start_worker, start_etcd). setup's one-slice RAID1 pool
+# and a wide pool of SOAK_WIDE_SLICES slices without redundancy take a steady
+# write from both hosts, and a cycle repeats on them: a grow, a snapshot made
+# and deleted, a migration of a leg of the RAID1 pool, a cntlr disabled and
+# enabled, a thin device exported and deleted, then one slow fault, each
+# fault in turn, with the outcome e2e_integtest.md states for it. A sampler
+# reads every program's memory, open files and threads and etcd's size every
+# SOAK_SAMPLE_SECS. The pools reuse the many-pools case's arrays and helpers:
+# the RAID1 pool is index 0, the wide pool index 1.
+
+# --soak-hours, a decimal number of hours; SOAK_HOURS_DEFAULT when absent.
+SOAK_HOURS_DEFAULT=6
+SOAK_HOURS=""
+# Derived (derive_params): the run's length, the cycle's, at most
+# SOAK_CYCLE_MAX and short enough that every fault comes once in the run, the
+# fault's, at most SOAK_FAULT_MAX and a third of a cycle, each writer's range
+# per host and pool, which outlasts two cycles at SOAK_IOPS.
+SOAK_SECS=0
+SOAK_CYCLE_SECS=0
+SOAK_CYCLE_CNT=0
+SOAK_FAULT_SECS=0
+SOAK_RANGE=0
+SOAK_CYCLE_MAX=1200
+SOAK_FAULT_MAX=240
+SOAK_SAMPLE_SECS=300
+SOAK_IOPS=1
+SOAK_WIDE=sw
+SOAK_WIDE_SLICES=8
+SOAK_TD=$MANY_TD
+SOAK_TD_SIZE=$((24 << 20))
+SOAK_UUID_BASE=2b6f0cc9-04d2-4f1a-9c3e-1d0a5e7e
+SOAK_VOL_UUID=2b6f0cc9-04d2-4f1a-9c3e-1d0a5e7f0000
+
+# The slow faults, in turn, and their levels: a delay on what one controller
+# node's agent sends to the worker, below the check round's timeout (the
+# object kind's interval, common.DefaultHealthCheckInterval; dnv-worker.md
+# RW8) and above it; a loss on what that node sends to the disk-node
+# guests; a cap on its agent's CPU; and the copy case's token bucket on what
+# a disk node sends from one side's port.
+SOAK_FAULTS=(delay_low delay_high loss cpu throttle)
+SOAK_DELAY_LOW_MS=500
+SOAK_DELAY_HIGH_MS=3000
+SOAK_LOSS_PCT=1
+SOAK_CPU_MAX="10000 100000"
+SOAK_THROTTLE_RATE=8mbit
+
+# The sampler's bound: from the sample at the end of the first hour, or of
+# the first sixth of a shorter run, to the last, no program's memory or open
+# files grow by more than SOAK_GROW_PCT percent beyond a slack for small
+# counts, and etcd's database file stays under SOAK_ETCD_CEIL.
+SOAK_GROW_PCT=50
+SOAK_RSS_SLACK_KIB=16384
+SOAK_FD_SLACK=16
+SOAK_ETCD_CEIL=$((256 << 20))
+
+SOAK_SLICES=()
+SOAK_SAMPLES=()
+SOAK_T_START=0
+SOAK_NEXT_SAMPLE=0
+SOAK_CYCLES=0
+SOAK_CPU_CN=-1
+SOAK_FAULT_LOG=()
+
+# soak_in is many_in with the pool's slice count too, which the stack
+# predicates read (cntlr_full_ready).
+soak_in() { # <i> <cmd…>
+	local SP=${MANY_NAME[$1]} SLICE_CNT=${SOAK_SLICES[$1]}
+	shift
+	"$@"
+}
+
+# --- step 0: setup's pool, at the shipped thresholds -------------------------
+soak_snapshot() {
+	stage 00 "setup's pool $SP at the shipped thresholds: none stored, the defaults run"
+	assert_field "$SP_JSON" '.sp_conf.event_threshold.primary_unhealthy // 0' 0 \
+		"setup's pool stores no primary threshold"
+	sp_refresh
+	sp_read_roles
+	CNTLR_FIELD_LAST=""
+	wait_until "$WAIT_BUILD" \
+		"the primary cntlr $PRIMARY_CNTLR_ID of $SP to be settled" \
+		cntlr_field_is "$PRIMARY_CNTLR_ID" settling false
+	wait_all_listed "$WAIT_PROVISION" \
+		"both cntlrs of $SP to be in its discovery records"
+	MANY_POOL_CNT=2
+	MANY_NAME=("$SP" "$SOAK_WIDE")
+	MANY_SPID=("$SP_ID" "")
+	MANY_SS=("$SS0" "$NQN_IT:mss1")
+	MANY_SSID=("$SS0_ID" "")
+	MANY_NSIDX=(2 1)
+	MANY_NSID=("" "")
+	MANY_UUID=("$SOAK_UUID_BASE$(printf '%04x' 0)" "$SOAK_UUID_BASE$(printf '%04x' 1)")
+	SOAK_SLICES=(1 "$SOAK_WIDE_SLICES")
+	SOAK_SAMPLES=()
+	SOAK_FAULT_LOG=()
+	log "  $SOAK_HOURS h: $SOAK_CYCLE_CNT cycles of ${SOAK_CYCLE_SECS}s, each fault" \
+		"${SOAK_FAULT_SECS}s, a sample every ${SOAK_SAMPLE_SECS}s; the shipped" \
+		"primary threshold resolves to ${DEFAULT_PRIMARY_UNHEALTHY}s"
+}
+
+# --- step 1: the wide pool, and each pool's writer namespace -----------------
+soak_pools() {
+	stage 01 "sp create $SOAK_WIDE: $SOAK_WIDE_SLICES slices, no redundancy, no threshold; a thin device and a namespace on each pool"
+	local i id a
+	ctl_timeout 180 many_in 1 ctl_ok sp create \
+		--cntlr-cnt "$CNTLR_CNT" --slice-cnt "$SOAK_WIDE_SLICES" \
+		--init-ext-cnt "$INIT_EXT_CNT" --slots "$SLOTS" --redund none
+	id=$(jq_of "$CTL_OUT" '.sp_id')
+	case "$id" in
+	'' | *[!0-9]*) die "sp create of $SOAK_WIDE returned sp_id '$id'" ;;
+	esac
+	MANY_SPID[1]=$id
+	many_in 1 ctl_ok ss create --nqn "${MANY_SS[1]}"
+	MANY_SSID[1]=$(jq_of "$CTL_OUT" '.ss_id')
+	many_in 1 ctl_ok ss set-hosts --nqn "${MANY_SS[1]}" \
+		--hosts "${HOST_NQN[0]},${HOST_NQN[1]}"
+	for i in 0 1; do
+		many_in "$i" ctl_ok td create --name "$SOAK_TD" --size "$SOAK_TD_SIZE"
+		many_in "$i" ctl_ok ns create --nqn "${MANY_SS[$i]}" \
+			--idx "${MANY_NSIDX[$i]}" --td "$SOAK_TD" --uuid "${MANY_UUID[$i]}"
+		id=$(jq_of "$CTL_OUT" '.ns_id')
+		case "$id" in
+		'' | *[!0-9]*) die "ns create on ${MANY_SS[$i]} returned ns_id '$id'" ;;
+		esac
+		MANY_NSID[i]=$id
+	done
+	for i in 0 1; do
+		SIDES_LEFT=-1
+		soak_in "$i" wait_until "$WAIT_BUILD" \
+			"every side of ${MANY_NAME[$i]} to be provisioned" sp_sides_provisioned
+		soak_in "$i" wait_until "$WAIT_BUILD" \
+			"$SOAK_TD of ${MANY_NAME[$i]} to report created" td_created "$SOAK_TD"
+		many_read_roles "$i"
+		CNTLR_FIELD_LAST=""
+		soak_in "$i" wait_until "$WAIT_BUILD" \
+			"the primary cntlr ${MANY_PRIM[$i]} of ${MANY_NAME[$i]} to be settled" \
+			cntlr_field_is "${MANY_PRIM[$i]}" settling false
+		soak_in "$i" wait_all_listed "$WAIT_PROVISION" \
+			"both cntlrs of ${MANY_NAME[$i]} to be in its discovery records"
+		soak_in "$i" wait_ns_exported_all "${MANY_SS[$i]}" "${MANY_SSID[$i]}" \
+			"${MANY_NSID[$i]}"
+		many_read_roles "$i"
+	done
+	assert_field "$(soak_in 1 sp_refresh; printf '%s' "$SP_JSON")" \
+		'.sp_conf.event_threshold.primary_unhealthy // 0' 0 \
+		"$SOAK_WIDE stores no primary threshold"
+	many_back_to_setup
+}
+
+# --- the sampler -------------------------------------------------------------
+#
+# soak_sample reads, on every guest, each program this suite started there:
+# its resident memory, its open files and its threads (the helper's
+# proc_sample), and on the control-plane guest etcd's database file, and
+# appends one `t=<seconds into the run> <guest> <program> rss_kib=<n>
+# fds=<n> threads=<n>` row per program, and `etcd_db=<bytes>` for etcd, to
+# SOAK_SAMPLES.
+soak_sample() {
+	local t=$((SECONDS - SOAK_T_START)) v k out line args
+	out=$(helper_cp proc_sample "etcd=$WORK/etcd/pid" "gateway=$WORK/gateway/pid" \
+		"worker=$WORK/worker/pid" "cdc=$WORK/cdc/pid") ||
+		die "cp: the sampler's read failed"
+	while read -r line; do
+		[ -n "$line" ] && SOAK_SAMPLES+=("t=$t cp $line")
+	done < <(printf '%s\n' "$out")
+	out=$(ssh_cp "stat -c %s $WORK/etcd/member/snap/db") ||
+		die "cp: reading etcd's database size failed"
+	SOAK_SAMPLES+=("t=$t cp etcd_db=$out")
+	for v in "${!CN[@]}"; do
+		out=$(helper_cn "$v" proc_sample "cn=$(cn_pid_file)") ||
+			die "cn$v: the sampler's read failed"
+		SOAK_SAMPLES+=("t=$t cn$v $out")
+	done
+	for v in "${!DN[@]}"; do
+		args=""
+		for ((k = 0; k < DNS_PER_VM; k++)); do
+			args="$args dn$k=$(dn_pid_file "$k")"
+		done
+		# shellcheck disable=SC2086
+		out=$(helper_dn "$v" proc_sample $args) ||
+			die "dn$v: the sampler's read failed"
+		while read -r line; do
+			[ -n "$line" ] && SOAK_SAMPLES+=("t=$t dn$v $line")
+		done < <(printf '%s\n' "$out")
+	done
+	log "  sample at ${t}s: etcd db $(printf '%s\n' "${SOAK_SAMPLES[@]}" |
+		awk -v t="t=$t" '$1 == t && $3 ~ /^etcd_db=/ { print substr($3, 9) }') bytes;" \
+		"$(printf '%s\n' "${SOAK_SAMPLES[@]}" | awk -v t="t=$t" '
+			$1 == t && $3 ~ /^(worker|gateway|cdc|etcd|cn)$/ {
+				printf "%s/%s %s %s; ", $2, $3, $4, $5 }')"
+	SOAK_NEXT_SAMPLE=$((SECONDS + SOAK_SAMPLE_SECS))
+}
+
+# soak_tick is the predicate of every wait the run spends on its clock: true
+# once SECONDS reaches <until>; until then it samples when a sample is due and
+# reads the writers every 30 s, and dies on a writer that stopped or wrote a
+# failed write outside a fault the run measures rather than bounds.
+SOAK_NEXT_READ=0
+soak_tick() { # <until>
+	if [ "$SECONDS" -ge "$SOAK_NEXT_SAMPLE" ]; then
+		soak_sample
+	fi
+	if [ "$SECONDS" -ge "$SOAK_NEXT_READ" ]; then
+		soak_writes_ok
+		SOAK_NEXT_READ=$((SECONDS + 30))
+	fi
+	[ "$SECONDS" -ge "$1" ]
+}
+
+# soak_writes_ok reads both writers while they run: each must run. Their
+# failed writes show only in their latency logs, which fio writes as it
+# stops (many_fio_jobs), so soak_gen_errs judges them per generation.
+soak_writes_ok() {
+	local h
+	for h in "${!HOST[@]}"; do
+		many_jobs_wrote "$h" 0 || die "host$h: the writers could not be read"
+	done
+}
+SOAK_CYCLE=0
+SOAK_MEASURED=0
+# The windows of the CPU cap, `<epoch from> <epoch to>` each, from the cap
+# on to both pools settled after it is off: the only time the run lets a
+# write fail.
+SOAK_MWIN=()
+SOAK_ERRS_MEASURED=0
+
+# soak_gen_errs reads the stopped generation's failed writes from both
+# writers' latency logs and dies on one sent outside every window of
+# SOAK_MWIN; those inside it count in SOAK_ERRS_MEASURED.
+soak_gen_errs() {
+	local h out w o p j sent n t0 t1 in
+	for h in "${!HOST[@]}"; do
+		out=$(helper_host "$h" many_fio_jobs all) || die "host$h: reading the writers failed"
+		while read -r w o p j; do
+			case "$w" in err=*) ;; *) continue ;; esac
+			# Sent about j write intervals after the completion before it
+			# (many_err_offsets).
+			sent=$((p + ${j:-1} * 1000 / SOAK_IOPS))
+			in=0
+			for n in "${!SOAK_MWIN[@]}"; do
+				read -r t0 t1 <<<"${SOAK_MWIN[$n]}"
+				if [ "$sent" -ge "$(many_ms "$t0")" ] && [ "$sent" -le "$(many_ms "$t1")" ]; then
+					in=1
+				fi
+			done
+			if [ "$in" = 1 ]; then
+				SOAK_ERRS_MEASURED=$((SOAK_ERRS_MEASURED + 1))
+			else
+				die "host$h job ${w#err=} (pool ${MANY_NAME[${w#err=}]}): the write at $o," \
+					"sent about $sent ms, failed outside the" \
+					"CPU cap the run measures (e2e_integtest.md, The cases, soak)"
+			fi
+		done < <(printf '%s\n' "$out")
+	done
+}
+
+# soak_wait_clock spends the run's time until SECONDS reaches <until>.
+soak_wait_clock() { # <until> <what>
+	wait_until "$(($1 - SECONDS + 60))" "$2" soak_tick "$1"
+}
+
+# --- the writers, one generation a cycle --------------------------------------
+#
+# Each cycle starts a new generation of the two writers under a seed of its
+# own, after the last generation stopped and read back: a block the last
+# generation saw written must hold its write, which its seed tells from an
+# older generation's.
+soak_writers() { # <cycle>
+	local c=$1 h out
+	if [ "$c" -gt 0 ]; then
+		for h in "${!HOST[@]}"; do
+			out=$(helper_host "$h" many_fio_stop 60) ||
+				die "host$h: stopping the writers failed"
+			assert_eq "$out" "mfio=stopped" "host$h: the writers end on SIGINT"
+		done
+		soak_gen_errs
+		many_verify_writes "$c" "$SOAK_RANGE"
+	fi
+	for h in "${!HOST[@]}"; do
+		out=$(helper_host "$h" many_fio_start "$SOAK_IOPS" "$SOAK_RANGE" \
+			"$((h * SOAK_RANGE))" "$((c + 1))" "${MANY_UUID[@]}") ||
+			die "host$h: the writers did not start (fio's errors are above)"
+	done
+	for h in "${!HOST[@]}"; do
+		many_wios_mark "$h"
+		wait_until "$WAIT_HOST" "every writer job on host$h to complete a write" \
+			many_jobs_wrote "$h" 1
+	done
+}
+
+# soak_reactions prints the worker's `reaction applied` records since
+# <epoch>, one `<kind> <sp_id> <epoch>` line each.
+soak_reactions() { # <epoch>
+	local lines
+	lines=$(ssh_cp "grep -F '\"msg\":\"reaction applied\"' $WORK/worker/worker.log || [ \$? -eq 1 ]") ||
+		die "cannot read the reaction records in $WORK/worker/worker.log on $CP_IP"
+	[ -n "$lines" ] || return 0
+	printf '%s\n' "$lines" | "$JQ" -R -r "$MANY_EPOCH_JQ"'
+		fromjson? // empty | (.time | epoch) as $t | select($t >= '"$1"')
+		| "\(.kind) \(.sp_id) \($t)"'
+}
+
+# soak_settled is the predicate of the wait after every operation and every
+# fault: both pools list both cntlrs, no err_epoch left, and both hosts see
+# each pool optimized through its primary and inaccessible through its
+# standby on live controllers. It reads the roles again as it goes.
+soak_settled() {
+	local i h
+	for i in "${!MANY_NAME[@]}"; do
+		soak_in "$i" sp_all_listed || return 1
+		# One primary, or the roles cannot be read yet: a failover between
+		# its two transactions shows none (sp_read_roles' header).
+		[ "$(jq_of "$CTL_OUT" '[.cntlr_list[] | select(.primary)] | length')" = 1 ] ||
+			return 1
+		SP_JSON=$CTL_OUT
+		soak_in "$i" sp_read_roles
+		MANY_PRIM[i]=$PRIMARY_CNTLR_ID
+		MANY_PRIM_CN[i]=$PRIMARY_CN
+		MANY_PRIM_ADDR[i]=$PRIMARY_TRADDR
+		MANY_STBY[i]=$STANDBY_CNTLR_ID
+		MANY_STBY_CN[i]=$STANDBY_CN
+		MANY_STBY_ADDR[i]=$STANDBY_TRADDR
+	done
+	for h in "${!HOST[@]}"; do
+		many_paths_ok "$h" || return 1
+	done
+}
+
+soak_wait_settled() { # <what>
+	MANY_PATHS_LAST=""
+	LISTED_LAST=""
+	wait_until "$WAIT_BUILD" "$1" soak_settled
+}
+
+# --- the cycle's operations ---------------------------------------------------
+#
+# Each must end with both pools settled (soak_settled), and none may make the
+# worker react: every one is the operator's own act (soak_ops_check).
+soak_grow() { # <cycle>
+	local k=$(($1 % SOAK_WIDE_SLICES)) id
+	# `--slice` takes the slice's id, sp_conf.slice_id_list's k-th, not its
+	# index (ops_grow says why).
+	soak_in 1 sp_refresh
+	id=$(jq_of "$SP_JSON" ".sp_conf.slice_id_list[$k]")
+	case "$id" in
+	'' | *[!0-9]*) die "$SOAK_WIDE's slice $k has slice_id '$id'" ;;
+	esac
+	soak_in 1 ctl_ok sp grow-slice --slice "$id" --ext "$INIT_EXT_CNT"
+	SIDES_LEFT=-1
+	soak_in 1 wait_until "$WAIT_PROVISION" \
+		"the grown group's side of $SOAK_WIDE slice $k to be provisioned" \
+		sp_sides_provisioned
+	SP_JSON=$CTL_OUT
+	soak_in 1 sp_read_roles
+	soak_in 1 sp_totals
+	stack_wait_reset
+	soak_in 1 wait_until "$WAIT_PROVISION" \
+		"the primary cntlr $PRIMARY_CNTLR_ID of $SOAK_WIDE to carry $SP_GRP_TOTAL groups" \
+		cntlr_full_ready "$PRIMARY_CNTLR_ID"
+	log "  grew $SOAK_WIDE slice $k to $SP_GRP_TOTAL groups"
+}
+
+soak_snapshot_op() { # <cycle>
+	local name="sn$1"
+	many_in 0 ctl_ok td create --name "$name" --ori "$SOAK_TD" --size 0
+	many_in 0 wait_until "$WAIT_PROVISION" "the snapshot $name to report created" \
+		td_created "$name"
+	many_in 0 ctl_ok td delete --name "$name"
+	many_in 0 wait_until "$WAIT_PROVISION" "the snapshot $name to be gone" \
+		soak_td_gone "$name"
+}
+
+soak_td_gone() { # <td name>
+	ctl_try td list || return 1
+	[ "$(jq_of "$CTL_OUT" ".name_to_td | has(\"$1\")")" = false ]
+}
+
+# soak_migration moves the side of one leg of the RAID1 pool's data group,
+# the legs in turn, to a disk node the allocator picks, and finishes it once
+# the destination has hydrated, as the copy case's migration does.
+soak_migration() { # <cycle>
+	local name="mg$1" leg=$(($1 % LEGS)) side dst
+	many_in 0 sp_refresh
+	side=$(jq_of "$SP_JSON" ".slice_list[0].data_grp_list[0].leg_list[$leg].side_list[0].side_id")
+	case "$side" in
+	'' | *[!0-9]*) die "the RAID1 pool's data leg $leg has side_id '$side'" ;;
+	esac
+	many_in 0 ctl_ok migr create --name "$name" --src-side "$side"
+	many_in 0 ctl_ok migr get --name "$name"
+	dst=$(jq_of "$CTL_OUT" '.migr.dst_side_id')
+	MIGR_HYD_LAST=""
+	many_in 0 wait_until "$WAIT_PROVISION" \
+		"the worker to start the cutover of migration $name" \
+		migr_cutover_started "$name"
+	MIGR_HYD_LAST=""
+	many_in 0 wait_until "$WAIT_PROVISION" \
+		"the destination side $dst of migration $name to serve" \
+		migr_dst_serving "$dst"
+	MIGR_HYD_LAST=""
+	many_in 0 wait_until "$WAIT_PROVISION" \
+		"the destination side $dst of migration $name to hydrate" \
+		side_hydrated "$dst"
+	many_in 0 ctl_ok migr finish --name "$name"
+	many_in 0 sp_refresh
+	assert_field "$SP_JSON" \
+		".slice_list[0].data_grp_list[0].leg_list[$leg].side_list | length" 1 \
+		"the migrated leg is back to one side"
+	assert_field "$SP_JSON" \
+		".slice_list[0].data_grp_list[0].leg_list[$leg].side_list[0].side_id" \
+		"$dst" "and that side is the migration's destination"
+	many_in 0 sp_read_roles
+	many_in 0 sp_totals
+	stack_wait_reset
+	many_in 0 wait_until "$WAIT_PROVISION" \
+		"the primary cntlr $PRIMARY_CNTLR_ID of ${MANY_NAME[0]} to carry the moved leg" \
+		cntlr_full_ready "$PRIMARY_CNTLR_ID"
+	log "  migrated side $side of data leg $leg to side $dst"
+}
+
+# soak_disable disables the RAID1 pool's standby and enables it again. A
+# disabled cntlr leaves the discovery records and its node removes the
+# pool's subsystem (architecture.md, Subsystems, namespaces), which ends or
+# stalls the hosts' paths to it; enabled again, it builds its standby's
+# stack and is listed again, and each host connects through the cdc to the
+# path it lost.
+soak_disable() {
+	local s=${MANY_STBY[0]} h
+	many_in 0 ctl_ok cntlr set-enabled --id "$s" --enabled=false
+	CNTLR_FIELD_LAST=""
+	many_in 0 wait_until "$WAIT_PROVISION" "cntlr $s to read disabled" \
+		cntlr_field_is "$s" disabled true
+	many_in 0 ctl_ok cntlr set-enabled --id "$s"
+	CNTLR_FIELD_LAST=""
+	many_in 0 wait_until "$WAIT_PROVISION" "cntlr $s to read enabled" \
+		cntlr_field_is "$s" disabled false
+	many_in 0 wait_all_listed "$WAIT_BUILD" \
+		"both cntlrs of ${MANY_NAME[0]} to be listed again"
+	many_in 0 wait_ns_exported_all "${MANY_SS[0]}" "${MANY_SSID[0]}" "${MANY_NSID[0]}"
+	for h in "${!HOST[@]}"; do
+		DISC_LAST=""
+		wait_until "$WAIT_HOST" "the cdc to serve host$h both pools' records" \
+			many_disc_cnt "$h"
+		host_connect_all "$h" "${MANY_SS[0]}"
+	done
+	log "  disabled and enabled cntlr $s"
+}
+
+# soak_volume exports a new thin device of the RAID1 pool to both hosts as
+# its namespace 3 and deletes it again.
+soak_volume() { # <cycle>
+	local name="vo$1" id h
+	many_in 0 ctl_ok td create --name "$name" --size "$((4 * TD_UNIT))"
+	many_in 0 wait_until "$WAIT_PROVISION" "$name to report created" td_created "$name"
+	many_in 0 ctl_ok ns create --nqn "${MANY_SS[0]}" --idx 3 --td "$name" \
+		--uuid "$SOAK_VOL_UUID"
+	id=$(jq_of "$CTL_OUT" '.ns_id')
+	many_in 0 sp_refresh
+	many_in 0 sp_read_roles
+	many_in 0 wait_ns_exported_all "${MANY_SS[0]}" "${MANY_SSID[0]}" "$id"
+	for h in "${!HOST[@]}"; do
+		wait_dev "$h" "$SOAK_VOL_UUID"
+	done
+	many_in 0 ctl_ok ns delete --nqn "${MANY_SS[0]}" --idx 3
+	for h in "${!HOST[@]}"; do
+		wait_dev_gone "$h" "$SOAK_VOL_UUID"
+	done
+	many_in 0 ctl_ok td delete --name "$name"
+	many_in 0 wait_until "$WAIT_PROVISION" "$name to be gone" soak_td_gone "$name"
+}
+
+# soak_ops runs cycle <c>'s operations and holds them to no reaction at all.
+soak_ops() { # <cycle>
+	local c=$1 t0 recs
+	t0=$(date +%s.%N)
+	soak_grow "$c"
+	soak_wait_settled "both pools settled after the grow"
+	soak_snapshot_op "$c"
+	soak_migration "$c"
+	soak_wait_settled "both pools settled after the migration"
+	soak_disable
+	soak_wait_settled "both pools settled after the standby's disable and enable"
+	soak_volume "$c"
+	soak_wait_settled "both pools settled after the namespace's create and delete"
+	recs=$(soak_reactions "$t0")
+	[ -z "$recs" ] ||
+		die "cycle $c: the worker reacted during the operator's operations, which" \
+			"make no fault: $recs"
+	log "  cycle $c: grow, snapshot, migration, disable and enable, namespace:" \
+		"no reaction"
+}
+
+# --- the slow faults ----------------------------------------------------------
+#
+# soak_fault puts cycle <c>'s fault on, holds it SOAK_FAULT_SECS while the
+# run's clock runs (soak_tick), takes it off, waits for both pools to settle
+# and holds the worker's records of the window to the fault's stated
+# outcome (e2e_integtest.md, The cases, soak). Every fault but the CPU cap is
+# put on the controller node of the RAID1 pool's primary, or on a disk node
+# of that pool's data group, where it slows that primary's IO; the CPU cap
+# goes on that primary's node too, and its outcome is measured, not bounded.
+SOAK_SLOW_CN=-1
+SOAK_SLOW_DN=-1
+
+soak_fault() { # <cycle> <kind>
+	local c=$1 kind=$2 v ip out t_on recs want i dv k addr svc dnips="" n rest
+	soak_wait_settled "both pools settled before the $kind fault"
+	v=${MANY_PRIM_CN[0]}
+	ip=${CN_IP[$v]}
+	want=""
+	for i in "${!MANY_NAME[@]}"; do
+		[ "${MANY_PRIM_CN[$i]}" != "$v" ] || want="$want ${MANY_SPID[$i]}"
+	done
+	SOAK_MEASURED=0
+	case "$kind" in
+	delay_low | delay_high)
+		n=$SOAK_DELAY_LOW_MS
+		[ "$kind" = delay_low ] || n=$SOAK_DELAY_HIGH_MS
+		SOAK_SLOW_CN=$v
+		out=$(helper_cn "$v" netem_from "$ip" "$CN_GRPC_PORT" "$CP_IP" delay "$n") ||
+			die "cn$v: the $kind fault's verb failed"
+		;;
+	loss)
+		for k in "${DN_IP[@]}"; do dnips="$dnips,$k"; done
+		SOAK_SLOW_CN=$v
+		out=$(helper_cn "$v" netem_to "${dnips#,}" loss "$SOAK_LOSS_PCT") ||
+			die "cn$v: the loss fault's verb failed"
+		;;
+	cpu)
+		SOAK_MEASURED=1
+		SOAK_CPU_CN=$v
+		# shellcheck disable=SC2086
+		out=$(helper_cn "$v" cpu_cap "$(cn_pid_file)" $SOAK_CPU_MAX) ||
+			die "cn$v: the CPU cap's verb failed"
+		;;
+	throttle)
+		many_in 0 sp_refresh
+		addr=$(jq_of "$SP_JSON" '.slice_list[0].data_grp_list[0].leg_list[0].side_list[0].nvme_tr_conf.tr_addr')
+		svc=$(jq_of "$SP_JSON" '.slice_list[0].data_grp_list[0].leg_list[0].side_list[0].nvme_tr_conf.tr_svc_id')
+		dv=$(dn_vm_of_addr "$addr:0")
+		[ "$dv" != none ] || die "the throttled side's address $addr names no --dn guest"
+		SOAK_SLOW_DN=$dv
+		out=$(helper_dn "$dv" throttle_from "$addr" "$svc" "$ip" "$SOAK_THROTTLE_RATE") ||
+			die "dn$dv: the throttle's verb failed"
+		;;
+	*) die "soak_fault: no fault '$kind'" ;;
+	esac
+	case "$out" in
+	slowed* | throttled* | capped*) ;;
+	*) die "the $kind fault did not go on: $out" ;;
+	esac
+	t_on=$(date +%s.%N)
+	log "  cycle $c: the $kind fault on ($out), the RAID1 pool's primary on cn$v"
+	soak_wait_clock $((SECONDS + SOAK_FAULT_SECS)) "the $kind fault's ${SOAK_FAULT_SECS}s"
+	case "$kind" in
+	delay_low | delay_high | loss)
+		out=$(helper_cn "$v" unthrottle) || die "cn$v: taking the $kind fault off failed"
+		SOAK_SLOW_CN=-1
+		;;
+	cpu)
+		out=$(helper_cn "$v" cpu_uncap) || die "cn$v: taking the CPU cap off failed"
+		SOAK_CPU_CN=-1
+		;;
+	throttle)
+		out=$(helper_dn "$dv" unthrottle) || die "dn$dv: taking the throttle off failed"
+		SOAK_SLOW_DN=-1
+		;;
+	esac
+	soak_wait_settled "both pools settled after the $kind fault"
+	if [ "$SOAK_MEASURED" -eq 1 ]; then
+		SOAK_MWIN+=("$t_on $(date +%s.%N)")
+	fi
+	SOAK_MEASURED=0
+	recs=$(soak_reactions "$t_on")
+	SOAK_FAULT_LOG+=("cycle=$c fault=$kind cn=$v reactions=[$(printf '%s\n' "$recs" | awk 'NF { printf "%s:%s+%.1fs ", $1, $2, $3 - t0 }' t0="$t_on")]")
+	case "$kind" in
+	delay_high)
+		# One failover of each pool whose primary the delayed node held, and
+		# no other reaction.
+		rest=$(soak_judge_failovers "$want" "$recs")
+		[ -z "$rest" ] ||
+			die "cycle $c: the delay above the round timeout on cn$v wants one" \
+				"failover of each pool whose primary it held ($want), got: $rest"
+		;;
+	cpu)
+		log "  cycle $c: under the CPU cap the worker reacted:" \
+			"${recs:-not at all}"
+		;;
+	*)
+		[ -z "$recs" ] ||
+			die "cycle $c: the $kind fault wants no reaction, got: $recs"
+		;;
+	esac
+	log "  cycle $c: the $kind fault off; ${SOAK_FAULT_LOG[-1]}"
+}
+
+# soak_judge_failovers prints how the reaction records <recs> (soak_reactions)
+# differ from one failover of each pool of <want>, its sp ids, and no other
+# reaction; the ids compare as strings, as in many_cut_rows.
+soak_judge_failovers() { # <want> <recs>
+	printf '%s\n' "$2" | awk -v want="$1" '
+		BEGIN { n = split(want, w, " "); for (j = 1; j <= n; j++) need[w[j]] = 0 }
+		NF {
+			if ($1 == "failover" && (($2 "") in need)) need[$2 ""]++
+			else printf "unexpected %s of %s; ", $1, $2
+		}
+		END { for (k in need) if (need[k] != 1) printf "%d failover(s) of %s; ", need[k], k }'
+}
+
+# --- step 3: the run -----------------------------------------------------------
+soak_run() {
+	stage 04 "the run: $SOAK_HOURS hours of cycles, a fault in each, the writers and the sampler throughout"
+	local c=0 t_cycle
+	SOAK_T_START=$SECONDS
+	SOAK_NEXT_READ=0
+	soak_sample
+	while [ "$c" -lt "$SOAK_CYCLE_CNT" ]; do
+		t_cycle=$SECONDS
+		SOAK_CYCLE=$c
+		log ""
+		log "--- soak cycle $c at $((SECONDS - SOAK_T_START))s of $SOAK_SECS:" \
+			"the ${SOAK_FAULTS[$((c % ${#SOAK_FAULTS[@]}))]} fault"
+		soak_writers "$c"
+		soak_ops "$c"
+		soak_fault "$c" "${SOAK_FAULTS[$((c % ${#SOAK_FAULTS[@]}))]}"
+		soak_wait_clock $((t_cycle + SOAK_CYCLE_SECS)) "the end of cycle $c"
+		c=$((c + 1))
+	done
+	SOAK_CYCLES=$c
+	soak_sample
+}
+
+# --- step 4: the verdict --------------------------------------------------------
+soak_verdict() {
+	stage 05 "the last writers read back; the sampler's bound; what each fault did"
+	local h out bad row
+	for h in "${!HOST[@]}"; do
+		out=$(helper_host "$h" many_fio_stop 60) || die "host$h: stopping the writers failed"
+		assert_eq "$out" "mfio=stopped" "host$h: the writers end on SIGINT"
+	done
+	soak_faults_ran
+	soak_gen_errs
+	many_verify_writes "$SOAK_CYCLES" "$SOAK_RANGE"
+	log "  failed writes under the CPU cap: $SOAK_ERRS_MEASURED"
+	for row in "${SOAK_FAULT_LOG[@]}"; do
+		log "  $row"
+	done
+	bad=$(soak_bounds)
+	[ -z "$bad" ] || die "the sampler's bound (e2e_integtest.md, The cases, soak): $bad"
+	log "  $SOAK_CYCLES cycles in $((SECONDS - SOAK_T_START))s, every fault as stated," \
+		"every generation read back, the sampler within its bound"
+}
+
+# soak_faults_ran dies unless every fault of SOAK_FAULTS has a row in
+# SOAK_FAULT_LOG, the rows soak_fault writes once a fault's window is judged:
+# the run is a whole number of cycles, at least one per fault, so each comes.
+soak_faults_ran() {
+	local k rows missing=""
+	rows=$(printf '%s\n' "${SOAK_FAULT_LOG[@]}")
+	for k in "${SOAK_FAULTS[@]}"; do
+		[ "$(grep -c -F " fault=$k " <<<"$rows")" -gt 0 ] || missing="$missing $k"
+	done
+	[ -z "$missing" ] ||
+		die "faults that never came in the run's $SOAK_CYCLES cycle(s):$missing" \
+			"(e2e_integtest.md, The cases, soak: every fault comes at least once)"
+}
+
+# soak_bounds logs, per program, its first sample, its sample at the end of
+# the first hour or of the first sixth of a shorter run, and its last, and
+# prints each bound the samples break: memory or open files grown by more
+# than SOAK_GROW_PCT percent and the slack from that sample to the last, or
+# etcd's database file over SOAK_ETCD_CEIL at any sample.
+soak_bounds() {
+	local bt=$((SOAK_SECS / 6))
+	[ "$bt" -le 3600 ] || bt=3600
+	printf '%s\n' "${SOAK_SAMPLES[@]}" | awk -v bt="$bt" -v pct="$SOAK_GROW_PCT" \
+		-v rs="$SOAK_RSS_SLACK_KIB" -v fs="$SOAK_FD_SLACK" -v ceil="$SOAK_ETCD_CEIL" '
+		function v(f) { sub(/^[a-z_]+=/, "", f); return f + 0 }
+		{
+			t = substr($1, 3) + 0
+			if ($3 ~ /^etcd_db=/) { db = v($3); if (db > maxdb) maxdb = db; lastdb = db; next }
+			k = $2 "/" $3
+			if ($4 == "gone") { gone[k] = 1; next }
+			if (!(k in first)) { first[k] = $4 " " $5 " " $6 }
+			if (!(k in base) && t >= bt) { base[k] = 1; br[k] = v($4); bf[k] = v($5) }
+			lr[k] = v($4); lf[k] = v($5); lt[k] = v($6); last[k] = $4 " " $5 " " $6
+		}
+		END {
+			for (k in first) {
+				printf "  sample %s: first %s; at %ds %s; last %s\n", k, first[k], bt,
+					(k in base) ? sprintf("rss_kib=%d fds=%d", br[k], bf[k]) : "-", last[k] > "/dev/stderr"
+				if (!(k in base)) continue
+				if (lr[k] > br[k] * (100 + pct) / 100 + rs) printf "%s memory %d KiB from %d KiB; ", k, lr[k], br[k]
+				if (lf[k] > bf[k] * (100 + pct) / 100 + fs) printf "%s open files %d from %d; ", k, lf[k], bf[k]
+			}
+			for (k in gone) printf "%s went away; ", k
+			printf "  etcd database file: largest %d bytes, last %d (ceiling %d)\n", maxdb, lastdb, ceil > "/dev/stderr"
+			if (maxdb > ceil) printf "etcd database file %d bytes over %d; ", maxdb, ceil
+		}'
+}
+
+case_soak() {
+	CASE=soak
+	soak_snapshot
+	soak_pools
+	many_connect
+	soak_run
+	soak_verdict
+	many_teardown
+	case_finish
+}
+
+# ---------------------------------------------------------------------------
 # The space guard's run summary (E2E5)
 # ---------------------------------------------------------------------------
 #
@@ -32407,6 +33445,13 @@ log_topology() {
 	log "  zeroing:   a meta side whole, a data side $DATA_ZERO_BYTES bytes" \
 		"(its meta region and first data block); run cap $RUN_SHAPE_CAP_BYTES bytes"
 	log "  cases:     ${ONLY:-${CASES[*]}}"
+	if [ "$ONLY" = soak ]; then
+		log "  soak:      $SOAK_HOURS h ($SOAK_SECS s): cycles of" \
+			"${SOAK_CYCLE_SECS}s, faults of ${SOAK_FAULT_SECS}s, setup's pool" \
+			"and $SOAK_WIDE_SLICES slices without redundancy, the shipped" \
+			"thresholds and vote timers, $DNS_PER_VM dn agent(s) per DN VM," \
+			"run cap $SOAK_RUN_CAP_BYTES bytes"
+	fi
 	if [ "$ONLY" = many ]; then
 		log "  many:      $MANY_POOL_CNT one-slice pools, setup's included," \
 			"$DNS_PER_VM dn agent(s) per DN VM for their sides," \
