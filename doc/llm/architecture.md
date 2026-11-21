@@ -9269,9 +9269,50 @@ document and only pointed to here.
   pool commits about once a second, its commit period, and a primary that
   dies before that commit loses the write, the block reading as it did
   before it, zeros for a block never written. nvmet reports a volatile
-  write cache on its controllers, so hosts flush as they do to a disk with
-  one. Read in the kernel's dm-thin, nvmet, block and NVMe host sources,
-  not measured.
+  write cache on its controllers and on every namespace whose device has
+  one, so hosts flush through a path to a serving primary as they do to a
+  disk with one, but not through a path they identified while the
+  namespace's device had none (the next entry). Read in the kernel's
+  dm-thin, nvmet, block and NVMe host sources. The end-to-end suite resets
+  the primary's machine under writes to new blocks, each followed by an
+  fsync (`e2e_integtest.md`, The cases, react): in three runs at one slice
+  on the lab every write whose fsync completed before the reset, the write
+  in flight then and every write after read back, and no fsync was in
+  flight at the reset, the last run's slowed commits included, so the loss
+  itself is not seen.
+* **A host's flush through a path it identified over the dm-error is not
+  sent.** nvmet marks a namespace as having no volatile write cache when
+  the namespace's device has none, and a host takes that mark into its
+  path when it identifies the namespace: at its connect and at each scan
+  of the controller's namespaces, which a namespace added to or removed
+  from the subsystem or an `nvme ns-rescan` brings, never at an ANA
+  change. An ns-dev over its td's `CnErrorName` has no write cache: a
+  standby's, a parked one, a provisioning-deferred one and one whose
+  dm-clone does not serve (`cnagent.md` CN16). The reload that serves the
+  ns-dev from the pool gives it one, but on a live namespace the cn agent
+  rewrites only its ANA group (`EnsureNamespace`), so nothing makes the
+  host identify the namespace again. So after a failover the host's path
+  to the new primary, identified on the standby, still reads
+  write-through: the host's block layer completes a flush routed to that
+  path at once, sending nothing, and sends a write the host marks FUA as a
+  plain write. An fsync through the new primary then completes with
+  nothing committed: a write to a new block is durable only at the pool's
+  own commit, about once a second, which flushes the data device first,
+  and a new primary that dies before it loses the write though its fsync
+  completed (the entry above); a write over a mapped block, which leaves
+  nothing to commit, reaches the legs' disks with no flush until the
+  pool's next commit or another flush of its data device. A namespace a
+  host identified while it was parked, deferred or waiting for its
+  dm-clone is the same once it serves. Read in the kernel's nvmet, NVMe
+  host and block sources, and seen on the lab outside the suites (cn0 and
+  host0): a namespace over a linear on a dm-error read write-through on
+  the host's path and still did after the linear's table moved onto a loop
+  device, and a host fsync then sent no flush to that device; after an
+  `nvme ns-rescan` the path read write-back and the fsync's flush reached
+  it. In the end-to-end suite's flush stage the fsyncs of the writes the
+  host sent again to the new primary took under a millisecond
+  (`e2e_integtest.md`, Known limits, The flush stage met no fsync in
+  flight).
 * **A failover while the old primary serves can lose an acknowledged
   write.** An old primary that has not applied its demotion, or a primary
   a cntlr replacement deleted whose CN has not torn its stack down, goes
@@ -9479,7 +9520,23 @@ document and only pointed to here.
   onto a controller node none of whose leg paths the cut reached assembled
   both arrays from both legs and brought the pool back read-only with
   needs_check, which only a repair by hand ends (No thin-metadata repair
-  path is specified, above).
+  path is specified, above). The end-to-end suite measured the cut with
+  the worker running, every leg's path cut from the primary alone while the
+  standby still reached them, under a host writing one 4 KiB block a
+  second, with no flush, into blocks the pool had not mapped, each cut
+  timed on the primary's node from just before its rule went in to just
+  after it came off (`e2e_integtest.md`, The cases, react): a cut of
+  3.06 s held the write in flight for 3.09 s and failed none, with no
+  failover; through a cut of 8.05 s md read the array write-pending with
+  no member failed, and once it ended md broke the array, the pool read
+  read-only with needs_check, the write in flight failed 13.4 s after it
+  was sent, the primary's reads of the two blocks written before the cut
+  failed, and the broken group's row brought the failover onto the standby
+  on its own, whose build assembled the array from both legs 6 s after the
+  pool read needs_check and opened the pool read-only with the flag again.
+  Each length is of one run; in two runs that timed the cuts less closely
+  the 3 s cut failed no write either and the 8 s cut left the pool
+  read-only with needs_check too.
   The meta group's whole loss is worked out from dm-thin's code.
 * **A repair waits while its array does not run or its bad leg serves.**
   `CreateRepair` reads the primary's report for its bad leg's row alone,
@@ -9567,7 +9624,8 @@ document and only pointed to here.
   (`cnagent.md` CN12); the re-assembly leaves such an array as it is, its
   converge's row naming the holders, and the failover or the cntlr replacement that
   its `ERROR` row brings assembles the group on the next primary once the
-  legs are back. A pool with one cntlr waits for the cntlr replacement,
+  legs are back, as the end-to-end suite's group cut shows on the lab
+  (`e2e_integtest.md`, The cases, react). A pool with one cntlr waits for the cntlr replacement,
   at the cntlr threshold. A
   level where reactions stop lets the primary stop such an array, and
   keeps failovers off while the group is down.
@@ -9993,7 +10051,10 @@ document and only pointed to here.
   slice, one a stripe short of the slice count times the block freed one
   block on every slice but the last, and an aligned discard of one block
   freed one block on one slice where the stripe is the block and none where
-  it is smaller.
+  it is smaller. On one slice, where the stripe is the block, a host's
+  `fstrim` on an ext4 file system of a volume, after the removal of three
+  4 MiB files, freed 13 MiB of the pool's blocks, the files' 12 MiB and
+  1 MiB more (`e2e_integtest.md`, The cases, ops).
 * **Controller node budgets cap a cluster's group space.** Every cntlr of
   a pool, a standby as much as the primary, charges its controller node
   the full size of the groups of the pool's slices (Terminology and object

@@ -265,8 +265,15 @@ Three more things belong with case 1:
   [the introduction](introduction.md#status-and-limits-of-01): a short cut
   only paused the host's writes, a longer one left the thin pool
   read-only on its primary and after a failover, and no write the host was
-  told was done was lost. The meta group's case is read from the kernel's
-  code.
+  told was done was lost. In the end-to-end suite, with the worker
+  running, a cut that lasted 3.06 s paused the host's writes for 3.1 s
+  and failed none. One that lasted 8.05 s failed the host's write in
+  flight and left the thin pool read-only; the worker then moved the
+  primary role to the standby on its own, which brought the array back
+  but not a writable thin pool. Each length is of one run. In two runs
+  that timed the cuts less closely, the shorter cut failed no write either
+  and the longer one left the thin pool read-only too. The meta group's
+  case is read from the kernel's code.
 - **A clone whose clone meta group is lost stops.** The clone meta group
   holds the dm-clone's metadata. With no cntlr able to assemble it, no dm-clone is built. The
   clone's namespaces stay inaccessible and host IO queues. State:
@@ -305,8 +312,9 @@ loss in the sense of this document. The application knows. Two cases:
   leaves its thin pool read-only. The measured times are in [the
   introduction](introduction.md#status-and-limits-of-01). State: accepted.
 
-**What a completed write means.** A volume tells the host that it has a
-volatile write cache, as many disks do, so the host sends flushes. A write
+**What a completed write means.** A volume tells the host, on the path to
+its primary, that it has a volatile write cache, as many disks do, so the
+host sends flushes. A write
 is durable once a later flush from the host, or a write the host marks to
 reach stable storage before it completes (FUA), has completed on the
 primary that took the write. Without a flush, a write to a block the pool
@@ -315,9 +323,10 @@ once a second. A primary that dies before that commit loses the write, and
 the block reads as it did before the write: zeros where nothing was
 written. This is the behaviour of a disk with a volatile write cache, not
 a loss in the sense of this document. A flush that completes although its
-primary died is a defect; section 5.1 has it. So is a durable write lost
-in a failover while the old primary still serves, but for the cases
-section 5.1 lists and accepts.
+primary died is a defect; section 5.1 has it. So is a flush the host never
+sends because it still reads a volume's path as having no cache, as after a
+failover. So is a durable write lost in a failover while the old primary
+still serves, but for the cases section 5.1 lists and accepts.
 
 ## 5. Data loss outside the accepted cases
 
@@ -337,7 +346,37 @@ the host.
   commits nothing of the dead one's. The fsync returns success and the
   writes are gone. A plain PCIe disk never takes this path. dnv's own
   programs cannot fix this. State: fix later; a change inside dm-thin is
-  under test. Read from the kernel's code; not seen in the lab.
+  under test. Read from the kernel's code. The end-to-end suite resets the
+  primary's machine while a host writes 4 KiB to new blocks from four jobs,
+  each write followed by an fsync, and reads every block back after the
+  failover. In its three runs at one slice no fsync was in flight at the
+  reset, so this loss was not met; every write whose fsync had completed,
+  the write in flight at the reset and every write after it read back.
+  The last run slowed the pool's commits so that the reset could land in
+  an fsync, and it still landed in a write in each of the four jobs.
+- **After a failover, a host's flush through the new primary is not
+  sent.** Silent. A volume tells the host, path by path, whether it has
+  a volatile write cache. A standby's volume has none, as it serves only
+  errors, and so has a volume whose namespace an operator suspended, or
+  that waits for its clone's copy. The host reads this when it connects,
+  and again only when it rescans the controller's volumes: when a volume
+  is added to or removed from the subsystem, or at `nvme ns-rescan`. A
+  failover moves the primary role but does not make the host rescan. So
+  the host still reads the new primary's path as having no cache. Its
+  kernel then completes each flush on that path at once without sending
+  it, and sends a write it marks FUA as a plain write. An fsync returns
+  success with nothing made durable. The pool commits on its own about
+  once a second, so a write to a new block is lost when the new primary
+  dies before that commit, though its fsync completed. A write over data
+  already there waits in the disks' caches until something else flushes
+  them. A rescan, or a new connection, ends this until the next
+  failover. State: fix later; the question of how is open. Read from the
+  kernel's code and seen in the lab: a host's path to a volume served
+  first by an error device, then by a disk, kept reading as having no
+  cache, and the host's fsync sent no flush to the disk; after
+  `nvme ns-rescan` it did. In the end-to-end suite, the fsyncs a host made
+  through the new primary right after a failover took under a
+  millisecond.
 - **A failover while the old primary still serves can lose a write the
   host was told was done, in some cases.** Silent. A host still writing
   through the old primary can have a write that lands on one leg of a
@@ -692,7 +731,9 @@ Measured times are in [the introduction](introduction.md#status-and-limits-of-01
   State: accepted: taking the pool and the volumes above down to assemble
   the array in place would take the volumes from hosts as well, and the
   failover or the cntlr replacement builds the group again. Seen in the
-  lab: on loop devices, and in the cn agent suite after a level step.
+  lab: on loop devices, in the cn agent suite after a level step, and in
+  the end-to-end suite, where a network cut broke the group and the
+  worker's failover built it again on the standby.
 - **A forced start cut short after its zeroing can leave no leg to start
   from.** The forced start zeroes the md superblock of every other member
   it keeps, except the open repair's bad leg. When the operator withdraws
@@ -2055,7 +2096,9 @@ design:
   block, and `fstrim` can report success and free nothing. Seen in the
   lab: with one slice an aligned 4 MiB discard freed four blocks and a
   512 KiB one none; with two and eight slices each discard freed exactly
-  what this entry says. State: accepted.
+  what this entry says; and with one slice, after a host removed 12 MiB of
+  files from an ext4 file system on a volume, `fstrim` freed 13 MiB of the
+  pool's 1 MiB blocks. State: accepted.
   Procedure to write, one line on the stripe setting.
 - **A deleted volume's space can stay in use on the disks.** The delete
   of a volume frees its blocks in the thin pool alone, so the primary

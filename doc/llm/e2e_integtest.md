@@ -13,8 +13,9 @@ facts the suites driving real agents share.
 One storage pool at the widest shape the tree builds, on real guests with no
 fakes, driven end to end through the shipped operator CLI while two real kernel
 NVMe hosts read and write its namespaces. A green run at the default shape is
-eleven statements; a smaller shape proves no ceiling, and one without redundancy
-no repair, no forced start, no take-over and no cut of a migrating leg's path:
+twelve statements; a smaller shape proves no ceiling, and one without redundancy
+no repair, no forced start, no take-over, no cut of a migrating leg's path,
+no crash of a migration's destination and no cut of a whole group:
 
 * **The ceiling is real.** `MaxSliceCntPerSp` slices with md-raid1, every side
   on a disk node of its own, every group's array and every slice's thin pool on
@@ -31,8 +32,8 @@ no repair, no forced start, no take-over and no cut of a migrating leg's path:
   bound, at every slice count the run builds.
 * **The operator surface works against a real control plane.** Every
   `Gateway` RPC but the cluster and node deletions and listings, the id
-  step, the restore check, the status read, which only a failed run's dump
-  issues, and the capacity read of the layer above, `GetClusterCapacity`, is
+  step, the restore check and the capacity read of the layer above,
+  `GetClusterCapacity`, is
   issued by the shipped `dnvctl` against a real gateway, etcd and agents,
   and no echoed id is the whole of an assertion: a mutation is read back
   from its record and, where the device is the point, from its agent, or,
@@ -48,8 +49,20 @@ no repair, no forced start, no take-over and no cut of a migrating leg's path:
   leg holds, an operator's take-over of a group's repair from the worker,
   and all between; and fio stamps, data that fio writes and verifies, check
   block by block the stamped part of what a clone copies, read through its
-  destination, and the blocks a migration copies last, read through the
-  moved leg's new side (The cases, copy).
+  destination, the same part read through a transfer, the blocks a
+  migration copies last, read through the moved leg's new side, and the
+  blocks written to a migrating leg before its new side's whole guest is
+  reset in the middle of the copy, read through that side once the copy is
+  done (The cases, copy).
+* **No write the host was told was done is lost under a procedure.** A
+  stamped writer, fio passes of random overwrites each verified block by
+  block with the seed of the write that put it there, runs on a volume of
+  its own across an operator's repair while md copies, across a failover
+  in the middle of a clone's copy, while the old primary still serves, and
+  across the reset of the primary's machine, and fails its stage on a failed
+  write or a block that does not read back as its last pass wrote it; a
+  write to a new block followed by an fsync that completed before that
+  reset reads back too (The cases, copy, react).
 * **A clone's copy survives a failover of its primary** (`architecture.md`,
   Clone metadata durability). A primary disabled in the middle of a slowed
   copy hands the copy to the new primary, which loads the metadata the
@@ -71,8 +84,8 @@ no repair, no forced start, no take-over and no cut of a migrating leg's path:
   host's writes go on finishing, and the worker finishes the migration and
   repairs the leg; and the primary's machine, reset by its kernel with no
   sync, loses the primary role and then its cntlr while host0 keeps its
-  paths and reads its data through the new primary, and comes back with no
-  cntlr of the pool.
+  paths, writes on through the failover and reads its data through the new
+  primary, and comes back with no cntlr of the pool.
 * **A group md will not start comes back from one leg** (`architecture.md`,
   Repair; `cnagent.md` CN12), on react's pool, at the level where reactions
   stop. When the leg md holds in sync dies while md copies onto a repair's
@@ -90,7 +103,9 @@ no repair, no forced start, no take-over and no cut of a migrating leg's path:
   group's `operator_in_charge` flag set, the worker's repair of a dead leg,
   held created, is aborted and cancelled, the worker creates no repair of the
   group while the flag stands (`dnv-worker.md` AR8), and the operator's own
-  repair with a fresh leg is started, finished and copied whole; with the
+  repair with a fresh leg is started, finished and copied whole; host0
+  reads its data unchanged while the flag stands, with the group on one
+  leg and again while md copies onto the operator's leg; with the
   flag cleared, the pool is still at the read-write level, host0 reads its
   data unchanged with no failed IO, and no failover happens.
 * **A primary cut off from the control plane fails over as a pause**
@@ -108,7 +123,11 @@ no repair, no forced start, no take-over and no cut of a migrating leg's path:
   one write fails, the cdc serves its last records meanwhile, the stored
   state reads the same before and after, and the worker rejoins and drives
   the pool again.
-* **The lab is left as it was found.** After every case every disk node has all
+* **Every case ends with its pool sound and the lab as it was found.** Before
+  its teardown every case's pool has every thin pool writable, without
+  needs_check and with room, by the status read, and every array clean and
+  whole on the primary, but for a pool a measuring stage left needs_check on
+  purpose. After every case every disk node has all
   its extents back, the free count of its own disk counts agreeing with its
   record's and the worker having logged no disagreement between the two
   (`dnv-worker.md` RW13), no node guest holds a dnv dm device, md array or
@@ -119,8 +138,7 @@ no repair, no forced start, no take-over and no cut of a migrating leg's path:
 **What it does not prove.** The RPCs it never issues, the deletions and
 listings of clusters, disk nodes and controller nodes, the id step, the
 restore check `CheckControllerNodeRestore` (`architecture.md`, Controller
-nodes), the status read `GetClusterStatus`, which a failed run's dump issues
-and nothing asserts (Diagnostics on failure), and the capacity read
+nodes), and the capacity read
 `GetClusterCapacity` (`architecture.md`, Clusters): the gateway suite issues
 each of them, the dnvctl suite each against its fake gateway, and the csi
 suite reaches the capacity read through dnv-csi and through `dnvctl`, whose
@@ -345,9 +363,13 @@ provisioning protocol), so what a host or md writes into a data group's side
 allocates too. The allocation caps, one per backing file and one for the
 whole run at what the pool's own sides zero plus slack, a part of which
 grows with the disk node count for the agents' logs, count both and the
-pattern, and are asserted after every case; the copy case's run cap also
-takes, on every leg, its two fio stamps and its first clone's copy of its
-source, which grow with the slices and stay allocated until the case ends.
+pattern, and are asserted after every case; a case's run cap also takes, on
+every leg, what its stages write on purpose: the copy case's fio stamps and
+its first clone's copy of its source, the range of every stamped writer, the
+new blocks of the react case's flush and group-cut writers and the ops
+case's file system, each of which grows with the slices and stays
+allocated until the case ends, as a thin delete hands no block back to a
+backing file.
 
 E2E6. **Cleanup runs unconditionally at the start, and only on success at the
 end.** `cleanup_all` runs before anything is built, between cases, at the end
@@ -361,23 +383,35 @@ unfinished or one of the suite's own nvmet ports standing fails, after
 cleaning, while a run that fails an assertion removes nothing but the copy
 case's two token buckets, its clone's off the controller node and its
 migration's off the disk node that carries it, the react case's reject rule,
-which it takes off the controller node that carries it, and the react case's
+its group cut and its flush stage's delay, which it takes off the controller
+node that carries them, and the react case's
 silencing rule, which it takes off the disk node that carries it, as a
-slowed port would slow, a refused one fail and a silenced one stall every
-suite that runs before the next cleanup.
+slowed or delayed port would slow, a refused one fail and a silenced or cut
+one stall every suite that runs before the next cleanup; and it tells
+host0's stamped writer to start no more passes, as its passes would write
+on into a lab other suites then use.
 
 E2E7. **No direct-IO flags to dd.** The guests' dd mishandles direct IO
 (`dnagent_integtest.md`, Assumptions and preflight checks), so every dd write
 is buffered and synced and every dd read that must reach the media follows a
-cache drop. Three host processes run detached, as their IO may block and `timeout`
+cache drop. Five host processes run detached, as their IO may block and `timeout`
 cannot bound a task in uninterruptible sleep: the read-only level's read, which
 answers "blocked" within its own budget; the write loop, whose writes are
 meant to queue through a failover in the cutoff case, and in react's
-migrating leg on md until the primary cuts the leg's path; and the cutoff
+migrating leg on md until the primary cuts the leg's path; the cutoff
 case's fence writer on host1, which stops on its first failed write or at
-the end of its range. The fence writer runs fio, not dd, and writes and
-verifies with direct IO (The cases), and so do the copy case's fio stamps,
-each written or read back by one fio run under the watchdog below. The loop
+the end of its range; the stamped writer, whose passes run across a
+procedure on host0 until its stop file, its first failed pass or a time
+bound sized to outlive a passing run, a pass in hand ending before it
+stops; and the react case's writer to new blocks, which ends at the end of
+its writes or at its first failed one. The fence writer and the stamped
+writer run fio, not dd, and write and verify with direct IO (The cases), and
+so do the copy case's fio stamps, each written or read back by one fio run
+under the watchdog below, as is each verify the detached writers' stages
+read after them. The writer to new blocks is a python program of the
+suite's own, as fio's latency logs carry no fsync: it writes with direct IO
+and logs the time around each write and each fsync it makes, and its blocks
+are read back with direct IO under the same watchdog. The loop
 reports through files and keeps to its own namespace: it writes only to the
 device the namespace's link named at its start, never creating that device
 node, and checks before every write that the device still carries the
@@ -403,8 +437,10 @@ sweeps, which also reach a crashed run's processes whose pid files are gone,
 sit in helper files on the guest
 behind helper verbs, bracketed so they never match the ssh command's own shell,
 and qualified by the suite's work directory or its etcd name or, for the fio
-of the cutoff case's writer and of a fio stamp, by a job name only this suite
-uses, so they never touch another suite's processes.
+of the cutoff case's writer, of a fio stamp and of the stamped writer, by a
+job name only this suite uses, and for the writer to new blocks by its own
+name word and its directory under the suite's work directory, so they never
+touch another suite's processes.
 
 E2E9. **One dnv suite runs at a time in the lab** (`layout.md`, Directory
 tree). The suite occupies every guest it names; no other suite binds its
@@ -562,9 +598,14 @@ snapshot, which no namespace exports, its bitmap clear at the block setup
 wrote (`architecture.md`, Bitmap reads; `cnagent.md` CN26); a namespace
 suspend that parks rather than
 removes, and a repoint there and back (`architecture.md`, Namespace suspend
-semantics); and a disabled disk node and controller node, invisible to the
+semantics); a disabled disk node and controller node, invisible to the
 agents, each proved by a refused allocation that writes nothing
-(`architecture.md`, Capacity index keys).
+(`architecture.md`, Capacity index keys); and last a host's fstrim: an ext4
+file system on a volume of its own, its files written and removed, then
+`fstrim`, after which the pool's used bytes, read from `sp inspect`, must
+drop by the files' whole blocks where the pool's stripe is its block, and
+are logged where the stripe is below it, as a discard frees only the
+blocks it covers whole on their slice (`architecture.md`, Known limits).
 
 **copy** proves the four RPC groups that move bytes — transfer, clone,
 migration and an operator's repairs — and that a clone's copy survives a
@@ -583,7 +624,7 @@ the whole device, so that at one slice no part of the device is left
 unwritten and the digest covers all of it. A transfer, auto-suspended, parks
 the origin namespace and carries its identity, so host1, the only host
 connected to it, reads the origin through it (`architecture.md`, Transfers;
-`cnagent.md` CN17). Before the clone is created the origin's bitmap is read,
+`cnagent.md` CN17), the digest and the fio stamp with fio's verify. Before the clone is created the origin's bitmap is read,
 slice by slice, once the primary reports the origin parked, a wait the case
 polls, for every source slice one destination region spans, and right after
 the create those bitmaps are appended as the clone's chunks, one per slice,
@@ -696,7 +737,51 @@ plain cancel and ended by a forced one, its source serving again, the
 primary's path to it optimized, with the time from the cancel to that path
 logged, and the volume reading as before, since no host IO ran in between
 (`architecture.md`, Migrations); the case relies on leg repair leaving a
-two-sided leg alone (`dnv-worker.md` AR8). Two of an operator's repairs
+two-sided leg alone (`dnv-worker.md` AR8). A third migration of the same
+leg (raid1 only, as a leg's one side lost with its guest takes the slice
+with it) loses its destination's whole guest in the middle of its copy, held
+back by the same bucket: once the destination serves and the primary's path
+to it reads optimized, host0 writes a fio stamp over half a volume of its
+own and reads it back, md must read the group's array clean on the
+primary, as md writes its superblocks with a flush to every member when the
+array turns clean, and md's bitmap on the moved leg's member, read with the
+plain `mdadm --examine-bitmap`, must then read no dirty chunk, md's passes
+over its bitmap shortened to half a second while the step waits, as md
+clears a chunk's bit only after a flush to every member: the stamp is
+durable on every leg, the destination's dm-clone, whose flush commits its
+metadata, included, and a re-add of the member copies nothing onto it.
+With the copy still short of whole, the destination's guest is reset through the kernel's sysrq
+trigger, which takes every agent of the guest, its loop devices, its dm
+devices and its nvmet ports, and any other side of the pool it carries.
+host0 makes no IO from the reset until the leg serves again. Once the guest
+answers under a new boot id it gets its per-boot preparation (Preflight)
+and its agents start again over their backing files and stores, each
+reporting its node state; the destination must serve through its dm-clone
+again, the primary's path to it read optimized and md hold every group of
+the pool whole on the primary, having written to the moved leg's member
+since just before the reset, by the member device's own count of written
+sectors, no more than a bound with room for its superblock and bitmap pages
+and far below the member's data area, so md took the member back by its
+bitmap and copied nothing onto it; with the bucket off the copy must end and
+the migration be finished. Then host0 reads the stamp back through the
+moved leg alone, with the write-mostly flag on the other leg's member as
+for the first migration, so every write fio was told was done before the
+reset reads back from what the reset guest kept, and writes a stamp
+over the whole volume, which reads back through that leg too. The same
+guest, which now carries the moved leg's one side, is then reset under
+writes md has not flushed (raid1 only): host0's stamped writer runs on a
+volume of its own, made once the pool has room for it under its grow mark,
+and a few seconds into a pass, with the group's array active, the guest is
+reset; md fails the member at the IO's first error and the writes go on to
+the other leg. Once the guest's agents are back, the primary's path to the
+side reads optimized and md holds every group whole again, the writer stops
+at the end of its pass in hand and its range is read back through the
+moved leg alone, with the last pass's seeds. The blocks that do not read
+back as the pass wrote them, the passes that failed and the sectors md
+wrote to the member across its return are logged, not asserted: the
+suite asserts on flushed writes only, the crash before, and this one counts
+what a crash costs a leg md had not flushed. Two of an
+operator's repairs
 (raid1 only) work on one group, each replacing a leg whose disk node dies as
 in react, its agent killed and its nvmet port removed (`architecture.md`,
 Repairs, Repair, Retired legs); each dying disk node carries no other side
@@ -706,7 +791,9 @@ none of them, and for the second the node's own record does — so its death
 takes down one leg and its record's side count can be checked. The first
 repair takes a fresh new leg, placed outside the group's disk nodes (E2E4),
 once the primary's probe has given the dead leg the health epoch a create
-requires; it must reach STARTED, read through `repair get` alone, as the
+requires, while host0's stamped writer runs on a volume of its own from
+before the disk node dies to after the repair's finish, md copying, and
+must lose no write; it must reach STARTED, read through `repair get` alone, as the
 worker follows the primary's report (`dnv-worker.md` AR11; `cnagent.md`
 CN12, CN28), refuse an abort and a cancel, each refusal naming its stage,
 and its finish, made while md still copies onto the new leg, must put the
@@ -777,7 +864,10 @@ to host0 reading that namespace optimized, and within it, when a poll sees
 it first, the time to every side of the clone meta group provisioned — with
 no limit on either, such a command lengthening the wait by that round and
 the re-sent converge. The primary is disabled once a quarter of the copy's
-regions are copied, which fails it over at once (`dnv-worker.md` AR5); the
+regions are copied, which fails it over at once (`dnv-worker.md` AR5),
+host0's stamped writer running on a volume of its own from just before the
+disable to after the old primary's return, through a failover while the old
+primary serves, and losing no write (Known limits); the
 new primary's first count must be at least the last count read on the old
 one and leave a region to copy; with the bucket gone and the copy whole, the
 new primary's destination raid0, which its promotion created, must have had
@@ -800,8 +890,9 @@ node before the pool's subsystem goes, rather than wait for that sweep.
 **react** proves the four reactions on real faults, that a planned restart
 of the primary's cn agent moves nothing, an operator's forced start of a
 group md will not start, an operator's take-over of a group's repair from
-the worker, the cut of a migrating leg whose serving disk node goes silent
-and the loss of the primary's machine, on a pool of the run's slice count
+the worker, the cut of a migrating leg whose serving disk node goes silent,
+the loss of the primary's machine under host writes, and measures the cut of
+a whole group, on a pool of the run's slice count
 but at most `REACT_SLICE_CAP`
 slices (Topology and parameters), each by the record it writes or, for the
 restart, by the records it does not write, one action per pass making every
@@ -994,9 +1085,16 @@ start and be finished, the dead leg kept as a retired leg, the flag
 cleared, md must hold the group whole on the fresh leg, which it copies
 whole as it was never a member (`architecture.md`, Repair), host0 must read
 both namespaces' data unchanged with no failed IO in its kernel log, and no
-failover may happen across the take-over. As in the leg repairs before,
-host0 makes no IO from the kill until md holds the group whole, so the
-stage proves the take-over at the read-write level, not IO during it. The
+failover may happen across the take-over. While the flag stands host0
+reads both namespaces twice through the primary, once the worker's repair is
+gone, with the group on its one live leg, and again right after the
+operator's finish, while md copies onto the fresh leg, md's copy slowed on
+the group's array from before the operator's create and given md's own
+limits back after this read, and md must be copying onto the fresh leg
+just before the read and just after it, md's row of the group logged with
+each read; a read that meets
+the dead member is served by the other, as md fails the member its IO meets,
+and the kernel-log witness from the stage's mark covers both. The
 migrating leg (raid1 only, and only with more disk-node guests than legs
 per group, E2E4) runs after the take-over, on the same group at the
 read-write level, and takes away the disk node that serves a leg in the
@@ -1035,12 +1133,38 @@ the loop must still finish writes, and no cntlr may hold the retired leg.
 The loop stops on its stop file with no write failed by its records,
 host0's kernel log since a mark taken before the silence must report no
 failed IO, host0 reads its data unchanged, and no failover may happen
-across the stage. The loss of a machine runs last: the primary's
+across the stage. The loss of a machine comes next, twice: the primary's
 controller-node guest is reset through the kernel's sysrq trigger, with no
 sync, which drops every kernel object of the guest as a power loss does, and
 the hypervisor starts it again; the guest must answer again under a new boot
-id within a bound. Nothing of the old primary survives to advertise a path,
-so host0 keeps every path it holds through the failover: the standby must
+id within a bound. The first time host0's stamped writer runs on a volume of
+its own, exported by both cntlrs, from before the reset to after the
+replacement, and must lose no write: its writes wait on the multipath head
+while no path serves and go on through the new primary. The second time
+host0's writer to new blocks runs on a volume of its own: from several jobs
+at once, 4 KiB writes a pool block apart, each to a block no write mapped
+and each followed by an fsync, whose flush makes the pool commit the
+block's mapping (`architecture.md`, Known limits, A write that needs a new
+block is durable only after a flush or a commit), the reset coming once
+every job has completed writes. While the writer runs, the primary's node
+delays what it sends to every meta group leg's nvmet port by
+`FSYNC_META_DELAY_MS`, so that each pool commit, and with it each fsync,
+lasts a few such round trips and the reset can land in one, while the data
+groups' writes keep their speed; the delay goes with the reset guest. The
+writer logs the time around each write and each fsync; after the failover
+every block is read back and told by its header for its offset from the
+zeros of a block never mapped. Each job's first write or fsync that waits seconds is the reset's
+stall: the writes before it, whose fsync completed, the write in flight
+then, which the host's multipath code sends again to the new primary, and
+every write after must read back, and every job must have met the stall; a
+write whose fsync was in flight at the reset is the case of the entry of
+`scope.md` "A host's fsync completes after the primary died with its
+writes", counted held or lost and logged, not asserted, and so is the
+kernel-log witness of that second reset, which an fsync the reset fails
+would fill. A write or an fsync that fails ends its job there and is
+logged, held or not, as an error the host was told; the writes before it
+must still read back. Nothing of the old primary survives to advertise a path, so
+host0 keeps every path it holds through the failover: the standby must
 become primary and build the stack (`dnv-worker.md` AR5), and host0 must
 read its data through the path it already held, now optimized. Once the
 cdc's records no longer name the reset node, host0 drops its path to it, as
@@ -1050,14 +1174,47 @@ slot, so that a retrying controller of the same controller id does not make
 the kernel refuse the new one (`architecture.md`, Known limits). The lost
 cntlr must be replaced on a controller node that held none (`dnv-worker.md`
 AR7), host0 must connect the replacement through the cdc, its kernel log
-since a mark taken before the reset must report no failed IO, and the worker
+since a mark taken before the first reset must report no failed IO, and the worker
 must have applied one failover and one replacement. Only then does the guest
 get its per-boot preparation again, the module loads and the configfs mount
 of Preflight with that guest's checks of Preflight, the kernel option's
 among them, and its cn agent, started from its store, must converge to a
 node with no cntlr of the pool and no dnv object (`cnagent.md` CN7): an
 agent back before the replacement would answer its rounds and keep the cntlr
-it rebuilds.
+it rebuilds. The cut of a whole group (raid1 only) runs last: every leg of
+slice 0's data groups is cut from the primary alone, every packet between
+its node and each leg's nvmet address and port, as the pool's record gives
+them, dropped while the standby still reaches them, for 3, 8, 20 and 60
+seconds in turn, each cut under host0's writer to new blocks with no fsync,
+whose mappings the pool commits on its own about once a second. The cut is
+timed on the primary's node, from just before its rule goes in to just
+after it comes off, and a watch in the background there reads md's array
+state and the slice's thin pool line once a second while it stands, so no
+read lengthens it. Each cut records its measured length and the packets its
+rule dropped, what host0 saw (its longest write, its writer's error, its
+blocks read back), the watch's readings, the worker's failovers and leg
+repairs since the cut, and the time until the writer is done and the
+primary holds the groups whole again. A cut of 3 seconds, shorter than the
+leg connections' keep-alive, must make no failed write and no failover, and
+every write must read back; and, as the cut's own proof, the writer must
+have met its stall, a write waiting at least the cut's measured length less
+a second, which a rule that misses the legs' packets does not make. The
+rest is measured, not asserted (`architecture.md`, Known limits, A group that
+loses every leg at once under IO is broken by md). Each cut's blocks are
+read once the writer has ended and the primary reads the groups whole or the
+pool needs_check, through the primary of that moment, so the blocks of a cut
+that broke a group can be read through the array md broke, before any
+failover, and then count as failed reads, neither held nor lost. A cut that leaves the slice's pool needs_check
+ends the cutting, as no step of dnv repairs such a pool: the stage gives the
+worker the primary threshold and a minute more to make the groups whole
+again, logs what it did, and otherwise takes the pool to the level that
+builds no thin pool, where the primary's re-assembly starts the arrays again
+(`cnagent.md` CN12, The re-assembly), and back to the read-write level, where
+the pool opens with its mark again; the case's status check then allows that
+pool's row (The ending every case shares). That level step is not
+exercised: in the lab the worker makes the groups whole first. A cut that
+leaves the pool in any other state but OK ends the cutting too, the arrays
+brought back the same way, and the status check then judges the pool.
 
 **cutoff** proves that a primary cut off from the control plane fails over as
 a pause for a host that follows the discovery log (`architecture.md`,
@@ -1171,7 +1328,30 @@ subsystem, namespace and thin device, and only the suite's own paths on
 host0, while the primary role stays on the cntlr the second failover
 elected.
 
-**The ending every case shares** proves that a pool deletes back to nothing:
+**The ending every case shares** first checks the pool's state on disk by
+its status lines, while the pool still stands: once md runs no sync on any
+group, within a bound, as a case can end while md still copies a leg, one
+status read (`architecture.md`, Clusters, GetClusterStatus) must name no
+fault of the pool's thin pools, none whose report row reads an error, which
+the cn agent makes of a failed pool and of one marked needs_check, none
+out of data space, as no case fills a pool on purpose, none read-only for
+want of metadata space, no row saying the read held no state of the
+pool to judge it by, as a read that judged nothing would pass, and no row
+saying the pool's cap left rows out, every page of the read taken; and as
+the read lists a thin pool's row only when it reads an error, the
+primary's report must hold each slice's thin pool row and read it OK, a
+missing or unknown row failing the check; the one
+needs_check row allowed, in the read and in the report, is that of a slice
+a stage of the case left so on purpose and measured, the react case's
+group cut. Every group's array must
+read clean on the primary: its row OK, md's array state a running word, not
+degraded, no sync running and the group reported whole. The check's own
+proof runs at every preflight: its filter must name the fault in a saved
+status read holding a needs_check pool, allow it only for an allowed slice,
+name a saved space, report and cap row, fail a missing, an unknown and an
+unallowed pool row of the report, and name a degraded, a copying, a broken
+and a not whole array, or the run stops. Then
+it proves that a pool deletes back to nothing:
 only setup's subsystem, namespace and thin device may remain before it; a
 namespace deleted under live controllers loses its head disk; the subsystem
 goes with no live controller under it, both hosts having let go first — a
@@ -1205,7 +1385,11 @@ accepted, which no line logs (Known limits). A skipped check — a
 raid1-only step without redundancy, a
 guest-distinctness check or react's migrating leg without headroom, setup's
 disk-node look at side zeroing after a build whose reactions changed its
-legs — is a logged line, not a proof.
+legs — is a logged line, not a proof, and so are the measurements: the
+group cut past its 3 seconds, the writes whose fsync was in flight at the
+second reset, the blocks the copy case's crash under unflushed writes
+lost, the fstrim's drop where the stripe is below the block, and
+the pauses the writers saw.
 
 ## Preflight
 
@@ -1241,8 +1425,13 @@ and no lockdown the lockdown file shows, as no start line of the suite takes
 modules with the option (`layout.md`, Directory tree); that a host is a
 clean initiator — sudo, nvme-tcp and multipath, its identity files,
 generated if absent and never overwritten, nvme-stas not running or starting
-and the masked autoconnector (E2E10); that host0, when the copy case is in the run, has the
-tools of its fio stamps, fio, cmp, readlink and pkill; that host0, when the
+and the masked autoconnector (E2E10); that both hosts, when the copy case is in the run,
+have the tools of its fio stamps, fio, cmp, readlink and pkill, as host1
+reads a stamp through the transfer; that host0, when the copy or the react
+case is in the run, has the tools of the stamped writer and the writer to new
+blocks, fio, python3, readlink, pkill and nohup, and when the ops case is,
+those of its fstrim step, mkfs.ext4, mount, umount, mountpoint and fstrim;
+that host0, when the
 copy or the
 react case runs with md-raid1, has
 the tool of the kernel-log witness their repairs read, and, when the react
@@ -1294,8 +1483,10 @@ Hosts go before every target, as they hold the
 controllers, and a subsystem removed under a live controller kills it with DNR
 while its port keeps listening and leaves it retrying once the port has
 nothing left (`cnagent_integtest.md`, Lab facts). On a host the write loop,
-the fence writer and the fio of any fio stamp stop first, so that nothing
-writes into a device while its paths go, then nvme-stas, so that nothing
+the fence writer, the stamped writer, the writer to new blocks and the fio
+of any fio stamp stop first, so that nothing writes into a device while its
+paths go, and the ops case's file system is unmounted, so that no mount
+holds a device whose paths go, then nvme-stas, so that nothing
 reconnects what the sweep drops, the host's own nvme-stas configuration
 going back while the work directory still holds its copy and an nvme-stas
 the suite never started being left alone; then the
@@ -1315,9 +1506,10 @@ node, as its stacks sit on the disk nodes' sides, in the cn agent suite's order
 them, so that every clone final is gone, removed while its transfer source is
 connected, before any transfer goes, as a dm-clone flushes through its source
 (`cnagent.md` L3). The first phase takes the copy case's clone bucket and the
-react case's reject rule off first, whether or not this run set them, so
-that no removal waits on a slowed source and no later connect is refused,
-and does not finish while a reading still shows either. On a disk-node guest
+react case's reject rule and group cut off first, whether or not this run
+set them, so that no removal waits on a slowed source and no later connect
+is refused or cut, and does not finish while a reading still shows any of
+them. On a disk-node guest
 every dnv md array goes before any dm
 device, as an array assembled from the controller node's superblocks pins the
 device under it (Known limits), each loop device's header is zeroed before it
@@ -1370,7 +1562,8 @@ namespace and a live path from a retrying one; each guest's kernel, device,
 nvmet and log state follows, a host's with its nvme-stas state, configuration
 and journal and the write loop's records, a controller node's
 with its recorded agent's process state, which shows an agent the cutoff case
-left stopped, the copy case's clone bucket and the react case's reject rule,
+left stopped, the copy case's clone bucket and the react case's reject rule
+and group cut,
 and a disk node's with the react case's silencing rule and the copy case's
 migration bucket; the
 failure line ends with the
@@ -1381,12 +1574,58 @@ the connect attempted.
 ## Known limits
 
 * **A multi-case run pays a full rebuild per case** (E2E11).
-* **The loss of a machine is a controller-node guest's reset, on react's
-  pool.** The suite reaches its guests by ssh alone (E2E1), so react resets
-  the primary's guest through the kernel's sysrq trigger, which drops every
-  kernel object as a power loss does but leaves the hypervisor's machine
-  running; no disk-node guest loses its power, and the step runs at react's
-  slice count only.
+* **The loss of a machine is a guest's reset through the kernel's sysrq
+  trigger.** The suite reaches its guests by ssh alone (E2E1), so it resets
+  a guest that way, which drops every kernel object as a power loss does but
+  leaves the hypervisor's machine running, and what reached the guest's
+  disk stays: react resets the primary's controller-node guest twice, at
+  react's slice count only, and the copy case one disk-node guest twice,
+  its migration's destination once host0's writes have stopped and md has
+  flushed them, and the same guest once more under host writes md has not
+  flushed. A disk that loses what its own cache held is not exercised.
+* **The crash under writes md has not flushed reads md's copy.** On the
+  lab at one slice one chunk of md's bitmap covers a group's whole array,
+  so the copy case's second reset of the disk-node guest finds that chunk
+  dirty and md copies the whole array back onto the returned member: in
+  its one run md wrote 135517 sectors to the member across its return,
+  more than the array holds, the writer's writes after the return among
+  them, no pass of the writer failed and no block read back through the
+  leg other than as the last pass wrote it. That read shows md's copy
+  from the other leg, not what the reset guest kept; only the first reset,
+  after md's flush, reads what the guest kept, md having written 49
+  sectors to the member across its return in that run.
+* **The flush stage met no fsync in flight.** The reset lands in an fsync
+  only while one is in flight, so the stage delays the primary's writes to
+  the meta groups' legs, which lengthens each pool commit and each fsync
+  with it. Its jobs keep one schedule, so the reset meets them all at the
+  same point of it, and in its one run with the delay it met every job in
+  a write and none in an fsync. The stage counts the fsyncs in flight, held
+  or lost, and asserts nothing of them, and it logs no time of an fsync it
+  judges completed, so how long the delay made them is not read. A commit
+  slowed this way is not the lab's own speed. The fsyncs of the writes the
+  host sent again to the new primary took under a millisecond, as the
+  host sends no flush through a path it identified on the standby
+  (`architecture.md`, Known limits, A host's flush through a path it
+  identified over the dm-error is not sent), so the writes that read back
+  after the stall show the pool's mappings, not a commit their fsync made.
+* **The new data checks ran at one slice.** The stamped writer, the status
+  check, the flush stage, the group cut, the fstrim step and the copy
+  case's two crashes of a disk-node guest have run at one slice only;
+  their cost at more slices, the copy case's crashes recovering every
+  group with a side on the reset guest and the fstrim step's file system
+  tables, is not measured, and the run cap's slack covers it untested.
+* **The group cut measures one lab.** Its outcomes past the 3 second cut,
+  the host's pause, md's state, the pool's mode and the worker's reaction,
+  are logged per run and rest on the lab's kernel and the leg connections'
+  timers; the meta group, a group of one leg and a cut of the standby are
+  not exercised, and the stage cuts no more once a cut has left the pool
+  needs_check. Timed on the primary's node, the cuts lasted 3.06 s and
+  8.05 s in the one run that timed them so, the 3 second cut's rule
+  dropping 22 packets the primary sent to the legs and none coming back.
+  The blocks of that cut are read before the failover, through
+  the broken array, so whether the writes acknowledged before it held is not
+  read here; the cn agent suite's group cut reads them after its failover
+  (`cnagent_integtest.md`, Cases, groupcut).
 * **The clone source may fall back.** Whether one kernel can be initiator and
   target for the same bytes is the lab kernel's property, so a source that
   never connects or stops hydrating routes to a fallback pool on another
@@ -1414,9 +1653,10 @@ the connect attempted.
 * **The closing trim returns space to the host only where the guests' disks
   pass discards through**; elsewhere the host's free space shrinks by each
   run's real writes.
-* **Without redundancy the suite is smaller**: copy's forced drop and two
-  repair stages and react's two leg repair stages, two forced-start stages,
-  take-over stage and migrating-leg stage are skipped.
+* **Without redundancy the suite is smaller**: copy's forced drop, its
+  crash of a migration's destination and its two repair stages, and react's
+  two leg repair stages, two forced-start stages, take-over stage,
+  migrating-leg stage and group cut are skipped.
 * **How md takes a retired leg back is logged, not asserted.** md catches a
   retired leg taken back up from its write-intent bitmap only while the
   array has stayed degraded since the leg left, and otherwise copies it
@@ -1507,14 +1747,18 @@ the connect attempted.
   times neither the drop nor the fence. On a host that drops the path after
   the fence, a write sent in between fails (`architecture.md`, Known limits),
   and with it the case.
-* **The cutoff case's writer can meet a known limit.** A failover while
+* **The cutoff case's writer and the copy case's stamped writer can meet a
+  known limit.** A failover while
   the old primary still serves can lose a write it acknowledged in the
   cases `architecture.md`, Known limits, A failover while the old primary
-  serves can lose an acknowledged write, lists (`dnv-worker.md` RW24). The case's second cut is such a failover, and
-  its worker has the old primary's reports, so the round runs; a side of
+  serves can lose an acknowledged write, lists (`dnv-worker.md` RW24). The
+  cutoff case's second cut is such a failover, and so is the copy case's
+  disable of its primary in the middle of a clone's copy under the stamped
+  writer, and
+  their worker has the old primary's reports, so the round runs; a side of
   the round that reports its fence later than the round's bound can still
-  cost the write, and fio's verify then fails the case on a block before
-  the failed write, a failure of that limit and not of the suite.
+  cost a write, and fio's verify then fails the case, a failure of that
+  limit and not of the suite.
 * **The drop is asserted only on paths nvme-stas made.** host0 lets go of its
   own paths before nvme-stas starts, so a path nvme-stas took over is not
   exercised, and one it does not manage it never drops (`architecture.md`,
