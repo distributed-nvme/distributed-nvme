@@ -860,7 +860,20 @@ fail) and of NP8 (a read that starts past the end of the log), which a
 Linux host meets only through a fault or the race of DS9, and a host's
 terminate request (NP2), which a Linux host never sends.
 
-Out of scope: etcd quorum loss and compaction races; TLS and in-band
+Out of scope: etcd quorum loss and compaction races, and the worker
+suite's three-member etcd mode (`dnv-worker.md`, Integration test plan).
+The cdc reaches etcd through the same `etcdutil` client as the worker, and
+of that client the mode shows that a stopped member holds the calls sent
+to it until the etcd operation timeout (`dnv-worker.md` EU5), the path the
+cdc's scans take too, and that after a member's kill and restart a watch
+resumes from the last revision it heard and ends compacted when that lies
+under a compaction; the cdc's own part, a restart of its watch on any
+error, a compaction's included (WV4), is held by the watcher's unit tests,
+which end its watch with a compaction's error and with a broken
+connection's. No suite stages a watch stream on a member stopped with no
+TCP reset, which stays silent until the keepalive of `dnv-worker.md` EU1
+closes its connection, the cdc serving its last known state meanwhile
+(DS10). Also out of scope: TLS and in-band
 authentication; non-TCP transports; digests; scale past the manyhosts
 case — every shard code, more hosts than two host servers can run; mDNS
 (TP-8009); TP-8010 registration; the nvme-stas version matrix, the lab

@@ -98,7 +98,8 @@ CDC_PENDING_TMO_S=
 WORK=/var/tmp/dnv-cdc-integtest
 
 # The ports (Integration test plan, Topology): none shared with the worker
-# suite (12379/12380, 296xx/297xx) or the agent suites (29528/29529/4200).
+# suite (12379/12380, 12381-12384 in its three-member mode, 296xx/297xx) or
+# the agent suites (29528/29529/4200).
 ETCD_CLIENT_PORT=13379
 ETCD_PEER_PORT=13380
 CDC_PORT_BASE=18009               # cdc0..cdc3 -> 18009..18012

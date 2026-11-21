@@ -1,16 +1,19 @@
 #!/usr/bin/env bash
 #
 # worker_test.sh — the `dnv-worker` integration test of dnv-worker.md,
-# Integration test plan. One server, a real single-node etcd, a real
-# three-process worker fleet and the plan's fake dn/cn agents, driven from this
-# machine over ssh by integtest/workerctl (the gateway's write path) and
-# integtest/fakeagent.
+# Integration test plan. One server, a real etcd (one member, or three with
+# --etcd-members 3), a real three-process worker fleet and the plan's fake
+# dn/cn agents, driven from this machine over ssh by integtest/workerctl (the
+# gateway's write path) and integtest/fakeagent.
 #
-#   bash integtest/worker_test.sh [--only <case>] [--cleanup-only] user@ip
+#   bash integtest/worker_test.sh [--etcd-members 1|3] [--only <case>]
+#       [--cleanup-only] user@ip
 #
 # The plan's cases, in order, each in its own cluster `it-<case>` and each
 # after a fleet restart: smoke, revision, health, bitmap, reaction, repair,
-# failover, hold, drain, vote, handoff. Cleanup runs unconditionally at the start and,
+# failover, hold, drain, vote, handoff; with --etcd-members 3 the run is the
+# four etcd cases alone: etcd_leader, etcd_follower, etcd_compact,
+# etcd_nospace. Cleanup runs unconditionally at the start and,
 # on success only, at the end: a failing run leaves etcd's data, every log and
 # every behavior file in place and dumps the diagnostics.
 #
@@ -88,7 +91,8 @@ DEMOTION_HOLD=
 
 WORK=/var/tmp/dnv-worker-integtest
 
-# Ports: nine in total, none shared with the two agent suites.
+# Ports: nine in total, thirteen in the three-member mode (below), none shared
+# with the two agent suites.
 ETCD_CLIENT_PORT=12379
 # common.DnvPrefix — the first field of every dnv etcd key (architecture.md,
 # Key grammar).
@@ -98,12 +102,41 @@ DN_PORT_BASE=29600 # dn0..dn3 -> 29600..29603
 CN_PORT_BASE=29700 # cn0..cn2 -> 29700..29702
 ALL_PORTS=(12379 12380 29600 29601 29602 29603 29700 29701 29702)
 
+# The three-member mode (--etcd-members 3; dnv-worker.md, Integration test
+# plan, The three-member etcd mode): members 2 and 3 listen beside member 1,
+# on four more loopback ports, every program gets all three endpoints, and
+# the run is the four etcd cases alone, at a backend quota small enough for
+# the NOSPACE case to fill.
+ETCD_MEMBERS=1
+ETCD2_CLIENT_PORT=12381
+ETCD2_PEER_PORT=12382
+ETCD3_CLIENT_PORT=12383
+ETCD3_PEER_PORT=12384
+ETCD_ENDPOINTS="127.0.0.1:$ETCD_CLIENT_PORT"
+ETCD_QUOTA_BYTES=33554432
+ETCD_CASES=(etcd_leader etcd_follower etcd_compact etcd_nospace)
+# The leader's stop in case etcd_leader, and the bound on the follower's stop
+# in case etcd_follower (dnv-worker.md, Integration test plan, The
+# three-member etcd mode, for the measurements they rest on). The leader's
+# stop stays under one vote interval of that case's fleet (set_vote_timers).
+ETCD_LEADER_STOP=3
+ETCD_FOLLOWER_STOP=30
+# The one key case etcd_nospace overwrites until the store reaches its quota,
+# outside the dnv prefix, so no worker reads it.
+NOSPACE_KEY=zz-nospace-fill
+# A key the case puts before the fill and reads and deletes under the alarm.
+NOSPACE_SCRATCH=zz-nospace-scratch
+SEEDS0=""
+
 # Test-time constants (dnv-worker.md, Integration test plan, Topology).
 VOTE_INTERVAL=2
 VOTE_GRACE=6
 # The leave grace must exceed the vote interval plus the etcd operation
 # timeout, 10 s (dnv-worker.md CM3).
 VOTE_LEAVE_GRACE=13
+BASE_VOTE_INTERVAL=$VOTE_INTERVAL
+BASE_VOTE_GRACE=$VOTE_GRACE
+BASE_VOTE_LEAVE_GRACE=$VOTE_LEAVE_GRACE
 HEALTH_INTERVAL=1     # every health_check_conf.*_interval
 THRESHOLDS=2,4,3,6    # primary, cntlr, side, leg
 LWM=50                # low_water_mark_pct
@@ -319,7 +352,7 @@ sshw_ok() { sshw "$@" || true; }
 ctl() {
 	local quoted
 	quoted=$(printf '%q ' "$@")
-	sshw "$WORK/bin/workerctl --endpoints 127.0.0.1:$ETCD_CLIENT_PORT" \
+	sshw "$WORK/bin/workerctl --endpoints $ETCD_ENDPOINTS" \
 		"--cluster $CLUSTER --trace-id $TRACE $quoted"
 }
 
@@ -778,7 +811,7 @@ start_worker() { # <w>
 	REG_BASE[$1]=$(count_recs "$(wpath "$1")" \
 		'select(.msg == "worker registered")')
 	remote_start "$1" worker.log \
-		"$WORK/bin/dnv-worker --etcd-endpoints 127.0.0.1:$ETCD_CLIENT_PORT" \
+		"$WORK/bin/dnv-worker --etcd-endpoints $ETCD_ENDPOINTS" \
 		"--roles dn,cn,sp --vote-interval $VOTE_INTERVAL" \
 		"--vote-grace-time $VOTE_GRACE" \
 		"--vote-leave-grace-time $VOTE_LEAVE_GRACE" \
@@ -853,7 +886,7 @@ truncate_logs() {
 # Safe because the workers are down: their registrations go with the wipe and
 # are re-put on restart.
 wipe_etcd() {
-	sshw "$WORK/bin/etcdctl --endpoints 127.0.0.1:$ETCD_CLIENT_PORT" \
+	sshw "$WORK/bin/etcdctl --endpoints $ETCD_ENDPOINTS" \
 		"del --prefix '$DNV_PREFIX '" >/dev/null
 }
 
@@ -863,6 +896,24 @@ reset_fakes() {
 		clear_behavior "$d"
 		reset_state "$d"
 	done
+}
+
+# set_vote_timers sets the vote timers the fleet of case <name> starts with:
+# the suite's own, but for case etcd_leader, whose fleet runs at the shortest
+# whole vote interval whose dead threshold, twice it, exceeds
+# common.DefaultEtcdOpTimeout, so that no one heartbeat put a stopped leader
+# holds, which that timeout bounds (dnv-worker.md EU5), can reach VW8 (a)'s
+# limit; its grace times keep CM3's rules over that interval.
+set_vote_timers() { # <case name>
+	VOTE_INTERVAL=$BASE_VOTE_INTERVAL
+	VOTE_GRACE=$BASE_VOTE_GRACE
+	VOTE_LEAVE_GRACE=$BASE_VOTE_LEAVE_GRACE
+	if [ "$1" = etcd_leader ]; then
+		VOTE_INTERVAL=$((ETCD_OP_TIMEOUT / 2 + 1))
+		VOTE_GRACE=$((2 * VOTE_INTERVAL + 2))
+		VOTE_LEAVE_GRACE=$((VOTE_INTERVAL + ETCD_OP_TIMEOUT + 1))
+	fi
+	WAIT_MEMBERSHIP=$((2 * VOTE_INTERVAL + VOTE_LEAVE_GRACE + 8))
 }
 
 # fleet_restart is the fleet restart before every case (dnv-worker.md,
@@ -920,8 +971,9 @@ EOF
 
 # cleanup signals every recorded pid (SIGTERM, SIGKILL after 5 s), falls back
 # to the three pkill -f forms, each matching only a program under $WORK, and
-# removes $WORK. Nothing outside $WORK is touched. A SIGSTOPped worker is SIGCONTed first, or it would never see the
-# SIGTERM.
+# removes $WORK. Nothing outside $WORK is touched. A SIGSTOPped process (a
+# worker, or an etcd member in the three-member mode) is SIGCONTed first, or
+# it would never see the SIGTERM.
 cleanup() {
 	log "[server] cleanup: signal every recorded pid, then rm -rf $WORK"
 	cleanup_script | ssh "${SSH_OPTS[@]}" "$TARGET" "bash -s" || true
@@ -973,8 +1025,15 @@ diagnostics() {
 	log "--- workerctl list-keys --prefix dnv ---"
 	ctl list-keys --prefix dnv >&2 || true
 
+	if [ "$ETCD_MEMBERS" != 1 ]; then
+		log ""
+		log "--- etcdctl endpoint status and alarm list ---"
+		sshw_ok "$WORK/bin/etcdctl --endpoints $ETCD_ENDPOINTS endpoint status" >&2
+		sshw_ok "$WORK/bin/etcdctl --endpoints $ETCD_ENDPOINTS alarm list" >&2
+	fi
+
 	log ""
-	log "--- ss -ltn (the nine ports) ---"
+	log "--- ss -ltn (the suite's ports) ---"
 	sshw_ok "ss -ltn | grep -E ':(${ALL_PORTS[0]}$(printf '|%s' "${ALL_PORTS[@]:1}"))\\b' || true" >&2
 
 	log ""
@@ -1031,6 +1090,9 @@ read_constants() {
 	ETCD_MAX_REQUEST_BYTES=$(constant_of "$json" EtcdMaxRequestBytes)
 	log "  --max-request-bytes = common.EtcdMaxRequestBytes =" \
 		"$ETCD_MAX_REQUEST_BYTES"
+	ETCD_OP_TIMEOUT=$(constant_of "$json" DefaultEtcdOpTimeout)
+	log "  case etcd_leader's vote interval rests on" \
+		"common.DefaultEtcdOpTimeout = $ETCD_OP_TIMEOUT s"
 	DEFAULT_HC_INTERVAL=$(constant_of "$json" DefaultHealthCheckInterval)
 	DEFAULT_PRIMARY_UNHEALTHY=$(constant_of "$json" DefaultPrimaryUnhealthy)
 	DEMOTION_HOLD=$(constant_of "$json" DemotionHoldTimeout)
@@ -1139,8 +1201,11 @@ preflight_server() {
 	STAGE="preflight (server)"
 	log "=== preflight: server"
 	sshw "true" || die "passwordless ssh to $TARGET failed"
-	local missing
-	missing=$(sshw "for b in bash nohup pkill ss tar df sed awk; do" \
+	local missing tools="bash nohup pkill ss tar df sed awk"
+	# The three-member mode reads a member's metrics with python3 and makes
+	# its filler with base64.
+	[ "$ETCD_MEMBERS" = 1 ] || tools+=" python3 base64 head"
+	missing=$(sshw "for b in $tools; do" \
 		"command -v \$b >/dev/null || echo \$b; done")
 	[ -z "$missing" ] || die "missing on $TARGET: $missing"
 	local free
@@ -1162,8 +1227,56 @@ preflight_server() {
 # Setup
 # ---------------------------------------------------------------------------
 
+# The members of the run's etcd: member <m> runs in $WORK/<etcd dir> under
+# its own name and ports, the dir of member 1 being the one-member run's.
+etcd_dir() { # <m>
+	if [ "$1" = 1 ]; then echo etcd; else echo "etcd$1"; fi
+}
+etcd_name() { # <m>
+	if [ "$1" = 1 ]; then echo dnv-it; else echo "dnv-it$1"; fi
+}
+etcd_client_port() { # <m>
+	case "$1" in
+	1) echo "$ETCD_CLIENT_PORT" ;;
+	2) echo "$ETCD2_CLIENT_PORT" ;;
+	3) echo "$ETCD3_CLIENT_PORT" ;;
+	esac
+}
+etcd_peer_port() { # <m>
+	case "$1" in
+	1) echo "$ETCD_PEER_PORT" ;;
+	2) echo "$ETCD2_PEER_PORT" ;;
+	3) echo "$ETCD3_PEER_PORT" ;;
+	esac
+}
+etcd_endpoint() { echo "127.0.0.1:$(etcd_client_port "$1")"; }
+
+# start_etcd_member starts member <m> on its data dir, a new one at setup and
+# the one it left after a stop: a member that finds its data dir rejoins the
+# cluster it holds and reads none of the --initial flags. The three-member
+# mode runs every member at the case's backend quota.
+start_etcd_member() { # <m>
+	local m=$1 cluster="" i extra=()
+	for i in $(seq 1 "$ETCD_MEMBERS"); do
+		cluster+="${cluster:+,}$(etcd_name "$i")=http://127.0.0.1:$(etcd_peer_port "$i")"
+	done
+	[ "$ETCD_MEMBERS" = 1 ] ||
+		extra=("--initial-cluster-token dnv-it-$ETCD_MEMBERS"
+			"--quota-backend-bytes=$ETCD_QUOTA_BYTES")
+	remote_start "$(etcd_dir "$m")" etcd.log \
+		"$WORK/bin/etcd --name $(etcd_name "$m")" \
+		"--data-dir $WORK/$(etcd_dir "$m")/data" \
+		"--listen-client-urls http://$(etcd_endpoint "$m")" \
+		"--advertise-client-urls http://$(etcd_endpoint "$m")" \
+		"--listen-peer-urls http://127.0.0.1:$(etcd_peer_port "$m")" \
+		"--initial-advertise-peer-urls http://127.0.0.1:$(etcd_peer_port "$m")" \
+		"--initial-cluster $cluster" \
+		"--max-txn-ops=$ETCD_MAX_TXN_OPS" \
+		"--max-request-bytes=$ETCD_MAX_REQUEST_BYTES" "${extra[@]}"
+}
+
 etcd_reachable() {
-	sshw "$WORK/bin/workerctl --endpoints 127.0.0.1:$ETCD_CLIENT_PORT ping" >/dev/null
+	sshw "$WORK/bin/workerctl --endpoints $ETCD_ENDPOINTS ping" >/dev/null
 }
 
 ports_up() { # <port…>
@@ -1179,7 +1292,8 @@ setup() {
 	CASE=setup
 
 	stage layout "create the work tree and ship the five binaries"
-	local dirs=("bin" "etcd" "${WORKER_DIRS[@]}" "${DN_DIRS[@]}" "${CN_DIRS[@]}")
+	local dirs=("bin" "${WORKER_DIRS[@]}" "${DN_DIRS[@]}" "${CN_DIRS[@]}") m
+	for m in $(seq 1 "$ETCD_MEMBERS"); do dirs+=("$(etcd_dir "$m")"); done
 	sshw "mkdir -p $(printf "$WORK/%s " "${dirs[@]}")"
 	SETUP_DONE=1
 	log "[server] scp etcd etcdctl dnv-worker fakeagent workerctl -> $WORK/bin"
@@ -1189,16 +1303,9 @@ setup() {
 		"$TARGET:$WORK/bin/" || die "scp of the binaries failed"
 	sshw "chmod 0755 $WORK/bin/*"
 
-	stage etcd "start etcd and wait for a workerctl ping"
-	remote_start etcd etcd.log \
-		"$WORK/bin/etcd --name dnv-it --data-dir $WORK/etcd" \
-		"--listen-client-urls http://127.0.0.1:$ETCD_CLIENT_PORT" \
-		"--advertise-client-urls http://127.0.0.1:$ETCD_CLIENT_PORT" \
-		"--listen-peer-urls http://127.0.0.1:$ETCD_PEER_PORT" \
-		"--initial-advertise-peer-urls http://127.0.0.1:$ETCD_PEER_PORT" \
-		"--initial-cluster dnv-it=http://127.0.0.1:$ETCD_PEER_PORT" \
-		"--max-txn-ops=$ETCD_MAX_TXN_OPS" \
-		"--max-request-bytes=$ETCD_MAX_REQUEST_BYTES"
+	stage etcd "start $ETCD_MEMBERS etcd member(s) and wait for a workerctl ping"
+	local m
+	for m in $(seq 1 "$ETCD_MEMBERS"); do start_etcd_member "$m"; done
 	wait_until "$WAIT_SHORT" "etcd to answer a workerctl ping" etcd_reachable
 
 	stage fakes "start four fake DNs and three fake CNs with an empty behavior"
@@ -4137,7 +4244,7 @@ sp_rev_key() { # <sp id>
 # when the read did or the key is absent.
 mod_rev() { # <key>
 	local out rev
-	out=$(sshw "$WORK/bin/etcdctl --endpoints 127.0.0.1:$ETCD_CLIENT_PORT" \
+	out=$(sshw "$WORK/bin/etcdctl --endpoints $ETCD_ENDPOINTS" \
 		"get $(printf '%q' "$1") -w json") || return 1
 	rev=$(jq_of "$out" '.kvs[0].mod_revision // empty') || return 1
 	case "$rev" in
@@ -5496,7 +5603,7 @@ case_drain() {
 		"$((dn1_rev + 1))" "$((dn2_rev + 1))" "after put-clone c0"
 	# One ssh for all 65 puts: 65 round trips would dominate the case.
 	sshw "set -e; for s in 0 1 2 3 4; do for b in \$(seq 0 12); do" \
-		"$WORK/bin/workerctl --endpoints 127.0.0.1:$ETCD_CLIENT_PORT" \
+		"$WORK/bin/workerctl --endpoints $ETCD_ENDPOINTS" \
 		"--cluster $CLUSTER --trace-id $TRACE put-bitmap --sp sp3" \
 		"--kind clone --name c0 --src-slice-idx \$s --bm-idx \$b --hex 0102" \
 		"> /dev/null; done; done"
@@ -5612,7 +5719,7 @@ case_drain() {
 	drain_assert_clone_dns 57 5 "$c1Grp" 1 \
 		"$((dn1_rev + 1))" "$((dn2_rev + 1))" "after put-clone c1"
 	sshw "set -e; for s in 0 1 2 3 4; do for b in \$(seq 0 12); do" \
-		"$WORK/bin/workerctl --endpoints 127.0.0.1:$ETCD_CLIENT_PORT" \
+		"$WORK/bin/workerctl --endpoints $ETCD_ENDPOINTS" \
 		"--cluster $CLUSTER --trace-id $TRACE put-bitmap --sp sp3" \
 		"--kind clone --name c1 --src-slice-idx \$s --bm-idx \$b --hex 0102" \
 		"> /dev/null; done; done"
@@ -6290,14 +6397,374 @@ flip_gt() { # <n> <kind>
 }
 
 # ---------------------------------------------------------------------------
+# The three-member etcd mode (dnv-worker.md, Integration test plan, The
+# three-member etcd mode): four cases over etcd faults, each case's
+# expectation the one the lab measured for this etcd and these timers
+# ---------------------------------------------------------------------------
+
+# etcdctl_at runs the shipped etcdctl against <endpoints>.
+etcdctl_at() { # <endpoints> <args…>
+	local eps=$1
+	shift
+	sshw "$WORK/bin/etcdctl --endpoints $eps --command-timeout=5s $*"
+}
+
+# etcd_leader prints the member that leads: the one whose own id is the
+# leader it names. It reads etcdctl's fields output, so no 64-bit member id
+# passes through a JSON number, and it fails when no member answers as the
+# leader.
+etcd_leader() {
+	local m out id lead
+	for m in $(seq 1 "$ETCD_MEMBERS"); do
+		out=$(etcdctl_at "$(etcd_endpoint "$m")" endpoint status -w fields) ||
+			continue
+		id=$(printf '%s\n' "$out" | awk -F' : ' '$1 == "\"MemberID\"" { print $2 }')
+		lead=$(printf '%s\n' "$out" | awk -F' : ' '$1 == "\"Leader\"" { print $2 }')
+		if [ -n "$id" ] && [ "$id" = "$lead" ]; then
+			printf '%s' "$m"
+			return 0
+		fi
+	done
+	return 1
+}
+
+leader_is() { # <member>
+	local now
+	now=$(etcd_leader) || return 1
+	[ "$now" = "$1" ]
+}
+
+# move_leader_off moves etcd's leadership from member <m>, when it leads, to
+# another member: etcdctl names a member by its id in hex, which the member
+# list prints beside the member's name.
+move_leader_off() { # <m>
+	local lead target m id
+	lead=$(etcd_leader) || die "no member answers as the leader"
+	[ "$lead" = "$1" ] || return 0
+	for m in $(seq 1 "$ETCD_MEMBERS"); do
+		[ "$m" = "$1" ] || target=$m
+	done
+	id=$(etcdctl_at "$ETCD_ENDPOINTS" member list |
+		awk -F', ' -v n="$(etcd_name "$target")" '$3 == n { print $1 }')
+	[ -n "$id" ] || die "no member id for member $target"
+	log "  moving the leadership from member $1 to member $target ($id)"
+	etcdctl_at "$(etcd_endpoint "$1")" move-leader "$id" >/dev/null
+	wait_until "$WAIT_SHORT" "member $target leads" leader_is "$target"
+}
+
+# stop_for stops member <m> for <secs> on the server, in one remote command,
+# so that the stop lasts what the case means and no ssh connect more, and
+# continues it on the way out whatever ends the command.
+stop_for() { # <m> <secs>
+	sshw "p=\$(cat $WORK/$(etcd_dir "$1")/pid); trap 'kill -CONT \$p' EXIT;" \
+		"kill -STOP \$p; sleep $2"
+}
+
+# raft_term prints the raft term member <m> reports: a leader's stop starts an
+# election, which raises it, and a follower's stop leaves it as it was.
+raft_term() { # <m>
+	local out term
+	out=$(etcdctl_at "$(etcd_endpoint "$1")" endpoint status -w fields) ||
+		return 1
+	term=$(printf '%s\n' "$out" |
+		awk -F' : ' '$1 == "\"RaftTerm\"" { print $2; exit }')
+	want_number "$term" "member $1's raft term"
+	printf '%s' "$term"
+}
+
+# busiest_member prints the member that serves the most watch streams, and
+# dies when none serves one, and on a stream count that does not read: it
+# runs inside its callers' $( ), where set -e is off, so the read dies by
+# hand, and the caller's assignment stops the run.
+busiest_member() {
+	local m n most=0 busy=""
+	for m in $(seq 1 "$ETCD_MEMBERS"); do
+		n=$(watch_streams "$m") ||
+			die "member $m's watch streams could not be read"
+		log "  member $m serves $n watch streams"
+		if [ "$n" -gt "$most" ]; then
+			most=$n
+			busy=$m
+		fi
+	done
+	[ -n "$busy" ] || die "no member serves a watch stream"
+	printf '%s' "$busy"
+}
+
+leader_is_not() { # <member>
+	local now
+	now=$(etcd_leader) || return 1
+	[ "$now" != "$1" ]
+}
+
+# etcd_head_rev prints the store's revision, read from one member.
+etcd_head_rev() {
+	local out rev
+	out=$(etcdctl_at "$ETCD_ENDPOINTS" endpoint status -w fields) || return 1
+	rev=$(printf '%s\n' "$out" | awk -F' : ' '$1 == "\"Revision\"" { print $2 }' |
+		sort -n | tail -n 1)
+	want_number "$rev" "the store's revision"
+	printf '%s' "$rev"
+}
+
+# watch_streams prints how many watch streams member <m> serves, from its
+# metrics: a client's watches of one connection share a stream, so the
+# member with the most streams is the one whose stop ends the most watches.
+watch_streams() { # <m>
+	local out n
+	out=$(sshw "python3 -c \"import sys, urllib.request; sys.stdout.write(urllib.request.urlopen('http://$(etcd_endpoint "$1")/metrics', timeout=5).read().decode())\"") ||
+		return 1
+	n=$(printf '%s\n' "$out" |
+		awk '$1 == "etcd_debugging_mvcc_watch_stream_total" { print $2 }')
+	want_count "$n" "member $1's watch streams"
+	printf '%s' "$n"
+}
+
+# want_count dies unless a count read back is a plain number, zero included:
+# a read that failed prints nothing.
+want_count() { # <value> <label>
+	case "$1" in
+	'' | *[!0-9]*) die "$2 read back as '$1'" ;;
+	esac
+}
+
+# fences counts the `worker fenced` records of w1..w3 that pass the jq test
+# <filter> (`true` for all).
+fences() { # <filter>
+	wcount "select(.msg == \"worker fenced\") | select($1)"
+}
+
+fences_gt() { # <n> <filter>
+	count_gt "$1" fences "$2"
+}
+
+# every_worker_fenced_since: each of w1..w3 has logged a fence of the seed it
+# ran under when the case read SEEDS0.
+every_worker_fenced_since() {
+	local w seed
+	for w in w1 w2 w3; do
+		seed=$(printf '%s\n' "$SEEDS0" | awk -v w="$w" '$1 == w { print $2 }')
+		count_ge 1 count_recs "$(wpath "$w")" \
+			'select(.msg == "worker fenced") | select(.old_seed == $s)' \
+			--arg s "$seed" || return 1
+	done
+}
+
+# read_seeds keeps each worker's seed in SEEDS0, one "w seed" line each.
+read_seeds() {
+	local w
+	SEEDS0=$(for w in w1 w2 w3; do printf '%s %s\n' "$w" "$(seed_of "$w")"; done)
+	log "  seeds: $(printf '%s' "$SEEDS0" | tr '\n' ' ')"
+}
+
+case_etcd_leader() {
+	CASE=etcd_leader
+
+	stage 1 "a leader stop of ${ETCD_LEADER_STOP}s at a vote interval of ${VOTE_INTERVAL}s fences no worker"
+	# A leader stopped for less than one vote interval of this case's fleet
+	# (set_vote_timers) costs an election and fails at most one tick of each
+	# worker, whose puts the timeout of EU5 bounds under the dead threshold,
+	# so no worker fences (VW8 (a)), as architecture.md, Running without the
+	# control plane, says of a heartbeat that lands again over a leader
+	# election. The stop is timed on the server.
+	local lead base
+	lead=$(etcd_leader) || die "no member answers as the leader"
+	base=$(fences true)
+	want_count "$base" "the fences before the stop"
+	log "  stopping the leader, member $lead, for ${ETCD_LEADER_STOP}s"
+	stop_for "$lead" "$ETCD_LEADER_STOP"
+	wait_until "$WAIT_SHORT" "a member other than $lead leads" leader_is_not "$lead"
+	assert_none_for $((3 * VOTE_INTERVAL + VOTE_GRACE)) \
+		"a worker fenced after the leader's stop" fences_gt "$base" true
+	assert_owners 50 w1 w2 w3
+}
+
+case_etcd_follower() {
+	CASE=etcd_follower
+
+	stage 1 "the member that serves the most watch streams, a follower, stopped: every worker fences on its heartbeat within ${ETCD_FOLLOWER_STOP}s"
+	# The member stopped is the one that serves the most watch streams, made
+	# a follower first, so that a worker whose watches go quiet could fence
+	# for them (VW8 (b)). The client spreads its calls over every endpoint,
+	# so some heartbeat puts of every worker reach the stopped member and
+	# wait out the etcd operation timeout: the tick that waits fences the
+	# worker for its heartbeat (VW8 (a)) first. The raft term, unchanged
+	# over the stop, shows that the stopped member did not lead.
+	local follower lead term0 term
+	follower=$(busiest_member)
+	move_leader_off "$follower"
+	lead=$(etcd_leader) || die "no member answers as the leader"
+	term0=$(raft_term "$lead")
+	read_seeds
+	log "  stopping member $follower, a follower of member $lead at raft term $term0"
+	sig_dir "$(etcd_dir "$follower")" STOP
+	wait_until "$ETCD_FOLLOWER_STOP" "every worker fenced while member $follower is stopped" \
+		every_worker_fenced_since
+	assert_eq "$(fences '.reason != "heartbeat_stalled"')" 0 \
+		"fences for any reason but a stalled heartbeat"
+	term=$(raft_term "$lead")
+	assert_eq "$term" "$term0" \
+		"the raft term over the stop (a moved term means the stopped member led)"
+	leader_is "$lead" ||
+		die "member $lead no longer leads while member $follower is stopped"
+	sig_dir "$(etcd_dir "$follower")" CONT
+
+	stage 2 "the member back: every worker under a new seed, the table whole"
+	wait_until "$WAIT_MEMBERSHIP" "the three-member table over w1 w2 w3 again" \
+		owners_settled 50 w1 w2 w3
+	assert_owners 50 w1 w2 w3
+	local w
+	for w in w1 w2 w3; do
+		assert_ne "$(seed_of "$w")" \
+			"$(printf '%s\n' "$SEEDS0" | awk -v w="$w" '$1 == w { print $2 }')" \
+			"$w's seed after its fence"
+	done
+}
+
+case_etcd_compact() {
+	CASE=etcd_compact
+
+	stage 1 "a compaction to the store's head ends no watch that is up to date"
+	# etcd cancels a watch for a compaction only when the watch asks for a
+	# revision the compaction removed, so a compaction alone restarts no
+	# watch of a worker (dnv-worker.md SW4, VW3).
+	local rev
+	rev=$(etcd_head_rev)
+	etcdctl_at "$ETCD_ENDPOINTS" compact "$rev" >/dev/null
+	assert_none_for 10 "a watch restarting after the compaction alone" \
+		count_gt 0 wcount 'select(.msg | endswith("watch restarting"))'
+
+	stage 2 "the member that serves the most watch streams restarts: the quiet watches end compacted"
+	# A stream that breaks resumes each of its watches from the revision
+	# after the last event it heard, which for a quiet shard's watch lies
+	# under the compaction: those watches end compacted and log their
+	# restart as such (SW4), the cluster conf watch too (RW21); the rescan's
+	# diff is the unit tests' (dnv-worker.md, Integration test plan, Rules
+	# exercised). The member is made a follower first, since the lab saw a
+	# kill of the leader fence every worker, as a leader's stop at this
+	# case's vote interval does (case etcd_leader runs at timers of its
+	# own); a follower's restart is shorter than the dead threshold plus one
+	# vote interval (VW8 (a)), so no worker fences.
+	local busy
+	busy=$(busiest_member)
+	move_leader_off "$busy"
+	local base
+	base=$(fences true)
+	want_count "$base" "the fences before the restart"
+	sig_dir "$(etcd_dir "$busy")" KILL
+	wait_gone "$(etcd_dir "$busy")" "$WAIT_SHORT"
+	start_etcd_member "$busy"
+	wait_until "$WAIT_SHORT" "member $busy to answer" \
+		etcdctl_at "$(etcd_endpoint "$busy")" endpoint health
+	wait_until 20 "a rev watch's compacted restart" \
+		count_ge 1 wcount 'select(.msg == "rev watch restarting" and .compacted == true)'
+	wait_until 20 "a cluster conf watch's compacted restart" \
+		count_ge 1 wcount 'select(.msg == "cluster conf watch restarting" and .compacted == true)'
+	assert_none_for "$VOTE_GRACE" "a worker fenced over the member's restart" \
+		fences_gt "$base" true
+	assert_owners 50 w1 w2 w3
+}
+
+# nospace_fill overwrites one key outside the dnv prefix with a large value
+# until etcd refuses the put for its quota, as the history of a store that no
+# compaction trims grows, and prints the count of puts that landed, then the
+# count of lines of the last put's error that name the quota.
+nospace_fill() {
+	sshw "head -c 750000 /dev/urandom | base64 -w0 > $WORK/fill.val &&" \
+		"n=0; while [ \$n -lt 400 ]; do" \
+		"$WORK/bin/etcdctl --endpoints $ETCD_ENDPOINTS put $NOSPACE_KEY" \
+		"< $WORK/fill.val >/dev/null 2>$WORK/fill.err || break;" \
+		"n=\$((n + 1)); done; echo \$n;" \
+		"grep -c 'database space exceeded' $WORK/fill.err || true"
+}
+
+# alarm_nospace reports whether a member's NOSPACE alarm stands; a read that
+# fails dies, since a negative rests on it (dnv-worker.md, Integration test
+# plan, What a pass means).
+alarm_nospace() {
+	local out
+	out=$(etcdctl_at "$ETCD_ENDPOINTS" alarm list) ||
+		die "the etcd alarm list could not be read: a failed read is no empty list"
+	case "$out" in
+	*alarm:NOSPACE*) return 0 ;;
+	esac
+	return 1
+}
+
+# every_worker_fenced_twice: each of w1..w3 has logged two fences or more.
+every_worker_fenced_twice() {
+	local w
+	for w in w1 w2 w3; do
+		count_ge 2 count_recs "$(wpath "$w")" \
+			'select(.msg == "worker fenced")' || return 1
+	done
+}
+
+case_etcd_nospace() {
+	CASE=etcd_nospace
+
+	stage 1 "the store at its quota: etcd refuses every put and serves reads and deletes, and every worker fences again and again"
+	local out filled refused
+	etcdctl_at "$ETCD_ENDPOINTS" put "$NOSPACE_SCRATCH" kept >/dev/null
+	read_seeds
+	out=$(nospace_fill)
+	filled=$(printf '%s\n' "$out" | sed -n 1p)
+	refused=$(printf '%s\n' "$out" | sed -n 2p)
+	log "  $filled puts of a 1 MB value landed before the quota"
+	assert_ge "$refused" 1 "lines of the filler's last put that name the quota"
+	alarm_nospace || die "no member raised the NOSPACE alarm"
+	out=$(etcdctl_at "$ETCD_ENDPOINTS" get "$NOSPACE_SCRATCH" --print-value-only) ||
+		die "a get under the NOSPACE alarm failed"
+	assert_eq "$out" kept "the scratch key read under the alarm"
+	out=$(etcdctl_at "$ETCD_ENDPOINTS" del "$NOSPACE_SCRATCH") ||
+		die "a delete under the NOSPACE alarm failed"
+	assert_eq "$out" 1 "the keys a delete under the alarm removed"
+	wait_until "$((3 * VOTE_INTERVAL + VOTE_GRACE))" "every worker fenced under the alarm" \
+		every_worker_fenced_since
+	wait_until "$((2 * 3 * VOTE_INTERVAL + VOTE_GRACE))" \
+		"every worker fenced again under the alarm" every_worker_fenced_twice
+	assert_eq "$(fences '.reason != "heartbeat_stalled"')" 0 \
+		"fences under the alarm for any reason but a stalled heartbeat"
+	count_ge 1 wcount 'select(.msg == "etcd put")
+		| select((.error // "") | contains("database space exceeded"))' ||
+		die "no worker's etcd put record names the quota"
+
+	stage 2 "compact, defragment, disarm: every worker back with no other step"
+	# The operations doc's recovery of a store at its quota (operations.md,
+	# etcd refuses writes: its store is full): a compaction to the store's
+	# head that returns once etcd has removed the old values, then a
+	# defragmentation of every member, then the alarm's disarm, each under a
+	# long command timeout. The workers need no step.
+	local rev
+	rev=$(etcd_head_rev)
+	sshw "$WORK/bin/etcdctl --endpoints $ETCD_ENDPOINTS --command-timeout=60s" \
+		"compact --physical $rev" >/dev/null
+	sshw "$WORK/bin/etcdctl --endpoints $ETCD_ENDPOINTS --command-timeout=60s" \
+		"defrag --cluster" >/dev/null
+	etcdctl_at "$ETCD_ENDPOINTS" alarm disarm >/dev/null
+	! alarm_nospace || die "the NOSPACE alarm stands after the disarm"
+	wait_until "$WAIT_MEMBERSHIP" "the three-member table over w1 w2 w3 again" \
+		owners_settled 50 w1 w2 w3
+	assert_owners 50 w1 w2 w3
+	local base
+	base=$(fences true)
+	want_count "$base" "the fences after the recovery"
+	assert_none_for $((3 * VOTE_INTERVAL)) "a worker fenced after the recovery" \
+		fences_gt "$base" true
+	etcdctl_at "$ETCD_ENDPOINTS" del "$NOSPACE_KEY" >/dev/null
+}
+
+# ---------------------------------------------------------------------------
 # Entry point
 # ---------------------------------------------------------------------------
 
 usage() {
 	cat >&2 <<EOF
-usage: bash integtest/worker_test.sh [--only <case>] [--cleanup-only] <user@ip>
+usage: bash integtest/worker_test.sh [--etcd-members 1|3] [--only <case>]
+       [--cleanup-only] <user@ip>
 
 cases: ${CASES[*]}
+with --etcd-members 3: ${ETCD_CASES[*]}
 EOF
 	exit 2
 }
@@ -6318,6 +6785,14 @@ parse_args() {
 			CLEANUP_ONLY=1
 			shift
 			;;
+		--etcd-members)
+			ETCD_MEMBERS=${2-}
+			shift 2 || usage
+			;;
+		--etcd-members=*)
+			ETCD_MEMBERS=${1#*=}
+			shift
+			;;
 		-h | --help) usage ;;
 		-*) usage ;;
 		*)
@@ -6330,6 +6805,17 @@ parse_args() {
 	TARGET=${positional[0]}
 	IP=${TARGET##*@}
 	[ -n "$IP" ] || usage
+	case "$ETCD_MEMBERS" in
+	1) ;;
+	3)
+		CASES=("${ETCD_CASES[@]}")
+		ETCD_ENDPOINTS="127.0.0.1:$ETCD_CLIENT_PORT,127.0.0.1:$ETCD2_CLIENT_PORT"
+		ETCD_ENDPOINTS+=",127.0.0.1:$ETCD3_CLIENT_PORT"
+		ALL_PORTS+=("$ETCD2_CLIENT_PORT" "$ETCD2_PEER_PORT" "$ETCD3_CLIENT_PORT"
+			"$ETCD3_PEER_PORT")
+		;;
+	*) usage ;;
+	esac
 	if [ -n "$ONLY" ]; then
 		local known=0 name
 		for name in "${CASES[@]}"; do
@@ -6367,6 +6853,7 @@ main() {
 	local name
 	for name in "${CASES[@]}"; do
 		if [ -n "$ONLY" ] && [ "$ONLY" != "$name" ]; then continue; fi
+		set_vote_timers "$name"
 		fleet_restart "$name"
 		"case_$name"
 	done

@@ -1207,6 +1207,7 @@ func cmdConstants(g *globals, args []string) {
 		"DefaultDmPoolDataBlockSize": common.DefaultDmPoolDataBlockSize,
 		"DefaultStripeSize": model.DefaultStripeSize(
 			common.DefaultDmPoolDataBlockSize),
+		"DefaultEtcdOpTimeout":     common.DefaultEtcdOpTimeout,
 		"MaxNvmeTcpCmdBytes":       common.MaxNvmeTcpCmdBytes,
 		"DefaultPrimaryUnhealthy":  common.DefaultPrimaryUnhealthy,
 		"DemotionHoldTimeout":      common.DemotionHoldTimeout,

@@ -2405,6 +2405,112 @@ refusals and `--force` over fake agents, and its smoke case deletes every
 node of its cluster over fake agents that answer clean. No test removes a
 node from real agents, and no test runs the loop of step 5.
 
+## etcd refuses writes: its store is full
+
+Words: etcd runs as one **etcd server** or several that keep the same store;
+etcd's own tools and output call each of them a member, which is not an md
+member (above). etcd keeps every old value of every key, its **history**,
+and counts every change to the whole store in its **store revision**, which
+is etcd's own counter, not a pool's revision. A **compaction** drops the
+history older than a store revision. The store's file on disk may grow to
+the **quota**, set by etcd's `--quota-backend-bytes` flag, 2 GiB when the
+flag is not given; the quota counts the file's size, not the part of it in
+use. A **defragmentation** gives the space a compaction freed back to the
+disk. When the file reaches the quota, etcd raises its **NOSPACE alarm** and
+refuses every write but a delete until the alarm is disarmed; reads still
+work. etcd's `--auto-compaction-retention` flag compacts on its own; without
+it, or with a long retention, the history grows until the store is full.
+
+Symptom: every worker stops driving its pools, and its log shows `worker
+fenced` again about every three vote intervals (the worker's
+`--vote-interval`, 10 seconds at the default, so about every 30 seconds).
+The worker's `etcd put` records carry the error `database space exceeded`. A
+change through `dnvctl` that writes a value fails with the same error. Reads
+still work, and the hosts' IO goes on.
+
+How to confirm:
+
+1. Run `etcdctl --endpoints <every etcd server> alarm list`. It prints
+   `alarm:NOSPACE` for one etcd server or more.
+2. Run `etcdctl --endpoints <every etcd server> endpoint status -w table`.
+   The DB SIZE column is at the QUOTA column, close under it or above it;
+   the alarm of step 1 is the sign. While any alarm stands, `etcdctl
+   endpoint health` reports every etcd server unhealthy and names the alarm:
+   that is the alarm, not a broken etcd server, so do not restart an etcd
+   server for it. A restart does not clear the alarm.
+
+What dnv does alone: nothing frees the store, since no dnv program compacts
+etcd. While etcd refuses writes, no pool is driven: no failover, no repair,
+no grow and no other reaction runs, as while etcd is down ([the scope
+page](scope.md), section 6). The agents keep serving what they last built.
+As soon as etcd takes writes again, every worker registers again with no
+step from you, and drives its pools again one grace time later (the worker's
+`--vote-grace-time`, 60 seconds at the default).
+
+Safe steps:
+
+1. Read the store revision: `etcdctl --endpoints <every etcd server>
+   endpoint status -w fields`. Use the largest `"Revision"` it prints.
+2. Compact the history up to it, and wait until etcd has removed the old
+   values: `etcdctl --endpoints <every etcd server> --command-timeout 10m
+   compact --physical <revision>`. It returns once the etcd server that
+   answers the call has removed them, which can take minutes on a large
+   store; the other etcd servers remove theirs at about the same time, and
+   step 4 shows one that had not finished. The current value of every key
+   stays.
+3. Only after step 2 has returned, defragment every etcd server: `etcdctl
+   --endpoints <every etcd server> --command-timeout 10m defrag --cluster`.
+   With `--cluster`, `etcdctl` defragments one etcd server after another,
+   and an etcd server answers nothing while its own defragmentation runs. If
+   the command reports an etcd server failed with a deadline exceeded, that
+   etcd server is still at work: wait until `etcdctl --endpoints <that etcd
+   server> endpoint status` answers before you go on.
+4. Read `etcdctl --endpoints <every etcd server> endpoint status -w table`
+   again. If DB SIZE is now well under QUOTA, go on. If DB SIZE is still
+   high but IN USE is small, the removal was still running when the
+   defragmentation ran: defragment again, as in step 3, and do not raise the
+   quota. If IN USE itself stays near QUOTA, the keys fill the quota, not
+   their history: see when to stop, below.
+5. Disarm the alarm: `etcdctl --endpoints <every etcd server> alarm disarm`.
+6. Check: `alarm list` prints nothing, and each worker's log shows `worker
+   registered` for each of its roles. A worker can log one more `worker
+   fenced` right after the disarm, followed by `worker registered`; what
+   counts is that no `worker fenced` comes after its last `worker
+   registered`.
+7. So that it does not come back, run every etcd server with
+   `--auto-compaction-retention`, such as `1h`, as the tutorial does.
+
+Steps that can lose data: deleting keys to free space. A delete still lands
+while the alarm stands. Never delete a key that starts with `dnv `: every
+such key is part of the desired state, and the nodes act on what the store
+no longer holds, as after a restore ([Restore etcd from a
+backup](#restore-etcd-from-a-backup)).
+
+When to stop: IN USE stays near QUOTA in step 4, or the alarm comes back
+right after the disarm. Then the keys themselves fill the quota, not their
+history, and no compaction helps. Raise the quota: restart one etcd server
+at a time with a larger `--quota-backend-bytes`, each on its own data
+directory. Before you restart the next etcd server, run `etcdctl --endpoints
+<every etcd server> endpoint status -w table`: the restarted etcd server
+must answer, show the same RAFT TERM as the others (etcd's count of its
+leader elections), and show a RAFT APPLIED INDEX (how far the etcd server
+has applied the store's changes) equal to theirs or close to it. `endpoint
+health` reports every etcd server unhealthy until the alarm is disarmed, so
+it is no sign here. Then disarm the alarm again. Ask for help before you
+delete anything.
+
+Tested: the worker suite's three-member mode (`--etcd-members 3`, three etcd
+servers) runs these steps in its case etcd_nospace on the lab. It fills
+their store at a small quota with the history of one key, and checks that
+etcd refuses the filler's write, that a read and a delete still land, and
+that every worker stops driving its pools again and again, each stop logging
+`worker fenced`. It then compacts with `--physical`, defragments every etcd
+server and disarms the alarm, and checks that every worker comes back with
+no other step and none stops again. Its store is a few tens of MB, so it
+does not show a removal that outlasts the steps: step 3's wait on a large
+store, step 4's second defragmentation and the raise of the quota are not
+tested.
+
 ## Restore etcd from a backup
 
 Words: a **backup** is etcd's own snapshot of its data, made with

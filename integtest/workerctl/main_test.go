@@ -646,6 +646,7 @@ func TestConstantsEmitsWhatTheSuitesRead(t *testing.T) {
 		"DefaultDmPoolDataBlockSize": common.DefaultDmPoolDataBlockSize,
 		"DefaultStripeSize": model.DefaultStripeSize(
 			common.DefaultDmPoolDataBlockSize),
+		"DefaultEtcdOpTimeout":     common.DefaultEtcdOpTimeout,
 		"MaxNvmeTcpCmdBytes":       common.MaxNvmeTcpCmdBytes,
 		"DefaultPrimaryUnhealthy":  common.DefaultPrimaryUnhealthy,
 		"DemotionHoldTimeout":      common.DemotionHoldTimeout,

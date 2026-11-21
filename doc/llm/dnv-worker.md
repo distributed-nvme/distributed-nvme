@@ -5854,7 +5854,8 @@ show a multi-batch drain advancing.
 
 **What the suite proves.** `integtest/worker_test.sh` proves a real
 `dnv-worker` fleet — the real `worker`, `model` and `etcdutil` packages over a
-real single-node etcd — against fake dn and cn agents. The agents are fake
+real etcd of one member, or of three in the three-member mode (below) —
+against fake dn and cn agents. The agents are fake
 because the data plane is proven by the agent suites (`dnagent_integtest.md`,
 Goal and scope; `cnagent_integtest.md`, Goal and scope); what this suite
 proves is everything between etcd and the agent's gRPC surface: membership and
@@ -5862,8 +5863,9 @@ ownership, revision propagation, health bookkeeping, the flips, the pushes,
 the reactions, the two pass steps of a repair, the forced-start clear, the
 two drains and handoff —
 the happy paths plus the failures each case names; the failures it does
-not run are listed under Rules exercised and left to the unit tests, and
-error paths of etcd itself (quorum loss, compaction races) are out of
+not run are listed under Rules exercised and left to the unit tests. Its
+three-member mode (below) proves what a member's stop, a compaction and a
+store at its quota do to a worker fleet; etcd's quorum loss is out of
 scope. It runs on one server as a plain user,
 because nothing it exercises needs root: real etcd, several real workers, fake
 agents driven by a behavior file, etcd driven by a fake-gateway CLI, and
@@ -5984,7 +5986,8 @@ random first wait, so the case logs the seed and every step it took, and
 a person reads each failure.
 
 **Topology.** The developer machine drives one Linux server over ssh, as a
-plain user with no sudo. The server runs one etcd on localhost, configured
+plain user with no sudo. The server runs one etcd on localhost, three in
+the three-member mode (below), configured
 with the request caps every etcd serving dnv must have (its transaction-op cap
 at `EtcdMaxTxnOps` and its request-size cap at `EtcdMaxRequestBytes`, which
 the suite reads from the driver it has just built instead of copying the
@@ -6120,9 +6123,80 @@ revision gate being per object and not per cluster.
   no handover state, and a flip in the middle of a handoff applies exactly
   once.
 
+**The three-member etcd mode.** With `--etcd-members 3` the suite starts
+three etcd members on the server's loopback instead of one, each at the
+request caps above and at a backend quota small enough for a case to fill,
+gives every program the three endpoints, and runs four cases of its own,
+none of the cases above, each after the fleet restart. Each case asserts
+the outcome its item gives, which the lab measured first for the shipped
+etcd at the suite's vote timers, but for etcd_leader, whose fleet runs at
+timers of its own; a number given as the lab's is a measurement, not an
+assertion:
+
+* etcd_leader — the leader stopped for 3 seconds, timed on the server,
+  while the case's fleet runs at the shortest whole vote interval whose
+  dead threshold exceeds `DefaultEtcdOpTimeout`, read from the build, with
+  grace times that keep CM3's rules: another member is elected, and no
+  worker fences, as `architecture.md`, Running without the control plane,
+  says of a heartbeat that lands again over a leader election. A stop
+  under one vote interval fails at most one tick of a worker, and that
+  tick's puts end within the timeout (EU5), so it stays under VW8 (a)'s
+  limit. At the suite's own vote interval the case does not hold: on the
+  lab server a leader stopped for 2 seconds fenced a worker in 3 of 6 runs,
+  and stops of 4 seconds or more fenced every worker, for a heartbeat put
+  the stopped leader held, which ended in a timeout once it went on
+  (Known limits);
+* etcd_follower — the member that serves the most watch streams, made a
+  follower first, stopped, its raft term unchanged over the stop: the etcd
+  client spreads every worker's calls over the three members, so the
+  heartbeat puts that reach the stopped member wait out the etcd operation
+  timeout (EU5), which at the suite's vote interval is longer than the time
+  a slow tick may cost under VW8 (a), and every worker fences for its
+  heartbeat, none for a quiet watch (VW8 (b)), though only the workers
+  whose streams the stopped member served had their watches go quiet, as
+  the run's stream counts show; with the member back,
+  every worker drives its shards again under a new seed. On the lab server
+  the fences came about 11 seconds into the stop. At the shipped vote
+  interval a tick may wait out the operation timeout and still not fence,
+  and whether a member's stop fences a worker there no case measures
+  (Known limits);
+* etcd_compact — a compaction to the store's head ends no watch, since
+  etcd ends a watch as compacted only when the revision it serves that
+  watch from lies under the compaction, and it serves every running watch
+  at the head; a restart of the member that serves the most watch streams,
+  its leadership moved to another member first, then makes the client
+  resume each of those watches from the revision after the last event it
+  heard, which for a quiet shard's watch and the cluster conf watch lies
+  under the compaction, so those end compacted and log
+  their restart as such (SW4, RW21), and no worker fences over the restart
+  of a follower, which is shorter than the dead threshold plus one vote
+  interval, where the lab saw a kill of the leader fence every worker, as
+  a long stop of the leader does;
+* etcd_nospace — the store filled to its quota by the history of one key
+  outside the dnv prefix, as a store that nothing compacts grows: etcd
+  refuses the filler's put for its quota and raises its NOSPACE alarm, and
+  a get and a delete of another key outside the prefix still land; every
+  worker fences, for its heartbeat, and fences again once the dead
+  threshold plus one vote interval has passed once more, and an `etcd put`
+  record of a worker names the quota; a compaction to the store's head
+  that returns once the member that answers has removed the old values, a
+  defragmentation of every member
+  after it and the disarm of the alarm, the recovery the operations doc
+  gives, bring every worker back with no other step, and none fences
+  after.
+
+The cdc runs in none of them (`cdc.md`, Integration test plan). The mode
+stages neither a quorum loss nor a backup and restore: a quorum loss is an
+etcd outage, which the end-to-end suite's cutoff case stages by stopping
+its one member, and a restore is an operator's procedure over every
+program (`architecture.md`, etcd backup and restore), not a fault the
+worker's etcd client meets.
+
 **Rules exercised.** The vote and handoff cases exercise VW1 to VW7 and VW9
 to VW11, the vote case VW8 (a), and every case's fleet restart VW7, RW11
-and CM5; SW1 to SW3 and SW5 are exercised by the smoke, revision and
+and CM5; the three-member mode VW8 (a) over a member's stop and a full
+store, and the compacted end of a quiet shard's watch and of the cluster
+conf watch after a resume, the restart records of SW4 and RW21; SW1 to SW3 and SW5 are exercised by the smoke, revision and
 handoff cases, and of SW6 only the `cluster_id` read from a key of the one
 cluster each case makes, no case holding a second or an unknown cluster
 (below); RW1 to RW12 by the smoke, revision and health cases, RW10 by
@@ -6167,7 +6241,8 @@ assertion. Left to the unit tests: AR6's withdrawal of a stuck grow
 AR16's end of a request past its bound and its pass over a group a check
 does not suit, AR2's pass-on of a leg repair create's scan that finds no
 DN and the pass's memo of empty scans, and EU4's and EU6's run again on a
-future revision, which the suite's one-member etcd never answers; AR8's
+future revision, which no suite's etcd answers, no case reading from a
+member that lags behind the read; AR8's
 end of a bad leg's migration, its repair of a leg for md's bad-block
 ranges and its cancel joined to the next create
 (`CancelAndCreateRepair`); RW22's demotion read from a cntlr's record by a
@@ -6183,7 +6258,13 @@ reading of a node record of another id as missing; RW3's unchanged
 desired state inside a round; RW11's reply that arrives after the stop;
 VW8 (b),
 (c) and (d), because a broken watch with live puts cannot
-be induced from outside the process; that the drain's wake-up runs no
+be induced from outside the process: a stop of the member that serves the
+most watch streams fences every worker for its heartbeat, and none of the
+workers whose streams it served for a quiet watch, as the three-member
+mode's follower case shows; SW4's and RW21's rescan after a
+compaction, its diff and the watch opened again from the new revision,
+since the mode's shards and conf prefix are empty when the watches end, so
+a rescan finds nothing to change; that the drain's wake-up runs no
 reaction and re-seeds no health memo (SPD6, CLD7), because a pass with no
 reaction due and no epoch to correct leaves no record, so no case can tell
 the wake-up from a pass; RW13's count compare and HL1's rule for the disk
@@ -6193,7 +6274,7 @@ to the compare (`e2e_integtest.md`, The cases); RW23's count of new
 observations only and HL7's late rounds and rounds whose observation is too
 old, since no suite case sets `obs_age_ms` or `obs_none`, the levers by
 which a fake answers from an old observation or from none;
-SW4, compaction; BM6, because every code a suite case forces, a stale
+BM6, because every code a suite case forces, a stale
 revision or an unknown object, rejects the object's `Syncup*` itself, so no
 push is attempted, let alone failed, while no suite case forces
 `ReplyCodeLeftover`, the one forced code under which the worker can still
@@ -6267,9 +6348,10 @@ SW6's idle on a cluster the cache does not hold, since no suite case holds
 a second or an unknown cluster.
 The suite never produces `invalid stored conf`, because its driver resolves
 every conf it writes, and the conf gates are unit-tested instead.
-Twenty-four records no suite case stages: `worker reg watch restarting`, `rev
-watch restarting` and `cluster conf watch restarting`, since no suite case
-ends a watch on an error or a compaction; `sp drain failed` and `clone drain
+Twenty-two records no suite case stages: `worker reg watch restarting`,
+since no suite case ends a registry watch on an error or a compaction, the
+three-member mode's restart of a member resuming each registry watch from
+a revision its own heartbeats keep past the compaction; `sp drain failed` and `clone drain
 failed`,
 which the drain case asserts at zero after every drain; `sp flip failed`,
 which the bitmap case asserts at zero for its cutover; `cluster conf
@@ -6286,7 +6368,10 @@ and `agent started`, for the same reason (HL8);
 `forced start kept`, since every clear the repair case stages commits;
 `clone latched` and `clone latch skipped`, for the reason given for CLD13
 above;
-`sp demotion clear failed`, since no suite case fails an etcd write;
+`sp demotion clear failed`, since no suite case fails an etcd write while
+a demotion hold ends: the three-member mode's full store refuses every
+put, but that mode plants no pool, so no failover and no demotion hold
+runs there;
 `sp group missing`, since no suite case plants a repair or a retired leg
 whose group is missing; `member add refused`, since no fake agent reports
 a group's refusal (AR14); `repair leg partial kept`, since every partial
@@ -6301,8 +6386,9 @@ repair and reaction cases stage committing.
 
 Out of scope: real agents, and real hosts, whose drop of a path the discovery
 records withdraw is the e2e suite's to show (`e2e_integtest.md`, The cases);
-more than one server; a three-member etcd; etcd quorum loss, restore or
-compaction races; clock-skew injection, clock agreement across workers being
+more than one server; etcd quorum loss and restore, for the reasons the
+three-member mode gives, and compaction races beyond the compacted end of
+a watch after a resume; clock-skew injection, clock agreement across workers being
 no correctness dependency (VW4); TLS and authentication, the fabric being
 trusted (`architecture.md`, Known limits); failures of `RedundNone` legs,
 save the withdrawal of a stuck grow (AR6), which is left to the unit tests;
@@ -6333,7 +6419,8 @@ in place and prints its diagnostics — the failing stage and its trace id,
 the registrations, the ownership table, the tail of every log and the dnv
 keys — so the debris is what the developer reads; a cleanup-only run does
 the cleanup alone. Cleanup signals every process the suite started by its
-recorded pid, continuing a stopped worker first so that it acts on its
+recorded pid, continuing every stopped process first, a worker or, in the
+three-member mode, an etcd member, so that it acts on its
 termination, with a pattern kill of the programs under the work directory
 as a safety net, and removes the suite's work directory; nothing outside that directory is
 touched, and the suite leaves no kernel state, no packages and no users
@@ -6612,6 +6699,21 @@ caught.
   within the keepalive's timeout loses every call open on its connection:
   a syncup is sent again as RW4 says, once a later round asks for it, and
   a bitmap push ends its plan as any failed push does (BM6).
+
+* **One etcd member that stops answering can fence every worker at once.**
+  A member frozen, or whose machine is gone with no TCP reset, holds every
+  call the client sent it: the client spreads each worker's calls over
+  every endpoint, so some heartbeat put of every worker waits out
+  `DefaultEtcdOpTimeout` (EU5) or the keepalive's close of the connection
+  (EU1). With a `--vote-interval` of about half of that wait or less,
+  that one tick reaches VW8 (a)'s limit, and every worker fences at about
+  the same time and drives its pools again one join grace window later
+  (VW7). At the worker suite's short vote interval the lab saw every worker
+  fence once, about 11 seconds after the stop of a follower (the
+  three-member mode's follower case, Integration test plan), and a leader
+  stopped for only 2 seconds fence a worker in half its runs. At the
+  default interval a tick that waits out the timeout does not reach the
+  limit alone, but two such ticks in a row can, and that is not measured.
 
 * **Slow heartbeat writes can fence a worker its peers saw alive.** VW8
   (a) measures from the start of the last good tick's puts to the end of

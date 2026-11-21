@@ -7631,7 +7631,8 @@ and the data plane goes on serving what it last applied:
   long as `dnv-worker.md` VW8 tolerates, and then drives nothing until one
   join grace window after its first put lands again (`dnv-worker.md` VW7); a
   worker whose heartbeat lands again sooner, such as over a leader
-  election, does not fence. No health epoch, flip, reaction or drain step
+  election, does not fence, though one etcd member that stops answering
+  can fence every worker at once (`dnv-worker.md`, Known limits). No health epoch, flip, reaction or drain step
   can commit meanwhile, so a fault meets no reaction: a primary that fails
   is failed over only once a worker drives its pool again and has judged it
   unhealthy itself (Automatic reactions), and a pool that fills gets no
@@ -7662,8 +7663,11 @@ Known limits).
 
 A backup is etcd's own snapshot of its data, and a restore is etcd's
 restore tool run on one; dnv adds nothing to either, and dnv's suites and
-tutorials run etcd as one member, so an etcd of several members is
-untested. A restore needs an order, because the restored desired state is
+tutorials run etcd as one member, save the worker suite's three-member
+mode, which stops, compacts and fills an etcd of three members but backs up
+and restores none (`dnv-worker.md`, Integration test plan), so a backup and
+restore of an etcd of several members is untested. A restore needs an
+order, because the restored desired state is
 older than the nodes: the
 agents' stores, the disks and the kernels hold what was built after the
 backup, and the id counters (Globals: id allocation + shard buckets) are

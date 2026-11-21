@@ -218,7 +218,8 @@ NVMET=/sys/kernel/config/nvmet
 # ---------------------------------------------------------------------------
 #
 # Bound-port inventory of the seven other suites, verified against their own
-# declaration blocks: worker_test.sh 12379/12380, 29600-29603, 29700-29702;
+# declaration blocks: worker_test.sh 12379/12380 (and 12381-12384 in its
+# three-member mode), 29600-29603, 29700-29702;
 # gateway_test.sh 15379/15380, 29810-29812, 29820-29823, 29830-29832;
 # cdc_test.sh 13379/13380, 18009-18012, 14420-14423; cnagent_test.sh
 # 29528/29529 + trsvcid 4200; dnagent_test.sh 29528 + trsvcid 4200;
