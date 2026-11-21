@@ -26,6 +26,19 @@ fails fails the block, where a reader would see the error. A block whose
 command a reader repeats until a stated output ("repeat until", "run it
 again") runs again until its checks hold, within the time its marker gives.
 
+A crash fails the run: after each block the suite reads every log under its
+work folder on the guest and, in the CSI part, the log of every container of
+the driver's pods, with the log of its previous run when it restarted, and a
+line that starts as Go's report of a crash starts, `panic: ` or
+`fatal error: `, fails the run with the log and the line, while a record that
+holds those words inside a field never matches. The read follows each block,
+not the run's end, as the tutorial's teardown removes its programs' logs and
+pods; each read of the containers logs how many logs it read, and a CSI part
+in which no read found one fails. The preflight proves the read on a sample
+log it plants on the guest, and a failed run prints every crash line first. A
+crash while the suite's own cleanup stops a program is not read, as the read
+has ended by then.
+
 ## The markers
 
 A tutorial carries, beside each block that needs one, an HTML comment that

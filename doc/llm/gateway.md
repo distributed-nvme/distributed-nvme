@@ -2335,13 +2335,22 @@ gateway's reply; the race waves' tokens and the threshold pool's delete
 token are not checked against etcd, since a wrong one fails the next call.
 A disk node's or a controller node's token is read from etcd; where a stage
 counts such a revision after a bump, it also reads the gateway's
-`GetDiskNode` or `GetControllerNode` reply of it as the second check.
+`GetDiskNode` or `GetControllerNode` reply of it as the second check. A crash
+fails the run: as each case ends, and in the reset before each case, right
+before it truncates the logs, the suite reads every log under its work
+directory, and a line that starts as Go's report of a crash starts, `panic: `
+or `fatal error: `, fails the run with the log and the line, while a record
+that holds those words inside a field never matches; the preflight proves the
+read on a sample log it plants on the server. A crash while the cleanup at the
+end of a passing run stops a program is not read, as that cleanup removes the
+logs with the programs.
 
 **Cleanup.** Cleanup runs unconditionally at the start of every run —
 before the server preflight, so a crashed earlier run cannot fail it — and
 at the end only on success: a failing run leaves etcd's data, every log and
-every behavior file in place and prints its diagnostics — the failing stage
-and its trace id, the tail of every process log, a full dump of the dnv
+every behavior file in place and prints its diagnostics — the crash lines
+of every log, the failing stage and its trace id, the tail of every process
+log, a full dump of the dnv
 keys and the listening ports — so the debris is what the developer reads;
 a cleanup-only run does the cleanup alone.
 Cleanup signals every daemon the suite started — etcd, the gateways and the

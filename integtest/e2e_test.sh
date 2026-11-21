@@ -9087,6 +9087,11 @@ preflight_guests() {
 	# not" could not be told apart.
 	assert_ne "${HOST_NQN[0]}" "${HOST_NQN[1]}" "the two hosts' hostnqn"
 
+	# The crash scan reads the control-plane guest as the plain user and the
+	# node guests through sudo: one plant through each.
+	panic_plant cp ssh_cp
+	panic_plant dn0 ssh_dn 0
+
 	log "preflight (guests) ok"
 }
 
@@ -9428,6 +9433,108 @@ keep_logs_from() {
 	rm -f -- "$tgz"
 }
 
+# ---------------------------------------------------------------------------
+# The crash scan (E2E13)
+# ---------------------------------------------------------------------------
+
+# PANIC_PAT matches the first line of the report Go's runtime writes to a
+# program's stderr, which is its log here, when the program dies of a panic or
+# a fatal error. A JSON record starts with a brace, so a record that holds
+# either word inside a field never matches.
+PANIC_PAT='^(panic: |fatal error: )'
+
+# panic_lines prints, as <log>:<line>:<text>, every line of each *.log under
+# <dir> on one guest that PANIC_PAT matches, and fails when grep could not
+# read them all: a log that was not read is not a log without a crash. The
+# lines it found are printed either way.
+panic_lines() { # <dir> <ssh function> [<guest index>]
+	local dir=$1
+	shift
+	"$@" "grep -rnHaE --include='*.log' '$PANIC_PAT' $dir || [ \$? -eq 1 ]"
+}
+
+# panic_label prints one guest's hits, each on its own line behind the
+# guest's name, or nothing for none.
+panic_label() { # <guest name> <hits>
+	[ -z "$2" ] || printf '\n    %s: %s' "$1" "${2//$'\n'/$'\n'    $1: }"
+}
+
+# PANIC_HITS and PANIC_UNREAD are panic_guests' answers.
+PANIC_HITS=""
+PANIC_UNREAD=""
+
+# panic_guests reads the logs under the work directory of the control-plane
+# guest and of each controller node and disk node guest, the guests that run
+# a dnv program (panic_lines), and leaves their hits, each behind its guest's
+# name, in PANIC_HITS; it fails on the first guest whose logs it could not
+# read all of, which it names in PANIC_UNREAD, with what it read kept in
+# PANIC_HITS. It runs in the caller's shell, for the two variables.
+panic_guests() {
+	local v hits
+	PANIC_HITS="" PANIC_UNREAD=""
+	hits=$(panic_lines "$WORK" ssh_cp) || PANIC_UNREAD="cp ($CP_IP)"
+	PANIC_HITS+=$(panic_label "cp" "$hits")
+	[ -z "$PANIC_UNREAD" ] || return 1
+	for v in "${!CN[@]}"; do
+		hits=$(panic_lines "$WORK" ssh_cn "$v") || PANIC_UNREAD="cn$v (${CN_IP[$v]})"
+		PANIC_HITS+=$(panic_label "cn$v" "$hits")
+		[ -z "$PANIC_UNREAD" ] || return 1
+	done
+	for v in "${!DN[@]}"; do
+		hits=$(panic_lines "$WORK" ssh_dn "$v") || PANIC_UNREAD="dn$v (${DN_IP[$v]})"
+		PANIC_HITS+=$(panic_label "dn$v" "$hits")
+		[ -z "$PANIC_UNREAD" ] || return 1
+	done
+	return 0
+}
+
+# panic_scan fails the case when a log of a guest that runs a dnv program
+# (panic_guests) holds a crash line, naming the guest, the log and the line.
+# run_case calls it as each case ends, before the cleanup between cases
+# removes the logs.
+panic_scan() {
+	stage crash "the crash scan of every program log"
+	panic_guests ||
+		die "the crash scan could not read the logs under $WORK on $PANIC_UNREAD${PANIC_HITS:+; the lines it read:$PANIC_HITS}"
+	[ -z "$PANIC_HITS" ] || die "a program crashed; its log holds:$PANIC_HITS"
+}
+
+# panic_dump prints, on the failure path, every crash line the guests' logs
+# hold, so that a crash that failed a case through another check is named.
+# It never fails.
+panic_dump() {
+	panic_guests || PANIC_HITS+=$'\n'"    (the logs on $PANIC_UNREAD could not all be read)"
+	log "--- crash lines in the program logs"
+	log "${PANIC_HITS:-    (none)}"
+	return 0
+}
+
+# panic_plant proves panic_lines at preflight, on a sample log in a scratch
+# directory of one guest, through one ssh function: a record that holds both
+# prefixes inside a field must not match, the two crash lines planted after it
+# must, and nothing else may.
+panic_plant() { # <guest name> <ssh function> [<guest index>]
+	local name=$1 d hits want
+	shift
+	d=$("$@" "mktemp -d /var/tmp/dnv-panic-plant.XXXXXX") ||
+		die "making the crash scan's scratch directory on $name failed"
+	case "$d" in
+	/var/tmp/dnv-panic-plant.?*) ;;
+	*) die "mktemp on $name printed '$d', not a scratch directory" ;;
+	esac
+	printf '%s\n' \
+		'{"level":"ERROR","msg":"os command failed","stderr":"panic: in a field\nfatal error: in a field"}' \
+		'panic: planted by the preflight' 'goroutine 1 [running]:' \
+		'fatal error: planted by the preflight' |
+		"$@" "mkdir $d/sub && cat > $d/sub/plant.log" ||
+		die "writing the crash scan's sample log on $name failed"
+	hits=$(panic_lines "$d" "$@") || hits="(the read failed)"
+	"$@" "rm -rf $d" || true
+	want="$d/sub/plant.log:2:panic: planted by the preflight"
+	want+=$'\n'"$d/sub/plant.log:4:fatal error: planted by the preflight"
+	assert_eq "$hits" "$want" "the crash scan on its planted sample log on $name"
+}
+
 cleanup_all() {
 	local v extra=""
 
@@ -9659,6 +9766,8 @@ DIAG_ERR_PAT="'\"level\":\"ERROR\"'"
 
 diagnostics() {
 	local v h key dev out ids id addr logs f spout n
+
+	panic_dump
 
 	diag_banner "failure context"
 	log "  stage:      $STAGE"
@@ -29485,6 +29594,7 @@ run_case() { # <case name>
 	LOGS_CASE=$1
 	"case_$1"
 	space_note_case "$1"
+	panic_scan
 }
 
 # ---------------------------------------------------------------------------

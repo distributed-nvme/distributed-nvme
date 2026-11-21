@@ -967,18 +967,29 @@ strings, protojson's doing. A count is a delta between two state snapshots
 taken in the same round trip as the call, so nothing can slip in between; a
 usage error passes only with the count unmoved, and exit 3 only with it moved
 by one. Every success but the status read's table parses stdout, and the
-goldens, that table's among them, compare byte-exact. The token
-assertions are request-side — what dnvctl put on the wire — so they hold
-whatever a gateway does with the token. Waits are bounded polls for process
-start and exit only: every dnvctl call is synchronous. The fake's log is read
-through a filter that drops a line torn by a concurrent append.
+goldens, that table's among them, compare byte-exact. The token assertions are
+request-side — what dnvctl put on the wire — so they hold whatever a gateway
+does with the token. Waits are bounded polls for process start and exit only:
+every dnvctl call is synchronous. The fake's log is read through a filter that
+drops a line torn by a concurrent append. A crash of the fake fails the run:
+as each case ends, and in the reset before each case, right before it
+truncates the fake's log, the suite reads every log under its work directory,
+and a line that starts as Go's report of a crash starts, `panic: ` or
+`fatal error: `, fails the run with the log and the line, while a record that
+holds those words inside a field never matches; the preflight proves the read
+on a sample log it plants on the server. A crash while the cleanup at the end
+of a passing run stops the fake is not read, as that cleanup removes its log
+with it. A crash of dnvctl itself is in no log: it exits 2, a usage error's
+code (CT5), with its report on stderr, so every step fails on such a line in
+the stderr it brings back; the readiness probe brings back only its exit
+status.
 
 **Cleanup.** Cleanup runs unconditionally at the start of every run, and at
 the end only on success; a cleanup-only run does it alone and then verifies
 that both ports are free and the work directory is gone. A failing run
 leaves the work directory, the fake's log and both of its files in place and
-prints its diagnostics — the failing stage and its trace id, the fake's
-recent request records and its behavior-file and state-file records, both
+prints its diagnostics — the crash lines of every log, the failing stage
+and its trace id, the fake's recent request records and its behavior-file and state-file records, both
 files verbatim, the last invocation's exit code and output, the listeners on
 the two ports and the suite's processes — so the debris is what the
 developer reads. Cleanup signals the fake by its recorded pid, only while

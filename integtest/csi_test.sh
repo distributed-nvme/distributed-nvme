@@ -934,6 +934,77 @@ container_cat() { # <namespace> <pod> <container> <path>
 	k3s crictl exec "$cid" cat "$4"
 }
 
+# pod_crash_lines reads the log of every container of one namespace's pods
+# that has run, and that of its previous run as well when it restarted, and
+# prints each line that matches a pattern as "crash <pod>/<container>:<line>:
+# <text>", the container's name followed by " (previous)" for the previous
+# run's. It also prints "restarts <pod>/<container> <count>" for each
+# container that restarted, "skipped <pod>/<container>" for a log of a pod
+# being deleted that could not be read, as its containers may be gone
+# already, "gone <pod>" for a pod gone between the listing and its read,
+# which is skipped, as its logs went with it, "nolog <pod>" for any other pod
+# not being deleted of which no log was read, and last "read <logs> logs of
+# <containers> containers in <pods> pods". Any other read that fails fails
+# the verb.
+pod_crash_lines() { # <namespace> <pattern>
+	local ns=$1 pat=$2 list pod del rest c name n id prev f label out rc
+	local logs=0 ctrs=0 pods=0 read_here gone
+	list=$(k3s kubectl -n "$ns" get pods -o 'jsonpath={range .items[*]}{.metadata.name}{" del="}{.metadata.deletionTimestamp}{range .status.containerStatuses[*]}{" "}{.name}{"="}{.restartCount}{"="}{.containerID}{end}{"\n"}{end}') || {
+		echo "pod_crash_lines: listing the pods of $ns did not answer" >&2
+		return 1
+	}
+	f=$(mktemp) || return 1
+	while read -r pod del rest; do
+		[ -n "$pod" ] || continue
+		del=${del#del=}
+		pods=$((pods + 1))
+		read_here=0 gone=0
+		for c in $rest; do
+			name=${c%%=*}
+			c=${c#*=}
+			n=${c%%=*}
+			id=${c#*=}
+			# A container that never ran has no log.
+			[ -n "$id" ] || continue
+			ctrs=$((ctrs + 1))
+			[ "$n" = 0 ] || echo "restarts $pod/$name $n"
+			for prev in "" --previous; do
+				[ -z "$prev" ] || [ "$n" != 0 ] || continue
+				label="$pod/$name${prev:+ (previous)}"
+				if ! k3s kubectl -n "$ns" logs "$pod" -c "$name" $prev >"$f" 2>"$f.err"; then
+					if [ -n "$del" ]; then
+						echo "skipped $label"
+						continue
+					fi
+					if out=$(k3s kubectl -n "$ns" get pod "$pod" --ignore-not-found -o name) &&
+						[ -z "$out" ]; then
+						gone=1
+						continue
+					fi
+					echo "pod_crash_lines: reading the log of $label failed: $(head -c 300 "$f.err")" >&2
+					rm -f "$f" "$f.err"
+					return 1
+				fi
+				logs=$((logs + 1))
+				read_here=1
+				out=$(grep -naE "$pat" "$f")
+				rc=$?
+				if [ "$rc" -gt 1 ]; then
+					echo "pod_crash_lines: grep could not read the log of $label" >&2
+					rm -f "$f" "$f.err"
+					return 1
+				fi
+				[ -z "$out" ] || printf '%s\n' "$out" | sed "s|^|crash $label:|"
+			done
+		done
+		[ "$gone" = 0 ] || echo "gone $pod"
+		[ -n "$del" ] || [ "$read_here" = 1 ] || [ "$gone" = 1 ] || echo "nolog $pod"
+	done <<<"$list"
+	rm -f "$f" "$f.err"
+	echo "read $logs logs of $ctrs containers in $pods pods"
+	return 0
+}
+
 # now_ns prints the guest's clock in nanoseconds, the clock its pods read.
 now_ns() {
 	date +%s%N
@@ -2096,6 +2167,7 @@ preflight_guests() {
 		busy=$(helper_cn "$v" ports_busy "$CN_GRPC_PORT" "$CN_TRSVCID") || die "cn$v: ports"
 		[ -z "$busy" ] || die "cn$v: port(s) already listening: $(printf '%s' "$busy" | tr '\n' ' ')"
 	done
+	panic_plant
 	log "preflight (guests) ok"
 }
 
@@ -2544,6 +2616,7 @@ EOF
 
 	stage 09 "a controller plugin copy, its container's first process, takes SIGUSR1 and SIGUSR2"
 	plugin_signals
+	DRIVER_UP=1
 }
 
 # leases_held answers whether both sidecar leases name a controller copy
@@ -2666,6 +2739,7 @@ plugin_signals() {
 # cluster without k3s has nothing to remove. It reports, never dies.
 driver_down() {
 	local out ver
+	DRIVER_UP=0
 	out=$(QUIET=1 helper_cp_ok k3s_state 2>/dev/null) || true
 	ver=$(k3s_version_of "$out")
 	if [ -z "$ver" ] || [ "$ver" = none ] || [ "$(k3s_unit_of "$out" k3s)" != active ]; then
@@ -2807,6 +2881,7 @@ untaint_hosts() {
 diagnostics() {
 	local h v
 	QUIET=1
+	panic_dump
 	log "--- the cut on the hosts, and the nodes' taints"
 	for h in "${!HOST[@]}"; do log "  host$h: $(helper_host_ok "$h" net_cut_state 2>/dev/null)"; done
 	kc_ok get nodes -o 'jsonpath={range .items[*]}{.metadata.name}: {.spec.taints[*].key}{"\n"}{end}' >&2
@@ -2865,6 +2940,160 @@ keep_logs() {
 	kc_ok -n "$DRIVER_NS" logs ds/dnv-csi-node -c dnv-csi --tail=-1 >"$KEEP_LOGS/node-plugin.log" 2>/dev/null || true
 	QUIET=0
 	log "  logs kept under $KEEP_LOGS"
+}
+
+# ---------------------------------------------------------------------------
+# The crash scan (CSI21)
+# ---------------------------------------------------------------------------
+
+# PANIC_PAT matches the first line of the report Go's runtime writes to a
+# program's stderr, which is its log here, when the program dies of a panic or
+# a fatal error. A JSON record starts with a brace, so a record that holds
+# either word inside a field never matches.
+PANIC_PAT='^(panic: |fatal error: )'
+
+# DRIVER_UP is 1 from the end of driver_up to the start of driver_down: while
+# it is, panic_pods wants a log of every driver pod. PANIC_HITS and
+# PANIC_UNREAD are panic_guests' answers.
+DRIVER_UP=0
+PANIC_HITS=""
+PANIC_UNREAD=""
+
+# panic_lines prints, as <log>:<line>:<text>, every line of each *.log under
+# <dir> on one guest that PANIC_PAT matches, and fails when grep could not
+# read them all: a log that was not read is not a log without a crash. The
+# lines it found are printed either way.
+panic_lines() { # <dir> <ssh function> [<guest index>]
+	local dir=$1
+	shift
+	"$@" "grep -rnHaE --include='*.log' '$PANIC_PAT' $dir || [ \$? -eq 1 ]"
+}
+
+# panic_label prints one guest's hits, each on its own line behind the
+# guest's name, or nothing for none.
+panic_label() { # <guest name> <hits>
+	[ -z "$2" ] || printf '\n    %s: %s' "$1" "${2//$'\n'/$'\n'    $1: }"
+}
+
+# panic_guests reads the logs under the work directory of every guest
+# (panic_lines) and leaves their hits, each behind its guest's name, in
+# PANIC_HITS; it fails on the first guest whose logs it could not read all
+# of, which it names in PANIC_UNREAD, with what it read kept in PANIC_HITS.
+# It runs in the caller's shell, for the two variables.
+panic_guests() {
+	local h v hits
+	PANIC_HITS="" PANIC_UNREAD=""
+	hits=$(panic_lines "$WORK" ssh_cp_sudo) || PANIC_UNREAD="cp ($CP_IP)"
+	PANIC_HITS+=$(panic_label "cp" "$hits")
+	[ -z "$PANIC_UNREAD" ] || return 1
+	for h in "${!HOST[@]}"; do
+		hits=$(panic_lines "$WORK" ssh_host "$h") || PANIC_UNREAD="host$h (${HOST_IP[$h]})"
+		PANIC_HITS+=$(panic_label "host$h" "$hits")
+		[ -z "$PANIC_UNREAD" ] || return 1
+	done
+	for v in "${!CN[@]}"; do
+		hits=$(panic_lines "$WORK" ssh_cn "$v") || PANIC_UNREAD="cn$v (${CN_IP[$v]})"
+		PANIC_HITS+=$(panic_label "cn$v" "$hits")
+		[ -z "$PANIC_UNREAD" ] || return 1
+	done
+	for v in "${!DN[@]}"; do
+		hits=$(panic_lines "$WORK" ssh_dn "$v") || PANIC_UNREAD="dn$v (${DN_IP[$v]})"
+		PANIC_HITS+=$(panic_label "dn$v" "$hits")
+		[ -z "$PANIC_UNREAD" ] || return 1
+	done
+	return 0
+}
+
+# panic_pods reads the logs of every container of the driver's pods, its
+# previous run's included (pod_crash_lines), under the caller's stage, and
+# fails on a crash line or on a read that did not answer, and, while the
+# driver is up (DRIVER_UP), on no pod listed or on a pod not being deleted of
+# which no log was read. It logs how many logs it read and the restart count
+# of each container that restarted. The suite calls it as each case ends
+# (panic_scan) and right before each step of its own that deletes or replaces
+# a driver pod: a rollout, a patch of the node plugin's pod template, a
+# scale-down, a pod's delete, the cut of a host and driver_down, since a
+# deleted pod's logs go with it.
+panic_pods() {
+	local out line who count hits="" nolog="" summary="" pods=-1 logs=-1
+	out=$(helper_cp pod_crash_lines "$DRIVER_NS" "'$PANIC_PAT'") ||
+		die "the crash scan could not read the logs of the driver's containers"
+	while IFS= read -r line; do
+		case "$line" in
+		"restarts "*)
+			read -r _ who count <<<"$line"
+			log "  container $who has restarted $count time(s) in its pod"
+			;;
+		"skipped "*) log "  ${line#skipped }: its pod is being deleted and its log is gone" ;;
+		"gone "*) log "  ${line#gone }: the pod went between the listing and its read" ;;
+		"nolog "*) nolog+=" ${line#nolog }" ;;
+		"crash "*) hits+=$'\n'"    ${line#crash }" ;;
+		"read "*)
+			summary=${line#read }
+			read -r logs _ _ _ _ _ pods _ <<<"$summary"
+			;;
+		esac
+	done <<<"$out"
+	[ -n "$summary" ] || die "the read of the driver's containers printed no count: $out"
+	log "  the crash scan read $summary"
+	[ -z "$hits" ] || die "a program crashed; its container's log holds:$hits"
+	if [ "$DRIVER_UP" = 1 ]; then
+		[ "$pods" -ge 1 ] && [ "$logs" -ge 1 ] ||
+			die "the crash scan read no log of the driver's pods while the driver is up ($summary)"
+		[ -z "$nolog" ] ||
+			die "the crash scan read no log of the driver's pod(s)$nolog while the driver is up"
+	fi
+}
+
+# panic_scan fails the case when a log under the work directory of any guest
+# (panic_guests) or a log of a container of the driver's pods (panic_pods)
+# holds a crash line, naming the guest or the container, the log and the
+# line. run_case calls it as each case ends.
+panic_scan() {
+	stage crash "the crash scan of every program log and container log"
+	panic_guests ||
+		die "the crash scan could not read the logs under $WORK on $PANIC_UNREAD${PANIC_HITS:+; the lines it read:$PANIC_HITS}"
+	[ -z "$PANIC_HITS" ] || die "a program crashed; its log holds:$PANIC_HITS"
+	panic_pods
+}
+
+# panic_dump prints, on the failure path, every crash line the guests' logs
+# and the driver's containers hold, so that a crash that failed a case
+# through another check is named. It never fails.
+panic_dump() {
+	local out
+	panic_guests || PANIC_HITS+=$'\n'"    (the logs on $PANIC_UNREAD could not all be read)"
+	out=$(QUIET=1 helper_cp pod_crash_lines "$DRIVER_NS" "'$PANIC_PAT'" 2>&1) ||
+		out+=$'\n'"(the read of the driver's containers did not answer)"
+	log "--- crash lines in the program logs and the driver's container logs"
+	log "${PANIC_HITS:-    (none in the logs of the guests)}"
+	printf '%s\n' "$out" | grep -v '^restarts \|^read \|^skipped \|^gone \|^nolog ' >&2 || true
+	return 0
+}
+
+# panic_plant proves panic_lines at preflight, on a sample log in a scratch
+# directory of the control-plane guest, read through sudo as every guest's
+# logs are: a record that holds both prefixes inside a field must not match,
+# the two crash lines planted after it must, and nothing else may.
+panic_plant() {
+	local d hits want
+	d=$(ssh_cp_sudo "mktemp -d /var/tmp/dnv-panic-plant.XXXXXX") ||
+		die "making the crash scan's scratch directory on cp failed"
+	case "$d" in
+	/var/tmp/dnv-panic-plant.?*) ;;
+	*) die "mktemp on cp printed '$d', not a scratch directory" ;;
+	esac
+	printf '%s\n' \
+		'{"level":"ERROR","msg":"os command failed","stderr":"panic: in a field\nfatal error: in a field"}' \
+		'panic: planted by the preflight' 'goroutine 1 [running]:' \
+		'fatal error: planted by the preflight' |
+		ssh_cp_sudo "mkdir $d/sub && cat > $d/sub/plant.log" ||
+		die "writing the crash scan's sample log on cp failed"
+	hits=$(panic_lines "$d" ssh_cp_sudo) || hits="(the read failed)"
+	ssh_cp_sudo "rm -rf $d" || true
+	want="$d/sub/plant.log:2:panic: planted by the preflight"
+	want+=$'\n'"$d/sub/plant.log:4:fatal error: planted by the preflight"
+	assert_eq "$hits" "$want" "the crash scan on its planted sample log"
 }
 
 # ---------------------------------------------------------------------------
@@ -3367,6 +3596,7 @@ controller_cdcs() { # <ip:port,…>
 	kc -n "$DRIVER_NS" patch configmap dnv-csi-config --type merge \
 		-p "{\"data\":{\"cdcAddresses\":\"$1\"}}" >/dev/null ||
 		die "patching the cdc list of the config map failed"
+	panic_pods
 	kc -n "$DRIVER_NS" rollout restart deploy/dnv-csi-controller >/dev/null ||
 		die "restarting the controller plugin failed"
 	kc -n "$DRIVER_NS" rollout status deploy/dnv-csi-controller "--timeout=${WAIT_ROLLOUT}s" >/dev/null ||
@@ -3494,6 +3724,7 @@ case_restart() {
 	wait_until "$WAIT_SHORT" "host0 to hold a path to the primary at $ip" has_path_to 0 "$ip"
 
 	stage 02 "take the node plugin off host0; host0 keeps its paths and the mount"
+	panic_pods
 	kc -n "$DRIVER_NS" patch ds dnv-csi-node --type merge \
 		-p "{\"spec\":{\"template\":{\"spec\":{\"nodeSelector\":{\"kubernetes.io/hostname\":\"${HOST_NAME[1]}\"}}}}}" \
 		>/dev/null || die "keeping the node plugin to host1 failed"
@@ -3511,6 +3742,7 @@ case_restart() {
 	has_path_to 0 "$ip" || die "host0 dropped the old primary's path with no node plugin on it"
 
 	stage 04 "the node plugin back on host0: its first pass drops the old path"
+	panic_pods
 	kc -n "$DRIVER_NS" patch ds dnv-csi-node --type json \
 		-p '[{"op":"remove","path":"/spec/template/spec/nodeSelector"}]' >/dev/null ||
 		die "giving the node plugin back to host0 failed"
@@ -3705,6 +3937,7 @@ case_detach() {
 	[ "$rc" = 0 ] || die "cn$v: host0 holds no nvmet connection to $nqn before the cut (rc $rc)"
 
 	stage 02 "take the node plugin off host0; host0 keeps its paths and the mount"
+	panic_pods
 	kc -n "$DRIVER_NS" patch ds dnv-csi-node --type merge \
 		-p "{\"spec\":{\"template\":{\"spec\":{\"nodeSelector\":{\"kubernetes.io/hostname\":\"${HOST_NAME[1]}\"}}}}}" \
 		>/dev/null || die "keeping the node plugin to host1 failed"
@@ -3724,12 +3957,15 @@ case_detach() {
 				controller.kubernetes.io/pod-deletion-cost=-1000 >/dev/null || die "annotating $pod failed"
 		fi
 	done
+	panic_pods
 	kc -n "$DRIVER_NS" scale deploy/dnv-csi-controller --replicas=1 >/dev/null || die "scaling to one copy failed"
 	wait_until "$WAIT_ROLLOUT" "one controller copy Ready, none being deleted" copies_ready 1
 	wait_until "$WAIT_LEASE" "both leases on $keep, the one copy left" leases_on "$keep"
 	log "  both leases on $keep, on $(live_copies | awk -v k="$keep" '$1 == k {print $2}')"
 
 	stage 04 "cut host0 off from the control-plane guest alone; host0 reads NotReady"
+	# The cut lets Kubernetes delete host0's pods, and their logs with them.
+	panic_pods
 	CUT_TRIED=1
 	out=$(helper_host 0 net_cut_peer "$CUT_LIMIT" "$CP_IP") || die "host0: the cut failed: $out"
 	assert_eq "$out" cut "host0: the cut from $CP_IP"
@@ -3945,6 +4181,7 @@ case_detach() {
 	out=$(helper_host 0 net_uncut) || die "host0: the uncut failed: $out"
 	CUT_TRIED=0
 	wait_until "$WAIT_NODES" "${HOST_NAME[0]} Ready" node_ready "${HOST_NAME[0]}"
+	panic_pods
 	kc -n "$DRIVER_NS" patch ds dnv-csi-node --type json \
 		-p '[{"op":"remove","path":"/spec/template/spec/nodeSelector"}]' >/dev/null ||
 		die "giving the node plugin back to host0 failed"
@@ -4224,6 +4461,7 @@ case_machine() {
 				controller.kubernetes.io/pod-deletion-cost=-1000 >/dev/null || die "annotating $pod failed"
 		fi
 	done
+	panic_pods
 	kc -n "$DRIVER_NS" scale deploy/dnv-csi-controller --replicas=1 >/dev/null || die "scaling to one copy failed"
 	wait_until "$WAIT_LEASE" "both leases on $keep, the one copy left" leases_on "$keep"
 	kc -n "$DRIVER_NS" scale deploy/dnv-csi-controller --replicas=2 >/dev/null || die "scaling to two copies failed"
@@ -4236,6 +4474,7 @@ case_machine() {
 	if [ "$(printf '%s\n' "$out" | awk -v k="$keep" '$1 != k {print $2}')" = "${HOST_NAME[$h]}" ]; then
 		# The new copy landed on H too: delete it, so that its replacement
 		# goes elsewhere. It holds no lease.
+		panic_pods
 		kc -n "$DRIVER_NS" delete pod "$pod" --wait=false >/dev/null || die "deleting $pod failed"
 		wait_until "$WAIT_ROLLOUT" "two controller copies Ready, none being deleted" copies_ready 2
 		out=$(live_copies) || die "reading the controller copies failed"
@@ -4247,6 +4486,8 @@ case_machine() {
 	leases_on "$keep" || die "the leases left $keep while the second copy started"
 
 	stage 03 "cut H off the network; a new claim and a pod on the other host"
+	# Kubernetes deletes the copy on H while H is cut, and its log with it.
+	panic_pods
 	CUT_TRIED=1
 	out=$(helper_host "$h" net_cut "$CUT_LIMIT") || die "host$h: the cut failed: $out"
 	assert_eq "$out" cut "host$h: the cut"
@@ -4313,6 +4554,7 @@ sanity_build() {
 case_sanity() {
 	CASE=sanity
 	stage 01 "take the driver's pods down and build csi-sanity"
+	panic_pods
 	driver_down
 	[ "$CLEANUP_DIRTY" -eq 0 ] || die "taking the driver down did not finish"
 	wait_until "$WAIT_HOST_CLEAN" "host0 to hold no connection of the driver's" host_clean 0
@@ -4342,7 +4584,10 @@ case_sanity() {
 	log "=== $CASE: PASS"
 }
 
-run_case() { "case_$1"; }
+run_case() {
+	"case_$1"
+	panic_scan
+}
 
 # ---------------------------------------------------------------------------
 # Main

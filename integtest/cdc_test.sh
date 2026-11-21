@@ -377,6 +377,82 @@ count_recs() { # <cdc dir> <filter> [jq args…]
 }
 
 # ---------------------------------------------------------------------------
+# The crash scan (cdc.md, Integration test plan, What a pass means)
+# ---------------------------------------------------------------------------
+
+# PANIC_PAT matches the first line of the report Go's runtime writes to a
+# program's stderr, which is its log here, when the program dies of a panic or
+# a fatal error. A JSON record starts with a brace, so a record that holds
+# either word inside a field never matches.
+PANIC_PAT='^(panic: |fatal error: )'
+
+# panic_lines prints, as <log>:<line>:<text>, every line of each *.log under
+# <dir> on the first server that PANIC_PAT matches, and fails when grep could not
+# read them all: a log that was not read is not a log without a crash. The
+# lines it found are printed either way.
+panic_lines() { # <dir>
+	s1 "grep -rnHaE --include='*.log' '$PANIC_PAT' $1 || [ \$? -eq 1 ]"
+}
+
+# panic_fmt prints hits, each on its own indented line after a line break,
+# or nothing for none.
+panic_fmt() { # <hits>
+	[ -z "$1" ] || printf '\n    %s' "${1//$'\n'/$'\n'    }"
+}
+
+# panic_scan fails the case when a log of the work directory holds a crash
+# line, naming the log and the line. The case loop calls it as each case ends,
+# under a stage of its own, and the per-case reset calls it with in-reset,
+# under the reset's stage, from truncate_logs right before it truncates the
+# logs, so that a crash in the reset's stop of a program, or before the first
+# case, is read too.
+panic_scan() { # [in-reset]
+	local hits
+	[ "${1:-}" = in-reset ] || stage crash "the crash scan of every log"
+	hits=$(panic_lines "$WORK") ||
+		die "the crash scan could not read the logs under $WORK on $S1${hits:+; the lines it read:}$(panic_fmt "$hits")"
+	[ -z "$hits" ] ||
+		die "a program crashed; its log on $S1 holds:$(panic_fmt "$hits")"
+}
+
+# panic_dump prints, on the failure path, every crash line the logs of the
+# work directory hold, so that a crash that failed a case through another
+# check is named. It never fails.
+panic_dump() {
+	local hits
+	hits=$(panic_lines "$WORK" 2>/dev/null) ||
+		hits+=$'\n'"(the logs under $WORK could not all be read)"
+	log "--- crash lines in the logs under $WORK on $S1"
+	log "${hits:-(none)}"
+	return 0
+}
+
+# panic_plant proves panic_lines at preflight, on a sample log in a scratch
+# directory of the first server: a record that holds both prefixes inside a field
+# must not match, the two crash lines planted after it must, and nothing else
+# may.
+panic_plant() {
+	local d hits want
+	d=$(s1 "mktemp -d /var/tmp/dnv-panic-plant.XXXXXX") ||
+		die "making the crash scan's scratch directory on $S1 failed"
+	case "$d" in
+	/var/tmp/dnv-panic-plant.?*) ;;
+	*) die "mktemp on $S1 printed '$d', not a scratch directory" ;;
+	esac
+	printf '%s\n' \
+		'{"level":"ERROR","msg":"os command failed","stderr":"panic: in a field\nfatal error: in a field"}' \
+		'panic: planted by the preflight' 'goroutine 1 [running]:' \
+		'fatal error: planted by the preflight' |
+		s1 "mkdir $d/sub && cat > $d/sub/plant.log" ||
+		die "writing the crash scan's sample log on $S1 failed"
+	hits=$(panic_lines "$d") || hits="(the read failed)"
+	s1 "rm -rf $d" || true
+	want="$d/sub/plant.log:2:panic: planted by the preflight"
+	want+=$'\n'"$d/sub/plant.log:4:fatal error: planted by the preflight"
+	assert_eq "$hits" "$want" "the crash scan on its planted sample log"
+}
+
+# ---------------------------------------------------------------------------
 # Polling (Integration test plan, What a pass means)
 # ---------------------------------------------------------------------------
 
@@ -1927,6 +2003,7 @@ banner() {
 diagnostics() {
 	local saved=$QUIET
 	QUIET=1
+	panic_dump
 	log "failing stage: '$STAGE'   trace_id: $TRACE   cluster: $CID/$CID2"
 
 	local dir
@@ -2184,6 +2261,7 @@ preflight_servers() {
 					"(LoadState '$state', want loaded)"
 		done
 	done
+	panic_plant
 	log "preflight (servers) ok"
 }
 
@@ -2200,6 +2278,11 @@ setup() {
 
 	stage layout "create the work directory tree and ship the binaries"
 	s1 "mkdir -p $WORK/bin $WORK/etcd $(printf "$WORK/%s " "${CDC_DIRS[@]}")"
+	# A failed run's logs stay on s1 until this run (Integration test plan,
+	# Cleanup), and every program here appends to its log: they go before
+	# anything starts, so that the crash scan reads only this run's lines.
+	s1 "find $WORK -name '*.log' -type f -delete" ||
+		die "removing the last run's logs from $WORK on s1 failed"
 	SETUP_DONE=1
 	log "[s1] scp etcd etcdctl dnv-cdc cdcctl -> $WORK/bin"
 	scp -q "${SSH_OPTS[@]}" \
@@ -2253,6 +2336,13 @@ setup() {
 # Per-case reset (Integration test plan, Cases)
 # ---------------------------------------------------------------------------
 
+# truncate_logs empties the cdc logs for the next case, after the crash scan
+# has read them (panic_scan).
+truncate_logs() {
+	panic_scan in-reset
+	s1 "for d in ${CDC_DIRS[*]}; do : > $WORK/\$d/cdc.log; done"
+}
+
 # case_reset gives each case a pristine fleet, an empty {p} cdc prefix, its own
 # cluster ids and two hosts with no test connections left. The order matters:
 # the fleet is stopped BEFORE the wipe, so no instance ever observes a
@@ -2264,7 +2354,7 @@ case_reset() { # <case>
 	stage reset "fleet restart, wipe, host disconnect (cluster $CID/$CID2)"
 	stop_fleet
 	wipe_entries
-	s1 "for d in ${CDC_DIRS[*]}; do : > $WORK/\$d/cdc.log; done"
+	truncate_logs
 	start_fleet
 	local hostsel
 	for hostsel in h1 h2; do
@@ -3587,6 +3677,7 @@ main() {
 		if [ -n "$ONLY" ] && [ "$ONLY" != "$name" ]; then continue; fi
 		case_reset "$name"
 		"case_$name"
+		panic_scan
 	done
 }
 

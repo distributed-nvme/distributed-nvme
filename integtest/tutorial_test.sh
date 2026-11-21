@@ -514,8 +514,185 @@ restored() {
 	return 0
 }
 
+# pod_crash_lines reads the log of every container of one namespace's pods
+# that has run, and that of its previous run as well when it restarted, and
+# prints each line that matches a pattern as "crash <pod>/<container>:<line>:
+# <text>", the container's name followed by " (previous)" for the previous
+# run's. It also prints "restarts <pod>/<container> <count>" for each
+# container that restarted, "skipped <pod>/<container>" for a log of a pod
+# being deleted that could not be read, as its containers may be gone
+# already, "gone <pod>" for a pod gone between the listing and its read,
+# which is skipped, as its logs went with it, "nolog <pod>" for any other pod
+# not being deleted of which no log was read, and last "read <logs> logs of
+# <containers> containers in <pods> pods". Any other read that fails fails
+# the verb.
+pod_crash_lines() { # <namespace> <pattern>
+	local ns=$1 pat=$2 list pod del rest c name n id prev f label out rc
+	local logs=0 ctrs=0 pods=0 read_here gone
+	list=$(k3s kubectl -n "$ns" get pods -o 'jsonpath={range .items[*]}{.metadata.name}{" del="}{.metadata.deletionTimestamp}{range .status.containerStatuses[*]}{" "}{.name}{"="}{.restartCount}{"="}{.containerID}{end}{"\n"}{end}') || {
+		echo "pod_crash_lines: listing the pods of $ns did not answer" >&2
+		return 1
+	}
+	f=$(mktemp) || return 1
+	while read -r pod del rest; do
+		[ -n "$pod" ] || continue
+		del=${del#del=}
+		pods=$((pods + 1))
+		read_here=0 gone=0
+		for c in $rest; do
+			name=${c%%=*}
+			c=${c#*=}
+			n=${c%%=*}
+			id=${c#*=}
+			# A container that never ran has no log.
+			[ -n "$id" ] || continue
+			ctrs=$((ctrs + 1))
+			[ "$n" = 0 ] || echo "restarts $pod/$name $n"
+			for prev in "" --previous; do
+				[ -z "$prev" ] || [ "$n" != 0 ] || continue
+				label="$pod/$name${prev:+ (previous)}"
+				if ! k3s kubectl -n "$ns" logs "$pod" -c "$name" $prev >"$f" 2>"$f.err"; then
+					if [ -n "$del" ]; then
+						echo "skipped $label"
+						continue
+					fi
+					if out=$(k3s kubectl -n "$ns" get pod "$pod" --ignore-not-found -o name) &&
+						[ -z "$out" ]; then
+						gone=1
+						continue
+					fi
+					echo "pod_crash_lines: reading the log of $label failed: $(head -c 300 "$f.err")" >&2
+					rm -f "$f" "$f.err"
+					return 1
+				fi
+				logs=$((logs + 1))
+				read_here=1
+				out=$(grep -naE "$pat" "$f")
+				rc=$?
+				if [ "$rc" -gt 1 ]; then
+					echo "pod_crash_lines: grep could not read the log of $label" >&2
+					rm -f "$f" "$f.err"
+					return 1
+				fi
+				[ -z "$out" ] || printf '%s\n' "$out" | sed "s|^|crash $label:|"
+			done
+		done
+		[ "$gone" = 0 ] || echo "gone $pod"
+		[ -n "$del" ] || [ "$read_here" = 1 ] || [ "$gone" = 1 ] || echo "nolog $pod"
+	done <<<"$list"
+	rm -f "$f" "$f.err"
+	echo "read $logs logs of $ctrs containers in $pods pods"
+	return 0
+}
+
 "$@"
 HELPER_EOF
+}
+
+# ---------------------------------------------------------------------------
+# The crash scan (tutorial_integtest.md, Purpose)
+# ---------------------------------------------------------------------------
+
+# PANIC_PAT matches the first line of the report Go's runtime writes to a
+# program's stderr, which is its log in the tutorials, when the program dies
+# of a panic or a fatal error. A JSON record starts with a brace, so a record
+# that holds either word inside a field never matches.
+PANIC_PAT='^(panic: |fatal error: )'
+
+# PANIC_LOGS_READ is the most logs of the driver's containers one read of the
+# CSI part found (panic_scan); the run fails if no read found one.
+PANIC_LOGS_READ=0
+
+# panic_lines prints, as <log>:<line>:<text>, every line of each *.log under
+# <dir> on the guest that PANIC_PAT matches, and fails when grep could not
+# read them all: a log that was not read is not a log without a crash. The
+# lines it found are printed either way. It reads as root, as the agents'
+# stores in the release folder are root's.
+panic_lines() { # <dir>
+	rsh "sudo -n grep -rnHaE --include='*.log' '$PANIC_PAT' $1 || [ \$? -eq 1 ]"
+}
+
+# panic_fmt prints hits, each on its own indented line after a line break,
+# or nothing for none.
+panic_fmt() { # <hits>
+	[ -z "$1" ] || printf '\n    %s' "${1//$'\n'/$'\n'    }"
+}
+
+# panic_scan fails the run when a log under the work folder, or in the CSI
+# part a log of a container of the driver's pods, its previous run's included
+# (pod_crash_lines), holds a crash line, naming the log and the line; it
+# logs how many container logs it read and the restart count of each
+# container that restarted. run_doc calls it after each block, under the
+# block's stage, since the tutorial's teardown removes the logs.
+panic_scan() {
+	local hits out line who count logs
+	hits=$(panic_lines "$WORK") ||
+		die "the crash scan could not read the logs under $WORK${hits:+; the lines it read:}$(panic_fmt "$hits")"
+	if [ "$PART" = csi ]; then
+		out=$(helper pod_crash_lines dnv-csi "'$PANIC_PAT'") ||
+			die "the crash scan could not read the logs of the driver's containers"
+		while IFS= read -r line; do
+			case "$line" in
+			"restarts "*)
+				read -r _ who count <<<"$line"
+				log "  container $who has restarted $count time(s) in its pod"
+				;;
+			"skipped "* | "gone "*) log "  ${line#* }: its pod is being deleted or gone, its log with it" ;;
+			"crash "*) hits+=${hits:+$'\n'}${line#crash } ;;
+			"read "*)
+				log "  the crash scan read ${line#read }"
+				read -r logs _ <<<"${line#read }"
+				[ "$logs" -le "$PANIC_LOGS_READ" ] || PANIC_LOGS_READ=$logs
+				;;
+			esac
+		done <<<"$out"
+	fi
+	[ -z "$hits" ] || die "a program crashed; its log holds:$(panic_fmt "$hits")"
+}
+
+# panic_dump prints, on the failure path, every crash line the logs under
+# the work folder hold, and in the CSI part the driver's containers, so that
+# a crash that failed a block through another check is named. It never
+# fails.
+panic_dump() {
+	local hits out=""
+	hits=$(panic_lines "$WORK" 2>/dev/null) ||
+		hits+=$'\n'"(the logs under $WORK could not all be read)"
+	if [ "$PART" = csi ]; then
+		out=$(helper pod_crash_lines dnv-csi "'$PANIC_PAT'" 2>&1) ||
+			out+=$'\n'"(the read of the driver's containers did not answer)"
+		out=$(printf '%s\n' "$out" | grep -v '^restarts \|^read \|^skipped \|^gone \|^nolog ' || true)
+	fi
+	log "--- crash lines in the logs under $WORK and of the driver's containers"
+	log "${hits:-(none in the logs under the work folder)}"
+	[ -z "$out" ] || log "$out"
+	return 0
+}
+
+# panic_plant proves panic_lines at preflight, on a sample log in a scratch
+# directory of the guest: a record that holds both prefixes inside a field
+# must not match, the two crash lines planted after it must, and nothing else
+# may.
+panic_plant() {
+	local d hits want
+	d=$(rsh "mktemp -d /var/tmp/dnv-panic-plant.XXXXXX") ||
+		die "making the crash scan's scratch directory on the guest failed"
+	case "$d" in
+	/var/tmp/dnv-panic-plant.?*) ;;
+	*) die "mktemp on the guest printed '$d', not a scratch directory" ;;
+	esac
+	printf '%s\n' \
+		'{"level":"ERROR","msg":"os command failed","stderr":"panic: in a field\nfatal error: in a field"}' \
+		'panic: planted by the preflight' 'goroutine 1 [running]:' \
+		'fatal error: planted by the preflight' |
+		rsh "mkdir $d/sub && cat > $d/sub/plant.log" ||
+		die "writing the crash scan's sample log on the guest failed"
+	hits=$(panic_lines "$d") || hits="(the read failed)"
+	rsh "rm -rf $d" || true
+	want="$d/sub/plant.log:2:panic: planted by the preflight"
+	want+=$'\n'"$d/sub/plant.log:4:fatal error: planted by the preflight"
+	[ "$hits" = "$want" ] ||
+		die "the crash scan on its planted sample log: got '$hits', want '$want'"
 }
 
 # ---------------------------------------------------------------------------
@@ -793,6 +970,7 @@ run_doc() { # <parse dir> <name> <plan|run> [last section]
 			PLAN_REPL=$((PLAN_REPL + BLOCK_REPL))
 		else
 			run_block "$b" "$name, $sec"
+			panic_scan
 		fi
 	done
 	[ -z "$last" ] || [ "$past" = 1 ] || die "$name has no section \"$last\""
@@ -865,6 +1043,7 @@ preflight() {
 	*) die "reading $SAVED on the guest failed (exit $t)" ;;
 	esac
 	rsh "mkdir -p $WORK && cat > $HELPER" < <(helper_text) || die "shipping the helper failed"
+	panic_plant
 	line=$(helper state) || die "reading the guest's state failed"
 	[ -z "$line" ] || die "the guest holds dnv state: $(echo $line)"
 	line=$(rsh "modinfo -n nvmet") || die "modinfo -n nvmet failed"
@@ -1094,6 +1273,7 @@ on_exit() {
 		log ""
 		log "########## diagnostics (tutorial_integtest.md, Cleanup) ##########"
 		if [ "$SETUP_DONE" = 1 ]; then
+			panic_dump
 			rsh "cd $(printf '%q' "$DIR") 2>/dev/null && for f in *.log; do echo \"--- \$f\"; tail -n 30 \"\$f\"; done" >&2 || true
 		fi
 		# A run that failed before it saved the guest's state has changed
@@ -1146,5 +1326,11 @@ else
 	run_doc "$PARSE/aio" tutorial_all_in_one.md run "Cluster and nodes"
 	REPL_FROM="" REPL_FILE=""
 	run_doc "$PARSE/csi" tutorial_csi.md run
+	# The driver ran in the CSI part, so a read that never found one of
+	# its logs read nothing (panic_scan).
+	[ "$PANIC_LOGS_READ" -ge 1 ] || {
+		STAGE="the crash scan of the CSI part"
+		die "the crash scan read no log of the driver's containers in the whole run"
+	}
 fi
 teardown_read

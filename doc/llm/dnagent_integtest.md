@@ -209,6 +209,13 @@ their progress in. The info-read commands are plain memory reads.
   miss. Each is logged as hit or missed, never failed on. The teardown
   case's copy, which a loop device would finish at once, is slowed instead,
   so that it still runs when its source vanishes, and the case asserts it.
+* **A crash fails the case.** As each case ends, the suite reads every log
+  under the work directory of both VMs, and a line that starts as Go's report
+  of a crash starts, `panic: ` or `fatal error: `, fails the case with the VM,
+  the log and the line, while a record that holds those words inside a field
+  never matches; the preflight proves the read on a sample log it plants on
+  the first VM. A crash while the cleanup at the end of a passing run stops
+  an agent is not read, as that cleanup removes the logs with the agents.
 
 ## Cases
 
@@ -465,7 +472,8 @@ success and after a failed wipe (below), its first step taking off the token
 bucket of migr_bitmap's late push and of the teardown case's slowed copy;
 any other failing run
 leaves its debris, save that bucket, which it takes off at its exit since
-other suites share the VMs, and dumps the tail of each agent's
+other suites share the VMs, and dumps the crash lines of every log
+(Conventions, A crash fails the case), the tail of each agent's
 log, the dm, nvmet and host state of both VMs, a listing of each local store
 and of any file system mounted under the work directory, the failing stage's
 trace id and, when the failing case is zeroing, a migration case, teardown or

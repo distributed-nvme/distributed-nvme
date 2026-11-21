@@ -529,6 +529,13 @@ that asks for the counters, which reads them at the call as
   (`cnagent.md` CN2), so clone_xfer's restart and rebuild checks and the
   restart case's checks read a fresh log, and clone_xfer's check of the
   source's return reads the log after a mark.
+* **A crash fails the case.** As each case ends, the suite reads every log
+  under the work directory of both VMs, and a line that starts as Go's report
+  of a crash starts, `panic: ` or `fatal error: `, fails the case with the VM,
+  the log and the line, while a record that holds those words inside a field
+  never matches; the preflight proves the read on a sample log it plants on
+  the first VM. A crash while the cleanup at the end of a passing run stops
+  an agent is not read, as that cleanup removes the logs with the agents.
 
 ## Cases
 
@@ -1321,7 +1328,8 @@ signatures removes it.
 
 Cleanup runs unconditionally at the start of every run, and at its end only
 on success and after a failed wipe (below); any other failing run leaves its
-debris and dumps the agents' logs, both
+debris and dumps the crash lines of every log (Conventions, A crash
+fails the case), the agents' logs, both
 VMs' dm, md, nvmet and host state, each read bounded, and the failing
 stage's trace id, but for clone_xfer's token bucket, which it removes, as
 the bucket would slow any suite that runs on the VMs before the next

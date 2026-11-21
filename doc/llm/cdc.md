@@ -910,13 +910,24 @@ exact names (Log records), read through a filter that drops a line torn by
 a concurrent append. The flood case judges accepting by kernel socket
 state — the listener's accept queue on the first server and the flooding
 host's sockets the instance has closed — never by a record, since a
-pending connection logs none (NP13), and never by a timing window.
+pending connection logs none (NP13), and never by a timing window. A crash
+fails the run: as each case ends, and in the reset before each case, right
+before it empties the cdc logs, the suite reads every log under its work
+directory on the first server, the one server that runs a dnv program, and a
+line that starts as Go's report of a crash starts, `panic: ` or
+`fatal error: `, fails the run with the log and the line, while a record that
+holds those words inside a field never matches. The preflight proves the read on a sample
+log it plants on the first server, and the setup removes the logs a failed run
+left there before anything starts, as every program there appends to its
+log, so that the read meets only the run's own lines. A crash while the
+cleanup at the end of a passing run stops a program is not read, as that
+cleanup removes the logs with the programs.
 
 **Cleanup.** Cleanup runs unconditionally at the start of every run, and
 at the end only on success: a failing run leaves etcd's data, every cdc
 log, the nvmet and dm state and the host connections in place and prints
-its diagnostics — the failing stage and its trace id, the tail of every
-cdc log, the entries in etcd, the target's configfs tree and dm tables,
+its diagnostics — the crash lines of every log, the failing stage and its
+trace id, the tail of every cdc log, the entries in etcd, the target's configfs tree and dm tables,
 and the hosts' subsystems, uevent captures, flood sockets, nvme-stas
 journals and the manyhosts case's daemons' services, discovery controllers
 and journals — so the debris is what the developer reads; a cleanup-only run

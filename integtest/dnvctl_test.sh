@@ -319,6 +319,82 @@ req_recs() { # <Rpc> <trace id>
 count_req_recs() { req_recs "$@" | wc -l | tr -d ' \n'; }
 
 # ---------------------------------------------------------------------------
+# The crash scan (dnvctl.md, Integration test plan, What a pass means)
+# ---------------------------------------------------------------------------
+
+# PANIC_PAT matches the first line of the report Go's runtime writes to a
+# program's stderr, which is its log here, when the program dies of a panic or
+# a fatal error. A JSON record starts with a brace, so a record that holds
+# either word inside a field never matches.
+PANIC_PAT='^(panic: |fatal error: )'
+
+# panic_lines prints, as <log>:<line>:<text>, every line of each *.log under
+# <dir> on the server that PANIC_PAT matches, and fails when grep could not
+# read them all: a log that was not read is not a log without a crash. The
+# lines it found are printed either way.
+panic_lines() { # <dir>
+	sshw "grep -rnHaE --include='*.log' '$PANIC_PAT' $1 || [ \$? -eq 1 ]"
+}
+
+# panic_fmt prints hits, each on its own indented line after a line break,
+# or nothing for none.
+panic_fmt() { # <hits>
+	[ -z "$1" ] || printf '\n    %s' "${1//$'\n'/$'\n'    }"
+}
+
+# panic_scan fails the case when a log of the work directory holds a crash
+# line, naming the log and the line. The case loop calls it as each case ends,
+# under a stage of its own, and the per-case reset calls it with in-reset,
+# under the reset's stage, from truncate_log right before it truncates the
+# logs, so that a crash in the reset's stop of a program, or before the first
+# case, is read too.
+panic_scan() { # [in-reset]
+	local hits
+	[ "${1:-}" = in-reset ] || stage crash "the crash scan of every log"
+	hits=$(panic_lines "$WORK") ||
+		die "the crash scan could not read the logs under $WORK on $TARGET${hits:+; the lines it read:}$(panic_fmt "$hits")"
+	[ -z "$hits" ] ||
+		die "a program crashed; its log on $TARGET holds:$(panic_fmt "$hits")"
+}
+
+# panic_dump prints, on the failure path, every crash line the logs of the
+# work directory hold, so that a crash that failed a case through another
+# check is named. It never fails.
+panic_dump() {
+	local hits
+	hits=$(panic_lines "$WORK" 2>/dev/null) ||
+		hits+=$'\n'"(the logs under $WORK could not all be read)"
+	log "--- crash lines in the logs under $WORK on $TARGET"
+	log "${hits:-(none)}"
+	return 0
+}
+
+# panic_plant proves panic_lines at preflight, on a sample log in a scratch
+# directory of the server: a record that holds both prefixes inside a field
+# must not match, the two crash lines planted after it must, and nothing else
+# may.
+panic_plant() {
+	local d hits want
+	d=$(sshw "mktemp -d /var/tmp/dnv-panic-plant.XXXXXX") ||
+		die "making the crash scan's scratch directory on $TARGET failed"
+	case "$d" in
+	/var/tmp/dnv-panic-plant.?*) ;;
+	*) die "mktemp on $TARGET printed '$d', not a scratch directory" ;;
+	esac
+	printf '%s\n' \
+		'{"level":"ERROR","msg":"os command failed","stderr":"panic: in a field\nfatal error: in a field"}' \
+		'panic: planted by the preflight' 'goroutine 1 [running]:' \
+		'fatal error: planted by the preflight' |
+		sshw "mkdir $d/sub && cat > $d/sub/plant.log" ||
+		die "writing the crash scan's sample log on $TARGET failed"
+	hits=$(panic_lines "$d") || hits="(the read failed)"
+	sshw "rm -rf $d" || true
+	want="$d/sub/plant.log:2:panic: planted by the preflight"
+	want+=$'\n'"$d/sub/plant.log:4:fatal error: planted by the preflight"
+	assert_eq "$hits" "$want" "the crash scan on its planted sample log"
+}
+
+# ---------------------------------------------------------------------------
 # Polling (Integration test plan, What a pass means: only for process
 # readiness — every dnvctl call is synchronous, so no stage ever sleeps
 # waiting for the fake to catch up)
@@ -420,6 +496,10 @@ ctl_exec() { # <args…>
 	CTL_OUT=$(ctl_section "$framed" 4)
 	CTL_POST=$(ctl_section "$framed" 5)
 	[ -n "$CTL_RC" ] || die "dnvctl $*: the framed reply carried no exit code"
+	# A crash of dnvctl exits 2, a usage error's code (CT5), and its report
+	# can name the flag a usage stage looks for: no call may carry one.
+	[ "$(printf '%s\n' "$CTL_ERR" | grep -cE "$PANIC_PAT" || true)" = 0 ] ||
+		die "dnvctl $* crashed (exit $CTL_RC): $CTL_ERR"
 }
 
 # ctl_ok is the success wrapper (Integration test plan, What a pass means):
@@ -567,6 +647,7 @@ reset_state() {
 }
 
 truncate_log() {
+	panic_scan in-reset
 	sshw "f=$(fgw_log); [ -f \"\$f\" ] && : > \"\$f\"; true"
 }
 
@@ -701,6 +782,7 @@ verify_clean() {
 diagnostics() {
 	local saved=$QUIET
 	QUIET=1
+	panic_dump
 	log "failing stage: '$STAGE'   trace_id: $TRACE"
 	log "cluster: $CLUSTER  sp: $SP  gateway: $CTL_ADDR"
 
@@ -803,6 +885,7 @@ preflight_server() {
 			die "port $port is already listening on $TARGET"
 		fi
 	done
+	panic_plant
 	log "preflight (server) ok"
 }
 
@@ -1850,6 +1933,7 @@ main() {
 		if [ -n "$ONLY" ] && [ "$ONLY" != "$name" ]; then continue; fi
 		case_reset "$name"
 		"case_$name"
+		panic_scan
 	done
 }
 

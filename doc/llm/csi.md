@@ -907,6 +907,31 @@ CSI6. **Test pods run on the hosts.** The control-plane node carries a
 no-schedule taint the suite ensures on every run, and every pod names its
 host.
 
+CSI21. **A crash fails the case.** As each case ends, the suite reads every
+log under the work directory of every guest, and the log of every container of
+the driver's pods that has run, with the log of its previous run when its
+restart count is above zero, and a line that starts as Go's report of a crash
+starts, `panic: ` or `fatal error: `, fails the case with the guest or the
+container, the log and the line, while a record that holds those words inside
+a field never matches. Since a deleted pod's logs go with it, the suite reads
+the containers the same way right before each step of its own that deletes or
+replaces a driver pod: a rollout of the controller plugin, a change of the
+node plugin's pod template, a scale-down, a pod's delete, the cut of a host
+and the driver's removal. While the driver is up, a read that lists no pod, or
+reads no log of a pod not being deleted, fails, and each read logs how many
+logs it read; a pod being deleted whose log is gone, or a pod gone between the
+listing and its read, is skipped and logged. A restart alone fails nothing, as
+a sidecar that loses its lease exits by design (CSI19); the read logs the
+count of each container that restarted. The preflight proves the read of the
+guests' logs on a sample log it plants on the control-plane guest. Not read: a
+container's runs before its previous one; a copy Kubernetes deletes from a cut
+host, whose lines after the cut, and whose log once deleted, the API no longer
+serves; and a crash while the cleanup at the end of a passing run stops a
+program, as that cleanup removes the logs with the programs. Each read starts
+one kubectl call per container log and reads each log from its start, about
+twenty reads of some fifteen logs in a run, which by that count adds a few
+minutes to a run.
+
 ### The cases
 
 Every case runs on the suite's dnv stack with the driver deployed from the
@@ -1121,7 +1146,9 @@ stack and the driver.
 
 ### Diagnostics on failure
 
-A failing run prints the nodes, every pod, the claims, volumes and
+A failing run prints first every crash line the guests' logs and the
+driver's container logs hold (CSI21), then the nodes, every pod, the claims,
+volumes and
 attachments, the pods and events of the suite's namespace, the state of the
 cut of the machine and detach cases on each host, the nodes' taints, the
 sidecars' leases, the logs of both controller copies and every node plugin,

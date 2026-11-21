@@ -5512,6 +5512,7 @@ cleanup_all() {
 
 diagnostics() {
 	local idx spec sp cntlr rest
+	panic_dump
 	for idx in 1 2; do
 		log ""
 		log "########## vm$idx ##########"
@@ -5534,6 +5535,83 @@ diagnostics() {
 # Teardown and cleanup). Cases reset the list.
 diag_cntlr() { # cnidx sp cntlr
 	DIAG_CNTLRS+=("$1:$2:$3")
+}
+
+# ---------------------------------------------------------------------------
+# The crash scan (cnagent_integtest.md, Conventions)
+# ---------------------------------------------------------------------------
+
+# PANIC_PAT matches the first line of the report Go's runtime writes to a
+# program's stderr, which is its log here, when the program dies of a panic or
+# a fatal error. A JSON record starts with a brace, so a record that holds
+# either word inside a field never matches.
+PANIC_PAT='^(panic: |fatal error: )'
+
+# panic_lines prints, as <log>:<line>:<text>, every line of each *.log under
+# <dir> on one VM that PANIC_PAT matches, and fails when grep could not read
+# them all: a log that was not read is not a log without a crash. The lines it
+# found are printed either way.
+panic_lines() { # <vm index> <dir>
+	sshv "$1" "grep -rnHaE --include='*.log' '$PANIC_PAT' $2 || [ \$? -eq 1 ]"
+}
+
+# panic_label prints one VM's hits, each on its own line behind the VM's
+# name, or nothing for none.
+panic_label() { # <vm name> <hits>
+	[ -z "$2" ] || printf '\n    %s: %s' "$1" "${2//$'\n'/$'\n'    $1: }"
+}
+
+# panic_scan fails the case when a log of the work directory on either VM
+# holds a crash line, naming the VM, the log and the line. The case loop
+# calls it as each case ends.
+panic_scan() {
+	local idx hits all=""
+	stage crash "the crash scan of every agent log"
+	for idx in 1 2; do
+		hits=$(panic_lines "$idx" "$WORK") ||
+			die "the crash scan could not read the logs under $WORK on vm$idx${hits:+; the lines it read:}$(panic_label "vm$idx" "$hits")"
+		all+=$(panic_label "vm$idx" "$hits")
+	done
+	[ -z "$all" ] || die "a program crashed; its log holds:$all"
+}
+
+# panic_dump prints, on the failure path, every crash line the logs of the
+# work directory on both VMs hold, so that a crash that failed a case through
+# another check is named. It never fails.
+panic_dump() {
+	local idx hits all=""
+	for idx in 1 2; do
+		hits=$(panic_lines "$idx" "$WORK" 2>/dev/null) ||
+			hits+=$'\n'"(the logs under $WORK could not all be read)"
+		all+=$(panic_label "vm$idx" "$hits")
+	done
+	log "--- crash lines in the logs under $WORK"
+	log "${all:-    (none)}"
+	return 0
+}
+
+# panic_plant proves panic_lines at preflight, on a sample log in a scratch
+# directory of vm1: a record that holds both prefixes inside a field must not
+# match, the two crash lines planted after it must, and nothing else may.
+panic_plant() {
+	local d hits want
+	d=$(sshv 1 "mktemp -d /var/tmp/dnv-panic-plant.XXXXXX") ||
+		die "making the crash scan's scratch directory on vm1 failed"
+	case "$d" in
+	/var/tmp/dnv-panic-plant.?*) ;;
+	*) die "mktemp on vm1 printed '$d', not a scratch directory" ;;
+	esac
+	printf '%s\n' \
+		'{"level":"ERROR","msg":"os command failed","stderr":"panic: in a field\nfatal error: in a field"}' \
+		'panic: planted by the preflight' 'goroutine 1 [running]:' \
+		'fatal error: planted by the preflight' |
+		sshv 1 "mkdir $d/sub && cat > $d/sub/plant.log" ||
+		die "writing the crash scan's sample log on vm1 failed"
+	hits=$(panic_lines 1 "$d") || hits="(the read failed)"
+	sshv 1 "rm -rf $d" || true
+	want="$d/sub/plant.log:2:panic: planted by the preflight"
+	want+=$'\n'"$d/sub/plant.log:4:fatal error: planted by the preflight"
+	assert_eq "$hits" "$want" "the crash scan on its planted sample log"
 }
 
 # ---------------------------------------------------------------------------
@@ -5667,6 +5745,7 @@ preflight_vms() {
 		assert_eq "$got" "0" \
 			"vm$idx: ports $DN_GRPC_PORT/$CN_GRPC_PORT/$TR_SVC_ID must be free"
 	done
+	panic_plant
 	log "preflight ok"
 }
 
@@ -14474,6 +14553,7 @@ main() {
 	for name in "${CASES[@]}"; do
 		if [ -n "$ONLY" ] && [ "$ONLY" != "$name" ]; then continue; fi
 		"case_$name"
+		panic_scan
 	done
 }
 

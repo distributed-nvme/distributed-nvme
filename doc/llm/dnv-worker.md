@@ -6411,12 +6411,20 @@ condition; a fixed sleep is used only where a window must elapse — a grace
 window, a rate measured over a window, a "nothing must happen for this long"
 negative; every counting helper, and every read a negative rests on, fails on
 a failed read instead of answering zero, because a failed read taken for zero
-would pass every negative built on it.
+would pass every negative built on it. A crash fails the run: as each case
+ends, and in the restart of the worker fleet before each case, right before it
+truncates the logs, the suite reads every log under its work directory, and a
+line that starts as Go's report of a crash starts, `panic: ` or
+`fatal error: `, fails the run with the log and the line, while a record that
+holds those words inside a field never matches; the preflight proves the read
+on a sample log it plants on the server. A crash while the cleanup at the end
+of a passing run stops a program is not read, as that cleanup removes the
+logs with the programs.
 
 **Cleanup.** Cleanup runs at the start of every run and at its end only on
 success: a failing run leaves etcd's data, every log and every behavior file
-in place and prints its diagnostics — the failing stage and its trace id,
-the registrations, the ownership table, the tail of every log and the dnv
+in place and prints its diagnostics — the crash lines of every log, the
+failing stage and its trace id, the registrations, the ownership table, the tail of every log and the dnv
 keys — so the debris is what the developer reads; a cleanup-only run does
 the cleanup alone. Cleanup signals every process the suite started by its
 recorded pid, continuing every stopped process first, a worker or, in the

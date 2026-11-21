@@ -516,6 +516,19 @@ the same way and checked against the stored pool once it is created; the
 pool's stripe, which its create does not name, is read back and held to the
 narrowing's rule by its properties rather than by a copy of the arithmetic.
 
+E2E13. **A crash fails the case.** As each case ends, before the cleanup
+between cases removes the logs, the suite reads every log under the work
+directory of the control-plane guest and of each controller node and disk
+node guest, the guests that run a dnv program, and a line that starts as Go's
+report of a crash starts, `panic: ` or `fatal error: `, fails the case with
+the guest, the log and the line, while a record that holds those words inside
+a field never matches. The preflight proves the read on a sample log it plants
+on the control-plane guest, read as the plain user, and on a disk node guest,
+read through sudo. A crash in the cleanup's own stop of a program, between
+cases or at the end of a passing run, is not read, as the cleanup removes the
+logs with the programs; a crash of `dnvctl` is in no log but in its call's
+exit status and stderr, which E2E2 frames apart.
+
 ## The cases
 
 The cases run in order, each on a fresh pool (E2E11): smoke, ops, copy, react
@@ -1531,7 +1544,9 @@ suites' wipe clears it (`dnagent_integtest.md`, Teardown and cleanup).
 ## Diagnostics on failure
 
 A run that fails an assertion dumps instead of cleaning, so everything stays in
-place; a run failed by its end cleanup dumps what that cleanup left. The
+place; a run failed by its end cleanup dumps what that cleanup left. The dump
+starts with every crash line the logs of E2E13 hold, so that a crash that
+failed a case through another check is named. The
 control-plane guest goes first, as its dump holds the failing dnvctl call's
 streams, which a later read would overwrite, and every dump is tolerant and
 bounded, as a guest command hangs exactly when something is wrong. Once
