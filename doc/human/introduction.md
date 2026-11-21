@@ -579,7 +579,7 @@ VMs with the e2e suite's many-pools case: one-slice RAID1 pools with two
 cntlrs each over three controller nodes, both hosts writing every pool with
 one synced 4 KiB write a second, at the default primary threshold. With
 every packet of the node that held the most primaries dropped, each of its
-pools failed over 6.3 to 9.8 s after the cut at 8, 32 and 64 pools, and both
+pools failed over 6.1 to 9.9 s after the cut at 8, 32 and 64 pools, and both
 hosts saw it served by its new primary at most 13.6 s after the cut at 8
 and 32 pools and 25.8 s at 64; the longest write was just under that, and
 no write failed while the node was cut off. When the node came back, a host
@@ -587,10 +587,11 @@ whose connection to it came back before the node had made its old
 primaries standbys had its writes there fail for a few seconds: none at 8
 pools, 15 in one run at 32 and none in the other, and 112 at 64, 56 on each
 host ([dnv's scope and known limits](scope.md), section 8). Building 64
-pools at once took 332 s and made 22 failovers of pools of the same burst
-that had finished building; a second build of 64 made 25, one pool failing
-over twice, and that pool's second failover left it unbuilt (section 8 of
-the same document). 32 pools built with one failover in one of two runs, 8
+pools at once took 332 s and made 22 failovers of pools that had finished
+building; a second build of 64 made 25, one pool failing over twice, and
+that pool's second failover left it unbuilt (section 8 of the same
+document); a third took 336 s and made 18, one of them of the pool built
+before the others. 32 pools built with one failover in one of two runs, 8
 with none.
 
 The limits dnv enforces, each against the largest size a test has run. The

@@ -1943,8 +1943,8 @@ the connect attempted.
   (`cnagent_integtest.md`, Cases, groupcut).
 * **The many-pools case's bound is measured on the lab's three
   controller-node guests, at 8, 32 and 64 pools.** On the packet cut each
-  moved pool's failover record came 6.3 to 9.8 s after the cut at every
-  count, its fence record 9.4 to 12.9 s after, and both hosts saw it
+  moved pool's failover record came 6.1 to 9.9 s after the cut at every
+  count, its fence record 9.1 to 12.9 s after, and both hosts saw it
   optimized at most 13.6 s after the cut at 8 and 32 pools and 25.8 s at
   64, the longest write a few hundred ms short of that; on the agent stop,
   at most 12.9, 15.4 and 35.5 s. The case asserts 60 s on the packet cut,
@@ -1952,18 +1952,20 @@ the connect attempted.
   that or one whose run cap the driver's disk cannot hold (E2E5). 64 pools
   put up to 44 cntlrs on one controller node and every extent of one disk
   node to use, and cost each host about 60 MB of memory for its 128
-  controllers.
-* **The many-pools case's build fails over pools of its own burst.** Built
-  at once, with the cutoff set's primary threshold, the shipped default, 64
-  pools made 22 failovers in the 332 s they took to build in one run and 25
-  in another, 32 pools one in one of two runs, and 8 pools none: each of a
-  pool of the burst whose primary had settled while later pools still
-  built, one pool twice, its rounds missed on observations too old
+  controllers. The case's script passes whole at 64 pools, in 18 minutes.
+* **The many-pools case's build fails over pools that have built.** Built at
+  once, with the cutoff set's primary threshold, the shipped default, 64
+  pools made 22, 25 and 18 failovers in three runs, the two builds that
+  finished taking 332 and 336 s, 32 pools one in one of two runs, and 8
+  pools none: each of a pool whose primary had settled while later pools
+  still built, pools of the burst, one of them twice, and in one run setup's
+  pool, built before the burst. Their rounds missed on observations too old,
+  the largest some 20 s old, the disk nodes' side rounds too in one run
   (`architecture.md`, Known limits). The case logs the worker's rounds and
   reactions of that window and asserts none of it. In the second run at 64
-  that pool's second failover left it unbuilt, its data group's array
-  inactive on the new primary (`architecture.md`, Known limits), and the
-  case failed at its build wait.
+  the pool that failed over twice was left unbuilt by its second failover,
+  its data group's array inactive on the new primary (`architecture.md`,
+  Known limits), and the case failed at its build wait.
 * **The many-pools case's logs are large.** Every agent logs each object's
   reads at debug, so a passing run at 64 pools leaves some 22 GB of logs on
   the node guests, which its run cap counts. A failed run is held to no cap:

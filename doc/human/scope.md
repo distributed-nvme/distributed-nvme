@@ -1778,21 +1778,21 @@ failover's among them.
   nothing. By dnv's rules the worker then fails the pool over to its
   standby once the error has lasted the cntlr threshold, 600 seconds at
   the default; no run has waited that long. The e2e suite's many-pools
-  case saw it once, in one of two builds of 64 pools at once, on a pool
+  case saw it once, in one of three builds of 64 pools at once, on a pool
   that failed over twice while it built. State: fix later; not decided
   yet.
-- **Creating many volumes at once can fail over volumes of the same
-  burst.** A controller node that builds many new primaries at once can
+- **Creating many volumes at once can fail over volumes that are already
+  built.** A controller node that builds many new primaries at once can
   answer the worker's health checks of the primaries it has finished too
   late, and the worker then fails those over, so their hosts see a pause
-  with no fault behind it. The e2e suite's many-pools case shows it on
-  three controller nodes at the default thresholds: 22 and 25 failovers in
-  two builds of 64 pools, one in one of two builds of 32 and none at 8,
-  each of a pool of the burst that had finished building, one pool twice
+  with no fault behind it. The e2e suite's many-pools case shows it on three
+  controller nodes at the default thresholds: 22, 25 and 18 failovers in
+  three builds of 64 pools, one in one of two builds of 32 and none at 8,
+  each of a pool that had finished building, one pool twice, and in one
+  build the pool made before the others
   ([the introduction](introduction.md#status-and-limits-of-01) has the
-  numbers). A volume that served before the burst can be hit the same way
-  by dnv's rules; no run has shown it. A Kubernetes cluster that creates
-  many volumes at once has this shape. State: fix later; whether the threshold or the build should change
+  numbers). A Kubernetes cluster that creates many volumes at once has this
+  shape. State: fix later; whether the threshold or the build should change
   is not decided yet.
 - **A controller node that comes back after a network cut fails a host's
   writes for a few seconds.** While the node is cut off, the failover moves

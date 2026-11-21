@@ -1195,11 +1195,11 @@ log, and the conformance test's logs, its plugins' included.
   cntlrs and RAID1, is the e2e suite's many-pools case, which states the
   pool counts it ran and the times it measured (`e2e_integtest.md`, The
   cases; `e2e_integtest.md`, Known limits).
-* **Many volumes created at once can fail over volumes of the same burst.**
+* **Many volumes created at once can fail over volumes that have built.**
   A Kubernetes cluster that creates many volumes in a burst has the
   controller nodes build many new primaries at once, which can answer the
   check rounds of the primaries they have settled with observations too
   old, so those fail over with no fault behind them, as the e2e suite's
-  many-pools case saw for pools of its own burst (`architecture.md`, Known
-  limits). Each such failover is a pause for its volume's pod; a volume
-  that served before the burst is open to the same by the rules.
+  many-pools case saw for pools of its own burst and for a pool built
+  before it (`architecture.md`, Known limits). Each such failover is a
+  pause for its volume's pod.

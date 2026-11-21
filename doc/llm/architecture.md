@@ -9933,21 +9933,21 @@ document and only pointed to here.
   later than the demotion hold ends (Failover). Such a host can also lose
   an acknowledged write (A failover while the old primary serves can lose
   an acknowledged write, above).
-* **Many pools built at once fail over pools whose primaries have
-  settled.** A controller node that builds the stacks of many new primaries
-  at once answers check rounds of the primaries it has settled with
-  observations too old (`dnv-worker.md` HL7), and a settled primary whose
-  rounds miss for its primary threshold is failed over (`dnv-worker.md`
-  AR4, AR5), a pause for its hosts with no fault behind it; a settling
-  primary is held to the cntlr threshold instead (`dnv-worker.md` HL2).
-  That those reads wait behind the builds, the head-of-line blocking above,
-  is inferred: the rounds' records show only the observations' age. In the
-  e2e suite's many-pools case at the default primary threshold every such
-  failover hit a pool of the same burst whose primary had settled while
-  later pools still built, one pool twice (`e2e_integtest.md`, Known
-  limits); that a pool serving before the burst is hit the same way follows
-  from the rules and is not run. A Kubernetes cluster makes this shape when
-  it creates many volumes at once (`csi.md`, Known limits).
+* **Many pools built at once fail over pools that have built.** A controller
+  node that builds the stacks of many new primaries at once answers check
+  rounds of the primaries it has settled with observations too old
+  (`dnv-worker.md` HL7), and a settled primary whose rounds miss for its
+  primary threshold is failed over (`dnv-worker.md` AR4, AR5), a pause for
+  its hosts with no fault behind it; a settling primary is held to the cntlr
+  threshold instead (`dnv-worker.md` HL2). That those reads wait behind the
+  builds, the head-of-line blocking above, is inferred: the rounds' records
+  show only the observations' age, and in one run the disk nodes' side
+  rounds came from observations too old as well. In the e2e suite's
+  many-pools case at the default primary threshold every such failover hit a
+  pool whose primary had settled while later pools still built: pools of the
+  burst, one of them twice, and in one run a pool built before the burst
+  (`e2e_integtest.md`, Known limits). A Kubernetes cluster makes this shape
+  when it creates many volumes at once (`csi.md`, Known limits).
 * **A promotion that outruns its sides can leave a group's array inactive.**
   A new primary whose converge runs before a group's sides have opened its
   path assembles the group's array from the legs it reaches; mdadm then
@@ -9959,9 +9959,10 @@ document and only pointed to here.
   pool on its primary until, by the rules, the worker fails it over to its
   healthy standby once that error has lasted the cntlr threshold, a
   settling primary's threshold (`dnv-worker.md` AR5); no run has waited
-  that long. Seen once in the e2e suite's many-pools case, on a pool that
-  failed over twice while 64 pools built, the second time while the disk
-  nodes were still opening paths (`e2e_integtest.md`, Known limits).
+  that long. Seen in one of three runs of the e2e suite's many-pools case
+  at 64 pools, on a pool that failed over twice while the pools built, the
+  second time while the disk nodes were still opening paths
+  (`e2e_integtest.md`, Known limits).
 * **An old primary cut off from the network serves again for a moment when
   it comes back.** Cut off, its agent hears no syncup, so its namespaces stay
   in their optimized group while the failover moves the pool, and its sides
