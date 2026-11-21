@@ -1,0 +1,1150 @@
+#!/usr/bin/env bash
+#
+# tutorial_test.sh — the tutorial suite of tutorial_integtest.md: it builds
+# the release archive, unpacks it on one lab guest that holds no dnv state,
+# and runs the shell blocks of a tutorial there in the order the tutorial
+# gives them, each checked by the HTML comment marker beside it; then it puts
+# the guest back as it found it.
+#
+#   bash integtest/tutorial_test.sh [--part all-in-one|csi] [--archive FILE]
+#        [--cleanup-only] user@host
+#
+# --part all-in-one (the default) runs doc/human/tutorial_all_in_one.md
+# whole. --part csi runs doc/human/tutorial_csi.md on the lab's k3s: the
+# guest named is its server node, and the prelude the CSI tutorial asks for
+# (the all-in-one tutorial from its start through "Cluster and nodes", with
+# the CSI tutorial's gateway start in place of the all-in-one's) runs first
+# (tutorial_integtest.md, Topology). --archive takes a release archive
+# instead of building one. --cleanup-only puts the guest back and runs no
+# block.
+#
+# The markers (tutorial_integtest.md, The markers): an HTML comment that
+# starts with "<!-- test" and ends on the line just before a block's opening
+# fence binds to that block; each line inside it is one directive: wait
+# SECS, timeout SECS, out TEXT, line TEXT, has TEXT, lacks TEXT, word TEXT,
+# count N TEXT, same-first-word, save NAME, same NAME, skip REASON, omit
+# TEXT, replaces TEXT, run. A marker that binds to no block, or a directive
+# the suite does not know, fails the parse before anything runs. Before any
+# block runs, the plan of the run checks every block it will run: each omit
+# drops exactly one line, the CSI part's replaces takes the place of exactly
+# one line of its prelude, and the CSI tutorial has one block with a
+# replaces; the prelude's last section exists; every block of the CSI
+# tutorial carries a marker; and no block's text names k3s or rancher but in
+# `sudo k3s kubectl ` and `sudo k3s ctr ` (k3s_hit), whatever its marker says.
+#
+# Every block runs as its own file under `bash -e` in the unpacked release
+# folder on the guest, with stdin from /dev/null, as the plain user; the
+# tutorial's own sudo does the rest. Its stdout is what the directives read;
+# its stdout and stderr both go to the transcript.
+
+set -euo pipefail
+
+REPO_ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
+WORK=/var/tmp/dnv-tutorial
+SAVED=$WORK/saved
+HELPER=$WORK/helper.sh
+AIO_DOC=$REPO_ROOT/doc/human/tutorial_all_in_one.md
+CSI_DOC=$REPO_ROOT/doc/human/tutorial_csi.md
+BLOCK_TIMEOUT=300
+
+# k3s_hit prints the first line of a block's text that names k3s or rancher,
+# in any case, once every `sudo k3s kubectl ` and `sudo k3s ctr ` is taken
+# out of it, and nothing when no line does. Those two are the uses the
+# tutorials have of the lab's k3s; any other line that names it may install
+# a second k3s beside the lab's, or stop or remove the lab's (csi.md CSI1),
+# so the guard holds by the shape of a use, not by a list of the harmful
+# ones.
+k3s_hit() { # <text>
+	sed -e 's/sudo k3s kubectl //g' -e 's/sudo k3s ctr //g' <<<"$1" |
+		grep -iE 'k3s|rancher' | head -n 1 || true
+}
+
+# The packages the tutorials install. A lab guest that has one of them at
+# another version than its candidate is refused at preflight: the tutorial's
+# install would upgrade a tool the other suites run with.
+AIO_PKGS=(nvme-cli mdadm nvme-stas dmsetup thin-provisioning-tools)
+CSI_PKGS=(docker.io)
+# The udev rule files the tutorials install and their teardowns remove.
+UDEV_RULES=(58-dnv-dm.rules 63-dnv-md.rules 63-zz-dnv-md-array.rules)
+# Every TCP port a tutorial listens on.
+PORTS=(2379 2380 29527 8009 29900 29901 29902 29903 29950 4301 4302 4303 4304 4420)
+# The taint by which the CSI part keeps the lab's other k3s nodes free of the
+# tutorial's pods, so that the server node is the one machine the tutorial
+# expects; the server's own taint is lifted for the run and put back.
+TUT_TAINT_KEY=dnv.io/tutorial
+CP_TAINT=node-role.kubernetes.io/control-plane:NoSchedule
+
+PART=all-in-one
+ARCHIVE=""
+CLEANUP_ONLY=0
+TARGET=""
+STAGE="(startup)"
+SETUP_DONE=0
+SAVE_DONE=0
+DIR=""
+PARSE=""
+RELEASE_OUT=""
+SSH_OPTS=(-o BatchMode=yes -o StrictHostKeyChecking=accept-new
+	-o ConnectTimeout=15 -o ServerAliveInterval=15)
+
+log() { echo "$*" >&2; }
+
+stage() {
+	STAGE=$1
+	log ""
+	log "=== $STAGE"
+}
+
+# die prints the failure report the runner reads (layout.md, Directory tree).
+# The tutorial's commands carry no trace id of the suite's, so it reads "-".
+die() {
+	log ""
+	log "FAILED at stage '$STAGE' (trace_id -)"
+	log "  $*"
+	exit 1
+}
+
+usage() {
+	sed -n '9,10p' "${BASH_SOURCE[0]}" | sed 's/^# //' >&2
+	exit 2
+}
+
+while [ $# -gt 0 ]; do
+	case $1 in
+	--part)
+		[ $# -ge 2 ] || usage
+		case $2 in all-in-one | csi) PART=$2 ;; *) usage ;; esac
+		shift 2
+		;;
+	--archive)
+		[ $# -ge 2 ] || usage
+		ARCHIVE=$2
+		shift 2
+		;;
+	--cleanup-only)
+		CLEANUP_ONLY=1
+		shift
+		;;
+	-*) usage ;;
+	*)
+		[ -z "$TARGET" ] || usage
+		TARGET=$1
+		shift
+		;;
+	esac
+done
+[ -n "$TARGET" ] || usage
+case $TARGET in *@*) ;; *) usage ;; esac
+
+rsh() { ssh "${SSH_OPTS[@]}" "$TARGET" "$@"; }
+
+# helper runs one function of the guest's helper as root.
+helper() { rsh "sudo -n bash $HELPER $*"; }
+
+# The guest's helper, shipped at preflight and at a cleanup-only run. Every
+# function runs as root and acts only on what the tutorial makes: preflight
+# proved that the guest held none of it (dnv's devices, arrays, nvmet
+# objects, NVMe-oF controllers and programs) before the run.
+helper_text() {
+	cat <<'HELPER_EOF'
+set -uo pipefail
+WORK=/var/tmp/dnv-tutorial
+SAVED=$WORK/saved
+NVMET=/sys/kernel/config/nvmet
+UDEV_RULES="58-dnv-dm.rules 63-dnv-md.rules 63-zz-dnv-md-array.rules"
+
+# state prints what preflight requires absent, one line each; empty means
+# the guest holds no dnv state.
+state() {
+	local p
+	dmsetup ls 2>/dev/null | awk '$1 ~ /^dnv-/ { print "dm device " $1 }'
+	awk '/^md[0-9]/ { print "md array " $1 }' /proc/mdstat 2>/dev/null
+	for p in "$NVMET"/ports/* "$NVMET"/subsystems/* "$NVMET"/hosts/*; do
+		[ -e "$p" ] && echo "nvmet ${p#$NVMET/}"
+	done
+	for p in /sys/class/nvme-fabrics/ctl/nvme*; do
+		[ -e "$p" ] && echo "NVMe-oF controller ${p##*/}"
+	done
+	pgrep -a -x 'dnv-agent|dnv-gateway|dnv-worker|dnv-cdc|dnv-csi|etcd' | sed 's/^/process /'
+	losetup -a 2>/dev/null | grep "$WORK" | sed 's/^/loop /'
+	return 0
+}
+
+# The readings save keeps and restored compares, one function each: the
+# installed packages, the mask of nvme-cli's connector units, the policy of
+# iptables' FORWARD chain, the network links, nvme-stas's two daemons
+# (whether each starts at boot and whether it runs), which of docker's and
+# containerd's state folders exist, whether the docker group does, and the
+# images of k3s's store. Each fails when its reading fails, and never
+# prints a partial answer as a whole one.
+pkgs_now() {
+	dpkg-query -W -f '${db:Status-Abbrev} ${Package}\n' | awk '$1 == "ii" { print $2 }' | LC_ALL=C sort
+}
+units_now() {
+	local u st
+	for u in nvmf-connect@.service nvmf-connect.target; do
+		# is-enabled prints its answer and exits non-zero for masked, so
+		# the answer is read alone.
+		st=$(systemctl is-enabled "$u" 2>/dev/null) || true
+		[ -n "$st" ] || return 1
+		echo "$u $st"
+	done
+}
+forward_now() {
+	iptables -S FORWARD | awk '$1 == "-P" { print $3; f = 1 } END { exit !f }'
+}
+links_now() {
+	ip -o link show | awk -F': ' '{ print $2 }' | sed 's/@.*//' | LC_ALL=C sort
+}
+daemons_now() {
+	local u st act
+	for u in stafd stacd; do
+		st=$(systemctl is-enabled "$u" 2>/dev/null) || true
+		case $st in '' | not-found) st=absent ;; esac
+		act=$(systemctl is-active "$u" 2>/dev/null) || true
+		echo "$u $st ${act:-unknown}"
+	done
+}
+dirs_now() {
+	local f
+	for f in /var/lib/docker /var/lib/containerd; do
+		[ ! -e "$f" ] || echo "$f"
+	done
+}
+group_now() {
+	if getent group docker >/dev/null; then echo yes; else echo no; fi
+}
+images_now() {
+	if command -v k3s >/dev/null; then
+		k3s ctr images ls -q | LC_ALL=C sort
+	fi
+}
+READINGS="pkgs units forward links daemons dirs group images"
+
+# list_to writes a reading into its file only when the reading succeeded,
+# so that a failed one leaves no list, and restore deletes nothing by it.
+list_to() { # <file> <reading>
+	if "$2" >"$1.tmp" 2>/dev/null; then
+		mv -f "$1.tmp" "$1"
+	else
+		rm -f "$1.tmp"
+		echo "saving ${1##*/} failed: $2 did not answer"
+		return 1
+	fi
+}
+
+# save keeps what the tutorial changes and its teardown may not put back:
+# the udev rule files, nvme-stas's files and every reading above. It fails,
+# naming it, when any of them cannot be kept.
+save() {
+	local f bad=0
+	mkdir -p "$SAVED/udev" "$SAVED/stas" || return 1
+	for f in $UDEV_RULES; do
+		[ ! -e "/etc/udev/rules.d/$f" ] || cp -a "/etc/udev/rules.d/$f" "$SAVED/udev/" || {
+			echo "saving the udev rule $f failed"
+			bad=1
+		}
+	done
+	if [ -d /etc/stas ]; then
+		if cp -a /etc/stas/. "$SAVED/stas/"; then echo yes >"$SAVED/stas.present"; else
+			echo "saving /etc/stas failed"
+			bad=1
+		fi
+	else
+		echo no >"$SAVED/stas.present"
+	fi
+	for f in $READINGS; do
+		list_to "$SAVED/$f" "${f}_now" || bad=1
+	done
+	return "$bad"
+}
+
+# stop_x stops every process whose name the pattern matches, TERM first,
+# KILL after 30 s.
+stop_x() { # <pgrep -x pattern>
+	local i
+	pkill -x "$1" 2>/dev/null
+	for i in $(seq 30); do
+		pgrep -x "$1" >/dev/null || return 0
+		sleep 1
+	done
+	pkill -9 -x "$1" 2>/dev/null
+	sleep 1
+}
+
+# wipe takes down what a run left and prints what stays. First the
+# programs, the worker first, so that no syncup rebuilds what the steps
+# after take down and no agent connects a leg again; then nvme-stas, which
+# would connect the host again; then nvmet, whose enabled namespaces hold
+# open the disk nodes' sides and the controller node's namespace devices,
+# so that no dm device or md array below them can go before it; then the
+# host's NVMe-oF controllers, the md arrays' legs among them; then the dm
+# devices and the md arrays in rounds, each round taking what the one
+# before freed, until none is left; then the loop devices; and last the
+# read of what stays.
+wipe() {
+	local p pid d i link f
+	stop_x dnv-worker
+	stop_x dnv-agent
+	stop_x 'dnv-gateway|dnv-cdc'
+	for pid in $(pgrep -x etcd); do
+		[ "$(readlink "/proc/$pid/cwd")" = "$(cat "$SAVED/dir" 2>/dev/null)" ] && kill "$pid"
+	done
+	for p in stacd stafd; do systemctl stop "$p" 2>/dev/null; done
+	if [ -d "$NVMET" ]; then
+		for d in "$NVMET"/ports/*; do
+			[ -d "$d" ] || continue
+			for link in "$d"/subsystems/*; do [ -e "$link" ] && rm -f "$link"; done
+		done
+		for d in "$NVMET"/subsystems/*; do
+			[ -d "$d" ] || continue
+			for f in "$d"/namespaces/*; do
+				[ -d "$f" ] || continue
+				echo 0 >"$f/enable" 2>/dev/null
+				rmdir "$f" 2>/dev/null
+			done
+			for link in "$d"/allowed_hosts/*; do [ -e "$link" ] && rm -f "$link"; done
+			rmdir "$d" 2>/dev/null
+		done
+		for d in "$NVMET"/ports/*; do
+			[ -d "$d" ] || continue
+			rmdir "$d/ana_groups/3" "$d/ana_groups/2" 2>/dev/null
+			rmdir "$d" 2>/dev/null
+		done
+		for d in "$NVMET"/hosts/*; do [ -d "$d" ] && rmdir "$d" 2>/dev/null; done
+	fi
+	nvme disconnect-all >/dev/null 2>&1
+	for i in $(seq 30); do
+		ls /sys/class/nvme-fabrics/ctl/ 2>/dev/null | grep -q nvme || break
+		sleep 1
+	done
+	for d in $(dmsetup ls 2>/dev/null | awk '$1 ~ /^dnv-/ { print $1 }' | sort -r); do
+		dmsetup resume "$d" 2>/dev/null
+	done
+	for i in 1 2 3 4 5 6; do
+		for d in $(dmsetup ls 2>/dev/null | awk '$1 ~ /^dnv-/ { print $1 }'); do
+			dmsetup remove "$d" 2>/dev/null
+		done
+		for d in $(awk '/^md[0-9]/ { print $1 }' /proc/mdstat); do
+			mdadm --stop "/dev/$d" >/dev/null 2>&1
+		done
+		[ -z "$(dmsetup ls 2>/dev/null | awk '$1 ~ /^dnv-/')$(awk '/^md[0-9]/' /proc/mdstat)" ] && break
+		sleep 1
+	done
+	for d in $(losetup -a 2>/dev/null | grep "$WORK" | cut -d: -f1); do
+		losetup -d "$d" 2>/dev/null
+	done
+	state
+}
+
+# after prints what the tutorial's own teardown left that the tutorial
+# says it removes, one line each, before the suite's cleanup touches the
+# guest: every dnv object state lists, a udev rule file that differs from
+# before the run, a connector unit whose mask differs from before the run,
+# and, for the all-in-one tutorial, whose teardown puts nvme-stas's files
+# back and leaves its daemons stopped, a file of /etc/stas that differs from
+# before the run and a daemon that runs. Empty means the teardown did what
+# the tutorial says.
+after() { # <all-in-one|csi>
+	local f u st cur
+	state
+	for f in $UDEV_RULES; do
+		if [ -e "$SAVED/udev/$f" ]; then
+			cmp -s "$SAVED/udev/$f" "/etc/udev/rules.d/$f" || echo "udev rule $f differs from before the run"
+		elif [ -e "/etc/udev/rules.d/$f" ]; then
+			echo "udev rule $f left"
+		fi
+	done
+	while read -r u st; do
+		cur=$(systemctl is-enabled "$u" 2>/dev/null) || true
+		[ "$cur" = "$st" ] || echo "unit $u reads ${cur:-nothing}, before the run $st"
+	done <"$SAVED/units"
+	[ "$1" = all-in-one ] || return 0
+	if [ "$(cat "$SAVED/stas.present")" = yes ]; then
+		diff -r -q "$SAVED/stas" /etc/stas >/dev/null 2>&1 ||
+			echo "/etc/stas differs from before the run: $(diff -r -q "$SAVED/stas" /etc/stas 2>&1 | head -n 3 | tr '\n' ' ')"
+	fi
+	for u in stafd stacd; do
+		systemctl is-active -q "$u" 2>/dev/null && echo "$u runs"
+	done
+	return 0
+}
+
+# restore puts back what save kept, purges every package the run added,
+# deletes the bridge docker made, the state folders and the group the
+# run's packages left, and the images the run added to k3s's store; a step
+# whose reading save could not keep deletes nothing and is reported. Then it
+# reads everything back (restored). It prints each step that failed and
+# each difference, and then exits non-zero.
+restore() {
+	local f u st act new cur bad=0
+	fail() {
+		echo "$*"
+		bad=1
+	}
+	for f in $UDEV_RULES; do
+		if [ -e "$SAVED/udev/$f" ]; then
+			cp -a "$SAVED/udev/$f" /etc/udev/rules.d/ || fail "putting the udev rule $f back failed"
+		else
+			rm -f "/etc/udev/rules.d/$f" || fail "removing the udev rule $f failed"
+		fi
+	done
+	udevadm control --reload || fail "reloading udev's rules failed"
+	if [ -f "$SAVED/units" ]; then
+		while read -r u st; do
+			case $st in
+			masked) systemctl mask "$u" >/dev/null 2>&1 || fail "masking $u failed" ;;
+			*) systemctl unmask "$u" >/dev/null 2>&1 || fail "unmasking $u failed" ;;
+			esac
+		done <"$SAVED/units"
+	else
+		fail "the units' masks were not saved: left as they are"
+	fi
+	if [ "$(cat "$SAVED/stas.present" 2>/dev/null)" = yes ]; then
+		{ mkdir -p /etc/stas && find /etc/stas -mindepth 1 -maxdepth 1 -exec rm -rf {} + &&
+			cp -a "$SAVED/stas/." /etc/stas/; } || fail "putting /etc/stas back failed"
+	fi
+	if [ -f "$SAVED/pkgs" ]; then
+		if cur=$(pkgs_now); then
+			new=$(LC_ALL=C comm -13 "$SAVED/pkgs" - <<<"$cur")
+			if [ -n "$new" ]; then
+				echo "purging the packages the run added: $(echo $new)"
+				DEBIAN_FRONTEND=noninteractive apt-get purge -y -q $new >/dev/null || fail "purge failed"
+			fi
+		else
+			fail "listing the packages failed: none purged"
+		fi
+	else
+		fail "the packages were not saved: none purged"
+	fi
+	[ "$(cat "$SAVED/stas.present" 2>/dev/null)" = yes ] || rm -rf /etc/stas || fail "removing /etc/stas failed"
+	if [ -f "$SAVED/dirs" ]; then
+		for f in /var/lib/docker /var/lib/containerd; do
+			[ -e "$f" ] && ! grep -qxF "$f" "$SAVED/dirs" && { rm -rf "$f" || fail "removing $f failed"; }
+		done
+	else
+		fail "the state folders were not saved: none removed"
+	fi
+	if [ -f "$SAVED/group" ]; then
+		if [ "$(cat "$SAVED/group")" = no ] && getent group docker >/dev/null; then
+			groupdel docker || fail "deleting the group docker failed"
+		fi
+	else
+		fail "the docker group was not saved: left as it is"
+	fi
+	if [ -f "$SAVED/images" ]; then
+		if cur=$(images_now); then
+			for f in $(LC_ALL=C comm -13 "$SAVED/images" - <<<"$cur"); do
+				k3s ctr images rm "$f" >/dev/null 2>&1 || fail "deleting the image $f from k3s's store failed"
+			done
+		else
+			fail "listing k3s's images failed: none deleted"
+		fi
+	else
+		fail "k3s's images were not saved: none deleted"
+	fi
+	if [ -f "$SAVED/forward" ]; then
+		st=$(cat "$SAVED/forward")
+		case $st in ACCEPT | DROP) iptables -P FORWARD "$st" || fail "setting the FORWARD policy failed" ;; esac
+	else
+		fail "the FORWARD policy was not saved: left as it is"
+	fi
+	if [ -f "$SAVED/links" ]; then
+		if cur=$(links_now); then
+			for f in $(LC_ALL=C comm -13 "$SAVED/links" - <<<"$cur" | grep -x 'docker[0-9]*'); do
+				ip link delete "$f" 2>/dev/null || fail "deleting the link $f failed"
+			done
+		else
+			fail "listing the network links failed: none deleted"
+		fi
+	else
+		fail "the network links were not saved: none deleted"
+	fi
+	# stafd first, then stacd: stacd reads a stafd that is away as an empty
+	# discovery log.
+	if [ -f "$SAVED/daemons" ]; then
+		while read -r u st act; do
+			case $st in
+			absent) continue ;;
+			enabled) systemctl enable "$u" >/dev/null 2>&1 || fail "enabling $u failed" ;;
+			*) systemctl disable "$u" >/dev/null 2>&1 || fail "disabling $u failed" ;;
+			esac
+			case $act in
+			active) systemctl restart "$u" >/dev/null 2>&1 || fail "starting $u failed" ;;
+			*) systemctl stop "$u" >/dev/null 2>&1 || fail "stopping $u failed" ;;
+			esac
+		done <"$SAVED/daemons"
+	else
+		fail "nvme-stas's daemons were not saved: left as they are"
+	fi
+	cur=$(restored)
+	[ -z "$cur" ] || fail "$cur"
+	return "$bad"
+}
+
+# restored prints, one line each, what is not as save kept it: a udev rule
+# file, nvme-stas's files, a reading other than the saved one, a docker
+# link the run made. Empty means the guest is back.
+restored() {
+	local f cur
+	for f in $UDEV_RULES; do
+		if [ -e "$SAVED/udev/$f" ]; then
+			cmp -s "$SAVED/udev/$f" "/etc/udev/rules.d/$f" || echo "udev rule $f is not as before the run"
+		elif [ -e "/etc/udev/rules.d/$f" ]; then
+			echo "udev rule $f left"
+		fi
+	done
+	if [ "$(cat "$SAVED/stas.present" 2>/dev/null)" = yes ]; then
+		diff -r -q "$SAVED/stas" /etc/stas >/dev/null 2>&1 || echo "/etc/stas is not as before the run"
+	else
+		[ ! -e /etc/stas ] || echo "/etc/stas left"
+	fi
+	for f in pkgs units forward daemons dirs group images; do
+		[ -f "$SAVED/$f" ] || continue
+		if ! cur=$("${f}_now" 2>/dev/null); then
+			echo "reading $f back failed"
+		elif [ "$cur" != "$(cat "$SAVED/$f")" ]; then
+			echo "$f not as before the run: $(LC_ALL=C diff <(echo "$cur") "$SAVED/$f" | grep '^[<>]' | head -n 3 | tr '\n' ' ')"
+		fi
+	done
+	if [ -f "$SAVED/links" ] && cur=$(links_now 2>/dev/null); then
+		f=$(LC_ALL=C comm -13 "$SAVED/links" - <<<"$cur" | grep -x 'docker[0-9]*' | tr '\n' ' ')
+		[ -z "$f" ] || echo "docker links left: $f"
+	fi
+	return 0
+}
+
+"$@"
+HELPER_EOF
+}
+
+# ---------------------------------------------------------------------------
+# The parse of a tutorial (tutorial_integtest.md, The markers)
+# ---------------------------------------------------------------------------
+
+# parse_doc writes the blocks of a tutorial into <dir>/<nnn>.sh, each with
+# <nnn>.sec (its section heading) and, when a marker binds to it, <nnn>.mk
+# (one directive per line). It fails on a marker that binds to no block, on
+# an unknown directive and on a fence left open.
+parse_doc() { # <doc> <dir>
+	mkdir -p "$2"
+	awk -v dir="$2" '
+	function fail(m) { printf "%s:%d: %s\n", FILENAME, FNR, m > "/dev/stderr"; bad = 1; exit 1 }
+	function add(d) {
+		sub(/^[ \t]+/, "", d); sub(/[ \t]+$/, "", d)
+		if (d == "") return
+		w = d; sub(/[ \t].*/, "", w)
+		if (w !~ /^(wait|timeout|out|line|has|lacks|word|count|same-first-word|save|same|skip|omit|replaces|run)$/)
+			fail("unknown marker directive \"" w "\"")
+		mk[++mkn] = d
+	}
+	fence { if ($0 ~ /^```[ \t]*$/) { fence = 0; close(f) } else print > f; next }
+	inc {
+		if (index($0, "-->")) { l = $0; sub(/-->.*/, "", l); add(l); inc = 0; mend = FNR }
+		else add($0)
+		next
+	}
+	/^<!-- test/ {
+		if (mkn > 0) fail("a marker that binds to no block")
+		l = $0; sub(/^<!-- test:?/, "", l)
+		if (index(l, "-->")) { sub(/-->.*/, "", l); add(l); mend = FNR } else { add(l); inc = 1 }
+		next
+	}
+	/^```/ {
+		n++; f = sprintf("%s/%03d.sh", dir, n); printf "" > f
+		print sec > sprintf("%s/%03d.sec", dir, n)
+		if (mkn > 0) {
+			if (mend != FNR - 1) fail("a marker that binds to no block")
+			for (i = 1; i <= mkn; i++) print mk[i] > sprintf("%s/%03d.mk", dir, n)
+			mkn = 0
+		}
+		fence = 1; next
+	}
+	/^## / { sec = substr($0, 4) }
+	{ if (mkn > 0 && mend != FNR) fail("a marker that binds to no block") }
+	END {
+		if (bad) exit 1
+		if (fence) fail("a block left open")
+		if (inc) fail("a marker left open")
+		if (mkn > 0) fail("a marker that binds to no block")
+	}' "$1"
+}
+
+# directive prints the arguments of every directive <name> of block <b>.
+directive() { # <block base> <name>
+	[ -f "$1.mk" ] || return 0
+	awk -v d="$2" '{ w = $0; sub(/[ \t].*/, "", w) } w == d { a = $0; sub(/^[^ \t]+[ \t]*/, "", a); print a }' "$1.mk"
+}
+
+# has_word says whether block <b> has a directive <name>, with or without
+# words after it.
+has_word() { # <block base> <name>
+	[ -f "$1.mk" ] && awk -v d="$2" '{ w = $0; sub(/[ \t].*/, "", w) } w == d { f = 1 } END { exit !f }' "$1.mk"
+}
+
+# SAVED_WORDS holds what a save directive kept, by name.
+declare -A SAVED_WORDS=()
+
+# ---------------------------------------------------------------------------
+# Running one block
+# ---------------------------------------------------------------------------
+
+# checks_hold reads one run's stdout against the block's out, line, has,
+# lacks, word, count, same-first-word and same directives and prints the
+# first one that fails.
+checks_hold() { # <block base> <stdout file>
+	local b=$1 o=$2 want t last n c
+	if has_word "$b" out; then
+		want=$(directive "$b" out)
+		[ "$(cat "$o")" = "$want" ] || {
+			echo "stdout is not the marker's out lines"
+			return 1
+		}
+	fi
+	while IFS= read -r t; do
+		grep -qxF -- "$t" "$o" || {
+			echo "stdout has no line \"$t\""
+			return 1
+		}
+	done < <(directive "$b" line)
+	while IFS= read -r t; do
+		grep -qF -- "$t" "$o" || {
+			echo "stdout has no \"$t\""
+			return 1
+		}
+	done < <(directive "$b" has)
+	while IFS= read -r t; do
+		! grep -qF -- "$t" "$o" || {
+			echo "stdout has \"$t\""
+			return 1
+		}
+	done < <(directive "$b" lacks)
+	while IFS= read -r t; do
+		grep -qwF -- "$t" "$o" || {
+			echo "stdout has no word \"$t\""
+			return 1
+		}
+	done < <(directive "$b" word)
+	while read -r n t; do
+		c=$(grep -cF -- "$t" "$o" || true)
+		[ "$c" = "$n" ] || {
+			echo "stdout has $c lines with \"$t\", not $n"
+			return 1
+		}
+	done < <(directive "$b" count)
+	if has_word "$b" same-first-word; then
+		[ "$(awk '{ print $1 }' "$o" | sort -u | wc -l)" = 1 ] && [ "$(wc -l <"$o")" -ge 2 ] || {
+			echo "the lines of stdout do not start with one word"
+			return 1
+		}
+	fi
+	last=$(awk 'NF { w = $1 } END { print w }' "$o")
+	while IFS= read -r t; do
+		[ -n "${SAVED_WORDS[$t]:-}" ] || {
+			echo "no block before saved \"$t\""
+			return 1
+		}
+		[ "$last" = "${SAVED_WORDS[$t]}" ] || {
+			echo "the last line starts with \"$last\", not with the saved $t \"${SAVED_WORDS[$t]}\""
+			return 1
+		}
+	done < <(directive "$b" same)
+	return 0
+}
+
+# block_text prints the block's text as it runs: without the lines an omit
+# directive names, each a line that starts with the directive's text and
+# the lines it continues to, and, in the CSI part's prelude, with the
+# replacement of a replaces directive (REPL_FROM and REPL_FILE) in place of
+# the command it names, the line that starts with REPL_FROM and the lines it
+# continues to. Into [count file] it writes how many lines each omit took
+# ("omit<TAB><n><TAB><text>") and how many the replacement took
+# ("replaces<TAB><n>"). The texts reach awk through its environment, which
+# it takes as they are, where -v would read their backslashes as escapes.
+REPL_FROM=""
+REPL_FILE=""
+block_text() { # <block base> [count file]
+	local b=$1
+	OMITS=$(directive "$b" omit) FROM=$REPL_FROM REPL=$REPL_FILE CNT=${2:-/dev/null} awk '
+	BEGIN {
+		n = split(ENVIRON["OMITS"], o, "\n")
+		from = ENVIRON["FROM"]; repl = ENVIRON["REPL"]; cnt = ENVIRON["CNT"]
+	}
+	skipping { if ($0 !~ /\\$/) skipping = 0; next }
+	{
+		for (i = 1; i <= n; i++) if (o[i] != "" && index($0, o[i]) == 1) {
+			hit[i]++
+			if ($0 ~ /\\$/) skipping = 1
+			next
+		}
+		if (from != "" && index($0, from) == 1) {
+			repls++
+			while ((getline l < repl) > 0) print l
+			close(repl)
+			if ($0 ~ /\\$/) skipping = 1
+			next
+		}
+		print
+	}
+	END {
+		for (i = 1; i <= n; i++) if (o[i] != "") printf "omit\t%d\t%s\n", hit[i] + 0, o[i] > cnt
+		printf "replaces\t%d\n", repls + 0 > cnt
+	}' "$b.sh"
+}
+
+# block_plan checks one block the run will run, before any block runs:
+# each omit of its marker takes exactly one line, and the text it would run
+# has no line k3s_hit prints. It leaves in BLOCK_REPL how many lines the
+# replacement took.
+BLOCK_REPL=0
+block_plan() { # <block base> <label>
+	local b=$1 label=$2 cnt text k n o hit
+	cnt=$(mktemp)
+	text=$(block_text "$b" "$cnt")
+	BLOCK_REPL=$(awk -F'\t' '$1 == "replaces" { print $2 }' "$cnt")
+	while IFS=$'\t' read -r k n o; do
+		[ "$k" = omit ] || continue
+		[ "$n" = 1 ] || {
+			rm -f "$cnt"
+			die "[$label] the omit \"$o\" takes $n lines of the block, not one"
+		}
+	done <"$cnt"
+	rm -f "$cnt"
+	hit=$(k3s_hit "$text")
+	[ -z "$hit" ] ||
+		die "[$label] the block would run \"$hit\", a use of k3s other than its kubectl and ctr, which the suite never runs"
+}
+
+run_block() { # <block base> <label>
+	local b=$1 label=$2 wait t0 rc why first text b64 out err tmo t
+	text=$(block_text "$b")
+	# The plan checked every block before the first ran; this is the same
+	# check on the text that runs now.
+	[ -z "$(k3s_hit "$text")" ] ||
+		die "[$label] the block names k3s other than in its kubectl and ctr, which the suite never runs"
+	first=$(head -n 1 <<<"$text")
+	stage "$label: ${first:0:100}"
+	sed 's/^/  | /' <<<"$text" >&2
+	wait=$(directive "$b" wait | tail -n 1)
+	tmo=$(directive "$b" timeout | tail -n 1)
+	tmo=${tmo:-$BLOCK_TIMEOUT}
+	b64=$(base64 -w0 <<<"$text")
+	out=$(mktemp)
+	err=$(mktemp)
+	t0=$SECONDS
+	while :; do
+		rc=0
+		rsh "cd $(printf '%q' "$DIR") && printf %s $b64 | base64 -d > .tutorial-block &&
+			timeout -k 10 $tmo bash -e .tutorial-block < /dev/null" >"$out" 2>"$err" || rc=$?
+		why=""
+		if [ "$rc" -ne 0 ]; then
+			why="exit $rc"
+		else
+			why=$(checks_hold "$b" "$out") || true
+		fi
+		[ -n "$why" ] || break
+		if [ -z "$wait" ] || [ $((SECONDS - t0)) -ge "$wait" ]; then
+			sed 's/^/  > /' "$out" >&2
+			sed 's/^/  ! /' "$err" >&2
+			rm -f "$out" "$err"
+			die "[$label] $why${wait:+ after ${wait}s of runs}"
+		fi
+		sleep 1
+	done
+	sed 's/^/  > /' "$out" >&2
+	sed 's/^/  ! /' "$err" >&2
+	while IFS= read -r t; do
+		SAVED_WORDS[$t]=$(awk 'NF { w = $1 } END { print w }' "$out")
+	done < <(directive "$b" save)
+	log "  ok in $((SECONDS - t0))s"
+	rm -f "$out" "$err"
+}
+
+# run_doc walks the blocks of a parsed tutorial in order, from its first
+# block through the last one of the section [last section] when one is
+# named, which must exist: in mode plan it checks each block it would run
+# (block_plan), and every block of the CSI tutorial for a marker; in mode
+# run it runs them. A block with a skip directive is not run, and one with
+# a replaces directive not in its own place (it ran inside the prelude).
+PLAN_REPL=0
+run_doc() { # <parse dir> <name> <plan|run> [last section]
+	local pd=$1 name=$2 mode=$3 last=${4:-} b sec past=0
+	for b in "$pd"/*.sh; do
+		b=${b%.sh}
+		sec=$(cat "$b.sec")
+		if [ -n "$last" ]; then
+			[ "$past" = 1 ] && [ "$sec" != "$last" ] && break
+			[ "$sec" = "$last" ] && past=1
+		fi
+		if [ "$mode" = plan ] && [ "$name" = tutorial_csi.md ] && [ ! -f "$b.mk" ]; then
+			die "[$name, $sec] a block with no marker: a block of the CSI tutorial runs only when its marker lets it ($(head -n 1 "$b.sh"))"
+		fi
+		if has_word "$b" replaces; then
+			[ "$mode" = plan ] ||
+				log "--- [$name, $sec] ran in the prelude in place of the line that starts with \"$(directive "$b" replaces)\""
+			continue
+		fi
+		if has_word "$b" skip; then
+			[ "$mode" = plan ] || log "--- [$name, $sec] skipped: $(directive "$b" skip)"
+			continue
+		fi
+		if [ "$mode" = plan ]; then
+			block_plan "$b" "$name, $sec"
+			PLAN_REPL=$((PLAN_REPL + BLOCK_REPL))
+		else
+			run_block "$b" "$name, $sec"
+		fi
+	done
+	[ -z "$last" ] || [ "$past" = 1 ] || die "$name has no section \"$last\""
+}
+
+# csi_repl sets REPL_FROM and REPL_FILE from the CSI tutorial's block with a
+# replaces directive.
+csi_repl() {
+	local b
+	REPL_FROM="" REPL_FILE=""
+	for b in "$PARSE"/csi/*.sh; do
+		b=${b%.sh}
+		REPL_FROM=$(directive "$b" replaces)
+		[ -n "$REPL_FROM" ] && REPL_FILE=$b.sh && break
+	done
+	[ -n "$REPL_FROM" ] || die "tutorial_csi.md has no block with a replaces directive"
+}
+
+# plan checks every block the part will run before any runs (run_doc,
+# mode plan): in the CSI part the replacement takes exactly one line of the
+# prelude.
+plan() {
+	local t b
+	stage "preflight: the plan of the run"
+	if [ "$PART" = all-in-one ]; then
+		run_doc "$PARSE/aio" tutorial_all_in_one.md plan
+	else
+		t=0
+		for b in "$PARSE"/csi/*.sh; do
+			has_word "${b%.sh}" replaces && t=$((t + 1))
+		done
+		[ "$t" = 1 ] || die "tutorial_csi.md has $t blocks with a replaces directive, not one"
+		csi_repl
+		PLAN_REPL=0
+		run_doc "$PARSE/aio" tutorial_all_in_one.md plan "Cluster and nodes"
+		[ "$PLAN_REPL" = 1 ] ||
+			die "the CSI tutorial's replaces \"$REPL_FROM\" takes $PLAN_REPL lines of the prelude, not one"
+		REPL_FROM="" REPL_FILE=""
+		run_doc "$PARSE/csi" tutorial_csi.md plan
+	fi
+	log "  every block the run will run passed the plan"
+}
+
+# ---------------------------------------------------------------------------
+# Preflight, setup, cleanup
+# ---------------------------------------------------------------------------
+
+kc() { rsh "sudo -n k3s kubectl $*"; }
+
+preflight() {
+	local t pkg line st
+	stage "preflight: the driver"
+	for t in ssh scp awk base64 tar git make go sha256sum mktemp; do
+		command -v "$t" >/dev/null || die "the driver has no $t"
+	done
+	PARSE=$(mktemp -d)
+	parse_doc "$AIO_DOC" "$PARSE/aio" || die "the markers of tutorial_all_in_one.md do not parse"
+	parse_doc "$CSI_DOC" "$PARSE/csi" || die "the markers of tutorial_csi.md do not parse"
+	log "  tutorial_all_in_one.md: $(ls "$PARSE"/aio/*.sh | wc -l) blocks; tutorial_csi.md: $(ls "$PARSE"/csi/*.sh | wc -l) blocks"
+	plan
+
+	stage "preflight: the guest $TARGET holds no dnv state"
+	rsh "sudo -n true" || die "no passwordless sudo on $TARGET"
+	# ssh exits 255 when it fails, test 1 for an absent file.
+	t=0
+	rsh "test -e $SAVED" || t=$?
+	case $t in
+	0) die "$TARGET holds what an earlier run saved under $SAVED: put the guest back with --cleanup-only" ;;
+	1) ;;
+	*) die "reading $SAVED on the guest failed (exit $t)" ;;
+	esac
+	rsh "mkdir -p $WORK && cat > $HELPER" < <(helper_text) || die "shipping the helper failed"
+	line=$(helper state) || die "reading the guest's state failed"
+	[ -z "$line" ] || die "the guest holds dnv state: $(echo $line)"
+	line=$(rsh "modinfo -n nvmet") || die "modinfo -n nvmet failed"
+	case $line in */updates/*) die "the guest runs a rebuilt nvmet ($line); the tutorial is for a stock kernel" ;; esac
+	for t in "${PORTS[@]}"; do
+		line=$(rsh "ss -Hltn 'sport = :$t'") || die "reading the listeners of port $t failed"
+		[ -z "$line" ] || die "port $t is taken on the guest"
+	done
+	local pkgs=("${AIO_PKGS[@]}")
+	[ "$PART" = csi ] && pkgs+=("${CSI_PKGS[@]}")
+	local inst cand
+	for pkg in "${pkgs[@]}"; do
+		st=$(rsh "dpkg-query -W -f '\${db:Status-Abbrev} \${Version}\n' $pkg 2>/dev/null | awk '\$1 == \"ii\" { print \$NF }'; echo; apt-cache policy $pkg | awk '/Candidate:/ { print \$2 }'") ||
+			die "reading the package $pkg failed"
+		inst=$(head -n 1 <<<"$st")
+		cand=$(tail -n 1 <<<"$st")
+		if [ -n "$inst" ] && [ "$inst" != "$cand" ]; then
+			# The k3s server node runs no node tool for any other suite, so
+			# the CSI part lets the tutorial's install upgrade one there.
+			[ "$PART" = csi ] ||
+				die "the guest's $pkg is $inst, its candidate $cand: the tutorial would upgrade it"
+			log "  $pkg: $inst, which the tutorial's install upgrades to $cand"
+			continue
+		fi
+		log "  $pkg: ${inst:-not installed}, candidate $cand"
+	done
+	if [ "$PART" = csi ]; then
+		stage "preflight: the lab's k3s holds no CSI driver"
+		kc get nodes >/dev/null || die "the guest is not the k3s server (sudo k3s kubectl get nodes failed)"
+		line=$(csi_left) || die "reading the lab's k3s failed"
+		[ -z "$line" ] || die "the lab's k3s holds what the tutorial makes or a run leaves: $(echo $line)"
+	fi
+}
+
+setup() {
+	local v ar etcd_dir
+	if [ -n "$ARCHIVE" ]; then
+		ar=$ARCHIVE
+		stage "setup: the archive $ar"
+	else
+		# The archive goes into a folder of the run's own on the driver,
+		# never into the tree's _out/, whose checksum file may be a tagged
+		# release's.
+		stage "setup: make release"
+		RELEASE_OUT=$(mktemp -d)
+		if v=$(git -C "$REPO_ROOT" describe --tags --exact-match 2>/dev/null) &&
+			[ -z "$(git -C "$REPO_ROOT" status --porcelain)" ]; then
+			make -C "$REPO_ROOT" release RELEASE_OUT="$RELEASE_OUT" >&2 || die "make release failed"
+		else
+			v=test-$(git -C "$REPO_ROOT" rev-parse --short=12 HEAD)
+			make -C "$REPO_ROOT" release VERSION="$v" RELEASE_OUT="$RELEASE_OUT" >&2 ||
+				die "make release VERSION=$v failed"
+		fi
+		ar=$RELEASE_OUT/dnv-$v-linux-amd64.tar.gz
+	fi
+	[ -f "$ar" ] || die "no archive $ar"
+	# awk reads the whole listing, so tar never meets a closed pipe.
+	DIR=$WORK/$(tar -tzf "$ar" | awk -F/ 'NR == 1 { print $1 }')
+	# shellcheck source=fetch_etcd.sh
+	. "$REPO_ROOT/integtest/fetch_etcd.sh"
+	fetch_etcd >/dev/null
+	etcd_dir=$ETCD_CACHE_DIR/$ETCD_DIST
+
+	stage "setup: save the guest's state, unpack the archive, put etcd beside the binaries"
+	SAVE_DONE=1
+	helper save || die "saving the guest's state failed"
+	rsh "echo $(printf '%q' "$DIR") | sudo -n tee $SAVED/dir >/dev/null" || die "recording the folder failed"
+	scp -q "${SSH_OPTS[@]}" "$ar" "$TARGET:$WORK/" || die "copying the archive failed"
+	scp -q "${SSH_OPTS[@]}" "$etcd_dir/etcd" "$TARGET:$WORK/etcd" || die "copying etcd failed"
+	rsh "cd $WORK && tar xzf $(basename "$ar") && mv etcd $(printf '%q' "$DIR")/" || die "unpacking failed"
+	SETUP_DONE=1
+}
+
+# cleanup puts the guest back: it takes down what the run left, restores
+# what setup saved, keeps the logs of a failed run under $WORK/logs and
+# removes the rest of $WORK. In the CSI part it first deletes from the lab's
+# k3s what the tutorial applied and puts the taints back. It fails when any
+# step of it failed or anything is left, on the guest or in the lab's k3s.
+cleanup() { # <keep logs: 0|1>
+	local keep=$1 left n bad=0
+	stage "cleanup: put the guest back"
+	if [ "$PART" = csi ]; then
+		csi_cleanup || bad=1
+	fi
+	left=$(helper wipe) || left="the wipe failed"
+	[ -z "$left" ] || log "WARNING: left after the wipe: $(echo $left)"
+	if rsh "sudo -n test -f $SAVED/pkgs"; then
+		helper restore >&2 || {
+			log "WARNING: restoring the guest's state failed (the steps above)"
+			bad=1
+		}
+	fi
+	if [ "$keep" = 1 ]; then
+		rsh "cd $WORK && sudo -n mkdir -p logs && sudo -n find . -path ./logs -prune -o -name '*.log' -type f -exec cp {} logs/ \\; ; sudo -n find . -mindepth 1 -maxdepth 1 ! -name logs -exec rm -rf {} +" || {
+			log "WARNING: keeping the logs failed"
+			bad=1
+		}
+		log "the run's logs are kept on $TARGET under $WORK/logs"
+	else
+		rsh "sudo -n rm -rf $WORK" || {
+			log "WARNING: removing $WORK failed"
+			bad=1
+		}
+	fi
+	[ -n "$RELEASE_OUT" ] && rm -rf "$RELEASE_OUT"
+	[ -z "$left" ] || return 1
+	n=$(rsh "ls /sys/kernel/config/nvmet/ports 2>/dev/null | wc -l") || n=unknown
+	[ "$n" = 0 ] || {
+		log "WARNING: nvmet ports left: $n"
+		return 1
+	}
+	return "$bad"
+}
+
+# csi_left prints what the tutorial makes or a run leaves in the lab's k3s,
+# one line each: the tutorial's namespaces, driver, class, claim and policy,
+# a volume or an attachment of the driver's, a node with the suite's taint,
+# the server without its own, and the driver's image in the server's store.
+# Empty means none.
+csi_left() {
+	local t out me
+	for t in "namespace dnv-csi" "namespace policy-check" "csidriver csi.dnv.io" \
+		"storageclass dnv" "pvc demo" "pod demo" "-n default networkpolicy dnv-keep-off"; do
+		out=$(kc get $t --ignore-not-found -o name 2>/dev/null) || return 1
+		[ -z "$out" ] || echo "$t"
+	done
+	out=$(kc get pv -o "'jsonpath={range .items[*]}{.spec.csi.driver} {.metadata.name}{\"\\n\"}{end}'") || return 1
+	awk '$1 == "csi.dnv.io" { print "volume " $2 }' <<<"$out"
+	out=$(kc get volumeattachment -o "'jsonpath={range .items[*]}{.spec.attacher} {.metadata.name}{\"\\n\"}{end}'") || return 1
+	awk '$1 == "csi.dnv.io" { print "attachment " $2 }' <<<"$out"
+	out=$(kc get nodes -o "'jsonpath={range .items[*]}{.metadata.name} {.spec.taints[*].key}{\"\\n\"}{end}'") || return 1
+	me=$(rsh hostname) || return 1
+	awk -v k="$TUT_TAINT_KEY" -v me="$me" -v cp="${CP_TAINT%%:*}" '
+		{ for (i = 2; i <= NF; i++) if ($i == k) print "the suite'"'"'s taint on " $1 }
+		$1 == me { for (i = 2; i <= NF; i++) if ($i == cp) has = 1 }
+		END { if (!has) print "the server " me " without its own taint" }' <<<"$out"
+	out=$(rsh "sudo -n k3s ctr images ls -q") || return 1
+	grep -x docker.io/library/dnv-csi:0.1.0 <<<"$out" || true
+}
+
+# csi_gone answers whether no volume and no attachment of the driver's is
+# left in the lab's k3s.
+csi_gone() {
+	local out
+	out=$(kc get pv,volumeattachment -o "'jsonpath={range .items[*]}{.spec.csi.driver}{.spec.attacher}{\"\\n\"}{end}'") ||
+		return 1
+	! grep -qx csi.dnv.io <<<"$out"
+}
+
+# csi_cleanup deletes the tutorial's objects from the lab's k3s, waiting for
+# the driver's volumes and attachments to go before the driver does, the
+# image it imported into the server's store and the tutorial's taints, and
+# puts the server's own taint back; then it reads the lab's k3s back
+# (csi_left). It fails when a step failed or anything is left.
+csi_cleanup() {
+	local f n i bad=0 left
+	kc get nodes >/dev/null 2>&1 || {
+		log "WARNING: the lab's k3s does not answer"
+		return 1
+	}
+	kc delete pod demo --ignore-not-found --wait=true --timeout=120s >/dev/null || bad=1
+	kc delete pvc demo --ignore-not-found --wait=true --timeout=120s >/dev/null || bad=1
+	# A claim's delete returns before its volume and attachment are gone,
+	# and without the driver a volume or an attachment keeps its finalizer.
+	for i in $(seq 180); do
+		csi_gone && break
+		sleep 1
+	done
+	csi_gone || {
+		log "WARNING: a volume or an attachment of the driver is still there after 180 s"
+		bad=1
+	}
+	kc delete namespace policy-check --ignore-not-found --wait=true --timeout=120s >/dev/null || bad=1
+	kc -n default delete networkpolicy dnv-keep-off --ignore-not-found >/dev/null || bad=1
+	kc delete storageclass dnv --ignore-not-found >/dev/null || bad=1
+	if rsh "test -d $(printf '%q' "$DIR")/deploy"; then
+		for f in node controller controller-rolebinding controller-role controller-clusterrolebinding \
+			controller-clusterrole node-serviceaccount controller-serviceaccount csidriver config namespace; do
+			kc delete --ignore-not-found --wait=true --timeout=120s -f "$DIR/deploy/$f.yaml" >/dev/null || bad=1
+		done
+	fi
+	rsh "sudo -n k3s ctr images rm docker.io/library/dnv-csi:0.1.0 >/dev/null 2>&1; true"
+	# A node without the taint answers the removal with an error, so the
+	# read back below is the verdict.
+	for n in $(kc get nodes -o name | sed 's|node/||'); do
+		kc taint node "$n" "$TUT_TAINT_KEY-" >/dev/null 2>&1 || true
+	done
+	kc taint node "$(rsh hostname)" "$CP_TAINT" --overwrite >/dev/null || bad=1
+	left=$(csi_left) || left="the read of the lab's k3s failed"
+	[ -z "$left" ] || {
+		log "WARNING: left in the lab's k3s: $(echo $left)"
+		bad=1
+	}
+	return "$bad"
+}
+
+# csi_prepare makes the lab's k3s one machine for the tutorial: the other
+# nodes take the suite's taint, which the tutorial's pods do not tolerate,
+# and the server's own taint is lifted.
+csi_prepare() {
+	local n me
+	stage "setup: the lab's k3s schedules on the server alone"
+	me=$(rsh hostname)
+	for n in $(kc get nodes -o name | sed 's|node/||'); do
+		[ "$n" = "$me" ] && continue
+		kc taint node "$n" "$TUT_TAINT_KEY=run:NoSchedule" --overwrite >/dev/null || die "tainting $n failed"
+	done
+	kc taint node "$me" "${CP_TAINT%%:*}-" >/dev/null 2>&1 || true
+}
+
+on_exit() {
+	local rc=$?
+	trap - EXIT
+	if [ "$CLEANUP_ONLY" = 1 ]; then
+		[ "$rc" = 0 ] && log "" && log "PASS"
+		exit "$rc"
+	fi
+	if [ "$rc" = 0 ]; then
+		cleanup 0 || {
+			log "LAB NOT CLEAN"
+			exit 1
+		}
+		log ""
+		log "PASS"
+	else
+		local failed=$STAGE
+		log ""
+		log "########## diagnostics (tutorial_integtest.md, Cleanup) ##########"
+		if [ "$SETUP_DONE" = 1 ]; then
+			rsh "cd $(printf '%q' "$DIR") 2>/dev/null && for f in *.log; do echo \"--- \$f\"; tail -n 30 \"\$f\"; done" >&2 || true
+		fi
+		# A run that failed before it saved the guest's state has changed
+		# nothing on the guest but its copy of the helper under $WORK, and
+		# its cleanup would put back nothing.
+		if [ "$SAVE_DONE" = 1 ]; then
+			cleanup 1 || log "LAB NOT CLEAN"
+			log ""
+			log "the guest is put back; failing stage '$failed'"
+		else
+			log ""
+			log "the guest was not changed; failing stage '$failed'"
+		fi
+	fi
+	[ -n "$PARSE" ] && rm -rf "$PARSE"
+	[ -n "$RELEASE_OUT" ] && rm -rf "$RELEASE_OUT"
+	exit "$rc"
+}
+
+# teardown_read reads the guest after the tutorial's own teardown and before
+# the suite's cleanup touches it (the helper's after): anything the
+# teardown left that the tutorial says it removes fails the run.
+teardown_read() {
+	local left
+	stage "the guest after the tutorial's teardown"
+	left=$(helper after "$PART") || die "reading the guest after the teardown failed"
+	[ -z "$left" ] || die "the tutorial's teardown left: $(echo $left)"
+	log "  nothing left that the tutorial's teardown removes"
+}
+
+trap on_exit EXIT
+
+if [ "$CLEANUP_ONLY" = 1 ]; then
+	stage "cleanup-only"
+	rsh "mkdir -p $WORK && cat > $HELPER" < <(helper_text) || die "shipping the helper failed"
+	DIR=$(rsh "cat $SAVED/dir 2>/dev/null") || DIR=""
+	cleanup 1 || die "the guest is not clean"
+	exit 0
+fi
+
+preflight
+setup
+if [ "$PART" = all-in-one ]; then
+	run_doc "$PARSE/aio" tutorial_all_in_one.md run
+else
+	csi_prepare
+	# The prelude: the all-in-one tutorial through "Cluster and nodes", the
+	# gateway started by the CSI tutorial's command instead.
+	csi_repl
+	run_doc "$PARSE/aio" tutorial_all_in_one.md run "Cluster and nodes"
+	REPL_FROM="" REPL_FILE=""
+	run_doc "$PARSE/csi" tutorial_csi.md run
+fi
+teardown_read

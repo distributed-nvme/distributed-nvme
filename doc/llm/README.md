@@ -48,6 +48,7 @@ are its document's:
 - `integtest/cdc_test.sh` — `cdc.md`, Integration test plan
 - `integtest/dnvctl_test.sh` — `dnvctl.md`, Integration test plan
 - `integtest/csi_test.sh` — `csi.md`, Integration test plan
+- `integtest/tutorial_test.sh` — `tutorial_integtest.md`
 
 `integtest/runner.sh` runs the suites one after another, as listed in
 `integtest/runner.conf`, and ends with a summary of every run (`layout.md`,
@@ -57,7 +58,11 @@ Directory tree).
 
 The build and test entry points are the `Makefile` targets; what each does
 is the `Makefile` row of `layout.md`, Directory tree. `make test` runs
-`go test ./doclint/` with every other test.
+`go test ./doclint/` with every other test. The hosted CI,
+`.github/workflows/ci.yml`, runs the gates every change passes and checks
+that two release builds give one checksum (the `.github/` row of
+`layout.md`, Directory tree); `make test-race` runs outside it, and a test
+that fails now and then has its line in `integtest/flakes.txt`.
 
 ## Rules for docs and code comments
 

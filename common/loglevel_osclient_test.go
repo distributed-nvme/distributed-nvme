@@ -58,107 +58,107 @@ func TestOsClientReadRecordsAreDebug(t *testing.T) {
 	client := NewLimitedOsClient(0)
 	for _, tc := range []struct {
 		name, msg, want string
-		op              func() error
+		op              func(t *testing.T) error
 	}{
-		{"file", "os read file", "DEBUG", func() error {
+		{"file", "os read file", "DEBUG", func(t *testing.T) error {
 			_, err := client.ReadFile(ctx, file)
 			return err
 		}},
-		{"absent file", "os read file", "DEBUG", func() error {
+		{"absent file", "os read file", "DEBUG", func(t *testing.T) error {
 			_, err := client.ReadFile(ctx, missing)
 			return err
 		}},
-		{"a directory read as a file", "os read file", "INFO", func() error {
+		{"a directory read as a file", "os read file", "INFO", func(t *testing.T) error {
 			_, err := client.ReadFile(ctx, dir)
 			return err
 		}},
-		{"dir", "os read dir", "DEBUG", func() error {
+		{"dir", "os read dir", "DEBUG", func(t *testing.T) error {
 			_, err := client.ReadDir(ctx, dir)
 			return err
 		}},
-		{"absent dir", "os read dir", "DEBUG", func() error {
+		{"absent dir", "os read dir", "DEBUG", func(t *testing.T) error {
 			_, err := client.ReadDir(ctx, missing)
 			return err
 		}},
-		{"a file read as a dir", "os read dir", "INFO", func() error {
+		{"a file read as a dir", "os read dir", "INFO", func(t *testing.T) error {
 			_, err := client.ReadDir(ctx, file)
 			return err
 		}},
-		{"mtime", "os read mtime", "DEBUG", func() error {
+		{"mtime", "os read mtime", "DEBUG", func(t *testing.T) error {
 			_, err := client.ReadMtime(ctx, file)
 			return err
 		}},
-		{"absent mtime", "os read mtime", "DEBUG", func() error {
+		{"absent mtime", "os read mtime", "DEBUG", func(t *testing.T) error {
 			_, err := client.ReadMtime(ctx, missing)
 			return err
 		}},
-		{"devno", "os read devno", "DEBUG", func() error {
+		{"devno", "os read devno", "DEBUG", func(t *testing.T) error {
 			if blockDev == "" {
 				t.Skip("no block device under /dev")
 			}
 			_, err := client.ReadDevNo(ctx, blockDev)
 			return err
 		}},
-		{"absent devno", "os read devno", "DEBUG", func() error {
+		{"absent devno", "os read devno", "DEBUG", func(t *testing.T) error {
 			_, err := client.ReadDevNo(ctx, missing)
 			return err
 		}},
-		{"devno of a character device", "os read devno", "DEBUG", func() error {
+		{"devno of a character device", "os read devno", "DEBUG", func(t *testing.T) error {
 			_, err := client.ReadDevNo(ctx, "/dev/null")
 			return err
 		}},
-		{"devno of a directory", "os read devno", "DEBUG", func() error {
+		{"devno of a directory", "os read devno", "DEBUG", func(t *testing.T) error {
 			_, err := client.ReadDevNo(ctx, dir)
 			return err
 		}},
 		{"devno behind a directory it may not search", "os read devno", "INFO",
-			func() error {
+			func(t *testing.T) error {
 				if os.Geteuid() == 0 {
 					t.Skip("root searches every directory")
 				}
 				_, err := client.ReadDevNo(ctx, filepath.Join(shut, "f"))
 				return err
 			}},
-		{"block", "os read block", "DEBUG", func() error {
+		{"block", "os read block", "DEBUG", func(t *testing.T) error {
 			_, err := client.ReadBlock(ctx, file, 0, 4)
 			return err
 		}},
-		{"short block", "os read block", "INFO", func() error {
+		{"short block", "os read block", "INFO", func(t *testing.T) error {
 			_, err := client.ReadBlock(ctx, file, 0, 4096)
 			return err
 		}},
-		{"absent block device", "os read block", "INFO", func() error {
+		{"absent block device", "os read block", "INFO", func(t *testing.T) error {
 			_, err := client.ReadBlock(ctx, missing, 0, 4)
 			return err
 		}},
 		{"absent block device direct", "os read block direct", "INFO",
-			func() error {
+			func(t *testing.T) error {
 				_, err := client.ReadBlockDirect(ctx, missing, 0, 4096)
 				return err
 			}},
-		{"absent proto", "os read proto", "DEBUG", func() error {
+		{"absent proto", "os read proto", "DEBUG", func(t *testing.T) error {
 			return client.ReadProto(ctx, missing, &pb.NvmeTrConf{})
 		}},
-		{"a directory read as a proto", "os read proto", "INFO", func() error {
+		{"a directory read as a proto", "os read proto", "INFO", func(t *testing.T) error {
 			return client.ReadProto(ctx, dir, &pb.NvmeTrConf{})
 		}},
-		{"write file", "os write file", "INFO", func() error {
+		{"write file", "os write file", "INFO", func(t *testing.T) error {
 			return client.WriteFile(ctx, filepath.Join(dir, "w"), "x")
 		}},
-		{"failed write file", "os write file", "INFO", func() error {
+		{"failed write file", "os write file", "INFO", func(t *testing.T) error {
 			return client.WriteFile(ctx, filepath.Join(missing, "w"), "x")
 		}},
-		{"write proto", "os write proto", "INFO", func() error {
+		{"write proto", "os write proto", "INFO", func(t *testing.T) error {
 			return client.WriteProto(ctx, filepath.Join(dir, "p"),
 				&pb.NvmeTrConf{TrType: "tcp"})
 		}},
-		{"write block", "os write block", "INFO", func() error {
+		{"write block", "os write block", "INFO", func(t *testing.T) error {
 			return client.WriteBlock(ctx, file, 0, []byte("ab"))
 		}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			capture := captureLogs(t)
-			err := tc.op()
+			err := tc.op(t)
 			if got := levelOf(t, capture, tc.msg); got != tc.want {
 				t.Errorf("%s (err %v): level %s, want %s", tc.msg, err, got,
 					tc.want)

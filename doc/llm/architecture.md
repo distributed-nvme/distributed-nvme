@@ -8038,17 +8038,21 @@ alone with one line on stdout, its name and its build's version, and exits
 0 before it binds a flag, reads a config or dials anything. The version is
 `common.BuildVersion`: the module version Go stamps into the binary, the
 one `go version -m` prints — the tag for a release build, a pseudo-version
-naming the commit for another build from a checkout — or "(devel)" for a
-build that carries none. The flag has no short form, since `-v` reads as
-verbose, and no subcommand takes it, so `dnv-agent dn --version` starts no
-agent but is refused; no config key or environment variable sets it. Every
-daemon's start record carries the same version (`log.md`, Agent start;
-`dnv-worker.md` CM6; `gateway.md` GW2; `cdc.md` CM4; `csi.md`, Log
-records). Reason: before the workers start again after an upgrade, the
-operator checks with `--version` that every node holds the new binary and
-with the start records that every process runs it (Upgrade in lockstep);
-`--version` reads the file on disk, and a process started before its file
-was replaced still runs the old build.
+naming the commit for another build from a checkout whose `.git` is a
+directory — or "(devel)" for a build that carries none. Go takes the
+version from the nearest directory, at or above the module's, whose `.git`
+is a directory: a build in a git worktree, whose `.git` is a file, carries
+the commit of the checkout whose folder holds the worktree, when one does,
+not the worktree's own, and else none. The flag
+has no short form, since `-v` reads as verbose, and no subcommand takes it,
+so `dnv-agent dn --version` starts no agent but is refused; no config key
+or environment variable sets it. Every daemon's start record carries the
+same version (`log.md`, Agent start; `dnv-worker.md` CM6; `gateway.md` GW2;
+`cdc.md` CM4; `csi.md`, Log records). Reason: before the workers start
+again after an upgrade, the operator checks with `--version` that every
+node holds the new binary and with the start records that every process
+runs it (Upgrade in lockstep); `--version` reads the file on disk, and a
+process started before its file was replaced still runs the old build.
 
 **The log level.** Every daemon and `dnvctl` take `--log-level` (`debug`,
 `info` or `warn`; `info` for a daemon, `warn` for `dnvctl`), and a daemon

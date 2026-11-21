@@ -1,0 +1,102 @@
+# The hosted CI of dnv (layout.md, Directory tree). The job "test" runs the
+# gates every commit passes: vet, the gofmt check, bash -n on every shell
+# script, the doc lint and make test with the etcd release make fetch-etcd
+# fetches. The job "release" builds make release twice, in two directories,
+# and fails when the two checksum files differ. Both jobs run in the
+# ubuntu:26.04 image, the system the lab guests run, so a run of these steps
+# in a local container of that image runs the same tools. The race target
+# (make test-race) is not run here: the detector needs cgo, and the image
+# with the packages the jobs install has no C compiler; its memory was
+# measured only on a laptop under a 12 GiB cap.
+name: ci
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    container: ubuntu:26.04
+    timeout-minutes: 90
+    steps:
+      # git comes before the checkout, which else copies the files without
+      # their history, and Go then stamps no version into a binary.
+      - name: Install the tools the build and the tests call
+        run: |
+          apt-get update
+          DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+            ca-certificates curl git make
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+      # The workspace belongs to the runner's user, not to the container's
+      # root, and git refuses a repository another user owns.
+      - name: Trust the checkout
+        run: git config --global --add safe.directory '*'
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+      - name: go vet
+        run: go vet ./...
+      - name: gofmt
+        run: |
+          out=$(gofmt -l .)
+          if [ -n "$out" ]; then
+            echo "gofmt -l lists files that are not formatted:"
+            echo "$out"
+            exit 1
+          fi
+      - name: bash -n
+        run: |
+          git ls-files -z '*.sh' | xargs -0 -n1 bash -n
+      - name: doc lint
+        run: go test -count=1 ./doclint/
+      - name: fetch etcd
+        run: make fetch-etcd
+      - name: make test
+        run: make test
+
+  release:
+    runs-on: ubuntu-latest
+    container: ubuntu:26.04
+    timeout-minutes: 30
+    steps:
+      - name: Install the tools the build calls
+        run: |
+          apt-get update
+          DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+            ca-certificates git make
+      # The whole history with its tags: Go stamps each binary's version
+      # from the newest tag below the commit, so a shallow clone stamps
+      # another version and builds other bytes.
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+      - name: Trust the checkout
+        run: git config --global --add safe.directory '*'
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+      # The second build runs in a whole copy of the checkout, so it has
+      # the same history and tags under another path, which -trimpath keeps
+      # out of the binaries, and with a Go build cache of its own, so that it
+      # compiles every package again rather than take the first build's. A
+      # copy, not a git worktree: Go stamps a binary built where .git is a
+      # file with the commit of a checkout around it, if any, and else with
+      # no version.
+      - name: Two release builds give one checksum
+        run: |
+          version="ci-$(git rev-parse --short=12 HEAD)"
+          cp -a . ../second
+          make release VERSION="$version"
+          GOCACHE="$RUNNER_TEMP/gocache-second" make -C ../second release VERSION="$version"
+          cat _out/SHA256SUMS ../second/_out/SHA256SUMS
+          cmp _out/SHA256SUMS ../second/_out/SHA256SUMS

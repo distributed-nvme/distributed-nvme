@@ -82,6 +82,9 @@ with a firewall rule or a network policy that the cluster's network software
 enforces, as the section [Keep other pods off dnv](#keep-other-pods-off-dnv)
 below does for one Kubernetes namespace.
 
+<!-- test
+replaces nohup ./dnv-gateway
+-->
 ```
 nohup ./dnv-gateway --grpc-address 0.0.0.0:29527 --etcd-endpoints 127.0.0.1:2379 \
   > gateway.log 2>&1 & echo $! > gateway.pid
@@ -98,6 +101,9 @@ two files below and refuses to start without them; nvme-cli's package
 usually writes them at install, so the two commands create a file only
 when it is missing or empty.
 
+<!-- test
+has nqn.2014-08.org.nvmexpress:uuid:
+-->
 ```
 sudo mkdir -p /etc/nvme
 test -s /etc/nvme/hostnqn || sudo nvme gen-hostnqn | sudo tee /etc/nvme/hostnqn
@@ -110,6 +116,9 @@ and a uuid; the second is the host id, a uuid.
 
 docker, to build the driver's image:
 
+<!-- test
+timeout 900
+-->
 ```
 sudo apt-get install -y docker.io
 ```
@@ -119,6 +128,9 @@ parts this tutorial does not use: the ingress, the load balancer and the
 metrics server. The install script writes the `k3s` binary and starts the
 `k3s` service.
 
+<!-- test
+skip the lab's own k3s serves here, since a second k3s cannot run beside it
+-->
 ```
 curl -sfL https://get.k3s.io | INSTALL_K3S_VERSION=v1.37.1+k3s1 sh -s - server --disable traefik --disable servicelb --disable metrics-server
 ```
@@ -126,6 +138,12 @@ curl -sfL https://get.k3s.io | INSTALL_K3S_VERSION=v1.37.1+k3s1 sh -s - server -
 Check: the one node is Ready. The server needs some seconds after the
 install; repeat until the line says `Ready`.
 
+<!-- test
+wait 120
+word Ready
+lacks NotReady
+has v1.37.1+k3s1
+-->
 ```
 sudo k3s kubectl get nodes
 ```
@@ -142,6 +160,9 @@ of the working directory, the disk files among it, is sent to the build.
 k3s pulls nothing it already has, so the image goes straight into its
 image store.
 
+<!-- test
+timeout 900
+-->
 ```
 mkdir -p image && cp dnv-csi image/
 sudo docker build -t dnv-csi:0.1.0 -f deploy/Dockerfile image
@@ -150,6 +171,9 @@ sudo docker save dnv-csi:0.1.0 | sudo k3s ctr images import -
 
 Check: the image is in the store.
 
+<!-- test
+out docker.io/library/dnv-csi:0.1.0
+-->
 ```
 sudo k3s ctr images ls -q | grep dnv-csi
 ```
@@ -168,6 +192,9 @@ network, so it reaches the cdc at 127.0.0.1, where the all-in-one tutorial
 started it. The command below reads the machine's address off its default
 route.
 
+<!-- test
+run
+-->
 ```
 sudo k3s kubectl apply -f deploy/namespace.yaml -f deploy/csidriver.yaml -f deploy/controller-serviceaccount.yaml -f deploy/node-serviceaccount.yaml -f deploy/controller-clusterrole.yaml -f deploy/controller-clusterrolebinding.yaml -f deploy/controller-role.yaml -f deploy/controller-rolebinding.yaml
 sed "s/192.0.2.10:29527/$(ip -4 route get 1.1.1.1 | sed -n 's/.* src \([0-9.]*\).*/\1/p'):29527/; s/192.0.2.10:8009/127.0.0.1:8009/" deploy/config.yaml | sudo k3s kubectl apply -f -
@@ -176,6 +203,10 @@ sudo k3s kubectl apply -f deploy/controller.yaml -f deploy/node.yaml
 
 Check: the config map carries the two addresses.
 
+<!-- test
+has {"cdcAddresses":"127.0.0.1:8009","gatewayAddress":"
+has :29527"}
+-->
 ```
 sudo k3s kubectl -n dnv-csi get configmap dnv-csi-config -o jsonpath='{.data}{"\n"}'
 ```
@@ -187,6 +218,9 @@ The storage class. The example names the cluster `default` and two cntlrs;
 this machine's cluster is `c0` and has one controller node, so the class
 asks for one cntlr.
 
+<!-- test
+run
+-->
 ```
 sed 's/cluster: default/cluster: c0/; s/cntlrs: "2"/cntlrs: "1"/' deploy/storageclass.yaml | sudo k3s kubectl apply -f -
 ```
@@ -196,6 +230,11 @@ the sidecar images, the small programs that run beside each plugin and talk
 to Kubernetes for it, which takes a minute the first time; the two commands
 wait for it.
 
+<!-- test
+timeout 660
+wait 120
+has successfully rolled out
+-->
 ```
 sudo k3s kubectl -n dnv-csi rollout status deploy/dnv-csi-controller --timeout=300s
 sudo k3s kubectl -n dnv-csi rollout status ds/dnv-csi-node --timeout=300s
@@ -212,6 +251,13 @@ lease, a Kubernetes record that the copy renews every few seconds and that
 the other copy takes when the first stops. Here both copies run on the one
 machine.
 
+<!-- test
+wait 60
+count 2 4/4
+count 2 Running
+count 2 csi-dnv-io
+has external-attacher-leader-csi-dnv-io
+-->
 ```
 sudo k3s kubectl -n dnv-csi get pods -l app=dnv-csi-controller
 sudo k3s kubectl -n dnv-csi get lease
@@ -228,6 +274,11 @@ can give a pool of the class: RAID1, one cntlr and one slice, the answer
 --slice-cnt 1` prints. The first answer comes within a minute of the
 start, so repeat until a row shows.
 
+<!-- test
+wait 120
+has dnv
+has 18Gi
+-->
 ```
 sudo k3s kubectl get csistoragecapacities -A -o custom-columns=CLASS:.storageClassName,CAPACITY:.capacity,LARGEST:.maximumVolumeSize
 ```
@@ -265,6 +316,9 @@ The policy for the Kubernetes namespace `default`, with every address of
 the machine in its list. The first command writes the list to a file, the
 second puts it and the machine's address into the example and applies it:
 
+<!-- test
+run
+-->
 ```
 ip -4 -o addr show scope global | awk '{split($4, a, "/"); print "              - " a[1] "/32"}' > dnv-addrs.txt
 sed -e '/192.0.2.10\/32 # every address/{r dnv-addrs.txt' -e 'd}' -e "s|192.0.2.10/32 # the API server.*|$(ip -4 route get 1.1.1.1 | sed -n 's/.* src \([0-9.]*\).*/\1/p')/32|" deploy/networkpolicy.yaml | sudo k3s kubectl apply -n default -f -
@@ -272,6 +326,9 @@ sed -e '/192.0.2.10\/32 # every address/{r dnv-addrs.txt' -e 'd}' -e "s|192.0.2.
 
 Check: the policy lists the machine's addresses.
 
+<!-- test
+has /32
+-->
 ```
 sudo k3s kubectl -n default get networkpolicy dnv-keep-off -o jsonpath='{.spec.egress[0].to[0].ipBlock.except}{"\n"}'
 ```
@@ -285,16 +342,29 @@ port on every address of the machine and prints one line per address; the
 policy holds for a new pod about a second after it starts, so the pod
 waits two seconds first.
 
+<!-- test
+has closed
+lacks open
+-->
 ```
 sudo k3s kubectl run probe -n default --rm -i --restart=Never --image=dnv-csi:0.1.0 --image-pull-policy=Never --command -- bash -c 'sleep 2; for a in "$@"; do timeout 3 bash -c "</dev/tcp/$a/29527" 2>/dev/null && echo "$a open" || echo "$a closed"; done' probe $(ip -4 -o addr show scope global | awk '{split($4, a, "/"); print a[1]}')
+```
+
+It prints `closed` for every address. Kubernetes prints two notes about the
+session before the lines, and a line that the pod was deleted after them.
+
+<!-- test
+has open
+lacks closed
+-->
+```
 sudo k3s kubectl create namespace policy-check
 sudo k3s kubectl run probe -n policy-check --rm -i --restart=Never --image=dnv-csi:0.1.0 --image-pull-policy=Never --command -- bash -c 'sleep 2; for a in "$@"; do timeout 3 bash -c "</dev/tcp/$a/29527" 2>/dev/null && echo "$a open" || echo "$a closed"; done' probe $(ip -4 -o addr show scope global | awk '{split($4, a, "/"); print a[1]}')
 sudo k3s kubectl delete namespace policy-check
 ```
 
-The first prints `closed` for every address, the second `open` for every
-address. Kubernetes prints two notes about the session before them, and a
-line that the pod was deleted after them. The demo pod below runs in `default` under the policy:
+It prints `open` for every address, with the same notes around the lines.
+The demo pod below runs in `default` under the policy:
 its volume needs no connection of its own, since the node plugin connects the
 machine.
 
@@ -302,6 +372,9 @@ machine.
 
 The claim:
 
+<!-- test
+run
+-->
 ```
 sudo k3s kubectl apply -f - <<'EOF'
 apiVersion: v1
@@ -338,6 +411,13 @@ pool chose.
 Zeroing the meta sides takes some seconds; repeat the third command until
 it prints 4. The fourth prints 1 from the start.
 
+<!-- test
+wait 120
+has Bound
+has "sp_name":["pvc-
+line 4
+line 1
+-->
 ```
 sudo k3s kubectl get pvc demo
 ./dnvctl --gateway-address 127.0.0.1:29527 --cluster c0 sp list
@@ -354,6 +434,9 @@ and that uuid `"]}`: the volume's name is the pool's name.
 The pod mounts the claim at `/data` and sleeps, so that the commands below
 can run in it:
 
+<!-- test
+run
+-->
 ```
 sudo k3s kubectl apply -f - <<'EOF'
 apiVersion: v1
@@ -390,6 +473,9 @@ failover would move its path.
 Check: the pod runs. The first run pulls the busybox image; the wait
 covers it.
 
+<!-- test
+timeout 360
+-->
 ```
 sudo k3s kubectl wait --for=condition=Ready pod/demo --timeout=300s
 ```
@@ -398,6 +484,12 @@ Check: the volume is a device of 8 GiB on this machine, mounted twice,
 and the pod sees it at `/data`. The namespace uuid, which names the
 device, is among the volume's attributes in Kubernetes.
 
+<!-- test
+has 8.59
+line 8589934592
+line 2
+has /data
+-->
 ```
 sudo nvme list
 sudo blockdev --getsize64 /dev/disk/by-id/nvme-uuid.$(sudo k3s kubectl get pv -o jsonpath='{.items[0].spec.csi.volumeAttributes.uuid}')
@@ -415,6 +507,10 @@ Check: IO goes through the whole stack. Write 4 MiB of random bytes in the
 pod and keep their sum, drop the machine's page cache so that the read goes
 to the device, and read them back.
 
+<!-- test
+same-first-word
+save sum
+-->
 ```
 sudo k3s kubectl exec demo -- sh -c 'dd if=/dev/urandom of=/data/sample bs=1M count=4 conv=fsync && sha256sum /data/sample'
 sync; echo 3 | sudo tee /proc/sys/vm/drop_caches >/dev/null
@@ -450,6 +546,10 @@ end no connection: it is the node plugin's drop of the path that ends this
 machine's connection, and a machine that runs no node plugin any more would
 keep its connection.
 
+<!-- test
+timeout 900
+same sum
+-->
 ```
 sudo k3s kubectl delete pod demo
 while sudo nvme list-subsys 2>/dev/null | grep -q io.dnv.csi; do sleep 1; done
@@ -487,6 +587,9 @@ namespace, the subsystem and the thin device, and deletes the pool, which
 the worker takes apart in the background (the drain). The loop waits until
 the pool's record is gone.
 
+<!-- test
+run
+-->
 ```
 sudo k3s kubectl delete pod demo
 sudo k3s kubectl delete pvc demo
@@ -497,6 +600,11 @@ Check: Kubernetes holds no volume, and the kernel holds nothing of the
 pool. The loops wait for the controller node's agent and the disk nodes'
 agents to finish.
 
+<!-- test
+lacks pvc-
+lacks : active
+lacks : inactive
+-->
 ```
 sudo k3s kubectl get pv
 while sudo dmsetup ls | grep -q dnv-; do sleep 1; done
@@ -514,6 +622,9 @@ stops the service and removes its program, its containers and most of its
 state.
 Then the image, its build directory and the policy's address list.
 
+<!-- test
+omit sudo /usr/local/bin/k3s-uninstall.sh
+-->
 ```
 sudo k3s kubectl -n default delete networkpolicy dnv-keep-off
 sudo k3s kubectl delete -f deploy/node.yaml -f deploy/controller.yaml
@@ -529,6 +640,9 @@ shows it, which can come some seconds after the kernel is clean, or about
 to age ([Remove a node](operations.md#remove-a-node)). So each delete
 runs again until it passes, for 90 seconds at most:
 
+<!-- test
+run
+-->
 ```
 for i in $(seq 90); do ./dnvctl --gateway-address 127.0.0.1:29527 --cluster c0 cn delete --addr 127.0.0.1:29950 && break; sleep 1; done
 for a in 127.0.0.1:29900 127.0.0.1:29901 127.0.0.1:29902 127.0.0.1:29903; do
@@ -541,6 +655,9 @@ The programs, agents first, then the control plane. Each loop waits until
 the processes of the pid files are gone, since a program finishes its
 current work before it exits, which can take some seconds.
 
+<!-- test
+run
+-->
 ```
 sudo kill $(cat dn0.pid dn1.pid dn2.pid dn3.pid cn0.pid)
 for f in dn0.pid dn1.pid dn2.pid dn3.pid cn0.pid; do while [ -e /proc/$(cat $f) ]; do sleep 1; done; done
@@ -552,6 +669,9 @@ The nvmet ports the agents built outlive them, and so do the two host
 entries, the machine's own and the controller node's. Each port's two ANA
 groups go before the port:
 
+<!-- test
+run
+-->
 ```
 for p in 1 2 3 4 5; do sudo rmdir /sys/kernel/config/nvmet/ports/$p/ana_groups/3 /sys/kernel/config/nvmet/ports/$p/ana_groups/2 /sys/kernel/config/nvmet/ports/$p; done
 sudo rmdir /sys/kernel/config/nvmet/hosts/$(cat /etc/nvme/hostnqn) /sys/kernel/config/nvmet/hosts/nqn.2024-01.io.dnv:1:*
@@ -559,6 +679,9 @@ sudo rmdir /sys/kernel/config/nvmet/hosts/$(cat /etc/nvme/hostnqn) /sys/kernel/c
 
 The loop devices and the files:
 
+<!-- test
+run
+-->
 ```
 for f in dn0.img dn1.img dn2.img dn3.img; do sudo losetup -d $(sudo losetup -j $f | cut -d: -f1); done
 sudo rm -rf store-dn0 store-dn1 store-dn2 store-dn3 store-cn0 etcd-data
@@ -570,6 +693,9 @@ rm -f etcd.pid gateway.pid worker.pid cdc.pid dn0.pid dn1.pid dn2.pid dn3.pid cn
 The udev rules and the unit. The nvme-stas files were not changed here, so
 there is nothing to put back.
 
+<!-- test
+run
+-->
 ```
 sudo rm -f /etc/udev/rules.d/58-dnv-dm.rules /etc/udev/rules.d/63-dnv-md.rules /etc/udev/rules.d/63-zz-dnv-md-array.rules
 sudo udevadm control --reload

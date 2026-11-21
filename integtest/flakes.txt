@@ -1,0 +1,16 @@
+# integtest/flakes.txt — the flake record (layout.md, Directory tree): one
+# entry per Go test or suite stage that fails now and then, so that a failure
+# of one of them is read as what it is before it is read as a regression of
+# the change under test. A text file, not a doc, so that it may carry dates.
+#
+# Each entry is one line of five fields joined by " | ": the test, the date
+# it was first seen failing, the date it was last seen failing, how to run
+# it alone, and its cause, or "unknown". A line leaves the record in the
+# commit that fixes its cause. Run a Go test of it alone under the memory cap
+# of the race target's machine; a count of runs and how many failed goes
+# into the cause field when one is measured.
+#
+# test | first seen | last seen | run alone | cause
+agent/dnagent TestSideProvisioningMatrix/probe/unprovisioned/absent | 2026-10-11 | 2026-10-11 | go test -race -count=20 -cpu=1,2,4 -run '^TestSideProvisioningMatrix$' ./agent/dnagent/ | a DATA RACE in the test: clearRecord and clearZeroed assign srv.meta while the background zeroing loop's last pass still reads it, since waitZeroed returns once the zeroed count shows, before the loop has ended; seen only under load (two race batches at once), 1 to 3 in 60 to 90 race runs then; 0 in 60 race runs alone on 2026-11-20
+agent/dnagent TestProbeReportsABrokenDeviceWhileZeroing | 2026-10-11 | 2026-10-11 | go test -race -count=20 -cpu=1,2,4 -run '^TestProbeReportsABrokenDeviceWhileZeroing$' ./agent/dnagent/ | "a probe mutated the node: cmd blkdiscard --zeroout": a background zeroing batch lands inside the window in which the test checks that the probe only reads; seen only under load, with the one above; 0 in 60 race runs alone on 2026-11-20
+agent/cnagent TestFakeWorkerConvergesTheWidestCntlr | 2026-11-20 | 2026-11-20 | go test -count=6 -cpu=4 -run '^TestFakeWorkerConvergesTheWidestCntlr$' ./agent/cnagent/ | "a background read never ended": a full-shape converge of 31 to 41 s leaves the reads of the settled rounds little of their one-minute bound on 4 CPUs; seen once in five runs of the CI test job that reached the package in a 4-CPU container on a loaded laptop (load about 9; its converge took 39.9 s); 0 in 6 runs alone at -cpu=4

@@ -620,7 +620,7 @@ The vocabulary of dnv in alphabetical order, one entry per term, with synonyms s
 
 **subsystem** — `Subsystem`, the host-facing NVMe-oF object a pool exports from every cntlr under one NQN, each cntlr's export within that cntlr's cntlid slot: it carries its allowed hosts and its namespaces, and the gateway publishes it to the cdc as a `CdcEntry`.
 
-**suite** — One of the integration test scripts under `integtest/` that drives real binaries on lab VMs over ssh: the dn agent, cn agent, worker, gateway, dnvctl, cdc, end-to-end and csi suites.
+**suite** — One of the integration test scripts under `integtest/` that drives real binaries on lab VMs over ssh: the dn agent, cn agent, worker, gateway, dnvctl, cdc, end-to-end, csi and tutorial suites.
 
 **superblock read** — The cn agent's own read of a member's md superblock area (`Md.ReadMember`): one O_DIRECT read through the OsClient where md's version-1.2 superblock sits, and one of its bad-block list when the superblock says the list is not empty, parsed in the kernel's layout into the identity, the change count, the member's role, its copy position, the length of its bad-block list and whether that list holds an entry of length zero, which the kernel refuses to import, the array's number of places and the role table, the role md held each member in when it last wrote the superblock. A read that fails or does not answer is an answer of its own, never "no superblock", which mdadm's examine cannot tell apart; the assembly, the forced start, the take-back refusal, the identity check of an add, the re-assembly, the inspect, and a cntlr's read for its names of an absent array and of a forced start decide from it (see degraded gate; `cnagent.md` CN12, The superblock read).
 

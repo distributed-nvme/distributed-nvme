@@ -638,8 +638,9 @@ tar xzf dnv-v0.1.0-linux-amd64.tar.gz
 ```
 
 The archive unpacks to one folder, `dnv-v0.1.0-linux-amd64`, with the six
-binaries, the `LICENSE` file and the `deploy/` directory, the CSI driver's
-image recipe and manifests.
+binaries, the `LICENSE` file and the `deploy/` directory: the udev rules
+every node that runs a dnv agent carries, and the CSI driver's image recipe
+and manifests.
 
 Or clone the repository and build it with Go 1.26.5 or newer, which puts the
 six binaries in `bin/`:
@@ -651,7 +652,10 @@ make build
 ```
 
 The version is stamped into every binary and `go version -m <binary>` prints
-it, v0.1.0 for a release build. A build of later code also prints it with
+it, v0.1.0 for a release build. Go stamps it from the nearest folder, at or
+above the build's, whose `.git` is a directory: a build in a git worktree,
+whose `.git` is a file, carries the commit of the clone whose folder holds
+the worktree, when one does, and else prints `(devel)`. A build of later code also prints it with
 `--version`, such as `dnv-agent --version`, and each agent, gateway,
 worker, cdc and CSI plugin logs it when it starts; the programs of v0.1.0
 have no such flag.

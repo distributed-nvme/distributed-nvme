@@ -90,6 +90,9 @@ How the commands are written:
 
 The tools, on Ubuntu or Debian:
 
+<!-- test
+timeout 900
+-->
 ```
 sudo apt-get install -y nvme-cli mdadm nvme-stas dmsetup thin-provisioning-tools
 ```
@@ -100,6 +103,9 @@ On another distribution install the same tools: `nvme` from nvme-cli,
 nvme-stas must be a 2.x version, the one dnv is tested with; 3.x is untested
 with dnv:
 
+<!-- test
+has nvme-stas 2.
+-->
 ```
 sudo stafd --version
 ```
@@ -108,6 +114,9 @@ Kernel modules and configfs. The agents load nothing themselves. The last
 line must print `Y`: the kernel's native NVMe multipath is what joins a
 host's paths into one device and carries the ANA state.
 
+<!-- test
+out Y
+-->
 ```
 sudo modprobe -a nvmet nvmet-tcp nvme-tcp nvme-fabrics loop dm-thin-pool raid1
 mountpoint -q /sys/kernel/config || sudo mount -t configfs none /sys/kernel/config
@@ -147,6 +156,9 @@ disk space only where something is written: a disk node zeroes a whole
 meta side and the first blocks of a data side, and the rest stays unwritten
 until a host writes.
 
+<!-- test
+has /dev/loop
+-->
 ```
 truncate -s 10G dn0.img dn1.img dn2.img dn3.img
 sudo losetup --find --show dn0.img
@@ -190,6 +202,11 @@ nohup ./dnv-cdc --etcd-endpoints 127.0.0.1:2379 --tr-addr 127.0.0.1 --tr-svc-id 
 Check: the gateway answers through etcd with an empty cluster list, and
 the cdc has read etcd and listens.
 
+<!-- test
+wait 30
+out {"cluster_name":[],"page_token":""}
+out 1
+-->
 ```
 ./dnvctl --gateway-address 127.0.0.1:29527 cluster list
 grep -c '"cdc scan complete"' cdc.log
@@ -216,6 +233,9 @@ First, the node check: the agent program reads the machine as a disk node
 and as a controller node and reports what an agent needs, one line each.
 It starts no agent and changes nothing.
 
+<!-- test
+has 0 failures
+-->
 ```
 sudo ./dnv-agent check dn --disk $(sudo losetup -j dn0.img | cut -d: -f1)
 sudo ./dnv-agent check cn --ignore-host-disconnection
@@ -284,6 +304,14 @@ its local files; until then it answers the worker's check rounds with
 "starting". A new node has nothing to rebuild, so the two lines come
 together here.
 
+<!-- test
+wait 30
+out dn0.log
+out dn1.log
+out dn2.log
+out dn3.log
+out cn0.log
+-->
 ```
 grep -l '"agent started"' dn0.log dn1.log dn2.log dn3.log cn0.log
 ```
@@ -339,6 +367,10 @@ disk node keeps for its header, its record of which extents each side holds
 and its metadata area holds nine
 whole 1 GiB extents.
 
+<!-- test
+has "free_ext_cnt":"9"
+has "total_ext_cnt":"9"
+-->
 ```
 ./dnvctl --gateway-address 127.0.0.1:29527 --cluster c0 dn get --addr 127.0.0.1:29900 | grep -o '"[a-z_]*ext_cnt":"[0-9]*"'
 ```
@@ -351,6 +383,11 @@ can hold 18 extents of groups with two legs each, while the controller
 node's budget holds 64 TiB, so the disks are the limit; and the first data
 group of such a pool is sure of nine extents.
 
+<!-- test
+has "largest_init_ext_cnt":"9"
+has "limit":"CAPACITY_LIMIT_DN_SPACE"
+has "placeable_bytes":"19327352832"
+-->
 ```
 ./dnvctl --gateway-address 127.0.0.1:29527 cluster get-capacity --name c0 --leg-cnt 2 --cntlr-cnt 1 --slice-cnt 1 | grep -o '"largest_init_ext_cnt":"[0-9]*"\|"limit":"[A-Z_]*"\|"placeable_bytes":"[0-9]*"'
 ```
@@ -366,6 +403,14 @@ agent's local files, two rows. The worker reaches a new node within a few
 seconds, and until then the count is 0. Repeat until the counts are 4, 4, 4,
 4 and 2.
 
+<!-- test
+wait 60
+out 4
+out 4
+out 4
+out 4
+out 2
+-->
 ```
 ./dnvctl --gateway-address 127.0.0.1:29527 --cluster c0 dn inspect --addr 127.0.0.1:29900 | grep -o RES_STATUS_OK | wc -l
 ./dnvctl --gateway-address 127.0.0.1:29527 --cluster c0 dn inspect --addr 127.0.0.1:29901 | grep -o RES_STATUS_OK | wc -l
@@ -395,6 +440,11 @@ RAID1 arrays and builds the slice's thin pool.
 Check: four sides provisioned, one primary. Zeroing the two meta sides
 takes some seconds; repeat until the counts are 4 and 1.
 
+<!-- test
+wait 180
+out 4
+out 1
+-->
 ```
 ./dnvctl --gateway-address 127.0.0.1:29527 --cluster c0 --sp sp0 sp get | grep -o '"provisioned":true' | wc -l
 ./dnvctl --gateway-address 127.0.0.1:29527 --cluster c0 --sp sp0 sp get | grep -o '"primary":true' | wc -l
@@ -417,6 +467,10 @@ The thin device:
 Check: the primary has created it. Repeat until it prints
 `"created":true`.
 
+<!-- test
+wait 60
+out "created":true
+-->
 ```
 ./dnvctl --gateway-address 127.0.0.1:29527 --cluster c0 --sp sp0 td list | grep -o '"created":[a-z]*'
 ```
@@ -431,6 +485,9 @@ namespace over the thin device with the fixed uuid:
 
 Check: the subsystem lists the namespace.
 
+<!-- test
+out "dev_uuid":"11111111-2222-4333-8444-555555555555"
+-->
 ```
 ./dnvctl --gateway-address 127.0.0.1:29527 --cluster c0 --sp sp0 ss list | grep -o '"dev_uuid":"[^"]*"'
 ```
@@ -442,6 +499,12 @@ It prints `"dev_uuid":"11111111-2222-4333-8444-555555555555"`.
 First a plain discovery read. The cdc shows a host exactly the subsystems
 whose allowed hosts name it, so the read carries the host NQN and host id:
 
+<!-- test
+has nqn.2014-08.org.nvmexpress.discovery
+has nqn.2026-10.com.example:sp0-ss0
+has 8009
+has 4420
+-->
 ```
 sudo nvme discover -t tcp -a 127.0.0.1 -s 8009 -q nqn.2014-08.org.nvmexpress:uuid:aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee -I aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee
 ```
@@ -516,6 +579,11 @@ Check: the discovery daemon holds its connection to the cdc, and the
 connector holds one to the subsystem. The two need a few seconds; repeat
 until each lists one controller.
 
+<!-- test
+wait 60
+has 8009
+has 4420
+-->
 ```
 sudo stafctl ls
 sudo stacctl ls
@@ -526,6 +594,11 @@ port `4420` with the subsystem's NQN.
 
 Check: the volume is a block device of 50 GiB.
 
+<!-- test
+wait 30
+has 53.69
+line 53687091200
+-->
 ```
 sudo nvme list
 ls -l /dev/disk/by-id/nvme-uuid.11111111-2222-4333-8444-555555555555
@@ -540,6 +613,9 @@ is `53687091200`.
 Check: IO goes through the whole stack. Write 4 MiB of random bytes, drop
 the page cache so that the read goes to the device, and read them back.
 
+<!-- test
+same-first-word
+-->
 ```
 head -c 4194304 /dev/urandom > sample.bin
 sudo dd if=sample.bin of=/dev/disk/by-id/nvme-uuid.11111111-2222-4333-8444-555555555555 bs=1M conv=fsync
@@ -583,6 +659,10 @@ its agent then finishes on a later pass, which the worker drives as long
 as the controller node's record exists. So wait until the kernel holds
 nothing of the pool before the nodes are deleted:
 
+<!-- test
+lacks : active
+lacks : inactive
+-->
 ```
 while sudo dmsetup ls | grep -q dnv-; do sleep 1; done
 while sudo nvme list-subsys 2>/dev/null | grep -q dnv; do sleep 1; done

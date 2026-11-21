@@ -6,7 +6,7 @@ PROTOC ?= protoc
 # The cmd/ directories that already contain Go sources.
 CMDS := $(sort $(patsubst cmd/%/,%,$(dir $(wildcard cmd/*/*.go))))
 
-.PHONY: all gen fmt build vet test fetch-etcd release clean
+.PHONY: all gen fmt build vet test test-race fetch-etcd release clean
 
 all: build
 
@@ -44,21 +44,39 @@ vet:
 # directory; the test binaries refuse one that names no file. With ETCD_BIN
 # empty or unset the target takes etcd on the PATH, else the one `make
 # fetch-etcd` leaves in integtest/bin/cache, and with neither it fails before
-# go test runs.
-test:
-	@bin="$$ETCD_BIN"; \
+# go test runs. test-race picks the etcd binary the same way.
+ETCD_PICK = bin="$$ETCD_BIN"; \
 	if [ -z "$$bin" ]; then \
 		bin=$$(command -v etcd) || \
 		bin=$$(bash integtest/fetch_etcd.sh path) || { \
-			echo "make test: no etcd binary: set ETCD_BIN, put etcd on" \
+			echo "make $@: no etcd binary: set ETCD_BIN, put etcd on" \
 				"the PATH, or run 'make fetch-etcd' to fetch it into" \
 				"integtest/bin/cache" >&2; \
 			exit 1; \
 		}; \
 	fi; \
 	case "$$bin" in /*) ;; *) bin="$(CURDIR)/$$bin" ;; esac; \
-	echo "make test: etcd binary $$bin"; \
+	echo "make $@: etcd binary $$bin"
+
+test:
+	@$(ETCD_PICK); \
 	ETCD_BIN="$$bin" $(GO) test ./...
+
+# test-race runs the short tests (go test -short skips the full-shape tests
+# and the slowest timing tests) of every package under the race detector,
+# which needs cgo and so a C compiler on the machine. The detector
+# multiplies the memory of each test binary, so RACE_P packages run at once
+# and RACE_PARALLEL tests at once within a package; a machine with less
+# memory lowers them. A test that fails now and then under it has its line
+# in integtest/flakes.txt (layout.md, Directory tree). The hosted CI does not
+# run this target: its image has no C compiler, and the target's memory was
+# measured only on a laptop under a 12 GiB cap.
+RACE_P ?= 4
+RACE_PARALLEL ?= 2
+
+test-race:
+	@$(ETCD_PICK); \
+	ETCD_BIN="$$bin" $(GO) test -race -short -p $(RACE_P) -parallel $(RACE_PARALLEL) ./...
 
 # fetch-etcd fetches the etcd release the integration suites pin into
 # integtest/bin/cache, where test finds it (dnv-worker.md EU7), and checks
@@ -68,24 +86,30 @@ fetch-etcd:
 	bash integtest/fetch_etcd.sh
 
 # release builds the six programs for Linux x64 into one archive with a
-# checksum file under _out/ (layout.md, Directory tree). VERSION is the exact
+# checksum file under RELEASE_OUT, _out/ by default (layout.md, Directory
+# tree). VERSION is the exact
 # tag on HEAD; an untagged HEAD or a tree that is not clean is refused, unless
 # VERSION is given on the command line, which overrides both refusals; an
 # environment VERSION is ignored. The binaries are static (cgo off), free of
 # build paths (-trimpath) and stripped (-s -w); Go stamps the module version
-# from the tag, so `go version -m` on each binary still prints it. The archive
-# is reproducible: a fixed owner, fixed modes (0644 for a file, 0755 for a
+# from the tag, so `go version -m` on each binary still prints it. Go takes
+# the version from the nearest directory, at or above the tree, whose .git
+# is a directory: a checkout stamps its own commit; a git worktree, whose
+# .git is a file, stamps the commit of the checkout whose folder holds it,
+# when one does, and else nothing, and every binary then prints (devel). The archive is
+# reproducible: a fixed owner, fixed modes (0644 for a file, 0755 for a
 # directory or a program, whatever the builder's umask, as long as it leaves
 # the owner read, write and execute, and with no setuid or setgid bit), sorted
 # entries, the commit time of HEAD as every entry's time, and gzip without a
-# timestamp, so a rebuild on the same commit with the same Go and Go
-# settings, tar and gzip, and no file git ignores under deploy/, gives the
-# same checksum. Once a release is tagged, its schema's layout joins
+# timestamp, so a rebuild on the same commit with the same history and tags,
+# the same Go and Go settings, tar and gzip, and no file git ignores under
+# deploy/, gives the same checksum. Once a release is tagged, its schema's layout joins
 # pb/testdata/<tag>/ (layout.md, Protobuf generation).
 ifneq ($(origin VERSION),command line)
 VERSION := $(shell git describe --tags --exact-match 2>/dev/null)
 endif
 RELEASE_DIR := dnv-$(VERSION)-linux-amd64
+RELEASE_OUT ?= _out
 
 release:
 	@if [ -z "$(VERSION)" ]; then \
@@ -96,20 +120,20 @@ release:
 		echo "make release: the tree is not clean; commit or stash, or pass VERSION=<version>" >&2; \
 		exit 1; \
 	fi
-	rm -rf _out/$(RELEASE_DIR) _out/$(RELEASE_DIR).tar.gz _out/SHA256SUMS
-	mkdir -p _out/$(RELEASE_DIR)
+	rm -rf $(RELEASE_OUT)/$(RELEASE_DIR) $(RELEASE_OUT)/$(RELEASE_DIR).tar.gz $(RELEASE_OUT)/SHA256SUMS
+	mkdir -p $(RELEASE_OUT)/$(RELEASE_DIR)
 	@for c in $(CMDS); do \
-		echo "  build _out/$(RELEASE_DIR)/$$c"; \
+		echo "  build $(RELEASE_OUT)/$(RELEASE_DIR)/$$c"; \
 		CGO_ENABLED=0 GOOS=linux GOARCH=amd64 $(GO) build -trimpath -ldflags '-s -w' \
-			-o _out/$(RELEASE_DIR)/$$c ./cmd/$$c || exit 1; \
+			-o $(RELEASE_OUT)/$(RELEASE_DIR)/$$c ./cmd/$$c || exit 1; \
 	done
-	cp LICENSE _out/$(RELEASE_DIR)/
-	cp -r deploy _out/$(RELEASE_DIR)/
-	tar -C _out --sort=name --owner=0 --group=0 --numeric-owner \
+	cp LICENSE $(RELEASE_OUT)/$(RELEASE_DIR)/
+	cp -r deploy $(RELEASE_OUT)/$(RELEASE_DIR)/
+	tar -C $(RELEASE_OUT) --sort=name --owner=0 --group=0 --numeric-owner \
 		--mode=go=rX,u+rw,a-st --mtime=@$$(git log -1 --format=%ct) \
-		-cf - $(RELEASE_DIR) | gzip -n > _out/$(RELEASE_DIR).tar.gz
-	cd _out && sha256sum $(RELEASE_DIR).tar.gz > SHA256SUMS
-	@echo "release: _out/$(RELEASE_DIR).tar.gz and _out/SHA256SUMS"
+		-cf - $(RELEASE_DIR) | gzip -n > $(RELEASE_OUT)/$(RELEASE_DIR).tar.gz
+	cd $(RELEASE_OUT) && sha256sum $(RELEASE_DIR).tar.gz > SHA256SUMS
+	@echo "release: $(RELEASE_OUT)/$(RELEASE_DIR).tar.gz and $(RELEASE_OUT)/SHA256SUMS"
 
 clean:
 	rm -rf bin _out
