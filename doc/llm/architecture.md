@@ -7707,7 +7707,8 @@ as a gateway answers, before the id step. Then, in this order:
    step 5 (below). A volume that is to be kept can be read off while
    the agents still serve it: no worker runs, so each node keeps the
    devices and exports of its pre-restore requests and a host connected to
-   the pool still reads it, which no test has shown. Kubernetes keeps its
+   the pool still reads it (`e2e_integtest.md`, The cases, upgrade).
+   Kubernetes keeps its
    records of every volume of a pool that is lost whole, every volume made
    since the backup with the CSI driver; the operator deletes them or makes
    the volumes again.
@@ -7737,7 +7738,8 @@ A restore loses or breaks what changed after the backup:
   sweep after a failed delete — deletes every id the list does not name
   (`cnagent.md` CN14, CN21), so every thin device created after the backup
   is lost with its data, with no undo.
-* A pool that gained groups after the backup by auto-grow, or whose legs a
+* A pool that gained groups after the backup by a grow, an operator's or an
+  auto-grow, or whose legs a
   migration, a repair or a leg repair moved, goes back to its old layout
   and breaks.
 * An object deleted after the backup comes back. One whose parts a node
@@ -7844,7 +7846,15 @@ the agents have started again, their startup reconciles ended
 instances stop and start in any order. Reason: to a running worker a
 stopped agent is a failed node, and its reactions would fail over
 primaries, replace cntlrs and repair legs that only wait for their agent
-(Automatic reactions; `dnv-worker.md` AR10). Before the workers start, the
+(Automatic reactions; `dnv-worker.md` AR10). Before the first agent of the
+new build starts on a node, the node carries the udev rules of that build's
+`deploy/udev/` (Components: invocation reference), which the operator
+installs while the node's agents are stopped wherever the new build changes
+a rule file or ships one the node lacks, as every node of v0.1.0 lacks them
+all. Reason: the new agents rebuild what the node holds and build what it
+does not yet, and a node without the rules lets the system's own udev rules
+assemble, probe and link what they make, as Components: invocation
+reference says. Before the workers start, the
 operator checks that every program runs the new build: each binary's
 `--version` shows the build the node holds, and each process's start record
 the build it runs (Components: invocation reference). Reason: a program
@@ -7881,7 +7891,9 @@ so, not only those etcd stores: an agent stores its syncup requests, which
 carry most of the others, and dnvctl prints the rest by their field names.
 The freeze test holds the schema to each release's layout, and the sample
 tests read what v0.1.0 wrote through today's readers (`layout.md`, Protobuf
-generation). A field it adds reads
+generation); the e2e suite's opt-in upgrade case upgrades a cluster of
+v0.1.0 to the tree's build on the lab in this order (`e2e_integtest.md`, The
+cases, upgrade). A field it adds reads
 zero in what an older build wrote, so it adds only a field whose zero is
 right there: a count it adds starts at zero. A migration whose record
 carries no `meta_units` thus counts as zero units and adds nothing to any
@@ -7916,6 +7928,11 @@ which is how the build that wrote it stood after any worker restart
 whose array has not run until the sp worker sets the flag at the group's
 first OK row (`dnv-worker.md` AR15); until then its primary may create an
 array over legs that read no superblock, as the build that wrote it could.
+The worker of the new build therefore writes every serving pool of the older
+build once after the upgrade, which raises the pool's revision: in a restore
+of a backup taken before the upgrade, a pool no call touched reads older,
+not the same, and loses only that flag, which the worker sets again
+(`e2e_integtest.md`, The cases, upgrade).
 A forced-start mark that carries neither `force` nor `override_list` meets
 every refusal of `cnagent.md` CN12, some of which the build that wrote it
 lacked, so a start it was asked for can be refused after the upgrade, until

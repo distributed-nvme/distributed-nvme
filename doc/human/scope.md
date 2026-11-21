@@ -1466,9 +1466,9 @@ known today" below gives the longer ones.
 
 | Action | Tool today | Doc today | State |
 |---|---|---|---|
-| Back up and restore etcd | etcd's own tools; `dnvctl cluster advance-ids` after a restore; `dnvctl cn check-restore`, which says pool by pool what the restore loses, before the agents' local files are reset | the operations doc, [Restore etcd from a backup](operations.md#restore-etcd-from-a-backup), and [a new volume refused for a thin id that holds data](operations.md#a-new-volume-refused-for-a-thin-id-that-holds-data) | procedure written; it has not run on real agents. The check does not see a pool none of whose controller nodes answers, and lists no disk node's sides. A new volume over a restored thin id that holds data is refused. |
+| Back up and restore etcd | etcd's own tools; `dnvctl cluster advance-ids` after a restore; `dnvctl cn check-restore`, which says pool by pool what the restore loses, before the agents' local files are reset | the operations doc, [Restore etcd from a backup](operations.md#restore-etcd-from-a-backup), and [a new volume refused for a thin id that holds data](operations.md#a-new-volume-refused-for-a-thin-id-that-holds-data) | procedure written; the e2e suite's upgrade case runs its steps once on the lab's real agents, from a backup taken under 0.1, with one etcd member and no Kubernetes, all but the change of host lists, which it has none to make, and the Kubernetes step. The check does not see a pool none of whose controller nodes answers, and lists no disk node's sides. A new volume over a restored thin id that holds data is refused. |
 | Recover an etcd that refuses writes because its store is full | etcd's own tools: `etcdctl compact --physical`, `etcdctl defrag --cluster`, `etcdctl alarm disarm` | the operations doc, [etcd refuses writes: its store is full](operations.md#etcd-refuses-writes-its-store-is-full) | procedure written; the worker suite's three-member mode runs the compaction, the defragmentation and the disarm on the lab, over a small store. The raise of the quota is not tested. |
-| Upgrade | every program at once; `--version` on each program, and the version each running program logs when it starts | this page, below | procedure to write. Rolling upgrades are not yet. A downgrade is not supported. |
+| Upgrade | every program at once; `--version` on each program, and the version each running program logs when it starts | this page, below | procedure to write; the e2e suite's upgrade case upgrades a cluster of 0.1 in lockstep once on the lab, under a host's writes, with no failed write and no reaction. Rolling upgrades are not yet. A downgrade is not supported. |
 | Run while the control plane is down | nothing to do; the data plane serves | none | procedure to write |
 | Handle the logs | `--log-level` on every program; SIGUSR1 and SIGUSR2 to a running program; JSON on stderr, no rotation | [the operations doc](operations.md#the-logs) | procedure written. A paragraph on reading the logs: procedure to write. |
 | See what is wrong across the cluster | `dnvctl cluster get-status` | the operations doc, Read what is wrong | done |
@@ -1512,8 +1512,14 @@ cluster it holds, and every CSI driver that talks to its gateways: its
 controller plugin, the part that calls the gateway, and its node plugins. A
 stopped node plugin leaves the connections and mounts of its volumes in
 place. Every binary is replaced, `dnvctl` included, and only then does any
-program start again. The workers stop first and start last. For the CSI
-driver, apply these files of the new release's `deploy/` folder by name:
+program start again. The workers stop first and start last. Before the new
+agents start, install the udev rules of the new release's `deploy/udev/` on
+every disk node and every controller node, with the two settings that go
+with them ([the operations
+doc](operations.md#install-the-udev-rules-on-a-node)): 0.1 shipped none, so
+an upgrade from 0.1 installs them all, and a node without them lets the
+system's own udev rules assemble and probe what the new agents build. For the
+CSI driver, apply these files of the new release's `deploy/` folder by name:
 `namespace.yaml`, `csidriver.yaml`, `controller-serviceaccount.yaml`,
 `node-serviceaccount.yaml`, `controller-clusterrole.yaml`,
 `controller-clusterrolebinding.yaml`, `controller-role.yaml`,

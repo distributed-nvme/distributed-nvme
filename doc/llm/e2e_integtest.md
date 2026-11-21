@@ -123,16 +123,17 @@ no crash of a migration's destination and no cut of a whole group:
   one write fails, the cdc serves its last records meanwhile, the stored
   state reads the same before and after, and the worker rejoins and drives
   the pool again.
-* **Every case ends with its pool sound and the lab as it was found.** Before
-  its teardown every case's pool has every thin pool writable, without
+* **Every case but upgrade ends with its pool sound and the lab as it was
+  found.** Before its teardown every such case's pool has every thin pool writable, without
   needs_check and with room, by the status read, and every array clean and
   whole on the primary, but for a pool a measuring stage left needs_check on
-  purpose. After every case every disk node has all
+  purpose. After every such case every disk node has all
   its extents back, the free count of its own disk counts agreeing with its
   record's and the worker having logged no disagreement between the two
   (`dnv-worker.md` RW13), no node guest holds a dnv dm device, md array or
   nvmet subsystem, and allocation stays under a per-file and a whole-run
-  cap; the cutoff case also stops nvme-stas on host0 and puts host0's own
+  cap, which the upgrade case, with no ending of its own, also holds; the
+  cutoff case also stops nvme-stas on host0 and puts host0's own
   configuration of it back byte for byte.
 
 **The opt-in cases** prove more, each only in a run that names it (The
@@ -150,16 +151,26 @@ cases):
   and after its cn agent is
   stopped and continued in turn, every pool lists both cntlrs again and
   every write a host saw complete reads back.
+* **A cluster of v0.1.0 upgrades in lockstep, and a backup taken under it
+  restores with the new programs** (`architecture.md`, Upgrade in lockstep,
+  etcd backup and restore). With v0.1.0's programs read running on every
+  guest first, the agents stopped node by node and held stopped, and host1
+  writing through the upgrade, no write fails, nothing reacts and every pool
+  keeps its cntlrs, its primary and its sides, while every program then
+  runs the new build. Restoring a backup taken under v0.1.0 keeps the
+  untouched pool's data, breaks the pool grown after the backup as the
+  design doc says, hands out ids above every id handed out after the
+  backup, and frees on the disk nodes every side made after it.
 
 **What it does not prove.** The RPCs it never issues, the deletions and
-listings of clusters, disk nodes and controller nodes, the id step, the
-restore check `CheckControllerNodeRestore` (`architecture.md`, Controller
-nodes), and the capacity read
-`GetClusterCapacity` (`architecture.md`, Clusters): the gateway suite issues
-each of them, the dnvctl suite each against its fake gateway, and the csi
-suite reaches the capacity read through dnv-csi and through `dnvctl`, whose
-answer it compares with the driver's; this run discards the whole cluster
-between cases. Error paths, beyond the few refusals the ops case asserts on
+listings of clusters, disk nodes and controller nodes, and the capacity read
+`GetClusterCapacity` (`architecture.md`, Clusters), and those a default run
+never issues, the id step and the restore check `CheckControllerNodeRestore`
+(`architecture.md`, Controller nodes), which only the opt-in upgrade case
+does: the gateway suite issues each of them, the dnvctl suite each against
+its fake gateway, and the csi suite reaches the capacity read through dnv-csi
+and through `dnvctl`, whose answer it compares with the driver's; this run
+discards the whole cluster between cases. Error paths, beyond the few refusals the ops case asserts on
 purpose, the copy case's refused abort and cancel of a started repair,
 react's refused forced start of a group whose array runs and its refused
 repair that takes back a retired leg newer than the array, the `NOT_FOUND`
@@ -213,9 +224,10 @@ each, every one on its own loop device and its own nvmet port and service id,
 as two ports cannot listen on one address, all registered at their guest's
 location (E2E4). Two hosts run only the kernel's nvme-tcp stack and nvme-cli,
 but for nvme-stas on host0 inside the cutoff case (E2E10). Every dnv daemon
-runs at `--log-level debug`, so a failed run's logs hold the reads a fault
-needs and the steps that read a converge's commands see its reads too
-(`log.md` R6, R9).
+of the tree's build runs at `--log-level debug`, so a failed run's logs hold
+the reads a fault needs and the steps that read a converge's commands see its
+reads too (`log.md` R6, R9); the upgrade case's v0.1.0 programs, which lack
+the flag, log at their default level (The cases, upgrade).
 
 The control plane has a guest of its own, as in a deployment
 (`architecture.md`, System overview): it holds no kernel state and runs without
@@ -234,7 +246,7 @@ cause, the check streams it failed to open or to send a round on, its health
 changes to unreachable and its late observations with the largest age, as no
 stage of the suite counts missed rounds. Every node guest carries the udev
 rules of `deploy/udev/` (`architecture.md`, Components: invocation reference)
-while its agents run, installed before an agent starts from the texts the
+while its agents of the tree's build run, installed before an agent starts from the texts the
 guest's helper carries: on a controller node the stock udev rule would
 otherwise race the agent for an array it is creating, and on a disk node it
 would assemble the superblocks the controller node writes there (Known
@@ -314,7 +326,12 @@ elected standby is held to the cntlr threshold while it settles
 (`dnv-worker.md` AR5, HL2), so its own build cannot hand the role back.
 The many-pools case builds under the cutoff set too, for the same reasons:
 its cuts must fail every pool over within seconds, and nothing else may
-react while a node is cut off. Every
+react while a node is cut off. The
+upgrade case's pools take the shipped thresholds, as their creates name none:
+a worker that ran while a controller node's agent was stopped and its
+standby's ran would then fail a primary over within the default primary
+threshold, and the case stops those agents 20 s apart, so the case's "no
+reaction" reads the order of the upgrade (The cases, upgrade). Every other
 set names all four, as an omitted or zero threshold resolves to its default
 when read (`gateway.md` GW11; `dnv-worker.md` AR4) and the default primary
 threshold is short; in every set the leg threshold exceeds the side threshold
@@ -340,7 +357,11 @@ read, its table (Diagnostics on failure), a refusal with one stderr line
 naming its code and trace id (`dnvctl.md` CT4, CT5). `workerctl` runs on the
 driver only to print the tree's constants, `cnagentctl` is built for a host-id
 helper no step calls, and etcd's client is shipped for read-only diagnostics
-and never invoked.
+and invoked by no case but the upgrade case, which takes etcd's backups with
+it and restores one with etcd's restore tool, shipped for that case alone:
+the backup and the restore are the operator's acts that case tests
+(`architecture.md`, etcd backup and restore), not a write the suite makes in
+place of `dnvctl`.
 
 E2E3. **The dn agents per disk-node guest default to the placement bound.** An
 override below it is a warning naming the demand it risks, never an error; a
@@ -1452,7 +1473,77 @@ subsystem but setup's, every thin device and every pool it made, the hosts
 letting go of its subsystems first, waits for every drain, and reaches the
 shared ending with setup's pool alone.
 
-**The ending every case shares** first checks the pool's state on disk by
+**upgrade**, an opt-in case, proves that a cluster of the v0.1.0 release
+upgrades in lockstep to the tree's build with no failed host write, no
+reaction and its data unchanged (`architecture.md`, Upgrade in lockstep), and
+that an etcd backup taken under v0.1.0 restores with the new programs as
+`architecture.md`, etcd backup and restore, says. It runs alone and gets no
+setup: v0.1.0's programs lack flags the suite's start lines pass, and its
+records lack fields setup reads, so the case builds its cluster itself. The
+driver keeps v0.1.0's five programs in the gitignored `integtest/bin/v010`,
+built once from a clone of the tag, not in a git worktree, which Go stamps
+with the commit of a checkout around it or with no version, never with the
+worktree's own tag (`architecture.md`, Components: invocation reference); a
+run reuses that build while each program in it carries the tag's module
+version, builds it only with room for it on the driver, and keeps the
+programs alone, not the clone. The guests then
+run v0.1.0's programs with v0.1.0's start flags, and every node guest the
+one udev rule v0.1.0's suites installed, its mask of the stock md assembly,
+in place of the rules of `deploy/udev/`, which v0.1.0 did not ship. Every
+pool of the case has one slice, two cntlrs and the shipped thresholds,
+whatever the run's slice count. Before anything else under v0.1.0 the case
+reads that v0.1.0 runs: every dnv program on every guest runs a file whose
+digest is v0.1.0's build's, read from the process itself, each shipped
+program refuses `--version`, no agent log holds the start record of the
+versions and no daemon's start record a version, and the cluster stores
+v0.1.0's default stripe of 64 KiB. Under v0.1.0 the case makes pool A, whose
+thin device host0 writes a pattern into and which nothing touches after, and
+pool C; takes a backup with etcd's snapshot tool; and then makes pool B with
+two thin devices, the first exported to host1, and grows C's slice by a data
+group. The upgrade runs while host1 writes B's volume with the cutoff case's
+writer: the worker stops first, then the gateway, the cdc and every agent,
+node by node, as an operator's upgrade does: the controller nodes' agents
+one at a time 20 s apart, the node with the most primaries first, then the
+disk nodes', all of them then held stopped 30 s, so that a worker left
+running would fail over a primary whose node stopped while its standby's
+ran; every dnv binary is replaced while etcd runs on; the rules of `deploy/udev/`
+are written over the mask on every node guest; the new build's node check
+passes on every controller node; the new agents start, and every one ends
+its startup pass;
+every binary's `--version` and every agent's start record name the new build
+before the gateway, the cdc and, last, the worker start, whose start records
+name it too, and every running program's file then has the new build's
+digest. Once the worker has run past the default primary threshold, the
+writer still runs with no failed write, the worker has applied no reaction,
+each pool keeps its cntlrs, its primary and its sides, and host0 reads A's
+pattern back; the writer's whole range then reads back with fio's verify, and
+neither host's kernel log reports a failed IO. The restore runs the steps of
+`architecture.md`, etcd backup and restore, with the new programs: the
+worker, the cdc and the gateway stop; etcd's restore tool writes the backup
+into a new data directory, where etcd starts as the suite starts it; the
+gateway answers, read through the list of clusters alone, the one call the
+procedure allows before the id step; the id step runs; the gateway serves A
+and C and not B; the restore check of every controller node reads A older
+with no lost and no returning thin device and its highest held revision one
+above the restored one, since the new worker sets the array flag of A's
+groups once after the upgrade, a write the backup lacks (`architecture.md`,
+Upgrade in lockstep), B new with both its thin devices lost, and C may
+break; while
+no worker runs and before any store is cleared, host1 reads B's whole range
+back and host0 A's pattern; every agent stops, its local store is set aside
+and deleted, and it starts again; the worker and the cdc start, and a new
+backup is taken. Then a new pool D takes an sp id above B's and comes up
+whole, a new thin device of C takes an id above every id C's grow took,
+C's primary refuses to shrink its slice's data concat to the restored
+layout (`cnagent.md` CN13), every side made after the backup leaves its disk
+node, every disk node's agent comes to hold its record's sides and free
+count, and host0 reads A's pattern back. The case ends with no teardown of
+its own but the space caps: after a pass the end cleanup takes every object
+it made, and after a failure the next run's start cleanup or a
+`--cleanup-only` run does (E2E6).
+
+**The ending every case shares**, which the upgrade case alone leaves out
+but for its space caps, first checks the pool's state on disk by
 its status lines, while the pool still stands: once md runs no sync on any
 group, within a bound, as a case can end while md still copies a leg, one
 status read (`architecture.md`, Clusters, GetClusterStatus) must name no
@@ -1565,11 +1656,12 @@ cutoff case is in the run, has the tools of the case's write loop and
 kernel-log witness and nvme-stas 2.x installed, both its units known to
 systemd, as a 1.x one would fail later and silently, never connecting,
 nvme-stas being a package the suite never installs; that host1, when the
-cutoff case is in the run, has the tools of its fence writer, fio, cmp,
-nohup and pkill, which the suite never installs either; that both hosts,
-when the many-pools case runs, have the tools of its writers and its path
-sampler, fio, readlink, nohup and pkill, and every controller node those of
-its cut, nft and systemd-run; and that the
+cutoff or the upgrade case is in the run, has the tools of the fence writer,
+fio, cmp, nohup and pkill, which the suite never installs either; that both
+hosts, when the many-pools case runs, have the tools of its writers and its
+path sampler, fio, readlink, nohup and pkill, and every controller node those
+of its cut, nft and systemd-run; that both hosts, when the upgrade case is in
+the run, have the kernel-log witness's tool; and that the
 control-plane
 guest has its tools, its ports free and the free-space floor the space guard
 holds it to, and needs no sudo: the closing trim is the one root command tried
@@ -1589,7 +1681,9 @@ since nothing between the cases changes a guest's kernel or tools; hosts and
 the control-plane guest run no agent and no check. The guest checks above
 stay, run before the first setup builds anything: they guard the tools of
 the sweeps after them, between the cases and at the end, not the start
-sweep's, which runs before them.
+sweep's, which runs before them. The upgrade case, which has no setup, runs
+the new build's `dnv-agent check cn` on each controller node guest at its
+upgrade instead, before the new agents start, and no `check dn`.
 
 ## Cleanup, and why the order is what it is
 
@@ -1976,3 +2070,43 @@ the connect attempted.
   connector always and its discovery daemon under persistent connections, so
   the cutoff case disconnects them itself before it hands host0 back, and a
   host's cleanup drops what a failed run left.
+* **The upgrade case upgrades from v0.1.0 alone, at one slice, with no CSI
+  driver.** It upgrades from the one release and builds every pool at one
+  slice and two cntlrs, so it reads what v0.1.0 wrote but not what a wide
+  pool's build writes; the suite runs no CSI plugin, so the plugins' part of
+  the upgrade and the volume contexts they hand Kubernetes are the csi
+  suite's and the Go tests' (`csi.md`, CSI10). It holds no migration, repair,
+  clone or forced start open across the upgrade, the states `architecture.md`,
+  Upgrade in lockstep, gives readings for; its restore covers one etcd member,
+  no node added or deleted since the backup, and no host added to or taken
+  off the list of a pool kept from before the backup: B's subsystem, with
+  host1 on its list, is lost whole, so the host lists the operator sets
+  before the workers start again have nothing to change; and it checks C's
+  break by its primary's refusal to shrink the data concat, not by a host
+  read of C.
+* **The upgrade case's check of no reaction has a time margin, not a
+  bound.** Host1's writer fills pool B's one data group past its mark about
+  480 s after it starts, and the worker then grows B, a reaction; the check
+  reads the worker's records about 170 s after the writer starts on the lab
+  (the agents all stopped 72 s in, held 30 s, and the worker started 137 s
+  in), so an upgrade window longer than about 300 s would read that grow
+  as one. The grow lands after the check, so the
+  restore check reads B with the grown group's sides, which the restore
+  frees with B's others.
+* **The upgrade case's v0.1.0 nodes carry v0.1.0's test mask.** A v0.1.0
+  node of a deployment had no udev rule of dnv's at all, since the release
+  shipped none; one with none lets the stock md assembly take the legs'
+  superblocks on a disk node guest, which pins the sides there (as the
+  entry on a disk node's md superblocks, above, says) and would stop the
+  restore's side frees and the cleanup for a cause the case does not test.
+  So the v0.1.0 half runs on the mask v0.1.0's suites ran under, and the
+  upgrade writes the rules of `deploy/udev/` over it before the new agents
+  start.
+* **From a git worktree the new build's version is not the tree's own.** Go
+  stamps a build in a worktree with the commit of the checkout whose folder
+  holds the worktree, or with no version, "(devel)", when none does
+  (`architecture.md`, Components: invocation reference), so the case's
+  version checks then hold every new program to that version and tell the
+  new build from v0.1.0 by v0.1.0's programs having no `--version` and no
+  version in a start record; a run from a checkout whose `.git` is a
+  directory names its commit.

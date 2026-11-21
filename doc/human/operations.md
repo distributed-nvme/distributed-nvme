@@ -1544,9 +1544,11 @@ lvm2 must read only the node's own physical volumes, and md must assemble
 by itself only the arrays that `/etc/mdadm/mdadm.conf` lists.
 
 When: on every disk node and every controller node, before its first dnv
-agent starts, and again when a new release changes a file of
-`deploy/udev/`. The rules need systemd 253 or newer; `systemctl --version`
-prints it. An older udev skips the lines of `63-zz-dnv-md-array.rules`
+agent starts, and again when a new release changes or adds a file of
+`deploy/udev/`, as the first release after 0.1 does on a node that ran 0.1,
+which shipped none: then while the node's agents are stopped for the
+upgrade, before the new ones start. The rules need systemd 253 or newer;
+`systemctl --version` prints it. An older udev skips the lines of `63-zz-dnv-md-array.rules`
 that take the links away, with an error in the system log, and keeps the
 rest.
 
@@ -1585,7 +1587,11 @@ Safe steps, before the node's first dnv agent starts:
    node's own physical volumes and nothing else.
 4. md. `sudo mdadm --detail --scan` prints one ARRAY line for each md
    array that runs on the node; before the node's first dnv agent starts,
-   each one is the node's own. Add those lines to `/etc/mdadm/mdadm.conf`,
+   each one is the node's own. On a controller node that ran dnv before,
+   as at an upgrade from 0.1, it also prints the arrays dnv runs, each
+   named `/dev/md/` and 28 hex digits: leave those lines out, since only
+   dnv may assemble them.
+   Add the node's own lines to `/etc/mdadm/mdadm.conf`,
    and add the line `AUTO -all` after them. With it md assembles by itself
    only the arrays the file lists. An array of the node's own that the
    file does not list no longer comes up at boot. mdadm reads only the
@@ -2596,7 +2602,11 @@ Safe steps:
      an error with no data. A volume whose thin id the pool still holds,
      because its delete on the primary failed or had not yet run, comes
      back working, with its old data. `dnvctl td list` shows each volume
-     with its name and `td_id`.
+     with its name and `td_id`. After an upgrade from 0.1, a backup taken
+     before the upgrade reads older for every pool, even one no call
+     touched since: the new release marks each pool's arrays as made once
+     after the upgrade. Such a pool loses only that mark, which the worker
+     sets again, and lists no lost volume.
    - `RESTORE_VERDICT_MAY_BREAK`: as older, and the pool's layout changed
      since the backup, so the pool may not come back working: a part of it
      was made since (a grow, a repair, a migration, a clone), or removed
@@ -2639,7 +2649,10 @@ Safe steps:
    volume of its pool can take after the restore.
 5. To keep a lost volume, copy its data off now, through a host that still
    has a path to it. No worker runs, so each node still serves what it held
-   before the restore. No test has shown this step.
+   before the restore. The upgrade case of the e2e suite shows it on the
+   lab: with no worker running and before any agent's files are reset, a
+   host reads back a whole volume of a pool made after the backup, and
+   another the data of a pool made before it.
 6. For each agent: stop it, copy its local files aside, delete them, and
    start it again. The copy is the last record of what the node was told
    before the restore.
@@ -2708,8 +2721,18 @@ breaking, and to the pools it does not see.
 Tested: the gateway's Go tests check every verdict against planted records
 and a fake agent, and the cn agent's tests check what it answers; the
 gateway suite's smoke case runs the check over a fake controller node after
-its id step. No test runs the whole procedure, a real `etcdutl` restore or
-the check against a real agent.
+its id step. The upgrade case of the e2e suite runs steps 1 to 6 and the
+start of the workers and the cdc of step 7 on the lab's real agents, from a
+backup taken under 0.1 and with the programs of a later build: a real
+`etcdutl` restore into a new folder, the id step, the check on every
+controller node, the reads of step 5 and every agent's files reset. It
+then checks that a pool made before the backup keeps its data, that new
+ids lie above every id handed out after the backup, that a pool grown after
+the backup breaks, and that the disk nodes free the sides made after the
+backup. It runs one etcd member and no Kubernetes, adds or takes away no
+node after the backup, and adds no host to and takes none off the list of
+a pool kept from before the backup (the one subsystem made after it is lost
+whole), so step 7's list change has nothing to do and step 8 does not run.
 
 ## The logs
 

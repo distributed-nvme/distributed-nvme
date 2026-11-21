@@ -679,7 +679,19 @@ CASES=(smoke ops copy react cutoff)
 # names it, alone, and never in the default list above, as each holds the lab
 # far longer than a default run or needs parameters of its own. Every name
 # here also needs its arm in sp_thresholds and sp_shape, like any case.
-OPTIN_CASES=(many)
+OPTIN_CASES=(many upgrade)
+
+# Which build's binaries ship_binaries ships and which build's start flags
+# the start lines carry: this tree's (`new`) for every case, and v0.1.0's
+# for the first half of the upgrade case (case_upgrade), whose programs lack
+# --log-level and the worker's --vote-leave-grace-time. RUN_BUILD is passed
+# to dn_up and cn_up as well.
+SHIP_BIN_DIR="$REPO_ROOT/bin"
+RUN_BUILD=new
+# The word install_udev_rules (or v0.1.0's mask) answered on each node guest
+# at the start of its first agent, keyed dn<v> and cn<v>: the upgrade case
+# reads it to show the new build's rules were written before its agents.
+declare -A NODE_UDEV=()
 
 # The cases this run will actually execute, in CASES order with --only applied.
 # main fills it BEFORE the guest preflight, which checks nvme-stas on host0
@@ -4014,6 +4026,52 @@ remove_udev_rules() {
 	return 0
 }
 
+# install_udev_v010 gives a node of the upgrade case's v0.1.0 half the one
+# udev rule v0.1.0's suites installed, its mask of the stock md assembly
+# (v0.1.0's integtest/e2e_test.sh, install_udev_rule), as 0.1 shipped none of
+# the rules of deploy/udev/; it takes those rules away first. The mask's file
+# is 63-dnv-md.rules, a name of deploy/udev/ too, so the new build's
+# install_udev_rules writes over it and remove_udev_rules takes it away. It
+# answers as install_udev_rules does.
+install_udev_v010() {
+	local name want word=present
+	want='ACTION=="add|change", SUBSYSTEM=="block", ENV{ID_FS_TYPE}=="linux_raid_member", \
+  IMPORT{program}="/sbin/mdadm --examine --export $devnode"
+ENV{MD_NAME}=="dnv-*|*:dnv-*", ENV{SYSTEMD_READY}="0"'
+	for name in "${!UDEV_RULES[@]}"; do
+		[ "$name" = 63-dnv-md.rules ] && continue
+		[ -e "$UDEV_DIR/$name" ] || continue
+		rm -f "$UDEV_DIR/$name" && word=installed
+	done
+	if ! printf '%s\n' "$want" | cmp -s - "$UDEV_DIR/63-dnv-md.rules"; then
+		printf '%s\n' "$want" >"$UDEV_DIR/63-dnv-md.rules" || {
+			echo "install_udev_v010: writing $UDEV_DIR/63-dnv-md.rules failed" >&2
+			return 1
+		}
+		word=installed
+	fi
+	udevadm control --reload >/dev/null 2>&1
+	echo "$word"
+	return 0
+}
+
+# store_aside <store dir> copies an agent's local store aside, to
+# <store dir>.aside, and deletes it: step 4 of an etcd restore
+# (architecture.md, etcd backup and restore), which the upgrade case runs
+# with the agent stopped. The copy is under $WORK, so the cleanup takes it.
+store_aside() {
+	[ -d "$1" ] || {
+		echo "store_aside: $1 is no directory" >&2
+		return 1
+	}
+	rm -rf "$1.aside" && cp -a "$1" "$1.aside" && rm -rf "$1" || {
+		echo "store_aside: copying $1 aside or deleting it failed" >&2
+		return 1
+	}
+	echo "aside=$1.aside files=$(find "$1.aside" -type f | wc -l)"
+	return 0
+}
+
 # udev_rules_list prints, for the dump, each rule file of deploy/udev/ in
 # $UDEV_DIR: its listing and whether it is the text this helper carries.
 udev_rules_list() {
@@ -4444,19 +4502,29 @@ helper_dn_source() {
 # them behind the suite's back. The rules are per GUEST, not per instance —
 # install_udev_rules writes nothing once the files are right, so every later
 # call on this VM costs one compare per file.
+# The last argument is the build whose flags the agent starts with: `new`,
+# or `v010` for the first half of the upgrade case, whose agent takes no
+# --log-level and whose node carries v0.1.0's mask (install_udev_v010)
+# instead of the rules.
 # <dir> <backing> <store> <log> <size> <ip> <grpc_port> <trsvcid> <port_id>
-# <pattern file> <pattern MiB> <pattern MiB>
+# <pattern file> <pattern MiB> <pattern MiB> <new|v010>
 dn_up() {
 	local dir=$1 backing=$2 store=$3 log=$4 size=$5
 	local ip=$6 gport=$7 svcid=$8 portid=$9
-	local pfile=${10} pmib1=${11} pmib2=${12}
+	local pfile=${10} pmib1=${11} pmib2=${12} build=${13:-new}
 	local dev pid pat udev
+	local -a lvl=(--log-level debug)
 
 	mkdir -p "$dir" "$store" || {
 		echo "dn_up: mkdir $dir / $store failed" >&2
 		return 1
 	}
-	udev=$(install_udev_rules) || {
+	if [ "$build" = v010 ]; then
+		lvl=()
+		udev=$(install_udev_v010)
+	else
+		udev=$(install_udev_rules)
+	fi || {
 		echo "dn_up: installing the udev rules of deploy/udev failed;" \
 			"without it this guest's own udev assembles the md legs whose" \
 			"superblocks the cn writes through the side export, and the" \
@@ -4510,7 +4578,7 @@ dn_up() {
 			--tr-type tcp --adr-fam ipv4 \
 			--tr-addr "$ip" --tr-svc-id "$svcid" \
 			--nvmet-port-id "$portid" \
-			--local-store "$store" --disk "$dev" --log-level debug \
+			--local-store "$store" --disk "$dev" "${lvl[@]}" \
 			>>"$log" 2>&1 </dev/null &
 		pid=$!
 		sleep 0.5
@@ -5753,14 +5821,22 @@ dev_wsect() { # <major:minor>
 # in addCommonFlags (cmd/dnv-agent/main.go), which is the port cn_cleanup_phase2
 # removes. Only the
 # dn agents need distinct ids, because only they share a kernel.
-cn_up() { # <dir> <store> <log> <ip> <grpc_port> <trsvcid> <capacity>
+# The last argument is dn_up's: the build whose flags the agent starts with.
+cn_up() { # <dir> <store> <log> <ip> <grpc_port> <trsvcid> <capacity> [new|v010]
 	local dir=$1 store=$2 log=$3 ip=$4 gport=$5 svcid=$6 cap=$7 pid pat udev
+	local build=${8:-new}
+	local -a lvl=(--log-level debug)
 
 	mkdir -p "$dir" "$store" || {
 		echo "cn_up: mkdir $dir / $store failed" >&2
 		return 1
 	}
-	udev=$(install_udev_rules) || {
+	if [ "$build" = v010 ]; then
+		lvl=()
+		udev=$(install_udev_v010)
+	else
+		udev=$(install_udev_rules)
+	fi || {
 		echo "cn_up: installing the udev rules of deploy/udev failed;" \
 			"starting the agent without it would let the stock udev rule" \
 			"assemble an array the agent is building" >&2
@@ -5774,7 +5850,7 @@ cn_up() { # <dir> <store> <log> <ip> <grpc_port> <trsvcid> <capacity>
 			--grpc-network tcp --grpc-address "$ip:$gport" \
 			--tr-type tcp --adr-fam ipv4 \
 			--tr-addr "$ip" --tr-svc-id "$svcid" \
-			--local-store "$store" --capacity "$cap" --log-level debug \
+			--local-store "$store" --capacity "$cap" "${lvl[@]}" \
 			>>"$log" 2>&1 </dev/null &
 		pid=$!
 		sleep 0.5
@@ -6516,6 +6592,31 @@ fwrite_verify() { # <uuid> <range bytes> <failed offset>
 	fi
 	printf 'verify_rc=%s verified_bytes=%s failed_block=%s zeros=%s\n' \
 		"$vrc" "${bytes:-none}" "$failed_block" "$zeros"
+	tail -n 5 "$FWRITE_DIR/verify.err" 2>/dev/null
+	return 0
+}
+
+# fwrite_verify_range reads back, with fio's verify and the writer's saved
+# state, the first <bytes> of a range the writer wrote whole, as fwrite_verify
+# reads the part before a failed write: `verify_rc=<n> verified_bytes=<n>`,
+# then the tail of the verify's errors. The upgrade case's writer ends at the
+# end of its range with no failed write.
+fwrite_verify_range() { # <uuid> <bytes>
+	local node vrc=0 bytes
+	node=$(readlink -f "/dev/disk/by-id/nvme-uuid.$1" 2>/dev/null) || node=""
+	[ -n "$node" ] && [ -b "$node" ] || {
+		echo "fwrite_verify_range: no block device for $1 ('$node')" >&2
+		return 1
+	}
+	cd "$FWRITE_DIR" || return 1
+	fio --name=fence --filename="$node" --rw=write --bs=4k --size="$2" \
+		--ioengine=psync --iodepth=1 --direct=1 --verify=crc32c \
+		--verify_only=1 --verify_state_load=1 --output-format=json \
+		>"$FWRITE_DIR/verify.json" 2>"$FWRITE_DIR/verify.err" || vrc=$?
+	bytes=$(awk '/"read"[[:space:]]*:/ { r = 1 }
+		r && /"io_bytes"/ { gsub(/[^0-9]/, ""); print; exit }' \
+		"$FWRITE_DIR/verify.json")
+	printf 'verify_rc=%s verified_bytes=%s\n' "$vrc" "${bytes:-none}"
 	tail -n 5 "$FWRITE_DIR/verify.err" 2>/dev/null
 	return 0
 }
@@ -8302,7 +8403,8 @@ basename_list() {
 #
 #   cp        etcd + etcdctl from the pinned cache, dnv-gateway, dnv-worker,
 #             dnv-cdc and dnvctl. etcdctl is shipped for READ-ONLY diagnostics
-#             only — every control-plane call of this suite is dnvctl (E2E2),
+#             and for the upgrade case's backups, an operator's act it tests
+#             — every control-plane call of this suite is dnvctl (E2E2),
 #             and a direct etcd write would be a rule violation, not a
 #             shortcut.
 #   dn VMs    dnv-agent (one binary, DNS_PER_VM processes), and the backing
@@ -8313,16 +8415,26 @@ basename_list() {
 #
 # It is sequential on purpose: a parallel scp would report a failure without
 # saying which guest it was.
-ship_binaries() {
-	local v
-	ship_one "$CP" cp \
-		"$ETCD_CACHE_DIR/$ETCD_DIST/etcd" "$ETCD_CACHE_DIR/$ETCD_DIST/etcdctl" \
-		"$GATEWAY_BIN" "$WORKER_BIN" "$CDC_BIN" "$DNVCTL_BIN"
+#
+# <bin dir> is the build whose five programs go out, SHIP_BIN_DIR by default
+# (the upgrade case ships v0.1.0's first); `dnv` ships those five and the
+# disk nodes' backing pattern, not etcd, for the upgrade case's binary swap,
+# while etcd runs on. A run with the upgrade
+# case ships etcd's restore tool etcdutl to cp as well.
+ship_binaries() { # [bin dir] [dnv]
+	local v bd=${1:-$SHIP_BIN_DIR}
+	local -a etcd=()
+	if [ "${2:-}" != dnv ]; then
+		etcd=("$ETCD_CACHE_DIR/$ETCD_DIST/etcd" "$ETCD_CACHE_DIR/$ETCD_DIST/etcdctl")
+		! run_has_case upgrade || etcd+=("$ETCD_CACHE_DIR/$ETCD_DIST/etcdutl")
+	fi
+	ship_one "$CP" cp "${etcd[@]}" \
+		"$bd/dnv-gateway" "$bd/dnv-worker" "$bd/dnv-cdc" "$bd/dnvctl"
 	for v in "${!DN[@]}"; do
-		ship_one "${DN[$v]}" "dn$v" "$AGENT_BIN" "$DN_PAT_LOCAL"
+		ship_one "${DN[$v]}" "dn$v" "$bd/dnv-agent" "$DN_PAT_LOCAL"
 	done
 	for v in "${!CN[@]}"; do
-		ship_one "${CN[$v]}" "cn$v" "$AGENT_BIN"
+		ship_one "${CN[$v]}" "cn$v" "$bd/dnv-agent"
 	done
 }
 
@@ -8447,6 +8559,10 @@ start_etcd() {
 		"--max-request-bytes=$ETCD_MAX_REQUEST_BYTES"
 }
 
+# new_flag prints its words when the start lines carry this tree's flags and
+# nothing when they carry v0.1.0's (RUN_BUILD): a flag v0.1.0's programs lack.
+new_flag() { [ "$RUN_BUILD" = v010 ] || printf '%s' "$*"; }
+
 # The three dnv daemons all reach etcd over the loopback, because all four run
 # on cp. The gateway binds $CP_IP, not 127.0.0.1: dnvctl runs on cp too (E2E2)
 # but --gateway-address is the address the run was told, and a loopback-only
@@ -8456,7 +8572,7 @@ start_gateway() {
 		"$WORK/bin/dnv-gateway --grpc-network tcp" \
 		"--grpc-address $CP_IP:$GW_PORT" \
 		"--etcd-endpoints 127.0.0.1:$ETCD_CLIENT_PORT" \
-		"--log-level debug"
+		"$(new_flag --log-level debug)"
 }
 
 # One worker with all three role loops. --vote-interval, --vote-grace-time
@@ -8468,8 +8584,8 @@ start_worker() {
 		"$WORK/bin/dnv-worker --etcd-endpoints 127.0.0.1:$ETCD_CLIENT_PORT" \
 		"--roles ${WORKER_ROLES// /,}" \
 		"--vote-interval $VOTE_INTERVAL --vote-grace-time $VOTE_GRACE" \
-		"--vote-leave-grace-time $VOTE_LEAVE_GRACE" \
-		"--log-level debug"
+		"$(new_flag --vote-leave-grace-time "$VOTE_LEAVE_GRACE")" \
+		"$(new_flag --log-level debug)"
 }
 
 # One cdc, serving every shard: --range is left at its default
@@ -8481,7 +8597,7 @@ start_cdc() {
 	remote_start "$CP" cdc cdc.log \
 		"$WORK/bin/dnv-cdc --etcd-endpoints 127.0.0.1:$ETCD_CLIENT_PORT" \
 		"--tr-type tcp --adr-fam ipv4 --tr-addr $CP_IP --tr-svc-id $CDC_PORT" \
-		"--log-level debug"
+		"$(new_flag --log-level debug)"
 }
 
 # cp_port_up is the readiness predicate the launches need between them. It
@@ -8547,12 +8663,14 @@ start_dn_instance() { # <v> <k>
 		"$(dn_dir "$k")" "$(dn_backing "$k")" "$(dn_store "$k")" \
 		"$(dn_log "$k")" "$BACKING_SIZE" "${DN_IP[$v]}" \
 		"$(dn_grpc_port "$k")" "$(dn_trsvcid "$k")" "$(dn_port_id "$k")" \
-		"$DN_PAT_GUEST" "$DN_PAT_DATA0_MIB" "$DN_PAT_LAST_MIB") ||
+		"$DN_PAT_GUEST" "$DN_PAT_DATA0_MIB" "$DN_PAT_LAST_MIB" \
+		"$RUN_BUILD") ||
 		die "dn$v instance $k: dn_up failed (its message is above)"
 	for kv in $out; do
 		case "$kv" in
 		loop=*) dev=${kv#loop=} ;;
 		pid=*) pid=${kv#pid=} ;;
+		udev=*) [ "$k" != 0 ] || NODE_UDEV[dn$v]=${kv#udev=} ;;
 		esac
 	done
 	case "$dev" in
@@ -8588,11 +8706,12 @@ start_cn_agent() { # <v>
 	local v=$1 out kv pid=""
 	out=$(helper_cn "$v" cn_up \
 		"$(cn_dir)" "$(cn_store)" "$(cn_log)" "${CN_IP[$v]}" \
-		"$CN_GRPC_PORT" "$CN_TRSVCID" 0) ||
+		"$CN_GRPC_PORT" "$CN_TRSVCID" 0 "$RUN_BUILD") ||
 		die "cn$v: cn_up failed (its message is above)"
 	for kv in $out; do
 		case "$kv" in
 		pid=*) pid=${kv#pid=} ;;
+		udev=*) NODE_UDEV[cn$v]=${kv#udev=} ;;
 		esac
 	done
 	case "$pid" in
@@ -9439,13 +9558,14 @@ preflight_host() { # <h>
 	fi
 
 	# The cutoff case's fence writer (stage 10) runs fio on host1 and reads
-	# its range back with cmp. Never installed by this suite: a host without
+	# its range back with cmp; the upgrade case runs the same writer on host1
+	# through the upgrade. Never installed by this suite: a host without
 	# them fails here, naming them.
-	if [ "$h" = 1 ] && run_has_case cutoff; then
+	if [ "$h" = 1 ] && { run_has_case cutoff || run_has_case upgrade; }; then
 		missing=$(ssh_host "$h" "$(tools_cmd $HOST_FENCE_TOOLS)") ||
 			die "$label: listing the fence writer's tools failed"
 		[ -z "$missing" ] ||
-			die "$label: missing tool(s) for the cutoff case's fence writer:" \
+			die "$label: missing tool(s) for the fence writer:" \
 				"$(printf '%s' "$missing" | tr '\n' ' ')"
 	fi
 
@@ -9494,8 +9614,10 @@ preflight_host() { # <h>
 	# failed IO (host_kmsg_clean), so with md-raid1, where those steps run,
 	# host0 needs the witness's tool, as preflight_stas asks it for the cutoff
 	# case.
-	if [ "$h" = 0 ] && [ "$REDUND" = raid1 ] &&
-		{ run_has_case copy || run_has_case react; }; then
+	# The upgrade case reads both hosts' kernel logs across the upgrade.
+	if { [ "$h" = 0 ] && [ "$REDUND" = raid1 ] &&
+		{ run_has_case copy || run_has_case react; }; } ||
+		run_has_case upgrade; then
 		missing=$(ssh_host "$h" "$(tools_cmd $HOST_KMSG_TOOLS)") ||
 			die "$label: listing the kernel-log witness's tools failed"
 		[ -z "$missing" ] ||
@@ -11830,6 +11952,17 @@ sp_thresholds() { # <case name>
 		THR_LEG=$THR_CUT_LEG
 		THR=$THR_CUT
 		;;
+	upgrade)
+		# The shipped thresholds: the case's pools are created with no
+		# --thr flag, so a worker that ran while an agent was down would
+		# fail its primary over within the default primary threshold.
+		THR_SET=shipped
+		THR_PRIMARY=$DEFAULT_PRIMARY_UNHEALTHY
+		THR_CNTLR=default
+		THR_SIDE=default
+		THR_LEG=default
+		THR=""
+		;;
 	smoke | ops | copy)
 		THR_SET=quiet
 		THR_PRIMARY=$THR_QUIET_PRIMARY
@@ -12896,8 +13029,9 @@ setup_between_cases() {
 # The ending every case shares (e2e_integtest.md, The cases; E2E5)
 # ---------------------------------------------------------------------------
 #
-# Each of the five cases ends the same way: delete what the case built, delete
-# the sp, wait for the sp-worker's drain to make `sp get` answer NOT_FOUND,
+# Each of the five default cases ends the same way (the upgrade case alone
+# leaves it out, and the end cleanup takes what it made): delete what the
+# case built, delete the sp, wait for the sp-worker's drain to make `sp get` answer NOT_FOUND,
 # assert that nothing of the sp survives on any guest, assert the two E2E5
 # allocation caps, and assert that every disk node's agent counts its whole
 # data area free, as its record does, and that the worker logged no
@@ -31144,6 +31278,911 @@ case_many() {
 }
 
 # ---------------------------------------------------------------------------
+# The upgrade case (e2e_integtest.md, The cases, upgrade), an opt-in case
+# ---------------------------------------------------------------------------
+#
+# It builds v0.1.0 from its tag, runs the lab's cluster on v0.1.0's programs
+# with v0.1.0's start flags, makes pools around an etcd backup, upgrades every
+# program to this tree's build in the order of architecture.md, Upgrade in
+# lockstep, while host1 writes, and then restores the backup in the order of
+# architecture.md, etcd backup and restore, with the new programs. main skips
+# `setup` for it: v0.1.0's programs lack flags setup's start lines pass, and
+# its records lack fields setup's checks read (the store row, the cluster's
+# 1 MiB stripe). Every pool is one slice, two cntlrs, the run's redundancy
+# and the shipped thresholds (sp_thresholds), whatever the run's slice count.
+#
+# The pools: UP_SP_A is made before the backup and nothing touches it after;
+# UP_SP_C is made before the backup and grows after it; UP_SP_B is made after
+# the backup with two thin devices, host1 writing into the first through the
+# upgrade; UP_SP_D is made after the restore.
+
+# The tag the case upgrades from, and where the driver keeps its five
+# programs: a cache in the gitignored integtest/bin, built once from a
+# depth-1 clone of the tag, never a git worktree, which Go stamps, as its
+# .git is a file, with the commit of a checkout around it or with no
+# version, never with the worktree's own tag (architecture.md, Components:
+# invocation reference, The version). A run reuses the cache when each
+# program in it carries the tag's module version, and builds it only when
+# the driver has UP_V010_ROOM free there; the clone goes once the build is
+# done, so the cache holds the programs alone.
+UP_TAG=v0.1.0
+UP_V010_DIR="$BIN_DIR/v010"
+UP_V010_SRC="$UP_V010_DIR/src"
+UP_V010_BIN="$UP_V010_DIR/bin"
+UP_V010_ROOM=$((2 << 30))
+UP_PROGS="dnv-agent dnv-gateway dnv-worker dnv-cdc dnvctl"
+# The agents' stop at the upgrade, as an operator's takes time: the
+# controller nodes' agents stop one at a time UP_STOP_GAP seconds apart,
+# then the disk nodes', and every agent stays stopped UP_DOWN_HOLD seconds
+# before the new ones start. Both are longer than the shipped primary
+# threshold and two check intervals, so a worker left running (a wrong
+# order) would fail over a primary whose node stopped first while its
+# standby's ran, and the case's check of no reaction would read it.
+UP_STOP_GAP=20
+UP_DOWN_HOLD=30
+# The digests of each program of the two builds, on the driver, which the
+# case holds every running program on the guests to (up_running_is).
+declare -A UP_SUM_V010=()
+declare -A UP_SUM_NEW=()
+UP_SP_A=upa
+UP_SP_B=upb
+UP_SP_C=upc
+UP_SP_D=upd
+UP_UUID_A=2b6f0cc9-04d2-4f1a-9c3e-1d0a5e7b8c21
+UP_UUID_B=2b6f0cc9-04d2-4f1a-9c3e-1d0a5e7b8c22
+# Each thin device's size, the pattern host0 writes into UP_SP_A's, and the
+# range host1's writer writes into UP_SP_B's at UP_FW_IOPS writes a second:
+# 48 MiB of 4 KiB writes at 16 a second last 768 s, which the case asserts
+# outlasts the upgrade.
+UP_TD_MIB=64
+UP_PAT_MIB=16
+UP_FW_MIB=48
+UP_FW_IOPS=16
+# Filled by the case: the new build's version as its --version prints it,
+# host0's digest of UP_SP_A, the backup's etcd revision, the sp id of
+# UP_SP_B, the per-pool ids UP_SP_C's grow minted, the sides made after the
+# backup ("<dn v> <sp hex16> <side hex16>" each), and the pools' signatures
+# before the upgrade.
+UP_NEW_VERSION=""
+UP_SHA_A=""
+UP_BACKUP_REV=""
+UP_B_SP_ID=""
+UP_C_GROW_IDS=()
+UP_POST_SIDES=()
+declare -A UP_SIG=()
+declare -A UP_SP_ID=()
+
+# dec_gt <a> <b>: decimal id <a> is above <b>, compared as strings, as an id
+# can pass the shell's signed range.
+dec_gt() {
+	[ "${#1}" -gt "${#2}" ] || { [ "${#1}" -eq "${#2}" ] && [[ "$1" > "$2" ]]; }
+}
+
+# up_dec <value> <what>: dies unless <value> is a decimal id above zero.
+up_dec() {
+	case "$1" in
+	'' | *[!0-9]* | 0) die "$2 reads '$1', not a decimal id" ;;
+	esac
+}
+
+# up_v010_mod <program>: the module version go version -m reads in the
+# cached build's program, or nothing.
+up_v010_mod() {
+	go version -m "$UP_V010_BIN/$1" 2>/dev/null | awk '$1 == "mod" { print $3 }'
+}
+
+up_build_v010() {
+	stage 00 "$UP_TAG's programs on the driver: the cached build, or one built from its tag"
+	local common bin cached=1 room
+	for bin in $UP_PROGS; do
+		[ "$(up_v010_mod "$bin")" = "$UP_TAG" ] || cached=0
+	done
+	if [ "$cached" = 1 ]; then
+		log "  $UP_TAG's programs are cached in $UP_V010_BIN: reused"
+	else
+		mkdir -p "$UP_V010_DIR" || die "mkdir $UP_V010_DIR failed"
+		room=$(df -B1 --output=avail "$UP_V010_DIR" | tail -n 1 | tr -d ' ')
+		case $room in
+		'' | *[!0-9]*) die "reading the driver's free room under $UP_V010_DIR failed ('$room')" ;;
+		esac
+		[ "$room" -ge "$UP_V010_ROOM" ] ||
+			die "the driver has $room bytes free under $UP_V010_DIR, under the" \
+				"$UP_V010_ROOM the build of $UP_TAG is given; free room first"
+		common=$(git -C "$REPO_ROOT" rev-parse --path-format=absolute \
+			--git-common-dir) || die "cannot find the git directory of $REPO_ROOT"
+		rm -rf "$UP_V010_SRC" "$UP_V010_BIN"
+		git clone -q --depth 1 --branch "$UP_TAG" "file://$common" \
+			"$UP_V010_SRC" 2>&1 | grep -v -e detached -e advice -e '^$' >&2 || true
+		[ -f "$UP_V010_SRC/Makefile" ] || die "cloning $UP_TAG from $common failed"
+		# -trimpath keeps the build's path out of Go's build cache keys, so
+		# a run from another tree reuses them.
+		(cd "$UP_V010_SRC" && GOFLAGS=-trimpath CGO_ENABLED=0 GOOS=linux \
+			GOARCH=amd64 make build >&2) || die "make build of $UP_TAG failed"
+		{ mv "$UP_V010_SRC/bin" "$UP_V010_BIN" && rm -rf "$UP_V010_SRC"; } ||
+			die "keeping the build of $UP_TAG in $UP_V010_BIN failed"
+		log "  $UP_TAG built from its tag into $UP_V010_BIN; its clone removed"
+	fi
+	for bin in $UP_PROGS; do
+		assert_eq "$(up_v010_mod "$bin")" "$UP_TAG" \
+			"the module version go version -m reads in the $UP_TAG build's $bin"
+		UP_SUM_V010[$bin]=$(sha256_of "$UP_V010_BIN/$bin")
+		UP_SUM_NEW[$bin]=$(sha256_of "$REPO_ROOT/bin/$bin")
+		assert_ne "${UP_SUM_V010[$bin]}" "${UP_SUM_NEW[$bin]}" \
+			"the digest of $bin in the two builds"
+	done
+	UP_NEW_VERSION=$("$AGENT_BIN" --version | awk '{ print $2 }')
+	[ -n "$UP_NEW_VERSION" ] || die "the new build's dnv-agent --version printed nothing"
+	assert_ne "$UP_NEW_VERSION" "$UP_TAG" "the new build's version differs from $UP_TAG's"
+	[ -x "$ETCD_CACHE_DIR/$ETCD_DIST/etcdutl" ] ||
+		die "the pinned etcd release in $ETCD_CACHE_DIR/$ETCD_DIST has no etcdutl"
+	log "  $UP_TAG built in $UP_V010_BIN; the new build is $UP_NEW_VERSION"
+}
+
+# up_dn_ready and up_cn_ready are dn_node_ready and cn_node_ready without the
+# store row, which v0.1.0's agents do not report.
+up_dn_ready() { # <v> <k>
+	ctl_try dn inspect --addr "$(dn_addr "$1" "$2")" || return 1
+	[ "$(jq_of "$CTL_OUT" '.dn_info.disk_info.status')" = RES_STATUS_OK ] &&
+		[ "$(jq_of "$CTL_OUT" '.dn_info.meta_info.status')" = RES_STATUS_OK ] &&
+		[ "$(jq_of "$CTL_OUT" '.dn_info.port_info.status')" = RES_STATUS_OK ]
+}
+
+up_cn_ready() { # <v>
+	ctl_try cn inspect --addr "$(cn_addr "$1")" || return 1
+	[ "$(jq_of "$CTL_OUT" '.cn_info.port_info.status')" = RES_STATUS_OK ]
+}
+
+# up_agents_logged <msg>: every agent's log holds a record whose msg is
+# <msg>, read in one ssh per guest: the guest prints the count of agent logs
+# and then each log that lacks the record. The logs are fresh at each start
+# of the case's agents (up_logs_aside).
+up_agents_logged() { # <msg>
+	local v out
+	for v in "${!DN[@]}"; do
+		out=$(ssh_dn "$v" "ls $WORK/dn*/agent.log | wc -l; \
+grep -LF '\"msg\":\"$1\"' $WORK/dn*/agent.log; true") || return 1
+		[ "$out" = "$DNS_PER_VM" ] || return 1
+	done
+	for v in "${!CN[@]}"; do
+		out=$(ssh_cn "$v" "ls $(cn_log) | wc -l; \
+grep -LF '\"msg\":\"$1\"' $(cn_log); true") || return 1
+		[ "$out" = 1 ] || return 1
+	done
+}
+
+# up_logs_aside <suffix> <cp daemon…> moves every agent's log, and on cp the
+# logs of the named daemons, each stopped, to <name>.<suffix>.log, so that
+# the programs started next write fresh logs whose start records the case
+# reads. A log a running program writes stays. The moved logs stay under
+# $WORK, where --keep-logs finds them.
+up_logs_aside() { # <suffix> <cp daemon…>
+	local v sfx=$1 d
+	shift
+	for v in "${!DN[@]}"; do
+		ssh_dn "$v" "for f in $WORK/dn*/agent.log; do [ ! -f \$f ] || \
+mv \$f \${f%.log}.$sfx.log || exit 1; done" >/dev/null ||
+			die "dn$v: moving the agent logs aside failed"
+	done
+	for v in "${!CN[@]}"; do
+		ssh_cn "$v" "f=$(cn_log); [ ! -f \$f ] || mv \$f \${f%.log}.$sfx.log" \
+			>/dev/null || die "cn$v: moving the agent log aside failed"
+	done
+	for d in "$@"; do
+		ssh_cp "f=$WORK/$d/$d.log; [ ! -f \$f ] || mv \$f \${f%.log}.$sfx.log" \
+			>/dev/null || die "cp: moving the $d's log aside failed"
+	done
+}
+
+# up_stop_agents stops every agent of the run, on every node guest.
+up_stop_agents() {
+	local v out
+	for v in "${!DN[@]}"; do
+		out=$(helper_dn "$v" kill_agents dn) || die "dn$v: kill_agents failed"
+		assert_eq "$out" "stopped dnv-agent dn" "dn$v's agents stopped"
+	done
+	for v in "${!CN[@]}"; do
+		out=$(helper_cn "$v" kill_agents cn) || die "cn$v: kill_agents failed"
+		assert_eq "$out" "stopped dnv-agent cn" "cn$v's agent stopped"
+	done
+}
+
+# up_stop_agents_gapped stops every agent as an operator's upgrade does,
+# node by node (UP_STOP_GAP, UP_DOWN_HOLD): the controller nodes' agents
+# first, one at a time, the node with the most primaries first, then every
+# disk node's, and then holds them all stopped. A worker still running, a
+# wrong order, would then fail over the primaries of the node it saw stop
+# first, whose standbys still ran.
+UP_T0=0
+UP_CN_ORDER=""
+declare -A UP_CN_PRIM=()
+# up_stop_order reads, while the gateway still answers, which controller
+# node holds each pool's primary, and orders the controller nodes for the
+# stop: the most primaries first.
+up_stop_order() {
+	local v sp addr
+	UP_CN_PRIM=()
+	for v in "${!CN[@]}"; do UP_CN_PRIM[$v]=0; done
+	for sp in "$UP_SP_A" "$UP_SP_B" "$UP_SP_C"; do
+		ctl_ok --sp "$sp" sp get
+		addr=$(jq_of "$CTL_OUT" '[.cntlr_list[] | select(.primary) | .addr_port] | first // ""')
+		v=$(cn_vm_of_addr "$addr")
+		[ "$v" != none ] || die "$sp's primary '$addr' is on no --cn guest"
+		UP_CN_PRIM[$v]=$((UP_CN_PRIM[$v] + 1))
+	done
+	UP_CN_ORDER=$(for v in "${!UP_CN_PRIM[@]}"; do echo "${UP_CN_PRIM[$v]} $v"; done |
+		sort -k1,1nr -k2,2n | awk '{ print $2 }' | tr '\n' ' ')
+}
+
+up_stop_agents_gapped() {
+	local v out first=1
+	[ -n "$UP_CN_ORDER" ] || die "up_stop_agents_gapped before up_stop_order"
+	for v in $UP_CN_ORDER; do
+		[ "$first" = 1 ] || sleep "$UP_STOP_GAP"
+		first=0
+		out=$(helper_cn "$v" kill_agents cn) || die "cn$v: kill_agents failed"
+		assert_eq "$out" "stopped dnv-agent cn" "cn$v's agent stopped"
+		log "  cn$v's agent stopped, ${UP_CN_PRIM[$v]} primary cntlr(s) there, $((SECONDS - UP_T0))s after the writer started"
+	done
+	sleep "$UP_STOP_GAP"
+	for v in "${!DN[@]}"; do
+		out=$(helper_dn "$v" kill_agents dn) || die "dn$v: kill_agents failed"
+		assert_eq "$out" "stopped dnv-agent dn" "dn$v's agents stopped"
+	done
+	log "  every agent stopped $((SECONDS - UP_T0))s after the writer started; held stopped ${UP_DOWN_HOLD}s"
+	sleep "$UP_DOWN_HOLD"
+}
+
+# up_start_agents starts every agent with the start lines of RUN_BUILD,
+# each after its guest's udev rules (dn_up, cn_up).
+up_start_agents() {
+	local v
+	for v in "${!DN[@]}"; do
+		start_dn_vm "$v"
+	done
+	for v in "${!CN[@]}"; do
+		start_cn_agent "$v"
+	done
+}
+
+# up_record_version <ssh fn> <index|""> <log> <msg> <what>: the version the
+# last <msg> record of <log> carries is the new build's.
+up_record_version() {
+	local line ver
+	if [ -n "$2" ]; then
+		line=$("$1" "$2" "grep -F '\"msg\":\"$4\"' $3 | tail -n 1") ||
+			die "$5: reading $3 failed"
+	else
+		line=$("$1" "grep -F '\"msg\":\"$4\"' $3 | tail -n 1") ||
+			die "$5: reading $3 failed"
+	fi
+	ver=$(printf '%s\n' "$line" | "$JQ" -R -r 'fromjson? // empty | .version // "none"')
+	assert_eq "$ver" "$UP_NEW_VERSION" "$5: the version of its '$4' record"
+}
+
+# up_running_is <v010|new> <when>: every dnv program that runs on a guest
+# runs the build's file, read as the digest of its /proc/<pid>/exe against
+# the driver's file of that build, by the pid each launcher recorded: every
+# dn agent, every cn agent, the gateway, the worker and the cdc. For v010
+# it also wants each shipped program to refuse --version, a flag v0.1.0
+# lacks, every agent log to hold no "agent node versions" record and the
+# gateway's, the worker's and the cdc's start records to carry no version,
+# as v0.1.0's carry none.
+up_running_is() { # <v010|new> <when>
+	local build=$1 when=$2 v d out prog
+	local -n sums=UP_SUM_${build^^}
+	for v in "${!DN[@]}"; do
+		out=$(ssh_dn "$v" "for k in \$(seq 0 $((DNS_PER_VM - 1))); do \
+sha256sum /proc/\$(cat $WORK/dn\$k/pid)/exe | cut -c1-64; done") ||
+			die "dn$v: reading what its agents run failed"
+		assert_eq "$(printf '%s\n' "$out" | sort -u | tr '\n' ' ')" \
+			"${sums[dnv-agent]} " \
+			"dn$v: the digest of the program each of its $DNS_PER_VM agents runs, against $build's dnv-agent, $when"
+	done
+	for v in "${!CN[@]}"; do
+		out=$(ssh_cn "$v" "sha256sum /proc/\$(cat $WORK/cn/pid)/exe | cut -c1-64") ||
+			die "cn$v: reading what its agent runs failed"
+		assert_eq "$out" "${sums[dnv-agent]}" \
+			"cn$v: the digest of the program its agent runs, against $build's dnv-agent, $when"
+	done
+	for d in gateway worker cdc; do
+		out=$(ssh_cp "sha256sum /proc/\$(cat $WORK/$d/pid)/exe | cut -c1-64") ||
+			die "cp: reading what the $d runs failed"
+		assert_eq "$out" "${sums[dnv-$d]}" \
+			"cp: the digest of the program the $d runs, against $build's dnv-$d, $when"
+	done
+	[ "$build" = v010 ] || return 0
+	for v in "${!DN[@]}"; do
+		out=$(ssh_dn "$v" "$WORK/bin/dnv-agent --version 2>&1; echo rc=\$?; \
+grep -cHF '\"msg\":\"agent node versions\"' $WORK/dn*/agent.log | grep -vc ':0\$'; true") ||
+			die "dn$v: reading dnv-agent --version and its agents' logs failed"
+		assert_eq "$(printf '%s\n' "$out" | tr '\n' ' ')" \
+			"Error: unknown flag: --version unknown flag: --version rc=1 0 " \
+			"dn$v: dnv-agent --version, and its agents' logs with a versions record, $when"
+	done
+	for v in "${!CN[@]}"; do
+		out=$(ssh_cn "$v" "$WORK/bin/dnv-agent --version 2>&1; echo rc=\$?; \
+grep -cF '\"msg\":\"agent node versions\"' $(cn_log); true") ||
+			die "cn$v: reading dnv-agent --version and its agent's log failed"
+		assert_eq "$(printf '%s\n' "$out" | tr '\n' ' ')" \
+			"Error: unknown flag: --version unknown flag: --version rc=1 0 " \
+			"cn$v: dnv-agent --version, and the versions records in its agent's log, $when"
+	done
+	for prog in dnv-gateway dnv-worker dnv-cdc dnvctl; do
+		out=$(ssh_cp "$WORK/bin/$prog --version >/dev/null 2>&1; echo rc=\$?") ||
+			die "cp: running $prog --version failed"
+		case "$out" in
+		rc=1 | rc=2) ;;
+		*) die "cp: $prog --version answered '$out', not a refusal of the flag $UP_TAG lacks, $when" ;;
+		esac
+	done
+	for d in gateway worker cdc; do
+		out=$(ssh_cp "grep -F '\"msg\":\"$d starting\"' $WORK/$d/$d.log | tail -n 1") ||
+			die "cp: reading the $d's start record failed"
+		assert_eq "$(printf '%s\n' "$out" | "$JQ" -R -r 'fromjson? // empty | if has("version") then "version " + .version else "no version" end')" \
+			"no version" "cp: the $d's start record, $when"
+	done
+}
+
+# up_pool_build <sp> creates <sp> (one slice, CNTLR_CNT cntlrs, the run's
+# redundancy, the shipped thresholds), waits for its sides and its primary's
+# stack, and leaves SP, SP_JSON and the roles of sp_read_roles on it.
+up_pool_build() { # <sp>
+	SP=$1
+	ctl_timeout 120 ctl_ok sp create --cntlr-cnt "$CNTLR_CNT" --slice-cnt 1 \
+		--init-ext-cnt "$INIT_EXT_CNT" --slots "$SLOTS" --redund "$REDUND"
+	UP_SP_ID[$1]=$(jq_of "$CTL_OUT" '.sp_id')
+	up_dec "${UP_SP_ID[$1]}" "sp create --sp $1's sp_id"
+	wait_until "$WAIT_PROVISION" "$1's sides to be provisioned" \
+		src_sides_provisioned "$1"
+	sp_refresh
+	sp_read_roles
+	SRC_STACK_LAST=""
+	wait_until "$WAIT_PROVISION" \
+		"$1's primary cntlr $PRIMARY_CNTLR_ID to build its pool, 2 groups and $((2 * LEGS)) legs" \
+		src_cntlr_ready "$1" "$PRIMARY_CNTLR_ID" 1 2 $((2 * LEGS))
+}
+
+# up_pool_export <sp> <td> <uuid> <h> makes a thin device of UP_TD_MIB MiB in
+# <sp>, the pool up_pool_build just made, and exports it to host <h> alone
+# through the cdc, which <h> connects through.
+up_pool_export() { # <sp> <td> <uuid> <h>
+	local nqn="$NQN_IT:$1" ss ns
+	ctl_ok td create --name "$2" --size "$((UP_TD_MIB << 20))"
+	wait_until "$WAIT_PROVISION" "$1/$2 to report created" src_td_created "$1" "$2"
+	wait_until "$WAIT_PROVISION" "$1's primary to build $2's raid0" \
+		src_raid0_ready "$1" "$PRIMARY_CNTLR_ID" 1
+	ctl_ok ss create --nqn "$nqn" --hosts "${HOST_NQN[$4]}"
+	ss=$(jq_of "$CTL_OUT" '.ss_id')
+	up_dec "$ss" "ss create $nqn's ss_id"
+	ctl_ok ns create --nqn "$nqn" --idx 1 --td "$2" --uuid "$3"
+	ns=$(jq_of "$CTL_OUT" '.ns_id')
+	up_dec "$ns" "ns create $nqn's ns_id"
+	wait_ns_exported_all "$nqn" "$ss" "$ns"
+	wait_until "$WAIT_HOST" "the cdc to serve $nqn to host$4 through the primary" \
+		up_host_disc_has "$4" "$nqn|$PRIMARY_TRADDR|$PRIMARY_TRSVCID"
+	host_connect_all "$4" "$nqn"
+	host_wait_ana "$4" "$nqn" "$PRIMARY_TRADDR" "$3" optimized
+	wait_dev "$4" "$3"
+}
+
+# up_host_disc_has <h> <record>: host <h>'s discovery log through the cdc
+# holds the subsystem record <record>, "<subnqn>|<traddr>|<trsvcid>" as
+# disc_records renders it. A host of the case may be on several pools'
+# lists, so the log is not compared whole, as setup's is (host_disc_is).
+up_host_disc_has() { # <h> <record>
+	local json
+	json=$(host_disc "$1")
+	[ -n "$json" ] || return 1
+	DISC_LAST=$(disc_records "$json") || return 1
+	[ "$(printf '%s\n' "$DISC_LAST" | grep -cxF -- "$2" || true)" -ge 1 ]
+}
+
+# up_sig <sp>: what a reaction would change in <sp>'s record — each cntlr's
+# id with its primary and disabled flags, and the sorted side ids.
+up_sig() { # <sp>
+	ctl_ok --sp "$1" sp get
+	jq_of "$CTL_OUT" "([.sp_conf.cntlr_id_list, .cntlr_list] | transpose
+		| map(\"\(.[0]):\(.[1].primary):\(.[1].disabled)\") | join(\",\"))
+		+ \" sides \" + ([$SP_SIDE_PATH | .side_id] | sort | join(\",\"))"
+}
+
+# up_sides_of <sp> [grp id] adds to UP_POST_SIDES one "<dn v> <sp hex16>
+# <side hex16>" entry per side of <sp>, or of its group <grp id>.
+up_sides_of() { # <sp> [grp id]
+	local sel='.' sp line v side
+	[ -z "${2:-}" ] || sel="select(.grp_id == \"$2\")"
+	ctl_ok --sp "$1" sp get
+	sp=$(hex16 "$(jq_of "$CTL_OUT" '.sp_conf.sp_id')") || die "$1 has no sp id"
+	while read -r line; do
+		[ -n "$line" ] || continue
+		v=$(dn_vm_of_addr "${line% *}")
+		[ "$v" != none ] || die "a side of $1 is on ${line% *}, no --dn guest"
+		side=$(hex16 "${line#* }") || die "a side of $1 has no side id"
+		UP_POST_SIDES+=("$v $sp $side")
+	done < <(jq_of "$CTL_OUT" ".slice_list[] | (.meta_grp_list[], .data_grp_list[])
+		| $sel | .leg_list[] | .side_list[] | \"\(.addr_port) \(.side_id)\"")
+}
+
+# up_v010() runs the first half: v0.1.0's cluster and the three pools around
+# the backup.
+up_v010() {
+	local v k out
+
+	stage 04 "$UP_TAG on today's guests: every program runs $UP_TAG's build, every agent serves; the cluster and the nodes"
+	# A v0.1.0 agent logs 'agent serving' once its startup pass has ended,
+	# not before it as the tree's build does, hence the longer wait.
+	wait_until "$WAIT_PROVISION" "every $UP_TAG agent to log 'agent serving'" \
+		up_agents_logged "agent serving"
+	up_running_is v010 "before the upgrade"
+	for v in "${!DN[@]}"; do
+		log "  dn$v: kernel $(ssh_dn "$v" "uname -r"), udev ${NODE_UDEV[dn$v]:-?}"
+	done
+	for v in "${!CN[@]}"; do
+		log "  cn$v: kernel $(ssh_cn "$v" "uname -r"), udev ${NODE_UDEV[cn$v]:-?}"
+	done
+	ctl_ok cluster create --name "$CLUSTER" --extent-size "$EXTENT_SIZE"
+	ctl_ok cluster get --name "$CLUSTER"
+	CLUSTER_ID=$(jq_of "$CTL_OUT" '.cluster_id')
+	up_dec "$CLUSTER_ID" "cluster get's cluster_id"
+	# v0.1.0's default stripe, which the tree's build no longer stores.
+	assert_field "$CTL_OUT" '.cluster_conf.bdev_conf.dm_raid0_conf.stripe_size' \
+		65536 "the stripe $UP_TAG's gateway stores for a cluster that names none"
+	log "  cluster_id $CLUSTER_ID; $UP_TAG stores the stripe 65536"
+	for v in "${!DN[@]}"; do
+		for ((k = 0; k < DNS_PER_VM; k++)); do
+			wait_until "$WAIT_AGENT" "dn create $(dn_addr "$v" "$k") to be accepted" \
+				ctl_create_try dn create --addr "$(dn_addr "$v" "$k")" \
+				--tr-type tcp --adr-fam ipv4 \
+				--tr-addr "${DN_IP[$v]}" --tr-svc-id "$(dn_trsvcid "$k")" \
+				--location "$(dn_location "$v")"
+		done
+	done
+	for v in "${!CN[@]}"; do
+		wait_until "$WAIT_AGENT" "cn create $(cn_addr "$v") to be accepted" \
+			ctl_create_try cn create --addr "$(cn_addr "$v")" \
+			--tr-type tcp --adr-fam ipv4 \
+			--tr-addr "${CN_IP[$v]}" --tr-svc-id "$CN_TRSVCID" \
+			--location "$(cn_location "$v")"
+	done
+	for v in "${!DN[@]}"; do
+		for ((k = 0; k < DNS_PER_VM; k++)); do
+			wait_until "$WAIT_PROVISION" "dn$v instance $k: disk, header and port OK" \
+				up_dn_ready "$v" "$k"
+		done
+	done
+	for v in "${!CN[@]}"; do
+		wait_until "$WAIT_PROVISION" "cn$v: its port OK" up_cn_ready "$v"
+	done
+
+	stage 05 "$UP_TAG: pool $UP_SP_A, its thin device exported to host0, a pattern written"
+	up_pool_build "$UP_SP_A"
+	up_pool_export "$UP_SP_A" t0 "$UP_UUID_A" 0
+	out="$WORK/pattern-$UP_SP_A"
+	host_make_pattern 0 "$out" "$UP_PAT_MIB"
+	UP_SHA_A=$(host_sha_range 0 "$out" "$UP_PAT_MIB") ||
+		die "host0: digesting the pattern failed"
+	assert_eq "${#UP_SHA_A}" 64 "host0's pattern digest is 64 hex digits"
+	host_write_range 0 "$out" "$(host_dev "$UP_UUID_A")" "$UP_PAT_MIB" 0
+	host_wait_sha 0 "$(host_dev "$UP_UUID_A")" "$UP_PAT_MIB" "$UP_SHA_A" \
+		"$WAIT_HOST" "host0 to read the pattern back from $UP_SP_A"
+
+	stage 06 "$UP_TAG: pool $UP_SP_C"
+	up_pool_build "$UP_SP_C"
+
+	stage 07 "the etcd backup: etcdctl snapshot save"
+	ssh_cp "mkdir -p $WORK/backup && $WORK/bin/etcdctl --endpoints \
+http://127.0.0.1:$ETCD_CLIENT_PORT snapshot save $WORK/backup/etcd.db" >&2 ||
+		die "etcdctl snapshot save failed"
+	out=$(ssh_cp "$WORK/bin/etcdutl snapshot status $WORK/backup/etcd.db -w json") ||
+		die "etcdutl snapshot status failed"
+	UP_BACKUP_REV=$(jq_of "$out" '.revision')
+	up_dec "$UP_BACKUP_REV" "the backup's etcd revision"
+	log "  backup at etcd revision $UP_BACKUP_REV: $out"
+
+	stage 08 "after the backup: pool $UP_SP_B with two thin devices, host1 on the first; a data grow of $UP_SP_C"
+	up_pool_build "$UP_SP_B"
+	UP_B_SP_ID=$(jq_of "$SP_JSON" '.sp_conf.sp_id')
+	up_dec "$UP_B_SP_ID" "$UP_SP_B's sp_id"
+	up_pool_export "$UP_SP_B" t0 "$UP_UUID_B" 1
+	ctl_ok td create --name t1 --size "$((UP_TD_MIB << 20))"
+	wait_until "$WAIT_PROVISION" "$UP_SP_B/t1 to report created" \
+		src_td_created "$UP_SP_B" t1
+	UP_POST_SIDES=()
+	up_sides_of "$UP_SP_B"
+	assert_eq "${#UP_POST_SIDES[@]}" "$((2 * LEGS))" \
+		"the sides read of $UP_SP_B, a meta and a data group of $LEGS leg(s) each"
+	SP=$UP_SP_C
+	sp_refresh
+	sp_read_roles
+	ctl_ok sp grow-slice --slice "$(sp_field '.sp_conf.slice_id_list[0]')" \
+		--ext "$INIT_EXT_CNT"
+	out=$(jq_of "$CTL_OUT" '.grp_id')
+	up_dec "$out" "the grow's grp_id"
+	wait_until "$WAIT_PROVISION" "$UP_SP_C's new sides to be provisioned" \
+		src_sides_provisioned "$UP_SP_C"
+	SRC_STACK_LAST=""
+	wait_until "$WAIT_PROVISION" \
+		"$UP_SP_C's primary to build 3 groups and $((3 * LEGS)) legs" \
+		src_cntlr_ready "$UP_SP_C" "$PRIMARY_CNTLR_ID" 1 3 $((3 * LEGS))
+	sp_refresh
+	mapfile -t UP_C_GROW_IDS < <(jq_of "$SP_JSON" ".slice_list[0].data_grp_list[]
+		| select(.grp_id == \"$out\") | .grp_id, (.leg_list[] | .leg_id,
+		  (.side_list[] | .side_id))")
+	assert_eq "${#UP_C_GROW_IDS[@]}" "$((1 + LEGS * 2))" \
+		"the grow minted a group, $LEGS leg(s) and $LEGS side(s)"
+	up_sides_of "$UP_SP_C" "${UP_C_GROW_IDS[0]}"
+	assert_eq "${#UP_POST_SIDES[@]}" "$((3 * LEGS))" \
+		"the sides read of $UP_SP_B and of $UP_SP_C's grow, $LEGS more"
+	log "  made after the backup: $UP_SP_B (sp_id $UP_B_SP_ID) and the ids" \
+		"${UP_C_GROW_IDS[*]} of $UP_SP_C's grow; their sides:" \
+		"$(printf '[%s] ' "${UP_POST_SIDES[@]}")"
+}
+
+# up_upgrade() is the upgrade in lockstep (architecture.md, Upgrade in
+# lockstep) under host1's writes.
+up_upgrade() {
+	local v out line sp t0 window settle tag="dnv-e2e-upgrade-$CLUSTER_ID"
+
+	stage 09 "the upgrade, under host1's writes: the worker stops first, then the gateway, the cdc and every agent, node by node, held stopped ${UP_DOWN_HOLD}s"
+	host_kmsg_mark 0 "$tag"
+	host_kmsg_mark 1 "$tag"
+	out=$(helper_host 1 fwrite_start "$UP_UUID_B" "$((UP_FW_MIB << 20))" \
+		"$UP_FW_IOPS") || die "host1: starting the writer failed (its message is above)"
+	printf '%s\n' "$out" >&2
+	t0=$SECONDS
+	UP_T0=$t0
+	sleep 5
+	out=$(helper_host 1 fwrite_stat) || die "host1: the fwrite_stat verb failed"
+	assert_eq "$(printf '%s\n' "$out" | head -n 1)" \
+		"running=yes rc=none failed_offset=none issued=none" \
+		"host1's writer before the upgrade"
+	for sp in "$UP_SP_A" "$UP_SP_B" "$UP_SP_C"; do
+		UP_SIG[$sp]=$(up_sig "$sp")
+		log "  $sp before: ${UP_SIG[$sp]}"
+	done
+	up_stop_order
+	stop_proc "$CP" worker || die "the $UP_TAG worker did not stop"
+	stop_proc "$CP" gateway || die "the $UP_TAG gateway did not stop"
+	stop_proc "$CP" cdc || die "the $UP_TAG cdc did not stop"
+	up_stop_agents_gapped
+
+	stage 10 "every binary replaced, dnvctl too; the udev rules of deploy/udev on every node guest; the new build's node check on every controller node"
+	up_logs_aside v010 gateway worker cdc
+	ship_binaries "$REPO_ROOT/bin" dnv
+	SHIP_BIN_DIR="$REPO_ROOT/bin"
+	RUN_BUILD=new
+	for v in "${!DN[@]}"; do
+		assert_eq "$(helper_dn "$v" install_udev_rules)" installed \
+			"dn$v: the rules of deploy/udev written over $UP_TAG's mask"
+	done
+	for v in "${!CN[@]}"; do
+		assert_eq "$(helper_cn "$v" install_udev_rules)" installed \
+			"cn$v: the rules of deploy/udev written over $UP_TAG's mask"
+	done
+	for v in "${!CN[@]}"; do
+		# What the operations doc's md step reads on a node that ran dnv
+		# before: the scan lists dnv's own arrays beside the node's.
+		out=$(ssh_cn_ok "$v" "timeout 30 mdadm --detail --scan 2>/dev/null")
+		log "  cn$v: mdadm --detail --scan prints" \
+			"$(printf '%s\n' "$out" | grep -c '^ARRAY' || true) ARRAY line(s), their" \
+			"devices $(printf '%s\n' "$out" | awk '$1 == "ARRAY" { printf "%s ", $2 }')"
+		line=0
+		out=$(ssh_cn "$v" "$WORK/bin/dnv-agent check cn --output json") || line=$?
+		node_check_ok "cn$v" "$out" "$line"
+	done
+
+	stage 11 "the new agents start, each after its guest's udev rules, and each ends its startup pass"
+	up_start_agents
+	wait_until "$WAIT_PROVISION" "every new agent to log 'agent started'" \
+		up_agents_logged "agent started"
+
+	stage 12 "before the workers start: every binary's --version and every agent's start record name the new build"
+	for v in "${!DN[@]}"; do
+		assert_eq "$(ssh_dn "$v" "$WORK/bin/dnv-agent --version")" \
+			"dnv-agent $UP_NEW_VERSION" "dn$v: dnv-agent --version"
+		for ((line = 0; line < DNS_PER_VM; line++)); do
+			up_record_version ssh_dn "$v" "$(dn_log "$line")" \
+				"agent node versions" "dn$v instance $line"
+		done
+	done
+	for v in "${!CN[@]}"; do
+		assert_eq "$(ssh_cn "$v" "$WORK/bin/dnv-agent --version")" \
+			"dnv-agent $UP_NEW_VERSION" "cn$v: dnv-agent --version"
+		up_record_version ssh_cn "$v" "$(cn_log)" "agent node versions" "cn$v"
+	done
+	for out in dnv-gateway dnv-worker dnv-cdc dnvctl; do
+		assert_eq "$(ssh_cp "$WORK/bin/$out --version")" "$out $UP_NEW_VERSION" \
+			"cp: $out --version"
+	done
+
+	stage 13 "the gateway and the cdc start, the worker last"
+	start_gateway
+	wait_until "$WAIT_SHORT" "the gateway to listen on $GW_PORT" \
+		cp_port_up "$GW_PORT"
+	start_cdc
+	wait_until "$WAIT_SHORT" "the cdc to listen on $CDC_PORT" \
+		cp_port_up "$CDC_PORT"
+	wait_until "$WAIT_CP_READY" "the new gateway to answer" gateway_serving
+	up_record_version ssh_cp "" "$WORK/gateway/gateway.log" "gateway starting" \
+		"the gateway"
+	up_record_version ssh_cp "" "$WORK/cdc/cdc.log" "cdc starting" "the cdc"
+	start_worker
+	window=$((SECONDS - t0))
+	settle=$((VOTE_GRACE + VOTE_INTERVAL + DEFAULT_PRIMARY_UNHEALTHY + 10 * DEFAULT_HC_INTERVAL))
+	log "  the worker started ${window}s after the writer; waiting ${settle}s:" \
+		"the vote grace and interval, the primary threshold and ten check intervals"
+	sleep "$settle"
+	up_record_version ssh_cp "" "$WORK/worker/worker.log" "worker starting" \
+		"the worker"
+	up_running_is new "after the upgrade"
+
+	stage 14 "after the upgrade: no reaction, no failed write, the data unchanged"
+	# No reaction first: a reaction of a worker left running in a wrong
+	# order may also fail host1's writes, and the run must name the order.
+	assert_eq "$(worker_msg_cnt "reaction applied")" 0 \
+		"the new worker's 'reaction applied' records"
+	for sp in "$UP_SP_A" "$UP_SP_B" "$UP_SP_C"; do
+		assert_eq "$(up_sig "$sp")" "${UP_SIG[$sp]}" \
+			"$sp's cntlrs, primary and sides after the upgrade"
+	done
+	out=$(helper_host 1 fwrite_stat) || die "host1: the fwrite_stat verb failed"
+	assert_eq "$(printf '%s\n' "$out" | head -n 1)" \
+		"running=yes rc=none failed_offset=none issued=none" \
+		"host1's writer after the upgrade and the settle (still running: the window is covered)"
+	host_wait_sha 0 "$(host_dev "$UP_UUID_A")" "$UP_PAT_MIB" "$UP_SHA_A" \
+		"$WAIT_HOST" "host0 to read $UP_SP_A's pattern after the upgrade"
+	wait_until "$((UP_FW_MIB * 256 / UP_FW_IOPS + WAIT_HOST))" \
+		"host1's writer to end its range" up_fw_ended
+	out=$(helper_host 1 fwrite_stat) || die "host1: the fwrite_stat verb failed"
+	assert_eq "$(printf '%s\n' "$out" | head -n 1 | sed 's/ issued=.*//')" \
+		"running=no rc=0 failed_offset=none" "host1's writer at its end"
+	log "  $(printf '%s\n' "$out" | head -n 1); $((SECONDS - t0))s"
+	up_fw_verify "after the upgrade"
+	host_kmsg_clean 0 "$tag" "through the upgrade"
+	host_kmsg_clean 1 "$tag" "through the upgrade"
+}
+
+# up_fw_ended: host1's writer has stopped.
+up_fw_ended() {
+	local out
+	out=$(helper_host 1 fwrite_stat 2>/dev/null) || return 1
+	case "$out" in
+	running=no*) return 0 ;;
+	esac
+	return 1
+}
+
+# up_fw_verify <when>: host1 reads its writer's whole range back with fio's
+# verify, through whatever path it holds.
+up_fw_verify() { # <when>
+	local out
+	out=$(helper_host 1 fwrite_verify_range "$UP_UUID_B" "$((UP_FW_MIB << 20))") ||
+		die "host1: the fwrite_verify_range verb failed (its message is above)"
+	printf '%s\n' "$out" >&2
+	assert_eq "$(printf '%s\n' "$out" | head -n 1)" \
+		"verify_rc=0 verified_bytes=$((UP_FW_MIB << 20))" \
+		"host1's verify of every block its writer wrote, $1"
+}
+
+# up_restore_rows: the rows of every controller node's restore check, one
+# JSON array, in UP_ROWS.
+UP_ROWS=""
+up_restore_rows() {
+	local v rows="[]"
+	for v in "${!CN[@]}"; do
+		ctl_timeout 120 ctl_ok cn check-restore --addr "$(cn_addr "$v")"
+		log "  cn$v: held_cn_list $(jq_of "$CTL_OUT" '.held_cn_list | tostring')," \
+			"restored_revision $(jq_of "$CTL_OUT" '.restored_revision')"
+		rows=$(printf '%s\n%s' "$rows" "$CTL_OUT" | "$JQ" -s -c \
+			'.[0] + [.[1].pool_list[]? ]') || die "joining the restore rows failed"
+	done
+	UP_ROWS=$rows
+}
+
+# up_verdict <sp>: the verdict of <sp>'s row with the highest held revision,
+# the pool found by its sp id.
+up_verdict() { # <sp>
+	jq_of "$UP_ROWS" "[.[] | select(.sp_id == \"${UP_SP_ID[$1]}\")]
+		| sort_by(.held_revision // \"0\" | tonumber) | last
+		| .verdict // \"none\""
+}
+
+# up_side_gone <v> <sp hex16> <side hex16>: no dm device of dn<v> names the
+# side.
+up_side_gone() {
+	local out
+	out=$(helper_dn "$1" dm_names) || return 1
+	[ "$(printf '%s\n' "$out" | grep -c -- "-$2-$3" || true)" = 0 ]
+}
+
+# up_dn_counts <v> <k>: the disk node's agent holds its record's revision,
+# its side records name exactly that record's sides, and it counts the free
+# extents its record counts.
+up_dn_counts() { # <v> <k>
+	local addr rec ins
+	addr=$(dn_addr "$1" "$2")
+	ctl_try dn get --addr "$addr" || return 1
+	rec=$CTL_OUT
+	ctl_try dn inspect --addr "$addr" || return 1
+	ins=$CTL_OUT
+	[ "$(jq_of "$ins" '.applied_revision')" = "$(jq_of "$rec" '.dn_rev.revision')" ] &&
+		[ "$(jq_of "$ins" '.dn_info.disk_counts.side_recs_match // false')" = true ] &&
+		[ "$(jq_of "$ins" '.dn_info.disk_counts.free_ext_cnt')" = \
+			"$(jq_of "$rec" '.dn_conf.free_ext_cnt')" ]
+}
+
+# up_c_broken: the primary of UP_SP_C refuses to shrink its slice's data
+# concat back to the restored layout (cnagent.md CN13).
+UP_C_LAST=""
+up_c_broken() { # <cntlr id>
+	local rows
+	ctl_try --sp "$UP_SP_C" cntlr inspect --id "$1" || return 1
+	rows=$(jq_of "$CTL_OUT" '[(.cntlr_info.slice_id_to_data // {})[],
+		(.cntlr_info.slice_id_to_dm_pool // {})[]]
+		| map("\(.status) \(.details // "")") | join(" | ")')
+	if [ "$rows" != "$UP_C_LAST" ]; then
+		UP_C_LAST=$rows
+		log "  $UP_SP_C's data concat and pool rows: $rows"
+	fi
+	case "$rows" in
+	"RES_STATUS_ERROR refusing to shrink the concat"*) return 0 ;;
+	esac
+	return 1
+}
+
+# up_restore() restores the backup by architecture.md, etcd backup and
+# restore, with the new programs.
+up_restore() {
+	local v k out line id max
+
+	stage 15 "restore: the worker, the cdc and the gateway stop; etcd restored into a new data directory and started; the gateway"
+	stop_proc "$CP" worker || die "the worker did not stop"
+	stop_proc "$CP" cdc || die "the cdc did not stop"
+	stop_proc "$CP" gateway || die "the gateway did not stop"
+	stop_proc "$CP" etcd || die "etcd did not stop"
+	ssh_cp "mv $WORK/etcd $WORK/etcd.before-restore && $WORK/bin/etcdutl \
+snapshot restore $WORK/backup/etcd.db --data-dir $WORK/etcd --name $ETCD_NAME \
+--initial-cluster $ETCD_NAME=http://127.0.0.1:$ETCD_PEER_PORT \
+--initial-advertise-peer-urls http://127.0.0.1:$ETCD_PEER_PORT" >&2 ||
+		die "etcdutl snapshot restore failed"
+	start_etcd
+	wait_until "$WAIT_SHORT" "etcd to listen on $ETCD_CLIENT_PORT" \
+		cp_port_up "$ETCD_CLIENT_PORT"
+	start_gateway
+	wait_until "$WAIT_SHORT" "the gateway to listen on $GW_PORT" \
+		cp_port_up "$GW_PORT"
+	# Step 2 of the procedure: before the id step no call but the list of
+	# clusters (and of workers), so the gateway's answer is read through it.
+	wait_until "$WAIT_CP_READY" "the gateway to answer cluster list" \
+		ctl_try cluster list
+
+	stage 16 "the id step, then the restore check on every controller node"
+	ctl_ok cluster advance-ids --name "$CLUSTER"
+	log "  advance-ids: $CTL_OUT"
+	ctl_ok sp list
+	assert_jq "$CTL_OUT" "[.sp_name[]?] | sort == [\"$UP_SP_A\", \"$UP_SP_C\"]" \
+		"the restored state holds $UP_SP_A and $UP_SP_C, and not $UP_SP_B"
+	up_restore_rows
+	log "  rows: $UP_ROWS"
+	# A, which no call touched after the backup, reads older: the new worker
+	# set its groups' array flag once after the upgrade (architecture.md,
+	# Upgrade in lockstep), one write, so its held revision is the restored
+	# one plus one.
+	assert_eq "$(up_verdict "$UP_SP_A")" RESTORE_VERDICT_OLDER \
+		"$UP_SP_A, untouched since the backup but by the new worker's array flag, reads older"
+	assert_eq "$(jq_of "$UP_ROWS" "[.[] | select(.sp_id == \"${UP_SP_ID[$UP_SP_A]}\")]
+		| sort_by(.held_revision // \"0\" | tonumber) | last
+		| (.held_revision | tonumber) - (.restored_revision | tonumber)")" 1 \
+		"$UP_SP_A's highest held revision past its restored one (the one write of the array flag)"
+	assert_eq "$(jq_of "$UP_ROWS" "[.[] | select(.sp_id == \"${UP_SP_ID[$UP_SP_A]}\")
+		| (.lost_td_list // [])[], (.returning_td_list // [])[]] | length")" 0 \
+		"$UP_SP_A's rows list no lost and no returning thin device"
+	assert_eq "$(up_verdict "$UP_SP_B")" RESTORE_VERDICT_NEW \
+		"$UP_SP_B, made after the backup, reads new"
+	assert_eq "$(jq_of "$UP_ROWS" "[.[] | select(.sp_id == \"$UP_B_SP_ID\")]
+		| sort_by(.held_revision // \"0\" | tonumber) | last
+		| (.lost_td_list // []) | length")" 2 \
+		"$UP_SP_B's row lists its two thin devices lost"
+	assert_eq "$(up_verdict "$UP_SP_C")" RESTORE_VERDICT_MAY_BREAK \
+		"$UP_SP_C, grown after the backup, reads may break"
+
+	stage 17 "while no worker runs and before any store is cleared, host1 reads all of $UP_SP_B and host0 $UP_SP_A"
+	up_fw_verify "before the stores are cleared"
+	host_wait_sha 0 "$(host_dev "$UP_UUID_A")" "$UP_PAT_MIB" "$UP_SHA_A" \
+		"$WAIT_HOST" "host0 to read $UP_SP_A's pattern with no worker running"
+
+	stage 18 "every agent stops, its local store is set aside and deleted, and it starts"
+	up_stop_agents
+	for v in "${!DN[@]}"; do
+		for ((k = 0; k < DNS_PER_VM; k++)); do
+			out=$(helper_dn "$v" store_aside "$(dn_store "$k")") ||
+				die "dn$v instance $k: store_aside failed"
+			log "  dn$v instance $k: $out"
+		done
+	done
+	for v in "${!CN[@]}"; do
+		out=$(helper_cn "$v" store_aside "$(cn_store)") ||
+			die "cn$v: store_aside failed"
+		log "  cn$v: $out"
+	done
+	up_logs_aside upgrade worker cdc
+	up_start_agents
+	wait_until "$WAIT_PROVISION" "every agent to log 'agent started'" \
+		up_agents_logged "agent started"
+
+	stage 19 "the worker and the cdc start; a new backup"
+	start_cdc
+	wait_until "$WAIT_SHORT" "the cdc to listen on $CDC_PORT" \
+		cp_port_up "$CDC_PORT"
+	start_worker
+	ssh_cp "$WORK/bin/etcdctl --endpoints http://127.0.0.1:$ETCD_CLIENT_PORT \
+snapshot save $WORK/backup/etcd-after-restore.db" >&2 ||
+		die "the new backup failed"
+
+	stage 20 "new ids lie above every id handed out after the backup"
+	SP=$UP_SP_D
+	up_pool_build "$UP_SP_D"
+	id=$(jq_of "$SP_JSON" '.sp_conf.sp_id')
+	dec_gt "$id" "$UP_B_SP_ID" ||
+		die "$UP_SP_D's sp_id $id is not above $UP_SP_B's $UP_B_SP_ID"
+	log "  $UP_SP_D's sp_id $id is above $UP_SP_B's $UP_B_SP_ID, and its" \
+		"sides came up provisioned"
+	SP=$UP_SP_C
+	ctl_ok td create --name t9 --size "$((UP_TD_MIB << 20))"
+	id=$(jq_of "$CTL_OUT" '.td_id')
+	up_dec "$id" "$UP_SP_C's new td_id"
+	for max in "${UP_C_GROW_IDS[@]}"; do
+		dec_gt "$id" "$max" ||
+			die "$UP_SP_C's new td_id $id is not above $max, an id of its grow"
+	done
+	log "  $UP_SP_C's new td_id $id is above every id of its grow:" \
+		"${UP_C_GROW_IDS[*]}"
+
+	stage 21 "$UP_SP_C breaks: its primary refuses to shrink the data concat"
+	sp_refresh
+	sp_read_roles
+	UP_C_LAST=""
+	wait_until "$WAIT_PROVISION" \
+		"$UP_SP_C's primary $PRIMARY_CNTLR_ID to refuse to shrink its data concat" \
+		up_c_broken "$PRIMARY_CNTLR_ID"
+
+	stage 22 "the disk nodes free the sides made after the backup; their counts agree with their records"
+	for line in "${UP_POST_SIDES[@]}"; do
+		read -r v id max <<<"$line"
+		wait_until "$WAIT_PROVISION" "dn$v to free side $max of sp $id" \
+			up_side_gone "$v" "$id" "$max"
+	done
+	for v in "${!DN[@]}"; do
+		for ((k = 0; k < DNS_PER_VM; k++)); do
+			wait_until "$WAIT_PROVISION" \
+				"dn$v instance $k to hold its record's sides and free count" \
+				up_dn_counts "$v" "$k"
+		done
+	done
+	log "  ${#UP_POST_SIDES[@]} sides made after the backup are gone"
+
+	stage 23 "$UP_SP_A holds its data"
+	host_wait_sha 0 "$(host_dev "$UP_UUID_A")" "$UP_PAT_MIB" "$UP_SHA_A" \
+		"$WAIT_HOST" "host0 to read $UP_SP_A's pattern after the restore"
+}
+
+case_upgrade() {
+	CASE=upgrade
+	up_build_v010
+	SHIP_BIN_DIR=$UP_V010_BIN
+	RUN_BUILD=v010
+	setup_infra
+	CASE=upgrade
+	up_v010
+	up_upgrade
+	up_restore
+	# The case leaves out the ending every other case shares (case_finish),
+	# not its space caps: the pools stay for the end cleanup, and the caps
+	# hold over what they and the case's files allocate.
+	case_space_guard
+}
+
+# ---------------------------------------------------------------------------
 # The space guard's run summary (E2E5)
 # ---------------------------------------------------------------------------
 #
@@ -31274,7 +32313,8 @@ run_case() { # <case name>
 #     -> [--cleanup-only: ship_helpers, cleanup_all, stop]
 #     -> preflight_driver -> ship_helpers -> cleanup_all -> cleanup_start_gate
 #     -> the run list (RUN_CASES) -> preflight_guests
-#     -> setup -> the case loop -> run_summary
+#     -> setup (none for the upgrade case, which builds its own) -> the case
+#     loop -> run_summary
 #
 #  a. PREFLIGHT RUNS AFTER THE START CLEANUP, not before it: a port check, a
 #     `ports_busy` and an nvmet-port conflict check taken before the cleanup
@@ -31498,7 +32538,13 @@ main() {
 	# from "clean up" to "dump".
 	sp_thresholds "${RUN_CASES[0]}"
 	sp_shape "${RUN_CASES[0]}"
-	setup
+	# The upgrade case runs alone and builds its own cluster on v0.1.0's
+	# programs first (case_upgrade), so it gets no setup.
+	if [ "${RUN_CASES[0]}" = upgrade ]; then
+		log "  the upgrade case builds its own cluster: no setup"
+	else
+		setup
+	fi
 
 	# E2E11. Every case starts from an EMPTY etcd and a freshly
 	# built sp: the first one uses the setup above, and every later one gets
