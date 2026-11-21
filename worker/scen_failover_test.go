@@ -81,6 +81,15 @@ func foDataGrpRow() string {
 	return fmt.Sprintf("grp_id_to_md_raid.%d", stdDataGrpId)
 }
 
+// foSubsystemRow is the standard subsystem's row on a cntlr, a row of its
+// own class (HL2) that a standby reports too, as the cn agent exports the
+// subsystem on every cntlr: an ungated ERROR on it makes a standby
+// unhealthy, where a row of what only a primary builds, such as
+// foDataGrpRow, is not reported on a standby at all.
+func foSubsystemRow(c *stdCluster) string {
+	return fmt.Sprintf("ss_id_to_subsystem.%d", c.ss.Id)
+}
+
 // foFailPrimaryByRow makes cntlr 1's agent report its data group ERROR while it
 // is the primary, a fault of its own (HL2), so the worker fails it over on
 // its threshold and two unhealthy rounds (AR5, AR10). Once demoted, the row
@@ -1150,7 +1159,7 @@ func TestFailoverRefusingPrimaryWithNoCandidateIsReplaced(t *testing.T) {
 		func() (bool, string) { return c.cntlr(t, 1).GetErrEpoch() != 0, "none yet" })
 	standby, standbyKey := c.cntlrAgent(t, 2)
 	foLever(t, standby, standbyKey, func(o *agentfake.Object) {
-		foSetRow(o, foDataGrpRow(), foStatusRow(pb.ResStatus_RES_STATUS_ERROR, false))
+		foSetRow(o, foSubsystemRow(c), foStatusRow(pb.ResStatus_RES_STATUS_ERROR, false))
 	})
 	h.waitUntil(t, 10*time.Second, "the standby's health epoch",
 		func() (bool, string) { return c.cntlr(t, 2).GetErrEpoch() != 0, "none yet" })
@@ -1197,7 +1206,7 @@ func TestFailoverEveryStandbyUnhealthyReplacesThePrimary(t *testing.T) {
 		func() (bool, string) { return c.cntlr(t, 1).GetErrEpoch() != 0, "none yet" })
 	standby, standbyKey := c.cntlrAgent(t, 2)
 	foLever(t, standby, standbyKey, func(o *agentfake.Object) {
-		foSetRow(o, foDataGrpRow(), foStatusRow(pb.ResStatus_RES_STATUS_ERROR, false))
+		foSetRow(o, foSubsystemRow(c), foStatusRow(pb.ResStatus_RES_STATUS_ERROR, false))
 	})
 	h.waitUntil(t, 10*time.Second, "the standby's health epoch",
 		func() (bool, string) { return c.cntlr(t, 2).GetErrEpoch() != 0, "none yet" })

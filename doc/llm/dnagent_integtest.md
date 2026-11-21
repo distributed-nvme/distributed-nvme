@@ -39,7 +39,9 @@ restart with the local store kept and with it lost (`dnagent.md` DN2, DN6),
 an OS command that hangs across rounds and past the pass budget
 (`dnagent.md` SH15, DN13), a syncup that arrives during a converge
 (`dnagent.md` SH30), and a sweep whose listings name objects already gone
-(`dnagent.md` DN6, DN16).
+(`dnagent.md` DN6, DN16). One of them drives the dn agent and the fake agent
+through the same syncups to hold the fake to the agent (`dnv-worker.md`,
+Integration test plan, The fake against the real agents).
 
 ## Topology
 

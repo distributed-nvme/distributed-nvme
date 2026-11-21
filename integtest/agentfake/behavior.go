@@ -33,10 +33,12 @@ import (
 // the cntlr's last accepted request carries cntlr.primary = true and
 // cntlr.disabled = false (cnagent.md CN9), so a row
 // planted on a standby bites the moment a failover promotes it and not
-// before. The fake reports a standby's pool and md rows too — every row but
-// the primary-only thin rows — where the real cn agent reports those for a
-// primary only, so an ungated ERROR row would make the standby unhealthy —
-// and ineligible — before the failover. Only a cntlr object has a role:
+// before. A row the fake derives on a standby too — a namespace's, a
+// subsystem's, a td's dm-error — would otherwise make the standby
+// unhealthy, and ineligible, before the failover; one the fake derives on
+// a primary alone, as the cn agent builds it (cntlrInfoLocked), bites only
+// once the cntlr is primary either way, and so does a leg row, since a
+// standby's leg row is logged, never recorded (dnv-worker.md HL2). Only a cntlr object has a role:
 // validate refuses it anywhere else.
 type Row struct {
 	Status      *pb.ResStatus

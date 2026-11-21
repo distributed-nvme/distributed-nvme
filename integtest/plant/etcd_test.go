@@ -780,6 +780,24 @@ func TestPutSubObjectsReadBack(t *testing.T) {
 		}) {
 		t.Fatalf("the destination dn = %v", dn)
 	}
+	// A create that names the next_id it read is refused once another write
+	// has moved it, and writes nothing.
+	revBefore, err := SpRevision(ctx, c.cli, c.cl, ref)
+	if err != nil {
+		t.Fatalf("SpRevision: %v", err)
+	}
+	if _, err := PutMigr(ctx, c.cli, c.cl, ref, MigrSpec{
+		Name: "m2", Id: 53, SrcSide: 8, DstSide: 54, DstDn: 4,
+		ExpectNextId: 53,
+	}); err == nil || !strings.Contains(err.Error(), "next_id is 54") {
+		t.Fatalf("PutMigr with a stale next_id: %v, want a refusal naming "+
+			"next_id 54", err)
+	}
+	if rev, err := SpRevision(ctx, c.cli, c.cl, ref); err != nil ||
+		rev != revBefore {
+		t.Fatalf("the refused PutMigr moved SpRev from %d to %d (%v)",
+			revBefore, rev, err)
+	}
 
 	for i, chunk := range []struct {
 		spec    CloneBitmapSpec

@@ -8,7 +8,10 @@
 // *Info row from the last request it accepted for the object, reports only
 // changes on a Check stream, and answers every round or info read about an
 // object it knows, and every Syncup* it does not refuse, from a new
-// observation. Levers a test sets make it misbehave.
+// observation. Levers a test sets make it misbehave. The comparison tests of
+// agent/cnagent and agent/dnagent hold its codes, revisions and ResInfo rows
+// to the real agents', save the differences RealDiffs names (realdiff.go); a
+// field that is no row, such as a group reading's slots, is not compared.
 //
 // Two fronts set the same levers, so one fake cannot drift from itself. The
 // behavior file of the fakeagent program, whose format ParseBehavior parses

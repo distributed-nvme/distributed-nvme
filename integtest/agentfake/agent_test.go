@@ -1063,11 +1063,17 @@ func TestCntlrInfoDerivation(t *testing.T) {
 // TestCntlrInfoWhenPrimary is the fake's when_primary (dnv-worker.md,
 // Integration test plan, The fake agent): the row override applies only while
 // the cntlr's last accepted request marks it primary and not disabled
-// (cnagent.md CN9), and an ungated override beside it applies either way.
+// (cnagent.md CN9), and an ungated override beside it applies either way. A
+// cntlr in the standby shape reports no row of what the cn agent builds on a
+// primary alone — the groups' arrays, the slices' pools and concats, the tds'
+// raid0s and the clones' rows (cnagent.md CN12, CN13, CN15, CN18) — so an
+// override of one of them bites only on the primary, and it reports the
+// rest, the tds' dm-errors among them.
 func TestCntlrInfoWhenPrimary(t *testing.T) {
 	const behavior = `{"objects": {"cntlr 1:1": {"rows": {
-	  "slice_id_to_dm_pool.1": {"status": "ERROR", "details": "settling test",
+	  "ns_id_to_dm_linear.31": {"status": "ERROR", "details": "settling test",
 	                            "when_primary": true},
+	  "ss_id_to_subsystem.3": {"status": "ERROR", "details": "always"},
 	  "slice_id_to_meta.1": {"status": "ERROR", "details": "always"}
 	}}}}`
 	if _, err := ParseBehavior([]byte(behavior)); err != nil {
@@ -1078,13 +1084,12 @@ func TestCntlrInfoWhenPrimary(t *testing.T) {
 		name     string
 		primary  bool
 		disabled bool
-		wantPool pb.ResStatus
 	}{
-		{"standby", false, false, pb.ResStatus_RES_STATUS_OK},
-		{"primary", true, false, pb.ResStatus_RES_STATUS_ERROR},
+		{"standby", false, false},
+		{"primary", true, false},
 		// A disabled primary converges the standby shape (cnagent.md CN9),
 		// so the when_primary override does not apply to it.
-		{"disabled primary", true, true, pb.ResStatus_RES_STATUS_OK},
+		{"disabled primary", true, true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			agent := newTestAgent(t)
@@ -1099,27 +1104,64 @@ func TestCntlrInfoWhenPrimary(t *testing.T) {
 				}
 			}
 			info := reply(t, cnClient, tc.primary).GetCntlrInfo()
-			pool := info.GetSliceIdToDmPool()[1]
-			if pool.GetStatus() != tc.wantPool {
-				t.Errorf("slice_id_to_dm_pool.1 status = %v, want %v",
-					pool.GetStatus(), tc.wantPool)
+			shapePrimary := tc.primary && !tc.disabled
+			ns := info.GetNsIdToDmLinear()[31]
+			wantStatus, wantDetails := pb.ResStatus_RES_STATUS_OK, ""
+			if shapePrimary {
+				wantStatus, wantDetails = pb.ResStatus_RES_STATUS_ERROR,
+					"settling test"
 			}
-			wantDetails := ""
-			if tc.primary && !tc.disabled {
-				wantDetails = "settling test"
+			if ns.GetStatus() != wantStatus || ns.GetDetails() != wantDetails {
+				t.Errorf("ns_id_to_dm_linear.31 = %v %q, want %v %q",
+					ns.GetStatus(), ns.GetDetails(), wantStatus, wantDetails)
 			}
-			if pool.GetDetails() != wantDetails {
-				t.Errorf("slice_id_to_dm_pool.1 details = %q, want %q",
-					pool.GetDetails(), wantDetails)
-			}
-			if got := info.GetSliceIdToDmPool()[2].GetStatus(); got !=
+			if got := info.GetNsIdToDmLinear()[32].GetStatus(); got !=
 				pb.ResStatus_RES_STATUS_OK {
-				t.Errorf("slice_id_to_dm_pool.2 status = %v, want OK", got)
+				t.Errorf("ns_id_to_dm_linear.32 status = %v, want OK", got)
 			}
-			if got := info.GetSliceIdToMeta()[1].GetStatus(); got !=
+			if got := info.GetSsIdToSubsystem()[3].GetStatus(); got !=
 				pb.ResStatus_RES_STATUS_ERROR {
-				t.Errorf("slice_id_to_meta.1 status = %v, want the ungated "+
-					"ERROR", got)
+				t.Errorf("ss_id_to_subsystem.3 status = %v, want the "+
+					"ungated ERROR", got)
+			}
+			for _, tdId := range []uint64{7, 8} {
+				if got := info.GetTdIdToDmError()[tdId].GetStatus(); got !=
+					pb.ResStatus_RES_STATUS_OK {
+					t.Errorf("td_id_to_dm_error.%d status = %v, want OK",
+						tdId, got)
+				}
+			}
+			primaryOnly := []struct {
+				field string
+				rows  map[uint64]*pb.ResInfo
+				ids   []uint64
+			}{
+				{"slice_id_to_dm_pool", info.GetSliceIdToDmPool(), []uint64{1, 2}},
+				{"slice_id_to_meta", info.GetSliceIdToMeta(), []uint64{1, 2}},
+				{"slice_id_to_data", info.GetSliceIdToData(), []uint64{1, 2}},
+				{"grp_id_to_md_raid", info.GetGrpIdToMdRaid(), []uint64{11, 12, 21, 71}},
+				{"td_id_to_raid0", info.GetTdIdToRaid0(), []uint64{7, 8}},
+				{"clone_id_to_target", info.GetCloneIdToTarget(), []uint64{41}},
+				{"clone_id_to_dm_clone", info.GetCloneIdToDmClone(), []uint64{41}},
+			}
+			for _, m := range primaryOnly {
+				if !shapePrimary {
+					if len(m.rows) != 0 {
+						t.Errorf("%s = %v in the standby shape, want no row",
+							m.field, m.rows)
+					}
+					continue
+				}
+				for _, id := range m.ids {
+					want := pb.ResStatus_RES_STATUS_OK
+					if m.field == "slice_id_to_meta" && id == 1 {
+						want = pb.ResStatus_RES_STATUS_ERROR
+					}
+					if got := m.rows[id].GetStatus(); got != want {
+						t.Errorf("%s.%d status = %v, want %v", m.field, id,
+							got, want)
+					}
+				}
 			}
 		})
 	}

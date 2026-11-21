@@ -816,6 +816,11 @@ type MigrSpec struct {
 	// CutoverPending writes the record's cutover_pending, which
 	// CreateMigration always sets.
 	CutoverPending bool
+	// ExpectNextId, when not 0, is the pool's next_id the caller read: the
+	// write is refused when the pool's next_id is another, as when the
+	// caller named the ids it predicted from that read (Id, DstSide) and
+	// another write took them since.
+	ExpectNextId uint64
 }
 
 // Check refuses a migration no key could be written for.
@@ -903,6 +908,10 @@ func PutMigr(
 		conf, err := getSpConf(s, cid, target)
 		if err != nil {
 			return err
+		}
+		if spec.ExpectNextId != 0 && conf.GetNextId() != spec.ExpectNextId {
+			return fmt.Errorf("migration %q: the pool's next_id is %d, "+
+				"want %d", spec.Name, conf.GetNextId(), spec.ExpectNextId)
 		}
 		if containsName(conf.GetMigrNameList(), spec.Name) {
 			return fmt.Errorf("migration %q already exists", spec.Name)

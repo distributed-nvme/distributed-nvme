@@ -3279,16 +3279,17 @@ EOF
 	assert_eq "$(cntlr_field sp2 2 settling)" false \
 		"sp2 C2, a standby, is never settling"
 
-	log "  12.2: a row that bites only as primary, planted on the standby"
-	# The fake's when_primary (dnv-worker.md,
-	# Integration test plan, The fake agent): the fake reports a standby's pool
-	# rows too, so an ungated ERROR row would make C2 unhealthy — and no
-	# failover candidate — before the failover this step needs.
+	log "  12.2: a pool row that bites only as primary, planted on the standby"
+	# The fake reports a pool row on a primary alone, as the cn agent does
+	# (dnv-worker.md, Integration test plan, The fake agent), so the row,
+	# set for every role, bites once the failover promotes C2 and leaves C2
+	# a failover candidate until then: a fake that reported a standby's pool
+	# row would set C2's health epoch here.
 	set_behavior cn1 <<'EOF'
 {"objects": {"cntlr 3:2": {"rows": {"slice_id_to_dm_pool.1":
-  {"status": "ERROR", "details": "settling test", "when_primary": true}}}}}
+  {"status": "ERROR", "details": "settling test"}}}}}
 EOF
-	assert_none_for 3 "sp2 C2 err_epoch set by a when_primary row on a standby" \
+	assert_none_for 3 "sp2 C2 err_epoch set by a pool row planted on a standby, which reports none" \
 		cntlr_epoch_set sp2 2
 
 	log "  12.3: fail the settled C1; C2 is promoted settling and reports ERROR"
@@ -3372,9 +3373,10 @@ EOF
 	# cn 1 (fake cn0) primary, C2 on cn 2 (fake cn1) standby, one RedundNone
 	# data group on dn 4, and the clone meta group on dn 1 and dn 2
 	# (clone_meta_grp). The fake reports a clone's two rows for every clone a
-	# cntlr's request carries (dnv-worker.md, Integration test plan, The fake
-	# agent), and the settle reads a MISSING row with no reason as a build
-	# still to come and one with the source-fault reason as built (HL2).
+	# primary's request carries, and none on a standby, as the cn agent does
+	# (dnv-worker.md, Integration test plan, The fake agent), and the settle
+	# reads a MISSING row with no reason as a build still to come and one
+	# with the source-fault reason as built (HL2).
 	#
 	# put-sp writes C1 settling, and its first clean round at the driven
 	# revision would settle it before the clone exists, so cn0's levers are
@@ -4411,17 +4413,20 @@ EOF
 		"reactions while a standby was unhealthy"
 
 	stage 3 "an unhealthy primary with no candidate keeps its record (AR5)"
-	# Both standbys go first, each its own way. C3 reports an ERROR row,
-	# which every reply of it carries — its Check rounds and the syncup the
-	# failover of stage 4 sends it alike — so it stays unhealthy and unlisted
-	# through that failover; a hung standby would answer the syncup and read
-	# clean for a round.
+	# Both standbys go first, each its own way. C3 reports its subsystem
+	# ERROR, a row every cntlr reports, primary or standby, so every reply of
+	# it carries the row — its Check rounds and the syncup the failover of
+	# stage 4 sends it alike — and it stays unhealthy and unlisted through
+	# that failover; a hung standby would answer the syncup and read clean
+	# for a round. A pool row would not do: the fake, as the cn agent,
+	# reports one on a primary alone (dnv-worker.md, Integration test plan,
+	# The fake agent).
 	set_behavior cn1 <<'EOF'
 {"objects": {"cntlr 1:2": {"hang": true}}}
 EOF
-	set_behavior cn2 <<'EOF'
-{"objects": {"cntlr 1:3": {"rows": {"slice_id_to_dm_pool.1":
-  {"status": "ERROR", "details": "pool failed"}}}}}
+	set_behavior cn2 <<EOF
+{"objects": {"cntlr 1:3": {"rows": {"ss_id_to_subsystem.$((SS_ID))":
+  {"status": "ERROR", "details": "subsystem gone"}}}}}
 EOF
 	wait_until $((2 * hc + WAIT_SHORT)) "C2 err_epoch set" cntlr_epoch_set sp0 2
 	wait_until $((2 * hc + WAIT_SHORT)) "C3 err_epoch set" cntlr_epoch_set sp0 3

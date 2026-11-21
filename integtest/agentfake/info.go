@@ -372,7 +372,12 @@ func sliceIdList(req *pb.SyncupCntlrRequest) []uint64 {
 // (dnv-worker.md, Integration test plan, The fake agent). A cntlr is the
 // primary here exactly when the real cn agent converges it as one: its
 // request's cntlr.primary is set and cntlr.disabled is not (cnagent.md CN9);
-// a disabled primary reports the standby shape. td_id_to_thin_info is filled
+// a disabled primary reports the standby shape. A standby reports no row of
+// what the cn agent builds on a primary alone — a group's array, a slice's
+// pool and its two concats, a td's raid0 and a clone's two rows (cnagent.md
+// CN12, CN13, CN15, CN18) — and the rows of its legs, its tds' dm-errors,
+// its namespaces, its subsystems and its transfers, as a primary does.
+// td_id_to_thin_info is filled
 // only on the primary and when the thin_ok lever says so (architecture.md, sp
 // role; cnagent.md CN14, "primary only"), minus any thin_missing_slices — the
 // created-flip negative of the worker suite's smoke case (RW19). The same
@@ -429,6 +434,9 @@ func (a *Agent) cntlrInfoLocked(key string) *pb.CntlrInfo {
 	}
 	sliceIdList := sliceIdList(req)
 	for _, sliceId := range sliceIdList {
+		if !primary {
+			continue
+		}
 		info.SliceIdToDmPool[sliceId] = a.resolveCntlrRow(
 			key, primary, rowKey("slice_id_to_dm_pool", sliceId))
 		info.SliceIdToMeta[sliceId] = a.resolveCntlrRow(
@@ -462,11 +470,14 @@ func (a *Agent) cntlrInfoLocked(key string) *pb.CntlrInfo {
 	}
 	for _, td := range req.GetTdList() {
 		tdId := td.GetTdId()
-		info.TdIdToRaid0[tdId] = a.resolveCntlrRow(
-			key, primary, rowKey("td_id_to_raid0", tdId))
 		info.TdIdToDmError[tdId] = a.resolveCntlrRow(
 			key, primary, rowKey("td_id_to_dm_error", tdId))
-		if !primary || !thinOk {
+		if !primary {
+			continue
+		}
+		info.TdIdToRaid0[tdId] = a.resolveCntlrRow(
+			key, primary, rowKey("td_id_to_raid0", tdId))
+		if !thinOk {
 			continue
 		}
 		thinKey := rowKey("td_id_to_thin_info", tdId)
@@ -494,6 +505,9 @@ func (a *Agent) cntlrInfoLocked(key string) *pb.CntlrInfo {
 		}
 	}
 	for _, clone := range req.GetCloneList() {
+		if !primary {
+			continue
+		}
 		cloneId := clone.GetCloneId()
 		info.CloneIdToTarget[cloneId] = a.resolveCntlrRow(
 			key, primary, rowKey("clone_id_to_target", cloneId))
@@ -512,17 +526,17 @@ func (a *Agent) cntlrInfoLocked(key string) *pb.CntlrInfo {
 	return info
 }
 
-// grpRowsLocked derives one group's rows into info (cntlrInfoLocked): its
-// group row and a leg row per leg, and, with paths, the
-// path rows of every leg with two sides. A clone meta group is walked without
-// paths: no migration gives its legs a second side. On a primary it adds the
-// group's reading (grpReadingLocked).
+// grpRowsLocked derives one group's rows into info (cntlrInfoLocked): a leg
+// row per leg, and, with paths, the path rows of every leg with two sides. A
+// clone meta group is walked without paths: no migration gives its legs a
+// second side. On a primary it adds the group's row and its reading
+// (grpReadingLocked); a standby has no array (cnagent.md CN12).
 func (a *Agent) grpRowsLocked(
 	info *pb.CntlrInfo, key string, primary bool, grp *pb.Group, paths bool,
 ) {
-	info.GrpIdToMdRaid[grp.GetGrpId()] = a.resolveCntlrRow(
-		key, primary, rowKey("grp_id_to_md_raid", grp.GetGrpId()))
 	if primary {
+		info.GrpIdToMdRaid[grp.GetGrpId()] = a.resolveCntlrRow(
+			key, primary, rowKey("grp_id_to_md_raid", grp.GetGrpId()))
 		info.GrpIdToGrpInfo[grp.GetGrpId()] = a.grpReadingLocked(key, grp)
 	}
 	for _, leg := range grp.GetLegList() {

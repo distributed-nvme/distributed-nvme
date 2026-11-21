@@ -5952,6 +5952,37 @@ its syncups, and when its agent refuses its own and its one standby is
 unhealthy, and that no role moves when the primary's agent and its one
 standby's both refuse (HL9, AR5, AR7).
 
+**The fault schedule.** One whole-worker case draws its faults from a
+seed, and runs only on demand: when the environment variable
+`DNV_FAULT_SEED` names its seeds, so `make test` skips it. On a cluster
+of two pools under three workers, each step draws one action and acts on
+what the state offers: a worker crashed, stopped or started again; a fault
+of the kinds a real agent gives set or cleared on a fake, an agent stopped
+and started again on its files among them; a cntlr disabled or enabled; a
+pool's level moved between levels where reactions run and one where they
+stop (AR3); an operator's repair created — on a group that holds one too,
+which the op must refuse —, aborted, finished or cancelled, or the
+primary's verdict on one given; a migration created, its destination
+zeroing slowly or not, cancelled or finished. It reads every write etcd
+applies, in order, from one watch, and fails at the step in which a write
+broke one of four rules that hold at every instant: no revision goes back;
+a set health epoch changes only by a clear (HL3), the stale epoch of an
+overlap (VW7) being a clear and a set again; a group has one repair at
+most (`architecture.md`, Repairs); and the legs of a group sit on
+different disk nodes, a repair's new leg on none of its group's, save a
+leg taken back from a retired leg, which may sit on its bad leg's
+(`architecture.md`, Per-operation allocation). A unit case feeds the same
+check planted writes and requires a report of each rule's break. At the
+end it clears every fault, brings every worker, agent and cntlr back,
+ends every repair and migration as an operator would, and requires both
+pools to converge and stay so for two rounds of every object. Each seed
+counts, by kind, the steps that found a target and those whose act took
+effect, and a run of twenty seeds or more fails on a kind none of its
+steps took effect for. The seed fixes what each step draws, not the
+targets the state then offers, the timing of the real clock or AR1's
+random first wait, so the case logs the seed and every step it took, and
+a person reads each failure.
+
 **Topology.** The developer machine drives one Linux server over ssh, as a
 plain user with no sudo. The server runs one etcd on localhost, configured
 with the request caps every etcd serving dnv must have (its transaction-op cap
@@ -6434,8 +6465,13 @@ which the gateway suite's restore check reads, as the cn agent does
 (`cnagent.md` CN32): its node's last accepted request and a summary of each
 cntlr request that request's pointer list names, an unknown object for any
 other cluster or node, its node's `reply_code` and `Starting` levers
-setting the code. A cntlr also reports, for each clone its request carries, a
-group row and a leg row per leg of the clone's clone meta
+setting the code. A cntlr that its request does not make the primary
+reports, as the cn agent does, no row of what only a primary builds — a
+group's array, a slice's pool and its concats, a thin device's raid0 and a
+clone's rows (`cnagent.md` CN12, CN13, CN15, CN18) —, so a lever's row of
+one of them bites on a standby only once it is promoted. A cntlr also
+reports, for each clone its request carries, a group row while it is the
+primary and a leg row per leg of the clone's clone meta
 group, as for a slice's group, the kinds of row the cn agent reports for a
 group (`cnagent.md` CN28), so that a Go case can stage HL2's leg rows and
 AR8 on such a group; no leg of it has a second side, so none has a path
@@ -6535,6 +6571,32 @@ the dn disk counts, sent only beside an OK meta row, as the dn agent sends
 them (`dnagent.md` DN18). The fake computes no sweep verdict and no disk
 counts of its own: a leftover and the counts come only from those levers,
 which no suite case sets, so no suite case runs RW13's count compare.
+
+**The fake against the real agents.** Two Go tests, one in each role's
+package, drive a real agent on its package's model of the node and a fake
+agent through the same syncups and rounds, with no lever set: on the cn
+role a primary and a standby that holds a clone, the demotion of the one
+and the promotion of the other, a repair with a new leg, a clone held by
+the level, its bitmap pushed and the clone enabled, and a migration of the
+meta leg and one data leg through the destination's flip and the finish;
+on the dn role a side that provisions and is exported to its primary and
+its standby, a failover, a repair's new leg on the same disk node, and a
+migration's destination and source through the cutover; on both, a syncup
+and a round of an object its node's syncup does not list, and a stale
+syncup. A test fails when the two answer a syncup with another code or
+revision, or when a round of each, once the real agent's rows have
+settled, carries a row the other lacks or a row with another status or
+reason — unless the fake's table of allowed differences
+(`agentfake.RealDiffs`) names it: the row, the exact status and reason of
+the row each agent reports, the states of the object's request it holds
+in, and the rule by which a worker test on the fake stays true despite
+it — and on an entry of its role that it never meets, so the table holds
+what the fake does. A field that is no row, such as a group reading's
+slots, is not compared. A leftover the cn agent answers is sent to it
+again until it answers clean, as the worker sends it (RW5). The tests
+bind the fake to the real agents' rows and codes for those steps alone: a
+difference in a step neither plays, or in what the levers produce, is not
+caught.
 
 ## Known limits
 

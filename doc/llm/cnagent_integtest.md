@@ -67,7 +67,9 @@ and rounds: a restart with the local store kept and with it lost (`cnagent.md`
 CN2, CN21), a leg connect that hangs across rounds and past the pass budget
 (`cnagent.md` CN10), a syncup that arrives during a converge (`dnagent.md`
 SH30), and a sweep whose `dmsetup ls` names devices already gone (`cnagent.md`
-CN21, CN30).
+CN21, CN30). One of them drives the cn agent and the fake agent through the
+same syncups to hold the fake to the agent (`dnv-worker.md`, Integration test
+plan, The fake against the real agents).
 
 ## Topology
 
