@@ -6860,10 +6860,29 @@ stores instead is CN23's.
   bad-block list (CN12, the forced start): the pass ends in the group's
   error, and the next converge, which a read's name of the members the
   array lacks brings (CN30), finds the array running and leaves the mark
-  waiting, and its member reconciliation adds the zeroed members, whose copies read the listed regions and mark them
-  bad there too. There is no tested way back: the level that stops the
-  group arrays is one at which the gateway refuses a mark, and a mark over
-  the running array waits (`architecture.md`, Repairs, ForceStartGroup).
+  waiting, and its member reconciliation adds the zeroed members, onto
+  which md copies the listed regions as bad, as no member in sync can be
+  read there; a host's read over such a region fails, though the named
+  leg holds its bytes. Four ways are tried in the cn suite, each from that
+  state (`cnagent_integtest.md`, Cases, repair). The mark kept, the
+  level stepped to the one that stops the group arrays and back: the
+  standing mark acts again, as no array of the group runs, and its stop
+  drops the list; but the worker clears a mark once its report reads the
+  start done (`dnv-worker.md` AR13), which it does once the group's row
+  reads OK again after the converge that adds the other members. The mark
+  cleared, the same level steps: the plain assembly starts the array from
+  every member with its list and the row reads OK, over which the gateway
+  refuses a new mark, as it does at the level that stops the group arrays
+  (`architecture.md`, Repairs, ForceStartGroup). A new mark given while the
+  row reads ERROR, the one state in which the gateway takes one, then the
+  level steps: the mark waits over the running array, the reading names no
+  mark of its revision acted, so the worker keeps it, and it acts at the
+  step up and drops the list; that state lasts only until the next
+  converge, which the worker's re-send on the failed start's reply code
+  brings. By hand, mdadm's own assembly passing force-no-bbl at the level
+  that stops the group arrays, then its stop, drops every member's list; a
+  region md never copied onto a member added under the list is then read
+  as good whatever that member holds there.
 * After a forced start, a group whose `leg_list` legs that decide its
   assembly carry two identities stays down at its next assembly (CN12, case
   2): a leg the forced start left as it was, the bad leg of a repair since

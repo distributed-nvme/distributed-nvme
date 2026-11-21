@@ -560,10 +560,11 @@ filled. No write failed and every block read back. The longest write took
 at least 6.1 s, a write that waited for a grow.
 
 The loss of every leg of a data group at once was measured on the lab VMs
-with a 4 KiB write with a flush, one write at a time, each into a block the
-pool had not mapped, to a RAID1 pool whose data group lost every path from
-its primary while its meta group kept them, at the default fast IO fail
-timeout of 5 s; each time counts from just before the cut began. A cut of
+(commit 008fa9c7) with a 4 KiB write with a flush, one write at a time,
+each into a block the pool had not mapped, to a RAID1 pool whose data group
+lost every path from its primary while its meta group kept them, at the
+default fast IO fail timeout of 5 s; each time counts from just before the
+cut began. A cut of
 3.3 s held the write in flight for 3.1 to 3.3 s over six runs, and one of
 3.8 s for 6.3 to 6.4 s over three; no write failed. Cuts of 8.5, 20.5 and
 60.5 s each broke the array: md failed its first member 9.6 to 10.2 s after
@@ -590,8 +591,8 @@ proven against fakes alone.
 | Storage pools per cluster | 4096 | 4096 | 8 at once as CSI volumes, on real nodes; 10 at once in a suite on fake agents |
 | Slices per pool | 32 | 32, committed on a real etcd | 32; 1 under the CSI driver |
 | Cntlrs per pool | 4 | 4 | 3 |
-| Cntlrs per controller node | 256 | 256, and a real cn agent on a fake machine converged 257 | about 10 |
-| Sides per disk node | 1024 | 1024, and a real dn agent on a fake machine converged 1025 | about 10 |
+| Cntlrs per controller node | 256 | 256, and a real cn agent on a fake machine converged 257 | 256 on one guest of 8 CPUs and 3.3 GiB, each cntlr a one-slice pool with no RAID1, one IO queue a leg, no host, no IO |
+| Sides per disk node | 1024 | 1024, and a real dn agent on a fake machine converged 1025 | 1024 on one guest of 2 CPUs and 7.2 GiB, no host, no IO |
 | Groups per slice, meta and data each | 255 | 255 data groups, grown without redundancy; a full meta list, and a full list with RAID1, only written to etcd directly | 9 data groups with RAID1, in a CSI volume filled whole; about 2 meta groups |
 | Thin devices per pool | 1024 | 1024 | a few |
 | Subsystems per pool; namespaces per subsystem; hosts per subsystem | 4; 4; 8 | each at its value | 1; 2; 4 |
@@ -602,6 +603,21 @@ proven against fakes alone.
 | Extent size | 64 MiB to 1 TiB, a whole number of 4 KiB | pools created on 5 GiB extents; 1 TiB checked by validation alone | 64 MiB and 1 GiB; no run at 1 TiB |
 | Data block of a pool | 64 KiB to 4 MiB, a power of two | pools created on 4 MiB blocks; the next power of two refused | the default 1 MiB; 64 KiB in a suite on fake agents |
 | Controller node budget | one extent to 64 TiB, set once per node: a larger `--capacity` is cut to 64 TiB, one smaller than an extent is refused, and one unset or under 1 KiB is 64 TiB | the bounds, through the create with a fake agent | 64 TiB, the default, on real nodes in the Kubernetes suite and on fake agents in the gateway suite |
+
+A lab tool, `integtest/size_step.sh`, stepped one real disk node guest of 2
+CPUs and 7.2 GiB to 1024 sides and one real controller node guest of 8 CPUs
+and 3.3 GiB to 256 cntlrs, each cntlr a one-slice pool with no RAID1. Each
+leg's connection had one IO queue, no host connected and no IO ran, so the
+numbers hold for those conditions only. Every call succeeded and every
+check round answered code 0. A fresh read of a node came within the
+tool's floor of about 0.2 s at every step, and one cntlr's at 256 cntlrs in
+0.6 s. A cntlr's first build took about 0.4 s at 16 cntlrs and about 1 s
+past 128, the slowest 1.7 s. The controller node used about 4 MiB of memory
+a cntlr, and the disk node about 0.4 MiB a side. Emptying a disk node of
+1024 sides in one desired state took 56 s. That run read no object's
+rows. The tool reads the rows of a sample of each step's new objects and
+stops at a failed one; a short run to 128 sides and 64 cntlrs read every
+sample clean.
 
 To measure dnv fairly, write the whole volume first, since a thin device
 returns zeros for a block it has not written without reading any disk; run

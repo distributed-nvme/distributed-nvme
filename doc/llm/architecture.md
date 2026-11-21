@@ -9035,8 +9035,22 @@ document and only pointed to here.
   each primary that reads the corrupt metadata meets it again, and only `dnv-worker.md` AR5's and AR7's
   second refusals bound the failovers and replacements it costs. Each is an
   operator-intervention event (the pool's level raised to stop its thin
-  pools, "thin_check", then "thin_repair" onto fresh space, or the flag
-  cleared when the check passes, by hand).
+  pools, "thin_check", then "thin_repair" onto a new device copied back
+  over the metadata's device, or the flag cleared when the check passes,
+  by hand). Tried in the lab on a pool of one meta group whose data group
+  broke under a commit (`cnagent_integtest.md`, Cases, thinrepair): at the
+  level that builds no thin pool the meta group's array holds the whole
+  metadata, its superblock carrying the flag; "thin_check" passed with the
+  flag set, as the metadata was intact; "thin_repair" onto a new device of
+  the array's size, its check and its copy back over the array, which
+  already left the superblock without the flag, then
+  "thin_check --clear-needs-check-flag", brought the pool back writable at
+  the level that builds it,
+  with the data its last commit held. A swap of the new device for the old
+  has no path, as the primary builds the pool over the meta group's array
+  by its name, so the copy back stands in for it. Corrupt metadata is not
+  tried, nor a pool of more than one meta group, which has no device that
+  holds its whole metadata at that level.
 * **The fabric is trusted.** dnv authenticates no user and no host beyond
   its NQN: gRPC is plaintext (`grpc.md`, Wiring), dnv's etcd client
   presents no client certificate and no username or password, so etcd must

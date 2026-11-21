@@ -408,8 +408,8 @@ Safe steps:
    every leg is in sync. Check that no leg shows a bad-block list. If the
    named leg's list is still there after a start that passed `bad-blocks`,
    the start's second run, which drops it, did not happen, and hosts get IO
-   errors over the list's regions. No procedure for this is tested: stop.
-   No such case was seen in the lab.
+   errors over the list's regions. A suite case makes this state on purpose;
+   no procedure for it is tested: stop.
 6. Step the level back:
    `dnvctl sp set-level --level READWRITE`, or the level the pool had.
 7. Write to a volume from a host. A thin pool that comes back read-only

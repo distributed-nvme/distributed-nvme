@@ -39,7 +39,9 @@ legs come back assembled again with no mark, a group whose array has run
 whose legs all read blank, the clone's source lost and given back, a new
 volume over a thin id that holds data, a snapshot torn by a primary stopped
 between its slices' steps, a disk node that dies under a host's writes, the
-loss of every leg of a data group for seconds under a host's writes, a
+loss of every leg of a data group for seconds under a host's writes, a thin
+pool whose metadata needs a check, repaired by hand, a forced start whose
+stop md refuses, a
 disk node that leaves new connections unanswered, a node whose mdadm does
 not keep its degraded gate, an md array stalled under the gather, a
 connected host taken off a subsystem's list, which the cn agent cuts while
@@ -48,7 +50,7 @@ a host left on the list writes on, and on a primary and a standby at once
 leftover, an accepted request reporting residue (`cnagent.md` CN20). The
 cases run in a fixed order, fail-fast — nodecheck, smoke, redund, repair,
 teardown, thinbm, torn, discard, isolation, clone_xfer, restart, pause,
-groupcut — nodecheck
+groupcut, thinrepair — nodecheck
 building no pool and each other case under pool ids of its own, and each
 leaving nothing of its pools, a teardown per case and per stage that also
 keeps the run inside a DN's data area, which the cases together would
@@ -88,7 +90,13 @@ and the host whose IO goes on write through devices of two machines: the
 kernel's NVMe host can join two connections of one machine to one
 subsystem into one device, whatever their host NQNs. Agents run as
 root under one process name, so the suite stops a role by its command line, and
-a case fails a stop that leaves an agent alive to race its successor.
+a case fails a stop that leaves an agent alive to race its successor. Each
+cn agent runs with the suite's mdadm first in its PATH, which runs the
+node's own mdadm with the same arguments, save one stop that one of
+repair's badstop stages arms: before it runs that stop, it opens the array
+from a process of its own, so that md refuses the stop for real (Cases,
+repair); a failed run's exit ends that process, as another suite's cleanup
+could not stop the array it holds.
 
 ## Assumptions and preflight checks
 
@@ -123,7 +131,7 @@ modules, as the lab's controller node VMs do; on any other pair its
 preflight fails. iptables and
 tc are left to the stages that use them, the partition stages, redund's dial
 and slow leg stages, pause's and groupcut's cuts and clone_xfer's slowed
-copy, so a VM
+copy, and thin_check and thin_repair to thinrepair, so a VM
 without one fails in the stage that needs it rather than a run that might
 never reach one.
 
@@ -884,7 +892,38 @@ it passed; the same mark passing bad-blocks reads its
 superblock and its list, zeroes leg 1, starts the array from the leg under
 a new identity, stops it and starts it again with the list dropped, then
 adds leg 1, under one record naming both updates, and the leg's superblock
-shows no list; the host reads its data unchanged. Then an older named leg:
+shows no list; the host reads its data unchanged. Then a stop that fails
+(`cnagent.md`, Known limits), in four stages, each of which first makes
+the same state: a leg whose superblock keeps a bad-block log, leg 1 at
+first, which that start added, the named leg's log having gone with its
+drop, and then the leg the last forced start added, as md refuses a new bad
+block on a member whose log a force-no-bbl start dropped, gets a bad block,
+unless it still lists one, inside md's data, over the first bytes of the
+host's first MiB, which the host's rewrite of another MiB writes into its
+superblock (a write that covers a listed block and succeeds takes it off
+the list), and at the same two levels a mark naming it and passing
+bad-blocks starts the array under a new identity, whose stop the suite's
+mdadm makes md refuse (Topology): the row names the failed stop, the array
+runs with the list, and the re-send adds the other leg, which md gives a
+copy of the list, as the region it cannot read from the named leg is bad
+on every member in sync. In the first stage
+the level that serves the host comes back with both lists kept and the
+host's read of its first MiB fails; then the mark, kept, with the level
+stepped down to the one that stops group arrays and back, acts again once
+no array runs, the record of a new forced start naming leg 1 and both runs,
+and drops both lists. In the second the mark is cleared as the worker
+clears it, once the reading names it acted and the row reads OK; the same
+level steps assemble the array again from both legs, whose lists stay, the
+row OK. In the third a new mark is given while the row reads ERROR, the one
+state in which the gateway takes a new mark below the level that stops the
+group arrays; the array runs, so the mark waits, and the reading names no
+mark of its revision as acted (it read 0 on the lab), so the worker would
+keep it, and the level steps make it act and drop both lists. In the
+fourth, with the mark cleared, mdadm assembles the array by hand at the
+level with no group array passing force-no-bbl and stops it, and the level
+step up assembles it with no list. Before each stage that plants the block
+again, and at the end, the host reads its data unchanged.
+Then an older named leg:
 leg 1 dies for the primary alone and the host's write of its first block,
 its own bytes again, makes md fail it, so the other leg's change count
 moves past leg 1's; with the arrays stopped and leg 1 back, both
@@ -1226,6 +1265,37 @@ after it, the pool read read-only with needs_check,
 every acknowledged block read back as written, and the failover brought
 both arrays back and the pool read-only with needs_check.
 
+**thinrepair** is the repair by hand of a thin pool whose metadata carries
+needs_check (`architecture.md`, Known limits, No thin-metadata repair path
+is specified), its steps tried on a real kernel and each logged with its
+exit status. The A shape's pool, its primary on CN2 alone and one meta
+group, takes 8 MiB from the host; then both data legs' exports to CN2 error
+every IO, as repair's reassembly stage does it, a host write breaks the data
+array (`cnagent.md` CN29), and a request with a new volume, whose creation
+is a pool message that commits the pool (CN14), fails that commit over the
+broken array: the pool reads read-only with needs_check, its row
+`RES_STATUS_ERROR` with `RES_REASON_POOL_NEEDS_CHECK` (CN13). With the
+exports back, the level with no thin pool takes the pool's devices away and
+lets the primary assemble the data array again (CN12, The re-assembly); the
+meta group's array is then the metadata's whole device, and the flags word
+of its superblock, read with direct IO, carries needs_check. On CN2's VM the
+case runs `thin_check` on it, `thin_repair` from it onto a new device, a
+loop device over a file of the array's size, `thin_check` of the new device,
+the new device copied back onto the array, `thin_check`, `thin_check
+--clear-needs-check-flag` and a last `thin_check`, which must pass, and the
+superblock's flags word must then read no needs_check; the level back up
+builds a pool that reads writable with no needs_check flag, the host reads
+its 8 MiB as written and writes again. On the lab `thin_repair`'s output
+carried no needs_check: the flags word read none after the copy back, before
+the clear. The new device is copied back rather than swapped in, as the
+primary builds the pool over the meta group's array by its name and no
+request names another metadata device. The metadata is intact with the flag
+set, so `thin_check` passes before the repair too: a repair of corrupt
+metadata is not tried. With the repair steps left out the flags check fails,
+and with that check left out as well the level back up reads the pool
+read-only with needs_check. A pool of more than one meta group, whose
+metadata no one device holds at that level, is not tried.
+
 **What a pass means.** Exit status zero and PASS mean every assertion held in a
 run that stops at the first failure: data checked against patterns the agents
 never see, removals proved by the nodes' own listings, every stop a case makes
@@ -1261,7 +1331,9 @@ connections, which it removes for the same reason, and its netem delay,
 which it removes for the bucket's reason, nodecheck's stalled array and
 mdadm wrapper, which it resumes and removes, as a suspended member wedges
 another suite's udev and LVM scans, and smoke's host writers, which it
-stops, as a writer left running writes on and holds its namespace open.
+stops, as a writer left running writes on and holds its namespace open;
+the cleanup also ends the process repair's held stop leaves holding an
+array, with the suite's device pins, and takes away a hold still armed.
 A cleanup-only run does the scrub alone.
 It takes every `dnv-agent` and every dnv dm device, md array and nvmet
 subsystem on the node, of either role, which is why one dnv suite runs at a
@@ -1317,9 +1389,10 @@ and the cut of a migrating leg's path (`cnagent.md` CN10) — the unit tests
 prove, the e2e suite's migrations exercising it, and the path rows of a leg
 with two sides (`cnagent.md` CN28), which the unit tests cover; levels but
 read-write, read-only and the no-clone gate, save what repair's
-forced-start stages read of the two levels they use to free the data array:
-the pool row the level that builds no thin pool suppresses, and the group
-array the level that builds no group array stops (`cnagent.md` CN19); more
+forced-start stages and thinrepair read of the two levels they use to free
+the data array: the pool row the level that builds no thin pool
+suppresses, and the group array the level that builds no group array stops
+(`cnagent.md` CN19); more
 than one slice but torn's two RedundNone slices and discard's pools of two
 and eight slices on one disk node; several
 namespaces per subsystem; snapshots of snapshots; `UpdateNamespaceDev`; the

@@ -484,10 +484,23 @@ The entries:
   stops it at once, and starts it again with the list dropped. If that stop
   fails, the array runs with the list, and the legs added to it copy the
   list's regions as bad too. Hosts then get IO errors over those regions,
-  though the named leg holds their data. State: procedure to write: the
-  way back, a level step down and a new mark, is tried in the lab first;
-  until then [the forced-start guide](operations.md#the-forced-start-guide)
-  says to stop and ask for help. Forty such stops in the lab never failed.
+  though the named leg holds their data. State: procedure to write; until
+  then [the forced-start guide](operations.md#the-forced-start-guide) says
+  to stop and ask for help. Forty such stops in the lab never failed. A
+  suite case makes one fail on purpose and tries four ways from it.
+  With the mark still standing, the pool turned down to the level that
+  stops the arrays and back up: the forced start runs again and drops the
+  list. But the worker clears the mark soon after such a start. With the
+  mark cleared, the same steps keep the list, and dnv then refuses a new
+  mark. A new mark given right after the failed stop, while the group
+  reads as an error, is the one dnv takes; it waits, and the same steps
+  then drop the list. That moment ends with the worker's next request to
+  the node, which the failed stop's reply makes it send. By hand, at the
+  level that stops the arrays, mdadm can start the array with an option
+  that drops every leg's list, then stop it. That drops the list too, but
+  then the places md never copied onto a leg added under the list read as
+  good data, whatever that leg holds there. So the procedure needs a way
+  to keep or give the mark first.
 - **A forced-start mark cleared during a change of the pool's owner.**
   Silent. A pool's owner is the worker that drives it. At an owner change
   the new owner sends a request that drops the mark. If the controller
@@ -692,7 +705,7 @@ Measured times are in [the introduction](introduction.md#status-and-limits-of-01
   good, the data on the zeroed legs can be reached only by hand with mdadm.
   State: procedure written, [the forced-start guide](operations.md#the-forced-start-guide), "A group whose every
   leg was wiped". Not seen in the lab.
-- **A thin pool marked for a metadata check, or with corrupt metadata, has
+- **A thin pool whose metadata needs a check, or with corrupt metadata, has
   no repair path.** A failed commit leaves a slice's thin pool read-only,
   with dm-thin's mark that its
   metadata needs a check. The mark is kept in the pool's metadata, so the
@@ -705,10 +718,16 @@ Measured times are in [the introduction](introduction.md#status-and-limits-of-01
   the auto-grow. Corrupt thin pool metadata has no check and no repair
   flow in dnv. State: procedure to write, the repair by hand onto fresh
   space, with the level steps, the names of the devices involved, and the
-  tools thin_check and thin_repair, with a test of the cn agent suite.
-  Seen in the lab: a pool with the mark opened read-only, a failed pool
-  opened again as writable, and a full one became writable after its
-  metadata grew.
+  tools thin_check and thin_repair. Seen in the lab: a pool with the mark
+  opened read-only, a failed pool opened again as writable, and a full one
+  became writable after its metadata grew. A suite case repairs by hand a
+  pool whose metadata needs a check, one whose metadata sits in one group:
+  the pool turned off, the check, the repair onto a new device, that
+  device's check, its copy back over the group's array, the mark cleared,
+  and the pool turned on again, writable with its data. The copy back
+  stands in for a swap of the new device, as dnv builds the pool over the
+  group's array. That metadata was intact, so a repair of corrupt metadata
+  is not tried, nor a pool whose metadata spans several groups.
 - **A group whose in-sync leg dies during a copy waits for a forced
   start.** A repair finishes once the primary reports the new leg in place,
   while md may still copy onto it. The old leg dies during the copy. md
@@ -1859,6 +1878,13 @@ design:
   pause, the write pause when a disk node dies and what the loss of every
   path of a data group does are measured, on the lab VMs. State: accepted; the figures come
   from a performance run on AWS.
+- **The largest counts ran on small machines only.** A lab tool stepped
+  one real disk node to 1024 sides and one real controller node to 256
+  cntlrs, each cntlr a one-slice pool with no RAID1, on small guests; every
+  call succeeded and every check round was clean.
+  [The introduction](introduction.md#status-and-limits-of-01) gives the
+  guests' sizes and the times. State: accepted; larger machines and pools
+  with RAID1 come with the performance run.
 - **Every change of a pool sends the whole desired state to its sides and
   cntlrs.** A volume
   create sends the whole desired state to every side and cntlr twice: once

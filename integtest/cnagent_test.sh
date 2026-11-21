@@ -260,6 +260,10 @@ PAUSE_VM=0
 # stage (syn_drop_from), 0 while none does: on_exit lifts the rule even when
 # a run fails, for the two-way cut's reason.
 SYNDROPPED=0
+# The VM on which repair's badstop stages hold a data array open (the stop
+# hold, md_hold_arm), 0 while none does: on_exit ends the holder even when a
+# run fails, as another suite's cleanup could not stop the array it holds.
+MD_HOLD_VM=0
 # The VM that holds the nodecheck case's stalled array or its mdadm wrapper,
 # 0 while none does: on_exit removes both even when a run fails.
 NCG_VM=0
@@ -285,7 +289,7 @@ GCUT_REPORTS=()
 GCUT_FO=""
 
 CASES=(nodecheck smoke redund repair teardown thinbm torn discard isolation
-	clone_xfer restart pause groupcut)
+	clone_xfer restart pause groupcut thinrepair)
 
 # ---------------------------------------------------------------------------
 # Logging, assertions, failure handling
@@ -607,6 +611,9 @@ on_exit() {
 		fi
 		if [ "$PAUSE_VM" -ne 0 ]; then
 			helper_ok "$PAUSE_VM" "pause_stop 0" >&2
+		fi
+		if [ "$MD_HOLD_VM" -ne 0 ]; then
+			helper_ok "$MD_HOLD_VM" md_hold_release >&2
 		fi
 		if [ "$SYNDROPPED" -ne 0 ]; then
 			helper_ok "$SYNDROPPED" \
@@ -2158,6 +2165,73 @@ md_bad_block_add() {
 	echo
 }
 
+# The thinrepair case's new metadata device: a loop device over a file.
+TR_META_FILE=$WORK/tr-meta.bin
+
+# tr_meta_make <bytes> makes the thinrepair case's new metadata device, a
+# loop device over a new file of <bytes>, and prints its path.
+tr_meta_make() {
+	tr_meta_drop >/dev/null
+	truncate -s "$1" "$TR_META_FILE" || return 1
+	losetup -f --show "$TR_META_FILE"
+}
+
+# tr_meta_drop takes the thinrepair case's new metadata device and its file
+# away, whatever is left of them; prints "dropped".
+tr_meta_drop() {
+	local l
+	for l in $(losetup -j "$TR_META_FILE" 2>/dev/null | cut -d: -f1); do
+		losetup -d "$l" 2>/dev/null
+	done
+	rm -f "$TR_META_FILE"
+	echo dropped
+}
+
+# tr_sb_flags <dev> — the thin-pool metadata superblock of <dev>, read with
+# direct IO: "magic=<n> flags=<n>", the magic number at byte 32 (27022010
+# for dm-thin's) and the flags word at byte 4, whose bit 0 is needs_check.
+tr_sb_flags() {
+	local sb=$WORK/tr-sb.bin magic flags
+	gnudd if="$1" of="$sb" bs=4096 count=1 iflag=direct status=none || {
+		rm -f "$sb"
+		echo "tr_sb_flags: reading $1's first 4 KiB failed" >&2
+		return 1
+	}
+	magic=$(od -A n -t u8 -j 32 -N 8 "$sb" | tr -d ' ')
+	flags=$(od -A n -t u4 -j 4 -N 4 "$sb" | tr -d ' ')
+	rm -f "$sb"
+	echo "magic=$magic flags=$flags"
+}
+
+# md_data_chunk <dm name> <file> — where the first 64 KiB of <file> lie in
+# the array that holds the dm device <dm name> as a member: "<data offset>
+# <array sector>", the member's data offset (md/dev-*/offset) and the
+# sector of the array's first 64 KiB chunk that holds those bytes, read
+# with direct IO; a bad block md is to hold over those bytes is recorded at
+# their sum, as md keeps a member's list in the member's own sectors. It
+# fails, saying so, when no chunk holds them or a read fails.
+md_data_chunk() {
+	local where node dmk off size want got i
+	where=$(md_member_of "$1") || return 1
+	read -r node dmk <<<"$where"
+	off=$(cat "/sys/block/$node/md/dev-$dmk/offset") || return 1
+	size=$(blockdev --getsize64 "/dev/$node") || return 1
+	want=$(gnudd if="$2" bs=64K count=1 status=none | sha256sum) || return 1
+	want=${want%% *}
+	for ((i = 0; i < size / 65536; i++)); do
+		got=$(gnudd if="/dev/$node" bs=64K skip="$i" count=1 iflag=direct \
+			status=none | sha256sum) || {
+			echo "md_data_chunk: reading chunk $i of /dev/$node failed" >&2
+			return 1
+		}
+		[ "${got%% *}" = "$want" ] || continue
+		echo "$off $((i * 128))"
+		return 0
+	done
+	echo "md_data_chunk: no 64 KiB chunk of /dev/$node holds the first 64 KiB of $2" >&2
+	return 1
+}
+
 # md_sync_speed <dm name> <min> <max> — writes md/sync_speed_min and
 # md/sync_speed_max of the array that holds the dm device <dm name> as a
 # member, each a speed in KiB per second or the word system, and prints the
@@ -3204,6 +3278,85 @@ unpin_dev() {
 	echo unpinned
 }
 
+# The suite's mdadm (repair's badstop stage; cnagent_integtest.md, Cases,
+# repair): first in the cn agent's PATH (start_cn_agent), it runs the real
+# mdadm with the arguments it was given, unless the stop hold's flag file
+# stands (md_hold_arm) and the call is a stop: it then first opens the array
+# from a process of its own, whose pid it keeps as a pin's, so that unpin_all
+# ends it, and md refuses the stop for real, as it refuses the stop of any
+# array that is open. The flag goes with the first stop it meets.
+MD_WRAP_DIR=$WORK/mdwrap
+MD_HOLD_FLAG=/var/tmp/dnv-it-md-hold.armed
+
+# md_wrap_install writes the suite's mdadm into MD_WRAP_DIR, naming the
+# node's own mdadm by its path, and prints "installed".
+md_wrap_install() {
+	local real
+	real=$(PATH=/usr/sbin:/usr/bin:/sbin:/bin command -v mdadm) || {
+		echo "md_wrap_install: no mdadm on this node" >&2
+		return 1
+	}
+	mkdir -p "$MD_WRAP_DIR" || return 1
+	cat >"$MD_WRAP_DIR/mdadm" <<WRAP_EOF || return 1
+#!/bin/sh
+if [ "\$1" = --stop ] && [ -n "\$2" ] && rm "$MD_HOLD_FLAG" 2>/dev/null; then
+	setsid sleep 600 <"\$2" >/dev/null 2>&1 &
+	echo \$! >"$PIN_PREFIX.mdhold.pid"
+	sleep 0.5
+fi
+exec $real "\$@"
+WRAP_EOF
+	chmod 0755 "$MD_WRAP_DIR/mdadm" || return 1
+	echo installed
+}
+
+# md_hold_arm sets the stop hold's flag; prints "armed".
+md_hold_arm() {
+	: >"$MD_HOLD_FLAG" || return 1
+	echo armed
+}
+
+# md_hold_state prints "held" while the hold's process lives and holds an
+# md device open, "armed" while the flag still waits for a stop, and
+# "none" otherwise.
+md_hold_state() {
+	local pid fd
+	pid=$(cat "$PIN_PREFIX.mdhold.pid" 2>/dev/null)
+	if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
+		for fd in /proc/"$pid"/fd/*; do
+			case "$(readlink "$fd" 2>/dev/null)" in
+			/dev/md*)
+				echo held
+				return 0
+				;;
+			esac
+		done
+	fi
+	if [ -e "$MD_HOLD_FLAG" ]; then echo armed; else echo none; fi
+}
+
+# md_hold_release ends the hold's process and takes the flag away; prints
+# "released" once the process is gone, and fails, saying so, when it still
+# lives 10 s after its kill.
+md_hold_release() {
+	local pid i
+	rm -f "$MD_HOLD_FLAG"
+	pid=$(cat "$PIN_PREFIX.mdhold.pid" 2>/dev/null)
+	if [ -n "$pid" ]; then
+		kill -9 "$pid" >/dev/null 2>&1
+		for ((i = 0; i < 40; i++)); do
+			kill -0 "$pid" 2>/dev/null || break
+			sleep 0.25
+		done
+		if kill -0 "$pid" 2>/dev/null; then
+			echo "md_hold_release: the holder, pid $pid, lives after its kill" >&2
+			return 1
+		fi
+	fi
+	rm -f "$PIN_PREFIX.mdhold.pid"
+	echo released
+}
+
 # unpin_all releases every pin on this VM, whoever left it behind. A pin that
 # survived a failed stage would make the NEXT run's teardown fail on a device
 # nothing is testing, and the failure would name the sweep rather than the pin.
@@ -4221,6 +4374,8 @@ cleanup_phase1() { # <cn16> [other vm ip]
 	pause_stop 0 >/dev/null
 	hostw_stop >/dev/null
 	ncg_teardown >/dev/null
+	rm -f "$MD_HOLD_FLAG"
+	tr_meta_drop >/dev/null
 	unpin_all
 	unthrottle >/dev/null
 	if [ -n "${2:-}" ]; then
@@ -5446,7 +5601,7 @@ preflight_vms() {
 		# silent no-op. Note this list is reached
 		# AFTER the start-of-run cleanup_all and not at all under
 		# --cleanup-only, so those sweeps run unchecked.
-		missing=$(sshv "$idx" "for b in dmsetup nvme losetup blkdiscard lsblk dd gnudd fallocate sha256sum cmp pkill jq timeout mdadm udevadm stat thin_dump blkid blockdev truncate pvcreate vgcreate lvcreate vgremove pvremove make-bcache mkfs.ext4; do command -v \$b >/dev/null || echo \$b; done")
+		missing=$(sshv "$idx" "for b in dmsetup nvme losetup blkdiscard lsblk dd gnudd fallocate sha256sum cmp od pkill jq timeout mdadm udevadm stat thin_dump blkid blockdev truncate pvcreate vgcreate lvcreate vgremove pvremove make-bcache mkfs.ext4; do command -v \$b >/dev/null || echo \$b; done")
 		[ -z "$missing" ] || die "missing: $missing on vm$idx"
 		# smoke's queue counts prove the cap only on a VM with more CPUs than
 		# QID_MAX: with no more, a host asks for no more queues than the
@@ -5544,7 +5699,7 @@ start_dn_agent() { # <idx>
 # `$!` names the agent.
 start_cn_agent() { # <idx>
 	local idx=$1
-	sshv "$idx" "setsid nohup $WORK/dnv-agent cn \
+	sshv "$idx" "PATH=$WORK/mdwrap:\$PATH setsid nohup $WORK/dnv-agent cn \
 --grpc-network tcp --grpc-address ${IP[$idx]}:$CN_GRPC_PORT \
 --tr-type tcp --adr-fam ipv4 --tr-addr ${IP[$idx]} --tr-svc-id $TR_SVC_ID \
 --local-store $WORK/cn-store --capacity $CN_CAPACITY --nvmet-qid-max $QID_MAX \
@@ -5574,6 +5729,8 @@ setup() {
 		log "[vm$idx] scp dnv-agent"
 		scp -q "${SSH_OPTS[@]}" "$AGENT_BIN" "${VM[$idx]}:$WORK/dnv-agent"
 		sshv "$idx" "chmod 0755 $WORK/dnv-agent"
+		assert_eq "$(helper "$idx" md_wrap_install)" installed \
+			"vm$idx: the suite's mdadm for the cn agent"
 		start_dn_agent "$idx"
 		start_cn_agent "$idx"
 	done
@@ -8585,6 +8742,185 @@ grp_reading() { # json grpid
 	jq_of "$1" "(.cntlr_info.grp_id_to_grp_info // {})[\"$(d16 "$2")\"] as \$r | if \$r == null then \"none\" else \"\(\$r.whole // false) \((\$r.in_sync_leg_id_list // []) | join(\",\"))\" end"
 }
 
+# badstop_level <level> <label> — a level step of repair's badstop stage
+# (repair_forced_start): both request files at SP_LEVEL_<level>, CN2's next
+# revision sent and re-sent until a round reads clean. It works on
+# repair_forced_start's request files, pool and rev2, which bash's dynamic
+# scope hands it.
+badstop_level() {
+	local f
+	for f in "$req1" "$req2"; do
+		req_set "$f" ".sp_level = \"SP_LEVEL_$1\""
+	done
+	bump_cn_rev 2
+	rev2=${CNREV[2]}
+	cn_syncup_cntlr 2 "$req2" --expect-code 4 >/dev/null 2>&1 || true
+	resync_until_clean 2 "$sp" "$c2" "$rev2" "$req2" 90 "repair badstop: $2"
+}
+
+# badstop_dropped <label> — whether a way back of repair's badstop stage
+# dropped the kept list: once md holds the data array whole, neither Z nor
+# O carries a bad-block list; logged either way.
+badstop_dropped() {
+	local exz exo
+	md_wait_clean 2 "$sp" "$c2" 120 "repair badstop: $1" "$A_DGRP"
+	exz=$(helper 2 "md_examine $zname") ||
+		die "repair badstop: $1: examining Z failed"
+	exo=$(helper 2 "md_examine $oname") ||
+		die "repair badstop: $1: examining O failed"
+	log "BADSTOP $1: Z '$exz', O '$exo'"
+	case "$exz $exo" in
+	*" bbl=0 "*" bbl=0 "*) return 0 ;;
+	esac
+	return 1
+}
+
+# badstop_recs sets BS_REC to how many forced-start records the cn agent
+# wrote under the stage's trace (cnagent.md CN12, The record).
+badstop_recs() {
+	local rec
+	rec=$(helper 2 "cn_msg $TRACE 'forced start'") ||
+		die "repair badstop: reading the cn log failed"
+	BS_REC=$(printf '%s\n' "$rec" | grep -c .) || true
+}
+
+# badstop_ran <label> — whether the forced start ran again since badstop_keep
+# counted the trace's records: a new record, the last one naming the named
+# leg and both runs, the start that keeps the list and the one that drops
+# it; logged either way.
+badstop_ran() {
+	local rec n last
+	rec=$(helper 2 "cn_msg $TRACE 'forced start'") ||
+		die "repair badstop: $1: reading the cn log failed"
+	n=$(printf '%s\n' "$rec" | grep -c .) || true
+	last=$(printf '%s\n' "$rec" | grep . | tail -n 1 |
+		"$JQ" -r '"\(.leg_id) \(.update)"' 2>/dev/null) || last=""
+	log "BADSTOP $1: forced-start records $BS_REC before, $n after, the last '$last'"
+	[ "$n" -gt "$BS_REC" ] && [ "$last" = "$(d16 "$BS_N") uuid,force-no-bbl" ]
+}
+
+# badstop_swap — after a forced start that dropped the named leg's list, the
+# named leg and the other trade places: md refuses a new bad block on a
+# member whose bad-block log a force-no-bbl start dropped, which it drops
+# for good, while the other, zeroed and added again, has a new one.
+badstop_swap() {
+	local l=$BS_N n=$BS_NN
+	BS_N=$BS_A BS_NN=$BS_AN BS_A=$l BS_AN=$n
+	log "BADSTOP the named leg is now $(d16 "$BS_N") ($BS_NN)"
+}
+
+# badstop_keep <label> — the kept-list state of repair's badstop stages
+# (cnagent_integtest.md, Cases, repair), made the same way before each way
+# back is tried, over the named leg (BS_N, its dm name BS_NN; O, leg 1, at
+# first) and the other (BS_A, BS_AN). When the named leg lists no bad
+# block, one is recorded on it inside md's data, over the first bytes of
+# the host's MiB 0, at the level that serves the host, whose rewrite of MiB
+# 7 then writes the list into the leg's superblock: a write that covers a
+# listed block and succeeds takes it off the list (raid1's "made good"), so
+# the rewrite is of another MiB. The arrays stop at the level with no group
+# array, and a mark naming the leg and passing bad-blocks starts the array
+# from it under a new identity, whose stop the suite's mdadm makes fail
+# (md_hold_arm): the row reads ERROR, the holder holds the array and the
+# leg keeps its list. It works on repair_forced_start's names, which bash's
+# dynamic scope hands it, and sets BS_REC to the count of the trace's
+# forced-start records once that start has run.
+badstop_keep() {
+	local exn deadline bb loc sec st
+	exn=$(helper 2 "md_examine $BS_NN") ||
+		die "repair badstop: $1: examining the named leg failed"
+	case "$exn" in
+	*" bbl=0 "*)
+		if [ "$("$JQ" -r .sp_level "$req2")" != SP_LEVEL_READWRITE ]; then
+			badstop_level READWRITE "$1: the level that serves the host"
+			host_wait_ana "$hv" "$nqn" 2 optimized 30
+		fi
+		drop_caches "$hv"
+		assert_eq "$(sha_range "$hv" "$dev" 8)" "$want" \
+			"repair badstop: $1: the host's data before the bad block"
+		loc=$(helper 2 "md_data_chunk $BS_NN $WORK/mib0-repair.bin") ||
+			die "repair badstop: $1: finding the host's MiB 0 in the data array failed: $loc"
+		sec=$((${loc% *} + ${loc#* }))
+		log "BADSTOP $1: the host's MiB 0 starts at sector ${loc#* } of the data array, whose data starts at sector ${loc% *} of the named leg: the bad block goes at its sector $sec"
+		sshv "$hv" "dd if=$dev of=$WORK/mib7-repair.bin bs=1M count=1 skip=7 status=none" ||
+			die "repair badstop: $1: reading MiB 7 failed"
+		bb=$(helper 2 "md_bad_block_add $BS_NN $sec 8") ||
+			die "repair badstop: $1: recording a bad block on the named leg failed: $bb"
+		write_range "$hv" "$WORK/mib7-repair.bin" "$dev" 1 7 ||
+			die "repair badstop: $1: rewriting MiB 7 failed"
+		deadline=$((SECONDS + 30))
+		while :; do
+			exn=$(helper 2 "md_examine $BS_NN") ||
+				die "repair badstop: $1: examining the named leg failed"
+			case "$exn" in *" bbl=0 "*) ;; *) break ;; esac
+			[ "$SECONDS" -lt "$deadline" ] ||
+				die "repair badstop: $1: after 30 s the named leg's superblock reads '$exn'"
+			sleep 1
+		done
+		;;
+	esac
+	badstop_level NO_REDUND "$1: the level with no group array"
+	assert_eq "$(helper 2 "md_array_state $BS_NN")" none \
+		"repair badstop: $1: the level stops the array"
+	MD_HOLD_VM=2
+	assert_eq "$(helper 2 md_hold_arm)" armed "repair badstop: $1: the stop's hold"
+	for f in "$req1" "$req2"; do
+		mark_set "$f" "$BS_N" bad-blocks
+		req_set "$f" '.sp_level = "SP_LEVEL_NO_THINPOOL"'
+	done
+	bump_cn_rev 2
+	rev2=${CNREV[2]}
+	out=$(cn_syncup_cntlr 2 "$req2" --expect-code 4 2>/dev/null || true)
+	assert_map_status "$out" grp_id_to_md_raid "$A_DGRP" RES_STATUS_ERROR \
+		"its stop to drop the list failed" "repair badstop: $1: the start"
+	assert_eq "$(helper 2 md_hold_state)" held \
+		"repair badstop: $1: the process that held the array open"
+	exn=$(helper 2 "md_examine $BS_NN") ||
+		die "repair badstop: $1: examining the named leg after the start failed"
+	case "$exn" in
+	*" bbl=0 "*) die "repair badstop: $1: the named leg lost its list with its stop refused: $exn" ;;
+	esac
+	st=$(helper 2 "md_array_state $BS_NN")
+	log "BADSTOP $1, the start from leg $(d16 "$BS_N"): '$exn', the array '$st'"
+	case "$st" in none | broken | inactive) die "repair badstop: $1: the array reads '$st' after the start" ;; esac
+	badstop_recs
+}
+
+# badstop_added <label> — after the converge that adds the other leg beside
+# the named one in the kept-list state: the array whole and clean again,
+# each leg's list as the primary reads it logged, the other's checked to be
+# a copy of the named leg's (md marks bad on a member it recovers every
+# region bad on every in-sync member), and the holder ended.
+badstop_added() {
+	local al nl
+	md_wait_clean 2 "$sp" "$c2" 120 "repair badstop: $1: the other leg added" "$A_DGRP"
+	al=$(leg_bbl 2 "$sp" "$c2" "$BS_A") ||
+		die "repair badstop: $1: reading the other leg's list failed"
+	nl=$(leg_bbl 2 "$sp" "$c2" "$BS_N") ||
+		die "repair badstop: $1: reading the named leg's list failed"
+	log "BADSTOP $1, the other leg added under the list: its list $al, the named leg's $nl"
+	[ "$al" -ge 1 ] ||
+		die "repair badstop: $1: the other leg, added under the named leg's list, lists no bad block (the named leg's $nl)"
+	assert_eq "$(helper 2 md_hold_release)" released \
+		"repair badstop: $1: the holder ended"
+	MD_HOLD_VM=0
+}
+
+# badstop_mark_check <label> — sets BS_ACTED to the revision of the mark the
+# primary's fresh reading names as acted, BS_MARK to the revision of the
+# mark the request carries and BS_ROW to the data group's row: the worker
+# clears a mark once the first two match and the row reads OK
+# (dnv-worker.md AR13).
+badstop_mark_check() {
+	local out
+	out=$(cnctl 2 check-cntlr --fresh --show-info --revision "$rev2" \
+		--sp "$sp" --cntlr "$c2" 2>/dev/null) ||
+		die "repair badstop: $1: the fresh CheckCntlr failed"
+	BS_ACTED=$(grp_acted "$out" "$A_DGRP")
+	BS_MARK=$("$JQ" -r ".id_to_slice[\"$(hex16 "$A_SLICE")\"].data_grp_list[0].forced_start.revision // \"0\"" "$req2")
+	BS_ROW=$(jq_of "$out" ".cntlr_info.grp_id_to_md_raid[\"$(d16 "$A_DGRP")\"].status // \"none\"")
+	log "BADSTOP $1: the reading names mark $BS_ACTED as acted, the request carries mark $BS_MARK, the row reads $BS_ROW"
+}
+
 # repair_forced_start is repair's forced-start stages (cnagent_integtest.md,
 # Cases, repair; cnagent.md CN12), run after its finish. It works on
 # case_repair's pool, request files, host device and pattern, and moves on
@@ -9227,6 +9563,134 @@ repair_forced_start() {
 	drop_caches "$hv"
 	assert_eq "$(sha_range "$hv" "$dev" 8)" "$want" \
 		"repair badblocks: the host's data"
+
+	stage badstop "a forced start whose stop is refused keeps the named leg's list, a leg added after it gets a copy and a host read over it fails; way 1, the mark kept"
+	# The way back of a stop that fails (cnagent.md, Known limits): the named
+	# leg, O at first, the member badstart added, whose superblock still
+	# keeps a bad-block log (Z's start dropped Z's), gets a bad block inside
+	# md's data, over the host's MiB 0, and a mark naming it and passing
+	# bad-blocks starts the array from it under a new identity, the start
+	# that keeps the list, whose stop the case makes fail for real
+	# (badstop_keep), and the re-send adds the other leg: the suite's mdadm,
+	# first in the cn agent's PATH, holds the array open from a process of
+	# its own before it runs the stop once its flag stands (md_hold_arm), and
+	# md refuses a stop of an array that is open. Then each way back is tried
+	# from that same state, one a stage, and what each does is asserted: the
+	# mark kept, the level stepped down and up (here); the mark cleared as
+	# the worker clears it, the level stepped down and up (badclear); a new
+	# mark while the row reads ERROR, then the level stepped down and up
+	# (badwindow); mdadm's own drop of both lists at the level with no group
+	# array (badmdadm). A way that drops the lists by a forced start drops
+	# the named leg's log with them, so the other leg is named next
+	# (badstop_swap).
+	local BS_N=${A_DLEG[1]} BS_NN=$oname BS_A=$zleg BS_AN=$zname
+	local BS_REC=0 BS_ACTED BS_MARK BS_ROW rd
+	badstop_keep "way 1"
+	# The re-send the worker makes on the row's code: the array runs, so the
+	# standing mark does not act, and the converge adds Z, which the start
+	# zeroed, and md copies onto Z the regions O holds bad as bad.
+	cn_syncup_cntlr 2 "$req2" --expect-code 4 >/dev/null 2>&1 || true
+	badstop_added "way 1"
+	# What a host read meets over the kept lists, at the level that serves
+	# the host with the mark still standing.
+	badstop_level READWRITE "way 1: the level that serves the host, both lists kept"
+	host_wait_ana "$hv" "$nqn" 2 optimized 30
+	drop_caches "$hv"
+	rd=$(sshv "$hv" "gnudd if=$dev of=/dev/null bs=1M count=1 iflag=direct status=none 2>&1; echo rc=\$?")
+	rd=$(printf '%s' "$rd" | tr '\n' ' ')
+	log "BADSTOP way 1: a host read of MiB 0 over both lists: $rd"
+	case "$rd" in
+	*"rc=0 "*) die "repair badstop: a host read of MiB 0 over the region both members list bad succeeded: $rd" ;;
+	esac
+	badstop_level NO_THINPOOL "way 1: back to the level with no thin pool"
+	badstop_level NO_REDUND "way 1, down"
+	badstop_level NO_THINPOOL "way 1, up with the mark kept"
+	badstop_dropped "way 1, the mark kept" ||
+		die "repair badstop: way 1, the mark kept, left a list"
+	badstop_ran "way 1, the mark kept" ||
+		die "repair badstop: way 1: the standing mark did not start the array again from the named leg"
+	badstop_swap
+
+	stage badclear "way 2 outside the window: the mark cleared as the worker clears it, the level stepped down and up, keeps both lists"
+	# Once the re-send has added the other leg the row reads OK and the
+	# reading names the standing mark as acted, so the worker clears it;
+	# with no mark the level
+	# step assembles the array again from both members, whose lists stay,
+	# and the row reads OK, over which the gateway takes no new mark
+	# (architecture.md, Repair).
+	badstop_keep "way 2 outside the window"
+	cn_syncup_cntlr 2 "$req2" --expect-code 4 >/dev/null 2>&1 || true
+	badstop_added "way 2 outside the window"
+	badstop_mark_check "way 2 outside the window, the re-send"
+	[ "$BS_ROW" = RES_STATUS_OK ] && [ "$BS_ACTED" = "$BS_MARK" ] ||
+		die "repair badstop: way 2 outside the window: the worker would not clear the mark (acted $BS_ACTED, mark $BS_MARK, row $BS_ROW)"
+	for f in "$req1" "$req2"; do
+		mark_set "$f"
+	done
+	badstop_level NO_REDUND "way 2 outside the window, down"
+	badstop_level NO_THINPOOL "way 2 outside the window, up with no mark"
+	! badstop_dropped "way 2 outside the window" ||
+		die "repair badstop: way 2 outside the window dropped the lists"
+	badstop_mark_check "way 2 outside the window, up"
+	assert_eq "$BS_ROW" RES_STATUS_OK \
+		"repair badstop: way 2 outside the window: the row over both lists"
+
+	stage badwindow "way 2 in the window: a new mark while the row reads ERROR, the level stepped down and up, drops both lists"
+	# Right after the failed stop the row reads ERROR, the one state in which
+	# the gateway takes a new mark below the level with no group array
+	# (architecture.md, Repair). The array runs, so the new mark does not act
+	# and the converge adds the other leg; the reading names no mark of the
+	# new one's revision as acted, so the worker keeps it, and it acts at
+	# the next level step up.
+	badstop_keep "way 2 in the window"
+	for f in "$req1" "$req2"; do
+		mark_set "$f" "$BS_N" bad-blocks
+	done
+	bump_cn_rev 2
+	rev2=${CNREV[2]}
+	cn_syncup_cntlr 2 "$req2" --expect-code 4 >/dev/null 2>&1 || true
+	badstop_added "way 2 in the window"
+	badstop_mark_check "way 2 in the window, the new mark's converge"
+	[ "$BS_ACTED" != "$BS_MARK" ] ||
+		die "repair badstop: way 2 in the window: the reading names the new mark $BS_MARK as acted, so the worker would clear it"
+	badstop_level NO_REDUND "way 2 in the window, down"
+	badstop_level NO_THINPOOL "way 2 in the window, up with the new mark"
+	badstop_dropped "way 2 in the window" ||
+		die "repair badstop: way 2 in the window left a list"
+	badstop_ran "way 2 in the window" ||
+		die "repair badstop: way 2 in the window: the new mark did not start the array again from the named leg"
+	badstop_swap
+
+	stage badmdadm "way 3: mdadm's own drop of both lists at the level with no group array"
+	# The mark cleared as the worker clears it, at the level with no group
+	# array mdadm assembles the array from both members by hand, passing
+	# force-no-bbl, which drops each one's list, and stops it; the level step
+	# up then assembles it as the agent does.
+	badstop_keep "way 3"
+	cn_syncup_cntlr 2 "$req2" --expect-code 4 >/dev/null 2>&1 || true
+	badstop_added "way 3"
+	for f in "$req1" "$req2"; do
+		mark_set "$f"
+	done
+	badstop_level NO_REDUND "way 3, down"
+	out=$(sshv 2 "mdadm --assemble $md2dev --metadata=1.2 --update=force-no-bbl /dev/mapper/$zname /dev/mapper/$oname 2>&1; echo rc=\$?; mdadm --stop $md2dev 2>&1; echo rc=\$?")
+	log "BADSTOP way 3, mdadm: $(printf '%s' "$out" | tr '\n' ' ')"
+	badstop_level NO_THINPOOL "way 3, up"
+	badstop_dropped "way 3, mdadm's drop" ||
+		die "repair badstop: way 3, mdadm's drop, left a list"
+	for f in "$req1" "$req2"; do
+		mark_set "$f"
+		req_set "$f" '.sp_level = "SP_LEVEL_READWRITE"'
+	done
+	bump_cn_rev 2
+	rev2=${CNREV[2]}
+	out=$(cn_syncup_cntlr 2 "$req2")
+	assert_map_ok "$out" slice_id_to_dm_pool "$A_SLICE" \
+		"repair badstop: the pool"
+	host_wait_ana "$hv" "$nqn" 2 optimized 30
+	drop_caches "$hv"
+	assert_eq "$(sha_range "$hv" "$dev" 8)" "$want" \
+		"repair badstop: the host's data"
 
 	stage older "a forced start from a leg older than a member it zeroes is refused unless passed"
 	# O, in sync beside Z, dies for CN2 alone, and the host's write of MiB 0,
@@ -13710,6 +14174,204 @@ case_groupcut() {
 	log ""
 	log "groupcut: the summaries"
 	cat "${GCUT_REPORTS[@]}" >&2
+}
+
+# ---------------------------------------------------------------------------
+# Case R — thinrepair (cnagent_integtest.md, Cases)
+# ---------------------------------------------------------------------------
+
+# The thinrepair case's pool: the A shape, primary on CN2 alone, its one meta
+# group the slice's whole thin-pool metadata; TR_TD2 is the new volume whose
+# creation commits the pool while its data group is broken.
+TR_SP=0x451
+TR_UUID=aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaa0451
+TR_TD2=0x1e
+
+# tr_step <label> <cmd…> — one step of the repair by hand on vm2, its exit
+# status and output logged as "THINREPAIR <label> rc=<n>: <output>", and the
+# status returned, since the case records which steps work.
+tr_step() {
+	local label=$1 out rc=0
+	shift
+	out=$(sshv 2 "$*" 2>&1) || rc=$?
+	log "THINREPAIR $label rc=$rc: $(printf '%s' "$out" | tr '\n' ' ' | cut -c1-400)"
+	return "$rc"
+}
+
+case_thinrepair() {
+	CASE=thinrepair
+	DIAG_CNTLRS=()
+	SIDE_PROVISIONED=()
+	local sp=$TR_SP c2=0x2 hv=2 nqn="$NQN_IT_PREFIX:tr:vol1"
+	local req2="$WORK/req-thinrepair-cn2.json" out dev want l st flags pool
+	local lin meta md2 mdmeta deadline grp size way sb newmeta
+	dev=$(host_dev "$TR_UUID")
+	pool=$(cn_dm_name c2 2 "$sp" "$A_SLICE")
+	diag_cntlr 2 "$sp" "$c2"
+	for l in thin_check thin_repair; do
+		[ -n "$(sshv 2 "command -v $l || true")" ] ||
+			die "thinrepair: vm2 has no $l (thin-provisioning-tools)"
+	done
+
+	stage build "the A-shaped pool, primary CN2; 8 MiB written and committed"
+	dn_pointers 1 "$sp:${A_MLEG[1]}:${A_MSIDE[1]}" "$sp:${A_DLEG[1]}:${A_DSIDE[1]}"
+	dn_pointers 2 "$sp:${A_MLEG[2]}:${A_MSIDE[2]}" "$sp:${A_DLEG[2]}:${A_DSIDE[2]}"
+	for l in 1 2; do
+		dn_side "$l" "$sp" "${A_MLEG[$l]}" "${A_MSIDE[$l]}" 1 \
+			"$RAID1_MGRP_ZERO_BYTES" "${CNID[2]}"
+		dn_side "$l" "$sp" "${A_DLEG[$l]}" "${A_DSIDE[$l]}" 2 \
+			"$RAID1_DGRP_ZERO_BYTES" "${CNID[2]}"
+	done
+	bump_cn_sync 2
+	out=$(cnctl 2 syncup-cn --revision "${CNREV[2]}" --cntlr "$sp:$c2")
+	assert_cn_info_ok "$out" "thinrepair syncup-cn"
+	req_raid1 "$req2" 2 "$sp" "$c2" 0 true "$nqn" "$TR_UUID"
+	bump_cn_rev 2
+	out=$(cn_syncup_cntlr 2 "$req2")
+	assert_map_ok "$out" slice_id_to_dm_pool "$A_SLICE" "thinrepair build"
+	assert_map_ok "$out" ns_id_to_namespace "$A_NS" "thinrepair build"
+	flip_created "$out" "$req2"
+	host_connect "$hv" 2 "$nqn"
+	helper "$hv" "wait_dev '$dev' 20" >/dev/null || die "no device node $dev on vm$hv"
+	host_wait_ana "$hv" "$nqn" 2 optimized 20
+	make_pattern "$hv" "$WORK/pattern-tr.bin" 8
+	want=$(sha_range "$hv" "$WORK/pattern-tr.bin" 8)
+	write_range "$hv" "$WORK/pattern-tr.bin" "$dev" 8
+
+	stage fault "the data group's every leg errors, md breaks the array, and a new volume's creation leaves the pool read-only with needs_check"
+	# Both data legs' exports to CN2 error every IO, as repair's reassembly
+	# stage does it, and a host write breaks the array (cnagent.md CN29).
+	# A broken array refuses every write, empty flushes included, and every
+	# pool message the agent sends commits the pool, whose commit flushes
+	# the data device first: the new volume's creation (cnagent.md CN14)
+	# fails that commit, and dm-thin writes needs_check into the metadata on
+	# the meta group, which still takes writes.
+	for l in 1 2; do
+		lin=$(dn_lin_name "$l" "$sp" "${A_DSIDE[$l]}" 2)
+		assert_eq "$(helper "$l" "dm_error_load $lin")" loaded \
+			"thinrepair: $lin erroring"
+	done
+	assert_eq "$(helper "$hv" "write_probe '$dev' 0")" eio \
+		"thinrepair: the host's write over the erroring legs"
+	deadline=$((SECONDS + 60))
+	while :; do
+		st=$(helper 2 "md_array_state $(cn_dm_name c9 2 "$sp" "${A_DLEG[1]}")") ||
+			die "thinrepair: reading the data array's state failed"
+		[ "$st" = broken ] && break
+		[ "$SECONDS" -lt "$deadline" ] ||
+			die "thinrepair: after 60 s the data array reads '$st'"
+		sleep 1
+	done
+	req_set "$req2" ".td_list += [$(req_td "$TR_TD2" 2 0)]"
+	bump_cn_rev 2
+	out=$(cn_syncup_cntlr 2 "$req2" --expect-code 4 2>/dev/null || true)
+	flags=$(gcut_pool_flags 2 "$pool")
+	log "THINREPAIR fault: the pool's status after the new volume: $flags"
+	case " $flags " in
+	*" needs_check "*) ;;
+	*) die "thinrepair: the pool reads '$flags' after a commit over the broken data array, want needs_check" ;;
+	esac
+	out=$(cnctl 2 check-cntlr --fresh --show-info --revision "${CNREV[2]}" \
+		--sp "$sp" --cntlr "$c2" --expect-code 4 2>/dev/null || true)
+	assert_eq "$(jq_of "$out" ".cntlr_info.slice_id_to_dm_pool[\"$(d16 "$A_SLICE")\"] | \"\(.status) \(.reason)\"")" \
+		"RES_STATUS_ERROR RES_REASON_POOL_NEEDS_CHECK" \
+		"thinrepair: CN2's pool row"
+
+	stage nopool "the legs back, then the level with no thin pool: the data array assembled again, the meta group's array the metadata's device"
+	host_disconnect "$hv" "$nqn"
+	for l in 1 2; do
+		dn_side "$l" "$sp" "${A_DLEG[$l]}" "${A_DSIDE[$l]}" 2 \
+			"$RAID1_DGRP_ZERO_BYTES" "${CNID[2]}"
+		leg_wait_not_error 2 "$sp" "$c2" "${A_DLEG[$l]}" 30 \
+			"thinrepair: data leg $l's probe"
+	done
+	req_set "$req2" '.sp_level = "SP_LEVEL_NO_THINPOOL"'
+	bump_cn_rev 2
+	cn_syncup_cntlr 2 "$req2" --expect-code 4 >/dev/null 2>&1 || true
+	resync_until_clean 2 "$sp" "$c2" "${CNREV[2]}" "$req2" 60 \
+		"thinrepair: the level with no thin pool"
+	md_resync_until_clean 2 "$sp" "$c2" "${CNREV[2]}" "$req2" 120 \
+		"thinrepair: the data array" "$A_DGRP"
+	assert_eq "$(helper 2 "dm_state '$pool'")" missing \
+		"thinrepair: no thin pool at the level"
+	mdmeta=$(cnctl 2 md-name --sp "$sp" --slice-idx 0 --grp-idx 0 --meta)
+	meta=$(jq_of "$mdmeta" .dev_path)
+	assert_eq "$(sshv 2 "test -b $meta && echo yes || echo no")" yes \
+		"thinrepair: the meta group's array $meta"
+	size=$(sshv 2 "blockdev --getsize64 $meta")
+	log "THINREPAIR nopool: the metadata's device is $meta, $size bytes"
+	# The flag on the metadata itself, as the pool's removal left it: the
+	# superblock's flags word, bit 0.
+	sb=$(helper 2 "tr_sb_flags $meta") ||
+		die "thinrepair: reading $meta's superblock failed: $sb"
+	log "THINREPAIR nopool: $meta's superblock: $sb"
+	case "$sb" in
+	"magic=27022010 flags="*) ;;
+	*) die "thinrepair: $meta holds no thin-pool superblock: $sb" ;;
+	esac
+	(((${sb##*flags=} & 1) == 1)) ||
+		die "thinrepair: $meta's superblock carries no needs_check flag: $sb"
+
+	stage repair "thin_check, thin_repair onto a new metadata device, its check, the copy back over the meta group's array, the flag cleared"
+	# dnv builds the pool over the meta group's array by its name, and no
+	# request names another metadata device, so the swap of a repaired
+	# device for the old one is the copy back over the array.
+	way=""
+	tr_step "thin_check (the flag set)" "thin_check $meta" || true
+	newmeta=$(helper 2 "tr_meta_make $size") ||
+		die "thinrepair: making the new metadata device failed: $newmeta"
+	if tr_step "thin_repair onto the new device $newmeta" \
+		"thin_repair -i $meta -o $newmeta" &&
+		tr_step "thin_check of the new device" "thin_check $newmeta" &&
+		tr_step "the copy back onto $meta" \
+			"dd if=$newmeta of=$meta bs=1M conv=fsync status=none"; then
+		way="thin_repair onto a new device, the copy back"
+	fi
+	log "THINREPAIR repair: $meta's superblock after the copy: $(helper 2 "tr_sb_flags $meta")"
+	assert_eq "$(helper 2 tr_meta_drop)" dropped \
+		"thinrepair: the new metadata device taken away"
+	tr_step "thin_check after the copy" "thin_check $meta" || true
+	tr_step "thin_check --clear-needs-check-flag" \
+		"thin_check --clear-needs-check-flag $meta" && way="${way:+$way, }the flag cleared"
+	tr_step "thin_check at the end" "thin_check $meta" ||
+		die "thinrepair: $meta does not check clean after the steps ($way)"
+	log "THINREPAIR repair: the steps that worked: ${way:-none}"
+	sb=$(helper 2 "tr_sb_flags $meta") ||
+		die "thinrepair: reading $meta's superblock failed: $sb"
+	log "THINREPAIR repair: $meta's superblock at the end: $sb"
+	(((${sb##*flags=} & 1) == 0)) ||
+		die "thinrepair: $meta's superblock still carries the needs_check flag after the steps ($way): $sb"
+
+	stage back "the level back up: the pool writable over the repaired metadata, and the host reads its data"
+	req_set "$req2" '.sp_level = "SP_LEVEL_READWRITE"'
+	bump_cn_rev 2
+	cn_syncup_cntlr 2 "$req2" --expect-code 4 >/dev/null 2>&1 || true
+	resync_until_clean 2 "$sp" "$c2" "${CNREV[2]}" "$req2" 60 \
+		"thinrepair: the level back up"
+	flags=$(gcut_pool_flags 2 "$pool")
+	log "THINREPAIR back: the pool's status: $flags"
+	case " $flags " in
+	*" needs_check "* | *" ro "* | *Fail*)
+		die "thinrepair: the pool reads '$flags' after the repair" ;;
+	*" rw "*) ;;
+	*) die "thinrepair: the pool reads '$flags', want rw" ;;
+	esac
+	host_connect "$hv" 2 "$nqn"
+	helper "$hv" "wait_dev '$dev' 20" >/dev/null || die "no device node $dev on vm$hv"
+	host_wait_ana "$hv" "$nqn" 2 optimized 20
+	drop_caches "$hv"
+	assert_eq "$(sha_range "$hv" "$dev" 8)" "$want" \
+		"thinrepair: the data written before the fault"
+	assert_eq "$(helper "$hv" "write_probe '$dev' 16")" ok \
+		"thinrepair: a new write after the repair"
+
+	stage teardown "empty cntlr list, then empty side lists"
+	host_disconnect "$hv" "$nqn"
+	cn_drop 2
+	dn_drop 1
+	dn_drop 2
+	assert_no_residue "$sp"
+	sshv_ok "$hv" "rm -f $WORK/pattern-tr.bin"
 }
 
 # ---------------------------------------------------------------------------
