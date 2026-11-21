@@ -2182,9 +2182,12 @@ func (w *spWorker) parsePoolStatus(
 // the total it read, once; a later pass that reads a larger total logs
 // `grow done` with the seconds between the two passes, the time a grow took
 // from the first sight of the breach to the pool the primary reports grown,
-// and forgets the note. A note is forgotten with nothing logged when a pass
-// reads the pool under its mark again at the same total, or the slice gone,
-// or the automation off. Notes live in the coordinator's memory, so a
+// and forgets the note. That pass is the first to read the pool at its new
+// total, so when it reads the pool past its mark there it notes the time
+// again: the grow tryGrow may start later in the same pass, as a fill does,
+// is timed from this pass. A note is forgotten with nothing logged when a
+// pass reads the pool under its mark again at the same total, or the slice
+// gone, or the automation off. Notes live in the coordinator's memory, so a
 // restart of it or of its worker, or a move of its shard, loses them; and a
 // breach that the coordinator's first reading of the pool rows already
 // finds gets a note with no time, whose grow is not timed either, since the
@@ -2230,19 +2233,22 @@ func (w *spWorker) timeGrows(ctx context.Context, p *spPass) {
 			past := kind.used*100 > lwm*kind.total
 			watch, noted := r.grows[kind.key]
 			switch {
-			case noted && kind.total > watch.total && watch.since.IsZero():
-				delete(r.grows, kind.key)
 			case noted && kind.total > watch.total:
-				slog.InfoContext(ctx, msgGrowDone,
-					slog.Uint64("cluster_id", w.cid),
-					slog.Uint64("sp_id", w.spId),
-					slog.Uint64("slice_id", sliceId),
-					slog.String("kind", kind.name),
-					slog.Uint64("old_total", watch.total),
-					slog.Uint64("new_total", kind.total),
-					slog.Float64("seconds", now.Sub(watch.since).Seconds()),
-				)
+				if !watch.since.IsZero() {
+					slog.InfoContext(ctx, msgGrowDone,
+						slog.Uint64("cluster_id", w.cid),
+						slog.Uint64("sp_id", w.spId),
+						slog.Uint64("slice_id", sliceId),
+						slog.String("kind", kind.name),
+						slog.Uint64("old_total", watch.total),
+						slog.Uint64("new_total", kind.total),
+						slog.Float64("seconds", now.Sub(watch.since).Seconds()),
+					)
+				}
 				delete(r.grows, kind.key)
+				if past {
+					r.grows[kind.key] = growWatch{since: now, total: kind.total}
+				}
 			case noted && !past:
 				delete(r.grows, kind.key)
 			case !noted && past && first:

@@ -549,6 +549,16 @@ gave up waited until the fast IO fail timeout ended, 1, 5 or 15 s after
 the drop. On a pool with no RAID1 the write failed after 13.2 s at 5 s and
 after 23.3 s at 15 s.
 
+The write pause while a volume grows was measured on the lab VMs on
+2026-11-20 with fio filling a fresh 4 GiB volume of the CSI driver from its
+first block to its last, with direct IO and eight writes of 1 MiB in
+flight. The pool started with a data group of one eighth of the volume and
+grew eight times while the fill ran. Each grow took about 4 s from the pool
+passing half of its data space, and the writes spent most of the fill
+waiting for the grows: the grows, not the device, set how fast the volume
+filled. No write failed and every block read back. The longest write took
+at least 6.1 s, a write that waited for a grow.
+
 The limits dnv enforces, each against the largest size a test has run. The
 Go tests run the control plane against fake agents, test programs that answer
 an agent's calls with no node behind them, and the agents against a fake
@@ -568,7 +578,7 @@ proven against fakes alone.
 | Cntlrs per pool | 4 | 4 | 3 |
 | Cntlrs per controller node | 256 | 256, and a real cn agent on a fake machine converged 257 | about 10 |
 | Sides per disk node | 1024 | 1024, and a real dn agent on a fake machine converged 1025 | about 10 |
-| Groups per slice, meta and data each | 255 | 255 data groups, grown without redundancy; a full meta list, and a full list with RAID1, only written to etcd directly | about 2 |
+| Groups per slice, meta and data each | 255 | 255 data groups, grown without redundancy; a full meta list, and a full list with RAID1, only written to etcd directly | 9 data groups with RAID1, in a CSI volume filled whole; about 2 meta groups |
 | Thin devices per pool | 1024 | 1024 | a few |
 | Subsystems per pool; namespaces per subsystem; hosts per subsystem | 4; 4; 8 | each at its value | 1; 2; 4 |
 | Clones; transfers; migrations per pool | 64; 4; 4 | each at its value | 1; 1; 2 |

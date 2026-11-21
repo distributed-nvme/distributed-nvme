@@ -131,7 +131,9 @@ func TestThePassStartsAfterItsOffset(t *testing.T) {
 // that read a larger total, once; a pool read under its mark again at the
 // same total is forgotten, and its later growth logs nothing, as does the
 // growth of a pool never read past its mark and of one whose breach the
-// coordinator's first reading of the pool rows already found.
+// coordinator's first reading of the pool rows already found. The pass that
+// reads the larger total is the first to read the pool at it, so a pool
+// still past its mark there is timed from that pass, as is the next grow.
 func TestAGrowIsTimedFromTheFirstPassPastTheMark(t *testing.T) {
 	// The coordinator's first reading of the pool rows finds no breach, so
 	// that every later breach has a pass of its own that first read it.
@@ -212,16 +214,41 @@ func TestAGrowIsTimedFromTheFirstPassPastTheMark(t *testing.T) {
 			t.Fatalf("records %v for a breach older than the first reading",
 				got)
 		}
-		// The pool still past its mark at the new total: a breach this
-		// coordinator's next pass reads first, which is timed from there.
+		// The pool still past its mark at the new total: a breach the pass
+		// that read the new total reads first, which is timed from there.
 		h.clk.advance(time.Second)
 		h.pass()
 		h.setPool(reactSliceId, pb.ResStatus_RES_STATUS_OK,
 			poolLine(10, 100, 190, 300))
 		h.clk.advance(3 * time.Second)
 		h.pass()
-		if got := done(h); len(got) != 1 || got[0]["seconds"] != float64(3) {
-			t.Fatalf("records %v, want the next grow timed at 3 s", got)
+		if got := done(h); len(got) != 1 || got[0]["seconds"] != float64(4) {
+			t.Fatalf("records %v, want the next grow timed at 4 s", got)
+		}
+	})
+	t.Run("two grows in a row", func(t *testing.T) {
+		// A fill: each grow lands on a pool already past its mark at the
+		// new total, and the next grow starts in the pass that read it.
+		h := setup(t)
+		h.setPool(reactSliceId, pb.ResStatus_RES_STATUS_OK,
+			poolLine(10, 100, 90, 100))
+		h.pass()
+		h.setPool(reactSliceId, pb.ResStatus_RES_STATUS_OK,
+			poolLine(10, 100, 190, 200))
+		h.clk.advance(4 * time.Second)
+		h.pass()
+		h.clk.advance(2 * time.Second)
+		h.pass()
+		h.setPool(reactSliceId, pb.ResStatus_RES_STATUS_OK,
+			poolLine(10, 100, 290, 300))
+		h.clk.advance(2 * time.Second)
+		h.pass()
+		got := done(h)
+		if len(got) != 2 || got[0]["seconds"] != float64(4) ||
+			got[1]["seconds"] != float64(4) ||
+			got[1]["old_total"] != float64(200) ||
+			got[1]["new_total"] != float64(300) {
+			t.Fatalf("records %v, want two data grows of 4 s each", got)
 		}
 	})
 	t.Run("metadata", func(t *testing.T) {

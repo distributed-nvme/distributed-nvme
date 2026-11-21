@@ -239,6 +239,12 @@ HOLD_CUT=20
 # on the lab, with a margin.
 WAIT_HOST_IO_FAIL=90
 WAIT_NS_GONE=300
+# The fill case's volume (csi.md, The cases): 4 GiB, which keeps what the
+# fill writes into the disk node guests to 8 GiB through RAID1, and the
+# bound on its fio run, the write of the whole device and the read back.
+FILL_SIZE=4Gi
+FILL_BYTES=4294967296
+WAIT_FILL=1200
 WAIT_HOST_CLEAN=120
 SANITY_TIMEOUT=2400
 CLEANUP_TIMEOUT=600
@@ -249,7 +255,7 @@ FRAME=@@csi-frame@@
 SSH_OPTS=(-o BatchMode=yes -o ConnectTimeout=10 -o ServerAliveInterval=15
 	-o ServerAliveCountMax=4 -o LogLevel=ERROR)
 
-CASES=(k8s policy volume failover restart detach many machine sanity)
+CASES=(k8s policy volume failover restart detach many fill machine sanity)
 
 # ---------------------------------------------------------------------------
 # State
@@ -1147,7 +1153,7 @@ kill_agents() { # <dn|cn>
 }
 
 agent_pids() { # <dn|cn>
-	pgrep -af "[d]nv-agent $1" || true
+	pgrep -af "$WORK/bin/[d]nv-agent $1" || true
 	return 0
 }
 
@@ -1623,7 +1629,7 @@ dn_up() {
 
 # dn_cleanup takes a disk-node guest back: the agent, stray arrays, the
 # nvmet objects, the dm devices top-down, the loop device, the udev rules,
-# $WORK.
+# $WORK, and then a trim of the guest's root file system.
 dn_cleanup() { # [extra host nqn…]
 	kill_agents dn >/dev/null
 	resume_suspended
@@ -1643,7 +1649,16 @@ dn_cleanup() { # [extra host nqn…]
 	resume_suspended
 	loop_teardown
 	remove_udev_rules >/dev/null
-	rm -rf "$WORK"
+	# The trim: the backing files' blocks, about 2 GiB on a guest after the
+	# fill case, stay allocated in the host's image of the guest until the
+	# guest discards them, so a guest that held a work directory is synced,
+	# given 10 s for its file system to free the blocks, and trimmed.
+	if [ -d "$WORK" ]; then
+		rm -rf "$WORK"
+		sync
+		sleep 10
+		timeout 120 fstrim / >/dev/null 2>&1 || echo "TRIM_FAILED: fstrim / on $(hostname)"
+	fi
 	echo cleaned
 	return 0
 }
@@ -1749,18 +1764,18 @@ stop_all() {
 	pkill -f "$WORK/bin/[d]nv-gateway" >/dev/null 2>&1
 	pkill -f "$WORK/bin/[d]nv-worker" >/dev/null 2>&1
 	pkill -f "$WORK/bin/[d]nv-cdc" >/dev/null 2>&1
-	pkill -f "[e]tcd --name $ETCD_NAME" >/dev/null 2>&1
+	pkill -f "$WORK/bin/[e]tcd --name $ETCD_NAME" >/dev/null 2>&1
 	sleep 0.5
 	pkill -9 -f "$WORK/bin/[d]nv-gateway" >/dev/null 2>&1
 	pkill -9 -f "$WORK/bin/[d]nv-worker" >/dev/null 2>&1
 	pkill -9 -f "$WORK/bin/[d]nv-cdc" >/dev/null 2>&1
-	pkill -9 -f "[e]tcd --name $ETCD_NAME" >/dev/null 2>&1
+	pkill -9 -f "$WORK/bin/[e]tcd --name $ETCD_NAME" >/dev/null 2>&1
 	echo stopped
 	return 0
 }
 
 cp_pids() {
-	pgrep -af "[d]nv-gateway|[d]nv-worker|[d]nv-cdc|[e]tcd --name $ETCD_NAME" || true
+	pgrep -af "$WORK/bin/([d]nv-gateway|[d]nv-worker|[d]nv-cdc|[e]tcd --name $ETCD_NAME)" || true
 	return 0
 }
 
@@ -1878,6 +1893,8 @@ diag() {
 	cp_pids
 	agent_pids dn
 	agent_pids cn
+	# Every dnv-csi process, the driver's plugins in their pods and the
+	# sanity case's plain ones: a listing signals nothing.
 	pgrep -af "[d]nv-csi" || true
 	echo "--- $(hostname): nvme subsystems"
 	subsys_nqns
@@ -2030,7 +2047,7 @@ preflight_guests() {
 		assert_eq "$(fact_of "$out" multipath)" Y "host$h: nvme_core.multipath"
 		mem=$(fact_of "$out" mem_total_kib)
 		assert_ge "$mem" 3000000 "host$h: MemTotal in KiB (raise the guest's memory)"
-		missing=$(helper_host "$h" tools nvme uuidgen systemctl udevadm nft systemd-run ss) ||
+		missing=$(helper_host "$h" tools nvme uuidgen systemctl udevadm nft systemd-run ss fio) ||
 			die "host$h: listing its tools failed"
 		[ -z "$missing" ] || die "host$h: missing tool(s): $(printf '%s' "$missing" | tr '\n' ' ')"
 		missing=$(helper_host "$h" modules nvme-tcp) || die "host$h: modprobe failed"
@@ -2704,7 +2721,7 @@ cleanup_verb() { # <label> <sentinel> <ssh wrapper> [<index>] <verb…>
 		out=$(QUIET=1 "$wrapper" "$idx" "timeout $CLEANUP_TIMEOUT bash $HELPER $*" 2>&1) || true
 	fi
 	if printf '%s\n' "$out" | grep -qx "$want"; then
-		printf '%s\n' "$out" | grep -v -x "$want" | grep -E 'wipe_left=|STUCK|REFUSED|STILL_RUNNING' |
+		printf '%s\n' "$out" | grep -v -x "$want" | grep -E 'wipe_left=|STUCK|REFUSED|STILL_RUNNING|TRIM_FAILED' |
 			sed "s/^/  $label: /" >&2 || true
 		return 0
 	fi
@@ -4015,6 +4032,100 @@ case_many() {
 	stage 02 "every delete, and nothing left"
 	for i in $(seq 0 7); do delete_pod "p$i"; done
 	for i in $(seq 0 7); do delete_claim "m$i"; done
+	nothing_left
+	log "=== $CASE: PASS"
+}
+
+# fill_dev_ready answers whether host0 shows the fill volume's device at its
+# full size.
+fill_dev_ready() { # <device> <bytes>
+	[ "$(QUIET=1 ssh_host 0 "blockdev --getsize64 $1 2>/dev/null")" = "$2" ]
+}
+
+# fill_grow_chain reads the fill's grow records, "<kind> <old total> <new
+# total> <seconds> <time>" per line, and prints the count of data grows and
+# whether each starts from the total the one before it reached: "<n>
+# chained", or "<n> broken".
+fill_grow_chain() { # <records>
+	printf '%s\n' "$1" | awk '$1 == "grow_data" {
+			if (n && $2 != last) bad = 1
+			last = $3
+			n++
+		}
+		END { printf "%d %s\n", n, bad ? "broken" : "chained" }'
+}
+
+# fill_hold_script holds a block claim and writes nothing.
+fill_hold_script() {
+	cat <<'EOF'
+echo done > /tmp/marker
+exec sleep 1000000
+EOF
+}
+
+# case_fill fills a fresh volume from its first block to its last at the
+# device's speed (csi.md, The cases): fio on host0 writes the whole device
+# with direct IO and blocks that carry their own check, then reads every
+# block back, while the pool grows under it one data group at a time. Any
+# write or check error fails the case, and so does a count of the worker's
+# data grow records for the pool other than the data groups the pool added;
+# the longest write, the write rate and the time of each grow the worker
+# logs are measured, not asserted, since no rule bounds a grow's time.
+case_fill() {
+	CASE=fill
+	local pv uuid dev out sp recs grps
+	stage 01 "a claim of $FILL_SIZE in block mode, held by a pod on host0"
+	claim fl0 "$FILL_SIZE" Block
+	wait_until "$WAIT_PVC" "claim fl0 Bound" pvc_bound fl0
+	pv=$(pvc_volume fl0)
+	run_pod fl fl0 0 Block "$(fill_hold_script)" /tmp/marker
+	uuid=$(kc get pv "$pv" -o 'jsonpath={.spec.csi.volumeAttributes.uuid}') ||
+		die "reading the namespace uuid of $pv failed"
+	[ -n "$uuid" ] || die "the volume $pv names no namespace uuid"
+	dev=/dev/disk/by-id/nvme-uuid.$uuid
+	wait_until "$WAIT_SHORT" "host0 to show $dev at $FILL_BYTES bytes" fill_dev_ready "$dev" "$FILL_BYTES"
+	ctl_ok sp get --sp "$pv"
+	sp=$(jq_of "$CTL_OUT" '.sp_conf.sp_id')
+	case $sp in '' | *[!0-9]*) die "the pool $pv reads no id ('$sp')" ;; esac
+	log "  the pool $pv has id $sp"
+
+	stage 02 "fio writes the whole device with checked blocks at the device's speed, then reads every block back"
+	out=$(ssh_host 0 "timeout $WAIT_FILL fio --name=fill --filename=$dev --rw=write --bs=1M" \
+		"--direct=1 --ioengine=libaio --iodepth=8 --verify=crc32c --do_verify=1" \
+		"--lat_percentiles=1 --continue_on_error=all --output-format=json") ||
+		die "fio on host0 failed: $(printf '%s' "$out" | tail -c 2000)"
+	# fio's lat, a write's whole time from its submission to its completion,
+	# not clat, which leaves the submission out: a write held while it is
+	# submitted is part of the stall the case measures.
+	log "  fill: $(jq_of "$out" '.jobs[0].write.io_kbytes') KiB written at $(jq_of "$out" '.jobs[0].write.bw') KiB/s" \
+		"in $(jq_of "$out" '.jobs[0].write.runtime') ms;" \
+		"write latency median $(jq_of "$out" '(.jobs[0].write.lat_ns.percentile["50.000000"] // 0) / 1000000 | floor') ms," \
+		"99.9th $(jq_of "$out" '(.jobs[0].write.lat_ns.percentile["99.900000"] // 0) / 1000000 | floor') ms," \
+		"longest $(jq_of "$out" '.jobs[0].write.lat_ns.max / 1000000 | floor') ms;" \
+		"$(jq_of "$out" '.jobs[0].read.io_kbytes') KiB read back in $(jq_of "$out" '.jobs[0].read.runtime') ms"
+	assert_eq "$(jq_of "$out" '.jobs[0].error')" 0 "the first error fio met on the fill"
+	assert_eq "$(jq_of "$out" '.jobs[0].total_err')" 0 "the errors fio counted on the fill and its read back"
+	assert_eq "$(jq_of "$out" '.jobs[0].write.io_kbytes * 1024')" "$FILL_BYTES" "the bytes fio wrote"
+	assert_eq "$(jq_of "$out" '.jobs[0].read.io_kbytes * 1024')" "$FILL_BYTES" "the bytes fio read back"
+
+	stage 03 "the grows the worker logged for the pool, one per data group it added"
+	recs=$(ssh_cp "cat $WORK/worker/worker.log" |
+		"$JQ" -rR --argjson sp "$sp" 'fromjson? | objects | select(.msg == "grow done" and .sp_id == $sp) |
+			"\(.kind) \(.old_total) \(.new_total) \(.seconds) \(.time)"') ||
+		die "reading the worker's grow records failed"
+	printf '%s\n' "$recs" | awk 'NF { printf "  grow: %s %s -> %s in %s s, logged %s\n", $1, $2, $3, $4, $5 }' >&2
+	ctl_ok sp get --sp "$pv"
+	grps=$(jq_of "$CTL_OUT" '.slice_list[0].data_grp_list | length')
+	case $grps in '' | *[!0-9]* | 0) die "the pool $pv reads no data group count ('$grps')" ;; esac
+	# One record per data group the pool added past its first, each from the
+	# total the one before it reached: a grow the record missed, or one that
+	# logged twice, shows in the count or in the chain.
+	assert_eq "$(fill_grow_chain "$recs")" "$((grps - 1)) chained" \
+		"the data grows the worker logged for the fill, against the pool's $grps data groups"
+
+	stage 04 "the pod and the claim go, and nothing left"
+	delete_pod fl
+	delete_claim fl0
 	nothing_left
 	log "=== $CASE: PASS"
 }

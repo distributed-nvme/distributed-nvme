@@ -4251,12 +4251,16 @@ later pass that reads a larger total logs `grow done` with the slice, the
 kind (`grow_data` or `grow_meta`), the two totals and the seconds between
 the two passes, the time from the first sight of the breach to the pool
 the primary reports grown, which spans the worker's grow, the CN's
-convergence and the primary's next report. A note is dropped with nothing
-logged when a pass reads the pool under its mark at the same total, the
-slice gone or the automation off. A breach that the coordinator's first
-reading of the pool rows already finds is never timed, since it began
-before that reading: its note carries no time and is dropped with nothing
-logged once the pool grows. The notes live in the coordinator's
+convergence and the primary's next report. The pass that reads the larger
+total is the first to read the pool at it, so when it reads the pool past
+its mark there it notes the time and that total as the first sight of the
+new breach, whether it logged the note before or dropped it: the next grow,
+which may start in that same pass, as under a fill, is timed from it. A
+note is dropped with nothing logged when a pass reads the pool under its
+mark at the same total, the slice gone or the automation off. A breach that
+the coordinator's first reading of the pool rows already finds is never
+timed, since it began before that reading: its note carries no time and is
+dropped with nothing logged once the pool grows. The notes live in the coordinator's
 memory: a restart of it, or of its worker, or a move of the shard loses
 them, and logs nothing for those grows. The step changes nothing.
 

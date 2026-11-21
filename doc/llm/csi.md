@@ -819,7 +819,9 @@ from the controller nodes, ends only once the primary has cut that host's
 nvmet connection, which it cannot while the worker is stopped, as does the
 attach to the other host that Kubernetes asks for meanwhile, and then the
 old host's writes fail and the volume's new pod on the other host reads what
-the old host wrote and writes; eight volumes live at once; the two controller
+the old host wrote and writes; eight volumes live at once; a fresh volume
+filled from its first block to its last at the device's speed, while its
+pool grows under it, fails no write and reads back whole; the two controller
 copies lead through two leases, and when the machine of the copy that leads
 is cut off, the other copy takes both leases and serves a new volume, and a
 new copy runs elsewhere while that machine stays cut; the example network
@@ -841,7 +843,10 @@ a slice count the suite accepts and every pool ignores, since a volume's
 pool has one slice, and a directory on the suite's machine to keep the logs
 in. The pinned k3s version is a constant of the suite.
 The suite's work directory on every guest and its shipped helper are its
-own, named so that no other suite's is a prefix of them.
+own, named so that no other suite's is a prefix of them, and every process
+its cleanup stops or lists by a pattern is matched by its program's path
+under that directory, etcd's included, so that a cleanup never signals a
+program another suite started.
 
 ### The rules
 
@@ -887,7 +892,11 @@ to the suite's cdc go, with the hosts' mask of nvme-cli's autoconnector, then
 the controller nodes' and the disk nodes' devices, exports, agents and udev
 rules, with the controller nodes' nvmet entries of the two hosts that
 attaches made, then the control plane's processes, the imported images and the
-work directories, holder first. Cleanup runs at the start of every run and, on
+work directories, holder first. A disk-node guest whose work directory the
+cleanup removed is then synced, given 10 s, and its root file system
+trimmed, since the blocks of the backing files, about 2 GiB a guest after
+the fill case, stay allocated in the host's image of the guest until the
+guest discards them; a trim that fails is named in the cleanup's report. Cleanup runs at the start of every run and, on
 success only, at its end; a failing run leaves everything in place and dumps
 diagnostics, but for the taint and the cut, which it removes after the
 diagnostics, the cut also by a timer on the host once its time limit has
@@ -1032,6 +1041,33 @@ back to two copies, then every delete, and nothing left.
 a pattern and checking it; the cluster holds eight pools; then every
 delete, and nothing left.
 
+**fill.** A fresh claim of 4 GiB in block mode, held by a pod on host0, and
+fio on host0 against the volume's device: one pass that writes every block
+from the first to the last with direct IO, eight writes of 1 MiB in flight,
+each block carrying its own check, then a read of every block against its
+check. The pool starts with one data group of an eighth of the volume and
+grows one group at a time while the fill runs (`dnv-worker.md`, Thin-pool
+auto-grow). A write error, a check that fails or a short count fails the
+case, and so does a count of the worker's data grow records for the pool
+other than the data groups the pool added past its first, or a record that
+does not start from the total the one before it reached, since each grow
+the fill causes is one the record times (`dnv-worker.md` AR6, its record
+`grow done`). The longest write and the median, each a write's whole time from
+its submission to its completion, the write rate and each grow's record,
+its time and its seconds, are measured and logged, not asserted, since no
+rule bounds how long a grow takes. On the lab, at the suite's extent size
+and with the legs on four disk-node guests, the fill wrote at about
+114 MiB/s; the median write took 17 ms and the longest at least 6.1 s, a
+write that waited for a grow, both read as their completion time alone,
+which leaves the submission out; the pool grew eight times, from 509 to
+4581 data blocks; no write failed and every block read back. Each grow took
+about 4 s from the pool passing its mark: the writes took 36 s, of which
+the writes alone, eight of 1 MiB in flight at the median's 17 ms, need
+about 9 s, so about 27 s went to waits for the eight grows. The waits for
+the grows, not the device, set the fill's rate. Then the pod and the claim
+go, and nothing left; the disk nodes' cleanup trims what the fill wrote
+into their guests (CSI5).
+
 **machine.** Every driver container has run without a restart so far,
 which the case checks before it cuts anything, since a sidecar that loses its
 lease exits by design. Both leases are brought to the copy on one host H,
@@ -1065,8 +1101,9 @@ shipped and the start cleanup runs, before any guest check, so that a port
 check never judges what a failed run left in place. Then the guest checks:
 passwordless sudo on every guest; on the three Kubernetes guests the
 hostnames and machine-ids distinct (CSI2), native multipath, the memory
-floor and the firewall and timer tools of the machine and detach cases on the
-hosts, and the hosts' identities present and different; on the node guests
+floor, the firewall and timer tools of the machine and detach cases and the
+fio of the fill case on the hosts, and the hosts' identities present and
+different; on the node guests
 the agents' tools and modules and this suite's ports free, and on a
 controller-node guest, once nvmet is loaded, the facts the cn agent's start
 check reads (`cnagent.md` CN-CM2): debugfs mounted at /sys/kernel/debug,
@@ -1089,7 +1126,8 @@ attachments, the pods and events of the suite's namespace, the state of the
 cut of the machine and detach cases on each host, the nodes' taints, the
 sidecars' leases, the logs of both controller copies and every node plugin,
 with the previous run of a sidecar that restarted, dnvctl's list of pools,
-and from each guest its facts, its k3s state, its dnv processes, its NVMe
+and from each guest its facts, its k3s state, its dnv processes, the
+driver's plugins in their pods among them, its NVMe
 subsystems and discovery connections, its dm, md, nvmet and loop state, the
 nvmet connections that nvmet's debug directory shows, its memory, and the
 tails of its k3s journal and of its programs' logs. A run asked to keep its logs
