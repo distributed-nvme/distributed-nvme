@@ -169,10 +169,13 @@ their progress in. The info-read commands are plain memory reads.
   over the gate (DN11); provisioning where the gate holds a resource back; and
   provisioning or OK only for a new side's own row right after its
   unprovisioned sync, a genuine race. The residue and dm listings, the
-  agent-log readers and the host's controller lookups fail their stage when
-  their tool did not answer, since a failed read taken for an absence passes
-  every negative built on it (SH15); the pin release alone reads an unanswered
-  `dmsetup info` as a device already gone.
+  listing of a migration's chunk files in the local store, the agent-log
+  readers and the host's controller lookups fail their stage when their tool
+  did not answer, since a failed read taken for an absence passes every
+  negative built on it (SH15), and so does a data read whose `dd` fails, as a
+  hash of what it read before the error passes a check that wants it to
+  differ; the pin release alone reads an unanswered `dmsetup info` as a
+  device already gone.
 * **Check rounds.** A stage that reads the agent after a fault, behind a
   converge, for progress no converge stores — a zeroing, a hydration — or to
   count what a read does sends a fresh round, and a poll samples with rounds
@@ -198,9 +201,9 @@ their progress in. The info-read commands are plain memory reads.
 * **Observed, never asserted.** The provisioning and read-through windows are
   races a loop device usually wins; the cutover window lasts `SuspendSeconds`
   and is sampled once right after the cutover reply, which a slow step can
-  miss; and whether the teardown case's clone still hydrates when its source
-  vanishes decides only whether its removal blocks. Each is logged as hit or
-  missed, never failed on.
+  miss. Each is logged as hit or missed, never failed on. The teardown
+  case's copy, which a loop device would finish at once, is slowed instead,
+  so that it still runs when its source vanishes, and the case asserts it.
 
 ## Cases
 
@@ -286,8 +289,16 @@ the no-hydration and no-discard-passdown pair (DN13; `architecture.md`, [D7]);
 the last must-copy region reads from the destination as the source holds it,
 hydrated or not; the finish leaves nothing of the migration on either node,
 the per-CN linear repointed and the source side dropped (`dnagent.md` DN6, L1
-to L4, L6), which the teardown's residue check proves; and the data verifies
-through the destination path, which also takes a write.
+to L4, L6; `architecture.md`, Migrations, FinishMigration), which reads of each node's
+kernel and of the destination's local store prove: right after the finish,
+no dm-clone, metadata wrapper, controller of the source's export or chunk
+file of the migration on its destination's node, and its primary's per-CN
+linear mapping the side device; right after the source drop, nothing of the
+source side on its node, its devices and its two exports. Each read is
+scoped to the migration's names, as each node also holds the other
+migration's side of the same pool, and each has its positive control right
+before the step, which finds what the step must remove. The data then
+verifies through the destination path, which also takes a write.
 
 **migr_full** pushes no bitmap: the destination's reply reports an applied
 set for its own migration, and the set is empty (`architecture.md`, Bitmap
@@ -339,17 +350,25 @@ the cleanup takes it off first, whatever else fails.
 
 **teardown** proves `architecture.md`, Teardown by sweep: what cannot go yet
 is reported and finished later, never forgotten (`dnagent.md` DN6, DN7, DN16,
-DN19, SH7), under the two shapes a blocked removal takes. A removal that
-outlasts a pass: a migration's source export is yanked and the destination
-side dropped at once, so its clone comes off before the connection it hydrates
-through (`dnagent.md` L3), over a source already dead; the same revision is
-re-sent until clean, only the leftover code tolerated, nothing of the migration
+DN19, SH7). A clone whose source dies mid-copy: the
+migration's copy slowed on the source's node, as migr_bitmap's late push
+slows it, so that it still runs once the source's cutover grace window has
+ended (the converge that ends the window builds the export again,
+`dnagent.md` DN12), which the case asserts, the source export is yanked and
+the destination side dropped at once, so its clone comes off before the
+connection it hydrates through (`dnagent.md` L3), over a source already
+dead, which proves the removal order and, below, the release of both
+records; whether the clone's removal outlasts its pass is only observed,
+the log naming what the first pass left: on the lab it ends within the
+first pass, for a cause not read; the same revision
+is re-sent until clean, only the leftover code tolerated, nothing of the migration
 may remain on either node, and a fresh `CheckDn` round, whose verdict is
 that of a read made after the drop, replies clean, which proves its
 allocation and clone-metadata records went with their devices, an orphaned
 record being a leftover itself (DN6's record step); that a record never goes
 before its device is left to the unit tests. A removal blocked from outside
-the agent: a side device is held open and the side dropped; the leftover
+the agent, the shape that outlasts a pass: a side device is held open and
+the side dropped; the leftover
 reply names it, the residue is exactly that device (DN6's layers), the
 verdict of a read made after the drop, which a fresh round reports, agrees,
 and the same revision, re-sent once the device is free, finishes.
@@ -429,15 +448,17 @@ later, which converges as it is, is left to the unit tests.
 held in a run that stops at the first failure: data checked against a pattern
 file the agent never sees or against zeros, removals proved by the node's own
 listings. The observed windows are only logged, so a pass need not have caught
-a source mid-cutover, a read mid-hydration or a clone removal blocking on its
-dead source. The restart case prints, not asserts, whether each old agent
+a source mid-cutover, a read mid-hydration or a clone removal that outlasts
+its pass over a dead source. The restart case prints, not asserts, whether each old agent
 stopped; one that survives keeps its endpoint and answers the later steps, so
 that pass is as good as that line.
 
 ## Teardown and cleanup
 
 Cleanup runs unconditionally at the start of every run and at its end only on
-success, its first step taking off migr_bitmap's token bucket; a failing run
+success and after a failed wipe (below), its first step taking off the token
+bucket of migr_bitmap's late push and of the teardown case's slowed copy;
+any other failing run
 leaves its debris, save that bucket, which it takes off at its exit since
 other suites share the VMs, and dumps the tail of each agent's
 log, the dm, nvmet and host state of both VMs, a listing of each local store
@@ -461,8 +482,10 @@ devices top-down, a clone before the migration connection and export it
 flushes to on removal; and a disk's header block zeroed before its loop device
 is detached, which leaves its volume-table slots inert (`architecture.md`,
 [D13]; `dnagent.md` DN5); the udev rules go last. Two more rules keep the removals from wedging:
-every suspended device is resumed first, since a run killed in a
-cutover window leaves the source's linears suspended and a suspended device
+every suspended device is resumed first, an inactive table waiting or not,
+since a run killed in a
+cutover window leaves the source's linears suspended, a reload that stopped
+after its load leaves a table waiting, and a suspended device
 wedges its removal, the namespace disable above it and any block scan; and
 both VMs are cleaned at once, since a node's migration source export backs its
 peer's clone. The helper running all this lives outside the work directory it
@@ -479,11 +502,12 @@ the move lived only on the tmpfs, and the dump is what keeps their names.
 That node's agent stays stopped: started over the disk store below, it would
 converge the older requests held there and remove the debris the run leaves.
 
-The wipe is a separate flag that runs no case: it reads no dm kind, taking
+The wipe is a separate flag that runs no case: it kills the suite's device
+pins first, as the cleanup does, then reads no dm kind, taking
 dnv-named residue whatever its name decodes to, every dnv nvmet subsystem and
 md array and, past dnv, every fabrics controller on the node, a reach that
-makes it a flag and not a step; then, when it does not fail (below), it runs
-the ordinary cleanup. It repeats
+makes it a flag and not a step; then it runs the ordinary cleanup, and when
+the wipe failed (below), the run fails after that cleanup. It repeats
 while dnv dm devices remain, as udev can re-assemble an array from its
 members, and fails if a dnv dm device or nvmet subsystem is left or the dm
 listing did not answer, as reporting a residue is not success; md arrays are

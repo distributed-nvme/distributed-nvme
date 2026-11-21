@@ -83,6 +83,13 @@ QID_MAX=3
 # (copy_held).
 COPY_RATE=4mbit
 HOLD_SECS=4
+# The clones' hydration threshold, with a batch size of one (req_clone): a
+# dm-clone starts a background region's copy only while fewer than this many
+# are in flight (do_hydration in the kernel's dm-clone-target.c counts its
+# own pass as one), so no more than this many are ever in flight, and that is
+# also the bound on the regions a held copy can still count once it reads as
+# held (clone_xfer's stages 5c and 5d; cnagent_integtest.md, Lab facts).
+CLONE_HYDR_THRESHOLD=1
 
 # redund's dial stage (cnagent.md CN10): the cn agent's dial timeout,
 # common.CnConnectDialTimeout, in ms, and the room the stage gives a converge
@@ -229,6 +236,9 @@ WIPE=0
 CASE="setup"
 TRACE="it-setup"
 STAGE="(startup)"
+# WIPE_CLEANED is 1 once a failed --wipe has run the ordinary cleanup
+# (wipe_all), so the exit's last line says so.
+WIPE_CLEANED=0
 SETUP_DONE=0
 DIAG_CNTLRS=()
 # The VM that holds clone_xfer's throttle (throttle_to) or redund's slowleg
@@ -607,7 +617,12 @@ on_exit() {
 		done
 		[ -z "$PAUSE_STOP" ] || rm -f "$PAUSE_STOP"
 		log ""
-		log "debris left in place on both VMs; failing stage '$STAGE'"
+		if [ "$WIPE_CLEANED" -eq 1 ]; then
+			log "the ordinary cleanup ran after the failed wipe; the residue" \
+				"printed above may remain on the VM(s)"
+		else
+			log "debris left in place on both VMs; failing stage '$STAGE'"
+		fi
 		log "pull records with: jq 'select(.trace_id==\"$TRACE\")' $CN_LOG"
 		log "                   jq 'select(.trace_id==\"$TRACE\")' $DN_LOG"
 	fi
@@ -972,8 +987,12 @@ leg_wait_live() { # cnvm sp leg cn dnidx secs
 
 drop_caches() { sshv "$1" "sync; echo 3 > /proc/sys/vm/drop_caches"; }
 
+# sha_range hashes a range of a device or file. The VM's shell runs the
+# pipeline under pipefail, so a read that fails fails the call: the VM's dd
+# exits non-zero on a read error, after writing what it read before it, and
+# a caller that assigns the hash stops there rather than on a mismatch.
 sha_range() { # vm path countMiB [skipMiB]
-	sshv "$1" "dd if=$2 bs=1M count=$3 skip=${4:-0} status=none | sha256sum | cut -d' ' -f1"
+	sshv "$1" "set -o pipefail; dd if=$2 bs=1M count=$3 skip=${4:-0} status=none | sha256sum | cut -d' ' -f1"
 }
 
 # write_range's status is dd's: `&& sync`, never `; sync`, whose 0 would
@@ -1079,9 +1098,9 @@ req_xfer() { # xferid ori_nqn ori_ns_idx allowed_hosts_json auto_suspend
 # meta group (architecture.md, Terminology and object model), one req_grp
 # whose legs and sides the case provisions as it does a slice's.
 req_clone() { # cloneid src_nqn src_vm dst_tdid auto_resume grp_json
-	printf '{"clone_id": "%s", "src_tr_conf_list": [%s], "src_nqn": "%s", "src_ns_idx": 1, "src_slice_cnt": 1, "src_stripe_size": "%s", "src_block_size": "%s", "dst_td_id": "%s", "dm_clone_conf": {"hydration_threshold": 1, "hydration_batch_size": 1}, "auto_resume": %s, "meta_grp": %s}' \
+	printf '{"clone_id": "%s", "src_tr_conf_list": [%s], "src_nqn": "%s", "src_ns_idx": 1, "src_slice_cnt": 1, "src_stripe_size": "%s", "src_block_size": "%s", "dst_td_id": "%s", "dm_clone_conf": {"hydration_threshold": %s, "hydration_batch_size": 1}, "auto_resume": %s, "meta_grp": %s}' \
 		"$(d16 "$1")" "$(req_tr "${IP[$3]}")" "$2" "$STRIPE_SIZE" \
-		"$BLOCK_SIZE" "$(d16 "$4")" "$5" "$6"
+		"$BLOCK_SIZE" "$(d16 "$4")" "$CLONE_HYDR_THRESHOLD" "$5" "$6"
 }
 
 join_json() {
@@ -1486,6 +1505,41 @@ dm_wsect() {
 		;;
 	esac
 	echo "$wsect"
+}
+
+# dm_wquiet <dm name> — the sectors written to a dm device, read twice a
+# second apart with its count of writes in flight beside each read: it
+# prints the count when both reads agree and no write was in flight at
+# either, and "busy <sectors> <in flight> <sectors> <in flight>" otherwise. A
+# dm device counts in flight every write it has started and not ended, so a
+# copy write a token bucket holds back shows there (clone_xfer's stage 5d).
+dm_wquiet() {
+	local dmk w1 f1 w2 f2
+	dmk=$(readlink -f "/dev/mapper/$1" 2>/dev/null) || dmk=""
+	dmk=${dmk##*/}
+	case "$dmk" in
+	dm-*) ;;
+	*)
+		echo "dm_wquiet: /dev/mapper/$1 is not a dm device" >&2
+		return 1
+		;;
+	esac
+	w1=$(awk '{print $7}' "/sys/block/$dmk/stat") || return 1
+	f1=$(awk '{print $2}' "/sys/block/$dmk/inflight") || return 1
+	sleep 1
+	w2=$(awk '{print $7}' "/sys/block/$dmk/stat") || return 1
+	f2=$(awk '{print $2}' "/sys/block/$dmk/inflight") || return 1
+	case "$w1$f1$w2$f2" in
+	'' | *[!0-9]*)
+		echo "dm_wquiet: $dmk reads '$w1' '$f1' '$w2' '$f2'" >&2
+		return 1
+		;;
+	esac
+	if [ "$w1" = "$w2" ] && [ "$f1" = 0 ] && [ "$f2" = 0 ]; then
+		echo "$w1"
+	else
+		echo "busy $w1 $f1 $w2 $f2"
+	fi
 }
 
 # dm_discards <name> — one dm device's discards since it was created: the
@@ -3246,14 +3300,38 @@ good_sectors() {
 	dmsetup table "$name"
 }
 
+# ipt_chain <chain> — this node's rules of one iptables chain in `-S` form,
+# or one line saying they are unknown when there is no iptables or the
+# listing fails, for throttle_rules' reason: the rule readers below print
+# what they find, and their callers' empty check would read a listing that
+# did not answer as a rule that is gone. It fails in the second case, so a
+# reader prints the line and filters nothing.
+ipt_chain() {
+	local ipt out nl=$'\n'
+	ipt=$(iptables_bin)
+	if [ -z "$ipt" ]; then
+		echo "no iptables on this node, the $1 rules are unknown"
+		return 1
+	fi
+	if out=$("$ipt" -S "$1" 2>&1); then
+		printf '%s\n' "$out"
+	else
+		echo "iptables -S $1 failed, the rules are unknown: ${out//$nl/; }"
+		return 1
+	fi
+}
+
 # partition_rules <ip> — the rules unpartition_from is supposed to have taken.
 # Empty output is the assertion, and reading it after the removal is what turns
-# "we ran -D" into "the rule is gone".
+# "we ran -D" into "the rule is gone"; a listing that did not answer prints
+# its line (ipt_chain).
 partition_rules() {
-	local ipt
-	ipt=$(iptables_bin)
-	[ -n "$ipt" ] || return 0
-	"$ipt" -S INPUT 2>/dev/null |
+	local rules
+	rules=$(ipt_chain INPUT) || {
+		printf '%s\n' "$rules"
+		return 0
+	}
+	printf '%s\n' "$rules" |
 		grep -F -- "-s $1" | grep -F -- "--dport $TR_SVC_ID" || true
 }
 
@@ -4088,9 +4166,12 @@ wipe_cn() { # <cn16>
 	drop_subsys_glob "$NQN_PREFIX:9:*"
 	host_link_drop "$NQN_IT_PREFIX:operator-host"
 	dm_remove_kind c6 "$1"
-	dm_remove_kind c8 "$1"
 	dm_remove_kind c7 "$1"
+	# A transfer device goes once nvmet has let it go: its :4: export holds
+	# it open while the namespace stands (cleanup_phase2).
 	disconnect_prefix "$NQN_PREFIX:4:"
+	drop_subsys_glob "$NQN_PREFIX:4:*"
+	dm_remove_kind c8 "$1"
 	disconnect_prefix "$NQN_PREFIX:2:"
 	local kind
 	for kind in c5 c4 c3 c2 c1 c0 ca c9; do
@@ -4104,7 +4185,8 @@ wipe_cn() { # <cn16>
 # Teardown and cleanup. The split is what makes the
 # cross-VM ordering safe: a case C clone on one VM holds an nvme connection to
 # a transfer on the other, so every clone is removed (phase 1) before any
-# transfer subsystem is (phase 2).
+# transfer subsystem is (phase 2), and a transfer device goes only after the
+# transfer subsystem whose namespace holds it open (phase 2).
 cleanup_phase1() { # <cn16> [other vm ip]
 	kill_role cn >/dev/null
 	kill_role dn >/dev/null
@@ -4142,7 +4224,6 @@ cleanup_phase1() { # <cn16> [other vm ip]
 	drop_subsys_glob "$NQN_IT_PREFIX:*"
 
 	dm_remove_kind c6 "${1:-}"
-	dm_remove_kind c8 "${1:-}"
 	dm_remove_kind c7 "${1:-}"
 	echo phase1
 }
@@ -4150,9 +4231,11 @@ cleanup_phase1() { # <cn16> [other vm ip]
 cleanup_phase2() { # <cn16> <dn16>
 	local cn16=${1:-} dn16=${2:-} kind name
 
-	# The transfers the clones of phase 1 were sourced from.
+	# The transfers the clones of phase 1 were sourced from, then the
+	# transfer devices their namespaces held open.
 	disconnect_prefix "$NQN_PREFIX:4:"
 	drop_subsys_glob "$NQN_PREFIX:4:*"
+	dm_remove_kind c8 "$cn16"
 
 	# cn dm pass 2, top-down, then the arrays, then the leg wrappers.
 	for kind in c5 c4 c3 c2 c1 c0; do
@@ -4247,6 +4330,10 @@ lab_wipe() {
 
 	kill_role cn >/dev/null
 	kill_role dn >/dev/null
+
+	# Every device pin, whoever left it, for cleanup_phase1's reason (see
+	# unpin_all): nothing below can remove a device a pin holds open.
+	unpin_all
 
 	# Nothing may stay suspended from here on (see resume_suspended): reading
 	# a suspended device goes to D state, where `timeout` cannot reach it.
@@ -4344,10 +4431,21 @@ lab_wipe() {
 	# tests lives by: what is left is reported, and reporting it is not
 	# success. Everything this deliberately does not touch — $WORK, the loop
 	# devices, the udev rules, the nvmet port — belongs to the
-	# ordinary cleanup that runs after a wipe that does not fail and is not
+	# ordinary cleanup that runs after the wipe, failed or not, and is not
 	# counted here.
-	local dm_left nvmet_left md_left
-	dm_left=$(dmsetup ls 2>/dev/null | awk '$1 ~ /^dnv/ {print $1}' | tr '\n' ' ')
+	#
+	# A `dmsetup ls` that did not answer is no evidence of a clean node: the
+	# dm residue is then reported as unknown, which fails the wipe just as a
+	# residue does. The loops above keep their 2>/dev/null reads, since this
+	# final read is the verdict; nvmet_left keeps its own, as it takes a
+	# missing $NVMET for a node that exports nothing.
+	local dms dm_left nvmet_left md_left
+	if dms=$(dmsetup ls); then
+		dm_left=$(printf '%s\n' "$dms" | awk '$1 ~ /^dnv/ {print $1}' | tr '\n' ' ')
+	else
+		echo "lab_wipe: dmsetup ls did not answer; the dm residue is unknown" >&2
+		dm_left="(unknown: dmsetup ls did not answer)"
+	fi
 	nvmet_left=$(ls "$NVMET/subsystems" 2>/dev/null | grep -F dnv | tr '\n' ' ')
 	md_left=$(grep -oE '^md[^ :]+' /proc/mdstat 2>/dev/null | tr '\n' ' ')
 	echo wiped
@@ -4493,17 +4591,22 @@ unblackhole_from() {
 }
 
 # blackhole_rules <ip> — the rules unblackhole_from is supposed to have
-# taken, partition_rules' twin: empty output is the assertion.
+# taken, partition_rules' twin: empty output is the assertion, and a listing
+# that did not answer prints its line (ipt_chain).
 blackhole_rules() {
-	local ipt
-	ipt=$(iptables_bin)
-	[ -n "$ipt" ] || return 0
-	{
-		"$ipt" -S INPUT 2>/dev/null |
-			grep -F -- "-s $1" | grep -F -- "--dport $TR_SVC_ID"
-		"$ipt" -S OUTPUT 2>/dev/null |
-			grep -F -- "-d $1" | grep -F -- "--sport $TR_SVC_ID"
-	} || true
+	local rules
+	if rules=$(ipt_chain INPUT); then
+		printf '%s\n' "$rules" |
+			grep -F -- "-s $1" | grep -F -- "--dport $TR_SVC_ID" || true
+	else
+		printf '%s\n' "$rules"
+	fi
+	if rules=$(ipt_chain OUTPUT); then
+		printf '%s\n' "$rules" |
+			grep -F -- "-d $1" | grep -F -- "--sport $TR_SVC_ID" || true
+	else
+		printf '%s\n' "$rules"
+	fi
 }
 
 # syn_drop_from <ip> — drops the SYNs this VM receives from <ip> aimed at the
@@ -4538,12 +4641,15 @@ unsyn_drop_from() {
 }
 
 # syn_drop_rules <ip> — the rules unsyn_drop_from is supposed to have taken:
-# empty output is the assertion.
+# empty output is the assertion, and a listing that did not answer prints
+# its line (ipt_chain).
 syn_drop_rules() {
-	local ipt
-	ipt=$(iptables_bin)
-	[ -n "$ipt" ] || return 0
-	"$ipt" -S INPUT 2>/dev/null | grep -F -- "-s $1" |
+	local rules
+	rules=$(ipt_chain INPUT) || {
+		printf '%s\n' "$rules"
+		return 0
+	}
+	printf '%s\n' "$rules" | grep -F -- "-s $1" |
 		grep -F -- "--dport $TR_SVC_ID" | grep -F -- "SYN" || true
 }
 
@@ -4990,13 +5096,13 @@ ship_helper() {
 # Teardown and cleanup) on both VMs, concurrently
 # for cleanup_all's reason: a subsystem on one VM backs a connection on the
 # other, so the shorter the window the better. `--wipe` is its only caller:
-# after a wipe that does not fail it runs the ordinary start-of-run cleanup,
-# which takes what the wipe deliberately leaves — $WORK, the loop devices,
-# the udev rules and the nvmet port; a wipe that leaves a dnv dm device or
-# nvmet subsystem behind dies here, before that cleanup. The wipe releases
-# no pin (unpin_all runs in cleanup_phase1 alone), so a device a pinned
-# process holds survives it and fails it, and `--cleanup-only`, whose
-# cleanup releases the pins first, is the way past that.
+# after the wipe it runs the ordinary start-of-run cleanup, which takes what
+# the wipe deliberately leaves — $WORK, the loop devices, the udev rules and
+# the nvmet port; a wipe that leaves a dnv dm device or nvmet subsystem
+# behind, or whose dm listing did not answer, runs that cleanup too and then
+# dies. The wipe releases the suite's device pins first (unpin_all), as
+# cleanup_phase1 does, so a device that survives it is held by something
+# outside the suite.
 #
 # EACH VM'S STATUS IS READ, because the two VMs' output interleaves and a
 # missing report does not stand out.
@@ -5013,11 +5119,15 @@ wipe_all() {
 		wait "${pids[$((idx - 1))]}" || rc=$?
 		[ "$rc" -eq 0 ] || bad+=("vm$idx (${IP[$idx]}) rc=$rc")
 	done
-	[ ${#bad[@]} -eq 0 ] ||
-		die "the lab wipe left objects behind on ${bad[*]} — the residue is" \
-			"printed above; run --cleanup-only, which releases the suite's" \
-			"device pins, then --wipe again, and if the same names survive that" \
-			"something outside dnv is holding them"
+	[ ${#bad[@]} -eq 0 ] && return 0
+	log ""
+	log "=== post-wipe cleanup (the wipe failed)"
+	cleanup_all
+	WIPE_CLEANED=1
+	die "the lab wipe did not leave ${bad[*]} clean — the residue, or the" \
+		"listing that did not answer, is printed above; the ordinary cleanup" \
+		"ran after it; run --wipe again, and if the same names survive that" \
+		"something outside dnv is holding them"
 }
 
 # cleanup_all runs cnagent_integtest.md, Teardown and cleanup, as two cross-VM
@@ -5665,16 +5775,40 @@ verdict_names_only() { # verdict label entry…
 	done < <(printf '%s\n' "$details" | sed 's/, /\n/g')
 }
 
+# cntlr_resend re-sends a cntlr's SyncupCntlr at the stored revision, as
+# the worker re-sends one a check round names a leftover in (dnv-worker.md
+# RW4), and accepts what such a re-send may answer: code 0, or the leftover
+# code 4 when its own pass leaves a row not as wanted, a leg's disconnect
+# still running or a member not yet back among them (cnagent.md CN10,
+# CN30), which the next round and re-send take up. It dies with the label on
+# no reply or on any other code, as cn_resync_until_clean does.
+cntlr_resend() { # cnidx req label
+	local out code
+	out=$(cn_syncup_cntlr "$1" "$2" || true)
+	[ -n "$out" ] ||
+		die "$3: cn$1's re-sent syncup-cntlr printed no reply — the call" \
+			"never reached the agent"
+	code=$(jq_of "$out" '.agent_reply.code // 0')
+	case "$code" in
+	0) ;;
+	4) log "  $3: cn$1's re-send replied leftover:" \
+		"$(jq_of "$out" '.agent_reply.details // ""')" ;;
+	*) die "$3: cn$1's re-sent syncup-cntlr replied code $code" \
+		"($(jq_of "$out" '.agent_reply.details // ""')), want 0 or 4" ;;
+	esac
+}
+
 # resync_until_clean plays the worker's re-sync on a cntlr's verdict
 # (dnv-worker.md RW4): a check round, and while it answers the leftover code,
-# the SyncupCntlr re-sent at the stored revision, until a round reads clean.
+# the SyncupCntlr re-sent at the stored revision (cntlr_resend), until a round
+# reads clean.
 resync_until_clean() { # cnidx sp cntlr rev req secs label
 	local deadline=$((SECONDS + $6)) got
 	while :; do
 		got=$(check_verdict "$1" "$2" "$3" "$4")
 		case "$got" in
 		"0 "*) return 0 ;;
-		"4 "*) cn_syncup_cntlr "$1" "$5" >/dev/null ;;
+		"4 "*) cntlr_resend "$1" "$5" "$7" ;;
 		esac
 		[ "$SECONDS" -lt "$deadline" ] ||
 			die "$7: after $6 s cn$1's check round reads '$got'"
@@ -5739,7 +5873,7 @@ md_resync_until_clean() { # cnidx sp cntlr rev req secs label grpid…
 		bad=$(md_rows_bad "$out" "$@")
 		[ -z "$bad" ] && return 0
 		if [ "$(jq_of "$out" '.agent_reply.code // 0')" = 4 ]; then
-			cn_syncup_cntlr "$idx" "$req" >/dev/null
+			cntlr_resend "$idx" "$req" "$label"
 		fi
 		[ "$SECONDS" -lt "$deadline" ] ||
 			die "$label: after $secs s cn$idx's md rows read:$bad"
@@ -7951,7 +8085,7 @@ case_redund() {
 		"4 "*)
 			[ "$resends" -lt 3 ] ||
 				die "lateflip: after $resends re-sends CN1's round reads '$vd'"
-			cn_syncup_cntlr 1 "$req1" >/dev/null
+			cntlr_resend 1 "$req1" lateflip
 			resends=$((resends + 1))
 			;;
 		esac
@@ -9587,7 +9721,7 @@ case_repair() {
 		case "$vd" in
 		"4 "*"md_member:$name"*)
 			named=1
-			cn_syncup_cntlr 2 "$req2" >/dev/null
+			cntlr_resend 2 "$req2" "repair failover"
 			;;
 		esac
 		[ "$SECONDS" -lt "$deadline" ] ||
@@ -10869,7 +11003,8 @@ copied_past() {
 # for HOLD_SECS, and prints it; it fails the stage after <secs>, or on a
 # sample that fails. Once its source fails, a slowed copy finishes at most
 # the one region it was writing (cnagent_integtest.md, Lab facts), which
-# takes a few seconds at most.
+# takes a few seconds at most and can end after the hold, so the count read
+# later can be the held one plus that region (stages 5c and 5d).
 copy_held() {
 	local deadline=$((SECONDS + $3)) got last="" since=$SECONDS
 	while :; do
@@ -10901,7 +11036,7 @@ case_clone_xfer() {
 	local idx bmargs bmfiles nsdev2 err1 err2 hyd tot post deadline
 	local code details shape now tgt rows c1 k g c2 legdm grpdm legnqn raid0dm
 	local srcpass wsect bound w0 w1 held dm before i muts mark src0 src1 cmds
-	local ids again wbase json vd wcode
+	local ids again wbase json vd wcode held0
 	diag_cntlr 1 "$sp1" "$cntlr"
 	diag_cntlr 2 "$sp2" "$cntlr"
 	dev=$(host_dev "$uuid")
@@ -11275,10 +11410,15 @@ case_clone_xfer() {
 	# reconcile converges it as it is (cnagent.md CN2): the source has no
 	# namespace, so CN18 step 1 ends the clone's pass before the dm-clone is
 	# touched, and the dm-clone that serves serves on (CN16 rule 5). With
-	# the copy held, the count it shows after the restart is the held count
-	# exactly, not merely at least it; the dm-clone, its clone meta group's
-	# device and that group's leg wrapper keep their device numbers and their
-	# tables; and the fresh log holds no mutation at all. Each pass reads the
+	# the copy held, the count it shows after the restart is the held count,
+	# or more by at most the regions the dm-clone can have in flight
+	# (CLONE_HYDR_THRESHOLD): the region in flight when the source went
+	# writes into a destination the token bucket slows, and it can end after
+	# the hold's samples, its count stepping once its write has ended
+	# (cnagent_integtest.md, Lab facts). That count is the held one from here
+	# on, for stage 5d's and stage 6's counts. The dm-clone, its clone meta
+	# group's device and that group's leg wrapper keep their device numbers
+	# and their tables; and the fresh log holds no mutation at all. Each pass reads the
 	# dm-clone for its rows (CN18): the reconcile under its own trace id
 	# (CN2), and the reads the samples' rounds start under the stage's. No
 	# read starts before the startup pass has ended (dnagent.md SH33), so a
@@ -11298,8 +11438,20 @@ case_clone_xfer() {
 	out=$(cnctl 2 get-cn-size --wait 60)
 	assert_eq "$(jq_of "$out" .size)" "$CN_CAPACITY" \
 		"clone_xfer cn2 size after the restart"
-	assert_eq "$(clone_sample "$sp2" "$cntlr")" "$held" \
-		"clone_xfer: the hydrated count after the restart"
+	held0=$held
+	sample=$(clone_sample_checked "$sp2" "$cntlr") || exit 1
+	[ "${sample##*/}" = "$tot" ] && [ "${sample%%/*}" -ge "$hyd" ] &&
+		[ "${sample%%/*}" -le $((${held0%%/*} + CLONE_HYDR_THRESHOLD)) ] ||
+		die "clone_xfer: the hydrated count after the restart reads $sample," \
+			"want the held $held or at most $CLONE_HYDR_THRESHOLD more"
+	if [ "$sample" = "$held" ]; then
+		log "clone_xfer: the count after the restart is the held $held"
+	else
+		log "clone_xfer: the count after the restart is $sample, the region" \
+			"in flight at the hold's $held having ended since"
+		held=$sample
+		hyd=${held%%/*}
+	fi
 	i=0
 	for dm in "$clonedm" "$grpdm" "$legdm"; do
 		assert_eq "$(helper 2 "dm_devno $dm") $(helper 2 "dm_table $dm")" \
@@ -11373,15 +11525,42 @@ case_clone_xfer() {
 	#
 	# Stage 6 counts what the copy writes into the destination raid0 from
 	# here on, so the write count is read first, while the copy still
-	# holds: no write of the copy is in flight, as every copy the dm-clone
-	# starts while its source fails every read writes nothing, and a region
-	# whose copy failed as the source went has left in it whatever part of
-	# its block it wrote (cnagent_integtest.md, Lab facts).
-	wbase=$(helper 2 "dm_wsect $raid0dm") ||
-		die "clone_xfer: the destination raid0's write count could not" \
-			"be read before the source came back"
+	# holds, at a moment no write of the copy is in flight: every copy the
+	# dm-clone starts while its source fails every read writes nothing, and
+	# a region whose copy failed as the source went has left in it whatever
+	# part of its block it wrote (cnagent_integtest.md, Lab facts), but the
+	# region in flight when the source went may still be writing, slowed,
+	# part of its block in the count and its region not counted yet. So the
+	# count is read once the raid0 has no write in flight and its count
+	# stands for a second (dm_wquiet), with the same hydrated count on both
+	# sides of that read, and a hydrated count past the held one, by at most
+	# the regions in flight since stage 5b's hold, is the held one from here
+	# on.
+	deadline=$((SECONDS + 30))
+	while :; do
+		sample=$(clone_sample_checked "$sp2" "$cntlr") || exit 1
+		wbase=$(helper 2 "dm_wquiet $raid0dm") ||
+			die "clone_xfer: the destination raid0's write count could not" \
+				"be read before the source came back"
+		again=$(clone_sample_checked "$sp2" "$cntlr") || exit 1
+		[ "$again" != "$sample" ] || [ "${wbase%% *}" = busy ] || break
+		[ "$SECONDS" -lt "$deadline" ] ||
+			die "clone_xfer: for 30 s the destination raid0 was never quiet" \
+				"between two equal hydrated counts: $sample, '$wbase', $again"
+	done
+	[ "${sample%%/*}" -ge "$hyd" ] &&
+		[ "${sample%%/*}" -le $((${held0%%/*} + CLONE_HYDR_THRESHOLD)) ] ||
+		die "clone_xfer: the held copy counts $sample before the source comes" \
+			"back, want the held $held, or at most $CLONE_HYDR_THRESHOLD more" \
+			"than stage 5b's $held0"
+	if [ "$sample" != "$held" ]; then
+		log "clone_xfer: the held copy counts $sample before the source" \
+			"comes back, past $held: the region in flight has ended since"
+		held=$sample
+		hyd=${held%%/*}
+	fi
 	log "clone_xfer: the destination raid0 holds $wbase sectors written" \
-		"when the source comes back"
+		"when the source comes back, the copy holding at $held"
 	mark=$(helper 2 cn_log_lines)
 	src0=$(helper 2 "dm_table $clonedm" | awk '{print $6}')
 	[ -n "$src0" ] || die "clone_xfer: the dm-clone's table could not be read"
@@ -11895,8 +12074,22 @@ case_clone_xfer() {
 		;;
 	*) die "clone_xfer: the finalize leftover is none of the clone's: $details" ;;
 	esac
+	# The worker's re-sends of that request until one answers 0: each may
+	# answer the leftover code while a removal waits, and any other code, or
+	# no reply, fails the stage.
 	deadline=$((SECONDS + 60))
-	until out=$(cn_syncup_cntlr 2 "$req2" --expect-code 0 2>/dev/null); do
+	while :; do
+		out=$(cn_syncup_cntlr 2 "$req2" || true)
+		[ -n "$out" ] ||
+			die "clone_xfer: the finalize's re-send printed no reply"
+		code=$(jq_of "$out" '.agent_reply.code // 0')
+		log "clone_xfer: the finalize's re-send answers code $code"
+		case "$code" in
+		0) break ;;
+		4) ;;
+		*) die "clone_xfer: the finalize's re-send replied code $code" \
+			"($(jq_of "$out" '.agent_reply.details // ""')), want 0 or 4" ;;
+		esac
 		[ "$SECONDS" -lt "$deadline" ] ||
 			die "clone_xfer: the clone's connections outlived 60 s"
 		sleep 2
@@ -12684,10 +12877,11 @@ usage: bash integtest/cnagent_test.sh [--only <case>] [--cleanup-only] \\
 
 cases: ${CASES[*]}
 
---wipe is the ONE-TIME lab wipe: it removes EVERY dnv object on both VMs,
-whatever dm kind spelling its name carries, then, unless a dnv dm device or
-nvmet subsystem is left, runs the ordinary cleanup.
-It runs no case. Never run it while another suite is using these VMs.
+--wipe is the ONE-TIME lab wipe: it releases the suite's device pins and
+removes EVERY dnv object on both VMs, whatever dm kind spelling its name
+carries, then runs the ordinary cleanup, and fails when a dnv dm device or
+nvmet subsystem was left or the dm listing did not answer. It runs no case.
+Never run it while another suite is using these VMs.
 EOF
 	exit 2
 }

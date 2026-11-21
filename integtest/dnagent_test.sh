@@ -63,6 +63,11 @@ HYDR_BATCH=1
 # a second a region of 1 MiB, so its copy is still short of the 64 regions
 # its chunk marks for the half minute the destination takes to serve.
 LATE_COPY_RATE=16mbit
+# The teardown case's dead source (dnagent_integtest.md, Cases, teardown):
+# the rate its source replies at (throttle_from), about a second a region of
+# 1 MiB, so that its copy of 128 regions still runs when the source's
+# cutover grace window has ended and the export goes.
+DEAD_COPY_RATE=8mbit
 
 # The length a worker asks a data group's side to zero (side_conf.zero_bytes,
 # architecture.md, Side provisioning protocol): its meta region and its first
@@ -130,9 +135,9 @@ DNID=("" 0x1 0x2)
 REV=("" 0 0)
 DNREV=("" 0 0)
 LOOP=("" "" "")
-# THROTTLED is the VM whose replies migr_bitmap's late push slows
-# (throttle_from), 0 while none is: on_exit takes the bucket off even when a
-# run fails, since the VMs are shared.
+# THROTTLED is the VM whose replies migr_bitmap's late push or the teardown
+# case's dead source slows (throttle_from), 0 while none is: on_exit takes the
+# bucket off even when a run fails, since the VMs are shared.
 THROTTLED=0
 
 # The two concurrent, opposite-direction migrations of cases B and C
@@ -154,6 +159,9 @@ WIPE=0
 CASE="setup"
 TRACE="it-setup"
 STAGE="(startup)"
+# WIPE_CLEANED is 1 once a failed --wipe has run the ordinary cleanup
+# (wipe_all), so the exit's last line says so.
+WIPE_CLEANED=0
 SETUP_DONE=0
 # The VM whose local store the store_full case moves onto a tmpfs: set from
 # that agent's stop until the restore stage has moved the store back, so that
@@ -321,7 +329,12 @@ on_exit() {
 		fi
 		release_store_tmpfs
 		log ""
-		log "debris left in place on both VMs; failing stage '$STAGE'"
+		if [ "$WIPE_CLEANED" -eq 1 ]; then
+			log "the ordinary cleanup ran after the failed wipe; the residue" \
+				"printed above may remain on the VM(s)"
+		else
+			log "debris left in place on both VMs; failing stage '$STAGE'"
+		fi
 		log "pull records with: jq 'select(.trace_id==\"$TRACE\")' $WORK/agent.log"
 	fi
 	exit "$rc"
@@ -460,6 +473,15 @@ dn_linear_name() { # cluster dn sp side cn
 		"$(hex16 "$5")"
 }
 
+# dn_error_name is one CN's per-CN dm-error on a side (dm kind d0,
+# dnagent.md DN10), dn_linear_name's twin: what the per-CN dm-linear maps
+# while the side serves no IO to that CN.
+dn_error_name() { # cluster dn sp side cn
+	printf 'dnv-%s-%s-d0-%s-%s-%s' \
+		"$(hex16 "$1")" "$(hex16 "$2")" "$(hex16 "$3")" "$(hex16 "$4")" \
+		"$(hex16 "$5")"
+}
+
 # ns_by_id is the CN-side device node of a leg: the namespace identity is
 # deterministic per leg, so both sides of a migrating leg land on one
 # multipath device (dnagent_integtest.md, Topology).
@@ -519,8 +541,13 @@ cn_wait_ana() { # cnvm sp leg cn dn want secs
 
 drop_caches() { sshv "$1" "sync; echo 3 > /proc/sys/vm/drop_caches"; }
 
+# sha_range hashes a range of a device or file. The VM's shell runs the
+# pipeline under pipefail, so a read that fails fails the call: the VM's dd
+# exits non-zero on a read error, after writing what it read before it, and
+# the hash of that partial stream would pass a caller that wants it to differ
+# (migr_bitmap's skipped regions).
 sha_range() { # vm path countMiB [skipMiB]
-	sshv "$1" "dd if=$2 bs=1M count=$3 skip=${4:-0} status=none | sha256sum | cut -d' ' -f1"
+	sshv "$1" "set -o pipefail; dd if=$2 bs=1M count=$3 skip=${4:-0} status=none | sha256sum | cut -d' ' -f1"
 }
 
 write_range() { # vm src dst countMiB [seekMiB]
@@ -990,12 +1017,79 @@ export_dms() { # sp16 side16
 # cutover grace window (architecture.md, Migration, src side step 2): the side
 # is the field after the pool in the name (dn_side_name gives the order). The
 # attr column is four positions (live, inactive, suspended, ro/rw), so a
-# suspended device matches ':.-s' — name, then '.', '-', 's'.
+# suspended device matches ':..s' — name, then any two, then 's': the second
+# position reads 'I' while an inactive table waits, as a reload that stopped
+# after its load leaves it, and that device is suspended all the same.
 fenced_linears() {
 	local rows
 	rows=$(dmsetup info -c --noheadings -o name,attr) || return 1
 	printf '%s\n' "$rows" |
-		grep -E "^dnv-[0-9a-f]{16}-[0-9a-f]{16}-d1-$1-.*:.-s" || true
+		grep -E "^dnv-[0-9a-f]{16}-[0-9a-f]{16}-d1-$1-.*:..s" || true
+}
+
+# The finish reads of the migration cases (dnagent_integtest.md, Cases,
+# migr_full and migr_bitmap) fail, as residue does, when their tool did not
+# answer: each feeds an assertion that something is gone.
+
+# migr_bm_files <cluster16> <dn16> <sp16> <migr16> — the basenames of one
+# migration's bitmap chunk files in the local store (LocalMigrBmPath), one a
+# line, sorted, nothing when there is none. A save writes through a
+# "{name}.tmp-*" file beside its target and removes it on every path, so one
+# a crash left is no chunk and is skipped.
+migr_bm_files() {
+	local list f
+	list=$(ls -A "$STORE") || return 1
+	printf '%s\n' "$list" | while IFS= read -r f; do
+		case "$f" in
+		migr-bm-"$1"-"$2"-"$3"-"$4"-*.tmp-*) ;;
+		migr-bm-"$1"-"$2"-"$3"-"$4"-*) printf '%s\n' "$f" ;;
+		esac
+	done | sort
+}
+
+# dm_side_names <kind> <sp16> <side16> — this node's agent dm devices of one
+# kind on one side of one pool, the side being the field after the pool.
+dm_side_names() {
+	local names
+	names=$(agent_dm_names) || return 1
+	printf '%s\n' "$names" |
+		awk -F- -v k="$1" -v sp="$2" -v side="$3" \
+			'$4 == k && $5 == sp && $6 == side'
+}
+
+# subsys_listed <nqn> — the NQN when this node's nvmet holds that subsystem,
+# nothing when it does not.
+subsys_listed() {
+	local subs
+	subs=$(ls "$NVMET/subsystems") || return 1
+	printf '%s\n' "$subs" | grep -xF -- "$1" || true
+}
+
+# lin_target <dm name> — "MAJ:MIN" of the device a one-target dm-linear
+# maps; fails on a table that is not one linear target or does not read.
+lin_target() {
+	local table
+	table=$(dmsetup table "$1") || return 1
+	set -- $table
+	if [ "$#" -ne 5 ] || [ "$3" != linear ]; then
+		echo "lin_target: $table is not one linear target" >&2
+		return 1
+	fi
+	echo "$4"
+}
+
+# dm_majmin <dm name> — "MAJ:MIN" of a dm device; fails when it does not
+# read.
+dm_majmin() {
+	local v
+	v=$(dmsetup info -c --noheadings -o major,minor --separator : "$1") ||
+		return 1
+	v=${v// /}
+	[[ $v =~ ^[0-9]+:[0-9]+$ ]] || {
+		echo "dm_majmin: $1 reads '$v'" >&2
+		return 1
+	}
+	echo "$v"
 }
 
 # clone_table <clone dm name> — the live dm-clone table, so the mandatory feature pair
@@ -1618,11 +1712,15 @@ dm_kind_names() {
 # prevents is severe: anything that reads a suspended device (`dmsetup
 # remove`, disabling the nvmet namespace above it, and above all a
 # block-device scan) blocks in uninterruptible D state and wedges the node
-# until reboot. Resuming first lets the queued IO drain or fail.
+# until reboot. Resuming first lets the queued IO drain or fail. The pattern
+# is `:..s`, not `:.-s`: a device with an inactive table waiting reads `LIsw`,
+# and an interrupted reload leaves exactly that, the device this sweep most
+# needs to release. Its resume makes the waiting table live, which harms
+# nothing, as the cleanup removes the device next.
 resume_suspended() {
 	local row name
 	for row in $(dmsetup info -c --noheadings -o name,attr 2>/dev/null |
-		grep -E '^dnv[-a-z0-9]*.*:.-s'); do
+		grep -E '^dnv[-a-z0-9]*.*:..s'); do
 		name=${row%%:*}
 		timeout 10 dmsetup resume "$name" >/dev/null 2>&1
 	done
@@ -1813,6 +1911,10 @@ lab_wipe() {
 	done
 	pkill -9 -x dnv-agent >/dev/null 2>&1
 
+	# Every device pin, whoever left it, for cleanup's reason (see
+	# kill_pins): nothing below can remove a device a pin holds open.
+	kill_pins
+
 	# Nothing may stay suspended from here on (see resume_suspended): reading
 	# a suspended device goes to D state, where `timeout` cannot reach it.
 	resume_suspended
@@ -1927,7 +2029,7 @@ lab_wipe() {
 	# tests lives by: what is left is reported, and reporting it is not
 	# success. Everything this deliberately does not touch — $WORK, the loop
 	# devices, the nvmet port — belongs to the ordinary
-	# cleanup that runs after a wipe that does not fail and is not counted here.
+	# cleanup that runs after the wipe, failed or not, and is not counted here.
 	#
 	# A `dmsetup ls` that did not answer is no evidence of a clean node: the
 	# dm residue is then reported as unknown, which fails the wipe just as a
@@ -2018,13 +2120,12 @@ ship_helper() {
 # Teardown and cleanup) on both VMs, concurrently
 # for cleanup_all's reason: a subsystem on one VM backs a connection on the
 # other, so the shorter the window the better. `--wipe` is its only caller:
-# after a wipe that does not fail it runs the ordinary start-of-run cleanup,
-# which takes what the wipe deliberately leaves — $WORK, the loop devices and
-# the nvmet port; a wipe that leaves a dnv dm device or nvmet subsystem
-# behind, or whose dm listing did not answer, dies here, before that cleanup.
-# The wipe kills no device pin (kill_pins), so a device a pinned process
-# holds survives it and fails it, and `--cleanup-only`, whose cleanup kills
-# the pins first, is the way past that.
+# after the wipe it runs the ordinary start-of-run cleanup, which takes what
+# the wipe deliberately leaves — $WORK, the loop devices and the nvmet port;
+# a wipe that leaves a dnv dm device or nvmet subsystem behind, or whose dm
+# listing did not answer, runs that cleanup too and then dies. The wipe kills
+# the suite's device pins first (kill_pins), as the cleanup does, so a device
+# that survives it is held by something outside the suite.
 #
 # EACH VM'S STATUS IS READ, because the two VMs' output interleaves and a
 # missing report does not stand out.
@@ -2041,11 +2142,15 @@ wipe_all() {
 		wait "${pids[$((idx - 1))]}" || rc=$?
 		[ "$rc" -eq 0 ] || bad+=("vm$idx (${IP[$idx]}) rc=$rc")
 	done
-	[ ${#bad[@]} -eq 0 ] ||
-		die "the lab wipe did not leave ${bad[*]} clean — the residue, or the" \
-			"listing that did not answer, is printed above; run --cleanup-only," \
-			"which kills the suite's device pins, then --wipe again, and if the" \
-			"same names survive that something outside dnv is holding them"
+	[ ${#bad[@]} -eq 0 ] && return 0
+	log ""
+	log "=== post-wipe cleanup (the wipe failed)"
+	cleanup_all
+	WIPE_CLEANED=1
+	die "the lab wipe did not leave ${bad[*]} clean — the residue, or the" \
+		"listing that did not answer, is printed above; the ordinary cleanup" \
+		"ran after it; run --wipe again, and if the same names survive that" \
+		"something outside dnv is holding them"
 }
 
 # cleanup_all runs the two VMs concurrently: dismantling one node's nvmet
@@ -2303,6 +2408,8 @@ assert_no_residue() { # sp
 # about this loop worth reading afterwards, and neither outcome is a failure.
 dn_drop_until_clean() { # dnidx secs
 	local idx=$1 secs=$2 out code details deadline first=1
+	DROP_FIRST_CODE=""
+	DROP_FIRST_DETAILS=""
 	deadline=$((SECONDS + secs))
 	while :; do
 		# No --expect-code: 4 is expected here for a while, so the reply is
@@ -2315,6 +2422,8 @@ dn_drop_until_clean() { # dnidx secs
 		details=$(jq_of "$out" '.agent_reply.details // ""')
 		if [ "$first" -eq 1 ]; then
 			log "dn$idx drop: first reply code $code, details: ${details:-(none)}"
+			DROP_FIRST_CODE=$code
+			DROP_FIRST_DETAILS=$details
 			first=0
 		fi
 		if [ "$code" = 0 ]; then
@@ -3487,6 +3596,31 @@ migr_finish_dst() { # m revision
 	assert_cn_ok "$out" cn_id_to_nvmeof "${MCN[$m]}" "migr $m finished dst"
 }
 
+# migr_src_window_end waits out migration m's cutover grace window on its
+# source's node, and the converge its timer runs (dnagent.md DN12): that
+# converge runs the source's whole build again, the export and its namespace
+# included, so a stage that takes the export, or a part of it, away inside
+# the window would see the timer put it back. The window ends with the
+# source's per-CN dm-linears resumed onto their dm-errors, inside that
+# converge, and a fresh CheckSide of the source side returns only once no
+# converge of the side runs and a read made after that has ended
+# (dnagent.md SH29, SH30): an info read takes no lock and would not wait.
+migr_src_window_end() { # m
+	local m=$1 src=${MSRCDN[$1]} srcside susp deadline
+	srcside="$(hex16 "$SP")-$(hex16 "${MSRCSIDE[$m]}")"
+	deadline=$((SECONDS + FENCE_TIMEOUT))
+	while :; do
+		susp=$(helper "$src" "fenced_linears '$srcside'")
+		[ -n "$susp" ] || break
+		[ "$SECONDS" -lt "$deadline" ] ||
+			die "migr $m: the source's per-CN dm-linears are still" \
+				"suspended after ${FENCE_TIMEOUT}s: $susp"
+		sleep 2
+	done
+	ctl "$src" check-side --fresh --sp "$SP" --leg "${MLEG[$m]}" \
+		--side "${MSRCSIDE[$m]}" --timeout "$FENCE_TIMEOUT" >/dev/null
+}
+
 # migr_src_ns_gone is migr_full's lost source (dnagent_integtest.md, Cases,
 # migr_full). Once migration m's destination has hydrated, its source's export
 # loses its namespace behind both agents' backs, the export and the
@@ -3519,34 +3653,17 @@ migr_src_ns_gone() { # m
 	local m=$1
 	local src=${MSRCDN[$m]} dst=${MDSTDN[$m]} vm=${MCNVM[$m]}
 	local rev=${REV[${MDSTDN[$m]}]} key=$((MCN[m]))
-	local srcnqn srcside susp deadline shape now rows c1 k g c2
+	local srcnqn shape now rows c1 k g c2
 	local want from lin clone made
 	srcnqn=$(migr_src_nqn "$CLUSTER" "${DNID[$src]}" "$SP" "${MID[$m]}")
-	srcside="$(hex16 "$SP")-$(hex16 "${MSRCSIDE[$m]}")"
 	lin=$(dn_linear_name "$CLUSTER" "${DNID[$dst]}" "$SP" \
 		"${MDSTSIDE[$m]}" "${MCN[$m]}")
 	clone=$(dn_clone_name "$CLUSTER" "${DNID[$dst]}" "$SP" "${MID[$m]}")
 
 	stage stage3gone "migration $m's source loses its namespace: the destination's rows read one status on every channel"
-	# The source's cutover grace window must be over, and the converge its
-	# timer runs done (dnagent.md DN12), before the export loses anything:
-	# that converge runs the source's whole build again, the export's
-	# namespace included. The window ends with the source's per-CN dm-linears
-	# resumed onto their dm-errors, inside that converge, and a fresh
-	# CheckSide of the source side returns only once no converge of the side
-	# runs and a read made after that has ended (dnagent.md SH29, SH30): an
-	# info read takes no lock and would not wait.
-	deadline=$((SECONDS + FENCE_TIMEOUT))
-	while :; do
-		susp=$(helper "$src" "fenced_linears '$srcside'")
-		[ -n "$susp" ] || break
-		[ "$SECONDS" -lt "$deadline" ] ||
-			die "migr $m: the source's per-CN dm-linears are still" \
-				"suspended after ${FENCE_TIMEOUT}s: $susp"
-		sleep 2
-	done
-	ctl "$src" check-side --fresh --sp "$SP" --leg "${MLEG[$m]}" \
-		--side "${MSRCSIDE[$m]}" --timeout "$FENCE_TIMEOUT" >/dev/null
+	# The export loses nothing before the source's cutover grace window is
+	# over (migr_src_window_end).
+	migr_src_window_end "$m"
 	# The positive control of the reading below: one live controller and its
 	# namespace node.
 	assert_eq "$(helper "$dst" "subsys_shape '$srcnqn'")" "1 1 1" \
@@ -3566,6 +3683,7 @@ migr_src_ns_gone() { # m
 			"namespace while the dm-clone held it; dropping the whole export"
 		assert_eq "$(helper "$src" "drop_subsystem '$srcnqn'")" dropped \
 			"migr $m: the source export dropped"
+		MSRC_DROPPED[m]=1
 		shape=$(helper "$dst" "wait_no_ctrl '$srcnqn' 30") ||
 			die "migr $m: dn$dst still holds a controller of its source" \
 				"30 s after the export was dropped"
@@ -3689,6 +3807,131 @@ migr_drop_src() { # m revision
 		"${MDSTDN[$m]}" optimized 30
 }
 
+# migr_dst_left <m> <before|after> reads what migration m's finish leaves on
+# its destination's node (dnagent_integtest.md, Cases, migr_full and
+# migr_bitmap; architecture.md, Migrations, FinishMigration): the node's kernel and its
+# local store, not the agent's reply, since a sweep that skipped an object
+# would not name it either. The names are the migration's own, as the node
+# also holds the other migration's source side of the same pool. Before the
+# finish it is the positive control: the dm-clone and its metadata wrapper
+# stand, the primary's per-CN dm-linear maps another device than the side
+# device (the dm-clone, or its dm-error with no source to read from), the
+# node holds a controller of the source's export unless migr_full's lost
+# source dropped that export, and the store holds every chunk the case
+# pushed. After it, none of those is left and the dm-linear maps the side
+# device.
+migr_dst_left() { # m before|after
+	local m=$1 when=$2 dst=${MDSTDN[$1]} src=${MSRCDN[$1]}
+	local cl16 dn16 sp16 migr16 clone meta lin sidedev srcnqn
+	local names got want ctrl files nfiles
+	cl16=$(hex16 "$CLUSTER")
+	dn16=$(hex16 "${DNID[$dst]}")
+	sp16=$(hex16 "$SP")
+	migr16=$(hex16 "${MID[$m]}")
+	clone=$(dn_clone_name "$CLUSTER" "${DNID[$dst]}" "$SP" "${MID[$m]}")
+	meta=$(dn_migr_meta_name "$CLUSTER" "${DNID[$dst]}" "$SP" "${MID[$m]}")
+	lin=$(dn_linear_name "$CLUSTER" "${DNID[$dst]}" "$SP" \
+		"${MDSTSIDE[$m]}" "${MCN[$m]}")
+	sidedev=$(dn_side_name "$CLUSTER" "${DNID[$dst]}" "$SP" "${MDSTSIDE[$m]}")
+	srcnqn=$(migr_src_nqn "$CLUSTER" "${DNID[$src]}" "$SP" "${MID[$m]}")
+	names=$(helper "$dst" agent_dm_names) ||
+		die "migr $m: dn$dst's dm listing did not answer"
+	files=$(helper "$dst" "migr_bm_files $cl16 $dn16 $sp16 $migr16") ||
+		die "migr $m: dn$dst's local store could not be listed"
+	nfiles=$(printf '%s\n' "$files" | grep -c . || true)
+	ctrl=$(helper "$dst" "ctrl_of '$srcnqn' '${IP[$src]}'") ||
+		die "migr $m: dn$dst's controllers could not be listed"
+	got=$(helper "$dst" "lin_target $lin") ||
+		die "migr $m: dn$dst's per-CN dm-linear $lin did not read"
+	want=$(helper "$dst" "dm_majmin $sidedev") ||
+		die "migr $m: dn$dst's side device $sidedev did not read"
+	if [ "$when" = before ]; then
+		grep -qxF -- "$clone" <<<"$names" ||
+			die "migr $m: before the finish dn$dst holds no dm-clone $clone"
+		grep -qxF -- "$meta" <<<"$names" ||
+			die "migr $m: before the finish dn$dst holds no metadata wrapper $meta"
+		[ "$got" != "$want" ] ||
+			die "migr $m: before the finish $lin maps the side device $want"
+		if [ "${MSRC_DROPPED[$m]}" -eq 1 ]; then
+			assert_eq "$ctrl" none \
+				"migr $m: dn$dst's controller of the dropped source export"
+		else
+			[ "$ctrl" != none ] ||
+				die "migr $m: before the finish dn$dst holds no controller of" \
+					"its source $srcnqn"
+		fi
+		assert_eq "$nfiles" "${MBM_FILES[$m]}" \
+			"migr $m: chunk files in dn$dst's store before the finish"
+		log "migr $m: before the finish dn$dst holds $clone, $meta," \
+			"controller '$ctrl' and $nfiles chunk file(s); $lin maps $got"
+		return 0
+	fi
+	assert_eq "$got" "$want" \
+		"migr $m: the device $lin maps after the finish (the side device)"
+	! grep -qxF -- "$clone" <<<"$names" ||
+		die "migr $m: after the finish dn$dst still holds the dm-clone $clone"
+	! grep -qxF -- "$meta" <<<"$names" ||
+		die "migr $m: after the finish dn$dst still holds the metadata" \
+			"wrapper $meta"
+	assert_eq "$ctrl" none \
+		"migr $m: dn$dst's controller of its source after the finish"
+	assert_eq "$files" "" \
+		"migr $m: chunk files in dn$dst's store after the finish"
+}
+
+# migr_src_left <m> <before|after> is migr_dst_left's twin for the source's
+# node and the source drop: the migr-src dm-linear, the migration's :3:
+# export, and the source side's own devices and its :2: export, scoped to
+# the source side and its leg, as the node also holds the other migration's
+# destination side of the same pool. Before the drop each stands, the :3:
+# export unless migr_full's lost source dropped it; after it, none is left.
+migr_src_left() { # m before|after
+	local m=$1 when=$2 src=${MSRCDN[$1]}
+	local sp16 side16 migrsrc srcnqn sidenqn names objs kind got
+	sp16=$(hex16 "$SP")
+	side16=$(hex16 "${MSRCSIDE[$m]}")
+	migrsrc=$(printf 'dnv-%s-%s-d2-%s-%s' "$(hex16 "$CLUSTER")" \
+		"$(hex16 "${DNID[$src]}")" "$sp16" "$(hex16 "${MID[$m]}")")
+	srcnqn=$(migr_src_nqn "$CLUSTER" "${DNID[$src]}" "$SP" "${MID[$m]}")
+	sidenqn=$(side_to_cn_nqn "$CLUSTER" "$SP" "${MLEG[$m]}" "${MCN[$m]}")
+	names=$(helper "$src" agent_dm_names) ||
+		die "migr $m: dn$src's dm listing did not answer"
+	objs=""
+	! grep -qxF -- "$migrsrc" <<<"$names" || objs="$objs $migrsrc"
+	for kind in d4 d0 d1; do
+		got=$(helper "$src" "dm_side_names $kind $sp16 $side16") ||
+			die "migr $m: dn$src's dm listing did not answer"
+		[ -z "$got" ] || objs="$objs $(printf '%s' "$got" | tr '\n' ' ')"
+	done
+	got=$(helper "$src" "subsys_listed '$srcnqn'") ||
+		die "migr $m: dn$src's nvmet subsystems could not be listed"
+	[ -z "$got" ] || objs="$objs $got"
+	got=$(helper "$src" "subsys_listed '$sidenqn'") ||
+		die "migr $m: dn$src's nvmet subsystems could not be listed"
+	[ -z "$got" ] || objs="$objs $got"
+	if [ "$when" = before ]; then
+		for got in "$migrsrc" "$sidenqn" \
+			"$(dn_side_name "$CLUSTER" "${DNID[$src]}" "$SP" "${MSRCSIDE[$m]}")" \
+			"$(dn_error_name "$CLUSTER" "${DNID[$src]}" "$SP" "${MSRCSIDE[$m]}" "${MCN[$m]}")" \
+			"$(dn_linear_name "$CLUSTER" "${DNID[$src]}" "$SP" "${MSRCSIDE[$m]}" "${MCN[$m]}")"; do
+			case " $objs " in
+			*" $got "*) ;;
+			*) die "migr $m: before the source drop dn$src holds no $got:$objs" ;;
+			esac
+		done
+		if [ "${MSRC_DROPPED[$m]}" -eq 0 ]; then
+			case " $objs " in
+			*" $srcnqn "*) ;;
+			*) die "migr $m: before the source drop dn$src exports no $srcnqn:$objs" ;;
+			esac
+		fi
+		log "migr $m: before the source drop dn$src holds$objs"
+		return 0
+	fi
+	[ -z "$objs" ] ||
+		die "migr $m: after the source drop dn$src still holds$objs"
+}
+
 # migr_write_probe proves the migrated side is live and writable.
 migr_write_probe() { # m
 	local m=$1
@@ -3709,12 +3952,19 @@ migr_write_probe() { # m
 # differences are the five hooks push_bitmaps, before_enable, after_serving,
 # after_hydration and verify_data.
 declare -a PAT_SHA=("" "" "")
+# MSRC_DROPPED[m] is 1 once migr_full's lost source dropped migration m's
+# whole export, and MBM_FILES[m] the chunk files the case stores on m's
+# destination: what the finish reads expect before the finish
+# (migr_dst_left, migr_src_left).
+declare -a MSRC_DROPPED=("" 0 0)
+declare -a MBM_FILES=("" 0 0)
 declare -a PAT_SHA_HEAD=("" "" "")
 REPLY_DIR=""
 
 run_migration_cases() {
 	local m out pids rev1 rev2 prov1 prov2 dn
 	REPLY_DIR=$(mktemp -d)
+	MSRC_DROPPED=("" 0 0)
 	# A fresh case starts with no sides for the failure dump of
 	# dnagent_integtest.md, Teardown and cleanup, to report; the sides
 	# below are registered as each stage creates them.
@@ -3903,7 +4153,8 @@ run_migration_cases() {
 	# The case's own stage on hydrated destinations: migr_full's lost source.
 	after_hydration
 
-	stage stage4dst "finish the destinations first: clone flushed and removed"
+	stage stage4dst "finish the destinations first: clone flushed and removed, nothing of the migration left on their nodes"
+	for m in 1 2; do migr_dst_left "$m" before; done
 	bump_rev "${MDSTDN[1]}"
 	rev1=${REV[${MDSTDN[1]}]}
 	bump_rev "${MDSTDN[2]}"
@@ -3914,8 +4165,10 @@ run_migration_cases() {
 	migr_finish_dst 2 "$rev2" &
 	pids+=($!)
 	join_jobs "${pids[@]}"
+	for m in 1 2; do migr_dst_left "$m" after; done
 
-	stage stage4src "then tear the source sides down"
+	stage stage4src "then tear the source sides down: nothing of the source side left on their nodes"
+	for m in 1 2; do migr_src_left "$m" before; done
 	bump_dn_rev "${MSRCDN[1]}"
 	rev1=${REV[${MSRCDN[1]}]}
 	bump_dn_rev "${MSRCDN[2]}"
@@ -3926,6 +4179,7 @@ run_migration_cases() {
 	migr_drop_src 2 "$rev2" &
 	pids+=($!)
 	join_jobs "${pids[@]}"
+	for m in 1 2; do migr_src_left "$m" after; done
 
 	stage verify "the migrated data, read through the surviving path"
 	for m in 1 2; do
@@ -3970,6 +4224,8 @@ case_migr_full() {
 	MID=("" 0x31 0x32)
 	READ_THROUGH_MIB=127
 	MIN_FIRST=("" 0 0)
+	# No chunk is pushed, so none is stored (migr_dst_left).
+	MBM_FILES=("" 0 0)
 
 	before_enable() { :; }
 	after_serving() { :; }
@@ -4040,6 +4296,9 @@ case_migr_bitmap() {
 	# 2 only once its destination serves (after_serving), so only the first
 	# can show the skip jump at the enabling converge.
 	MIN_FIRST=("" 64 0)
+	# The chunk files each destination stores (migr_dst_left): the first
+	# migration's two, the second's one late push.
+	MBM_FILES=("" 2 1)
 
 	push_bitmaps() { # rev1 rev2 — the destinations' current revisions
 		local revs=("" "$1" "$2") m=1 out
@@ -4166,10 +4425,12 @@ case_migr_bitmap() {
 # is torn down immediately. The order the sweep has to keep is the whole
 # point: the dm-clone comes off BEFORE the connection it hydrates through
 # (DN6) — pulling the source out from under a live clone strands its IO — and
-# it comes off over a source that is already dead, so its removal blocks on
-# the queued hydration IO until fast_io_fail_tmo fails it, which is longer
-# than the soft timeout that kills the command. That is why the drop is a
-# loop and not a single call. What may not happen in that window is any
+# it comes off over a source that is already dead, its copy slowed so that
+# hydration IO is in flight when the source goes. Should its removal wait on
+# that IO past the soft timeout that kills the command, the pass reports the
+# clone as left and a later pass finishes, which is why the drop is a loop
+# and not a single call; on the lab the removal ends within the first pass.
+# What may not happen in that window is any
 # forgetting: the side's allocation record and the migration's clone-metadata
 # record are freed only after their devices have been PROBED gone, so the sp's
 # extents cannot be handed to the next side while a device still maps them.
@@ -4204,10 +4465,10 @@ case_teardown() {
 	rm -rf "$REPLY_DIR"
 }
 
-# teardown_dead_source builds one migration exactly as case B does, kills the
-# source export behind the destination's back, and tears the destination down
-# inside the window where its clone's hydration IO is still queued at a
-# controller that will never answer.
+# teardown_dead_source builds one migration exactly as case B does, its copy
+# slowed on the source's node, kills the source export behind the
+# destination's back once the cutover grace window has ended, and tears the
+# destination down at once, while the slowed copy still runs.
 teardown_dead_source() {
 	local m=1
 	local src=${MSRCDN[$m]} dst=${MDSTDN[$m]} vm=${MCNVM[$m]}
@@ -4259,31 +4520,39 @@ teardown_dead_source() {
 	bump_rev "$src"
 	migr_cutover_src "$m" "${REV[$src]}"
 
-	stage dshydr "the destination is enabled and hydrates from the source"
+	stage dshydr "the destination is enabled and hydrates from the source, its copy slowed on the source's node"
+	# The copy is slowed from before the enable until the drop below, so
+	# that it still runs once the grace window has ended: the case's shape,
+	# a clone whose removal meets hydration IO queued at a dead source, needs
+	# a copy that is not whole when the source goes. A failing run takes the
+	# bucket off at its exit, and the cleanup first, whatever else fails.
+	THROTTLED=$src
+	assert_eq "$(helper "$src" "throttle_from ${IP[$dst]} $DEAD_COPY_RATE")" \
+		throttled "teardown: the source's replies slowed"
 	bump_rev "$dst"
 	migr_declare_dst "$m" "${REV[$dst]}" readwrite false
 	cn_wait_ana "$vm" "$SP" "${MLEG[$m]}" "${MCN[$m]}" "$dst" optimized 30
-	# Observed, never asserted (dnagent_integtest.md, Conventions), exactly
-	# like the migration cases' read-through window: 128
-	# regions of 1 MiB over a local TCP link can be through before this
-	# samples. Hydration still in flight is what makes the clone's removal
-	# below block on the dead source; hydration already finished still
-	# exercises the removal order and both record releases. Both are a pass,
-	# and the log says which of the two this run got. The sample is a fresh
-	# round, since only a read shows the kernel's hydration.
+
+	stage dskill "the source export is yanked once the cutover grace window has ended; the destination is never told"
+	# Not inside the window: the converge the source's timer runs at its end
+	# builds the export again (migr_src_window_end), and dsgone would find it
+	# on the source's VM.
+	migr_src_window_end "$m"
+	# The copy, slowed since the enable, still runs, which the case asserts:
+	# a copy still running when its source goes is what a removal that waits
+	# on the dead source needs, and the drop below logs whether the removal
+	# outlasted its pass. The sample is a fresh round, since only a read
+	# shows the kernel's hydration.
 	out=$(ctl "$dst" check-side --fresh --show-info \
 		--sp "$SP" --leg "${MLEG[$m]}" --side "${MDSTSIDE[$m]}")
 	raw=$(jq_of "$out" '.side_info.migr_dst_info.dm_clone_info.details // ""')
 	pair=$(printf '%s' "$raw" | awk '{for (i = 1; i <= NF; i++) if ($i == "clone") { split($(i + 4), a, "/"); print a[1], a[2]; exit }}')
 	hydrated=${pair%% *}
 	total=${pair##* }
-	if [ -n "$hydrated" ] && [ -n "$total" ] && [ "$hydrated" -lt "$total" ]; then
-		log "teardown: hydration window HIT ($hydrated/$total hydrated)"
-	else
-		log "teardown: WARNING hydration window missed ($raw)"
-	fi
-
-	stage dskill "the source export is yanked; the destination is never told"
+	[ -n "$hydrated" ] && [ -n "$total" ] && [ "$hydrated" -lt "$total" ] ||
+		die "teardown: the slowed copy is no longer running when the source" \
+			"goes: '$raw'"
+	log "teardown: the copy runs when the source goes ($hydrated/$total hydrated)"
 	# drop_subsystems, not a syncup-side with migr_src_conf dropped: that
 	# would be an ORDERLY retirement — the source would take its own migr-src
 	# linear with it and report its own leftovers, and a code 4 on that reply
@@ -4297,14 +4566,26 @@ teardown_dead_source() {
 		"teardown: the source export survived drop_subsystems"
 
 	stage dsdrop "and IMMEDIATELY the destination side leaves the pointer list"
-	# Nothing sleeps between the yank and this drop: the dm-clone has to be
-	# removed inside the window where its hydration IO to the dead source is
-	# still queued, which is the window the sweep is written for (the failfast
-	# bound of architecture.md, Teardown by sweep). The loop is what lets the
-	# pass that is killed at the soft timeout be followed by one that finds the
-	# device gone.
+	# Nothing sleeps between the yank and this drop. A removal that outlasts
+	# the pass is reported with the leftover code, and the loop is what lets
+	# that pass be followed by one that finds the device gone; the log says
+	# what the first pass left, as the clone's removal has ended within its
+	# pass on the lab, for a cause not read.
 	bump_dn_rev "$dst"
 	dn_drop_until_clean "$dst" 60
+	case "$DROP_FIRST_CODE:$DROP_FIRST_DETAILS" in
+	"4:"*"$(dn_clone_name "$CLUSTER" "${DNID[$dst]}" "$SP" "${MID[$m]}")"*)
+		log "teardown: the clone's removal outlasted the first pass" ;;
+	4:*)
+		log "teardown: the first pass left, the clone not among it:" \
+			"$DROP_FIRST_DETAILS" ;;
+	*) log "teardown: the clone's removal ended within the first pass" ;;
+	esac
+	assert_eq "$(helper "$src" unthrottle)" unthrottled \
+		"teardown: the source's replies at full speed again"
+	THROTTLED=0
+	assert_eq "$(helper "$src" throttle_rules)" "" \
+		"teardown: no bucket left on the source's node"
 
 	stage dsgone "nothing of the migration is left on the destination"
 	for idx in 1 2; do
@@ -5175,10 +5456,11 @@ usage: bash integtest/dnagent_test.sh [--only <case>] [--cleanup-only] \\
 
 cases: ${CASES[*]}
 
---wipe is the ONE-TIME lab wipe: it removes EVERY dnv object on both VMs,
-whatever dm kind spelling its name carries, then, unless a dnv dm device or
-nvmet subsystem is left or the dm listing did not answer, runs the ordinary
-cleanup. It runs no case. Never run it while another suite is using these VMs.
+--wipe is the ONE-TIME lab wipe: it kills the suite's device pins and
+removes EVERY dnv object on both VMs, whatever dm kind spelling its name
+carries, then runs the ordinary cleanup, and fails when a dnv dm device or
+nvmet subsystem was left or the dm listing did not answer. It runs no case.
+Never run it while another suite is using these VMs.
 EOF
 	exit 2
 }

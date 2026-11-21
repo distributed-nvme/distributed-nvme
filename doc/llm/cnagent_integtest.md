@@ -246,11 +246,25 @@ measures as the dn suite's does; and on the dm-clone table. This suite adds:
   in its place or out of it.
 * A source that fails every read holds a dm-clone's copy at a fixed count,
   its metadata read-write: the region in flight ends, and no other is copied
-  while the source fails. A namespace removed from the source's export takes
-  the destination's multipath head with it, though the dm-clone holds it
-  open, so a namespace that comes back does so under a new device number,
-  which the dm-clone does not read until it is reloaded onto it. clone_xfer
-  measures both rather than assume them.
+  while the source fails. Under clone_xfer's token bucket the region in
+  flight writes slowly, so it can end after the count has stood for the
+  hold's few seconds. A namespace removed from the source's export takes the
+  destination's multipath head with it, though the dm-clone holds it open,
+  so a namespace that comes back does so under a new device number, which
+  the dm-clone does not read until it is reloaded onto it. clone_xfer
+  measures the hold and the new device number rather than assume them.
+* A dm-clone starts the copy of a background region only while fewer
+  regions than its hydration threshold are in flight, so with the suite's
+  threshold of one and batch of one it copies one region at a time, and no
+  more regions than the threshold are ever in flight (read in the lab
+  kernel's dm-clone source); a copy a host write brings on is not bounded
+  so, and clone_xfer's host only reads.
+* A dm device counts in its `inflight` file every write it has started and
+  not ended, a copy write that the token bucket holds back below it
+  included: read on the lab during a slowed copy, the destination raid0's
+  file counted the copy's writes until the region's count stepped. clone_xfer
+  relies on it for the baseline of its write count, which it reads with no
+  write in flight.
 * md's version-1.2 superblock sits 4096 bytes into a member, in the
   kernel's version-1.2 superblock layout, with a checksum the agent's own
   read checks; a member md was copying onto carries a copy position (the
@@ -382,7 +396,18 @@ that asks for the counters, which reads them at the call as
   against what it last stored, so the suite also tracks the last `SyncupCn`
   revision, the one a `CheckCn` round echoes and the stale probe undercuts.
   Re-sends at an equal revision are deliberate re-applies (`dnagent.md` SH8,
-  SH16).
+  SH16). The re-sends of a `SyncupCntlr` that a round's leftover code
+  drives until a round reads clean, played as the worker's (`dnv-worker.md`
+  RW4), may answer the leftover code themselves, a pass leaving a row not as
+  wanted (`cnagent.md` CN30), so each accepts code zero or the leftover
+  code, any other failing its stage, and the next round decides: the
+  re-sync helpers', repair's failover's and the late flip's put-back loop's.
+  clone_xfer's finalize, which has no round, re-sends on the finalize's own
+  leftover code until a re-send answers zero, each re-send taking zero or
+  the leftover code and any other failing the stage. A single re-send whose stage checks what that one converge
+  did wants code zero, as the converge clears the row the round named
+  (`cnagent.md` CN30): redund's resync and early fail, the late flip's first
+  re-send and clone_xfer's giveback.
 * **Sides first.** The suite plays the provisioned flip, a side's per-CN rows
   reading provisioning until then (`dnagent.md` DN9, DN10), and converges sides
   before cntlrs, so no leg is provisioning-deferred (`cnagent.md` CN9) and legs
@@ -414,8 +439,10 @@ that asks for the counters, which reads them at the call as
   error row compares against error, never "not OK", and a suppressed one also
   reads the level's details and its reason. A failed read taken for an absence
   passes every negative on it (`cnagent.md` CN21): a residue check's failed dm
-  or nvmet listing prints a failing line, and so does a failed listing of
-  clone_xfer's token bucket once it is removed, a status-less check reply
+  or nvmet listing prints a failing line, and so do a failed listing of
+  clone_xfer's token bucket once it is removed and a failed listing of the
+  firewall rules once a partition stage, redund's dial or pause's cut has
+  removed them, a node with no iptables included, a status-less check reply
   fails, the agent-log readers fail their stage on a log that is missing or
   cannot be read, thinbm's checks, clone_xfer's enable and finalize checks
   that a converge ran no such command and the late flip's check that its
@@ -994,7 +1021,10 @@ the writers). Once the copy has passed the chunk, the source loses its
 namespace behind both agents' backs, as it does again once the copy is whole
 (below), and the copy holds at a count past the chunk's (Lab facts). The
 destination's agent then restarts over the held copy and leaves it as it is
-(CN2, CN18): the count reads the held one, the dm-clone, its group's device
+(CN2, CN18): the count reads the held one, or more by at most the regions
+the dm-clone can have in flight, as the region in flight when the source went
+can end after the hold (Lab facts), and that count is the held one from then
+on; the dm-clone, its group's device
 and its leg's wrapper keep their device numbers and tables, the fresh log,
 read once a round of the stage's has read the dm-clone after the reconcile,
 so that it holds the whole reconcile, holds no mutation, the dm-clone is read
@@ -1018,7 +1048,9 @@ them and the chunk again before hydration (CN2, CN18, CN30), its dead host
 path replaced by device as the pools share the NQN. The wipe-time sample
 counts more than the held count,
 and between the destination raid0's write count read while the copy held,
-which holds any part of a block that a copy failing as the source went
+with no write in flight on the raid0 and the same count on both sides of
+the read, the held one or one past it by the regions in flight, which holds
+any part of a block that a copy failing as the source went
 left, and one read between two samples that read the same count, the copy
 alone wrote one whole block for each region copied past the held count and
 no more (Lab facts): no region was copied twice, so the reload loaded the
@@ -1126,8 +1158,9 @@ signatures removes it.
 
 ## Teardown and cleanup
 
-Cleanup runs unconditionally at the start of every run and at its end only
-on success; a failing run leaves its debris and dumps the agents' logs, both
+Cleanup runs unconditionally at the start of every run, and at its end only
+on success and after a failed wipe (below); any other failing run leaves its
+debris and dumps the agents' logs, both
 VMs' dm, md, nvmet and host state, each read bounded, and the failing
 stage's trace id, but for clone_xfer's token bucket, which it removes, as
 the bucket would slow any suite that runs on the VMs before the next
@@ -1154,7 +1187,9 @@ out, cn devices top-down and the dn objects in the dn suite's order
 (`dnagent_integtest.md`, Teardown and cleanup); a dm-clone while its source
 is still connected (`cnagent.md` L3), which makes the cleanup two phases
 across both VMs, every clone of either VM gone before any transfer, as a
-clone flushes through a source the other VM exports; each disk's header
+clone flushes through a source the other VM exports, and a transfer's device
+only once its export is gone, as the export's namespace holds it open; each
+disk's header
 block zeroed (`architecture.md`, [D13]) and the udev rules removed last; and
 before the arrays stop, whatever the system made of redund's foreign
 signatures, an array, an active volume or a bcache device over one of them,
@@ -1170,13 +1205,15 @@ the foreign stage's sweep, an array that holds an md array, one of that
 stage's scratch loop devices, or a member whose superblock names one of the
 stage's arrays.
 
-The wipe is a separate flag that runs no case. Kind-blind, it takes every
+The wipe is a separate flag that runs no case. It releases the suite's
+device pins first, as the cleanup does; then, kind-blind, it takes every
 dnv-named dm device, every dnv nvmet subsystem and md array, an array named
 also by its members' dm names, and every fabrics controller on the node, a
-reach that makes it a flag; then, when no residue fails it (below), the
-ordinary cleanup runs. It repeats while
+reach that makes it a flag; then the ordinary cleanup runs, and when the
+wipe failed (below), the run fails after it. It repeats while
 dnv dm devices remain, as udev can re-assemble an array from its members, and
-any dm or nvmet residue fails it, since reporting it is not success.
+any dm or nvmet residue, or a dm listing that did not answer, fails it, since
+reporting it is not success.
 
 ## Out of scope
 
