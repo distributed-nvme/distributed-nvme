@@ -811,8 +811,9 @@ a pod reads and writes on either host, as a filesystem and as a raw block
 device, and an xfs volume is formatted with the profile of the oldest kernel
 series a node may run; a failover under IO fails no write, the host drops its
 path to the old primary though every attach names a dead cdc, and the data
-written before it reads back, for one pool at a time, since no case stops the
-cn agent of a controller node that holds many pools; a node plugin away during
+written before it reads back, for one pool at a time, as the cut of a
+controller node that holds many pools is the e2e suite's many-pools case's
+(Known limits); a node plugin away during
 a failover drops the old primary's path at its start; a detach that Kubernetes
 forces, while the old host is cut off from the control-plane guest and not
 from the controller nodes, ends only once the primary has cut that host's
@@ -1162,3 +1163,38 @@ copies to the suite's machine at its end the k3s journal of the
 control-plane guest and of each host, the logs of the control plane's
 programs and of the agents, one controller plugin's and one node plugin's
 log, and the conformance test's logs, its plugins' included.
+
+## Known limits
+
+* **A volume costs a pool, with a pool's whole share of every ceiling.**
+  Every volume is a pool of its own (The volume model), so the volume counts
+  a cluster holds are pool counts. A volume's cntlrs, the class's cntlr
+  count of them, count against `MaxCntlrCntPerCn` on the controller nodes,
+  so a cluster of two-cntlr volumes holds at most half of
+  `MaxCntlrCntPerCn` volumes per controller node it has: on fewer than
+  twice `MaxSpCntPerCluster` over `MaxCntlrCntPerCn` controller nodes that
+  limit binds first, and on more the cluster's pool ceiling,
+  `MaxSpCntPerCluster`, does. A RAID1
+  volume takes four sides at its create, a side on each leg of its meta
+  group and of its first data group, and two more for every group
+  auto-grow adds, against `MaxSideCntPerDn` on the disk nodes. A claim far
+  smaller than `DefaultDnExtSize` still reserves whole extents on every
+  leg, its meta group's one and its first data group's (`architecture.md`,
+  Cardinality limits). The capacity the driver reports is the gateway's
+  answer for one more pool of the class's shape (CSI11), which counts these
+  ceilings for that pool, not for the groups the cluster's volumes will grow.
+* **A failover of many volumes at once is measured on the e2e suite's
+  many-pools case.** This suite fails over one volume's pool at a time
+  (The cases, failover); the cut of a controller node that holds the
+  primaries of many pools, each a CSI volume's shape of one slice, two
+  cntlrs and RAID1, is the e2e suite's many-pools case, which states the
+  pool counts it ran and the times it measured (`e2e_integtest.md`, The
+  cases; `e2e_integtest.md`, Known limits).
+* **Many volumes created at once can fail over volumes of the same burst.**
+  A Kubernetes cluster that creates many volumes in a burst has the
+  controller nodes build many new primaries at once, which can answer the
+  check rounds of the primaries they have settled with observations too
+  old, so those fail over with no fault behind them, as the e2e suite's
+  many-pools case saw for pools of its own burst (`architecture.md`, Known
+  limits). Each such failover is a pause for its volume's pod; a volume
+  that served before the burst is open to the same by the rules.

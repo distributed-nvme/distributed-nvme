@@ -135,6 +135,22 @@ no crash of a migration's destination and no cut of a whole group:
   cap; the cutoff case also stops nvme-stas on host0 and puts host0's own
   configuration of it back byte for byte.
 
+**The opt-in cases** prove more, each only in a run that names it (The
+cases):
+
+* **A controller node that holds many pools fails over as a pause for every
+  one of them** (`architecture.md`, Failover), the layout a CSI cluster has
+  by default, where every volume is a pool of its own (`csi.md`, The volume
+  model). With many one-slice RAID1 pools over the three controller nodes
+  and both hosts writing every pool, every packet of the node that holds the
+  most primaries is dropped: every pool whose primary it held fails over
+  once and no other pool at all, not one write sent while the node is cut
+  off fails, and both hosts see each moved pool optimized through its new
+  primary within the measured bound (Known limits); once the node is back,
+  and after its cn agent is
+  stopped and continued in turn, every pool lists both cntlrs again and
+  every write a host saw complete reads back.
+
 **What it does not prove.** The RPCs it never issues, the deletions and
 listings of clusters, disk nodes and controller nodes, the id step, the
 restore check `CheckControllerNodeRestore` (`architecture.md`, Controller
@@ -150,7 +166,7 @@ repair that takes back a retired leg newer than the array, the `NOT_FOUND`
 reads after the copy and react cases' deletions and the read the cutoff case
 sees refused while etcd is down; validation and CLI semantics are the
 gateway and dnvctl suites'. Concurrency: one dnvctl call and one case at a
-time, and never a revision token, since a present token changes what the
+time, many pools at once only in the many-pools case, and never a revision token, since a present token changes what the
 gateway checks (`gateway.md` GW6; `dnvctl.md` CT3). ANA path selection
 between two usable controllers (Known limits). Auto-grow, cntlr replacement,
 leg repair, a failover after the primary's cn agent is killed, the forced
@@ -231,7 +247,9 @@ each host connects as itself, under a host NQN distinct from the other's.
 
 **Parameters.** The slice count, by default the ceiling; the redundancy,
 md-raid1 or none, which sets the legs per group; the dn agents per disk-node
-guest, by default the placement bound (E2E3); one case to run alone; a
+guest, by default the placement bound (E2E3); one case to run alone, a
+default case or an opt-in one (The cases); the many-pools case's pool count,
+which that case alone takes; a
 cleanup-only run that sweeps every guest and stops; and a directory on the
 driver to keep the logs in. Every other number derives from these before a
 guest is touched, and a slice count `CreateStoragePool` would refuse is refused
@@ -293,7 +311,10 @@ clusters, derived from the tree's default check interval rather than typed
 the primary's agent is stopped: cntlr replacement must not replace the stopped
 cntlr before the case continues it, leg repair has no fault to repair, and the
 elected standby is held to the cntlr threshold while it settles
-(`dnv-worker.md` AR5, HL2), so its own build cannot hand the role back. Every
+(`dnv-worker.md` AR5, HL2), so its own build cannot hand the role back.
+The many-pools case builds under the cutoff set too, for the same reasons:
+its cuts must fail every pool over within seconds, and nothing else may
+react while a node is cut off. Every
 set names all four, as an omitted or zero threshold resolves to its default
 when read (`gateway.md` GW11; `dnv-worker.md` AR4) and the default primary
 threshold is short; in every set the leg threshold exceeds the side threshold
@@ -326,7 +347,10 @@ override below it is a warning naming the demand it risks, never an error; a
 value above the per-kernel cap is a die: an operator's value is told to come
 under the cap or go, as no guest count makes it fit, and the die names the
 guest count the shape needs when the shape's own bound is above the cap,
-and the bound when it is within it.
+and the bound when it is within it. A run of the many-pools case defaults
+to the count its pools' sides need, a third more extents than they take on
+average, as the allocator draws the guests at random (`architecture.md`,
+Finding DN candidates), and never below the bound.
 
 E2E4. **Every dn agent of a guest registers that guest as its location**, so
 groups straddle guests and, with more disk-node guests than legs per group,
@@ -369,7 +393,19 @@ its first clone's copy of its source, the range of every stamped writer, the
 new blocks of the react case's flush and group-cut writers and the ops
 case's file system, each of which grows with the slices and stays
 allocated until the case ends, as a thin delete hands no block back to a
-backing file.
+backing file. The many-pools case's disk nodes each carry sides of many
+pools, and a guest's disk nodes fill one at a time once each has few
+extents left (`architecture.md`, Finding DN candidates), so each of its
+backing files has a cap of its own: an extent for each side its disk node
+carried at the case's widest, as a meta side is zeroed whole and a data
+side holds all a host writes into it, beside the pattern and the agent's
+metadata; its run cap counts every pool's sides, both hosts' writes into
+every pool and the logs every pool's objects add at debug. These caps guard
+space only: a whole extent for every side does not hold a data side's
+zeroing to its region, which the default cases' caps do. A pool count whose
+run cap would leave less than a margin free on the driver's file system
+that holds the guests' disk images, which grow by what the guests
+allocate, is refused before a guest is touched.
 
 E2E6. **Cleanup runs unconditionally at the start, and only on success at the
 end.** `cleanup_all` runs before anything is built, between cases, at the end
@@ -384,18 +420,20 @@ cleaning, while a run that fails an assertion removes nothing but the copy
 case's two token buckets, its clone's off the controller node and its
 migration's off the disk node that carries it, the react case's reject rule,
 its group cut and its flush stage's delay, which it takes off the controller
-node that carries them, and the react case's
-silencing rule, which it takes off the disk node that carries it, as a
-slowed or delayed port would slow, a refused one fail and a silenced or cut
-one stall every suite that runs before the next cleanup; and it tells
-host0's stamped writer to start no more passes, as its passes would write
-on into a lab other suites then use.
+node that carries them, the react case's silencing rule, which it takes off
+the disk node that carries it, and the many-pools case's cut, which it takes
+off the controller node it cuts off, as a slowed or delayed port would
+slow, a refused one fail and a silenced or cut one, or a cut node, stall
+every suite that runs before the next cleanup, the many-pools case's cut
+also removing itself on a timer; and it tells host0's stamped writer to
+start no more passes, as its passes would write on into a lab other suites
+then use.
 
 E2E7. **No direct-IO flags to dd.** The guests' dd mishandles direct IO
 (`dnagent_integtest.md`, Assumptions and preflight checks), so every dd write
 is buffered and synced and every dd read that must reach the media follows a
-cache drop. Five host processes run detached, as their IO may block and `timeout`
-cannot bound a task in uninterruptible sleep: the read-only level's read, which
+cache drop. Seven host processes run detached, as their IO may block and
+`timeout` cannot bound a task in uninterruptible sleep: the read-only level's read, which
 answers "blocked" within its own budget; the write loop, whose writes are
 meant to queue through a failover in the cutoff case, and in react's
 migrating leg on md until the primary cuts the leg's path; the cutoff
@@ -403,12 +441,16 @@ case's fence writer on host1, which stops on its first failed write or at
 the end of its range; the stamped writer, whose passes run across a
 procedure on host0 until its stop file, its first failed pass or a time
 bound sized to outlive a passing run, a pass in hand ending before it
-stops; and the react case's writer to new blocks, which ends at the end of
-its writes or at its first failed one. The fence writer and the stamped
-writer run fio, not dd, and write and verify with direct IO (The cases), and
-so do the copy case's fio stamps, each written or read back by one fio run
-under the watchdog below, as is each verify the detached writers' stages
-read after them. The writer to new blocks is a python program of the
+stops; the react case's writer to new blocks, which ends at the end of its
+writes or at its first failed one; and the many-pools case's writers, one
+fio on each host with a job per pool, whose writes are meant to wait
+through its cuts and which stop on a signal, once the case has read them,
+and its path sampler, which stops on its stop file or by itself after a
+bound. The fence writer, the stamped writer and the many-pools case's
+writers run fio, not dd, and write and verify with direct IO (The cases),
+and so do the copy case's fio stamps, each written or read back by one fio
+run under the watchdog below, as is each verify the detached writers'
+stages read after them. The writer to new blocks is a python program of the
 suite's own, as fio's latency logs carry no fsync: it writes with direct IO
 and logs the time around each write and each fsync it makes, and its blocks
 are read back with direct IO under the same watchdog. The loop
@@ -427,8 +469,9 @@ E2E8. **Pids in files, signals by pid, `pkill` only from helper files with
 bracketed patterns.** Every agent and every control-plane daemon the suite
 starts, etcd included, records its pid: the control-plane daemons are stopped
 by theirs, the react case stops each agent it kills by that agent's pid file,
-and the cutoff case stops and continues the agent it cuts off by its pid file,
-with SIGSTOP and then SIGCONT, reading the process state back, as a signal is
+and the cutoff case and the many-pools case's second cut stop and continue
+the agent they cut off by its pid file, with SIGSTOP and then SIGCONT,
+reading the process state back, as a signal is
 delivered asynchronously, and stops etcd by its pid file, waiting for it to
 exit, before it starts it again on the same data. Every stop of an agent, by
 pid or by pattern, sends SIGCONT before SIGTERM, so that an agent a failed
@@ -532,7 +575,9 @@ exit status and stderr, which E2E2 frames apart.
 ## The cases
 
 The cases run in order, each on a fresh pool (E2E11): smoke, ops, copy, react
-and cutoff. Each stage has its own trace id, sent by every dnvctl call of the
+and cutoff. An opt-in case runs only when the run names it as the one case to
+run alone, and never in that order, as it holds the lab far longer than a
+default run or needs parameters of its own. Each stage has its own trace id, sent by every dnvctl call of the
 stage and carried by the gateway's records and an agent's records of the reads
 the gateway makes for that call, never by the converge it sets off, which runs
 under the worker's ids (`dnv-worker.md` RW10). Every wait on a condition is a
@@ -1341,6 +1386,72 @@ subsystem, namespace and thin device, and only the suite's own paths on
 host0, while the primary role stays on the cntlr the second failover
 elected.
 
+**many**, an opt-in case, proves that a controller node holding many pools
+fails over as a pause for every one of them (`architecture.md`, Failover),
+the layout a CSI cluster has by default, where every volume is a pool of its
+own (`csi.md`, The volume model). It builds the run's pool count of one-slice
+RAID1 pools, setup's the first, each with two cntlrs, a thin device and a
+namespace that both hosts reach through the cdc, all under the cutoff set
+(Topology and parameters, Event thresholds): every pool is created before any
+is waited for, as a burst of volume creates makes them, and each must then
+have every side provisioned, its thin device created, its primary settled,
+both cntlrs listed and its namespace exported by both. Both hosts must be
+served a discovery record for both cntlrs of every pool and must hold, after
+one discovery connect each, every namespace optimized through its primary
+and inaccessible through its standby on live controllers; the case logs each
+host's available memory and TCP connections before and after. Each host then
+runs one fio with one job per pool, which writes the pool's namespace in
+order over the host's own range, one synchronous direct write in flight at a
+low fixed rate, with fio's verify headers and a latency log of every
+completed write, and goes on after a failed write, which that log then
+lacks (E2E7); every job must have completed writes before the first cut,
+and none may have failed.
+
+The case then cuts the controller node that holds the most primaries, twice,
+reading the primaries again before each cut, as the first cut moves every
+primary off the node it cuts. The first cut drops every packet of the node's
+guest but the driver's ssh, by a table that removes itself on a timer should
+the run stop first: the agent answers no check round, the hosts' paths to it
+stall unanswered and its connections to its sides stall too. The second, once
+the first node is back, stops the cn agent of the node that then holds the
+most primaries, as the cutoff case does (E2E8), while its kernel objects go
+on serving. In each, every pool whose primary the node holds must fail over
+and both hosts must see its namespace optimized through its new primary;
+after the packet cut every job must also have written again by then, through
+the new primary. Then the node comes back, the table removed or the agent
+continued, every pool must list both its cntlrs again, both hosts must see
+every pool optimized through its primary and inaccessible through its
+standby, and every job must have written after the return. A sampler on each
+host reads every path's ANA state twice a second while a cut lasts, so the
+times come from the guests' records rather than from the driver's polls,
+which take a call per pool: per pool and cut, the case reports the seconds
+from the cut, on the cut node's clock, to the worker's record of the fence of
+the old primary's sides, logged when the demotion hold runs to its timer
+(`dnv-worker.md` RW22), to its record of the failover, and to each host's
+first sample optimized through the new primary, the failovers the worker
+logged for the pool in the window, each host's longest write completed in
+the window and its failed writes, and the load of each controller node after
+the cut. On the packet cut no write sent while the node is cut off may
+fail, every pool whose primary the node held must fail over exactly once
+and no other pool at all, and both hosts must see each of them optimized
+within the measured bound (Known limits); the writes that fail once the
+node is back are counted, as a host can reach the old primary again before
+its agent turns it into a standby (`architecture.md`, Known limits). A
+failed write's time is the completion before it and one write interval for
+each failed write between. On the agent stop the writes a host sends down
+the old primary's path fail from the fence until the agent, continued,
+turns that path inaccessible, as the cutoff case's writer shows on a plain path
+(`architecture.md`, Known limits), so they are counted, not asserted. Last
+the writers stop and every job's range is read back with fio's verify up to
+its last completed write: the read-back holds only when that fio ran to its
+end and every job answered that it read its whole range, a block whose
+write fio saw complete must verify, and a block whose write failed may read
+zeros or that write's own bytes, as a failed write can land, and is
+counted. The case then deletes every namespace, every
+subsystem but setup's, every thin device and every pool it made, the hosts
+letting go of its subsystems first, waits for every drain, and reaches the
+shared ending with setup's pool alone.
+
 **The ending every case shares** first checks the pool's state on disk by
 its status lines, while the pool still stands: once md runs no sync on any
 group, within a bound, as a case can end while md still copies a leg, one
@@ -1455,7 +1566,10 @@ kernel-log witness and nvme-stas 2.x installed, both its units known to
 systemd, as a 1.x one would fail later and silently, never connecting,
 nvme-stas being a package the suite never installs; that host1, when the
 cutoff case is in the run, has the tools of its fence writer, fio, cmp,
-nohup and pkill, which the suite never installs either; and that the
+nohup and pkill, which the suite never installs either; that both hosts,
+when the many-pools case runs, have the tools of its writers and its path
+sampler, fio, readlink, nohup and pkill, and every controller node those of
+its cut, nft and systemd-run; and that the
 control-plane
 guest has its tools, its ports free and the free-space floor the space guard
 holds it to, and needs no sudo: the closing trim is the one root command tried
@@ -1496,10 +1610,11 @@ Hosts go before every target, as they hold the
 controllers, and a subsystem removed under a live controller kills it with DNR
 while its port keeps listening and leaves it retrying once the port has
 nothing left (`cnagent_integtest.md`, Lab facts). On a host the write loop,
-the fence writer, the stamped writer, the writer to new blocks and the fio
-of any fio stamp stop first, so that nothing writes into a device while its
-paths go, and the ops case's file system is unmounted, so that no mount
-holds a device whose paths go, then nvme-stas, so that nothing
+the fence writer, the stamped writer, the writer to new blocks, the fio of
+any fio stamp and the many-pools case's writers and path sampler stop
+first, so that nothing writes into a device while its paths go, and the ops
+case's file system is unmounted, so that no mount holds a device whose
+paths go, then nvme-stas, so that nothing
 reconnects what the sweep drops, the host's own nvme-stas configuration
 going back while the work directory still holds its copy and an nvme-stas
 the suite never started being left alone; then the
@@ -1518,11 +1633,12 @@ node, as its stacks sit on the disk nodes' sides, in the cn agent suite's order
 (`cnagent_integtest.md`, Teardown and cleanup) and in two phases across all of
 them, so that every clone final is gone, removed while its transfer source is
 connected, before any transfer goes, as a dm-clone flushes through its source
-(`cnagent.md` L3). The first phase takes the copy case's clone bucket and the
-react case's reject rule and group cut off first, whether or not this run
-set them, so that no removal waits on a slowed source and no later connect
-is refused or cut, and does not finish while a reading still shows any of
-them. On a disk-node guest
+(`cnagent.md` L3). The first phase takes the many-pools case's cut, the
+copy case's clone bucket and the react case's reject rule and group cut off
+first, whether or not this run set them, so that the node answers again,
+no removal waits on a slowed source and no later connect is refused or
+cut, and does not finish while a reading still shows any of them. On a
+disk-node guest
 every dnv md array goes before any dm
 device, as an array assembled from the controller node's superblocks pins the
 device under it (Known limits), each loop device's header is zeroed before it
@@ -1641,6 +1757,50 @@ the connect attempted.
   the broken array, so whether the writes acknowledged before it held is not
   read here; the cn agent suite's group cut reads them after its failover
   (`cnagent_integtest.md`, Cases, groupcut).
+* **The many-pools case's bound is measured on the lab's three
+  controller-node guests, at 8, 32 and 64 pools.** On the packet cut each
+  moved pool's failover record came 6.3 to 9.8 s after the cut at every
+  count, its fence record 9.4 to 12.9 s after, and both hosts saw it
+  optimized at most 13.6 s after the cut at 8 and 32 pools and 25.8 s at
+  64, the longest write a few hundred ms short of that; on the agent stop,
+  at most 12.9, 15.4 and 35.5 s. The case asserts 60 s on the packet cut,
+  room for a slower lab at 64 pools, and refuses a pool count above twice
+  that or one whose run cap the driver's disk cannot hold (E2E5). 64 pools
+  put up to 44 cntlrs on one controller node and every extent of one disk
+  node to use, and cost each host about 60 MB of memory for its 128
+  controllers.
+* **The many-pools case's build fails over pools of its own burst.** Built
+  at once, with the cutoff set's primary threshold, the shipped default, 64
+  pools made 22 failovers in the 332 s they took to build in one run and 25
+  in another, 32 pools one in one of two runs, and 8 pools none: each of a
+  pool of the burst whose primary had settled while later pools still
+  built, one pool twice, its rounds missed on observations too old
+  (`architecture.md`, Known limits). The case logs the worker's rounds and
+  reactions of that window and asserts none of it. In the second run at 64
+  that pool's second failover left it unbuilt, its data group's array
+  inactive on the new primary (`architecture.md`, Known limits), and the
+  case failed at its build wait.
+* **The many-pools case's logs are large.** Every agent logs each object's
+  reads at debug, so a passing run at 64 pools leaves some 22 GB of logs on
+  the node guests, which its run cap counts. A failed run is held to no cap:
+  its objects and logs stay on the guests for the diagnosis until the next
+  start cleanup or a cleanup-only run, and a run at 64 that failed in its
+  build wait left some 43 GB in the guests' work directories, up to 7 GB on
+  one guest.
+* **The many-pools case's times are the guests' records.** The cut's time is
+  read on the cut node's clock, the fence's and the failover's in the
+  worker's log, each host's optimized time by its sampler, two samples a
+  second, and the guests' clocks, kept by NTP, agree within about a tenth of
+  a second, so each time is good to about half a second; each job writes
+  once a second, so its longest write shows a pause to within a second.
+* **The many-pools case's agent stop fails writes by design**, through the
+  suite's own paths (The cases, many), and its packet cut ends with a node
+  whose old primaries serve again until they converge to standbys
+  (`architecture.md`, Known limits), so the writes a host sends them then
+  fail and are counted, not asserted: none at 8 pools; at 32, 15 of one
+  host's in one run and none in the other; at 64, 56 of each host's, over
+  20 pools; each a few seconds of a host's writes to the pools whose paths
+  came back first.
 * **The clone source may fall back.** Whether one kernel can be initiator and
   target for the same bytes is the lab kernel's property, so a source that
   never connects or stops hydrating routes to a fallback pool on another

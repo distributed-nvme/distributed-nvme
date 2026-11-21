@@ -684,7 +684,7 @@ Measured times are in [the introduction](introduction.md#status-and-limits-of-01
 |---|---|---|---|
 | A disk fails, one leg of a RAID1 group | md fails the leg. IO goes on over the other leg. Leg repair replaces the leg with a new leg on another disk node, and md copies the data onto it. The old leg becomes a retired leg. | `leg_unhealthy`, 1200 at the default, before the repair starts. | Nothing. In a pool without RAID the data is gone (accepted case 2). |
 | A disk node is down and comes back | In a RAID1 pool, md fails its legs after the kernel's keep-alive. IO goes on over the other legs. A group with no IO sends md nothing to fail, so the primary fails such a leg in md itself once the leg has failed its health check twice in a row, while another leg holds the data in sync. md then records the death on the other leg, and a failover or a reboot can start the array from that leg alone. Back in time, its legs rejoin and md copies the changed regions. Down for long, leg repair moves each leg to another disk node. In a pool without RAID, the IO waits for the fast IO fail timeout and then fails (section 4). | `side_unhealthy`, 600 at the default, before the repairs start. The pool's fast IO fail timeout, 5 at the default, bounds how long the IO of a pool without RAID waits before it fails, and how long IO that reaches a lost leg after the keep-alive gives up waits. | Nothing. A node that never returns needs the node replacement procedure (section 7). |
-| A controller node is down and comes back | Each primary on it that has a healthy enabled standby is failed over to it. Hosts see a pause. A pool of one cntlr waits for a cntlr replacement. Back, the cntlrs that were failed over are standbys. A cntlr unhealthy for long is replaced on another controller node. | `primary_unhealthy`, 4 at the default, with two check rounds in a row that find the primary unhealthy; a round runs every `cntlr_interval`, 2 at the default. A missed round counts only once its own wait of one interval has run out, so a failover comes about 6 to 10 seconds after the node dies. `cntlr_unhealthy`, 600, before a replacement. | Nothing. |
+| A controller node is down and comes back | Each primary on it that has a healthy enabled standby is failed over to it. Hosts see a pause. A pool of one cntlr waits for a cntlr replacement. Back, the cntlrs that were failed over are standbys; a node that was cut off from the network can fail a host's writes for a few seconds first (section 8). A cntlr unhealthy for long is replaced on another controller node. | `primary_unhealthy`, 4 at the default, with two check rounds in a row that find the primary unhealthy; a round runs every `cntlr_interval`, 2 at the default. A missed round counts only once its own wait of one interval has run out, so a failover comes about 6 to 10 seconds after the node dies. `cntlr_unhealthy`, 600, before a replacement. | Nothing. |
 | The network between a controller node and a disk node is cut | When the controller node holds the primary, as for a disk node down, seen from that controller node: md fails the legs behind the cut and takes them back when the cut ends. A long cut moves the legs. A cut from a node that holds only standbys changes nothing. | `leg_unhealthy`, 1200. | Nothing. |
 | The network between hosts and a controller node is cut | Nothing. dnv reads the agents, never a host. The primary stays the primary and stays in the cdc's answer. The host's IO queues as long as a standby path is left. | None. | Disable the primary, so a failover runs at once. Enable it again after. State: procedure to write; fix later, a host health signal into the worker. |
 | The network between the control plane and the agents is cut | The data plane keeps serving. The primaries of one cut-off controller node are failed over. The old primary never gets its demotion, and the fence comes after the three-second hold, so hosts that drop the old path inside the hold see a pause, and a host still on it sees IO errors (section 8) and, in the cases section 5.1 lists, can lose a write it was told was done. With every agent cut off, nothing changes until the network is back. | As for a controller node down. | Nothing. |
@@ -1765,6 +1765,40 @@ failover's among them.
   path shows the volume, and can lose a write the same way. The e2e suite
   shows the first window, with an old primary whose agent is stopped; the
   other windows and the Kubernetes case are not seen in the lab.
+- **A failover in the middle of a pool's build can leave the pool
+  unbuilt.** When the new primary builds before the disk nodes have opened
+  its paths to every copy of a group, the group's RAID1 array can start
+  inactive with one copy, and nothing starts it again: the pool serves
+  nothing. By dnv's rules the worker then fails the pool over to its
+  standby once the error has lasted the cntlr threshold, 600 seconds at
+  the default; no run has waited that long. The e2e suite's many-pools
+  case saw it once, in one of two builds of 64 pools at once, on a pool
+  that failed over twice while it built. State: fix later; not decided
+  yet.
+- **Creating many volumes at once can fail over volumes of the same
+  burst.** A controller node that builds many new primaries at once can
+  answer the worker's health checks of the primaries it has finished too
+  late, and the worker then fails those over, so their hosts see a pause
+  with no fault behind it. The e2e suite's many-pools case shows it on
+  three controller nodes at the default thresholds: 22 and 25 failovers in
+  two builds of 64 pools, one in one of two builds of 32 and none at 8,
+  each of a pool of the burst that had finished building, one pool twice
+  ([the introduction](introduction.md#status-and-limits-of-01) has the
+  numbers). A volume that served before the burst can be hit the same way
+  by dnv's rules; no run has shown it. A Kubernetes cluster that creates
+  many volumes at once has this shape. State: fix later; whether the threshold or the build should change
+  is not decided yet.
+- **A controller node that comes back after a network cut fails a host's
+  writes for a few seconds.** While the node is cut off, the failover moves
+  its primaries to other controller nodes and the disk nodes fence its
+  legs, but the node hears nothing of this, so it keeps telling hosts that
+  it serves those volumes. Once the network is back, the worker's next
+  message turns each of them into a standby. A host whose connection to the
+  node comes back before that message sends its writes there, and they fail.
+  No write the host was told was done is lost. The e2e suite's many-pools
+  case shows it at 32 and 64 pools
+  ([the introduction](introduction.md#status-and-limits-of-01) has the
+  numbers). State: fix later; the way is not decided yet.
 - **A node clock that steps back delays a failover.** The worker reads how
   old an agent's report is by the node's clock. After the clock steps
   back, reports read younger by up to the step, so a node whose reads hang

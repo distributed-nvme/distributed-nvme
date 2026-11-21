@@ -574,6 +574,25 @@ read-only, needing a check, on its primary and after a failover to a
 controller node none of whose paths to the legs the cut reached, and every
 block the host was told was written read back as written.
 
+The loss of a controller node that holds many pools was measured on the lab
+VMs with the e2e suite's many-pools case: one-slice RAID1 pools with two
+cntlrs each over three controller nodes, both hosts writing every pool with
+one synced 4 KiB write a second, at the default primary threshold. With
+every packet of the node that held the most primaries dropped, each of its
+pools failed over 6.3 to 9.8 s after the cut at 8, 32 and 64 pools, and both
+hosts saw it served by its new primary at most 13.6 s after the cut at 8
+and 32 pools and 25.8 s at 64; the longest write was just under that, and
+no write failed while the node was cut off. When the node came back, a host
+whose connection to it came back before the node had made its old
+primaries standbys had its writes there fail for a few seconds: none at 8
+pools, 15 in one run at 32 and none in the other, and 112 at 64, 56 on each
+host ([dnv's scope and known limits](scope.md), section 8). Building 64
+pools at once took 332 s and made 22 failovers of pools of the same burst
+that had finished building; a second build of 64 made 25, one pool failing
+over twice, and that pool's second failover left it unbuilt (section 8 of
+the same document). 32 pools built with one failover in one of two runs, 8
+with none.
+
 The limits dnv enforces, each against the largest size a test has run. The
 Go tests run the control plane against fake agents, test programs that answer
 an agent's calls with no node behind them, and the agents against a fake
@@ -588,11 +607,11 @@ proven against fakes alone.
 |---|---|---|---|
 | Disk nodes per cluster | 1024 | 1024 | 180 dn agents on four guests, at 32 slices |
 | Controller nodes per cluster | 1024 | 1024 | 3 |
-| Storage pools per cluster | 4096 | 4096 | 8 at once as CSI volumes, on real nodes; 10 at once in a suite on fake agents |
+| Storage pools per cluster | 4096 | 4096 | 64 at once on real nodes, in the e2e suite's many-pools case; 8 at once as CSI volumes; 10 at once in a suite on fake agents |
 | Slices per pool | 32 | 32, committed on a real etcd | 32; 1 under the CSI driver |
 | Cntlrs per pool | 4 | 4 | 3 |
-| Cntlrs per controller node | 256 | 256, and a real cn agent on a fake machine converged 257 | 256 on one guest of 8 CPUs and 3.3 GiB, each cntlr a one-slice pool with no RAID1, one IO queue a leg, no host, no IO |
-| Sides per disk node | 1024 | 1024, and a real dn agent on a fake machine converged 1025 | 1024 on one guest of 2 CPUs and 7.2 GiB, no host, no IO |
+| Cntlrs per controller node | 256 | 256, and a real cn agent on a fake machine converged 257 | 256 on one guest of 8 CPUs and 3.3 GiB, each cntlr a one-slice pool with no RAID1, one IO queue a leg, no host, no IO; 44 with both hosts writing, in the e2e suite's many-pools case |
+| Sides per disk node | 1024 | 1024, and a real dn agent on a fake machine converged 1025 | 1024 on one guest of 2 CPUs and 7.2 GiB, no host, no IO; 28, every extent of its disk, with both hosts writing, in the e2e suite's many-pools case |
 | Groups per slice, meta and data each | 255 | 255 data groups, grown without redundancy; a full meta list, and a full list with RAID1, only written to etcd directly | 9 data groups with RAID1, in a CSI volume filled whole; about 2 meta groups |
 | Thin devices per pool | 1024 | 1024 | a few |
 | Subsystems per pool; namespaces per subsystem; hosts per subsystem | 4; 4; 8 | each at its value | 1; 2; 4 |

@@ -9916,6 +9916,46 @@ document and only pointed to here.
   later than the demotion hold ends (Failover). Such a host can also lose
   an acknowledged write (A failover while the old primary serves can lose
   an acknowledged write, above).
+* **Many pools built at once fail over pools whose primaries have
+  settled.** A controller node that builds the stacks of many new primaries
+  at once answers check rounds of the primaries it has settled with
+  observations too old (`dnv-worker.md` HL7), and a settled primary whose
+  rounds miss for its primary threshold is failed over (`dnv-worker.md`
+  AR4, AR5), a pause for its hosts with no fault behind it; a settling
+  primary is held to the cntlr threshold instead (`dnv-worker.md` HL2).
+  That those reads wait behind the builds, the head-of-line blocking above,
+  is inferred: the rounds' records show only the observations' age. In the
+  e2e suite's many-pools case at the default primary threshold every such
+  failover hit a pool of the same burst whose primary had settled while
+  later pools still built, one pool twice (`e2e_integtest.md`, Known
+  limits); that a pool serving before the burst is hit the same way follows
+  from the rules and is not run. A Kubernetes cluster makes this shape when
+  it creates many volumes at once (`csi.md`, Known limits).
+* **A promotion that outruns its sides can leave a group's array inactive.**
+  A new primary whose converge runs before a group's sides have opened its
+  path assembles the group's array from the legs it reaches; mdadm then
+  leaves a RAID1 array with one of its two members inactive, and an
+  inactive array is left as it is and reported as the group's error
+  (`cnagent.md` CN12), which sets the primary's error epoch (`dnv-worker.md`
+  HL2), while the worker re-sends the promotion only once a read names the
+  group's array absent (`dnv-worker.md` RW14). The pool then has no thin
+  pool on its primary until, by the rules, the worker fails it over to its
+  healthy standby once that error has lasted the cntlr threshold, a
+  settling primary's threshold (`dnv-worker.md` AR5); no run has waited
+  that long. Seen once in the e2e suite's many-pools case, on a pool that
+  failed over twice while 64 pools built, the second time while the disk
+  nodes were still opening paths (`e2e_integtest.md`, Known limits).
+* **An old primary cut off from the network serves again for a moment when
+  it comes back.** Cut off, its agent hears no syncup, so its namespaces stay
+  in their optimized group while the failover moves the pool, and its sides
+  fence its legs. Back, it turns them inaccessible only in the converge of
+  the demotion the worker sends it once its check rounds reach the node
+  again, while a host's controller to it reconnects at its own retry: a
+  host whose path comes back first sends its writes down a path that
+  answers optimized, and the fenced sides fail them, until that converge.
+  Measured in the e2e suite's many-pools case (`e2e_integtest.md`, Known
+  limits). No acknowledged write is lost: the failed writes are reported
+  failed.
 * **A cntlr replacement of a serving primary can still fence it first.** A
   replacement deletes the cntlr it replaces, so that cntlr gets no
   demotion; the replacement's fan-out holds the sides and the other cntlrs

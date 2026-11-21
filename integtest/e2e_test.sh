@@ -18,9 +18,11 @@
 #
 #   optional: [--only <case>] [--cleanup-only] [--slice-cnt N]
 #             [--redund raid1|none] [--dns-per-vm N] [--keep-logs DIR]
+#             [--pool-cnt N]
 #
 # Cases, in order, each from an EMPTY etcd and a freshly built storage pool
-# (E2E11): smoke, ops, copy, react, cutoff. `--only` picks one. Cleanup runs
+# (E2E11): smoke, ops, copy, react, cutoff. `--only` picks one, or one of the
+# opt-in cases of OPTIN_CASES, which only `--only` runs. Cleanup runs
 # unconditionally at the START and, on success only, at the END (E2E6): a
 # failing run leaves every process, dm/md/nvmet object, loop device, host
 # connection and log in place and dumps diagnostics instead. The START
@@ -673,6 +675,12 @@ SETUP_STACK_ROUNDS=3
 
 CASES=(smoke ops copy react cutoff)
 
+# The opt-in cases (e2e_integtest.md, The cases): each runs only when --only
+# names it, alone, and never in the default list above, as each holds the lab
+# far longer than a default run or needs parameters of its own. Every name
+# here also needs its arm in sp_thresholds and sp_shape, like any case.
+OPTIN_CASES=(many)
+
 # The cases this run will actually execute, in CASES order with --only applied.
 # main fills it BEFORE the guest preflight, which checks nvme-stas on host0
 # only when the cutoff case is in it, and so before setup too, which builds
@@ -739,6 +747,11 @@ REACT_GRP_CNT=0
 REACT_SP_ZERO_BYTES=0
 REACT_RUN_CAP_BYTES=0
 REACT_TD_UNIT=0
+# The many-pools case's own numbers (derive_params): its run cap, which
+# counts every pool's sides and writes, and the dn agents per DN VM its
+# pools' sides need.
+MANY_RUN_CAP_BYTES=0
+MANY_DNS_PER_VM=0
 
 JQ=jq
 # DISC_NQN is the well-known discovery NQN, the SUBNQN of the cdc's record of
@@ -747,6 +760,9 @@ JQ=jq
 DISC_NQN=nqn.2014-08.org.nvmexpress.discovery
 ONLY=""
 CLEANUP_ONLY=0
+# 1 when the command line names --slice-cnt, which the many-pools case
+# refuses unless it is 1 (parse_args).
+SLICE_CNT_SET=0
 # --keep-logs DIR, a directory on the driver, empty when the flag is absent
 # (keep_logs). LOGS_CASE names the case whose logs the guests hold now: the
 # case run_case last started, or "setup" while a build runs.
@@ -949,18 +965,19 @@ on_exit() {
 		log ""
 		log "########## diagnostics ##########"
 		diagnostics || true
-		# The six injectors a failed run does not leave in place (E2E6):
+		# The seven injectors a failed run does not leave in place (E2E6):
 		# the next run's cleanup would remove them, but a token bucket on a
 		# node's port would slow every suite run before that, the clone's on
 		# a controller node and the migration's on a disk node, a reject
 		# rule on a controller node would refuse its connects to the disk
 		# nodes' ports, the group cut on a controller node would cut them,
-		# the flush stage's delay on a controller node would slow them, and a
+		# the flush stage's delay on a controller node would slow them, a
 		# silencing rule on a disk node would stall every connect to its
-		# port. The diagnostics above have shown all six. host0's stamped
-		# writer is told to stop too: it starts passes until its stop file,
-		# and would write on for as long as its pass bound allows into a lab
-		# other runs then use.
+		# port, and the many-pools case's cut would keep a controller node's
+		# guest unreachable until its timer. The diagnostics above have
+		# shown all seven. host0's stamped writer is told to stop too: it
+		# starts passes until its stop file, and would write on for as long
+		# as its pass bound allows into a lab other runs then use.
 		if [ "${COPY_FO_THROTTLE_CN:--1}" -ge 0 ]; then
 			log ""
 			log "--- taking the copy case's throttle off cn$COPY_FO_THROTTLE_CN"
@@ -990,6 +1007,11 @@ on_exit() {
 			log ""
 			log "--- taking the react case's delay off cn$REACT_FSYNC_DELAY_CN"
 			helper_cn "$REACT_FSYNC_DELAY_CN" unthrottle >&2 || true
+		fi
+		if [ "${MANY_CUT_CN:--1}" -ge 0 ]; then
+			log ""
+			log "--- taking the many-pools case's cut off cn$MANY_CUT_CN"
+			helper_cn "$MANY_CUT_CN" net_uncut >&2 || true
 		fi
 		if [ "${SWRITE_RUNNING:-0}" = 1 ]; then
 			log ""
@@ -1472,7 +1494,7 @@ usage() {
 	cat >&2 <<EOF
 usage: bash integtest/e2e_test.sh [--only <case>] [--cleanup-only]
            [--slice-cnt N] [--redund raid1|none] [--dns-per-vm N]
-           [--keep-logs DIR]
+           [--keep-logs DIR] [--pool-cnt N]
            --cp user@ip --cn user@ip … --dn user@ip … --host user@ip …
 
 roles (repeatable flags; nothing is positional, nothing is hardcoded):
@@ -1500,7 +1522,12 @@ parameters:
                       covers the create AND the two grows of ops step 2,
                       whose step 8 then needs legs side-less DNs on legs
                       different VMs. Below the bound is allowed and warns.
-  --only <case>       run one case: ${CASES[*]}
+  --only <case>       run one case: ${CASES[*]}; or one opt-in case,
+                      which no default run includes: ${OPTIN_CASES[*]:-(none)}
+  --pool-cnt N        the many case's pools, setup's included (default
+                      $MANY_POOL_CNT_DEFAULT; 1..$MANY_POOL_CNT_MAX); that case alone takes it, and
+                      it builds one-slice raid1 pools, so it refuses
+                      --slice-cnt other than 1 and --redund none
   --cleanup-only      run the start cleanup on every guest and stop
   --keep-logs DIR     before each cleanup that removes the guests' work
                       directories — between cases, and at the end of a run
@@ -1599,10 +1626,12 @@ parse_args() {
 		--slice-cnt)
 			[ $# -ge 2 ] || usage
 			SLICE_CNT=$2
+			SLICE_CNT_SET=1
 			shift 2
 			;;
 		--slice-cnt=*)
 			SLICE_CNT=${1#*=}
+			SLICE_CNT_SET=1
 			shift
 			;;
 		--redund)
@@ -1628,6 +1657,15 @@ parse_args() {
 			KEEP_LOGS=$2
 			shift 2
 			;;
+		--pool-cnt)
+			[ $# -ge 2 ] || usage
+			MANY_POOL_CNT=$2
+			shift 2
+			;;
+		--pool-cnt=*)
+			MANY_POOL_CNT=${1#*=}
+			shift
+			;;
 		--keep-logs=*)
 			KEEP_LOGS=${1#*=}
 			shift
@@ -1636,6 +1674,25 @@ parse_args() {
 		*) usage ;;
 		esac
 	done
+
+	# The many-pools case builds one-slice RAID1 pools whatever the run's
+	# defaults say (e2e_integtest.md, The cases, many), so its run's shape
+	# is one slice, and a run that names another shape for it, or a pool
+	# count for another case, is a usage error. Its pool count defaults to
+	# MANY_POOL_CNT_DEFAULT and counts setup's pool.
+	if [ "$ONLY" = many ]; then
+		{ [ "$SLICE_CNT_SET" -eq 0 ] || [ "$SLICE_CNT" = 1 ]; } || usage
+		[ "$REDUND" = raid1 ] || usage
+		SLICE_CNT=1
+		[ -n "$MANY_POOL_CNT" ] || MANY_POOL_CNT=$MANY_POOL_CNT_DEFAULT
+		case "$MANY_POOL_CNT" in
+		'' | *[!0-9]*) usage ;;
+		esac
+		{ [ "$MANY_POOL_CNT" -ge 1 ] &&
+			[ "$MANY_POOL_CNT" -le "$MANY_POOL_CNT_MAX" ]; } || usage
+	elif [ -n "$MANY_POOL_CNT" ]; then
+		usage
+	fi
 
 	# --redund decides LEGS, and LEGS decides how many --dn guests are the
 	# minimum, so the arms are checked before the counts.
@@ -1708,9 +1765,11 @@ parse_args() {
 	HOST_IP=()
 	for i in "${!HOST[@]}"; do HOST_IP[i]=${HOST[$i]##*@}; done
 
+	# A default case or an opt-in one (OPTIN_CASES); an opt-in case runs
+	# only here, by name.
 	if [ -n "$ONLY" ]; then
 		local known=0 name
-		for name in "${CASES[@]}"; do
+		for name in "${CASES[@]}" "${OPTIN_CASES[@]}"; do
 			[ "$name" = "$ONLY" ] && known=1
 		done
 		[ "$known" -eq 1 ] || usage
@@ -1920,6 +1979,24 @@ derive_params() {
 		DNS_PER_VM=$DNS_PER_VM_BOUND
 	fi
 
+	# The many-pools case's pools need more disk nodes than the one-pool bound
+	# above: every pool puts LEGS sides of each of its two groups on LEGS
+	# guests, so each guest takes LEGS x MANY_POOL_CNT x 2 / DN_VM_CNT sides
+	# on average, one extent each, and each dn agent holds MANY_EXT_PER_DN
+	# extents of its backing file. The count gives the guests a third more
+	# extents than that average, as the draw among the guests is random
+	# (architecture.md, Finding DN candidates), and is never below the bound.
+	# An override is the operator's, as for any case.
+	if [ "$ONLY" = many ]; then
+		MANY_EXT_PER_DN=$(((${BACKING_SIZE%G} << 30) / EXTENT_SIZE - DN_DATA_OFFSET / EXTENT_SIZE))
+		local need=$((LEGS * MANY_POOL_CNT * 2 * 4))
+		local per=$((3 * DN_VM_CNT * MANY_EXT_PER_DN))
+		MANY_DNS_PER_VM=$(((need + per - 1) / per))
+		[ "$MANY_DNS_PER_VM" -ge "$DNS_PER_VM_BOUND" ] ||
+			MANY_DNS_PER_VM=$DNS_PER_VM_BOUND
+		[ -n "$DNS_PER_VM_OPT" ] || DNS_PER_VM=$MANY_DNS_PER_VM
+	fi
+
 	# The cap is a per-kernel sanity limit (E2E3), and it is also what keeps the
 	# DN gRPC block below CN_GRPC_PORT. More VMs is the remedy — but NOT
 	# necessarily one more, and "add --dn guests" on its own would be a hint
@@ -2018,6 +2095,24 @@ derive_params() {
 	SP_ZERO_BYTES=$((LEGS * SLICE_CNT * (EXTENT_SIZE + DATA_ZERO_BYTES)))
 	RUN_SLACK_BYTES=$(((4 << 30) + DN_TOTAL * (16 << 20)))
 	RUN_CAP_BYTES=$((SP_ZERO_BYTES + DN_TOTAL * DN_PAT_BYTES + RUN_SLACK_BYTES))
+	# The many-pools case's twin: what every one of its pools' sides zero,
+	# what its two hosts write into each pool on every leg, whole pool
+	# blocks as dm-thin provisions them, 512 MiB a pool for the logs its
+	# cntlrs and sides add, as every agent logs each object's reads at
+	# debug (a run at 64 pools left about 22 GB of logs on the node guests,
+	# some 340 MB a pool), and the same slack.
+	if [ "$ONLY" = many ]; then
+		local wr=$(((2 * MANY_RANGE + DATA_BLOCK_SIZE - 1) / DATA_BLOCK_SIZE * DATA_BLOCK_SIZE))
+		MANY_RUN_CAP_BYTES=$((MANY_POOL_CNT * (SP_ZERO_BYTES + LEGS * wr + (512 << 20)) + DN_TOTAL * DN_PAT_BYTES + RUN_SLACK_BYTES))
+		# many_cut's waits: while cut, the failovers, each host's ANA and
+		# each host's writes; after the return, the listing, each host's
+		# paths and each host's writes; the sampler also spans each host's
+		# first sample before the cut.
+		local hosts=${#HOST[@]}
+		MANY_CUT_SECS=$((WAIT_REACT + 2 * MANY_POOL_CNT + hosts * (WAIT_BUILD + WAIT_HOST) + 2 * MANY_POOL_CNT + MANY_TIMER_SLACK))
+		MANY_SAMPLER_SECS=$((hosts * WAIT_SHORT + MANY_CUT_SECS + WAIT_BUILD + hosts * (WAIT_BUILD + WAIT_HOST) + 2 * MANY_POOL_CNT + MANY_TIMER_SLACK))
+		lab_disk_guard "$MANY_RUN_CAP_BYTES" "--pool-cnt $MANY_POOL_CNT"
+	fi
 
 	# CreateThinDevice (gateway/thindevice.go): a td's size must be a positive
 	# multiple of slice_cnt x stripe_size, computed from the SP's stored
@@ -5513,6 +5608,88 @@ gcut_read() {
 	return 0
 }
 
+# --- the many-pools case's cut of a whole controller node -------------------
+#
+# net_cut drops every packet this guest sends or receives but the loopback's
+# and ssh's, so its agent answers no check round, its hosts' paths stall
+# with no answer and its connections to the disk nodes stall too, while the
+# driver keeps its shell, and schedules the table's own removal after <secs>
+# seconds through a systemd timer, so that a run killed before its cleanup
+# leaves no cut behind. It prints `cut t=<epoch seconds>`, read on this
+# guest's own clock as the table goes in, which the case holds the other
+# guests' records against. The table is this suite's own (NET_CUT_TABLE),
+# not react's group cut's (CUT_TABLE), so neither cleanup takes the other's.
+# The verbs carry the net_ prefix of net_cut (csi_test.sh): a helper
+# function named after a command, such as cut, would shadow that command in
+# every verb.
+NET_CUT_TABLE=dnv_e2e_cut
+NET_CUT_UNIT=dnv-e2e-cut
+
+net_cut() { # <secs>
+	local nft t
+	nft=$(nft_bin)
+	[ -n "$nft" ] || {
+		echo "net_cut: no nft on this guest" >&2
+		return 1
+	}
+	net_uncut >/dev/null
+	systemd-run --quiet --unit="$NET_CUT_UNIT" --on-active="$1" \
+		"$(command -v "$nft")" delete table inet "$NET_CUT_TABLE" || return 1
+	t=$(date +%s.%N)
+	"$nft" -f - <<NFT || return 1
+table inet $NET_CUT_TABLE {
+	chain input {
+		type filter hook input priority -400; policy drop;
+		iif "lo" accept
+		tcp dport 22 accept
+	}
+	chain output {
+		type filter hook output priority -400; policy drop;
+		oif "lo" accept
+		tcp sport 22 accept
+	}
+}
+NFT
+	echo "cut t=$t"
+	return 0
+}
+
+# net_uncut removes the cut and its timer, and prints `uncut t=<epoch
+# seconds>` as the table goes; a guest with no cut is done.
+net_uncut() {
+	local nft
+	nft=$(nft_bin)
+	if [ -n "$nft" ]; then
+		"$nft" delete table inet "$NET_CUT_TABLE" >/dev/null 2>&1 || true
+	fi
+	echo "uncut t=$(date +%s.%N)"
+	systemctl stop "$NET_CUT_UNIT.timer" >/dev/null 2>&1 || true
+	systemctl reset-failed "$NET_CUT_UNIT.timer" "$NET_CUT_UNIT.service" \
+		>/dev/null 2>&1 || true
+	return 0
+}
+
+# sig_agent_at is sig_pidfile with the time first: `t=<epoch seconds>` on
+# this guest's clock, read just before the signal goes, then sig_pidfile's
+# answer. The many-pools case stops an agent with it and holds the other
+# guests' records against that time.
+sig_agent_at() { # <pidfile> <STOP|CONT>
+	echo "t=$(date +%s.%N)"
+	sig_pidfile "$@"
+}
+
+# net_cut_state prints `cut` while the cut's table stands, `none` otherwise.
+net_cut_state() {
+	local nft
+	nft=$(nft_bin)
+	if [ -n "$nft" ] && "$nft" list table inet "$NET_CUT_TABLE" >/dev/null 2>&1; then
+		echo cut
+	else
+		echo none
+	fi
+	return 0
+}
+
 # clone_dst_dev prints the device number of the destination of this node's
 # one dnv dm-clone, as the dm-clone's table names it. Copy step 7 reads it
 # on a new primary while the dm-clone serves: the worker latches a clone
@@ -5635,6 +5812,7 @@ cn_up() { # <dir> <store> <log> <ip> <grpc_port> <trsvcid> <capacity>
 # still on leaves the verb unfinished.
 cn_cleanup_phase1() {
 	local left
+	net_uncut >/dev/null
 	unthrottle >/dev/null
 	unreject >/dev/null
 	uncut >/dev/null
@@ -5663,6 +5841,10 @@ cn_cleanup_phase1() {
 	left=$(cut_rules)
 	if [ -n "$left" ]; then
 		echo "cn_cleanup_phase1: the react case's group cut is still on: $left" >&2
+		return 1
+	fi
+	if [ "$(net_cut_state)" != none ]; then
+		echo "cn_cleanup_phase1: the many-pools case's cut is still on" >&2
 		return 1
 	fi
 	echo phase1
@@ -5737,6 +5919,8 @@ diag() {
 	reject_rules
 	echo "--- the react case's group cut (empty: none) ---"
 	cut_rules
+	echo "--- the many-pools case's cut ---"
+	net_cut_state
 	echo "--- df -h /var/tmp ---"
 	df -h /var/tmp 2>/dev/null
 	echo "--- space ---"
@@ -7294,6 +7478,345 @@ connect() { # <traddr> <trsvcid> <subnqn> <hostnqn> <hostid> [extra…]
 	return 0
 }
 
+# --- the many-pools case's writers and path sampler, on both hosts ------------
+#
+# One fio per host writes every pool's namespace at once, one job per pool:
+# each job writes its device in order from the host's own offset, 4 KiB at a
+# time with one write in flight, each write direct and synchronous, at a low
+# fixed rate, with fio's verify headers, and logs every completed write in a
+# latency log of its own, stamped with the epoch time of its completion and
+# with its offset. A failed write does not stop the job
+# (continue_on_error=write): fio goes on with the next block, prints nothing
+# for it and leaves it out of the latency log, which logs only the writes
+# that completed (fio 3.41, measured on host0), so a failed write is a block
+# of the job's range before its last completed write that the log does not
+# name, and its block is judged at the verify. fio writes its latency logs
+# only when it exits (measured on host0), so while it runs the jobs are read
+# by their devices' completed writes, the kernel's count in
+# /sys/block/<device>/stat, and the logs once it has stopped. The
+# sampler reads every controller's state and every path's ANA state twice a
+# second into a file, the record of when each namespace turned optimized on
+# the path the case waits for. Everything lives in $MANY_DIR, which
+# host_cleanup's many_stop removes; every pkill pattern names a file there.
+MANY_DIR="$WORK/many"
+
+# many_fio_start <iops> <bytes> <offset> <seed> <uuid…> writes the job file,
+# starts fio on it DETACHED and answers `mfio=started pid=<pid> jobs=<n>` once
+# it runs, after one `job=<i> uuid=<uuid> node=<dev>` line per job; job i is
+# the i-th uuid and its latency log is lat_lat.<i+1>.log, fio counting its
+# jobs from one. <seed> is fio's randseed, from which its verify headers
+# derive, so a range written again under another seed tells each block's
+# writer apart.
+many_fio_start() {
+	local iops=$1 bytes=$2 off=$3 seed=$4 i=0 uuid node pid
+	shift 4
+	many_fio_stop >/dev/null
+	mkdir -p "$MANY_DIR" || return 1
+	: >"$MANY_DIR/jobs"
+	{
+		printf '[global]\nrw=write\nbs=4k\nioengine=psync\niodepth=1\n'
+		printf 'direct=1\nsync=1\nrate_iops=%s\nverify=crc32c\n' "$iops"
+		printf 'do_verify=0\nverify_state_save=0\ncontinue_on_error=write\n'
+		printf 'write_lat_log=%s/lat\nlog_unix_epoch=1\nlog_offset=1\n' \
+			"$MANY_DIR"
+		printf 'thread\noffset=%s\nsize=%s\nrandseed=%s\n' "$off" "$bytes" \
+			"$seed"
+	} >"$MANY_DIR/write.fio"
+	for uuid in "$@"; do
+		node=$(readlink -f "/dev/disk/by-id/nvme-uuid.$uuid" 2>/dev/null) ||
+			node=""
+		if [ -z "$node" ] || [ ! -b "$node" ]; then
+			echo "many_fio_start: nvme-uuid.$uuid names no block device" \
+				"('$node')" >&2
+			return 1
+		fi
+		printf '[mw%s]\nfilename=%s\n' "$i" "$node" >>"$MANY_DIR/write.fio"
+		echo "$i $uuid $node $off" >>"$MANY_DIR/jobs"
+		echo "job=$i uuid=$uuid node=$node"
+		i=$((i + 1))
+	done
+	nohup fio "$MANY_DIR/write.fio" --output-format=json \
+		--output="$MANY_DIR/write.json" </dev/null >/dev/null \
+		2>"$MANY_DIR/write.err" &
+	pid=$!
+	echo "$pid" >"$MANY_DIR/pid"
+	sleep 1
+	if ! kill -0 "$pid" 2>/dev/null; then
+		echo "many_fio_start: fio exited at once:" >&2
+		tail -n 20 "$MANY_DIR/write.err" >&2
+		return 1
+	fi
+	echo "mfio=started pid=$pid jobs=$i"
+	return 0
+}
+
+# many_fio_jobs prints, per job, `job=<i> wios=<writes its device has
+# completed> done=<completed writes> last_ms=<epoch ms of the last
+# completion, or 0> errs=<failed writes before the last completed one>
+# max_off=<offset of the last completed write, or -1>`, the last four from
+# the latency log, so 0 and -1 while fio runs; then `running=yes|no`; then,
+# with <all> given, one `err=<i> <offset> <epoch ms of the completion before
+# it>` line per such failed write.
+many_fio_jobs() { # [all]
+	local i uuid node off log nok last errs maxo pid running=no wios
+	[ -s "$MANY_DIR/jobs" ] || {
+		echo "running=no"
+		return 0
+	}
+	while read -r i uuid node off; do
+		log="$MANY_DIR/lat_lat.$((i + 1)).log"
+		wios=$(awk '{ print $5 }' "/sys/block/${node##*/}/stat" 2>/dev/null)
+		read -r nok last maxo < <(awk -F', *' '
+			{ n++; t = $1; if ($5 + 0 > m) m = $5 + 0 }
+			END { printf "%d %.0f %.0f\n", n, (n ? t : 0), (n ? m : -1) }' \
+			"$log" 2>/dev/null || echo "0 0 -1")
+		errs=$(many_err_offsets "$log" "$off" | grep -c . || true)
+		echo "job=$i wios=${wios:-0} done=${nok:-0} last_ms=${last:-0} errs=${errs:-0} max_off=$maxo"
+		if [ "${1:-}" = all ]; then
+			many_err_offsets "$log" "$off" | sed "s/^/err=$i /"
+		fi
+	done <"$MANY_DIR/jobs"
+	pid=$(cat "$MANY_DIR/pid" 2>/dev/null) || pid=""
+	case "$pid" in
+	'' | *[!0-9]*) ;;
+	*) kill -0 "$pid" 2>/dev/null && running=yes ;;
+	esac
+	echo "running=$running"
+	return 0
+}
+
+# many_err_offsets <latency log> <offset> prints, for each failed write of a
+# job that writes in order from <offset>, each 4 KiB block from there to its
+# last completed write that the log does not name, `<offset> <epoch ms of
+# the completion before it, or 0> <its place, 1 for the first, in the run of
+# failed writes after that completion>`: one write in flight at a fixed rate,
+# so the failed write was sent about that many write intervals after that
+# completion.
+many_err_offsets() { # <latency log> <offset>
+	awk -F', *' -v base="$2" '
+		{ t[$5 + 0] = $1; if ($5 + 0 > m) m = $5 + 0; n++ }
+		END {
+			if (!n) exit
+			p = 0
+			for (o = base + 0; o < m; o += 4096) {
+				if (o in t) { p = t[o]; j = 0 }
+				else printf "%.0f %.0f %d\n", o, p, ++j
+			}
+		}' "$1" 2>/dev/null
+	return 0
+}
+
+# many_lat_max <from ms> <to ms> prints, per job, `lat=<i> <the longest
+# latency in ms of a write completed between the two epoch times> <the
+# writes completed then>`. fio's latency log holds nanoseconds.
+many_lat_max() { # <from ms> <to ms>
+	local i uuid node off
+	while read -r i uuid node off; do
+		awk -F', *' -v a="$1" -v b="$2" -v i="$i" '
+			$1 + 0 >= a + 0 && $1 + 0 <= b + 0 {
+				n++; if ($2 + 0 > m) m = $2 + 0
+			}
+			END { printf "lat=%s %d %d\n", i, m / 1000000, n }' \
+			"$MANY_DIR/lat_lat.$((i + 1)).log" 2>/dev/null ||
+			echo "lat=$i 0 0"
+	done <"$MANY_DIR/jobs"
+	return 0
+}
+
+# many_fio_stop ends the writers with SIGINT, which fio answers by ending
+# every job after its write in flight, waits up to <secs> for it to exit and
+# answers `mfio=stopped|stuck|absent`. A write that waits in the kernel holds
+# fio until its device answers (E2E7), so `stuck` is a finding, not an error
+# of the verb.
+many_fio_stop() { # [secs]
+	local pid n=0 secs=${1:-60}
+	if [ ! -d "$MANY_DIR" ] || [ ! -e "$MANY_DIR/pid" ]; then
+		echo "mfio=absent"
+		return 0
+	fi
+	pid=$(cat "$MANY_DIR/pid" 2>/dev/null) || pid=""
+	case "$pid" in
+	'' | *[!0-9]*)
+		echo "mfio=absent"
+		return 0
+		;;
+	esac
+	kill -INT "$pid" 2>/dev/null
+	while kill -0 "$pid" 2>/dev/null && [ "$n" -lt "$((secs * 2))" ]; do
+		sleep 0.5
+		n=$((n + 1))
+	done
+	if kill -0 "$pid" 2>/dev/null; then
+		echo "mfio=stuck"
+	else
+		echo "mfio=stopped"
+	fi
+	return 0
+}
+
+# many_fio_verify <offset> <seed> <i:bytes…> reads back, with fio's verify and in
+# the foreground, the first <bytes> from <offset> of the device of each job
+# <i> the last many_fio_start named, through whatever path the host holds
+# now. The job file is the writers' own, with verify_only and each job's
+# size, so fio rebuilds the same header for every block, and it goes on past
+# a block that fails (continue_on_error=verify). verify_header_seed holds
+# each block's header to the seed of the write that wrote it, which
+# verify_only leaves unchecked unless told (fio 3.41, measured on host0),
+# so a block that holds an older write under another seed fails too. It
+# answers
+# `vrc=<fio's exit code>`, one `vread=<i> <bytes read>` line per job and one
+# `vfail=<i> <offset>` line per block whose header or checksum failed.
+many_fio_verify() { # <offset> <seed> <i:bytes…>
+	local off=$1 seed=$2 spec i bytes node rc=0 j uuid n
+	shift 2
+	[ -s "$MANY_DIR/jobs" ] || {
+		echo "many_fio_verify: no writer ran" >&2
+		return 1
+	}
+	{
+		printf '[global]\nrw=write\nbs=4k\nioengine=psync\niodepth=1\n'
+		printf 'direct=1\nverify=crc32c\nverify_only=1\nverify_header_seed=1\n'
+		printf 'continue_on_error=verify\nthread\noffset=%s\nrandseed=%s\n' \
+			"$off" "$seed"
+	} >"$MANY_DIR/verify.fio"
+	for spec in "$@"; do
+		i=${spec%%:*}
+		bytes=${spec#*:}
+		node=$(awk -v i="$i" '$1 == i { print $3 }' "$MANY_DIR/jobs")
+		[ -n "$node" ] || {
+			echo "many_fio_verify: no job $i" >&2
+			return 1
+		}
+		printf '[mw%s]\nfilename=%s\nsize=%s\n' "$i" "$node" "$bytes" \
+			>>"$MANY_DIR/verify.fio"
+	done
+	fio "$MANY_DIR/verify.fio" --output-format=json \
+		--output="$MANY_DIR/verify.json" </dev/null >/dev/null \
+		2>"$MANY_DIR/verify.err" || rc=$?
+	echo "vrc=$rc"
+	awk '/"jobname"/ { gsub(/[",]/, ""); name = $3; sub(/^mw/, "", name) }
+		/"read"[[:space:]]*:/ { r = 1 }
+		r && /"io_bytes"/ { gsub(/[^0-9]/, ""); print "vread=" name " " $0; r = 0 }' \
+		"$MANY_DIR/verify.json" 2>/dev/null
+	while read -r j uuid node n; do
+		awk -v node="$node" -v j="$j" '
+			index($0, "at file " node " offset ") {
+				o = $0; sub(/.* offset /, "", o); sub(/[^0-9].*/, "", o)
+				print "vfail=" j " " o
+			}' "$MANY_DIR/verify.err" 2>/dev/null
+	done <"$MANY_DIR/jobs"
+	n=$(grep -c . "$MANY_DIR/verify.err" 2>/dev/null || true)
+	[ "${n:-0}" -eq 0 ] || tail -n 5 "$MANY_DIR/verify.err" >&2
+	return 0
+}
+
+# many_devs <present|absent> <uuid…> prints each uuid whose link
+# /dev/disk/by-id/nvme-uuid.<uuid> is not as asked, one a line, and nothing
+# when every one is: one call for all of the case's namespaces.
+many_devs() { # <present|absent> <uuid…>
+	local want=$1 u
+	shift
+	for u in "$@"; do
+		if [ -e "/dev/disk/by-id/nvme-uuid.$u" ]; then
+			[ "$want" = present ] || echo "$u"
+		else
+			[ "$want" = absent ] || echo "$u"
+		fi
+	done
+	return 0
+}
+
+# many_paths prints this host's view of every controller of a subsystem of
+# this suite: `ctrl=<nvmeX> nqn=<nqn> traddr=<addr> trsvcid=<svc>
+# state=<state>`, and under it one `path=<nvmeX> <path device> uuid=<uuid>
+# ana=<state>` line per namespace path.
+many_paths() {
+	local c nqn addr a svc p
+	for c in /sys/class/nvme/nvme*; do
+		[ -e "$c/subsysnqn" ] || continue
+		nqn=$(cat "$c/subsysnqn" 2>/dev/null) || continue
+		case "$nqn" in
+		"$NQN_IT"*) ;;
+		*) continue ;;
+		esac
+		addr=$(cat "$c/address" 2>/dev/null | tr ',' ' ') || addr=""
+		a="" svc=""
+		for p in $addr; do
+			case "$p" in
+			traddr=*) a=${p#traddr=} ;;
+			trsvcid=*) svc=${p#trsvcid=} ;;
+			esac
+		done
+		echo "ctrl=${c##*/} nqn=$nqn traddr=$a trsvcid=$svc state=$(cat "$c/state" 2>/dev/null)"
+		for p in "$c"/nvme*c*n*; do
+			[ -e "$p/ana_state" ] || continue
+			echo "path=${c##*/} ${p##*/} uuid=$(cat "$p/uuid" 2>/dev/null) ana=$(cat "$p/ana_state" 2>/dev/null)"
+		done
+	done
+	return 0
+}
+
+# many_sampler_start <tag> <secs> starts the sampler DETACHED into
+# $MANY_DIR/ana-<tag>.log; it stops on many_sampler_stop or by itself after
+# <secs>. Each sample is a `T <epoch seconds>` line and then one
+# `<file>:<value>` line per controller state and per path ANA state.
+many_sampler_start() { # <tag> <secs>
+	local pid
+	many_sampler_stop >/dev/null
+	mkdir -p "$MANY_DIR" || return 1
+	rm -f "$MANY_DIR/sampler.stop"
+	nohup bash "$0" many_sampler_run "$MANY_DIR/ana-$1.log" "$2" \
+		</dev/null >/dev/null 2>>"$MANY_DIR/sampler.err" &
+	pid=$!
+	echo "$pid" >"$MANY_DIR/sampler.pid"
+	echo "sampler=started pid=$pid"
+	return 0
+}
+
+many_sampler_run() { # <file> <secs>
+	local end=$((SECONDS + $2))
+	while [ ! -e "$MANY_DIR/sampler.stop" ] && [ "$SECONDS" -lt "$end" ]; do
+		echo "T $(date +%s.%N)"
+		grep -sH . /sys/class/nvme/nvme*/state \
+			/sys/class/nvme/nvme*/nvme*c*n*/ana_state
+		sleep 0.5
+	done >>"$1"
+	return 0
+}
+
+many_sampler_stop() {
+	local pid
+	[ -d "$MANY_DIR" ] || {
+		echo "sampler=absent"
+		return 0
+	}
+	touch "$MANY_DIR/sampler.stop"
+	pid=$(cat "$MANY_DIR/sampler.pid" 2>/dev/null) || pid=""
+	case "$pid" in
+	'' | *[!0-9]*) ;;
+	*) kill "$pid" 2>/dev/null ;;
+	esac
+	pkill -f "[m]any_sampler_run $MANY_DIR/" >/dev/null 2>&1
+	echo "sampler=stopped"
+	return 0
+}
+
+# many_stop is host_cleanup's: the writers and the sampler killed, whoever
+# started them, and $MANY_DIR removed: `many=stopped|absent`. A fio in D
+# state stays until its device answers (E2E7); the kill is sent all the
+# same.
+many_stop() {
+	pkill -9 -f "[f]io $MANY_DIR/" >/dev/null 2>&1
+	pkill -9 -f "[m]any_sampler_run $MANY_DIR/" >/dev/null 2>&1
+	if [ -d "$MANY_DIR" ]; then
+		rm -rf "$MANY_DIR"
+		echo "many=stopped"
+	else
+		echo "many=absent"
+	fi
+	return 0
+}
+
 # host_cleanup is a holder-first sweep of its own. The write loop (the cutoff
 # case's, or the react case's migrating-leg step's), the cutoff case's fence
 # writer, a fio stamp, the stamped writer and the writer to new blocks go
@@ -7318,6 +7841,7 @@ host_cleanup() { # [cdc traddr]
 	swrite_kill >/dev/null
 	fsync_kill >/dev/null
 	trim_umount >/dev/null
+	many_stop >/dev/null
 	stas=$(stas_restore)
 	wipe "${1:-}" >/dev/null
 	unmask >/dev/null
@@ -8314,6 +8838,9 @@ DN_COPY_TOOLS="tc ip"
 # The cleanup's unreject needs it only where the rule can be, and a node
 # without nft cannot carry it.
 CN_REACT_TOOLS="nft"
+# nft and systemd-run: the many-pools case's cut of a controller node
+# (net_cut), whose table a systemd timer removes should the run stop first.
+CN_MANY_TOOLS="nft systemd-run"
 # nft on a DN: the react case's silencing rule (silence_port), which
 # preflight_node asks of a DN only when that case runs with md-raid1 and more
 # DN VMs than legs, where its migrating-leg step runs (react_migr_cut), as it
@@ -8346,6 +8873,11 @@ HOST_WLOOP_TOOLS="nohup readlink"
 # The cutoff case's fence writer on host1 (stage 10): fio writes and verifies,
 # cmp reads the range after the first failed write.
 HOST_FENCE_TOOLS="fio cmp nohup pkill"
+# The many-pools case's writers and path sampler on both hosts
+# (many_fio_start, many_sampler_start): fio writes and verifies, readlink
+# finds each namespace's device, nohup detaches both and pkill is
+# many_stop's.
+HOST_MANY_TOOLS="fio readlink nohup pkill"
 # The copy case's stamps on host0 (stamp_write, stamp_verify): fio writes and
 # verifies them, cmp reads the clone's unwritten part as zeros, readlink
 # finds the device of a namespace's uuid link, and pkill is stamp_stop's.
@@ -8681,6 +9213,9 @@ preflight_node() { # <role: dn|cn> <index>
 		if run_has_case react && [ "$REDUND" = raid1 ]; then
 			want_tools="$want_tools $CN_REACT_TOOLS"
 		fi
+		if run_has_case many; then
+			want_tools="$want_tools $CN_MANY_TOOLS"
+		fi
 	fi
 
 	ssh_to "$target" "sudo -n true" >/dev/null ||
@@ -8911,6 +9446,16 @@ preflight_host() { # <h>
 			die "$label: listing the fence writer's tools failed"
 		[ -z "$missing" ] ||
 			die "$label: missing tool(s) for the cutoff case's fence writer:" \
+				"$(printf '%s' "$missing" | tr '\n' ' ')"
+	fi
+
+	# The many-pools case's writers and path sampler run on both hosts.
+	# Never installed by this suite either.
+	if run_has_case many; then
+		missing=$(ssh_host "$h" "$(tools_cmd $HOST_MANY_TOOLS)") ||
+			die "$label: listing the many-pools case's tools failed"
+		[ -z "$missing" ] ||
+			die "$label: missing tool(s) for the many-pools case's writers:" \
 				"$(printf '%s' "$missing" | tr '\n' ' ')"
 	fi
 
@@ -11270,11 +11815,13 @@ sp_thresholds() { # <case name>
 		THR_LEG=$THR_REACT_LEG
 		THR=$THR_REACT
 		;;
-	cutoff)
+	cutoff | many)
 		# Its primary threshold is read_constants', which preflight_driver
-		# runs before any sp is built.
+		# runs before any sp is built. The many-pools case takes the cutoff
+		# set for the cutoff case's reason: its cuts must fail every pool
+		# over within seconds, and nothing else may react meanwhile.
 		[ -n "$THR_CUT_PRIMARY" ] ||
-			die "sp_thresholds cutoff before read_constants: the cutoff" \
+			die "sp_thresholds $1 before read_constants: the cutoff" \
 				"set's primary threshold is not known yet"
 		THR_SET=cutoff
 		THR_PRIMARY=$THR_CUT_PRIMARY
@@ -11320,6 +11867,16 @@ sp_shape() { # <case name>
 			log "  react builds $REACT_SLICE_CNT slices, its cap" \
 				"REACT_SLICE_CAP, not the run's $RUN_SLICE_CNT"
 		fi
+		;;
+	many)
+		# The run's shape, one slice for this case (parse_args), and the
+		# case's own run cap, which counts every pool's sides
+		# (derive_params).
+		SLICE_CNT=$RUN_SLICE_CNT
+		GRP_CNT=$RUN_GRP_CNT
+		SP_ZERO_BYTES=$RUN_SP_ZERO_BYTES
+		RUN_CAP_BYTES=$MANY_RUN_CAP_BYTES
+		TD_UNIT=$RUN_TD_UNIT
 		;;
 	*)
 		SLICE_CNT=$RUN_SLICE_CNT
@@ -12791,7 +13348,7 @@ read_space() { # <helper wrapper> <index|""> <label>
 # reported and counted but not asserted against a floor of their own.
 case_space_guard() {
 	stage 92 "space guard (E2E5): the per-file and whole-run allocation caps"
-	local total=0 v k paths out bytes path worst
+	local total=0 v k paths out bytes path worst cap sides many_cap
 
 	for v in "${!DN[@]}"; do
 		paths=""
@@ -12812,11 +13369,24 @@ case_space_guard() {
 					"not a file that costs nothing"
 				;;
 			esac
-			assert_le "$bytes" "$DN_CAP_BYTES" \
+			cap=$DN_CAP_BYTES
+			# The many-pools case's disk nodes each carry the sides of many
+			# pools, every side one extent its disk node may zero whole and
+			# that holds all a host writes into it, so each file's cap is its
+			# own: an extent for each side its disk node carried at the case's
+			# widest, the backing pattern and 16 MiB of metadata.
+			if [ "$CASE" = many ]; then
+				k=${path#"$WORK"/dn}
+				k=${k%%/*}
+				sides=${MANY_DN_SIDES[$(dn_addr "$v" "$k")]:-0}
+				many_cap=$((sides * EXTENT_SIZE + DN_PAT_BYTES + (16 << 20)))
+				[ "$many_cap" -le "$cap" ] || cap=$many_cap
+			fi
+			assert_le "$bytes" "$cap" \
 				"dn$v: allocated bytes of $path (what its DN zeroed and had written through its sides, the backing pattern and metadata)"
 			[ "$bytes" -le "$worst" ] || worst=$bytes
 		done < <(printf '%s\n' "$out")
-		log "  dn$v: largest backing file allocates $worst bytes (cap $DN_CAP_BYTES)"
+		log "  dn$v: largest backing file allocates $worst bytes (cap $DN_CAP_BYTES, or its own in the many-pools case)"
 	done
 
 	for v in "${!DN[@]}"; do
@@ -21368,9 +21938,32 @@ react_pool_grew() { # <cntlr id> <slice id> <old total>
 	[ "$total" -gt "$3" ]
 }
 
+# lab_disk_guard <cap bytes> <what> dies when a run's cap would leave less
+# than MANY_DISK_MARGIN free where the driver keeps the guests' disk images,
+# since every byte the guests allocate grows those files; a driver whose
+# guests' images live elsewhere has no such directory, and the guard says
+# so and passes.
+lab_disk_guard() { # <cap bytes> <what>
+	local avail
+	if [ ! -d "$MANY_IMAGE_DIR" ]; then
+		echo "  lab disk guard: no $MANY_IMAGE_DIR on this driver, the guests' images are elsewhere; not checked" >&2
+		return 0
+	fi
+	avail=$(df -B1 --output=avail "$MANY_IMAGE_DIR" 2>/dev/null | tail -n 1 | tr -d ' ')
+	case "$avail" in
+	'' | *[!0-9]*) die "lab disk guard: df of $MANY_IMAGE_DIR read '$avail'" ;;
+	esac
+	[ "$1" -le $((avail - MANY_DISK_MARGIN)) ] ||
+		die "$2: its run cap of $1 bytes would leave less than $MANY_DISK_MARGIN bytes" \
+			"free under $MANY_IMAGE_DIR, which holds $avail bytes free now (the guests'" \
+			"disk images grow by what they allocate)"
+}
+
 # worker_failover_cnt prints how many failovers the worker has applied so far:
 # the `reaction applied` records with kind failover in its log (dnv-worker.md,
-# Log records). Every case has one sp, so the count is that sp's. A log that
+# Log records), of every sp: its callers, the copy and react cases, hold its
+# change across a window to none and to one, so a failover of any pool counts
+# toward it. A log that
 # cannot be read is fatal rather than a zero: a zero read at both ends would
 # pass the caller's unchanged-count assertion without having read the log (and
 # by react's stage 05 the count is not zero: stage 03's AR5 failover is
@@ -29477,6 +30070,1080 @@ case_cutoff() {
 }
 
 # ---------------------------------------------------------------------------
+# The many-pools case (e2e_integtest.md, The cases, many), an opt-in case
+# ---------------------------------------------------------------------------
+#
+# Under the CSI driver every volume is a pool of its own, so a controller node
+# of a cluster with many volumes holds many primaries, and its loss fails all
+# of them over at once. This case builds MANY_POOL_CNT one-slice RAID1 pools
+# over the three controller nodes, setup's pool as the first, each with two
+# cntlrs, a thin device and a namespace both hosts reach through the cdc;
+# puts a low write load from both hosts on every pool; and cuts the
+# controller node that holds the most primaries twice, first by dropping
+# every packet of its guest but the driver's ssh, then, once it is back, by
+# stopping its cn agent. Per pool it records the time from the cut to the
+# fence, to the failover and to each host's path turning optimized, the
+# longest write each host saw and the failovers the worker logged, from the
+# records of the guests and not from the driver's polls, which at many pools
+# take seconds a sweep. Each cut picks the node again: the first moves every
+# primary off the node it cuts.
+#
+# The pools are built under the cutoff set: a failover within seconds of the
+# cut, and nothing else (sp_thresholds).
+
+# The pool count, setup's pool included: --pool-cnt, MANY_POOL_CNT_DEFAULT
+# when it is not given. MANY_POOL_CNT_MAX is a choice of this suite, twice
+# the most pools a run of the case has measured, which keeps its cntlrs far
+# below the controller nodes' cntlr ceiling (common.MaxCntlrCntPerCn) on
+# three of them.
+MANY_POOL_CNT_DEFAULT=8
+MANY_POOL_CNT_MAX=128
+MANY_POOL_CNT=""
+
+# The writers (many_fio_start): each host writes each pool's thin device in
+# order, one 4 KiB write a second, over its own range of MANY_RANGE bytes,
+# which lasts MANY_WRITE_SECS, longer than any run of the case; host1's range
+# follows host0's. The thin device holds both ranges whole, and so the pool's
+# data group stays under its low water mark, as setup's pool stays with its
+# baseline too: no grow runs while the case measures.
+MANY_IOPS=1
+MANY_WRITE_SECS=2400
+MANY_RANGE=$((MANY_IOPS * MANY_WRITE_SECS * 4096))
+MANY_TD=mt
+MANY_TD_SIZE=$((20 << 20))
+
+# The seconds from a packet cut to each moved pool's namespace optimized on
+# both hosts that the case asserts (many_judge): the largest the runs
+# measured at MANY_POOL_CNT_MAX / 2 pools and fewer, with room for a slower
+# lab (e2e_integtest.md, Known limits).
+MANY_ANA_BOUND=60
+
+# The cut's own removal, should the run stop before it takes the cut off
+# (net_cut), and the samplers' own stop: derive_params sets each to the sum
+# of the bounds of every wait it spans (many_cut), a call per pool for the
+# role reads between them and MANY_TIMER_SLACK, so neither ends inside the
+# window it times.
+MANY_CUT_SECS=0
+MANY_SAMPLER_SECS=0
+MANY_TIMER_SLACK=300
+
+# The laptop's room for a run (lab safety): a pool count whose run cap
+# leaves less than MANY_DISK_MARGIN free on the file system of
+# MANY_IMAGE_DIR on the driver, where this lab's guests keep their disk
+# images, is refused before anything starts.
+MANY_IMAGE_DIR=/var/lib/libvirt/images
+MANY_DISK_MARGIN=$((20 << 30))
+
+# The namespaces' uuids: MANY_UUID_BASE and the pool's index as four hex
+# digits, so a host finds each by its uuid link (UUID1's comment).
+MANY_UUID_BASE=2b6f0cc9-04d2-4f1a-9c3e-1d0a5e7d
+
+# The guest records' times as epoch seconds: the log records' `time`, an
+# RFC 3339 time with a fraction and a zone, in jq.
+MANY_EPOCH_JQ='def epoch: capture("^(?<d>[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2})(?<f>\\.[0-9]+)?(?<z>Z|[+-][0-9]{2}:[0-9]{2})$")
+	| ((.d + "Z") | fromdateiso8601) + ((.f // ".0") | ("0" + .) | tonumber)
+	- (if .z == "Z" then 0 else ((.z[1:3] | tonumber) * 3600
+	   + (.z[4:6] | tonumber) * 60) * (if .z[0:1] == "-" then -1 else 1 end) end);'
+
+# Per pool i, 0 for setup's: its name, ids, subsystem, namespace index and
+# uuid, and the roles many_read_roles last read.
+MANY_NAME=()
+MANY_SPID=()
+MANY_SS=()
+MANY_SSID=()
+MANY_NSIDX=()
+MANY_NSID=()
+MANY_UUID=()
+MANY_PRIM=()
+MANY_PRIM_CN=()
+MANY_PRIM_ADDR=()
+MANY_STBY=()
+MANY_STBY_CN=()
+MANY_STBY_ADDR=()
+# The controller node a cut is on, while it is on, for on_exit, which takes a
+# cut off a failed run (E2E6); -1 when none is.
+MANY_CUT_CN=-1
+# The sides each disk node carries at the case's widest, by its address,
+# which the space guard sizes each backing file's cap by.
+declare -A MANY_DN_SIDES=()
+# What the two cuts recorded, one line per pool each, for the verdict.
+MANY_ROWS=()
+
+# many_in runs <cmd…> on pool <i>: dnvctl's --sp and every helper that
+# reads $SP name it while the command runs, as bash gives the callee the
+# caller's locals.
+many_in() { # <i> <cmd…>
+	local SP=${MANY_NAME[$1]}
+	shift
+	"$@"
+}
+
+# many_read_roles reads pool <i>'s roles into the MANY_* arrays. It leaves
+# SP_JSON and the CNTLR_* arrays at that pool's, so its callers read the
+# roles of setup's pool again before the shared ending.
+many_read_roles() { # <i>
+	local i=$1
+	many_in "$i" sp_refresh
+	many_in "$i" sp_read_roles
+	MANY_PRIM[i]=$PRIMARY_CNTLR_ID
+	MANY_PRIM_CN[i]=$PRIMARY_CN
+	MANY_PRIM_ADDR[i]=$PRIMARY_TRADDR
+	MANY_STBY[i]=$STANDBY_CNTLR_ID
+	MANY_STBY_CN[i]=$STANDBY_CN
+	MANY_STBY_ADDR[i]=$STANDBY_TRADDR
+}
+
+# many_back_to_setup reads setup's pool's roles back into SP_JSON and the
+# CNTLR_* arrays, which the shared ending reads.
+many_back_to_setup() {
+	sp_refresh
+	sp_read_roles
+}
+
+# many_most_primaries prints the controller node that holds the most
+# primaries of the case's pools, by the roles many_read_roles read, the
+# lowest index among equals.
+many_most_primaries() {
+	local i v best=0 cnt=""
+	local -a n=()
+	for v in "${!CN[@]}"; do n[v]=0; done
+	for i in "${!MANY_NAME[@]}"; do
+		v=${MANY_PRIM_CN[$i]}
+		n[v]=$((n[v] + 1))
+	done
+	for v in "${!CN[@]}"; do
+		[ "${n[$v]}" -le "${n[$best]}" ] || best=$v
+	done
+	for v in "${!CN[@]}"; do
+		cnt="$cnt cn$v:${n[$v]}"
+	done
+	log "  primaries per controller node:$cnt"
+	echo "$best"
+}
+
+# --- step 0: setup's pool, the first of the case's ---------------------------
+many_snapshot() {
+	stage 00 "setup's pool $SP, the first of $MANY_POOL_CNT: a settled primary, both cntlrs listed"
+	local ci
+
+	assert_eq "$CNTLR_CNT" 2 \
+		"this case is written for a cntlr_cnt of 2 (one standby to elect)"
+	assert_eq "$SLICE_CNT" 1 "this case builds one-slice pools"
+	ctl_ok cluster get --name "$CLUSTER"
+	ci=$(jq_of "$CTL_OUT" '.cluster_conf.health_check_conf.cntlr_interval')
+	assert_eq "$ci" "$DEFAULT_HC_INTERVAL" \
+		"the cluster's cntlr_interval: created without one, it stores common.DefaultHealthCheckInterval"
+	sp_refresh
+	sp_read_roles
+	CNTLR_FIELD_LAST=""
+	wait_until "$WAIT_PROVISION" \
+		"the primary cntlr $PRIMARY_CNTLR_ID of $SP to be settled" \
+		cntlr_field_is "$PRIMARY_CNTLR_ID" settling false
+	wait_all_listed "$WAIT_PROVISION" \
+		"both cntlrs of $SP to be in its discovery records"
+	MANY_NAME=("$SP")
+	MANY_SPID=("$SP_ID")
+	MANY_SS=("$SS0")
+	MANY_SSID=("$SS0_ID")
+	MANY_NSIDX=(2)
+	MANY_NSID=("")
+	MANY_UUID=("$MANY_UUID_BASE$(printf '%04x' 0)")
+	MANY_DN_SIDES=()
+	MANY_ROWS=()
+	log "  $MANY_POOL_CNT pools: $SP and $((MANY_POOL_CNT - 1)) more, each" \
+		"one slice, $REDUND, $CNTLR_CNT cntlrs, the $THR_SET set"
+}
+
+# --- step 1: the other pools, and every pool's thin device and namespace -----
+#
+# Every pool is created before any is waited for, so their builds overlap as
+# a cluster's volumes made in a burst do. Setup's pool keeps its subsystem and
+# its namespace 1; its writer's namespace is its index 2. Every other pool has
+# a subsystem of its own with both hosts allowed and the writer's namespace
+# as its index 1.
+many_create() {
+	stage 01 "sp create of $((MANY_POOL_CNT - 1)) more pools, then a thin device and a namespace on each"
+	local i id
+	MANY_T_CREATE=$SECONDS
+	MANY_T_CREATE_EPOCH=$(date +%s.%N)
+	for ((i = 1; i < MANY_POOL_CNT; i++)); do
+		MANY_NAME[i]="mp$i"
+		MANY_SS[i]="$NQN_IT:mss$i"
+		MANY_NSIDX[i]=1
+		MANY_UUID[i]="$MANY_UUID_BASE$(printf '%04x' "$i")"
+		# $THR unquoted, as setup_create_sp says why.
+		# shellcheck disable=SC2086
+		many_in "$i" ctl_timeout 180 ctl_ok sp create \
+			--cntlr-cnt "$CNTLR_CNT" --slice-cnt 1 \
+			--init-ext-cnt "$INIT_EXT_CNT" --slots "$SLOTS" \
+			--redund "$REDUND" $THR
+		id=$(jq_of "$CTL_OUT" '.sp_id')
+		case "$id" in
+		'' | *[!0-9]*) die "sp create of ${MANY_NAME[$i]} returned sp_id '$id'" ;;
+		esac
+		MANY_SPID[i]=$id
+	done
+	for i in "${!MANY_NAME[@]}"; do
+		many_in "$i" ctl_ok td create --name "$MANY_TD" --size "$MANY_TD_SIZE"
+		if [ "$i" -gt 0 ]; then
+			many_in "$i" ctl_ok ss create --nqn "${MANY_SS[$i]}"
+			id=$(jq_of "$CTL_OUT" '.ss_id')
+			case "$id" in
+			'' | *[!0-9]*) die "ss create of ${MANY_SS[$i]} returned ss_id '$id'" ;;
+			esac
+			MANY_SSID[i]=$id
+			many_in "$i" ctl_ok ss set-hosts --nqn "${MANY_SS[$i]}" \
+				--hosts "${HOST_NQN[0]},${HOST_NQN[1]}"
+		fi
+		many_in "$i" ctl_ok ns create --nqn "${MANY_SS[$i]}" \
+			--idx "${MANY_NSIDX[$i]}" --td "$MANY_TD" --uuid "${MANY_UUID[$i]}"
+		id=$(jq_of "$CTL_OUT" '.ns_id')
+		case "$id" in
+		'' | *[!0-9]*) die "ns create on ${MANY_SS[$i]} returned ns_id '$id'" ;;
+		esac
+		MANY_NSID[i]=$id
+	done
+	log "  $MANY_POOL_CNT pools, thin devices and namespaces created in" \
+		"$((SECONDS - MANY_T_CREATE))s"
+}
+
+# --- step 2: every pool built and exported, both cntlrs listed ---------------
+#
+# Pool by pool, as the setup of one pool waits: every side provisioned, the
+# thin device created, the primary settled, both cntlrs listed and the
+# namespace exported by both. The pools build at once, so each wait after
+# the slowest one passes at its first poll; the time is the case's build
+# time for its pools.
+many_wait_built() {
+	stage 02 "wait: every one of the $MANY_POOL_CNT pools built, its primary settled, both cntlrs listed and its namespace exported by both"
+	local i a
+	for i in "${!MANY_NAME[@]}"; do
+		SIDES_LEFT=-1
+		many_in "$i" wait_until "$WAIT_BUILD" \
+			"every side of ${MANY_NAME[$i]} to be provisioned" \
+			sp_sides_provisioned
+		many_in "$i" wait_until "$WAIT_BUILD" \
+			"$MANY_TD of ${MANY_NAME[$i]} to report created" \
+			td_created "$MANY_TD"
+		many_read_roles "$i"
+		CNTLR_FIELD_LAST=""
+		many_in "$i" wait_until "$WAIT_BUILD" \
+			"the primary cntlr ${MANY_PRIM[$i]} of ${MANY_NAME[$i]} to be settled" \
+			cntlr_field_is "${MANY_PRIM[$i]}" settling false
+		many_in "$i" wait_all_listed "$WAIT_PROVISION" \
+			"both cntlrs of ${MANY_NAME[$i]} to be in its discovery records"
+		many_in "$i" wait_ns_exported_all "${MANY_SS[$i]}" "${MANY_SSID[$i]}" \
+			"${MANY_NSID[$i]}"
+		many_read_roles "$i"
+		# The disk nodes this pool's sides are on, for the space guard.
+		for a in $(jq_of "$SP_JSON" "[$SP_SIDE_PATH | .addr_port] | .[]"); do
+			MANY_DN_SIDES[$a]=$((${MANY_DN_SIDES[$a]:-0} + 1))
+		done
+	done
+	MANY_T_BUILT=$SECONDS
+	log "  every pool built and exported $((MANY_T_BUILT - MANY_T_CREATE))s" \
+		"after the first create"
+	# The sizes the introduction's table reports: the most sides one disk
+	# node carries, and the cntlrs and primaries of each controller node.
+	log "  the most sides on one disk node: $(printf '%s\n' "${MANY_DN_SIDES[@]}" |
+		sort -n | tail -n 1), on ${#MANY_DN_SIDES[@]} disk nodes"
+	for a in "${!CN[@]}"; do
+		log "  cn$a holds $(for i in "${!MANY_NAME[@]}"; do
+			[ "${MANY_PRIM_CN[$i]}" != "$a" ] || echo p
+			[ "${MANY_STBY_CN[$i]}" != "$a" ] || echo s
+		done | sort | uniq -c | awk '{ printf "%s %s ", $1, ($2 == "p") ? "primaries" : "standbys" }')"
+	done
+	log "  failovers while the pools built: $(worker_failover_cnt)"
+	many_round_report "while the pools built" "$MANY_T_CREATE_EPOCH"
+	many_back_to_setup
+}
+
+# many_round_report logs what the worker's check rounds showed from <epoch>
+# on: integtest/round_counts.sh over the worker's round records, and each
+# failover record with its pool and cntlrs. It judges nothing; the case
+# reads it where a reaction came without a fault.
+many_round_report() { # <what> <epoch>
+	local tmp out
+	tmp=$(mktemp) || die "mktemp on the driver failed"
+	if ! ssh_cp "grep -hF -e '\"msg\":\"check round failed\"' \
+		-e '\"msg\":\"check stream open failed\"' \
+		-e '\"msg\":\"check stream send failed\"' \
+		-e '\"msg\":\"health changed\"' \
+		-e '\"msg\":\"late observation\"' \
+		$WORK/worker/worker.log || [ \$? -eq 1 ]" |
+		"$JQ" -R -c "$MANY_EPOCH_JQ"' fromjson? // empty
+			| select((.time | epoch) >= '"$2"')' >"$tmp"; then
+		rm -f "$tmp"
+		die "reading the worker's round records failed"
+	fi
+	log "  the worker's check rounds $1 (integtest/round_counts.sh):"
+	bash "$REPO_ROOT/integtest/round_counts.sh" "$tmp" 2>&1 |
+		grep -v '^  /' | sed 's/^/    /' >&2 || true
+	rm -f "$tmp"
+	out=$(ssh_cp "grep -F '\"msg\":\"reaction applied\"' $WORK/worker/worker.log || [ \$? -eq 1 ]") ||
+		die "reading the worker's reaction records failed"
+	printf '%s\n' "$out" | "$JQ" -R -r "$MANY_EPOCH_JQ"' fromjson? // empty
+		| (.time | epoch) as $t | select($t >= '"$2"')
+		| "    \(.kind) of sp \(.sp_id) at +\($t - '"$2"' | floor)s: cntlr \(.old_cntlr_id // "-") to \(.new_cntlr_id // "-")"' >&2
+}
+
+# many_host_cost prints what host <h> holds now: its available memory and
+# its TCP sockets, the cost of its controllers.
+many_host_cost() { # <h>
+	ssh_host "$1" "awk '/^MemAvailable/ { print \"mem_avail_kib=\" \$2 }' /proc/meminfo; ss -t -a -n | grep -c ESTAB | sed 's/^/tcp_estab=/'" |
+		tr '\n' ' '
+}
+
+# many_disc_cnt is the polling predicate of step 3's discovery wait: host
+# <h>'s discovery log holds a subsystem record for every listed cntlr of the
+# case's pools, two per pool, and DISC_LAST holds what it held.
+many_disc_cnt() { # <h>
+	local json n
+	json=$(host_disc "$1")
+	[ -n "$json" ] || return 1
+	DISC_LAST=$(disc_records "$json") || return 1
+	n=$(printf '%s\n' "$DISC_LAST" | grep -c "^$NQN_IT:" || true)
+	[ "$n" = "$((2 * MANY_POOL_CNT))" ]
+}
+
+# many_paths_ok is the predicate of every wait on the hosts' paths: on host
+# <h>, by one read of its paths (the helper's many_paths), every pool's
+# namespace is optimized through its primary's address and inaccessible
+# through its standby's, on live controllers. The pools out of step stay in
+# MANY_PATHS_LAST, which is logged when it changes.
+MANY_PATHS_LAST=""
+many_paths_ok() { # <h>
+	local out bad
+	out=$(helper_host "$1" many_paths 2>/dev/null) || return 1
+	MANY_PATHS=$out
+	bad=$(many_paths_judge "$out")
+	if [ "$bad" != "$MANY_PATHS_LAST" ]; then
+		MANY_PATHS_LAST=$bad
+		[ -z "$bad" ] || log "  host$1 not yet: $bad"
+	fi
+	[ -z "$bad" ]
+}
+
+# many_paths_judge prints each pool whose paths many_paths_ok wants and
+# <paths>, a many_paths answer, does not show, with what it shows.
+many_paths_judge() { # <paths>
+	local i want=""
+	for i in "${!MANY_NAME[@]}"; do
+		want="$want${MANY_SS[$i]} ${MANY_UUID[$i]} ${MANY_PRIM_ADDR[$i]} optimized $i"$'\n'
+		want="$want${MANY_SS[$i]} ${MANY_UUID[$i]} ${MANY_STBY_ADDR[$i]} inaccessible $i"$'\n'
+	done
+	printf '%s\n' "$1" | awk -v want="$want" '
+		BEGIN {
+			n = split(want, w, "\n")
+			for (j = 1; j <= n; j++) if (w[j] != "") need[w[j]] = 1
+		}
+		$1 ~ /^ctrl=/ {
+			c = substr($1, 6); nq[c] = substr($2, 5)
+			ad[c] = substr($3, 8); st[c] = substr($5, 7)
+		}
+		$1 ~ /^path=/ {
+			c = substr($1, 6); u = substr($3, 6); a = substr($4, 5)
+			seen[nq[c] " " u " " ad[c]] = a " " st[c]
+		}
+		END {
+			for (k in need) {
+				split(k, f, " ")
+				key = f[1] " " f[2] " " f[3]
+				got = (key in seen) ? seen[key] : "none"
+				if (got != f[4] " live") printf "pool %s via %s: %s; ", f[5], f[3], got
+			}
+		}'
+}
+
+# --- step 3: both hosts connect through the cdc -----------------------------
+many_connect() {
+	stage 03 "both hosts discover every pool's subsystem through the cdc and connect: $((2 * MANY_POOL_CNT)) paths each"
+	local h i before after
+	for h in "${!HOST[@]}"; do
+		before=$(many_host_cost "$h")
+		DISC_LAST=""
+		wait_until "$WAIT_HOST" \
+			"the cdc to serve host$h a record for both cntlrs of every one of the $MANY_POOL_CNT pools" \
+			many_disc_cnt "$h"
+		host_connect_all "$h" "${MANY_SS[$((MANY_POOL_CNT - 1))]}"
+		MANY_PATHS_LAST=""
+		wait_until "$WAIT_PROVISION" \
+			"host$h to see every pool's namespace optimized through its primary and inaccessible through its standby, on live controllers" \
+			many_paths_ok "$h"
+		after=$(many_host_cost "$h")
+		log "  host$h before the connect: $before"
+		log "  host$h with $((2 * MANY_POOL_CNT)) more paths: $after"
+	done
+	for h in "${!HOST[@]}"; do
+		wait_until "$WAIT_HOST" \
+			"host$h to hold the device link of every one of the $MANY_POOL_CNT namespaces" \
+			many_devs_are "$h" present
+	done
+}
+
+# many_devs_are is the predicate of the waits on the namespaces' device
+# links: on host <h>, every namespace of the case is <present|absent>, by
+# one read (the helper's many_devs).
+many_devs_are() { # <h> <present|absent>
+	local out
+	out=$(helper_host "$1" many_devs "$2" "${MANY_UUID[@]}") || return 1
+	[ -z "$out" ]
+}
+
+# --- step 4: the writers -----------------------------------------------------
+many_writers() {
+	stage 04 "a writer on each host: one job per pool, $MANY_IOPS synced 4 KiB write a second each"
+	local h out i
+	for h in "${!HOST[@]}"; do
+		out=$(helper_host "$h" many_fio_start "$MANY_IOPS" "$MANY_RANGE" \
+			"$((h * MANY_RANGE))" 1 "${MANY_UUID[@]}") ||
+			die "host$h: the writers did not start (fio's errors are above)"
+		printf '%s\n' "$out" | tail -n 1 >&2
+		assert_eq "$(printf '%s\n' "$out" | sed -n 's/.* jobs=//p')" \
+			"$MANY_POOL_CNT" "host$h: one writer job per pool"
+	done
+	for h in "${!HOST[@]}"; do
+		many_wios_mark "$h"
+		wait_until "$WAIT_HOST" \
+			"every writer job on host$h to complete three writes" \
+			many_jobs_wrote "$h" 3
+	done
+}
+
+# many_wios_mark reads, for every job on host <h>, the writes its device has
+# completed (many_fio_jobs), the mark many_jobs_wrote counts from.
+declare -A MANY_WIOS=()
+many_wios_mark() { # <h>
+	local out w rest
+	out=$(helper_host "$1" many_fio_jobs) || die "host$1: reading the writers failed"
+	while read -r w rest; do
+		case "$w" in job=*) ;; *) continue ;; esac
+		rest=${rest%% *}
+		MANY_WIOS[$1:${w#job=}]=${rest#wios=}
+	done < <(printf '%s\n' "$out")
+}
+
+# many_jobs_wrote is the predicate of a wait on the writers: on host <h>,
+# fio runs and the device of every job has completed at least <n> writes
+# since many_wios_mark.
+many_jobs_wrote() { # <h> <n>
+	local out w rest bad=0 jobs=0
+	out=$(helper_host "$1" many_fio_jobs) || return 1
+	if [ "$(printf '%s\n' "$out" | grep -cx 'running=yes' || true)" != 1 ]; then
+		printf '%s\n' "$out" >&2
+		die "host$1: the writers stopped"
+	fi
+	while read -r w rest; do
+		case "$w" in job=*) ;; *) continue ;; esac
+		rest=${rest%% *}
+		jobs=$((jobs + 1))
+		[ "${rest#wios=}" -ge $((${MANY_WIOS[$1:${w#job=}]:-0} + $2)) ] ||
+			bad=$((bad + 1))
+	done < <(printf '%s\n' "$out")
+	[ "$jobs" -gt 0 ] && [ "$bad" = 0 ]
+}
+
+MANY_MOVED=()
+MANY_LISTED=()
+
+# many_moved is the predicate of a cut's failover wait: every pool of
+# <i…> holds a primary other than the one many_read_roles read before the
+# cut. It reads each pool still to move once a poll.
+many_moved() { # <i…>
+	local i p left=""
+	for i in "$@"; do
+		[ -z "${MANY_MOVED[$i]:-}" ] || continue
+		many_in "$i" ctl_try sp get || {
+			left="$left $i"
+			continue
+		}
+		p=$(jq_of "$CTL_OUT" '[.sp_conf.cntlr_id_list, .cntlr_list] | transpose
+			| map(select(.[1].primary)) | .[0][0] // ""')
+		if [ -n "$p" ] && [ "$p" != "${MANY_PRIM[$i]}" ]; then
+			MANY_MOVED[i]=$SECONDS
+		else
+			left="$left $i"
+		fi
+	done
+	[ -z "$left" ]
+}
+
+# many_listed is the predicate of the wait for a cut's end: every pool holds
+# one primary, and every one of its cntlrs is in its discovery records, no
+# err_epoch left (architecture.md [D18]).
+many_listed() {
+	local i
+	for i in "${!MANY_NAME[@]}"; do
+		[ -z "${MANY_LISTED[$i]:-}" ] || continue
+		many_in "$i" sp_all_listed || return 1
+		MANY_LISTED[i]=1
+	done
+	return 0
+}
+
+# many_records prints the worker's failover and fence records since <epoch>,
+# one `F|D <sp_id> <epoch>` line each: `reaction applied` of a failover, and
+# `sp demotion unsynced`, the fence of the old primary's sides when its
+# demotion hold runs to its timer (dnv-worker.md RW22).
+many_records() { # <epoch>
+	local lines
+	lines=$(ssh_cp "grep -E '\"msg\":\"(reaction applied|sp demotion unsynced)\"' \
+		$WORK/worker/worker.log || [ \$? -eq 1 ]") ||
+		die "cannot read the failover records in $WORK/worker/worker.log on $CP_IP"
+	[ -n "$lines" ] || return 0
+	printf '%s\n' "$lines" | "$JQ" -R -r "$MANY_EPOCH_JQ"'
+		fromjson? // empty
+		| select((.msg == "reaction applied" and .kind == "failover")
+		         or .msg == "sp demotion unsynced")
+		| (.time | epoch) as $t | select($t >= '"$1"')
+		| "\(if .msg == "sp demotion unsynced" then "D" else "F" end) \(.sp_id) \($t)"'
+}
+
+# many_ana_times prints, per pool of <i…>, `<i> <epoch>`: the first sample of
+# host <h>'s sampler file <tag> at or after <epoch> that shows the pool's
+# namespace optimized on its path to the primary many_read_roles last read,
+# or `<i> none`.
+many_ana_times() { # <h> <tag> <epoch> <i…>
+	local h=$1 tag=$2 t0=$3 i want="" file
+	shift 3
+	file=$(ssh_host "$h" "cat $WORK/many/ana-$tag.log") ||
+		die "host$h: reading the sampler's file $tag failed"
+	for i in "$@"; do
+		want="$want$(printf '%s\n' "$MANY_PATHS" | awk -v nq="${MANY_SS[$i]}" \
+			-v a="${MANY_PRIM_ADDR[$i]}" -v u="${MANY_UUID[$i]}" -v i="$i" '
+			$1 ~ /^ctrl=/ { c = substr($1, 6); ok[c] = (substr($2, 5) == nq && substr($3, 8) == a) }
+			$1 ~ /^path=/ && ok[substr($1, 6)] && substr($3, 6) == u {
+				print substr($1, 6) "/" $2 " " i
+			}')"$'\n'
+	done
+	printf '%s\n' "$file" | awk -v want="$want" -v t0="$t0" '
+		BEGIN {
+			n = split(want, w, "\n")
+			for (j = 1; j <= n; j++) if (w[j] != "") { split(w[j], f, " "); key[f[1]] = f[2]; pools[f[2]] = 1 }
+		}
+		$1 == "T" { t = $2; next }
+		t + 0 >= t0 + 0 {
+			split($0, kv, ":"); p = kv[1]
+			sub(/^\/sys\/class\/nvme\//, "", p); sub(/\/ana_state$/, "", p)
+			if ((p in key) && kv[2] == "optimized" && !(key[p] in done)) done[key[p]] = t
+		}
+		END { for (q in pools) print q, ((q in done) ? done[q] : "none") }'
+}
+
+# many_ms prints an epoch time in seconds as whole milliseconds, and
+# many_after <t> <t0> the seconds from <t0> to <t> to a tenth: the guests'
+# times carry fractions, which shell arithmetic does not.
+many_ms() { awk -v t="$1" 'BEGIN { printf "%.0f", t * 1000 }'; }
+many_after() { awk -v t="$1" -v t0="$2" 'BEGIN { printf "%.1f", t - t0 }'; }
+
+# many_sampled is the predicate of the wait for a sampler's first sample: host
+# <h>'s sampler file <tag> holds one.
+many_sampled() { # <h> <tag>
+	local n
+	n=$(ssh_host "$1" "grep -c '^T ' $WORK/many/ana-$2.log 2>/dev/null || true") ||
+		return 1
+	[ "${n:-0}" -ge 1 ]
+}
+
+# many_cut runs one cut of the controller node that holds the most
+# primaries, <how> `net` (every packet dropped) or `stop` (its cn agent
+# stopped), from the samplers' start to the node's return as a standby, and
+# appends one row per pool to MANY_ROWS. While the node is cut off, every
+# pool whose primary it holds must fail over, and both hosts must see each
+# such pool's namespace optimized through its new primary; after a packet
+# cut every writer job must also have written again by then, through the
+# new primary, while after an agent stop a host may still send its writes
+# down the old primary's path, which fails them from the fence until the
+# agent, continued, turns that path inaccessible (The cases, many). Once the
+# node is back, every pool must list both cntlrs again, both hosts must see
+# every pool optimized through its primary and inaccessible through its
+# standby, and every job must have written again after the return.
+many_cut() { # <n> <net|stop> <label>
+	local n=$1 how=$2 label=$3 i h v out t_cut t_back t_end tag="cut$1"
+	local -a moved=()
+	for i in "${!MANY_NAME[@]}"; do many_read_roles "$i"; done
+	v=$(many_most_primaries)
+	for i in "${!MANY_NAME[@]}"; do
+		[ "${MANY_PRIM_CN[$i]}" != "$v" ] || moved+=("$i")
+	done
+	assert_ge "${#moved[@]}" 1 "cut $n: cn$v holds a primary to fail over"
+	log "  cut $n ($label) on cn$v, which holds ${#moved[@]} of the" \
+		"$MANY_POOL_CNT primaries"
+	for h in "${!HOST[@]}"; do
+		helper_host "$h" many_sampler_start "$tag" "$MANY_SAMPLER_SECS" >&2 ||
+			die "host$h: the path sampler did not start"
+		wait_until "$WAIT_SHORT" "host$h's path sampler to take its first sample" \
+			many_sampled "$h" "$tag"
+	done
+	case "$how" in
+	net)
+		MANY_CUT_CN=$v
+		out=$(helper_cn "$v" net_cut "$MANY_CUT_SECS") ||
+			die "cn$v: the cut did not go in: $out"
+		t_cut=$(printf '%s\n' "$out" | sed -n 's/^cut t=//p')
+		;;
+	stop)
+		out=$(helper_cn "$v" sig_agent_at "$(cn_pid_file)" STOP) ||
+			die "cn$v: stopping its agent failed"
+		assert_eq "$(printf '%s\n' "$out" | sed -n 's/^state=//p')" T \
+			"cn$v's agent is stopped (SIGSTOP read back as state T)"
+		t_cut=$(printf '%s\n' "$out" | sed -n 's/^t=//p')
+		;;
+	esac
+	case "$t_cut" in
+	'' | *[!0-9.]*) die "cn$v: the cut's time reads '$t_cut'" ;;
+	esac
+	MANY_T0=$SECONDS
+	MANY_MOVED=()
+	wait_until "$((WAIT_REACT + 2 * MANY_POOL_CNT))" \
+		"the ${#moved[@]} pools whose primary is on cn$v to fail over" \
+		many_moved "${moved[@]}"
+	log "  cut $n: every primary of cn$v moved, $((SECONDS - MANY_T0))s by the driver's polls"
+	for i in "${moved[@]}"; do many_read_roles "$i"; done
+	for h in "${!HOST[@]}"; do
+		MANY_PATHS_LAST=""
+		wait_until "$WAIT_BUILD" \
+			"host$h to see every moved pool's namespace optimized through its new primary" \
+			many_moved_ana "$h" "${moved[@]}"
+	done
+	log "  cut $n: every moved pool optimized on both hosts, $((SECONDS - MANY_T0))s by the driver's polls"
+	if [ "$how" = net ]; then
+		for h in "${!HOST[@]}"; do
+			many_wios_mark "$h"
+			wait_until "$WAIT_HOST" \
+				"every writer job on host$h to complete a write through the new primaries while cn$v is cut off" \
+				many_jobs_wrote "$h" 1
+		done
+	fi
+	case "$how" in
+	net)
+		out=$(helper_cn "$v" net_uncut) || die "cn$v: the cut did not come off"
+		MANY_CUT_CN=-1
+		t_back=$(printf '%s\n' "$out" | sed -n 's/^uncut t=//p')
+		;;
+	stop)
+		out=$(helper_cn "$v" sig_agent_at "$(cn_pid_file)" CONT) ||
+			die "cn$v: continuing its agent failed"
+		assert_ne "$(printf '%s\n' "$out" | sed -n 's/^state=//p')" T \
+			"cn$v's agent runs again (SIGCONT)"
+		t_back=$(printf '%s\n' "$out" | sed -n 's/^t=//p')
+		;;
+	esac
+	case "$t_back" in
+	'' | *[!0-9.]*) die "cn$v: the return's time reads '$t_back'" ;;
+	esac
+	MANY_LISTED=()
+	wait_until "$WAIT_BUILD" \
+		"every pool to list both cntlrs again, cn$v's as standbys" \
+		many_listed
+	for i in "${!MANY_NAME[@]}"; do many_read_roles "$i"; done
+	for h in "${!HOST[@]}"; do
+		MANY_PATHS_LAST=""
+		wait_until "$WAIT_BUILD" \
+			"host$h to see every pool optimized through its primary and inaccessible through its standby again" \
+			many_paths_ok "$h"
+	done
+	for h in "${!HOST[@]}"; do
+		many_wios_mark "$h"
+		wait_until "$WAIT_HOST" \
+			"every writer job on host$h to complete a write after cn$v's return" \
+			many_jobs_wrote "$h" 1
+	done
+	log "  cut $n: cn$v back, a standby of every pool on it, and every job" \
+		"writing, $((SECONDS - MANY_T0))s after the cut"
+	t_end=$(date +%s.%N)
+	for h in "${!HOST[@]}"; do
+		helper_host "$h" many_sampler_stop >/dev/null ||
+			die "host$h: stopping the path sampler failed"
+	done
+	many_cut_rows "$n" "$how" "$v" "$t_cut" "$t_back" "$t_end" "${moved[@]}"
+	for v in "${!CN[@]}"; do
+		log "  cn$v load after cut $n: $(ssh_cn "$v" "cat /proc/loadavg")"
+	done
+}
+
+# many_moved_ana is the predicate of the wait on a cut's new primaries: on
+# host <h>, every pool of <i…> is optimized through the primary
+# many_read_roles last read.
+many_moved_ana() { # <h> <i…>
+	local h=$1 out bad i want=""
+	shift
+	out=$(helper_host "$h" many_paths 2>/dev/null) || return 1
+	MANY_PATHS=$out
+	for i in "$@"; do
+		want="$want${MANY_SS[$i]} ${MANY_UUID[$i]} ${MANY_PRIM_ADDR[$i]} $i"$'\n'
+	done
+	bad=$(printf '%s\n' "$out" | awk -v want="$want" '
+		BEGIN { n = split(want, w, "\n"); for (j = 1; j <= n; j++) if (w[j] != "") need[w[j]] = 1 }
+		$1 ~ /^ctrl=/ { c = substr($1, 6); nq[c] = substr($2, 5); ad[c] = substr($3, 8) }
+		$1 ~ /^path=/ { c = substr($1, 6); seen[nq[c] " " substr($3, 6) " " ad[c]] = substr($4, 5) }
+		END {
+			for (k in need) {
+				split(k, f, " "); key = f[1] " " f[2] " " f[3]
+				if (seen[key] != "optimized") printf "pool %s: %s; ", f[4], (key in seen) ? seen[key] : "none"
+			}
+		}')
+	if [ "$bad" != "$MANY_PATHS_LAST" ]; then
+		MANY_PATHS_LAST=$bad
+		[ -z "$bad" ] || log "  host$h not yet: $bad"
+	fi
+	[ -z "$bad" ]
+}
+
+# many_cut_rows reads what cut <n> left in the guests' records and appends
+# one row per pool to MANY_ROWS: `cut=<n> how=<how> pool=<i> moved=0|1
+# fence=<s> failover=<s> fo=<failovers> ana0=<s> ana1=<s>`, every time in
+# seconds after the cut and `-` where there is none: the worker's fence and
+# first failover records of the pool, its failovers in the window, and each
+# host's first sample of the pool optimized through its new primary. The
+# window, from the cut to <t_end>, goes to MANY_WIN, and many_rows_finish
+# adds each host's longest write and failed writes in it once the writers
+# have stopped and written their logs.
+MANY_WIN=()
+many_cut_rows() { # <n> <how> <v> <t_cut> <t_back> <t_end> <moved i…>
+	local n=$1 how=$2 v=$3 t_cut=$4 t_back=$5 t_end=$6 i h t recs row out
+	local -A ana=() is_moved=()
+	shift 6
+	for i in "$@"; do is_moved[$i]=1; done
+	recs=$(many_records "$t_cut") || die "reading the worker's records failed"
+	for h in "${!HOST[@]}"; do
+		MANY_PATHS=$(helper_host "$h" many_paths) ||
+			die "host$h: reading its paths failed"
+		out=$(many_ana_times "$h" "cut$n" "$t_cut" "$@") ||
+			die "host$h: reading the path sampler of cut $n failed"
+		while read -r i t; do
+			[ -n "$i" ] || continue
+			ana[$h:$i]=$t
+		done < <(printf '%s\n' "$out")
+	done
+	for i in "${!MANY_NAME[@]}"; do
+		# The ids compare as strings: as numbers awk would round them to a
+		# double's 53 bits, and two ids could compare equal.
+		row=$(printf '%s\n' "$recs" | awk -v id="${MANY_SPID[$i]}" -v t0="$t_cut" '
+			($2 "") == (id "") && $1 == "D" && d == "" { d = sprintf("%.1f", $3 - t0) }
+			($2 "") == (id "") && $1 == "F" { if (f == "") f = sprintf("%.1f", $3 - t0); fo++ }
+			END { printf "fence=%s failover=%s fo=%d", (d == "" ? "-" : d), (f == "" ? "-" : f), fo }')
+		for h in "${!HOST[@]}"; do
+			if [ -n "${ana[$h:$i]:-}" ] && [ "${ana[$h:$i]}" != none ]; then
+				row="$row ana$h=$(many_after "${ana[$h:$i]}" "$t_cut")"
+			else
+				row="$row ana$h=-"
+			fi
+		done
+		MANY_ROWS+=("cut=$n how=$how pool=$i moved=${is_moved[$i]:-0} $row")
+	done
+	MANY_WIN[n]="$t_cut $t_back $t_end"
+	log "  cut $n: cn$v cut at $t_cut, back $(many_after "$t_back" "$t_cut")s" \
+		"later, the window $(many_after "$t_end" "$t_cut")s long"
+}
+
+# many_rows_finish adds to every row of MANY_ROWS, from the stopped writers'
+# latency logs, `lat<h>=<ms> errs<h>=<n> rerrs<h>=<n>` per host: the
+# longest write host h completed in the row's window, its failed writes sent
+# while the node was cut off, and those sent from the node's return to the
+# window's end. A failed write's send time is the completion before it and
+# one write interval per failed write between them (many_err_offsets). It
+# sets MANY_ERRS_OUT to the failed writes sent outside every window, which no
+# fault explains.
+MANY_ERRS_OUT=0
+many_rows_finish() {
+	local h n w i ms cnt out t0 tb t1 o p j sent row k part
+	local -A lat=() errs=() rerrs=()
+	MANY_ERRS_OUT=0
+	for h in "${!HOST[@]}"; do
+		for n in "${!MANY_WIN[@]}"; do
+			read -r t0 tb t1 <<<"${MANY_WIN[$n]}"
+			out=$(helper_host "$h" many_lat_max "$(many_ms "$t0")" \
+				"$(many_ms "$t1")") || die "host$h: reading the latency logs failed"
+			while read -r i ms cnt; do
+				[ -n "$i" ] || continue
+				lat[$n:$h:${i#lat=}]=$ms
+			done < <(printf '%s\n' "$out")
+		done
+		out=$(helper_host "$h" many_fio_jobs all) || die "host$h: reading the writers failed"
+		while read -r w o p j; do
+			case "$w" in err=*) ;; *) continue ;; esac
+			i=${w#err=}
+			sent=$((p + ${j:-1} * 1000 / MANY_IOPS))
+			k=""
+			part=""
+			for n in "${!MANY_WIN[@]}"; do
+				read -r t0 tb t1 <<<"${MANY_WIN[$n]}"
+				if [ "$sent" -ge "$(many_ms "$t0")" ] && [ "$sent" -le "$(many_ms "$t1")" ]; then
+					k=$n
+					part=cut
+					[ "$sent" -lt "$(many_ms "$tb")" ] || part=return
+				fi
+			done
+			case "$part" in
+			cut) errs[$k:$h:$i]=$((${errs[$k:$h:$i]:-0} + 1)) ;;
+			return) rerrs[$k:$h:$i]=$((${rerrs[$k:$h:$i]:-0} + 1)) ;;
+			*)
+				MANY_ERRS_OUT=$((MANY_ERRS_OUT + 1))
+				log "!!! host$h job $i (pool ${MANY_NAME[$i]}): a write at $o failed outside both cuts, sent about ${sent} ms"
+				;;
+			esac
+		done < <(printf '%s\n' "$out")
+	done
+	for k in "${!MANY_ROWS[@]}"; do
+		row=${MANY_ROWS[$k]}
+		n=${row#cut=}
+		n=${n%% *}
+		i=${row#* pool=}
+		i=${i%% *}
+		for h in "${!HOST[@]}"; do
+			row="$row lat$h=${lat[$n:$h:$i]:-0} errs$h=${errs[$n:$h:$i]:-0}"
+			row="$row rerrs$h=${rerrs[$n:$h:$i]:-0}"
+		done
+		MANY_ROWS[k]=$row
+	done
+}
+
+# --- steps 5 and 6: the two cuts --------------------------------------------
+many_net_cut() {
+	stage 05 "cut 1: every packet of the controller node with the most primaries dropped but the driver's ssh"
+	many_cut 1 net "packets dropped"
+}
+
+many_agent_stop() {
+	stage 06 "cut 2: the cn agent of the controller node with the most primaries stopped"
+	many_cut 2 stop "agent stopped"
+}
+
+# --- step 7: the writers stop, every acknowledged write reads back ----------
+#
+# Each job's range is read back up to its last write, completed or failed,
+# with fio's verify. A block whose write fio saw complete must verify; a
+# block whose write failed may read zeros or the write's own bytes, as a
+# failed write can land (architecture.md, Known limits), and is counted.
+many_verify() {
+	stage 07 "the writers stop; every write a host saw complete reads back"
+	local h out
+	for h in "${!HOST[@]}"; do
+		out=$(helper_host "$h" many_fio_stop 60) || die "host$h: stopping the writers failed"
+		assert_eq "$out" "mfio=stopped" "host$h: the writers end on SIGINT"
+	done
+	many_rows_finish
+	assert_eq "$MANY_ERRS_OUT" 0 \
+		"failed writes sent outside both cuts' windows, where no fault was on"
+	many_verify_writes 1 "$MANY_RANGE"
+}
+
+# many_verify_writes reads back what the stopped writers of seed <seed>
+# wrote, host h's from h x <range>, as many_verify says. The read-back holds
+# only when fio's verify ran to its end, exit code 0 (under
+# continue_on_error=verify a block that fails leaves it 0, fio 3.41 measured
+# on host0), and every job of the host answered its `vread=` line with the
+# job's whole range: an answer without them read nothing, and a lost write
+# would pass unread.
+many_verify_writes() { # <seed> <range>
+	local seed=$1 range=$2 h out i size off maxo bad vfail w a b c d vrc spec_i
+	local -a spec=()
+	local -A errset=() vread=()
+	for h in "${!HOST[@]}"; do
+		spec=()
+		off=$((h * range))
+		out=$(helper_host "$h" many_fio_jobs all) || die "host$h: reading the writers failed"
+		while read -r w a b c d; do
+			case "$w" in
+			job=*)
+				i=${w#job=}
+				maxo=$(printf '%s\n' "$a $b $c $d" | sed -n 's/.*max_off=\(-*[0-9]*\).*/\1/p')
+				assert_ge "$maxo" "$off" "host$h job $i: it wrote a block"
+				size=$((maxo + 4096 - off))
+				spec+=("$i:$size")
+				MANY_VSIZE[$h:$i]=$size
+				;;
+			err=*)
+				errset[$h:${w#err=}:$a]=1
+				;;
+			esac
+		done < <(printf '%s\n' "$out")
+		out=$(ssh_host_watched "$h" "bash $HELPER many_fio_verify $off $seed ${spec[*]}" \
+			"$((WAIT_HOST + MANY_POOL_CNT * 2))") ||
+			host_watch_verdict "$?" "$h" "the writers' verify" ||
+			die "host$h: the writers' verify failed"
+		bad=0
+		vrc=""
+		vread=()
+		while read -r w a b; do
+			case "$w" in
+			vrc=*)
+				vrc=${w#vrc=}
+				;;
+			vread=*)
+				assert_eq "$a" "${MANY_VSIZE[$h:${w#vread=}]}" \
+					"host$h job ${w#vread=}: the verify read the job's whole range"
+				vread[${w#vread=}]=$((${vread[${w#vread=}]:-0} + 1))
+				;;
+			vfail=*)
+				if [ -z "${errset[$h:${w#vfail=}:$a]:-}" ]; then
+					log "!!! host$h job ${w#vfail=} (pool ${MANY_NAME[${w#vfail=}]}): the block at $a fails fio's verify, and its write was not one fio saw fail"
+					bad=$((bad + 1))
+				fi
+				;;
+			esac
+		done < <(printf '%s\n' "$out")
+		assert_eq "$vrc" 0 "host$h: fio's verify ran to its end (its exit code)"
+		for spec_i in "${spec[@]}"; do
+			i=${spec_i%%:*}
+			assert_eq "${vread[$i]:-0}" 1 \
+				"host$h job $i (pool ${MANY_NAME[$i]}): the verify's answers that it read the job's range"
+		done
+		vfail=$(printf '%s\n' "$out" | grep -c '^vfail=' || true)
+		log "  host$h: $vfail block(s) of failed writes read other than their write; ${#errset[@]} failed write(s) on both hosts so far"
+		assert_eq "$bad" 0 \
+			"host$h: blocks whose write fio saw complete that fail its verify (a lost acknowledged write)"
+	done
+}
+declare -A MANY_VSIZE=()
+
+# --- step 8: the verdict -----------------------------------------------------
+many_verdict() {
+	stage 08 "what the two cuts did to each pool"
+	local row bad
+	log "  per pool, seconds after the cut: fence (the worker's fan-out when the"
+	log "  demotion hold ran to its timer), failover (its record), ana<h> (host"
+	log "  <h>'s first sample optimized on the new primary); fo, the failovers"
+	log "  in the window; lat<h>, host <h>'s longest write in the window in ms;"
+	log "  errs<h>, its failed writes sent while the node was cut off, rerrs<h>"
+	log "  those sent from the node's return"
+	for row in "${MANY_ROWS[@]}"; do
+		log "  $row"
+	done
+	many_summary 1
+	many_summary 2
+	bad=$(many_judge 1 "$MANY_ANA_BOUND")
+	[ -z "$bad" ] ||
+		die "cut 1, every packet of a controller node dropped, wants one" \
+			"failover of each pool whose primary the node held and none of" \
+			"any other, no failed write while the node is cut off and each" \
+			"moved pool optimized on both hosts within ${MANY_ANA_BOUND}s" \
+			"(e2e_integtest.md, Known limits): $bad"
+	log "  cut 1: one failover of each moved pool, none of the others, no" \
+		"failed write while the node was cut off, each moved pool optimized" \
+		"within ${MANY_ANA_BOUND}s; at its return" \
+		"$(printf '%s\n' "${MANY_ROWS[@]}" | awk '$1 == "cut=1" {
+			for (i = 1; i <= NF; i++) { split($i, kv, "="); if (kv[1] ~ /^rerrs/) n += kv[2] } }
+			END { print n + 0 }') write(s) failed, which the case counts" \
+		"(e2e_integtest.md, Known limits)"
+}
+
+# many_judge prints each row of cut <n> that breaks what a packet cut
+# promises: a failover of each pool whose primary the node held, exactly
+# one, none of any other pool (dnv-worker.md AR5, AR10), no failed write
+# while the node is cut off, the failover a pause (architecture.md,
+# Failover), and each moved pool optimized on both hosts within <bound>
+# seconds of the cut. The writes that fail at the node's return are a known
+# limit (architecture.md, Known limits), counted in the row's rerrs.
+many_judge() { # <n> <bound>
+	printf '%s\n' "${MANY_ROWS[@]}" | awk -v n="$1" -v b="$2" '
+		{
+			delete f
+			for (i = 1; i <= NF; i++) { split($i, kv, "="); f[kv[1]] = kv[2] }
+			if (f["cut"] != n) next
+			p = "pool " f["pool"]
+			if (f["moved"] == 1 && f["fo"] != 1) printf "%s: %s failovers; ", p, f["fo"]
+			if (f["moved"] != 1 && f["fo"] != 0) printf "%s, not moved: %s failovers; ", p, f["fo"]
+			if (f["errs0"] + f["errs1"] != 0) printf "%s: %d failed writes while the node was cut off; ", p, f["errs0"] + f["errs1"]
+			if (f["moved"] == 1) {
+				if (f["ana0"] == "-" || f["ana0"] + 0 > b + 0) printf "%s: host0 optimized at %s; ", p, f["ana0"]
+				if (f["ana1"] == "-" || f["ana1"] + 0 > b + 0) printf "%s: host1 optimized at %s; ", p, f["ana1"]
+			}
+		}'
+}
+
+# many_summary logs, for cut <n>, the largest and the median of each time
+# over the pools that moved, and the totals.
+many_summary() { # <n>
+	printf '%s\n' "${MANY_ROWS[@]}" | awk -v n="$1" '
+		function stat(name,    k, a, c, i, j, t) {
+			c = 0
+			for (k in v) if (k ~ "^" name ":") a[++c] = v[k]
+			if (!c) return name "=-"
+			for (i = 1; i <= c; i++) for (j = i + 1; j <= c; j++) if (a[j] + 0 < a[i] + 0) { t = a[i]; a[i] = a[j]; a[j] = t }
+			return sprintf("%s max %s median %s", name, a[c], a[int((c + 1) / 2)])
+		}
+		{
+			delete f
+			for (i = 1; i <= NF; i++) { split($i, kv, "="); f[kv[1]] = kv[2] }
+			if (f["cut"] != n) next
+			if (f["moved"] == 1) {
+				moved++
+				foreach_k = split("fence failover ana0 ana1 lat0 lat1", ks, " ")
+				for (j = 1; j <= foreach_k; j++) if (f[ks[j]] != "-") v[ks[j] ":" moved] = f[ks[j]]
+				if (f["fo"] != 1) notone++
+			} else {
+				if (f["fo"] != 0) others++
+				if (f["lat0"] + 0 > ol) ol = f["lat0"] + 0
+				if (f["lat1"] + 0 > ol) ol = f["lat1"] + 0
+			}
+			errs += f["errs0"] + f["errs1"]
+			rerrs += f["rerrs0"] + f["rerrs1"]
+		}
+		END {
+			printf "  cut %s: %d pools moved; %s; %s; %s; %s; %s; %s\n", n, moved,
+				stat("fence"), stat("failover"), stat("ana0"), stat("ana1"), stat("lat0"), stat("lat1")
+			printf "  cut %s: moved pools with other than one failover %d; other pools with a failover %d; longest write of the other pools %d ms; failed writes %d while cut off, %d at the return\n",
+				n, notone, others, ol, errs, rerrs
+		}' >&2
+}
+
+# --- step 9: the case's pools go, and setup's writer namespace --------------
+#
+# Every namespace first, under the live controllers, then the hosts let go
+# of every subsystem of the case but setup's, then the subsystems, the thin
+# devices and the pools, whose drains run at once. Setup's pool keeps its
+# subsystem and its namespace 1 for the shared ending.
+many_teardown() {
+	stage 09 "delete every namespace, subsystem, thin device and pool the case made"
+	local h i out
+	for i in "${!MANY_NAME[@]}"; do
+		many_in "$i" ctl_ok ns delete --nqn "${MANY_SS[$i]}" --idx "${MANY_NSIDX[$i]}"
+	done
+	for h in "${!HOST[@]}"; do
+		wait_until "$WAIT_HOST" \
+			"host$h to lose the device link of every one of the case's namespaces" \
+			many_devs_are "$h" absent
+		helper_host "$h" disconnect_prefix "$NQN_IT:mss" >/dev/null ||
+			die "host$h: letting go of the case's subsystems failed"
+		out=$(helper_host "$h" subsys_nqns) || die "host$h: listing its subsystems failed"
+		assert_eq "$(printf '%s\n' "$out" | grep -c "^$NQN_IT:mss" || true)" 0 \
+			"host$h holds no subsystem of the case's pools after it lets go"
+	done
+	for i in "${!MANY_NAME[@]}"; do
+		if [ "$i" -gt 0 ]; then
+			many_in "$i" ctl_ok ss delete --nqn "${MANY_SS[$i]}"
+		fi
+		many_in "$i" ctl_ok td delete --name "$MANY_TD"
+	done
+	for ((i = 1; i < MANY_POOL_CNT; i++)); do
+		many_in "$i" ctl_ok sp delete
+	done
+	for ((i = 1; i < MANY_POOL_CNT; i++)); do
+		many_in "$i" wait_until "$WAIT_DELETE" \
+			"the drain of ${MANY_NAME[$i]} to make \`sp get\` answer NOT_FOUND" \
+			sp_gone
+	done
+	many_back_to_setup
+}
+
+case_many() {
+	CASE=many
+	many_snapshot
+	many_create
+	many_wait_built
+	many_connect
+	many_writers
+	many_net_cut
+	many_agent_stop
+	many_verify
+	many_verdict
+	many_teardown
+	case_finish
+}
+
+# ---------------------------------------------------------------------------
 # The space guard's run summary (E2E5)
 # ---------------------------------------------------------------------------
 #
@@ -29700,6 +31367,11 @@ log_topology() {
 	log "  zeroing:   a meta side whole, a data side $DATA_ZERO_BYTES bytes" \
 		"(its meta region and first data block); run cap $RUN_SHAPE_CAP_BYTES bytes"
 	log "  cases:     ${ONLY:-${CASES[*]}}"
+	if [ "$ONLY" = many ]; then
+		log "  many:      $MANY_POOL_CNT one-slice pools, setup's included," \
+			"$DNS_PER_VM dn agent(s) per DN VM for their sides," \
+			"run cap $MANY_RUN_CAP_BYTES bytes"
+	fi
 	log "  cp:        $CP  etcd $ETCD_CLIENT_PORT/$ETCD_PEER_PORT," \
 		"gateway $GW_PORT, cdc $CDC_PORT (all as the login user)"
 	for v in "${!CN[@]}"; do
@@ -29802,20 +31474,22 @@ main() {
 	# case will run (preflight_stas), and `setup` builds the FIRST case's sp,
 	# so sp_thresholds and sp_shape have to know whose sp that is: the
 	# event_threshold set and the slice count are chosen at `sp create` and no
-	# RPC changes them afterwards. parse_args has
+	# RPC changes them afterwards. An --only run is the one case it names,
+	# a default case or an opt-in one (OPTIN_CASES), and a run without it
+	# the default list. parse_args has
 	# already refused an --only that names no case, so this list cannot come
 	# out empty; it is checked anyway, because an empty list would otherwise
 	# index an empty array under `set -u`.
 	local name i ran=""
 	RUN_CASES=()
-	for name in "${CASES[@]}"; do
-		if [ -n "$ONLY" ] && [ "$ONLY" != "$name" ]; then
-			continue
-		fi
-		RUN_CASES+=("$name")
-	done
+	if [ -n "$ONLY" ]; then
+		RUN_CASES=("$ONLY")
+	else
+		RUN_CASES=("${CASES[@]}")
+	fi
 	[ "${#RUN_CASES[@]}" -ge 1 ] ||
-		die "no case to run: --only '$ONLY' matched none of ${CASES[*]}"
+		die "no case to run: --only '$ONLY' matched none of" \
+			"${CASES[*]} ${OPTIN_CASES[*]}"
 
 	preflight_guests
 
