@@ -76,7 +76,12 @@ How the commands are written:
   `dnvctl` run as you.
 - A long-running program goes to the background with a log file and a pid
   file, the file that holds its process id, which the teardown uses to stop
-  it.
+  it. On the machines of a real cluster each one runs as a systemd service
+  instead: `deploy/systemd/` holds a unit for each of these programs but
+  etcd, and an example unit for etcd, and `deploy/dnv/` an example of the
+  settings file of each of these dnv programs and of `dnvctl`; no unit
+  starts until you start or enable it
+  ([the operations doc](operations.md#prepare-a-node)).
 - Every `dnvctl` command names the gateway and the cluster, and the pool
   where it acts on one: `--gateway-address 127.0.0.1:29527 --cluster c0
   --sp sp0`. Each `dnvctl` command below prints one JSON document; the
@@ -122,6 +127,13 @@ sudo modprobe -a nvmet nvmet-tcp nvme-tcp nvme-fabrics loop dm-thin-pool raid1
 mountpoint -q /sys/kernel/config || sudo mount -t configfs none /sys/kernel/config
 cat /sys/module/nvme_core/parameters/multipath
 ```
+
+A module loaded this way is gone after a reboot. A node of a real cluster
+loads its modules at every boot from the files of `deploy/modules-load.d/`,
+one for a disk node, one for a controller node and one for a host, copied
+into `/etc/modules-load.d`
+([the operations doc](operations.md#prepare-a-node)); this test machine
+goes without them.
 
 The udev rules. The controller node assembles its RAID1 arrays itself.
 The system's own udev rules would race it for an array it is creating, and

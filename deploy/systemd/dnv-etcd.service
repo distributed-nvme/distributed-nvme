@@ -1,0 +1,47 @@
+# dnv: an example unit for one member of etcd, the store of the control plane
+# (architecture.md, Components: invocation reference, etcd). etcd is no dnv
+# program and its release ships apart; this example runs one member of three,
+# 192.0.2.10 to 192.0.2.12, with the settings dnv needs: the request limits
+# --max-txn-ops and --max-request-bytes at least at the values below, which
+# etcd's defaults are far under, automatic compaction of its history, and
+# etcd's default watch progress notification interval. Use etcd 3.5.13 or
+# later.
+#
+# Install as /etc/systemd/system/dnv-etcd.service on each member, with the
+# program as /usr/local/bin/etcd, and give each member its own --name and
+# its own addresses in the lines below. etcd's data is under
+# /var/lib/dnv-etcd, which this unit makes. Keep it on a filesystem apart
+# from the logs, or cap the journal (SystemMaxUse= in journald.conf): etcd
+# refuses writes it cannot save.
+#
+# The kit enables nothing. "systemctl start dnv-etcd" starts the member;
+# "systemctl enable dnv-etcd" also starts it at boot, once the network is up.
+# The member tells systemd once it serves (Type=notify), which in a new
+# cluster waits for the other members too, so the start has no time limit.
+[Unit]
+Description=etcd for dnv
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=notify
+ExecStart=/usr/local/bin/etcd \
+  --name dnv-etcd-0 \
+  --data-dir /var/lib/dnv-etcd \
+  --listen-client-urls http://192.0.2.10:2379 \
+  --advertise-client-urls http://192.0.2.10:2379 \
+  --listen-peer-urls http://192.0.2.10:2380 \
+  --initial-advertise-peer-urls http://192.0.2.10:2380 \
+  --initial-cluster dnv-etcd-0=http://192.0.2.10:2380,dnv-etcd-1=http://192.0.2.11:2380,dnv-etcd-2=http://192.0.2.12:2380 \
+  --initial-cluster-state new \
+  --max-txn-ops=1024 \
+  --max-request-bytes=33554432 \
+  --auto-compaction-retention=1h
+StateDirectory=dnv-etcd
+TimeoutStartSec=0
+LimitNOFILE=40000
+Restart=on-failure
+RestartSec=5s
+
+[Install]
+WantedBy=multi-user.target

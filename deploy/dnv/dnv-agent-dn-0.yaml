@@ -1,0 +1,36 @@
+# dnv: an example of the settings of one disk node agent, instance 0 of
+# deploy/systemd/dnv-agent-dn@.service, which reads them with --config. Install
+# one copy for each instance as /etc/dnv/dnv-agent-dn-<name>.yaml, mode 0644,
+# and put your own values in place of the example ones, whose addresses are
+# from 192.0.2.0/24. Each key is a flag of "dnv-agent dn" ("dnv-agent dn
+# --help" lists them all, with their defaults); a flag given on the command
+# line wins over an environment variable DNV_AGENT_<KEY> (the key in capitals,
+# dashes as underscores), and both win over this file. The unit gives the agent
+# its local store; this file names none. Keep the name's ending, .yaml: dnv
+# reads a settings file in the format its ending names and refuses an ending it
+# does not know, such as .conf.
+#
+# The node check reads the same file: dnv-agent check dn --config
+# /etc/dnv/dnv-agent-dn-<name>.yaml.
+#
+# The raw disk this agent formats and gives the cluster. A disk without
+# dnv's format is formatted at the node's first converge after "dnvctl dn
+# create", and what it held is lost, so name it by a link that does not move
+# at a reboot, under /dev/disk/by-id/, not as /dev/nvme1n1 or /dev/sdb.
+disk: /dev/disk/by-id/your-disk
+# The address and port the agent listens on for the gateway and the worker,
+# which "dnvctl dn create --addr" names.
+grpc-address: 192.0.2.21:29900
+# The NVMe/TCP port the controller nodes connect to, and another disk node
+# for a migration, which "dnvctl dn create" repeats with --tr-addr and
+# --tr-svc-id: an address of this machine.
+tr-type: tcp
+adr-fam: ipv4
+tr-addr: 192.0.2.21
+tr-svc-id: "4301"
+# The id of the agent's nvmet port. Each agent of this machine takes its own
+# id, its own gRPC port and its own NVMe/TCP port: instance 1 could take
+# nvmet-port-id 2, grpc-address port 29901 and tr-svc-id 4302.
+nvmet-port-id: 1
+# How much it logs: debug, info or warn.
+# log-level: info

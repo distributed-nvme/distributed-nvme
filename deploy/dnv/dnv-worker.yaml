@@ -1,0 +1,19 @@
+# dnv: an example of the worker's settings, which
+# deploy/systemd/dnv-worker.service reads with --config. Install as
+# /etc/dnv/dnv-worker.yaml, mode 0644, and put your own addresses in place of
+# the example ones, from 192.0.2.0/24. Each key is a flag of dnv-worker
+# (dnv-worker --help lists them all, with their defaults); a flag given on the
+# command line wins over an environment variable DNV_WORKER_<KEY> (the key in
+# capitals, dashes as underscores), and both win over this file. Keep the
+# name's ending, .yaml: dnv reads a settings file in the format its ending
+# names and refuses an ending it does not know, such as .conf.
+#
+# The etcd members, as one string of addresses separated by commas, not as
+# a list.
+etcd-endpoints: "192.0.2.10:2379,192.0.2.11:2379,192.0.2.12:2379"
+# The worker's waits as it joins and leaves the other workers stay at their
+# defaults on a cluster; the tutorial "dnv on one machine" shortens them
+# for one machine alone. The roles it runs: every role by default.
+# roles: dn,cn,sp
+# How much it logs: debug, info or warn.
+# log-level: info

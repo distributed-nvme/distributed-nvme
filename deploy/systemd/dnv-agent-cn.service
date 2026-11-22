@@ -1,0 +1,78 @@
+# dnv: the controller node agent (architecture.md, Components: invocation
+# reference). Run one on a machine: two cn agents on one kernel are never
+# safe.
+#
+# Install as /etc/systemd/system/dnv-agent-cn.service, with the program as
+# /usr/local/bin/dnv-agent, the modules of deploy/modules-load.d/dnv-cn.conf,
+# the udev rules of deploy/udev/ and its settings as
+# /etc/dnv/dnv-agent-cn.yaml, made from deploy/dnv/dnv-agent-cn.yaml. Its
+# local store is the default folder, /var/lib/dnv, which this unit names and
+# makes. An agent that ran before with a store in another folder finds this
+# one empty and starts as after a lost store (cnagent.md CN2): before its
+# first start under this unit, with the agent stopped, move its files, those
+# whose names start with cn-, cntlr-, clone-bm- or torn-, into /var/lib/dnv.
+#
+# The kit enables nothing. "systemctl start dnv-agent-cn" starts the agent;
+# "systemctl enable dnv-agent-cn" also starts it at boot, once the modules
+# are loaded, configfs and debugfs are mounted and the network is up. The
+# cost of the start at boot: when the agent of a controller node that
+# rebooted answers that it is starting before the worker has begun a
+# failover, each primary on the node keeps its role for up to the start hold
+# while its hosts' IO waits (the scope page, "A reboot that the worker first
+# sees as an agent that answers starting delays the failover"). The cost of
+# leaving it off: after a reboot the agent stays stopped until you start it,
+# each primary on the node fails over where its pool has a standby, and once
+# the node's cntlrs have been unhealthy for the pool's cntlr_unhealthy, 600
+# seconds at the default, the worker replaces each of them on another
+# controller node (dnv-worker.md AR5, AR7).
+#
+# Order: every worker stops before any agent does, and the workers start
+# last, once the agents have started again and their startup passes have
+# ended (architecture.md, Upgrade in lockstep; the operations doc's "Upgrade
+# dnv"). On a machine that also runs dnv-worker.service,
+# "Before=dnv-worker.service" makes systemd stop the worker first when the
+# two stop together, as at shutdown. When they start together, as at boot,
+# it starts the worker's process after the agent's, not after the agent's
+# startup pass: a new worker drives nothing for its first --vote-grace-time
+# seconds (dnv-worker.md VW7), and it holds its verdicts on an agent that
+# answers that it is starting for up to the start hold (dnv-worker.md HL8).
+# Across machines, at an upgrade, and for a unit started or stopped alone,
+# you keep the order yourself.
+#
+# Stop: systemd sends SIGTERM to the agent's main process alone and kills
+# nothing else of the unit (KillMode=process); the agent then stops. It
+# cancels its background work and waits for none of it, and the
+# "nvme disconnect" its sweep runs in the background may go on after it
+# (dnagent.md SH27): inside the kernel's delete of a controller whose target
+# is gone, it waits out nvme_core's admin timeout, which no signal ends.
+# Under KillMode=mixed or control-group, systemd would wait for it before it
+# counts the stop as done, so a restart could leave the agent stopped that
+# long, longer than a controller node that holds a primary may stay stopped
+# (the operations doc's "A planned restart of an agent"). With this mode the
+# next start goes ahead beside it, and systemd logs it as a left-over
+# process; after a crash, the commands the old agent was running are left to
+# end in the same way. Send it no second signal: a second one ends the agent
+# at once, without its stop. Restart=on-failure starts again an agent that
+# exited with an error, such as one whose gRPC address this machine does not
+# hold yet, or one whose start check refused it.
+#
+# Log: the journal. Keep the journal on another filesystem than the store,
+# or cap its size (SystemMaxUse= in journald.conf): an agent that cannot
+# write its store refuses the worker's syncups, a failover's among them (the
+# operations doc's "The logs").
+[Unit]
+Description=dnv controller node agent
+Wants=network-online.target sys-kernel-config.mount sys-kernel-debug.mount
+After=network-online.target systemd-modules-load.service sys-kernel-config.mount sys-kernel-debug.mount
+Before=dnv-worker.service
+
+[Service]
+Type=exec
+ExecStart=/usr/local/bin/dnv-agent cn --config /etc/dnv/dnv-agent-cn.yaml --local-store /var/lib/dnv
+StateDirectory=dnv
+KillMode=process
+Restart=on-failure
+RestartSec=5s
+
+[Install]
+WantedBy=multi-user.target

@@ -310,6 +310,8 @@ The vocabulary of dnv in alphabetical order, one entry per term, with synonyms s
 
 **in-sync guard** — The cn agent's rule that it fails a member the group does not keep, such as an aborted repair's new leg, only while another member keeps the data: one md marks in sync and not faulty, whose leg stays in the `leg_list` and is available. With none, it leaves the array as it is for that pass and the group's row reads ERROR, naming the member (see `cnagent.md` CN12).
 
+**install kit** — The files of `deploy/` an operator installs on a machine beside the binaries: the udev rules, the module lists for each role and for a host, the systemd units of the daemons with an example unit for etcd, and the config examples; the kit enables no unit (see `architecture.md`, Components: invocation reference).
+
 **interceptor** — One of the four shared gRPC interceptors in `common` that every dnv client connection and server chains (`GrpcUnaryClientInterceptor` and its stream and server siblings): they move the trace id between context and gRPC metadata and log every request and reply message, and they never mint an id (see `grpc.md`, T1 to T4).
 
 **invariant key** — A key the data model guarantees present while its parent exists: the revision keys, the globals, the record of every object a conf lists, and the node record a stored side or cntlr names. A read that reaches one through its parent and finds it absent has found a lost invariant, which the gateway never answers `NOT_FOUND` (see `architecture.md`, Key table).

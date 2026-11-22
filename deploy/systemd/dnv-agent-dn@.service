@@ -1,0 +1,85 @@
+# dnv: the disk node agent of one disk, as a template: one instance for each
+# disk, dnv-agent-dn@<name>.service, where <name> is a short name you choose,
+# such as 0 or 1 (architecture.md, Components: invocation reference).
+#
+# Install as /etc/systemd/system/dnv-agent-dn@.service, with the program as
+# /usr/local/bin/dnv-agent, the modules of deploy/modules-load.d/dnv-dn.conf,
+# the udev rules of deploy/udev/ and, for each instance, its settings as
+# /etc/dnv/dnv-agent-dn-<name>.yaml, made from deploy/dnv/dnv-agent-dn-0.yaml.
+# Each instance needs its own disk, gRPC address, nvmet port id and NVMe/TCP
+# port, which its settings name, and its own local store, the folder
+# /var/lib/dnv-dn-<name>, which this unit names and makes: two disk node
+# agents must never share a store, and the folder lies outside the default
+# store /var/lib/dnv, which a controller node agent may use. An agent that ran
+# before with a store in another folder, such as /var/lib/dnv, finds this
+# one empty and starts as after a lost store (dnagent.md DN2 and Known
+# limits): before its first start under this unit, with the agent stopped,
+# move its files, those whose names start with dn-, side- or migr-bm-, into
+# /var/lib/dnv-dn-<name>.
+#
+# The instances of one machine share its kernel, so give them one location:
+# create each disk node with no --location, which takes the machine's host
+# name, or with one location for all of the machine's disk nodes. Two disk
+# node agents of one kernel must never hold the two sides of one leg, and
+# only a shared location keeps a migration from putting a leg's second side
+# on a sibling instance while another location has room (architecture.md,
+# Disk node). It also keeps the legs of a new group on different machines,
+# and the new leg a repair allocates off the machines of the group's legs
+# while another location has room. A one-machine test cluster has neither
+# guard, whatever its locations (for a RAID1 pool it gives each disk node a
+# location of its own: the operations doc's "Choose a node's location",
+# step 4): every migration there puts a leg's second side on a sibling
+# instance, so make no migration on it.
+#
+# The kit enables nothing. "systemctl start dnv-agent-dn@<name>" starts one
+# instance; "systemctl enable dnv-agent-dn@<name>" also starts it at boot,
+# once the modules are loaded, configfs is mounted and the network is up. A
+# disk node holds no primary, so its start at boot delays no failover. The
+# cost of leaving it off: after a reboot the instance stays stopped until you
+# start it, and once its sides have been unhealthy for the pool's
+# side_unhealthy, 600 seconds at the default, the worker repairs each leg
+# they hold onto another disk node, a copy of the whole leg (dnv-worker.md
+# AR8).
+#
+# Order: every worker stops before any agent does, and the workers start
+# last, once the agents have started again and their startup passes have
+# ended (architecture.md, Upgrade in lockstep; the operations doc's "Upgrade
+# dnv"). On a machine that also runs dnv-worker.service,
+# "Before=dnv-worker.service" makes systemd stop the worker first when the
+# two stop together, as at shutdown. When they start together, as at boot,
+# it starts the worker's process after the agent's, not after the agent's
+# startup pass: a new worker drives nothing for its first --vote-grace-time
+# seconds (dnv-worker.md VW7), and it holds its verdicts on an agent that
+# answers that it is starting for up to the start hold (dnv-worker.md HL8).
+# Across machines, at an upgrade, and for a unit started or stopped alone,
+# you keep the order yourself.
+#
+# Stop: systemd sends SIGTERM to the agent's main process alone
+# (KillMode=mixed), which ends its background work as part of its own stop
+# and waits for the commands it runs, save one a fence timer had already
+# started (dnagent.md SH27), and SIGKILL to what of the unit is left once it
+# has exited. Send it no second signal: a second one ends the agent at once,
+# without that stop. Restart=on-failure starts again an agent that exited
+# with an error, such as one whose gRPC address this machine does not hold
+# yet.
+#
+# Log: the journal. Keep the journal on another filesystem than the store,
+# or cap its size (SystemMaxUse= in journald.conf): an agent that cannot
+# write its store refuses the worker's syncups (the operations doc's "The
+# logs").
+[Unit]
+Description=dnv disk node agent %i
+Wants=network-online.target sys-kernel-config.mount
+After=network-online.target systemd-modules-load.service sys-kernel-config.mount
+Before=dnv-worker.service
+
+[Service]
+Type=exec
+ExecStart=/usr/local/bin/dnv-agent dn --config /etc/dnv/dnv-agent-dn-%i.yaml --local-store /var/lib/dnv-dn-%i
+StateDirectory=dnv-dn-%i
+KillMode=mixed
+Restart=on-failure
+RestartSec=5s
+
+[Install]
+WantedBy=multi-user.target

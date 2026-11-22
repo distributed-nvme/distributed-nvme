@@ -1,0 +1,36 @@
+# dnv: the gateway, the API server (architecture.md, Components: invocation
+# reference). Run it on one or more control-plane machines.
+#
+# Install as /etc/systemd/system/dnv-gateway.service, with the program as
+# /usr/local/bin/dnv-gateway and its settings as /etc/dnv/dnv-gateway.yaml,
+# made from deploy/dnv/dnv-gateway.yaml, readable by every user (mode 0644):
+# the gateway needs no root, and the unit runs it as a user of its own that
+# systemd makes for it (DynamicUser=yes).
+#
+# The kit enables nothing. "systemctl start dnv-gateway" starts it;
+# "systemctl enable dnv-gateway" also starts it at boot, once the network is
+# up. It starts whether etcd answers or not, and until etcd answers it fails
+# each call that needs etcd, with ABORTED or by the caller's own deadline,
+# whichever ends first. On a machine that also runs dnv-etcd.service, it
+# starts after etcd and stops before it when the two start or stop together.
+#
+# Order: the gateways stop and start in any order beside the other programs
+# (architecture.md, Upgrade in lockstep; the operations doc's "Upgrade dnv").
+#
+# Stop: on SIGTERM the gateway takes no new call and lets the calls in flight
+# finish. Restart=on-failure starts again a gateway that exited with an
+# error, such as one whose address this machine does not hold yet.
+[Unit]
+Description=dnv gateway
+Wants=network-online.target
+After=network-online.target dnv-etcd.service
+
+[Service]
+Type=exec
+ExecStart=/usr/local/bin/dnv-gateway --config /etc/dnv/dnv-gateway.yaml
+DynamicUser=yes
+Restart=on-failure
+RestartSec=5s
+
+[Install]
+WantedBy=multi-user.target

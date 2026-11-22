@@ -1,0 +1,35 @@
+# dnv: the cdc, the discovery service hosts ask where their subsystems are
+# (architecture.md, Components: invocation reference).
+#
+# Install as /etc/systemd/system/dnv-cdc.service, with the program as
+# /usr/local/bin/dnv-cdc and its settings as /etc/dnv/dnv-cdc.yaml, made
+# from deploy/dnv/dnv-cdc.yaml, readable by every user (mode 0644): the cdc
+# needs no root, and the unit runs it as a user of its own that systemd
+# makes for it (DynamicUser=yes).
+#
+# The kit enables nothing. "systemctl start dnv-cdc" starts it; "systemctl
+# enable dnv-cdc" also starts it at boot, once the network is up. It answers
+# hosts only once it has read etcd. On a machine that also runs
+# dnv-etcd.service, it starts after etcd and stops before it when the two
+# start or stop together.
+#
+# Order: the cdc instances stop and start in any order beside the other
+# programs (architecture.md, Upgrade in lockstep; the operations doc's
+# "Upgrade dnv").
+#
+# Restart=on-failure starts again a cdc that exited with an error, such as
+# one whose address this machine does not hold yet.
+[Unit]
+Description=dnv cdc
+Wants=network-online.target
+After=network-online.target dnv-etcd.service
+
+[Service]
+Type=exec
+ExecStart=/usr/local/bin/dnv-cdc --config /etc/dnv/dnv-cdc.yaml
+DynamicUser=yes
+Restart=on-failure
+RestartSec=5s
+
+[Install]
+WantedBy=multi-user.target

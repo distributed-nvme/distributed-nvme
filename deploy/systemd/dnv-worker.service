@@ -1,0 +1,51 @@
+# dnv: the worker, the program that makes the nodes follow etcd
+# (architecture.md, Components: invocation reference). Run one or more on
+# control-plane machines; workers that run at once share the work.
+#
+# Install as /etc/systemd/system/dnv-worker.service, with the program as
+# /usr/local/bin/dnv-worker and its settings as /etc/dnv/dnv-worker.yaml,
+# made from deploy/dnv/dnv-worker.yaml, readable by every user (mode 0644):
+# the worker needs no root, and the unit runs it as a user of its own that
+# systemd makes for it (DynamicUser=yes).
+#
+# The kit enables nothing. "systemctl start dnv-worker" starts it;
+# "systemctl enable dnv-worker" also starts it at boot, once the network is
+# up. It starts whether etcd answers or not. On a machine that also runs
+# dnv-etcd.service, it starts after etcd and stops before it when the two
+# start or stop together, so that its stop can still reach etcd.
+#
+# Order: every worker stops before any agent does, and the workers start
+# last, once the agents have started again and their startup passes have
+# ended: to a running worker a stopped agent is a failed node, and it would
+# react (architecture.md, Upgrade in lockstep; the operations doc's "Upgrade
+# dnv"). On a machine that also runs an agent, the agent's unit orders
+# itself before this one, so systemd stops this one first when they stop
+# together, as at shutdown. When they start together, as at boot, systemd
+# starts the worker's process after the agent's, not after the agent's
+# startup pass: the worker then drives nothing for its first
+# --vote-grace-time seconds (dnv-worker.md VW7), and it holds its verdicts
+# on an agent that answers that it is starting for up to the start hold
+# (dnv-worker.md HL8). Across machines, at an upgrade, and for a unit
+# started or stopped alone, you keep the order yourself.
+#
+# Stop: on SIGTERM the worker takes itself out of the workers' list and lets
+# its calls in flight finish, which can take up to about 160 seconds at the
+# defaults (dnv-worker.md CM5), longer than systemd's default stop timeout,
+# so TimeoutStopSec= below is longer; a SIGKILL before the end would cut
+# those calls. Restart=on-failure starts again a worker that exited with an
+# error.
+[Unit]
+Description=dnv worker
+Wants=network-online.target
+After=network-online.target dnv-etcd.service
+
+[Service]
+Type=exec
+ExecStart=/usr/local/bin/dnv-worker --config /etc/dnv/dnv-worker.yaml
+DynamicUser=yes
+TimeoutStopSec=180s
+Restart=on-failure
+RestartSec=5s
+
+[Install]
+WantedBy=multi-user.target

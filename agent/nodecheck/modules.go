@@ -260,15 +260,26 @@ func (c *checker) namedModules(ctx context.Context) (map[string]bool, error) {
 		if err != nil {
 			return nil, err
 		}
-		for _, line := range strings.Split(text, "\n") {
-			line = strings.TrimSpace(line)
-			if line == "" || line[0] == '#' || line[0] == ';' {
-				continue
-			}
-			named[moduleName(strings.Fields(line)[0])] = true
+		for _, name := range modulesLoadNames(text) {
+			named[name] = true
 		}
 	}
 	return named, nil
+}
+
+// modulesLoadNames are the modules one modules-load file names, as
+// /sys/module spells them: the first word of each line, blank lines and
+// lines that start with '#' or ';' skipped.
+func modulesLoadNames(text string) []string {
+	var names []string
+	for _, line := range strings.Split(text, "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" || line[0] == '#' || line[0] == ';' {
+			continue
+		}
+		names = append(names, moduleName(strings.Fields(line)[0]))
+	}
+	return names
 }
 
 // The commands each role's agent runs, by name, through its OsClient

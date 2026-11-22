@@ -1,0 +1,17 @@
+# dnv: an example of the gateway's settings, which
+# deploy/systemd/dnv-gateway.service reads with --config. Install as
+# /etc/dnv/dnv-gateway.yaml, mode 0644, and put your own addresses in place of
+# the example ones, from 192.0.2.0/24. Each key is a flag of dnv-gateway
+# (dnv-gateway --help lists them all, with their defaults); a flag given on the
+# command line wins over an environment variable DNV_GATEWAY_<KEY> (the key in
+# capitals, dashes as underscores), and both win over this file. Keep the
+# name's ending, .yaml: dnv reads a settings file in the format its ending
+# names and refuses an ending it does not know, such as .conf.
+#
+# The address and port the gateway listens on for dnvctl and the CSI driver.
+grpc-address: 192.0.2.10:29527
+# The etcd members, as one string of addresses separated by commas, not as
+# a list.
+etcd-endpoints: "192.0.2.10:2379,192.0.2.11:2379,192.0.2.12:2379"
+# How much it logs: debug, info or warn.
+# log-level: info

@@ -519,7 +519,8 @@ SH6. Enumeration on startup: one listing of the prefix through
 `OsClient.ReadDir`, in the agent's own process, on a ctx carrying the SH15
 soft timeout (the store calls the `OsClient` directly, so it applies that
 bound itself); a prefix that is missing, is not a directory or whose listing
-fails in any other way is SH3's fatal case. It filters by the role's
+fails in any other way is SH3's fatal case. It filters every name the
+listing returns, a folder's as a file's, by the role's
 `Local*Path` kind prefixes (`StoreKindDn`, `StoreKindSide`,
 `StoreKindMigrBm` and `StoreKindDnProbe` for the dn; `StoreKindCn`,
 `StoreKindCntlr`, `StoreKindCloneBm`, `StoreKindCnProbe` and

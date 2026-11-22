@@ -8237,6 +8237,121 @@ two ways alone: this rule in effect, byte for byte the shipped text, or an
 mdadm.conf that refuses every format in a strict form and names no dnv
 array; it judges no other rule (`dnagent.md` CM5).
 
+**The install kit.** What an operator installs on a machine beside the
+binaries and the two node settings above is the udev rules above and,
+beside them in `deploy/`:
+
+* under `deploy/modules-load.d/`, one file for each role, `dnv-dn.conf` and
+  `dnv-cn.conf`, each naming every module the node check lists for its role,
+  those it wants loaded and those it wants the kernel to have
+  (`dnagent.md` CM5), and `dnv-host.conf` for a host, naming the module the
+  node plugin's start check names (`csi.md` CSI13). Reason: no agent loads
+  a module, and a module loaded by hand is gone after a reboot.
+* under `deploy/systemd/`, one unit for each daemon on a machine: a
+  template for the dn agent with one instance for each disk, and units for
+  the cn agent, the gateway, the worker and the cdc; and an example unit for
+  one etcd member that carries the requirements of the etcd paragraph above.
+* under `deploy/dnv/`, one config example for each daemon's unit and one
+  for `dnvctl`, each a YAML file whose keys are flags of its program; YAML,
+  since viper takes a config file's format from its name's extension and
+  refuses an extension it does not know.
+
+Tests hold the kit to the code: the module files to the node check's lists,
+each list in a run of lines of its own, and to the node plugin's start
+check, the config keys to the flags and each example to its program's own
+checks of the values it requires, each unit's start line to its program and
+its config example, the agents' stores and their units' stop modes to the
+rules below, the etcd example to `EtcdMaxTxnOps` and
+`EtcdMaxRequestBytes`, and the worker's stop timeout to its drain. What the
+units assume:
+
+* Each daemon is `/usr/local/bin/<program>` and reads its config file under
+  `/etc/dnv` through `--config`. The agents run as root, as the node check
+  must; the gateway, the worker and the cdc run as a user systemd makes for
+  the unit, since none of them needs root or keeps a file.
+* An agent starts after the modules load, configfs is mounted, debugfs too
+  for the cn agent, whose start check reads it (`cnagent.md` CN-CM2), and
+  the network is up. A daemon that exits with an error is started again: an
+  agent or a gateway whose listener cannot open on an address the machine
+  does not hold yet, or a cn agent its start check refused. A port an agent
+  cannot build is a row of its report and leaves the agent running.
+* The unit of each dn instance names the instance's own local store, a
+  folder outside the default store, which the unit makes; the cn agent's
+  store is the default. Reason: two agents of one role that share a store
+  adopt each other's records (Disk node; `dnagent.md` CM2), and a store's
+  listing takes every name that starts as a store kind does, a folder's
+  too (`dnagent.md` SH6), so a store folder inside the default store, named
+  as a kind starts, would be read there as a state file of the agent that
+  keeps that store. An agent that ran with a store elsewhere keeps its
+  state under its unit only once its files are moved into the unit's folder
+  before its first start there; started on the empty folder, it starts as
+  after a lost store (`dnagent.md` DN2, `cnagent.md` CN2).
+* The dn instances of one machine share its kernel, and so one
+  `location`: each is created with none, which takes the machine's host
+  name, or with one that all the machine's disk nodes share. Reason: two dn
+  agents of one kernel must never hold the two sides of one leg, and only a
+  shared `location` keeps a migration's destination off the source's
+  kernel, while another location has a free disk node (Disk node, the
+  `SideToCnNqn` note under Per side). It also keeps the legs of a new group
+  on different machines, and the new leg a repair allocates off the
+  machines of the group's legs while another location has a free disk node
+  (Disk nodes; Per-operation allocation, CreateRepair).
+* An agent's stop signal goes to its main process alone. The dn's unit
+  then kills what of the unit is left, since the dn's stop waits for its
+  background tasks that run children, a fence timer's callback aside
+  (`dnagent.md` SH27). The cn's unit kills nothing else: the cn joins no
+  background task, and its sweep's background `nvme disconnect` may outlive
+  it (`dnagent.md` SH27, `cnagent.md` CN10). Reason: that disconnect can
+  wait out the kernel's admin timeout inside a controller's delete, which
+  no signal ends, and a unit that killed the rest of itself would count its
+  stop as done only once the disconnect had returned, so a restart of a cn
+  agent could leave it stopped longer than a planned restart of a
+  controller node that holds a primary allows (`operations.md`, A planned
+  restart of an agent); left, the disconnect ends on its own beside the
+  next agent. The cost: no unit kill ends a command the old cn agent left,
+  so it runs to its own end beside the next agent, as after a `kill -9` of
+  the agent outside systemd. After a stop, such a command is one that the
+  agent's cancellation had not ended when the agent exited, such as a
+  background disconnect that waits out the admin timeout; after a crash,
+  which no cancellation follows, it is every command the agent had in
+  flight, a path watcher's and a background read's among them.
+* The worker's unit waits on a stop longer than the worker's longest drain
+  (`dnv-worker.md` CM5): its heartbeat's last put and one delete for each
+  role, each within `DefaultEtcdOpTimeout`, then the join of its shard
+  workers within `DefaultWorkerSyncupTimeout` plus `DefaultWorkerPushTimeout`,
+  which is longer than systemd's default stop timeout. Reason: a kill before
+  the end cuts a syncup or a push in flight.
+* On a machine that runs them together, an agent's unit is ordered before
+  the worker's, and the gateway's, the worker's and the cdc's after etcd's.
+  The order is of the processes: a stop of them together, at a shutdown,
+  stops the worker before the agents, the stop order of Upgrade in
+  lockstep, and before etcd, so that its stop reaches etcd; a start of them
+  together, at a boot, starts the worker's process once the agents'
+  processes have started, not once their startup reconciles have ended
+  (`dnagent.md` SH33). What keeps a worker started so from acting on an
+  agent still in its startup reconcile is the worker itself: a fresh worker
+  drives nothing for its first grace window (`dnv-worker.md` VW7), and a
+  round whose agent answers that it is starting holds its verdict for up to
+  the start hold (`dnv-worker.md` HL8). Across machines, at an upgrade, and
+  for a unit started or stopped alone, the operator keeps the order of
+  Upgrade in lockstep.
+* The daemons log to the journal, which on a stock install shares a
+  filesystem with the stores and etcd's data, so the operator keeps the
+  journal apart or caps it (`operations.md`, The logs).
+
+The kit enables no unit, since the start at boot is the operator's choice,
+and for an agent each choice has a cost. The agent of a controller node
+that rebooted fast, started at boot, answers that it is starting, and its
+primaries then keep their role for up to the start hold while their hosts'
+IO waits (`dnv-worker.md` HL8, AR10), an accepted limit of `scope.md`. An
+agent left off stays stopped after a reboot until the operator starts it,
+and the worker reacts at the pools' thresholds as to a failed node: on a
+controller node, it fails over each primary whose pool has a standby and
+replaces the node's cntlrs (`dnv-worker.md` AR5, AR7); on a disk node, it
+repairs each leg the node's sides hold onto another disk node, a copy of
+the whole leg (`dnv-worker.md` AR8). A disk node holds no primary, so its
+agent's start at boot delays no failover.
+
 ## Recorded design decisions
 
 Each decision states the rule it shapes and its reason; the rest of this
