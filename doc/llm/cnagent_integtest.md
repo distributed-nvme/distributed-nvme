@@ -429,7 +429,10 @@ that asks for the counters, which reads them at the call as
   the leftover code and any other failing the stage. A single re-send whose stage checks what that one converge
   did wants code zero, as the converge clears the row the round named
   (`cnagent.md` CN30): redund's resync and early fail, the late flip's first
-  re-send and clone_xfer's giveback.
+  re-send and clone_xfer's giveback. Repair's badstop, badclear and badmdadm
+  stages each make the worker's re-send after the forced start and take
+  whatever it answers, as what they check is md's state after it: the other
+  leg added, its bad-block list and the array clean.
 * **Sides first.** The suite plays the provisioned flip, a side's per-CN rows
   reading provisioning until then (`dnagent.md` DN9, DN10), and converges sides
   before cntlrs, so no leg is provisioning-deferred (`cnagent.md` CN9) and legs
@@ -1353,7 +1356,13 @@ and repair's stop hold, whose holder it ends and whose flag it takes away,
 as another suite's cleanup could not stop the array it holds; the cleanup
 also ends the process repair's held stop leaves holding an array, with the
 suite's device pins, and takes away a hold still armed.
-A cleanup-only run does the scrub alone.
+A cleanup-only run does the scrub alone. The run's exit handler goes on after
+a Ctrl-C, which ends only the command in hand, and after a SIGHUP, which it
+ignores; output that fails partway through the handler, as a terminal that
+closes, can still end it before its removals, which a run under the runner,
+whose output is a file, does not meet (`e2e_integtest.md` E2E6). A Ctrl-C
+while the start-of-run cleanup's helpers clean the VMs ends no helper, and the
+handler waits for them first.
 It takes every `dnv-agent` and every dnv dm device, md array and nvmet
 subsystem on the node, of either role, which is why one dnv suite runs at a
 time in the lab (`layout.md`, Directory tree) — but for two blind spots the

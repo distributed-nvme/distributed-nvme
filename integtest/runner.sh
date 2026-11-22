@@ -65,10 +65,16 @@
 # suite traps once it has set its exit handler, ends once the command it
 # waits on has ended, through its failure branch, with 130, 143 or 129. In
 # its exit handler, a SIGTERM ends it at once, with 143, a SIGHUP changes
-# nothing and a SIGINT ends only the command in hand: so a suite that a
-# Ctrl-C reaches in its end cleanup exits with the code it was ending with,
-# 0 and PASS where that cleanup does not judge the step the Ctrl-C ended, as
-# cdc_test.sh's does not.
+# nothing and a SIGINT ends the command in hand: so a suite that a Ctrl-C
+# reaches in its end cleanup exits with the code it was ending with, 0 and
+# PASS, where that cleanup does not judge the step the Ctrl-C ended, as the
+# cdc and worker suites' do not, and with 1 where it does: the csi, e2e and
+# tutorial suites fail a run whose end cleanup did not finish. The cn and
+# dn suites' handlers first wait for cleanup helpers that a Ctrl-C in main
+# left running. Output that fails partway through a suite's exit handler, as
+# a terminal that closes, can still end the handler before its removals;
+# the runner writes each suite's output to a file, so its runs do not meet
+# that.
 
 set -uo pipefail
 

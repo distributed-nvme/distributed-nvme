@@ -933,12 +933,16 @@ trace id, the tail of every cdc log, the entries in etcd, the target's configfs 
 and the hosts' subsystems, uevent captures, flood sockets, nvme-stas
 journals and the manyhosts case's daemons' services, discovery controllers
 and journals — so the debris is what the developer reads; a cleanup-only run
-does the end-of-run cleanup alone. Order matters, and
-every step tolerates absence: the hosts first, with the flood's idle
-connections closed, the manyhosts case's daemons stopped and their discovery
-controllers disconnected, and nvme-stas stopped, so that their reconnect
-loops die before their targets vanish; then the target, its port links
-first, which is safe because the hosts are already disconnected: a port
+does the end-of-run cleanup alone. The run's exit handler goes on after a
+Ctrl-C, which ends only the command in hand, and after a SIGHUP, which it
+ignores; output that fails partway through the handler, as a terminal that
+closes, can still end it before its removals, which a run under the runner,
+whose output is a file, does not meet (`e2e_integtest.md` E2E6). Order
+matters, and every step tolerates absence: the hosts first, with the flood's
+idle connections closed, the manyhosts case's daemons stopped and their
+discovery controllers disconnected, and nvme-stas stopped, so that their
+reconnect loops die before their targets vanish; then the target, its port
+links first, which is safe because the hosts are already disconnected: a port
 unlinked under a live connection kills the host's controller and the host never
 reconnects by itself; then the first server's processes. Cleanup touches
 only what is the suite's, but for a process a stale pid file on the first

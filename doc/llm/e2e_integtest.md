@@ -491,10 +491,17 @@ the next cleanup, the many-pools case's cut also removing itself on a timer;
 and it tells host0's stamped writer to start no more passes, as its passes
 would write on into a lab other suites then use. A Ctrl-C while the run's
 exit handler runs ends no more than the command in hand, and a SIGHUP ends
-nothing, so the handler goes on; a SIGTERM then ends the run at once, and
-what it has not yet taken off stays. Output that fails, as a terminal that
-has closed does, goes to /dev/null from then on, so that the handler goes
-on then too.
+nothing, so the handler goes on, also where the same signal ends a reader
+of the run's output, as tee, whose loss then makes a write fail; a SIGTERM
+then ends the run at once, and what it has not yet taken off stays. Output
+that has failed when the handler starts, as a terminal that has closed
+does, goes to /dev/null from then on, so that the handler goes on then too.
+Two limits stay: output that fails later, partway through the handler, can
+still end it at a log line before what it has not yet taken off; and a
+SIGHUP that ends a tee the output goes through ends the run by SIGPIPE
+before the handler, at bash's own notice of the command the hangup ended,
+unless that command catches it, as ssh does. A run under the runner writes
+its output to a file and meets neither.
 
 E2E7. **No direct-IO flags to dd.** The guests' dd mishandles direct IO
 (`dnagent_integtest.md`, Assumptions and preflight checks), so every dd
@@ -945,19 +952,19 @@ repair keeps the retired time for a cancel, must reach STARTED, and its
 finish must put the retired leg back in its place, with its own `leg_idx`
 and side, and retire the leg that died; md must then hold the group whole,
 by the array's state words and by the whole flag and in-sync list the
-primary reports beside its rows, and how md took the leg back is logged
-(Known limits). Across the two repairs no cntlr may hold a retired leg;
-host0 reads its data while each leg is dead, while md copies, once the group
-is whole and at the end, and its kernel log, marked before the first disk
-node dies, must report no failed IO, as md fails a member whose IO errs and
-serves the read from the other (`cnagent.md` CN12); no failover may happen.
-The second retired leg's delete must take its side out of its disk node's
-record with the group's extents; that node's returning agent must then
-remove the side no record names (`dnagent.md` DN6) until its counts agree
-with its record (`dnagent.md` DN18), and the primary must hold every leg
-again. The quiet thresholds keep the worker's own leg repair off the first
-dead leg, and the group's `operator_in_charge` flag keeps it off the first
-repair's new leg once that leg dies, as md's bad-block ranges make it a
+primary reports beside its rows, and mdadm's word on the add and the
+sectors md wrote to the leg are logged (Known limits). Across the two repairs
+no cntlr may hold a retired leg; host0 reads its data while each leg is dead,
+while md copies, once the group is whole and at the end, and its kernel log,
+marked before the first disk node dies, must report no failed IO, as md fails
+a member whose IO errs and serves the read from the other (`cnagent.md` CN12);
+no failover may happen. The second retired leg's delete must take its side out
+of its disk node's record with the group's extents; that node's returning
+agent must then remove the side no record names (`dnagent.md` DN6) until its
+counts agree with its record (`dnagent.md` DN18), and the primary must hold
+every leg again. The quiet thresholds keep the worker's own leg repair off the
+first dead leg, and the group's `operator_in_charge` flag keeps it off the
+first repair's new leg once that leg dies, as md's bad-block ranges make it a
 candidate with no threshold, so that the worker's repair cannot race the
 operator's creates (`dnv-worker.md` AR8), and the retire timer deletes only
 an old retired leg (`dnv-worker.md` AR12), so the worker only moves the
@@ -1346,7 +1353,8 @@ create left with as many of the pool's legs as it has disk nodes: at the
 placement bound's disk nodes per guest (E2E3), the create can leave one on
 four disk-node guests, as the lab has, in a run of three or four slices, on
 none of three guests or fewer, and on five or more at other slice counts
-too. The rest is measured, not
+too; or one it left one short, whose last disk node with no side such a
+repair took before the grow drew it. The rest is measured, not
 asserted (`architecture.md`, Known limits, A group that loses every leg at
 once under IO is broken by md). Each cut's blocks are read once the writer has
 ended and the primary reads the groups whole or the pool needs_check, through
@@ -2051,8 +2059,12 @@ the connect attempted.
   side rounds too in one run (`architecture.md`, Known limits). The case logs
   the worker's rounds and reactions of that window and asserts none of it. In
   the second run at 64 the pool that failed over twice was left unbuilt by its
-  second failover, its data group's array inactive on the new primary
-  (`architecture.md`, Known limits), and the case failed at its build wait.
+  second failover, its data group's array inactive on the new primary: the
+  promotion's assembly from one leg was refused, and the next converge's
+  from both legs was ended by the cn agent's soft timeout after mdadm had
+  added one member (`architecture.md`, Known limits, A promotion that outruns
+  its sides can leave a group's array inactive), and the case failed at its
+  build wait.
 * **The many-pools case's logs are large.** Every agent logs each object's
   reads at debug, so a passing run at 64 pools leaves some 22 GB of logs on
   the node guests, which its run cap counts. A failed run is held to no cap:
@@ -2117,10 +2129,13 @@ the connect attempted.
   just before the leg's departure to after the first repair's finish, and
   its range is read back and its volume deleted then, before the leg's
   return, so a catch-up that skipped a region of those writes would leave
-  the returned leg stale there with no read to see it; the case logs which
-  way md went, from
+  the returned leg stale there with no read to see it. The case logs
   mdadm's word on the add and the sectors written to the returned leg, and
-  asserts the whole group and the data, not the way.
+  asserts the whole group and the data, not the way; at one slice those
+  readings do not tell the way, as one chunk of md's bitmap covers the
+  group's whole array (The crash under writes md has not flushed reads md's
+  copy), the writer's writes leave it dirty, and a catch-up from the bitmap
+  then writes the whole array, as a whole copy does.
 * **react's take-over holds the worker's repair created only on the
   primary's controller node.** The reject rule refuses that node's connects
   alone, so a failover inside the hold hands the group to a primary the
@@ -2236,13 +2251,13 @@ the connect attempted.
   flips names the group's absent array, or under `--redund none` its
   `RedundNone` dm-linear (`cnagent.md` CN12, CN30), which adds the rounds
   until that read and one more converge, each converge growing with the
-  slice count (`cnagent.md`, Known limits). One that outruns the flip of one
-  leg of a RAID1 group and not the other's leaves the group's array
-  inactive, which no read names absent, so no re-send builds it and the
-  case fails at its wait for the new primary's build (`architecture.md`,
-  Known limits, A promotion that outruns its sides can leave a group's array
-  inactive). The case bounds that wait only by the build's own and logs how
-  long the write took.
+  slice count (`cnagent.md`, Known limits). Where that converge's assembly
+  of a RAID1 group outlasts the cn agent's soft timeout, which ends it after
+  mdadm has added one member, the group's array stays inactive, which no
+  read names absent, so no re-send builds it and the case fails at its wait
+  for the new primary's build (`architecture.md`, Known limits, A promotion
+  that outruns its sides can leave a group's array inactive). The case bounds
+  that wait only by the build's own and logs how long the write took.
 * **The outage takes etcd away, nothing else, and only once.** The gateway,
   the worker and the cdc run through it, so a program that starts while etcd
   is down (`cdc.md` CM4) is not exercised, nor a fault that waits for a

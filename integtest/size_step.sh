@@ -52,9 +52,10 @@
 # MIN_DISK_GIB; a check round's code is recorded, not judged. Each step
 # prints one "SIZE …" line with its times, the check rounds' codes, the
 # sample, the dm devices and fabrics controllers the guests hold and their
-# room after it, but a cntlrs step that stops among its disk node sides,
-# which prints none and logs only the stop; a header line gives each guest's
-# CPU count, memory and kernel.
+# room after it, but a step that its room check stops before it begins and a
+# cntlrs step that stops among its disk node sides, which print none and log
+# only the stop; a header line gives each guest's CPU count, memory and
+# kernel.
 #
 # A run touches a guest only once both have passed its guard: a guest that
 # runs a dnv-agent, holds a dnv dm device, nvmet subsystem, nvmet host or

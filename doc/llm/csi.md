@@ -914,7 +914,11 @@ success only, at its end; a failing run leaves everything in place and dumps
 diagnostics, but for the taint and the cut, which it removes after the
 diagnostics, the cut also by a timer on the host once its time limit has
 passed, so that no cut outlives a run killed before its cleanup. k3s, the
-hostnames and the identity files stay.
+hostnames and the identity files stay. The run's exit handler goes on after a
+Ctrl-C, which ends only the command in hand, and after a SIGHUP, which it
+ignores; output that fails partway through the handler, as a terminal that
+closes, can still end it before its removals, which a run under the runner,
+whose output is a file, does not meet (`e2e_integtest.md` E2E6).
 
 CSI6. **Test pods run on the hosts.** The control-plane node carries a
 no-schedule taint the suite ensures on every run, and every pod names its
@@ -1132,8 +1136,8 @@ both plugins started there as plain processes with the lab's gateway and
 cdc, after the driver's pods are taken down, since two node plugins on one
 host would follow each other's subsystems. The tests of capabilities the
 driver does not advertise skip on their own; a failure names its test. Then
-the plugins stop, and nothing is left. csi-sanity runs on past the end of
-the driver's ssh when the case's timeout or a signal ends that ssh, so the
+the plugins stop, and nothing is left. csi-sanity runs on past the end of the
+suite's ssh to host0 when the case's timeout or a signal ends that ssh, so the
 cleanup stops it with the plugins.
 
 ### Preflight

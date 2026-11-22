@@ -232,10 +232,7 @@ SSH_OPTS=(-o BatchMode=yes -o StrictHostKeyChecking=accept-new
 # Logging, assertions, failure handling
 # ---------------------------------------------------------------------------
 
-# A write that fails, as to a terminal that has closed, sends the run's
-# output to /dev/null from then on, so that a log line never ends the run's
-# exit handler under set -e.
-log() { echo "$*" >&2 || exec >/dev/null 2>&1; }
+log() { echo "$*" >&2; }
 
 # stage names the step for the failure report and mints the trace id
 # `it-<case>-<step>`, which every cdcctl call of the step then stamps on its
@@ -269,15 +266,20 @@ on_exit() {
 	# command in hand, which it ends unless that command ignores it, a read
 	# of a command's output and an ssh still connecting among them, and the
 	# dump and the removals below go on; a SIGHUP, which a terminal that
-	# closes sends twice, is ignored here and by every command below; a
-	# SIGTERM ends the run at once. Output that fails, as a terminal that
-	# has closed does, goes to /dev/null from then on, so that set -e ends
-	# the handler at no log line: this line tries a write first, and log
-	# does the same at each of its writes. rc keeps the code the run was
-	# ending with, and the run exits with it but on a SIGTERM.
+	# closes sends twice, is ignored here and by every command below, and so
+	# is a SIGPIPE, so that a reader of the run's output that the same
+	# signal ended, as tee, makes a write fail and does not end the run; a
+	# SIGTERM ends the run at once. Output that has failed when the handler
+	# starts, as a terminal that has closed or a tee that a Ctrl-C ended,
+	# goes to /dev/null from then on: this line tries a write first. Output
+	# that fails later, partway through the handler, can still end it at a
+	# log line before its removals; a run under the runner writes to a file
+	# and does not meet it. rc keeps the code the run was ending
+	# with, and the run exits with it but on a SIGTERM.
 	trap - TERM
 	trap : INT
 	trap '' HUP
+	trap '' PIPE
 	printf '\n' >&2 2>/dev/null || exec >/dev/null 2>&1
 	if [ "$rc" -eq 0 ]; then
 		if [ "$CLEANUP_ONLY" -eq 0 ] && [ "$SETUP_DONE" -eq 1 ]; then
@@ -1978,7 +1980,17 @@ cleanup() { # <end 0|1>
 	local end=$1
 	log "[cleanup] hosts: stop the stafd copies and stas, stop captures," \
 		"disconnect everything ours"
-	ship_helpers
+	# In a passing run's end cleanup a die while the helpers are shipped, as
+	# after a Ctrl-C there, would skip every removal below, so the copies the
+	# servers hold since setup do them then; the start cleanup and a
+	# cleanup-only run still stop at a failed shipping.
+	if [ "$end" = 1 ] && [ "$CLEANUP_ONLY" -eq 0 ]; then
+		( ship_helpers ) 2>/dev/null ||
+			log "[cleanup] shipping the helpers failed; the removals go on" \
+				"with the copies the servers hold"
+	else
+		ship_helpers
+	fi
 	local hostsel
 	for hostsel in h1 h2; do
 		ok_or_true h "$hostsel" "$WORK/cdc_host.sh many_stop $WORK"

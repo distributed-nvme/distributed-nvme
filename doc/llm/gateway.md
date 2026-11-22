@@ -2357,14 +2357,18 @@ every behavior file in place and prints its diagnostics — the crash lines
 of every log, the failing stage and its trace id, the tail of every process
 log, a full dump of the dnv
 keys and the listening ports — so the debris is what the developer reads;
-a cleanup-only run does the cleanup alone.
-Cleanup signals every daemon the suite started — etcd, the gateways and the
-fake agents — by its recorded pid with a pattern kill of the programs under
-the work directory as a safety net, and removes the suite's work directory
-and the crash scan's sample folder in `/var/tmp` by its name; nothing else
-outside that directory is touched but for a process a stale pid file names,
-as a pid is signalled with no check that it still runs the suite's program,
-and the suite leaves no kernel state, no packages and no users behind.
+a cleanup-only run does the cleanup alone. The run's exit handler goes on
+after a Ctrl-C, which ends only the command in hand, and after a SIGHUP, which
+it ignores; output that fails partway through the handler, as a terminal that
+closes, can still end it before its removals, which a run under the runner,
+whose output is a file, does not meet (`e2e_integtest.md` E2E6). Cleanup
+signals every daemon the suite started — etcd, the gateways and the fake
+agents — by its recorded pid with a pattern kill of the programs under the
+work directory as a safety net, and removes the suite's work directory and the
+crash scan's sample folder in `/var/tmp` by its name; nothing else outside
+that directory is touched but for a process a stale pid file names, as a pid
+is signalled with no check that it still runs the suite's program, and the
+suite leaves no kernel state, no packages and no users behind.
 
 **The driver, `gatewayctl`.** `gatewayctl` is the gRPC driver of this
 suite, in the style of the agent suites' drivers: the gateway serves

@@ -7147,13 +7147,13 @@ stores instead is CN23's.
   read, and the converge that round's re-send brings; each converge, and
   the read, grow with the slice count. No worker that drives the pool, as
   in a handoff between owners, means no re-send: the stack waits for the
-  next owner's first round (next). A promotion that outruns the flip of one
-  leg of a RAID1 group and not the other's builds no stack at all: md
-  starts the array inactive from the one member, which this agent leaves
-  as it is (CN12) and no read names absent, so no re-send comes, and the
-  pause lasts until the worker fails the pool over (`architecture.md`,
-  Known limits, A promotion that outruns its sides can leave a group's array
-  inactive).
+  next owner's first round (next). An assembly of a RAID1 group that
+  outlasts the soft timeout (`dnagent.md` SH15) builds no stack at all: its
+  SIGTERM ends mdadm after it has added one member, and md holds the array
+  inactive with that member, which this agent leaves as it is (CN12) and no
+  read names absent, so no re-send comes, and the pause lasts until the
+  worker fails the pool over (`architecture.md`, Known limits, A promotion
+  that outruns its sides can leave a group's array inactive).
 * The cn agent converges only in a `SyncupCntlr` and in the startup
   reconcile (CN10, No converge in the background), so while no worker
   drives the pool — a handoff between owners (`dnv-worker.md` VW7) — a

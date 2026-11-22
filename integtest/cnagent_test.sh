@@ -299,10 +299,7 @@ CASES=(nodecheck smoke redund repair teardown thinbm torn discard isolation
 # Logging, assertions, failure handling
 # ---------------------------------------------------------------------------
 
-# A write that fails, as to a terminal that has closed, sends the run's
-# output to /dev/null from then on, so that a log line never ends the run's
-# exit handler under set -e.
-log() { echo "$*" >&2 || exec >/dev/null 2>&1; }
+log() { echo "$*" >&2; }
 
 # stage names the step for the failure report and mints the trace id the
 # driver sends (cnagent_integtest.md, The driver: `cnagentctl`): one id shared
@@ -593,16 +590,24 @@ on_exit() {
 	# command in hand, which it ends unless that command ignores it, a read
 	# of a command's output and an ssh still connecting among them, and the
 	# dump and the removals below go on; a SIGHUP, which a terminal that
-	# closes sends twice, is ignored here and by every command below; a
-	# SIGTERM ends the run at once. Output that fails, as a terminal that
-	# has closed does, goes to /dev/null from then on, so that set -e ends
-	# the handler at no log line: this line tries a write first, and log
-	# does the same at each of its writes. rc keeps the code the run was
+	# closes sends twice, is ignored here and by every command below, and so
+	# is a SIGPIPE, so that a reader of the run's output that the same
+	# signal ended, as tee, makes a write fail and does not end the run; a
+	# SIGTERM ends the run at once. Output that has failed when the handler
+	# starts, as a terminal that has closed or a tee that a Ctrl-C ended,
+	# goes to /dev/null from then on: this line tries a write first. Output
+	# that fails later, partway through the handler, can still end it at a
+	# log line before its removals; a run under the runner writes to a file
+	# and does not meet it. The helpers of a cleanup_all that main
+	# ran are waited for first (HELPER_PIDS). rc keeps the code the run was
 	# ending with, and the run exits with it but on a SIGTERM.
 	trap - TERM
 	trap : INT
 	trap '' HUP
+	trap '' PIPE
 	printf '\n' >&2 2>/dev/null || exec >/dev/null 2>&1
+	local pid
+	for pid in "${HELPER_PIDS[@]}"; do helper_wait "$pid"; done
 	if [ "$rc" -eq 0 ]; then
 		if [ "$CLEANUP_ONLY" -eq 0 ] && [ "$SETUP_DONE" -eq 1 ]; then
 			log ""
@@ -5514,24 +5519,36 @@ wipe_all() {
 }
 
 # helper_wait waits for the helper job <pid> to end, whatever its status.
-# cleanup_all's helpers ignore SIGINT themselves, as a background job of a
-# shell that traps SIGINT, as the exit handler does, takes it at its default
-# action, so a Ctrl-C ends none of them; the Ctrl-C ends a wait at once
-# instead, so the wait is made again until the job has ended: the handler
-# goes on, to a next phase or to its exit, only once no helper still cleans
-# a VM.
+# cleanup_all starts each helper as a brace group in the background, which
+# bash, with no job control, starts with SIGINT ignored whatever this
+# shell's trap, and the group's own trap '' INT keeps it so (a function
+# call started alone in the background, as `helper_ok … &`, takes SIGINT
+# at its default action instead, whatever this shell's trap); so a Ctrl-C
+# ends none of them. The Ctrl-C ends a wait at once instead, so the wait
+# is made again while the job runs: the handler goes on, to a next phase or
+# to its exit, only once no helper still cleans a VM. A job already waited
+# for is no child any more, and its wait returns at once.
 helper_wait() { # <pid>
-	until wait "$1"; do
-		kill -0 "$1" 2>/dev/null || return 0
+	local rc
+	while :; do
+		rc=0
+		wait "$1" 2>/dev/null || rc=$?
+		[ "$rc" -gt 128 ] && kill -0 "$1" 2>/dev/null || return 0
 	done
 }
+
+# HELPER_PIDS holds the helper jobs of the cleanup_all phase in hand. A
+# Ctrl-C in main ends cleanup_all's waits through main's INT trap but ends
+# no helper, so on_exit waits for them before anything else.
+HELPER_PIDS=()
 
 # cleanup_all runs cnagent_integtest.md, Teardown and cleanup, as two cross-VM
 # phases: within a phase the two VMs run
 # concurrently, but no VM starts phase 2 until both finished phase 1, because
 # a clone on one VM flushes through a transfer export on the other.
 cleanup_all() {
-	local idx pid pids=()
+	local idx pid
+	HELPER_PIDS=()
 	for idx in 1 2; do
 		# The other VM's ip is what a partition rule names (case T's S4 on
 		# vm2, case A's degrade on vm1), and only this VM can remove it, so
@@ -5541,19 +5558,20 @@ cleanup_all() {
 			helper_ok "$idx" \
 				"cleanup_phase1 $(hex16 "${CNID[$idx]}") ${IP[$((3 - idx))]}"
 		} &
-		pids+=($!)
+		HELPER_PIDS+=($!)
 	done
-	for pid in "${pids[@]}"; do helper_wait "$pid"; done
-	pids=()
+	for pid in "${HELPER_PIDS[@]}"; do helper_wait "$pid"; done
+	HELPER_PIDS=()
 	for idx in 1 2; do
 		{
 			trap '' INT
 			helper_ok "$idx" \
 				"cleanup_phase2 $(hex16 "${CNID[$idx]}") $(hex16 "${DNID[$idx]}")"
 		} &
-		pids+=($!)
+		HELPER_PIDS+=($!)
 	done
-	for pid in "${pids[@]}"; do helper_wait "$pid"; done
+	for pid in "${HELPER_PIDS[@]}"; do helper_wait "$pid"; done
+	HELPER_PIDS=()
 }
 
 diagnostics() {

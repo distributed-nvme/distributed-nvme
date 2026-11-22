@@ -880,10 +880,7 @@ FRAME=@@e2e-frame@@
 # assert_parses (dnvctl_test.sh))
 # ---------------------------------------------------------------------------
 
-# A write that fails, as to a terminal that has closed, sends the run's
-# output to /dev/null from then on, so that a log line never ends the run's
-# exit handler under set -e.
-log() { echo "$*" >&2 || exec >/dev/null 2>&1; }
+log() { echo "$*" >&2; }
 
 # stage names the step for the failure report and mints the trace id. Every
 # dnvctl call of the stage sends it; the gateway's records carry it, and so do
@@ -965,15 +962,22 @@ on_exit() {
 	# command in hand, which it ends unless that command ignores it, a read
 	# of a command's output and an ssh still connecting among them, and the
 	# dump and the removals below go on; a SIGHUP, which a terminal that
-	# closes sends twice, is ignored here and by every command below; a
-	# SIGTERM ends the run at once. Output that fails, as a terminal that
-	# has closed does, goes to /dev/null from then on, so that set -e ends
-	# the handler at no log line: this line tries a write first, and log
-	# does the same at each of its writes. rc keeps the code the run was
-	# ending with, and the run exits with it but on a SIGTERM.
+	# closes sends twice, is ignored here and by every command below, and so
+	# is a SIGPIPE, so that a reader of the run's output that the same
+	# signal ended, as tee, makes a write fail and does not end the run; a
+	# SIGTERM ends the run at once. Output that has failed when the handler
+	# starts, as a terminal that has closed or a tee that a Ctrl-C ended,
+	# goes to /dev/null from then on: this line tries a write first. Output
+	# that fails later, partway through the handler, can still end it at a
+	# log line before its removals; a run under the runner writes to a file
+	# and does not meet it. rc keeps the code the run was ending
+	# with, and the run exits with it but on a SIGTERM and after an end
+	# cleanup that did not finish, as one whose verb a Ctrl-C ended, which
+	# turns rc to 1 below.
 	trap - TERM
 	trap : INT
 	trap '' HUP
+	trap '' PIPE
 	printf '\n' >&2 2>/dev/null || exec >/dev/null 2>&1
 	# --keep-logs: the logs of the case that ran last, before the end cleanup
 	# removes them on a pass, and on a failure too, since the next run's start
@@ -20874,8 +20878,10 @@ copy_repair() {
 # HOW MD TAKES THE OLD LEG BACK IS LOGGED, NOT ASSERTED (e2e_integtest.md,
 # Known limits): md catches a returned member up from its write-intent
 # bitmap, or copies it whole when it took it as a new member, and the step
-# logs which, from mdadm's own word on the add and from the sectors written
-# to the old leg's member (copy_reuse_catchup). Either way the group must end
+# logs mdadm's own word on the add and the sectors written to the old leg's
+# member (copy_reuse_catchup), which at one slice do not tell the two apart:
+# one bitmap chunk covers the group's whole array, and step 5's stamped
+# writer leaves it dirty. Either way the group must end
 # whole, host0 must read SHA0, and its kernel log since step 5's mark must
 # report no failed IO.
 
@@ -20941,8 +20947,9 @@ copy_reuse_catchup() { # <mark> <leg id>
 		log "  md's catch-up of leg $2: $wsect sector(s) written to its" \
 			"member on the primary since the primary connected it, against" \
 			"the $total sectors of the group's extents (a whole copy writes" \
-			"about all of them, a catch-up from the bitmap only what was" \
-			"written while the leg was away)"
+			"about all of them, a catch-up from the bitmap the chunks written" \
+			"while the leg was away, all of them where one chunk covers the" \
+			"array)"
 	else
 		log "  md's catch-up of leg $2: its member $name could not be read: $mrd"
 	fi
@@ -28741,8 +28748,10 @@ react_fsync_kmsg() { # <tag>
 # (react_snapshot, CreateRepair), drew a guest every disk node of which held
 # a side: one the create left with as many of the pool's legs as it has disk
 # nodes, as it can on four disk-node guests in a run of three or four slices
-# at the placement bound's disk nodes per guest (E2E3, derive_params). A run
-# without redundancy, whose groups have one leg, skips the step.
+# at the placement bound's disk nodes per guest (E2E3, derive_params), or one
+# it left one short, whose last disk node with no side such a repair took
+# before the grow drew it. A run without redundancy, whose groups have one
+# leg, skips the step.
 REACT_GCUT_SECS="3 8 20 60"
 REACT_GCUT_CN=-1
 REACT_GCUT_WRITES=12
@@ -33604,7 +33613,9 @@ space_summary() {
 		log "$row"
 	done
 	log "  peak:    $SPACE_RUN_MAX_TOTAL bytes on all guests" \
-		"(cap $RUN_SHAPE_CAP_BYTES at the run's shape), largest backing file" \
+		"(cap $RUN_SHAPE_CAP_BYTES at the run's shape, or the case's own run" \
+		"cap, which its row names, in the many-pools case and the long run)," \
+		"largest backing file" \
 		"$SPACE_RUN_MAX_BACKING bytes (cap $DN_CAP_BYTES per file at the run's" \
 		"shape, or a many-pools file's own where that is larger, and the" \
 		"backing file's size in the long run)"

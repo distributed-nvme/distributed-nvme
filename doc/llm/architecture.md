@@ -6471,8 +6471,8 @@ new primary's optimized flip releases it once its stack is built
 (new_primary step 1) makes the pause longer by the rounds until a read
 that starts after the flips names the group, and by the converge of the
 `SyncupCntlr` the worker re-sends on that name (`cnagent.md` CN10, CN30;
-`cnagent.md`, Known limits), or, where it outruns the flip of one leg of a
-RAID1 group and not the other's, leaves that array inactive and the pool
+`cnagent.md`, Known limits), or, where that converge's assembly of a RAID1
+group outlasts the soft timeout, leaves that array inactive and the pool
 unbuilt (Known limits, A promotion that outruns its sides can leave a group's
 array inactive), and never turns it into IO errors: the new primary builds its
 groups only over available legs, so no stack it builds reaches a side that
@@ -9969,19 +9969,27 @@ document and only pointed to here.
   when it creates many volumes at once (`csi.md`, Known limits).
 * **A promotion that outruns its sides can leave a group's array inactive.**
   A new primary whose converge runs before a group's sides have opened its
-  path assembles the group's array from the legs it reaches; mdadm then
-  leaves a RAID1 array with one of its two members inactive, and an
-  inactive array is left as it is and reported as the group's error
-  (`cnagent.md` CN12), which sets the primary's error epoch (`dnv-worker.md`
-  HL2), while the worker re-sends the promotion only once a read names the
-  group's array absent (`dnv-worker.md` RW14). The pool then has no thin
-  pool on its primary until, by the rules, the worker fails it over to its
+  path assembles the group's array from the legs it reaches. mdadm refuses
+  a RAID1 array from one of its two members whose superblock still counts
+  both and leaves no array (`cnagent_integtest.md`, Lab facts), so a later
+  read names the array absent and the converge the worker re-sends on that
+  name assembles it from both legs (`dnv-worker.md` RW14); but an assembly
+  that outlasts the soft timeout is ended by its SIGTERM (`dnagent.md`
+  SH15) after mdadm has added one member, and md then holds the array
+  inactive with that member. An inactive array is left as it is and
+  reported as the group's error (`cnagent.md` CN12), which sets the
+  primary's error epoch (`dnv-worker.md` HL2), and no read names it
+  absent, so the worker re-sends nothing. The pool then has no thin pool
+  on its primary until, by the rules, the worker fails it over to its
   healthy standby once that error has lasted the cntlr threshold, a
   settling primary's threshold (`dnv-worker.md` AR5); no run has waited
   that long. Seen in one of three runs of the e2e suite's many-pools case
-  at 64 pools, on a pool that failed over twice while the pools built, the
-  second time while the disk nodes were still opening paths
-  (`e2e_integtest.md`, Known limits).
+  at 64 pools, on a pool that failed over twice while the pools built: on
+  its second new primary, while the disk nodes were still opening paths,
+  the agent's records show the promotion's assembly of the data group from
+  one leg refused, then the next converge's assembly from both legs ended
+  by the soft timeout's SIGTERM, then the group read `inactive`, with md
+  holding the array with one member (`e2e_integtest.md`, Known limits).
 * **An old primary cut off from the network serves again for a moment when
   it comes back.** Cut off, its agent hears no syncup, so its namespaces stay
   in their optimized group while the failover moves the pool, and its sides

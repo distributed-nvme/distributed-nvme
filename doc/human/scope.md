@@ -1789,18 +1789,20 @@ failover's among them.
   shows the first window, with an old primary whose agent is stopped; the
   other windows and the Kubernetes case are not seen in the lab.
 - **A failover while the disk nodes are still opening a pool's paths can
-  leave the pool unbuilt.** When the new primary builds before the disk nodes
-  have opened its paths to every copy of a group, the group's RAID1 array can
-  start inactive with one copy, and nothing starts it again: the pool serves
-  nothing. By dnv's rules the worker then fails the pool over to its
-  standby once the error has lasted the cntlr threshold, 600 seconds at
-  the default. The run that met it had raised that threshold to 1800
-  seconds and gave up its wait after 1200 seconds, so no run has reached
-  that failover. The e2e suite's many-pools case saw it once, in one of
-  three builds of 64 pools at once, on a pool that had finished building
-  and then failed over twice while the other pools still built, the second
-  time while the disk nodes were still opening its paths. State: fix later;
-  not decided yet.
+  leave the pool unbuilt.** When the new primary builds while the disk nodes
+  are still opening its paths, it starts a group's RAID1 array only once both
+  copies are reachable, and on a busy controller node that start can take
+  longer than the 3 seconds the node's agent gives any command, which then
+  stops it halfway. The array then stays inactive with one copy, and nothing
+  starts it again: the pool serves nothing. By dnv's rules the worker then
+  fails the pool over to its standby once the error has lasted the cntlr
+  threshold, 600 seconds at the default. The run that met it had raised that
+  threshold to 1800 seconds and gave up its wait after 1200 seconds, so no run
+  has reached that failover. The e2e suite's many-pools case saw it once, in
+  one of three builds of 64 pools at once, on a pool that had finished
+  building and then failed over twice while the other pools still built, the
+  second time while the disk nodes were still opening its paths. State: fix
+  later; not decided yet.
 - **Creating many volumes at once can fail over volumes that are already
   built.** A controller node that builds many new primaries at once can
   answer the worker's check rounds of the primaries it has finished with

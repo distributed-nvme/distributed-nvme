@@ -59,9 +59,11 @@ k3s_hit() { # <text>
 		grep -iE 'k3s|rancher' | head -n 1 || true
 }
 
-# The packages the tutorials install. A lab guest that has one of them at
-# another version than its candidate is refused at preflight: the tutorial's
-# install would upgrade a tool the other suites run with.
+# The packages the tutorials install. In the all-in-one part a guest that has
+# one of them at another version than its candidate is refused at
+# preflight: the tutorial's install would upgrade a tool the other suites
+# run with. The CSI part lets the install upgrade one on the k3s server
+# node, where no other suite runs a node's tools, and logs it.
 AIO_PKGS=(nvme-cli mdadm nvme-stas dmsetup thin-provisioning-tools)
 CSI_PKGS=(docker.io)
 # The udev rule files the tutorials install and their teardowns remove.
@@ -119,10 +121,7 @@ RELEASE_OUT=""
 SSH_OPTS=(-o BatchMode=yes -o StrictHostKeyChecking=accept-new
 	-o ConnectTimeout=15 -o ServerAliveInterval=15)
 
-# A write that fails, as to a terminal that has closed, sends the run's
-# output to /dev/null from then on, so that a log line never ends the run's
-# exit handler under set -e.
-log() { echo "$*" >&2 || exec >/dev/null 2>&1; }
+log() { echo "$*" >&2; }
 
 stage() {
 	STAGE=$1
@@ -1524,15 +1523,22 @@ on_exit() {
 	# command in hand, which it ends unless that command ignores it, a read
 	# of a command's output and an ssh still connecting among them, and the
 	# dump and the removals below go on; a SIGHUP, which a terminal that
-	# closes sends twice, is ignored here and by every command below; a
-	# SIGTERM ends the run at once. Output that fails, as a terminal that
-	# has closed does, goes to /dev/null from then on, so that set -e ends
-	# the handler at no log line: this line tries a write first, and log
-	# does the same at each of its writes. rc keeps the code the run was
-	# ending with, and the run exits with it but on a SIGTERM.
+	# closes sends twice, is ignored here and by every command below, and so
+	# is a SIGPIPE, so that a reader of the run's output that the same
+	# signal ended, as tee, makes a write fail and does not end the run; a
+	# SIGTERM ends the run at once. Output that has failed when the handler
+	# starts, as a terminal that has closed or a tee that a Ctrl-C ended,
+	# goes to /dev/null from then on: this line tries a write first. Output
+	# that fails later, partway through the handler, can still end it at a
+	# log line before its removals; a run under the runner writes to a file
+	# and does not meet it. rc keeps the code the run was ending
+	# with, and the run exits with it but on a SIGTERM and after a failed end
+	# cleanup, as one whose step a Ctrl-C ended, which exits 1 with LAB NOT
+	# CLEAN.
 	trap - TERM
 	trap : INT
 	trap '' HUP
+	trap '' PIPE
 	printf '\n' >&2 2>/dev/null || exec >/dev/null 2>&1
 	if [ "$CLEANUP_ONLY" = 1 ]; then
 		[ "$rc" = 0 ] && log "" && log "PASS"

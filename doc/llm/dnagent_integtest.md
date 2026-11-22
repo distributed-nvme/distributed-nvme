@@ -481,7 +481,13 @@ trace id and, when the failing case is zeroing, a migration case, teardown or
 store_full, the last info of every side that case has set up since it last
 tore all its sides down, an info read's, which shows the side as the last
 converge or read left it and answers even while a converge is wedged. A
-cleanup-only run does the scrub alone. It takes every `dnv-agent` and every
+cleanup-only run does the scrub alone. The run's exit handler goes on after a
+Ctrl-C, which ends only the command in hand, and after a SIGHUP, which it
+ignores; output that fails partway through the handler, as a terminal that
+closes, can still end it before its removals, which a run under the runner,
+whose output is a file, does not meet (`e2e_integtest.md` E2E6). A Ctrl-C
+while the start-of-run cleanup's helpers clean the VMs ends no helper, and the
+handler waits for them first. It takes every `dnv-agent` and every
 dnv dm device on the node, of either role, which is why one dnv suite runs at
 a time in the lab (`layout.md`, Directory tree), and the blocksize case's
 nvmet port and loop devices beside the suite's own. Each step is best-effort,
