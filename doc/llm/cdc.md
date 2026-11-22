@@ -933,29 +933,28 @@ trace id, the tail of every cdc log, the entries in etcd, the target's configfs 
 and the hosts' subsystems, uevent captures, flood sockets, nvme-stas
 journals and the manyhosts case's daemons' services, discovery controllers
 and journals — so the debris is what the developer reads; a cleanup-only run
-does the end-of-run cleanup alone. The run's exit handler goes on after a
-Ctrl-C, which ends only the command in hand, and after a SIGHUP, which it
-ignores; output that fails partway through the handler, as a terminal that
-closes, can still end it before its removals, which a run under the runner,
-whose output is a file, does not meet (`e2e_integtest.md` E2E6). Order
-matters, and every step tolerates absence: the hosts first, with the flood's
-idle connections closed, the manyhosts case's daemons stopped and their
-discovery controllers disconnected, and nvme-stas stopped, so that their
-reconnect loops die before their targets vanish; then the target, its port
-links first, which is safe because the hosts are already disconnected: a port
-unlinked under a live connection kills the host's controller and the host never
-reconnects by itself; then the first server's processes. Cleanup touches
-only what is the suite's, but for a process a stale pid file on the first
-server names — the test subsystems and the discovery
+does the end-of-run cleanup alone. A run that SIGTERM, SIGINT or SIGHUP stops
+before its exit handler exits non-zero and logs no PASS; the handler's
+removals are best effort, as a signal while they run, a dead terminal or tee
+or a full disk can end them early; after a stopped or failed run, run the
+suite's `--cleanup-only`, as every lab chain does (`e2e_integtest.md` E2E6).
+In the cleanup, order matters, and every step tolerates absence: the hosts
+first, with the flood's idle connections closed, the manyhosts case's daemons
+stopped and their discovery controllers disconnected, and nvme-stas stopped,
+so that their reconnect loops die before their targets vanish; then the
+target, its port links first, which is safe because the hosts are already
+disconnected: a port unlinked under a live connection kills the host's
+controller and the host never reconnects by itself; then the first server's
+processes. Cleanup touches only what is the suite's, but for a process a stale
+pid file on the first server names — the test subsystems and the discovery
 controllers that point at the fleet, never every subsystem of a host; on a
-host the uevent capture and the flood by the pid files they leave in the
-work directory, never a process of the host's own; on the first server its
-processes by recorded pid, with no check that a pid still runs a program
-under the work directory, and with a pattern kill of the programs under the
-work directory as a safety net —
-and leaves nvme-stas installed and the kernel modules loaded; the
-end-of-run cleanup also removes the work directories and unmasks
-nvme-cli's autoconnect unit.
+host the uevent capture and the flood by the pid files they leave in the work
+directory, never a process of the host's own; on the first server its
+processes by recorded pid, with no check that a pid still runs a program under
+the work directory, and with a pattern kill of the programs under the work
+directory as a safety net — and leaves nvme-stas installed and the kernel
+modules loaded; the end-of-run cleanup also removes the work directories and
+unmasks nvme-cli's autoconnect unit.
 
 **The driver, `cdcctl`.** `cdcctl` is the etcd driver that plays the
 gateway and the worker for `CdcEntry` keys only: it formats the keys

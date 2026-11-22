@@ -7147,10 +7147,11 @@ stores instead is CN23's.
   read, and the converge that round's re-send brings; each converge, and
   the read, grow with the slice count. No worker that drives the pool, as
   in a handoff between owners, means no re-send: the stack waits for the
-  next owner's first round (next). An assembly of a RAID1 group that
-  outlasts the soft timeout (`dnagent.md` SH15) builds no stack at all: its
-  SIGTERM ends mdadm after it has added one member, and md holds the array
-  inactive with that member, which this agent leaves as it is (CN12) and no
+  next owner's first round (next). An assembly of a RAID1 group that the
+  soft timeout (`dnagent.md` SH15) ends after mdadm has added a member and
+  before it has started the array builds no stack at all: md holds the
+  array inactive with the members added, which this agent leaves as it is
+  (CN12) and no
   read names absent, so no re-send comes, and the pause lasts until the
   worker fails the pool over (`architecture.md`, Known limits, A promotion
   that outruns its sides can leave a group's array inactive).

@@ -986,25 +986,25 @@ status.
 
 **Cleanup.** Cleanup runs unconditionally at the start of every run, and at
 the end only on success; a cleanup-only run does it alone and then verifies
-that both ports are free and the work directory is gone. The run's exit
-handler goes on after a Ctrl-C, which ends only the command in hand, and after
-a SIGHUP, which it ignores; output that fails partway through the handler, as
-a terminal that closes, can still end it before its removals, which a run
-under the runner, whose output is a file, does not meet (`e2e_integtest.md`
-E2E6). A failing run leaves the work directory, the fake's log and both of its
-files in place and prints its diagnostics — the crash lines of every log, the
-failing stage and its trace id, the fake's recent request records and its
-behavior-file and state-file records, both files verbatim, the last
-invocation's exit code and output, the listeners on the two ports and the
-suite's processes — so the debris is what the developer reads. Cleanup signals
-the fake by its recorded pid, only while the first word of that pid's command
-line is still a program under the work directory, so a pid the kernel has
-given to another process since is left alone, with a pattern kill of the
-programs under the work directory as a safety net for it and for a straggling
-dnvctl, which runs in the foreground of each step's ssh and has no pid file,
-then removes the work directory and the crash scan's sample folder in
-`/var/tmp` by its name; no other file outside the work directory is removed,
-and no process another suite started is signalled.
+that both ports are free and the work directory is gone. A run that SIGTERM,
+SIGINT or SIGHUP stops before its exit handler exits non-zero and logs no
+PASS; the handler's removals are best effort, as a signal while they run, a
+dead terminal or tee or a full disk can end them early; after a stopped or
+failed run, run the suite's `--cleanup-only`, as every lab chain does
+(`e2e_integtest.md` E2E6). A failing run leaves the work directory, the fake's
+log and both of its files in place and prints its diagnostics — the crash
+lines of every log, the failing stage and its trace id, the fake's recent
+request records and its behavior-file and state-file records, both files
+verbatim, the last invocation's exit code and output, the listeners on the two
+ports and the suite's processes — so the debris is what the developer reads.
+Cleanup signals the fake by its recorded pid, only while the first word of
+that pid's command line is still a program under the work directory, so a pid
+the kernel has given to another process since is left alone, with a pattern
+kill of the programs under the work directory as a safety net for it and for a
+straggling dnvctl, which runs in the foreground of each step's ssh and has no
+pid file, then removes the work directory and the crash scan's sample folder
+in `/var/tmp` by its name; no other file outside the work directory is
+removed, and no process another suite started is signalled.
 
 **The fake gateway, `fakegateway`.** `integtest/fakegateway` stands in for
 the whole control plane so that the suite can read the exact request a

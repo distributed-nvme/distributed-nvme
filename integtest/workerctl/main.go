@@ -1145,7 +1145,8 @@ func cmdPing(g *globals, args []string) {
 // cmdConstants prints, as one JSON object, the common package's constants a
 // shell suite reads instead of typing: the request size every etcd serving
 // dnv is started with, transaction budgets and their factors, the slice
-// ceiling, the health timers, a DN's metadata area, the strides of the id
+// ceiling, the health timers, the etcd client's budget of one operation, a
+// DN's metadata area, the strides of the id
 // step and the cdc's pending cap and pre-Connect deadline. It exists because
 // a shell suite cannot import common: every shell suite that starts an etcd
 // has to launch it with --max-txn-ops=common.EtcdMaxTxnOps and
@@ -1173,7 +1174,10 @@ func cmdPing(g *globals, args []string) {
 // thin block and the stripe a cluster conf that names none takes with it
 // (model.DefaultStripeSize), which the gateway suite's smoke case pins the
 // stored confs to; a pool that names none takes that stripe narrowed to its
-// slice count (model.FitStripe). Then MaxNvmeTcpCmdBytes, the most data one
+// slice count (model.FitStripe). Then DefaultEtcdOpTimeout, the etcd
+// client's budget of one operation (dnv-worker.md EU5), from which the
+// worker suite's case etcd_leader sizes its fleet's vote timers. Then
+// MaxNvmeTcpCmdBytes, the most data one
 // NVMe/TCP command may carry to a node's kernel: the e2e suite holds the IO
 // sizes its hosts read to it, and the gateway suite sizes its stage-13
 // clone's source stripe by it. The

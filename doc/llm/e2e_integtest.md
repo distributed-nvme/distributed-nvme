@@ -476,8 +476,9 @@ start and the between-cases sweeps, `cleanup_start_gate` stops the run when any
 verb never printed its sentinel, naming guest, verb and status. The end
 cleanup's verdict is the exit status: a run whose end cleanup left a verb
 unfinished or one of the suite's own nvmet ports standing fails, after
-cleaning, and a run killed by SIGTERM, SIGINT or SIGHUP fails; a run that
-fails an assertion or is killed by one of them removes nothing but the copy
+cleaning. A run that SIGTERM, SIGINT or SIGHUP stops before its exit handler
+exits non-zero and logs no PASS. A run that fails an assertion or is stopped
+so removes nothing but the copy
 case's two token buckets, its clone's off the controller node and its
 migration's off the disk node that carries it, the react case's reject rule,
 its group cut and its flush stage's delay, which it takes off the controller
@@ -489,19 +490,11 @@ that carries it, as a slowed or delayed port would slow, a refused one fail
 and a silenced or cut one, or a cut node, stall every suite that runs before
 the next cleanup, the many-pools case's cut also removing itself on a timer;
 and it tells host0's stamped writer to start no more passes, as its passes
-would write on into a lab other suites then use. A Ctrl-C while the run's
-exit handler runs ends no more than the command in hand, and a SIGHUP ends
-nothing, so the handler goes on, also where the same signal ends a reader
-of the run's output, as tee, whose loss then makes a write fail; a SIGTERM
-then ends the run at once, and what it has not yet taken off stays. Output
-that has failed when the handler starts, as a terminal that has closed
-does, goes to /dev/null from then on, so that the handler goes on then too.
-Two limits stay: output that fails later, partway through the handler, can
-still end it at a log line before what it has not yet taken off; and a
-SIGHUP that ends a tee the output goes through ends the run by SIGPIPE
-before the handler, at bash's own notice of the command the hangup ended,
-unless that command catches it, as ssh does. A run under the runner writes
-its output to a file and meets neither.
+would write on into a lab other suites then use. These removals, like a
+passing run's end cleanup, are best effort: a signal while the exit handler
+runs, a dead terminal or tee or a full disk can end them early. After a
+stopped or failed run, run the suite with `--cleanup-only`, as every lab
+chain does.
 
 E2E7. **No direct-IO flags to dd.** The guests' dd mishandles direct IO
 (`dnagent_integtest.md`, Assumptions and preflight checks), so every dd
@@ -1983,7 +1976,8 @@ the connect attempted.
   flushed them, and the same guest once more under host writes md has not
   flushed. A disk that loses what its own cache held is not exercised.
 * **The crash under writes md has not flushed reads md's copy.** On the
-  lab at one slice one chunk of md's bitmap covers a group's whole array,
+  lab one chunk of md's bitmap covers a group's whole array, a data group
+  being one extent at every slice count,
   so the copy case's second reset of the disk-node guest finds that chunk
   dirty and md copies the whole array back onto the returned member: in
   its one run md wrote 135517 sectors to the member across its return,
@@ -2123,19 +2117,24 @@ the connect attempted.
   array has stayed degraded since the leg left, and otherwise copies it
   whole (`architecture.md`, Repair, Known limits). The copy case's array
   stays degraded from the leg's departure to its return, but in between md
-  copied part of the data onto the leg that replaced it, which then died,
-  and whether md still catches the returned leg up from the bitmap after
-  that is not established. host0's stamped writer writes the group from
-  just before the leg's departure to after the first repair's finish, and
-  its range is read back and its volume deleted then, before the leg's
-  return, so a catch-up that skipped a region of those writes would leave
-  the returned leg stale there with no read to see it. The case logs
-  mdadm's word on the add and the sectors written to the returned leg, and
-  asserts the whole group and the data, not the way; at one slice those
-  readings do not tell the way, as one chunk of md's bitmap covers the
-  group's whole array (The crash under writes md has not flushed reads md's
-  copy), the writer's writes leave it dirty, and a catch-up from the bitmap
-  then writes the whole array, as a whole copy does.
+  began a copy onto the leg that replaced it, which step 6 ends by the kill
+  of that leg's disk node, and md copies the returned leg whole after that,
+  whatever the bitmap holds: in a run with no host write to the group while
+  the leg was away, mdadm answered `re-added` and md then wrote 124975
+  sectors to the leg, the whole array, where step 4's catch-up from a clean
+  bitmap wrote 25; read in the kernel's raid1 source, the add of a member
+  with no place of its own sets a full copy that only a copy that ends
+  clears. host0's stamped writer writes the group from just before the
+  leg's departure to after the first repair's finish, and its range is read
+  back and its volume deleted then, before the leg's return, so a catch-up
+  that skipped a region of those writes would leave the returned leg stale
+  there with no read to see it. The case logs mdadm's word on the add and
+  the sectors written to the returned leg, and asserts the whole group and
+  the data, not the way; neither reading tells the way at any slice count:
+  mdadm answers `re-added` whenever md takes the member back into the place
+  it held, however md then copies it, and a data group is one extent, which
+  one chunk of md's bitmap covers whole, so the writer's writes leave that
+  chunk dirty and a catch-up from the bitmap writes the whole array too.
 * **react's take-over holds the worker's repair created only on the
   primary's controller node.** The reject rule refuses that node's connects
   alone, so a failover inside the hold hands the group to a primary the
@@ -2251,9 +2250,10 @@ the connect attempted.
   flips names the group's absent array, or under `--redund none` its
   `RedundNone` dm-linear (`cnagent.md` CN12, CN30), which adds the rounds
   until that read and one more converge, each converge growing with the
-  slice count (`cnagent.md`, Known limits). Where that converge's assembly
-  of a RAID1 group outlasts the cn agent's soft timeout, which ends it after
-  mdadm has added one member, the group's array stays inactive, which no
+  slice count (`cnagent.md`, Known limits). Where the cn agent's soft
+  timeout ends that converge's assembly of a RAID1 group after mdadm has
+  added a member and before it has started the array, the group's array
+  stays inactive, which no
   read names absent, so no re-send builds it and the case fails at its wait
   for the new primary's build (`architecture.md`, Known limits, A promotion
   that outruns its sides can leave a group's array inactive). The case bounds

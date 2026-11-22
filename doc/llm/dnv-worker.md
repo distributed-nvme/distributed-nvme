@@ -2252,18 +2252,19 @@ order mitigates three races and is no correctness dependency
 `SyncupCntlr` outrunning the sides' ANA flips, which leaves the new
 primary's groups to the converge of the `SyncupCntlr` this worker
 re-sends once the cntlr's read names a group's absent array or a
-`RedundNone` group's dm-linear (`cnagent.md` CN10, CN30; RW4), but for a
-RAID1 group whose assembly in that converge outlasts the agent's soft
-timeout and leaves the array inactive, which no read names absent
-(`architecture.md`, Known limits, A promotion that outruns its sides can leave
-a group's array inactive), and a cntlr's connect to a new side outrunning that
-side's export (both `cnagent.md` CN10); and a leg removal's `nvme disconnect`
-on a CN overlapping the disk node's unlink of that side's export, which can
-leave the disconnect waiting out the kernel's admin timeout. That unlink comes
-from the dn role's `SyncupDn`, which the barrier does not wait for: the cntlrs
-gain only the sides' round trip on it, and more when that disk node also holds
-a side of the SP whose `SyncupSide` finds the `SyncupDn` ahead of it on the
-node lock (`dnagent.md` DN1).
+`RedundNone` group's dm-linear (`cnagent.md` CN10, CN30; RW4), but for a RAID1
+group whose assembly in that converge the agent's soft timeout ends after
+mdadm has added a member and before it has started the array, which leaves the
+array inactive, which no read names absent (`architecture.md`, Known limits, A
+promotion that outruns its sides can leave a group's array inactive), and a
+cntlr's connect to a new side outrunning that side's export (both `cnagent.md`
+CN10); and a leg removal's `nvme disconnect` on a CN overlapping the disk
+node's unlink of that side's export, which can leave the disconnect waiting
+out the kernel's admin timeout. That unlink comes from the dn role's
+`SyncupDn`, which the barrier does not wait for: the cntlrs gain only the
+sides' round trip on it, and more when that disk node also holds a side of the
+SP whose `SyncupSide` finds the `SyncupDn` ahead of it on the node lock
+(`dnagent.md` DN1).
 
 **What the hold costs.** No demotion RW22 finds is held: the demotion hold
 hands a failover's demotion to the old primary, and gives the controller
@@ -6429,18 +6430,18 @@ success: a failing run leaves etcd's data, every log and every behavior file
 in place and prints its diagnostics — the crash lines of every log, the
 failing stage and its trace id, the registrations, the ownership table, the tail of every log and the dnv
 keys — so the debris is what the developer reads; a cleanup-only run does
-the cleanup alone. The run's exit handler goes on after a Ctrl-C, which
-ends only the command in hand, and after a SIGHUP, which it ignores; output
-that fails partway through the handler, as a terminal that closes, can still
-end it before its removals, which a run under the runner, whose output is a
-file, does not meet (`e2e_integtest.md` E2E6). Cleanup signals every process
-the suite started by its recorded pid, continuing every stopped process first,
-a worker or, in the three-member mode, an etcd member, so that it acts on its
-termination, with a pattern kill of the programs under the work directory
-as a safety net, and removes the suite's work directory and the crash
-scan's sample folder in `/var/tmp` by its name; nothing else outside that
-directory is touched but for a process a stale pid file names, as a pid is
-signalled with no check that it still runs the suite's program, and the
+the cleanup alone. A run that SIGTERM, SIGINT or SIGHUP stops before its exit
+handler exits non-zero and logs no PASS; the handler's removals are best
+effort, as a signal while they run, a dead terminal or tee or a full disk can
+end them early; after a stopped or failed run, run the suite's
+`--cleanup-only`, as every lab chain does (`e2e_integtest.md` E2E6). Cleanup
+signals every process the suite started by its recorded pid, continuing every
+stopped process first, a worker or, in the three-member mode, an etcd member,
+so that it acts on its termination, with a pattern kill of the programs under
+the work directory as a safety net, and removes the suite's work directory and
+the crash scan's sample folder in `/var/tmp` by its name; nothing else outside
+that directory is touched but for a process a stale pid file names, as a pid
+is signalled with no check that it still runs the suite's program, and the
 suite leaves no kernel state, no packages and no users behind.
 
 **The driver, `workerctl`.** `workerctl` is the etcd driver that plays the

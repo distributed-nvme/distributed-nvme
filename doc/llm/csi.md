@@ -914,11 +914,11 @@ success only, at its end; a failing run leaves everything in place and dumps
 diagnostics, but for the taint and the cut, which it removes after the
 diagnostics, the cut also by a timer on the host once its time limit has
 passed, so that no cut outlives a run killed before its cleanup. k3s, the
-hostnames and the identity files stay. The run's exit handler goes on after a
-Ctrl-C, which ends only the command in hand, and after a SIGHUP, which it
-ignores; output that fails partway through the handler, as a terminal that
-closes, can still end it before its removals, which a run under the runner,
-whose output is a file, does not meet (`e2e_integtest.md` E2E6).
+hostnames and the identity files stay. A run that SIGTERM, SIGINT or SIGHUP
+stops before its exit handler exits non-zero and logs no PASS; the handler's
+removals are best effort, as a signal while they run, a dead terminal or tee
+or a full disk can end them early; after a stopped or failed run, run the
+suite's `--cleanup-only`, as every lab chain does (`e2e_integtest.md` E2E6).
 
 CSI6. **Test pods run on the hosts.** The control-plane node carries a
 no-schedule taint the suite ensures on every run, and every pod names its

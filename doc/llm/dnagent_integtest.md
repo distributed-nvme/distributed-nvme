@@ -481,29 +481,28 @@ trace id and, when the failing case is zeroing, a migration case, teardown or
 store_full, the last info of every side that case has set up since it last
 tore all its sides down, an info read's, which shows the side as the last
 converge or read left it and answers even while a converge is wedged. A
-cleanup-only run does the scrub alone. The run's exit handler goes on after a
-Ctrl-C, which ends only the command in hand, and after a SIGHUP, which it
-ignores; output that fails partway through the handler, as a terminal that
-closes, can still end it before its removals, which a run under the runner,
-whose output is a file, does not meet (`e2e_integtest.md` E2E6). A Ctrl-C
-while the start-of-run cleanup's helpers clean the VMs ends no helper, and the
-handler waits for them first. It takes every `dnv-agent` and every
-dnv dm device on the node, of either role, which is why one dnv suite runs at
-a time in the lab (`layout.md`, Directory tree), and the blocksize case's
-nvmet port and loop devices beside the suite's own. Each step is best-effort,
-and the order is load-bearing on one principle, a holder goes before what it
-holds: the agents
-go first, a graceful stop joining their children (`dnagent.md` SH27) while one
-killed outright can leave a zeroing child holding a side device a moment
-longer, which a final retry sweep absorbs; any process a failed stage left
-holding a device goes before the devices too, as nothing removes an open
-device; host controllers before the nvmet objects they are connected to; dm
-devices top-down, a clone before the migration connection and export it
-flushes to on removal; and a disk's header block zeroed before its loop device
-is detached, which leaves its volume-table slots inert (`architecture.md`,
-[D13]; `dnagent.md` DN5); the udev rules go last. Two more rules keep the removals from wedging:
-every suspended device is resumed first, an inactive table waiting or not,
-since a run killed in a
+cleanup-only run does the scrub alone. A run that SIGTERM, SIGINT or SIGHUP
+stops before its exit handler exits non-zero and logs no PASS; the handler's
+removals are best effort, as a signal while they run, a dead terminal or tee
+or a full disk can end them early; after a stopped or failed run, run the
+suite's `--cleanup-only`, as every lab chain does (`e2e_integtest.md` E2E6). A
+Ctrl-C while the start-of-run cleanup's helpers clean the VMs ends no helper,
+and the handler waits for them first. The scrub takes every `dnv-agent` and
+every dnv dm device on the node, of either role, which is why one dnv suite
+runs at a time in the lab (`layout.md`, Directory tree), and the blocksize
+case's nvmet port and loop devices beside the suite's own. Each step is
+best-effort, and the order is load-bearing on one principle, a holder goes
+before what it holds: the agents go first, a graceful stop joining their
+children (`dnagent.md` SH27) while one killed outright can leave a zeroing
+child holding a side device a moment longer, which a final retry sweep
+absorbs; any process a failed stage left holding a device goes before the
+devices too, as nothing removes an open device; host controllers before the
+nvmet objects they are connected to; dm devices top-down, a clone before the
+migration connection and export it flushes to on removal; and a disk's header
+block zeroed before its loop device is detached, which leaves its volume-table
+slots inert (`architecture.md`, [D13]; `dnagent.md` DN5); the udev rules go
+last. Two more rules keep the removals from wedging: every suspended device is
+resumed first, an inactive table waiting or not, since a run killed in a
 cutover window leaves the source's linears suspended, a reload that stopped
 after its load leaves a table waiting, and a suspended device
 wedges its removal, the namespace disable above it and any block scan; and

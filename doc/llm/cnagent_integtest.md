@@ -429,7 +429,8 @@ that asks for the counters, which reads them at the call as
   the leftover code and any other failing the stage. A single re-send whose stage checks what that one converge
   did wants code zero, as the converge clears the row the round named
   (`cnagent.md` CN30): redund's resync and early fail, the late flip's first
-  re-send and clone_xfer's giveback. Repair's badstop, badclear and badmdadm
+  re-send, torn's re-send once the id is removed by hand, and clone_xfer's
+  giveback. Repair's badstop, badclear and badmdadm
   stages each make the worker's re-send after the forced start and take
   whatever it answers, as what they check is md's state after it: the other
   leg added, its bad-block list and the array clean.
@@ -1356,29 +1357,28 @@ and repair's stop hold, whose holder it ends and whose flag it takes away,
 as another suite's cleanup could not stop the array it holds; the cleanup
 also ends the process repair's held stop leaves holding an array, with the
 suite's device pins, and takes away a hold still armed.
-A cleanup-only run does the scrub alone. The run's exit handler goes on after
-a Ctrl-C, which ends only the command in hand, and after a SIGHUP, which it
-ignores; output that fails partway through the handler, as a terminal that
-closes, can still end it before its removals, which a run under the runner,
-whose output is a file, does not meet (`e2e_integtest.md` E2E6). A Ctrl-C
-while the start-of-run cleanup's helpers clean the VMs ends no helper, and the
-handler waits for them first.
-It takes every `dnv-agent` and every dnv dm device, md array and nvmet
-subsystem on the node, of either role, which is why one dnv suite runs at a
-time in the lab (`layout.md`, Directory tree) — but for two blind spots the
-wipe exists for: its dm steps see only names with a role-lettered kind, and
-its md stop skips an inactive array over unreadable members, which neither
-udev nor mdadm names. Each step is best-effort, and the order is
-load-bearing on one principle, a holder goes before what it holds, across
-both VMs at once: the agents, their retries and probers with them, before
-the devices; the fault injections and clone_xfer's token bucket
-unconditionally, as each outlives its stage and would pass for another fault
-next run; host connections before the subsystems they hold, exports inside
-out, cn devices top-down and the dn objects in the dn suite's order
-(`dnagent_integtest.md`, Teardown and cleanup); a dm-clone while its source
-is still connected (`cnagent.md` L3), which makes the cleanup two phases
-across both VMs, every clone of either VM gone before any transfer, as a
-clone flushes through a source the other VM exports, and a transfer's device
+A cleanup-only run does the scrub alone. A run that SIGTERM, SIGINT or SIGHUP
+stops before its exit handler exits non-zero and logs no PASS; the handler's
+removals are best effort, as a signal while they run, a dead terminal or tee
+or a full disk can end them early; after a stopped or failed run, run the
+suite's `--cleanup-only`, as every lab chain does (`e2e_integtest.md` E2E6). A
+Ctrl-C while the start-of-run cleanup's helpers clean the VMs ends no helper,
+and the handler waits for them first. The scrub takes every `dnv-agent` and
+every dnv dm device, md array and nvmet subsystem on the node, of either role,
+which is why one dnv suite runs at a time in the lab (`layout.md`, Directory
+tree) — but for two blind spots the wipe exists for: its dm steps see only
+names with a role-lettered kind, and its md stop skips an inactive array over
+unreadable members, which neither udev nor mdadm names. Each step is
+best-effort, and the order is load-bearing on one principle, a holder goes
+before what it holds, across both VMs at once: the agents, their retries and
+probers with them, before the devices; the fault injections and clone_xfer's
+token bucket unconditionally, as each outlives its stage and would pass for
+another fault next run; host connections before the subsystems they hold,
+exports inside out, cn devices top-down and the dn objects in the dn suite's
+order (`dnagent_integtest.md`, Teardown and cleanup); a dm-clone while its
+source is still connected (`cnagent.md` L3), which makes the cleanup two
+phases across both VMs, every clone of either VM gone before any transfer, as
+a clone flushes through a source the other VM exports, and a transfer's device
 only once its export is gone, as the export's namespace holds it open; each
 disk's header
 block zeroed (`architecture.md`, [D13]) and the udev rules removed last; and

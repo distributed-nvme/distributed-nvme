@@ -2,7 +2,8 @@
 # The pinned etcd release every suite that starts an etcd runs, and the one
 # download-and-verify path that puts it into integtest/bin/cache. The worker,
 # gateway, cdc, end-to-end and csi suites source this file and call
-# fetch_etcd at preflight; `make fetch-etcd` runs it, and `make test` hands
+# fetch_etcd at preflight, and the tutorial suite at setup; `make
+# fetch-etcd` runs it, and `make test` hands
 # the unit tests the binary it leaves there when ETCD_BIN is empty or unset
 # and the PATH holds no etcd (dnv-worker.md EU7). A cached tarball whose
 # sha256 already matches the pin is never re-downloaded, so a repeat run

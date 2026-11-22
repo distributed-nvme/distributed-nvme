@@ -1793,8 +1793,9 @@ failover's among them.
   are still opening its paths, it starts a group's RAID1 array only once both
   copies are reachable, and on a busy controller node that start can take
   longer than the 3 seconds the node's agent gives any command, which then
-  stops it halfway. The array then stays inactive with one copy, and nothing
-  starts it again: the pool serves nothing. By dnv's rules the worker then
+  stops it. Stopped after it has taken in one copy and before the array has
+  started, the array stays inactive with that copy, and nothing starts it
+  again: the pool serves nothing. By dnv's rules the worker then
   fails the pool over to its standby once the error has lasted the cntlr
   threshold, 600 seconds at the default. The run that met it had raised that
   threshold to 1800 seconds and gave up its wait after 1200 seconds, so no run

@@ -310,26 +310,24 @@ no_ctrl_shape() {
 on_exit() {
 	local rc=$?
 	trap - EXIT
-	# A signal while this handler runs: a Ctrl-C (SIGINT) reaches the
-	# command in hand, which it ends unless that command ignores it, a read
-	# of a command's output and an ssh still connecting among them, and the
-	# dump and the removals below go on; a SIGHUP, which a terminal that
-	# closes sends twice, is ignored here and by every command below, and so
-	# is a SIGPIPE, so that a reader of the run's output that the same
-	# signal ended, as tee, makes a write fail and does not end the run; a
-	# SIGTERM ends the run at once. Output that has failed when the handler
-	# starts, as a terminal that has closed or a tee that a Ctrl-C ended,
-	# goes to /dev/null from then on: this line tries a write first. Output
-	# that fails later, partway through the handler, can still end it at a
-	# log line before its removals; a run under the runner writes to a file
-	# and does not meet it. The helpers of a cleanup_all that main
-	# ran are waited for first (HELPER_PIDS). rc keeps the code the run was
-	# ending with, and the run exits with it but on a SIGTERM.
+	# The run's signal contract (e2e_integtest.md, E2E6): a run that
+	# SIGTERM, SIGINT or SIGHUP stops before this handler exits non-zero and
+	# logs no PASS; the removals below are best effort, as a signal while
+	# they run, a dead terminal or tee or a full disk can end them early;
+	# after a stopped or failed run, run the suite's --cleanup-only, as every
+	# lab chain does. The lines below take the handler as far as they can: a
+	# SIGTERM ends it at once, a Ctrl-C does nothing to this shell itself, a
+	# SIGHUP and a SIGPIPE are ignored, output already gone goes to
+	# /dev/null, and log loses a line it cannot write rather than end the
+	# handler under set -e. The helpers of a cleanup_all that
+	# main ran are waited for first (HELPER_PIDS). rc keeps the code the run
+	# was ending with, and the run exits with it but on a SIGTERM.
 	trap - TERM
 	trap : INT
 	trap '' HUP
 	trap '' PIPE
 	printf '\n' >&2 2>/dev/null || exec >/dev/null 2>&1
+	log() { echo "$*" >&2 || :; }
 	local pid
 	for pid in "${HELPER_PIDS[@]}"; do helper_wait "$pid"; done
 	if [ "$rc" -eq 0 ]; then
@@ -2184,8 +2182,8 @@ wipe_all() {
 # at its default action instead, whatever this shell's trap); so a Ctrl-C
 # ends none of them. The Ctrl-C ends a wait at once instead, so the wait
 # is made again while the job runs: the handler goes on, to a next phase or
-# to its exit, only once no helper still cleans a VM. A job already waited
-# for is no child any more, and its wait returns at once.
+# to its exit, only once no helper still cleans a VM. A second wait for a
+# job already waited for returns its saved status at once.
 helper_wait() { # <pid>
 	local rc
 	while :; do
@@ -5647,10 +5645,11 @@ parse_args() {
 main() {
 	parse_args "$@"
 	trap on_exit EXIT
-	# A run killed by SIGTERM, SIGINT or SIGHUP exits with the shell's
-	# code for the signal, so on_exit reads it as the failure it is, never
-	# as a PASS. The HUP trap ignores every later SIGHUP first: a terminal
-	# that closes sends a second one right after the first.
+	# A SIGTERM, SIGINT or SIGHUP that stops the run before its exit handler
+	# makes it exit non-zero and never with a PASS: each trap exits with the
+	# shell's code for its signal, which on_exit reads as the failure it is
+	# (e2e_integtest.md, E2E6). The HUP trap ignores every later SIGHUP
+	# first, as a terminal that closes sends a second right after the first.
 	trap 'exit 143' TERM
 	trap 'exit 130' INT
 	trap 'trap "" HUP; exit 129' HUP

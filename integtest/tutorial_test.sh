@@ -176,9 +176,11 @@ rsh() { ssh "${SSH_OPTS[@]}" "$TARGET" "$@"; }
 helper() { rsh "sudo -n bash $HELPER $*"; }
 
 # The guest's helper, shipped at preflight and at a cleanup-only run. Every
-# function runs as root and acts only on what the tutorial makes: preflight
-# proved that the guest held none of it (dnv's devices, arrays, nvmet
-# objects, NVMe-oF controllers and programs) before the run.
+# function runs as root, and the wipe acts on every dnv program, nvmet
+# object, NVMe-oF controller, dnv device and md array of the guest: a run
+# relies on its preflight, which proved the guest held none of them before
+# the run, and a cleanup-only run acts only on a guest that holds this
+# suite's work folder.
 helper_text() {
 	cat <<'HELPER_EOF'
 set -uo pipefail
@@ -1187,7 +1189,7 @@ kc() { rsh "sudo -n k3s kubectl $*"; }
 preflight() {
 	local t pkg line st
 	stage "preflight: the driver"
-	for t in ssh scp awk base64 tar git make go sha256sum mktemp; do
+	for t in ssh scp awk base64 tar git make go sha256sum mktemp curl flock; do
 		command -v "$t" >/dev/null || die "the driver has no $t"
 	done
 	PARSE=$(mktemp -d)
@@ -1519,27 +1521,24 @@ csi_prepare() {
 on_exit() {
 	local rc=$?
 	trap - EXIT
-	# A signal while this handler runs: a Ctrl-C (SIGINT) reaches the
-	# command in hand, which it ends unless that command ignores it, a read
-	# of a command's output and an ssh still connecting among them, and the
-	# dump and the removals below go on; a SIGHUP, which a terminal that
-	# closes sends twice, is ignored here and by every command below, and so
-	# is a SIGPIPE, so that a reader of the run's output that the same
-	# signal ended, as tee, makes a write fail and does not end the run; a
-	# SIGTERM ends the run at once. Output that has failed when the handler
-	# starts, as a terminal that has closed or a tee that a Ctrl-C ended,
-	# goes to /dev/null from then on: this line tries a write first. Output
-	# that fails later, partway through the handler, can still end it at a
-	# log line before its removals; a run under the runner writes to a file
-	# and does not meet it. rc keeps the code the run was ending
-	# with, and the run exits with it but on a SIGTERM and after a failed end
-	# cleanup, as one whose step a Ctrl-C ended, which exits 1 with LAB NOT
-	# CLEAN.
+	# The run's signal contract (e2e_integtest.md, E2E6): a run that
+	# SIGTERM, SIGINT or SIGHUP stops before this handler exits non-zero and
+	# logs no PASS; the removals below are best effort, as a signal while
+	# they run, a dead terminal or tee or a full disk can end them early;
+	# after a stopped or failed run, run the suite's --cleanup-only, as every
+	# lab chain does. The lines below take the handler as far as they can: a
+	# SIGTERM ends it at once, a Ctrl-C does nothing to this shell itself, a
+	# SIGHUP and a SIGPIPE are ignored, output already gone goes to
+	# /dev/null, and log loses a line it cannot write rather than end the
+	# handler under set -e. rc keeps the code the run was
+	# ending with, and the run exits with it but on a SIGTERM and after a
+	# failed end cleanup, which exits 1 with LAB NOT CLEAN.
 	trap - TERM
 	trap : INT
 	trap '' HUP
 	trap '' PIPE
 	printf '\n' >&2 2>/dev/null || exec >/dev/null 2>&1
+	log() { echo "$*" >&2 || :; }
 	if [ "$CLEANUP_ONLY" = 1 ]; then
 		[ "$rc" = 0 ] && log "" && log "PASS"
 		exit "$rc"
@@ -1588,16 +1587,35 @@ teardown_read() {
 }
 
 trap on_exit EXIT
-# A run killed by SIGTERM, SIGINT or SIGHUP exits with the shell's code for
-# the signal, so on_exit reads it as the failure it is, never as a PASS. The
-# HUP trap ignores every later SIGHUP first: a terminal that closes sends a
-# second one right after the first.
+# A SIGTERM, SIGINT or SIGHUP that stops the run before its exit handler
+# makes it exit non-zero and never with a PASS: each trap exits with the
+# shell's code for its signal, which on_exit reads as the failure it is
+# (e2e_integtest.md, E2E6). The HUP trap ignores every later SIGHUP first, as
+# a terminal that closes sends a second right after the first.
 trap 'exit 143' TERM
 trap 'exit 130' INT
 trap 'trap "" HUP; exit 129' HUP
 
 if [ "$CLEANUP_ONLY" = 1 ]; then
 	stage "cleanup-only"
+	# The wipe takes every dnv program, nvmet object, NVMe-oF controller, dnv
+	# device and md array of the guest, and the CSI part's cleanup the list's
+	# objects in the lab's k3s, whoever made them, and a cleanup-only run has
+	# no preflight to prove the guest holds none of another suite's. So it
+	# acts only on a guest that holds this suite's work folder, which every
+	# run of the suite makes before it changes the guest and which holds its
+	# saved state, and changes nothing on any other.
+	t=0
+	rsh "test -d $WORK" || t=$?
+	case $t in
+	0) ;;
+	1)
+		log "nothing of the tutorial suite is on the guest ($WORK is absent):" \
+			"nothing changed"
+		exit 0
+		;;
+	*) die "reading whether $WORK is on the guest failed (exit $t)" ;;
+	esac
 	rsh "mkdir -p $WORK && cat > $HELPER" < <(helper_text) || die "shipping the helper failed"
 	DIR=$(rsh "cat $SAVED/dir 2>/dev/null") || DIR=""
 	cleanup 1 || die "the guest is not clean"

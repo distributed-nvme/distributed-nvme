@@ -589,9 +589,9 @@ func TestKeyPrefix(t *testing.T) {
 
 // TestConstantsEmitsWhatTheSuitesRead pins `constants`, the channel through
 // which the shell suites read a Go constant (`geometry` and `meta-units` are
-// the others, for computed values). It prints twenty-two keys, and the suites
-// read twenty of them and stop when one is missing: nineteen at preflight,
-// and RetiredLegMaxAge, which the worker suite's repair case reads.
+// the others, for computed values). It prints twenty-three keys, and the
+// suites read twenty-one of them and stop when one is missing: twenty at
+// preflight, and RetiredLegMaxAge, which the worker suite's repair case reads.
 // Every suite that starts an etcd — the worker, gateway, cdc and e2e suites —
 // launches it with EtcdMaxTxnOps and EtcdMaxRequestBytes. The e2e suite
 // cross-checks MaxAllocLegPerGrp and holds its hosts' IO sizes to
@@ -608,9 +608,11 @@ func TestKeyPrefix(t *testing.T) {
 // DefaultPrimaryUnhealthy and DemotionHoldTimeout for their failover cases,
 // and the e2e suite DefaultStartHoldSeconds for react's restart step and
 // DefaultNvmeFastIoFailTmo for the legs of a pool that sets none.
+// The worker suite reads DefaultEtcdOpTimeout, from which case etcd_leader
+// sizes its fleet's vote timers (worker_test.sh, set_vote_timers).
 // The cdc suite's flood case fills the pending cap, CdcMaxPendingConnCnt, and
 // waits by the pre-Connect deadline, DefaultCdcPendingTmoMs. One of those
-// twenty dropped or renamed here would otherwise surface only when a suite
+// twenty-one dropped or renamed here would otherwise surface only when a suite
 // is run, at its preflight or in that case. No suite reads the other two,
 // MaxDelGrpPerTxn and MaxDelBmPerTxn; they are pinned as well, because a case
 // may size itself against them.

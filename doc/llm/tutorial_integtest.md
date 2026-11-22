@@ -205,13 +205,16 @@ guest, which the next run's preflight refuses until a run with
 `--cleanup-only`, which runs no block, keeps its programs' logs under the
 work folder for the runner to copy, and the next run's setup removes them,
 once its preflight has passed and before its first block, so that its crash
-scan reads its own logs alone; a passed run leaves nothing. The run's exit
-handler goes on after a Ctrl-C, which ends only the command in hand, and after
-a SIGHUP, which it ignores; output that fails partway through the handler, as
-a terminal that closes, can still end it before its removals, which a run
-under the runner, whose output is a file, does not meet (`e2e_integtest.md`
-E2E6). This is what lets the suite run on a guest that other suites use:
-preflight proved the guest held none of what cleanup removes.
+scan reads its own logs alone; a passed run leaves nothing. A run that
+SIGTERM, SIGINT or SIGHUP stops before its exit handler exits non-zero and
+logs no PASS; the handler's removals are best effort, as a signal while they
+run, a dead terminal or tee or a full disk can end them early; after a stopped
+or failed run, run the suite's `--cleanup-only`, as every lab chain does
+(`e2e_integtest.md` E2E6). That cleanup is what lets the suite run on a guest
+that other suites use: a run's preflight proved the guest held none of what
+cleanup removes, and a run with `--cleanup-only`, which runs no preflight,
+acts only on a guest that holds the suite's work folder, which every run of
+the suite makes before it changes the guest, and changes nothing on any other.
 
 ## Known limits
 

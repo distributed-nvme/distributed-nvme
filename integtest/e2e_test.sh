@@ -958,27 +958,24 @@ assert_parses() { # <json> <label>
 on_exit() {
 	local rc=$? dirty=0
 	trap - EXIT
-	# A signal while this handler runs: a Ctrl-C (SIGINT) reaches the
-	# command in hand, which it ends unless that command ignores it, a read
-	# of a command's output and an ssh still connecting among them, and the
-	# dump and the removals below go on; a SIGHUP, which a terminal that
-	# closes sends twice, is ignored here and by every command below, and so
-	# is a SIGPIPE, so that a reader of the run's output that the same
-	# signal ended, as tee, makes a write fail and does not end the run; a
-	# SIGTERM ends the run at once. Output that has failed when the handler
-	# starts, as a terminal that has closed or a tee that a Ctrl-C ended,
-	# goes to /dev/null from then on: this line tries a write first. Output
-	# that fails later, partway through the handler, can still end it at a
-	# log line before its removals; a run under the runner writes to a file
-	# and does not meet it. rc keeps the code the run was ending
-	# with, and the run exits with it but on a SIGTERM and after an end
-	# cleanup that did not finish, as one whose verb a Ctrl-C ended, which
-	# turns rc to 1 below.
+	# The run's signal contract (e2e_integtest.md, E2E6): a run that
+	# SIGTERM, SIGINT or SIGHUP stops before this handler exits non-zero and
+	# logs no PASS; the removals below are best effort, as a signal while
+	# they run, a dead terminal or tee or a full disk can end them early;
+	# after a stopped or failed run, run the suite's --cleanup-only, as every
+	# lab chain does. The lines below take the handler as far as they can: a
+	# SIGTERM ends it at once, a Ctrl-C does nothing to this shell itself, a
+	# SIGHUP and a SIGPIPE are ignored, output already gone goes to
+	# /dev/null, and log loses a line it cannot write rather than end the
+	# handler under set -e. rc keeps the code the run was
+	# ending with, and the run exits with it but on a SIGTERM and after an
+	# end cleanup that did not finish, which turns rc to 1 below.
 	trap - TERM
 	trap : INT
 	trap '' HUP
 	trap '' PIPE
 	printf '\n' >&2 2>/dev/null || exec >/dev/null 2>&1
+	log() { echo "$*" >&2 || :; }
 	# --keep-logs: the logs of the case that ran last, before the end cleanup
 	# removes them on a pass, and on a failure too, since the next run's start
 	# cleanup removes them then. keep_logs never dies.
@@ -20877,13 +20874,15 @@ copy_repair() {
 #
 # HOW MD TAKES THE OLD LEG BACK IS LOGGED, NOT ASSERTED (e2e_integtest.md,
 # Known limits): md catches a returned member up from its write-intent
-# bitmap, or copies it whole when it took it as a new member, and the step
-# logs mdadm's own word on the add and the sectors written to the old leg's
-# member (copy_reuse_catchup), which at one slice do not tell the two apart:
-# one bitmap chunk covers the group's whole array, and step 5's stamped
-# writer leaves it dirty. Either way the group must end
-# whole, host0 must read SHA0, and its kernel log since step 5's mark must
-# report no failed IO.
+# bitmap or copies it whole, and once this step's kill has ended md's copy
+# onto step 5's fresh leg it copies it whole. The step logs mdadm's own word
+# on the add and the sectors written to the old leg's member
+# (copy_reuse_catchup), which do not tell the two apart: mdadm answers
+# `re-added` whenever md takes the member back into its place, either way,
+# and one bitmap chunk covers a data group's whole array, which step 5's
+# stamped writer leaves dirty. Either way the group must end whole, host0
+# must read SHA0, and its kernel log since step 5's mark must report no
+# failed IO.
 
 # copy_ret_side_healthy is the wait on retired leg <leg id>'s side once its
 # disk node is back: `retired-leg list` holds the leg and its side's health
@@ -20912,13 +20911,13 @@ copy_ret_side_healthy() { # <leg id>
 # the primary's cn agent logged after line <mark>, as the agent logs every
 # command with what it wrote on stderr: `re-added` when md took the member
 # back into the place it held, which md then catches up from the array's
-# write-intent bitmap, and `added` when md took it as a new member, which md
-# copies whole. The other is how many sectors have been written to the
-# member's device on the primary since the primary connected the leg, the
-# write count md_member_read reads, against the sectors of the group's
-# extents: a catch-up from the bitmap writes only the regions the bitmap
-# marks, a whole copy every region. A log or a member it cannot read is a
-# logged line, never a failure.
+# write-intent bitmap or copies whole (e2e_integtest.md, Known limits), and
+# `added` when md took it as a new member, which md copies whole. The other is
+# how many sectors have been written to the member's device on the primary
+# since the primary connected the leg, the write count md_member_read reads,
+# against the sectors of the group's extents: a catch-up from the bitmap
+# writes only the regions the bitmap marks, a whole copy every region. A log
+# or a member it cannot read is a logged line, never a failure.
 copy_reuse_catchup() { # <mark> <leg id>
 	local name lines adds mrd wsect total
 	name=$(cn_leg_name "$PRIMARY_CN_ID" "$SP_ID" "$2")
@@ -33613,8 +33612,10 @@ space_summary() {
 		log "$row"
 	done
 	log "  peak:    $SPACE_RUN_MAX_TOTAL bytes on all guests" \
-		"(cap $RUN_SHAPE_CAP_BYTES at the run's shape, or the case's own run" \
-		"cap, which its row names, in the many-pools case and the long run)," \
+		"(cap $RUN_SHAPE_CAP_BYTES at the run's shape; the run cap that held" \
+		"each case is on its row: react's at its own shape, the many-pools" \
+		"case's and the long run's own, and in the ops, copy and react cases" \
+		"raised by what their stages write on purpose)," \
 		"largest backing file" \
 		"$SPACE_RUN_MAX_BACKING bytes (cap $DN_CAP_BYTES per file at the run's" \
 		"shape, or a many-pools file's own where that is larger, and the" \
@@ -33802,10 +33803,11 @@ main() {
 	# without a cleanup pass over guests this run has never touched.
 	parse_args "$@"
 	trap on_exit EXIT
-	# A run killed by SIGTERM, SIGINT or SIGHUP exits with the shell's
-	# code for the signal, so on_exit reads it as the failure it is, never
-	# as a PASS. The HUP trap ignores every later SIGHUP first: a terminal
-	# that closes sends a second one right after the first.
+	# A SIGTERM, SIGINT or SIGHUP that stops the run before its exit handler
+	# makes it exit non-zero and never with a PASS: each trap exits with the
+	# shell's code for its signal, which on_exit reads as the failure it is
+	# (e2e_integtest.md, E2E6). The HUP trap ignores every later SIGHUP
+	# first, as a terminal that closes sends a second right after the first.
 	trap 'exit 143' TERM
 	trap 'exit 130' INT
 	trap 'trap "" HUP; exit 129' HUP
