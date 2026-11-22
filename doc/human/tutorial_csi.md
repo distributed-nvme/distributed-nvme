@@ -54,8 +54,8 @@ How the commands are written:
 - All commands run in one terminal, in the directory of the all-in-one
   tutorial, the one that holds the binaries ([Get dnv](introduction.md#get-dnv)
   says where they come from). Before you start, make sure that directory
-  holds `dnv-csi` and the `deploy/` directory, the image recipe and the
-  driver's manifests: the unpacked folder of a release after 0.1 has both
+  holds `dnv-csi` and the `deploy/` directory, which holds the image recipe
+  and the driver's manifests: the unpacked folder of a release after 0.1 has both
   already; a build has them in its `bin/` and in the repository's
   `deploy/`, so copy them from there. 0.1 cannot run this tutorial
   ([Get dnv](introduction.md#get-dnv)).
@@ -77,11 +77,16 @@ Control plane, start the gateway with this command in place of the one
 written there, so that it listens on every address of the machine. Every
 `dnvctl` command stays as written, since 127.0.0.1 is one of those
 addresses. This bind is a demo: the gateway checks no caller, so bound to
-every address it is open to every pod and to the LAN; a deployment blocks
-that traffic to all but the controller plugin and the operator's `dnvctl`,
-with a firewall rule or a network policy that the cluster's network software
-enforces, as the section [Keep other pods off dnv](#keep-other-pods-off-dnv)
-below does for one Kubernetes namespace.
+every address it is open to every pod and to the LAN. A deployment binds
+the gateway to one address on the back network, the network of dnv's own
+traffic, which hosts do not reach; the machines that run the controller
+plugin get an address there, as the one that runs `dnvctl` does, and a
+firewall keeps the hosts off ([The networks](operations.md#the-networks)
+gives the layout and the firewall). A firewall on a dnv machine cannot
+single out the controller plugin's pod among the other pods of the
+cluster: only a network policy that the cluster's network software
+enforces can keep the other pods off, as the section [Keep other pods off
+dnv](#keep-other-pods-off-dnv) below does for one Kubernetes namespace.
 
 <!-- test
 replaces nohup ./dnv-gateway
@@ -183,9 +188,10 @@ It prints `docker.io/library/dnv-csi:0.1.0`.
 
 ## The driver
 
-The manifests under `deploy/` are applied as they are, except three: the
-config map, which carries the addresses the two plugins need, the storage
-class, and the network policy, which the section [Keep other pods off
+The driver's manifests, the `.yaml` files at the top of `deploy/`, are
+applied as they are, except three: the config map, which carries the
+addresses the two plugins need, the storage class, and the network
+policy, which the section [Keep other pods off
 dnv](#keep-other-pods-off-dnv) fills in. The controller plugin runs on the
 pod network, where 127.0.0.1 is the pod itself, so it reaches the gateway
 through the machine's address; the node plugin runs on the machine's
@@ -217,7 +223,15 @@ machine's address with `:29527"}`.
 
 The storage class. The example names the cluster `default` and two cntlrs;
 this machine's cluster is `c0` and has one controller node, so the class
-asks for one cntlr.
+asks for one cntlr. On a cluster of two controller nodes or more, give
+every class two cntlrs, as the example does, or leave `cntlrs` out for the
+gateway's default of two: a volume with one cntlr can lose its path when
+the worker replaces that cntlr ([A one-cntlr Kubernetes volume after a
+cntlr replacement](operations.md#a-one-cntlr-kubernetes-volume-after-a-cntlr-replacement)).
+A class can ask for more, up to four, but never for more cntlrs than the
+cluster has controller nodes: each cntlr of a volume needs a controller
+node of its own, so the gateway refuses every volume of such a class, and
+its claims stay `Pending`.
 
 <!-- test
 run

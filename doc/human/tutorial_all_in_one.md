@@ -586,12 +586,15 @@ connections to the discovery log, which a reload, a removed controller, a
 device audit or one of its timers starts, then drops every path it made,
 since `disconnect-scope` above lets it disconnect what it connected. To
 restart stafd, stop stacd first, which keeps its connections when it stops;
-restart stafd; once `stafctl ls`, the first check below, shows stafd holding
-its connection to the cdc again, start stacd.
+restart stafd; once `stafctl adlp -d` shows the cdc's address with its
+`connected` field `True`, and the subsystem's NQN among the records the
+cdc gave, start stacd ([Restart nvme-stas](operations.md#restart-nvme-stas)
+gives the steps).
 
-Check: the discovery daemon holds its connection to the cdc, and the
-connector holds one to the subsystem. The two need a few seconds; repeat
-until each lists one controller.
+Check: the discovery daemon lists the cdc, and the connector, which
+connects only to what the cdc's discovery log names, holds a connection to
+the subsystem. The two need a few seconds; repeat until each lists one
+controller.
 
 <!-- test
 wait 60

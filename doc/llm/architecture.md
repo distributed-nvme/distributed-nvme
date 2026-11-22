@@ -9303,7 +9303,14 @@ document and only pointed to here.
   (`dnagent.md` SH8, SH9, DN4, DN8;
   `cnagent.md` CN4, CN8), so such a caller can store a desired state that
   removes the
-  node's sides or cntlrs. The cn agent holds a request's NQNs to the
+  node's sides or cntlrs. A cn agent takes the CN it acts as from each
+  call's `cn_id` (`newCntlrPlan`), and `SyncupCn` gates only the revision
+  (`cnagent.md` CN4), so such a caller can also make one cn agent act as
+  any CN of a cluster: connect to any SP's legs under that CN's
+  `CnHostNqn` as the SP's primary (`cnagent.md` CN10), export the SP's
+  thin devices to a host NQN of the caller's (`cnagent.md` CN16), and
+  delete them by leaving them out of the request (`cnagent.md` CN14). The
+  cn agent holds a request's NQNs to the
   gateway's rule before it builds a configfs path or a connect from one
   (`cnagent.md` CN8), and its attribute writes create no file
   (`osclient.md`, ReadFile / WriteFile / WriteFileDirect), so such a caller

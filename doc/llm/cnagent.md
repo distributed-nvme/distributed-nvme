@@ -6927,7 +6927,16 @@ stores instead is CN23's.
   wait's bound, and one that outlasts that bound ends the apply with no
   discard: a pause for nothing, and those regions are copied, until the
   next apply. A cancelled push sends no further range and still waits for
-  the one in the kernel.
+  the one in the kernel. The cntlr's own background read takes its object
+  lock too (`dnagent.md` SH11), so it waits out the apply, and the cntlr's
+  observation ages with no `SyncupCn` at all; a `SyncupCn` that arrives
+  meanwhile waits for the node write lock behind the apply, and no read of
+  the node starts until it has run (`dnagent.md` SH10, SH30), so every
+  observation of the CN and of its other cntlrs ages as well. Past
+  `ObsMaxAgeIntervals` of their intervals the worker counts their rounds as
+  missed and sets their health epochs (`dnv-worker.md` HL7), and a
+  primary's missed rounds can fail it over (`dnv-worker.md` AR5), so a long
+  apply on the primary can fail it over by itself.
 * A subsystem whose NQN carries the dnv prefix but decodes to nothing
   stays, with its namespaces, once no held request names it: the sweep
   never attributes such a subsystem unclaimed (CN21; `architecture.md`,

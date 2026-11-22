@@ -1394,7 +1394,8 @@ Measured times are in [the introduction](introduction.md#status-and-limits).
   holds: the new path cannot join, and the mount waits until the old path
   ends (A Kubernetes mount waits for ever when no cntlr of its volume
   comes back, above). State: accepted; use two cntlrs per volume.
-  Procedure to write, one line in the CSI tutorial. For a Kubernetes
+  Procedure written: [the CSI tutorial](tutorial_csi.md#the-driver) says
+  so where its one-machine class asks for one cntlr. For a Kubernetes
   volume whose new path cannot join: procedure written, [the operations
   doc](operations.md#a-one-cntlr-kubernetes-volume-after-a-cntlr-replacement);
   fix later.
@@ -1499,22 +1500,12 @@ a node. "Doc" names the document with the steps. The two
 tutorials are [dnv on one machine](tutorial_all_in_one.md) and
 [dnv under Kubernetes on one machine](tutorial_csi.md). "Operations doc"
 names [the operations doc](operations.md), the procedures an operator
-follows by hand, which holds how to read what is wrong across the cluster,
-the forced-start guide, the steps for a pool made before the stripe bound,
-for a pool made before the block bound, for a new volume refused for a
-thin id that holds data and for a pool left by a Kubernetes volume whose
-name held "..", a planned restart of an agent, a slow leg, the install of
-the udev rules on a node, the node check, the choice of a node's location,
-the cluster's capacity, a pool's space, a change of a volume's hosts, the
-removal of a node, the logs, the gather of a node's state, a Kubernetes
-volume the node plugin will not format, a change of the cdc addresses of
-the Kubernetes driver, a Kubernetes node plugin that does not start, the
-loss of a Kubernetes machine, a one-cntlr Kubernetes volume after a cntlr
-replacement, the restore of etcd from a backup and the recovery of an
-etcd whose store is full so far, and gets the
-others as they are written. Every row with no tool or no doc carries its
-note. Section 6.1 and the tables give some short steps; the section "Steps
-known today" below gives the longer ones.
+follows by hand; the list at its top names each of its sections by
+subject: where to start, the forced-start guide, nodes, the networks,
+pools, volumes, the control plane, Kubernetes and hosts. Every row with no
+tool or no doc carries its note. Section 6.1 and the tables give some
+short steps; the section "Steps known today" below says what three of the
+longer procedures rest on.
 
 ### Nodes
 
@@ -1593,8 +1584,8 @@ known today" below gives the longer ones.
 
 ### Steps known today
 
-These are the longer steps written so far. [The operations doc](operations.md)
-will hold the full procedures.
+These are three longer procedures and what each rests on. [The
+operations doc](operations.md) gives their full steps.
 
 **Back up and restore etcd.** The steps are in the operations doc:
 [back up etcd](operations.md#back-up-etcd), [restore etcd from a
@@ -1897,22 +1888,70 @@ failover's among them.
   keeps serving, and a cancel frees the units. State: accepted. Counting
   runs would need a map of the units in etcd that every allocation and
   release keeps. Not seen in the lab.
-- **Smaller bounded waits.** An agent that marks the regions of a piece
-  of a written-block list holds that object's other work, and while the
-  copy serves pauses the volume's IO, until the marks are done; a copy
-  still in flight first holds the pause for a short bound. A grow whose new group cannot get ready waits while a repair,
-  a retired leg, a forced-start mark, the operator-in-charge flag or a
-  migration acts on that group. Outside a failover and a cntlr replacement
-  of the primary, the hold delays the cntlrs' syncups by up to one check
-  interval. In those two, the cntlrs but the old primary also wait for its
-  demotion, three seconds at most, and for the other legs' disk nodes to
-  report their fence, one more interval at most (the failover entries
-  above). A repair waits while its array does not run. A clone
-  source the agent reads as unused can be cut under a new dm-clone until
-  the next converge. The read-only level reaches a controller node only
-  with its converge. The cdc answers nothing before its first etcd scan,
-  delays hosts under a flood of new connections, and serves old addresses
-  through an etcd outage. State: accepted; each ends on its own.
+- **Other waits, some of which only the operator ends.** An agent that
+  marks the regions of a piece of a written-block list holds that
+  object's other work, and while the copy serves pauses the volume's IO,
+  until the marks are done; a copy still in flight first holds the pause
+  for a short bound. No read of that object runs until the marks are
+  done, even when no syncup of the node comes, so its reports age: once
+  the marks last past three check intervals, 6 seconds at the default,
+  the worker counts the object's check rounds as missed and sets its
+  health epoch, and a primary cntlr can then fail over. A syncup of the
+  node itself that comes meanwhile waits for the marks too, and holds
+  every other syncup and piece of that node behind it. No new read of the
+  node's state starts while it waits, so the reports of every object of
+  the node age the same way, and on a controller node the node's
+  primaries can fail over. Read from the code; not seen in the lab.
+  A grow whose new group cannot get ready waits while a repair, a retired
+  leg, a forced-start mark, the operator-in-charge flag or a migration
+  acts on that group. The worker ends its own repairs, and clears a
+  forced-start mark once the primary reports the start done. Four of these
+  holds can last until the operator acts:
+  - an operator's repair, which the worker never drives, until the
+    operator finishes or cancels it;
+  - the operator-in-charge flag, which only the operator clears, with
+    `dnvctl group set-operator-in-charge --grp <group id>
+    --operator-in-charge=false` ([Taking the group's repairs
+    over](operations.md#taking-the-groups-repairs-over));
+  - a migration, until the operator finishes or cancels it; the worker
+    ends one only when its leg goes bad;
+  - a retired leg, until the operator deletes it with
+    `dnvctl retired-leg delete --leg <leg id>` ([Retired
+    legs](operations.md#retired-legs)). The worker's own delete of a
+    retired leg after seven days needs the leg not kept, its group whole
+    and no health epoch on a leg or side of the group; a group whose new
+    side is dead carries one. `dnvctl retired-leg keep
+    --leg <leg id>` keeps a leg, and a forced-start mark keeps every
+    retired leg of its group.
+
+  A forced-start mark whose start waits or is refused holds the grow too:
+  until what holds the start ends, which can take the operator ([A forced
+  start that waits](operations.md#a-forced-start-that-waits)), or until the
+  operator withdraws the mark with
+  `dnvctl group force-start --grp <group id> --cancel`.
+  Outside a failover and a cntlr replacement of the primary, the worker's
+  hold delays the cntlrs' syncups by up to one check interval. In those two,
+  the cntlrs but the old primary also wait for its demotion, three seconds
+  at most, and for the other legs' disk nodes to report their fence, one
+  more interval at most (the failover entries above). A repair waits while
+  its array does not run, until the array runs again; that can take the
+  operator's forced start or level step ([the forced-start
+  guide](operations.md#the-forced-start-guide)). A repair whose bad leg
+  still serves in its array waits until it is aborted: an operator's by the
+  operator, and a worker's by the worker once the leg reads healthy again. A
+  clone source the agent reads as unused can be cut under a new dm-clone
+  until the next converge. The read-only level reaches a controller node
+  only with its converge. The cdc answers nothing before its first etcd
+  scan, which waits as long as etcd does not answer, with the record
+  `cdc waiting for first scan` once a minute; it delays hosts under a flood
+  of new connections, and serves old addresses through an etcd outage.
+  State: accepted. Each wait above that the operator ends stops at the step
+  named there; the others end once what they wait for is done or answers
+  again. The cdc's first scan and its old addresses last as long as etcd
+  does not answer, and an etcd that does not come back takes the
+  operator's restore ([Restore etcd from a
+  backup](operations.md#restore-etcd-from-a-backup)); its delay under a
+  flood of new connections ends with the flood.
 - **Disabling the last enabled cntlr stops the pool's IO with no
   warning.** State: accepted, by the dnvctl design.
 

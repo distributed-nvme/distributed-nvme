@@ -46,6 +46,109 @@ the command again.
 the pool's cntlrs. The one marked primary is the group's primary.
 `dnvctl cntlr inspect --id <cntlr id>` shows its rows.
 
+The sections, by subject:
+
+- Where to start:
+  - [Read what is wrong](#read-what-is-wrong)
+- The forced-start guide, which brings back a group whose legs all failed:
+  - [The forced-start guide](#the-forced-start-guide)
+    - [Words of this guide](#words-of-this-guide)
+    - [Reading a group](#reading-a-group)
+    - [Before every forced start](#before-every-forced-start)
+    - [Which leg to choose](#which-leg-to-choose)
+    - [A group whose in-sync leg died during a
+      copy](#a-group-whose-in-sync-leg-died-during-a-copy)
+    - [Starting from a retired leg](#starting-from-a-retired-leg)
+    - [A broken array that comes back by
+      itself](#a-broken-array-that-comes-back-by-itself)
+    - [A forced start that waits](#a-forced-start-that-waits)
+    - [A forced start whose stop failed](#a-forced-start-whose-stop-failed)
+    - [A lost clone meta group](#a-lost-clone-meta-group)
+    - [A leg of another identity that the primary does not
+      add](#a-leg-of-another-identity-that-the-primary-does-not-add)
+    - [A group whose every leg was
+      wiped](#a-group-whose-every-leg-was-wiped)
+    - [Keeping the old copies](#keeping-the-old-copies)
+    - [Taking the group's repairs over](#taking-the-groups-repairs-over)
+- Nodes:
+  - [Prepare a node](#prepare-a-node)
+  - [Install the udev rules on a node](#install-the-udev-rules-on-a-node)
+  - [Check a node before it joins](#check-a-node-before-it-joins)
+  - [Choose a node's location](#choose-a-nodes-location)
+  - [The cluster's capacity](#the-clusters-capacity)
+  - [Read a node's state](#read-a-nodes-state)
+  - [A planned restart of an agent](#a-planned-restart-of-an-agent)
+  - [Disable a node](#disable-a-node)
+  - [Leftovers on a node](#leftovers-on-a-node)
+  - [Remove a node](#remove-a-node)
+  - [Reuse a disk from an old node](#reuse-a-disk-from-an-old-node)
+  - [Replace a dead disk node](#replace-a-dead-disk-node)
+  - [Replace a dead controller node](#replace-a-dead-controller-node)
+  - [Gather a node's state for a bug
+    report](#gather-a-nodes-state-for-a-bug-report)
+- The networks:
+  - [The networks](#the-networks)
+- Pools:
+  - [A pool's space](#a-pools-space)
+  - [Change a pool's level](#change-a-pools-level)
+  - [Repair a thin pool's metadata](#repair-a-thin-pools-metadata)
+  - [A slow leg](#a-slow-leg)
+  - [Move a leg to another disk node](#move-a-leg-to-another-disk-node)
+    - [Ending a migration with force](#ending-a-migration-with-force)
+  - [Repair a leg by hand](#repair-a-leg-by-hand)
+  - [Retired legs](#retired-legs)
+  - [Replace a cntlr by hand](#replace-a-cntlr-by-hand)
+  - [Change a pool's cntlid slots](#change-a-pools-cntlid-slots)
+  - [Stripes and discards](#stripes-and-discards)
+  - [md's copy speed](#mds-copy-speed)
+  - [The md check's mismatch count](#the-md-checks-mismatch-count)
+  - [One pool for each volume](#one-pool-for-each-volume)
+  - [A pool made before the stripe
+    bound](#a-pool-made-before-the-stripe-bound)
+  - [A pool made before the block
+    bound](#a-pool-made-before-the-block-bound)
+- Volumes:
+  - [Change a volume's hosts](#change-a-volumes-hosts)
+  - [Snapshots](#snapshots)
+  - [Park a namespace](#park-a-namespace)
+  - [Move a volume to another pool](#move-a-volume-to-another-pool)
+    - [Read a volume's written blocks](#read-a-volumes-written-blocks)
+  - [Clone from another cluster](#clone-from-another-cluster)
+  - [A new volume refused for a thin id that holds
+    data](#a-new-volume-refused-for-a-thin-id-that-holds-data)
+- The control plane:
+  - [Back up etcd](#back-up-etcd)
+  - [Restore etcd from a backup](#restore-etcd-from-a-backup)
+    - [Restore one record from a backup](#restore-one-record-from-a-backup)
+  - [etcd refuses writes: its store is
+    full](#etcd-refuses-writes-its-store-is-full)
+  - [Upgrade dnv](#upgrade-dnv)
+  - [While the control plane is down](#while-the-control-plane-is-down)
+  - [Give hosts the cdc addresses](#give-hosts-the-cdc-addresses)
+  - [The logs](#the-logs)
+    - [Read the logs](#read-the-logs)
+- Kubernetes:
+  - [A Kubernetes volume the node plugin will not
+    format](#a-kubernetes-volume-the-node-plugin-will-not-format)
+    - [The read failed](#the-read-failed)
+    - [Data at the start](#data-at-the-start)
+  - [A Kubernetes node plugin that does not
+    start](#a-kubernetes-node-plugin-that-does-not-start)
+  - [Change the cdc addresses of the Kubernetes
+    driver](#change-the-cdc-addresses-of-the-kubernetes-driver)
+  - [A Kubernetes machine is lost](#a-kubernetes-machine-is-lost)
+  - [A one-cntlr Kubernetes volume after a cntlr
+    replacement](#a-one-cntlr-kubernetes-volume-after-a-cntlr-replacement)
+  - [A Kubernetes mount that lost its last
+    path](#a-kubernetes-mount-that-lost-its-last-path)
+  - [A pool left by a Kubernetes volume whose name held
+    ".."](#a-pool-left-by-a-kubernetes-volume-whose-name-held-)
+- Hosts:
+  - [Restart nvme-stas](#restart-nvme-stas)
+  - [A host that keeps a withdrawn
+    path](#a-host-that-keeps-a-withdrawn-path)
+  - [A fault only a host sees](#a-fault-only-a-host-sees)
+
 ## Read what is wrong
 
 Words: the **status read** is `dnvctl cluster get-status`, one read of the
@@ -330,9 +433,9 @@ gateway for `partial`.
    cannot read it later.
 3. Read the group (above).
 
-For a forced start, the suites step the level down before a leg dies.
-Stepping it down after, as here, is tested only for "A broken array that
-comes back by itself".
+Tested: for a forced start, the suites step the level down before a leg
+dies. Stepping it down after, as here, is tested only for "A broken array
+that comes back by itself".
 
 ### Which leg to choose
 
@@ -639,17 +742,19 @@ Causes and steps:
 
 - The array does not run, and the thin pool or a clone holds it open, so
   the primary cannot stop it. Step the level to `NO_THINPOOL`. The primary
-  then stops the array and acts on the mark. Not tested: the suites write
-  every mark at that level.
+  then stops the array and acts on the mark.
 - The array runs. The mark was written over a running array, or the
   primary's agent restarted after the start and forgot that it acted on
   the mark. Cancel the mark at once:
   `dnvctl group force-start --grp <group id> --cancel`. Left standing, the
   mark acts at the array's next stop, from a leg that may be stale by
   then. The worker also makes no leg repair of the group while it stands.
-  Not tested. After a forced start whose stop failed, read "A forced start
-  whose stop failed" first: there a mark whose leg md holds in sync can
-  drop the bad-block lists.
+  After a forced start whose stop failed, read "A forced start whose stop
+  failed" first: there a mark whose leg md holds in sync can drop the
+  bad-block lists.
+- The named leg does not serve. The start waits for it. Bring the leg
+  back, as in [A group whose in-sync leg died during a
+  copy](#a-group-whose-in-sync-leg-died-during-a-copy).
 - A leg the start would wipe does not serve. The start waits for it. Bring the
   leg back. If it will never come back, replace it with a repair:
   `dnvctl repair create --name <name> --grp <group id> --bad-legs <leg
@@ -657,7 +762,7 @@ Causes and steps:
   until the repair's new leg serves. The group must have no other open
   repair. The repair is also refused while the group holds two retired
   legs, and every mark keeps them; deleting one may delete the copy you
-  need, so stop instead. Not tested.
+  need, so stop instead.
 - A start from a repair's new leg waits the same way for the leg of the
   list that is not the repair's bad leg.
 - The dry run from the named leg, with the mark's words in `--override`,
@@ -666,16 +771,26 @@ Causes and steps:
   leg that was dead when the mark was written, and it wipes nothing. The
   group's row shows that text at most until the primary's next check
   round, which reads the row missing. Follow step 4 of the safe steps of
-  "Which leg to choose". Tested: the cn agent suite, repair case, stages
-  `older` and `olderstart`, a start refused for an older leg and then
-  passed; the end-to-end suite's react case writes the mark again, from
-  the dry run, when a dead named leg comes back with a list.
+  "Which leg to choose".
 
 Steps that can lose data: a mark left standing over a running array (see
 above).
 
 When to stop: the mark stays after a cancel, or the array runs and the
 row still reads error.
+
+Tested: the cn agent suite, `integtest/cnagent_test.sh`, repair case,
+stages `badstart`, `older` and `olderstart`: a start refused for the named
+leg's bad-block list and for an older leg, then passed; and the
+end-to-end suite, `integtest/e2e_test.sh`, react case. Its first mark is
+written while the named leg is dead, and the start waits until that leg's
+disk node comes back; the case writes the mark again, from the dry run,
+when the leg comes back with a bad-block list. These test the wait for the
+named leg and the last cause. The other causes are not tested: the step
+to `NO_THINPOOL` that lets the primary stop the array, since the suites
+write every mark at that level; the cancel of a mark over a running array;
+the wait for a leg the start would wipe, with its repair; and the wait of a
+start from a repair's new leg for the list's other leg.
 
 ### A forced start whose stop failed
 
@@ -883,7 +998,7 @@ Safe steps while the array runs, the leg's reason `RES_REASON_OTHER_IDENTITY`:
    worker never deletes it: it stays until you clear keep with
    `dnvctl retired-leg keep --leg <leg id> --clear`, after which the worker
    deletes it once it is old enough, or delete it with
-   `dnvctl retired-leg delete`.
+   `dnvctl retired-leg delete --leg <leg id>`.
 
 Safe steps once the group is down, each leg's reason
 `RES_REASON_IDENTITY_UNDECIDED`:
@@ -1128,10 +1243,13 @@ Safe steps, as root on every host of the pool:
    a subsystem of the pool needs the script and the rules file before it
    connects.
 3. To leave the old pool for good, copy the data at the file level from a
-   host into a volume of a new pool, and then delete the old pool. A
-   clone out of the old pool is refused when the clone's dm-clone device,
-   on the new pool's primary, would tell its hosts a best IO size over
-   4 MiB. The refusal names both pools' stripe times slice count.
+   host into a volume of a new pool, and then delete the old pool from the
+   inside out, in the order of step 2 of [Remove a node](#remove-a-node):
+   its delete is refused while it still holds a volume, a subsystem, a
+   clone, a transfer or a migration. A clone out of the old pool is
+   refused when the clone's dm-clone device, on the new pool's primary,
+   would tell its hosts a best IO size over 4 MiB. The refusal names both
+   pools' stripe times slice count.
 
 Steps that can lose data: steps 1 and 2 write no data. In step 3, delete
 the old pool only after the copy is read back on the new volume.
@@ -1214,16 +1332,30 @@ Safe steps, to move every volume of the pool to a new pool:
      a controller node of the other pool. Before each move of step 2,
      compare the `addr_port` of the cntlrs that `dnvctl sp get` shows for
      both pools. If two share a controller node, stop moving and move one
-     of them. Choose one whose pool has another healthy, enabled cntlr:
-     disabling a pool's only enabled cntlr stops that pool's IO, and no
-     failover follows. If neither has one, stop and ask for help. Disable
-     it with `dnvctl cntlr set-enabled --id <cntlr id> --enabled=false`.
-     If it was the primary, wait until `dnvctl sp get` shows another cntlr
-     as the primary, since the gateway refuses to delete the primary. Then
-     delete it with `dnvctl cntlr delete --id <cntlr id>`, and create it
-     again with
-     `dnvctl cntlr create --slot <its cntlid slot> --cn-black <the other pool's controller nodes>`,
-     the addresses separated by commas.
+     of them to another controller node, the new cntlr first, as
+     [Replace a cntlr by hand](#replace-a-cntlr-by-hand) says. Create the
+     new cntlr with
+     `dnvctl cntlr create --slot <slot> --cn-black <the other pool's controller nodes>`,
+     the addresses separated by commas, and a slot of its pool's
+     `sp_conf.cntlid_slot_list` that no cntlr of either pool uses; when the
+     list holds none, add one first ([Change a pool's cntlid
+     slots](#change-a-pools-cntlid-slots)). A pool with fewer than four
+     cntlrs always finds such a slot, since the two pools' cntlrs then use
+     fewer than the eight slots. Wait until the new cntlr is built, as step
+     3 of [Replace a cntlr by hand](#replace-a-cntlr-by-hand) says. Then
+     disable the old one with
+     `dnvctl cntlr set-enabled --id <cntlr id> --enabled=false`. If it was
+     the primary, wait until `dnvctl sp get` shows another cntlr as the
+     primary, since the gateway refuses to delete the primary. Then delete
+     it with `dnvctl cntlr delete --id <cntlr id>`. A pool of four cntlrs,
+     the most a pool can have, refuses the create: move a cntlr of the
+     other pool instead when that pool has fewer. When both have four,
+     disable and delete the old cntlr first, and then create the new one,
+     in the old cntlr's slot when the two pools' cntlrs use every other
+     slot. Delete first only a cntlr whose pool has another healthy,
+     enabled cntlr: disabling a pool's only enabled cntlr stops that
+     pool's IO, and no failover follows. If neither pool has one, stop and
+     ask for help.
 2. Move the volumes one at a time, or a few at once: a pool holds at most
    four transfers, and a fifth `dnvctl xfer create` is refused with the
    error code RESOURCE_EXHAUSTED. For each volume:
@@ -1266,8 +1398,9 @@ Safe steps, to move every volume of the pool to a new pool:
    such as a snapshot, moves only once a namespace of the old pool exports
    it. In the new pool it is a volume of its own, which shares no block
    with its origin.
-3. Once the old pool holds no volume, subsystem or transfer, delete it
-   with `dnvctl sp delete`, which refuses a pool that still holds any.
+3. Once the old pool holds no volume, subsystem, clone, transfer or
+   migration, delete it with `dnvctl sp delete`, which refuses a pool that
+   still holds any.
 
 Steps that can lose data:
 
@@ -2189,10 +2322,14 @@ reach or route to. dnv checks no caller of the gateway, the agents and
 etcd, and no host beyond its NQN, so the network alone keeps hosts away
 from them. A machine that reaches the gateway can change or delete any
 pool, and one that reaches an agent's control port can make the agent
-remove what its node holds. A machine that reaches a disk node's NVMe/TCP
-port and claims the NQN of any controller node that holds a cntlr of a
-pool, primary or standby, can read and write that pool's raw legs there,
-the old bytes of other pools included.
+remove what its node holds. A controller node's agent takes from each call
+the id of the controller node it acts as, so through its control port a
+machine can also make it connect to the legs of any pool as that pool's
+primary. A machine that reaches a disk node's NVMe/TCP port and claims the
+NQN of the controller node that holds a pool's primary can read and write
+that pool's raw legs there, the old bytes of other pools included. The NQN
+of a controller node that holds a standby of the pool gets in too, but its
+reads and writes fail until a failover makes that standby the primary.
 
 Who connects to whom:
 
@@ -4171,8 +4308,8 @@ Safe steps:
    records: wait until the clone's copy is complete and the clone leaves by
    itself, or, in a RAID1 pool, replace that leg with a repair.
    `dnvctl retired-leg list` shows the pool's retired legs; delete each one
-   on the node with `dnvctl retired-leg delete` once you no longer want its
-   copy.
+   on the node with `dnvctl retired-leg delete --leg <leg id>` once you no
+   longer want its copy.
 
    A pool is deleted from the inside out. Its delete is refused while the
    pool still holds a thin device, a subsystem, a clone, a transfer or a
@@ -5874,7 +6011,9 @@ Safe steps for the cdcs:
    lists name, is in `/etc/stas/sys.conf`.
 3. Restart nvme-stas in its safe order ([Restart
    nvme-stas](#restart-nvme-stas)) so that it reads the list.
-4. Check on the host: `stafctl ls` shows a connection to each cdc.
+4. Check on the host: `stafctl adlp -d` shows each cdc's address with its
+   `connected` field `True`, as step 4 of [Restart
+   nvme-stas](#restart-nvme-stas) reads it.
 5. For the Kubernetes driver, the list is its config map:
    [Change the cdc addresses of the Kubernetes
    driver](#change-the-cdc-addresses-of-the-kubernetes-driver).
@@ -6028,9 +6167,10 @@ program, not to a shell or a wrapper, before you send another.
 Tested: unit tests check the log level of the records every program shares
 (the reads and the writes of the node, the messages of a check round, the
 records of etcd and of the leg probe), of the worker's skipped reactions,
-its fence and its late rounds, of the CSI driver's calls and of its records
-for a cdc it cannot reach; that every program but the agent's node check
-and gather parses `--log-level` and refuses a word other than the three;
+its stops (`worker fenced`) and its late rounds, of the CSI driver's
+calls and of its records for a cdc it cannot reach; that every program
+but the agent's node check and gather parses `--log-level` and refuses a
+word other than the three;
 and that SIGUSR1 and SIGUSR2 change the log level of a running program. On the lab VMs, the dn suite's loglevel
 case restarts an agent at the default log level, checks that a check round
 writes no record of its reads or of its messages and that a request still
@@ -6184,8 +6324,9 @@ volume reads as zeros, since a thin device reads zeros where nothing was
 written.
 
 Symptom: a pod that uses a filesystem volume stays in `ContainerCreating`.
-`kubectl describe pod <pod>` shows events with the plugin's refusal. This
-section covers the two refusals of the check that the volume is blank:
+`kubectl -n <Kubernetes namespace> describe pod <pod>` shows events with
+the plugin's refusal. This section covers the two refusals of the check
+that the volume is blank:
 
 1. **The read failed**: "reading the start of the device <device> ... the
    driver formats only a device whose start it has read".
@@ -6226,6 +6367,11 @@ When to stop: the read keeps failing while the pool's cntlrs serve, which
 is a fault only the host sees ([A fault only a host
 sees](#a-fault-only-a-host-sees)). Ask for help.
 
+Tested: a unit test of the node plugin checks that a failed read formats
+nothing and keeps the volume's paths, and that the next try formats the
+volume once the read works. No suite case fails a read under a Kubernetes
+volume.
+
 ### Data at the start
 
 Between tries the node holds no path to the volume, so `<device>` does not
@@ -6254,10 +6400,11 @@ Safe steps:
 
 1. Stop the tries: scale the workload that owns the pod to zero; delete
    the pod only when no workload owns it, since a workload makes a new pod
-   with the same claim at once. Wait until `kubectl get volumeattachment` lists no
-   attachment of the claim's persistent volume (`kubectl get pvc <claim>`
-   names it). A try still running would disconnect the node from the volume
-   under the steps below.
+   with the same claim at once. Wait until `kubectl get volumeattachment`
+   lists no attachment of the claim's persistent volume
+   (`kubectl -n <Kubernetes namespace> get pvc <claim>` names it). A try
+   still running would disconnect the node from the volume under the steps
+   below.
 2. Read the volume's handle:
    `kubectl get pv <pv> -o jsonpath='{.spec.csi.volumeHandle}'`.
 3. Give the same volume to a pod as a raw block volume, through a second
@@ -6495,9 +6642,9 @@ Safe steps:
    - Multipath: add `nvme_core.multipath=Y` to the kernel's command line and
      reboot the node; a kernel built without native NVMe multipath must be
      replaced.
-   - The fabrics device: `modprobe nvme-tcp`, and name nvme-tcp in a file
-     under `/etc/modules-load.d`, such as `/etc/modules-load.d/nvme-tcp.conf`,
-     so that it loads at boot.
+   - The fabrics device: `modprobe nvme-tcp`, and copy the release's
+     `deploy/modules-load.d/dnv-host.conf`, which names nvme-tcp, into
+     `/etc/modules-load.d/`, so that it loads at boot.
 2. Delete the node plugin pod, `kubectl -n dnv-csi delete pod <pod>`, so
    that Kubernetes starts it at once rather than after its wait. Its log
    then shows `csi node serving`, or a refusal of another fact, as of the

@@ -4587,7 +4587,15 @@ else reported through `agent_reply` is still a protocol-level refusal.
   and one that outlasts that bound ends the apply with no discard: a pause
   for nothing, and those regions are copied, until the next apply. A
   cancelled push sends no further range and still waits for the one in the
-  kernel.
+  kernel. The side's own background read takes its object lock too (SH11),
+  so it waits out a push's or a converge's apply, and the side's
+  observation ages with no `SyncupDn` at all; a `SyncupDn` that arrives
+  meanwhile waits for the node write lock behind the apply, and no read of
+  the node starts until it has run (SH10, SH30), so every observation of
+  the DN and of its other sides ages as well. Past `ObsMaxAgeIntervals` of
+  their intervals the worker counts their rounds as missed and sets their
+  health epochs (`dnv-worker.md` HL7), so a long apply by itself sets the
+  destination side's.
 * A reload whose load fails leaves its device suspended (OS wrappers), so
   [D12]'s bound on a suspension holds only as far as the reloads succeed.
   When a primary flip's reload of the old primary's linear fails its load,
