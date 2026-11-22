@@ -1919,9 +1919,10 @@ HOST_EOF
 }
 
 # ship_helpers pushes the two generated helpers and creates the per-server
-# tree. It is idempotent and cheap, and cleanup calls it first so that even a
-# start-of-run cleanup on a machine that has never seen this suite has the
-# tools it needs.
+# tree. It is idempotent and cheap. The start-of-run cleanup and a
+# cleanup-only run call it first, so that even a start-of-run cleanup on a
+# machine that has never seen this suite has the tools it needs; a passing
+# run's end cleanup uses the copies setup shipped.
 ship_helpers() {
 	[ -n "$TMPDIR_LOCAL" ] || die "ship_helpers before the temp dir exists"
 	write_target_helper "$TMPDIR_LOCAL/cdc_target.sh"

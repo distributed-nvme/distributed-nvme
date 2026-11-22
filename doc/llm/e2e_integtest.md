@@ -1288,7 +1288,8 @@ then, which the host's multipath code sends again to the new primary, and
 every write after must read back, and every job must have met the stall; a
 write whose fsync was in flight at the reset is the case of the entry of
 `scope.md` "A host's fsync completes after the primary died with its
-writes", counted held or lost and logged, not asserted, and so is the
+writes", counted held or lost and logged, not asserted (Known limits,
+The flush stage's lost fsync is logged, not asserted), and so is the
 kernel-log witness of that second reset, which an fsync the reset fails
 would fill. A write or an fsync that fails ends its job there and is
 logged, held or not, as an error the host was told; the writes before it
@@ -1761,12 +1762,13 @@ there, the 3 second cut and its asserts included — is a logged line, not a
 proof, and so is every reading the cases above log or count without
 asserting it, among them the group cut past its 3 seconds and the 3 second
 cut's pause above one slice, the writes whose fsync was in flight at the
-second reset and that reset's kernel-log witness, the first block the copy
-case's crash under unflushed writes lost, how md takes a retired leg back,
-the fstrim's drop where the stripe is below the block, the many-pools
-case's failovers while its pools build and the writes it counts at a cut
-node's return and on its agent stop, what the worker did and which writes
-failed under the long run's CPU cap, and the pauses the writers saw.
+second reset, lost in the one run that met them, and that reset's kernel-log
+witness, the first block the copy case's crash under unflushed writes lost,
+how md takes a retired leg back, the fstrim's drop where the stripe is below
+the block, the many-pools case's failovers while its pools build and the
+writes it counts at a cut node's return and on its agent stop, what the worker
+did and which writes failed under the long run's CPU cap, and the pauses the
+writers saw.
 
 ## Preflight
 
@@ -1987,20 +1989,27 @@ the connect attempted.
   from the other leg, not what the reset guest kept; only the first reset,
   after md's flush, reads what the guest kept, md having written 49
   sectors to the member across its return in that run.
-* **The flush stage met no fsync in flight.** The reset lands in an fsync
-  only while one is in flight, so the stage delays the primary's writes to
-  the meta groups' legs, which lengthens each pool commit and each fsync
-  with it. Its jobs keep one schedule, so the reset meets them all at the
-  same point of it, and in its one run with the delay it met every job in
-  a write and none in an fsync. The stage counts the fsyncs in flight, held
-  or lost, and asserts nothing of them, and it logs no time of an fsync it
-  judges completed, so how long the delay made them is not read. A commit
-  slowed this way is not the lab's own speed. The fsyncs of the writes the
-  host sent again to the new primary took under a millisecond, as the
-  host sends no flush through a path it identified on the standby
-  (`architecture.md`, Known limits, A host's flush through a path it
-  identified over the dm-error is not sent), so the writes that read back
-  after the stall show the pool's mappings, not a commit their fsync made.
+* **The flush stage's lost fsync is logged, not asserted.** The reset lands in
+  an fsync only while one is in flight, so the stage delays the primary's
+  writes to the meta groups' legs, which lengthens each pool commit and each
+  fsync with it. Its jobs keep one schedule, so the reset meets them all at
+  the same point of it. Of its four runs at one slice, two ran with the delay.
+  The first met every job in a write and none in an fsync. The second met
+  every job in its fsync: each of the four fsyncs returned success 4181 to
+  4186 ms after it was issued, after the failover to the standby, and none of
+  the four writes read back from the new primary, held 0 of 4, which is the
+  loss of `scope.md`'s entry "A host's fsync completes after the primary died
+  with its writes"; the 20 writes whose fsync completed before the reset and
+  the 8 after it read back, and no write or fsync failed. The stage counts the
+  fsyncs in flight, held or lost, logs each lost one with its times and the
+  longest write or fsync of any job, and asserts nothing of them; the loss is
+  a known limit, to be fixed later. A commit slowed this way is not the lab's
+  own speed. In the first run with the delay the fsyncs of the writes the host
+  sent again to the new primary took under a millisecond, as the host sends no
+  flush through a path it identified on the standby (`architecture.md`, Known
+  limits, A host's flush through a path it identified over the dm-error is not
+  sent), so the writes that read back after the stall show the pool's
+  mappings, not a commit their fsync made.
 * **The new data checks ran at one slice.** The stamped writer, the status
   check, the flush stage, the group cut, the fstrim step and the copy
   case's two crashes of a disk-node guest have run at one slice only;

@@ -346,14 +346,20 @@ the host.
   commits nothing of the dead one's. The fsync returns success and the
   writes are gone. A plain PCIe disk never takes this path. dnv's own
   programs cannot fix this. State: fix later; a change inside dm-thin is
-  under test. Read from the kernel's code. The end-to-end suite resets the
-  primary's machine while a host writes 4 KiB to new blocks from four jobs,
-  each write followed by an fsync, and reads every block back after the
-  failover. In its three runs at one slice no fsync was in flight at the
-  reset, so this loss was not met; every write whose fsync had completed,
-  the write in flight at the reset and every write after it read back.
-  The last run slowed the pool's commits so that the reset could land in
-  an fsync, and it still landed in a write in each of the four jobs.
+  under test. Read from the kernel's code, and seen in the lab once. The
+  end-to-end suite resets the primary's machine while a host writes 4 KiB
+  to new blocks from four jobs, each write followed by an fsync, and reads
+  every block back after the failover. It has run this four times at one
+  slice. Two of the runs slowed the pool's commits so that the reset could
+  land in an fsync. In the first of the two the reset landed in a write in
+  each of the four jobs. In the second each of the four jobs was in its
+  fsync at the reset: each fsync returned success about 4.2 seconds after
+  it was sent, after the failover to the standby, and none of the four
+  writes read back from the new primary. That is this loss. In every run,
+  every write whose fsync had completed before the reset, any write in
+  flight at the reset and every write after it read back, and no write or
+  fsync failed. The suite logs the writes whose fsync was in flight and
+  does not fail on them.
 - **A host's flush through a path it last read while its volume served
   only errors is not sent.** Silent. A volume tells the host, path by
   path, whether it has a volatile write cache. A volume served only by

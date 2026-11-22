@@ -9301,11 +9301,16 @@ document and only pointed to here.
   namespace's device had none (the next entry). Read in the kernel's
   dm-thin, nvmet, block and NVMe host sources. The end-to-end suite resets
   the primary's machine under writes to new blocks, each followed by an
-  fsync (`e2e_integtest.md`, The cases, react): in three runs at one slice
-  on the lab every write whose fsync completed before the reset, the write
-  in flight then and every write after read back, and no fsync was in
-  flight at the reset, the last run's slowed commits included, so the loss
-  itself is not seen.
+  fsync (`e2e_integtest.md`, The cases, react). In its four runs at one
+  slice on the lab every write whose fsync completed before the reset, any
+  write in flight then and every write after read back, and no write or
+  fsync failed. Two of the runs slowed the pool's commits: in the first the
+  reset met every job in a write, and in the second every job in its fsync,
+  and there the loss is seen: each of the four fsyncs returned success some
+  four seconds after it was sent, after the failover to the standby, and
+  none of the four writes read back from the new primary
+  (`e2e_integtest.md`, Known limits, The flush stage's lost fsync is logged,
+  not asserted).
 * **A host's flush through a path it identified over the dm-error is not
   sent.** nvmet marks a namespace as having no volatile write cache when
   the namespace's device has none, and a host takes that mark into its
@@ -9349,7 +9354,7 @@ document and only pointed to here.
   write-back and the fsync's flush reached it. In the end-to-end suite's flush
   stage the fsyncs of the writes the host sent again to the new primary took
   under a millisecond, as fsyncs that send no flush do (`e2e_integtest.md`,
-  Known limits, The flush stage met no fsync in flight).
+  Known limits, The flush stage's lost fsync is logged, not asserted).
 * **A failover while the old primary serves can lose an acknowledged
   write.** An old primary that has not applied its demotion, or a primary
   a cntlr replacement deleted whose CN has not torn its stack down, goes

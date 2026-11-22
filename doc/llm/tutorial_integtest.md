@@ -213,8 +213,10 @@ or failed run, run the suite's `--cleanup-only`, as every lab chain does
 (`e2e_integtest.md` E2E6). That cleanup is what lets the suite run on a guest
 that other suites use: a run's preflight proved the guest held none of what
 cleanup removes, and a run with `--cleanup-only`, which runs no preflight,
-acts only on a guest that holds the suite's work folder, which every run of
-the suite makes before it changes the guest, and changes nothing on any other.
+acts only on a guest that holds the suite's mark in the work folder, which
+a run makes once its preflight has passed and before it changes the guest,
+and which only a cleanup that left nothing takes away, and changes nothing
+on any other.
 
 ## Known limits
 

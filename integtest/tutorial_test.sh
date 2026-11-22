@@ -180,7 +180,7 @@ helper() { rsh "sudo -n bash $HELPER $*"; }
 # object, NVMe-oF controller, dnv device and md array of the guest: a run
 # relies on its preflight, which proved the guest held none of them before
 # the run, and a cleanup-only run acts only on a guest that holds this
-# suite's work folder.
+# suite's mark (the guard of the cleanup-only branch).
 helper_text() {
 	cat <<'HELPER_EOF'
 set -uo pipefail
@@ -1279,6 +1279,10 @@ setup() {
 	etcd_dir=$ETCD_CACHE_DIR/$ETCD_DIST
 
 	stage "setup: save the guest's state, unpack the archive, put etcd beside the binaries"
+	# The mark by which a --cleanup-only run knows the guest as this suite's:
+	# made once preflight proved the guest held none of what cleanup removes,
+	# before the first change; only a cleanup that left nothing takes it away.
+	rsh "touch $WORK/owned" || die "marking the guest as this suite's failed"
 	SAVE_DONE=1
 	# The logs an earlier run kept under $WORK/logs for the runner to copy go
 	# before this run's first block, whose crash scan reads every log under
@@ -1297,7 +1301,8 @@ setup() {
 # cleanup puts the guest back: it takes down what the run left, restores
 # what setup saved, keeps the logs of a failed run under $WORK/logs and
 # removes the rest of $WORK, but for $SAVED when the restore failed or did
-# not run for a read that failed, so that a run with --cleanup-only can
+# not run for a read that failed, and but for the mark $WORK/owned when
+# anything failed or is left, so that a run with --cleanup-only can
 # still put the guest back (the next run's preflight refuses until it has).
 # In the CSI part it first deletes from the lab's k3s the objects of
 # CSI_OBJECTS by kind and name, which needs no release folder, and puts the
@@ -1338,14 +1343,22 @@ cleanup() { # <keep logs: 0|1>
 		keep_saved="! -name saved"
 		;;
 	esac
+	[ -z "$left" ] || bad=1
+	n=$(rsh "ls /sys/kernel/config/nvmet/ports 2>/dev/null | wc -l") || n=unknown
+	[ "$n" = 0 ] || {
+		log "WARNING: nvmet ports left: $n"
+		bad=1
+	}
+	local keep_mark=""
+	[ "$bad" = 0 ] || keep_mark="! -name owned"
 	if [ "$keep" = 1 ]; then
-		rsh "cd $WORK && sudo -n mkdir -p logs && sudo -n find . -path ./logs -prune -o -name '*.log' -type f -exec cp {} logs/ \\; ; sudo -n find . -mindepth 1 -maxdepth 1 ! -name logs $keep_saved -exec rm -rf {} +" || {
+		rsh "cd $WORK && sudo -n mkdir -p logs && sudo -n find . -path ./logs -prune -o -name '*.log' -type f -exec cp {} logs/ \\; ; sudo -n find . -mindepth 1 -maxdepth 1 ! -name logs $keep_saved $keep_mark -exec rm -rf {} +" || {
 			log "WARNING: keeping the logs failed"
 			bad=1
 		}
 		log "the run's logs are kept on $TARGET under $WORK/logs"
-	elif [ -n "$keep_saved" ]; then
-		rsh "sudo -n find $WORK -mindepth 1 -maxdepth 1 $keep_saved -exec rm -rf {} +" || {
+	elif [ "$bad" = 1 ]; then
+		rsh "sudo -n find $WORK -mindepth 1 -maxdepth 1 $keep_saved $keep_mark -exec rm -rf {} +" || {
 			log "WARNING: removing $WORK but its saved state failed"
 			bad=1
 		}
@@ -1358,12 +1371,6 @@ cleanup() { # <keep logs: 0|1>
 	[ -z "$keep_saved" ] ||
 		log "the saved state stays on $TARGET under $SAVED: run --cleanup-only to put the guest back"
 	[ -n "$RELEASE_OUT" ] && rm -rf "$RELEASE_OUT"
-	[ -z "$left" ] || return 1
-	n=$(rsh "ls /sys/kernel/config/nvmet/ports 2>/dev/null | wc -l") || n=unknown
-	[ "$n" = 0 ] || {
-		log "WARNING: nvmet ports left: $n"
-		return 1
-	}
 	return "$bad"
 }
 
@@ -1602,16 +1609,17 @@ if [ "$CLEANUP_ONLY" = 1 ]; then
 	# device and md array of the guest, and the CSI part's cleanup the list's
 	# objects in the lab's k3s, whoever made them, and a cleanup-only run has
 	# no preflight to prove the guest holds none of another suite's. So it
-	# acts only on a guest that holds this suite's work folder, which every
-	# run of the suite makes before it changes the guest and which holds its
-	# saved state, and changes nothing on any other.
+	# acts only on a guest that holds this suite's mark, $WORK/owned, which a
+	# run makes once its preflight has passed and before it changes the guest
+	# and which only a cleanup that left nothing takes away, or the saved
+	# state of an earlier run, and changes nothing on any other.
 	t=0
-	rsh "test -d $WORK" || t=$?
+	rsh "test -e $WORK/owned || test -e $SAVED" || t=$?
 	case $t in
 	0) ;;
 	1)
-		log "nothing of the tutorial suite is on the guest ($WORK is absent):" \
-			"nothing changed"
+		log "nothing of the tutorial suite is on the guest (no $WORK/owned and" \
+			"no $SAVED): nothing changed"
 		exit 0
 		;;
 	*) die "reading whether $WORK is on the guest failed (exit $t)" ;;
