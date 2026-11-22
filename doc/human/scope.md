@@ -161,8 +161,9 @@ always sends a piece's position.
   host wrote a block the list marked never written, and the older bytes
   where it wrote a region the copy had already taken, with no error. State: accepted, because the gateway
   cannot tell a reading controller node's connection from a writing
-  host's. Procedure to write, one line in the operations doc: list only
-  the other pool's controller nodes.
+  host's. Procedure written: [the operations
+  doc](operations.md#move-a-volume-to-another-pool) lists only the other
+  pool's controller nodes, by host NQNs it shows how to work out.
 - **A clone's list piece sent twice without its position is stored
   twice.** dnvctl always sends a piece's position, so this needs a program
   that calls the gateway itself and leaves the position out. A clone's
@@ -717,9 +718,13 @@ No case is known today.
 - **A change without a revision token overwrites another operator's
   change.** A revision token is the revision the caller last read, which
   dnvctl sends with `--rev`; the gateway refuses the change if the
-  revision has moved since. This loses a change of the desired state, not
-  volume data. A caller may send the token and is then protected. State: accepted, by
-  design. Procedure to write, one line in the operations doc.
+  revision has moved since. This loses a change of the desired state, and
+  a delete by name can delete a volume that another caller made again
+  under that name since the read, with its data. A caller may send the
+  token and is then protected. State: accepted, by
+  design. Procedure written: the start of [the operations
+  doc](operations.md) says which read gives each token and what its
+  refusal means.
 
 ## 6. The system comes back alone
 
@@ -741,7 +746,7 @@ Measured times are in [the introduction](introduction.md#status-and-limits).
 | The network between a controller node and a disk node is cut | When the controller node holds the primary, as for a disk node down, seen from that controller node: md fails the legs behind the cut and takes them back when the cut ends. A long cut moves the legs. A cut from a node that holds only standbys changes nothing. | `leg_unhealthy`, 1200. | Nothing. |
 | The network between hosts and a controller node is cut | Nothing. dnv reads the agents, never a host. The primary stays the primary and stays in the cdc's answer. The host's IO queues as long as a standby path is left. | None. | Disable the primary, so a failover runs at once. Enable it again after. State: procedure to write; fix later, a host health signal into the worker. |
 | The network between the control plane and the agents is cut | The data plane keeps serving. The primaries of one cut-off controller node are failed over. The old primary never gets its demotion, and the fence comes after the three-second hold, so hosts that drop the old path inside the hold see a pause, and a host still on it sees IO errors (section 8) and, in the cases section 5.1 lists, can lose a write it was told was done. With every agent cut off, nothing changes until the network is back. | As for a controller node down. | Nothing. |
-| etcd is down and comes back | The data plane keeps serving. No call and no reaction runs. A worker that cannot write to etcd stops driving its pools about 30 seconds into the outage, and drives again about one grace time after etcd is back. | The worker's flags: `--vote-interval`, 10 at the default, for the 30 seconds, which are three intervals; `--vote-grace-time`, 60, for the wait after. | Nothing. State: procedure to write, "running while the control plane is down". |
+| etcd is down and comes back | The data plane keeps serving. No call and no reaction runs. A worker that cannot write to etcd stops driving its pools about 30 seconds into the outage, and drives again about one grace time after etcd is back. | The worker's flags: `--vote-interval`, 10 at the default, for the 30 seconds, which are three intervals; `--vote-grace-time`, 60, for the wait after. | Nothing. State: procedure written, [while the control plane is down](operations.md#while-the-control-plane-is-down). |
 | etcd's store reaches its quota | The data plane keeps serving. etcd refuses every write but a delete and still serves reads, so no call that writes the state and no reaction runs: each worker stops driving its pools within three vote intervals and does so again each time it starts. Once etcd takes writes again, every worker drives again about one grace time later. | The worker's flags: `--vote-interval`, 10 at the default, three intervals before it stops; `--vote-grace-time`, 60, for the wait after. The cause: etcd's `--quota-backend-bytes`, 2 GiB when not given; the history shrinks only with a compaction, which `--auto-compaction-retention` runs. | Compact, defragment and disarm the alarm: [the steps](operations.md#etcd-refuses-writes-its-store-is-full). |
 | One etcd member of several hangs, or its machine is gone with no TCP reset | The data plane keeps serving. Each worker's writes to that member wait out the worker's etcd call timeout, 10 seconds, so the workers can all stop driving their pools at once, and drive again about one grace time later; no reaction runs meanwhile. Measured at a vote interval of 2 seconds: every worker stopped once, about 11 seconds after a member froze, and a leader frozen for 2 seconds stopped a worker in 3 of 6 runs. At a vote interval of 6 seconds, a leader frozen for 3 seconds stops no worker. | The worker's flags `--vote-interval` and `--vote-grace-time`. At the defaults, 10 and 60, none of this is measured. | Nothing. |
 | A worker, the gateway or the cdc is down and comes back | Another worker, when one runs, takes the pools after a bounded window. The gateway has no state. Without the cdc, hosts keep their paths and get no path changes. | The worker's flags `--vote-interval`, 10 at the default, and `--vote-leave-grace-time`, 25: a dead worker counts as gone after twice the interval, and the change then holds for the leave grace time, about 45 seconds in all. | Nothing. A failover during a cdc outage leaves hosts on a withdrawn path (section 6.1). |
@@ -1199,8 +1204,12 @@ Measured times are in [the introduction](introduction.md#status-and-limits).
   Removing that name from the pool's list makes the primary delete a
   volume's data for good. The status read names the lost record's key
   ([the operations doc](operations.md#read-what-is-wrong)). State:
-  procedure to write, how to restore one record from the etcd backup;
-  never remove the name.
+  procedure written for a volume's record, [restore one record from a
+  backup](operations.md#restore-one-record-from-a-backup), rehearsed in the
+  lab with fake agents. For a record of another kind, fix later: no safe
+  way to put it back is known, since a backup's copy of such a record can
+  be older than the pool's legs, health and hosts; ask for help, and never
+  remove the name.
 - **A node deleted with force keeps leftovers.** A node delete asks the
   node's agent. It is refused while the agent does not answer, reports a
   leftover or has not yet applied the node's latest desired state, and, on
@@ -1518,25 +1527,25 @@ known today" below gives the longer ones.
 
 | Action | Tool today | Doc today | State |
 |---|---|---|---|
-| Create, snapshot and delete a volume | `dnvctl td create`, with `--ori` for a snapshot; `dnvctl td delete` | the tutorials, for the create and the delete | done; procedure to write, one line on snapshots |
+| Create, snapshot and delete a volume | `dnvctl td create`, with `--ori` for a snapshot; `dnvctl td delete` | the tutorials, for the create and the delete; the operations doc, [Snapshots](operations.md#snapshots) | done; procedure written for snapshots, which the e2e suite makes and waits for until they are recorded as created |
 | Export a volume to hosts; change its hosts | `dnvctl ss create`, `dnvctl ns create`, `dnvctl ss set-hosts`; a host taken off the list loses its connection where the controller node's cn agent ends connections (section 5.4) | the tutorials, for the export; the operations doc, [Change a volume's hosts](operations.md#change-a-volumes-hosts) | done |
-| Park a namespace | `dnvctl ns set-suspended`, `dnvctl ns set-dev` | none | procedure to write |
-| Move a volume to another pool | `dnvctl xfer create` on the source; `dnvctl clone create`, `clone append-bm` on the destination | the introduction explains the flow; the operations doc, A pool made before the block bound, gives the order of the moves out of a pool and when each old volume may go | procedure to write: the whole flow. |
-| Clone from a source outside this cluster | `dnvctl clone create`, `clone set-tr` | none; the introduction explains the flow | procedure to write |
-| Read a volume's written blocks | `dnvctl td get-bm` | none | procedure to write, with the move to another pool |
+| Park a namespace | `dnvctl ns set-suspended`, `dnvctl ns set-dev` | the operations doc, [Park a namespace](operations.md#park-a-namespace) | procedure written; the e2e suite parks a namespace, resumes it, and points it at another volume and back |
+| Move a volume to another pool | `dnvctl xfer create` on the source; `dnvctl clone create`, `clone append-bm` on the destination | the introduction explains the flow; the operations doc, [Move a volume to another pool](operations.md#move-a-volume-to-another-pool), gives the whole flow, and A pool made before the block bound the order of the moves out of a pool | procedure written. The e2e suite runs a transfer and a clone within one pool, into a namespace of another identity; the move into another pool under the same identity is not tested. |
+| Clone from a source outside this cluster | `dnvctl clone create`, `clone set-tr` | the introduction explains the flow; the operations doc, [Clone from another cluster](operations.md#clone-from-another-cluster) | procedure written; not tested from another cluster or from a target that is not dnv. The e2e suite clones a plain namespace of a second pool of the same cluster, with no transfer. |
+| Read a volume's written blocks | `dnvctl td get-bm` | the operations doc, [Read a volume's written blocks](operations.md#read-a-volumes-written-blocks) | procedure written; the e2e suite reads the list of a parked volume and of a snapshot. Reads in windows through `dnvctl` are not tested. |
 | Grow a volume; revert a volume to a snapshot | none | — | not yet |
 
 ### Control plane
 
 | Action | Tool today | Doc today | State |
 |---|---|---|---|
-| Back up and restore etcd | etcd's own tools; `dnvctl cluster advance-ids` after a restore; `dnvctl cn check-restore`, which says pool by pool what the restore loses, before the agents' local files are reset | the operations doc, [Restore etcd from a backup](operations.md#restore-etcd-from-a-backup), and [a new volume refused for a thin id that holds data](operations.md#a-new-volume-refused-for-a-thin-id-that-holds-data) | procedure written; the e2e suite's upgrade case runs its steps once on the lab's real agents, from a backup taken under 0.1, with one etcd member and no Kubernetes, all but the change of host lists, which it has none to make, and the Kubernetes step. The check does not see a pool none of whose controller nodes answers, and lists no disk node's sides. A new volume over a restored thin id that holds data is refused. |
+| Back up and restore etcd | etcd's own tools; `dnvctl cluster advance-ids` after a restore; `dnvctl cn check-restore`, which says pool by pool what the restore loses, before the agents' local files are reset | the operations doc, [Back up etcd](operations.md#back-up-etcd), [Restore etcd from a backup](operations.md#restore-etcd-from-a-backup), and [a new volume refused for a thin id that holds data](operations.md#a-new-volume-refused-for-a-thin-id-that-holds-data) | procedure written; the e2e suite's upgrade case runs its steps once on the lab's real agents, from a backup taken under 0.1, with one etcd member and no Kubernetes, all but the change of host lists, which it has none to make, and the Kubernetes step. The check does not see a pool none of whose controller nodes answers, and lists no disk node's sides. A new volume over a restored thin id that holds data is refused. |
 | Recover an etcd that refuses writes because its store is full | etcd's own tools: `etcdctl compact --physical`, `etcdctl defrag --cluster`, `etcdctl alarm disarm` | the operations doc, [etcd refuses writes: its store is full](operations.md#etcd-refuses-writes-its-store-is-full) | procedure written; the worker suite's three-member mode runs the compaction, the defragmentation and the disarm on the lab, over a small store. The raise of the quota is not tested. |
-| Upgrade | every program at once; `--version` on each program, and the version each running program logs when it starts | this page, below | procedure to write; the e2e suite's upgrade case upgrades a cluster of 0.1 in lockstep once on the lab, under a host's writes, with no failed write and no reaction. Rolling upgrades are not yet. A downgrade is not supported. |
-| Run while the control plane is down | nothing to do; the data plane serves | none | procedure to write |
-| Handle the logs | `--log-level` on every program; SIGUSR1 and SIGUSR2 to a running program; JSON on stderr, no rotation | [the operations doc](operations.md#the-logs) | procedure written. A paragraph on reading the logs: procedure to write. |
+| Upgrade | every program at once; `--version` on each program, and the version each running program logs when it starts | the operations doc, [Upgrade dnv](operations.md#upgrade-dnv) | procedure written; the e2e suite's upgrade case upgrades a cluster of 0.1 in lockstep in the doc's order on the lab, under a host's writes, with no failed write and no reaction. The CSI driver's part is not tested. Rolling upgrades are not yet. A downgrade is not supported. |
+| Run while the control plane is down | nothing to do; the data plane serves | the operations doc, [While the control plane is down](operations.md#while-the-control-plane-is-down) | procedure written; the e2e suite stops etcd under a host's writes, at shorter vote times than the shipped ones |
+| Handle the logs | `--log-level` on every program; SIGUSR1 and SIGUSR2 to a running program; JSON on stderr, no rotation | [the operations doc](operations.md#the-logs) | procedure written, with [the steps to read them](operations.md#read-the-logs). |
 | See what is wrong across the cluster | `dnvctl cluster get-status` | the operations doc, Read what is wrong | done |
-| Give hosts the cdc addresses; front the gateways | none | the tutorials, for one host | procedure to write |
+| Give hosts the cdc addresses; front the gateways | none | the tutorials, for one host; the operations doc, [Give hosts the cdc addresses](operations.md#give-hosts-the-cdc-addresses) | procedure written; the cdc suite runs hosts that list several cdcs. A front over several gateways is not tested. |
 | Change the check intervals or a node's budget | none | — | not yet |
 
 ### Hosts
@@ -1561,90 +1570,27 @@ known today" below gives the longer ones.
 These are the longer steps written so far. [The operations doc](operations.md)
 will hold the full procedures.
 
-**Back up and restore etcd.** The steps are in the operations doc,
-[restore etcd from a backup](operations.md#restore-etcd-from-a-backup). A
-restore brings the desired state back to the backup's time, so what was
-created after it is lost with its data, and a pool whose layout changed
-since can break. The suites and the tutorials run etcd as one member. The
-worker suite also has a three-member mode, which stops one member, compacts
-the store and fills it to its quota, but it backs up and restores nothing,
-so a backup and restore of an etcd of several members is untested.
+**Back up and restore etcd.** The steps are in the operations doc:
+[back up etcd](operations.md#back-up-etcd), [restore etcd from a
+backup](operations.md#restore-etcd-from-a-backup) and [restore one record
+from a backup](operations.md#restore-one-record-from-a-backup). A restore
+brings the desired state back to the backup's time, so what was created
+after it is lost with its data, and a pool whose layout changed since can
+break. The suites and the tutorials run etcd as one member. The worker
+suite also has a three-member mode, which stops one member, compacts the
+store and fills it to its quota, but it backs up and restores nothing, so a
+backup and restore of an etcd of several members is untested.
 
 **Upgrade.** Upgrades are lockstep. Every dnv program of one etcd
 installation stops: its gateways, workers and cdc, the agents of every
-cluster it holds, and every CSI driver that talks to its gateways: its
-controller plugin, the part that calls the gateway, and its node plugins. A
-stopped node plugin leaves the connections and mounts of its volumes in
-place. Every binary is replaced, `dnvctl` included, and only then does any
-program start again. The workers stop first and start last. Before the new
-agents start, install the udev rules of the new release's `deploy/udev/` on
-every disk node and every controller node, with the two settings that go
-with them ([the operations
-doc](operations.md#install-the-udev-rules-on-a-node)): 0.1 shipped none, so
-an upgrade from 0.1 installs them all, and a node without them lets the
-system's own udev rules assemble and probe what the new agents build. For the
-CSI driver, apply these files of the new release's `deploy/` folder by name:
-`namespace.yaml`, `csidriver.yaml`, `controller-serviceaccount.yaml`,
-`node-serviceaccount.yaml`, `controller-clusterrole.yaml`,
-`controller-clusterrolebinding.yaml`, `controller-role.yaml`,
-`controller-rolebinding.yaml`, `controller.yaml` and `node.yaml`, each with
-your own changes of it made again, such as another driver image name, or
-another directory of the kubelet, the Kubernetes program on each machine. Do
-not apply `config.yaml`, `storageclass.yaml` or `networkpolicy.yaml`: they
-are examples that hold placeholders, addresses in `config.yaml` and
-`networkpolicy.yaml` and a cluster name in `storageclass.yaml`, and you keep
-your own copies of them. Applied, the example `config.yaml` would point both
-plugins at the placeholder addresses, so that every create of a volume and
-every attach, the step that lets a Kubernetes node into a volume's
-subsystem, fails; the example storage class, the Kubernetes record that
-names the cluster, the redundancy and the cntlr count of each new volume,
-would name the placeholder cluster, or be refused where your class of its
-name names another, since Kubernetes lets no one change a storage class's
-settings; and the example policy, which names no Kubernetes namespace, would
-replace your own copy in the current Kubernetes namespace. From this release
-on, the rights of the controller plugin within its Kubernetes namespace are
-a file of their own, `controller-role.yaml`, and the new
-`controller-clusterrole.yaml`, its rights across the Kubernetes cluster,
-applied without it takes them away, after which the controller plugin's
-provisioner, the helper program that asks it for volumes, stops at its
-start. Before an upgrade from 0.1, check every Kubernetes node: the node
-plugin of a later release starts only with native NVMe multipath on and the
-module nvme-fabrics loaded, which nvme-tcp loads, and one that does not
-start unmounts nothing ([the operations
-doc](operations.md#a-kubernetes-node-plugin-that-does-not-start)). There is
-no rolling upgrade, since no message carries a build version, and two builds
-that differ in a message would misread each other with no error. A disk
-node's disk keeps the format it was made with across every upgrade, and each
-new build reads it as it is, unless the new release's notes say that the
-disks must be made again; making a disk again loses every side it holds.
-Before the workers start again, check that every program runs the new build.
-`--version` on each program prints the version of the file on the machine,
-such as `dnv-agent --version`. The record each agent, gateway, worker, cdc
-and CSI plugin logs when it starts carries the version of the program that
-runs; a program that was not stopped still runs the old one. The
-introduction says which builds have `--version`. No build may replace a
-newer one: section 5.5 says why. A node that 0.1 created with no location
-keeps its address as its location after the upgrade; only emptying, deleting
-and creating it again puts it in its machine's location ([the operations
-doc](operations.md#choose-a-nodes-location)). A controller node that 0.1
-created with no budget keeps the 4 TiB 0.1 gave it after the upgrade, not
-the 64 TiB a new node gets, so `dnvctl cluster get-capacity` can name the
-budget as the limit sooner than the new default suggests; only emptying,
-deleting and creating it again gives it another budget ([the operations
-doc](operations.md#the-clusters-capacity)). From this release on, a cn agent
-that finds, when it starts, that the kernel cannot end a host's connection
-to the controller node, or that cannot read whether it can, starts only with
-`--ignore-host-disconnection` (section 5.4). Before an upgrade from 0.1, run
-the new build's `dnv-agent check cn` on every controller node, with the
-flags its agent will run with: a `FAIL` on its `nvmet host cut (debugfs)`
-line means that the new cn agent would refuse to start there ([the
-operations doc](operations.md#check-a-node-before-it-joins)). Where the new
-cn agent ends connections, its first converge of each cntlr ends the
-connection of every host that is off a subsystem's list but still connected,
-which 0.1 left in place, and that host's writes fail. Before the upgrade,
-run `nvme list-subsys` on each host and compare it with `dnvctl ss list`; on
-each host that is off a list, stop the volume's users and run
-`nvme disconnect -n <subsystem nqn>`.
+cluster it holds, and every CSI driver that talks to its gateways. Every
+binary is replaced, `dnvctl` included, and only then does any program start
+again. The workers stop first and start last, and the new udev rules go on
+every node before its new agents start. There is no rolling upgrade, since
+no message carries a build version, and two builds that differ in a message
+would misread each other with no error. No build may replace a newer one:
+section 5.5 says why. [The operations doc](operations.md#upgrade-dnv) gives
+the steps, with those of an upgrade from 0.1.
 
 **Logs.** The programs log to stderr as JSON, one record per line, with no
 rotation. Each program takes `--log-level`, the log level: the least serious
@@ -1699,7 +1645,9 @@ failover's among them.
   delete it.
 - **A forced clone delete returns before the teardown is done.** Success
   means the teardown started. The operator polls the clone and the pool.
-  State: accepted, by the dnvctl design. Procedure to write, one line.
+  State: accepted, by the dnvctl design. Procedure written: [the operations
+  doc](operations.md#move-a-volume-to-another-pool) deletes the
+  destination's namespaces first and polls the clone until it is gone.
 
 ## 8. Waits a host can see
 
@@ -2017,9 +1965,12 @@ failover's among them.
   State: accepted, by design.
 - **Log records that say less than they seem.** A call that gives up
   after its rounds (section 10) fails with the error code ABORTED, and the
-  message does not say which node changed. A cdc write timeout and a
-  vanished host log the same reason. State: accepted. Procedure to write:
-  one paragraph on reading the logs.
+  message does not say which node changed. A record of an etcd write
+  inside a transaction does not say whether the write was made. The
+  worker's leftover record names the first eight objects only. A cdc write
+  timeout and a vanished host log the same reason. A device listing cut
+  short by an error can ground a read's verdict. State: accepted.
+  Procedure written: [read the logs](operations.md#read-the-logs).
 
 ## 10. Sizes and performance
 

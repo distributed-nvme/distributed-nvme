@@ -6768,7 +6768,8 @@ caught.
   list of a live pool names is missing from etcd, the sp role sends the pool no new request and its pass runs
   nothing after its gates — no reaction, failover included, no stage move,
   no forced-start clear and no retire timer — until an operator puts the
-  record back (RW14, AR1). The running children keep their last request
+  record back (RW14, AR1; `operations.md`, Restore one record from a
+  backup). The running children keep their last request
   and their rounds, but a worker that starts or takes the pool over
   meanwhile starts none, so the pool then has no check round and no
   health record either. Removing the name from the list instead is no way
