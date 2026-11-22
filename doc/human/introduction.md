@@ -19,12 +19,17 @@ dnv can be the data plane of a multi-tenant block storage system, for example
 behind Kubernetes or OpenStack Cinder. A tenant is a user of that system. dnv
 knows no tenants and authenticates nobody: the layer above authenticates its
 users and decides which storage pools, subsystems and hosts serve each of
-them. dnv promises that layer that the data of one storage pool is never
-readable from another storage pool, unless that layer exports it there itself,
-for example with a transfer, or a step of a caller breaks the promise, as
-[dnv's scope and known limits](scope.md) says. The promise is about what a
-host can read, not about the network or the nodes: the network under dnv and
-the root user of every node are trusted.
+them. dnv promises that layer that a host never reads, through the volumes of
+one storage pool, the data of another storage pool, unless that layer exports
+the data there itself, for example with a transfer. Steps that a caller gets
+wrong and steps that an operator forces can break the promise, and [dnv's
+scope and known limits](scope.md#3-the-promise-one-pool-never-reads-another-pools-bytes)
+lists them. The promise is about what a host reads through its volumes, not
+about the network or the nodes: it needs a trusted network under dnv and a
+trusted root user on every node. Root on a host can pose as another host and
+read that host's volumes, which the promise does not cover, so keeping
+tenants apart also needs hosts where a tenant has no root.
+[Status and limits](#status-and-limits) says who can read what.
 
 The words are those of [the core glossary](core_glossary.md), the list to read
 first; any other project word is explained where it first appears.
@@ -516,10 +521,53 @@ suites on lab VMs and by the two tutorials, which 0.1 itself cannot run
 ([Get dnv](#get-dnv)). No production deployment is known.
 Linux x64 is the only platform.
 
-The network and the root user of every node are trusted: dnv authenticates no
-user and no host beyond its NQN, a name a host can spoof, gRPC is plain text,
-nothing is encrypted, and root on a node can read the old bytes of a recycled
-extent from the raw disk. Deploy dnv on an isolated network you trust.
+dnv trusts the network, and the root user of every node and of every host,
+so a tenant must not be root on a host. dnv authenticates no user, and no
+host beyond its host NQN, a name that any machine can claim. gRPC and
+NVMe/TCP carry plain text, and nothing is encrypted, on the wire or on the
+disks. The table below says who can read what, and [the scope
+page](scope.md#3-the-promise-one-pool-never-reads-another-pools-bytes) says
+what the promise covers and which steps can break it.
+
+A host needs to reach only the NVMe/TCP ports of the controller nodes and
+the cdc, which sit on the host network, the one the hosts are on. The rest
+belongs on a back network, one that hosts cannot reach: the disk nodes'
+NVMe/TCP ports, the gateway, etcd, and the agents' ports, where the agents
+take the calls of the gateway and the worker. Under Kubernetes, the machines
+that may run the driver's controller plugin reach the gateway too. [The
+operations doc](operations.md#the-networks) has the table of who connects to
+whom, and a firewall example. Deploy dnv on an isolated network you trust.
+
+| Who | What they can read |
+|---|---|
+| A tenant inside a volume, whose programs read and write only through the volume's namespace | Only what was written to that volume, and what the layer above put in it with a snapshot or a clone: a snapshot starts with what its origin held, and a clone with what its source holds. Every other block reads as zeros, whatever the disk holds there. This is the promise, and the scope page lists the steps that can break it. |
+| Root on a host, or any machine or Kubernetes pod that reaches an NVMe/TCP port | Every volume whose subsystem lets in a host NQN that it claims, since a host gets in by its NQN alone, with no key: it can read and write those volumes, and the cdc tells it where they are. At a disk node's port, the whole leg, old bytes included, when it claims the NQN that the primary's controller node connects with; and from a migration's cutover until the migration ends, the whole old side, when it claims the NQN of the destination disk node. These NQNs that dnv makes hold the cluster's id, a hash of the cluster's name and of the moment the cluster was created, so they cannot be worked out from a name alone. But they can be built from the cluster's id, which the gateway shows and etcd holds, and they cross the network in plain text, so whoever reads them can claim them. A machine on the traffic's path also reads the IO itself. |
+| A machine that reaches the gateway, an agent's port or etcd | Every volume, since none of them asks for a login: through the gateway or etcd, and through a controller node's agent port too. That agent takes from each call the id of the controller node it acts as, so a caller can make it connect to the legs of any pool as the pool's primary. Through a disk node's agent port, what that node's disk holds. Through the gateway it can put a host NQN of its own on any subsystem's list, and then read as the row above says. Through an agent's port it can make the node build, export or remove what it asks. Through etcd it can write any desired state, which the worker then carries out. Through the gateway or etcd it can also delete every volume and every pool, and through a controller node's agent port the volumes of any pool. |
+| Root on a node | Everything on the node: the raw disk with every side on it, the agent's local files, and on a controller node every device it builds, so the volumes of every pool whose primary runs there. A disk node's disk keeps the old bytes of freed extents, since nothing zeroes an extent when it is freed, and a new data leg is zeroed only over its first blocks. Root on a node also reaches the NVMe/TCP ports, and the back network, where the gateway, etcd and the other agents' ports are, so it can do what the second and the third rows say. |
+| Someone holding a disk node's pulled disk | Every block written to the legs on it, the old bytes of its freed extents, and the disk's own table of which extents make up each side. Nothing on it is encrypted. |
+
+Only the first row is dnv's promise. The other rows are held back only by
+how dnv is deployed: a host network that only the hosts and dnv's own
+machines reach, hosts where a tenant has no root, a back network that hosts
+cannot reach, under Kubernetes a network policy that keeps the other pods
+off dnv's machines ([the CSI
+tutorial](tutorial_csi.md#keep-other-pods-off-dnv)), and people you trust as
+root on the nodes and with the disks. The cn agent suite's isolation case,
+in `integtest/cnagent_test.sh`, shows the first row's zeros on a real
+kernel: blocks never written, over disks that held old bytes, read as zeros
+around a write, on the host and on both legs. In the same suite, the thinbm
+case reads a snapshot as its origin's blocks, with zeros where the origin
+held none, and the clone_xfer case reads a clone as its source: the
+source's pattern where the source was written, and zeros past it. The other
+rows follow from the code, which asks for no login and encrypts nothing.
+The suites show part of them by the way they work: they call the gateway
+and the agents with no login, and the dn agent suite, in
+`integtest/dnagent_test.sh`, writes and reads legs through a disk node's
+exports from machines that only claim a controller node's NQN. Two cases read, as root on a node, the old bytes that the last
+two rows name: the dn agent suite's zeroing case finds a new side of a data
+group zeroed over its first blocks and an old pattern past them, and the
+cn agent suite's isolation case finds the old pattern on both legs in a
+block that no write reached. No test reads a pulled disk.
 
 [dnv's scope and known limits](scope.md) says what dnv promises, the data
 loss it accepts and what it does not do. It also gives every other known
@@ -620,7 +668,7 @@ proven against fakes alone.
 | Subsystems per pool; namespaces per subsystem; hosts per subsystem | 4; 4; 8 | each at its value | 1; 2; 4 |
 | Clones; transfers; migrations per pool | 64; 4; 4 | each at its value | 1; 1; 2 |
 | Retired legs per group, the replaced legs a group keeps with their data after its repairs | 2 | 2 | retired legs made, taken back into a group by a repair, and deleted |
-| Bitmap chunks, the pieces of the list of blocks a copy must take: per source slice of a clone, which an operator appends; per migration, which the worker cuts from its own read, 4 MiB each | 16; 16 | 16; 16 | 2; 2 on real agents; 13, written to etcd directly, and 1 in a suite on fake agents |
+| Bitmap chunks, the pieces of the list of blocks a copy must take: per source slice of a clone, which an operator appends, each holding up to 1 MiB; per migration, which the worker cuts from its own read, each 4 MiB but the last | 16; 16 | 16; 16 | 2; 2 on real agents; 13, written to etcd directly, and 1 in a suite on fake agents |
 | Thin ids per pool, one taken from a counter by every thin device the pool creates, snapshots included | 16,777,215 | the counter set to the limit by hand, one create at it, the next refused | no test reaches it |
 | Extent size | 64 MiB to 1 TiB, a whole number of 4 KiB | pools created on 5 GiB extents; 1 TiB checked by validation alone | 64 MiB and 1 GiB; no run at 1 TiB |
 | Data block of a pool | 64 KiB to 4 MiB, a power of two | pools created on 4 MiB blocks; the next power of two refused | the default 1 MiB; 64 KiB in a suite on fake agents |
