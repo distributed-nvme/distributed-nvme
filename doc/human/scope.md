@@ -354,7 +354,7 @@ the host.
   land in an fsync. In the first of the two the reset landed in a write in
   each of the four jobs. In the second each of the four jobs was in its
   fsync at the reset: each fsync returned success about 4.2 seconds after
-  it was sent, after the failover to the standby, and none of the four
+  it was sent, before the failover to the standby, and none of the four
   writes read back from the new primary. That is this loss. In every run,
   every write whose fsync had completed before the reset, any write in
   flight at the reset and every write after it read back, and no write or

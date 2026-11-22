@@ -9307,7 +9307,7 @@ document and only pointed to here.
   fsync failed. Two of the runs slowed the pool's commits: in the first the
   reset met every job in a write, and in the second every job in its fsync,
   and there the loss is seen: each of the four fsyncs returned success some
-  four seconds after it was sent, after the failover to the standby, and
+  four seconds after it was sent, before the failover to the standby, and
   none of the four writes read back from the new primary
   (`e2e_integtest.md`, Known limits, The flush stage's lost fsync is logged,
   not asserted).

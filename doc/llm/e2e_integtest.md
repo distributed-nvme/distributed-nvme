@@ -1996,8 +1996,10 @@ the connect attempted.
   the same point of it. Of its four runs at one slice, two ran with the delay.
   The first met every job in a write and none in an fsync. The second met
   every job in its fsync: each of the four fsyncs returned success 4181 to
-  4186 ms after it was issued, after the failover to the standby, and none of
-  the four writes read back from the new primary, held 0 of 4, which is the
+  4186 ms after it was sent, before the failover to the standby, which waits
+  out the reacting set's primary threshold from the worker's first unhealthy
+  verdict after the reset (Topology and parameters, Event thresholds), and
+  none of the four writes read back from the new primary, held 0 of 4, which is the
   loss of `scope.md`'s entry "A host's fsync completes after the primary died
   with its writes"; the 20 writes whose fsync completed before the reset and
   the 8 after it read back, and no write or fsync failed. The stage counts the
