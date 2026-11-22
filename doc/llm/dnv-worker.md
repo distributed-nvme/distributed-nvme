@@ -7438,9 +7438,10 @@ caught.
   disagreement that two compares in a row see is logged, once until a
   compare agrees, and nothing corrects the record or the disk's volume
   table; an operator sets `dnvctl dn inspect`, the agent's counts, beside
-  `dnvctl dn get`, the record's. A disk node whose side records never come
-  to name exactly its side pointer list — a side its sweep cannot remove,
-  or a listed side the disk never allocates — is never compared, and no
+  `dnvctl dn get`, the record's (`operations.md`, Read a node's state). A
+  disk node whose side records never come to name exactly its side pointer
+  list — a side its sweep cannot remove, or a listed side the disk never
+  allocates — is never compared, and no
   record says that the compare is not running.
 * **Log volume**: at `--log-level debug` every round logs a client send and
   receive record pair per object (`grpc.md`, L1, L6), every pass and every

@@ -1507,6 +1507,141 @@ suite's slow leg stage, which delays one disk node's traffic with tc netem
 and reads a higher write time on its legs while their rows stay ok, runs in
 the suite's redund case and passes on the lab VMs.
 
+## Prepare a node
+
+Words: an agent's **store folder** is the folder its `--local-store` flag
+names, `/var/lib/dnv` by default. The agent keeps its local files there:
+the desired state it last accepted, which it builds again each time it
+starts. The **kit** is what the release's `deploy/` folder holds for a
+machine: the module lists of `deploy/modules-load.d/`, the udev rules of
+`deploy/udev/`, the systemd units of `deploy/systemd/`, the examples of
+settings in `deploy/dnv/` and the firewall example
+`deploy/nftables/dnv-filter.nft`.
+
+When: on every machine that will hold a disk node or a controller node,
+before its first dnv agent starts. Run step 11 again after a kernel or
+mdadm update on the machine, and step 6 when a new release changes a file
+of `deploy/udev/`.
+
+What dnv does alone: nothing. No agent loads a kernel module, installs a
+udev rule, opens a port in a firewall or starts at boot, and the kit
+enables no unit. The node check reads most of what these steps set, and an
+agent starts whatever the check would report, save the case that step 3 of
+[Check a node before it joins](#check-a-node-before-it-joins) names.
+
+Safe steps, as root on the machine:
+
+1. Give the machine a host name of its own before any of its nodes is
+   created. A node's location is its machine's host name by default
+   ([Choose a node's location](#choose-a-nodes-location)).
+2. Install the tools the agents run ([the
+   introduction](introduction.md#requirements)): nvme-cli, mdadm and
+   dmsetup on every node, and thin-provisioning-tools on a controller node.
+   A disk node needs mdadm too, since the md rule of step 6 runs
+   `/sbin/mdadm`. The node check's `commands` and `mdadm` lines name a tool
+   that is missing.
+3. Copy the program `dnv-agent` from the release folder to the folder that
+   the `ExecStart=` line of its unit in `deploy/systemd/` names.
+4. Load the kernel modules at every boot. Copy
+   `deploy/modules-load.d/dnv-dn.conf` on a machine with disk nodes, and
+   `deploy/modules-load.d/dnv-cn.conf` on a machine with a controller node,
+   both on a machine with both, into `/etc/modules-load.d/`. Then load them
+   now: `sudo systemctl restart systemd-modules-load.service`. A `modprobe`
+   by hand, as in the tutorials, lasts only until the next boot. The node
+   check's `kernel modules` line fails a module the kernel lacks, and its
+   `kernel modules at boot` line warns for a module the agent needs loaded
+   that no such file names.
+5. Mount the kernel file systems the agents use: configfs at
+   `/sys/kernel/config`, and on a controller node debugfs at
+   `/sys/kernel/debug`, which the end of a host's connection needs, and
+   securityfs at `/sys/kernel/security`, without which the node check and
+   the cn agent cannot see a lockdown, a mode of the kernel that refuses
+   that end ([Check a node before it joins](#check-a-node-before-it-joins),
+   step 3). systemd mounts all three at boot on Ubuntu.
+6. Install the udev rules, and set the lvm2 and md settings that go with
+   them: [Install the udev rules on a node](#install-the-udev-rules-on-a-node).
+7. Open the network the machine's roles need, and no more: [The
+   networks](#the-networks) lists who connects to whom, and gives the
+   firewall example `deploy/nftables/dnv-filter.nft`, to load with your own
+   addresses and ports.
+8. On a controller node, keep no NVMe-oF subsystem of your own that has no
+   namespace that names a device, no host and no port: the agent removes
+   it once it is 30 seconds old, and a namespace never given a device does
+   not keep it. Make no NVMe-oF connection by hand with the host NQN that
+   the agent uses: the agent removes it once no clone reads through it
+   ([the scope
+   page](scope.md#61-cases-where-dnv-does-not-come-back-alone-today), a
+   controller node's sweep removes two things that may be an operator's).
+9. Install the units of the machine's agents from `deploy/systemd/` into
+   `/etc/systemd/system/`: `dnv-agent-dn@.service` for the disk node
+   agents, one instance for each disk, such as `dnv-agent-dn@0`, and
+   `dnv-agent-cn.service` for the controller node agent, at most one on a
+   machine. Put each agent's settings where the first comment of its unit
+   says, made from the examples in `deploy/dnv/`: among them its disk and
+   its gRPC address, which differ for each agent of the machine, its
+   NVMe/TCP address and port, and its nvmet port id. Then run
+   `sudo systemctl daemon-reload`.
+10. Give each agent a store folder of its own. Each unit of the kit names
+    its agent's folder and makes it when the agent starts. An agent started
+    in another way needs its folder made first, as with
+    `sudo mkdir -p /var/lib/dnv`: an agent whose folder does not exist ends
+    at its start. Two disk node agents never share a folder; a disk node
+    agent and the controller node agent may. Keep nothing in a store folder
+    but the agents' own files, and no folder of another agent inside it:
+    an agent reads every name of its folder that starts with `dn-`,
+    `side-`, `migr-bm-` or `probe-dn-` for a disk node agent, or with `cn-`,
+    `cntlr-`, `clone-bm-`, `probe-cn-` or `torn-` for the controller node
+    agent, as a file of its own.
+11. Run the node check with each agent's settings ([Check a node before it
+    joins](#check-a-node-before-it-joins)), and fix every `FAIL`.
+12. Start the agents: `sudo systemctl start dnv-agent-dn@<name>` and
+    `sudo systemctl start dnv-agent-cn`. Each agent logs the record
+    `agent started` once its startup pass, its rebuild of its local files,
+    has ended. `sudo systemctl enable` a unit to start it at boot too.
+13. Create the nodes once their agents run:
+    `dnvctl dn create --addr <ip:port> --tr-addr <ip> --tr-svc-id <port>`,
+    and `dnvctl cn create` with the same flags. `--addr` is the agent's
+    `--grpc-address`. `--tr-addr` and `--tr-svc-id` are where other
+    machines reach the agent's NVMe-oF port: its own `--tr-addr` and
+    `--tr-svc-id`, unless an address translation lies between. Leave out
+    `--tr-type` and `--adr-fam` for NVMe/TCP over IPv4. A create asks the
+    agent for the size of its disk or for its budget, the pool space a
+    controller node may serve, and, with no `--location`, for its host
+    name, so it fails while the agent does not answer. With `--disabled`,
+    nothing is placed on the new node until you enable it ([Disable a
+    node](#disable-a-node)).
+
+The start order. On a machine that joins a running cluster, the order is
+the order of the steps: the agent first, then its node's create. When every
+program of a cluster starts, as after a power loss of the whole cluster or
+an upgrade, the workers start last, once every agent has logged
+`agent started`, and they stop first. To a running worker a stopped agent
+is a failed node, and the worker would fail over primaries, replace cntlrs
+and repair legs that only wait for their agent. The gateways and the cdc
+start and stop in any order. It is the order of an upgrade ([Upgrade
+dnv](#upgrade-dnv); [the scope page](scope.md), section 7, Upgrade). No
+program checks the order.
+
+Steps that lose data: none of the steps writes to a disk. Step 6's md
+setting can keep an array of the machine's own from coming up at the next
+boot, as that section says. A firewall rule that refuses a connection dnv
+needs makes a node look dead to the worker, which then fails its primaries
+over and repairs its legs. Load new rules on one machine at a time, and
+check with `dnvctl cluster get-status` that no `health` line comes.
+
+When to stop: the node check exits 2 as root, or a `FAIL` you cannot fix;
+an agent that ends at its start; a node create that fails while its agent
+runs. Ask for help.
+
+Tested: the e2e suite runs the node check on every disk node and controller
+node guest before it creates its pool, and the disk node, controller node,
+e2e and csi suites install the udev rules of `deploy/udev/`; the e2e suite
+passed in the lab with them on 2026-11-21. Every suite loads the modules
+with `modprobe` and starts the programs by hand: no suite loads the modules
+from the kit's files, starts an agent from the kit's units or reboots a
+machine set up this way. The firewall's proof is in [The
+networks](#the-networks).
+
 ## Install the udev rules on a node
 
 Words: **udev** is the Linux service that acts when a block device
@@ -1851,9 +1986,9 @@ location: nodes of two machines that share one host name, nodes of one
 machine created before and after a rename of it, or a node 0.1 created
 with no location on a machine that runs other nodes. No command changes a location; the
 node must be emptied, deleted and created again. [Remove a
-node](#remove-a-node) gives the first two steps; the steps that use a disk
-node's disk again are not written yet (the scope page, section 7, Reuse a
-disk from an old node). Ask for help.
+node](#remove-a-node) gives the first two steps, and [Reuse a disk from an
+old node](#reuse-a-disk-from-an-old-node) the use of a disk node's disk
+again. Ask for help.
 
 Tested: the gateway's Go tests check the host name as the default, the
 refusals of a name that is no location, a RAID1 pool refused on one host
@@ -2550,6 +2685,15 @@ What dnv does alone:
   and applies it again each time it starts: after a delete without
   `--force`, that is a node with nothing on it but its NVMe-oF port and, on
   a disk node, the disk's header block.
+- No agent removes an NVMe-oF host entry, the folder under
+  `/sys/kernel/config/nvmet/hosts/` that the machine makes for each host
+  NQN one of its subsystems lets in. So a removed node leaves the entries of
+  the hosts and nodes its exports let in on its own machine, and an entry of
+  its own host NQN on each machine that exported to it: a controller node's
+  on each disk node machine of its pools' legs, and on a controller node
+  machine whose transfer listed it; a disk node's on each disk node machine
+  that was the source of a migration to it. An entry that no subsystem
+  lists lets no host in.
 
 Safe steps:
 
@@ -2569,8 +2713,49 @@ Safe steps:
    `dnvctl retired-leg list` shows the pool's retired legs; delete each one
    on the node with `dnvctl retired-leg delete` once you no longer want its
    copy.
+
+   A pool is deleted from the inside out. Its delete is refused while the
+   pool still holds a thin device, a subsystem, a clone, a transfer or a
+   migration, and the refusal names which. `dnvctl --sp '<pool name>' sp get`
+   lists them under `sp_conf`: `td_name_list`, `nqn_list`,
+   `clone_name_list`, `xfer_name_list` and `migr_name_list`.
+   `dnvctl --sp '<pool name>' ss list` shows each subsystem under its NQN
+   in `nqn_to_subsystem`, with its namespaces under `ns_list`, each with
+   its `ns_idx`. Delete them in this order:
+   1. Each transfer: `dnvctl --sp '<pool name>' xfer delete --name <transfer>`.
+      A namespace that a transfer reads from cannot be deleted while the
+      transfer lives, so the transfers go first. A transfer is the source of
+      a clone in another pool: its delete takes from that clone the only
+      source of each region it has not copied yet. If that clone must stay
+      whole, first wait until
+      `dnvctl --sp '<other pool>' clone get --name <clone>` answers
+      NOT_FOUND: the worker removes a clone by itself once its copy is
+      whole.
+   2. Each namespace: `dnvctl --sp '<pool name>' ns delete --nqn <nqn> --idx <ns_idx>`.
+   3. Each subsystem, once it holds no namespace:
+      `dnvctl --sp '<pool name>' ss delete --nqn <nqn>`.
+   4. Each clone: `dnvctl --sp '<pool name>' clone delete --name <clone>`.
+      A clone's delete sets each namespace of its volume back to serving,
+      so a namespace still there would serve the copy to the hosts, a
+      second path beside the source under the same identity, and once the
+      clone is gone, zeros where the copy never reached: this is why the
+      namespaces go first.
+      The delete is refused unless the pool's primary shows the clone's
+      copy complete; with `--force` it is deleted without that proof. Then
+      wait until `dnvctl --sp '<pool name>' clone get --name <clone>`
+      answers NOT_FOUND: the worker removes the clone in the background,
+      and the deletes of its volume and of the pool are refused until then.
+   5. Each migration: `dnvctl --sp '<pool name>' migr cancel --name <migration>`.
+      Once a migration's cutover has started, the cancel is refused without
+      `--force`, and its refusal says so.
+   6. Each thin device: `dnvctl --sp '<pool name>' td delete --name <td name>`.
+      A thin device with a snapshot that is not made yet is refused, and
+      the refusal names the snapshot: delete the snapshot first.
+   7. The pool: `dnvctl --sp '<pool name>' sp delete`. The worker then
+      removes its parts in the background (its drain).
 3. Empty a controller node: delete the storage pools that have a cntlr on
-   it, or move each cntlr on it to another controller node, one at a time.
+   it, as step 2 says, or move each cntlr on it to another controller node,
+   one at a time.
    `dnvctl cn get --addr <addr>` lists each cntlr on the node under
    `cn_conf.cntlr_ptr_list`, with the `sp_id` of its pool and its
    `cntlr_id`, the id that `--id` takes below.
@@ -2624,7 +2809,10 @@ Safe steps:
       take the role back.
    4. Then delete the old cntlr with `dnvctl cntlr delete --id <cntlr id>`.
       A primary and an enabled cntlr are never deleted.
-4. Check that the node is empty, as above.
+4. Check that the node is empty, as above, and note its id,
+   `dn_conf.dn_id` or `cn_conf.cn_id`, and the cluster's `cluster_id`, which
+   `dnvctl cluster get` prints: steps 6 and 7 name the node's files and
+   entries by them.
 5. Delete the node, and run the delete again until it passes:
 
    ```
@@ -2635,16 +2823,56 @@ Safe steps:
    ```
 
    Use `dnvctl cn delete` for a controller node. Read each refusal: it
-   names what the agent still reports.
-6. Stop the node's agent if its machine leaves. Its local files still hold
-   the node's desired state: delete them before an agent serves a new node
-   with that `--local-store` directory. The steps that use a disk node's
-   disk again, which also zero its header block, are not written yet (the
-   scope page, section 7, Reuse a disk from an old node).
+   names what the agent still reports. After 90 refusals the loop ends
+   with no error of its own: `dnvctl dn get --addr <addr>` still shows the
+   node, and the last refusal says why ([Leftovers on a
+   node](#leftovers-on-a-node)).
+6. Stop the node's agent if its machine leaves, or before an agent serves
+   another node with the same store folder, its `--local-store`. The node's
+   local files still hold its desired state, and an agent started on them
+   builds it again. Delete them, and only them: another agent may share the
+   folder, and a controller node agent can also serve nodes of other
+   clusters. With the ids of step 4, list the files of a disk node, then run
+   the same command with `-delete` after `-print`:
 
-Steps that can lose data or leave state behind: the pool deletes of steps
-2 and 3, which delete every volume of the pool with its data; the retired
-leg deletes of step 2, which delete the copy each leg held; and `--force`.
+   ```
+   cid=$(printf '%016x' <cluster id>); nid=$(printf '%016x' <node id>)
+   sudo find <store folder> -maxdepth 1 -type f \( -name "dn-$cid-$nid*" -o -name "probe-dn-$cid-$nid*" -o -name "side-$cid-$nid-*" -o -name "migr-bm-$cid-$nid-*" \) -print
+   ```
+
+   For a controller node, the names are these:
+
+   ```
+   cid=$(printf '%016x' <cluster id>); nid=$(printf '%016x' <node id>)
+   sudo find <store folder> -maxdepth 1 -type f \( -name "cn-$cid-$nid*" -o -name "probe-cn-$cid-$nid*" -o -name "cntlr-$cid-$nid-*" -o -name "torn-$cid-$nid-*" -o -name "clone-bm-$cid-$nid-*" \) -print
+   ```
+
+   To use a disk node's disk again: [Reuse a disk from an old
+   node](#reuse-a-disk-from-an-old-node).
+7. Remove by hand what no agent removes, once the node's agent is stopped
+   and its files are gone. On the node's machine, its NVMe-oF port, the
+   folder of its agent's `--nvmet-port-id`, when
+   `ls /sys/kernel/config/nvmet/ports/<port id>/subsystems/` lists nothing
+   and no other agent of the machine uses that port id. Its two ANA groups
+   go first:
+   `sudo rmdir /sys/kernel/config/nvmet/ports/<port id>/ana_groups/3 /sys/kernel/config/nvmet/ports/<port id>/ana_groups/2 /sys/kernel/config/nvmet/ports/<port id>`.
+   On the node's own machine and on each machine that exported to it, as
+   What dnv does alone says above, the host entries that no subsystem
+   lists any more, which
+   `ls /sys/kernel/config/nvmet/subsystems/*/allowed_hosts/` shows:
+   `sudo rmdir /sys/kernel/config/nvmet/hosts/<nqn>`. The node's own host
+   NQN is `nqn.2024-01.io.dnv:0:<cluster id>:<node id>` for a disk node and
+   `nqn.2024-01.io.dnv:1:<cluster id>:<node id>` for a controller node,
+   with both ids as in step 6. On a controller node's machine, the folder
+   `/run/dnv-thin-dump` stays until the next boot.
+
+Steps that can lose data or leave state behind: the deletes of a pool's
+thin devices in steps 2 and 3, each with its data, and of its transfers,
+whose clones in other pools lose their source; a clone's delete with
+`--force`, whose volume holds only the regions copied so far, and which
+serves them to the hosts beside the source while a namespace of that volume
+is still there; the retired leg deletes of step 2, which delete the copy
+each leg held; and `--force` on the node's delete.
 `dnvctl dn delete --force` and `dnvctl cn delete --force` delete the node
 without asking its agent. Use them only for a node whose agent is gone for
 good, or whose disk is dead or names another node, since such a node never
@@ -2654,8 +2882,13 @@ sweep had not removed, and its agent builds again, each time it starts,
 what its local files still name: NVMe-oF exports included, open to the
 hosts and controller nodes they named, over disk space that the cluster
 counts as free. So after a forced delete, stop that agent and delete its
-local files, remove by hand what it built, and on a disk node zero the
-header block before the disk is used again.
+local files, remove by hand what it built ([Leftovers on a
+node](#leftovers-on-a-node)), and on a disk node zero the header block
+before the disk is used again ([Reuse a disk from an old
+node](#reuse-a-disk-from-an-old-node)). [Replace a dead disk
+node](#replace-a-dead-disk-node) and [Replace a dead controller
+node](#replace-a-dead-controller-node) give the steps for a node whose
+machine is gone.
 
 When to stop and ask for help: a refusal that names the same leftover for
 several minutes, while the agent's log keeps showing `sweep leftover`
@@ -2669,8 +2902,708 @@ on a node whose agent does not answer and on a node that still holds a side,
 and a node whose desired state changed, or that was deleted and created
 again, while its agent was asked. The gateway suite's faults case checks the
 refusals and `--force` over fake agents, and its smoke case deletes every
-node of its cluster over fake agents that answer clean. No test removes a
-node from real agents, and no test runs the loop of step 5.
+node of its cluster over fake agents that answer clean. The tutorial suite
+runs both tutorials' teardowns on real agents: their node deletes, without
+`--force`, run again until they pass, as in the loop of step 5, and their
+last steps remove the NVMe-oF ports and host entries by hand. It then
+checks that no dnv device, md array, NVMe-oF port, subsystem or host entry
+is left, and passed in the lab on 2026-11-21. There the nodes' pools were
+deleted first, all on one machine: no test removes a node emptied by
+moves, and none removes host entries from another machine.
+
+## Disable a node
+
+Words: **disabled** is a word of the core glossary. A **placement** is the
+choice of a disk node for a new leg, or of a controller node for a new
+cntlr.
+
+When:
+
+- before you empty a node to remove it ([Remove a node](#remove-a-node),
+  step 1);
+- while a disk node reads healthy but its new legs fail, so that the
+  worker's next repair of a group does not go to it again ([the scope
+  page](scope.md#61-cases-where-dnv-does-not-come-back-alone-today), a disk
+  node that stays healthy but cannot serve a new leg);
+- while a node that died is replaced, and while a node fails and comes back
+  by turns: its health epoch keeps new placements off it only while the
+  epoch is set, and the worker clears the epoch at the first check round
+  that finds nothing wrong;
+- to add a node that gets nothing until you are ready: `dnvctl dn create`
+  or `dnvctl cn create` with `--disabled` ([Prepare a node](#prepare-a-node),
+  step 13).
+
+What a disable does:
+
+- The node gets no new placement: no leg of a new pool, of a grow or of a
+  clone, no new leg of a repair, the worker's or yours, no new side of a
+  migration, and no new cntlr, by `dnvctl cntlr create` or by the worker's
+  cntlr replacement. A white list, the node addresses that `--dn-white` or
+  `--cn-white` gives a command as the only nodes it may use, that names
+  only disabled nodes is refused with RESOURCE_EXHAUSTED, as for nodes with
+  no room.
+- It moves nothing and stops nothing. The node's sides and cntlrs keep
+  serving, and nothing moves them off the node. A disable starts no
+  failover, no repair and no migration, and it never reaches the node's
+  agent.
+- A standby on a disabled controller node can still become the primary:
+  the failover chooses the enabled cntlr of the pool with no health epoch
+  and the smallest id, whatever its node. To keep primaries off a
+  controller node, also disable its cntlrs, with
+  `dnvctl --sp '<pool name>' cntlr set-enabled --id <cntlr id> --enabled=false`.
+  A disabled cntlr serves no IO, is never made the primary and is never
+  replaced by the worker, and the disable of a primary that has an enabled
+  standby with no health epoch fails it over at once. [A planned restart of
+  an agent](#a-planned-restart-of-an-agent), step 3, gives the checks to
+  make first and how to give the pool its IO back.
+- A leg that fails on a disabled disk node is repaired onto another disk
+  node, as on any node. The disable alone repairs nothing.
+
+How to confirm: `dnvctl dn get --addr <addr>` shows `dn_conf.disabled` as
+true, and `dnvctl cn get --addr <addr>` shows `cn_conf.disabled`.
+`dnvctl cluster get-capacity` shows `disabled` for each node under
+`addr_port_to_dn` and `addr_port_to_cn`, and counts a disabled node's free
+space in the whole space only ([The cluster's
+capacity](#the-clusters-capacity)). The status read names no disabled node.
+
+What dnv does alone: nothing. Only these commands change the flag.
+
+Safe steps:
+
+1. Disable the node: `dnvctl dn set-disabled --addr <addr> --disabled`, or
+   `dnvctl cn set-disabled --addr <addr> --disabled`.
+2. Enable it again: `dnvctl dn set-disabled --addr <addr> --disabled=false`,
+   or the same with `cn`. The command stores the value it is given, and
+   with no `--disabled` it stores false: a command that leaves the flag out
+   enables the node.
+3. These commands, as a node's delete, take as `--rev` the node's own
+   revision, which `dnvctl dn get` prints as `dn_rev.revision` and
+   `dnvctl cn get` as `cn_rev.revision`, not the pool's. A disable or an
+   enable does not move it.
+
+Steps that lose data: none. A disable can leave a group without its repair,
+though. Leg repair needs an enabled disk node with room that holds no leg
+of the group. When there is none, the worker logs `reaction skipped` with
+the reason `no candidate`, and the group runs on its other legs until a
+disk node can take the new leg. Auto-grow needs enabled disk nodes with
+room for the new group too: with none, the worker skips the grow and logs
+it, as [A pool's space](#a-pools-space) says, and a thin pool that fills
+up gets no new group; once it is full, the hosts' writes that need a new
+block wait and then fail. A pool's create and a grow by hand are refused
+the same way, with RESOURCE_EXHAUSTED.
+
+When to stop: a group that waits for its repair while every disk node with
+room is disabled, and you cannot enable one. Ask for help.
+
+Tested: the e2e suite's ops case disables a disk node and checks that a
+grow white-listed to it is refused, disables a controller node that holds
+no cntlr of the pool and checks that a cntlr create white-listed to it is
+refused, and enables both again; its react case disables every disk node
+that holds a side to steer a repair's new leg. Both passed in the lab on
+2026-11-21. The cn half of the ops case runs only when a controller node
+holds no cntlr of the pool. No test makes a standby on a disabled
+controller node the primary.
+
+## Read a node's state
+
+`dnvctl dn inspect --addr <addr>` and `dnvctl cn inspect --addr <addr>`
+show a node's live state: its agent's latest observation of the node, made
+at the agent's latest converge or read of it, not etcd's record.
+`dnvctl dn get` and `dnvctl cn get` show the record.
+
+When: a `health` or `report/unknown` line of the status read names a node
+([Read what is wrong](#read-what-is-wrong)); before a node delete; to compare
+a disk node's own free count with its record.
+
+How to read it:
+
+1. Run `dnvctl dn inspect --addr <addr>`, or `dnvctl cn inspect --addr <addr>`.
+   In the reply:
+   - `applied_revision` is the revision of the node's desired state that the
+     agent held when the reading started. `dnvctl dn get --addr <addr>`
+     prints the node's latest one as `dn_rev.revision`, and `dnvctl cn get`
+     as `cn_rev.revision`. A lower one is a change that has not reached the
+     node yet, or whose converge still runs.
+   - `dn_info` holds a disk node's rows: `disk_info`, its disk; `meta_info`,
+     the disk's header block and volume table, where dnv records the disk
+     and its sides; `port_info`, its NVMe-oF port; and `store_info`, its
+     store folder. `cn_info` holds a controller node's `port_info` and
+     `store_info`. A row has its `status`, such as `RES_STATUS_OK` or
+     `RES_STATUS_ERROR`, its text in `details`, and in `epoch` the time its
+     status last changed.
+   - `dn_info.disk_counts` holds the disk node's own counts of its volume
+     table (below).
+   - `obs_stamp.obs_time` is when the reading ended, and `obs_age` the
+     reading's age when the agent answered. `obs_stamp.converge_start` is
+     set while a converge runs, and `obs_stamp.agent_start_time` is when the
+     agent started.
+   - `disk_io_stats`, on a disk node, is the disk's counters, read at the
+     call ([A slow leg](#a-slow-leg)).
+2. An agent that is still starting answers with `applied_revision` 0, no
+   `dn_info` or `cn_info`, no `obs_time` and `obs_age` as `null`: run the
+   command again a little later. An agent that does not answer makes the
+   command fail with ABORTED, with the text `get dn info from` or
+   `get cn info from` and the node's address.
+3. The cntlrs and the sides on a node have rows of their own:
+   `dnvctl --sp '<pool name>' cntlr inspect --id <cntlr id>` and
+   `dnvctl --sp '<pool name>' sp inspect-side --id <side id>`.
+4. `dnvctl cluster get-capacity` lists every node's record under
+   `addr_port_to_dn` and `addr_port_to_cn`: its location, whether it is
+   disabled, its health epoch, its extents and how many sides or cntlrs it
+   holds ([The cluster's capacity](#the-clusters-capacity)).
+
+The reply holds no code of the agent, so a leftover on the node does not
+show in it ([Leftovers on a node](#leftovers-on-a-node)).
+
+The free count of a disk node. The agent counts the free extents of its
+disk from the disk's volume table; etcd's record counts them from what the
+cluster placed there. The two counts are compared, never reconciled:
+
+- The agent's counts are under `dn_info.disk_counts` of `dnvctl dn inspect`:
+  `total_ext_cnt`, `free_ext_cnt`, `side_rec_cnt`, the side records of the
+  table, `free_meta_units`, and `side_recs_match`, whether those records
+  name exactly the sides of the desired state the agent holds. The agent
+  sends them only beside a `meta_info` row that reads `RES_STATUS_OK`, from
+  a table it has confirmed as this node's and a read of the disk's size
+  that answered; otherwise `disk_counts` is `null`.
+- The record's counts are `dn_conf.total_ext_cnt` and `dn_conf.free_ext_cnt`
+  of `dnvctl dn get`.
+- Compare the two free counts only when `applied_revision` equals
+  `dn_rev.revision` and `side_recs_match` is true. At other times they count
+  two different states. The totals also differ when the disk's size changed
+  after the node was created: the record keeps the total of the create, and
+  the agent counts from its latest read of the size.
+- What dnv does alone: the worker makes the same compare at the check
+  rounds that bring a new observation. When two compares in a row disagree,
+  it logs `dn free count disagrees` at the error level, once until a compare
+  agrees, with both counts: `free_ext_cnt` and `agent_free_ext_cnt`,
+  `total_ext_cnt` and `agent_total_ext_cnt`. Nothing corrects either count,
+  and no health epoch is set. A disk node whose side records never come to
+  match its desired state is never compared, and no record says so.
+- What a disagreement costs: a record that counts more free extents than
+  the disk has can place a side that the disk refuses, whose row then reads
+  `RES_STATUS_ERROR`. A record that counts fewer leaves room unused.
+
+Safe steps on a `dn free count disagrees` record: disable the node, so that
+no new side is placed on it by a count that may be wrong ([Disable a
+node](#disable-a-node)), and ask for help. The way to make the counts agree
+again is to empty the node, remove it and add its disk again ([Remove a
+node](#remove-a-node), [Reuse a disk from an old
+node](#reuse-a-disk-from-an-old-node)).
+
+Steps that lose data: none. The reads change nothing.
+
+When to stop: a `dn free count disagrees` record; a row that stays
+`RES_STATUS_ERROR`. Ask for help.
+
+Tested: the e2e suite's ops case runs `dnvctl dn inspect` and
+`dnvctl cn inspect` on the lab's nodes. At the end of every case but the
+upgrade case, the e2e suite waits until each disk node's agent, at its
+record's revision, counts its whole data area free, as its record does,
+and checks that the worker logged no `dn free count disagrees`. The tutorial suite runs the all-in-one
+tutorial, which counts the `RES_STATUS_OK` rows of `dnvctl dn inspect` and
+`dnvctl cn inspect`. Both suites passed in the lab on 2026-11-21. No suite
+makes the counts disagree; the worker's unit tests check the compare and its
+record. The way back of the safe steps is not tested.
+
+## Leftovers on a node
+
+Words: a **leftover** is a word of the core glossary. An agent's answer
+carries the **leftover code**, code 4, while its latest sweep or read of the
+node found something that the desired state no longer wants.
+
+When:
+
+- a node delete without `--force` is refused for several minutes, and its
+  text says that the agent's latest observation of the node "answers code
+  4";
+- an agent's log keeps showing `sweep leftover` records for the same
+  objects;
+- on the machine of a node deleted with `--force`;
+- after any node delete, on the node's machine and on the machines that
+  exported to it ([Remove a node](#remove-a-node), step 7).
+
+How to confirm: the agent's `sweep leftover` record names what is left. Its
+`leftover_cnt` counts the objects, and `leftovers` names each one as
+`<kind>:<name>`: `dm` a device mapper device, `md` an md array, `nvmet` an
+NVMe-oF subsystem the machine exports, `nvmet_ns` one of its namespaces,
+`nvme` an NVMe-oF connection the machine made, and `record` a side's record
+in a disk's volume table. `failures` names each step that failed, with its
+cause. The worker logs `syncup leftover` for the answer to each syncup it
+sends, with at most eight names in its `details`; a check round's answer
+gets no such record. Both records are at the info level, so a
+program run with `--log-level warn` logs neither ([The logs](#the-logs)).
+For a cntlr, the cn agent's `sweep leftover` record of a read of the
+cntlr, not of a converge, can also name `md_member`, `md_broken` and
+`md_absent`: a member, a broken array or a missing array of a group the
+primary still wants. These are no objects to remove by hand: the converge
+that the worker sends on that code fails the member early, puts it back,
+adds it or removes it from the array, assembles the array again, or
+starts it. The worker's `syncup leftover` record of that converge does not
+name them.
+`dnvctl dn inspect` and `dnvctl cn inspect` show no code, and the status
+read shows no leftover.
+
+What dnv does alone: the worker sends the node's desired state again at
+each check round whose answer carries the leftover code, every 2 seconds at
+the default, and each converge's sweep tries again, from the top down. It
+stops below a layer that left something, since that layer may still use
+what is under it. A leftover goes at the first sweep that can remove it, as
+once a host lets go of a device; nothing keeps a memory of failures. A
+sweep never removes:
+
+- what a node deleted with `--force` still holds: no worker sends that node
+  anything any more, and its agent builds it again each time it starts,
+  for as long as the node's local files stay;
+- after any node delete, the node's NVMe-oF port with its two ANA groups,
+  and the NVMe-oF host entries ([Remove a node](#remove-a-node));
+- an NVMe-oF subsystem or connection whose name has dnv's prefix but names
+  no dnv object ([the scope
+  page](scope.md#61-cases-where-dnv-does-not-come-back-alone-today));
+- a leg's device left suspended under an md array of a pool that has left a
+  controller node (the scope page, section 6.1);
+- on a disk node, a device of another cluster or of another node that maps
+  the disk, which keeps a blank disk from being formatted ([Reuse a disk
+  from an old node](#reuse-a-disk-from-an-old-node)).
+
+Safe steps:
+
+1. For a node that still exists, read `failures` in the agent's latest
+   `sweep leftover` record. A removal fails most often because something
+   still uses the object: a host still connected to a subsystem, a process
+   that holds a device open, or a device above it. End that use, and the
+   next round's sweep removes the object. Do not remove by hand an object of
+   a node that still exists while its agent runs: ask for help instead.
+2. A leg's device of a pool that has left a controller node, named
+   `dnv-<cluster id>-<node id>-c9-<pool id>-<leg id>` with each id in 16 hex
+   digits, where no entry of `cn_conf.cntlr_ptr_list` of `dnvctl cn get`
+   names that pool: `sudo dmsetup info <name>` shows `State: SUSPENDED`, and
+   `sudo dmsetup resume <name>` ends it. Resume no other device by hand.
+3. For a node deleted with `--force`, or a machine whose nodes are all
+   removed:
+   1. Stop the node's agent, so that it builds nothing again, and delete the
+      node's local files ([Remove a node](#remove-a-node), step 6).
+   2. Reboot the machine, if no other node on it serves a pool. No device
+      mapper device, md array or NVMe-oF object survives a reboot, and an
+      agent with no files of the node builds none of them again. On a
+      machine whose other nodes serve pools, a reboot is the loss of those
+      nodes until they are back ([the scope page](scope.md), section 6).
+      There, remove the node's objects by hand instead, each one only after
+      what is above it, with `<cluster id>` and `<node id>` in 16 hex digits
+      (`printf '%016x' <id>`):
+      - The NVMe-oF subsystems that export a device of the node.
+        `grep -l 'dnv-<cluster id>-<node id>-' /sys/kernel/config/nvmet/subsystems/*/namespaces/*/device_path`
+        lists their namespaces. For each subsystem, remove its link from
+        each port, `sudo rm /sys/kernel/config/nvmet/ports/<port id>/subsystems/<nqn>`,
+        which ends every connection to it. Disable each namespace,
+        `echo 0 | sudo tee /sys/kernel/config/nvmet/subsystems/<nqn>/namespaces/<nsid>/enable`,
+        and remove it with `sudo rmdir`. Remove the links under the
+        subsystem's `allowed_hosts`, then the subsystem itself with
+        `sudo rmdir`.
+      - The device mapper devices whose names start
+        `dnv-<cluster id>-<node id>-`, from the top down:
+        `sudo dmsetup remove <name>` for each one that no other device
+        holds, as `lsblk` shows; first `sudo dmsetup resume <name>` for one
+        that `sudo dmsetup info <name>` shows suspended. On a controller
+        node, stop each md array left over the node's leg devices, once no
+        device above it is left, and before the leg devices: `lsblk` shows
+        each array, of type `raid1`, as `md<N>` under the leg devices it
+        holds, or as `md_<name>` where mdadm.conf says `CREATE names=yes`,
+        and `sudo mdadm --stop /dev/<that name>` stops it.
+      - The node's own NVMe-oF connections, whose host NQN is the node's:
+        on a controller node, `nqn.2024-01.io.dnv:1:<cluster id>:<node id>`,
+        to the disk nodes and to a clone's source; on a disk node,
+        `nqn.2024-01.io.dnv:0:<cluster id>:<node id>`, to the source of a
+        migration whose destination it was.
+        `grep -l '<host nqn>' /sys/class/nvme/nvme*/hostnqn` names them, and
+        `sudo nvme disconnect -d nvme<N>` ends each one.
+   3. Then remove the node's port and host entries, as [Remove a
+      node](#remove-a-node), step 7, says.
+4. A subsystem or a connection whose name has dnv's prefix,
+   `nqn.2024-01.io.dnv:`, but names no dnv object: remove it by hand in the
+   same way, once you know whose it is.
+
+Steps that lose data: the removal of a subsystem or a device that a pool
+still uses cuts its hosts or its legs. Remove only objects whose names
+carry the removed node's ids, and only after its agent has stopped. Never
+remove a port that another agent of the machine uses: disk node agents of
+one machine can share a port id, and so can a disk node agent and the
+controller node agent.
+
+When to stop: a removal that fails; an object whose owner its name does not
+tell; a leftover that a node still in the cluster names for minutes while
+nothing uses it. Ask for help.
+
+Tested: the cn suite's smoke case suspends a striped device by hand and
+checks that a check round's read names it with the leftover code and that
+the desired state sent again resumes it. The e2e suite's react case checks
+that a dead controller node agent, started again, removes what it left.
+The tutorial suite checks that the tutorials' teardowns, whose last steps
+remove the NVMe-oF ports and host entries by hand, leave no dnv device, md
+array, NVMe-oF port, subsystem or host entry. The three suites passed in
+the lab on 2026-11-21. The removals by hand of step 3 and a reboot to clear
+a node are not tested.
+
+## Reuse a disk from an old node
+
+Words: a disk node's **header block** is the first block of its disk, 4 KiB,
+where dnv records which node the disk belongs to. A disk node's **volume
+table** is the record on the disk of which extents each side holds.
+
+When: a disk that served a disk node of dnv must serve a new disk node: its
+node was removed and is created again, as for another location, or the disk
+goes to another cluster or another machine. Also when a disk node's agent
+gets a new disk: its old local files must go first (step 5).
+
+How to confirm:
+
+- `sudo head -c 8 <disk>; echo` prints `DNVDISK1` on a disk whose header
+  block dnv wrote.
+- A node created over such a disk before its header block was zeroed gets
+  nothing: `dnvctl dn inspect --addr <addr>` shows its `meta_info` row as
+  `RES_STATUS_ERROR` with the text
+  `foreign disk: cluster/dn/extent is <a>/<b>/<c>, want <d>/<e>/<f>`, its
+  health epoch stays set, and a delete without `--force` is refused, with
+  "answers code 4" and "disk identity is not confirmed for this node". It
+  holds no side, so delete it with
+  `dnvctl dn delete --addr <addr> --force`.
+
+What dnv does alone: nothing zeroes a header block. A disk node's agent
+formats a disk whose header block is blank at the first converge of its
+node, and then only when no side device or clone metadata device of dnv,
+of any node, still maps the disk, its local files hold no provisioned side
+of a node that still lists the side or of a node it holds no desired state
+for, and the disk reads 512-byte blocks. Otherwise its `meta_info` row reads
+`RES_STATUS_ERROR` with a text that starts
+`blank disk header; refusing to format`, and the disk stays blank. An agent
+started with the old node's local files formats a blank disk under the old
+node's id, so that the new node refuses it again as foreign.
+
+Safe steps, as root on the machine of the disk:
+
+1. If the old node still exists in a cluster, remove it first ([Remove a
+   node](#remove-a-node)). If it was deleted with `--force`, its machine can
+   still hold what it built ([Leftovers on a node](#leftovers-on-a-node)).
+2. Stop the disk node agent that uses the disk, and wait until its process
+   has exited.
+3. Check that no device of dnv maps the disk: `lsblk <disk>` lists no device
+   whose name starts `dnv-` above it. If one does, remove it as [Leftovers on
+   a node](#leftovers-on-a-node), step 3, says, or reboot the machine when no
+   other node on it serves a pool.
+4. Zero the header block. This step loses data:
+
+   ```
+   sudo dd if=/dev/zero of=<disk> bs=4096 count=1 conv=fsync
+   ```
+
+   Check `<disk>` twice first: on any other device the command wipes the
+   first 4 KiB.
+5. Delete the agent's disk node files from its store folder. They are all
+   this agent's, since two disk node agents never share a folder; the files
+   of a controller node agent in the same folder stay:
+
+   ```
+   sudo find <store folder> -maxdepth 1 -type f \( -name 'dn-*' -o -name 'probe-dn-*' -o -name 'side-*' -o -name 'migr-bm-*' \) -print -delete
+   ```
+
+   When the disk comes from another machine, delete the files of the agent
+   that used it there too, before that agent starts again.
+6. Start the agent with the disk as its `--disk`.
+7. Create the node ([Prepare a node](#prepare-a-node), step 13). Within a few
+   check rounds, `dnvctl dn inspect --addr <addr>` shows `meta_info` as
+   `RES_STATUS_OK` and `dn_info.disk_counts.free_ext_cnt` equal to
+   `total_ext_cnt`.
+
+A new disk needs no step 4, but the agent's old files must still go
+(step 5) before it serves the new disk.
+
+Steps that lose data: step 4. With the header block zeroed, nothing of dnv
+reads the old volume table again, so the data of the old node's sides is
+gone for dnv. Only the header block is zeroed: the old bytes stay on the
+disk, readable by root on the machine, until new sides write over them
+([the scope page](scope.md), section 3).
+
+When to stop: `meta_info` still reads `blank disk header; refusing to
+format` a minute after the create; its text names the first device that
+still maps the disk, or the side its files hold. Or `meta_info` reads
+`foreign disk` after step 7. Ask for help.
+
+Tested: not tested as a whole. Unit tests of the disk node agent check that
+it never writes a disk whose header block names another node, and that it
+does not format a blank disk that a side device of this node or of another
+maps, or whose local files hold such a side. The disk node, controller
+node, e2e and csi suites zero each test disk's header block with the `dd`
+command of step 4 at their cleanup, and then delete the disk: no suite
+creates a node again on a used disk. The e2e suite's upgrade case deletes
+every agent's local files and starts the agents again, but keeps each disk's
+header block and its node.
+
+## Replace a dead disk node
+
+Words: a **repair** and a **retired leg** are as in [Words of this
+guide](#words-of-this-guide): a repair replaces a bad leg of a group with a
+new leg, and the bad leg then stays in the pool as a retired leg, with its
+side and that side's extents, until it is deleted.
+
+When: a disk node's machine or disk is gone for good. If the machine runs
+and only its agent stopped, start the agent again ([A planned restart of an
+agent](#a-planned-restart-of-an-agent)). A node that comes back needs
+nothing.
+
+Symptom: `dnvctl cluster get-status` shows a `health` line for
+`dn <addr>`, "health epoch set: the worker's checks of the disk node fail",
+whose age grows, and `row` or `health` lines for its legs and sides in each
+pool that has one there. While the machine is gone,
+`dnvctl dn inspect --addr <addr>` fails with ABORTED and
+`get dn info from`; a node whose disk died reads its rows as
+`RES_STATUS_ERROR` instead. A RAID1 pool goes on serving over its
+other legs. In a pool without RAID, IO to the groups on the node waits for
+the pool's fast IO fail timeout, 5 seconds at the default, and then fails.
+[The introduction](introduction.md#status-and-limits) gives the measured
+pause.
+
+How to confirm: find the pools. `dnvctl dn get --addr <addr>` lists each side
+on the node under `dn_conf.side_ptr_list`, with the `sp_id` of its pool, its
+`leg_id` and its `side_id`, and `dnvctl sp find-names --ids <sp_id>,<sp_id>`
+prints the pools' names. `dnvctl --sp '<pool name>' sp get` shows under
+`sp_conf.bdev_conf.redund_conf` whether a pool is RAID1, `redund_md_raid1`,
+or has no redundancy, `redund_none`.
+
+What dnv does alone:
+
+- In a RAID1 pool, leg repair replaces each leg on the node, once the leg's
+  side has had its health epoch for the pool's `side_unhealthy`, 600 seconds
+  at the default, while the leg has one too, or once the leg has had its own
+  for the pool's `leg_unhealthy`, 1200 seconds. The worker repairs one leg of
+  a group at a time. It puts the new leg on an enabled, healthy disk node
+  with room that holds no leg of the group, in another location when it
+  can. Once the new leg is ready, the primary adds it to the group's array
+  and md starts to copy the group's data onto it. The worker then finishes
+  the repair, which puts the new leg in the dead leg's place in the group:
+  the dead leg is then a retired leg, and its side stays on the dead node,
+  in its `side_ptr_list`. md's copy goes on until the group is whole.
+- A group none of whose other legs is in sync and free of a health epoch
+  gets no repair: the worker logs `reaction skipped` with the reason
+  `no_healthy_leg` ([the forced-start guide](#the-forced-start-guide)). With
+  no disk node to take the new leg, the reason is `no candidate`, and the
+  repair waits until one can. A pool without RAID gets no repair: its data on
+  the node is gone.
+- The worker deletes a retired leg by itself once it is 7 days old and not
+  kept, when its group has no repair, its row reads `RES_STATUS_OK`, md
+  holds its array whole, and no leg or side of the group has a health
+  epoch. It deletes one at a time. It never deletes a kept one, and a forced
+  start keeps the group's retired legs ([Keeping the old
+  copies](#keeping-the-old-copies)).
+- Nothing deletes the node.
+
+Safe steps:
+
+1. Disable the node, so that it gets no new leg if it comes back for a
+   while: `dnvctl dn set-disabled --addr <addr> --disabled` ([Disable a
+   node](#disable-a-node)).
+2. If no other disk node has room for the new legs, add one ([Prepare a
+   node](#prepare-a-node)).
+3. For each RAID1 pool with a leg on the node, wait for its leg repairs, or
+   start them yourself ([Repair a leg by hand](#repair-a-leg-by-hand)). A
+   leg's repair has finished when
+   `dnvctl --sp '<pool name>' retired-leg list` lists the leg under
+   `leg_id_to_retired_leg`, with the dead node's address as `side.addr_port`.
+   Then wait until `dnvctl cluster get-status` shows no `group` line for its
+   group, whose id is the retired leg's `grp_id`, that says the array is not
+   whole: md has then copied the group's data onto the new leg.
+4. Match the node's sides with the retired legs. Each `leg_id` of the node's
+   `side_ptr_list` that is a key of its pool's `leg_id_to_retired_leg` is a
+   retired leg with its side on the node. `dnvctl` prints both ids as decimal
+   numbers in quotes, so they compare as text. A `leg_id` that is no retired
+   leg is a leg still in its group, whose repair has not finished.
+5. Delete each such retired leg once its group is whole. Read the pool's
+   revision, `sp_rev.revision` of `dnvctl --sp '<pool name>' sp get`, then
+   run `dnvctl --sp '<pool name>' retired-leg delete --leg <leg id> --rev <revision>`.
+   Each delete moves the revision, so read it again before the next one. Or
+   wait, and the worker deletes them by itself after seven days, as above.
+6. For each pool without RAID with a leg on the node, delete the pool, from
+   the inside out, as [Remove a node](#remove-a-node), step 2, says: its
+   transfers, its namespaces, its subsystems, its clones, its migrations,
+   its thin devices, and then the pool itself. The pool's delete is refused
+   while it holds any of them. After each clone's delete, wait until
+   `dnvctl --sp '<pool name>' clone get --name <clone>` answers NOT_FOUND:
+   until then the deletes of its volume and of the pool are refused. This
+   step loses data: the thin device deletes delete each volume with what it
+   still holds on the other disk nodes. Its volumes lost their data on the
+   dead node, and a node with a side on it cannot be deleted. A clone whose
+   copy the primary does not show complete is deleted only with `--force`,
+   and its volume holds only the regions copied so far: delete its
+   namespaces first, since a clone's delete sets them back to serving. With
+   `--rev`, read the pool's revision again before each command, as in step
+   5. The removal of a clone or of the pool in the background needs no
+   answer from the dead node.
+7. Once `dnvctl dn get --addr <addr>` shows `dn_conf.side_ptr_list` as `[]`,
+   delete the node with force: `dnvctl dn delete --addr <addr> --force`.
+   Without `--force` the delete is refused, since the agent does not answer,
+   or, on a machine whose disk alone died, cannot prove the disk clean: it
+   reports no counts of a disk it cannot read. With a side left on the node
+   it is refused with `--force` too.
+8. If the node's agent still runs, as on a machine whose disk alone died,
+   or if the machine comes back, stop that agent at once, or before it
+   starts, delete the node's local files, and remove what it built, as
+   [Leftovers on a node](#leftovers-on-a-node), step 3, says: the agent
+   builds again, each time it starts, what its files name, NVMe-oF exports
+   included, over disk space that the cluster counts as free, and what it
+   built stays after it stops. To use its disk again, or to give its agent
+   a new disk: [Reuse a disk from an old
+   node](#reuse-a-disk-from-an-old-node).
+
+Steps that lose data: step 6, with its thin device deletes and its forced
+clone deletes, whose volumes serve a partial copy to the hosts while a
+namespace of them is still there; and the delete of a retired leg, which
+drops its copy, the last one while its group is not whole: delete one only
+once its group is whole.
+
+When to stop: a group with no healthy leg ([the forced-start
+guide](#the-forced-start-guide)); a repair that does not start a few minutes
+after the thresholds above, or does not finish; a `no candidate` record that
+goes on once a disk node has room. Ask for help.
+
+Tested: the e2e suite's react case kills a disk node's agent and removes its
+NVMe-oF port, and checks that the worker repairs the dead leg with a repair
+of its own, finishes it and keeps the dead leg as a retired leg; it also
+kills the disk nodes of both legs of one group, and checks that the group
+gets no repair until one of them comes back. It runs with short thresholds,
+not the defaults, and passed in the lab on 2026-11-21. The e2e suite's copy
+case, in its stage 06, kills the disk node of a repair's new leg while md
+copies onto it, retires that leg with a second repair, and deletes it with
+`dnvctl retired-leg delete` while its disk node is still dead, on real
+agents. It checks that the side leaves the node's `side_ptr_list` and that
+the node's record counts every extent free again; that node's agent, back,
+then removes the side. It passed in the lab on 2026-11-21, in the e2e run
+at one slice. The worker suite checks the delete of a retired leg and the
+worker's own delete at seven days, over fake agents; the gateway's tests
+check `--force` on a node whose agent does not answer, and its refusal
+while a side is on the node. The procedure as a whole, and the forced
+delete of a dead disk node with real agents, are not tested.
+
+## Replace a dead controller node
+
+Words: the **start hold** and a primary's `settling` flag are as in [A
+planned restart of an agent](#a-planned-restart-of-an-agent): the start
+hold is how long the worker waits for a starting agent to end its startup
+pass, and `settling` stays true until a new primary reports its devices
+built. A **cntlid slot** is a range of NVMe controller ids, as in [Remove a
+node](#remove-a-node), step 3: each cntlr of a pool uses one slot of the
+pool's list.
+
+When: a controller node's machine is gone for good. If the machine runs and
+only its agent stopped, start the agent again ([A planned restart of an
+agent](#a-planned-restart-of-an-agent)): the cntlrs that were failed over
+come back as standbys.
+
+Symptom: `dnvctl cluster get-status` shows a `health` line for
+`cn <addr>`, "health epoch set: the worker's checks of the controller node
+fail", whose age grows, and one for each cntlr on the node.
+`dnvctl cn inspect --addr <addr>` fails with ABORTED and `get cn info from`.
+Each pool whose primary was on the node, and that had an enabled standby
+with no health epoch, has failed over to it about 6 to 10 seconds after the
+node died, at the defaults; its hosts saw a pause. A pool with no such
+standby, as a pool of one cntlr, serves no IO.
+
+How to confirm: `dnvctl cn get --addr <addr>` lists each cntlr on the node
+under `cn_conf.cntlr_ptr_list`, with the `sp_id` of its pool and its
+`cntlr_id`, and `dnvctl sp find-names --ids <sp_id>,<sp_id>` prints the
+pools' names. `dnvctl --sp '<pool name>' sp get` lists the pool's cntlrs
+under `cntlr_list`, in the order of the ids of `sp_conf.cntlr_id_list`, and
+shows which one is the primary.
+
+What dnv does alone:
+
+- Failover: a primary on the node that two check rounds in a row find
+  unhealthy, with its health epoch as old as the pool's
+  `primary_unhealthy`, 4 seconds at the default, is failed over to the
+  pool's enabled cntlr with no health epoch and the smallest id.
+- Cntlr replacement: the worker replaces each cntlr on the node that is not
+  disabled and has had its health epoch for the pool's `cntlr_unhealthy`,
+  600 seconds at the default. It deletes the cntlr and makes a new one with
+  the same cntlid slot on a controller node that is enabled, healthy, has
+  room and holds no cntlr of the pool, in another location when it can. It
+  replaces a primary only when the pool has no cntlr to fail it over to, and
+  the new cntlr is then the primary. Each replacement takes the old cntlr off
+  the dead node's `cntlr_ptr_list`, so with room elsewhere the node empties
+  itself about 600 seconds after it died. With no controller node to take a
+  cntlr, the worker logs `reaction skipped` with the reason `no candidate`,
+  and tries again at its next passes. The replacement in a pool of one cntlr
+  can cost a Kubernetes volume its path ([A one-cntlr Kubernetes volume after
+  a cntlr replacement](#a-one-cntlr-kubernetes-volume-after-a-cntlr-replacement)).
+- The worker never replaces a disabled cntlr.
+- A node that comes back before its cntlrs are replaced: its agent answers
+  that it is starting while it builds its stored cntlrs again, and the
+  worker waits for it for up to the start hold, 120 seconds at the default.
+  Its cntlrs then serve again, those that were failed over as standbys. A
+  node that comes back after: its agent removes the cntlrs it no longer
+  holds.
+- Nothing deletes the node.
+
+Safe steps:
+
+1. Disable the node, so that no cntlr is placed on it if it comes back for a
+   while: `dnvctl cn set-disabled --addr <addr> --disabled` ([Disable a
+   node](#disable-a-node)).
+2. Wait for the replacements, or make them now. For each cntlr on the node,
+   in its pool, with `--rev` the pool's `sp_rev.revision` from
+   `dnvctl --sp '<pool name>' sp get`, read again before each command:
+   1. Give the pool a new cntlr:
+      `dnvctl --sp '<pool name>' cntlr create --slot <slot> --rev <revision>`,
+      with a slot of `sp_conf.cntlid_slot_list` that no cntlr of the pool
+      uses as its `cntlid_slot`. [Remove a node](#remove-a-node), step 3,
+      sub-step 1, gives the create's refusals and their ways out. The
+      `cntlr_id` of the reply is the new cntlr's id.
+   2. Wait until the new cntlr is built: `dnvctl --sp '<pool name>' sp get`
+      shows it with `err_epoch` 0, and
+      `dnvctl --sp '<pool name>' cntlr inspect --id <new cntlr id>` shows
+      `applied_revision` equal to the pool's `sp_rev.revision` and each row
+      under `cntlr_info.leg_id_to_leg` as `RES_STATUS_OK`. If the old cntlr
+      is the primary, the worker fails it over to the new one, which has no
+      health epoch, at its next passes, before or after it is built; the
+      pool serves again once the new primary is built and `sp get` shows it
+      with `settling` false.
+   3. Disable the old cntlr:
+      `dnvctl --sp '<pool name>' cntlr set-enabled --id <old cntlr id> --enabled=false --rev <revision>`.
+      Do it only once another cntlr is the primary: a disabled cntlr is
+      never replaced, so a dead primary disabled while its pool has no other
+      cntlr to fail over to is never replaced either, and its pool stays
+      without IO until you enable it again.
+   4. Delete the old cntlr:
+      `dnvctl --sp '<pool name>' cntlr delete --id <old cntlr id> --rev <revision>`.
+      The gateway never deletes a primary or an enabled cntlr.
+
+   If the worker replaces the old cntlr while you do this, sub-steps 3 and
+   4 find it gone, and the pool has one cntlr more than before. To get back
+   to the count it had, disable one of the two new cntlrs that is not the
+   primary, and delete it the same way.
+3. Once `dnvctl cn get --addr <addr>` shows `cn_conf.cntlr_ptr_list` as
+   `[]`, delete the node with force: `dnvctl cn delete --addr <addr> --force`.
+   Without `--force` the delete is refused, since the agent does not answer.
+4. If the machine comes back, stop its controller node agent at once, or
+   before it starts, delete the node's local files, and remove what it
+   built, as [Leftovers on a node](#leftovers-on-a-node), step 3, says: the
+   agent builds again, each time it starts, what its files name, NVMe-oF
+   exports to hosts included, and what it built stays after it stops.
+
+Steps that lose data: none deletes volume data, since a controller node
+holds none. The disable of step 2.3 on a cntlr that is still the primary
+keeps its pool without IO.
+
+When to stop: a pool whose IO does not come back, with no new primary whose
+`settling` is false a minute after it became primary; a `no candidate`
+record that goes on while a controller node has room. Ask for help.
+
+Tested: the e2e suite's react case kills the primary's controller node
+agent, and checks the failover, the replacement of the dead cntlr on a node
+that held none, with its slot and its role, and that the dead agent,
+started again, removes what it left. It also resets the primary's machine
+twice, which fails the pool over and replaces the lost cntlr, and the
+machine comes back with no cntlr of the pool. It runs with short thresholds,
+not the defaults, and passed in the lab on 2026-11-21. A node back before
+its cntlrs are replaced, the replacement by hand of step 2 on a dead node,
+and a forced `dnvctl cn delete` with real agents are not tested.
 
 ## etcd refuses writes: its store is full
 

@@ -2851,13 +2851,21 @@ the syncup that removes them. The agent keeps the node's request in its
 local store and converges it again at every start (`dnagent.md` DN2): after
 a clean delete that is the empty node, its port and the disk's header;
 after a forced one, everything the stored request still names, exports
-included, over extents the cluster counts as free. And the disk's header
-still names the node, so the agent refuses the disk as a foreign one under
-any new node id (`dnagent.md` DN5). To add the disk again, in this order:
-stop the agent, zero the disk's header block, delete the agent's local
-store, start the agent, and create the node (etcd backup and restore). An
-agent started with the old store would format the blank disk under the
-old node id (`dnagent.md` DN2) or, while that store holds a provisioned
+included, over extents the cluster counts as free. No code removes an
+nvmet host entry, which `EnsureSubsystem` makes for each allowed host: a
+deleted node's machine keeps the entries of the hosts its exports let in,
+and every machine that exported to the node keeps the entry of the node's
+host NQN (`operations.md`, Remove a node). And the disk's header still
+names the node, so the agent refuses the disk as a foreign one under any
+new node id (`dnagent.md` DN5). To add the disk again, once no side device
+or clone-metadata wrapper maps it (`dnagent.md` DN5), in this order: stop
+the agent, zero the disk's header block, delete the dn agent's files of
+its local store (the dn kinds of `agent/store.go`: `dn-`, `side-`,
+`migr-bm-`, `probe-dn-`), never the files of a cn agent that shares the
+folder (`dnagent.md` CM2), start the agent, and create the node (etcd
+backup and restore; `operations.md`, Reuse a disk from an old node). An
+agent started with the old store would format the blank disk under the old node id
+(`dnagent.md` DN2) or, while that store holds a provisioned
 side its stored node still lists, refuse to format it (`dnagent.md` DN5).
 
 **GetDiskNode** — Errors: `NOT_FOUND`; `ABORTED` if the `DnRev` that must
@@ -7766,11 +7774,12 @@ A restore loses or breaks what changed after the backup:
   refused while it holds a side and, without `force`, until its agent
   proves it clean (Disk nodes); stop its agent; zero the disk's header
   block by hand, since the agent formats only a disk whose header carries
-  no magic (`dnagent.md` DN5); delete the agent's local store, start it,
-  and add the node again. An agent started with its old store formats the
-  blank disk under the old node's identity (`dnagent.md` DN2) or, while
-  that store still holds a provisioned side its stored node still lists,
-  refuses to format it (`dnagent.md` DN5). A controller node holds no
+  no magic (`dnagent.md` DN5); delete the dn agent's files of its local
+  store, never those of a cn agent that shares the folder (Disk nodes),
+  start it, and add the node again. An agent started with its old store
+  formats the blank disk under the old node's identity (`dnagent.md` DN2)
+  or, while that store still holds a provisioned side its stored node
+  still lists, refuses to format it (`dnagent.md` DN5). A controller node holds no
   disk, so the conflict never arises on one.
 * A node added after the backup is not in the restored state, and what it
   built stays on it until removed by hand. Added again it takes a new id,
@@ -10461,19 +10470,21 @@ document and only pointed to here.
   `DeleteDiskNode` or `DeleteControllerNode` asks no agent, and the stop of
   a deleted node's revision worker sends no last syncup (`dnv-worker.md`
   SW3), so the node keeps every device, export, array and connection its
-  last sweep had not removed, and its agent rebuilds what its stored
-  request names at every start (`dnagent.md` DN2; `cnagent.md` CN2) until
-  the store is deleted (Disk nodes); the operator stops the agent, removes
-  them by hand and deletes the store. A delete without `force` proves the
-  node clean from its agent's latest observation (Disk nodes) and has one
-  blind spot: on a controller node, an empty subsystem with no host and no
-  port link, younger than `CnSubsysOrphanGrace`, is left alone by the
-  node-level sweep and named by no verdict (`cnagent.md` CN21), so the proof
-  does not see it; it exports nothing, and the first start of the agent
-  once it reads older than that, whose converge of the stored request
-  sweeps the node (`cnagent.md` CN2), removes it. The deleted
-  node's request stays in the agent's local store either way, and is
-  converged at every start until the store is deleted.
+  last sweep had not removed, and its agent rebuilds what its stored request
+  names at every start (`dnagent.md` DN2; `cnagent.md` CN2) until the
+  node's files of the store are deleted (Disk nodes); the operator stops the
+  agent, removes them by hand and deletes the node's files of the store,
+  which other nodes' agents may share (`operations.md`, Leftovers on a
+  node). A delete without `force` proves the node clean from its agent's latest
+  observation (Disk nodes) and has one blind spot: on a controller node, an
+  empty subsystem with no host and no port link, younger than
+  `CnSubsysOrphanGrace`, is left alone by the node-level sweep and named by
+  no verdict (`cnagent.md` CN21), so the proof does not see it; it exports
+  nothing, and the first start of the agent once it reads older than that,
+  whose converge of the stored request sweeps the node (`cnagent.md` CN2),
+  removes it. The deleted node's request stays in the agent's local store
+  either way, and is converged at every start until the node's files of the
+  store are deleted.
 * **A downgrade can lose data** (Upgrade in lockstep): no build replaces a
   newer one, yet nothing checks a build, so an older build started over
   what a newer one wrote runs. It ignores the fields the newer build added,

@@ -429,7 +429,8 @@ func (s *CnAgentServer) ensurePort(
 // backup and restore).
 //
 // The base state itself is never torn down — like the DN port it outlives
-// every cntlr, and only lab cleanup removes it.
+// every cntlr, and no agent removes it: only a removal by hand once the node
+// is deleted (operations.md, Remove a node), or lab cleanup, does.
 //
 // It also drops the object lock of every pointer that left the list since
 // prev, the request the agent held for the CN before req, whether or not the

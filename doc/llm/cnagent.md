@@ -599,7 +599,8 @@ removes them. What the sweep could
 not finish is remembered only as the code of the CN's observation, which
 the next read or converge replaces, and no later pass reads it (CN30); the reply's code is that of
 the sweep's own verdict. The base state itself is never swept — like the DN port, it
-outlives every cntlr and only lab cleanup removes it. Reply
+outlives every cntlr, and no agent removes it: only a removal by hand, once
+the node is deleted (`operations.md`, Remove a node), or lab cleanup does. Reply
 `agent_reply`, `revision`, `cn_info`, and the `obs_stamp` and
 `save_time` of `dnagent.md` SH28: the CN's observation, stored before the
 reply, holds that code and that `cn_info`.
