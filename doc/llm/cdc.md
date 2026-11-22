@@ -236,7 +236,8 @@ host stack meets the case there too.
 DS10. **Staleness.** Through etcd outages `dnv-cdc` keeps serving its last
 known state (WV5): stale-but-consistent beats unavailable, though a stale
 instance also keeps listing an old primary a failover has taken out of the
-entries (`architecture.md` [D18]; `architecture.md`, Known limits). So
+entries (`architecture.md` [D18]; `architecture.md`, Known limits;
+`operations.md`, A host that keeps a withdrawn path). So
 does an instance whose watch etcd stops serving while etcd still answers:
 the cdc has no check like the worker's registry echo check (`dnv-worker.md`
 VW8 (b)), so only its silence threshold (`dnv-worker.md` EU3) or a restart

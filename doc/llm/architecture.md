@@ -10011,7 +10011,17 @@ document and only pointed to here.
   still lists it, and a host holds discovery connections to every cdc
   endpoint (`cdc.md` DS2). A host running nvme-stas whose discovery
   connections include such a twin keeps the old primary's path past the
-  fence (Failover).
+  fence (Failover). A twin that reaches etcd again catches up by itself
+  (`cdc.md` DS10), and one whose watch etcd stopped serving catches up at a
+  restart, whose first scan comes before it accepts a host (`cdc.md` CM4).
+  A stop of the twin is no way out: a node of the Kubernetes driver holds
+  every drop while a cdc of its list cannot be read (`csi.md` CSI15), and
+  nvme-stas hosts keep the device of every subsystem they use while every
+  cdc is down for a few seconds and is started again (the cdc suite's ha
+  case, `integtest/cdc_test.sh`), so a stop does not make nvme-stas drop a
+  path at once; how long it keeps the log of a discovery controller it
+  cannot reach is not known. The operator's steps are `operations.md`, A
+  host that keeps a withdrawn path.
 * **An nvme-stas host drops every path stacd made when stafd stays
   away.** stacd reads a stafd it cannot reach as an empty discovery log,
   and its start, or its next reconfiguration — the pass in which it
@@ -10027,13 +10037,15 @@ document and only pointed to here.
   reload, such an audit or a soak timer already running brings a
   reconfiguration meanwhile, or stacd starts while stafd is down; stacd's
   own stop keeps its connections, so stopping stacd before stafd is the
-  safe order. Read in the nvme-stas 2.3.1 source.
+  safe order (`operations.md`, Restart nvme-stas). Read in the nvme-stas
+  2.3.1 source.
 * **A path that nothing following the discovery log manages is never
   dropped.** A path connected by hand on a host that runs no nvme-stas or
   equivalent, or a controller named in nvme-stas's own configuration
   rather than discovered, stays when the records withdraw its cntlr, so
   that host keeps a failed-over primary's path past the fence (Host view,
-  Failover).
+  Failover), until the operator drops it (`operations.md`, A host that
+  keeps a withdrawn path).
 * **A host that still holds a lost cntlr's path refuses the path of its
   replacement.** A cntlr replacement keeps the lost cntlr's `cntlid_slot`
   (`dnv-worker.md` AR7; cntlid slots), and the replacement's node can give
@@ -10055,10 +10067,13 @@ document and only pointed to here.
   refused with DNR or the operator's `nvme disconnect -d` of that
   controller, and the mount does not survive that end (A mount does not
   survive the loss of its last path, below). The way out is the
-  operator's: that disconnect on the node, after which the follower's next
-  pass connects the replacement, and a delete of the pod, whose mount does
-  not follow the new device (`operations.md`, A one-cntlr Kubernetes volume
-  after a cntlr replacement). A path connected by hand stays (above).
+  operator's: that disconnect on the node, after which a later pass of the
+  follower connects the replacement, and then a new mount of the new
+  device, which the old mount does not follow: for a filesystem volume the
+  end of the volume's pods on the node and the kubelet's unstage before a
+  new pod starts there, and for a block volume a new pod (`csi.md` CSI14;
+  `operations.md`, A one-cntlr Kubernetes volume after a cntlr
+  replacement). A path connected by hand stays (above).
 * **A removed host keeps its connection where the cn agent runs without the
   cut.** nvmet checks a subsystem's list only when a host connects. A cn
   agent whose start check finds no cause runs in cut mode, and ends the
@@ -10138,9 +10153,14 @@ document and only pointed to here.
   for another subsystem before the volume's is built again, or one from a
   subsystem whose cntlid slot has run out (cntlid slots). Once the last
   controller is gone, a later connect makes a new namespace device, which
-  the mount does not follow. The way out is `csi.md` CSI14's: the operator
-  deletes the pod, as a host of any other kind mounts the new device again
-  by hand.
+  the mount does not follow. The way out is `csi.md` CSI14's. For a
+  filesystem volume the operator stops the volume's pods on the node and
+  starts them again once the kubelet's unstage has unmounted the dead
+  mount: a new pod's publish binds the standing mount with no read of the
+  device under it, and a stage over that mount takes it as it is (`csi.md`
+  CSI17). For a block volume a new pod gets the new device (`operations.md`,
+  A Kubernetes mount that lost its last path). A host of any other kind
+  mounts the new device again by hand.
 * **A volume none of whose cntlrs comes back waits for ever on a
   Kubernetes node.** The node plugin's connect never gives up, so the
   kernel never deletes the volume's controllers and IO to the volume
@@ -10148,7 +10168,8 @@ document and only pointed to here.
   cannot be killed and stays terminating, so the kubelet never unstages
   the volume. The way out is the operator's: `nvme disconnect -n` of the
   volume's subsystem NQN on the node fails the waiting IO, after which the
-  pod stops and the unstage runs (`csi.md` CSI14).
+  pod stops and the unstage runs (`csi.md` CSI14; `operations.md`, A
+  Kubernetes mount that lost its last path).
 * **A fault only a host sees never fails over.** Reactions read the agents'
   reports and the stored records, never a host (Automatic reactions;
   `dnv-worker.md` AR1), so a primary whose agent answers the worker while
@@ -10160,10 +10181,15 @@ document and only pointed to here.
   whose connect never gives up (`csi.md` CSI14). The way out is the
   operator's: disabling the primary starts a failover with no threshold wait
   where an enabled standby with a zero health epoch exists (`dnv-worker.md`
-  AR5), the operator enabling the cntlr again afterwards, since a disabled
-  cntlr is never a candidate; with no such standby a disable starts no
-  failover and takes the primary out of the discovery records (Cntlrs), so a
-  host that follows the log drops its last path (`csi.md`, The node plugin).
+  AR5), after the operator has disabled each such standby the hosts cannot
+  reach, since that rule takes the smallest such `cntlr_id` whatever the
+  hosts see and a standby's disable starts no failover; the operator
+  enables each disabled cntlr again once hosts reach it, since a disabled
+  cntlr is never a candidate and an enabled one is; with no such
+  standby a disable starts no failover and takes the primary out of the
+  discovery records (Cntlrs), so a host that follows the log drops its last
+  path (`csi.md`, The node plugin; `operations.md`, A fault only a host
+  sees).
 * **An old primary that cannot apply its demotion within the demotion
   hold fails IO from the fence.** An agent whose demotion waits behind a
   slow converge for the cntlr's locks (`cnagent.md` CN1; the head-of-line

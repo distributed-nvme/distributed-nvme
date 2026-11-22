@@ -348,13 +348,18 @@ but the node cannot, at the cntlr's address, and the node's IO to the volume
 queues while a standby's path is left (`osclient.md`, Exported raw helpers and
 the probe-IO carve-out) and otherwise waits with no error, since the plugin's
 connect never gives up (CSI14); on a pool with an enabled standby of a zero
-health epoch the operator ends that by disabling the primary
-(`UpdateCntlrEnabled`), which starts a failover with no threshold wait
-(`dnv-worker.md` AR5), and enabling it again after the failover, since a
-disabled cntlr is never a candidate (`dnv-worker.md` AR3); on a pool with no
-such standby a disable starts no failover (`dnv-worker.md` AR5) and takes the
-primary out of the discovery records (`architecture.md`, Cntlrs), so the
-follower drops the node's last path and the mount does not survive it (CSI14).
+health epoch the operator ends that by disabling first each such standby
+the node cannot reach, since `dnv-worker.md` AR5 takes the smallest such
+`cntlr_id` whatever the node sees and a standby's disable starts no
+failover, then the primary (`UpdateCntlrEnabled`), which starts a failover
+with no threshold wait (`dnv-worker.md` AR5), and by enabling each
+disabled cntlr again once the node reaches it, since a disabled cntlr is
+never a candidate (`dnv-worker.md` AR3) and an enabled one is; on a pool
+with no such standby a disable starts no failover
+(`dnv-worker.md` AR5) and takes the primary out of the discovery records
+(`architecture.md`, Cntlrs), so the follower drops the node's last path and
+the mount does not survive it (CSI14; `operations.md`, A fault only a host
+sees).
 
 CSI13. **The node id is the host NQN, and every node is in one topology
 segment.** The plugin reads the node's identity files at start and refuses
@@ -407,15 +412,16 @@ which the mount does not follow. The cost of a reconnect without end is that IO
 to a volume none of whose cntlrs comes back waits for ever, with no error; a
 pod blocked in it cannot be killed, and the operator ends the wait with `nvme
 disconnect -n` of the volume's subsystem on the node (`architecture.md`, Known
-limits). The follower keeps a withdrawn path until a listed cntlr's path shows
-the volume's namespace, or until the cdcs list no cntlr for the subsystem
-(CSI15), so on a pool of one cntlr a cntlr replacement, whose new cntlr the cdc
-lists before its agent has exported the subsystem, keeps the old path until the
-new one has joined the device, as long as the old path's reconnects are not
-refused before then; the new one cannot join while the old path holds the
-CNTLID the replacement's controller node gives the connect, and the old path
-then stays, its IO waiting, until a reconnect of it is refused with DNR or the
-operator disconnects it (`architecture.md`, Known limits). Each path holds at
+limits; `operations.md`, A Kubernetes mount that lost its last path). The
+follower keeps a withdrawn path until a listed cntlr's path shows the volume's
+namespace, or until the cdcs list no cntlr for the subsystem (CSI15), so on a
+pool of one cntlr a cntlr replacement, whose new cntlr the cdc lists before its
+agent has exported the subsystem, keeps the old path until the new one has
+joined the device, as long as the old path's reconnects are not refused before
+then; the new one cannot join while the old path holds the CNTLID the
+replacement's controller node gives the connect, and the old path then stays,
+its IO waiting, until a reconnect of it is refused with DNR or the operator
+disconnects it (`architecture.md`, Known limits). Each path holds at
 most the cn agent's IO queue cap of IO queues, one per CPU up to the cap, plus
 its admin queue, when the cap is above zero (`dnagent.md` SH32): the cap binds
 this connect too. Each connect and each of the two discovery reads of CSI15
@@ -440,7 +446,16 @@ subsystem at the cntlr's address under the node's host NQN that is not being
 deleted or dead, one for which the kernel would refuse a second connect,
 whatever nvme-cli printed; the connect reads none of nvme-cli's words. The
 plugin reports no volume health, so nothing in the driver or in Kubernetes acts
-on a dead mount, and the operator deletes the pod. A stage connects to every
+on a dead mount, and the operator ends it. A filesystem volume's publish binds
+whatever is mounted at the staging path, with no read of the device under it,
+and a stage that finds the volume mounted there takes that mount as it is
+(CSI17), so a pod the kubelet starts on the node while a dead mount stands
+there is given the dead mount, whether the kubelet publishes over the standing
+stage or stages again first: the operator stops the volume's pods on the node
+and starts them again only once the kubelet's unstage has unmounted it.
+A block volume's publish binds the device its uuid link names at that
+publish, so a new pod gets the new device (`operations.md`, A Kubernetes mount
+that lost its last path). A stage connects to every
 cntlr the cdcs list for the volume's subsystem and repeats the connects, since
 the cdc lists a subsystem before its cntlrs have built it, until a pass ends
 with no error or the node holds a path to the subsystem, a standby's included,
@@ -593,9 +608,15 @@ and removes it, a directory with a plain rmdir, never recursively; unstage
 unmounts the staging path. Every step reads the mount table first, so a
 repeat is done, as the spec asks, and a capability the driver does not serve
 is FAILED_PRECONDITION at stage and publish, the spec's word for a capability
-the volume does not support. The used-space report reads a mounted
-filesystem's totals in bytes and inodes through the OS client, and a block
-volume's size alone.
+the volume does not support. A stage that finds the capability's filesystem
+mounted at the staging path mounts nothing and does not compare the device
+under that mount with the volume's device, and of the staging path a
+filesystem volume's publish checks only that something is mounted there,
+refusing when nothing is, and binds that mount with no read of its device, so
+a mount whose device is gone stays the one publish binds until an unstage
+removes it (CSI14). The
+used-space report reads a mounted filesystem's totals in bytes and inodes
+through the OS client, and a block volume's size alone.
 
 ## Deployment
 

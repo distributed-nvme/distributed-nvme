@@ -744,7 +744,7 @@ Measured times are in [the introduction](introduction.md#status-and-limits).
 | A disk node is down and comes back | In a RAID1 pool, md fails its legs after the kernel's keep-alive. IO goes on over the other legs. A group with no IO sends md nothing to fail, so the primary fails such a leg in md itself once the leg has failed its health check twice in a row, while another leg holds the data in sync. md then records the death on the other leg, and a failover or a reboot can start the array from that leg alone. Back in time, its legs rejoin and md copies the changed regions. Down for long, leg repair moves each leg to another disk node. In a pool without RAID, the IO waits for the fast IO fail timeout and then fails (section 4). | `side_unhealthy`, 600 at the default, before the repairs start. The pool's fast IO fail timeout, 5 at the default, bounds how long the IO of a pool without RAID waits before it fails, and how long IO that reaches a lost leg after the keep-alive gives up waits. | Nothing. A node that never returns: [replace it](operations.md#replace-a-dead-disk-node). |
 | A controller node is down and comes back | Each primary on it that has a healthy enabled standby is failed over to it. Hosts see a pause. A pool of one cntlr waits for a cntlr replacement. Back, the cntlrs that were failed over are standbys; a node that was cut off from the network can fail a host's writes for a few seconds first (section 8). A cntlr unhealthy for long is replaced on another controller node. | `primary_unhealthy`, 4 at the default, with two check rounds in a row that find the primary unhealthy; a round runs every `cntlr_interval`, 2 at the default. A missed round counts only once its own wait of one interval has run out, so a failover comes about 6 to 10 seconds after the node dies. `cntlr_unhealthy`, 600, before a replacement. | Nothing. A node that never returns: [replace it](operations.md#replace-a-dead-controller-node). |
 | The network between a controller node and a disk node is cut | When the controller node holds the primary, as for a disk node down, seen from that controller node: md fails the legs behind the cut and takes them back when the cut ends. A long cut moves the legs. A cut from a node that holds only standbys changes nothing. | `leg_unhealthy`, 1200. | Nothing. |
-| The network between hosts and a controller node is cut | Nothing. dnv reads the agents, never a host. The primary stays the primary and stays in the cdc's answer. The host's IO queues as long as a standby path is left. | None. | Disable the primary, so a failover runs at once. Enable it again after. State: procedure to write; fix later, a host health signal into the worker. |
+| The network between hosts and a controller node is cut | Nothing. dnv reads the agents, never a host. The primary stays the primary and stays in the cdc's answer. The host's IO queues as long as a standby path is left. | None. | Disable the primary, so a failover runs at once. The failover takes the enabled standby with no health epoch that has the smallest id, whatever the hosts see, so first disable each such standby that the hosts cannot reach. Enable each disabled cntlr again once the hosts reach it. State: procedure written, [the steps](operations.md#a-fault-only-a-host-sees); the worker suite runs the disable on fake agents and the e2e suite the disable and the enable on the lab's agents, not the fault; fix later, a host health signal into the worker. |
 | The network between the control plane and the agents is cut | The data plane keeps serving. The primaries of one cut-off controller node are failed over. The old primary never gets its demotion, and the fence comes after the three-second hold, so hosts that drop the old path inside the hold see a pause, and a host still on it sees IO errors (section 8) and, in the cases section 5.1 lists, can lose a write it was told was done. With every agent cut off, nothing changes until the network is back. | As for a controller node down. | Nothing. |
 | etcd is down and comes back | The data plane keeps serving. No call and no reaction runs. A worker that cannot write to etcd stops driving its pools about 30 seconds into the outage, and drives again about one grace time after etcd is back. | The worker's flags: `--vote-interval`, 10 at the default, for the 30 seconds, which are three intervals; `--vote-grace-time`, 60, for the wait after. | Nothing. State: procedure written, [while the control plane is down](operations.md#while-the-control-plane-is-down). |
 | etcd's store reaches its quota | The data plane keeps serving. etcd refuses every write but a delete and still serves reads, so no call that writes the state and no reaction runs: each worker stops driving its pools within three vote intervals and does so again each time it starts. Once etcd takes writes again, every worker drives again about one grace time later. | The worker's flags: `--vote-interval`, 10 at the default, three intervals before it stops; `--vote-grace-time`, 60, for the wait after. The cause: etcd's `--quota-backend-bytes`, 2 GiB when not given; the history shrinks only with a compaction, which `--auto-compaction-retention` runs. | Compact, defragment and disarm the alarm: [the steps](operations.md#etcd-refuses-writes-its-store-is-full). |
@@ -1297,13 +1297,21 @@ Measured times are in [the introduction](introduction.md#status-and-limits).
   State: accepted, by design.
 - **A fault only a host sees never fails over.** See the table. On a pool
   with a healthy enabled standby, disabling the primary starts a failover
-  at once. A disabled cntlr is never made the primary and never replaced,
-  so enable it again after the failover. On a pool with no such standby,
-  a pool of one cntlr among them, a disable starts no failover and stops
-  the pool's IO at once, since a disabled cntlr serves no IO. The cdc stops
-  listing the disabled primary, so a host that follows the discovery log
-  drops its last path, and a Kubernetes mount does not survive it. State:
-  procedure to write; fix later.
+  at once. The failover takes the enabled standby with no health epoch
+  that has the smallest id, whatever the hosts see, so first disable each
+  such standby that the hosts cannot reach; the disable of a standby
+  starts no failover. A disabled cntlr is never made the primary and never
+  replaced, so enable each one again after the failover, once the hosts
+  reach it: an enabled cntlr can take the role again at a later failover.
+  On a pool with no such standby, a pool of one cntlr among them, a
+  disable starts no failover and stops the pool's IO at once, since a
+  disabled cntlr serves no IO. The cdc stops listing the disabled
+  primary, so a host that follows the discovery log drops its last path,
+  and a Kubernetes mount does not survive it. State: procedure written,
+  [the operations doc](operations.md#a-fault-only-a-host-sees); the
+  worker suite runs the disable on fake agents and the e2e suite the
+  disable and the enable on the lab's agents, not the fault itself; fix
+  later.
 - **An nvme-stas host loses every path when its discovery daemon is
   away.** nvme-stas has two daemons: stafd talks to the cdc, and stacd
   connects the paths. stacd reads a missing stafd as an empty discovery
@@ -1311,10 +1319,12 @@ Measured times are in [the introduction](introduction.md#status-and-limits).
   connected itself, it drops every path it made at its next start or at
   its next pass over its connections. A reload, a removed controller, a
   device audit or one of its timers starts such a pass. This was read in the source of
-  nvme-stas 2.3.1. To restart stafd, stop stacd first, which keeps its
-  connections when it stops; restart stafd; once stafd holds its
-  connection to the cdc again, start stacd. State: procedure to write,
-  the restart order.
+  nvme-stas 2.3.1; the lab runs 2.4.1. To restart stafd, stop stacd first,
+  which keeps its connections when it stops; restart stafd; once stafd
+  holds its connection to each cdc again, or, with a cdc away, once the
+  cdcs it reaches still list every path the host must keep, start stacd.
+  State: procedure written, [the operations
+  doc](operations.md#restart-nvme-stas); the order is not tested.
 - **A host keeps a withdrawn path.** A path connected by hand is never
   dropped. A cdc cut off from etcd keeps listing a failed-over primary. Such
   a host writes to the fenced old primary and gets IO errors in the failover
@@ -1325,7 +1335,12 @@ Measured times are in [the introduction](introduction.md#status-and-limits).
   does once the cdc stops naming it (seen in the lab). A Kubernetes node
   drops it only once another path of the volume shows the volume, so on a
   pool of one cntlr it keeps the old path, and the volume waits (the next
-  entry). State: procedure to write.
+  entry). State: procedure written, [the operations
+  doc](operations.md#a-host-that-keeps-a-withdrawn-path); the e2e suite's
+  cutoff case drops a path connected by hand and then connects the new
+  primary, on a host that holds one path; no test runs the procedure's
+  connect before the drop, its drop by device of one path among several,
+  or its steps for a cdc cut off from etcd.
 - **A Kubernetes mount waits for ever when no cntlr of its volume comes
   back.** The node plugin's connect keeps reconnecting through an outage
   of every path, however long, and the IO waits. So the mount survives a
@@ -1340,19 +1355,30 @@ Measured times are in [the introduction](introduction.md#status-and-limits).
   in that IO cannot be stopped until the operator runs
   `nvme disconnect -n` with the volume's subsystem NQN on the node.
   Nothing reports a dead mount.
-  State: procedure to write; no fix.
+  State: procedure written, [the operations
+  doc](operations.md#a-kubernetes-mount-that-lost-its-last-path), not
+  tested; no fix.
 - **A Kubernetes mount does not follow a new device.** A reconnect refused
   with "do not retry" ends for good, as when a controller node comes back
   holding other volumes' cntlrs before the volume's. Once the subsystem's
   last connection is gone, the mount keeps the dead device, and a later
-  connect makes a new device that the mount does not follow, until the pod
-  is deleted and made again. State: procedure to write; no fix.
+  connect makes a new device that the mount does not follow. The node
+  plugin mounts a filesystem volume, one it formats and mounts for its
+  pods, once on each node, and a pod that starts on that node while this
+  mount stands gets it as it is, the dead device with it. So the volume's
+  pods must stop, and the plugin must unmount the volume on that node,
+  which it does once no pod of the volume is left there, before a new pod
+  mounts the new device. A raw block volume, which a pod gets as a bare
+  device, needs only a new pod. State: procedure written, [the operations
+  doc](operations.md#a-kubernetes-mount-that-lost-its-last-path), not
+  tested; no fix.
 - **A Kubernetes node whose cdc list leaves out a cdc drops that cdc's
   volumes.** The node plugin follows the cdc addresses of its own
   configuration and no other. When the list leaves out every cdc that serves
   some pools, the listed cdcs list no path for those pools' volumes, and the
   plugin drops their paths on that node as after a detach: their mounts
-  fail, and their pods must be deleted and started again. A listed cdc that
+  fail, and their pods must be stopped and started again, as for a mount
+  that does not follow a new device (above). A listed cdc that
   is restarted to serve fewer pools does the same to the pools it gives up,
   until the list names a cdc that took them. A change of the list reaches a
   plugin only when it starts again. So the order of a change is: start the
@@ -1554,16 +1580,16 @@ known today" below gives the longer ones.
 |---|---|---|---|
 | Connect a host with nvme-stas | nvme-stas | the all-in-one tutorial | done |
 | Connect a Kubernetes cluster | the CSI driver | the CSI tutorial | done |
-| Restart nvme-stas | none | this page, section 6.1; [dnv on one machine](tutorial_all_in_one.md) | procedure to write: stop stacd first, restart stafd, and start stacd once stafd holds its connection to the cdc again |
-| Recover a host that keeps a withdrawn path | none | none | procedure to write |
-| Recover a Kubernetes mount after the loss of its last path | none; `nvme disconnect -n`, then delete the pod | this page, section 6.1 | procedure to write; no fix |
+| Restart nvme-stas | none | [the operations doc](operations.md#restart-nvme-stas); [dnv on one machine](tutorial_all_in_one.md) | procedure written: stop stacd first, restart stafd, and start stacd once stafd holds its connection to each cdc again, or, with a cdc away, once the cdcs it reaches still list every path the host must keep; not tested |
+| Recover a host that keeps a withdrawn path | none; `nvme connect` to the listed cntlrs, then `nvme disconnect -d` of the withdrawn path; a stale cdc's link to etcd repaired | [the operations doc](operations.md#a-host-that-keeps-a-withdrawn-path) | procedure written; the e2e suite's cutoff case drops a path connected by hand and connects the new primary, on a host that holds one path; the connect before the drop, the drop by device and a stale cdc are not tested |
+| Recover a Kubernetes mount after the loss of its last path | none; `nvme disconnect -n` for a pod whose IO waits; for a filesystem volume, its pods stopped until the node holds nothing of the volume, then started again; for a raw block volume, a delete of the pod | [the operations doc](operations.md#a-kubernetes-mount-that-lost-its-last-path) | procedure written; not tested; no fix |
 | Change the cdc addresses of the Kubernetes driver | the config map, the Kubernetes record that holds the cdc addresses both plugins start with, and a restart of both plugins | the operations doc, Change the cdc addresses of the Kubernetes driver | procedure written; the Kubernetes suite changes the list of the controller plugin, the part of the driver that calls the gateway, alone, and no suite restarts the node plugins with a new list |
 | Start a Kubernetes node plugin that refuses to start | none; the plugin's log names the fact and its fix | the operations doc, A Kubernetes node plugin that does not start | procedure written; not tested in a suite |
 | Keep a Kubernetes cluster's pods off dnv | the example network policy, [`deploy/networkpolicy.yaml`](../../deploy/networkpolicy.yaml) | [the CSI tutorial](tutorial_csi.md#keep-other-pods-off-dnv) | procedure written; the Kubernetes suite's policy case tries the ports of the gateway, the cdc and two agents, not the NVMe/TCP ports, which listen only once a pool uses them |
 | Handle the loss of a Kubernetes machine | the controller plugin's second copy; the out-of-service mark of Kubernetes, which an operator puts on a machine that is gone so that Kubernetes moves its volumes | the operations doc, A Kubernetes machine is lost | procedure written; the Kubernetes suite checks the controller plugin's part, and its detach case the move of a pod's volume after the out-of-service mark, of a machine cut off from Kubernetes but not from the controller nodes, on controller nodes that end its connections; both passed in the lab on 2026-11-20 |
-| Recover a one-cntlr Kubernetes volume after a cntlr replacement | `nvme disconnect -d` of the old path, then delete the pod | the operations doc, A one-cntlr Kubernetes volume after a cntlr replacement | procedure written; not tested |
+| Recover a one-cntlr Kubernetes volume after a cntlr replacement | `nvme disconnect -d` of the old path, then, for a filesystem volume, its pods stopped until the node holds nothing of the volume and started again, or, for a raw block volume, a delete of the pod | the operations doc, A one-cntlr Kubernetes volume after a cntlr replacement | procedure written; not tested |
 | Recover a Kubernetes volume the node plugin will not format | none; the plugin formats only a volume whose first MiB reads as zeros; for data at the start, an operator reaches the volume through a pod that gets it as a raw block device, and zeroes the start by hand for a volume that never held data | the operations doc, A Kubernetes volume the node plugin will not format | procedure written; its steps for data at the start are not tested |
-| Recover from a fault only a host sees | disable the primary | this page, section 6.1 | procedure to write. Fix later. |
+| Recover from a fault only a host sees | disable each enabled standby the hosts cannot reach, then the primary; enable each again once the hosts reach it | [the operations doc](operations.md#a-fault-only-a-host-sees) | procedure written; the worker suite's reaction case runs the disable on fake agents, and the e2e suite's copy case the disable and the enable on the lab's agents; the fault itself is not tested. Fix later. |
 
 ### Steps known today
 

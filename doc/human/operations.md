@@ -6223,8 +6223,8 @@ primary's rows. The node reconnects its paths by itself; once a path
 serves, the next try formats the volume.
 
 When to stop: the read keeps failing while the pool's cntlrs serve, which
-is a fault only the host sees ([the scope page](scope.md), section 6.1).
-Ask for help.
+is a fault only the host sees ([A fault only a host
+sees](#a-fault-only-a-host-sees)). Ask for help.
 
 ### Data at the start
 
@@ -6415,7 +6415,9 @@ up, as before step 4 ends on that node; and a list that leaves out the only
 cdcs of a range that serves volumes on a node. Once the listed cdcs answer,
 none of them lists a path for those volumes, which the node plugin takes as
 a detach: it drops their paths, their mounts fail, and their pods must be
-deleted and started again ([the scope page](scope.md), section 6.1). No
+stopped and started again, as [A Kubernetes mount that lost its last
+path](#a-kubernetes-mount-that-lost-its-last-path) says ([the scope
+page](scope.md), section 6.1). No
 data on the disks is lost, but a write a pod had not yet flushed is. A
 listed cdc that is stopped, by contrast, only holds the drops while it
 cannot be reached. Keep the order of the steps, and check the new list
@@ -6668,7 +6670,12 @@ does not end.
 
 ## A one-cntlr Kubernetes volume after a cntlr replacement
 
-Words: as in [A Kubernetes machine is lost](#a-kubernetes-machine-is-lost).
+Words: as in [A Kubernetes machine is lost](#a-kubernetes-machine-is-lost);
+a **filesystem volume** and a **raw block volume** are as in [A Kubernetes
+volume the node plugin will not
+format](#a-kubernetes-volume-the-node-plugin-will-not-format), and the
+**node's mount** of a volume as in [A Kubernetes mount that lost its last
+path](#a-kubernetes-mount-that-lost-its-last-path).
 A **controller id** is the number the target gives each connection of a
 subsystem; one host's kernel refuses two connections of one subsystem with
 the same number.
@@ -6680,8 +6687,8 @@ threshold, 600 seconds at the default.
 
 Confirm:
 - `dnvctl sp get` for the volume's pool, whose name is the persistent
-  volume's (`kubectl get pvc <claim>` names it), lists one cntlr, on another
-  controller node than before.
+  volume's (`kubectl -n <Kubernetes namespace> get pvc <claim>` names it),
+  lists one cntlr, on another controller node than before.
 - On the node of the pod, as root, `nvme list-subsys` shows the volume's
   subsystem with one path, to the old controller node's address, in the
   state `connecting`, and `dmesg` shows "Duplicate cntlid" for the
@@ -6702,8 +6709,15 @@ Safe steps:
 2. Drop it: `nvme disconnect -d nvmeN`, with that folder's name.
 3. Within a minute the node plugin connects the new cntlr: `nvme
    list-subsys` shows the new path `live`.
-4. The pod's mount does not follow the new device: delete the pod. Its
-   workload makes a new one, whose start mounts the volume again.
+4. The pod's mount does not follow the new device. For a filesystem
+   volume, deleting the pod is not enough: its workload's new pod can start
+   on the same node while the node's mount of the volume, the old one,
+   stands, and get it. Stop the volume's pods and start them again once the
+   node holds nothing of the volume, with steps 2, 4 and 5 of [A Kubernetes
+   mount that lost its last
+   path](#a-kubernetes-mount-that-lost-its-last-path). For a raw block
+   volume, delete the pod: its workload makes a new one, whose start takes
+   the new device.
 
 Steps that can lose data: step 2 fails the IO that waits on the old path,
 so writes the pod had not yet flushed to the volume are lost.
@@ -6713,3 +6727,552 @@ When to stop: the pool lists more than one cntlr, or the kernel log shows no
 
 Tested: not tested. The suites give every volume two cntlrs, where the
 failover's new primary serves while the old path goes.
+
+## Restart nvme-stas
+
+Words: **nvme-stas** is the host program that [dnv on one
+machine](tutorial_all_in_one.md) uses to follow the cdc. It has two
+daemons. **stafd** holds a connection to each cdc of its configuration and
+reads the cdc's answer, the **discovery log**, which lists the address of
+each cntlr of each subsystem the host may use. **stacd** connects the host
+to the cntlrs the discovery logs list. With that tutorial's setting
+`disconnect-scope=only-stas-connections` in `/etc/stas/stacd.conf`, it also
+disconnects a connection it made once no log lists it. `stafctl` and
+`stacctl` are the commands of the two daemons. A host's **path** to a
+subsystem is one of its connections to one cntlr of the pool; the kernel
+joins the paths to one volume into one device.
+
+When: stafd must start again on a host that holds paths to dnv volumes, for
+example after a change of `/etc/stas/stafd.conf`, such as a new cdc
+address. Or stacd alone must start again.
+
+What dnv does alone: nothing. dnv runs no program on such a host and does
+not see what nvme-stas does. stacd reads a stafd it cannot reach as an
+empty discovery log. The next time it compares its connections with the
+logs, it then disconnects every path it made. It does so at its start, at a
+reload, and at a pass that a removed controller, a device audit or one of
+its timers starts. This was read in the source of nvme-stas 2.3.1; the lab
+runs nvme-stas 2.4.1. A stop of stacd keeps the paths it made, and a stop
+of stafd keeps its connections to the cdcs under the tutorial's setting
+`persistent-connections=true` in `/etc/stas/stafd.conf`: both were seen in
+the lab with nvme-stas 2.4.1. While stacd is stopped, nothing on the host
+follows the discovery log: a failover meanwhile leaves the host on the old
+primary's path ([A host that keeps a withdrawn
+path](#a-host-that-keeps-a-withdrawn-path)), and the host gets no path to a
+new cntlr.
+
+Safe steps, as root on the host:
+
+1. Note what the host uses: `stafctl adlp -d` lists the records stafd
+   holds now, read as step 4 says, and `nvme list-subsys` lists each
+   subsystem with its paths, their addresses and their states.
+2. Stop stacd: `systemctl stop stacd`. Keep the time until step 5 short, for
+   the reason What dnv does alone gives.
+3. Restart stafd: `systemctl restart stafd`. To restart stacd alone, leave
+   this step out.
+4. Wait until stafd holds its connection to every cdc again.
+   `stafctl adlp -d` prints one entry for each cdc address of stafd's
+   configuration. In each entry, the `discovery-controller` part names the
+   address, as `traddr` and `trsvcid`, and its `connected` field must read
+   `True`. The `log-pages` part lists the records the cdc gave this host:
+   the cdc's record of itself, and for each subsystem the host may use its
+   NQN, `subnqn`, with the address of each of its cntlrs that the cdc
+   lists. Read it again until every cdc address reads connected and the
+   records name every subsystem that they named at step 1. stacd keeps a
+   path while some cdc lists the path's subsystem at the path's address,
+   and drops it once none does. So if a cdc address still does not read
+   connected after a minute, go on to step 5 only when the records of the
+   connected cdcs together list each path of step 1: its subsystem's
+   `subnqn` with its `traddr` and `trsvcid`. They may leave out a path
+   whose cntlr the cdc no longer lists, by step 1 of Confirm of [A host
+   that keeps a withdrawn path](#a-host-that-keeps-a-withdrawn-path):
+   `dnvctl sp get` no longer shows that cntlr, or shows it with `disabled`
+   true, or with `primary` false and `err_epoch` set. stacd then drops
+   that path, as it should. If they leave out any other path, stop (When
+   to stop). After step 6, repair the cdc whose address does not read
+   connected, or its address in stafd's configuration; a change of that
+   configuration needs this procedure again. Then read `stafctl adlp -d`
+   again until that address reads `connected` `True`. If it still does
+   not a minute after the repair, do this procedure again: no run shows
+   that a stafd started while a cdc did not answer connects to that cdc
+   once it answers.
+5. Start stacd: `systemctl start stacd`.
+6. Check that `nvme list-subsys` still shows the paths of step 1, `live`,
+   save a path to a cntlr that the cdcs no longer list.
+
+Steps that can lose data: these can make stacd disconnect every path it
+made: a restart or a stop of stafd while stacd runs; a start of stacd while
+stafd is down or before step 4 shows its records, which
+`systemctl restart stafd stacd` can do on a host that holds paths; and a
+reload of stacd while stafd is away. A start of stacd while a cdc address
+does not read connected, and the connected cdcs leave out a path of step 1
+whose cntlr the cdc still lists, makes stacd drop that path; step 4 forbids
+it. When a connected cdc serves old records, that path can be the one to a
+new primary after a failover, and the host is left on the fenced old
+primary, whose IO fails. Once a subsystem has no path left, its
+device goes: IO to it fails, and writes not yet flushed to it are lost. A
+later connect makes a new device, which a mount of the old one does not
+follow: unmount it and mount the new device. Also never disconnect by hand,
+while stafd runs, a connection that stafd made to a cdc, one whose
+`subsysnqn` file reads `nqn.2014-08.org.nvmexpress.discovery`: stafd then
+takes that cdc as gone for good and does not connect it again, so the host
+no longer hears of the cdc's changes. The cdc suite never touches these
+connections while stafd runs, for this reason.
+
+When to stop: at step 4, after a minute, the records of all the connected
+cdcs together still leave out a subsystem that they named at step 1 and
+whose paths the host must keep; or, while a cdc address does not read
+connected, they leave out a path of step 1 whose cntlr the cdc still lists.
+Do not start stacd then: it would drop the paths that only the missing
+records name. A connected cdc that leaves out such a path may serve old
+records ([A host that keeps a withdrawn
+path](#a-host-that-keeps-a-withdrawn-path), step 3 of Confirm). Fix stafd's
+configuration, the network to the cdc, or the cdc first, and keep the time
+short, as What dnv does alone says. Ask for help if you cannot.
+
+Tested: not tested. No suite restarts stafd while stacd is stopped, or
+starts stacd after such a restart: the suites start both daemons together
+before the host holds any path, and stop them after. The read of step 4 is
+the one the cdc suite, `integtest/cdc_test.sh`, makes in its manyhosts case
+on the lab's nvme-stas 2.4.1, where each cdc address must read connected
+and carry its records. That a stop of stacd or of stafd keeps their
+connections was seen in the lab; no suite checks it. The same suite's ha
+case kills every cdc for a few seconds while nvme-stas runs on the hosts
+and starts the cdcs again: stafd, which held a connection to each of them,
+connects to each again, and the hosts keep the device of every subsystem
+they use throughout. Not tested: the start of stacd at step 4 while a cdc
+address does not read connected, and the later connect of a stafd that was
+started while a cdc did not answer.
+
+## A host that keeps a withdrawn path
+
+Words: **nvme-stas**, **stafd**, **stacd**, the **discovery log** and a
+**path** are as in [Restart nvme-stas](#restart-nvme-stas), and a **range**
+and **twins** as in [Change the cdc addresses of the Kubernetes
+driver](#change-the-cdc-addresses-of-the-kubernetes-driver). The cdc lists a
+cntlr of a subsystem while the cntlr is enabled and is either the primary
+or has no health epoch. A **withdrawn path** is a host's path to a cntlr
+that the cdc no longer lists: a cntlr that was disabled, deleted or
+replaced, or an old primary after a failover, until its health epoch
+clears. A host that follows the discovery log drops a withdrawn path by
+itself: nvme-stas once no cdc it reads lists the cntlr, and the node plugin
+of dnv's Kubernetes driver once it also holds a path to a listed cntlr that
+shows the volume.
+
+Symptom: a host holds a withdrawn path, and one of these follows:
+
+- After a failover, the host's IO to the volume fails on that path from
+  the moment the disk nodes fence the old primary. A write the host was
+  told was done can then be lost, in the cases [the scope page](scope.md),
+  section 5.1, lists.
+- After a cntlr replacement, the host gets no path to the new cntlr, and
+  `dmesg` shows "Duplicate cntlid" for the subsystem. A **controller id** is
+  the number the target gives each connection of a subsystem, and one
+  host's kernel takes no two connections of one subsystem with the same
+  number: the new cntlr gave the host's connect the number that the old
+  path holds.
+
+The causes:
+
+1. **A path nothing manages**: one connected by hand with `nvme connect`,
+   or a controller named in stacd's own configuration, the `[Controllers]`
+   part of `/etc/stas/stacd.conf`, rather than learned from the cdc.
+   Nothing ever drops it.
+2. **A stale cdc**: a cdc that cannot reach etcd serves the records it last
+   read, and so does a cdc whose stream of changes from etcd stopped while
+   etcd still answers. nvme-stas keeps a path while any cdc it reads lists
+   it, so one stale twin is enough.
+3. **stacd is stopped**: nothing drops a path until it runs again ([Restart
+   nvme-stas](#restart-nvme-stas)).
+
+Confirm:
+
+1. `dnvctl sp get` lists the pool's cntlrs under `cntlr_list`, each with its
+   address as `nvme_tr_conf.tr_addr` and `nvme_tr_conf.tr_svc_id`. The cdc
+   lists those whose `disabled` is false and whose `primary` is true or
+   whose `err_epoch` is 0.
+2. As root on the host, `grep -H . /sys/class/nvme/nvme*/address` shows the
+   address of each connection, and the `subsysnqn` file in the same folder
+   names its subsystem; `nvme list-subsys` shows the state of each path. A
+   path of the subsystem whose address is not that of a cntlr the cdc lists,
+   by step 1, is withdrawn.
+3. What the cdcs tell the host: on an nvme-stas host, `stafctl adlp -d`
+   lists the records stafd read from each cdc ([Restart
+   nvme-stas](#restart-nvme-stas), step 4). A cdc whose records still name
+   the address of a cntlr that the cdc should not list, by step 1, is stale.
+   On a host with no follower of the discovery log, the path is one of
+   cause 1.
+
+What dnv does alone: in a failover, the worker gives the old primary its
+demotion first, which moves the old primary's namespaces to ANA
+inaccessible, so a host that also holds a path to the new primary sends its
+IO there once that path serves. The worker waits up to three seconds for the
+demotion to be reported done, and then the disk nodes fence the old primary.
+A host that follows the discovery log drops the path inside the three
+seconds. An old primary whose agent the worker cannot reach gets no
+demotion, and keeps serving its path until the fence. A stale
+cdc that reaches etcd again catches up by itself and tells its hosts of the
+change, and nvme-stas then drops the path. Nothing drops a path nothing
+manages.
+
+Safe steps, as root on the host:
+
+1. For a path nothing manages, on a pool whose cntlr was failed over or
+   disabled: first connect the host to the primary, if it holds no path to
+   it:
+   `nvme connect -t tcp -a <tr_addr> -s <tr_svc_id> -n <subsystem NQN> --hostnqn <host NQN> --hostid <host id>`,
+   with the primary's address from step 1 of Confirm, and the host NQN and
+   host id that the host's other connections carry, which
+   `/sys/class/nvme/nvme*/hostnqn` and `/sys/class/nvme/nvme*/hostid` show.
+   Wait until `nvme list-subsys` shows that path `live`. Then drop the
+   withdrawn path by its folder's name from step 2 of Confirm:
+   `nvme disconnect -d nvmeN`. With a live path left, the device stays.
+2. For a path nothing manages whose cntlr was replaced: the new cntlr's path
+   cannot join while the old path holds its controller id, so drop the old
+   path first, `nvme disconnect -d nvmeN`, and then connect the new cntlr as
+   in step 1. If the old path is the host's only path to the subsystem, this
+   drop can lose data (Steps that can lose data).
+3. For a controller named in `/etc/stas/stacd.conf`: take it out of that
+   file, restart stacd as [Restart nvme-stas](#restart-nvme-stas) says, and
+   drop the path as in step 1 if it stays.
+4. For a stale cdc: if its machine cannot reach etcd, repair that link, and
+   the cdc catches up by itself. If it reaches etcd and still serves the old
+   records, restart it with the same flags: when it starts, it reads etcd
+   whole before it accepts a host. Never restart a cdc that cannot reach
+   etcd: it then accepts no host until it can, and logs
+   `cdc waiting for first scan` once a minute. Do not stop the stale cdc to
+   be rid of its records. In the cdc suite's ha case, hosts that run
+   nvme-stas keep the device of every subsystem they use while every cdc
+   is down for a few seconds and is started again, so a stop does not make
+   nvme-stas drop a path at once; how long it keeps the records of a cdc it
+   cannot reach is not known. And a node of dnv's Kubernetes driver drops
+   no path at all while a cdc of its list cannot be reached.
+5. For a stopped stacd: finish [Restart nvme-stas](#restart-nvme-stas).
+6. On a node of dnv's Kubernetes driver, drop no path by hand that a cdc
+   still lists: the node plugin connects every path a cdc lists. A pool of
+   one cntlr after a cntlr replacement has steps of its own: [A one-cntlr
+   Kubernetes volume after a cntlr
+   replacement](#a-one-cntlr-kubernetes-volume-after-a-cntlr-replacement).
+
+Steps that can lose data: `nvme disconnect -n <subsystem NQN>` drops every
+path of the subsystem, the live ones too: never use it to drop one path. A
+drop of the host's only path to a subsystem, as step 2 can be, fails the IO
+that waits on it: the device goes, writes not yet flushed to it are lost, and
+a mount of the old device must be unmounted and mounted again on the new
+one. A path dropped by hand while a stale cdc still lists it may be
+connected again by stacd; whether it is, is not known.
+
+When to stop: the path you would drop is the primary's, since `dnvctl sp get`
+shows its address on the cntlr whose `primary` is true. That path is not
+withdrawn: see [A fault only a host sees](#a-fault-only-a-host-sees). Stop
+too when the cdcs still disagree after step 4 while each reaches etcd, or
+when a node of the Kubernetes driver keeps a withdrawn path while it holds a
+`live` path to the primary and every cdc of its list answers. Ask for help.
+
+Tested: the e2e suite's cutoff case connects a host by hand to a pool's
+primary alone and stops the primary's cn agent: the host keeps that path
+past the failover, and its writes fail from the fence. The host then drops
+the old path, with `nvme disconnect -n` since it holds no other, connects to
+the new primary by hand, and reads back what it wrote before the failed
+write. The same case checks that nvme-stas on another host drops its path
+to the old primary before the fence, with no failed write, and connects it
+again once the old cntlr is a healthy standby, and that the cdc serves the
+same records while etcd is down. It passed in the lab on 2026-11-21. The cdc
+suite's stas case checks that nvme-stas drops a connection whose record
+goes, and keeps the device when a record moves to a new address, the new
+address first. Its ha case, with nvme-stas 2.4.1 on the hosts, kills one
+cdc and starts it again: the cdc reads etcd and then serves the same
+records as its twin. It then kills every cdc for a few seconds and starts
+them again, and checks at each of its reads meanwhile that the hosts keep
+the device of every subsystem they use. The Kubernetes suite's
+failover case checks that a node drops its path to the old primary after a
+failover. Not tested: the connect before the drop of step 1, a drop by
+device of one path among several, the lost cntlr's path of step 2, a stale
+cdc during a failover and its recovery, the restart at step 4 of a cdc that
+serves old records, and a controller named in stacd's configuration.
+
+## A Kubernetes mount that lost its last path
+
+Words: the **node plugin**, a **pod**, a **filesystem volume**, a **raw
+block volume**, a **claim**, a **persistent volume**, a **workload**, a
+**Kubernetes namespace** and the **kubelet** are as in [A Kubernetes volume
+the node plugin will not
+format](#a-kubernetes-volume-the-node-plugin-will-not-format), **attach**
+and **detach** as in [Change the cdc addresses of the Kubernetes
+driver](#change-the-cdc-addresses-of-the-kubernetes-driver), and a **path**
+as in [Restart nvme-stas](#restart-nvme-stas). The node plugin mounts a
+filesystem volume once on each node that uses it, in a folder of the
+kubelet, and gives each pod of that node that uses the volume this one
+mount: it is the **node's mount** of the volume. When the last pod of the
+volume on a node is gone, the kubelet asks the node plugin to **let go** of
+the volume there: the plugin unmounts the node's mount and drops every path
+of the volume.
+
+Symptom: a pod's IO to its volume fails or waits with no end, in one of two
+ways:
+
+1. **The mount waits.** No cntlr of the volume serves the node, and the IO
+   waits with no error, since the node plugin's connects never give up. On
+   the node, `nvme list-subsys` shows each path of the volume's subsystem in
+   a state other than `live`, such as `connecting`. A pod whose IO waits
+   like this does not stop when it is deleted.
+2. **The mount is dead.** The volume's last path on the node ended once,
+   by a reconnect the controller node refused with "do not retry" or by
+   someone's `nvme disconnect`. The volume's device went with it, and the
+   node's mount kept that device. A later connect made a new device, which
+   the mount does not follow: the pod's IO fails while `nvme list-subsys` on
+   the node shows a `live` path of the subsystem.
+
+Confirm:
+
+1. Find the volume. `kubectl -n <Kubernetes namespace> get pvc <claim>`
+   names its persistent volume, and the `Used By` line of
+   `kubectl -n <Kubernetes namespace> describe pvc <claim>` names the pods
+   that use the claim.
+   `kubectl get pv <pv> -o jsonpath='{.spec.csi.volumeHandle}'` prints the
+   volume's id: the cluster's name, a slash and the name of the volume's
+   storage pool, which `--cluster` and `--sp` take below. The subsystem's
+   NQN is
+   `kubectl get pv <pv> -o jsonpath='{.spec.csi.volumeAttributes.nqn}'`,
+   and the volume's device on a node is `/dev/disk/by-id/nvme-uuid.<uuid>`,
+   with `<uuid>` read the same way from `{.spec.csi.volumeAttributes.uuid}`.
+2. `dnvctl sp get` for that pool. For the mount that waits, every cntlr
+   shows `err_epoch` set, and `dnvctl cluster get-status` shows a `health`
+   line for each. For the dead mount, a cntlr is primary with `err_epoch` 0.
+   A pool of one cntlr, now on another controller node than before, with
+   "Duplicate cntlid" for the subsystem in the node's `dmesg`, is the case
+   of [A one-cntlr Kubernetes volume after a cntlr
+   replacement](#a-one-cntlr-kubernetes-volume-after-a-cntlr-replacement):
+   follow it first.
+3. On the node of the pod, as root, `nvme list-subsys` shows the
+   subsystem's paths and their states, as the symptom says.
+
+What dnv does alone:
+
+- The node plugin's connects never give up: while a path of the volume is
+  left, the kernel holds the IO and reconnects onto the same device. So the
+  mount that waits goes on by itself, with no loss, once a cntlr of the
+  volume serves again. The worker makes an enabled standby with no health
+  epoch the primary once the primary has been unhealthy for the pool's
+  `primary_unhealthy`, 4 seconds at the default, and replaces a cntlr that
+  has been unhealthy for the pool's `cntlr_unhealthy`, 600 seconds at the
+  default.
+- Nothing reports a dead mount, and nothing ends it: the node plugin tells
+  Kubernetes nothing of a volume's health.
+- While a volume is in use on a node, the node plugin runs a pass, in which
+  it matches the node's paths to what the cdcs list, at each change notice
+  of an NVMe connection of the node and every 30 seconds, its
+  `--sync-period`, which `deploy/node.yaml` does not set. Each pass connects
+  the node to every cntlr the cdcs list for the volume that it holds no path
+  to. After a connect that
+  failed, it tries again one second later, then at waits that double up to
+  30 seconds. So once the last path is gone, the next pass after a listed
+  cntlr answers makes a new device.
+- When a pod of a filesystem volume starts on a node where the node's mount
+  of the volume stands, the node plugin takes that mount as it is: it does
+  not check the device under it. So a pod that starts there while a dead
+  mount stands gets the dead mount. A raw block volume has no node's mount:
+  each pod's start takes the device that `/dev/disk/by-id/nvme-uuid.<uuid>`
+  names at that moment, so a new pod gets the new device.
+- Kubernetes detaches the volume from a node only once the node plugin has
+  let go of it there; this order is Kubernetes' own, and no dnv test checks
+  it. The detach waits until the pool's primary reports, and an attach to a
+  node waits the same way, as [A Kubernetes machine is
+  lost](#a-kubernetes-machine-is-lost) says. So while no cntlr serves, the
+  volume stays attached, and no pod can start with it on any node.
+
+Safe steps, for a filesystem volume:
+
+1. If a cntlr of the volume can serve again, bring it back: start its
+   controller node, or repair the network to it. The mount that waits then
+   goes on by itself.
+2. Stop the volume's pods. Find the workload of each pod of step 1 of
+   Confirm:
+   `kubectl -n <Kubernetes namespace> get pod <pod> -o jsonpath='{.metadata.ownerReferences[0].kind}/{.metadata.ownerReferences[0].name}'`
+   prints its owner, such as `StatefulSet/<name>`, and `/` alone for a pod
+   with no owner. A pod of a Deployment prints `ReplicaSet/<name>`: a
+   ReplicaSet is the record through which a Deployment keeps its pods. The
+   same read of `replicaset <name>` in place of `pod <pod>` then prints
+   `Deployment/<name>`, or `/` alone for a ReplicaSet with no owner, which
+   is then itself the workload. Note the workload's pod count,
+   `kubectl -n <Kubernetes namespace> get <kind>/<name> -o jsonpath='{.spec.replicas}'`,
+   where `<kind>` is `deployment`, `statefulset` or `replicaset`, and scale
+   the workload to zero:
+   `kubectl -n <Kubernetes namespace> scale <kind>/<name> --replicas=0`.
+   A StatefulSet's scale to zero stops all of its pods, each with a claim of
+   its own, so their IO stops too until step 5. Delete the pod only when the
+   read prints `/` alone: a workload makes a new pod with the same claim at
+   once, which can start on the same node and get the old mount. For any
+   other owner, such as a DaemonSet, which keeps one pod on each node, or a
+   Job, which runs a pod until its work ends, this step has no command:
+   stop that owner by its own means, or ask for help.
+3. If a pod of the volume does not stop, because its IO waits: on its node,
+   as root, run `nvme disconnect -n <subsystem NQN>`. This fails the IO that
+   waits, and the pod stops. Until a cntlr serves again, the node plugin's
+   connects to the volume fail.
+4. Wait until the node holds nothing of the volume:
+   `kubectl get volumeattachment` lists no attachment of the persistent
+   volume to the node, and, as root on the node, `nvme list-subsys` shows no
+   path of the subsystem. While no cntlr serves, the attachment stays, as
+   What dnv does alone says: do step 1 meanwhile.
+5. Scale the workload back to its count:
+   `kubectl -n <Kubernetes namespace> scale <kind>/<name> --replicas=<count>`,
+   or make the pod again. Its start connects the node again and mounts the
+   volume's new device.
+
+Safe steps, for a raw block volume: for the mount that waits, do step 1,
+and the pod goes on by itself. Otherwise delete the pod, and if it does not
+stop because its IO waits, do step 3. Its workload's new pod takes the
+device that the volume's link names at its start, so it starts once a cntlr
+serves and a path of the volume is `live` again.
+
+Steps that can lose data: step 3 fails every write that waits on the volume
+on that node, so writes the pod had not flushed are lost. A pod stopped while
+its IO fails, as for a dead mount, loses what it had not flushed as well.
+What was written and flushed stays on the pool.
+
+When to stop: `dnvctl sp get` shows a primary with `err_epoch` 0 while the
+node's paths to it are not `live`: that is [A fault only a host
+sees](#a-fault-only-a-host-sees). Stop too when step 4 does not end once a
+cntlr serves, or when the new pod's IO still fails. Ask for help.
+
+Tested: not tested. No suite case loses a volume's last path, ends a pod's
+waiting IO with `nvme disconnect -n` or starts a pod over a new device; the
+Kubernetes suite's failover, restart and detach cases keep a path, or detach,
+by design. A unit test of the node plugin checks that a second request to
+make a filesystem volume ready, over a mount that stands, mounts nothing
+again. The CSI tutorial, which the tutorial suite runs, deletes a pod and
+waits until the node shows no path of the volume, the reading of step 4.
+
+## A fault only a host sees
+
+Words: a **path** is as in [Restart nvme-stas](#restart-nvme-stas), the
+**status read** as in [Read what is wrong](#read-what-is-wrong), and the
+**check interval** as in [A planned restart of an
+agent](#a-planned-restart-of-an-agent). A **fault only a host sees** keeps
+hosts from a pool's primary while the
+worker still reaches the primary's agent: for example, the network between
+the hosts and the primary's controller node is cut, and the network between
+that node and the control plane is not.
+
+Symptom: the IO of hosts to the volumes of one pool stops or waits, while
+dnv sees nothing wrong.
+
+Confirm:
+
+1. `dnvctl cluster get-status` lists no line for the pool, and
+   `dnvctl sp get` shows the cntlr whose `primary` is true with `err_epoch` 0.
+   `dnvctl sp get` lists the cntlrs under `cntlr_list` in the order of the
+   ids in `sp_conf.cntlr_id_list`, so the primary's id stands at the same
+   place in that list. `dnvctl cntlr inspect --id <primary cntlr id>` shows
+   no row of the primary that reads `RES_STATUS_ERROR`.
+2. As root on a host, `nvme list-subsys` shows the volume's subsystem with
+   its paths. The path to the primary's address, its `nvme_tr_conf` in
+   `dnvctl sp get`, is not `live`, for example `connecting`, while the path
+   to a standby is `live`.
+
+What dnv does alone: nothing, for as long as the fault lasts. The worker
+judges the agents' answers and never reads a host, so the primary stays the
+primary, and the cdc keeps listing it. A host's IO waits while the host holds
+a path to a standby; on a node of dnv's Kubernetes driver it waits with no
+end. Once the operator disables the primary, the worker makes a standby the
+primary at its next pass over the pool, with no event threshold to wait
+out; it makes such a pass every check interval, 2 seconds at the default.
+It takes, of the other cntlrs that are enabled and have no health epoch,
+the one with the smallest id, and passes over one whose agent it has seen
+refuse a syncup. It does not ask whether the hosts reach that cntlr. It
+first gives the old primary its demotion and waits up to three seconds for
+it to report the demotion done; then the disk nodes fence the old primary,
+and the new primary builds its devices. Until it reports them built,
+`dnvctl sp get` shows the new primary with `settling` true. A disabled
+cntlr serves no IO, is never made the primary and is never replaced, and the
+gateway takes it out of the cdc's records in the same write that disables it.
+The status read lists a disabled primary until its failover, and never says
+that a cntlr which is not the primary is disabled.
+
+Safe steps:
+
+1. Find the cntlrs the worker can make the primary: those that
+   `dnvctl sp get` shows with `primary` false, `disabled` false and
+   `err_epoch` 0. Each entry of `cntlr_list` has its id at the same place in
+   `sp_conf.cntlr_id_list`. The worker takes the one with the smallest id,
+   so the hosts must reach it: on each host that holds a path to it,
+   `nvme list-subsys` must show that path `live`. Disable first each of
+   these cntlrs whose path is not `live`, with the command of step 2 and its
+   own id. It is not the primary, so no failover follows, and the worker
+   then passes it over. If none is left whose path is `live`, do not
+   disable the primary (Steps that can lose data): enable again each cntlr
+   you disabled here, and repair the network instead.
+2. Disable the primary:
+   `dnvctl cntlr set-enabled --id <primary cntlr id> --enabled=false`.
+3. Wait until `dnvctl sp get` shows another cntlr as primary with `settling`
+   false. If no other cntlr becomes primary within a few check intervals, or
+   the new primary still shows `settling` true a minute after it became
+   primary, give the role back to the old cntlr as step 3 of [A planned
+   restart of an agent](#a-planned-restart-of-an-agent) says, and ask for
+   help: a standby whose agent refuses its syncups can take the role and then
+   serve nothing.
+4. Check the hosts: `nvme list-subsys` shows the path to the new primary
+   `live`, and their IO goes on. A host that runs nvme-stas, and a node of
+   dnv's Kubernetes driver, drop the old primary's path by themselves; a path
+   connected by hand stays ([A host that keeps a withdrawn
+   path](#a-host-that-keeps-a-withdrawn-path)).
+5. Repair the network between the hosts and the old primary's controller
+   node, and the controller nodes of the cntlrs step 1 disabled.
+6. For the old cntlr, and for each cntlr step 1 disabled, check that the
+   hosts reach its controller node again. `nvme list-subsys` cannot show
+   this: the cdc does not list a disabled cntlr, so a host that follows the
+   discovery log has dropped its path to it. Instead, on each host that
+   uses the pool, `timeout 3 bash -c '</dev/tcp/<tr_addr>/<tr_svc_id>' && echo open`
+   must print `open`, with the cntlr's `nvme_tr_conf.tr_addr` and
+   `nvme_tr_conf.tr_svc_id` from `dnvctl sp get`: a disabled cntlr still
+   exports its subsystems there, as a standby does. Every host must print
+   it: the fault can cut some hosts and not others, so a host that was
+   never cut tells nothing of the rest. Then enable the cntlr:
+   `dnvctl cntlr set-enabled --id <cntlr id>`. It comes back as a standby,
+   and the cdc lists it again once its `err_epoch` is 0. While it stays
+   disabled it is no standby: in a pool of two cntlrs, no cntlr can take over
+   from the new primary. Do not enable it while the hosts cannot reach it: an
+   enabled cntlr is a candidate for the next failover, and a failover to it
+   brings the fault back.
+7. Check that `dnvctl sp get` shows each cntlr you disabled with `disabled`
+   false. Nothing else reminds you of it: the status read never says that a
+   cntlr which is not the primary is disabled.
+
+Steps that can lose data: a disable on a pool with no enabled standby whose
+`err_epoch` is 0, such as a pool of one cntlr. No failover follows, the
+pool's IO stops at once, and the cdc lists no cntlr of the pool, so a host
+that follows the discovery log drops its last path: the device goes, writes
+not yet flushed are lost, and a Kubernetes mount does not survive it ([A
+Kubernetes mount that lost its last
+path](#a-kubernetes-mount-that-lost-its-last-path)). The worker's log then
+shows `reaction skipped` with the reason `no candidate` at each pass. Enable
+the cntlr again at once if this happened.
+
+When to stop: `dnvctl sp get` shows the primary with `err_epoch` set, or
+`dnvctl cluster get-status` lists lines for the pool: dnv sees a fault, and
+[Read what is wrong](#read-what-is-wrong) leads on. Stop too when the hosts
+reach no cntlr of the pool, a fault of the whole host network, or when step
+3 or step 4 does not end as it says. Ask for help.
+
+Tested: the worker suite, `integtest/worker_test.sh`, reaction case, on
+fake agents: a disable of a primary with no health epoch, and no other
+change, makes the enabled standby the primary within five seconds at a
+check interval of one second. Neither cntlr has a health epoch then, so no
+threshold was waited out. The suite writes that disable straight to etcd,
+not through the gateway. The same case checks that a disabled standby is
+not replaced. The e2e suite's copy case disables the primary of a
+pool on the lab's real agents while a host writes, waits for the standby to take
+the role, enables the old cntlr again, and checks that every write of the
+host passed, that its data reads back, and that the disable made the one
+failover and the enable none. It passed in the lab on 2026-11-21. Its host
+holds the paths to both cntlrs, which the suite made, and runs no nvme-stas.
+The e2e suite also disables a standby on the lab's agents: its smoke case
+waits for the cdc to stop listing it, and each cycle of its soak case, a
+long run, disables a standby and enables it again with no reaction of the
+worker. A unit test of the worker checks that a disabled cntlr is never
+made the primary, and that a failover passes over a disabled cntlr with a
+smaller id and takes the next one. Not tested: the fault itself, a host cut
+off from a primary that the worker reaches, a host that follows the
+discovery log, nvme-stas or the node plugin, through these steps, a
+failover past a disabled standby in any suite, and the check of step 6.
