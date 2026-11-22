@@ -1869,6 +1869,267 @@ location default, as every node there is created with a location named,
 nor a new pool keeping its legs out of its primary's location, as no
 controller node there shares a location with a disk node.
 
+## The networks
+
+Words: the **host network** is the network on which the hosts reach dnv.
+The **back network** is every other network dnv uses. It can be split in
+two: the **leg network**, on which the controller nodes reach the legs on
+the disk nodes and a disk node reaches another for a migration, and the
+**control network**, on which `dnvctl`, the gateway, the worker, the cdc,
+etcd and the agents talk. An agent's **control port** is the port of its
+`--grpc-address`, where the gateway and the worker call it. nftables is
+the Linux firewall, and `nft` is its command. The CSI driver is dnv's
+Kubernetes driver; its **node plugin**, its **controller plugin** with its
+two **copies**, and a **pod** are as in [A Kubernetes machine is
+lost](#a-kubernetes-machine-is-lost).
+
+When: before the first node of a cluster joins, and when you add a
+machine, a host or a program, or change an address or a port.
+
+The rule: hosts reach only the controller nodes' NVMe/TCP ports and the
+cdc. Every other port of dnv sits on the back network, which no host can
+reach or route to. dnv checks no caller of the gateway, the agents and
+etcd, and no host beyond its NQN, so the network alone keeps hosts away
+from them. A machine that reaches the gateway can change or delete any
+pool, and one that reaches an agent's control port can make the agent
+remove what its node holds. A machine that reaches a disk node's NVMe/TCP
+port and claims the NQN of any controller node that holds a cntlr of a
+pool, primary or standby, can read and write that pool's raw legs there,
+the old bytes of other pools included.
+
+Who connects to whom:
+
+| Who connects | To | The port, set by these flags of the listener | Where the caller reads the address | Network |
+|---|---|---|---|---|
+| A host, and the CSI node plugin on a Kubernetes node | the cdc | the cdc's `--tr-addr` and `--tr-svc-id`, 8009 by default | the host's own settings, such as those of nvme-stas, the host's discovery service; the driver's `--cdc-addresses` | host |
+| A host, and the CSI node plugin | a controller node's NVMe/TCP port | the cn agent's `--tr-addr` and `--tr-svc-id` | the cdc's answer, which holds the address given to `dnvctl cn create --tr-addr --tr-svc-id` | host |
+| The primary of a pool that clones a volume | the source: another pool's controller node, over the transfer it exports there, or any NVMe/TCP target | that controller node's NVMe/TCP port, or the target's | the clone's source address, given to `dnvctl clone create --src-tr-addr --src-tr-svc-id` and changed by `dnvctl clone set-tr` | host, or wherever the target is |
+| A controller node, for each cntlr, primary and standby | a disk node's NVMe/TCP port, for the legs | the dn agent's `--tr-addr` and `--tr-svc-id` | the address given to `dnvctl dn create --tr-addr --tr-svc-id` | leg |
+| A disk node, the new side of a migration | the disk node of the old side, its NVMe/TCP port | the same | the same | leg |
+| `dnvctl`, and the CSI controller plugin | the gateway | the gateway's `--grpc-address` | their `--gateway-address`; for the CSI driver, the key `gatewayAddress` of `deploy/config.yaml` | control |
+| The gateway and the worker | each agent's control port | the agent's `--grpc-address` | the node's address, given to `dnvctl dn create --addr` or `dnvctl cn create --addr` | control |
+| The gateway, the worker and the cdc | etcd | etcd's client address | their `--etcd-endpoints` | control |
+| Each etcd server | the other etcd servers | etcd's peer address | etcd's own settings | control |
+
+What the table means:
+
+- The addresses that nodes and hosts dial are stored in the node records
+  once, at `dnvctl dn create` and `dnvctl cn create`, and no command
+  changes them. A node's `--addr` is also its name. To move a node to
+  another address, empty it, delete it and create it again ([Remove a
+  node](#remove-a-node)). `--tr-addr` and `--tr-svc-id` of those two
+  commands default to 127.0.0.1 and 4420, which fit one machine alone:
+  give both on every create. A clone's source is the one address a
+  command changes.
+- A record's address may differ from the agent's own flags, as when a
+  program that forwards the traffic sits between. dnv does not check that
+  the two agree.
+- No dnv program but the cdc has a default port. The worker and `dnvctl`
+  listen on nothing.
+- A controller node exports to its hosts and to the clones of other pools
+  from one NVMe/TCP port. So a transfer between two pools crosses the host
+  network: the controller nodes of the cloning pool, any of which may hold
+  its primary, must reach the NVMe/TCP ports of the source pool's
+  controller nodes.
+- A machine that runs the cdc is on the host network, and one that runs
+  the gateway or etcd is on the control network. A control-plane server
+  that runs all three is on both.
+- No dnv program chooses the source address of a connection it makes: the
+  machine's routing table picks the network. On a machine on two networks,
+  route each network through its own interface, or a leg's or a call's
+  traffic can leave over the host network.
+
+The risks a firewall does not take away:
+
+- Anyone on the host network can pose as a host. A host is known by its
+  NQN alone, and dnv checks no key. A machine that claims the NQN of a
+  host, once it learns it, reaches that host's volumes on the controller
+  nodes, and gets that host's answer from the cdc: the names of its
+  subsystems and the addresses of their controller nodes. The same holds
+  for a transfer, which a controller node exports on the same port: a
+  machine that claims an NQN the transfer lists can write the source
+  while a clone copies it ([the scope page](scope.md#3-the-promise-one-pool-never-reads-another-pools-bytes)).
+  So the promise needs hosts on which no tenant has root.
+- All traffic is plain text. Whoever can read a network reads what
+  crosses it: the volumes' data on the host and leg networks, and every
+  desired state on the control network.
+- A failure of the host network at the primary's controller node alone
+  starts no failover: the worker reads the agents over the control
+  network, never a host. See [A fault only a host
+  sees](#a-fault-only-a-host-sees).
+- A machine that runs a dn agent and a cn agent with the default nvmet
+  port id, the configfs id of the agent's NVMe/TCP port, shares one
+  NVMe/TCP port between the two at one address. The disk node's legs are
+  then exported on the port the hosts reach, and no rule by port can keep
+  hosts off them. Give each agent its own `--nvmet-port-id` and its own
+  `--tr-svc-id` or `--tr-addr`, as [dnv on one
+  machine](tutorial_all_in_one.md) does.
+- A program bound to every address of its machine, as with an address of
+  `0.0.0.0` or none before the port, answers on each of them, IPv6 and a
+  Kubernetes node's pod network addresses among them. A pod on another
+  Kubernetes node reaches those with its own pod address, which a rule on
+  the hosts' addresses does not catch. Bind each program to one address,
+  on the network the table names.
+
+How to confirm: step 7 below. From a host, a refused port times out, and
+the table's counter shows the drops.
+
+What dnv does alone: it sets no firewall rule and checks no address. A
+node create is refused when the gateway cannot reach the agent. While a
+table drops the gateway's packets, `dnvctl dn create` and `dnvctl cn
+create` fail after about 10 seconds with error code DEADLINE_EXCEEDED:
+`dnvctl` waits as long as its `--timeout`, 10 seconds at the default,
+and that wait ends before the gateway's own. When the agent's machine
+refuses the connection, or with a `--timeout` above 10, they fail with
+error code ABORTED and "get dn size from" or "get cn size from" in the
+text. The gateway's call of an agent waits up to 10 seconds. A controller
+node's connection to a leg's address waits 1.5 seconds, and then that try
+of the leg counts as failed; the leg is tried again at a later check
+round.
+
+Safe steps, as root on every machine that runs a dnv program or etcd:
+
+1. Give each listener one address on its network, from the table: the
+   gateway's `--grpc-address`, each agent's `--grpc-address`, `--tr-addr`
+   and `--tr-svc-id`, the cdc's `--tr-addr` and `--tr-svc-id`, and
+   etcd's client and peer addresses.
+2. Copy `deploy/nftables/dnv-filter.nft`, the example firewall table, and
+   put the hosts' addresses in its sets `hosts4` and `hosts6`. List them
+   one by one, or a range that only hosts use. A range that also holds an
+   address from which another dnv machine or an etcd server connects, as
+   the one subnet of a network that hosts and dnv share does, drops that
+   machine's calls too. The rule by address refuses only the machines the
+   sets name, so a machine left out of them passes it. Add each new host
+   to them. On Kubernetes, where a pod's connection to another machine
+   keeps its pod address, add the pod network's range too, but not on the
+   machine that runs the gateway: the CSI controller plugin calls the
+   gateway from its pod, so there the range drops its calls, and the
+   network policy alone keeps the tenants' pods off that machine (see the
+   part on Kubernetes below). Where a program listens on IPv6, add each
+   host's IPv6 addresses, its link-local one, which starts with fe80,
+   among them.
+3. Put in the set `refused` this machine's ports that hosts must not
+   reach: on a disk node, each dn agent's control port and NVMe/TCP port;
+   on a controller node, the cn agent's control port; on a control-plane
+   server, the gateway's port and etcd's client and peer ports. Never put
+   a controller node's NVMe/TCP port or the cdc's port there.
+4. On a machine on two networks, such as a controller node or a
+   control-plane server with one interface on the host network, also take
+   the `#` away from the lines at the end of the file, with the names of
+   the two interfaces. Linux takes a packet sent to any of its addresses
+   on any of its interfaces, so these lines refuse the same ports to every
+   packet that comes in on the host network's interface, and forward
+   nothing from the host network to the back network. A machine that must
+   reach those ports, such as one that calls the gateway, then reaches
+   them over the back network.
+5. Start a timer that takes the table away again, so that a mistake that
+   cuts you off ends by itself:
+   `systemd-run --collect --unit=dnv-filter-undo --on-active=30min /usr/sbin/nft delete table inet dnv_filter`.
+   With `--collect`, systemd forgets the timer and the service it starts
+   once they have run, even when the delete failed, so this step can be
+   run again later.
+6. Load the table: `nft -f dnv-filter.nft`. A second load replaces it, and
+   no other table changes. Never run `nft flush ruleset`: it also removes
+   the tables of other programs, such as Kubernetes and docker.
+7. From a host, try a refused port where something listens:
+   `timeout 3 bash -c '</dev/tcp/<address>/<port>'; echo $?` prints 124,
+   since the table drops the packets, and the same try from a machine of
+   the back network prints 0. From a host, the same try of the cdc's port
+   prints 0, and so does that of a controller node's NVMe/TCP port once a
+   subsystem of a pool with a cntlr there exists: the port listens only
+   while a subsystem or a transfer uses it. `nft list table inet
+   dnv_filter` shows the counter of the drops.
+8. Stop the timer once the cluster works: `systemctl stop
+   dnv-filter-undo.timer`. The table does not survive a reboot. To load it
+   at boot, run `nft -f` on the file from a unit of your own, before the
+   dnv programs start. Do not use the nftables package's own unit on a
+   machine where Kubernetes or docker keep tables: on Ubuntu its stop
+   empties the whole rule set, and so does the file its start and its
+   reload load, as the package ships it.
+
+On Kubernetes, the hosts are the Kubernetes nodes that run the tenants'
+pods. The CSI node plugin runs on each of them, on the machine's own
+network, and reaches the cdc and the controller nodes as any host does. On
+k3s with its default network software, flannel, as in the lab, a pod's
+connection to another machine leaves its node with the node's own address,
+so a firewall on a dnv machine cannot tell a tenant's pod from the driver:
+keep the tenants' pods off dnv with the example network policy, a
+Kubernetes record that limits where the pods of one Kubernetes namespace
+may connect ([Keep other pods off
+dnv](tutorial_csi.md#keep-other-pods-off-dnv)). The CSI controller plugin
+calls the gateway from the Kubernetes node its pod runs on, so the
+gateway's port must be open to every node that may run one of its two
+copies. Run those copies only on machines where no tenant has root. Give
+each of those machines an address on the control network, and let it
+reach the gateway there, as the machine that runs `dnvctl` does: on a
+control-plane server on two networks, the lines of step 4 drop a call to
+the gateway that comes in on the host network's interface. A call from a
+copy on another machine then comes from that machine's address on the
+control network, so keep that address out of the sets `hosts4` and
+`hosts6`, even on a machine that is also a host. Where a pod's connection
+to another machine keeps its pod address, the call comes from the copy's
+pod address instead: that is why step 2 keeps the pod network's range out
+of the sets on the gateway's machine. To keep the copies on those
+machines, give two or more of them a label, a key and a value that
+Kubernetes keeps on a node: `kubectl label node <node> <key>=<value>`.
+Then add a `nodeSelector`, the field of a pod's settings that names the
+labels a node must carry to run the pod, with that key and value to
+`deploy/controller.yaml`, under `spec.template.spec`.
+
+Steps that can lose data: a rule that refuses a path the table needs
+makes the fault of a cut network, and the table drops packets, so such a
+mistake shows as a stall, not as an error. A controller node cut from the
+control plane has its primaries failed over, and a host still on the old
+path can lose a write it was told was done, in the cases the scope page
+lists. A controller node cut from a disk node has md fail its legs there,
+and leg repair moves them after the pool's `leg_unhealthy`, 1200 seconds
+at the default ([the scope page](scope.md#6-the-system-comes-back-alone)).
+So start the timer of step 5 first, and check within its time.
+
+When to stop: after a load, a host's IO stalls, a node create fails as
+above, or `dnvctl cluster get-status` lists something new ([Read what is
+wrong](#read-what-is-wrong)). Delete the table at once, `nft delete table
+inet dnv_filter`, and stop its timer, `systemctl stop
+dnv-filter-undo.timer`. Check the sets against the list of who connects
+to whom above, and on a machine on two networks check the two interface
+names of step 4 against `ip address`, then start again at step 5.
+
+Tested: the firewall run in the lab on 2026-11-22. This file, with the
+lab's addresses and ports in its sets, was loaded on the control-plane
+guest and on the seven disk node and controller node guests, each after
+its undo timer, and no other table changed. With a listener on each, the
+gateway's port, etcd's client port, a cn agent's control port, a dn
+agent's control port and a dn agent's NVMe/TCP port timed out from a host
+and answered from a machine outside the hosts' set, and the cdc's port and
+a controller node's NVMe/TCP port answered from the host. The e2e suite
+at one slice then passed under the tables, on its second run: the first
+stopped in its react case on a host's read that did not end while the
+machine that runs the lab ran out of memory, with no packet dropped. Each
+case of the Kubernetes suite but policy passed too, each run alone, with
+the gateway's port left open to the hosts, where one of the controller
+plugin's two copies always runs in the lab; its machine case makes the
+copy on a host the one that acts. After each passing run every table
+stood, and its counter showed no dropped packet: neither suite needs a
+refused port. In the passing run the e2e suite reset three node guests
+on purpose, one of them twice, and each reset took the table away, as
+any reboot does; a loop loaded it again within a minute of the guest's
+return, and that table counted drops only from its new load. The sets
+held the hosts one by one, their link-local IPv6 addresses among them.
+The `--collect` of step 5 was checked outside the lab with systemd 255,
+the version of Ubuntu 24.04, on a user's own units
+(`systemd-run --user`): after a failed delete, a new timer of the same
+name starts. The lab run ran `systemctl reset-failed` on the timer's
+units before each start instead. The policy case was not run under the
+tables: it needs the agents' ports open from a pod on a host as its own
+control. Not tested: the lines for a machine on two networks and a
+route through a controller node, as every lab guest has one interface on
+one network; a refusal over IPv6, which no suite uses; a pod network
+whose connections to other machines keep their pod address, with its
+range in the sets, as the lab runs flannel alone; the load at boot; and
+the node selector of the controller plugin, which the lab cannot run, as
+its three Kubernetes nodes are the control-plane guest and the two
+hosts.
+
 ## The cluster's capacity
 
 `dnvctl cluster get-capacity` says what pools of one shape can still be

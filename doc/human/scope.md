@@ -108,16 +108,26 @@ md never trusts an old superblock.
 **What the promise does not cover.**
 
 - **The network and root are trusted.** dnv checks no user. A host is
-  known by its NQN alone, and a host can claim any NQN. All traffic is
-  plain text. Root on a node, and anyone on the storage network, can read
-  the old bytes of a recycled extent from a raw disk or from a leg. Anyone
-  who reaches an agent's port can send it a desired state. dnv's programs
-  log in to etcd with no password and no certificate, so etcd must accept
-  such clients and stay on the trusted network. Deploy dnv on an isolated
-  network you trust. State: accepted. Procedure to write: the
-  network section of [the operations doc](operations.md), the document of
-  procedures an operator follows by hand, with a table of who connects to whom and a firewall
-  example.
+  known by its NQN alone, and a host can claim any NQN. So the promise
+  needs hosts on which no tenant has root: root on a host can claim the
+  NQN of another host and read and write that host's volumes. All traffic
+  is plain text. Root on a node, and anyone who reaches a disk node's
+  NVMe/TCP port, can read the old bytes of a recycled extent from a raw
+  disk or from a leg. Anyone who reaches an agent's port can send it a
+  desired state. dnv's programs log in to etcd with no password and no
+  certificate, so etcd must accept such clients and stay on the trusted
+  network. Deploy dnv on an isolated network you trust, where hosts reach
+  only the controller nodes' NVMe/TCP ports and the cdc. State: accepted.
+  Procedure written: [the operations doc](operations.md#the-networks),
+  the document of procedures an operator follows by hand, says who
+  connects to whom and gives a firewall example,
+  `deploy/nftables/dnv-filter.nft`. The e2e suite at one slice and the
+  Kubernetes suite's cases but policy passed in the lab on 2026-11-22 with
+  the example loaded on every node and on the control plane, and the
+  example's drop counters, read after each run, showed no dropped packet.
+  For the Kubernetes suite the gateway's port was left open to the hosts,
+  since one copy of the controller plugin, the part of the Kubernetes
+  driver that calls the gateway, always runs on a host in the lab.
 - **In Kubernetes every pod reaches dnv's ports.** Every pod reaches the
   gateway, the agents, etcd, the cdc and the NVMe/TCP ports through its
   machine's network. Only the operator's firewall rule blocks it, or a network

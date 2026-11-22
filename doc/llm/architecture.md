@@ -4,7 +4,7 @@ This document owns the design of dnv as a whole: the system overview, the
 object model, the data-plane device stacks, naming, the etcd data model,
 allocation, common validation, the `service Gateway` API contract, the
 agent contract both roles share, the worker contract, the procedures that
-span components, the recorded design decisions [D1] to [D18] and the
+span components, the recorded design decisions [D1] to [D19] and the
 known limits. It leans on the component documents for how
 each component carries its part out — `gateway.md` for the gateway,
 `dnv-worker.md` for the workers with `model` and `etcdutil`, `dnagent.md`
@@ -555,8 +555,9 @@ Per DN, once (created by the dn agent at the first `SyncupDn`):
    CM2, SH6). Agents that keep the default id co-own the default port
    instead, which is what lets a dn and a cn agent on one node share one
    port: `EnsurePort` is probe-first and writes only what differs
-   (`dnagent.md` SH19). Sharing a kernel also carries one placement rule —
-   the `SideToCnNqn` note under **Per side** below.
+   (`dnagent.md` SH19). On a node that hosts reach, the two take ports of
+   their own instead ([D19]). Sharing a kernel also carries one placement
+   rule — the `SideToCnNqn` note under **Per side** below.
 
 Per **side** (one per hosted leg replica):
 
@@ -716,7 +717,8 @@ Per CN, once (created by the cn agent at the first `SyncupCn`):
    a disk node the port is one per **agent**, at the configfs id
    `NvmetPortId` unless `--nvmet-port-id` says otherwise
    (`dnagent.md` CM2); a cn agent that keeps the default co-owns the
-   default port with a dn agent on the same node. Unlike the dn case,
+   default port with a dn agent on the same node, which a node that hosts
+   reach does not do ([D19]). Unlike the dn case,
    distinct port ids do **not** make two cn agents on one kernel safe, so
    run at most one: the host-facing subsystem NQN is the one the user
    passed to `CreateSubsystem` and every cntlr of that SP exports it
@@ -8117,7 +8119,8 @@ node's reads turns them on in the running process, with no restart.
   a removed host's nvmet connection (Primary cntlr, step 6; `cnagent.md`
   CN-CM1, CN-CM2). A node may run a dn agent and a cn agent side by
   side: the pair co-owns one nvmet port at the default port id, with
-  identical transport flags, and both use the default local-store prefix,
+  identical transport flags, unless hosts reach the node, where each takes
+  a port of its own ([D19]), and both use the default local-store prefix,
   since the two roles' store kinds are disjoint
   (Disk node; Controller node, common; `dnagent.md` CM2). Several agents on
   one kernel need more than distinct port ids (`dnagent.md` CM2), and two
@@ -8890,6 +8893,60 @@ document and the component documents cite it by its id.
   it. A health write still bumps no revision (Revision keys and the sync
   fan-out): dnv-cdc watches the `CdcEntry` keys themselves, and no agent's
   desired state moves.
+* **[D19] Hosts reach only the controller nodes' NVMe/TCP ports and the
+  cdc; every other port of dnv sits on a back network.** The host network
+  carries what a host uses: its discovery connections to the cdc and its
+  paths to the controller nodes' nvmet ports. A controller node's one
+  nvmet port also carries its transfers (Controller node, common), so the
+  primary of a cloning pool reaches a transfer's controller node over the
+  host network, and any other clone source where that source sits
+  (Clones). The back network
+  carries the rest, in two parts a deployment may split or join: the leg
+  network, where every cntlr, primary and standby, connects its legs on
+  the disk nodes' nvmet ports (Primary cntlr, Standby cntlr) and a
+  migration destination connects its source (Migration), and the control
+  network, where `dnvctl` and the CSI controller plugin dial the gateway,
+  the gateway and the workers dial the agents' gRPC endpoints, and the
+  gateway, the workers and the cdc dial etcd. The reason: nothing in dnv
+  but nvmet's allow-lists checks a caller. The gateway, the agents' gRPC
+  servers and etcd take any client (Known limits), and a side subsystem
+  admits a `CnHostNqn` that anyone who learns it can claim (NQNs), so the
+  network alone keeps a host, and a tenant with root on one, from
+  rewriting desired state or reading and writing raw legs; the host
+  network is the one a tenant's machine sits on, and it needs no more
+  than a host uses.
+
+  The consequences. Every address a peer dials is either a record written
+  at create (`DnConf.nvme_tr_conf`, copied into each `Side.nvme_tr_conf`;
+  `CnConf.nvme_tr_conf`, copied into each `Cntlr.nvme_tr_conf` and the
+  discovery records; a node's `addr_port`), which no call changes, or a
+  flag of the dialer (`--gateway-address`, `--etcd-endpoints`,
+  `--cdc-addresses`), or, for a host's cdc, the host's own settings; a
+  clone's `src_tr_conf_list` is the one address a call changes (Clones).
+  No dialer binds a source address or an interface (`NvmeHost.Connect`,
+  the node plugin's connects, the gRPC dials), so on a machine on two
+  networks the routing table picks the network, and since Linux takes a
+  packet for any local address on any interface, a listener bound to a
+  back address answers a packet that arrives on the host interface: such
+  a machine filters its input by interface. A control-plane server that
+  runs the cdc beside the gateway or etcd sits on both networks
+  (`cdc.md`, `cmd/dnv-cdc`). A node that hosts reach and that runs a dn
+  and a cn agent gives each its own nvmet port, a distinct
+  `--nvmet-port-id` and transport address (`dnagent.md` CM2), since the
+  default port they would co-own (Disk node) exports the sides on the
+  address hosts reach. The CSI controller plugin's machine is on the
+  control network, since it dials the gateway (`csi.md` CSI7). In
+  Kubernetes the hosts are nodes, and the example network policy is what
+  keeps a tenant's pod off dnv (`csi.md` CSI20): where the cluster's
+  network software masquerades a pod's connection to another machine with
+  its node's address, as k3s's flannel does, a firewall cannot tell a
+  tenant's pod from the driver's, and where it keeps the pod's address, a
+  rule on the gateway's machine that refuses the pod network refuses the
+  controller plugin too, whose pod is on that network
+  (`deploy/controller.yaml`). The rule is the deployment's: no
+  dnv program sets a firewall rule or checks an address.
+  `deploy/nftables/dnv-filter.nft` is the example table, and the
+  procedure is the operations doc's (`operations.md`, The networks).
 
 ## Known limits
 
@@ -9205,7 +9262,7 @@ document and only pointed to here.
   authentication and no TLS; the layer above authenticates its users
   (System overview). The [D15] guarantee is that a host never reads,
   through a pool's thin devices, bytes another pool wrote; it does not
-  defend against an attacker on the storage network, nor against root on
+  defend against an attacker on the back network ([D19]), nor against root on
   a node, which can read the old bytes of a recycled extent from the raw
   leg or disk. Deploy on an isolated, trusted fabric. The agents' gRPC
   ports are open the same way: whoever reaches one can send a syncup the
@@ -9221,18 +9278,21 @@ document and only pointed to here.
   cannot make it create a directory or file at a path of its choosing; in
   nvmet's configfs tree a well-formed NQN of its choosing is still built,
   and the agent still creates its own files and devices at the paths dnv
-  names (the local store, its dm and md devices). Hosts need only
-  the NVMe/TCP ports and the cdc; a deployment limits who reaches the
-  gateway, the agents and etcd by its firewall alone. Root on a host can
-  claim any host NQN, so the allow-lists bind no one who holds a host.
+  names (the local store, its dm and md devices). Hosts must reach the
+  controller nodes' NVMe/TCP ports and the cdc, and need nothing else; the
+  disk nodes' NVMe/TCP ports, the agents' gRPC ports, the gateway and etcd
+  belong on a back network that hosts cannot route to, and a deployment
+  keeps hosts off them by its network and its firewall alone ([D19]). Root
+  on a host can claim any host NQN, so the allow-lists bind no one who
+  holds a host, and the promise needs hosts on which no tenant has root.
 * **In a Kubernetes cluster every pod reaches dnv's ports unless the
   operator blocks it** (`csi.md`, Deployment): the trust in the network
   above is then trust in every pod of the cluster. The example network
   policy keeps the pods of each namespace that applies it off every address
   of the dnv machines but the API server's port where a dnv machine runs
   it, where the cluster's network software enforces egress policies
-  (`csi.md` CSI20); a namespace without it, or a pod on the host network,
-  still reaches them.
+  (`csi.md` CSI20); a namespace without it, or a pod on its node's own
+  network, still reaches them.
 * **A pool commit in a migration gap waits for the gap to end.** A migration
   gap is the time in which the primary has no usable path to a migrating
   leg: from src step 1, which moves the source's per-CN namespaces to

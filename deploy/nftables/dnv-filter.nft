@@ -1,0 +1,86 @@
+#!/usr/sbin/nft -f
+# An example firewall table for one machine that runs a dnv program, for
+# nftables, the Linux firewall: it keeps the hosts off the machine's ports
+# on the back network. A host needs only the controller nodes' NVMe/TCP
+# ports and the cdc's port. Every other port of dnv, a disk node's agent and
+# NVMe/TCP ports, a controller node's agent port, the gateway's port and
+# etcd's ports, checks no caller, or none beyond an NQN anyone can claim, so
+# no host may reach it (the operations doc, The networks;
+# architecture.md [D19]).
+#
+# The addresses and ports below are placeholders: no dnv program but the
+# cdc has a default port, so put in the ones your flags name. Load the file
+# as root with `nft -f dnv-filter.nft`: it replaces this table alone, in one
+# step, and changes no other table. Remove it with
+# `nft delete table inet dnv_filter`. Never flush the whole rule set, as
+# other programs keep tables of their own, Kubernetes and docker among
+# them. The rule drops a host's packet, so a refused connect waits until it
+# times out; the counter shows each one: `nft list table inet dnv_filter`.
+
+table inet dnv_filter
+delete table inet dnv_filter
+
+table inet dnv_filter {
+	# The hosts: every machine on the host network that runs no dnv program,
+	# a Kubernetes node that runs tenants' pods among them. List them one by
+	# one, or a range that only hosts use. A range that also holds an address
+	# another dnv machine or etcd server connects from, as the one subnet of
+	# a network that hosts and dnv share does, drops that machine's calls
+	# too. The rules by address below refuse only the machines these sets
+	# name, so a machine left out of them passes those rules: add each new
+	# host; on Kubernetes, where a pod's connection to another machine keeps
+	# its pod address, the pod network's range, but not on the machine that
+	# runs the gateway, since the CSI controller plugin calls the gateway
+	# from its pod and the range would drop those calls; and, where a program
+	# listens on IPv6, each host's IPv6 addresses, its link-local one, which
+	# starts with fe80, among them.
+	set hosts4 {
+		type ipv4_addr
+		flags interval
+		elements = { 198.51.100.11, 198.51.100.12 }
+	}
+	set hosts6 {
+		type ipv6_addr
+		flags interval
+		elements = { 2001:db8:100::11, 2001:db8:100::12 }
+	}
+
+	# The ports of this machine that hosts must not reach. Keep the lines of
+	# the roles this machine runs, with your own ports, and delete the rest.
+	# The ports here are those of the tutorial "dnv on one machine".
+	set refused {
+		type inet_service
+		flags interval
+		elements = {
+			29900-29903,	# disk node: each dn agent's --grpc-address port
+			4301-4304,	# disk node: each dn agent's --tr-svc-id, its NVMe/TCP port
+			29950,		# controller node: the cn agent's --grpc-address port
+			29527,		# control plane: the gateway's --grpc-address port
+			2379-2380,	# control plane: etcd's client and peer ports
+		}
+	}
+
+	chain input {
+		type filter hook input priority -10; policy accept;
+		ip saddr @hosts4 tcp dport @refused counter drop
+		ip6 saddr @hosts6 tcp dport @refused counter drop
+	}
+
+	# A machine on two networks, such as a controller node or a control
+	# plane server with one interface on the host network: Linux takes a
+	# packet sent to any of its addresses on any of its interfaces, so also
+	# refuse these ports to every packet that comes in on the host network's
+	# interface, and forward nothing from that network to the back network.
+	# A machine that must reach these ports, such as one that runs the CSI
+	# controller plugin, then reaches them over the back network's interface.
+	# Put in the two interface names and remove the "#" of these lines
+	# before the first load.
+	#chain input_by_interface {
+	#	type filter hook input priority -10; policy accept;
+	#	iifname "<host network interface>" tcp dport @refused counter drop
+	#}
+	#chain forward {
+	#	type filter hook forward priority -10; policy accept;
+	#	iifname "<host network interface>" oifname "<back network interface>" counter drop
+	#}
+}

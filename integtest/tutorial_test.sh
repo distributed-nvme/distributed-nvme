@@ -70,7 +70,7 @@ CSI_PKGS=(docker.io)
 UDEV_RULES=(58-dnv-dm.rules 63-dnv-md.rules 63-zz-dnv-md-array.rules)
 # Every TCP port the all-in-one tutorial listens on, and the one the CSI
 # tutorial adds on the server node: 9809, the health port of the CSI driver's
-# node plugin, which runs on the host's network (deploy/node.yaml).
+# node plugin, which runs on its node's own network (deploy/node.yaml).
 PORTS=(2379 2380 29527 8009 29900 29901 29902 29903 29950 4301 4302 4303 4304 4420)
 CSI_PORTS=(9809)
 # The taint by which the CSI part keeps the lab's other k3s nodes free of the

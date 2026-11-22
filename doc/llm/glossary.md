@@ -278,6 +278,8 @@ The vocabulary of dnv in alphabetical order, one entry per term, with synonyms s
 
 **host** — The NVMe-oF initiator that reads a pool's namespaces: a kernel nvme host that discovers them through the cdc, connects to the cntlrs the discovery records list through nvme-stas or an equivalent that follows the discovery log, and aggregates their exports of a subsystem into one multipath device, following ANA to the primary (see `architecture.md`, Host view).
 
+**host network, back network, leg network, control network** — The networks of a deployment (`architecture.md` [D19]): the host network carries what a host uses, its discovery connections to the cdc and its paths to the controller nodes' nvmet ports, over which a clone also reads a transfer; the back network carries every other port of dnv, as the leg network, the cntlrs' connects of their legs and a migration destination's connect of its source, and the control network, the gRPC calls of `dnvctl`, the CSI controller plugin, the gateway and the workers, and etcd. Kubernetes' host network, a pod's use of its node's own network, is another thing, which the LLM docs, the deploy files and the code comments call "its node's own network", and the human docs "the machine's own network" (`csi.md` CSI18).
+
 **host NQN** — The NQN an nvme host connects under and an allowed-hosts list names, from which its host id is derived (`NvmeHostId`): an agent connects as its controller node's `CnHostNqn` for legs and clone sources, or as `DnHostNqn` for a migration destination, and a side's export to a controller node admits that node's `CnHostNqn` alone.
 
 **host state** — The cdc's record of one host on one instance: created at the host NQN's first live connection with a fresh GENCTR and its view rendered, shared by all its connections and dropped at its last disconnect, so GENCTR restarts when it is recreated (see `cdc.md` DS7).
@@ -472,7 +474,7 @@ The vocabulary of dnv in alphabetical order, one entry per term, with synonyms s
 
 **pointer list** — The ids of the sides or cntlrs a node hosts, kept in its record (`side_ptr_list`, `cntlr_ptr_list`) and sent in its syncup request (`side_pointer_list`, `cntlr_pointer_list`); the list is authoritative, so an object it omits is removed by the node sweep.
 
-**port** — The nvmet port an agent converges at its port id (`--nvmet-port-id`) as part of its node's base state, with the fixed ANA groups; every export of the node is linked to it. A dn agent and a cn agent side by side on one node co-own one port at the default port id with identical transport values (see `dnagent.md` CM2, SH19).
+**port** — The nvmet port an agent converges at its port id (`--nvmet-port-id`) as part of its node's base state, with the fixed ANA groups; every export of the node is linked to it. A dn agent and a cn agent side by side on one node co-own one port at the default port id with identical transport values (see `dnagent.md` CM2, SH19), except on a node that hosts reach, where each takes its own (`architecture.md` [D19]).
 
 **positive control** — A suite's proof that the read behind a negative assertion can see what it asserts absent, such as the same read seeing a path live before it counts the path gone, so a read that failed cannot pass the negative.
 

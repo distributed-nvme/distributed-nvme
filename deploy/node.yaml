@@ -1,5 +1,5 @@
 # The node plugin (csi.md, Deployment): one pod per node, privileged and on
-# the host's network, since the kernel keeps an NVMe/TCP connection in the
+# its node's own network, since the kernel keeps an NVMe/TCP connection in the
 # network namespace of the process that made it. The kubelet's directories
 # are mounted both ways so the mounts the plugin makes reach the host and the
 # pods; the device and sysfs trees give it the volumes' devices and the

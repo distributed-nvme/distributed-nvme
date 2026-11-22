@@ -634,7 +634,7 @@ firewall blocks it (CSI20), and dnv authenticates no user and no host beyond
 its NQN (`architecture.md`, Known limits), so a gateway bound to every address
 of its machine is open to every pod and to the machine's network.
 
-CSI18. **The node pods run privileged on the host's network.** The kernel
+CSI18. **The node pods run privileged on their node's own network.** The kernel
 keeps an NVMe/TCP connection in the network namespace of the process that made
 it, so a connect from a pod's own namespace would die with the pod. The
 kubelet's pod and plugin directories are mounted both ways, so the mounts the
@@ -717,7 +717,7 @@ of a dnv machine too: the API server rule is the one way through, and it names
 the API server's endpoint, which the policy sees after the cluster translates
 the service address. Where a dnv machine is also a Kubernetes node, the
 namespace's pods lose that node's own services with it: its kubelet, which a
-metrics service in `kube-system` reads, any service on the node's host
+metrics service in `kube-system` reads, any service on the node's own
 network, and a node-local name cache, whose addresses sit on the node and so
 stand in the except list. So `kube-system` takes no copy there, and a
 namespace whose pods need such a service adds a rule for its address and port,
@@ -725,10 +725,10 @@ as the API server rule does. The cluster's name service otherwise needs no
 rule: it runs in pods, whose addresses the first rule allows. The driver's
 namespace takes no copy: its pods must reach dnv, the controller copies the
 gateway and the node pods the cdcs and the cntlrs, and the node pods run on
-the host network, which no policy holds. On k3s, whose embedded controller
-enforces egress policies, the policy holds for a new pod within about a second
-of its start, so its first connects can pass; network software that enforces
-no egress policy, flannel alone, gives it no effect.
+their node's own network, which no policy holds. On k3s, whose embedded
+controller enforces egress policies, the policy holds for a new pod within
+about a second of its start, so its first connects can pass; network software
+that enforces no egress policy, flannel alone, gives it no effect.
 
 ## The suite's dnv stack
 

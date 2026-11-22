@@ -10,7 +10,8 @@
 #
 # The driver's own namespace takes none: its pods must reach dnv, the
 # controller copies the gateway and the node pods the cdcs and the cntlrs,
-# and the node pods run on the host network, which no network policy holds.
+# and the node pods run on their node's own network, which no network policy
+# holds.
 # A policy binds only where the cluster's network software enforces egress
 # policies: k3s's embedded policy controller does, and flannel alone does
 # not.
@@ -32,7 +33,7 @@
 # leave it out where no dnv machine runs it. Where a dnv machine is also a
 # Kubernetes node, the pods lose that node's own services as well: its
 # kubelet, which a metrics service in kube-system reads, any service on the
-# node's host network, and a node-local name cache, whose addresses sit on
+# node's own network, and a node-local name cache, whose addresses sit on
 # the node and so stand in rule 1's list. So kube-system takes no copy
 # there, and a namespace whose pods need such a service gets a rule like
 # rule 2 for its address and port. Otherwise the cluster's name service
