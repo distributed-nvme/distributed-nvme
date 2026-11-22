@@ -556,7 +556,7 @@ The vocabulary of dnv in alphabetical order, one entry per term, with synonyms s
 
 **rootCtx** — The agent's lifetime context (`rootCtx`), which `Serve` hands the role server before the gRPC listener opens, that background tasks run on, so the end of a request never cancels a zeroing goroutine, a fence timer, a leg prober, a path watcher, a background read or a background disconnect. Process exit cancels it, stops the dn agent's armed fence timers and waits only for the dn agent's zeroing workers and background reads (see `dnagent.md` SH27, SH29).
 
-**rotation** — The operator's replacement of a cntlr to give it a free cntlid slot or another controller node: disable it, delete it, then create a cntlr with a free slot (`UpdateCntlrEnabled`, `DeleteCntlr`, `CreateCntlr`).
+**rotation** — The operator's replacement of a cntlr to give it a free cntlid slot or another controller node: create a cntlr with a free slot, disable the old one once the new one is built, and delete it once another cntlr holds the primary role (`CreateCntlr`, `UpdateCntlrEnabled`, `DeleteCntlr`); an SP at `MaxCntlrCntPerSp` cntlrs deletes first (`architecture.md`, Transfer + clone = cross-SP live migration).
 
 **row** — One line of an agent's report about one device, export or connection, or about the agent's local store (see store row), with a status and a text: one `ResInfo` of an info (see ResInfo).
 

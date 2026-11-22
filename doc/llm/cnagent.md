@@ -6885,6 +6885,8 @@ stores instead is CN23's.
   assembly passing force-no-bbl at the level that stops the group arrays, then
   its stop, drops every member's list; a region md never copied onto a member
   added under the list is then read as good whatever that member holds there.
+  The operator's choices from that state, and what each costs, are
+  `operations.md`, A forced start whose stop failed.
 * After a forced start, a group whose `leg_list` legs that decide its
   assembly carry two identities stays down at its next assembly (CN12, case
   2): a leg the forced start left as it was, the bad leg of a repair since

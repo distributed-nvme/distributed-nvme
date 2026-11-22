@@ -176,24 +176,43 @@ always sends a piece's position.
   removed. The regions the copy
   had not reached read old bytes of the new side's extents, possibly
   another pool's, with no error. State: accepted. The operator asks for
-  it with force. Procedure to write, one line in the operations doc: force
-  is right only when an agent cannot answer the proof.
+  it with force. Procedure written,
+  [the operations doc](operations.md#ending-a-migration-with-force): force
+  is right when the new side's agent alone cannot answer the proof of a
+  copy seen whole, and, in a RAID1 group, to end the migration toward a
+  disk node that is gone for good, so that a repair replaces the leg; not
+  tested as a whole.
 - **A forced migration cancel after the cutover.** A cancel after the
   cutover is refused unless forced, as the new side may hold the only copy
   of the leg's new writes. With force the old side serves its content as
   of the cutover: the leg loses every write since, and blocks first mapped
   since read old bytes of the old side's extents, possibly another pool's.
-  In a group of more than one leg the other legs hold those writes, and md
-  does not know this leg is behind, so reads can return its old bytes until
-  the leg is repaired. State: accepted. The operator asks for it with
-  force. Procedure to write: repair the leg right after a forced cancel.
+  In a group of more than one leg the other legs hold those writes, but md
+  does not know this leg is behind and counts it whole, so reads can
+  return its old bytes. No call makes md copy the leg again: a repair is
+  refused for a leg with no health epoch, and a member md failed in the
+  switch is added back from md's record of the regions written while it
+  was out, which holds none of these. State: fix later, a way to have md
+  copy the leg again after a forced cancel. Until then the operator asks
+  for it with force. A forced cancel loses nothing when nothing has
+  written to the pool since the cutover. After writes,
+  [the operations doc](operations.md#ending-a-migration-with-force) gives
+  its one safe use: in a RAID1 group, when the old side's disk node is
+  gone for good, so that a repair replaces the leg.
 - **A forced start from an older copy restores one group, not the pool.**
   A forced start is an operator's start of a group's RAID1 array from one
-  leg they name, when md will not start it by itself. Blocks rewritten
-  since the leg left read old bytes. In a data group, blocks first mapped
-  since then read what the leg holds there, possibly another pool's bytes.
-  No error is shown. A start from a half-copied leg that md marked in sync
-  does the same over the regions md never copied (section 5.2). State:
+  leg they name, when md will not start it by itself. In a data group,
+  blocks rewritten since the leg left read old bytes, and blocks first
+  mapped since then read what the leg holds there, possibly another pool's
+  bytes. No error is shown. In a slice's meta group, the thin pool's
+  records go back to that time over data groups that kept their newer
+  writes. A block first mapped since reads zeros. A block that a volume or
+  its snapshot rewrote since, while the two shared it, reads its older
+  bytes. A block freed and given out again since can read another
+  volume's bytes. None of these reads shows an error. A volume or a
+  snapshot made since is lost, which the primary reports as an error. A
+  start from a half-copied leg that md marked in sync serves, over the
+  regions md never copied, what that leg holds there (section 5.2). State:
   accepted. The operator asks for it. Procedure:
   [the forced-start guide](operations.md#the-forced-start-guide) says which
   leg to choose and what an older copy costs.
@@ -554,10 +573,13 @@ The entries:
   stops it at once, and starts it again with the list dropped. If that stop
   fails, the array runs with the list, and the legs added to it copy the
   list's regions as bad too. Hosts then get IO errors over those regions,
-  though the named leg holds their data. State: procedure to write; until
-  then [the forced-start guide](operations.md#the-forced-start-guide) says
-  to stop and ask for help. Forty such stops in the lab never failed. A
-  suite case makes one fail on purpose and tries four ways from it.
+  though the named leg holds their data. State: procedure written,
+  [A forced start whose stop failed](operations.md#a-forced-start-whose-stop-failed):
+  leave the group as it is, with IO errors over the listed regions alone,
+  or drop the lists by hand with mdadm at the cost it names. Fix later: a
+  call of the gateway that keeps or gives the mark. Forty such stops in the lab
+  never failed. A suite case makes one fail on purpose and tries four ways
+  from it.
   With the mark still standing, the pool turned down to the level that
   stops the arrays and back up: the forced start runs again and drops the
   list. But the worker clears the mark soon after such a start. With the
@@ -569,8 +591,8 @@ The entries:
   level that stops the arrays, mdadm can start the array with an option
   that drops every leg's list, then stop it. That drops the list too, but
   then the places md never copied onto a leg added under the list read as
-  good data, whatever that leg holds there. So the procedure needs a way
-  to keep or give the mark first.
+  good data, whatever that leg holds there. So a way back that loses
+  nothing needs a way to keep or give the mark first.
 - **A forced-start mark cleared during a change of the pool's owner.**
   Silent. A pool's owner is the worker that drives it. At an owner change
   the new owner sends a request that drops the mark. If the controller
@@ -725,7 +747,7 @@ Measured times are in [the introduction](introduction.md#status-and-limits).
 | A worker, the gateway or the cdc is down and comes back | Another worker, when one runs, takes the pools after a bounded window. The gateway has no state. Without the cdc, hosts keep their paths and get no path changes. | The worker's flags `--vote-interval`, 10 at the default, and `--vote-leave-grace-time`, 25: a dead worker counts as gone after twice the interval, and the change then holds for the leave grace time, about 45 seconds in all. | Nothing. A failover during a cdc outage leaves hosts on a withdrawn path (section 6.1). |
 | An agent restarts | The agent rebuilds its desired state from its local store, the files in which it keeps the desired state it last accepted. The kernel keeps the devices. As soon as the program runs again, the agent answers each check round with "starting", an answer that says it is still rebuilding, and while it does, for the start hold at most, the worker starts no failover, cntlr replacement or leg repair because of that node. A controller node agent that stays stopped for longer than one check interval can have its primaries failed over, as for a controller node that is down. | For a stopped agent, `primary_unhealthy` with two check rounds in a row: its rounds fail at once, so a stop a little longer than one `cntlr_interval`, 2 at the default, can already fail a primary over, and a failover comes about 4 to 8 seconds after the agent stops, at the defaults. For an agent that answers "starting", the start hold: the longest time the worker waits for an agent that is still rebuilding, 120 at the default, counted from its first start even when it stops and starts again while it rebuilds or just after, before a check round has judged it, a cluster setting fixed when the cluster is created (`--start-hold-seconds` of `dnvctl cluster create`). | For a planned restart, the steps in [the operations doc](operations.md#a-planned-restart-of-an-agent). A rebuild longer than the start hold, and a reboot that the worker first sees as an agent that answers "starting", are in section 6.1. |
 | A host reboots | Nothing on dnv's side. nvme-stas or the Kubernetes node plugin, the part of dnv's Kubernetes driver that runs on each Kubernetes node, connects the paths again. | None. | See the host actions in section 7. |
-| All disk nodes of a pool are down at once, as in a switch reload | md marks each array broken under IO. Hosts see IO errors. The broken array makes the primary unhealthy, so the worker fails it over at the primary threshold, even while the nodes are still down. Once the legs are back, the new primary assembles the arrays again. If a data group broke while its meta group still took writes, the thin pool comes back read-only and needs the repair by hand (section 6.1). A pool of one cntlr waits for a cntlr replacement at the cntlr threshold. | `primary_unhealthy` for the failover. `cntlr_unhealthy`, 600, for a replacement. | A forced start, when no failover comes. The blocks mapped since the last commit of a broken meta group are gone (accepted case 1). |
+| All disk nodes of a pool are down at once, as in a switch reload | md marks each array broken under IO. Hosts see IO errors. The broken array makes the primary unhealthy, so the worker fails it over at the primary threshold, even while the nodes are still down. Once the legs are back, the new primary assembles the arrays again. If a data group broke while its meta group still took writes, the thin pool comes back read-only and needs the repair by hand ([the operations doc](operations.md#repair-a-thin-pools-metadata)). A pool of one cntlr waits for a cntlr replacement at the cntlr threshold. | `primary_unhealthy` for the failover. `cntlr_unhealthy`, 600, for a replacement. | A forced start, when no failover comes. The blocks mapped since the last commit of a broken meta group are gone (accepted case 1). |
 
 ### 6.1 Cases where dnv does not come back alone today
 
@@ -778,19 +800,24 @@ Measured times are in [the introduction](introduction.md#status-and-limits).
   State: procedure written, [the forced-start guide](operations.md#the-forced-start-guide), "A group whose every
   leg was wiped". Not seen in the lab.
 - **A thin pool whose metadata needs a check, or with corrupt metadata, has
-  no repair path.** A failed commit leaves a slice's thin pool read-only,
-  with dm-thin's mark that its
-  metadata needs a check. The mark is kept in the pool's metadata, so the
-  pool opens read-only on every controller node. The primary reports the
+  no repair flow in dnv.** A failed commit leaves a slice's thin pool
+  read-only, with dm-thin's mark that its metadata needs a check. The mark
+  is kept in the pool's metadata, so the pool opens read-only on every
+  controller node. The primary reports the
   pool as an error, and the worker logs it and starts no failover, since a
   new primary would meet the same pool. A pool that dm-thin failed
   without that mark, or that is read-only because its metadata is full,
   is not this case: the first is failed over, since a new primary opens
   the pool from its last commit, and the second gets more metadata from
   the auto-grow. Corrupt thin pool metadata has no check and no repair
-  flow in dnv. State: procedure to write, the repair by hand onto a new
-  device copied back over the metadata's group, with the level steps, the
-  names of the devices involved, and the tools thin_check and thin_repair.
+  flow in dnv. State: procedure written,
+  [Repair a thin pool's metadata](operations.md#repair-a-thin-pools-metadata),
+  for metadata that thin_check passes, in a slice of one meta group: the
+  level steps, the names of the devices involved, thin_check and
+  thin_repair onto a new device, and its copy back over the meta group's
+  array. Fix later: a repair of metadata that thin_check finds damaged, or
+  that spans more than one meta group, since no way is tried yet; for
+  those the procedure says to stop.
   Seen in the lab: a pool with the mark opened read-only, a failed pool opened
   again as writable, and a full one became writable after its metadata grew. A
   suite case repairs by hand a pool whose metadata needs a check, one whose
@@ -1478,13 +1505,13 @@ known today" below gives the longer ones.
 | Create and delete a pool | `dnvctl sp create`, `dnvctl sp delete` | the tutorials | done |
 | Grow a slice | the worker grows it by itself; `dnvctl sp grow-slice` | the operations doc, A pool's space | procedure written |
 | See how full a pool is and how far its volumes overcommit it | `dnvctl sp inspect` | the operations doc, A pool's space | procedure written |
-| Change a pool's level | `dnvctl sp set-level` | none | procedure to write, with the thin pool repair |
-| Move a leg to another disk node | `dnvctl migr create`, `migr finish`, `migr cancel`; the worker reads and hands over the leg's list itself | none; the introduction explains the flow | procedure to write: the whole flow |
-| Repair a leg by hand | `dnvctl repair create`, `repair finish`, `repair cancel`, `repair abort`; the worker repairs by itself | none | procedure to write |
+| Change a pool's level | `dnvctl sp set-level` | the operations doc, [Change a pool's level](operations.md#change-a-pools-level), and [Repair a thin pool's metadata](operations.md#repair-a-thin-pools-metadata) | procedure written; the e2e suite steps the whole ladder down and back, and the cn suite repairs a thin pool's metadata at the agent level |
+| Move a leg to another disk node | `dnvctl migr create`, `migr finish`, `migr cancel`; the worker reads and hands over the leg's list itself | the operations doc, [Move a leg to another disk node](operations.md#move-a-leg-to-another-disk-node); the introduction explains the flow | procedure written; the e2e suite runs a migration to its finish and a cancel with force after a cutover; a forced end of a migration whose disk node is gone is not tested as a whole |
+| Repair a leg by hand | `dnvctl repair create`, `repair finish`, `repair cancel`, `repair abort`; the worker repairs by itself | the operations doc, [Repair a leg by hand](operations.md#repair-a-leg-by-hand) | procedure written; the e2e suite runs two repairs of an operator's on one group |
 | Force-start a group | `dnvctl group inspect` shows what the primary reads from each member, and with `--leg` says what a start from that leg would do or why it would refuse; `dnvctl group force-start`, `dnvctl group set-operator-in-charge` | [the forced-start guide](operations.md#the-forced-start-guide) | none |
-| Delete or keep a retired leg | `dnvctl retired-leg list`, `dnvctl retired-leg delete`, `dnvctl retired-leg keep`; a forced start keeps the group's retired legs by itself, and an operator's repair of a leg the primary keeps out for another identity keeps that leg once the repair finishes | [the forced-start guide](operations.md#the-forced-start-guide), "Keeping the old copies", for a forced start, and [a leg of another identity that the primary does not add](operations.md#a-leg-of-another-identity-that-the-primary-does-not-add) for that repair | procedure to write: when to keep a leg apart from these two cases |
-| Replace a cntlr by hand | `dnvctl cntlr set-enabled`, `dnvctl cntlr delete`, `dnvctl cntlr create` | none | procedure to write |
-| Change a pool's cntlid slots, the ranges of NVMe controller ids its exports use | `dnvctl sp set-cntlid-slots` | none | procedure to write, one line |
+| Delete or keep a retired leg | `dnvctl retired-leg list`, `dnvctl retired-leg delete`, `dnvctl retired-leg keep`; a forced start keeps the group's retired legs by itself, and an operator's repair of a leg the primary keeps out for another identity keeps that leg once the repair finishes | [the forced-start guide](operations.md#the-forced-start-guide), "Keeping the old copies", for a forced start, [a leg of another identity that the primary does not add](operations.md#a-leg-of-another-identity-that-the-primary-does-not-add) for that repair, and [Retired legs](operations.md#retired-legs) for the others | procedure written |
+| Replace a cntlr by hand | `dnvctl cntlr set-enabled`, `dnvctl cntlr delete`, `dnvctl cntlr create` | the operations doc, [Replace a cntlr by hand](operations.md#replace-a-cntlr-by-hand) | procedure written; the e2e suite makes, disables and deletes a cntlr, and disables a primary and enables it again, but runs no whole replacement |
+| Change a pool's cntlid slots, the ranges of NVMe controller ids its exports use | `dnvctl sp set-cntlid-slots` | the operations doc, [Change a pool's cntlid slots](operations.md#change-a-pools-cntlid-slots) | procedure written |
 | Change a pool's thresholds | none | — | not yet |
 
 ### Volumes
@@ -1667,7 +1694,9 @@ failover's among them.
   rule; the check does not read it. State: accepted.
 - **Retired legs keep their extents until deleted.** A group never back to
   whole keeps them for good. At the bound of two, an operator's repair
-  with a fresh leg is refused. State: procedure to write, one line.
+  with a fresh leg is refused. State: procedure written,
+  [Retired legs](operations.md#retired-legs): when to keep one, and how to
+  delete it.
 - **A forced clone delete returns before the teardown is done.** Success
   means the teardown started. The operator polls the clone and the pool.
   State: accepted, by the dnvctl design. Procedure to write, one line.
@@ -1764,7 +1793,9 @@ failover's among them.
   holds the leg's data, so the worker does neither and logs why. The group
   serves on its other legs until the destination comes back. The primary
   then puts the leg back into the array, and the copy goes on to its end.
-  Before that, an operator can end the migration. Where no other leg is in
+  Before that, an operator can end the migration with force, as
+  [the operations doc](operations.md#ending-a-migration-with-force) says.
+  Where no other leg is in
   sync, as in a pool without RAID, the primary does not cut the path,
   since the write would fail. The IO then waits until the disk node comes
   back. State: accepted; the group left one leg short after a cutover with
@@ -2145,7 +2176,9 @@ design:
   for every leg a repair adds, since the leg it replaces keeps its side
   for a time. A volume takes whole extents, one for its meta group and at
   least one for its first data group on every leg, however small the
-  volume. State: accepted, by design.
+  volume. State: accepted, by design. Procedure written,
+  [One pool for each volume](operations.md#one-pool-for-each-volume): what
+  a volume costs, and how to read what still fits.
 - **A RAID1 pool needs four disk nodes per slice at create, in at least
   two locations.** The create puts every leg of the pool on a disk node of
   its own, and each slice has a meta group and a data group of two legs
@@ -2167,8 +2200,10 @@ design:
   kernel's md speed settings bound the copies: the sysctls
   `dev.raid.speed_limit_min` and `dev.raid.speed_limit_max`, which an
   array's own `md/sync_speed_min` and `md/sync_speed_max` override until
-  the array stops, as read in the kernel's md source. State: accepted. Fix later, after the performance runs:
-  per-pool copy speed settings.
+  the array stops, as read in the kernel's md source. State: accepted;
+  [md's copy speed](operations.md#mds-copy-speed) says how to read and set
+  them. Fix later, after the performance runs: per-pool copy speed
+  settings.
 - **A host discard frees space only over whole aligned blocks on every
   slice.** A thin pool frees whole blocks only, and completes a shorter or
   misaligned discard with success. A cluster created with no stripe gets
@@ -2187,8 +2222,9 @@ design:
   512 KiB one none; with two and eight slices each discard freed exactly
   what this entry says; and with one slice, after a host removed 12 MiB of
   files from an ext4 file system on a volume, `fstrim` freed 13 MiB of the
-  pool's 1 MiB blocks. State: accepted.
-  Procedure to write, one line on the stripe setting.
+  pool's 1 MiB blocks. State: accepted. Procedure written,
+  [Stripes and discards](operations.md#stripes-and-discards): a pool whose
+  hosts count on discards takes a stripe equal to its block.
 - **A deleted volume's space can stay in use on the disks.** The delete
   of a volume frees its blocks in the thin pool alone, so the primary
   first discards the blocks the volume wrote, and the discard reaches the
@@ -2229,7 +2265,7 @@ design:
   creation.** State: accepted, by design.
 - **An md check counts mismatches on never-written blocks.** The count
   means nothing, and dnv does not read it. State: accepted. Procedure
-  to write, one line.
+  written, [The md check's mismatch count](operations.md#the-md-checks-mismatch-count).
 - **A retired leg taken back is copied whole unless the array stayed
   degraded.** State: accepted.
 - **Steady control-plane cost.** The reaction pass reads the whole pool

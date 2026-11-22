@@ -7243,7 +7243,8 @@ caught.
   logs `migration_copy_not_whole` on every pass and the group runs one leg
   short until both sides answer and the primary puts the leg back, the copy
   then going on to its end (`cnagent.md` CN12), or until an operator ends
-  the migration (`architecture.md`, Known limits). No reaction
+  the migration (`architecture.md`, Known limits; `operations.md`, Ending a
+  migration with force). No reaction
   replaces such a leg: each of its sides misses part of the leg's data. A
   destination whose child has not reported since that child started —
   after a worker restart, a handoff or the diff's restart of the child —

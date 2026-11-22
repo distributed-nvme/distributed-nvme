@@ -4289,11 +4289,22 @@ it away: the source then serves its content as of the cutover, so this
 leg loses every write since, and a block the pool first mapped after the
 destination began to serve reads the source's old extent bytes, possibly
 another pool's. In a group with more than one leg the other legs hold those
-writes, md does not know this leg is behind, and reads can return its old
-bytes; the operator repairs the leg (Repairs) before relying on its group. The gateway cannot tell whether the destination has served without
-a call to an agent, and the flag is in etcd and exact, so it refuses from
-the cutover on; `force` is the operator's way out, as for a destination
-that cannot be finished, and costs what this paragraph says. Action: the
+writes, but md does not know this leg is behind, and reads can return its
+old bytes; nothing copies the leg again, since the cancel marks nothing on
+it: a member md holds in sync stays so, one md failed in the switch is put
+back by a re-add that md resyncs from its write-intent bitmap (`cnagent.md`
+CN12), which marks what was written while it was out and none of what the
+destination took, and
+`CreateRepair` refuses a leg with no `err_epoch` (Repairs). The gateway
+cannot tell whether the destination has served without a call to an agent,
+and the flag is in etcd and exact, so it refuses from the cutover on;
+`force` is the operator's way out and costs what this paragraph says. A
+forced cancel with no write since the cutover loses nothing. After writes,
+its one safe end is in an md-raid1 group whose other leg md holds in sync,
+where the source side is gone for good: the leg then keeps no side that
+serves, md fails its member, and a repair replaces it with a fresh leg md
+copies whole (Repair), as a forced finish does where the destination is
+gone (`operations.md`, Ending a migration with force). Action: the
 mirror rollback: the STM removes the **destination** `Side` and the
 `Migration`, returns the destination DN's extents and the
 migration's metadata units, and bumps `SpRev` and the destination's
@@ -7286,10 +7297,20 @@ Setup for moving a subsystem and namespace from sp1 to sp2:
   cluster's cdc, or a connect by address.
 * The cntlrs of sp1 and sp2 must use disjoint `cntlid_slot`s: two SPs
   of `MaxCntlrCntPerSp` cntlrs each fill exactly the `CnCntlidSlotCnt`
-  slots (cntlid slots). If they do not, rotate a cntlr:
-  `UpdateCntlrEnabled` to disabled, `DeleteCntlr`, then `CreateCntlr` with
-  a free slot. Likewise the two SPs' cntlrs must not share CNs; rotate the
-  same way if they do.
+  slots (cntlid slots). If they do not, rotate a cntlr: `CreateCntlr`
+  first, with a slot of its SP's list that neither SP uses, which
+  `UpdateStoragePoolCntlidSlotList` adds to the list first when the list
+  holds none; then, once it is built, `UpdateCntlrEnabled` to disabled on
+  the old cntlr, and `DeleteCntlr` once another cntlr holds the primary
+  role, so that the SP keeps its cntlr count and a cntlr that can take the
+  role back until the new one serves (`operations.md`, Replace a cntlr by
+  hand). An SP below `MaxCntlrCntPerSp` cntlrs always finds such a slot,
+  as the two SPs' cntlrs then use fewer than `CnCntlidSlotCnt` slots. Only
+  an SP at `MaxCntlrCntPerSp` cntlrs, where `CreateCntlr` refuses one more,
+  deletes first; its new cntlr then takes a slot neither SP uses, the old
+  one's own when the two SPs' cntlrs filled every slot. Likewise the two
+  SPs' cntlrs must not share CNs; rotate the same way if they do, the new
+  cntlr's `cn_selector` black-listing the other SP's CNs.
 * Ensure `Namespace.suspended` false on sp1 and true on sp2 (create the
   sp2 namespace with `CreateNamespace` and `suspended` true, or
   `UpdateNamespaceSuspended` on an existing one).
@@ -9248,7 +9269,9 @@ document and only pointed to here.
   operator-intervention event (the pool's level raised to stop its thin
   pools, "thin_check", then "thin_repair" onto a new device copied back
   over the metadata's device, or the flag cleared when the check passes,
-  by hand). Tried in the lab on a pool of one meta group whose data group
+  by hand; the operator's steps, for metadata that "thin_check" passes in a
+  slice of one meta group, are `operations.md`, Repair a thin pool's
+  metadata). Tried in the lab on a pool of one meta group whose data group
   broke under a commit (`cnagent_integtest.md`, Cases, thinrepair): at the
   level that builds no thin pool the meta group's array holds the whole
   metadata, its superblock carrying the flag; "thin_check" passed with the
@@ -9907,7 +9930,14 @@ document and only pointed to here.
   bytes ([D15]): the copy below the pool no longer carries every block the
   pool has written. A meta group started from an older copy gives the
   other mix inside the pool, older mappings over data groups that kept
-  their newer writes. Neither reads as an error (Repair, Forced start).
+  their newer writes: a block first mapped since reads zeros, as an
+  unmapped block of a thin device does; a block that a thin device or its
+  snapshot rewrote since, while the two shared it, reads its older bytes,
+  since dm-thin gave the rewrite a new block and the older mapping names
+  the shared one; a block freed and given out again since reads what the
+  pool wrote there later, which may be another thin device's; and a thin
+  device created since has lost its id, which its row reports (`cnagent.md`
+  CN14). Neither mix of bytes reads as an error (Repair, Forced start).
 * **A retired leg that a cancel gives back may not be the copy it was.**
   When a repair takes a retired leg back, the primary can add it to md
   before the abort flag reaches the primary: md writes the array's
@@ -10276,7 +10306,9 @@ document and only pointed to here.
   short until both sides answer and the primary puts the leg back, the
   copy then going on to its end (`cnagent.md` CN12), or until an operator
   ends the migration, whose `force` costs what `CancelMigration` and
-  `FinishMigration` say (Migrations).
+  `FinishMigration` say (Migrations): where one side is gone for good, the
+  end that keeps that side alone leaves the leg for leg repair to replace
+  (`operations.md`, Ending a migration with force).
 * **A replacement of the primary can fence the old primary first when the
   pool's coordinator changes during its demotion hold**
   (`dnv-worker.md` RW22 and Known limits). A replacement deletes the old

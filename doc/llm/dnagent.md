@@ -3912,9 +3912,11 @@ held. The rule:
   its last commit, and read the regions copied since from the source
   again, over what was written to them. So the side's verdict does not
   name the row (DN16), and no re-send repeats a converge that cannot cure
-  it; an operator's forced cancel ends the migration
-  (`architecture.md`, Migrations), or md fails the leg and leg repair
-  replaces it;
+  it. While the copy does not show whole only an operator ends the
+  migration, at what a forced end costs (`architecture.md`, Migrations;
+  `operations.md`, Ending a migration with force): leg repair ends a bad
+  leg's migration after the cutover only once its copy shows whole, and
+  then replaces the leg (`dnv-worker.md` AR8);
 * both rows carry the reason `RES_REASON_AWAITING_CUTOVER` while they read
   the wait for the cutover, and no reason in any other state;
 * the per-CN rows are judged where the rule puts the stacks (above), and,

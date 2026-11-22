@@ -408,12 +408,14 @@ Safe steps:
    every leg is in sync. Check that no leg shows a bad-block list. If the
    named leg's list is still there after a start that passed `bad-blocks`,
    the start's second run, which drops it, did not happen, and hosts get IO
-   errors over the list's regions. A suite case makes this state on purpose;
-   no procedure for it is tested: stop.
+   errors over the list's regions: see "A forced start whose stop failed".
 6. Step the level back:
    `dnvctl sp set-level --level READWRITE`, or the level the pool had.
-7. Write to a volume from a host. A thin pool that comes back read-only
-   has no repair procedure yet (the scope page, section 6.1): stop.
+7. Write to a volume from a host. If a thin pool comes back read-only, its
+   row under `slice_id_to_dm_pool` in `dnvctl cntlr inspect` says why: for
+   the reason `RES_REASON_POOL_NEEDS_CHECK`, follow
+   [Repair a thin pool's metadata](#repair-a-thin-pools-metadata); for any
+   other, stop.
 
 Steps that can lose data:
 
@@ -429,8 +431,17 @@ Steps that can lose data:
   regions md never copied as whatever that leg's disk held, with no error.
 - A start from an older copy restores this group alone. The pool's other
   groups keep their newer state, so the pool's volumes can mix old and new
-  blocks. A block first written since that copy can read another pool's
-  bytes. Check the volumes from the hosts.
+  blocks. For a data group, a block first written since that copy can read
+  another pool's bytes. A start of a slice's meta group from an older copy
+  gives the slice's thin pool its records of that time, over data groups
+  that kept their newer writes. A block a volume first wrote since that
+  copy reads zeros. A block that a volume or its snapshot rewrote since,
+  while the two shared it, reads its older bytes. A block a volume freed
+  since, which the pool then gave out again, reads what the pool wrote
+  there later, possibly another volume's bytes. None of these reads shows
+  an error. A volume or a snapshot made since is lost: the primary reports
+  it as an error with the reason `RES_REASON_THIN_ID_LOST`. Check the
+  volumes from the hosts.
 
 When to stop: no leg of the array's identity can come back; the dry run
 refuses every leg; or two legs have the same change count and you cannot
@@ -540,7 +551,8 @@ Safe steps:
 Steps that can lose data: this is a start from an older copy. Everything
 written to the group since the leg retired is lost, while the pool's other
 groups keep their newer state. Blocks first written since can read another
-pool's bytes.
+pool's bytes. For a slice's meta group, a start from an older copy costs
+more: the steps that can lose data of "Which leg to choose" say what.
 
 When to stop: as in steps 2, 4 and 5, the refusal for a bad-block list
 included when you do not accept what `--override bad-blocks` does.
@@ -621,7 +633,9 @@ Causes and steps:
   `dnvctl group force-start --grp <group id> --cancel`. Left standing, the
   mark acts at the array's next stop, from a leg that may be stale by
   then. The worker also makes no leg repair of the group while it stands.
-  Not tested.
+  Not tested. After a forced start whose stop failed, read "A forced start
+  whose stop failed" first: there a mark whose leg md holds in sync can
+  drop the bad-block lists.
 - A leg the start would wipe does not serve. The start waits for it. Bring the
   leg back. If it will never come back, replace it with a repair:
   `dnvctl repair create --name <name> --grp <group id> --bad-legs <leg
@@ -648,6 +662,140 @@ above).
 
 When to stop: the mark stays after a cancel, or the array runs and the
 row still reads error.
+
+### A forced start whose stop failed
+
+Symptom: a start that passed `bad-blocks` kept the named leg's bad-block
+list. Such a start starts the array, stops it, and starts it again with the
+list dropped; here the stop failed, which the lab saw only when a suite
+held the array open on purpose. The group's row reads error for a moment,
+with a text that says the stop to drop the list failed. At the worker's
+next request the primary adds the other legs, and md copies onto them, but
+not over the list's regions, which no member can read; those legs get the
+regions in their own lists, and the row then reads ok. Hosts get IO errors
+over the listed regions, though the named leg holds their data.
+
+Confirm: `dnvctl group inspect --grp <group id>` shows a bad-block list on
+the named leg and, once md has copied onto them, on the other legs.
+`dnvctl cluster get-status` lists a `group` line for the bad blocks.
+
+What dnv does alone: nothing that drops the lists. The worker sends the
+primary its request again at the next check round, which adds the other
+legs. It clears the mark once the row reads ok and the primary reports
+that it acted on the mark. A primary whose agent restarted since the start
+reports no such thing, and the mark then stands: it acts again at the
+array's next stop. The worker makes no leg repair of the group, since
+every leg now lists bad blocks, and a repair for bad blocks needs a leg
+with none. From `NO_THINPOOL` up no reaction runs at all.
+
+The ways, and what each costs:
+
+1. Leave the group as it is, and go on from step 6 of "Which leg to
+   choose", which steps the level back. Every region outside the lists
+   reads and writes as before; a read over a listed region fails. Nothing
+   more is lost, and way 3 stays open. If `dnvctl sp get` still shows a
+   `forced_start` on the group a few check rounds after the row reads ok,
+   cancel the mark, as "A forced start that waits" says: left standing, it
+   acts at the array's next stop, from a leg that may be stale by then.
+2. A new mark that names the same leg and passes `bad-blocks`, given while
+   the row still reads error, then the level stepped to `NO_REDUND` and
+   back, drops every list and loses nothing: the second start wipes the
+   added legs again, and md copies them whole. But
+   that moment ends with the worker's next request, one check round after
+   the failed stop, 2 seconds at the default: no person can act in it.
+   Once the row reads ok, the gateway refuses a new mark, and it refuses
+   one at `NO_REDUND` too.
+3. By hand with mdadm, which drops every leg's list. Before you start,
+   with the level at `NO_THINPOOL`
+   (`dnvctl sp set-level --level NO_THINPOOL` when it is not):
+   - Read the group's md device, `res_name` of its row under
+     `cntlr_info.grp_id_to_md_raid` in
+     `dnvctl cntlr inspect --id <primary cntlr id>`. As root on the
+     primary's controller node, `readlink -f <md device>` prints the
+     array's kernel name, such as `/dev/md126`. Check that name once:
+     `cat /sys/block/md126/md/array_state`, with the kernel name you read,
+     must print a state of a running array: `clean`, `active`,
+     `active-idle`, `write-pending`, `readonly` or `read-auto`. If it fails
+     or prints another word, stop and ask for help.
+   - Read the device of each leg md holds in the array: the legs of
+     `leg_list` in `dnvctl group inspect --grp <group id>` whose
+     `member.md_state` is not empty. A leg's device is
+     `/dev/mapper/<res_name>` of its row under `cntlr_info.leg_id_to_leg`.
+   - Check that `dnvctl sp get` shows no `forced_start` on the group. If it
+     shows one, run no mdadm: follow "When the mark still stands" below in
+     place of the four steps.
+
+   The four steps:
+   1. Step the level to `NO_REDUND`:
+      `dnvctl sp set-level --level NO_REDUND`.
+   2. Wait until the primary has stopped the array:
+      `dnvctl cntlr inspect --id <primary cntlr id>` shows
+      `applied_revision` at least the `sp_rev.revision` of `dnvctl sp get`,
+      and on the primary's controller node
+      `cat /sys/block/md126/md/array_state`, with the kernel name you read,
+      prints `clear` or fails with `No such file or directory`. If the
+      array still runs a minute later, its stop failed again: stop and ask
+      for help.
+   3. As root on the primary's controller node, in one command line, so
+      that the array stops at once:
+      `mdadm --assemble <md device> --metadata=1.2 --update=force-no-bbl <the device of each leg>; mdadm --stop <md device>`.
+   4. Step the level back: `dnvctl sp set-level --level NO_THINPOOL`. The
+      primary assembles the array again, with no list.
+      `dnvctl group inspect --grp <group id>` must show no list on any leg.
+      Then go on from step 6 of "Which leg to choose".
+
+   When the mark still stands: the worker has not cleared it yet, or the
+   primary's agent restarted after the start and forgot that it acted on
+   the mark, and then the worker never clears it. The mark acts again at
+   the array's next stop, and that drops every list with nothing lost, but
+   only while md still holds the mark's leg in sync:
+   1. Check that `dnvctl group inspect --grp <group id>` shows, for the leg
+      the mark names, a `member.md_state` that holds the word `in_sync` and
+      not the word `faulty`. If it does not, md no longer counts that leg
+      whole, and the other legs may hold newer data: cancel the mark with
+      `dnvctl group force-start --grp <group id> --cancel`, then stop and
+      ask for help.
+   2. Step the level to `NO_REDUND`, wait as in step 2 of the four steps,
+      and step the level back to `NO_THINPOOL`. The mark acts: the start
+      wipes the added legs, and md copies them whole.
+   3. Wait until every leg is in sync and no leg shows a bad-block list, as
+      in step 5 of "Which leg to choose". If the lists are still there, the
+      worker cleared the mark first, or the start's stop failed again:
+      start way 3 again. Otherwise go on from step 6 of "Which leg to
+      choose". Run none of the four steps.
+
+   The cost of the four steps: md then reads the listed regions from any
+   leg as good data. The named leg holds their data. A leg added after the
+   failed stop holds there whatever its disk held, since the forced start
+   wipes only a leg's md superblock and md copied nothing onto those
+   regions: for a leg that was a member of this group before, the group's
+   data as md last wrote it there, which can be older; for a repair's new
+   leg, whose disk node zeroed only its first blocks, possibly another
+   pool's bytes. Hosts can read those bytes, with no error.
+
+Steps that can lose data: the four steps of way 3, as their cost says.
+
+When to stop: before the four steps of way 3, unless you know what each
+added leg holds over the listed regions, as from its history in the group;
+when the kernel name you read does not show a running array before you
+start; when a mark still stands and md does not hold its leg in sync; or
+when the array still runs at `NO_REDUND`, since its stop failed again. Ask
+for help.
+
+Tested: the cn agent suite, repair case, stages `badstop` (the failed stop
+made on purpose; a host read over the lists fails; the mark kept and the
+level stepped down and up drops the lists), `badclear` (the mark cleared:
+the same steps keep both lists), `badwindow` (a new mark while the row
+reads error, then the level steps: both lists dropped) and `badmdadm` (the
+mdadm steps of way 3, with the stop at `NO_REDUND` read from the cn
+agent's check round, which reports the array as a leftover until it stops,
+and the host's data read back), at the agent level. The suite plays the
+worker and the gateway, so it times none of these against a worker. It
+passed in the lab on 2026-11-21. Not tested: the wait of step 2 of the
+four steps, through dnvctl and sysfs; the check of the kernel name; the
+check that md holds the mark's leg in sync; a mark that an agent restart
+left standing; and the four steps over a leg that holds another pool's
+bytes.
 
 ### A lost clone meta group
 
@@ -1487,9 +1635,9 @@ that works ([the scope page](scope.md), section 6.1).
 Safe steps: move the slow leg's side to another disk node with a
 migration: `dnvctl migr create` with the side's id as `--src-side`, and
 `--dn-black` naming the slow disk node; watch the copy with
-`dnvctl sp inspect-side`; then `dnvctl migr finish`. The scope page lists
-the whole migration flow as a procedure still to write; the introduction
-explains it. When the disk node's disk is the cause, move every side it
+`dnvctl sp inspect-side`; then `dnvctl migr finish`, as
+[Move a leg to another disk node](#move-a-leg-to-another-disk-node) says.
+When the disk node's disk is the cause, move every side it
 holds the same way, and then fix or replace the disk. A pool whose data
 block is above 4 MiB refuses every migration: move that pool's volumes
 instead, as [a pool made before the block bound](#a-pool-made-before-the-block-bound)
@@ -2464,21 +2612,833 @@ Safe steps:
    slice's first data group, whatever number you give. `--meta`, with no
    `--ext`, adds a meta group instead, as large as the slice's meta groups
    together.
+3. A thin pool can be read-only while its slice's `read` is true. Its
+   line in `dnvctl cntlr inspect --id <primary cntlr id>`, the row under
+   `slice_id_to_dm_pool`, says why. When it carries `needs_check`, follow
+   [Repair a thin pool's metadata](#repair-a-thin-pools-metadata). When it
+   carries `ro` and no `needs_check`, the thin pool's metadata is full: a
+   meta group that auto-grow or step 2 with `--meta` adds makes it writable
+   again.
 
 Steps that lose data: deleting a thin device or a snapshot to free blocks of
 the thin pool deletes its data.
 
 When to stop: a slice stays unread, run after run, while the pool is built
-and the agent has a reading of the cntlr (`obs_age` is not `null`), or the
-line of its thin pool in `dnvctl cntlr inspect --id <primary cntlr id>`,
-the row under `slice_id_to_dm_pool`, carries `ro` or `needs_check`: the
-thin pool needs a repair whose procedure is not written yet. Ask for help.
+and the agent has a reading of the cntlr (`obs_age` is not `null`); or a
+thin pool's line carries `ro` and no `needs_check`, and the pool stays
+read-only after a meta group is added. Ask for help.
 
 Tested: the Go tests of the answer on hand-made rows, and of the gateway's
 read with a fake agent; the gateway suite's smoke case checks it over a fake
 agent's row, and the e2e suite's setup over real agents after a host writes
 its pattern. The gateway suite passed in the lab with its check on
 2026-11-19, and the e2e suite's setup read it in the lab on 2026-11-21.
+
+## Repair a thin pool's metadata
+
+Words: a thin pool's **metadata** is dm-thin's record of which blocks of the
+pool each volume uses. It lives on the slice's meta group. When dm-thin
+fails to commit it, dm-thin writes a mark into the metadata that it **needs
+a check** (`needs_check`). The mark stays in the metadata, so every
+controller node then opens that thin pool read-only. The tools here,
+`thin_check` and `thin_repair`, come with thin-provisioning-tools, whose
+`thin_dump` the cn agent already runs.
+
+Symptom: a write to the pool's volumes fails when it needs a new block of
+the thin pool, or lands on a block that a snapshot shares; other writes and
+reads still work.
+`dnvctl cluster get-status` lists the object `slice <slice id> thin pool`
+with `row/error/pool_needs_check`.
+
+Confirm: in `dnvctl cntlr inspect --id <primary cntlr id>`, the slice's row
+under `cntlr_info.slice_id_to_dm_pool` reads `RES_STATUS_ERROR` with the
+reason `RES_REASON_POOL_NEEDS_CHECK`. Its details are the thin pool's status
+line, which holds `needs_check`. Two other states are not this case: the
+reason `RES_REASON_POOL_FAILED`, a thin pool that dm-thin failed, which a
+failover cures; and a line with `ro` and no `needs_check`, metadata that is
+full ([A pool's space](#a-pools-space)).
+
+What dnv does alone: the worker starts no failover and no cntlr replacement
+for this row, since every controller node would open the pool the same way.
+It logs `reaction skipped` with the reason `shared_state` at its passes.
+This lasts until you act. An error row of another kind in the same report,
+such as a broken group, still brings a failover.
+
+Safe steps:
+
+1. Find the slice's meta group. `dnvctl sp get` lists the slices in
+   `slice_list`, in the order of the slice ids in `sp_conf.slice_id_list`.
+   The slice's `meta_grp_list` must hold one group: note its `grp_id`. With
+   more than one, stop.
+2. Step the level to `NO_THINPOOL`:
+   `dnvctl sp set-level --level NO_THINPOOL`. The primary takes the thin
+   pools away and keeps the group arrays. Hosts get IO errors, and no
+   reaction runs.
+3. Wait until `dnvctl cntlr inspect --id <primary cntlr id>` shows
+   `applied_revision` at least the `sp_rev.revision` of `dnvctl sp get`,
+   the slice's row under `slice_id_to_dm_pool` as `RES_STATUS_MISSING` with
+   the reason `RES_REASON_SP_LEVEL`, and each row of the slice's groups
+   under `grp_id_to_md_raid` as `RES_STATUS_OK`. A data group that broke
+   comes back here once its legs serve
+   ([A broken array that comes back by itself](#a-broken-array-that-comes-back-by-itself)).
+4. Note the metadata's device: the `res_name` of the meta group's row under
+   `cntlr_info.grp_id_to_md_raid`, keyed by its `grp_id`, a path such as
+   `/dev/md/<name>`. At this level that array holds the whole metadata of
+   the slice's thin pool. Run the next steps as root on the primary's
+   controller node, the `addr_port` of the primary in `dnvctl sp get`.
+5. Check it: `thin_check <metadata device>`. It passes on metadata that
+   only carries the mark. If it fails, stop.
+6. Make a new device of the same size, a loop device over a new file on a
+   local file system with room, outside the agent's `--local-store`
+   directory:
+
+   ```
+   truncate -s $(blockdev --getsize64 <metadata device>) <file>
+   losetup -f --show <file>
+   ```
+
+   The second command prints the loop device's path.
+7. Repair onto it and check the copy:
+   `thin_repair -i <metadata device> -o <loop device>`, then
+   `thin_check <loop device>`.
+8. Copy it back over the meta group's array:
+   `dd if=<loop device> of=<metadata device> bs=1M conv=fsync status=none`.
+   dnv builds the thin pool over that array by its name, so the copy back
+   takes the place of a swap of devices. Then remove the loop device with
+   `losetup -d <loop device>` and delete the file.
+9. `thin_check --clear-needs-check-flag <metadata device>`, then
+   `thin_check <metadata device>`. Both must pass.
+10. Check that the mark is gone. Read the metadata's first block with
+    direct IO and print its flags word, whose lowest bit is the mark:
+    `dd if=<metadata device> bs=4096 count=1 iflag=direct status=none | od -A n -t u4 -j 4 -N 4`.
+    It must print an even number; it printed 0 in the lab. Use GNU dd for
+    it: the `dd` of uutils, which some systems ship, handles direct IO
+    wrongly.
+11. Step the level back: `dnvctl sp set-level --level READWRITE`, or the
+    level the pool had. Wait until the slice's row under
+    `slice_id_to_dm_pool` reads `RES_STATUS_OK` and its details show `rw`.
+12. Write to a volume from a host, and read back data it held before.
+
+Steps that can lose data:
+
+- The copy of step 8 overwrites the device it is given. A wrong device,
+  such as a data group's array or another pool's, loses its data. Copy only
+  onto the `res_name` of step 4.
+- `thin_repair` over damaged metadata can drop mappings, and the volumes
+  then lose the blocks they mapped. This is not tried; step 5 stops first.
+- A level stepped back before step 8 brings the pool back read-only with
+  the mark. That loses nothing: do the steps again. Never step the level
+  while the copy of step 8 runs: the primary would build the thin pool
+  over metadata that is half copied.
+
+When to stop: the slice has more than one meta group, since then no device
+holds the whole metadata at that level; `thin_check` fails in step 5 or 7;
+a group's row of the slice does not read ok at `NO_THINPOOL`; or the pool
+reads `needs_check` again after step 11.
+
+Tested: the cn agent suite, `integtest/cnagent_test.sh`, case `thinrepair`,
+at the agent level. The suite plays the worker and the gateway: it sends
+the level to the cn agent itself, and it finds the metadata's device with a
+tool of its own, not with `dnvctl cntlr inspect`. Its pool has one cntlr
+and one meta group in a RAID1 slice, and a commit over a broken data group
+makes the mark; the host is disconnected during the steps. Steps 5 to 10
+run as written, step 10 with GNU dd, and the host reads its data after the
+level is back. It passed in the lab on 2026-11-21, every step working. Not
+tested: the steps through `dnvctl` and a worker, a pool with standbys or
+without RAID, metadata that `thin_check` finds damaged, and a slice of more
+than one meta group.
+
+## Change a pool's level
+
+Words: a pool's **level** steps from `READWRITE` down to `DISABLE`. Each
+step keeps what the steps before it switch off:
+
+- `READONLY`: the primary fails every write to the pool's volumes, and
+  reads work. A controller node that has not yet applied the level keeps
+  serving writes until it does.
+- `NO_CLONE`: the clones' copies go, and the volumes they fill give hosts
+  IO errors.
+- `NO_THINPOOL`: the thin pools and the volumes go: every read and write of
+  the pool's volumes fails. The namespaces stay exported, so a host sees IO
+  errors, not a lost device. The group arrays still run. From this level
+  up the worker runs no reaction for the pool: no failover, cntlr
+  replacement, leg repair or auto-grow, no delete of old retired legs and
+  no md check.
+- `NO_REDUND`: the primary stops the group arrays. The legs stay connected
+  and checked.
+- `NO_MIGRATION`: the disk nodes take every migration's copy away, and no
+  cutover starts.
+- `NO_SIDE`: the disk nodes export no side, and the controller nodes drop
+  their leg connections.
+- `DISABLE`: only the sides' disk space stays. The zeroing of a new side
+  goes on.
+
+When: before a forced start ([Before every forced start](#before-every-forced-start)),
+before [Repair a thin pool's metadata](#repair-a-thin-pools-metadata), or
+to take a damaged pool apart in stages.
+
+How to confirm the level: `dnvctl sp get` shows it as `sp_conf.sp_level`.
+`dnvctl cluster get-status` lists a `pool` line for any level above
+`READWRITE`, with the text "level SP_LEVEL_<name>: writes to its volumes
+fail", and from `NO_THINPOOL` up ", and the worker runs no reaction for the
+pool". From `NO_THINPOOL` up reads fail too, which the line does not say.
+The primary has applied the level when `dnvctl cntlr inspect --id <primary
+cntlr id>` shows `applied_revision` at least the pool's `sp_rev.revision`.
+Each row the level takes away then reads `RES_STATUS_MISSING` with the
+reason `RES_REASON_SP_LEVEL`.
+
+What dnv does alone: the worker sends the new level to every cntlr and side
+of the pool. Nothing else changes, and no timer moves the level back. Some
+calls wait on the level: from `NO_REDUND` up the gateway refuses
+`dnvctl repair create`, `dnvctl group force-start` (but its `--cancel`) and
+`dnvctl group inspect`. `dnvctl repair finish`, `repair cancel` and
+`repair abort` run at every level, and so does `dnvctl migr create`, though
+no cutover starts from `NO_MIGRATION` up.
+
+Safe steps: `dnvctl sp set-level --level <level>`, with a short name such as
+`NO_THINPOOL`, or the full name such as `SP_LEVEL_NO_THINPOOL`; case does
+not matter. Step back the same way. Then wait for `applied_revision`, as
+above.
+
+Steps that can lose data: every level above `READWRITE` fails the hosts'
+writes, and from `NO_THINPOOL` up their reads, so an application on a host
+can lose what it was writing. `dnvctl sp set-level` with no `--level` sets
+`READWRITE`: it brings the pool back up.
+
+When to stop: the primary's `applied_revision` does not reach the pool's
+revision, or rows stay in error after the level is back: read the pool
+again from [Read what is wrong](#read-what-is-wrong).
+
+Tested: the e2e suite's ops case, stage 05, steps the whole ladder down to
+`DISABLE` and back, each step awaited on the primary's `applied_revision`
+and its rows; the read-only step reads the data and keeps a write off the
+disks. It passed in the lab on 2026-11-21. The cn agent suite steps
+levels at the agent level: its repair case's forced start stages step
+`NO_THINPOOL` and `NO_REDUND`, and that case's stage `reassembly` and the
+`thinrepair` case step `NO_THINPOOL`.
+
+## Move a leg to another disk node
+
+Words: a migration moves the side of a leg to another disk node while the
+leg stays in use ([the introduction](introduction.md#migration) shows its
+flow). The **old side** is the side that moves; the **new side** is the one
+the gateway makes for it. On the new disk node dm-clone copies the old side
+in **regions** of one pool block. The copy is **whole** when every region is
+copied.
+
+When to use: a side must leave its disk node while its leg works: a slow
+leg ([A slow leg](#a-slow-leg)), a disk node to empty before its removal
+([Remove a node](#remove-a-node)), or a disk to replace. A leg that failed
+is replaced by a repair instead ([Repair a leg by hand](#repair-a-leg-by-hand)).
+
+How to confirm it can run: `dnvctl sp get` lists, under `slice_list`, each
+group's `leg_list`, and each leg's `side_list` with the `side_id` and the
+disk node's `addr_port`. `dnvctl dn get --addr <addr>` lists the sides on one
+disk node under `dn_conf.side_ptr_list`. The gateway refuses with
+FAILED_PRECONDITION, unless another code is named:
+
+- a pool that has four migrations already (RESOURCE_EXHAUSTED), or a name in
+  use (ALREADY_EXISTS);
+- a pool whose data block is above 4 MiB
+  ([A pool made before the block bound](#a-pool-made-before-the-block-bound));
+- a side that is in no leg of the pool's slices, such as the side of a
+  repair's new leg or of a retired leg (NOT_FOUND);
+- a side of a clone meta group, of a repair's bad leg, or of a leg that
+  already has two sides;
+- a pool whose `sp_conf.cntlid_slot_list` holds no slot but the side's
+  `cntlid_slot` ([Change a pool's cntlid slots](#change-a-pools-cntlid-slots));
+- no disk node with room: one that holds no leg of the group, with the
+  group's extents free and room in its metadata area for the copy's records
+  (RESOURCE_EXHAUSTED).
+
+What dnv does alone:
+
+- The gateway puts the new side on a disk node that holds no leg of the
+  group, and out of the group's locations when it can.
+- The new disk node takes its room in its metadata area and zeroes the
+  side as for any new side: its first blocks, or the whole side of a meta
+  group. The worker then marks the side provisioned, and every
+  cntlr connects to it. The old side serves meanwhile.
+- The worker starts the cutover once the new side waits for it and the
+  primary's path to it is live. It starts none while the pool's level is
+  `NO_MIGRATION` or above, or while the primary is disabled.
+- At the cutover the leg has no path for a moment: one to two and a half
+  seconds were measured at 32 slices ([the scope page](scope.md),
+  section 8). Then the worker reads the leg's list of written blocks from
+  the primary and hands it to the new side, so that the copy skips the
+  blocks the pool never wrote.
+- The worker never ends the migration of a healthy leg. For a leg that leg
+  repair would replace, it cancels a migration whose cutover is pending,
+  finishes one whose copy is whole, and otherwise logs `reaction skipped`
+  with the reason `migration_copy_not_whole` at each pass
+  ([Ending a migration with force](#ending-a-migration-with-force)).
+
+Safe steps:
+
+1. Start it:
+   `dnvctl migr create --name <name> --src-side <side id>`. Add
+   `--dn-black <addr>,<addr>` to keep the new side off those disk nodes,
+   such as the slow one, or `--dn-white` to name the only ones it may use.
+   `--hyd-threshold`, from 1 to 8, is how many regions dm-clone copies at
+   once, and `--hyd-batch`, from 1 to 4, how many regions side by side it
+   joins in one copy; each is 1 when left out.
+2. Wait for the cutover. `dnvctl migr get --name <name>` shows the new
+   side as `migr.dst_side_id` and `migr.cutover_pending`, true until the
+   cutover. `dnvctl cluster get-status` lists `its cutover is pending`
+   meanwhile, with the primary's path to the new side when it has one.
+3. Watch the copy: `dnvctl sp inspect-side --id <new side id>` shows
+   dm-clone's status line in `side_info.migr_dst_info.dm_clone_info.details`.
+   Its count of hydrated regions, the regions copied so far, out of all
+   regions shows how far the copy is. A copy that runs has no line in
+   `dnvctl cluster get-status`; one whose row reads an error has
+   `its copy reads ...`.
+4. When the count reaches the total, `dnvctl cluster get-status` lists
+   `its copy is whole: it waits for migr finish`. Finish it:
+   `dnvctl migr finish --name <name>`. The gateway asks the new side's
+   agent for the proof that the copy is whole. It refuses while the copy is
+   not whole or the agent does not answer, and, with `--force` too, while
+   the cutover has not started. The leg then keeps the new side alone, and
+   the old disk node removes the old side and frees its extents.
+5. Check: `dnvctl sp get` shows the leg with one side, the new one, and
+   `dnvctl migr get --name <name>` answers NOT_FOUND.
+
+To end it without the move before the cutover, run
+`dnvctl migr cancel --name <name>`: the new side goes, and nothing is lost.
+After the cutover the gateway refuses a cancel without `--force`: finish
+the migration instead.
+
+Steps that can lose data:
+
+- `dnvctl migr finish --force` skips the proof. The regions the copy had not
+  reached then read what the new side's disk held there, possibly another
+  pool's bytes, with no error.
+- `dnvctl migr cancel --force` after the cutover brings the old side back
+  as of the cutover. The leg loses every write since, and blocks first
+  mapped since read the old side's old bytes, possibly another pool's. md
+  still counts the leg whole, so in a RAID1 group reads can return those
+  bytes, and no call makes md copy the leg again: a repair is refused for a
+  leg with no health epoch, and a member md failed in the switch is added
+  back from md's record of the regions written while it was out, which
+  holds none of these.
+
+Use either flag only as [Ending a migration with force](#ending-a-migration-with-force)
+says.
+
+When to stop: the cutover does not come, and the `its cutover is pending`
+line names a path that does not read ok, or the new side's rows, which
+`dnvctl sp inspect-side --id <new side id>` shows, wait for room in its
+metadata area: cancel it, which needs no force then, and ask for help.
+The copy's count stops growing, or its row reads an error: force no end,
+and read [Ending a migration with force](#ending-a-migration-with-force).
+
+Tested: the e2e suite's copy case, stage 04: a migration under a capped
+copy, the cutover, the worker's read of the written blocks, the finish and
+the data read back; then a second migration, whose plain cancel after the
+cutover is refused and whose cancel with `--force` goes through. No host IO
+runs between that one's create and its cancel, so it proves the refusal and
+the steps, not the loss. Stage 04b resets the new side's disk node guest
+during a copy and reads the data after the copy ends. Both passed in the lab
+on 2026-11-21. The gateway's unit tests check each refusal.
+
+### Ending a migration with force
+
+When: a migration whose cutover has started cannot be finished, because the
+new side's agent does not answer the proof, or because a disk node of the
+leg is gone.
+
+Confirm: `dnvctl migr get --name <name>` shows `cutover_pending` false.
+`dnvctl sp get` shows each side's `err_epoch` in the leg's `side_list`, and
+`dnvctl dn inspect --addr <addr>` whether a disk node's agent answers.
+
+What dnv does alone: for a leg it would repair, the worker ends a
+migration only where that loses nothing, as above. With a copy that is not
+whole it logs `migration_copy_not_whole` at each pass, and the group runs
+one leg short until both sides answer again and the copy goes on to its
+end.
+
+Steps, by case:
+
+1. The new side's agent does not answer, so `dnvctl migr finish` is refused
+   with "did not report hydration", and you saw the copy whole before: the
+   line `its copy is whole: it waits for migr finish`, or a count of copied
+   regions equal to the total. A copy that was whole stays whole. Then
+   `dnvctl migr finish --name <name> --force` loses nothing the new side
+   holds.
+2. A RAID1 group whose other leg md holds in sync, as
+   `dnvctl group inspect --grp <group id>` shows, and a disk node of the
+   leg is gone for good: its machine will not come back, or its disk
+   failed. End the migration so that the leg
+   keeps the side that is gone: `dnvctl migr finish --name <name> --force`
+   when the new side's disk node is gone, and
+   `dnvctl migr cancel --name <name> --force` when the old side's is. The leg
+   then has no path. md fails its member, and the group serves from its
+   other leg, which holds every write. Then have the leg replaced at once,
+   before the node can come back with its old or partial copy: once
+   `dnvctl sp get` shows a health epoch (`err_epoch`) on the leg and no
+   repair on the group (`rep_name` empty), create one:
+   `dnvctl repair create --name <name> --grp <group id> --bad-legs <leg id>`,
+   and follow [Repair a leg by hand](#repair-a-leg-by-hand). The worker may
+   create its own first, once the leg's threshold has passed; the gateway
+   then refuses yours and names the worker's. md copies the new leg whole
+   from the other leg, and a repair's bad leg never joins the array again.
+   When the repair has finished, delete the retired leg it made, which
+   holds no whole copy ([Retired legs](#retired-legs)).
+3. A group of one leg, in a pool without RAID, with a disk node gone: no end
+   keeps the data. A forced finish leaves the leg on a dead side, and the
+   volumes then give IO errors over that group for good. A forced cancel,
+   with the new side gone, brings the old side back as of the cutover, and
+   the leg loses every write since. Stop and ask for help.
+4. Both disk nodes answer, and the new side's copy row reads an error, as
+   when dm-clone's own records fail: neither forced end is safe. A forced
+   cancel serves the old side as of the cutover, which md counts whole; a
+   forced finish serves the regions not copied from the new side's disk.
+   Stop and ask for help.
+
+Steps that can lose data: every forced end but those of cases 1 and 2. A
+forced cancel also loses nothing when nothing has written to the pool since
+the cutover. In case 2, naming the wrong side as gone keeps a live side
+whose copy is old or partial, which md counts whole.
+
+When to stop: cases 3 and 4; you cannot tell whether a disk node is gone
+for good; or the gateway refuses the repair of case 2 for a reason other
+than the worker's repair.
+
+Tested: not as a whole. The gateway suite, `integtest/gateway_test.sh`, on
+fake agents, finishes a migration with `--force` while the new side's disk
+node is stopped, after its plain finish is refused. The e2e suite's copy
+case cancels one with `--force` after its cutover (above). The e2e suite's
+react case, stage 10, runs what follows case 2, with the worker's own
+finish of a whole copy in place of a forced end: the new side's disk node
+goes silent, the primary cuts its path to the old side, and md fails the
+leg's member while a host writes; then the worker finishes the migration,
+so that the leg keeps the gone new side alone, and repairs the leg with a
+fresh leg, no write failing. It passed in the lab on 2026-11-21. Not
+tested: a forced end of a copy that is not whole, the forced cancel of case
+2, and cases 3 and 4.
+
+## Repair a leg by hand
+
+Words: a **repair** replaces a bad leg of a RAID1 group with a new leg: a
+fresh leg on another disk node, or a retired leg taken back
+([Starting from a retired leg](#starting-from-a-retired-leg)). Its stages are
+`REP_STAGE_CREATED`, `REP_STAGE_STARTED` once the primary has added the new
+leg to the group's array, and `REP_STAGE_ABORTED` after an abort.
+
+When to use: a leg of a RAID1 group is unhealthy, and you do not wait for
+leg repair, which waits for the pool's `leg_unhealthy`, 1200 seconds at the
+default, or for its side's `side_unhealthy`, 600 seconds; or you hold the
+group's repairs yourself ([Taking the group's repairs over](#taking-the-groups-repairs-over));
+or you want to choose where the new leg goes. A leg that works, even a slow
+one, is refused: "leg <id> is healthy: use a migration to move it"
+([Move a leg to another disk node](#move-a-leg-to-another-disk-node)). A leg
+the primary keeps out for another identity has steps of its own
+([A leg of another identity that the primary does not add](#a-leg-of-another-identity-that-the-primary-does-not-add)).
+
+How to confirm: `dnvctl sp get` shows the leg's `err_epoch` not 0, and
+`dnvctl cluster get-status` lists a line for the leg whose text holds
+`health epoch set on the leg`: a `row` line, as in `row/error`, while the
+primary's row for the leg reads an error, as for a dead leg, and a
+`health` line otherwise.
+
+What dnv does alone: leg repair replaces such a leg by itself once its
+threshold passes, while another leg of the group is in sync and healthy.
+The worker creates no repair while the group has one, an operator-in-charge
+flag or a forced-start mark. It moves every repair from
+`REP_STAGE_CREATED` to `REP_STAGE_STARTED` at every level, and it finishes
+and cancels only its own repairs, at levels where reactions run.
+
+Safe steps:
+
+1. Create it:
+   `dnvctl repair create --name <name> --grp <group id> --bad-legs <leg id>`,
+   with one leg. `--dn-black` and `--dn-white` steer the new leg's disk
+   node. The reply gives `rep_id` and `new_leg_id`. The gateway refuses: a
+   name that starts with `__internal__`, which the worker's repairs use; a
+   level of `NO_REDUND` or above; a pool without RAID; a name in use; a group
+   with an open repair; a leg that is not in the group's list, that a
+   migration moves, or that is healthy; and a fresh leg for a group that
+   holds two retired legs, whose message says to delete one first
+   ([Retired legs](#retired-legs)).
+2. Wait until `dnvctl repair get --name <name>` shows `repair.rep_stage` as
+   `REP_STAGE_STARTED`. The new disk node first zeroes the new side as for
+   any new side, the worker marks it provisioned, and the primary adds the new
+   leg to the array. md then copies onto it, and
+   `dnvctl group inspect --grp <group id>` shows its copy position until the
+   copy ends.
+3. Finish it: `dnvctl repair finish --name <name>`. The new leg takes the
+   bad leg's place in the group's list, and the bad leg becomes a retired
+   leg, named in the reply's `retired_leg_id`. md can still be copying onto
+   the new leg: wait until `dnvctl group inspect` shows every leg in sync
+   before you touch another leg of the group.
+4. To drop a repair that has not started, abort it with
+   `dnvctl repair abort --name <name>`. Once `dnvctl repair get` shows
+   `REP_STAGE_ABORTED`, which the primary confirms only from a running
+   array, run `dnvctl repair cancel --name <name>`. A repair that has
+   started cannot be aborted.
+
+Steps that can lose data: `dnvctl repair create --force` lets an abort copy
+over the bad leg and lets a take-back copy over a retired leg of another
+identity. Your finish of
+the worker's repair, whose name starts with `__internal__`, at a group that
+holds two retired legs gives back the oldest one that is not kept, and its
+copy with it ([Retired legs](#retired-legs)); the finish of your own repair
+never does.
+
+When to stop: the repair stays at `REP_STAGE_CREATED` and the primary's
+report, `dnvctl cntlr inspect --id <primary cntlr id>`, shows a `waits` or a
+`refusal` text in `cntlr_info.rep_id_to_repair_info` under the repair's
+`rep_id` that you do not understand; or the group's other leg dies while md
+copies onto the new leg
+([A group whose in-sync leg died during a copy](#a-group-whose-in-sync-leg-died-during-a-copy)).
+
+Tested: the e2e suite's copy case, stages 05 and 06: an operator's repair
+with a fresh leg, created, started and finished while md copies onto it,
+and its abort and cancel refused once it started; then a repair that takes
+the retired leg back after the new leg's disk node died, and the delete of
+a retired leg. Its react case, stage 09, takes a group's repairs over from
+the worker. Both passed in the lab on 2026-11-21. The cn agent suite's
+repair case runs the primary's part at the agent level.
+
+## Retired legs
+
+Words: a **retired leg** is a leg that left its group at the finish of a
+repair. Its side keeps its extents on its disk node, and the data the leg
+held when it left, until it is deleted. Its **keep flag** keeps the worker
+from deleting it.
+
+When: a group holds retired legs; a repair with a fresh leg is refused for
+two retired legs; or a disk node to remove still holds a retired leg's side.
+
+Confirm: `dnvctl retired-leg list` shows each retired leg with its `grp_id`,
+its `side` and the side's disk node, `retired_epoch`, the time it left in
+seconds since 1970, `keep`, and `partial`: md wrote onto the leg after a
+repair took it back and was then cancelled, so it is no longer the copy it
+was.
+
+What dnv does alone: the worker deletes one retired leg a pass once it is
+seven days old and not kept, only on a group whose array is whole, with no
+repair and no health epoch on a leg or a side, and only at levels where
+reactions run. So a group that does not come back whole keeps its retired
+legs until you delete them. A group holds at most two. At that bound the
+gateway refuses an operator's repair with a fresh leg, and the finish of
+the worker's repair gives back the oldest one that is not kept; with both
+kept, the worker's repair cannot finish until you clear a flag or delete
+one. The write of a forced-start mark sets the keep flag on the group's
+retired legs, and the finish of the repair of a leg of another identity
+keeps the old leg.
+
+When to keep one: a retired leg holds one group's blocks as of the time it
+left, not a copy of a volume, and it costs its extents and one of the
+1024 sides its disk node can hold. Keep it while it may be the group's only
+other copy: while the group's array is not whole, or while md still copies
+onto the new leg; a start from it is then the way back if the group's last
+full leg dies ([Starting from a retired leg](#starting-from-a-retired-leg)).
+Keep it in the two cases above, too: a forced start, and a leg of another
+identity. Otherwise let the worker delete it, or delete it.
+
+Safe steps:
+
+- Keep it: `dnvctl retired-leg keep --leg <leg id>`.
+- Clear the flag: `dnvctl retired-leg keep --leg <leg id> --clear`.
+- Delete it: `dnvctl retired-leg delete --leg <leg id>`. The delete runs at
+  every level, and it deletes a kept leg too.
+
+Steps that can lose data: a delete, or a cleared flag that lets the worker
+delete the leg, deletes its copy for good.
+
+When to stop: you cannot tell whether a retired leg holds a copy you need
+([Keeping the old copies](#keeping-the-old-copies)).
+
+Tested: the e2e suite's copy case, stage 06, takes a retired leg back and
+deletes a retired leg and its side; its react case keeps and clears the flag
+around two forced starts. Both passed in the lab on 2026-11-21. The gateway
+suite checks the flag, and the worker's unit tests check the delete at
+seven days and what holds it.
+
+## Replace a cntlr by hand
+
+When to use: a cntlr must move to another controller node while its own
+still answers, as to empty a controller node ([Remove a node](#remove-a-node));
+or its controller node is dead, and you do not wait for the cntlr
+replacement, which comes after the pool's `cntlr_unhealthy`, 600 seconds at
+the default.
+
+How to confirm: `dnvctl sp get` shows the cntlr under `cntlr_list` with
+its controller node's `addr_port`, and an `err_epoch` that is not 0 while
+the worker's checks of it fail. `dnvctl cn inspect --addr <addr>` answers
+only while that controller node's agent does.
+
+What dnv does alone: the worker replaces a cntlr whose health epoch is as
+old as `cntlr_unhealthy`, with a new cntlr in its slot on another controller
+node. It never replaces a disabled cntlr. A disabled primary fails over at
+the worker's next pass, with no threshold, to an enabled standby with no
+health epoch. Disabling the last enabled cntlr of a pool stops its IO, and
+nothing warns.
+
+Safe steps, the new cntlr first and the delete last:
+
+1. Read the pool: `dnvctl sp get` lists its cntlrs under `cntlr_list`, in
+   the order of the ids in `sp_conf.cntlr_id_list`, the ids `--id` takes,
+   each with `addr_port`, `cntlid_slot`, `primary`, `disabled`, `err_epoch`
+   and `settling`. `sp_conf.cntlid_slot_list` lists the pool's cntlid slots,
+   the ranges of NVMe controller ids its exports use.
+2. Create the new cntlr: `dnvctl cntlr create --slot <slot>`, with a slot of
+   the list that no cntlr of the pool uses, the old one included. Add
+   `--cn-black <addr>,<addr>` to keep it off those controller nodes; the
+   gateway already keeps it off every controller node that holds a cntlr of
+   the pool, and out of their locations when it can. The reply's `cntlr_id`
+   is its id. The create is refused:
+   - when the pool has four cntlrs, the most it can have
+     (RESOURCE_EXHAUSTED): then do steps 4 and 5 for the old cntlr first,
+     and steps 2 and 3 after, the pool keeping one cntlr fewer meanwhile;
+   - for a slot of 8 or more (INVALID_ARGUMENT): give a slot of the list;
+   - for a slot not in the list, or one another cntlr uses
+     (INVALID_ARGUMENT): give a slot of the list that no cntlr uses; when
+     every slot of the list is in use, add a free slot first
+     ([Change a pool's cntlid slots](#change-a-pools-cntlid-slots));
+   - when no controller node that is enabled, healthy and free of the pool
+     has room (RESOURCE_EXHAUSTED): add a controller node first. Or, if the
+     pool has another enabled cntlr, do steps 4 and 5 alone: the pool then
+     has one cntlr fewer until you give it a new one, and a pool left with
+     one cntlr has no standby to take over from its primary.
+3. Wait until it is built: `dnvctl sp get` shows it with `err_epoch` 0, and
+   `dnvctl cntlr inspect --id <new cntlr id>` shows `applied_revision` at
+   least the pool's `sp_rev.revision` and each row under
+   `cntlr_info.leg_id_to_leg` as `RES_STATUS_OK`. The worker can make a
+   new cntlr the primary before it is built, and the pool then serves no
+   IO until it is built.
+4. Disable the old cntlr:
+   `dnvctl cntlr set-enabled --id <old cntlr id> --enabled=false`. If it is
+   the primary, wait until `dnvctl sp get` shows another cntlr as primary
+   with `settling` false, as step 3 of
+   [A planned restart of an agent](#a-planned-restart-of-an-agent) says.
+   A dead cntlr is disabled the same way.
+5. Delete it: `dnvctl cntlr delete --id <old cntlr id>`. The gateway refuses
+   the primary and an enabled cntlr (FAILED_PRECONDITION).
+
+Steps that can lose data: none writes data away, but two mistakes stop the
+pool's IO: disabling its last enabled cntlr, and deleting the old cntlr
+before another cntlr took its role, since nothing can then take the role
+back. A disabled cntlr whose controller node is dead is never replaced by
+the worker, so do not leave one standing in place of step 2.
+
+When to stop: no other cntlr becomes primary within a few check rounds
+after step 4, or the new primary still shows `settling` true a minute after
+it became primary: enable the old cntlr again,
+`dnvctl cntlr set-enabled --id <old cntlr id>`, and ask for help.
+
+Tested: the e2e suite's ops case, stage 03, gives the pool a third cntlr in
+a new slot, sees its delete refused while it is enabled and its subsystem
+leave the discovery answer once it is disabled, and deletes it; that half
+is skipped when every controller node guest already holds a cntlr of the
+pool. Its copy case, stage 07, disables the primary during a clone's copy,
+sees the failover and enables it again. Both passed in the lab on
+2026-11-21. No test runs the whole replacement as one sequence.
+
+## Change a pool's cntlid slots
+
+Words: a pool's **cntlid slots** are the ranges of NVMe controller ids its
+exports use, numbered from 0 to 7. `dnvctl sp get` shows the pool's list as
+`sp_conf.cntlid_slot_list`, 0 to 7 for a pool made with no `--slots`, and
+the slot of each cntlr and side as `cntlid_slot`.
+
+When: a new cntlr needs a free slot
+([Replace a cntlr by hand](#replace-a-cntlr-by-hand)); a migration is refused
+because the list has no slot but the old side's; or two pools joined by a
+transfer and a clone need cntlrs in slots the other pool does not use
+([A pool made before the block bound](#a-pool-made-before-the-block-bound)).
+
+What dnv does alone: nothing moves. Every cntlr and side keeps its slot.
+Each new side, of a grow, a repair or a clone, takes the list's first
+slot, a migration's new side the first one that differs from the old
+side's, and a new cntlr the slot `dnvctl cntlr create --slot` names, which
+must be in the list.
+
+Safe steps: `dnvctl sp set-cntlid-slots --slots <the whole new list>`, the
+slots separated by commas, such as `0,1,2`. The new list replaces the old
+one, in the order given. The gateway refuses with INVALID_ARGUMENT an empty
+list, a value of 8 or more, a value given twice, and a list that drops a
+slot that a cntlr or a side of a leg uses; the message names it, as in
+"cntlid_slot_list drops slot 1, which cntlr 7 uses".
+
+Steps that can lose data: none. A list of one slot refuses every migration
+of the pool. A list that starts with another slot moves the sides made from
+then on to that slot; no test does this.
+
+When to stop: the gateway refuses a list for a slot that a cntlr or a side
+uses, and you cannot move that cntlr or side to another slot first: keep
+the slot in the list.
+
+Tested: the e2e suite's ops case, stage 03, gives the pool a longer list,
+sees lists that drop its cntlrs' slots refused, and makes a cntlr in the
+new slot. It passed in the lab on 2026-11-21.
+
+## Stripes and discards
+
+Words: a pool's **stripe** and **data block** are as in
+[A pool made before the stripe bound](#a-pool-made-before-the-stripe-bound)
+and [A pool made before the block bound](#a-pool-made-before-the-block-bound).
+A **discard** is a host's message that it no longer needs a range of a
+volume, as `fstrim` sends for a file system's free space.
+
+When: before you create a pool whose hosts count on discards to give space
+back to the pool.
+
+What dnv does alone: a pool's stripe and block are set when it is created
+and never change. A pool that names no block takes its cluster's, 1 MiB at
+the defaults. A pool that names no stripe takes its cluster's stripe, the
+cluster's block up to 1 MiB at the defaults, and halves it until the stripe
+times the slice count is at most 4 MiB
+([the scope page](scope.md), section 10). A thin pool frees whole blocks
+only, and each slice gets its own share of a discard. So a discard frees a
+block on a slice only where its share there covers a whole block, aligned
+to the block. With the stripe equal to the block, an aligned discard of
+one block frees one block. With a smaller stripe, a discard frees a block
+on a slice only when it covers nearly the slice count times the block, and
+`fstrim` can report success and free nothing.
+
+Safe steps: for a pool whose hosts count on discards, give
+`dnvctl sp create` a `--stripe-size` equal to its `--block-size`, both in
+bytes, with the stripe times `--slice-cnt` at most 4194304. At the defaults
+this holds up to four slices; at eight slices a block and stripe of 524288
+fit, and at 32 slices 131072. The gateway refuses with INVALID_ARGUMENT a
+block that is not a power of two from 64 KiB to 4 MiB, a stripe that is not
+a multiple of 4 KiB from 4 KiB to 1 MiB, a block that is not a whole number
+of stripes, and a stripe times slice count above 4 MiB, a refusal that names
+the largest stripe that fits. A smaller block gives the thin pool more
+blocks to map for the same space. `dnvctl sp get` shows the pool's
+`sp_conf.bdev_conf.dm_pool_conf.data_block_size` and
+`sp_conf.bdev_conf.dm_raid0_conf.stripe_size`; `dnvctl sp inspect` shows
+each slice's `used_data_bytes` before and after an `fstrim`.
+
+Steps that can lose data: none.
+
+Tested: the e2e suite's ops case, stage 10: an ext4 file system on a
+volume, files written and removed, `fstrim`, and the pool's used bytes drop
+by the files' whole blocks where the stripe is the block; where it is
+smaller the drop is logged, not checked. The cn agent suite's discard case,
+at one, two and eight slices, sees each discard free exactly the blocks
+this rule gives; [the scope page](scope.md), section 10, has the numbers.
+Both passed in the lab on 2026-11-21. A pool made with a smaller block to
+keep its stripe equal to it is not tested.
+
+## md's copy speed
+
+Words: md **copies** onto a leg that joins a group's array: a repair's new
+leg, a leg a forced start wiped, or a leg back from a short absence. Two
+settings bound its speed, in KiB per second: a minimum and a maximum.
+
+When: a copy slows the hosts' IO too much, or you want it to end sooner;
+after a dead disk node starts a copy in every group it held, all at about
+the same time.
+
+What dnv does alone: the agents set no copy speed. md's own settings rule:
+the sysctls `dev.raid.speed_limit_min` and `dev.raid.speed_limit_max` of each
+controller node, 1000 and 200000 on the lab's controller nodes, and an
+array's own `md/sync_speed_min` and `md/sync_speed_max`, which override them
+until the array stops. A failover and a step of the level to `NO_REDUND`
+and back start the array anew, with no setting of its own. The
+md check runs at the same settings. A migration's copy is not md's: its
+speed is set at its create ([Move a leg to another disk node](#move-a-leg-to-another-disk-node)).
+
+Safe steps, as root on the primary's controller node:
+
+1. Find the array: `res_name` of the group's row under
+   `cntlr_info.grp_id_to_md_raid` in
+   `dnvctl cntlr inspect --id <primary cntlr id>`, such as `/dev/md/<name>`.
+   `readlink -f /dev/md/<name>` prints the kernel's name for it, such as
+   `/dev/md126`.
+2. Read it: `cat /sys/block/md126/md/sync_speed_min` and `sync_speed_max`
+   in the same folder print each limit with `(system)` while the array
+   follows the sysctls, or `(local)` once it has its own; `sync_speed` and
+   `sync_completed` show the copy's speed and how far it is.
+3. Slow or speed one array: write a number to
+   `/sys/block/md126/md/sync_speed_max`, and to `sync_speed_min` when it
+   must stay below the minimum, such as
+   `echo 10000 > /sys/block/md126/md/sync_speed_max`. Write `system` to
+   either to give it back to the sysctls.
+4. For every array of a controller node: `sysctl -w dev.raid.speed_limit_max=<KiB per second>`
+   on it, and on every controller node a failover can move the arrays to.
+   It lasts until the machine restarts unless it is in a file under
+   `/etc/sysctl.d/`.
+
+Steps that can lose data: none writes data, but a low maximum keeps a group
+longer on one full copy, and a second fault in that time can lose it.
+
+Tested: the e2e suite's copy case, stages 05 and 06, slows one array's copy
+by writing its own two settings on the primary, reads them back as
+`(local)`, and gives them back with the word `system`; it passed in the lab
+on 2026-11-21, where the sysctls read 1000 and 200000. The sysctls are not
+tested.
+
+## The md check's mismatch count
+
+The md check is md's own read of both legs of each group's array, which the
+worker asks of the primary for one group at a time, every 30 days at the
+default (`dnvctl cluster create --md-check-days`, where 0 turns it off). md
+counts in `/sys/block/<md device>/md/mismatch_cnt` the sectors where the
+legs differ. The count means nothing, and dnv does not read it: dnv zeroes a
+data leg only in its first blocks, so the legs differ wherever the pool has
+not written, and the pool never reads a block it has not written. What
+counts is md's bad-block list of each leg, which `dnvctl group inspect`
+shows and `dnvctl cluster get-status` lists as a `group` line. dnv never
+asks md for its `repair` action, and nothing here needs it.
+
+Tested: the cn agent suite's redund case, stage `mdcheck`, runs a check
+over a leg with sectors that fail and reads a count of 8 or more where a
+read failed, besides the regions never written. It passed in the lab on
+2026-11-21.
+
+## One pool for each volume
+
+When: before you give each volume a pool of its own, as the CSI driver,
+dnv's driver for Kubernetes, does for every Kubernetes volume, rather than
+many volumes in one pool. A pool
+per volume keeps each volume's data apart, as dnv promises between pools.
+
+What it costs, for the CSI driver's shape of one slice, RAID1 and two
+cntlrs, from dnv's ceilings and code:
+
+- Two cntlrs, on two controller nodes. A controller node holds at most
+  256 cntlrs, so a cluster holds at most 128 such volumes for each
+  controller node it has. A cluster holds at most 4096 pools, a deleted
+  one counted until its drain ends.
+- Four sides at the create, a side on each leg of the meta group and of the
+  first data group; two more for each group auto-grow adds, and one more for
+  each migration's new side, repair's new leg and retired leg. A disk node
+  holds at most 1024 sides.
+- Whole extents: one for the meta group, and on every leg at least one for
+  the first data group, however small the volume. The CSI driver makes the
+  first data group an eighth of the volume, rounded up to whole extents, and
+  auto-grow adds groups of that size, so a full volume has 4 to 18 legs,
+  besides those of a meta group auto-grow adds.
+- Every cntlr connects to every leg: 8 to 36 NVMe-oF connections from the
+  controller nodes to the disk nodes for each volume.
+- The worker checks each cntlr and each side every check round, 2 seconds
+  at the default: 6 to 20 such objects for each volume.
+
+How to confirm: `dnvctl cluster get-capacity --leg-cnt 2 --cntlr-cnt 2 --slice-cnt 1`
+says how many more such pools fit and which limit the cluster reaches
+first ([The cluster's capacity](#the-clusters-capacity)).
+
+What dnv does alone: the worker drives each pool on its own. Building many
+pools at once makes failovers of pools that have built
+([the introduction](introduction.md#status-and-limits) gives the times).
+
+Safe steps: a storage class, the Kubernetes record that names the cntlrs of
+each volume's pool, with one cntlr, `cntlrs: "1"`, doubles the volumes the
+controller nodes can hold, at the cost of
+[A one-cntlr Kubernetes volume after a cntlr replacement](#a-one-cntlr-kubernetes-volume-after-a-cntlr-replacement).
+Many volumes in one pool share its cost, and their data is not kept apart
+from each other.
+
+Tested: the e2e suite's many-pools case, which runs only when it is named,
+built and cut 8,
+32 and 64 pools of this shape on the lab VMs; the csi suite's volume case
+checks the capacity Kubernetes shows; the size step tool,
+`integtest/size_step.sh`, reached 256 cntlrs on one controller node and
+1024 sides on one disk node with no IO. The counts for each volume above are
+read from the code, not measured.
 
 ## Change a volume's hosts
 
@@ -2702,8 +3662,8 @@ Safe steps:
    `dnvctl cn set-disabled --addr <addr> --disabled`.
 2. Empty a disk node: delete the storage pools that have a leg on it, or
    move each such leg to another disk node with a migration
-   (`dnvctl migr create`, then `dnvctl migr finish`; the steps of that flow
-   are not written yet). `dnvctl dn get --addr <addr>` lists each side on
+   ([Move a leg to another disk node](#move-a-leg-to-another-disk-node)).
+   `dnvctl dn get --addr <addr>` lists each side on
    the node under `dn_conf.side_ptr_list`, with the `sp_id` of its pool,
    its `leg_id` and its `side_id`. `dnvctl sp find-names --ids <sp_id>`
    prints the name of the pool, the name that `--sp` takes. No migration

@@ -760,8 +760,11 @@ has not started is refused with `--force` or without, and `migr cancel` is
 the way out (`architecture.md`, Migrations). `migr cancel` with `--force`
 sends `force` true, the only way to cancel once the cutover has started:
 the old side then serves its content as of the cutover, and what that
-costs, the leg's repair in a group of more than one leg included, is
-`architecture.md`, Migrations. `migr get` prints the record
+costs, a leg md still counts whole and nothing copies again, and its one
+safe use after writes since the cutover, a source side gone for good in an
+md-raid1 group, followed by the leg's repair, are `architecture.md`,
+Migrations.
+`migr get` prints the record
 as stored, its `cutover_pending` included (CT4), which tells whether a
 finish can succeed yet.
 
