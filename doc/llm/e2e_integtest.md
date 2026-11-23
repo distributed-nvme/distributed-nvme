@@ -867,20 +867,43 @@ logged, and the volume reading as before, since no host IO ran in between
 (`architecture.md`, Migrations); the case relies on leg repair leaving a
 two-sided leg alone (`dnv-worker.md` AR8). A third migration of the same
 leg (raid1 only, as a leg's one side lost with its guest takes the slice
-with it) loses its destination's whole guest in the middle of its copy, held
-back by the same bucket: once the destination serves and the primary's path
-to it reads optimized, host0 writes a fio stamp over half a volume of its
-own and reads it back, md must read the group's array clean on the
-primary, as md writes its superblocks with a flush to every member when the
-array turns clean, and md's bitmap on the moved leg's member, read with the
-plain `mdadm --examine-bitmap`, must then read no dirty chunk, md's passes
-over its bitmap shortened to half a second while the step waits, as md
-clears a chunk's bit only after a flush to every member: the stamp is
-durable on every leg, the destination's dm-clone, whose flush commits its
-metadata, included, and a re-add of the member copies nothing onto it.
-With the copy still short of whole, the destination's guest is reset through the kernel's sysrq
-trigger, which takes every agent of the guest, its loop devices, its dm
-devices and its nvmet ports, and any other side of the pool it carries.
+with it) loses its destination's whole guest in the middle of its copy,
+held back by the same bucket. Once its pieces apply, the copy moves only
+the leg's meta region and the blocks slice 0's pool maps when the worker
+reads the leg's bitmap, before this step the origin's few; before they
+apply, a write that covers part of a block not yet copied has that block
+copied first, so the copy moves at least these. So before the create, while
+the source serves, host0 writes a fio stamp over a volume of its own past
+the part the stamp after the cutover takes, the volume's second half at one
+slice and its last two thirds above: each part covers the same share of
+every slice's thin device whatever the stripe, so the blocks this stamp
+gives the copy to move do not shrink as the slices grow, and the volume is
+larger above one slice, where the time from the cutover to the check comes
+near the copy that a volume of the one-slice size would give. These blocks
+are mapped at the worker's read whichever comes first of that read and the
+stamp after the cutover, and written again only by the stamp over the whole
+volume, with the bucket off. md must then hold that stamp flushed, as below
+for the stamp after the cutover, so that md has no write of its own to send
+the moved leg in the migration's gap, where one that md sends failfast can
+fail the member (`architecture.md`, Known limits, A pool commit in a
+migration gap waits for the gap to end) and md's copy of the whole member
+back would make the copy whole before the check. Once the destination
+serves and the primary's path to it reads optimized, host0 writes a fio
+stamp over the volume's first part and reads it back, md must read the
+group's array clean on the primary, as md writes its superblocks with a
+flush to every member when the array turns clean, and md's bitmap on the
+moved leg's member, read with the plain `mdadm --examine-bitmap`, must then
+read no dirty chunk, md's passes over its bitmap shortened to half a second
+while the step waits, as md clears a chunk's bit only after a flush to
+every member: the stamp is durable on every leg, the destination's
+dm-clone, whose flush commits its metadata, included, and a re-add of the
+member copies nothing onto it. The copy must then still be short of whole,
+which rests on the bucket's rate against the lab's time from the cutover to
+that check; the step logs that time, from when it saw the cutover start,
+the regions left and whether the pieces' apply is logged. Then
+the destination's guest is reset through the kernel's sysrq trigger, which
+takes every agent of the guest, its loop devices, its dm devices and its
+nvmet ports, and any other side of the pool it carries.
 host0 makes no IO from the reset until the leg serves again. Once the guest
 answers under a new boot id it gets its per-boot preparation (Preflight)
 and its agents start again over their backing files and stores, each
@@ -891,11 +914,12 @@ since just before the reset, by the member device's own count of written
 sectors, no more than a bound with room for its superblock and bitmap pages
 and far below the member's data area, so md took the member back by its
 bitmap and copied nothing onto it; with the bucket off the copy must end and
-the migration be finished. Then host0 reads the stamp back through the
-moved leg alone, with the write-mostly flag on the other leg's member as
-for the first migration, so every write fio was told was done before the
-reset reads back from what the reset guest kept, and writes a stamp
-over the whole volume, which reads back through that leg too. The same
+the migration be finished. Then host0 reads the first part's stamp back
+through the moved leg alone, with the write-mostly flag on the other leg's
+member as for the first migration, so every write of it, which fio was
+told was done before the reset, reads back from what the reset guest kept,
+and writes a stamp over the whole volume, over the stamp before the create
+unread, which reads back through that leg too. The same
 guest, which now carries the moved leg's one side, is then reset under
 writes md has not flushed (raid1 only): host0's stamped writer runs on a
 volume of its own, made once the pool has room for it under its grow mark,

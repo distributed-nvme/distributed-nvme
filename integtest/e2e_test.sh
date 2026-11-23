@@ -7014,26 +7014,31 @@ fwrite_stop() {
 # 4 KiB, each 4 KiB stamped with its own offset, so a later read through any
 # device that keeps the offsets, the volume written or a clone of it, checks
 # every block's place and content. Each verb runs fio once and waits for it:
-# direct IO, one request of <bs> bytes in flight, from the device's start,
-# with no saved verify state (the write is whole or the stage fails). The
-# verify is the same job with verify_only, the same job name and options
-# giving every block the same verify header, and must read the whole size
-# back. Both run in $STAMP_DIR, which each verb removes when fio is done and
-# host_cleanup's stamp_stop removes too.
+# direct IO, one request of <bs> bytes in flight, from the device's start or
+# from an <offset> stamp_write is given, with no saved verify state (the
+# write is whole or the stage fails). The verify is the same job with
+# verify_only, the same job name and options giving every block the same
+# verify header, and must read the whole size back; stamp_verify takes no
+# offset, so it checks only a stamp written from the device's start, as the
+# verify header of each block carries its offset. Both run in $STAMP_DIR,
+# which each verb removes when fio is done and host_cleanup's stamp_stop
+# removes too.
 STAMP_DIR="$WORK/stamp"
 
-# stamp_fio <write|verify> <node> <size bytes> <bs bytes> runs the job and
-# answers `rc=<fio's exit code> bytes=<io_bytes of the job's write or read
-# side, or none>`, then the tail of fio's errors. The write leaves out fio's
-# verify phase (do_verify=0); the verify keeps it, as verify_only runs that
-# phase alone and do_verify=0 would skip it, reading nothing.
+# stamp_fio <write|verify> <node> <size bytes> <bs bytes> [offset bytes]
+# runs the job over <size> bytes from <offset>, the device's start when left
+# out, and answers `rc=<fio's exit code> bytes=<io_bytes of the job's write
+# or read side, or none>`, then the tail of fio's errors. The write leaves
+# out fio's verify phase (do_verify=0); the verify keeps it, as verify_only
+# runs that phase alone and do_verify=0 would skip it, reading nothing.
 stamp_fio() {
-	local mode=$1 node=$2 size=$3 bs=$4 rc=0 side=write bytes
+	local mode=$1 node=$2 size=$3 bs=$4 offset=${5:-0} rc=0 side=write bytes
 	local -a extra=(--do_verify=0)
 	if [ "$mode" = verify ]; then
 		extra=(--verify_only=1)
 		side=read
 	fi
+	[ "$offset" = 0 ] || extra+=(--offset="$offset")
 	rm -rf "$STAMP_DIR"
 	mkdir -p "$STAMP_DIR" || return 1
 	(
@@ -7065,12 +7070,13 @@ stamp_node() {
 	echo "$node"
 }
 
-# stamp_write <uuid> <size bytes> <bs bytes> stamps the first <size> bytes of
-# the namespace whose uuid is <uuid>: `stamp=written rc=<n> bytes=<n>`.
+# stamp_write <uuid> <size bytes> <bs bytes> [offset bytes] stamps <size>
+# bytes of the namespace whose uuid is <uuid> from <offset>, its first <size>
+# bytes when left out: `stamp=written rc=<n> bytes=<n>`.
 stamp_write() {
 	local node out
 	node=$(stamp_node "$1") || return 1
-	out=$(stamp_fio write "$node" "$2" "$3") || return 1
+	out=$(stamp_fio write "$node" "$2" "$3" "${4:-0}") || return 1
 	echo "stamp=written $out"
 }
 
@@ -17770,18 +17776,21 @@ copy_primary_cn_id() {
 #
 # host_stamp_run runs stamp_write or stamp_verify (the host helper) on
 # host<h> for the first <bytes> bytes of the namespace whose uuid is <uuid>,
-# under the watchdog with WAIT_STAMP, and keeps the helper's answer in
-# STAMP_OUT and the status in STAMP_RC: the caller may have to undo a step of
-# its own before it judges them (host_stamp_judge). host_stamp is the two in
-# one. A stamp's fio is host IO like any other, so rule 5 holds: none runs on
-# a host whose namespace is parked or suspended.
+# or for a write <bytes> bytes from <offset>, under the watchdog with
+# WAIT_STAMP, and keeps the helper's answer in STAMP_OUT and the status in
+# STAMP_RC: the caller may have to undo a step of its own before it judges
+# them (host_stamp_judge). host_stamp is the two in one. A stamp's fio is
+# host IO like any other, so rule 5 holds: none runs on a host whose
+# namespace is parked or suspended.
 STAMP_OUT=""
 STAMP_RC=0
 
-host_stamp_run() { # <write|verify> <h> <uuid> <bytes>
+host_stamp_run() { # <write|verify> <h> <uuid> <bytes> [offset]
+	local off=""
+	[ "${5:-0}" = 0 ] || off=" $5"
 	STAMP_RC=0
 	STAMP_OUT=$(ssh_host_watched "$2" \
-		"bash $HELPER stamp_$1 $3 $4 $STAMP_BS" "$WAIT_STAMP") || STAMP_RC=$?
+		"bash $HELPER stamp_$1 $3 $4 $STAMP_BS$off" "$WAIT_STAMP") || STAMP_RC=$?
 }
 
 # host_stamp_judge dies unless the run host_stamp_run kept ended with fio's
@@ -17808,8 +17817,8 @@ host_stamp_judge() { # <write|verify> <h> <bytes> <what>
 	log "  host$2: $4, $3 bytes $word by fio"
 }
 
-host_stamp() { # <write|verify> <h> <uuid> <bytes> <what>
-	host_stamp_run "$1" "$2" "$3" "$4"
+host_stamp() { # <write|verify> <h> <uuid> <bytes> <what> [offset]
+	host_stamp_run "$1" "$2" "$3" "$4" "${6:-0}"
 	host_stamp_judge "$1" "$2" "$4" "$5"
 }
 
@@ -19063,43 +19072,84 @@ copy_mstamp_check() { # <leg id>
 # ---------------------------------------------------------------------------
 #
 # The leg copy step 4 moved migrates once more, under the same cap on its
-# source's port, and once the destination serves through its dm-clone and
-# the primary's path to it reads optimized, host0 writes a fio stamp over
-# the first half of a volume of its own and reads it back, and the step waits
-# for md to read the group's array clean on the primary and then for md's
-# bitmap on the moved leg's member to read no dirty chunk (md_bitmap_dirty),
-# md's passes over its bitmap shortened meanwhile (md_bitmap_time): md
-# writes its superblocks with a flush to each member when the array turns
-# clean, and clears a chunk's bit only with a flush to every member first,
-# so the stamp is durable on every leg then, the destination's dm-clone
-# included (a flush commits its metadata), and a re-add of the member after
-# the reset copies nothing onto it. With the copy not yet whole, the
-# destination's whole guest is reset (power_reset): every agent of the
-# guest, its loop devices, its dm devices and its nvmet ports go, and with
-# them any other side of the pool the guest carries. host0 does no IO from
-# there until the leg serves again, as a host read while a leg's only
-# serving side is gone blocks out of `timeout`'s reach. Once the guest
-# answers under a new boot id, its per-boot preparation runs (preflight_node)
-# and its agents start again over their backing files and stores
-# (start_dn_vm), each reaching its node state; the destination must serve
-# again through a dm-clone, the primary's path to it read optimized, md hold
-# every group of the pool whole on the primary, having written at most
-# COPY_READD_MAX_SECTORS to the moved leg's member from before the reset, so
-# it took the member back by its bitmap and copied nothing onto it, and,
-# with the cap off, the copy end, and the migration is finished. Then host0
-# reads the stamp back through the moved leg alone (copy_leg_stamp_read):
-# every write fio was told was done before the crash must read back from
-# the side whose guest was reset; and it writes a stamp over the whole volume once the leg serves
-# again and reads that back through the same leg too. The volume and its
+# source's port. Before the migration's create, while the source serves and
+# before the cap, host0 writes a fio stamp over a volume of its own past its
+# first COPY_DSTAMP_CUT_UNITS TD_UNIT, for the copy to move, and the step
+# waits until md holds it flushed (copy_md_flushed, below), so that md has
+# no write of its own to send the moved leg until the stamp after the
+# cutover. Once the destination serves through its dm-clone and the
+# primary's path to it reads optimized, host0 writes a fio stamp over the
+# volume's first COPY_DSTAMP_CUT_UNITS TD_UNIT and reads it back, and the
+# step waits until md holds that stamp flushed too (copy_md_flushed): md
+# reads the group's array clean on the primary and then md's bitmap on the
+# moved leg's member reads no dirty chunk (md_bitmap_dirty), md's passes
+# over its bitmap shortened meanwhile (md_bitmap_time): md writes its
+# superblocks with a flush to each member when the array turns clean, and
+# clears a chunk's bit only with a flush to every member first, so the stamp
+# is durable on every leg then, the destination's dm-clone included (a flush
+# commits its metadata), and a re-add of the member after the reset copies
+# nothing onto it. With the copy not yet whole, the destination's whole
+# guest is reset (power_reset): every agent of the guest, its loop devices,
+# its dm devices and its nvmet ports go, and with them any other side of the
+# pool the guest carries. host0 does no IO from there until the leg serves
+# again, as a host read while a leg's only serving side is gone blocks out
+# of `timeout`'s reach. Once the guest answers under a new boot id, its
+# per-boot preparation runs (preflight_node) and its agents start again over
+# their backing files and stores (start_dn_vm), each reaching its node
+# state; the destination must serve again through a dm-clone, the primary's
+# path to it read optimized, md hold every group of the pool whole on the
+# primary, having written at most COPY_READD_MAX_SECTORS to the moved leg's
+# member from before the reset, so it took the member back by its bitmap and
+# copied nothing onto it, and, with the cap off, the copy end, and the
+# migration is finished. Then host0 reads the stamp after the cutover back
+# through the moved leg alone (copy_leg_stamp_read): every write of it,
+# which fio was told was done before the crash, must read back from the side
+# whose guest was reset; and it writes a stamp over the whole volume once
+# the leg serves again, which writes over the stamp before the create
+# unread, and reads that back through the same leg too. The volume and its
 # namespace go at the end. Without redundancy the step is skipped: a leg's
 # only side lost with its guest takes the slice with it (the data loss
 # scope.md accepts).
+#
+# THE COPY TO HOLD BACK. Once the pieces apply, the copy moves only the
+# leg's meta region, DATA_META_BLOCKS regions, and the regions of the pool
+# blocks that a thin device maps when the worker reads the leg's bitmap
+# (GetLegBm (agent/cnagent/bitmapread.go)); the pieces mark every other
+# region copied, a region being one pool block of DATA_BLOCK_SIZE. Before
+# they apply, a write that covers part of a region not yet copied has
+# dm-clone copy that region first, so the counts below are the least the
+# copy moves. In slice 0's pool only $TD0's blocks are mapped here, two
+# above one slice and four at one, so without more the copy is whole within
+# seconds of the cutover. The volume is COPY_DSTAMP_UNITS TD_UNIT at one
+# slice and COPY_DSTAMP_WIDE_UNITS above, a TD_UNIT being one MiB a slice
+# and a whole number of slice_cnt x stripe_size (setup_create_sp): whatever
+# the stripe, its TD_UNIT u covers MiB u of every slice's thin device. So
+# the stamp before the create covers MiB COPY_DSTAMP_CUT_UNITS onwards of
+# every slice's thin device: 8 pool blocks in slice 0 at one slice, 16
+# above. They are mapped before the create, so the worker's read finds them
+# written whichever comes first of that read and the stamp after the
+# cutover, and nothing writes them again before the stamp over the whole
+# volume, with the cap off. The copy is then at least 15 regions at one
+# slice and 21 above, every byte of them through the cap: about 16 s and
+# 23 s at COPY_MIGR_RATE_KBIT with the packets' headers. The volume is larger
+# above one slice, as there the time from the cutover to the check comes
+# near the copy of the 13 regions a second half of 16 TD_UNIT gives; at one
+# slice the step keeps that volume, whose copy there lasts far longer than
+# the time to the check. The volume holds no more of slice 0's pool than
+# step 4's stamp, whose room under the grow mark copy_mstamp_create asserts,
+# and the run cap takes it on every leg; what the moved leg's old side keeps
+# of the stamp before the create, a MiB a TD_UNIT past the first
+# COPY_DSTAMP_CUT_UNITS, falls within the room the cap gives the copy. The
+# check logs the time from when the step saw the cutover start to it, the
+# regions left and the pieces' apply, so that every run shows its margin.
 TD_DSTAMP=s4
 DSTAMP_IDX=8
 UUID_DSTAMP=2b6f0cc9-04d2-4f1a-9c3e-1d0a5e7b8c0a
 MIGR2=m2
 MIGR2_ID=""
 COPY_DSTAMP_UNITS=16
+COPY_DSTAMP_WIDE_UNITS=24
+COPY_DSTAMP_CUT_UNITS=8
 COPY_DCRASH_BOOT_WAIT=180
 # How long md may take to clear the stamp's bit and write the bitmap, a few
 # of its daemon passes, which the step shortens to COPY_BITMAP_TIME seconds
@@ -19187,6 +19237,36 @@ copy_readd_writes() { # <before> <member>
 	fi
 }
 
+# copy_md_flushed waits until md on the primary holds every write made so
+# far durable on the member <member>, leg <leg id> of group <gid>: md must
+# read the group's array clean (copy_md_clean_on), as md writes its
+# superblocks with a flush to every member when the array turns clean, and
+# then md's bitmap on the member must read no dirty chunk
+# (copy_bitmap_clean). md clears a chunk's bit some daemon passes after its
+# last write and writes the page with a flush to every member first, so a
+# bitmap with no dirty chunk on the leg means md holds the writes durable
+# there, a re-add of the member copies nothing, and md has no write of its
+# own left to send the member until the next write. md's passes come every
+# 5 s by default; they are shortened to COPY_BITMAP_TIME while the step
+# waits (md_bitmap_time), and md gets its own time back after.
+copy_md_flushed() { # <gid> <leg id> <member>
+	local out btime
+	wait_until "$WAIT_HOST" \
+		"md on cn$PRIMARY_CN to read group $1's array clean, its superblocks written with a flush to every member" \
+		copy_md_clean_on "$PRIMARY_CN" "$3"
+	out=$(helper_cn "$PRIMARY_CN" md_bitmap_time "$3" "$COPY_BITMAP_TIME") ||
+		die "cn$PRIMARY_CN: shortening md's bitmap passes on group $1's array failed: $out"
+	btime=$(kv_of "$out" was)
+	log "  md's bitmap passes on group $1's array: $out"
+	COPY_BITMAP_LAST=""
+	wait_until "$COPY_BITMAP_WAIT" \
+		"md's bitmap on leg $2's member $3 to read no dirty chunk on cn$PRIMARY_CN" \
+		copy_bitmap_clean "$PRIMARY_CN" "$3"
+	out=$(helper_cn "$PRIMARY_CN" md_bitmap_time "$3" "$btime") ||
+		die "cn$PRIMARY_CN: giving md its bitmap passes back on group $1's array failed: $out"
+	log "  md's bitmap passes on group $1's array back: $out"
+}
+
 copy_migr_crash() {
 	if [ "$REDUND" != raid1 ]; then
 		log ""
@@ -19197,9 +19277,9 @@ copy_migr_crash() {
 	fi
 	stage 04b "a disk node guest crash during a migration's copy: a stamp flushed after the cutover, the destination's guest reset, its agents back, the copy to its end, the stamp read through the moved leg"
 	local gid legid sideid saddr srcv srck srctraddr srctrsvcid dstside dstaddr
-	local v k legnqn dsttraddr dsttrsvcid bytes half tdid nsid out boot t0 secs
-	local det frac member grps before_vms dstvm straddr strsvcid wbefore wrote
-	local btime
+	local v k legnqn dsttraddr dsttrsvcid units bytes cut pre tdid nsid out boot
+	local t0 secs det frac member grps before_vms dstvm straddr strsvcid wbefore
+	local wrote tcut tserve tchk left applied margin
 
 	sp_refresh
 	sp_read_roles
@@ -19220,10 +19300,19 @@ copy_migr_crash() {
 	# shellcheck disable=SC2207
 	grps=($(sp_field "[$SP_GRP_PATH | .grp_id] | .[]"))
 
-	# The stamp's volume, made while host IO is legal.
-	bytes=$((COPY_DSTAMP_UNITS * TD_UNIT))
-	half=$((bytes / 2))
-	assert_eq "$((half % STAMP_BS))" 0 "half the crash stamp's volume is a whole number of fio requests"
+	# The stamp's volume, made while host IO is legal: larger above one
+	# slice, for the copy to move more (THE COPY TO HOLD BACK, above).
+	units=$COPY_DSTAMP_UNITS
+	if [ "$SLICE_CNT" -gt 1 ]; then
+		units=$COPY_DSTAMP_WIDE_UNITS
+	fi
+	assert_le "$units" "$COPY_MSTAMP_UNITS" \
+		"the crash stamp's volume, $units TD_UNIT, holds no more of slice 0's pool than step 4's stamp, whose room copy_mstamp_create asserts"
+	bytes=$((units * TD_UNIT))
+	cut=$((COPY_DSTAMP_CUT_UNITS * TD_UNIT))
+	pre=$((bytes - cut))
+	assert_eq "$((cut % STAMP_BS))" 0 "the crash stamp after the cutover is a whole number of fio requests"
+	assert_eq "$((pre % STAMP_BS))" 0 "the crash stamp before the create is a whole number of fio requests"
 	ctl_ok td create --name "$TD_DSTAMP" --size "$bytes"
 	tdid=$(jq_of "$CTL_OUT" '.td_id')
 	wait_until "$WAIT_PROVISION" "$TD_DSTAMP to report created" td_created "$TD_DSTAMP"
@@ -19233,11 +19322,27 @@ copy_migr_crash() {
 		"$SS0_ID" "$nsid"
 	host_wait_ana 0 "$SS0" "$PRIMARY_TRADDR" "$UUID_DSTAMP" optimized
 	wait_dev 0 "$UUID_DSTAMP"
-	# The stamps land on every leg, and the destination copies the leg's
-	# written blocks, the stamp's among them.
+	# The stamps land on every leg; the destination copies the leg's written
+	# blocks, the meta region and $TD0's among them, and the moved leg's old
+	# side keeps its share of the stamp before the create, a MiB a TD_UNIT
+	# of it: the further volume and 16 MiB hold both.
 	RUN_CAP_BYTES=$((RUN_CAP_BYTES + (LEGS + 1) * bytes + (16 << 20)))
 	log "  the run cap takes the crash stamp on every leg and its copy:" \
 		"$RUN_CAP_BYTES bytes"
+	# The copy's own blocks: the volume past its first
+	# COPY_DSTAMP_CUT_UNITS TD_UNIT, while the source serves and before the
+	# cap, mapped when the worker reads the leg's bitmap, so the copy moves
+	# them. md then holds them flushed, so that it has no write of its own
+	# to send the moved leg in the migration's gap, where an IO it sends
+	# failfast to the source can fail the member (architecture.md, Known
+	# limits, A pool commit in a migration gap waits for the gap to end),
+	# and md's copy of the whole member back onto the new side would make
+	# the copy whole before the check.
+	host_stamp write 0 "$UUID_DSTAMP" "$pre" \
+		"a stamp over $TD_DSTAMP from MiB $((cut >> 20)) to its end, before the migration, for its copy to move" \
+		"$cut"
+	member=$(cn_leg_name "$PRIMARY_CN_ID" "$SP_ID" "$legid")
+	copy_md_flushed "$gid" "$legid" "$member"
 
 	srctraddr=$(sp_field "$COPY_GRP0.leg_list[0].side_list[0].nvme_tr_conf.tr_addr")
 	srctrsvcid=$(sp_field "$COPY_GRP0.leg_list[0].side_list[0].nvme_tr_conf.tr_svc_id")
@@ -19273,6 +19378,7 @@ copy_migr_crash() {
 	wait_until "$WAIT_PROVISION" \
 		"the worker to start the cutover of migration $MIGR2" \
 		migr_cutover_started "$MIGR2"
+	tcut=$(copy_fo_now_ms)
 	legnqn=$(side_to_cn_nqn "$SP_ID" "$legid" "$PRIMARY_CN_ID")
 	dsttraddr=$(sp_field \
 		"$COPY_GRP0.leg_list[0] | [.side_list[] | select(.side_id == \"$dstside\")] | .[0].nvme_tr_conf.tr_addr")
@@ -19282,54 +19388,58 @@ copy_migr_crash() {
 	wait_until "$WAIT_PROVISION" \
 		"the migration's destination side $dstside to serve through its dm-clone" \
 		migr_dst_serving "$dstside"
+	tserve=$(copy_fo_now_ms)
 	cn_wait_ana "$PRIMARY_CN" "$legnqn" "$dsttraddr" "$dsttrsvcid" optimized \
 		"$WAIT_PROVISION"
 
-	# The stamp, through the leg's new side, then md clean: the flush.
-	host_stamp write 0 "$UUID_DSTAMP" "$half" \
-		"the crash stamp over the first half of $TD_DSTAMP, after the cutover"
-	host_stamp verify 0 "$UUID_DSTAMP" "$half" \
+	# The stamp, through the leg's new side, then md clean: the flush. md's
+	# shortened passes let the throttled copy still be short of whole at the
+	# reset, and md has its own time back before the reset. A bitmap with
+	# no dirty chunk on the leg means a re-add of the member after the reset
+	# copies nothing, so the read below reads what the reset guest kept, not
+	# md's copy of the other leg.
+	host_stamp write 0 "$UUID_DSTAMP" "$cut" \
+		"the crash stamp over the first $((cut >> 20)) MiB of $TD_DSTAMP, after the cutover"
+	host_stamp verify 0 "$UUID_DSTAMP" "$cut" \
 		"the crash stamp read back before the crash"
-	member=$(cn_leg_name "$PRIMARY_CN_ID" "$SP_ID" "$legid")
-	wait_until "$WAIT_HOST" \
-		"md on cn$PRIMARY_CN to read group $gid's array clean, its superblocks written with a flush to every member" \
-		copy_md_clean_on "$PRIMARY_CN" "$member"
-	# md's passes over the bitmap come every 5 s by default, and it clears a
-	# bit some passes after the chunk's last write; the step shortens them
-	# while it waits, so the throttled copy is still short of whole at the
-	# reset, and gives md its own time back before the reset.
-	out=$(helper_cn "$PRIMARY_CN" md_bitmap_time "$member" "$COPY_BITMAP_TIME") ||
-		die "cn$PRIMARY_CN: shortening md's bitmap passes on group $gid's array failed: $out"
-	btime=$(kv_of "$out" was)
-	log "  md's bitmap passes on group $gid's array: $out"
-	# md clears a chunk's bit some daemon passes after its last write and
-	# writes the page with a flush to every member first: a bitmap with no
-	# dirty chunk on the leg means md holds the stamp durable there, and a
-	# re-add of the member after the reset copies nothing, so the read below
-	# reads what the reset guest kept, not md's copy of the other leg.
-	COPY_BITMAP_LAST=""
-	wait_until "$COPY_BITMAP_WAIT" \
-		"md's bitmap on leg $legid's member $member to read no dirty chunk on cn$PRIMARY_CN" \
-		copy_bitmap_clean "$PRIMARY_CN" "$member"
-	out=$(helper_cn "$PRIMARY_CN" md_bitmap_time "$member" "$btime") ||
-		die "cn$PRIMARY_CN: giving md its bitmap passes back on group $gid's array failed: $out"
-	log "  md's bitmap passes on group $gid's array back: $out"
+	copy_md_flushed "$gid" "$legid" "$member"
 	wbefore=$(copy_member_writes "$member") ||
 		die "cn$PRIMARY_CN: leg $legid's member $member's write count did not read"
+	# The pieces' apply, read ahead of the copied count so that the reset
+	# follows the count at once; it is logged, not asserted.
+	COPY_MIGR_DISCARDED=""
+	COPY_MIGR_APPLY_LAST=""
+	if copy_migr_discarded "$v" "$k" "$MIGR2_ID"; then
+		applied="the pieces' apply marked $COPY_MIGR_DISCARDED regions copied"
+	elif [ "$COPY_MIGR_DISCARDED" = 0 ]; then
+		applied="no whole apply of the pieces is logged on dn$v instance $k"
+	else
+		applied="dn$v instance $k's log did not read"
+	fi
 	det=$(helper_dn "$v" migr_clone_status "$(hex16 "$SP_ID")" \
 		"$(hex16 "$MIGR2_ID")") ||
 		die "dn$v: the migr_clone_status verb could not be run"
+	tchk=$(copy_fo_now_ms)
 	frac=$(hyd_fraction "$det")
 	case "$frac" in
 	*/*) ;;
 	*) die "dn$v: migration $MIGR2's dm-clone status reads '$det'" ;;
 	esac
+	left="?"
+	case "${frac%%/*}${frac##*/}" in
+	'' | *[!0-9]*) ;;
+	*) left=$((${frac##*/} - ${frac%%/*})) ;;
+	esac
+	margin="$(copy_fo_secs "$tcut" "$tchk")s after the step saw its cutover"
+	margin="$margin start and $(copy_fo_secs "$tserve" "$tchk")s after it read"
+	margin="$margin the destination serving; $applied"
 	if hyd_complete "$frac"; then
 		die "migration $MIGR2's dm-clone reads $frac regions copied before the" \
-			"crash: the cap of ${COPY_MIGR_RATE_KBIT}kbit on dn$srcv did not" \
-			"hold the copy back long enough"
+			"crash, $margin: the cap of ${COPY_MIGR_RATE_KBIT}kbit on dn$srcv" \
+			"did not hold the copy back long enough"
 	fi
-	log "  migration $MIGR2's dm-clone reads $frac regions copied; dn$v is reset now"
+	log "  migration $MIGR2's dm-clone reads $frac regions copied, $left left," \
+		"$margin; dn$v is reset now"
 
 	# The crash.
 	out=$(helper_dn "$v" power_reset) || die "dn$v: the power_reset verb failed: $out"
@@ -19388,10 +19498,11 @@ copy_migr_crash() {
 	strsvcid=$(sp_field "$COPY_GRP0.leg_list[0].side_list[0].nvme_tr_conf.tr_svc_id")
 	cn_wait_ana "$PRIMARY_CN" "$legnqn" "$straddr" "$strsvcid" optimized
 
-	# Every write fio was told was done before the crash reads back from the
-	# side whose guest was reset, then a stamp written after the leg serves
-	# again, over the whole volume, reads back from it too.
-	copy_leg_stamp_read "$legid" "$UUID_DSTAMP" "$half" \
+	# Every write of the stamp after the cutover, which fio was told was done
+	# before the crash, reads back from the side whose guest was reset, then
+	# a stamp written after the leg serves again, over the whole volume and
+	# so over the stamp before the create, reads back from it too.
+	copy_leg_stamp_read "$legid" "$UUID_DSTAMP" "$cut" \
 		"the crash stamp written before dn$v's reset"
 	host_stamp write 0 "$UUID_DSTAMP" "$bytes" \
 		"a stamp over the whole of $TD_DSTAMP, after the leg serves again"
