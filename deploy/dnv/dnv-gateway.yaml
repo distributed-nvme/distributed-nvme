@@ -8,10 +8,12 @@
 # name's ending, .yaml: dnv reads a settings file in the format its ending
 # names and refuses an ending it does not know, such as .conf.
 #
-# The address and port the gateway listens on for dnvctl and the CSI driver.
+# The address and port the gateway listens on for dnvctl and the CSI driver:
+# an address on the back network, which hosts must not reach
+# (architecture.md [D19]; the operations doc's "The networks").
 grpc-address: 192.0.2.10:29527
-# The etcd members, as one string of addresses separated by commas, not as
-# a list.
+# The etcd members, on the back network too, as one string of addresses
+# separated by commas, not as a list.
 etcd-endpoints: "192.0.2.10:2379,192.0.2.11:2379,192.0.2.12:2379"
 # How much it logs: debug, info or warn.
 # log-level: info

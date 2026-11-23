@@ -4638,8 +4638,11 @@ it, which could later be taken back or force-started over blocks it never
 copied; ending the migration first keeps every later step on legs of one
 side, and the two safe directions are exactly the cases where one side is
 the whole leg. A migrating leg whose serving path dies is first cut down to
-one path by the primary (`cnagent.md` CN10, The cut of a migrating leg's
-path), so md fails its member and the leg's probe reads it dead.
+one path by the primary while md holds another member of its group in
+sync (`cnagent.md` CN10, The cut of a migrating leg's path), so md fails
+its member and the leg's probe reads it dead; with no other member in
+sync nothing cuts it, its probe stalls and reads `ERROR` (`cnagent.md`
+CN11), and the end of its migration takes the leaving side's path away.
 
 The create then runs `FindDnCandidatesAntiAffine` with the group's
 `ext_cnt`, a candidate count of `dn_batch_size`, a required count of one
@@ -7242,7 +7245,9 @@ caught.
   cutover with a copy not shown whole, the source misses the writes since
   the cutover and the destination the blocks not yet copied, so the pass
   logs `migration_copy_not_whole` on every pass and the group runs one leg
-  short until both sides answer and the primary puts the leg back, the copy
+  short, or, with no other member in sync, its writes to the leg wait
+  (`architecture.md`, Known limits), until both sides answer and the
+  primary puts the leg back, the copy
   then going on to its end (`cnagent.md` CN12), or until an operator ends
   the migration (`architecture.md`, Known limits; `operations.md`, Ending a
   migration with force). No reaction

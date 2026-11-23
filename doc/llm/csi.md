@@ -349,13 +349,16 @@ queues while a standby's path is left (`osclient.md`, Exported raw helpers and
 the probe-IO carve-out) and otherwise waits with no error, since the plugin's
 connect never gives up (CSI14); on a pool with an enabled standby of a zero
 health epoch the operator ends that by disabling first each such standby
-the node cannot reach, since `dnv-worker.md` AR5 takes the smallest such
-`cntlr_id` whatever the node sees and a standby's disable starts no
-failover, then the primary (`UpdateCntlrEnabled`), which starts a failover
-with no threshold wait (`dnv-worker.md` AR5), and by enabling each
-disabled cntlr again once the node reaches it, since a disabled cntlr is
-never a candidate (`dnv-worker.md` AR3) and an enabled one is; on a pool
-with no such standby a disable starts no failover
+that a node using the pool cannot reach, since `dnv-worker.md` AR5 takes
+the smallest such `cntlr_id` whatever the nodes see and a standby's
+disable starts no failover, then, while such a standby that every node
+using the pool reaches is left, the primary (`UpdateCntlrEnabled`), which
+starts a failover with no threshold wait (`dnv-worker.md` AR5), and by
+enabling each disabled cntlr again once every such node reaches it, since a
+disabled cntlr is never a candidate (`dnv-worker.md` AR3) and an enabled
+one is; where none that every such node reaches is left, the operator
+disables nothing more and enables again each standby it disabled, since on
+a pool with no such standby a disable starts no failover
 (`dnv-worker.md` AR5) and takes the primary out of the discovery records
 (`architecture.md`, Cntlrs), so the follower drops the node's last path and
 the mount does not survive it (CSI14; `operations.md`, A fault only a host

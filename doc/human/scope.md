@@ -108,12 +108,12 @@ md never trusts an old superblock.
 **What the promise does not cover.**
 
 - **The network and root are trusted.** dnv checks no user. A host is
-  known by its NQN alone, and a host can claim any NQN. So the promise
-  needs hosts on which no tenant has root: root on a host can claim the
-  NQN of another host and read and write that host's volumes. All traffic
-  is plain text. Root on a node, and anyone who reaches a disk node's
-  NVMe/TCP port, can read the old bytes of a recycled extent from a raw
-  disk or from a leg. Anyone who reaches an agent's port can send it a
+  known by its NQN alone, and a host can claim any NQN. Root on a host
+  can claim the NQN of another host and read and write that host's
+  volumes. The promise does not cover that, so keeping tenants apart also
+  needs hosts on which no tenant has root. All traffic is plain text. Root
+  on a node, and anyone who reaches a disk node's NVMe/TCP port, can read
+  the old bytes of a recycled extent from a raw disk or from a leg. Anyone who reaches an agent's port can send it a
   desired state. dnv's programs log in to etcd with no password and no
   certificate, so etcd must accept such clients and stay on the trusted
   network. Deploy dnv on an isolated network you trust, where hosts reach
@@ -121,10 +121,15 @@ md never trusts an old superblock.
   Procedure written: [the operations doc](operations.md#the-networks),
   the document of procedures an operator follows by hand, says who
   connects to whom and gives a firewall example,
-  `deploy/nftables/dnv-filter.nft`. The e2e suite at one slice and the
-  Kubernetes suite's cases but policy passed in the lab on 2026-11-22 with
-  the example loaded on every node and on the control plane, and the
-  example's drop counters, read after each run, showed no dropped packet.
+  `deploy/nftables/dnv-filter.nft`. The e2e suite at one slice passed in
+  the lab on 2026-11-22 with the example loaded on every node and on the
+  control plane, and so did every case of the Kubernetes suite except its
+  policy case, each in a run of its own. In the e2e suite's passing run,
+  each of its resets of a node guest took that guest's firewall table
+  away, as any reboot does, until a loop that ran beside the suite loaded
+  it again, within a minute of the guest's return. The example's drop
+  counters, read after each run, showed no dropped packet; a firewall
+  table loaded again counted drops only from its new load.
   For the Kubernetes suite the gateway's port was left open to the hosts,
   since one copy of the controller plugin, the part of the Kubernetes
   driver that calls the gateway, always runs on a host in the lab.
@@ -180,9 +185,9 @@ always sends a piece's position.
   it with force. Procedure written,
   [the operations doc](operations.md#ending-a-migration-with-force): force
   is right when the new side's agent alone cannot answer the proof of a
-  copy seen whole, and, in a RAID1 group, to end the migration toward a
-  disk node that is gone for good, so that a repair replaces the leg; not
-  tested as a whole.
+  copy seen whole, and, in a RAID1 group whose other leg md holds in sync,
+  to end the migration toward a disk node that is gone for good, so that a
+  repair replaces the leg; not tested as a whole.
 - **A forced migration cancel after the cutover.** A cancel after the
   cutover is refused unless forced, as the new side may hold the only copy
   of the leg's new writes. With force the old side serves its content as
@@ -191,15 +196,19 @@ always sends a piece's position.
   In a group of more than one leg the other legs hold those writes, but md
   does not know this leg is behind and counts it whole, so reads can
   return its old bytes. No call makes md copy the leg again: a repair is
-  refused for a leg with no health epoch, and a member md failed in the
-  switch is added back from md's record of the regions written while it
-  was out, which holds none of these. State: fix later, a way to have md
-  copy the leg again after a forced cancel. Until then the operator asks
-  for it with force. A forced cancel loses nothing when nothing has
-  written to the pool since the cutover. After writes,
-  [the operations doc](operations.md#ending-a-migration-with-force) gives
-  its one safe use: in a RAID1 group, when the old side's disk node is
-  gone for good, so that a repair replaces the leg.
+  refused for a leg with no health epoch, and a member that md failed when
+  the leg went back to its old side is added back from md's record of the
+  regions written while it was out, which holds none of these. State: fix
+  later, a way to have md copy the leg again after a forced cancel. Until
+  then this loss comes only from a cancel that the operator forces.
+  Procedure written,
+  [the operations doc](operations.md#ending-a-migration-with-force): a
+  forced cancel loses nothing when nothing has written to the pool since
+  the cutover, and after writes its one safe use is in a RAID1 group whose
+  other leg md holds in sync, when the old side's disk node is gone for
+  good and the copy is not whole, so that a repair replaces the leg. A copy
+  that is whole is finished with no force instead, since the gateway asks
+  only the new side's disk node for the proof.
 - **A forced start from an older copy restores one group, not the pool.**
   A forced start is an operator's start of a group's RAID1 array from one
   leg they name, when md will not start it by itself. In a data group,
@@ -214,7 +223,7 @@ always sends a piece's position.
   snapshot made since is lost, which the primary reports as an error. A
   start from a half-copied leg that md marked in sync serves, over the
   regions md never copied, what that leg holds there (section 5.2). State:
-  accepted. The operator asks for it. Procedure:
+  accepted. The operator asks for it. Procedure written:
   [the forced-start guide](operations.md#the-forced-start-guide) says which
   leg to choose and what an older copy costs.
 
@@ -307,7 +316,7 @@ Three more things belong with case 1:
 - **A clone whose clone meta group is lost stops.** The clone meta group
   holds the dm-clone's metadata. With no cntlr able to assemble it, no dm-clone is built. The
   clone's namespaces stay inaccessible and host IO queues. State:
-  accepted. Procedure: [the forced-start guide](operations.md#the-forced-start-guide), "A lost clone meta
+  accepted. Procedure written: [the forced-start guide](operations.md#the-forced-start-guide), "A lost clone meta
   group"; not tested.
 
 **An error is not a loss.** A write that fails with an error is not a data
@@ -669,7 +678,7 @@ No case is known today.
   stay inside one pool. Before the agents' local files are reset, the
   restore check (`dnvctl cn check-restore`) names each volume the restore
   loses and whether a new volume of its pool can take its thin id again.
-  State: accepted. Procedure:
+  State: accepted. Procedure written:
   [a new volume refused for a thin id that holds data](operations.md#a-new-volume-refused-for-a-thin-id-that-holds-data),
   which tells the two cases apart, and
   [restore etcd from a backup](operations.md#restore-etcd-from-a-backup).
@@ -741,15 +750,15 @@ Measured times are in [the introduction](introduction.md#status-and-limits).
 | Fault | What dnv does by itself | The wait, where a setting controls it | By hand |
 |---|---|---|---|
 | A disk fails, one leg of a RAID1 group | md fails the leg. IO goes on over the other leg. Leg repair replaces the leg with a new leg on another disk node, and md copies the data onto it. The old leg becomes a retired leg. | `leg_unhealthy`, 1200 at the default, before the repair starts. | Nothing. In a pool without RAID the data is gone (accepted case 2). |
-| A disk node is down and comes back | In a RAID1 pool, md fails its legs after the kernel's keep-alive. IO goes on over the other legs. A group with no IO sends md nothing to fail, so the primary fails such a leg in md itself once the leg has failed its health check twice in a row, while another leg holds the data in sync. md then records the death on the other leg, and a failover or a reboot can start the array from that leg alone. Back in time, its legs rejoin and md copies the changed regions. Down for long, leg repair moves each leg to another disk node. In a pool without RAID, the IO waits for the fast IO fail timeout and then fails (section 4). | `side_unhealthy`, 600 at the default, before the repairs start. The pool's fast IO fail timeout, 5 at the default, bounds how long the IO of a pool without RAID waits before it fails, and how long IO that reaches a lost leg after the keep-alive gives up waits. | Nothing. A node that never returns: [replace it](operations.md#replace-a-dead-disk-node). |
+| A disk node is down and comes back | In a RAID1 pool, md fails its legs after the kernel's keep-alive. IO goes on over the other legs. A group with no IO sends md nothing to fail, so the primary fails such a leg in md itself once the leg has failed its health check twice in a row, while another leg holds the data in sync. md then records the death on the other leg, and a failover or a reboot can start the array from that leg alone. Back in time, its legs rejoin and md copies the changed regions. Down for long, leg repair moves each leg to another disk node. In a pool without RAID, the IO waits until the keep-alive gives up, then for the fast IO fail timeout, and then fails (section 4). The IO to a leg that a migration moves waits instead when its side on the node serves it and the path to its other side stays up, both in a pool without RAID and in a RAID1 group with no other leg in sync; in a group whose other leg in sync is on the same machine, it can fail instead. In a pool without RAID it waits until the node comes back. In a RAID1 group it waits until the node comes back or leg repair ends the migration, after `side_unhealthy`; that end keeps the side on the dead node, and the IO then fails, md marks the group's array broken and the pool fails over, as in a switch reload below. A migration past its cutover whose copy is not whole is not ended, and its IO waits until the node comes back. Section 8 gives the other cases, among them a failover that can come first. | `side_unhealthy`, 600 at the default, before the repairs start. The pool's fast IO fail timeout, 5 at the default, bounds how long IO waits after the keep-alive gives up: the IO of a pool without RAID, before it fails, and IO that reaches a lost leg. It does not bound the wait of the IO to a leg that a migration moves, which "What dnv does by itself" gives. | Nothing. A node that never returns: [replace it](operations.md#replace-a-dead-disk-node). |
 | A controller node is down and comes back | Each primary on it that has a healthy enabled standby is failed over to it. Hosts see a pause. A pool of one cntlr waits for a cntlr replacement. Back, the cntlrs that were failed over are standbys; a node that was cut off from the network can fail a host's writes for a few seconds first (section 8). A cntlr unhealthy for long is replaced on another controller node. | `primary_unhealthy`, 4 at the default, with two check rounds in a row that find the primary unhealthy; a round runs every `cntlr_interval`, 2 at the default. A missed round counts only once its own wait of one interval has run out, so a failover comes about 6 to 10 seconds after the node dies. `cntlr_unhealthy`, 600, before a replacement. | Nothing. A node that never returns: [replace it](operations.md#replace-a-dead-controller-node). |
 | The network between a controller node and a disk node is cut | When the controller node holds the primary, as for a disk node down, seen from that controller node: md fails the legs behind the cut and takes them back when the cut ends. A long cut moves the legs. A cut from a node that holds only standbys changes nothing. | `leg_unhealthy`, 1200. | Nothing. |
-| The network between hosts and a controller node is cut | Nothing. dnv reads the agents, never a host. The primary stays the primary and stays in the cdc's answer. The host's IO queues as long as a standby path is left. | None. | Disable the primary, so a failover runs at once. The failover takes the enabled standby with no health epoch that has the smallest id, whatever the hosts see, so first disable each such standby that the hosts cannot reach. Enable each disabled cntlr again once the hosts reach it. State: procedure written, [the steps](operations.md#a-fault-only-a-host-sees); the worker suite runs the disable on fake agents and the e2e suite the disable and the enable on the lab's agents, not the fault; fix later, a host health signal into the worker. |
+| The network between hosts and a controller node is cut | Nothing. dnv reads the agents, never a host. The primary stays the primary and stays in the cdc's answer. The host's IO queues as long as a standby path is left. | None. | First disable each enabled standby with no health epoch that the hosts cannot reach, since the failover takes the one with the smallest id, whatever the hosts see. Then, while such a standby that the hosts reach is left, disable the primary, so a failover runs at once. If none is left, as in a pool of one cntlr, do not disable the primary: enable again each cntlr you disabled, and repair the network. With no enabled standby that has no health epoch, the disable of the primary starts no failover and stops the pool's IO, and a host that follows the discovery log drops its last path, so writes not yet flushed are lost (section 6.1). When the agent of each enabled standby with no health epoch refuses the worker's syncups, the disable starts no failover either and stops the pool's IO, but the cdc still lists those standbys, so the hosts keep their paths to them and their IO waits (section 6.1); enable the primary again at once then. When another cntlr takes the role but a minute later has still not reported its devices built, as when its agent refuses the syncup that makes it primary, do not enable the old primary while the hosts cannot reach it: the worker can then give it the role back, and the cdc stops listing the new primary, so a host that follows the discovery log loses its last path. Disable the new primary only while another enabled standby with no health epoch that the hosts reach is left; otherwise repair the network first, then enable the old primary and, once it shows no health epoch and the hosts show its path live, disable the new primary (section 6.1). After a failover, enable each disabled cntlr again once the hosts reach it. State: procedure written, [the steps](operations.md#a-fault-only-a-host-sees); the worker suite runs the disable on fake agents and the e2e suite the disable and the enable on the lab's agents, and a failover past a disabled standby runs in a unit test of the worker alone; the fault is not tested; fix later, a host health signal into the worker. |
 | The network between the control plane and the agents is cut | The data plane keeps serving. The primaries of one cut-off controller node are failed over. The old primary never gets its demotion, and the fence comes after the three-second hold, so hosts that drop the old path inside the hold see a pause, and a host still on it sees IO errors (section 8) and, in the cases section 5.1 lists, can lose a write it was told was done. With every agent cut off, nothing changes until the network is back. | As for a controller node down. | Nothing. |
 | etcd is down and comes back | The data plane keeps serving. No call and no reaction runs. A worker that cannot write to etcd stops driving its pools about 30 seconds into the outage, and drives again about one grace time after etcd is back. | The worker's flags: `--vote-interval`, 10 at the default, for the 30 seconds, which are three intervals; `--vote-grace-time`, 60, for the wait after. | Nothing. State: procedure written, [while the control plane is down](operations.md#while-the-control-plane-is-down). |
 | etcd's store reaches its quota | The data plane keeps serving. etcd refuses every write but a delete and still serves reads, so no call that writes the state and no reaction runs: each worker stops driving its pools within three vote intervals and does so again each time it starts. Once etcd takes writes again, every worker drives again about one grace time later. | The worker's flags: `--vote-interval`, 10 at the default, three intervals before it stops; `--vote-grace-time`, 60, for the wait after. The cause: etcd's `--quota-backend-bytes`, 2 GiB when not given; the history shrinks only with a compaction, which `--auto-compaction-retention` runs. | Compact, defragment and disarm the alarm: [the steps](operations.md#etcd-refuses-writes-its-store-is-full). |
 | One etcd member of several hangs, or its machine is gone with no TCP reset | The data plane keeps serving. Each worker's writes to that member wait out the worker's etcd call timeout, 10 seconds, so the workers can all stop driving their pools at once, and drive again about one grace time later; no reaction runs meanwhile. Measured at a vote interval of 2 seconds: every worker stopped once, about 11 seconds after a member froze, and a leader frozen for 2 seconds stopped a worker in 3 of 6 runs. At a vote interval of 6 seconds, a leader frozen for 3 seconds stops no worker. | The worker's flags `--vote-interval` and `--vote-grace-time`. At the defaults, 10 and 60, none of this is measured. | Nothing. |
-| A worker, the gateway or the cdc is down and comes back | Another worker, when one runs, takes the pools after a bounded window. The gateway has no state. Without the cdc, hosts keep their paths and get no path changes. | The worker's flags `--vote-interval`, 10 at the default, and `--vote-leave-grace-time`, 25: a dead worker counts as gone after twice the interval, and the change then holds for the leave grace time, about 45 seconds in all. | Nothing. A failover during a cdc outage leaves hosts on a withdrawn path (section 6.1). |
+| A worker, the gateway or the cdc is down and comes back | Another worker, when one runs, takes the pools after a bounded window. The gateway has no state. Without the cdc, hosts keep their paths and get no path changes. On a host that uses nvme-stas, this is tested only for an outage of a few seconds. After a longer outage of every cdc the host lists, nvme-stas may drop the paths once the kernel gives up the host's connection to each stopped cdc, after `ctrl_loss_tmo`, 600 seconds at the kernel's default; the volumes' IO then fails and writes not yet flushed are lost. Not seen in the lab. A Kubernetes node keeps its paths while a cdc of its list cannot be reached. | The worker's flags `--vote-interval`, 10 at the default, and `--vote-leave-grace-time`, 25: a dead worker counts as gone after twice the interval, and the change then holds for the leave grace time, about 45 seconds in all. | Bring the program back. Bring a cdc back at once. On a host where a longer outage of every cdc made nvme-stas drop every path of a volume, unmount its file system and mount it again on the new device, which replays its journal; when the mount fails or the kernel log reports an error, unmount it if it is mounted, check it with its own check tool, and mount it again once the check finds nothing more to repair. A failover during a cdc outage leaves hosts on a withdrawn path (section 6.1). State: procedure written, [while the control plane is down](operations.md#while-the-control-plane-is-down). |
 | An agent restarts | The agent rebuilds its desired state from its local store, the files in which it keeps the desired state it last accepted. The kernel keeps the devices. As soon as the program runs again, the agent answers each check round with "starting", an answer that says it is still rebuilding, and while it does, for the start hold at most, the worker starts no failover, cntlr replacement or leg repair because of that node. A controller node agent that stays stopped for longer than one check interval can have its primaries failed over, as for a controller node that is down. | For a stopped agent, `primary_unhealthy` with two check rounds in a row: its rounds fail at once, so a stop a little longer than one `cntlr_interval`, 2 at the default, can already fail a primary over, and a failover comes about 4 to 8 seconds after the agent stops, at the defaults. For an agent that answers "starting", the start hold: the longest time the worker waits for an agent that is still rebuilding, 120 at the default, counted from its first start even when it stops and starts again while it rebuilds or just after, before a check round has judged it, a cluster setting fixed when the cluster is created (`--start-hold-seconds` of `dnvctl cluster create`). | For a planned restart, the steps in [the operations doc](operations.md#a-planned-restart-of-an-agent). A rebuild longer than the start hold, and a reboot that the worker first sees as an agent that answers "starting", are in section 6.1. |
 | A host reboots | Nothing on dnv's side. nvme-stas or the Kubernetes node plugin, the part of dnv's Kubernetes driver that runs on each Kubernetes node, connects the paths again. | None. | See the host actions in section 7. |
 | All disk nodes of a pool are down at once, as in a switch reload | md marks each array broken under IO. Hosts see IO errors. The broken array makes the primary unhealthy, so the worker fails it over at the primary threshold, even while the nodes are still down. Once the legs are back, the new primary assembles the arrays again. If a data group broke while its meta group still took writes, the thin pool comes back read-only and needs the repair by hand ([the operations doc](operations.md#repair-a-thin-pools-metadata)). A pool of one cntlr waits for a cntlr replacement at the cntlr threshold. | `primary_unhealthy` for the failover. `cntlr_unhealthy`, 600, for a replacement. | A forced start, when no failover comes. The blocks mapped since the last commit of a broken meta group are gone (accepted case 1). |
@@ -820,9 +829,9 @@ Measured times are in [the introduction](introduction.md#status-and-limits).
   for metadata that thin_check passes, in a slice of one meta group: the
   level steps, the names of the devices involved, thin_check and
   thin_repair onto a new device, and its copy back over the meta group's
-  array. Fix later: a repair of metadata that thin_check finds damaged, or
-  that spans more than one meta group, since no way is tried yet; for
-  those the procedure says to stop.
+  device, its array in a RAID1 pool. Fix later: a repair of metadata that
+  thin_check finds damaged, or that spans more than one meta group, since
+  no way is tried yet; for those the procedure says to stop.
   Seen in the lab: a pool with the mark opened read-only, a failed pool opened
   again as writable, and a full one became writable after its metadata grew. A
   suite case repairs by hand a pool whose metadata needs a check, one whose
@@ -975,8 +984,9 @@ Measured times are in [the introduction](introduction.md#status-and-limits).
   in error, with a host taken off or none, so that node serves none of its
   volumes. Under a lockdown raised while the agent runs, the row of a
   subsystem with a host still connected that is off its list reads in error.
-  Where the pool has an enabled standby with no health epoch, the worker then
-  fails the primary over to it at the pool's threshold; a pool with no such
+  Where the pool has an enabled standby with no health epoch whose agent
+  does not refuse the worker's syncups, the worker then fails the primary
+  over to it at the pool's threshold; a pool with no such
   standby, such as a pool with one cntlr, waits for the cntlr replacement,
   which comes after the pool's `cntlr_unhealthy`, 600 seconds at the default.
   The agent cannot see a lockdown on a node where /sys/kernel/security is not
@@ -1296,22 +1306,48 @@ Measured times are in [the introduction](introduction.md#status-and-limits).
   and what it follows stays as it was on that worker until a restart.
   State: accepted, by design.
 - **A fault only a host sees never fails over.** See the table. On a pool
-  with a healthy enabled standby, disabling the primary starts a failover
-  at once. The failover takes the enabled standby with no health epoch
-  that has the smallest id, whatever the hosts see, so first disable each
-  such standby that the hosts cannot reach; the disable of a standby
-  starts no failover. A disabled cntlr is never made the primary and never
-  replaced, so enable each one again after the failover, once the hosts
-  reach it: an enabled cntlr can take the role again at a later failover.
-  On a pool with no such standby, a pool of one cntlr among them, a
+  with an enabled standby that has no health epoch, disabling the primary
+  starts a failover at once, unless the agent of each such standby
+  refuses the worker's syncups. The failover takes, of the enabled
+  standbys with no health epoch, the one with the smallest id, whatever
+  the hosts see, and passes over one whose agent refuses the worker's
+  syncups. So first disable each enabled standby with no health
+  epoch that the hosts cannot reach; the disable of a standby starts no
+  failover. Then disable the primary only while such a standby
+  that the hosts reach is left; if none is left, do not disable it,
+  enable again each cntlr you disabled and repair the network. A disabled
+  cntlr is never made the primary and never replaced, so enable each one
+  again after the failover, once the hosts reach it: an enabled cntlr can
+  take the role again at a later failover. On a pool with no enabled
+  standby that has no health epoch, a pool of one cntlr among them, a
   disable starts no failover and stops the pool's IO at once, since a
   disabled cntlr serves no IO. The cdc stops listing the disabled
   primary, so a host that follows the discovery log drops its last path,
-  and a Kubernetes mount does not survive it. State: procedure written,
+  writes not yet flushed are lost, and a Kubernetes mount does not
+  survive it. When the agent of each enabled standby with no health
+  epoch refuses the worker's syncups, no failover follows either and
+  the pool's IO stops, but the cdc still lists those standbys, so the
+  hosts keep their paths to them and their IO waits; enable the primary
+  again at once then. When another cntlr takes the role but a minute
+  later has still not reported its devices built, as when its agent
+  refuses the syncup that makes it primary, the hosts' IO waits on its
+  path. Do not enable the old primary while the hosts cannot reach it:
+  the worker can then give it the role back, at once after a disable of
+  the new primary and otherwise once the new primary's health epoch is as
+  old as the longer of the pool's `primary_unhealthy` and
+  `cntlr_unhealthy`, 600 seconds at the defaults, and the cdc stops
+  listing the new primary, so a host that follows the discovery log
+  drops its last path. Disable the new primary only while another
+  enabled standby with no health epoch that the hosts reach is left.
+  Otherwise repair the network first, then enable the old primary and,
+  once it shows no health epoch and the hosts show its path live, disable
+  the new primary. State:
+  procedure written,
   [the operations doc](operations.md#a-fault-only-a-host-sees); the
   worker suite runs the disable on fake agents and the e2e suite the
-  disable and the enable on the lab's agents, not the fault itself; fix
-  later.
+  disable and the enable on the lab's agents, not the fault itself, and a
+  failover past a disabled standby runs in a unit test of the worker
+  alone; fix later.
 - **An nvme-stas host loses every path when its discovery daemon is
   away.** nvme-stas has two daemons: stafd talks to the cdc, and stacd
   connects the paths. stacd reads a missing stafd as an empty discovery
@@ -1321,13 +1357,15 @@ Measured times are in [the introduction](introduction.md#status-and-limits).
   device audit or one of its timers starts such a pass. This was read in the source of
   nvme-stas 2.3.1; the lab runs 2.4.1. To restart stafd, stop stacd first,
   which keeps its connections when it stops; restart stafd; once stafd
-  holds its connection to each cdc again, or, with a cdc away, once the
-  cdcs it reaches still list every path the host must keep, start stacd.
+  holds its connection to each cdc again and their discovery logs name
+  every subsystem the host uses, or, with a cdc away, once the cdcs it
+  reaches still list every path the host must keep, start stacd.
   State: procedure written, [the operations
   doc](operations.md#restart-nvme-stas); the order is not tested.
-- **A host keeps a withdrawn path.** A path connected by hand is never
-  dropped. A cdc cut off from etcd keeps listing a failed-over primary. Such
-  a host writes to the fenced old primary and gets IO errors in the failover
+- **A host keeps a withdrawn path.** A path connected by hand, or to a
+  controller named in stacd's own configuration, is never dropped. A cdc
+  cut off from etcd keeps listing a failed-over primary. Such a host
+  writes to the fenced old primary and gets IO errors in the failover
   window, and, in the cases section 5.1 lists, can lose a write it was
   told was done. While a host still holds the path of a cntlr that was
   lost, it also gets no path to the cntlr that replaces it, which takes the
@@ -1340,7 +1378,8 @@ Measured times are in [the introduction](introduction.md#status-and-limits).
   cutoff case drops a path connected by hand and then connects the new
   primary, on a host that holds one path; no test runs the procedure's
   connect before the drop, its drop by device of one path among several,
-  or its steps for a cdc cut off from etcd.
+  its drop of a replaced cntlr's path, its steps for a controller named in
+  stacd's configuration, or its steps for a cdc cut off from etcd.
 - **A Kubernetes mount waits for ever when no cntlr of its volume comes
   back.** The node plugin's connect keeps reconnecting through an outage
   of every path, however long, and the IO waits. So the mount survives a
@@ -1357,7 +1396,7 @@ Measured times are in [the introduction](introduction.md#status-and-limits).
   Nothing reports a dead mount.
   State: procedure written, [the operations
   doc](operations.md#a-kubernetes-mount-that-lost-its-last-path), not
-  tested; no fix.
+  tested; accepted, and no fix is planned.
 - **A Kubernetes mount does not follow a new device.** A reconnect refused
   with "do not retry" ends for good, as when a controller node comes back
   holding other volumes' cntlrs before the volume's. Once the subsystem's
@@ -1371,7 +1410,7 @@ Measured times are in [the introduction](introduction.md#status-and-limits).
   mounts the new device. A raw block volume, which a pod gets as a bare
   device, needs only a new pod. State: procedure written, [the operations
   doc](operations.md#a-kubernetes-mount-that-lost-its-last-path), not
-  tested; no fix.
+  tested; accepted, and no fix is planned.
 - **A Kubernetes node whose cdc list leaves out a cdc drops that cdc's
   volumes.** The node plugin follows the cdc addresses of its own
   configuration and no other. When the list leaves out every cdc that serves
@@ -1452,8 +1491,10 @@ Measured times are in [the introduction](introduction.md#status-and-limits).
 - **A disabled primary whose standbys refuse their syncups can stop the
   pool's IO.** A standby refuses its syncups when it cannot save them to
   its local files or finds a setting in them invalid. Once the worker has
-  seen a standby refuse a syncup, it does not make that standby primary,
-  since it would refuse the syncup that makes it primary too. When an
+  seen a standby refuse a syncup, it does not make that standby primary
+  until the standby accepts a syncup, reports the revision it refused as
+  applied or misses a check round, since it would refuse the syncup that
+  makes it primary too. When an
   operator disables a primary and every healthy, enabled standby of its
   pool has so refused, no other cntlr takes the role, and the worker does
   not replace a disabled cntlr. The pool's IO stays stopped until a
@@ -1503,9 +1544,10 @@ names [the operations doc](operations.md), the procedures an operator
 follows by hand; the list at its top names each of its sections by
 subject: where to start, the forced-start guide, nodes, the networks,
 pools, volumes, the control plane, Kubernetes and hosts. Every row with no
-tool or no doc carries its note. Section 6.1 and the tables give some
-short steps; the section "Steps known today" below says what three of the
-longer procedures rest on.
+tool or no doc carries its note. A row's state uses the words of the list
+at the top of this document, or "done": the action has its tool and its
+doc. Section 6.1 and the tables give some short steps; the section "Steps
+known today" below says what three of the longer procedures rest on.
 
 ### Nodes
 
@@ -1513,16 +1555,16 @@ longer procedures rest on.
 |---|---|---|---|
 | Add a disk node or a controller node | `dnvctl dn create`, `dnvctl cn create` | the tutorials | done |
 | Choose a node's location: the machine's host name by default, or a location the operator names | `--location` of `dnvctl dn create` and `dnvctl cn create` | the operations doc, Choose a node's location | procedure written |
-| Prepare a node: the kernel modules at boot, the udev rules on every node that keep the system's own md assembly, LVM and bcache off dnv's devices, the LVM and md settings that go with them, the network and the firewall, the agents' units and their start order | the kit in the release's `deploy/` folder: the module lists of `deploy/modules-load.d/`, the udev rules of `deploy/udev/`, the systemd units of `deploy/systemd/` and the firewall example `deploy/nftables/dnv-filter.nft`; `dnv-agent check dn`, `dnv-agent check cn`: the node check reports what a node lacks and how to fix it | [the operations doc, Prepare a node](operations.md#prepare-a-node), which leads to the udev rules and the two settings, the node check and the networks; the tutorials, for the udev rules | procedure written; the suites install the udev rules and run the node check, but load the modules by hand and start no agent from a unit. The firewall's proof is in [the operations doc's network section](operations.md#the-networks). |
+| Prepare a node: the kernel modules at boot, the udev rules on every node that keep the system's own md assembly, LVM and bcache off dnv's devices, the LVM and md settings that go with them, the network and the firewall, the agents' units and their start order | the kit in the release's `deploy/` folder: the module lists of `deploy/modules-load.d/`, the udev rules of `deploy/udev/`, the systemd units of `deploy/systemd/` and the firewall example `deploy/nftables/dnv-filter.nft`; `dnv-agent check dn`, `dnv-agent check cn`: the node check reports what a node lacks and how to fix it | [the operations doc, Prepare a node](operations.md#prepare-a-node), which leads to the udev rules and the two settings, the node check and the networks; the tutorials, for the udev rules | procedure written; the suites install the udev rules and run the node check, but load the modules by hand and start no agent from a unit. A check by hand on one lab guest, on 2026-11-22, set the guest up from an archive that `make release` built from the repository, whose `deploy/` holds the kit. After a reboot its modules were loaded, every unit ran, the node check passed, and a volume read back the data written before the reboot. The check ran before a later change of the controller node agent's unit, which now stops only the agent's main process. The firewall's proof is in [the operations doc's network section](operations.md#the-networks). |
 | Gather a node's state for a bug report | `dnv-agent collect` | the operations doc, Gather a node's state for a bug report | done |
 | Disable a node | `dnvctl dn set-disabled`, `dnvctl cn set-disabled` | [the operations doc, Disable a node](operations.md#disable-a-node), which says when to disable and what a disable does not do: a standby on a disabled controller node can still become the primary | procedure written; the e2e suite's ops case checks the refusals of new legs and new cntlrs on disabled nodes |
 | Remove a node | `dnvctl dn delete`, `dnvctl cn delete`. Refused while a side or a cntlr is on it, and until the node's agent shows the node clean; `--force` deletes without asking the agent. | the operations doc, Remove a node | procedure written |
 | Replace a dead disk node | leg repair moves its RAID1 legs; `dnvctl retired-leg delete` frees the retired ones; `dnvctl dn delete --force` once no side is on it | [the operations doc, Replace a dead disk node](operations.md#replace-a-dead-disk-node) | procedure written; the e2e suite's react case tests leg repair of a dead disk node's leg at short thresholds, and its copy case deletes a retired leg whose disk node is dead, on real agents; no test deletes a dead disk node with real agents. Fix later: a forced delete that also frees the sides of the node's retired legs. |
-| Replace a dead controller node | the worker replaces its cntlrs after `cntlr_unhealthy`; `dnvctl cntlr create` and `dnvctl cntlr delete` by hand; `dnvctl cn delete --force` once no cntlr is on it | [the operations doc, Replace a dead controller node](operations.md#replace-a-dead-controller-node) | procedure written; the e2e suite's react case tests the failover and the cntlr replacement at short thresholds, and no test replaces a dead node's cntlrs by hand or deletes the node |
+| Replace a dead controller node | the worker replaces its cntlrs after `cntlr_unhealthy`; `dnvctl cntlr create` and `dnvctl cntlr delete` by hand; `dnvctl cn delete --force` once no cntlr is on it | [the operations doc, Replace a dead controller node](operations.md#replace-a-dead-controller-node) | procedure written; the e2e suite's react case tests the failover and the cntlr replacement at short thresholds, and no test replaces a dead node's cntlrs by hand or deletes the node with real agents |
 | Reuse a disk from an old node | none: stop the agent; remove what dnv still built over the disk; zero the disk's header block, where dnv records the disk; delete the agent's local files of disk nodes; start the agent; create the node | [the operations doc, Reuse a disk from an old node](operations.md#reuse-a-disk-from-an-old-node) | procedure written; not tested |
 | See a node's live state and the cluster's capacity | `dnvctl dn inspect`, `dnvctl cn inspect`, `dnvctl cluster get-capacity`, which also says what pools of one shape can still get and which limit the cluster reaches first | the operations doc, [Read a node's state](operations.md#read-a-nodes-state) and [The cluster's capacity](operations.md#the-clusters-capacity) | procedure written |
 | Compare a disk node's own free count with its record | `dnvctl dn inspect` shows the agent's count, `dnvctl dn get` the record's | [the operations doc, Read a node's state](operations.md#read-a-nodes-state) | procedure written: the counts are compared, never reconciled; the e2e suite checks that they agree at the end of every case but the upgrade case, and no suite makes them disagree |
-| Restart a node's agent | none; the agent answers "starting" while it rebuilds, and the worker waits for it up to the start hold | the operations doc | done |
+| Restart a node's agent | none; the agent answers "starting" while it rebuilds, and the worker waits for it up to the start hold | the operations doc, [A planned restart of an agent](operations.md#a-planned-restart-of-an-agent) | procedure written; the e2e suite's react case restarts the primary's cn agent this way, with its host connected, and no test restarts a dn agent this way |
 
 ### Pools
 
@@ -1534,7 +1576,7 @@ longer procedures rest on.
 | Change a pool's level | `dnvctl sp set-level` | the operations doc, [Change a pool's level](operations.md#change-a-pools-level), and [Repair a thin pool's metadata](operations.md#repair-a-thin-pools-metadata) | procedure written; the e2e suite steps the whole ladder down and back, and the cn suite repairs a thin pool's metadata at the agent level |
 | Move a leg to another disk node | `dnvctl migr create`, `migr finish`, `migr cancel`; the worker reads and hands over the leg's list itself | the operations doc, [Move a leg to another disk node](operations.md#move-a-leg-to-another-disk-node); the introduction explains the flow | procedure written; the e2e suite runs a migration to its finish and a cancel with force after a cutover; a forced end of a migration whose disk node is gone is not tested as a whole |
 | Repair a leg by hand | `dnvctl repair create`, `repair finish`, `repair cancel`, `repair abort`; the worker repairs by itself | the operations doc, [Repair a leg by hand](operations.md#repair-a-leg-by-hand) | procedure written; the e2e suite runs two repairs of an operator's on one group |
-| Force-start a group | `dnvctl group inspect` shows what the primary reads from each member, and with `--leg` says what a start from that leg would do or why it would refuse; `dnvctl group force-start`, `dnvctl group set-operator-in-charge` | [the forced-start guide](operations.md#the-forced-start-guide) | none |
+| Force-start a group | `dnvctl group inspect` shows what the primary reads from each member, and with `--leg` says what a start from that leg would do or why it would refuse; `dnvctl group force-start`, `dnvctl group set-operator-in-charge` | [the forced-start guide](operations.md#the-forced-start-guide) | procedure written |
 | Delete or keep a retired leg | `dnvctl retired-leg list`, `dnvctl retired-leg delete`, `dnvctl retired-leg keep`; a forced start keeps the group's retired legs by itself, and an operator's repair of a leg the primary keeps out for another identity keeps that leg once the repair finishes | [the forced-start guide](operations.md#the-forced-start-guide), "Keeping the old copies", for a forced start, [a leg of another identity that the primary does not add](operations.md#a-leg-of-another-identity-that-the-primary-does-not-add) for that repair, and [Retired legs](operations.md#retired-legs) for the others | procedure written |
 | Replace a cntlr by hand | `dnvctl cntlr set-enabled`, `dnvctl cntlr delete`, `dnvctl cntlr create` | the operations doc, [Replace a cntlr by hand](operations.md#replace-a-cntlr-by-hand) | procedure written; the e2e suite makes, disables and deletes a cntlr, and disables a primary and enables it again, but runs no whole replacement |
 | Change a pool's cntlid slots, the ranges of NVMe controller ids its exports use | `dnvctl sp set-cntlid-slots` | the operations doc, [Change a pool's cntlid slots](operations.md#change-a-pools-cntlid-slots) | procedure written |
@@ -1556,13 +1598,14 @@ longer procedures rest on.
 
 | Action | Tool today | Doc today | State |
 |---|---|---|---|
-| Back up and restore etcd | etcd's own tools; `dnvctl cluster advance-ids` after a restore; `dnvctl cn check-restore`, which says pool by pool what the restore loses, before the agents' local files are reset | the operations doc, [Back up etcd](operations.md#back-up-etcd), [Restore etcd from a backup](operations.md#restore-etcd-from-a-backup), and [a new volume refused for a thin id that holds data](operations.md#a-new-volume-refused-for-a-thin-id-that-holds-data) | procedure written; the e2e suite's upgrade case runs its steps once on the lab's real agents, from a backup taken under 0.1, with one etcd member and no Kubernetes, all but the change of host lists, which it has none to make, and the Kubernetes step. The check does not see a pool none of whose controller nodes answers, and lists no disk node's sides. A new volume over a restored thin id that holds data is refused. |
+| Set up the control plane: etcd with the request limits dnv needs, the gateways, the workers and the cdcs | the kit in the release's `deploy/` folder: the units of `deploy/systemd/`, with an example unit for etcd, and the examples of settings in `deploy/dnv/` | the operations doc, [Set up the control plane](operations.md#set-up-the-control-plane) | procedure written; a check by hand on one lab guest, on 2026-11-22, ran etcd as one member and the gateway, the worker and the cdc from their units, through a reboot. An etcd of several members started from the example unit, and a control plane on machines of its own, are not tested. When every program of a cluster starts, as after a power loss of the whole cluster, the workers must start after every agent: a worker that starts first, once its `--vote-grace-time` has run out, sees a node whose agent does not answer yet as failed. Units enabled at boot are safe on one machine alone: there systemd starts the worker after the agents, and a new worker drives nothing for its `--vote-grace-time` and waits up to 120 seconds at the default, counted from the agent's start, for an agent that answers that it is starting. Across several machines nothing orders the units. On a cluster of several machines, leave the workers' units off at boot, and start the workers once every agent has logged `agent started` ([Prepare a node](operations.md#prepare-a-node), the start order); no program checks the order. |
+| Back up and restore etcd | etcd's own tools; `dnvctl cluster advance-ids` after a restore; `dnvctl cn check-restore`, which says pool by pool what the restore loses, before the agents' local files are reset | the operations doc, [Back up etcd](operations.md#back-up-etcd), [Restore etcd from a backup](operations.md#restore-etcd-from-a-backup), and [a new volume refused for a thin id that holds data](operations.md#a-new-volume-refused-for-a-thin-id-that-holds-data) | procedure written; the e2e suite's upgrade case takes a backup under 0.1 and runs the restore's steps 1 to 6 from it, step 2 without its reads of each etcd server alone and its check of the cluster names, and of step 7 the start of the workers and the cdc and the new backup, once on the lab's real agents, with one etcd member and no Kubernetes; it has no host list to change, and step 8 does not run. A backup schedule, a backup taken from one of several etcd servers, a restore of several etcd servers or after a lost quorum, a restore from a server's own data directory, and a restore into a data directory that is the mount point of a file system of its own are not tested. The check does not see a pool none of whose controller nodes answers, and lists no disk node's sides. A new volume over a restored thin id that holds data is refused. |
 | Recover an etcd that refuses writes because its store is full | etcd's own tools: `etcdctl compact --physical`, `etcdctl defrag --cluster`, `etcdctl alarm disarm` | the operations doc, [etcd refuses writes: its store is full](operations.md#etcd-refuses-writes-its-store-is-full) | procedure written; the worker suite's three-member mode runs the compaction, the defragmentation and the disarm on the lab, over a small store. The raise of the quota is not tested. |
-| Upgrade | every program at once; `--version` on each program, and the version each running program logs when it starts | the operations doc, [Upgrade dnv](operations.md#upgrade-dnv) | procedure written; the e2e suite's upgrade case upgrades a cluster of 0.1 in lockstep in the doc's order on the lab, under a host's writes, with no failed write and no reaction. The CSI driver's part is not tested. Rolling upgrades are not yet. A downgrade is not supported. |
-| Run while the control plane is down | nothing to do; the data plane serves | the operations doc, [While the control plane is down](operations.md#while-the-control-plane-is-down) | procedure written; the e2e suite stops etcd under a host's writes, at shorter vote times than the shipped ones |
+| Upgrade | every program at once; `--version` on each program, and the version each running program logs when it starts | the operations doc, [Upgrade dnv](operations.md#upgrade-dnv) | procedure written; the e2e suite's upgrade case upgrades a cluster of 0.1 in lockstep in the order of steps 2 to 11 on the lab, under a host's writes, with no failed write and no reaction, and runs parts of steps 1 and 12. The rest of steps 1 and 12, the units of step 5 and the CSI driver's part are not tested. The case runs its programs from a work folder, not from units, so the `systemctl` commands of the steps are not tested either. Rolling upgrades are not yet. A downgrade is not supported. |
+| Run while the control plane is down | nothing to do, since the data plane serves; on a host where nvme-stas dropped every path of a volume, unmount its file system and mount it again on the new device, and check it with its own check tool only when the mount or the kernel log reports an error | the operations doc, [While the control plane is down](operations.md#while-the-control-plane-is-down) | procedure written; the e2e suite stops etcd under a host's writes, at shorter vote times than the shipped ones; the cdc suite stops every cdc for a few seconds only, and a longer outage of every cdc, with the mount again on a host whose paths nvme-stas dropped, is not tested |
 | Handle the logs | `--log-level` on every program; SIGUSR1 and SIGUSR2 to a running program; JSON on stderr, no rotation | [the operations doc](operations.md#the-logs) | procedure written, with [the steps to read them](operations.md#read-the-logs). |
 | See what is wrong across the cluster | `dnvctl cluster get-status` | the operations doc, Read what is wrong | done |
-| Give hosts the cdc addresses; front the gateways | none | the tutorials, for one host; the operations doc, [Give hosts the cdc addresses](operations.md#give-hosts-the-cdc-addresses) | procedure written; the cdc suite runs hosts that list several cdcs. A front over several gateways is not tested. |
+| Give hosts the cdc addresses; front the gateways | none | the tutorials, for one host; the operations doc, [Give hosts the cdc addresses](operations.md#give-hosts-the-cdc-addresses) | procedure written; the cdc suite runs hosts that list several cdcs. The move or the removal of a cdc, with the change of each host's list, and a front over several gateways are not tested, and no suite loads a host's kernel modules from the kit's file. |
 | Change the check intervals or a node's budget | none | — | not yet |
 
 ### Hosts
@@ -1571,16 +1614,16 @@ longer procedures rest on.
 |---|---|---|---|
 | Connect a host with nvme-stas | nvme-stas | the all-in-one tutorial | done |
 | Connect a Kubernetes cluster | the CSI driver | the CSI tutorial | done |
-| Restart nvme-stas | none | [the operations doc](operations.md#restart-nvme-stas); [dnv on one machine](tutorial_all_in_one.md) | procedure written: stop stacd first, restart stafd, and start stacd once stafd holds its connection to each cdc again, or, with a cdc away, once the cdcs it reaches still list every path the host must keep; not tested |
-| Recover a host that keeps a withdrawn path | none; `nvme connect` to the listed cntlrs, then `nvme disconnect -d` of the withdrawn path; a stale cdc's link to etcd repaired | [the operations doc](operations.md#a-host-that-keeps-a-withdrawn-path) | procedure written; the e2e suite's cutoff case drops a path connected by hand and connects the new primary, on a host that holds one path; the connect before the drop, the drop by device and a stale cdc are not tested |
-| Recover a Kubernetes mount after the loss of its last path | none; `nvme disconnect -n` for a pod whose IO waits; for a filesystem volume, its pods stopped until the node holds nothing of the volume, then started again; for a raw block volume, a delete of the pod | [the operations doc](operations.md#a-kubernetes-mount-that-lost-its-last-path) | procedure written; not tested; no fix |
+| Restart nvme-stas | none | [the operations doc](operations.md#restart-nvme-stas); [dnv on one machine](tutorial_all_in_one.md) | procedure written: stop stacd first, restart stafd, and start stacd once stafd holds its connection to each cdc again and their discovery logs name every subsystem the host uses, or, with a cdc away, once the cdcs it reaches still list every path the host must keep; not tested |
+| Recover a host that keeps a withdrawn path | none; `nvme connect` to the listed cntlrs, then `nvme disconnect -d` of the withdrawn path, or, for a cntlr that was replaced, the drop of the old path first and then the connect (a drop of the host's only path fails the IO that waits on it and loses writes not yet flushed); a stale cdc's link to etcd repaired; a controller taken out of `/etc/stas/stacd.conf` and stacd restarted; a stopped stacd started again as Restart nvme-stas says | [the operations doc](operations.md#a-host-that-keeps-a-withdrawn-path) | procedure written; the e2e suite's cutoff case drops a path connected by hand and connects the new primary, on a host that holds one path; the connect before the drop, the drop by device, the drop of a replaced cntlr's path, a controller named in stacd's configuration, a stopped stacd and a stale cdc are not tested |
+| Recover a Kubernetes mount after the loss of its last path | none; `nvme disconnect -n` for a pod whose IO waits; for a filesystem volume, its pods stopped until the node holds nothing of the volume, then started again; for a raw block volume, a delete of the pod | [the operations doc](operations.md#a-kubernetes-mount-that-lost-its-last-path) | procedure written; not tested; accepted, and no fix is planned |
 | Change the cdc addresses of the Kubernetes driver | the config map, the Kubernetes record that holds the cdc addresses both plugins start with, and a restart of both plugins | the operations doc, Change the cdc addresses of the Kubernetes driver | procedure written; the Kubernetes suite changes the list of the controller plugin, the part of the driver that calls the gateway, alone, and no suite restarts the node plugins with a new list |
 | Start a Kubernetes node plugin that refuses to start | none; the plugin's log names the fact and its fix | the operations doc, A Kubernetes node plugin that does not start | procedure written; not tested in a suite |
 | Keep a Kubernetes cluster's pods off dnv | the example network policy, [`deploy/networkpolicy.yaml`](../../deploy/networkpolicy.yaml) | [the CSI tutorial](tutorial_csi.md#keep-other-pods-off-dnv) | procedure written; the Kubernetes suite's policy case tries the ports of the gateway, the cdc and two agents, not the NVMe/TCP ports, which listen only once a pool uses them |
 | Handle the loss of a Kubernetes machine | the controller plugin's second copy; the out-of-service mark of Kubernetes, which an operator puts on a machine that is gone so that Kubernetes moves its volumes | the operations doc, A Kubernetes machine is lost | procedure written; the Kubernetes suite checks the controller plugin's part, and its detach case the move of a pod's volume after the out-of-service mark, of a machine cut off from Kubernetes but not from the controller nodes, on controller nodes that end its connections; both passed in the lab on 2026-11-20 |
-| Recover a one-cntlr Kubernetes volume after a cntlr replacement | `nvme disconnect -d` of the old path, then, for a filesystem volume, its pods stopped until the node holds nothing of the volume and started again, or, for a raw block volume, a delete of the pod | the operations doc, A one-cntlr Kubernetes volume after a cntlr replacement | procedure written; not tested |
+| Recover a one-cntlr Kubernetes volume after a cntlr replacement | `nvme disconnect -d` of the old path, then, for a filesystem volume, its pods stopped until the node holds nothing of the volume and started again, or, for a raw block volume, a delete of the pod | the operations doc, [A one-cntlr Kubernetes volume after a cntlr replacement](operations.md#a-one-cntlr-kubernetes-volume-after-a-cntlr-replacement) | procedure written; not tested |
 | Recover a Kubernetes volume the node plugin will not format | none; the plugin formats only a volume whose first MiB reads as zeros; for data at the start, an operator reaches the volume through a pod that gets it as a raw block device, and zeroes the start by hand for a volume that never held data | the operations doc, A Kubernetes volume the node plugin will not format | procedure written; its steps for data at the start are not tested |
-| Recover from a fault only a host sees | disable each enabled standby the hosts cannot reach, then the primary; enable each again once the hosts reach it | [the operations doc](operations.md#a-fault-only-a-host-sees) | procedure written; the worker suite's reaction case runs the disable on fake agents, and the e2e suite's copy case the disable and the enable on the lab's agents; the fault itself is not tested. Fix later. |
+| Recover from a fault only a host sees | disable each enabled standby with no health epoch that the hosts cannot reach, then the primary, but the primary only while an enabled standby with no health epoch that the hosts reach is left; if none is left, enable again each standby you disabled and repair the network; if no other cntlr takes the role within a few check rounds, enable the primary again at once; if another cntlr takes the role but a minute later has still not reported its devices built, as `settling` true in `dnvctl sp get` shows, keep the old primary disabled while the hosts cannot reach it, disable the new primary only while another enabled standby with no health epoch that the hosts reach is left, and otherwise repair the network first, then enable the old primary and, once it shows no health epoch and the hosts show its path live, disable the new primary; after a failover, enable each disabled cntlr again once the hosts reach it | [the operations doc](operations.md#a-fault-only-a-host-sees) | procedure written; the worker suite's reaction case runs the disable on fake agents, and the e2e suite's copy case the disable and the enable on the lab's agents; a failover past a disabled standby runs in a unit test of the worker alone, and the fault itself is not tested. Fix later. |
 
 ### Steps known today
 
@@ -1743,10 +1786,13 @@ failover's among them.
   new worker takes it over, the gap lasts until that worker's first check
   round. A destination that waits for free metadata units waits the same
   way under both faults. State: accepted.
-- **A migrating leg whose serving disk node dies waits without limit
-  where its group has no other leg in sync, as in a pool without RAID.
-  One whose destination dies after the cutover, before its copy is whole,
-  keeps its group one leg short.** A migrating leg has two paths, and the
+- **A migrating leg whose serving disk node dies waits until that node
+  comes back in a pool without RAID, and until that node comes back or
+  leg repair ends the migration in a RAID1 group with no other leg in
+  sync. One whose
+  destination dies after the cutover, before its copy is whole, keeps its
+  group one leg short, or, with no other leg in sync, makes its IO wait.** A
+  migrating leg has two paths, and the
   one that does not serve is live but ANA inaccessible. The kernel keeps
   the leg's IO queued as long as that path stays live. When the serving
   disk node dies, the primary cuts that other path while another leg of
@@ -1762,8 +1808,35 @@ failover's among them.
   [the operations doc](operations.md#ending-a-migration-with-force) says.
   Where no other leg is in
   sync, as in a pool without RAID, the primary does not cut the path,
-  since the write would fail. The IO then waits until the disk node comes
-  back. State: accepted; the group left one leg short after a cutover with
+  since the write would fail, and the IO waits. In a pool without RAID it
+  waits until the disk node comes back: the worker ends no migration
+  there. In a RAID1 group it waits until then, or until leg repair ends
+  the migration in one of the two directions above, after the pool's
+  `side_unhealthy`, 600 seconds at the default, or its `leg_unhealthy`,
+  1200, when only the network to that disk node is cut. Both ends keep the
+  side on that disk node, so the controller node drops its path to the
+  other side, and the waiting IO fails. md then marks the group's array
+  broken, since that leg was its last member in sync, and the broken
+  array makes the worker fail the pool over where the pool has an enabled
+  standby with no health epoch, a pause for every volume of the pool; a
+  pool of one cntlr waits for the cntlr replacement. No repair follows,
+  since no other leg of the group is in
+  sync: the group waits until the primary reaches that disk node again,
+  or for a forced start, and a broken data group can leave the thin pool
+  read-only, as in a switch reload (section 6). Leg repair ends nothing
+  after a cutover whose copy the worker has not seen whole, as after a
+  restart of the worker while the new side's disk node is down, nor while
+  the group has the operator-in-charge flag or a forced-start mark, nor
+  at the pool's level `NO_THINPOOL` or below; the IO then waits until the
+  disk node comes back. When only the network from the controller node
+  to the new side's disk node is cut, the copy goes on over the path
+  between the two disk nodes, so it can become whole during the cut; leg repair
+  then finishes the migration, and the IO fails. In both kinds of pool, the
+  worker can also fail the pool over before any of this: while the write
+  waits, a commit of the slice's thin pool can wait on the leg too, and
+  the primary then reports nothing new to the worker. All of this is read
+  from the code: of it, the lab saw only the waiting write, below.
+  State: accepted; the group left one leg short after a cutover with
   a copy not whole is fix later. Seen in the lab: in a RAID1 pool, after the
   cutover with the copy whole, all traffic to the NVMe-oF port of the
   serving disk node was dropped. The primary cut the other path, md
@@ -1786,8 +1859,11 @@ failover's among them.
 - **Hosts still on the old primary's path see IO errors from the fence.**
   The worker hands the old primary its demotion first and holds the sides
   for three seconds at most. It holds the sides of the legs md copies from
-  up to one interval more, 2 seconds at the default (section 5.1). A host
-  that follows the discovery log drops the path inside the three seconds.
+  up to one interval more, 2 seconds at the default (section 5.1). The
+  three seconds are the time a host that follows the discovery log needs
+  to drop the path. When the old primary's agent reports its demotion
+  before the host drops the path, the fence can come first, but the path
+  is then ANA inaccessible and carries no IO.
   The failover writes the demotion into the old cntlr's record, so a
   worker that restarts or takes the pool over during the failover holds
   the sides too. A cntlr replacement of the primary holds the sides the
@@ -1924,10 +2000,11 @@ failover's among them.
     --leg <leg id>` keeps a leg, and a forced-start mark keeps every
     retired leg of its group.
 
-  A forced-start mark whose start waits or is refused holds the grow too:
-  until what holds the start ends, which can take the operator ([A forced
-  start that waits](operations.md#a-forced-start-that-waits)), or until the
-  operator withdraws the mark with
+  A fifth hold, a forced-start mark whose start waits or is refused, can
+  last until the operator acts too: it holds the grow until what holds the
+  start ends, which can take the operator ([A forced start that
+  waits](operations.md#a-forced-start-that-waits)), or until the operator
+  withdraws the mark with
   `dnvctl group force-start --grp <group id> --cancel`.
   Outside a failover and a cntlr replacement of the primary, the worker's
   hold delays the cntlrs' syncups by up to one check interval. In those two,
@@ -1985,7 +2062,12 @@ failover's among them.
   the worker cannot create and a cntlr replacement that finds no controller
   node show only as a health line whose age grows; the worker's log names
   why. A disabled primary shows as a pool line, which says when no cntlr of
-  the pool is enabled. A subsystem whose row on the primary reads pending
+  the pool is enabled or the pool's level runs no reaction. It does not say
+  when every enabled standby has a health epoch or an agent that refuses
+  the worker's syncups, which also lets no failover follow; the worker's
+  log then shows `reaction skipped` with the reason `no candidate` or
+  `candidate_refuses`. A subsystem
+  whose row on the primary reads pending
   while a host taken off its list keeps its connection shows no line, and no
   health epoch is set, although, once a converge has left the row so, the
   primary serves the subsystem's volumes to no host, save a namespace whose
@@ -2033,8 +2115,10 @@ failover's among them.
   message does not say which node changed. A record of an etcd write
   inside a transaction does not say whether the write was made. The
   worker's leftover record names the first eight objects only. A cdc write
-  timeout and a vanished host log the same reason. A device listing cut
-  short by an error can ground a read's verdict. State: accepted.
+  timeout and a vanished host log the same reason. A listing of a
+  controller node's devices that an error cut short still gives the
+  devices it read, and the cn agent can judge the node from that part.
+  State: accepted.
   Procedure written: [read the logs](operations.md#read-the-logs).
 
 ## 10. Sizes and performance
@@ -2087,7 +2171,7 @@ design:
   cluster get-capacity` names the budget when it is the limit the cluster
   reaches first, and an auto-grow refused for want of budget shows in the
   worker's log. State: accepted.
-  Procedure: [the operations doc](operations.md#the-clusters-capacity),
+  Procedure written: [the operations doc](operations.md#the-clusters-capacity),
   The cluster's capacity.
 - **The default cap on IO queues is unmeasured.** Each path holds one
   TCP connection per IO queue, and the agent caps the queues of a
@@ -2216,10 +2300,10 @@ design:
   kernel's md speed settings bound the copies: the sysctls
   `dev.raid.speed_limit_min` and `dev.raid.speed_limit_max`, which an
   array's own `md/sync_speed_min` and `md/sync_speed_max` override until
-  the array stops, as read in the kernel's md source. State: accepted;
-  [md's copy speed](operations.md#mds-copy-speed) says how to read and set
-  them. Fix later, after the performance runs: per-pool copy speed
-  settings.
+  the array stops, as read in the kernel's md source. State: accepted.
+  Procedure written, [md's copy speed](operations.md#mds-copy-speed): how
+  to read and set them. Fix later, after the performance runs: per-pool
+  copy speed settings.
 - **A host discard frees space only over whole aligned blocks on every
   slice.** A thin pool frees whole blocks only, and completes a shorter or
   misaligned discard with success. A cluster created with no stripe gets

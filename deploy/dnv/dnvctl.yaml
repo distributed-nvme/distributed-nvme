@@ -1,13 +1,15 @@
 # dnv: an example of dnvctl's settings, read with "dnvctl --config <file>" or
 # from the file the environment variable DNVCTL_CONFIG names. Put your own
 # gateway in place of the example one, from 192.0.2.0/24. Each key is a global
-# flag of dnvctl but --rev, which only the command line takes; a flag given on
-# the command line wins over an environment variable DNVCTL_<KEY> (the key in
-# capitals, dashes as underscores), and both win over this file. Keep the
-# name's ending, .yaml: dnvctl reads a settings file in the format its ending
-# names and refuses an ending it does not know, such as .conf.
+# flag of dnvctl but --rev, which only the command line takes, and --config,
+# which names this file; a flag given on the command line wins over an
+# environment variable DNVCTL_<KEY> (the key in capitals, dashes as
+# underscores), and both win over this file. Keep the name's ending, .yaml:
+# dnvctl reads a settings file in the format its ending names and refuses an
+# ending it does not know, such as .conf.
 #
-# The gateway dnvctl calls.
+# The gateway dnvctl calls, at its address on the back network
+# (architecture.md [D19]; the operations doc's "The networks").
 gateway-address: 192.0.2.10:29527
 # The cluster and the pool of every command that takes them.
 # cluster: c0

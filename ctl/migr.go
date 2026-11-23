@@ -121,9 +121,10 @@ func migrFinishCmd() *cobra.Command {
 // --force is the only way to cancel once the cutover has started: the
 // gateway refuses it otherwise, since the destination may hold the only copy
 // of the writes since, and with it the source serves its content as of the
-// cutover, as a leg md still counts whole and nothing copies again; what
-// that costs, and its one safe use after writes since the cutover, a source
-// side gone for good in an md-raid1 group, followed by the leg's repair, are
+// cutover, while md still counts the leg whole and nothing copies it again;
+// what that costs, and its one safe use after writes since the cutover, a
+// source side gone for good in an md-raid1 group whose other leg md holds in
+// sync, before the copy is whole, followed by the leg's repair, are
 // architecture.md, Migrations.
 func migrCancelCmd() *cobra.Command {
 	cmd := leaf(
@@ -154,7 +155,8 @@ func migrCancelCmd() *cobra.Command {
 			"as of the cutover, so the leg loses every write since, and md "+
 			"still counts it whole and nothing copies it again; the safe "+
 			"end is a finish once the copy is whole, and a forced cancel "+
-			"is for a source side gone for good in a RAID1 group, "+
+			"is for a source side gone for good in a RAID1 group "+
+			"whose other leg md holds in sync, before the copy is whole, "+
 			"followed by the leg's repair")
 	return cmd
 }

@@ -1,27 +1,31 @@
 # dnv: an example of the controller node agent's settings, which
 # deploy/systemd/dnv-agent-cn.service reads with --config. Install as
 # /etc/dnv/dnv-agent-cn.yaml, mode 0644, and put your own values in place of
-# the example ones, whose addresses are from 192.0.2.0/24. Each key is a flag
-# of "dnv-agent cn" ("dnv-agent cn --help" lists them all, with their
-# defaults); a flag given on the command line wins over an environment variable
-# DNV_AGENT_<KEY> (the key in capitals, dashes as underscores), and both win
-# over this file. The unit gives the agent its local store; this file names
-# none. Keep the name's ending, .yaml: dnv reads a settings file in the format
-# its ending names and refuses an ending it does not know, such as .conf.
+# the example ones, whose addresses are from 192.0.2.0/24 on the back network
+# and 198.51.100.0/24 on the host network. Each key is a flag of "dnv-agent
+# cn" ("dnv-agent cn --help" lists them all, with their defaults); a flag given
+# on the command line wins over an environment variable DNV_AGENT_<KEY> (the
+# key in capitals, dashes as underscores), and both win over this file. The
+# unit gives the agent its local store; this file names none. Keep the name's
+# ending, .yaml: dnv reads a settings file in the format its ending names and
+# refuses an ending it does not know, such as .conf.
 #
 # The node check reads the same file: dnv-agent check cn --config
 # /etc/dnv/dnv-agent-cn.yaml.
 #
 # The address and port the agent listens on for the gateway and the worker,
-# which "dnvctl cn create --addr" names.
+# which "dnvctl cn create --addr" names: an address on the back network,
+# which hosts must not reach (architecture.md [D19]; the operations doc's
+# "The networks").
 grpc-address: 192.0.2.31:29950
 # The NVMe/TCP port hosts connect to, and the controller nodes of another
 # pool that copy a volume from one of this node's pools, which
 # "dnvctl cn create" repeats with --tr-addr and --tr-svc-id: an address of
-# this machine.
+# this machine on the network hosts reach, here 198.51.100.31, not
+# grpc-address's (architecture.md [D19]).
 tr-type: tcp
 adr-fam: ipv4
-tr-addr: 192.0.2.31
+tr-addr: 198.51.100.31
 tr-svc-id: "4420"
 # The id of the agent's nvmet port. On a machine that also runs disk node
 # agents, keep it apart from theirs, with a port of its own.

@@ -990,9 +990,17 @@ func (b *statusBuilder) poolRows() {
 		for _, cntlr := range state.Cntlrs {
 			enabled = enabled || !cntlr.GetDisabled()
 		}
+		// With no cntlr enabled no failover can follow at any level. Else,
+		// from NO_THINPOOL down the worker runs no reaction (dnv-worker.md
+		// AR3), so none follows until the level steps back. One of the two
+		// at most, so the text stays under the row text cap uncut.
 		if !enabled {
 			text += "; no cntlr of the pool is enabled, so no failover " +
 				"can follow"
+		} else if state.Conf.GetSpLevel() >= pb.SpLevel_SP_LEVEL_NO_THINPOOL {
+			text += "; at this level the worker runs no reaction, so no " +
+				"failover follows until the level steps back to " +
+				"NO_CLONE, READONLY or READWRITE"
 		}
 		b.add(rankPool, &pb.StatusRow{
 			Kind:     pb.StatusKind_STATUS_KIND_POOL,

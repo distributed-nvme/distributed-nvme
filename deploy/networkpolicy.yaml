@@ -17,14 +17,17 @@
 # not.
 #
 # Rule 1 lets the pods reach every IPv4 address but those of the dnv
-# machines. List every address of every machine that runs a dnv program: a
-# program bound to 0.0.0.0 answers on all of them, a Kubernetes node's pod
-# bridge (cni0) and overlay (flannel.1) addresses and a docker bridge
-# (docker0) included, as `ip -4 -o addr show scope global` prints them on
-# each machine; or bind every dnv program to one address and list that one.
-# A cluster with IPv6 pods adds a rule for ::/0 with the machines' IPv6
-# addresses excepted the same way, since the policy refuses whatever no rule
-# allows.
+# machines. List every address of every machine that runs a dnv agent, the
+# gateway, the cdc or etcd: a program bound to 0.0.0.0 answers on all of
+# them, a Kubernetes node's pod bridge (cni0) and overlay (flannel.1)
+# addresses and a docker bridge (docker0) included, as
+# `ip -4 -o addr show scope global` prints them on each machine; or give
+# every dnv program and etcd the addresses to listen on, never 0.0.0.0, and
+# list those: a machine on two networks has one on each, such as a
+# controller node's agent address on the back network and its NVMe/TCP
+# address on the host network (architecture.md [D19]). A cluster with IPv6
+# pods adds a rule for ::/0 with the machines' IPv6 addresses excepted the
+# same way, since the policy refuses whatever no rule allows.
 #
 # The policy names addresses, not ports, so it keeps the pods off every port
 # of a dnv machine, not only dnv's. Rule 2 lets them reach the Kubernetes API

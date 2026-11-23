@@ -1414,6 +1414,70 @@ func TestStatusPoolRows(t *testing.T) {
 	}
 }
 
+// TestStatusDisabledPrimaryAtNoReactionLevel pins the disabled primary's
+// row at NO_THINPOOL and below, where the worker runs no reaction
+// (dnv-worker.md AR3): it says no failover follows until the level steps
+// back, beside the level's own row; at NO_CLONE it does not, and with no
+// cntlr enabled it says that instead, at every level, uncut.
+func TestStatusDisabledPrimaryAtNoReactionLevel(t *testing.T) {
+	for _, tc := range []struct {
+		level   pb.SpLevel
+		standby bool
+		says    bool
+	}{
+		{pb.SpLevel_SP_LEVEL_NO_THINPOOL, true, true},
+		{pb.SpLevel_SP_LEVEL_NO_SIDE, true, true},
+		{pb.SpLevel_SP_LEVEL_NO_CLONE, true, false},
+		{pb.SpLevel_SP_LEVEL_NO_THINPOOL, false, false},
+	} {
+		label := tc.level.String()
+		if !tc.standby {
+			label += "/none enabled"
+		}
+		t.Run(label, func(t *testing.T) {
+			env := newStEnv(t)
+			cn, _ := env.addCn("cn")
+			pool := env.newPool("p0", cn, stDns(env))
+			pool.cntlrs[stCntlr].Disabled = true
+			if tc.standby {
+				env.putCn("cn-other:9000", 1<<20)
+				pool.cntlrs[2] = &pb.Cntlr{AddrPort: "cn-other:9000"}
+				pool.conf.CntlrIdList = append(pool.conf.CntlrIdList, 2)
+			}
+			pool.conf.SpLevel = tc.level
+			env.put(pool)
+			rows := stKinds(stRowsOf(env.status(0, ""), "p0"),
+				pb.StatusKind_STATUS_KIND_POOL)
+			var disabled []*pb.StatusRow
+			for _, row := range rows {
+				if strings.Contains(row.GetText(), "disabled") {
+					disabled = append(disabled, row)
+				}
+			}
+			if len(rows) != 2 || len(disabled) != 1 {
+				t.Fatalf("%d pool rows, %d of a disabled primary, "+
+					"want the level's and one: %v",
+					len(rows), len(disabled), rows)
+			}
+			text := disabled[0].GetText()
+			says := strings.Contains(text, "runs no reaction") &&
+				strings.Contains(text, "until the level steps back")
+			if says != tc.says {
+				t.Errorf("text %q says the level stops the failover: %v, "+
+					"want %v", text, says, tc.says)
+			}
+			none := strings.Contains(text, "no cntlr of the pool is enabled")
+			if none == tc.standby {
+				t.Errorf("text %q says no cntlr is enabled: %v, want %v",
+					text, none, !tc.standby)
+			}
+			if strings.Contains(text, common.TextCutMark) {
+				t.Errorf("text %q is cut", text)
+			}
+		})
+	}
+}
+
 // TestStatusDeadlineCutsThePage pins the read under a client's deadline: it
 // starts no pool once less than one agent budget and the reply's margin is
 // left, answers the pools it read with the token after the last of them,

@@ -1690,9 +1690,8 @@ func (w *spWorker) reactionPass(ctx context.Context) {
 	// dnv-worker.md AR17: the record of a repair the primary holds back, at
 	// every sp_level for the same reason; it changes nothing.
 	w.logRepairWaits(ctx, p)
-	// dnv-worker.md AR6: the timing of a grow, at every sp_level, since an
-	// operator grows a pool at the levels where reactions stop too; it
-	// changes nothing.
+	// dnv-worker.md AR6: the timing of a grow, at every sp_level, since it
+	// only follows the primary's pool rows; it changes nothing.
 	w.timeGrows(ctx, p)
 	// dnv-worker.md AR15: the flag that a group's array has run, a step of
 	// the pass at every sp_level, since it only follows the primary's

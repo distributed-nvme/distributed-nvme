@@ -54,7 +54,12 @@
 # end in the same way. Send it no second signal: a second one ends the agent
 # at once, without its stop. Restart=on-failure starts again an agent that
 # exited with an error, such as one whose gRPC address this machine does not
-# hold yet, or one whose start check refused it.
+# hold yet, or one whose start check refused it, 5 seconds after it exited
+# (RestartSec=5s): a wait that keeps an agent which fails again and again
+# within systemd's default start limit, 5 starts in 10 seconds, past which
+# systemd starts it no more. The cost: the wait is longer than a controller
+# node that holds a primary may stay stopped, so after a crash of the agent
+# each primary on the node can fail over where its pool has a standby.
 #
 # Log: the journal. Keep the journal on another filesystem than the store,
 # or cap its size (SystemMaxUse= in journald.conf): an agent that cannot

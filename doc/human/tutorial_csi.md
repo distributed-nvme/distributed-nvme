@@ -204,7 +204,7 @@ run
 -->
 ```
 sudo k3s kubectl apply -f deploy/namespace.yaml -f deploy/csidriver.yaml -f deploy/controller-serviceaccount.yaml -f deploy/node-serviceaccount.yaml -f deploy/controller-clusterrole.yaml -f deploy/controller-clusterrolebinding.yaml -f deploy/controller-role.yaml -f deploy/controller-rolebinding.yaml
-sed "s/192.0.2.10:29527/$(ip -4 route get 1.1.1.1 | sed -n 's/.* src \([0-9.]*\).*/\1/p'):29527/; s/192.0.2.10:8009/127.0.0.1:8009/" deploy/config.yaml | sudo k3s kubectl apply -f -
+sed "s/192.0.2.10:29527/$(ip -4 route get 1.1.1.1 | sed -n 's/.* src \([0-9.]*\).*/\1/p'):29527/; s/198.51.100.10:8009/127.0.0.1:8009/" deploy/config.yaml | sudo k3s kubectl apply -f -
 sudo k3s kubectl apply -f deploy/controller.yaml -f deploy/node.yaml
 ```
 

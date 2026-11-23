@@ -36,10 +36,12 @@
 # once the modules are loaded, configfs is mounted and the network is up. A
 # disk node holds no primary, so its start at boot delays no failover. The
 # cost of leaving it off: after a reboot the instance stays stopped until you
-# start it, and once its sides have been unhealthy for the pool's
-# side_unhealthy, 600 seconds at the default, the worker repairs each leg
-# they hold onto another disk node, a copy of the whole leg (dnv-worker.md
-# AR8).
+# start it. In a pool with RAID1, once its sides have been unhealthy for the
+# pool's side_unhealthy, 600 seconds at the default, the worker repairs each
+# leg they hold onto another disk node, a copy of the whole leg, where the
+# leg's group keeps another healthy leg (dnv-worker.md AR8). In a pool
+# without RAID nothing replaces the leg, and the IO of each group with a leg
+# on the instance's disk fails while the instance is off.
 #
 # Order: every worker stops before any agent does, and the workers start
 # last, once the agents have started again and their startup passes have

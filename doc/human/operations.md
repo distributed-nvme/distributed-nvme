@@ -43,8 +43,11 @@ the command again.
 
 `dnvctl cluster get-status` lists what is wrong across the cluster
 ([Read what is wrong](#read-what-is-wrong)). `dnvctl sp get` also lists
-the pool's cntlrs. The one marked primary is the group's primary.
-`dnvctl cntlr inspect --id <cntlr id>` shows its rows.
+the pool's cntlrs under `cntlr_list`, and the one whose `primary` is true
+is the pool's primary. That list shows no ids: its entries come in the
+order of the ids in `sp_conf.cntlr_id_list`, so a cntlr's id stands at the
+same place in that list. `dnvctl cntlr inspect --id <cntlr id>` shows a
+cntlr's rows, and `<primary cntlr id>` below is the primary's id.
 
 The sections, by subject:
 
@@ -117,6 +120,7 @@ The sections, by subject:
   - [A new volume refused for a thin id that holds
     data](#a-new-volume-refused-for-a-thin-id-that-holds-data)
 - The control plane:
+  - [Set up the control plane](#set-up-the-control-plane)
   - [Back up etcd](#back-up-etcd)
   - [Restore etcd from a backup](#restore-etcd-from-a-backup)
     - [Restore one record from a backup](#restore-one-record-from-a-backup)
@@ -210,7 +214,7 @@ status and the reason of the row it shows follow where it has them:
   epoch is set: either the change is still on its way to the primary, or
   its node refuses it, as when it cannot save what the worker sends; the
   read cannot tell which, and the worker's log names it.
-- `pool`: the pool as a whole: being deleted, its level above read-write,
+- `pool`: the pool as a whole: being deleted, its level below read-write,
   its primary disabled, or a stored setting the worker refuses, such as a
   group whose sizes give its sides nothing to zero.
 - `space`: a slice's thin pool is out of data space, so a write that needs
@@ -294,8 +298,9 @@ worker cannot create, for want of a disk node with room or of a healthy leg,
 and a cntlr replacement that finds no controller node show only as a
 `health` line whose age grows, and the worker's log names the reason, while
 a disabled primary shows as a `pool` line, which says when no cntlr of the
-pool is enabled; a subsystem no cdc serves; and a worker that runs but whose
-watch has stopped. Nor does it show a subsystem whose row on the primary
+pool is enabled or the pool's level runs no reaction; a subsystem no cdc
+serves; and a worker that runs but whose watch has stopped. Nor does it
+show a subsystem whose row on the primary
 reads `RES_STATUS_PENDING` while a host taken off its list keeps its
 connection, and no health epoch is set, though once a converge has left the
 row so, the primary serves the subsystem's volumes to no host, save a
@@ -511,7 +516,8 @@ Safe steps:
    the array runs with a member in sync on a leg whose row reads ok. If
    the mark stays while the named leg serves, run the dry run again, with
    the words the mark carries in `--override` (`dnvctl sp get` shows the
-   mark's `override_list`, in the names the dry run's list uses). When its
+   mark's `override_list`, in the names the dry run's list uses, and
+   `dnvctl clone get --name <clone>` for a clone's group). When its
    refusal starts `forced start refused`, the start meets a refusal the
    mark does not pass, as when the named leg came back with a bad-block
    list (rule 6), and it wipes nothing. Do not wait for the group's row
@@ -531,8 +537,10 @@ Safe steps:
 7. Write to a volume from a host. If a thin pool comes back read-only, its
    row under `slice_id_to_dm_pool` in `dnvctl cntlr inspect` says why: for
    the reason `RES_REASON_POOL_NEEDS_CHECK`, follow
-   [Repair a thin pool's metadata](#repair-a-thin-pools-metadata); for any
-   other, stop.
+   [Repair a thin pool's metadata](#repair-a-thin-pools-metadata); for a
+   row that reads ok while its details hold `ro` and no `needs_check`, the
+   metadata is full: follow step 3 of [A pool's space](#a-pools-space); for
+   any other, stop.
 
 Steps that can lose data:
 
@@ -815,17 +823,22 @@ that it acted on the mark. A primary whose agent restarted since the start
 reports no such thing, and the mark then stands: it acts again at the
 array's next stop. The worker makes no leg repair of the group, since
 every leg now lists bad blocks, and a repair for bad blocks needs a leg
-with none. From `NO_THINPOOL` up no reaction runs at all.
+with none. From `NO_THINPOOL` down no reaction runs at all.
 
 The ways, and what each costs:
 
 1. Leave the group as it is, and go on from step 6 of "Which leg to
    choose", which steps the level back. Every region outside the lists
    reads and writes as before; a read over a listed region fails. Nothing
-   more is lost, and way 3 stays open. If `dnvctl sp get` still shows a
-   `forced_start` on the group a few check rounds after the row reads ok,
-   cancel the mark, as "A forced start that waits" says: left standing, it
-   acts at the array's next stop, from a leg that may be stale by then.
+   more is lost. If `dnvctl sp get` (`dnvctl clone get --name <clone>` for
+   a clone's group) still shows a `forced_start` on the group a few check
+   rounds after the row reads ok, act on the mark. Either follow way 3 now:
+   with the mark standing, it leads to "When the mark still stands", where
+   the mark drops every list with nothing lost while md holds its leg in
+   sync. Or cancel the mark, as "A forced start that waits" says: left
+   standing, it acts at the array's next stop, from a leg that may be
+   stale by then. Once the mark is gone, way 3 keeps only its four steps,
+   at the cost they carry.
 2. A new mark that names the same leg and passes `bad-blocks`, given while
    the row still reads error, then the level stepped to `NO_REDUND` and
    back, drops every list and loses nothing: the second start wipes the
@@ -850,9 +863,10 @@ The ways, and what each costs:
      `leg_list` in `dnvctl group inspect --grp <group id>` whose
      `member.md_state` is not empty. A leg's device is
      `/dev/mapper/<res_name>` of its row under `cntlr_info.leg_id_to_leg`.
-   - Check that `dnvctl sp get` shows no `forced_start` on the group. If it
-     shows one, run no mdadm: follow "When the mark still stands" below in
-     place of the four steps.
+   - Check that `dnvctl sp get` (`dnvctl clone get --name <clone>` for a
+     clone's group) shows no `forced_start` on the group. If it shows one,
+     run no mdadm: follow "When the mark still stands" below in place of
+     the four steps.
 
    The four steps:
    1. Step the level to `NO_REDUND`:
@@ -871,7 +885,8 @@ The ways, and what each costs:
    4. Step the level back: `dnvctl sp set-level --level NO_THINPOOL`. The
       primary assembles the array again, with no list.
       `dnvctl group inspect --grp <group id>` must show no list on any leg.
-      Then go on from step 6 of "Which leg to choose".
+      If a list is still there, stop and ask for help. Otherwise go on from
+      step 6 of "Which leg to choose".
 
    When the mark still stands: the worker has not cleared it yet, or the
    primary's agent restarted after the start and forgot that it acted on
@@ -907,9 +922,10 @@ Steps that can lose data: the four steps of way 3, as their cost says.
 When to stop: before the four steps of way 3, unless you know what each
 added leg holds over the listed regions, as from its history in the group;
 when the kernel name you read does not show a running array before you
-start; when a mark still stands and md does not hold its leg in sync; or
-when the array still runs at `NO_REDUND`, since its stop failed again. Ask
-for help.
+start; when a mark still stands and md does not hold its leg in sync;
+when the array still runs at `NO_REDUND`, since its stop failed again; or
+when a leg still shows a bad-block list after step 4 of the four steps.
+Ask for help.
 
 Tested: the cn agent suite, repair case, stages `badstop` (the failed stop
 made on purpose; a host read over the lists fails; the mark kept and the
@@ -1329,9 +1345,9 @@ Safe steps, to move every volume of the pool to a new pool:
      another of its paths already uses. So the cluster needs controller
      nodes beyond those of the old pool. This list too binds only the
      create: a cntlr replacement of either pool may later place a cntlr on
-     a controller node of the other pool. Before each move of step 2,
-     compare the `addr_port` of the cntlrs that `dnvctl sp get` shows for
-     both pools. If two share a controller node, stop moving and move one
+     a controller node of the other pool. Before each move of step 2, and
+     while its copy runs, compare the `addr_port` of the cntlrs that
+     `dnvctl sp get` shows for both pools. If two share a controller node, stop moving and move one
      of them to another controller node, the new cntlr first, as
      [Replace a cntlr by hand](#replace-a-cntlr-by-hand) says. Create the
      new cntlr with
@@ -1346,11 +1362,17 @@ Safe steps, to move every volume of the pool to a new pool:
      disable the old one with
      `dnvctl cntlr set-enabled --id <cntlr id> --enabled=false`. If it was
      the primary, wait until `dnvctl sp get` shows another cntlr as the
-     primary, since the gateway refuses to delete the primary. Then delete
+     primary with `settling` false, which says the new primary reports its
+     devices built, as step 4 of [Replace a cntlr by
+     hand](#replace-a-cntlr-by-hand) says. The gateway refuses to delete
+     the primary, and a delete while the new primary still shows
+     `settling` true stops the pool's IO, since the old cntlr can then no
+     longer take the role back. Then delete
      it with `dnvctl cntlr delete --id <cntlr id>`. A pool of four cntlrs,
      the most a pool can have, refuses the create: move a cntlr of the
      other pool instead when that pool has fewer. When both have four,
-     disable and delete the old cntlr first, and then create the new one,
+     disable and delete the old cntlr first, with the same wait, and then
+     create the new one,
      in the old cntlr's slot when the two pools' cntlrs use every other
      slot. Delete first only a cntlr whose pool has another healthy,
      enabled cntlr: disabling a pool's only enabled cntlr stops that
@@ -1418,21 +1440,33 @@ Steps that can lose data:
   the same identity as the new one, so hosts that keep the new pool's path
   reach two copies that differ. Run it only to abort the move, and only
   once the new pool's namespace is deleted with `dnvctl ns delete` and its
-  clone, if there is one, with `dnvctl clone delete --force`. Even then
-  every write made through the new pool is lost, since the old volume
-  lacks it.
+  clone, if there is one, with `dnvctl clone delete --force`. Once the
+  clone has served the hosts, first stop the volume's users on each host
+  and unmount it, before that namespace's delete: the hosts' file systems
+  hold in their memory what they wrote through the new pool, and would
+  write it onto the old volume, as [Move a volume to another
+  pool](#move-a-volume-to-another-pool) says. Even then every write made
+  through the new pool is lost, since the old volume lacks it.
 - A clone refused after its transfer is made leaves the old volume's
   namespace parked, with no path that serves IO, until
   `dnvctl xfer delete --force` in the old pool; so check the two pools'
-  stripes before the transfer.
+  stripes, and the clone meta group as check 4 of the move says, before
+  the transfer.
 
 When to stop: the clone is refused for the two pools' stripes and no
 slice count of the new pool fits; then copy the data at the file level
 from a host into a volume of the new pool, as step 3 of
 [a pool made before the stripe bound](#a-pool-made-before-the-stripe-bound)
-says. Or the clone does not leave, and its count of hydrated regions stops
-growing or its row reads `RES_STATUS_ERROR`: delete nothing in the old
-pool, and ask for help.
+says. Or the clone cannot read its source, which `dnvctl cluster
+get-status` shows as a line `clone/missing/source_fault` that stays: the
+When to stop of [Move a volume to another
+pool](#move-a-volume-to-another-pool) says what to check. Or the clone
+does not leave, and its count of hydrated regions stops growing or its
+row in `cntlr_info.clone_id_to_dm_clone` reads `RES_STATUS_ERROR`: first
+make the checks of step 13 of the move, as the move's When to stop says.
+After a failover of the old pool, the status read can show no line for
+the clone. When the count
+still does not grow, delete nothing in the old pool, and ask for help.
 
 Tested: the gateway's unit tests refuse the migration and name the way
 out. The e2e suite runs a transfer and a clone within one pool: the clone
@@ -1662,9 +1696,13 @@ Safe steps:
    log the warning `agent host cut disabled` when it started, it ends
    connections, and the new one would not: fix the cause first.
 3. If the agent of a controller node that holds a primary may stay stopped
-   longer than step 1 allows, move each primary off the node first. For
-   each cntlr on the node that `dnvctl sp get` shows as primary, first
-   check that `dnvctl sp get` shows another cntlr of the pool with
+   longer than step 1 allows, move each primary off the node first. Skip
+   this step for a pool whose level is `NO_THINPOOL` or below: there the
+   worker makes no failover and no cntlr replacement, neither after a
+   disable nor during a stop ([Change a pool's
+   level](#change-a-pools-level)). For each cntlr on the node that
+   `dnvctl sp get` shows as primary, first check that `dnvctl sp get`
+   shows another cntlr of the pool with
    `disabled` false and `err_epoch` 0: an enabled standby with no health
    epoch. If there is one, run
    `dnvctl cntlr set-enabled --id <cntlr id> --enabled=false`, and wait
@@ -1830,8 +1868,9 @@ Safe steps, as root on the machine:
    created. A node's location is its machine's host name by default
    ([Choose a node's location](#choose-a-nodes-location)).
 2. Install the tools the agents run ([the
-   introduction](introduction.md#requirements)): nvme-cli, mdadm and
-   dmsetup on every node, and thin-provisioning-tools on a controller node.
+   introduction](introduction.md#requirements)): nvme-cli, mdadm, dmsetup
+   and util-linux on every node, and thin-provisioning-tools on a
+   controller node.
    A disk node needs mdadm too, since the md rule of step 6 runs
    `/sbin/mdadm`. The node check's `commands` and `mdadm` lines name a tool
    that is missing.
@@ -1874,7 +1913,20 @@ Safe steps, as root on the machine:
    machine. Put each agent's settings where the first comment of its unit
    says, made from the examples in `deploy/dnv/`: among them its disk and
    its gRPC address, which differ for each agent of the machine, its
-   NVMe/TCP address and port, and its nvmet port id. Then run
+   NVMe/TCP address and port, and its nvmet port id. Name the disk by a
+   link that does not move at a reboot, under `/dev/disk/by-id/`, and
+   check it twice: at the node's first converge after step 13, the agent
+   formats the disk unless its first 8 bytes read `DNVDISK1`, dnv's own
+   header. It does not check whether the disk is mounted or used by
+   anything but dnv, so a file system, an LVM volume or any other data on
+   it is lost. A disk whose first 8 bytes read `DNVDISK1`, as
+   `sudo head -c 8 <disk>; echo` prints, served an old node, and a new
+   node on it gets nothing: first take steps 1 to 5 of [Reuse a disk from
+   an old node](#reuse-a-disk-from-an-old-node). They remove the old node
+   if it still exists, stop the agent that used the disk, check that no
+   device of dnv maps it, zero the disk's first block, which holds that
+   header, and delete that agent's disk node files. Then come back here.
+   Steps 12 and 13 here take the place of its steps 6 and 7. Last, run
    `sudo systemctl daemon-reload`.
 10. Give each agent a store folder of its own. Each unit of the kit names
     its agent's folder and makes it when the agent starts. An agent started
@@ -1904,7 +1956,12 @@ Safe steps, as root on the machine:
     controller node may serve, and, with no `--location`, for its host
     name, so it fails while the agent does not answer. With `--disabled`,
     nothing is placed on the new node until you enable it ([Disable a
-    node](#disable-a-node)).
+    node](#disable-a-node)). A disk node's create loses what its disk
+    held: the agent formats the disk, as step 9 says. A disk that carries
+    dnv's header already names an old node, and the new node gets nothing
+    (step 9). Within a few check rounds of the create,
+    `dnvctl dn inspect --addr <addr>` shows `meta_info` as
+    `RES_STATUS_OK`.
 
 The start order. On a machine that joins a running cluster, the order is
 the order of the steps: the agent first, then its node's create. When every
@@ -1915,18 +1972,74 @@ is a failed node, and the worker would fail over primaries, replace cntlrs
 and repair legs that only wait for their agent. The gateways and the cdc
 start and stop in any order. It is the order of an upgrade ([Upgrade
 dnv](#upgrade-dnv); [the scope page](scope.md), section 7, Upgrade). No
-program checks the order.
+program checks the order. Units enabled at boot are safe only on one
+machine. There systemd starts the worker's unit after the agents' units.
+A worker that starts drives nothing for its join grace, the time it waits
+after it registers in etcd before it takes a share of the work: its
+`--vote-grace-time`, 60 seconds at the default. It also waits up to 120
+seconds at the default, counted from the agent's start, for an agent that
+answers that it is starting. Nothing orders the units of two machines.
+After a power loss of the whole cluster, a worker whose join grace ends
+before an agent of another machine answers sees that node as failed, as
+above. To keep the order, leave the workers' units off at boot, and start
+the workers by hand once every agent has logged `agent started`. A worker
+left off at boot also stays stopped after a reboot of its own machine
+alone: start it by hand then too. While no worker runs, no change reaches
+the nodes and no reaction runs: nothing fails over, replaces a cntlr,
+repairs a leg or grows a slice whose thin pool fills up. No old leg that a
+repair left in its pool is deleted, and no md check, md's read of both legs
+of each array, is asked for.
 
-Steps that lose data: none of the steps writes to a disk. Step 6's md
-setting can keep an array of the machine's own from coming up at the next
-boot, as that section says. A firewall rule that refuses a connection dnv
-needs makes a node look dead to the worker, which then fails its primaries
-over and repairs its legs. Load new rules on one machine at a time, and
-check with `dnvctl cluster get-status` that no `health` line comes.
+Steps that lose data: step 13, and, for a disk that carries dnv's header,
+the steps of [Reuse a disk from an old
+node](#reuse-a-disk-from-an-old-node) that step 9 sends you to. A disk
+node's create makes its agent format the disk that its `--disk` names,
+unless the disk carries dnv's header already, and whatever the disk held is
+lost. The `dd` of that section's step 4 zeroes the disk's first block, and
+then nothing of dnv reads the data of the old node's sides again. Its step
+1 removes the old node, which can delete pools, each with its data ([Remove
+a node](#remove-a-node)). No other step writes to a disk. Step 6's md
+setting can keep an array of the machine's own from
+coming up at the next boot, as that section says. A firewall rule that
+refuses a connection dnv needs makes a node look dead to the worker, which
+then fails its primaries over and repairs its legs. When a disk node is
+cut from the controller node that holds a pool's primary, the IO to the
+pool's groups on that disk node fails after about 13 seconds, as in
+[Replace a dead disk node](#replace-a-dead-disk-node): in a pool without
+RAID, and in a RAID1 pool for a group none of whose other legs md holds in
+sync on another machine. In those groups, the IO to a leg that a
+migration moves waits instead when its side on the cut disk node serves
+it and the path to its other side stays up, unless another leg of the
+group is in sync on that same machine, where the IO can fail too. In a
+pool without RAID, and for a migration past its cutover whose copy the
+worker does not see whole during the cut, it waits for as long as the cut
+lasts. The copy goes on during the cut over the path between the
+migration's two disk nodes, when that path stays up, so it can become
+whole then. Otherwise, in a RAID1 group, it waits only until leg repair
+ends the migration, after the pool's `leg_unhealthy`, 1200 seconds at the
+default, or its `side_unhealthy`, 600 seconds, when the worker's checks
+of that disk node fail too. That end keeps the side on the cut disk node,
+and the IO then fails. md then marks the group's array broken, and the
+worker fails the pool over where the pool has an enabled standby with no
+health epoch; a pool of one cntlr waits for the cntlr replacement. In both
+kinds of pool, the worker can also
+fail the pool over sooner, while the IO waits ([the scope page, section
+8](scope.md#8-waits-a-host-can-see)).
+The IO to such a leg also fails when the migration's two disk nodes are
+cut from each other, from the cutover until the migration ends, for a
+block the new side has not yet copied.
+A thin pool can then stay read-only, or lose with no error the blocks it
+mapped since its last commit, as the Steps that can lose data of [The
+networks](#the-networks) say. Load new rules by the steps of that section,
+on one machine at a time: on a disk node, their step 5 stops the IO of
+such a pool before it starts their timer, since the timer takes a mistake
+away only after minutes, and their step 7 tries each caller of each
+refused port.
 
 When to stop: the node check exits 2 as root, or a `FAIL` you cannot fix;
 an agent that ends at its start; a node create that fails while its agent
-runs. Ask for help.
+runs; a disk node whose `meta_info` row still reads `RES_STATUS_ERROR` a
+minute after its create. Ask for help.
 
 Tested: the e2e suite runs the node check on every disk node and controller
 node guest before it creates its pool, and the disk node, controller node,
@@ -1934,8 +2047,19 @@ e2e and csi suites install the udev rules of `deploy/udev/`; the e2e suite
 passed in the lab with them on 2026-11-21. Every suite loads the modules
 with `modprobe` and starts the programs by hand: no suite loads the modules
 from the kit's files, starts an agent from the kit's units or reboots a
-machine set up this way. The firewall's proof is in [The
-networks](#the-networks).
+machine set up this way. A one-off check did, in the lab on 2026-11-22,
+on one guest that held two disk nodes, a controller node and the control
+plane, with the programs and the kit of commit 802231a7, but for one line
+of the kit: the controller node unit's `KillMode=`, then `mixed`. It
+installed the programs and the kit from an archive that `make release`
+built, started every unit, made a pool and a volume, enabled the units and
+rebooted the guest.
+After the boot every unit ran, the node check passed for both roles with
+its `kernel modules at boot` line ok, and the volume read back what was
+written before the reboot. The Go tests of `agent/nodecheck/` and
+`cmd/dnv-agent/` hold the kit's module lists, units and settings examples
+to the code. The firewall's proof is in
+[The networks](#the-networks).
 
 ## Install the udev rules on a node
 
@@ -2278,12 +2402,12 @@ a side or a cntlr, and no step here deletes anything else.
 
 When to stop: a node already holds sides or cntlrs and has the wrong
 location: nodes of two machines that share one host name, nodes of one
-machine created before and after a rename of it, or a node 0.1 created
-with no location on a machine that runs other nodes. No command changes a location; the
-node must be emptied, deleted and created again. [Remove a
-node](#remove-a-node) gives the first two steps, and [Reuse a disk from an
-old node](#reuse-a-disk-from-an-old-node) the use of a disk node's disk
-again. Ask for help.
+machine created before and after a rename of it, or a node that 0.1
+created with no location on a machine that runs other nodes. No command
+changes a location; the node must be emptied, deleted and created again.
+[Remove a node](#remove-a-node) gives the first two steps, and [Reuse a
+disk from an old node](#reuse-a-disk-from-an-old-node) the use of a disk
+node's disk again. Ask for help.
 
 Tested: the gateway's Go tests check the host name as the default, the
 refusals of a name that is no location, a RAID1 pool refused on one host
@@ -2330,6 +2454,9 @@ NQN of the controller node that holds a pool's primary can read and write
 that pool's raw legs there, the old bytes of other pools included. The NQN
 of a controller node that holds a standby of the pool gets in too, but its
 reads and writes fail until a failover makes that standby the primary.
+From a migration's cutover until the migration ends, a machine that claims
+the NQN of the destination disk node can also read and write the whole old
+side at the source disk node's port.
 
 Who connects to whom:
 
@@ -2365,9 +2492,11 @@ What the table means:
   network: the controller nodes of the cloning pool, any of which may hold
   its primary, must reach the NVMe/TCP ports of the source pool's
   controller nodes.
-- A machine that runs the cdc is on the host network, and one that runs
-  the gateway or etcd is on the control network. A control-plane server
-  that runs all three is on both.
+- A machine that runs the cdc is on the host network, where the hosts
+  call the cdc, and on the control network too, where the cdc calls etcd,
+  even when it runs nothing else. One that runs the gateway or etcd is on
+  the control network, and on the host network too when it also runs the
+  cdc.
 - No dnv program chooses the source address of a connection it makes: the
   machine's routing table picks the network. On a machine on two networks,
   route each network through its own interface, or a leg's or a call's
@@ -2383,7 +2512,8 @@ The risks a firewall does not take away:
   for a transfer, which a controller node exports on the same port: a
   machine that claims an NQN the transfer lists can write the source
   while a clone copies it ([the scope page](scope.md#3-the-promise-one-pool-never-reads-another-pools-bytes)).
-  So the promise needs hosts on which no tenant has root.
+  The promise does not cover that, so keeping tenants apart also needs
+  hosts on which no tenant has root.
 - All traffic is plain text. Whoever can read a network reads what
   crosses it: the volumes' data on the host and leg networks, and every
   desired state on the control network.
@@ -2421,7 +2551,13 @@ node's connection to a leg's address waits 1.5 seconds, and then that try
 of the leg counts as failed; the leg is tried again at a later check
 round.
 
-Safe steps, as root on every machine that runs a dnv program or etcd:
+Safe steps, as root on every machine that runs a dnv agent, the gateway,
+the cdc or etcd, and on every other machine with one interface on the host
+network and one on the back network, such as a Kubernetes node that runs
+a copy of the controller plugin. Take steps 5 to 8 on one machine at a
+time, and end step 8 on one machine before step 5 on the next, so that a
+mistake in the sets, such as a range that holds the addresses of dnv
+machines, cuts one machine and not every node at once:
 
 1. Give each listener one address on its network, from the table: the
    gateway's `--grpc-address`, each agent's `--grpc-address`, `--tr-addr`
@@ -2441,42 +2577,114 @@ Safe steps, as root on every machine that runs a dnv program or etcd:
    network policy alone keeps the tenants' pods off that machine (see the
    part on Kubernetes below). Where a program listens on IPv6, add each
    host's IPv6 addresses, its link-local one, which starts with fe80,
-   among them.
+   among them. A host whose `ip -6 address` shows an address marked
+   `temporary` may connect from an address that changes from time to
+   time, which no list of single addresses holds: put its whole prefix in
+   the set instead, such as 2001:db8:100::/64, when only hosts use that
+   prefix.
 3. Put in the set `refused` this machine's ports that hosts must not
    reach: on a disk node, each dn agent's control port and NVMe/TCP port;
    on a controller node, the cn agent's control port; on a control-plane
    server, the gateway's port and etcd's client and peer ports. Never put
-   a controller node's NVMe/TCP port or the cdc's port there.
-4. On a machine on two networks, such as a controller node or a
-   control-plane server with one interface on the host network, also take
-   the `#` away from the lines at the end of the file, with the names of
-   the two interfaces. Linux takes a packet sent to any of its addresses
-   on any of its interfaces, so these lines refuse the same ports to every
-   packet that comes in on the host network's interface, and forward
-   nothing from the host network to the back network. A machine that must
-   reach those ports, such as one that calls the gateway, then reaches
-   them over the back network.
-5. Start a timer that takes the table away again, so that a mistake that
-   cuts you off ends by itself:
-   `systemd-run --collect --unit=dnv-filter-undo --on-active=30min /usr/sbin/nft delete table inet dnv_filter`.
-   With `--collect`, systemd forgets the timer and the service it starts
-   once they have run, even when the delete failed, so this step can be
-   run again later.
-6. Load the table: `nft -f dnv-filter.nft`. A second load replaces it, and
-   no other table changes. Never run `nft flush ruleset`: it also removes
-   the tables of other programs, such as Kubernetes and docker.
+   a controller node's NVMe/TCP port or the cdc's port there. A machine
+   with none of these ports, such as one that runs only the cdc, or a
+   Kubernetes node that runs a copy of the controller plugin but no agent,
+   gateway or etcd, keeps the set `refused` with no `elements` part. Such
+   a machine is on two networks, so it still needs step 4.
+4. On a machine on two networks, such as a controller node, a machine that
+   runs the cdc, or a control-plane server with one interface on the host
+   network, also take the `#` away from the lines at the end of the file,
+   with the names of the two interfaces. Linux takes a packet sent to any
+   of its addresses on any of its interfaces, so these lines refuse the
+   same ports to every packet that comes in on the host network's
+   interface, and forward nothing from the host network to the back
+   network. Every machine on two networks needs the chain `forward` of
+   those lines, even one with no port in `refused`: a machine on which
+   `sysctl -n net.ipv4.ip_forward` prints 1, as on each Kubernetes node of
+   the lab, otherwise carries to the back network the packets of a host
+   that routes through it. A machine that must reach those ports, such as
+   one that calls the gateway, then reaches them over the back network.
+5. Read each pool's `cntlr_unhealthy`, `side_unhealthy` and
+   `leg_unhealthy`, the waits after which the worker replaces a cntlr, or
+   repairs a leg, behind a cut: 600, 600 and 1200 seconds at the default.
+   `dnvctl --sp '<pool name>' sp get` shows them in
+   `sp_conf.event_threshold`, where null or 0 means the default. When one
+   of them is 60 seconds or less, stop here and ask for help, as When to
+   stop says. On a disk node, then stop the IO of each pool that a cut
+   there can fail, unless that failure is acceptable, as Steps that can
+   lose data says: a pool without RAID with a side there, and a RAID1
+   pool with a group whose leg there has no other leg in sync on another
+   machine.
+   Start that IO again only after step 8 on that machine. Then start a
+   timer that takes the table away again, so that a mistake that
+   cuts you off, or cuts one node from another, ends by itself before the
+   worker replaces a cntlr or a leg behind the cut (Steps that can lose
+   data):
+   `systemd-run --collect --unit=dnv-filter-undo --on-active=5min --timer-property=AccuracySec=1s /usr/sbin/nft delete table inet dnv_filter`.
+   A systemd timer runs up to its `AccuracySec` after its time, one
+   minute by default, and `AccuracySec=1s` makes it run within a second
+   of it. Keep its time at least 30 seconds shorter than each pool's
+   `cntlr_unhealthy`, `side_unhealthy` and `leg_unhealthy`. A health
+   epoch stands until a check round finds the path working again. After
+   the table goes, that can take about 20 seconds. The worker connects to
+   an agent again only at its next try, up to about 17 seconds later. A
+   controller node connects to a leg again only at its next try, up to
+   about 12 seconds later. It then finds the leg working at its next test
+   write to it, which it makes every 5 seconds, and the worker reads that
+   at its next check round. The timer adds up
+   to a second, and the worker counts whole seconds. When the cluster's
+   `cntlr_interval` or `side_interval`, which `dnvctl cluster get` shows
+   under `cluster_conf.health_check_conf`, is above 2 seconds, keep the
+   timer shorter by the larger of the two too. No run has measured these
+   times. When the smallest threshold is under two minutes, make the tries
+   of step 7 before the timer ends, and make the read of step 7 at half
+   the timer's time after the load, not a minute after it. With
+   `--collect`, systemd forgets the timer and the service it starts once
+   they have run, even when the delete failed, so this step can be run
+   again later.
+6. From the machine that runs `dnvctl`, run `dnvctl cluster get-status`
+   and keep what it prints ([Read what is wrong](#read-what-is-wrong)).
+   Then load the table, but only while the timer still waits:
+   `systemctl is-active dnv-filter-undo.timer && nft -f dnv-filter.nft`.
+   It prints `active` and loads the table. If it prints `inactive`, the
+   timer has run already and nothing was loaded: start again at step 5.
+   A second load replaces the table, and no other table changes. Never
+   run `nft flush ruleset`: it also removes the tables of other programs,
+   such as Kubernetes and docker.
 7. From a host, try a refused port where something listens:
    `timeout 3 bash -c '</dev/tcp/<address>/<port>'; echo $?` prints 124,
    since the table drops the packets, and the same try from a machine of
-   the back network prints 0. From a host, the same try of the cdc's port
-   prints 0, and so does that of a controller node's NVMe/TCP port once a
-   subsystem of a pool with a cntlr there exists: the port listens only
-   while a subsystem or a transfer uses it. `nft list table inet
-   dnv_filter` shows the counter of the drops.
+   the back network prints 0. Make that try of each refused port of this
+   machine from every machine that the table above names as its caller:
+   etcd's client port from each machine that runs the gateway, the worker
+   or a cdc, its peer port from every other etcd server, an agent's
+   control port from each machine that runs the gateway or the worker, a
+   disk node's NVMe/TCP port from every controller node and every other
+   disk node, and the gateway's port from the machine that runs `dnvctl`
+   and from each machine that may run a copy of the controller plugin.
+   Each must print 0, or 1 at once where nothing listens on the port yet,
+   as on a disk node's NVMe/TCP port before a pool has a leg there: only
+   124 shows that the table drops that caller. From a host, the same try
+   of the cdc's port prints 0, and so does that of a controller node's
+   NVMe/TCP port once a subsystem of a pool with a cntlr there exists: an
+   NVMe/TCP port listens only while a subsystem or a transfer uses it.
+   `nft list table inet dnv_filter` shows the counter of the drops. A
+   minute after the load, run `dnvctl cluster get-status` again: it must
+   list nothing that it did not list before the load. The read shows a
+   cut only on a path that dnv uses at that time, and it never shows a cdc
+   that cannot reach etcd, so it does not take the place of the callers'
+   tries. On a machine on two networks, `nft list chain inet dnv_filter
+   forward` must show the drop line with the host network's interface
+   after `iifname` and the back network's after `oifname`, as `ip
+   address` names them. On a machine whose set `refused` is empty, that
+   is the only check of its table, as it has no refused port to try.
 8. Stop the timer once the cluster works: `systemctl stop
-   dnv-filter-undo.timer`. The table does not survive a reboot. To load it
-   at boot, run `nft -f` on the file from a unit of your own, before the
-   dnv programs start. Do not use the nftables package's own unit on a
+   dnv-filter-undo.timer`. If that prints `Unit dnv-filter-undo.timer not
+   loaded`, the timer has run and taken the table away: start again at
+   step 5. Then `nft list table inet dnv_filter` must print the table,
+   or start again at step 5. The table does not survive a reboot. To
+   load it at boot, run `nft -f` on the file from a unit of your own,
+   before the dnv programs start. Do not use the nftables package's own unit on a
    machine where Kubernetes or docker keep tables: on Ubuntu its stop
    empties the whole rule set, and so does the file its start and its
    reload load, as the package ships it.
@@ -2500,10 +2708,12 @@ control-plane server on two networks, the lines of step 4 drop a call to
 the gateway that comes in on the host network's interface. A call from a
 copy on another machine then comes from that machine's address on the
 control network, so keep that address out of the sets `hosts4` and
-`hosts6`, even on a machine that is also a host. Where a pod's connection
-to another machine keeps its pod address, the call comes from the copy's
-pod address instead: that is why step 2 keeps the pod network's range out
-of the sets on the gateway's machine. To keep the copies on those
+`hosts6`, even on a machine that is also a host. Each machine that may
+run a copy is then on two networks, so take the safe steps on it too, for
+the chain `forward` of step 4. Where a pod's connection to another
+machine keeps its pod address, the call comes from the copy's pod address
+instead: that is why step 2 keeps the pod network's range out of the sets
+on the gateway's machine. To keep the copies on those
 machines, give two or more of them a label, a key and a value that
 Kubernetes keeps on a node: `kubectl label node <node> <key>=<value>`.
 Then add a `nodeSelector`, the field of a pod's settings that names the
@@ -2515,18 +2725,100 @@ makes the fault of a cut network, and the table drops packets, so such a
 mistake shows as a stall, not as an error. A controller node cut from the
 control plane has its primaries failed over, and a host still on the old
 path can lose a write it was told was done, in the cases the scope page
-lists. A controller node cut from a disk node has md fail its legs there,
-and leg repair moves them after the pool's `leg_unhealthy`, 1200 seconds
-at the default ([the scope page](scope.md#6-the-system-comes-back-alone)).
-So start the timer of step 5 first, and check within its time.
+lists. After the pool's `cntlr_unhealthy`, 600 seconds at the default,
+the worker also replaces each cntlr on that controller node. For a pool
+with no standby to fail over to, such as a pool of one cntlr, it then
+replaces the primary while the old primary still serves the hosts, and a
+write a host was told was done can be lost. A controller node cut from a
+disk node has md fail its legs there, and leg repair moves them after the
+pool's `leg_unhealthy`, 1200 seconds at the default, or after its
+`side_unhealthy`, 600 seconds, when the worker cannot reach that disk
+node either ([the scope page](scope.md#6-the-system-comes-back-alone)).
+So start the timer of step 5 first, keep it at least 30 seconds shorter
+than those times, as step 5 says, and check at step 7 before it ends. In
+a pool without RAID a group has one leg, so when a disk node is cut from
+the controller node that holds the pool's primary, the IO to the pool's
+groups on that disk node fails after about 13 seconds, as in [Replace a
+dead disk node](#replace-a-dead-disk-node), long before the timer ends:
+the hosts' reads and writes that reach those groups fail, and a write that
+failed may or may not be on the volume. When
+such a group is a data
+group, a commit of the slice's thin pool under writes then leaves the thin
+pool read-only, and it stays read-only after the table goes, until you
+take the steps of [Repair a thin pool's
+metadata](#repair-a-thin-pools-metadata). When it is the slice's meta
+group, a commit under writes then fails the thin pool, and the blocks it
+mapped since its last commit can be lost with no error ([the scope
+page](scope.md#4-data-loss-dnv-accepts)). The pool's IO then stays failed,
+even after the table goes, until the worker fails the primary over to a
+standby, which it does after the pool's `primary_unhealthy`, 4 seconds at
+the default, often while the table still stands. A pool with no standby
+to fail over to, such as a pool of one cntlr, keeps its IO failed until
+the cntlr replacement, after the pool's `cntlr_unhealthy`. The timer of
+step 5 does not keep that replacement away. A RAID1 group fails the same
+way when md holds in sync no leg of it on another machine, as while its
+other leg is dead, while md copies onto the new leg of a repair, or while
+a leg is kept out of its array. Under IO, md then marks the array broken.
+The primary does not
+assemble it again while the thin pool holds it open, so the group stays
+down after the table goes, until that failover or cntlr replacement
+([the scope page, section
+6.1](scope.md#61-cases-where-dnv-does-not-come-back-alone-today)).
+In a pool without RAID, and in a RAID1 group in which md holds no other
+leg in sync, the IO to a leg that a migration moves waits instead when
+its side on the cut disk node serves it and the path to its other side
+stays up. It waits for as long as the cut lasts, unless the worker fails
+the pool over meanwhile: leg repair, whose end of the migration fails
+that IO in a RAID1 group, as in [Prepare a node](#prepare-a-node), comes
+only after the pool's `side_unhealthy` or `leg_unhealthy`, and the timer
+of step 5 takes the table away before then ([the scope page, section
+8](scope.md#8-waits-a-host-can-see)).
+A table on the disk node makes such a cut when its set `hosts4` or
+`hosts6` holds the address of the controller node, or when the two
+interface names of step 4 are swapped. It also fails the IO to a leg that
+a migration moves, for a block the new side has not yet copied, when the
+sets hold the address of a disk node that holds the new side of a
+migration whose old side is there: from the cutover until the migration
+ends, that disk node reads such a block from the old side at this one's
+NVMe/TCP port. A controller node's own
+table drops none of its connections to the legs, since their answers come
+back to ports not in `refused`. So before step 5 on a disk node, find the
+pools with a side there, by `dnvctl dn get --addr <addr>` and `dnvctl sp
+get`, as the How to confirm of [Replace a dead disk
+node](#replace-a-dead-disk-node) says. For each pool whose `redund_conf`
+is `redund_none`, stop the users of its volumes on every host and unmount
+them, or load the table there only when the failure of that IO, the
+repair and the loss above are acceptable. Do the
+same for a RAID1 pool with a group whose leg on that disk node has no
+other leg of the group in sync on another machine.
+`dnvctl --sp '<pool name>' sp get` lists each group's `grp_id` with the
+`leg_id` of each of its legs in `leg_list`, save a clone's meta group,
+the group that holds a clone's copy records: `sp get` names the pool's
+clones in `sp_conf.clone_name_list`, and
+`dnvctl --sp '<pool name>' clone get --name <clone>` shows each one's
+group under `clone.meta_grp`. Then
+`dnvctl --sp '<pool name>' group inspect --grp <grp_id>` shows a leg in
+sync when its entry of `leg_list` has a `member.md_state` that holds the
+word `in_sync` and not the word `faulty`; the entry's `addr_port` names
+the leg's disk node. Start that IO again only after step 8 on that
+machine.
 
-When to stop: after a load, a host's IO stalls, a node create fails as
-above, or `dnvctl cluster get-status` lists something new ([Read what is
-wrong](#read-what-is-wrong)). Delete the table at once, `nft delete table
-inet dnv_filter`, and stop its timer, `systemctl stop
-dnv-filter-undo.timer`. Check the sets against the list of who connects
-to whom above, and on a machine on two networks check the two interface
-names of step 4 against `ip address`, then start again at step 5.
+When to stop: after a load, a host's IO stalls, a caller's try of step 7
+prints 124, `dnvctl cluster get-status` fails, as it does after about 10
+seconds with error code DEADLINE_EXCEEDED when the table drops its
+packets, or lists something new ([Read what is
+wrong](#read-what-is-wrong)), or a node create fails as above. Delete the
+table at once, `nft delete table inet dnv_filter`, and stop its timer,
+`systemctl stop dnv-filter-undo.timer`. Check the sets against the list
+of who connects to whom above, and on a machine on two networks check the
+two interface names of step 4 against `ip address`, then start again at
+step 5. Also start again at step 5 when the timer ran before step 8, as
+steps 6 and 8 show: the table is then gone or was never loaded, and a try
+of step 7 made after that shows nothing. Do not go on past the read of
+step 5 while a pool's `cntlr_unhealthy`, `side_unhealthy` or
+`leg_unhealthy` is 60 seconds or less: a timer 30 seconds shorter then
+leaves too little time for step 7, or none. Ask for help. A value of 0
+there means the default, as step 5 says.
 
 Tested: the firewall run in the lab on 2026-11-22. This file, with the
 lab's addresses and ports in its sets, was loaded on the control-plane
@@ -2539,7 +2831,8 @@ a controller node's NVMe/TCP port answered from the host. The e2e suite
 at one slice then passed under the tables, on its second run: the first
 stopped in its react case on a host's read that did not end while the
 machine that runs the lab ran out of memory, with no packet dropped. Each
-case of the Kubernetes suite but policy passed too, each run alone, with
+case of the Kubernetes suite except its policy case passed too, each run
+alone, with
 the gateway's port left open to the hosts, where one of the controller
 plugin's two copies always runs in the lab; its machine case makes the
 copy on a host the one that acts. After each passing run every table
@@ -2552,14 +2845,23 @@ held the hosts one by one, their link-local IPv6 addresses among them.
 The `--collect` of step 5 was checked outside the lab with systemd 255,
 the version of Ubuntu 24.04, on a user's own units
 (`systemd-run --user`): after a failed delete, a new timer of the same
-name starts. The lab run ran `systemctl reset-failed` on the timer's
-units before each start instead. The policy case was not run under the
+name starts. On the same systemd, a timer of one second ran after 50
+seconds at the default accuracy, and one of three seconds with
+`AccuracySec=1s` after four seconds. Once a timer had run,
+`systemctl is-active` printed `inactive` and `systemctl stop` printed
+`Unit ... not loaded`. The lab run did not use `--collect`: it ran
+`systemctl reset-failed` on the timer's units before each start, and
+loaded each table only once
+`systemctl is-active` printed `active`, with timers of two and a half
+hours at the default accuracy. The policy case was not run under the
 tables: it needs the agents' ports open from a pod on a host as its own
 control. Not tested: the lines for a machine on two networks and a
 route through a controller node, as every lab guest has one interface on
-one network; a refusal over IPv6, which no suite uses; a pod network
-whose connections to other machines keep their pod address, with its
-range in the sets, as the lab runs flannel alone; the load at boot; and
+one network; a set `refused` with no `elements` part, which nft 1.0.9
+loaded only outside the lab, in a network namespace of its own; a
+refusal over IPv6, which no suite uses; a pod network whose connections
+to other machines keep their pod address, with its range in the sets, as
+the lab runs flannel alone; the load at boot; and
 the node selector of the controller plugin, which the lab cannot run, as
 its three Kubernetes nodes are the control-plane guest and the two
 hosts.
@@ -2762,7 +3064,8 @@ Safe steps:
    0 asks for a data group, and the new group always takes the size of the
    slice's first data group, whatever number you give. `--meta`, with no
    `--ext`, adds a meta group instead, as large as the slice's meta groups
-   together.
+   together. The gateway refuses a grow while the pool's level is
+   `NO_THINPOOL` or below ([Change a pool's level](#change-a-pools-level)).
 3. A thin pool can be read-only while its slice's `read` is true. Its
    line in `dnvctl cntlr inspect --id <primary cntlr id>`, the row under
    `slice_id_to_dm_pool`, says why. When it carries `needs_check`, follow
@@ -2775,8 +3078,10 @@ Steps that lose data: deleting a thin device or a snapshot to free blocks of
 the thin pool deletes its data.
 
 When to stop: a slice stays unread, run after run, while the pool is built
-and the agent has a reading of the cntlr (`obs_age` is not `null`); or a
-thin pool's line carries `ro` and no `needs_check`, and the pool stays
+and the agent has a reading of the cntlr (`obs_age` is not `null`). Or a
+thin pool's line carries `ro` and no `needs_check`, and the grow of step 2
+with `--meta` is refused (FAILED_PRECONDITION): the slice's meta groups
+together reach dm-thin's metadata ceiling, about 16 GiB. Or the pool stays
 read-only after a meta group is added. Ask for help.
 
 Tested: the Go tests of the answer on hand-made rows, and of the gateway's
@@ -2833,10 +3138,13 @@ Safe steps:
    comes back here once its legs serve
    ([A broken array that comes back by itself](#a-broken-array-that-comes-back-by-itself)).
 4. Note the metadata's device: the `res_name` of the meta group's row under
-   `cntlr_info.grp_id_to_md_raid`, keyed by its `grp_id`, a path such as
-   `/dev/md/<name>`. At this level that array holds the whole metadata of
-   the slice's thin pool. Run the next steps as root on the primary's
-   controller node, the `addr_port` of the primary in `dnvctl sp get`.
+   `cntlr_info.grp_id_to_md_raid`, keyed by its `grp_id`. In a RAID1 pool
+   it is the path of the group's array, such as `/dev/md/<name>`. In a pool
+   without RAID it is the name of a device mapper device, whose path is
+   `/dev/mapper/<res_name>`. At this level that device holds the whole
+   metadata of the slice's thin pool. Run the next steps as root on the
+   primary's controller node, the `addr_port` of the primary in
+   `dnvctl sp get`.
 5. Check it: `thin_check <metadata device>`. It passes on metadata that
    only carries the mark. If it fails, stop.
 6. Make a new device of the same size, a loop device over a new file on a
@@ -2852,9 +3160,9 @@ Safe steps:
 7. Repair onto it and check the copy:
    `thin_repair -i <metadata device> -o <loop device>`, then
    `thin_check <loop device>`.
-8. Copy it back over the meta group's array:
+8. Copy it back over the meta group's device:
    `dd if=<loop device> of=<metadata device> bs=1M conv=fsync status=none`.
-   dnv builds the thin pool over that array by its name, so the copy back
+   dnv builds the thin pool over that device by its name, so the copy back
    takes the place of a swap of devices. Then remove the loop device with
    `losetup -d <loop device>` and delete the file.
 9. `thin_check --clear-needs-check-flag <metadata device>`, then
@@ -2874,7 +3182,7 @@ Steps that can lose data:
 
 - The copy of step 8 overwrites the device it is given. A wrong device,
   such as a data group's array or another pool's, loses its data. Copy only
-  onto the `res_name` of step 4.
+  onto the device of step 4.
 - `thin_repair` over damaged metadata can drop mappings, and the volumes
   then lose the blocks they mapped. This is not tried; step 5 stops first.
 - A level stepped back before step 8 brings the pool back read-only with
@@ -2911,10 +3219,12 @@ step keeps what the steps before it switch off:
   IO errors.
 - `NO_THINPOOL`: the thin pools and the volumes go: every read and write of
   the pool's volumes fails. The namespaces stay exported, so a host sees IO
-  errors, not a lost device. The group arrays still run. From this level
-  up the worker runs no reaction for the pool: no failover, cntlr
-  replacement, leg repair or auto-grow, no delete of old retired legs and
-  no md check.
+  errors, not a lost device. The group arrays still run. At this level
+  and every level below it the worker runs no reaction for the pool: no
+  failover, cntlr replacement, leg repair or auto-grow, no delete of old
+  retired legs and no md check, md's read of both legs of each array,
+  every 30 days at the default
+  ([The md check's mismatch count](#the-md-checks-mismatch-count)).
 - `NO_REDUND`: the primary stops the group arrays. The legs stay connected
   and checked.
 - `NO_MIGRATION`: the disk nodes take every migration's copy away, and no
@@ -2924,35 +3234,40 @@ step keeps what the steps before it switch off:
 - `DISABLE`: only the sides' disk space stays. The zeroing of a new side
   goes on.
 
-When: before a forced start ([Before every forced start](#before-every-forced-start)),
-before [Repair a thin pool's metadata](#repair-a-thin-pools-metadata), or
-to take a damaged pool apart in stages.
+When: before a forced start
+([Before every forced start](#before-every-forced-start)), before
+[Repair a thin pool's metadata](#repair-a-thin-pools-metadata), or to take
+a damaged pool apart in stages.
 
 How to confirm the level: `dnvctl sp get` shows it as `sp_conf.sp_level`.
-`dnvctl cluster get-status` lists a `pool` line for any level above
+`dnvctl cluster get-status` lists a `pool` line for any level below
 `READWRITE`, with the text "level SP_LEVEL_<name>: writes to its volumes
-fail", and from `NO_THINPOOL` up ", and the worker runs no reaction for the
-pool". From `NO_THINPOOL` up reads fail too, which the line does not say.
-The primary has applied the level when `dnvctl cntlr inspect --id <primary
-cntlr id>` shows `applied_revision` at least the pool's `sp_rev.revision`.
+fail", and from `NO_THINPOOL` down ", and the worker runs no reaction for
+the pool". From `NO_THINPOOL` down reads fail too, which the line does not
+say. The primary has applied the level when
+`dnvctl cntlr inspect --id <primary cntlr id>` shows `applied_revision` at
+least the pool's `sp_rev.revision`.
 Each row the level takes away then reads `RES_STATUS_MISSING` with the
 reason `RES_REASON_SP_LEVEL`.
 
 What dnv does alone: the worker sends the new level to every cntlr and side
-of the pool. Nothing else changes, and no timer moves the level back. Some
-calls wait on the level: from `NO_REDUND` up the gateway refuses
-`dnvctl repair create`, `dnvctl group force-start` (but its `--cancel`) and
-`dnvctl group inspect`. `dnvctl repair finish`, `repair cancel` and
-`repair abort` run at every level, and so does `dnvctl migr create`, though
-no cutover starts from `NO_MIGRATION` up.
+of the pool. Nothing else changes, and no timer moves the level back. The
+gateway refuses some calls at some levels: from `NO_THINPOOL` down,
+`dnvctl sp grow-slice`; from `NO_REDUND` down, `dnvctl repair create` and
+`dnvctl group force-start` (but its `--cancel`). `dnvctl group inspect`
+reads the group at every level; from `NO_REDUND` down its dry run, with
+`--leg`, answers that a start is refused at that level.
+`dnvctl repair finish`, `repair cancel` and `repair abort` run at every
+level, and so does `dnvctl migr create`, though no cutover starts from
+`NO_MIGRATION` down.
 
 Safe steps: `dnvctl sp set-level --level <level>`, with a short name such as
 `NO_THINPOOL`, or the full name such as `SP_LEVEL_NO_THINPOOL`; case does
 not matter. Step back the same way. Then wait for `applied_revision`, as
 above.
 
-Steps that can lose data: every level above `READWRITE` fails the hosts'
-writes, and from `NO_THINPOOL` up their reads, so an application on a host
+Steps that can lose data: every level below `READWRITE` fails the hosts'
+writes, and from `NO_THINPOOL` down their reads, so an application on a host
 can lose what it was writing. `dnvctl sp set-level` with no `--level` sets
 `READWRITE`: it brings the pool back up.
 
@@ -3012,7 +3327,7 @@ What dnv does alone:
   cntlr connects to it. The old side serves meanwhile.
 - The worker starts the cutover once the new side waits for it and the
   primary's path to it is live. It starts none while the pool's level is
-  `NO_MIGRATION` or above, or while the primary is disabled.
+  `NO_MIGRATION` or below, or while the primary is disabled.
 - At the cutover the leg has no path for a moment: one to two and a half
   seconds were measured at 32 slices ([the scope page](scope.md),
   section 8). Then the worker reads the leg's list of written blocks from
@@ -3068,9 +3383,9 @@ Steps that can lose data:
   mapped since read the old side's old bytes, possibly another pool's. md
   still counts the leg whole, so in a RAID1 group reads can return those
   bytes, and no call makes md copy the leg again: a repair is refused for a
-  leg with no health epoch, and a member md failed in the switch is added
-  back from md's record of the regions written while it was out, which
-  holds none of these.
+  leg with no health epoch, and a member that md failed when the leg went
+  back to its old side is added back from md's record of the regions
+  written while it was out, which holds none of these.
 
 Use either flag only as [Ending a migration with force](#ending-a-migration-with-force)
 says.
@@ -3093,9 +3408,19 @@ on 2026-11-21. The gateway's unit tests check each refusal.
 
 ### Ending a migration with force
 
-When: a migration whose cutover has started cannot be finished, because the
-new side's agent does not answer the proof, or because a disk node of the
-leg is gone.
+When: a migration whose cutover has started cannot be finished: the new
+side's agent does not answer the proof, or a disk node of the leg is gone
+and the copy is not whole. When the old side's disk node is the one gone,
+run `dnvctl migr finish --name <name>`, with no force, first. The gateway
+asks only the new side's disk node for the proof, so the finish goes
+through when the copy is whole. Once that disk node has lost its
+connection to the old side, only some of its reports carry the copy's
+count: if the finish is refused with "has not finished hydrating" after
+you saw the copy whole, run it again a few seconds later. The leg
+then keeps the new side alone, which holds every block, and needs no
+repair: if md failed the leg meanwhile, the primary adds it back once it
+serves again. While the copy is not whole the gateway refuses the finish
+each time: then read the cases below.
 
 Confirm: `dnvctl migr get --name <name>` shows `cutover_pending` false.
 `dnvctl sp get` shows each side's `err_epoch` in the leg's `side_list`, and
@@ -3104,8 +3429,8 @@ Confirm: `dnvctl migr get --name <name>` shows `cutover_pending` false.
 What dnv does alone: for a leg it would repair, the worker ends a
 migration only where that loses nothing, as above. With a copy that is not
 whole it logs `migration_copy_not_whole` at each pass, and the group runs
-one leg short until both sides answer again and the copy goes on to its
-end.
+one leg short, or, with no other leg in sync, its IO waits, until both
+sides answer again and the copy goes on to its end.
 
 Steps, by case:
 
@@ -3121,7 +3446,9 @@ Steps, by case:
    failed. End the migration so that the leg
    keeps the side that is gone: `dnvctl migr finish --name <name> --force`
    when the new side's disk node is gone, and
-   `dnvctl migr cancel --name <name> --force` when the old side's is. The leg
+   `dnvctl migr cancel --name <name> --force` when the old side's is and
+   the copy is not whole, so that the finish with no force is refused
+   ("When", above). The leg
    then has no path. md fails its member, and the group serves from its
    other leg, which holds every write. Then have the leg replaced at once,
    before the node can come back with its old or partial copy: once
@@ -3134,11 +3461,13 @@ Steps, by case:
    from the other leg, and a repair's bad leg never joins the array again.
    When the repair has finished, delete the retired leg it made, which
    holds no whole copy ([Retired legs](#retired-legs)).
-3. A group of one leg, in a pool without RAID, with a disk node gone: no end
-   keeps the data. A forced finish leaves the leg on a dead side, and the
-   volumes then give IO errors over that group for good. A forced cancel,
-   with the new side gone, brings the old side back as of the cutover, and
-   the leg loses every write since. Stop and ask for help.
+3. A group of one leg, in a pool without RAID, with a disk node gone and no
+   finish with no force that goes through ("When", above): no end keeps the
+   data. A forced end that keeps the side that is gone leaves the leg on a
+   dead side, and the volumes then give IO errors over that group for good.
+   A forced end that keeps the side that answers serves what that side
+   lacks: the old side lacks every write since the cutover, and the new
+   side the regions its copy had not reached. Stop and ask for help.
 4. Both disk nodes answer, and the new side's copy row reads an error, as
    when dm-clone's own records fail: neither forced end is safe. A forced
    cancel serves the old side as of the cutover, which md counts whole; a
@@ -3148,7 +3477,11 @@ Steps, by case:
 Steps that can lose data: every forced end but those of cases 1 and 2. A
 forced cancel also loses nothing when nothing has written to the pool since
 the cutover. In case 2, naming the wrong side as gone keeps a live side
-whose copy is old or partial, which md counts whole.
+whose copy is old or partial, which md counts whole. A forced cancel of a
+copy that is whole throws away the new side, which holds every block: in
+case 2 the group then runs on one copy until the repair ends, and a second
+fault in that time can lose data. Try the finish with no force first, as
+"When" says.
 
 When to stop: cases 3 and 4; you cannot tell whether a disk node is gone
 for good; or the gateway refuses the repair of case 2 for a reason other
@@ -3164,8 +3497,9 @@ goes silent, the primary cuts its path to the old side, and md fails the
 leg's member while a host writes; then the worker finishes the migration,
 so that the leg keeps the gone new side alone, and repairs the leg with a
 fresh leg, no write failing. It passed in the lab on 2026-11-21. Not
-tested: a forced end of a copy that is not whole, the forced cancel of case
-2, and cases 3 and 4.
+tested: the finish with no force of a whole copy whose old side's disk
+node is gone, a forced end of a copy that is not whole, the forced cancel
+of case 2, and cases 3 and 4.
 
 ## Repair a leg by hand
 
@@ -3205,7 +3539,7 @@ Safe steps:
    with one leg. `--dn-black` and `--dn-white` steer the new leg's disk
    node. The reply gives `rep_id` and `new_leg_id`. The gateway refuses: a
    name that starts with `__internal__`, which the worker's repairs use; a
-   level of `NO_REDUND` or above; a pool without RAID; a name in use; a group
+   level of `NO_REDUND` or below; a pool without RAID; a name in use; a group
    with an open repair; a leg that is not in the group's list, that a
    migration moves, or that is healthy; and a fresh leg for a group that
    holds two retired legs, whose message says to delete one first
@@ -3323,18 +3657,36 @@ What dnv does alone: the worker replaces a cntlr whose health epoch is as
 old as `cntlr_unhealthy`, with a new cntlr in its slot on another controller
 node. It never replaces a disabled cntlr. A disabled primary fails over at
 the worker's next pass, with no threshold, to an enabled standby with no
-health epoch. Disabling the last enabled cntlr of a pool stops its IO, and
-nothing warns.
+health epoch whose agent does not refuse the worker's syncups, at the
+levels where reactions run: `READWRITE`, `READONLY` and `NO_CLONE`
+([Change a pool's level](#change-a-pools-level)). Disabling
+the last enabled cntlr of a pool stops its IO, and nothing warns.
 
 Safe steps, the new cntlr first and the delete last:
 
 1. Read the pool: `dnvctl sp get` lists its cntlrs under `cntlr_list`, in
    the order of the ids in `sp_conf.cntlr_id_list`, the ids `--id` takes,
    each with `addr_port`, `cntlid_slot`, `primary`, `disabled`, `err_epoch`
-   and `settling`. `sp_conf.cntlid_slot_list` lists the pool's cntlid slots,
+   and `settling`, true while a new primary has not reported its devices
+   built. `sp_conf.cntlid_slot_list` lists the pool's cntlid slots,
    the ranges of NVMe controller ids its exports use.
-2. Create the new cntlr: `dnvctl cntlr create --slot <slot>`, with a slot of
-   the list that no cntlr of the pool uses, the old one included. Add
+2. If the old cntlr is the primary and the pool's level is `NO_THINPOOL`
+   or below, first step the level back to `NO_CLONE`, `READONLY` or
+   `READWRITE` with `dnvctl sp set-level --level <level>`
+   ([Change a pool's level](#change-a-pools-level)). From `NO_THINPOOL`
+   down no reaction runs. So no failover follows step 4, and a disabled
+   primary runs none of the pool's group arrays. Pick `READONLY` when the
+   pool must go back to its old level in step 5: hosts then write nothing
+   to the pool in between. Do not step the level
+   back while other work holds it there, such as a forced start, the
+   repair of a thin pool's metadata, or a damaged pool taken apart in
+   stages. End that work first, or ask for help
+   ([Before every forced start](#before-every-forced-start);
+   [Repair a thin pool's metadata](#repair-a-thin-pools-metadata),
+   step 8). The wait of step 3 also shows that the new cntlr has the
+   level.
+   Then create the new cntlr: `dnvctl cntlr create --slot <slot>`, with a
+   slot of the list that no cntlr of the pool uses, the old one included. Add
    `--cn-black <addr>,<addr>` to keep it off those controller nodes; the
    gateway already keeps it off every controller node that holds a cntlr of
    the pool, and out of their locations when it can. The reply's `cntlr_id`
@@ -3355,9 +3707,27 @@ Safe steps, the new cntlr first and the delete last:
 3. Wait until it is built: `dnvctl sp get` shows it with `err_epoch` 0, and
    `dnvctl cntlr inspect --id <new cntlr id>` shows `applied_revision` at
    least the pool's `sp_rev.revision` and each row under
-   `cntlr_info.leg_id_to_leg` as `RES_STATUS_OK`. The worker can make a
-   new cntlr the primary before it is built, and the pool then serves no
-   IO until it is built.
+   `cntlr_info.leg_id_to_leg` as `RES_STATUS_OK`, except the row of a leg
+   that `dnvctl sp get` shows with an `err_epoch` that is not 0 while a
+   cntlr other than the new one is the primary. The primary cannot read
+   that leg either, so the fault is the leg's, and its row on the new
+   cntlr can stay `RES_STATUS_ERROR`. So can the row of a leg one of
+   whose sides `dnvctl sp get` shows with an `err_epoch` that is not 0,
+   whichever cntlr is the primary, as when a disk node is down: the worker's
+   checks of that side fail too. If that
+   disk node is gone for good, replace it as [Replace a dead disk
+   node](#replace-a-dead-disk-node) says. Two kinds of leg keep their
+   `err_epoch`, and those of their sides, out of `dnvctl sp get`: a new
+   leg of a running repair shows them in `dnvctl repair list`, under the
+   repair's `new_leg_list`, and a leg of a clone's meta group, the group
+   that holds a clone's copy records, in
+   `dnvctl clone get --name <clone>`, under `clone.meta_grp`. At
+   `NO_SIDE` and `DISABLE` the
+   controller nodes drop their leg connections, and each row under
+   `cntlr_info.leg_id_to_leg` reads `RES_STATUS_MISSING` with the reason
+   `RES_REASON_SP_LEVEL` instead. The worker can make a new cntlr the
+   primary before it is built, and the pool then serves no IO until it is
+   built.
 4. Disable the old cntlr:
    `dnvctl cntlr set-enabled --id <old cntlr id> --enabled=false`. If it is
    the primary, wait until `dnvctl sp get` shows another cntlr as primary
@@ -3365,17 +3735,45 @@ Safe steps, the new cntlr first and the delete last:
    [A planned restart of an agent](#a-planned-restart-of-an-agent) says.
    A dead cntlr is disabled the same way.
 5. Delete it: `dnvctl cntlr delete --id <old cntlr id>`. The gateway refuses
-   the primary and an enabled cntlr (FAILED_PRECONDITION).
+   the primary and an enabled cntlr (FAILED_PRECONDITION). If step 2
+   stepped the pool's level back and the pool must stay at its old level,
+   set that level again now: `dnvctl sp set-level --level <the old level>`.
+   Between the two set-level calls the primary builds the thin pools
+   again, hosts use the volumes as the raised level allows, and the worker
+   runs its reactions, leg repair and auto-grow among them. The step down
+   fails the hosts' reads and writes again
+   ([Change a pool's level](#change-a-pools-level)).
 
-Steps that can lose data: none writes data away, but two mistakes stop the
-pool's IO: disabling its last enabled cntlr, and deleting the old cntlr
-before another cntlr took its role, since nothing can then take the role
-back. A disabled cntlr whose controller node is dead is never replaced by
-the worker, so do not leave one standing in place of step 2.
+The worker can replace the old cntlr while you do this, before step 4
+disables it, whether its controller node is dead or still answers. It does
+so at the levels where reactions run, once the old cntlr's health epoch is
+as old as `cntlr_unhealthy`. Steps 4 and 5 then find it gone: the gateway
+answers NOT_FOUND, "cntlr <id> not found". If you made the new cntlr of
+step 2 first, the pool now has one cntlr more than before. To get back to
+the count it had, disable one of the two new cntlrs that is not the
+primary, and delete it the same way. If steps 2 and 3 were still to come,
+skip them: the worker's new cntlr took the old one's place. Either way, if
+step 2 stepped the pool's level back and the pool must stay at its old
+level, set that level again, as step 5 says.
 
-When to stop: no other cntlr becomes primary within a few check rounds
-after step 4, or the new primary still shows `settling` true a minute after
-it became primary: enable the old cntlr again,
+Steps that can lose data: the step down to the old level in step 5 fails
+the hosts' reads and writes again, so an application on a host can lose
+what it was writing then. No other step writes data away, but two mistakes
+stop the pool's IO: disabling its last enabled cntlr, and deleting the old
+cntlr while the new primary still shows `settling` true, since the old
+cntlr can then no longer take the role back. A disabled cntlr whose
+controller node is dead is never replaced by the worker, so do not leave
+one standing in place of the new cntlr of step 2.
+
+When to stop: the new cntlr is still not built, as step 3 reads it, a few
+minutes after step 2, for any cause but a row that step 3 sets aside: as
+when a row under `cntlr_info.leg_id_to_leg` stays `RES_STATUS_ERROR` for
+another leg, `applied_revision` stays below the pool's
+`sp_rev.revision`, or `dnvctl sp get` shows the new cntlr's own
+`err_epoch` not 0. Do not go on to step 4, and ask for help. Or
+no other cntlr becomes primary within a few check rounds after step 4, or
+the new primary still shows `settling` true a minute after it became
+primary: enable the old cntlr again,
 `dnvctl cntlr set-enabled --id <old cntlr id>`, and ask for help.
 
 Tested: the e2e suite's ops case, stage 03, gives the pool a third cntlr in
@@ -3508,8 +3906,9 @@ Safe steps, as root on the primary's controller node:
    must stay below the minimum, such as
    `echo 10000 > /sys/block/md126/md/sync_speed_max`. Write `system` to
    either to give it back to the sysctls.
-4. For every array of a controller node: `sysctl -w dev.raid.speed_limit_max=<KiB per second>`
-   on it, and on every controller node a failover can move the arrays to.
+4. For every array of a controller node:
+   `sysctl -w dev.raid.speed_limit_max=<KiB per second>` on it, and on
+   every controller node a failover can move the arrays to.
    It lasts until the machine restarts unless it is in a file under
    `/etc/sysctl.d/`.
 
@@ -3527,8 +3926,10 @@ tested.
 The md check is md's own read of both legs of each group's array, which the
 worker asks of the primary for one group at a time, every 30 days at the
 default (`dnvctl cluster create --md-check-days`, where 0 turns it off). md
-counts in `/sys/block/<md device>/md/mismatch_cnt` the sectors where the
-legs differ. The count means nothing, and dnv does not read it: dnv zeroes a
+counts in `/sys/block/<kernel name>/md/mismatch_cnt` the sectors where the
+legs differ, with the array's kernel name, such as `md126` when
+`readlink -f` prints `/dev/md126` ([md's copy speed](#mds-copy-speed),
+step 1). The count means nothing, and dnv does not read it: dnv zeroes a
 data leg only in its first blocks, so the legs differ wherever the pool has
 not written, and the pool never reads a block it has not written. What
 counts is md's bad-block list of each leg, which `dnvctl group inspect`
@@ -3644,7 +4045,8 @@ syncup every second round, and that ends nothing while the cause lasts. A
 pending row starts no failover, so the hosts wait until the connection ends.
 An error row on a primary makes the worker fail it over at the pool's
 threshold, as for any error row, where the pool has an enabled standby with no
-health epoch. A pool with no such standby, such as a pool with one cntlr,
+health epoch whose agent does not refuse the worker's syncups. A pool with
+no such standby, such as a pool with one cntlr,
 waits for the cntlr replacement, which comes after the pool's
 `cntlr_unhealthy`, 600 seconds at the default. An error row on a standby
 brings its replacement in time. So a standby that becomes the primary serves
@@ -3735,9 +4137,10 @@ to every host still connected.
   first bullet says.
 
 For both rows that read `RES_STATUS_ERROR` the worker fails a primary on
-that node over to an enabled standby with no health epoch, where the pool
-has one, and replaces the cntlr after the pool's `cntlr_unhealthy` ([the
-scope page](scope.md#61-cases-where-dnv-does-not-come-back-alone-today)).
+that node over to an enabled standby with no health epoch whose agent does
+not refuse the worker's syncups, where the pool has one, and replaces the
+cntlr after the pool's `cntlr_unhealthy` ([the scope
+page](scope.md#61-cases-where-dnv-does-not-come-back-alone-today)).
 Mend the cause before the node serves the pool again. Ask for help.
 
 Tested: the cn suite's smoke case, on the lab's controller nodes, whose
@@ -3769,8 +4172,10 @@ created once the primary reports it in every slice. A try that fails is
 sent again every second check round, and each try pauses the origin's IO
 for a moment again; nothing ends the tries. A primary crash between two
 slices can leave the snapshot torn: its slices then hold its data from
-different points in time. The worker records the tear from the primary's
-report, and the status read then shows a `torn` line for the snapshot.
+different points in time. So does a slice that makes the snapshot only at
+a later try than the other slices. The worker records the tear from the
+primary's report, and the status read then shows a `torn` line for the
+snapshot.
 
 Safe steps:
 
@@ -3792,8 +4197,10 @@ Safe steps:
    the same, since the host's writes wait while the file system is frozen.
    The primary goes on trying, and a snapshot it makes after step 4 holds
    the volume as at that later moment, as after a power cut, not as at the
-   freeze: never take it for the copy from before your change. Then see
-   When to stop.
+   freeze. When it made the snapshot in some slices at an earlier try
+   than in the others, the slices hold different moments, and the
+   snapshot is torn. Never take it for the copy from before your change,
+   and run step 5 again once it is created. Then see When to stop.
 4. Let the writes go on, or thaw the file system:
    `fsfreeze -u <mount point>`.
 5. Run `dnvctl cluster get-status`. A `torn` line that names the snapshot
@@ -3809,16 +4216,37 @@ and the snapshots stay.
 
 Steps that can lose data: deleting a snapshot deletes its blocks. A torn
 snapshot whose mark was lost reads as whole, with no sign ([the scope
-page](scope.md), section 5.1). After an etcd restore, a new snapshot can
-take the thin id of a volume made after the backup and serve its data
+page](scope.md), section 5.1). After an etcd restore that skipped
+`dnvctl cluster advance-ids`, or in a pool that made more than 1,048,576
+volumes, snapshots included, after the backup, a new snapshot can take the
+thin id of a volume made after the backup and serve its data
 ([Restore etcd from a backup](#restore-etcd-from-a-backup)).
 
-When to stop: the snapshot stays `created` false for minutes, while the
-origin's hosts see short pauses again and again: the primary fails to make
-it in a slice. `dnvctl cntlr inspect --id <primary cntlr id>` shows the
-rows of the snapshot in `td_id_to_thin_info`. Ask for help. A snapshot
-that you no longer want can be deleted while it is not created, which
-ends the tries and their pauses: `dnvctl td delete --name <snapshot>`.
+When to stop: the snapshot stays `created` false for minutes. When the
+origin's hosts see short pauses again and again meanwhile, the primary
+fails to make it in a slice. When they do not, a slice's thin pool is
+not ready or takes no change, so the primary sends that slice no try and
+pauses nothing for it: the thin pool's row under `slice_id_to_dm_pool`
+does not read `RES_STATUS_OK` or shows `ro` in its details, or a row of
+that slice under `slice_id_to_meta` or `slice_id_to_data`, its metadata
+and data devices, does not read `RES_STATUS_OK` ([A pool's
+space](#a-pools-space)). A thin pool whose device has only the block
+layer's read-only flag set shows none of these signs. dnv never sets that
+flag, but `blockdev --setro` by hand does. Then, on the controller node
+of the primary, which alone builds the thin pools,
+`blockdev --getro /dev/mapper/<res_name>`, with the `res_name` of the
+slice's row under `slice_id_to_dm_pool`, prints 1. The snapshot waits
+until the primary converges for another reason, such as the next change
+to the pool, and `blockdev --setrw` on that device ends the wait. Or the
+pool's level is `NO_THINPOOL` or further down ([Change a pool's
+level](#change-a-pools-level)), where the primary makes no snapshot.
+`dnvctl cntlr inspect --id <primary cntlr id>` shows those rows, and the
+rows of the snapshot in `td_id_to_thin_info`. Ask for help. When some
+slices make the snapshot at a later try than the others, the slices hold
+different moments, and the snapshot is torn: once it is created, run
+step 5 again. A snapshot that you no longer want can be deleted while it
+is not created, which ends the tries and their pauses:
+`dnvctl td delete --name <snapshot>`.
 
 Tested: the e2e suite's ops case, stage 06, makes a snapshot with
 `--size 0`, waits until it is recorded as created, and checks its size and
@@ -3902,24 +4330,30 @@ the data; it then points the namespace at a new volume of the same size,
 which the host reads as zeros, and back, and checks the data again. The
 gateway suite, `integtest/gateway_test.sh`, checks that the bitmap read
 refuses a volume whose namespace is not parked. The e2e suite passed in the
-lab on 2026-11-21. A namespace pointed at a snapshot is not tested.
+lab on 2026-11-21. The stage points the namespace at the new volume while
+it serves, after the resume: the change of step 4 on a parked namespace,
+and a namespace pointed at a snapshot, are not tested.
 
 ## Move a volume to another pool
 
 Words: the **source pool** holds the volume now and the **destination
 pool** is to hold it. The **origin** is the volume to move, and the
-**origin namespace** the namespace that exports it. A **host NQN** is the
+**origin namespace** the namespace that exports it. This origin is not a
+snapshot's origin, as in [Snapshots](#snapshots): it need have no
+snapshot. A **host NQN** is the
 name an NVMe host gives when it connects; a controller node has one of its
 own, which it uses to read a transfer. The move is a transfer in the source
 pool and a clone in the destination pool, as [the
-introduction](introduction.md#transfer-and-clone) explains. Below, `--sp
+introduction](introduction.md#transfer-and-clone) explains. A **region** is
+one data block of the destination pool, the unit in which the clone
+copies. dm-clone calls a region it has copied **hydrated**. Below, `--sp
 <source>` and `--sp <destination>` pick the pool of each command.
 
 When to use: a volume must leave its pool while its hosts keep using it,
 for example to empty a pool before you delete it, as [A pool made before
 the block bound](#a-pool-made-before-the-block-bound) does.
 
-Before you start, check four things:
+Before you start, check five things:
 
 1. The two pools' layouts. `dnvctl --sp <pool> sp get` shows a pool's
    stripe, `sp_conf.bdev_conf.dm_raid0_conf.stripe_size`, its data block,
@@ -3942,11 +4376,32 @@ Before you start, check four things:
    each; a longer list is refused with the error code INVALID_ARGUMENT.
    The transfer's list must hold the destination pool's controller nodes.
 4. A pool holds at most four transfers, and at most 64 clones. A transfer
-   is refused while another namespace also exports the origin's volume. A
+   is refused with the error code FAILED_PRECONDITION while another
+   namespace also exports the origin's volume, and while the volume is the
+   destination of a clone that has not left, as for a volume moved into
+   the source pool a short while before. The refusal names that clone:
+   wait until its `dnvctl --sp <source> clone get` answers NOT_FOUND. A
    clone takes a clone meta group, the group of the destination pool that
    holds the copy's records: one extent on each of as many disk nodes as
    the pool's groups have legs. It is refused with
-   the error code RESOURCE_EXHAUSTED when too few disk nodes have room.
+   the error code RESOURCE_EXHAUSTED when too few disk nodes have room,
+   and with FAILED_PRECONDITION when the data part of one extent cannot
+   hold the copy's records, 4 MiB and one byte for each region of the new
+   volume; the message then names the largest new volume it holds. Both
+   refusals come at step 10, after the transfer has parked the origin.
+   Before the transfer, read `addr_port_to_dn` of `dnvctl cluster
+   get-capacity` ([The cluster's capacity](#the-clusters-capacity)): in
+   as many locations as the destination pool's groups have legs, a disk
+   node must show `disabled` false, `err_epoch` 0, a `free_ext_cnt` above
+   0 and a `side_cnt` below 1024, or the first refusal comes. No read
+   shows the second refusal before the create.
+5. The origin's size, `size` in `dnvctl --sp <source> td list`, must be a
+   whole multiple of the destination pool's stripe times its slice count,
+   or step 2 is refused with the error code INVALID_ARGUMENT. A
+   destination volume of another size cannot take the copy: the clone's
+   build fails over a larger one, since the clone reads the source as far
+   as the destination reaches, and a smaller one is copied short. The
+   simple way of check 1 always passes this check.
 
 Safe steps:
 
@@ -3995,18 +4450,21 @@ Safe steps:
    <xfer_id>`, with the source pool's `sp_conf.sp_id` of `dnvctl --sp
    <source> sp get`. No command prints it either.
 9. Read the address of the source pool's primary: in `dnvctl --sp <source>
-   sp get`, the entry of `cntlr_list` whose `primary` is true, its
-   `nvme_tr_conf.tr_addr` and `nvme_tr_conf.tr_svc_id`.
+   sp get`, the entry of `cntlr_list` whose `primary` is true, the four
+   fields of its `nvme_tr_conf`: `tr_type`, `adr_fam`, `tr_addr` and
+   `tr_svc_id`.
 10. In the destination pool, create the clone:
     `dnvctl --sp <destination> clone create --name <clone> --dst-td <new
     volume> --src-nqn <transfer NQN> --src-idx <ns_idx> --src-slices <the
     source's slice count> --src-stripe <the source's stripe> --src-block
-    <the source's data block> --src-tr-addr <tr_addr> --src-tr-svc-id
-    <tr_svc_id> --auto-resume`. Type both address flags: without them
-    `dnvctl` sends 127.0.0.1 and 4420, and the destination's primary
-    connects to its own machine. Type `--auto-resume`, which is off by
-    default: without it the destination's namespace stays parked until the
-    copy is whole, and the hosts have no path that serves for that time.
+    <the source's data block> --src-tr-type <tr_type> --src-adr-fam
+    <adr_fam> --src-tr-addr <tr_addr> --src-tr-svc-id <tr_svc_id>
+    --auto-resume`. Type the four address flags: without them `dnvctl`
+    sends `tcp`, `ipv4`, 127.0.0.1 and 4420, so the destination's primary
+    connects to its own machine, or by the wrong address family. Type
+    `--auto-resume`, which is off by default: without it the
+    destination's namespace stays parked until the copy is whole, and the
+    hosts have no path that serves for that time.
     The clone reads through the source's primary alone. Run
     `dnvctl --sp <destination> clone get --name <clone>` once now, and see
     that it shows the clone.
@@ -4018,21 +4476,34 @@ Safe steps:
     a host that connects by hand connects to the destination's controller
     nodes as it did to the source's. The destination's namespace serves
     them, ANA optimized, once the clone serves, and their IO goes on there.
-13. While the clone copies: if `dnvctl --sp <source> sp get` shows another
-    primary than in step 9, point the clone at it:
-    `dnvctl --sp <destination> clone set-tr --name <clone> --src-tr-addr
-    <tr_addr> --src-tr-svc-id <tr_svc_id>`, with the same care for the
-    address flags. If a cntlr of the destination pool moves to a controller
+13. While the clone copies, read both pools' `dnvctl sp get` again from
+    time to time. If the source pool shows another primary than in step
+    9, point the clone at it:
+    `dnvctl --sp <destination> clone set-tr --name <clone> --src-tr-type
+    <tr_type> --src-adr-fam <adr_fam> --src-tr-addr <tr_addr>
+    --src-tr-svc-id <tr_svc_id>`, with the four address flags as in
+    step 10. If a cntlr of the destination pool moves to a controller
     node that the transfer's list lacks, give the transfer its new list:
     `dnvctl --sp <source> xfer set-hosts --name <transfer> --hosts <the
-    whole new list>`.
+    whole new list>`. A cntlr replacement, which the worker makes once a
+    cntlr has been unhealthy for its pool's `cntlr_unhealthy`, 600 seconds
+    at the default, can place a cntlr of either pool on a controller node
+    that holds a cntlr of the other, which check 2 forbids. So compare the
+    `addr_port` of both pools' cntlrs too. When two share a controller
+    node, move one of them to another controller node at once, the new
+    cntlr first, as step 1 of [A pool made before the block
+    bound](#a-pool-made-before-the-block-bound) says, and then check the
+    two cases above again.
 14. Wait until the copy is whole: `dnvctl --sp <destination> clone get
     --name <clone>` fails with the error code NOT_FOUND once the clone has
     left by itself. Meanwhile the details of the clone's row in
     `cntlr_info.clone_id_to_dm_clone` of `dnvctl --sp <destination> cntlr
     inspect --id <primary cntlr id>`, keyed by the `clone_id` that
     `dnvctl clone get` shows, carry dm-clone's status line, whose count of
-    hydrated regions out of all regions shows how far the copy is.
+    hydrated regions out of all regions shows how far the copy is. A row
+    that reads `RES_STATUS_MISSING` with the reason
+    `RES_REASON_SOURCE_FAULT` instead has no dm-clone under it, since the
+    destination's primary cannot read the transfer: see When to stop.
 15. Then end the transfer, without `--force`: `dnvctl --sp <source> xfer
     delete --name <transfer>`. The origin namespace stays parked.
 16. Delete the origin in the source pool: `dnvctl --sp <source> ns delete
@@ -4042,8 +4513,9 @@ Safe steps:
     source pool refuses a pool that still holds a volume, a subsystem, a
     clone, a transfer or a migration.
 
-What dnv does alone: the source's primary parks the origin namespace on
-every cntlr, and exports the origin to the transfer's list alone. The
+What dnv does alone: every cntlr of the source pool parks the origin
+namespace and exports the origin to the transfer's list alone, and the
+source's primary serves that export. The
 destination's primary builds the clone once the sides of its clone meta
 group are provisioned: it connects to the source, puts the new volume's namespace on
 the copy and moves it ANA optimized. When the primary reports the copy
@@ -4051,7 +4523,11 @@ whole, the worker, which looks every 2 seconds at the default, sets the
 destination's namespace to serving in its stored state and drains the
 clone, and `dnvctl clone get` then answers NOT_FOUND.
 A destination pool whose level is stepped down to `NO_CLONE` or further
-has no clone device: the copy waits until the level is raised again. Nothing ends the
+has no clone device: the copy waits until the level is raised again, and
+meanwhile every read and write of the hosts to the volume fails, as
+[Change a pool's level](#change-a-pools-level) says: with `--auto-resume`
+the destination's namespace stays ANA optimized over a device that fails
+all IO. So do not step that level down during a move. Nothing ends the
 transfer: step 15 is yours. A part of the list of step 11
 that fails to reach the primary is sent again only when the worker next
 sends the primary a change for another reason, and costs a fuller copy, not
@@ -4072,17 +4548,25 @@ Steps that can lose data:
   already taken the region, with no error.
 - A destination volume that a host wrote before, or of another size than
   the origin's: the regions the copy skips keep the old blocks, and a
-  smaller volume is copied short.
+  smaller volume is copied short (check 5).
 - Deleting the transfer before `dnvctl clone get` answers NOT_FOUND, with
   or without `--force`: the clone loses its only source of every region it
   has not copied, and the deletes of step 16 then delete the last copy of
   those regions.
 - `dnvctl xfer delete --force` aborts the move: the origin namespace serves
   again, ANA optimized, beside the destination's under the same identity.
-  To abort, first delete the destination's namespace with `dnvctl --sp
+  To abort a move whose clone has served the hosts, first stop the
+  volume's users on each host and unmount it, while the destination still
+  serves: the hosts' file systems hold in their memory what they wrote
+  through the destination, and would later write it onto the origin,
+  which lacks those writes, and so mix the two copies, as [Park a
+  namespace](#park-a-namespace) warns. An unmount after the next delete
+  waits, since its flush then waits on the parked origin. Then, in every
+  abort, delete the destination's namespace with `dnvctl --sp
   <destination> ns delete`, then the clone with `dnvctl --sp <destination>
-  clone delete --force`, and only then the transfer with `--force`. Every
-  write made through the destination is lost, since the origin lacks it.
+  clone delete --force`, and only then the transfer with `--force`; mount
+  the volume again after that. Every write made through the destination
+  is lost, since the origin lacks it.
   The order matters: `dnvctl clone delete` sets every namespace of the new
   volume back to serving, so a namespace still there would serve the
   partial copy to the hosts, a second path that differs, and once the
@@ -4094,40 +4578,105 @@ Steps that can lose data:
   refuses until then.
 - A clone refused after the transfer was made leaves the origin namespace
   parked, with no path that serves IO, until `dnvctl --sp <source> xfer
-  delete --force`; check the layouts first.
+  delete --force`; make checks 1 and 4 first.
 
-When to stop: the clone is refused for the layouts: abort as above, which
-loses nothing while no clone served, and make the destination pool again
-with the source's stripe and slice count. When the source's own stripe
-times its slice count is over 4 MiB, as in [a pool made before the stripe
+When to stop: `clone create` is refused at step 10, for the layouts of
+check 1, for its clone meta group as check 4 says, or for any other
+reason: no clone was made, so delete the destination's namespace with
+`dnvctl --sp <destination> ns delete`, then end the transfer with
+`dnvctl --sp <source> xfer delete --force`, which loses nothing while no
+clone served. Then fix the cause before you start again. For the clone
+meta group, RESOURCE_EXHAUSTED passes once enough disk nodes have room,
+and FAILED_PRECONDITION stays, in that destination pool, for every volume
+over the largest size its message names. For the layouts, make the
+destination pool again with the source's stripe and slice count. When the
+source's own stripe times its slice count is over 4 MiB, as in [a pool
+made before the stripe
 bound](#a-pool-made-before-the-stripe-bound), dnv refuses to make a pool of
 that stripe and slice count, and the least common multiple of the first
 check is over 4 MiB for every destination. A clone then passes only when
 that multiple is no whole number of the destination's data block, so that
 the data block counts instead. Otherwise copy the data at the file level,
-as step 3 there says. The clone does not leave, and its count of hydrated
-regions stops growing or its row reads `RES_STATUS_ERROR`: delete nothing
-in the source pool, and ask for help.
+as step 3 there says. The clone cannot read its source: for a minute or
+more, after step 10 or at any later time of the copy, `dnvctl cluster
+get-status` shows a line whose object is `clone <clone>` and whose STATUS
+is `clone/missing/source_fault`. Its text says that the clone waits for
+its source, and then what the primary found of the source, such as the
+states of its paths to it, a source namespace that is not there, or why
+its own connect failed. When the primary holds no path to the source, as
+with a wrong address or a transfer list that lacks it, the text names at
+most why its last try to connect failed, and that only for a short time
+after each try; at other times it says no more than that the clone waits.
+In `dnvctl --sp <destination> cntlr inspect --id <primary cntlr id>`, the
+clone's row in `cntlr_info.clone_id_to_target` or in
+`cntlr_info.clone_id_to_dm_clone` reads `RES_STATUS_MISSING` with the
+reason `RES_REASON_SOURCE_FAULT`. When the row in
+`cntlr_info.clone_id_to_dm_clone` reads so, the primary has built no
+dm-clone: no count of hydrated regions grows, and the hosts' IO waits,
+from the park of step 7 on when no clone served before. When that row
+reads `RES_STATUS_OK` and only the row in
+`cntlr_info.clone_id_to_target` carries the reason, as after a failover
+of the source pool whose old primary's controller node is down, the
+dm-clone serves the hosts but cannot read the source: its count of
+hydrated regions stops growing, and the hosts' reads of the regions not
+yet copied, and their writes to part of such a region, fail after a short
+wait. The worker does not take either for a fault, so no failover or cntlr
+replacement comes, and nothing ends it by itself. Check the four address
+flags of step 10 against the source pool's primary as step 9 reads it
+now, and point the clone at that address with `clone set-tr`, as step 13
+says. Check that the transfer's list holds the host NQN of the controller
+node of the destination's primary, worked out as in step 6; when it lacks
+it, give the transfer its whole list with `xfer set-hosts`, as step 13
+says. When the line stays, ask for help. While no clone has served the
+hosts, you may instead abort the move as Steps that can lose data says:
+the abort then loses nothing and needs no unmount. Once the clone has
+served them, the abort needs the unmount that Steps that can lose data
+names, and that unmount can wait or fail on the regions the clone cannot
+read: ask for help. The clone does not
+leave, and its count of hydrated regions stops growing or its row in
+`cntlr_info.clone_id_to_dm_clone` reads `RES_STATUS_ERROR`: first make the
+checks of step 13. After a failover of
+the source pool whose old primary's controller node stays up, the status
+read shows no line for the clone, both of the clone's rows read
+`RES_STATUS_OK`, and the hosts' reads of the regions not yet copied, and
+their writes to part of such a region, wait until `clone set-tr` points
+the clone at the new primary.
+When the count still does not grow, delete nothing in the source pool,
+and ask for help.
+A cntlr of one pool shares a controller node with a cntlr of the other,
+and neither pool can move one as step 13 says: ask for help.
 
 Tested: the e2e suite's copy case runs a transfer made with
 `--auto-suspend` and read by a host, `xfer set-hosts` with every controller
-node's host NQN, the bitmap read of the parked origin for each slice, a
-clone made with both address flags and `--auto-resume`, one part of the
-list for each slice, `clone set-tr` with the same address, the worker's end
-of the clone, and then the end of the transfer with `--force`, all within
+node's host NQN, the bitmap read of the parked origin for each slice that
+one region of the destination spans, which at one slice is that slice, a
+clone made with the four address flags and `--auto-resume`, one part of
+the list for each of those slices, `clone set-tr` with the same address
+in a run whose copy is not whole by then, the worker's end of the clone,
+and then the end of the transfer with `--force`, all within
 one pool, into a second namespace of another identity. Its stage 07 fails
 the destination's primary over while the clone lives. It passed in the lab
 on 2026-11-21 at one slice. The move into another pool under the same
 subsystem name and identity, the order of steps 3 to 5, the end of the
 transfer without `--force`, the deletes of step 16, `clone set-tr` to a new
 address after a failover of the source pool, and the abort are not tested.
+For a clone that cannot read its source, the gateway's unit tests plant
+its row and read the line the gateway makes of it, the cn agent suite
+reads the reason on the rows of a clone whose source namespace is gone
+while its dm-clone serves (case `clone_xfer`), and the worker suite,
+with a fake agent that reports such a row, checks that the worker takes
+the primary as built, with `settling` false and no health epoch. No
+suite reads the line of a real clone whose source is refused or gone.
 
 ### Read a volume's written blocks
 
 Words: a volume's **written-block list** says, for each block of the pool's
 data block size in each slice, whether the volume has written it. A
 **part** of a clone's list is up to 1 MiB of it, 8,388,608 blocks, which
-`--bm-idx` numbers from 0.
+`--bm-idx` numbers from 0. A clone takes at most 16 parts of each slice's
+list, 16 MiB: the gateway refuses `--bm-idx` 16 or more with the error
+code INVALID_ARGUMENT, and the clone copies the regions past the 16th
+part whole.
 
 When to use: to give a clone the regions it may skip, in step 11 above.
 
@@ -4147,7 +4696,9 @@ Safe steps:
    `dnvctl --sp <destination> clone append-bm --name <clone>
    --src-slice-idx <slice> --bm-idx 0 --bm-hex <hex>`. Give every slice's:
    the clone skips a region only where every slice it spans says
-   never written. A part applies whenever it comes, before the copy is whole.
+   never written. A part applies whenever it comes, before the copy is
+   whole. Once the hosts' IO goes through the clone, each part pauses that
+   IO for a moment while it applies.
 4. A slice's list of 64 KiB or more, 524,288 blocks or more, does not fit
    one command line: in hex it takes two characters a byte, and one
    argument holds less than 128 KiB on Linux, its closing zero byte
@@ -4168,12 +4719,17 @@ Steps that can lose data: a list read while a host could still write the
 volume, which the gateway refuses; and a list given to a clone of another
 volume.
 
-When to stop: the read is refused for a namespace that is not parked: park
-it first ([Park a namespace](#park-a-namespace)).
+When to stop: the refusal says a namespace is on the volume and not
+suspended: park it first ([Park a namespace](#park-a-namespace)). A
+refusal that says a namespace is not parked on the primary, or that the
+namespaces are not proven parked, comes while the primary's report still
+lags the park, or while the primary's controller node does not answer:
+read again a few seconds later, and ask for help when it lasts a minute.
 
 Tested: the e2e suite's ops case reads a snapshot's list at once and is
 refused for the origin while its namespace serves; its copy case reads the
-list of a parked origin and gives one part for each slice. The gateway
+list of a parked origin, and gives one part of it, for each slice that one
+region of the destination spans. The gateway
 suite gives parts in windows with `--offset` through its own test driver,
 over fake agents. Windows through `dnvctl` are not tested.
 
@@ -4200,34 +4756,104 @@ Safe steps for a target that is not dnv:
 1. On that target, let this cluster's controller nodes connect: their host
    NQNs as step 6 of the move works them out, for every controller node
    that holds a cntlr of the destination pool.
-2. Stop every writer of the source namespace for the whole copy: nothing
-   parks it, and the copy misses each write to a region it has already
-   copied.
-3. Create the new volume and its namespace as steps 2 to 5 of the move say,
-   with a new identity of your choice or the source's.
-4. Create the clone as in step 10, with `--src-nqn <the target's subsystem
-   NQN> --src-idx <its namespace id>` and the target's address. Give the
-   layout flags values that pass the gateway's checks, such as the
+2. Stop every writer of the source namespace for the whole copy, and
+   unmount it on each host: nothing parks it, and the copy misses each
+   write to a region it has already copied. The unmount also flushes the
+   host's writes before step 4 drops its only path to the target, a drop
+   that loses every write not yet flushed. Step 4 cuts the hosts off every
+   namespace of the target's subsystem, not only this one: stop the users
+   of each other namespace there too, unmount it, and copy it as well,
+   with a volume, a namespace and a clone of its own as steps 3, 5 and 6
+   say.
+3. Read the source namespace's size in bytes on a host:
+   `blockdev --getsize64 <its device>`. The new volume must have exactly
+   that size, and the destination pool must be able to make it: a whole
+   multiple of the pool's stripe times its slice count, as check 5 of the
+   move says. A volume of another size cannot take the copy. If the new
+   namespace is to keep the source's identity, read it there too:
+   `nvme ns-descs <its device>` prints its `uuid`, and `nvme id-ns <its
+   device>` its `nguid`, each in the form the gateway takes, the uuid with
+   dashes and the nguid as 32 hex digits with none.
+4. Take the hosts off the target for good. First, on the target, let in
+   only the controller nodes of step 1: take every host off the
+   subsystem's list of allowed hosts, and turn off any setting that lets
+   in every host, so that the target refuses the hosts' next connect.
+   Then disconnect every host from the target: as root on each host,
+   `nvme disconnect -n <the target's subsystem NQN>`. Without the refusal,
+   a host that runs nvme-stas, the host program that follows the cdc
+   ([Restart nvme-stas](#restart-nvme-stas)), can connect to the target
+   again by itself when the `[Controllers]` part of its
+   `/etc/stas/stacd.conf` names the target, or a discovery service that
+   its `/etc/stas/stafd.conf` names lists it; take the target out of that
+   configuration later, as that section says. A host that holds a path to
+   the target and one to this cluster under one subsystem NQN, one
+   namespace id and one identity joins them into one device. It then
+   sends some of its writes to the
+   target, which this cluster never holds, with no sign. When only one or
+   two of the three match, the host can refuse this cluster's namespace
+   while it holds the target's.
+5. Create the new volume, of the size of step 3, and its namespace as
+   steps 2 to 5 of the move say, under the target's subsystem NQN or
+   another one, at the target's namespace id or another (a namespace's
+   `--idx` is its NVMe namespace id), and with the source's identity of
+   step 3 or a new one: leave out `--uuid` and `--nguid`, and the gateway
+   makes a new one.
+6. Create the clone as in step 10, with `--src-nqn <the target's subsystem
+   NQN> --src-idx <its namespace id>` and the target's address in the four
+   address flags. Give the layout flags values that pass the gateway's
+   checks, such as the
    destination pool's own stripe and data block with `--src-slices 1`, when
    that block is a multiple of that stripe: a
    stripe a multiple of 4 KiB up to 1 MiB, a data block a multiple of the
    stripe and of 64 KiB up to 1 GiB, a slice count from 1 to 32, and the
    layout rule of the move's first check. There is no written-block list
    for such a source, so the clone copies every region.
-5. Wait as step 14 of the move says. `dnvctl clone set-tr` points the clone
-   at another address of its source, with the same care for the address
-   flags.
+7. Give the hosts this cluster's paths. A host that runs nvme-stas finds
+   them through the cdc once it lists the cdc ([Give hosts the cdc
+   addresses](#give-hosts-the-cdc-addresses)). A host that connects by
+   hand connects to each cntlr that `dnvctl --sp <destination> sp get`
+   shows, at the address of its `nvme_tr_conf`. Once the clone serves,
+   its row of step 14 of the move reading `RES_STATUS_OK`, the
+   namespace moves to ANA optimized, and the hosts may mount this
+   cluster's device of the volume and start their writers again. It is a
+   new device, not the target's.
+8. Wait as step 14 of the move says. While the clone copies, read
+   `dnvctl --sp <destination> sp get` from time to time. When a cntlr of
+   the destination pool moves to a controller node that the target does
+   not let in, let that node's host NQN, worked out as in step 6 of the
+   move, in on the target too, as step 13 of the move does for a
+   transfer's list: the target refuses that node's connect, so a primary
+   there cannot read the source. `dnvctl clone set-tr` points the clone at
+   another address of its source, with the four address flags as in step
+   10.
 
 What dnv does alone: as for the move: the worker ends the clone once its
 copy is whole. Nothing points the clone at another address of its source.
 
-Steps that can lose data: a source that takes writes during the copy; a
-source lost before the copy is whole, which takes every region not yet
+Steps that can lose data: a source that takes writes during the copy; for
+a target that is not dnv, a mount of the target's device left at the
+disconnect of step 4, which loses the writes not yet flushed (step 2), and
+a host still connected to it once this cluster gives the host the
+subsystem (step 4); a source lost before the copy is
+whole, which takes every region not yet
 copied with it ([the scope page](scope.md), section 4, case 3); a destination
 volume of another size than the source, which the gateway cannot compare.
 
-When to stop: the clone does not leave and its count of hydrated regions
-stops growing: ask for help, and keep the source.
+When to stop: the clone cannot read its source, as the When to stop of
+the move says: its line `clone/missing/source_fault` in `dnvctl cluster
+get-status` stays, and nothing ends that wait. Check the four address
+flags of step 10 of the move and point the clone at the right address
+with `dnvctl clone set-tr`. For a dnv transfer, check its list of hosts
+as the move says; for a target that is not dnv, check that the target
+lets in the host NQN of the controller node of the destination's
+primary, as step 1 says. When the line stays, ask for help. The clone
+does not leave, and its count of hydrated regions stops growing or its
+row in `cntlr_info.clone_id_to_dm_clone` reads `RES_STATUS_ERROR`: for a
+dnv transfer, first make the checks of step 13 of the move, as the move's
+When to stop says. After a failover of the source pool of a dnv transfer,
+the status read can show no line for the clone. For a target that is
+not dnv, first make the checks of step 8. When the count still does not
+grow, ask for help, and keep the source.
 
 Tested: not tested from another cluster or from a target that is not dnv.
 The nearest run is the e2e suite's copy case, stage 07, which on every run
@@ -4327,7 +4953,14 @@ Safe steps:
       whole, first wait until
       `dnvctl --sp '<other pool>' clone get --name <clone>` answers
       NOT_FOUND: the worker removes a clone by itself once its copy is
-      whole.
+      whole. The clone is the one whose `src_nqn` in that reply is the
+      transfer's NQN, worked out as [Move a volume to another
+      pool](#move-a-volume-to-another-pool), step 8, says. `dnvctl sp list`
+      lists the pools, and `sp_conf.clone_name_list` of
+      `dnvctl --sp '<other pool>' sp get` names a pool's clones. For a
+      clone in another cluster, run these reads there, with that cluster's
+      `--cluster` and, for another etcd, the `--gateway-address` of its
+      gateways ([Clone from another cluster](#clone-from-another-cluster)).
    2. Each namespace: `dnvctl --sp '<pool name>' ns delete --nqn <nqn> --idx <ns_idx>`.
    3. Each subsystem, once it holds no namespace:
       `dnvctl --sp '<pool name>' ss delete --nqn <nqn>`.
@@ -4344,7 +4977,9 @@ Safe steps:
       and the deletes of its volume and of the pool are refused until then.
    5. Each migration: `dnvctl --sp '<pool name>' migr cancel --name <migration>`.
       Once a migration's cutover has started, the cancel is refused without
-      `--force`, and its refusal says so.
+      `--force`, and its refusal says so. Then cancel it with `--force`: the
+      pool's namespaces are gone and its thin devices are deleted next, so
+      the forced cancel loses nothing more.
    6. Each thin device: `dnvctl --sp '<pool name>' td delete --name <td name>`.
       A thin device with a snapshot that is not made yet is refused, and
       the refusal names the snapshot: delete the snapshot first.
@@ -4360,7 +4995,11 @@ Safe steps:
    `dnvctl sp get` lists the pool's cntlrs under `cntlr_list`, which shows
    no ids: its entries come in the order of the ids in
    `sp_conf.cntlr_id_list`. To move a cntlr:
-   1. Give the pool a new cntlr with `dnvctl cntlr create --slot <slot>`.
+   1. If the old cntlr is the primary and the pool's level is
+      `NO_THINPOOL` or below, first step the level back, as step 2 of
+      [Replace a cntlr by hand](#replace-a-cntlr-by-hand) says: at those
+      levels no failover follows sub-step 3.
+      Give the pool a new cntlr with `dnvctl cntlr create --slot <slot>`.
       The slot is a cntlid slot, a range of NVMe controller ids: one of
       the pool's `sp_conf.cntlid_slot_list` in `dnvctl sp get` that no
       cntlr of the pool uses as its `cntlid_slot`. The `cntlr_id` of the
@@ -4386,15 +5025,30 @@ Safe steps:
         slots separated by commas.
    2. Wait until the new cntlr is built. `dnvctl sp get` shows it with
       `err_epoch` 0, and `dnvctl cntlr inspect --id <new cntlr id>` shows
-      `applied_revision`, the revision its agent has applied, equal to the
+      `applied_revision`, the revision its agent has applied, at least the
       pool's `sp_rev.revision` in `dnvctl sp get`, and each row under
-      `cntlr_info.leg_id_to_leg` as `RES_STATUS_OK`. The worker can make a
-      new cntlr the primary before it is built, and the pool then serves
-      no IO until it is built.
+      `cntlr_info.leg_id_to_leg` as `RES_STATUS_OK`, or, at `NO_SIDE` and
+      `DISABLE`, as `RES_STATUS_MISSING` with the reason
+      `RES_REASON_SP_LEVEL`. The row of a leg that `dnvctl sp get` shows
+      with an `err_epoch` that is not 0 while a cntlr other than the new
+      one is the primary can stay `RES_STATUS_ERROR`: the primary cannot
+      read that leg either. A new leg of a running repair shows its
+      `err_epoch` in `dnvctl repair list`, and a leg of a clone's meta
+      group, the group that holds a clone's copy records, in
+      `dnvctl clone get --name <clone>`. The worker can make a new cntlr
+      the primary before it is built, and the pool then serves no IO until
+      it is built. If the new cntlr is still not built a few minutes after
+      sub-step 1, for any cause but a row this sub-step sets aside, as
+      when a row under `cntlr_info.leg_id_to_leg` stays
+      `RES_STATUS_ERROR` for another leg, `applied_revision` stays below
+      the pool's `sp_rev.revision`, or `dnvctl sp get` shows the new
+      cntlr's own `err_epoch` not 0, do not go on to sub-step 3: ask for
+      help.
    3. Disable the old cntlr with
       `dnvctl cntlr set-enabled --id <cntlr id> --enabled=false`. If it is
       the primary, the worker moves the role to an enabled standby with no
-      health epoch. Then wait, as [A planned restart of an
+      health epoch whose agent does not refuse the worker's syncups. Then
+      wait, as [A planned restart of an
       agent](#a-planned-restart-of-an-agent), step 3, says, until
       `dnvctl sp get` shows another cntlr as the primary with `settling`
       false, which says the new primary reports its devices built. If no
@@ -4406,6 +5060,11 @@ Safe steps:
       take the role back.
    4. Then delete the old cntlr with `dnvctl cntlr delete --id <cntlr id>`.
       A primary and an enabled cntlr are never deleted.
+   5. If sub-step 1 stepped the pool's level back and the pool must stay at
+      its old level, set that level again once the move is done:
+      `dnvctl sp set-level --level <the old level>`. At the raised level the
+      primary builds the thin pools again and the worker runs its
+      reactions, leg repair and auto-grow among them.
 4. Check that the node is empty, as above, and note its id,
    `dn_conf.dn_id` or `cn_conf.cn_id`, and the cluster's `cluster_id`, which
    `dnvctl cluster get` prints: steps 6 and 7 name the node's files and
@@ -4446,16 +5105,17 @@ Safe steps:
 
    To use a disk node's disk again: [Reuse a disk from an old
    node](#reuse-a-disk-from-an-old-node).
-7. Remove by hand what no agent removes, once the node's agent is stopped
-   and its files are gone. On the node's machine, its NVMe-oF port, the
+7. Remove by hand what no agent removes. On the node's machine, once the
+   node's agent is stopped and its files are gone: its NVMe-oF port, the
    folder of its agent's `--nvmet-port-id`, when
    `ls /sys/kernel/config/nvmet/ports/<port id>/subsystems/` lists nothing
    and no other agent of the machine uses that port id. Its two ANA groups
    go first:
    `sudo rmdir /sys/kernel/config/nvmet/ports/<port id>/ana_groups/3 /sys/kernel/config/nvmet/ports/<port id>/ana_groups/2 /sys/kernel/config/nvmet/ports/<port id>`.
-   On the node's own machine and on each machine that exported to it, as
-   What dnv does alone says above, the host entries that no subsystem
-   lists any more, which
+   After the delete, whether the node's agent still runs or not, on the
+   node's own machine and on each machine that exported to it, as What dnv
+   does alone says above: the host entries that no subsystem lists any
+   more, which
    `ls /sys/kernel/config/nvmet/subsystems/*/allowed_hosts/` shows:
    `sudo rmdir /sys/kernel/config/nvmet/hosts/<nqn>`. The node's own host
    NQN is `nqn.2024-01.io.dnv:0:<cluster id>:<node id>` for a disk node and
@@ -4487,12 +5147,14 @@ node](#replace-a-dead-disk-node) and [Replace a dead controller
 node](#replace-a-dead-controller-node) give the steps for a node whose
 machine is gone.
 
-When to stop and ask for help: a refusal that names the same leftover for
-several minutes, while the agent's log keeps showing `sweep leftover`
-records for it; a refusal that says the agent holds a newer desired state
-than etcd, which happens after an etcd restore (do not force the delete);
-a disk node whose agent reports no counts of its disk, whose disk failed or
-names another node, and which can only leave with `--force`.
+When to stop and ask for help: a new cntlr of step 3 that is still not
+built a few minutes after its create, as sub-step 2 says; a refusal that
+names the same leftover for several minutes, while the agent's log keeps
+showing `sweep leftover` records for it; a refusal that says the agent
+holds a newer desired state than etcd, which happens after an etcd
+restore (do not force the delete); a disk node whose agent reports no
+counts of its disk, whose disk failed or names another node, and which
+can only leave with `--force`.
 
 Tested: the gateway's Go tests check each refusal, a clean delete, `--force`
 on a node whose agent does not answer and on a node that still holds a side,
@@ -4550,9 +5212,13 @@ What a disable does:
   `dnvctl --sp '<pool name>' cntlr set-enabled --id <cntlr id> --enabled=false`.
   A disabled cntlr serves no IO, is never made the primary and is never
   replaced by the worker, and the disable of a primary that has an enabled
-  standby with no health epoch fails it over at once. [A planned restart of
-  an agent](#a-planned-restart-of-an-agent), step 3, gives the checks to
-  make first and how to give the pool its IO back.
+  standby with no health epoch fails it over at once, at the levels where
+  reactions run, `READWRITE`, `READONLY` and `NO_CLONE`. At the other
+  levels it stays the primary and runs none of the pool's group arrays.
+  No failover follows either when the agent of each such standby refuses
+  the worker's syncups. [A planned
+  restart of an agent](#a-planned-restart-of-an-agent), step 3, gives the
+  checks to make first and how to give the pool its IO back.
 - A leg that fails on a disabled disk node is repaired onto another disk
   node, as on any node. The disable alone repairs nothing.
 
@@ -4697,11 +5363,12 @@ Tested: the e2e suite's ops case runs `dnvctl dn inspect` and
 `dnvctl cn inspect` on the lab's nodes. At the end of every case but the
 upgrade case, the e2e suite waits until each disk node's agent, at its
 record's revision, counts its whole data area free, as its record does,
-and checks that the worker logged no `dn free count disagrees`. The tutorial suite runs the all-in-one
-tutorial, which counts the `RES_STATUS_OK` rows of `dnvctl dn inspect` and
-`dnvctl cn inspect`. Both suites passed in the lab on 2026-11-21. No suite
-makes the counts disagree; the worker's unit tests check the compare and its
-record. The way back of the safe steps is not tested.
+and checks that the worker logged no `dn free count disagrees`. The
+tutorial suite runs the all-in-one tutorial, which counts the
+`RES_STATUS_OK` rows of `dnvctl dn inspect` and `dnvctl cn inspect`. Both
+suites passed in the lab on 2026-11-21. No suite makes the counts
+disagree; the worker's unit tests check the compare and its record. The way
+back of the safe steps is not tested.
 
 ## Leftovers on a node
 
@@ -4779,15 +5446,26 @@ Safe steps:
 3. For a node deleted with `--force`, or a machine whose nodes are all
    removed:
    1. Stop the node's agent, so that it builds nothing again, and delete the
-      node's local files ([Remove a node](#remove-a-node), step 6).
+      node's local files ([Remove a node](#remove-a-node), step 6). That
+      step and the next name the node's files and objects by the cluster's
+      id and the node's. Once the node is deleted, no record holds the
+      node's id: if you did not note it before, read both ids from the name
+      of the node's file in the store folder before you delete the files.
+      It is `dn-<cluster id>-<node id>` for a disk node and
+      `cn-<cluster id>-<node id>` for a controller node, with both ids in
+      16 hex digits already; take the one whose cluster id is the
+      `cluster_id` of `dnvctl cluster get` in 16 hex digits, and set `cid`
+      and `nid` of that step to the two ids in place of the `printf`.
    2. Reboot the machine, if no other node on it serves a pool. No device
       mapper device, md array or NVMe-oF object survives a reboot, and an
       agent with no files of the node builds none of them again. On a
       machine whose other nodes serve pools, a reboot is the loss of those
       nodes until they are back ([the scope page](scope.md), section 6).
       There, remove the node's objects by hand instead, each one only after
-      what is above it, with `<cluster id>` and `<node id>` in 16 hex digits
-      (`printf '%016x' <id>`):
+      what is above it, with `<cluster id>` and `<node id>` in 16 hex
+      digits: `printf '%016x' <id>` of an id noted in decimal, or the ids of
+      the file's name of sub-step 1 as they are, with no `printf`, which
+      reads a number with a leading 0 as octal. The objects are these:
       - The NVMe-oF subsystems that export a device of the node.
         `grep -l 'dnv-<cluster id>-<node id>-' /sys/kernel/config/nvmet/subsystems/*/namespaces/*/device_path`
         lists their namespaces. For each subsystem, remove its link from
@@ -4823,9 +5501,8 @@ Safe steps:
 Steps that lose data: the removal of a subsystem or a device that a pool
 still uses cuts its hosts or its legs. Remove only objects whose names
 carry the removed node's ids, and only after its agent has stopped. Never
-remove a port that another agent of the machine uses: disk node agents of
-one machine can share a port id, and so can a disk node agent and the
-controller node agent.
+remove a port that another agent of the machine uses: a disk node agent
+and the controller node agent can share a port id.
 
 When to stop: a removal that fails; an object whose owner its name does not
 tell; a leftover that a node still in the cluster names for minutes while
@@ -4866,6 +5543,8 @@ How to confirm:
   `dnvctl dn delete --addr <addr> --force`.
 
 What dnv does alone: nothing zeroes a header block. A disk node's agent
+reads a header block that does not start with `DNVDISK1` as blank, a
+zeroed one or one that holds anything else, such as a file system. It
 formats a disk whose header block is blank at the first converge of its
 node, and then only when no side device or clone metadata device of dnv,
 of any node, still maps the disk, its local files hold no provisioned side
@@ -4954,10 +5633,32 @@ pool that has one there. While the machine is gone,
 `dnvctl dn inspect --addr <addr>` fails with ABORTED and
 `get dn info from`; a node whose disk died reads its rows as
 `RES_STATUS_ERROR` instead. A RAID1 pool goes on serving over its
-other legs. In a pool without RAID, IO to the groups on the node waits for
-the pool's fast IO fail timeout, 5 seconds at the default, and then fails.
-[The introduction](introduction.md#status-and-limits) gives the measured
-pause.
+other legs, but a group none of whose other legs md holds in sync on
+another machine, as while md copies onto the new leg of a repair, fails its
+IO as a pool without RAID does. In a pool without RAID, IO to the groups
+on the node waits until the controller node drops its connections to the
+node, 6 to 10 seconds after the node went silent in the lab, and then for
+the pool's fast IO fail timeout, the kernel's wait before it fails the IO
+queued on a lost path, 5 seconds at the default. Then it fails: a write
+failed after 13.2 seconds in the lab ([the
+introduction](introduction.md#status-and-limits)). In both cases, the IO
+to a leg that a migration moves waits instead when its side on the node
+serves it while the node's machine is gone, and the path to its other
+side stays up, unless another leg of the group is in sync on that same
+machine, where the IO can fail too. In a pool without RAID, and for a
+migration past its cutover whose copy is not whole, it waits until the
+node comes back or step 3 ends the migration. Otherwise, in a RAID1
+group, it waits only until the migration ends, by step 3 or by leg
+repair after the pool's `side_unhealthy`, 600 seconds at the default.
+Either end, step 3's or leg repair's, keeps the side on the dead node
+when that side serves, and the IO then fails. md then marks the group's
+array broken, the worker fails the pool over where the pool has an
+enabled standby with no health epoch (a pool of one cntlr waits for the
+cntlr replacement), and the group waits for the node or a forced start,
+since no other leg
+of it is in sync. In both kinds of pool, the worker can also fail the
+pool over sooner, while the IO waits ([the scope page, section
+8](scope.md#8-waits-a-host-can-see)).
 
 How to confirm: find the pools. `dnvctl dn get --addr <addr>` lists each side
 on the node under `dn_conf.side_ptr_list`, with the `sp_id` of its pool, its
@@ -4984,13 +5685,22 @@ What dnv does alone:
   `no_healthy_leg` ([the forced-start guide](#the-forced-start-guide)). With
   no disk node to take the new leg, the reason is `no candidate`, and the
   repair waits until one can. A pool without RAID gets no repair: its data on
-  the node is gone.
+  the node is gone, save that of a leg whose migration step 3 ends with no
+  loss.
+- Leg repair ends the migration of a leg it repairs only where that loses
+  nothing: it cancels one whose cutover is pending, and finishes one whose
+  copy is whole. A leg that still serves through its side on another disk
+  node gets no repair, and its migration waits for you (step 3), as does
+  one whose copy is not whole.
 - The worker deletes a retired leg by itself once it is 7 days old and not
   kept, when its group has no repair, its row reads `RES_STATUS_OK`, md
   holds its array whole, and no leg or side of the group has a health
   epoch. It deletes one at a time. It never deletes a kept one, and a forced
   start keeps the group's retired legs ([Keeping the old
   copies](#keeping-the-old-copies)).
+- At the pool's level `NO_THINPOOL` or below the worker makes no leg repair
+  and deletes no retired leg ([Change a pool's
+  level](#change-a-pools-level)).
 - Nothing deletes the node.
 
 Safe steps:
@@ -5000,29 +5710,65 @@ Safe steps:
    node](#disable-a-node)).
 2. If no other disk node has room for the new legs, add one ([Prepare a
    node](#prepare-a-node)).
-3. For each RAID1 pool with a leg on the node, wait for its leg repairs, or
+3. For each pool with a side on the node, RAID1 or without RAID, first end
+   each migration that has a side on the node. In a RAID1 pool, a leg that
+   still serves through its other side gets no repair, so its side would
+   stay on the node. In a pool without RAID, the worker ends no migration.
+   `dnvctl --sp '<pool name>' sp get` names the pool's migrations under
+   `sp_conf.migr_name_list`, and
+   `dnvctl --sp '<pool name>' migr get --name <migration>` shows the old
+   side as `migr.src_side_id`, the new side as `migr.dst_side_id`, and
+   `migr.cutover_pending`. A migration with a `side_id` of the node's
+   `side_ptr_list` has a side on the node.
+   - While its cutover is pending, cancel it:
+     `dnvctl --sp '<pool name>' migr cancel --name <migration>`. The old
+     side holds every write, so nothing is lost.
+   - Past the cutover, finish it:
+     `dnvctl --sp '<pool name>' migr finish --name <migration>`. The
+     gateway asks the new side's agent for the proof that the copy is
+     whole, and refuses while the copy is not whole or the agent does not
+     answer, so a finish that passes loses nothing.
+   - If the finish is refused, end the migration as [Ending a migration
+     with force](#ending-a-migration-with-force) says. The worker's
+     `reaction skipped` record with the reason `migration_copy_not_whole`
+     names such a migration in its `migr_name`.
+
+   In a pool without RAID, two migrations end with no loss, and their leg
+   keeps its data: one whose cutover is pending and whose new side is on
+   the node, and one past its cutover whose old side is on the node and
+   whose copy is whole. If a finish there is still refused once you have
+   run it again as [Ending a migration with
+   force](#ending-a-migration-with-force) says, that is its case 3: stop
+   and ask for help.
+4. For each RAID1 pool with a leg on the node, wait for its leg repairs, or
    start them yourself ([Repair a leg by hand](#repair-a-leg-by-hand)). A
    leg's repair has finished when
    `dnvctl --sp '<pool name>' retired-leg list` lists the leg under
    `leg_id_to_retired_leg`, with the dead node's address as `side.addr_port`.
-   Then wait until `dnvctl cluster get-status` shows no `group` line for its
-   group, whose id is the retired leg's `grp_id`, that says the array is not
-   whole: md has then copied the group's data onto the new leg.
-4. Match the node's sides with the retired legs. Each `leg_id` of the node's
+   Then wait until `dnvctl --sp '<pool name>' group inspect --grp <grp_id>`,
+   with the retired leg's `grp_id`, shows every leg in sync: each entry of
+   `leg_list` has a `member.md_state` that holds the word `in_sync` and not
+   the word `faulty`. md has then copied the group's data onto the new leg.
+   The status read does not prove it: it shows no `group` line that says
+   the array is not whole while the new leg has a line of its own, or while
+   the primary sends no report.
+5. Match the node's sides with the retired legs. Each `leg_id` of the node's
    `side_ptr_list` that is a key of its pool's `leg_id_to_retired_leg` is a
    retired leg with its side on the node. `dnvctl` prints both ids as decimal
    numbers in quotes, so they compare as text. A `leg_id` that is no retired
-   leg is a leg still in its group, whose repair has not finished.
-5. Delete each such retired leg once its group is whole. Read the pool's
+   leg is a leg still in its group: its repair has not finished, or a
+   migration of step 3 still moves it.
+6. Delete each such retired leg once its group is whole. Read the pool's
    revision, `sp_rev.revision` of `dnvctl --sp '<pool name>' sp get`, then
    run `dnvctl --sp '<pool name>' retired-leg delete --leg <leg id> --rev <revision>`.
    Each delete moves the revision, so read it again before the next one. Or
    wait, and the worker deletes them by itself after seven days, as above.
-6. For each pool without RAID with a leg on the node, delete the pool, from
-   the inside out, as [Remove a node](#remove-a-node), step 2, says: its
-   transfers, its namespaces, its subsystems, its clones, its migrations,
-   its thin devices, and then the pool itself. The pool's delete is refused
-   while it holds any of them. After each clone's delete, wait until
+7. For each pool without RAID that still has a side on the node after
+   step 3, delete the pool, from the inside out, as [Remove a
+   node](#remove-a-node), step 2, says: its transfers, its namespaces, its
+   subsystems, its clones, its migrations, its thin devices, and then the
+   pool itself. The pool's delete is refused while it holds any of them.
+   After each clone's delete, wait until
    `dnvctl --sp '<pool name>' clone get --name <clone>` answers NOT_FOUND:
    until then the deletes of its volume and of the pool are refused. This
    step loses data: the thin device deletes delete each volume with what it
@@ -5032,15 +5778,20 @@ Safe steps:
    and its volume holds only the regions copied so far: delete its
    namespaces first, since a clone's delete sets them back to serving. With
    `--rev`, read the pool's revision again before each command, as in step
-   5. The removal of a clone or of the pool in the background needs no
+   6. The removal of a clone or of the pool in the background needs no
    answer from the dead node.
-7. Once `dnvctl dn get --addr <addr>` shows `dn_conf.side_ptr_list` as `[]`,
-   delete the node with force: `dnvctl dn delete --addr <addr> --force`.
+8. Once `dnvctl dn get --addr <addr>` shows `dn_conf.side_ptr_list` as `[]`,
+   note the node's id, its `dn_conf.dn_id`, and the cluster's
+   `cluster_id`, which `dnvctl cluster get` prints: once the node is
+   deleted, no record holds its id, and step 9 names the node's files,
+   devices and host NQN by the two ids. Then delete the node with force:
+   `dnvctl dn delete --addr <addr> --force`. Its reply prints the node's id
+   as `dn_id` too.
    Without `--force` the delete is refused, since the agent does not answer,
    or, on a machine whose disk alone died, cannot prove the disk clean: it
    reports no counts of a disk it cannot read. With a side left on the node
    it is refused with `--force` too.
-8. If the node's agent still runs, as on a machine whose disk alone died,
+9. If the node's agent still runs, as on a machine whose disk alone died,
    or if the machine comes back, stop that agent at once, or before it
    starts, delete the node's local files, and remove what it built, as
    [Leftovers on a node](#leftovers-on-a-node), step 3, says: the agent
@@ -5050,16 +5801,20 @@ Safe steps:
    a new disk: [Reuse a disk from an old
    node](#reuse-a-disk-from-an-old-node).
 
-Steps that lose data: step 6, with its thin device deletes and its forced
+Steps that lose data: step 7, with its thin device deletes and its forced
 clone deletes, whose volumes serve a partial copy to the hosts while a
 namespace of them is still there; and the delete of a retired leg, which
 drops its copy, the last one while its group is not whole: delete one only
-once its group is whole.
+once its group is whole. A forced end of a migration that step 3 sends you
+to loses data as [Ending a migration with
+force](#ending-a-migration-with-force) says.
 
 When to stop: a group with no healthy leg ([the forced-start
 guide](#the-forced-start-guide)); a repair that does not start a few minutes
 after the thresholds above, or does not finish; a `no candidate` record that
-goes on once a disk node has room. Ask for help.
+goes on once a disk node has room; a migration of step 3 that falls in case
+3 or 4 of [Ending a migration with force](#ending-a-migration-with-force).
+Ask for help.
 
 Tested: the e2e suite's react case kills a disk node's agent and removes its
 NVMe-oF port, and checks that the worker repairs the dead leg with a repair
@@ -5076,8 +5831,11 @@ then removes the side. It passed in the lab on 2026-11-21, in the e2e run
 at one slice. The worker suite checks the delete of a retired leg and the
 worker's own delete at seven days, over fake agents; the gateway's tests
 check `--force` on a node whose agent does not answer, and its refusal
-while a side is on the node. The procedure as a whole, and the forced
-delete of a dead disk node with real agents, are not tested.
+while a side is on the node. The e2e suite's react case, stage 10, runs
+the worker's own finish of a migration whose new side's disk node went
+silent; no test ends a migration of step 3 by hand while a disk node is
+dead. The procedure as a whole, and the forced delete of a dead disk node
+with real agents, are not tested.
 
 ## Replace a dead controller node
 
@@ -5099,9 +5857,11 @@ Symptom: `dnvctl cluster get-status` shows a `health` line for
 fail", whose age grows, and one for each cntlr on the node.
 `dnvctl cn inspect --addr <addr>` fails with ABORTED and `get cn info from`.
 Each pool whose primary was on the node, and that had an enabled standby
-with no health epoch, has failed over to it about 6 to 10 seconds after the
-node died, at the defaults; its hosts saw a pause. A pool with no such
-standby, as a pool of one cntlr, serves no IO.
+with no health epoch whose agent does not refuse the worker's syncups,
+has failed over to it about 6 to 10 seconds after the
+node died, at the defaults, unless its level is `NO_THINPOOL` or below; its
+hosts saw a pause. A pool with no such standby, as a pool of one cntlr,
+serves no IO.
 
 How to confirm: `dnvctl cn get --addr <addr>` lists each cntlr on the node
 under `cn_conf.cntlr_ptr_list`, with the `sp_id` of its pool and its
@@ -5115,7 +5875,15 @@ What dnv does alone:
 - Failover: a primary on the node that two check rounds in a row find
   unhealthy, with its health epoch as old as the pool's
   `primary_unhealthy`, 4 seconds at the default, is failed over to the
-  pool's enabled cntlr with no health epoch and the smallest id.
+  pool's enabled cntlr with no health epoch whose agent does not refuse
+  the worker's syncups, the one with the smallest id. When the agent of
+  each enabled standby with no health epoch refuses the worker's syncups,
+  no failover comes, and the worker logs `reaction skipped` with the
+  reason `candidate_refuses`. The worker holds an agent as refusing from
+  its refusal of a syncup until it accepts a syncup, reports the revision
+  it refused as applied, or misses a check round. It is failed over only
+  at the levels where reactions run, `READWRITE`, `READONLY` and
+  `NO_CLONE` ([Change a pool's level](#change-a-pools-level)).
 - Cntlr replacement: the worker replaces each cntlr on the node that is not
   disabled and has had its health epoch for the pool's `cntlr_unhealthy`,
   600 seconds at the default. It deletes the cntlr and makes a new one with
@@ -5129,6 +5897,10 @@ What dnv does alone:
   and tries again at its next passes. The replacement in a pool of one cntlr
   can cost a Kubernetes volume its path ([A one-cntlr Kubernetes volume after
   a cntlr replacement](#a-one-cntlr-kubernetes-volume-after-a-cntlr-replacement)).
+  The worker replaces a cntlr only at the levels where reactions run, as
+  for a failover: a pool held at `NO_THINPOOL` or below keeps every cntlr
+  it has on the dead node, primary or standby, and the worker logs no
+  `no candidate` record for them.
 - The worker never replaces a disabled cntlr.
 - A node that comes back before its cntlrs are replaced: its agent answers
   that it is starting while it builds its stored cntlrs again, and the
@@ -5136,6 +5908,9 @@ What dnv does alone:
   Its cntlrs then serve again, those that were failed over as standbys. A
   node that comes back after: its agent removes the cntlrs it no longer
   holds.
+- Nothing points a clone at the new primary of its source pool, and
+  nothing adds a new controller node of a clone's pool to its transfer's
+  list (step 3).
 - Nothing deletes the node.
 
 Safe steps:
@@ -5143,10 +5918,15 @@ Safe steps:
 1. Disable the node, so that no cntlr is placed on it if it comes back for a
    while: `dnvctl cn set-disabled --addr <addr> --disabled` ([Disable a
    node](#disable-a-node)).
-2. Wait for the replacements, or make them now. For each cntlr on the node,
+2. Wait for the replacements, or make them now. At `NO_THINPOOL` or below
+   none comes: make each one now. For each cntlr on the node,
    in its pool, with `--rev` the pool's `sp_rev.revision` from
    `dnvctl --sp '<pool name>' sp get`, read again before each command:
-   1. Give the pool a new cntlr:
+   1. If the old cntlr is the primary and the pool's level is
+      `NO_THINPOOL` or below, first step the level back, as step 2 of
+      [Replace a cntlr by hand](#replace-a-cntlr-by-hand) says: at those
+      levels the worker makes no failover and no cntlr replacement.
+      Give the pool a new cntlr:
       `dnvctl --sp '<pool name>' cntlr create --slot <slot> --rev <revision>`,
       with a slot of `sp_conf.cntlid_slot_list` that no cntlr of the pool
       uses as its `cntlid_slot`. [Remove a node](#remove-a-node), step 3,
@@ -5155,30 +5935,83 @@ Safe steps:
    2. Wait until the new cntlr is built: `dnvctl --sp '<pool name>' sp get`
       shows it with `err_epoch` 0, and
       `dnvctl --sp '<pool name>' cntlr inspect --id <new cntlr id>` shows
-      `applied_revision` equal to the pool's `sp_rev.revision` and each row
-      under `cntlr_info.leg_id_to_leg` as `RES_STATUS_OK`. If the old cntlr
-      is the primary, the worker fails it over to the new one, which has no
-      health epoch, at its next passes, before or after it is built; the
-      pool serves again once the new primary is built and `sp get` shows it
-      with `settling` false.
+      `applied_revision` at least the pool's `sp_rev.revision` and each row
+      under `cntlr_info.leg_id_to_leg` as `RES_STATUS_OK`, or, at `NO_SIDE`
+      and `DISABLE`, as `RES_STATUS_MISSING` with the reason
+      `RES_REASON_SP_LEVEL`. The row of a leg that `sp get` shows with an
+      `err_epoch` that is not 0 while a cntlr other than the new one is the
+      primary can stay `RES_STATUS_ERROR`: the primary cannot read that leg
+      either. So can the row of a leg one of whose sides `sp get` shows
+      with an `err_epoch` that is not 0, whichever cntlr is the primary, as
+      when a disk node went down with the controller node: the worker's
+      checks of that side fail too. If that disk node is gone for good,
+      replace it as [Replace a dead disk node](#replace-a-dead-disk-node)
+      says. A new leg of a running repair shows its `err_epoch`, and those
+      of its sides, in `dnvctl --sp '<pool name>' repair list`, and a leg
+      of a clone's meta group, the group that holds a clone's copy
+      records, in `dnvctl --sp '<pool name>' clone get --name <clone>`. If
+      the old cntlr is the primary, the worker fails it over at its next
+      passes to an enabled cntlr with no health epoch whose agent does not
+      refuse the worker's syncups, the new one or another, before or after
+      the new one is built.
+      The pool serves again once the new primary is built and `sp get`
+      shows it with `settling` false.
    3. Disable the old cntlr:
       `dnvctl --sp '<pool name>' cntlr set-enabled --id <old cntlr id> --enabled=false --rev <revision>`.
       Do it only once another cntlr is the primary: a disabled cntlr is
       never replaced, so a dead primary disabled while its pool has no other
       cntlr to fail over to is never replaced either, and its pool stays
-      without IO until you enable it again.
+      without IO until you enable it again and the worker replaces it.
    4. Delete the old cntlr:
       `dnvctl --sp '<pool name>' cntlr delete --id <old cntlr id> --rev <revision>`.
       The gateway never deletes a primary or an enabled cntlr.
+   5. If sub-step 1 stepped the pool's level back and the pool must stay at
+      its old level, set that level again:
+      `dnvctl --sp '<pool name>' sp set-level --level <the old level> --rev <revision>`.
 
    If the worker replaces the old cntlr while you do this, sub-steps 3 and
    4 find it gone, and the pool has one cntlr more than before. To get back
    to the count it had, disable one of the two new cntlrs that is not the
    primary, and delete it the same way.
-3. Once `dnvctl cn get --addr <addr>` shows `cn_conf.cntlr_ptr_list` as
-   `[]`, delete the node with force: `dnvctl cn delete --addr <addr> --force`.
+3. Once each pool of the node serves again, check its copies between
+   pools. A clone reads its source through the source pool's primary
+   alone, at the address the clone holds, and only a controller node on a
+   transfer's list may read the transfer. Neither changes by itself. Until
+   you change it, the copy stops, and a host's read of a block not yet
+   copied waits or fails. For each pool of the node:
+   - If it holds a transfer, under `sp_conf.xfer_name_list` of
+     `dnvctl --sp '<pool name>' sp get`, and its primary moved, point the
+     clone that reads the transfer at the new primary:
+     `dnvctl --sp '<clone pool>' clone set-tr --name <clone> --src-tr-type <tr_type> --src-adr-fam <adr_fam> --src-tr-addr <tr_addr> --src-tr-svc-id <tr_svc_id>`,
+     with the four fields of `nvme_tr_conf` of the entry of `cntlr_list`
+     whose `primary` is true in that `sp get`. Type the four address
+     flags: without them `dnvctl` sends `tcp`, `ipv4`, 127.0.0.1 and 4420.
+     For a clone in another cluster, run the command there, with that
+     cluster's `--cluster` and, for another etcd, the `--gateway-address`
+     of its gateways ([Clone from another
+     cluster](#clone-from-another-cluster)).
+   - If it holds a clone, under `sp_conf.clone_name_list`, and a cntlr of
+     the pool is now on a controller node that the transfer's list lacks,
+     give the transfer its new list:
+     `dnvctl --sp '<transfer pool>' xfer set-hosts --name <transfer> --hosts <the whole new list>`,
+     the host NQNs separated by commas.
+
+   [Move a volume to another pool](#move-a-volume-to-another-pool), step 13,
+   gives both commands. The clone that reads a transfer shows the
+   transfer's NQN, which step 8 there works out, as `src_nqn` in
+   `dnvctl --sp '<clone pool>' clone get --name <clone>`, and step 6 there
+   works out a controller node's host NQN. For a source outside this
+   cluster, let the new controller node in there ([Clone from another
+   cluster](#clone-from-another-cluster)).
+4. Once `dnvctl cn get --addr <addr>` shows `cn_conf.cntlr_ptr_list` as
+   `[]`, note the node's id, its `cn_conf.cn_id`, and the cluster's
+   `cluster_id`, which `dnvctl cluster get` prints: once the node is
+   deleted, no record holds its id, and step 5 names the node's files,
+   objects and host NQN by the two ids. Then delete the node with force:
+   `dnvctl cn delete --addr <addr> --force`. Its reply prints the node's id
+   as `cn_id` too.
    Without `--force` the delete is refused, since the agent does not answer.
-4. If the machine comes back, stop its controller node agent at once, or
+5. If the machine comes back, stop its controller node agent at once, or
    before it starts, delete the node's local files, and remove what it
    built, as [Leftovers on a node](#leftovers-on-a-node), step 3, says: the
    agent builds again, each time it starts, what its files name, NVMe-oF
@@ -5188,9 +6021,15 @@ Steps that lose data: none deletes volume data, since a controller node
 holds none. The disable of step 2.3 on a cntlr that is still the primary
 keeps its pool without IO.
 
-When to stop: a pool whose IO does not come back, with no new primary whose
-`settling` is false a minute after it became primary; a `no candidate`
-record that goes on while a controller node has room. Ask for help.
+When to stop: a new cntlr that is still not built, as step 2.2 reads it, a
+few minutes after its create, for any cause but a row that step 2.2 sets
+aside: as when a row under `cntlr_info.leg_id_to_leg` stays
+`RES_STATUS_ERROR` for another leg, `applied_revision` stays below the
+pool's `sp_rev.revision`, or `dnvctl --sp '<pool name>' sp get` shows the
+new cntlr's own `err_epoch` not 0 (do not go on to step 2.3); a pool
+whose IO does not come back, with no new primary whose `settling` is
+false a minute after it became primary; a `no candidate` record that goes
+on while a controller node has room. Ask for help.
 
 Tested: the e2e suite's react case kills the primary's controller node
 agent, and checks the failover, the replacement of the dead cntlr on a node
@@ -5200,7 +6039,109 @@ twice, which fails the pool over and replaces the lost cntlr, and the
 machine comes back with no cntlr of the pool. It runs with short thresholds,
 not the defaults, and passed in the lab on 2026-11-21. A node back before
 its cntlrs are replaced, the replacement by hand of step 2 on a dead node,
-and a forced `dnvctl cn delete` with real agents are not tested.
+and a forced `dnvctl cn delete` with real agents are not tested. Neither
+are the commands of step 3 after a failover or a replacement: the e2e
+suite's copy case runs `xfer set-hosts`, and `clone set-tr` with the same
+address in a run whose copy is not whole by then ([Move a volume to another
+pool](#move-a-volume-to-another-pool)).
+
+## Set up the control plane
+
+Words: an **etcd server** is one of the etcd processes that keep the same
+store, which etcd's own tools call a member. A **control-plane machine** is
+a machine that runs part of the control plane: an etcd server, a gateway, a
+worker or a cdc. The kit's units for them, in `deploy/systemd/`, are
+`dnv-etcd.service`, an example for one etcd server, and
+`dnv-gateway.service`, `dnv-worker.service` and `dnv-cdc.service`; the
+examples of their settings are in `deploy/dnv/`.
+
+When: once, before the first cluster of a new etcd is created; and when a
+gateway, a worker or a cdc is added on a machine. To add an etcd server to
+a running etcd, follow etcd's own steps in place of step 1: such a server
+is first added with `etcdctl member add`, and it starts with
+`--initial-cluster-state existing`, not `new` as in the example.
+
+What dnv does alone: nothing. No dnv program installs or starts another,
+none checks how etcd runs, and the kit enables no unit. Each dnv program
+starts whether etcd answers or not: until etcd answers, the gateway fails
+each call that needs it, and the cdc answers no host. A worker that has
+started drives nothing for its join grace, the worker's
+`--vote-grace-time`, 60 seconds at the default.
+
+Safe steps, as root on each control-plane machine:
+
+1. On each machine of an etcd server, install a release of etcd 3.5.13 or
+   later as `/usr/local/bin/etcd`, and copy
+   `deploy/systemd/dnv-etcd.service` into `/etc/systemd/system/`. In it,
+   give the server its own `--name` and addresses, and list every server in
+   `--initial-cluster`. Keep `--max-txn-ops` and `--max-request-bytes` at
+   the unit's values or higher, since etcd's defaults are far under what
+   dnv writes in one request, and keep `--auto-compaction-retention`, since
+   no dnv program compacts etcd. etcd keeps its data in
+   `/var/lib/dnv-etcd`, which the unit makes: keep it on a file system
+   apart from the logs, or cap the journal (`SystemMaxUse=` in
+   `journald.conf`), since etcd refuses a write it cannot save. Then run
+   `systemctl daemon-reload` and `systemctl start dnv-etcd` on each server.
+   On a new etcd each start waits for the other servers too.
+2. Open the network the control plane needs, and no more: [The
+   networks](#the-networks) lists who connects to whom and gives the
+   firewall example.
+3. Copy from the release folder into `/usr/local/bin/` each of
+   `dnv-gateway`, `dnv-worker` and `dnv-cdc` that the machine runs, and
+   `dnvctl`, and copy their units from `deploy/systemd/` into
+   `/etc/systemd/system/`. Make each program's settings file in
+   `/etc/dnv/`, mode 0644, from its example in `deploy/dnv/`, under the
+   same name, with your own values: `etcd-endpoints`, the client address of
+   every etcd server in one string, separated by commas; the gateway's
+   `grpc-address`, where `dnvctl` and the Kubernetes driver call it; and
+   the cdc's `tr-addr` and `tr-svc-id`, an address of the machine and the
+   port hosts reach the cdc on. Settings for `dnvctl`, made from
+   `deploy/dnv/dnvctl.yaml`, go in a file that its `--config` flag or the
+   environment variable `DNVCTL_CONFIG` names. Then run
+   `systemctl daemon-reload`.
+4. Start every gateway and every cdc, in any order:
+   `systemctl start dnv-gateway dnv-cdc`. Check that each gateway answers:
+   `dnvctl --gateway-address <its address> cluster list` prints the
+   clusters, an empty list on a new etcd. Check that each cdc has read
+   etcd: `journalctl -u dnv-cdc` holds the record `cdc scan complete`.
+5. Start the workers: `systemctl start dnv-worker`. On a new etcd, which
+   holds no node yet, start them now. Once nodes exist, the workers start
+   last, once every agent has logged `agent started`, and stop first (the
+   start order in [Prepare a node](#prepare-a-node)).
+6. Create the cluster, once:
+   `dnvctl --gateway-address <address> cluster create --name <name>`. Its
+   `--extent-size`, `--md-check-days` and `--start-hold-seconds`, left out
+   for their defaults, stay as they are for the cluster's whole life: no
+   call changes them. Then prepare its nodes and create them ([Prepare a
+   node](#prepare-a-node)).
+7. `systemctl enable` a unit to start it at boot too. Before you enable a
+   worker's unit, read the start order in [Prepare a node](#prepare-a-node):
+   at boot, nothing starts a worker after the agents of other machines.
+   Take backups from then on ([Back up etcd](#back-up-etcd)).
+
+Steps that lose data: none; no step writes to a node's disk. An etcd with
+lower limits than the example's refuses the larger writes of dnv, such as
+the create of a pool of many slices, and an etcd without automatic
+compaction fills its store and then refuses writes ([etcd refuses writes:
+its store is full](#etcd-refuses-writes-its-store-is-full)).
+
+When to stop: an etcd server whose start does not end once every server has
+started; a gateway that does not answer `cluster list` while etcd runs; a
+cdc that does not log `cdc scan complete`. Read the program's log,
+`journalctl -u <unit>`, where a program that could not listen says so, and
+ask for help.
+
+Tested: a check by hand on one lab guest, on 2026-11-22, set the guest up
+from an archive that `make release` built from the repository, whose
+`deploy/` holds the kit: etcd 3.6.14 as one etcd server on the guest's own
+loopback address, from the example unit with its
+addresses changed, and the gateway, the worker and the cdc from their
+units, with settings made from the examples, on the same machine as the
+agents. Every unit started; a cluster, its nodes, a pool and a volume were
+made with `dnvctl`; and, enabled, every unit came back after a reboot. [dnv
+on one machine](tutorial_all_in_one.md) starts the same programs by hand,
+with the example's etcd flags. An etcd of several servers started from the
+example unit, and a control plane on machines of its own, are not tested.
 
 ## etcd refuses writes: its store is full
 
@@ -5327,7 +6268,12 @@ Safe steps:
 
 1. Take the backup from one etcd server, as root or as etcd's user:
    `etcdctl --endpoints <one etcd server> snapshot save <file>`. With
-   several etcd servers, one is enough: each holds the whole store.
+   several etcd servers, one is enough, since each holds the whole store,
+   but take it from etcd's leader, the server that orders every write:
+   `etcdctl --endpoints <every etcd server> endpoint status -w table` shows
+   it with `IS LEADER` true and the highest `RAFT TERM`, etcd's count of
+   its leader elections. A server cut off from the others can hold an older
+   store.
 2. Check it: `etcdutl snapshot status <file> -w json` prints its store
    revision, its count of keys and its size. A file that this command
    cannot read is no backup.
@@ -5386,7 +6332,10 @@ What dnv does alone:
 
 - Nothing restores etcd by itself. While etcd is down the data plane goes
   on: each node keeps what it built, hosts keep their IO, and the workers
-  change nothing.
+  change nothing. Every cdc stays stopped from step 1 to step 7: on a host
+  that uses nvme-stas, an outage of more than a few seconds is not tested,
+  and nvme-stas may drop the host's paths ([While the control plane is
+  down](#while-the-control-plane-is-down)).
 - A restore brings the desired state back to the backup's time. What was made
   after the backup is lost: disk nodes free the sides the restored state does
   not name, data included, and primaries delete the volumes it does not name,
@@ -5414,29 +6363,83 @@ Safe steps:
    Keep every agent running. A worker would hand out ids from the restored
    counters, and the controller plugin would retry a volume create as soon
    as a gateway answers.
-2. Stop etcd and move its data directory aside. Restore the backup into a
-   new data directory, with the name and the peer address of etcd's own
-   command line:
-   `etcdutl snapshot restore <backup file> --data-dir <new directory> --name <name> --initial-cluster <name>=<peer URL> --initial-advertise-peer-urls <peer URL>`.
+2. Stop every etcd server and move its data directory aside. When the data
+   directory is the mount point of a file system of its own, `mv` cannot
+   move it: move the `member` folder in it aside instead, to
+   `<data directory>/member.old`. After a lost
+   quorum, and only then, first choose what to restore: a server that
+   survived with its data directory can hold a newer store than any backup,
+   but one cut off before the loss can hold an older one. Compare the store
+   revision that `etcdutl snapshot status <file> -w json` prints for the file
+   `member/snap/db` in each data directory you moved aside, or
+   `<data directory>/member.old/snap/db` where you moved the `member`
+   folder alone, with that of the newest backup, and use the file whose
+   revision is the highest as the backup file below. A server's file
+   needs `--skip-hash-check` added to each restore, etcd's own way for a
+   file copied from a data directory.
+   When etcd lost its data or holds data that cannot be used, restore no
+   server's own file: restore the newest backup whose data can be used.
+   Restore the backup into the data directory that etcd's own command line
+   names, `--data-dir`, with the name and the
+   peer address of that command line:
+   `etcdutl snapshot restore <backup file> --data-dir <data directory> --name <name> --initial-cluster <name>=<peer URL> --initial-advertise-peer-urls <peer URL>`.
    For the etcd command of [dnv on one machine](tutorial_all_in_one.md),
-   that is `--name dnv --initial-cluster dnv=http://127.0.0.1:2380
-   --initial-advertise-peer-urls http://127.0.0.1:2380`. Start etcd on the
-   new directory with its usual command line, with the request caps and the
-   automatic compaction of the tutorial's etcd command, as [the
-   requirements](introduction.md#requirements) say. Start the gateways.
-   With several etcd servers, restore the same backup on each of them, each
-   with its own `--name` and `--initial-advertise-peer-urls` and the same
-   `--initial-cluster`, which names every server:
+   that is `--data-dir ./etcd-data --name dnv --initial-cluster
+   dnv=http://127.0.0.1:2380 --initial-advertise-peer-urls
+   http://127.0.0.1:2380`, run in the tutorial's folder; for the kit's
+   example unit, `dnv-etcd.service`, the data directory is
+   `/var/lib/dnv-etcd`. The restored `member` folder must end up in that
+   path and no other. etcd started on a data directory that is missing or
+   holds no `member` folder makes a new, empty store there. It does so
+   under `--initial-cluster-state new`, which is the kit unit's setting and
+   etcd's default. systemd makes the
+   unit's directory, empty, when it is missing. `etcdutl` refuses a data
+   directory that is not empty, such as a mount point that holds
+   `member.old`: there, restore into a new folder inside it,
+   `--data-dir <data directory>/restored`, then move
+   `<data directory>/restored/member` to `<data directory>/member` and
+   remove the empty `restored` folder. Start etcd with its usual command
+   line, with the request caps and the automatic compaction of the
+   tutorial's etcd command, as [the
+   requirements](introduction.md#requirements) say. With several etcd
+   servers, restore the same backup on each of them, each with its own
+   `--name` and `--initial-advertise-peer-urls` and the same
+   `--initial-cluster`, which names every server you restore:
    `<name 1>=<peer URL 1>,<name 2>=<peer URL 2>,<name 3>=<peer URL 3>`.
-   Start every etcd server on its new directory before the gateways. After
-   a lost quorum, a server that survived with its data directory can hold a
-   newer store than any backup, but one cut off before the loss can hold an
-   older one. With that etcd server stopped, compare the store revision
-   that `etcdutl snapshot status <file> -w json` prints for its file
-   `member/snap/db` under the data directory with that of the newest
-   backup. When the server's is higher, its file can serve as the backup
-   file, with `--skip-hash-check` added to each restore, etcd's own way for
-   a file copied from a data directory.
+   Name there only the servers you restore and start now: after a lost
+   quorum, the servers that are left and any new machines in place of the
+   lost ones, each restored the same way. A server that `--initial-cluster`
+   names but that never starts counts against the quorum: when half of the
+   named servers or fewer start, etcd elects no leader and answers nothing,
+   and `systemctl start` of the kit's example unit, `dnv-etcd.service`,
+   waits without end. Add a server later by etcd's own steps, as the When
+   part of [Set up the control plane](#set-up-the-control-plane) says.
+   Start every etcd server on its restored directory. Then read each
+   server alone, since a server started on an empty store can join the
+   restored ones, and then answers from its empty store:
+   `etcdctl --endpoints <client address of that server> --consistency=s get 'dnv cluster_conf ' --prefix --keys-only`.
+   `--consistency=s` makes the server answer from its own store at once,
+   without asking the leader first. Every server must print the same keys,
+   at least one: the key `dnv cluster_conf <name>` of each cluster of the
+   backup. Also read each server alone with `etcdctl --endpoints <client
+   address of that server> endpoint status -w fields`: every server must
+   print the same `"ClusterID"`, the id etcd gives the servers that elect
+   one leader together. A server restored with an `--initial-cluster`
+   unlike the others' gets another id and starts as an etcd of its own
+   beside them, with the same keys. The gateways and the workers would then
+   send their calls to both, and two workers could drive the same pools.
+   When the servers print different keys, or none, or different ids, a
+   server did not start on the restored backup, or started as an etcd of
+   its own beside the others: stop every etcd server,
+   move every data directory aside again to a name not yet taken, or, where
+   you moved the `member` folder alone, that folder to a name not yet
+   taken, such as `member.old2`, since `mv` onto a folder that exists moves
+   into it, and restore every server again, each with the same
+   `--initial-cluster`, which names every server you restore. Only then
+   start the gateways,
+   and check that `dnvctl cluster list` names the clusters whose keys the
+   first read printed. When it does not, stop the gateways and check that
+   the `etcd-endpoints` of their settings name the restored servers.
 3. For every cluster, before any other call but `dnvctl cluster list`,
    which names the clusters, run `dnvctl cluster advance-ids --name
    <cluster>`. Without this step a new object can take the ids, and with
@@ -5527,18 +6530,21 @@ Safe steps:
    before the restore.
 7. First set each subsystem's list to exactly the hosts that use it now.
    `dnvctl ss list` shows each list. On each host, `nvme list-subsys` shows
-   the subsystems it is connected to, and `/etc/nvme/hostnqn` holds its host
-   NQN. For a volume of the Kubernetes driver, `kubectl get volumeattachment`
-   names the one Kubernetes node the volume is attached to, and the list must
-   hold that node's host NQN alone, or nothing when the volume is attached to
-   no node: the driver attaches a volume to a node only when the list is empty
-   or names that node alone. Where a list misses a host that uses the volume,
-   or names a host that stopped using it after the backup, give the whole list
-   again, as step 2 of [Change a volume's hosts](#change-a-volumes-hosts)
-   says. Then start the workers and the cdc, let clients call the gateways
-   again, start the CSI controller plugin again with its former count of
-   copies, and take a new backup: a later restore of a backup from before step
-   3 would hand out again the ids handed out since.
+   the subsystems it is connected to, and
+   `cat /sys/class/nvme/nvme*/hostnqn 2>/dev/null | sort -u` prints the
+   host NQN of its connections. For a volume of the Kubernetes driver,
+   `kubectl get volumeattachment` names the one
+   Kubernetes node the volume is attached to, and the list must hold that
+   node's host NQN alone, or nothing when the volume is attached to no
+   node: the driver attaches a volume to a node only when the list is empty
+   or names that node alone.
+   Where a list misses a host that uses the volume, or names a host that
+   stopped using it after the backup, give the whole list again, as step 2
+   of [Change a volume's hosts](#change-a-volumes-hosts) says. Then start
+   the workers and the cdc, let clients call the gateways again, start the
+   CSI controller plugin again with its former count of copies, and take a
+   new backup: a later restore of a backup from before step 3 would hand
+   out again the ids handed out since.
 8. Kubernetes still holds its record of each volume whose pool step 4 found
    new: delete the record, or make the volume again. Delete again each
    volume step 4 listed in `returning_td_list`: it was deleted after the
@@ -5560,16 +6566,20 @@ Safe steps:
 
 Steps that can lose data: step 6 makes every loss of step 4 happen, with no
 undo: every volume made after the backup, snapshots included, loses its
-thin id, and the primary deletes it with the blocks it holds; an agent whose files are kept meets the same losses later, once the
-revisions climb back. Step 7 ends the connection of each host that a restored
+thin id, and the primary deletes it with the blocks it holds; an agent
+whose files are kept meets the same losses later, once the revisions climb
+back. Step 7 ends the connection of each host that a restored
 list leaves out, and that host's writes fail, unless step 7 gave it back
 first. A host taken off a list after the backup that step 7 leaves on the
 restored list may connect to the volume again, as a host that uses nvme-stas
 does by itself once the cdc lists the subsystem to it, and what writes on it
 then writes beside the host that uses the volume now. Step 6 before step 3, or
 a worker started before step 3, can give a new object the remains of one made
-after the backup, data included. Step 8 deletes again the volumes and the
-pools that came back, with any data they hold: a volume that came back working
+after the backup, data included. Step 1 keeps every cdc stopped until
+step 7, and a host that uses nvme-stas may then drop its paths (What dnv
+does alone): their IO fails, and writes not yet flushed are lost. Step 8
+deletes again the volumes and the pools that came back, with any data they
+hold: a volume that came back working
 holds its old data. A volume made in a cluster created after the backup is
 lost unseen: no call names that cluster.
 
@@ -5584,29 +6594,45 @@ then not known; a row read `RESTORE_VERDICT_MAY_BREAK` or
 `RESTORE_VERDICT_RECORD_LOST`; a lost volume that must be kept and that no
 host can reach. A pool whose every row is not held, from nodes whose
 agents hold their nodes at or above the restored revision, was deleted
-after the backup: step 8 deletes it again. The check lists no disk node's sides: the sides a disk
-node frees at step 6 belong to the pools the check finds new, older or
-breaking, and to the pools it does not see.
+after the backup: step 8 deletes it again. The check lists no disk node's
+sides: the sides a disk node frees at step 6 belong to the pools the check
+finds new, older or breaking, and to the pools it does not see.
 
 Tested: the gateway's Go tests check every verdict against planted records
 and a fake agent, and the cn agent's tests check what it answers; the
 gateway suite's smoke case runs the check over a fake controller node after
 its run of `dnvctl cluster advance-ids`. The upgrade case of the e2e suite
-runs steps 1 to 6 and the start of the workers and the cdc of step 7 on the
-lab's real agents, from a backup taken under 0.1 and with the programs of a
-later build: a real `etcdutl` restore into a new folder, the id step of step 3
+runs steps 1 to 6, step 2 without its reads of each etcd server alone and
+its check of the cluster names, and, of step 7, the start of the workers
+and the cdc and the new backup, on the lab's real agents, from a backup
+taken under 0.1 and with the programs of a later build: a real `etcdutl`
+restore into etcd's data directory, the old one
+moved aside, the id step of step 3
 (`dnvctl cluster advance-ids`), the check on every controller node, the reads
 of step 5 and every agent's files reset. It then checks that a pool made
 before the backup keeps its data, that a new pool's id lies above that of
 the pool made after the backup and a new volume's above every id the grow
 after the backup took, that a pool grown after
 the backup breaks, and that the disk nodes free the sides made after the
-backup. It runs one etcd member and no Kubernetes, adds or takes away no
-node after the backup, and adds no host to and takes none off the list of
-a pool kept from before the backup (the one subsystem made after it is lost
-whole), so step 7's list change has nothing to do and step 8 does not run.
-The restore of several etcd servers, after a lost quorum or otherwise, and a
-restore from a server's own data directory are not tested.
+backup. It does not read each etcd server alone, since with its one etcd
+member that read is the gateway's own and has no other `"ClusterID"` to
+compare, and it reads the restored pools through `dnvctl sp list`, not the
+names `dnvctl cluster list` prints. It runs one etcd member and no
+Kubernetes, adds or takes away no node after the backup, and adds no host
+to and takes none off the list of a pool kept from before the backup (the
+one subsystem made after it is lost whole), so step 7's list change has
+nothing to do and step 8 does not run.
+The restore of several etcd servers, after a lost quorum or otherwise, a
+restore from a server's own data directory, and a restore into a data
+directory that is the mount point of a file system of its own are not
+tested. A check by hand with three etcd 3.6.14 servers on one machine, on
+2026-11-22, restored two of them and started the third on an empty data
+directory: the third joined them and became their leader, and read alone
+it printed no key, while `endpoint status` showed the three alike. A
+second check by hand, the same day, restored one backup on three
+servers, one of them with an `--initial-cluster` that named it alone: read
+alone, each printed the backup's key, and `endpoint status -w fields`
+printed one `"ClusterID"` for that server and another for the two others.
 
 ### Restore one record from a backup
 
@@ -5661,10 +6687,12 @@ Safe steps, for a volume's record:
    so the primary keeps the volumes it last built, each under its `td_id`.
    `dnvctl cntlr inspect --id <primary cntlr id>` must show a row of the
    backup's `td_id` in `cntlr_info.td_id_to_thin_info`; the primary is the
-   cntlr that `dnvctl sp get` marks primary. A volume deleted and made
-   again under the same name after the backup has another `td_id`, and the
-   primary's rows show that one, not the backup's: the backup's record is
-   then of the old volume, so stop, as When to stop says.
+   cntlr whose `primary` is true under `cntlr_list` of `dnvctl sp get`, and
+   its id stands at the same place in `sp_conf.cntlr_id_list`. A volume
+   deleted and made again under the same name after the backup has another
+   `td_id`, and the primary's rows show that one, not the backup's: the
+   backup's record is then of the old volume, so stop, as When to stop
+   says.
 7. Check again that the live etcd lacks the key, as Confirm says, and that
    the scratch etcd holds it:
    `etcdctl --endpoints http://127.0.0.1:<client port> get '<key>' --keys-only`
@@ -5678,10 +6706,10 @@ Safe steps, for a volume's record:
 10. Stop the scratch gateway and the scratch etcd, and delete the scratch
     folder.
 11. Check: within a few seconds the `lost-record` line is gone from
-    `dnvctl cluster get-status`, `dnvctl td list` answers again and shows
-    the volume as the backup held it, and a change made meanwhile reaches
-    the nodes, such as a volume created meanwhile that is now recorded as
-    created.
+    every page of `dnvctl cluster get-status`, `dnvctl td list` answers
+    again and shows the volume as the backup held it, and a change made
+    meanwhile reaches the nodes, such as a volume created meanwhile that is
+    now recorded as created.
 
 Steps that can lose data:
 
@@ -5697,8 +6725,10 @@ Steps that can lose data:
   hold the volume's device yet, such as after a failover, refuses to build
   it over a thin id that holds data ([A new volume refused for a thin id
   that holds data](#a-new-volume-refused-for-a-thin-id-that-holds-data)).
-- A torn mark the worker recorded after the backup is lost with the
-  restore: such a snapshot then reads as whole.
+- A torn mark, the worker's record that a snapshot's slices hold its data
+  from different points in time ([Snapshots](#snapshots)), is lost with the
+  restore when the worker recorded it after the backup: such a snapshot
+  then reads as whole.
 - A worker started on the scratch etcd, or a put of another key or value.
 
 When to stop: no backup holds the record with `created` true; or the
@@ -5707,8 +6737,8 @@ again after that backup; or the line names another kind of record: a
 slice, a cntlr, a subsystem, a clone, a transfer, a migration, a repair or
 a retired leg, whose record changes with the pool's legs, its health and
 its hosts, so that a backup's copy is older than the pool; or the line
-names the pool's revision key, or a disk node's or a controller node's
-record. Ask for help.
+names the pool's revision key, the pool's id-to-name record, or a disk
+node's or a controller node's record. Ask for help.
 
 Tested: rehearsed in the lab on 2026-11-22, on the control-plane machine
 alone, with the test suites' fake agents in place of the nodes' agents:
@@ -5743,22 +6773,32 @@ which an upgrade of dnv does not touch.
 
 When to use: a new release is out and its notes allow an upgrade from the
 build you run. There is no rolling upgrade and no downgrade: no build may
-replace a newer one ([the scope page](scope.md), section 5.5).
+replace a newer one ([the scope page](scope.md), section 7, Steps known
+today, for the rolling upgrade, and section 5.5 for the downgrade).
 
 What dnv does alone: nothing during the upgrade. A stopped node plugin, and
 a stopped agent, leave the devices, the connections and the mounts of their
 node in place, so the hosts' IO goes on while every program is stopped,
-with no failover and no repair. Once the workers start, each drives nothing
-for its join grace, the worker's `--vote-grace-time`, 60 seconds at the
-default. After an upgrade from 0.1, the new worker marks the arrays of each
-RAID1 pool once, so a backup taken before the upgrade then reads older to
-the restore check.
+with no failover and no repair. No run stops every program while a host
+uses nvme-stas: the cdc suite stops every cdc for a few seconds only, and
+a longer outage may drop the host's paths ([While the control plane is
+down](#while-the-control-plane-is-down)). Once the workers start, each
+drives nothing for its join grace, the worker's `--vote-grace-time`, 60
+seconds at the default. After an upgrade from 0.1, the new worker marks
+the arrays of each RAID1 pool once, so a backup taken before the upgrade
+then reads older, `RESTORE_VERDICT_OLDER`, to the restore check ([Restore etcd from a
+backup](#restore-etcd-from-a-backup), step 4).
 
-Safe steps, in this order, which the e2e suite's upgrade case ran:
+Safe steps, in this order, the order the e2e suite's upgrade case ran
+(Tested says which steps it leaves out):
 
-1. Before the upgrade: take a backup ([Back up etcd](#back-up-etcd)). Run
-   the new build's node check on every node, with the flags its agent will
-   run with ([Check a node before it joins](#check-a-node-before-it-joins)).
+1. Before the upgrade: take a backup ([Back up etcd](#back-up-etcd)). Note
+   what `dnvctl cluster get-status --name <cluster>` shows for each
+   cluster, every page of it ([Read what is wrong](#read-what-is-wrong)).
+   The build 0.1 has no status read, so before an upgrade from 0.1 there is
+   nothing to note. Run the new build's node check on every node, with the
+   flags its agent will run with ([Check a node before it
+   joins](#check-a-node-before-it-joins)).
    On each host, compare `nvme list-subsys` with `dnvctl ss list`: a host
    that is off a subsystem's list but still connected loses its connection
    at the new agent's first converge, where the controller node's cn agent
@@ -5793,7 +6833,8 @@ Safe steps, in this order, which the e2e suite's upgrade case ran:
    `systemctl start dnv-agent-cn.service` on each controller node. Wait until each agent's log holds `agent started`, the
    record that it has rebuilt its node from its local files. The worker
    waits for an agent that is still rebuilding for the cluster's start hold
-   at most, 120 seconds by default, before it judges it.
+   at most, 120 seconds by default ([A planned restart of an
+   agent](#a-planned-restart-of-an-agent)), before it judges it.
 8. Check that every program runs the new build. `--version` on each
    program file prints its build, such as `dnv-agent --version`, and the
    first record each agent logs, `agent node versions`, carries the
@@ -5810,9 +6851,11 @@ Safe steps, in this order, which the e2e suite's upgrade case ran:
     --replicas=2`. Their start records carry `version` too.
 11. Start the workers last: `systemctl start dnv-worker.service`, and check
     the `version` of the `worker starting` record.
-12. Check: `dnvctl cluster get-status` shows no new line once the join
-    grace has passed, and the worker's log holds no `reaction applied`
-    record. Take a new backup.
+12. Check: once the join grace has passed, `dnvctl cluster get-status
+    --name <cluster>`, every page of it, shows for each cluster no line
+    that step 1 did not show, and after an upgrade from 0.1 no line at
+    all, and the worker's log holds no `reaction applied` record. Take a
+    new backup.
 
 For an upgrade from 0.1, also:
 
@@ -5873,14 +6916,18 @@ Steps that can lose data:
   is lost.
 - A host still connected but off a subsystem's list, when the new cn agent
   ends its connection: its writes fail.
+- Every cdc stopped from step 3 to step 9, on a host that uses nvme-stas:
+  an outage of more than a few seconds is not tested, and nvme-stas may
+  drop the host's paths, so that the volumes' IO fails and writes not yet
+  flushed are lost.
 - A node whose agents start before the new udev rules are on it: the
   system's own rules can assemble and probe what the agents build.
 
 When to stop: a program prints or logs another version than the new one; a
-node check fails; an agent does not log `agent started`; or after step 12 a
-line or a `reaction applied` record shows: stop, start no more programs,
-and ask for help. Never go back to the old build by starting its files
-again.
+node check fails; an agent does not log `agent started`; or at step 12 a
+line that step 1 did not show, any line after an upgrade from 0.1, or a
+`reaction applied` record, shows: stop, start no more programs, and ask for
+help. Never go back to the old build by starting its files again.
 
 Tested: the e2e suite's upgrade case (`integtest/e2e_test.sh`, run with
 `--only upgrade`) upgrades a cluster of 0.1 to the build under test in the
@@ -5901,9 +6948,9 @@ and its programs from a work folder, not from the kit's units. Of step 1,
 it takes the backup, and runs the node check on the controller nodes
 alone, after the program files are replaced, not before; of step 12, it
 checks that no `reaction applied` record shows. The node check on the disk
-nodes, the hosts' comparison of step 1, the status read and the new backup
-of step 12, the units of step 5, and the CSI driver's part, steps 3 and
-10, are not tested.
+nodes, the status read and the hosts' comparison of step 1, the status read
+and the new backup of step 12, the units of step 5, and the CSI driver's
+part, steps 3 and 10, are not tested.
 
 ## While the control plane is down
 
@@ -5924,20 +6971,26 @@ and how long the workers wait, by what is down, at the shipped settings:
   a gateway waits for etcd up to 10 seconds and then fails the call with the
   error code ABORTED, and `dnvctl`'s own `--timeout`, 10 seconds by
   default, can end it first. A write that failed so may have been made:
-  read the state before you send it again. The CSI driver's calls fail the
-  same way, and Kubernetes tries them again. Each worker stops itself
-  about 30 seconds after its last write to etcd that went through: two
-  vote intervals, the worker's `--vote-interval`, 10 seconds at the
-  default, plus one more; later when its writes hang, each up to 10
-  seconds. Its log shows `worker fenced` with the reason
+  read the state before you send it again. The calls of the CSI driver's
+  controller plugin, the part of the driver that calls the gateway, fail
+  the same way, and Kubernetes tries them again. Its node plugin, the part
+  on each Kubernetes node, calls no gateway. A pod whose volume is already
+  attached to its node, with the node on the list of the volume's
+  subsystem, still mounts it while a cdc serves what it last read.
+  Each worker stops itself about 30 seconds after its last write to etcd
+  that went through: two vote intervals, the worker's `--vote-interval`, 10
+  seconds at the default, plus one more; later when its writes hang, each
+  up to 10 seconds. Its log shows `worker fenced` with the reason
   `heartbeat_stalled`. Once etcd is back, each worker joins again with no
   step from you, and drives its pools again one join grace later, the
   worker's `--vote-grace-time`, 60 seconds at the default; it can stop
   itself once more first. A cdc that runs keeps serving what it last
   read; a cdc started during the outage answers no host until it has read
   etcd once.
-- Every gateway down: no `dnvctl` call and no CSI call works. The workers
-  go on.
+- Every gateway down: no `dnvctl` call works, and no call of the CSI
+  driver's controller plugin: no volume is created, deleted, attached or
+  detached. The node plugin calls no gateway, so a pod whose volume is
+  already attached to its node still mounts it. The workers go on.
 - Every worker down: nothing reacts. No failover, no cntlr replacement, no
   leg repair, no auto-grow, no end of a clone whose copy is whole, and no
   change reaches the nodes. A worker that starts again drives nothing for
@@ -5947,13 +7000,34 @@ and how long the workers wait, by what is down, at the shipped settings:
   `--vote-leave-grace-time`, 25 seconds at the default.
 - Every cdc down: hosts keep their paths but learn of no change: a new
   host finds no path, and after a failover a host stays on the path that
-  the failover withdrew.
+  the failover withdrew. On a host that uses nvme-stas, this is tested
+  only for an outage of a few seconds. How long nvme-stas keeps its paths
+  after that is not known: it may drop them once the kernel gives up the
+  host's connection to a stopped cdc, after that connection's
+  `ctrl_loss_tmo`, 600 seconds at the kernel's default. A node of dnv's
+  Kubernetes driver keeps its paths while a cdc of its list cannot be
+  reached.
 
-Safe steps: bring the program back; nothing else is needed. Send no write
-through `dnvctl` until the state reads again, and read the state of each
-call that failed before you send it again.
+Safe steps: bring the program back; nothing else is needed, except on a
+host where nvme-stas dropped every path of a volume. There the volume's
+device went, and once a cdc that the host lists and that serves the
+volume's pool answers, nvme-stas connects the paths again, under a new
+device. That can take a minute or more: stafd, the part of nvme-stas that
+holds the connections to the cdcs, tries about once a minute to connect
+again a cdc whose connection the kernel ended, as the source of nvme-stas
+2.4.1 reads. A file system mounted on the old device must be unmounted and
+mounted again on the new device, which replays its journal. When the mount
+fails, or the kernel log then reports an error, unmount it if it is
+mounted, check it with its own check tool, and mount it again once the
+check finds nothing more to repair. Do not let the check tool throw the
+journal away, as `xfs_repair -L` does: that loses the changes the journal
+holds. Send no write through `dnvctl` until the state reads again, and
+read the state of each call that failed before you send it again.
 
-Steps that can lose data: none from the outage itself. While no worker
+Steps that can lose data: no run has shown a loss from the outage itself.
+But an outage of every cdc longer than a few seconds is not tested:
+nvme-stas may then drop a host's paths, as Every cdc down says, and then
+the volumes' IO fails and writes not yet flushed are lost. While no worker
 drives, a primary that dies is not failed over, so its volumes have no IO
 until a worker drives again, and a thin pool that fills gets no auto-grow,
 so a write that needs a new block waits and then fails.
@@ -5961,7 +7035,14 @@ so a write that needs a new block waits and then fails.
 When to stop: etcd does not come back: see [Restore etcd from a
 backup](#restore-etcd-from-a-backup). A worker that logs `worker fenced`
 again and again while etcd answers: see [etcd refuses writes: its store is
-full](#etcd-refuses-writes-its-store-is-full).
+full](#etcd-refuses-writes-its-store-is-full). A host that dropped its
+paths during the outage and still finds no path two minutes after a cdc
+that it lists and that serves the volume's pool answers again: read [Read
+what is wrong](#read-what-is-wrong). When that read lists nothing wrong in
+the volume's pool, restart nvme-stas on that host ([Restart
+nvme-stas](#restart-nvme-stas)). A file system whose check still finds
+damage, whose check tool asks to throw its journal away, or that still
+does not mount: ask for help.
 
 Tested: the e2e suite's cutoff case, stage 07, stops etcd under a host's
 write loop: a read through `dnvctl` fails with ABORTED, the worker stops
@@ -5969,13 +7050,19 @@ itself and logs `worker fenced` with the reason `heartbeat_stalled`, the
 host's writes go on, the cdc serves what it read, and after etcd is back
 the worker drives again with the pools unchanged. It ran at the suite's
 shorter vote times, a vote interval of 2 seconds, a join grace of 6 and a
-leave grace of 13, and passed in the lab on 2026-11-21. The upgrade case keeps every agent stopped for 30
-seconds, and the worker for about two minutes, under a host's writes with
-no failed write (2026-11-21).
-The cdc suite, `integtest/cdc_test.sh`, kills every cdc under hosts that
-keep their connections. The worker suite's three-member mode stops one etcd
+leave grace of 13, and passed in the lab on 2026-11-21. The upgrade case
+keeps every agent stopped for 30 seconds, and the worker for about two
+minutes, under a host's writes with no failed write (2026-11-21).
+The cdc suite, `integtest/cdc_test.sh`, kills every cdc for a few seconds
+under hosts that keep their connections, and starts them again; a longer
+outage is not tested. The worker suite's three-member mode stops one etcd
 server at a time. The times at the shipped settings are read from the code,
-not measured.
+not measured. No suite runs the CSI driver while etcd or the gateways are
+down: that the node plugin still mounts an attached volume then is read
+from the code. That a node of the Kubernetes driver keeps its paths while
+a cdc of its list cannot be reached is shown by the driver's Go tests,
+with a fake host, not by a suite. No suite runs a cdc outage long enough
+for nvme-stas to drop a path, so its connect afterwards is not tested.
 
 ## Give hosts the cdc addresses
 
@@ -5987,14 +7074,20 @@ its `--range` flag, all of them by default; two cdcs of one range are
 **twins**, which serve the same pools. To **front** the gateways is to put
 them behind one address that clients call.
 
-When: a host is set up; a cdc moves, is added or is removed; or several
-gateways should serve one client.
+When: a host is set up; a cdc moves, is added or is removed, or the pools
+are split among cdcs in another way; or several gateways should serve one
+client.
 
 What dnv does alone: each cdc follows etcd by itself and tells each host
 connected to it when its answer changes. A cdc never checks that every
-range has one; a range that no running cdc serves leaves hosts with no path
-to its pools, and nothing says so. The gateways keep no state: any one of
-them answers any call.
+range has one, and nothing says so when a range has none. A host whose
+listed cdcs all answer and leave out a range drops its paths to that
+range's pools. When every cdc of a range is stopped, hosts keep their
+paths to its pools but learn of no change to them, as [While the control
+plane is down](#while-the-control-plane-is-down) says of every cdc down.
+On a host that uses nvme-stas, this is tested only for an outage of a few
+seconds, and a longer one may drop those paths, as that section says.
+The gateways keep no state: any one of them answers any call.
 
 Safe steps for the cdcs:
 
@@ -6003,20 +7096,44 @@ Safe steps for the cdcs:
    out `--range`, so that each serves every pool and they are twins. Where
    `--range` splits the pools among cdcs, give each range two cdcs on
    different machines.
-2. On each host that uses nvme-stas, list every cdc in `/etc/stas/stafd.conf`,
-   section `[Controllers]`, one line for each:
+2. On each host, copy `deploy/modules-load.d/dnv-host.conf` into
+   `/etc/modules-load.d/`, so that nvme-tcp, which a host needs to reach its
+   volumes, loads at every boot, and load it now:
+   `sudo systemctl restart systemd-modules-load.service`. On each host that
+   uses nvme-stas, list every cdc in `/etc/stas/stafd.conf`, section
+   `[Controllers]`, one line for each:
    `controller = transport=tcp;traddr=<cdc address>;trsvcid=<port>`, with
    `persistent-connections=true` and `zeroconf=disabled` as in [dnv on one
    machine](tutorial_all_in_one.md). The host's NQN, which the subsystems'
-   lists name, is in `/etc/stas/sys.conf`.
+   lists name, is the `nqn` of the `[Host]` section of `/etc/stas/sys.conf`,
+   as the tutorial sets it, or, where that names none, the content of
+   `/etc/nvme/hostnqn`.
 3. Restart nvme-stas in its safe order ([Restart
    nvme-stas](#restart-nvme-stas)) so that it reads the list.
 4. Check on the host: `stafctl adlp -d` shows each cdc's address with its
    `connected` field `True`, as step 4 of [Restart
    nvme-stas](#restart-nvme-stas) reads it.
-5. For the Kubernetes driver, the list is its config map:
-   [Change the cdc addresses of the Kubernetes
-   driver](#change-the-cdc-addresses-of-the-kubernetes-driver).
+5. When a cdc moves, is removed or is to serve a narrower `--range`, keep
+   it serving what it serves now until every host's list names another
+   running cdc of each range it gives up. First start the cdc at its new
+   address, or another cdc of each range it gives up, or check that a twin
+   serves that range, as step 1 says. Then give every host its new list,
+   which names such a cdc: on a host that uses nvme-stas, write the list as
+   the nvme-stas part of step 2 says and do steps 3 and 4; for the
+   Kubernetes driver, do steps 1 to 4 of [Change the cdc addresses of the
+   Kubernetes
+   driver](#change-the-cdc-addresses-of-the-kubernetes-driver). Only then
+   stop the old cdc, or restart it with its narrower `--range`. A host
+   whose list names no other cdc of the range learns of no change once the
+   old cdc stops: after a failover it stays on the path that the failover
+   withdrew, and it finds no path to a new subsystem. Once a cdc restarted
+   with a narrower `--range` answers, such a host drops its paths to the
+   pools of each range the cdc gave up (Steps that can lose data).
+6. For the Kubernetes driver, the list is its config map, and [Change the
+   cdc addresses of the Kubernetes
+   driver](#change-the-cdc-addresses-of-the-kubernetes-driver) gives its
+   whole order; after the old cdc stops, its step 6 drops each node's
+   connection to the old address.
 
 Safe steps for the gateways:
 
@@ -6034,8 +7151,20 @@ Safe steps for the gateways:
    machines of the operators and of the controller plugin ([The
    networks](#the-networks)).
 
-Steps that can lose data: none. A host that lists no cdc of a range gets
-no path to that range's volumes, and keeps the paths it holds.
+Steps that can lose data: two changes make stacd, the part of nvme-stas
+that connects the host to the cntlrs, drop a host's paths to the volumes
+of a range. One is a cdc restarted with a narrower `--range` while no
+other cdc the host lists serves a range it gives up: once that cdc answers
+again, none of the cdcs the host lists names those paths. The other is a
+host's new list that leaves out every cdc of a range whose volumes the host
+uses: once stacd starts on that host, none of the cdcs it lists names those
+paths. stacd then drops them: the volumes' IO fails, and a write not yet
+flushed is lost. [Restart nvme-stas](#restart-nvme-stas) stops at its step
+4, before stacd starts, when the records of a new list are missing. A host
+that lists no cdc of a range gets no path to that range's volumes. On a
+Kubernetes node the same two changes drop the volumes' paths, as [Change
+the cdc addresses of the Kubernetes
+driver](#change-the-cdc-addresses-of-the-kubernetes-driver) says.
 
 When to stop: a host that lists every cdc still finds no path to a volume
 whose subsystem lists it: read [Read what is wrong](#read-what-is-wrong).
@@ -6043,10 +7172,13 @@ whose subsystem lists it: read [Read what is wrong](#read-what-is-wrong).
 Tested: the cdc suite, `integtest/cdc_test.sh`, runs four cdcs, two twins
 of each half of the ranges, with hosts that list several cdcs through
 nvme-stas: one cdc killed, its twin serving alone, its restart, and every
-cdc killed under hosts that keep their connections. The gateway suite,
-`integtest/gateway_test.sh`, runs three gateways on one etcd and sends
-calls to each in turn. A load balancer in front of the gateways is not
-tested.
+cdc killed for a few seconds under hosts that keep their connections. The
+gateway suite, `integtest/gateway_test.sh`, runs three gateways on one etcd
+and sends calls to each in turn. The move, the removal or the narrower
+range of a cdc of step 5, with its change of each host's list, a longer
+outage of every cdc of a range, and a load balancer in front of the
+gateways are not tested, and no suite loads the host's module
+file of step 2.
 
 ## The logs
 
@@ -6752,20 +7884,20 @@ below before step 1.
    connections, or that a lockdown, the kernel mode that Secure Boot
    switches on, keeps from ending them on a node where /sys/kernel/security
    is mounted, reports an error. Where the pool has an enabled standby with
-   no health epoch, the worker then fails the primary over to it at the
-   pool's threshold. A pool with no such standby, such as a pool with one
-   cntlr, waits for the cntlr replacement, which comes after the pool's
-   `cntlr_unhealthy`, 600 seconds at the default, and the volume waits with
-   it. A connection that does not end for any other reason starts no
-   failover: the cn agent reports it as pending, as when the machine's IO is
-   held on the controller node, or under a lockdown on a node where
-   /sys/kernel/security is not mounted, which the cn agent cannot see. To
-   serve the volume from another node meanwhile, first check, as step 3 of
-   [A planned restart of an agent](#a-planned-restart-of-an-agent) says,
-   that `dnvctl sp get` shows another cntlr of the pool with `disabled`
-   false and `err_epoch` 0; if there is none, do not disable the primary: no
-   other cntlr becomes the primary, and the pool's IO stops. If there is
-   one, disable the primary's cntlr with
+   no health epoch whose agent does not refuse the worker's syncups, the
+   worker then fails the primary over to it at the pool's threshold. A
+   pool with no such standby, such as a pool with one cntlr, waits for the
+   cntlr replacement, which comes after the pool's `cntlr_unhealthy`, 600
+   seconds at the default, and the volume waits with it. A connection
+   that does not end for any other reason starts no failover: the cn agent
+   reports it as pending, as when the machine's IO is held on the controller
+   node, or under a lockdown on a node where /sys/kernel/security is not
+   mounted, which the cn agent cannot see. To serve the volume from another node
+   meanwhile, first check, as step 3 of [A planned restart of an
+   agent](#a-planned-restart-of-an-agent) says, that `dnvctl sp get` shows
+   another cntlr of the pool with `disabled` false and `err_epoch` 0; if there
+   is none, do not disable the primary: no other cntlr becomes the primary, and
+   the pool's IO stops. If there is one, disable the primary's cntlr with
    `dnvctl cntlr set-enabled --id <cntlr id> --enabled=false`: a disabled
    cntlr is never the primary, so the worker makes another cntlr the primary
    without its usual wait, and that cntlr ends the machine's connection
@@ -6961,10 +8093,11 @@ device goes: IO to it fails, and writes not yet flushed to it are lost. A
 later connect makes a new device, which a mount of the old one does not
 follow: unmount it and mount the new device. Also never disconnect by hand,
 while stafd runs, a connection that stafd made to a cdc, one whose
-`subsysnqn` file reads `nqn.2014-08.org.nvmexpress.discovery`: stafd then
-takes that cdc as gone for good and does not connect it again, so the host
-no longer hears of the cdc's changes. The cdc suite never touches these
-connections while stafd runs, for this reason.
+`subsysnqn` file reads `nqn.2014-08.org.nvmexpress.discovery`: the host
+then hears of none of that cdc's changes until stafd connects it again.
+The source of nvme-stas 2.4.1 reads that stafd tries again at its next
+retry, most often a minute later; no run shows that it does. The cdc suite
+never touches these connections while stafd runs, for this reason.
 
 When to stop: at step 4, after a minute, the records of all the connected
 cdcs together still leave out a subsystem that they named at step 1 and
@@ -7000,11 +8133,13 @@ driver](#change-the-cdc-addresses-of-the-kubernetes-driver). The cdc lists a
 cntlr of a subsystem while the cntlr is enabled and is either the primary
 or has no health epoch. A **withdrawn path** is a host's path to a cntlr
 that the cdc no longer lists: a cntlr that was disabled, deleted or
-replaced, or an old primary after a failover, until its health epoch
-clears. A host that follows the discovery log drops a withdrawn path by
+replaced, or one that is not the primary while its health epoch is set,
+such as an old primary after a failover, until that health epoch clears.
+A host that follows the discovery log drops a withdrawn path by
 itself: nvme-stas once no cdc it reads lists the cntlr, and the node plugin
 of dnv's Kubernetes driver once it also holds a path to a listed cntlr that
-shows the volume.
+shows the volume, or once every cdc of its list answers and none lists a
+cntlr of the volume.
 
 Symptom: a host holds a withdrawn path, and one of these follows:
 
@@ -7055,12 +8190,14 @@ demotion first, which moves the old primary's namespaces to ANA
 inaccessible, so a host that also holds a path to the new primary sends its
 IO there once that path serves. The worker waits up to three seconds for the
 demotion to be reported done, and then the disk nodes fence the old primary.
-A host that follows the discovery log drops the path inside the three
-seconds. An old primary whose agent the worker cannot reach gets no
-demotion, and keeps serving its path until the fence. A stale
-cdc that reaches etcd again catches up by itself and tells its hosts of the
-change, and nvme-stas then drops the path. Nothing drops a path nothing
-manages.
+The three seconds are the time a host that follows the discovery log needs
+to drop the path. When the old primary's agent reports its demotion before
+the host drops the path, the fence can come first, but the path is then ANA
+inaccessible and carries no IO. An old primary whose agent the worker
+cannot reach gets no demotion, and keeps serving its path until the fence.
+A stale cdc that reaches etcd again catches up by itself and tells its
+hosts of the change, and nvme-stas then drops the path. Nothing drops a
+path nothing manages.
 
 Safe steps, as root on the host:
 
@@ -7136,7 +8273,8 @@ failover case checks that a node drops its path to the old primary after a
 failover. Not tested: the connect before the drop of step 1, a drop by
 device of one path among several, the lost cntlr's path of step 2, a stale
 cdc during a failover and its recovery, the restart at step 4 of a cdc that
-serves old records, and a controller named in stacd's configuration.
+serves old records, a controller named in stacd's configuration, and the
+start of a stopped stacd at step 5.
 
 ## A Kubernetes mount that lost its last path
 
@@ -7163,9 +8301,11 @@ ways:
    the node, `nvme list-subsys` shows each path of the volume's subsystem in
    a state other than `live`, such as `connecting`. A pod whose IO waits
    like this does not stop when it is deleted.
-2. **The mount is dead.** The volume's last path on the node ended once,
-   by a reconnect the controller node refused with "do not retry" or by
-   someone's `nvme disconnect`. The volume's device went with it, and the
+2. **The mount is dead.** The volume's last path on the node ended once:
+   by a reconnect the controller node refused with "do not retry", by
+   someone's `nvme disconnect`, or by the node plugin, which drops every
+   path of the volume once every cdc of its list answers and none lists a
+   cntlr of the volume. The volume's device went with it, and the
    node's mount kept that device. A later connect made a new device, which
    the mount does not follow: the pod's IO fails while `nvme list-subsys` on
    the node shows a `live` path of the subsystem.
@@ -7232,7 +8372,10 @@ Safe steps, for a filesystem volume:
 
 1. If a cntlr of the volume can serve again, bring it back: start its
    controller node, or repair the network to it. The mount that waits then
-   goes on by itself.
+   goes on by itself: once its IO goes on, stop here. Steps 2 to 5 are for
+   the dead mount. Do them for a mount that waits only when its pods must
+   stop before a cntlr can serve again: step 3 then loses the writes they
+   had not flushed, which waiting keeps.
 2. Stop the volume's pods. Find the workload of each pod of step 1 of
    Confirm:
    `kubectl -n <Kubernetes namespace> get pod <pod> -o jsonpath='{.metadata.ownerReferences[0].kind}/{.metadata.ownerReferences[0].name}'`
@@ -7326,8 +8469,8 @@ end. Once the operator disables the primary, the worker makes a standby the
 primary at its next pass over the pool, with no event threshold to wait
 out; it makes such a pass every check interval, 2 seconds at the default.
 It takes, of the other cntlrs that are enabled and have no health epoch,
-the one with the smallest id, and passes over one whose agent it has seen
-refuse a syncup. It does not ask whether the hosts reach that cntlr. It
+the one with the smallest id, and passes over one whose agent refuses its
+syncups. It does not ask whether the hosts reach that cntlr. It
 first gives the old primary its demotion and waits up to three seconds for
 it to report the demotion done; then the disk nodes fence the old primary,
 and the new primary builds its devices. Until it reports them built,
@@ -7353,12 +8496,29 @@ Safe steps:
 2. Disable the primary:
    `dnvctl cntlr set-enabled --id <primary cntlr id> --enabled=false`.
 3. Wait until `dnvctl sp get` shows another cntlr as primary with `settling`
-   false. If no other cntlr becomes primary within a few check intervals, or
-   the new primary still shows `settling` true a minute after it became
-   primary, give the role back to the old cntlr as step 3 of [A planned
-   restart of an agent](#a-planned-restart-of-an-agent) says, and ask for
-   help: a standby whose agent refuses its syncups can take the role and then
-   serve nothing.
+   false. If no other cntlr becomes primary within a few check intervals,
+   enable the old cntlr again at once, with the command of step 6: it is
+   still the primary, and a disabled primary serves no IO. If another cntlr
+   became primary but still shows `settling` true a minute later, as when
+   its agent refuses the syncup that makes it primary, the hosts' IO waits
+   on its path. In that case, do not enable the old cntlr while the hosts
+   cannot reach it: the worker can give it the role back, at once if the new
+   primary is disabled, or else once the new primary's health epoch is as
+   old as the longer of the pool's `primary_unhealthy` and
+   `cntlr_unhealthy`, 600 seconds at the defaults. The cdc
+   then stops listing the new primary, so a host that follows the
+   discovery log drops its last path (Steps that can lose data). If step 1
+   left another cntlr that `dnvctl sp get` shows with `primary` false,
+   `disabled` false and `err_epoch` 0, disable the new primary too, with
+   the command of step 2 and its id, so that the worker gives the role to
+   such a cntlr, whose path the hosts reach. If none is left, repair the
+   network first, as step 5 says, check that the hosts reach the old
+   cntlr, as step 6 says, and enable it. Then wait until `dnvctl sp get`
+   shows it with `err_epoch` 0 and, on each host that uses the pool,
+   `nvme list-subsys` shows the path to it `live`, as step 1 says; only
+   then disable the new primary. Ask for help in each of
+   these cases: a standby whose agent refuses its syncups can take the role
+   and then serve nothing.
 4. Check the hosts: `nvme list-subsys` shows the path to the new primary
    `live`, and their IO goes on. A host that runs nvme-stas, and a node of
    dnv's Kubernetes driver, drop the old primary's path by themselves; a path
@@ -7367,7 +8527,9 @@ Safe steps:
 5. Repair the network between the hosts and the old primary's controller
    node, and the controller nodes of the cntlrs step 1 disabled.
 6. For the old cntlr, and for each cntlr step 1 disabled, check that the
-   hosts reach its controller node again. `nvme list-subsys` cannot show
+   hosts reach its controller node again; leave a new primary that step 3
+   disabled as it is, and ask for help about it. `nvme list-subsys` cannot
+   show
    this: the cdc does not list a disabled cntlr, so a host that follows the
    discovery log has dropped its path to it. Instead, on each host that
    uses the pool, `timeout 3 bash -c '</dev/tcp/<tr_addr>/<tr_svc_id>' && echo open`
@@ -7382,8 +8544,9 @@ Safe steps:
    from the new primary. Do not enable it while the hosts cannot reach it: an
    enabled cntlr is a candidate for the next failover, and a failover to it
    brings the fault back.
-7. Check that `dnvctl sp get` shows each cntlr you disabled with `disabled`
-   false. Nothing else reminds you of it: the status read never says that a
+7. Check that `dnvctl sp get` shows each cntlr you disabled in steps 1 and
+   2 with `disabled` false. Nothing else reminds you of it: the status read
+   never says that a
    cntlr which is not the primary is disabled.
 
 Steps that can lose data: a disable on a pool with no enabled standby whose
@@ -7394,7 +8557,10 @@ not yet flushed are lost, and a Kubernetes mount does not survive it ([A
 Kubernetes mount that lost its last
 path](#a-kubernetes-mount-that-lost-its-last-path)). The worker's log then
 shows `reaction skipped` with the reason `no candidate` at each pass. Enable
-the cntlr again at once if this happened.
+the cntlr again at once if this happened. The same loss follows an enable
+of the old cntlr while the hosts cannot reach it, once another cntlr has
+taken the role, as step 3 says: the worker can give the role back to it,
+and the cdc then stops listing the new primary.
 
 When to stop: `dnvctl sp get` shows the primary with `err_epoch` set, or
 `dnvctl cluster get-status` lists lines for the pool: dnv sees a fault, and

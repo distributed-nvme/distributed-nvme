@@ -80,8 +80,11 @@ How the commands are written:
   instead: `deploy/systemd/` holds a unit for each of these programs but
   etcd, and an example unit for etcd, and `deploy/dnv/` an example of the
   settings file of each of these dnv programs and of `dnvctl`; no unit
-  starts until you start or enable it
-  ([the operations doc](operations.md#prepare-a-node)).
+  starts until you start or enable it. The operations doc says how to
+  install them:
+  [Set up the control plane](operations.md#set-up-the-control-plane) for
+  etcd, the gateway, the worker and the cdc, and
+  [Prepare a node](operations.md#prepare-a-node) for the agents.
 - Every `dnvctl` command names the gateway and the cluster, and the pool
   where it acts on one: `--gateway-address 127.0.0.1:29527 --cluster c0
   --sp sp0`. Each `dnvctl` command below prints one JSON document; the
@@ -128,12 +131,13 @@ mountpoint -q /sys/kernel/config || sudo mount -t configfs none /sys/kernel/conf
 cat /sys/module/nvme_core/parameters/multipath
 ```
 
-A module loaded this way is gone after a reboot. A node of a real cluster
-loads its modules at every boot from the files of `deploy/modules-load.d/`,
-one for a disk node, one for a controller node and one for a host, copied
-into `/etc/modules-load.d`
-([the operations doc](operations.md#prepare-a-node)); this test machine
-goes without them.
+A module loaded this way is gone after a reboot. A machine of a real
+cluster loads its modules at every boot from the files of
+`deploy/modules-load.d/`, one for a disk node, one for a controller node
+and one for a host, copied into `/etc/modules-load.d`: the operations doc
+says so in [Prepare a node](operations.md#prepare-a-node) for a node and in
+[Give hosts the cdc addresses](operations.md#give-hosts-the-cdc-addresses)
+for a host. This test machine goes without them.
 
 The udev rules. The controller node assembles its RAID1 arrays itself.
 The system's own udev rules would race it for an array it is creating, and

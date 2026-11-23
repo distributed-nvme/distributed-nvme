@@ -1,19 +1,23 @@
 # dnv: an example of the cdc's settings, which deploy/systemd/dnv-cdc.service
 # reads with --config. Install as /etc/dnv/dnv-cdc.yaml, mode 0644, and put
-# your own addresses in place of the example ones, from 192.0.2.0/24. Each key
-# is a flag of dnv-cdc (dnv-cdc --help lists them all, with their defaults); a
-# flag given on the command line wins over an environment variable
-# DNV_CDC_<KEY> (the key in capitals, dashes as underscores), and both win over
-# this file. Keep the name's ending, .yaml: dnv reads a settings file in the
-# format its ending names and refuses an ending it does not know, such as
-# .conf.
+# your own addresses in place of the example ones, from 192.0.2.0/24 on the
+# back network and 198.51.100.0/24 on the host network. Each key is a flag of
+# dnv-cdc (dnv-cdc --help lists them all, with their defaults); a flag given on
+# the command line wins over an environment variable DNV_CDC_<KEY> (the key in
+# capitals, dashes as underscores), and both win over this file. Keep the
+# name's ending, .yaml: dnv reads a settings file in the format its ending
+# names and refuses an ending it does not know, such as .conf.
 #
-# The etcd members, as one string of addresses separated by commas, not as
-# a list.
+# The etcd members, on the back network, which hosts must not reach
+# (architecture.md [D19]; the operations doc's "The networks"), as one
+# string of addresses separated by commas, not as a list.
 etcd-endpoints: "192.0.2.10:2379,192.0.2.11:2379,192.0.2.12:2379"
 # The IP address and the port hosts reach the cdc on, an address of this
-# machine.
-tr-addr: 192.0.2.10
+# machine on the network hosts reach: here 198.51.100.10, beside 192.0.2.10 on
+# the back network, where the gateway and the first etcd member listen, since
+# a machine that runs the cdc beside them is on both networks (architecture.md
+# [D19]).
+tr-addr: 198.51.100.10
 tr-svc-id: "8009"
 # The address family of tr-addr: ipv4 or ipv6.
 # adr-fam: ipv4

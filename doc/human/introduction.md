@@ -710,9 +710,13 @@ tar xzf dnv-v0.1.0-linux-amd64.tar.gz
 
 The archive unpacks to one folder, `dnv-v0.1.0-linux-amd64`, with the six
 binaries, the `LICENSE` file and the `deploy/` directory, the CSI driver's
-image recipe and manifests. 0.1 is older than these documents. It ships no
-udev rules. Its `deploy/` lacks `controller-role.yaml`,
-`controller-rolebinding.yaml` and `networkpolicy.yaml`. Its programs also
+image recipe and manifests. 0.1 is older than these documents. Its
+`deploy/` lacks the folders that the repository now holds for setting up
+a machine: `udev/`, the udev rules; `modules-load.d/`, the kernel modules to
+load at boot; `systemd/`, the units of the programs; `dnv/`, the examples
+of their settings; and `nftables/`, the firewall example. It also lacks
+`controller-role.yaml`, `controller-rolebinding.yaml` and
+`networkpolicy.yaml`. Its programs also
 lack commands and flags the tutorials use, such as `dnv-agent check` and the
 cn agent's `--ignore-host-disconnection`. So follow the tutorials with a
 build of the repository, below, or with a release after 0.1.

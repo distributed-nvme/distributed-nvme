@@ -16,4 +16,4 @@ metadata:
   namespace: dnv-csi
 data:
   gatewayAddress: "192.0.2.10:29527"
-  cdcAddresses: "192.0.2.10:8009"
+  cdcAddresses: "198.51.100.10:8009"

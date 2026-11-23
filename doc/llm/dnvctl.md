@@ -762,8 +762,8 @@ sends `force` true, the only way to cancel once the cutover has started:
 the old side then serves its content as of the cutover, and what that
 costs, a leg md still counts whole and nothing copies again, and its one
 safe use after writes since the cutover, a source side gone for good in an
-md-raid1 group, followed by the leg's repair, are `architecture.md`,
-Migrations.
+md-raid1 group whose other leg md holds in sync, before the copy is whole,
+followed by the leg's repair, are `architecture.md`, Migrations.
 `migr get` prints the record
 as stored, its `cutover_pending` included (CT4), which tells whether a
 finish can succeed yet.

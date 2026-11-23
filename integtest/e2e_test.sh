@@ -28731,10 +28731,10 @@ react_fsync_kmsg() { # <tag>
 # in turn, its write to slice 0 can come late in the cut, and the pause is
 # logged, not asserted. How the step goes on after a cut is decided by
 # react_gcut_back's read of the pool, on the primary of that moment. A cut
-# that leaves the slice's pool needs_check stops the step, as no step of dnv
+# that leaves the slice's pool needs_check stops the step, as no flow of dnv
 # repairs it (scope.md's entry "A thin pool whose metadata needs a check, or
-# with corrupt metadata, has no repair path"), and the case's status check
-# then allows that one pool row (case_status_check); a cut that leaves the
+# with corrupt metadata, has no repair flow in dnv"), and the case's status
+# check then allows that one pool row (case_status_check); a cut that leaves the
 # pool in any other state but OK stops it too, and the status check judges the
 # pool. The meta groups stay out: a cut whose data legs share a disk node with
 # a meta group's leg is not made, and the step stops cutting there. The case
@@ -32632,7 +32632,7 @@ up_c_broken() { # <cntlr id>
 up_restore() {
 	local v k out line id max
 
-	stage 15 "restore: the worker, the cdc and the gateway stop; etcd restored into a new data directory and started; the gateway"
+	stage 15 "restore: the worker, the cdc, the gateway and etcd stop; etcd restored into its data directory, the old one moved aside, and started; the gateway"
 	stop_proc "$CP" worker || die "the worker did not stop"
 	stop_proc "$CP" cdc || die "the cdc did not stop"
 	stop_proc "$CP" gateway || die "the gateway did not stop"

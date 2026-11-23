@@ -1601,18 +1601,18 @@ sides, the one check that shows a failover by a worker left running, and
 host0 reads A's pattern back; the writer's whole range then reads back with
 fio's verify, and neither host's kernel log reports a failed IO. The restore
 runs the steps of `architecture.md`, etcd backup and restore, with the new
-programs: the worker, the cdc and the gateway stop; etcd's restore tool writes
-the backup into a new data directory, where etcd starts as the suite starts
-it; the gateway answers, read through the list of clusters alone, one of the
-two calls the procedure allows before the id step, the other the list of
-workers; the id step runs; the gateway serves A
-and C and not B; the restore check of every controller node reads A older
-with no lost and no returning thin device and its highest held revision one
-above the restored one, since the new worker sets the array flag of A's
-groups once after the upgrade, a write the backup lacks (`architecture.md`,
-Upgrade in lockstep), B new with both its thin devices lost, and C may
-break; while
-no worker runs and before any store is cleared, host1 reads B's whole range
+programs: the worker, the cdc, the gateway and etcd stop; etcd's restore tool
+writes the backup into etcd's data directory, the old one moved aside, and
+etcd starts on it as the suite starts it; the gateway answers, read through
+the list of clusters alone, one of the two calls the procedure allows before
+the id step, the other the list of workers; the id step runs; the gateway
+serves A and C and not B; the restore check of every controller node reads
+A older with no lost and no returning thin device and its highest held
+revision one above the restored one, since the new worker sets the array
+flag of A's groups once after the upgrade, a write the backup lacks
+(`architecture.md`, Upgrade in lockstep), B new with both its thin devices
+lost, and C may break; while no worker runs and before any store is
+cleared, host1 reads B's whole range
 back and host0 A's pattern; every agent stops, its local store is set aside
 and deleted, and it starts again; the worker and the cdc start, and a new
 backup is taken. Then a new pool D takes an sp id above B's and comes up

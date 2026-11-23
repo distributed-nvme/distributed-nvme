@@ -30,12 +30,12 @@ read what.
   loss it accepts, what it does not do, and every known limit of dnv beyond
   the test suites and the enforced sizes, with its state.
 - [`doc/human/operations.md`](doc/human/operations.md) — the procedures an
-  operator follows by hand, each with the steps that can lose data and the
-  test that checked it, or a note that none did: first how to read what is
-  wrong across a cluster, then the forced-start guide, which brings back a
-  group whose every leg failed, and the procedures for nodes, the
-  networks, pools, volumes, the control plane, Kubernetes and hosts,
-  listed by subject at its top.
+  operator follows by hand, each with the steps that can lose data where
+  there are any, and the test that checked it, or a note that none did:
+  first how to read what is wrong across a cluster, then the forced-start
+  guide, which brings back a group whose every leg failed, and the
+  procedures for nodes, the networks, pools, volumes, the control plane,
+  Kubernetes and hosts, listed by subject at its top.
 - [`doc/human/tutorial_all_in_one.md`](doc/human/tutorial_all_in_one.md) — dnv
   on one machine, run from its binaries: the whole system, then a host
   connected to a volume with nvme-stas, every command complete.

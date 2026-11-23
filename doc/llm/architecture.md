@@ -555,9 +555,10 @@ Per DN, once (created by the dn agent at the first `SyncupDn`):
    CM2, SH6). Agents that keep the default id co-own the default port
    instead, which is what lets a dn and a cn agent on one node share one
    port: `EnsurePort` is probe-first and writes only what differs
-   (`dnagent.md` SH19). On a node that hosts reach, the two take ports of
-   their own instead ([D19]). Sharing a kernel also carries one placement
-   rule — the `SideToCnNqn` note under **Per side** below.
+   (`dnagent.md` SH19). A deployment gives the two ports of their own
+   instead: hosts reach every controller node's port, and a shared one
+   would export the sides on it ([D19]). Sharing a kernel also carries one
+   placement rule — the `SideToCnNqn` note under **Per side** below.
 
 Per **side** (one per hosted leg replica):
 
@@ -717,8 +718,9 @@ Per CN, once (created by the cn agent at the first `SyncupCn`):
    a disk node the port is one per **agent**, at the configfs id
    `NvmetPortId` unless `--nvmet-port-id` says otherwise
    (`dnagent.md` CM2); a cn agent that keeps the default co-owns the
-   default port with a dn agent on the same node, which a node that hosts
-   reach does not do ([D19]). Unlike the dn case,
+   default port with a dn agent on the same node, which a deployment never
+   does, since hosts reach every controller node's port ([D19]). Unlike
+   the dn case,
    distinct port ids do **not** make two cn agents on one kernel safe, so
    run at most one: the host-facing subsystem NQN is the one the user
    passed to `CreateSubsystem` and every cntlr of that SP exports it
@@ -2618,8 +2620,10 @@ rest. A pool's rows are:
   call; a stored conf the sp worker refuses, a `bdev_conf` the readers
   refuse or a group whose counts give its sides no length to zero
   (`dnv-worker.md` AR1); a level above read-write;
-  a disabled primary, and none of its cntlrs enabled, which no failover
-  can follow;
+  a disabled primary, whose row adds that no failover follows while none
+  of its cntlrs is enabled, or while the pool's level is one at which the
+  worker runs no reaction, `SP_LEVEL_NO_THINPOOL` and above
+  (`dnv-worker.md` AR3);
 * a slice's thin pool whose row reads OK and whose status line says it is
   out of data space, or read-only without needs_check, that is out of
   metadata space, whatever its grow;
@@ -2860,8 +2864,9 @@ names the node, so the agent refuses the disk as a foreign one under any
 new node id (`dnagent.md` DN5). To add the disk again, once no side device
 or clone-metadata wrapper maps it (`dnagent.md` DN5), in this order: stop
 the agent, zero the disk's header block, delete the dn agent's files of
-its local store (the dn kinds of `agent/store.go`: `dn-`, `side-`,
-`migr-bm-`, `probe-dn-`), never the files of a cn agent that shares the
+its local store (the dn kinds `StoreKindDn`, `StoreKindSide`,
+`StoreKindMigrBm` and `StoreKindDnProbe`, `dnagent.md` SH6), never the
+files of a cn agent that shares the
 folder (`dnagent.md` CM2), start the agent, and create the node (etcd
 backup and restore; `operations.md`, Reuse a disk from an old node). An
 agent started with the old store would format the blank disk under the old node id
@@ -4291,8 +4296,9 @@ destination began to serve reads the source's old extent bytes, possibly
 another pool's. In a group with more than one leg the other legs hold those
 writes, but md does not know this leg is behind, and reads can return its
 old bytes; nothing copies the leg again, since the cancel marks nothing on
-it: a member md holds in sync stays so, one md failed in the switch is put
-back by a re-add that md resyncs from its write-intent bitmap (`cnagent.md`
+it: a member md holds in sync stays so, one md failed while the leg went
+back to the source is put back by a re-add that md resyncs from its
+write-intent bitmap (`cnagent.md`
 CN12), which marks what was written while it was out and none of what the
 destination took, and
 `CreateRepair` refuses a leg with no `err_epoch` (Repairs). The gateway
@@ -4301,7 +4307,9 @@ and the flag is in etcd and exact, so it refuses from the cutover on;
 `force` is the operator's way out and costs what this paragraph says. A
 forced cancel with no write since the cutover loses nothing. After writes,
 its one safe end is in an md-raid1 group whose other leg md holds in sync,
-where the source side is gone for good: the leg then keeps no side that
+where the source side is gone for good before the copy is whole (a whole
+copy is finished unforced instead, as `FinishMigration` asks only the
+destination's agent for its proof): the leg then keeps no side that
 serves, md fails its member, and a repair replaces it with a fresh leg md
 copies whole (Repair), as a forced finish does where the destination is
 gone (`operations.md`, Ending a migration with force). Action: the
@@ -7300,17 +7308,28 @@ Setup for moving a subsystem and namespace from sp1 to sp2:
   slots (cntlid slots). If they do not, rotate a cntlr: `CreateCntlr`
   first, with a slot of its SP's list that neither SP uses, which
   `UpdateStoragePoolCntlidSlotList` adds to the list first when the list
-  holds none; then, once it is built, `UpdateCntlrEnabled` to disabled on
-  the old cntlr, and `DeleteCntlr` once another cntlr holds the primary
-  role, so that the SP keeps its cntlr count and a cntlr that can take the
-  role back until the new one serves (`operations.md`, Replace a cntlr by
-  hand). An SP below `MaxCntlrCntPerSp` cntlrs always finds such a slot,
-  as the two SPs' cntlrs then use fewer than `CnCntlidSlotCnt` slots. Only
-  an SP at `MaxCntlrCntPerSp` cntlrs, where `CreateCntlr` refuses one more,
-  deletes first; its new cntlr then takes a slot neither SP uses, the old
-  one's own when the two SPs' cntlrs filled every slot. Likewise the two
-  SPs' cntlrs must not share CNs; rotate the same way if they do, the new
-  cntlr's `cn_selector` black-listing the other SP's CNs.
+  holds none, and a `cn_selector` that black-lists the other SP's CNs
+  (the CN rule below); then, once it is built, `UpdateCntlrEnabled` to
+  disabled on the old cntlr, and `DeleteCntlr` once another cntlr holds
+  the primary role, so that the SP keeps its cntlr count and a cntlr that
+  can take the role back until the new one serves (`operations.md`,
+  Replace a cntlr by hand). An SP below `MaxCntlrCntPerSp` cntlrs always
+  finds such a slot, as the two SPs' cntlrs then use fewer than
+  `CnCntlidSlotCnt` slots, but not always a CN: the new cntlr needs an
+  eligible CN that holds no cntlr of either SP (Finding CN candidates; the
+  CN rule below). An SP at `MaxCntlrCntPerSp` cntlrs, where `CreateCntlr`
+  refuses one more, deletes first, and so does an SP whose slot rotation
+  finds no eligible CN, unless a CN is added first: the delete takes the
+  SP off the old cntlr's CN and gives that CN the footprint back, which
+  makes the CN eligible only when it holds no cntlr of the other SP (the
+  CN rule below). Deleting first needs another enabled cntlr to hold the
+  primary role, and the SP keeps one cntlr fewer meanwhile. Its new cntlr
+  then takes a slot neither SP uses. Likewise the two SPs' cntlrs must not
+  share CNs; rotate the same way if they do, the new cntlr taking the old
+  one's own slot when the two SPs' cntlrs fill every slot, since both SPs
+  then hold `MaxCntlrCntPerSp` cntlrs and the rotation deletes first; add
+  a CN first when none is eligible, since the old cntlr's CN holds a cntlr
+  of the other SP and so stays black-listed after a delete.
 * Ensure `Namespace.suspended` false on sp1 and true on sp2 (create the
   sp2 namespace with `CreateNamespace` and `suspended` true, or
   `UpdateNamespaceSuspended` on an existing one).
@@ -8148,11 +8167,17 @@ node's reads turns them on in the running process, with no restart.
   (`agent.HostCutCauses`), and with which it runs there without the cut of
   a removed host's nvmet connection (Primary cntlr, step 6; `cnagent.md`
   CN-CM1, CN-CM2). A node may run a dn agent and a cn agent side by
-  side: the pair co-owns one nvmet port at the default port id, with
-  identical transport flags, unless hosts reach the node, where each takes
-  a port of its own ([D19]), and both use the default local-store prefix,
-  since the two roles' store kinds are disjoint
-  (Disk node; Controller node, common; `dnagent.md` CM2). Several agents on
+  side: the pair may co-own one nvmet port at the default port id, with
+  identical transport flags, only where every host that can reach the node
+  may read and write the raw legs, as in the cn suite
+  (`cnagent_integtest.md`, Topology), since hosts reach the cn agent's port
+  and a co-owned one exports the sides on it to any host that claims a
+  `CnHostNqn`, so a deployment gives each a port of its own ([D19]); and
+  the pair may share the default local-store prefix, since the two roles'
+  store kinds are disjoint
+  (Disk node; Controller node, common; `dnagent.md` CM2); the install
+  kit's config examples give the two ports of their own, and its units give
+  each dn instance a store of its own (below). Several agents on
   one kernel need more than distinct port ids (`dnagent.md` CM2), and two
   cn agents on one kernel are never safe (Controller node, common). Each
   agent caps the IO queues of the subsystems it links to its port, when its
@@ -8307,7 +8332,13 @@ units assume:
   the network is up. A daemon that exits with an error is started again: an
   agent or a gateway whose listener cannot open on an address the machine
   does not hold yet, or a cn agent its start check refused. A port an agent
-  cannot build is a row of its report and leaves the agent running.
+  cannot build is a row of its report and leaves the agent running. The
+  start comes after a wait that keeps a daemon which fails again and again
+  within systemd's default start limit, past which systemd starts it no
+  more. The cost: the wait is longer than a controller node that holds a
+  primary may stay stopped (`operations.md`, A planned restart of an
+  agent), so after a crash of a cn agent each primary on its node can fail
+  over where its pool has a standby (`dnv-worker.md` AR5).
 * The unit of each dn instance names the instance's own local store, a
   folder outside the default store, which the unit makes; the cn agent's
   store is the default. Reason: two agents of one role that share a store
@@ -8380,10 +8411,13 @@ IO waits (`dnv-worker.md` HL8, AR10), an accepted limit of `scope.md`. An
 agent left off stays stopped after a reboot until the operator starts it,
 and the worker reacts at the pools' thresholds as to a failed node: on a
 controller node, it fails over each primary whose pool has a standby and
-replaces the node's cntlrs (`dnv-worker.md` AR5, AR7); on a disk node, it
-repairs each leg the node's sides hold onto another disk node, a copy of
-the whole leg (`dnv-worker.md` AR8). A disk node holds no primary, so its
-agent's start at boot delays no failover.
+replaces the node's cntlrs (`dnv-worker.md` AR5, AR7); on a disk node, in
+a pool with RAID1, it repairs each leg the node's sides hold onto another
+disk node, a copy of the whole leg, where the leg's group keeps another
+healthy leg (`dnv-worker.md` AR8). In a pool without RAID no reaction
+replaces the leg, and the IO of each group with a leg on the node fails
+while the agent is off. A disk node holds no primary, so its agent's start
+at boot delays no failover.
 
 ## Recorded design decisions
 
@@ -8958,13 +8992,15 @@ document and the component documents cite it by its id.
   networks the routing table picks the network, and since Linux takes a
   packet for any local address on any interface, a listener bound to a
   back address answers a packet that arrives on the host interface: such
-  a machine filters its input by interface. A control-plane server that
-  runs the cdc beside the gateway or etcd sits on both networks
-  (`cdc.md`, `cmd/dnv-cdc`). A node that hosts reach and that runs a dn
-  and a cn agent gives each its own nvmet port, a distinct
-  `--nvmet-port-id` and transport address (`dnagent.md` CM2), since the
-  default port they would co-own (Disk node) exports the sides on the
-  address hosts reach. The CSI controller plugin's machine is on the
+  a machine filters its input by interface, and forwards nothing from the
+  host network to the back network, which no host may route to. The
+  hosts dial the cdc and the cdc dials etcd, so every machine that runs
+  the cdc, alone or beside the gateway or etcd, is on both networks
+  (`cdc.md`, `cmd/dnv-cdc`). A node that runs a dn and a cn agent gives
+  each its own nvmet port, a distinct `--nvmet-port-id` and transport
+  address (`dnagent.md` CM2), since hosts reach the cn agent's port, and
+  the default port the two would co-own (Disk node) exports the sides on
+  that address. The CSI controller plugin's machine is on the
   control network, since it dials the gateway (`csi.md` CSI7). In
   Kubernetes the hosts are nodes, and the example network policy is what
   keeps a tenant's pod off dnv (`csi.md` CSI20): where the cluster's
@@ -9323,7 +9359,8 @@ document and only pointed to here.
   belong on a back network that hosts cannot route to, and a deployment
   keeps hosts off them by its network and its firewall alone ([D19]). Root
   on a host can claim any host NQN, so the allow-lists bind no one who
-  holds a host, and the promise needs hosts on which no tenant has root.
+  holds a host; the promise does not cover that, so keeping tenants apart
+  also needs hosts on which no tenant has root.
 * **In a Kubernetes cluster every pod reaches dnv's ports unless the
   operator blocks it** (`csi.md`, Deployment): the trust in the network
   above is then trust in every pod of the cluster. The example network
@@ -10024,11 +10061,11 @@ document and only pointed to here.
   A stop of the twin is no way out: a node of the Kubernetes driver holds
   every drop while a cdc of its list cannot be read (`csi.md` CSI15), and
   nvme-stas hosts keep the device of every subsystem they use while every
-  cdc is down for a few seconds and is started again (the cdc suite's ha
-  case, `integtest/cdc_test.sh`), so a stop does not make nvme-stas drop a
-  path at once; how long it keeps the log of a discovery controller it
-  cannot reach is not known. The operator's steps are `operations.md`, A
-  host that keeps a withdrawn path.
+  cdc is killed, down for a few seconds and started again (the cdc suite's
+  ha case: `cdc.md`, Integration test plan), so a stop does not make
+  nvme-stas drop a path at once; how long it keeps the log of a discovery
+  controller it cannot reach is not known. The operator's steps are
+  `operations.md`, A host that keeps a withdrawn path.
 * **An nvme-stas host drops every path stacd made when stafd stays
   away.** stacd reads a stafd it cannot reach as an empty discovery log,
   and its start, or its next reconfiguration — the pass in which it
@@ -10188,15 +10225,18 @@ document and only pointed to here.
   whose connect never gives up (`csi.md` CSI14). The way out is the
   operator's: disabling the primary starts a failover with no threshold wait
   where an enabled standby with a zero health epoch exists (`dnv-worker.md`
-  AR5), after the operator has disabled each such standby the hosts cannot
-  reach, since that rule takes the smallest such `cntlr_id` whatever the
-  hosts see and a standby's disable starts no failover; the operator
-  enables each disabled cntlr again once hosts reach it, since a disabled
-  cntlr is never a candidate and an enabled one is; with no such
-  standby a disable starts no failover and takes the primary out of the
-  discovery records (Cntlrs), so a host that follows the log drops its last
-  path (`csi.md`, The node plugin; `operations.md`, A fault only a host
-  sees).
+  AR5). Since that rule takes the smallest such `cntlr_id` whatever the
+  hosts see, and a standby's disable starts no failover, the operator first
+  disables each such standby that a host using the pool cannot reach, and
+  disables the primary only while such a standby that every such host
+  reaches is left; the operator enables each disabled cntlr again once
+  every such host reaches it, since a disabled cntlr is never a candidate
+  and an enabled one is. With no such standby a disable starts no failover
+  and takes the primary out of the discovery records (Cntlrs), so a host
+  that follows the log drops its last path. So where none that every such
+  host reaches is left, the operator disables nothing more and enables
+  again each standby it disabled (`csi.md`, The node plugin;
+  `operations.md`, A fault only a host sees).
 * **An old primary that cannot apply its demotion within the demotion
   hold fails IO from the fence.** An agent whose demotion waits behind a
   slow converge for the cntlr's locks (`cnagent.md` CN1; the head-of-line
@@ -10321,22 +10361,47 @@ document and only pointed to here.
   (Clones), so only a forced delete of a clone still copying can see IO
   errors on its destination until the primary's next converge removes the
   dm-clone.
-* **A migrating leg whose serving side dies waits without limit where
-  nothing else of its group is in sync, and one whose destination dies
+* **A migrating leg whose serving side dies waits where nothing else of
+  its group is in sync, without limit in a `RedundNone` group or after a
+  cutover whose copy is not whole, and one whose destination dies
   after the cutover, before its copy is whole, keeps its group one leg
-  short** (`cnagent.md` CN10; `dnv-worker.md` AR8 and Known limits). In an
+  short where md holds another member in sync** (`cnagent.md` CN10;
+  `dnv-worker.md` AR8 and Known limits). In an
   md-raid1 group where md holds another member in sync, the primary cuts
   the leg's other path (`cnagent.md` CN10), so md fails the member and the
   group serves on its other legs. Where it does not cut — a `RedundNone`
   group, which leg repair never touches (`dnv-worker.md` AR9), or one with
   no other member in sync — a write to the leg waits on the live
-  inaccessible path until the serving side returns, on a kernel that
-  counts such a path (`cnagent.md` CN10). When the destination dies after
+  inaccessible path, on a kernel that counts such a path (`cnagent.md`
+  CN10): in a `RedundNone` group until the serving side returns; in an
+  md-raid1 group until then or until leg repair ends the migration
+  (`dnv-worker.md` AR8), save after a cutover whose copy is not shown
+  whole, which it does not end. That end keeps the serving side, so the
+  path to the side that leaves goes, as that side's disk node removes its
+  export (`dnagent.md` DN6) and the CN disconnects it (`cnagent.md`,
+  `NvmeHost.DisconnectDevice`), and the write fails on the array's last
+  member in sync: md marks the array broken (`cnagent.md` CN29), the
+  primary's row of the group reads `ERROR`, the worker fails the primary
+  over where it has a candidate (`dnv-worker.md` HL2, AR5), a pool with
+  none waiting for the cntlr replacement (`dnv-worker.md` AR7), and the
+  group waits for that side or a forced start, the gate on the group's
+  row, and then its healthy-leg test, holding its repair (`dnv-worker.md`
+  AR8). Leg repair acts only
+  once the primary has reported the leg's stalled probe (`cnagent.md`
+  CN11; `dnv-worker.md` HL2), and a read whose status read of the slice's
+  pool waits behind a commit that waits on the leg reports nothing and
+  holds the cntlr's lock (`cnagent.md` CN10, CN28; `dnagent.md` SH17): on
+  a pool that commits while the write waits, in either kind of group, the
+  primary's observation grows too old (`dnv-worker.md` HL7) and the
+  worker can fail it over first (`dnv-worker.md` AR5). No run covers a
+  migrating leg with no other member in sync. When the destination dies
+  after
   the cutover, before its copy is whole, neither side alone is the leg:
   the source misses the writes since the cutover, and the destination the
   blocks not yet copied, which hold old bytes on its disk. The worker
   neither cancels nor finishes, and logs why; the group stays one leg
-  short until both sides answer and the primary puts the leg back, the
+  short, or, with no other member in sync, its writes to the leg wait,
+  until both sides answer and the primary puts the leg back, the
   copy then going on to its end (`cnagent.md` CN12), or until an operator
   ends the migration, whose `force` costs what `CancelMigration` and
   `FinishMigration` say (Migrations): where one side is gone for good, the

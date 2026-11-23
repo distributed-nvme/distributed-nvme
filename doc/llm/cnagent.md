@@ -1330,7 +1330,16 @@ member of the group in sync, read from sysfs just before it
 (`otherMemberInSync`): md fails the cut leg's member, and with no other
 member in sync the cut would end the wait in an IO error on the array's
 last member, where waiting lets the write complete once the disk node
-returns. Not on a standby, which holds no array, so
+returns, unless leg repair ends the migration first (`dnv-worker.md`
+AR8): that end keeps the serving side, so the path to the side that
+leaves goes, by its disk node's removal of the export or the converge's
+disconnect (`NvmeHost.DisconnectDevice`), and the write fails then, as
+the cut would have, and md marks the array broken (CN29); after a
+cutover whose copy is not whole it ends nothing, and the write waits on.
+Leg repair acts only once the primary reports the leg's stalled probe
+(CN11), which a read whose status read waits behind a commit of the
+slice's pool that waits on the leg does not report (`architecture.md`,
+Known limits). Not on a standby, which holds no array, so
 nothing of it waits, and whose two paths keep it ready for a promotion;
 not for a group that is not md-raid1, which has no other leg to take the
 write, so a cut would turn the wait into IO errors to the hosts; not while

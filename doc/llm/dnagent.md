@@ -3914,9 +3914,10 @@ held. The rule:
   name the row (DN16), and no re-send repeats a converge that cannot cure
   it. While the copy does not show whole only an operator ends the
   migration, at what a forced end costs (`architecture.md`, Migrations;
-  `operations.md`, Ending a migration with force): leg repair ends a bad
-  leg's migration after the cutover only once its copy shows whole, and
-  then replaces the leg (`dnv-worker.md` AR8);
+  `operations.md`, Ending a migration with force): in a pool with RAID1,
+  leg repair ends a bad leg's migration after the cutover only once its
+  copy shows whole, and then replaces the leg where another leg of its
+  group is in sync with a zero `err_epoch` (`dnv-worker.md` AR8);
 * both rows carry the reason `RES_REASON_AWAITING_CUTOVER` while they read
   the wait for the cutover, and no reason in any other state;
 * the per-CN rows are judged where the rule puts the stacks (above), and,

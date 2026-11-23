@@ -19,11 +19,13 @@
 # at a reboot, under /dev/disk/by-id/, not as /dev/nvme1n1 or /dev/sdb.
 disk: /dev/disk/by-id/your-disk
 # The address and port the agent listens on for the gateway and the worker,
-# which "dnvctl dn create --addr" names.
+# which "dnvctl dn create --addr" names: an address on the back network,
+# which hosts must not reach (architecture.md [D19]; the operations doc's
+# "The networks").
 grpc-address: 192.0.2.21:29900
 # The NVMe/TCP port the controller nodes connect to, and another disk node
 # for a migration, which "dnvctl dn create" repeats with --tr-addr and
-# --tr-svc-id: an address of this machine.
+# --tr-svc-id: an address of this machine on the back network too.
 tr-type: tcp
 adr-fam: ipv4
 tr-addr: 192.0.2.21

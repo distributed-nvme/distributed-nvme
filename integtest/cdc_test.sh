@@ -1860,9 +1860,10 @@ wipe)
 	;;
 wipe_data)
 	# Data connections only. Never touch the discovery controllers while
-	# stafd owns them: it treats one disconnected behind its back as gone
-	# for good and does not re-create it, so the host silently stops
-	# receiving AENs for the rest of the run.
+	# stafd owns them: it connects one disconnected behind its back again
+	# only at its next retry, most often a minute later
+	# (Controller._on_ctrl_removed in nvme-stas 2.4.1), so the host
+	# silently misses that cdc's AENs until then.
 	uev_stop
 	flood_stop
 	disconnect_test_subsystems
@@ -2386,8 +2387,10 @@ case_reset() { # <case>
 		if [ "$STAS_RUNNING" = 1 ]; then
 			# stafd owns the discovery connections here; the fleet restart
 			# above already broke and let it re-establish them, and taking
-			# them down a second time behind its back is not something it
-			# recovers from.
+			# them down a second time behind its back would leave the host
+			# without them until stafd's next retry, most often a minute
+			# later (Controller._on_ctrl_removed in nvme-stas 2.4.1), and
+			# the case would miss that cdc's AENs until then.
 			host_wipe_data "$hostsel"
 		else
 			host_wipe "$hostsel"
