@@ -1818,8 +1818,10 @@ failover's among them.
   other side, and the waiting IO fails. md then marks the group's array
   broken, since that leg was its last member in sync, and the broken
   array makes the worker fail the pool over where the pool has an enabled
-  standby with no health epoch, a pause for every volume of the pool; a
-  pool of one cntlr waits for the cntlr replacement. No repair follows,
+  standby with no health epoch whose agent does not refuse the worker's
+  syncups, a pause for every volume of the pool; a pool with no such
+  standby, such as a pool of one cntlr, waits for the cntlr replacement.
+  No repair follows,
   since no other leg of the group is in
   sync: the group waits until the primary reaches that disk node again,
   or for a forced start, and a broken data group can leave the thin pool

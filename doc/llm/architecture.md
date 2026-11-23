@@ -10384,9 +10384,9 @@ document and only pointed to here.
   primary's row of the group reads `ERROR`, the worker fails the primary
   over where it has a candidate (`dnv-worker.md` HL2, AR5), a pool with
   none waiting for the cntlr replacement (`dnv-worker.md` AR7), and the
-  group waits for that side or a forced start, the gate on the group's
-  row, and then its healthy-leg test, holding its repair (`dnv-worker.md`
-  AR8). Leg repair acts only
+  group waits for that side or a forced start, leg repair's gate on the
+  group's row, and then its healthy-leg test, holding the group's repair
+  (`dnv-worker.md` AR8). Leg repair acts only
   once the primary has reported the leg's stalled probe (`cnagent.md`
   CN11; `dnv-worker.md` HL2), and a read whose status read of the slice's
   pool waits behind a commit that waits on the leg reports nothing and

@@ -1718,9 +1718,13 @@ Safe steps:
    `settling` true a minute after it became primary, enable the disabled
    cntlr again at once, with step 8's command. If another cntlr became
    primary, wait until `dnvctl sp get` shows the cntlr you enabled with
-   `err_epoch` 0, and then disable the new primary with the same command
-   as above, so that the worker moves the role back at once and the pool
-   gets its IO back. Then ask for help. If the pool has no enabled standby
+   `err_epoch` 0 and, on each host that uses the pool, `nvme list-subsys`
+   shows the path to it `live`; only then disable the new primary with
+   the same command as above, so that the worker moves the role back at
+   once and the pool gets its IO back. That disable takes the new primary
+   out of the cdc's records, so a host that follows the discovery log and
+   has no other `live` path can drop its last path (Steps that can lose
+   data). Then ask for help. If the pool has no enabled standby
    with no health epoch, do not disable the primary: that stops the pool's
    IO, and no other cntlr becomes primary. In such a pool a stop of any
    length fails the primary over only if an enabled standby with no health
@@ -1758,7 +1762,10 @@ the worker can then replace the primary while its kernel objects still
 serve. Step 3 avoids the first case: the worker gives the disabled primary its
 demotion first, and waits up to three seconds for it to report the
 demotion done before the other cntlr serves. An agent that runs reports
-it well inside that time.
+it well inside that time. In step 3, a disable of the new primary before
+each host shows its path to the cntlr you enabled `live` can lose data
+too: the cdc stops listing the new primary, so a host that follows the
+discovery log can drop its last path, and writes not yet flushed are lost.
 
 Stop and ask for help when the agent's log shows `agent reconcile failed`,
 when the agent exits on its own, when no other cntlr becomes primary after
@@ -2021,8 +2028,9 @@ default, or its `side_unhealthy`, 600 seconds, when the worker's checks
 of that disk node fail too. That end keeps the side on the cut disk node,
 and the IO then fails. md then marks the group's array broken, and the
 worker fails the pool over where the pool has an enabled standby with no
-health epoch; a pool of one cntlr waits for the cntlr replacement. In both
-kinds of pool, the worker can also
+health epoch whose agent does not refuse the worker's syncups; a pool
+with no such standby, such as a pool of one cntlr, waits for the cntlr
+replacement. In both kinds of pool, the worker can also
 fail the pool over sooner, while the IO waits ([the scope page, section
 8](scope.md#8-waits-a-host-can-see)).
 The IO to such a leg also fails when the migration's two disk nodes are
@@ -5653,10 +5661,11 @@ repair after the pool's `side_unhealthy`, 600 seconds at the default.
 Either end, step 3's or leg repair's, keeps the side on the dead node
 when that side serves, and the IO then fails. md then marks the group's
 array broken, the worker fails the pool over where the pool has an
-enabled standby with no health epoch (a pool of one cntlr waits for the
-cntlr replacement), and the group waits for the node or a forced start,
-since no other leg
-of it is in sync. In both kinds of pool, the worker can also fail the
+enabled standby with no health epoch whose agent does not refuse the
+worker's syncups (a pool with no such standby, such as a pool of one
+cntlr, waits for the cntlr replacement), and the group waits for the
+node or a forced start, since no other leg of it is in sync. In both
+kinds of pool, the worker can also fail the
 pool over sooner, while the IO waits ([the scope page, section
 8](scope.md#8-waits-a-host-can-see)).
 
@@ -8527,9 +8536,7 @@ Safe steps:
 5. Repair the network between the hosts and the old primary's controller
    node, and the controller nodes of the cntlrs step 1 disabled.
 6. For the old cntlr, and for each cntlr step 1 disabled, check that the
-   hosts reach its controller node again; leave a new primary that step 3
-   disabled as it is, and ask for help about it. `nvme list-subsys` cannot
-   show
+   hosts reach its controller node again. `nvme list-subsys` cannot show
    this: the cdc does not list a disabled cntlr, so a host that follows the
    discovery log has dropped its path to it. Instead, on each host that
    uses the pool, `timeout 3 bash -c '</dev/tcp/<tr_addr>/<tr_svc_id>' && echo open`
@@ -8543,7 +8550,8 @@ Safe steps:
    disabled it is no standby: in a pool of two cntlrs, no cntlr can take over
    from the new primary. Do not enable it while the hosts cannot reach it: an
    enabled cntlr is a candidate for the next failover, and a failover to it
-   brings the fault back.
+   brings the fault back. Leave a new primary that step 3 disabled as it
+   is, and ask for help about it.
 7. Check that `dnvctl sp get` shows each cntlr you disabled in steps 1 and
    2 with `disabled` false. Nothing else reminds you of it: the status read
    never says that a
