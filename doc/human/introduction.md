@@ -576,6 +576,20 @@ limit of dnv, with its state and what you can do about it; the sizes
 below and the limits of the test suites are not in it. Read it before you
 deploy dnv.
 
+An fsync across the death of a primary is no guarantee today. A write to
+a block that a volume never wrote before is recorded in its slice's thin
+pool at the thin pool's next commit, which comes at a flush or about once
+a second. When the primary dies while a host's fsync waits for that
+commit, the host's kernel can complete the fsync as a success, and those
+writes are gone after the failover. dnv's own programs cannot fix this:
+the fix waits for a kernel whose thin pool has an option that holds such a
+write back until the commit, and for dnv to use that option. After a
+failover a host can also send no flush at all until it reads the new
+primary's path again, so that an fsync makes nothing durable. [The scope
+page](scope.md#51-hosts-flushes-and-snapshots) has both cases, beside the
+other cases of hosts and flushes; its sections 4 and 5 list every known
+way to lose a completed write.
+
 0.1 publishes no throughput or latency figures. The failover pause was
 measured on the lab VMs as the longest write queued through a failover of a
 primary whose agent is stopped while its kernel goes on serving. The figure

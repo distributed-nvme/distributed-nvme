@@ -384,8 +384,11 @@ the host.
   has nothing to retry. A later flush goes to the new primary, which
   commits nothing of the dead one's. The fsync returns success and the
   writes are gone. A plain PCIe disk never takes this path. dnv's own
-  programs cannot fix this. State: fix later; a change inside dm-thin is
-  under test. Read from the kernel's code, and seen in the lab once. The
+  programs cannot fix this. State: fix later; it waits for a kernel whose
+  thin pool has an option that holds a write back until the pool's commit,
+  which dnv will use once kernels carry it. Until then an fsync across the
+  death of a primary is no guarantee. Read from the kernel's code, and seen
+  in the lab once. The
   end-to-end suite resets the primary's machine while a host writes 4 KiB
   to new blocks from four jobs, each write followed by an fsync, and reads
   every block back after the failover. It has run this four times at one
