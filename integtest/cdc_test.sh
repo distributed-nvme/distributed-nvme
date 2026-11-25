@@ -11,7 +11,7 @@
 #
 # Cases (Integration test plan, Cases), in order, each in its own cluster ids
 # and each after a fleet restart and a `cdcctl wipe`: smoke, matrix, lowlevel,
-# flood, manyhosts, stas, ha. Cleanup runs unconditionally at the start and,
+# flood, manyhosts, stas, ha, outage. Cleanup runs unconditionally at the start and,
 # on success only, at the end: a failing run leaves etcd's data, every cdc
 # log, the nvmet/dm state and the host connections in place and dumps the
 # diagnostics (Integration test plan, Cleanup).
@@ -123,6 +123,18 @@ WAIT_CONN=20
 WAIT_STAS=30
 # How long a "nothing must happen" assertion settles for before it is checked.
 SETTLE=3
+# The outage case keeps every cdc down this long, past the 600 seconds after
+# which the kernel gives up a host's lost connection to a cdc at its default
+# ctrl_loss_tmo, and probes the host every OUTAGE_PROBE seconds meanwhile.
+OUTAGE_SECS=900
+OUTAGE_PROBE=30
+# From OUTAGE_GIVEUP seconds into the outage, the kernel must have given up
+# every host's discovery controller to the fleet: ctrl_loss_tmo's 600 plus a
+# reconnect delay and a margin. Once the fleet is back, stafd connects again
+# only at its own retry, 60 s after the kernel gave a controller up and every
+# 60 s from then, so the hosts' reconnects get OUTAGE_RECONNECT seconds.
+OUTAGE_GIVEUP=690
+OUTAGE_RECONNECT=120
 # The flood case opens twice the pending cap and FLOOD_EXTRA more: the
 # connections past the first wave wait in cdc0's listen backlog from the
 # start, and FLOOD_EXTRA of them still wait there once the second wave holds
@@ -179,12 +191,12 @@ declare -A E_SS=(
 # (M -> 0x1cdc2).
 declare -A CASE_CID=(
 	[smoke]=0xcdc1 [matrix]=0xcdc2 [lowlevel]=0xcdc3 [stas]=0xcdc4 [ha]=0xcdc5
-	[flood]=0xcdc6 [manyhosts]=0xcdc7
+	[flood]=0xcdc6 [manyhosts]=0xcdc7 [outage]=0xcdc8
 )
 
 # flood and manyhosts run before stas: like lowlevel, they need the host's
 # own stas daemons stopped.
-CASES=(smoke matrix lowlevel flood manyhosts stas ha)
+CASES=(smoke matrix lowlevel flood manyhosts stas ha outage)
 
 # The uevent property the discovery-log-change AEN reaches a host as (header
 # item 1).
@@ -943,6 +955,16 @@ disc_ctrl_count() { # <h1|h2>
 		 select(.State == "live")] | length'
 }
 
+# disc_ctrl_states lists the state of every discovery controller of a host
+# that points at the cdc fleet, live or not, one per line, sorted: the
+# outage case logs how the kernel holds them while every cdc is down.
+disc_ctrl_states() { # <h1|h2>
+	subsys_json "$1" | "$JQ" -r --arg ip "$IP1" \
+		'[.[]?.Subsystems[]? |
+		 select(.NQN == "nqn.2014-08.org.nvmexpress.discovery") | .Paths[]? |
+		 select(.Address | contains("traddr=" + $ip)) | .State] | sort | .[]'
+}
+
 connect_all() { # <h1|h2> <instance>
 	h "$1" "nvme connect-all -t tcp -a $IP1 -s $(cdc_port "$2") 2>&1 || true"
 }
@@ -1272,8 +1294,13 @@ write_host_helper() { # <path>
 #                          open n idle TCP connections to one cdc instance,
 #                          held by one process, and print n once all are open
 #   flood_stop             close them
+#   writer_start <device> <limit secs>
+#                          the outage case's write loop on one device
+#   writer_stat            its "<writes that worked> <writes that failed>"
+#   writer_stop            stop it
 #
-# The uevent capture and the flood are stopped by the pid files they write in
+# The uevent capture, the flood and the writer are stopped by the pid files
+# they write in
 # the directory this helper is shipped to, the suite's work directory, so a
 # stop never signals a process of another suite or of the host itself.
 #   flood_count <work> <tcp state>
@@ -1346,6 +1373,40 @@ disconnect_discovery() {
 
 uev_stop() {
 	kill_recorded "$HERE/uev.pid" udevadm TERM
+}
+
+# The outage case's write loop (cdc.md, Integration test plan): a bash named
+# dnv-cdc-writer under its own pid, as the flood is, that writes 4 KiB with
+# fsync to a device every second and keeps "<writes that worked> <writes that
+# failed>" in writer.stat, until writer_stop or its own time limit, so a run
+# that dies leaves no writer for long. dd runs without oflag=, which the
+# lab's uutils dd mishandles, and with nocreat, so a write after the device
+# went fails instead of making a plain file at the device's path.
+writer_start() { # <device> <limit secs>
+	writer_stop
+	rm -f "$HERE/writer.stat" "$HERE/writer.stat.tmp"
+	(
+		trap '' HUP
+		exec -a dnv-cdc-writer bash -c '
+			ok=0
+			fail=0
+			end=$((SECONDS + $2))
+			while [ "$SECONDS" -lt "$end" ]; do
+				if dd if=/dev/zero of="$1" bs=4096 count=1 conv=fsync,nocreat 2>/dev/null; then
+					ok=$((ok + 1))
+				else
+					fail=$((fail + 1))
+				fi
+				echo "$ok $fail" > "$3/writer.stat.tmp" &&
+					mv "$3/writer.stat.tmp" "$3/writer.stat"
+				sleep 1
+			done' writer "$1" "$2" "$HERE"
+	) > /dev/null 2>&1 < /dev/null &
+	echo "$!" > "$HERE/writer.pid"
+}
+
+writer_stop() {
+	kill_recorded "$HERE/writer.pid" dnv-cdc-writer TERM
 }
 
 # The flood case's idle connections (cdc.md, Integration test plan). One
@@ -1854,6 +1915,7 @@ case "${1-}" in
 wipe)
 	uev_stop
 	flood_stop
+	writer_stop
 	disconnect_test_subsystems
 	disconnect_discovery "${2-}"
 	echo "cdc_host.sh: wiped"
@@ -1866,6 +1928,7 @@ wipe_data)
 	# silently misses that cdc's AENs until then.
 	uev_stop
 	flood_stop
+	writer_stop
 	disconnect_test_subsystems
 	echo "cdc_host.sh: data connections wiped"
 	;;
@@ -1896,6 +1959,15 @@ flood_stop)
 	echo "cdc_host.sh: flood stopped"
 	;;
 flood_count) flood_count "${2-}" "${3-}" ;;
+writer_start)
+	writer_start "${2-}" "${3-}"
+	echo "cdc_host.sh: writer started"
+	;;
+writer_stat) cat "$HERE/writer.stat" 2>/dev/null || true ;;
+writer_stop)
+	writer_stop
+	echo "cdc_host.sh: writer stopped"
+	;;
 many_start)
 	shift
 	many_start "$@"
@@ -1910,6 +1982,7 @@ many_state) many_state "${2-}" ;;
 		"uev_start <work> | uev_stop | stas_start <ip> <work> <p…> |" \
 		"stas_stop <work> | flood_start <ip> <port> <n> <work> |" \
 		"flood_stop | flood_count <work> <tcp state> |" \
+		"writer_start <device> <limit> | writer_stat | writer_stop |" \
 		"many_start <work> <nqn base> <n> <ip> <p…> | many_dump <work> |" \
 		"many_ctrls <ip> | many_stop <work> | many_state <work>" >&2
 	exit 2
@@ -3460,6 +3533,142 @@ ss_repointed() { # <h1|h2> <ss> <trsvcid…>
 	have_dev "$hostsel" "$ss" ||
 		die "$hostsel lost the $ss device during the re-point"
 	ss_paths_are "$@"
+}
+
+# ---------------------------------------------------------------------------
+# Case O — outage (Integration test plan, Cases)
+# ---------------------------------------------------------------------------
+
+# outage_writer_start starts h1's write loop on one subsystem's device
+# (cdc_host.sh writer_start); outage_writer_stop stops it.
+outage_writer_start() { # <ss> <limit secs>
+	h h1 "$WORK/cdc_host.sh writer_start $(uuid_path "$1") $2" >/dev/null ||
+		die "h1: starting the write loop failed"
+}
+
+outage_writer_stop() {
+	h h1 "$WORK/cdc_host.sh writer_stop" >/dev/null ||
+		die "h1: stopping the write loop failed"
+}
+
+# outage_writer_stat prints the loop's "<writes that worked> <failed>", and
+# dies when the counts cannot be read, so that a failed read is never taken
+# for failed writes.
+outage_writer_stat() {
+	local out ok fail
+	out=$(QUIET=1 h h1 "$WORK/cdc_host.sh writer_stat") ||
+		die "h1: reading the write loop's counts failed"
+	read -r ok fail <<<"$out"
+	case "$ok$fail" in
+	'' | *[!0-9]*) die "h1: the write loop's counts read '$out'" ;;
+	esac
+	printf '%s %s\n' "$ok" "$fail"
+}
+
+# writes_grow answers whether h1's loop has written more than <n> times; a
+# count not there yet, before the loop's first write, is no answer.
+writes_grow() { # <n>
+	local out ok fail
+	out=$(QUIET=1 h h1 "$WORK/cdc_host.sh writer_stat") || return 1
+	read -r ok fail <<<"$out"
+	case "$ok" in '' | *[!0-9]*) return 1 ;; esac
+	[ "$ok" -gt "$1" ]
+}
+
+# case_outage: every cdc down for OUTAGE_SECS under a host's writes, past
+# the kernel's default 600 seconds after which a host gives up its lost
+# discovery connections, which the case checks the kernel did. nvme-stas
+# must keep the data connection the whole time, and the host's writes must
+# go on without one failure; once the fleet is back, the hosts reconnect at
+# stafd's next retry and the data connection still stands. The case uses
+# ssX on port4 for H1, a path no earlier case gave h1, so that stacd holds
+# no record of it from an earlier case.
+case_outage() {
+	if [ "$STAS_RUNNING" != 1 ]; then
+		stage start "start stafd and stacd on both hosts"
+		stas_start_both
+	fi
+
+	stage put "put ssX (H1, port4): h1 connects it through nvme-stas"
+	wait_until "$WAIT_STAS" "h1 to hold no dnv-it subsystem" no_test_subsystems h1
+	put_entry ssx "4" "$H1NQN"
+	wait_stas_converged h1
+	wait_dev h1 ssx
+
+	stage writer "h1 writes 4 KiB with fsync to ssX every second"
+	outage_writer_start ssx $((OUTAGE_SECS + 600))
+	wait_until "$WAIT_SHORT" "h1's write loop to write" writes_grow 0
+	local ok fail
+	read -r ok fail <<<"$(outage_writer_stat)"
+	assert_eq "$fail" 0 "h1's failed writes to ssX before the outage"
+
+	stage fleet "SIGKILL every cdc and keep the fleet down for ${OUTAGE_SECS}s"
+	declare -A conn_base=() scan_base=()
+	local dir i end probe at states hostsel last=0 gaveup=0
+	for dir in "${CDC_DIRS[@]}"; do
+		conn_base[$dir]=$(connects_at "$dir")
+		scan_base[$dir]=$(scans_at "$dir")
+	done
+	for dir in "${CDC_DIRS[@]}"; do
+		ok_or_true sig_cdc "$dir" KILL
+		unset "RUNNING[$dir]"
+	done
+	for dir in "${CDC_DIRS[@]}"; do
+		wait_until "$WAIT_SHORT" "$dir to exit" cdc_gone "$dir"
+	done
+	end=$((SECONDS + OUTAGE_SECS))
+	while [ "$SECONDS" -lt "$end" ]; do
+		probe=$((SECONDS + OUTAGE_PROBE))
+		[ "$probe" -le "$end" ] || probe=$end
+		wait_until "$((OUTAGE_PROBE + WAIT_SHORT))" "the next probe" \
+			seconds_past "$probe"
+		at=$((OUTAGE_SECS - end + SECONDS))
+		have_dev h1 ssx ||
+			die "h1 lost its ssX data connection ${at}s into the outage"
+		read -r ok fail <<<"$(outage_writer_stat)"
+		states=$(disc_ctrl_states h1) || die "h1: listing its discovery controllers failed"
+		log "  +${at}s: writes $ok, failed $fail;" \
+			"h1's discovery controllers: $(printf '%s' "$states" | tr '\n' ' ')"
+		[ "$fail" = 0 ] ||
+			die "h1's writes to ssX failed during the outage: $ok worked, $fail failed"
+		[ "$ok" -gt "$last" ] ||
+			die "h1's writes to ssX stopped during the outage at $ok"
+		last=$ok
+		if [ "$at" -ge "$OUTAGE_GIVEUP" ]; then
+			# The kernel gave every discovery controller up, and stafd's
+			# refused retries make none.
+			for hostsel in h1 h2; do
+				states=$(disc_ctrl_states "$hostsel") ||
+					die "$hostsel: listing its discovery controllers failed"
+				[ -z "$states" ] ||
+					die "$hostsel still holds discovery controllers to the fleet" \
+						"${at}s into the outage: $(printf '%s' "$states" | tr '\n' ' ')"
+			done
+			gaveup=1
+		fi
+	done
+	[ "$gaveup" = 1 ] || die "no probe came ${OUTAGE_GIVEUP}s or more into the outage"
+	log "  ok: h1 kept ssX and wrote $last times through ${OUTAGE_SECS}s of no cdc," \
+		"after the kernel gave up its discovery controllers"
+
+	stage restart "relaunch the fleet: the hosts reconnect at stafd's next retry, and ssX still stands"
+	for i in 0 1 2 3; do start_cdc "$i"; done
+	for dir in "${CDC_DIRS[@]}"; do
+		wait_until "$WAIT_SHORT" "$dir: cdc scan complete" \
+			scanned_since "$dir" "${scan_base[$dir]}"
+	done
+	for dir in "${CDC_DIRS[@]}"; do
+		wait_until "$OUTAGE_RECONNECT" "$dir: both hosts reconnected after the outage" \
+			both_hosts_connected_since "$dir" "${conn_base[$dir]}"
+	done
+	wait_until "$OUTAGE_RECONNECT" "h1: four discovery connections to the fleet" \
+		disc_ctrls_ge h1 4
+	sleep "$SETTLE"
+	assert_dev h1 "h1 keeps ssX once the fleet is back" ssx
+	outage_writer_stop
+	read -r ok fail <<<"$(outage_writer_stat)"
+	assert_eq "$fail" 0 "h1's failed writes to ssX over the whole case"
+	log "  ok: h1 wrote $ok times in all, none failed"
 }
 
 # ---------------------------------------------------------------------------

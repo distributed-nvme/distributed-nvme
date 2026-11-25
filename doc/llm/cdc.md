@@ -862,7 +862,20 @@ under nvme-stas hosts, kills one instance with SIGKILL while its twin
 serves its half and starts it again, then kills the whole fleet with
 SIGKILL and starts it again, every wait of that restart probing that the
 hosts keep the device of each subsystem they use (What a pass means,
-"undisturbed throughout"). The manyhosts
+"undisturbed throughout"). The outage case, under nvme-stas hosts, gives
+the first host a subsystem on a path no earlier case gave it, starts a
+loop on that host that writes 4 KiB with fsync to the subsystem's device
+every second, counting the writes that failed, and kills the whole fleet
+with SIGKILL for 900 seconds, past the 600 seconds after which the kernel
+gives up a host's lost connection at its default; every 30 seconds the host
+still holds the device, the loop has written more and no write has failed,
+and from 690 seconds on neither host holds a discovery controller to the
+fleet, which shows the kernel gave them up. The fleet then starts again,
+both hosts reconnect within two minutes, as stafd connects a controller the
+kernel gave up only at its own retry, once a minute, and the device still
+stands, with no write failed over the whole case. The loop is the host
+helper's, named and stopped by its pid file like the flood, and ends by
+itself after a time limit. The manyhosts
 case runs many copies of the discovery daemon on each host server, each
 its own host — its own host NQN and host id, its own private bus and its
 own runtime directory — listing every instance, with the host's own
@@ -979,8 +992,9 @@ controller and the host never reconnects by itself; then the first server's
 processes. Cleanup touches only what is the suite's, but for a process a stale
 pid file on the first server names — the test subsystems and the discovery
 controllers that point at the fleet, never every subsystem of a host; on a
-host the uevent capture and the flood by the pid files they leave in the work
-directory, never a process of the host's own; on the first server its
+host the uevent capture, the flood and the outage case's write loop by the
+pid files they leave in the work directory, never a process of the host's
+own; on the first server its
 processes by recorded pid, with no check that a pid still runs a program under
 the work directory, and with a pattern kill of the programs under the work
 directory as a safety net — and leaves nvme-stas installed and the kernel
