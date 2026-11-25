@@ -22,7 +22,7 @@ import (
 // TestAStageWhoseCommandWaitsKeepsTheVolume pins the lock over a volume's
 // stage: while a stage waits in blkid, as one does on a device whose IO
 // waits, a second stage and an unstage of the volume are ABORTED and run no
-// command; a stage of another volume runs; once the first ends, the volume
+// blkid; a stage of another volume runs; once the first ends, the volume
 // stages and unstages as before.
 func TestAStageWhoseCommandWaitsKeepsTheVolume(t *testing.T) {
 	n, f := newTestNode(t)
@@ -98,10 +98,10 @@ func TestAStageWhoseCommandWaitsKeepsTheVolume(t *testing.T) {
 }
 
 // TestTheFollowerHasSlotsOfItsOwn pins the node plugin's two OS clients: a
-// node plugin built with no client of a test's gets one for its stages and
-// unstages and another for its follower, each with slots of its own, so
-// commands that wait for ever in the first leave the follower's connects
-// free; one a test passes serves both.
+// node plugin built with no client of a test's gets one for its mount side
+// and another for its NVMe side, the follower's among them, each with slots
+// of its own, so commands that wait for ever in the first leave the
+// follower's connects free; one a test passes serves both.
 func TestTheFollowerHasSlotsOfItsOwn(t *testing.T) {
 	oc, foc := nodeClients(Config{})
 	if oc == foc {

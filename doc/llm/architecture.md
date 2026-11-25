@@ -1551,8 +1551,9 @@ candidate lists) is prepared beforehand to keep transactions short.
 {p} cluster_conf {cluster_name} read is the first step **inside** the STM
 and every other key of the RPC is formatted from the `cluster_id` derived
 there. Doing it in-STM also makes the transaction fail correctly when the
-cluster is concurrently deleted or recreated. `GrowSlice` and the repair
-calls whose deciding STM is a `model` operation — `CreateRepair`,
+cluster is concurrently deleted or recreated. `GrowSlice`,
+`WithdrawGrow` and the repair calls whose deciding STM is a `model`
+operation — `CreateRepair`,
 `FinishRepair`, `CancelRepair`, `TryToAbortRepair`, `DeleteRetiredLeg`,
 `ForceStartGroup`, `UpdateGroupOperatorInCharge` and
 `UpdateRetiredLegKeep` — are the exceptions:
@@ -2856,8 +2857,10 @@ new group still never has two legs in it, but a repair's new leg, a
 migration's destination and a pool create's first preference find no
 other location sooner, and their second tier can then place a leg on the
 machine of the group's other leg or of the primary (Per-operation
-allocation; Known limits). So every machine needs a host name of its own,
-or each node of a machine a `location` naming that machine. A disk node or
+allocation; Known limits). So every machine needs a host name of its own:
+a `location` naming the machine keeps the failure domains apart, but two
+machines that report one name still get no migration between their disk
+nodes. A disk node or
 a controller node v0.1.0 created with no `location` keeps its `addr_port`
 as its `location`, a failure domain of its own and not its machine's, as
 no code rewrites a stored `location`: only emptying, deleting and creating
@@ -3120,7 +3123,8 @@ and `CnGlobal`, with these differences:
     held summary with no `ns_id_list`, from an agent before the field,
     reads every restored namespace as deleted. One case it does not see: a
     cutover the worker made after the backup, whose new revision reached
-    the sides and not yet the cntlrs when the failure came,
+    the sides and not yet the cntlrs when the failure came, the cntlrs
+    still holding the backup's revision,
     leaves every row read SAME (`dnv-worker.md` RW14 sends the cntlrs a
     new revision only after the sides apply it).
   * NEW: the restored state has no pool of the `sp_id`: the pool and
@@ -3520,8 +3524,10 @@ stacked group's DN extents are charged immediately. Reply `slice_id` and
 ### WithdrawGrow
 
 An operator takes back the newest grown group of one kind of a slice while
-it is not ready, the step the worker's withdrawal (`dnv-worker.md` AR6)
-takes only when the group's disk node carries a health epoch: a disk node
+it is not ready, in a planning snapshot and then the deciding STM of the
+`model` operation (`gateway.md`, Storage pools and GrowSlice), the step the
+worker's withdrawal (`dnv-worker.md` AR6) takes only when the group's disk
+node carries a health epoch: a disk node
 that keeps answering its rounds while it zeroes very slowly, or fails to,
 keeps the grow waiting, and with it every later grow of that kind of the
 slice. Errors: `NOT_FOUND` when `slice_id` is not in the pool;
@@ -4594,7 +4600,7 @@ made; the flag is the group's, not a level or a flag of the pool, so that
 it stops five things of that group alone: the worker's create of a repair
 (`dnv-worker.md` AR8), the withdrawal of a stuck grow, auto-grow's
 (`dnv-worker.md` AR6) and the operator's own `WithdrawGrow` alike, which
-waits until the flag is cleared, the end leg repair gives a bad leg's migration
+is refused, FAILED_PRECONDITION, until the flag is cleared, the end leg repair gives a bad leg's migration
 (`dnv-worker.md` AR8), the md check, which the worker does not ask for and
 withdraws when it stands (`dnv-worker.md` AR16), and the primary's new
 assembly of a broken array (`cnagent.md` CN12). Failover, auto-grow's

@@ -72,8 +72,9 @@ type entry struct {
 
 // newEntry renders one CdcEntry value (DS3). A transport configuration with
 // a foreign tr_type or address family is dropped, and its reason is kept once
-// in e.skips (addSkip), so the caller (watcher.render) logs `cdc entry
-// skipped` once per distinct reason, not once per dropped element.
+// in e.skips (addSkip), so its callers log `cdc entry skipped` once per
+// distinct reason, not once per dropped element: watcher.render at once,
+// watcher.scan through the records it owes.
 func newEntry(msg *pb.CdcEntry) *entry {
 	e := &entry{nqn: msg.GetNqn()}
 	if hosts := msg.GetAllowedHosts(); len(hosts) > 0 {
@@ -349,7 +350,8 @@ func (r *registry) apply(
 
 // holds reports whether the held entry map is the given one, entry for
 // entry: the same keys, each with the same subsystem, allowed hosts and
-// rendered records. A full read that finds so installs nothing (WV7).
+// rendered records. A full read that finds so, and owes the same skip
+// records as the last scan (watcher.scan), installs nothing (WV7).
 func (r *registry) holds(entries map[entryKey]*entry) bool {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -378,7 +380,8 @@ func (r *registry) holds(entries map[entryKey]*entry) bool {
 // Every active host is re-rendered rather than only the ones a per-key diff
 // would name: the answer is identical (DS6 impact is defined on rendered
 // bytes), and a rescan that changes the map is rare enough, a full read that
-// finds the same map installing nothing (WV7), that the cost is irrelevant
+// finds the same map and owes the same skip records installing nothing
+// (WV7), that the cost is irrelevant
 // next to getting the "changes missed across the watch gap still AEN" rule
 // exactly right. The diff is against what the held state renders, which a dirty
 // view's body may no longer say, so a dirty view is first rendered against

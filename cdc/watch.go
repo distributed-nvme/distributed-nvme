@@ -152,7 +152,8 @@ func (w *watcher) scan(ctx context.Context, prefix string, full bool) (int64, bo
 			// The etcdutil record carries the decode error; this one says
 			// what dnv-cdc did about it (WV2), at Warn: the entry is gone
 			// from every host until an operator mends the record, once per
-			// scan that changes the served state or event (log.md R6).
+			// scan, save a full read that repeats the last one (WV7), or
+			// event (log.md R6).
 			skips = append(skips, skipRecord{kv.Key, skipMalformedValue, true})
 			continue
 		}

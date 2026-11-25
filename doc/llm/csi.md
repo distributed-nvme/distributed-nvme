@@ -512,7 +512,7 @@ drop runs after the pass that decided it, once a drop slot is free; so right
 before its disconnect it reads the controller's subsystem and address again
 and drops nothing, logging `csi path drop skipped`, when they are no longer
 the path's: another volume's path would otherwise go. The read and the
-disconnect each wait for a slot of the OS client, so the time between them
+disconnect each wait for a slot of the NVMe side's OS client, so the time between them
 stays short only while slots are free. A cdc's log counts as its answer only when it holds
 the record of the cdc itself, which every log page of a dnv cdc holds first
 (`cdc.md` DS12): a log without it, an empty list included, cannot be read and
@@ -595,9 +595,9 @@ plugin's pod. A stage that fails with a final code, after which the kubelet
 counts the volume as not staged and never unstages it, leaves the set at once,
 with its paths, and with the discovery connections when nothing else is staged,
 as the last unstage does; a code after which the stage may still be running
-keeps it, as does a mount at the staging path, which an earlier stage made, and
-a mount table that cannot be read, since a missing answer is not an answer that
-nothing is mounted.
+keeps it, as does a mount at the staging path, which an earlier stage made, a
+mount table that cannot be read, since a missing answer is not an answer that
+nothing is mounted, and a device something still holds (below).
 
 An unstage drops the paths only once nothing holds the volume's device: after
 its unmount it opens the device for exclusive use (`osclient.md`,
@@ -619,7 +619,7 @@ runs no command, so a stage or an unstage whose command waits for IO keeps
 its volume, and the kubelet's tries that follow each deadline take no
 command slot; without the lock each try of a stage whose blkid waits
 would leave one more command waiting, one every two minutes, and take all
-of the plugin's slots in about an hour. A stage that
+of the mount side's slots in about an hour. A stage that
 fails with a final code drops its paths only after the same open, so a
 device still held keeps them there too. The reason: an unmount takes the
 mount out of the table before it writes the file system's unwritten data,
@@ -628,9 +628,10 @@ call while the unmount still runs, and its next try, reading the table
 alone, would find nothing mounted and drop the paths, and the kernel would
 fail those writes. What it leaves: a volume whose device something else on
 the node holds stays on its node, attached, until that holder goes (Known
-limits); and each volume whose command waits still holds one command slot
-until a path serves, so on a node where as many volumes wait as there are
-slots no other volume stages until one of them ends.
+limits); and each volume whose command waits still holds one of the mount
+side's command slots until a path serves, so on a node where as many
+volumes wait as there are such slots no other volume stages until one of
+them ends.
 
 CSI17. **Format only what is blank, mount by binding, repeat for free.** A
 stage of a filesystem volume reads the device's filesystem and partition
@@ -1351,11 +1352,11 @@ log, and the conformance test's logs, its plugins' included.
   and a detach the old leader began can run after the volume was attached
   to the same node again. The detach takes the node off the list, since it
   names only the volume and the node and cannot tell the new attach from the
-  one it undoes (CSI10). Where the primary's node can end a host's
-  connection, the primary ends the node's connection (`cnagent.md` CN33)
-  and the reconnect is refused with DNR; elsewhere the connection stays
-  until the path's next reconnect, which nvmet refuses the same way, the
-  node being off the list. The mount then dies under a running pod, whose
+  one it undoes (CSI10). The cdcs then list the subsystem to the node no
+  more, so the node's own plugin drops every path of it at its next pass
+  (CSI15), and where the primary's node can end a host's connection, the
+  primary ends it too (`cnagent.md` CN33). The mount then dies under a
+  running pod, whose
   writes not yet flushed are lost (`operations.md`, A Kubernetes mount that
   lost its last path). No fix is known: no call of
   the CSI spec carries a mark of which attach a detach undoes. Read from the

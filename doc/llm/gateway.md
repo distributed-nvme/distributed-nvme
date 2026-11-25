@@ -2153,8 +2153,8 @@ gateway, never through `workerctl`.
 
 * smoke (one gateway) — the full lifecycle: every RPC's happy path but
   `ListStoragePools`, which the parallel and restart cases run, and
-  `WithdrawGrow`, which the gateway's Go tests and the dnvctl suite's sweep
-  drive, each
+  `WithdrawGrow`, which the gateway's Go tests drive and whose request the
+  dnvctl suite's sweep checks, each
   mutation's exact write set read back, the first pool's one leg in its
   first primary's location a leg of its data group, never of its meta
   group, the `CdcEntry` the cdc serves

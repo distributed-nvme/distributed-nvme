@@ -143,8 +143,9 @@ func TestCreateMigrationPassOverIsNoLocation(t *testing.T) {
 	}
 }
 
-// TestCreateDiskNodeStoresNoNameForAnUnnamedMachine pins the names every
-// unnamed machine reports: none is kept, so they refuse no migration.
+// TestCreateDiskNodeStoresNoNameForAnUnnamedMachine pins localhost, one of
+// the names every unnamed machine reports (storedHostName keeps none of
+// them): no name is kept, so no migration passes the node over for it.
 func TestCreateDiskNodeStoresNoNameForAnUnnamedMachine(t *testing.T) {
 	s := newTestServer(t)
 	cluster := hnodeName("unnamed")

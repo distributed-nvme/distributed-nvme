@@ -175,7 +175,7 @@ always sends a piece's position.
   host's. Procedure written: [the operations
   doc](operations.md#move-a-volume-to-another-pool) lists only the other
   pool's controller nodes, by host NQNs it shows how to work out.
-- **Some inputs of a clone are taken as typed.** A clone maps each piece
+- **Some inputs of a clone are taken as typed.** Silent. A clone maps each piece
   of its source's list of written blocks through three numbers of the
   source pool, its slice count, stripe and data block, which the operator
   types at the clone's create, and through the slice and the place in the
@@ -236,9 +236,10 @@ always sends a piece's position.
   call also returns before the primary stops using the new side: until the
   primary has taken the cancel, and dropped its path to the new side with
   it, a write can still land on the new side and is then lost with it, in
-  a pool without RAID with no error; this part is read from dnv's code and
-  the kernel's, not seen in the lab. State of this part: fix decided: the
-  call will answer only once the old side serves. Procedure written,
+  a group with no other leg in sync, with no error; this part is read from
+  dnv's code and the kernel's, not seen in the lab. State of this part:
+  fix decided: the call will wait, up to a time limit, until the primary
+  uses the old side's path. Procedure written,
   [the operations doc](operations.md#ending-a-migration-with-force): a
   forced cancel loses nothing when nothing writes to the pool from the
   cutover until the primary has taken the cancel, which the operations doc
@@ -250,8 +251,9 @@ always sends a piece's position.
 - **An etcd restore over a migration's cutover since the backup.** Silent.
   The restore can make a leg's old side serve again beside its new one,
   and a block first written since the cutover can then read another pool's
-  bytes. The restore check names such a pool, but for one case (section
-  5.5). State: procedure written, as
+  bytes. The restore check (`dnvctl cn check-restore`, the read that says
+  pool by pool what a restore loses) names such a pool, but for one case
+  (section 5.5). State: procedure written, as
   section 5.5 says in its entry on an etcd restore over a cutover.
 - **A forced start from an older copy restores one group, not the pool.**
   A forced start is an operator's start of a group's RAID1 array from one
@@ -399,12 +401,13 @@ loss in the sense of this document. The application knows. Two cases:
   its disk node zeroes the new side very slowly or cannot. The worker
   takes such a group back by itself only when its disk node is dead or
   reports an error of its own. The status read, `dnvctl cluster
-  get-status`, lists a grow that this release made once it has waited
-  longer than the pool's side threshold, and the operator takes the group back with `dnvctl sp
-  withdraw-grow`. The gateway refuses to grow a slice by hand over such a
-  group. A slice where a group was grown by hand over such a group before
-  dnv refused it stays stuck: the call takes back only the newest group,
-  and only while it is itself waiting. Nothing reserves space ahead. A write
+  get-status`, lists such a grow once it has waited longer than the pool's
+  side threshold, if a build that records when a grow began made it; an
+  older grow is not timed. The operator takes the group back with `dnvctl
+  sp withdraw-grow`. The gateway refuses to grow a slice by hand over such
+  a group. A slice where a ready group was grown by hand over such a group
+  before dnv refused it stays stuck: the call takes back only the newest
+  group, and only while it is itself waiting. Nothing reserves space ahead. A write
   that needs a new block waits for the kernel's no-space timeout and fails. Written
   blocks keep serving. Under the CSI driver the cluster can be
   over-committed. `dnvctl cluster get-capacity` says what the cluster can
@@ -451,7 +454,11 @@ still serves, but for the cases section 5.1 lists and accepts.
 
 These cases exist today. Each will be fixed, unless its entry says
 otherwise and gives its reason. A case marked "silent" shows no error to
-the host.
+the host. A few other cases that can lose data or show old data stand
+where their cause belongs: the worker deleting a retired leg that holds
+newer data than the array, and a region's last copy (section 6.1); a host
+on the old primary's path reading zeros where it wrote (section 8); and a
+retired leg taken back that joins its array with old data (section 10).
 
 ### 5.1 Hosts, flushes and snapshots
 
@@ -513,8 +520,8 @@ the host.
   a pod that starts with a new claim can meet this with no failover.
   State: fix decided: a lab test first settles the way for a host's path.
   The first way: a standby's namespace device reports a write cache from
-  the start, while it still fails all IO; it must load on the lab and make
-  the host read "write back". The second way: the namespace is turned off
+  the start, while it still fails all IO; the lab must show that such a
+  device can be built and that the host then reads "write back". The second way: the namespace is turned off
   and on in the NVMe target once the serving device is under it, which the
   host then reads again; it must be proven safe for a host that looks in
   between. If neither holds, this entry stays, with the state fix later.
@@ -661,7 +668,7 @@ the host.
   gone, and a block can be given out twice. No error shows, except for a
   volume made in between that the worker had already recorded as created.
   State: fix decided. Read from dnv's code; not seen in the lab.
-- **A leg's device can be built over the wrong connection.** The primary
+- **A leg's device can be built over the wrong connection.** Silent. The primary
   puts a device over each leg it connects. It reads the device number of
   the leg's connection by the kernel's name for that connection, after a
   slow step and with no second look. The kernel can give a freed name to
@@ -887,11 +894,11 @@ The entries:
   in two copies, and one leads at a time. When the lead moves, both copies
   can act for a few seconds, and a detach that the old leader began can run
   after Kubernetes attached the volume to the same machine again. The
-  detach takes that machine off the volume's list. The controller node then
-  ends the machine's connection where its kernel lets it (the first entry
-  of this section); elsewhere the connection ends at its next reconnect,
-  which the controller node refuses. Either way the mount dies under a
-  running pod: its IO fails, and the writes it had not flushed are lost. State: fix later: no way to fix
+  detach takes that machine off the volume's list. The cdcs then stop
+  listing the volume to that machine, so its node plugin drops every path
+  of it at its next pass, and the controller node also ends the machine's
+  connection where its kernel lets it (the first entry of this section).
+  The mount dies under a running pod: its IO fails, and the writes it had not flushed are lost. State: fix later: no way to fix
   it is known, since a detach names only the volume and the machine. Read
   from dnv's code; not seen in the lab.
 - **A Kubernetes node plugin that starts under a new host NQN drops the
@@ -991,7 +998,7 @@ The entries:
   an older request at once. State: fix decided. Read from dnv's code; not
   seen in the lab.
 - **One disk node's agent that holds two disk nodes checks its disk for
-  the wrong one.** A disk node's agent refuses a disk whose header block,
+  the wrong one.** Silent. A disk node's agent refuses a disk whose header block,
   the disk's first block, where dnv records which node the disk belongs to,
   names another node, but it keeps one wanted name for the whole program,
   and each converge of one of its nodes overwrites it. An agent holds two
@@ -2006,7 +2013,7 @@ Measured times are in [the introduction](introduction.md#status-and-limits).
   of the worker's cannot finish: it stays open, and the group gets no other
   repair. State: procedure written, [Retired
   legs](operations.md#retired-legs): clear the keep flag of one, or delete
-  one.
+  one. Read from dnv's code; not seen in the lab.
 - **An array create cut short leaves a new group down on every cntlr.**
   mdadm writes the legs' superblocks one after the other when it creates
   an array, and the primary stops a command after 3 seconds. A slow leg
@@ -2030,7 +2037,9 @@ Measured times are in [the introduction](introduction.md#status-and-limits).
   built: the volume's namespace in the source pool is set aside, serving
   no IO, and the destination does not serve, so every host of the volume
   waits. State: fix decided. Until then, move no volume into a
-  pool with a cntlr on a machine that is one of the volume's hosts. Read
+  pool with a cntlr on a machine that is one of the volume's hosts, as
+  check 2 of [the operations
+  doc](operations.md#move-a-volume-to-another-pool) says. Read
   from the kernel's code; not seen in the lab.
 - **A clone reads its source through one address.** `dnvctl clone create`
   sends one address of the source, though every cntlr of the source pool
@@ -2250,8 +2259,10 @@ failover's among them.
   migration's new side off every disk node whose agent reported the old
   side's host name when the node was created. A host name does not name a
   machine in every case. An agent in a container reports the container's
-  name. Two machines can share a name. A disk node created before dnv kept
-  the name, or whose agent's read failed, has none. And two machines that
+  name. Two machines can share a name. A machine renamed between two node
+  creates gives its disk nodes two names. A disk node created before dnv
+  kept the name, whose agent's read failed, or whose machine reports
+  `localhost`, `localhost.localdomain` or `(none)` has none. And two machines that
   report one name get no migration between their disk nodes at all, until
   each has a name of its own and its disk nodes are created again. State:
   accepted: dnv knows a machine only by the host name its agent reports.

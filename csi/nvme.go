@@ -427,7 +427,8 @@ func (h *nvmeHost) discoveryLog(ctx context.Context, ctrlName string) ([]logEntr
 // the current discovery subsystem, which every log page of a dnv cdc holds
 // first (cdc.md DS12): an empty list, or one that only another service
 // could have sent, would read as a cdc that lists no cntlr for any staged
-// volume, and drop every path of every volume in use.
+// volume, and, with one cdc configured, drop every path of every volume in
+// use.
 func parseDiscoveryLog(out string) ([]logEntry, error) {
 	var doc struct {
 		Records *[]struct {

@@ -182,7 +182,7 @@ and no other, and that they name the driver's image by the archive's
 version. It waits
 for the driver's volumes and attachments to go before the driver does, since
 without the driver a volume or an attachment keeps its finalizer, deletes
-the image it imported, puts the taints back, and reads every object of the
+every dnv-csi image from k3s's store, puts the taints back, and reads every object of the
 list and the lab's k3s back as preflight reads it. The save
 fails, and so the run, when any of its readings fails, and a reading it could
 not keep is never written; a file is recorded as there before the run only

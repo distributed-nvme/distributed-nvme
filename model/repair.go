@@ -754,9 +754,11 @@ func placeFreshLeg(
 // from the sp worker (architecture.md, Repairs). While the flag is set the
 // worker creates no repair of the group and CreateRepair refuses a name with
 // the reserved prefix (ReasonGrpOperatorInCharge); the worker still drives a
-// repair of its own that exists. The flag's other effects are the worker's
-// and the primary's (architecture.md, Repairs): no end of a bad leg's
-// migration, no grow taken back, no md check.
+// repair of its own that exists. The flag's other effects
+// (architecture.md, Repairs) are the worker's: no end of a bad leg's
+// migration, no grow taken back, no md check; the primary's: no new
+// assembly of a broken array; and WithdrawGrow's own refusal of the
+// operator's take-back.
 //
 // It checks the token first (checkSpRev) and takes a pool at any level that
 // is not being deleted (loadSpConfAnyLevel): an operator sets the flag at a

@@ -1589,7 +1589,8 @@ func newestGrownNotReady(slice *pb.Slice, isMeta bool) (*pb.Group, bool) {
 // FAILED_PRECONDITION; a zero grp_id is INVALID_ARGUMENT before it. Then
 // model.WithdrawGrowAsked
 // decides in its own transaction, which re-checks them all and the
-// repair, retired leg, forced start and operator-in-charge guards, and gives
+// repair, retired leg, forced start, operator-in-charge and two-sided leg
+// guards, and gives
 // the group's extents back.
 func (s *Server) WithdrawGrow(
 	ctx context.Context,

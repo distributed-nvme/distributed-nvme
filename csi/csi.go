@@ -132,11 +132,13 @@ func RunController(ctx context.Context, cfg Config) error {
 // discovery connections when nothing is staged and leaves every connection
 // in place otherwise.
 func RunNode(ctx context.Context, cfg Config) error {
-	// Two OS clients, each with its own command slots: the stage and
-	// unstage commands, a mount or an unmount that waits for IO among them,
-	// take the first, and the follower's commands the second, so that the
-	// connects that would end such a wait never wait for a slot behind it
-	// (csi.md CSI16).
+	// Two OS clients, each with its own command slots: the mount side's
+	// commands (the mount tools, blkid, the direct read, the mount table,
+	// the exclusive open), a mount or an unmount that waits for IO among
+	// them, take the first, and the NVMe side's (the follower's connects
+	// and drops, the stage's wait for the device, the unstage's disconnect)
+	// the second, so that the connects that would end such a wait never
+	// wait for a slot behind it (csi.md CSI16).
 	oc, foc := nodeClients(cfg)
 	nqnPath, idPath := cfg.HostNqnPath, cfg.HostIdPath
 	if nqnPath == "" {
@@ -200,9 +202,9 @@ func RunNode(ctx context.Context, cfg Config) error {
 	return err
 }
 
-// nodeClients are the node plugin's two OS clients, the stage's and the
-// follower's, each with command slots of its own, or the one a test passes
-// for both.
+// nodeClients are the node plugin's two OS clients, the mount side's and
+// the NVMe side's, each with command slots of its own, or the one a test
+// passes for both.
 func nodeClients(cfg Config) (common.OsClient, common.OsClient) {
 	if cfg.OsClient != nil {
 		return cfg.OsClient, cfg.OsClient

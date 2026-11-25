@@ -862,8 +862,8 @@ func TestWatchFullReadThatFindsNothingNewIsQuiet(t *testing.T) {
 	}
 }
 
-// TestWatchFullReadWritesTheSkipOfALostEvent proves WV7's one exception to
-// its quiet case: a malformed value put under a new key whose event the
+// TestWatchFullReadWritesTheSkipOfALostEvent proves an exception to WV7's
+// quiet case: a malformed value put under a new key whose event the
 // watch lost leaves the served entries as they were, since a skipped key
 // never enters them, but the full read owes a skip record the last scan did
 // not, so it writes that record, at Warn, and logs its scan at Info.

@@ -393,12 +393,14 @@ The dry run is a forced start that only says what it would do:
 `dnvctl group inspect --grp <group id> --leg <leg id>`. It says which legs
 the start would wipe, whether it would stop the array first, and its update:
 `uuid`, or `uuid,force-no-bbl` when the start drops the named leg's
-bad-block list. When a device holds the array open, as the pool's thin
-pool does at a level that builds thin pools, it says that the start's stop
-would be refused and the start would wait, and that a step of the pool's
-level down to `NO_THINPOOL` comes first, or, at that level, that the
-device that holds it must go first; its list of refusals is then empty,
-since the start would stop before its checks. Or it says why the start
+bad-block list. When a device holds the array open, it says that the
+start's stop would be refused and the start would wait, and what must
+come first. For a slice's group, which the pool's thin pool holds at a
+level that builds thin pools, that is a step of the pool's level down to
+`NO_THINPOOL`. For a clone's group, which its clone holds at a level that
+builds clones, it is a step down to `NO_CLONE`. Otherwise the device that
+holds it must go first. Its list of refusals is then empty, since the
+start would stop before its checks. Or it says why the start
 would refuse, in the same words as
 the real start. Beside that, its `refusal_list` lists each refusal an
 override passes that it meets, in this order: a leg a repair took back
@@ -431,7 +433,7 @@ case when the named leg carries a bad-block list; a start that names one
 override and is refused for another kind is tested only by unit tests:
 those of the cn agent for `older-leg` and `bad-blocks`, and those of the
 gateway for `partial`. The dry run over an array that a device holds open
-is tested only by a unit test of the cn agent.
+is tested only by a unit test of the cn agent, for a slice's group.
 
 ### Before every forced start
 
@@ -1099,8 +1101,8 @@ superblock, as at any start: while the named leg serves, the group can
 come back by itself, and md then copies onto the wiped legs; where mdadm
 refuses that start, the group stays down with those legs. The group is
 left with no member that carries a superblock only once the named leg,
-and the open repair's bad leg where the group has one, are lost or have
-left the group.
+the open repair's bad leg where the group has one, and the new leg of a
+repair with its abort flag set, are lost or have left the group.
 
 Confirm: `dnvctl group inspect --grp <group id>` shows which legs carry a
 superblock. The named leg, the open repair's bad leg and an aborting
@@ -1135,8 +1137,9 @@ once the array ran.
 ### An array create cut short
 
 Symptom: a new group, of a new pool, of a grow or of a clone, has never
-run. Its row reads error: mdadm's refusal to start the array, or that the
-array is inactive.
+run. Its row reads error after a converge: mdadm's refusal to start the
+array, or that the array is inactive. At a check round it can read
+missing, with no text.
 
 Confirm: `dnvctl group inspect --grp <group id>` shows one leg with a
 superblock, a full member, and the other leg with none. `dnvctl sp get`,
@@ -1150,8 +1153,9 @@ later try, on this primary or on a new one, starts the array from the one
 leg with a superblock, and mdadm refuses, since that superblock counts
 both legs.
 
-What dnv does alone: nothing that brings the group back. The group's
-error row makes the primary unhealthy, so the worker fails the pool over,
+What dnv does alone: nothing that brings the group back. For a group of
+a slice, the group's error row makes the primary unhealthy, so the worker
+fails the pool over,
 after `primary_unhealthy` for a grow's group on a primary that has built
 its stack and after `cntlr_unhealthy` for a new pool, or replaces the only
 cntlr of a pool that has one; the new primary meets the same refusal, and
@@ -2754,10 +2758,8 @@ machines, cuts one machine and not every node at once:
    again later.
 6. From the machine that runs `dnvctl`, run `dnvctl cluster get-status`
    and keep what it prints ([Read what is wrong](#read-what-is-wrong)).
-   Then put the table where the boot will load it from, `mkdir -p
-   /etc/dnv && cp dnv-filter.nft /etc/dnv/dnv-filter.nft`, and load that
-   file, but only while the timer still waits:
-   `systemctl is-active dnv-filter-undo.timer && nft -f /etc/dnv/dnv-filter.nft`.
+   Then load the file, but only while the timer still waits:
+   `systemctl is-active dnv-filter-undo.timer && nft -f dnv-filter.nft`.
    It prints `active` and loads the table. If it prints `inactive`, the
    timer has run already and nothing was loaded: start again at step 5.
    A second load replaces the table, and no other table changes. Never
@@ -2795,7 +2797,10 @@ machines, cuts one machine and not every node at once:
    loaded`, the timer has run and taken the table away: start again at
    step 5. Then `nft list table inet dnv_filter` must print the table,
    or start again at step 5. The table does not survive a reboot. To
-   load it at boot, copy the kit's `deploy/systemd/dnv-filter.service` to
+   load it at boot, first put the file you tested where the boot loads
+   it from, `mkdir -p /etc/dnv && cp dnv-filter.nft
+   /etc/dnv/dnv-filter.nft`, then copy the kit's
+   `deploy/systemd/dnv-filter.service` to
    `/etc/systemd/system/dnv-filter.service` and run `systemctl
    daemon-reload` and `systemctl enable --now dnv-filter`: it loads
    `/etc/dnv/dnv-filter.nft`, the file step 6 loaded under the timer, now
@@ -2807,7 +2812,8 @@ machines, cuts one machine and not every node at once:
    reads active and that `nft list table inet dnv_filter` prints the
    table, since a missing file only skips the unit and a file that does
    not load fails it, and either way the node is open to the hosts. After
-   a change of the file, load it again under a timer as in steps 5 and 6;
+   a change of the file, test the new file under a timer as in steps 5 to
+   7, and copy it into `/etc/dnv` only once those tries pass;
    `systemctl reload dnv-filter` then loads it the same way.
    `systemctl stop dnv-filter` deletes the dnv table alone, and
    `systemctl disable --now dnv-filter` removes it for good. Leave the
@@ -2987,7 +2993,9 @@ one network; a set `refused` with no `elements` part, which nft 1.0.9
 loaded only outside the lab, in a network namespace of its own; a
 refusal over IPv6, which no suite uses; a pod network whose connections
 to other machines keep their pod address, with its range in the sets, as
-the lab runs flannel alone; the load at boot; and
+the lab runs flannel alone; the load at boot, which one check by hand
+through a reboot of one lab guest showed, with the table loaded before
+the network came online, and no suite; and
 the node selector of the controller plugin, which the lab cannot run, as
 its three Kubernetes nodes are the control-plane guest and the two
 hosts.
@@ -3457,7 +3465,8 @@ the error code RESOURCE_EXHAUSTED when only those have room. It cannot
 tell three cases. A disk node in a container reports the container's
 name. A machine renamed between two of its node creates has two names. A
 disk node has no stored host name when it was created before dnv kept it,
-when its agent could not read it, or when its machine reports `localhost`.
+when its agent could not read it, or when its machine reports
+`localhost`, `localhost.localdomain` or `(none)`.
 There keep the rule yourself, with `--dn-black` or `--dn-white`. The other way round, two machines that report one host name
 get no move between their disk nodes: give each machine its own name, as
 [Choose a node's location](#choose-a-nodes-location) says, then empty,
@@ -3566,9 +3575,12 @@ Steps that can lose data:
   new side, which holds old bytes there, possibly another pool's ([the
   scope page](scope.md#53-transfers-clones-and-migrations)). On each host
   of the pool, stop discards for the whole migration: `sudo systemctl stop
-  fstrim.timer`, and remount a file system that has the `discard` option
-  without it (`sudo mount -o remount,nodiscard <mount point>`). Start them
-  again once the migration has ended. `blkdiscard` sends discards too, and
+  fstrim.timer`, and take the `discard` option away from a file system
+  that has it. On ext4, `sudo mount -o remount,nodiscard <mount point>`
+  does it. XFS ignores that option on a remount: unmount the file system
+  and mount it again without `discard`. Either way, `findmnt -no OPTIONS
+  <mount point>` must then show no `discard`. Start them again once the
+  migration has ended. `blkdiscard` sends discards too, and
   so does a file system's maker, such as `mkfs.ext4` or `mkfs.xfs`, unless
   told not to; the Kubernetes driver's node plugin makes a file system on
   a new volume this way.
@@ -4496,8 +4508,8 @@ Safe steps:
    hosts keep the size they read. It also refuses while the namespace is a
    transfer's origin, and a volume that a transfer exports. It does not
    check that the other volume is recorded as created: wait for that in
-   `dnvctl td list` first, and for a snapshot check there too that it is
-   not torn, as [Snapshots](#snapshots) says. Nor does it check that no other namespace
+   `dnvctl td list` first, and for a snapshot check that the status read
+   shows no `torn` line for it, as [Snapshots](#snapshots) says. Nor does it check that no other namespace
    exports the other volume: `dnvctl ss list` shows each namespace's
    `td_id` in `ns_list`, and `dnvctl td list` each volume's, so pick a
    volume whose `td_id` no namespace shows. With a snapshot as the other
@@ -4568,7 +4580,8 @@ Before you start, check five things:
    only after the transfer has parked the origin. The simple way: give the
    destination pool the source's stripe and slice count.
 2. The two pools' cntlrs: no controller node may hold a cntlr of both
-   pools, and their cntlid slots, the ranges of NVMe controller ids a
+   pools, no cntlr of the destination may run on a machine that is one of
+   the volume's hosts, and their cntlid slots, the ranges of NVMe controller ids a
    pool's exports use, must differ. `dnvctl sp get` of each pool shows
    each cntlr's `addr_port` and `cntlid_slot`. Step 1 of [A pool made
    before the block bound](#a-pool-made-before-the-block-bound) says how to
@@ -4757,9 +4770,11 @@ Steps that can lose data:
   right after is then lost under the late copy ([the scope
   page](scope.md#53-transfers-clones-and-migrations)). On each host of the
   volume, stop discards before step 7 and until the clone has left:
-  `sudo systemctl stop fstrim.timer`, and remount a file system that has
-  the `discard` option without it (`sudo mount -o remount,nodiscard
-  <mount point>`). Start them again after step 14. A `blkdiscard` sends
+  `sudo systemctl stop fstrim.timer`, and take the `discard` option away
+  from a file system that has it, as [Move a leg to another disk
+  node](#move-a-leg-to-another-disk-node) says for ext4 and XFS, and
+  check with `findmnt -no OPTIONS <mount point>`. Start them again after
+  step 14. A `blkdiscard` sends
   discards too.
 - A host NQN on the transfer's list that is not one of the destination's
   controller nodes: that host can write the origin while the clone copies
@@ -5886,8 +5901,10 @@ Safe steps, as root on the machine of the disk:
      namespace, a name such as `/dev/nvme0n1` with no partition number
      after it, and no other namespace of the drive holds data you keep: a
      drive can apply a format to every one of its namespaces, as
-     `sudo nvme id-ctrl <disk> -H` shows in its `fna` field, in the line
-     "Format Applies to … Namespace(s)".
+     `sudo nvme id-ctrl <disk> -H` shows in its `fna` field: the line
+     "Format Applies to … Namespace(s)", and for a format with `--ses` also
+     "Crypto Erase Applies to … Namespace(s)". When either line you use
+     reads All, the format erases every namespace of the drive.
      Otherwise use the write of zeros.
    A write of zeros erases what the disk returns to reads. A flash disk
    can still hold old data in its spare cells, and any disk in blocks it
@@ -5896,7 +5913,7 @@ Safe steps, as root on the machine of the disk:
    safe, or destroy the disk.
 4. Read the whole disk back. After a write of zeros,
    `sudo cmp <disk> /dev/zero` must stop only at the end of the disk, with
-   `cmp: EOF on <disk> after byte <N>`, where `<N>` is the disk's size,
+   a line that starts `cmp: EOF on <disk> after byte <N>`, where `<N>` is the disk's size,
    `sudo blockdev --getsize64 <disk>`. After `nvme format` a disk can read
    back as zeros, as ones, which
    `tr '\0' '\377' < /dev/zero | sudo cmp <disk> -` checks the same way,
@@ -7280,7 +7297,8 @@ Steps that can lose data:
 
 When to stop: a program prints or logs another version than the new one;
 a line of the node check of step 6 reads `FAIL`, or a line of the one of
-step 1 does, other than those it names for a node that ran 0.1; an agent does not log `agent started`; or at step 12 a
+step 1 does, other than those it names for a node whose udev rules are
+older than the new release's; an agent does not log `agent started`; or at step 12 a
 line that step 1 did not show, any line after an upgrade from 0.1, or a
 `reaction applied` record, shows: stop, start no more programs, and ask for
 help. Never go back to the old build by starting its files again.

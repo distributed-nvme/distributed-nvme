@@ -234,7 +234,8 @@ NVMET=/sys/kernel/config/nvmet
 # three-member mode), 29600-29603, 29700-29702;
 # gateway_test.sh 15379/15380, 29810-29812, 29820-29823, 29830-29832;
 # cdc_test.sh 13379/13380, 18009-18012, 14420-14423; cnagent_test.sh
-# 29528/29529 + trsvcid 4200; dnagent_test.sh 29528 + trsvcids 4200 and 4209;
+# 29528/29529 + trsvcid 4200; dnagent_test.sh 29528 and 29538 + trsvcids
+# 4200 and 4209;
 # dnvctl_test.sh 29840/29841; csi_test.sh 17379/17380, 29870, 18030, 28900,
 # 28950 + trsvcid 4400, and k3s's 6443 on its
 # Kubernetes guests (its DEAD_CDC_PORT, 18039, is a port no cdc listens on);
@@ -10186,7 +10187,7 @@ preflight_guests() {
 	# The disk-node guests' host names must differ: the gateway keeps a
 	# migration's new side off every disk node of the old side's host name
 	# (architecture.md, Migrations), so guests that share one would leave the
-	# copy case's and the react case's migrations no destination. Each node's
+	# copy, react and soak cases' migrations no destination. Each node's
 	# location is still its role, passed at its create (E2E4).
 	local names name seen=""
 	for v in "${!DN[@]}"; do
@@ -12319,7 +12320,7 @@ setup_register_nodes() {
 		log "  dn$v: $DNS_PER_VM disk nodes at location $(dn_location "$v")"
 	done
 
-	# Every CN registers --location cn<v>, the VM's role: the lab's guests
+	# Every CN registers --location cn<v>, the VM's role: a lab's guests may
 	# share one host name, which a node created with no location takes
 	# (CreateControllerNode (gateway/controllernode.go)), so without it every
 	# CN would be one location. With one cn agent per VM every CN is then its

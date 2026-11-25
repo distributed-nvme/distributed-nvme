@@ -121,7 +121,8 @@ The first line printed is the host NQN, `nqn.2014-08.org.nvmexpress:uuid:`
 and a uuid; the second is the host id, a uuid. In a cluster of several
 machines each machine needs a host NQN and a host id of its own. Machines
 made from one image share the files nvme-cli's package wrote, and two
-machines with one host NQN defeat the driver's detach ([the scope
+machines with one host NQN defeat the driver's detach, the step that
+takes a machine off a volume's list of hosts ([the scope
 page](scope.md#54-hosts-and-the-kubernetes-driver)). On each such
 machine, before the driver runs there, write both files anew:
 `sudo nvme gen-hostnqn | sudo tee /etc/nvme/hostnqn` and

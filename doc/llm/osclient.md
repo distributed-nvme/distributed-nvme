@@ -161,7 +161,9 @@ the method set is exactly the following, each taking the caller's ctx:
   the ctx error without performing the operation and without logging an
   operation record) and releases it when it returns.
 * `LimitedOsClient` is safe for concurrent use and holds no other mutable
-  state. One instance per process is the expected usage.
+  state. One instance per process is the expected usage, but for the CSI
+  node plugin, which holds two, one for each side of its work (`csi.md`,
+  The node plugin).
 
 ### RunCommand
 

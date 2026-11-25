@@ -277,8 +277,8 @@ func TestWithdrawGrowRefusesASliceWithNoGrownGroup(t *testing.T) {
 // architecture.md, GrowSlice: a grow of a kind whose newest group is a grown
 // one with a leg whose every side is not provisioned is refused
 // ReasonGrowNotReady and writes nothing, so a grow sent with no token cannot
-// land over a group that became the newest after the gateway's read; the
-// other kind still grows, and once the group is ready its kind grows again.
+// land over a group that became the newest after the gateway's read; once
+// the group is ready its kind grows again.
 func TestGrowSliceRefusesOverAGrownGroupNotReady(t *testing.T) {
 	env := newOpsEnv(t)
 	legs := []Cand{env.dnCand(opsDnC), env.dnCand(opsDnD)}

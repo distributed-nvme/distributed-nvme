@@ -1809,7 +1809,7 @@ a pinned etcd release; that every
 guest answers passwordless ssh; that the disk-node guests' host names
 differ, since the gateway keeps a migration's new side off every disk node
 of the old side's host name (`architecture.md`, Migrations) and guests
-that share one would leave the copy and react cases' migrations no
+that share one would leave the copy, react and soak cases' migrations no
 destination; that a node guest has what the sweeps and the
 agents need — sudo, the tools of both roles (on a controller node, also the
 thin metadata reader the cn agent runs, those of the copy case's clone
