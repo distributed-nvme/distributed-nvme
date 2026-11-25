@@ -585,7 +585,9 @@ func (s *Server) CreateMigration(
 // so a token that was sent subsumes the staleness of everything phase 1 saw.
 // A caller that sent none gets the re-resolution but not that subsumption —
 // GW6 is presence-based, so an interleaved mutation stays invisible
-// to it.
+// to it, save one: the deciding STM compares the pool's and the migration's
+// ids with phase 1's whatever the token, and answers ABORTED when another
+// migration took the name in between.
 //
 // The agent answers GetSideInfo from its latest observation of the side and
 // reads nothing of the node (architecture.md, Live-state reporting). That is
@@ -622,6 +624,14 @@ func (s *Server) FinishMigration(
 		phaseDnId uint64
 		phaseAddr string
 		phasePtr  *pb.SidePointer
+		// phaseSpId and phaseMigrId name the pool and the migration phase
+		// 1 read, whose copy the agent call proves whole; phase 2 ends that
+		// migration or none, so a migration made again under the name in
+		// between, after a forced cancel, another caller's finish or the
+		// worker's own, is never ended on the old one's proof, as
+		// DeleteClone compares its clone's id.
+		phaseSpId   uint64
+		phaseMigrId uint64
 	)
 	err := s.cli.Snapshot(ctx, func(stm etcdutil.STM) error {
 		// openSp, not openSpRead, as in CreateMigration's planning read:
@@ -643,6 +653,8 @@ func (s *Server) FinishMigration(
 			return err
 		}
 		phaseCid = sc.Cid
+		phaseSpId = sc.SpId()
+		phaseMigrId = migr.GetMigrId()
 		if req.GetForce() {
 			return nil
 		}
@@ -723,6 +735,13 @@ func (s *Server) FinishMigration(
 		}
 		if err := migrCutoverStarted(req.GetMigrName(), migr); err != nil {
 			return err
+		}
+		if sc.SpId() != phaseSpId || migr.GetMigrId() != phaseMigrId {
+			return errAborted(
+				"migration %q is another migration (pool %d, id %d) than "+
+					"the one the first read found (pool %d, id %d): run "+
+					"the finish again", req.GetMigrName(), sc.SpId(),
+				migr.GetMigrId(), phaseSpId, phaseMigrId)
 		}
 		migrId = migr.GetMigrId()
 		// The source's extents go back to its DN and its pointer disappears,

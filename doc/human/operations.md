@@ -3471,7 +3471,8 @@ Safe steps:
    `dnvctl migr finish --name <name>`. The gateway asks the new side's
    agent for the proof that the copy is whole. It refuses while the copy is
    not whole or the agent does not answer, and, with `--force` too, while
-   the cutover has not started. The leg then keeps the new side alone, and
+   the cutover has not started. It answers ABORTED when another migration
+   took the name between its read and its write: run it again. The leg then keeps the new side alone, and
    the old disk node removes the old side and frees its extents.
 5. Check: `dnvctl sp get` shows the leg with one side, the new one, and
    `dnvctl migr get --name <name>` answers NOT_FOUND.

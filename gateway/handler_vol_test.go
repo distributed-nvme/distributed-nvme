@@ -5988,3 +5988,208 @@ func TestVolumeMutatorsWithoutATokenSkipTheCheck(t *testing.T) {
 		})
 	}
 }
+
+// TestFinishMigrationRefusesAnotherMigrationInPhaseTwo pins the id check of
+// a finish without force: between the agent call that proves the copy whole
+// and the deciding transaction, a forced cancel and a create make another
+// migration under the same name, and it too has cut over. The finish must
+// not end that one on the first one's proof: it is refused with ABORTED,
+// whatever the token, and writes nothing.
+func TestFinishMigrationRefusesAnotherMigrationInPhaseTwo(t *testing.T) {
+	env := newVolEnv(t)
+	addr := fakeAddrPort(t, "dn")
+	agent := startFakeAgent(t, addr, 1<<40)
+	agent.setInfo(nil, volHydratedSideInfo(), nil, nil)
+	env.putDn(addr, 704, 0, nil)
+	create := func() {
+		t.Helper()
+		if _, err := env.srv.CreateMigration(
+			env.ctx, &pb.CreateMigrationRequest{
+				ClusterName: env.cluster,
+				SpName:      volSpName,
+				SpRev:       env.token(),
+				MigrName:    "migr-a",
+				SrcSideId:   volDataSideA,
+				DnSelector:  volDnSelector(addr),
+			}); err != nil {
+			t.Fatalf("CreateMigration: %v", err)
+		}
+	}
+	create()
+	volCutover(env, "migr-a")
+
+	unblock := agent.setBlock()
+	defer unblock()
+	done := make(chan error, 1)
+	go func() {
+		_, err := env.srv.FinishMigration(
+			env.ctx, &pb.FinishMigrationRequest{
+				ClusterName: env.cluster,
+				SpName:      volSpName,
+				MigrName:    "migr-a",
+			})
+		done <- err
+	}()
+	deadline := time.Now().Add(10 * time.Second)
+	for agent.callCount("GetSideInfo") == 0 {
+		if time.Now().After(deadline) {
+			t.Fatalf("the finish never reached the agent call")
+		}
+		time.Sleep(time.Millisecond)
+	}
+	if _, err := env.srv.CancelMigration(
+		env.ctx, &pb.CancelMigrationRequest{
+			ClusterName: env.cluster,
+			SpName:      volSpName,
+			SpRev:       env.token(),
+			MigrName:    "migr-a",
+			Force:       true,
+		}); err != nil {
+		t.Fatalf("CancelMigration: %v", err)
+	}
+	create()
+	volCutover(env, "migr-a")
+	before := env.dump()
+	unblock()
+
+	err := <-done
+	if status.Code(err) != codes.Aborted ||
+		!strings.Contains(err.Error(), "another migration") {
+		t.Fatalf("the finish of a migration made again under its name "+
+			"answered %v, want ABORTED naming another migration", err)
+	}
+	env.wantNoWrite("the refused FinishMigration", before)
+}
+
+// TestCreateCloneChecksATransferSourcesLayout pins the check of a clone's
+// three layout numbers against its source pool: for a source that is a
+// transfer of this cluster, the gateway reads the source pool (here the
+// clone's own pool, as a move within one pool has it) and refuses a slice
+// count, a stripe or a block other than the pool's, naming both; the pool's
+// own numbers are taken. A transfer of another cluster is not read: its
+// numbers stay the caller's.
+func TestCreateCloneChecksATransferSourcesLayout(t *testing.T) {
+	nf := common.NewNameFmt("")
+	slices := uint32(len(volSpConf().GetSliceIdList()))
+	for _, tc := range []struct {
+		name    string
+		nqn     func(env *volEnv) string
+		slices  uint32
+		stripe  uint64
+		block   uint64
+		refused bool
+	}{
+		{"the pool's numbers", func(env *volEnv) string {
+			return nf.XferNqn(env.cid, volSpId, 7)
+		}, slices, volStripe, volPoolBlock, false},
+		{"another slice count", func(env *volEnv) string {
+			return nf.XferNqn(env.cid, volSpId, 7)
+		}, slices * 2, volStripe, volPoolBlock, true},
+		{"another stripe", func(env *volEnv) string {
+			return nf.XferNqn(env.cid, volSpId, 7)
+		}, slices, volStripe / 2, volPoolBlock, true},
+		{"another block", func(env *volEnv) string {
+			return nf.XferNqn(env.cid, volSpId, 7)
+		}, slices, volStripe, volPoolBlock / 2, true},
+		{"a transfer of another cluster", func(env *volEnv) string {
+			return nf.XferNqn(env.cid+1, volSpId, 7)
+		}, slices * 2, volStripe, volPoolBlock, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			env := newVolEnv(t)
+			env.putTd("dst", 900, 7, 0, true)
+			req := volCloneRequest(env, "clone-a", "dst")
+			req.SrcNqn = tc.nqn(env)
+			req.SrcSliceCnt = tc.slices
+			req.SrcStripeSize = tc.stripe
+			req.SrcBlockSize = tc.block
+			before := env.dump()
+			_, err := env.srv.CreateClone(env.ctx, req)
+			if !tc.refused {
+				if err != nil {
+					t.Fatalf("CreateClone: %v", err)
+				}
+				return
+			}
+			if status.Code(err) != codes.InvalidArgument ||
+				!strings.Contains(err.Error(), "differ from the source pool") {
+				t.Fatalf("CreateClone answered %v, want INVALID_ARGUMENT "+
+					"naming the source pool's numbers", err)
+			}
+			env.wantNoWrite("the refused CreateClone", before)
+		})
+	}
+}
+
+// TestAppendCloneBitmapByStartBlock pins a page placed by the first block
+// the bitmap read named: the gateway works out the chunk and the offset
+// (byte start/8 of the slice's bitmap, chunks of CloneBmChunkBytes), so a
+// page whose start lies in the second chunk lands there; a start that is
+// not a whole byte, a page that crosses its chunk's end, and a request that
+// also sends a bm_idx or an offset are refused. The bitmap read's reply
+// names its slice and first block.
+func TestAppendCloneBitmapByStartBlock(t *testing.T) {
+	env := newVolEnv(t)
+	env.putTd("dst", 900, 7, 0, true)
+	volCreateClone(env, "clone-a", "dst")
+	chunk := uint64(common.CloneBmChunkBytes)
+	appendAt := func(start uint64, page []byte, mod func(
+		*pb.AppendCloneBitmapRequest)) error {
+		req := &pb.AppendCloneBitmapRequest{
+			ClusterName:   env.cluster,
+			SpName:        volSpName,
+			SpRev:         env.token(),
+			CloneName:     "clone-a",
+			SrcSliceIdx:   1,
+			Bitmap:        page,
+			SrcStartBlock: proto.Uint64(start),
+		}
+		if mod != nil {
+			mod(req)
+		}
+		_, err := env.srv.AppendCloneBitmap(env.ctx, req)
+		return err
+	}
+	chunkBytes := func(bmIdx uint32) []byte {
+		got := &pb.CloneBitmap{}
+		env.get(model.CloneBitmapKey(env.cid, volSpId, "clone-a", 1, bmIdx),
+			got)
+		return got.GetBitmap()
+	}
+	// The second chunk's first two pages, by their first blocks.
+	if err := appendAt(chunk*8, []byte{0x01, 0x02}, nil); err != nil {
+		t.Fatalf("page at the second chunk's start: %v", err)
+	}
+	if err := appendAt(chunk*8+16, []byte{0x03}, nil); err != nil {
+		t.Fatalf("the next page: %v", err)
+	}
+	if got := chunkBytes(1); !bytes.Equal(got, []byte{0x01, 0x02, 0x03}) {
+		t.Fatalf("chunk 1: got %v, want the two pages in order", got)
+	}
+	for _, tc := range []struct {
+		name  string
+		start uint64
+		page  []byte
+		mod   func(*pb.AppendCloneBitmapRequest)
+		frag  string
+	}{
+		{"a start that is no whole byte", 4, []byte{1}, nil, "multiple of 8"},
+		{"a page over its chunk's end", chunk*8 - 8, []byte{1, 2}, nil,
+			"crosses the end"},
+		{"a bm_idx beside it", 0, []byte{1}, func(
+			r *pb.AppendCloneBitmapRequest) {
+			r.BmIdx = 1
+		}, "no bm_idx"},
+		{"an offset beside it", 0, []byte{1}, func(
+			r *pb.AppendCloneBitmapRequest) {
+			r.Offset = proto.Uint32(0)
+		}, "no bm_idx"},
+	} {
+		err := appendAt(tc.start, tc.page, tc.mod)
+		if status.Code(err) != codes.InvalidArgument ||
+			!strings.Contains(err.Error(), tc.frag) {
+			t.Errorf("%s: %v, want INVALID_ARGUMENT naming %q", tc.name, err,
+				tc.frag)
+		}
+	}
+}

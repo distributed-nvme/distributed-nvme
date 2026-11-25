@@ -4278,7 +4278,9 @@ false and hydration is incomplete, which is checked outside the STM through
 (`migr_dst_info.dm_clone_info.details`), which answers from the agent's
 latest observation of the side, proof enough for the reason `DeleteClone`
 gives (Clones); an agent that does not answer that call is
-`FAILED_PRECONDITION` too (`gateway.md` AG3). `force` skips the hydration
+`FAILED_PRECONDITION` too (`gateway.md` AG3); `ABORTED` when the pool or
+the migration of that name at the decision is another one than the first
+read found, by its id, whatever `force` (`gateway.md` AG4). `force` skips the hydration
 proof and nothing else, so a forced finish after the cutover succeeds at
 any copy level, and the leg then serves the destination's recycled bytes
 where the copy had not reached (System overview; Known limits). Reason:

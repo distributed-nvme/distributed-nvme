@@ -1604,7 +1604,11 @@ rather than a candidate problem.
   `FAILED_PRECONDITION`. Deciding STM: re-resolve and the
   token; the migration's `cutover_pending` again, since a cancel and a
   create under the same name between the phases leave a pending record
-  there; apply the finish of `architecture.md`, Migrations, through
+  there; the pool's and the migration's ids against phase 1's, `ABORTED`
+  when either differs, whatever the token and `force`, since another
+  migration can take the name between the phases, after a forced cancel,
+  another caller's finish or the worker's own, and the agent call proved
+  the copy of the first; apply the finish of `architecture.md`, Migrations, through
   `model.EndMigrationIn`, the write the sp worker's finish runs too
   (`dnv-worker.md` MD6): the destination side becomes the leg's side, the
   source side is removed, the source DN's bookkeeping is released with
@@ -1908,10 +1912,12 @@ what keeps such a two-phase RPC exactly as safe as a one-STM RPC. A
 GW6 is presence-based, so an interleaved mutation it did not observe stays
 invisible to it. That is the
 AG4 half of the token-less cost `architecture.md`, Revision keys and the
-sync fan-out, accepts. The node deletes are the exception: their agent
-call proves a fact of one node at one revision, so their deciding STM
-compares the cluster id, the node id and the revision with the planning
-snapshot's whatever the token (Disk nodes).
+sync fan-out, accepts. The node deletes, `DeleteClone` and
+`FinishMigration` are the exception: their agent call proves a fact of one
+object, so their deciding STM compares the ids it read, a node's cluster
+id, node id and revision, a clone's id, a pool's and a migration's ids,
+with the planning snapshot's whatever the token, and answers `ABORTED`
+when one moved (Disk nodes; the call matrix below).
 
 The complete call matrix:
 
