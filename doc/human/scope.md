@@ -916,16 +916,21 @@ The entries:
   those counts alone. It needs a disk of another cluster under the agent's
   path. State: fix decided. Read from dnv's code; not seen in the lab.
 - **Making the old primary the primary again right after a failed fence
-  can write old data.** Silent. A fence that suspends the old primary's
+  lands its held writes late.** A fence that suspends the old primary's
   path and then fails to load the error target leaves that path suspended
   on the side, holding the old primary's writes. If the next change makes
   that controller node the primary again before any later converge fences
-  it, those held writes land on the side. The other primary could not
-  write this side meanwhile, but it wrote the group's other leg, so the
-  two legs can hold different data. Two things must happen. A table load
-  fails. Then a change makes that controller node the primary again
-  before the syncup of the next check round fences the path. State: fix
-  later. Not seen in the lab.
+  it, those held writes land on the side. Nothing is lost by it. The other
+  primary could not write this side meanwhile, since its path there stays
+  closed while the fence has failed. It writes the group's other leg only
+  where it can start the array from that leg alone, which mdadm does only
+  where the old primary's md had already recorded this leg as failed on
+  the other leg; md's next start then takes this leg as behind and copies
+  over the held writes. Otherwise the other primary starts no array of the
+  group, and the held writes land on a group nothing else wrote. What
+  stays is a write the host saw fail, or never saw end, that lands after
+  all, which is no loss (section 4). State: accepted. Not seen in the
+  lab.
 - **An older build started after a newer one can lose data.** Silent. No
   program checks which build its peers run, and a build reads only what
   older builds wrote. An older build ignores what a newer one added. An
@@ -1944,8 +1949,8 @@ Measured times are in [the introduction](introduction.md#status-and-limits).
   the primary's md refuses to add such a leg to its running array, and
   after a failover the new primary still sees 512-byte blocks over the
   larger ones, so md fails the leg on its first write that the disk
-  refuses. Leg repair then puts a spare in the place of each leg, on
-  another disk node. State: accepted: the data stays in place for the fix
+  refuses. Leg repair then replaces each leg with a new leg, on another
+  disk node. State: accepted: the data stays in place for the fix
   and for a recovery by hand, and refusing the disk would stop the same
   legs. Read from the kernel's code; not seen in the lab.
 

@@ -4608,9 +4608,13 @@ else reported through `agent_reply` is still a protocol-level refusal.
   table it wants), and the held writes land on the side: DN10's fence
   check passes then, the other primary's linear being on its dm-error.
   That other primary wrote nothing to this side while the linear was
-  held, since its path there waited for the fence, but it wrote the
-  group's other legs, so the legs can hold different data where the held
-  writes land ([D16]).
+  held, since its path there waited for the fence, and the legs end equal
+  ([D16]): the other primary starts the group's array without this leg
+  only where the old primary's md had recorded this leg as failed on the
+  other legs before their fence, and md's next start then takes this leg as
+  behind and copies over the held writes; otherwise it starts no array of
+  the group, and the held writes land on a group nothing else wrote. What
+  stays is a write its host saw fail that lands after all.
 * The fence window's start, and the mark a level with no export layer
   leaves when it ends a window early (DN12 rule 3), live only in memory.
   After the window, with the linears resumed on the dm-errors phase 2 left
