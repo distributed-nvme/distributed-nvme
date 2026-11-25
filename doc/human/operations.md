@@ -71,6 +71,7 @@ The sections, by subject:
       add](#a-leg-of-another-identity-that-the-primary-does-not-add)
     - [A group whose every leg was
       wiped](#a-group-whose-every-leg-was-wiped)
+    - [An array create cut short](#an-array-create-cut-short)
     - [Keeping the old copies](#keeping-the-old-copies)
     - [Taking the group's repairs over](#taking-the-groups-repairs-over)
 - Nodes:
@@ -1098,6 +1099,47 @@ When to stop: the named leg will never come back.
 Tested: the cn agent suite, repair case, stage `made`: no array over wiped
 legs.
 
+### An array create cut short
+
+Symptom: a new group, of a new pool, of a grow or of a clone, has never
+run. Its row reads error: mdadm's refusal to start the array, or that the
+array is inactive.
+
+Confirm: `dnvctl group inspect --grp <group id>` shows one leg with a
+superblock, a full member, and the other leg with none. `dnvctl sp get`,
+or for a clone's group `dnvctl clone get --name <clone>`, shows the group
+with `array_made` false: the worker never saw its array run.
+
+What happened: mdadm writes the legs' superblocks one after the other when
+it creates an array, and the primary stops a command after 3 seconds. A
+slow leg made the create pass that limit between the two writes. Every
+later try, on this primary or on a new one, starts the array from the one
+leg with a superblock, and mdadm refuses, since that superblock counts
+both legs.
+
+What dnv does alone: nothing that brings the group back. The group's
+error row makes the primary unhealthy, so the worker fails the pool over,
+after `primary_unhealthy` for a grow's group on a primary that has built
+its stack and after `cntlr_unhealthy` for a new pool, or replaces the only
+cntlr of a pool that has one; the new primary meets the same refusal, and
+a grow's group that it cannot start can keep it from building that slice,
+and so the pool.
+
+Safe steps: follow "Before every forced start", then start the array from
+the leg with the superblock:
+`dnvctl group force-start --grp <group id> --leg <leg id>`. md then
+copies that leg onto the other. Step the level back once
+`dnvctl group inspect` shows the array running.
+
+Steps that can lose data: none, as long as the group never ran: it holds
+no data yet. A group whose array has run before is another case: read
+"Which leg to choose".
+
+When to stop: the group's `array_made` reads true, or `dnvctl group
+inspect` shows a superblock on both legs, or one that is not a full member.
+
+Tested: not tested.
+
 ### Keeping the old copies
 
 Symptom: you plan a forced start, and the group has retired legs.
@@ -1879,7 +1921,12 @@ Safe steps, as root on the machine:
 
 1. Give the machine a host name of its own before any of its nodes is
    created. A node's location is its machine's host name by default
-   ([Choose a node's location](#choose-a-nodes-location)).
+   ([Choose a node's location](#choose-a-nodes-location)). Keep its clock
+   in time with a time sync service, such as chrony or systemd-timesyncd,
+   on every machine of the cluster, the control plane's too: the worker
+   compares the times that the machines' clocks stamp, and a clock that is
+   off or steps back can hold a failover ([the scope
+   page](scope.md#8-waits-a-host-can-see)).
 2. Install the tools the agents run ([the
    introduction](introduction.md#requirements)): nvme-cli, mdadm, dmsetup
    and util-linux on every node, and thin-provisioning-tools on a
@@ -6149,7 +6196,9 @@ Safe steps, as root on each control-plane machine:
    On a new etcd each start waits for the other servers too.
 2. Open the network the control plane needs, and no more: [The
    networks](#the-networks) lists who connects to whom and gives the
-   firewall example.
+   firewall example. Keep the machine's clock in time with a time sync
+   service, as step 1 of [Prepare a node](#prepare-a-node) says: the
+   workers' clocks stamp the health epochs.
 3. Copy from the release folder into `/usr/local/bin/` each of
    `dnv-gateway`, `dnv-worker` and `dnv-cdc` that the machine runs, and
    `dnvctl`, and copy their units from `deploy/systemd/` into
