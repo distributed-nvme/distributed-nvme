@@ -295,10 +295,13 @@ always means the SP's `DmPoolConf.data_block_size`.
 * **operator in charge** — An operator's take-over of an md-raid1 group's
   repair from the sp worker: the group's flag, `Group.operator_in_charge`,
   which the operator sets and clears, keeps the worker from creating a
-  repair of the group, auto-grow from withdrawing a stuck grow of it
-  (`dnv-worker.md` AR6), and the primary from assembling a broken array of
-  the group again (`cnagent.md` CN12, The re-assembly), while it stands
-  (Repairs, `UpdateGroupOperatorInCharge`).
+  repair of the group and from ending a bad leg's migration
+  (`dnv-worker.md` AR8), auto-grow from withdrawing a stuck grow of it
+  (`dnv-worker.md` AR6), the worker from asking for the group's md check
+  (`dnv-worker.md` AR16), and the primary from assembling a broken array of
+  the group again (`cnagent.md` CN12, The re-assembly) and from running a
+  check it started for the worker, while it stands (Repairs,
+  `UpdateGroupOperatorInCharge`).
 * **array made** — The flag that an md-raid1 group's array has run,
   `Group.array_made`: the sp worker sets it from the first report of the
   primary that reads the group's row `OK` (`dnv-worker.md` AR15), and
@@ -4407,9 +4410,13 @@ worker's repair while it is CREATED and cancels it once it is ABORTED.
 Reason: without the flag the worker would create its repair again at once
 after the cancel, and no call changes a pool's `event_threshold` once it is
 made; the flag is the group's, not a level or a flag of the pool, so that
-it stops that group's create and auto-grow's withdrawal of the group
-(`dnv-worker.md` AR6) and nothing else: failover, auto-grow's grows and the
-other reactions run, the pool's IO goes on, and a level keeps its one
+it stops five things of that group alone: the worker's create of a repair
+(`dnv-worker.md` AR8), auto-grow's withdrawal of a stuck grow
+(`dnv-worker.md` AR6), the end leg repair gives a bad leg's migration
+(`dnv-worker.md` AR8), the md check, which the worker does not ask for and
+withdraws when it stands (`dnv-worker.md` AR16), and the primary's new
+assembly of a broken array (`cnagent.md` CN12). Failover, auto-grow's
+grows and the other reactions run, the pool's IO goes on, and a level keeps its one
 meaning, the parts of the pool it switches off (SpLevel). The worker still
 drives a worker's repair that exists (`dnv-worker.md` AR8): its drive step
 may cancel the aborted repair first, which the operator's cancel then meets
@@ -4714,7 +4721,8 @@ group's clone is being deleted. The call takes the pool at every
 `sp_level`, since an operator sets the flag at a level where reactions stop
 before lowering it, and at those levels the flag stops nothing but the
 primary's re-assembly of a broken array of the group (`cnagent.md` CN12,
-The re-assembly). No finish,
+The re-assembly) and a check the primary runs for a request that stands
+from before the level step (`cnagent.md` CN12, The md check). No finish,
 cancel or other step clears the flag, only this call: while it stands the
 worker creates no repair of the group, however long the operator leaves it.
 Action: STM: set the group's `operator_in_charge` to the request's value; a
@@ -4722,7 +4730,8 @@ group that already holds that value is answered OK with no write, a token
 the request carried still being checked first (`gateway.md` GW6). The write
 bumps `SpRev`. Reason: the primary reads the flag: while it stands, the
 primary leaves a broken array of the group as it is instead of assembling
-it again (`cnagent.md` CN12, The re-assembly), so the flag must reach the
+it again (`cnagent.md` CN12, The re-assembly) and starts no md check of
+the group, stopping one it runs, so the flag must reach the
 cntlrs in the group's record; the sp worker reads every record afresh at
 the start of each pass (`dnv-worker.md` AR1) and sees it there too. A token
 a caller holds is stale after the write, as after any write that bumps

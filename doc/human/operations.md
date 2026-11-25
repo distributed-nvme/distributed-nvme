@@ -1204,11 +1204,16 @@ Symptom: you want to run repairs of a group by hand.
 Confirm: `dnvctl sp get` shows the group's flag
 (`operator_in_charge`) and its repair.
 
-What dnv does alone: with the operator-in-charge flag set, the worker
-creates no repair of the group.
-The primary leaves a broken array of the group as it is. Failover and the
-other reactions go on. The worker still drives a repair of its own that
-exists.
+What dnv does alone: with the operator-in-charge flag set, five things
+stop for the group: the worker creates no repair of it; the worker does not
+take back a grow of it whose new group never gets ready, which it would
+otherwise remove; the worker asks for no md check of it, the read of both
+legs that repairs a sector one leg cannot read, and the primary stops a
+check it started for the worker; a bad leg of it that a migration moves
+keeps its migration, which leg repair would otherwise end; and the primary
+leaves a broken array of it as it is. Failover and the other reactions go
+on. The worker still drives a repair of its own that exists. A flag left
+set by mistake leaves the group with no md check for good.
 
 Safe steps:
 
@@ -1233,8 +1238,11 @@ When to stop: the group's array does not run and the worker's repair
 waits for an abort it cannot get.
 
 Tested: the worker suite, `integtest/worker_test.sh`, the gateway suite and
-the end-to-end suite check the flag. That the primary leaves a broken array
-alone under the flag is checked only by the agent's unit tests.
+the end-to-end suite check that the flag holds the worker's create of a
+repair. The other effects are checked only by unit tests: the broken array
+left alone by the agent's, the md check not asked for, the migration not
+ended and the grow not taken back by the worker's. No test covers the
+primary's stop of a running check under the flag.
 
 ## A pool made before the stripe bound
 

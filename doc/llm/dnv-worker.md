@@ -4432,7 +4432,8 @@ action (AR2), and none runs at a level that suppresses reactions (AR3);
 there the operator drives the worker's repairs with the gateway's calls,
 which take a name with the reserved prefix (`architecture.md`, Repair).
 Within leg repair, the group's `operator_in_charge` flag holds the create
-alone (The create, below): the drive step reads no `operator_in_charge` flag, so while an
+and the end of a bad leg's migration (The create, and A bad leg with two
+sides, below): the drive step reads no `operator_in_charge` flag, so while an
 operator takes the group over the worker still finishes, cancels and tries
 to abort its own repair of it (`architecture.md`, Repairs).
 

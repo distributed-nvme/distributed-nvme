@@ -1488,7 +1488,9 @@ Measured times are in [the introduction](introduction.md#status-and-limits).
   run. State: procedure written, [the forced-start guide](operations.md#the-forced-start-guide), "A forced start that
   waits".
 - **An open repair, or the operator-in-charge flag, holds the worker's
-  repair.** A group has one repair at a time. State: accepted, by design.
+  repair.** A group has one repair at a time. The flag also stops md's
+  check of the group, so a flag left set by mistake leaves the group with
+  no md check. State: accepted, by design.
 - **A pool with a lost record waits for an operator.** A pool's record
   lists the names of its volumes and its other objects. When the record of
   one of them is gone from etcd, the worker sends the pool nothing.

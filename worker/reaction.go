@@ -3003,10 +3003,10 @@ func operatorHold(target *repairTarget) (string, []slog.Attr) {
 	if target.grp.GetOperatorInCharge() {
 		// AR8: an operator has taken the group's repair over from the
 		// worker (architecture.md, Repairs), so leg repair creates no
-		// repair for it until the operator clears the flag. Only the
-		// create is held: the drive step above still drives the
-		// worker's own repair of the group, and every other reaction
-		// runs. The hold comes before the forced-start hold, since the
+		// repair for it until the operator clears the flag, and the end
+		// of a bad leg's migration waits too (endLegMigration). The
+		// drive step above still drives the worker's own repair of the
+		// group, and failover and the grows run. The hold comes before the forced-start hold, since the
 		// flag is the operator's own and lasts longer than a mark, so
 		// the record names the flag whenever both stand. The hold is
 		// THIS group's (AR2), so the scan goes on; a create from a
