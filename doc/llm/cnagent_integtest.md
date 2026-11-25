@@ -1287,9 +1287,12 @@ both arrays back and the pool read-only with needs_check.
 
 **thinrepair** is the repair by hand of a thin pool whose metadata carries
 needs_check (`architecture.md`, Known limits, No thin-metadata repair path
-is specified), its steps tried on a real kernel and each logged with its
-exit status. The A shape's pool, its primary on CN2 alone and one meta
-group, takes 8 MiB from the host; then both data legs' exports to CN2 error
+is specified), its steps run on a real kernel, each logged with its exit
+status and, when it fails, with its whole output, and each step of the
+procedure of `operations.md`, Repair a thin pool's metadata, required to
+pass, so that the case fails at the first one that does not. The A shape's
+pool, its primary on CN2 alone and one meta group, takes 8 MiB from the
+host; then both data legs' exports to CN2 error
 every IO, as repair's reassembly stage does it, a host write breaks the data
 array (`cnagent.md` CN29), and a request with a new volume, whose creation
 is a pool message that commits the pool (CN14), fails that commit over the
@@ -1301,9 +1304,13 @@ meta group's array is then the metadata's whole device, and the flags word
 of its superblock, read with direct IO, carries needs_check. On CN2's VM the
 case runs `thin_check` on it, `thin_repair` from it onto a new device, a
 loop device over a file of the array's size, `thin_check` of the new device,
-the new device copied back onto the array, `thin_check`, `thin_check
---clear-needs-check-flag` and a last `thin_check`, which must pass, and the
-superblock's flags word must then read no needs_check; the level back up
+the new device copied back onto the array, which `cmp` must then find
+equal to the new device, `thin_check`, `thin_check
+--clear-needs-check-flag` and a last `thin_check`, every one of which must
+pass but the `thin_check` right after the copy back, which the procedure
+does not have and the case only logs, and the superblock's flags word must
+then read no needs_check; the new device and its file stay for the cleanup
+when a step fails. The level back up
 builds a pool that reads writable with no needs_check flag, the host reads
 its 8 MiB as written and writes again. On the lab `thin_repair`'s output
 carried no needs_check: the flags word read none after the copy back, before
@@ -1384,7 +1391,9 @@ disk's header
 block zeroed (`architecture.md`, [D13]) and the udev rules removed last; and
 before the arrays stop, whatever the system made of redund's foreign
 signatures, an array, an active volume or a bcache device over one of them,
-should a rule have failed, together with the stage's scratch devices. Every
+should a rule have failed, together with the stage's scratch devices.
+Then thinrepair's new metadata device, a loop device over a file in the
+suite's work folder, is detached and its file removed. Every
 suspended dnv device is resumed before anything over it is removed, as one
 wedges its removal, the namespace disable above it and any block scan
 (`architecture.md`, [D12]). md arrays are named through udev, else by

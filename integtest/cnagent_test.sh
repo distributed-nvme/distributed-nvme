@@ -14342,12 +14342,18 @@ TR_TD2=0x1e
 
 # tr_step <label> <cmd…> — one step of the repair by hand on vm2, its exit
 # status and output logged as "THINREPAIR <label> rc=<n>: <output>", and the
-# status returned, since the case records which steps work.
+# status returned, and the whole output logged when the step failed; the case
+# dies on a step of the procedure of operations.md, Repair a thin pool's
+# metadata, that fails. It adds two checks after the copy back: a cmp of the
+# two devices, which must pass, and a thin_check, which it only logs.
 tr_step() {
 	local label=$1 out rc=0
 	shift
 	out=$(sshv 2 "$*" 2>&1) || rc=$?
 	log "THINREPAIR $label rc=$rc: $(printf '%s' "$out" | tr '\n' ' ' | cut -c1-400)"
+	if [ "$rc" != 0 ]; then
+		printf '%s\n' "$out" | sed 's/^/  THINREPAIR | /' >&2
+	fi
 	return "$rc"
 }
 
@@ -14357,7 +14363,7 @@ case_thinrepair() {
 	SIDE_PROVISIONED=()
 	local sp=$TR_SP c2=0x2 hv=2 nqn="$NQN_IT_PREFIX:tr:vol1"
 	local req2="$WORK/req-thinrepair-cn2.json" out dev want l st flags pool
-	local lin meta md2 mdmeta deadline grp size way sb newmeta
+	local lin meta md2 mdmeta deadline grp size sb newmeta
 	dev=$(host_dev "$TR_UUID")
 	pool=$(cn_dm_name c2 2 "$sp" "$A_SLICE")
 	diag_cntlr 2 "$sp" "$c2"
@@ -14468,32 +14474,39 @@ case_thinrepair() {
 	stage repair "thin_check, thin_repair onto a new metadata device, its check, the copy back over the meta group's array, the flag cleared"
 	# dnv builds the pool over the meta group's array by its name, and no
 	# request names another metadata device, so the swap of a repaired
-	# device for the old one is the copy back over the array.
-	way=""
-	tr_step "thin_check (the flag set)" "thin_check $meta" || true
+	# device for the old one is the copy back over the array. Each step of
+	# the procedure of operations.md, Repair a thin pool's metadata, must
+	# work, as the doc says, or the case fails there; a failing run leaves
+	# the new device for the cleanup (tr_meta_drop).
+	tr_step "thin_check (the flag set)" "thin_check $meta" ||
+		die "thinrepair: thin_check of $meta, which carries only the mark, failed (the procedure's check before the repair)"
 	newmeta=$(helper 2 "tr_meta_make $size") ||
 		die "thinrepair: making the new metadata device failed: $newmeta"
-	if tr_step "thin_repair onto the new device $newmeta" \
-		"thin_repair -i $meta -o $newmeta" &&
-		tr_step "thin_check of the new device" "thin_check $newmeta" &&
-		tr_step "the copy back onto $meta" \
-			"dd if=$newmeta of=$meta bs=1M conv=fsync status=none"; then
-		way="thin_repair onto a new device, the copy back"
-	fi
+	tr_step "thin_repair onto the new device $newmeta" \
+		"thin_repair -i $meta -o $newmeta" ||
+		die "thinrepair: thin_repair from $meta onto $newmeta failed (the procedure's repair onto a new device)"
+	tr_step "thin_check of the new device" "thin_check $newmeta" ||
+		die "thinrepair: the repaired metadata on $newmeta does not check clean (the procedure's check of the new device)"
+	tr_step "the copy back onto $meta" \
+		"dd if=$newmeta of=$meta bs=1M conv=fsync status=none" ||
+		die "thinrepair: the copy back from $newmeta onto $meta failed (the procedure's copy back)"
+	tr_step "the copy back compared" "cmp $newmeta $meta" ||
+		die "thinrepair: $meta does not hold what $newmeta holds after the copy back (the procedure's copy back)"
 	log "THINREPAIR repair: $meta's superblock after the copy: $(helper 2 "tr_sb_flags $meta")"
 	assert_eq "$(helper 2 tr_meta_drop)" dropped \
 		"thinrepair: the new metadata device taken away"
+	# Not a step of the procedure: logged only.
 	tr_step "thin_check after the copy" "thin_check $meta" || true
 	tr_step "thin_check --clear-needs-check-flag" \
-		"thin_check --clear-needs-check-flag $meta" && way="${way:+$way, }the flag cleared"
+		"thin_check --clear-needs-check-flag $meta" ||
+		die "thinrepair: clearing the mark on $meta failed (the procedure's clear of the mark)"
 	tr_step "thin_check at the end" "thin_check $meta" ||
-		die "thinrepair: $meta does not check clean after the steps ($way)"
-	log "THINREPAIR repair: the steps that worked: ${way:-none}"
+		die "thinrepair: $meta does not check clean after the steps (the procedure's last check)"
 	sb=$(helper 2 "tr_sb_flags $meta") ||
 		die "thinrepair: reading $meta's superblock failed: $sb"
 	log "THINREPAIR repair: $meta's superblock at the end: $sb"
 	(((${sb##*flags=} & 1) == 0)) ||
-		die "thinrepair: $meta's superblock still carries the needs_check flag after the steps ($way): $sb"
+		die "thinrepair: $meta's superblock still carries the needs_check flag after the steps: $sb"
 
 	stage back "the level back up: the pool writable over the repaired metadata, and the host reads its data"
 	req_set "$req2" '.sp_level = "SP_LEVEL_READWRITE"'
