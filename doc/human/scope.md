@@ -1040,7 +1040,9 @@ Measured times are in [the introduction](introduction.md#status-and-limits).
   carry no superblock but still hold data. The primary does not create a
   new array over them, since the group's array has run before, so no data
   is lost (section 5.2 has the one case where the worker has not yet
-  recorded that the array ran); the group stays down until a leg with a
+  recorded that the array ran). While the named leg serves, a withdrawn
+  mark lets the primary assemble the group from it with no mark, which can
+  bring the group back. Otherwise the group stays down until a leg with a
   superblock is back, such as the named leg, which a new mark can name. If that leg is gone for
   good, the data on the zeroed legs can be reached only by hand with mdadm.
   State: procedure written, [the forced-start guide](operations.md#the-forced-start-guide), "A group whose every

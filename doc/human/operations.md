@@ -1076,20 +1076,40 @@ refusal: a repair that takes back a retired leg of another identity.
 ### A group whose every leg was wiped
 
 Symptom: a forced start stopped after it wiped the other legs: its mark
-was withdrawn, or the named leg was lost. The group stays down. Its row
-says that the array has run before and no member carries a superblock,
-when every leg serves; or that only some legs are available and none
-carries a superblock, when the named leg is lost.
+was withdrawn, or the named leg was lost. The group stays down with no
+member that carries a superblock.
 
-Confirm: `dnvctl group inspect --grp <group id>` shows no superblock on any
-leg that serves.
+How it comes about: a forced start wipes the superblock of every other
+leg the group keeps, but never that of the leg its mark names, of the open
+repair's bad leg, or of the new leg of a repair with its abort flag set.
+While the mark stands and the named leg is lost, the start waits ("A
+forced start that waits"). Once the mark is withdrawn, the primary
+assembles the group with no mark from the legs that still carry a
+superblock, as at any start: while the named leg serves, the group can
+come back by itself, and md then copies onto the wiped legs; where mdadm
+refuses that start, the group stays down with those legs. The group is
+left with no member that carries a superblock only once the named leg,
+and the open repair's bad leg where the group has one, are lost or have
+left the group.
 
-What dnv does alone: once the worker has recorded that the group's array
-ran, the primary makes no new array over legs that hold data with no
-superblock. The scope page, section 5.2, lists the rare case where the
-worker has not recorded it yet.
+Confirm: `dnvctl group inspect --grp <group id>` shows which legs carry a
+superblock. The named leg, the open repair's bad leg and an aborting
+repair's new leg keep theirs while they serve; the wiped legs show none.
+The group's row can name mdadm's refusal, or say that the array has run
+before and no member carries a superblock, or that only some legs are
+available and none carries one, at the converge that met it; the next
+check round reads the row as `RES_STATUS_MISSING` with no text, so trust
+the inspect.
 
-Safe steps: bring back the leg the mark named. A new mark can name it.
+What dnv does alone: with the mark withdrawn, the primary assembles the
+group from the legs that carry a superblock. Once the worker has recorded
+that the group's array ran, it makes no new array over legs that hold data
+with no superblock. The scope page, section 5.2, lists the rare case where
+the worker has not recorded it yet.
+
+Safe steps: bring back the leg the mark named. A new mark can name it while
+the group keeps it. A leg that has left the group, as one a repair retired,
+takes the steps of "Starting from a retired leg" first.
 
 Steps that can lose data: if that leg will never come back, the data on
 the wiped legs can be reached only by hand with mdadm, by someone who
@@ -1098,7 +1118,9 @@ knows md's layout.
 When to stop: the named leg will never come back.
 
 Tested: the cn agent suite, repair case, stage `made`: no array over wiped
-legs.
+legs. The start with no mark after a withdrawn mark is run by no suite; a
+unit test of the agent covers the refusal to make an array over wiped legs
+once the array ran.
 
 ### An array create cut short
 
