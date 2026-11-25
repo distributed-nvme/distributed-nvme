@@ -450,13 +450,15 @@ uncommitted (`dnv-worker.md` EU4).
   candidates
   (`architecture.md`, Per-operation allocation); `AppendCloneBitmap`'s
   stored chunk plus the new page above `CloneBmChunkBytes` — one chunk's
-  ceiling reached by previous appends (its four `INVALID_ARGUMENT` refusals
+  ceiling reached by previous appends (its `INVALID_ARGUMENT` refusals
   are an invalid request: an empty `bitmap`, both
   index bounds — `src_slice_idx` at or above `src_slice_cnt` and `bm_idx` at
-  or above `MaxCloneBmCnt`, checked in-STM — and the stateless page cap, a
+  or above `MaxCloneBmCnt`, checked in-STM — the stateless page cap, a
   page longer than `CloneBmChunkBytes` judged on the request alone because a
-  page longer than a whole chunk fits nowhere whatever is stored; all four
-  under Clones); a cntlr's CN below a grow's extent count (`GrowSlice`'s
+  page longer than a whole chunk fits nowhere whatever is stored, and the
+  four of a `src_start_block`: sent beside a `bm_idx` or an `offset`, not
+  a multiple of 8, past the last chunk, or with a page that crosses the
+  end of its chunk; all under Clones); a cntlr's CN below a grow's extent count (`GrowSlice`'s
   pre-check); metadata room, which is capacity like extents
   (`architecture.md`, Metadata units): a scan that found no DN with room
   (`CreateMigration`), the message saying "metadata room"; the ledgers' own
@@ -1372,8 +1374,14 @@ below name.
   (`validateCloneGeometry`); then a candidate unit (GW9), because the
   clone's clone meta group takes extents on DNs. Each round plans from one
   read-only `Snapshot` opened with `openSp`, so a stale token is `ABORTED`
-  first, and runs every refusal of `cloneCreateChecks`, which the deciding
-  STM runs again, in its order: the `MaxCloneCntPerSp` ceiling, checked
+  first; then `cloneSrcLayoutCheck`, in the planning read alone, since a
+  pool's layout never changes: a source that is a transfer of this
+  cluster names its pool by id, and the request's three layout numbers
+  must be that pool's (`architecture.md`, Clones), judged before the
+  checks below that take them as typed, `cloneIoSizeCheck` above all, so
+  that a mistyped number hears its own refusal. Then the round runs every
+  refusal of `cloneCreateChecks`, which the deciding STM runs again, in
+  its order: the `MaxCloneCntPerSp` ceiling, checked
   ahead of the name; the name free; the destination td by name; a
   destination td that any `Clone.dst_td_id` names (walk `clone_name_list`, a
   draining clone included) refused; a destination td a transfer's origin
@@ -1490,7 +1498,10 @@ below name.
   absent chunk or a short tail means is `architecture.md`, Bitmap push
   protocol. Validation: `bitmap` non-empty (`validateBitmap`), then a page
   of at most `CloneBmChunkBytes`, judged on this request alone (a page
-  longer than a whole chunk fits nowhere, whatever is already stored).
+  longer than a whole chunk fits nowhere, whatever is already stored), then
+  its place (`clonePagePlace`): the request's `bm_idx` and `offset`, or the
+  chunk and the offset its `src_start_block` falls on, refused beside
+  either.
   STM:
   resolve; token; the clone (`loadLiveClone`, so an append to a latched
   clone is refused and the clone key is in the STM's read set either way);
@@ -1818,7 +1829,8 @@ what a precondition means. The codes are those of `architecture.md`,
 Bitmap reads, and the ones the bullet below names. A leg's bitmap has no
 gateway call: the worker reads it from the agent (`dnv-worker.md` BM7).
 
-* **GetThinDeviceBitmap** — STM: resolve; the td by name to its `td_id`;
+* **GetThinDeviceBitmap** — the reply echoes the request's `slice_idx` and
+  `start_block`. STM: resolve; the td by name to its `td_id`;
   the **primary** cntlr to its `addr_port` and, through `CnConfKey`, its
   `cn_id`; `slice_idx` within the SP's slice count, else
   `INVALID_ARGUMENT`; the window (`checkBitmapWindow`): a `start_block`

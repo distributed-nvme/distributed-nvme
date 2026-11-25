@@ -106,7 +106,7 @@ TD_SIZE=67108864
 GOLD_CLUSTER_GET='{"cluster_conf":null,"cluster_id":"0","cluster_name":"","cn_global":null,"dn_global":null,"sp_global":null}'
 SP_GET_REV=9007199254740993
 GOLD_SP_GET='{"cntlr_list":[],"slice_list":[],"sp_conf":null,"sp_name":"","sp_rev":{"revision":"9007199254740993","sp_name":"sp0"}}'
-GOLD_TD_BM='{"bitmap_hex":"a5","byte_cnt":1}'
+GOLD_TD_BM='{"bitmap_hex":"a5","byte_cnt":1,"slice_idx":0,"start_block":"0"}'
 # The status read's table (dnvctl.md, `cluster` — `ctl/cluster.go`), for
 # the reply the sweep injects for GetClusterStatus: a cluster row and a pool
 # row, one pool read, a next page. $( ) drops the last newline of stdout.

@@ -3821,7 +3821,13 @@ namespace backed by that td is reloaded onto the dm-clone; dm-clone pulls
 missing regions from the source and hydrates in the background, and keeps
 its metadata on the clone's clone meta group, whose legs are sides on DNs.*
 
-**CreateClone** — Errors: `ALREADY_EXISTS` clone key; `RESOURCE_EXHAUSTED`
+**CreateClone** — Errors: `ALREADY_EXISTS` clone key; `INVALID_ARGUMENT`
+when the source is a transfer of this cluster and `src_slice_cnt`,
+`src_stripe_size` or `src_block_size` differs from its pool's own, the pool
+read by the NQN's pool id and the message naming both, since a number
+within the bounds below but wrong would map the source's bitmap onto the
+wrong regions (a source of another cluster, outside dnv's names, or of a
+pool that is gone keeps the caller's numbers); `RESOURCE_EXHAUSTED`
 at `MaxCloneCntPerSp`, or when there are fewer DN candidates (Finding DN
 candidates) than the clone meta group has legs (Per-operation allocation);
 `NOT_FOUND` `dst_td_name`;
@@ -4036,11 +4042,21 @@ guard stable, `dnv-worker.md` CLD1); `INVALID_ARGUMENT` empty `bitmap`;
 `INVALID_ARGUMENT` a `bitmap` longer than `CloneBmChunkBytes` (stateless,
 judged on this request alone); `INVALID_ARGUMENT` `src_slice_idx` at or
 above `Clone.src_slice_cnt`; `INVALID_ARGUMENT` `bm_idx` at or above
-`MaxCloneBmCnt`; `FAILED_PRECONDITION`, naming the stored chunk's length,
+`MaxCloneBmCnt`; `INVALID_ARGUMENT` an optional `src_start_block` sent
+beside a `bm_idx` other than zero or an `offset`, one that is not a
+multiple of 8, one that falls past the last chunk, or one whose page would
+cross the end of its chunk;
+`FAILED_PRECONDITION`, naming the stored chunk's length,
 when the optional `offset` is present and is neither that length nor the
 place where the same bytes already stand; `RESOURCE_EXHAUSTED` when the
 stored chunk plus the new page would exceed `CloneBmChunkBytes` — the
 chunk's ceiling reached by previous appends.
+A request that carries `src_start_block` takes its place from it, the
+first block of the source slice the page covers, as the bitmap read's
+reply names it: the chunk and the offset its bit falls on, byte
+`src_start_block`/8 of the slice's bitmap in chunks of
+`CloneBmChunkBytes`, as if it carried that `bm_idx` and `offset`, so a
+caller that copies the reply's place cannot put the page at a wrong one.
 Action: STM: append the bytes to the `CloneBitmap` key of
 (`src_slice_idx`, `bm_idx`) (created if absent), bump `SpRev`. The `Clone`
 record is not rewritten. A request that carries `offset` appends only at
@@ -4884,7 +4900,9 @@ pass's snapshot still holds (`dnv-worker.md` AR12). Reply `leg_id`.
 ### Bitmap reads
 
 **GetThinDeviceBitmap** — inputs `td_name`, `slice_idx`, `start_block` and
-`block_cnt`. Errors: `NOT_FOUND` td; `FAILED_PRECONDITION` when the SP has
+`block_cnt`; the reply carries the request's `slice_idx` and `start_block`
+beside the bitmap, so that a clone's `AppendCloneBitmap` can take its
+place from the reply. Errors: `NOT_FOUND` td; `FAILED_PRECONDITION` when the SP has
 no primary cntlr; `INVALID_ARGUMENT` `slice_idx` at or above the SP's slice
 count (judged after the td and the primary); `INVALID_ARGUMENT` a
 `start_block` that is not a multiple of 8 or lies past the slice's part of
@@ -9516,9 +9534,24 @@ document and only pointed to here.
   since the page's own commit raised the revision. Every later bit of that
   clone chunk then moves, so blocks the source wrote can read as never
   written and the copy skips them, with no error: the clone serves zeros
-  there. dnvctl always sends the position (`dnvctl.md`, `clone` —
-  `ctl/clone.go`), so only a caller of the API that leaves it out meets
-  this.
+  there. dnvctl always sends the position, the offset or the start block
+  (`dnvctl.md`, `clone` — `ctl/clone.go`), so only a caller of the API
+  that leaves it out meets this.
+* **Some inputs of a clone are taken as typed.** A clone maps every source
+  bitmap page through the three layout numbers of its `CreateClone` and
+  through the page's `src_slice_idx` and place (Clones). The gateway
+  bounds each, and for a source that is a transfer of this cluster it
+  reads the source pool and refuses other layout numbers (CreateClone); a
+  page's `src_start_block` has the gateway work out its chunk and offset
+  (AppendCloneBitmap). Nothing else checks them: the layout numbers of a
+  source of another cluster or outside dnv's names, a page's
+  `src_slice_idx` and `src_start_block`, which nothing ties to the bitmap
+  read the page came from, and a page placed by `bm_idx` and `offset`. A
+  wrong value within the bounds maps the bitmap onto the wrong regions: a
+  region the source wrote reads as never written, the copy skips it and
+  the clone serves zeros there, with no error. Reason: a source of another
+  cluster can sit in another etcd, a page carries nothing of its read, and
+  `bm_idx` and `offset` stay for the callers of release 0.1.
 * **A forced finish before the copy is whole serves the destination's
   recycled bytes.** `FinishMigration` with `force` skips the proof that the
   copy is complete and nothing else (Migrations), so after the cutover it

@@ -6066,11 +6066,22 @@ func TestFinishMigrationRefusesAnotherMigrationInPhaseTwo(t *testing.T) {
 // transfer of this cluster, the gateway reads the source pool (here the
 // clone's own pool, as a move within one pool has it) and refuses a slice
 // count, a stripe or a block other than the pool's, naming both; the pool's
-// own numbers are taken. A transfer of another cluster is not read: its
+// own numbers are taken. A transfer of another cluster, of a pool that is
+// gone, or of a pool id whose name now holds another pool is not read: its
 // numbers stay the caller's.
 func TestCreateCloneChecksATransferSourcesLayout(t *testing.T) {
 	nf := common.NewNameFmt("")
 	slices := uint32(len(volSpConf().GetSliceIdList()))
+	// Numbers whose clone would report an optimal IO size over the bound,
+	// which cloneIoSizeCheck refuses FAILED_PRECONDITION: six slices of a
+	// 1 MiB stripe. The layout check runs first, so the mistyped numbers
+	// hear their own refusal.
+	const overSlices, overStripe = uint32(6), uint64(1) << 20
+	if io := model.CloneOptimalIo(overStripe, overSlices, volStripe, slices,
+		volPoolBlock); io <= common.MaxNvmeTcpCmdBytes {
+		t.Fatalf("six slices of 1 MiB give an IO size of %d, not over %d",
+			io, common.MaxNvmeTcpCmdBytes)
+	}
 	for _, tc := range []struct {
 		name    string
 		nqn     func(env *volEnv) string
@@ -6085,6 +6096,9 @@ func TestCreateCloneChecksATransferSourcesLayout(t *testing.T) {
 		{"another slice count", func(env *volEnv) string {
 			return nf.XferNqn(env.cid, volSpId, 7)
 		}, slices * 2, volStripe, volPoolBlock, true},
+		{"numbers over the IO size bound", func(env *volEnv) string {
+			return nf.XferNqn(env.cid, volSpId, 7)
+		}, overSlices, overStripe, volPoolBlock, true},
 		{"another stripe", func(env *volEnv) string {
 			return nf.XferNqn(env.cid, volSpId, 7)
 		}, slices, volStripe / 2, volPoolBlock, true},
@@ -6093,6 +6107,15 @@ func TestCreateCloneChecksATransferSourcesLayout(t *testing.T) {
 		}, slices, volStripe, volPoolBlock / 2, true},
 		{"a transfer of another cluster", func(env *volEnv) string {
 			return nf.XferNqn(env.cid+1, volSpId, 7)
+		}, slices * 2, volStripe, volPoolBlock, false},
+		{"a transfer of a pool that is gone", func(env *volEnv) string {
+			return nf.XferNqn(env.cid, volSpId+100, 7)
+		}, slices * 2, volStripe, volPoolBlock, false},
+		{"a pool id whose name now holds another pool", func(
+			env *volEnv) string {
+			mustPut(t, env.cli, model.SpNameKey(env.cid, volSpId+101),
+				&pb.SpName{SpName: volSpName})
+			return nf.XferNqn(env.cid, volSpId+101, 7)
 		}, slices * 2, volStripe, volPoolBlock, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -6125,9 +6148,8 @@ func TestCreateCloneChecksATransferSourcesLayout(t *testing.T) {
 // the bitmap read named: the gateway works out the chunk and the offset
 // (byte start/8 of the slice's bitmap, chunks of CloneBmChunkBytes), so a
 // page whose start lies in the second chunk lands there; a start that is
-// not a whole byte, a page that crosses its chunk's end, and a request that
-// also sends a bm_idx or an offset are refused. The bitmap read's reply
-// names its slice and first block.
+// not a whole byte, one past the last chunk, a page that crosses its chunk's
+// end, and a request that also sends a bm_idx or an offset are refused.
 func TestAppendCloneBitmapByStartBlock(t *testing.T) {
 	env := newVolEnv(t)
 	env.putTd("dst", 900, 7, 0, true)
@@ -6176,6 +6198,8 @@ func TestAppendCloneBitmapByStartBlock(t *testing.T) {
 		{"a start that is no whole byte", 4, []byte{1}, nil, "multiple of 8"},
 		{"a page over its chunk's end", chunk*8 - 8, []byte{1, 2}, nil,
 			"crosses the end"},
+		{"a start past the last chunk", common.MaxCloneBmCnt * chunk * 8,
+			[]byte{1}, nil, "not below"},
 		{"a bm_idx beside it", 0, []byte{1}, func(
 			r *pb.AppendCloneBitmapRequest) {
 			r.BmIdx = 1

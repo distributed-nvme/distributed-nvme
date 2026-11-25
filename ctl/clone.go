@@ -199,17 +199,20 @@ func cloneSetTrCmd() *cobra.Command {
 // source never allocated.
 //
 // A chunk is addressed by the PAIR --src-slice-idx / --bm-idx, never by either
-// alone: chunk (s, b) holds bytes [b*C, b*C+len) of source slice s's bitmap,
-// C = common.CloneBmChunkBytes. Chunks are self-positioned, so an operator may
+// alone, or by --src-slice-idx and --src-start-block, the first block of the
+// slice the page covers, which `td get-bm` prints and from which the gateway
+// works out the chunk and the offset: chunk (s, b) holds bytes [b*C, b*C+len)
+// of source slice s's bitmap, C = common.CloneBmChunkBytes. Chunks are self-positioned, so an operator may
 // send them in any order and leave whole chunks unsent; only the PAGES of ONE
 // chunk must arrive in slice-bitmap order, because the gateway appends each
 // page at that chunk's current length. --offset names the page's byte offset
-// in the chunk and is always sent, 0 when it is not typed, so a page sent
-// again after a lost answer changes nothing and a page at a wrong offset —
+// in the chunk and is sent 0 when it is not typed, unless --src-start-block
+// is, so a page sent again after a lost answer changes nothing and a page at a wrong offset —
 // a later page sent with no --offset among them — is refused by the gateway,
 // or taken with no write when its bytes equal those at that offset, never
 // appended twice (architecture.md, Clones). dnvctl checks nothing itself
-// (CT8). The Clone record carries no chunk count: how many chunks a
+// (CT8): --src-start-block beside --bm-idx or --offset is sent as typed, and
+// the gateway refuses it. The Clone record carries no chunk count: how many chunks a
 // clone holds is how many chunk keys it has.
 //
 // --bm-hex splits the two failure kinds dnvctl.md, `clone` — `ctl/clone.go`,
@@ -240,6 +243,16 @@ func cloneAppendBmCmd() *cobra.Command {
 				Bitmap:      bitmap,
 				Offset:      proto.Uint32(u32Of("offset")),
 			}
+			// The first block `td get-bm` printed: the gateway then works
+			// out the chunk and the offset itself. The offset is then sent
+			// only when typed, and --bm-idx as typed, so that the gateway
+			// refuses either beside the start block (CT8).
+			if invoked.Changed("src-start-block") {
+				req.SrcStartBlock = proto.Uint64(u64Of("src-start-block"))
+				if !invoked.Changed("offset") {
+					req.Offset = nil
+				}
+			}
 			return func(ctx context.Context, client pb.GatewayClient) (
 				any, error,
 			) {
@@ -255,5 +268,10 @@ func cloneAppendBmCmd() *cobra.Command {
 	flags.Uint32("offset", 0,
 		"the page's byte offset in the chunk; 0, the chunk's start, when "+
 			"not given")
+	flags.Uint64("src-start-block", 0,
+		"src_start_block, the first block of the source slice the page "+
+			"covers, as td get-bm prints it in start_block; the gateway "+
+			"then works out the chunk and the offset (no --bm-idx or "+
+			"--offset with it)")
 	return cmd
 }

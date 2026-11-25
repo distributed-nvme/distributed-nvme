@@ -2063,6 +2063,12 @@ message AppendCloneBitmapRequest {
     // names changes nothing; absent, the page is appended wherever the chunk
     // ends (architecture.md, Clones).
     optional uint32 offset = 8;
+    // The first block of the source slice the page covers, as the bitmap
+    // read that gave it names it (GetThinDeviceBitmapReply.start_block):
+    // present, the gateway works out bm_idx and the offset from it and
+    // refuses a request that also sends either; absent, the request's
+    // bm_idx and offset place the page. Appended, never renumbered.
+    optional uint64 src_start_block = 9;
 }
 
 message AppendCloneBitmapReply {
@@ -2392,6 +2398,11 @@ message GetThinDeviceBitmapRequest {
 
 message GetThinDeviceBitmapReply {
     bytes bitmap = 1;
+    // The request's slice and first block, so that the reply alone names
+    // the place of its bitmap, which a clone's AppendCloneBitmap takes as
+    // src_slice_idx and src_start_block. Appended, never renumbered.
+    uint32 slice_idx = 2;
+    uint64 start_block = 3;
 }
 
 message CheckControllerNodeRestoreRequest {

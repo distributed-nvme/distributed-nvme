@@ -540,14 +540,24 @@ func render(result any) ([]byte, error) {
 // hexBitmapResult is one of CT4's two deviations, the other being the
 // status read's table (statusTable). protojson renders a bytes field as
 // base64, which is neither what an operator wants to read nor what the suite
-// asserts, so the bitmap read, td get-bm, returns this map instead of its
-// reply message. byte_cnt travels with it so a length check needs no
-// arithmetic on the hex string.
+// asserts, so the bitmap read, td get-bm, returns this map, with the place
+// of tdBitmapResult beside it, instead of its reply message. byte_cnt
+// travels with it so a length check needs no arithmetic on the hex string.
 func hexBitmapResult(bitmap []byte) map[string]any {
 	return map[string]any{
 		"bitmap_hex": hex.EncodeToString(bitmap),
 		"byte_cnt":   len(bitmap),
 	}
+}
+
+// tdBitmapResult is the bitmap read's document: the hex map of CT4 and the
+// place the reply names, its slice_idx, a number, and its start_block, a
+// string as protojson writes a uint64.
+func tdBitmapResult(reply *pb.GetThinDeviceBitmapReply) map[string]any {
+	doc := hexBitmapResult(reply.GetBitmap())
+	doc["slice_idx"] = reply.GetSliceIdx()
+	doc["start_block"] = strconv.FormatUint(reply.GetStartBlock(), 10)
+	return doc
 }
 
 // ---------------------------------------------------------------------------

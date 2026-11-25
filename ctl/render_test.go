@@ -429,7 +429,8 @@ var renderCases = []renderCase{
 		reply: &pb.GetThinDeviceBitmapReply{
 			Bitmap: []byte{0xa5},
 		},
-		want: `{"bitmap_hex":"a5","byte_cnt":1}` + "\n",
+		want: `{"bitmap_hex":"a5","byte_cnt":1,"slice_idx":0,` +
+			`"start_block":"0"}` + "\n",
 	},
 	{
 		// Lowercase, no 0x, and byte_cnt travels alongside so a length check
@@ -438,9 +439,12 @@ var renderCases = []renderCase{
 		rpc:  "GetThinDeviceBitmap",
 		argv: []string{"td", "get-bm", "--name", "t0"},
 		reply: &pb.GetThinDeviceBitmapReply{
-			Bitmap: []byte{0xff, 0x00, 0x10, 0xde},
+			Bitmap:     []byte{0xff, 0x00, 0x10, 0xde},
+			SliceIdx:   3,
+			StartBlock: 1 << 33,
 		},
-		want: `{"bitmap_hex":"ff0010de","byte_cnt":4}` + "\n",
+		want: `{"bitmap_hex":"ff0010de","byte_cnt":4,"slice_idx":3,` +
+			`"start_block":"8589934592"}` + "\n",
 	},
 	{
 		// An empty bitmap is a legal answer (a window past the end of the
@@ -450,7 +454,8 @@ var renderCases = []renderCase{
 		rpc:   "GetThinDeviceBitmap",
 		argv:  []string{"td", "get-bm", "--name", "t0"},
 		reply: &pb.GetThinDeviceBitmapReply{},
-		want:  `{"bitmap_hex":"","byte_cnt":0}` + "\n",
+		want: `{"bitmap_hex":"","byte_cnt":0,"slice_idx":0,` +
+			`"start_block":"0"}` + "\n",
 	},
 }
 

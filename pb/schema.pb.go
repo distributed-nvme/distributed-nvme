@@ -12614,7 +12614,13 @@ type AppendCloneBitmapRequest struct {
 	// current length, and a page whose bytes already stand at the offset it
 	// names changes nothing; absent, the page is appended wherever the chunk
 	// ends (architecture.md, Clones).
-	Offset        *uint32 `protobuf:"varint,8,opt,name=offset,proto3,oneof" json:"offset,omitempty"`
+	Offset *uint32 `protobuf:"varint,8,opt,name=offset,proto3,oneof" json:"offset,omitempty"`
+	// The first block of the source slice the page covers, as the bitmap
+	// read that gave it names it (GetThinDeviceBitmapReply.start_block):
+	// present, the gateway works out bm_idx and the offset from it and
+	// refuses a request that also sends either; absent, the request's
+	// bm_idx and offset place the page. Appended, never renumbered.
+	SrcStartBlock *uint64 `protobuf:"varint,9,opt,name=src_start_block,json=srcStartBlock,proto3,oneof" json:"src_start_block,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -12701,6 +12707,13 @@ func (x *AppendCloneBitmapRequest) GetBitmap() []byte {
 func (x *AppendCloneBitmapRequest) GetOffset() uint32 {
 	if x != nil && x.Offset != nil {
 		return *x.Offset
+	}
+	return 0
+}
+
+func (x *AppendCloneBitmapRequest) GetSrcStartBlock() uint64 {
+	if x != nil && x.SrcStartBlock != nil {
+		return *x.SrcStartBlock
 	}
 	return 0
 }
@@ -15433,8 +15446,13 @@ func (x *GetThinDeviceBitmapRequest) GetBlockCnt() uint64 {
 }
 
 type GetThinDeviceBitmapReply struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	Bitmap        []byte                 `protobuf:"bytes,1,opt,name=bitmap,proto3" json:"bitmap,omitempty"`
+	state  protoimpl.MessageState `protogen:"open.v1"`
+	Bitmap []byte                 `protobuf:"bytes,1,opt,name=bitmap,proto3" json:"bitmap,omitempty"`
+	// The request's slice and first block, so that the reply alone names
+	// the place of its bitmap, which a clone's AppendCloneBitmap takes as
+	// src_slice_idx and src_start_block. Appended, never renumbered.
+	SliceIdx      uint32 `protobuf:"varint,2,opt,name=slice_idx,json=sliceIdx,proto3" json:"slice_idx,omitempty"`
+	StartBlock    uint64 `protobuf:"varint,3,opt,name=start_block,json=startBlock,proto3" json:"start_block,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -15474,6 +15492,20 @@ func (x *GetThinDeviceBitmapReply) GetBitmap() []byte {
 		return x.Bitmap
 	}
 	return nil
+}
+
+func (x *GetThinDeviceBitmapReply) GetSliceIdx() uint32 {
+	if x != nil {
+		return x.SliceIdx
+	}
+	return 0
+}
+
+func (x *GetThinDeviceBitmapReply) GetStartBlock() uint64 {
+	if x != nil {
+		return x.StartBlock
+	}
+	return 0
 }
 
 type CheckControllerNodeRestoreRequest struct {
@@ -21593,7 +21625,7 @@ const file_pb_schema_proto_rawDesc = "" +
 	"clone_name\x18\x04 \x01(\tR\tcloneName\x12+\n" +
 	"\vsrc_tr_conf\x18\x05 \x03(\v2\v.NvmeTrConfR\tsrcTrConf\"3\n" +
 	"\x16UpdateCloneTrConfReply\x12\x19\n" +
-	"\bclone_id\x18\x01 \x01(\x04R\acloneId\"\x8f\x02\n" +
+	"\bclone_id\x18\x01 \x01(\x04R\acloneId\"\xd0\x02\n" +
 	"\x18AppendCloneBitmapRequest\x12!\n" +
 	"\fcluster_name\x18\x01 \x01(\tR\vclusterName\x12\x17\n" +
 	"\asp_name\x18\x02 \x01(\tR\x06spName\x12\x1d\n" +
@@ -21603,8 +21635,10 @@ const file_pb_schema_proto_rawDesc = "" +
 	"\rsrc_slice_idx\x18\x05 \x01(\rR\vsrcSliceIdx\x12\x15\n" +
 	"\x06bm_idx\x18\x06 \x01(\rR\x05bmIdx\x12\x16\n" +
 	"\x06bitmap\x18\a \x01(\fR\x06bitmap\x12\x1b\n" +
-	"\x06offset\x18\b \x01(\rH\x00R\x06offset\x88\x01\x01B\t\n" +
-	"\a_offset\"3\n" +
+	"\x06offset\x18\b \x01(\rH\x00R\x06offset\x88\x01\x01\x12+\n" +
+	"\x0fsrc_start_block\x18\t \x01(\x04H\x01R\rsrcStartBlock\x88\x01\x01B\t\n" +
+	"\a_offsetB\x12\n" +
+	"\x10_src_start_block\"3\n" +
 	"\x16AppendCloneBitmapReply\x12\x19\n" +
 	"\bclone_id\x18\x01 \x01(\x04R\acloneId\"\x8e\x02\n" +
 	"\x15CreateTransferRequest\x12!\n" +
@@ -21803,9 +21837,12 @@ const file_pb_schema_proto_rawDesc = "" +
 	"\tslice_idx\x18\x04 \x01(\rR\bsliceIdx\x12\x1f\n" +
 	"\vstart_block\x18\x05 \x01(\x04R\n" +
 	"startBlock\x12\x1b\n" +
-	"\tblock_cnt\x18\x06 \x01(\x04R\bblockCnt\"2\n" +
+	"\tblock_cnt\x18\x06 \x01(\x04R\bblockCnt\"p\n" +
 	"\x18GetThinDeviceBitmapReply\x12\x16\n" +
-	"\x06bitmap\x18\x01 \x01(\fR\x06bitmap\"c\n" +
+	"\x06bitmap\x18\x01 \x01(\fR\x06bitmap\x12\x1b\n" +
+	"\tslice_idx\x18\x02 \x01(\rR\bsliceIdx\x12\x1f\n" +
+	"\vstart_block\x18\x03 \x01(\x04R\n" +
+	"startBlock\"c\n" +
 	"!CheckControllerNodeRestoreRequest\x12!\n" +
 	"\fcluster_name\x18\x01 \x01(\tR\vclusterName\x12\x1b\n" +
 	"\taddr_port\x18\x02 \x01(\tR\baddrPort\"\xf1\t\n" +

@@ -10,7 +10,7 @@
 //
 // `td get-bm` is one of the CLI's two deviations from CT4's "print the reply
 // message", the other being `cluster get-status`'s table — it prints
-// hexBitmapResult instead, because protojson renders a bytes field as
+// tdBitmapResult instead, because protojson renders a bytes field as
 // base64 (CT4).
 package ctl
 
@@ -140,7 +140,9 @@ func tdListCmd() *cobra.Command {
 // there is only one name to mean.
 //
 // The reply is reshaped into the CT4 hex map instead of being emitted as a
-// message, so the bitmap reads as hex rather than protojson's base64.
+// message, so the bitmap reads as hex rather than protojson's base64, with
+// the slice and the first block the reply names, which `clone append-bm`
+// takes as --src-slice-idx and --src-start-block.
 func tdGetBmCmd() *cobra.Command {
 	cmd := leaf(
 		"get-bm", "read a thin device's bitmap (GetThinDeviceBitmap)",
@@ -161,7 +163,7 @@ func tdGetBmCmd() *cobra.Command {
 				if err != nil {
 					return nil, err
 				}
-				return hexBitmapResult(reply.GetBitmap()), nil
+				return tdBitmapResult(reply), nil
 			}, nil
 		})
 	flags := cmd.Flags()

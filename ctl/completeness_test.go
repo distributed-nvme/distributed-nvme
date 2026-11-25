@@ -326,7 +326,7 @@ var leafFlags = map[string][]string{
 	"clone set-tr": {"name", "src-tr-type", "src-adr-fam", "src-tr-addr",
 		"src-tr-svc-id"},
 	"clone append-bm": {"name", "src-slice-idx", "bm-idx", "bm-hex",
-		"offset"},
+		"offset", "src-start-block"},
 	// xfer
 	"xfer create": {"name", "ori-nqn", "ori-idx", "hosts", "auto-suspend"},
 	"xfer delete": {"name", "force"},

@@ -300,3 +300,27 @@ func TestThinDeviceBitmapRefusesWhatTheStateCannotProve(t *testing.T) {
 		}
 	})
 }
+
+// TestThinDeviceBitmapReplyNamesItsPlace pins the reply's slice_idx and
+// start_block: they are the request's, so that the reply alone names where
+// its bitmap goes, which a clone's AppendCloneBitmap takes as src_slice_idx
+// and src_start_block.
+func TestThinDeviceBitmapReplyNamesItsPlace(t *testing.T) {
+	env, _ := bmReadEnvSlices(t, 515, 2)
+	reply, err := env.srv.GetThinDeviceBitmap(env.ctx,
+		&pb.GetThinDeviceBitmapRequest{
+			ClusterName: env.cluster,
+			SpName:      volSpName,
+			TdName:      "src",
+			SliceIdx:    1,
+			StartBlock:  64,
+			BlockCnt:    64,
+		})
+	if err != nil {
+		t.Fatalf("GetThinDeviceBitmap: %v", err)
+	}
+	if reply.GetSliceIdx() != 1 || reply.GetStartBlock() != 64 {
+		t.Errorf("reply names slice %d from block %d, want slice 1 from "+
+			"block 64", reply.GetSliceIdx(), reply.GetStartBlock())
+	}
+}

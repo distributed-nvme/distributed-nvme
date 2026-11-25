@@ -4604,7 +4604,11 @@ Safe steps:
     connects to its own machine, or by the wrong address family. Type
     `--auto-resume`, which is off by default: without it the
     destination's namespace stays parked until the copy is whole, and the
-    hosts have no path that serves for that time.
+    hosts have no path that serves for that time. For a transfer of this
+    cluster, the gateway reads the source pool that the transfer NQN
+    names and refuses, with the error code INVALID_ARGUMENT, a slice
+    count, a stripe or a data block other than that pool's; the message
+    names both. Nothing checks them for a transfer of another cluster.
     The clone reads through the source's primary alone. Run
     `dnvctl --sp <destination> clone get --name <clone>` once now, and see
     that it shows the clone.
@@ -4732,7 +4736,10 @@ Steps that can lose data:
   parked, with no path that serves IO, until `dnvctl --sp <source> xfer
   delete --force`; make checks 1 and 4 first.
 
-When to stop: `clone create` is refused at step 10, for the layouts of
+When to stop: `clone create` is refused at step 10 with the error code
+INVALID_ARGUMENT because a layout number differs from the source pool's:
+nothing was made, so run step 10 again with the numbers the message names.
+Stop when `clone create` is refused at step 10 for the layouts of
 check 1, for its clone meta group as check 4 says, or for any other
 reason: no clone was made, so delete the destination's namespace with
 `dnvctl --sp <destination> ns delete`, then end the transfer with
@@ -4841,12 +4848,16 @@ Safe steps:
    no namespace exports, such as a snapshot, is read at once.
 2. For each slice of the source pool, from 0 to its slice count less one:
    `dnvctl --sp <source> td get-bm --name <origin> --slice-idx <slice>`. It
-   prints `{"bitmap_hex": "<hex>", "byte_cnt": <bytes>}`. Bit k of the list,
-   the low bit of each byte first, is 1 when block k of that slice holds no
-   data: it was never written, or it was discarded.
-3. Give each slice's list to the clone, unchanged:
-   `dnvctl --sp <destination> clone append-bm --name <clone>
-   --src-slice-idx <slice> --bm-idx 0 --bm-hex <hex>`. Give every slice's:
+   prints `{"bitmap_hex": "<hex>", "byte_cnt": <bytes>, "slice_idx":
+   <slice>, "start_block": "<block>"}`: the list, and the slice and the
+   first block it covers. Bit k of the list, the low bit of each byte
+   first, is 1 when block start_block + k of that slice holds no data: it
+   was never written, or it was discarded.
+3. Give each slice's list to the clone, unchanged, at the place the read
+   printed: `dnvctl --sp <destination> clone append-bm --name <clone>
+   --src-slice-idx <slice_idx> --src-start-block <start_block> --bm-hex
+   <hex>`; the gateway works out the list's part and its place in it.
+   Give every slice's:
    the clone skips a region only where every slice it spans says
    never written. A part applies whenever it comes, before the copy is
    whole. Once the hosts' IO goes through the clone, each part pauses that
@@ -4855,12 +4866,13 @@ Safe steps:
    one command line: in hex it takes two characters a byte, and one
    argument holds less than 128 KiB on Linux, its closing zero byte
    counted. Read it in windows, `--start <block> --cnt <blocks>` on `td
-   get-bm`, and give each window in order, to part `--bm-idx <start /
-   8388608>` with `--offset <(start / 8) % 1048576>`, the window's place in
-   bytes within its part. Windows of 262,144 blocks fit: 32 of them fill
-   one part, so none crosses the end of a part, which the gateway refuses
-   with the error code RESOURCE_EXHAUSTED; the last window of a slice can
-   be shorter. A window starts at a multiple of 8 blocks. The gateway
+   get-bm`, and give each window in order, with the `--src-start-block`
+   the read printed for it. Windows of 262,144 blocks fit: 32 of them fill
+   one part, of 8,388,608 blocks, so none crosses the end of a part, which
+   the gateway refuses with the error code INVALID_ARGUMENT; the last
+   window of a slice can be shorter. The older form, `--bm-idx <start /
+   8388608>` with `--offset <(start / 8) % 1048576>`, still works, but
+   nothing checks that its numbers match the window. A window starts at a multiple of 8 blocks. The gateway
    refuses an offset that is not the end of what the part holds, unless the
    same bytes stand there already, which it takes as done.
 
@@ -4868,8 +4880,11 @@ What dnv does alone: nothing for the read; the worker sends each part to
 the destination's primary, which keeps it and skips those regions.
 
 Steps that can lose data: a list read while a host could still write the
-volume, which the gateway refuses; and a list given to a clone of another
-volume.
+volume, which the gateway refuses; a list given to a clone of another
+volume; and a slice or a first block typed wrong in step 3 or 4, or, in
+the older form, a part and an offset that do not match the window. Nothing
+checks these: the clone then skips regions the source wrote and reads
+zeros there.
 
 When to stop: the refusal says a namespace is on the volume and not
 suspended: park it first ([Park a namespace](#park-a-namespace)). A

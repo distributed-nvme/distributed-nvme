@@ -182,9 +182,10 @@ not set, such as `probe_times.read_ms` after a failed write or
 `last_success_age_ms` before any round succeeded, is left out, as protojson
 leaves out every member of a oneof that is not set. Two leaves
 deviate. The bitmap read, `td get-bm`, because protojson renders a bytes
-field as base64: it prints a document of two keys, `bitmap_hex`, the
-bitmap as lowercase hex with no prefix, and `byte_cnt`, its length in
-bytes (`hexBitmapResult`). And the status read, `cluster get-status`,
+field as base64: it prints a document of four keys, `bitmap_hex`, the
+bitmap as lowercase hex with no prefix, `byte_cnt`, its length in bytes,
+`slice_idx`, a number, and `start_block`, a string as protojson writes a
+uint64, the place the reply names (`tdBitmapResult`). And the status read, `cluster get-status`,
 which is read by a person in an incident: it prints a table by default
 and the document only with `--json` (`statusTable`; `cluster` —
 `ctl/cluster.go`). Every result reaches stdout the same way: `render`
@@ -729,10 +730,14 @@ the order in which an operator then takes them down, are `architecture.md`,
 Clones. dnvctl adds no wait flag here either (CT8, CT1).
 
 `clone append-bm` addresses a chunk by the pair `--src-slice-idx` and
-`--bm-idx`, never by either alone; what a chunk is and how its pages append
+`--bm-idx`, never by either alone, or by `--src-slice-idx` and
+`--src-start-block`, the place `td get-bm` printed, from which the gateway
+works out the chunk and the offset; with it dnvctl sends `offset` only when
+`--offset` is typed and `--bm-idx` as typed, and the gateway refuses either
+beside the start block (CT8; a `--bm-idx` of 0 cannot be told from none); what a chunk is and how its pages append
 is `architecture.md`, Clones. `--offset` names a page's position in its
-chunk and is always sent, 0, the chunk's start, when it is not typed, so
-dnvctl never sends a page without its position: a page sent again changes
+chunk and is sent 0, the chunk's start, when it is not typed and no
+`--src-start-block` is, so dnvctl never sends a page without its position: a page sent again changes
 nothing, and a later page sent with no `--offset` is refused by the
 gateway, or taken with no write when its bytes equal those at the chunk's
 start, but never appended where the chunk ends; dnvctl checks nothing

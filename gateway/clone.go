@@ -376,6 +376,13 @@ func (s *Server) CreateClone(
 			if err != nil {
 				return err
 			}
+			// A source pool's layout never changes, so the planning read
+			// alone holds the request to it, and before the checks that
+			// take the three numbers as typed, cloneIoSizeCheck's above
+			// all, so that a mistyped number hears its own refusal.
+			if err := cloneSrcLayoutCheck(stm, sc.Cid, req); err != nil {
+				return err
+			}
 			td, plan, err := cloneCreateChecks(stm, sc, req)
 			if err != nil {
 				return err
@@ -880,6 +887,87 @@ func (s *Server) UpdateCloneTrConf(
 	return &pb.UpdateCloneTrConfReply{CloneId: cloneId}, nil
 }
 
+// cloneSrcLayoutCheck refuses a clone whose source is a transfer of this
+// cluster when the request's src_slice_cnt, src_stripe_size or
+// src_block_size differs from the source pool's own: the gateway can read
+// that pool, and a wrong number that still passes validateCloneGeometry's
+// bounds would map the source's list of written blocks onto the wrong
+// regions, and the clone would read zeros where the source wrote
+// (architecture.md, Clones). A source of another cluster, a transfer NQN of
+// this one whose pool is gone, or an NQN outside dnv's names is not read:
+// its numbers stay the caller's.
+func cloneSrcLayoutCheck(
+	stm etcdutil.STM,
+	cid uint64,
+	req *pb.CreateCloneRequest,
+) error {
+	parts, ok := common.ParseNqn(req.GetSrcNqn())
+	if !ok || parts.Kind != common.NqnKindXfer || len(parts.Ids) < 2 ||
+		parts.Ids[0] != cid {
+		return nil
+	}
+	spId := parts.Ids[1]
+	name := &pb.SpName{}
+	if !stm.Get(model.SpNameKey(cid, spId), name) {
+		return nil
+	}
+	conf := &pb.SpConf{}
+	if !stm.Get(model.SpConfKey(cid, name.GetSpName()), conf) ||
+		conf.GetSpId() != spId {
+		return nil
+	}
+	sliceCnt := uint32(spSliceCnt(conf))
+	stripe := conf.GetBdevConf().GetDmRaid0Conf().GetStripeSize()
+	block := conf.GetBdevConf().GetDmPoolConf().GetDataBlockSize()
+	if req.GetSrcSliceCnt() != sliceCnt || req.GetSrcStripeSize() != stripe ||
+		req.GetSrcBlockSize() != block {
+		return errInvalid("src_slice_cnt %d, src_stripe_size %d and "+
+			"src_block_size %d differ from the source pool %q's %d, %d "+
+			"and %d", req.GetSrcSliceCnt(), req.GetSrcStripeSize(),
+			req.GetSrcBlockSize(), name.GetSpName(), sliceCnt, stripe, block)
+	}
+	return nil
+}
+
+// clonePagePlace is where an AppendCloneBitmap page goes: the request's
+// bm_idx and offset, or, when it names src_start_block, the chunk and the
+// byte offset that block's bit falls on, a chunk holding the slice's bitmap
+// bytes [b*C, b*C+C) with C = CloneBmChunkBytes (architecture.md, Clones).
+// So a caller that gives the place the bitmap read named (its slice_idx and
+// start_block) cannot put the page at a wrong one. A request that names the
+// start block and also a bm_idx or an offset is refused, as is a start that
+// is not a whole byte of the bitmap or a page that would cross its chunk's
+// end, which the caller cuts there.
+func clonePagePlace(req *pb.AppendCloneBitmapRequest) (uint32, *uint32, error) {
+	if req.SrcStartBlock == nil {
+		return req.GetBmIdx(), req.Offset, nil
+	}
+	if req.GetBmIdx() != 0 || req.Offset != nil {
+		return 0, nil, errInvalid("src_start_block names the page's place: " +
+			"send no bm_idx and no offset with it")
+	}
+	start := req.GetSrcStartBlock()
+	if start%8 != 0 {
+		return 0, nil, errInvalid(
+			"src_start_block %d is not a multiple of 8 blocks", start)
+	}
+	pos := start / 8
+	chunkBytes := uint64(common.CloneBmChunkBytes)
+	bmIdx := pos / chunkBytes
+	if bmIdx >= common.MaxCloneBmCnt {
+		return 0, nil, errInvalid("src_start_block %d falls in chunk %d, "+
+			"not below %d", start, bmIdx, common.MaxCloneBmCnt)
+	}
+	offset := pos % chunkBytes
+	if offset+uint64(len(req.GetBitmap())) > chunkBytes {
+		return 0, nil, errInvalid("the page from src_start_block %d crosses "+
+			"the end of chunk %d: cut it at block %d", start, bmIdx,
+			(bmIdx+1)*chunkBytes*8)
+	}
+	off32 := uint32(offset)
+	return uint32(bmIdx), &off32, nil
+}
+
 // AppendCloneBitmap is the AppendCloneBitmap of architecture.md, Clones: one
 // chunk of the SOURCE bitmap, addressed by the PAIR (`src_slice_idx`,
 // `bm_idx`).
@@ -943,8 +1031,12 @@ func (s *Server) AppendCloneBitmap(
 			"bitmap is %d bytes, over the %d one clone bitmap chunk holds",
 			len(req.GetBitmap()), common.CloneBmChunkBytes)
 	}
+	reqBmIdx, reqOffset, err := clonePagePlace(req)
+	if err != nil {
+		return nil, err
+	}
 	var cloneId uint64
-	err := s.cli.RunSTM(ctx, func(stm etcdutil.STM) error {
+	err = s.cli.RunSTM(ctx, func(stm etcdutil.STM) error {
 		cloneId = 0
 		sc, err := openSp(stm, req.GetClusterName(), req.GetSpName(),
 			req.GetSpRev())
@@ -964,7 +1056,7 @@ func (s *Server) AppendCloneBitmap(
 				"src_slice_idx %d is not below the clone's src_slice_cnt %d",
 				srcSliceIdx, clone.GetSrcSliceCnt())
 		}
-		bmIdx := req.GetBmIdx()
+		bmIdx := reqBmIdx
 		if bmIdx >= common.MaxCloneBmCnt {
 			return errInvalid("bm_idx %d is not below %d",
 				bmIdx, common.MaxCloneBmCnt)
@@ -997,10 +1089,10 @@ func (s *Server) AppendCloneBitmap(
 		// offset would move the chunk's later bits and is refused. The
 		// repeat is judged before the ceiling, so a full chunk's last page
 		// can be sent again.
-		if req.Offset != nil {
+		if reqOffset != nil {
 			stored := chunk.GetBitmap()
 			page := req.GetBitmap()
-			offset := uint64(req.GetOffset())
+			offset := uint64(*reqOffset)
 			end := offset + uint64(len(page))
 			if offset != uint64(len(stored)) {
 				if end <= uint64(len(stored)) &&

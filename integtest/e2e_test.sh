@@ -15974,9 +15974,10 @@ ops_levels() {
 #
 # `td get-bm --cnt 0` asks for the WHOLE slice — dnvctl substitutes no window
 # of its own (tdGetBmCmd (ctl/td.go), CT8). The reply is not a proto message
-# but the CT4 hex map `{"bitmap_hex","byte_cnt"}`, and byte_cnt is a Go `int`
-# (hexBitmapResult (ctl/root.go)), so it renders as a BARE NUMBER while every
-# uint64 in this file is a quoted string.
+# but the CT4 hex map `{"bitmap_hex","byte_cnt","slice_idx","start_block"}`,
+# and byte_cnt is a Go `int` (tdBitmapResult (ctl/root.go)), so it renders as
+# a BARE NUMBER while every uint64 in this file, start_block among them, is a
+# quoted string.
 ops_snapshot() {
 	stage 06 "td create --ori (snapshot), td get-bm, a second td"
 	local snapid hex bytes t0dev
@@ -18513,7 +18514,7 @@ copy_clone_write() { # <latched before> <what> <dnvctl args…>
 # a bug the fallback cannot fix.
 copy_clone_build() { # <latched before>
 	local before=$1 hex bytes idx spans
-	local -a bm_hex=()
+	local -a bm_hex=() bm_start=()
 	COPY_CLONE_DRAINED=0
 	log ""
 	log "  --- clone source branch: $COPY_SRC_BRANCH"
@@ -18569,7 +18570,15 @@ copy_clone_build() { # <latched before>
 				copy_src_bm_read "$idx"
 			bytes=$(jq_of "$CTL_OUT" '.byte_cnt')
 			assert_jq "$CTL_OUT" '(.byte_cnt | type) == "number"' \
-				"byte_cnt is a Go int and renders as a bare number (hexBitmapResult (ctl/root.go))"
+				"byte_cnt is a Go int and renders as a bare number (tdBitmapResult (ctl/root.go))"
+			# The reply names its place, the slice and the first block the
+			# list covers (architecture.md, Bitmap reads); the append
+			# below sends that place back.
+			assert_field "$CTL_OUT" '.slice_idx' "$idx" \
+				"the bitmap read names its slice (uint32, a bare number)"
+			assert_field "$CTL_OUT" '.start_block' 0 \
+				"the bitmap read names its first block (uint64, a JSON string)"
+			bm_start[idx]=$(jq_of "$CTL_OUT" '.start_block')
 			assert_ge "$bytes" 1 \
 				"slice $idx of $COPY_SRC_SP/$COPY_SRC_TD has a non-empty mapping bitmap"
 			assert_le "$bytes" 1048576 \
@@ -18618,10 +18627,11 @@ copy_clone_build() { # <latched before>
 		 and .clone.src_tr_conf_list[0].tr_svc_id == \"$COPY_SRC_TRSVCID\"" \
 		"src_tr_conf_list is the one transport the flags described"
 
-	# The chunks read above, back to back. The chunk is addressed by the
-	# PAIR (src_slice_idx, bm_idx), never by either alone (ctl/clone.go's
-	# append-bm comment; CN22 bounds them independently). Chunk (idx, 0) is
-	# the first CloneBmChunkBytes of source slice idx's bitmap, which is the
+	# The chunks read above, back to back, each at the place its read named:
+	# the source slice and --src-start-block, the first block the list
+	# covers, from which the gateway works out the chunk and the offset
+	# (architecture.md, Clones). Start block 0 is chunk 0, the
+	# first CloneBmChunkBytes of source slice idx's bitmap, which is the
 	# whole of it at every shape this suite builds.
 	if [ "${#bm_hex[@]}" -gt 0 ]; then
 		log "  appending the chunks of slices 0 to $((${#bm_hex[@]} - 1))"
@@ -18629,7 +18639,8 @@ copy_clone_build() { # <latched before>
 	for ((idx = 0; idx < ${#bm_hex[@]}; idx++)); do
 		copy_clone_write "$before" "slice $idx's chunk" \
 			clone append-bm --name "$CLONE0" --src-slice-idx "$idx" \
-			--bm-idx 0 --bm-hex "${bm_hex[idx]}" || break
+			--src-start-block "${bm_start[idx]}" --bm-hex "${bm_hex[idx]}" ||
+			break
 		assert_field "$CTL_OUT" '.clone_id' "$CLONE0_ID" \
 			"AppendCloneBitmapReply.clone_id"
 	done

@@ -170,6 +170,29 @@ always sends a piece's position.
   host's. Procedure written: [the operations
   doc](operations.md#move-a-volume-to-another-pool) lists only the other
   pool's controller nodes, by host NQNs it shows how to work out.
+- **Some inputs of a clone are taken as typed.** A clone maps each piece
+  of its source's list of written blocks through three numbers of the
+  source pool, its slice count, stripe and data block, which the operator
+  types at the clone's create, and through the slice and the place in the
+  list that the operator types for each piece. The gateway checks each
+  number against its limits only, with one exception: for a source that
+  is a transfer of the same cluster, it reads the source pool and refuses
+  three numbers other than the pool's. With `--src-start-block`, the
+  first block the list read printed, the gateway works out where in the
+  list the piece goes, but the slice and that block are still typed, and
+  nothing ties them to the read the piece came from. Nothing checks: the
+  three numbers for a source of another cluster or outside dnv, the slice
+  and the first block of each piece, and a piece placed the older way, by
+  `--bm-idx`, the number of its part of the list (a part holds up to
+  1 MiB of it), and `--offset`. One wrong number that still passes the
+  limits maps the list onto the wrong regions: a region the source wrote
+  is marked copied with no copy, and the clone reads zeros there, with no
+  error. State: accepted: a source of another cluster can sit in another
+  etcd, which the gateway cannot read, and the gateway cannot tell which
+  read a piece came from; the older way stays so that scripts written for
+  release 0.1 keep working. Procedure written: [the operations
+  doc](operations.md#move-a-volume-to-another-pool) gives the numbers from
+  `dnvctl sp get` and the place from `dnvctl td get-bm`.
 - **A clone's list piece sent twice without its position is stored
   twice.** dnvctl always sends a piece's position, so this needs a program
   that calls the gateway itself and leaves the position out. A clone's

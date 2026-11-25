@@ -2018,7 +2018,9 @@ func TestBitmapHexToBytes(t *testing.T) {
 }
 
 // TestBitmapPositionPresence pins the append-bm position flag: it is always
-// sent, 0 when not typed, so dnvctl never sends a page without its position,
+// sent, 0 when not typed, unless --src-start-block names the place
+// (TestBitmapStartBlockForwardsAsTyped), so dnvctl never sends a page without
+// its position,
 // which the gateway would read as "append wherever the chunk ends" and store
 // twice when sent again (architecture.md, Clones, Known limits).
 func TestBitmapPositionPresence(t *testing.T) {
@@ -2040,6 +2042,33 @@ func TestBitmapPositionPresence(t *testing.T) {
 		"--offset", "4096").(*pb.AppendCloneBitmapRequest)
 	if cloneSet.GetOffset() != 4096 {
 		t.Errorf("--offset 4096 sent %d", cloneSet.GetOffset())
+	}
+}
+
+// TestBitmapStartBlockForwardsAsTyped pins --src-start-block: alone it sends
+// src_start_block and no offset, so the gateway works out the place; beside
+// --bm-idx and --offset all three are sent as typed, and the gateway refuses
+// them, since dnvctl checks nothing itself (CT8).
+func TestBitmapStartBlockForwardsAsTyped(t *testing.T) {
+	alone := runArgv(t, "AppendCloneBitmap",
+		"clone", "append-bm", "--name", "cl0", "--bm-hex", "a5",
+		"--src-start-block", "8388608").(*pb.AppendCloneBitmapRequest)
+	if alone.SrcStartBlock == nil || alone.GetSrcStartBlock() != 8388608 {
+		t.Errorf("--src-start-block 8388608 sent %v", alone.SrcStartBlock)
+	}
+	if alone.Offset != nil || alone.GetBmIdx() != 0 {
+		t.Errorf("--src-start-block alone sent offset %v and bm_idx %d, "+
+			"want neither", alone.Offset, alone.GetBmIdx())
+	}
+	all := runArgv(t, "AppendCloneBitmap",
+		"clone", "append-bm", "--name", "cl0", "--bm-hex", "a5",
+		"--src-start-block", "16", "--bm-idx", "2",
+		"--offset", "3").(*pb.AppendCloneBitmapRequest)
+	if all.GetSrcStartBlock() != 16 || all.GetBmIdx() != 2 ||
+		all.Offset == nil || all.GetOffset() != 3 {
+		t.Errorf("the three flags sent start %v, bm_idx %d, offset %v; "+
+			"want 16, 2 and 3", all.SrcStartBlock, all.GetBmIdx(),
+			all.Offset)
 	}
 }
 

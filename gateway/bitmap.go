@@ -232,7 +232,11 @@ func (s *Server) GetThinDeviceBitmap(
 		return nil, errAborted("%s: controller node %q: %v",
 			opGetThinDeviceBitmap, target.AddrPort, err)
 	}
-	return &pb.GetThinDeviceBitmapReply{Bitmap: bitmap}, nil
+	return &pb.GetThinDeviceBitmapReply{
+		Bitmap:     bitmap,
+		SliceIdx:   req.GetSliceIdx(),
+		StartBlock: req.GetStartBlock(),
+	}, nil
 }
 
 // checkBitmapWindow is the window rule of architecture.md, Bitmap reads: a
