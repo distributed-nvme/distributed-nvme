@@ -86,6 +86,7 @@ The sections, by subject:
   - [Leftovers on a node](#leftovers-on-a-node)
   - [Remove a node](#remove-a-node)
   - [Reuse a disk from an old node](#reuse-a-disk-from-an-old-node)
+  - [A disk leaves dnv](#a-disk-leaves-dnv)
   - [Replace a dead disk node](#replace-a-dead-disk-node)
   - [Replace a dead controller node](#replace-a-dead-controller-node)
   - [Gather a node's state for a bug
@@ -5214,7 +5215,8 @@ Safe steps:
    ```
 
    To use a disk node's disk again: [Reuse a disk from an old
-   node](#reuse-a-disk-from-an-old-node).
+   node](#reuse-a-disk-from-an-old-node); for a disk that leaves dnv for
+   good: [A disk leaves dnv](#a-disk-leaves-dnv).
 7. Remove by hand what no agent removes. On the node's machine, once the
    node's agent is stopped and its files are gone: its NVMe-oF port, the
    folder of its agent's `--nvmet-port-id`, when
@@ -5707,7 +5709,8 @@ Steps that lose data: step 4. With the header block zeroed, nothing of dnv
 reads the old volume table again, so the data of the old node's sides is
 gone for dnv. Only the header block is zeroed: the old bytes stay on the
 disk, readable by root on the machine, until new sides write over them
-([the scope page](scope.md), section 3).
+([the scope page](scope.md), section 3). To erase a disk that leaves dnv
+for good, follow [A disk leaves dnv](#a-disk-leaves-dnv) instead.
 
 When to stop: `meta_info` still reads `blank disk header; refusing to
 format` a minute after the create; its text names the first device that
@@ -5723,6 +5726,74 @@ command of step 4 at their cleanup, and then delete the disk: no suite
 creates a node again on a used disk. The e2e suite's upgrade case deletes
 every agent's local files and starts the agents again, but keeps each disk's
 header block and its node.
+
+## A disk leaves dnv
+
+When: a disk that served a disk node leaves dnv for good: it goes to
+another use, back to its owner, or out of the machine.
+
+Why: a freed extent keeps its old bytes, and [Reuse a disk from an old
+node](#reuse-a-disk-from-an-old-node) zeroes only the disk's header block.
+Root on the next machine, or whoever holds the disk, can read the old bytes
+of every pool that had a side on it.
+
+What dnv does alone: nothing. No agent erases a disk.
+
+Safe steps, as root on the machine of the disk:
+
+1. Remove the disk's node ([Remove a node](#remove-a-node)), or, for a dead
+   node, [replace it](#replace-a-dead-disk-node) first: the disk must hold
+   no side.
+2. Stop the disk node agent that uses the disk, and keep it from starting
+   again at the next boot: `sudo systemctl disable --now
+   dnv-agent-dn@<name>`, for an agent started from the kit's unit. Wait
+   until its process has exited. Check that no device of dnv maps the disk:
+   `lsblk <disk>` lists no device whose name starts `dnv-` above it. If one
+   does, remove it as [Leftovers on a node](#leftovers-on-a-node), step 3,
+   says, or reboot the machine when no other node on it serves a pool.
+3. Erase the whole disk with a step that writes zeros or erases for
+   certain. A plain discard, such as `blkdiscard` with no option, is not an
+   erase on every disk: some disks keep the old data, and some return it.
+   Use one of:
+   - `sudo blkdiscard --zeroout <disk>`, which writes zeros over the whole
+     disk, or has the disk write them; it takes at most as long as writing
+     the disk once. `blkdiscard` may ask for `-f` when it finds a known
+     signature on the disk; give it only once step 2's checks pass, since
+     `-f` also lets it run while another program holds the disk.
+   - The disk's own erase: on an NVMe disk, `sudo nvme format <disk>
+     --ses=1`, a user data erase, or `--ses=2`, a cryptographic erase,
+     where the disk has one. Use it only when `<disk>` is a whole
+     namespace, a name such as `/dev/nvme0n1` with no partition number
+     after it, and no other namespace of the drive holds data you keep: a
+     drive can apply a format to every one of its namespaces, as
+     `sudo nvme id-ctrl <disk> -H` shows in its "Format NVM Attributes".
+     Otherwise use the write of zeros.
+   A write of zeros erases what the disk returns to reads. A flash disk
+   can still hold old data in its spare cells, and any disk in blocks it
+   set aside as bad, which someone who reads the disk's chips can recover.
+   For a disk that leaves your hands, use the disk's own erase where it is
+   safe, or destroy the disk.
+4. Read the whole disk back. After a write of zeros,
+   `sudo cmp <disk> /dev/zero` must stop only at the end of the disk, with
+   `cmp: EOF on <disk> after byte <N>`, where `<N>` is the disk's size,
+   `sudo blockdev --getsize64 <disk>`. After `nvme format` a disk can read
+   back as zeros, as ones, which
+   `tr ' ' 'ÿ' < /dev/zero | sudo cmp <disk> -` checks the same way,
+   or, after a cryptographic erase, as random bytes, which no read back can
+   tell from old data: then run the write of zeros of step 3 after it, and
+   check that.
+5. Delete the agent's disk node files from its store folder, as step 5 of
+   [Reuse a disk from an old node](#reuse-a-disk-from-an-old-node) says.
+
+Steps that lose data: step 3 erases everything on the disk, and an
+`nvme format` can erase every namespace of the drive. Check `<disk>` twice
+first.
+
+When to stop: the read back of step 4 reports a difference before the end
+of the disk after a write of zeros: the write did not reach that place.
+Keep the disk where nobody else can read it, and ask for help.
+
+Tested: not tested.
 
 ## Replace a dead disk node
 
@@ -5910,7 +5981,8 @@ Safe steps:
    included, over disk space that the cluster counts as free, and what it
    built stays after it stops. To use its disk again, or to give its agent
    a new disk: [Reuse a disk from an old
-   node](#reuse-a-disk-from-an-old-node).
+   node](#reuse-a-disk-from-an-old-node); for a disk that leaves dnv for
+   good: [A disk leaves dnv](#a-disk-leaves-dnv).
 
 Steps that lose data: step 7, with its thin device deletes and its forced
 clone deletes, whose volumes serve a partial copy to the hosts while a
