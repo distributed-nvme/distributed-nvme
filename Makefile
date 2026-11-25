@@ -97,9 +97,10 @@ fetch-etcd:
 # build paths (-trimpath) and stripped (-s -w); Go stamps the module version
 # from the tag, so `go version -m` on each binary still prints it. Go takes
 # the version from the nearest directory, at or above the tree, whose .git
-# is a directory: a checkout stamps its own commit; a git worktree, whose
-# .git is a file, stamps the commit of the checkout whose folder holds it,
-# when one does, and else nothing, and every binary then prints (devel). The archive is
+# is a directory: a checkout stamps its own commit, but a git worktree, whose
+# .git is a file, would stamp the commit of the checkout whose folder holds
+# it, or nothing, so the target refuses a tree whose .git is not a
+# directory, whatever VERSION says. The archive is
 # reproducible: a fixed owner, fixed modes (0644 for a file, 0755 for a
 # directory or a program, whatever the builder's umask, as long as it leaves
 # the owner read, write and execute, and with no setuid or setgid bit), sorted
@@ -120,6 +121,10 @@ RELEASE_OUT ?= _out
 IMAGE_TAG := $(if $(filter v0% v1% v2% v3% v4% v5% v6% v7% v8% v9%,$(VERSION)),$(patsubst v%,%,$(VERSION)),$(VERSION))
 
 release:
+	@if [ ! -d "$(CURDIR)/.git" ]; then \
+		echo "make release: $(CURDIR)/.git is not a directory (a git worktree, a submodule or a tree with no git), so the binaries would carry another checkout's commit or none; run make release in a clone" >&2; \
+		exit 1; \
+	fi
 	@if [ -z "$(VERSION)" ]; then \
 		echo "make release: HEAD carries no tag; tag it, or pass VERSION=<version>" >&2; \
 		exit 1; \

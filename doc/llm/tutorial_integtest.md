@@ -231,11 +231,13 @@ on any other.
 - The checks read what a tutorial's text states, no more: a check the text
   makes in words alone ("a line with the machine's hostname") is read only
   as far as a fixed text can say it.
-- A release built in a git worktree carries the commit of the checkout
-  whose folder holds the worktree, or no version stamp when none does (the
-  `Makefile` row of `layout.md`, Directory tree), and the tutorials read no
-  binary's version stamp, so the suite does not catch a wrong or missing
-  one.
+- A run with no `--archive` builds its release with the `Makefile`'s
+  release target, which refuses a tree whose `.git` is not a directory, as
+  a git worktree's, whose binaries would carry another checkout's commit or
+  none (the `Makefile` row of `layout.md`, Directory tree), so such a run
+  starts from a clone; a run given `--archive` builds nothing and starts
+  from any tree. The tutorials read no binary's version stamp, so the suite
+  would not catch a wrong one.
 - docker's purge on the k3s server node leaves the chains docker added to
   iptables and its rules in them until the next boot; the suite puts back
   the forward chain's policy alone, since a restore of every rule would
