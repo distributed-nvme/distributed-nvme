@@ -3008,7 +3008,9 @@ and `CnGlobal`, with these differences:
   a snapshot of its own, its `sp_id_to_name` record, `SpConf` and
   `SpRev`, and, for a pool held at a revision above the restored one, its
   `Slice`, `Clone` and `Repair` records and the `RetiredLeg` record of
-  each retired leg its counted groups list (MAY_BREAK, below), and the
+  each retired leg its counted groups list, the `Cntlr` record of the row's
+  cntlr when `cntlr_id_list` names it, and its `Migration`, `Subsystem` and
+  `Transfer` records (MAY_BREAK, below), and the
   thin devices of such a pool in one range of their prefix outside any
   STM. Reply: the
   held nodes with their revisions, the restored node's id and revision,
@@ -3018,7 +3020,8 @@ and `CnGlobal`, with these differences:
   restored revision, the held role and NQNs, whether the restored node
   names the cntlr, the largest side id and the count of sides of the held
   and, for a pool held ahead, of the restored layout, whether the held
-  request lacks the side id of a retired leg, and a verdict. A verdict is
+  request lacks the side id of a retired leg, a verdict, and for a row
+  read MAY_BREAK one text for each of its causes (`break_reason_list`). A verdict is
   the cntlr's: a standby can hold an older request than its primary, and
   its lists then name as lost a thin device deleted later. A pool is read
   from its row, on any controller node, with the highest held revision,
@@ -3062,9 +3065,34 @@ and `CnGlobal`, with these differences:
     as one from a worker before `retired_leg_id_to_side_id`, marks its row
     (`held_side_ids_incomplete`) and reads may break when held ahead, since
     its largest side id can miss a side made after the backup and retired
-    since. The verdict is cautious: a migration made after the backup and
-    not yet cut over gives it, although its source side still holds every
-    write.
+    since. Three changes since the backup keep the set of sides and give
+    MAY_BREAK too, read from the restored records beside the held summary
+    (`cnagent.md` CN32), since each makes a node serve otherwise than the
+    restored state says once the workers start (etcd backup and restore):
+    a `Migration` of the pool whose `cutover_pending` the restored state
+    holds set, since the cutover may have run since the backup and the
+    controller node's request does not carry it; a held role of the row's
+    cntlr, `primary`, other than the restored `Cntlr` record's, a cntlr
+    that `cntlr_id_list` does not name being no primary; and a namespace
+    the restored state holds and does not park, by the rule of `cnagent.md`
+    CN16 over its `Subsystem`, `Transfer` and `Clone` records, the clones
+    the worker sends a cntlr, that the held request keeps parked
+    (`parked_ns_id_list`) or does not hold at all (`ns_id_list`), deleted
+    since the backup, as at the end of a move to a pool of another etcd
+    (Transfer + clone = cross-SP live migration). Each cause gives one text
+    in `break_reason_list`, in this order: the set of sides, a missing side
+    id, the pending cutovers, the role, the parked namespaces, the deleted
+    namespaces, the migrations by name and the namespaces by `ns_id`, each
+    cut to the row text cap; a row read RECORD_LOST carries none. The
+    verdict is cautious: a migration made after the backup and not yet cut
+    over gives it, although its source side still holds every write, and
+    so does a cutover pending at the backup that has not run since, and a
+    held summary with no `ns_id_list`, from an agent before the field,
+    reads every restored namespace as deleted. One case it does not see: a
+    cutover the worker made after the backup, whose new revision reached
+    the sides and not yet the cntlrs when the backup or the failure came,
+    leaves every row read SAME (`dnv-worker.md` RW14 sends the cntlrs a
+    new revision only after the sides apply it).
   * NEW: the restored state has no pool of the `sp_id`: the pool and
     every thin device the agent holds of it are lost. The row lists them,
     and its NQNs name the Kubernetes volume of a pool the CSI driver made
@@ -5309,7 +5337,8 @@ its pad bits in the middle of the chunk and shift every later bit. So
   CN, or every CN of a cluster for a zero `cn_id` — each CN's `revision`
   and `cntlr_pointer_list`, and a summary of each held cntlr request, its
   `revision`, role, `td_list`, NQNs, the largest side id and the count of
-  sides of its layout, and whether a retired leg of it lacks its side id
+  sides of its layout, whether a retired leg of it lacks its side id, and
+  the `ns_id` of every namespace it holds and of every one it parks
   (`cnagent.md` CN32). It reads nothing of the node; an agent that holds no
   CN the request asks for answers `ReplyCodeUnknownObject`. Reply
   `agent_reply` and `cn_list`.
@@ -7866,7 +7895,11 @@ as a gateway answers, before the id step. Then, in this order:
    Kubernetes keeps its
    records of every volume of a pool that is lost whole, every volume made
    since the backup with the CSI driver; the operator deletes them or makes
-   the volumes again.
+   the volumes again. On every pool with a row read MAY_BREAK, the hosts'
+   IO stops before step 5 starts a worker, since the three hazards below
+   that keep the set of sides act from the workers' first syncups; the
+   check's rows are the only record of them, since step 4 clears the
+   stores that held who served.
 4. For each agent: stop it, copy the files of its local store (Agent
    local-store paths) aside, the only record of what the node was told
    before the restore, delete them, start it. A kept store refuses every
@@ -7897,6 +7930,27 @@ A restore loses or breaks what changed after the backup:
   auto-grow, or whose legs a
   migration, a repair or a leg repair moved, goes back to its old layout
   and breaks.
+* A migration cut over after the backup has its cutover pending again. Its
+  source side serves again, with its bytes as of the cutover, beside its
+  destination side, which serves too, so the primary holds two serving
+  paths to one leg with different bytes and its kernel uses the first,
+  mostly the source's: reads return old bytes, and a block first written
+  since the cutover can read the bytes of another pool ([D15]). The worker
+  then cuts over again, and the writes that reached the source side in
+  between are lost where the copy had already passed. The set of sides is
+  the same before and after a cutover.
+* A primary moved after the backup, by a failover or a cntlr replacement,
+  moves back in the restored state while the kernels still serve from the
+  newer one. The first worker holds no demotion for it (`dnv-worker.md`
+  RW22) and hands every side the restored primary at once, with no
+  demotion first and no order of fences, so a host still writing can lose
+  a completed write (Known limits, A failover while the old primary serves
+  can lose an acknowledged write).
+* A namespace parked or deleted after the backup, such as a transfer's
+  origin whose volume moved to a pool of another etcd, before or after the
+  move's end deleted it, serves again in the restored state, and hosts
+  then reach two serving copies of one volume under one multipath device,
+  or a namespace over a volume that is gone.
 * An object deleted after the backup comes back. One whose parts a node
   has freed reads as an error until it is deleted again: a side as "record
   missing" (`dnagent.md` DN9), a thin device as a lost thin id
@@ -7947,8 +8001,11 @@ A restore loses or breaks what changed after the backup:
   the token check compares numbers only (`gateway.md` GW6), so every client
   discards the tokens it holds and reads again.
 
-Reason: the order and the id step close the one hazard that could show a
-pool another pool's data; the others follow from restoring an older
+Reason: the order and the id step close the hazard of a new object taking
+the remains of one made after the backup, data included; a migration cut
+over after the backup can still show a pool another pool's bytes (above),
+which only the restore check sees, as a pending cutover in the restored
+state; the others follow from restoring an older
 desired state over newer nodes, and are stated so that an operator can
 weigh a restore against them; the restore check names, pool by pool, what
 the restore loses on the pools it sees while the agents still hold it:

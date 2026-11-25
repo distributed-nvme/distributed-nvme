@@ -978,10 +978,22 @@ update-disabled and inspect; and a seventh with no disk node twin:
   its parent group is a slice's or the meta group of a clone that is not
   latched, as the worker's `cntlrRepairs` sends it, and `layoutSides` counts
   the restored layout's sides as the agent counts the held one, a retired
-  leg by the side id of its record; a held layout with a higher largest side
-  id or another count, or one whose summary says a retired leg's side id is
-  missing, which also sets the row's `held_side_ids_incomplete`, reads
-  `RESTORE_VERDICT_MAY_BREAK`. `restoredTds` ranges `ThinDevicePrefix` with
+  leg by the side id of its record; past the backup it also reads the
+  `Cntlr` record of the row's cntlr when `cntlr_id_list` names it, every
+  `Migration`, and every `Subsystem` and `Transfer`, parking each
+  namespace by `nsParked`, the rule of `cnagent.md` CN16 over the clones
+  that are not latched. `breakReasons` gives one text per cause, in
+  order: a held layout with a higher largest side id or another count; a
+  summary that says a retired leg's side id is missing, which also sets
+  the row's `held_side_ids_incomplete`; each migration whose cutover is
+  pending in the restored state, in one text; a held role other than the
+  restored one; and the namespaces the restored state holds and does not
+  park that the summary's `parked_ns_id_list` names, in one text, and that
+  its `ns_id_list` lacks, deleted since the backup, in another, each text
+  cut by `common.CutRowText`. A row with any text reads
+  `RESTORE_VERDICT_MAY_BREAK` and carries them in `break_reason_list`;
+  the texts are made only once the thin devices' range found no lost
+  record, so a row read RECORD_LOST carries none. `restoredTds` ranges `ThinDevicePrefix` with
   no STM for a pool held above the restored revision. A record the row reads
   that does not decode, or that is missing past the pool's id-to-name
   record, whose absence alone reads as a pool made after the backup, a name

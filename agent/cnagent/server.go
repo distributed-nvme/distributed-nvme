@@ -768,8 +768,11 @@ func (s *CnAgentServer) heldRequests(
 // id there, as in a request from a worker without the map, is counted and
 // marks the summary as missing one. The gateway counts the restored layout
 // the same way (architecture.md, Controller nodes,
-// CheckControllerNodeRestore). A stored request is never modified, so the
-// summary shares its messages.
+// CheckControllerNodeRestore). It also lists, in order, the ns_id of every
+// namespace the request holds and of every one it keeps effectively
+// suspended, so parked (nsEffectivelySuspended), which the gateway compares
+// with the restored state. A stored request is never modified, so the summary shares its
+// messages.
 func storedCntlr(req *pb.SyncupCntlrRequest) *pb.GetCnStoreReply_StoredCntlr {
 	nqns := slices.Sorted(maps.Keys(req.GetNqnToSubsystem()))
 	var grps []*pb.Group
@@ -806,14 +809,27 @@ func storedCntlr(req *pb.SyncupCntlrRequest) *pb.GetCnStoreReply_StoredCntlr {
 			sideCnt++
 		}
 	}
+	var nsIds, parked []uint64
+	for _, nqn := range nqns {
+		for _, ns := range req.GetNqnToSubsystem()[nqn].GetNsList() {
+			nsIds = append(nsIds, ns.GetNsId())
+			if nsEffectivelySuspended(req, ns) {
+				parked = append(parked, ns.GetNsId())
+			}
+		}
+	}
+	slices.Sort(nsIds)
+	slices.Sort(parked)
 	return &pb.GetCnStoreReply_StoredCntlr{
-		CntlrPointer: req.GetCntlrPointer(),
-		Revision:     req.GetRevision(),
-		Primary:      req.GetCntlr().GetPrimary(),
-		TdList:       req.GetTdList(),
-		NqnList:      nqns,
-		MaxSideId:    maxSideId,
-		SideCnt:      sideCnt,
+		CntlrPointer:   req.GetCntlrPointer(),
+		Revision:       req.GetRevision(),
+		Primary:        req.GetCntlr().GetPrimary(),
+		TdList:         req.GetTdList(),
+		NqnList:        nqns,
+		MaxSideId:      maxSideId,
+		SideCnt:        sideCnt,
+		ParkedNsIdList: parked,
+		NsIdList:       nsIds,
 
 		RetiredSideIdMissing: missing,
 	}

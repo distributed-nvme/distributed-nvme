@@ -696,7 +696,12 @@ const (
 	// count; a repair's finish, a take-back of a retired leg as a repair's
 	// new leg, or a repair's cancel that gives that leg back as a retired
 	// leg moves a side inside the set. A held request that lacks a retired
-	// leg's side id (Pool.held_side_ids_incomplete) also reads MAY_BREAK.
+	// leg's side id (Pool.held_side_ids_incomplete) also reads MAY_BREAK,
+	// and so do three changes that keep the set of sides:
+	// a migration whose cutover the restored state holds pending, a held
+	// role of the cntlr other than the restored one, and a namespace the
+	// restored state holds and does not park that the held request parks
+	// or does not hold (Pool.break_reason_list).
 	RestoreVerdict_RESTORE_VERDICT_MAY_BREAK RestoreVerdict = 3
 	// The restored state has no pool of this sp_id: the pool and every thin
 	// device the agent holds of it are lost.
@@ -19707,8 +19712,12 @@ type CheckControllerNodeRestoreReply_Pool struct {
 	// largest side id is not exact; a pool held ahead then reads
 	// MAY_BREAK. Appended, never renumbered.
 	HeldSideIdsIncomplete bool `protobuf:"varint,17,opt,name=held_side_ids_incomplete,json=heldSideIdsIncomplete,proto3" json:"held_side_ids_incomplete,omitempty"`
-	unknownFields         protoimpl.UnknownFields
-	sizeCache             protoimpl.SizeCache
+	// Why the row reads MAY_BREAK: one text for each cause, in the order
+	// of the RestoreVerdict comment, each cut to the row text cap.
+	// Empty for every other verdict. Appended, never renumbered.
+	BreakReasonList []string `protobuf:"bytes,18,rep,name=break_reason_list,json=breakReasonList,proto3" json:"break_reason_list,omitempty"`
+	unknownFields   protoimpl.UnknownFields
+	sizeCache       protoimpl.SizeCache
 }
 
 func (x *CheckControllerNodeRestoreReply_Pool) Reset() {
@@ -19858,6 +19867,13 @@ func (x *CheckControllerNodeRestoreReply_Pool) GetHeldSideIdsIncomplete() bool {
 		return x.HeldSideIdsIncomplete
 	}
 	return false
+}
+
+func (x *CheckControllerNodeRestoreReply_Pool) GetBreakReasonList() []string {
+	if x != nil {
+		return x.BreakReasonList
+	}
+	return nil
 }
 
 type SyncupSideRequest_SideConf struct {
@@ -20160,8 +20176,16 @@ type GetCnStoreReply_StoredCntlr struct {
 	// in a request from a worker without retired_leg_id_to_side_id:
 	// the largest id misses its side. Appended, never renumbered.
 	RetiredSideIdMissing bool `protobuf:"varint,8,opt,name=retired_side_id_missing,json=retiredSideIdMissing,proto3" json:"retired_side_id_missing,omitempty"`
-	unknownFields        protoimpl.UnknownFields
-	sizeCache            protoimpl.SizeCache
+	// The ns_id of every namespace of nqn_to_subsystem the request keeps
+	// effectively suspended, so parked (cnagent.md CN16), in order.
+	// Appended, never renumbered.
+	ParkedNsIdList []uint64 `protobuf:"varint,9,rep,packed,name=parked_ns_id_list,json=parkedNsIdList,proto3" json:"parked_ns_id_list,omitempty"`
+	// The ns_id of every namespace of nqn_to_subsystem, in order: a
+	// namespace of the restored state that it lacks was deleted since
+	// the backup. Appended, never renumbered.
+	NsIdList      []uint64 `protobuf:"varint,10,rep,packed,name=ns_id_list,json=nsIdList,proto3" json:"ns_id_list,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
 }
 
 func (x *GetCnStoreReply_StoredCntlr) Reset() {
@@ -20248,6 +20272,20 @@ func (x *GetCnStoreReply_StoredCntlr) GetRetiredSideIdMissing() bool {
 		return x.RetiredSideIdMissing
 	}
 	return false
+}
+
+func (x *GetCnStoreReply_StoredCntlr) GetParkedNsIdList() []uint64 {
+	if x != nil {
+		return x.ParkedNsIdList
+	}
+	return nil
+}
+
+func (x *GetCnStoreReply_StoredCntlr) GetNsIdList() []uint64 {
+	if x != nil {
+		return x.NsIdList
+	}
+	return nil
 }
 
 // One controller node the agent holds, from its held SyncupCnRequest:
@@ -21845,7 +21883,8 @@ const file_pb_schema_proto_rawDesc = "" +
 	"startBlock\"c\n" +
 	"!CheckControllerNodeRestoreRequest\x12!\n" +
 	"\fcluster_name\x18\x01 \x01(\tR\vclusterName\x12\x1b\n" +
-	"\taddr_port\x18\x02 \x01(\tR\baddrPort\"\xf1\t\n" +
+	"\taddr_port\x18\x02 \x01(\tR\baddrPort\"\x9d\n" +
+	"\n" +
 	"\x1fCheckControllerNodeRestoreReply\x12I\n" +
 	"\fheld_cn_list\x18\x01 \x03(\v2'.CheckControllerNodeRestoreReply.HeldCnR\n" +
 	"heldCnList\x12$\n" +
@@ -21864,7 +21903,7 @@ const file_pb_schema_proto_rawDesc = "" +
 	"\rid_may_return\x18\x06 \x01(\bR\vidMayReturn\x1a9\n" +
 	"\vReturningTd\x12\x13\n" +
 	"\x05td_id\x18\x01 \x01(\x04R\x04tdId\x12\x15\n" +
-	"\x06dev_id\x18\x02 \x01(\rR\x05devId\x1a\xd5\x05\n" +
+	"\x06dev_id\x18\x02 \x01(\rR\x05devId\x1a\x81\x06\n" +
 	"\x04Pool\x12\x13\n" +
 	"\x05sp_id\x18\x01 \x01(\x04R\x04spId\x12\x19\n" +
 	"\bcntlr_id\x18\x02 \x01(\x04R\acntlrId\x12\x13\n" +
@@ -21884,7 +21923,8 @@ const file_pb_schema_proto_rawDesc = "" +
 	"\x11returning_td_list\x18\x0e \x03(\v2,.CheckControllerNodeRestoreReply.ReturningTdR\x0freturningTdList\x12\"\n" +
 	"\rheld_side_cnt\x18\x0f \x01(\x04R\vheldSideCnt\x12*\n" +
 	"\x11restored_side_cnt\x18\x10 \x01(\x04R\x0frestoredSideCnt\x127\n" +
-	"\x18held_side_ids_incomplete\x18\x11 \x01(\bR\x15heldSideIdsIncomplete\"F\n" +
+	"\x18held_side_ids_incomplete\x18\x11 \x01(\bR\x15heldSideIdsIncomplete\x12*\n" +
+	"\x11break_reason_list\x18\x12 \x03(\tR\x0fbreakReasonList\"F\n" +
 	"\x10GetDnSizeRequest\x12\x1d\n" +
 	"\n" +
 	"cluster_id\x18\x01 \x01(\x04R\tclusterId\x12\x13\n" +
@@ -22218,11 +22258,11 @@ const file_pb_schema_proto_rawDesc = "" +
 	"\x11GetCnStoreRequest\x12\x1d\n" +
 	"\n" +
 	"cluster_id\x18\x01 \x01(\x04R\tclusterId\x12\x13\n" +
-	"\x05cn_id\x18\x02 \x01(\x04R\x04cnId\"\xd8\x04\n" +
+	"\x05cn_id\x18\x02 \x01(\x04R\x04cnId\"\xa1\x05\n" +
 	"\x0fGetCnStoreReply\x12,\n" +
 	"\vagent_reply\x18\x01 \x01(\v2\v.AgentReplyR\n" +
 	"agentReply\x122\n" +
-	"\acn_list\x18\x02 \x03(\v2\x19.GetCnStoreReply.StoredCnR\x06cnList\x1a\xaa\x02\n" +
+	"\acn_list\x18\x02 \x03(\v2\x19.GetCnStoreReply.StoredCnR\x06cnList\x1a\xf3\x02\n" +
 	"\vStoredCntlr\x122\n" +
 	"\rcntlr_pointer\x18\x01 \x01(\v2\r.CntlrPointerR\fcntlrPointer\x12\x1a\n" +
 	"\brevision\x18\x02 \x01(\x04R\brevision\x12\x18\n" +
@@ -22231,7 +22271,11 @@ const file_pb_schema_proto_rawDesc = "" +
 	"\bnqn_list\x18\x05 \x03(\tR\anqnList\x12\x1e\n" +
 	"\vmax_side_id\x18\x06 \x01(\x04R\tmaxSideId\x12\x19\n" +
 	"\bside_cnt\x18\a \x01(\x04R\asideCnt\x125\n" +
-	"\x17retired_side_id_missing\x18\b \x01(\bR\x14retiredSideIdMissing\x1a\xb5\x01\n" +
+	"\x17retired_side_id_missing\x18\b \x01(\bR\x14retiredSideIdMissing\x12)\n" +
+	"\x11parked_ns_id_list\x18\t \x03(\x04R\x0eparkedNsIdList\x12\x1c\n" +
+	"\n" +
+	"ns_id_list\x18\n" +
+	" \x03(\x04R\bnsIdList\x1a\xb5\x01\n" +
 	"\bStoredCn\x12\x13\n" +
 	"\x05cn_id\x18\x01 \x01(\x04R\x04cnId\x12\x1a\n" +
 	"\brevision\x18\x02 \x01(\x04R\brevision\x12;\n" +

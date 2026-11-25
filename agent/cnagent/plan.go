@@ -1228,7 +1228,17 @@ func (p *cntlrPlan) buildSubsystems() {
 // anything: nsBacking rule 1 *parks* the ns-dev on the td's dm-error, and the
 // ANA rule above keeps the namespace in the inaccessible group ([D12]).
 func (p *cntlrPlan) effectiveSuspend(ns *pb.Namespace) bool {
-	for _, clone := range p.req.GetCloneList() {
+	return nsEffectivelySuspended(p.req, ns)
+}
+
+// nsEffectivelySuspended is effectiveSuspend's rule on a request alone, which
+// the plan and the store summary of GetCnStore share (storedCntlr), so that
+// the restore check reads the namespaces parked by the rule that parks them.
+func nsEffectivelySuspended(
+	req *pb.SyncupCntlrRequest,
+	ns *pb.Namespace,
+) bool {
+	for _, clone := range req.GetCloneList() {
 		if clone.GetAutoResume() && clone.GetDstTdId() == ns.GetTdId() {
 			return false
 		}
@@ -1236,14 +1246,14 @@ func (p *cntlrPlan) effectiveSuspend(ns *pb.Namespace) bool {
 	if ns.GetSuspended() {
 		return true
 	}
-	for _, xfer := range p.req.GetXferList() {
+	for _, xfer := range req.GetXferList() {
 		if !xfer.GetAutoSuspend() {
 			continue
 		}
 		if xfer.GetOriNsIdx() != ns.GetNsIdx() {
 			continue
 		}
-		if ss := p.req.GetNqnToSubsystem()[xfer.GetOriNqn()]; ss != nil {
+		if ss := req.GetNqnToSubsystem()[xfer.GetOriNqn()]; ss != nil {
 			for _, candidate := range ss.GetNsList() {
 				if candidate.GetNsId() == ns.GetNsId() {
 					return true

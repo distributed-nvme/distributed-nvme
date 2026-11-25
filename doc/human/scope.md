@@ -241,6 +241,11 @@ always sends a piece's position.
   good and the copy is not whole, so that a repair replaces the leg. A copy
   that is whole is finished with no force instead, since the gateway asks
   only the new side's disk node for the proof.
+- **An etcd restore over a migration's switch since the backup.** Silent.
+  The restore can make a leg's old side serve again beside its new one,
+  and a block first written since the switch can then read another pool's
+  bytes. The restore check names such a pool. State: procedure written, as
+  section 5.5 says in its entry on an etcd restore over a cutover.
 - **A forced start from an older copy restores one group, not the pool.**
   A forced start is an operator's start of a group's RAID1 array from one
   leg they name, when md will not start it by itself. In a data group,
@@ -890,6 +895,28 @@ The entries:
   which tells the two cases apart, and
   [restore etcd from a backup](operations.md#restore-etcd-from-a-backup).
   Not seen in the lab.
+- **An etcd restore over a cutover, a failover, a park or a namespace's
+  delete since the backup breaks the pool without changing its layout.**
+  Silent. A restore brings back the state of the backup's time. A
+  migration that moved a leg's data since then gets its switch to the new
+  side back as not done: the old side serves again with old bytes, beside
+  the new side, and reads can return old bytes, or a block first written
+  since can read another pool's; the worker switches again, and writes in
+  between are lost. A primary that moved since then moves back while the
+  old primary's node still serves, and a host still writing can lose a
+  write it was told was done, as in section 5.1. A namespace parked or
+  deleted since then serves again: when its volume was moved to a pool of
+  another etcd, hosts reach two copies of one volume. The restore check
+  (`dnvctl cn check-restore`) reads each of these, as a migration whose
+  switch is not done, a role that differs and a namespace that serves in
+  the backup but is parked or gone in what the node holds, and gives such
+  a pool the verdict may break, with a line for the cause. It misses a
+  switch that the controller nodes had not yet heard of. State: procedure
+  written: [restore etcd from a
+  backup](operations.md#restore-etcd-from-a-backup) has the hosts' IO on
+  such a pool stopped before any worker starts, since the check is the
+  only record of who served, and says when it may start again. Not seen
+  in the lab.
 - **A disk node's agent that starts on older local files removes the sides
   made since.** At its start a disk node's agent builds again from its
   local files, and also removes what they do not name and frees its

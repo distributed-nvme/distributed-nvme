@@ -74,7 +74,8 @@ func TestGetCnStoreAnswersTheHeldDesiredState(t *testing.T) {
 					NqnList:      nqns,
 					MaxSideId: max(testMetaSide, testDataSide,
 						testMetaSide+0x100, testDataSide+0x100),
-					SideCnt: 4,
+					SideCnt:  4,
+					NsIdList: heldNsIds(held),
 				}},
 			},
 			{CnId: testCn + 1, Revision: 9},
@@ -244,4 +245,55 @@ func TestStoredCntlrCountsRetiredSidesById(t *testing.T) {
 				c.max, c.sideCn)
 		}
 	}
+}
+
+// TestStoredCntlrListsTheParkedNamespaces pins CN32's list of the parked
+// namespaces of a held cntlr, by the effective-suspend rule of CN16: a
+// suspended namespace, one an auto_suspend transfer names, and not one an
+// auto_resume clone fills though its flag says suspended, nor a plain one,
+// nor one whose transfer does not park; the ids in order, over every
+// subsystem.
+func TestStoredCntlrListsTheParkedNamespaces(t *testing.T) {
+	const nqnA, nqnB = "nqn-a", "nqn-b"
+	req := &pb.SyncupCntlrRequest{
+		CntlrPointer: cntlrPtr(),
+		Revision:     7,
+		NqnToSubsystem: map[string]*pb.Subsystem{
+			nqnA: {NsList: []*pb.Namespace{
+				{NsId: 0x19, NsIdx: 1, TdId: 1, Suspended: true},
+				{NsId: 0x12, NsIdx: 2, TdId: 2},
+				{NsId: 0x13, NsIdx: 3, TdId: 3, Suspended: true},
+			}},
+			nqnB: {NsList: []*pb.Namespace{
+				{NsId: 0x14, NsIdx: 1, TdId: 4},
+				{NsId: 0x15, NsIdx: 2, TdId: 5},
+			}},
+		},
+		XferList: []*pb.Transfer{
+			{OriNqn: nqnB, OriNsIdx: 1, AutoSuspend: true},
+			{OriNqn: nqnB, OriNsIdx: 2},
+		},
+		CloneList: []*pb.Clone{{DstTdId: 3, AutoResume: true}},
+	}
+	got := storedCntlr(req).GetParkedNsIdList()
+	if !slices.Equal(got, []uint64{0x14, 0x19}) {
+		t.Errorf("parked namespaces %#x, want 0x14 (a transfer's park) "+
+			"and 0x19 (suspended)", got)
+	}
+	if all := storedCntlr(req).GetNsIdList(); !slices.Equal(all,
+		[]uint64{0x12, 0x13, 0x14, 0x15, 0x19}) {
+		t.Errorf("namespaces %#x, want all five in order", all)
+	}
+}
+
+// heldNsIds is the ns_id of every namespace of a request, in order.
+func heldNsIds(req *pb.SyncupCntlrRequest) []uint64 {
+	var ids []uint64
+	for _, ss := range req.GetNqnToSubsystem() {
+		for _, ns := range ss.GetNsList() {
+			ids = append(ids, ns.GetNsId())
+		}
+	}
+	slices.Sort(ids)
+	return ids
 }

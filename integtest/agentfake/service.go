@@ -1443,17 +1443,57 @@ func storedCntlrOf(
 			sideCnt++
 		}
 	}
+	var nsIds, parked []uint64
+	for _, nqn := range nqns {
+		for _, ns := range req.GetNqnToSubsystem()[nqn].GetNsList() {
+			nsIds = append(nsIds, ns.GetNsId())
+			if nsParkedOf(req, ns) {
+				parked = append(parked, ns.GetNsId())
+			}
+		}
+	}
+	slices.Sort(nsIds)
+	slices.Sort(parked)
 	return &pb.GetCnStoreReply_StoredCntlr{
-		CntlrPointer: req.GetCntlrPointer(),
-		Revision:     req.GetRevision(),
-		Primary:      req.GetCntlr().GetPrimary(),
-		TdList:       req.GetTdList(),
-		NqnList:      nqns,
-		MaxSideId:    maxSideId,
-		SideCnt:      sideCnt,
+		CntlrPointer:   req.GetCntlrPointer(),
+		Revision:       req.GetRevision(),
+		Primary:        req.GetCntlr().GetPrimary(),
+		TdList:         req.GetTdList(),
+		NqnList:        nqns,
+		MaxSideId:      maxSideId,
+		SideCnt:        sideCnt,
+		ParkedNsIdList: parked,
+		NsIdList:       nsIds,
 
 		RetiredSideIdMissing: missing,
 	}
+}
+
+// nsParkedOf is the effective-suspend rule of cnagent.md CN16, the cn
+// agent's nsEffectivelySuspended, which a fake cannot import: a namespace is
+// parked iff its flag says so or an auto_suspend transfer names it, unless
+// an auto_resume clone fills its volume.
+func nsParkedOf(req *pb.SyncupCntlrRequest, ns *pb.Namespace) bool {
+	for _, clone := range req.GetCloneList() {
+		if clone.GetAutoResume() && clone.GetDstTdId() == ns.GetTdId() {
+			return false
+		}
+	}
+	if ns.GetSuspended() {
+		return true
+	}
+	for _, xfer := range req.GetXferList() {
+		if !xfer.GetAutoSuspend() || xfer.GetOriNsIdx() != ns.GetNsIdx() {
+			continue
+		}
+		for _, candidate := range req.GetNqnToSubsystem()[xfer.GetOriNqn()].
+			GetNsList() {
+			if candidate.GetNsId() == ns.GetNsId() {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // CheckCn serves the CN health stream, one reply per request.

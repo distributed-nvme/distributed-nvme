@@ -6733,7 +6733,32 @@ Safe steps:
      row whose `held_side_ids_incomplete` is true was told by an older
      version of the worker, which did not send the side of each retired
      leg. The check then cannot see every change, so the row reads may
-     break whenever the cntlr holds a newer state than the backup.
+     break whenever the cntlr holds a newer state than the backup. Three
+     more changes read may break, though the layout is the same: a
+     migration whose cutover the backup holds as not done, which may have
+     run since; a cntlr whose role differs between what the agent holds
+     and the backup, after a failover or a cntlr replacement since,
+     including a cntlr made since that the backup does not name; and a
+     namespace that serves in the backup but was parked or deleted since,
+     such as the namespace of a volume moved to a pool of another etcd,
+     before or after the move's last step deleted it. `break_reason_list`
+     gives one line for each cause, which names the migrations and, by
+     their `ns_id` (`dnvctl ss list` shows each subsystem's namespaces
+     with it), the namespaces. On every pool with a row read may break,
+     stop the hosts' IO before step 7 starts the workers: unmount its
+     volumes on each host, or stop what writes them. Step 5's copy of a
+     lost volume may read first. Once a worker starts, an old side of a
+     migration can serve again with old bytes, or another pool's, the old
+     primary can serve again beside the new one, and a volume can have two
+     serving copies. The check's rows are the only record of this: step 6
+     deletes the agents' local files, so no agent can tell a new worker
+     which node served. Start the hosts' IO on such a pool again only
+     after step 7, once these hold: `dnvctl migr get` shows each migration
+     the line names with its cutover no longer pending, and the status
+     read, `dnvctl cluster get-status`, lists no row of the pool; and each
+     namespace the line names is parked again with `dnvctl ns
+     set-suspended`, or deleted with `dnvctl ns delete`, as step 8 says
+     for a namespace that came back.
    - `RESTORE_VERDICT_NEW`: the pool is not in the backup and is lost
      whole, with each volume `lost_td_list` lists. `nqn_list` names its
      subsystems; the NQN of a Kubernetes volume's subsystem carries the

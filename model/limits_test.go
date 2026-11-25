@@ -980,15 +980,23 @@ func TestRestoreCheckRepliesFitGrpcMaxMsgSize(t *testing.T) {
 			"GetCnStoreReply.StoredCn.cntlr_list":                    common.MaxCntlrCntPerCn,
 			"GetCnStoreReply.StoredCntlr.td_list":                    common.MaxTdCntPerSp,
 			"GetCnStoreReply.StoredCntlr.nqn_list":                   common.MaxSsCntPerSp,
+			"GetCnStoreReply.StoredCntlr.parked_ns_id_list":          common.MaxSsCntPerSp * common.MaxNsCntPerSs,
+			"GetCnStoreReply.StoredCntlr.ns_id_list":                 common.MaxSsCntPerSp * common.MaxNsCntPerSs,
 			"CheckControllerNodeRestoreReply.held_cn_list":           2,
 			"CheckControllerNodeRestoreReply.pool_list":              2 * common.MaxCntlrCntPerCn,
 			"CheckControllerNodeRestoreReply.Pool.nqn_list":          common.MaxSsCntPerSp,
 			"CheckControllerNodeRestoreReply.Pool.lost_td_list":      common.MaxTdCntPerSp,
 			"CheckControllerNodeRestoreReply.Pool.returning_td_list": common.MaxTdCntPerSp,
+			// One text per cause: the two side causes, the pending cutovers,
+			// the role, the parked and the deleted namespaces
+			// (gateway/restorecheck.go, breakReasons).
+			"CheckControllerNodeRestoreReply.Pool.break_reason_list": 6,
 		},
 		strLens: map[protoreflect.FullName]int{
 			"GetCnStoreReply.StoredCntlr.nqn_list":          common.MaxNqnLength,
 			"CheckControllerNodeRestoreReply.Pool.nqn_list": common.MaxNqnLength,
+			// Each text is cut to the row text cap.
+			"CheckControllerNodeRestoreReply.Pool.break_reason_list": common.AgentTextMax,
 		},
 		keyLens:  map[protoreflect.FullName]int{},
 		rowNames: map[protoreflect.FullName]int{},
@@ -1002,6 +1010,7 @@ func TestRestoreCheckRepliesFitGrpcMaxMsgSize(t *testing.T) {
 	b.build(check)
 	notHeld := proto.Clone(check.GetPoolList()[0]).(*pb.CheckControllerNodeRestoreReply_Pool)
 	notHeld.NqnList, notHeld.LostTdList, notHeld.ReturningTdList = nil, nil, nil
+	notHeld.BreakReasonList = nil
 	for range common.MaxCntlrCntPerCn {
 		check.PoolList = append(check.PoolList, notHeld)
 	}

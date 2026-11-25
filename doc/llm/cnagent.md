@@ -5202,7 +5202,13 @@ the new legs of each repair of `name_to_repair`, and each retired leg those
 groups list, by the side id the request's `retired_leg_id_to_side_id` gives
 it. A retired leg with no side id there, as in a request from a worker that
 sends no map, is counted and makes the summary say a side id is missing
-(`retired_side_id_missing`), since the largest id can then miss its side.
+(`retired_side_id_missing`), since the largest id can then miss its side;
+the `ns_id` of each namespace of `nqn_to_subsystem` the request keeps
+effectively suspended, in order (`parked_ns_id_list`), by the rule of CN16
+that parks it (`nsEffectivelySuspended`); and the `ns_id` of each namespace
+of `nqn_to_subsystem`, in order (`ns_id_list`), so that the restore check
+compares the parks with the restored state's and finds a namespace deleted
+since the backup.
 The agent builds nothing from `retired_leg_id_to_side_id`: it keeps the map
 with the request it holds, for this summary alone, so the map changes no
 converge, gate, sweep or other reply of the agent. A pointer whose cntlr the

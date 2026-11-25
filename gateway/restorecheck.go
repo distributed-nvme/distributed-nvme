@@ -4,7 +4,10 @@ import (
 	"cmp"
 	"context"
 	"errors"
+	"fmt"
+	"maps"
 	"slices"
+	"strconv"
 	"strings"
 
 	"google.golang.org/protobuf/proto"
@@ -127,7 +130,8 @@ func (s *Server) CheckControllerNodeRestore(
 			Verdict:              pb.RestoreVerdict_RESTORE_VERDICT_NOT_HELD,
 			CntlrInRestoredState: true,
 		}
-		restored, err := s.readRestoredPool(ctx, cid, ptr.GetSpId(), 0)
+		restored, err := s.readRestoredPool(ctx, cid, ptr.GetSpId(),
+			ptr.GetCntlrId(), 0)
 		if err != nil {
 			return nil, err
 		}
@@ -194,15 +198,57 @@ func heldCnStore(
 // state: found when the restored state names a pool of the sp_id, lost when
 // a record of it is missing or does not decode, its name, SpConf, revision
 // and, for a pool the agent holds at a newer revision, the largest side id
-// and the count of the sides of its layout (layoutSides).
+// and the count of the sides of its layout (layoutSides), whether the
+// checked cntlr is the primary, the migrations whose cutover is pending and
+// the namespaces with whether the cn agent's rule parks them.
 type restoredPool struct {
-	found     bool
-	lost      bool
-	name      string
-	conf      *pb.SpConf
-	revision  uint64
-	maxSideId uint64
-	sideCnt   uint64
+	found        bool
+	lost         bool
+	name         string
+	conf         *pb.SpConf
+	revision     uint64
+	maxSideId    uint64
+	sideCnt      uint64
+	primary      bool
+	listed       bool
+	pendingMigrs []string
+	namespaces   map[uint64]restoredNs
+}
+
+// restoredNs is one namespace of a restored pool: its address for a reason's
+// text and whether the restored state parks it.
+type restoredNs struct {
+	nqn    string
+	nsIdx  uint32
+	parked bool
+}
+
+// nsParked is the effective-suspend rule of cnagent.md CN16 on the records
+// of a pool, the rule the cn agent parks a namespace by: suspended iff its
+// flag says so or an auto_suspend transfer names it, unless an auto_resume
+// clone fills its volume. clones are those the worker sends a cntlr, the
+// ones not latched (dnv-worker.md CLD5).
+func nsParked(
+	nqn string,
+	ns *pb.Namespace,
+	xfers []*pb.Transfer,
+	clones []*pb.Clone,
+) bool {
+	for _, clone := range clones {
+		if clone.GetAutoResume() && clone.GetDstTdId() == ns.GetTdId() {
+			return false
+		}
+	}
+	if ns.GetSuspended() {
+		return true
+	}
+	for _, xfer := range xfers {
+		if xfer.GetAutoSuspend() && xfer.GetOriNqn() == nqn &&
+			xfer.GetOriNsIdx() == ns.GetNsIdx() {
+			return true
+		}
+	}
+	return false
 }
 
 // readRestoredPool reads one pool of the restored state by its sp_id, in a
@@ -210,9 +256,13 @@ type restoredPool struct {
 // when the restored revision is below heldRevision, every Slice of
 // slice_id_list, every Clone of clone_name_list, every Repair of
 // repair_name_list and the RetiredLeg of each retired leg a counted group
-// lists, for the sides of its layout. A missing or undecodable record makes
-// the pool lost, never an error; only a failure to reach etcd is one. The
-// sides are counted over the groups the agent counts in the request it
+// lists, for the sides of its layout; the Cntlr of cntlrId, when
+// cntlr_id_list names it, for its role (a cntlr the list does not name is
+// no primary); every Migration of migr_name_list, for a pending cutover;
+// and every Subsystem of nqn_list and Transfer of xfer_name_list, for the
+// namespaces the cn agent's rule parks. A missing or undecodable record
+// makes the pool lost, never an error; only a failure to reach etcd is one.
+// The sides are counted over the groups the agent counts in the request it
 // holds (cnagent.md CN32): the slices' meta and data groups and the meta
 // groups of the clones that are not latched, since the worker sends a
 // latched clone to no cntlr (dnv-worker.md CLD5).
@@ -220,6 +270,7 @@ func (s *Server) readRestoredPool(
 	ctx context.Context,
 	cid uint64,
 	spId uint64,
+	cntlrId uint64,
 	heldRevision uint64,
 ) (restoredPool, error) {
 	var pool restoredPool
@@ -262,15 +313,62 @@ func (s *Server) readRestoredPool(
 			}
 		}
 		cloneGrps := map[string]uint64{}
+		var sentClones []*pb.Clone
 		for _, cloneName := range conf.GetCloneNameList() {
 			clone := &pb.Clone{}
 			if !stm.Get(model.CloneKey(cid, spId, cloneName), clone) {
 				pool.lost = true
 				return nil
 			}
+			if !clone.GetDeleting() {
+				sentClones = append(sentClones, clone)
+			}
 			if !clone.GetDeleting() && clone.GetMetaGrp() != nil {
 				grps = append(grps, clone.GetMetaGrp())
 				cloneGrps[cloneName] = clone.GetMetaGrp().GetGrpId()
+			}
+		}
+		if slices.Contains(conf.GetCntlrIdList(), cntlrId) {
+			cntlr := &pb.Cntlr{}
+			if !stm.Get(model.CntlrKey(cid, spId, cntlrId), cntlr) {
+				pool.lost = true
+				return nil
+			}
+			pool.listed = true
+			pool.primary = cntlr.GetPrimary()
+		}
+		for _, migrName := range conf.GetMigrNameList() {
+			migr := &pb.Migration{}
+			if !stm.Get(model.MigrationKey(cid, spId, migrName), migr) {
+				pool.lost = true
+				return nil
+			}
+			if migr.GetCutoverPending() {
+				pool.pendingMigrs = append(pool.pendingMigrs, migrName)
+			}
+		}
+		var xfers []*pb.Transfer
+		for _, xferName := range conf.GetXferNameList() {
+			xfer := &pb.Transfer{}
+			if !stm.Get(model.TransferKey(cid, spId, xferName), xfer) {
+				pool.lost = true
+				return nil
+			}
+			xfers = append(xfers, xfer)
+		}
+		pool.namespaces = map[uint64]restoredNs{}
+		for _, nqn := range conf.GetNqnList() {
+			subsystem := &pb.Subsystem{}
+			if !stm.Get(model.SubsystemKey(cid, spId, nqn), subsystem) {
+				pool.lost = true
+				return nil
+			}
+			for _, ns := range subsystem.GetNsList() {
+				pool.namespaces[ns.GetNsId()] = restoredNs{
+					nqn:    nqn,
+					nsIdx:  ns.GetNsIdx(),
+					parked: nsParked(nqn, ns, xfers, sentClones),
+				}
 			}
 		}
 		// The side id of each retired leg those groups list, from its
@@ -330,9 +428,9 @@ func (s *Server) readRestoredPool(
 // judgeHeldCntlr is the restore check's row of one cntlr a held node names
 // (architecture.md, Controller nodes, CheckControllerNodeRestore): the
 // verdict from the held and the restored revision and, past the backup, the
-// largest side ids and the counts of sides of the two layouts; and, for a
-// pool whose held revision is above the restored one, the thin devices on
-// each side the other lacks. held is nil for a pointer whose cntlr the
+// largest side ids and the counts of sides of the two layouts and the causes
+// of breakReasons; and, for a pool whose held revision is above the restored
+// one, the thin devices on each side the other lacks. held is nil for a pointer whose cntlr the
 // agent holds no request of; inRestored says the restored node names the
 // cntlr, so that a pool the restored state names nowhere is a lost record,
 // not a pool made after the backup.
@@ -359,7 +457,7 @@ func (s *Server) judgeHeldCntlr(
 		pool.HeldSideIdsIncomplete = held.GetRetiredSideIdMissing()
 	}
 	restored, err := s.readRestoredPool(ctx, cid, ptr.GetSpId(),
-		pool.GetHeldRevision())
+		ptr.GetCntlrId(), pool.GetHeldRevision())
 	if err != nil {
 		return nil, err
 	}
@@ -396,13 +494,8 @@ func (s *Server) judgeHeldCntlr(
 	// come from one counter of the pool that only grows. A held request
 	// without a retired leg's side id, as one from a worker without
 	// retired_leg_id_to_side_id carries, may miss an added side in its
-	// largest id, so it may break.
-	pool.Verdict = pb.RestoreVerdict_RESTORE_VERDICT_OLDER
-	if held.GetMaxSideId() > restored.maxSideId ||
-		held.GetSideCnt() != restored.sideCnt ||
-		held.GetRetiredSideIdMissing() {
-		pool.Verdict = pb.RestoreVerdict_RESTORE_VERDICT_MAY_BREAK
-	}
+	// largest id, so it may break. Three changes keep the set of sides and
+	// may break all the same (breakReasons).
 	restoredTds, lost, err := s.restoredTds(ctx, cid, ptr.GetSpId(),
 		restored.conf.GetTdNameList())
 	if err != nil {
@@ -411,6 +504,11 @@ func (s *Server) judgeHeldCntlr(
 	if lost {
 		pool.Verdict = pb.RestoreVerdict_RESTORE_VERDICT_RECORD_LOST
 		return pool, nil
+	}
+	pool.BreakReasonList = breakReasons(held, restored)
+	pool.Verdict = pb.RestoreVerdict_RESTORE_VERDICT_OLDER
+	if len(pool.BreakReasonList) != 0 {
+		pool.Verdict = pb.RestoreVerdict_RESTORE_VERDICT_MAY_BREAK
 	}
 	heldIds := map[uint64]bool{}
 	restoredIds := map[uint64]bool{}
@@ -443,6 +541,97 @@ func (s *Server) judgeHeldCntlr(
 			return cmp.Compare(a.GetTdId(), b.GetTdId())
 		})
 	return pool, nil
+}
+
+// breakReasons is why a pool held past the store may break, one text for
+// each cause (architecture.md, Controller nodes,
+// CheckControllerNodeRestore): the set of sides differs, or the held request
+// lacks a retired leg's side id; and three changes that keep the set of
+// sides: a migration whose cutover the restored state holds pending, which
+// may have cut over since the backup, so that its old side serves again
+// beside the new one; a primary role that differs, which the first worker
+// hands out with no demotion first; and a namespace the restored state has
+// and serves that the agent holds parked, or does not hold, deleted since
+// the backup as at the end of a move to a pool of another etcd, so that
+// hosts can reach two serving copies of its volume. A held summary from an
+// agent without ns_id_list, which lists no namespace, reads every restored
+// namespace as deleted: cautious. One text per cause, the migrations and
+// the namespaces of a cause named in it, each cut to the row text cap
+// (common.CutRowText), so the reply stays within its bound (model's limits
+// test).
+func breakReasons(
+	held *pb.GetCnStoreReply_StoredCntlr,
+	restored restoredPool,
+) []string {
+	var out []string
+	if held.GetMaxSideId() > restored.maxSideId ||
+		held.GetSideCnt() != restored.sideCnt {
+		out = append(out, fmt.Sprintf("held sides differ from the "+
+			"restored ones (largest side id %d against %d, %d sides "+
+			"against %d): a side was made or removed since the backup",
+			held.GetMaxSideId(), restored.maxSideId, held.GetSideCnt(),
+			restored.sideCnt))
+	}
+	if held.GetRetiredSideIdMissing() {
+		out = append(out, "the held request lacks the side id of a "+
+			"retired leg, so a side made since the backup may not show")
+	}
+	if len(restored.pendingMigrs) != 0 {
+		out = append(out, fmt.Sprintf("cutover pending in the restored "+
+			"state for migration %s: if it ran since the backup, the old "+
+			"side serves again beside the new one, with old or another "+
+			"pool's bytes", strings.Join(restored.pendingMigrs, ", ")))
+	}
+	if held.GetPrimary() != restored.primary {
+		heldRole := "a standby"
+		if held.GetPrimary() {
+			heldRole = "the primary"
+		}
+		restoredRole := "a standby"
+		switch {
+		case !restored.listed:
+			restoredRole = "no cntlr, made since the backup"
+		case restored.primary:
+			restoredRole = "the primary"
+		}
+		out = append(out, fmt.Sprintf("held as %s, restored as %s: the "+
+			"role moved since the backup, and the first worker hands the "+
+			"restored role out with no demotion first", heldRole,
+			restoredRole))
+	}
+	heldNs := map[uint64]bool{}
+	for _, nsId := range held.GetNsIdList() {
+		heldNs[nsId] = true
+	}
+	heldParked := map[uint64]bool{}
+	for _, nsId := range held.GetParkedNsIdList() {
+		heldParked[nsId] = true
+	}
+	var parked, deleted []string
+	for _, nsId := range slices.Sorted(maps.Keys(restored.namespaces)) {
+		switch {
+		case restored.namespaces[nsId].parked:
+		case heldParked[nsId]:
+			parked = append(parked, strconv.FormatUint(nsId, 10))
+		case !heldNs[nsId]:
+			deleted = append(deleted, strconv.FormatUint(nsId, 10))
+		}
+	}
+	if len(parked) != 0 {
+		out = append(out, fmt.Sprintf("parked in what the agent holds and "+
+			"serving in the restored state, ns_id %s: hosts can reach two "+
+			"serving copies of a volume", strings.Join(parked, ", ")))
+	}
+	if len(deleted) != 0 {
+		out = append(out, fmt.Sprintf("deleted since the backup and "+
+			"serving in the restored state, ns_id %s, as after a move to "+
+			"another etcd: hosts can reach a second copy of a volume",
+			strings.Join(deleted, ", ")))
+	}
+	for i := range out {
+		out[i] = common.CutRowText(out[i])
+	}
+	return out
 }
 
 // restoredTds reads every thin device of one restored pool in one range of

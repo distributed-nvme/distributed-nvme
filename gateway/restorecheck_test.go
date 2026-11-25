@@ -8,6 +8,8 @@ package gateway
 
 import (
 	"context"
+	"fmt"
+	"strings"
 	"testing"
 
 	"google.golang.org/grpc/codes"
@@ -49,7 +51,11 @@ func rcMakeEnv(t *testing.T) *rcEnv {
 // first leg also migrSide when set, the group listing retiredLegs, its
 // clones by name with the side ids of their meta groups (a latched clone in
 // deletingClones), and its thin devices by name; tdNames names more thin
-// devices than tds holds, as a record lost under a listed name.
+// devices than tds holds, as a record lost under a listed name. Its cntlr 1
+// is the primary unless standby. migrs are its migrations by name, true for
+// one whose cutover is pending; subsystems its subsystems' namespaces by
+// NQN; xfers its transfers by name; and resumeTds the dst_td_id of an
+// auto_resume clone each.
 type rcPool struct {
 	spId           uint64
 	name           string
@@ -62,6 +68,11 @@ type rcPool struct {
 	deletingClones map[string]bool
 	tds            map[string]*pb.ThinDevice
 	tdNames        []string
+	standby        bool
+	migrs          map[string]bool
+	subsystems     map[string][]*pb.Namespace
+	xfers          map[string]*pb.Transfer
+	resumeTds      []uint64
 }
 
 func (e *rcEnv) putPool(t *testing.T, p rcPool) {
@@ -102,6 +113,35 @@ func (e *rcEnv) putPool(t *testing.T, p rcPool) {
 			MetaGrp:  grp,
 		})
 	}
+	for i, tdId := range p.resumeTds {
+		name := fmt.Sprintf("resume%d", i)
+		cloneNames = append(cloneNames, name)
+		mustPut(t, e.s.cli, model.CloneKey(e.cid, p.spId, name), &pb.Clone{
+			CloneId:    0x300 + uint64(i),
+			DstTdId:    tdId,
+			AutoResume: true,
+		})
+	}
+	var migrNames []string
+	for name, pending := range p.migrs {
+		migrNames = append(migrNames, name)
+		mustPut(t, e.s.cli, model.MigrationKey(e.cid, p.spId, name),
+			&pb.Migration{MigrId: 0x500, SrcSideId: p.sideIds[0],
+				DstSideId: p.migrSide, CutoverPending: pending})
+	}
+	var nqns []string
+	for nqn, nsList := range p.subsystems {
+		nqns = append(nqns, nqn)
+		mustPut(t, e.s.cli, model.SubsystemKey(e.cid, p.spId, nqn),
+			&pb.Subsystem{SsId: 0x600, NsList: nsList})
+	}
+	var xferNames []string
+	for name, xfer := range p.xfers {
+		xferNames = append(xferNames, name)
+		mustPut(t, e.s.cli, model.TransferKey(e.cid, p.spId, name), xfer)
+	}
+	mustPut(t, e.s.cli, model.CntlrKey(e.cid, p.spId, 1),
+		&pb.Cntlr{Primary: !p.standby})
 	e.putRetired(t, p.spId, sliceId, "", p.retiredLegs)
 	mustPut(t, e.s.cli, model.SpNameKey(e.cid, p.spId),
 		&pb.SpName{SpName: p.name})
@@ -109,10 +149,14 @@ func (e *rcEnv) putPool(t *testing.T, p rcPool) {
 		SpId:             p.spId,
 		ShardCode:        shard,
 		NextDevId:        p.nextDevId,
+		CntlrIdList:      []uint64{1},
 		SliceIdList:      []uint64{sliceId},
 		TdNameList:       tdNames,
 		CloneNameList:    cloneNames,
 		RetiredLegIdList: p.retiredLegs,
+		NqnList:          nqns,
+		XferNameList:     xferNames,
+		MigrNameList:     migrNames,
 	})
 	mustPut(t, e.s.cli, model.SpRevKey(shard, e.cid, p.spId),
 		&pb.SpRev{SpName: p.name, Revision: p.revision})
@@ -352,6 +396,9 @@ func TestCheckControllerNodeRestoreJudgesEachPool(t *testing.T) {
 		SpName:  "break", HeldRevision: 6, RestoredRevision: 5,
 		Primary: true, HeldMaxSideId: 0x40, RestoredMaxSideId: 0x33,
 		HeldSideCnt: 2, RestoredSideCnt: 2,
+		BreakReasonList: []string{"held sides differ from the " +
+			"restored ones (largest side id 64 against 51, 2 sides " +
+			"against 2): a side was made or removed since the backup"},
 	})
 	want(spNew, &pb.CheckControllerNodeRestoreReply_Pool{
 		CnId:    e.cnId,
@@ -511,6 +558,7 @@ func TestCheckControllerNodeRestoreSeesTheSetOfSidesChange(t *testing.T) {
 		return &pb.GetCnStoreReply_StoredCntlr{
 			CntlrPointer: rcPtr(spId, 1),
 			Revision:     6,
+			Primary:      true,
 			MaxSideId:    maxSide,
 			SideCnt:      sideCnt,
 		}
@@ -979,5 +1027,275 @@ func TestCheckControllerNodeRestoreGivesAHeldCntlrOfALostPoolItsRow(
 		pb.RestoreVerdict_RESTORE_VERDICT_NEW {
 		t.Errorf("a held cntlr the restored node does not name: %v, "+
 			"want NEW", got)
+	}
+}
+
+// TestCheckControllerNodeRestoreReadsWhatTheSidesHide pins the three causes
+// of MAY_BREAK that the set of sides cannot show (architecture.md,
+// Controller nodes, CheckControllerNodeRestore), each pool held one revision
+// past the store over the same sides: a migration whose cutover the
+// restored state holds pending, which may have cut over since the backup; a
+// primary role that differs between the held and the restored state, either
+// way, a cntlr made since the backup included; and a namespace the restored
+// state serves that the node holds parked, by its suspended flag, a
+// transfer's park or a clone's auto_resume override, or does not hold at
+// all, deleted since the backup. Each gives its own text. A namespace parked
+// in both, one the restored state does not have, one a latched clone's
+// auto_resume does not reach, and a pool where nothing differs read older;
+// a transfer of another subsystem parks nothing. A missing Cntlr, Migration,
+// Subsystem or Transfer record reads RECORD_LOST, and a lost row carries no
+// reason.
+func TestCheckControllerNodeRestoreReadsWhatTheSidesHide(t *testing.T) {
+	e := rcMakeEnv(t)
+	const (
+		spCutover = uint64(0x701)
+		spAway    = uint64(0x702)
+		spHere    = uint64(0x703)
+		spServes  = uint64(0x704)
+		spResumed = uint64(0x705)
+		spBoth    = uint64(0x706)
+		spGone    = uint64(0x707)
+		spPlain   = uint64(0x708)
+		spDeleted = uint64(0x709)
+		spLatched = uint64(0x70a)
+		spOtherSs = uint64(0x70b)
+		spNewCntl = uint64(0x70c)
+		spLostTd  = uint64(0x70d)
+	)
+	const nqn = "nqn.2024-01.io.dnv:0:00000000000000aa:0000000000000001"
+	sides := []uint64{0x31, 0x33}
+	e.putPool(t, rcPool{spId: spCutover, name: "cutover", revision: 5,
+		sideIds: sides, migrSide: 0x40,
+		migrs: map[string]bool{"m-done": true}})
+	e.putPool(t, rcPool{spId: spAway, name: "away", revision: 5,
+		sideIds: sides})
+	e.putPool(t, rcPool{spId: spHere, name: "here", revision: 5,
+		sideIds: sides, standby: true})
+	e.putPool(t, rcPool{spId: spServes, name: "serves", revision: 5,
+		sideIds: sides, subsystems: map[string][]*pb.Namespace{
+			nqn: {{NsId: 0x51, NsIdx: 1, TdId: 7}},
+		}})
+	e.putPool(t, rcPool{spId: spResumed, name: "resumed", revision: 5,
+		sideIds: sides, subsystems: map[string][]*pb.Namespace{
+			nqn: {{NsId: 0x52, NsIdx: 1, TdId: 8, Suspended: true}},
+		}, resumeTds: []uint64{8}})
+	e.putPool(t, rcPool{spId: spBoth, name: "both", revision: 5,
+		sideIds: sides, subsystems: map[string][]*pb.Namespace{
+			nqn: {{NsId: 0x53, NsIdx: 2, TdId: 9}},
+		}, xfers: map[string]*pb.Transfer{"x0": {XferId: 0x800,
+			OriNqn: nqn, OriNsIdx: 2, AutoSuspend: true}}})
+	e.putPool(t, rcPool{spId: spGone, name: "gone", revision: 5,
+		sideIds: sides})
+	e.putPool(t, rcPool{spId: spPlain, name: "plain", revision: 5,
+		sideIds: sides, migrs: map[string]bool{"m-old": false}})
+	e.putPool(t, rcPool{spId: spDeleted, name: "deleted", revision: 5,
+		sideIds: sides, subsystems: map[string][]*pb.Namespace{
+			nqn: {{NsId: 0x55, NsIdx: 3, TdId: 7}},
+		}})
+	e.putPool(t, rcPool{spId: spLatched, name: "latched", revision: 5,
+		sideIds: sides, subsystems: map[string][]*pb.Namespace{
+			nqn: {{NsId: 0x56, NsIdx: 1, TdId: 8, Suspended: true}},
+		}})
+	mustPut(t, e.s.cli, model.CloneKey(e.cid, spLatched, "gone"), &pb.Clone{
+		CloneId: 0x390, DstTdId: 8, AutoResume: true, Deleting: true})
+	latchedConf := &pb.SpConf{}
+	hnodeGet(t, e.s, model.SpConfKey(e.cid, "latched"), latchedConf)
+	latchedConf.CloneNameList = append(latchedConf.CloneNameList, "gone")
+	mustPut(t, e.s.cli, model.SpConfKey(e.cid, "latched"), latchedConf)
+	const otherNqn = "nqn.2024-01.io.dnv:0:00000000000000aa:0000000000000002"
+	e.putPool(t, rcPool{spId: spOtherSs, name: "otherss", revision: 5,
+		sideIds: sides, subsystems: map[string][]*pb.Namespace{
+			nqn: {{NsId: 0x57, NsIdx: 2, TdId: 9}},
+		}, xfers: map[string]*pb.Transfer{"x1": {XferId: 0x801,
+			OriNqn: otherNqn, OriNsIdx: 2, AutoSuspend: true}}})
+	e.putPool(t, rcPool{spId: spNewCntl, name: "newcntl", revision: 5,
+		sideIds: sides})
+	e.putPool(t, rcPool{spId: spLostTd, name: "losttd", revision: 5,
+		sideIds: sides, migrs: map[string]bool{"m-x": true},
+		tdNames: []string{"no-record"}})
+	held := func(spId uint64, primary bool, maxSide, sideCnt uint64,
+		parked ...uint64) *pb.GetCnStoreReply_StoredCntlr {
+		return &pb.GetCnStoreReply_StoredCntlr{
+			CntlrPointer:   rcPtr(spId, 1),
+			Revision:       6,
+			Primary:        primary,
+			MaxSideId:      maxSide,
+			SideCnt:        sideCnt,
+			ParkedNsIdList: parked,
+			NsIdList:       parked,
+		}
+	}
+	newCntlr := held(spNewCntl, true, 0x33, 2)
+	newCntlr.CntlrPointer = rcPtr(spNewCntl, 2)
+	plainHeld := func(spId uint64, nsIds ...uint64,
+	) *pb.GetCnStoreReply_StoredCntlr {
+		h := held(spId, true, 0x33, 2)
+		h.NsIdList = nsIds
+		return h
+	}
+	e.agent.setCnStore(&pb.GetCnStoreReply{
+		AgentReply: &pb.AgentReply{},
+		CnList: []*pb.GetCnStoreReply_StoredCn{{
+			CnId:     e.cnId,
+			Revision: 3,
+			CntlrPointerList: []*pb.CntlrPointer{
+				rcPtr(spCutover, 1), rcPtr(spAway, 1), rcPtr(spHere, 1),
+				rcPtr(spServes, 1), rcPtr(spResumed, 1), rcPtr(spBoth, 1),
+				rcPtr(spGone, 1), rcPtr(spPlain, 1), rcPtr(spDeleted, 1),
+				rcPtr(spLatched, 1), rcPtr(spOtherSs, 1),
+				rcPtr(spNewCntl, 2), rcPtr(spLostTd, 1),
+			},
+			CntlrList: []*pb.GetCnStoreReply_StoredCntlr{
+				// The cutover came after the backup: the same three sides.
+				held(spCutover, true, 0x40, 3),
+				// A failover since the backup made another cntlr primary.
+				held(spAway, false, 0x33, 2),
+				// And made this one primary.
+				held(spHere, true, 0x33, 2),
+				held(spServes, true, 0x33, 2, 0x51),
+				held(spResumed, true, 0x33, 2, 0x52),
+				held(spBoth, true, 0x33, 2, 0x53),
+				held(spGone, true, 0x33, 2, 0x54),
+				held(spPlain, true, 0x33, 2),
+				// The namespace was deleted since the backup.
+				plainHeld(spDeleted),
+				// The latched clone is sent to no cntlr, so the flag parks.
+				held(spLatched, true, 0x33, 2, 0x56),
+				// The transfer names another subsystem: nothing parks 0x57.
+				held(spOtherSs, true, 0x33, 2, 0x57),
+				newCntlr,
+				held(spLostTd, true, 0x33, 2),
+			},
+		}},
+	})
+	reply, err := e.check(t)
+	wantCode(t, err, codes.OK, "the restore check")
+	for _, c := range []struct {
+		label   string
+		spId    uint64
+		verdict pb.RestoreVerdict
+		frags   []string
+	}{
+		{"a cutover pending in the restored state", spCutover,
+			pb.RestoreVerdict_RESTORE_VERDICT_MAY_BREAK,
+			[]string{"migration m-done", "cutover"}},
+		{"a primary that became a standby", spAway,
+			pb.RestoreVerdict_RESTORE_VERDICT_MAY_BREAK,
+			[]string{"held as a standby", "restored as the primary"}},
+		{"a standby that became the primary", spHere,
+			pb.RestoreVerdict_RESTORE_VERDICT_MAY_BREAK,
+			[]string{"held as the primary", "restored as a standby"}},
+		{"a parked namespace the restored state serves", spServes,
+			pb.RestoreVerdict_RESTORE_VERDICT_MAY_BREAK,
+			[]string{"ns_id 81", "parked"}},
+		{"a parked namespace an auto_resume clone serves", spResumed,
+			pb.RestoreVerdict_RESTORE_VERDICT_MAY_BREAK,
+			[]string{"ns_id 82", "parked"}},
+		{"a namespace a transfer parks in both", spBoth,
+			pb.RestoreVerdict_RESTORE_VERDICT_OLDER, nil},
+		{"a parked namespace the restored state lacks", spGone,
+			pb.RestoreVerdict_RESTORE_VERDICT_OLDER, nil},
+		{"nothing differs", spPlain,
+			pb.RestoreVerdict_RESTORE_VERDICT_OLDER, nil},
+		{"a namespace deleted since the backup serves", spDeleted,
+			pb.RestoreVerdict_RESTORE_VERDICT_MAY_BREAK,
+			[]string{"ns_id 85", "deleted"}},
+		{"a latched clone's auto_resume reaches nothing", spLatched,
+			pb.RestoreVerdict_RESTORE_VERDICT_OLDER, nil},
+		{"a transfer of another subsystem parks nothing", spOtherSs,
+			pb.RestoreVerdict_RESTORE_VERDICT_MAY_BREAK,
+			[]string{"ns_id 87", "parked"}},
+		{"a cntlr made since the backup holds the primary role", spNewCntl,
+			pb.RestoreVerdict_RESTORE_VERDICT_MAY_BREAK,
+			[]string{"held as the primary", "restored as no cntlr"}},
+		{"a lost thin device record, with a pending cutover", spLostTd,
+			pb.RestoreVerdict_RESTORE_VERDICT_RECORD_LOST, nil},
+	} {
+		cntlrId := uint64(1)
+		if c.spId == spNewCntl {
+			cntlrId = 2
+		}
+		row := rcPoolOf(t, reply, c.spId, cntlrId)
+		reasons := row.GetBreakReasonList()
+		wantCnt := 0
+		if len(c.frags) != 0 {
+			wantCnt = 1
+		}
+		if row.GetVerdict() != c.verdict || len(reasons) != wantCnt {
+			t.Errorf("%s: %v with reasons %q, want %v with %d", c.label,
+				row.GetVerdict(), reasons, c.verdict, wantCnt)
+			continue
+		}
+		for _, frag := range c.frags {
+			if !strings.Contains(reasons[0], frag) {
+				t.Errorf("%s: reason %q does not say %q", c.label,
+					reasons[0], frag)
+			}
+		}
+	}
+}
+
+// TestCheckControllerNodeRestoreLosesARowOverAMissingNewRecord pins the
+// RECORD_LOST of the records the three causes of MAY_BREAK read: a listed
+// cntlr, migration, subsystem or transfer whose record is missing, as the
+// worker's read of the pool would refuse it after the restore.
+func TestCheckControllerNodeRestoreLosesARowOverAMissingNewRecord(
+	t *testing.T,
+) {
+	e := rcMakeEnv(t)
+	sides := []uint64{0x31, 0x33}
+	cases := []struct {
+		spId uint64
+		name string
+		mod  func(conf *pb.SpConf)
+	}{
+		{0x801, "nocntlr", func(c *pb.SpConf) {
+			c.CntlrIdList = append(c.CntlrIdList, 7)
+		}},
+		{0x802, "nomigr", func(c *pb.SpConf) {
+			c.MigrNameList = append(c.MigrNameList, "m-gone")
+		}},
+		{0x803, "noss", func(c *pb.SpConf) {
+			c.NqnList = append(c.NqnList, "nqn-gone")
+		}},
+		{0x804, "noxfer", func(c *pb.SpConf) {
+			c.XferNameList = append(c.XferNameList, "x-gone")
+		}},
+	}
+	var ptrs []*pb.CntlrPointer
+	var cntlrs []*pb.GetCnStoreReply_StoredCntlr
+	for _, c := range cases {
+		e.putPool(t, rcPool{spId: c.spId, name: c.name, revision: 5,
+			sideIds: sides})
+		conf := &pb.SpConf{}
+		hnodeGet(t, e.s, model.SpConfKey(e.cid, c.name), conf)
+		c.mod(conf)
+		mustPut(t, e.s.cli, model.SpConfKey(e.cid, c.name), conf)
+		cntlrId := uint64(1)
+		if c.name == "nocntlr" {
+			cntlrId = 7
+		}
+		ptrs = append(ptrs, rcPtr(c.spId, cntlrId))
+		cntlrs = append(cntlrs, &pb.GetCnStoreReply_StoredCntlr{
+			CntlrPointer: rcPtr(c.spId, cntlrId), Revision: 6,
+			Primary: true, MaxSideId: 0x33, SideCnt: 2,
+		})
+	}
+	e.agent.setCnStore(&pb.GetCnStoreReply{
+		AgentReply: &pb.AgentReply{},
+		CnList: []*pb.GetCnStoreReply_StoredCn{{
+			CnId: e.cnId, Revision: 3, CntlrPointerList: ptrs,
+			CntlrList: cntlrs,
+		}},
+	})
+	reply, err := e.check(t)
+	wantCode(t, err, codes.OK, "the restore check")
+	for i, c := range cases {
+		row := rcPoolOf(t, reply, c.spId, ptrs[i].GetCntlrId())
+		if row.GetVerdict() != pb.RestoreVerdict_RESTORE_VERDICT_RECORD_LOST ||
+			len(row.GetBreakReasonList()) != 0 {
+			t.Errorf("%s: %v with reasons %q, want RECORD_LOST with none",
+				c.name, row.GetVerdict(), row.GetBreakReasonList())
+		}
 	}
 }
