@@ -928,7 +928,13 @@ hosts' connections of the driver's and dnv's and the discovery connections
 to the suite's cdc go, with the hosts' mask of nvme-cli's autoconnector, then
 the controller nodes' and the disk nodes' devices, exports, agents and udev
 rules, with the controller nodes' nvmet entries of the two hosts that
-attaches made, then the control plane's processes, the imported images and the
+attaches made, and of the nvmet ports only the suite's own: any port
+whose service id is the agents', and a port with no service id under the
+agents' port id. Another suite's port then stays, though empty, since the
+dnv subsystems' links go, and so does a target a person made under
+another port id, as on NVMe/TCP's port 4420; preflight stops a run whose
+agents' port id holds a port of another service id, which the agents
+would take over or fail on, then the control plane's processes, the imported images and the
 work directories, holder first. A disk-node guest whose work directory the
 cleanup removed is then synced, given 10 s, and its root file system
 trimmed, since the blocks of the backing files, about 2 GiB a guest after

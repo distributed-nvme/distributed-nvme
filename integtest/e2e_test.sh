@@ -234,9 +234,9 @@ NVMET=/sys/kernel/config/nvmet
 # three-member mode), 29600-29603, 29700-29702;
 # gateway_test.sh 15379/15380, 29810-29812, 29820-29823, 29830-29832;
 # cdc_test.sh 13379/13380, 18009-18012, 14420-14423; cnagent_test.sh
-# 29528/29529 + trsvcid 4200; dnagent_test.sh 29528 + trsvcid 4200;
+# 29528/29529 + trsvcid 4200; dnagent_test.sh 29528 + trsvcids 4200 and 4209;
 # dnvctl_test.sh 29840/29841; csi_test.sh 17379/17380, 29870, 18030, 28900,
-# 28950 + trsvcid 4400 inside its band 4400-4449, and k3s's 6443 on its
+# 28950 + trsvcid 4400, and k3s's 6443 on its
 # Kubernetes guests (its DEAD_CDC_PORT, 18039, is a port no cdc listens on);
 # tutorial_test.sh, on the one guest it runs on, its PORTS: 2379/2380, 29527,
 # 8009, 29900-29903, 29950 and trsvcids 4301-4304 and 4420, and 9809 in its
@@ -9487,16 +9487,14 @@ assert_bytes() { # <got> <floor> <label>
 # is only useful if it is derived from the suites' own declarations:
 # TR_SVC_ID (dnagent_test.sh) and TR_SVC_ID (cnagent_test.sh) are both 4200;
 # NVMET_PORT_BASE (cdc_test.sh) is 14420, for its four ports 14420..14423;
-# DN_TRSVCID and CN_TRSVCID (csi_test.sh) are both 4400, and TRSVCID_MIN and
-# TRSVCID_MAX (csi_test.sh), 4400..4449, are only the band in which that
-# suite's cleanup removes a port, which it never binds but at 4400.
+# DN_TRSVCID and CN_TRSVCID (csi_test.sh) are both 4400, the one service id
+# whose ports that suite's cleanup removes (SUITE_TRSVCIDS (csi_test.sh)).
 # PORTS (tutorial_test.sh) holds 4301..4304 and 4420, the all-in-one
 # tutorial's nvmet ports on the guest that suite runs on (dn2 in the lab, and
 # the k3s server cp0 in its CSI part, which runs the all-in-one tutorial
 # first). gateway_test.sh's 4420/4421/4429 are payload its fake records and
 # never binds, so a real port on 4420 is the nvme-tcp default and not that
-# suite's (the arms are in that order: the default's arm comes before the csi
-# band's, which takes it in).
+# suite's.
 port_owner_hint() { # <trsvcid>
 	case "$1" in
 	'' | none)
@@ -9512,33 +9510,30 @@ port_owner_hint() { # <trsvcid>
 		printf ' (TR_SVC_ID (dnagent_test.sh), TR_SVC_ID (cnagent_test.sh))'
 		return 0
 		;;
+	4209)
+		printf "trsvcid 4209 is the dn agent suite's blocksize agent"
+		printf ' (BS_TR_SVC_ID (dnagent_test.sh))'
+		return 0
+		;;
 	1442[0-3])
 		printf 'trsvcid %s is the cdc suite' "$1"
 		printf ' (NVMET_PORT_BASE (cdc_test.sh) is 14420)'
 		return 0
 		;;
 	4420 | 4421)
-		printf 'trsvcid %s is the nvme-tcp default port:' "$1"
 		if [ "$1" = 4420 ]; then
+			printf 'trsvcid 4420 is the nvme-tcp default port:'
 			printf " the tutorial suite's cn agent (PORTS (tutorial_test.sh))"
-			printf ' on the guest it runs on, or a hand-made target;'
+			printf ' on the guest it runs on, or a hand-made target'
 		else
-			printf ' a hand-made target, not a dnv suite;'
+			printf 'trsvcid 4421 is the port after the nvme-tcp default: a'
+			printf ' hand-made target, not a dnv suite'
 		fi
-		printf " it lies inside the csi suite's cleanup band 4400..4449"
-		printf ' (TRSVCID_MIN, TRSVCID_MAX (csi_test.sh)), whose cleanup would'
-		printf ' remove it'
 		return 0
 		;;
 	4400)
 		printf 'trsvcid 4400 is the csi suite'
 		printf ' (DN_TRSVCID and CN_TRSVCID (csi_test.sh))'
-		return 0
-		;;
-	44[0-4][0-9])
-		printf "trsvcid %s lies inside the csi suite's cleanup band" "$1"
-		printf ' 4400..4449 (TRSVCID_MIN, TRSVCID_MAX (csi_test.sh)), which'
-		printf ' that suite removes but never binds'
 		return 0
 		;;
 	esac

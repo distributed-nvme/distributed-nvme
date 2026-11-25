@@ -165,11 +165,19 @@ DN_PORT_ID=1
 CN_GRPC_PORT=28950
 CN_TRSVCID=4400
 CN_PORT_ID=1
-# port_drop refuses an nvmet port outside this band: the agents of this suite
-# listen on DN_TRSVCID and CN_TRSVCID, the dn and cn suites on 4200, the e2e
-# suite on 4300..4349, the cdc suite on 14420..14423.
-TRSVCID_MIN=4400
-TRSVCID_MAX=4449
+# port_drop removes an nvmet port only when it is this suite's own: one whose
+# service id is DN_TRSVCID or CN_TRSVCID, where this suite's agents listen,
+# under any port id, or one with no service id under their port id,
+# DN_PORT_ID or CN_PORT_ID, an agent's port it left half made (csi.md CSI5).
+# Any other port stays, another suite's (the dn and cn suites listen on 4200
+# and 4209, the e2e suite on 4300..4349, the cdc suite on 14420..14423, the
+# tutorial suite on 4301..4304 and 4420) or a target a person made, such as
+# one on NVMe/TCP's own port, 4420; preflight stops a run whose agents' port
+# id holds such a port (ports_foreign).
+SUITE_TRSVCIDS=$DN_TRSVCID
+[ "$CN_TRSVCID" = "$DN_TRSVCID" ] || SUITE_TRSVCIDS="$SUITE_TRSVCIDS $CN_TRSVCID"
+SUITE_PORT_IDS=$DN_PORT_ID
+[ "$CN_PORT_ID" = "$DN_PORT_ID" ] || SUITE_PORT_IDS="$SUITE_PORT_IDS $CN_PORT_ID"
 
 ETCD_NAME=dnv-csi-it
 CLUSTER=csi
@@ -744,8 +752,8 @@ NQN_CSI="$NQN_CSI"
 DM_PREFIX="dnv"
 UDEV_DIR=/etc/udev/rules.d
 ETCD_NAME="$ETCD_NAME"
-TRSVCID_MIN="$TRSVCID_MIN"
-TRSVCID_MAX="$TRSVCID_MAX"
+SUITE_TRSVCIDS="$SUITE_TRSVCIDS"
+SUITE_PORT_IDS="$SUITE_PORT_IDS"
 K3S_INSTALL_URL="$K3S_INSTALL_URL"
 SMOKE_IMAGE_REF="$SMOKE_IMAGE_REF"
 IMAGE_REF="$IMAGE_REF"
@@ -823,6 +831,21 @@ listening() { # <port>
 	n=$(ss -ltnH 2>/dev/null | awk '{print $4}' | sed 's/.*://' |
 		grep -cx "$1" || true)
 	[ "$n" != 0 ]
+}
+
+# ports_foreign prints, for each of SUITE_PORT_IDS, a port there that is not
+# this suite's (port_drop refuses it), as "port <id> trsvcid=<svc>": the
+# suite's agents would take it over or fail to make their own there.
+ports_foreign() {
+	local id svc
+	for id in $SUITE_PORT_IDS; do
+		[ -d "$NVMET/ports/$id" ] || continue
+		svc=$(port_trsvcid "$id")
+		case "$svc" in none) continue ;; esac
+		case " $SUITE_TRSVCIDS " in *" $svc "*) continue ;; esac
+		printf 'port %s trsvcid=%s\n' "$id" "$svc"
+	done
+	return 0
 }
 
 ports_busy() { # <port…>
@@ -1437,8 +1460,10 @@ port_trsvcid() { # <port id>
 	return 0
 }
 
-# port_drop removes ONE nvmet port and refuses one outside this suite's
-# service-id band. ana_groups 3 and 2 go BEFORE the port (rule 7).
+# port_drop removes ONE nvmet port when it is this suite's own and refuses
+# any other: a port whose service id is one of SUITE_TRSVCIDS, or one with
+# no service id under one of SUITE_PORT_IDS, which this suite's agent left
+# half made (csi.md CSI5). ana_groups 3 and 2 go BEFORE the port (rule 7).
 port_drop() { # <port id>
 	local id=$1 svc grp link
 	[ -d "$NVMET/ports/$id" ] || {
@@ -1448,18 +1473,26 @@ port_drop() { # <port id>
 	svc=$(port_trsvcid "$id")
 	case "$svc" in
 	none)
-		printf 'port %s empty trsvcid, removing as debris\n' "$id"
-		;;
-	*[!0-9]*)
-		printf 'port %s REFUSED addr_trsvcid=%s\n' "$id" "$svc"
-		return 0
+		case " $SUITE_PORT_IDS " in
+		*" $id "*)
+			printf 'port %s empty trsvcid, removing as debris\n' "$id"
+			;;
+		*)
+			printf 'port %s REFUSED: empty trsvcid, not port %s\n' \
+				"$id" "$SUITE_PORT_IDS"
+			return 0
+			;;
+		esac
 		;;
 	*)
-		if [ "$svc" -lt "$TRSVCID_MIN" ] || [ "$svc" -gt "$TRSVCID_MAX" ]; then
-			printf 'port %s REFUSED addr_trsvcid=%s outside %s..%s\n' \
-				"$id" "$svc" "$TRSVCID_MIN" "$TRSVCID_MAX"
+		case " $SUITE_TRSVCIDS " in
+		*" $svc "*) ;;
+		*)
+			printf 'port %s REFUSED addr_trsvcid=%s, not the suite port %s\n' \
+				"$id" "$svc" "$SUITE_TRSVCIDS"
 			return 0
-		fi
+			;;
+		esac
 		;;
 	esac
 	for link in "$NVMET/ports/$id"/subsystems/*; do
@@ -1766,7 +1799,7 @@ dn_residue() {
 # cn_up starts the one cn agent of this guest, the udev rules of deploy/udev/
 # before it, and is idempotent. <ip> <grpc_port> <trsvcid>
 cn_up() {
-	local ip=$1 gport=$2 svcid=$3
+	local ip=$1 gport=$2 svcid=$3 portid=$4
 	local dir="$WORK/cn" store="$WORK/cn/store" log="$WORK/cn/agent.log" pid pat
 	mkdir -p "$dir" "$store" || {
 		echo "cn_up: mkdir $dir failed" >&2
@@ -1782,7 +1815,7 @@ cn_up() {
 		nohup "$WORK/bin/dnv-agent" cn \
 			--grpc-network tcp --grpc-address "$ip:$gport" \
 			--tr-type tcp --adr-fam ipv4 \
-			--tr-addr "$ip" --tr-svc-id "$svcid" \
+			--tr-addr "$ip" --tr-svc-id "$svcid" --nvmet-port-id "$portid" \
 			--local-store "$store" --capacity 0 --log-level debug \
 			>>"$log" 2>&1 </dev/null &
 		pid=$!
@@ -2163,6 +2196,10 @@ preflight_guests() {
 		[ -z "$missing" ] || die "dn$v: module(s) missing: $(printf '%s' "$missing" | tr '\n' ' ')"
 		busy=$(helper_dn "$v" ports_busy "$DN_GRPC_PORT" "$DN_TRSVCID") || die "dn$v: ports"
 		[ -z "$busy" ] || die "dn$v: port(s) already listening: $(printf '%s' "$busy" | tr '\n' ' ')"
+		busy=$(helper_dn "$v" ports_foreign) || die "dn$v: reading the nvmet ports failed"
+		[ -z "$busy" ] || die "dn$v: an nvmet port that is not this suite's" \
+			"holds the agents' port id: $(printf '%s' "$busy" | tr '\n' ' ')." \
+			"Remove it, or move it to another port id"
 	done
 	for v in "${!CN[@]}"; do
 		ssh_cn "$v" "true" >/dev/null || die "cn$v (${CN[$v]}): passwordless sudo is required"
@@ -2188,6 +2225,10 @@ preflight_guests() {
 				"these facts again"
 		busy=$(helper_cn "$v" ports_busy "$CN_GRPC_PORT" "$CN_TRSVCID") || die "cn$v: ports"
 		[ -z "$busy" ] || die "cn$v: port(s) already listening: $(printf '%s' "$busy" | tr '\n' ' ')"
+		busy=$(helper_cn "$v" ports_foreign) || die "cn$v: reading the nvmet ports failed"
+		[ -z "$busy" ] || die "cn$v: an nvmet port that is not this suite's" \
+			"holds the agents' port id: $(printf '%s' "$busy" | tr '\n' ' ')." \
+			"Remove it, or move it to another port id"
 	done
 	panic_plant
 	log "preflight (guests) ok"
@@ -2432,7 +2473,7 @@ dnv_up() {
 		log "  dn$v: $out"
 	done
 	for v in "${!CN[@]}"; do
-		out=$(helper_cn "$v" cn_up "${CN_IP[$v]}" "$CN_GRPC_PORT" "$CN_TRSVCID") ||
+		out=$(helper_cn "$v" cn_up "${CN_IP[$v]}" "$CN_GRPC_PORT" "$CN_TRSVCID" "$CN_PORT_ID") ||
 			die "cn$v: cn_up failed: $out"
 		log "  cn$v: $out"
 	done
