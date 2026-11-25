@@ -225,7 +225,10 @@ status and the reason of the row it shows follow where it has them:
 - `grow`: auto-grow cannot add a group to a slice that is filling up; the
   text says why, for example that no disk node has room or that a
   controller node's budget, the extents it may still give the pools it
-  serves, is short.
+  serves, is short. A grow that waits is this kind too, whatever the
+  slice's use: its new group has waited longer than the pool's side
+  threshold for its disk node to prepare it ([A pool's
+  space](#a-pools-space), step 3).
 - `row`, as in `row/error`: a row of the primary's report reads
   `RES_STATUS_ERROR`, or a leg is kept out of its array; the text is the
   row's text. A subsystem's row, or a transfer's subsystem row, that reads
@@ -3171,8 +3174,25 @@ Safe steps:
    slice's first data group, whatever number you give. `--meta`, with no
    `--ext`, adds a meta group instead, as large as the slice's meta groups
    together. The gateway refuses a grow while the pool's level is
-   `NO_THINPOOL` or below ([Change a pool's level](#change-a-pools-level)).
-3. A thin pool can be read-only while its slice's `read` is true. Its
+   `NO_THINPOOL` or below ([Change a pool's level](#change-a-pools-level)),
+   and while a group grown on that slice and of that kind earlier is still
+   waiting for its disk nodes to prepare it, since a group grown over it
+   would wait behind it for ever.
+3. A grow that waits: the status read, `dnvctl cluster get-status`, lists
+   a row "data grow waits" or "metadata grow waits" once a group grown on
+   the slice has waited longer than the pool's side threshold for a disk
+   node to prepare its new side, which it zeroes first. The disk node
+   zeroes very slowly, or cannot, and no other grow of that kind of the
+   slice runs meanwhile. When that disk node is dead or reports an error
+   of its own, the worker takes the group back by itself, but only while
+   the slice's thin pool is filling up. Otherwise take it back:
+   `dnvctl --sp <pool> sp withdraw-grow --slice <slice id> --grp <group id>`,
+   with `--meta` for a metadata group, the group the row names. The
+   gateway refuses a group that is not the newest, a slice's first group,
+   a group whose disk nodes have all prepared their sides, which may hold
+   data, and a pool whose level is `NO_THINPOOL` or below. The next grow
+   then runs again.
+4. A thin pool can be read-only while its slice's `read` is true. Its
    line in `dnvctl cntlr inspect --id <primary cntlr id>`, the row under
    `slice_id_to_dm_pool`, says why. When it carries `needs_check`, follow
    [Repair a thin pool's metadata](#repair-a-thin-pools-metadata). When it
@@ -3195,6 +3215,10 @@ read with a fake agent; the gateway suite's smoke case checks it over a fake
 agent's row, and the e2e suite's setup over real agents after a host writes
 its pattern. The gateway suite passed in the lab with its check on
 2026-11-19, and the e2e suite's setup read it in the lab on 2026-11-21.
+Step 3: the gateway's Go tests cover the refusal of a grow over a group
+that waits, `dnvctl sp withdraw-grow` and the row of a grow that waits, on
+planted records; the dnvctl suite sends the command to a fake gateway. No
+suite takes back a group that waits on a real disk node.
 
 ## Repair a thin pool's metadata
 

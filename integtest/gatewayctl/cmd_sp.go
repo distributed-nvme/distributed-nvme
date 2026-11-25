@@ -341,6 +341,34 @@ func setupGrowSlice(fs *flag.FlagSet) job {
 	}
 }
 
+// setupWithdrawGrow drives WithdrawGrow (gateway.md, Storage pools and
+// GrowSlice): --grp names the newest grown group of the slice's data list,
+// or of its meta list with --meta.
+func setupWithdrawGrow(fs *flag.FlagSet) job {
+	spName := fs.String("sp", "", "sp_name of the storage pool")
+	var rev hexUint
+	fs.Var(&rev, "rev", "sp_rev.revision token")
+	var slice hexUint
+	fs.Var(&slice, "slice", "slice_id of the group")
+	var grp hexUint
+	fs.Var(&grp, "grp", "grp_id to take back")
+	isMeta := fs.Bool("meta", false, "the group is of the meta list")
+	return func(
+		ctx context.Context,
+		client pb.GatewayClient,
+		g *globals,
+	) (any, error) {
+		return client.WithdrawGrow(ctx, &pb.WithdrawGrowRequest{
+			ClusterName: g.cluster,
+			SpName:      *spName,
+			SpRev:       &pb.SpRev{Revision: uint64(rev)},
+			SliceId:     uint64(slice),
+			IsMeta:      *isMeta,
+			GrpId:       uint64(grp),
+		})
+	}
+}
+
 // setupCreateCntlr drives CreateCntlr (gateway.md, Cntlrs and inspects).
 // --slot is the cntlid_slot the new controller takes; it must be in the SP's
 // cntlid_slot_list and unused, else the gateway refuses the request. Every

@@ -466,10 +466,11 @@ func (o *fakeReactionOps) growSlice(
 	poolTotal uint64,
 	cc *pb.ClusterConf,
 	legs []model.Cand,
+	now uint64,
 ) (uint64, error) {
 	err := o.record(reactionCall{
 		op: "grow", sliceId: sliceId, isMeta: isMeta,
-		poolTotal: poolTotal, legs: legs,
+		poolTotal: poolTotal, legs: legs, now: now,
 	})
 	return 999, err
 }
@@ -1481,7 +1482,13 @@ func TestReactionPriority(t *testing.T) {
 		h := newReactHarness(t, reactFixture(t))
 		armed(h)
 		h.pass()
-		h.wantOps("grow")
+		calls := h.wantOps("grow")
+		// The pass's clock becomes the group's grow_epoch (architecture.md,
+		// GrowSlice), which the status read times a waiting grow by.
+		if calls[0].now == 0 || calls[0].now > h.now() {
+			t.Fatalf("grow now = %d, want the pass's clock (at most %d)",
+				calls[0].now, h.now())
+		}
 		h.wantApplied(reactionGrowData)
 	})
 

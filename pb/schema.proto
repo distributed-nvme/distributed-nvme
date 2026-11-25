@@ -282,6 +282,12 @@ message Group {
     // alone. A record without it reads as a group never scheduled.
     // Appended, never renumbered.
     MdCheck md_check = 12;
+    // When GrowSlice appended the group, in Unix seconds, whoever asked for
+    // the grow; zero for a group a pool's create or a clone made, and for
+    // one grown before the field. The status read times a grow that waits
+    // from it (architecture.md, Clusters, GetClusterStatus). Appended,
+    // never renumbered.
+    uint64 grow_epoch = 13;
 }
 
 // The schedule of one group's md check (Group.md_check; dnv-worker.md AR16).
@@ -1732,6 +1738,23 @@ message GrowSliceReply {
     uint64 grp_id = 2;
 }
 
+// WithdrawGrow takes back the newest group of one kind of a slice, a grown
+// group no array was ever built from (architecture.md, WithdrawGrow).
+message WithdrawGrowRequest {
+    string cluster_name = 1;
+    string sp_name = 2;
+    SpRev sp_rev = 3;
+    uint64 slice_id = 4;
+    bool is_meta = 5;
+    // The group to take back, which must be the newest of its kind.
+    uint64 grp_id = 6;
+}
+
+message WithdrawGrowReply {
+    uint64 slice_id = 1;
+    uint64 grp_id = 2;
+}
+
 message CreateCntlrRequest {
     string cluster_name = 1;
     string sp_name = 2;
@@ -2580,6 +2603,7 @@ service Gateway {
     rpc FindStoragePoolNames(FindStoragePoolNamesRequest) returns (FindStoragePoolNamesReply) {}
 
     rpc GrowSlice(GrowSliceRequest) returns (GrowSliceReply) {}
+    rpc WithdrawGrow(WithdrawGrowRequest) returns (WithdrawGrowReply) {}
 
     rpc CreateCntlr(CreateCntlrRequest) returns (CreateCntlrReply) {}
     rpc DeleteCntlr(DeleteCntlrRequest) returns (DeleteCntlrReply) {}

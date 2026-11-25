@@ -97,6 +97,16 @@ const ReasonGrowPending = "grow_pending"
 // pass finds the list full before it would scan for a grow.
 const ReasonGrpListFull = "grp_list_full"
 
+// ReasonGrowNotReady is the Reason a GrowSlice carries when the newest group
+// of its kind is a grown one with a leg whose every side is still not
+// provisioned (GroupNotReady): a group grown over it would never join the
+// thin pool, since a cntlr's concat stops at the first such group
+// (cnagent.md CN9), and it would bury that group, which only a withdrawal
+// of the newest group takes back (architecture.md, GrowSlice). The worker's
+// grow never meets it: AR6's pending rule holds while the pool does not
+// count the newest group, and such a group the pool never counts.
+const ReasonGrowNotReady = "newest_grp_not_ready"
+
 // ReasonStaleRevision is the Reason the ops the gateway shares with the
 // worker — GrowSlice and the repair operations CreateRepair, FinishRepair,
 // CancelRepair, SetRepairAbort and DeleteRetiredLeg (dnv-worker.md MD6) —
@@ -1975,6 +1985,9 @@ func ClearCntlrDemotion(
 // them reserve it; the Slice, the SpConf whose next_id fed the ids, and one
 // SpRev bump. The ids are one run TakeSpIds takes, the group's and a leg and a
 // side per pick, and a pool with fewer left refuses with ReasonNoIdLeft.
+// The group carries now, the caller's clock in Unix seconds, as its
+// grow_epoch, which times a grow that waits (architecture.md, Clusters,
+// GetClusterStatus).
 func GrowSlice(
 	ctx context.Context,
 	cli *etcdutil.Client,
@@ -1988,6 +2001,7 @@ func GrowSlice(
 	poolTotal uint64,
 	cc *pb.ClusterConf,
 	legs []Cand,
+	now uint64,
 ) (uint64, error) {
 	grpId := uint64(0)
 	err := cli.RunSTM(ctx, func(s etcdutil.STM) error {
@@ -2035,6 +2049,18 @@ func GrowSlice(
 		if GrpListFull(slice, isMeta) {
 			return fail(opGrowSlice, ReasonGrpListFull)
 		}
+		// The gateway's pre-check of architecture.md, GrowSlice, decided
+		// here, on the slice this transaction read: a grow sent with no token
+		// must not land over a grown group that became the newest after the
+		// gateway's planning read.
+		if grps := slice.GetDataGrpList(); !isMeta && len(grps) >= 2 &&
+			GroupNotReady(grps[len(grps)-1]) {
+			return fail(opGrowSlice, ReasonGrowNotReady)
+		}
+		if grps := slice.GetMetaGrpList(); isMeta && len(grps) >= 2 &&
+			GroupNotReady(grps[len(grps)-1]) {
+			return fail(opGrowSlice, ReasonGrowNotReady)
+		}
 		extentSize := cc.GetDnBinConf().GetExtentSize()
 		extCnt, err := growExtCnt(slice, isMeta, extentSize)
 		if err != nil {
@@ -2070,6 +2096,7 @@ func GrowSlice(
 			ExtCnt:     extCnt,
 			MetaBlocks: metaBlocks,
 			DataBlocks: dataBlocks,
+			GrowEpoch:  now,
 		}
 		for legIdx, cand := range legs {
 			dn, err := checkDnPick(

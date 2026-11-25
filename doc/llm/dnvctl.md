@@ -268,7 +268,8 @@ CT3. **Revision tokens.** A request that carries a token carries one of
 three messages: `dn_rev` on `DeleteDiskNode` and `UpdateDiskNodeDisabled`,
 `cn_rev` on their two controller-node mirrors, and `sp_rev` on every
 SP-scoped mutator — every create, delete, update, append, finish, cancel
-and abort under a pool, `GrowSlice` and `ForceStartGroup`. Reads carry
+and abort under a pool, `GrowSlice`, `WithdrawGrow` and
+`ForceStartGroup`. Reads carry
 none; an operator reads the tokens with `dn get`, `cn get` and `sp get`.
 dnvctl sends exactly what was typed:
 
@@ -308,8 +309,8 @@ it reuses gatewayctl's verb and flag vocabulary. The leaves are the RPCs of
 `service Gateway`, one leaf per RPC and nothing else (CT1): no convenience
 verbs, no compound commands, and cobra's stock `help` and `completion` are
 the only subcommands that are not RPCs. The RPCs without a group of their
-own are homed in a group: `GrowSlice`, `InspectSide`, `FindStoragePoolNames`
-and `UpdateStoragePoolCntlidSlotList` under `sp`, `GetThinDeviceBitmap`
+own are homed in a group: `GrowSlice`, `WithdrawGrow`, `InspectSide`,
+`FindStoragePoolNames` and `UpdateStoragePoolCntlidSlotList` under `sp`, `GetThinDeviceBitmap`
 under `td` and `AppendCloneBitmap` under `clone`. A group issues no RPC: typed without a
 verb, or with a verb it lacks, it is a usage error (CT5), never a help
 screen on stdout, unless `--help` is typed.
@@ -647,6 +648,11 @@ level name, an `SP_LEVEL_*` name or a raw number — the number so that an
 undeclared enum value is forwarded for the gateway to refuse (CT8) — and
 `--level` defaults to read-write, the enum's zero. `sp grow-slice`'s
 `--meta` and `--ext` do not constrain each other client-side (CT8).
+`sp withdraw-grow` takes back the newest grown group of a slice, of its
+data list or of its meta list with `--meta`, that `--grp` names, the
+group the status read's row of a waiting grow names (`architecture.md`,
+WithdrawGrow); dnvctl checks neither that the group is the newest nor
+that it is not ready (CT8).
 `sp inspect` takes no flag of its own: it reads the pool `--sp` names, its
 data space per slice from the records and its thin pools' use from the
 primary's report, with the overcommit as a whole percent
@@ -943,8 +949,9 @@ before and after the call.
 restarted fake whose behavior file is reset and whose state file holds only
 the reset's own readiness probe, so counters are read only as deltas. Together
 they exercise, on the wire, CT1 with one step per RPC in tree order, save
-`sp inspect`, `cluster get-status` and `cn check-restore`, which run last,
-in that order, so that the steps before them keep their numbers, CT2's
+`sp inspect`, `cluster get-status`, `cn check-restore` and
+`sp withdraw-grow`, which run last, in that order, so that the steps
+before them keep their numbers, CT2's
 trace id and deadline, CT3's token on exactly its carriers and its refusal on
 one leaf that carries none, CT4's goldens, the status read's table among
 them, CT5's failure line and codes, exit

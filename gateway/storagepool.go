@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"math"
+	"time"
 
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
@@ -1441,6 +1442,29 @@ func (s *Server) GrowSlice(
 					"can hold", req.GetSliceId(), common.MaxGrpCntPerSlice,
 				kind)
 		}
+		// A grow over a grown group that is not ready never joins the thin
+		// pool, since a cntlr's concat stops at the first such group of the
+		// list (cnagent.md CN9), and it buries that group under one, so
+		// neither the worker's withdrawal nor WithdrawGrow, which take back
+		// the newest group alone, could end the wait (architecture.md,
+		// GrowSlice). A first group is never taken back, and one grown over
+		// a first group that still zeroes joins once it is done, so only a
+		// grown group refuses. It is the gateway's answer, with the group's
+		// name and the way out, and model.GrowSlice decides it again in its
+		// STM (ReasonGrowNotReady), so a grow sent with no token cannot land
+		// over a group that became the newest after this read. At a level
+		// where no grow runs, the model's level gate answers instead.
+		if grp, ok := newestGrownNotReady(slice, req.GetIsMeta()); ok &&
+			conf.GetSpLevel() < pb.SpLevel_SP_LEVEL_NO_THINPOOL {
+			return errPrecondition(
+				"slice %d: the newest %s group %d is not ready: a leg has "+
+					"no side ready, as its disk node still zeroes it or "+
+					"cannot, and a group grown over it would never join "+
+					"the thin pool; wait for it, or take it back with "+
+					"WithdrawGrow (dnvctl sp withdraw-grow)",
+				req.GetSliceId(), grpKindWord(req.GetIsMeta()),
+				grp.GetGrpId())
+		}
 		extentSize := cc.GetDnBinConf().GetExtentSize()
 		extCnt := uint64(0)
 		if req.GetIsMeta() {
@@ -1515,7 +1539,8 @@ func (s *Server) GrowSlice(
 		newGrpId, err := model.GrowSlice(
 			ctx, s.cli, cid, conf.GetShardCode(), conf.GetSpId(),
 			req.GetSpName(), req.GetSpRev().GetRevision(),
-			req.GetSliceId(), req.GetIsMeta(), math.MaxUint64, cc, picks)
+			req.GetSliceId(), req.GetIsMeta(), math.MaxUint64, cc, picks,
+			uint64(time.Now().Unix()))
 		if err != nil {
 			return mapModelErr(err)
 		}
@@ -1529,4 +1554,128 @@ func (s *Server) GrowSlice(
 		SliceId: req.GetSliceId(),
 		GrpId:   grpId,
 	}, nil
+}
+
+// grpKindWord is the word for a group list in a message.
+func grpKindWord(isMeta bool) string {
+	if isMeta {
+		return "metadata"
+	}
+	return "data"
+}
+
+// newestGrownNotReady is the newest group of a kind of the slice when it is
+// a grown one, the slice holding two or more of the kind, with a leg that
+// has no side provisioned (model.GroupNotReady).
+func newestGrownNotReady(slice *pb.Slice, isMeta bool) (*pb.Group, bool) {
+	grps := slice.GetDataGrpList()
+	if isMeta {
+		grps = slice.GetMetaGrpList()
+	}
+	if len(grps) < 2 || !model.GroupNotReady(grps[len(grps)-1]) {
+		return nil, false
+	}
+	return grps[len(grps)-1], true
+}
+
+// WithdrawGrow is the WithdrawGrow of architecture.md, WithdrawGrow: an
+// operator takes back the newest grown group of one kind of a slice while
+// it is not ready, as the worker's withdrawal does for a disk node that
+// carries a health epoch (dnv-worker.md AR6). One snapshot, opened with
+// openSp so a stale token is ABORTED first (GW6), names the refusals the
+// operator can act on: the slice not in the pool is NOT_FOUND, and a first
+// group, a group that is not the newest of its kind and one whose every leg
+// has a side ready are FAILED_PRECONDITION. Then model.WithdrawGrowAsked
+// decides in its own transaction, which re-checks them all and the
+// repair, retired leg, forced start and operator-in-charge guards, and gives
+// the group's extents back.
+func (s *Server) WithdrawGrow(
+	ctx context.Context,
+	req *pb.WithdrawGrowRequest,
+) (*pb.WithdrawGrowReply, error) {
+	if err := validateOptionalName(
+		"cluster_name", req.GetClusterName(),
+	); err != nil {
+		return nil, err
+	}
+	if err := validateName("sp_name", req.GetSpName()); err != nil {
+		return nil, err
+	}
+	if req.GetGrpId() == 0 {
+		return nil, errInvalid("grp_id must not be zero")
+	}
+	var cid uint64
+	var cc *pb.ClusterConf
+	var conf *pb.SpConf
+	err := s.cli.Snapshot(ctx, func(stm etcdutil.STM) error {
+		sc, err := openSp(stm, req.GetClusterName(), req.GetSpName(),
+			req.GetSpRev())
+		if err != nil {
+			return err
+		}
+		cid, cc, conf = sc.Cid, sc.Cc, sc.Conf
+		if !containsId(conf.GetSliceIdList(), req.GetSliceId()) {
+			return errNotFound("slice %d is not in storage pool %q",
+				req.GetSliceId(), req.GetSpName())
+		}
+		// The model's level gate, named here: at these levels the pool has
+		// no thin pool, nothing grows and no group is taken back.
+		if conf.GetSpLevel() >= pb.SpLevel_SP_LEVEL_NO_THINPOOL {
+			return errPrecondition("storage pool %q is at level %s, where "+
+				"no grow runs and no group is taken back; set a lower "+
+				"level first", req.GetSpName(), conf.GetSpLevel())
+		}
+		sliceKey := model.SliceKey(cid, conf.GetSpId(), req.GetSliceId())
+		slice := &pb.Slice{}
+		if !stm.Get(sliceKey, slice) {
+			return errAborted("slice key %q is missing", sliceKey)
+		}
+		kind := grpKindWord(req.GetIsMeta())
+		grps := slice.GetDataGrpList()
+		if req.GetIsMeta() {
+			grps = slice.GetMetaGrpList()
+		}
+		if len(grps) < 2 {
+			return errPrecondition("slice %d holds its first %s group "+
+				"alone, which is never taken back", req.GetSliceId(), kind)
+		}
+		newest := grps[len(grps)-1]
+		if newest.GetGrpId() != req.GetGrpId() {
+			if grps[0].GetGrpId() == req.GetGrpId() {
+				return errPrecondition("%s group %d is the slice's "+
+					"first, which is never taken back", kind,
+					req.GetGrpId())
+			}
+			return errPrecondition("%s group %d is not the newest %s "+
+				"group of slice %d, which is %d: only the newest is taken "+
+				"back", kind, req.GetGrpId(), kind, req.GetSliceId(),
+				newest.GetGrpId())
+		}
+		if !model.GroupNotReady(newest) {
+			return errPrecondition("%s group %d is ready: every leg has a "+
+				"side ready, so a cntlr may have built it and its pool may "+
+				"hold data in it; it is not taken back", kind,
+				req.GetGrpId())
+		}
+		return nil
+	})
+	if err != nil {
+		return nil, mapStmErr(err)
+	}
+	// Both confs as stored (GW11): a zero in either is a lost record,
+	// ABORTED, not the model's precondition.
+	if err := model.ValidateClusterConf(cc); err != nil {
+		return nil, errAborted("%v", err)
+	}
+	if err := model.ValidateBdevConf(conf.GetBdevConf()); err != nil {
+		return nil, errAborted("%v", err)
+	}
+	grpId, err := model.WithdrawGrowAsked(
+		ctx, s.cli, cid, conf.GetShardCode(), conf.GetSpId(),
+		req.GetSpName(), req.GetSpRev().GetRevision(), req.GetSliceId(),
+		req.GetIsMeta(), req.GetGrpId(), cc)
+	if err != nil {
+		return nil, mapModelErr(err)
+	}
+	return &pb.WithdrawGrowReply{SliceId: req.GetSliceId(), GrpId: grpId}, nil
 }

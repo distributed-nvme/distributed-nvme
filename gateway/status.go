@@ -777,6 +777,7 @@ func statusPoolRows(in *statusInput) []statusRow {
 	} else {
 		b.etcdGroupRows()
 	}
+	b.waitingGrowRows()
 	b.repairRows(info)
 	b.migrationRows(info)
 	b.cloneRows(info)
@@ -1512,6 +1513,54 @@ func (b *statusBuilder) spaceAndGrowRows(info *pb.CntlrInfo) {
 				continue
 			}
 			b.growRow(slice, sliceId, kind.isMeta, kind.total, blockSize)
+		}
+	}
+}
+
+// waitingGrowRows lists each grow that waits longer than the pool's side
+// threshold (architecture.md, Clusters, GetClusterStatus): the newest grown group of a
+// kind of a slice has a leg with no side ready (model.GroupNotReady), and
+// its grow_epoch lies more than the resolved side_unhealthy before the read.
+// While it waits no other grow of that kind of the slice runs, and the worker
+// takes it back only when a disk node of it carries a health epoch
+// (dnv-worker.md AR6), so the row names the call that takes it back. It
+// reads etcd alone, so a pool with no report lists it too; a group with no
+// grow_epoch, grown before the field or made by a pool's create, is not
+// timed, and a pool at a level with no thin pool lists none.
+func (b *statusBuilder) waitingGrowRows() {
+	state := b.in.state
+	// At a level with no thin pool nothing grows and no group is taken
+	// back (WithdrawGrow refuses), so the row would point at no way out.
+	if b.badConf ||
+		state.Conf.GetSpLevel() >= pb.SpLevel_SP_LEVEL_NO_THINPOOL {
+		return
+	}
+	threshold := uint64(model.ResolveEventThreshold(
+		state.Conf.GetEventThreshold()).GetSideUnhealthy())
+	now := uint64(b.in.readTime.Unix())
+	for _, sliceId := range state.Conf.GetSliceIdList() {
+		slice, ok := state.Slices[sliceId]
+		if !ok {
+			continue
+		}
+		for _, isMeta := range []bool{false, true} {
+			grp, waits := newestGrownNotReady(slice, isMeta)
+			if !waits || grp.GetGrowEpoch() == 0 ||
+				grp.GetGrowEpoch()+threshold >= now {
+				continue
+			}
+			kind := grpKindWord(isMeta)
+			b.add(rankGrow, &pb.StatusRow{
+				Kind:   pb.StatusKind_STATUS_KIND_GROW,
+				Object: fmt.Sprintf("slice %d thin pool", sliceId),
+				Text: fmt.Sprintf("%s grow waits: %s group %d has a leg "+
+					"with no side ready, as its disk node still zeroes it "+
+					"or cannot; no other %s grow of the slice runs until "+
+					"it is ready or taken back with WithdrawGrow (dnvctl "+
+					"sp withdraw-grow)", kind, kind, grp.GetGrpId(), kind),
+				SliceId: sliceId,
+				Age:     epochAge(b.in.readTime, grp.GetGrowEpoch()),
+			})
 		}
 	}
 }

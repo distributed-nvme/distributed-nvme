@@ -26,7 +26,7 @@ func TestWithdrawGrowUndoesTheGrow(t *testing.T) {
 	grpId, err := GrowSlice(
 		env.ctx, env.cli, env.cid, opsShard, opsSpId, opsSpName, noExpectRev,
 		opsSliceId, false, opsNotPending, env.cc,
-		[]Cand{env.dnCand(opsDnC), env.dnCand(opsDnD)},
+		[]Cand{env.dnCand(opsDnC), env.dnCand(opsDnD)}, 0,
 	)
 	if err != nil {
 		t.Fatalf("GrowSlice: %v", err)
@@ -140,7 +140,7 @@ func TestWithdrawGrowPreconditions(t *testing.T) {
 			grpId, err := GrowSlice(
 				env.ctx, env.cli, env.cid, opsShard, opsSpId, opsSpName,
 				noExpectRev, opsSliceId, false, opsNotPending, env.cc,
-				[]Cand{env.dnCand(opsDnC), env.dnCand(opsDnD)},
+				[]Cand{env.dnCand(opsDnC), env.dnCand(opsDnD)}, 0,
 			)
 			if err != nil {
 				t.Fatalf("GrowSlice: %v", err)
@@ -183,7 +183,7 @@ func TestWithdrawGrowOfAMetaGroup(t *testing.T) {
 	grpId, err := GrowSlice(
 		env.ctx, env.cli, env.cid, opsShard, opsSpId, opsSpName, noExpectRev,
 		opsSliceId, true, opsNotPending, env.cc,
-		[]Cand{env.dnCand(opsDnC), env.dnCand(opsDnD)},
+		[]Cand{env.dnCand(opsDnC), env.dnCand(opsDnD)}, 0,
 	)
 	if err != nil {
 		t.Fatalf("GrowSlice: %v", err)
@@ -211,7 +211,7 @@ func TestWithdrawGrowAtTheMetaCap(t *testing.T) {
 	grpId, err := GrowSlice(
 		env.ctx, env.cli, env.cid, opsShard, opsSpId, opsSpName, noExpectRev,
 		opsSliceId, true, opsNotPending, env.cc,
-		[]Cand{env.dnCand(opsDnC), env.dnCand(opsDnD)},
+		[]Cand{env.dnCand(opsDnC), env.dnCand(opsDnD)}, 0,
 	)
 	if err != nil {
 		t.Fatalf("GrowSlice: %v", err)
@@ -270,5 +270,43 @@ func TestWithdrawGrowRefusesASliceWithNoGrownGroup(t *testing.T) {
 	var pre *ErrPrecondition
 	if !errors.As(err, &pre) || pre.Reason != "no grown group" {
 		t.Fatalf("err = %v, want the refusal \"no grown group\"", err)
+	}
+}
+
+// TestGrowSliceRefusesOverAGrownGroupNotReady pins GrowSlice's own check of
+// architecture.md, GrowSlice: a grow of a kind whose newest group is a grown
+// one with a leg whose every side is not provisioned is refused
+// ReasonGrowNotReady and writes nothing, so a grow sent with no token cannot
+// land over a group that became the newest after the gateway's read; the
+// other kind still grows, and once the group is ready its kind grows again.
+func TestGrowSliceRefusesOverAGrownGroupNotReady(t *testing.T) {
+	env := newOpsEnv(t)
+	legs := []Cand{env.dnCand(opsDnC), env.dnCand(opsDnD)}
+	if _, err := GrowSlice(
+		env.ctx, env.cli, env.cid, opsShard, opsSpId, opsSpName, noExpectRev,
+		opsSliceId, false, opsNotPending, env.cc, legs, 0,
+	); err != nil {
+		t.Fatalf("the first data grow: %v", err)
+	}
+	before := env.slice()
+	_, err := GrowSlice(
+		env.ctx, env.cli, env.cid, opsShard, opsSpId, opsSpName, noExpectRev,
+		opsSliceId, false, opsNotPending, env.cc,
+		[]Cand{env.dnCand(opsDnA), env.dnCand(opsDnB)}, 0,
+	)
+	if pre := wantPrecondition(t, err, opGrowSlice); pre.Reason !=
+		ReasonGrowNotReady {
+		t.Errorf("Reason: got %q, want %q", pre.Reason, ReasonGrowNotReady)
+	}
+	if !proto.Equal(env.slice(), before) {
+		t.Errorf("the refused grow changed the slice")
+	}
+	env.readySlice()
+	if _, err := GrowSlice(
+		env.ctx, env.cli, env.cid, opsShard, opsSpId, opsSpName, noExpectRev,
+		opsSliceId, false, opsNotPending, env.cc,
+		[]Cand{env.dnCand(opsDnA), env.dnCand(opsDnB)}, 0,
+	); err != nil {
+		t.Errorf("a data grow once the grown group is ready: %v", err)
 	}
 }

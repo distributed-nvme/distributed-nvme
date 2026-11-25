@@ -337,6 +337,25 @@ func (e *opsEnv) spConf() *pb.SpConf {
 	return conf
 }
 
+// readySlice marks every side of the env's slice provisioned, as the
+// worker's flips do once the disk nodes have zeroed them: a test that grows
+// one kind twice in a row calls it between the grows, since GrowSlice
+// refuses to grow over a grown group that is not ready
+// (ReasonGrowNotReady).
+func (e *opsEnv) readySlice() {
+	e.t.Helper()
+	slice := e.slice()
+	for _, grp := range append(append([]*pb.Group(nil),
+		slice.GetMetaGrpList()...), slice.GetDataGrpList()...) {
+		for _, leg := range grp.GetLegList() {
+			for _, side := range leg.GetSideList() {
+				side.Provisioned = true
+			}
+		}
+	}
+	mustPut(e.t, e.cli, SliceKey(e.cid, opsSpId, opsSliceId), slice)
+}
+
 func (e *opsEnv) slice() *pb.Slice {
 	slice := &pb.Slice{}
 	e.get(SliceKey(e.cid, opsSpId, opsSliceId), slice)
@@ -2322,7 +2341,7 @@ func TestGrowSliceData(t *testing.T) {
 	}
 	grpId, err := GrowSlice(
 		env.ctx, env.cli, env.cid, opsShard, opsSpId, opsSpName, noExpectRev,
-		opsSliceId, false, opsNotPending, env.cc, legs,
+		opsSliceId, false, opsNotPending, env.cc, legs, 0,
 	)
 	if err != nil {
 		t.Fatalf("GrowSlice: %v", err)
@@ -2459,10 +2478,13 @@ func TestGrowSliceData(t *testing.T) {
 	if got := env.spRev(); got != before.spRev+1 {
 		t.Errorf("SpRev: got %d, want %d (exactly one bump)", got, before.spRev+1)
 	}
-	// The picks are stale now, so the same call is refused (MD5).
+	// The picks are stale now, so the same call is refused (MD5), once the
+	// grown group is ready, since a grow over one that is not is refused
+	// first.
+	env.readySlice()
 	_, err = GrowSlice(
 		env.ctx, env.cli, env.cid, opsShard, opsSpId, opsSpName, noExpectRev,
-		opsSliceId, false, opsNotPending, env.cc, legs,
+		opsSliceId, false, opsNotPending, env.cc, legs, 0,
 	)
 	precondition := wantPrecondition(t, err, opGrowSlice)
 	if precondition.Reason != ReasonCandidateChanged {
@@ -2506,7 +2528,7 @@ func TestGrowSliceRefusesASecondGrowForOneBreach(t *testing.T) {
 			if _, err := GrowSlice(
 				env.ctx, env.cli, env.cid, opsShard, opsSpId, opsSpName, noExpectRev,
 				opsSliceId, tc.isMeta, tc.total, env.cc,
-				[]Cand{env.dnCand(opsDnC), env.dnCand(opsDnD)},
+				[]Cand{env.dnCand(opsDnC), env.dnCand(opsDnD)}, 0,
 			); err != nil {
 				t.Fatalf("first grow: %v", err)
 			}
@@ -2529,7 +2551,7 @@ func TestGrowSliceRefusesASecondGrowForOneBreach(t *testing.T) {
 				opsSliceId, tc.isMeta, tc.total, env.cc,
 				[]Cand{
 					env.dnCand("dn-g0:9000"), env.dnCand("dn-g1:9000"),
-				},
+				}, 0,
 			)
 			precondition := wantPrecondition(t, err, opGrowSlice)
 			if precondition.Reason != ReasonGrowPending {
@@ -2654,11 +2676,12 @@ func TestGrowSliceMetaLadder(t *testing.T) {
 		legs := []Cand{env.dnCand(pair[0]), env.dnCand(pair[1])}
 		grpId, err := GrowSlice(
 			env.ctx, env.cli, env.cid, opsShard, opsSpId, opsSpName, noExpectRev,
-			opsSliceId, true, opsNotPending, env.cc, legs,
+			opsSliceId, true, opsNotPending, env.cc, legs, 0,
 		)
 		if err != nil {
 			t.Fatalf("meta grow %d: %v", step, err)
 		}
+		env.readySlice()
 		slice := env.slice()
 		grp := findGroup(slice, grpId)
 		if grp == nil {
@@ -2688,7 +2711,7 @@ func TestGrowSliceMetaLadder(t *testing.T) {
 	_, err := GrowSlice(
 		env.ctx, env.cli, env.cid, opsShard, opsSpId, opsSpName, noExpectRev,
 		opsSliceId, true, opsNotPending, env.cc,
-		[]Cand{env.dnCand("dn-z0:9000"), env.dnCand("dn-z1:9000")},
+		[]Cand{env.dnCand("dn-z0:9000"), env.dnCand("dn-z1:9000")}, 0,
 	)
 	precondition := wantPrecondition(t, err, opGrowSlice)
 	if precondition.Reason != "meta ladder at the dm-thin metadata cap" {
@@ -2735,7 +2758,7 @@ func TestGrowSliceMetaPastTheCapIsNotPending(t *testing.T) {
 	_, err := GrowSlice(
 		env.ctx, env.cli, env.cid, opsShard, opsSpId, opsSpName, noExpectRev,
 		opsSliceId, true, common.ThinMetaMaxBlocks, env.cc,
-		[]Cand{env.dnCand(opsDnC), env.dnCand(opsDnD)},
+		[]Cand{env.dnCand(opsDnC), env.dnCand(opsDnD)}, 0,
 	)
 	precondition := wantPrecondition(t, err, opGrowSlice)
 	if precondition.Reason != "meta ladder at the dm-thin metadata cap" {
@@ -2796,7 +2819,7 @@ func TestGrowSliceRefusesAFullGroupList(t *testing.T) {
 				if _, err := GrowSlice(
 					env.ctx, env.cli, env.cid, opsShard, opsSpId, opsSpName,
 					noExpectRev, opsSliceId, false, opsNotPending, env.cc,
-					[]Cand{env.dnCand(opsDnC), env.dnCand(opsDnD)},
+					[]Cand{env.dnCand(opsDnC), env.dnCand(opsDnD)}, 0,
 				); err != nil {
 					t.Fatalf("the grow that fills the list: %v", err)
 				}
@@ -2809,7 +2832,7 @@ func TestGrowSliceRefusesAFullGroupList(t *testing.T) {
 			_, err := GrowSlice(
 				env.ctx, env.cli, env.cid, opsShard, opsSpId, opsSpName,
 				noExpectRev, opsSliceId, tc.isMeta, opsNotPending, env.cc,
-				[]Cand{env.dnCand("dn-f0:9000"), env.dnCand("dn-f1:9000")},
+				[]Cand{env.dnCand("dn-f0:9000"), env.dnCand("dn-f1:9000")}, 0,
 			)
 			precondition := wantPrecondition(t, err, opGrowSlice)
 			if precondition.Reason != ReasonGrpListFull {
@@ -2834,7 +2857,7 @@ func TestGrowSliceRefusesAFullGroupList(t *testing.T) {
 			if _, err := GrowSlice(
 				env.ctx, env.cli, env.cid, opsShard, opsSpId, opsSpName,
 				noExpectRev, opsSliceId, !tc.isMeta, opsNotPending, env.cc,
-				[]Cand{env.dnCand("dn-f0:9000"), env.dnCand("dn-f1:9000")},
+				[]Cand{env.dnCand("dn-f0:9000"), env.dnCand("dn-f1:9000")}, 0,
 			); err != nil {
 				t.Fatalf("a grow of the other kind beside a full %s list: %v",
 					tc.name, err)
@@ -2942,7 +2965,7 @@ func TestGrowSlicePreconditions(t *testing.T) {
 			dnCFree := env.dn(opsDnC).GetFreeExtCnt()
 			_, err := GrowSlice(
 				env.ctx, env.cli, env.cid, opsShard, opsSpId, opsSpName, noExpectRev,
-				opsSliceId, false, opsNotPending, env.cc, legs,
+				opsSliceId, false, opsNotPending, env.cc, legs, 0,
 			)
 			precondition := wantPrecondition(t, err, opGrowSlice)
 			if precondition.Reason != tc.reason {
@@ -2972,7 +2995,7 @@ func TestGrowSlicePreconditions(t *testing.T) {
 		legs := []Cand{env.dnCand(opsDnC), env.dnCand(opsDnD)}
 		_, err := GrowSlice(
 			env.ctx, env.cli, env.cid, opsShard, opsSpId, opsSpName, noExpectRev,
-			9999, false, opsNotPending, env.cc, legs,
+			9999, false, opsNotPending, env.cc, legs, 0,
 		)
 		precondition := wantPrecondition(t, err, opGrowSlice)
 		if precondition.Reason != "slice not in sp" {
@@ -3025,7 +3048,7 @@ func TestGrowSliceRefusesAnInvalidStoredConf(t *testing.T) {
 			dnCFree := env.dn(opsDnC).GetFreeExtCnt()
 			_, err := GrowSlice(
 				env.ctx, env.cli, env.cid, opsShard, opsSpId, opsSpName,
-				noExpectRev, opsSliceId, false, opsNotPending, env.cc, legs,
+				noExpectRev, opsSliceId, false, opsNotPending, env.cc, legs, 0,
 			)
 			precondition := wantPrecondition(t, err, opGrowSlice)
 			if precondition.Reason != tc.reason {

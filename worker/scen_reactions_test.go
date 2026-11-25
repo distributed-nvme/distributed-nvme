@@ -634,7 +634,7 @@ func operatorGrow(c *stdCluster) error {
 		return fmt.Errorf("%d DNs with room, want 2", len(picks))
 	}
 	_, err = model.GrowSlice(ctx, c.h.cli, c.cl.Id, stdSpShard, stdSpId,
-		c.sp.Ref.Name, 0, stdSliceId, false, math.MaxUint64, c.cl.Conf, picks)
+		c.sp.Ref.Name, 0, stdSliceId, false, math.MaxUint64, c.cl.Conf, picks, 0)
 	return err
 }
 

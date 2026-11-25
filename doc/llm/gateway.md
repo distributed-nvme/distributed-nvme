@@ -41,7 +41,7 @@ with `dnvctl`.
 
 The STM bodies of the public RPCs live in the per-resource files of
 `gateway/`. The `model` operations a handler runs as its deciding STM —
-`GrowSlice`, the repair operations `FinishRepair`, `CancelRepair` and
+`GrowSlice`, `WithdrawGrowAsked`, the repair operations `FinishRepair`, `CancelRepair` and
 `SetRepairAbort` and the retired-leg operations `DeleteRetiredLeg` and
 `SetRetiredLegKeep`, which take the group of either kind through the parent
 their record holds, and
@@ -301,7 +301,7 @@ snapshot and the deciding STM of every SP-scoped mutator but
 opens every SP-scoped read-only RPC and `DeleteClone`'s phase 1 (Clones);
 `openSpFlags` is `openSp` with the gate selectable, and `DeleteStoragePool`
 is its one caller with the gate off (Storage pools and GrowSlice).
-`GrowSlice` and the eight repair calls that run a `model` op —
+`GrowSlice`, `WithdrawGrow` and the eight repair calls that run a `model` op —
 `CreateRepair`, `FinishRepair`, `CancelRepair`, `TryToAbortRepair`,
 `DeleteRetiredLeg`, `ForceStartGroup`, `UpdateGroupOperatorInCharge` and
 `UpdateRetiredLegKeep` — resolve in their planning `Snapshot` only (Storage
@@ -361,7 +361,7 @@ through `openSpRead`, which has no `deleting` gate, before its
 them — and the hydration check's agent call all come ahead of it (Clones).
 
 The `model` mutations the gateway runs (Scope and placement) — `GrowSlice`,
-`CreateRepair`, `FinishRepair`, `CancelRepair`, `SetRepairAbort`,
+`WithdrawGrowAsked`, `CreateRepair`, `FinishRepair`, `CancelRepair`, `SetRepairAbort`,
 `DeleteRetiredLeg`, `ForceStartGroup`, `SetGrpOperatorInCharge` and
 `SetRetiredLegKeep` — take an expected revision and re-check it first inside their own STM, zero
 skipping the check (`dnv-worker.md` MD6); a mismatch is an
@@ -615,7 +615,9 @@ capacity key each moves is named by shifting the STORED ladder), in
 `CreateStoragePool` (on its plain pre-read, before the merge that gives its
 scans their leg count and that the geometry rules of `architecture.md`,
 Common validation, judge, and again in its STM before any group geometry)
-and the `GrowSlice` handler (before any group geometry), in `newDnLedger`
+and the `GrowSlice` handler (before any group geometry), in the
+`WithdrawGrow` handler (before its op, which gives extents back by the
+stored ladder), in `newDnLedger`
 (the DN ledger `CreateStoragePool`, `CreateClone` and `CreateMigration`
 build before staging their first write, for the same capacity-key reason),
 at the top of `model.EndMigrationIn` for `FinishMigration` and
@@ -634,7 +636,7 @@ ladder and turns extents into bytes by the stored extent size), in
 sized by the cluster's `extent_size` (`migrMetaUnitsOf`), and in
 `CreateClone`'s plan and STM before its clone meta group is laid out from
 that `extent_size` (`planCloneGrp`); `model.ValidateBdevConf` in
-`GrowSlice`, in `CreateThinDevice` (before sizing against the stripe), in
+`GrowSlice`, in `WithdrawGrow`, in `CreateThinDevice` (before sizing against the stripe), in
 `InspectStoragePool` (before it sizes the data space by the block size), in
 `CreateClone`'s plan and STM before its clone meta group is laid out and its
 metadata bounded by the SP's block size (`planCloneGrp`), and in
@@ -783,7 +785,11 @@ and field-level rules stay in the cited section of `architecture.md`,
   GW10); GW20's reads and calls, with no STM. Reply the defaulted name, the
   rows of the cluster on the first page and of each pool read, the token,
   the count of pools read and the read's time (`architecture.md`,
-  Clusters).
+  Clusters). A pool's row of a grow that waits (`waitingGrowRows`) reads
+  the loaded records and the read's time alone: the newest grown group of
+  a kind not ready (`newestGrownNotReady`) whose `grow_epoch` plus the
+  pool's resolved `side_unhealthy` lies before the read, in a pool below
+  `SP_LEVEL_NO_THINPOOL`.
 
 GW19. **The id step.** `AdvanceClusterIds` runs the transactions of
 `architecture.md`, Clusters, which owns their order and their reasons. One
@@ -1148,7 +1154,12 @@ set.
   of `architecture.md`, GrowSlice, answered from the same snapshot
   (`model.GrpListFull`, `FAILED_PRECONDITION`, GW7's object-state class)
   ahead of the scan, so a cluster short of DNs cannot report it as
-  `RESOURCE_EXHAUSTED` (`model.GrowSlice` re-checks it in-STM); the new
+  `RESOURCE_EXHAUSTED` (`model.GrowSlice` re-checks it in-STM); a newest
+  grown group of the kind that is not ready (`newestGrownNotReady`, the
+  slice holding two or more of the kind and `model.GroupNotReady` true),
+  `FAILED_PRECONDITION` naming it and WithdrawGrow, skipped at a level
+  where the model's level gate answers, and decided again by
+  `model.GrowSlice` in its STM (`ReasonGrowNotReady`); the new
   group's size, computed as `architecture.md`, GrowSlice, says and never
   taken from the request's `ext_cnt` — the slice's first data group's
   `ext_cnt` for a data grow, `model.MetaLadderExtCnt` of the slice's meta
@@ -1163,9 +1174,10 @@ set.
   (`pickDns`) with the request's own black list and no location exclusion,
   as `architecture.md`, Per-operation allocation, has it; then the call of
   `model.GrowSlice` with the token's revision as its expected revision
-  (GW6) and the largest pool total (`math.MaxUint64`), which leaves the
+  (GW6), the largest pool total (`math.MaxUint64`), which leaves the
   pending rule of `dnv-worker.md` AR6 to the worker's auto-grow
-  (`architecture.md`, GrowSlice). The op re-validates in-STM and bumps the
+  (`architecture.md`, GrowSlice), and the gateway's clock as the group's
+  `grow_epoch`. The op re-validates in-STM and bumps the
   `SpRev`, the leg DNs' revs and — through `chargeSpCns`, which charges the
   CN of every cntlr — those CNs' `CnRev`s itself. A CN that loses its budget
   in the window after the pre-check is therefore still refused, but by
@@ -1174,6 +1186,16 @@ set.
   one, since only the STM decides. `ReasonStaleRevision` maps to `ABORTED`,
   any other `ErrPrecondition` to `FAILED_PRECONDITION`. Reply `slice_id` and
   `grp_id`.
+* **WithdrawGrow** — validate the names and a non-zero `grp_id`; one
+  `Snapshot` opened with `openSp` (GW6) names the refusals of
+  `architecture.md`, WithdrawGrow, the operator acts on: the slice not in
+  the pool `NOT_FOUND`, and a pool at `SP_LEVEL_NO_THINPOOL` or above, a
+  first group, a group that is not the newest of its kind and a ready one
+  `FAILED_PRECONDITION`; then `model.ValidateClusterConf` and
+  `model.ValidateBdevConf` (`ABORTED`, GW11) and
+  `model.WithdrawGrowAsked` with the token's revision, which decides in
+  its own STM and re-checks them all with the model's other guards,
+  mapped as `GrowSlice`'s errors are. Reply `slice_id` and `grp_id`.
 
 ### Cntlrs and inspects
 
@@ -2121,7 +2143,9 @@ so no state leaks between them; each creates its own cluster through the
 gateway, never through `workerctl`.
 
 * smoke (one gateway) — the full lifecycle: every RPC's happy path but
-  `ListStoragePools`, which the parallel and restart cases run, each
+  `ListStoragePools`, which the parallel and restart cases run, and
+  `WithdrawGrow`, which the gateway's Go tests and the dnvctl suite's sweep
+  drive, each
   mutation's exact write set read back, the first pool's one leg in its
   first primary's location a leg of its data group, never of its meta
   group, the `CdcEntry` the cdc serves

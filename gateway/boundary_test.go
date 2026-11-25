@@ -503,6 +503,11 @@ func bndGrowOnto(
 		ExtCnt:      1,
 		DnSelector:  &pb.NodeSelector{WhiteList: dns},
 	})
+	if err == nil {
+		// The next grow of the slice must not meet a grown group not
+		// ready (GrowSlice).
+		sptReady(env, spName)
+	}
 	return err
 }
 
@@ -1085,6 +1090,11 @@ func bndGrowData(
 		SliceId:     sliceId,
 		ExtCnt:      1,
 	})
+	if err == nil {
+		// The next grow of the slice must not meet a grown group not
+		// ready (GrowSlice).
+		sptReady(env, sptSpName)
+	}
 	return err
 }
 
@@ -1445,6 +1455,7 @@ func TestMetaLadderPassesItsCapWithAnOddExtent(t *testing.T) {
 		if err := grow(); err != nil {
 			t.Fatalf("meta grow %d: %v", idx+1, err)
 		}
+		sptReady(env, sptSpName)
 	}
 	total := uint64(0)
 	var extCnts []uint64

@@ -2674,6 +2674,14 @@ rest. A pool's rows are:
   disk nodes have room for are not listed; a full group list, the
   metadata ceiling, a slice with no data group, a controller node short of
   budget and no disk node with room are;
+* a grow that waits: the newest grown group of a kind of a slice has a
+  leg whose every side is not `provisioned`, and its `grow_epoch` lies
+  more than the pool's `side_unhealthy` before the read, whatever the
+  pool's use; the row names the group and WithdrawGrow. It reads etcd
+  alone, so a pool with no report lists it too; a group with no
+  `grow_epoch`, made by a pool's create, a clone or a grow before the
+  field, is not timed, and a pool at `SP_LEVEL_NO_THINPOOL` or above,
+  where WithdrawGrow refuses, lists none;
 * a report row that reads `RES_STATUS_ERROR`, a leg's row with an identity
   reason, a subsystem's or a transfer's subsystem row that reads
   `RES_STATUS_PENDING`, which only a host taken off its list that keeps its
@@ -3402,10 +3410,16 @@ computed (below); `FAILED_PRECONDITION` when `is_meta` is true and the
 slice's meta total has already reached the dm-thin metadata ceiling, when the
 slice's group list of the requested kind already holds
 `MaxGrpCntPerSlice` groups (the width of md names, a count that the
-gateway answers ahead of the candidate scan; on a live slice only
-auto-grow's withdrawal of a stuck newest group frees a place,
-`dnv-worker.md` AR6, and otherwise groups leave a slice only by a deleting
-SP's drain, `dnv-worker.md` SPD10), or when `sp_level` is at
+gateway answers ahead of the candidate scan; on a live slice only the
+withdrawal of a stuck newest group, auto-grow's, `dnv-worker.md` AR6, or
+an operator's, WithdrawGrow, frees a place, and otherwise groups leave a
+slice only by a deleting SP's drain, `dnv-worker.md` SPD10), when the
+newest group of the requested kind is a grown one, the slice holding two
+or more of the kind, with a leg whose every side is still not
+`provisioned`, the message naming the group and WithdrawGrow, answered by
+the gateway from its planning read and decided again in the STM
+(`model.GrowSlice`, `ReasonGrowNotReady`), so that a grow with no token
+cannot land over a group grown in between, or when `sp_level` is at
 or above `SP_LEVEL_NO_THINPOOL` (the model op's level gate refuses: pools
 are suppressed at those levels, so there is nothing to grow; the same gate
 guards `CreateRepair` under the sp worker's name, Repairs);
@@ -3453,7 +3467,9 @@ top of the transaction (Common validation), compute `meta_blocks` and
 `data_blocks` (Group on-leg layout: meta region, data region, health
 block) and append a `Group` — its `grp_id`, `ext_cnt`, `meta_blocks`,
 `data_blocks`, legs and sides, every new `Side` written `provisioned` false
-([D15]) — to the slice; update the involved DNs and their `DnRev`s and the
+([D15]), and its `grow_epoch`, the caller's clock, the gateway's or the
+worker's, which the status read times a waiting grow by (Clusters) — to
+the slice; update the involved DNs and their `DnRev`s and the
 budget of every cntlr's CN and its `CnRev`; bump `SpRev`. Agents extend
 the pool-meta and pool-data linear tables and resize the thin pool online
 — but the growth is **deferred on the CN** while the new group still
@@ -3461,15 +3477,50 @@ contains a provisioning leg: the concat and the pool keep their old,
 effective size and keep reporting `OK` at that size, and the grow
 completes by itself once the leg clears (Side provisioning protocol,
 Automatic reactions). A group whose leg never clears can instead be taken
-back by the sp worker, under the conditions of `dnv-worker.md` AR6. The
-per-kind "one grow per pool at a time" pending
+back, by the sp worker under the conditions of `dnv-worker.md` AR6, or by
+an operator (WithdrawGrow). A grow over a grown group that is not ready is
+refused (Errors above): the concat stops at the first group of the list
+that is deferred (`cnagent.md` CN9), so the new group would never join the
+pool, and it would bury the waiting group, which only a withdrawal of the
+newest group takes back. A first group refuses no grow: it is never taken
+back, and a group grown over one that still zeroes joins once it is done.
+The per-kind "one grow per pool at a time" pending
 rule (`dnv-worker.md` AR6) binds only the sp worker's own auto-grow, which
 judges "pending" by the primary's reported usage, and so does its covered
 rule, which stops a data grow once the slice's data covers the pool's thin
 devices; a user-driven `GrowSlice` is explicit operator intent, holds no
-such report and is **not** so gated (`gateway.md`, Storage pools and GrowSlice) — stacked
-grows are absorbed by the deferred growth above, though every stacked
-group's DN extents are charged immediately. Reply `slice_id` and `grp_id`.
+such report and is **not** so gated (`gateway.md`, Storage pools and GrowSlice) — a grow
+stacked over groups the pool does not count yet, which are ready or a
+first group, is absorbed by the deferred growth above, though every
+stacked group's DN extents are charged immediately. Reply `slice_id` and
+`grp_id`.
+
+### WithdrawGrow
+
+An operator takes back the newest grown group of one kind of a slice while
+it is not ready, the step the worker's withdrawal (`dnv-worker.md` AR6)
+takes only when the group's disk node carries a health epoch: a disk node
+that keeps answering its rounds while it zeroes very slowly, or fails to,
+keeps the grow waiting, and with it every later grow of that kind of the
+slice. Errors: `NOT_FOUND` when `slice_id` is not in the pool;
+`INVALID_ARGUMENT` for a zero `grp_id`; `ABORTED` for a stale token (GW6
+of `gateway.md`), and for a stored `bdev_conf` or `ClusterConf` that fails
+Common validation; `FAILED_PRECONDITION` when `sp_level` is at or above
+`SP_LEVEL_NO_THINPOOL`, where no grow runs and no group is taken back
+(the model op's level gate), when the slice holds one group of the kind, which is never taken back, when `grp_id` is not the newest group
+of the kind, when every leg of the group has a side `provisioned`, so a
+cntlr may have built it and its pool may hold data in it, when a leg has
+two sides, a migration in flight, and when the group carries a repair, a
+retired leg, a forced-start mark or an operator in charge (`dnv-worker.md`
+MD6, `WithdrawGrow`). Action: one STM, the worker's `WithdrawGrow` without
+its pool total (`model.WithdrawGrowAsked`): it re-checks every condition,
+takes the group off the tail of its list, gives every side back to its
+disk node and the CN of every current cntlr the extents the group costs
+it, and bumps `SpRev`. It holds no report of the pool and needs none: a
+`provisioned` flag only ever turns true, and no cntlr builds a group while
+one of its legs has every side not provisioned (`cnagent.md` CN9), so no
+array of the group, and no pool, ever held it. Reply `slice_id` and
+`grp_id`.
 
 ### Cntlrs
 
@@ -10623,7 +10674,12 @@ document and only pointed to here.
   the kernel's "no_space_timeout" (a dm-thin module parameter) and then
   fails with EIO, while already-provisioned blocks keep serving. A
   `low_water_mark_pct` above a hundred percent switches auto-grow off
-  (Common validation).
+  (Common validation). A grow also waits, and no later grow of its kind of the slice
+  runs, while its new group is not ready (a disk node that zeroes the new
+  side very slowly, or cannot): the worker takes the group back only when
+  that disk node carries a health epoch (`dnv-worker.md` AR6), the status
+  read lists the wait past `side_unhealthy` (Clusters), and an operator's
+  WithdrawGrow takes it back.
 * **A host discard frees pool space only where it covers, on every slice, a
   whole aligned block.** dm-thin frees whole blocks only, completes a
   shorter or misaligned discard with success, and advertises one block as a

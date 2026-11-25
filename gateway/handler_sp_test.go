@@ -3071,7 +3071,9 @@ func TestGrowSliceData(t *testing.T) {
 // the SECOND grow of a kind: per kind the first is never pending
 // (len(grps) < 2), so a gateway that passed a real total (0 being what
 // "no report" naively becomes) would refuse it FAILED_PRECONDITION
-// "grow_pending".
+// "grow_pending". The first grown group is made ready between the two, as
+// the worker's flips do, since a grow over a grown group not ready is
+// refused.
 func TestGrowSliceConsecutiveDataGrows(t *testing.T) {
 	env := sptNewEnv(t, sptDnCnt, sptCnCnt, sptCnFree)
 	spId := env.createSp(sptDefaultSpec(sptSpName))
@@ -3087,6 +3089,7 @@ func TestGrowSliceConsecutiveDataGrows(t *testing.T) {
 		if err != nil {
 			t.Fatalf("GrowSlice with token %d: %v", tok, err)
 		}
+		sptReady(env, sptSpName)
 		if reply.GetSliceId() != sliceId {
 			t.Errorf("slice_id: got %d, want %d",
 				reply.GetSliceId(), sliceId)
@@ -3405,6 +3408,7 @@ func TestGrowSliceWithoutAToken(t *testing.T) {
 		if err != nil {
 			t.Fatalf("token-less GrowSlice %d: %v", round, err)
 		}
+		sptReady(env, sptSpName)
 		if reply.GetSliceId() != sliceId {
 			t.Errorf("slice_id: got %d, want %d",
 				reply.GetSliceId(), sliceId)

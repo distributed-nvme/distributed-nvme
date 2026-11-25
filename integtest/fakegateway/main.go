@@ -898,6 +898,12 @@ func (g *fakeGateway) FindStoragePoolNames(
 	return serve[*pb.FindStoragePoolNamesReply](g, ctx, "FindStoragePoolNames", req)
 }
 
+func (g *fakeGateway) WithdrawGrow(
+	ctx context.Context, req *pb.WithdrawGrowRequest,
+) (*pb.WithdrawGrowReply, error) {
+	return serve[*pb.WithdrawGrowReply](g, ctx, "WithdrawGrow", req)
+}
+
 func (g *fakeGateway) GrowSlice(
 	ctx context.Context, req *pb.GrowSliceRequest,
 ) (*pb.GrowSliceReply, error) {

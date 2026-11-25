@@ -519,6 +519,7 @@ var commands = []command{
 	{"set-sp-level", setupSetSpLevel},
 	{"find-sp-names", setupFindSpNames},
 	{"grow-slice", setupGrowSlice},
+	{"withdraw-grow", setupWithdrawGrow},
 	// cntlr
 	{"create-cntlr", setupCreateCntlr},
 	{"delete-cntlr", setupDeleteCntlr},

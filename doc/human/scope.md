@@ -387,7 +387,17 @@ loss in the sense of this document. The application knows. Two cases:
 - **A pool runs out of space.** Auto-grow is best effort. A grow fails
   when it finds no disk node with room, when one of the pool's controller
   nodes has no budget left for the new group, or when the slice already
-  holds the most data groups it can. Nothing reserves space ahead. A write
+  holds the most data groups it can. A grow also waits, and no later grow
+  of its kind of the slice runs, while its new group is not ready, as when
+  its disk node zeroes the new side very slowly or cannot. The worker
+  takes such a group back by itself only when its disk node is dead or
+  reports an error of its own. The status read, `dnvctl cluster
+  get-status`, lists the grow once it has waited longer than the pool's
+  side threshold, and the operator takes the group back with `dnvctl sp
+  withdraw-grow`. The gateway refuses to grow a slice by hand over such a
+  group. A slice where a group was grown by hand over such a group before
+  dnv refused it stays stuck: the call takes back only the newest group,
+  and only while it is itself waiting. Nothing reserves space ahead. A write
   that needs a new block waits for the kernel's no-space timeout and fails. Written
   blocks keep serving. Under the CSI driver the cluster can be
   over-committed. `dnvctl cluster get-capacity` says what the cluster can

@@ -589,7 +589,8 @@ MD6. **Internal mutations.** Each is **one** `RunSTM` (`FlipCreated` and
 `MarkTdTorn`: one per `MaxFlipCreatedPerTxn` tds, RW19), re-validates every precondition it
 lists (MD7), and bumps exactly the revisions the equivalent RPC bumps
 (`architecture.md`, `service Gateway` — RPC specifications, and
-`architecture.md`, Workers); `WithdrawGrow`, which no RPC runs, bumps the
+`architecture.md`, Workers); `WithdrawGrow`, which the gateway's
+`WithdrawGrow` runs as `WithdrawGrowAsked`, with no pool total, bumps the
 SP's and those of every node it touches, as `GrowSlice` does. `now` is the caller's unix seconds; thresholds
 are resolved inside from `SpConf.event_threshold` with the defaults of
 `architecture.md`, Common validation. The shard and the sp id address the
@@ -824,7 +825,9 @@ list; the flip, which reads the repair's key alone, and
   with an older one before it ("no grown group" otherwise); the pool not
   counting the group: the pool total no larger than the groups before it
   imply (AR6's pending rule without its metadata cap clause,
-  `GrowUncounted`); one side per leg ("a leg has two sides"
+  `GrowUncounted`), a check `WithdrawGrowAsked`, the operator's version,
+  which takes no pool total, leaves out, since the next guard already proves
+  it; one side per leg ("a leg has two sides"
   otherwise: a migration is in flight); a leg whose only side is not
   `provisioned`, so no cntlr ever built the group (`cnagent.md` CN9; "no leg
   provisioning" otherwise); and the group to carry no repair
@@ -836,7 +839,8 @@ list; the flip, which reads the repair's key alone, and
   (`free_ext_cnt`, capacity, a `CnRev` bump each; a cntlr created or replaced
   since the grow was charged the whole footprint, the group included, and a
   cntlr or CN record that is gone is skipped), puts the `Slice` and bumps
-  `SpRev`. No gateway call runs it.
+  `SpRev`. The gateway's `WithdrawGrow` runs it as `WithdrawGrowAsked`
+  (`architecture.md`, WithdrawGrow).
 * `ReplaceCntlr` takes the old cntlr, the picked CN, the SP's CN endpoints the
   scan ran against, whether the new cntlr is primary and `now`, and requires
   the SP checks; the old cntlr's `err_epoch` set and `now` minus it at least
@@ -6767,11 +6771,16 @@ caught.
   `ThinMetaMaxBlocks`, by a ceiling of `architecture.md`, GrowSlice, and the
   group keeps its extents on the disk nodes and its share of every CN's
   budget. A side whose disk node passes its own rounds, one that zeroes
-  very slowly or fails its zeroing there, is never withdrawn, and its grow
-  waits for the zeroing. An
-  operator's `GrowSlice` stacked on top of the stuck group is a later group
-  of the list, so the stuck one is not the newest any more and is not
-  withdrawn while that later group stands.
+  very slowly or fails its zeroing there, is never withdrawn by the
+  worker, and its grow waits for the zeroing; the status read lists such a
+  grow once it has waited longer than `side_unhealthy`, and an operator's
+  `WithdrawGrow` takes it back (`architecture.md`, WithdrawGrow). The
+  gateway refuses an operator's `GrowSlice` over a grown group that is not
+  ready (`architecture.md`, GrowSlice), and `GrowSlice` refuses it again
+  in its STM, so no later group buries the stuck one; a group stacked so
+  before that refusal is a later group of the list, the stuck one is not
+  the newest while it stands, and the call takes the later one back only
+  while it is not ready either, so such a stack stays stuck.
 
 * **A pool with a lost record waits for an operator.** When a record that a
   list of a live pool names is missing from etcd, the sp role sends the pool no new request and its pass runs

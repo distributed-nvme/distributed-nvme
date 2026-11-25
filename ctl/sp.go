@@ -1,9 +1,9 @@
 // The storage-pool group of dnvctl (dnvctl.md, `sp` — `ctl/sp.go`). Six
 // commands are the pool object's own RPCs — create, delete, get, list,
-// set-level, inspect — and the other four are the RPCs that dnvctl.md,
+// set-level, inspect — and the other five are the RPCs that dnvctl.md,
 // Conventions, homes here rather than giving each a group of its own:
-// UpdateStoragePoolCntlidSlotList, FindStoragePoolNames, GrowSlice and
-// InspectSide. Everything else under an SP (cntlr, td, ss, ns, clone, xfer,
+// UpdateStoragePoolCntlidSlotList, FindStoragePoolNames, GrowSlice,
+// WithdrawGrow and InspectSide. Everything else under an SP (cntlr, td, ss, ns, clone, xfer,
 // migr, repair, retired-leg, group) is its own group file.
 //
 // Three group-wide notes:
@@ -13,8 +13,8 @@
 //     request that carries it, `sp create` included. `sp list` and
 //     `sp find-names` have no sp_name field at all, so for those two the
 //     global flag is simply ignored.
-//   - Four commands carry a token: delete, set-cntlid-slots, set-level and
-//     grow-slice call spRev. The five reads carry none, and neither does
+//   - Five commands carry a token: delete, set-cntlid-slots, set-level,
+//     grow-slice and withdraw-grow call spRev. The five reads carry none, and neither does
 //     `sp create` — there is no SP yet to have a revision. `sp get` is where
 //     the operator read the number they pass back as --rev (CT3).
 //   - The two parse helpers below are prefixed `sp` because ctl/ is a single
@@ -113,7 +113,7 @@ func spRedundConf(spec string, chunkBlocks uint64) (*pb.RedundConf, error) {
 	}
 }
 
-// registerSp adds the `sp` group and its ten leaves
+// registerSp adds the `sp` group and its eleven leaves
 // (dnvctl.md, `sp` — `ctl/sp.go`).
 func registerSp(root *cobra.Command) {
 	root.AddCommand(group("sp", "storage pools",
@@ -125,6 +125,7 @@ func registerSp(root *cobra.Command) {
 		spSetLevelCmd(),
 		spFindNamesCmd(),
 		spGrowSliceCmd(),
+		spWithdrawGrowCmd(),
 		spInspectSideCmd(),
 		spInspectCmd(),
 	))
@@ -458,6 +459,49 @@ func spGrowSliceCmd() *cobra.Command {
 	flags.Bool("meta", false,
 		"grow the meta group by one ladder step instead of the data group")
 	selectorFlags(flags, "dn")
+	return cmd
+}
+
+// spWithdrawGrowCmd is WithdrawGrow (dnvctl.md, `sp` — `ctl/sp.go`;
+// architecture.md, WithdrawGrow): it takes back the newest grown group of a
+// slice's data list, or of its meta list with --meta, while it is not
+// ready. --grp names the group, the one the status read's row or `sp get`
+// shows, and the gateway refuses any but the newest (CT8).
+func spWithdrawGrowCmd() *cobra.Command {
+	cmd := leaf("withdraw-grow",
+		"take back a grown group that is not ready (WithdrawGrow)",
+		func() (job, error) {
+			rev, err := spRev()
+			if err != nil {
+				return nil, err
+			}
+			sliceId, err := hexOf("slice")
+			if err != nil {
+				return nil, err
+			}
+			grpId, err := hexOf("grp")
+			if err != nil {
+				return nil, err
+			}
+			req := &pb.WithdrawGrowRequest{
+				ClusterName: clusterOf(),
+				SpName:      spOf(),
+				SpRev:       rev,
+				SliceId:     sliceId,
+				IsMeta:      boolOf("meta"),
+				GrpId:       grpId,
+			}
+			return func(
+				ctx context.Context,
+				client pb.GatewayClient,
+			) (any, error) {
+				return client.WithdrawGrow(ctx, req)
+			}, nil
+		})
+	flags := cmd.Flags()
+	flags.String("slice", "", "slice_id of the group")
+	flags.String("grp", "", "grp_id to take back, the newest of its list")
+	flags.Bool("meta", false, "the group is of the meta list")
 	return cmd
 }
 

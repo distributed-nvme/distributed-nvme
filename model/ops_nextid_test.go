@@ -109,7 +109,7 @@ func TestGrowSliceNeverMintsIdZero(t *testing.T) {
 	legs := []Cand{env.dnCand(opsDnC), env.dnCand(opsDnD)}
 	grpId, err := GrowSlice(
 		env.ctx, env.cli, env.cid, opsShard, opsSpId, opsSpName, noExpectRev,
-		opsSliceId, false, opsNotPending, env.cc, legs,
+		opsSliceId, false, opsNotPending, env.cc, legs, 0,
 	)
 	if err != nil {
 		t.Fatalf("GrowSlice: %v", err)
@@ -223,7 +223,7 @@ func TestOpsTakeTheirIdsUpToTheTop(t *testing.T) {
 				return GrowSlice(
 					env.ctx, env.cli, env.cid, opsShard, opsSpId,
 					opsSpName, noExpectRev, opsSliceId, false,
-					opsNotPending, env.cc, legs,
+					opsNotPending, env.cc, legs, 0,
 				)
 			},
 		},

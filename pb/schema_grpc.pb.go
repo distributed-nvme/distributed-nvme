@@ -47,6 +47,7 @@ const (
 	Gateway_UpdateStoragePoolLevel_FullMethodName          = "/Gateway/UpdateStoragePoolLevel"
 	Gateway_FindStoragePoolNames_FullMethodName            = "/Gateway/FindStoragePoolNames"
 	Gateway_GrowSlice_FullMethodName                       = "/Gateway/GrowSlice"
+	Gateway_WithdrawGrow_FullMethodName                    = "/Gateway/WithdrawGrow"
 	Gateway_CreateCntlr_FullMethodName                     = "/Gateway/CreateCntlr"
 	Gateway_DeleteCntlr_FullMethodName                     = "/Gateway/DeleteCntlr"
 	Gateway_UpdateCntlrEnabled_FullMethodName              = "/Gateway/UpdateCntlrEnabled"
@@ -125,6 +126,7 @@ type GatewayClient interface {
 	UpdateStoragePoolLevel(ctx context.Context, in *UpdateStoragePoolLevelRequest, opts ...grpc.CallOption) (*UpdateStoragePoolLevelReply, error)
 	FindStoragePoolNames(ctx context.Context, in *FindStoragePoolNamesRequest, opts ...grpc.CallOption) (*FindStoragePoolNamesReply, error)
 	GrowSlice(ctx context.Context, in *GrowSliceRequest, opts ...grpc.CallOption) (*GrowSliceReply, error)
+	WithdrawGrow(ctx context.Context, in *WithdrawGrowRequest, opts ...grpc.CallOption) (*WithdrawGrowReply, error)
 	CreateCntlr(ctx context.Context, in *CreateCntlrRequest, opts ...grpc.CallOption) (*CreateCntlrReply, error)
 	DeleteCntlr(ctx context.Context, in *DeleteCntlrRequest, opts ...grpc.CallOption) (*DeleteCntlrReply, error)
 	UpdateCntlrEnabled(ctx context.Context, in *UpdateCntlrEnabledRequest, opts ...grpc.CallOption) (*UpdateCntlrEnabledReply, error)
@@ -453,6 +455,16 @@ func (c *gatewayClient) GrowSlice(ctx context.Context, in *GrowSliceRequest, opt
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(GrowSliceReply)
 	err := c.cc.Invoke(ctx, Gateway_GrowSlice_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *gatewayClient) WithdrawGrow(ctx context.Context, in *WithdrawGrowRequest, opts ...grpc.CallOption) (*WithdrawGrowReply, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(WithdrawGrowReply)
+	err := c.cc.Invoke(ctx, Gateway_WithdrawGrow_FullMethodName, in, out, cOpts...)
 	if err != nil {
 		return nil, err
 	}
@@ -931,6 +943,7 @@ type GatewayServer interface {
 	UpdateStoragePoolLevel(context.Context, *UpdateStoragePoolLevelRequest) (*UpdateStoragePoolLevelReply, error)
 	FindStoragePoolNames(context.Context, *FindStoragePoolNamesRequest) (*FindStoragePoolNamesReply, error)
 	GrowSlice(context.Context, *GrowSliceRequest) (*GrowSliceReply, error)
+	WithdrawGrow(context.Context, *WithdrawGrowRequest) (*WithdrawGrowReply, error)
 	CreateCntlr(context.Context, *CreateCntlrRequest) (*CreateCntlrReply, error)
 	DeleteCntlr(context.Context, *DeleteCntlrRequest) (*DeleteCntlrReply, error)
 	UpdateCntlrEnabled(context.Context, *UpdateCntlrEnabledRequest) (*UpdateCntlrEnabledReply, error)
@@ -1068,6 +1081,9 @@ func (UnimplementedGatewayServer) FindStoragePoolNames(context.Context, *FindSto
 }
 func (UnimplementedGatewayServer) GrowSlice(context.Context, *GrowSliceRequest) (*GrowSliceReply, error) {
 	return nil, status.Error(codes.Unimplemented, "method GrowSlice not implemented")
+}
+func (UnimplementedGatewayServer) WithdrawGrow(context.Context, *WithdrawGrowRequest) (*WithdrawGrowReply, error) {
+	return nil, status.Error(codes.Unimplemented, "method WithdrawGrow not implemented")
 }
 func (UnimplementedGatewayServer) CreateCntlr(context.Context, *CreateCntlrRequest) (*CreateCntlrReply, error) {
 	return nil, status.Error(codes.Unimplemented, "method CreateCntlr not implemented")
@@ -1722,6 +1738,24 @@ func _Gateway_GrowSlice_Handler(srv interface{}, ctx context.Context, dec func(i
 	}
 	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
 		return srv.(GatewayServer).GrowSlice(ctx, req.(*GrowSliceRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _Gateway_WithdrawGrow_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(WithdrawGrowRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(GatewayServer).WithdrawGrow(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Gateway_WithdrawGrow_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(GatewayServer).WithdrawGrow(ctx, req.(*WithdrawGrowRequest))
 	}
 	return interceptor(ctx, in, info, handler)
 }
@@ -2636,6 +2670,10 @@ var Gateway_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "GrowSlice",
 			Handler:    _Gateway_GrowSlice_Handler,
+		},
+		{
+			MethodName: "WithdrawGrow",
+			Handler:    _Gateway_WithdrawGrow_Handler,
 		},
 		{
 			MethodName: "CreateCntlr",

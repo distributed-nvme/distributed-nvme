@@ -382,7 +382,8 @@ type reactionOps interface {
 	) error
 	// growSlice is AR6; it returns the new group's grp_id. poolTotal is the
 	// total the primary reported for the pool of this kind, which the op
-	// re-runs the AR6 pending rule against inside its STM (AR2).
+	// re-runs the AR6 pending rule against inside its STM (AR2); now, the
+	// pass's clock, is the new group's grow_epoch.
 	growSlice(
 		ctx context.Context,
 		cid uint64,
@@ -394,6 +395,7 @@ type reactionOps interface {
 		poolTotal uint64,
 		cc *pb.ClusterConf,
 		legs []model.Cand,
+		now uint64,
 	) (uint64, error)
 	// withdrawGrow is AR6's withdrawal of a grown group no array was built
 	// from; it returns the grp_id withdrawn. poolTotal is the total the
@@ -764,13 +766,14 @@ func (o *modelReactionOps) growSlice(
 	poolTotal uint64,
 	cc *pb.ClusterConf,
 	legs []model.Cand,
+	now uint64,
 ) (uint64, error) {
 	// expectRev 0: the worker holds no client token and converges on what
 	// etcd holds (gateway.md GW6, MD6). The gateway passes a real one only
 	// when its caller sent one — GW6 is presence-based — and 0 otherwise.
 	return model.GrowSlice(
 		ctx, o.cli, cid, shard, spId, spName, 0, sliceId, isMeta,
-		poolTotal, cc, legs,
+		poolTotal, cc, legs, now,
 	)
 }
 
@@ -2455,7 +2458,7 @@ func (w *spWorker) runGrow(
 	}
 	grpId, err := w.reactor().ops.growSlice(
 		ctx, w.cid, w.shard, w.spId, w.desired.handle,
-		sliceId, isMeta, poolTotal(usage, isMeta), p.cc, picks,
+		sliceId, isMeta, poolTotal(usage, isMeta), p.cc, picks, p.now,
 	)
 	if err != nil {
 		w.reactionFailed(ctx, kind, err, sliceAttr)

@@ -56,6 +56,53 @@ func WithdrawGrow(
 	poolTotal uint64,
 	cc *pb.ClusterConf,
 ) (uint64, error) {
+	return withdrawGrow(ctx, cli, cid, shard, spId, spName, expectRev,
+		sliceId, isMeta, grpId, poolTotal, false, cc)
+}
+
+// WithdrawGrowAsked is WithdrawGrow as an operator asks for it, through the
+// gateway's WithdrawGrow (architecture.md, WithdrawGrow), which holds no
+// report of the pool: it takes no pool total and skips the guard that the
+// pool does not count the group, since the guard that a leg has no side
+// provisioned proves it already. A provisioned flag only ever turns true,
+// and no cntlr builds a group while a leg of it has every side unprovisioned
+// (cnagent.md CN9), so no array of the group, and no pool, ever held it. Its
+// refusals are WithdrawGrow's, the first group's ("no grown group") among
+// them.
+func WithdrawGrowAsked(
+	ctx context.Context,
+	cli *etcdutil.Client,
+	cid uint64,
+	shard uint32,
+	spId uint64,
+	spName string,
+	expectRev uint64,
+	sliceId uint64,
+	isMeta bool,
+	grpId uint64,
+	cc *pb.ClusterConf,
+) (uint64, error) {
+	return withdrawGrow(ctx, cli, cid, shard, spId, spName, expectRev,
+		sliceId, isMeta, grpId, 0, true, cc)
+}
+
+// withdrawGrow is the transaction of WithdrawGrow and WithdrawGrowAsked;
+// asked skips the pool total's guard.
+func withdrawGrow(
+	ctx context.Context,
+	cli *etcdutil.Client,
+	cid uint64,
+	shard uint32,
+	spId uint64,
+	spName string,
+	expectRev uint64,
+	sliceId uint64,
+	isMeta bool,
+	grpId uint64,
+	poolTotal uint64,
+	asked bool,
+	cc *pb.ClusterConf,
+) (uint64, error) {
 	done := uint64(0)
 	err := cli.RunSTM(ctx, func(s etcdutil.STM) error {
 		done = 0
@@ -93,7 +140,7 @@ func WithdrawGrow(
 		if grp.GetGrpId() != grpId {
 			return fail(opWithdrawGrow, "not the newest group")
 		}
-		if !GrowUncounted(
+		if !asked && !GrowUncounted(
 			slice, isMeta, poolTotal, PoolBlockSize(conf.GetBdevConf()),
 		) {
 			return fail(opWithdrawGrow, "grow not pending")
@@ -139,6 +186,14 @@ func WithdrawGrow(
 		return 0, err
 	}
 	return done, nil
+}
+
+// GroupNotReady reports whether a leg of grp has every side not provisioned
+// yet, which keeps every cntlr from building the group (cnagent.md CN9): its
+// disk node still zeroes the side, or cannot. The gateway's GrowSlice refuses
+// to grow over such a newest grown group, and the status read times one.
+func GroupNotReady(grp *pb.Group) bool {
+	return grpProvisioning(grp)
 }
 
 // grpProvisioning reports whether a leg of grp has every side not
