@@ -1742,7 +1742,10 @@ Measured times are in [the introduction](introduction.md#status-and-limits).
   doc](operations.md#restart-nvme-stas); the order is not tested.
 - **A host keeps a withdrawn path.** A path connected by hand, or to a
   controller named in stacd's own configuration, is never dropped. A cdc
-  cut off from etcd keeps listing a failed-over primary. Such a host
+  cut off from etcd keeps listing a failed-over primary, and so does a cdc
+  whose watch of etcd stopped getting changes while it still gets etcd's
+  progress messages, until its next full read of etcd, at most 300 seconds
+  later; such a cdc also lists the new primary only then. Such a host
   writes to the fenced old primary and gets IO errors in the failover
   window, and, in the cases section 5.1 lists, can lose a write it was
   told was done. While a host still holds the path of a cntlr that was
@@ -1789,21 +1792,28 @@ Measured times are in [the introduction](introduction.md#status-and-limits).
   device, needs only a new pod. State: procedure written, [the operations
   doc](operations.md#a-kubernetes-mount-that-lost-its-last-path), not
   tested; accepted, and no fix is planned.
-- **A Kubernetes node whose cdc list leaves out a cdc drops that cdc's
-  volumes.** The node plugin follows the cdc addresses of its own
-  configuration and no other. When the list leaves out every cdc that serves
-  some pools, the listed cdcs list no path for those pools' volumes, and the
-  plugin drops their paths on that node as after a detach: their mounts
-  fail, and their pods must be stopped and started again, as for a mount
-  that does not follow a new device (above). A listed cdc that
-  is restarted to serve fewer pools does the same to the pools it gives up,
-  until the list names a cdc that took them. A change of the list reaches a
-  plugin only when it starts again. So the order of a change is: start the
-  new cdcs first, while the old ones still serve every pool; then change the
-  list and restart the plugins; only then make an old cdc serve fewer pools
-  or stop it. State: accepted; the list is configuration. Procedure written:
-  [the operations
-  doc](operations.md#change-the-cdc-addresses-of-the-kubernetes-driver).
+- **A host whose cdcs leave out some pools drops those pools' volumes.**
+  Each cdc serves the pools of the ranges it is started with, a range
+  being a fixed group of pools, and nothing checks that every range has a
+  cdc. When every cdc a host follows answers
+  and none serves some pools, because no cdc is started with their range
+  or the host's list leaves out every cdc that serves them, the host drops
+  the paths of those pools' volumes as after a detach. On a host that uses
+  nvme-stas, the volumes' IO then fails and writes not yet flushed are
+  lost. On a Kubernetes node, which follows the cdc addresses of its own
+  configuration and no other, their mounts fail, and their pods must be
+  stopped and started again, as for a mount that does not follow a new
+  device (above). A cdc that is restarted to serve fewer ranges does the
+  same to the pools it gives up, until the hosts follow a cdc that took
+  them. A change of a host's list takes effect only when nvme-stas or the
+  plugin starts again. So the order of a change is: start the
+  new cdcs first, while the old ones still serve every pool; then change
+  every host's list, restarting nvme-stas or the Kubernetes plugins; only
+  then make an old cdc serve fewer pools or stop it. State: accepted; the ranges and the lists are configuration.
+  Procedure written: [the operations
+  doc](operations.md#give-hosts-the-cdc-addresses) for every host and
+  [for the Kubernetes
+  driver](operations.md#change-the-cdc-addresses-of-the-kubernetes-driver).
 - **A cntlr replacement on a one-cntlr pool can cost the volume its path.**
   This happens when the old path's reconnect is refused with "do not
   retry" before the new path joins. It also happens when the new cntlr

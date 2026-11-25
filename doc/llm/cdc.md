@@ -2,7 +2,7 @@
 
 This document owns the `dnv-cdc` binary: package `cdc` and the
 `cmd/dnv-cdc` command, with the discovery service model (DS1 to DS12), the
-etcd watcher (WV1 to WV6), the NVMe/TCP discovery service (NP1 to NP14),
+etcd watcher (WV1 to WV7), the NVMe/TCP discovery service (NP1 to NP14),
 the command (CM1 to CM5), its log records and the intent of the cdc
 integration suite. It leans on `architecture.md` for the system context,
 the etcd data model with the `CdcEntry` key, and the listing rule that
@@ -98,7 +98,8 @@ The shared constants of `dnv-cdc` are one region of the constant block in
   connection expires, and `DefaultCdcZeroKatoTmoMs`, the idle cutoff of a
   connected connection whose KATO is zero (NP10);
 * `DefaultCdcRescanInterval`, the seconds between retries of a failed etcd
-  scan (WV5).
+  scan (WV5), and `DefaultCdcFullReadInterval`, the seconds a watch
+  generation runs before the watcher reads its whole prefix again (WV7).
 
 ### Key helpers this document owns
 
@@ -240,9 +241,11 @@ entries (`architecture.md` [D18]; `architecture.md`, Known limits;
 `operations.md`, A host that keeps a withdrawn path). So
 does an instance whose watch etcd stops serving while etcd still answers:
 the cdc has no check like the worker's registry echo check (`dnv-worker.md`
-VW8 (b)), so only its silence threshold (`dnv-worker.md` EU3) or a restart
-of the instance ends such a watch, and that threshold never ends a watch that
-goes on hearing progress notifications while it loses events.
+VW8 (b)), so the full read of WV7 ends such a watch within
+`DefaultCdcFullReadInterval` seconds, whether it hears nothing from etcd,
+which `etcdutil`'s silence threshold (`dnv-worker.md` EU3) would end only
+after its far longer bound, or goes on hearing progress notifications while
+it loses events, which that threshold never ends.
 Recovery rescans diff against the held state — each re-renders every active
 host and impacts, by the DS6 rule, the hosts whose view moved (WV4) — so
 changes missed during the outage still AEN. A last known state
@@ -362,6 +365,25 @@ answers no host at all, its accept loop not yet started (CM4). The
 WV6. **Read-only.** No puts, no deletes, no leases, no locks, ever. The
 watcher reaches etcd only through the narrow `etcdStore` interface, which
 has no write method, so the rule holds by construction.
+
+WV7. **A full read every few minutes.** A watch generation that has run
+`DefaultCdcFullReadInterval` seconds, 300, ends with no error and no record,
+its etcd watch closed, and the watcher returns to WV1: the rescan installs
+the scanned map and impacts the hosts whose rendered bytes moved (WV4), and
+the next generation watches from the rescan's revision plus one. A full read
+whose scanned map equals the held one, entry for entry, installs nothing and
+renders no host, writes none of the `cdc entry skipped` records its entries
+earned, each written when its entry came, and logs its `cdc scan complete`
+at Debug, as it repeats and changes nothing (`log.md` R6); one that finds a
+change works as a rescan (WV4), its records at their levels. The
+reason: a watch that still hears etcd's progress notifications while it
+loses events is noticed by nothing else, as `etcdutil` ends only a watch
+that hears nothing at all (`dnv-worker.md` EU3), and without the full read
+the cdc would go on listing a failed-over primary, and no host would be
+told, until it was restarted. So a lost change is served, and its hosts
+told, within one interval. A failed rescan retries as WV5 says. What it
+does not do: a range of pools that no cdc serves stays served by none
+(`scope.md` entry "A host whose cdcs leave out some pools").
 
 ## The NVMe/TCP discovery service
 
@@ -709,7 +731,8 @@ decision each marks:
 
 * `cdc starting` and `cdc stopping`, the two ends of the lifecycle (CM4,
   CM5);
-* `cdc scan complete`, a scan or rescan that landed (WV1);
+* `cdc scan complete`, a scan or rescan that landed (WV1), at Debug for a
+  full read that found nothing new (WV7);
 * `cdc watch restarting`, a watch generation ended by an error, a
   compaction included (WV4);
 * `cdc entry applied`, a put or a delete folded into the held state (WV3);
@@ -770,7 +793,7 @@ them, over a real etcd whose watchers scan and watch it: the one the test
 binary starts, except for the case at the largest shape, which starts an etcd
 of its own so that its entries, written and deleted on every run, do not grow
 the shared one's history. In every test but the one that runs `Run`, the
-timers of NP10, WV5 and CM4 run on a fake clock; `Run` builds its instance on
+timers of NP10, WV5, WV7 and CM4 run on a fake clock; `Run` builds its instance on
 the real clock. The entries the real-etcd instances serve are written into
 etcd as the worker writes them: keys by `model`'s helpers, transport lists by
 the listing rule over the pool's cntlrs ([D18]). Those instances serve

@@ -8517,8 +8517,10 @@ The causes:
    Nothing ever drops it.
 2. **A stale cdc**: a cdc that cannot reach etcd serves the records it last
    read, and so does a cdc whose stream of changes from etcd stopped while
-   etcd still answers. nvme-stas keeps a path while any cdc it reads lists
-   it, so one stale twin is enough.
+   etcd still answers, until its next full read of etcd, at most 300
+   seconds later, after which it serves the right records again by itself.
+   nvme-stas keeps a path while any cdc it reads lists it, so one stale
+   twin is enough.
 3. **stacd is stopped**: nothing drops a path until it runs again ([Restart
    nvme-stas](#restart-nvme-stas)).
 

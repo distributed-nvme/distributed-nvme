@@ -23,7 +23,8 @@ import (
 // (WV1/WV2), the DS2 ownership arithmetic, the events that flow through the
 // DS6 impact pass (WV3), the rescan a watch failure forces and the diff it
 // produces (WV4), the retry cadence of a failing Range (WV5) with the held
-// state still served through it (DS10), and the read-only rule (WV6).
+// state still served through it (DS10), the read-only rule (WV6), and the
+// full read every few minutes (WV7).
 
 // watchHostNqn is the host every impact assertion in this file is made for.
 const watchHostNqn = "nqn.2026-01.io.dnv-test:cdc:host1"
@@ -32,6 +33,11 @@ const watchHostNqn = "nqn.2026-01.io.dnv-test:cdc:host1"
 // deliberately NOT the production default, so a watcher that ignored
 // Config.RescanInterval would hang here instead of passing.
 const watchRescan = 5 * time.Second
+
+// watchFullRead is the WV7 full-read cadence the harness configures, not the
+// production default either, and not watchRescan, so a watcher that used the
+// wrong interval would not pass.
+const watchFullRead = 7 * time.Second
 
 // ---------------------------------------------------------------------------
 // Harness
@@ -133,12 +139,13 @@ func newWatchHarness(t *testing.T, ranges ...uint32) *watchHarness {
 	clk := newFakeClock()
 	d := &deps{
 		cfg: Config{
-			Ranges:         ranges,
-			TrType:         common.DefaultCdcTrType,
-			AdrFam:         common.DefaultCdcAdrFam,
-			TrAddr:         "127.0.0.1",
-			TrSvcId:        common.DefaultCdcTrSvcId,
-			RescanInterval: watchRescan,
+			Ranges:           ranges,
+			TrType:           common.DefaultCdcTrType,
+			AdrFam:           common.DefaultCdcAdrFam,
+			TrAddr:           "127.0.0.1",
+			TrSvcId:          common.DefaultCdcTrSvcId,
+			RescanInterval:   watchRescan,
+			FullReadInterval: watchFullRead,
 		},
 		store: store,
 		clk:   clk,
@@ -695,6 +702,12 @@ func TestWatchRestartsOnWatchError(t *testing.T) {
 				t.Errorf("new watch from rev %d, want %d",
 					next.fromRev, rev+1)
 			}
+			// WV7: the ended generation's full-read timer was stopped, so
+			// only the new generation's is armed.
+			h.clk.waitWaiters(t, 1)
+			if got := h.clk.waiterCount(); got != 1 {
+				t.Errorf("%d timers armed under the new watch, want 1", got)
+			}
 		})
 	}
 }
@@ -743,6 +756,109 @@ func TestWatchRescanDiffsMissedChange(t *testing.T) {
 	if got := h.logs.count(msgEntryApplied); got != 0 {
 		t.Errorf("%d cdc entry applied records, want 0: the change was "+
 			"never seen as an event", got)
+	}
+}
+
+// TestWatchFullReadServesALostEvent proves WV7: a watch that stays open and
+// still hears etcd, but lost the event of a change, is ended once its
+// full-read interval passes and not before; the rescan that follows serves
+// the change and tells the connected host, through the WV4 diff, and the
+// next generation watches from the rescan's revision. Nothing failed, so no
+// `cdc watch restarting` record is written.
+func TestWatchFullReadServesALostEvent(t *testing.T) {
+	h := newWatchHarness(t, 0x0)
+	keyA := testKey(0x01, 0x1, 0xa)
+	h.store.set(t, keyA, cdcEntry(
+		"nqn.2026-01.io.dnv-test:cdc:ssa", []string{watchHostNqn},
+		tcpConf("10.0.0.1", "4420"),
+	))
+	h.start()
+	h.logs.waitFor(t, msgScanComplete, 1)
+	first := h.store.nextWatch(t)
+	c := h.attachHost(watchHostNqn)
+	h.assertView(watchHostNqn, 1, 1)
+
+	// A change whose event the open watch never delivers.
+	keyB := testKey(0x02, 0x1, 0xb)
+	h.store.set(t, keyB, cdcEntry(
+		"nqn.2026-01.io.dnv-test:cdc:ssb", []string{watchHostNqn},
+		tcpConf("10.0.0.2", "4420"),
+	))
+	h.clk.waitWaiters(t, 1)
+	h.clk.advance(watchFullRead - time.Second)
+	if got := h.store.rangeCount(); got != 1 {
+		t.Fatalf("%d Range calls before the full-read interval, want 1", got)
+	}
+	h.assertView(watchHostNqn, 1, 1)
+
+	h.clk.advance(time.Second)
+	h.logs.waitFor(t, msgScanComplete, 2)
+	next := h.store.nextWatch(t)
+	h.assertView(watchHostNqn, 2, 2)
+	if !poked(c) {
+		t.Error("the full read did not poke the host's connection")
+	}
+	if want := h.store.currentRev() + 1; next.fromRev != want {
+		t.Errorf("the next watch starts at %d, want %d", next.fromRev, want)
+	}
+	if got := h.logs.count(msgWatchRestarting); got != 0 {
+		t.Errorf("%d cdc watch restarting records, want 0: nothing failed", got)
+	}
+	// The ended generation's etcd watch is closed, and only the new
+	// generation's timer is armed.
+	select {
+	case _, open := <-first.events:
+		if open {
+			t.Error("the ended generation's watch delivered an event")
+		}
+	case <-time.After(5 * time.Second):
+		t.Error("the ended generation's watch was never closed")
+	}
+	h.clk.waitWaiters(t, 1)
+	if got := h.clk.waiterCount(); got != 1 {
+		t.Errorf("%d timers armed under the new watch, want 1", got)
+	}
+}
+
+// TestWatchFullReadThatFindsNothingNewIsQuiet proves WV7's quiet case: a full
+// read whose scan equals the held state installs nothing, so no host is
+// poked and no GENCTR moves, writes none of the skip records its entries
+// earned when they came, and logs its scan record at Debug, as it repeats
+// and changes nothing (log.md R6).
+func TestWatchFullReadThatFindsNothingNewIsQuiet(t *testing.T) {
+	h := newWatchHarness(t, 0x0)
+	h.store.set(t, testKey(0x01, 0x1, 0xa), cdcEntry(
+		"nqn.2026-01.io.dnv-test:cdc:ssa", []string{watchHostNqn},
+		trConf("rdma", common.DefaultCdcAdrFam, "10.0.0.1", "4420"),
+		tcpConf("10.0.0.1", "4421"),
+	))
+	h.store.setRaw(testKey(0x02, 0x1, 0xb), []byte{0xff, 0x01, 0x02})
+	h.start()
+	scans := h.logs.waitFor(t, msgScanComplete, 1)
+	if got := scans[0]["level"]; got != "INFO" {
+		t.Errorf("the first scan's record at %v, want INFO", got)
+	}
+	skips := h.logs.count(msgEntrySkipped)
+	if skips != 2 {
+		t.Fatalf("%d cdc entry skipped records after the first scan, want 2", skips)
+	}
+	h.store.nextWatch(t)
+	c := h.attachHost(watchHostNqn)
+	h.assertView(watchHostNqn, 1, 1)
+
+	h.clk.waitWaiters(t, 1)
+	h.clk.advance(watchFullRead)
+	scans = h.logs.waitFor(t, msgScanComplete, 2)
+	h.store.nextWatch(t)
+	if got := scans[1]["level"]; got != "DEBUG" {
+		t.Errorf("a full read that found nothing new logs at %v, want DEBUG", got)
+	}
+	if got := h.logs.count(msgEntrySkipped); got != skips {
+		t.Errorf("%d cdc entry skipped records after the full read, want %d", got, skips)
+	}
+	h.assertView(watchHostNqn, 1, 1)
+	if poked(c) {
+		t.Error("a full read that found nothing new poked the host")
 	}
 }
 

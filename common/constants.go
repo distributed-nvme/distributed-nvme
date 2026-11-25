@@ -1091,4 +1091,9 @@ const (
 	// meanwhile (DS10) — or, before the first scan has landed, answers no
 	// host at all (CM4).
 	DefaultCdcRescanInterval = 10
+	// DefaultCdcFullReadInterval is the seconds a watch generation runs
+	// before the cdc reads its whole prefix again (WV7): the bound on how
+	// long a change that a watch lost while it still heard etcd stays
+	// unserved.
+	DefaultCdcFullReadInterval = 300
 )

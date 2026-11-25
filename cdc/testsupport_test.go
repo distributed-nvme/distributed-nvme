@@ -72,6 +72,28 @@ func (c *fakeClock) after(d time.Duration) <-chan time.Time {
 	return w.ch
 }
 
+// timer is after with a stop that disarms the waiter, as a stopped timer
+// does.
+func (c *fakeClock) timer(d time.Duration) (<-chan time.Time, func()) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	w := &fakeWaiter{
+		deadline: c.current.Add(d),
+		ch:       make(chan time.Time, 1),
+	}
+	c.waiters = append(c.waiters, w)
+	return w.ch, func() {
+		c.mu.Lock()
+		defer c.mu.Unlock()
+		for i, other := range c.waiters {
+			if other == w {
+				c.waiters = append(c.waiters[:i], c.waiters[i+1:]...)
+				return
+			}
+		}
+	}
+}
+
 // waiterCount is how many timers are armed right now; a test waits on it
 // before advancing, so it never races the goroutine it is driving.
 func (c *fakeClock) waiterCount() int {

@@ -347,14 +347,40 @@ func (r *registry) apply(
 	return out
 }
 
+// holds reports whether the held entry map is the given one, entry for
+// entry: the same keys, each with the same subsystem, allowed hosts and
+// rendered records. A full read that finds so installs nothing (WV7).
+func (r *registry) holds(entries map[entryKey]*entry) bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if len(r.entries) != len(entries) {
+		return false
+	}
+	for k, e := range entries {
+		held, ok := r.entries[k]
+		if !ok || held.nqn != e.nqn || held.numRec != e.numRec ||
+			!bytes.Equal(held.records, e.records) ||
+			len(held.allowed) != len(e.allowed) {
+			return false
+		}
+		for host := range e.allowed {
+			if _, ok := held.allowed[host]; !ok {
+				return false
+			}
+		}
+	}
+	return true
+}
+
 // replace installs a whole new owned entry map, as a (re)scan produces it, and
 // returns the deliveries the diff against the held state earns (WV1, WV4).
 //
 // Every active host is re-rendered rather than only the ones a per-key diff
 // would name: the answer is identical (DS6 impact is defined on rendered
-// bytes), and a rescan is rare enough that the cost is irrelevant next to
-// getting the "changes missed across the watch gap still AEN" rule exactly
-// right. The diff is against what the held state renders, which a dirty
+// bytes), and a rescan that changes the map is rare enough, a full read that
+// finds the same map installing nothing (WV7), that the cost is irrelevant
+// next to getting the "changes missed across the watch gap still AEN" rule
+// exactly right. The diff is against what the held state renders, which a dirty
 // view's body may no longer say, so a dirty view is first rendered against
 // the held state.
 func (r *registry) replace(

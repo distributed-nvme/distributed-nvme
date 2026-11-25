@@ -54,16 +54,18 @@ func (w *watcher) owns(shard uint32) bool {
 	return w.owned[shard]
 }
 
-// run is the WV1/WV4/WV5 loop: scan, watch, and on any watch failure scan
-// again. It returns when ctx ends.
+// run is the WV1/WV4/WV5/WV7 loop: scan, watch, and on any watch failure,
+// or once a watch generation has run its full-read interval, scan again. It
+// returns when ctx ends.
 func (w *watcher) run(ctx context.Context) {
 	prefix := model.CdcEntryPrefix()
+	full := false
 	for {
 		if ctx.Err() != nil {
 			return
 		}
 		genCtx := common.WithTraceId(ctx, common.NewTraceId())
-		rev, ok := w.scan(genCtx, prefix)
+		rev, ok := w.scan(genCtx, prefix, full)
 		if !ok {
 			// WV5: while a failed scan is retried the server keeps answering
 			// from the held state — or, before the first scan has landed,
@@ -79,13 +81,19 @@ func (w *watcher) run(ctx context.Context) {
 		default:
 			close(w.scanned)
 		}
+		// Each generation has its own ctx, so a generation that ends on
+		// the full-read timer (WV7) closes its etcd watch before the scan.
+		watchCtx, cancel := context.WithCancel(genCtx)
 		evCh, errCh := w.deps.store.WatchTyped(
-			genCtx, prefix, rev+1,
+			watchCtx, prefix, rev+1,
 			func() proto.Message { return &pb.CdcEntry{} },
 		)
-		if !w.watch(ctx, evCh, errCh) {
+		again, timed := w.watch(ctx, evCh, errCh)
+		cancel()
+		if !again {
 			return
 		}
+		full = timed
 	}
 }
 
@@ -100,20 +108,35 @@ func (w *watcher) wait(ctx context.Context) bool {
 	}
 }
 
+// skipRecord is one `cdc entry skipped` record a scan owes (WV2), which a
+// full read that finds nothing new does not write (WV7).
+type skipRecord struct {
+	key    string
+	reason string
+	warn   bool
+}
+
 // scan is WV1/WV2: range the whole discovery prefix, keep the owned entries,
 // install them and log `cdc scan complete`. The rescan DIFFS — replace
 // re-renders every active host against the new map and impacts, by the DS6
 // rule, the ones whose bytes moved from what the held state renders — so
-// AENs are not lost across a watch gap (WV4). It reports the revision the
-// scan was served at.
-func (w *watcher) scan(ctx context.Context, prefix string) (int64, bool) {
+// AENs are not lost across a watch gap (WV4). A full read (WV7) that finds
+// the scanned map equal to the held one installs nothing, renders no host,
+// writes none of its skip records, each written when its entry came, and
+// logs its `cdc scan complete` at Debug, as it repeats and changes nothing
+// (log.md R6). It reports the revision the scan was served at.
+func (w *watcher) scan(ctx context.Context, prefix string, full bool) (int64, bool) {
 	kvs, rev, err := w.deps.store.Range(ctx, prefix)
 	if err != nil {
 		return 0, false
 	}
 	entries := make(map[entryKey]*entry, len(kvs))
+	var skips []skipRecord
 	for _, kv := range kvs {
-		k, ok := w.parseKey(ctx, kv.Key)
+		k, ok, malformed := w.keyOf(kv.Key)
+		if malformed {
+			skips = append(skips, skipRecord{kv.Key, skipMalformedKey, true})
+		}
 		if !ok {
 			continue
 		}
@@ -122,14 +145,32 @@ func (w *watcher) scan(ctx context.Context, prefix string) (int64, bool) {
 			// The etcdutil record carries the decode error; this one says
 			// what dnv-cdc did about it (WV2), at Warn: the entry is gone
 			// from every host until an operator mends the record, once per
-			// scan or event (log.md R6).
-			slog.WarnContext(ctx, msgEntrySkipped,
-				slog.String("key", kv.Key),
-				slog.String("reason", skipMalformedValue),
-			)
+			// scan that changes the served state or event (log.md R6).
+			skips = append(skips, skipRecord{kv.Key, skipMalformedValue, true})
 			continue
 		}
-		entries[k] = w.render(ctx, kv.Key, msg)
+		e := newEntry(msg)
+		for _, reason := range e.skips {
+			skips = append(skips, skipRecord{kv.Key, reason, false})
+		}
+		entries[k] = e
+	}
+	if full && w.reg.holds(entries) {
+		slog.DebugContext(ctx, msgScanComplete,
+			slog.Int("entries", len(entries)),
+			slog.Int64("rev", rev),
+		)
+		return rev, true
+	}
+	for _, r := range skips {
+		level := slog.LevelInfo
+		if r.warn {
+			level = slog.LevelWarn
+		}
+		slog.Log(ctx, level, msgEntrySkipped,
+			slog.String("key", r.key),
+			slog.String("reason", r.reason),
+		)
 	}
 	deliver(w.reg.replace(ctx, entries))
 	slog.InfoContext(ctx, msgScanComplete,
@@ -140,19 +181,31 @@ func (w *watcher) scan(ctx context.Context, prefix string) (int64, bool) {
 }
 
 // watch consumes one watch generation (WV3). It returns true when the caller
-// must rescan — a compaction or any other watch error (WV4) — and false when
-// the watcher must stop.
+// must rescan — a compaction or any other watch error (WV4), or the
+// generation's full-read interval passed (WV7), which the second result
+// says — and false when the watcher must stop.
 func (w *watcher) watch(
 	ctx context.Context,
 	evCh <-chan etcdutil.Event,
 	errCh <-chan error,
-) bool {
+) (bool, bool) {
+	fullRead, stop := w.deps.clk.timer(w.deps.cfg.fullReadInterval())
+	defer stop()
 	for {
 		select {
 		case <-ctx.Done():
-			return false
+			return false, false
+		case <-fullRead:
+			// WV7: a watch that still hears etcd's progress notifications
+			// while it loses events is noticed by nothing else, so the
+			// generation ends here and the rescan diffs against the held
+			// state (WV4).
+			return true, true
 		case event, ok := <-evCh:
 			if !ok {
+				// The generation's timer goes before its record, so that no
+				// one who reads the record sees it still armed.
+				stop()
 				// EU3: the error, if any, is already buffered and both
 				// channels are closed, so this never blocks.
 				if err := <-errCh; err != nil {
@@ -161,7 +214,7 @@ func (w *watcher) watch(
 						slog.Bool("compacted", etcdutil.IsCompacted(err)),
 					)
 				}
-				return ctx.Err() == nil
+				return ctx.Err() == nil, false
 			}
 			w.applyEvent(common.WithTraceId(ctx, common.NewTraceId()), event)
 		}
@@ -203,18 +256,27 @@ func (w *watcher) applyEvent(ctx context.Context, event etcdutil.Event) {
 // is the expected key-field filter of architecture.md, dnv-cdc, not an
 // anomaly — while a key that does not parse at all is logged and dropped.
 func (w *watcher) parseKey(ctx context.Context, key string) (entryKey, bool) {
-	cid, shard, spId, ssId, ok := model.ParseCdcEntryKey(key)
-	if !ok {
+	k, ok, malformed := w.keyOf(key)
+	if malformed {
 		slog.WarnContext(ctx, msgEntrySkipped,
 			slog.String("key", key),
 			slog.String("reason", skipMalformedKey),
 		)
-		return entryKey{}, false
+	}
+	return k, ok
+}
+
+// keyOf is parseKey without the record: ok for an owned key, malformed for
+// one that does not parse.
+func (w *watcher) keyOf(key string) (entryKey, bool, bool) {
+	cid, shard, spId, ssId, ok := model.ParseCdcEntryKey(key)
+	if !ok {
+		return entryKey{}, false, true
 	}
 	if !w.owns(shard) {
-		return entryKey{}, false
+		return entryKey{}, false, false
 	}
-	return entryKey{cid: cid, shard: shard, spId: spId, ssId: ssId}, true
+	return entryKey{cid: cid, shard: shard, spId: spId, ssId: ssId}, true, false
 }
 
 // render turns one CdcEntry value into its rendered entry (DS3) and logs the

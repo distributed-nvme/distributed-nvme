@@ -1,5 +1,5 @@
 // Package cdc is dnv-cdc's engine (cdc.md): the etcd watcher over the
-// {p} cdc keys (WV1 to WV6), the per-active-host view registry (DS1 to DS11)
+// {p} cdc keys (WV1 to WV7), the per-active-host view registry (DS1 to DS11)
 // and the NVMe/TCP discovery controller that answers hosts on the well-known
 // discovery NQN (NP1 to NP14), every log page it serves beginning with the
 // record of the cdc itself (DS12).
@@ -89,6 +89,9 @@ type Config struct {
 	// RescanInterval overrides common.DefaultCdcRescanInterval (WV5). Zero
 	// means the default; only the unit tests set it.
 	RescanInterval time.Duration
+	// FullReadInterval overrides common.DefaultCdcFullReadInterval (WV7).
+	// Zero means the default; only the unit tests set it.
+	FullReadInterval time.Duration
 }
 
 // listenAddr is the (TrAddr, TrSvcId) pair as a dial string.
@@ -102,6 +105,14 @@ func (c Config) rescanInterval() time.Duration {
 		return c.RescanInterval
 	}
 	return common.DefaultCdcRescanInterval * time.Second
+}
+
+// fullReadInterval is WV7's cadence.
+func (c Config) fullReadInterval() time.Duration {
+	if c.FullReadInterval > 0 {
+		return c.FullReadInterval
+	}
+	return common.DefaultCdcFullReadInterval * time.Second
 }
 
 // rangeStrings renders the owned ranges for the `cdc starting` record, in the
@@ -119,13 +130,16 @@ func (c Config) rangeStrings() []string {
 // ---------------------------------------------------------------------------
 
 // clock is the package's source of time for every timer the unit tests drive:
-// the pre-Connect and keep-alive deadlines of NP10, the rescan cadence of WV5
-// and the one-minute timer of CM4's first-scan wait all go through it, so
-// those tests drive them without sleeping. NP1's acceptRetryDelay pause and
-// NP13's socketWriteTimeout deadline call time directly (NP1, NP13).
+// the pre-Connect and keep-alive deadlines of NP10, the rescan cadence of WV5,
+// the full-read cadence of WV7 and the one-minute timer of CM4's first-scan
+// wait all go through it, so those tests drive them without sleeping. NP1's
+// acceptRetryDelay pause and NP13's socketWriteTimeout deadline call time
+// directly (NP1, NP13). timer is after with a stop, for a timer whose wait
+// usually ends on something else, as WV7's does at every watch failure.
 type clock interface {
 	now() time.Time
 	after(d time.Duration) <-chan time.Time
+	timer(d time.Duration) (<-chan time.Time, func())
 }
 
 // realClock is the production clock.
@@ -134,6 +148,11 @@ type realClock struct{}
 func (realClock) now() time.Time { return time.Now() }
 
 func (realClock) after(d time.Duration) <-chan time.Time { return time.After(d) }
+
+func (realClock) timer(d time.Duration) (<-chan time.Time, func()) {
+	t := time.NewTimer(d)
+	return t.C, func() { t.Stop() }
+}
 
 // ---------------------------------------------------------------------------
 // Dependencies

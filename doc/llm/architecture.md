@@ -8315,7 +8315,7 @@ many upgrades ago it was formatted, unless its release notes say otherwise.
 `dnv-cdc` serves the NVMe-oF Central Discovery Controller, the well-known
 discovery subsystem `NvmeDiscoveryNqn`, to hosts over NVMe/TCP. `cdc.md`
 owns it: the discovery service model (DS1 to DS12), the etcd watcher (WV1
-to WV6) and the NVMe/TCP discovery service (NP1 to NP14). An instance
+to WV7) and the NVMe/TCP discovery service (NP1 to NP14). An instance
 serves the ranges it is configured with — a range is the shard codes that
 share one first hex digit — by watching the cdc prefix and filtering on
 each key's shard code (`cdc.md` DS2). For each `CdcEntry` it owns — the
@@ -10352,8 +10352,9 @@ document and only pointed to here.
   endpoint (`cdc.md` DS2). A host running nvme-stas whose discovery
   connections include such a twin keeps the old primary's path past the
   fence (Failover). A twin that reaches etcd again catches up by itself
-  (`cdc.md` DS10), and one whose watch etcd stopped serving catches up at a
-  restart, whose first scan comes before it accepts a host (`cdc.md` CM4).
+  (`cdc.md` DS10), and so does one whose watch etcd stopped serving, at its
+  next full read, within `DefaultCdcFullReadInterval` seconds, 300
+  (`cdc.md` WV7).
   A stop of the twin is no way out: a node of the Kubernetes driver holds
   every drop while a cdc of its list cannot be read (`csi.md` CSI15), and
   nvme-stas hosts keep the device of every subsystem they use while every
