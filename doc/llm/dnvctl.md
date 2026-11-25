@@ -422,8 +422,9 @@ never `--enabled false`, whose `false` would be a positional argument,
 which no leaf accepts.
 
 **Defaults.** dnvctl keeps a leaf-flag default of its own only where a spec
-names one: `sp create`'s redundancy (`sp` — `ctl/sp.go`), the transport flags
-wherever they appear, and the value flags of `sp set-level`,
+names one: `sp create`'s redundancy (`sp` — `ctl/sp.go`), `cluster
+get-capacity`'s `--leg-cnt`, which follows it (`cluster` — `ctl/cluster.go`), the transport
+flags wherever they appear, and the value flags of `sp set-level`,
 `cntlr set-enabled`, `ns set-suspended` and `group set-operator-in-charge`.
 A flag default is not a hidden RPC (CT8).
 
@@ -535,7 +536,10 @@ a cluster of many pools it needs a `--timeout` that covers them all.
 every node's recorded extent counts and flags, and what pools of one shape
 can still place, with the limit the cluster reaches first. `--leg-cnt`,
 `--cntlr-cnt` and `--slice-cnt` name the shape, each sent as typed, so a
-zero takes the gateway's default as on `sp create`. It names its cluster
+zero takes the gateway's default as on `sp create`; `--leg-cnt` defaults
+to `MaxAllocLegPerGrp`, the legs of the md-raid1 groups `sp create` makes
+with no `--redund`, so that the answer left at its defaults is for the
+pools `sp create` makes the same way. It names its cluster
 with `--name`, falling back to the global `--cluster`, and carries no
 token, as every read does (CT3).
 

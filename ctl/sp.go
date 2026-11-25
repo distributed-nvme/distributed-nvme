@@ -77,7 +77,7 @@ func spParseLevel(spec string) (pb.SpLevel, error) {
 	return pb.SpLevel(value), nil
 }
 
-// spRedundConf builds the redund_conf arm --redund names. This is the one
+// spRedundConf builds the redund_conf arm --redund names. This is a
 // dnvctl-side default the spec keeps (dnvctl.md, Conventions;
 // architecture.md, Storage pools): `sp create` ALWAYS sends a bdev_conf with
 // a redund_conf, and an unmentioned --redund means raid1 rather than "let the

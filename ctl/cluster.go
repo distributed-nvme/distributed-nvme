@@ -269,10 +269,16 @@ func clusterGetCapacityCmd() *cobra.Command {
 		})
 	clusterNameFlag(cmd)
 	// The defaults are interpolated, spCreateCmd's --slice-cnt rule.
+	// --leg-cnt defaults to the legs of the groups `sp create` makes with
+	// no --redund, raid1's, so that the answer left at its defaults is for
+	// the pools the operator creates the same way; 0 still asks for the
+	// cluster's redundancy.
 	flags := cmd.Flags()
-	flags.Uint32("leg-cnt", 0,
-		"leg_cnt — legs a group has: 2 for RAID1, 1 without redundancy "+
-			"(0 = the cluster's redundancy)")
+	flags.Uint32("leg-cnt", common.MaxAllocLegPerGrp,
+		fmt.Sprintf("leg_cnt — legs a group has: %d for RAID1, 1 without "+
+			"redundancy; the default is what sp create makes with no "+
+			"--redund (0 = the cluster's redundancy)",
+			common.MaxAllocLegPerGrp))
 	flags.Uint32("cntlr-cnt", 0,
 		fmt.Sprintf("cntlr_cnt — cntlrs a pool has (0 = the gateway "+
 			"default, %d)", common.DefaultCntlrCntPerSp))

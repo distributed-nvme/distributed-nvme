@@ -2976,9 +2976,11 @@ hosts.
 made in a cluster, and which limit the cluster reaches first. The shape is
 the number of legs of a group, `--leg-cnt` (2 for RAID1, 1 for a pool with
 no redundancy), the number of cntlrs of a pool, `--cntlr-cnt`, and its
-number of slices, `--slice-cnt`. A flag left out, or 0, takes what a pool
-create takes: the legs of the cluster's own redundancy, and the default
-counts. The answer is under `space`. The CSI driver gives Kubernetes the
+number of slices, `--slice-cnt`. A flag left out takes what a pool
+create takes: two legs a group, as in the RAID1 pool `dnvctl sp create`
+makes with no `--redund`, and the default counts. A `--leg-cnt` of 0
+takes the legs of the cluster's own redundancy, and a count of 0 the
+default. The answer is under `space`. The CSI driver gives Kubernetes the
 same answer for a storage class, the Kubernetes record that names the
 cluster, the legs of a group and the cntlrs of each volume's pool, with
 the class's legs and cntlrs and one slice.

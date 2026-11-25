@@ -30,6 +30,7 @@ import (
 	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/reflect/protoreflect"
 
+	"github.com/distributed-nvme/distributed-nvme/common"
 	"github.com/distributed-nvme/distributed-nvme/pb"
 )
 
@@ -2096,5 +2097,34 @@ func TestBoolFlagDefaults(t *testing.T) {
 		"dn", "create", "--addr", itDnAddr).(*pb.CreateDiskNodeRequest)
 	if node.Disabled {
 		t.Errorf("a bare dn create sent disabled=true, want false")
+	}
+}
+
+// TestCapacityLegCntDefaultIsSpCreates pins the default of `cluster
+// get-capacity --leg-cnt`: the legs of the groups that `sp create` makes
+// with no --redund, so that the capacity answer left at its defaults is for
+// the pools the operator creates the same way (the operations document, The
+// cluster's capacity). An explicit 0 still asks for the cluster's
+// redundancy.
+func TestCapacityLegCntDefaultIsSpCreates(t *testing.T) {
+	sp := runArgv(t, "CreateStoragePool", "sp", "create", "--cntlr-cnt",
+		"2", "--slice-cnt", "1", "--init-ext-cnt", "2",
+		"--slots", "0,1").(*pb.CreateStoragePoolRequest)
+	want := uint32(1)
+	if sp.GetBdevConf().GetRedundConf().GetRedundMdRaid1() != nil {
+		want = common.MaxAllocLegPerGrp
+	}
+	req := runArgv(t, "GetClusterCapacity",
+		"cluster", "get-capacity").(*pb.GetClusterCapacityRequest)
+	if req.GetLegCnt() != want {
+		t.Errorf("get-capacity with no --leg-cnt asks for %d legs, want %d,"+
+			" the legs of a group `sp create` makes with no --redund",
+			req.GetLegCnt(), want)
+	}
+	req = runArgv(t, "GetClusterCapacity",
+		"cluster", "get-capacity", "--leg-cnt", "0").(*pb.GetClusterCapacityRequest)
+	if req.GetLegCnt() != 0 {
+		t.Errorf("get-capacity --leg-cnt 0 asks for %d legs, want 0, the "+
+			"cluster's redundancy", req.GetLegCnt())
 	}
 }
