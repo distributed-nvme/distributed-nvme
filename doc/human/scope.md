@@ -127,7 +127,10 @@ md never trusts an old superblock.
   policy case, each in a run of its own. In the e2e suite's passing run,
   each of its resets of a node guest took that guest's firewall table
   away, as any reboot does, until a loop that ran beside the suite loaded
-  it again, within a minute of the guest's return. The example's drop
+  it again, within a minute of the guest's return. The kit now ships a
+  unit, `deploy/systemd/dnv-filter.service`, that loads the table at boot
+  before the network services set the interfaces up; its load at boot is
+  tested as the operations doc's network section says. The example's drop
   counters, read after each run, showed no dropped packet; a firewall
   table loaded again counted drops only from its new load.
   For the Kubernetes suite the gateway's port was left open to the hosts,

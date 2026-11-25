@@ -15,8 +15,11 @@
 # as root by the steps of the operations doc, The networks, on one machine
 # at a time and after the timer of its step 5, which takes the table away
 # again: `nft -f dnv-filter.nft` replaces this table alone, in one step,
-# and changes no other table. Remove it with
-# `nft delete table inet dnv_filter`. Never flush the whole rule set, as
+# and changes no other table. Once it works there, the kit's unit
+# deploy/systemd/dnv-filter.service loads it from /etc/dnv/dnv-filter.nft
+# at every boot (that doc's step 8). Remove it with
+# `nft delete table inet dnv_filter`, and for good with
+# `systemctl disable --now dnv-filter`. Never flush the whole rule set, as
 # other programs keep tables of their own, Kubernetes and docker among
 # them. The rule drops a host's packet, so a refused connect waits until it
 # times out; the counter shows each one: `nft list table inet dnv_filter`.

@@ -1,0 +1,54 @@
+# dnv: loads dnv's firewall table, the table inet dnv_filter of
+# deploy/nftables/dnv-filter.nft, at boot, so a node that reboots is not
+# open to the hosts until someone loads it by hand (the operations doc, The
+# networks).
+#
+# Install the table, with this machine's addresses and ports in it, as
+# /etc/dnv/dnv-filter.nft, and this unit as
+# /etc/systemd/system/dnv-filter.service, by the steps of the operations
+# doc's "The networks", which load that file under an undo timer first. The
+# kit enables nothing: "systemctl enable --now dnv-filter" loads the table
+# now and at every boot; "systemctl disable --now dnv-filter" removes it for
+# good.
+#
+# It runs before network-pre.target, as the nftables package's own unit
+# does, so the table stands before the network services set the interfaces
+# up and before any dnv program starts: the kit's agents, gateway, worker
+# and cdc start after network-online.target. They do not wait for this unit
+# to succeed: a table that does not load fails the unit, which
+# "systemctl --failed" then lists, and the network and the programs still
+# come up; a missing /etc/dnv/dnv-filter.nft skips it ("condition not met"
+# in "systemctl status dnv-filter"). After a reboot, check both
+# "systemctl status dnv-filter" and "nft list table inet dnv_filter".
+#
+# It runs after the nftables package's unit, when that one is on, since
+# the file that unit loads on Ubuntu starts with "flush ruleset", which would
+# remove dnv's table loaded before it. Better leave that unit off.
+#
+# Reload: "systemctl reload dnv-filter" replaces the table from the file in
+# one step, keeping the old one if the file does not parse. Stop:
+# "systemctl stop dnv-filter" deletes dnv's table alone, a table already
+# gone included; never use the nftables package's own unit for it, whose
+# stop empties the whole rule set, the tables of Kubernetes and docker
+# among them. Nothing stops this unit at shutdown, so the table stands until
+# the machine is off.
+[Unit]
+Description=dnv firewall table (inet dnv_filter)
+DefaultDependencies=no
+Wants=network-pre.target
+Before=network-pre.target
+After=nftables.service
+ConditionPathExists=/etc/dnv/dnv-filter.nft
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+StandardInput=null
+ProtectSystem=full
+ProtectHome=true
+ExecStart=/usr/sbin/nft -f /etc/dnv/dnv-filter.nft
+ExecReload=/usr/sbin/nft -f /etc/dnv/dnv-filter.nft
+ExecStop=-/usr/sbin/nft delete table inet dnv_filter
+
+[Install]
+WantedBy=sysinit.target

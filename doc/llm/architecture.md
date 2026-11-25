@@ -8550,8 +8550,17 @@ beside them in `deploy/`:
   a module, and a module loaded by hand is gone after a reboot.
 * under `deploy/systemd/`, one unit for each daemon on a machine: a
   template for the dn agent with one instance for each disk, and units for
-  the cn agent, the gateway, the worker and the cdc; and an example unit for
-  one etcd member that carries the requirements of the etcd paragraph above.
+  the cn agent, the gateway, the worker and the cdc; an example unit for
+  one etcd member that carries the requirements of the etcd paragraph
+  above; and, no daemon's, `dnv-filter.service`, which loads the
+  firewall table of `deploy/nftables/` ([D19]) from `/etc/dnv/` before
+  network-pre.target and after the nftables package's unit, so before the
+  network services set the interfaces up and before the daemons' units,
+  which start after network-online.target and do not wait for it to
+  succeed, and whose stop deletes that table alone, since the nftables
+  package's unit empties the whole rule set at its stop and its start.
+  Reason: a reboot takes the table away, and a node is open to the hosts
+  until it is loaded again.
 * under `deploy/dnv/`, one config example for each daemon's unit and one
   for `dnvctl`, each a YAML file whose keys are flags of its program; YAML,
   since viper takes a config file's format from its name's extension and

@@ -2753,8 +2753,10 @@ machines, cuts one machine and not every node at once:
    again later.
 6. From the machine that runs `dnvctl`, run `dnvctl cluster get-status`
    and keep what it prints ([Read what is wrong](#read-what-is-wrong)).
-   Then load the table, but only while the timer still waits:
-   `systemctl is-active dnv-filter-undo.timer && nft -f dnv-filter.nft`.
+   Then put the table where the boot will load it from, `mkdir -p
+   /etc/dnv && cp dnv-filter.nft /etc/dnv/dnv-filter.nft`, and load that
+   file, but only while the timer still waits:
+   `systemctl is-active dnv-filter-undo.timer && nft -f /etc/dnv/dnv-filter.nft`.
    It prints `active` and loads the table. If it prints `inactive`, the
    timer has run already and nothing was loaded: start again at step 5.
    A second load replaces the table, and no other table changes. Never
@@ -2792,11 +2794,23 @@ machines, cuts one machine and not every node at once:
    loaded`, the timer has run and taken the table away: start again at
    step 5. Then `nft list table inet dnv_filter` must print the table,
    or start again at step 5. The table does not survive a reboot. To
-   load it at boot, run `nft -f` on the file from a unit of your own,
-   before the dnv programs start. Do not use the nftables package's own unit on a
-   machine where Kubernetes or docker keep tables: on Ubuntu its stop
-   empties the whole rule set, and so does the file its start and its
-   reload load, as the package ships it.
+   load it at boot, copy the kit's `deploy/systemd/dnv-filter.service` to
+   `/etc/systemd/system/dnv-filter.service` and run `systemctl
+   daemon-reload` and `systemctl enable --now dnv-filter`: it loads
+   `/etc/dnv/dnv-filter.nft`, the file step 6 loaded under the timer, now
+   and at every boot, before the network services set the interfaces up
+   and so before any dnv program starts. The dnv programs do not wait for
+   it: after the next reboot check that `systemctl status dnv-filter`
+   reads active and that `nft list table inet dnv_filter` prints the
+   table, since a missing file only skips the unit and a file that does
+   not load fails it, and either way the node is open to the hosts. After
+   a change of the file, load it again under a timer as in steps 5 and 6;
+   `systemctl reload dnv-filter` then loads it the same way.
+   `systemctl stop dnv-filter` deletes the dnv table alone, and
+   `systemctl disable --now dnv-filter` removes it for good. Leave the
+   nftables package's own unit off on every machine with this table: on
+   Ubuntu its start and its reload load a file that empties the whole rule
+   set first, dnv's table among them, and its stop empties it too.
 
 On Kubernetes, the hosts are the Kubernetes nodes that run the tenants'
 pods. The CSI node plugin runs on each of them, on the machine's own
