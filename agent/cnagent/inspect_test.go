@@ -537,3 +537,43 @@ func TestInfoReadsAndRoundsReadNoCounters(t *testing.T) {
 	wantStat(t, flagged.GetIoStats().GetNsIdToIo()[testNs],
 		nsDevName(srv, testNs), 5000)
 }
+
+// TestInspectGrpDryRunOverAHeldArray pins the dry run over an array of the
+// group that a device above holds open, as the pool's concat does at a level
+// that builds thin pools: the real start's stop is refused there and the
+// start waits (forcedStartPass, stopGroupArray), so the dry run says that
+// the stop would be refused and names the step that frees the array; it
+// stops nothing itself. A holders listing that does not answer is a refusal
+// too, since the dry run cannot tell then.
+func TestInspectGrpDryRunOverAHeldArray(t *testing.T) {
+	t.Run("held by the pool", func(t *testing.T) {
+		f := newRepFix(t, allLegs...)
+		f.node.setArrayState(f.mdDev, "broken")
+		f.node.Reset()
+		dry := f.inspect(t, testDataLeg2).GetDryRun()
+		if !dry.GetStopsArray() ||
+			!strings.Contains(dry.GetRefusal(), "is held open by") ||
+			!strings.Contains(dry.GetRefusal(), "NO_THINPOOL") {
+			t.Fatalf("dry run %v, want the stop first, refused for the "+
+				"device that holds the array", dry)
+		}
+		assertNoCall(t, f.node, "cmd mdadm")
+	})
+	t.Run("the holders listing does not answer", func(t *testing.T) {
+		f := newRepFix(t, allLegs...)
+		f.syncup(t, quietLevel(3))
+		f.node.setArrayState(f.mdDev, "broken")
+		holders := "list " + sysfsBlockDir + "/" + strings.TrimPrefix(
+			f.node.mdNode(f.mdDev), "/dev/") + "/holders"
+		f.node.mu.Lock()
+		f.node.failCmdAlways[holders] = "input/output error"
+		f.node.mu.Unlock()
+		f.node.Reset()
+		dry := f.inspect(t, testDataLeg2).GetDryRun()
+		if !strings.Contains(dry.GetRefusal(), "holders could not be read") {
+			t.Fatalf("dry run %v, want a refusal for the unread holders",
+				dry)
+		}
+		assertNoCall(t, f.node, "cmd mdadm")
+	})
+}

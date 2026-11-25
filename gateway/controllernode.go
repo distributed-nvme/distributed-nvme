@@ -368,8 +368,11 @@ func cnDeleteChecks(
 	}
 	if len(cn.GetCntlrPtrList()) != 0 {
 		return nil, errPrecondition(
-			"controller node %q still hosts %d cntlrs: delete or migrate "+
-				"the owning storage pools first",
+			"controller node %q still hosts %d cntlrs: replace each with "+
+				"a cntlr on another controller node (CreateCntlr, then "+
+				"disable the old one and DeleteCntlr it; dnvctl cntlr "+
+				"create, dnvctl cntlr set-enabled, dnvctl cntlr delete), or "+
+				"delete its storage pool, first",
 			req.GetAddrPort(), len(cn.GetCntlrPtrList()))
 	}
 	globalKey := model.CnGlobalKey(cid)

@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"slices"
+	"strings"
 	"time"
 
 	"google.golang.org/grpc/codes"
@@ -292,8 +293,10 @@ func (s *CnAgentServer) inspectMember(
 // the primary leaves a mark waiting while it runs (ensureGroup); one
 // that is there and does not run is stopped first (forcedStartPass), unless
 // it holds a member that is no leg wrapper of this pool, which the real
-// start refuses to stop (MdDetail.strangerErr); a read of the array that
-// failed is the refusal, as it is the real start's error (ensureGroup).
+// start refuses to stop (MdDetail.strangerErr), or a device holds it open
+// (Md.Holders), which makes the real start's stop fail and the start wait;
+// a read of the array that failed is the refusal, as it is the real start's
+// error (ensureGroup).
 // Every refusal an override passes that the checks met is listed, passed or
 // not, so one dry run shows them all (planForcedStart). Every refusal and
 // each listed text is cut to the row text cap as the real start's row is
@@ -322,6 +325,33 @@ func (s *CnAgentServer) forcedStartDryRun(
 			return dry
 		}
 		dry.StopsArray = true
+		// The real start's stop is refused while a device holds the array
+		// open, as the pool's layers above do at a level that builds thin
+		// pools, and the start then waits; the dry run reads the holders as
+		// the re-assembly does (reassemblyRefusal) and says so.
+		holders, err := s.md.Holders(ctx, detail.Dev)
+		if err != nil {
+			dry.Refusal = agent.CutAgentText(fmt.Sprintf(
+				"the array of group %#x: its holders could not be read, so "+
+					"whether its stop would be refused is not known: %v",
+				gp.grpId, err))
+			return dry
+		}
+		if len(holders) > 0 {
+			// The step that frees the array: at a level that builds thin
+			// pools they hold it, and below that level only a device dnv did
+			// not remove, or one outside dnv, can.
+			step := "step the pool's level down to NO_THINPOOL first"
+			if !plan.levelPool {
+				step = "remove that device first, which dnv did not remove " +
+					"or did not make"
+			}
+			dry.Refusal = agent.CutAgentText(fmt.Sprintf(
+				"the array of group %#x is held open by %s, so its stop "+
+					"would be refused and the start would wait: %s",
+				gp.grpId, strings.Join(holders, ", "), step))
+			return dry
+		}
 	}
 	gp.mark = &pb.ForcedStart{LegId: legId, OverrideList: overrides}
 	fp, refusals, err := s.planForcedStart(ctx, gp, look.serves)

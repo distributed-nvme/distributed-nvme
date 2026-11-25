@@ -2822,9 +2822,10 @@ to `disabled` go through `UpdateDiskNodeDisabled` below (and
 
 **DeleteDiskNode** —
 Errors: `NOT_FOUND` cluster or dn; `FAILED_PRECONDITION` while
-`side_ptr_list` is not empty, with `force` too (delete or migrate the
-owning SPs first; a retired leg's side counts, and the message says that
-`DeleteRetiredLeg` frees one, Retired legs); `FAILED_PRECONDITION`,
+`side_ptr_list` is not empty, with `force` too (move the legs off by a
+migration or a repair, or delete the owning SPs or clones first; a retired
+leg's side counts, and the message names `DeleteRetiredLeg`, with the
+dnvctl command that runs it, as the way to free one, Retired legs); `FAILED_PRECONDITION`,
 without `force`, while the node's agent does not prove the node clean
 (below); `ABORTED` for a missing `DnGlobal`, a stale `DnRev` token, or,
 without `force`, a node that changed during the proof.
@@ -2943,7 +2944,10 @@ and `CnGlobal`, with these differences:
   `CreateDiskNode`, so a machine's controller node shares the location of
   its disk nodes unless the operator names others.
 * **DeleteControllerNode**: `FAILED_PRECONDITION` while `cntlr_ptr_list`
-  is not empty, with `force` too. Without `force` it proves the node clean
+  is not empty, with `force` too; the message names the way off, a new
+  cntlr on another controller node (`CreateCntlr`, then the old one
+  disabled and `DeleteCntlr` run, with the dnvctl commands), or the delete
+  of the pool. Without `force` it proves the node clean
   as `DeleteDiskNode` does, through `GetCnInfo` and with no counts to read,
   since a controller node holds no disk: a zero code, an observation and
   the node's stored `CnRev` revision; the deciding STM requires the
@@ -4774,9 +4778,11 @@ make, in its order (a pool being deleted, the level, a clone being
 deleted, the leg, the partial mark when `override_list` does not name
 `PARTIAL`, the group's row in the report reading `OK` or absent),
 else the agent's dry run, its refusal word for word the real start's,
-both cut alike to the row text cap (Live-state reporting) (the refusal of
-an array that runs aside, which is the dry run's own, as the real start
-leaves the mark waiting), or the members it would zero, in order, a
+both cut alike to the row text cap (Live-state reporting) (the refusals
+of an array that runs, of an array a device holds open and of holders
+that could not be read aside, which are the dry run's own, as the real
+start leaves the mark waiting over a running array, fails its stop under
+a holder and reads no holders before its stop), or the members it would zero, in order, a
 member already blank counted among them, the assembly's update and
 whether it stops an array that does not run first; and, beside either,
 the list of every refusal an override passes that the checks met, passed

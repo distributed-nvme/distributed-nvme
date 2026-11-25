@@ -390,7 +390,13 @@ The dry run is a forced start that only says what it would do:
 `dnvctl group inspect --grp <group id> --leg <leg id>`. It says which legs
 the start would wipe, whether it would stop the array first, and its update:
 `uuid`, or `uuid,force-no-bbl` when the start drops the named leg's
-bad-block list. Or it says why the start would refuse, in the same words as
+bad-block list. When a device holds the array open, as the pool's thin
+pool does at a level that builds thin pools, it says that the start's stop
+would be refused and the start would wait, and that a step of the pool's
+level down to `NO_THINPOOL` comes first, or, at that level, that the
+device that holds it must go first; its list of refusals is then empty,
+since the start would stop before its checks. Or it says why the start
+would refuse, in the same words as
 the real start. Beside that, its `refusal_list` lists each refusal an
 override passes that it meets, in this order: a leg a repair took back
 after md wrote onto it (`FORCED_START_OVERRIDE_PARTIAL`, the word
@@ -421,7 +427,8 @@ refusals, and so do its stage `forced` and the end-to-end suite's react
 case when the named leg carries a bad-block list; a start that names one
 override and is refused for another kind is tested only by unit tests:
 those of the cn agent for `older-leg` and `bad-blocks`, and those of the
-gateway for `partial`.
+gateway for `partial`. The dry run over an array that a device holds open
+is tested only by a unit test of the cn agent.
 
 ### Before every forced start
 
@@ -7071,8 +7078,12 @@ Safe steps, in this order, the order the e2e suite's upgrade case ran
 9. Start every gateway and every cdc, `systemctl start dnv-gateway.service
    dnv-cdc.service`, and check the `version` of their start records,
    `gateway starting` and `cdc starting`.
-10. Start the CSI driver from the new release's files, as the upgrade from
-    0.1 below names them, with `kubectl apply -f <file>` for each, which
+10. Build the driver's image from the new release's folder under the name
+    its `deploy/controller.yaml` gives it, `dnv-csi:` and the release's
+    version, and import it into every Kubernetes node's image store, as the
+    CSI tutorial's "The image" does: the new manifests name the new tag,
+    which no node holds yet. Then start the CSI driver from the new
+    release's files, as the upgrade from 0.1 below names them, with `kubectl apply -f <file>` for each, which
     starts the node plugins again, and give the controller plugin back its
     copies: `kubectl -n dnv-csi scale deployment dnv-csi-controller
     --replicas=2`. Their start records carry `version` too.

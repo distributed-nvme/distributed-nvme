@@ -312,8 +312,8 @@ func TestStoredClusterConfZeroIsRefusedByEveryReader(t *testing.T) {
 	cnAddr := fakeAddrPort(t, "sc-cn")
 	startFakeAgent(t, cnAddr, 1<<40)
 	// The node DeleteDiskNode is about, created after every SP above so it
-	// hosts no side: DeleteDiskNode's "delete or migrate the owning storage
-	// pools first" (architecture.md, Disk nodes) is the one refusal that would
+	// hosts no side: DeleteDiskNode's refusal of a node that still hosts
+	// sides (architecture.md, Disk nodes) is the one refusal that would
 	// otherwise hide the conf's. It is created ENABLED, so it carries a capacity
 	// key and its delete is a real MaintainDnCapacity delete rather than a no-op
 	// on an absent key (architecture.md, Capacity index keys).

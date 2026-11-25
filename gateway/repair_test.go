@@ -590,7 +590,7 @@ func repRefusals() []repRefusal {
 	healthyMsg := fmt.Sprintf("leg %d is healthy: use a migration to move it",
 		volDataLegA)
 	boundMsg := fmt.Sprintf("group %d already holds the maximum of %d "+
-		"retired legs: delete one (DeleteRetiredLeg) first",
+		"retired legs: delete one (DeleteRetiredLeg; dnvctl retired-leg delete) first",
 		volDataGrpId, common.MaxRetiredLegPerGrp)
 	workerName := common.WorkerRepName(volSpId, volDataGrpId, repEpoch)
 	badSelector := &pb.NodeSelector{WhiteList: []string{"bad entry"}}
@@ -1106,7 +1106,7 @@ func TestCreateRepairAnswersTheOpsReasons(t *testing.T) {
 		})
 		if msg := volWantCode(t, err, codes.ResourceExhausted); msg !=
 			fmt.Sprintf("group %d already holds the maximum of %d "+
-				"retired legs: delete one (DeleteRetiredLeg) first",
+				"retired legs: delete one (DeleteRetiredLeg; dnvctl retired-leg delete) first",
 				volDataGrpId, common.MaxRetiredLegPerGrp) {
 			t.Errorf("message: got %q", msg)
 		}

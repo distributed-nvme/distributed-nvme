@@ -333,9 +333,10 @@ func dnDeleteChecks(
 	}
 	if len(dn.GetSidePtrList()) != 0 {
 		return nil, errPrecondition(
-			"disk node %q still hosts %d sides: delete or migrate the "+
-				"owning storage pools, or delete their retired legs "+
-				"(DeleteRetiredLeg), first",
+			"disk node %q still hosts %d sides: move each leg off it by a "+
+				"migration or a repair, or delete its storage pool or clone, "+
+				"and delete each retired leg (DeleteRetiredLeg; dnvctl "+
+				"retired-leg delete), first",
 			req.GetAddrPort(), len(dn.GetSidePtrList()))
 	}
 	globalKey := model.DnGlobalKey(cid)

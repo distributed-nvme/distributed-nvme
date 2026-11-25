@@ -204,7 +204,8 @@ func errRepairExists(repName string) error {
 func errRetiredListFull(grpId uint64) error {
 	return errExhausted(
 		"group %d already holds the maximum of %d retired legs: delete one "+
-			"(DeleteRetiredLeg) first", grpId, common.MaxRetiredLegPerGrp)
+			"(DeleteRetiredLeg; dnvctl retired-leg delete) first",
+		grpId, common.MaxRetiredLegPerGrp)
 }
 
 // modelReason is the Reason of the model.ErrPrecondition err carries, or the

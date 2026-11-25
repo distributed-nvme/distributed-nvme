@@ -5432,7 +5432,13 @@ mark waiting over a running array and the read's error ends the real
 start; an array that is there and does not run is stopped first, so the
 reply says so, unless it holds a member that is no leg wrapper of this
 pool, which the real start refuses to stop (`MdDetail.strangerErr`), word
-for word; then the start's checks: the first that does not hold, or else
+for word; and the reply still says it stops the array when a device holds
+the array open (`Md.Holders`, read as the re-assembly reads it), but then
+refuses in words of its own, since the real start's stop fails there and
+the start waits: the refusal names the holders and the step that frees the
+array, the level step where the pool builds thin pools; a listing of the
+holders that does not answer is a refusal too, which says only that; then
+the start's checks: the first that does not hold, or else
 the refusals the request does not pass, make the refusal, word for word the
 real start's, both cut alike to the row text cap (`architecture.md`,
 Live-state reporting), or else the reply names the members it would zero,
