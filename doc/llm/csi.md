@@ -564,6 +564,33 @@ keeps it, as does a mount at the staging path, which an earlier stage made, and
 a mount table that cannot be read, since a missing answer is not an answer that
 nothing is mounted.
 
+An unstage drops the paths only once nothing holds the volume's device: after
+its unmount it opens the device for exclusive use (`osclient.md`,
+OpenExclusive), which the kernel refuses while anything holds the device: any
+mount of it, the one an unmount still tears down while it writes the file
+system's unwritten data included, a copy of the mount that another mount
+namespace keeps, which no mount table the plugin reads shows, and a device
+built over a raw block volume, such as a device mapper, md or bcache device
+the node's own tools made of what a pod wrote there. While the open is refused
+the unstage fails FAILED_PRECONDITION, naming the device as still held, and
+keeps every path and the subsystem in the staged set; a device that is gone
+has no path left to keep. A call that ended first answers its end,
+DEADLINE_EXCEEDED or CANCELED, not a hold it never read: one whose unmount
+outlived it, as the client's command then answers the end of the call
+though the unmount goes on, and one that ended between the unmount and the
+open. Two unstages of one volume never run side by side: one that comes
+while another of the volume runs is ABORTED and touches nothing. A stage that
+fails with a final code drops its paths only after the same open, so a
+device still held keeps them there too. The reason: an unmount takes the
+mount out of the table before it writes the file system's unwritten data,
+which waits while no cntlr serves, so the kubelet's deadline can end the
+call while the unmount still runs, and its next try, reading the table
+alone, would find nothing mounted and drop the paths, and the kernel would
+fail those writes. What it leaves: a volume whose device something else on
+the node holds stays on its node, attached, until that holder goes (Known
+limits); and the lock covers unstages alone, so a stage of the volume is
+not kept from running beside an unstage.
+
 CSI17. **Format only what is blank, mount by binding, repeat for free.** A
 stage of a filesystem volume reads the device's filesystem and partition
 table straight from the device: a device that carries the capability's
@@ -844,7 +871,12 @@ from the controller nodes, ends only once the primary has cut that host's
 nvmet connection, which it cannot while the worker is stopped, as does the
 attach to the other host that Kubernetes asks for meanwhile, and then the
 old host's writes fail and the volume's new pod on the other host reads what
-the old host wrote and writes; eight volumes live at once; a fresh volume
+the old host wrote and writes; a host cut off from every controller node
+keeps a volume's paths while the unmount of its deleted pod still waits to
+write, though the kubelet asks again to let go, and once the cut goes the
+data the pod wrote while cut off reads back on the other host; a host keeps
+a volume's paths while another mount namespace holds a copy of its mount,
+and drops them once the copy goes; eight volumes live at once; a fresh volume
 filled from its first block to its last at the device's speed, while its
 pool grows under it, fails no write and reads back whole; the two controller
 copies lead through two leases, and when the machine of the copy that leads
@@ -1113,6 +1145,32 @@ attach, host0's first failed write and the new pod's start. The taint and the
 cut go, host0 comes back Ready with its node plugin, the controller is scaled
 back to two copies, then every delete, and nothing left.
 
+**unstage.** A pod on host0 writes a 16 MiB file with fsync. host0 is then
+cut off from every controller node, by a firewall table that keeps the
+control-plane guest and the suite's ssh, and only then does the pod write
+16 MiB of random data over the file with no fsync, a write that needs no
+read and no new block, so that data can only be in host0's page cache, and
+the volume's IO waits; host0's dirty page cache is logged. The pod goes, and
+the kubelet's first unstage unmounts and waits to write the data, until the
+kubelet's deadline of two minutes ends the call; within a bound host0's
+node plugin answers a later try ABORTED, as another unstage of the volume
+runs, no unstage has answered OK, and host0 holds the same paths as before
+the cut (CSI16). The staging mounts in host0's mount table are counted
+before the cut, one, and logged while the first unstage waits, since an
+unmount that waits has taken its mount out of the table already. The cut
+goes; within a bound host0 holds no path of the volume and an unstage has
+answered OK, and the claim's pod on host1 reads the data with the digest
+the first pod kept. A second claim's pod then runs on host0, and a process
+on host0 keeps a copy of host0's mounts in a mount namespace of its own, by
+`unshare`, ending by itself after the cut's time limit, as a container that
+keeps a private copy does. The pod goes: the unmount ends at once, the
+staging mount leaves host0's table, but within a bound the plugin answers a
+try FAILED_PRECONDITION naming the device as still held, the kernel having
+refused the exclusive open, no unstage answers OK, and host0 keeps its
+paths; once the copy's process is ended, within a bound host0 holds no path
+of the volume and an unstage has answered OK. Then every delete, and
+nothing left.
+
 **many.** Eight claims and eight pods at once, four per host, each writing
 a pattern and checking it; the cluster holds eight pools; then every
 delete, and nothing left.
@@ -1179,8 +1237,9 @@ shipped and the start cleanup runs, before any guest check, so that a port
 check never judges what a failed run left in place. Then the guest checks:
 passwordless sudo on every guest; on the three Kubernetes guests the
 hostnames and machine-ids distinct (CSI2), native multipath, the memory
-floor, the firewall and timer tools of the machine and detach cases and the
-fio of the fill case on the hosts, and the hosts' identities present and
+floor, the firewall and timer tools of the machine, detach and unstage
+cases, the fio of the fill case and the unstage case's `unshare` on the
+hosts, and the hosts' identities present and
 different; on the node guests
 the agents' tools and modules and this suite's ports free, and on a
 controller-node guest, once nvmet is loaded, the facts the cn agent's start
@@ -1237,6 +1296,20 @@ log, and the conformance test's logs, its plugins' included.
   Cardinality limits). The capacity the driver reports is the gateway's
   answer for one more pool of the class's shape (CSI11), which counts these
   ceilings for that pool, not for the groups the cluster's volumes will grow.
+* **A volume whose device something else holds stays on its node.** The
+  node plugin lets go of a volume only once nothing holds its device
+  (CSI16). A copy of the volume's mount that another container keeps, in a
+  mount namespace of its own, holds it, and so does a device mapper, md or
+  bcache device that the node's own tools build over a raw block volume
+  from what a pod wrote there, as an LVM or md layout the node's rules
+  start by themselves. The plugin ends neither, and no mount table it reads
+  shows the first: each unstage fails FAILED_PRECONDITION naming the device
+  as still held, the kubelet tries again, and the volume stays attached to
+  the node, so no pod with it starts on another node, until the holder goes
+  (`operations.md`, A Kubernetes mount that lost its last path). An unstage
+  whose unmount waits for a cntlr to serve, which keeps the pods' unflushed
+  writes, holds the volume's lock instead: the next tries are ABORTED until
+  it ends, once a cntlr serves (The cases, unstage).
 * **A failover of many volumes at once is measured on the e2e suite's
   many-pools case.** This suite fails over one volume's pool at a time
   (The cases, failover); the cut of a controller node that holds the

@@ -164,7 +164,9 @@ R8. The following events MUST be logged, at the level R9 gives, with the
        output file) — implemented once inside `LimitedOsClient`;
    10. every TCP dial made in the caller's own process (the address, the
        timeout, how long it took) — implemented once inside
-       `LimitedOsClient`.
+       `LimitedOsClient`;
+   11. every exclusive open of a block device made in the caller's own
+       process (full path) — implemented once inside `LimitedOsClient`.
 
 R9. Each logging point emits exactly **one** record per operation, on
     completion, so the record can carry the outcome (exit code, error); a
@@ -174,13 +176,15 @@ R9. Each logging point emits exactly **one** record per operation, on
     record additionally carries an `error` attribute holding the error's
     text. The level follows R6. At Debug: a read that succeeded — a file,
     block, proto, modification-time or device-number read, a directory
-    listing, a dial that connected, an etcd get, range or watch event, a
+    listing, a dial that connected, an exclusive open that was granted, an
+    etcd get, range or watch event, a
     command of the read list, which is `commandReadsOnly`
     (`common/osclient.go`), a check round's stream message — and a leg
     probe's half that succeeded, the probe being a read of the leg's health
     though its first half writes (`ReadLevel`); and a file, proto,
-    modification-time or device-number read or a directory listing that
-    found its path absent, and a device-number read that found no block
+    modification-time or device-number read, a directory listing or an
+    exclusive open that found its path absent, and a device-number read
+    that found no block
     device at its path, since its caller decides by that answer, the CSI
     node plugin's stats call by the second. At Info: a read that failed
     otherwise, every write, every command not on the read list, every
@@ -269,6 +273,8 @@ returned a non-nil error (R9).
   logs `os discard ranges` with `path`, `range_cnt` (the ranges asked
   for), `done` (the ranges discarded), `ranges` (at most the first
   `discardLogRanges`, as `[offset, length]` pairs) and "error?";
+* an exclusive open made in the caller's own process (`OpenExclusive`)
+  logs `os open exclusive` with `path` and "error?";
 * a TCP dial made in the caller's own process (`DialTcp`) logs `os dial`
   with `address` (the "host:port" dialled), `timeout_ms` (the caller's
   timeout), `duration_ms` (how long the dial took) and "error?";

@@ -412,6 +412,15 @@ func (g *crashGate) DiscardRanges(
 	return g.osc.DiscardRanges(ctx, path, ranges)
 }
 
+func (g *crashGate) OpenExclusive(ctx context.Context, path string) error {
+	ok, held := g.enter(ctx, "open exclusive "+path)
+	if !ok {
+		return errCrashEnded
+	}
+	defer g.leave(held)
+	return g.osc.OpenExclusive(ctx, path)
+}
+
 func (g *crashGate) DialTcp(
 	ctx context.Context, address string, timeout time.Duration,
 ) error {

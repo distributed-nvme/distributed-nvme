@@ -151,6 +151,14 @@ type OsClient interface {
 	// "os discard ranges" record covers the whole call.
 	DiscardRanges(ctx context.Context, path string, ranges []DiscardRange) (done int, err error)
 
+	// OpenExclusive opens the block device at path for exclusive use in the
+	// caller's own process, reading nothing, and closes it at once. The
+	// kernel refuses it with EBUSY while any mount of the device is left, in
+	// any mount namespace, or another exclusive opener holds it; a missing
+	// path is an error wrapping fs.ErrNotExist (osclient.md,
+	// OpenExclusive).
+	OpenExclusive(ctx context.Context, path string) (err error)
+
 	// DialTcp opens a TCP connection to address ("host:port") in the
 	// caller's own process, waiting at most timeout for the peer to answer,
 	// and closes it dialHold after it opened, on its own, having returned at
@@ -823,6 +831,28 @@ var ErrDialTimeout = errors.New("timed out")
 // closes before its queue is set up, and one held this long closes in
 // silence. A variable, so the package's tests can see the close.
 var dialHold = 200 * time.Millisecond
+
+func (c *LimitedOsClient) OpenExclusive(ctx context.Context, path string) error {
+	if err := c.sem.Acquire(ctx, 1); err != nil {
+		return err
+	}
+	defer c.sem.Release(1)
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	f, err := os.OpenFile(path, os.O_RDONLY|syscall.O_EXCL, 0)
+	if err == nil {
+		err = f.Close()
+	}
+	// An open that was granted, or that found its path absent, is an answer
+	// the caller decides by, as a read's is (pathReadLevel); a refusal, the
+	// hold the caller acts on, is at Info.
+	if level := pathReadLevel(err); LogEnabled(ctx, level) {
+		attrs := []any{slog.String("path", path)}
+		slog.Log(ctx, level, "os open exclusive", appendErr(attrs, err)...)
+	}
+	return err
+}
 
 func (c *LimitedOsClient) DialTcp(
 	ctx context.Context,

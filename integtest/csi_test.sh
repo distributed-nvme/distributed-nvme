@@ -18,8 +18,8 @@
 #
 #   optional: [--only <case>] [--cleanup-only] [--slice-cnt N] [--keep-logs DIR]
 #
-# Cases, in order: k8s, policy, volume, failover, restart, detach, many, fill,
-# machine, sanity. `--only` picks one.
+# Cases, in order: k8s, policy, volume, failover, restart, detach, unstage,
+# many, fill, machine, sanity. `--only` picks one.
 # Cleanup runs at the START and, on success only, at the END (CSI5): a
 # failing run leaves its pods, pools, processes and work directories in place
 # and dumps diagnostics instead.
@@ -235,6 +235,12 @@ WAIT_NODE_LOST=150
 # for the primary's cut and is repeated with a backoff when its own deadline
 # passes.
 WAIT_DETACH=240
+# The unstage case: the kubelet bounds an unstage call at two minutes, and
+# its next try follows at once; once the cut goes, a path reconnects within
+# the kernel's reconnect delay, 10 s, and the kubelet's waits between tries,
+# which double from half a second, reach about two minutes.
+WAIT_UNSTAGE_HOLD=240
+WAIT_UNSTAGE_END=300
 # How long the detach case keeps the worker stopped once the detach has
 # taken host0 off the list, so that no cn agent cuts: longer than one call
 # of the attacher, whose deadline is 15 s by default, so that the detach is
@@ -263,7 +269,7 @@ FRAME=@@csi-frame@@
 SSH_OPTS=(-o BatchMode=yes -o ConnectTimeout=10 -o ServerAliveInterval=15
 	-o ServerAliveCountMax=4 -o LogLevel=ERROR)
 
-CASES=(k8s policy volume failover restart detach many fill machine sanity)
+CASES=(k8s policy volume failover restart detach unstage many fill machine sanity)
 
 # ---------------------------------------------------------------------------
 # State
@@ -759,6 +765,7 @@ SMOKE_IMAGE_REF="$SMOKE_IMAGE_REF"
 IMAGE_REF="$IMAGE_REF"
 CUT_TABLE="$CUT_TABLE"
 CUT_UNIT="$CUT_UNIT"
+DRIVER_NAME="$DRIVER_NAME"
 DBG_NVMET="$DBG_NVMET"
 DISC_NQN=nqn.2014-08.org.nvmexpress.discovery
 EOF
@@ -863,7 +870,7 @@ listen_addrs() { # <port>
 	return 0
 }
 
-# --- the cuts of a host (csi.md, The cases, machine and detach) ---------------
+# --- the cuts of a host (csi.md, The cases, machine, detach and unstage) ------
 
 # net_cut drops every packet of the machine but the loopback's and ssh's, so
 # that Kubernetes loses the node and the suite keeps its shell, and schedules
@@ -917,42 +924,98 @@ net_cut_state() {
 	return 0
 }
 
-# net_cut_peer drops every packet between this machine and one peer, the
-# control-plane guest, but ssh's, and keeps every other: the node's kubelet
-# and k3s agent lose the API server there, so Kubernetes loses the node, and
-# the node loses the cdc there too, while it keeps its paths to the
-# controller nodes and the suite its ssh. It is the detach case's cut, in
-# the machine case's table and under its timer, so net_uncut and
-# net_cut_state serve both, and it refuses where net_cut does.
-net_cut_peer() { # <secs> <peer ip>
+# net_cut_peer drops every packet between this machine and the peers it
+# names, but ssh's, and keeps every other. The detach case names the
+# control-plane guest: the node's kubelet and k3s agent lose the API server
+# there, so Kubernetes loses the node, and the node loses the cdc there too,
+# while it keeps its paths to the controller nodes and the suite its ssh.
+# The unstage case names every controller node: the node loses every path
+# and keeps Kubernetes. It is the machine case's table and timer, so
+# net_uncut and net_cut_state serve all three, and it refuses where net_cut
+# does.
+net_cut_peer() { # <secs> <peer ip>…
+	local secs=$1 ip in_rules="" out_rules=""
+	shift
 	if ! systemctl is-active --quiet k3s-agent || systemctl is-active --quiet k3s; then
 		echo "net_cut_peer: refused: this guest is not a k3s agent" >&2
 		return 1
 	fi
-	case "$2" in
-	'' | *[!0-9.]*)
-		echo "net_cut_peer: refused: '$2' is no IPv4 address" >&2
+	if [ "$#" -eq 0 ]; then
+		echo "net_cut_peer: refused: no peer named" >&2
 		return 1
-		;;
-	esac
+	fi
+	for ip in "$@"; do
+		case "$ip" in
+		'' | *[!0-9.]*)
+			echo "net_cut_peer: refused: '$ip' is no IPv4 address" >&2
+			return 1
+			;;
+		esac
+		in_rules+="		ip saddr $ip drop
+"
+		out_rules+="		ip daddr $ip drop
+"
+	done
 	net_uncut >/dev/null
-	systemd-run --quiet --unit="$CUT_UNIT" --on-active="$1" \
+	systemd-run --quiet --unit="$CUT_UNIT" --on-active="$secs" \
 		/usr/sbin/nft delete table inet "$CUT_TABLE" || return 1
 	nft -f - <<NFT || return 1
 table inet $CUT_TABLE {
 	chain input {
 		type filter hook input priority -400; policy accept;
 		tcp dport 22 accept
-		ip saddr $2 drop
-	}
+${in_rules}	}
 	chain output {
 		type filter hook output priority -400; policy accept;
 		tcp sport 22 accept
-		ip daddr $2 drop
-	}
+${out_rules}	}
 }
 NFT
 	echo cut
+	return 0
+}
+
+# mount_copy_start keeps a copy of this machine's mounts in a mount namespace
+# of its own, held by a process that sleeps <secs> seconds and ends then by
+# itself: while it lives, every mount it copied, a volume's staging mount
+# among them, is still left to the kernel, as in a container that keeps a
+# private copy of the node's mounts. mount_copy_stop ends it.
+mount_copy_start() { # <secs>
+	local pid
+	mount_copy_stop >/dev/null
+	mkdir -p "$WORK" || return 1
+	setsid unshare --mount --propagation private sleep "$1" >/dev/null 2>&1 </dev/null &
+	pid=$!
+	echo "$pid" >"$WORK/mount-copy.pid"
+	sleep 1
+	if [ "$(readlink "/proc/$pid/ns/mnt" 2>/dev/null)" = "$(readlink /proc/self/ns/mnt)" ] ||
+		! kill -0 "$pid" 2>/dev/null; then
+		echo "mount_copy_start: process $pid holds no mount namespace of its own" >&2
+		return 1
+	fi
+	echo started
+	return 0
+}
+
+mount_copy_stop() {
+	local pid
+	pid=$(cat "$WORK/mount-copy.pid" 2>/dev/null) || {
+		echo none
+		return 0
+	}
+	kill "$pid" 2>/dev/null || true
+	rm -f "$WORK/mount-copy.pid"
+	echo stopped
+	return 0
+}
+
+# staging_mounts prints how many mounts of the host's mount table stand at
+# the kubelet's staging folder of the driver's volumes, its globalmount
+# folder of each, where the node plugin mounts a filesystem volume once per
+# node.
+staging_mounts() {
+	grep -c " /var/lib/kubelet/plugins/kubernetes.io/csi/$DRIVER_NAME/[^ ]*/globalmount " \
+		/proc/self/mountinfo
 	return 0
 }
 
@@ -2173,7 +2236,7 @@ preflight_guests() {
 		assert_eq "$(fact_of "$out" multipath)" Y "host$h: nvme_core.multipath"
 		mem=$(fact_of "$out" mem_total_kib)
 		assert_ge "$mem" 3000000 "host$h: MemTotal in KiB (raise the guest's memory)"
-		missing=$(helper_host "$h" tools nvme uuidgen systemctl udevadm nft systemd-run ss fio) ||
+		missing=$(helper_host "$h" tools nvme uuidgen systemctl udevadm nft systemd-run ss fio unshare) ||
 			die "host$h: listing its tools failed"
 		[ -z "$missing" ] || die "host$h: missing tool(s): $(printf '%s' "$missing" | tr '\n' ' ')"
 		missing=$(helper_host "$h" modules nvme-tcp) || die "host$h: modprobe failed"
@@ -4308,6 +4371,183 @@ not_ready() { # <node name>
 	local st
 	st=$(kc get node "$1" -o 'jsonpath={.status.conditions[?(@.type=="Ready")].status}' 2>/dev/null) || return 1
 	[ -n "$st" ] && [ "$st" != True ]
+}
+
+# The script of the unstage case's first pod: it writes 16 MiB of zeros
+# with fsync, so the file's blocks are on the volume and its pages in
+# host0's page cache; once the suite makes /tmp/go, after host0 is cut off
+# from every controller node, it writes 16 MiB of random data over them
+# with no fsync, a write that needs no read and no new block, so that data
+# is in the page cache alone; and it keeps the data's digest in the
+# container, which the suite reads before the pod goes.
+unstage_writer_script() {
+	cat <<'EOF'
+set -e
+dd if=/dev/zero of=/data/late bs=1M count=16 conv=fsync status=none
+echo done > /tmp/marker
+while [ ! -f /tmp/go ]; do sleep 0.2; done
+dd if=/dev/urandom of=/data/late bs=1M count=16 conv=notrunc status=none
+sha256sum /data/late > /tmp/late.sha
+echo done > /tmp/written
+exec sleep 1000000
+EOF
+}
+
+# The script of the claim's pod on host1: the digest of the data the first
+# pod wrote, read from the volume.
+unstage_check_script() {
+	cat <<'EOF'
+sha256sum /data/late > /tmp/check 2>&1 || true
+echo done > /tmp/marker
+exec sleep 1000000
+EOF
+}
+
+# unstage_replies prints a node plugin's replies to the unstage calls of the
+# last <secs> seconds, one per line: its time, code, duration and error.
+unstage_replies() { # <pod> <secs>
+	kc -n "$DRIVER_NS" logs "$1" -c dnv-csi "--since=${2}s" 2>/dev/null |
+		"$JQ" -R -r 'fromjson? | objects | select(.msg == "csi reply" and (.method // "" | endswith("NodeUnstageVolume"))) | "\(.time) \(.code) \(.duration_ms) ms \(.error // "")"' 2>/dev/null
+}
+
+# unstage_refused answers whether a node plugin has refused an unstage
+# since <t0>, a value of SECONDS, because another unstage of the volume ran;
+# unstage_held whether it has refused one because the volume's device is
+# still held; unstage_done whether an unstage has answered OK.
+unstage_refused() { # <pod> <t0>
+	unstage_replies "$1" $((SECONDS - $2 + 10)) | grep -q ' Aborted .*another unstage of volume'
+}
+
+unstage_held() { # <pod> <t0>
+	unstage_replies "$1" $((SECONDS - $2 + 10)) | grep -q ' FailedPrecondition .*is still held'
+}
+
+unstage_done() { # <pod> <t0>
+	unstage_replies "$1" $((SECONDS - $2 + 10)) | grep -q ' OK '
+}
+
+# paths_gone answers whether a host holds no path of the driver's volumes.
+paths_gone() { # <h>
+	local out
+	out=$(QUIET=1 helper_host "$1" ctrl_addrs "$NQN_CSI:") || return 1
+	[ -z "$out" ]
+}
+
+# case_unstage: the node plugin lets go of a volume, dropping its paths,
+# only once nothing holds its device, and one try at a time (csi.md CSI16).
+# First, a pod on host0 writes 16 MiB over its file while host0 is cut off
+# from every controller node, so the data can be in the page cache alone
+# and the volume's IO waits. The pod goes: the kubelet's first unstage
+# unmounts, which takes the mount out of the table and then waits to write
+# the data, until the kubelet's deadline ends the call; the kubelet's next
+# tries are refused while the first runs, and host0 keeps its paths. The cut
+# goes, the unmount ends, a later try drops the paths, and the claim's pod
+# on host1 reads the data. Second, a process on host0 keeps a copy of
+# host0's mounts in a mount namespace of its own while a second claim's pod
+# goes: the unmount ends at once, but the kernel refuses the exclusive open,
+# so each try answers that the device is still held and the paths stay,
+# until the copy goes.
+case_unstage() {
+	CASE=unstage
+	local pv pv1 before after plugin mounts out t0 dirty want got
+	stage 01 "a claim and a pod on host0 that writes 16 MiB with fsync and waits"
+	claim u0 1Gi Filesystem
+	wait_until "$WAIT_PVC" "claim u0 Bound" pvc_bound u0
+	pv=$(pvc_volume u0)
+	run_pod wu u0 0 Filesystem "$(unstage_writer_script)" /tmp/marker
+	before=$(QUIET=1 helper_host 0 ctrl_addrs "$NQN_CSI:" | sort) ||
+		die "host0: reading its paths failed"
+	[ -n "$before" ] || die "host0 holds no path of $pv"
+	log "  host0's paths of $pv: $(printf '%s' "$before" | tr '\n' ' ')"
+	plugin=$(node_plugin_pod 0) || die "reading host0's node plugin pod failed"
+	[ -n "$plugin" ] || die "host0 has no node plugin pod"
+	# The positive control of the mount read below.
+	mounts=$(QUIET=1 helper_host 0 staging_mounts) || die "host0: reading its mount table failed"
+	assert_eq "$mounts" 1 "host0's staging mounts of the driver's volumes"
+
+	stage 02 "host0 is cut off from every controller node; then the pod writes 16 MiB over its file, with no fsync"
+	CUT_TRIED=1
+	out=$(helper_host 0 net_cut_peer "$CUT_LIMIT" "${CN_IP[@]}") || die "host0: the cut failed: $out"
+	assert_eq "$out" cut "host0: the cut from every controller node"
+	t0=$SECONDS
+	kc_exec wu touch /tmp/go >/dev/null || die "starting the write of pod wu failed"
+	wait_until "$WAIT_SHORT" "pod wu to write" pod_marked wu /tmp/written
+	dirty=$(QUIET=1 ssh_host 0 "awk '/^Dirty:/ {print \$2, \$3}' /proc/meminfo") || dirty="unread"
+	log "  host0's dirty page cache after the write: $dirty"
+	want=$(kc_exec wu cat /tmp/late.sha) || die "reading the digest of pod wu's data failed"
+	[ -n "$want" ] || die "pod wu kept no digest of its data"
+
+	stage 03 "the pod goes; the first unstage waits in its unmount, the next tries are refused, and host0 keeps its paths"
+	delete_pod wu
+	wait_until "$WAIT_UNSTAGE_HOLD" "host0's node plugin to refuse an unstage of $pv while another runs" \
+		unstage_refused "$plugin" "$t0"
+	out=$(unstage_replies "$plugin" $((SECONDS - t0 + 10))) || true
+	printf '%s\n' "$out" | sed 's/^/  unstage reply: /' >&2
+	! printf '%s\n' "$out" | grep -q ' OK ' || die "an unstage of $pv answered OK while host0 was cut off"
+	out=$(call_records "$plugin" $((SECONDS - t0 + 10)) NodeUnstageVolume) || true
+	printf '%s\n' "$out" | sed 's/^/  unstage call: /' >&2
+	after=$(QUIET=1 helper_host 0 ctrl_addrs "$NQN_CSI:" | sort) ||
+		die "host0: reading its paths failed"
+	assert_eq "$after" "$before" "host0's paths of $pv while its unstage waits"
+	# Logged only: the reason a second try that read the mount table alone
+	# would drop the paths.
+	mounts=$(QUIET=1 helper_host 0 staging_mounts) || mounts="unread"
+	log "  host0's staging mounts while the first unstage waits: $mounts"
+	log "  the cut held $((SECONDS - t0)) s"
+
+	stage 04 "the cut goes; the unmount ends, a later unstage drops the paths, and the claim's pod on host1 reads the data"
+	out=$(helper_host 0 net_uncut) || die "host0: the uncut failed: $out"
+	CUT_TRIED=0
+	t0=$SECONDS
+	wait_until "$WAIT_UNSTAGE_END" "host0 to drop every path of $pv" paths_gone 0
+	log "  host0 dropped its paths $((SECONDS - t0)) s after the cut went"
+	# The plugin logs its reply after the drop the wait above saw.
+	wait_until "$WAIT_SHORT" "an unstage of $pv to answer OK" unstage_done "$plugin" "$t0"
+	out=$(unstage_replies "$plugin" $((SECONDS - t0 + 10))) || true
+	printf '%s\n' "$out" | sed 's/^/  unstage reply: /' >&2
+	run_pod ru u0 1 Filesystem "$(unstage_check_script)" /tmp/marker
+	got=$(kc_exec ru cat /tmp/check) || die "reading pod ru's digest failed"
+	assert_eq "$got" "$want" "the data pod wu wrote while host0 was cut off, read on host1"
+	delete_pod ru
+	delete_claim u0
+
+	stage 05 "a second claim and a pod on host0; a process on host0 keeps a copy of host0's mounts"
+	claim u1 1Gi Filesystem
+	wait_until "$WAIT_PVC" "claim u1 Bound" pvc_bound u1
+	pv1=$(pvc_volume u1)
+	run_pod wh u1 0 Filesystem "$(hold_script)"
+	before=$(QUIET=1 helper_host 0 ctrl_addrs "$NQN_CSI:" | sort) ||
+		die "host0: reading its paths failed"
+	[ -n "$before" ] || die "host0 holds no path of $pv1"
+	out=$(helper_host 0 mount_copy_start "$CUT_LIMIT") || die "host0: the mount copy failed: $out"
+	assert_eq "$out" started "host0: a copy of its mounts in a mount namespace of its own"
+
+	stage 06 "the pod goes; each unstage answers that the device is still held, and host0 keeps its paths"
+	t0=$SECONDS
+	delete_pod wh
+	wait_until "$WAIT_UNSTAGE_HOLD" "host0's node plugin to refuse an unstage of $pv1 as its device is held" \
+		unstage_held "$plugin" "$t0"
+	out=$(unstage_replies "$plugin" $((SECONDS - t0 + 10))) || true
+	printf '%s\n' "$out" | sed 's/^/  unstage reply: /' >&2
+	! printf '%s\n' "$out" | grep -q ' OK ' || die "an unstage of $pv1 answered OK while its device was held"
+	after=$(QUIET=1 helper_host 0 ctrl_addrs "$NQN_CSI:" | sort) ||
+		die "host0: reading its paths failed"
+	assert_eq "$after" "$before" "host0's paths of $pv1 while its device is held"
+	mounts=$(QUIET=1 helper_host 0 staging_mounts) || mounts="unread"
+	assert_eq "$mounts" 0 "host0's staging mounts once the unmount is done"
+
+	stage 07 "the copy goes; a later unstage drops the paths"
+	out=$(helper_host 0 mount_copy_stop) || die "host0: ending the mount copy failed: $out"
+	assert_eq "$out" stopped "host0: the mount copy ended"
+	t0=$SECONDS
+	wait_until "$WAIT_UNSTAGE_END" "host0 to drop every path of $pv1" paths_gone 0
+	log "  host0 dropped its paths $((SECONDS - t0)) s after the copy went"
+	wait_until "$WAIT_SHORT" "an unstage of $pv1 to answer OK" unstage_done "$plugin" "$t0"
+
+	stage 08 "delete, and nothing left"
+	delete_claim u1
+	nothing_left
+	log "=== $CASE: PASS"
 }
 
 # case_many: eight claims and eight pods at once, four per host, each

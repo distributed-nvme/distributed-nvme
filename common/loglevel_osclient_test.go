@@ -2,6 +2,8 @@ package common
 
 import (
 	"context"
+	"errors"
+	"io/fs"
 	"log/slog"
 	"net"
 	"os"
@@ -186,6 +188,57 @@ func aBlockDevice() string {
 		}
 	}
 	return ""
+}
+
+// R9: an exclusive open that was granted, or that found its path absent,
+// is an answer at DEBUG, with "error" only for the absent path, which wraps
+// fs.ErrNotExist; a call whose ctx ended opens nothing, logs nothing and
+// gives its slot back.
+func TestOsOpenExclusive(t *testing.T) {
+	dir := t.TempDir()
+	// O_EXCL without O_CREAT on a plain file is not checked by the kernel,
+	// which takes it on a block device alone, so the open is granted.
+	file := filepath.Join(dir, "plain")
+	if err := os.WriteFile(file, []byte("x"), 0o644); err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	client := NewLimitedOsClient(1)
+	for _, tc := range []struct {
+		name, path string
+		absent     bool
+	}{
+		{"a granted open", file, false},
+		{"an absent path", filepath.Join(dir, "missing"), true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			capture := captureLogs(t)
+			err := client.OpenExclusive(context.Background(), tc.path)
+			if tc.absent != errors.Is(err, fs.ErrNotExist) || (!tc.absent && err != nil) {
+				t.Fatalf("OpenExclusive(%s) = %v", tc.path, err)
+			}
+			if got := levelOf(t, capture, "os open exclusive"); got != "DEBUG" {
+				t.Errorf("level %s, want DEBUG", got)
+			}
+			rec := capture.onlyMsg(t, "os open exclusive")
+			if rec["path"] != tc.path || (rec["error"] != nil) != tc.absent {
+				t.Errorf("record %v", rec)
+			}
+		})
+	}
+	capture := captureLogs(t)
+	ended, cancel := context.WithCancel(context.Background())
+	cancel()
+	if err := client.OpenExclusive(ended, file); !errors.Is(err, context.Canceled) {
+		t.Errorf("OpenExclusive on an ended ctx = %v, want context.Canceled", err)
+	}
+	if got := len(capture.withMsg(t, "os open exclusive")); got != 0 {
+		t.Errorf("%d records of an open that did not run", got)
+	}
+	short, cancelShort := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancelShort()
+	if _, err := client.ReadFile(short, file); err != nil {
+		t.Errorf("a call after the opens = %v: an open kept the only slot", err)
+	}
 }
 
 // R9: a dial that connects is a read at DEBUG; a refused one is INFO.

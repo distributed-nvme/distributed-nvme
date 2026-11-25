@@ -8638,8 +8638,8 @@ filesystem volume once on each node that uses it, in a folder of the
 kubelet, and gives each pod of that node that uses the volume this one
 mount: it is the **node's mount** of the volume. When the last pod of the
 volume on a node is gone, the kubelet asks the node plugin to **let go** of
-the volume there: the plugin unmounts the node's mount and drops every path
-of the volume.
+the volume there: the plugin unmounts the node's mount and, once nothing
+holds the volume's device, drops every path of the volume.
 
 Symptom: a pod's IO to its volume fails or waits with no end, in one of two
 ways:
@@ -8715,6 +8715,18 @@ What dnv does alone:
   node waits the same way, as [A Kubernetes machine is
   lost](#a-kubernetes-machine-is-lost) says. So while no cntlr serves, the
   volume stays attached, and no pod can start with it on any node.
+- When the last pod of a mount that waits is gone, the unmount waits too:
+  it must first write what the pods had not flushed. The node plugin keeps
+  every path of the volume until nothing holds the volume's device, which
+  the kernel shows by refusing to open it for exclusive use, however often
+  the kubelet asks it again to let go: it answers each such request with an
+  error. So the writes reach the volume once a cntlr serves again.
+  Anything else on the node that holds the device does the same: a copy of
+  the node's mount that another container keeps, or a device that the
+  node's own tools built over a raw block volume, such as an LVM volume or
+  an md array made of what a pod wrote there. The volume then stays
+  attached to the node until that holder goes ([the scope
+  page](scope.md), section 8).
 
 Safe steps, for a filesystem volume:
 
@@ -8774,10 +8786,17 @@ node's paths to it are not `live`: that is [A fault only a host
 sees](#a-fault-only-a-host-sees). Stop too when step 4 does not end once a
 cntlr serves, or when the new pod's IO still fails. Ask for help.
 
-Tested: not tested. No suite case loses a volume's last path, ends a pod's
-waiting IO with `nvme disconnect -n` or starts a pod over a new device; the
-Kubernetes suite's failover, restart and detach cases keep a path, or detach,
-by design. A unit test of the node plugin checks that a second request to
+Tested: in part. The Kubernetes suite's unstage case cuts a node off from
+every controller node, has a pod write data that can then be in the
+node's page cache alone, deletes the pod, and checks that the node keeps
+its paths while the unmount waits and that the writes reach the volume
+once the cut goes: the mount that waits, and the node plugin's wait before
+it lets go. It also keeps a copy of the node's mounts in another process
+while a pod goes, and checks that the node keeps the volume's paths until
+that copy goes. No suite case makes a dead
+mount, ends a pod's waiting IO with `nvme disconnect -n` or starts a pod
+over a new device; the Kubernetes suite's failover, restart and detach
+cases keep a path, or detach, by design. A unit test of the node plugin checks that a second request to
 make a filesystem volume ready, over a mount that stands, mounts nothing
 again. The CSI tutorial, which the tutorial suite runs, deletes a pod and
 waits until the node shows no path of the volume, the reading of step 4.

@@ -2,8 +2,11 @@ package csi
 
 import (
 	"context"
+	"errors"
+	"io/fs"
 	"log/slog"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/container-storage-interface/spec/lib/go/csi"
@@ -26,6 +29,29 @@ type node struct {
 	follow     *follower
 	mnt        *mounter
 	deviceWait time.Duration
+	// unstaging holds the volumes whose unstage runs, so that a second try
+	// for one volume never runs beside the first (csi.md CSI16).
+	unstagingMu sync.Mutex
+	unstaging   map[string]bool
+}
+
+// tryUnstage claims a volume for one unstage; false when another runs. The
+// release must be called once the claim's call ends.
+func (n *node) tryUnstage(name string) (func(), bool) {
+	n.unstagingMu.Lock()
+	defer n.unstagingMu.Unlock()
+	if n.unstaging[name] {
+		return nil, false
+	}
+	if n.unstaging == nil {
+		n.unstaging = map[string]bool{}
+	}
+	n.unstaging[name] = true
+	return func() {
+		n.unstagingMu.Lock()
+		defer n.unstagingMu.Unlock()
+		delete(n.unstaging, name)
+	}, true
 }
 
 // publishContext is what the node reads of the context the controller
@@ -153,7 +179,7 @@ func (n *node) NodeStageVolume(
 	}
 	n.follow.trigger()
 	if err := n.stageDevice(ctx, staging, cap, dev); err != nil {
-		n.forgetFailedStage(ctx, staging, pc.nqn, err)
+		n.forgetFailedStage(ctx, staging, pc.nqn, dev, err)
 		return nil, err
 	}
 	return &csi.NodeStageVolumeResponse{}, nil
@@ -255,8 +281,15 @@ func (n *node) proveBlank(ctx context.Context, dev string) error {
 // its paths with it. A code after which the stage may still be running
 // keeps it, since the kubelet unstages such a volume itself, and so does a
 // mount at the staging path, which an earlier stage made; a mount table
-// that cannot be read keeps it too.
-func (n *node) forgetFailedStage(ctx context.Context, staging string, nqn string, err error) {
+// that cannot be read keeps it too, and so does a device that something
+// still holds, as an unstage's drop does (heldDevice).
+func (n *node) forgetFailedStage(
+	ctx context.Context,
+	staging string,
+	nqn string,
+	dev string,
+	err error,
+) {
 	switch status.Code(err) {
 	case codes.Unavailable, codes.Canceled, codes.DeadlineExceeded,
 		codes.ResourceExhausted, codes.Aborted:
@@ -266,15 +299,46 @@ func (n *node) forgetFailedStage(ctx context.Context, staging string, nqn string
 	if merr != nil || entry != nil {
 		return
 	}
+	if herr := n.heldDevice(ctx, strings.TrimPrefix(nqn, nqnPrefix), dev); herr != nil {
+		slog.InfoContext(ctx, msgFollowerSyncError,
+			slog.String("nqn", nqn), slog.String("error", herr.Error()))
+		return
+	}
 	if uerr := n.follow.unstage(ctx, nqn); uerr != nil {
 		slog.InfoContext(ctx, msgFollowerSyncError,
 			slog.String("nqn", nqn), slog.String("error", uerr.Error()))
 	}
 }
 
-// NodeUnstageVolume unmounts the staging path, drops every path to the
-// volume's subsystem and forgets it. The subsystem's NQN derives from the
-// volume id, since an unstage carries no context.
+// heldDevice answers whether something still holds a volume's device, so
+// that its paths must stay (csi.md CSI16): nil when the kernel grants an
+// exclusive open of it, or the device is gone and has no path left to keep;
+// otherwise the call's error. The kernel refuses that open while any mount
+// of the device is left, the one an unmount still tears down while it
+// writes the file system's data included, a mount another mount namespace
+// copied, which no table this plugin reads shows, and any other holder,
+// such as a device mapper, md or bcache device built over a raw block
+// volume. A call that ended first answers its end, not a hold it never read.
+func (n *node) heldDevice(ctx context.Context, name string, dev string) error {
+	err := n.mnt.oc.OpenExclusive(ctx, dev)
+	if err == nil || errors.Is(err, fs.ErrNotExist) {
+		return nil
+	}
+	if ctx.Err() != nil {
+		return status.Errorf(status.FromContextError(ctx.Err()).Code(),
+			"volume %q: the call ended before its device %s was read free, "+
+				"so its paths stay: %v", name, dev, err)
+	}
+	return status.Errorf(codes.FailedPrecondition,
+		"volume %q: its device %s is still held, by a mount in some mount "+
+			"namespace, an unmount that still writes, or a device built "+
+			"over it, so its paths stay: %v", name, dev, err)
+}
+
+// NodeUnstageVolume unmounts the staging path and, once nothing holds the
+// volume's device, drops every path to the volume's subsystem and forgets
+// it; one try of a volume runs at a time. The subsystem's NQN derives from
+// the volume id, since an unstage carries no context.
 func (n *node) NodeUnstageVolume(
 	ctx context.Context,
 	req *csi.NodeUnstageVolumeRequest,
@@ -291,14 +355,38 @@ func (n *node) NodeUnstageVolume(
 	if err != nil {
 		return nil, status.Error(codes.NotFound, err.Error())
 	}
+	// One try at a time: a try whose unmount still writes the file system's
+	// data, after the kubelet's deadline ended its call, holds the volume, so
+	// a second try neither unmounts nor drops the paths that data needs.
+	release, ok := n.tryUnstage(name)
+	if !ok {
+		return nil, status.Errorf(codes.Aborted,
+			"another unstage of volume %q runs", name)
+	}
+	defer release()
 	entry, err := n.mnt.mountAt(ctx, staging)
 	if err != nil {
 		return nil, status.Error(codes.Internal, err.Error())
 	}
 	if entry != nil {
 		if err := n.mnt.unmount(ctx, staging); err != nil {
+			// The kubelet's deadline can end the call while the unmount
+			// waits to write the file system's data; the try answers that
+			// end, and the lock above keeps the next tries off until the
+			// unmount is done.
+			if ctx.Err() != nil {
+				return nil, status.Errorf(
+					status.FromContextError(ctx.Err()).Code(),
+					"volume %q: the call ended while its unmount ran, so "+
+						"its paths stay: %v", name, err)
+			}
 			return nil, status.Error(codes.Internal, err.Error())
 		}
+	}
+	// The paths go only once nothing holds the device: an unmount takes the
+	// mount out of the table before it has written the file system's data.
+	if err := n.heldDevice(ctx, name, devicePath(namespaceUuidOf(name))); err != nil {
+		return nil, err
 	}
 	if err := n.follow.unstage(ctx, subsystemNqnOf(name)); err != nil {
 		return nil, status.Error(codes.Internal, err.Error())

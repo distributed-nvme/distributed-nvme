@@ -1349,6 +1349,10 @@ func TestFakeOsClientDefaultsAndOverrides(t *testing.T) {
 	if err := fake.DialTcp(ctx, "192.0.2.1:4420", time.Second); err != nil {
 		t.Errorf("unset DialTcpFn = %v", err)
 	}
+	// An unset OpenExclusiveFn grants the open: nothing holds the device.
+	if err := fake.OpenExclusive(ctx, "/dev/x"); err != nil {
+		t.Errorf("unset OpenExclusiveFn = %v", err)
+	}
 
 	var gotName string
 	var gotArgs []string

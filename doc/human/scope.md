@@ -2263,6 +2263,27 @@ failover's among them.
   a new pod that waits loses no data. The Kubernetes suite's detach case checks
   both waits, with the worker stopped so that no cn agent converges, and passed
   in the lab on 2026-11-20.
+- **A Kubernetes volume stays on a node while something on the node holds
+  its device.** The node plugin is the Kubernetes driver's part on each
+  machine, and the kubelet is Kubernetes' own program there, which asks the
+  node plugin to let go of a volume once no pod on that machine uses it.
+  The node plugin lets go, and drops the volume's paths, only once nothing
+  holds the volume's device, which the kernel shows by refusing to open it
+  for exclusive use. A container can keep a copy of the node's mount of
+  the volume in a set of mounts of its own, and the machine's own tools can
+  build a device over a raw block volume, such as an LVM volume or an md
+  array made of what a pod wrote there; the node plugin can end neither.
+  Each request of the kubelet to let go then fails, naming the device as
+  still held, and the volume stays attached to that machine, so no pod with
+  it starts on another machine, until the holder goes. The same wait holds
+  a volume whose unmount still writes what its pods had not flushed while
+  no cntlr serves; it keeps those writes, and ends once a cntlr serves
+  again ([the operations
+  doc](operations.md#a-kubernetes-mount-that-lost-its-last-path)). State:
+  procedure to write: the steps that find what holds the device. The
+  Kubernetes suite's unstage case makes both the wait for a cntlr and a
+  copy of the mount held by another process; a device built over a raw
+  block volume is not seen in the lab.
 - **A cntlr or a cdc that does not answer holds up a Kubernetes node.** The
   node plugin makes its connects and its reads of the cdcs' answers one at a
   time and bounds each by a few seconds, but no signal ends some waits in

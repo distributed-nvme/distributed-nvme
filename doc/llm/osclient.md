@@ -44,16 +44,19 @@ it.
   children among them, and the archive's write (`dnagent.md` CM6), and for
   persisting the `Local*Path` protobuf state files; and `dnv-csi`'s node
   plugin, for its nvme-cli, blkid, filesystem maker and mount commands, its
-  sysfs and mount table reads, its read of a volume's device link and its
+  sysfs and mount table reads, its read of a volume's device link, its
   direct read of a volume's start before a format (`csi.md`, The node
-  plugin, CSI17). **All** OS command execution, detached child
-  start, directory listing, modification-time read, device-number read,
-  discard, TCP connect made to test whether an address answers (DialTcp)
-  and disk file IO in production code goes through an `OsClient` — never
-  call `os/exec` or `os.ReadFile`/`os.WriteFile`, and never read a
-  directory, stat a path or make such a test connect, directly outside this
-  file. This is what makes the logging rules of `log.md` R8 (its first,
-  second, fifth, sixth, seventh, eighth, ninth and tenth items) enforceable
+  plugin, CSI17) and its exclusive open of a volume's device before it
+  drops the volume's paths (CSI16). **All** OS command execution, detached
+  child start, directory listing, modification-time read, device-number
+  read, discard, TCP connect made to test whether an address answers
+  (DialTcp), exclusive open of a block device made to test whether anything
+  holds it (OpenExclusive) and disk file IO in production code goes through
+  an `OsClient` — never call `os/exec` or `os.ReadFile`/`os.WriteFile`, and
+  never read a directory, stat a path, make such a test connect or such a
+  test open, directly outside this file. This is what makes the logging
+  rules of `log.md` R8 (its first, second, fifth, sixth, seventh, eighth,
+  ninth, tenth and eleventh items) enforceable
   and makes every consumer unit-testable via `FakeOsClient`. There is
   exactly **one** sanctioned exception in production code, recorded under
   "Exported raw helpers and the probe-IO carve-out": the CN11 leg-health
@@ -119,6 +122,10 @@ the method set is exactly the following, each taking the caller's ctx:
 * `DiscardRanges` discards byte ranges of a block device in the caller's own
   process, one open, not exclusive, and one BLKDISCARD per range, and returns how
   many it discarded and the first error (DiscardRanges).
+* `OpenExclusive` opens a block device for exclusive use in the caller's own
+  process and closes it at once; the kernel refuses it while any mount of
+  the device is left or another exclusive opener holds it
+  (OpenExclusive).
 * `DialTcp` opens a TCP connection to an address in the caller's own
   process, waiting at most a timeout the caller passes, and lets it go; an
   address that did not answer within the timeout is an error wrapping
@@ -561,6 +568,27 @@ kernel's one fabrics connect at a time.
 * One `os dial` record covers the call (`log.md`, OS commands and file
   IO).
 
+### OpenExclusive
+
+How the CSI node plugin learns that nothing holds a volume's device before
+it drops the volume's paths (`csi.md` CSI16): an open with `O_EXCL` in the
+caller's own process, which the kernel refuses with EBUSY while a file
+system mounted from the device, in any mount namespace, or another
+exclusive opener holds it, an unmount still writing its file system's data
+among them, and which plain opens do not stop.
+
+* It takes one semaphore slot, checks the ctx error after acquiring it,
+  opens the path read-only with `O_EXCL`, reads nothing and closes it at
+  once, then gives the slot back. The open sends no IO of its own, but the
+  call can still wait, and the ctx bounds none of it: the open waits behind
+  another opener that holds the disk's open lock while it waits, and the
+  close of the last opener writes the device's dirty page cache back, which
+  a raw block volume can have, and which waits while no path serves.
+* A refusal returns the open's error, which wraps `syscall.EBUSY`; a
+  missing path one that wraps `fs.ErrNotExist`.
+* One `os open exclusive` record covers the call (`log.md`, OS commands and
+  file IO).
+
 ### StartDetached
 
 How the gather runs a read that can wait in the kernel (`dnagent.md` CM6):
@@ -695,8 +723,10 @@ One record per call, emitted on completion, under the `msg` strings and
 attributes `log.md` owns (R8, and OS commands and file IO: each `OsClient`
 method emits the "os …" record assigned to it there, and `error` is appended
 only when the error is non-nil), at the log level `log.md` R9 gives. Debug:
-a read that succeeded; a `ReadFile`, `ReadProto`, `ReadMtime`, `ReadDevNo`
-or `ReadDir` that found its path absent (`pathReadLevel`), an error wrapping
+a read that succeeded, and an `OpenExclusive` that was granted, an answer
+its caller decides by though it reads nothing; a `ReadFile`, `ReadProto`,
+`ReadMtime`, `ReadDevNo`, `ReadDir` or `OpenExclusive` that found its path
+absent (`pathReadLevel`), an error wrapping
 `fs.ErrNotExist` that its callers decide by (Interface); a `ReadDevNo` that
 found no block device at its path (`devNoLevel`), by which the CSI node
 plugin tells a block volume from a mounted filesystem on every stats call;
