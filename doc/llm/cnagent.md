@@ -4621,13 +4621,15 @@ cn behavior per level, each holding at that level and above:
 CN20. Reply `agent_reply`, `revision`, `cntlr_info`, `bm_info_list`, and
 the `obs_stamp` and `save_time` of `dnagent.md` SH28.
 
-**`agent_reply` is the sweep's verdict.** It is `ReplyCodeLeftover` iff
+**`agent_reply` is the sweep's verdict.** It is `ReplyCodeLeftover` when
 this cntlr's sweep was not clean — the node still holds an object of this
 sp that the desired state does not want, or one of the enumerations did
-not answer — and zero otherwise. The details list the leftovers by kind
+not answer — and when a row of the build is not as wanted (CN30), and zero
+otherwise. The details list the leftovers by kind
 and name, a bounded number of them with a tail saying how many more,
 plus an "enumeration failed" entry naming each unanswered enumeration,
-at most `maxLeftoverNames` of them, each error cut to `AgentTextMax`, and
+and one naming each row of the build that is not as wanted, with its
+cause (CN30), at most `maxLeftoverNames` of them, each error cut to `AgentTextMax`, and
 a "[+k more failures]" tail for the rest (`architecture.md`, Teardown by
 sweep); the full list goes to the agent log from every pass and every read whose
 verdict is not clean, in the leftover record of `log.md`, Leftovers, so

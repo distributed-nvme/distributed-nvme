@@ -32,8 +32,10 @@ R2. The handler chain is `TraceIdHandler` wrapping a `slog.NewJSONHandler` on
     convention — klog defaults to stderr, kubectl keeps stdout for the
     result a script pipes — and what it buys is that **stdout is the payload
     channel** of every dnv binary: dnvctl's one result document (`dnvctl.md`
-    CT7), and nothing from a running daemon (cobra's own `--help` text is
-    all five ever put there). A consumer that reads stdout alone therefore
+    CT7), and nothing from a running daemon: the five daemons put there
+    only cobra's own `--help` text, its `completion` command's script and
+    their `--version` line, and `dnv-agent check` and `dnv-agent collect`,
+    which run once and are no daemon, their reports. A consumer that reads stdout alone therefore
     gets the result and never a log record. The etcd client's own logger is
     silenced (`zap.NewNop`, in `etcdutil`) so that stderr carries one JSON
     stream and it is dnv's — a daemon that exits on an error prints that

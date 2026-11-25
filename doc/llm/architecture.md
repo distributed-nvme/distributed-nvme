@@ -967,7 +967,9 @@ cntlr, step 1) — whose health it reports from transport liveness, since it
 cannot run the block probe (`cnagent.md` CN11) —, the per-td
 `CnErrorName` and the per-namespace `CnNsDevName` (table → dm-error), and
 the host-facing nvmet objects with every namespace in the inaccessible ANA
-group [D4]. It has
+group [D4], and the connection to each clone source that a cntlr stored on
+the node still names, which a demoted primary keeps (`cnagent.md`
+CN21). It has
 **no** md arrays, pools, thin volumes or raid0s ("cleanup all resources that
 a primary shouldn't have"). For a transfer it also keeps the
 dm-error-backed `CnXferFinalName` and the transfer subsystem counterparts
@@ -8610,7 +8612,8 @@ document and the component documents cite it by its id.
   scanner that touches it blocks in uninterruptible D state — "exit_aio"
   then makes that task unkillable and the node needs a reboot — and (b)
   `dmsetup remove` on it does not succeed. The dn agent therefore suspends
-  nowhere except inside this one window and lets no device outlive it —
+  nowhere except inside this one window and the apply's pause below, and
+  lets no device outlive the window —
   across a restart that finds it suspended, or under a teardown step that
   runs over it — short of a reload that fails and the cases `dnagent.md`,
   Known limits, names; `dnagent.md` DN6 and DN12 are the rules that keep
@@ -8652,7 +8655,12 @@ document and the component documents cite it by its id.
   What is left there is the snapshot quiesce of `cnagent.md` CN14, a
   suspend bracketed around one per-slice snapshot sequence and resumed
   before the pass returns unless that resume fails — otherwise bounded by
-  construction.
+  construction — and the drain before a leg's bitmap read (`cnagent.md`
+  CN27), a suspend and resume of each thin device it waits for. On both
+  agents the apply of a bitmap chunk also pauses the devices that map the
+  dm-clone (Bitmap push protocol, The apply pauses the writers;
+  `agent.ApplySkipRanges`), and resumes them before the apply returns,
+  short of a resume that fails: bounded the same way.
 * **[D13] The DN carries a self-describing dnv disk format; the dn agent
   uses no LVM.** Three reasons keep LVM out. (a) Its label scan reads every
   block device on the node, so any dnv device in a bad state takes the

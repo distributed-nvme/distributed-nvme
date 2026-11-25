@@ -7140,14 +7140,21 @@ caught.
   agent's saves fail the rounds of its objects can answer from reads, and
   those reports count.
 * **After a restart or a handoff, a leg its primary reads missing waits
-  for a converge.** A primary's background read reads a leg whose
-  device-mapper wrapper is absent — one it had to build while the leg's
-  disk node was down, or after its CN rebooted — `MISSING` with no details,
-  which neither sets nor clears (HL2); only its converge's observation
-  reports such a leg `ERROR`. A coordinator that starts after the one that
-  stamped the leg's `err_epoch` therefore has no verdict on the leg, and AR8
-  waits (AR10) until something makes the primary converge, a revision bump
-  of the SP say, and a reply carries that converge's report.
+  for a converge, which comes by the second round.** A primary's
+  background read reads a leg whose device-mapper wrapper is absent — one
+  it had to build while the leg's disk node was down, or after its CN
+  rebooted — `MISSING` with no details, which neither sets nor clears
+  (HL2); only its converge's observation reports such a leg `ERROR`. A
+  coordinator that starts after the one that stamped the leg's `err_epoch`
+  therefore has no verdict on the leg at first, and AR8 waits (AR10). A
+  read names the leg's side, which has no connection, as a converge's work
+  (`cnagent.md` CN30), and a converge names none, so the syncup comes from
+  the first round whose answer is a read's: the child's first round when
+  the node's last answer was a read's, and otherwise its second, which
+  answers from the read the first started; a round that gives no verdict
+  still re-syncs (HL7, RW4). That converge's report gives the verdict. On
+  the lab, with the pool's revision unchanged, the repair came two rounds
+  and one converge after the cntlr's child started.
 * **The hold delays the cntlr requests, and at a failover or a replacement
   of the primary the sides too**
   (RW14, RW22): a side the hold waits for that does not report — one on a

@@ -506,8 +506,11 @@ func (d *Dm) LoadTable(
 // the operation that took it: the dn's cutover window (architecture.md,
 // Migration, src step 2) is bounded by
 // `SuspendSeconds` and ends in a reload — which is what errors the deferred IO
-// instead of replaying it — and the cn's only one is CN14's snapshot
-// quiesce, resumed inside the same converge pass. The namespace suspension
+// instead of replaying it — the cn's are CN14's snapshot quiesce and
+// CN27's drain before a leg's bitmap read, each resumed inside the same
+// converge pass or read, and on both roles the apply of a bitmap chunk
+// pauses its holders and resumes them before it returns (ApplySkipRanges
+// (agent/bitmap.go)). The namespace suspension
 // (architecture.md, Namespace suspend semantics) is a *park*: a reload onto
 // the td's dm-error, live (cnagent.md CN16).
 func (d *Dm) Reload(

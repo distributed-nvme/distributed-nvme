@@ -91,7 +91,11 @@ T4. Minting trace ids is the entry points' job, never the interceptors':
     (`gateway/traceid.go`), which `serverOptions` chains first, upstream of
     the shared pair, so the shared chain adopts the id as it adopts a
     client's and logs the request under it. Each daemon also mints one at startup, for its startup and
-    other process-lifetime records; `dnv-agent` mints one per attempt of a
+    other process-lifetime records, save three records of `dnv-agent`,
+    which carry none: its start record of the versions and its start
+    check, written before its serve mints the startup id, and its signal
+    records, written on the signal context, to which the serve adds no
+    id; `dnv-agent` mints one per attempt of a
     background task, all but two: the cn sweep's background
     "nvme disconnect" runs under the id of the pass that set it going and
     mints one only when that pass had none (`dnagent.md` SH27, `cnagent.md`
