@@ -8429,7 +8429,7 @@ The kit enables no unit, since the start at boot is the operator's choice,
 and for an agent each choice has a cost. The agent of a controller node
 that rebooted fast, started at boot, answers that it is starting, and its
 primaries then keep their role for up to the start hold while their hosts'
-IO waits (`dnv-worker.md` HL8, AR10), an accepted limit of `scope.md`. An
+IO waits (`dnv-worker.md` HL8, AR10), a limit of `scope.md`. An
 agent left off stays stopped after a reboot until the operator starts it,
 and the worker reacts at the pools' thresholds as to a failed node: on a
 controller node, it fails over each primary whose pool has a standby and

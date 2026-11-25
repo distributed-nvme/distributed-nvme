@@ -200,8 +200,11 @@ always sends a piece's position.
   refused for a leg with no health epoch, and a member that md failed when
   the leg went back to its old side is added back from md's record of the
   regions written while it was out, which holds none of these. State: fix
-  later, a way to have md copy the leg again after a forced cancel. Until
-  then this loss comes only from a cancel that the operator forces. The
+  decided for a group with another leg in sync, where md will copy the leg
+  again after a forced cancel, a few seconds of old reads staying until
+  the primary's next converge; accepted for a group with no other leg in
+  sync, where the loss is the one the operator asks for. Until then this
+  loss comes only from a cancel that the operator forces. The
   call also returns before the primary stops using the new side: until the
   primary has taken the cancel, and dropped its path to the new side with
   it, a write can still land on the new side and is then lost with it, in
@@ -463,8 +466,11 @@ the host.
   the path while the volume serves only errors, as at the next failover. A
   Kubernetes volume is attached without a wait for its pool's zeroing, so
   a pod that starts with a new claim can meet this with no failover.
-  State: fix later; the question of how is open. Read from the kernel's
-  code. Seen in the lab, on one controller node and one host, outside
+  State: fix decided: a lab test first settles the way for a host's path.
+  The first way must load on the lab and make the host read "write back",
+  or the second must be proven safe; if neither holds, this entry stays,
+  with the state fix later.
+  Read from the kernel's code. Seen in the lab, on one controller node and one host, outside
   dnv's own steps: a
   host's path to a namespace made by hand over an error device, then moved
   onto a loop device that has a write cache, kept reading as having no
@@ -553,7 +559,9 @@ the host.
   the lab, in the e2e suite at 32 slices, with the paths fenced in no
   order, and shown with md alone: each run that began fencing md's first
   member first lost the last completed write, and each run that began it
-  last kept it. State: accepted, for every case but the late disk node.
+  last kept it. State: accepted, for every case but the late disk node
+  and the worker that restarts or takes the pool over, whose fix is
+  decided (below).
   The first case needs a worker restart, or a worker taking the pool over,
   between the old primary's last report as the primary and the fence of
   the leg md copies from. For an agent that is stopped or cut off from
@@ -565,10 +573,11 @@ the host.
   threshold, the event threshold of any cntlr, 600 seconds at the
   default. A disk node that reports without having fenced needs a second
   fault, and a leg brought into sync needs md to change the array between
-  the primary's last report and the failover. State for a late disk node:
-  fix later. On the lab VMs a late disk node needed no fault at 32 slices.
-  The fix waits for dnv's maintainers to decide whether the wait should
-  grow with the pool.
+  the primary's last report and the failover. State for a late disk node,
+  and for a worker that restarts or takes the pool over: fix decided. A
+  disk node so loaded that it misses its check rounds but still serves,
+  or one slower than the longer wait that fix brings, stays a limit, fix
+  later. On the lab VMs a late disk node needed no fault at 32 slices.
 - **A write can be lost when the paths of a group die one after the
   other.** Silent. A network cut can take every path of a RAID1 group
   away a few seconds apart, with no failover. A write that lands on the
@@ -686,8 +695,8 @@ The entries:
   though the named leg holds their data. State: procedure written,
   [A forced start whose stop failed](operations.md#a-forced-start-whose-stop-failed):
   leave the group as it is, with IO errors over the listed regions alone,
-  or drop the lists by hand with mdadm at the cost it names. Fix later: a
-  call of the gateway that keeps or gives the mark. Forty such stops in the lab
+  or drop the lists by hand with mdadm at the cost it names. Fix decided:
+  the mark will stay after such a start. Forty such stops in the lab
   never failed. A suite case makes one fail on purpose and tries four ways
   from it.
   With the mark still standing, the pool turned down to the level that
@@ -980,7 +989,7 @@ Measured times are in [the introduction](introduction.md#status-and-limits).
 | The network between the control plane and the agents is cut | The data plane keeps serving. The primaries of one cut-off controller node are failed over. The old primary never gets its demotion, and the fence comes after the three-second hold, so hosts that drop the old path inside the hold see a pause, and a host still on it sees IO errors (section 8) and, in the cases section 5.1 lists, can lose a write it was told was done. A cut-off disk node keeps serving its legs to the primary that has them, but it opens no new primary's path, so a failover of a pool with a leg there can leave a group of that pool down (section 6.1). With every agent cut off, the primaries keep serving, but within a few check rounds the worker sets a health epoch on every node, cntlr and side it drives. Then no node is offered for new space, so every pool create, grow and cntlr create is refused, and so is a repair that needs a new leg; every standby leaves the cdc's answer, so a host that follows the cdc drops its paths to the standbys; and no failover or cntlr replacement can follow, since no cntlr or controller node is healthy. A worker cut off from the agents while another worker still reaches some of them can take its pools down (section 6.1). Read from dnv's code; not seen in the lab. | As for a controller node down. | Nothing. Stop a worker that reaches etcd but no agent, while another worker runs (section 6.1). |
 | etcd is down and comes back | The data plane keeps serving. No call and no reaction runs. A worker that cannot write to etcd stops driving its pools about 30 seconds into the outage, and drives again about one grace time after etcd is back. | The worker's flags: `--vote-interval`, 10 at the default, for the 30 seconds, which are three intervals; `--vote-grace-time`, 60, for the wait after. | Nothing. State: procedure written, [while the control plane is down](operations.md#while-the-control-plane-is-down). |
 | etcd's store reaches its quota | The data plane keeps serving. etcd refuses every write but a delete and still serves reads, so no call that writes the state and no reaction runs: each worker stops driving its pools within three vote intervals and does so again each time it starts. Once etcd takes writes again, every worker drives again about one grace time later. | The worker's flags: `--vote-interval`, 10 at the default, three intervals before it stops; `--vote-grace-time`, 60, for the wait after. The cause: etcd's `--quota-backend-bytes`, 2 GiB when not given; the history shrinks only with a compaction, which `--auto-compaction-retention` runs. | Compact, defragment and disarm the alarm: [the steps](operations.md#etcd-refuses-writes-its-store-is-full). |
-| One etcd member of several hangs, or its machine is gone with no TCP reset | The data plane keeps serving. Each worker's writes to that member wait out the worker's etcd call timeout, 10 seconds, so the workers can all stop driving their pools at once, and drive again about one grace time later; no reaction runs meanwhile. Measured at a vote interval of 2 seconds: every worker stopped once, about 11 seconds after a member froze, and a leader frozen for 2 seconds stopped a worker in 3 of 6 runs. At a vote interval of 6 seconds, a leader frozen for 3 seconds stops no worker. | The worker's flags `--vote-interval` and `--vote-grace-time`. At the defaults, 10 and 60, none of this is measured. | Nothing. |
+| One etcd member of several hangs, or its machine is gone with no TCP reset | The data plane keeps serving. Each worker's writes to that member wait out the worker's etcd call timeout, 10 seconds, so the workers can all stop driving their pools at once, and drive again about one grace time later; no reaction runs meanwhile. Measured at a vote interval of 2 seconds: every worker stopped once, about 11 seconds after a member froze, and a leader frozen for 2 seconds stopped a worker in 3 of 6 runs. At a vote interval of 6 seconds, a leader frozen for 3 seconds stops no worker. | The worker's flags `--vote-interval` and `--vote-grace-time`. At the defaults, 10 and 60, none of this is measured. | Nothing. State: fix decided: first a measurement at the default timers, then, if the workers stop there too, a shorter time limit and a second try for the small write each worker makes at a fixed interval to show it is alive. |
 | A worker, the gateway or the cdc is down and comes back | Another worker, when one runs, takes the pools after a bounded window. The gateway has no state. Without the cdc, hosts keep their paths and get no path changes. On a host that uses nvme-stas, this is tested only for an outage of a few seconds. After a longer outage of every cdc the host lists, nvme-stas may drop the paths once the kernel gives up the host's connection to each stopped cdc, after `ctrl_loss_tmo`, 600 seconds at the kernel's default; the volumes' IO then fails and writes not yet flushed are lost. Not seen in the lab. A Kubernetes node keeps its paths while a cdc of its list cannot be reached. | The worker's flags `--vote-interval`, 10 at the default, and `--vote-leave-grace-time`, 25: a dead worker counts as gone after twice the interval, and the change then holds for the leave grace time, about 45 seconds in all. A worker that keeps running and has just given pools away waits for them to stop before it starts any pool that a later change gives it in that time: up to 60 seconds for a request in flight, and 60 more when the hand-over of a list of written blocks to a migration's new side or a clone follows it, so up to about two minutes; read from dnv's code. | Bring the program back. Bring a cdc back at once. On a host where a longer outage of every cdc made nvme-stas drop every path of a volume, unmount its file system and mount it again on the new device, which replays its journal; when the mount fails or the kernel log reports an error, unmount it if it is mounted, check it with its own check tool, and mount it again once the check finds nothing more to repair. A failover during a cdc outage leaves hosts on a withdrawn path (section 6.1). State: procedure written, [while the control plane is down](operations.md#while-the-control-plane-is-down). |
 | An agent restarts | The agent rebuilds its desired state from its local store, the files in which it keeps the desired state it last accepted. The kernel keeps the devices. As soon as the program runs again, the agent answers each check round with "starting", an answer that says it is still rebuilding, and while it does, for the start hold at most, the worker starts no failover, cntlr replacement or leg repair because of that node. A controller node agent that stays stopped for longer than one check interval can have its primaries failed over, as for a controller node that is down. | For a stopped agent, `primary_unhealthy` with two check rounds in a row: its rounds fail at once, so a stop a little longer than one `cntlr_interval`, 2 at the default, can already fail a primary over, and a failover comes about 4 to 8 seconds after the agent stops, at the defaults. For an agent that answers "starting", the start hold: the longest time the worker waits for an agent that is still rebuilding, 120 at the default, counted from its first start even when it stops and starts again while it rebuilds or just after, before a check round has judged it, a cluster setting fixed when the cluster is created (`--start-hold-seconds` of `dnvctl cluster create`). | For a planned restart, the steps in [the operations doc](operations.md#a-planned-restart-of-an-agent). A rebuild longer than the start hold, and a reboot that the worker first sees as an agent that answers "starting", are in section 6.1. |
 | A host reboots | Nothing on dnv's side. nvme-stas or the Kubernetes node plugin, the part of dnv's Kubernetes driver that runs on each Kubernetes node, connects the paths again. | None. | See the host actions in section 7. |
@@ -1052,9 +1061,12 @@ Measured times are in [the introduction](introduction.md#status-and-limits).
   for metadata that thin_check passes, in a slice of one meta group: the
   level steps, the names of the devices involved, thin_check and
   thin_repair onto a new device, and its copy back over the meta group's
-  device, its array in a RAID1 pool. Fix later: a repair of metadata that
-  thin_check finds damaged, or that spans more than one meta group, since
-  no way is tried yet; for those the procedure says to stop.
+  device, its array in a RAID1 pool. Fix decided for a pool with the mark
+  whose metadata thin_check passes, however many meta groups it spans: the
+  primary will check it and clear the mark by itself. Fix later: a repair
+  of metadata that thin_check finds damaged, since no way is tried yet; for
+  it, and until the decided fix for metadata that spans more than one meta
+  group, the procedure says to stop.
   Seen in the lab: a pool with the mark opened read-only, a failed pool opened
   again as writable, and a full one became writable after its metadata grew. A
   suite case repairs by hand a pool whose metadata needs a check, one whose
@@ -1192,8 +1204,9 @@ Measured times are in [the introduction](introduction.md#status-and-limits).
   it. A side on a disk node loops the same way, as a migration's new side
   does when it cannot connect to the old side after the cutover. The loop
   runs one converge of the cntlr or side at a time, with one interval
-  between two, and the node's other cntlrs and sides go on. State:
-  accepted. Not seen in the lab.
+  between two, and the node's other cntlrs and sides go on. State: fix
+  decided for a primary whose rows read error this way; accepted for a
+  side on a disk node. Not seen in the lab.
 - **A host's connection that does not end takes the subsystem's volumes off
   that controller node.** Where the cn agent ends connections (section 5.4),
   each converge ends the connections of hosts that are off a subsystem's
@@ -1744,8 +1757,8 @@ Measured times are in [the introduction](introduction.md#status-and-limits).
   agent of a rebooted controller node answers "starting" before the
   failover has begun, as after a fast reboot or when a worker has just
   taken over the pool, each primary on the node keeps its role for up to
-  the start hold while its hosts' IO waits. State: accepted; the start
-  hold bounds the wait. Not seen in the lab.
+  the start hold while its hosts' IO waits. State: fix decided. Not seen
+  in the lab.
 - **A machine that holds a pool's primary and a leg of a group stops the
   group when it stops.** A new pool keeps its legs out of the location of
   its first primary while another location has room, and a node's location
@@ -2300,7 +2313,7 @@ failover's among them.
   one of three builds of 64 pools at once, on a pool that had finished
   building and then failed over twice while the other pools still built, the
   second time while the disk nodes were still opening its paths. State: fix
-  later; not decided yet.
+  decided.
 - **Creating many volumes at once can fail over volumes that are already
   built.** A controller node that builds many new primaries at once can
   answer the worker's check rounds of the primaries it has finished with
@@ -2314,8 +2327,9 @@ failover's among them.
   and in one build the pool made before the others
   ([the introduction](introduction.md#status-and-limits) has the
   numbers). A Kubernetes cluster that creates many volumes at once has this
-  shape. State: fix later; whether the threshold or the build should change
-  is not decided yet.
+  shape. State: fix decided: the thresholds stay, and the reads of the
+  primaries a controller node has built will no longer wait behind its
+  builds, in the way a measurement of the cause shows.
 - **A controller node that comes back after a network cut fails a host's
   writes for a few seconds.** While the node is cut off, the failover moves
   its primaries to other controller nodes and the disk nodes fence its
@@ -2329,7 +2343,7 @@ failover's among them.
   the fence" says; the state of those reads is fix decided. The e2e suite's many-pools
   case shows it at 32 and 64 pools
   ([the introduction](introduction.md#status-and-limits) has the
-  numbers). State: fix later; the way is not decided yet.
+  numbers). State: fix decided.
 - **Clocks can hold the reactions.** Two clocks count. A worker's clock:
   a health epoch is the clock of the worker that set it, and every
   threshold compares it with the clock of the worker that reads it. When
