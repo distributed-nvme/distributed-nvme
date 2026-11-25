@@ -2798,8 +2798,10 @@ machines, cuts one machine and not every node at once:
    `/etc/systemd/system/dnv-filter.service` and run `systemctl
    daemon-reload` and `systemctl enable --now dnv-filter`: it loads
    `/etc/dnv/dnv-filter.nft`, the file step 6 loaded under the timer, now
-   and at every boot, before the network services set the interfaces up
-   and so before any dnv program starts. The dnv programs do not wait for
+   and at every boot, before the system's network services set the
+   interfaces up and so before any dnv program starts. An initramfs that
+   sets the network up, as dracut's does on Ubuntu 26.04, gives the machine
+   its address a moment earlier, while no dnv program runs. The dnv programs do not wait for
    it: after the next reboot check that `systemctl status dnv-filter`
    reads active and that `nft list table inet dnv_filter` prints the
    table, since a missing file only skips the unit and a file that does

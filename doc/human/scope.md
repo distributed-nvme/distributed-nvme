@@ -129,8 +129,10 @@ md never trusts an old superblock.
   away, as any reboot does, until a loop that ran beside the suite loaded
   it again, within a minute of the guest's return. The kit now ships a
   unit, `deploy/systemd/dnv-filter.service`, that loads the table at boot
-  before the network services set the interfaces up; its load at boot is
-  tested as the operations doc's network section says. The example's drop
+  before any dnv program starts. A check through a reboot of a lab guest
+  showed the table loaded before the system's network services set the
+  interfaces up and well before the network came online; that guest's
+  initramfs had taken its address a second before. The example's drop
   counters, read after each run, showed no dropped packet; a firewall
   table loaded again counted drops only from its new load.
   For the Kubernetes suite the gateway's port was left open to the hosts,

@@ -8555,7 +8555,9 @@ beside them in `deploy/`:
   above; and, no daemon's, `dnv-filter.service`, which loads the
   firewall table of `deploy/nftables/` ([D19]) from `/etc/dnv/` before
   network-pre.target and after the nftables package's unit, so before the
-  network services set the interfaces up and before the daemons' units,
+  system's network services set the interfaces up, though an initramfs
+  that sets the network up gives the machine its address earlier, and
+  before the daemons' units,
   which start after network-online.target and do not wait for it to
   succeed, and whose stop deletes that table alone, since the nftables
   package's unit empties the whole rule set at its stop and its start.
