@@ -1194,8 +1194,8 @@ its copy is gone.
 When to stop: you cannot tell which retired leg holds a copy you may need.
 
 Tested: the gateway suite, `integtest/gateway_test.sh`, checks the flag;
-the end-to-end suite, react case, keeps and clears it around its two
-forced starts.
+the end-to-end suite's react case reads the keep flag that its first
+forced start set on each retired leg, and clears it on all but one.
 
 ### Taking the group's repairs over
 
@@ -3754,8 +3754,9 @@ When to stop: you cannot tell whether a retired leg holds a copy you need
 ([Keeping the old copies](#keeping-the-old-copies)).
 
 Tested: the e2e suite's copy case, stage 06, takes a retired leg back and
-deletes a retired leg and its side; its react case keeps and clears the flag
-around two forced starts. Both passed in the lab on 2026-11-21. The gateway
+deletes a retired leg and its side; its react case reads the keep flag
+that its first forced start set, and clears it on all but one retired
+leg. Both passed in the lab on 2026-11-21. The gateway
 suite checks the flag, and the worker's unit tests check the delete at
 seven days and what holds it.
 
@@ -6811,7 +6812,8 @@ finds new, older or breaking, and to the pools it does not see.
 Tested: the gateway's Go tests check every verdict against planted records
 and a fake agent, and the cn agent's tests check what it answers; the
 gateway suite's smoke case runs the check over a fake controller node after
-its run of `dnvctl cluster advance-ids`. The upgrade case of the e2e suite
+step 3's move of every id counter, which it makes through its own test
+client, not through `dnvctl cluster advance-ids`. The upgrade case of the e2e suite
 runs steps 1 to 6, step 2 without its reads of each etcd server alone and
 its check of the cluster names, and, of step 7, the start of the workers
 and the cdc and the new backup, on the lab's real agents, from a backup
@@ -8796,10 +8798,12 @@ the role, enables the old cntlr again, and checks that every write of the
 host passed, that its data reads back, and that the disable made the one
 failover and the enable none. It passed in the lab on 2026-11-21. Its host
 holds the paths to both cntlrs, which the suite made, and runs no nvme-stas.
-The e2e suite also disables a standby on the lab's agents: its smoke case
-waits for the cdc to stop listing it, and each cycle of its soak case, a
-long run, disables a standby and enables it again with no reaction of the
-worker. A unit test of the worker checks that a disabled cntlr is never
+The e2e suite also disables a standby on the lab's agents: its ops case
+disables a third cntlr it has just made and waits for the cdc to stop
+listing it, and skips the third cntlr's whole part when every controller
+node guest already holds a cntlr of the pool; and each cycle of its soak
+case, a long run, disables a standby and enables it again with no
+reaction of the worker. A unit test of the worker checks that a disabled cntlr is never
 made the primary, and that a failover passes over a disabled cntlr with a
 smaller id and takes the next one. Not tested: the fault itself, a host cut
 off from a primary that the worker reaches, a host that follows the
