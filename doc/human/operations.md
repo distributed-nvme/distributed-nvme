@@ -1155,12 +1155,11 @@ both legs.
 
 What dnv does alone: nothing that brings the group back. For a group of
 a slice, the group's error row makes the primary unhealthy, so the worker
-fails the pool over,
-after `primary_unhealthy` for a grow's group on a primary that has built
-its stack and after `cntlr_unhealthy` for a new pool, or replaces the only
-cntlr of a pool that has one; the new primary meets the same refusal, and
-a grow's group that it cannot start can keep it from building that slice,
-and so the pool.
+fails the pool over: after `primary_unhealthy` for a grow's group on a
+primary that has built its stack, and after `cntlr_unhealthy` for a new
+pool. In a pool of one cntlr, it replaces that cntlr. The new primary
+meets the same refusal. A grow's group that it cannot start can keep it
+from building that slice, and so the pool.
 
 Safe steps: follow "Before every forced start", then start the array from
 the leg with the superblock:
@@ -2813,8 +2812,9 @@ machines, cuts one machine and not every node at once:
    table, since a missing file only skips the unit and a file that does
    not load fails it, and either way the node is open to the hosts. After
    a change of the file, test the new file under a timer as in steps 5 to
-   7, and copy it into `/etc/dnv` only once those tries pass;
-   `systemctl reload dnv-filter` then loads it the same way.
+   7 and stop the timer as this step says; then copy the file into
+   `/etc/dnv` and run `systemctl reload dnv-filter`, which loads it the
+   same way.
    `systemctl stop dnv-filter` deletes the dnv table alone, and
    `systemctl disable --now dnv-filter` removes it for good. Leave the
    nftables package's own unit off on every machine with this table: on
@@ -4586,7 +4586,8 @@ Before you start, check five things:
    each cntlr's `addr_port` and `cntlid_slot`. Step 1 of [A pool made
    before the block bound](#a-pool-made-before-the-block-bound) says how to
    create the destination pool so, and how to move a cntlr that breaks
-   this.
+   this; give `--cn-black` there also each controller node that runs on a
+   machine of the volume's hosts.
 3. A subsystem's list of hosts and a transfer's hold at most 8 host NQNs
    each; a longer list is refused with the error code INVALID_ARGUMENT.
    The transfer's list must hold the destination pool's controller nodes.
@@ -4948,7 +4949,8 @@ Safe steps:
    get-bm`, and give each window in order, with the `--src-start-block`
    the read printed for it. Windows of 262,144 blocks fit: 32 of them fill
    one part, of 8,388,608 blocks, so none crosses the end of a part, which
-   the gateway refuses with the error code INVALID_ARGUMENT; the last
+   the gateway refuses with the error code INVALID_ARGUMENT, or
+   RESOURCE_EXHAUSTED in the older form below; the last
    window of a slice can be shorter. The older form, `--bm-idx <start /
    8388608>` with `--offset <(start / 8) % 1048576>`, still works, but
    nothing checks that its numbers match the window. A window starts at a multiple of 8 blocks. The gateway
@@ -6927,8 +6929,9 @@ does by itself once the cdc lists the subsystem to it, and what writes on it
 then writes beside the host that uses the volume now. Step 6 before step 3, or
 a worker started before step 3, can give a new object the remains of one made
 after the backup, data included. Step 1 keeps every cdc stopped until
-step 7, and a host that uses nvme-stas may then drop its paths (What dnv
-does alone): their IO fails, and writes not yet flushed are lost. Step 8
+step 7: for more than 900 seconds that is not tested, and a host that uses
+nvme-stas might then drop its paths (What dnv does alone): their IO would
+fail, and writes not yet flushed would be lost. Step 8
 deletes again the volumes and the pools that came back, with any data they
 hold: a volume that came back working
 holds its old data. A volume made in a cluster created after the backup is
@@ -7291,7 +7294,9 @@ Steps that can lose data:
   ends its connection: its writes fail.
 - Every cdc stopped from step 3 to step 9 for more than 900 seconds, on
   a host that uses nvme-stas: that is not tested. The lab showed
-  nvme-stas keeping the host's paths through 900 seconds.
+  nvme-stas keeping the host's paths through 900 seconds. Should it drop
+  them after longer, the volumes' IO fails and writes not yet flushed are
+  lost.
 - A node whose agents start before the new udev rules are on it: the
   system's own rules can assemble and probe what the agents build.
 
@@ -7461,8 +7466,9 @@ listed cdcs all answer and leave out a range drops its paths to that
 range's pools. When every cdc of a range is stopped, hosts keep their
 paths to its pools but learn of no change to them, as [While the control
 plane is down](#while-the-control-plane-is-down) says of every cdc down.
-On a host that uses nvme-stas, this is tested only for an outage of a few
-seconds, and a longer one may drop those paths, as that section says.
+On a host that uses nvme-stas, an outage of every cdc kept the paths
+through 900 seconds in the lab; a longer one, and an outage of one range's
+cdcs alone, are not tested.
 The gateways keep no state: any one of them answers any call.
 
 Safe steps for the cdcs:
@@ -8611,11 +8617,11 @@ Safe steps, as root on the host:
    whole before it accepts a host. Never restart a cdc that cannot reach
    etcd: it then accepts no host until it can, and logs
    `cdc waiting for first scan` once a minute. Do not stop the stale cdc to
-   be rid of its records. In the cdc suite's ha case, hosts that run
-   nvme-stas keep the device of every subsystem they use while every cdc
-   is down for a few seconds and is started again, so a stop does not make
-   nvme-stas drop a path at once; how long it keeps the records of a cdc it
-   cannot reach is not known. And a node of dnv's Kubernetes driver drops
+   be rid of its records. In the cdc suite's ha and outage cases, hosts
+   that run nvme-stas keep the device of every subsystem they use while
+   every cdc is down, for a few seconds and for 900 seconds, so a stop
+   does not make nvme-stas drop a path at once; how long it keeps the
+   records of a cdc it cannot reach past 900 seconds is not known. And a node of dnv's Kubernetes driver drops
    no path at all while a cdc of its list cannot be reached.
 5. For a stopped stacd: finish [Restart nvme-stas](#restart-nvme-stas).
 6. On a node of dnv's Kubernetes driver, drop no path by hand that a cdc
@@ -8755,9 +8761,9 @@ What dnv does alone:
   volume stays attached, and no pod can start with it on any node.
 - When the last pod of a mount that waits is gone, the unmount waits too:
   it must first write what the pods had not flushed. The node plugin keeps
-  every path of the volume until nothing holds the volume's device, which
-  the kernel shows by refusing to open it for exclusive use, however often
-  the kubelet asks it again to let go: it answers each such request with an
+  every path of the volume until nothing holds the volume's device: while
+  something holds it, the kernel refuses to open it for exclusive use. It
+  does so however often the kubelet asks it again to let go: it answers each such request with an
   error. So the writes reach the volume once a cntlr serves again.
   Anything else on the node that holds the device does the same: a copy of
   the node's mount that another container keeps, or a device that the

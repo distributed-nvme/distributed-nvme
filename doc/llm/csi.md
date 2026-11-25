@@ -508,8 +508,9 @@ withdrawn one but still refuses the connect, or whose path has not yet joined
 the multipath device, does not cost the volume its last path. A drop goes by
 the controller's device name, and the kernel gives a later connection the
 lowest free number, the name of a controller that is gone among them; the
-drop runs after the pass that decided it, once a drop slot is free; so right
-before its disconnect it reads the controller's subsystem and address again
+drop runs apart from the pass that decided it, once a drop slot is free, by
+a name read at the pass's start, before its log reads; so right before its
+disconnect it reads the controller's subsystem and address again
 and drops nothing, logging `csi path drop skipped`, when they are no longer
 the path's: another volume's path would otherwise go. The read and the
 disconnect each wait for a slot of the NVMe side's OS client, so the time between them

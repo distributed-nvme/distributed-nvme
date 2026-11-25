@@ -2453,8 +2453,9 @@ enum RestoreVerdict {
     // was told does not change.
     RESTORE_VERDICT_SAME = 1;
     // The agent holds a newer revision over the same set of sides as the
-    // restored layout: the restore loses every change since, the thin
-    // devices of lost_td_list among them, and the layout stands.
+    // restored layout, and none of MAY_BREAK's causes holds: the restore
+    // loses every change since, the thin devices of lost_td_list among
+    // them, and the layout stands.
     RESTORE_VERDICT_OLDER = 2;
     // As OLDER, and the held set of sides differs from the restored one,
     // so the pool may break: with every place a side sits counted by its

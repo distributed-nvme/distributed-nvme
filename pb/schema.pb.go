@@ -681,8 +681,9 @@ const (
 	// was told does not change.
 	RestoreVerdict_RESTORE_VERDICT_SAME RestoreVerdict = 1
 	// The agent holds a newer revision over the same set of sides as the
-	// restored layout: the restore loses every change since, the thin
-	// devices of lost_td_list among them, and the layout stands.
+	// restored layout, and none of MAY_BREAK's causes holds: the restore
+	// loses every change since, the thin devices of lost_td_list among
+	// them, and the layout stands.
 	RestoreVerdict_RESTORE_VERDICT_OLDER RestoreVerdict = 2
 	// As OLDER, and the held set of sides differs from the restored one,
 	// so the pool may break: with every place a side sits counted by its

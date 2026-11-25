@@ -594,7 +594,8 @@ SP's and those of every node it touches, as `GrowSlice` does. `now` is the calle
 are resolved inside from `SpConf.event_threshold` with the defaults of
 `architecture.md`, Common validation. The shard and the sp id address the
 `SpRev` key; the sp name the `SpConf`. The ops a gateway call runs are
-shared mutations this worker runs too: `GrowSlice` (AR6); the repair ops
+shared mutations this worker runs too: `GrowSlice` (AR6); `WithdrawGrow`
+(AR6), which the gateway runs as `WithdrawGrowAsked`; the repair ops
 `CreateRepair`, `FinishRepair`, `CancelRepair` and `SetRepairAbort`, which
 it runs on its own repairs (AR8); `DeleteRetiredLeg`, which its retire
 timer runs (AR12); `LatchClone`, the latch `DeleteClone` stages, which

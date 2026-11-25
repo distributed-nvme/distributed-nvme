@@ -20,7 +20,7 @@
 # then. They do not wait for this unit
 # to succeed: a table that does not load fails the unit, which
 # "systemctl --failed" then lists, and the network and the programs still
-# come up; a missing /etc/dnv/dnv-filter.nft skips it ("condition not met"
+# come up; a missing /etc/dnv/dnv-filter.nft skips it ("start condition unmet"
 # in "systemctl status dnv-filter"). After a reboot, check both
 # "systemctl status dnv-filter" and "nft list table inet dnv_filter".
 #

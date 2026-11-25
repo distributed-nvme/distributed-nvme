@@ -2767,7 +2767,8 @@ rest. A row carries its pool, its kind, its object in words and as ids and
 names, the status of the report row it shows, its reason, its text cut to
 the row text cap (Live-state reporting) and its age where a time records
 it: a report row's by the node's clock, a health epoch's and a
-registration's by the gateway's. No record holds the time of a repair, a
+registration's by the gateway's, and a waiting grow's from its group's
+`grow_epoch`, by the clock of the gateway or the worker that grew it. No record holds the time of a repair, a
 migration, a clone, a lost record or a refused grow, so such a row carries
 an age only where it shows a report row: a pending cutover's path row, a
 clone's row that waits for its source. The reply carries the defaulted
@@ -3062,7 +3063,8 @@ and `CnGlobal`, with these differences:
   holds nothing of the pool to read.
   * SAME: the held revision is the restored one: what this cntlr was told
     does not change.
-  * OLDER: the held revision is above it, over the same set of sides. The
+  * OLDER: the held revision is above it, over the same set of sides, and
+    none of the causes MAY_BREAK lists below holds. The
     restore loses every change of the pool since the backup, and the
     layout stands. The row lists the thin devices lost, each with its thin
     id and whether that id is at or above the pool's `next_dev_id` as the
@@ -3073,8 +3075,8 @@ and `CnGlobal`, with these differences:
     thin id the primary's sweep has deleted reads as a lost thin id with no
     data until deleted again (`cnagent.md` CN14), and one whose thin id the
     pool still holds comes back working (etcd backup and restore).
-  * MAY_BREAK: as OLDER, over another set of sides, so the restored layout
-    may break. The set counts every place a side sits: every leg of the
+  * MAY_BREAK: as OLDER, with one of the causes below, the first of which
+    is another set of sides, so the restored layout may break. The set counts every place a side sits: every leg of the
     slices' meta and data groups and of the meta group of each clone that
     is not latched, the clones the worker sends a cntlr (`dnv-worker.md`
     CLD5); the new legs of each open repair whose parent group is one of
@@ -3114,9 +3116,9 @@ and `CnGlobal`, with these differences:
     since the backup, as at the end of a move to a pool of another etcd
     (Transfer + clone = cross-SP live migration). Each cause gives one text
     in `break_reason_list`, in this order: the set of sides, a missing side
-    id, the pending cutovers, the role, the parked namespaces, the deleted
-    namespaces, the migrations by name and the namespaces by `ns_id`, each
-    cut to the row text cap; a row read RECORD_LOST carries none. The
+    id, the pending cutovers, the role, the parked namespaces and the
+    deleted namespaces; a text names its migrations by name and its
+    namespaces by `ns_id`, and each is cut to the row text cap; a row read RECORD_LOST carries none. The
     verdict is cautious: a migration made after the backup and not yet cut
     over gives it, although its source side still holds every write, and
     so does a cutover pending at the backup that has not run since, and a
@@ -3159,8 +3161,10 @@ and `CnGlobal`, with these differences:
   * RECORD_LOST: a record of the restored pool the row reads is missing or
     does not decode — its `SpConf`, or one that names another `sp_id`, its
     `SpRev`, its `sp_id_to_name` record when that does not decode, for a
-    pool held ahead a `Slice`, `Clone`, `Repair`, `RetiredLeg` or thin
-    device record, a name of `td_name_list` with no record among them —
+    pool held ahead a `Slice`, `Clone`, `Repair`, `RetiredLeg`, `Cntlr`
+    (the row's, when `cntlr_id_list` names it), `Migration`, `Subsystem`,
+    `Transfer` or thin device record, a name of `td_name_list` with no
+    record among them —
     and, for a cntlr of the restored node, a pool the restored state names
     nowhere, with no `sp_id_to_name` record of its `sp_id`, which on any
     other row reads new, or not loaded where the agent holds no request of
@@ -9758,11 +9762,13 @@ document and only pointed to here.
 * **Some inputs of a clone are taken as typed.** A clone maps every source
   bitmap page through the three layout numbers of its `CreateClone` and
   through the page's `src_slice_idx` and place (Clones). The gateway
-  bounds each, and for a source that is a transfer of this cluster it
-  reads the source pool and refuses other layout numbers (CreateClone); a
+  bounds each, and for a source that is a transfer of this cluster whose
+  pool still exists it reads the source pool and refuses other layout
+  numbers (CreateClone); a
   page's `src_start_block` has the gateway work out its chunk and offset
   (AppendCloneBitmap). Nothing else checks them: the layout numbers of a
-  source of another cluster or outside dnv's names, a page's
+  source of another cluster, outside dnv's names or of a pool that is
+  gone, a page's
   `src_slice_idx` and `src_start_block`, which nothing ties to the bitmap
   read the page came from, and a page placed by `bm_idx` and `offset`. A
   wrong value within the bounds maps the bitmap onto the wrong regions: a

@@ -2703,7 +2703,8 @@ for one a suspended linear holds; it runs after the retire, so that a
 retired linear's dm-error is on its path. The bare resume is safe there:
 but for a reload's own moment between its suspend and its resume, only the
 fence and the apply of a bitmap chunk suspend a device on purpose, and
-only a per-CN linear, which the apply resumes before it returns
+only a per-CN linear, which the apply resumes before it returns unless
+that resume fails
 (`agent.ApplySkipRanges`), so any other device found suspended was left so by a reload that failed or was cut off,
 and what it holds came through devices that still map it. A device this
 step cannot prove out of suspension — a probe, a table read, the read of a

@@ -2155,9 +2155,9 @@ the connect attempted.
   two leg repair stages, two forced-start stages, take-over stage,
   migrating-leg stage and group cut are skipped.
 * **How md takes a retired leg back is logged, not asserted.** md catches a
-  retired leg taken back up from its write-intent bitmap only while the
-  array has stayed degraded since the leg left, and otherwise copies it
-  whole (`architecture.md`, Repair, Known limits). The copy case's array
+  retired leg taken back up from its write-intent bitmap in some cases,
+  such as when the array has stayed degraded since the leg left, and
+  otherwise copies it whole (`architecture.md`, Repair, Known limits). The copy case's array
   stays degraded from the leg's departure to its return, but in between md
   began a copy onto the leg that replaced it, which step 6 ends by the kill
   of that leg's disk node, and md copies the returned leg whole after that,

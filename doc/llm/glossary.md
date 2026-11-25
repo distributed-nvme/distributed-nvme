@@ -24,7 +24,7 @@ The vocabulary of dnv in alphabetical order, one entry per term, with synonyms s
 
 **attribution** — The sweep's test of which agent, cluster, node and storage pool a kernel object belongs to, by its parsed dm name or NQN, or for a nameless object by what it is built from. An object that is another agent's is foreign and is never touched; one nobody claims is unowned.
 
-**auto-grow, thin-pool auto-grow** — The sp worker's reaction that appends a data or meta group to a slice whose pool usage has crossed its low-water mark, a data group by the slice's original allocation and a meta group by the next rung of the meta ladder, the fixed sequence of sizes a slice's meta groups take. One grow of a kind stays pending until the reported pool total reflects it or, for a meta grow, reaches the most metadata dm-thin uses, or until auto-grow withdraws it (see withdrawal of a stuck grow).
+**auto-grow, thin-pool auto-grow** — The sp worker's reaction that appends a data or meta group to a slice whose pool usage has crossed its low-water mark, a data group by the slice's original allocation and a meta group by the next rung of the meta ladder, the fixed sequence of sizes a slice's meta groups take. One grow of a kind stays pending until the reported pool total reflects it or, for a meta grow, reaches the most metadata dm-thin uses, or until auto-grow withdraws it (see withdrawal of a stuck grow), or the operator takes the group back (see WithdrawGrow).
 
 **auto_resume** — A clone attribute that makes the destination namespace serve while the clone runs although it is stored suspended. In cross-SP live migration the destination namespace is created suspended and the clone overrides that until it is deleted.
 
@@ -416,6 +416,8 @@ The vocabulary of dnv in alphabetical order, one entry per term, with synonyms s
 
 **not given** — dnvctl's convention for an optional sub-message: it is sent only when one of its flags holds a non-zero value, a zero meaning the member was not given. For `--rev`, given means typed on the command line.
 
+**not ready (a group)** — A grown group with a leg whose every side is still not provisioned: no cntlr builds it, a grow of its kind over it is refused, and the status read lists it once it has waited longer than the pool's side threshold (see `architecture.md`, GrowSlice).
+
 **noun group** — One of dnvctl's per-resource command groups, "dnvctl <group> <verb>", under which the leaf commands sit; a group issues no RPC itself, and each lives in a file of its own under `ctl/`.
 
 **NQN kind** — The digit in every dnv NQN that names the object kind (`ParseNqn`): a disk-node host, a controller-node host, a side export, a migration source export or a transfer. A user-facing subsystem NQN must lie outside the dnv namespace (`IsDnvNqn`).
@@ -433,8 +435,6 @@ The vocabulary of dnv in alphabetical order, one entry per term, with synonyms s
 **observed state** — A registration's live or dead state as one observer judges it, by its own monotonic clock since the last put it saw and never by the stored epoch (see `dnv-worker.md` VW3, VW4).
 
 **open repair** — A repair whose stage is CREATED or STARTED. Its new leg is a member the group keeps, by which the primary also finds the group's array, and no add and no put-back brings its bad leg back into the array; an assembly can still take the bad leg in, and then only the add, in the pass that adds the new leg, or, once the repair has started in md, the removal of a bad leg md holds without a place takes it out. Once the repair is ABORTED its new leg is an extra and its bad leg a leg like any other (see `cnagent.md` CN12).
-
-**not ready (a group)** — A grown group with a leg whose every side is still not provisioned: no cntlr builds it, a grow of its kind over it is refused, and the status read lists it once it has waited longer than the pool's side threshold (see `architecture.md`, GrowSlice).
 
 **operator in charge** — An operator's take-over of an md-raid1 group's repair from the sp worker: the group's flag, `operator_in_charge`, which the operator sets and clears with `UpdateGroupOperatorInCharge`, at any level. While it stands the worker creates no repair of the group and the model's create refuses a worker's repair of it; an operator's repair is never refused for it, the worker still drives a worker's repair that exists, auto-grow withdraws no stuck grow of the group, the operator's `WithdrawGrow` of it is refused until the flag is cleared, leg repair ends no migration of a bad leg of the group, the worker asks for no md check of the group and withdraws one that stands, and failover, auto-grow's grows and every other reaction run. The operator sets the flag, aborts and cancels the worker's repair, creates their own, finishes it and clears the flag. Its write raises the pool's revision, so the flag reaches the cntlrs, whose primary then leaves a broken array of the group as it is instead of assembling it again (see `architecture.md`, Repairs; `cnagent.md` CN12; `dnv-worker.md` AR8).
 
@@ -692,9 +692,9 @@ The vocabulary of dnv in alphabetical order, one entry per term, with synonyms s
 
 **wipe** — A lab-only scrub of a guest: the e2e suite's host-side disconnect of every dnv NQN, and the agent suites' kind-blind `--wipe` over every dnv-named dm device, nvmet subsystem and md array and every fabrics controller on the node, repeated while dnv dm devices remain and failing on dm or nvmet residue or on a dm listing that did not answer.
 
-**WithdrawGrow** — The operator's take-back of the newest grown group of one kind of a slice while that group is not ready, `dnvctl sp withdraw-grow`; the step the worker's withdrawal of a stuck grow takes by itself only for a disk node that carries a health epoch (see `architecture.md`, WithdrawGrow).
-
 **withdrawal of a stuck grow** — The sp worker's removal of the newest group of a kind from a slice when the grow that added it waits on a side that does not provision: a leg's only side is unhealthy past its threshold on a disk node that carries a health epoch, one that died while the side zeroed or one with an error row of its own, such as a store that refuses writes, so no array was ever built from the group and the pool does not count it. The group's extents go back to the disk nodes and the controller nodes, and auto-grow grows again, on disk nodes other than that one, unless a ceiling of the grow refuses it (see `dnv-worker.md` AR6).
+
+**WithdrawGrow** — The operator's take-back of the newest grown group of one kind of a slice while that group is not ready, `dnvctl sp withdraw-grow`; the step the worker's withdrawal of a stuck grow takes by itself only for a disk node that carries a health epoch (see `architecture.md`, WithdrawGrow).
 
 **worker** — `dnv-worker`, the control-plane process that turns etcd's desired state into agent calls: it watches revision keys by role and shard, syncs and checks each object, applies flips, runs health rounds, reacts, and drains deleted pools and clones. Several run active-active, divided by shard ownership.
 

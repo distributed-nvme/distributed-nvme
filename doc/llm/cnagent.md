@@ -1938,8 +1938,9 @@ dm-clone (CN18).
   steps; then a repair's new legs are added (below). The put-back and both
   adds wait for a copy source (below). md then resyncs: a
   bitmap catch-up for a briefly absent leg or a member put back, a full
-  copy for a repair's new leg, short of a retired leg taken back while the
-  array has stayed degraded (`architecture.md`,
+  copy for a repair's new leg, short of a retired leg taken back in the
+  cases md catches up from its bitmap, such as while the array has stayed
+  degraded (`architecture.md`,
   Repair). A leg **can
   take** a member back when it is available and its own leg row reads `OK`,
   which on the primary is the CN11 probe's last result. Reason: a leg whose

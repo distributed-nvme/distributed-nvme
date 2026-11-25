@@ -25,7 +25,8 @@ Every known limit has a state:
 - **not yet**: dnv does not have it and may get it later. Nothing is
   planned for it today.
 
-An entry leaves this document once its fix is done and tested.
+An entry leaves this document once its fix is done and tested. An entry
+marked "Silent" is a case in which no error shows to the host.
 
 Some limits were read from dnv's code or from the kernel's code. No test
 has shown them yet. Such an entry carries the mark "not seen in the lab".
@@ -252,8 +253,9 @@ always sends a piece's position.
   The restore can make a leg's old side serve again beside its new one,
   and a block first written since the cutover can then read another pool's
   bytes. The restore check (`dnvctl cn check-restore`, the read that says
-  pool by pool what a restore loses) names such a pool, but for one case
-  (section 5.5). State: procedure written, as
+  pool by pool what a restore loses) names such a pool, except a cutover
+  its cntlrs had not yet heard of (section 5.5) and a pool none of whose
+  controller nodes answers (section 7). State: procedure written, as
   section 5.5 says in its entry on an etcd restore over a cutover.
 - **A forced start from an older copy restores one group, not the pool.**
   A forced start is an operator's start of a group's RAID1 array from one
@@ -402,8 +404,8 @@ loss in the sense of this document. The application knows. Two cases:
   takes such a group back by itself only when its disk node is dead or
   reports an error of its own. The status read, `dnvctl cluster
   get-status`, lists such a grow once it has waited longer than the pool's
-  side threshold, if a build that records when a grow began made it; an
-  older grow is not timed. The operator takes the group back with `dnvctl
+  side threshold, if a dnv version that records when a grow began made
+  it; an older grow is not timed. The operator takes the group back with `dnvctl
   sp withdraw-grow`. The gateway refuses to grow a slice by hand over such
   a group. A slice where a ready group was grown by hand over such a group
   before dnv refused it stays stuck: the call takes back only the newest
@@ -895,8 +897,8 @@ The entries:
   can act for a few seconds, and a detach that the old leader began can run
   after Kubernetes attached the volume to the same machine again. The
   detach takes that machine off the volume's list. The cdcs then stop
-  listing the volume to that machine, so its node plugin drops every path
-  of it at its next pass, and the controller node also ends the machine's
+  listing the volume to that machine, so its node plugin, the Kubernetes
+  driver's part on that machine, drops every path of it at its next pass, and the controller node also ends the machine's
   connection where its kernel lets it (the first entry of this section).
   The mount dies under a running pod: its IO fails, and the writes it had not flushed are lost. State: fix later: no way to fix
   it is known, since a detach names only the volume and the machine. Read
@@ -2319,8 +2321,8 @@ failover's among them.
   machine, and the kubelet is Kubernetes' own program there, which asks the
   node plugin to let go of a volume once no pod on that machine uses it.
   The node plugin lets go, and drops the volume's paths, only once nothing
-  holds the volume's device, which the kernel shows by refusing to open it
-  for exclusive use. A container can keep a copy of the node's mount of
+  holds the volume's device: while something holds it, the kernel refuses
+  to open it for exclusive use. A container can keep a copy of the node's mount of
   the volume in a set of mounts of its own, and the machine's own tools can
   build a device over a raw block volume, such as an LVM volume or an md
   array made of what a pod wrote there; the node plugin can end neither.

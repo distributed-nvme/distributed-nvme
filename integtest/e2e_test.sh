@@ -10187,8 +10187,11 @@ preflight_guests() {
 	# The disk-node guests' host names must differ: the gateway keeps a
 	# migration's new side off every disk node of the old side's host name
 	# (architecture.md, Migrations), so guests that share one would leave the
-	# copy, react and soak cases' migrations no destination. Each node's
-	# location is still its role, passed at its create (E2E4).
+	# copy, react and soak cases' migrations no destination. The names every
+	# unnamed machine reports are stored as none and pass over nothing, but
+	# the suite refuses them too, so that the lab's guests each carry a name
+	# of their own. Each node's location is still its role, passed at its
+	# create (E2E4).
 	local names name seen=""
 	for v in "${!DN[@]}"; do
 		name=$(ssh_to "${DN[$v]}" "cat /proc/sys/kernel/hostname") ||

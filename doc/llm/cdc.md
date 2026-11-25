@@ -142,8 +142,8 @@ entry per element of `nvme_tr_conf_list`:
   with reason `foreign_adr_fam`: an address family this controller cannot
   name has no byte to put in the record. Either way the rest of the entry
   still serves. These skips log `cdc entry skipped` once per distinct
-  reason each time the entry is rendered (by a scan, or by a put event
-  carrying it), not once per skipped element: however many elements share
+  reason each time the entry is rendered (by a scan, save a full read that
+  repeats the last scan, WV7, or by a put event carrying it), not once per skipped element: however many elements share
   a foreign transport, they are one record.
 * TRADDR and TRSVCID verbatim from `tr_addr` and `tr_svc_id`; SUBNQN from
   `nqn`. Each fits its field by the gateway's validation
@@ -321,7 +321,8 @@ serially. Log `cdc scan complete` after each scan.
 WV2. **Parse and filter.** Keys parse with `ParseCdcEntryKey`; a key whose
 shard code is not owned is skipped silently — it is expected, the key-field
 filter of `architecture.md`, dnv-cdc — and a malformed key logs
-`cdc entry skipped` and is dropped, from a scan and from a watch event
+`cdc entry skipped` and is dropped, from a scan, save a full read that
+repeats the last scan (WV7), and from a watch event
 alike (the rule of `dnv-worker.md` SW2). A malformed value is dropped the
 same way by a scan; in a watch event it ends the watch generation instead,
 because `WatchTyped` reports a value it cannot decode as the watch's error,

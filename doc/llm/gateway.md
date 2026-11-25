@@ -456,7 +456,8 @@ uncommitted (`dnv-worker.md` EU4).
   or above `MaxCloneBmCnt`, checked in-STM — the stateless page cap, a
   page longer than `CloneBmChunkBytes` judged on the request alone because a
   page longer than a whole chunk fits nowhere whatever is stored, and the
-  four of a `src_start_block`: sent beside a `bm_idx` or an `offset`, not
+  four of a `src_start_block`: sent beside a non-zero `bm_idx` or an
+  `offset`, not
   a multiple of 8, past the last chunk, or with a page that crosses the
   end of its chunk; all under Clones); a cntlr's CN below a grow's extent count (`GrowSlice`'s
   pre-check); metadata room, which is capacity like extents
@@ -1541,8 +1542,8 @@ below name.
   of at most `CloneBmChunkBytes`, judged on this request alone (a page
   longer than a whole chunk fits nowhere, whatever is already stored), then
   its place (`clonePagePlace`): the request's `bm_idx` and `offset`, or the
-  chunk and the offset its `src_start_block` falls on, refused beside
-  either.
+  chunk and the offset its `src_start_block` falls on, refused beside a
+  non-zero `bm_idx` or an `offset`.
   STM:
   resolve; token; the clone (`loadLiveClone`, so an append to a latched
   clone is refused and the clone key is in the STM's read set either way);
