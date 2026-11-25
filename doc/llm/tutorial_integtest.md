@@ -178,7 +178,8 @@ own list and never through the release's manifests, since a run with
 `--cleanup-only` has no release folder and the lab's k3s is permanent, so
 that nothing outside the list goes; setup checks, before the first block,
 that the release's manifests hold the list's objects that name a manifest,
-and no other. It waits
+and no other, and that they name the driver's image by the archive's
+version. It waits
 for the driver's volumes and attachments to go before the driver does, since
 without the driver a volume or an attachment keeps its finalizer, deletes
 the image it imported, puts the taints back, and reads every object of the
@@ -233,7 +234,8 @@ on any other.
 - A release built in a git worktree carries the commit of the checkout
   whose folder holds the worktree, or no version stamp when none does (the
   `Makefile` row of `layout.md`, Directory tree), and the tutorials read no
-  version, so the suite does not catch a wrong or missing stamp.
+  binary's version stamp, so the suite does not catch a wrong or missing
+  one.
 - docker's purge on the k3s server node leaves the chains docker added to
   iptables and its rules in them until the next boot; the suite puts back
   the forward chain's policy alone, since a restore of every rule would

@@ -1397,7 +1397,7 @@ csi_left() {
 		$1 == me { for (i = 2; i <= NF; i++) if ($i == cp) has = 1 }
 		END { if (!has) print "the server " me " without its own taint" }' <<<"$out"
 	out=$(rsh "sudo -n k3s ctr images ls -q") || return 1
-	grep -x docker.io/library/dnv-csi:0.1.0 <<<"$out" || true
+	grep '^docker.io/library/dnv-csi:' <<<"$out" || true
 }
 
 # csi_gone answers whether no volume and no attachment of the driver's is
@@ -1451,15 +1451,28 @@ csi_manifest_objects() { # <deploy dir>
 # csi_objects_check fails, before any block, unless the manifests of the
 # release's deploy/ hold exactly the objects CSI_OBJECTS names from them: an
 # object the list lacks would be applied and never deleted. A manifest that
-# names no namespace matches the list's, as the tutorial picks it.
+# names no namespace matches the list's, as the tutorial picks it. It also
+# fails unless every manifest that names the driver's image names it by the
+# archive's version, as the release step writes it (the Makefile's
+# IMAGE_TAG).
 csi_objects_check() { # <archive>
-	local tmp got bad
+	local tmp got bad ver tags
 	tmp=$(mktemp -d) || die "making a folder for the release's manifests failed"
 	tar -xzf "$1" -C "$tmp" --wildcards '*/deploy/*.yaml' ||
 		die "unpacking the release's manifests failed"
 	got=$(csi_manifest_objects "$tmp"/*/deploy) ||
 		die "reading the kinds and names of the release's manifests failed"
+	# The release step names the driver's image by the archive's version,
+	# the v of a version such as v0.2.0 dropped (the Makefile's IMAGE_TAG).
+	ver=$(basename "$1" .tar.gz)
+	ver=${ver#dnv-}
+	ver=${ver%-linux-amd64}
+	case "$ver" in v[0-9]*) ver=${ver#v} ;; esac
+	tags=$(grep -h '^ *image: dnv-csi:' "$tmp"/*/deploy/*.yaml |
+		awk '{ print $2 }' | sort -u)
 	rm -rf "$tmp"
+	[ "$tags" = "dnv-csi:$ver" ] ||
+		die "the release's manifests name the image ${tags:-nowhere}, not dnv-csi:$ver"
 	bad=$(awk 'FNR == NR { if ($1 != "inline") w[$1 " " $2 " " $4] = $3; next }
 		{ k = $1 " " $2 " " $4
 		  if (!(k in w)) { print "an object of no CSI_OBJECTS entry: " $0; next }
@@ -1468,7 +1481,8 @@ csi_objects_check() { # <archive>
 		END { for (k in w) if (!(k in seen)) print "a CSI_OBJECTS entry no manifest holds: " k }' \
 		<(printf '%s\n' "${CSI_OBJECTS[@]}") <(printf '%s\n' "$got"))
 	[ -z "$bad" ] || die "the release's manifests and the cleanup's list differ: $(echo $bad)"
-	log "  the release's manifests hold the objects of CSI_OBJECTS, and no other"
+	log "  the release's manifests hold the objects of CSI_OBJECTS, and no other," \
+		"and name the image dnv-csi:$ver"
 }
 
 # csi_cleanup deletes the tutorial's objects from the lab's k3s by kind and
@@ -1496,7 +1510,8 @@ csi_cleanup() {
 		bad=1
 	}
 	csi_delete rest || bad=1
-	rsh "sudo -n k3s ctr images rm docker.io/library/dnv-csi:0.1.0 >/dev/null 2>&1; true"
+	rsh "sudo -n k3s ctr images ls -q | grep '^docker.io/library/dnv-csi:' |
+		xargs -r sudo -n k3s ctr images rm >/dev/null 2>&1; true"
 	# A node without the taint answers the removal with an error, so the
 	# read back below is the verdict.
 	for n in $(kc get nodes -o name | sed 's|node/||'); do

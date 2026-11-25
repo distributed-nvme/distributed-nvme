@@ -90,7 +90,10 @@ fetch-etcd:
 # tree). VERSION is the exact
 # tag on HEAD; an untagged HEAD or a tree that is not clean is refused, unless
 # VERSION is given on the command line, which overrides both refusals; an
-# environment VERSION is ignored. The binaries are static (cgo off), free of
+# environment VERSION is ignored. The CSI driver's manifests in the
+# archive's deploy/ name its image by the version, a leading v dropped, so
+# that a release names its own image (csi.md, Deployment); the tree's
+# manifests keep the tag the csi suite builds. The binaries are static (cgo off), free of
 # build paths (-trimpath) and stripped (-s -w); Go stamps the module version
 # from the tag, so `go version -m` on each binary still prints it. Go takes
 # the version from the nearest directory, at or above the tree, whose .git
@@ -110,6 +113,11 @@ VERSION := $(shell git describe --tags --exact-match 2>/dev/null)
 endif
 RELEASE_DIR := dnv-$(VERSION)-linux-amd64
 RELEASE_OUT ?= _out
+# IMAGE_TAG is the tag the release's CSI manifests give the driver's image:
+# the release's version, with the v of a version such as v0.2.0 dropped,
+# as docker tags are written; the release step refuses a tag docker would
+# not take.
+IMAGE_TAG := $(if $(filter v0% v1% v2% v3% v4% v5% v6% v7% v8% v9%,$(VERSION)),$(patsubst v%,%,$(VERSION)),$(VERSION))
 
 release:
 	@if [ -z "$(VERSION)" ]; then \
@@ -129,6 +137,15 @@ release:
 	done
 	cp LICENSE $(RELEASE_OUT)/$(RELEASE_DIR)/
 	cp -r deploy $(RELEASE_OUT)/$(RELEASE_DIR)/
+	@printf '%s\n' '$(IMAGE_TAG)' | grep -Eqx '[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}' || { \
+		echo "make release: '$(IMAGE_TAG)', from VERSION $(VERSION), is no docker tag" >&2; exit 1; }
+	@m=$$(grep -l 'dnv-csi:' $(RELEASE_OUT)/$(RELEASE_DIR)/deploy/*.yaml); \
+	[ -n "$$m" ] || { echo "make release: no manifest of deploy/ names the image dnv-csi" >&2; exit 1; }; \
+	for f in $$m; do \
+		grep -q '^ *image: dnv-csi:' $$f || { \
+			echo "make release: $$f names dnv-csi but in no plain image line" >&2; exit 1; }; \
+		sed -i 's|^\( *image: dnv-csi:\).*|\1$(IMAGE_TAG)|' $$f || exit 1; \
+	done
 	tar -C $(RELEASE_OUT) --sort=name --owner=0 --group=0 --numeric-owner \
 		--mode=go=rX,u+rw,a-st --mtime=@$$(git log -1 --format=%ct) \
 		-cf - $(RELEASE_DIR) | gzip -n > $(RELEASE_OUT)/$(RELEASE_DIR).tar.gz

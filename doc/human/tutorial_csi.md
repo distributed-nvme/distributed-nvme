@@ -172,28 +172,33 @@ The image holds the one binary and the tools the node plugin runs on the
 node: nvme-cli, the mount tools, blkid and the two filesystem makers. The
 build's context is a directory with the binary alone, so that nothing else
 of the working directory, the disk files among it, is sent to the build.
-k3s pulls nothing it already has, so the image goes straight into its
-image store.
+The image takes the name the manifests in `deploy/` give it, `dnv-csi:`
+and a version: a release's own version in a release's folder, `0.1.0` in
+the repository's copy. The commands read the name from
+`deploy/controller.yaml`. k3s pulls nothing it already has, so the image
+goes straight into its image store.
 
 <!-- test
 timeout 900
 -->
 ```
 mkdir -p image && cp dnv-csi image/
-sudo docker build -t dnv-csi:0.1.0 -f deploy/Dockerfile image
-sudo docker save dnv-csi:0.1.0 | sudo k3s ctr images import -
+sudo docker build -t "$(awk '/image: dnv-csi:/ {print $2; exit}' deploy/controller.yaml)" -f deploy/Dockerfile image
+sudo docker save "$(awk '/image: dnv-csi:/ {print $2; exit}' deploy/controller.yaml)" | sudo k3s ctr images import -
 ```
 
 Check: the image is in the store.
 
 <!-- test
-out docker.io/library/dnv-csi:0.1.0
+has docker.io/library/dnv-csi:
+count 1 dnv-csi
 -->
 ```
 sudo k3s ctr images ls -q | grep dnv-csi
 ```
 
-It prints `docker.io/library/dnv-csi:0.1.0`.
+It prints `docker.io/library/dnv-csi:` and the version that
+`deploy/controller.yaml` names.
 
 ## The driver
 
@@ -371,7 +376,7 @@ has closed
 lacks open
 -->
 ```
-sudo k3s kubectl run probe -n default --rm -i --restart=Never --image=dnv-csi:0.1.0 --image-pull-policy=Never --command -- bash -c 'sleep 2; for a in "$@"; do timeout 3 bash -c "</dev/tcp/$a/29527" 2>/dev/null && echo "$a open" || echo "$a closed"; done' probe $(ip -4 -o addr show scope global | awk '{split($4, a, "/"); print a[1]}')
+sudo k3s kubectl run probe -n default --rm -i --restart=Never --image=$(awk '/image: dnv-csi:/ {print $2; exit}' deploy/controller.yaml) --image-pull-policy=Never --command -- bash -c 'sleep 2; for a in "$@"; do timeout 3 bash -c "</dev/tcp/$a/29527" 2>/dev/null && echo "$a open" || echo "$a closed"; done' probe $(ip -4 -o addr show scope global | awk '{split($4, a, "/"); print a[1]}')
 ```
 
 It prints `closed` for every address. Kubernetes prints two notes about the
@@ -383,7 +388,7 @@ lacks closed
 -->
 ```
 sudo k3s kubectl create namespace policy-check
-sudo k3s kubectl run probe -n policy-check --rm -i --restart=Never --image=dnv-csi:0.1.0 --image-pull-policy=Never --command -- bash -c 'sleep 2; for a in "$@"; do timeout 3 bash -c "</dev/tcp/$a/29527" 2>/dev/null && echo "$a open" || echo "$a closed"; done' probe $(ip -4 -o addr show scope global | awk '{split($4, a, "/"); print a[1]}')
+sudo k3s kubectl run probe -n policy-check --rm -i --restart=Never --image=$(awk '/image: dnv-csi:/ {print $2; exit}' deploy/controller.yaml) --image-pull-policy=Never --command -- bash -c 'sleep 2; for a in "$@"; do timeout 3 bash -c "</dev/tcp/$a/29527" 2>/dev/null && echo "$a open" || echo "$a closed"; done' probe $(ip -4 -o addr show scope global | awk '{split($4, a, "/"); print a[1]}')
 sudo k3s kubectl delete namespace policy-check
 ```
 
@@ -653,7 +658,7 @@ omit sudo /usr/local/bin/k3s-uninstall.sh
 sudo k3s kubectl -n default delete networkpolicy dnv-keep-off
 sudo k3s kubectl delete -f deploy/node.yaml -f deploy/controller.yaml
 sudo /usr/local/bin/k3s-uninstall.sh
-sudo docker image rm dnv-csi:0.1.0 ubuntu:26.04
+sudo docker image rm "$(awk '/image: dnv-csi:/ {print $2; exit}' deploy/controller.yaml)" ubuntu:26.04
 rm -rf image dnv-addrs.txt
 ```
 
