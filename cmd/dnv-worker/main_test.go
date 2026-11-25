@@ -26,14 +26,12 @@ var exampleArgs = []string{
 	"--roles", "dn,cn,sp",
 	"--vote-interval", "10",
 	"--vote-grace-time", "60",
-	"--etcd-dial-timeout", "5",
 }
 
 // cm1Flags is the CM1 flag set, verbatim, with the --version every program
 // answers (architecture.md, Components: invocation reference).
 var cm1Flags = []string{
 	"config",
-	"etcd-dial-timeout",
 	"etcd-endpoints",
 	"log-level",
 	"roles",
@@ -164,11 +162,6 @@ func TestDefaults(t *testing.T) {
 		t.Errorf("vote-leave-grace-time default = %v, want %v",
 			opts.leaveGraceTime, want)
 	}
-	if want := common.DefaultEtcdDialTimeout * time.Second; opts.dialTimeout !=
-		want {
-		t.Errorf("etcd-dial-timeout default = %v, want %v",
-			opts.dialTimeout, want)
-	}
 	if opts.graceTooShort {
 		t.Error("the default timers tripped the CM3 grace warning")
 	}
@@ -210,7 +203,6 @@ func TestEnvironmentSuppliesEveryValue(t *testing.T) {
 	t.Setenv("DNV_WORKER_ETCD_ENDPOINTS", "10.0.0.1:2379,10.0.0.2:2379")
 	t.Setenv("DNV_WORKER_VOTE_INTERVAL", "1")
 	t.Setenv("DNV_WORKER_VOTE_GRACE_TIME", "3")
-	t.Setenv("DNV_WORKER_ETCD_DIAL_TIMEOUT", "2")
 	opts := mustOptions(t, nil)
 	if want := []string{"10.0.0.1:2379", "10.0.0.2:2379"}; !reflect.DeepEqual(
 		opts.endpoints, want) {
@@ -221,9 +213,6 @@ func TestEnvironmentSuppliesEveryValue(t *testing.T) {
 	}
 	if opts.graceTime != 3*time.Second {
 		t.Errorf("vote-grace-time = %v, want 3s", opts.graceTime)
-	}
-	if opts.dialTimeout != 2*time.Second {
-		t.Errorf("etcd-dial-timeout = %v, want 2s", opts.dialTimeout)
 	}
 }
 
@@ -378,15 +367,15 @@ func TestShortGraceTimeWarnsButIsAccepted(t *testing.T) {
 	}
 }
 
-// EU5: a non-positive dial timeout is passed through to etcdutil.New, which
-// substitutes the default; it is not a configuration error.
-func TestZeroDialTimeoutIsPassedThrough(t *testing.T) {
-	opts := mustOptions(t, []string{
-		"--etcd-endpoints", "127.0.0.1:2379", "--etcd-dial-timeout", "0",
-	})
-	if opts.dialTimeout != 0 {
-		t.Errorf("dial timeout = %v, want 0 (etcdutil substitutes the default)",
-			opts.dialTimeout)
+// The flag --etcd-dial-timeout is gone: the etcd client does not wait for
+// its first connection, so a dial timeout bounds nothing, and the program
+// refuses the flag as unknown.
+func TestEtcdDialTimeoutFlagIsGone(t *testing.T) {
+	cmd := newRootCmd()
+	err := cmd.ParseFlags([]string{"--etcd-dial-timeout", "5"})
+	if err == nil || !strings.Contains(err.Error(), "unknown flag") {
+		t.Errorf("--etcd-dial-timeout parsed with %v, want an unknown flag",
+			err)
 	}
 }
 

@@ -82,9 +82,9 @@ the per-call deadlines of the worker's agent RPCs (RW5, BM3);
 `DemotionHoldTimeout`, the bound of the demotion hold, in which a fan-out
 that demotes a primary holds its sides and its other cntlrs for the demoted
 cntlr to report its demotion applied (RW22);
-`DefaultEtcdDialTimeout` and `DefaultEtcdOpTimeout`, the etcd client's dial
-deadline and its budget per plain operation and per whole transaction, every
-retry included (EU1, EU5); `DefaultEtcdKeepaliveTime` and
+`DefaultEtcdDialTimeout` and `DefaultEtcdOpTimeout`, the dial timeout the
+etcd client is given, which bounds nothing (EU5), and its budget per plain
+operation and per whole transaction, every retry included (EU1, EU5); `DefaultEtcdKeepaliveTime` and
 `DefaultEtcdKeepaliveTimeout`, how long a connection of the etcd client
 carries no read before the client pings it and how long the client waits for
 the answer before it closes the connection (EU1); `DefaultEtcdWatchSilence`,
@@ -342,7 +342,9 @@ mutation re-validating its preconditions on the next pass (MD7, AR2), and a
 caller with no round of its own is left to decide what to do with the
 failure (EU6). A read-only load is budgeted the same way, as one operation
 rather than one per key read. `New` uses `DefaultEtcdDialTimeout` unless the
-caller passes another value (`--etcd-dial-timeout`, CM1).
+caller passes another value. The programs pass none and take no flag for
+it: the client dials without waiting, and dnv sets none of the options
+that would make it wait, so a dial timeout bounds nothing.
 
 EU6. **Errors.** Connection, timeout and (de)serialization errors are
 returned wrapped, never retried inside the helpers (the STM conflict retry
@@ -1224,7 +1226,7 @@ under the prefix `DNV_WORKER_`. The
 flags name the etcd endpoints (required), the roles this process carries
 (every role by default, each registered and driven independently, VW10), the
 three vote timers — the vote interval (VW2), a join's grace and a leave's
-grace (VW5) — the etcd dial timeout (EU1), the log level (`log.md` R6) and
+grace (VW5) — the log level (`log.md` R6) and
 an optional viper config file; `cmd/dnv-worker` holds their names and
 defaults. The vote timers exist as
 flags so the worker suite can run membership cases in seconds; production

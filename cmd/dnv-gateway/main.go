@@ -24,7 +24,6 @@ import (
 	"os/signal"
 	"strings"
 	"syscall"
-	"time"
 
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
@@ -83,7 +82,7 @@ func addVersionFlag(root *cobra.Command) {
 }
 
 // addFlags declares the CM2 flag set: --grpc-network and --grpc-address, as
-// in cmd/dnv-agent, and --etcd-endpoints, --etcd-dial-timeout and --config,
+// in cmd/dnv-agent, and --etcd-endpoints and --config,
 // as in cmd/dnv-worker.
 //
 // There is deliberately no --etcd-op-timeout — every plain etcd operation, and
@@ -98,8 +97,6 @@ func addFlags(cmd *cobra.Command) {
 		"gRPC endpoint this gateway serves on (required)")
 	flags.String("etcd-endpoints", "",
 		"comma-separated host:port list of the etcd cluster (required)")
-	flags.Int("etcd-dial-timeout", common.DefaultEtcdDialTimeout,
-		"seconds to wait for the initial etcd dial (0 = the built-in default)")
 	flags.String("log-level", common.LogLevelInfo,
 		"log level: debug, info or warn; SIGUSR1 sets debug while the "+
 			"process runs and SIGUSR2 sets this level again")
@@ -134,10 +131,6 @@ type options struct {
 	grpcAddress string
 	// endpoints is the parsed --etcd-endpoints list, never empty.
 	endpoints []string
-	// dialTimeout bounds the initial etcd dial (EU1, EU5). A non-positive
-	// value is passed through: etcdutil.New substitutes
-	// common.DefaultEtcdDialTimeout for it.
-	dialTimeout time.Duration
 	// logLevel is the parsed --log-level, set before the first record
 	// (log.md R6).
 	logLevel slog.Level
@@ -167,9 +160,7 @@ func optionsFromViper() (*options, error) {
 		grpcNetwork: grpcNetwork,
 		grpcAddress: grpcAddress,
 		endpoints:   endpoints,
-		dialTimeout: time.Duration(viper.GetInt("etcd-dial-timeout")) *
-			time.Second,
-		logLevel: logLevel,
+		logLevel:    logLevel,
 	}, nil
 }
 
@@ -230,7 +221,7 @@ func run(cmd *cobra.Command, args []string) error {
 	defer signal.Stop(sigCh)
 	go watchSignals(ctx, cancel, sigCh, os.Exit)
 
-	cli, err := etcdutil.New(ctx, opts.endpoints, opts.dialTimeout)
+	cli, err := etcdutil.New(ctx, opts.endpoints, 0)
 	if err != nil {
 		return err
 	}

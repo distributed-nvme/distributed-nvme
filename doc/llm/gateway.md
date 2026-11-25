@@ -1942,7 +1942,7 @@ No other `service Gateway` RPC leaves etcd — the matrix is complete.
 CM1. **Shape.** `cmd/dnv-gateway/main.go` mirrors `cmd/dnv-worker/main.go`
 and `cmd/dnv-cdc` structurally — cobra and viper, an environment prefix,
 two-signal handling, a thin `main` — and it is the only binary needing both
-the gRPC-server flags (from `cmd/dnv-agent`) and the etcd flags (from
+the gRPC-server flags (from `cmd/dnv-agent`) and the etcd flag (from
 `cmd/dnv-worker`). It has a package doc comment naming this spec; every
 flag but `--version` is also a config key and an environment variable under
 the prefix `DNV_GATEWAY_`; `main` executes `newRootCmd`; one root command, no
@@ -1954,7 +1954,7 @@ environment lookup, an optional `--config` file); an I/O-free
 `splitList` idiom.
 
 CM2. **Flags.** The gRPC flags are the agent command's network and address
-pair, the etcd flags the worker command's endpoints and dial timeout, and
+pair, the etcd flag the worker command's endpoints, and
 the optional config file is the one both carry; the gateway adds no flag of
 its own beyond the `--version` and the `--log-level` every daemon answers
 (`architecture.md`, Components: invocation reference; `log.md` R6), and

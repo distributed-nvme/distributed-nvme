@@ -101,8 +101,6 @@ func addFlags(cmd *cobra.Command) {
 	flags.Int("vote-leave-grace-time", common.DefaultVoteWorkerLeaveGraceTime,
 		"seconds an observed leave must hold before it is committed; "+
 			"more than the vote interval plus the etcd operation timeout")
-	flags.Int("etcd-dial-timeout", common.DefaultEtcdDialTimeout,
-		"seconds to wait for the initial etcd dial (0 = the built-in default)")
 	flags.String("log-level", common.LogLevelInfo,
 		"log level: debug, info or warn; SIGUSR1 sets debug while the "+
 			"process runs and SIGUSR2 sets this level again")
@@ -142,10 +140,6 @@ type options struct {
 	voteInterval   time.Duration
 	graceTime      time.Duration
 	leaveGraceTime time.Duration
-	// dialTimeout bounds the initial etcd dial (EU1, EU5). A non-positive
-	// value is passed through: etcdutil.New substitutes
-	// common.DefaultEtcdDialTimeout for it.
-	dialTimeout time.Duration
 	// logLevel is the parsed --log-level, set before the first record
 	// (log.md R6).
 	logLevel slog.Level
@@ -198,10 +192,8 @@ func optionsFromViper() (*options, error) {
 		voteInterval:   time.Duration(voteInterval) * time.Second,
 		graceTime:      time.Duration(graceTime) * time.Second,
 		leaveGraceTime: time.Duration(leaveGraceTime) * time.Second,
-		dialTimeout: time.Duration(viper.GetInt("etcd-dial-timeout")) *
-			time.Second,
-		logLevel:      logLevel,
-		graceTooShort: graceTime <= 2*voteInterval,
+		logLevel:       logLevel,
+		graceTooShort:  graceTime <= 2*voteInterval,
 	}, nil
 }
 
@@ -299,7 +291,7 @@ func run(cmd *cobra.Command, args []string) error {
 	defer signal.Stop(sigCh)
 	go watchSignals(ctx, cancel, sigCh, os.Exit)
 
-	cli, err := etcdutil.New(ctx, opts.endpoints, opts.dialTimeout)
+	cli, err := etcdutil.New(ctx, opts.endpoints, 0)
 	if err != nil {
 		return err
 	}

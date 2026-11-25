@@ -7056,7 +7056,12 @@ Safe steps, in this order, the order the e2e suite's upgrade case ran
    the new release's units of the dnv programs, the five that Words names,
    over the installed ones, each with your own changes of it made again,
    and run `systemctl daemon-reload`: until then systemd keeps the old
-   units.
+   units. A command line of the gateway, the worker or the cdc that still
+   passes `--etcd-dial-timeout`, in a unit of your own or a script, must
+   drop it: the new build refuses that flag, which bounded nothing. A key
+   of that name in a config file, or the environment variables
+   `DNV_GATEWAY_ETCD_DIAL_TIMEOUT`, `DNV_WORKER_ETCD_DIAL_TIMEOUT` and
+   `DNV_CDC_ETCD_DIAL_TIMEOUT`, are ignored.
 6. On every disk node and every controller node, install the udev rules of
    the new release's `deploy/udev/`, with the two settings that go with
    them ([Install the udev rules on a node](#install-the-udev-rules-on-a-node)).

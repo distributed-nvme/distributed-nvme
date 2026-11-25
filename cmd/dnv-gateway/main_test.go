@@ -19,8 +19,6 @@ import (
 
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
-
-	"github.com/distributed-nvme/distributed-nvme/common"
 )
 
 // The invocation gateway.md, Integration test plan, launches every instance
@@ -37,7 +35,6 @@ var exampleArgs = []string{
 // deliberately no --etcd-op-timeout (EU5) and no default gRPC port (CM2).
 var cm2Flags = []string{
 	"config",
-	"etcd-dial-timeout",
 	"etcd-endpoints",
 	"grpc-address",
 	"grpc-network",
@@ -149,10 +146,6 @@ func TestDefaults(t *testing.T) {
 	if opts.grpcNetwork != "tcp" {
 		t.Errorf("grpc-network = %q, want tcp", opts.grpcNetwork)
 	}
-	want := time.Duration(common.DefaultEtcdDialTimeout) * time.Second
-	if opts.dialTimeout != want {
-		t.Errorf("etcd-dial-timeout = %v, want %v", opts.dialTimeout, want)
-	}
 	if !reflect.DeepEqual(opts.endpoints, []string{"127.0.0.1:15379"}) {
 		t.Errorf("endpoints = %v, want [127.0.0.1:15379]", opts.endpoints)
 	}
@@ -167,16 +160,12 @@ func TestEnvironmentSuppliesEveryValue(t *testing.T) {
 	t.Setenv("DNV_GATEWAY_GRPC_ADDRESS", "10.0.0.9:29527")
 	t.Setenv("DNV_GATEWAY_GRPC_NETWORK", "tcp")
 	t.Setenv("DNV_GATEWAY_ETCD_ENDPOINTS", "a:2379,b:2379")
-	t.Setenv("DNV_GATEWAY_ETCD_DIAL_TIMEOUT", "9")
 	opts := mustOptions(t, nil)
 	if opts.grpcAddress != "10.0.0.9:29527" {
 		t.Errorf("grpc-address = %q, want 10.0.0.9:29527", opts.grpcAddress)
 	}
 	if !reflect.DeepEqual(opts.endpoints, []string{"a:2379", "b:2379"}) {
 		t.Errorf("endpoints = %v, want [a:2379 b:2379]", opts.endpoints)
-	}
-	if opts.dialTimeout != 9*time.Second {
-		t.Errorf("dial timeout = %v, want 9s", opts.dialTimeout)
 	}
 }
 
@@ -249,14 +238,15 @@ func TestValidationRejections(t *testing.T) {
 	}
 }
 
-// TestZeroDialTimeoutIsPassedThrough pins EU5's contract: a non-positive dial
-// timeout reaches etcdutil.New, which substitutes the default itself, rather
-// than being silently rewritten here.
-func TestZeroDialTimeoutIsPassedThrough(t *testing.T) {
-	opts := mustOptions(t, append(append([]string(nil), exampleArgs...),
-		"--etcd-dial-timeout", "0"))
-	if opts.dialTimeout != 0 {
-		t.Errorf("dial timeout = %v, want 0", opts.dialTimeout)
+// TestEtcdDialTimeoutFlagIsGone: the flag --etcd-dial-timeout is gone, since
+// the etcd client does not wait for its first connection and a dial timeout
+// bounds nothing; the program refuses the flag as unknown.
+func TestEtcdDialTimeoutFlagIsGone(t *testing.T) {
+	cmd := newRootCmd()
+	err := cmd.ParseFlags([]string{"--etcd-dial-timeout", "5"})
+	if err == nil || !strings.Contains(err.Error(), "unknown flag") {
+		t.Errorf("--etcd-dial-timeout parsed with %v, want an unknown flag",
+			err)
 	}
 }
 

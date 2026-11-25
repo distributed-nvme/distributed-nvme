@@ -21,7 +21,6 @@ import (
 	"strconv"
 	"strings"
 	"syscall"
-	"time"
 
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
@@ -83,8 +82,6 @@ func addFlags(cmd *cobra.Command) {
 	flags := cmd.Flags()
 	flags.String("etcd-endpoints", "",
 		"comma-separated host:port list of the etcd cluster (required)")
-	flags.Int("etcd-dial-timeout", common.DefaultEtcdDialTimeout,
-		"seconds to wait for the initial etcd dial (0 = the built-in default)")
 	flags.String("range", common.CdcRangeAll,
 		"comma-separated hex digits, each claiming the sixteen shard "+
 			"codes h0..hf")
@@ -124,10 +121,6 @@ func bindViper(cmd *cobra.Command) error {
 type options struct {
 	// endpoints is the parsed --etcd-endpoints list, never empty (CM2).
 	endpoints []string
-	// dialTimeout bounds the initial etcd dial (EU1, EU5). A non-positive
-	// value is passed through: etcdutil.New substitutes
-	// common.DefaultEtcdDialTimeout for it.
-	dialTimeout time.Duration
 	// ranges is the parsed --range list: non-empty, duplicate-free, every
 	// element in [0, 15], in the order given (CM2).
 	ranges []uint32
@@ -183,14 +176,12 @@ func optionsFromViper() (*options, error) {
 	}
 	return &options{
 		endpoints: endpoints,
-		dialTimeout: time.Duration(viper.GetInt("etcd-dial-timeout")) *
-			time.Second,
-		ranges:   ranges,
-		trType:   trType,
-		adrFam:   adrFam,
-		trAddr:   trAddr,
-		trSvcId:  trSvcId,
-		logLevel: logLevel,
+		ranges:    ranges,
+		trType:    trType,
+		adrFam:    adrFam,
+		trAddr:    trAddr,
+		trSvcId:   trSvcId,
+		logLevel:  logLevel,
 	}, nil
 }
 
@@ -315,7 +306,7 @@ func run(cmd *cobra.Command, args []string) error {
 	defer signal.Stop(sigCh)
 	go watchSignals(ctx, cancel, sigCh, os.Exit)
 
-	cli, err := etcdutil.New(ctx, opts.endpoints, opts.dialTimeout)
+	cli, err := etcdutil.New(ctx, opts.endpoints, 0)
 	if err != nil {
 		return err
 	}
