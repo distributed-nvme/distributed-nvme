@@ -4244,6 +4244,12 @@ type DnConf struct {
 	// what that field records. A write that changes only this count raises no
 	// revision, and a release stops at zero. Appended, never renumbered.
 	UsedMetaUnits uint64 `protobuf:"varint,10,opt,name=used_meta_units,json=usedMetaUnits,proto3" json:"used_meta_units,omitempty"`
+	// The host name the node's agent reported at the node's create
+	// (GetDnSizeReply.host_name), empty when the read failed and for a node
+	// created before the field. A migration's destination is never a node
+	// of the old side's host name (architecture.md, Migrations). Appended,
+	// never renumbered.
+	HostName      string `protobuf:"bytes,11,opt,name=host_name,json=hostName,proto3" json:"host_name,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -4346,6 +4352,13 @@ func (x *DnConf) GetUsedMetaUnits() uint64 {
 		return x.UsedMetaUnits
 	}
 	return 0
+}
+
+func (x *DnConf) GetHostName() string {
+	if x != nil {
+		return x.HostName
+	}
+	return ""
 }
 
 // {dnv_prefix} cn_conf {cluster_id} {addr_port}
@@ -21115,7 +21128,7 @@ const file_pb_schema_proto_rawDesc = "" +
 	"\brevision\x18\x02 \x01(\x04R\brevision\"<\n" +
 	"\x05SpRev\x12\x17\n" +
 	"\asp_name\x18\x01 \x01(\tR\x06spName\x12\x1a\n" +
-	"\brevision\x18\x02 \x01(\x04R\brevision\"\xe0\x02\n" +
+	"\brevision\x18\x02 \x01(\x04R\brevision\"\xfd\x02\n" +
 	"\x06DnConf\x12\x13\n" +
 	"\x05dn_id\x18\x01 \x01(\x04R\x04dnId\x12\x1d\n" +
 	"\n" +
@@ -21130,7 +21143,8 @@ const file_pb_schema_proto_rawDesc = "" +
 	"\ffree_ext_cnt\x18\t \x01(\x04R\n" +
 	"freeExtCnt\x12&\n" +
 	"\x0fused_meta_units\x18\n" +
-	" \x01(\x04R\rusedMetaUnits\"\xd2\x02\n" +
+	" \x01(\x04R\rusedMetaUnits\x12\x1b\n" +
+	"\thost_name\x18\v \x01(\tR\bhostName\"\xd2\x02\n" +
 	"\x06CnConf\x12\x13\n" +
 	"\x05cn_id\x18\x01 \x01(\x04R\x04cnId\x12\x1d\n" +
 	"\n" +

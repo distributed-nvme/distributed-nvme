@@ -2,6 +2,7 @@ package gateway
 
 import (
 	"context"
+	"strings"
 
 	"google.golang.org/protobuf/proto"
 
@@ -752,6 +753,53 @@ func grpDnLocations(
 		locs = append(locs, dn.GetLocation())
 	}
 	return locs, nil
+}
+
+// storedHostName is the host name a disk node's record keeps: the agent's,
+// but none for the names a machine nobody named reports, which every such
+// machine shares, so that they would refuse every migration between them
+// (architecture.md, Migrations).
+func storedHostName(hostName string) string {
+	switch hostName {
+	case "localhost", "localhost.localdomain", "(none)":
+		return ""
+	}
+	return hostName
+}
+
+// sameHostDns is every disk node of the cluster whose stored host name is
+// host, a migration's black list beside its group's disk nodes
+// (architecture.md, Migrations): two dn agents of one machine share one
+// kernel, and the two sides of one leg export the same subsystem and
+// namespace there, so each would take them from the other. An empty host,
+// a node created before the field or whose agent's read failed, names none.
+// It reads outside any STM, as grpDnLocations does: a host name never
+// changes after the create.
+func sameHostDns(
+	ctx context.Context,
+	cli *etcdutil.Client,
+	cid uint64,
+	host string,
+) ([]string, error) {
+	if host == "" {
+		return nil, nil
+	}
+	prefix := model.DnConfPrefix(cid)
+	kvs, _, err := cli.Range(ctx, prefix)
+	if err != nil {
+		return nil, errAborted("%v", err)
+	}
+	var addrs []string
+	for _, kv := range kvs {
+		dn := &pb.DnConf{}
+		if err := cli.Decode(ctx, kv, dn); err != nil {
+			return nil, errAborted("%v", err)
+		}
+		if dn.GetHostName() == host {
+			addrs = append(addrs, strings.TrimPrefix(kv.Key, prefix))
+		}
+	}
+	return addrs, nil
 }
 
 // cnLocations is the failure domain of every CN addrs names: the tier-1

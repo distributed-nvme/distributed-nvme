@@ -3,6 +3,9 @@ package gateway
 import (
 	"context"
 
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
+
 	"github.com/distributed-nvme/distributed-nvme/common"
 	"github.com/distributed-nvme/distributed-nvme/etcdutil"
 	"github.com/distributed-nvme/distributed-nvme/model"
@@ -362,6 +365,7 @@ func (s *Server) CreateMigration(
 			planUnits uint64
 			planGrp   *pb.Group
 			planRep   *pb.Repair
+			planHost  string
 		)
 		err := s.cli.Snapshot(ctx, func(stm etcdutil.STM) error {
 			// openSp, not openSpRead: this is a MUTATOR's planning read, so
@@ -412,6 +416,13 @@ func (s *Server) CreateMigration(
 			planUnits = units
 			planGrp = loc.Grp
 			planRep = rep
+			// The old side's machine, which the destination never shares
+			// (sameHostDns); a disk node record that is gone names none.
+			srcDn := &pb.DnConf{}
+			if stm.Get(model.DnConfKey(sc.Cid, loc.Side.GetAddrPort()),
+				srcDn) {
+				planHost = srcDn.GetHostName()
+			}
 			return nil
 		})
 		if err != nil {
@@ -424,6 +435,13 @@ func (s *Server) CreateMigration(
 		if err != nil {
 			return err
 		}
+		// Then the old side's machine joins the black list, but not the
+		// tier-1 locations: its other disk nodes are no failure domain the
+		// group occupies, they are simply never the destination.
+		sameHost, err := sameHostDns(ctx, s.cli, planCid, planHost)
+		if err != nil {
+			return err
+		}
 		picks, err := pickDns(
 			ctx, s.cli, planCid, planCc,
 			dnPickPlan{
@@ -432,9 +450,17 @@ func (s *Server) CreateMigration(
 				ExcludeLocs: planLocs,
 				MetaUnits:   planUnits,
 			},
-			req.GetDnSelector(), planBlack, whatMigrDst,
+			req.GetDnSelector(), append(planBlack, sameHost...),
+			whatMigrDst,
 		)
 		if err != nil {
+			if len(sameHost) > 1 && status.Code(err) ==
+				codes.ResourceExhausted {
+				return errExhausted("%s; the disk nodes of host %q, the "+
+					"old side's machine, are passed over, since two disk "+
+					"nodes of one machine never hold the two sides of one "+
+					"leg", status.Convert(err).Message(), planHost)
+			}
 			return err
 		}
 		cand := picks[0]
@@ -509,6 +535,14 @@ func (s *Server) CreateMigration(
 			dn, err := ledger.verifyPick(cand, extCnt, units)
 			if err != nil {
 				return err
+			}
+			// The pass-over decided again on the pick's own record: a disk
+			// node created on the old side's machine after the plan listed
+			// the machine's nodes, or deleted and created again at the
+			// pick's address, is no destination. The old side's host name
+			// cannot change, since its disk node holds the side.
+			if planHost != "" && dn.GetHostName() == planHost {
+				return errCandidateChanged
 			}
 			minter := newSpIdMinter(sc.Conf)
 			migrId = minter.mint()

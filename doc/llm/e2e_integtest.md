@@ -227,9 +227,9 @@ loses its destination after the cutover, with its copy whole.
 Every guest comes from the command line (E2E1), each in one role. The
 control-plane guest runs etcd, `dnv-gateway`, `dnv-worker`, `dnv-cdc` and
 `dnvctl` as the login user. At least three controller-node guests run one
-`dnv-agent cn` each, registered at its guest's role as its location, since
-the lab's node guests share one host name, the default location
-(`architecture.md`, Controller nodes): two carry the pool's cntlrs and the
+`dnv-agent cn` each, registered at its guest's role as its location, the
+default location being the host name, which a lab may share among its
+guests (`architecture.md`, Controller nodes): two carry the pool's cntlrs and the
 rest none, where the ops case's third cntlr and the cntlr replacements land.
 The disk-node guests, at
 least as many as a group has legs, and more than that in a run with the copy
@@ -1803,7 +1803,11 @@ state; a cleanup-only run does neither. Preflight dies on the first failure,
 naming the guest and the fix. It proves that the driver has its tools, the
 binaries, whose build versions it prints, the tree's constants (E2E12) and
 a pinned etcd release; that every
-guest answers passwordless ssh; that a node guest has what the sweeps and the
+guest answers passwordless ssh; that the disk-node guests' host names
+differ, since the gateway keeps a migration's new side off every disk node
+of the old side's host name (`architecture.md`, Migrations) and guests
+that share one would leave the copy and react cases' migrations no
+destination; that a node guest has what the sweeps and the
 agents need — sudo, the tools of both roles (on a controller node, also the
 thin metadata reader the cn agent runs, those of the copy case's clone
 bucket when that case is in the run, those of the react case's flush-stage

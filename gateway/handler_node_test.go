@@ -1158,6 +1158,12 @@ func TestCreateDiskNodeWritesFourKeys(t *testing.T) {
 		if location == "" {
 			location = tc.hostName
 		}
+		// The record keeps the host name the agent reported, which the
+		// fake gives as its own address unless the case sets one.
+		hostName := tc.hostName
+		if hostName == "" {
+			hostName = addr
+		}
 		// err_epoch 0, an empty side_ptr_list and free == total are the state
 		// of a node that is healthy and hosts nothing yet
 		// (architecture.md, Disk nodes).
@@ -1171,6 +1177,7 @@ func TestCreateDiskNodeWritesFourKeys(t *testing.T) {
 			Location:    location,
 			TotalExtCnt: tc.wantExt,
 			FreeExtCnt:  tc.wantExt,
+			HostName:    hostName,
 		}, tc.label+": dn_conf")
 		rev := &pb.DnRev{}
 		hnodeGet(t, s, model.DnRevKey(tc.wantShard, cid, tc.wantId), rev)

@@ -894,7 +894,10 @@ to no cluster (`architecture.md`, Worker registry).
   zero is refused `ABORTED`, never divided by, GW11); gate and mint from
   `DnGlobal` (GW12, `RESOURCE_EXHAUSTED` at `MaxDnCntPerCluster`); put the
   `DnConf` with `dn_id`, `shard_code`, `disabled`, `nvme_tr_conf`,
-  `location`, `total_ext_cnt` and a `free_ext_cnt` equal to the total;
+  `location`, `total_ext_cnt`, a `free_ext_cnt` equal to the total and the
+  reply's host name as `host_name` (`storedHostName`), empty when the
+  agent's read failed and for `localhost`, `localhost.localdomain` and
+  `(none)`, which every unnamed machine reports;
   `model.MaintainDnCapacity` from no record to the new one; put the `DnRev`
   holding the `addr_port` and the first revision at `DnRevKey`; put the
   global. Reply `dn_id`.
@@ -1607,8 +1610,14 @@ The codes are those of `architecture.md`, Migrations.
   (`pickDns`, with the black list and the two tiers of `architecture.md`,
   Per-operation allocation, both over the group's DN set, its repair's new
   legs included (`grpDnAddrs`); the group's DN locations are read outside
-  every transaction through `grpDnLocations`; each round reads the group
-  afresh —
+  every transaction through `grpDnLocations`; every DN whose stored
+  `host_name` is the source DN's, read in the planning snapshot, joins the
+  black list but not the locations (`sameHostDns`, a range of the
+  cluster's `DnConf` records outside any transaction), and a round left
+  with no DN while another DN shares that host name answers
+  `RESOURCE_EXHAUSTED` saying the old side's machine is passed over, and
+  the deciding STM drops a pick whose record carries that host name as a
+  changed candidate (GW9); each round reads the group afresh —
   hence the candidate extent count, the destination's metadata units
   (`migrMetaUnitsOf`, behind GW11's two gates), the black list and the
   locations — before it scans). The scan passes over a DN without room for

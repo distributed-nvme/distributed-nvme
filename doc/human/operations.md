@@ -2486,9 +2486,11 @@ Safe steps:
    still never has two legs in it, but a repair or a migration then finds
    no other location sooner and can put the new leg on the machine that
    holds the group's other leg, and a new pool can put a leg on its
-   primary's machine. Set the name once: a machine renamed between two
-   creates puts its nodes in two locations, and a group can then get two
-   legs on that machine.
+   primary's machine. Two machines with one name also get no move of a
+   leg between their disk nodes ([Move a leg to another disk
+   node](#move-a-leg-to-another-disk-node)). Set the name once: a machine
+   renamed between two creates puts its nodes in two locations, and a
+   group can then get two legs on that machine.
 2. To keep the legs of a group in different racks, not only on different
    machines, pass `--location <rack>` on every node of every machine in
    the rack: on its disk nodes and on its controller node alike. A rack
@@ -3426,6 +3428,22 @@ When to use: a side must leave its disk node while its leg works: a slow
 leg ([A slow leg](#a-slow-leg)), a disk node to empty before its removal
 ([Remove a node](#remove-a-node)), or a disk to replace. A leg that failed
 is replaced by a repair instead ([Repair a leg by hand](#repair-a-leg-by-hand)).
+Never move a side to another disk node of the same machine: two disk
+nodes of one machine share its kernel, and the two sides of one leg would
+then fight over one export, so the leg has no steady path and its IO
+waits or fails. The gateway passes over every disk node whose agent
+reported the old side's host name when the node was created, which
+`dnvctl dn get` shows as `dn_conf.host_name`, and refuses the move with
+the error code RESOURCE_EXHAUSTED when only those have room. It cannot
+tell a machine whose disk node runs in a container, which reports the
+container's name, a machine renamed between two of its node creates, nor
+a disk node with no stored host name: one created before dnv kept it, one
+whose agent could not read it, or one on a machine that reports
+`localhost`; there keep the rule yourself, with `--dn-black` or
+`--dn-white`. The other way round, two machines that report one host name
+get no move between their disk nodes: give each machine its own name, as
+[Choose a node's location](#choose-a-nodes-location) says, then empty,
+delete and create again its disk nodes.
 
 How to confirm it can run: `dnvctl sp get` lists, under `slice_list`, each
 group's `leg_list`, and each leg's `side_list` with the `side_id` and the

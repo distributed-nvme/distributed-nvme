@@ -2196,6 +2196,23 @@ failover's among them.
 
 ## 8. Waits a host can see
 
+- **A migration between two disk nodes of one machine has no steady
+  path.** Two disk nodes of one machine share its kernel, and the two
+  sides of one leg export the same subsystem and namespace there, so each
+  takes them from the other about once in each check round: the leg's IO
+  waits or fails, and at the migration's finish the old side's removal can
+  take away the export the new side serves through. The gateway keeps a
+  migration's new side off every disk node whose agent reported the old
+  side's host name when the node was created. A host name does not name a
+  machine in every case: an agent in a container reports the container's
+  name, two machines can share a name, and a disk node created before dnv
+  kept the name, or whose agent's read failed, has none, and two machines
+  that report one name get no migration between their disk nodes at all,
+  until each has a name of its own and its disk nodes are created again.
+  State: accepted.
+  Procedure written: no migration between two disk nodes of one machine
+  ([the operations doc](operations.md#move-a-leg-to-another-disk-node)).
+  Not seen in the lab.
 - **A detach of the Kubernetes driver, and the attach that follows it, wait
   until the primary has ended the old host's connection.** A detach takes a
   Kubernetes node off a volume's list of hosts, and then waits until the cn

@@ -174,6 +174,12 @@ func (s *Server) CreateDiskNode(
 			Location:    location,
 			TotalExtCnt: totalExtCnt,
 			FreeExtCnt:  totalExtCnt,
+			// The machine's name, kept so that a migration never puts the
+			// two sides of one leg on two disk nodes of one machine
+			// (architecture.md, Migrations); empty when the read failed,
+			// and for a name every unnamed machine reports, which names no
+			// machine (storedHostName).
+			HostName: storedHostName(hostName),
 		}
 		stm.Put(confKey, newDn)
 		// The capacity key is written iff the new node is allocatable, so a

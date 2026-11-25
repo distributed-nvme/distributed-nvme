@@ -353,7 +353,10 @@ disk nodes would be one location, and the RAID1 pool below would be
 refused. Each disk node therefore gets a location of its own, `dn0` to
 `dn3`. The two copies of each group are then on two disks of this one
 machine, not on two machines. The controller node keeps the host name as
-its location.
+its location. Do not move a side between these disk nodes with a
+migration: two disk nodes of one machine must never hold the two sides of
+one leg. The gateway stores each disk node's host name and passes over
+the old side's machine, so a migration on this machine is refused.
 
 ```
 ./dnvctl --gateway-address 127.0.0.1:29527 --cluster c0 dn create --addr 127.0.0.1:29900 --tr-addr 127.0.0.1 --tr-svc-id 4301 --location dn0

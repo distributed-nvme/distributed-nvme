@@ -10188,6 +10188,26 @@ preflight_guests() {
 	# not" could not be told apart.
 	assert_ne "${HOST_NQN[0]}" "${HOST_NQN[1]}" "the two hosts' hostnqn"
 
+	# The disk-node guests' host names must differ: the gateway keeps a
+	# migration's new side off every disk node of the old side's host name
+	# (architecture.md, Migrations), so guests that share one would leave the
+	# copy case's and the react case's migrations no destination. Each node's
+	# location is still its role, passed at its create (E2E4).
+	local names name seen=""
+	for v in "${!DN[@]}"; do
+		name=$(ssh_to "${DN[$v]}" "cat /proc/sys/kernel/hostname") ||
+			die "dn$v: reading its host name failed"
+		case " $seen " in
+		*" $name "*)
+			die "dn$v shares the host name '$name' with another disk-node" \
+				"guest: no migration would find a destination; give each" \
+				"guest its own name (hostnamectl set-hostname)" ;;
+		esac
+		seen="$seen $name"
+	done
+	names=${seen# }
+	log "  the disk-node guests' host names differ: $names"
+
 	# The crash scan reads the control-plane guest as the plain user and the
 	# node guests through sudo: one plant through each.
 	panic_plant cp ssh_cp

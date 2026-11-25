@@ -760,9 +760,9 @@ The suite deploys the dnv stack itself, as the e2e suite does, with its
 own copies of the deployment verbs: etcd, the gateway, the worker and the
 cdc on the control-plane guest as the login user, one dn agent per
 disk-node guest over a sparse loop device, one cn agent per controller-node
-guest, each guest its own location, passed at its node's create (the lab's
-disk-node and controller-node guests share one host name, the default
-location: `architecture.md`, Disk nodes), and a cluster with every node
+guest, each guest its own location, passed at its node's create (the
+default location is the host name, which a lab may share among its
+guests: `architecture.md`, Disk nodes), and a cluster with every node
 registered; the controller and disk nodes carry the udev rules of
 `deploy/udev/` (`architecture.md`, Components: invocation reference), and
 the hosts the mask of nvme-cli's autoconnector, for the run. No cn agent

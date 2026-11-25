@@ -621,18 +621,31 @@ Per **side** (one per hosted leg replica):
     rule already covers.
 
     Only a **migration** ever gives a leg two sides, so the rule is a
-    placement one, not an agent-flag one: when every DN of one kernel shares
-    one `location`, the first tier of Per-operation allocation keeps a
+    placement one, not an agent-flag one. A migration's destination is never
+    a DN whose stored `host_name`, the host name its agent reported at the
+    DN's create, is the source DN's (Migrations), whatever their
+    `location`s. Beside it, when every DN of one kernel shares one
+    `location`, the first tier of Per-operation allocation keeps a
     migration destination (and a repair's fresh new leg) off the source's
     kernel. An omitted `location` is the host name of the node's machine
     (Disk nodes), so the DNs of one kernel share it unless the operator
-    names another. Two things bound that. A DN created with a `location`
-    other than its kernel's DNs', or on a machine renamed between two
-    creates, is a failure domain apart, and nothing keeps it off its
-    kernel's other DNs; and even under a shared `location` the second tier
-    of Per-operation allocation rescans without the exclusion rather than
-    refuse to place, so the guarantee holds only while some other domain
-    still has a free DN.
+    names another. Two things bound the location's part. A DN created with
+    a `location` other than its kernel's DNs', or on a machine renamed
+    between two creates, is a failure domain apart; and even under a shared
+    `location` the second tier of Per-operation allocation rescans without
+    the exclusion rather than refuse to place, so it holds only while some
+    other domain still has a free DN. The host name's part holds at any
+    location and any tier, but a host name does not name a kernel in every
+    case. It misses a kernel when an agent in a container reports the
+    container's name, when a machine renamed between two creates gives its
+    DNs two names, and for a DN that stores none: one created before the
+    field, one whose agent's read failed, and one whose machine reports a
+    name every unnamed machine shares (`localhost`, `localhost.localdomain`,
+    `(none)`), which is stored as none. So the operator keeps the rule too
+    (Known limits). And it joins kernels: two machines that report one name
+    get no migration between them at all, whatever their locations, until
+    their DNs are emptied, deleted and created again under names of their
+    own (Disk nodes).
 
 ```mermaid
 flowchart BT
@@ -1761,7 +1774,8 @@ counts no metadata units, since no copy keeps its metadata there.
 * **CreateMigration** — one DN; `candExt` is the group's `ext_cnt` and
   `candUnits` the migration's metadata units (Metadata units); the
   black list starts with the group's DNs, those of every leg and side of
-  the group (below).
+  the group (below), and with every DN whose stored `host_name` is the
+  source DN's (Migrations), which do not join the locations below.
   Placement is **two-tier**, because a black list of `addr_port`s excludes
   DNs and not failure domains: **tier 1** scans with the `location`s of
   those same DNs excluded as well (they seed `excludeLocs`, so a DN merely
@@ -1789,7 +1803,9 @@ counts no metadata units, since no copy keeps its metadata there.
   migration's units, as every pick with a unit floor is dropped (Metadata
   units).
 * **CreateRepair** — a fresh new leg is one DN, with the same black-list
-  seeding and the same two tiers as CreateMigration, the request's
+  seeding from the group's DNs and the same two tiers as CreateMigration,
+  but no DN passed over for its host name, since a new leg is no second
+  side of a leg, the request's
   `dn_selector` filtering the scan, and no unit floor: a new leg takes no
   metadata units. It is planned in every round from a fresh read of the
   group and of its DNs' locations, and its deciding STM,
@@ -2832,7 +2848,9 @@ give each agent a failure domain of its own in silence. The name is read
 at the create alone: a node keeps its `location` when its machine is
 renamed, so a machine renamed between two creates puts its nodes in two
 locations, and an agent in a container with a host name of its own
-reports that name. Two machines that report one name are one location: a
+reports that name. Two machines that report one name are one location,
+and no migration moves a side from a DN of one to a DN of the other, since
+the stored `host_name` takes them for one kernel (Migrations): a
 new group still never has two legs in it, but a repair's new leg, a
 migration's destination and a pool create's first preference find no
 other location sooner, and their second tier can then place a leg on the
@@ -2855,8 +2873,10 @@ existing `dn_conf` key; compute `total_ext_cnt` (Size → extents) from the
 allocate `dn_id` and `shard_code` from `DnGlobal` (Globals: id allocation +
 shard buckets);
 write the `DnConf` (`disabled`, a zero `err_epoch`, `nvme_tr_conf`,
-`location`, an empty `side_ptr_list`, `total_ext_cnt`, and `free_ext_cnt`
-equal to `total_ext_cnt`); write the `DnCapacity` key at the computed
+`location`, an empty `side_ptr_list`, `total_ext_cnt`, `free_ext_cnt`
+equal to `total_ext_cnt`, and the reported host name as `host_name`, kept
+for the migration's pass-over of the source's machine, Migrations, and
+never changed, empty when the agent's read failed); write the `DnCapacity` key at the computed
 `bin_idx` iff the node is allocatable (Capacity index keys); write the
 `DnRev` key with the first revision and `addr_port` set to the node's
 endpoint — its appearance makes the owning dn worker start syncing and
@@ -4364,9 +4384,22 @@ allocation) — a DN without room in its clone-metadata area for the
 migration's units is no candidate, and a refusal for want of that room says
 no DN has metadata room (Metadata units).
 
-Action: allocate one DN (Per-operation allocation). The deciding STM drops a
-pick when the group, as that STM reads it, occupies a DN the scan's read of
-the group did not, and the scan and the STM re-run as a unit from a fresh
+Action: allocate one DN (Per-operation allocation), with every DN whose
+stored `host_name` is the source DN's on the black list beside the group's
+DNs, but not among the tier-1 locations (Disk node, the `SideToCnNqn` note
+under Per side): two dn agents of one kernel export the two sides of one
+leg as one subsystem and one namespace, so each would take them from the
+other, the leg would have no steady path, and the source side's removal at
+the finish could take the export the destination serves through. When the
+scan then finds no DN, and another DN shares the source's host name, the
+`RESOURCE_EXHAUSTED` says so. The deciding STM drops a pick whose DN's
+record, as it reads it, carries the source DN's host name, as a changed
+candidate (`gateway.md` GW9): a DN created on the source's machine after
+the plan listed the machine's DNs, or deleted and created again at the
+pick's address. The source DN's own host name cannot change while it
+holds the source side. The deciding STM also drops
+a pick when the group, as that STM reads it, occupies a DN the scan's read
+of the group did not, and the scan and the STM re-run as a unit from a fresh
 read of the group (`gateway.md` GW9): the scan's black list and tier-1
 locations come from that earlier read, so a side hung off the group since —
 a migration of its other leg, a repair's new leg — could put the
@@ -9674,6 +9707,20 @@ document and only pointed to here.
   where that host wrote a block the bitmap marked never written, and the
   old bytes where it wrote a region the copy had already read. Nothing
   checks what `allowed_hosts` name.
+* **A host name does not always name a machine.** A migration's
+  destination is never a DN of the source DN's stored host name
+  (Migrations). An agent in a container reports the container's name, a
+  machine renamed between two creates gives its DNs two names, and a DN
+  created before `host_name`, whose agent's read failed, or whose machine
+  reports a name every unnamed machine shares stores none: two DNs of one
+  kernel can then still get the two sides of one leg, which neither then
+  serves steadily (Disk node, the `SideToCnNqn` note under Per side), so
+  the operator keeps the rule: no migration between two disk nodes of one
+  machine. The other way round, two machines that report one name, as
+  machines made from one disk image often do, get no migration between
+  their DNs: the move is refused `RESOURCE_EXHAUSTED` when no other
+  machine has room, until each machine has a name of its own and its DNs
+  are emptied, deleted and created again (Disk nodes).
 * **A clone bitmap page sent again without its position is stored
   twice.** `AppendCloneBitmap` places a page only when the request names
   its position (Clones). Without it the page lands at the end, so a caller
