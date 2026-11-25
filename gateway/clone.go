@@ -935,7 +935,8 @@ func cloneSrcLayoutCheck(
 // bytes [b*C, b*C+C) with C = CloneBmChunkBytes (architecture.md, Clones).
 // So a caller that gives the place the bitmap read named (its slice_idx and
 // start_block) cannot put the page at a wrong one. A request that names the
-// start block and also a bm_idx or an offset is refused, as is a start that
+// start block and also a bm_idx other than zero or an offset is refused, as
+// is a start that
 // is not a whole byte of the bitmap or a page that would cross its chunk's
 // end, which the caller cuts there.
 func clonePagePlace(req *pb.AppendCloneBitmapRequest) (uint32, *uint32, error) {

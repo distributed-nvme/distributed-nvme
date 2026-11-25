@@ -55,8 +55,9 @@ func TestShippedEtcdUnitCarriesTheRequestLimits(t *testing.T) {
 // firewall unit, deploy/systemd/dnv-filter.service (the operations doc, The
 // networks): it loads the table file the operations doc installs, before
 // network-pre.target and from sysinit.target, so the table stands before
-// any interface is up, and its stop deletes the table the example file
-// names and no other, never the whole rule set.
+// the system's network services set the interfaces up and before any dnv
+// program starts, and its stop deletes the table the example file names
+// and no other, never the whole rule set.
 func TestShippedFilterUnitLoadsAndRemovesDnvsTableAlone(t *testing.T) {
 	unit, err := os.ReadFile(filepath.Join("..", "deploy", "systemd",
 		"dnv-filter.service"))

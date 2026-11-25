@@ -862,6 +862,55 @@ func TestWatchFullReadThatFindsNothingNewIsQuiet(t *testing.T) {
 	}
 }
 
+// TestWatchFullReadWritesTheSkipOfALostEvent proves WV7's one exception to
+// its quiet case: a malformed value put under a new key whose event the
+// watch lost leaves the served entries as they were, since a skipped key
+// never enters them, but the full read owes a skip record the last scan did
+// not, so it writes that record, at Warn, and logs its scan at Info.
+func TestWatchFullReadWritesTheSkipOfALostEvent(t *testing.T) {
+	h := newWatchHarness(t, 0x0)
+	h.store.set(t, testKey(0x01, 0x1, 0xa), cdcEntry(
+		"nqn.2026-01.io.dnv-test:cdc:ssa", []string{watchHostNqn},
+		tcpConf("10.0.0.1", "4420"),
+	))
+	h.start()
+	h.logs.waitFor(t, msgScanComplete, 1)
+	h.store.nextWatch(t)
+	if got := h.logs.count(msgEntrySkipped); got != 0 {
+		t.Fatalf("%d cdc entry skipped records after the first scan, want 0", got)
+	}
+
+	badKey := testKey(0x02, 0x1, 0xb)
+	h.store.setRaw(badKey, []byte{0xff, 0x01, 0x02})
+	h.clk.waitWaiters(t, 1)
+	h.clk.advance(watchFullRead)
+	scans := h.logs.waitFor(t, msgScanComplete, 2)
+	h.store.nextWatch(t)
+	if got := scans[1]["level"]; got != "INFO" {
+		t.Errorf("the full read that owes a new skip logs at %v, want INFO", got)
+	}
+	skips := h.logs.waitFor(t, msgEntrySkipped, 1)
+	if got := watchAttrString(t, skips[0], "key"); got != badKey {
+		t.Errorf("cdc entry skipped key = %q, want %q", got, badKey)
+	}
+	if got := skips[0]["level"]; got != "WARN" {
+		t.Errorf("cdc entry skipped of a malformed value at %v, want WARN", got)
+	}
+
+	// The next full read owes the same record and finds the same entries:
+	// quiet again.
+	h.clk.waitWaiters(t, 1)
+	h.clk.advance(watchFullRead)
+	scans = h.logs.waitFor(t, msgScanComplete, 3)
+	h.store.nextWatch(t)
+	if got := scans[2]["level"]; got != "DEBUG" {
+		t.Errorf("the next full read logs at %v, want DEBUG", got)
+	}
+	if got := h.logs.count(msgEntrySkipped); got != 1 {
+		t.Errorf("%d cdc entry skipped records after the next full read, want 1", got)
+	}
+}
+
 // ---------------------------------------------------------------------------
 // WV5 — scan failure
 // ---------------------------------------------------------------------------

@@ -551,7 +551,7 @@ Safe steps:
    the reason `RES_REASON_POOL_NEEDS_CHECK`, follow
    [Repair a thin pool's metadata](#repair-a-thin-pools-metadata); for a
    row that reads ok while its details hold `ro` and no `needs_check`, the
-   metadata is full: follow step 3 of [A pool's space](#a-pools-space); for
+   metadata is full: follow step 4 of [A pool's space](#a-pools-space); for
    any other, stop.
 
 Steps that can lose data:
@@ -1215,12 +1215,13 @@ Confirm: `dnvctl sp get` shows the group's flag
 (`operator_in_charge`) and its repair.
 
 What dnv does alone: with the operator-in-charge flag set, five things
-stop for the group: the worker creates no repair of it; the worker does not
-take back a grow of it whose new group never gets ready, which it would
-otherwise remove; the worker asks for no md check of it, the read of both
-legs that repairs a sector one leg cannot read, and the primary stops a
-check it started for the worker; a bad leg of it that a migration moves
-keeps its migration, which leg repair would otherwise end; and the primary
+stop for the group. The worker creates no repair of it. A grow of it whose
+new group never gets ready is not taken back: the worker does not take it
+back, which it would otherwise do, and `sp withdraw-grow` refuses it until
+you clear the flag. The worker asks for no md check of it, the read of
+both legs that repairs a sector one leg cannot read, and the primary stops
+a check it started for the worker. A bad leg of it that a migration moves
+keeps its migration, which leg repair would otherwise end. And the primary
 leaves a broken array of it as it is. Failover and the other reactions go
 on. The worker still drives a repair of its own that exists. A flag left
 set by mistake leaves the group with no md check for good.
@@ -1247,9 +1248,9 @@ copies").
 When to stop: the group's array does not run and the worker's repair
 waits for an abort it cannot get.
 
-Tested: the worker suite, `integtest/worker_test.sh`, the gateway suite and
-the end-to-end suite check that the flag holds the worker's create of a
-repair. The other effects are checked only by unit tests: the broken array
+Tested: the worker suite, `integtest/worker_test.sh`, and the end-to-end
+suite check that the flag holds the worker's create of a repair; the
+gateway suite sets, reads and clears the flag. The other effects are checked only by unit tests: the broken array
 left alone by the agent's, the md check not asked for, the migration not
 ended and the grow not taken back by the worker's. No test covers the
 primary's stop of a running check under the flag.
@@ -3208,8 +3209,10 @@ Safe steps:
    with `--meta` for a metadata group, the group the row names. The
    gateway refuses a group that is not the newest, a slice's first group,
    a group whose disk nodes have all prepared their sides, which may hold
-   data, and a pool whose level is `NO_THINPOOL` or below. The next grow
-   then runs again.
+   data, and a pool whose level is `NO_THINPOOL` or below. It also refuses
+   a group with a repair, a retired leg, a forced-start mark or the
+   operator-in-charge flag, and one with a leg in a migration: end that
+   first, or clear the flag. The next grow then runs again.
 4. A thin pool can be read-only while its slice's `read` is true. Its
    line in `dnvctl cntlr inspect --id <primary cntlr id>`, the row under
    `slice_id_to_dm_pool`, says why. When it carries `needs_check`, follow
@@ -3451,12 +3454,11 @@ waits or fails. The gateway passes over every disk node whose agent
 reported the old side's host name when the node was created, which
 `dnvctl dn get` shows as `dn_conf.host_name`, and refuses the move with
 the error code RESOURCE_EXHAUSTED when only those have room. It cannot
-tell a machine whose disk node runs in a container, which reports the
-container's name, a machine renamed between two of its node creates, nor
-a disk node with no stored host name: one created before dnv kept it, one
-whose agent could not read it, or one on a machine that reports
-`localhost`; there keep the rule yourself, with `--dn-black` or
-`--dn-white`. The other way round, two machines that report one host name
+tell three cases. A disk node in a container reports the container's
+name. A machine renamed between two of its node creates has two names. A
+disk node has no stored host name when it was created before dnv kept it,
+when its agent could not read it, or when its machine reports `localhost`.
+There keep the rule yourself, with `--dn-black` or `--dn-white`. The other way round, two machines that report one host name
 get no move between their disk nodes: give each machine its own name, as
 [Choose a node's location](#choose-a-nodes-location) says, then empty,
 delete and create again its disk nodes.
@@ -5884,7 +5886,8 @@ Safe steps, as root on the machine of the disk:
      namespace, a name such as `/dev/nvme0n1` with no partition number
      after it, and no other namespace of the drive holds data you keep: a
      drive can apply a format to every one of its namespaces, as
-     `sudo nvme id-ctrl <disk> -H` shows in its "Format NVM Attributes".
+     `sudo nvme id-ctrl <disk> -H` shows in its `fna` field, in the line
+     "Format Applies to … Namespace(s)".
      Otherwise use the write of zeros.
    A write of zeros erases what the disk returns to reads. A flash disk
    can still hold old data in its spare cells, and any disk in blocks it
@@ -5896,7 +5899,7 @@ Safe steps, as root on the machine of the disk:
    `cmp: EOF on <disk> after byte <N>`, where `<N>` is the disk's size,
    `sudo blockdev --getsize64 <disk>`. After `nvme format` a disk can read
    back as zeros, as ones, which
-   `tr ' ' 'ÿ' < /dev/zero | sudo cmp <disk> -` checks the same way,
+   `tr '\0' '\377' < /dev/zero | sudo cmp <disk> -` checks the same way,
    or, after a cryptographic erase, as random bytes, which no read back can
    tell from old data: then run the write of zeros of step 3 after it, and
    check that.
@@ -6798,9 +6801,9 @@ Safe steps:
      break whenever the cntlr holds a newer state than the backup. Three
      more changes read may break, though the layout is the same: a
      migration whose cutover the backup holds as not done, which may have
-     run since; a cntlr whose role differs between what the agent holds
-     and the backup, after a failover or a cntlr replacement since,
-     including a cntlr made since that the backup does not name; and a
+     run since; a cntlr the agent holds as the primary that the backup
+     holds as a standby or does not name, or the other way round, after a
+     failover or a cntlr replacement since; and a
      namespace that serves in the backup but was parked or deleted since,
      such as the namespace of a volume moved to a pool of another etcd,
      before or after the move's last step deleted it. `break_reason_list`
@@ -6921,8 +6924,10 @@ backup names cntlrs, since its agent lost what the node was told; a pool
 with a `RESTORE_VERDICT_BEHIND` or `RESTORE_VERDICT_NOT_LOADED` row and no
 row read `RESTORE_VERDICT_SAME`, `RESTORE_VERDICT_OLDER`,
 `RESTORE_VERDICT_MAY_BREAK` or `RESTORE_VERDICT_NEW`, whose losses are
-then not known; a row read `RESTORE_VERDICT_MAY_BREAK` or
-`RESTORE_VERDICT_RECORD_LOST`; a lost volume that must be kept and that no
+then not known; a row read `RESTORE_VERDICT_MAY_BREAK` whose
+`break_reason_list` names held sides that differ from the restored ones or
+a missing side id of a retired leg, which step 4 does not cover; a row
+read `RESTORE_VERDICT_RECORD_LOST`; a lost volume that must be kept and that no
 host can reach. A pool whose every row is not held, from nodes whose
 agents hold their nodes at or above the restored revision, was deleted
 after the backup: step 8 deletes it again. The check lists no disk node's
@@ -7130,11 +7135,14 @@ Safe steps, in this order, the order the e2e suite's upgrade case ran
    The build 0.1 has no status read, so before an upgrade from 0.1 there is
    nothing to note. Run the new build's node check on every node, with the
    flags its agent will run with ([Check a node before it
-   joins](#check-a-node-before-it-joins)). On a node that ran 0.1 the
-   lines `udev rule 58-dnv-dm.rules`, `udev rule 63-dnv-md.rules`,
+   joins](#check-a-node-before-it-joins)). On a node whose udev rules are
+   older than the new release's, as on a node that ran 0.1, the lines
+   `udev rule 58-dnv-dm.rules`, `udev rule 63-dnv-md.rules`,
    `udev rule 63-zz-dnv-md-array.rules` and `md assembly mask` fail or warn
    until step 6 installs the new rules: there those lines are expected,
-   and the run of step 6 decides.
+   and the run of step 6 decides. A line that only warns, such as the ones
+   on lvm2's scan, mdadm.conf or the kernel modules at boot, does not stop
+   the upgrade; fix it as its text says.
    On each host, compare `nvme list-subsys` with `dnvctl ss list`: a host
    that is off a subsystem's list but still connected loses its connection
    at the new agent's first converge, where the controller node's cn agent

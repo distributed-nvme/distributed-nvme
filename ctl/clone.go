@@ -212,7 +212,7 @@ func cloneSetTrCmd() *cobra.Command {
 // or taken with no write when its bytes equal those at that offset, never
 // appended twice (architecture.md, Clones). dnvctl checks nothing itself
 // (CT8): --src-start-block beside --bm-idx or --offset is sent as typed, and
-// the gateway refuses it. The Clone record carries no chunk count: how many chunks a
+// the gateway refuses it beside a non-zero --bm-idx or any --offset. The Clone record carries no chunk count: how many chunks a
 // clone holds is how many chunk keys it has.
 //
 // --bm-hex splits the two failure kinds dnvctl.md, `clone` — `ctl/clone.go`,
@@ -246,7 +246,8 @@ func cloneAppendBmCmd() *cobra.Command {
 			// The first block `td get-bm` printed: the gateway then works
 			// out the chunk and the offset itself. The offset is then sent
 			// only when typed, and --bm-idx as typed, so that the gateway
-			// refuses either beside the start block (CT8).
+			// refuses a non-zero --bm-idx or any offset beside the start
+			// block (CT8).
 			if invoked.Changed("src-start-block") {
 				req.SrcStartBlock = proto.Uint64(u64Of("src-start-block"))
 				if !invoked.Changed("offset") {

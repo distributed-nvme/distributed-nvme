@@ -3,6 +3,7 @@ package cdc
 import (
 	"context"
 	"log/slog"
+	"maps"
 
 	"google.golang.org/protobuf/proto"
 
@@ -27,6 +28,11 @@ type watcher struct {
 	// digit h owns the sixteen codes h0…hf. It is an array rather than a
 	// map because the lookup happens once per key of every scan.
 	owned [common.ShardBucketSize]bool
+	// skipped is the set of `cdc entry skipped` records the last scan that
+	// wrote its records owed, each as its key and reason; a full read that
+	// owes the same set and finds the held entries writes none (WV7). Only
+	// the run goroutine touches it.
+	skipped map[string]struct{}
 	// scanned is closed by the first scan that lands, and only by the run
 	// goroutine. Until then the registry holds no state at all — empty, not
 	// "no subsystems" — so Run keeps the accept loop shut (CM4).
@@ -121,10 +127,11 @@ type skipRecord struct {
 // re-renders every active host against the new map and impacts, by the DS6
 // rule, the ones whose bytes moved from what the held state renders — so
 // AENs are not lost across a watch gap (WV4). A full read (WV7) that finds
-// the scanned map equal to the held one installs nothing, renders no host,
-// writes none of its skip records, each written when its entry came, and
-// logs its `cdc scan complete` at Debug, as it repeats and changes nothing
-// (log.md R6). It reports the revision the scan was served at.
+// the scanned map equal to the held one, and owes the same skip records the
+// last scan that wrote them owed, installs nothing, renders no host, writes
+// none of them, and logs its `cdc scan complete` at Debug, as it repeats and
+// changes nothing (log.md R6). It reports the revision the scan was served
+// at.
 func (w *watcher) scan(ctx context.Context, prefix string, full bool) (int64, bool) {
 	kvs, rev, err := w.deps.store.Range(ctx, prefix)
 	if err != nil {
@@ -155,13 +162,18 @@ func (w *watcher) scan(ctx context.Context, prefix string, full bool) (int64, bo
 		}
 		entries[k] = e
 	}
-	if full && w.reg.holds(entries) {
+	owed := make(map[string]struct{}, len(skips))
+	for _, r := range skips {
+		owed[r.key+"\x00"+r.reason] = struct{}{}
+	}
+	if full && maps.Equal(owed, w.skipped) && w.reg.holds(entries) {
 		slog.DebugContext(ctx, msgScanComplete,
 			slog.Int("entries", len(entries)),
 			slog.Int64("rev", rev),
 		)
 		return rev, true
 	}
+	w.skipped = owed
 	for _, r := range skips {
 		level := slog.LevelInfo
 		if r.warn {

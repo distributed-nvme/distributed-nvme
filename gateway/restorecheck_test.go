@@ -1042,9 +1042,10 @@ func TestCheckControllerNodeRestoreGivesAHeldCntlrOfALostPoolItsRow(
 // all, deleted since the backup. Each gives its own text. A namespace parked
 // in both, one the restored state does not have, one a latched clone's
 // auto_resume does not reach, and a pool where nothing differs read older;
-// a transfer of another subsystem parks nothing. A missing Cntlr, Migration,
-// Subsystem or Transfer record reads RECORD_LOST, and a lost row carries no
-// reason.
+// a transfer of another subsystem parks nothing. A missing thin device
+// record beside a pending cutover reads RECORD_LOST, and a lost row carries
+// no reason; the other missing records are
+// TestCheckControllerNodeRestoreLosesARowOverAMissingNewRecord's.
 func TestCheckControllerNodeRestoreReadsWhatTheSidesHide(t *testing.T) {
 	e := rcMakeEnv(t)
 	const (

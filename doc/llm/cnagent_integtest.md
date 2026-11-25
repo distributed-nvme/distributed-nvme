@@ -1398,8 +1398,9 @@ device is one the stage can reach: an md array whose every member is a dm
 device of dnv, where the signatures land, a dm device of dnv, or one of the
 stage's scratch loop devices, which carry no bcache superblock but are the
 stage's; a bcache device a lab machine uses for its own storage stays.
-Then thinrepair's new metadata device, a loop device over a file in the
-suite's work folder, is detached and its file removed. Every
+thinrepair's new metadata device, a loop device over a file in the suite's
+work folder, is detached and its file removed with the fault injectors,
+at the cleanup's start. Every
 suspended dnv device is resumed before anything over it is removed, as one
 wedges its removal, the namespace disable above it and any block scan
 (`architecture.md`, [D12]). md arrays are named through udev, else by

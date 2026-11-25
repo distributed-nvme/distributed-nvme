@@ -2061,7 +2061,8 @@ func TestBitmapPositionPresence(t *testing.T) {
 // TestBitmapStartBlockForwardsAsTyped pins --src-start-block: alone it sends
 // src_start_block and no offset, so the gateway works out the place; beside
 // --bm-idx and --offset all three are sent as typed, and the gateway refuses
-// them, since dnvctl checks nothing itself (CT8).
+// a non-zero --bm-idx or any offset beside it, since dnvctl checks nothing
+// itself (CT8).
 func TestBitmapStartBlockForwardsAsTyped(t *testing.T) {
 	alone := runArgv(t, "AppendCloneBitmap",
 		"clone", "append-bm", "--name", "cl0", "--bm-hex", "a5",

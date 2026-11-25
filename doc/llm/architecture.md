@@ -297,7 +297,8 @@ always means the SP's `DmPoolConf.data_block_size`.
   which the operator sets and clears, keeps the worker from creating a
   repair of the group and from ending a bad leg's migration
   (`dnv-worker.md` AR8), auto-grow from withdrawing a stuck grow of it
-  (`dnv-worker.md` AR6), the worker from asking for the group's md check
+  (`dnv-worker.md` AR6) and the operator's `WithdrawGrow` from taking it
+  back (WithdrawGrow), the worker from asking for the group's md check
   (`dnv-worker.md` AR16), and the primary from assembling a broken array of
   the group again (`cnagent.md` CN12, The re-assembly) and from running a
   check it started for the worker, while it stands (Repairs,
@@ -2876,7 +2877,8 @@ write the `DnConf` (`disabled`, a zero `err_epoch`, `nvme_tr_conf`,
 `location`, an empty `side_ptr_list`, `total_ext_cnt`, `free_ext_cnt`
 equal to `total_ext_cnt`, and the reported host name as `host_name`, kept
 for the migration's pass-over of the source's machine, Migrations, and
-never changed, empty when the agent's read failed); write the `DnCapacity` key at the computed
+never changed, empty when the agent's read failed and for `localhost`,
+`localhost.localdomain` and `(none)`); write the `DnCapacity` key at the computed
 `bin_idx` iff the node is allocatable (Capacity index keys); write the
 `DnRev` key with the first revision and `addr_port` set to the node's
 endpoint — its appearance makes the owning dn worker start syncing and
@@ -3118,7 +3120,7 @@ and `CnGlobal`, with these differences:
     held summary with no `ns_id_list`, from an agent before the field,
     reads every restored namespace as deleted. One case it does not see: a
     cutover the worker made after the backup, whose new revision reached
-    the sides and not yet the cntlrs when the backup or the failure came,
+    the sides and not yet the cntlrs when the failure came,
     leaves every row read SAME (`dnv-worker.md` RW14 sends the cntlrs a
     new revision only after the sides apply it).
   * NEW: the restored state has no pool of the `sp_id`: the pool and
@@ -4590,8 +4592,9 @@ Reason: without the flag the worker would create its repair again at once
 after the cancel, and no call changes a pool's `event_threshold` once it is
 made; the flag is the group's, not a level or a flag of the pool, so that
 it stops five things of that group alone: the worker's create of a repair
-(`dnv-worker.md` AR8), auto-grow's withdrawal of a stuck grow
-(`dnv-worker.md` AR6), the end leg repair gives a bad leg's migration
+(`dnv-worker.md` AR8), the withdrawal of a stuck grow, auto-grow's
+(`dnv-worker.md` AR6) and the operator's own `WithdrawGrow` alike, which
+waits until the flag is cleared, the end leg repair gives a bad leg's migration
 (`dnv-worker.md` AR8), the md check, which the worker does not ask for and
 withdraws when it stands (`dnv-worker.md` AR16), and the primary's new
 assembly of a broken array (`cnagent.md` CN12). Failover, auto-grow's
@@ -7304,8 +7307,9 @@ array (Known limits).
 
 **Reuse.** An operator's repair may take a retired leg of its own group as
 its new leg; a worker's repair always takes a fresh one (Repairs). md
-catches it up from the write-intent bitmap only while the array has stayed
-degraded since the leg left; otherwise md copies it whole (Known limits).
+catches it up from the write-intent bitmap in some cases, such as when the
+array has stayed degraded since the leg left, and otherwise copies it whole
+(Known limits).
 A leg that left the array before a forced start is of the array's old
 history, of another identity: the primary refuses its add unless the repair
 carries the operator's force, and with it md copies the leg whole (What the
@@ -7982,8 +7986,9 @@ as a gateway answers, before the id step. Then, in this order:
    the volumes again. On every pool with a row read MAY_BREAK, the hosts'
    IO stops before step 5 starts a worker, since the three hazards below
    that keep the set of sides act from the workers' first syncups; the
-   check's rows are the only record of them, since step 4 clears the
-   stores that held who served.
+   check's rows are the only record of them that a dnv call can read, since
+   step 4 clears the stores that held who served, keeping their files aside
+   where nothing reads them.
 4. For each agent: stop it, copy the files of its local store (Agent
    local-store paths) aside, the only record of what the node was told
    before the restore, delete them, start it. A kept store refuses every
@@ -8088,8 +8093,8 @@ A restore loses or breaks what changed after the backup:
 Reason: the order and the id step close the hazard of a new object taking
 the remains of one made after the backup, data included; a migration cut
 over after the backup can still show a pool another pool's bytes (above),
-which only the restore check sees, as a pending cutover in the restored
-state; the others follow from restoring an older
+which only the restore check can show, as a pending cutover in the
+restored state, save the one case Controller nodes names; the others follow from restoring an older
 desired state over newer nodes, and are stated so that an operator can
 weigh a restore against them; the restore check names, pool by pool, what
 the restore loses on the pools it sees while the agents still hold it:
@@ -8607,10 +8612,11 @@ units assume:
 * The dn instances of one machine share its kernel, and so one
   `location`: each is created with none, which takes the machine's host
   name, or with one that all the machine's disk nodes share. Reason: two dn
-  agents of one kernel must never hold the two sides of one leg, and only a
-  shared `location` keeps a migration's destination off the source's
-  kernel, while another location has a free disk node (Disk node, the
-  `SideToCnNqn` note under Per side). It also keeps the legs of a new group
+  agents of one kernel must never hold the two sides of one leg; the stored
+  `host_name` keeps a migration's destination off the source's machine
+  (Migrations), and a shared `location` does so too where the host name
+  does not name the machine, while another location has a free disk node
+  (Disk node, the `SideToCnNqn` note under Per side). It also keeps the legs of a new group
   on different machines, and the new leg a repair allocates off the
   machines of the group's legs while another location has a free disk node
   (Disk nodes; Per-operation allocation, CreateRepair).
@@ -10150,9 +10156,10 @@ document and only pointed to here.
   Meanwhile a waiting repair is the group's one repair, and the worker's
   leg repair creates no other for the group (`dnv-worker.md` AR8).
 * **A retired leg taken back can join its array with old data.** md
-  catches a returning member up from its write-intent bitmap when the
-  array has stayed degraded since the member left, and otherwise copies a
-  retired leg that a repair takes back as it copies a fresh leg (Repair).
+  catches a returning member up from its write-intent bitmap in some cases,
+  such as when the array has stayed degraded since the member left, and
+  otherwise copies a retired leg that a repair takes back as it copies a
+  fresh leg (Repair).
   md clears the bitmap behind a copy onto another new leg, so the catch-up
   misses the regions that copy passed in two cases: that leg died in its
   copy and the array was then built anew, as by a failover or a reboot of
@@ -10353,8 +10360,8 @@ document and only pointed to here.
   connections include such a twin keeps the old primary's path past the
   fence (Failover). A twin that reaches etcd again catches up by itself
   (`cdc.md` DS10), and so does one whose watch etcd stopped serving, at its
-  next full read, within `DefaultCdcFullReadInterval` seconds, 300
-  (`cdc.md` WV7).
+  next full read, within `DefaultCdcFullReadInterval` seconds (`cdc.md`
+  WV7).
   A stop of the twin is no way out: a node of the Kubernetes driver holds
   every drop while a cdc of its list cannot be read (`csi.md` CSI15), and
   nvme-stas hosts keep the device of every subsystem they use while every

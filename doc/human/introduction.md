@@ -503,9 +503,9 @@ should the unit run.
 The tutorials load nvme-tcp by hand, which lasts until a reboot. Each
 Kubernetes node needs a host NQN and a host id of its own, in
 `/etc/nvme/hostnqn` and `/etc/nvme/hostid`. The driver takes the host NQN
-as the node's name, machines made from one image share the files that
-nvme-cli's package wrote at install, and two nodes with one host NQN
-defeat the driver's detach, which then no longer keeps a lost node off a
+as the node's name. Machines made from one image share the files that
+nvme-cli's package wrote at install. Two nodes with one host NQN defeat
+the driver's detach, which then no longer keeps a lost node off a
 volume ([the scope page](scope.md#54-hosts-and-the-kubernetes-driver)).
 `kubectl get csinodes -o yaml` prints each node's id, its host NQN: two
 nodes with one id share a host NQN. The driver's pods, the Kubernetes units of one or more containers that run its

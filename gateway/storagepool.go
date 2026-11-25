@@ -1583,9 +1583,11 @@ func newestGrownNotReady(slice *pb.Slice, isMeta bool) (*pb.Group, bool) {
 // it is not ready, as the worker's withdrawal does for a disk node that
 // carries a health epoch (dnv-worker.md AR6). One snapshot, opened with
 // openSp so a stale token is ABORTED first (GW6), names the refusals the
-// operator can act on: the slice not in the pool is NOT_FOUND, and a first
-// group, a group that is not the newest of its kind and one whose every leg
-// has a side ready are FAILED_PRECONDITION. Then model.WithdrawGrowAsked
+// operator can act on: the slice not in the pool is NOT_FOUND, and a level
+// of NO_THINPOOL or above, a first group, a group that is not the newest of
+// its kind and one whose every leg has a side ready are
+// FAILED_PRECONDITION; a zero grp_id is INVALID_ARGUMENT before it. Then
+// model.WithdrawGrowAsked
 // decides in its own transaction, which re-checks them all and the
 // repair, retired leg, forced start and operator-in-charge guards, and gives
 // the group's extents back.

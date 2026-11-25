@@ -999,12 +999,10 @@ mount_copy_start() { # <secs>
 
 mount_copy_stop() {
 	local pid
-	pid=$(cat "$WORK/mount-copy.pid" 2>/dev/null) || {
-		echo none
-		return 0
-	}
-	kill "$pid" 2>/dev/null || true
-	rm -f "$WORK/mount-copy.pid"
+	if pid=$(cat "$WORK/mount-copy.pid" 2>/dev/null); then
+		kill "$pid" 2>/dev/null || true
+		rm -f "$WORK/mount-copy.pid"
+	fi
 	echo stopped
 	return 0
 }
@@ -1860,7 +1858,7 @@ dn_residue() {
 # --- the controller node ------------------------------------------------------------
 
 # cn_up starts the one cn agent of this guest, the udev rules of deploy/udev/
-# before it, and is idempotent. <ip> <grpc_port> <trsvcid>
+# before it, and is idempotent. <ip> <grpc_port> <trsvcid> <port_id>
 cn_up() {
 	local ip=$1 gport=$2 svcid=$3 portid=$4
 	local dir="$WORK/cn" store="$WORK/cn/store" log="$WORK/cn/agent.log" pid pat
@@ -2975,12 +2973,15 @@ cleanup_all() {
 # Diagnostics and kept logs
 # ---------------------------------------------------------------------------
 
-# uncut_hosts removes the cut of either case from both hosts, whatever
-# state the run left them in.
+# uncut_hosts removes the cut of any case from both hosts, whatever state
+# the run left them in, and ends the unstage case's copy of a host's mounts,
+# which would keep a volume's device held, every unstage of it refused,
+# until its own time limit.
 uncut_hosts() {
 	local h
 	for h in "${!HOST[@]}"; do
 		cleanup_verb "host$h" uncut ssh_host "$h" net_uncut || true
+		cleanup_verb "host$h" stopped ssh_host "$h" mount_copy_stop || true
 	done
 }
 

@@ -108,8 +108,9 @@ const ReasonGrpListFull = "grp_list_full"
 const ReasonGrowNotReady = "newest_grp_not_ready"
 
 // ReasonStaleRevision is the Reason the ops the gateway shares with the
-// worker — GrowSlice and the repair operations CreateRepair, FinishRepair,
-// CancelRepair, SetRepairAbort and DeleteRetiredLeg (dnv-worker.md MD6) —
+// worker — GrowSlice, WithdrawGrowAsked and the repair operations
+// CreateRepair, FinishRepair, CancelRepair, SetRepairAbort and
+// DeleteRetiredLeg (dnv-worker.md MD6) —
 // carry when their
 // expectRev argument does not match the stored SpRev.revision (gateway.md
 // GW6). The gateway maps exactly this reason to ABORTED "stale

@@ -872,8 +872,9 @@ message DnConf {
     // revision, and a release stops at zero. Appended, never renumbered.
     uint64 used_meta_units = 10;
     // The host name the node's agent reported at the node's create
-    // (GetDnSizeReply.host_name), empty when the read failed and for a node
-    // created before the field. A migration's destination is never a node
+    // (GetDnSizeReply.host_name), empty when the read failed, for
+    // localhost, localhost.localdomain and (none), and for a node created
+    // before the field. A migration's destination is never a node
     // of the old side's host name (architecture.md, Migrations). Appended,
     // never renumbered.
     string host_name = 11;

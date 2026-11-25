@@ -367,15 +367,17 @@ watcher reaches etcd only through the narrow `etcdStore` interface, which
 has no write method, so the rule holds by construction.
 
 WV7. **A full read every few minutes.** A watch generation that has run
-`DefaultCdcFullReadInterval` seconds, 300, ends with no error and no record,
+`DefaultCdcFullReadInterval` seconds ends with no error and no record,
 its etcd watch closed, and the watcher returns to WV1: the rescan installs
 the scanned map and impacts the hosts whose rendered bytes moved (WV4), and
 the next generation watches from the rescan's revision plus one. A full read
-whose scanned map equals the held one, entry for entry, installs nothing and
-renders no host, writes none of the `cdc entry skipped` records its entries
-earned, each written when its entry came, and logs its `cdc scan complete`
-at Debug, as it repeats and changes nothing (`log.md` R6); one that finds a
-change works as a rescan (WV4), its records at their levels. The
+whose scanned map equals the held one, entry for entry, and that owes the
+same `cdc entry skipped` records as the last scan that wrote them, installs
+nothing and renders no host, writes none of those records, and logs its
+`cdc scan complete` at Debug, as it repeats and changes nothing (`log.md`
+R6); one that finds a change, or owes a record the last one did not, as for
+a malformed record whose event the watch lost, works as a rescan (WV4), its
+records at their levels. The
 reason: a watch that still hears etcd's progress notifications while it
 loses events is noticed by nothing else, as `etcdutil` ends only a watch
 that hears nothing at all (`dnv-worker.md` EU3), and without the full read
@@ -871,7 +873,7 @@ gives up a host's lost connection at its default; every 30 seconds the host
 still holds the device, the loop has written more and no write has failed,
 and from 690 seconds on neither host holds a discovery controller to the
 fleet, which shows the kernel gave them up. The fleet then starts again,
-both hosts reconnect within two minutes, as stafd connects a controller the
+both hosts reconnect, each wait bounded by two minutes, as stafd connects a controller the
 kernel gave up only at its own retry, once a minute, and the device still
 stands, with no write failed over the whole case. The loop is the host
 helper's, named and stopped by its pid file like the flood, and ends by

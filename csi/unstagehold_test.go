@@ -125,17 +125,17 @@ func TestNodeUnstageRunsOneTryAtATime(t *testing.T) {
 
 // TestNodeUnstageAnswersItsEndedCall pins the answer of a try whose call
 // ended while it ran, as the kubelet's deadline ends the first try while
-// its unmount waits to write: the real client's command then returns the
-// ended call's error, though the unmount goes on, so the try answers that
-// end, DEADLINE_EXCEEDED, and keeps the paths; and a call that ends between
-// the unmount and the exclusive open answers its end too, not a hold it
-// never read.
+// its unmount waits to write: the real client's command returns only once
+// the umount process exits, with the ended call's error, so the try
+// answers that end, DEADLINE_EXCEEDED, and keeps the paths; and a call that
+// ends between the unmount and the exclusive open answers its end too, not
+// a hold it never read.
 func TestNodeUnstageAnswersItsEndedCall(t *testing.T) {
 	for _, tc := range []struct {
 		name string
 		// unmountErrs makes the fake umount answer the ended call's error
-		// after it unmounted, as RunCommand does for a child that outlived
-		// its call.
+		// after it unmounted, as RunCommand does once a child that outlived
+		// its call exits.
 		unmountErrs bool
 		want        string
 	}{

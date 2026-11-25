@@ -326,9 +326,11 @@ func (s *CnAgentServer) forcedStartDryRun(
 		}
 		dry.StopsArray = true
 		// The real start's stop is refused while a device holds the array
-		// open, as the pool's layers above do at a level that builds thin
-		// pools, and the start then waits; the dry run reads the holders as
-		// the re-assembly does (reassemblyRefusal) and says so.
+		// open, as the pool's layers above a slice's group do at a level
+		// that builds thin pools, and a clone's dm-clone above its clone
+		// meta group at a level that builds clones, and the start then
+		// waits; the dry run reads the holders as the re-assembly does
+		// (reassemblyRefusal) and says so.
 		holders, err := s.md.Holders(ctx, detail.Dev)
 		if err != nil {
 			dry.Refusal = agent.CutAgentText(fmt.Sprintf(
@@ -338,13 +340,18 @@ func (s *CnAgentServer) forcedStartDryRun(
 			return dry
 		}
 		if len(holders) > 0 {
-			// The step that frees the array: at a level that builds thin
-			// pools they hold it, and below that level only a device dnv did
-			// not remove, or one outside dnv, can.
-			step := "step the pool's level down to NO_THINPOOL first"
-			if !plan.levelPool {
-				step = "remove that device first, which dnv did not remove " +
-					"or did not make"
+			// The step that frees the array: a slice's group is held by the
+			// pool's layers at a level that builds thin pools, a clone meta
+			// group by its clone's dm-clone at a level that builds clones,
+			// and otherwise only a device dnv did not remove, or one outside
+			// dnv, can hold it.
+			step := "remove that device first, which dnv did not remove " +
+				"or did not make"
+			switch {
+			case gp.clone != nil && plan.levelClone:
+				step = "step the pool's level down to NO_CLONE first"
+			case gp.clone == nil && plan.levelPool:
+				step = "step the pool's level down to NO_THINPOOL first"
 			}
 			dry.Refusal = agent.CutAgentText(fmt.Sprintf(
 				"the array of group %#x is held open by %s, so its stop "+

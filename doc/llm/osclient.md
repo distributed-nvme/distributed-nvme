@@ -46,8 +46,9 @@ it.
   plugin, for its nvme-cli, blkid, filesystem maker and mount commands, its
   sysfs and mount table reads, its read of a volume's device link, its
   direct read of a volume's start before a format (`csi.md`, The node
-  plugin, CSI17) and its exclusive open of a volume's device before it
-  drops the volume's paths (CSI16). **All** OS command execution, detached
+  plugin, CSI17), its exclusive open of a volume's device before it drops
+  the volume's paths (`csi.md` CSI16) and its write of a path's
+  ctrl_loss_tmo in sysfs (`csi.md` CSI14). **All** OS command execution, detached
   child start, directory listing, modification-time read, device-number
   read, discard, TCP connect made to test whether an address answers
   (DialTcp), exclusive open of a block device made to test whether anything

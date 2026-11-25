@@ -5442,7 +5442,10 @@ for word; and the reply still says it stops the array when a device holds
 the array open (`Md.Holders`, read as the re-assembly reads it), but then
 refuses in words of its own, since the real start's stop fails there and
 the start waits: the refusal names the holders and the step that frees the
-array, the level step where the pool builds thin pools; a listing of the
+array: for a slice's group the step to `SP_LEVEL_NO_THINPOOL` where the
+pool builds thin pools, for a clone meta group the step to
+`SP_LEVEL_NO_CLONE` where the pool builds clones, and otherwise the removal
+of a device dnv did not remove or did not make; a listing of the
 holders that does not answer is a refusal too, which says only that; then
 the start's checks: the first that does not hold, or else
 the refusals the request does not pass, make the refusal, word for word the

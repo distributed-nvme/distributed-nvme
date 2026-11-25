@@ -317,9 +317,9 @@ func addCommonFlags(cmd *cobra.Command) {
 	flags.Int("nvmet-port-id", common.NvmetPortId,
 		"configfs id of the nvmet port this agent converges "+
 			"(/sys/kernel/config/nvmet/ports/<id>); agents that need their "+
-			"own port take distinct ids; a dn and a cn on one node may "+
-			"share the default only where every host may read and write "+
-			"the raw legs, since a host on a shared port reaches the dn's "+
+			"own port take distinct ids; a dn and a cn on one node never "+
+			"share one in a deployment, since hosts reach every controller "+
+			"node's port and a shared port would show them the dn's "+
 			"exports")
 	flags.Int("nvmet-qid-max", common.NvmetQidMax,
 		fmt.Sprintf("IO queue cap (attr_qid_max) written on each nvmet "+

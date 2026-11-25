@@ -339,12 +339,15 @@ takes the socket to serve (`--csi-address`), the cdc addresses it follows
 does to the node goes through the OS client, the one path to the operating
 system (`osclient.md`): nvme-cli for what the kernel takes as a command, the
 mount tools, blkid, the direct read of a volume's start, the filesystem
-makers, the sysfs and mount table reads, and one sysfs write, a path's
-ctrl_loss_tmo (CSI14). It holds two OS clients, each with
-`DefaultOsClientLimit` command slots: one for the follower's commands and
-one for everything else, so that the commands of stages and unstages that
-wait for IO, which a kill cannot end, never leave the follower's connects,
-which would end that wait, without a slot (CSI16).
+makers, the exclusive open of a volume's device (CSI16), the sysfs and mount
+table reads, and one sysfs write, a path's ctrl_loss_tmo (CSI14). It holds
+two OS clients, each with `DefaultOsClientLimit` command slots: one for the
+NVMe side, the follower's connects and drops, the stage's wait for the
+device and the unstage's disconnect among them, and one for the mount side,
+the mount tools, blkid, the direct read, the mount table and the exclusive
+open, so that the mount side's commands of stages and unstages that wait
+for IO, which a kill cannot end, never leave the follower's connects, which
+would end that wait, without a slot (CSI16).
 Only the kernel's event socket is the plugin's own, since the OS client has no
 socket. The plugin reports nothing to dnv, and the worker's reactions read the
 agents' reports and the stored records, never a host (`architecture.md`,
@@ -598,8 +601,8 @@ nothing is mounted.
 
 An unstage drops the paths only once nothing holds the volume's device: after
 its unmount it opens the device for exclusive use (`osclient.md`,
-OpenExclusive), which the kernel refuses while anything holds the device: any
-mount of it, the one an unmount still tears down while it writes the file
+OpenExclusive), which the kernel refuses while anything holds the device for
+exclusive use: any mount of it, the one an unmount still tears down while it writes the file
 system's unwritten data included, a copy of the mount that another mount
 namespace keeps, which no mount table the plugin reads shows, and a device
 built over a raw block volume, such as a device mapper, md or bcache device
@@ -608,15 +611,15 @@ the unstage fails FAILED_PRECONDITION, naming the device as still held, and
 keeps every path and the subsystem in the staged set; a device that is gone
 has no path left to keep. A call that ended first answers its end,
 DEADLINE_EXCEEDED or CANCELED, not a hold it never read: one whose unmount
-outlived it, as the client's command then answers the end of the call
-though the unmount goes on, and one that ended between the unmount and the
-open. No two of a volume's stages and unstages run side by side: a try that
+outlived it, as the command returns only once the umount process exits
+(`osclient.md`, RunCommand), killed then by the signal the call's end sent,
+and one that ended between the unmount and the open. No two of a volume's stages and unstages run side by side: a try that
 comes while another of the volume runs is ABORTED, naming what runs, and
 runs no command, so a stage or an unstage whose command waits for IO keeps
 its volume, and the kubelet's tries that follow each deadline take no
-command slot; on the lab, before this lock, each try of a stage whose
-blkid waited left one more command waiting, one every two minutes, which
-would have taken all of the plugin's slots in about an hour. A stage that
+command slot; without the lock each try of a stage whose blkid waits
+would leave one more command waiting, one every two minutes, and take all
+of the plugin's slots in about an hour. A stage that
 fails with a final code drops its paths only after the same open, so a
 device still held keeps them there too. The reason: an unmount takes the
 mount out of the table before it writes the file system's unwritten data,
@@ -996,8 +999,9 @@ the kernel may since have given to another process, which the cleanup
 signals as it signals the suite's own (Topology and parameters). The detach
 case's out-of-service taint goes first, so that no host comes back
 under it, which would evict the host's pods; then the cut of a host, the
-machine case's or the detach case's, since Kubernetes cannot confirm the
-deletes of a cut host's pods; then a worker the detach case stopped goes on,
+machine case's, the detach case's or the unstage case's, since Kubernetes
+cannot confirm the deletes of a cut host's pods, with the unstage case's
+copy of a host's mounts, which would keep a volume's device held; then a worker the detach case stopped goes on,
 since no cn agent converges without it, so no detach of the deletes would end
 (CSI10); then the test namespace, the policy case's open namespace and the
 driver's namespace are deleted and waited for, the driver's cluster-wide
@@ -1010,10 +1014,10 @@ attaches made, and of the nvmet ports only the suite's own: any port
 whose service id is the agents', and a port with no service id under the
 agents' port id. Another suite's port then stays, though empty, since the
 dnv subsystems' links go, and so does a target a person made under
-another port id, as on NVMe/TCP's port 4420; preflight stops a run whose
-agents' port id holds a port of another service id, which the agents
-would take over or fail on, then the control plane's processes, the imported images and the
-work directories, holder first. A disk-node guest whose work directory the
+another port id, as on NVMe/TCP's port 4420; then the control plane's
+processes, the imported images and the work directories, holder first.
+Preflight stops a run whose agents' port id holds a port of another
+service id, which the agents would take over or fail on. A disk-node guest whose work directory the
 cleanup removed is then synced, given 10 s, and its root file system
 trimmed, since the blocks of the backing files, about 2 GiB a guest after
 the fill case, stay allocated in the host's image of the guest until the

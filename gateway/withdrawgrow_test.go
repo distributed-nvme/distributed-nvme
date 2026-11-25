@@ -14,7 +14,7 @@ import (
 )
 
 // This file pins a grow that never gets ready (architecture.md, GrowSlice,
-// WithdrawGrow and The status read): a grow by hand is refused while the
+// WithdrawGrow and Clusters, GetClusterStatus): a grow by hand is refused while the
 // newest grown group of its kind is not ready, WithdrawGrow takes such a
 // group back, and the status read lists one that has waited longer than the
 // side threshold.

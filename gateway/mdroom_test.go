@@ -44,9 +44,8 @@ func mrEnv(t *testing.T, extentSize uint64) *sptEnv {
 	return env
 }
 
-// TestCreateStoragePoolRefusesAnMdChunkTooSmallForAGroup is the example of
-// the plan's item: a 64 KiB block with one block for each chunk, on 1 GiB
-// extents. The first metadata group, of one extent, fits, but the metadata
+// TestCreateStoragePoolRefusesAnMdChunkTooSmallForAGroup takes a 64 KiB
+// block with one block for each chunk, on 1 GiB extents. The first metadata group, of one extent, fits, but the metadata
 // grows by doubling to groups of 2, 4 and 8 extents, and mdadm gives a group
 // of up to 8 GiB only 4 KiB for its record, so those groups need a larger
 // chunk: the pool is refused INVALID_ARGUMENT, nothing written, the message
@@ -206,11 +205,11 @@ func TestMdBitmapMinChunkFollowsMdadm(t *testing.T) {
 	}{
 		{"under 64 KiB there is no room", 32 * mrKib, 0},
 		{"64 KiB", 64 * mrKib, 4 * mrKib},
-		{"the item's 1 GiB group", gib, 64 * mrKib},
+		{"a 1 GiB group", gib, 64 * mrKib},
 		{"30719 x 64 KiB, the last size a 64 KiB chunk fits",
 			30719 * 64 * mrKib, 64 * mrKib},
 		{"30720 x 64 KiB", 30720 * 64 * mrKib, 128 * mrKib},
-		{"the item's 2 GiB group", 2 * gib, 128 * mrKib},
+		{"a 2 GiB group", 2 * gib, 128 * mrKib},
 		{"8 GiB, the last size of the 4 KiB room", 8 * gib, 512 * mrKib},
 		{"8 GiB + 64 KiB, the 64 KiB room", 8*gib + 64*mrKib, 32 * mrKib},
 		{"200 GiB, the last size of the 64 KiB room", 200 * gib,

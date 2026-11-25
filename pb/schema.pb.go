@@ -4245,8 +4245,9 @@ type DnConf struct {
 	// revision, and a release stops at zero. Appended, never renumbered.
 	UsedMetaUnits uint64 `protobuf:"varint,10,opt,name=used_meta_units,json=usedMetaUnits,proto3" json:"used_meta_units,omitempty"`
 	// The host name the node's agent reported at the node's create
-	// (GetDnSizeReply.host_name), empty when the read failed and for a node
-	// created before the field. A migration's destination is never a node
+	// (GetDnSizeReply.host_name), empty when the read failed, for
+	// localhost, localhost.localdomain and (none), and for a node created
+	// before the field. A migration's destination is never a node
 	// of the old side's host name (architecture.md, Migrations). Appended,
 	// never renumbered.
 	HostName      string `protobuf:"bytes,11,opt,name=host_name,json=hostName,proto3" json:"host_name,omitempty"`

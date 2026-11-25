@@ -257,10 +257,9 @@ Components: invocation reference). Every caller rescans on any watch error
 error. etcd sends no notification to a watch whose
 start revision lies past the store's revision until the store reaches it,
 and every dnv watch starts at its scan's revision plus one: a worker's
-registration puts move the store, but a cdc that runs alone on an etcd
-nothing writes to restarts its watch once per threshold, each time with a
-rescan, which is accepted because a rescan that finds nothing changed
-impacts no host (`cdc.md` WV4).
+registration puts move the store, but a cdc restarts its watch at each full
+read (`cdc.md` WV7), long before the threshold, each time with a rescan
+that installs nothing when it finds nothing changed.
 
 Every watch of a process rides one gRPC stream of the etcd client, because
 no caller puts outgoing gRPC metadata on the contexts it watches with, and
@@ -791,7 +790,8 @@ list; the flip, which reads the repair's key alone, and
   disable — and bumps `SpRev` (`architecture.md`, Automatic reactions).
   The own verdict AR10 asks for is not re-checked: no STM sees it (AR5).
 * `GrowSlice` takes the slice, the kind (meta or data), a pool total, the
-  cluster conf and the picked legs, and requires the SP checks above; the
+  cluster conf, the picked legs and the time `now`, and requires the SP
+  checks above; the
   expected revision as in the preamble; the SP's `bdev_conf` and the cluster
   conf both valid (`architecture.md`, Common validation — the two checks sit
   at the top of the STM, ahead of its first put, so a refusal aborts with
@@ -799,7 +799,10 @@ list; the flip, which reads the repair's key alone, and
   of that kind below `MaxGrpCntPerSlice` groups (`GrpListFull`, reason
   `grp_list_full` — `architecture.md`, md names, and `architecture.md`,
   GrowSlice; checked ahead of the sizing, so it holds for a meta grow whatever
-  the ladder says); the meta ladder not at its cap; no grow of that kind
+  the ladder says); the meta ladder not at its cap; the newest group of that
+  kind, when it is a grown one, ready, no leg of it with every side still
+  not provisioned (`GroupNotReady`; reason `newest_grp_not_ready`,
+  `ReasonGrowNotReady`, `architecture.md`, GrowSlice); no grow of that kind
   pending — AR6's rule re-applied in-STM, judged against the pool total handed
   in (the worker passes the primary's reported total; a user-driven grow is
   not so gated, `architecture.md`, GrowSlice, and what the gateway passes is
@@ -811,8 +814,8 @@ list; the flip, which reads the repair's key alone, and
   `data_blocks` follow `architecture.md`, Group on-leg layout: meta region,
   data region, health block, with the SP's `block_size` and
   `bitmap_chunk_block_cnt` and the cluster's `extent_size`, each used as
-  stored; ids come from `SpConf.next_id`; the new `Group` carries one `Leg`
-  plus `Side` per pick (`leg_idx` from zero, `cntlid_slot` the first of
+  stored; ids come from `SpConf.next_id`; the new `Group` carries `now` as
+  its `grow_epoch` and one `Leg` plus `Side` per pick (`leg_idx` from zero, `cntlid_slot` the first of
   `cntlid_slot_list`, `provisioned` false, `addr_port` and `nvme_tr_conf` from
   the DN); DN bookkeeping (`side_ptr_list`, `free_ext_cnt`, capacity, a
   `DnRev` bump each); CN budgets (`free_ext_cnt`, capacity, a `CnRev` bump
@@ -826,8 +829,8 @@ list; the flip, which reads the repair's key alone, and
   counting the group: the pool total no larger than the groups before it
   imply (AR6's pending rule without its metadata cap clause,
   `GrowUncounted`), a check `WithdrawGrowAsked`, the operator's version,
-  which takes no pool total, leaves out, since the next guard already proves
-  it; one side per leg ("a leg has two sides"
+  which takes no pool total, leaves out, since the provisioning guard below
+  already proves it; one side per leg ("a leg has two sides"
   otherwise: a migration is in flight); a leg whose only side is not
   `provisioned`, so no cntlr ever built the group (`cnagent.md` CN9; "no leg
   provisioning" otherwise); and the group to carry no repair
