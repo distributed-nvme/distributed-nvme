@@ -627,6 +627,13 @@ func (s *Server) CreateStoragePool(
 			scanBdev, req.GetBdevConf(), sliceCnt); err != nil {
 			return err
 		}
+		// The md bitmap's room (architecture.md, Common validation), on the
+		// same conf and the extent size above, before the scans for the same
+		// reason.
+		if err := validateMdBitmapRoom(scanBdev, req.GetBdevConf(),
+			extentSize, req.GetInitExtCnt()); err != nil {
+			return err
+		}
 		// The primary threshold against the cluster's cntlr_interval
 		// (architecture.md, Common validation), before the scans for the
 		// same reason.
@@ -709,6 +716,17 @@ func (s *Server) CreateStoragePool(
 			// authoritative.
 			if err := validateMergedBdevConf(
 				bdev, req.GetBdevConf(), sliceCnt); err != nil {
+				return err
+			}
+			// The md bitmap's room reads the cluster's extent size and lays
+			// groups out, so this read's ClusterConf is validated first
+			// (GW11), as below before the groups are built.
+			if err := model.ValidateClusterConf(cc); err != nil {
+				return errAborted("%v", err)
+			}
+			if err := validateMdBitmapRoom(bdev, req.GetBdevConf(),
+				cc.GetDnBinConf().GetExtentSize(),
+				req.GetInitExtCnt()); err != nil {
 				return err
 			}
 			if err := validatePrimaryThreshold(

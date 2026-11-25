@@ -2230,6 +2230,42 @@ harmless. A migration destination takes its run before it zeroes
   `CreateTransfer` judges no geometry, and `CreateClone` holds a source's
   block to `MaxDmPoolDataBlockSize` alone, beside the clone's optimal IO
   size (Clones; Known limits).
+* **The md bitmap's room.** Under `redund_md_raid1`,
+  `CreateStoragePool` holds the md bitmap chunk to at least the smallest
+  chunk mdadm takes for every group the pool can make (`INVALID_ARGUMENT`
+  otherwise): the first meta group of one extent, which is also the size
+  of every clone meta group in the pool (Clones); each group the meta
+  ladder adds, up to its cap (GrowSlice); and the data group of
+  `init_ext_cnt` extents, which every data grow repeats. A group's size
+  here is its data region, `data_blocks` times `data_block_size` (Group
+  on-leg layout: meta region, data region, health block), the size of its
+  md array. mdadm 4.5 (`super1.c`) gives the internal bitmap of a 1.2 array
+  it creates a fixed room by that size alone, whatever room the data offset
+  leaves: 4 KiB up to 8 GiB of data, 64 KiB above that, 128 KiB from
+  200 GiB plus 64 KiB on. Less the bitmap's 256-byte superblock, the room
+  holds one bit per chunk and one more, so a chunk of `C` bytes fits a
+  group of `D` bytes when `D/4096 + 1`, divided by `C/4096` and rounded up,
+  is at most `(room - 256) × 8`, and mdadm refuses a smaller chunk ("Given
+  bitmap chunk size not supported"); the lab confirmed it with mdadm 4.5
+  on both sides of the two steps between the rooms and of one chunk's
+  edge in the 4 KiB room. Every group is judged, not the largest alone:
+  the room grows in steps, so a smaller group can need a larger chunk than
+  a larger one. Reason: an SP's geometry and its cluster's `extent_size`
+  never change, so a first group mdadm refuses leaves the pool unbuilt,
+  and a grow whose group mdadm refuses fails at its md create, for ever,
+  while the thin pool fills and runs out of data space, or its metadata
+  fills and turns it read-only. The message says, as the geometry rules'
+  does, that it concerns the conf merged over the cluster's, and that the
+  chunk count is the cluster's when the request names none; it names the
+  group that needs the largest chunk, its data bytes, mdadm's room and
+  that chunk, and the smallest `bitmap_chunk_block_cnt` that fits every
+  group, or says that none within its bound does at this block, so a
+  larger block or fewer extents is needed. It is judged on the conf the
+  create stores, before the scans and once more in the deciding STM,
+  there after the STM's `ClusterConf` is validated, as the geometry rules
+  are. The default chunk, `DefaultChunkBlockCnt`
+  blocks of the default 1 MiB block, fits groups up to about 127 TiB. A
+  pool stored before the rule keeps its chunk.
 * `EventThreshold.leg_unhealthy` must be greater than
   `EventThreshold.side_unhealthy` after the defaults above are resolved
   (`INVALID_ARGUMENT` otherwise): the leg repair of Automatic reactions
@@ -3116,7 +3152,9 @@ when a `stripe_size` the request names times the slice count is over
 stripe's product); and when `data_block_size` is over
 `MaxNvmeTcpCmdBytes`, a named one before any read and an inherited one on
 the merged conf, whose message says the block is the cluster's (Common
-validation, the block's bound).
+validation, the block's bound); and, under md-raid1, when the md bitmap
+chunk is smaller than mdadm takes for one of the groups the pool can make
+(Common validation, the md bitmap's room).
 Defaults: `cntlr_cnt` is `DefaultCntlrCntPerSp`; `slice_cnt` is
 `DefaultSliceCntPerSp`; `cntlid_slot_list` is every slot below
 `CnCntlidSlotCnt`; `bdev_conf` is taken member-wise from
@@ -3151,7 +3189,8 @@ Action:
    (`INVALID_ARGUMENT`), which no DN could hold, so the scan would
    otherwise answer it first. Then merge and resolve `bdev_conf` against
    that pre-read, an inherited stripe narrowed: the result gives the scan
-   its leg count, and the geometry rules and the stripe's product judge it
+   its leg count, and the geometry rules, the stripe's product and, at
+   the pre-read's `extent_size`, the md bitmap's room judge it
    right there (`INVALID_ARGUMENT`, and the
    message says it concerns the merged conf: a member the request omitted
    is inherited, and only the merge shows whether it meets the ones the
@@ -3173,8 +3212,9 @@ Action:
    merge and resolve `bdev_conf` against the `ClusterConf` this
    transaction read, an inherited stripe narrowed as before, **before any
    id is minted**, and refuse the picks right there if the leg count or the
-   `cluster_id` moved since the scan; the geometry rules and the stripe's
-   product on that resolved `bdev_conf` once more
+   `cluster_id` moved since the scan; the geometry rules, the stripe's
+   product and the md bitmap's room on that resolved `bdev_conf`
+   once more
    (`ClusterConf` is write-once, so for an unchanged `cluster_id` this
    repeats the pre-read's verdict, but this read is the authoritative
    one), and the primary threshold against that `ClusterConf`; the

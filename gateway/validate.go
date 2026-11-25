@@ -1,6 +1,8 @@
 package gateway
 
 import (
+	"fmt"
+	"math"
 	"math/bits"
 	"regexp"
 	"strings"
@@ -577,6 +579,160 @@ func validateBdevConf(conf *pb.BdevConf) error {
 // chunk it computes without overflowing: a 4 GiB one wraps to zero and is
 // refused, and md stores the chunk as a 32-bit byte count anyway.
 const maxMdBitmapChunk = uint64(1) << 30
+
+// mdBitmapRoom is the room in bytes that mdadm gives the internal
+// write-intent bitmap of a 1.2 array it creates, by the array's size in bytes,
+// which for a dnv group is its data region (architecture.md, Group on-leg
+// layout: meta region, data region, health block): mdadm 4.5, super1.c,
+// choose_bm_space, less the 4 KiB of bad-block log that
+// add_internal_bitmap1 adds to it and takes off again. mdadm sizes this room
+// by the array alone, not by the space before the data offset, so the meta
+// region dnv reserves does not widen it. Zero is no room: mdadm refuses the
+// bitmap.
+func mdBitmapRoom(dataBytes uint64) uint64 {
+	const gib = uint64(1) << 30
+	sectors := dataBytes / 512
+	switch {
+	case sectors < 64*2:
+		return 0
+	case sectors-64*2 >= 200*gib/512:
+		return 128 << 10
+	case sectors-4*2 > 8*gib/512:
+		return 64 << 10
+	default:
+		return 4 << 10
+	}
+}
+
+// mdBitmapMinChunk is the smallest bitmap chunk in bytes that mdadm 4.5
+// takes for an array of dataBytes (super1.c, add_internal_bitmap1): the room
+// of mdBitmapRoom, less the bitmap's 256-byte superblock, holds one bit per
+// chunk and one more, and mdadm starts at 4 KiB and doubles the chunk until
+// the bits fit, refusing a chunk below the one it reaches ("Given bitmap
+// chunk size not supported"). Zero means no chunk fits.
+func mdBitmapMinChunk(dataBytes uint64) uint64 {
+	room := mdBitmapRoom(dataBytes)
+	if room == 0 {
+		return 0
+	}
+	maxBits := (room - 256) * 8
+	minChunk := uint64(4096)
+	bits := dataBytes/minChunk + 1
+	for bits > maxBits {
+		if minChunk > math.MaxUint64/2 {
+			return 0
+		}
+		minChunk *= 2
+		bits = (bits + 1) / 2
+	}
+	return minChunk
+}
+
+// mdGroup is one size of group a pool can make, in extents, and the words
+// that name it in a refusal.
+type mdGroup struct {
+	extCnt uint64
+	name   string
+}
+
+// mdGroupsOfPool lists every size of group an md-raid1 pool can ever make
+// (architecture.md, Storage pools and GrowSlice): the first metadata group of
+// one extent, which is also the size of every clone's metadata group in the
+// pool; each group the meta ladder adds as the metadata grows, up to its cap;
+// and the data group of init_ext_cnt extents, which every data grow repeats.
+func mdGroupsOfPool(extentSize uint64, initExtCnt uint64) []mdGroup {
+	groups := []mdGroup{{1, "metadata group of 1 extent"}}
+	total := uint64(1)
+	for {
+		extCnt, ok := model.MetaLadderExtCnt(total, extentSize)
+		if !ok {
+			break
+		}
+		groups = append(groups, mdGroup{extCnt, fmt.Sprintf(
+			"metadata group of %d extents that the pool's metadata grows "+
+				"to", extCnt)})
+		total += extCnt
+	}
+	unit := "extents"
+	if initExtCnt == 1 {
+		unit = "extent"
+	}
+	return append(groups, mdGroup{initExtCnt, fmt.Sprintf(
+		"data group of %d %s", initExtCnt, unit)})
+}
+
+// validateMdBitmapRoom is the md bitmap's room of architecture.md, Common
+// validation: under md-raid1, a pool's bitmap chunk is at least the
+// smallest chunk mdadm takes for every group the pool can make
+// (mdGroupsOfPool), since an SP's geometry and its cluster's extent size
+// never change, and a grow whose group mdadm refuses would fail at its md
+// create, for ever. Every group is judged, not the largest alone: mdadm's
+// room grows in steps with the group, so a smaller group can need a larger
+// chunk than a larger one. The message names the group that needs the
+// largest chunk and the smallest chunk count that fits every group, or that
+// none within the count's bound does; like validateMergedBdevConf's, it says
+// it concerns the conf merged over the cluster's, and that the chunk count is
+// the cluster's when the request names none (req). A group GroupBlocks
+// refuses is left to its own refusal in the deciding STM.
+func validateMdBitmapRoom(
+	bdev *pb.BdevConf,
+	req *pb.BdevConf,
+	extentSize uint64,
+	initExtCnt uint64,
+) error {
+	raid1 := bdev.GetRedundConf().GetRedundMdRaid1()
+	blockSize := bdev.GetDmPoolConf().GetDataBlockSize()
+	if raid1 == nil || blockSize == 0 || extentSize == 0 || initExtCnt == 0 {
+		return nil
+	}
+	chunkBlockCnt := raid1.GetBitmapChunkBlockCnt()
+	chunk := chunkBlockCnt * blockSize
+	need := uint64(0)
+	var worst mdGroup
+	var worstData uint64
+	for _, grp := range mdGroupsOfPool(extentSize, initExtCnt) {
+		_, dataBlocks, err := model.GroupBlocks(grp.extCnt, extentSize, bdev)
+		if err != nil {
+			continue
+		}
+		dataBytes := dataBlocks * blockSize
+		// A group's data region is at least one block of at least 64 KiB,
+		// where mdadm always gives room, so a zero, no chunk fitting, is a
+		// last-resort guard that refuses.
+		minChunk := mdBitmapMinChunk(dataBytes)
+		if minChunk == 0 {
+			minChunk = math.MaxUint64
+		}
+		if minChunk > need {
+			need, worst, worstData = minChunk, grp, dataBytes
+		}
+	}
+	if chunk >= need {
+		return nil
+	}
+	cnt := uint64(1)
+	if need > blockSize {
+		cnt = need / blockSize
+	}
+	hint := fmt.Sprintf("; name a bitmap_chunk_block_cnt of at least %d", cnt)
+	if need > maxMdBitmapChunk || cnt > common.MaxChunkBlockCnt {
+		hint = fmt.Sprintf("; no bitmap_chunk_block_cnt up to %d gives "+
+			"one at this data_block_size: name a larger data_block_size "+
+			"or fewer extents", common.MaxChunkBlockCnt)
+	}
+	if req.GetRedundConf().GetRedundMdRaid1().GetBitmapChunkBlockCnt() == 0 {
+		hint = "; the bitmap_chunk_block_cnt is the cluster's" + hint
+	}
+	return errInvalid(
+		"bdev_conf merged over the cluster's: "+
+			"bdev_conf.redund_conf.redund_md_raid1.bitmap_chunk_block_cnt %d x "+
+			"bdev_conf.dm_pool_conf.data_block_size %d = %d bytes is too "+
+			"small for the md write-intent bitmap of the pool's %s, %d bytes "+
+			"of data: mdadm gives such a group %d bytes for that bitmap and "+
+			"refuses a chunk under %d bytes there%s",
+		chunkBlockCnt, blockSize, chunk, worst.name, worstData,
+		mdBitmapRoom(worstData), need, hint)
+}
 
 // validateStripeProduct is the bound of architecture.md, Common validation,
 // on a pool's stripe times its slice count: that product is the optimal IO

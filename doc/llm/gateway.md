@@ -1018,7 +1018,9 @@ update-disabled and inspect; and a seventh with no disk node twin:
   GW11), the overflow of `init_ext_cnt` times that conf's `extent_size`,
   the same merge and resolution the STM makes below (`resolveSpBdevConf`),
   which gives the scans their leg count (`legCntOf`) and which
-  `validateMergedBdevConf` judges, the stripe's product included,
+  `validateMergedBdevConf` judges, the stripe's product included, and
+  `validateMdBitmapRoom` at that conf's `extent_size` (`architecture.md`,
+  Common validation, the md bitmap's room),
   and `validatePrimaryThreshold`; then come the name (`spNameUnused`) on a
   plain read of its own, and on another of `SpGlobal` the pool count
   ceiling and then whether its id counter has an id left
@@ -1041,8 +1043,10 @@ update-disabled and inspect; and a seventh with no disk node twin:
   GW11) — and fail the unit right there, before a single other key is
   read, when this transaction's cluster id or that conf's leg count no
   longer matches the one the scan drew its picks for;
-  `validateMergedBdevConf` on that conf and `validatePrimaryThreshold` on
-  the `ClusterConf` this STM read, once more each (`ClusterConf` is
+  `validateMergedBdevConf` on that conf, `model.ValidateClusterConf` of
+  the `ClusterConf` this STM read (a failure is `ABORTED`, GW11) and
+  `validateMdBitmapRoom` on the conf at that `ClusterConf`'s `extent_size`,
+  and `validatePrimaryThreshold` on that `ClusterConf`, once more each (`ClusterConf` is
   write-once, so for an unchanged cluster id these repeat the verdicts of
   the pre-read, but the in-STM read is the authoritative one);
   `SpConfKey` present is `ALREADY_EXISTS`; mint `sp_id`
