@@ -4492,7 +4492,8 @@ Safe steps:
    hosts keep the size they read. It also refuses while the namespace is a
    transfer's origin, and a volume that a transfer exports. It does not
    check that the other volume is recorded as created: wait for that in
-   `dnvctl td list` first. Nor does it check that no other namespace
+   `dnvctl td list` first, and for a snapshot check there too that it is
+   not torn, as [Snapshots](#snapshots) says. Nor does it check that no other namespace
    exports the other volume: `dnvctl ss list` shows each namespace's
    `td_id` in `ns_list`, and `dnvctl td list` each volume's, so pick a
    volume whose `td_id` no namespace shows. With a snapshot as the other
@@ -4521,12 +4522,15 @@ before you change the volume.
 Tested: the e2e suite's ops case, stage 07, parks a namespace, sees it ANA
 inaccessible on the host with the host's device kept, resumes it and checks
 the data; it then points the namespace at a new volume of the same size,
-which the host reads as zeros, and back, and checks the data again. The
+which the host reads as zeros, then at a snapshot of the first volume,
+whose data the host reads and whose first MiB it overwrites with zeros
+and reads back, and back to the first volume, which must still hold its
+data whole, so the write went to the snapshot alone. The
 gateway suite, `integtest/gateway_test.sh`, checks that the bitmap read
 refuses a volume whose namespace is not parked. The e2e suite passed in the
-lab on 2026-11-21. The stage points the namespace at the new volume while
-it serves, after the resume: the change of step 4 on a parked namespace,
-and a namespace pointed at a snapshot, are not tested.
+lab on 2026-11-21, before the step at the snapshot was added. The stage
+points the namespace while it serves, after the resume: the change of step
+4 on a parked namespace is not tested.
 
 ## Move a volume to another pool
 

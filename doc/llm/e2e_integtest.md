@@ -725,8 +725,11 @@ refused for the volume a host's namespace serves and answered for the
 snapshot, which no namespace exports, its bitmap clear at the block setup
 wrote (`architecture.md`, Bitmap reads; `cnagent.md` CN26); a namespace
 suspend that parks rather than
-removes, and a repoint there and back (`architecture.md`, Namespace suspend
-semantics); a disabled disk node and controller node, invisible to the
+removes, and a repoint to a new volume, whose zeros the host reads, to
+the snapshot, whose data, setup's pattern, the host then reads and over
+whose first MiB it writes zeros and reads them back, and back to the
+volume, which still reads setup's pattern whole, so that the write went to
+the snapshot alone (`architecture.md`, Namespace suspend semantics); a disabled disk node and controller node, invisible to the
 agents, each proved by a refused allocation that writes nothing
 (`architecture.md`, Capacity index keys); and last a host's fstrim: an ext4
 file system on a volume of its own, its files written and removed, then

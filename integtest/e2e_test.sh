@@ -16083,7 +16083,7 @@ ops_snapshot() {
 # … and the device stays live"), so wait_dev_gone would burn its whole budget
 # and die.
 ops_namespace() {
-	stage 07 "ns set-suspended (a park, not a removal), then ns set-dev"
+	stage 07 "ns set-suspended (a park, not a removal), then ns set-dev to a new volume, to the snapshot and back"
 	local dev zero
 
 	dev=$(host_dev "$UUID1")
@@ -16115,8 +16115,27 @@ ops_namespace() {
 	ctl_ok ns set-dev --nqn "$SS0" --idx 1 --td "$TD1"
 	host_wait_sha 0 "$dev" "$BASELINE_MIB" "$zero" "$WAIT_HOST" \
 		"host0 to read $TD1's unprovisioned zeros through the same namespace"
+	# The repoint that shows a snapshot's data under a volume's namespace,
+	# as operations.md, Park a namespace, makes it, here while the namespace
+	# serves: the namespace pointed at $SNAP0, which holds setup's pattern
+	# as $TD0 held it at step 6, so the host reads SHA0 again where it has
+	# just read $TD1's zeros. $SNAP0 and $TD0 hold the same bytes, so a
+	# write through the namespace then tells them apart: 1 MiB of zeros at
+	# offset 0, read back as zeros. The repoint back must then read SHA0
+	# whole, which shows both that the namespace left $SNAP0 and that the
+	# write went to $SNAP0 alone. $SNAP0 has $TD0's size, so the change is
+	# invisible to the host but for its data; no later stage reads it.
+	ctl_ok ns set-dev --nqn "$SS0" --idx 1 --td "$SNAP0"
+	host_wait_sha 0 "$dev" "$BASELINE_MIB" "$SHA0" "$WAIT_HOST" \
+		"host0 to read $SNAP0's data, setup's pattern, through the same namespace"
+	assert_eq "$(host_write_probe 0 /dev/zero "$dev" 1)" rc=0 \
+		"host0's write of 1 MiB of zeros through the namespace on $SNAP0"
+	zero=$(host_sha_range 0 /dev/zero 1) ||
+		die "host0: digesting 1 MiB of /dev/zero failed"
+	host_wait_sha 0 "$dev" 1 "$zero" "$WAIT_HOST" \
+		"host0 to read back its zeros from $SNAP0"
 	ctl_ok ns set-dev --nqn "$SS0" --idx 1 --td "$TD0"
-	check_sha0 "after the namespace was repointed back at $TD0"
+	check_sha0 "after the namespace was repointed back at $TD0, which the write to $SNAP0 did not reach"
 }
 
 # --- step 8 -----------------------------------------------------------------
