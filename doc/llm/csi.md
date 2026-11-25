@@ -339,7 +339,12 @@ takes the socket to serve (`--csi-address`), the cdc addresses it follows
 does to the node goes through the OS client, the one path to the operating
 system (`osclient.md`): nvme-cli for what the kernel takes as a command, the
 mount tools, blkid, the direct read of a volume's start, the filesystem
-makers, the sysfs and mount table reads.
+makers, the sysfs and mount table reads, and one sysfs write, a path's
+ctrl_loss_tmo (CSI14). It holds two OS clients, each with
+`DefaultOsClientLimit` command slots: one for the follower's commands and
+one for everything else, so that the commands of stages and unstages that
+wait for IO, which a kill cannot end, never leave the follower's connects,
+which would end that wait, without a slot (CSI16).
 Only the kernel's event socket is the plugin's own, since the OS client has no
 socket. The plugin reports nothing to dnv, and the worker's reactions read the
 agents' reports and the stored records, never a host (`architecture.md`,
@@ -416,6 +421,20 @@ to a volume none of whose cntlrs comes back waits for ever, with no error; a
 pod blocked in it cannot be killed, and the operator ends the wait with `nvme
 disconnect -n` of the volume's subsystem on the node (`architecture.md`, Known
 limits; `operations.md`, A Kubernetes mount that lost its last path). The
+follower takes every path of a staged subsystem as its own, whoever made it,
+so at each pass it reads each such path's ctrl_loss_tmo in sysfs and sets a
+limited one to no limit, by writing -1 straight into the attribute, which the
+kernel takes as a reconnect that never gives up, after it has read the
+controller's subsystem and address again, as a drop does (CSI15), since the
+pass's list was read before its log reads; it logs
+`csi path loss limit lifted` with the old limit:
+a path that nvme-cli's own connect unit or a person made gives up after 600
+seconds at nvme-cli's default, which would end the promise above. A kernel
+that shows no such attribute is left as it is; a read or a write that fails
+is the pass's failure, at Warn, and the limit stays. The operator still
+switches nvme-cli's unit off on a Kubernetes node, so that the plugin is the
+only program that connects the node's paths (`operations.md`, Give hosts the
+cdc addresses). The
 follower keeps a withdrawn path until a listed cntlr's path shows the volume's
 namespace, or until the cdcs list no cntlr for the subsystem (CSI15), so on a
 pool of one cntlr a cntlr replacement, whose new cntlr the cdc lists before its
@@ -483,7 +502,20 @@ the volume's namespace, a path connected in the same pass counting from the
 next one and a path being dropped not counting, or when the cdcs list no cntlr
 for the subsystem, which a detach leaves (CSI10): a cntlr that replaced the
 withdrawn one but still refuses the connect, or whose path has not yet joined
-the multipath device, does not cost the volume its last path.
+the multipath device, does not cost the volume its last path. A drop goes by
+the controller's device name, and the kernel gives a later connection the
+lowest free number, the name of a controller that is gone among them; the
+drop runs after the pass that decided it, once a drop slot is free; so right
+before its disconnect it reads the controller's subsystem and address again
+and drops nothing, logging `csi path drop skipped`, when they are no longer
+the path's: another volume's path would otherwise go. The read and the
+disconnect each wait for a slot of the OS client, so the time between them
+stays short only while slots are free. A cdc's log counts as its answer only when it holds
+the record of the cdc itself, which every log page of a dnv cdc holds first
+(`cdc.md` DS12): a log without it, an empty list included, cannot be read and
+holds the drops, since read as a list it would say that the cdc lists no
+cntlr for any staged subsystem, and with one cdc in the list every path of
+every volume in use would go.
 
 The triggers are a stage; one pass when the loop starts, so a plugin that
 restarted acts at once on a log that changed while it was away; every
@@ -578,8 +610,13 @@ has no path left to keep. A call that ended first answers its end,
 DEADLINE_EXCEEDED or CANCELED, not a hold it never read: one whose unmount
 outlived it, as the client's command then answers the end of the call
 though the unmount goes on, and one that ended between the unmount and the
-open. Two unstages of one volume never run side by side: one that comes
-while another of the volume runs is ABORTED and touches nothing. A stage that
+open. No two of a volume's stages and unstages run side by side: a try that
+comes while another of the volume runs is ABORTED, naming what runs, and
+runs no command, so a stage or an unstage whose command waits for IO keeps
+its volume, and the kubelet's tries that follow each deadline take no
+command slot; on the lab, before this lock, each try of a stage whose
+blkid waited left one more command waiting, one every two minutes, which
+would have taken all of the plugin's slots in about an hour. A stage that
 fails with a final code drops its paths only after the same open, so a
 device still held keeps them there too. The reason: an unmount takes the
 mount out of the table before it writes the file system's unwritten data,
@@ -588,8 +625,9 @@ call while the unmount still runs, and its next try, reading the table
 alone, would find nothing mounted and drop the paths, and the kernel would
 fail those writes. What it leaves: a volume whose device something else on
 the node holds stays on its node, attached, until that holder goes (Known
-limits); and the lock covers unstages alone, so a stage of the volume is
-not kept from running beside an unstage.
+limits); and each volume whose command waits still holds one command slot
+until a path serves, so on a node where as many volumes wait as there are
+slots no other volume stages until one of them ends.
 
 CSI17. **Format only what is blank, mount by binding, repeat for free.** A
 stage of a filesystem volume reads the device's filesystem and partition
@@ -717,8 +755,11 @@ each, so each elects one leader through a lease in the driver's namespace; the
 two leaders can sit in different copies, and a leader whose lease runs out
 stops, its container starting again as a follower. A lease is no fence: at a
 handover the old leader acts until its own renewal deadline passes, a few
-seconds in which both copies can act, which CSI9's create by name and CSI10's
-revision cover. When a machine is lost, the other copy takes both leases
+seconds in which both copies can act. CSI9's create by name covers a create
+made twice, and CSI10's revision covers two attaches to two nodes and a late
+detach against an attach to another node, but not a late detach after a new
+attach of its own node: it takes the node off the list, as it cannot tell
+the new attach from the one it was asked to undo (Known limits). When a machine is lost, the other copy takes both leases
 within one lease time and one retry, about 20 seconds on the lab. The copies
 prefer two machines, as a preference and no rule, so that a cluster of one
 machine and a rolling update on two still run both; they tolerate the
@@ -813,13 +854,18 @@ it ends; the node plugin logs `csi node starting` with its endpoint, node
 id, cdc addresses and build version, `csi node serving`
 and `csi node stopping` the same way, and, since those are the moments the
 failover contract turns on, `csi path connected` and `csi path dropped`
-with the subsystem and the cntlr address, `csi discovery connection opened`
+with the subsystem and the cntlr address, `csi path drop skipped` with the
+same and the controller's name for a drop that found the name no longer the
+path's, `csi path loss limit lifted` with the same, the controller's name
+and the old limit for a path whose reconnects would have given up (CSI14,
+CSI15), `csi discovery connection opened`
 and `csi discovery connection dropped` with the cdc address, and
 `csi follower sync error` with what failed when a follow could not finish or
 the kernel's event socket failed: at Warn for a listed cdc it cannot reach
 or whose log it cannot read, naming the cdc, since every drop waits and a
 path that cdc alone lists is never learned until the cdc comes back or the
-list is fixed, and at Info for every other failure, which its next pass, its
+list is fixed, and for a path whose limit it cannot read or lift, naming the
+path, since the limit stays (CSI14), and at Info for every other failure, which its next pass, its
 timer, the stage's own retry or the socket's reopening clears, but for a
 failed drop after a stage that failed or at the stop, which nothing retries
 (`log.md` R6).
@@ -1296,6 +1342,20 @@ log, and the conformance test's logs, its plugins' included.
   Cardinality limits). The capacity the driver reports is the gateway's
   answer for one more pool of the class's shape (CSI11), which counts these
   ceilings for that pool, not for the groups the cluster's volumes will grow.
+* **A late detach can end a new attach of the same node.** At a handover
+  of the attacher's lease both copies can act for a few seconds (CSI19),
+  and a detach the old leader began can run after the volume was attached
+  to the same node again. The detach takes the node off the list, since it
+  names only the volume and the node and cannot tell the new attach from the
+  one it undoes (CSI10). Where the primary's node can end a host's
+  connection, the primary ends the node's connection (`cnagent.md` CN33)
+  and the reconnect is refused with DNR; elsewhere the connection stays
+  until the path's next reconnect, which nvmet refuses the same way, the
+  node being off the list. The mount then dies under a running pod, whose
+  writes not yet flushed are lost (`operations.md`, A Kubernetes mount that
+  lost its last path). No fix is known: no call of
+  the CSI spec carries a mark of which attach a detach undoes. Read from the
+  code; not seen in the lab.
 * **A volume whose device something else holds stays on its node.** The
   node plugin lets go of a volume only once nothing holds its device
   (CSI16). A copy of the volume's mount that another container keeps, in a

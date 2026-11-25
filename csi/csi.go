@@ -132,10 +132,12 @@ func RunController(ctx context.Context, cfg Config) error {
 // discovery connections when nothing is staged and leaves every connection
 // in place otherwise.
 func RunNode(ctx context.Context, cfg Config) error {
-	oc := cfg.OsClient
-	if oc == nil {
-		oc = common.NewLimitedOsClient(0)
-	}
+	// Two OS clients, each with its own command slots: the stage and
+	// unstage commands, a mount or an unmount that waits for IO among them,
+	// take the first, and the follower's commands the second, so that the
+	// connects that would end such a wait never wait for a slot behind it
+	// (csi.md CSI16).
+	oc, foc := nodeClients(cfg)
 	nqnPath, idPath := cfg.HostNqnPath, cfg.HostIdPath
 	if nqnPath == "" {
 		nqnPath = DefaultHostNqnPath
@@ -168,7 +170,7 @@ func RunNode(ctx context.Context, cfg Config) error {
 		slog.Any("cdc_addresses", cfg.CdcAddresses),
 		slog.String("version", Version),
 	)
-	host := &nvmeHost{oc: oc, id: id}
+	host := &nvmeHost{oc: foc, id: id}
 	follow := newFollower(host, cfg.SyncPeriod, cdcs)
 	if err := follow.recover(ctx); err != nil {
 		return err
@@ -196,6 +198,16 @@ func RunNode(ctx context.Context, cfg Config) error {
 	wg.Wait()
 	slog.InfoContext(ctx, msgNodeStopping)
 	return err
+}
+
+// nodeClients are the node plugin's two OS clients, the stage's and the
+// follower's, each with command slots of its own, or the one a test passes
+// for both.
+func nodeClients(cfg Config) (common.OsClient, common.OsClient) {
+	if cfg.OsClient != nil {
+		return cfg.OsClient, cfg.OsClient
+	}
+	return common.NewLimitedOsClient(0), common.NewLimitedOsClient(0)
 }
 
 // dialGateway opens the one gateway connection a plugin holds: plaintext,

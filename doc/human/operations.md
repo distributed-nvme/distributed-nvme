@@ -7455,7 +7455,14 @@ Safe steps for the cdcs:
    machine](tutorial_all_in_one.md). The host's NQN, which the subsystems'
    lists name, is the `nqn` of the `[Host]` section of `/etc/stas/sys.conf`,
    as the tutorial sets it, or, where that names none, the content of
-   `/etc/nvme/hostnqn`.
+   `/etc/nvme/hostnqn`. On each host, a Kubernetes node included, switch
+   off nvme-cli's own connect unit:
+   `sudo systemctl mask nvmf-connect@.service nvmf-connect.target`. That
+   unit connects every path a cdc's change notice announces, with
+   reconnects that give up after 600 seconds, so that a longer outage of
+   every path ends the mount. The node plugin of the Kubernetes driver lifts
+   that limit on the paths of its volumes, but the unit is still a second
+   program that connects the node's paths.
 3. Restart nvme-stas in its safe order ([Restart
    nvme-stas](#restart-nvme-stas)) so that it reads the list.
 4. Check on the host: `stafctl adlp -d` shows each cdc's address with its

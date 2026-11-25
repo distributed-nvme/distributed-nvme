@@ -480,7 +480,11 @@ v3.6.14.
 
 A host: an NVMe/TCP initiator with native multipath and a follower of the
 discovery log such as nvme-stas, which drops a failed-over primary's path; a
-path that no follower manages is never dropped.
+path that no follower manages is never dropped. nvme-cli's own connect unit
+is switched off on every host
+([operations](operations.md#give-hosts-the-cdc-addresses)): it connects the
+paths a cdc announces with reconnects that give up after 600 seconds, and it
+is a second program that connects the host's paths.
 
 To build: Go 1.26.5 or newer. For the CSI driver: Kubernetes 1.34 or newer,
 k3s in its tutorial, and docker to build the driver's image. Every Kubernetes
@@ -493,6 +497,9 @@ release's `deploy/modules-load.d/dnv-host.conf` does once copied into
 `/etc/modules-load.d`: it names nvme-tcp, which loads nvme-fabrics. The
 node plugin refuses to start without either, and names the fix
 ([operations](operations.md#a-kubernetes-node-plugin-that-does-not-start)).
+Such a node, a host too, also needs nvme-cli's own connect unit switched
+off; the node plugin lifts the 600-second limit on its volumes' paths
+should the unit run.
 The tutorials load nvme-tcp by hand, which lasts until a reboot. Each
 Kubernetes node needs a host NQN and a host id of its own, in
 `/etc/nvme/hostnqn` and `/etc/nvme/hostid`. The driver takes the host NQN

@@ -29,30 +29,40 @@ type node struct {
 	follow     *follower
 	mnt        *mounter
 	deviceWait time.Duration
-	// unstaging holds the volumes whose unstage runs, so that a second try
-	// for one volume never runs beside the first (csi.md CSI16).
-	unstagingMu sync.Mutex
-	unstaging   map[string]bool
+	// busy holds, by subsystem NQN, the volumes whose stage or unstage
+	// runs, and which of the two, so that no second try of either runs
+	// beside it (csi.md CSI16): a try whose command waits for IO keeps the
+	// volume, and its next tries neither take another command slot nor drop
+	// the paths it needs.
+	busyMu sync.Mutex
+	busy   map[string]string
 }
 
-// tryUnstage claims a volume for one unstage; false when another runs. The
-// release must be called once the claim's call ends.
-func (n *node) tryUnstage(name string) (func(), bool) {
-	n.unstagingMu.Lock()
-	defer n.unstagingMu.Unlock()
-	if n.unstaging[name] {
-		return nil, false
+// tryVolume claims a volume for one stage or unstage, op naming which;
+// when one runs already, it returns false and what runs. The release must
+// be called once the claim's call ends.
+func (n *node) tryVolume(nqn string, op string) (func(), string, bool) {
+	n.busyMu.Lock()
+	defer n.busyMu.Unlock()
+	if running, ok := n.busy[nqn]; ok {
+		return nil, running, false
 	}
-	if n.unstaging == nil {
-		n.unstaging = map[string]bool{}
+	if n.busy == nil {
+		n.busy = map[string]string{}
 	}
-	n.unstaging[name] = true
+	n.busy[nqn] = op
 	return func() {
-		n.unstagingMu.Lock()
-		defer n.unstagingMu.Unlock()
-		delete(n.unstaging, name)
-	}, true
+		n.busyMu.Lock()
+		defer n.busyMu.Unlock()
+		delete(n.busy, nqn)
+	}, "", true
 }
+
+// opStage and opUnstage name the calls tryVolume claims for.
+const (
+	opStage   = "stage"
+	opUnstage = "unstage"
+)
 
 // publishContext is what the node reads of the context the controller
 // plugin handed it at attach: the subsystem NQN and the namespace uuid.
@@ -141,6 +151,12 @@ func (n *node) NodeStageVolume(
 	if err != nil {
 		return nil, err
 	}
+	release, running, ok := n.tryVolume(pc.nqn, opStage)
+	if !ok {
+		return nil, status.Errorf(codes.Aborted,
+			"another %s of the volume of subsystem %q runs", running, pc.nqn)
+	}
+	defer release()
 
 	// The connects, retried within the device wait until the node holds a
 	// path to the subsystem: the cdc lists a subsystem before its cntlrs
@@ -357,11 +373,12 @@ func (n *node) NodeUnstageVolume(
 	}
 	// One try at a time: a try whose unmount still writes the file system's
 	// data, after the kubelet's deadline ended its call, holds the volume, so
-	// a second try neither unmounts nor drops the paths that data needs.
-	release, ok := n.tryUnstage(name)
+	// a second try neither unmounts nor drops the paths that data needs; and
+	// a stage of the volume that still runs holds it too.
+	release, running, ok := n.tryVolume(subsystemNqnOf(name), opUnstage)
 	if !ok {
 		return nil, status.Errorf(codes.Aborted,
-			"another unstage of volume %q runs", name)
+			"another %s of volume %q runs", running, name)
 	}
 	defer release()
 	entry, err := n.mnt.mountAt(ctx, staging)

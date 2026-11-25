@@ -877,6 +877,30 @@ The entries:
   tutorial](tutorial_csi.md) say. `kubectl get csinodes -o yaml` prints
   each machine's node id, which is its host NQN: two machines with one id
   share a host NQN. Read from dnv's code; not seen in the lab.
+- **A late detach of the Kubernetes driver can end a new attach of the
+  same machine.** The Kubernetes driver's part that attaches volumes runs
+  in two copies, and one leads at a time. When the lead moves, both copies
+  can act for a few seconds, and a detach that the old leader began can run
+  after Kubernetes attached the volume to the same machine again. The
+  detach takes that machine off the volume's list. The controller node then
+  ends the machine's connection where its kernel lets it (the first entry
+  of this section); elsewhere the connection ends at its next reconnect,
+  which the controller node refuses. Either way the mount dies under a
+  running pod: its IO fails, and the writes it had not flushed are lost. State: fix later: no way to fix
+  it is known, since a detach names only the volume and the machine. Read
+  from dnv's code; not seen in the lab.
+- **A Kubernetes node plugin that starts under a new host NQN drops the
+  paths of every volume in use.** The host NQN is a Kubernetes machine's
+  name to dnv, and the node plugin is the driver's part on each machine. A
+  node plugin that starts with new identity files, the machine's
+  `/etc/nvme/hostnqn` and `/etc/nvme/hostid`, hears from the cdcs no
+  path of the volumes attached under the old name, takes that as a detach
+  of each, and drops all their paths: their mounts fail, and writes their
+  pods had not flushed are lost. State: procedure written: make new
+  identity files only on a machine with no NVMe connection, after its pods
+  moved away ([the operations
+  doc](operations.md#a-kubernetes-node-plugin-that-does-not-start)). Read
+  from dnv's code; not seen in the lab.
 - **The Kubernetes driver can format a volume that holds data past its
   first MiB.** Silent. The node plugin formats a file system volume that
   it takes for blank, and its proof is blkid's answer and the volume's
@@ -2284,6 +2308,14 @@ failover's among them.
   Kubernetes suite's unstage case makes both the wait for a cntlr and a
   copy of the mount held by another process; a device built over a raw
   block volume is not seen in the lab.
+- **A volume whose IO waits on a Kubernetes machine holds one of the node
+  plugin's 32 command slots.** When no cntlr of a volume serves a machine,
+  the node plugin's command that reads or unmounts the volume there waits
+  until one serves again, and no signal ends it. The node plugin runs one
+  such command for each volume at a time, so the kubelet's later tries do
+  not add more, and its connects have slots of their own. But when 32
+  volumes wait at once on one machine, no other volume can be made ready
+  there until one of them ends. State: accepted. Not seen in the lab.
 - **A cntlr or a cdc that does not answer holds up a Kubernetes node.** The
   node plugin makes its connects and its reads of the cdcs' answers one at a
   time and bounds each by a few seconds, but no signal ends some waits in

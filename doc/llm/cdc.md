@@ -278,7 +278,9 @@ Reasons. nvmet lists its own record first in every discovery log it serves,
 so host stacks already read one and skip it: nvme-cli's `connect-all` never
 connects a record of the current discovery subsystem, nvme-stas connects
 only NVM subsystem records and follows only referrals, and the node plugin
-of dnv's Kubernetes driver skips it as well (`parseDiscoveryLog`). The
+of dnv's Kubernetes driver connects it neither, but requires it: a log
+without it is no answer of a dnv cdc and holds the plugin's drops
+(`parseDiscoveryLog`; `csi.md` CSI15). The
 record is per connection rather than in the host's view because it names
 the address the connection reached, and one host can reach one instance at
 two addresses while holding one view (DS7). The address comes from the

@@ -41,6 +41,9 @@ type fakeNode struct {
 	blkidErr map[string]string     // blkid's complaint per device it cannot read
 	logs     map[string][]logEntry // discovery log per cdc endpoint
 	logFail  map[string]bool       // cdcs whose log read fails
+	noSelf   map[string]bool       // cdcs whose log lacks the cdc's own record
+	emptyLog map[string]bool       // cdcs whose log is an empty list
+	lossTmo  map[string]string     // controller name -> ctrl_loss_tmo; "off" when unset
 	discFail map[string]bool       // cdcs a discovery connect fails to
 	refuse   map[string]int        // endpoint -> connects still refused
 	noNs     map[string]bool       // endpoints whose paths show no namespace yet
@@ -60,8 +63,9 @@ type fakeNode struct {
 	// remountFail is how many read-only remounts still fail.
 	remountFail int
 	// readFail makes ReadFile of a path fail with an error that is not
-	// "not there".
-	readFail map[string]error
+	// "not there"; writeFail makes WriteFileDirect of a path fail.
+	readFail  map[string]error
+	writeFail map[string]error
 	// disconnectFail makes the disconnect of a controller fail, by name,
 	// and leaves the controller in place.
 	disconnectFail map[string]bool
@@ -99,6 +103,9 @@ func newFakeNode() *fakeNode {
 		blkidErr: map[string]string{},
 		logs:     map[string][]logEntry{},
 		logFail:  map[string]bool{},
+		noSelf:   map[string]bool{},
+		emptyLog: map[string]bool{},
+		lossTmo:  map[string]string{},
 		discFail: map[string]bool{},
 		refuse:   map[string]int{},
 		noNs:     map[string]bool{},
@@ -109,6 +116,7 @@ func newFakeNode() *fakeNode {
 
 		connectErr:     map[string]string{},
 		readFail:       map[string]error{},
+		writeFail:      map[string]error{},
 		disconnectFail: map[string]bool{},
 	}
 	return f
@@ -251,6 +259,11 @@ func (f *fakeNode) client() common.OsClient {
 					if c.hostNqn != "" {
 						return c.hostNqn + "\n", nil
 					}
+				case "ctrl_loss_tmo":
+					if tmo := f.lossTmo[name]; tmo != "" {
+						return tmo + "\n", nil
+					}
+					return lossTmoOff + "\n", nil
 				}
 				return "", notExist(path)
 			}
@@ -301,7 +314,36 @@ func (f *fakeNode) client() common.OsClient {
 			if f.dirs[path] {
 				return errors.New("is a directory")
 			}
+			// sysfs lets no file be created, so the atomic replace fails
+			// there, as the real client's does.
+			if strings.HasPrefix(path, sysClassNvme+"/") {
+				return fmt.Errorf("create temp file next to %s: %w", path,
+					fs.ErrPermission)
+			}
 			f.files[path] = data
+			return nil
+		},
+		// A controller's ctrl_loss_tmo takes a negative number as no limit,
+		// as the kernel's does; writeFail makes a write fail.
+		WriteFileDirectFn: func(ctx context.Context, path string, data string) error {
+			f.mu.Lock()
+			defer f.mu.Unlock()
+			rest, ok := strings.CutPrefix(path, sysClassNvme+"/")
+			if !ok {
+				return notExist(path)
+			}
+			name, attr, _ := strings.Cut(rest, "/")
+			if _, ok := f.ctrls[name]; !ok || attr != "ctrl_loss_tmo" {
+				return notExist(path)
+			}
+			if err := f.writeFail[path]; err != nil {
+				return err
+			}
+			if strings.HasPrefix(data, "-") {
+				f.lossTmo[name] = lossTmoOff
+			} else {
+				f.lossTmo[name] = data
+			}
 			return nil
 		},
 		// A direct read answers what the device holds: startOf's bytes,
@@ -377,7 +419,19 @@ func (f *fakeNode) runCommand(
 				if f.logFail[c.key()] {
 					return fail(1, "discovery failed")
 				}
+				if f.emptyLog[c.key()] {
+					return `{"device":"` + dev + `","genctr":1,"records":[]}`, "", 0, nil
+				}
 				var records []map[string]string
+				// A dnv cdc lists itself first (cdc.md DS12).
+				if !f.noSelf[c.key()] {
+					records = append(records, map[string]string{
+						"trtype": "tcp", "adrfam": "ipv4",
+						"subtype": "current discovery subsystem",
+						"trsvcid": c.trSvcId, "traddr": c.trAddr,
+						"subnqn": common.NvmeDiscoveryNqn,
+					})
+				}
 				for _, e := range f.logs[c.key()] {
 					records = append(records, map[string]string{
 						"trtype": "tcp", "adrfam": "ipv4", "subtype": "nvme subsystem",
@@ -1418,6 +1472,8 @@ func TestParsers(t *testing.T) {
 		t.Error("an IPv6 address without brackets was read as ip:port")
 	}
 	entries, err := parseDiscoveryLog(`{"device":"nvme0","genctr":3,"records":[
+		{"trtype":"tcp","adrfam":"ipv4","subtype":"current discovery subsystem","treq":"not specified",
+		 "portid":1,"trsvcid":"18030","subnqn":"nqn.2014-08.org.nvmexpress.discovery","traddr":"10.0.0.78"},
 		{"trtype":"tcp","adrfam":"ipv4","subtype":"nvme subsystem","treq":"not specified",
 		 "portid":1,"trsvcid":"4300","subnqn":"nqn.2024-01.io.dnv.csi:pvc-1","traddr":"10.0.0.125"},
 		{"trtype":"tcp","adrfam":"ipv4","subtype":"discovery subsystem referral",
@@ -1428,15 +1484,20 @@ func TestParsers(t *testing.T) {
 		entries[0].ep.String() != "10.0.0.125:4300" {
 		t.Errorf("parseDiscoveryLog = %v, %v", entries, err)
 	}
-	// A log that lists nothing is a document with an empty list; an output
-	// that is empty or a document without its records cannot be read
-	// (csi.md CSI15).
-	if entries, err := parseDiscoveryLog(`{"genctr":4,"records":[]}`); err != nil ||
+	// A log that lists nothing is a document whose one record is the cdc
+	// itself; an output that is empty, a document without its records, and
+	// a list without the cdc's own record, an empty one included, cannot be
+	// read (csi.md CSI15; cdc.md DS12).
+	if entries, err := parseDiscoveryLog(`{"genctr":4,"records":[
+		{"trtype":"tcp","adrfam":"ipv4","subtype":"current discovery subsystem",
+		 "trsvcid":"18030","subnqn":"nqn.2014-08.org.nvmexpress.discovery","traddr":"10.0.0.78"}]}`); err != nil ||
 		len(entries) != 0 {
-		t.Errorf("a log with no record = %v, %v", entries, err)
+		t.Errorf("a log with the cdc's record alone = %v, %v", entries, err)
 	}
 	for _, out := range []string{"", " \n", `{"genctr":1}`, `{"device":"nvme0"}`,
-		`{"genctr":1,"records":null}`, "not json"} {
+		`{"genctr":1,"records":null}`, "not json", `{"genctr":4,"records":[]}`,
+		`{"genctr":5,"records":[{"trtype":"tcp","subtype":"nvme subsystem",
+		 "trsvcid":"4300","subnqn":"nqn.2024-01.io.dnv.csi:pvc-1","traddr":"10.0.0.125"}]}`} {
 		if entries, err := parseDiscoveryLog(out); err == nil {
 			t.Errorf("parseDiscoveryLog(%q) = %v, nil: taken as a log", out, entries)
 		}

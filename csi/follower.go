@@ -33,6 +33,8 @@ const (
 
 	msgPathConnected     = "csi path connected"
 	msgPathDropped       = "csi path dropped"
+	msgPathDropSkipped   = "csi path drop skipped"
+	msgLossLimitLifted   = "csi path loss limit lifted"
 	msgDiscoveryOpened   = "csi discovery connection opened"
 	msgDiscoveryDropped  = "csi discovery connection dropped"
 	msgFollowerSyncError = "csi follower sync error"
@@ -243,6 +245,10 @@ func (f *follower) waitDrops(ctx context.Context, nqn string) error {
 // dropPathLocked starts the drop of one path outside the lock, unless one
 // is running for that controller already. The drop outlives the call that
 // began it, so its command runs on a ctx that call's end does not cancel.
+// Right before its disconnect, which goes by device name, it reads the
+// controller's subsystem and address again and drops nothing when they are
+// no longer the path's: the kernel can have given the name to another
+// connection meanwhile (csi.md CSI15).
 func (f *follower) dropPathLocked(
 	ctx context.Context,
 	nqn string,
@@ -258,11 +264,20 @@ func (f *follower) dropPathLocked(
 	go func() {
 		defer close(d.done)
 		f.dropSlots <- struct{}{}
-		err := f.host.disconnectCtrl(dropCtx, name)
+		same, err := f.host.ctrlStillIs(dropCtx, name, nqn, key)
+		if err == nil && same {
+			err = f.host.disconnectCtrl(dropCtx, name)
+		}
 		<-f.dropSlots
 		f.mu.Lock()
 		delete(f.dropping, name)
 		f.mu.Unlock()
+		if err == nil && !same {
+			slog.InfoContext(dropCtx, msgPathDropSkipped,
+				slog.String("nqn", nqn), slog.String("endpoint", key),
+				slog.String("ctrl", name))
+			return
+		}
 		if err != nil {
 			slog.InfoContext(dropCtx, msgFollowerSyncError,
 				slog.String("nqn", nqn), slog.String("endpoint", key),
@@ -417,6 +432,11 @@ func (f *follower) syncLocked(ctx context.Context) (bool, error) {
 		}
 		have[c.subNqn][c.key()] = c
 	}
+	for nqn := range f.staged {
+		for key, c := range have[nqn] {
+			f.lossTmoNeverLocked(ctx, nqn, key, c, keep)
+		}
+	}
 	joining := false
 	for nqn := range f.staged {
 		// A listed cntlr's path counts as held only once the kernel shows
@@ -468,6 +488,49 @@ func (f *follower) syncLocked(ctx context.Context) (bool, error) {
 		}
 	}
 	return joining, firstErr
+}
+
+// lossTmoNeverLocked lifts the limit of a staged volume's path whose
+// reconnects give up, as a path nvme-cli's own connect unit or a person
+// made does, 600 seconds at nvme-cli's default: the plugin takes every path
+// of a staged subsystem as its own, and its promise that a mount outlives an
+// outage of every path holds only while no path's reconnects end (csi.md
+// CSI14). A kernel that shows no limit is left as it is; a read or a write
+// that fails is the pass's failure, logged at Warn, as the limit stays.
+func (f *follower) lossTmoNeverLocked(
+	ctx context.Context,
+	nqn string,
+	key string,
+	c ctrl,
+	keep func(error),
+) {
+	tmo, err := f.host.lossTmo(ctx, c.name)
+	if err == nil && (tmo == "" || tmo == lossTmoOff) {
+		return
+	}
+	// The name came from the pass's list, read before its log reads, which
+	// can wait about a minute: read again that it is still this path, as a
+	// drop does, so that no other tool's connection is written.
+	if err == nil {
+		var same bool
+		same, err = f.host.ctrlStillIs(ctx, c.name, nqn, key)
+		if err == nil && !same {
+			return
+		}
+	}
+	if err == nil {
+		err = f.host.lossTmoNever(ctx, c.name)
+	}
+	if err != nil {
+		slog.WarnContext(ctx, msgFollowerSyncError,
+			slog.String("nqn", nqn), slog.String("endpoint", key),
+			slog.String("error", err.Error()))
+		keep(err)
+		return
+	}
+	slog.InfoContext(ctx, msgLossLimitLifted,
+		slog.String("nqn", nqn), slog.String("endpoint", key),
+		slog.String("ctrl", c.name), slog.String("ctrl_loss_tmo", tmo))
 }
 
 // pass runs one sync for the loop and reports whether a pass again soon

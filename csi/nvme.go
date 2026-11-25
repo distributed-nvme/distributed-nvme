@@ -19,8 +19,8 @@ import (
 )
 
 // The node's side of NVMe-oF (csi.md, The node plugin): the node's identity,
-// the connects and disconnects, the discovery log and the few sysfs
-// attributes the follower reads. Everything goes through the OS client, as
+// the connects and disconnects, the discovery log, the few sysfs attributes
+// the follower reads and the one it writes, a path's ctrl_loss_tmo. Everything goes through the OS client, as
 // for the agents (osclient.md): nvme-cli for what the kernel takes as a
 // command, plain reads for sysfs.
 const (
@@ -311,6 +311,62 @@ func (h *nvmeHost) connectDiscovery(ctx context.Context, ep endpoint) error {
 	return err
 }
 
+// ctrlStillIs reports whether a controller's device name still names the
+// path a drop or a lift was decided for, the same subsystem at the same
+// cntlr address, read again from sysfs: the kernel gives a later connection
+// the lowest free number, a deleted controller's name among them, which can
+// be another volume's path by the time a step decided on an earlier read
+// runs (csi.md CSI14, CSI15). A name that names no controller any more is
+// not the path.
+func (h *nvmeHost) ctrlStillIs(ctx context.Context, name, nqn, key string) (bool, error) {
+	dir := path.Join(sysClassNvme, name)
+	sub, err := h.oc.ReadFile(ctx, path.Join(dir, "subsysnqn"))
+	if errors.Is(err, fs.ErrNotExist) {
+		return false, nil
+	}
+	if err != nil {
+		return false, fmt.Errorf("reading subsysnqn of %s: %w", name, err)
+	}
+	address, err := h.oc.ReadFile(ctx, path.Join(dir, "address"))
+	if errors.Is(err, fs.ErrNotExist) {
+		return false, nil
+	}
+	if err != nil {
+		return false, fmt.Errorf("reading address of %s: %w", name, err)
+	}
+	c := ctrl{subNqn: strings.TrimSpace(sub)}
+	c.trAddr, c.trSvcId = parseAddress(strings.TrimSpace(address))
+	return c.subNqn == nqn && c.key() == key, nil
+}
+
+// lossTmoOff is what sysfs shows as a controller's ctrl_loss_tmo when its
+// reconnects never give up.
+const lossTmoOff = "off"
+
+// lossTmo reads a controller's ctrl_loss_tmo from sysfs: "off" for a
+// reconnect that never gives up, else its limit in seconds; empty, with no
+// error, for a kernel or a controller that shows none.
+func (h *nvmeHost) lossTmo(ctx context.Context, name string) (string, error) {
+	data, err := h.oc.ReadFile(ctx, path.Join(sysClassNvme, name, "ctrl_loss_tmo"))
+	if errors.Is(err, fs.ErrNotExist) {
+		return "", nil
+	}
+	if err != nil {
+		return "", fmt.Errorf("reading ctrl_loss_tmo of %s: %w", name, err)
+	}
+	return strings.TrimSpace(data), nil
+}
+
+// lossTmoNever sets a controller's reconnects to never give up, as the
+// plugin's own connect makes them (ctrlLossTmoNever): the kernel takes a
+// negative ctrl_loss_tmo written to sysfs as no limit. The write goes
+// straight into the attribute, since sysfs lets no file be created
+// (osclient.md, ReadFile / WriteFile / WriteFileDirect).
+func (h *nvmeHost) lossTmoNever(ctx context.Context, name string) error {
+	return h.oc.WriteFileDirect(ctx,
+		path.Join(sysClassNvme, name, "ctrl_loss_tmo"), ctrlLossTmoNever)
+}
+
 // disconnectCtrl drops one controller by its device name.
 func (h *nvmeHost) disconnectCtrl(ctx context.Context, name string) error {
 	_, err := h.run(ctx, "disconnect", "-d", name)
@@ -342,6 +398,10 @@ func parseEndpoint(s string) (endpoint, error) {
 	return endpoint{trAddr: host, trSvcId: port}, nil
 }
 
+// subTypeCurrentDiscovery is how nvme-cli names, in lower case, the subtype
+// of a discovery log record that describes the discovery service itself.
+const subTypeCurrentDiscovery = "current discovery subsystem"
+
 // logEntry is one entry of a discovery log: a subsystem a cntlr exports to
 // this node.
 type logEntry struct {
@@ -363,8 +423,11 @@ func (h *nvmeHost) discoveryLog(ctx context.Context, ctrlName string) ([]logEntr
 // parseDiscoveryLog reads nvme-cli's JSON rendering of a discovery log. An
 // output that is empty, or a document without its list of records, is not
 // a log that lists nothing: it cannot be read, and so holds the follower's
-// drops (csi.md CSI15). A dnv cdc's log is never empty, since it lists the
-// cdc itself first (cdc.md DS12).
+// drops (csi.md CSI15). Nor is a log without the record of the cdc itself,
+// the current discovery subsystem, which every log page of a dnv cdc holds
+// first (cdc.md DS12): an empty list, or one that only another service
+// could have sent, would read as a cdc that lists no cntlr for any staged
+// volume, and drop every path of every volume in use.
 func parseDiscoveryLog(out string) ([]logEntry, error) {
 	var doc struct {
 		Records *[]struct {
@@ -386,6 +449,18 @@ func parseDiscoveryLog(out string) ([]logEntry, error) {
 	if doc.Records == nil {
 		return nil, errors.New("the discovery log is not the JSON nvme-cli " +
 			"renders: it has no records")
+	}
+	self := false
+	for _, r := range *doc.Records {
+		if strings.Contains(strings.ToLower(r.SubType), subTypeCurrentDiscovery) {
+			self = true
+			break
+		}
+	}
+	if !self {
+		return nil, fmt.Errorf("the discovery log holds no record of the cdc "+
+			"itself (%d records), which a dnv cdc's log always holds first, "+
+			"so it is not taken as a list", len(*doc.Records))
 	}
 	var entries []logEntry
 	for _, r := range *doc.Records {
