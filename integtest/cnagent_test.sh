@@ -3033,9 +3033,11 @@ fgn_head_effects() {
 # fgn_none — every trace the system's rules could have left of the stage's
 # signatures on this node, one per line, nothing when there is none: an md
 # array one of whose members is no dm device of dnv, a dm device of FGN_VG,
-# lvm2's online record of FGN_PVID, a bcache device.
+# lvm2's online record of FGN_PVID, a bcache device over a device the stage
+# can reach (fgn_bcache_ours), so a lab machine's own bcache device is no
+# trace.
 fgn_none() {
-	local d m name foreign
+	local d m name foreign b
 	for d in /sys/block/md*; do
 		[ -d "$d/md" ] || continue
 		foreign=""
@@ -3051,27 +3053,84 @@ fgn_none() {
 	[ ! -e "/run/lvm/pvs_online/${FGN_PVID//-/}" ] ||
 		echo "lvm2 records physical volume $FGN_PVID online"
 	for d in /sys/block/bcache*; do
-		[ -e "$d" ] && echo "bcache device ${d##*/}"
+		[ -e "$d" ] || continue
+		b=$(fgn_bcache_backing "${d##*/}") || b=""
+		fgn_bcache_ours "$b" && echo "bcache device ${d##*/} over $b"
 	done
 	return 0
 }
 
+# fgn_bcache_ours <block device name> — succeeds when a bcache device over
+# that backing device can be the stage's: the backing device is an md array
+# whose every member is a dm device of dnv, where the stage plants its
+# signatures, a dm device of dnv, which shows the array's start (the pool's
+# data concat, the thin pool), or a scratch loop device of the stage, over a
+# file in FGN_DIR, which carries no bcache superblock but is the stage's.
+# Any other bcache device, such as one a lab machine uses for its own
+# storage, is not the stage's.
+fgn_bcache_ours() {
+	local m n=0
+	case "$1" in
+	loop*)
+		case "$(losetup -n -O BACK-FILE "/dev/$1" 2>/dev/null)" in
+		"$FGN_DIR"/*) return 0 ;;
+		esac
+		return 1
+		;;
+	md*)
+		for m in "/sys/block/$1"/md/dev-*; do
+			[ -e "$m" ] || continue
+			case "$(cat "$m/block/dm/name" 2>/dev/null)" in
+			dnv-*) n=$((n + 1)) ;;
+			*) return 1 ;;
+			esac
+		done
+		[ "$n" -gt 0 ]
+		return
+		;;
+	dm-*)
+		case "$(cat "/sys/block/$1/dm/name" 2>/dev/null)" in
+		dnv-*) return 0 ;;
+		esac
+		return 1
+		;;
+	esac
+	return 1
+}
+
+# fgn_bcache_backing <bcache device name> — the name of the backing device a
+# bcache device caches, read off its bcache entry, which links to the backing
+# device's own.
+fgn_bcache_backing() {
+	local real
+	real=$(readlink -f "/sys/block/$1/bcache") || return 1
+	real=${real%/bcache}
+	printf '%s' "${real##*/}"
+}
+
 # fgn_sweep — removes whatever the system made of the stage's signatures, a
 # rule having failed, and the stage's scratch: FGN_VG's dm devices and
-# lvm2's online records of it; every bcache device, stopped through the
-# device it caches; and every md array that holds an md array or a scratch
-# loop device of the stage, or a member whose superblock, as mdadm's plain
-# examine reads it, names fgnmd or fgntail. It runs before cleanup stops the
-# arrays, which any of these would hold. Best-effort.
+# lvm2's online records of it; a bcache device over a device the stage's
+# signature can have reached (fgn_bcache_ours), stopped through the device
+# it caches, and no other; and every md array that holds an md array or a
+# scratch loop device of the stage, or a member whose superblock, as
+# mdadm's plain examine reads it, names fgnmd or fgntail. It runs before
+# cleanup stops the arrays, which any of these would hold. Best-effort.
 fgn_sweep() {
-	local name d m stop
+	local name d m stop real backing
 	for name in $(dmsetup ls 2>/dev/null |
 		awk -v p="$FGN_VG-" 'index($1, p) == 1 {print $1}'); do
 		timeout 15 dmsetup remove "$name" >/dev/null 2>&1
 	done
 	rm -f "/run/lvm/pvs_online/${FGN_PVID//-/}" "/run/lvm/vgs_online/$FGN_VG"
+	# A bcache device's own entry links to its backing device's, so the
+	# backing device's name is read off the resolved path.
 	for d in /sys/block/*/bcache/stop; do
-		[ -e "$d" ] && echo 1 >"$d" 2>/dev/null
+		[ -e "$d" ] || continue
+		real=$(readlink -f "$d") || continue
+		backing=${real%/bcache/stop}
+		backing=${backing##*/}
+		fgn_bcache_ours "$backing" && echo 1 >"$real" 2>/dev/null
 	done
 	for d in /sys/block/md*; do
 		[ -d "$d/md" ] || continue

@@ -711,7 +711,8 @@ arguments the first stage's rule builds for its own group, the data
 surviving, the data group's from both legs, which the newer 1.0 superblocks
 would make a plain assembly refuse (CN12, The superblock format). After the
 failover neither VM holds an array, a volume group or a bcache device made
-from the planted signatures, and the stage zeroes the legs' ends again
+from the planted signatures, a bcache device being counted only over a
+device the stage can reach (Teardown and cleanup), and the stage zeroes the legs' ends again
 through the new primary's leg devices. With what the primary's machine sends
 to DN1's port delayed (`tc netem`, no device changed), the primary's inspect
 read reports a write half of the probe of each of DN1's legs, from a round
@@ -1391,7 +1392,12 @@ disk's header
 block zeroed (`architecture.md`, [D13]) and the udev rules removed last; and
 before the arrays stop, whatever the system made of redund's foreign
 signatures, an array, an active volume or a bcache device over one of them,
-should a rule have failed, together with the stage's scratch devices.
+should a rule have failed, together with the stage's scratch devices; a
+bcache device is stopped, and counted as a trace, only when its backing
+device is one the stage can reach: an md array whose every member is a dm
+device of dnv, where the signatures land, a dm device of dnv, or one of the
+stage's scratch loop devices, which carry no bcache superblock but are the
+stage's; a bcache device a lab machine uses for its own storage stays.
 Then thinrepair's new metadata device, a loop device over a file in the
 suite's work folder, is detached and its file removed. Every
 suspended dnv device is resumed before anything over it is removed, as one
