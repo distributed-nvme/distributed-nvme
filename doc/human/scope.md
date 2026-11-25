@@ -1384,10 +1384,17 @@ Measured times are in [the introduction](introduction.md#status-and-limits).
   leg, since md no longer holds it, and the worker calls the repair off.
   The primary then puts the old leg back into md, and the group runs on
   its other legs until it does. A new repair comes only when a report
-  names the bad blocks again, or when the leg's health fails. State: fix
-  decided, the worker calls the repair off only while md still holds the
-  leg. It needs md to refuse an add, which is rare, and nothing is lost.
-  Not seen in the lab.
+  names the bad blocks again, or when the leg's health fails. It needs md
+  to refuse an add, which is rare, and nothing is lost. State: accepted.
+  Calling the repair off is the safe outcome: the old leg comes back, and
+  a new repair follows once a report names its bad blocks again. A worker that went on with the repair once md no
+  longer holds the old leg would leave the group on one copy, with no end,
+  after a refused add. Fix later, the real fix: md's replace step, in which
+  the primary adds the new leg before the old leg leaves the array, so that
+  a refused add never touches the old leg. It has a second gain: today the
+  group runs on its other leg alone during the whole copy, and a bad sector
+  there then breaks the array, while with the old leg still in place md
+  can read such a sector from it. Not seen in the lab.
 - **Leg repair for bad blocks takes the leg out before the other leg is
   known to be whole.** md's check finds a sector of one leg that it cannot
   read or write again, and records it in that leg's bad-block list. The

@@ -6947,7 +6947,13 @@ caught.
   (`cnagent.md` CN12), and the next pass's drive step cancels the repair.
   Until that add, the group runs on its other legs. A new repair of the
   leg comes only from a reading that names its ranges again once md holds
-  it, or from a health trigger.
+  it, or from a health trigger. The abort is the safe outcome: a repair
+  that went on once md no longer holds the bad leg would leave the group
+  on one copy, with no end, after a refused add. md's replace step, an add
+  of the new leg while the bad leg keeps its place until the copy has
+  ended, would let a refused add touch nothing and keep the bad leg
+  readable during the copy; the primary does not use it
+  (`cnagent.md` CN12).
 * **A group whose array does not run, or that has no healthy leg, is never
   repaired on its own.** AR8's gate creates no repair for a group whose
   row does not read `OK`, as a stopped or broken array's does not
