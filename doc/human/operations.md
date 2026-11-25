@@ -6986,7 +6986,11 @@ Safe steps, in this order, the order the e2e suite's upgrade case ran
    The build 0.1 has no status read, so before an upgrade from 0.1 there is
    nothing to note. Run the new build's node check on every node, with the
    flags its agent will run with ([Check a node before it
-   joins](#check-a-node-before-it-joins)).
+   joins](#check-a-node-before-it-joins)). On a node that ran 0.1 the
+   lines `udev rule 58-dnv-dm.rules`, `udev rule 63-dnv-md.rules`,
+   `udev rule 63-zz-dnv-md-array.rules` and `md assembly mask` fail or warn
+   until step 6 installs the new rules: there those lines are expected,
+   and the run of step 6 decides.
    On each host, compare `nvme list-subsys` with `dnvctl ss list`: a host
    that is off a subsystem's list but still connected loses its connection
    at the new agent's first converge, where the controller node's cn agent
@@ -7015,7 +7019,10 @@ Safe steps, in this order, the order the e2e suite's upgrade case ran
 6. On every disk node and every controller node, install the udev rules of
    the new release's `deploy/udev/`, with the two settings that go with
    them ([Install the udev rules on a node](#install-the-udev-rules-on-a-node)).
-   0.1 shipped none, so an upgrade from 0.1 installs them all.
+   0.1 shipped none, so an upgrade from 0.1 installs them all. Then run the
+   node check of step 1 again on the node: this run decides. No line may
+   read `FAIL`; a `WARN` is handled as step 3 of [Check a node before it
+   joins](#check-a-node-before-it-joins) says.
 7. Start the agents: `systemctl start dnv-agent-dn@<instance>.service` for
    the instance of each disk on each disk node, then
    `systemctl start dnv-agent-cn.service` on each controller node. Wait until each agent's log holds `agent started`, the
@@ -7111,8 +7118,9 @@ Steps that can lose data:
 - A node whose agents start before the new udev rules are on it: the
   system's own rules can assemble and probe what the agents build.
 
-When to stop: a program prints or logs another version than the new one; a
-node check fails; an agent does not log `agent started`; or at step 12 a
+When to stop: a program prints or logs another version than the new one;
+a line of the node check of step 6 reads `FAIL`, or a line of the one of
+step 1 does, other than those it names for a node that ran 0.1; an agent does not log `agent started`; or at step 12 a
 line that step 1 did not show, any line after an upgrade from 0.1, or a
 `reaction applied` record, shows: stop, start no more programs, and ask for
 help. Never go back to the old build by starting its files again.
@@ -7122,8 +7130,8 @@ Tested: the e2e suite's upgrade case (`integtest/e2e_test.sh`, run with
 order of steps 2 to 11, under a host's writes, after a backup taken with
 `etcdctl snapshot save`: it stops the worker, the gateway and the cdc,
 then the agents as step 4 says, replaces every program
-file, installs the udev rules, runs the node check on each controller node,
-starts the disk nodes' agents and then the controller nodes', checks every
+file, installs the udev rules, runs the node check of step 6 on each
+controller node, starts the disk nodes' agents and then the controller nodes', checks every
 `--version` and every agent's `agent node versions` record, starts the
 gateway, the cdc and the worker last, and checks their start records. It
 then checks that no reaction ran, that each pool kept its cntlrs, its
@@ -7133,10 +7141,9 @@ It passed in the lab on 2026-11-21, in 17 minutes. It runs one slice, two
 cntlrs per pool and no migration, repair, clone or forced start open; it
 runs the worker at the suite's shorter vote times, not the shipped ones,
 and its programs from a work folder, not from the kit's units. Of step 1,
-it takes the backup, and runs the node check on the controller nodes
-alone, after the program files are replaced, not before; of step 12, it
-checks that no `reaction applied` record shows. The node check on the disk
-nodes, the status read and the hosts' comparison of step 1, the status read
+it takes the backup; of step 12, it checks that no `reaction applied`
+record shows. The node check of step 1, the node check of step 6 on the
+disk nodes, the status read and the hosts' comparison of step 1, the status read
 and the new backup of step 12, the units of step 5, and the CSI driver's
 part, steps 3 and 10, are not tested.
 
