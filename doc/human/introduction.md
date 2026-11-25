@@ -493,8 +493,15 @@ release's `deploy/modules-load.d/dnv-host.conf` does once copied into
 `/etc/modules-load.d`: it names nvme-tcp, which loads nvme-fabrics. The
 node plugin refuses to start without either, and names the fix
 ([operations](operations.md#a-kubernetes-node-plugin-that-does-not-start)).
-The tutorials load nvme-tcp by hand, which lasts until a reboot. The
-driver's pods, the Kubernetes units of one or more containers that run its
+The tutorials load nvme-tcp by hand, which lasts until a reboot. Each
+Kubernetes node needs a host NQN and a host id of its own, in
+`/etc/nvme/hostnqn` and `/etc/nvme/hostid`. The driver takes the host NQN
+as the node's name, machines made from one image share the files that
+nvme-cli's package wrote at install, and two nodes with one host NQN
+defeat the driver's detach, which then no longer keeps a lost node off a
+volume ([the scope page](scope.md#54-hosts-and-the-kubernetes-driver)).
+`kubectl get csinodes -o yaml` prints each node's id, its host NQN: two
+nodes with one id share a host NQN. The driver's pods, the Kubernetes units of one or more containers that run its
 plugins, live in a Kubernetes namespace of their own, `dnv-csi`: a named
 group of Kubernetes objects such as pods. The driver's file for it under
 `deploy/` asks Kubernetes' pod security admission, the check that refuses a

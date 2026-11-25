@@ -118,7 +118,16 @@ cat /etc/nvme/hostnqn /etc/nvme/hostid
 ```
 
 The first line printed is the host NQN, `nqn.2014-08.org.nvmexpress:uuid:`
-and a uuid; the second is the host id, a uuid.
+and a uuid; the second is the host id, a uuid. In a cluster of several
+machines each machine needs a host NQN and a host id of its own. Machines
+made from one image share the files nvme-cli's package wrote, and two
+machines with one host NQN defeat the driver's detach ([the scope
+page](scope.md#54-hosts-and-the-kubernetes-driver)). On each such
+machine, before the driver runs there, write both files anew:
+`sudo nvme gen-hostnqn | sudo tee /etc/nvme/hostnqn` and
+`uuidgen | sudo tee /etc/nvme/hostid`. `sudo k3s kubectl get csinodes -o
+yaml` prints each machine's node id, which is its host NQN: two machines
+with one id share a host NQN.
 
 docker, to build the driver's image:
 

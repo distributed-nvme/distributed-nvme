@@ -2078,7 +2078,9 @@ dm-clone (CN18).
   alone is refused; after the remove, mdadm turns the add into a re-add,
   and md resyncs only the regions its write-intent bitmap marks, since
   md keeps every region written while the array is degraded marked in
-  that bitmap. It is not a write of "re-add" to the member's "state":
+  that bitmap, save the regions behind a copy onto another new leg, which
+  md clears as that copy passes them (`architecture.md`, Known limits, "A
+  retired leg taken back can join its array with old data"). It is not a write of "re-add" to the member's "state":
   that write is made in the agent's own process and waits on md's own
   lock, which a superblock write stuck on a member holds for as long as
   that member's IO is held; it cannot be killed and would hold the
@@ -5374,7 +5376,10 @@ table is a thin target over the slice's `CnPoolFinalName`, found in one
 listing of the node's tables, and so a device the plan does not hold too,
 with their numbers and flags from one listing of the node's devices. A
 device whose in-flight count (`Dm.InFlight`) reads no write is left alone,
-at the cost of that read: every write it took has ended, and a write that
+at the cost of that read: every write it sent down has ended, though a
+write dm-thin holds back while it zeroes or copies a new block is not
+counted and can still be on its way (`scope.md` entry "The read of a leg's
+written blocks can miss a block that dm-thin still prepares"); a write that
 starts after the read is no concern, as the old side takes no more writes
 by the time the worker reads (`architecture.md`, Migration). A device with
 a write in flight is suspended and then resumed, one at a time; a suspend

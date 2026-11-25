@@ -4815,7 +4815,10 @@ back the source, so the side kept holds the whole leg (AR8). Beside the
 drains, the
 retire timer deletes a retired leg that has aged on a whole group: a retired
 leg is no leg, the timer is no reaction, and the data of the leg it deletes
-is held twice elsewhere (AR12). The finish of the worker's own repair at the
+is held twice elsewhere, as far as the group's whole flag and health
+epochs tell, which do not see a region md records as bad on every leg
+(AR12; `scope.md` entry "A member md keeps dropping is put back until an
+md check reaches the bad sector; a slow leg reads ok"). The finish of the worker's own repair at the
 retired-leg bound gives back the group's oldest retired leg that does not
 carry `keep` in its own transaction, a copy older than the newest one the
 group keeps beside the leg md holds in sync (AR8; `architecture.md`,

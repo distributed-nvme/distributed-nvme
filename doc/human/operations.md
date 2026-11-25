@@ -721,9 +721,15 @@ Safe steps, when the group stays down:
 4. Wait until every leg is in sync, then step the level back and write
    from a host, as in "Which leg to choose".
 
-Steps that can lose data: the assembly loses nothing; mdadm starts the
-array from the newest legs, and md copies the rest. But the failure itself
-can: a data group that broke while the slice's metadata group took writes
+Steps that can lose data: the assembly makes no choice of its own; mdadm
+starts the array from the newest legs, and md copies the rest. When the
+legs' paths died a few seconds apart rather than at once, md can have
+completed a write on one leg alone with no record of that on the other
+leg, so the legs look equal. md's copy after the assembly then copies the
+leg in its first place over the other in the regions that were being
+written, and such a write is lost when the leg that lacks it holds that
+first place ([the scope page](scope.md#51-hosts-flushes-and-snapshots)).
+The failure itself can lose data too: a data group that broke while the slice's metadata group took writes
 brings the thin pool back read-only, and a metadata group that broke loses
 the blocks mapped since its last commit (the scope page, section 4).
 
@@ -1945,7 +1951,12 @@ Safe steps, as root on the machine:
     an agent reads every name of its folder that starts with `dn-`,
     `side-`, `migr-bm-` or `probe-dn-` for a disk node agent, or with `cn-`,
     `cntlr-`, `clone-bm-`, `probe-cn-` or `torn-` for the controller node
-    agent, as a file of its own.
+    agent, as a file of its own. Never put an agent's local files back from
+    an older copy, as from a backup or a snapshot of the system disk: a disk
+    node's agent that starts on older files removes every side made since
+    their time, with its data ([the scope
+    page](scope.md#55-records-and-tools)). Delete them instead; the worker
+    then sends the agent its desired state again.
 11. Run the node check with each agent's settings ([Check a node before it
     joins](#check-a-node-before-it-joins)), and fix every `FAIL`.
 12. Start the agents: `sudo systemctl start dnv-agent-dn@<name>` and
@@ -3349,7 +3360,9 @@ What dnv does alone:
 
 Safe steps:
 
-1. Start it:
+1. First stop the hosts' discards on the pool's volumes, and make no file
+   system on them, for the whole migration, as "Steps that can lose data"
+   below says. Then start it:
    `dnvctl migr create --name <name> --src-side <side id>`. Add
    `--dn-black <addr>,<addr>` to keep the new side off those disk nodes,
    such as the slow one, or `--dn-white` to name the only ones it may use.
@@ -3393,7 +3406,24 @@ Steps that can lose data:
   bytes, and no call makes md copy the leg again: a repair is refused for a
   leg with no health epoch, and a member that md failed when the leg went
   back to its old side is added back from md's record of the regions
-  written while it was out, which holds none of these.
+  written while it was out, which holds none of these. The call also
+  returns before the primary stops using the new side, and a write until
+  then can land on the new side and be lost with it ([Ending a migration
+  with force](#ending-a-migration-with-force) says how to see the end of
+  that).
+- A host's discard, the message that a range holds no data any more, as
+  `fstrim` sends, on a leg past its cutover: it marks the region as copied
+  on the new side, and when the primary dies within the second before its
+  thin pool records the discard, the new primary reads that block from the
+  new side, which holds old bytes there, possibly another pool's ([the
+  scope page](scope.md#53-transfers-clones-and-migrations)). On each host
+  of the pool, stop discards for the whole migration: `sudo systemctl stop
+  fstrim.timer`, and remount a file system that has the `discard` option
+  without it (`sudo mount -o remount,nodiscard <mount point>`). Start them
+  again once the migration has ended. `blkdiscard` sends discards too, and
+  so does a file system's maker, such as `mkfs.ext4` or `mkfs.xfs`, unless
+  told not to; the Kubernetes driver's node plugin makes a file system on
+  a new volume this way.
 
 Use either flag only as [Ending a migration with force](#ending-a-migration-with-force)
 says.
@@ -3483,8 +3513,19 @@ Steps, by case:
    Stop and ask for help.
 
 Steps that can lose data: every forced end but those of cases 1 and 2. A
-forced cancel also loses nothing when nothing has written to the pool since
-the cutover. In case 2, naming the wrong side as gone keeps a live side
+forced cancel also loses nothing when nothing writes to the pool from the
+cutover until the primary has taken the cancel. The call returns before
+that, and until then a write can still land on the new side and is lost
+with it, unless another leg of the group in sync holds it too. So where
+the group has no other leg in sync, keep the hosts' writes stopped after a
+forced cancel until `dnvctl cntlr inspect --id <primary cntlr id>` shows
+`applied_revision` at least the pool's `sp_rev.revision` that `dnvctl sp
+get` shows after the cancel, and the leg's row under
+`cntlr_info.leg_id_to_leg` reads `RES_STATUS_OK`: the primary has then
+taken the cancel, and its converge drops its path to the new side. If that
+controller node's agent log holds the record `disconnecting a dead leg
+path failed` since the cancel, that path can still serve: keep the writes
+stopped and ask for help. In case 2, naming the wrong side as gone keeps a live side
 whose copy is old or partial, which md counts whole. A forced cancel of a
 copy that is whole throws away the new side, which holds every block: in
 case 2 the group then runs on one copy until the repair ends, and a second
@@ -4442,7 +4483,9 @@ Safe steps:
    `nqn.2024-01.io.dnv:1:<cluster id>:<controller node id>`, each id written
    in hex with 16 digits: `printf 'nqn.2024-01.io.dnv:1:%016x:%016x\n'
    <cluster_id> <cn_id>`. No command prints it.
-7. In the source pool, create the transfer with those NQNs alone:
+7. On each host of the volume, stop its discards, as "Steps that can lose
+   data" below says. Then, in the source pool, create the transfer with
+   those NQNs alone:
    `dnvctl --sp <source> xfer create --name <transfer> --ori-nqn <nqn>
    --ori-idx <ns_idx> --hosts <the NQNs of step 6> --auto-suspend`. Its
    reply holds the transfer's id, `xfer_id`. `--auto-suspend` parks the
@@ -4546,9 +4589,21 @@ Steps that can lose data:
 - Creating the destination's namespace without `--suspended`: the hosts
   on its subsystem's list read the new, empty volume beside the origin
   under the same name and identity.
-- Creating the transfer without `--auto-suspend`: the hosts write the
-  origin during the copy, and the copy misses each write to a region it
-  has already copied.
+- Creating the transfer without `--auto-suspend`: the origin namespace
+  keeps serving, and with `--auto-resume` the destination's serves at
+  once, under the same NQN and namespace identity, so the hosts have two
+  serving copies of one volume and write to either. The copy misses each
+  write to the origin in a region it has already copied.
+- A host's discard during the copy, the message that a range holds no data
+  any more, as `fstrim` sends: it can mark a region as copied while the
+  copy of that region is still on its way, and a host write to the region
+  right after is then lost under the late copy ([the scope
+  page](scope.md#53-transfers-clones-and-migrations)). On each host of the
+  volume, stop discards before step 7 and until the clone has left:
+  `sudo systemctl stop fstrim.timer`, and remount a file system that has
+  the `discard` option without it (`sudo mount -o remount,nodiscard
+  <mount point>`). Start them again after step 14. A `blkdiscard` sends
+  discards too.
 - A host NQN on the transfer's list that is not one of the destination's
   controller nodes: that host can write the origin while the clone copies
   it, and the clone then reads zeros where it wrote a block the list of
@@ -6536,7 +6591,10 @@ Safe steps:
    it.
 6. For each agent: stop it, copy its local files aside, delete them, and
    start it again. The copy is the last record of what the node was told
-   before the restore.
+   before the restore. Never put the copy back, nor local files from any
+   other older copy: a disk node's agent that starts on older files removes
+   every side made since their time, with its data ([the scope
+   page](scope.md#55-records-and-tools)).
 7. First set each subsystem's list to exactly the hosts that use it now.
    `dnvctl ss list` shows each list. On each host, `nvme list-subsys` shows
    the subsystems it is connected to, and

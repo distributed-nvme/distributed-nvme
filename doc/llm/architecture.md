@@ -4305,7 +4305,12 @@ destination took, and
 cannot tell whether the destination has served without a call to an agent,
 and the flag is in etcd and exact, so it refuses from the cutover on;
 `force` is the operator's way out and costs what this paragraph says. A
-forced cancel with no write since the cutover loses nothing. After writes,
+forced cancel loses nothing when nothing writes to the pool from the
+cutover until the primary has taken the cancel: the cancel answers at its
+commit, and until the primary's converge drops its path to the destination
+(`cnagent.md` CN10), a write can still land there and is lost with it, in
+a group with no other leg in sync (`scope.md` entry "A forced migration
+cancel after the cutover"). After writes,
 its one safe end is in an md-raid1 group whose other leg md holds in sync,
 where the source side is gone for good before the copy is whole (a whole
 copy is finished unforced instead, as `FinishMigration` asks only the
@@ -4903,8 +4908,11 @@ without tracking any cursor.
 a migrating leg's bitmap from the primary cntlr's agent through `GetLegBm`
 (`dnv-worker.md` BM7), and Migration says when. The agent first suspends
 and resumes every thin device over the owning slice's pool that has a write
-in flight, so that every write already sent down has its block recorded,
-then walks the pool
+in flight, so that every write already sent down has its block recorded
+(`cnagent.md` CN27); a write dm-thin holds back while it zeroes or copies a
+new block is counted in flight by no device, so it can be missing from the
+bitmap (`scope.md` entry "The read of a leg's written blocks can miss a
+block that dm-thin still prepares"). It then walks the pool
 metadata of that slice and translates pool-data blocks through the
 pool-data linear concat and the group geometry down to this leg's **data
 region** (`cnagent.md` CN27), returning bit k as **1 iff no pool block maps
@@ -5745,8 +5753,14 @@ metadata durability).
 yet copied as "copied" without looking at a copy of that region in
 flight, and sends a write to a region it holds as copied straight to the
 destination; a copy still in flight then lands after that write and puts
-the source's bytes over it. So the discards reach a dm-clone only while no
-write can reach it and no copy is in flight on it (`agent.ApplySkipRanges`).
+the source's bytes over it. So the agent's own discards reach a dm-clone
+only while no write can reach it and no copy is in flight on it
+(`agent.ApplySkipRanges`). A host's discard has no such guard: a clone's
+dm-clone takes it while the clone serves, and a thin pool passes it down
+to a migration's dm-clone on a leg past its cutover, where the thin pool
+commits the block's removal only later (`scope.md` entries "A host's
+discard can make a migration skip a block" and "A host's discard during a
+clone's copy can undo a later write").
 The agent stops the background copy when it runs and waits, for a short
 bound, until the status shows no copy in flight, going on when the bound
 passes: this wait holds no IO back and keeps the pause that follows short.
@@ -6330,9 +6344,17 @@ The four reactions:
 
 The worker never deletes user data on its own (`dnv-worker.md` AR9): the
 retire timer, a step of the pass and no reaction, deletes a retired leg
-only once its data is held twice elsewhere (`dnv-worker.md` AR12), and the
+only once its group misses no leg and has no health epoch, which it takes
+for the leg's data held twice elsewhere (`dnv-worker.md` AR12), and the
 finish of a worker's repair at the retired-leg bound gives back only a copy
-older than the newest one its group keeps (Repairs); neither takes a leg
+older than the newest one its group keeps (Repairs); a region md records
+as bad on every leg of the group, and the newer data of a leg a forced
+start left out whose keep a cancel dropped, are held nowhere else, and the
+timer does not look for either (`scope.md` entries "A member md keeps
+dropping is put back until an md check reaches the bad sector; a slow leg
+reads ok" and "After a forced start, a leg of the old identity can keep
+the group down");
+neither takes a leg
 that carries `keep` (Retired legs).
 
 ## Procedures
@@ -9538,7 +9560,11 @@ document and only pointed to here.
   block's mapping; a flush, or a write the host marks FUA, to a thin device
   with uncommitted changes commits the metadata first, after flushing the
   data device, so a completed fsync is durable when the primary that took
-  its writes completed the flush itself; a primary that dies first loses
+  its writes completed the flush itself and its paths to the legs read a
+  volatile write cache where the disks have one, which after a failover,
+  and on a migration's destination, they do not: such a primary's flushes
+  stop at its leg paths (`scope.md` entry "After a failover, no flush of
+  the new primary reaches a disk node"); a primary that dies first loses
   those writes though the host's fsync can still complete, since the host's
   kernel completes a flush cancelled on the dead path with no error, the
   request carrying no data to retry, and sends a later flush to the new
@@ -9856,14 +9882,17 @@ document and only pointed to here.
   its place and serves; no data is lost.
   Meanwhile a waiting repair is the group's one repair, and the worker's
   leg repair creates no other for the group (`dnv-worker.md` AR8).
-* **A retired leg taken back is copied whole unless the array stayed
-  degraded.** md catches a returning member up from its write-intent
-  bitmap only while the array has stayed degraded since the member left;
-  when the array has been whole since, md copies a retired leg that a
-  repair takes back as it copies a fresh leg (Repair), and so it does after
-  a copy onto another new leg that did not end, as when that leg died in
-  it, since the full copy md sets for a member added with no place of its
-  own stands until a copy ends.
+* **A retired leg taken back can join its array with old data.** md
+  catches a returning member up from its write-intent bitmap when the
+  array has stayed degraded since the member left, and otherwise copies a
+  retired leg that a repair takes back as it copies a fresh leg (Repair).
+  md clears the bitmap behind a copy onto another new leg, so the catch-up
+  misses the regions that copy passed in two cases: that leg died in its
+  copy and the array was then built anew, as by a failover or a reboot of
+  the CN, which drops the full copy md set for that leg; or its copy ended,
+  no host write followed, and it then died. md then marks the taken-back
+  leg in sync while it holds old bytes there (`scope.md` entry "A retired
+  leg taken back can join its array with old data").
 * **A forced start that ends after its zero can leave the group with no
   leg to start from.** The forced start zeroes the superblock of every
   other member it keeps before it assembles the array (Repair, Forced

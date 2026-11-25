@@ -152,8 +152,9 @@ reads the leg's list of written blocks itself, once the old side takes no
 more writes, and hands it to the new side in pieces of a fixed size. For a
 clone the caller reads the source volume's list and hands it over in
 pieces; the gateway answers the read only while every namespace on the
-volume is set aside on the primary, that is, ANA inaccessible with its
-device serving no IO, and only in pieces that each cover a multiple of
+volume that etcd holds is set aside on the primary, that is, ANA
+inaccessible with its device serving no IO (section 5.3 has a namespace
+that etcd no longer holds), and only in pieces that each cover a multiple of
 eight blocks but the last, so that they join end to end; and dnvctl
 always sends a piece's position.
 
@@ -200,11 +201,16 @@ always sends a piece's position.
   the leg went back to its old side is added back from md's record of the
   regions written while it was out, which holds none of these. State: fix
   later, a way to have md copy the leg again after a forced cancel. Until
-  then this loss comes only from a cancel that the operator forces.
-  Procedure written,
+  then this loss comes only from a cancel that the operator forces. The
+  call also returns before the primary stops using the new side: until the
+  primary has taken the cancel, and dropped its path to the new side with
+  it, a write can still land on the new side and is then lost with it, in
+  a pool without RAID with no error; this part is read from dnv's code and
+  the kernel's, not seen in the lab. Procedure written,
   [the operations doc](operations.md#ending-a-migration-with-force): a
-  forced cancel loses nothing when nothing has written to the pool since
-  the cutover, and after writes its one safe use is in a RAID1 group whose
+  forced cancel loses nothing when nothing writes to the pool from the
+  cutover until the primary has taken the cancel, which the operations doc
+  says how to see, and after writes its one safe use is in a RAID1 group whose
   other leg md holds in sync, when the old side's disk node is gone for
   good and the copy is not whole, so that a repair replaces the leg. A copy
   that is whole is finished with no force instead, since the gateway asks
@@ -226,6 +232,29 @@ always sends a piece's position.
   accepted. The operator asks for it. Procedure written:
   [the forced-start guide](operations.md#the-forced-start-guide) says which
   leg to choose and what an older copy costs.
+- **Two pools with a subsystem of the same NQN can serve each other's
+  volumes.** The gateway keeps a subsystem's NQN unique inside one pool
+  only, and the move of a volume to another pool asks for the same NQN in
+  both pools. A controller node's kernel has one subsystem for each NQN,
+  and nothing keeps a cntlr of each pool off one controller node: a pool
+  create, a cntlr an operator creates and the worker's cntlr replacement
+  can each put them there. Each cntlr then writes its own values into the
+  one kernel subsystem: its serial number, its list of hosts and the
+  device under each namespace. A subsystem's serial number comes from its
+  id in its pool, and every pool counts its ids from the same start, so two
+  pools can give a subsystem the same serial number, as two pools of one
+  shape do with nothing else made first; the two pools of a move usually
+  differ. With the same serial number every write of the second cntlr goes
+  through: a host connected under the first pool's list keeps its
+  connection, where the controller node ends no connections, and reads and
+  writes the second pool's volume, with no error when both pools give the
+  namespace the same identity, as a move does. With different serial
+  numbers, once a host has read the subsystem, the kernel refuses the
+  second cntlr's serial number, and neither pool serves steadily on that
+  node. State: fix decided. Until then, keep the cntlrs of two such pools
+  on different controller nodes: [the operations
+  doc](operations.md#move-a-volume-to-another-pool) checks it before a move
+  and during the copy. Read from dnv's code; not seen in the lab.
 
 ## 4. Data loss dnv accepts
 
@@ -312,7 +341,9 @@ Three more things belong with case 1:
   but not a writable thin pool. Each length is of one run. In two runs
   that timed the cuts less closely, the shorter cut failed no write either
   and the longer one left the thin pool read-only too. The meta group's
-  case is read from the kernel's code.
+  case is read from the kernel's code. When the paths of a group die a few
+  seconds apart instead of at once, a write the host was told was done can
+  be lost (section 5.1).
 - **A clone whose clone meta group is lost stops.** The clone meta group
   holds the dm-clone's metadata. With no cntlr able to assemble it, no dm-clone is built. The
   clone's namespaces stay inaccessible and host IO queues. State:
@@ -364,7 +395,8 @@ written. This is the behaviour of a disk with a volatile write cache, not
 a loss in the sense of this document. A flush that completes although its
 primary died is a defect; section 5.1 has it. So is a flush the host never
 sends because it still reads a volume's path as having no cache, as after a
-failover. So is a durable write lost in a failover while the old primary
+failover, and a flush the primary never sends on to the disk nodes for the
+same reason (section 5.1). So is a durable write lost in a failover while the old primary
 still serves, but for the cases section 5.1 lists and accepts.
 
 ## 5. Data loss outside the accepted cases
@@ -422,7 +454,9 @@ the host.
   sends a write it marks FUA as a plain write. An fsync returns success
   with nothing made durable. The pool commits on its own about once a
   second. So a write to a new block is lost when the serving primary dies
-  before that commit, though its fsync completed. A write over data
+  before that commit, though its fsync completed. After a failover even
+  that commit is not made durable on a disk node whose disk has a write
+  cache (the next entry). A write over data
   already there waits in the disks' caches until something else flushes
   them. This ends with a rescan, or with a connection made, or made again,
   while the volume is served. It comes back the next time the host reads
@@ -440,6 +474,27 @@ the host.
   primary right after a failover took 0 ms, as fsyncs that send no flush
   do; no suite reads the cache setting of a host's path. The cases with no
   failover only follow from dnv's rules, and no run has shown them.
+- **After a failover, no flush of the new primary reaches a disk node.**
+  Silent. A controller node reads whether a leg's path has a volatile
+  write cache as a host does: when it connects the leg, connects it again
+  or rescans it, and not when the path's ANA state changes. A standby
+  connects to every leg while each disk node serves that standby's path
+  from a device that fails every IO, which has no write cache. A failover
+  puts the side's own device under the path and moves its ANA state, and
+  nothing makes the new primary read the setting again. So the new
+  primary's kernel completes every flush to its legs at once and sends
+  nothing: the hosts' flushes, md's own and those of each thin pool
+  commit. The same holds for the new side of a migration, whose path the
+  controller node connects before the cutover, while the new side serves
+  it from such a device. Where a disk node's disk has a volatile write
+  cache, completed and flushed writes then wait in that cache, and a power
+  loss of the disk node can lose them: md can count that leg as whole, so
+  reads can return old data, and a thin pool's metadata can come back
+  damaged. This lasts until the controller node connects that path again
+  and also loads its own device over the leg anew, which takes the setting
+  only when it is loaded, as after the controller node's reboot. A disk with no volatile write cache loses nothing
+  this way. State: fix decided. Read from dnv's code and the kernel's;
+  not seen in the lab.
 - **A failover while the old primary still serves can lose a write the
   host was told was done, in some cases.** Silent. A host still writing
   through the old primary can have a write that lands on one leg of a
@@ -514,6 +569,48 @@ the host.
   fix later. On the lab VMs a late disk node needed no fault at 32 slices.
   The fix waits for dnv's maintainers to decide whether the wait should
   grow with the pool.
+- **A write can be lost when the paths of a group die one after the
+  other.** Silent. A network cut can take every path of a RAID1 group
+  away a few seconds apart, with no failover. A write that lands on the
+  second leg alone, after the first leg's path died, makes md fail the
+  first leg and complete the write to the host from that one copy. md's
+  record of that failure cannot reach the second leg either, once its path
+  is dead too. So the legs look equal to md, and when they return, md
+  copies the leg in its first place over the other in the regions that
+  were being written: the write is gone when the leg whose path died first,
+  which lacks the write, holds that first place. On
+  a meta group the lost write is part of a thin pool commit, so an fsync
+  that returned success is undone. This is the loss of the entry above,
+  with no failover, and the order of fences cannot help, since no fence
+  takes part. Nothing reports it: the same sign, members with one change
+  count, md's count of the changes of its array that each leg's superblock
+  records, in an array that md did not mark as fully written, shows after
+  any crash of a primary.
+  State: fix later; no cheap cure is known. Read from the kernel's code;
+  not seen in the lab, whose cuts take every leg at the same moment.
+- **An old primary can serve again from a thin pool it did not remove.**
+  Silent. A demotion makes the old primary remove its arrays and thin
+  pools. The removal can stop part way, as when a listing does not answer
+  or a command runs into its time limit. The agent then reports a leftover,
+  and the worker counts that answer as healthy, so the old primary can
+  become the primary again at a later failover. The primary builds an
+  array or a thin pool only where none is there, and keeps one it finds.
+  dm-thin keeps a pool's records in memory and does not read them from the
+  legs again while the pool's device exists. So when the role comes back
+  before a later sweep removes that thin pool, the old primary serves from
+  records that miss what the other primary wrote in between. A block
+  written then reads as zeros, and the old primary's next commit writes
+  its old records over the newer ones: the blocks written in between are
+  gone, and a block can be given out twice. No error shows, except for a
+  volume made in between that the worker had already recorded as created.
+  State: fix decided. Read from dnv's code; not seen in the lab.
+- **A leg's device can be built over the wrong connection.** The primary
+  puts a device over each leg it connects. It reads the device number of
+  the leg's connection by the kernel's name for that connection, after a
+  slow step and with no second look. The kernel can give a freed name to
+  another connection in that time, and the leg's device then maps another
+  connection's device, which can be another pool's leg. It needs that rare
+  race. State: fix decided. Read from dnv's code; not seen in the lab.
 - **A torn snapshot can read as whole.** Silent. A snapshot is taken slice
   by slice. A primary crash between two slices, or a slice whose step was
   skipped or failed, leaves a torn snapshot. The agent marks it torn and
@@ -619,7 +716,57 @@ The entries:
 
 ### 5.3 Transfers, clones and migrations
 
-No case is known today.
+- **The read of a leg's written blocks can miss a block that dm-thin still
+  prepares.** Silent. Once a migration's cutover has begun, the worker
+  reads the leg's list of written blocks from the slice's thin pool. Just
+  before that read, the primary waits for the writes in flight of each
+  thin device, but only of a device whose kernel count of writes in flight
+  is above zero, and dm-thin does not count a write it holds back while it
+  zeroes or copies a new block. So such a write can be missing from the
+  list while the zeros of its block are already on the old side. The new
+  side then skips the block, and when the held write lands there later,
+  the block holds, around the write's bytes, old bytes of a reused extent,
+  possibly another pool's, where zeros belong. md reads from that leg with
+  no error. It needs the group's other leg to stall across the cutover.
+  State: fix decided. Read from dnv's code and the kernel's; not seen in
+  the lab.
+- **A volume's written blocks can be read while a namespace that etcd no
+  longer holds still serves it.** Silent. `dnvctl td get-bm` reads a
+  volume's list of written blocks, and the gateway answers only while
+  every namespace on the volume is set aside on the primary. It takes
+  those namespaces from etcd. A namespace just deleted, or pointed at
+  another volume, is gone from etcd while the primary still serves it
+  until its next converge, and for a volume with no namespace in etcd the
+  gateway asks the primary nothing. A host can then still write the volume
+  after the list was read. A block first written then is marked never
+  written, and a clone that uses the list reads zeros there. The window is
+  the usual delay before the primary applies a change, and longer while
+  the worker is slow or down. State: fix decided. Read from dnv's code;
+  not seen in the lab.
+- **A host's discard can make a migration skip a block.** Silent. A
+  discard is a host's message that a range of a volume holds no data any
+  more, as `fstrim` sends. The thin pool passes a host's discard down to
+  the legs. On a leg past its cutover the discard reaches the device on the
+  new side that pulls the data from the old side, and that device marks the
+  region as copied, though it did not copy it. The thin pool records the
+  removal of the block up to a second later, at its commit. When the
+  primary dies in that second, the new primary's thin pool still maps the
+  block, and its reads go to the new side, which holds old bytes of a
+  reused extent there, possibly another pool's. State: fix decided. Until
+  then, stop the hosts' discards during a migration, as [the operations
+  doc](operations.md#move-a-leg-to-another-disk-node) says. Read from dnv's
+  code and the kernel's; not seen in the lab.
+- **A host's discard during a clone's copy can undo a later write.**
+  Silent. While a clone copies its source, a host's discard of the clone's
+  volume marks a region as copied, and a copy of that region may still be
+  on its way. A host write to the region right after goes straight to the
+  destination, and the late copy then lands over it: the host reads the
+  source's older bytes where it wrote. The window is short. State: fix
+  later; the clean fix is in dm-clone, the kernel's device that copies a
+  clone. Procedure written: [the operations
+  doc](operations.md#move-a-volume-to-another-pool) stops the hosts'
+  discards during the copy. Read from the kernel's code; not seen in the
+  lab.
 
 ### 5.4 Hosts and the Kubernetes driver
 
@@ -663,6 +810,31 @@ No case is known today.
   doc](operations.md#check-a-node-before-it-joins)). The cn agent suite shows
   the end of a connection on controller nodes whose NVMe target is built with
   the option.
+- **Two Kubernetes machines with the same host NQN defeat the detach.**
+  Silent. The Kubernetes driver takes the content of a machine's
+  `/etc/nvme/hostnqn` as the machine's name, and puts that name alone on a
+  volume's list of hosts. The package of nvme-cli writes the file at
+  install, so machines made from one image share it. A detach then takes
+  the name off, and the attach to the second machine puts the same name
+  back: the first machine's kernel connects again and is let in. A lost
+  machine that still reaches the controller nodes then writes the file
+  system beside the machine the volume moved to, with no error. State:
+  accepted: the driver cannot see the other machines. Each Kubernetes
+  machine needs a host NQN and a host id of its own, as [the
+  introduction](introduction.md#requirements) and [the CSI
+  tutorial](tutorial_csi.md) say. `kubectl get csinodes -o yaml` prints
+  each machine's node id, which is its host NQN: two machines with one id
+  share a host NQN. Read from dnv's code; not seen in the lab.
+- **The Kubernetes driver can format a volume that holds data past its
+  first MiB.** Silent. The node plugin formats a file system volume that
+  it takes for blank, and its proof is blkid's answer and the volume's
+  first MiB. A volume used before as a raw block device can have zeros in
+  its first MiB and data further in, in a form blkid does not know. Given
+  later to a pod as a file system volume, it is formatted and its data is
+  gone. A form that blkid knows makes the plugin refuse instead. State: fix
+  later: a wider proof, for example from the volume's count of written
+  blocks, which the primary knows. Read from dnv's code; not seen in the
+  lab.
 
 ### 5.5 Records and tools
 
@@ -686,6 +858,54 @@ No case is known today.
   which tells the two cases apart, and
   [restore etcd from a backup](operations.md#restore-etcd-from-a-backup).
   Not seen in the lab.
+- **A disk node's agent that starts on older local files removes the sides
+  made since.** At its start a disk node's agent builds again from its
+  local files, and also removes what they do not name and frees its
+  extents, before the worker can send it anything. Nothing checks that the
+  files are as new as the node. They are older when a system disk is put
+  back from a backup or a snapshot while the data disk stays, when old
+  files are copied into the folder, or when a mount that was missing at one
+  start is back at the next. Every side made after the files' time is then
+  removed, and its extents are free for the next side: in a pool without
+  RAID the group's data is lost, and in a RAID1 pool the group loses a leg,
+  or both legs when both machines went back to one backup. An older file of
+  a side also makes the agent build that side as the file has it until the
+  worker's first request. Local files that are missing are safe: the
+  worker then sends every object again. State: fix decided. Until then,
+  never put an agent's local files back from an older copy: delete them
+  instead, as [the operations doc](operations.md#prepare-a-node) says. Read
+  from dnv's code; not seen in the lab.
+- **An older request can pass a controller node's revision check after a
+  failed read of its local files.** Silent. A controller node's agent
+  refuses a request whose revision is lower than the one it holds. At its
+  start it loads its local files, and when the node's own file cannot be
+  read once, it skips every cntlr file too. It then holds no revision for
+  those cntlrs, and any request passes. Two workers can drive one pool for
+  a short time at a change of its owner, so an old owner can still send an
+  older request. On a primary the converge of that request removes what
+  the request does not name: a volume made since is removed with its thin
+  id, and its data is gone. It needs an agent restart, one failed read and
+  an older request at once. State: fix decided. Read from dnv's code; not
+  seen in the lab.
+- **One disk node's agent that holds two disk nodes checks its disk for
+  the wrong one.** A disk node's agent refuses a disk whose header block,
+  the disk's first block, where dnv records which node the disk belongs to,
+  names another node, but it keeps one wanted name for the whole program,
+  and each converge of one of its nodes overwrites it. An agent holds two
+  disk nodes after an operator's mistake: its address created as a disk
+  node in a second cluster, or two disk node agents that share one folder
+  of local files. Nothing refuses either. The first node's sides then read
+  as on a foreign disk and take no change, and a side of the second node
+  passes the check and gets extents in the first node's table. Both
+  clusters count their ids from the same start, so that side can even be
+  built over the extents of a side of the first. State: fix decided. Read
+  from dnv's code; not seen in the lab.
+- **A side can be marked provisioned from the counts of a foreign disk.**
+  A disk node's agent fills its counts of the zeroing from the disk's own
+  record of which extents each side holds, before it has confirmed that
+  record as its own, and the worker marks a side provisioned on
+  those counts alone. It needs a disk of another cluster under the agent's
+  path. State: fix decided. Read from dnv's code; not seen in the lab.
 - **Making the old primary the primary again right after a failed fence
   can write old data.** Silent. A fence that suspends the old primary's
   path and then fails to load the error target leaves that path suspended
@@ -865,7 +1085,16 @@ Measured times are in [the introduction](introduction.md#status-and-limits).
   heals the sector, and the drops end. A rewrite that fails makes md record
   a bad block on the leg, and leg repair then moves the leg, copying from
   another leg of the group that has no bad block; where every leg has one,
-  nothing moves, and a region recorded on every leg is lost. Between two
+  nothing moves, and a region recorded on every leg is lost from the
+  group's legs. A retired leg that left the group before can still hold
+  that region, but the worker deletes a retired leg seven days after it
+  left once the group misses no leg and has no health epoch, and a region
+  recorded on every leg does not stop that delete: the worker can delete
+  the last copy, and its log does not say that the legs carry bad blocks.
+  Keep such a leg with `dnvctl retired-leg keep --leg <leg id>` ([Retired
+  legs](operations.md#retired-legs)); the state of that delete is fix
+  decided, and it is read from dnv's code, not seen in the lab. Between
+  two
   checks the drops go on, each a resync of a small part of the leg. A
   drop stops a running check, and the next try starts again from the
   leg's start, so a sector on which reads fail often enough can keep the
@@ -1098,7 +1327,10 @@ Measured times are in [the introduction](introduction.md#status-and-limits).
   from the desired state while its volume stays, the primary names nothing
   of the transfer. The transfer's device should then serve only errors;
   when that change fails, the device stays as it was until a syncup comes
-  for another reason. The gateway refuses to delete a namespace a transfer
+  for another reason. Such a transfer also skips the step that sets its
+  list of hosts, so a host taken off that list keeps its access: it reaches
+  only errors, unless the change of the device failed too, and then it
+  reaches the volume's data. The gateway refuses to delete a namespace a transfer
   is made from, or to point it at another volume, so only a record written
   before that refusal holds this state. State: accepted. Not seen in the
   lab.
@@ -1143,6 +1375,21 @@ Measured times are in [the introduction](introduction.md#status-and-limits).
   decided, the worker calls the repair off only while md still holds the
   leg. It needs md to refuse an add, which is rare, and nothing is lost.
   Not seen in the lab.
+- **Leg repair for bad blocks takes the leg out before the other leg is
+  known to be whole.** md's check finds a sector of one leg that it cannot
+  read or write again, and records it in that leg's bad-block list. The
+  worker then repairs that leg at once, since the other leg shows no bad
+  block so far. The repair stops the running check, so the check never
+  read the rest of the other leg, and the primary takes the leg with bad
+  blocks out of the array before it adds the new leg: the group runs on
+  the other leg alone during the whole copy. A bad sector there is then
+  read from the last leg in sync: md marks the array broken, host writes
+  fail, the primary is failed over, and the sector is recorded as bad on
+  that leg and on the new leg, though the leg taken out holds it. Two legs
+  with bad sectors in different places are something RAID1 survives; the
+  repair turns them into a lost region and an outage. The leg taken out
+  keeps its data as a retired leg until it is deleted. State: fix decided.
+  Read from dnv's code and the kernel's; not seen in the lab.
 - **A repair whose new leg the primary never reports stays open while
   the primary role cannot move.** It blocks every other repair of the
   group. This happens only while the primary does not apply the syncup
@@ -1185,7 +1432,16 @@ Measured times are in [the introduction](introduction.md#status-and-limits).
   when the primary's report names the leg's identity as undecided: while
   the primary's agent is still starting, it takes a leg that has a health
   epoch without the flag, and once that repair finishes the worker may
-  delete the old leg when it is old enough.
+  delete the old leg when it is old enough. The worker's own repair is a
+  second way: the forced start's keep mark for that leg, which keeps the
+  worker from deleting a retired leg, lives on the open
+  repair's record, so the cancel of the repair drops it. When the leg
+  later gets a health epoch, as when its disk node is down for a while,
+  the worker replaces it with a repair of its own, whose finish retires the
+  leg without the keep mark, and the worker deletes it seven days later,
+  though it may hold newer data than the array. Keep it with `dnvctl
+  retired-leg keep --leg <leg id>` once it is retired; the state of that
+  delete is fix decided.
   State: procedure written,
   [a leg of another identity that the primary does not add](operations.md#a-leg-of-another-identity-that-the-primary-does-not-add),
   not run on real agents. Not seen in the lab.
@@ -1884,7 +2140,17 @@ failover's among them.
   Kubernetes host on an unreachable old node sees errors until the new
   path shows the volume, and can lose a write the same way. The e2e suite
   shows the first window, with an old primary whose agent is stopped; the
-  other windows and the Kubernetes case are not seen in the lab.
+  other windows and the Kubernetes case are not seen in the lab. A read
+  through the old path can do worse than fail. After the fence the old
+  primary still runs its thin pools with the records they had, and a thin
+  pool answers a read of a block it never mapped with zeros, with no leg
+  needed. A block first written through the new primary is such a block,
+  so a host still on the old path can read zeros, with success, where it
+  wrote. This needs a thin pool that had no change waiting for its commit
+  at the fence; a thin pool with one fails every read. For an old primary
+  whose agent is stopped it can last for as long as that thin pool makes no
+  commit. Read from dnv's code and the kernel's, not seen in the lab; the
+  state of these reads is fix decided.
 - **A failover while the disk nodes are still opening a pool's paths can
   leave the pool unbuilt.** When the new primary builds while the disk nodes
   are still opening its paths, it starts a group's RAID1 array only once both
@@ -1923,7 +2189,10 @@ failover's among them.
   it serves those volumes. Once the network is back, the worker's next
   message turns each of them into a standby. A host whose connection to the
   node comes back before that message sends its writes there, and they fail.
-  No write the host was told was done is lost. The e2e suite's many-pools
+  No write the host was told was done is lost, but a read there of a block
+  first written through the new primary can return zeros, with success,
+  as the entry "Hosts still on the old primary's path see IO errors from
+  the fence" says; the state of those reads is fix decided. The e2e suite's many-pools
   case shows it at 32 and 64 pools
   ([the introduction](introduction.md#status-and-limits) has the
   numbers). State: fix later; the way is not decided yet.
@@ -2371,8 +2640,20 @@ design:
 - **An md check counts mismatches on never-written blocks.** The count
   means nothing, and dnv does not read it. State: accepted. Procedure
   written, [The md check's mismatch count](operations.md#the-md-checks-mismatch-count).
-- **A retired leg taken back is copied whole unless the array stayed
-  degraded.** State: accepted.
+- **A retired leg taken back can join its array with old data.** A retired
+  leg taken back is copied whole, unless md takes it back by a short copy
+  of the regions its record names as written while the leg was away, as
+  when the array stayed degraded since the leg left. In two cases md uses
+  that short copy although its record lacks regions, since md clears the
+  record behind a copy onto another new leg:
+  that other new leg died during its copy and the array was then built
+  anew, as by a failover or a reboot of the controller node; or its copy
+  ended, no host write followed, and it then died. md then marks the leg
+  in sync within seconds while it still holds its old bytes of everything
+  written during the other leg's copy, and reads from both legs in turn, so
+  hosts read old blocks with no error. State: accepted for the time of a
+  whole copy; fix decided for the two cases. Read from the kernel's and
+  mdadm's code; not seen in the lab.
 - **Steady control-plane cost.** The reaction pass reads the whole pool
   from etcd every interval. At the debug log level every check round logs
   two records per object; at the default log level, info, a round that
