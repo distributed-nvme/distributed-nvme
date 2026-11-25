@@ -6639,9 +6639,9 @@ What dnv does alone:
 - Nothing restores etcd by itself. While etcd is down the data plane goes
   on: each node keeps what it built, hosts keep their IO, and the workers
   change nothing. Every cdc stays stopped from step 1 to step 7: on a host
-  that uses nvme-stas, an outage of more than a few seconds is not tested,
-  and nvme-stas may drop the host's paths ([While the control plane is
-  down](#while-the-control-plane-is-down)).
+  that uses nvme-stas, an outage of every cdc kept the host's paths for
+  900 seconds in the lab, and a longer one is not tested ([While the
+  control plane is down](#while-the-control-plane-is-down)).
 - A restore brings the desired state back to the backup's time. What was made
   after the backup is lost: disk nodes free the sides the restored state does
   not name, data included, and primaries delete the volumes it does not name,
@@ -7117,8 +7117,8 @@ What dnv does alone: nothing during the upgrade. A stopped node plugin, and
 a stopped agent, leave the devices, the connections and the mounts of their
 node in place, so the hosts' IO goes on while every program is stopped,
 with no failover and no repair. No run stops every program while a host
-uses nvme-stas: the cdc suite stops every cdc for a few seconds only, and
-a longer outage may drop the host's paths ([While the control plane is
+uses nvme-stas: the cdc suite stops only every cdc, for up to 900
+seconds, and the host kept its paths ([While the control plane is
 down](#while-the-control-plane-is-down)). Once the workers start, each
 drives nothing for its join grace, the worker's `--vote-grace-time`, 60
 seconds at the default. After an upgrade from 0.1, the new worker marks
@@ -7272,10 +7272,9 @@ Steps that can lose data:
   is lost.
 - A host still connected but off a subsystem's list, when the new cn agent
   ends its connection: its writes fail.
-- Every cdc stopped from step 3 to step 9, on a host that uses nvme-stas:
-  an outage of more than a few seconds is not tested, and nvme-stas may
-  drop the host's paths, so that the volumes' IO fails and writes not yet
-  flushed are lost.
+- Every cdc stopped from step 3 to step 9 for more than 900 seconds, on
+  a host that uses nvme-stas: that is not tested. The lab showed
+  nvme-stas keeping the host's paths through 900 seconds.
 - A node whose agents start before the new udev rules are on it: the
   system's own rules can assemble and probe what the agents build.
 
@@ -7356,11 +7355,14 @@ and how long the workers wait, by what is down, at the shipped settings:
   `--vote-leave-grace-time`, 25 seconds at the default.
 - Every cdc down: hosts keep their paths but learn of no change: a new
   host finds no path, and after a failover a host stays on the path that
-  the failover withdrew. On a host that uses nvme-stas, this is tested
-  only for an outage of a few seconds. How long nvme-stas keeps its paths
-  after that is not known: it may drop them once the kernel gives up the
-  host's connection to a stopped cdc, after that connection's
-  `ctrl_loss_tmo`, 600 seconds at the kernel's default. A node of dnv's
+  the failover withdrew. On a host that uses nvme-stas, the lab showed
+  the host keep its paths, and its writes go on, through 900 seconds with
+  every cdc down. The kernel gave up the host's connections to the cdcs
+  after about 620 seconds, their `ctrl_loss_tmo` of 600 seconds at the
+  kernel's default and a reconnect delay, and nvme-stas kept the paths it
+  had made all the same. Once the cdcs started again, nvme-stas connected
+  to them again at its next try, once a minute. A longer outage is not
+  tested. A node of dnv's
   Kubernetes driver keeps its paths while a cdc of its list cannot be
   reached.
 
@@ -7380,10 +7382,8 @@ journal away, as `xfs_repair -L` does: that loses the changes the journal
 holds. Send no write through `dnvctl` until the state reads again, and
 read the state of each call that failed before you send it again.
 
-Steps that can lose data: no run has shown a loss from the outage itself.
-But an outage of every cdc longer than a few seconds is not tested:
-nvme-stas may then drop a host's paths, as Every cdc down says, and then
-the volumes' IO fails and writes not yet flushed are lost. While no worker
+Steps that can lose data: no run has shown a loss from the outage itself,
+an outage of every cdc for 900 seconds included. While no worker
 drives, a primary that dies is not failed over, so its volumes have no IO
 until a worker drives again, and a thin pool that fills gets no auto-grow,
 so a write that needs a new block waits and then fails.
@@ -7410,15 +7410,17 @@ leave grace of 13, and passed in the lab on 2026-11-21. The upgrade case
 keeps every agent stopped for 30 seconds, and the worker for about two
 minutes, under a host's writes with no failed write (2026-11-21).
 The cdc suite, `integtest/cdc_test.sh`, kills every cdc for a few seconds
-under hosts that keep their connections, and starts them again; a longer
-outage is not tested. The worker suite's three-member mode stops one etcd
+under hosts that keep their connections, and starts them again; its
+outage case kills every cdc for 900 seconds under a host's writes, past
+the kernel's 600 seconds, and the host kept its path with no failed write
+(2026-11-25); a longer outage is not tested. The worker suite's three-member mode stops one etcd
 server at a time. The times at the shipped settings are read from the code,
 not measured. No suite runs the CSI driver while etcd or the gateways are
 down: that the node plugin still mounts an attached volume then is read
 from the code. That a node of the Kubernetes driver keeps its paths while
 a cdc of its list cannot be reached is shown by the driver's Go tests,
-with a fake host, not by a suite. No suite runs a cdc outage long enough
-for nvme-stas to drop a path, so its connect afterwards is not tested.
+with a fake host, not by a suite. nvme-stas dropped no path in the cdc
+suite's outage case, so its connect after such a drop is not tested.
 
 ## Give hosts the cdc addresses
 
@@ -7534,8 +7536,9 @@ whose subsystem lists it: read [Read what is wrong](#read-what-is-wrong).
 
 Tested: the cdc suite, `integtest/cdc_test.sh`, runs four cdcs, two twins
 of each half of the ranges, with hosts that list several cdcs through
-nvme-stas: one cdc killed, its twin serving alone, its restart, and every
-cdc killed for a few seconds under hosts that keep their connections. The
+nvme-stas: one cdc killed, its twin serving alone, its restart, every
+cdc killed for a few seconds under hosts that keep their connections, and
+every cdc killed for 900 seconds under a host's writes. The
 gateway suite, `integtest/gateway_test.sh`, runs three gateways on one etcd
 and sends calls to each in turn. The move, the removal or the narrower
 range of a cdc of step 5, with its change of each host's list, a longer
