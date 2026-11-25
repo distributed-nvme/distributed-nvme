@@ -228,7 +228,13 @@ status and the reason of the row it shows follow where it has them:
   serves, is short.
 - `row`, as in `row/error`: a row of the primary's report reads
   `RES_STATUS_ERROR`, or a leg is kept out of its array; the text is the
-  row's text.
+  row's text. A subsystem's row, or a transfer's subsystem row, that reads
+  `RES_STATUS_PENDING` shows as `row/pending`: a host taken off the list
+  keeps its connection, because the controller node has not ended it yet
+  or cannot. Its text says that while it does, the cntlr's converges move
+  the subsystem's namespaces to ANA inaccessible, away from every host,
+  and then gives the row's own text ([Change a volume's
+  hosts](#change-a-volumes-hosts)).
 - `health`: the worker has set a health epoch; the age is how long ago.
 - `group`: a group's array is not whole, the primary refuses to add a leg,
   the operator is in charge of the group's repair, a forced-start mark
@@ -301,14 +307,8 @@ and a cntlr replacement that finds no controller node show only as a
 `health` line whose age grows, and the worker's log names the reason, while
 a disabled primary shows as a `pool` line, which says when no cntlr of the
 pool is enabled or the pool's level runs no reaction; a subsystem no cdc
-serves; and a worker that runs but whose watch has stopped. Nor does it
-show a subsystem whose row on the primary
-reads `RES_STATUS_PENDING` while a host taken off its list keeps its
-connection, and no health epoch is set, though once a converge has left the
-row so, the primary serves the subsystem's volumes to no host, save a
-namespace whose move to ANA inaccessible failed; `dnvctl cntlr inspect`
-shows that row ([Change a volume's hosts](#change-a-volumes-hosts)). The
-scope page, section 9, lists these.
+serves; and a worker that runs but whose watch has stopped. The scope
+page, section 9, lists these.
 
 Tested: the gateway's unit tests plant each kind of line and check it,
 the order of a pool's lines and their cap, a node that hangs, the pages

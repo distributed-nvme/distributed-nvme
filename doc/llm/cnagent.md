@@ -7055,8 +7055,8 @@ stores instead is CN23's.
   load (CN16), whose own row reads `ERROR`, or on a leg no path of which can
   serve while one stays live (CN1), and the cut holds on the first converge
   after that IO completes. A pending row sets no health epoch, so nothing
-  fails over and the gateway's status read, which lists a subsystem's row
-  only in error, lists no row of it: the subsystem stays dark on that cntlr
+  fails over, and the gateway's status read lists the primary's row with
+  its status but starts nothing: the subsystem stays dark on that cntlr
   with no reaction until the connection ends; so does a stray whose write
   the kernel refuses with no lockdown the lockdown file shows. nvmet
   connections that cannot be read, or that a lockdown the lockdown file

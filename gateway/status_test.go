@@ -1980,3 +1980,53 @@ func TestStatusDeadlineNamesOnlyTheCallItCuts(t *testing.T) {
 	stOne(t, rows, pb.StatusKind_STATUS_KIND_MIGRATION,
 		"the new side's call the deadline cut", "time ran out")
 }
+
+// TestStatusSubsystemHostCutPending pins the line of a subsystem row, and of
+// a transfer's subsystem row, that reads RES_STATUS_PENDING: the cn agent
+// gives that status only while a host taken off the list keeps its
+// connection (exportRow (agent/cnagent/nvmetconn.go)), and its converges
+// then move the subsystem's namespaces to ANA inaccessible. A PENDING row of
+// another table gives no line, and neither does an OK subsystem row.
+func TestStatusSubsystemHostCutPending(t *testing.T) {
+	env := newStEnv(t)
+	cn, fake := env.addCn("cn")
+	epoch := stAnswer().Add(-30 * time.Second)
+	cut := "host nqn.2014-08.org.nvmexpress:uuid:off still connected"
+	fake.setInfo(nil, nil, nil, &pb.CntlrInfo{
+		SsIdToSubsystem: map[uint64]*pb.ResInfo{
+			7: {Status: pb.ResStatus_RES_STATUS_PENDING, Details: cut,
+				Epoch: uint64(epoch.Unix())},
+			8: {Status: pb.ResStatus_RES_STATUS_OK},
+		},
+		XferIdToSubsystem: map[uint64]*pb.ResInfo{
+			9: {Status: pb.ResStatus_RES_STATUS_PENDING, Details: cut},
+		},
+		NsIdToNamespace: map[uint64]*pb.ResInfo{
+			10: {Status: pb.ResStatus_RES_STATUS_PENDING, Details: "other"},
+		},
+	})
+	env.put(env.newPool("p0", cn, stDns(env)))
+	rows := stKinds(stRowsOf(env.status(0, ""), "p0"),
+		pb.StatusKind_STATUS_KIND_ROW)
+	if len(rows) != 2 {
+		t.Fatalf("%d row lines, want 2 (the subsystem's and the "+
+			"transfer's): %v", len(rows), rows)
+	}
+	for _, row := range rows {
+		stWantStatus(t, row, pb.ResStatus_RES_STATUS_PENDING)
+		for _, fragment := range []string{
+			"keeps its connection", "ANA inaccessible", cut,
+		} {
+			if !strings.Contains(row.GetText(), fragment) {
+				t.Errorf("row %q: text %q holds no %q",
+					row.GetObject(), row.GetText(), fragment)
+			}
+		}
+	}
+	if rows[0].GetObject() != "subsystem id 7" ||
+		rows[1].GetObject() != "transfer id 9 subsystem" {
+		t.Errorf("objects %q and %q, want the subsystem id 7 and the "+
+			"transfer id 9", rows[0].GetObject(), rows[1].GetObject())
+	}
+	stWantAge(t, rows[0], 30*time.Second)
+}

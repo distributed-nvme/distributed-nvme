@@ -2639,8 +2639,11 @@ rest. A pool's rows are:
   metadata ceiling, a slice with no data group, a controller node short of
   budget and no disk node with room are;
 * a report row that reads `RES_STATUS_ERROR`, a leg's row with an identity
-  reason, and a clone's row that waits for its source (Live-state
-  reporting);
+  reason, a subsystem's or a transfer's subsystem row that reads
+  `RES_STATUS_PENDING`, which only a host taken off its list that keeps its
+  connection gives, and under which the primary's converges make the
+  subsystem dark, save a namespace whose move fails (`cnagent.md` CN33),
+  and a clone's row that waits for its source (Live-state reporting);
 * a health epoch of a cntlr, a leg, a side, a clone meta group's leg or
   side, a repair's new leg or its side, or a retired leg's side; a leg's
   row is one row with its sides' epochs, its report row and the bad blocks
@@ -2694,7 +2697,7 @@ rest. A pool's rows are:
 A pool's rows are ordered by what they say — lost records, the report,
 the pool, its thin pools' space, their error rows and grows, its cntlrs'
 health, its legs, its groups, its repairs, migrations and clones, its other
-error rows, its torn devices — so that a leg's row comes before every
+report rows, its torn devices — so that a leg's row comes before every
 group's, and a node's fault shows by the legs it holds before the groups
 they touch; then oldest first. At most
 `MaxStatusRowPerSp` rows of a pool are listed, then one row that counts the
@@ -9284,12 +9287,12 @@ document and only pointed to here.
   hint by the gateway's clock at the default vote interval, since the
   registry's epochs decide nothing (Worker registry); no record holds the
   time of a repair, a migration, a clone, a lost record or a refused grow,
-  so their rows carry no age but a report row's; it lists a subsystem's row
-  only when it reads `ERROR`, so a subsystem whose row reads `PENDING` while
-  a host taken off its list keeps its connection gives no row, and no health
-  epoch is set, though a converge that leaves the row so has made the
-  subsystem dark on the primary, save a namespace whose move failed
-  (`cnagent.md` CN33, Known limits); and a pool shows at most
+  so their rows carry no age but a report row's; a subsystem whose row on
+  the primary reads `PENDING` while a host taken off its list keeps its
+  connection gives a row but no health epoch, so no reaction follows,
+  though a converge that leaves the row so has made the subsystem dark on
+  the primary, save a namespace whose move failed (`cnagent.md` CN33,
+  Known limits); and a pool shows at most
   `MaxStatusRowPerSp` rows, with a count of the rest. Its bounds are per
   request (`gateway.md` GW20): a read holds up to `StatusFanOut` primary
   reports at once, each as wide as a cntlr report at the limits, so reads

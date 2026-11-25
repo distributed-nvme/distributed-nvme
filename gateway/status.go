@@ -1991,8 +1991,19 @@ func (b *statusBuilder) errorRows(info *pb.CntlrInfo) {
 		for _, id := range sortedIds(t.rows) {
 			row := t.rows[id]
 			listed := row.GetStatus() == pb.ResStatus_RES_STATUS_ERROR
-			if t.key == "leg" {
+			text := rowText(row)
+			switch {
+			case t.key == "leg":
 				listed = legRowListed(row)
+			case subsystemRowPending(t.key, row):
+				// A subsystem's row reads PENDING only while a host taken
+				// off its list keeps its connection (exportRow
+				// (agent/cnagent/nvmetconn.go)), and while it does the
+				// cntlr's converges move the subsystem's namespaces to ANA
+				// inaccessible: a line for the operator, though no health
+				// epoch follows.
+				listed = true
+				text = msgHostCutPending + ": " + text
 			}
 			if !listed || b.used[statusRowKey{t.key, id}] ||
 				t.skip != nil && t.skip(id) {
@@ -2003,7 +2014,7 @@ func (b *statusBuilder) errorRows(info *pb.CntlrInfo) {
 				Object: t.object(id),
 				Status: statusOf(row.GetStatus()),
 				Reason: row.GetReason(),
-				Text:   rowText(row),
+				Text:   text,
 				Age:    b.rowAge(row),
 			}
 			if t.fill != nil {
@@ -2033,6 +2044,19 @@ func (b *statusBuilder) errorRows(info *pb.CntlrInfo) {
 			})
 		}
 	}
+}
+
+// msgHostCutPending opens the text of a subsystem's or a transfer's
+// subsystem row that reads RES_STATUS_PENDING, the row's own text after it.
+const msgHostCutPending = "a host taken off the list keeps its connection; " +
+	"while it does, the cntlr's converges move the subsystem's namespaces " +
+	"to ANA inaccessible, away from every host"
+
+// subsystemRowPending says that row, of the table key names, is a subsystem
+// row or a transfer's subsystem row that reads RES_STATUS_PENDING.
+func subsystemRowPending(key string, row *pb.ResInfo) bool {
+	return (key == "ss" || key == "xfer ss") &&
+		row.GetStatus() == pb.ResStatus_RES_STATUS_PENDING
 }
 
 // nsLabel names a namespace row's object.

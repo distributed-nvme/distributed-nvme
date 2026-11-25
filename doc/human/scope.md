@@ -1228,7 +1228,8 @@ Measured times are in [the introduction](introduction.md#status-and-limits).
   serving primary it then goes on serving, the host taken off included,
   until a later converge ends that host's connection or moves the namespace.
   A connection still there keeps the subsystem's row pending: no failover
-  comes, `dnvctl cluster get-status` does not list the row, and the hosts
+  comes, `dnvctl cluster get-status` lists the primary's row with the
+  status pending, and the hosts
   wait until the connection ends, which it does once the removed host's IO
   held on the node ends, as on a device that does not resume. A node that
   cannot read the connections, after debugfs is unmounted or the NVMe target
@@ -2513,8 +2514,8 @@ failover's among them.
 - **No metrics, no alerts.** The logs are the only alert: the records at the
   warn and error log levels are the ones an operator must look at. The logs
   go to stderr as JSON with no rotation. The status read, `dnvctl cluster
-  get-status`, shows what is wrong when a person asks: error rows, health
-  epochs, an auto-grow that cannot run, a full thin pool, a repair, a
+  get-status`, shows what is wrong when a person asks: error rows, a
+  subsystem's row that reads pending, health epochs, an auto-grow that cannot run, a full thin pool, a repair, a
   migration or a clone that waits, a lost record and a worker that seems
   gone ([the operations doc](operations.md#read-what-is-wrong)). A
   subsystem no cdc serves and a frozen worker watch still show in a log
@@ -2542,13 +2543,12 @@ failover's among them.
   when every enabled standby has a health epoch or an agent that refuses
   the worker's syncups, which also lets no failover follow; the worker's
   log then shows `reaction skipped` with the reason `no candidate` or
-  `candidate_refuses`. A subsystem
-  whose row on the primary reads pending
-  while a host taken off its list keeps its connection shows no line, and no
-  health epoch is set, although, once a converge has left the row so, the
-  primary serves the subsystem's volumes to no host, save a namespace whose
-  move to ANA inaccessible failed (section 6.1); `dnvctl cntlr inspect`
-  shows the row. A worker that seems gone is a hint: the record a running
+  `candidate_refuses`. A subsystem whose row on the primary reads pending
+  while a host taken off its list keeps its connection shows as a `row`
+  line with the status pending, and no health epoch is set; once a
+  converge has left the row so, the primary serves the subsystem's volumes
+  to no host, save a namespace whose move to ANA inaccessible failed
+  (section 6.1). A worker that seems gone is a hint: the record a running
   worker writes in etcd every few seconds is older, by the gateway's clock,
   than twice the default time between two writes, and the gateway does not
   know a worker's own time between writes. No record keeps the time of a
