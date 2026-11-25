@@ -4235,7 +4235,7 @@ EOF
 # subsystem's NQN passed on. The check writes nothing.
 smoke_restore_check() { # <sp0 id> <t0 td_id> <t1 td_id>
 	local spId=$1 t0Id=$2 t1Id=$3
-	local primary cntlrId cnAddr cnDir cnId sp nextDev out row
+	local primary cntlrId cnAddr cnDir cnId sp nextDev out row sss
 	primary=$(sp_primary_cntlr sp0)
 	cntlrId=${primary%% *}
 	cnAddr=${primary##* }
@@ -4243,6 +4243,13 @@ smoke_restore_check() { # <sp0 id> <t0 td_id> <t1 td_id>
 	cnId=$(cn_id_of "$cnAddr")
 	sp=$(sp_json sp0)
 	nextDev=$(smoke_jq "$sp" '.sp_conf.next_dev_id')
+	# The held request one revision ahead carries the stored subsystems as
+	# they are, so each namespace the store serves is one the agent holds,
+	# serving or parked as stored: a namespace it lacked would read as
+	# deleted since the backup, and one it held parked as parked, each a
+	# reason the pool may break (architecture.md, Controller nodes,
+	# CheckControllerNodeRestore).
+	sss=$(jq_of "$(gw list-sss --sp sp0)" '.nqn_to_subsystem // {}')
 	# The held layout planted below is the stored slices and clones alone:
 	# the check counts the new legs of open repairs and the side id of each
 	# retired leg too, which the pool read does not give, and sp0 has
@@ -4283,7 +4290,8 @@ EOF
         "id_to_slice":$(smoke_jq "$sp" '.slices'),
         "clone_list":$(smoke_jq "$sp" '[.clones[] | select(.deleting | not)]'),
         "td_list":[{"td_id":"$t0Id","size":"$TD_SIZE"},
-                   {"td_id":"999999","dev_id":$nextDev,"size":"$TD_SIZE"}]}},
+                   {"td_id":"999999","dev_id":$nextDev,"size":"$TD_SIZE"}],
+        "nqn_to_subsystem":$sss}},
   "cntlr 4242:1":{"revision":3,"request":{
         "cluster_id":"$CID","cn_id":"$cnId",
         "cntlr_pointer":{"sp_id":"4242","cntlr_id":"1"},"revision":"3",
@@ -4296,7 +4304,9 @@ EOF
 	assert_field "$out" '.pool_list | length' "2" "check-restore: two pools"
 	row=$(jq_of "$out" ".pool_list[] | select(.sp_id == \"$spId\") | @json")
 	assert_field "$row" '.verdict' "RESTORE_VERDICT_OLDER" \
-		"check-restore: sp0 one revision ahead is older"
+		"check-restore: sp0 one revision ahead is older (reasons: $(jq_of "$row" '.break_reason_list // [] | @json'))"
+	assert_field "$row" '.break_reason_list // [] | length' "0" \
+		"check-restore: sp0 one revision ahead gives no reason it may break"
 	assert_field "$row" '.held_side_cnt == .restored_side_cnt and
 		(.held_side_cnt | tonumber) > 0' "true" \
 		"check-restore: sp0's held layout counts the stored sides"

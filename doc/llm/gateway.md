@@ -2245,12 +2245,13 @@ gateway, never through `workerctl`.
   counters, above every old one. Then the restore check runs on the store
   the id step left, over the primary's controller node, whose fake is
   given what an agent would hold: the pool at its stored revision reads
-  the same; one revision ahead over the stored layout, the pool holding
-  no open repair and no retired leg, which the planted held layout leaves
-  out, holding a thin
+  the same; one revision ahead over the stored layout and the stored
+  subsystems, each namespace serving or parked as stored, the pool
+  holding no open repair and no retired leg, which the planted held
+  layout leaves out, holding a thin
   device the store lacks at the pool's next thin id and not one the store
-  has, the pool reads older, the two layouts counting the same sides with
-  no retired side id missing, the
+  has, the pool reads older with no reason it may break, the two layouts
+  counting the same sides with no retired side id missing, the
   lost thin device listed with its thin id marked as one that may return
   and the other listed as coming back, beside a pool the store lacks, read
   as new with its NQN; nothing is written.
