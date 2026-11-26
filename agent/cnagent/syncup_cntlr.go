@@ -250,6 +250,7 @@ func (s *CnAgentServer) convergeCntlr(
 		return newCntlrInfo(), &agent.SweepResult{}
 	}
 	plan := newCntlrPlan(s.nf, req)
+	applyFence(plan, st)
 	// CN12: a forced-start mark acts only from a request that counts as
 	// delivered (cntlrState.reqFromRpc). Any other held request is the
 	// stored copy the startup reconcile loaded, or one whose newer
@@ -293,8 +294,12 @@ func (s *CnAgentServer) convergeCntlr(
 	// disconnect, which is what releases a prober still wedged on a leg the
 	// sweep removes.
 	s.stopLegProbers(st, wantedProbers(plan))
-	// CN10: the path watchers follow the plan from the request alone too.
+	// CN10: the path watchers follow the plan from the request alone too,
+	// and so does CN34's fence watch.
 	s.keepPathWatchers(st, plan)
+	s.keepFenceWatch(st, cntlrKey(req.GetClusterId(), req.GetCnId(),
+		req.GetCntlrPointer().GetSpId(), req.GetCntlrPointer().GetCntlrId()),
+		plan)
 	// CN10: the pass's NVMe walk, the sweep's list of connections and where
 	// the build's lookups find their entries until the build marks it stale.
 	plan.walk = s.newPassWalk(ctx)

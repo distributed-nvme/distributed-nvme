@@ -343,6 +343,8 @@ func (s *CnAgentServer) ensureLegs(
 ) map[uint64]bool {
 	available := make(map[uint64]bool, len(plan.legs))
 	keepWcStale(st, plan)
+	var fence fenceViews
+	defer func() { s.fenceAfterLegs(ctx, st, plan, fence) }()
 	for _, lp := range plan.legs {
 		if lp.provisioning {
 			// [D15]: every side is still zeroing, so the DN exports nothing —
@@ -360,6 +362,7 @@ func (s *CnAgentServer) ensureLegs(
 			continue
 		}
 		view, err := s.ensureLeg(ctx, st, plan, lp, budget)
+		fence.add(lp, view)
 		// The path rows read the connect step's own view; a leg that failed
 		// has none, and they look it up again (legPathRows).
 		s.legPathRows(ctx, st, plan, lp, view, info)

@@ -6817,8 +6817,15 @@ paragraph above explains), and the errors nvmet returns on the
 still-optimized path are target-internal (DNR), not path errors — host
 multipath does **not** retry them on the new primary's path, so
 applications can see IO errors until the old primary applies its
-demotion, tears its stack down or is stopped.
-[D16] records why that residue is accepted.
+demotion, tears its stack down or is stopped, or until its own fence watch
+reads the fence: once a leg path is live and reads non-optimized, the
+standby group, and none reads optimized, an old primary whose agent runs
+moves its namespaces to ANA inaccessible with no demotion, at the watch's
+next tick, or the one after a converge or a read that held the cntlr's
+lock (`cnagent.md` CN34), and a host on its path then queues its IO for the
+new primary's path. That ends, too, its reads of zeros for a block written through the
+new primary, which its thin pool, mapping no block there, answers with no
+leg. [D16] records why that residue is accepted.
 
 #### "Make sure all groups are available"
 
@@ -10638,11 +10645,13 @@ document and only pointed to here.
 * **An old primary cut off from the network serves again for a moment when
   it comes back.** Cut off, its agent hears no syncup, so its namespaces stay
   in their optimized group while the failover moves the pool, and its sides
-  fence its legs. Back, it turns them inaccessible only in the converge of
-  the demotion the worker sends it once its check rounds reach the node
-  again, while a host's controller to it reconnects at its own retry: a
-  host whose path comes back first sends its writes down a path that
-  answers optimized, and the fenced sides fail them, until that converge.
+  fence its legs. Back, it turns them inaccessible once its fence watch
+  reads a leg path in the standby group and none optimized (`cnagent.md`
+  CN34), which its own leg connections give it as they reconnect, or in
+  the converge of the demotion the worker sends it, whichever comes first,
+  while a host's controller to it reconnects at its own retry: a host whose
+  path comes back before the node's first leg path sends its writes down a
+  path that answers optimized, and the fenced sides fail them, until then.
   Measured in the e2e suite's many-pools case (`e2e_integtest.md`, Known
   limits). No acknowledged write is lost: the failed writes are reported
   failed.

@@ -2283,7 +2283,8 @@ down, before the sides fence its legs. The fence-first window
 — an old primary still serving host IO answering it with target-internal
 errors on its still-optimized path from the time the sides' flips fence its
 legs until its agent has applied its demotion (`architecture.md`, Failover, and
-`architecture.md`, [D16]) — therefore remains only for an old primary that
+`architecture.md`, [D16]), or its fence watch has moved its namespaces
+(`cnagent.md` CN34) — therefore remains only for an old primary that
 does not apply its demotion, or a deleted primary whose controller node
 does not tear its stack down, within RW22's wait; for a primary a
 replacement deletes when a coordinator that has just started fans the

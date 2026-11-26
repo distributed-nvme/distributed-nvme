@@ -44,6 +44,12 @@ type CnAgentServer struct {
 
 	// wcache is the agent's write cache loop device (CN15; wcacheDevNo).
 	wcache wcacheLoop
+
+	// fenceWatches are CN34's fence watches, one for each primary cntlr that
+	// builds legs, by cntlr key, and fenceLoopStarted says the node's watch
+	// loop runs; both guarded by mu (keepFenceWatch).
+	fenceWatches     map[string]*fenceWatch
+	fenceLoopStarted bool
 	// strayCut is the cut mode the agent decided at its start (CN33,
 	// CN-CM2): set where the start check found no cause, and then every
 	// converge cuts and every read reads the stray connections of the
@@ -110,6 +116,9 @@ type CnAgentServer struct {
 	// run a converge pass's CN10 connect budget (newPassBudget) on a fake
 	// clock too; nothing else changes them.
 	probeInterval time.Duration
+	// fenceInterval is the period of CN34's fence watch loop
+	// (common.CnFenceCheckInterval), a field so a test can lengthen it.
+	fenceInterval time.Duration
 	probeStall    time.Duration
 	now           func() time.Time
 	sleep         func(context.Context, time.Duration) error
@@ -266,6 +275,14 @@ type cntlrState struct {
 	// read and written under this cntlr's object lock or the node write
 	// lock, as tornTds is.
 	wcStale map[uint64]wcMark
+
+	// fenced is the cntlr's fence flag (CN34): set by the fence watch as it
+	// moves the namespaces for the fence it read, and by a converge that
+	// reads the fence itself (fenceAtPlan); dropped when the watch reads a
+	// leg path optimized and when the cntlr leaves the primary role
+	// (keepFenceWatch). Every plan of the cntlr reads it once (applyFence).
+	// Atomic: the watch drops it holding no lock.
+	fenced atomic.Bool
 }
 
 // NewCnAgentServer builds the cn role server. oc is the process's single
@@ -312,6 +329,7 @@ func NewCnAgentServer(
 		},
 		cns:             make(map[string]*cnState),
 		cntlrs:          make(map[string]*cntlrState),
+		fenceWatches:    make(map[string]*fenceWatch),
 		marks:           agent.NewConvergeMarks(),
 		roundReads:      true,
 		disconnecting:   make(map[string]struct{}),
@@ -319,6 +337,7 @@ func NewCnAgentServer(
 		connectSlots:    make(chan struct{}, connectConcurrency),
 		rootCtx:         context.Background(),
 		probeInterval:   common.CnLegProbeInterval * time.Second,
+		fenceInterval:   common.CnFenceCheckInterval,
 		probeStall:      common.CnLegProbeStallSeconds * time.Second,
 		now:             time.Now,
 		sleep:           agent.SleepCtx,

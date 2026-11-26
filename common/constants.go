@@ -747,6 +747,12 @@ const (
 	CnRescanPause  = 5 * time.Millisecond
 	CnRescanPauses = 20
 
+	// CnFenceCheckInterval is the period of the cn agent's fence watch loop
+	// (cnagent.md CN34), one NVMe walk of the node and a read of each
+	// primary's legs that stops at its first optimized path: a host whose
+	// path to an old primary comes back sends IO within its first second.
+	CnFenceCheckInterval = 1 * time.Second
+
 	// DmErrorWcSectors is the length of the last target of the table of a
 	// device that fails every IO and reports a write cache (agent.
 	// ErrorWcTable; architecture.md, Data-plane device stacks): an error

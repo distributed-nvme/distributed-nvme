@@ -133,6 +133,7 @@ func (s *CnAgentServer) readCntlr(
 		return newCntlrInfo(), &agent.SweepResult{}
 	}
 	plan := newCntlrPlan(s.nf, req)
+	applyFence(plan, st)
 	rd := s.takeReading(ctx)
 	plan.rd, plan.walk, plan.mdWalks = rd, rd.walk, rd.mdWalks()
 	info, putBack, noCtrl := s.probeCntlr(ctx, st, plan)

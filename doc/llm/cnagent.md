@@ -278,7 +278,9 @@ take a dm device's facts and a device's number from; `syncup_cn.go` and
 walk a cntlr's converge or read takes and the lookups in it (the walk's code
 is the one both agents share, `dnagent.md` SH20), and the wrappers;
 `healthcheck.go` the CN11 probers and their `LegProbeIO` (direct syscalls,
-never the `OsClient`); `nvmetconn.go` CN33's cut of a removed host's
+never the `OsClient`); `wcache.go` CN15's write cache loop device and CN10's
+write cache of a leg's path; `fence.go` CN34's fence watch;
+`nvmetconn.go` CN33's cut of a removed host's
 nvmet connection, its read, the list step and whether a subsystem is
 safe, and the move of an unsafe subsystem's namespaces; `md.go` the mdadm wrapper, the sysfs reads of the
 arrays, the assembly cases, the member reconciliation with a group's repair
@@ -337,10 +339,14 @@ lock; the chunk sets are touched only under the cntlr's object lock, or
 under the node write lock, which excludes it. A buffered channel of
 `disconnectConcurrency` slots caps how many of the disconnect registry's
 disconnects run at once, and one of `connectConcurrency` places how many
-connect attempts of all the cntlrs' passes run at once (CN10). `rootCtx` anchors the CN10 background disconnects
-and path watchers, the CN11 probers and the background reads, so shutdown
-cancels them and joins none (CN-CM2). No cn lock is held across OS calls
-but the `LockSet`'s own.
+connect attempts of all the cntlrs' passes run at once (CN10). The fence
+watches of CN34 and their loop's start are guarded by the server's mutex,
+and each cntlr's fence flag is atomic. `rootCtx` anchors the CN10
+background disconnects and path watchers, the CN11 probers, CN34's fence
+watch loop and the background reads, so shutdown cancels them and joins
+none (CN-CM2). No cn lock is held across OS calls but the `LockSet`'s own,
+and the write cache loop device's own (CN15), under which nothing else is
+taken.
 
 CN1. Lock mapping (instantiates `dnagent.md` SH10 to SH13): `SyncupCn` and the startup
 reconcile — node write; `SyncupCntlr`, `PushCloneBitmap`, one background
@@ -369,7 +375,11 @@ disconnect takes no lock either: the sweep issues it through the CN10
 disconnect registry, and under its locks the pass only probes the connection.
 The CN10 path watchers take no lock either (CN10, The cut of a migrating
 leg's path); their lookups, md reads and disconnects take `OsClient`
-slots.
+slots. CN34's fence watch reads with no lock, and takes the node read lock
+and then the cntlr's object lock only to move a fenced primary's
+namespaces, each with a try that skips the tick when the lock is held, and
+only for a cntlr the agent still holds, so it never waits behind a
+converge or a read and leaves no object lock entry behind a drop.
 
 ### Startup reconcile
 
@@ -3721,7 +3731,8 @@ whose listings answer removes it.
 **ANA**: the desired group is `AnaGrpIdOptimized` iff primary and not
 disabled and not effectively suspended and its backing chain is not
 provisioning-deferred (CN9) and the `sp_level` is below `SP_LEVEL_DISABLE`
-(CN9's `wantAny`); else `AnaGrpIdInaccessible` (single "ana_grpid" writes,
+(CN9's `wantAny`) and the cntlr's fence flag is not set (CN34); else
+`AnaGrpIdInaccessible` (single "ana_grpid" writes,
 `dnagent.md` SH19). The
 deferral conjunct is what makes initial provisioning painless for hosts:
 while the td's legs are still zeroing, the namespace stays inaccessible
@@ -3877,7 +3888,8 @@ against L6 — a linear left serving would keep that raid0's
 `dmsetup remove` failing EBUSY on every pass while the transfer stays in
 the request. Its namespace stays `AnaGrpIdOptimized` all the same, as it
 does at `SP_LEVEL_NO_THINPOOL`: the transfer's desired group follows the
-role, the level and deferral only, so the destination is handed IO errors
+role, the level, deferral and the fence flag (CN34) only, so the
+destination is handed IO errors
 from the error table, not a queue: an origin gone from the request is
 lost for good, a level is the operator's choice, and a wait for either
 would never end. A transfer whose origin is gone gets no export step, so
@@ -4125,6 +4137,58 @@ replacement (`dnv-worker.md` AR5, AR7, AR10). Reason: a node that cannot
 read its nvmet connections, or whose lockdown the lockdown file shows
 refuses every end, stays unsafe until an operator acts, while a stray
 connection ends by itself, mostly within the wait.
+
+CN34. The fence watch (`fence.go`; primary only). A failover fences the
+old primary on every side: each disk node moves its export to that
+cntlr's node onto a dm-error and into the standby's ANA group,
+non-optimized (`dnagent.md` DN10). An old primary that heard nothing of
+the failover, its network cut or its agent stopped, still serves its
+namespaces optimized: a host still on its path has its writes fail, and
+its reads of a block written through the new primary can return zeros
+from a thin pool that maps no block there and needs no leg to say so. A
+disk node gives a primary's path the standby group only when the role
+moved, so the fence is read as: no leg path live and optimized, and at
+least one live and non-optimized. Reason for one path and not all: after a
+network cut a host's controller and the node's own leg controllers
+reconnect each at its own retry, and a host whose path comes back first
+must meet a node that has already read its fence. A migration's gap moves
+a path to inaccessible, not to the standby group. Each converge of a
+primary that builds legs keeps one watch of the cntlr (`keepFenceWatch`),
+made anew when the plan's legs, their sides or its namespaces change and
+ended when the cntlr is no primary or is dropped, with its fence flag
+dropped. One loop of the agent's (`fenceWatchLoop`) reads every watch each
+`common.CnFenceCheckInterval` over one NVMe walk of the node, and a watch's
+read stops at the first optimized live path, so a serving primary costs
+one leg lookup a tick. A lookup or an address read that did not answer
+reads as neither picture, unless another leg's path reads optimized. A
+watch is armed once it has seen the cntlr serve: a leg path optimized, a
+namespace of the cntlr in the optimized group, or a pool device of the
+cntlr, which a standby never holds and an agent's restart leaves in place.
+Reason: a new primary whose disk nodes have not opened its paths shows the
+fence's picture, and has not served. An armed watch that reads the fence
+takes the node read lock and the cntlr's object lock, each only when free,
+so it never waits behind a converge or a read and a held lock leaves the
+move to the next tick, and only for a cntlr the agent still holds; it reads
+the legs again in a walk of its own, sets the cntlr's fence flag
+(`cntlrState.fenced`), and moves each namespace of the cntlr's host-facing
+subsystems and transfers that is not inaccessible to the inaccessible group
+(`moveDark`), logged at Warn, on every tick while the fence reads so, so a
+move that failed is made again. A host on that path then queues its IO, and
+its multipath sends it on through the new primary's path. The plan of every
+converge and read of a primary reads the flag once (`applyFence`) and wants
+every namespace and transfer in the inaccessible group while it is set, so
+a converge keeps the move and a read names nothing (CN30). A primary's
+converge also reads the fence itself, from the lookups of its leg step,
+before its build moves any namespace (`fenceAfterLegs`): a cntlr that has
+served and reads it gets the flag. Reason: an agent that restarts after
+its watch moved the namespaces forgets the flag, and its startup converge
+would move them back before a watch reads anything. A leg path read optimized drops the flag, and so does the end of
+the primary role. Nothing of this runs while the agent is stopped. A disk
+node that, from older local files, serves the primary as a standby while
+every other leg of the primary has no live path, makes the primary read
+fenced until that disk node's syncup: a pause of its hosts, which the
+watch's next read of an optimized path and the read that names the groups
+end.
 
 CN18. Clones (`clone.go`; primary only; `architecture.md`, Clones;
 `sp_level` below `SP_LEVEL_NO_CLONE`). Per `clone_list` entry, in order:

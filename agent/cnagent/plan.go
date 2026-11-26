@@ -148,8 +148,12 @@ type cntlrPlan struct {
 	// sp_level gates (CN19). Levels are desired state: raising one shrinks
 	// the sweep's wanted set, so the layers it forbids are swept away;
 	// lowering it rebuilds them in the build phase.
-	wantAny   bool // level < SP_LEVEL_DISABLE
-	wantLeg   bool // + level < SP_LEVEL_NO_SIDE
+	wantAny bool // level < SP_LEVEL_DISABLE
+	wantLeg bool // + level < SP_LEVEL_NO_SIDE
+	// fenced is the cntlr's fence flag as this pass read it (applyFence,
+	// CN34): every namespace and transfer of the plan then wants the
+	// inaccessible group.
+	fenced    bool
 	wantGrp   bool // + primary, level < SP_LEVEL_NO_REDUND
 	wantPool  bool // + primary, level < SP_LEVEL_NO_THINPOOL
 	wantClone bool // + primary, level < SP_LEVEL_NO_CLONE
@@ -1200,7 +1204,8 @@ func (p *cntlrPlan) buildSubsystems() {
 			// CN16's desired group: optimized iff primary ∧ not disabled
 			// (folded into p.primary) ∧ not effectively suspended ∧ the
 			// backing chain is not provisioning-deferred ([D15]) ∧ sp_level
-			// below SP_LEVEL_DISABLE (wantAny). During initial provisioning
+			// below SP_LEVEL_DISABLE (wantAny) ∧ the fence flag is not set,
+			// which applyFence brings in after the plan is built (CN34). During initial provisioning
 			// hosts queue on an inaccessible path instead of eating IO errors
 			// from an error-backed ns-dev. The build moves a namespace to
 			// optimized only in a pass whose ns-dev step left its ns-dev

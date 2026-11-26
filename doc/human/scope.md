@@ -2450,10 +2450,19 @@ failover's among them.
   needed. A block first written through the new primary is such a block,
   so a host still on the old path can read zeros, with success, where it
   wrote. This needs a thin pool that had no change waiting for its commit
-  at the fence; a thin pool with one fails every read. For an old primary
-  whose agent is stopped it can last for as long as that thin pool makes no
-  commit. Read from dnv's code and the kernel's, not seen in the lab; the
-  state of these reads is fix decided.
+  at the fence; a thin pool with one fails every read. An old primary
+  whose agent runs ends both, the errors and the zeros, by itself: once
+  one of its paths to the disk nodes is connected and turned to the
+  standby's state, which is what the fence leaves, and none still serves
+  it, it tells the hosts that it no longer serves, within about a second,
+  and their IO goes to the new primary. What stays: an old primary whose
+  agent is stopped serves as before until the agent runs again, for as
+  long as its thin pool makes no commit; after a network cut, a host whose
+  path comes back before any of the node's own paths to the disk nodes
+  meets the old primary until one of those is back; and a node that is
+  busy with a converge of the cntlr just then waits for it to end. State:
+  accepted for these cases. Read from dnv's code and the kernel's; the
+  reads of zeros are not seen in the lab.
 - **A failover while the disk nodes are still opening a pool's paths can
   leave the pool unbuilt.** When the new primary builds while the disk nodes
   are still opening its paths, it starts a group's RAID1 array only once both
@@ -2496,10 +2505,12 @@ failover's among them.
   No write the host was told was done is lost, but a read there of a block
   first written through the new primary can return zeros, with success,
   as the entry "Hosts still on the old primary's path see IO errors from
-  the fence" says; the state of those reads is fix decided. The e2e suite's many-pools
-  case shows it at 32 and 64 pools
-  ([the introduction](introduction.md#status-and-limits) has the
-  numbers). State: fix decided.
+  the fence" says. The node does not wait for the worker's message: once
+  one of its own paths to the disk nodes is back and reads as the fence
+  left it, it stops telling hosts that it serves, within about a second.
+  So only a host whose connection comes back before the node's first path
+  to a disk node does can still send its writes there, until then. State:
+  accepted for that gap.
 - **Clocks can hold the reactions.** Two clocks count. A worker's clock:
   a health epoch is the clock of the worker that set it, and every
   threshold compares it with the clock of the worker that reads it. When

@@ -232,7 +232,9 @@ The vocabulary of dnv in alphabetical order, one entry per term, with synonyms s
 
 **fence round** — The first of the two rounds in which the coordinator hands the sides of a failover, or of a replacement of the primary, their syncups at the end of the demotion hold: every side but the fence-last legs', whose sides wait until the round's other sides that the sides-first hold would wait for, and those of legs md holds in sync by the fence readings whatever their health, report the revision applied, or one `cntlr_interval`; a fan-out with no fence-last leg runs none (see `dnv-worker.md` RW24).
 
-**fence-first window** — The time from the sides' fence of an old primary's legs until its agent applies its demotion, in which that primary answers host IO on its still-optimized path with target-internal errors (see `architecture.md`, Failover; `dnv-worker.md` RW14, RW22).
+**fence-first window** — The time from the sides' fence of an old primary's legs until its agent applies its demotion or its fence watch moves its namespaces to the inaccessible group, in which that primary answers host IO on its still-optimized path with target-internal errors (see `architecture.md`, Failover; `dnv-worker.md` RW14, RW22; `cnagent.md` CN34).
+
+**fence watch, fence flag** — The cn agent's read, once a second for every primary of the node, of the picture a fence leaves: no leg path optimized and one live path in the standby group, non-optimized. A watch that has seen its cntlr serve and reads it moves the cntlr's namespaces to the inaccessible group with no converge and sets the cntlr's fence flag, by which every later converge and read of that primary wants them there. Not the dn agent's fence check (see `cnagent.md` CN34).
 
 **fence-last leg** — In one RAID1 group, the leg whose member md holds in sync in the lowest slot, by the latest report of the primary that reads the group: the leg a start of the array from equal superblocks copies from, whose sides the fence round hands their syncups last, once the sides the round waits for have reported or one `cntlr_interval` has passed (see `dnv-worker.md` RW24; `cnagent.md` CN28).
 

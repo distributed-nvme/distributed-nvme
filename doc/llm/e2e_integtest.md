@@ -1569,7 +1569,9 @@ fail, every pool whose primary the node held must fail over exactly once
 and no other pool at all, and both hosts must see each of them optimized
 within the measured bound (Known limits); the writes that fail once the
 node is back are counted, as a host can reach the old primary again before
-its agent turns it into a standby (`architecture.md`, Known limits). A
+its agent turns its namespaces inaccessible, once its own leg paths are back
+and read its fence (`cnagent.md` CN34), or turns it into a standby
+(`architecture.md`, Known limits). A
 failed write's time is the completion before it plus one write interval for
 each failed write from that completion to it, itself included. On the agent
 stop the writes a host sends down

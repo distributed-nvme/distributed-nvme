@@ -105,6 +105,10 @@ func newCnServerOnPort(node *fakeNode, portId int) *CnAgentServer {
 		common.DefaultLocalStorPrefix, testCapacity, testTrConf(), portId, 0,
 		false)
 	srv.probeIO = node.probeIO()
+	// CN34's fence watch loop reads the node in the background every
+	// second, which would add calls to the lists the tests count; its tests
+	// drive it one tick at a time (fenceTickAll).
+	srv.fenceInterval = time.Hour
 	// The CN10 pass budget's pauses do not really sleep here: a fixture whose
 	// connect fails for good would otherwise spend the whole
 	// CnConnectPassBudget of wall time on every pass. The budget still draws

@@ -29,9 +29,9 @@ func (p *cntlrPlan) xferServed(xp *xferPlan) bool {
 }
 
 // xferAnaGrpId is the transfer's desired group: optimized on a primary below
-// SP_LEVEL_DISABLE whose transfer is not deferred — whether or not that
-// primary serves data — and inaccessible everywhere else; the transfer has no
-// suspend state of its own. So where such a primary does not serve it on
+// SP_LEVEL_DISABLE whose transfer is not deferred and whose fence flag is not
+// set (CN34) — whether or not that primary serves data — and inaccessible
+// everywhere else; the transfer has no suspend state of its own. So where such a primary does not serve it on
 // purpose (SP_LEVEL_NO_THINPOOL ≤ level < SP_LEVEL_DISABLE, or an origin that
 // no longer resolves, CN29), the transfer namespace stays optimized over an
 // error table and the destination reads IO errors: an operator's choice or a
@@ -43,7 +43,7 @@ func (p *cntlrPlan) xferServed(xp *xferPlan) bool {
 // (xferAnaMove), and a transfer that should serve waits inaccessible while
 // its device is an error table (xferAnaWanted).
 func (p *cntlrPlan) xferAnaGrpId(xp *xferPlan) int {
-	if p.primary && p.wantAny && !xp.deferred {
+	if p.primary && p.wantAny && !xp.deferred && !p.fenced {
 		return common.AnaGrpIdOptimized
 	}
 	return common.AnaGrpIdInaccessible

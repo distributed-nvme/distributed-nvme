@@ -59,6 +59,7 @@ func (s *CnAgentServer) cntlrIoStats(
 		return out
 	}
 	plan := newCntlrPlan(s.nf, req)
+	applyFence(plan, st)
 	s.mu.Lock()
 	probers := make(map[uint64]*legProber, len(st.probers))
 	for legId, prober := range st.probers {
