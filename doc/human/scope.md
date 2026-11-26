@@ -1885,8 +1885,11 @@ Measured times are in [the introduction](introduction.md#status-and-limits).
   and each primary on the node keeps its role for up to the start hold
   while its hosts' IO waits. State: fixed. Unit tests of the agent and of
   the worker, and the worker's scenario tests on fake agents. A fast
-  reboot cannot be made on the lab: a guest answers again 16 seconds or
-  more after a reset, after the failover has come.
+  reboot is not tested on the lab. There a VM answers ssh again 6 to 57
+  seconds after a reset, and at the default event thresholds a failover
+  comes about 6 to 10 seconds after a node dies. The e2e suite starts the
+  agent again only after it has checked the failover and the cntlr
+  replacement, and it starts no agent at boot.
 - **A machine that holds a pool's primary and a leg of a group stops the
   group when it stops.** A new pool keeps its legs out of the location of
   its first primary while another location has room, and a node's location
