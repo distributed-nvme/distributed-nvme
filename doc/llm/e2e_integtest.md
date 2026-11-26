@@ -613,7 +613,8 @@ resolve to, which the run prints and holds to the floor every set's
 primary threshold is held to; `DemotionHoldTimeout`,
 which the run prints beside the cutoff case's timings and from which that
 case computes its wait for its writer's failed write and the least time the
-writer's range must last; `DefaultStartHoldSeconds`, the start hold every
+writer's range must last, with `FenceRoundIntervals`, the fence round's
+bound in check intervals (`dnv-worker.md` RW24); `DefaultStartHoldSeconds`, the start hold every
 cluster of the suite stores, as none names one at its create
 (`dnv-worker.md` HL8), which bounds the react case's wait for a restarted
 agent's start; `DefaultNvmeFastIoFailTmo`, the fast IO fail timeout of the
@@ -1518,6 +1519,15 @@ deletes the writer's namespace and thin device. So the ending finds only setup's
 subsystem, namespace and thin device, and only the suite's own paths on
 host0, while the primary role stays on the cntlr the second failover
 elected.
+
+Last, the worker's fence round of each of the case's failovers must have
+ended by the reports (`dnv-worker.md` RW24): its `sp fence round ended`
+records of the case's pool since the case began must be one per failover
+the worker applied since then, and each must name no side it waited for
+that had not reported (`side_cnt` zero) and no side it did not wait for as
+its latest check round got no answer (`unanswered_cnt` zero), since every
+disk node of the case answers; each round's wait is logged. A run with no
+redundancy skips this, as a group with no redundancy runs no round.
 
 **many**, an opt-in case, proves that a controller node holding many pools
 fails over as a pause for every one of them (`architecture.md`, Failover),

@@ -81,7 +81,8 @@ which the retire timer may delete a retired leg (AR12);
 the per-call deadlines of the worker's agent RPCs (RW5, BM3);
 `DemotionHoldTimeout`, the bound of the demotion hold, in which a fan-out
 that demotes a primary holds its sides and its other cntlrs for the demoted
-cntlr to report its demotion applied (RW22);
+cntlr to report its demotion applied (RW22); `FenceRoundIntervals`, the
+bound of the fence round after it, in `cntlr_interval`s (RW24);
 `DefaultEtcdDialTimeout` and `DefaultEtcdOpTimeout`, the dial timeout the
 etcd client is given, which bounds nothing (EU5), and its budget per plain
 operation and per whole transaction, every retry included (EU1, EU5); `DefaultEtcdKeepaliveTime` and
@@ -673,8 +674,8 @@ three epoch writes take an SP that exists with its id, at any level and
 while it is deleting, as the other epoch writes read their record whatever
 its pool's state. A clone parent being deleted is refused by every repair
 op, save the epoch writes, which accept it as their clone twins do, and
-the flip, `ClearForcedStart`, `MarkGroupsArrayMade`, `UpdateMdChecks` and
-`SetNewLegsPartial`, which skip it:
+the flip, `ClearForcedStart`, `MarkGroupsArrayMade`, `UpdateMdChecks`,
+`SetFenceLastLegs` and `SetNewLegsPartial`, which skip it:
 its group goes back with its repair and retired legs in CLD9's
 transaction. A repair or a retired
 leg the pool lists whose key is missing is refused ("repair record missing", "retired leg record
@@ -1073,6 +1074,13 @@ list; the flip, which reads the repair's key alone, and
   cntlr's `demoted_revision` only while the record still carries that
   revision, with no expected revision and no bump of any revision, since no
   agent reads the field; a cntlr that is gone is no error (RW22).
+* `SetFenceLastLegs` takes a list of edits, each a group's `GrpRef` and a
+  leg id, zero for none, and writes each group's `fence_last_leg_id` where
+  it differs, in one STM with no expected revision, no level check and no
+  bump of any revision, since no agent reads the field; it skips, and fails
+  nothing, a parent or a group that is gone and a clone parent `deleting`,
+  and returns how many groups it changed (RW24). Its one STM reads and
+  writes each parent once.
 * `CancelAndCreateRepair` runs `CancelRepair`'s checks and writes and then
   `CreateRepair`'s, over the state the cancel left, in one STM with no
   expected revision, each raising `SpRev`; a refusal of either commits
@@ -2303,7 +2311,7 @@ reached, since the worker judges no reachability — holds its sides and its
 promotion for the whole demotion hold, and the sides-first hold begins only
 after it and after RW24's fence round, which holds the fence-last legs'
 sides and the promotion until the slowest side the round waits for
-reports, one `cntlr_interval` at most; and a
+reports, `FenceRoundIntervals` `cntlr_interval`s at most; and a
 replacement of the primary that RW22 finds holds its sides and its new
 primary for the whole demotion hold, since the deleted cntlr reports
 nothing. Only an accepted reply reports,
@@ -2324,11 +2332,15 @@ leg of a repair keeps its side's epoch until its finish makes it a retired
 leg, whose side no hold waits for, so a bad leg costs no such hold. RW24's
 fence round is the exception: it waits, whatever a side's epoch, for the
 sides of every leg md holds in sync by the fence readings save each group's
-fence-last leg, whose sides it holds and never waits for. So a side that
-does not report, a dead disk node's or a bad leg's, costs a failover, or a
-replacement of the primary, the round's bound of one `cntlr_interval` while
-the fence readings hold its leg in sync and that leg is not its group's
-fence-last leg. The
+fence-last leg, whose sides it holds and never waits for, but for a side
+whose latest check round got no answer. So a side that does not report
+while its agent answers its check rounds, as a bad leg's whose disk node
+lives, costs a failover, or a replacement of the primary, the round's bound
+of `FenceRoundIntervals` `cntlr_interval`s while the fence readings hold
+its leg in sync and that leg is not its group's fence-last leg; a dead disk
+node's side costs it until its child's check round gets no answer, at most
+the syncup's own deadline when its syncup of the round is in flight, and
+no longer than that bound. The
 price of leaving a side out is the narrowing itself: a side the load found
 unhealthy that answers after all is not waited for, and the three races
 above stay open for it. The cost is also paid in normal
@@ -2534,19 +2546,44 @@ fence readings of the groups it reads, and a group it does not read, as
 one whose array's row did not read `OK` (CN28), keeps its last fence
 reading; a group reading that names no fence-last leg clears the group's
 fence reading, and so does a plan that no longer holds the fence-last leg.
-Nothing persists the fence readings. The **fence round** hands at once every
+The coordinator writes each group's fence-last leg into the group's record,
+`fence_last_leg_id`, when its fence reading changes from the leg it last
+read or wrote there, zero for a reading it drops, in one write per drain of
+reports and per load that bumps no revision, as no agent reads the field
+(MD6's `SetFenceLastLegs`); a write that fails is logged (`sp fence-last
+write failed`, Log records), and the next drain or load writes again. At
+each load, a group that no report of the primary has read since the
+coordinator started takes a fence reading from its record: the stored leg
+while the group or its repair still holds it, with every one of those
+legs as a leg md holds in sync, since the record keeps the leg alone (a
+repair's new leg is in sync once its copy ends); the primary's next report
+that reads the group replaces it. A group a report has read keeps the
+reports' reading, or none: a reading a report dropped stays dropped, and
+its zero is written again while the record holds a leg. So a coordinator
+that has just started, after a worker restart or a handoff, fences that
+leg last from its first failover. The **fence round** hands at once every
 side whose leg is no fence-last leg; the fence-last legs' sides, both
 sides of a migrating one included, are held until every side of the round
 that RW14's barrier would wait for — no `err_epoch` in the load, not
 retired — and every other side of the round of a leg md holds in sync by
 the fence readings, whatever its `err_epoch`, a retired one aside, has reported the
-revision applied, or until one `cntlr_interval` after the round began,
-whichever comes first. Then the fence-last legs' sides are handed, and
+revision applied, or until `FenceRoundIntervals` `cntlr_interval`s after
+the round began, whichever comes first. A side whose latest check round
+got no answer is not waited for: its child marks it when a check round
+fails — no reply within the round's bound, a broken stream, an observation
+too old, or a starting answer past the start hold (HL7, HL8) — clears the
+mark at the next reply it judges, of a round or of a `Syncup*`, and at a
+starting answer within the hold, and reports each change. A side that
+goes quiet during the round stops being waited for once its child's check
+round fails; while the side's syncup of the round is in flight its child
+runs no check round, so the round waits for it until that syncup's
+deadline or the round's bound. Then the fence-last legs' sides are handed, and
 RW14's sides-first barrier begins over every side of the newest fan-out,
 its bound running from that moment. A fan-out whose sides hold no
 fence-last leg runs no round and hands every side at once: one whose
-coordinator has no fence reading since it started, and one whose groups
-hold no member in sync or have no redundancy. A group reading that gives
+coordinator has no fence reading of the groups, from a report or from
+their records, and one whose groups hold no member in sync or have no
+redundancy. A group reading that gives
 no in-sync member a slot names no fence-last leg, a guard only: the cn
 agent reports md's slot of every in-sync member, leaving out only one
 that does not read as a number (`cnagent.md` CN28), and no cn agent of
@@ -2570,12 +2607,19 @@ from any leg it holds in sync, so the round waits for those legs' sides
 whatever their health records say. The fence-last leg's fence comes once
 the round's sides have reported theirs, or at the round's bound: the
 round costs a failover the syncup round trip of the slowest side it waits
-for, one `cntlr_interval` at most, and a round side not fenced by the
-bound can be fenced after the fence-last leg. Such a side, a side that
+for, `FenceRoundIntervals` `cntlr_interval`s at most; on the lab at 32
+slices the sides' syncups converged within it (Known limits). A side
+whose latest check round got no answer costs nothing, as no fence reaches
+it either: waiting for it would only delay the failover to the bound. A
+round side not fenced by the bound can be fenced after the fence-last leg.
+Such a side, a side whose disk node misses its check rounds, or whose
+agent is down or restarting, while the node's kernel still serves the old
+primary, a side that
 reports the revision without its fence, a member md brings into sync in a
 lower slot after the group's fence reading, and a group whose fence no
 round orders — its fan-out runs none, or the coordinator has no fence
-reading of the group — leave the loss open (Known limits).
+reading of the group, from a report or its record — leave the loss open
+(Known limits).
 
 RW15. **Side request.** A `SyncupSideRequest` carrying `cluster_id`,
 `dn_id`, the `side_pointer` (sp id, leg id, side id), `revision` (the
@@ -2631,7 +2675,8 @@ from the `SpConf`, `sp_level`, `cntlr` (the `Cntlr` record, its
 `demoted_revision` left out: RW22's field is the worker's alone, and its
 clear bumps no revision), `id_to_slice`
 keyed by the slice id rendered with `IdKeyFmt` — the key the cn agent reads
-—, `td_list` in `td_name_list` order, `nqn_to_subsystem`, `clone_list`,
+—, every group's `fence_last_leg_id` left out of it and of `clone_list`'s
+clone meta groups for the same reason (RW24), `td_list` in `td_name_list` order, `nqn_to_subsystem`, `clone_list`,
 `xfer_list`, `name_to_repair`, every repair of the SP by its name, at
 every stage (`architecture.md`, Repair), and `leg_fast_io_fail_tmo`, the
 `SpConf`'s `event_threshold` member resolved by `model.ResolveEventThreshold`
@@ -5785,9 +5830,12 @@ demoted cntlr's `demoted_revision` at the end of that hold that failed,
 with its error (RW22); `sp fence round ended` the end of RW24's fence
 round by its reports or its bound, one record per such end, with the count
 of the fence-last legs' sides handed, the count of the round's sides it
-waited for that had not reported, zero when the reports ended it, and the
-wait in milliseconds, the round's cost in the failover's pause; a round a
-demotion ends logs none (RW24).
+waited for that had not reported, zero when the reports ended it, the
+count of the sides it did not wait for as their latest check round got no
+answer (`unanswered_cnt`), and the wait in milliseconds, the round's cost
+in the failover's pause; a round a demotion ends logs none (RW24); `sp
+fence-last write failed` a write of the groups' fence-last legs into their
+records that failed, with the count of groups and the error (RW24).
 
 **Bitmap pushes.** `bitmap pushed` every push that got a reply, with the
 agent's code (BM3); `bitmap push failed` a push that got none — the chunk
@@ -7246,25 +7294,29 @@ caught.
 * **The fence round orders only what the coordinator saw, and counts a
   report as a fence** (RW24). A coordinator with no fence reading of a
   group — no report of the primary that read the group since it started,
-  after a worker restart or a handoff — has no fence-last leg for it, so a
+  and no fence-last leg in the group's record, as a group no worker has
+  read since the upgrade, or one whose record's leg the group no longer
+  holds — has no fence-last leg for it, so a
   failover or a replacement of the primary that it fans out hands that
   group's sides at once, as does a replacement of the primary fanned out
-  with no demotion hold (below). A report reads a group only while the
+  with no demotion hold (below). A reading taken from the record holds
+  every leg of the group in sync, so the round waits for more sides than
+  md holds, which costs only time. A report reads a group only while the
   group's array row reads `OK` (`cnagent.md` CN28), so a primary that has
   reported since the coordinator started can still have left a group with
   no fence reading. A side of the round counts as fenced once it reports the
   revision applied, which a converge that could not fence does too: a
   side device that failed (`dnagent.md` DN9) or a dm-error that could not
   be built leaves the old primary's dm-linear live, and a later re-send
-  fences it. A side of the round that does not report within one
-  `cntlr_interval` is not waited for further. On the lab at 32 slices every
-  copy and cutoff failover of the e2e suite, in one full run and two runs
-  of the cutoff case alone, ended its round by the bound, with 15 to 51 of
-  the round's awaited sides not reported, and in the full run's three such
-  failovers the sides' syncups at each one's revision converged in a
-  median of 2.5 to 3.1 s and at most 4.8 s. So there the round ensures the
-  order only for the groups whose sides report within one
-  `cntlr_interval`. The runs timed the sides' reports and converges, not
+  fences it. A side of the round that does not report within
+  `FenceRoundIntervals` `cntlr_interval`s is not waited for further, nor a
+  side whose latest check round got no answer, though a disk node so
+  loaded that it misses its check rounds, or whose agent is down or
+  restarting while its kernel target serves on, can still serve the old
+  primary. On the lab at 32 slices the sides' syncups at a failover's
+  revision converged in a median of 2.5 to 3.1 s and at most 4.8 s,
+  within that bound at the default interval. The runs timed the sides'
+  reports and converges, not
   their fence steps: a side reports with the accepted reply at the end of
   its converge (RW14), and its fence is one step inside that converge
   (`dnagent.md` DN10). A side that reports without its fence, or not

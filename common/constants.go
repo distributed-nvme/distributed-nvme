@@ -835,6 +835,12 @@ const (
 	// enough for a host running nvme-stas to drop the path the failover took
 	// out of the discovery records before the sides fence it.
 	DemotionHoldTimeout = 3
+	// The bound of a failover's fence round, in cntlr_intervals (RW24): the
+	// round ends at once with the last report it waits for, so the bound
+	// costs time only when a side that answers its check rounds is slow to
+	// report its fence; on the lab at 32 slices the reports took up to 4.8
+	// seconds.
+	FenceRoundIntervals = 5
 	// etcd client: dial, and per plain operation / per whole
 	// transaction, every retry included (EU1, EU5).
 	DefaultEtcdDialTimeout = 5

@@ -2469,9 +2469,19 @@ type Group struct {
 	// one grown before the field. The status read times a grow that waits
 	// from it (architecture.md, Clusters, GetClusterStatus). Appended,
 	// never renumbered.
-	GrowEpoch     uint64 `protobuf:"varint,13,opt,name=grow_epoch,json=growEpoch,proto3" json:"grow_epoch,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
+	GrowEpoch uint64 `protobuf:"varint,13,opt,name=grow_epoch,json=growEpoch,proto3" json:"grow_epoch,omitempty"`
+	// The group's fence-last leg as the sp worker last read it from the
+	// primary's report: the leg md holds in sync in the lowest slot, which a
+	// failover's fence round fences last (dnv-worker.md RW24), zero for none.
+	// Written by the sp worker alone, when its reading changes, in a write
+	// that bumps no revision: no agent reads it, and the cntlr request
+	// leaves it out (dnv-worker.md RW16). A worker whose reports have not
+	// read the group since it started, as after a restart or a handoff,
+	// starts from it. A record without it reads as none. Appended, never
+	// renumbered.
+	FenceLastLegId uint64 `protobuf:"varint,14,opt,name=fence_last_leg_id,json=fenceLastLegId,proto3" json:"fence_last_leg_id,omitempty"`
+	unknownFields  protoimpl.UnknownFields
+	sizeCache      protoimpl.SizeCache
 }
 
 func (x *Group) Reset() {
@@ -2584,6 +2594,13 @@ func (x *Group) GetMdCheck() *MdCheck {
 func (x *Group) GetGrowEpoch() uint64 {
 	if x != nil {
 		return x.GrowEpoch
+	}
+	return 0
+}
+
+func (x *Group) GetFenceLastLegId() uint64 {
+	if x != nil {
+		return x.FenceLastLegId
 	}
 	return 0
 }
@@ -3225,10 +3242,10 @@ type CntlrInfo struct {
 	RepIdToRepairInfo map[uint64]*CntlrInfo_RepairInfo `protobuf:"bytes,19,rep,name=rep_id_to_repair_info,json=repIdToRepairInfo,proto3" json:"rep_id_to_repair_info,omitempty" protobuf_key:"varint,1,opt,name=key" protobuf_val:"bytes,2,opt,name=value"`
 	GrpIdToGrpInfo    map[uint64]*CntlrInfo_GrpInfo    `protobuf:"bytes,20,rep,name=grp_id_to_grp_info,json=grpIdToGrpInfo,proto3" json:"grp_id_to_grp_info,omitempty" protobuf_key:"varint,1,opt,name=key" protobuf_val:"bytes,2,opt,name=value"`
 	// A standby's: its sweep left an md array, a thin pool, a thin volume, a
-	// raid0 or a pool concat of the cntlr, which a build would keep. Not a
-	// row, so it moves no health epoch; the failover passes over such a
-	// standby (cnagent.md CN35; dnv-worker.md AR5). Appended, never
-	// renumbered.
+	// raid0 or a pool concat of the cntlr, so a promotion would serve
+	// nothing until the removal goes through. Not a row, so it moves no
+	// health epoch; the failover passes over such a standby (cnagent.md
+	// CN35; dnv-worker.md AR5). Appended, never renumbered.
 	StackLeft     bool `protobuf:"varint,21,opt,name=stack_left,json=stackLeft,proto3" json:"stack_left,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
@@ -4865,12 +4882,13 @@ type Cntlr struct {
 	// cntlr's request leaves it out. Appended, never renumbered.
 	DemotedRevision uint64 `protobuf:"varint,8,opt,name=demoted_revision,json=demotedRevision,proto3" json:"demoted_revision,omitempty"`
 	// The pool revision of the failover that made this cntlr the primary,
-	// written in the failover's own transaction (model.Failover), and zero
-	// for a standby and for a primary no failover made, as a pool's first
-	// primary and every record an older build wrote: its term. A cn agent
-	// builds a primary's stack under one term only, and tears down what an
-	// earlier term left before it builds under another (cnagent.md CN35).
-	// Appended, never renumbered.
+	// written in the failover's own transaction (model.Failover), or of the
+	// replacement that created it as the primary (model.ReplaceCntlr), and
+	// zero for a standby and for a primary neither made, as a pool's first
+	// primary and every record an older build wrote: its term, zero meaning
+	// none. A cn agent builds a primary's stack under one term only, and
+	// tears down what an earlier term left before it builds under another
+	// (cnagent.md CN35). Appended, never renumbered.
 	PrimaryRevision uint64 `protobuf:"varint,9,opt,name=primary_revision,json=primaryRevision,proto3" json:"primary_revision,omitempty"`
 	unknownFields   protoimpl.UnknownFields
 	sizeCache       protoimpl.SizeCache
@@ -20960,7 +20978,7 @@ const file_pb_schema_proto_rawDesc = "" +
 	"\x06leg_id\x18\x01 \x01(\x04R\x05legId\x12\x17\n" +
 	"\aleg_idx\x18\x02 \x01(\rR\x06legIdx\x12\"\n" +
 	"\tside_list\x18\x03 \x03(\v2\x05.SideR\bsideList\x12\x1b\n" +
-	"\terr_epoch\x18\x04 \x01(\x04R\berrEpoch\"\xbc\x03\n" +
+	"\terr_epoch\x18\x04 \x01(\x04R\berrEpoch\"\xe7\x03\n" +
 	"\x05Group\x12\x15\n" +
 	"\x06grp_id\x18\x01 \x01(\x04R\x05grpId\x12\x17\n" +
 	"\aext_cnt\x18\x02 \x01(\x04R\x06extCnt\x12\x1f\n" +
@@ -20978,7 +20996,8 @@ const file_pb_schema_proto_rawDesc = "" +
 	"array_made\x18\v \x01(\bR\tarrayMade\x12#\n" +
 	"\bmd_check\x18\f \x01(\v2\b.MdCheckR\amdCheck\x12\x1d\n" +
 	"\n" +
-	"grow_epoch\x18\r \x01(\x04R\tgrowEpochJ\x04\b\x06\x10\aR\x0espare_leg_list\"M\n" +
+	"grow_epoch\x18\r \x01(\x04R\tgrowEpoch\x12)\n" +
+	"\x11fence_last_leg_id\x18\x0e \x01(\x04R\x0efenceLastLegIdJ\x04\b\x06\x10\aR\x0espare_leg_list\"M\n" +
 	"\aMdCheck\x12\x1d\n" +
 	"\n" +
 	"next_epoch\x18\x01 \x01(\x04R\tnextEpoch\x12#\n" +

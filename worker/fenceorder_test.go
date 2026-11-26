@@ -1,10 +1,15 @@
 package worker
 
 import (
+	"context"
+	"errors"
+	"slices"
 	"sync"
 	"testing"
 	"time"
 
+	"github.com/distributed-nvme/distributed-nvme/common"
+	"github.com/distributed-nvme/distributed-nvme/model"
 	"github.com/distributed-nvme/distributed-nvme/pb"
 )
 
@@ -75,6 +80,18 @@ func newFenceHarness(
 	holds map[uint64]uint64,
 	infoAt map[uint64]*pb.CntlrInfo,
 ) *fenceHarness {
+	return newFenceHarnessWith(t, reporter, holds, infoAt, nil)
+}
+
+// newFenceHarnessWith is newFenceHarness whose fixture prep changes before
+// the coordinator's first load.
+func newFenceHarnessWith(
+	t *testing.T,
+	reporter string,
+	holds map[uint64]uint64,
+	infoAt map[uint64]*pb.CntlrInfo,
+	prep func(state *model.SpState),
+) *fenceHarness {
 	h := &fenceHarness{
 		spHarness: newSpHarness(t),
 		holds:     holds,
@@ -86,6 +103,11 @@ func newFenceHarness(
 		infoAt = map[uint64]*pb.CntlrInfo{testSpRev: fenceInfo(spLegMigr, spLegD)}
 	}
 	h.addFixtureAgents()
+	if prep != nil {
+		state := spFixture()
+		prep(state)
+		h.ops.setState(state)
+	}
 	for _, stub := range h.sides {
 		stub.syncupReply = func(req *pb.SyncupSideRequest) *pb.SyncupSideReply {
 			rev := req.GetRevision()
@@ -308,15 +330,19 @@ func TestFailoverFencesTheLastLegLast(t *testing.T) {
 }
 
 // TestFenceRoundIsBounded checks RW24's bound: a side of the fence round that
-// never reports holds the fence-last legs' sides for one cntlr_interval
-// after the demotion hold's end and no longer, and the record counts the
-// side that did not report and gives the wait.
+// never reports holds the fence-last legs' sides for common.FenceRoundIntervals
+// cntlr_intervals after the demotion hold's end and no longer, one interval
+// included, and the record counts the side that did not report and gives
+// the wait.
 func TestFenceRoundIsBounded(t *testing.T) {
 	const bump = testSpRev + 1
+	bound := common.FenceRoundIntervals * roundInterval
 	h := newFenceHarness(t, spCnA, heldD(bump), nil)
 	h.failOver(bump)
 
-	h.clk.advance(roundInterval - 250*time.Millisecond)
+	h.clk.advance(roundInterval + 250*time.Millisecond)
+	h.settleNoLast(bump, "one interval into the round")
+	h.clk.advance(bound - roundInterval - 500*time.Millisecond)
 	h.settleNoLast(bump, "before the round's bound")
 	h.clk.advance(250 * time.Millisecond)
 	h.awaitLast(bump)
@@ -327,9 +353,226 @@ func TestFenceRoundIsBounded(t *testing.T) {
 	if n, _ := recs[0]["side_cnt"].(float64); n != 1 {
 		t.Fatalf("side_cnt = %v, want 1: leg D's side", recs[0]["side_cnt"])
 	}
-	if ms, _ := recs[0]["wait_ms"].(float64); int64(ms) != roundInterval.Milliseconds() {
+	if ms, _ := recs[0]["wait_ms"].(float64); int64(ms) != bound.Milliseconds() {
 		t.Fatalf("wait_ms = %v, want %d", recs[0]["wait_ms"],
-			roundInterval.Milliseconds())
+			bound.Milliseconds())
+	}
+}
+
+// silenceD makes leg D's disk node answer no check round from now on.
+func (h *fenceHarness) silenceD() {
+	stub := h.sides[spDnD]
+	stub.mu.Lock()
+	defer stub.mu.Unlock()
+	stub.checkReply = func(*pb.CheckSideRequest) *pb.CheckSideReply {
+		return nil
+	}
+}
+
+// awaitRoundFailed advances the fake clock one interval at a time, at most
+// limit times, until leg D's side child has logged a check round with no
+// answer, and reports whether it did.
+func (h *fenceHarness) awaitRoundFailed(limit int) bool {
+	h.t.Helper()
+	failed := func() bool {
+		for _, rec := range h.logs.withMsg("check round failed") {
+			if id, _ := rec["dn_id"].(float64); uint64(id) == spDnIdD {
+				return true
+			}
+		}
+		return false
+	}
+	for range limit {
+		h.clk.advance(roundInterval)
+		deadline := time.Now().Add(3 * time.Second)
+		for time.Now().Before(deadline) {
+			if failed() {
+				return true
+			}
+			time.Sleep(5 * time.Millisecond)
+		}
+	}
+	return failed()
+}
+
+// TestFenceRoundSkipsASideWithNoAnswer checks RW24's rule for a side whose
+// latest check round got no answer: leg D's disk node stops answering
+// before the failover, so the round does not wait for its side, though its
+// syncup of the failover is held: the fence-last sides go with no move of
+// the clock, and the record counts the side as not waited for.
+func TestFenceRoundSkipsASideWithNoAnswer(t *testing.T) {
+	const bump = testSpRev + 1
+	h := newFenceHarness(t, spCnA, heldD(bump), nil)
+	h.silenceD()
+	if !h.awaitRoundFailed(3) {
+		t.Fatalf("leg D's side child logged no check round with no answer")
+	}
+	h.failOver(bump)
+	h.awaitLast(bump)
+	recs := h.logs.withMsg(msgSpFenceRoundEnded)
+	if len(recs) != 1 {
+		t.Fatalf("%d %q records, want one", len(recs), msgSpFenceRoundEnded)
+	}
+	if n, _ := recs[0]["side_cnt"].(float64); n != 0 {
+		t.Fatalf("side_cnt = %v, want 0", recs[0]["side_cnt"])
+	}
+	if n, _ := recs[0]["unanswered_cnt"].(float64); n != 1 {
+		t.Fatalf("unanswered_cnt = %v, want 1: leg D's side",
+			recs[0]["unanswered_cnt"])
+	}
+}
+
+// TestFenceRoundEndsWhenASideGoesQuiet checks RW24's rule during a round:
+// leg D's side answers its syncup of the failover without applying it, so
+// the round waits for it; once its disk node stops answering and its child
+// logs a check round with no answer, the round ends with that report, well
+// before its bound.
+func TestFenceRoundEndsWhenASideGoesQuiet(t *testing.T) {
+	const bump = testSpRev + 1
+	h := newFenceHarness(t, spCnA, nil, nil)
+	stub := h.sides[spDnD]
+	stub.mu.Lock()
+	stub.syncupReply = func(req *pb.SyncupSideRequest) *pb.SyncupSideReply {
+		if req.GetRevision() > testSpRev {
+			h.note(h.sideIn, req.GetSidePointer().GetSideId(),
+				req.GetRevision())
+		}
+		return &pb.SyncupSideReply{Revision: testSpRev}
+	}
+	stub.mu.Unlock()
+	h.failOver(bump)
+	h.settleNoLast(bump, "while leg D's side answered without the fence")
+	h.silenceD()
+	if !h.awaitRoundFailed(common.FenceRoundIntervals - 2) {
+		t.Fatalf("leg D's side child logged no check round with no answer")
+	}
+	h.awaitLast(bump)
+	recs := h.logs.withMsg(msgSpFenceRoundEnded)
+	if len(recs) != 1 {
+		t.Fatalf("%d %q records, want one", len(recs), msgSpFenceRoundEnded)
+	}
+	bound := common.FenceRoundIntervals * roundInterval
+	if ms, _ := recs[0]["wait_ms"].(float64); int64(ms) >= bound.Milliseconds() {
+		t.Fatalf("wait_ms = %v: the round ended by its bound %d",
+			recs[0]["wait_ms"], bound.Milliseconds())
+	}
+}
+
+// TestANewCoordinatorFencesTheStoredLegLast checks RW24's record: group 101's
+// record names leg Migr as its fence-last leg and the primary's report reads
+// no group, as after a worker restart before the primary's next report, so
+// the coordinator's view comes from the record, and the failover fences leg
+// Migr's sides last, after leg D's side has reported.
+func TestANewCoordinatorFencesTheStoredLegLast(t *testing.T) {
+	const bump = testSpRev + 1
+	h := newFenceHarnessWith(t, spCnA, heldD(bump),
+		map[uint64]*pb.CntlrInfo{testSpRev: thinInfoOnly()},
+		func(state *model.SpState) {
+			state.Slices[spSliceA].DataGrpList[0].FenceLastLegId = spLegMigr
+		})
+	h.failOver(bump)
+	h.settleNoLast(bump, "before leg D's side reported the fence")
+	h.release(spSideD, bump)
+	h.awaitLast(bump)
+	recs := h.logs.withMsg(msgSpFenceRoundEnded)
+	if len(recs) != 1 {
+		t.Fatalf("%d %q records, want one", len(recs), msgSpFenceRoundEnded)
+	}
+}
+
+// TestAReadingChangeWritesTheFenceLastLeg checks RW24's write of the record:
+// the primary's first reading of group 101 writes leg Migr once, a report
+// with the same reading writes nothing, and a reading that names no
+// fence-last leg writes zero.
+func TestAReadingChangeWritesTheFenceLastLeg(t *testing.T) {
+	const (
+		bump  = testSpRev + 1
+		bump2 = testSpRev + 2
+	)
+	noSlot := thinInfoOnly()
+	noSlot.GrpIdToGrpInfo = map[uint64]*pb.CntlrInfo_GrpInfo{
+		101: {Whole: true, InSyncLegIdList: []uint64{spLegMigr, spLegD}},
+	}
+	h := newFenceHarness(t, spCnA, nil, map[uint64]*pb.CntlrInfo{
+		testSpRev: fenceInfo(spLegMigr, spLegD),
+		bump:      fenceInfo(spLegMigr, spLegD),
+		bump2:     noSlot,
+	})
+	ref := model.GrpRef{Parent: model.GrpParent{SliceId: spSliceA}, GrpId: 101}
+	want := [][]model.FenceLastEdit{{{Ref: ref, LegId: spLegMigr}}}
+	if got := h.ops.fenceLastCalls(); !slices.EqualFunc(got, want,
+		slices.Equal) {
+		t.Fatalf("after the first reading: writes %v, want %v", got, want)
+	}
+	for i, revision := range []uint64{bump, bump2} {
+		// The load reads the record the first write wrote.
+		next := spFixture()
+		next.Slices[spSliceA].DataGrpList[0].FenceLastLegId = spLegMigr
+		next.SpRevision = revision
+		h.ops.setState(next)
+		h.w.update(desiredState{revision: revision, handle: testSpName})
+		h.awaitFlips(2 + i)
+	}
+	want = append(want, []model.FenceLastEdit{{Ref: ref}})
+	waitFor(t, "the zero write", func() bool {
+		return len(h.ops.fenceLastCalls()) >= len(want)
+	})
+	if got := h.ops.fenceLastCalls(); !slices.EqualFunc(got, want,
+		slices.Equal) {
+		t.Fatalf("writes %v, want %v", got, want)
+	}
+}
+
+// TestSideNotesItsAnswers checks the side child's reports of RW24's mark: a
+// check round with no answer reports the side quiet once, a second one
+// reports nothing, and the next answer reports it answering again.
+func TestSideNotesItsAnswers(t *testing.T) {
+	ctx := context.Background()
+	captureLogs(t)
+	d := newTestDeps(
+		testConfig(common.WorkerRoleSp), newFakeStore(), newFakeClock(),
+	)
+	d.health = &fakeHealthWriter{}
+	w := spTestWorker(d)
+	w.verdicts = newVerdictMemo()
+	plan := spTestWorker(nil).buildPlan(ctx, spFixture()).
+		sides[sideKey{legId: spLegD, sideId: spSideD}]
+	driver := newSideDriver(w, nil, plan)
+	answers := func() []bool {
+		var out []bool
+		for {
+			select {
+			case rep := <-w.reportCh:
+				if rep.answer != nil {
+					if rep.answer.driver != driver ||
+						rep.answer.key.sideId != spSideD {
+						t.Fatalf("an answer report of another side: %+v",
+							rep.answer)
+					}
+					out = append(out, rep.answer.answered)
+				}
+			default:
+				return out
+			}
+		}
+	}
+	driver.unreachable(ctx)
+	driver.unreachable(ctx)
+	if got := answers(); !slices.Equal(got, []bool{false}) {
+		t.Fatalf("after two rounds with no answer: %v, want [false]", got)
+	}
+	driver.storeInfo(&pb.SideInfo{})
+	driver.observe(ctx, &replyState{revision: testSpRev, infoPresent: true})
+	if got := answers(); !slices.Equal(got, []bool{true}) {
+		t.Fatalf("after an answer: %v, want [true]", got)
+	}
+	// A starting answer within the hold is an answer too: the node's kernel
+	// may still serve the old primary.
+	driver.unreachable(ctx)
+	driver.starting(ctx)
+	if got := answers(); !slices.Equal(got, []bool{false, true}) {
+		t.Fatalf("a round with no answer, then a starting one: %v, want "+
+			"[false true]", got)
 	}
 }
 
@@ -477,5 +720,161 @@ func TestFenceViewsOf(t *testing.T) {
 	}
 	if got := fenceViewsOf(&pb.CntlrInfo{}); got != nil {
 		t.Fatalf("fenceViewsOf(no reading) = %v, want nil: nothing to send", got)
+	}
+}
+
+// TestACntlrRequestLeavesTheFenceLastLegOut checks RW16 with RW24: the group
+// record's fence_last_leg_id, which the worker writes with no revision bump,
+// is left out of every cntlr request, so a load at the same revision after
+// that write keeps the cntlr children (keepChild), and the loaded state the
+// requests are copied from keeps the field.
+func TestACntlrRequestLeavesTheFenceLastLegOut(t *testing.T) {
+	ctx := context.Background()
+	captureLogs(t)
+	state := spFixture()
+	state.Slices[spSliceA].DataGrpList[0].FenceLastLegId = spLegMigr
+	state.Clones[spCloneNm].MetaGrp = &pb.Group{GrpId: 777, FenceLastLegId: 7}
+	plan := spTestWorker(nil).buildPlan(ctx, state)
+	if len(plan.cntlrs) == 0 {
+		t.Fatalf("fixture is wrong: the plan holds no cntlr")
+	}
+	for cntlrId, p := range plan.cntlrs {
+		for _, slice := range p.req.GetIdToSlice() {
+			for _, grp := range append(slices.Clone(slice.GetMetaGrpList()),
+				slice.GetDataGrpList()...) {
+				if grp.GetFenceLastLegId() != 0 {
+					t.Errorf("cntlr %d's request carries group %d's "+
+						"fence-last leg %d", cntlrId, grp.GetGrpId(),
+						grp.GetFenceLastLegId())
+				}
+			}
+		}
+	}
+	for cntlrId, p := range plan.cntlrs {
+		for _, clone := range p.req.GetCloneList() {
+			if got := clone.GetMetaGrp().GetFenceLastLegId(); got != 0 {
+				t.Errorf("cntlr %d's request carries clone %d's fence-last "+
+					"leg %d", cntlrId, clone.GetCloneId(), got)
+			}
+		}
+	}
+	if got := state.Slices[spSliceA].DataGrpList[0].GetFenceLastLegId(); got != spLegMigr {
+		t.Errorf("the loaded state lost the field: %d", got)
+	}
+	if got := state.Clones[spCloneNm].GetMetaGrp().GetFenceLastLegId(); got != 7 {
+		t.Errorf("the loaded clone lost the field: %d", got)
+	}
+	if got := plan.fenceGrps[101].stored; got != spLegMigr {
+		t.Errorf("the plan's group 101 stores %d, want %d", got, spLegMigr)
+	}
+	bare := spFixture()
+	bare.Clones[spCloneNm].MetaGrp = &pb.Group{GrpId: 777}
+	bareReq := spTestWorker(nil).buildPlan(ctx, bare).cntlrs[spCntlrPrimary].req
+	if !keepChild("a", "a", bareReq, plan.cntlrs[spCntlrPrimary].req) {
+		t.Errorf("a load that differs only in the fence-last leg would " +
+			"restart the cntlr child")
+	}
+}
+
+// TestADroppedViewStaysDropped checks RW24's record against a view a report
+// dropped: the primary's reading of group 101 names no fence-last leg, the
+// zero write fails and is logged, and a later drain or load, while the
+// record still holds leg Migr, seeds no view from it and writes the zero
+// again; the failover after it runs no fence round.
+func TestADroppedViewStaysDropped(t *testing.T) {
+	const (
+		bump  = testSpRev + 1
+		bump2 = testSpRev + 2
+		bump3 = testSpRev + 3
+	)
+	noSlot := thinInfoOnly()
+	noSlot.GrpIdToGrpInfo = map[uint64]*pb.CntlrInfo_GrpInfo{
+		101: {Whole: true, InSyncLegIdList: []uint64{spLegMigr, spLegD}},
+	}
+	stored := func(state *model.SpState) {
+		state.Slices[spSliceA].DataGrpList[0].FenceLastLegId = spLegMigr
+	}
+	h := newFenceHarnessWith(t, spCnA, heldD(bump3), map[uint64]*pb.CntlrInfo{
+		testSpRev: fenceInfo(spLegMigr, spLegD),
+		bump:      noSlot,
+		bump2:     thinInfoOnly(),
+	}, stored)
+	ref := model.GrpRef{Parent: model.GrpParent{SliceId: spSliceA}, GrpId: 101}
+	if got := h.ops.fenceLastCalls(); len(got) != 0 {
+		t.Fatalf("a reading equal to the record wrote %v", got)
+	}
+	h.ops.mu.Lock()
+	h.ops.fenceLastErr = errors.New("etcd is away")
+	h.ops.mu.Unlock()
+	next := spFixture()
+	stored(next)
+	next.SpRevision = bump
+	h.ops.setState(next)
+	h.w.update(desiredState{revision: bump, handle: testSpName})
+	h.awaitFlips(2)
+	waitFor(t, "the failed write's record", func() bool {
+		return len(h.logs.withMsg(msgSpFenceLastWriteFailed)) >= 1
+	})
+	h.ops.mu.Lock()
+	h.ops.fenceLastErr = nil
+	failed := len(h.ops.fenceLasts)
+	h.ops.mu.Unlock()
+	next = spFixture()
+	stored(next)
+	next.SpRevision = bump2
+	h.ops.setState(next)
+	h.w.update(desiredState{revision: bump2, handle: testSpName})
+	h.awaitFlips(3)
+	waitFor(t, "the zero written again", func() bool {
+		return len(h.ops.fenceLastCalls()) > failed
+	})
+	calls := h.ops.fenceLastCalls()
+	for i, call := range calls {
+		if !slices.Equal(call, []model.FenceLastEdit{{Ref: ref}}) {
+			t.Fatalf("write %d is %v, want the zero of group 101", i, call)
+		}
+	}
+	failover := failoverFixture(bump3)
+	h.ops.setState(failover)
+	h.w.update(desiredState{revision: bump3, handle: testSpName})
+	h.awaitLast(bump3)
+	if recs := h.logs.withMsg(msgSpFenceRoundEnded); len(recs) != 0 {
+		t.Fatalf("%d %q records: a dropped view came back from the record",
+			len(recs), msgSpFenceRoundEnded)
+	}
+}
+
+// TestARepairsNewLegIsAGroupLeg checks RW24's record for a repair's new leg:
+// md holds it in sync once its copy ends, so the plan counts it among the
+// group's legs, and a stored fence-last leg that names it is seeded.
+func TestARepairsNewLegIsAGroupLeg(t *testing.T) {
+	const newLeg = uint64(9001)
+	captureLogs(t)
+	state := spFixture()
+	grp := state.Slices[spSliceA].DataGrpList[0]
+	grp.RepName = "rep0"
+	grp.FenceLastLegId = newLeg
+	state.Repairs = map[string]*pb.Repair{"rep0": {
+		RepId:   9000,
+		GrpId:   grp.GetGrpId(),
+		SliceId: spSliceA,
+		NewLegList: []*pb.Leg{{LegId: newLeg, LegIdx: 2,
+			SideList: []*pb.Side{{SideId: 9002, AddrPort: spDnC,
+				Provisioned: true}}}},
+	}}
+	state.Conf.RepairNameList = []string{"rep0"}
+	w := spTestWorker(nil)
+	plan := w.buildPlan(context.Background(), state)
+	if !slices.Contains(plan.fenceGrps[101].legs, newLeg) {
+		t.Fatalf("group 101's legs %v lack the repair's new leg %d",
+			plan.fenceGrps[101].legs, newLeg)
+	}
+	w.fenceLast = make(map[uint64]grpFenceView)
+	w.fenceSaved = make(map[uint64]uint64)
+	w.fenceRead = make(map[uint64]bool)
+	w.seedFenceLast(plan)
+	if got := w.fenceLast[101].last; got != newLeg {
+		t.Errorf("the seeded view's fence-last leg is %d, want %d", got,
+			newLeg)
 	}
 }

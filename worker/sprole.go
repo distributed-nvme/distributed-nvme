@@ -108,10 +108,16 @@ const (
 	msgSpDemotionClearFailed = "sp demotion clear failed"
 	// msgSpFenceRoundEnded is the end of RW24's fence round by its reports or
 	// its bound: the sides of the fence-last legs are handed the fan-out, once
-	// the other sides the round waits for have reported it applied or one
-	// cntlr_interval has passed. One record per such end, with the wait it
-	// took and the count of sides that had not reported.
+	// the other sides the round waits for have reported it applied or
+	// common.FenceRoundIntervals cntlr_intervals have passed. One record per such
+	// end, with the wait it took, the count of sides that had not reported,
+	// and the count of sides it did not wait for because their latest check
+	// round got no answer.
 	msgSpFenceRoundEnded = "sp fence round ended"
+	// msgSpFenceLastWriteFailed is a write of the groups' fence-last legs
+	// (RW24; MD6's SetFenceLastLegs) that failed: the coordinator keeps its
+	// readings, and the next report writes again.
+	msgSpFenceLastWriteFailed = "sp fence-last write failed"
 )
 
 // spConfRefusal is the memo that keeps a steady invalid stored conf to one
@@ -226,6 +232,15 @@ type spOps interface {
 		cntlrId uint64,
 		revision uint64,
 	) (bool, error)
+	// setFenceLastLegs is RW24's record of the groups' fence-last legs
+	// (MD6's SetFenceLastLegs): it writes each edit's leg, zero for none,
+	// bumps nothing, and returns how many groups it changed.
+	setFenceLastLegs(
+		ctx context.Context,
+		cid uint64,
+		spId uint64,
+		edits []model.FenceLastEdit,
+	) (int, error)
 }
 
 // modelSpOps is the production spOps.
@@ -298,6 +313,15 @@ func (o *modelSpOps) clearCntlrDemotion(
 	revision uint64,
 ) (bool, error) {
 	return model.ClearCntlrDemotion(ctx, o.cli, cid, spId, cntlrId, revision)
+}
+
+func (o *modelSpOps) setFenceLastLegs(
+	ctx context.Context,
+	cid uint64,
+	spId uint64,
+	edits []model.FenceLastEdit,
+) (int, error) {
+	return model.SetFenceLastLegs(ctx, o.cli, cid, spId, edits)
 }
 
 func (o *modelSpOps) flipCreated(
@@ -482,6 +506,30 @@ type spPlan struct {
 	// when the conf no longer lists it and the SP is not being drained.
 	listed   map[uint64]bool
 	deleting bool
+	// fenceGrps are the groups of the SP's slices and of its clones' clone
+	// meta groups, by group id, with what RW24's record of the fence-last
+	// leg needs: the group's ref, its legs and the leg its record stores.
+	fenceGrps map[uint64]fenceGrp
+}
+
+// fenceGrp is one group as RW24's record of its fence-last leg reads it: its
+// legs are the group's and its repair's new legs.
+type fenceGrp struct {
+	ref    model.GrpRef
+	legs   []uint64
+	stored uint64
+}
+
+// addFenceGrp adds grp, whose record parent holds, to the plan's fenceGrps.
+func (p *spPlan) addFenceGrp(parent model.GrpParent, grp *pb.Group) {
+	g := fenceGrp{
+		ref:    model.GrpRef{Parent: parent, GrpId: grp.GetGrpId()},
+		stored: grp.GetFenceLastLegId(),
+	}
+	for _, leg := range grp.GetLegList() {
+		g.legs = append(g.legs, leg.GetLegId())
+	}
+	p.fenceGrps[grp.GetGrpId()] = g
 }
 
 // cloneOwner names the clone whose clone meta group holds a leg: the name that
@@ -543,6 +591,9 @@ type sideChild struct {
 	// synced is the highest revision the child reported its agent holds
 	// (spReport.synced): what RW14's sides-first barrier waits for.
 	synced uint64
+	// unanswered says the child's latest check round got no answer
+	// (spReport.answer), so RW24's fence round does not wait for the side.
+	unanswered bool
 }
 
 // cntlrChild is one running cntlr child of the coordinator.
@@ -614,6 +665,18 @@ type spReport struct {
 	// rows and under the same gate; nil when the reply carried no leg rows of
 	// a primary, or no info at all.
 	fenceViews map[uint64]grpFenceView
+	// answer is a side child's change between check rounds its agent
+	// answers and a round that got no answer (sideDriver.noteAnswer), which
+	// RW24's fence round reads; nil on every other report.
+	answer *sideAnswer
+}
+
+// sideAnswer names one side, the driver that sent it, and whether the
+// side's latest check round got an answer.
+type sideAnswer struct {
+	key      sideKey
+	driver   *sideDriver
+	answered bool
 }
 
 // sideSynced names one side and the revision its agent reported applied.
@@ -741,10 +804,20 @@ type spWorker struct {
 	// coordinator's latest plan makes the enabled primary read the group. A
 	// report changes the groups it reads and keeps the others, so a group
 	// whose array the report could not read keeps its last view; a group
-	// whose fence-last leg leaves the plan loses it (applyPlan). Nothing
-	// persists it: a coordinator that has just started has none until the
-	// primary reports.
+	// whose fence-last leg leaves the plan loses it (applyPlan). The group's
+	// record keeps the fence-last leg (saveFenceLast), so a coordinator that
+	// has just started takes a view from its first load (seedFenceLast)
+	// until the primary reports.
 	fenceLast map[uint64]grpFenceView
+	// fenceGrps are the latest plan's groups (spPlan.fenceGrps), and
+	// fenceSaved each group's fence-last leg as the coordinator last read
+	// or wrote its record: saveFenceLast writes a view that differs.
+	fenceGrps  map[uint64]fenceGrp
+	fenceSaved map[uint64]uint64
+	// fenceRead are the groups a report of the primary has read since the
+	// coordinator started, whose view, or the lack of one, is the reports'
+	// own: a load seeds no view for them from the record (seedFenceLast).
+	fenceRead map[uint64]bool
 }
 
 // newSpWorker starts the sp coordinator (SW2). Its signature is the
@@ -786,6 +859,9 @@ func startSpWorker(p revWorkerParams, ops spOps) *spWorker {
 		react:      newReactor(&modelReactionOps{cli: p.deps.cli}),
 		verdicts:   newVerdictMemo(),
 		fenceLast:  make(map[uint64]grpFenceView),
+		fenceGrps:  make(map[uint64]fenceGrp),
+		fenceSaved: make(map[uint64]uint64),
+		fenceRead:  make(map[uint64]bool),
 	}
 	go w.run()
 	return w
@@ -1162,6 +1238,7 @@ func (w *spWorker) buildPlan(
 		untornRefs: make(map[uint64]model.TdRef),
 		listed:     make(map[uint64]bool),
 		deleting:   conf.GetDeleting(),
+		fenceGrps:  make(map[uint64]fenceGrp),
 	}
 	for _, cntlrId := range conf.GetCntlrIdList() {
 		plan.listed[cntlrId] = true
@@ -1492,6 +1569,7 @@ func (w *spWorker) buildSidePlans(
 				// the group rather than send it a length of zero.
 				zeroBytes, zeroErr := model.SideZeroBytes(
 					grp, list.isMeta, blockSize)
+				plan.addFenceGrp(model.GrpParent{SliceId: sliceId}, grp)
 				for _, leg := range grp.GetLegList() {
 					plan.legSlice[leg.GetLegId()] = sliceId
 					if !withRequests || zeroErr != nil {
@@ -1609,6 +1687,7 @@ func (w *spWorker) buildCloneSidePlans(
 		// it; fanOut's gate refuses the plan of an SP with a clone meta
 		// group that has none, as for a slice's group.
 		zeroBytes, zeroErr := model.CloneMetaSideZeroBytes(grp, blockSize)
+		plan.addFenceGrp(model.GrpParent{CloneName: cloneName}, grp)
 		for _, leg := range grp.GetLegList() {
 			plan.legClone[leg.GetLegId()] = owner
 			if !withRequests || zeroErr != nil {
@@ -1830,8 +1909,18 @@ func (w *spWorker) buildRepairSidePlans(
 			continue
 		}
 		owner := repairOwner{name: repName, id: rep.GetRepId()}
+		g, grpKnown := plan.fenceGrps[rep.GetGrpId()]
 		for _, leg := range rep.GetNewLegList() {
 			plan.legRepair[leg.GetLegId()] = owner
+			// RW24: md holds a new leg in sync once its copy ends, so it can
+			// be the group's fence-last leg before the repair's finish moves
+			// it into the group.
+			if grpKnown {
+				g.legs = append(g.legs, leg.GetLegId())
+			}
+		}
+		if grpKnown {
+			plan.fenceGrps[rep.GetGrpId()] = g
 		}
 		if !withRequests {
 			continue
@@ -2181,16 +2270,37 @@ func (w *spWorker) buildCntlrPlans(
 		}
 		// As for the sides: the cntlr requests of one SP share the whole
 		// loaded state, so each child gets its own copy to marshal. The
-		// record's demoted_revision is the worker's alone (RW22): its clear
-		// bumps no revision, and a request that changed under one revision
-		// would restart the child (keepChild).
+		// record's demoted_revision is the worker's alone (RW22), and so is
+		// each group's fence_last_leg_id (RW24): their writes bump no
+		// revision, and a request that changed under one revision would
+		// restart the child (keepChild).
 		out.req = proto.Clone(out.req).(*pb.SyncupCntlrRequest)
 		out.req.Cntlr.DemotedRevision = 0
+		clearFenceLastLegs(out.req)
 		if out.primary {
 			// BM4: clone chunks go only to the CN hosting the primary.
 			out.clones = clonePlans
 		}
 		plan.cntlrs[cntlrId] = out
+	}
+}
+
+// clearFenceLastLegs leaves every group's fence_last_leg_id out of a cntlr
+// request, its slices' and its clones' clone meta groups': the field is the
+// worker's alone (RW24), and no agent reads it.
+func clearFenceLastLegs(req *pb.SyncupCntlrRequest) {
+	for _, slice := range req.GetIdToSlice() {
+		for _, grp := range slice.GetMetaGrpList() {
+			grp.FenceLastLegId = 0
+		}
+		for _, grp := range slice.GetDataGrpList() {
+			grp.FenceLastLegId = 0
+		}
+	}
+	for _, clone := range req.GetCloneList() {
+		if grp := clone.GetMetaGrp(); grp != nil {
+			grp.FenceLastLegId = 0
+		}
 	}
 }
 
@@ -2434,7 +2544,8 @@ func (w *spWorker) releaseHeld(ctx context.Context) {
 // the cntlr plans stay held, under RW14's barrier from the moment the last
 // side plans are handed, with a bound of one cntlr_interval from then and the
 // sides it waits for taken from the newest side plans. The timer it re-arms
-// is the fence round's bound, or the barrier's when no round runs. When the
+// is the barrier's, which startFence re-arms for the fence round's bound
+// when a round runs. When the
 // demotion hold's timer ended it, the record names the demoted cntlrs that
 // had not reported.
 func (w *spWorker) endDemotion(ctx context.Context, expired bool) {
@@ -2535,12 +2646,14 @@ func fenceAwaitedSides(
 }
 
 // startFence begins RW24's fence round at the end of RW22's demotion hold,
-// whose timer the caller has already re-armed for one cntlr_interval, the
-// round's bound: every side but the fence-last legs' is handed the fan-out
+// and re-arms the hold's timer, which the caller armed for one
+// cntlr_interval, for the round's bound, common.FenceRoundIntervals
+// cntlr_intervals: every side but the fence-last legs' is handed the fan-out
 // at once, and the fence-last legs' sides are held until every other side the
 // round waits for (fenceAwaitedSides) has reported the revision applied, or
-// until the bound. A fan-out whose sides hold no fence-last leg runs no
-// round: it reports false and hands nothing.
+// its latest check round got no answer (fenceUnsynced), or until the bound.
+// A fan-out whose sides hold no fence-last leg runs no round: it reports
+// false, re-arms nothing and hands nothing.
 func (w *spWorker) startFence(sides map[sideKey]*sidePlan) bool {
 	lastLegs, inSyncLegs := w.fenceLegs()
 	others, last := splitLast(sides, lastLegs)
@@ -2554,6 +2667,9 @@ func (w *spWorker) startFence(sides map[sideKey]*sidePlan) bool {
 	held.fenceSides = sides
 	held.fenceAwaited = fenceAwaitedSides(others, inSyncLegs)
 	held.fenceStart = w.deps.clk.now()
+	held.timer.stop()
+	held.timer = w.deps.clk.newTimer(
+		common.FenceRoundIntervals * w.tickPeriod())
 	held.awaited = nil
 	w.handSides(others)
 	return true
@@ -2580,12 +2696,27 @@ func (w *spWorker) holdFence(plan *spPlan) {
 
 // fenceUnsynced counts the sides RW24's fence round waits for that have not
 // reported the held revision applied; a side of the set whose child the diff
-// has stopped since is not waited for.
+// has stopped since is not waited for, nor one whose latest check round got
+// no answer, which the coordinator cannot fence in any case.
 func (w *spWorker) fenceUnsynced() int {
 	cnt := 0
 	for key := range w.held.fenceAwaited {
 		child, ok := w.sides[key]
-		if ok && child.synced < w.held.revision {
+		if ok && !child.unanswered && child.synced < w.held.revision {
+			cnt++
+		}
+	}
+	return cnt
+}
+
+// fenceUnanswered counts the sides RW24's fence round would wait for but
+// does not, as their latest check round got no answer, that have not
+// reported the held revision applied.
+func (w *spWorker) fenceUnanswered() int {
+	cnt := 0
+	for key := range w.held.fenceAwaited {
+		child, ok := w.sides[key]
+		if ok && child.unanswered && child.synced < w.held.revision {
 			cnt++
 		}
 	}
@@ -2605,6 +2736,7 @@ func (w *spWorker) endFence(ctx context.Context) {
 		slog.Uint64("revision", held.revision),
 		slog.Int("last_side_cnt", len(held.lastPlans)),
 		slog.Int("side_cnt", w.fenceUnsynced()),
+		slog.Int("unanswered_cnt", w.fenceUnanswered()),
 		slog.Int64("wait_ms", w.deps.clk.now().Sub(held.fenceStart).Milliseconds()),
 	)
 	last := held.lastPlans
@@ -2672,8 +2804,9 @@ func (w *spWorker) unsyncedSides() int {
 
 // expireHold is the bound of whatever is held. RW22's demotion hold ends and
 // RW24's fence round or RW14's barrier begins; the fence round hands the
-// fence-last legs' sides one cntlr_interval after it began, whatever the round's
-// other sides reported, and RW14's barrier begins; RW14's barrier releases
+// fence-last legs' sides common.FenceRoundIntervals cntlr_intervals after it
+// began, whatever the round's other sides reported, and RW14's barrier
+// begins; RW14's barrier releases
 // the cntlrs one cntlr_interval after it began, whatever the sides reported,
 // and the record counts the side children it waited for that had not
 // reported the revision.
@@ -2880,7 +3013,72 @@ func (w *spWorker) applyPlan(ctx context.Context, plan *spPlan) {
 			delete(w.fenceLast, grpId)
 		}
 	}
+	w.seedFenceLast(plan)
+	w.saveFenceLast(ctx)
 	w.idleCnt = plan.unresolved
+}
+
+// seedFenceLast takes the plan's groups for RW24's record of the fence-last
+// legs: each group's stored leg is what the coordinator last read of its
+// record, and a group that no report of the primary has read since the
+// coordinator started gets a view from its record, the stored leg while
+// the group or its repair still holds it, with every one of those legs as
+// a leg md may hold in sync, as the record keeps the leg alone. The
+// primary's next report that reads the group replaces it. A group a report
+// has read keeps the reports' view, or none: a view a report dropped stays
+// dropped, and its zero is written again while the record holds a leg.
+func (w *spWorker) seedFenceLast(plan *spPlan) {
+	w.fenceGrps = plan.fenceGrps
+	for grpId := range w.fenceSaved {
+		if _, ok := plan.fenceGrps[grpId]; !ok {
+			delete(w.fenceSaved, grpId)
+			delete(w.fenceRead, grpId)
+		}
+	}
+	for grpId, g := range plan.fenceGrps {
+		w.fenceSaved[grpId] = g.stored
+		if _, ok := w.fenceLast[grpId]; ok || w.fenceRead[grpId] ||
+			g.stored == 0 || !slices.Contains(g.legs, g.stored) {
+			continue
+		}
+		w.fenceLast[grpId] = grpFenceView{
+			last:   g.stored,
+			inSync: slices.Clone(g.legs),
+		}
+	}
+}
+
+// saveFenceLast writes RW24's record of the fence-last legs: every group of
+// the latest plan whose view's fence-last leg, zero with no view, differs
+// from the one the coordinator last read or wrote of its record, in one
+// write that bumps nothing. A write that fails is logged, and the next
+// report or load writes again.
+func (w *spWorker) saveFenceLast(ctx context.Context) {
+	var edits []model.FenceLastEdit
+	for _, grpId := range sortedIds(slices.Collect(maps.Keys(w.fenceGrps))) {
+		want := w.fenceLast[grpId].last
+		if want == w.fenceSaved[grpId] {
+			continue
+		}
+		edits = append(edits, model.FenceLastEdit{
+			Ref: w.fenceGrps[grpId].ref, LegId: want,
+		})
+	}
+	if len(edits) == 0 {
+		return
+	}
+	if _, err := w.ops.setFenceLastLegs(ctx, w.cid, w.spId, edits); err != nil {
+		slog.InfoContext(ctx, msgSpFenceLastWriteFailed,
+			slog.Uint64("cluster_id", w.cid),
+			slog.Uint64("sp_id", w.spId),
+			slog.Int("grp_cnt", len(edits)),
+			slog.String("error", err.Error()),
+		)
+		return
+	}
+	for _, edit := range edits {
+		w.fenceSaved[edit.Ref.GrpId] = edit.LegId
+	}
 }
 
 // startSideChild starts one side child (RW14): an ordinary revision worker
@@ -3081,6 +3279,7 @@ func (w *spWorker) handleReports(first spReport) {
 			// RW24: the primary's views of the groups it read, under the
 			// leg rows' gate; a group it did not read keeps its view.
 			for grpId, view := range rep.fenceViews {
+				w.fenceRead[grpId] = true
 				if view.last == 0 {
 					delete(w.fenceLast, grpId)
 					continue
@@ -3138,6 +3337,14 @@ func (w *spWorker) handleReports(first spReport) {
 				child.synced = synced.revision
 			}
 		}
+		if answer := rep.answer; answer != nil {
+			// RW24: only the running child's own report counts, so a
+			// stopped child's late one never marks its successor.
+			child, ok := w.sides[answer.key]
+			if ok && child.driver == answer.driver {
+				child.unanswered = !answer.answered
+			}
+		}
 		if rep.cntlrSynced != 0 {
 			child, ok := w.cntlrs[rep.cntlrId]
 			if ok && rep.cntlrSynced > child.synced {
@@ -3152,6 +3359,7 @@ func (w *spWorker) handleReports(first spReport) {
 		tds[i].Torn = tornSeen[tds[i].TdId]
 	}
 	w.releaseHeld(ctx)
+	w.saveFenceLast(ctx)
 	w.applyProvisionedFlip(ctx, sides)
 	w.applyCloneFlip(ctx, cloneSides)
 	w.applyRepairFlips(ctx, repairSides)
@@ -3662,6 +3870,9 @@ type sideDriver struct {
 	// synced is the last revision reportSynced handed the coordinator, so a
 	// standing reply does not report every round.
 	synced uint64
+	// quiet is whether the latest check round got no answer, which
+	// noteAnswer hands the coordinator on each change (RW24).
+	quiet bool
 
 	// The migration bitmap of a destination side (BM7), guarded by mu:
 	// bmMigrId and bmMigrName are the migration the rest is about, bmPieces
@@ -4208,6 +4419,26 @@ func (d *sideDriver) observe(ctx context.Context, r *replyState) {
 	d.setCloneReady(accepted(r.code) &&
 		r.revision == plan.req.GetRevision() && migrCloneShown(info))
 	d.reportSynced(ctx, r)
+	d.noteAnswer(ctx, true)
+}
+
+// noteAnswer hands the coordinator a change between check rounds the side's
+// agent answers and one that got no answer, which RW24's fence round reads:
+// a side whose latest round got no answer is not waited for. A round that
+// fails (revWorker.fail: no reply in time, a broken stream, an observation
+// too old, a starting answer past the start hold) is no answer; a reply the
+// child judges, of a round or of a Syncup*, and a starting answer within the
+// hold, are answers.
+func (d *sideDriver) noteAnswer(ctx context.Context, answered bool) {
+	if d.quiet == !answered {
+		return
+	}
+	d.quiet = !answered
+	d.send(ctx, spReport{answer: &sideAnswer{
+		key:      sideKey{legId: d.ptr.GetLegId(), sideId: d.ptr.GetSideId()},
+		driver:   d,
+		answered: answered,
+	}})
 }
 
 // sideAwaitsCutover reads condition (2) of the cutover (applyCutovers) off a
@@ -4299,6 +4530,10 @@ func (d *sideDriver) starting(ctx context.Context) {
 	if d.noteStarting != nil {
 		d.noteStarting()
 	}
+	// RW24: an agent that answers starting within the hold answers, and its
+	// node's kernel may still serve the old primary, so the fence round
+	// waits for its side.
+	d.noteAnswer(ctx, true)
 }
 
 // startEnded ends the side's hold of HL8.
@@ -4319,6 +4554,7 @@ func (d *sideDriver) unreachable(ctx context.Context) {
 	d.setAwaiting(false)
 	d.setCloneReady(false)
 	d.health.observe(ctx, healthUnreachable, "")
+	d.noteAnswer(ctx, false)
 }
 
 // fold turns one reply into a replyState, remembering the SideInfo it carried

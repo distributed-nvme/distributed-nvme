@@ -185,13 +185,16 @@ MAX_ALLOC_LEG_PER_GRP=
 # primary threshold is held to and the upgrade case's settle wait counts;
 # and common.DemotionHoldTimeout, how long a fan-out that demotes a primary
 # holds its sides for the demoted cntlr (dnv-worker.md RW22), from which the
-# cutoff case computes its waits on the fence writer. And
+# cutoff case computes its waits on the fence writer, with
+# common.FenceRoundIntervals, the bound of the fence round after the hold in
+# cntlr_intervals (dnv-worker.md RW24). And
 # common.DefaultStartHoldSeconds, the start hold every cluster of this suite
 # stores, as none names one at its create (dnv-worker.md HL8): react's
 # restart step bounds its wait by it.
 DEFAULT_HC_INTERVAL=
 DEFAULT_PRIMARY_UNHEALTHY=
 DEMOTION_HOLD_TIMEOUT=
+FENCE_ROUND_INTERVALS=
 DEFAULT_START_HOLD=
 # common.DefaultNvmeFastIoFailTmo, the fast IO fail timeout of the legs of a
 # pool whose event_threshold sets none, as no pool of this suite does
@@ -1487,7 +1490,7 @@ read_constants() {
 	fi
 	local key val
 	for key in DefaultHealthCheckInterval DefaultPrimaryUnhealthy \
-		DemotionHoldTimeout DefaultStartHoldSeconds \
+		DemotionHoldTimeout FenceRoundIntervals DefaultStartHoldSeconds \
 		DefaultNvmeFastIoFailTmo; do
 		val=$(jq_of "$json" ".$key")
 		case "$val" in
@@ -1499,6 +1502,7 @@ read_constants() {
 		DefaultHealthCheckInterval) DEFAULT_HC_INTERVAL=$val ;;
 		DefaultPrimaryUnhealthy) DEFAULT_PRIMARY_UNHEALTHY=$val ;;
 		DemotionHoldTimeout) DEMOTION_HOLD_TIMEOUT=$val ;;
+		FenceRoundIntervals) FENCE_ROUND_INTERVALS=$val ;;
 		DefaultStartHoldSeconds) DEFAULT_START_HOLD=$val ;;
 		DefaultNvmeFastIoFailTmo) DEFAULT_FAST_IO_FAIL=$val ;;
 		esac
@@ -30117,6 +30121,7 @@ cut_snapshot() {
 	CUT_OLD_TRADDR=$PRIMARY_TRADDR
 	CUT_OLD_TRSVCID=$PRIMARY_TRSVCID
 	CUT_OLD_CN=$PRIMARY_CN
+	CUT_LOG_MARK=$(worker_log_mark)
 	CUT_NEW_ID=$STANDBY_CNTLR_ID
 	CUT_NEW_TRADDR=$STANDBY_TRADDR
 	CUT_NEW_TRSVCID=$STANDBY_TRSVCID
@@ -30900,8 +30905,8 @@ cut_fence_writer() {
 	bound=$((THR_PRIMARY + 3 * CUT_CI + CUT_SLACK))
 	range_secs=$((FENCE_RANGE_MIB * 256 / FENCE_IOPS))
 	assert_ge "$range_secs" \
-		"$((2 * (FENCE_WARMUP_SECS + bound + DEMOTION_HOLD_TIMEOUT + CUT_CI + WAIT_SHORT)))" \
-		"the writer's range lasts twice the warm-up, the failover's bound, the demotion hold, the fence round and one side converge"
+		"$((2 * (FENCE_WARMUP_SECS + bound + DEMOTION_HOLD_TIMEOUT + FENCE_ROUND_INTERVALS * CUT_CI + WAIT_SHORT)))" \
+		"the writer's range lasts twice the warm-up, the failover's bound, the demotion hold, the fence round's bound and one side converge"
 
 	size=$(((FENCE_RANGE_MIB * 1048576 + TD_UNIT - 1) / TD_UNIT * TD_UNIT))
 	ctl_ok td create --name "$TD_FENCE" --size "$size"
@@ -30974,9 +30979,9 @@ cut_fence_writer() {
 	# primary before they open the new one's path (dnagent.md DN10). A write
 	# that fails on a leg the fence round fences md completes from the
 	# fence-last leg, so the first write that fails is one after the
-	# fence-last leg's fence, at most one cntlr interval after the round
-	# began (dnv-worker.md RW24).
-	wait_until "$((DEMOTION_HOLD_TIMEOUT + CUT_CI + WAIT_SHORT + CUT_SLACK))" \
+	# fence-last leg's fence, at most the round's bound, FENCE_ROUND_INTERVALS
+	# cntlr intervals, after the round began (dnv-worker.md RW24).
+	wait_until "$((DEMOTION_HOLD_TIMEOUT + FENCE_ROUND_INTERVALS * CUT_CI + WAIT_SHORT + CUT_SLACK))" \
 		"host1's fence writer to stop on a write error once the sides fence the stopped primary" \
 		fence_writer_stopped
 	out=$(helper_host 1 fwrite_stat) || die "host1: the fwrite_stat verb failed"
@@ -31121,7 +31126,64 @@ case_cutoff() {
 	cut_stas_down
 	cut_drop_target
 	cut_fence_writer
+	cut_fence_rounds
 	case_finish
+}
+
+# --- the fence rounds of the case's failovers -------------------------------
+#
+# Each failover of the case's pool runs the worker's fence round, which hands
+# each RAID1 group's fence-last leg the failover once the other sides of the
+# round have reported it, or once its bound of five cntlr_intervals has passed
+# (dnv-worker.md RW24): a round that ends by its bound with a side not
+# reported leaves that group's fence order open. The worker's `sp fence round
+# ended` records of the pool since stage 00 must be one per failover the
+# worker applied since then, and each must name no side not reported
+# (side_cnt 0) and no side the round did not wait for as its latest check
+# round got no answer (unanswered_cnt 0): every disk node of this case
+# answers. A pool with no redundancy has no group reading, so no round runs,
+# and the stage is skipped.
+cut_fence_rounds() {
+	if [ "$REDUND" != raid1 ]; then
+		log ""
+		log "=== cutoff step 11 (the fence rounds of the case's failovers)" \
+			"SKIPPED: --redund $REDUND. A group with no redundancy runs no" \
+			"fence round."
+		return 0
+	fi
+	stage 11 "the fence rounds of the case's failovers ended by the reports"
+	local lines n=0 side unans wait max=0 fos
+
+	lines=$(ssh_cp "tail -n +$((CUT_LOG_MARK + 1)) $WORK/worker/worker.log |
+		grep -F '\"msg\":\"sp fence round ended\"' || [ \$? -eq 1 ]") ||
+		die "cannot read the fence round records in $WORK/worker/worker.log on $CP_IP"
+	lines=$(printf '%s\n' "$lines" | "$JQ" -R -r --argjson sp "$SP_ID" \
+		'fromjson? // empty | select(.sp_id == $sp) |
+		"\(.side_cnt) \(.unanswered_cnt // 0) \(.wait_ms)"') ||
+		die "cannot parse the fence round records"
+	while read -r side unans wait; do
+		[ -n "$side" ] || continue
+		n=$((n + 1))
+		[ "$side" = 0 ] || die "a fence round of $SP ended by its bound" \
+			"after ${wait} ms with $side side(s) not reported" \
+			"($unans not waited for): the fence order is open"
+		[ "$unans" = 0 ] || die "a fence round of $SP did not wait for" \
+			"$unans side(s) whose check round got no answer, though every" \
+			"disk node of the case answers"
+		[ "$wait" -le "$max" ] || max=$wait
+		log "  a fence round ended after ${wait} ms"
+	done <<<"$lines"
+	fos=$(ssh_cp "tail -n +$((CUT_LOG_MARK + 1)) $WORK/worker/worker.log |
+		grep -c '\"msg\":\"reaction applied\".*\"kind\":\"failover\"' ||
+		[ \$? -eq 1 ]") ||
+		die "cannot count the failovers in $WORK/worker/worker.log on $CP_IP"
+	case "$fos" in
+	'' | *[!0-9]*) die "the worker log's failover count since stage 00 read '$fos'" ;;
+	esac
+	[ "$fos" -ge 1 ] || die "no failover of the worker since stage 00"
+	assert_eq "$n" "$fos" \
+		"'sp fence round ended' records of $SP since stage 00, one per failover"
+	log "  $n fence round(s) of $SP, the longest ${max} ms, every one by the reports"
 }
 
 # ---------------------------------------------------------------------------

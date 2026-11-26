@@ -288,6 +288,16 @@ message Group {
     // from it (architecture.md, Clusters, GetClusterStatus). Appended,
     // never renumbered.
     uint64 grow_epoch = 13;
+    // The group's fence-last leg as the sp worker last read it from the
+    // primary's report: the leg md holds in sync in the lowest slot, which a
+    // failover's fence round fences last (dnv-worker.md RW24), zero for none.
+    // Written by the sp worker alone, when its reading changes, in a write
+    // that bumps no revision: no agent reads it, and the cntlr request
+    // leaves it out (dnv-worker.md RW16). A worker whose reports have not
+    // read the group since it started, as after a restart or a handoff,
+    // starts from it. A record without it reads as none. Appended, never
+    // renumbered.
+    uint64 fence_last_leg_id = 14;
 }
 
 // The schedule of one group's md check (Group.md_check; dnv-worker.md AR16).

@@ -2936,6 +2936,10 @@ type fakeSpOps struct {
 	// what each returns.
 	clears   []demotionClear
 	clearErr error
+	// fenceLasts records every setFenceLastLegs call; fenceLastErr, when
+	// set, is what each returns, having written nothing.
+	fenceLasts   [][]model.FenceLastEdit
+	fenceLastErr error
 }
 
 // demotionClear is one clearCntlrDemotion call of the coordinator.
@@ -2970,6 +2974,51 @@ func (o *fakeSpOps) clearCntlrDemotion(
 	next.Cntlrs[cntlrId] = cleared
 	o.state = &next
 	return true, nil
+}
+
+func (o *fakeSpOps) setFenceLastLegs(
+	ctx context.Context, cid uint64, spId uint64,
+	edits []model.FenceLastEdit,
+) (int, error) {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	o.fenceLasts = append(o.fenceLasts, slices.Clone(edits))
+	if o.fenceLastErr != nil {
+		return 0, o.fenceLastErr
+	}
+	// As model.SetFenceLastLegs on the slices' groups: the records change,
+	// and the store's revision does not move.
+	next := *o.state
+	next.Slices = make(map[uint64]*pb.Slice, len(o.state.Slices))
+	for id, rec := range o.state.Slices {
+		next.Slices[id] = rec
+	}
+	set := 0
+	for _, edit := range edits {
+		slice, ok := next.Slices[edit.Ref.Parent.SliceId]
+		if !ok || edit.Ref.Parent.CloneName != "" {
+			continue
+		}
+		slice = proto.Clone(slice).(*pb.Slice)
+		for _, grp := range append(slices.Clone(slice.GetMetaGrpList()),
+			slice.GetDataGrpList()...) {
+			if grp.GetGrpId() == edit.Ref.GrpId &&
+				grp.GetFenceLastLegId() != edit.LegId {
+				grp.FenceLastLegId = edit.LegId
+				set++
+			}
+		}
+		next.Slices[edit.Ref.Parent.SliceId] = slice
+	}
+	o.state = &next
+	return set, nil
+}
+
+// fenceLastCalls returns the setFenceLastLegs calls so far.
+func (o *fakeSpOps) fenceLastCalls() [][]model.FenceLastEdit {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	return slices.Clone(o.fenceLasts)
 }
 
 func (o *fakeSpOps) clearCalls() []demotionClear {

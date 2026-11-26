@@ -201,12 +201,12 @@ and thin pools; its legs stay connected. Then the fence: each disk node
 reloads the old primary's path onto an error target and the new primary's
 onto the side device, and moves ANA with them. In each RAID1 group the worker
 fences the leg md copies from last: it tells that leg's disk node only once
-the other legs' disk nodes report their fence done, or after one interval,
-2 seconds at the default. The order keeps a write that an old primary
-still serving completed on that leg, the one the new primary's start of the
-array copies from, but only in the groups whose other disk nodes report in
-time. At 32 slices on the lab VMs the wait ran out in most failovers, so
-there the worker ensured the order only for part of the groups.
+the other legs' disk nodes report their fence done, or after five intervals,
+10 seconds at the default, and it does not wait for a disk node that does not
+answer. The order keeps a write that an old primary still serving completed
+on that leg, the one the new primary's start of the array copies from, but
+only in the groups whose other disk nodes report in time. The worker keeps
+that leg in the group's record, so a worker that restarts knows it too.
 [The scope page](scope.md#51-hosts-flushes-and-snapshots) says when a write
 can still be lost. Then the new primary assembles
 the arrays, builds the thin pools and the striped devices, and only then moves

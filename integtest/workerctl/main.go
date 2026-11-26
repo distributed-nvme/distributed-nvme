@@ -1216,6 +1216,7 @@ func cmdConstants(g *globals, args []string) {
 		"MaxNvmeTcpCmdBytes":       common.MaxNvmeTcpCmdBytes,
 		"DefaultPrimaryUnhealthy":  common.DefaultPrimaryUnhealthy,
 		"DemotionHoldTimeout":      common.DemotionHoldTimeout,
+		"FenceRoundIntervals":      common.FenceRoundIntervals,
 		"DefaultStartHoldSeconds":  common.DefaultStartHoldSeconds,
 		"RetiredLegMaxAge":         common.RetiredLegMaxAge,
 		"DefaultNvmeFastIoFailTmo": common.DefaultNvmeFastIoFailTmo,

@@ -540,33 +540,34 @@ retired leg taken back that joins its array with old data (section 10).
   leg in its first place over the others. So the worker fences, in each
   group, the leg md copies from last: it first hands the other legs' disk
   nodes the failover, and that leg's only once they report their fence
-  done, or one interval later, 2 seconds at the default. A write that
-  fails on the other legs then lands on that leg, md's record reaches it
-  before its own fence, and the new primary starts from it. The worker
-  learns which leg md copies from in the primary's reports, and keeps it
-  in memory only. The loss stays possible in these cases. The worker that
-  hands the sides a failover or a cntlr replacement of the primary has had
-  no report on a group from the old primary as the primary since it
-  started or took the pool over, so it does not know that group's leg. A
-  report covers a group only while the primary's row for the group's
-  array has the status ok. A worker that restarts or
-  takes the pool over during the waits of a failover or a replacement,
-  before the leg md copies from is told, is such a worker. A disk node
-  does not report its fence within the one interval the worker waits, or
-  reports the failover without having fenced, as one whose side device
-  failed does. On the lab VMs, where 45 disk nodes share each VM that
-  runs disk nodes, a late disk node was the common case at 32 slices: the
-  wait ended at its interval in every failover of a pool of 32 slices,
-  with 15 to 51 of roughly 64 sides it waited for not yet reported. So
-  there the worker ensured the order only in the groups whose sides
-  reported in time. The runs timed the disk nodes' reports, which come at
-  the end of each converge, not the moment of each fence. md brought a leg
-  into sync in a lower place after the primary's last report on the
-  group: a leg the primary put back into the array, or the new leg of a
-  leg repair, which can be a leg that an earlier repair took out of the
-  group.
+  done, or five intervals later, 10 seconds at the default. It does not
+  wait for a disk node whose latest check round got no answer, as no fence
+  reaches that node either. A write that fails on the other legs then
+  lands on that leg, md's record reaches it before its own fence, and the
+  new primary starts from it. The worker learns which leg md copies from
+  in the primary's reports, and keeps it in the group's record too, so a
+  worker that restarts or takes the pool over knows the leg from its first
+  failover. The loss stays possible in these cases. A disk node so loaded
+  that it misses its check rounds while it still serves the old primary,
+  or one that does not report its fence within the five intervals: on the
+  lab VMs at 32 slices, where 45 disk nodes share each VM that runs disk
+  nodes, the reports took up to 4.8 seconds. A disk node whose agent is
+  down or restarting at the failover, while the node's kernel still serves
+  the old primary: its check rounds get no answer, so the worker does not
+  wait for it. A disk node that reports the failover without having
+  fenced, as one whose side device failed does. A worker that restarts or
+  takes the pool over within three seconds after a cntlr replacement of
+  the primary: it holds nothing before the fence, so it tells every disk
+  node at once, in no order (section 8).
+  A group whose leg no worker has read: the primary's report covers a
+  group only while the primary's row for the group's array has the status
+  ok, and a group of a pool made before this record existed has no leg in
+  its record until a worker reads one. md brought a leg into sync in a
+  lower place after the primary's last report on the group: a leg the
+  primary put back into the array, or the new leg of a leg repair, which
+  can be a leg that an earlier repair took out of the group.
   The worker then fences that leg before the leg it read as the one md
-  copies from. For the late disk node and the leg brought into sync, the
+  copies from. For a late disk node and the leg brought into sync, the
   write is lost only when, of the two legs, the one md copies from is
   fenced first. A fence holds the old primary's IO to its leg while the
   disk node reloads the path. When the other leg's fence comes in that
@@ -587,25 +588,12 @@ retired leg taken back that joins its array with old data (section 10).
   the lab, in the e2e suite at 32 slices, with the paths fenced in no
   order, and shown with md alone: each run that began fencing md's first
   member first lost the last completed write, and each run that began it
-  last kept it. State: accepted, for every case but the late disk node
-  and the worker that restarts or takes the pool over, whose fix is
-  decided (below).
-  The first case needs a worker restart, or a worker taking the pool over,
-  between the old primary's last report as the primary and the fence of
-  the leg md copies from. For an agent that is stopped or cut off from
-  the control plane, that time is a few seconds, under 20 at the
-  defaults. For an agent that answers "starting", it is a little more
-  than the start hold, the longest time the worker waits for an agent
-  that is still rebuilding, 120 seconds at the default. Before a cntlr
-  replacement of the primary, it can be a little more than the cntlr
-  threshold, the event threshold of any cntlr, 600 seconds at the
-  default. A disk node that reports without having fenced needs a second
-  fault, and a leg brought into sync needs md to change the array between
-  the primary's last report and the failover. State for a late disk node,
-  and for a worker that restarts or takes the pool over: fix decided. A
-  disk node so loaded that it misses its check rounds but still serves,
-  or one slower than the longer wait that fix brings, stays a limit, fix
-  later. On the lab VMs a late disk node needed no fault at 32 slices.
+  last kept it. A disk node that reports without having fenced needs a
+  second fault, and a leg brought into sync needs md to change the array
+  between the primary's last report and the failover. State: accepted for
+  these cases. A disk node so loaded that it misses its check rounds but
+  still serves, one whose agent is down or restarting, or one slower than
+  the five intervals, stays a limit, fix later.
 - **A write can be lost when the paths of a group die one after the
   other.** Silent. A network cut can take every path of a RAID1 group
   away a few seconds apart, with no failover. A write that lands on the
@@ -2416,8 +2404,9 @@ failover's among them.
   the new primary has built the whole stack. The figures are in the
   introduction. Before the build, the worker hands each group's leg md
   copies from its fence last (section 5.1), which adds the time the
-  slowest disk node takes to report its fence, at most one interval, 2
-  seconds at the default. A new primary can start its build before the
+  slowest disk node takes to report its fence, at most five intervals, 10
+  seconds at the default; a disk node whose latest check round got no
+  answer is not waited for. A new primary can start its build before the
   disk nodes have set the legs' paths to it ANA optimized. It then builds
   its groups in the converge of a later syncup, which the worker sends
   once a check round made after that change names the groups: up to about
@@ -2437,7 +2426,8 @@ failover's among them.
 - **Hosts still on the old primary's path see IO errors from the fence.**
   The worker hands the old primary its demotion first and holds the sides
   for three seconds at most. It holds the sides of the legs md copies from
-  up to one interval more, 2 seconds at the default (section 5.1). The
+  until the other sides report their fence, up to five intervals more, 10
+  seconds at the default (section 5.1). The
   three seconds are the time a host that follows the discovery log needs
   to drop the path. When the old primary's agent reports its demotion
   before the host drops the path, the fence can come first, but the path
