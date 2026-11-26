@@ -722,6 +722,18 @@ list; the flip, which reads the repair's key alone, and
   the same rule. They accept a `deleting` clone too: its
   legs and sides stay in its record, with their health epochs, until CLD9's
   transaction removes them. They rewrite the `Clone`; no bump.
+* `LowerFutureErrEpochs` takes the reader's clock and a list of
+  `EpochRecordRef`s, each a cntlr, a slice, a clone or a repair, and writes
+  the clock over every health epoch later than it in those records: a
+  cntlr's, a slice's legs and sides, a clone meta group's legs and sides, a
+  repair's new legs and their sides (AR4). It runs one STM per
+  `LowerRecordsPerTxn` records, in the list's order, so the widest pool's
+  cntlrs, slices and clones commit in the first, and reads each epoch again
+  in its STM, so an epoch cleared or lowered since the caller's load stays,
+  and a zero is never set; a record that is gone is skipped. It is the one
+  write that replaces a stored non-zero epoch with another. It returns how
+  many it lowered, on an error those the STMs before it lowered; no bump,
+  no level check.
 * `FlipProvisioned` takes a list of `SideRef`s and requires the slice to
   exist: every listed side still `provisioned` false is set true; `SpRev` is
   bumped once iff any was written. It returns the sides actually flipped and
@@ -2121,6 +2133,12 @@ or of a `Syncup*` reply included, and so does a round whose agent answers
 that it is starting within the start hold (AR10, HL8); past the hold
 such a round counts as a missed round does. The time seen is forgotten when
 the object moves to another endpoint (RW13), and a loop starts with none.
+It is forgotten too, with the first round after a pause (HL7), when a
+round's reply carries another agent start than the loop's rounds last
+carried (HL8): the restarted agent stamps from its node's clock again,
+which may have stepped back behind both, and kept they would read every
+new observation as not new and as asked for by no round until that clock
+passed them; the agent's start is a pause in the rounds.
 A child restarted at the same endpoint never counts in its cntlr's run
 (AR10) what a look its predecessor saw reported: its loop's start is a
 pause (HL7), and the new loop starts only once the old one has stopped,
@@ -3272,8 +3290,9 @@ bookkeeping of the same kind as `err_epoch`, not a memo of a failed step.
 
 HL3. **Transitions only.** A record is written when the observed health
 changes (healthy to unhealthy sets the epoch once — while the record stays
-set, the threshold clock of Automatic reactions never restarts; unhealthy
-to healthy clears it). The op re-reads the record inside its STM, so two
+set, the threshold clock of Automatic reactions never restarts, save that a
+reaction pass that reads an epoch later than its own clock writes its
+clock over it (AR4); unhealthy to healthy clears it). The op re-reads the record inside its STM, so two
 owners observing the same transition write once. Health never bumps a
 revision (`architecture.md`, Revision keys and the sync fan-out). What a
 health verdict is compared with is a cache of the record, not only a memory
@@ -3385,9 +3404,11 @@ earlier than the first round after a pause in its rounds of the object,
 and from that round alone for a reply that carries no observation time,
 and keeps the agent's answer time on that round until the next pause
 (RW2). A pause is the loop's start, an idle or a refused conf (RW9), a
-move to another endpoint (RW13), or an agent's start (HL8), from the
+move to another endpoint (RW13), an agent's start (HL8), from the
 starting answer that begins it through the starting answers and missed
-rounds that follow, within the start hold or past it; its
+rounds that follow, within the start hold or past it, or an agent's
+restart that a round's reply shows by another agent start than the loop's
+rounds last carried, answering or not that it is starting (RW23); its
 first round is the first that the agent answers in time
 without refusing the object as unknown or answering that it is starting. A gap
 between two rounds of a running loop is no pause: a round that waited out
@@ -4056,6 +4077,24 @@ are gateway validation rules (`architecture.md`, Common validation); the
 worker is correct either way. The second alone does not keep one missed
 round from failing a primary over, so AR5's threshold trigger also needs
 AR10's run; what that run does not cover is in Known limits.
+
+An epoch later than `now` reaches no threshold. A pass that reads such an
+epoch in its pool, where reactions run (past AR3's gate), writes its own
+clock over every one before its reactions (MD6's `LowerFutureErrEpochs`),
+read as the write starts, so an epoch its own monitor wrote since the pass
+began is not set back, and logs it at Warn. The epochs are a cntlr's, the
+legs' and sides' of the slices' groups and of the clone meta groups, and
+the repairs' new legs' and their sides'; a node record's epoch and a
+retired side's are left, since every reader reads those as set or not. Reason:
+an epoch is the clock of the worker that wrote it, and one a worker with a
+faster clock wrote, or one written before this worker's clock stepped back,
+would hold every threshold that counts from it until this clock caught up,
+so a pool could stay on a primary that does not serve for as long as the
+clocks differ. Counted from the reader's clock, the threshold waits its own
+length at most from the first pass that reads the epoch. A worker with a
+faster clock that reads an epoch a slower one wrote counts from the earlier
+time instead, by up to the difference; time sync on every machine keeps it
+small (`operations.md`, Prepare a node).
 
 AR10. **Own verdict.** A threshold reaction — AR5's failover on its
 threshold, AR6's withdrawal of a stuck grow, AR7's replacement, AR8's
@@ -6066,6 +6105,12 @@ AR13 finds due and does not make, with its reason, the op's name as `op`
 when the op refused it, or its error (AR13); `member add refused`, at
 Warn, a group whose primary refuses a `leg_list` member's add, naming the
 group, the primary, its report's revision and the refusal's text (AR14);
+`future health epochs lowered`, at Warn, a write of the pass's clock over
+the pool's health epochs later than it, with how many records the pass
+found, the largest step in seconds, how many epochs the write lowered and
+the clock, and `future health epochs kept` such a write whose call failed,
+with its error and how many epochs its transactions before the failed one
+lowered (AR4);
 `groups array made` a write of the flag that a group's array has run whose
 call wrote, naming the groups, the primary and its report's revision, with how
 many it set and the revision its own STM committed, and `groups array made
@@ -7148,7 +7193,16 @@ caught.
   later. A cntlr child restarted at the same endpoint just after such a
   step can also count again a look its predecessor counted, since an
   observation made before the step can read as ending after the new
-  loop's first round (RW23).
+  loop's first round (RW23). When the agent restarts after such a step,
+  the loop forgets the newest observation it saw and the first round after
+  a pause (RW23), so the restarted agent's reports read as new from the
+  round after the restart on, the restart being a pause.
+* **A worker whose clock runs ahead of another's counts that one's health
+  epochs early.** A pass lowers an epoch later than its own clock (AR4),
+  but an epoch a worker with a slower clock wrote reads older than it is,
+  by the difference, so a threshold that counts from it, as after a
+  handoff, is reached that much early. Time sync on every machine keeps the
+  difference small (`operations.md`, Prepare a node).
 * **The grown-chunk memo of BM5** (`architecture.md`, [D8]) lives as long as
   its child: a handoff, and any restart of the child on the same worker
   (RW14), can leave a shorter chunk at the agent (cost: extra copying, never

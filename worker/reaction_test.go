@@ -2,6 +2,7 @@ package worker
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"slices"
 	"strings"
@@ -327,6 +328,12 @@ type fakeReactionOps struct {
 	// replaced or withdrawn since the snapshot.
 	markErr  error
 	markSkip bool
+	// lowers records each of AR4's writes over future health epochs, with
+	// the clock it wrote; onLower, when set, applies one as the store would,
+	// and lowerErr fails it.
+	lowers   []lowerCall
+	onLower  func(now uint64, refs []model.EpochRecordRef) int
+	lowerErr error
 	// arrayMade records each of AR15's writes of the flag that a group's
 	// array has run, apart from calls, since every pass over a fixture whose
 	// groups carry no flag makes one; arrayMadeErr fails the write, apart
@@ -710,6 +717,32 @@ func (o *fakeReactionOps) setNewLegsPartial(
 		return 0, o.partialErr
 	}
 	return len(mark) + len(clear), nil
+}
+
+// lowerCall is one lowerFutureErrEpochs call.
+type lowerCall struct {
+	now  uint64
+	refs []model.EpochRecordRef
+}
+
+func (o *fakeReactionOps) lowerFutureErrEpochs(
+	ctx context.Context,
+	cid uint64,
+	spId uint64,
+	now uint64,
+	refs []model.EpochRecordRef,
+) (int, error) {
+	o.mu.Lock()
+	o.lowers = append(o.lowers, lowerCall{now: now, refs: slices.Clone(refs)})
+	err, apply := o.lowerErr, o.onLower
+	o.mu.Unlock()
+	if err != nil {
+		return 0, err
+	}
+	if apply == nil {
+		return len(refs), nil
+	}
+	return apply(now, refs), nil
 }
 
 func (o *fakeReactionOps) markGroupsArrayMade(
@@ -4743,6 +4776,80 @@ func TestReactionTheSameErrorHoldEndsAtTheCntlrThreshold(t *testing.T) {
 	if skips() != held+2 {
 		t.Fatalf("%d same_error records after the move back, want %d",
 			skips(), held+2)
+	}
+}
+
+// TestReactionLowersAFutureEpoch pins AR4's step for the clocks: a held pass
+// lowers nothing; a pass that reads a health epoch later than its own clock
+// writes its clock over it, once, and logs it at Warn with the step; the failover then comes once
+// primary_unhealthy has passed by this worker's clock, not once that clock
+// has caught up with the epoch; a write that fails is logged and tried
+// again by the next pass.
+func TestReactionLowersAFutureEpoch(t *testing.T) {
+	h := newReactHarness(t, reactFixture(t))
+	now := h.clk.nowUnix()
+	h.state.Cntlrs[reactCntlrA].ErrEpoch = now + 300
+	// A held pass lowers nothing (AR3): the step runs where reactions run.
+	h.deps.reach = &agentReach{}
+	h.deps.reach.asked(h.deps.reach.join(), h.clk.now(), roundInterval)
+	h.pass()
+	h.rops.mu.Lock()
+	held := len(h.rops.lowers)
+	h.rops.mu.Unlock()
+	if held != 0 {
+		t.Fatalf("%d lower calls from a held pass, want none", held)
+	}
+	h.deps.reach = nil
+	h.rops.lowerErr = errors.New("etcd down")
+	h.pass()
+	h.wantOps()
+	if recs := h.logs.withMsg(msgFutureEpochsKept); len(recs) != 1 {
+		t.Fatalf("records of the failed write %v, want one", recs)
+	}
+	h.rops.lowerErr = nil
+	h.rops.onLower = func(at uint64, refs []model.EpochRecordRef) int {
+		n := 0
+		for _, ref := range refs {
+			cntlr := h.state.Cntlrs[ref.Id]
+			if ref.Record == model.EpochRecordCntlr && cntlr.GetErrEpoch() > at {
+				cntlr.ErrEpoch = at
+				n++
+			}
+		}
+		return n
+	}
+	h.pass()
+	h.wantOps()
+	h.rops.mu.Lock()
+	lowers := slices.Clone(h.rops.lowers)
+	h.rops.mu.Unlock()
+	want := []model.EpochRecordRef{{Record: model.EpochRecordCntlr,
+		Id: reactCntlrA}}
+	if len(lowers) != 2 || lowers[1].now != now ||
+		!slices.Equal(lowers[1].refs, want) {
+		t.Fatalf("lower calls %+v, want a second at %d for %v", lowers, now,
+			want)
+	}
+	recs := h.logs.withMsg(msgFutureEpochsLowered)
+	if len(recs) != 1 || recs[0]["level"] != "WARN" ||
+		recs[0]["step_seconds"] != float64(300) ||
+		recs[0]["lowered"] != float64(1) {
+		t.Fatalf("lowered records %v, want one at Warn with a step of 300 "+
+			"and one lowered", recs)
+	}
+	if got := h.state.Cntlrs[reactCntlrA].GetErrEpoch(); got != now {
+		t.Fatalf("cntlr A's epoch %d, want the pass's clock %d", got, now)
+	}
+	primary := model.ResolveEventThreshold(
+		h.state.Conf.GetEventThreshold()).GetPrimaryUnhealthy()
+	h.clk.advance(time.Duration(primary) * time.Second)
+	h.pass()
+	h.wantOps("failover")
+	h.rops.mu.Lock()
+	n := len(h.rops.lowers)
+	h.rops.mu.Unlock()
+	if n != 2 {
+		t.Fatalf("%d lower calls, want none once no epoch lies ahead", n)
 	}
 }
 

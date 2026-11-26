@@ -318,7 +318,8 @@ type revWorker struct {
 	confRefused string
 	// obsSeen is the latest observation time a round's or a Syncup* reply
 	// carried for the object (RW23), and obsAddr the endpoint it was seen
-	// at: a move to another endpoint forgets it (connect). It lives here, on
+	// at: a move to another endpoint forgets it (connect), and so does an
+	// agent's restart (seeAgentStart). It lives here, on
 	// the loop goroutine, not in fold, which runs on the stream's pump
 	// goroutine for a round's reply.
 	obsSeen time.Time
@@ -340,8 +341,9 @@ type revWorker struct {
 	syncupObs time.Time
 	// askFrom is the agent's answer time on the first round the loop judged
 	// after a pause in its rounds of the object: its start, an idle or a
-	// refused conf (quiesce), a move to another endpoint (connect), or the
-	// agent's own start, whose rounds it answered starting (HL8). An
+	// refused conf (quiesce), a move to another endpoint (connect), the
+	// agent's own start, whose rounds it answered starting (HL8), or a
+	// restart a round's reply shows by another agent start (seeAgentStart). An
 	// observation's age is counted from no earlier than askFrom (HL7), since
 	// no round asked the agent to read during the pause. It is by the node's
 	// clock; zero until that first round.
@@ -780,17 +782,27 @@ func (w *revWorker) startingRound(
 
 // seeAgentStart compares the agent's start a round's reply carries with the
 // one the loop's rounds last carried: a different one is the agent's
-// restart, which a DN's or a CN's loop logs once (HL8), whether or not a
-// round found the agent starting.
+// restart, which forgets the newest observation seen and the first round
+// after a pause (RW23, HL7), and which a DN's or a CN's loop logs once
+// (HL8), whether or not a round found the agent starting.
 func (w *revWorker) seeAgentStart(ctx context.Context, reply *replyState) {
 	if reply.agentStart.IsZero() {
 		return
 	}
-	if !w.agentStart.IsZero() && !reply.agentStart.Equal(w.agentStart) &&
-		w.role != common.WorkerRoleSp {
-		slog.InfoContext(ctx, msgAgentRestarted, append(w.idAttrs(),
-			slog.Time("old_agent_start_time", w.agentStart),
-			slog.Time("agent_start_time", reply.agentStart))...)
+	if !w.agentStart.IsZero() && !reply.agentStart.Equal(w.agentStart) {
+		// RW23, HL7: the restarted agent stamps its observations from its
+		// node's clock again, which may have stepped back behind the newest
+		// observation the loop saw and the first round after a pause; kept,
+		// they would read every new observation as not new and as asked
+		// for by no round until that clock passed them. The agent's start
+		// is a pause in the loop's rounds (HL8).
+		w.obsSeen = time.Time{}
+		w.askFrom = time.Time{}
+		if w.role != common.WorkerRoleSp {
+			slog.InfoContext(ctx, msgAgentRestarted, append(w.idAttrs(),
+				slog.Time("old_agent_start_time", w.agentStart),
+				slog.Time("agent_start_time", reply.agentStart))...)
+		}
 	}
 	w.agentStart = reply.agentStart
 }

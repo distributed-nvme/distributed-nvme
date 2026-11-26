@@ -339,7 +339,9 @@ always means the SP's `DmPoolConf.data_block_size`.
   `err_epoch`, which is in unix **seconds**.
 * **err_epoch** — The unix seconds at which a worker found the object
   unhealthy after last seeing it healthy; zero while it is healthy. It
-  stays put while the object stays unhealthy (`dnv-worker.md` HL3), and the
+  stays put while the object stays unhealthy (`dnv-worker.md` HL3), save
+  that a worker whose clock reads it in the future writes its own time
+  over it (`dnv-worker.md` AR4), and the
   automatic reactions measure their thresholds, the `EventThreshold`, from
   it (Automatic reactions). A node with a nonzero `err_epoch` also loses
   its capacity key (Capacity index keys), and a cntlr with one leaves its

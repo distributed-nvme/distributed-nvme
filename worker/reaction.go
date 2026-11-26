@@ -564,6 +564,16 @@ type reactionOps interface {
 		spName string,
 		ref model.ForcedStartRef,
 	) (bool, uint64, error)
+	// lowerFutureErrEpochs is AR4's write for the clocks (MD6's
+	// LowerFutureErrEpochs): it writes now over every health epoch later
+	// than now in the records refs names, and reports how many it lowered.
+	lowerFutureErrEpochs(
+		ctx context.Context,
+		cid uint64,
+		spId uint64,
+		now uint64,
+		refs []model.EpochRecordRef,
+	) (int, error)
 	// markGroupsArrayMade is AR15's write (MD6's MarkGroupsArrayMade): it
 	// sets array_made on the groups refs names that do not carry it, and
 	// reports how many it set and the SpRev revision its STM committed.
@@ -959,6 +969,16 @@ func (o *modelReactionOps) clearForcedStart(
 	ref model.ForcedStartRef,
 ) (bool, uint64, error) {
 	return model.ClearForcedStart(ctx, o.cli, cid, shard, spId, spName, ref)
+}
+
+func (o *modelReactionOps) lowerFutureErrEpochs(
+	ctx context.Context,
+	cid uint64,
+	spId uint64,
+	now uint64,
+	refs []model.EpochRecordRef,
+) (int, error) {
+	return model.LowerFutureErrEpochs(ctx, o.cli, cid, spId, now, refs)
 }
 
 func (o *modelReactionOps) markGroupsArrayMade(
@@ -1931,6 +1951,10 @@ func (w *spWorker) reactionPass(ctx context.Context) {
 	if w.reactionSuppressed(ctx, p) {
 		return
 	}
+	// dnv-worker.md AR4: a health epoch later than this pass's clock is
+	// written over with it, so that the thresholds below count from this
+	// worker's clock; where reactions run, and not the pass's one action.
+	w.lowerFutureEpochs(ctx, p)
 	// The retire timer runs only where reactions run (AR3), and is not the
 	// pass's one action either.
 	w.retireOldLeg(ctx, p)
@@ -4356,6 +4380,58 @@ func (w *spWorker) markArrayMade(ctx context.Context, p *spPass) {
 	w.stepAppliedAt(ctx, msgGroupsArrayMade, revision,
 		withAttr(attrs, slog.Int("set", set))...)
 }
+
+// lowerFutureEpochs is AR4's step for the clocks: every health epoch of the
+// pool that is later than the pass's clock, as one a worker with a faster
+// clock wrote or one written before this worker's clock stepped back, is
+// written over with this worker's clock as the write starts (MD6's
+// LowerFutureErrEpochs), which lowers only an epoch still later than that
+// clock when it commits; read at the call, not the pass's earlier one, so
+// an epoch this worker's own monitor wrote since the pass began is not set
+// back. Until then no threshold that counts from such an epoch is reached
+// (reached), so a failover, a cntlr replacement or a leg repair would wait
+// for this clock to catch up. A node record's epoch and a retired side's
+// are no part of it: every reader reads those as set or not. A write that
+// fails is logged and tried again by the next pass (RW12).
+func (w *spWorker) lowerFutureEpochs(ctx context.Context, p *spPass) {
+	refs, step := model.FutureEpochRecords(p.state, p.now)
+	if len(refs) == 0 {
+		return
+	}
+	now := w.deps.clk.nowUnix()
+	attrs := []slog.Attr{
+		slog.Int("records", len(refs)),
+		slog.Uint64("step_seconds", step),
+	}
+	lowered, err := w.reactor().ops.lowerFutureErrEpochs(
+		ctx, w.cid, w.spId, now, refs)
+	if err != nil {
+		w.stepFailed(ctx, msgFutureEpochsKept, err,
+			withAttr(attrs, slog.Int("lowered", lowered))...)
+		return
+	}
+	if lowered == 0 {
+		return
+	}
+	args := []any{
+		slog.Uint64("cluster_id", w.cid),
+		slog.Uint64("sp_id", w.spId),
+	}
+	for _, attr := range attrs {
+		args = append(args, attr)
+	}
+	args = append(args, slog.Int("lowered", lowered),
+		slog.Uint64("now", now))
+	slog.WarnContext(ctx, msgFutureEpochsLowered, args...)
+}
+
+// The records of lowerFutureEpochs (dnv-worker.md, Log records): the write,
+// at Warn, since clocks that disagree are an operator's matter, and its
+// failure, with the epochs the STMs before the failed one lowered.
+const (
+	msgFutureEpochsLowered = "future health epochs lowered"
+	msgFutureEpochsKept    = "future health epochs kept"
+)
 
 // scheduleMdChecks is AR16, the md check schedule of the pool's slice
 // groups, one write per pass with the edits of its three parts:

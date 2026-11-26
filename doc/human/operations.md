@@ -1975,8 +1975,9 @@ Safe steps, as root on the machine:
    ([Choose a node's location](#choose-a-nodes-location)). Keep its clock
    in time with a time sync service, such as chrony or systemd-timesyncd,
    on every machine of the cluster, the control plane's too: the worker
-   compares the times that the machines' clocks stamp, and a clock that is
-   off or steps back can hold a failover ([the scope
+   compares the times that the machines' clocks stamp: a worker's clock
+   that runs ahead of another's can make a failover come early, and a
+   node's clock that steps back can make one come late ([the scope
    page](scope.md#8-waits-a-host-can-see)).
 2. Install the tools the agents run ([the
    introduction](introduction.md#requirements)): nvme-cli, mdadm, dmsetup

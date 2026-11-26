@@ -2937,6 +2937,68 @@ func TestASyncupLeavesTheAgeCount(t *testing.T) {
 	}
 }
 
+// TestNewObservationsAfterAnAgentRestart pins RW23's forgetting at an
+// agent's restart: after a round's reply whose agent start differs from the
+// one the loop's rounds last carried, its node's clock stepped back behind
+// the newest observation the loop saw before, that round gives no verdict,
+// its observation ending before the first round after the pause (HL7), and
+// the next round, on the agent's new read, is judged and new.
+func TestNewObservationsAfterAnAgentRestart(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		h := newRevHarness(t)
+		base := testObsBase.Add(time.Hour)
+		at := func(ms int) time.Time {
+			return base.Add(time.Duration(ms) * time.Millisecond)
+		}
+		startA := base.Add(-time.Hour)
+		startB := base.Add(-2 * time.Hour)
+		script := []struct {
+			obs, answer, start time.Time
+		}{
+			{at(10000), at(10100), startA},
+			{at(12000), at(12100), startA},
+			{at(1000), at(1500), startB},
+			{at(2000), at(2100), startB},
+		}
+		var rounds atomic.Int64
+		stub := &stubDnAgent{}
+		stub.setCheckReply(func(req *pb.CheckDnRequest) *pb.CheckDnReply {
+			step := script[min(int(rounds.Add(1))-1, len(script)-1)]
+			stamp := stampAt(step.obs, step.answer, "read")
+			stamp.AgentStartTime = timestamppb.New(step.start)
+			return &pb.CheckDnReply{Revision: req.GetRevision(),
+				ObsStamp: stamp}
+		})
+		h.fleet.addDn(t, testAddr, stub)
+		h.defaultConf()
+		h.seedDnConf(testAddr, dnTestConf())
+		_, rec, _ := h.startRecordedDn(testAddr, 5)
+		h.advanceUntil("a round after the restart judged", roundInterval,
+			func() bool {
+				replies, _ := rec.seen()
+				for _, r := range replies {
+					if r.agentStart.Equal(startB) {
+						return true
+					}
+				}
+				return false
+			})
+		replies, _ := rec.seen()
+		for _, r := range replies {
+			if !r.agentStart.Equal(startB) {
+				continue
+			}
+			if !r.obsTime.Equal(at(2000)) || !r.fromRound || !r.newObs {
+				t.Fatalf("the first round judged after the restart: "+
+					"observation %v, fromRound %t, newObs %t; want the "+
+					"new read %v, from a round and new", r.obsTime,
+					r.fromRound, r.newObs, at(2000))
+			}
+			break
+		}
+	})
+}
+
 // TestNewObservationsCount pins RW23 on the loop: a round's reply is new only
 // when its observation time is later than every one the loop has seen, in a
 // round's reply or a Syncup*'s; a Syncup* reply's observation is seen but

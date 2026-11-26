@@ -2550,26 +2550,26 @@ failover's among them.
   So only a host whose connection comes back before the node's first path
   to a disk node does can still send its writes there, until then. State:
   accepted for that gap.
-- **Clocks can hold the reactions.** Two clocks count. A worker's clock:
-  a health epoch is the clock of the worker that set it, and every
-  threshold compares it with the clock of the worker that reads it. When
-  the reader's clock is behind the epoch, as after a step back of a
-  worker's clock, or when another worker with a faster clock set the epoch
-  and then stopped, no failover, cntlr replacement or leg repair fires
-  until that clock has caught up. A node's clock: the worker reads how old
-  an agent's report is by the node's clock, so after the node's clock steps
-  back, reports read younger by up to the step, and a node whose reads hang
-  is taken for unreachable up to the step later. When the agent also
-  restarts, the worker still holds the newest report time it saw from that
-  node, and every new report reads as not new until the node's clock has
-  passed that time; reports that are not new count toward no failover. So
-  a pool can stay on a primary that does not serve for as long as the step.
-  State: fix decided for the worker's clock and for the newest report time
-  after an agent's restart; accepted for the reports that read younger
-  after a node's clock steps back. Until then, keep every machine's clock
-  in time, as
-  [the operations doc](operations.md#prepare-a-node) says. Read from dnv's
-  code; not seen in the lab.
+- **Clocks can make a reaction come early or late.** Two clocks count. A
+  worker's clock: a health epoch is the clock of the worker that set it,
+  and every threshold compares it with the clock of the worker that reads
+  it. A worker that finds an epoch later than its own clock, as after a
+  step back of its clock, or when another worker with a faster clock set
+  the epoch and then stopped, writes its own time over it, so the
+  threshold counts from there and waits its own length at most. A worker
+  whose clock runs ahead of the one that set the epoch reads it older than
+  it is, and its failover, cntlr replacement or leg repair can come early
+  by the difference. A node's clock: the worker reads how old an agent's
+  report is by the node's clock, so after the node's clock steps back,
+  reports read younger by up to the step, and a node whose reads hang is
+  taken for unreachable up to the step later. When the agent also
+  restarts, the worker forgets the newest report time it saw from that
+  node, so the new reports count from the round after the restart. State: fixed for an epoch in the
+  reader's future and for the newest report time after an agent's
+  restart; accepted for a clock that runs ahead and for the reports that
+  read younger after a node's clock steps back. Keep every machine's clock
+  in time, as [the operations doc](operations.md#prepare-a-node) says.
+  Unit tests of the worker and of the store's write; not seen in the lab.
 - **One slow syncup holds an object's check rounds.** The worker runs the
   syncups and the check rounds of one node, side or cntlr on one loop, so
   that it sends that object one syncup at a time. A syncup to an agent
