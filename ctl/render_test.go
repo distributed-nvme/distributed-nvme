@@ -337,6 +337,7 @@ var renderCases = []renderCase{
 		},
 		want: `{"cntlr_list":[],"slice_list":[{"data_grp_list":[` +
 			`{"array_made":false,"data_blocks":"0","ext_cnt":"0",` +
+			`"fence_last_leg_id":"0",` +
 			`"forced_start":{"force":false,"leg_id":"5",` +
 			`"override_list":["FORCED_START_OVERRIDE_BAD_BLOCKS"],` +
 			`"revision":"12"},` +
@@ -345,6 +346,7 @@ var renderCases = []renderCase{
 			`"operator_in_charge":true,` +
 			`"rep_name":"","retired_leg_id_list":[]}],"meta_grp_list":[` +
 			`{"array_made":false,"data_blocks":"0","ext_cnt":"0",` +
+			`"fence_last_leg_id":"0",` +
 			`"forced_start":null,` +
 			`"grow_epoch":"0",` +
 			`"grp_id":"1","leg_list":[],"md_check":null,"meta_blocks":"0",` +
