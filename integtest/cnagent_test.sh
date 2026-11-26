@@ -3962,7 +3962,9 @@ cn_requests_since() {
 # of an md member (cnagent.md CN12), and the probers' `ReadBlockDirectAt`
 # logs nothing (osclient.md, Exported raw helpers and the probe-IO
 # carve-out). Probe commands (lsblk, dmsetup info|table|status|ls, stat,
-# nvme list-subsys) are expected and deliberately not in the list. Every
+# nvme list-subsys, and `losetup -j`, the cn agent's look for its write cache
+# loop device, cnagent.md CN15) are expected and deliberately not in the
+# list. Every
 # directory listing, of configfs, of sysfs or of the local store, is an
 # `os read dir` record, a read and never a mutation. The cn agent reads md
 # state from sysfs and never runs
@@ -3996,7 +3998,8 @@ mutations() {
 	            or (.cmd == "mdadm" and ($a | any(IN("--create","--assemble",
 	                  "--add","--fail","--remove","--stop","--zero-superblock"))))
 	            or (.cmd == "nvme" and ($a[0] | IN("connect","disconnect")))
-	            or (.cmd | IN("blkdiscard","mount","umount","truncate","losetup",
+	            or (.cmd == "losetup" and ($a[0] != "-j"))
+	            or (.cmd | IN("blkdiscard","mount","umount","truncate",
 	                  "mkdir","rmdir","ln","rm"))
 	          )
 	        | .cmd + " " + ($a | join(" "))
