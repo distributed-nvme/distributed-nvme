@@ -29098,6 +29098,9 @@ GCUT_LAST=""
 # The pool's line react_gcut_back last read, on the primary it read then:
 # the one read that decides how a cut's step goes on.
 GCUT_POOL=""
+# The pool's line react_gcut_way_back read last, on the primary of that
+# moment, which a failover in the cut can have moved.
+GCUT_WAY_POOL=""
 
 # react_gcut_back is true once host0's writer has ended and the primary
 # reports every cut group's array OK, not degraded and with no sync
@@ -29214,6 +29217,7 @@ react_gcut_way_back() { # <wmark> <slice id> <grp ids…>
 			react_gcut_groups_pool "$rev" "$slice" "$@"
 	fi
 	st=$(jq_of "$CTL_OUT" ".cntlr_info.slice_id_to_dm_pool[\"$slice\"] | \"\(.status) \(.reason) [\(.details)]\"")
+	GCUT_WAY_POOL=$st
 	log "  slice 0's pool on the primary cntlr $PRIMARY_CNTLR_ID now: $st;" \
 		"$(worker_reaction_kind_cnt "$wmark" failover) failover(s) since the cut"
 }
@@ -29409,6 +29413,17 @@ react_group_cut() {
 				"nor needs_check; the step stops cutting, and the status check" \
 				"judges the pool"
 			react_gcut_way_back "$wmark" "$slice" "${grps[@]}"
+			# A cut long enough to stall the pool's reads can fail the
+			# role over (two rounds on a report too old, HL7), and the
+			# pool the next primary starts then reads the needs_check the
+			# cut left, as the branch above allows on the same primary.
+			case "$GCUT_WAY_POOL" in
+			*needs_check*)
+				STATUS_ALLOW_NEEDS_CHECK=$slice
+				log "  the pool reads needs_check on the primary it has now," \
+					"as the cut left it; no step of dnv repairs it"
+				;;
+			esac
 			break
 			;;
 		esac
