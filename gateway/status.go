@@ -1941,8 +1941,10 @@ func (b *statusBuilder) tornRows() {
 
 // standbyRows are the candidate standbys whose latest report reads ERROR on
 // every leg of a group (model.UnreachedGroups), one row per such group: the
-// failover passes over them (dnv-worker.md AR5). A standby whose call
-// failed gives no row; its health epoch shows it once the worker reads it
+// failover passes over them while another candidate stands, once two of
+// their reports in a row read so (dnv-worker.md AR5), so a row after one
+// such report can name a standby the failover would still choose. A
+// standby whose call failed gives no row; its health epoch shows it once the worker reads it
 // so.
 func (b *statusBuilder) standbyRows() {
 	state := b.in.state
@@ -1971,7 +1973,7 @@ func (b *statusBuilder) standbyRows() {
 			b.add(rankStandby, &pb.StatusRow{
 				Kind:    pb.StatusKind_STATUS_KIND_STANDBY,
 				Object:  cntlrObject(cntlrId, state.Cntlrs[cntlrId]),
-				Text:    fmt.Sprintf("reaches no leg of group %d: the failover passes over it", grpId),
+				Text:    fmt.Sprintf("reaches no leg of group %d: the failover passes over it while another candidate stands", grpId),
 				CntlrId: cntlrId,
 				GrpId:   grpId,
 			})

@@ -22924,8 +22924,9 @@ lab_disk_guard() { # <cap bytes> <what>
 # worker_failover_cnt prints how many failovers the worker has applied so far:
 # the `reaction applied` records with kind failover in its log (dnv-worker.md,
 # Log records), of every sp: the copy, react and cutoff cases hold its change
-# across a window to none and to one, and the many-pools case logs it after
-# its build, so a failover of any pool counts toward it. A log that
+# across a window to none and to one, and the many-pools case holds it to no
+# change over its build and logs it, so a failover of any pool counts toward
+# it. A log that
 # cannot be read is fatal rather than a zero: a zero read at both ends would
 # pass the caller's unchanged-count assertion without having read the log (and
 # by react's stage 05 the count is not zero: stage 03's AR5 failover is

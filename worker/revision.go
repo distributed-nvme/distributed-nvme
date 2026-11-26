@@ -766,8 +766,10 @@ func (w *revWorker) staleRound(
 // follows, which the agent would refuse; the driver ends a cntlr's run of
 // unhealthy rounds and holds its failover and replacement, or a side's
 // clocks (driver.starting). Past the hold, with a hold of zero, with no
-// start time or answer time to judge by, or with an answer before the
-// series' start (the node's clock stepped back), it is a missed round.
+// start time or answer time to judge by, with an answer before the series'
+// start (the node's clock stepped back), or, within the hold, with a start
+// after a reboot of the node that the driver does not hold
+// (errStartingAfterReboot, holdsRebootedStart; HL8), it is a missed round.
 func (w *revWorker) startingRound(
 	ctx context.Context,
 	cc *pb.ClusterConf,

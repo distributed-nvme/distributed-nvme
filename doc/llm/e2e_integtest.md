@@ -2133,8 +2133,9 @@ stage logs the median of those fsyncs.
   once a second, so its longest write shows a pause to within a second.
 * **The many-pools case's agent stop fails writes by design**, through the
   suite's own paths (The cases, many), and its packet cut ends with a node
-  whose old primaries serve again until they converge to standbys
-  (`architecture.md`, Known limits), so the writes a host sends them then
+  whose old primaries serve again until their fence watch reads the fence
+  or they converge to standbys, whichever comes first (`architecture.md`,
+  Known limits), so the writes a host sends them then
   fail and are counted, not asserted: none at 8 pools; at 32, 15 of one
   host's in one run and none in the other; at 64, 56 of each host's, over
   20 pools, in one of the two runs that reached the cut and none in the

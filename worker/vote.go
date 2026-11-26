@@ -551,9 +551,9 @@ func (v *voteWorker) putAll(inc *incarnation) bool {
 // usually reaches another member, but its counter is shared by every call
 // of the client, so a later try can come back to the same one. A member
 // that hangs, its machine gone with no TCP reset or its process stopped,
-// holds a put for the operation timeout (EU5), and at the default vote
-// timers a tick that waited it out and a next that failed would together
-// reach VW8 (a)'s limit. Each try stamps the time it is sent. No further try follows
+// holds a call for the operation timeout (EU5), and at the default vote
+// timers a tick whose put waited that out and a next that failed would
+// together reach VW8 (a)'s limit. Each try stamps the time it is sent. No further try follows
 // a heartbeat the incarnation has stopped.
 func (v *voteWorker) putReg(inc *incarnation, role string) error {
 	key := workerRegKey(role, inc.seed)

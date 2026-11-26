@@ -10702,10 +10702,10 @@ document and only pointed to here.
   member and before mdadm has started the array, md holds the array
   inactive with the members added. The same converge reads the array
   again and stops it when every member is a leg wrapper of this pool, and
-  the next read names the absent array, or an inactive one the converge
-  could not stop when at least one of its members carries a superblock,
-  so the worker's re-send assembles it from both legs (`cnagent.md` CN12,
-  The re-assembly; CN30).
+  the next read names the absent array, so the worker's re-send assembles
+  it from both legs; an inactive array the converge could not stop is
+  named only where CN12's re-assembly would take it (`cnagent.md` CN12,
+  The re-assembly; CN30), and one held open by another device is not.
   That limit is longer than the soft timeout, so the stop is rare; it
   still costs a round and a converge. Seen once in the
   e2e suite's many-pools case at 64 pools, on a pool failed over twice in

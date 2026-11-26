@@ -186,8 +186,9 @@ R9. Each logging point emits exactly **one** record per operation, on
     (`common/osclient.go`), a check round's stream message — and a leg
     probe's half that succeeded, the probe being a read of the leg's health
     though its first half writes (`ReadLevel`); and a file, proto,
-    modification-time or device-number read, a directory listing, an
-    exclusive open or an NVMe Identify that found its path absent, and a
+    modification-time or device-number read, a directory listing or an
+    exclusive open that found its path absent, an NVMe Identify that found
+    its device absent (its caller leaves the path unjudged then), and a
     device-number read
     that found no block
     device at its path, since its caller decides by that answer, the CSI

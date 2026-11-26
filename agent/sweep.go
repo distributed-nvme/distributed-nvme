@@ -58,7 +58,8 @@ const MsgSweepLeftover = "sweep leftover"
 // SweepResult is what one pass found: the leftovers — the objects still
 // present that nothing wants and, under LeftoverKindMdMember,
 // LeftoverKindMdBroken and LeftoverKindMdAbsent, the wanted md members,
-// broken arrays and absent arrays a cntlr verdict names (cnagent.md CN30) —
+// broken or inactive arrays and absent arrays a cntlr verdict names
+// (cnagent.md CN30) —
 // and the failures — each
 // enumeration or read that did not answer, each removal that failed, and each
 // other condition an agent reports the same way so that the worker re-sends

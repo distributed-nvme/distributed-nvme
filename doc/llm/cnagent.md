@@ -1197,7 +1197,7 @@ or a dm-clone, among them. A read names those rows too and, beside them,
 what only a read sees: the sides and clone source endpoints with no
 controller (below; CN18), a migrating leg's path to cut (The cut of a
 migrating leg's path, below), the md members to fail early, put back, add
-or remove, a broken array to assemble again, an absent array the assembly
+or remove, a broken or inactive array to assemble again, an absent array the assembly
 would start, a forced start a converge would carry through or the stop of
 an array it begins with, and an md check a converge would start, stop or
 adopt (CN12), the forced-start marks of a held request that does not count
@@ -1357,6 +1357,11 @@ path reads "write through" what it reports now (`NvmeHost.NsWriteCache`); a
 path that reads "write back" is not asked: it sends flushes, and a target
 with no write cache completes them at once. An answer that does not come,
 or a command the target fails, leaves its path unjudged, logged at Info. A
+leg whose path the pass connects or cuts is looked up again without the
+write cache (`awaitNsHead`, `lookupSubsys`), so none of its paths is asked
+in that pass: a path the pass connected read its target's setting at its
+connect, and the leg's other paths are asked at a later converge, or by a
+read while the leg carries a mark (below). A
 path whose target reports a write cache is stale: the step writes its
 controller's `rescan_controller` (`NvmeHost.Rescan`) and, for each rescan
 written, looks the leg up again, after up to `common.CnRescanPauses`
@@ -6352,8 +6357,8 @@ add on a leg that can take it, or remove for a repair (CN12): its group's row
 reads `OK`, and a
 read's verdict names the member (CN30), unless CN12's in-sync guard
 holds over its array, whose row then reads `ERROR` and whose members the
-verdict does not name. A broken array the converge would assemble again
-(CN12, The re-assembly) travels in both too: its group's row reads
+verdict does not name. A broken or inactive array the converge would
+assemble again (CN12, The re-assembly) travels in both too: its group's row reads
 `ERROR` with its state, and the verdict names the array. So does an
 absent array the converge's assembly would start (CN12): its group's row
 reads `RES_STATUS_MISSING`, and the verdict names the array; and a forced
@@ -6799,8 +6804,8 @@ source's entry with no controller the converge would connect, a side whose
 live path the converge would cut, a leg wrapper, a `RedundNone` group's
 dm-linear or a dm-clone that a converge would create, reload, resume or
 finish where the last converge stopped short of that step, an md member to
-fail early, put back, add or remove, a broken array to assemble again, an
-absent array to start, a forced start to carry through or its stop to
+fail early, put back, add or remove, a broken or inactive array to
+assemble again, an absent array to start, a forced start to carry through or its stop to
 make, an md check to start, stop or adopt, an uncreated snapshot to
 message, a piece of the base state and a stored forced-start mark (all
 above) — brings by itself the

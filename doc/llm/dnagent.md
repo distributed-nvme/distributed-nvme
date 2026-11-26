@@ -316,8 +316,8 @@ SH27. **Background tasks and process exit.** (Its number is out of order
 because rule ids never shift: code comments cite them.) A role server MAY
 run goroutines outside any RPC: the DN12 fence timer, the DN9 side-zeroing
 workers, the background reads the check rounds start (SH29), the CN11 leg
-probers, the CN10 path watchers and the cn sweep's background
-`nvme disconnect` (`cnagent.md` CN10). The DN12 fence timer is the one of
+probers, the CN10 path watchers, the cn sweep's background
+`nvme disconnect` (`cnagent.md` CN10) and CN34's fence watch loop. The DN12 fence timer is the one of
 them that runs a converge. Every one of them derives its ctx from the
 server's **`rootCtx`** — the process-lifetime ctx, which `Serve` derives
 from its own ctx, hands the server before the gRPC listener opens (SH33)
@@ -892,12 +892,12 @@ would only cut the list between chunks, which the pass's chunk count
 already bounds. The cn's md wrapper runs an array's `--create` and
 `--assemble`, the forced one's included, under `MdBuildTimeout` in place
 of `CmdSoftTimeout` (`agent.Cmd.RunOkFor`), the hard stop following as for
-every command: on a node that builds many arrays at once an assembly
-outlasts the soft timeout, and a stop once md holds a member leaves the
+every command: on a node that builds many arrays at once an assembly can
+outlast the soft timeout, and a stop once md holds a member leaves the
 array inactive (`cnagent.md` CN12); the node check's md replay runs its
-create and assembly through the same wrapper, under the same bound. It
-passes its caller's ctx on unchanged to
-its in-process calls as well — the superblock reads of `Md.ReadMember` and
+create and assembly through the same wrapper, under the same bound. The
+md wrapper passes its caller's ctx on unchanged to its in-process calls,
+as `Dm.DiscardRanges` does — the superblock reads of `Md.ReadMember` and
 the md sysfs writes of `Md.SetSyncAction` and `Md.SetSyncMin` (`cnagent.md`
 CN12) — where a deadline would bound only the wait before the syscall
 starts (below). The bound holds in full only for a child the signals end. A

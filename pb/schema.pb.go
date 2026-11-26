@@ -603,7 +603,8 @@ const (
 	StatusKind_STATUS_KIND_MORE StatusKind = 14
 	// An enabled standby with no health epoch whose latest report reads
 	// RES_STATUS_ERROR on every leg of a group: the failover passes over it
-	// (dnv-worker.md AR5). Appended, never renumbered.
+	// while another candidate stands, once two of its reports in a row read
+	// so (dnv-worker.md AR5). Appended, never renumbered.
 	StatusKind_STATUS_KIND_STANDBY StatusKind = 15
 )
 

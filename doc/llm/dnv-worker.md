@@ -481,7 +481,7 @@ three prefixes `ThinDevicePrefix`, `RepairPrefix` and `RetiredLegPrefix`
 (`RangeAtRev`, EU2) then reads the thin devices, the repairs and the
 retired legs at it, since a pool holds a thin device per volume, and up to
 one repair and `MaxRetiredLegPerGrp` retired legs per group, too many for a
-point read each within the load's one budget (EU5): with a point read per
+point read each within the snapshot's one budget (EU5): with a point read per
 volume, a load of a pool of the most volumes (`MaxTdCntPerSp`) costs a
 round trip per volume, which passes the budget once one read takes that
 budget over that count, while the range costs one (`TestMeasurePoolLoad`,
@@ -1391,10 +1391,10 @@ observes anything (VW3), so its own registration is part of its first scan
 or its first watch events. A failed put is logged by the `etcd put` record,
 and a role whose tries all fail is tried again at the next tick. Reason: a
 member that hangs, its machine gone with no TCP reset or its process
-stopped, holds a put for `DefaultEtcdOpTimeout` (EU5) until the client's
-keepalive closes its connection (EU1), and at the default vote timers a
-tick that waited it out and a next that failed at the keepalive's close
-would together pass VW8 (a)'s limit; with the put's own limit and the
+stopped, holds a call for `DefaultEtcdOpTimeout` (EU5) until the
+client's keepalive closes its connection (EU1), and at the default vote
+timers a tick whose put waited that out and a next that failed at the
+keepalive's close would together pass VW8 (a)'s limit; with the put's own limit and the
 tries a tick costs a few seconds, and no worker fences (the three-member
 mode's etcd_defaults, Integration test plan). The
 loop records `lastOkPut`: the start of the last tick whose puts **all**
@@ -3403,8 +3403,9 @@ its leg rows all read it; a `Syncup*` reply with no report, a refused one
 or an unknown object's, leaves AR5's marks of a left stack and of the legs
 as they are, while a round's reply always counts as a report, of the info
 its stream last carried, and AR5's unknown-object mark follows the answer
-of every reply the cntlr's child judges (RW5): a starting answer, a round
-too old and one no round asked for leave it as it is. The side's
+of every reply the cntlr's child judges (RW5), a `Syncup*` reply's
+included: a round's starting answer, a round too old and one no round
+asked for leave it as it is. The side's
 provisioned flip (RW18), its cutover wait and its clone-ready gate, and
 the coordinator's snapshot of a cntlr's info (AR1) still read the latest
 known info. A round's reply with neither info nor error is a

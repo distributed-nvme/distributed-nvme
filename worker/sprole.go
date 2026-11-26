@@ -76,7 +76,8 @@ const (
 	msgSpStandbyLegRow = "standby leg row"
 	// msgSpStandbyNoLeg is a standby whose report reads ERROR on every leg of
 	// some group (model.UnreachedGroups), logged at Warn when that set of
-	// groups changes: the failover passes over it (AR5). msgSpStandbyLegsBack
+	// groups changes: the failover passes over it while another candidate
+	// stands (AR5). msgSpStandbyLegsBack
 	// is the end of it, at Info.
 	msgSpStandbyNoLeg    = "standby reaches no leg"
 	msgSpStandbyLegsBack = "standby reaches its legs again"

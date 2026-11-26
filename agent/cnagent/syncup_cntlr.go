@@ -518,7 +518,8 @@ func (s *CnAgentServer) build(
 	// a member that is not available, a build that failed, a forced start
 	// that waits or failed. A cntlr's read names each group a converge would
 	// act on — an absent array the assembly would start, a member to put
-	// back, a broken array to assemble again, a forced start it would carry
+	// back, a broken or inactive array to assemble again, a forced start it
+	// would carry
 	// through, an md check it would start, stop or adopt, a RedundNone
 	// group's dm-linear it would change (CN12, CN30) — and the worker
 	// re-sends the request on that name (dnv-worker.md RW4).

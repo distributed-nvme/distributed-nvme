@@ -2504,8 +2504,8 @@ func (s *CnAgentServer) nodeUnownedSrcs(
 //
 // putBack are the conditions the verdict names beside the leftovers: each
 // md member, by dm name, the converge would fail early, put back, add or
-// remove for a repair (putBackNames), and each broken array, by its node,
-// the converge would assemble again (reassemblyNamed; CN30), each absent
+// remove for a repair (putBackNames), and each broken or inactive array, by
+// its node, the converge would assemble again (reassemblyNamed; CN30), each absent
 // array, by its group's row name, the converge's assembly would start
 // (absentArrayNamed), and, as failures, each forced start the converge
 // would carry through, or the stop of an array it begins with
@@ -2677,7 +2677,8 @@ func (s *CnAgentServer) sweepCntlr(
 // details after it. It names a row only while every row it is built on
 // reads RES_STATUS_OK (rowsUnder): a stack over a group whose array does not
 // run waits for that array, which the verdict's md names cover (the absent
-// array, a member to put back, a broken array, a forced start), and over a
+// array, a member to put back, a broken or inactive array, a forced
+// start), and over a
 // broken layer of its own only that
 // layer is named, the lowest, whose converge builds the rest. It names no row
 // the level suppresses (RES_REASON_SP_LEVEL), no RES_STATUS_PROVISIONING row,
@@ -3233,7 +3234,8 @@ func (s *CnAgentServer) reportChain(chain *cnChain, res *agent.SweepResult) {
 // redrive is what of the base state the caller's own probe read wrong in a
 // way a SyncupCn's converge would cure (probeCn): a piece of it absent, or an
 // ANA group in a state other than its fixed one. The read-only verdict of a
-// CN's read (refreshCn) reports each as a failure, so the verdict is
+// CN's read (refreshCn) or of a SyncupCn that only adds cntlrs
+// (syncupCnAdds) reports each as a failure, so the verdict is
 // not clean and the worker re-sends the SyncupCn whose converge builds or
 // rewrites it (CN30); nothing else would, since the worker re-syncs on a
 // reply's code and never on its rows. The removing passes pass none: their

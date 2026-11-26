@@ -366,8 +366,9 @@ const (
 	// MdBuildTimeout bounds a cn agent's mdadm --create and --assemble of a
 	// group's array in place of CmdSoftTimeout, the hard stop following
 	// CmdHardTimeout-CmdSoftTimeout later as for every command: on a node
-	// that builds many arrays at once an assembly took longer than 3
-	// seconds, and the stop left the array inactive (cnagent.md CN12).
+	// that builds many arrays at once an assembly can take longer than
+	// CmdSoftTimeout, and a stop once md holds a member leaves the array
+	// inactive (cnagent.md CN12).
 	MdBuildTimeout = 15
 
 	// The clone pair has no defaults: a clone's DmCloneConf is stored as sent
@@ -789,7 +790,7 @@ const (
 	// connection's directory a fraction of a second after the write, so
 	// the pass's own row and reply say the cut held in the common case; a
 	// cut the budget does not see hold is left to the worker's re-send.
-	// time.Durations, like the five above.
+	// time.Durations, like the connect step's five above.
 	CnStrayCutPassBudget = 2 * time.Second
 	CnStrayCutPause      = 50 * time.Millisecond
 
@@ -861,9 +862,9 @@ const (
 	// A worker's heartbeat put of one role's registration waits this long
 	// a try, and when it fails is sent again at once, which the client's
 	// balancer usually sends to another member (VW2): a member that hangs
-	// then costs a tick 3 seconds, not DefaultEtcdOpTimeout. At the default
-	// vote timers the lab saw a worker fence after one tick waited out the
-	// operation timeout and the next failed at the keepalive's close.
+	// then costs a tick this long, not DefaultEtcdOpTimeout, which a tick
+	// and the next, failing at the keepalive's close, would together take
+	// past VW8 (a)'s limit at the default vote timers.
 	HeartbeatPutTimeout = 3
 	// etcd client keepalive (EU1): seconds without a read on a connection
 	// before the client pings it, and seconds it waits for the ping's answer

@@ -10,7 +10,7 @@ import (
 // of which reads RES_STATUS_ERROR in a cntlr's report (leg_id_to_leg) and
 // has one side: a standby that reports so reaches no leg of the group and
 // could build nothing of it as the primary, so the failover passes over it
-// (dnv-worker.md AR5). A leg with no row is not counted as unreached, nor a
+// while another candidate stands (dnv-worker.md AR5). A leg with no row is not counted as unreached, nor a
 // leg with two sides, a migrating one, whose row reads ERROR while either
 // side has no live path though the other may serve (a standby's transport
 // probe, cnagent.md CN11); and an error on some legs of a group but not

@@ -3945,7 +3945,8 @@ func (s *CnAgentServer) legServes(
 // of a group the guard holds, whose converge would refuse again, so no
 // syncup comes for it on every round. The fourth value is the group's
 // array as the read's md walk matched it, Exists false when there is none,
-// for the verdict's names of a broken array (brokenArray, reassemblyNamed),
+// for the verdict's names of a broken or inactive array (brokenArray,
+// reassemblyNamed),
 // of an absent one (absentArrayNamed) and of a forced start
 // (forcedStartNamed); it is nil for a RedundNone group and when the walk or
 // the array's read did not answer.
