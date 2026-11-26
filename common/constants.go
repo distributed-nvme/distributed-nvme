@@ -851,6 +851,13 @@ const (
 	// transaction, every retry included (EU1, EU5).
 	DefaultEtcdDialTimeout = 5
 	DefaultEtcdOpTimeout   = 10
+	// A worker's heartbeat put of one role's registration waits this long
+	// a try, and when it fails is sent again at once, which the client's
+	// balancer usually sends to another member (VW2): a member that hangs
+	// then costs a tick 3 seconds, not DefaultEtcdOpTimeout. At the default
+	// vote timers the lab saw a worker fence after one tick waited out the
+	// operation timeout and the next failed at the keepalive's close.
+	HeartbeatPutTimeout = 3
 	// etcd client keepalive (EU1): seconds without a read on a connection
 	// before the client pings it, and seconds it waits for the ping's answer
 	// before it closes the connection. The time is gRPC's floor for a client,

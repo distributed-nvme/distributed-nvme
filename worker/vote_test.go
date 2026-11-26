@@ -48,6 +48,21 @@ type voteHookStore struct {
 	// before it lands: an etcd that is slow but answers (delayPuts).
 	putDelay time.Duration
 	delayClk *fakeClock
+	// hangPattern makes the later Puts hang until their context ends in
+	// turn by its entries, cycling: a client whose balancer sends the calls
+	// to the members in turn, some of the calls to a stopped one
+	// (hangInTurn).
+	hangPattern []bool
+	hangCalls   int
+}
+
+// hangInTurn makes the later Puts hang, cycling through pattern: true hangs
+// a Put until its context ends.
+func (s *voteHookStore) hangInTurn(pattern ...bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.hangPattern = pattern
+	s.hangCalls = 0
 }
 
 // delayPuts makes every later Put wait d on clk before it lands, unless its
@@ -165,7 +180,16 @@ func (s *voteHookStore) Put(
 ) error {
 	s.mu.Lock()
 	clk, delay := s.delayClk, s.putDelay
+	hang := false
+	if len(s.hangPattern) > 0 {
+		hang = s.hangPattern[s.hangCalls%len(s.hangPattern)]
+		s.hangCalls++
+	}
 	s.mu.Unlock()
+	if hang {
+		<-ctx.Done()
+		return ctx.Err()
+	}
 	if delay > 0 {
 		select {
 		case <-clk.after(delay):
@@ -2537,6 +2561,64 @@ func testVoteShutdownStopsHeartbeatBeforeDeletingRegs(t *testing.T) {
 		if !deleted {
 			t.Fatalf("the shutdown never deleted %s: %v", key, store.opLog())
 		}
+	}
+}
+
+// TestVoteHeartbeatPutTries pins VW2's put: a put that hangs ends at
+// HeartbeatPutTimeout and is sent again at once, up to three tries within
+// the vote interval, so a member that hangs one try in two, or two tries in
+// three, costs a tick a few seconds and no fence, and every tick's
+// registrations land; with every put held, the ticks fail and the worker
+// fences for a stalled heartbeat (VW8 (a)). VW8 (a) measures on the fake
+// clock while a try's limit runs on the bubble's own time, so the test shows
+// the tries and their landing, not what a tick costs.
+func TestVoteHeartbeatPutTries(t *testing.T) {
+	for _, pattern := range [][]bool{{true, false}, {true, true, false}} {
+		synctest.Test(t, func(t *testing.T) {
+			role := common.WorkerRoleSp
+			store := newVoteHookStore()
+			h := newVoteHarnessDeps(t, testConfig(role), store, nil)
+			step := h.deps.cfg.VoteInterval
+			h.advance(h.deps.cfg.GraceTime + step)
+			landed := func() int {
+				n := 0
+				for _, op := range store.opLog() {
+					if strings.HasPrefix(op, "put ") {
+						n++
+					}
+				}
+				return n
+			}
+			before := landed()
+			store.hangInTurn(pattern...)
+			ticks := 6
+			for range ticks {
+				h.advance(step)
+				// A try's limit runs on the bubble's own time, which moves
+				// only while the test sleeps.
+				time.Sleep((2*common.HeartbeatPutTimeout + 1) * time.Second)
+				synctest.Wait()
+			}
+			if n := len(h.logs.withMsg(msgWorkerFenced)); n != 0 {
+				t.Fatalf("pattern %v: fenced %d times", pattern, n)
+			}
+			if got := landed() - before; got < ticks-1 {
+				t.Fatalf("pattern %v: %d puts landed over %d ticks, want "+
+					"one a tick", pattern, got, ticks)
+			}
+			store.hangInTurn()
+			store.delayPuts(h.clk, time.Hour)
+			for range int(h.deps.cfg.fenceThreshold()/step) + 2 {
+				h.advance(step)
+				time.Sleep((3*common.HeartbeatPutTimeout + 1) * time.Second)
+				synctest.Wait()
+			}
+			recs := h.logs.withMsg(msgWorkerFenced)
+			if len(recs) == 0 || recs[0]["reason"] != fenceHeartbeatStalled {
+				t.Fatalf("pattern %v: fences %v with every put held, want "+
+					"one for a stalled heartbeat", pattern, recs)
+			}
+		})
 	}
 }
 

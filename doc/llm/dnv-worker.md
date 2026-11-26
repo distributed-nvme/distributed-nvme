@@ -87,6 +87,7 @@ bound of the fence round after it, in `cntlr_interval`s (RW24);
 answers holds its reactions, in `cntlr_interval`s (AR3), and
 `AgentsUnreachedSeconds`, after which one with a live peer fences itself
 (VW8 (e));
+`HeartbeatPutTimeout`, the bound of one try of a heartbeat put (VW2);
 `DefaultEtcdDialTimeout` and `DefaultEtcdOpTimeout`, the dial timeout the
 etcd client is given, which bounds nothing (EU5), and its budget per plain
 operation and per whole transaction, every retry included (EU1, EU5); `DefaultEtcdKeepaliveTime` and
@@ -1370,11 +1371,24 @@ roles of one process share the incarnation's seed.
 VW2. For every configured role the worker keeps `WorkerRegKey` of the role
 and its seed refreshed: the value is a `WorkerReg` carrying the current
 unix seconds as `epoch`, re-put every `--vote-interval` from a ticker, each
-put under `DefaultEtcdOpTimeout`. The puts of one tick, one per role, start
-together, and the tick's puts end with the slowest. The **first** put of
-every role happens before the worker observes anything (VW3), so its own
-registration is part of its first scan or its first watch events. A failed
-put is logged by the `etcd put` record and retried at the next tick. The
+put under `HeartbeatPutTimeout`, and when it fails sent again at once,
+stamped again, a second time always and a third while that try would end
+within one vote interval of the first's start; the etcd client's balancer
+sends each call to the next member, so a try usually reaches another
+member, but its counter is shared by every call of the client, so a later
+try can come back to the same one.
+The puts of one tick, one per role, start together, and the tick's puts end
+with the slowest. The **first** put of every role happens before the worker
+observes anything (VW3), so its own registration is part of its first scan
+or its first watch events. A failed put is logged by the `etcd put` record,
+and a role whose tries all fail is tried again at the next tick. Reason: a
+member that hangs, its machine gone with no TCP reset or its process
+stopped, holds a put for `DefaultEtcdOpTimeout` (EU5) until the client's
+keepalive closes its connection (EU1); at the default vote timers the lab
+saw a worker fence after one tick waited it out and the next failed at the
+keepalive's close (the three-member mode's etcd_defaults, Integration test
+plan), and with the put's own limit and the tries a tick costs a few
+seconds. The
 loop records `lastOkPut`: the start of the last tick whose puts **all**
 succeeded, one per role, the first puts at start included (VW8 (a)).
 
@@ -6446,12 +6460,12 @@ revision gate being per object and not per cluster.
 **The three-member etcd mode.** With `--etcd-members 3` the suite starts
 three etcd members on the server's loopback instead of one, each at the
 request caps above and at a backend quota small enough for a case to fill,
-gives every program the three endpoints, and runs four cases of its own,
+gives every program the three endpoints, and runs five cases of its own,
 none of the cases above, each after the fleet restart. Each case asserts
 the outcome its item gives, which the lab measured first for the shipped
-etcd at the suite's vote timers, but for etcd_leader, whose fleet runs at
-timers of its own; a number given as the lab's is a measurement, not an
-assertion:
+etcd at the suite's vote timers, but for etcd_leader and etcd_defaults,
+whose fleets run at timers of their own; a number given as the lab's is a
+measurement, not an assertion:
 
 * etcd_leader — the leader stopped for 3 seconds, timed on the server,
   while the case's fleet runs at the shortest whole vote interval whose
@@ -6465,21 +6479,28 @@ assertion:
   lab server a leader stopped for 2 seconds fenced a worker in 3 of 6 runs,
   and stops of 4 seconds or more fenced every worker, for a heartbeat put
   the stopped leader held, which ended in a timeout once it went on
-  (Known limits);
+  (Known limits), measured before the heartbeat put had its own bound,
+  which makes the case's interval, sized by `DefaultEtcdOpTimeout`, an
+  upper bound;
 * etcd_follower — the member that serves the most watch streams, made a
-  follower first, stopped, its raft term unchanged over the stop: the etcd
-  client spreads every worker's calls over the three members, so the
-  heartbeat puts that reach the stopped member wait out the etcd operation
-  timeout (EU5), which at the suite's vote interval is longer than the time
-  a slow tick may cost under VW8 (a), and every worker fences for its
-  heartbeat, none for a quiet watch (VW8 (b)), though only the workers
-  whose streams the stopped member served had their watches go quiet, as
-  the run's stream counts show; with the member back,
-  every worker drives its shards again under a new seed. On the lab server
-  the fences came about 11 seconds into the stop. At the shipped vote
-  interval a tick may wait out the operation timeout and still not fence,
-  and whether a member's stop fences a worker there no case measures
-  (Known limits);
+  follower first, stopped for 30 seconds at the suite's vote interval, its
+  raft term unchanged over the stop: a heartbeat put the stopped member
+  holds ends at its own bound and goes once more (VW2), but at this
+  interval two slow ticks in a row can still reach VW8 (a)'s limit, and a
+  watch it served stays quiet until the client's keepalive closes the
+  connection, which can reach VW8 (b)'s; which workers fence, and for
+  what, depends on the streams the member served, so the case logs the
+  fences by reason and per worker, asserts that a heartbeat put met the
+  stopped member, and asserts the way back: with the member back, every
+  worker drives its shards again. On the lab there were three fences,
+  every one for a stalled heartbeat;
+* etcd_defaults — the same stop, for 60 seconds, two fence thresholds,
+  with the fleet at the worker's default vote timers read from the build:
+  no worker fences, every worker keeps its seed, and a heartbeat put met
+  the stopped member and was tried again. Before the heartbeat put had its
+  own bound, the lab saw two of three workers fence 20 seconds into the
+  stop, after one tick waited out the operation timeout and the next
+  failed at the keepalive's close (Known limits);
 * etcd_compact — a compaction to the store's head ends no watch, since
   etcd ends a watch as compacted only when the revision it serves that
   watch from lies under the compaction, and it serves every running watch
@@ -7034,30 +7055,37 @@ caught.
   a syncup is sent again as RW4 says, once a later round asks for it, and
   a bitmap push ends its plan as any failed push does (BM6).
 
-* **One etcd member that stops answering can fence every worker at once.**
-  A member frozen, or whose machine is gone with no TCP reset, holds every
-  call the client sent it: the client spreads each worker's calls over
-  every endpoint, so some heartbeat put of every worker waits out
-  `DefaultEtcdOpTimeout` (EU5) or the keepalive's close of the connection
-  (EU1). With a `--vote-interval` of about half of that wait or less,
-  that one tick reaches VW8 (a)'s limit, and every worker fences at about
-  the same time and drives its pools again one join grace window later
-  (VW7). At the worker suite's short vote interval the lab saw every worker
-  fence once, about 11 seconds after the stop of a follower (the
-  three-member mode's follower case, Integration test plan), and a leader
-  stopped for only 2 seconds fence a worker in half its runs. At the
-  default interval a tick that waits out the timeout does not reach the
-  limit alone, but two such ticks in a row can, and that is not measured.
+* **One etcd member that stops answering can fence every worker at a
+  short vote interval.** A member frozen, or whose machine is gone with no
+  TCP reset, holds every call the client sends it until the keepalive
+  closes the connection, about 15 seconds (EU1). A heartbeat put it holds
+  ends at `HeartbeatPutTimeout` and goes again, usually to another member
+  (VW2), so a tick that meets it costs about 3 seconds, and at the default
+  vote timers no worker fences: the lab froze the member that served the
+  most watch streams for 60 seconds with no fence (etcd_defaults), where
+  before the put's own bound two of three workers fenced 20 seconds in. At
+  a short `--vote-interval`, ticks that meet the member in a row can still
+  reach VW8 (a)'s limit, and a watch the member served stays quiet until
+  the keepalive closes it, which can reach VW8 (b)'s: at the worker suite's
+  2-second interval the lab saw three fences, every one for a stalled
+  heartbeat (etcd_follower), and before the put's own bound a leader
+  stopped for only 2 seconds fenced a worker in half its runs. Every other call the member
+  holds, a pass's load or a reaction's write, waits out
+  `DefaultEtcdOpTimeout` (EU5) and is tried again by the next pass.
 
 * **Slow heartbeat writes can fence a worker its peers saw alive.** VW8
   (a) measures from the start of the last good tick's puts to the end of
   the current tick's, which spans two ticks, while a peer that watches the
   keys sees the gap between two landings. With the default timers this
-  cannot happen, since a write that succeeds takes less than the operation
-  timeout and two ticks fit inside the limit; with a `--vote-interval`
-  below about two thirds of `DefaultEtcdOpTimeout`, writes that succeed
-  but take most of that timeout can reach the limit, and the worker fences
-  and rejoins though none of its keys was seen dead. The measure is never
+  cannot happen, since a tick's puts end within two tries of
+  `HeartbeatPutTimeout` and two ticks fit inside the limit; with a
+  `--vote-interval` of 4 seconds or less, puts that land but take most of
+  their two tries, tick after tick, can reach the limit, and the worker
+  fences and rejoins though none of its keys was seen dead. The other way
+  round, an etcd whose every write takes longer than `HeartbeatPutTimeout`
+  fails every try, where a write that took up to `DefaultEtcdOpTimeout`
+  once counted, so such an etcd fences every worker once the fence
+  threshold has passed. The measure is never
   shorter than the widest gap a peer can see (VW8 (a)); how the fence
   falls against the peers' commit of it dead is CM3's.
 

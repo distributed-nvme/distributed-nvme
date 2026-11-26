@@ -1176,7 +1176,9 @@ func cmdPing(g *globals, args []string) {
 // stored confs to; a pool that names none takes that stripe narrowed to its
 // slice count (model.FitStripe). Then DefaultEtcdOpTimeout, the etcd
 // client's budget of one operation (dnv-worker.md EU5), from which the
-// worker suite's case etcd_leader sizes its fleet's vote timers. Then
+// worker suite's case etcd_leader sizes its fleet's vote timers, and the
+// worker's three default vote timers, which its case etcd_defaults runs its
+// fleet at. Then
 // MaxNvmeTcpCmdBytes, the most data one
 // NVMe/TCP command may carry to a node's kernel: the e2e suite holds the IO
 // sizes its hosts read to it, and the gateway suite sizes its stage-13
@@ -1212,14 +1214,17 @@ func cmdConstants(g *globals, args []string) {
 		"DefaultDmPoolDataBlockSize": common.DefaultDmPoolDataBlockSize,
 		"DefaultStripeSize": model.DefaultStripeSize(
 			common.DefaultDmPoolDataBlockSize),
-		"DefaultEtcdOpTimeout":     common.DefaultEtcdOpTimeout,
-		"MaxNvmeTcpCmdBytes":       common.MaxNvmeTcpCmdBytes,
-		"DefaultPrimaryUnhealthy":  common.DefaultPrimaryUnhealthy,
-		"DemotionHoldTimeout":      common.DemotionHoldTimeout,
-		"FenceRoundIntervals":      common.FenceRoundIntervals,
-		"DefaultStartHoldSeconds":  common.DefaultStartHoldSeconds,
-		"RetiredLegMaxAge":         common.RetiredLegMaxAge,
-		"DefaultNvmeFastIoFailTmo": common.DefaultNvmeFastIoFailTmo,
+		"DefaultEtcdOpTimeout":            common.DefaultEtcdOpTimeout,
+		"DefaultVoteWorkerInterval":       common.DefaultVoteWorkerInterval,
+		"DefaultVoteWorkerGraceTime":      common.DefaultVoteWorkerGraceTime,
+		"DefaultVoteWorkerLeaveGraceTime": common.DefaultVoteWorkerLeaveGraceTime,
+		"MaxNvmeTcpCmdBytes":              common.MaxNvmeTcpCmdBytes,
+		"DefaultPrimaryUnhealthy":         common.DefaultPrimaryUnhealthy,
+		"DemotionHoldTimeout":             common.DemotionHoldTimeout,
+		"FenceRoundIntervals":             common.FenceRoundIntervals,
+		"DefaultStartHoldSeconds":         common.DefaultStartHoldSeconds,
+		"RetiredLegMaxAge":                common.RetiredLegMaxAge,
+		"DefaultNvmeFastIoFailTmo":        common.DefaultNvmeFastIoFailTmo,
 
 		"DnCloneMetaUnitCnt": common.DnCloneMetaUnitCnt,
 		"DnCloneMetaUnit":    common.DnCloneMetaUnit,

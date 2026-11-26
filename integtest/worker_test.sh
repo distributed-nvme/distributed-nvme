@@ -12,8 +12,8 @@
 # The plan's cases, in order, each in its own cluster `it-<case>` and each
 # after a fleet restart: smoke, revision, health, bitmap, reaction, repair,
 # failover, hold, drain, vote, handoff; with --etcd-members 3 the run is the
-# four etcd cases alone: etcd_leader, etcd_follower, etcd_compact,
-# etcd_nospace. Cleanup runs unconditionally at the start and,
+# five etcd cases alone: etcd_leader, etcd_follower, etcd_defaults,
+# etcd_compact, etcd_nospace. Cleanup runs unconditionally at the start and,
 # on success only, at the end: a failing run leaves etcd's data, every log and
 # every behavior file in place and dumps the diagnostics.
 #
@@ -119,13 +119,16 @@ ETCD3_CLIENT_PORT=12383
 ETCD3_PEER_PORT=12384
 ETCD_ENDPOINTS="127.0.0.1:$ETCD_CLIENT_PORT"
 ETCD_QUOTA_BYTES=33554432
-ETCD_CASES=(etcd_leader etcd_follower etcd_compact etcd_nospace)
+ETCD_CASES=(etcd_leader etcd_follower etcd_defaults etcd_compact etcd_nospace)
 # The leader's stop in case etcd_leader, and the bound on the follower's stop
 # in case etcd_follower (dnv-worker.md, Integration test plan, The
 # three-member etcd mode, for the measurements they rest on). The leader's
 # stop stays under one vote interval of that case's fleet (set_vote_timers).
 ETCD_LEADER_STOP=3
 ETCD_FOLLOWER_STOP=30
+# How long case etcd_defaults keeps the busiest follower stopped: two of the
+# default fence thresholds, so that two ticks in a row wait on it.
+ETCD_DEFAULTS_STOP=60
 # The one key case etcd_nospace overwrites until the store reaches its quota,
 # outside the dnv prefix, so no worker reads it.
 NOSPACE_KEY=zz-nospace-fill
@@ -1014,6 +1017,11 @@ set_vote_timers() { # <case name>
 		VOTE_GRACE=$((2 * VOTE_INTERVAL + 2))
 		VOTE_LEAVE_GRACE=$((VOTE_INTERVAL + ETCD_OP_TIMEOUT + 1))
 	fi
+	if [ "$1" = etcd_defaults ]; then
+		VOTE_INTERVAL=$DEFAULT_VOTE_INTERVAL
+		VOTE_GRACE=$DEFAULT_VOTE_GRACE
+		VOTE_LEAVE_GRACE=$DEFAULT_VOTE_LEAVE_GRACE
+	fi
 	WAIT_MEMBERSHIP=$((2 * VOTE_INTERVAL + VOTE_LEAVE_GRACE + 8))
 }
 
@@ -1198,6 +1206,13 @@ read_constants() {
 	ETCD_OP_TIMEOUT=$(constant_of "$json" DefaultEtcdOpTimeout)
 	log "  case etcd_leader's vote interval rests on" \
 		"common.DefaultEtcdOpTimeout = $ETCD_OP_TIMEOUT s"
+	DEFAULT_VOTE_INTERVAL=$(constant_of "$json" DefaultVoteWorkerInterval)
+	DEFAULT_VOTE_GRACE=$(constant_of "$json" DefaultVoteWorkerGraceTime)
+	DEFAULT_VOTE_LEAVE_GRACE=$(constant_of "$json" \
+		DefaultVoteWorkerLeaveGraceTime)
+	log "  case etcd_defaults runs at the default vote timers:" \
+		"interval $DEFAULT_VOTE_INTERVAL s, grace $DEFAULT_VOTE_GRACE s," \
+		"leave grace $DEFAULT_VOTE_LEAVE_GRACE s"
 	DEFAULT_HC_INTERVAL=$(constant_of "$json" DefaultHealthCheckInterval)
 	DEFAULT_PRIMARY_UNHEALTHY=$(constant_of "$json" DefaultPrimaryUnhealthy)
 	DEMOTION_HOLD=$(constant_of "$json" DemotionHoldTimeout)
@@ -6646,6 +6661,13 @@ fences_gt() { # <n> <filter>
 	count_gt "$1" fences "$2"
 }
 
+# failed_reg_puts counts the heartbeat puts of w1..w3 that failed: an `etcd
+# put` record of a registration key that carries an error, as a put a
+# stopped member held logs when its own bound ends (dnv-worker.md VW2).
+failed_reg_puts() {
+	wcount 'select(.msg == "etcd put") | select((.key // "") | startswith("dnv worker ")) | select(.error != null)'
+}
+
 # every_worker_fenced_since: each of w1..w3 has logged a fence of the seed it
 # ran under when the case read SEEDS0.
 every_worker_fenced_since() {
@@ -6689,43 +6711,88 @@ case_etcd_leader() {
 
 case_etcd_follower() {
 	CASE=etcd_follower
-
-	stage 1 "the member that serves the most watch streams, a follower, stopped: every worker fences on its heartbeat within ${ETCD_FOLLOWER_STOP}s"
+	stage 1 "the member that serves the most watch streams, a follower, stopped for ${ETCD_FOLLOWER_STOP}s at the suite's vote interval: the fences it costs, by reason"
 	# The member stopped is the one that serves the most watch streams, made
-	# a follower first, so that a worker whose watches go quiet could fence
-	# for them (VW8 (b)). The client spreads its calls over every endpoint,
-	# so some heartbeat puts of every worker reach the stopped member and
-	# wait out the etcd operation timeout: the tick that waits fences the
-	# worker for its heartbeat (VW8 (a)) first. The raft term, unchanged
-	# over the stop, shows that the stopped member did not lead.
-	local follower lead term0 term
+	# a follower first. A heartbeat put it holds ends at the put's own limit
+	# and is sent again to another member (dnv-worker.md VW2), but at the
+	# suite's vote interval two slow ticks in a row can still reach VW8
+	# (a)'s limit, and a watch it served is quiet until the client's
+	# keepalive closes the connection (EU1), which can reach VW8 (b)'s:
+	# which workers fence, and for what, depends on which streams the member
+	# served, so the case logs the fences and asserts the way back. Case
+	# etcd_defaults asserts no fence at the default vote timers. The raft
+	# term, unchanged over the stop, shows that the stopped member did not
+	# lead.
+	local follower lead term0 term base hb0 watch0 puts0 w line
 	follower=$(busiest_member)
 	move_leader_off "$follower"
 	lead=$(etcd_leader) || die "no member answers as the leader"
 	term0=$(raft_term "$lead")
-	read_seeds
-	log "  stopping member $follower, a follower of member $lead at raft term $term0"
-	sig_dir "$(etcd_dir "$follower")" STOP
-	wait_until "$ETCD_FOLLOWER_STOP" "every worker fenced while member $follower is stopped" \
-		every_worker_fenced_since
-	assert_eq "$(fences '.reason != "heartbeat_stalled"')" 0 \
-		"fences for any reason but a stalled heartbeat"
+	base=$(fences true)
+	hb0=$(fences '.reason == "heartbeat_stalled"')
+	watch0=$(fences '.reason == "watch_stalled"')
+	puts0=$(failed_reg_puts)
+	want_count "$base" "the fences before the stop"
+	log "  stopping member $follower, a follower of member $lead at raft term" \
+		"$term0, for ${ETCD_FOLLOWER_STOP}s"
+	stop_for "$follower" "$ETCD_FOLLOWER_STOP"
+	count_gt "$puts0" failed_reg_puts ||
+		die "no heartbeat put met the stopped member: the stop held nothing"
+	line=""
+	for w in w1 w2 w3; do
+		line+=" $w $(count_recs "$(wpath "$w")" 'select(.msg == "worker fenced")')"
+	done
+	log "  fences over the stop: $(($(fences true) - base)), for a stalled" \
+		"heartbeat $(($(fences '.reason == "heartbeat_stalled"') - hb0)), for a" \
+		"quiet watch $(($(fences '.reason == "watch_stalled"') - watch0));" \
+		"per worker since the fleet restart:$line; heartbeat puts that failed" \
+		"over the stop: $(($(failed_reg_puts) - puts0))"
 	term=$(raft_term "$lead")
 	assert_eq "$term" "$term0" \
 		"the raft term over the stop (a moved term means the stopped member led)"
-	leader_is "$lead" ||
-		die "member $lead no longer leads while member $follower is stopped"
-	sig_dir "$(etcd_dir "$follower")" CONT
-
-	stage 2 "the member back: every worker under a new seed, the table whole"
+	stage 2 "the member back: the table whole"
 	wait_until "$WAIT_MEMBERSHIP" "the three-member table over w1 w2 w3 again" \
 		owners_settled 50 w1 w2 w3
 	assert_owners 50 w1 w2 w3
-	local w
+}
+
+case_etcd_defaults() {
+	CASE=etcd_defaults
+	stage 1 "the member that serves the most watch streams, a follower, stopped for ${ETCD_DEFAULTS_STOP}s at the default vote timers: no worker fences"
+	# The measurement of the multi wave plan's wave 2, change 12: case
+	# etcd_follower's stop at the default vote timers (the worker's own
+	# defaults, read from the build), for two fence thresholds. A heartbeat
+	# put the stopped member holds ends at its own bound and is sent again,
+	# usually to another member (dnv-worker.md VW2); before that bound, one
+	# tick waited out the etcd operation timeout and the next failed at the
+	# keepalive's close, and two of three workers fenced.
+	local follower lead base puts0 w
+	follower=$(busiest_member)
+	move_leader_off "$follower"
+	lead=$(etcd_leader) || die "no member answers as the leader"
+	read_seeds
+	base=$(fences true)
+	puts0=$(failed_reg_puts)
+	want_count "$base" "the fences before the stop"
+	log "  stopping member $follower, a follower of member $lead, for" \
+		"${ETCD_DEFAULTS_STOP}s"
+	sig_dir "$(etcd_dir "$follower")" STOP
+	assert_none_for "$ETCD_DEFAULTS_STOP" \
+		"a worker fenced while member $follower is stopped at the default vote timers" \
+		fences_gt "$base" true
+	sig_dir "$(etcd_dir "$follower")" CONT
+	count_gt "$puts0" failed_reg_puts ||
+		die "no heartbeat put met the stopped member: the stop held nothing"
+	log "  heartbeat puts that failed over the stop, each tried again:" \
+		"$(($(failed_reg_puts) - puts0))"
+	stage 2 "the member back: every worker under its old seed, the table whole"
+	wait_until "$WAIT_MEMBERSHIP" "the three-member table over w1 w2 w3" \
+		owners_settled 50 w1 w2 w3
+	assert_owners 50 w1 w2 w3
 	for w in w1 w2 w3; do
-		assert_ne "$(seed_of "$w")" \
+		assert_eq "$(seed_of "$w")" \
 			"$(printf '%s\n' "$SEEDS0" | awk -v w="$w" '$1 == w { print $2 }')" \
-			"$w's seed after its fence"
+			"$w's seed over the stop"
 	done
 }
 

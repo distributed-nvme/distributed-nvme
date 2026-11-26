@@ -512,9 +512,10 @@ func (v *voteWorker) heartbeat(inc *incarnation) {
 // same time and the round ends with the slowest, so every put starts at the
 // round's start: the time from a good round's start to the end of a later
 // round is then the widest gap any peer can see in any role's key, which is
-// what VW8 (a) measures, and a slow round is counted once. Each put is bounded
-// by common.DefaultEtcdOpTimeout inside etcdutil (EU5); a failed put is logged
-// by its "etcd put" record and retried at the next tick.
+// what VW8 (a) measures, and a slow round is counted once. Each put is
+// putReg's: bounded and tried twice (VW2); a failed put is logged by its
+// "etcd put" record, and a role whose two tries fail is tried again at the
+// next tick.
 func (v *voteWorker) putAll(inc *incarnation) bool {
 	oks := make([]bool, len(v.roles))
 	var wg sync.WaitGroup
@@ -522,11 +523,7 @@ func (v *voteWorker) putAll(inc *incarnation) bool {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			reg := &pb.WorkerReg{Epoch: v.deps.clk.nowUnix()}
-			err := v.deps.store.Put(
-				inc.hbCtx, workerRegKey(role, inc.seed), reg,
-			)
-			if err != nil {
+			if err := v.putReg(inc, role); err != nil {
 				return
 			}
 			oks[idx] = true
@@ -546,6 +543,41 @@ func (v *voteWorker) putAll(inc *incarnation) bool {
 	}
 	return true
 }
+
+// putReg puts one role's registration (VW2) under common.HeartbeatPutTimeout,
+// and when that fails sends it once more at once, and a third time while
+// that try would end within one vote interval of the first's start: the
+// etcd client's balancer sends each call to the next member, so a try
+// usually reaches another member, but its counter is shared by every call
+// of the client, so a later try can come back to the same one. A member
+// that hangs, its machine gone with no TCP reset or its process stopped,
+// holds a put for the operation timeout (EU5), and at the default vote
+// timers the lab saw a worker fence after one tick waited it out and the
+// next failed. Each try stamps the time it is sent. No further try follows
+// a heartbeat the incarnation has stopped.
+func (v *voteWorker) putReg(inc *incarnation, role string) error {
+	key := workerRegKey(role, inc.seed)
+	limit := common.HeartbeatPutTimeout * time.Second
+	end := v.deps.clk.now().Add(v.deps.cfg.VoteInterval)
+	var err error
+	for try := range heartbeatPutTries {
+		if try >= 2 && v.deps.clk.now().Add(limit).After(end) {
+			break
+		}
+		ctx, cancel := context.WithTimeout(inc.hbCtx, limit)
+		err = v.deps.store.Put(ctx, key,
+			&pb.WorkerReg{Epoch: v.deps.clk.nowUnix()})
+		cancel()
+		if err == nil || inc.hbCtx.Err() != nil {
+			return err
+		}
+	}
+	return err
+}
+
+// heartbeatPutTries is how many tries putReg gives a put at most: two always,
+// the third only within the vote interval.
+const heartbeatPutTries = 3
 
 // onHeartbeat applies the self-fence checks of VW8 (a) and (b), which VW8
 // requires on every tick, and only THEN folds the tick's outcome into the
