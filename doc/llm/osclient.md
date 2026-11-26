@@ -52,12 +52,13 @@ it.
   child start, directory listing, modification-time read, device-number
   read, discard, TCP connect made to test whether an address answers
   (DialTcp), exclusive open of a block device made to test whether anything
-  holds it (OpenExclusive) and disk file IO in production code goes through
+  holds it (OpenExclusive), NVMe Identify sent to a controller
+  (NvmeNsWriteCache) and disk file IO in production code goes through
   an `OsClient` — never call `os/exec` or `os.ReadFile`/`os.WriteFile`, and
   never read a directory, stat a path, make such a test connect or such a
   test open, directly outside this file. This is what makes the logging
   rules of `log.md` R8 (its first, second, fifth, sixth, seventh, eighth,
-  ninth, tenth and eleventh items) enforceable
+  ninth, tenth, eleventh and twelfth items) enforceable
   and makes every consumer unit-testable via `FakeOsClient`. There is
   exactly **one** sanctioned exception in production code, recorded under
   "Exported raw helpers and the probe-IO carve-out": the CN11 leg-health
@@ -127,6 +128,9 @@ the method set is exactly the following, each taking the caller's ctx:
   process and closes it at once; the kernel refuses it while any mount of
   the device is left or another exclusive opener holds it
   (OpenExclusive).
+* `NvmeNsWriteCache` asks an NVMe controller, by its character device,
+  whether it reports a volatile write cache for one namespace now, in the
+  caller's own process (NvmeNsWriteCache).
 * `DialTcp` opens a TCP connection to an address in the caller's own
   process, waiting at most a timeout the caller passes, and lets it go; an
   address that did not answer within the timeout is an error wrapping
@@ -592,6 +596,26 @@ among them, and which plain opens do not stop.
 * One `os open exclusive` record covers the call (`log.md`, OS commands and
   file IO).
 
+### NvmeNsWriteCache
+
+How the cn agent learns what a disk node's target reports of a leg's
+namespace now, which its path read only at its last scan (`cnagent.md`
+CN10, The write cache of a leg's path): one Identify of the namespace's
+command set independent data structure, the structure the kernel reads at
+a scan, sent as an admin command through `NVME_IOCTL_ADMIN_CMD` on the
+controller's character device, and its bit "volatile write cache not
+present" read.
+
+* It takes one semaphore slot, checks the ctx error after acquiring it,
+  opens the device read-only, sends the command with a time limit of its
+  own, which the kernel takes as the request's, closes the device, then
+  gives the slot back. The ctx bounds none of the ioctl.
+* The answer is true when the bit is clear. A command the controller
+  fails, or an open that fails, returns the error and false; a missing
+  device one that wraps `fs.ErrNotExist`.
+* One `os nvme ns write cache` record covers the call (`log.md`, OS
+  commands and file IO).
+
 ### StartDetached
 
 How the gather runs a read that can wait in the kernel (`dnagent.md` CM6):
@@ -728,7 +752,8 @@ method emits the "os …" record assigned to it there, and `error` is appended
 only when the error is non-nil), at the log level `log.md` R9 gives. Debug:
 a read that succeeded, and an `OpenExclusive` that was granted, an answer
 its caller decides by though it reads nothing; a `ReadFile`, `ReadProto`,
-`ReadMtime`, `ReadDevNo`, `ReadDir` or `OpenExclusive` that found its path
+`ReadMtime`, `ReadDevNo`, `ReadDir`, `OpenExclusive` or `NvmeNsWriteCache`
+that found its path
 absent (`pathReadLevel`), an error wrapping
 `fs.ErrNotExist` that its callers decide by (Interface); a `ReadDevNo` that
 found no block device at its path (`devNoLevel`), by which the CSI node

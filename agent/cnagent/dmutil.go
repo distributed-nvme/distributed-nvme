@@ -246,6 +246,8 @@ func (s *CnAgentServer) stepDmSingle(
 		ctx, name, step, dmTable(targetType, sectors, args))
 }
 
+// ensureDmError converges a single-target dm-error: a transfer device that
+// does not serve (CN17), which no ns-dev maps.
 func (s *CnAgentServer) ensureDmError(
 	ctx context.Context,
 	name string,
@@ -253,6 +255,142 @@ func (s *CnAgentServer) ensureDmError(
 ) error {
 	return s.ensureDmSingle(ctx, name, "error", sectors, nil, 0)
 }
+
+// ensureTdError converges a td's dm-error (CN15). Its table reports a write
+// cache (agent.ErrorWcTable over the agent's write cache loop device,
+// wcacheDevNo), so a host scans an ns-dev that maps it, a standby's or a
+// parked one, as having a write cache, which the serving device it stands
+// in for, a raid0 over thin devices, has: a failover or the end of a park
+// then leaves the host's reading right (CN15, The dm-error reports a write
+// cache). The one-target table of an older agent is loaded again into this
+// one once the loop device is there; while it is not, either table is the
+// one wanted. A read-only one is loaded again and made writable, a
+// suspended one on a wanted table resumed.
+func (s *CnAgentServer) ensureTdError(
+	ctx context.Context,
+	name string,
+	sectors uint64,
+) error {
+	if sectors == 0 {
+		return fmt.Errorf("device size is 0")
+	}
+	wcNo := s.wcacheDevNo(ctx, true)
+	table := agent.ErrorWcTable(sectors, wcNo)
+	dev, err := s.dm.Info(ctx, name)
+	if err != nil {
+		return err
+	}
+	if dev == nil {
+		err := s.dm.CreateMulti(ctx, name, table)
+		if err != nil && wcNo != "" {
+			// The loop device can go between its find and the load: the
+			// next pass builds the one-target table (wcacheLoadFailed).
+			s.wcacheLoadFailed(ctx, name, err)
+		}
+		return err
+	}
+	targets, err := s.dm.Table(ctx, name)
+	if err != nil {
+		return err
+	}
+	shape := agent.ErrorShapeOf(targets, sectors)
+	if shape == agent.ErrorShapeOther || dev.ReadOnly ||
+		(shape == agent.ErrorShapePlain && wcNo != "" &&
+			sectors > 2*common.DmErrorWcSectors) {
+		err := s.dm.ReloadMulti(ctx, name, table)
+		if err != nil && wcNo != "" {
+			s.wcacheLoadFailed(ctx, name, err)
+			if shape == agent.ErrorShapePlain && !dev.ReadOnly {
+				// A load that fails leaves the device suspended on its old
+				// table (Dm.Reload fails closed), which this one keeps,
+				// live again: suspended, it would queue IO it must fail.
+				return s.dm.Resume(ctx, name)
+			}
+		}
+		if err != nil {
+			return err
+		}
+		if dev.ReadOnly {
+			return s.dm.SetWritable(ctx, s.nf.DmPath(name))
+		}
+		return nil
+	}
+	if dev.Suspended {
+		return s.dm.Resume(ctx, name)
+	}
+	return nil
+}
+
+// msgTdErrorPlain is the Warn record of a td dm-error whose two-target
+// table did not load, which then keeps or gets the one-target table (CN15).
+const msgTdErrorPlain = "the td dm-error's write cache table did not load"
+
+// wcacheLoadFailed logs a two-target table of the dm-error name that did not
+// load, and forgets the loop device as a make that failed does
+// (wcacheDevNo): no converge asks for it again, and no read names a
+// one-target table by it (probeDmError), before common.CnWcacheRetry, so a
+// load that keeps failing brings no re-send on every round.
+func (s *CnAgentServer) wcacheLoadFailed(
+	ctx context.Context,
+	name string,
+	err error,
+) {
+	slog.WarnContext(ctx, msgTdErrorPlain,
+		slog.String("dm", name), slog.String("error", err.Error()))
+	s.wcache.mu.Lock()
+	s.wcache.devNo = ""
+	s.wcache.failedAt = s.now()
+	s.wcache.mu.Unlock()
+}
+
+// probeDmError reads a td's dm-error's row (CN15): OK on either table of a
+// device that fails every IO (agent.ErrorShapeOf), the one that reports a
+// write cache and an older agent's one-target table. The one-target table
+// reads OK with RES_REASON_DIFFERS while the agent knows its write cache
+// loop device (wcacheKnown), which names it, so the worker sends the syncup
+// whose converge loads the two-target table (ensureTdError, CN30): a row
+// that reads OK sets no health epoch. A read never looks for the loop
+// device, so with none known the one-target table is named by nothing. The
+// read-only flag is not read, as no probe reads it (shapeRow).
+func (s *CnAgentServer) probeDmError(
+	ctx context.Context,
+	rd *cnReading,
+	name string,
+	sectors uint64,
+) (pb.ResStatus, string, pb.ResReason) {
+	none := pb.ResReason_RES_REASON_NONE
+	dev, err := s.dmInfo(ctx, rd, name)
+	if err != nil {
+		return pb.ResStatus_RES_STATUS_ERROR, err.Error(), none
+	}
+	if dev == nil {
+		status, details := shapeRow(dmShapeAbsent, "error")
+		return status, details, none
+	}
+	targets, err := s.dmTable(ctx, rd, name)
+	if err != nil {
+		return pb.ResStatus_RES_STATUS_ERROR, err.Error(), none
+	}
+	shape := agent.ErrorShapeOf(targets, sectors)
+	if shape == agent.ErrorShapeOther {
+		status, details := shapeRow(dmShapeOther, "error")
+		return status, details, none
+	}
+	if dev.Suspended {
+		status, details := shapeRow(dmShapeSuspended, "error")
+		return status, details, none
+	}
+	if shape == agent.ErrorShapePlain && s.wcacheKnown() != "" &&
+		sectors > 2*common.DmErrorWcSectors {
+		return pb.ResStatus_RES_STATUS_OK, detailsTdErrorNoWcache,
+			pb.ResReason_RES_REASON_DIFFERS
+	}
+	return pb.ResStatus_RES_STATUS_OK, "", none
+}
+
+// detailsTdErrorNoWcache names a td dm-error on the one-target table while
+// the agent has its write cache loop device (probeDmError).
+const detailsTdErrorNoWcache = "the one-target table reports no write cache"
 
 // ensureDmLinear converges a dm-linear over the device whose number is
 // backingNo. The caller reads that number first, from where its device

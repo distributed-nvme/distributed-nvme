@@ -308,6 +308,16 @@ func (g *crashGate) OpenExclusive(ctx context.Context, path string) error {
 	return g.inner.OpenExclusive(ctx, path)
 }
 
+func (g *crashGate) NvmeNsWriteCache(
+	ctx context.Context, ctrlPath string, nsid uint32,
+) (bool, error) {
+	if !g.enter(ctx, "nvme ns write cache "+ctrlPath) {
+		return false, errCrashEnded
+	}
+	defer g.inflight.Done()
+	return g.inner.NvmeNsWriteCache(ctx, ctrlPath, nsid)
+}
+
 func (g *crashGate) DialTcp(
 	ctx context.Context, address string, timeout time.Duration,
 ) error {

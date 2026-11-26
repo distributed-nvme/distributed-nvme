@@ -1323,6 +1323,41 @@ func (s *DnAgentServer) ensureDmLinearSuspended(
 	return s.dm.Suspend(ctx, name)
 }
 
+// diskDevNo is the disk's number, the device ErrorWcTable names, read once
+// and kept (diskNo); "" while no read of it has answered, which leaves the
+// dm-error on the one-target table, logged.
+func (s *DnAgentServer) diskDevNo(ctx context.Context) string {
+	s.mu.Lock()
+	no := s.diskNo
+	s.mu.Unlock()
+	if no != "" {
+		return no
+	}
+	no, err := s.dm.DevNo(ctx, s.disk)
+	if err != nil {
+		slog.WarnContext(ctx, "the disk's number is unread, so a dm-error "+
+			"reports no write cache",
+			slog.String("disk", s.disk),
+			slog.String("error", err.Error()))
+		return ""
+	}
+	s.mu.Lock()
+	s.diskNo = no
+	s.mu.Unlock()
+	return no
+}
+
+// ensureDmError converges a per-CN dm-error (DN10). Its table reports the
+// write cache of the node's disk (agent.ErrorWcTable), so a cntlr's path
+// that the node serves from it reads, when its controller node scans it, the
+// write cache the side's own device has, a dm-linear over the same disk: a
+// failover that puts that device under the path then changes nothing the
+// controller node read (dnagent.md DN10, The dm-error reports the disk's
+// write cache). A migration's cutover puts a dm-clone there, which reports a
+// write cache whatever the disk's; the primary's rescan reads it (cnagent.md
+// CN10). The one-target table of an older agent is loaded again into this
+// one; with the disk's number unread it is the table wanted, and so is this
+// one.
 func (s *DnAgentServer) ensureDmError(
 	ctx context.Context,
 	name string,
@@ -1331,21 +1366,27 @@ func (s *DnAgentServer) ensureDmError(
 	if sectors == 0 {
 		return fmt.Errorf("side size is 0 (extent_size or ext_cnt unset)")
 	}
-	table := agent.ErrorTable(sectors)
+	diskNo := s.diskDevNo(ctx)
+	table := agent.ErrorWcTable(sectors, diskNo)
 	dev, err := s.dm.Info(ctx, name)
 	if err != nil {
 		return err
 	}
 	if dev == nil {
-		return s.dm.Create(ctx, name, table)
+		return s.dm.CreateMulti(ctx, name, table)
 	}
 	targets, err := s.dm.Table(ctx, name)
 	if err != nil {
 		return err
 	}
-	if len(targets) != 1 || targets[0].Type != "error" ||
-		targets[0].Length != sectors {
-		return s.dm.Reload(ctx, name, table)
+	switch agent.ErrorShapeOf(targets, sectors) {
+	case agent.ErrorShapeWc:
+	case agent.ErrorShapePlain:
+		if diskNo != "" && sectors > 2*common.DmErrorWcSectors {
+			return s.dm.ReloadMulti(ctx, name, table)
+		}
+	default:
+		return s.dm.ReloadMulti(ctx, name, table)
 	}
 	// Suspended on the table it wants — an interrupted reload, or a failed
 	// one whose old table is wanted again, since a reload fails closed

@@ -933,6 +933,11 @@ func TestCheckChangesNothing(t *testing.T) {
 				tr.detached)
 		}
 		for _, line := range tr.commands {
+			if strings.HasPrefix(line, "sh -c for t in ") {
+				// The commands row's presence check, which names each
+				// command it looks up, losetup among them, and runs none.
+				continue
+			}
 			for _, verb := range []string{"--create", "--assemble",
 				"--stop", "--zero-superblock", "modprobe", "losetup",
 				"dmsetup create", "dmsetup remove"} {

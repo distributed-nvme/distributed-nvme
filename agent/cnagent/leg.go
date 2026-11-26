@@ -79,6 +79,10 @@ type ctrlView struct {
 	// served reads unconnected and is connected again — and it is neither
 	// unknown nor disconnected (CN10).
 	gone bool
+	// wcache is the write cache setting of the controller's path device,
+	// "write back" or "write through", "" when unread (agent.CtrlRead
+	// .WriteCache; CN10, The write cache of a leg's path).
+	wcache string
 }
 
 func (v *subsysView) ctrlOf(trAddr, trSvcId string) *ctrlView {
@@ -215,6 +219,29 @@ func (s *CnAgentServer) lookupSubsys(
 	nqn string,
 	nsIdx uint32,
 ) (*subsysView, error) {
+	return s.lookupSubsysOf(ctx, pw, nqn, nsIdx, false)
+}
+
+// lookupLegWcache is lookupSubsys that also reads each controller's path
+// write cache (ctrlView.wcache), what only a primary's write cache step and
+// its read of a marked leg use (CN10, The write cache of a leg's path).
+func (s *CnAgentServer) lookupLegWcache(
+	ctx context.Context,
+	pw *passWalk,
+	nqn string,
+) (*subsysView, error) {
+	return s.lookupSubsysOf(ctx, pw, nqn, sideNsid, true)
+}
+
+// lookupSubsysOf is lookupSubsys, with each path's write cache read when
+// wcache is set.
+func (s *CnAgentServer) lookupSubsysOf(
+	ctx context.Context,
+	pw *passWalk,
+	nqn string,
+	nsIdx uint32,
+	wcache bool,
+) (*subsysView, error) {
 	if pw == nil {
 		return nil, fmt.Errorf("subsystem %s %w: no NVMe walk in this pass",
 			nqn, errSubsysUnknown)
@@ -240,8 +267,9 @@ func (s *CnAgentServer) lookupSubsys(
 		return &subsysView{}, nil
 	}
 	read, err := s.host.ReadSubsys(ctx, match.Dir, agent.SubsysReadOpts{
-		NsIdx: nsIdx,
-		Rule:  agent.ReadTolerant,
+		NsIdx:      nsIdx,
+		Rule:       agent.ReadTolerant,
+		WriteCache: wcache,
 	})
 	switch {
 	case err != nil:
@@ -283,6 +311,7 @@ func (s *CnAgentServer) lookupSubsys(
 			anaState:    ctrl.AnaState,
 			addrUnknown: ctrl.AddrErr,
 			gone:        ctrl.AddrGone,
+			wcache:      ctrl.WriteCache,
 		})
 	}
 	return view, nil
@@ -313,6 +342,7 @@ func (s *CnAgentServer) ensureLegs(
 	budget *agent.WaitBudget,
 ) map[uint64]bool {
 	available := make(map[uint64]bool, len(plan.legs))
+	keepWcStale(st, plan)
 	for _, lp := range plan.legs {
 		if lp.provisioning {
 			// [D15]: every side is still zeroing, so the DN exports nothing —
@@ -329,7 +359,7 @@ func (s *CnAgentServer) ensureLegs(
 			available[lp.legId] = false
 			continue
 		}
-		view, err := s.ensureLeg(ctx, plan, lp, budget)
+		view, err := s.ensureLeg(ctx, st, plan, lp, budget)
 		// The path rows read the connect step's own view; a leg that failed
 		// has none, and they look it up again (legPathRows).
 		s.legPathRows(ctx, st, plan, lp, view, info)
@@ -412,6 +442,7 @@ func (s *CnAgentServer) keepLegProber(
 // them, since the disconnect is by NQN.
 func (s *CnAgentServer) ensureLeg(
 	ctx context.Context,
+	st *cntlrState,
 	plan *cntlrPlan,
 	lp *legPlan,
 	budget *agent.WaitBudget,
@@ -419,7 +450,11 @@ func (s *CnAgentServer) ensureLeg(
 	if s.disconnectInFlight(lp.nqn) {
 		return nil, fmt.Errorf("%s", detailsDisconnectInFlight(lp.nqn))
 	}
-	view, err := s.lookupSubsys(ctx, plan.walk, lp.nqn, sideNsid)
+	// A primary reads its paths' write cache in this lookup (CN10, The
+	// write cache of a leg's path), so its write cache step takes no lookup
+	// of its own.
+	view, err := s.lookupSubsysOf(ctx, plan.walk, lp.nqn, sideNsid,
+		plan.primary)
 	if err != nil {
 		return nil, err
 	}
@@ -460,6 +495,17 @@ func (s *CnAgentServer) ensureLeg(
 	if err := wrapperUnder(lp, view); err != nil {
 		return nil, err
 	}
+	// CN10, The write cache of a leg's path: a primary scans again each path
+	// it read while its disk node served it no data, before the wrapper's
+	// step, so the wrapper and the array over it take the setting the disk
+	// node reports.
+	var stale []ctrlView
+	if plan.primary {
+		view, stale = s.freshenLegPaths(ctx, plan, lp, view, budget)
+		if err := wrapperUnder(lp, view); err != nil {
+			return nil, err
+		}
+	}
 	headNo, err := s.blockDevNo(ctx, path.Base(view.nsDev))
 	if err != nil {
 		return nil, err
@@ -475,7 +521,69 @@ func (s *CnAgentServer) ensureLeg(
 		}
 		return nil, err
 	}
+	if plan.primary {
+		if err := s.freshenWrapper(ctx, st, lp, view, stale, headNo,
+			step); err != nil {
+			return nil, err
+		}
+	}
 	return view, nil
+}
+
+// freshenWrapper is the rest of a primary's write cache step on lp (CN10,
+// The write cache of a leg's path): a wrapper whose table is as wanted and
+// that reads "write through" over a head that reads "write back" is loaded
+// again (wcacheStale), and then the leg's mark is set (markLegWcache): a
+// path that stalePaths found and that still reads "write through", or the
+// wrapper, is stale, which names its wrapper, as a failed wrapper step does,
+// so the worker sends the syncup again (CN30). A reload that fails is the
+// leg's error.
+func (s *CnAgentServer) freshenWrapper(
+	ctx context.Context,
+	st *cntlrState,
+	lp *legPlan,
+	view *subsysView,
+	stale []ctrlView,
+	headNo string,
+	step dmStep,
+) error {
+	if step == dmStepNone && s.wcacheStale(ctx, lp.name, headNo) {
+		if err := s.dm.Reload(ctx, lp.name,
+			dmTable("linear", lp.sectors, linearArgs(headNo, 0))); err != nil {
+			lp.wrapperName = rowFailure(errRowDiffers, err.Error())
+			return err
+		}
+	}
+	var still []ctrlView
+	for _, was := range stale {
+		if !pathsFresh(view, []ctrlView{was}) {
+			still = append(still, was)
+		}
+	}
+	details := legWcacheDetails(still, s.wcacheStale(ctx, lp.name, headNo))
+	markLegWcache(st, lp, view, details)
+	if details != "" {
+		lp.wrapperName = rowFailure(errRowDiffers, details)
+	}
+	return nil
+}
+
+// keepWcStale sets the cntlr's write cache marks for a converge (CN10):
+// none on a standby, which asks no target, and on a primary those of the
+// legs the plan still holds, which each leg's step then sets or drops
+// (freshenWrapper).
+func keepWcStale(st *cntlrState, plan *cntlrPlan) {
+	if !plan.primary {
+		st.wcStale = nil
+		return
+	}
+	keep := make(map[uint64]wcMark, len(st.wcStale))
+	for _, lp := range plan.legs {
+		if mark, ok := st.wcStale[lp.legId]; ok {
+			keep[lp.legId] = mark
+		}
+	}
+	st.wcStale = keep
 }
 
 // wrapperUnder is the test ensureLeg makes of a leg's lookup before the
@@ -1080,6 +1188,12 @@ func (s *CnAgentServer) legInfo(
 		return st.tracker.Set(key, lp.name, status, details)
 	}
 	if plan.primary {
+		// A leg whose path or wrapper keeps a stale write cache reads error
+		// whatever its probe says (CN10): its flushes stop short of a disk
+		// with a write cache.
+		if details := st.wcStale[lp.legId].stale; details != "" {
+			return st.tracker.Err(key, lp.name, details)
+		}
 		probeStatus, probeDetails := s.legProbeOutcome(st, lp)
 		return st.tracker.Set(key, lp.name, probeStatus, probeDetails)
 	}

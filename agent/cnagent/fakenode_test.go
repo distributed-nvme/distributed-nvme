@@ -34,6 +34,22 @@ import (
 type fakeNode struct {
 	mu sync.Mutex
 
+	// loopCnt is how many loop devices cmdLosetup has made: loop<n> is
+	// numbered 7:<n>. loopWc is the write cache each new one reads, "write
+	// back" when empty.
+	loopCnt int
+	loopWc  string
+	// targetWc is what the NVMe target of a leg's path reports for the
+	// side's namespace now, "write back" or "write through", keyed
+	// "{nqn}|{traddr}:{trsvcid}" as anaOf is. A path with an entry gets the
+	// kernel's write cache rules: a connect and a rescan of its controller
+	// copy the entry into the path device's queue/write_cache, the
+	// subsystem's head reads "write back" once any path did, an identify
+	// answers the entry (nvmeNsWriteCache), and a dm device takes the write
+	// cache of the devices its table names when the table goes live
+	// (stackWc). A path with none has no write_cache file, as before.
+	targetWc map[string]string
+
 	calls []string
 	// sysfsNoDeadline records every /sys read or listing that arrived on a
 	// ctx carrying no deadline. The NVMe walk's and the md walk's reads and
@@ -648,19 +664,20 @@ func (f *fakeNode) releaseCmd(key string) {
 // never issue — is still recorded rather than silently succeeding.
 func (f *fakeNode) osClient() *common.FakeOsClient {
 	return &common.FakeOsClient{
-		RunCommandFn:      f.runCommand,
-		ReadFileFn:        f.readFile,
-		ReadDirFn:         f.readDir,
-		ReadMtimeFn:       f.readMtime,
-		ReadDevNoFn:       f.readDevNo,
-		WriteFileFn:       f.writeFile,
-		WriteFileDirectFn: f.writeFileDirect,
-		ReadBlockFn:       f.readBlock,
-		ReadBlockDirectFn: f.readSuperblockArea,
-		DiscardRangesFn:   f.discardRanges,
-		DialTcpFn:         f.dialTcp,
-		ReadProtoFn:       f.readProto,
-		WriteProtoFn:      f.writeProto,
+		RunCommandFn:       f.runCommand,
+		ReadFileFn:         f.readFile,
+		ReadDirFn:          f.readDir,
+		ReadMtimeFn:        f.readMtime,
+		ReadDevNoFn:        f.readDevNo,
+		WriteFileFn:        f.writeFile,
+		WriteFileDirectFn:  f.writeFileDirect,
+		ReadBlockFn:        f.readBlock,
+		ReadBlockDirectFn:  f.readSuperblockArea,
+		DiscardRangesFn:    f.discardRanges,
+		NvmeNsWriteCacheFn: f.nvmeNsWriteCache,
+		DialTcpFn:          f.dialTcp,
+		ReadProtoFn:        f.readProto,
+		WriteProtoFn:       f.writeProto,
 	}
 }
 
@@ -756,6 +773,7 @@ var readOnlyPrefixes = []string{
 	"cmd dmsetup ls", "cmd nvme list-subsys",
 	"cmd mdadm --detail", "readsb ",
 	"cmd thin_dump ", "read ", "readproto ", "readblock ", "readblockdirect ",
+	"devno ", "cmd losetup -j ", "identify ",
 }
 
 // Mutations returns only the calls that change the system.
@@ -1170,7 +1188,7 @@ func (f *fakeNode) writeFileDirect(
 	if err := f.cntlidRefusal(path, data); err != nil {
 		return err
 	}
-	if f.mdSyncActionWrite(path, data) {
+	if f.mdSyncActionWrite(path, data) || f.rescanWc(path) {
 		return nil
 	}
 	f.files[path] = configfsNormalize(path, data)
@@ -1552,8 +1570,63 @@ func (f *fakeNode) dispatch(
 		return f.cmdStat(args)
 	case "thin_dump":
 		return f.cmdThinDump(args)
+	case "losetup":
+		return f.cmdLosetup(args)
 	}
 	return "", 127
+}
+
+// cmdLosetup is the two losetup calls of the agent's write cache loop device
+// (wcacheDevNo): `losetup --find --show <file>`, which puts a new loop device
+// over a file the node holds, read-write with a write cache, and prints its
+// node; and `losetup -j <file> --noheadings --output MAJ:MIN`, which prints
+// the number of each loop device over the file. A loop device is a set of
+// the files the agent reads of it: its node's number, its backing file and
+// its write cache. Called with f.mu held.
+func (f *fakeNode) cmdLosetup(args []string) (string, int) {
+	switch {
+	case len(args) == 3 && args[0] == "--find" && args[1] == "--show":
+		file := args[2]
+		if _, ok := f.files[file]; !ok {
+			f.dispatchStderr = "losetup: " + file + ": failed to set up loop device: No such file or directory"
+			return "", 1
+		}
+		n := f.loopCnt
+		f.loopCnt++
+		node := fmt.Sprintf("/dev/loop%d", n)
+		devNo := fmt.Sprintf("7:%d", n)
+		f.devNo[node] = devNo
+		f.files["/sys/dev/block/"+devNo+"/loop/backing_file"] = file + "\n"
+		wc := f.loopWc
+		if wc == "" {
+			wc = "write back"
+		}
+		f.files["/sys/dev/block/"+devNo+"/queue/write_cache"] = wc + "\n"
+		f.files["/sys/dev/block/"+devNo+"/size"] = fmt.Sprintf("%d\n",
+			len(f.files[file])/512)
+		return node + "\n", 0
+	case len(args) == 2 && args[0] == "-d":
+		devNo, ok := f.devNo[args[1]]
+		if !ok {
+			return "", 1
+		}
+		delete(f.files, "/sys/dev/block/"+devNo+"/loop/backing_file")
+		return "", 0
+	case len(args) >= 2 && args[0] == "-j":
+		var out []string
+		for n := 0; n < f.loopCnt; n++ {
+			devNo := fmt.Sprintf("7:%d", n)
+			back := f.files["/sys/dev/block/"+devNo+"/loop/backing_file"]
+			if strings.TrimSpace(back) == args[1] {
+				out = append(out, devNo)
+			}
+		}
+		if len(out) == 0 {
+			return "", 0
+		}
+		return strings.Join(out, "\n") + "\n", 0
+	}
+	return "", 1
 }
 
 // cmdBlockdev is `blockdev --setro|--setrw <path>` of a dm device: the block
@@ -2520,6 +2593,7 @@ func (f *fakeNode) dmCreate(args []string, stdin string) (string, int) {
 		f.dmOfDevNo[devNo] = name
 	}
 	f.devSize[path] = tableSectors(table) * 512
+	f.stackWc(devNo, table)
 	return "", 0
 }
 
@@ -2571,6 +2645,7 @@ func (f *fakeNode) goLive(name string, dm *fakeDm) {
 	dm.waiting = nil
 	applyCloneTable(dm, dm.table)
 	f.devSize["/dev/mapper/"+name] = tableSectors(dm.table) * 512
+	f.stackWc(f.devNo["/dev/mapper/"+name], dm.table)
 }
 
 // poolThinIds is the thin-id set a freshly activated device carries. For a
@@ -4319,6 +4394,119 @@ func (f *fakeNode) addCtrl(
 	}
 	f.dirs[ctrlDir+"/"+pathDev] = true
 	f.files[ctrlDir+"/"+pathDev+"/ana_state"] = ctrl.anaState + "\n"
+	f.scanWc(subsys, ctrl)
+}
+
+// scanWc is the kernel's scan of ctrl's namespace for its write cache: the
+// path device takes what the target reports now (targetWc), and the
+// subsystem's head reads "write back" once any path did, as the head stacks
+// its paths' limits and never drops the flag. Nothing for a path with no
+// targetWc entry. Called with f.mu held.
+func (f *fakeNode) scanWc(subsys *fakeSubsys, ctrl *fakeCtrl) {
+	wc, ok := f.targetWc[subsys.nqn+"|"+ctrl.trAddr+":"+ctrl.trSvcId]
+	if !ok {
+		return
+	}
+	f.files[sysfsNvmeCtrlDir+"/"+ctrl.name+"/"+ctrl.pathDev+
+		"/queue/write_cache"] = wc + "\n"
+	nsDev := fmt.Sprintf("nvme%dn1", subsys.idx)
+	head := sysfsBlockDir + "/" + nsDev + "/queue/write_cache"
+	if strings.TrimSpace(f.files[head]) == "write back" {
+		return
+	}
+	f.files[head] = wc + "\n"
+	if devNo := f.devNo["/dev/"+nsDev]; devNo != "" {
+		f.files["/sys/dev/block/"+devNo+"/queue/write_cache"] = wc + "\n"
+	}
+}
+
+// setTargetWc changes what the target of one path reports (targetWc), as a
+// disk node does when it puts another device under the path, and nothing the
+// host read: that takes a rescan (rescanWc).
+func (f *fakeNode) setTargetWc(nqn, trAddr, trSvcId, wc string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.targetWc == nil {
+		f.targetWc = make(map[string]string)
+	}
+	f.targetWc[nqn+"|"+trAddr+":"+trSvcId] = wc
+}
+
+// rescanWc is a write to /sys/class/nvme/<ctrl>/rescan_controller: the
+// controller's namespace scanned again (scanWc). It reports whether path
+// was such an attribute. Called with f.mu held.
+func (f *fakeNode) rescanWc(path string) bool {
+	rest, ok := strings.CutPrefix(path, sysfsNvmeCtrlDir+"/")
+	if !ok {
+		return false
+	}
+	name, ok := strings.CutSuffix(rest, "/rescan_controller")
+	if !ok {
+		return false
+	}
+	for _, subsys := range f.subsystems {
+		for _, ctrl := range subsys.ctrls {
+			if ctrl.name == name {
+				f.scanWc(subsys, ctrl)
+			}
+		}
+	}
+	return true
+}
+
+// nvmeNsWriteCache is OsClient.NvmeNsWriteCache, recorded as
+// "identify <path>": what targetWc holds for the controller's path, false
+// for one with no entry.
+func (f *fakeNode) nvmeNsWriteCache(
+	ctx context.Context, ctrlPath string, nsid uint32,
+) (bool, error) {
+	if err := f.ctxErr(ctx); err != nil {
+		return false, err
+	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.record("identify %s", ctrlPath)
+	name := strings.TrimPrefix(ctrlPath, "/dev/")
+	for _, subsys := range f.subsystems {
+		for _, ctrl := range subsys.ctrls {
+			if ctrl.name == name {
+				return f.targetWc[subsys.nqn+"|"+ctrl.trAddr+":"+
+					ctrl.trSvcId] == "write back", nil
+			}
+		}
+	}
+	return false, fmt.Errorf("open %s: %w", ctrlPath, fs.ErrNotExist)
+}
+
+// stackWc is a dm device's write cache when its table goes live: "write
+// back" when a device its table names reads so, "write through" when the
+// devices it names read only that, and no file when none of them has one,
+// as before. Called with f.mu held.
+func (f *fakeNode) stackWc(devNo, table string) {
+	if devNo == "" {
+		return
+	}
+	got := ""
+	for _, field := range strings.Fields(table) {
+		if !blockDevNoPattern.MatchString(field) {
+			continue
+		}
+		switch strings.TrimSpace(
+			f.files["/sys/dev/block/"+field+"/queue/write_cache"]) {
+		case "write back":
+			got = "write back"
+		case "write through":
+			if got == "" {
+				got = "write through"
+			}
+		}
+	}
+	own := "/sys/dev/block/" + devNo + "/queue/write_cache"
+	if got == "" {
+		delete(f.files, own)
+		return
+	}
+	f.files[own] = got + "\n"
 }
 
 // plantSubsys connects nqn at the chosen entry number, the way the kernel
@@ -4364,6 +4552,11 @@ func (f *fakeNode) addNsHeadStep(dir, nsDev string, nsIdx uint32, step int) {
 		f.devNo["/dev/"+nsDev] = f.newDevNo()
 		f.devSize["/dev/"+nsDev] = 1 << 40
 		f.publishBlockDev(nsDev)
+		// The head's write cache under its number too (scanWc).
+		if wc, ok := f.files[sysfsBlockDir+"/"+nsDev+"/queue/write_cache"]; ok {
+			f.files["/sys/dev/block/"+f.devNo["/dev/"+nsDev]+
+				"/queue/write_cache"] = wc
+		}
 	case 3:
 		f.dirs[dir+"/"+ngDevOf(nsDev)] = true
 	}

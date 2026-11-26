@@ -613,7 +613,7 @@ func (s *CnAgentServer) build(
 	// Per-td raid0 and the permanent dm-error reload target (CN15).
 	for _, tp := range plan.tds {
 		if plan.wantAny {
-			err := s.ensureDmError(ctx, tp.errorName, tp.sectors)
+			err := s.ensureTdError(ctx, tp.errorName, tp.sectors)
 			info.TdIdToDmError[tp.tdId] = st.tracker.FromErr(
 				resKeyOf(resKeyTdErrorFmt, tp.tdId), tp.errorName, "", err)
 		} else {

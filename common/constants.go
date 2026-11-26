@@ -738,6 +738,33 @@ const (
 	CnNsScanPause        = 50 * time.Millisecond
 	CnNsHeadPause        = 5 * time.Millisecond
 	CnConnectDialTimeout = CnConnectPassBudget * 3 / 2
+	// CnRescanPause is the step of the wait for a leg path's write cache
+	// after the rescan of its controller (cnagent.md CN10, The write cache
+	// of a leg's path): the fourth draw on the pass's wait budget. The
+	// kernel's scan of one namespace ends well inside a few of them, and
+	// CnRescanPauses caps the steps of one leg, so a leg whose rescan does
+	// not take spends no more of the budget the pass's other legs need.
+	CnRescanPause  = 5 * time.Millisecond
+	CnRescanPauses = 20
+
+	// DmErrorWcSectors is the length of the last target of the table of a
+	// device that fails every IO and reports a write cache (agent.
+	// ErrorWcTable; architecture.md, Data-plane device stacks): an error
+	// target that names a device with the write cache wanted, which it takes
+	// and sends no IO. 8 sectors are 4 KiB, a whole block of every logical
+	// block size a disk node or a loop device has.
+	DmErrorWcSectors = 8
+	// CnWcacheDir holds the file of a cn agent's write cache loop device
+	// (cnagent.md CN15): a memory file system, which a reboot empties as it
+	// ends the loop device. CnWcacheFileBytes is the file's size, one
+	// DmErrorWcSectors.
+	CnWcacheDir       = "/run/dnv"
+	CnWcacheFileBytes = DmErrorWcSectors * 512
+	// CnWcacheRetry is how long a cn agent waits after a make of its write
+	// cache loop device failed before it tries again (cnagent.md CN15): a
+	// make that fails, as without losetup, fails again at once, and every
+	// converge asks for the device.
+	CnWcacheRetry = time.Minute
 
 	// The cut's wait (cnagent.md CN33). After a converge pass writes
 	// "fatal" to a subsystem's stray connections, it lists the subsystem's

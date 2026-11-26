@@ -40,6 +40,11 @@ type DnAgentServer struct {
 	disk string
 	port agent.PortConf
 
+	// diskNo is the disk's "major:minor" once a read of it answered
+	// (diskDevNo); guarded by mu. The disk the agent was started with never
+	// changes, so neither does its number while the agent runs.
+	diskNo string
+
 	// fenceWait is the src-cutover grace window of architecture.md, Migration,
 	// src step 2 (common.SuspendSeconds).
 	// It is a field rather than a constant so tests can shorten it; nothing

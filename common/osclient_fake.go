@@ -20,22 +20,23 @@ import (
 // It is exported (not a _test.go file) so that tests in other packages can
 // reuse it (osclient.md, Test double — `common/osclient_fake.go`).
 type FakeOsClient struct {
-	RunCommandFn      func(ctx context.Context, name string, args []string, stdinInput string) (string, string, int, error)
-	ReadFileFn        func(ctx context.Context, path string) (string, error)
-	ReadDirFn         func(ctx context.Context, path string) ([]string, error)
-	ReadMtimeFn       func(ctx context.Context, path string) (time.Time, error)
-	ReadDevNoFn       func(ctx context.Context, path string) (string, error)
-	WriteFileFn       func(ctx context.Context, path string, data string) error
-	WriteFileDirectFn func(ctx context.Context, path string, data string) error
-	ReadBlockFn       func(ctx context.Context, path string, offset uint64, length uint64) ([]byte, error)
-	ReadBlockDirectFn func(ctx context.Context, path string, offset uint64, length uint64) ([]byte, error)
-	WriteBlockFn      func(ctx context.Context, path string, offset uint64, data []byte) error
-	DiscardRangesFn   func(ctx context.Context, path string, ranges []DiscardRange) (int, error)
-	OpenExclusiveFn   func(ctx context.Context, path string) error
-	DialTcpFn         func(ctx context.Context, address string, timeout time.Duration) error
-	StartDetachedFn   func(ctx context.Context, name string, args []string, dir string) (*Detached, error)
-	ReadProtoFn       func(ctx context.Context, path string, target proto.Message) error
-	WriteProtoFn      func(ctx context.Context, path string, msg proto.Message) error
+	RunCommandFn       func(ctx context.Context, name string, args []string, stdinInput string) (string, string, int, error)
+	ReadFileFn         func(ctx context.Context, path string) (string, error)
+	ReadDirFn          func(ctx context.Context, path string) ([]string, error)
+	ReadMtimeFn        func(ctx context.Context, path string) (time.Time, error)
+	ReadDevNoFn        func(ctx context.Context, path string) (string, error)
+	WriteFileFn        func(ctx context.Context, path string, data string) error
+	WriteFileDirectFn  func(ctx context.Context, path string, data string) error
+	ReadBlockFn        func(ctx context.Context, path string, offset uint64, length uint64) ([]byte, error)
+	ReadBlockDirectFn  func(ctx context.Context, path string, offset uint64, length uint64) ([]byte, error)
+	WriteBlockFn       func(ctx context.Context, path string, offset uint64, data []byte) error
+	DiscardRangesFn    func(ctx context.Context, path string, ranges []DiscardRange) (int, error)
+	OpenExclusiveFn    func(ctx context.Context, path string) error
+	NvmeNsWriteCacheFn func(ctx context.Context, ctrlPath string, nsid uint32) (bool, error)
+	DialTcpFn          func(ctx context.Context, address string, timeout time.Duration) error
+	StartDetachedFn    func(ctx context.Context, name string, args []string, dir string) (*Detached, error)
+	ReadProtoFn        func(ctx context.Context, path string, target proto.Message) error
+	WriteProtoFn       func(ctx context.Context, path string, msg proto.Message) error
 }
 
 var _ OsClient = (*FakeOsClient)(nil)
@@ -125,6 +126,15 @@ func (f *FakeOsClient) OpenExclusive(ctx context.Context, path string) error {
 		return f.OpenExclusiveFn(ctx, path)
 	}
 	return nil
+}
+
+// NvmeNsWriteCache answers false with no error when unset: a controller
+// that reports no write cache, which asks nothing more of the caller.
+func (f *FakeOsClient) NvmeNsWriteCache(ctx context.Context, ctrlPath string, nsid uint32) (bool, error) {
+	if f.NvmeNsWriteCacheFn != nil {
+		return f.NvmeNsWriteCacheFn(ctx, ctrlPath, nsid)
+	}
+	return false, nil
 }
 
 func (f *FakeOsClient) DialTcp(ctx context.Context, address string, timeout time.Duration) error {

@@ -2985,6 +2985,142 @@ cn_wait_ana() { # <v> <nqn> <traddr> <trsvcid> <want> [secs]
 }
 
 # ---------------------------------------------------------------------------
+# The write cache a path reads (e2e_integtest.md, The cases, react and copy)
+#
+# A path takes its write cache setting from what its NVMe target reports for
+# the namespace when its host scans the namespace: at the connect, at a
+# reconnect and at a rescan, never at an ANA change. A path that reads "write
+# through" sends no flush: the host's block layer completes it at once. So
+# the reading that matters is the path device's queue/write_cache against
+# what the target reports now, the bit "volatile write cache not present"
+# (0x20) of nsfeat in the command set independent identify, the field the
+# kernel reads at a scan.
+# ---------------------------------------------------------------------------
+
+# wcache_script is the guest side of wcache_of: it prints "<path>/<target>"
+# for the path device of controller <ctrl> whose namespace has <uuid> (any
+# when the uuid is empty, as on a leg's controller, whose subsystem holds one
+# namespace): the path's queue/write_cache, and "write back" where the target
+# reports a volatile write cache, "write through" where it reports none. It
+# prints "none" for a controller with no such path device and "unread" for a
+# read that did not answer. <ctrl> and <uuid> are a controller name and a
+# uuid, which carry no character the guest shell would read.
+wcache_script() { # <ctrl> <uuid|"">
+	printf 'c=%s u=%s\n' "$1" "$2"
+	printf '%s\n' \
+		'for d in /sys/class/nvme/$c/nvme*c*n*; do' \
+		'	[ -d "$d" ] || continue' \
+		'	if [ -n "$u" ] && [ "$(cat "$d/uuid" 2>/dev/null)" != "$u" ]; then continue; fi' \
+		'	wc=$(cat "$d/queue/write_cache" 2>/dev/null) || { echo unread; exit 0; }' \
+		'	nsid=$(cat "$d/nsid" 2>/dev/null) || { echo unread; exit 0; }' \
+		'	f=$(timeout 10 nvme cmdset-ind-id-ns "/dev/$c" -n "$nsid" 2>/dev/null | awk '"'"'/^nsfeat/ {print $3}'"'"')' \
+		'	case "$f" in 0 | 0x*) ;; *) echo unread; exit 0 ;; esac' \
+		'	if [ $((f & 32)) -ne 0 ]; then t="write through"; else t="write back"; fi' \
+		'	echo "$wc/$t"' \
+		'	exit 0' \
+		'done' \
+		'echo none'
+}
+
+# wcache_of runs wcache_script through <ssh-wrapper> <idx>, an _ok form.
+wcache_of() { # <ssh-wrapper> <idx> <ctrl> <uuid|"">
+	if [ "$3" = none ] || [ -z "$3" ] || [ "$3" = unread ]; then
+		printf 'none'
+		return 0
+	fi
+	"$1" "$2" "$(wcache_script "$3" "$4")"
+}
+
+# WCACHE_LAST is the last reading of host_wcache_ok and cn_legs_wcache_ok,
+# for the failure report: wait_until's own message names the wait.
+WCACHE_LAST=""
+
+# host_wcache_ok: host <h>'s path to <traddr> for the namespace <uuid> reads
+# the write cache its target reports now.
+host_wcache_ok() { # <h> <nqn> <traddr> <uuid>
+	local ctrl
+	ctrl=$(host_ctrl "$1" "$2" "$3")
+	WCACHE_LAST="$ctrl: $(wcache_of ssh_host_ok "$1" "$ctrl" "$4")"
+	case "$WCACHE_LAST" in
+	*": write back/write back" | *": write through/write through") return 0 ;;
+	esac
+	return 1
+}
+
+# cn_path_wcache_ok: cn <v>'s path to one side of a leg, <traddr>:<trsvcid>
+# of the subsystem <nqn>, reads the write cache its disk node's target
+# reports now.
+cn_path_wcache_ok() { # <v> <nqn> <traddr> <trsvcid>
+	local ctrl
+	ctrl=$(cn_path_field "$1" "$2" "$3" "$4" Name)
+	WCACHE_LAST="$ctrl: $(wcache_of ssh_cn_ok "$1" "$ctrl" "")"
+	case "$WCACHE_LAST" in
+	*": write back/write back" | *": write through/write through") return 0 ;;
+	esac
+	return 1
+}
+
+# cn_legs_wcache_script is the guest side of cn_legs_wcache_ok: one line
+# "<ctrl> <path>/<target>" for each live controller of a subsystem whose NQN
+# starts with <prefix> and whose path reads ANA optimized, the paths a primary
+# serves its legs through, as wcache_script reads them.
+cn_legs_wcache_script() { # <prefix>
+	printf 'p=%s\n' "$1"
+	printf '%s\n' \
+		'for c in /sys/class/nvme/nvme*; do' \
+		'	[ -d "$c" ] || continue' \
+		'	case "$(cat "$c/subsysnqn" 2>/dev/null)" in "$p"*) ;; *) continue ;; esac' \
+		'	[ "$(cat "$c/state" 2>/dev/null)" = live ] || continue' \
+		'	for d in "$c"/nvme*c*n*; do' \
+		'		[ -d "$d" ] || continue' \
+		'		[ "$(cat "$d/ana_state" 2>/dev/null)" = optimized ] || continue' \
+		'		wc=$(cat "$d/queue/write_cache" 2>/dev/null) || wc=unread' \
+		'		nsid=$(cat "$d/nsid" 2>/dev/null) || nsid=1' \
+		'		f=$(timeout 10 nvme cmdset-ind-id-ns "/dev/${c##*/}" -n "$nsid" 2>/dev/null | awk '"'"'/^nsfeat/ {print $3}'"'"')' \
+		'		case "$f" in 0 | 0x*) if [ $((f & 32)) -ne 0 ]; then t="write through"; else t="write back"; fi ;; *) t=unread ;; esac' \
+		'		echo "${c##*/} $wc/$t"' \
+		'	done' \
+		'done'
+}
+
+# cn_legs_wcache_ok: every live, optimized path of cn <v> to a leg of this
+# case's pool reads the write cache its disk node's target reports now, and
+# there is at least one such path. A leg's subsystem is SideToCnNqn, keyed on
+# (cluster, sp, leg, cn), so the prefix up to the sp names this pool's legs
+# on whichever cn reads them.
+cn_legs_wcache_ok() { # <v>
+	local prefix lines bad
+	require_cluster_id
+	prefix=$(printf '%s:2:%s:%s:' "$NQN_PREFIX" "$(hex16 "$CLUSTER_ID")" \
+		"$(hex16 "$SP_ID")")
+	lines=$(ssh_cn_ok "$1" "$(cn_legs_wcache_script "$prefix")")
+	bad=$(printf '%s\n' "$lines" | awk 'NF && !/ write back\/write back$/ && !/ write through\/write through$/' |
+		tr '\n' ';')
+	WCACHE_LAST="$(printf '%s\n' "$lines" | grep -c .) optimized leg paths; not as their target reports: ${bad:-none}"
+	[ -n "$lines" ] && [ -z "$bad" ]
+}
+
+# wait_wcache is wait_until for the write cache predicates above, whose
+# failure names the last reading: wait_until's names only the wait.
+wait_wcache() { # <secs> <label> <cmd…>
+	local secs=$1 label=$2 deadline saved=$QUIET
+	shift 2
+	deadline=$((SECONDS + secs))
+	WCACHE_LAST=""
+	QUIET=1
+	until "$@"; do
+		if [ "$SECONDS" -ge "$deadline" ]; then
+			QUIET=$saved
+			die "timed out after ${secs}s waiting for: $label; last" \
+				"reading: ${WCACHE_LAST:-none}"
+		fi
+		sleep 0.5
+	done
+	QUIET=$saved
+	log "  $label: $WCACHE_LAST"
+}
+
+# ---------------------------------------------------------------------------
 # Host IO, after sha_range and write_range (cnagent_test.sh)
 #
 # RULE 1 IS ABSOLUTE HERE: no iflag=, no oflag=, anywhere, ever. The guests
@@ -7539,7 +7675,10 @@ fsync_progress() {
 # `fsync=judged writes=<n> stalled_jobs=<n> stall_ms=<the longest>
 # before=<n>/<held> inflight_write=<n>/<held> inflight_fsync=<n>/<held>
 # after=<n>/<held> failed=<n>/<held> other=<n> max_ms=<the longest write or
-# fsync of any job, over the stall or not>`, then a line for each block
+# fsync of any job, over the stall or not> after_fsync_median_ms=<the median
+# fsync of the writes after the stall, -1 with none>`: an fsync that sends no
+# flush takes a few microseconds, one whose flush reaches the disks takes
+# more. Then a line for each block
 # not held and for each in flight or failed, with the times this host read
 # for it.
 fsync_judge() {
@@ -7564,6 +7703,7 @@ def read(off):
 cls = {"before": [0, 0], "inflight_write": [0, 0], "inflight_fsync": [0, 0],
        "after": [0, 0], "failed": [0, 0]}
 lines, writes, stalled, longest, other, slowest = [], 0, 0, 0.0, 0, 0.0
+after_fsync = []
 for path in sorted(glob.glob(os.path.join(d, "w.*.log"))):
     ops = []
     for ln in open(path):
@@ -7603,6 +7743,8 @@ for path in sorted(glob.glob(os.path.join(d, "w.*.log"))):
             c = kind
         else:
             c = "after"
+        if c == "after" and tf is not None:
+            after_fsync.append(tf - tw)
         r = read(off)
         cls[c][0] += 1
         if r == "held":
@@ -7617,10 +7759,12 @@ for path in sorted(glob.glob(os.path.join(d, "w.*.log"))):
                 t += ", " + why
             lines.append("%s %s: %s offset %d, %s" %
                          (os.path.basename(path), c, r, off, t))
-print("fsync=judged writes=%d stalled_jobs=%d stall_ms=%.0f %s other=%d max_ms=%.0f" % (
+after_fsync.sort()
+median = after_fsync[len(after_fsync) // 2] * 1000 if after_fsync else -1
+print("fsync=judged writes=%d stalled_jobs=%d stall_ms=%.0f %s other=%d max_ms=%.0f after_fsync_median_ms=%.3f" % (
     writes, stalled, longest * 1000,
     " ".join("%s=%d/%d" % (k, v[0], v[1]) for k, v in cls.items()), other,
-    slowest * 1000))
+    slowest * 1000, median))
 for ln in lines:
     print(ln)
 PYEOF
@@ -20184,6 +20328,16 @@ copy_migration() {
 		migr_dst_serving "$dstside"
 	cn_wait_ana "$PRIMARY_CN" "$legnqn" "$dsttraddr" "$dsttrsvcid" optimized \
 		"$WAIT_PROVISION"
+	# The primary connected the destination before the cutover, while the
+	# destination served it from its dm-error, which reports its disk's write
+	# cache; the cutover puts a dm-clone under the path, which reports one
+	# whatever the disk's, and the path must read what the destination's
+	# target reports now (cnagent.md CN10), or the primary's flushes stop at
+	# it. On the suite's disks, loop devices over files with a write cache,
+	# the two agree from the connect.
+	wait_wcache "$WAIT_PROVISION" \
+		"the primary's path to the destination $dsttraddr:$dsttrsvcid to read the write cache its target reports" \
+		cn_path_wcache_ok "$PRIMARY_CN" "$legnqn" "$dsttraddr" "$dsttrsvcid"
 	# THE GAP ENDS IN THE PASS THE CUTOVER BROUGHT. The destination serves,
 	# so both dn agents have logged the gap's two ends: the source's write of
 	# the inaccessible group to the primary's export, and the destination's
@@ -25650,6 +25804,19 @@ react_failover() {
 	wait_until "$WAIT_PROVISION" \
 		"the new primary to report CN19's READWRITE shape, subsystem and namespace rows included" \
 		cntlr_level_ready "$PRIMARY_CNTLR_ID"
+	# THE NEW PRIMARY'S FLUSHES REACH THE DISK NODES (cnagent.md CN10). It
+	# connected every leg as a standby, while each disk node served its path
+	# from its dm-error, and a controller node reads a path's write cache only
+	# when it scans the namespace, never at the ANA change the failover makes.
+	# Each optimized leg path must read what its disk node's target reports
+	# now: "write back" here, since the suite's disks are loop devices over
+	# files, which have a write cache. The dm-error reports the disk's write
+	# cache (dnagent.md DN10), so the paths read so from their connect; the
+	# primary's rescan of a path that does not (cnagent.md CN10) is the unit
+	# tests' to prove, as no disk node here serves from the older table.
+	wait_wcache "$WAIT_PROVISION" \
+		"every optimized leg path of the new primary on cn$PRIMARY_CN to read the write cache its disk node reports" \
+		cn_legs_wcache_ok "$PRIMARY_CN"
 
 	# host0 comes back THROUGH THE CDC (E2E10). The failover's own transaction
 	# applied the listing rule (architecture.md [D18]): the dead cntlr is a
@@ -28841,6 +29008,9 @@ react_fsync_judge() {
 	n=$(swrite_stat_field "$first" inflight_fsync)
 	log "  writes whose fsync was in flight at the reset: ${n%/*}, held" \
 		"${n#*/} (scope.md's fsync entry; logged, not asserted)"
+	log "  the median fsync of the writes after the reset, on the new" \
+		"primary: $(swrite_stat_field "$first" after_fsync_median_ms) ms" \
+		"(an fsync whose flush is sent takes real time; logged, not asserted)"
 }
 
 # react_fsync_remove deletes step 13's namespace and thin device.
@@ -29366,6 +29536,19 @@ react_power_loss() { # <stage nn> <swrite|fsync>
 	# host0's head turns to the path it already holds to the new primary.
 	host_wait_ana 0 "$SS0" "$PRIMARY_TRADDR" "$UUID1" optimized
 	wait_dev 0 "$UUID1"
+	# AND THAT PATH SENDS host0's FLUSHES (architecture.md, The write cache a
+	# path reads; cnagent.md CN15). host0 read the path's write cache when it
+	# connected, while the path led to the standby, whose namespace devices
+	# map the td's dm-error, and a host reads it again only at a scan, never
+	# at the failover's ANA change. So it reads "write back" now only if the
+	# standby's device reported a write cache then. The new primary's leg
+	# paths are read as in step 3.
+	wait_wcache "$WAIT_HOST" \
+		"host0's path to the new primary on cn$PRIMARY_CN to read the write cache its target reports" \
+		host_wcache_ok 0 "$SS0" "$PRIMARY_TRADDR" "$UUID1"
+	wait_wcache "$WAIT_PROVISION" \
+		"every optimized leg path of the new primary on cn$PRIMARY_CN to read the write cache its disk node reports" \
+		cn_legs_wcache_ok "$PRIMARY_CN"
 	st=$(host_path_state 0 "$SS0" "$old_traddr")
 	assert_ne "$st" unread \
 		"host0's listing of its paths answered (one that did not reads 'unread')"

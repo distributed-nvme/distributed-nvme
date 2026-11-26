@@ -3208,6 +3208,22 @@ table live before anything else touches the linear (DN12 rule 2,
 `finishFence`), so the IO it held at the fence fails whatever the CN is by
 then.
 
+**The dm-error reports the disk's write cache.** Each per-CN `DnErrorName`
+has the table `agent.ErrorWcTable` over the node's disk, whose number the
+agent reads once and keeps: its last error target takes the disk's write
+cache and sends it no IO. A cntlr's path served from it then reads, at its
+controller node's scan, the write cache the side's own device, a dm-linear
+over the same disk, has, so a failover that puts that device under the path
+changes nothing the controller node read (`architecture.md`, The write
+cache a path reads). A migration's cutover puts the new side's dm-clone
+there, which reports a write cache whatever the disk's; the primary's
+rescan reads that (`cnagent.md` CN10, The write cache of a leg's path). A
+converge loads an older agent's one-target table again into this one; a
+read reads either table OK and names neither, and the primary's rescan
+covers a path read meanwhile. With the disk's number unread the dm-error
+gets `agent.ErrorTable`, logged at Warn; the side's own device needs that
+number too, so its build fails in that pass and the next pass loads both.
+
 **The fence comes first.** A pass converges the per-CN stacks in
 `cnIdsOf`'s order — the standbys ascending, the primary last — so every
 other CN's dm-linear is fenced before the primary's path opens, and every

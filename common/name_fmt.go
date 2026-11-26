@@ -657,6 +657,16 @@ func DnNsIdentity(clusterId, spId, legId uint64) (uuid string, nguid string) {
 	return uuid, nguid
 }
 
+// CnWcacheFile names the file of a cn agent's write cache loop device
+// (cnagent.md CN15), in CnWcacheDir: the dm prefix and a hash of the agent's
+// local store folder, which no two agents of one machine share.
+func (nf *NameFmt) CnWcacheFile() string {
+	h := fnv.New64a()
+	h.Write([]byte(nf.localStorPrefix))
+	return fmt.Sprintf("%s/%s-wcache-%016x", CnWcacheDir, nf.dmPrefix,
+		h.Sum64())
+}
+
 func (nf *NameFmt) LocalDnPath(
 	clusterId uint64,
 	dnId uint64,

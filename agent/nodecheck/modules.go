@@ -284,12 +284,14 @@ func modulesLoadNames(text string) []string {
 
 // The commands each role's agent runs, by name, through its OsClient
 // (dnagent.md CM5). blockdev is both roles': each agent clears a device's
-// read-only flag with it after a reload (Dm.SetWritable).
+// read-only flag with it after a reload (Dm.SetWritable). losetup is the cn
+// agent's: it makes the loop device whose write cache a td's dm-error
+// reports (cnagent.md CN15).
 var (
 	commandsBoth = []string{"dmsetup", "nvme", "lsblk", "mkdir", "rmdir",
 		"ln", "rm", "blockdev"}
 	commandsDn = []string{"blkdiscard"}
-	commandsCn = []string{"mdadm", "thin_dump", "stat"}
+	commandsCn = []string{"mdadm", "thin_dump", "stat", "losetup"}
 )
 
 // thinDumpHeaderFlags are the flags of the cn agent's thin header read

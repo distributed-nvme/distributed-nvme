@@ -555,6 +555,11 @@ type SubsysReadOpts struct {
 	// (ListSubsys). A transport read that did not answer ends the read with
 	// its error, under either rule.
 	Transport bool
+	// WriteCache reads, under CtrlPaths, the write cache setting of the path
+	// device whose ana_state is read (CtrlRead.WriteCache). A read of it
+	// that did not answer leaves it "" under either rule: no caller acts on
+	// an unread setting.
+	WriteCache bool
 	// Rule is what a read that did not answer does to the rest of the read.
 	Rule SubsysReadRule
 }
@@ -614,6 +619,14 @@ type CtrlRead struct {
 	// is there, and AnaErr the first ana_state read that did not answer.
 	AnaState string
 	AnaErr   error
+	// PathDev is that path device, e.g. "nvme0c1n1", and WriteCache its
+	// queue/write_cache, "write back" or "write through": what the host
+	// read of the namespace's volatile write cache when it last scanned it
+	// (cnagent.md CN10, The write cache of a leg's path). Both are read only
+	// with SubsysReadOpts.WriteCache, and WriteCache is "" for a read that
+	// did not answer.
+	PathDev    string
+	WriteCache string
 }
 
 // ReadSubsys reads one entry's directory under opts, in listing order: the
@@ -761,10 +774,35 @@ func (h *NvmeHost) readCtrl(
 		}
 		if ok {
 			ctrl.AnaState = ana
+			if opts.WriteCache {
+				ctrl.PathDev = entry
+				ctrl.WriteCache, _, _ = h.readTrimmed(ctx,
+					ctrlDir+"/"+entry+"/queue/write_cache")
+			}
 			break
 		}
 	}
 	return ctrl, nil
+}
+
+// Rescan asks the kernel to scan the namespaces of the controller ctrl, e.g.
+// "nvme0", again: a write to its rescan_controller, which queues the scan and
+// returns, and which is what makes a host read again what the controller
+// reports of each namespace, its volatile write cache included (cnagent.md
+// CN10, The write cache of a leg's path).
+func (h *NvmeHost) Rescan(ctx context.Context, ctrl string) error {
+	return h.oc.WriteFileDirect(ctx,
+		sysfsNvmeCtrlDir+"/"+ctrl+"/rescan_controller", "1")
+}
+
+// NsWriteCache asks the controller ctrl, e.g. "nvme0", whether it reports a
+// volatile write cache for its namespace nsid now (OsClient.NvmeNsWriteCache).
+func (h *NvmeHost) NsWriteCache(
+	ctx context.Context,
+	ctrl string,
+	nsid uint32,
+) (bool, error) {
+	return h.oc.NvmeNsWriteCache(ctx, "/dev/"+ctrl, nsid)
 }
 
 // State is the read as ListSubsys answers it, for the entry named nqn: the

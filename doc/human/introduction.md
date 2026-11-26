@@ -386,15 +386,15 @@ failover rests on, with that machine's mdadm and kernel.
 Tools: nvme-cli, mdadm, nvme-stas, a 2.x version with its daemons stafd and
 stacd, dmsetup, and thin-provisioning-tools, whose thin_dump the agents run,
 all of which the all-in-one tutorial installs, and losetup from util-linux for
-its loop-device disks. The agents also run blkdiscard and lsblk from
-util-linux. nvme-stas is 2.x because dnv is tested with 2.x alone; 3.x is
+its loop-device disks, which the cn agent also runs. The agents also run
+blkdiscard and lsblk from util-linux. nvme-stas is 2.x because dnv is tested with 2.x alone; 3.x is
 untested with dnv.
 
 Kernel: the NVMe/TCP target and host drivers nvmet, nvmet-tcp, nvme-tcp and
 nvme-fabrics; native NVMe multipath switched on, which joins a host's paths
 into one device and carries the ANA state; md RAID1; device mapper with the
-thin-pool, thin, clone, linear, striped, error and flakey targets; and configfs
-mounted. Every controller node of a cluster runs one kernel series: a RAID1
+thin-pool, thin, clone, linear, striped, error and flakey targets; loop
+devices on a controller node; and configfs mounted. Every controller node of a cluster runs one kernel series: a RAID1
 array created on a 6.19 or newer kernel is refused by an older one, so a
 failover to a controller node on the older kernel cannot start the pool. On a
 controller node `nvme_core.io_timeout` keeps the kernel's default, 30 s, and is
@@ -597,9 +597,10 @@ a second. When the primary dies while a host's fsync waits for that
 commit, the host's kernel can complete the fsync as a success, and those
 writes are gone after the failover. dnv's own programs cannot fix this:
 the fix waits for a kernel whose thin pool has an option that holds such a
-write back until the commit, and for dnv to use that option. After a
-failover a host can also send no flush at all until it reads the new
-primary's path again, so that an fsync makes nothing durable. [The scope
+write back until the commit, and for dnv to use that option. On a
+controller node whose kernel is older than 6.7, a host can also send no
+flush at all after a failover until it reads the new primary's path again,
+so that an fsync makes nothing durable. [The scope
 page](scope.md#51-hosts-flushes-and-snapshots) has both cases, beside the
 other cases of hosts and flushes; its sections 4 and 5 list every known
 way to lose a completed write.

@@ -1036,6 +1036,53 @@ that shows the volume's namespace (`csi.md` CSI15). A path that nothing
 following the discovery log manages is never dropped (Known
 limits).
 
+### The write cache a path reads
+
+A host reads whether a namespace has a volatile write cache when it scans
+the namespace: at its connect, at each reconnect or reset of its
+controller, and at a rescan of the controller's namespaces. It never reads
+it at an ANA change. A controller node reads its paths to the legs the
+same way. nvmet marks a namespace as having no volatile write cache while
+the namespace's device has none, and a device-mapper device takes the
+write cache of the devices its table names only when that table is loaded.
+A path that reads "write through" sends no flush: the host's block layer
+completes a flush routed to it at once and sends a write marked FUA as a
+plain one. So a device that stands in for a serving one reports the write
+cache the serving one has, and a role change finds nothing to read again:
+
+* A td's `CnErrorName` reports a write cache. Its table is two error
+  targets, and the last, `common.DmErrorWcSectors` long, names the cn
+  agent's write cache loop device (`cnagent.md` CN15). An error target that
+  names a device takes that device's write cache and sends it no IO, so
+  every IO still fails. Every ns-dev over the dm-error then reports a
+  write cache, as the raid0 over thin devices it stands in for does: a
+  standby's, a disabled cntlr's, a parked one, a provisioning-deferred one,
+  one whose dm-clone does not serve, one at a level at or above
+  `SP_LEVEL_NO_THINPOOL`, and a clone destination's at or above
+  `SP_LEVEL_NO_CLONE` (`cnagent.md` CN16). A host reads each of them as
+  having a write cache from its first scan.
+* A disk node's per-CN `DnErrorName` reports the node's disk's write
+  cache: the last of its two error targets names the disk (`dnagent.md`
+  DN10). A standby's leg path then reads what the side's own device, a
+  dm-linear over the same disk, reports once a failover opens it.
+* A primary scans again each leg path that reads "write through" while its
+  disk node's target reports a write cache, before the arrays start, and
+  loads the leg's wrapper again; and its reads look again at a leg with a
+  path that is not open yet (`cnagent.md` CN10, The write cache of a leg's
+  path). This covers a path read over an older agent's one-target error
+  table, a disk node whose kernel's error target takes no device, and a
+  migration's new side, whose dm-clone the cutover puts under the path and
+  which reports a write cache whatever the disk's.
+* A one-target device-mapper device that reads "write through" over a
+  device that reads "write back" is loaded again with the same table: an
+  ns-dev over an older agent's one-target `CnErrorName` (`cnagent.md`
+  CN16), and a leg's wrapper after its path's rescan.
+
+The error target takes a device from Linux 6.7 on. An older kernel loads
+the table, ignores the device and reports no write cache (Known limits, A
+flush through a path read on an older kernel or before an upgrade is not
+sent).
+
 ### Group on-leg layout: meta region, data region, health block
 
 Every leg's side device of a group is split into a **meta region**
@@ -9845,11 +9892,9 @@ document and only pointed to here.
   block's mapping; a flush, or a write the host marks FUA, to a thin device
   with uncommitted changes commits the metadata first, after flushing the
   data device, so a completed fsync is durable when the primary that took
-  its writes completed the flush itself and its paths to the legs read a
-  volatile write cache where the disks have one, which after a failover,
-  and on a migration's destination, they do not: such a primary's flushes
-  stop at its leg paths (`scope.md` entry "After a failover, no flush of
-  the new primary reaches a disk node"); a primary that dies first loses
+  its writes completed the flush itself and its paths to the legs read the
+  write cache their disk nodes report (Data-plane device stacks, The write
+  cache a path reads); a primary that dies first loses
   those writes though the host's fsync can still complete, since the host's
   kernel completes a flush cancelled on the dead path with no error, the
   request carrying no data to retry, and sends a later flush to the new
@@ -9859,8 +9904,7 @@ document and only pointed to here.
   before it, zeros for a block never written. nvmet reports a volatile
   write cache on its controllers and on every namespace whose device has
   one, so hosts flush through a path to a serving primary as they do to a
-  disk with one, but not through a path they identified while the
-  namespace's device had none (the next entry). Read in the kernel's
+  disk with one (the next entry). Read in the kernel's
   dm-thin, nvmet, block and NVMe host sources. The end-to-end suite resets
   the primary's machine under writes to new blocks, each followed by an
   fsync (`e2e_integtest.md`, The cases, react). In its four runs at one
@@ -9873,50 +9917,35 @@ document and only pointed to here.
   none of the four writes read back from the new primary
   (`e2e_integtest.md`, Known limits, The flush stage's lost fsync is logged,
   not asserted).
-* **A host's flush through a path it identified over the dm-error is not
-  sent.** nvmet marks a namespace as having no volatile write cache when
-  the namespace's device has none, and a host takes that mark into its
-  path when it identifies the namespace. It does so at its connect, at
-  each reconnect or reset of its controller, and at each other scan of
-  the controller's namespaces, which a namespace added to or removed from
-  the subsystem or an `nvme ns-rescan` brings. It never does so at an ANA
-  change. An ns-dev over its td's `CnErrorName` has no write cache: a
-  standby's, a disabled cntlr's, a parked one, a provisioning-deferred
-  one, one whose dm-clone does not serve, one at a level at or above
-  `SP_LEVEL_NO_THINPOOL`, and a clone destination's at or above
-  `SP_LEVEL_NO_CLONE` (`cnagent.md` CN16). The reload that serves the
-  ns-dev from the pool gives it one, but on a live namespace the cn agent
-  rewrites only its ANA group (`EnsureNamespace`), so nothing makes the
-  host identify the namespace again. So after a failover the host's path
-  to the new primary, identified on the standby, still reads
-  write-through: the host's block layer completes a flush routed to that
-  path at once, sending nothing, and sends a write the host marks FUA as a
-  plain write. An fsync through the new primary then completes with
-  nothing committed: a write to a new block is durable only at the pool's
-  own commit, about once a second, which flushes the data device first,
-  and a new primary that dies before it loses the write though its fsync
-  completed (the entry above); a write over a mapped block, which leaves
-  nothing to commit, reaches the legs' disks with no flush until the
-  pool's next commit or another flush of its data device. A namespace a
-  host identified while it was parked, deferred, waiting for its dm-clone,
-  on a disabled cntlr or at such a level is the same once it serves, with
-  no failover. A CSI volume whose node plugin connects before its pool's
-  sides end their zeroing is one: the driver's create returns once the
-  volume's records exist, and its attach waits only for the primary's
-  subsystem row (`csi.md` CSI10), which reads OK while the sides zero. So
-  is a one-cntlr pool's disabled primary, which the cdc lists again at its
-  enable, before its node has built the primary's stack (Cntlrs,
-  UpdateCntlrEnabled). These cases follow from CN16 and the kernel's
-  sources. No run shows them, and no suite reads the cache mode of a
-  host's path. Read in the kernel's nvmet, NVMe host and block sources,
-  and seen on the lab outside the suites (cn0 and host0): a namespace over a
-  linear on a dm-error read write-through on the host's path and still did
-  after the linear's table moved onto a loop device, and a host fsync then
-  sent no flush to that device; after an `nvme ns-rescan` the path read
-  write-back and the fsync's flush reached it. In the end-to-end suite's flush
-  stage the fsyncs of the writes the host sent again to the new primary took
-  under a millisecond, as fsyncs that send no flush do (`e2e_integtest.md`,
-  Known limits, The flush stage's lost fsync is logged, not asserted).
+* **A flush through a path read on an older kernel or before an upgrade is
+  not sent.** A path keeps the write cache its host read at its last scan
+  (Data-plane device stacks, The write cache a path reads). On a
+  controller node whose kernel's error target takes no device, older than
+  6.7, a td's `CnErrorName` reports no write cache, so a host's path to a
+  standby, or to a namespace parked, deferred or waiting for its dm-clone,
+  reads "write through" and keeps that reading once the namespace serves:
+  the host's block layer completes a flush routed to that path at once, so
+  an fsync through the new primary after a failover completes with nothing
+  committed, and a write to a new block is durable only at the pool's own
+  commit, about once a second, which a new primary that dies first never
+  makes. The same holds for a path a host read from an agent whose
+  dm-error has one target, until the host rescans the controller or
+  connects again (`operations.md`, Upgrade dnv). A primary's leg path that
+  reads "write through" over a target that reports a write cache is
+  scanned again in the primary's converge; until the scan takes, its leg
+  reads error and the primary's flushes stop at that path. Read in the
+  kernel's nvmet, NVMe host, block and device-mapper sources, and seen on
+  the lab, on kernel 7.0.0-43 outside the suites (cn0 and host0): a
+  namespace over a dm-linear on a one-target dm-error read "write
+  through" on the host's path and kept that reading after the linear's
+  table moved onto a loop device with a write cache, and three host fsyncs
+  then sent no flush to that device; over a dm-error whose last target
+  names a loop device the path read "write back" from its connect, every
+  IO failed, and after the move the three fsyncs sent three flushes. The
+  end-to-end suite reads, after a failover, each optimized leg path of the
+  new primary and the host's path to it, and after a migration's cutover
+  the primary's path to the new side, against what its target reports
+  (`e2e_integtest.md`, The cases, react and copy).
 * **A failover while the old primary serves can lose an acknowledged
   write.** An old primary that has not applied its demotion, or a primary
   a cntlr replacement deleted whose CN has not torn its stack down, goes

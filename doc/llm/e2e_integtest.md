@@ -819,7 +819,11 @@ still stop the cutover's pass and fail the case through the gap check below
 on a distinct cntlid slot; its cutover comes only once the primary holds a
 live path to the new side, and the worker's record of it names the primary
 and a reply of the primary's at a revision no older than the new side's
-provisioned flip (`dnv-worker.md` RW18). The case prints the migration gap,
+provisioned flip (`dnv-worker.md` RW18). Once the new side serves, the
+primary's path to it must read the write cache the new side's target
+reports, though the primary connected it while the new side served it from
+its dm-error (`cnagent.md` CN10, The write cache of a leg's path). The case
+prints the migration gap,
 read from both dn agents' logs — from the old side's first write of the
 inaccessible group to the primary's export of the leg to the new side's
 write of the optimized group — with no time limit on it, and fails when
@@ -1076,7 +1080,11 @@ short restart. Failover and cntlr replacement: the primary's cn agent is
 killed, host0 having let go first since a killed agent's nvmet objects go
 on advertising optimized; the standby must become primary and build the
 stack, held to the cntlr threshold while settling (`dnv-worker.md` AR5,
-HL2; `architecture.md`, Failover), a second failover stops the run, host0
+HL2; `architecture.md`, Failover), and every optimized leg path of the new
+primary must then read the write cache its disk node's target reports,
+"write back" for the suite's disks, loop devices over files, though the
+cntlr connected each leg as a standby (`cnagent.md` CN10, The write cache
+of a leg's path); a second failover stops the run, host0
 reconnects through the cdc, whose records the failover's own transaction
 rewrote without the dead cntlr (`architecture.md` [D18]), the dead cntlr is
 replaced on a node that held none, keeping its slot and role
@@ -1318,12 +1326,16 @@ write whose fsync was in flight at the reset is the case of the entry of
 writes", counted held or lost and logged, not asserted (Known limits,
 The flush stage's lost fsync is logged, not asserted), and so is the
 kernel-log witness of that second reset, which an fsync the reset fails
-would fill. A write or an fsync that fails ends its job there and is
+would fill. The stage also logs the median fsync of the writes after the
+stall, which takes real time only where its flush is sent. A write or an fsync that fails ends its job there and is
 logged, held or not, as an error the host was told; the writes before it
 must still read back. Nothing of the old primary survives to advertise a path, so
 host0 keeps every path it holds through the failover: the standby must
 become primary and build the stack (`dnv-worker.md` AR5), and host0 must
-read its data through the path it already held, now optimized. Once the
+read its data through the path it already held, now optimized. That path
+must read the write cache its target reports, "write back", though host0
+read it while it led to the standby, and so must every optimized leg path
+of the new primary (`architecture.md`, The write cache a path reads). Once the
 cdc's records no longer name the reset node, host0 drops its path to it, as
 a host that follows the discovery log does, and must hold none; it does so
 before it connects the replacement, which keeps the lost cntlr's cntlid
@@ -2037,12 +2049,10 @@ the connect attempted.
   fsyncs in flight, held or lost, logs each lost one with its times and the
   longest write or fsync of any job, and asserts nothing of them; the loss is
   a known limit, to be fixed later. A commit slowed this way is not the lab's
-  own speed. In the first run with the delay the fsyncs of the writes the host
-  sent again to the new primary took under a millisecond, as the host sends no
-  flush through a path it identified on the standby (`architecture.md`, Known
-  limits, A host's flush through a path it identified over the dm-error is not
-  sent), so the writes that read back after the stall show the pool's
-  mappings, not a commit their fsync made.
+  own speed. The host's path to the new primary sends flushes
+(`architecture.md`, The write cache a path reads), so the fsyncs of the
+writes the host sends again to the new primary commit their mappings; the
+stage logs the median of those fsyncs.
 * **The new data checks ran at one slice.** The stamped writer, the status
   check, the flush stage, the group cut, the fstrim step and the copy
   case's two crashes of a disk-node guest have run at one slice only;

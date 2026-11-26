@@ -928,3 +928,49 @@ func TestReadSubsysCtrlReads(t *testing.T) {
 		t.Errorf("missing directory: SubsysDevicePath = %q, %v", path, err)
 	}
 }
+
+// TestReadSubsysWriteCache: with WriteCache set, a controller's read also
+// reads the queue/write_cache of the path device whose ana_state it reads,
+// and names that device; one that does not answer reads "" and fails
+// nothing; with WriteCache unset nothing of it is read.
+func TestReadSubsysWriteCache(t *testing.T) {
+	ctx := context.Background()
+	s := newNvmeSysfs()
+	dir := s.subsys("nvme-subsys0", "nqn.2024-01.io.dnv:2:a:b:c:d",
+		"nvme0n1", "nvme3", "nvme4")
+	s.files[dir+"/nvme0n1/nsid"] = "1\n"
+	s.ctrl("nvme3", "10.0.0.3", "live", "optimized")
+	s.ctrl("nvme4", "10.0.0.4", "live", "non-optimized")
+	nvme3 := sysfsNvmeCtrlDir + "/nvme3"
+	nvme4 := sysfsNvmeCtrlDir + "/nvme4"
+	s.files[nvme3+"/nvme3c1n1/queue/write_cache"] = "write back\n"
+	s.fail("read " + nvme4 + "/nvme4c1n1/queue/write_cache")
+	read, err := s.host().ReadSubsys(ctx, dir, SubsysReadOpts{
+		NsIdx: 1, Rule: ReadStrict, WriteCache: true})
+	if err != nil || len(read.Ctrls) != 2 {
+		t.Fatalf("ReadSubsys: %+v, %v", read, err)
+	}
+	if got := read.Ctrls[0]; got.PathDev != "nvme3c1n1" ||
+		got.WriteCache != "write back" {
+		t.Errorf("nvme3 read %q %q, want nvme3c1n1 and write back",
+			got.PathDev, got.WriteCache)
+	}
+	if got := read.Ctrls[1]; got.PathDev != "nvme4c1n1" || got.WriteCache != "" {
+		t.Errorf("nvme4 read %q %q, want nvme4c1n1 and nothing",
+			got.PathDev, got.WriteCache)
+	}
+	s.trace = nil
+	read, err = s.host().ReadSubsys(ctx, dir, SubsysReadOpts{
+		NsIdx: 1, Rule: ReadStrict})
+	if err != nil {
+		t.Fatalf("ReadSubsys: %v", err)
+	}
+	for _, call := range s.trace {
+		if strings.HasSuffix(call, "/queue/write_cache") {
+			t.Errorf("a read without WriteCache read %s", call)
+		}
+	}
+	if read.Ctrls[0].WriteCache != "" || read.Ctrls[0].PathDev != "" {
+		t.Errorf("a read without WriteCache set %+v", read.Ctrls[0])
+	}
+}

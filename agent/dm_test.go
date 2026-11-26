@@ -797,3 +797,45 @@ func TestDmCloneStatusFlushesOnlyAWholeCopy(t *testing.T) {
 		})
 	}
 }
+
+// TestErrorWcTableAndItsShape: ErrorWcTable is two error targets, the last
+// common.DmErrorWcSectors long and naming the write cache device, and
+// ErrorTable with no device or a device too small to split; ErrorShapeOf
+// reads both back, as dmsetup prints them with no argument, and nothing
+// else.
+func TestErrorWcTableAndItsShape(t *testing.T) {
+	if got := ErrorWcTable(1024, "7:3"); got != "0 1016 error\n1016 8 error 7:3 0\n" {
+		t.Errorf("ErrorWcTable(1024, 7:3) = %q", got)
+	}
+	for _, tc := range []struct {
+		sectors uint64
+		devNo   string
+	}{{1024, ""}, {16, "7:3"}} {
+		if got := ErrorWcTable(tc.sectors, tc.devNo); got != ErrorTable(tc.sectors) {
+			t.Errorf("ErrorWcTable(%d, %q) = %q, want ErrorTable", tc.sectors,
+				tc.devNo, got)
+		}
+	}
+	for _, tc := range []struct {
+		name    string
+		targets []common.DmTarget
+		want    ErrorShape
+	}{
+		{"plain", []common.DmTarget{{Start: 0, Length: 1024, Type: "error"}},
+			ErrorShapePlain},
+		{"two", []common.DmTarget{{Start: 0, Length: 1016, Type: "error"},
+			{Start: 1016, Length: 8, Type: "error"}}, ErrorShapeWc},
+		{"short", []common.DmTarget{{Start: 0, Length: 1000, Type: "error"}},
+			ErrorShapeOther},
+		{"split elsewhere", []common.DmTarget{
+			{Start: 0, Length: 1000, Type: "error"},
+			{Start: 1000, Length: 24, Type: "error"}}, ErrorShapeOther},
+		{"linear", []common.DmTarget{{Start: 0, Length: 1024, Type: "linear",
+			Args: []string{"7:3", "0"}}}, ErrorShapeOther},
+		{"none", nil, ErrorShapeOther},
+	} {
+		if got := ErrorShapeOf(tc.targets, 1024); got != tc.want {
+			t.Errorf("%s: ErrorShapeOf = %d, want %d", tc.name, got, tc.want)
+		}
+	}
+}

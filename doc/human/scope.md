@@ -446,11 +446,11 @@ once a second. A primary that dies before that commit loses the write, and
 the block reads as it did before the write: zeros where nothing was
 written. This is the behaviour of a disk with a volatile write cache, not
 a loss in the sense of this document. A flush that completes although its
-primary died is a defect; section 5.1 has it. So is a flush the host never
-sends because it still reads a volume's path as having no cache, as after a
-failover, and a flush the primary never sends on to the disk nodes for the
-same reason (section 5.1). So is a durable write lost in a failover while the old primary
-still serves, but for the cases section 5.1 lists and accepts.
+primary died is a defect; section 5.1 has it. So is a flush that a host or
+a primary never sends because it read a path as having no cache, in the
+cases section 5.1 still lists. So is a durable write lost in a failover
+while the old primary still serves, but for the cases section 5.1 lists and
+accepts.
 
 ## 5. Data loss outside the accepted cases
 
@@ -491,73 +491,44 @@ retired leg taken back that joins its array with old data (section 10).
   flight at the reset and every write after it read back, and no write or
   fsync failed. The suite logs the writes whose fsync was in flight and
   does not fail on them.
-- **A host's flush through a path it last read while its volume served
-  only errors is not sent.** Silent. A volume tells the host, path by
-  path, whether it has a volatile write cache. A volume served only by
-  errors has none. These are: a standby's volume; a volume of a disabled
-  cntlr; a volume of a new pool whose sides are still zeroing; a volume
-  whose namespace an operator suspended or that waits for its clone's
-  copy; a clone's destination volume while its pool's level builds no
-  clone; and every volume of a pool whose level builds no thin pool. The
-  host reads this when it connects. It reads it again when its connection
-  to the controller comes back after a loss or a reset, and when it
-  rescans the controller's volumes: when a volume is added to or removed
-  from the subsystem, or at `nvme ns-rescan`. A failover moves the primary
-  role but makes the host read nothing again. Neither does the end of the
-  zeroing, of the suspension, of the clone's wait, of the disable or of the
-  level step. So the host still reads the new primary's path, or the path
-  to a volume it connected to early, as having no cache. The host's kernel
-  then completes each flush on that path at once without sending it, and
-  sends a write it marks FUA as a plain write. An fsync returns success
-  with nothing made durable. The pool commits on its own about once a
-  second. So a write to a new block is lost when the serving primary dies
-  before that commit, though its fsync completed. After a failover even
-  that commit is not made durable on a disk node whose disk has a write
-  cache (the next entry). A write over data
-  already there waits in the disks' caches until something else flushes
-  them. This ends with a rescan, or with a connection made, or made again,
-  while the volume is served. It comes back the next time the host reads
-  the path while the volume serves only errors, as at the next failover. A
-  Kubernetes volume is attached without a wait for its pool's zeroing, so
-  a pod that starts with a new claim can meet this with no failover.
-  State: fix decided: a lab test first settles the way for a host's path.
-  The first way: a standby's namespace device reports a write cache from
-  the start, while it still fails all IO; the lab must show that such a
-  device can be built and that the host then reads "write back". The second way: the namespace is turned off
-  and on in the NVMe target once the serving device is under it, which the
-  host then reads again; it must be proven safe for a host that looks in
-  between. If neither holds, this entry stays, with the state fix later.
-  Read from the kernel's code. Seen in the lab, on one controller node and one host, outside
-  dnv's own steps: a
-  host's path to a namespace made by hand over an error device, then moved
-  onto a loop device that has a write cache, kept reading as having no
-  cache, and the host's fsync sent no flush to that device; after
-  `nvme ns-rescan` it did. Seen in the
-  end-to-end suite's fsync stage: the fsyncs a host made through the new
-  primary right after a failover took 0 ms, as fsyncs that send no flush
-  do; no suite reads the cache setting of a host's path. The cases with no
-  failover only follow from dnv's rules, and no run has shown them.
-- **After a failover, no flush of the new primary reaches a disk node.**
-  Silent. A controller node reads whether a leg's path has a volatile
-  write cache as a host does: when it connects the leg, connects it again
-  or rescans it, and not when the path's ANA state changes. A standby
-  connects to every leg while each disk node serves that standby's path
-  from a device that fails every IO, which has no write cache. A failover
-  puts the side's own device under the path and moves its ANA state, and
-  nothing makes the new primary read the setting again. So the new
-  primary's kernel completes every flush to its legs at once and sends
-  nothing: the hosts' flushes, md's own and those of each thin pool
-  commit. The same holds for the new side of a migration, whose path the
-  controller node connects before the cutover, while the new side serves
-  it from such a device. Where a disk node's disk has a volatile write
-  cache, completed and flushed writes then wait in that cache, and a power
-  loss of the disk node can lose them: md can count that leg as whole, so
-  reads can return old data, and a thin pool's metadata can come back
-  damaged. This lasts until the controller node connects that path again
-  and also loads its own device over the leg anew, which takes the setting
-  only when it is loaded, as after the controller node's reboot. A disk with no volatile write cache loses nothing
-  this way. State: fix decided. Read from dnv's code and the kernel's;
-  not seen in the lab.
+- **A flush is not sent through a path read on an older kernel or before
+  an upgrade.** Silent. A host reads whether a volume has a volatile write
+  cache when it connects, when its connection comes back after a loss or a
+  reset, and when it rescans the controller's volumes. It does not read it
+  at a failover. A controller node reads its paths to the legs the same
+  way. A path read as having no cache sends no flush: the kernel completes
+  each flush on it at once. So the devices that serve no data in a volume's
+  place report a write cache, while every IO through them fails: a
+  standby's volume, a disabled cntlr's, a parked volume, one whose sides
+  still zero, one that waits for its clone's copy, and one whose pool's
+  level builds no thin pool or no clone. So does the device by which a disk
+  node serves a standby's path to a leg. And a new primary scans again each
+  path to a leg that reads no write cache while its disk node reports one,
+  before it starts the arrays. Three cases are left. First, on a controller
+  node whose kernel is older than 6.7, a device that serves no data reports
+  no write cache: a host reads such a volume's path as having none, and
+  sends no flush through it once the volume serves, as after a failover.
+  An fsync through it then makes nothing durable, and a write to a new
+  block is lost when the primary dies before its thin pool's own commit,
+  about once a second. Second, a host's path read before an upgrade from a
+  build whose devices reported no write cache, as 0.1's did, keeps that
+  reading until the host rescans the controller or connects again. Third,
+  a new primary's path to a leg can read no write cache for a few seconds
+  until its rescan takes: the leg's row then reads error, and the worker
+  sends the syncup again, which scans it again; until then the primary's
+  flushes stop at that path. State: accepted for the older kernel, as dnv
+  is tested on the 7.0 series only; procedure written for the upgrade
+  ([operations](operations.md#upgrade-dnv), the steps for an upgrade from
+  0.1). Read from the kernel's code. Seen in the lab, on one controller
+  node and one host, outside dnv's own steps: a namespace made by hand over
+  a device with no write cache, then moved onto one with a write cache,
+  kept reading as having no cache on the host, and the host's fsyncs sent
+  no flush; over a device built as dnv builds it now, the host read "write
+  back" from its connect, every write failed, and after the move each
+  fsync sent its flush. The end-to-end suite checks, after a failover,
+  that the host's path to the new primary and each of the new primary's
+  paths to its legs read what their targets report, and after a
+  migration's cutover, that the primary's path to the new side does.
 - **A failover while the old primary still serves can lose a write the
   host was told was done, in some cases.** Silent. A host still writing
   through the old primary can have a write that lands on one leg of a

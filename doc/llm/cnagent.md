@@ -73,12 +73,14 @@ and comments `common/constants.go` holds:
 * `CnConnectPassBudget`, `CnConnectRetryPause`, `CnNsScanPause`,
   `CnNsHeadPause` and `CnConnectDialTimeout`, the connect step's one wait
   budget per converge pass (CN10, CN18), shared by every leg and clone
-  source of the pass and drawn on by exactly three things: a failed
+  source of the pass and drawn on by exactly four things: a failed
   attempt's own elapsed time, its dial and its `nvme connect`; the pause
-  before each in-pass retry; and the steps of the wait for the namespace
-  head after a connect this pass made, with a pause of its own while a
-  picked head is not complete. `CnConnectDialTimeout` bounds the dial
-  before each attempt, half as much again as the budget (CN10).
+  before each in-pass retry; the steps of the wait for the namespace head
+  after a connect this pass made, with a pause of its own while a picked
+  head is not complete; and the `CnRescanPause` steps of a primary's wait
+  for a rescanned leg path's write cache (CN10, The write cache of a leg's
+  path). `CnConnectDialTimeout` bounds the dial before each attempt, half
+  as much again as the budget (CN10).
 * `CnSubsysOrphanGrace`, the age under which the node-level sweep leaves
   alone a subsystem that has no namespace device, no allowed host and no
   port link and that no held cntlr request claims (CN21).
@@ -1028,7 +1030,9 @@ whether a `SyncupCntlr` or the startup reconcile runs it — gets one wait
 budget,
 `CnConnectPassBudget`, made at the start of that pass, shared by every
 leg and by the clone sources of CN18, and never carried into another pass
-or another cntlr. Exactly three things draw on it. (1) Every failed
+or another cntlr. Exactly four things draw on it, the fourth a primary's
+wait for a rescanned leg path's write cache (The write cache of a leg's
+path, below). (1) Every failed
 connect attempt, its dial and its `nvme connect` (below), is charged its
 own elapsed time. (2) After a failed attempt at a provisioned side the
 pass pauses `CnConnectRetryPause` and tries again — an in-pass retry — as
@@ -1287,6 +1291,45 @@ every controller of one NQN in the one subsystem (`architecture.md`,
 [D1]). CN18's source step reads its source through the same lookup, and
 the CN28 rows that come from it — a standby's leg, a clone's target —
 read `ERROR` naming the read too.
+
+**The write cache of a leg's path.** A leg path reads the write cache its
+controller node read at its last scan of the side's namespace
+(`architecture.md`, The write cache a path reads). On a primary, the leg's
+first lookup of a converge reads it beside each path's ANA state
+(`lookupLegWcache`), and the leg's step asks, after the connect and before
+the wrapper's step, the target of each live, optimized controller whose
+path reads "write through" what it reports now (`NvmeHost.NsWriteCache`); a
+path that reads "write back" is not asked: it sends flushes, and a target
+with no write cache completes them at once. An answer that does not come,
+or a command the target fails, leaves its path unjudged, logged at Info. A
+path whose target reports a write cache is stale: the step writes its
+controller's `rescan_controller` (`NvmeHost.Rescan`) and, for each rescan
+written, looks the leg up again, after up to `common.CnRescanPauses`
+`common.CnRescanPause` steps drawn from the pass's wait budget, until those
+paths and the leg's multipath head read "write back". Reason: a leg's
+wrapper takes the head's write cache only at a load, and md's array takes
+no setting of its members, so the scan comes before the arrays start; the
+cap keeps one leg whose rescan does not take from spending the budget the
+pass's other legs need. The wrapper's step follows, and a wrapper as wanted
+that reads "write through" over a head that reads "write back" is loaded
+again. Then the leg's mark is set (`cntlrState.wcStale`, `markLegWcache`):
+stale while a path or the wrapper still is, watched while a live path of
+the leg is not optimized, and dropped otherwise. A stale leg's row reads
+error whatever its probe says, which the worker counts as any error row of
+a leg (`dnv-worker.md` HL2), so a leg whose flushes keep stopping at a path
+gets the leg repair its threshold brings; and the verdict names its
+wrapper, so the worker sends the syncup again (CN30). A cntlr's read looks
+again at each marked leg, its paths' targets asked and its wrapper read,
+sets the mark again, and names the wrapper while the leg is stale and the
+lookup answered: a lookup that does not answer stops the converge's step
+too. The watch is for a path a disk node opens with no converge of the
+cntlr: a migration's new side at its cutover, whose dm-clone reports a
+write cache whatever the disk's, and a new primary's path opened after its
+converge. A read asks no target of a leg with no mark: its paths are open
+over devices that report the write cache they will keep. A standby asks
+nothing, and its paths are read with no write cache: its disk nodes serve
+it from dm-errors that report the disk's write cache (`dnagent.md` DN10),
+and a failover's converge reads them.
 
 **The cut of a migrating leg's path.** On a primary, a leg with two sides
 — a migration's — of an md-raid1 group, one of whose paths is down (its
@@ -3466,6 +3509,29 @@ the error): the raid0 `CnRaid0Name` (dm-striped across the td's per-slice
 thin volumes in `slice_idx` order, with its chunk from `stripe_size`) and
 the permanent reload target `CnErrorName`, both of the td's size.
 
+**The dm-error reports a write cache.** `CnErrorName`'s table is
+`agent.ErrorWcTable` over the agent's **write cache loop device**
+(`wcache.go`), so every ns-dev over it reports a write cache while every IO
+fails (`architecture.md`, The write cache a path reads). The loop device is
+a read-write loop device over the file `NameFmt.CnWcacheFile` in
+`common.CnWcacheDir`, a memory file system, one for each agent: a
+read-only loop device has no write cache, and the file and the loop device
+both end with a reboot. A converge asks for it: the device last found is
+checked again by its backing file and its write cache; with none, the
+converge looks for the one an earlier process of the agent made
+(`losetup -j`), and makes one where none is; a read that does not answer
+keeps the device last found, and a loop device the make put there that
+does not read as wanted is detached again. A look or a make that fails is
+logged at Warn and not tried again before `common.CnWcacheRetry`, and the
+dm-error then gets `agent.ErrorTable`; so is a two-target table whose load
+fails, the dm-error resumed on the table it had. A read neither looks nor
+makes. While the agent has no loop device either table is the one wanted;
+once it has one, a converge loads an older agent's one-target table again
+into the two-target one, and a read reads such a table OK with
+`RES_REASON_DIFFERS`, which names it, so the worker sends the syncup that
+loads it (CN30), and any other table of a dm-error OK. Nothing removes the
+loop device; a reboot does.
+
 CN16. Namespaces and host-facing nvmet (`td.go`, `plan.go`). Per
 `Namespace` of every `Subsystem` in `nqn_to_subsystem`, the namespace's
 own dm-linear `CnNsDevName` (`architecture.md`, Primary cntlr) with a
@@ -3526,6 +3592,14 @@ backing state machine, evaluated in this order (first match wins;
 7. `sp_level` at or above `SP_LEVEL_READONLY` (primary only): the table
    is a dm-flakey table with the error-writes feature over the rule-5 or
    rule-6 backing — reads pass, writes error (`architecture.md`, [D11]).
+
+**An ns-dev with a stale write cache is loaded again.** An ns-dev over its
+td's `CnErrorName` that reads "write through" while the dm-error reads
+"write back", which an older agent's build leaves, is loaded again with the
+same table (`architecture.md`, The write cache a path reads): a
+device-mapper device takes the write cache of the device under it only at
+a load of its own. The same table moves no data, so CN33's fence lets the
+load through. A read does not name it.
 
 Rules 4 and 5 and the `auto_resume` override below combine into one flip
 worth stating out loud. An `auto_resume` clone's destination namespace

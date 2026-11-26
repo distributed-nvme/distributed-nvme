@@ -704,6 +704,62 @@ func ErrorTable(sectors uint64) string {
 	return fmt.Sprintf("0 %d error", sectors)
 }
 
+// ErrorWcTable is the table of a device that fails every IO and reports the
+// write cache of the device wcDevNo (architecture.md, Data-plane device
+// stacks): an error target over all but the last common.DmErrorWcSectors
+// sectors, and over those an error target that names wcDevNo, which takes
+// that device's write cache, as a target over a device does, and still
+// sends it no IO. A host or a controller node reads a path's write cache
+// only when it scans the namespace, so a device that stands in for a
+// serving one reports the write cache the serving one will. Two lines, for
+// Dm.CreateMulti and Dm.ReloadMulti. With no wcDevNo, or a device too small
+// to keep a first target as long as the last, it is ErrorTable.
+func ErrorWcTable(sectors uint64, wcDevNo string) string {
+	if wcDevNo == "" || sectors <= 2*common.DmErrorWcSectors {
+		return ErrorTable(sectors)
+	}
+	first := sectors - common.DmErrorWcSectors
+	return fmt.Sprintf("0 %d error\n%d %d error %s 0\n",
+		first, first, common.DmErrorWcSectors, wcDevNo)
+}
+
+// ErrorShape is what a live table of a device that fails every IO reads as
+// (ErrorShapeOf).
+type ErrorShape int
+
+const (
+	// ErrorShapeOther: neither table below.
+	ErrorShapeOther ErrorShape = iota
+	// ErrorShapePlain: ErrorTable, one error target of the device's length.
+	ErrorShapePlain
+	// ErrorShapeWc: ErrorWcTable's two error targets. dmsetup prints an
+	// error target with no arguments, the device it names included, so the
+	// table tells nothing of which device that is.
+	ErrorShapeWc
+)
+
+// ErrorShapeOf reads a live table against the two tables of a device of
+// sectors that fails every IO.
+func ErrorShapeOf(targets []common.DmTarget, sectors uint64) ErrorShape {
+	for _, target := range targets {
+		if target.Type != "error" {
+			return ErrorShapeOther
+		}
+	}
+	switch {
+	case len(targets) == 1 && targets[0].Start == 0 &&
+		targets[0].Length == sectors:
+		return ErrorShapePlain
+	case len(targets) == 2 && sectors > 2*common.DmErrorWcSectors &&
+		targets[0].Start == 0 &&
+		targets[0].Length == sectors-common.DmErrorWcSectors &&
+		targets[1].Start == sectors-common.DmErrorWcSectors &&
+		targets[1].Length == common.DmErrorWcSectors:
+		return ErrorShapeWc
+	}
+	return ErrorShapeOther
+}
+
 func LinearTable(sectors uint64, dev string, offsetSectors uint64) string {
 	return fmt.Sprintf("0 %d linear %s %d", sectors, dev, offsetSectors)
 }

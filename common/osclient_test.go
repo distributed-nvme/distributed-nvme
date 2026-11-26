@@ -16,6 +16,7 @@ import (
 	"syscall"
 	"testing"
 	"time"
+	"unsafe"
 
 	"google.golang.org/protobuf/proto"
 
@@ -2311,5 +2312,68 @@ func TestRunCommandNotFound(t *testing.T) {
 		"sh", []string{"-c", "exit 127"}, "")
 	if errors.Is(err, ErrCommandNotFound) {
 		t.Errorf("a tool that exits 127 reads as not found: %v", err)
+	}
+}
+
+// TestNvmeNsWriteCache: the admin command is the kernel's 72-byte struct,
+// an Identify of the namespace's command set independent structure, and
+// the answer is the bit "volatile write cache not present" of its first
+// byte, read the other way round; a refused command is an error with false.
+func TestNvmeNsWriteCache(t *testing.T) {
+	if got := unsafe.Sizeof(nvmeAdminCmd{}); got != 72 {
+		t.Fatalf("nvmeAdminCmd is %d bytes, want the kernel's 72", got)
+	}
+	path := filepath.Join(t.TempDir(), "nvme0")
+	if err := os.WriteFile(path, nil, 0o644); err != nil {
+		t.Fatalf("planting %s: %v", path, err)
+	}
+	saved := nvmeIdentify
+	defer func() { nvmeIdentify = saved }()
+	client := NewLimitedOsClient(0)
+	for _, tc := range []struct {
+		name    string
+		nsfeat  byte
+		refuse  bool
+		want    bool
+		wantErr bool
+	}{
+		{"a write cache", 0x00, false, true, false},
+		{"none", nvmeNsVwcNotPresent, false, false, false},
+		{"none, beside another bit", nvmeNsVwcNotPresent | 0x10, false, false, false},
+		{"refused", 0x00, true, false, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			nvmeIdentify = func(f *os.File, nsid uint32, cns uint32, buf []byte) error {
+				if nsid != 1 || cns != nvmeCnsCsIndep || len(buf) != nvmeIdentifyBytes {
+					return fmt.Errorf("identify nsid %d cns %d into %d bytes", nsid, cns, len(buf))
+				}
+				if tc.refuse {
+					return errors.New("EIO")
+				}
+				buf[0] = tc.nsfeat
+				return nil
+			}
+			got, err := client.NvmeNsWriteCache(context.Background(), path, 1)
+			if got != tc.want || (err != nil) != tc.wantErr {
+				t.Errorf("NvmeNsWriteCache = %v, %v; want %v, error %v", got,
+					err, tc.want, tc.wantErr)
+			}
+		})
+	}
+}
+
+// TestIdentifyResult: an Identify ioctl fails on its errno, and with none on
+// a non-zero NVMe status, which the kernel returns for a command the
+// controller failed; only a status of zero with no errno succeeds.
+func TestIdentifyResult(t *testing.T) {
+	if err := identifyResult("/dev/nvme0", 1, nvmeCnsCsIndep, 0, 0); err != nil {
+		t.Errorf("status 0, no errno: %v", err)
+	}
+	if err := identifyResult("/dev/nvme0", 1, nvmeCnsCsIndep, 0x400b, 0); err == nil ||
+		!strings.Contains(err.Error(), "0x400b") {
+		t.Errorf("status 0x400b: %v, want an error naming it", err)
+	}
+	if err := identifyResult("/dev/nvme0", 1, nvmeCnsCsIndep, 0, syscall.EIO); !errors.Is(err, syscall.EIO) {
+		t.Errorf("EIO: %v", err)
 	}
 }

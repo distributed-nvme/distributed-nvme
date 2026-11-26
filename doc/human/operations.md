@@ -7235,6 +7235,18 @@ Safe steps, in this order, the order the e2e suite's upgrade case ran
 
 For an upgrade from 0.1, also:
 
+- The hosts' paths: once step 12 passes, rescan on each host every
+  controller of a dnv subsystem, with `nvme ns-rescan /dev/nvme<X>` for
+  each controller that `nvme list-subsys` lists under one. A host reads
+  whether a volume has a write cache only when it connects and when it
+  rescans. 0.1 served a standby's volume, a parked one and a few others
+  from a device with no write cache, so a path a host read then, above all
+  a path to a standby, reads as having none, and the host would send no
+  flush through it once it serves, as after a failover. The new build's
+  devices report a write cache, which the rescan reads. The agents' start
+  of step 7 loads those devices again first. Not tested: the e2e suite's
+  upgrade case reads no host's write cache.
+
 - The CSI driver: apply these files of the new release's `deploy/` folder
   by name: `namespace.yaml`, `csidriver.yaml`,
   `controller-serviceaccount.yaml`, `node-serviceaccount.yaml`,

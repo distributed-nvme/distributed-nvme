@@ -41,6 +41,9 @@ type CnAgentServer struct {
 
 	capacity uint64
 	port     agent.PortConf
+
+	// wcache is the agent's write cache loop device (CN15; wcacheDevNo).
+	wcache wcacheLoop
 	// strayCut is the cut mode the agent decided at its start (CN33,
 	// CN-CM2): set where the start check found no cause, and then every
 	// converge cuts and every read reads the stray connections of the
@@ -251,6 +254,18 @@ type cntlrState struct {
 	// obs is the cntlr's latest observation and its running read
 	// (dnagent.md SH28, SH29), guarded by the server's mu.
 	obs agent.ObsSlot[*pb.CntlrInfo]
+
+	// wcStale holds, per leg id, the legs whose write cache a primary's
+	// reads look at again (CN10, The write cache of a leg's path; wcMark):
+	// one a converge or a read left stale, a path or the leg's wrapper, and
+	// one with a live path that is not optimized, which its disk node can
+	// open over another device with no converge of this cntlr. A read that
+	// finds neither drops the entry (legWcacheVerdict), and every converge
+	// sets the map anew for its own legs, empty on a standby. In memory
+	// only: the startup reconcile's converge reads every leg again. It is
+	// read and written under this cntlr's object lock or the node write
+	// lock, as tornTds is.
+	wcStale map[uint64]wcMark
 }
 
 // NewCnAgentServer builds the cn role server. oc is the process's single

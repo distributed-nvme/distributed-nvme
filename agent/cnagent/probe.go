@@ -130,7 +130,15 @@ func (s *CnAgentServer) probeCntlr(
 		// thousands of legs would otherwise read each one's controllers on
 		// every read.
 		var row *pb.ResInfo
+		var wcName string
 		if plan.primary {
+			// A leg with a write cache mark is read again (CN10): this
+			// updates or drops its mark, which its row reads, and names the
+			// leg while a path or its wrapper is stale and the lookup
+			// answered.
+			if lookupErr == nil {
+				view, wcName = s.legWcacheVerdict(ctx, st, plan, lp, view)
+			}
 			row = s.legInfo(ctx, st, plan, lp, view, lookupErr)
 		}
 		if view == nil && lookupErr == nil && (!plan.primary ||
@@ -167,6 +175,10 @@ func (s *CnAgentServer) probeCntlr(
 		}
 		if !plan.primary {
 			row = s.legInfo(ctx, st, plan, lp, view, lookupErr)
+		} else if wcName != "" {
+			// The converge's step on a stale write cache is the leg's
+			// rescan and its wrapper's load (CN10, CN30).
+			lp.wrapperName = rowFailure(errRowDiffers, wcName)
 		}
 		info.LegIdToLeg[lp.legId] = row
 	}
@@ -329,11 +341,11 @@ func (s *CnAgentServer) probeCntlr(
 	// Per-td raid0 and dm-error.
 	for _, tp := range plan.tds {
 		if plan.wantAny {
-			status, details := s.probeDmArgs(
-				ctx, plan.rd, tp.errorName, "error", tp.sectors, nil, 0)
-			info.TdIdToDmError[tp.tdId] = t.Set(
+			status, details, reason := s.probeDmError(
+				ctx, plan.rd, tp.errorName, tp.sectors)
+			info.TdIdToDmError[tp.tdId] = t.SetReason(
 				resKeyOf(resKeyTdErrorFmt, tp.tdId), tp.errorName,
-				status, details)
+				status, details, reason)
 		} else {
 			// CN19: the converge reports the suppressed dm-error rather than
 			// leaving it out (syncup_cntlr.go build()), so the probe must

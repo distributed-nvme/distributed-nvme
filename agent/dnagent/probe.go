@@ -486,8 +486,7 @@ func (s *DnAgentServer) probeCnStacks(
 	info.CnIdToDmLinear = make(map[uint64]*pb.ResInfo, len(plan.cnIds))
 	for _, cnId := range plan.cnIds {
 		errName := plan.errName(cnId)
-		status, details := s.probeDmTarget(
-			ctx, errName, "error", plan.sectors, "")
+		status, details := s.probeDmError(ctx, errName, plan.sectors)
 		info.CnIdToDmError[cnId] = t.Set(
 			resKeyOf(resKeyDmErrorFmt, cnId), errName, status, details)
 
@@ -556,8 +555,42 @@ func (s *DnAgentServer) probeCnStacks(
 	}
 }
 
+// probeDmError reads a per-CN dm-error's row: OK on either table of a
+// device that fails every IO (agent.ErrorShapeOf), the one that reports the
+// disk's write cache and an older agent's one-target table, which a converge
+// loads again (ensureDmError) and a read does not name. While it stays, a
+// cntlr's path the node serves from it reads no write cache at its scan,
+// which the primary's own rescan corrects once the path serves (cnagent.md
+// CN10, The write cache of a leg's path).
+func (s *DnAgentServer) probeDmError(
+	ctx context.Context,
+	name string,
+	sectors uint64,
+) (pb.ResStatus, string) {
+	dev, err := s.dm.Info(ctx, name)
+	if err != nil {
+		return pb.ResStatus_RES_STATUS_ERROR, err.Error()
+	}
+	if dev == nil {
+		return pb.ResStatus_RES_STATUS_MISSING, ""
+	}
+	targets, err := s.dm.Table(ctx, name)
+	if err != nil {
+		return pb.ResStatus_RES_STATUS_ERROR, err.Error()
+	}
+	if agent.ErrorShapeOf(targets, sectors) == agent.ErrorShapeOther {
+		return pb.ResStatus_RES_STATUS_ERROR,
+			"table is not the desired error target"
+	}
+	if dev.Suspended {
+		return pb.ResStatus_RES_STATUS_ERROR, detailsSuspended
+	}
+	return pb.ResStatus_RES_STATUS_OK, ""
+}
+
 // probeDmTarget checks one dm device against its desired single-target
-// table. backingPath is empty for a dm-error device.
+// table; backingPath, when not empty, is the device its first argument must
+// name.
 func (s *DnAgentServer) probeDmTarget(
 	ctx context.Context,
 	name string,

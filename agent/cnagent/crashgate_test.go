@@ -421,6 +421,17 @@ func (g *crashGate) OpenExclusive(ctx context.Context, path string) error {
 	return g.osc.OpenExclusive(ctx, path)
 }
 
+func (g *crashGate) NvmeNsWriteCache(
+	ctx context.Context, ctrlPath string, nsid uint32,
+) (bool, error) {
+	ok, held := g.enter(ctx, "nvme ns write cache "+ctrlPath)
+	if !ok {
+		return false, errCrashEnded
+	}
+	defer g.leave(held)
+	return g.osc.NvmeNsWriteCache(ctx, ctrlPath, nsid)
+}
+
 func (g *crashGate) DialTcp(
 	ctx context.Context, address string, timeout time.Duration,
 ) error {

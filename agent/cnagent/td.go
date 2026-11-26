@@ -277,7 +277,7 @@ func (s *CnAgentServer) convergeNsDev(
 	// loop ensures it earlier in the pass (CN15), and this retries it on a
 	// pass in which that step failed.
 	if np.td != nil && np.backingName == np.td.errorName {
-		if err := s.ensureDmError(
+		if err := s.ensureTdError(
 			ctx, np.td.errorName, np.td.sectors); err != nil {
 			return nsDevFailed, err
 		}
@@ -297,7 +297,7 @@ func (s *CnAgentServer) convergeNsDev(
 		}
 		if hold {
 			// Created parked, on the td's dm-error.
-			if err := s.ensureDmError(
+			if err := s.ensureTdError(
 				ctx, np.td.errorName, np.td.sectors); err != nil {
 				return nsDevFailed, err
 			}
@@ -351,6 +351,17 @@ func (s *CnAgentServer) convergeNsDev(
 				}
 				dev = &agent.DmDevInfo{}
 			}
+		} else if np.td != nil && np.backingName == np.td.errorName &&
+			s.wcacheStale(ctx, np.devName, devNo) {
+			// CN15: an ns-dev loaded over its td's dm-error while the
+			// dm-error reported no write cache, as an older agent built it,
+			// takes the dm-error's write cache only from a load of its own;
+			// the same table again moves no data, so the CN33 fence lets it
+			// through.
+			if err := s.dm.Reload(ctx, np.devName, table); err != nil {
+				return nsDevFailed, err
+			}
+			dev = &agent.DmDevInfo{}
 		}
 	}
 	// Nothing here suspends the ns-dev but the Reload above, and it leaves the
@@ -568,7 +579,7 @@ func (s *CnAgentServer) parkNsDev(
 	if err != nil || dev == nil {
 		return err
 	}
-	if err := s.ensureDmError(ctx, np.td.errorName, np.td.sectors); err != nil {
+	if err := s.ensureTdError(ctx, np.td.errorName, np.td.sectors); err != nil {
 		return err
 	}
 	devNo, err := s.dmDevNo(ctx, nil, np.td.errorName)

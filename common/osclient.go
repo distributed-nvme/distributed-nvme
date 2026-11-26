@@ -12,6 +12,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strings"
 	"sync"
@@ -158,6 +159,16 @@ type OsClient interface {
 	// path is an error wrapping fs.ErrNotExist (osclient.md,
 	// OpenExclusive).
 	OpenExclusive(ctx context.Context, path string) (err error)
+
+	// NvmeNsWriteCache asks an NVMe controller, the character device at
+	// ctrlPath, whether its namespace nsid has a volatile write cache, in
+	// the caller's own process: one Identify of the namespace's command set
+	// independent data structure, sent as an admin command, and its bit
+	// "volatile write cache not present" read. It is what the controller
+	// reports now, the field the kernel reads when it scans the namespace
+	// (osclient.md, NvmeNsWriteCache). A command the controller fails is an
+	// error, and the answer that comes back with an error is false.
+	NvmeNsWriteCache(ctx context.Context, ctrlPath string, nsid uint32) (cache bool, err error)
 
 	// DialTcp opens a TCP connection to address ("host:port") in the
 	// caller's own process, waiting at most timeout for the peer to answer,
@@ -852,6 +863,125 @@ func (c *LimitedOsClient) OpenExclusive(ctx context.Context, path string) error 
 		slog.Log(ctx, level, "os open exclusive", appendErr(attrs, err)...)
 	}
 	return err
+}
+
+// nvmeAdminCmd is the kernel's struct nvme_passthru_cmd, the argument of
+// NVME_IOCTL_ADMIN_CMD, field for field; Go lays it out as C does, in 72
+// bytes.
+type nvmeAdminCmd struct {
+	opcode      uint8
+	flags       uint8
+	rsvd1       uint16
+	nsid        uint32
+	cdw2        uint32
+	cdw3        uint32
+	metadata    uint64
+	addr        uint64
+	metadataLen uint32
+	dataLen     uint32
+	cdw10       uint32
+	cdw11       uint32
+	cdw12       uint32
+	cdw13       uint32
+	cdw14       uint32
+	cdw15       uint32
+	timeoutMs   uint32
+	result      uint32
+}
+
+const (
+	// nvmeIoctlAdminCmd is NVME_IOCTL_ADMIN_CMD, _IOWR('N', 0x41, struct
+	// nvme_passthru_cmd).
+	nvmeIoctlAdminCmd = 0xC0484E41
+	// nvmeAdminIdentify is the Identify opcode, nvmeCnsCsIndep its CNS
+	// value for the command set independent namespace data structure, and
+	// nvmeNsVwcNotPresent the bit of that structure's first byte, nsfeat,
+	// that says the namespace has no volatile write cache.
+	nvmeAdminIdentify   = 0x06
+	nvmeCnsCsIndep      = 0x08
+	nvmeNsVwcNotPresent = 1 << 5
+	// nvmeIdentifyBytes is the size of an Identify data structure, and
+	// nvmeIdentifyTimeoutMs the time limit the command carries, which the
+	// kernel takes as the request's own: an Identify is answered in
+	// microseconds by a live controller.
+	nvmeIdentifyBytes     = 4096
+	nvmeIdentifyTimeoutMs = 2000
+)
+
+// nvmeIdentify sends one Identify of nsid with cns on an open controller
+// device into buf. A variable, so the package's tests can stand in for the
+// kernel.
+var nvmeIdentify = func(f *os.File, nsid uint32, cns uint32, buf []byte) error {
+	cmd := nvmeAdminCmd{
+		opcode:    nvmeAdminIdentify,
+		nsid:      nsid,
+		addr:      uint64(uintptr(unsafe.Pointer(&buf[0]))),
+		dataLen:   uint32(len(buf)),
+		cdw10:     cns,
+		timeoutMs: nvmeIdentifyTimeoutMs,
+	}
+	status, _, errno := syscall.Syscall(syscall.SYS_IOCTL, f.Fd(),
+		nvmeIoctlAdminCmd, uintptr(unsafe.Pointer(&cmd)))
+	runtime.KeepAlive(buf)
+	return identifyResult(f.Name(), nsid, cns, status, errno)
+}
+
+// identifyResult is the error of one Identify ioctl: its errno, or, with
+// none, the NVMe status the ioctl returns, which a command the controller
+// failed carries, such as an invalid namespace; nil for a status of zero.
+// The data of a failed command is never read: its buffer stays zero, which
+// would read as a write cache.
+func identifyResult(
+	name string,
+	nsid uint32,
+	cns uint32,
+	status uintptr,
+	errno syscall.Errno,
+) error {
+	switch {
+	case errno != 0:
+		return fmt.Errorf("NVME_IOCTL_ADMIN_CMD identify cns %d nsid %d on %s: %w",
+			cns, nsid, name, errno)
+	case status != 0:
+		return fmt.Errorf("NVME_IOCTL_ADMIN_CMD identify cns %d nsid %d on %s: "+
+			"NVMe status %#x", cns, nsid, name, status)
+	}
+	return nil
+}
+
+func (c *LimitedOsClient) NvmeNsWriteCache(
+	ctx context.Context,
+	ctrlPath string,
+	nsid uint32,
+) (bool, error) {
+	if err := c.sem.Acquire(ctx, 1); err != nil {
+		return false, err
+	}
+	defer c.sem.Release(1)
+	if err := ctx.Err(); err != nil {
+		return false, err
+	}
+	cache, err := func() (bool, error) {
+		f, err := os.OpenFile(ctrlPath, os.O_RDONLY, 0)
+		if err != nil {
+			return false, err
+		}
+		defer f.Close()
+		buf := make([]byte, nvmeIdentifyBytes)
+		if err := nvmeIdentify(f, nsid, nvmeCnsCsIndep, buf); err != nil {
+			return false, err
+		}
+		return buf[0]&nvmeNsVwcNotPresent == 0, nil
+	}()
+	if level := pathReadLevel(err); LogEnabled(ctx, level) {
+		attrs := []any{
+			slog.String("path", ctrlPath),
+			slog.Int("nsid", int(nsid)),
+			slog.Bool("cache", cache),
+		}
+		slog.Log(ctx, level, "os nvme ns write cache", appendErr(attrs, err)...)
+	}
+	return cache, err
 }
 
 func (c *LimitedOsClient) DialTcp(

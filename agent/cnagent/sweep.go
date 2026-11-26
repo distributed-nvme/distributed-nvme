@@ -650,7 +650,7 @@ func (w *cnWanted) addNs(nqn string, nsid int) {
 //	c4 raid0                      wantPool  (ensureRaid0 — NOT wantAny: at
 //	                                        SP_LEVEL_NO_THINPOOL the raid0
 //	                                        has nothing to stripe over)
-//	c5 per-td dm-error            wantAny   (ensureDmError; a standby keeps it)
+//	c5 per-td dm-error            wantAny   (ensureTdError; a standby keeps it)
 //	c6 ns-dev + nvmet namespace   wantAny   (ensureNsDev / ensureSubsystem)
 //	host-facing nvmet subsystem   wantAny   (ensureSubsystem)
 //	c8 xfer + its subsystem/ns    wantAny   (ensureXfer)
