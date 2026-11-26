@@ -187,3 +187,81 @@ func TestAStandbyHasNoFenceWatch(t *testing.T) {
 			watched, st.fenced.Load())
 	}
 }
+
+// TestAWatchNotArmedRunsNoCommand: the watch of a primary that has not
+// served, as a promotion whose disk nodes have not opened its paths, reads
+// its namespaces alone at each tick and runs no command, so the agent runs
+// none between two syncups (CN34).
+func TestAWatchNotArmedRunsNoCommand(t *testing.T) {
+	srv, node := newTestServer(t)
+	setLegPaths(srv, node, "non-optimized", "non-optimized")
+	syncupBoth(t, srv, reqOpts{revision: 2})
+	syncupBoth(t, srv, reqOpts{revision: 3, primary: true, leftoverOk: true})
+	w := fixtureWatch(srv)
+	if w == nil || w.armed.Load() {
+		t.Fatalf("fixture is wrong: want a watch not armed, have one %v",
+			w != nil)
+	}
+	node.Reset()
+	for range 3 {
+		srv.fenceTickAll(context.Background())
+	}
+	for _, call := range node.Calls() {
+		if strings.HasPrefix(call, "cmd ") {
+			t.Errorf("a tick of a watch not armed ran %q", call)
+		}
+	}
+	if w.armed.Load() {
+		t.Errorf("the ticks armed a primary that has not served")
+	}
+}
+
+// fixtureWatch is the fixture cntlr's fence watch, nil when it has none.
+func fixtureWatch(srv *CnAgentServer) *fenceWatch {
+	srv.mu.Lock()
+	defer srv.mu.Unlock()
+	return srv.fenceWatches[cntlrKey(testCluster, testCn, testSp, testCntlr)]
+}
+
+// TestATickArmsOnAServingNamespace: a watch not armed arms at its tick once
+// a namespace of the cntlr reads optimized, with no converge (CN34).
+func TestATickArmsOnAServingNamespace(t *testing.T) {
+	srv, node := newTestServer(t)
+	setLegPaths(srv, node, "non-optimized", "non-optimized")
+	syncupBoth(t, srv, reqOpts{revision: 2})
+	syncupBoth(t, srv, reqOpts{revision: 3, primary: true, leftoverOk: true})
+	w := fixtureWatch(srv)
+	if w == nil || w.armed.Load() {
+		t.Fatalf("fixture is wrong: want a watch not armed")
+	}
+	ns := fenceFixtureNs(srv)
+	node.mu.Lock()
+	node.files[anaPath(ns.nqn, ns.nsIdx)] = anaOptimized + "\n"
+	node.mu.Unlock()
+	srv.fenceTickAll(context.Background())
+	if !w.armed.Load() {
+		t.Errorf("a tick over an optimized namespace did not arm the watch")
+	}
+}
+
+// TestARestartedPrimaryIsArmedByItsConverge: after a restart, the startup
+// converge of a primary whose pool stands arms its watch, though its
+// namespaces read inaccessible and no tick has run (CN34; armFenceWatch).
+func TestARestartedPrimaryIsArmedByItsConverge(t *testing.T) {
+	srv, node := newTestServer(t)
+	syncupBoth(t, srv, reqOpts{revision: 2, primary: true})
+	setLegPaths(srv, node, "non-optimized", "non-optimized")
+	srv.fenceTickAll(context.Background())
+	if got := anaOfNs(node, fenceFixtureNs(srv)); got != anaInaccessible {
+		t.Fatalf("fixture is wrong: the namespace reads group %s", got)
+	}
+	restarted := newCnServer(node)
+	reconcileForTest(t, restarted)
+	if got := anaOfNs(node, fenceFixtureNs(srv)); got != anaInaccessible {
+		t.Fatalf("the restart moved the fenced namespace to group %s", got)
+	}
+	w := fixtureWatch(restarted)
+	if w == nil || !w.armed.Load() {
+		t.Errorf("the restarted primary's watch is not armed: %v", w != nil)
+	}
+}

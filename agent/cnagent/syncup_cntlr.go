@@ -337,6 +337,11 @@ func (s *CnAgentServer) convergeCntlr(
 		s.dropAllResKeys(st, plan)
 	}
 	s.build(ctx, st, plan, info, budget)
+	// CN34: a primary whose own pool device stands has served; the converge
+	// arms its fence watch, whose ticks read no pool device and run no
+	// command.
+	s.armFenceWatch(ctx, cntlrKey(req.GetClusterId(), req.GetCnId(),
+		req.GetCntlrPointer().GetSpId(), req.GetCntlrPointer().GetCntlrId()))
 	// The converge's code names, beside its sweep's leftovers, every row of
 	// its build a re-sent SyncupCntlr could cure (CN30), as a read's does,
 	// but an uncreated snapshot's, which only a read names (snapshotDue):

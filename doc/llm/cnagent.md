@@ -4175,7 +4175,15 @@ watch is armed once it has seen the cntlr serve: a leg path optimized, a
 namespace of the cntlr in the optimized group, or a pool device of the
 cntlr, which a standby never holds and an agent's restart leaves in place.
 Reason: a new primary whose disk nodes have not opened its paths shows the
-fence's picture, and has not served. An armed watch that reads the fence
+fence's picture, and has not served. A tick reads the leg paths and the
+namespaces' groups from sysfs and configfs and runs no command; a
+primary's converge arms its watch after its build when a namespace reads
+optimized or a pool device of the cntlr stands (`armFenceWatch`), and one
+that stops after a teardown sweep that left a stack (CN35) serves the
+standby's shape and arms nothing. Reason: a watch not armed yet, of a new
+primary or of one at a level with no thin pool whose paths have not read
+optimized, would otherwise run `dmsetup info` once per slice each tick,
+between two syncups. An armed watch that reads the fence
 takes the node read lock and the cntlr's object lock, each only when free,
 so it never waits behind a converge or a read and a held lock leaves the
 move to the next tick, and only for a cntlr the agent still holds; it reads

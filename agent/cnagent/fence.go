@@ -33,7 +33,8 @@ import (
 // fenceWatch is one primary cntlr's watch (CN34): the cntlr's key and
 // state, the key of its inputs, the legs and namespaces it reads and moves,
 // the cntlr's pool devices, and whether it has seen the cntlr serve. Only
-// armed changes after it is made; the watch loop alone sets it.
+// armed changes after it is made; the watch loop and the converge that kept
+// the watch (armFenceWatch) set it.
 type fenceWatch struct {
 	key    string
 	st     *cntlrState
@@ -184,10 +185,12 @@ func (s *CnAgentServer) fenceTickAll(ctx context.Context) {
 }
 
 // fenceTick is one watch's tick over walk: a leg path optimized arms the
-// watch and drops the cntlr's fence flag; a watch not armed yet arms once
-// the cntlr is seen to have served (fenceServed); and an armed watch that
-// reads the fence moves the namespaces (fenceNamespaces), on every tick
-// while the fence reads so, so a move that failed is made again.
+// watch and drops the cntlr's fence flag; a watch not armed yet arms once a
+// namespace of the cntlr reads optimized (fenceServed over the namespaces
+// alone; the converge arms it on a pool device, armFenceWatch); and an
+// armed watch that reads the fence moves the namespaces (fenceNamespaces),
+// on every tick while the fence reads so, so a move that failed is made
+// again.
 func (s *CnAgentServer) fenceTick(
 	ctx context.Context,
 	w *fenceWatch,
@@ -199,7 +202,10 @@ func (s *CnAgentServer) fenceTick(
 		w.st.fenced.Store(false)
 		return
 	}
-	if !w.armed.Load() && s.fenceServed(ctx, w.nss, w.pools) {
+	// The tick reads the namespaces alone, which runs no command: a pool
+	// device of the cntlr's own arms the watch from the converge that built
+	// or found it (armFenceWatch).
+	if !w.armed.Load() && s.fenceServed(ctx, w.nss, nil) {
 		w.armed.Store(true)
 	}
 	if read == fenceShown && w.armed.Load() {
@@ -260,6 +266,26 @@ func (s *CnAgentServer) fencePicture(
 		return fenceNone
 	}
 	return fenceShown
+}
+
+// armFenceWatch arms the fence watch of the cntlr key names, as this
+// converge kept it (keepFenceWatch), once the cntlr is seen to have served
+// (fenceServed): the converge reads its pool devices, which the watch's
+// ticks do not, so a primary whose stack stands is armed after an agent's
+// restart too, though its namespaces do not serve. A watch armed already is
+// left. The read runs on the pass's context, so a pass cut off runs no
+// command after the cut: a read that fails or is cut off leaves the watch
+// unarmed until the next converge.
+func (s *CnAgentServer) armFenceWatch(ctx context.Context, key string) {
+	s.mu.Lock()
+	w := s.fenceWatches[key]
+	s.mu.Unlock()
+	if w == nil || w.armed.Load() {
+		return
+	}
+	if s.fenceServed(ctx, w.nss, w.pools) {
+		w.armed.Store(true)
+	}
 }
 
 // fenceServed says whether the cntlr has served: a namespace of nss in the
