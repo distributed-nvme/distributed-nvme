@@ -538,7 +538,8 @@ func (s *CnAgentServer) GetCnSize(
 // lock (dnagent.md SH30). A newer request that only adds cntlrs to the CN's
 // held one (addsCntlrsOnly) marks the CN alone, cancels the CN's own read
 // alone and runs under the node read lock (syncupCnAdds, cnagent.md CN1),
-// so it neither waits for the converges in flight nor holds off a read; one
+// so it holds off no cntlr's read and waits for no converge in flight, save
+// behind a syncup that asked for the write lock first; one
 // that is no longer such a request once it holds that lock runs as below,
 // under the write lock with the CN's mark alone. Any other request newer
 // than the CN's held one, or for a CN the agent does not hold, marks the

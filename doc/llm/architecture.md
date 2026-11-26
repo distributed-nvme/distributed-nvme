@@ -340,8 +340,10 @@ always means the SP's `DmPoolConf.data_block_size`.
 * **err_epoch** — The unix seconds at which a worker found the object
   unhealthy after last seeing it healthy; zero while it is healthy. It
   stays put while the object stays unhealthy (`dnv-worker.md` HL3), save
-  that a worker whose clock reads it in the future writes its own time
-  over it (`dnv-worker.md` AR4), and the
+  that the sp worker's reaction pass writes its own time over a pool's
+  epoch its clock reads in the future, of a cntlr, a leg or a side of a
+  group, or a repair's new leg, and leaves a node's and a retired side's
+  (`dnv-worker.md` AR4), and the
   automatic reactions measure their thresholds, the `EventThreshold`, from
   it (Automatic reactions). A node with a nonzero `err_epoch` also loses
   its capacity key (Capacity index keys), and a cntlr with one leaves its
@@ -376,7 +378,8 @@ always means the SP's `DmPoolConf.data_block_size`.
   neither made, a pool's first primary and any record an older build
   wrote, and zero means no term (Upgrade in lockstep). A cn agent builds a
   primary's stack under one term, and removes what an earlier term left
-  before it builds under another (`cnagent.md` CN35).
+  before it builds under another, save a stack whose namespaces serve
+  while it keeps no term, which it takes (`cnagent.md` CN35).
 
 Ownership hierarchy (etcd side):
 
@@ -2830,7 +2833,9 @@ give the rest. A pool's rows are:
 * a candidate standby whose latest report reads `RES_STATUS_ERROR` on every
   leg of a group of its slices or of a clone not being deleted, one row per
   such group (`model.UnreachedGroups`), which the failover passes over
-  while another candidate stands (`dnv-worker.md` AR5); a standby whose
+  while another candidate stands once two reports in a row at its plan's
+  revision read so (`dnv-worker.md` AR5), so a row after one such report
+  can name a standby the failover would still choose; a standby whose
   call fails gives no row.
 
 A pool's rows are ordered by what they say — lost records, the report,
@@ -9654,7 +9659,9 @@ document and only pointed to here.
 * **The agent node lock has head-of-line blocking.** A pending node write
   (`SyncupDn`/`SyncupCn`) blocks every new node-read acquisition behind the
   slowest in-flight object converge; a `SyncupCn` that only adds cntlrs
-  takes the node read lock and is no node write (`cnagent.md` CN7). Converges are bounded per command
+  takes the node read lock and is no node write, save while the store's
+  latest save failed or once it no longer only adds cntlrs under that
+  lock (`cnagent.md` CN7). Converges are bounded per command
   (Common validation) wherever the command's child can be killed; one
   blocked in an uninterruptible kernel wait is not (Common validation), nor
   is an in-process sysfs, configfs or device access once its syscall has
@@ -10683,22 +10690,22 @@ document and only pointed to here.
   both and leaves no array (`cnagent_integtest.md`, Lab facts), so the next
   converge, a later change of the pool's (`dnv-worker.md` RW14) or the one
   the worker re-sends once a read names the array absent (`dnv-worker.md`
-  RW4), assembles it from both legs, as it does where the soft timeout
-  (`dnagent.md` SH15) ends an assembly before mdadm has added a member; but
-  where the timeout ends one after mdadm has added a member and before mdadm
-  has started the array, md holds the array inactive with the members
-  added. The same converge reads the array again and stops it when every
+  RW4), assembles it from both legs, as it does where its time limit,
+  `MdBuildTimeout` (`dnagent.md` SH15), ends an assembly before mdadm has
+  added a member; but where that limit ends one after mdadm has added a
+  member and before mdadm has started the array, md holds the array
+  inactive with the members added. The same converge reads the array again and stops it when every
   member is a leg wrapper of this pool, and a read names an inactive array
   whose kept members all carry a superblock, so the worker's re-send
   assembles it from both legs (`cnagent.md` CN12, The re-assembly; CN30).
-  An array build runs under `MdBuildTimeout`, not the soft timeout, so the
-  stop is rare; it still costs a round and a converge. Seen once in the
+  That limit is longer than the soft timeout, so the stop is rare; it
+  still costs a round and a converge. Seen once in the
   e2e suite's many-pools case at 64 pools, on a pool failed over twice in
   a row: on
   its second new primary, while the disk nodes were still opening paths,
   the agent's records show the promotion's assembly of the data group from
   one leg refused, then the converge of the pool's next revision, which
-  came before any read named the array absent, ended by the soft timeout's
+  came before any read named the array absent, ended by its time limit's
   SIGTERM while it assembled the array from both legs, then the group read
   `inactive`, with md holding the array with one member.
 * **An old primary cut off from the network serves again for a moment when
@@ -10941,19 +10948,23 @@ document and only pointed to here.
   whether a new volume of its pool can take its thin id again (Controller
   nodes, CheckControllerNodeRestore).
 * **A restore can make an old term match again.** A term is a pool
-  revision (`primary_revision`, Cntlrs), and a restore takes the pool's
-  revision back to the backup's, so the failovers after it write terms
-  that ones before it wrote. The restore's steps delete every agent's local
-  files (`operations.md`, Restore etcd from a backup), with them every kept
-  term, so a primary of the restored state removes a stack that does not
-  serve before it builds, and keeps one whose namespaces still serve
-  (`cnagent.md` CN35). Two cases keep a stack of an earlier term, with the
-  stale metadata CN35 is about. A primary of the backup that a failover
-  after it demoted while its agent was down, until the restore deleted its
-  files, still serves its old stack, which it keeps. An agent that keeps
-  its files keeps its terms too: once the pool's revision climbs back past
-  them, a failover can write a term that agent kept for a stack of an
-  earlier term. In both, the pool loses the other primary's writes since.
+  revision (`primary_revision`, Terminology and object model), and a
+  restore takes the pool's revision back to the backup's, so the failovers
+  after it write terms that ones before it wrote. The restore's steps
+  delete every agent's local files (`operations.md`, Restore etcd from a
+  backup), with them every kept term, so a primary of the restored state
+  whose record carries a term removes a stack that does not serve before
+  it builds, and keeps one whose namespaces still serve (`cnagent.md`
+  CN35). Three cases keep a stack of an earlier term, with the stale
+  metadata CN35 is about. A primary of the backup that a failover after it
+  demoted while its agent was down, until the restore deleted its files,
+  still serves its old stack, which it keeps. A primary of the backup whose
+  record carries no term, a pool's first primary, keeps any stack it
+  finds, serving or not, as one demoted after the backup and whose sweep
+  stopped part way leaves. An agent that keeps its files keeps its terms
+  too: once the pool's revision climbs back past them, a failover can
+  write a term that agent kept for a stack of an earlier term. In each,
+  the pool loses the other primary's writes since.
   In the first, the restore check reads the pool
   `RESTORE_VERDICT_MAY_BREAK` on the other primary's node, whose agent
   holds the role the backup does not give it (Controller nodes,

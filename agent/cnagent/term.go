@@ -22,11 +22,13 @@ import (
 // and kept such a pool would serve from mappings that miss every block the
 // other primary wrote in between, and its next commit would write its old
 // metadata over the newer. Each term of a primary has a number, the pool
-// revision of the failover that made the cntlr the primary
-// (Cntlr.primary_revision), and the agent keeps the number its stack was
-// built under (StackTerm, in the local store). A primary under another
-// number sweeps as a standby first, and builds only once that sweep is
-// clean.
+// revision of the failover that made the cntlr the primary, or of a
+// replacement made as the primary (Cntlr.primary_revision), and the agent
+// keeps the number its stack was built under (StackTerm, in the local
+// store). A primary under another number takes it at once where no piece
+// of a primary stack is there, takes a stack whose namespaces serve while
+// it keeps no number, and otherwise sweeps as a standby first and builds
+// only once that sweep is clean (termStep).
 // ---------------------------------------------------------------------------
 
 // termMismatch says whether plan is a primary's under a term its stack was

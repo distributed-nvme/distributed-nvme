@@ -266,8 +266,9 @@ status and the reason of the row it shows follow where it has them:
 - `standby`: an enabled standby with no health epoch whose latest report
   reads error on every leg of a group: it reaches none of that group's
   disk nodes, and a failover passes over it while another standby can
-  take the role. Look at the paths between its controller node and those
-  disk nodes.
+  take the role, once two of its reports in a row read so; a row after
+  only one such report can name a standby a failover would still choose.
+  Look at the paths between its controller node and those disk nodes.
 - `worker`: no worker of a role (dn, cn or sp) has its record in etcd,
   the record a running worker writes again every few seconds; or one
   worker has not written its record for twice the default time between

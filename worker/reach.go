@@ -41,7 +41,8 @@ type reachSlot struct {
 
 // agentReconnectWait is the longest a connection to an agent that comes back
 // takes to try again: gRPC's reconnect backoff stops growing at
-// GrpcReconnectMaxDelay, give or take its jitter of a fifth (RW7).
+// GrpcReconnectMaxDelay (grpc.md, Wiring), give or take gRPC's jitter of a
+// fifth.
 const agentReconnectWait = common.GrpcReconnectMaxDelay * time.Second * 6 / 5
 
 // join gives a loop its slot, which it hands to every call below, and leave

@@ -325,12 +325,13 @@ mirrors nothing: in each cntlr's state the prober and path-watcher
 registries; in each CN's and each cntlr's state its observation slot, which
 holds its latest observation and its running background read (`dnagent.md`
 SH28, SH29); the converge marks (`dnagent.md` SH30); and the CN10
-disconnect registry, all in memory only, never persisted. Seven more fields
+disconnect registry, all in memory only, never persisted. Eight more fields
 of a cntlr's state sit outside that mutex, touched only under the cntlr's
 object lock or the node write lock: the marks of CN14's activation sweep
 (`pendingSweep`), CN14's torn marks (`tornTds`), CN35's kept term
 (`stackTerm`) and whether its file holds it (`stackTermSaved`), CN12's
-acted marks (`forcedStarts`), CN12's md checks (`mdChecks`) and
+acted marks (`forcedStarts`), CN12's md checks (`mdChecks`), CN10's marks
+of a leg path whose write cache reads stale (`wcStale`) and
 `reqFromRpc`, which says whether the request this process holds counts as
 delivered (CN8, CN12, CN14); the torn marks and the kept term are the ones
 the local store also holds (CN14, CN35), and the rest are in memory only. Each state's request is an atomic pointer, stored and loaded without
@@ -1348,7 +1349,8 @@ read `ERROR` naming the read too.
 controller node read at its last scan of the side's namespace
 (`architecture.md`, The write cache a path reads). On a primary, the leg's
 first lookup of a converge reads it beside each path's ANA state
-(`lookupLegWcache`), and the leg's step asks, after the connect and before
+(`lookupSubsysOf` with the write cache asked for, as `lookupLegWcache`
+does for the later lookups), and the leg's step asks, after the connect and before
 the wrapper's step, the target of each live, optimized controller whose
 path reads "write through" what it reports now (`NvmeHost.NsWriteCache`); a
 path that reads "write back" is not asked: it sends flushes, and a target
@@ -3590,9 +3592,12 @@ fails, the dm-error resumed on the table it had. A read neither looks nor
 makes. While the agent has no loop device either table is the one wanted;
 once it has one, a converge loads an older agent's one-target table again
 into the two-target one, and a read reads such a table OK with
-`RES_REASON_DIFFERS`, which names it, so the worker sends the syncup that
-loads it (CN30), and any other table of a dm-error OK. Nothing removes the
-loop device; a reboot does.
+`RES_REASON_DIFFERS` while the agent knows its loop device and the device
+is larger than the two-target table's small part twice over, which names
+it, so the worker sends the syncup that loads it (CN30); a read reads the
+two-target table, and a one-target table it does not name, OK, and any
+other table, or a suspended device, `ERROR`. Nothing removes the loop
+device; a reboot does.
 
 CN16. Namespaces and host-facing nvmet (`td.go`, `plan.go`). Per
 `Namespace` of every `Subsystem` in `nqn_to_subsystem`, the namespace's
@@ -4262,7 +4267,7 @@ old metadata over the newer. The stack's device names carry the pool and
 the node, not the cntlr, so a cntlr made on a node that held an earlier
 cntlr of the same pool can find such a pool too. Each term of a primary has
 a number, the cntlr record's `primary_revision` (`architecture.md`,
-Cntlrs), written by the failover that makes the cntlr the primary and by a
+Terminology and object model), written by the failover that makes the cntlr the primary and by a
 replacement made as the primary, and the agent keeps the number its stack
 was built under in the local store (`LocalStackTermPath`, a `StackTerm`;
 `cntlrState.stackTerm`), loaded at its start (CN2).

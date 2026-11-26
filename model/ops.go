@@ -1811,9 +1811,10 @@ func Failover(
 
 // FailoverPassingOver is Failover whose election passes over the cntlrs of
 // passed: the standbys whose agents refuse their own SyncupCntlr, whose
-// latest answer was "unknown object", or whose reports say their sweep left
-// a stack of the cntlr, which the worker alone knows of from their replies
-// (dnv-worker.md HL9, RW5, AR5; cnagent.md CN35).
+// latest answer was "unknown object", whose reports read ERROR on every leg
+// of some group while another candidate stands, or whose reports say their
+// sweep left a stack of the cntlr, which the worker alone knows of from
+// their replies (dnv-worker.md HL9, RW5, AR5; cnagent.md CN35).
 func FailoverPassingOver(
 	ctx context.Context,
 	cli *etcdutil.Client,

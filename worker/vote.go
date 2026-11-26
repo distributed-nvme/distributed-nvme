@@ -513,9 +513,9 @@ func (v *voteWorker) heartbeat(inc *incarnation) {
 // round's start: the time from a good round's start to the end of a later
 // round is then the widest gap any peer can see in any role's key, which is
 // what VW8 (a) measures, and a slow round is counted once. Each put is
-// putReg's: bounded and tried twice (VW2); a failed put is logged by its
-// "etcd put" record, and a role whose two tries fail is tried again at the
-// next tick.
+// putReg's: bounded, tried twice, and a third time while that try ends
+// within the vote interval (VW2); a failed put is logged by its "etcd put"
+// record, and a role whose tries all fail is tried again at the next tick.
 func (v *voteWorker) putAll(inc *incarnation) bool {
 	oks := make([]bool, len(v.roles))
 	var wg sync.WaitGroup

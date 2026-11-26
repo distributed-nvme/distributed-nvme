@@ -2706,8 +2706,8 @@ func olderNamedLeg(
 // identity (mdUpdateUuid), and update is the superblock update, or the two,
 // of the runs that started it. When that run fails, the same pass reads what
 // it left (assemblyLeft): an array that does not run is stopped, and one
-// that runs, which a run killed at the soft timeout can have started in the
-// kernel, is taken as started.
+// that runs, which a run killed at its time limit (MdBuildTimeout) can have
+// started in the kernel, is taken as started.
 //
 // A second run drops the named leg's bad-block list (mdUpdateForceNoBbl), as
 // mdadm takes one update a run, in two cases. When the first run started
@@ -2828,8 +2828,9 @@ func errForcedStartWaits(lp *legPlan) error {
 // assemblyLeft is what an assembly that failed left of the group's array, a
 // forced one's (forcedAssemble) or a plain one's (ensureGroup): started
 // reports an array that runs, and one that does not run — a failed assembly
-// can leave an inactive array holding a leg, as one the soft timeout
-// stopped once md took it — is stopped, so that the next assembly finds the
+// can leave an inactive array holding a leg, as one its time limit
+// (MdBuildTimeout) stopped once md took it — is stopped, so that the next
+// assembly finds the
 // leg free. An array holding a member that is not a dm device
 // is the group's error whether it runs or not, as in ensureGroup, and one
 // that does not run is stopped only when the sweep would call it ours: one

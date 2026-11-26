@@ -2159,8 +2159,8 @@ func (w *spWorker) newPass(state *model.SpState, cc *pb.ClusterConf) *spPass {
 	if p.failoverCand == 0 && len(noLeg) > 0 {
 		// AR5: where every candidate reaches no leg of some group, as when
 		// a disk node of a pool with no redundancy is down, the election
-		// takes them as before: the smallest of them, and none is passed
-		// over for it.
+		// takes the smallest of them, and none of them is passed over for
+		// it.
 		p.failoverCand = noLeg[0]
 		p.passedOver = slices.DeleteFunc(p.passedOver, func(id uint64) bool {
 			return slices.Contains(noLeg, id)

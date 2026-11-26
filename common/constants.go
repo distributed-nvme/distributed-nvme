@@ -718,16 +718,17 @@ const (
 	// The connect step's one wait budget per converge pass (cnagent.md CN10,
 	// CN18). A pass — one convergeCntlr, whether a SyncupCntlr or the
 	// startup reconcile runs it — gets one budget of CnConnectPassBudget, shared by every leg and every clone
-	// source it connects, and exactly three things draw on it: a failed
+	// source it connects, and exactly four things draw on it: a failed
 	// attempt's own elapsed time, its dial of the side's address and its
 	// `nvme connect`; the CnConnectRetryPause before each
-	// in-pass retry of a failed connect; and the steps of the wait for the
+	// in-pass retry of a failed connect; the steps of the wait for the
 	// multipath namespace head after a connect this pass made, until the
 	// head is complete — a CnNsScanPause while no head is picked, the far
 	// shorter CnNsHeadPause while one is picked but its ng device is not
 	// listed yet: the kernel's steps left once the head is listed end well
 	// inside one CnNsScanPause, and a pause of that size there would spend
-	// the budget the other legs of a large pass need.
+	// the budget the other legs of a large pass need; and the steps of the
+	// wait for a leg path's write cache after a rescan (CnRescanPause).
 	// A pause starts only while it fits in what is left; a failed attempt is
 	// charged after it ran, so a slow one can overdraw the budget. The dial
 	// bounds a side's first attempt at an address that does not answer by

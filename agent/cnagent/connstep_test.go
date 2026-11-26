@@ -22,11 +22,12 @@ import (
 // ---------------------------------------------------------------------------
 //
 // One wait budget per converge pass, CnConnectPassBudget, shared by every leg
-// and every clone source, drawn on by exactly three things: a failed connect's
-// own elapsed time, the CnConnectRetryPause before each in-pass retry, and the
+// and every clone source, drawn on by exactly four things: a failed connect's
+// own elapsed time, the CnConnectRetryPause before each in-pass retry, the
 // steps of the wait for the namespace head after a connect the pass made — a
 // CnNsScanPause while no head is picked, a CnNsHeadPause while the picked head
-// lacks its ng device. Every test here runs the pass on a fake clock
+// lacks its ng device — and the steps of the wait for a leg path's write
+// cache after a rescan (CnRescanPause). Every test here runs the pass on a fake clock
 // (withPassClock), so "how long" is exact: a failed connect takes no time
 // unless the fake says so (connectTakes), and a pause moves the clock by
 // exactly its length. On that clock the CnConnectPassBudget budget holds

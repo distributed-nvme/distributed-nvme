@@ -1388,5 +1388,7 @@ log, and the conformance test's logs, its plugins' included.
   nodes build many new sides at once, which can answer the check rounds of
   the sides they have built with observations too old; that moves no
   reaction at the default side threshold (`architecture.md`, Known
-  limits). The controller nodes' builds of the new primaries fail no
-  volume over that has built (`cnagent.md` CN7).
+  limits). The controller nodes' builds of the new primaries hold off no
+  read of a primary built already (`cnagent.md` CN7), and the e2e suite's
+  many-pools case asserts that no pool fails over while its pools build
+  (`e2e_integtest.md`, The cases).

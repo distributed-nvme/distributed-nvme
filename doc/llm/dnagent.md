@@ -283,7 +283,7 @@ the one its role's store file (`StoreFileBootDn`, `StoreFileBootCn`) holds
 from its last start that ended: when they differ, the agent starts after a
 reboot of its machine, and every reply's stamp says so
 (`ObsStamp.agent_rebooted`) for as long as the process runs. These two
-reads are the only touch of the node before the startup reconcile. A boot
+reads are the prepare step's only touch of the node. A boot
 id it cannot read, and a file that is absent or does not load, as at the
 first start of an agent, say no reboot. It logs `agent boot seen` with the
 answer, at Warn with the error when the boot id could not be read. The new
@@ -544,7 +544,9 @@ listing returns, a folder's as a file's, by the role's
 `Local*Path` kind prefixes (`StoreKindDn`, `StoreKindSide`,
 `StoreKindMigrBm` and `StoreKindDnProbe` for the dn; `StoreKindCn`,
 `StoreKindCntlr`, `StoreKindCloneBm`, `StoreKindCnProbe`, `StoreKindTorn`
-and `StoreKindTerm` for the cn); the
+and `StoreKindTerm` for the cn), and the role's boot file
+(`StoreFileBootDn`, `StoreFileBootCn`, SH33), which the listing names so
+that a temp file a save of it left is removed with the others; the
 probe file of DN18 is never loaded: the enumeration deletes it, and its temp
 files with the others, before anything is loaded, since nothing reads it and
 it holds room the store may need; a failed delete is logged, and the next
@@ -1533,8 +1535,10 @@ cntlrs with no fault would go too old (`dnv-worker.md` HL7).
 A `SyncupCn` newer than the held request that only adds cntlrs to it
 (`cnagent.md` CN7) marks its CN and cancels the CN's own read alone, as
 a re-send at the held revision does, and takes the node read lock, not
-the write lock (`cnagent.md` CN1): it waits for no cntlr's read or
-converge and holds no read off. One that no longer only adds cntlrs once
+the write lock (`cnagent.md` CN1): it holds no cntlr's read off, and it
+waits for no cntlr's read or converge, save as its read lock waits behind
+a node-level syncup that asked for the write lock first, and for another
+such syncup of its CN. One that no longer only adds cntlrs once
 it holds that lock takes the write lock after it, with the CN's mark
 alone, and so does one that arrives while the store's latest save failed
 (below). Reason: a build of many pools brings one for each new cntlr, back

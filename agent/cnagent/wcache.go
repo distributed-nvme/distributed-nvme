@@ -466,10 +466,10 @@ func pathNotOpen(lp *legPlan, view *subsysView) bool {
 // which the read names the leg's wrapper with. A leg with no mark, a
 // standby's, and a lookup that did not answer give "" and change nothing:
 // the converge, which stops at that lookup, would act on nothing. A read
-// asks no target of a leg with no mark: a disk node opens a path over
-// another device only at a role change, which a converge of the primary
-// follows, or, where the path is open already over a device that reports
-// the disk's write cache, never.
+// asks no target of a leg with no mark: a path a disk node opens over
+// another device with no converge of this cntlr, as a migration's new side
+// does at its cutover, is one that is not optimized first, which the watch
+// mark covers (markLegWcache).
 func (s *CnAgentServer) legWcacheVerdict(
 	ctx context.Context,
 	st *cntlrState,

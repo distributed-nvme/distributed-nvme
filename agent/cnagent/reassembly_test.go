@@ -421,8 +421,9 @@ func TestAnInactiveArrayIsAssembledAgain(t *testing.T) {
 	}
 }
 
-// TestACutShortAssemblyIsStoppedAndAssembledAgain: an assembly the soft
-// timeout stops once md took one member leaves the array inactive; the same
+// TestACutShortAssemblyIsStoppedAndAssembledAgain: an assembly its time
+// limit (MdBuildTimeout) stops once md took one member leaves the array
+// inactive; the same
 // converge reads it again and stops it, the group's row naming the failed
 // assembly, and the next converge assembles it from both legs (CN12).
 func TestACutShortAssemblyIsStoppedAndAssembledAgain(t *testing.T) {

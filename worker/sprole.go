@@ -5076,9 +5076,10 @@ func (d *cntlrDriver) observe(ctx context.Context, r *replyState) {
 	// there: this worker's own Syncup* rows, which a later read — one
 	// another worker's round started, say — replaced at the agent.
 	info := d.ownInfo(r)
-	// A reply that carries no report — a refused Syncup*, or an unknown
+	// A Syncup* reply that carries no report — a refused one, or an unknown
 	// object's — says nothing of the stack or the legs, so it leaves AR5's
-	// marks of a standby as they are.
+	// marks of those as they are; a round's reply always counts as a
+	// report, of the info its stream last carried (ownInfo).
 	reported := info != nil || r.fromRound
 	if reported {
 		// AR5: a standby's report that its sweep left a stack takes it out

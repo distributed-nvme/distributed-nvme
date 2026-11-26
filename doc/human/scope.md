@@ -620,7 +620,7 @@ retired leg taken back that joins its array with old data (section 10).
   pool's revision at that failover. The cn agent keeps, in its local files,
   the number under which it built its arrays and thin pools. A primary
   that gets another number removes them before it builds, so it does not
-  serve from a thin pool that misses what another primary wrote. Three
+  serve from a thin pool that misses what another primary wrote. Four
   cases still keep such a thin pool. First, the agent keeps no number for
   the cntlr, because it lost the file or because the cntlr is new on its
   node, and the namespaces of the pool still serve on that node: the agent
@@ -631,7 +631,10 @@ retired leg taken back that joins its array with old data (section 10).
   that node stopped before it moved them.
   Second, a restore of etcd after a failover, where the old primary's agent
   was down from that failover until the restore deleted its local files.
-  Third, a restore in which an agent keeps its local files. In each case
+  Third, a restore that makes a pool's first primary the primary again: it
+  has no number, so its agent keeps whatever arrays and thin pools its node
+  still holds. Fourth, a restore in which an agent keeps its local files.
+  In each case
   the thin pool's records miss the other primary's writes: a block written
   then reads as zeros, and the next commit writes the old records over the
   newer ones. State: fix later. Read from dnv's code; not seen in the lab.

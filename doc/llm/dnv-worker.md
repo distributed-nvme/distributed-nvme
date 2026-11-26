@@ -482,10 +482,10 @@ three prefixes `ThinDevicePrefix`, `RepairPrefix` and `RetiredLegPrefix`
 retired legs at it, since a pool holds a thin device per volume, and up to
 one repair and `MaxRetiredLegPerGrp` retired legs per group, too many for a
 point read each within the load's one budget (EU5): with a point read per
-volume, a load of 1024 volumes took 3.6 seconds where one read took 3.3
-milliseconds, 7.7 seconds at 7.3, and passed the budget at 12.5, where with
-the range the load takes 40, 73 and 129 milliseconds
-(`TestMeasurePoolLoad`, run by hand); and a snapshot
+volume, a load of 1024 volumes costs 1024 round trips, which passes the
+budget once one read takes about 10 milliseconds, while the range costs
+one, a load of tens of milliseconds at such round trips
+(`TestMeasurePoolLoad`, run by hand, measures both); and a snapshot
 pinned to the same
 revision (`SnapshotAtRev`, EU4) reads the node records last, because the
 repairs' new legs and the retired legs name nodes too. The fields: `Rev`,
@@ -807,7 +807,8 @@ list; the flip, which reads the repair's key alone, and
   (`FailoverPassingOver`; `Failover` passes over none): the worker hands
   it the standbys whose agents refuse their own `SyncupCntlr` (AR5, HL9),
   those whose latest answer was unknown object (AR5, RW5), those whose
-  latest report reads `ERROR` on every leg of some group (AR5) and those whose
+  reports read `ERROR` on every leg of some group while another candidate
+  stands (AR5) and those whose
   report says their sweep left a stack (AR5, `cnagent.md` CN35), which no
   STM can see. It flips both `primary` booleans, sets the
   new cntlr's `settling` and clears the old one's (HL2), writes the
@@ -3051,8 +3052,9 @@ The rules are the same for every kind of record:
 * `Cntlr.err_epoch` is set to now (if zero) when its `CheckCntlr` stream
   cannot be opened, breaks or misses a round — a round whose observation
   HL7 finds too old, a starting round past the start hold (HL8), and a
-  round answered unknown object once such answers have lasted the start
-  hold (RW5), included — or any `RES_STATUS_ERROR` row of its
+  round answered unknown object once such answers have lasted RW5's bound
+  (the start hold, never less than `ObsMaxAgeIntervals` intervals),
+  included — or any `RES_STATUS_ERROR` row of its
   `CntlrInfo` **other than** `leg_id_to_leg` and `side_id_to_path` reads
   so, or a round of an enabled primary answers from a revision older than
   the driven one, whose `SyncupCntlr` its agent refused (HL9); it is cleared
@@ -3086,7 +3088,8 @@ The rules are the same for every kind of record:
   disabled primary's, which runs the standby shape (`cnagent.md` CN9), is
   logged, never recorded, save that an enabled standby whose reports read
   `ERROR` on every leg of some group, two in a row at its plan's revision
-  (a migrating leg counting for nothing), is marked for AR5's election and
+  (a group with a migrating leg, two sides, never counts, as AR5 says), is
+  marked for AR5's election and
   logged `standby reaches no leg` at Warn when that set of groups changes,
   and `standby reaches its legs again` at Info when it empties; a report of
   the cntlr as a primary or as a disabled cntlr clears the mark with no
@@ -3104,8 +3107,7 @@ The rules are the same for every kind of record:
 * `Side.err_epoch` is set to now (if zero) when its `CheckSide` stream cannot
   be opened, breaks or misses a round — a round whose observation HL7 finds
   too old, a starting round past the start hold (HL8), and a round answered
-  unknown object once such answers have lasted the start hold (RW5),
-  included — or
+  unknown object once such answers have lasted RW5's bound, included — or
   `side_dev_info` or any
   `cn_id_to_dm_error`, `cn_id_to_dm_linear` or `cn_id_to_nvmeof` row is
   `RES_STATUS_ERROR`, or a `migr_src_info` or `migr_dst_info` row is `ERROR`;
@@ -3395,8 +3397,11 @@ worker's round started, as for a few seconds at a change of owner (VW7),
 or one of the agent's own. The health verdict, the leg rows and the fence
 views a primary's reply reports (HL2, RW24), the created and torn thin
 devices (RW19), the settle (HL2), AR5's marks of a standby and the log of
-its leg rows all read it; a reply with no report, a refused `Syncup*` or
-an unknown object's, leaves AR5's marks as they are. The side's
+its leg rows all read it; a `Syncup*` reply with no report, a refused one
+or an unknown object's, leaves AR5's marks of a left stack and of the legs
+as they are, while a round's reply always counts as a report, of the info
+its stream last carried, and AR5's unknown-object mark follows every
+reply's answer (RW5). The side's
 provisioned flip (RW18), its cutover wait and its clone-ready gate, and
 the coordinator's snapshot of a cntlr's info (AR1) still read the latest
 known info. A round's reply with neither info nor error is a
@@ -4009,7 +4014,8 @@ past: AR5's no-failover-candidate (AR7's sole-primary variant is defined as
 "AR5 found none" and would otherwise be unreachable); AR5's `shared_state`
 and `same_error`, the first of which can hold for as long as the error
 does — an operator's intervention, for a lost thin id or a pool's
-needs_check — and the second for `cntlr_unhealthy` at most — and
+needs_check — and the second for `cntlr_unhealthy`, save after a failover
+that hold's bound released, whose hold has no end (AR5) — and
 its `candidate_refuses`, for as long as the standbys' refusals do (HL9),
 a no-candidate case as well; AR6's `grow_pending`,
 `data_covered`, `grp_list_full`, `meta_ladder_cap`, `no_data_group` and the
@@ -4114,8 +4120,8 @@ not stretched by long intervals, as the fence's is: a hold costs only
 time. An answer that ends a silence of the worker's rounds two of the
 answering loop's intervals long or longer starts a recovery, and the hold
 stands for the bound and `agentReconnectWait` after it, the longest gRPC's
-reconnect backoff waits (`GrpcReconnectMaxDelay` and its jitter of a
-fifth, RW7): each agent's connection comes back on its own backoff, and
+reconnect backoff waits (`GrpcReconnectMaxDelay`, `grpc.md`, Wiring, and
+gRPC's jitter of a fifth around it): each agent's connection comes back on its own backoff, and
 until it does, the cntlrs on it read unhealthy by the cut's missed rounds
 while the first to come back read healthy, so a failover would move a role
 that serves. No healthy worker is silent for two rounds, since its loops
@@ -4281,7 +4287,8 @@ it; a migrating leg, with two sides, does not count, as its row reads
 a group, as with one disk node down every standby of a RAID1 pool reads
 such a row and can still serve) while another candidate stands — where
 every candidate is so marked, as when a disk node of a pool with no
-redundancy is down, the election takes them as before —,
+redundancy is down, the election takes the smallest of them and passes
+over none of them —,
 and whose latest report does not say that its sweep left a stack of the
 cntlr (`CntlrInfo.stack_left`, `cnagent.md` CN35), since a promotion would
 serve nothing until the removal goes through, and which moves no health
@@ -4395,9 +4402,10 @@ does (AR7, Known limits):
 * **The candidates refuse.** Every cntlr with `primary` false, `disabled`
   false and `err_epoch` zero has an agent that refuses its own
   `SyncupCntlr` with an invalid conf or a failed save (HL9), a latest
-  answer of unknown object (RW5), a report that reads `ERROR` on every leg
-  of some group, or a report that says its sweep left a stack (CN35), and
-  at least one refuses, so none is a candidate:
+  answer of unknown object (RW5), or a report that says its sweep left a
+  stack (CN35), and at least one refuses, so none is a candidate (a
+  standby that reaches no leg of some group is no such case: the election
+  takes it when no other candidate stands, above):
   `reaction skipped` (`candidate_refuses`, with `old_cntlr_id` and, as
   `new_cntlr_id`, the smallest refusing one). Where none refuses, the pass
   logs `no candidate`. A
@@ -4603,8 +4611,8 @@ AR7. When a cntlr has `err_epoch` set, `now` minus it at least
 or it is the primary and
 **no failover candidate exists** (AR5 found none — the sole-cntlr SP,
 every other cntlr unhealthy or disabled, or every healthy, enabled one
-refusing its syncups, HL9, answering unknown object, RW5, reaching no leg
-of some group, AR5, or reporting a left stack, `cnagent.md` CN35):
+refusing its syncups, HL9, answering unknown object, RW5, or reporting a
+left stack, `cnagent.md` CN35):
 the candidates are
 `FindCnCandidatesAntiAffine` with the SP footprint (the sum of `ext_cnt` over
 all groups of its slices), a candidate count of `cn_batch_size`, a black list
@@ -4704,7 +4712,8 @@ row (`cnagent.md` CN14), so its `ERROR` rows are its own.
 
 * **The cntlrs all refuse.** The primary's own agent refuses its
   `SyncupCntlr` (HL9), and every healthy, enabled standby's refuses its
-  own or reports a left stack (`cnagent.md` CN35), at least one refusing,
+  own, answers unknown object (RW5) or reports a left stack (`cnagent.md`
+  CN35), at least one refusing,
   which left AR5 no candidate: `reaction skipped`
   (`candidate_refuses`, with `old_cntlr_id` and, as `new_cntlr_id`, the
   smallest refusing standby; the kind, `replace_cntlr`, tells the record
@@ -6501,10 +6510,9 @@ measurement, not an assertion:
   limit. At the suite's own vote interval the case does not hold: on the
   lab server a leader stopped for 2 seconds fenced a worker in 3 of 6 runs,
   and stops of 4 seconds or more fenced every worker, for a heartbeat put
-  the stopped leader held, which ended in a timeout once it went on
-  (Known limits), measured before the heartbeat put had its own bound,
-  which makes the case's interval, sized by `DefaultEtcdOpTimeout`, an
-  upper bound;
+  the stopped leader held (Known limits); the case's interval, sized by
+  `DefaultEtcdOpTimeout`, is an upper bound, since a heartbeat put ends
+  within its own shorter bound (VW2);
 * etcd_follower — the member that serves the most watch streams, made a
   follower first, stopped for 30 seconds at the suite's vote interval, its
   raft term unchanged over the stop: a heartbeat put the stopped member
@@ -6520,10 +6528,7 @@ measurement, not an assertion:
 * etcd_defaults — the same stop, for 60 seconds, two fence thresholds,
   with the fleet at the worker's default vote timers read from the build:
   no worker fences, every worker keeps its seed, and a heartbeat put met
-  the stopped member and was tried again. Before the heartbeat put had its
-  own bound, the lab saw two of three workers fence 20 seconds into the
-  stop, after one tick waited out the operation timeout and the next
-  failed at the keepalive's close (Known limits);
+  the stopped member and was tried again (Known limits);
 * etcd_compact — a compaction to the store's head ends no watch, since
   etcd ends a watch as compacted only when the revision it serves that
   watch from lies under the compaction, and it serves every running watch
@@ -7081,18 +7086,16 @@ caught.
 * **One etcd member that stops answering can fence every worker at a
   short vote interval.** A member frozen, or whose machine is gone with no
   TCP reset, holds every call the client sends it until the keepalive
-  closes the connection, about 15 seconds (EU1). A heartbeat put it holds
-  ends at `HeartbeatPutTimeout` and goes again, usually to another member
-  (VW2), so a tick that meets it costs about 3 seconds, and at the default
-  vote timers no worker fences: the lab froze the member that served the
-  most watch streams for 60 seconds with no fence (etcd_defaults), where
-  before the put's own bound two of three workers fenced 20 seconds in. At
-  a short `--vote-interval`, ticks that meet the member in a row can still
-  reach VW8 (a)'s limit, and a watch the member served stays quiet until
-  the keepalive closes it, which can reach VW8 (b)'s: at the worker suite's
-  2-second interval the lab saw three fences, every one for a stalled
-  heartbeat (etcd_follower), and before the put's own bound a leader
-  stopped for only 2 seconds fenced a worker in half its runs. Every other call the member
+  closes the connection (EU1). A heartbeat put it holds ends at
+  `HeartbeatPutTimeout` and goes again, usually to another member (VW2),
+  so a tick that meets it costs about one `HeartbeatPutTimeout`, and at
+  the default vote timers no worker fences: the lab froze the member that
+  served the most watch streams for 60 seconds with no fence
+  (etcd_defaults). At a short `--vote-interval`, ticks that meet the
+  member in a row can still reach VW8 (a)'s limit, and a watch the member
+  served stays quiet until the keepalive closes it, which can reach VW8
+  (b)'s: at the worker suite's own interval the lab saw three fences,
+  every one for a stalled heartbeat (etcd_follower). Every other call the member
   holds, a pass's load or a reaction's write, waits out
   `DefaultEtcdOpTimeout` (EU5) and is tried again by the next pass.
 
@@ -7100,15 +7103,15 @@ caught.
   (a) measures from the start of the last good tick's puts to the end of
   the current tick's, which spans two ticks, while a peer that watches the
   keys sees the gap between two landings. With the default timers this
-  cannot happen, since a tick's puts end within two tries of
-  `HeartbeatPutTimeout` and two ticks fit inside the limit; with a
-  `--vote-interval` of 4 seconds or less, puts that land but take most of
-  their two tries, tick after tick, can reach the limit, and the worker
-  fences and rejoins though none of its keys was seen dead. The other way
-  round, an etcd whose every write takes longer than `HeartbeatPutTimeout`
-  fails every try, where a write that took up to `DefaultEtcdOpTimeout`
-  once counted, so such an etcd fences every worker once the fence
-  threshold has passed. The measure is never
+  cannot happen, since a tick's puts end within the vote interval (the
+  tries of VW2) and two ticks fit inside the limit; with a
+  `--vote-interval` of 4 seconds or less, the two tries every put gets can
+  outlast the interval, and puts that land but take most of them, tick
+  after tick, can reach the limit, and the worker fences and rejoins
+  though none of its keys was seen dead. The other way round, an etcd
+  whose every write takes longer than `HeartbeatPutTimeout` fails every
+  try, though such a write lands within `DefaultEtcdOpTimeout`, so such an
+  etcd fences every worker once the fence threshold has passed. The measure is never
   shorter than the widest gap a peer can see (VW8 (a)); how the fence
   falls against the peers' commit of it dead is CM3's.
 
@@ -7131,8 +7134,8 @@ caught.
   incarnation that rejoins after its sit-out (VW8 (e)) is given its share
   of the shards again with no probe of the agents first, holds them with
   no reaction and no unhealthy write for `AgentsUnreachedSeconds` to a
-  heartbeat tick, and fences again: at the default `--vote-interval` the
-  sit-outs are 30, 60, 120 and then 240 seconds, and each return leaves
+  heartbeat tick, and fences again: the sit-outs double from the fence
+  threshold to eight times it (VW8 (e)), and each return leaves
   those pools undriven for about `AgentsUnreachedSeconds` plus the leave's
   grace window and the ownership changes' gaps (VW7), about a minute. When
   every worker is cut off, one at least keeps the pools, its reactions
@@ -7141,8 +7144,7 @@ caught.
   peer again and fences too, so the pools move between them and go
   undriven for a leave's grace window at each move. Once the network is
   back, a worker that sits out drives again only after the rest of its
-  sit-out and a join's grace window, up to about five minutes at the
-  defaults. A peer counts in every role: where the roles are split, as a
+  sit-out and a join's grace window. A peer counts in every role: where the roles are split, as a
   worker of the sp and dn roles beside one of the dn role alone, the
   first never fences for it and keeps its pools held. A worker that hears
   any agent is not unreached: one that reaches some agents but not others
@@ -7157,10 +7159,9 @@ caught.
   agents being down, has its reactions held between their answers. And
   an event threshold set below AR3's hold, `AgentsUnreachedIntervals` of
   the cluster's `cntlr_interval`, can be reached first: in the first
-  stretch of a cut a worker can then replace a cntlr it cannot reach, as
-  before the hold existed. At the defaults the hold comes after 10 seconds
-  and the shortest threshold that needs no healthy standby,
-  `cntlr_unhealthy`, is 600 seconds; a failover needs a standby the
+  stretch of a cut a worker can then replace a cntlr it cannot reach. At
+  the defaults the hold comes long before the shortest threshold that
+  needs no healthy standby, `cntlr_unhealthy`; a failover needs a standby the
   cut-off worker reads healthy, which it has none of once its rounds to
   them have missed.
 
@@ -7755,7 +7756,8 @@ caught.
   over once more before it has.
   It compares rows, not causes: a new primary whose own fault fails only
   rows the old primary failed on is held as well, for `cntlr_unhealthy`
-  from the hold's first pass at most, or until an operator
+  from the hold's first pass, or with no end after a failover that bound
+  released (AR5), or until an operator
   moves the role, every pass logging why. AR7's sole-primary variant takes the
   twins of both refusals, judged on the same report (AR7). The first holds the
   primary of an SP with no failover candidate only while the report the

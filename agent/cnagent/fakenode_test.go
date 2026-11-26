@@ -186,9 +186,9 @@ type fakeNode struct {
 	zeroNoEffect  map[string]bool
 	refusedLeaves bool
 	// cutShortAssemblies is how many of the next plain assemblies are
-	// stopped once md took their first member, as the soft timeout stops a
-	// slow one: each leaves an inactive array holding that member and
-	// fails.
+	// stopped once md took their first member, as their time limit
+	// (MdBuildTimeout) stops a slow one: each leaves an inactive array
+	// holding that member and fails.
 	cutShortAssemblies int
 	// cmdLimits is, per mdadm action a call named (--create, --assemble,
 	// --stop, and --force for a forced assembly), the largest time its

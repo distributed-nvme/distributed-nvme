@@ -82,7 +82,7 @@ const BootIdPath = "/proc/sys/kernel/random/boot_id"
 // ends, empty when the file holds it already or it could not be read. A boot
 // id it cannot read, and a file that is absent, as at the first start of an
 // agent, or that does not load, report no reboot: the worker then holds the
-// node's failover as for a restart, the old behaviour. It saves nothing, so a
+// node's failover as for a restart. It saves nothing, so a
 // start that dies before its end, and every restart after it until one
 // ends, still reports the reboot, the kernel's devices not built yet.
 func (s *Store) ReadBoot(ctx context.Context, name string) (string, bool, error) {
