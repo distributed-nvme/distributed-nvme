@@ -667,7 +667,11 @@ whose connection to it came back before the node had made its old
 primaries standbys had its writes there fail for a few seconds: none at 8
 pools, 15 in one run at 32 and none in the other, and at 64 pools 112, 56 on
 each host, in one of the two runs that reached the cut and none in the other
-([dnv's scope and known limits](scope.md), section 8). Building 64 pools at
+([dnv's scope and known limits](scope.md), section 8). With the node's agent
+stopped instead, at 8 pools, the hosts' writes to the 6 pools that moved
+failed 18 times in all while the agent was stopped, as the fence answers the
+old primary's path with errors (section 8 of the same document), and none
+failed once it ran again. Building 64 pools at
 once took 332 s and made 22 failovers of pools that had finished building; in
 a second build of 64 one pool failed over twice, and its second failover left
 it unbuilt (section 8 of the same document); a third took 336 s and made 18,
