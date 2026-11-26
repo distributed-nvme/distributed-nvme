@@ -8476,3 +8476,37 @@ func TestObserveMarksAnAcceptedSyncupErrorReply(t *testing.T) {
 		t.Fatalf("a refused reply marked the cntlr")
 	}
 }
+
+// TestObserveMarksAnUnknownCntlr pins the memo AR5's election reads (HL2):
+// a reply that answers "unknown object", of a round or of a Syncup*, marks
+// the cntlr, and any other answer clears the mark.
+func TestObserveMarksAnUnknownCntlr(t *testing.T) {
+	ctx := context.Background()
+	captureLogs(t)
+	d := newTestDeps(
+		testConfig(common.WorkerRoleSp), newFakeStore(), newFakeClock(),
+	)
+	d.health = &fakeHealthWriter{}
+	w := spTestWorker(d)
+	w.verdicts = newVerdictMemo()
+	marked := func() bool {
+		w.verdicts.mu.Lock()
+		defer w.verdicts.mu.Unlock()
+		return w.verdicts.unknown[spCntlrPrimary]
+	}
+	driver := newCntlrDriver(w, nil, settlePlan(false, false))
+	driver.observe(ctx, &replyState{code: common.ReplyCodeUnknownObject})
+	if !marked() {
+		t.Fatalf("a Syncup* answered unknown did not mark the cntlr")
+	}
+	driver.observe(ctx, &replyState{revision: 7, fromRound: true,
+		code: common.ReplyCodeUnknownObject})
+	if !marked() {
+		t.Fatalf("a round answered unknown cleared the mark")
+	}
+	driver.storeInfo(&pb.CntlrInfo{}, 0)
+	driver.observe(ctx, &replyState{revision: 7, infoPresent: true})
+	if marked() {
+		t.Fatalf("an accepted answer kept the mark")
+	}
+}

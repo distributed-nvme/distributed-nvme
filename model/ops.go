@@ -1810,9 +1810,10 @@ func Failover(
 }
 
 // FailoverPassingOver is Failover whose election passes over the cntlrs of
-// passed: the standbys whose agents refuse their own SyncupCntlr, or whose
-// reports say their sweep left a stack of the cntlr, which the worker alone
-// knows of from their replies (dnv-worker.md HL9, AR5; cnagent.md CN35).
+// passed: the standbys whose agents refuse their own SyncupCntlr, whose
+// latest answer was "unknown object", or whose reports say their sweep left
+// a stack of the cntlr, which the worker alone knows of from their replies
+// (dnv-worker.md HL9, RW5, AR5; cnagent.md CN35).
 func FailoverPassingOver(
 	ctx context.Context,
 	cli *etcdutil.Client,
@@ -2573,9 +2574,9 @@ func ReplaceCntlr(
 // ReplaceCntlrPassingOver is ReplaceCntlr whose test for a failover
 // candidate passes over the cntlrs of passed, as FailoverPassingOver's
 // election does: a primary whose only healthy standbys refuse their own
-// SyncupCntlr, or say their sweep left a stack of the cntlr, has no
-// candidate, so its replacement may go on (dnv-worker.md HL9, AR7;
-// cnagent.md CN35).
+// SyncupCntlr, answer "unknown object", or say their sweep left a stack of
+// the cntlr, has no candidate, so its replacement may go on (dnv-worker.md
+// HL9, RW5, AR7; cnagent.md CN35).
 func ReplaceCntlrPassingOver(
 	ctx context.Context,
 	cli *etcdutil.Client,

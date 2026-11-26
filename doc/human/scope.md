@@ -1921,22 +1921,26 @@ Measured times are in [the introduction](introduction.md#status-and-limits).
   that reads healthy is left. State: fix decided. Until then, stop a worker
   that reaches etcd but no agent: the other workers then take its pools.
   Read from dnv's code; not seen in the lab.
-- **A cntlr that its controller node never came to know can become the
-  primary, and is then never moved.** A controller node whose store disk,
-  the disk that holds its agent's local files, is full has saved nothing
-  since, so it still reads healthy, and a new cntlr
-  can be placed on it. The node cannot save its new list of cntlrs and
-  keeps the old one, so the new cntlr's own syncup and every check round
-  of it get the answer that the object is unknown. The worker gives no
-  health verdict for that answer, with no time limit, so the cntlr keeps no
-  health epoch and counts as a healthy standby. The next failover can
-  choose it. It builds nothing and still gets no health epoch, which a
-  failover and a cntlr replacement both need: the pool serves nothing until
-  an operator repairs the store disk or disables the cntlr. A new side that
-  an auto-grow places on a disk node with a full store disk is the same:
-  it is never built, and the worker never takes the grow back; an operator
-  takes it back with `dnvctl sp withdraw-grow` (section 4). State: fix
-  decided. Read from dnv's code; not seen in the lab.
+- **A cntlr or a side that its node never came to know waits for the
+  start hold.** A controller node whose store disk, the disk that holds
+  its agent's local files, is full has saved nothing since, so it still
+  reads healthy, and a new cntlr can be placed on it. The node cannot save
+  its new list of cntlrs and keeps the old one, so every check round of
+  the new cntlr gets the answer that the object is unknown. The worker
+  gives no health verdict for that answer during the cluster's start hold,
+  120 seconds at the default, as a new object's node may not have taken
+  the syncup that lists it yet; after that, each such round counts as a
+  missed round, so the cntlr gets a health epoch and a cntlr replacement
+  can follow. A restart of the worker, or another worker taking the pool
+  over, starts that wait again. A failover never chooses a standby whose latest answer was
+  that the object is unknown. A new side that an auto-grow places on a
+  disk node with a full store disk gets a health epoch the same way; the
+  worker takes the grow back once that side has been unhealthy for the side
+  threshold and the disk node's record carries a health epoch, as the
+  node's first refused save gives it. State: accepted for the wait of the
+  start hold. Both parts are tested with fake agents, the grow's with an
+  error row of the disk node's own in place of a store row, which the fake
+  agents do not report. Not seen in the lab.
 - **A failover does not bring a pool back while a disk node's agent takes
   no syncup.** Only a disk node's agent opens a new primary's path to a
   side, and only in the converge of a syncup. That agent can stop taking
@@ -2744,9 +2748,9 @@ failover's among them.
 - **A disk node's full store disk is offered until a save fails.** A quiet
   node with a full store disk reads ok and is offered for new sides. The
   first refused request marks it. A side placed there before that, and a
-  cntlr placed on a controller node in the same state, can keep a pool
-  down (section 6.1), and a failover can leave a group down while a disk
-  node's store disk is full. State: fix decided for a disk node: its agent
+  cntlr placed on a controller node in the same state, wait for the start
+  hold before they get a health epoch (section 6.1), and a failover can
+  leave a group down while a disk node's store disk is full. State: fix decided for a disk node: its agent
   will test its store disk with a small write at a fixed interval, so a
   full disk marks the node early. Fix later for a controller node: no like
   test is planned there yet. Not seen in the lab.

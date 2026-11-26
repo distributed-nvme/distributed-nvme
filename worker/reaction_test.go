@@ -4591,3 +4591,36 @@ func TestReactionABuildFailingOnEveryCntlrMovesTheRoleOnce(t *testing.T) {
 	h.wantOps("failover")
 	h.wantSkipped(reactionFailover, reasonSameError)
 }
+
+// TestReactionFailoverPassesOverAnUnknownStandby pins AR5's election with
+// HL2: a standby whose latest answer was "unknown object", one its node
+// never came to know, is passed over and handed to the op to pass over too;
+// with no other standby, the pass logs no candidate and names no refusal.
+func TestReactionFailoverPassesOverAnUnknownStandby(t *testing.T) {
+	t.Run("another standby", func(t *testing.T) {
+		state := reactFixture(t)
+		state.Conf.CntlrIdList = append(state.Conf.CntlrIdList, reactCntlrC)
+		state.Cntlrs[reactCntlrC] = &pb.Cntlr{AddrPort: reactCnC}
+		h := newReactHarness(t, state)
+		h.state.Cntlrs[reactCntlrA].Disabled = true
+		h.w.verdicts.noteUnknown(reactCntlrB, true)
+		h.pass()
+		calls := h.wantOps("failover")
+		if calls[0].oldId != reactCntlrA || calls[0].newId != reactCntlrC {
+			t.Fatalf("failover %d -> %d, want %d -> %d", calls[0].oldId,
+				calls[0].newId, reactCntlrA, reactCntlrC)
+		}
+		if !slices.Equal(calls[0].passed, []uint64{reactCntlrB}) {
+			t.Fatalf("the failover passed over %v, want [%d]",
+				calls[0].passed, reactCntlrB)
+		}
+	})
+	t.Run("no other standby", func(t *testing.T) {
+		h := newReactHarness(t, reactFixture(t))
+		h.state.Cntlrs[reactCntlrA].Disabled = true
+		h.w.verdicts.noteUnknown(reactCntlrB, true)
+		h.pass()
+		h.wantOps()
+		h.wantSkipped(reactionFailover, reasonNoCandidate)
+	})
+}

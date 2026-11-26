@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"io"
+	"log/slog"
 	"net"
 	"slices"
 	"strings"
@@ -3156,4 +3157,101 @@ func testSyncupResultNamesTheObservation(t *testing.T) {
 		return
 	}
 	t.Fatal("no syncup result at revision 6")
+}
+
+// unknownStub is the driver of TestUnknownPastHold: it counts what the
+// loop hands it.
+type unknownStub struct {
+	objDriver
+	observed, unreachables int
+}
+
+func (s *unknownStub) logAttrs() []slog.Attr { return nil }
+
+func (s *unknownStub) observe(context.Context, *replyState) { s.observed++ }
+
+func (s *unknownStub) unreachable(context.Context) { s.unreachables++ }
+
+// TestUnknownPastHold pins RW5's bound on rounds answered unknown object
+// (HL2): an sp object's are no verdict until the cluster's start hold, and
+// never less than ObsMaxAgeIntervals intervals, has passed by the worker's
+// clock since the first one with no other answer of a round between, and
+// missed rounds from then on; any other answer, a pause of the loop, and
+// another role reset or skip it.
+func TestUnknownPastHold(t *testing.T) {
+	ctx := context.Background()
+	captureLogs(t)
+	const interval = time.Second
+	unknown := &replyState{code: common.ReplyCodeUnknownObject}
+	clean := &replyState{}
+	newLoop := func(role string, hold uint32) (*revWorker, *unknownStub,
+		*fakeClock, *pb.ClusterConf) {
+		clk := newFakeClock()
+		d := newTestDeps(testConfig(role), newFakeStore(), clk)
+		stub := &unknownStub{}
+		w := &revWorker{deps: d, role: role, driver: stub}
+		cc := &pb.ClusterConf{StartHoldConf: &pb.StartHoldConf{
+			Seconds: hold,
+		}}
+		return w, stub, clk, cc
+	}
+
+	t.Run("past the start hold", func(t *testing.T) {
+		w, stub, clk, cc := newLoop(common.WorkerRoleSp, 10)
+		if w.unknownPastHold(ctx, cc, interval, unknown) {
+			t.Fatalf("the first unknown answer was judged")
+		}
+		clk.advance(10*time.Second - time.Millisecond)
+		if w.unknownPastHold(ctx, cc, interval, unknown) {
+			t.Fatalf("an unknown answer within the hold was judged")
+		}
+		clk.advance(time.Millisecond)
+		if !w.unknownPastHold(ctx, cc, interval, unknown) ||
+			stub.unreachables != 1 || stub.observed != 1 {
+			t.Fatalf("at the hold: %d missed rounds, %d observed; want 1, 1",
+				stub.unreachables, stub.observed)
+		}
+	})
+	t.Run("another answer starts the count again", func(t *testing.T) {
+		w, stub, clk, cc := newLoop(common.WorkerRoleSp, 10)
+		w.unknownPastHold(ctx, cc, interval, unknown)
+		clk.advance(9 * time.Second)
+		w.unknownPastHold(ctx, cc, interval, clean)
+		w.unknownPastHold(ctx, cc, interval, unknown)
+		clk.advance(9 * time.Second)
+		if w.unknownPastHold(ctx, cc, interval, unknown) || stub.unreachables != 0 {
+			t.Fatalf("the count did not start again at the other answer")
+		}
+	})
+	t.Run("a pause starts the count again", func(t *testing.T) {
+		w, stub, clk, cc := newLoop(common.WorkerRoleSp, 10)
+		w.unknownPastHold(ctx, cc, interval, unknown)
+		clk.advance(9 * time.Second)
+		w.quiesce()
+		w.unknownPastHold(ctx, cc, interval, unknown)
+		clk.advance(9 * time.Second)
+		if w.unknownPastHold(ctx, cc, interval, unknown) || stub.unreachables != 0 {
+			t.Fatalf("the count did not start again after the idle")
+		}
+	})
+	t.Run("a hold of zero has a floor of intervals", func(t *testing.T) {
+		w, stub, clk, cc := newLoop(common.WorkerRoleSp, 0)
+		w.unknownPastHold(ctx, cc, interval, unknown)
+		clk.advance(common.ObsMaxAgeIntervals*interval - time.Millisecond)
+		if w.unknownPastHold(ctx, cc, interval, unknown) {
+			t.Fatalf("an unknown answer within the floor was judged")
+		}
+		clk.advance(time.Millisecond)
+		if !w.unknownPastHold(ctx, cc, interval, unknown) || stub.unreachables != 1 {
+			t.Fatalf("at the floor: %d missed rounds, want 1", stub.unreachables)
+		}
+	})
+	t.Run("a node's loop never judges it", func(t *testing.T) {
+		w, stub, clk, cc := newLoop(common.WorkerRoleDn, 10)
+		w.unknownPastHold(ctx, cc, interval, unknown)
+		clk.advance(time.Hour)
+		if w.unknownPastHold(ctx, cc, interval, unknown) || stub.unreachables != 0 {
+			t.Fatalf("a dn loop judged an unknown answer")
+		}
+	})
 }

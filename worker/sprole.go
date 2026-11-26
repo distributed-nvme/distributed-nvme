@@ -4419,16 +4419,20 @@ func (d *sideDriver) observe(ctx context.Context, r *replyState) {
 	d.setCloneReady(accepted(r.code) &&
 		r.revision == plan.req.GetRevision() && migrCloneShown(info))
 	d.reportSynced(ctx, r)
-	d.noteAnswer(ctx, true)
+	if r.code != common.ReplyCodeUnknownObject {
+		// RW24: a side its node does not know is no side a fence reaches.
+		d.noteAnswer(ctx, true)
+	}
 }
 
 // noteAnswer hands the coordinator a change between check rounds the side's
 // agent answers and one that got no answer, which RW24's fence round reads:
 // a side whose latest round got no answer is not waited for. A round that
 // fails (revWorker.fail: no reply in time, a broken stream, an observation
-// too old, a starting answer past the start hold) is no answer; a reply the
-// child judges, of a round or of a Syncup*, and a starting answer within the
-// hold, are answers.
+// too old, a starting answer past the start hold; and a round answered
+// unknown object past its bound, revWorker.unknownPastHold) is no answer; a
+// reply the child judges, of a round or of a Syncup*, but one that answers
+// unknown object, and a starting answer within the hold, are answers.
 func (d *sideDriver) noteAnswer(ctx context.Context, answered bool) {
 	if d.quiet == !answered {
 		return
@@ -4999,6 +5003,9 @@ func (d *cntlrDriver) diffBitmaps(
 func (d *cntlrDriver) observe(ctx context.Context, r *replyState) {
 	plan := d.current()
 	d.noteRefusal(r, plan)
+	// HL2, AR5: a cntlr whose latest answer is "unknown object" is one its
+	// node does not know, which the failover passes over.
+	d.memo.noteUnknown(d.cntlrId, r.code == common.ReplyCodeUnknownObject)
 	info := d.info()
 	// AR5: a standby's report that its sweep left a stack takes it out of
 	// the failover's candidates; it moves no health epoch.

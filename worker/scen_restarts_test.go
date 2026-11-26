@@ -91,7 +91,9 @@ func TestScenAgentRestartWithItsFilesGetsNoSyncup(t *testing.T) {
 // side syncup meanwhile is refused as unknown,
 // logged as `syncup rejected` and re-sent from the next round, and the first
 // side syncup accepted comes after the node's. The case holds the node's
-// syncup for a few rounds, so the refusals last as long as it wants.
+// syncup for a few rounds, so the refusals last as long as it wants
+// within the cluster's start hold, past which a side's would be missed
+// rounds (dnv-worker.md RW5).
 func TestScenAgentRestartWithEmptyFilesResyncs(t *testing.T) {
 	t.Parallel()
 	h := newWorkerHarness(t, harnessOpts{})

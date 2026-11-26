@@ -215,7 +215,8 @@ func TestScenReplaceCntlrOfADeadCn(t *testing.T) {
 // `syncup rejected` and re-sent from the next rounds, with no health
 // verdict meanwhile (HL1), until the CN's syncup lands; then the cntlr's
 // syncup is accepted and it converges. The case holds the CN's syncup, so the
-// refusals last as long as it wants.
+// refusals last as long as it wants within the cluster's start hold, past
+// which they would be missed rounds (RW5).
 func TestScenReplacementRefusedUnknownUntilItsCnSyncupLands(t *testing.T) {
 	t.Parallel()
 	h := newWorkerHarness(t, harnessOpts{})
@@ -714,5 +715,176 @@ func TestScenGrowWithdrawnWhenItsDnDies(t *testing.T) {
 	}
 	if n := len(c.load(t).Slices[stdSliceId].GetDataGrpList()); n != 2 {
 		t.Fatalf("the slice holds %d data groups, want 2", n)
+	}
+}
+
+// TestScenUnknownCntlrPastTheStartHoldIsUnhealthy pins HL2's unknown answer
+// past the start hold: a replacement's new cntlr whose CN holds the syncup
+// that would list it answers every round "unknown object"; within the
+// cluster's start hold that is no verdict (RW5), and past it each such
+// round is a missed round, so the new cntlr gets a health epoch while its
+// syncup is still re-sent. Once the CN's syncup lands, the cntlr's syncup is
+// accepted and its epoch clears.
+func TestScenUnknownCntlrPastTheStartHoldIsUnhealthy(t *testing.T) {
+	t.Parallel()
+	const hold = 3
+	h := newWorkerHarness(t, harnessOpts{})
+	c := h.plantStd(t, func(s *stdSpec) {
+		v := uint32(hold)
+		s.startHold = &v
+		// A cntlr threshold long enough that the never-known cntlr is not
+		// replaced in turn before its epoch clears.
+		s.threshold = &pb.EventThreshold{
+			PrimaryUnhealthy: 2,
+			CntlrUnhealthy:   10,
+			SideUnhealthy:    1,
+			LegUnhealthy:     2,
+		}
+	})
+	w := h.startWorker(t, "w1")
+	h.waitOwnsAll(t, w)
+	c.waitConverged(t)
+
+	cn3 := c.cnAgent(3)
+	setLever(t, cn3, agentfake.CnKey, func(o *agentfake.Object) { o.HangSyncup = true })
+	defer setLever(t, cn3, agentfake.CnKey, func(o *agentfake.Object) { o.HangSyncup = false })
+	c.failCntlr(t, 2)
+	applied := h.waitRecord(t, 20*time.Second, w, msgReactionApplied,
+		reactionIs(reactionReplaceCntlr, ""))
+	newId := applied.num("new_cntlr_id")
+	h.waitUntil(t, 30*time.Second, "the never-known cntlr's health epoch",
+		func() (bool, string) {
+			return c.cntlr(t, newId).GetErrEpoch() != 0, "none yet"
+		})
+	set := time.Now()
+	if took := set.Sub(applied.at); took < hold*time.Second {
+		t.Errorf("cntlr %d got its epoch %v after it was made, within the "+
+			"start hold of %ds", newId, took, hold)
+	}
+	if n := h.countRecs(w, "check round failed", func(rec logRecord) bool {
+		id, ok := cntlrIdOf(rec)
+		return ok && id == newId && rec.str("error") == errUnknownPastHold.Error()
+	}); n == 0 {
+		t.Errorf("no failed round of cntlr %d names its unknown answers", newId)
+	}
+
+	setLever(t, cn3, agentfake.CnKey, func(o *agentfake.Object) { o.HangSyncup = false })
+	h.waitUntil(t, 30*time.Second, "the new cntlr's epoch cleared once known",
+		func() (bool, string) {
+			return c.cntlr(t, newId).GetErrEpoch() == 0, "still set"
+		})
+}
+
+// TestScenUnknownSidePastTheStartHoldIsUnhealthy pins the same for a side:
+// a repair's new leg on a disk node whose agent holds the node syncup that
+// introduces the new side answers "unknown object" for that side; past the
+// start hold its side gets a health epoch.
+func TestScenUnknownSidePastTheStartHoldIsUnhealthy(t *testing.T) {
+	t.Parallel()
+	const hold = 3
+	h := newWorkerHarness(t, harnessOpts{})
+	c := h.plantStd(t, func(s *stdSpec) {
+		v := uint32(hold)
+		s.startHold = &v
+	})
+	w := h.startWorker(t, "w1")
+	h.waitOwnsAll(t, w)
+	c.waitConverged(t)
+	dn3 := c.dnAgent(3)
+	setLever(t, dn3, agentfake.DnKey, func(o *agentfake.Object) { o.HangSyncup = true })
+	defer setLever(t, dn3, agentfake.DnKey, func(o *agentfake.Object) { o.HangSyncup = false })
+	primary, primaryKey := c.cntlrAgent(t, 1)
+	setLever(t, primary, primaryKey, func(o *agentfake.Object) {
+		foSetRow(o, "leg_id_to_leg.3", foStatusRow(pb.ResStatus_RES_STATUS_ERROR, true))
+	})
+	created := h.waitRecord(t, 20*time.Second, w, msgReactionApplied,
+		func(rec logRecord) bool { return rec.str("kind") == reactionRepairCreate })
+	repName := created.str("rep_name")
+	h.waitUntil(t, 30*time.Second, "the never-known side's health epoch",
+		func() (bool, string) {
+			rep := c.repair(t, repName)
+			if rep == nil || len(rep.GetNewLegList()) == 0 {
+				return false, "no repair"
+			}
+			side := rep.GetNewLegList()[0].GetSideList()[0]
+			return side.GetErrEpoch() != 0, "none yet"
+		})
+	if took := time.Since(created.at); took < hold*time.Second {
+		t.Errorf("the new side got its epoch %v after the repair, within the "+
+			"start hold of %ds", took, hold)
+	}
+	if n := h.countRecs(w, "check round failed", func(rec logRecord) bool {
+		return rec.str("error") == errUnknownPastHold.Error()
+	}); n == 0 {
+		t.Errorf("no failed round names the side's unknown answers")
+	}
+}
+
+// TestScenGrowWithdrawnFromADnThatNeverKnowsItsSide pins RW5's bound on a
+// stuck grow (AR6): every disk node holds the syncup that would list the
+// new group's side when the grow lands; the others then take theirs, and
+// the grow's disk node keeps holding it, with an error row of its own, as a
+// full store disk gives with its store row (the fake reports no store row,
+// so its disk row plays it). Its side answers "unknown object"; past the start
+// hold those rounds are missed, the side gets a health epoch, and with the
+// disk node's own epoch the worker withdraws the grow.
+func TestScenGrowWithdrawnFromADnThatNeverKnowsItsSide(t *testing.T) {
+	t.Parallel()
+	const hold = 3
+	h := newWorkerHarness(t, harnessOpts{})
+	c := h.plantScen(t, scenShape{extraDns: 1, edit: func(s *stdSpec) {
+		v := uint32(hold)
+		s.startHold = &v
+	}})
+	w := h.startWorker(t, "w1")
+	h.waitOwnsAll(t, w)
+	c.waitConverged(t)
+
+	grpId := c.nextSpId(t)
+	held := func(id uint64, hang bool) {
+		setLever(t, c.dnAgent(id), agentfake.DnKey,
+			func(o *agentfake.Object) { o.HangSyncup = hang })
+	}
+	for id := uint64(1); id <= uint64(c.spec.dnCnt); id++ {
+		held(id, true)
+	}
+	defer func() {
+		for id := uint64(1); id <= uint64(c.spec.dnCnt); id++ {
+			held(id, false)
+		}
+	}()
+	total := c.dataGrp(t).GetDataBlocks()
+	c.setPoolRow(t, pb.ResStatus_RES_STATUS_OK, dataBreach(total))
+	grown := h.waitRecord(t, 20*time.Second, w, msgReactionApplied,
+		reactionIs(reactionGrowData, ""))
+	if grown.num("grp_id") != grpId {
+		t.Fatalf("the grow %v, want group %d", grown.attrs, grpId)
+	}
+	var stuckDn uint64
+	for id := uint64(1); id <= uint64(c.spec.dnCnt); id++ {
+		if strings.Contains(fmt.Sprint(grown.attrs["addr_port_list"]),
+			stdDnAddr(id)) {
+			stuckDn = id
+			break
+		}
+	}
+	if stuckDn == 0 {
+		t.Fatalf("the grow %v names no disk node of the cluster", grown.attrs)
+	}
+	for id := uint64(1); id <= uint64(c.spec.dnCnt); id++ {
+		if id != stuckDn {
+			held(id, false)
+		}
+	}
+	// The disk node's own error row, which a full store disk gives as its
+	// store row; the fake reports no store row, so its disk row plays it.
+	setLever(t, c.dnAgent(stuckDn), agentfake.DnKey, func(o *agentfake.Object) {
+		foSetRow(o, "disk_info",
+			foStatusRow(pb.ResStatus_RES_STATUS_ERROR, false))
+	})
+	withdrawn := h.waitRecord(t, 40*time.Second, w, msgReactionApplied,
+		reactionIs(reactionGrowWithdraw, ""))
+	if withdrawn.num("grp_id") != grpId {
+		t.Fatalf("the withdrawal %v, want group %d", withdrawn.attrs, grpId)
 	}
 }

@@ -65,7 +65,10 @@ func (h *workerHarness) plantScen(t *testing.T, shape scenShape) *stdCluster {
 			t.Fatalf("fake cn %d: %v", id, err)
 		}
 	}
-	cl := h.putCluster(t, plant.ClusterSpec{ExtentSize: common.MinDnExtSize})
+	cl := h.putCluster(t, plant.ClusterSpec{
+		ExtentSize:       common.MinDnExtSize,
+		StartHoldSeconds: spec.startHold,
+	})
 	c.cl = cl
 	var err error
 	var dnSpecs []plant.DnSpec

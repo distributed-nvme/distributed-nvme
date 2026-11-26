@@ -7766,11 +7766,13 @@ stores instead is CN23's.
   a `SyncupCntlr` newer than the request it holds, for as long as the
   primary's rounds answer from the held one; a refused re-send of the held
   revision, such as one a leftover's sweep or a read's name brings, makes
-  none of its rounds unhealthy. The worker passes over a standby here only
+  none of its rounds unhealthy. The worker passes over a standby here
   while its own refused `SyncupCntlr` marks it, from the refusal until a
   round answers, accepted, at the revision its child drives, or a round is
   missed, and where every healthy, enabled standby is so marked it moves no
-  role at all (`dnv-worker.md` HL9, AR5, AR7). A standby here that holds
+  role at all (`dnv-worker.md` HL9, AR5, AR7); a new cntlr this node could
+  not save into its list answers unknown object, which the worker passes
+  over too and judges unhealthy past its bound (`dnv-worker.md` RW5, AR5). A standby here that holds
   its driven revision and whose rounds answer code zero is sent no
   `SyncupCntlr` (`dnv-worker.md` RW4), so it carries no mark, and the store
   row marks the node, not the cntlr (`dnv-worker.md` HL1): the worker can

@@ -29,6 +29,12 @@ var errStaleObservation = errors.New("observation too old")
 // or answer time to measure by, or with an answer before the series' start.
 var errStartingPastHold = errors.New("agent starting past its hold")
 
+// errUnknownPastHold fails a round of a side or a cntlr whose agent has
+// answered "unknown object" for the cluster's start hold or longer, by the
+// worker's clock, with no other answer of a round between (HL2): the node
+// never came to know the object.
+var errUnknownPastHold = errors.New("object unknown to its agent past the start hold")
+
 // errRoundAborted ends a round that a desired change overtook (RW6). The
 // pending reply would answer the request built from the SUPERSEDED revision,
 // so the round is given up together with its stream. It is NOT a health
@@ -357,6 +363,10 @@ type revWorker struct {
 	// until one does and after a move: a different one is the agent's
 	// restart, which a DN's or a CN's loop logs (HL8).
 	agentStart time.Time
+	// unknownSince is when, by the worker's clock, a round of the loop
+	// first answered "unknown object" with no other answer of a round
+	// since, zero otherwise (unknownPastHold).
+	unknownSince time.Time
 }
 
 // streamState is one open Check* stream plus the goroutine that turns its
@@ -537,6 +547,9 @@ func (w *revWorker) round(cc *pb.ClusterConf, interval time.Duration) {
 	}
 	w.seeAgentStart(ctx, reply)
 	if reply.code == common.ReplyCodeStarting {
+		// A starting answer is another answer: the count of unknown answers
+		// starts again (unknownPastHold).
+		w.unknownSince = time.Time{}
 		w.startingRound(ctx, cc, reply)
 		return
 	}
@@ -558,6 +571,12 @@ func (w *revWorker) round(cc *pb.ClusterConf, interval time.Duration) {
 		w.logStartEnded(ctx, reply)
 	}
 	if w.staleRound(ctx, reply, interval) {
+		return
+	}
+	if w.unknownPastHold(ctx, cc, interval, reply) {
+		// HL2: a missed round for the object's health, and the syncup still
+		// goes, so the object becomes known once its node's syncup lands.
+		w.syncup(ctx, cc, reply.obsTraceId)
 		return
 	}
 	// Step 5: process the reply's *Info if present (HL4/HL5), then re-sync
@@ -591,6 +610,57 @@ func (w *revWorker) round(cc *pb.ClusterConf, interval time.Duration) {
 	}
 }
 
+// unknownPastHold judges a round of a side or a cntlr whose agent answers
+// "unknown object" (HL2): within the cluster's start hold, and never less
+// than ObsMaxAgeIntervals of the object's intervals, counted by the worker's
+// clock from the first such answer with no other answer of a round since,
+// it is no verdict, as a new object's node may not have taken the syncup
+// that lists it yet (RW5); past that bound, it is a missed round for the
+// object's health, logged as a failed round, and it reports true. Any other
+// answer of a round, a pause of the loop (a move, an idle, a refused conf)
+// and a new loop start the count again. The dn and cn roles' loops never
+// judge it: a node that does not know itself is made known by its own
+// syncup, and one whose store refuses that save stays unjudged (Known
+// limits).
+func (w *revWorker) unknownPastHold(
+	ctx context.Context,
+	cc *pb.ClusterConf,
+	interval time.Duration,
+	reply *replyState,
+) bool {
+	if reply.code != common.ReplyCodeUnknownObject {
+		w.unknownSince = time.Time{}
+		return false
+	}
+	if w.role != common.WorkerRoleSp {
+		return false
+	}
+	now := w.deps.clk.now()
+	if w.unknownSince.IsZero() {
+		w.unknownSince = now
+		return false
+	}
+	hold := max(time.Duration(model.ResolveStartHoldSeconds(cc))*time.Second,
+		common.ObsMaxAgeIntervals*interval)
+	unknownFor := now.Sub(w.unknownSince)
+	if unknownFor < hold {
+		return false
+	}
+	slog.InfoContext(ctx, "check round failed", append(w.idAttrs(),
+		slog.String("error", errUnknownPastHold.Error()),
+		slog.Int64("unknown_ms", unknownFor.Milliseconds()))...)
+	// A judged round closes the start series (HL8). The driver records the
+	// unknown answer (a cntlr's mark for AR5), then the missed round. The
+	// stream drops, as at every missed round (HL7): the agent leaves an
+	// unchanged *Info out on a kept stream, and the unknown marking would
+	// then outlive a later clean answer.
+	w.startFrom = time.Time{}
+	w.driver.observe(ctx, reply)
+	w.dropStream()
+	w.driver.unreachable(ctx)
+	return true
+}
+
 // staleRound judges the age of the observation a round's reply answers from
 // (HL7) and reports whether the round failed on it. The age counts from no
 // earlier than the first round after a pause in the loop's rounds (askFrom):
@@ -609,11 +679,13 @@ func (w *revWorker) round(cc *pb.ClusterConf, interval time.Duration) {
 // the unknown marking would then read clean, and no Syncup* is issued on the
 // reply's revision or code: the next round's fresh stream brings them again.
 //
-// A reply that refuses the object as unknown is not judged: the agent holds
-// no state of the object and so no observation of it, and its answer is its
-// state as it answers. Judged, it would fail every round, and the re-sync of
-// RW4 step 5 that makes the object known — an agent's first SyncupDn, a
-// side's first SyncupSide — would never be issued.
+// A reply that refuses the object as unknown is not judged by its age: the
+// agent holds no state of the object and so no observation of it, and its
+// answer is its state as it answers. Judged by its age, it would fail every
+// round, and the re-sync of RW4 step 5 that makes the object known — an
+// agent's first SyncupDn, a side's first SyncupSide — would never be issued
+// (unknownPastHold judges a side's or a cntlr's past its bound, and still
+// sends the syncup).
 func (w *revWorker) staleRound(
 	ctx context.Context,
 	reply *replyState,
@@ -1019,6 +1091,7 @@ func (w *revWorker) connect() (*grpc.ClientConn, error) {
 		w.obsSeen = time.Time{}
 		w.askFrom = time.Time{}
 		w.agentStart = time.Time{}
+		w.unknownSince = time.Time{}
 		if w.obsAddr != "" {
 			w.endStart(w.ctx)
 		}
@@ -1088,8 +1161,10 @@ func (w *revWorker) quiesce() {
 	w.releaseConn()
 	// No round asks the agent to read while the loop idles, so the first
 	// round after it counts an observation's age from its own answer (HL7),
-	// and a start series the idle cut is forgotten (HL8).
+	// and a start series the idle cut is forgotten (HL8), and so is the
+	// count of unknown answers (unknownPastHold).
 	w.askFrom = time.Time{}
+	w.unknownSince = time.Time{}
 	w.endStart(w.ctx)
 }
 

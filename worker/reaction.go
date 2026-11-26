@@ -1317,6 +1317,10 @@ type verdictMemo struct {
 	// fail a primary over onto one (cnagent.md CN35). It moves no health
 	// epoch.
 	stackLeft map[uint64]bool
+	// unknown holds the cntlrs whose latest answer, of a round or of a
+	// Syncup*, was "unknown object": their node does not know them, so AR5
+	// does not fail a primary over onto one (HL2).
+	unknown map[uint64]bool
 	// sidesStarting holds the sides whose latest round answered that their
 	// disk node's agent is starting, within the start hold (HL8): no side
 	// clock of AR6 or AR8 counts for them. A verdict on the side, or the end
@@ -1337,8 +1341,24 @@ func newVerdictMemo() *verdictMemo {
 		refusing:   make(map[uint64]bool),
 
 		stackLeft:     make(map[uint64]bool),
+		unknown:       make(map[uint64]bool),
 		sidesStarting: make(map[sideKey]bool),
 	}
+}
+
+// noteUnknown records whether a cntlr's latest answer was "unknown object"
+// (HL2; AR5).
+func (m *verdictMemo) noteUnknown(cntlrId uint64, unknown bool) {
+	if m == nil {
+		return
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if unknown {
+		m.unknown[cntlrId] = true
+		return
+	}
+	delete(m.unknown, cntlrId)
 }
 
 // noteSyncupSick records that an accepted Syncup* reply with an ERROR row
@@ -1522,6 +1542,9 @@ type judgedSet struct {
 	// stackLeft are the standbys whose latest report says their sweep left
 	// a stack of the cntlr's (verdictMemo.stackLeft).
 	stackLeft map[uint64]bool
+	// unknown are the cntlrs whose latest answer was "unknown object"
+	// (verdictMemo.unknown).
+	unknown map[uint64]bool
 	// sidesStarting are the sides held while their disk node's agent starts
 	// (HL8).
 	sidesStarting map[sideKey]bool
@@ -1553,6 +1576,7 @@ func (m *verdictMemo) snapshot(state *model.SpState) judgedSet {
 		refusing:   make(map[uint64]bool),
 
 		stackLeft:     make(map[uint64]bool),
+		unknown:       make(map[uint64]bool),
 		sidesStarting: make(map[sideKey]bool),
 	}
 	if m == nil {
@@ -1610,6 +1634,13 @@ func (m *verdictMemo) snapshot(state *model.SpState) judgedSet {
 		}
 		out.stackLeft[cntlrId] = true
 	}
+	for cntlrId := range m.unknown {
+		if _, ok := state.Cntlrs[cntlrId]; !ok {
+			delete(m.unknown, cntlrId)
+			continue
+		}
+		out.unknown[cntlrId] = true
+	}
 	for legId := range m.legs {
 		if _, ok := legs[legId]; !ok {
 			delete(m.legs, legId)
@@ -1665,8 +1696,9 @@ type spPass struct {
 	// sole-primary variant is defined as "AR5 found none". 0 = none.
 	// refusingCand is the smallest standby passed over because its agent
 	// refuses its own SyncupCntlr (HL9), 0 = none, and passedOver every
-	// standby passed over, for such a refusal or for a report that its
-	// sweep left a stack (CN35), which the ops' own checks pass over too.
+	// standby passed over, for such a refusal, for a latest answer of
+	// unknown object (HL2) or for a report that its sweep left a stack
+	// (CN35), which the ops' own checks pass over too.
 	failoverCand uint64
 	refusingCand uint64
 	passedOver   []uint64
@@ -1976,6 +2008,15 @@ func (w *spWorker) newPass(state *model.SpState, cc *pb.ClusterConf) *spPass {
 			p.primaryId, p.primary = cntlrId, cntlr
 		}
 		if !failoverEligible(cntlr) {
+			continue
+		}
+		if p.judged.unknown[cntlrId] && !p.judged.refusing[cntlrId] {
+			// HL2: a standby whose latest answer was "unknown object" is a
+			// cntlr its node does not know, which a promotion could not build;
+			// the election in model.Failover and the candidate test of
+			// model.ReplaceCntlr pass over it too (passedOver). It names no
+			// refusal.
+			p.passedOver = append(p.passedOver, cntlrId)
 			continue
 		}
 		if p.judged.stackLeft[cntlrId] && !p.judged.refusing[cntlrId] {
