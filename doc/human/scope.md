@@ -551,7 +551,9 @@ retired leg taken back that joins its array with old data (section 10).
   that it misses its check rounds while it still serves the old primary,
   or one that does not report its fence within the five intervals: on the
   lab VMs at 32 slices, where 45 disk nodes share each VM that runs disk
-  nodes, the reports took up to 4.8 seconds. A disk node whose agent is
+  nodes, the reports took up to 4.8 seconds; in three runs of the cutoff
+  case of the end-to-end suite at 32 slices, every wait of a failover
+  ended with the last report, after 0.8 to 1.3 seconds. A disk node whose agent is
   down or restarting at the failover, while the node's kernel still serves
   the old primary: its check rounds get no answer, so the worker does not
   wait for it. A disk node that reports the failover without having

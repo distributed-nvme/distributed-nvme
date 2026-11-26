@@ -7346,7 +7346,9 @@ caught.
   restarting while its kernel target serves on, can still serve the old
   primary. On the lab at 32 slices the sides' syncups at a failover's
   revision converged in a median of 2.5 to 3.1 s and at most 4.8 s,
-  within that bound at the default interval. The runs timed the sides'
+  within that bound at the default interval, and in three runs of the e2e
+  cutoff case at 32 slices every fence round ended by its reports, in 0.8
+  to 1.3 s (`e2e_integtest.md`, The cases, cutoff). The runs timed the sides'
   reports and converges, not
   their fence steps: a side reports with the accepted reply at the end of
   its converge (RW14), and its fence is one step inside that converge
