@@ -347,11 +347,15 @@ and each cntlr's fence flag is atomic. `rootCtx` anchors the CN10
 background disconnects and path watchers, the CN11 probers, CN34's fence
 watch loop and the background reads, so shutdown cancels them and joins
 none (CN-CM2). No cn lock is held across OS calls but the `LockSet`'s own,
-and the write cache loop device's own (CN15), under which nothing else is
-taken.
+the write cache loop device's own (CN15), under which nothing else is
+taken, and a CN's `addsMu` (CN1), which a `SyncupCn` that only adds cntlrs
+holds under the node read lock across its save, its probes and its sweep's
+listings, and under which it takes no other lock of the hierarchy.
 
 CN1. Lock mapping (instantiates `dnagent.md` SH10 to SH13): `SyncupCn` and the startup
-reconcile — node write; `SyncupCntlr`, `PushCloneBitmap`, one background
+reconcile — node write, save a `SyncupCn` that only adds cntlrs (CN7),
+which takes the node read lock and the CN's own lock (`cnState.addsMu`),
+so that two of them of one CN run one at a time; `SyncupCntlr`, `PushCloneBitmap`, one background
 read of a cntlr (`dnagent.md` SH29), `GetThinDeviceBm`, `GetLegBm` and
 `InspectGrp` — node read plus that cntlr's object lock (key = the cluster, cn, sp and cntlr
 ids); one background read of a CN — node read; `GetCnSize`, `GetCnInfo`,
@@ -626,6 +630,34 @@ the node is deleted (`operations.md`, Remove a node), or lab cleanup does. Reply
 `agent_reply`, `revision`, `cn_info`, and the `obs_stamp` and
 `save_time` of `dnagent.md` SH28: the CN's observation, stored before the
 reply, holds that code and that `cn_info`.
+
+A request that only adds cntlrs runs another way (`syncupCnAdds`). Such a
+request is newer than the one the agent holds for the CN, keeps every
+pointer of the held list, adds at least one and carries the same
+`qos_ratio` (`addsCntlrsOnly`), and arrives while the store's latest save
+holds; one that arrives while it failed runs as above (`dnagent.md`
+SH30). It takes the node read lock and the CN's
+own lock (CN1), runs the CN4 gate again, saves the request as above and
+holds it, and then does what a read of the CN does (`dnagent.md` SH29):
+it probes the base state with CN28's probes and writes none of it, and
+takes the node-level sweep's read-only verdict (CN21, CN30). It stores
+those as the CN's observation and replies them, with the same fields as
+above. It forgets no cntlr and removes nothing from the node: a write of
+the base state or a removal is what the write lock is for, while cntlr
+converges run beside it under the read lock. So a base state that reads
+wrong, or a leftover the verdict names, gives a code that is not zero,
+and the worker sends the request again at the held revision
+(`dnv-worker.md` RW4), which runs as above. A request that no longer
+only adds cntlrs once it holds its locks (another syncup landed between
+its arrival and its locks, so it is at the held revision or adds nothing
+by then) runs as above, under the write lock; one the gate refuses by
+then is refused there. Reason: a build of many pools sends one such
+request for each new cntlr, back to back, and one under the write lock
+waits behind every cntlr converge in flight, so no read of a cntlr built
+already would start or end while the build lasts (`dnagent.md` SH30),
+and those cntlrs' rounds would be missed rounds that fail their pools
+over (`dnv-worker.md` HL7). Cost: the repair of a base state that a
+build meets comes one round later, at the re-send.
 
 ### `SyncupCntlr`
 
@@ -6228,6 +6260,17 @@ converge makes a check on a leg, and counts a new leg it could add, once
 the leg is available, and a read only once the leg's own row reads `OK`
 (CN30), so while that row does not read `OK` a converge reports a refusal
 that a read leaves empty, and the two can name different waits.
+
+Each cntlr read that holds its locks logs, at Debug, `cntlr read times`
+with `cn_id`, `sp_id`, `cntlr_id`, `obs_age_ms` (the age of the cntlr's
+latest observation as the read starts: the time in which no read of it
+ran or stored, as a converge mark or a cancel of `dnagent.md` SH30
+makes), `lock_wait_ms` (its wait for the CN1 locks), `slot_wait_ms` (the
+time its commands waited for an `OsClient` slot, `osclient.md`,
+`WithSlotWait`) and `run_ms` (its run once it held its locks, slot waits
+included). A read cancelled before it held its locks logs nothing.
+Reason: these are what a cntlr's report's age is made of while the node
+builds many cntlrs at once.
 
 CN29. Error capture (`architecture.md`, Common agent rules): a failed
 command marks that resource `RES_STATUS_ERROR` with the command output in

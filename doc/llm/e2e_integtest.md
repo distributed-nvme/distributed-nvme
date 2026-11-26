@@ -260,8 +260,8 @@ cause, the check streams it failed to open or to send a round on, its health
 changes to unreachable and its late observations with the largest age, as no
 stage of the suite asserts on missed rounds; the many-pools case alone runs
 the script, over the worker's records of its build, and logs what it counts
-(Known limits, The many-pools case's build fails over pools that have
-built). Every node guest carries the udev
+(Known limits, The many-pools case's build ages the disk nodes' side
+reports). Every node guest carries the udev
 rules of `deploy/udev/` (`architecture.md`, Components: invocation reference)
 while its agents of the tree's build run, installed before an agent starts from the texts the
 guest's helper carries: on a controller node the stock udev rule would
@@ -1538,7 +1538,11 @@ namespace that both hosts reach through the cdc, all under the cutoff set
 (Topology and parameters, Event thresholds): every pool is created before any
 is waited for, as a burst of volume creates makes them, and each must then
 have every side provisioned, its thin device created, its primary settled,
-both cntlrs listed and its namespace exported by both. Both hosts must be
+both cntlrs listed and its namespace exported by both, and no pool may fail
+over while they build, as the worker's count of failovers shows: the
+`SyncupCn` that each new cntlr brings holds off no read of a cntlr built
+already (`cnagent.md` CN7), so a pool built early still answers its rounds
+from fresh observations. Both hosts must be
 served a discovery record for both cntlrs of every pool and must hold, after
 one discovery connect each, every namespace optimized through its primary
 and inaccessible through its standby on live controllers; the case logs each
@@ -1816,10 +1820,9 @@ cut's pause above one slice, the writes whose fsync was in flight at the
 second reset, lost in the one run that met them, and that reset's kernel-log
 witness, the first block the copy case's crash under unflushed writes lost,
 how md takes a retired leg back, the fstrim's drop where the stripe is below
-the block, the many-pools case's failovers while its pools build and the
-writes it counts at a cut node's return and on its agent stop, what the worker
-did and which writes failed under the long run's CPU cap, and the pauses the
-writers saw.
+the block, the writes the many-pools case counts at a cut node's return
+and on its agent stop, what the worker did and which writes failed under
+the long run's CPU cap, and the pauses the writers saw.
 
 ## Preflight
 
@@ -2106,23 +2109,15 @@ stage logs the median of those fsyncs.
   node and, in one run, every extent of one disk node to use, and cost each
   host some 44 to 67 MB of available memory for its 128 controllers. The
   case's script passes whole at 64 pools, in 18 minutes.
-* **The many-pools case's build fails over pools that have built.** Built at
-  once, with the cutoff set's primary threshold, the shipped default, 64
-  pools made 22 and 18 failovers in the two builds that finished, in 332 and
-  336 s, and in the other, which never finished, one pool failed over twice;
-  32 pools made one in one of two runs, and 8 pools none: each of a pool
-  whose primary had settled while later pools still built, pools of the
-  burst and, in one run, setup's pool, built before the burst. Their rounds
-  missed on observations too old, the largest some 20 s old, the disk nodes'
-  side rounds too in one run (`architecture.md`, Known limits). The case logs
-  the worker's rounds and reactions of that window and asserts none of it. In
-  the second run at 64 the pool that failed over twice was left unbuilt by its
-  second failover, its data group's array inactive on the new primary: the
-  promotion's assembly from one leg was refused, and the next converge's
-  from both legs was ended by the cn agent's soft timeout after mdadm had
-  added one member (`architecture.md`, Known limits, A promotion that outruns
-  its sides can leave a group's array inactive), and the case failed at its
-  build wait.
+* **The many-pools case's build ages the disk nodes' side reports.** Built
+  at once, with the cutoff set's primary threshold, the shipped default, 64
+  pools build in some 314 s with no failover, which the case asserts, and
+  the worker's rounds of their cntlrs read no late report. The rounds of
+  their sides do: some 76 to 115 of them on reports too old over two runs,
+  the largest some 14 to 18 s old, each setting its side's health epoch,
+  which the cutoff set's side threshold keeps from any leg repair
+  (`architecture.md`, Known limits).
+  The case logs the worker's rounds of that window and asserts none of it.
 * **The many-pools case's logs are large.** Every agent logs each object's
   reads at debug, so a passing run at 64 pools leaves some 22 GB of logs on
   the node guests, which its run cap counts. A failed run is held to no cap:

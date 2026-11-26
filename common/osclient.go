@@ -16,6 +16,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 	"unsafe"
@@ -227,6 +228,34 @@ func NewLimitedOsClient(limit int64) *LimitedOsClient {
 	return &LimitedOsClient{sem: semaphore.NewWeighted(limit)}
 }
 
+// acquire takes one of the client's slots, as every operation does first,
+// and adds the time it waited to the slot-wait count ctx carries, when it
+// carries one (WithSlotWait).
+func (c *LimitedOsClient) acquire(ctx context.Context) error {
+	acc, _ := ctx.Value(slotWaitKey{}).(*atomic.Int64)
+	if acc == nil {
+		return c.sem.Acquire(ctx, 1)
+	}
+	start := time.Now()
+	err := c.sem.Acquire(ctx, 1)
+	acc.Add(int64(time.Since(start)))
+	return err
+}
+
+// slotWaitKey keys the slot-wait count of WithSlotWait in a ctx.
+type slotWaitKey struct{}
+
+// WithSlotWait returns ctx carrying a fresh count of the time the
+// LimitedOsClient's operations under it waited for a slot, and a func that
+// reads it: a caller that wants to know how much of its run went to the
+// queue for slots (osclient.md, WithSlotWait; the cn agent's cntlr read,
+// cnagent.md CN28).
+func WithSlotWait(ctx context.Context) (context.Context, func() time.Duration) {
+	acc := &atomic.Int64{}
+	return context.WithValue(ctx, slotWaitKey{}, acc),
+		func() time.Duration { return time.Duration(acc.Load()) }
+}
+
 func appendErr(attrs []any, err error) []any {
 	if err != nil {
 		attrs = append(attrs, slog.String("error", err.Error()))
@@ -341,7 +370,7 @@ func (c *LimitedOsClient) RunCommand(
 	args []string,
 	stdinInput string,
 ) (string, string, int, error) {
-	if err := c.sem.Acquire(ctx, 1); err != nil {
+	if err := c.acquire(ctx); err != nil {
 		return "", "", -1, err
 	}
 	defer c.sem.Release(1)
@@ -393,7 +422,7 @@ func (c *LimitedOsClient) ReadFile(
 	ctx context.Context,
 	path string,
 ) (string, error) {
-	if err := c.sem.Acquire(ctx, 1); err != nil {
+	if err := c.acquire(ctx); err != nil {
 		return "", err
 	}
 	defer c.sem.Release(1)
@@ -420,7 +449,7 @@ func (c *LimitedOsClient) ReadDir(
 	ctx context.Context,
 	path string,
 ) ([]string, error) {
-	if err := c.sem.Acquire(ctx, 1); err != nil {
+	if err := c.acquire(ctx); err != nil {
 		return nil, err
 	}
 	defer c.sem.Release(1)
@@ -452,7 +481,7 @@ func (c *LimitedOsClient) ReadMtime(
 	ctx context.Context,
 	path string,
 ) (time.Time, error) {
-	if err := c.sem.Acquire(ctx, 1); err != nil {
+	if err := c.acquire(ctx); err != nil {
 		return time.Time{}, err
 	}
 	defer c.sem.Release(1)
@@ -482,7 +511,7 @@ func (c *LimitedOsClient) ReadDevNo(
 	ctx context.Context,
 	path string,
 ) (string, error) {
-	if err := c.sem.Acquire(ctx, 1); err != nil {
+	if err := c.acquire(ctx); err != nil {
 		return "", err
 	}
 	defer c.sem.Release(1)
@@ -560,7 +589,7 @@ func (c *LimitedOsClient) WriteFile(
 	path string,
 	data string,
 ) error {
-	if err := c.sem.Acquire(ctx, 1); err != nil {
+	if err := c.acquire(ctx); err != nil {
 		return err
 	}
 	defer c.sem.Release(1)
@@ -585,7 +614,7 @@ func (c *LimitedOsClient) WriteFileDirect(
 	path string,
 	data string,
 ) error {
-	if err := c.sem.Acquire(ctx, 1); err != nil {
+	if err := c.acquire(ctx); err != nil {
 		return err
 	}
 	defer c.sem.Release(1)
@@ -637,7 +666,7 @@ func (c *LimitedOsClient) ReadBlock(
 	offset uint64,
 	length uint64,
 ) ([]byte, error) {
-	if err := c.sem.Acquire(ctx, 1); err != nil {
+	if err := c.acquire(ctx); err != nil {
 		return nil, err
 	}
 	defer c.sem.Release(1)
@@ -672,7 +701,7 @@ func (c *LimitedOsClient) ReadBlockDirect(
 	offset uint64,
 	length uint64,
 ) ([]byte, error) {
-	if err := c.sem.Acquire(ctx, 1); err != nil {
+	if err := c.acquire(ctx); err != nil {
 		return nil, err
 	}
 	defer c.sem.Release(1)
@@ -771,7 +800,7 @@ func (c *LimitedOsClient) DiscardRanges(
 	// ctx has no deadline waits for one no longer than a command's caller
 	// does (osclient.md, DiscardRanges).
 	actx, cancel := context.WithTimeout(ctx, discardSoftTimeout)
-	err := c.sem.Acquire(actx, 1)
+	err := c.acquire(actx)
 	cancel()
 	if err != nil {
 		return 0, err
@@ -844,7 +873,7 @@ var ErrDialTimeout = errors.New("timed out")
 var dialHold = 200 * time.Millisecond
 
 func (c *LimitedOsClient) OpenExclusive(ctx context.Context, path string) error {
-	if err := c.sem.Acquire(ctx, 1); err != nil {
+	if err := c.acquire(ctx); err != nil {
 		return err
 	}
 	defer c.sem.Release(1)
@@ -954,7 +983,7 @@ func (c *LimitedOsClient) NvmeNsWriteCache(
 	ctrlPath string,
 	nsid uint32,
 ) (bool, error) {
-	if err := c.sem.Acquire(ctx, 1); err != nil {
+	if err := c.acquire(ctx); err != nil {
 		return false, err
 	}
 	defer c.sem.Release(1)
@@ -989,7 +1018,7 @@ func (c *LimitedOsClient) DialTcp(
 	address string,
 	timeout time.Duration,
 ) error {
-	if err := c.sem.Acquire(ctx, 1); err != nil {
+	if err := c.acquire(ctx); err != nil {
 		return err
 	}
 	if err := ctx.Err(); err != nil {
@@ -1090,7 +1119,7 @@ func (c *LimitedOsClient) StartDetached(
 	args []string,
 	dir string,
 ) (*Detached, error) {
-	if err := c.sem.Acquire(ctx, 1); err != nil {
+	if err := c.acquire(ctx); err != nil {
 		return nil, err
 	}
 	child, err := startDetached(ctx, name, args, dir)
@@ -1165,7 +1194,7 @@ func (c *LimitedOsClient) WriteBlock(
 	offset uint64,
 	data []byte,
 ) error {
-	if err := c.sem.Acquire(ctx, 1); err != nil {
+	if err := c.acquire(ctx); err != nil {
 		return err
 	}
 	defer c.sem.Release(1)
@@ -1287,7 +1316,7 @@ func (c *LimitedOsClient) ReadProto(
 	path string,
 	target proto.Message,
 ) error {
-	if err := c.sem.Acquire(ctx, 1); err != nil {
+	if err := c.acquire(ctx); err != nil {
 		return err
 	}
 	defer c.sem.Release(1)
@@ -1317,7 +1346,7 @@ func (c *LimitedOsClient) WriteProto(
 	path string,
 	msg proto.Message,
 ) error {
-	if err := c.sem.Acquire(ctx, 1); err != nil {
+	if err := c.acquire(ctx); err != nil {
 		return err
 	}
 	defer c.sem.Release(1)

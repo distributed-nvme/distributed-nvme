@@ -169,6 +169,16 @@ the method set is exactly the following, each taking the caller's ctx:
   node plugin, which holds two, one for each side of its work (`csi.md`,
   The node plugin).
 
+### WithSlotWait
+
+* `WithSlotWait(ctx)` returns a ctx that carries a fresh count and a func
+  that reads it. Every operation of a `LimitedOsClient` under that ctx, or
+  under one derived from it, adds to the count the time it waited for its
+  semaphore unit, a wait that ended in the ctx's error included; an
+  operation under a ctx with no count adds nothing. The count is safe for
+  concurrent use. Its one caller is the cn agent's cntlr read, which logs
+  how much of its run went to the wait for slots (`cnagent.md` CN28).
+
 ### RunCommand
 
 * The command runs through `exec.CommandContext`; the stdin payload is

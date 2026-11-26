@@ -672,11 +672,9 @@ stopped instead, at 8 pools, the hosts' writes to the 6 pools that moved
 failed 18 times in all while the agent was stopped, as the fence answers the
 old primary's path with errors (section 8 of the same document), and none
 failed once it ran again. Building 64 pools at
-once took 332 s and made 22 failovers of pools that had finished building; in
-a second build of 64 one pool failed over twice, and its second failover left
-it unbuilt (section 8 of the same document); a third took 336 s and made 18,
-one of them of the pool built before the others. 32 pools built with one
-failover in one of two runs, 8 with none.
+once took 314 s with no failover; the disk nodes' reports of their sides
+grew 14 to 18 s old meanwhile over two runs, which starts no leg repair at
+the default thresholds (section 8 of the same document).
 
 The limits dnv enforces, each against the largest size a test has run. The
 Go tests run the control plane against fake agents, test programs that answer

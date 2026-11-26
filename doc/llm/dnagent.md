@@ -673,7 +673,9 @@ entry is made.
 SH10. Node **write** lock: the startup reconcile and the node-level syncup
 (`SyncupDn`/`SyncupCn` — they diff the pointer list and run the node-level
 sweep, which enumerates the whole node and may remove the resources of any
-object **of this agent** on it). Which background reads a node-level
+object **of this agent** on it), save a `SyncupCn` that only adds cntlrs,
+which removes nothing and takes the node read lock (SH12; `cnagent.md`
+CN1, CN7). Which background reads a node-level
 syncup cancels as it arrives, and which it waits for, is SH30; one that
 cancels every read of the agent waits behind a read no longer than that
 read's current command, or than the holder of the object lock that read
@@ -695,7 +697,9 @@ lock, save one a gate refuses as it arrives, which marks nothing, and one
 that arrives while the store's latest save failed (SH30); every other
 holder waits for a read as it waits for a converge, and so do those two.
 
-SH12. Node **read** lock only: the background read of a DN or a CN (SH29).
+SH12. Node **read** lock only: the background read of a DN or a CN (SH29),
+and, on a cn, a `SyncupCn` that only adds cntlrs, with a lock of its CN's
+own that keeps two of them of one CN apart (`cnagent.md` CN1, CN7).
 `GetDnSize`/`GetCnSize`, the four info reads and every check round take no
 lock of the hierarchy (SH25, SH28).
 
@@ -1509,8 +1513,9 @@ read end, and the object's health epoch would go on and off with no fault
 on the node (`dnv-worker.md` HL7).
 
 A node-level syncup that marks its object marks the node too, save one at
-the revision the agent holds for its DN or CN and one that arrives while
-the store's latest save failed (below). The node's mark keeps every
+the revision the agent holds for its DN or CN, one that arrives while
+the store's latest save failed (below), and, on a cn, a `SyncupCn` that
+only adds cntlrs (below). The node's mark keeps every
 read from starting until the syncup ends, and the syncup cancels every
 read of the agent, each of which holds the node read lock its write lock
 waits for. A node-level syncup at the held revision is the re-send the
@@ -1525,6 +1530,20 @@ starting, such a read would end only between two re-sends, none would
 while a read takes longer than that, and the observations of sides and
 cntlrs with no fault would go too old (`dnv-worker.md` HL7).
 
+A `SyncupCn` newer than the held request that only adds cntlrs to it
+(`cnagent.md` CN7) marks its CN and cancels the CN's own read alone, as
+a re-send at the held revision does, and takes the node read lock, not
+the write lock (`cnagent.md` CN1): it waits for no cntlr's read or
+converge and holds no read off. One that no longer only adds cntlrs once
+it holds that lock takes the write lock after it, with the CN's mark
+alone, and so does one that arrives while the store's latest save failed
+(below). Reason: a build of many pools brings one for each new cntlr, back
+to back; were each to mark the node, cancel every read and wait for the
+write lock behind the cntlr converges in flight, no read of a cntlr
+built already would start or end while the build lasts, and their
+observations would go too old (`dnv-worker.md` HL7). The disk node has
+no such exception: each new side's `SyncupDn` marks the node as above.
+
 While the store's latest save failed, of a request, a chunk or, on a cn, a
 torn marks file or a term file, whatever its object (`Store.SaveFailing`, SH4), a syncup
 that marks its object as it arrives marks that object alone and cancels no
@@ -1533,7 +1552,10 @@ marks no node. It then waits for its locks behind the reads that hold them,
 each of which runs bounded commands (SH13): a `SyncupSide` or `SyncupCntlr`
 behind its object's read, a node-level syncup behind every read that holds
 the node read lock when it asks for it, as one at the held revision does
-(above). A syncup a gate refuses as it arrives still marks nothing. The
+(above), a `SyncupCn` that only adds cntlrs among them: it takes the write
+lock in this state, since it cancels no read of its CN, which would
+otherwise store over its observation beside it. A syncup a gate refuses as
+it arrives still marks nothing. The
 first save that succeeds ends the state; the probe of DN18 leaves it as it
 is. Reason: the worker re-sends a request refused for a failed save round
 after round (SH5), as it re-sends one a gate refuses, and nothing knows

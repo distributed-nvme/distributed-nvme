@@ -2,11 +2,13 @@ package cnagent
 
 import (
 	"context"
+	"log/slog"
 	"time"
 
 	"github.com/distributed-nvme/distributed-nvme/agent"
 	"github.com/distributed-nvme/distributed-nvme/common"
 	"github.com/distributed-nvme/distributed-nvme/pb"
+	"google.golang.org/protobuf/proto"
 )
 
 // ---------------------------------------------------------------------------
@@ -21,7 +23,8 @@ import (
 // lock, unless a gate refuses it against the object's held request
 // (markSyncup, markNodeSyncup); a SyncupCn newer than the CN's held request,
 // or for a CN the agent does not hold, marks the node too and cancels every
-// read, one at the held revision only the CN's own. While the store's latest
+// read, one at the held revision or one that only adds cntlrs (syncupCnAdds)
+// only the CN's own. While the store's latest
 // save failed, a syncup the gates admit marks its own object alone and
 // cancels no read. No converge of the cn role runs in the background. No
 // read starts while a mark of its object or of the node stands.
@@ -173,6 +176,11 @@ func (s *CnAgentServer) refreshCntlr(
 	if ctx.Err() != nil {
 		return
 	}
+	s.mu.Lock()
+	last := st.obs.LatestLocked().Time
+	s.mu.Unlock()
+	obsAge := s.now().Sub(last)
+	start := time.Now()
 	s.locks.Node().RLock()
 	defer s.locks.Node().RUnlock()
 	if s.getCntlr(key) != st || ctx.Err() != nil {
@@ -186,8 +194,38 @@ func (s *CnAgentServer) refreshCntlr(
 	}
 	defer st.tracker.Bind(ctx)()
 	rev := st.loadReq().GetRevision()
-	info, verdict := s.readCntlr(ctx, st)
+	locked := time.Now()
+	readCtx, slotWait := common.WithSlotWait(ctx)
+	info, verdict := s.readCntlr(readCtx, st)
+	logReadTimes(ctx, st.loadReq(), obsAge, locked.Sub(start), slotWait(),
+		time.Since(locked))
 	s.storeCntlrObs(ctx, st, rev, info, verdict.Reply())
+}
+
+// msgCntlrReadTimes is the record of a cntlr's read's times (CN28).
+const msgCntlrReadTimes = "cntlr read times"
+
+// logReadTimes logs, at Debug, what a cntlr's report's age is made of while
+// a node builds many cntlrs at once (CN28): the age of the cntlr's latest
+// observation as its read starts, the time in which no read of it ran or
+// stored, which a converge mark or a cancel makes (dnagent.md SH30); how
+// long the read waited for its locks; how long its commands waited for a
+// slot of the agent's OsClient; and how long it ran once it held its locks,
+// slot waits included. A read cancelled before it held its locks logs
+// nothing.
+func logReadTimes(
+	ctx context.Context,
+	req *pb.SyncupCntlrRequest,
+	obsAge, lockWait, slotWait, run time.Duration,
+) {
+	slog.DebugContext(ctx, msgCntlrReadTimes,
+		slog.Uint64("cn_id", req.GetCnId()),
+		slog.Uint64("sp_id", req.GetCntlrPointer().GetSpId()),
+		slog.Uint64("cntlr_id", req.GetCntlrPointer().GetCntlrId()),
+		slog.Int64("obs_age_ms", obsAge.Milliseconds()),
+		slog.Int64("lock_wait_ms", lockWait.Milliseconds()),
+		slog.Int64("slot_wait_ms", slotWait.Milliseconds()),
+		slog.Int64("run_ms", run.Milliseconds()))
 }
 
 // endRead runs end, an EndReadLocked, under mu: on every path out of a read,
@@ -297,9 +335,10 @@ func (s *CnAgentServer) markSyncup(
 }
 
 // markNodeSyncup marks a SyncupCn's converge of the CN key as it arrives,
-// before the syncup waits for the node write lock (SH30), and returns what
-// ends the marks it made once the lock has gone, after the converge has
-// stored its observation or the call has ended without one.
+// before the syncup waits for its node lock (SH30), and returns whether the
+// request only adds cntlrs to the CN's held request (addsCntlrsOnly) and
+// what ends the marks it made once the lock has gone, after the converge
+// has stored its observation or the call has ended without one.
 //
 // A request of a revision newer than the one the agent holds for the CN, or
 // for a CN it does not hold, marks the CN and the node and cancels every
@@ -320,6 +359,16 @@ func (s *CnAgentServer) markSyncup(
 // SH13); a read a round starts after that waits for the node read lock until
 // the syncup ends, so it takes no lock ahead of the syncup.
 //
+// A newer request that only adds cntlrs (addsCntlrsOnly) marks the CN and
+// cancels the CN's own read alone too, and runs under the node read lock
+// (syncupCnAdds, cnagent.md CN1); the cancel keeps the CN's read, which
+// shares that lock, from storing over the syncup's observation. A many-pools build brings one for each
+// new cntlr, back to back; were each to mark the node, cancel every read
+// and wait for the write lock behind the cntlr converges in flight, no read
+// of a cntlr built already would start or end for as long as the build
+// lasts, and those cntlrs' rounds would be missed rounds that fail their
+// pools over (dnv-worker.md HL7, AR5).
+//
 // A request the revision gate (SH8) refuses against the CN's held request
 // marks nothing and cancels nothing, for markSyncup's reason: the held
 // revision only grows, so the gate refuses it again under the write lock.
@@ -330,32 +379,40 @@ func (s *CnAgentServer) markSyncup(
 // revision, for markSyncup's reason: the worker re-sends a request refused
 // for a failed save on every round at a newer revision, and at the held
 // revision while the CN's rounds answer a non-zero code (dnagent.md SH5),
-// and nothing knows before its save that it will be refused. Were each
+// and nothing knows before its save that it will be refused. Such a request
+// runs under the write lock even when it only adds cntlrs, since it cancels
+// no read of the CN that could then store over its observation. Were each
 // newer re-send, or each one for a CN the agent does not hold, to mark the
 // node and cancel every read of the agent, the observations of the agent's
 // CNs and cntlrs would go too old (dnv-worker.md HL7), and were each
 // re-send at the held revision to cancel the CN's own read, the CN's would.
 // Its write lock waits for the reads that hold the node read lock when it
 // asks, as a re-send's at the held revision does.
-func (s *CnAgentServer) markNodeSyncup(key string, revision uint64) func() {
+func (s *CnAgentServer) markNodeSyncup(
+	req *pb.SyncupCnRequest,
+) (adds bool, end func()) {
+	key := cnKey(req.GetClusterId(), req.GetCnId())
+	revision := req.GetRevision()
 	now := s.now()
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	st := s.cns[key]
 	var held uint64
 	if st != nil {
-		held = st.loadReq().GetRevision()
+		heldReq := st.loadReq()
+		held = heldReq.GetRevision()
 		if agent.GateRevision(held, revision) != nil {
-			return func() {}
+			return false, func() {}
 		}
+		adds = addsCntlrsOnly(heldReq, req)
 	}
 	s.marks.BeginLocked(key, now)
 	if s.store.SaveFailing() {
-		return func() { s.endMark(key, false) }
+		return false, func() { s.endMark(key, false) }
 	}
-	if st != nil && revision == held {
+	if st != nil && (revision == held || adds) {
 		st.obs.CancelReadLocked()
-		return func() { s.endMark(key, false) }
+		return adds, func() { s.endMark(key, false) }
 	}
 	s.marks.BeginNodeLocked()
 	for _, st := range s.cns {
@@ -364,7 +421,31 @@ func (s *CnAgentServer) markNodeSyncup(key string, revision uint64) func() {
 	for _, st := range s.cntlrs {
 		st.obs.CancelReadLocked()
 	}
-	return func() { s.endMark(key, true) }
+	return false, func() { s.endMark(key, true) }
+}
+
+// addsCntlrsOnly reports whether req, a SyncupCn of the CN whose held
+// request is held, only adds cntlrs to it (cnagent.md CN1): it is newer,
+// keeps every cntlr pointer of held, adds at least one and carries the same
+// qos_ratio. Such a request removes nothing from the node and changes
+// nothing of its base state, so it needs no node write lock. One that adds
+// nothing is no such request: it runs as every other newer request does.
+func addsCntlrsOnly(held, req *pb.SyncupCnRequest) bool {
+	if req.GetRevision() <= held.GetRevision() ||
+		!proto.Equal(held.GetQosRatio(), req.GetQosRatio()) {
+		return false
+	}
+	for _, ptr := range held.GetCntlrPointerList() {
+		if !pointerKnown(req, ptr) {
+			return false
+		}
+	}
+	for _, ptr := range req.GetCntlrPointerList() {
+		if !pointerKnown(held, ptr) {
+			return true
+		}
+	}
+	return false
 }
 
 func (s *CnAgentServer) endMark(key string, node bool) {

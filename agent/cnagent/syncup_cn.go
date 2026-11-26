@@ -359,6 +359,68 @@ func (s *CnAgentServer) syncupCn(
 	}
 }
 
+// syncupCnAdds is a SyncupCn that only adds cntlrs to the CN's held request
+// (addsCntlrsOnly; cnagent.md CN1, CN4 to CN7): under the node read lock and
+// the CN's addsMu it runs the revision gate again, saves the request first
+// (CN7), holds it, and then does what a read of the CN does (refreshCn): it
+// probes the base state without writing it and takes the node sweep's
+// read-only verdict, which it stores as the CN's observation and replies.
+// It writes nothing on the node and removes nothing: that is what the write
+// lock is for, while cntlr converges run beside it under the read lock. A
+// base state the probe reads wrong (dnagent.md SH31) or a leftover the
+// verdict names gives a code that is not zero, and the request the worker
+// sends again at the held revision runs under the write lock (syncupCn).
+// It returns nil for a request that is no longer such a request once it
+// holds its locks, another syncup having landed meanwhile, or for a CN the
+// agent no longer holds: the caller then runs syncupCn under the write
+// lock. A request whose save fails is refused, as syncupCn refuses it.
+func (s *CnAgentServer) syncupCnAdds(
+	ctx context.Context,
+	req *pb.SyncupCnRequest,
+) *pb.SyncupCnReply {
+	s.locks.Node().RLock()
+	defer s.locks.Node().RUnlock()
+	st := s.getCn(cnKey(req.GetClusterId(), req.GetCnId()))
+	if st == nil {
+		return nil
+	}
+	st.addsMu.Lock()
+	defer st.addsMu.Unlock()
+	held := st.loadReq()
+	if reject := agent.GateRevision(
+		held.GetRevision(), req.GetRevision()); reject != nil {
+		return &pb.SyncupCnReply{
+			AgentReply: reject,
+			Revision:   held.GetRevision(),
+		}
+	}
+	if !addsCntlrsOnly(held, req) {
+		return nil
+	}
+	path := s.nf.LocalCnPath(req.GetClusterId(), req.GetCnId())
+	if err := s.store.Save(ctx, path, req); err != nil {
+		slog.ErrorContext(ctx, "persisting cn state failed",
+			slog.String("path", path),
+			slog.String("error", err.Error()))
+		return &pb.SyncupCnReply{
+			AgentReply: agent.SaveFailedReply(err),
+			Revision:   held.GetRevision(),
+		}
+	}
+	saveAt := s.now()
+	st.storeReq(req)
+	info, redrive := s.probeCn(ctx, st)
+	code := s.sweepCn(ctx, st, false, redrive).Reply()
+	obs := s.storeCnObs(ctx, st, req.GetRevision(), info, code)
+	return &pb.SyncupCnReply{
+		AgentReply: code,
+		Revision:   req.GetRevision(),
+		CnInfo:     info,
+		ObsStamp:   s.startup.Stamped(obs.Stamp(s.now(), time.Time{})),
+		SaveTime:   agent.Timestamp(saveAt),
+	}
+}
+
 // convergeCn builds the once-per-CN base state of architecture.md, Controller
 // node, common, probe-first (CN5): the agent's nvmet port, whose outcome is
 // the CnInfo row. A failure is that row's and never aborts the pass (CN29).

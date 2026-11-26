@@ -4197,7 +4197,7 @@ says how many more such pools fit and which limit the cluster reaches
 first ([The cluster's capacity](#the-clusters-capacity)).
 
 What dnv does alone: the worker drives each pool on its own. Building many
-pools at once makes failovers of pools that have built
+pools at once fails over no pool that has built
 ([the introduction](introduction.md#status-and-limits) gives the times).
 
 Safe steps: a storage class, the Kubernetes record that names the cntlrs of

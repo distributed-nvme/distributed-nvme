@@ -2526,21 +2526,25 @@ failover's among them.
   request starts it from both copies, a few seconds later. State: fixed.
   Unit tests of the controller node agent.
 - **Creating many volumes at once can fail over volumes that are already
-  built.** A controller node that builds many new primaries at once can
-  answer the worker's check rounds of the primaries it has finished with
-  reports that are too old, which the worker counts as missed rounds, and
-  the worker then fails those primaries over, so their hosts see a pause
-  with no fault behind it. The e2e suite's many-pools case shows it on three
-  controller nodes at the default primary threshold, with the other
-  thresholds raised: 22 and 18 failovers in the two builds of 64 pools
-  that finished, one pool failing over twice in a third, one in one of two
-  builds of 32 and none at 8, each of a pool that had finished building,
-  and in one build the pool made before the others
-  ([the introduction](introduction.md#status-and-limits) has the
-  numbers). A Kubernetes cluster that creates many volumes at once has this
-  shape. State: fix decided: the thresholds stay, and the reads of the
-  primaries a controller node has built will no longer wait behind its
-  builds, in the way a measurement of the cause shows.
+  built.** A controller node that builds many new primaries at once must
+  not answer the worker's check rounds of the primaries it has finished
+  with reports that are too old: the worker counts those as missed rounds
+  and fails those primaries over, so their hosts see a pause with no fault
+  behind it. The cause was measured: each new cntlr brings a syncup of the
+  controller node itself, at a newer revision, and that syncup stopped
+  every read of the node's cntlrs and then waited for the builds in flight;
+  these syncups came one after another, so no read of a finished primary
+  ran for 9 to 18 seconds. The wait for the agent's command slots was
+  short. Now a syncup that only adds cntlrs to the node runs beside the
+  reads: it stops no read, waits for no build, and leaves the repair of
+  anything it finds wrong to the next syncup, which the worker sends at
+  its next check round. The e2e suite's many-pools case built 64 pools at
+  once in 314 seconds with no failover, where it made 22 and 18 before,
+  and it now fails if a pool fails over while the pools build. The
+  thresholds are as they were. The disk nodes' reports of their sides
+  still grow old during such a build, up to about 14 to 18 seconds over
+  two runs; at the default thresholds this starts no leg repair. State: fixed. Unit tests of the controller
+  node agent and the e2e suite's many-pools case.
 - **A controller node that comes back after a network cut fails a host's
   writes for a few seconds.** While the node is cut off, the failover moves
   its primaries to other controller nodes and the disk nodes fence its

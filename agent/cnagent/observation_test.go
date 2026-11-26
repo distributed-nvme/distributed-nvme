@@ -10,6 +10,7 @@ import (
 	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/types/known/timestamppb"
 
+	"github.com/distributed-nvme/distributed-nvme/agent"
 	"github.com/distributed-nvme/distributed-nvme/common"
 	"github.com/distributed-nvme/distributed-nvme/pb"
 )
@@ -1149,7 +1150,7 @@ func TestARefusedSyncupCancelsNoRead(t *testing.T) {
 		}
 		endAdmitted()
 
-		endSyncup := srv.markNodeSyncup(cnK, 3)
+		_, endSyncup := srv.markNodeSyncup(cnReq(3, true))
 		within(t, "a stale SyncupCn", func() {
 			if got := staleCn(srv); got.GetCode() !=
 				common.ReplyCodeStaleRevision {
@@ -1307,6 +1308,384 @@ func TestAReSentSyncupCnLetsCntlrReadsEnd(t *testing.T) {
 			t.Errorf("cntlr observation is %q's, want the read's", got)
 		}
 	})
+}
+
+// TestASyncupCnThatAddsCntlrsLetsCntlrReadsRun: a SyncupCn newer than the
+// CN's held request that adds a cntlr pointer and removes none, with the
+// same qos_ratio, runs beside the reads (cnagent.md CN1; dnagent.md SH30):
+// it marks the CN alone, cancels no cntlr's read and takes the node read
+// lock, so it answers while a cntlr converge holds that lock, a cntlr read
+// in flight as it arrives runs on and stores, and a round while it runs
+// starts a read that stores. The request is held and saved, and the CN's
+// observation is the syncup's. A many-pools build sends one such syncup
+// for each new cntlr; were each to hold the reads off and wait for the
+// write lock behind the converges, the observations of the cntlrs built
+// already would go too old and their pools would fail over (dnv-worker.md
+// HL7).
+func TestASyncupCnThatAddsCntlrsLetsCntlrReadsRun(t *testing.T) {
+	cntlrK := cntlrKey(testCluster, testCn, testSp, testCntlr)
+	cnK := cnKey(testCluster, testCn)
+	srv, node := newTestServer(t)
+	syncupBoth(t, srv, reqOpts{revision: 2})
+	srv.roundReads = true
+	prev := latestCntlrObs(t, srv)
+
+	// A cntlr converge in flight holds the node read lock for as long as it
+	// runs (CN1); this stands for one that runs past the whole test.
+	srv.locks.Node().RLock()
+	converging := true
+	defer func() {
+		if converging {
+			srv.locks.Node().RUnlock()
+		}
+	}()
+
+	// A round's read parks in its table listing, under its locks.
+	node.Reset()
+	releaseCntlr := openGate(t, node, dmTableListLine)
+	roundCntlr(srv, "cntlr-round-1", 2)
+	waitFor(t, func() bool { return node.hasCall(dmTableListLine) })
+
+	// The syncup, which adds the pointer of a second cntlr, parks in its
+	// probe of the port.
+	releaseCn := openGate(t, node, portProbeLine)
+	done := make(chan *pb.SyncupCnReply, 1)
+	go func() {
+		reply, _ := srv.SyncupCn(traced("syncup"), cnReq2(3))
+		done <- reply
+	}()
+	parked := false
+	for deadline := time.Now().Add(obsBound); time.Now().Before(deadline); {
+		if node.hasCall(portProbeLine) {
+			parked = true
+			break
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	if !parked {
+		t.Fatal("the SyncupCn that adds a cntlr never reached its probe " +
+			"while a converge held the node read lock: it waits for the " +
+			"node write lock")
+	}
+	srv.mu.Lock()
+	cnSince := srv.marks.SinceLocked(cnK)
+	cntlrQuiet := srv.marks.QuietLocked(cntlrK)
+	srv.mu.Unlock()
+	if cnSince.IsZero() || !cntlrQuiet {
+		t.Errorf("cn marked %v, cntlr quiet %v; want the CN's mark alone",
+			!cnSince.IsZero(), cntlrQuiet)
+	}
+
+	// The read in flight runs on and stores.
+	dropGate(node, dmTableListLine)
+	releaseCntlr()
+	joinReads(t, srv)
+	got := latestCntlrObs(t, srv)
+	if got.TraceId != "cntlr-round-1" || !got.Time.After(prev.Time) {
+		t.Errorf("cntlr observation = trace %q at %v, want the read "+
+			"cntlr-round-1's after %v: the syncup cancelled it",
+			got.TraceId, got.Time, prev.Time)
+	}
+
+	// A round while the syncup runs starts a read, which stores.
+	roundCntlr(srv, "cntlr-round-2", 2)
+	joinReads(t, srv)
+	if got := latestCntlrObs(t, srv).TraceId; got != "cntlr-round-2" {
+		t.Errorf("cntlr observation is %q's, want the read cntlr-round-2's, "+
+			"started while the syncup ran", got)
+	}
+
+	releaseCn()
+	var reply *pb.SyncupCnReply
+	select {
+	case reply = <-done:
+	case <-time.After(obsBound):
+		t.Fatal("the SyncupCn never answered")
+	}
+	if reply.GetAgentReply().GetCode() != 0 || reply.GetRevision() != 3 {
+		t.Errorf("SyncupCn answered %v at revision %d, want OK at 3",
+			reply.GetAgentReply(), reply.GetRevision())
+	}
+	converging = false
+	srv.locks.Node().RUnlock()
+	if held := fixtureCnState(t, srv).loadReq(); !proto.Equal(held,
+		cnReq2(3)) {
+		t.Errorf("the CN holds %v, want the syncup's request", held)
+	}
+	saved := &pb.SyncupCnRequest{}
+	if err := srv.store.Load(context.Background(),
+		srv.nf.LocalCnPath(testCluster, testCn), saved); err != nil ||
+		!proto.Equal(saved, cnReq2(3)) {
+		t.Errorf("the cn file holds %v (%v), want the syncup's request",
+			saved, err)
+	}
+	if got := latestCnObs(t, srv); got.TraceId != "syncup" ||
+		got.Revision != 3 {
+		t.Errorf("the cn's observation is %q's at revision %d, want the "+
+			"syncup's at 3", got.TraceId, got.Revision)
+	}
+}
+
+// TestASyncupCnThatRemovesACntlrMarksTheNode: a SyncupCn newer than the CN's
+// held request that removes a cntlr pointer, or that changes qos_ratio,
+// still marks the node, cancels every read and waits for the node write
+// lock (dnagent.md SH30): its drop and its sweep need the node to
+// themselves. One that adds a pointer while it changes qos_ratio is no
+// adds-only request either.
+func TestASyncupCnThatRemovesACntlrMarksTheNode(t *testing.T) {
+	cntlrK := cntlrKey(testCluster, testCn, testSp, testCntlr)
+	removes := func() *pb.SyncupCnRequest {
+		req := cnReq2(3)
+		req.CntlrPointerList = []*pb.CntlrPointer{cntlrPtr2()}
+		return req
+	}
+	qos := func() *pb.SyncupCnRequest {
+		req := cnReq2(3)
+		req.QosRatio = &pb.QosRatio{BytesPerIops: 4096}
+		return req
+	}
+	same := func() *pb.SyncupCnRequest { return cnReq(3, true) }
+	for _, tc := range []struct {
+		name string
+		req  func() *pb.SyncupCnRequest
+	}{
+		{"a pointer removed", removes},
+		{"qos_ratio changed", qos},
+		{"the list unchanged", same},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			srv, _ := newTestServer(t)
+			syncupBoth(t, srv, reqOpts{revision: 2})
+			srv.locks.Node().RLock()
+			done := make(chan struct{})
+			go func() {
+				defer close(done)
+				_, _ = srv.SyncupCn(traced("syncup"), tc.req())
+			}()
+			waitFor(t, func() bool {
+				srv.mu.Lock()
+				defer srv.mu.Unlock()
+				return !srv.marks.QuietLocked(cntlrK)
+			})
+			select {
+			case <-done:
+				t.Error("the SyncupCn answered while a converge held the " +
+					"node read lock")
+			case <-time.After(150 * time.Millisecond):
+			}
+			srv.locks.Node().RUnlock()
+			<-done
+		})
+	}
+}
+
+// TestASyncupCnThatNoLongerAddsTakesTheWriteLock: a SyncupCn that only
+// added cntlrs as it arrived but no longer does once it holds the node read
+// lock, another syncup having landed meanwhile, is left to the write lock
+// (syncupCnAdds answers nil): one at the revision the CN holds by then, and
+// one that adds nothing. One the revision gate refuses by then is refused
+// there, at the held revision.
+func TestASyncupCnThatNoLongerAddsTakesTheWriteLock(t *testing.T) {
+	srv, _ := newTestServer(t)
+	syncupBoth(t, srv, reqOpts{revision: 2})
+	ctx := traced("syncup")
+	if reply := srv.syncupCnAdds(ctx, cnReq(3, true)); reply != nil {
+		t.Errorf("a request that adds nothing answered %v, want nil",
+			reply)
+	}
+	if reply, err := srv.SyncupCn(ctx, cnReq2(3)); err != nil ||
+		reply.GetAgentReply().GetCode() != 0 {
+		t.Fatalf("fixture is wrong: SyncupCn %v %v", err,
+			reply.GetAgentReply())
+	}
+	if reply := srv.syncupCnAdds(ctx, cnReq2(3)); reply != nil {
+		t.Errorf("a request at the held revision answered %v, want nil",
+			reply)
+	}
+	reply := srv.syncupCnAdds(ctx, cnReq2(2))
+	if reply.GetAgentReply().GetCode() != common.ReplyCodeStaleRevision ||
+		reply.GetRevision() != 3 {
+		t.Errorf("a stale request answered %v at revision %d, want a "+
+			"stale refusal at 3", reply.GetAgentReply(), reply.GetRevision())
+	}
+}
+
+// TestASyncupCnThatAddsCntlrsLeavesTheBaseStateToTheReSend: a SyncupCn that
+// only adds cntlrs writes nothing of the base state (cnagent.md CN7): over
+// an absent port it replies the CN's port row as an error and a code that
+// re-drives, and makes no port directory. The re-send at the held revision
+// runs under the write lock and builds the port (dnagent.md SH31).
+func TestASyncupCnThatAddsCntlrsLeavesTheBaseStateToTheReSend(t *testing.T) {
+	srv, node := newTestServer(t)
+	syncupBoth(t, srv, reqOpts{revision: 2})
+	portPath := agent.NvmetRoot + "/ports/1"
+	node.mu.Lock()
+	node.cmdRmdir([]string{portPath})
+	node.mu.Unlock()
+	node.Reset()
+	reply, err := srv.SyncupCn(traced("syncup"), cnReq2(3))
+	if err != nil {
+		t.Fatalf("SyncupCn: %v", err)
+	}
+	assertReDriven(t, reply.GetAgentReply(), "the SyncupCn that adds a cntlr")
+	assertErrorDetails(t, reply.GetCnInfo().GetPortInfo(),
+		"port directory missing", "port")
+	if n := countCalls(node, "cmd mkdir -p "+portPath); n != 0 {
+		t.Errorf("the SyncupCn that adds a cntlr made the port %d times, "+
+			"want none", n)
+	}
+	node.Reset()
+	reply, err = srv.SyncupCn(traced("resend"), cnReq2(3))
+	if err != nil || reply.GetAgentReply().GetCode() != 0 {
+		t.Fatalf("the re-send: %v %v", err, reply.GetAgentReply())
+	}
+	if n := countCalls(node, "cmd mkdir -p "+portPath); n != 1 {
+		t.Errorf("the re-send made the port %d times, want 1", n)
+	}
+}
+
+// TestASyncupCnThatNoLongerAddsRunsUnderTheWriteLock: a SyncupCn that only
+// adds cntlrs as it arrives, but finds another syncup has landed at its
+// revision once it holds the node read lock, runs under the write lock
+// (SyncupCn after syncupCnAdds answers nil), as a re-send at the held
+// revision does: it marks the CN alone, and it builds the absent port,
+// which the adds-only path never writes.
+func TestASyncupCnThatNoLongerAddsRunsUnderTheWriteLock(t *testing.T) {
+	cntlrK := cntlrKey(testCluster, testCn, testSp, testCntlr)
+	cnK := cnKey(testCluster, testCn)
+	srv, node := newTestServer(t)
+	syncupBoth(t, srv, reqOpts{revision: 2})
+	portPath := agent.NvmetRoot + "/ports/1"
+	node.mu.Lock()
+	node.cmdRmdir([]string{portPath})
+	node.mu.Unlock()
+	node.Reset()
+	// A syncup under the write lock is in flight: it keeps the new one out
+	// of the node read lock until it has landed.
+	srv.locks.Node().Lock()
+	locked := true
+	defer func() {
+		if locked {
+			srv.locks.Node().Unlock()
+		}
+	}()
+	done := make(chan *pb.SyncupCnReply, 1)
+	go func() {
+		reply, _ := srv.SyncupCn(traced("syncup"), cnReq2(3))
+		done <- reply
+	}()
+	waitFor(t, func() bool {
+		srv.mu.Lock()
+		defer srv.mu.Unlock()
+		return !srv.marks.SinceLocked(cnK).IsZero()
+	})
+	srv.mu.Lock()
+	cntlrQuiet := srv.marks.QuietLocked(cntlrK)
+	srv.mu.Unlock()
+	if !cntlrQuiet {
+		t.Error("the SyncupCn that adds a cntlr marked the node")
+	}
+	// The syncup in flight lands the same request.
+	fixtureCnState(t, srv).storeReq(cnReq2(3))
+	locked = false
+	srv.locks.Node().Unlock()
+	var reply *pb.SyncupCnReply
+	select {
+	case reply = <-done:
+	case <-time.After(obsBound):
+		t.Fatal("the SyncupCn never answered")
+	}
+	if reply.GetAgentReply().GetCode() != 0 || reply.GetRevision() != 3 {
+		t.Errorf("SyncupCn answered %v at revision %d, want OK at 3",
+			reply.GetAgentReply(), reply.GetRevision())
+	}
+	if n := countCalls(node, "cmd mkdir -p "+portPath); n != 1 {
+		t.Errorf("the SyncupCn made the port %d times, want 1: it did "+
+			"not run under the write lock", n)
+	}
+}
+
+// TestASyncupCnThatAddsCntlrsWhileSavesFailTakesTheWriteLock: while the
+// store's latest save failed, a SyncupCn that only adds cntlrs marks its CN
+// alone and cancels no read, as every syncup then does (dnagent.md SH30),
+// and so it runs under the write lock: a read of the CN, which it does not
+// cancel, would otherwise share the read lock with it and could store over
+// its observation.
+func TestASyncupCnThatAddsCntlrsWhileSavesFailTakesTheWriteLock(t *testing.T) {
+	cntlrK := cntlrKey(testCluster, testCn, testSp, testCntlr)
+	ctx := context.Background()
+	srv, node := newTestServer(t)
+	syncupBoth(t, srv, reqOpts{revision: 2})
+	fault := failSaves(srv, node, srv.nf.LocalCnPath(testCluster, testCn))
+	reply, err := srv.SyncupCn(ctx, cnReq(3, true))
+	if err != nil || reply.GetAgentReply().GetCode() !=
+		common.ReplyCodeSaveFailed || !srv.store.SaveFailing() {
+		t.Fatalf("fixture is wrong: the SyncupCn was not refused for its "+
+			"save: %v %v", err, reply.GetAgentReply())
+	}
+	fault.mu.Lock()
+	clear(fault.paths)
+	fault.mu.Unlock()
+
+	srv.locks.Node().RLock()
+	done := make(chan *pb.SyncupCnReply, 1)
+	go func() {
+		reply, _ := srv.SyncupCn(traced("syncup"), cnReq2(3))
+		done <- reply
+	}()
+	select {
+	case <-done:
+		t.Error("the SyncupCn that adds a cntlr answered while a converge " +
+			"held the node read lock and saves failed: it ran beside it")
+	case <-time.After(150 * time.Millisecond):
+	}
+	srv.mu.Lock()
+	cntlrQuiet := srv.marks.QuietLocked(cntlrK)
+	srv.mu.Unlock()
+	if !cntlrQuiet {
+		t.Error("the SyncupCn marked the node while saves failed")
+	}
+	srv.locks.Node().RUnlock()
+	select {
+	case reply = <-done:
+	case <-time.After(obsBound):
+		t.Fatal("the SyncupCn never answered")
+	}
+	if reply.GetAgentReply().GetCode() != 0 || reply.GetRevision() != 3 {
+		t.Errorf("SyncupCn answered %v at revision %d, want OK at 3",
+			reply.GetAgentReply(), reply.GetRevision())
+	}
+}
+
+// TestACntlrReadLogsItsTimes: a cntlr's read logs, at Debug, the record
+// "cntlr read times" (cnagent.md CN28) with the cntlr's ids, the age of its
+// latest observation as the read starts, and its lock wait, slot wait and
+// run time.
+func TestACntlrReadLogsItsTimes(t *testing.T) {
+	srv, _ := newTestServer(t)
+	clock := withClock(srv)
+	syncupBoth(t, srv, reqOpts{revision: 2})
+	clock.advance(3 * time.Second)
+	logs := captureLogs(t)
+	refreshTestCntlr(t, srv)
+	recs := logs.msgRecords(t, msgCntlrReadTimes)
+	if len(recs) != 1 {
+		t.Fatalf("the read logged %d %q records, want 1", len(recs),
+			msgCntlrReadTimes)
+	}
+	rec := recs[0]
+	if rec["level"] != "DEBUG" || rec["cn_id"] != float64(testCn) ||
+		rec["sp_id"] != float64(testSp) ||
+		rec["cntlr_id"] != float64(testCntlr) ||
+		rec["obs_age_ms"] != float64(3000) {
+		t.Errorf("the record is %v, want Debug, the cntlr's ids and an "+
+			"observation age of 3000 ms", rec)
+	}
+	for _, attr := range []string{"lock_wait_ms", "slot_wait_ms", "run_ms"} {
+		if _, ok := rec[attr].(float64); !ok {
+			t.Errorf("the record has no %s: %v", attr, rec)
+		}
+	}
 }
 
 // TestAReadWhoseListingDidNotAnswerStillStores: a read whose listing did not

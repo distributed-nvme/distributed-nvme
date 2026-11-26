@@ -2377,3 +2377,41 @@ func TestIdentifyResult(t *testing.T) {
 		t.Errorf("EIO: %v", err)
 	}
 }
+
+// TestWithSlotWaitCountsTheWaitForASlot: an operation of a LimitedOsClient
+// under a ctx from WithSlotWait adds the time it waited for a slot to the
+// count the returned func reads, and one with no slot to wait for adds
+// none (osclient.md, WithSlotWait).
+func TestWithSlotWaitCountsTheWaitForASlot(t *testing.T) {
+	c := NewLimitedOsClient(1)
+	ctx, slotWait := WithSlotWait(context.Background())
+	if err := c.acquire(ctx); err != nil {
+		t.Fatalf("acquire a free slot: %v", err)
+	}
+	if got := slotWait(); got > 20*time.Millisecond {
+		t.Errorf("a free slot counted a wait of %v", got)
+	}
+	done := make(chan error, 1)
+	started := make(chan struct{})
+	go func() {
+		close(started)
+		done <- c.acquire(ctx)
+	}()
+	<-started
+	time.Sleep(100 * time.Millisecond)
+	c.sem.Release(1)
+	if err := <-done; err != nil {
+		t.Fatalf("acquire after the release: %v", err)
+	}
+	c.sem.Release(1)
+	// The goroutine may reach its wait late on a loaded machine, so the
+	// bound is half the sleep.
+	if got := slotWait(); got < 50*time.Millisecond {
+		t.Errorf("a wait of about 100 ms counted %v", got)
+	}
+	// A ctx without the count is no error.
+	if err := c.acquire(context.Background()); err != nil {
+		t.Fatalf("acquire without a count: %v", err)
+	}
+	c.sem.Release(1)
+}

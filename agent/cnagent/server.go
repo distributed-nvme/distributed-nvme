@@ -70,7 +70,8 @@ type CnAgentServer struct {
 	cntlrs map[string]*cntlrState
 	// marks are the converges in flight, by CN key and cntlr key, and the
 	// SyncupCn calls in flight that carry a request newer than the CN's held
-	// one, or for a CN the agent does not hold (dnagent.md SH30): what keeps
+	// one, save one that only adds cntlrs (syncupCnAdds), or for a CN the
+	// agent does not hold (dnagent.md SH30): what keeps
 	// a round from starting a read beside a converge, and the converge start
 	// a reply reports.
 	marks *agent.ConvergeMarks
@@ -134,12 +135,18 @@ type CnAgentServer struct {
 // node, common), and its latest observation.
 type cnState struct {
 	// req is read and written through loadReq and storeReq only. It is
-	// stored only under the node write lock, and every reader holds
-	// at least the node lock's read half, so the lock alone would do; it is
-	// an atomic pointer all the same, like cntlrState.req, so that a reader
-	// added off the node lock cannot race it.
+	// stored under the node write lock, or under the node read lock and
+	// addsMu by a SyncupCn that only adds cntlrs (syncupCnAdds), so a
+	// reader under the node read lock can see it change: it is an atomic
+	// pointer, like cntlrState.req, and a reader that needs it to stay the
+	// same across several reads loads it once (loadReq).
 	req     atomic.Pointer[pb.SyncupCnRequest]
 	tracker *agent.ResTracker
+	// addsMu keeps two SyncupCn that only add cntlrs apart, which run under
+	// the node read lock (syncupCnAdds, cnagent.md CN1): each runs the gate,
+	// the save and the store of its request as one. A syncup under the node
+	// write lock keeps every one of them out already.
+	addsMu sync.Mutex
 	// obs is the CN's latest observation and its running read (dnagent.md
 	// SH28, SH29), guarded by the server's mu.
 	obs agent.ObsSlot[*pb.CnInfo]
@@ -527,12 +534,18 @@ func (s *CnAgentServer) GetCnSize(
 	}, nil
 }
 
-// SyncupCn marks its converge as it arrives, before it waits for the node
-// write lock (dnagent.md SH30). A request newer than the CN's held one, or
-// for a CN the agent does not hold, marks the node too and cancels every
-// read of the agent: that lock waits for every holder of its read half,
-// every cntlr's read among them, and the node's mark keeps a round from
-// starting a new one until the syncup ends. A re-send at the held revision,
+// SyncupCn marks its converge as it arrives, before it waits for its node
+// lock (dnagent.md SH30). A newer request that only adds cntlrs to the CN's
+// held one (addsCntlrsOnly) marks the CN alone, cancels the CN's own read
+// alone and runs under the node read lock (syncupCnAdds, cnagent.md CN1),
+// so it neither waits for the converges in flight nor holds off a read; one
+// that is no longer such a request once it holds that lock runs as below,
+// under the write lock with the CN's mark alone. Any other request newer
+// than the CN's held one, or for a CN the agent does not hold, marks the
+// node too and cancels every read of the agent: the write lock waits for
+// every holder of its read half, every cntlr's read among them, and the
+// node's mark keeps a round from starting a new one until the syncup ends.
+// A re-send at the held revision,
 // which a CN-level leftover brings every round, cancels the CN's read alone
 // and waits for the cntlr reads in flight, so it keeps no cntlr's read from
 // ending. A request the revision gate refuses against the CN's held request
@@ -553,8 +566,13 @@ func (s *CnAgentServer) SyncupCn(
 			ObsStamp:   s.startingStamp(s.now()),
 		}, nil
 	}
-	defer s.markNodeSyncup(cnKey(req.GetClusterId(), req.GetCnId()),
-		req.GetRevision())()
+	adds, end := s.markNodeSyncup(req)
+	defer end()
+	if adds {
+		if reply := s.syncupCnAdds(ctx, req); reply != nil {
+			return reply, nil
+		}
+	}
 	s.locks.Node().Lock()
 	defer s.locks.Node().Unlock()
 	return s.syncupCn(ctx, req), nil

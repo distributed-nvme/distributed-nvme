@@ -31396,6 +31396,9 @@ many_snapshot() {
 many_create() {
 	stage 01 "sp create of $((MANY_POOL_CNT - 1)) more pools, then a thin device and a namespace on each"
 	local i id
+	# The failovers before the burst, which stage 02 compares with its own
+	# count: none may come while the pools build.
+	MANY_FO_BEFORE=$(worker_failover_cnt)
 	MANY_T_CREATE=$SECONDS
 	MANY_T_CREATE_EPOCH=$(date +%s.%N)
 	for ((i = 1; i < MANY_POOL_CNT; i++)); do
@@ -31485,8 +31488,15 @@ many_wait_built() {
 			[ "${MANY_STBY_CN[$i]}" != "$a" ] || echo s
 		done | sort | uniq -c | awk '{ printf "%s %s ", $1, ($2 == "p") ? "primaries" : "standbys" }')"
 	done
-	log "  failovers while the pools built: $(worker_failover_cnt)"
+	local fo
+	fo=$(worker_failover_cnt)
+	log "  failovers while the pools built: $((fo - MANY_FO_BEFORE))"
 	many_round_report "while the pools built" "$MANY_T_CREATE_EPOCH"
+	# No pool fails over while the pools build: a SyncupCn that only adds
+	# cntlrs holds no read of a built cntlr off (cnagent.md CN7), so the
+	# rounds of the pools built already answer from fresh observations.
+	assert_eq "$fo" "$MANY_FO_BEFORE" \
+		"no pool failed over while the pools built (the worker's failover count)"
 	many_back_to_setup
 }
 

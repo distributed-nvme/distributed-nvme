@@ -9653,7 +9653,8 @@ document and only pointed to here.
   stops. Read in the kernel's md source.
 * **The agent node lock has head-of-line blocking.** A pending node write
   (`SyncupDn`/`SyncupCn`) blocks every new node-read acquisition behind the
-  slowest in-flight object converge. Converges are bounded per command
+  slowest in-flight object converge; a `SyncupCn` that only adds cntlrs
+  takes the node read lock and is no node write (`cnagent.md` CN7). Converges are bounded per command
   (Common validation) wherever the command's child can be killed; one
   blocked in an uninterruptible kernel wait is not (Common validation), nor
   is an in-process sysfs, configfs or device access once its syscall has
@@ -10657,21 +10658,24 @@ document and only pointed to here.
   later than the demotion hold ends (Failover). Such a host can also lose
   an acknowledged write (A failover while the old primary serves can lose
   an acknowledged write, above).
-* **Many pools built at once fail over pools that have built.** A controller
-  node that builds the stacks of many new primaries at once answers check
-  rounds of the primaries it has settled with observations too old
-  (`dnv-worker.md` HL7), and a settled primary whose rounds miss for its
-  primary threshold is failed over (`dnv-worker.md` AR4, AR5), a pause for
-  its hosts with no fault behind it; a settling primary is held to the cntlr
-  threshold instead (`dnv-worker.md` HL2). That those reads wait behind the
-  builds, the head-of-line blocking above, is inferred: the rounds' records
-  show only the observations' age, and in one run the disk nodes' side
-  rounds came from observations too old as well. In the e2e suite's
-  many-pools case at the default primary threshold every such failover hit a
-  pool whose primary had settled while later pools still built: pools of the
-  burst, one of them twice, and in one run a pool built before the burst
-  (`e2e_integtest.md`, Known limits). A Kubernetes cluster makes this shape
-  when it creates many volumes at once (`csi.md`, Known limits).
+* **Many pools built at once age the disk nodes' side reports.** A disk
+  node that builds the sides of many new pools at once answers the check
+  rounds of the sides it has built with observations that can grow too old
+  (`dnv-worker.md` HL7): each new side brings a `SyncupDn` newer than the
+  DN's held request, which marks the node, cancels every read and waits for
+  the node write lock behind the side converges in flight, so no side's
+  read starts while one stands (`dnagent.md` SH30), as the e2e suite's
+  many-pools case measures (`e2e_integtest.md`, Known limits). A side
+  whose rounds miss sets its health epoch. It starts no reaction while the
+  side threshold, which leg repair counts from that epoch (`dnv-worker.md`
+  AR8), is longer than such a build's stretch, as the default is by far,
+  and it holds back the retire timer of its group meanwhile
+  (`dnv-worker.md` AR12). A side threshold set shorter would repair healthy
+  legs while pools build. The controller node has no such limit for its cntlrs:
+  a `SyncupCn` that only adds cntlrs holds off no read (`cnagent.md` CN7),
+  and that case's build fails no pool over (`e2e_integtest.md`, The cases).
+  A Kubernetes cluster makes this shape when it creates many volumes at
+  once (`csi.md`, Known limits).
 * **A promotion that outruns its sides can leave a group's array inactive.**
   A new primary whose converge runs before a group's sides have opened its
   path assembles the group's array from the legs it reaches. mdadm refuses
@@ -10688,16 +10692,15 @@ document and only pointed to here.
   whose kept members all carry a superblock, so the worker's re-send
   assembles it from both legs (`cnagent.md` CN12, The re-assembly; CN30).
   An array build runs under `MdBuildTimeout`, not the soft timeout, so the
-  stop is rare; it still costs a round and a converge. Seen in one of
-  three runs of the e2e suite's many-pools case
-  at 64 pools, on a pool that failed over twice while the pools built: on
+  stop is rare; it still costs a round and a converge. Seen once in the
+  e2e suite's many-pools case at 64 pools, on a pool failed over twice in
+  a row: on
   its second new primary, while the disk nodes were still opening paths,
   the agent's records show the promotion's assembly of the data group from
   one leg refused, then the converge of the pool's next revision, which
   came before any read named the array absent, ended by the soft timeout's
   SIGTERM while it assembled the array from both legs, then the group read
-  `inactive`, with md holding the array with one member (`e2e_integtest.md`,
-  Known limits).
+  `inactive`, with md holding the array with one member.
 * **An old primary cut off from the network serves again for a moment when
   it comes back.** Cut off, its agent hears no syncup, so its namespaces stay
   in their optimized group while the failover moves the pool, and its sides

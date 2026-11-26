@@ -134,8 +134,10 @@ func (s *CnAgentServer) syncupCntlr(
 // the node read lock before it takes the object lock of a cntlr this process
 // does not hold, and a refused request leaves no lock entry behind
 // (dnagent.md, SH11); syncupCntlr runs it again under that lock. The CN
-// request the pointer gate reads cannot change under the node read lock,
-// since SyncupCn replaces it under the write lock.
+// request the pointer gate reads changes under the node read lock only by a
+// SyncupCn that adds cntlrs (syncupCnAdds), which keeps every pointer the
+// held list names, so a pointer the first run admits the second admits too;
+// one that removes a pointer runs under the write lock.
 func (s *CnAgentServer) gateCntlr(
 	ctx context.Context,
 	req *pb.SyncupCntlrRequest,
