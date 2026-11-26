@@ -518,6 +518,14 @@ func (m *healthMonitor) observeSettle(
 	if !transition && !doSettle {
 		return false
 	}
+	if unhealthy && m.deps.reach.heardNone() {
+		// HL3: while the worker asks and has heard no agent since its
+		// incarnation started, no unhealthy verdict is written: the missed
+		// rounds are of its own path, as when it starts or rejoins cut off
+		// from the agents (VW8 (e)). Nothing is remembered, so the verdict
+		// is written on the first round after an agent answers.
+		return false
+	}
 	var epoch uint64
 	if unhealthy {
 		epoch = m.deps.clk.nowUnix()

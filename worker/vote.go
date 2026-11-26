@@ -23,7 +23,11 @@ import (
 const (
 	fenceHeartbeatStalled = "heartbeat_stalled"
 	fenceWatchStalled     = "watch_stalled"
-	fenceKeyDeleted       = "key_deleted"
+	// fenceAgentsUnreached is VW8's fence of a worker with a live peer whose
+	// rounds have gone unanswered by every agent for AgentsUnreachedSeconds:
+	// it reaches etcd but no agent, and its pools go to the peers.
+	fenceAgentsUnreached = "agents_unreached"
+	fenceKeyDeleted      = "key_deleted"
 )
 
 // The "state" attributes of the membership records (VW3, VW6; dnv-worker.md,
@@ -351,6 +355,11 @@ type voteWorker struct {
 
 	nextGen uint64
 	inc     *incarnation
+	// runCtx is the loop's context, which a sit-out before a rejoin waits
+	// on (fence), and agentFences the fences in a row for unreached agents,
+	// which double the sit-out.
+	runCtx      context.Context
+	agentFences int
 
 	mu   sync.Mutex
 	seed string
@@ -391,6 +400,7 @@ func (v *voteWorker) setSeed(seed string) {
 // workers.
 func (v *voteWorker) run(ctx context.Context) {
 	defer close(v.stopped)
+	v.runCtx = ctx
 	v.startIncarnation(v.currentSeed())
 	for {
 		select {
@@ -415,6 +425,9 @@ func (v *voteWorker) run(ctx context.Context) {
 // watch events (VW2/VW3).
 func (v *voteWorker) startIncarnation(seed string) {
 	v.nextGen++
+	// A new incarnation has heard no agent yet: its reactions wait for one
+	// (AR3), and its own unanswered rounds count from its first.
+	v.deps.reach.reset()
 	// The incarnation's own trace id (RW10), which its heartbeat, registry
 	// scan, watch, membership and fence records carry for the seed's life.
 	ctx, cancel := context.WithCancel(newTraceCtx(context.Background(), seed))
@@ -1165,7 +1178,46 @@ func (v *voteWorker) checkFence(inc *incarnation, now time.Time) bool {
 			return true
 		}
 	}
+	// (e) the worker reaches etcd but no agent, and a live peer can drive
+	// its pools: they go to the peers (AR3 holds a lone worker's reactions).
+	if v.deps.reach.answeredSinceReset() {
+		v.agentFences = 0
+	}
+	if v.deps.reach.unreached(now, common.AgentsUnreachedSeconds*time.Second) &&
+		hasLivePeer(inc) {
+		v.fence(inc, fenceAgentsUnreached)
+		return true
+	}
 	return false
+}
+
+// hasLivePeer says whether in every role this worker is an effective member
+// of, and there is one at least, another worker is an effective member whose
+// registration is live: a fence gives every role up, and a role with no such
+// peer would go undriven. A peer whose own fence deleted its key is not one
+// while its leave's grace runs, so of workers that are all cut off from the
+// agents one at least keeps its pools, its reactions held (AR3), unless two
+// judge in one tick.
+func hasLivePeer(inc *incarnation) bool {
+	member := false
+	for _, rs := range inc.roles {
+		own, ok := rs.entries[inc.seed]
+		if !ok || !own.effective {
+			continue
+		}
+		member = true
+		peer := false
+		for seed, entry := range rs.entries {
+			if seed != inc.seed && entry.effective && entry.live {
+				peer = true
+				break
+			}
+		}
+		if !peer {
+			return false
+		}
+	}
+	return member
 }
 
 // fence stops driving everything and rejoins as a fresh identity (VW8): there
@@ -1199,9 +1251,33 @@ func (v *voteWorker) fence(inc *incarnation, reason string) {
 		slog.String("new_seed", seed),
 	)
 	v.leave(inc.ctx, inc)
+	if reason == fenceAgentsUnreached && !v.sitOut() {
+		return
+	}
 	// VW7 applies to the new incarnation: nothing is driven until one full
 	// grace window after its first successful put.
 	v.startIncarnation(seed)
+}
+
+// sitOut is the wait before a worker fenced for unreached agents rejoins
+// (VW8 (e)): one fence threshold, doubled at each such fence in a row up to
+// eight times it, so the peers drive its pools meanwhile and the churn of a
+// lasting cut stays bounded. It reports false when the worker is stopping.
+func (v *voteWorker) sitOut() bool {
+	v.agentFences++
+	wait := v.deps.cfg.fenceThreshold() << min(v.agentFences-1, 3)
+	t := v.deps.clk.newTimer(wait)
+	defer t.stop()
+	ctx := v.runCtx
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	select {
+	case <-t.C:
+		return true
+	case <-ctx.Done():
+		return false
+	}
 }
 
 // leave takes an incarnation out of the vote layer in the one order both ways

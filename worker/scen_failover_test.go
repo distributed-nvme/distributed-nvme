@@ -1817,3 +1817,95 @@ func TestABuildThatKeepsFailingFailsTheRoleOver(t *testing.T) {
 			took, cntlrTh)
 	}
 }
+
+// TestAWorkerCutFromTheAgentsGivesItsPoolsUp pins VW8 (e) and AR3 on the
+// whole worker: two workers split the shards; the pool's owner loses every
+// agent connection while it still reaches etcd. It takes no reaction, as
+// its passes are held, fences itself for unreached agents, and the other
+// worker takes its pool; no cntlr is replaced and the primary stays. Its new
+// incarnation, whose rounds fail at their open, writes no health epoch
+// (HL3) and fences again once its rounds have gone unanswered for the bound,
+// unless it drives no object.
+func TestAWorkerCutFromTheAgentsGivesItsPoolsUp(t *testing.T) {
+	t.Parallel()
+	h := newWorkerHarness(t, harnessOpts{allowFence: true})
+	// The thresholds a cut-off worker could reach lie past the hold, five
+	// cntlr intervals of a second, as the defaults do; the failover's
+	// needs a standby the cut-off worker reads healthy, which it has none
+	// of.
+	c := h.plantStd(t, func(spec *stdSpec) {
+		spec.threshold = &pb.EventThreshold{
+			PrimaryUnhealthy: 2,
+			CntlrUnhealthy:   20,
+			SideUnhealthy:    20,
+			LegUnhealthy:     40,
+		}
+	})
+	owner, peer := foStartPair(t, h, c)
+	c.waitConverged(t)
+	cutAt := time.Now()
+	owner.conns.cutAll()
+	isAgentFence := func(rec logRecord) bool {
+		return rec.str("reason") == fenceAgentsUnreached
+	}
+	first := h.waitRecord(t,
+		time.Duration(common.AgentsUnreachedSeconds+30)*time.Second,
+		owner, msgWorkerFenced, isAgentFence)
+	foWaitTakesPool(t, h, peer, cutAt)
+	// The second fence: its rounds asked since the rejoin count, so it
+	// comes once they have gone unanswered for the bound, if the new
+	// incarnation asks at all (a record of a failed open says it does).
+	deadline := time.Now().Add(
+		time.Duration(common.AgentsUnreachedSeconds+20) * time.Second)
+	for {
+		fences := 0
+		for _, rec := range h.records(owner, msgWorkerFenced) {
+			if isAgentFence(rec) && rec.at.After(first.at) {
+				fences++
+			}
+		}
+		if fences > 0 {
+			break
+		}
+		if time.Now().After(deadline) {
+			// The new incarnation's records only: those after its
+			// registration, the new seed's.
+			var since time.Time
+			for _, rec := range h.records(owner, msgWorkerRegistered) {
+				if rec.str("seed") == first.str("new_seed") {
+					since = rec.at
+				}
+			}
+			asked := false
+			for _, rec := range h.records(owner, "check stream open failed") {
+				if !since.IsZero() && rec.at.After(since) {
+					asked = true
+				}
+			}
+			if asked {
+				t.Fatalf("the new incarnation asks with no answer but did "+
+					"not fence again within %ds",
+					common.AgentsUnreachedSeconds+20)
+			}
+			t.Logf("the new incarnation drives no object: no second fence")
+			break
+		}
+		time.Sleep(harnessPoll)
+	}
+	for _, rec := range h.records(owner, msgHealthChanged) {
+		if rec.at.After(first.at) && rec.num("err_epoch") != 0 {
+			t.Errorf("the cut-off worker's new incarnation wrote a health "+
+				"epoch: %v", rec.attrs)
+		}
+	}
+	for _, w := range []*harnessWorker{owner, peer} {
+		for _, rec := range h.records(w, msgReactionApplied) {
+			if rec.at.After(cutAt) {
+				t.Errorf("%s applied %v after the cut", w.name, rec.attrs)
+			}
+		}
+	}
+	if got := c.primary(t); got != 1 {
+		t.Errorf("the primary is cntlr %d after the cut, want 1", got)
+	}
+}

@@ -1196,6 +1196,37 @@ func TestHealthWriteFailureIsRetried(t *testing.T) {
 	}
 }
 
+// TestHealthNoUnhealthyWriteBeforeAnyAnswer pins HL3's gate on the record of
+// agent reach: while the worker asks and has heard no agent since its
+// incarnation started, an unhealthy verdict writes nothing and is not
+// remembered, a clean one is written; the first unhealthy verdict after an
+// answer is written.
+func TestHealthNoUnhealthyWriteBeforeAnyAnswer(t *testing.T) {
+	captureLogs(t)
+	d, writer := healthTestDeps(t)
+	seedClusterConf(d, 1)
+	d.reach = &agentReach{}
+	slot := d.reach.join()
+	d.reach.asked(slot, d.clk.now(), roundInterval)
+	ctx := context.Background()
+	monitor := newDnMonitor(d, 1, 2, func() string { return "dn0:9520" }, nil)
+	monitor.observe(ctx, healthUnreachable, "")
+	monitor.observe(ctx, healthErrorRow, "disk")
+	if got := writer.all(); len(got) != 0 {
+		t.Fatalf("writes %v before any answer, want none", got)
+	}
+	other := newDnMonitor(d, 1, 3, func() string { return "dn1:9520" }, nil)
+	other.observe(ctx, healthClean, "")
+	if got := writer.all(); len(got) != 1 || got[0].epoch != 0 {
+		t.Fatalf("writes %v, want the clean verdict's", got)
+	}
+	d.reach.heard(slot, d.clk.now())
+	monitor.observe(ctx, healthUnreachable, "")
+	if got := writer.all(); len(got) != 2 || got[1].epoch == 0 {
+		t.Fatalf("writes %v, want the unhealthy verdict after an answer", got)
+	}
+}
+
 // TestHealthSettle pins HL2's settle half of the cntlr monitor: a clean
 // observation the driver judges to prove the primary role (canSettle) clears
 // the record's settling flag once, in the same write as any err_epoch clear —

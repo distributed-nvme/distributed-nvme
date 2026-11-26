@@ -219,6 +219,9 @@ type deps struct {
 	// the pass interval (AR1): randomPassOffset in Run. nil starts the pass
 	// ticker at once, which the unit tests rely on to count passes.
 	passOffset func(period time.Duration) time.Duration
+	// reach is the worker's record of agent reach, over all its loops
+	// (agentReach; AR3, VW8). nil records nothing and holds nothing.
+	reach *agentReach
 }
 
 // randomPassOffset is a random wait in (0, period], the offset of a
@@ -356,6 +359,7 @@ func run(
 		clk:    env.clk,
 		tmo:    env.tmo,
 		kinds:  kindFor,
+		reach:  &agentReach{},
 
 		passOffset: env.passOffset,
 	}

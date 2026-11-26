@@ -323,6 +323,9 @@ type revWorker struct {
 	// goroutine for a round's reply.
 	obsSeen time.Time
 	obsAddr string
+	// reachSlot is the loop's slot in the worker's record of agent reach
+	// (AR3, VW8), from its start to its end.
+	reachSlot *reachSlot
 	// syncupObs is the observation time the latest Syncup* reply carried,
 	// kept until the next round's reply is judged or a round fails
 	// (staleRound, fail). That round answers from it as a rule, a whole
@@ -444,6 +447,10 @@ func (w *revWorker) run() {
 	if !awaitPredecessor(w.ctx, w.after) {
 		return
 	}
+	// The loop's slot in the worker's record of agent reach (AR3, VW8),
+	// given back as it ends, when it waits for no answer any more.
+	w.reachSlot = w.deps.reach.join()
+	defer w.deps.reach.leave(w.reachSlot)
 	slog.InfoContext(w.ctx, msgRevisionWorkerStarted, w.lifecycleAttrs()...)
 	defer func() {
 		w.cleanup()
@@ -507,6 +514,10 @@ func (w *revWorker) round(cc *pb.ClusterConf, interval time.Duration) {
 	// never carries a superseded revision and step 1 opens its stream at the
 	// endpoint the parent last named (RW13).
 	w.drainDesired(cc)
+	// The round is one the worker's record of agent reach counts (AR3, VW8),
+	// from before its stream is opened, since a loop cut off from its agent
+	// fails there.
+	w.deps.reach.asked(w.reachSlot, w.deps.clk.now(), interval)
 	// Step 1: no stream => open one over the cached connection (RW7); a
 	// failure to open counts as a broken stream.
 	if w.stream == nil {
@@ -545,6 +556,8 @@ func (w *revWorker) round(cc *pb.ClusterConf, interval time.Duration) {
 		w.fail(ctx)
 		return
 	}
+	// An answer, whatever its code: the agent was reached (AR3, VW8).
+	w.deps.reach.heard(w.reachSlot, w.deps.clk.now())
 	w.seeAgentStart(ctx, reply)
 	if reply.code == common.ReplyCodeStarting {
 		// A starting answer is another answer: the count of unknown answers
@@ -899,6 +912,10 @@ func (w *revWorker) syncup(
 	obsTraceId string,
 ) {
 	revision := w.desired.revision
+	// The loop waits for no answer while its Syncup* runs (AR3, VW8): an
+	// agent can take long to answer one, and a loop cut off from its agent
+	// asks again at its next round.
+	w.deps.reach.withdraw(w.reachSlot)
 	conn, err := w.connect()
 	if err != nil {
 		w.logSyncupResult(ctx, revision, obsTraceId, nil, err)
@@ -922,6 +939,8 @@ func (w *revWorker) syncup(
 		// The driver sent nothing and said why (RW13's missing DnConf).
 		return
 	}
+	// An answer of the agent (AR3, VW8).
+	w.deps.reach.heard(w.reachSlot, w.deps.clk.now())
 	// RW23: the reply's observation is seen, so a round that answers from it
 	// afterwards is no new one, but it never counts itself: newObs stays
 	// false. Nor is it judged by its age (HL7), and the next round, which
@@ -1159,6 +1178,8 @@ func (w *revWorker) refuseConf(err error) {
 func (w *revWorker) quiesce() {
 	w.dropStream()
 	w.releaseConn()
+	// The loop asks nothing while it idles (AR3, VW8).
+	w.deps.reach.withdraw(w.reachSlot)
 	// No round asks the agent to read while the loop idles, so the first
 	// round after it counts an observation's age from its own answer (HL7),
 	// and a start series the idle cut is forgotten (HL8), and so is the

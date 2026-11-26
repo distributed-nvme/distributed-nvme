@@ -1121,9 +1121,9 @@ type reactor struct {
 	// badLine is the last unparsable pool status line per slice_id, so a
 	// steady bad line is logged once per CHANGE and not once per pass (AR6).
 	badLine map[uint64]string
-	// suppressed is the last AR3 verdict, so msgReactionSuppressed is emitted
-	// on the transition only.
-	suppressed bool
+	// suppressed is the reason of the last AR3 verdict, empty for none, so
+	// msgReactionSuppressed is emitted on a change only.
+	suppressed string
 	// lastFailover is AR5's record of the last failover this coordinator
 	// applied (errorFollowedRole); nil before the first.
 	lastFailover *failoverMemo
@@ -2150,24 +2150,33 @@ func (w *spWorker) primaryInfo(cntlrId uint64) (*pb.CntlrInfo, uint64) {
 
 // reactionSuppressed is AR3: no reaction runs at
 // sp_level >= SP_LEVEL_NO_THINPOOL, the disaster-recovery levels
-// (architecture.md, SpLevel). The record is emitted on the transition only.
+// (architecture.md, SpLevel), nor while the worker reaches no agent
+// (agentReach.holds). The record is emitted once per change of the reason.
 //
 // A `deleting` SP is not suppressed, it drains (SPD6): reactionPass routes it
 // to drainStep before reaching this gate, so this function is never called
-// with `deleting` set and the sp_level test below is the whole of it.
+// with `deleting` set.
 func (w *spWorker) reactionSuppressed(ctx context.Context, p *spPass) bool {
 	conf := p.state.Conf
 	reason := ""
 	if conf.GetSpLevel() >= pb.SpLevel_SP_LEVEL_NO_THINPOOL {
 		reason = "sp_level"
+	} else if w.deps.reach.holds(w.deps.clk.now(),
+		common.AgentsUnreachedIntervals*
+			roundPeriod(p.cc.GetHealthCheckConf().GetCntlrInterval())) {
+		// AR3: a worker that reaches etcd but no agent, or that has heard
+		// none since it started, takes no reaction: its verdicts are its own
+		// missed rounds, and a stored health epoch can be an earlier
+		// owner's.
+		reason = reasonAgentsUnreached
 	}
 	r := w.reactor()
 	if reason == "" {
-		r.suppressed = false
+		r.suppressed = ""
 		return false
 	}
-	if !r.suppressed {
-		r.suppressed = true
+	if r.suppressed != reason {
+		r.suppressed = reason
 		slog.InfoContext(ctx, msgReactionSuppressed,
 			slog.Uint64("cluster_id", w.cid),
 			slog.Uint64("sp_id", w.spId),
@@ -2177,6 +2186,10 @@ func (w *spWorker) reactionSuppressed(ctx context.Context, p *spPass) bool {
 	}
 	return true
 }
+
+// reasonAgentsUnreached is AR3's suppression of a worker that reaches no
+// agent (agentReach.holds).
+const reasonAgentsUnreached = "agents_unreached"
 
 // ---------------------------------------------------------------------------
 // AR5 — primary failover

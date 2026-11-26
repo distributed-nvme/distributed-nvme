@@ -4745,3 +4745,60 @@ func TestReactionTheSameErrorHoldEndsAtTheCntlrThreshold(t *testing.T) {
 			skips(), held+2)
 	}
 }
+
+// TestReactionHeldWhileNoAgentAnswers pins AR3's suppression of a worker
+// that reaches etcd but no agent: while its rounds go unanswered and it has
+// heard no agent since its start, and again once they have gone unanswered
+// for AgentsUnreachedIntervals intervals and not a second before, every
+// reaction of its passes is held, a disabled primary's failover among them,
+// with one record per change of the reason; one answer of any agent lifts
+// the first, and the second only once the bound and the reconnect wait have
+// passed since that answer.
+func TestReactionHeldWhileNoAgentAnswers(t *testing.T) {
+	h := newReactHarness(t, reactFixture(t))
+	h.deps.reach = &agentReach{}
+	slot := h.deps.reach.join()
+	h.state.Cntlrs[reactCntlrA].Disabled = true
+	h.deps.reach.asked(slot, h.clk.now(), roundInterval)
+	h.pass()
+	h.pass()
+	h.wantOps()
+	recs := h.logs.withMsg(msgReactionSuppressed)
+	if len(recs) != 1 || recs[0]["reason"] != reasonAgentsUnreached {
+		t.Fatalf("suppression records %v, want one with reason %q", recs,
+			reasonAgentsUnreached)
+	}
+	h.deps.reach.heard(slot, h.clk.now())
+	h.pass()
+	h.wantOps("failover")
+
+	// After an answer: the rounds asked since hold nothing until they have
+	// gone unanswered for the bound, and everything from it on; the answer
+	// that ends that hold keeps it for the bound and the reconnect wait.
+	h = newReactHarness(t, reactFixture(t))
+	h.deps.reach = &agentReach{}
+	slot = h.deps.reach.join()
+	h.state.Cntlrs[reactCntlrA].Disabled = true
+	h.deps.reach.heard(slot, h.clk.now())
+	h.deps.reach.asked(slot, h.clk.now(), roundInterval)
+	bound := common.AgentsUnreachedIntervals * roundPeriod(
+		reactClusterConf().GetHealthCheckConf().GetCntlrInterval())
+	h.clk.advance(bound - time.Second)
+	h.pass()
+	h.wantOps("failover")
+	h.clk.advance(time.Second)
+	h.pass()
+	h.wantOps("failover")
+	recs = h.logs.withMsg(msgReactionSuppressed)
+	if len(recs) != 1 || recs[0]["reason"] != reasonAgentsUnreached {
+		t.Fatalf("suppression records %v, want one with reason %q at the "+
+			"bound", recs, reasonAgentsUnreached)
+	}
+	h.deps.reach.heard(slot, h.clk.now())
+	h.clk.advance(bound + agentReconnectWait - time.Second)
+	h.pass()
+	h.wantOps("failover")
+	h.clk.advance(time.Second)
+	h.pass()
+	h.wantOps("failover", "failover")
+}

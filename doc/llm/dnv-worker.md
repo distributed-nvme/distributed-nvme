@@ -83,6 +83,10 @@ the per-call deadlines of the worker's agent RPCs (RW5, BM3);
 that demotes a primary holds its sides and its other cntlrs for the demoted
 cntlr to report its demotion applied (RW22); `FenceRoundIntervals`, the
 bound of the fence round after it, in `cntlr_interval`s (RW24);
+`AgentsUnreachedIntervals`, after which a worker whose rounds no agent
+answers holds its reactions, in `cntlr_interval`s (AR3), and
+`AgentsUnreachedSeconds`, after which one with a live peer fences itself
+(VW8 (e));
 `DefaultEtcdDialTimeout` and `DefaultEtcdOpTimeout`, the dial timeout the
 etcd client is given, which bounds nothing (EU5), and its budget per plain
 operation and per whole transaction, every retry included (EU1, EU5); `DefaultEtcdKeepaliveTime` and
@@ -1530,6 +1534,38 @@ every heartbeat tick and on every own-key watch event:
   on the own-key delete a peer may have issued meanwhile, or (d) through a
   grace timer armed before the stop — because (d) too judges the stalled
   heartbeat first.
+* (e) it reaches etcd but no agent, while another worker is a live member:
+  the rounds it has asked agents, in any role, have gone unanswered by
+  every agent for `AgentsUnreachedSeconds`, or for twice the longest round
+  interval of its loops that wait for no answer if that is longer (their
+  agents answered them last and may be silent that long with no cut), with
+  no answer of a round or a `Syncup*` between, while one of its loops
+  still waits for an answer; and
+  in every role it is an effective member of, and in one at least, another
+  effective member's registration is live. The worker's record of agent
+  reach keeps a slot per loop, from the loop's start to its end: a round
+  makes its loop wait from before its stream is opened, since a loop cut
+  off from its agent fails there, and an answer, of any code, of a round or
+  a `Syncup*`, ends the wait. A loop that idles waits for nothing, and so
+  does one that has ended, as when the worker's objects are gone or a stop
+  cancelled its last round, and so does one whose `Syncup*` runs, since an
+  agent can take long to answer one; the unanswered time starts again at a
+  round asked while no loop waits. A peer whose key is deleted, as by
+  its own fence, is no live peer while its leave's grace runs, so of
+  workers all cut off one at least keeps its pools, unless two judge in the
+  same tick; a role with no live peer keeps the worker from fencing, since
+  the fence gives every role up and that role would go undriven. The rule
+  is read on each heartbeat tick and own-key watch event, so the fence
+  comes `AgentsUnreachedSeconds` to a tick after the first round asked
+  since the last answer. Its `reason` is `agents_unreached`. The peers then drive its
+  pools, which reach the agents; a worker alone does not fence for it, and
+  AR3 holds its reactions instead. The new incarnation does not register at
+  once: it sits out one fence threshold first, doubled at each such fence
+  in a row up to eight times it, the count reset once an incarnation hears
+  an agent, so a lasting cut costs a rejoin and a fence per sit-out at
+  most. No probe of the agents comes before the rejoin; each incarnation's
+  reactions wait, by AR3, and its unhealthy verdicts, by HL3, until it
+  hears one.
 
 Fencing means: mint a new seed (VW1) — first, because the `worker fenced`
 record names it and a fence that cannot mint one tears nothing down (below);
@@ -3283,6 +3319,18 @@ transition is due, the settle rides in that same write (HL2) — and it too
 is written once per memo, the op re-reading the record so that a second
 owner's settle writes nothing.
 
+An unhealthy verdict is not written while one of the worker's loops waits
+for an answer and the worker has heard no agent since its incarnation
+started (AR3's record of agent reach): the monitor writes nothing and its
+memo of the record keeps what it held, so the verdict is written at the
+first one after an agent answers; a clean verdict is written as ever. The
+coordinator's memo of its own verdicts (AR10) is told the verdict all the
+same, and AR3 holds every reaction meanwhile.
+Reason: such missed rounds are of the worker's own path, as when it starts
+or rejoins cut off from the agents (VW8 (e)), and a health epoch on every
+object it drives would take every standby out of the cdc's answer and every
+node out of the allocator's offers until another owner clears them.
+
 HL4. A `Syncup*` reply's `*Info` is processed exactly like a `Check*`
 reply's (the secondary signal, `architecture.md`, Check streams), but for
 a cntlr's run of unhealthy health verdicts, to which only rounds add
@@ -3975,6 +4023,28 @@ runs without `DeleteCntlr`'s not-primary and disabled preconditions
 (`architecture.md`, Automatic reactions), which means it does not demand
 that the cntlr it deletes be disabled; it refuses a disabled one, so it
 never replaces disabled cntlrs.
+
+No reaction runs, either, while the worker reaches no agent: while one of
+its loops waits for an answer, its rounds, in any role, have gone
+unanswered by every agent for `AgentsUnreachedIntervals` of the cluster's
+`cntlr_interval`, or it has heard no agent since its incarnation started
+(the worker's record of agent reach, as VW8 (e) words it). The bound is
+not stretched by long intervals, as the fence's is: a hold costs only
+time. An answer that ends a silence of the worker's rounds two of the
+answering loop's intervals long or longer starts a recovery, and the hold
+stands for the bound and `agentReconnectWait` after it, the longest gRPC's
+reconnect backoff waits (`GrpcReconnectMaxDelay` and its jitter of a
+fifth, RW7): each agent's connection comes back on its own backoff, and
+until it does, the cntlrs on it read unhealthy by the cut's missed rounds
+while the first to come back read healthy, so a failover would move a role
+that serves. No healthy worker is silent for two rounds, since its loops
+answer each one. The pass logs `reaction
+suppressed` with the reason `agents_unreached` once per change of reason;
+a deleting SP's drain step runs as above. Reason: the verdicts of a worker
+cut off from the agents are its own missed rounds, and a stored health
+epoch can be an earlier owner's, so a failover or a cntlr replacement
+would move roles that serve; with a live peer VW8 (e) also gives its
+pools up.
 
 AR4. **Thresholds.** `now` minus `err_epoch` at least the threshold, which
 is the SP's `event_threshold` field of that kind, a zero meaning its
@@ -5832,8 +5902,9 @@ and `shard released` the ownership diff, the owner being the logging worker
 itself and a release logged after the join (VW9, SW5); `worker fenced`, at
 Warn, the fence, its `reason` naming the cause as VW8 lists them and the
 record naming the old and the new seed (VW8): the worker joins again alone,
-but a fence means its heartbeat, its watch or its registration failed and
-its shards went undriven for a while, which an operator must know of
+after a sit-out for `agents_unreached`, but a fence means its heartbeat,
+its watch or its registration failed, or it reached no agent, and its
+shards went undriven for a while, which an operator must know of
 (`log.md` R6); `worker reg watch restarting` a registry
 watch that ended on an error or a compaction and is reopened with a rescan
 (VW3, EU3).
@@ -5940,9 +6011,10 @@ its migration's bitmap, with the CN, the leg and the piece count, and
 `migration bitmap read failed` one that ended with no bitmap, with its error
 and whether the child gave the bitmap up (`given_up`, BM7).
 
-**Reactions and drains.** `reaction applied` a reaction whose op call
-succeeded and `reaction skipped` a reaction the pass does not take, with its
-reason (AR2; for AR8's gate, the status of the group's row it read, or
+**Reactions and drains.** `reaction suppressed` an SP whose passes take no
+reaction, once per change of its reason, `sp_level` or `agents_unreached`
+(AR3); `reaction applied` a reaction whose op call succeeded and
+`reaction skipped` a reaction the pass does not take, with its reason (AR2; for AR8's gate, the status of the group's row it read, or
 that its report is older than the snapshot), at Warn when the reason holds
 until an operator acts and at Info otherwise (`warnSkipReasons`; `log.md`
 R6) — no failover can happen (`no candidate` and AR5's three refusals),
@@ -6918,6 +6990,48 @@ caught.
   and rejoins though none of its keys was seen dead. The measure is never
   shorter than the widest gap a peer can see (VW8 (a)); how the fence
   falls against the peers' commit of it dead is CM3's.
+
+* **A worker cut off from the agents gives its pools up only beside a
+  live peer, and takes them back while the cut lasts.** A worker alone
+  never fences for it: AR3 holds its reactions, and its rounds go on
+  failing, so its pools stay undriven until the cut ends; one cut off
+  while it ran sets health epochs on what it drives at its first missed
+  rounds, one started cut off sets none (HL3). Beside a peer, each
+  incarnation that rejoins after its sit-out (VW8 (e)) is given its share
+  of the shards again with no probe of the agents first, holds them with
+  no reaction and no unhealthy write for `AgentsUnreachedSeconds` to a
+  heartbeat tick, and fences again: at the default `--vote-interval` the
+  sit-outs are 30, 60, 120 and then 240 seconds, and each return leaves
+  those pools undriven for about `AgentsUnreachedSeconds` plus the leave's
+  grace window and the ownership changes' gaps (VW7), about a minute. When
+  every worker is cut off, one at least keeps the pools, its reactions
+  held, but two that judge in the same tick both fence; and when a
+  returning worker's join commits, the one that kept the pools has a live
+  peer again and fences too, so the pools move between them and go
+  undriven for a leave's grace window at each move. Once the network is
+  back, a worker that sits out drives again only after the rest of its
+  sit-out and a join's grace window, up to about five minutes at the
+  defaults. A peer counts in every role: where the roles are split, as a
+  worker of the sp and dn roles beside one of the dn role alone, the
+  first never fences for it and keeps its pools held. A worker that hears
+  any agent is not unreached: one that reaches some agents but not others
+  drives every pool, and its reactions follow the missed rounds of the
+  agents it does not reach. The other way round, a worker whose every
+  object sits on a node whose agent is down, its own path being fine, is
+  unreached as well, and beside a peer its shards go away and come back at
+  each return. A loop that waits for no answer stretches the fence's bound
+  to twice its interval, so a worker whose agents answer at long intervals
+  fences later; the hold's bound is not stretched, so a worker whose only
+  answering loops have intervals longer than the hold's bound, its other
+  agents being down, has its reactions held between their answers. And
+  an event threshold set below AR3's hold, `AgentsUnreachedIntervals` of
+  the cluster's `cntlr_interval`, can be reached first: in the first
+  stretch of a cut a worker can then replace a cntlr it cannot reach, as
+  before the hold existed. At the defaults the hold comes after 10 seconds
+  and the shortest threshold that needs no healthy standby,
+  `cntlr_unhealthy`, is 600 seconds; a failover needs a standby the
+  cut-off worker reads healthy, which it has none of once its rounds to
+  them have missed.
 
 * **A stuck grow waits while another hold stands on it.** Auto-grow
   withdraws a grown group whose provisioning side is unhealthy on a disk

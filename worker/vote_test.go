@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/hex"
 	"errors"
+	"fmt"
 	"strings"
 	"sync"
 	"testing"
@@ -2537,4 +2538,169 @@ func testVoteShutdownStopsHeartbeatBeforeDeletingRegs(t *testing.T) {
 			t.Fatalf("the shutdown never deleted %s: %v", key, store.opLog())
 		}
 	}
+}
+
+// TestVoteNoAgentFenceBesideAPeerThatLeft pins hasLivePeer: a peer whose key
+// was deleted, as by its own fence, is no live peer while its leave's grace
+// runs, so a worker whose rounds go unanswered does not fence beside it; once
+// the peer beats again, it does.
+func TestVoteNoAgentFenceBesideAPeerThatLeft(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		role := common.WorkerRoleSp
+		h := newVoteHarnessDeps(t, testConfig(role), newVoteHookStore(),
+			func(d *deps) { d.reach = &agentReach{} })
+		step := h.deps.cfg.VoteInterval
+		peer := seedOf(9)
+		h.beatUntilObserved(role, peer)
+		slot := h.deps.reach.join()
+		h.deps.reach.heard(slot, h.clk.now())
+		h.keepAlive(role, peer, h.deps.cfg.GraceTime+step)
+		if err := h.store.Delete(context.Background(),
+			workerRegKey(role, peer)); err != nil {
+			t.Fatalf("peer delete: %v", err)
+		}
+		h.deps.reach.asked(slot, h.clk.now(), roundInterval)
+		unreached := common.AgentsUnreachedSeconds * time.Second
+		if unreached+2*step >= h.deps.cfg.LeaveGraceTime {
+			t.Fatalf("the case needs a leave grace past the bound")
+		}
+		h.advance(unreached + 2*step)
+		if n := len(h.logs.withMsg(msgWorkerFenced)); n != 0 {
+			t.Fatalf("fenced %d times beside a peer whose key is gone", n)
+		}
+		h.beatUntilObserved(role, peer)
+		h.keepAlive(role, peer, 2*step)
+		recs := h.logs.withMsg(msgWorkerFenced)
+		if len(recs) != 1 || recs[0]["reason"] != fenceAgentsUnreached {
+			t.Fatalf("fence records %v once the peer is live again, want one "+
+				"with reason %q", recs, fenceAgentsUnreached)
+		}
+	})
+}
+
+// TestVoteNoAgentFenceWhileARoleHasNoPeer pins hasLivePeer's every role: a
+// worker of the sp and dn roles whose only peer runs the dn role does not
+// fence for unreached agents, since its pools would go undriven; once the
+// peer runs the sp role too, it does.
+func TestVoteNoAgentFenceWhileARoleHasNoPeer(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		sp, dn := common.WorkerRoleSp, common.WorkerRoleDn
+		h := newVoteHarnessDeps(t, testConfig(sp, dn), newVoteHookStore(),
+			func(d *deps) { d.reach = &agentReach{} })
+		step := h.deps.cfg.VoteInterval
+		peer := seedOf(9)
+		h.beatUntilObserved(dn, peer)
+		slot := h.deps.reach.join()
+		h.deps.reach.heard(slot, h.clk.now())
+		h.keepAlive(dn, peer, h.deps.cfg.GraceTime+step)
+		h.deps.reach.asked(slot, h.clk.now(), roundInterval)
+		h.keepAlive(dn, peer, common.AgentsUnreachedSeconds*time.Second+2*step)
+		if n := len(h.logs.withMsg(msgWorkerFenced)); n != 0 {
+			t.Fatalf("fenced %d times with no peer in the sp role", n)
+		}
+		h.beatUntilObserved(sp, peer)
+		for range int((h.deps.cfg.GraceTime+2*step)/step) + 1 {
+			h.beat(sp, peer)
+			h.keepAlive(dn, peer, step)
+		}
+		recs := h.logs.withMsg(msgWorkerFenced)
+		if len(recs) != 1 || recs[0]["reason"] != fenceAgentsUnreached {
+			t.Fatalf("fence records %v once the peer runs both roles, want "+
+				"one with reason %q", recs, fenceAgentsUnreached)
+		}
+	})
+}
+
+// TestVoteFenceAgentsUnreached pins VW8 (e): a worker whose rounds have gone
+// unanswered by every agent for AgentsUnreachedSeconds fences itself only
+// while another worker of its role is a live member, and then sits out
+// before it registers under its new seed: one fence threshold, doubled at
+// each such fence in a row up to eight times it, the row ended by an answer
+// in an incarnation; each new incarnation starts with a fresh record of
+// agent reach. Alone, it never fences for it (AR3 holds its reactions
+// instead).
+func TestVoteFenceAgentsUnreached(t *testing.T) {
+	synctest.Test(t, testVoteFenceAgentsUnreached)
+}
+
+func testVoteFenceAgentsUnreached(t *testing.T) {
+	role := common.WorkerRoleSp
+	h := newVoteHarnessDeps(t, testConfig(role), newVoteHookStore(),
+		func(d *deps) { d.reach = &agentReach{} })
+	unreached := common.AgentsUnreachedSeconds * time.Second
+	step := h.deps.cfg.VoteInterval
+	threshold := h.deps.cfg.fenceThreshold()
+
+	// Alone: no fence however long the agents stay silent. The slot is a
+	// loop's that keeps asking.
+	slot := h.deps.reach.join()
+	h.deps.reach.asked(slot, h.clk.now(), roundInterval)
+	h.advance(unreached + threshold)
+	if n := len(h.logs.withMsg(msgWorkerFenced)); n != 0 {
+		t.Fatalf("a lone worker fenced %d times for unreached agents", n)
+	}
+
+	// With a live peer: no fence while an agent answers.
+	peer := seedOf(9)
+	h.beatUntilObserved(role, peer)
+	h.deps.reach.heard(slot, h.clk.now())
+	h.keepAlive(role, peer, h.deps.cfg.GraceTime+step)
+	if n := len(h.logs.withMsg(msgWorkerFenced)); n != 0 {
+		t.Fatalf("fenced %d times while an agent answered", n)
+	}
+
+	// fenceAndSitOut asks with no answer until the want-th fence, which
+	// must carry the reason, then checks that the new seed sits out sitOut
+	// and registers after it, with the record of agent reach reset, and
+	// lets the new seed's join commit.
+	fenceAndSitOut := func(want int, sitOut time.Duration) {
+		t.Helper()
+		h.deps.reach.asked(slot, h.clk.now(), roundInterval)
+		for range int((unreached+threshold)/step) + 2 {
+			if len(h.logs.withMsg(msgWorkerFenced)) >= want {
+				break
+			}
+			h.keepAlive(role, peer, step)
+		}
+		recs := h.logs.withMsg(msgWorkerFenced)
+		if len(recs) != want || recs[want-1]["reason"] != fenceAgentsUnreached {
+			t.Fatalf("fence records %v, want %d, the last with reason %q",
+				recs, want, fenceAgentsUnreached)
+		}
+		newSeed, _ := recs[want-1]["new_seed"].(string)
+		registered := func() bool {
+			reg := &pb.WorkerReg{}
+			ok, err := h.store.Get(context.Background(),
+				workerRegKey(role, newSeed), reg)
+			return err == nil && ok
+		}
+		h.keepAlive(role, peer, sitOut-step)
+		if registered() {
+			t.Fatalf("fence %d: the new seed registered before its sit-out "+
+				"of %v", want, sitOut)
+		}
+		h.keepAlive(role, peer, 2*step)
+		waitFor(t, fmt.Sprintf("fence %d: the new seed's registration "+
+			"after its sit-out of %v", want, sitOut), registered)
+		if h.deps.reach.answeredSinceReset() ||
+			h.deps.reach.unreached(h.clk.now(), 0) {
+			t.Fatalf("fence %d: the new incarnation kept the record of "+
+				"agent reach", want)
+		}
+		h.keepAlive(role, peer, h.deps.cfg.GraceTime+step)
+	}
+
+	// The fences in a row sit out one fence threshold, doubled at each, up
+	// to eight times it.
+	fenceAndSitOut(1, threshold)
+	fenceAndSitOut(2, 2*threshold)
+	// An answer in the third incarnation ends the row: its fence sits out
+	// one threshold again.
+	h.deps.reach.heard(slot, h.clk.now())
+	h.keepAlive(role, peer, step)
+	fenceAndSitOut(3, threshold)
+	fenceAndSitOut(4, 2*threshold)
+	fenceAndSitOut(5, 4*threshold)
+	fenceAndSitOut(6, 8*threshold)
+	fenceAndSitOut(7, 8*threshold)
 }

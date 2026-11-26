@@ -841,6 +841,12 @@ const (
 	// report its fence; on the lab at 32 slices the reports took up to 4.8
 	// seconds.
 	FenceRoundIntervals = 5
+	// A worker whose rounds have gone unanswered by every agent for this
+	// many cntlr_intervals holds every reaction of its passes (AR3), and
+	// one with a live peer fences itself once they have gone unanswered for
+	// AgentsUnreachedSeconds (VW8): it reaches etcd but no agent.
+	AgentsUnreachedIntervals = 5
+	AgentsUnreachedSeconds   = 30
 	// etcd client: dial, and per plain operation / per whole
 	// transaction, every retry included (EU1, EU5).
 	DefaultEtcdDialTimeout = 5

@@ -3255,3 +3255,128 @@ func TestUnknownPastHold(t *testing.T) {
 		}
 	})
 }
+
+// TestRevisionRoundsFeedTheAgentReach pins the loop's part in the worker's
+// record of agent reach (AR3, VW8): a round sent and not answered is asked
+// and not heard, so the record goes unreached once the bound passes; an
+// answered round, of any code, is heard; a Syncup* reply is heard while the
+// rounds stay silent, and a loop in a Syncup* the agent holds waits for no
+// answer; a round whose stream cannot be opened, as at an address no agent
+// serves, is asked too; and a loop that idles waits for no answer.
+func TestRevisionRoundsFeedTheAgentReach(t *testing.T) {
+	synctest.Test(t, testRevisionRoundsFeedTheAgentReach)
+}
+
+func testRevisionRoundsFeedTheAgentReach(t *testing.T) {
+	h := newRevHarness(t)
+	h.deps.reach = &agentReach{}
+	var silent atomic.Bool
+	silent.Store(true)
+	stub := &stubDnAgent{
+		checkReply: func(req *pb.CheckDnRequest) *pb.CheckDnReply {
+			if silent.Load() {
+				return nil
+			}
+			return &pb.CheckDnReply{Revision: req.GetRevision()}
+		},
+	}
+	h.fleet.addDn(t, testAddr, stub)
+	h.defaultConf()
+	h.seedDnConf(testAddr, &pb.DnConf{DnId: testDnId})
+	h.startDn(testAddr, 5)
+	waitFor(t, "first check", func() bool { return stub.checkCount() >= 1 })
+	if h.deps.reach.answeredSinceReset() {
+		t.Fatalf("a silent agent counted as heard")
+	}
+	h.advanceUntil("the record unreached", roundInterval, func() bool {
+		return h.deps.reach.unreached(h.clk.now(), 2*roundInterval)
+	})
+	silent.Store(false)
+	h.advanceUntil("an answer heard", roundInterval, func() bool {
+		return h.deps.reach.answeredSinceReset()
+	})
+	if h.deps.reach.unreached(h.clk.now(), 2*roundInterval) {
+		t.Fatalf("an answer left the record unreached")
+	}
+}
+
+func TestRevisionSyncupAndFailedOpenFeedTheAgentReach(t *testing.T) {
+	synctest.Test(t, testRevisionSyncupAndFailedOpenFeedTheAgentReach)
+}
+
+func testRevisionSyncupAndFailedOpenFeedTheAgentReach(t *testing.T) {
+	// The rounds stay silent; a desired change's immediate Syncup* is
+	// answered, and that answer alone is heard.
+	h := newRevHarness(t)
+	h.deps.reach = &agentReach{}
+	stub := &stubDnAgent{
+		checkReply: func(req *pb.CheckDnRequest) *pb.CheckDnReply {
+			return nil
+		},
+		syncupReply: func(req *pb.SyncupDnRequest) (*pb.SyncupDnReply, error) {
+			return &pb.SyncupDnReply{Revision: req.GetRevision()}, nil
+		},
+	}
+	h.fleet.addDn(t, testAddr, stub)
+	h.defaultConf()
+	h.seedDnConf(testAddr, &pb.DnConf{DnId: testDnId})
+	w := h.startDn(testAddr, 1)
+	waitFor(t, "first check", func() bool { return stub.checkCount() >= 1 })
+	if h.deps.reach.answeredSinceReset() {
+		t.Fatalf("a silent round counted as heard")
+	}
+	w.update(desiredState{revision: 2, handle: testAddr})
+	waitFor(t, "the syncup", func() bool { return len(stub.syncups()) >= 1 })
+	waitFor(t, "the syncup's answer heard", h.deps.reach.answeredSinceReset)
+
+	// While a Syncup* the agent holds runs, the loop waits for no answer,
+	// so the stretch of silent rounds counts for nothing.
+	h = newRevHarness(t)
+	h.deps.reach = &agentReach{}
+	entered := make(chan struct{}, 1)
+	release := make(chan struct{})
+	held := &stubDnAgent{
+		checkReply: func(req *pb.CheckDnRequest) *pb.CheckDnReply {
+			return nil
+		},
+		syncupReply: func(req *pb.SyncupDnRequest) (*pb.SyncupDnReply, error) {
+			entered <- struct{}{}
+			<-release
+			return nil, errors.New("released")
+		},
+	}
+	h.fleet.addDn(t, testAddr, held)
+	h.defaultConf()
+	h.seedDnConf(testAddr, &pb.DnConf{DnId: testDnId})
+	w = h.startDn(testAddr, 1)
+	waitFor(t, "first check", func() bool { return held.checkCount() >= 1 })
+	w.update(desiredState{revision: 2, handle: testAddr})
+	<-entered
+	h.clk.advance(max(roundInterval, common.GrpcConnectTimeout*time.Second) +
+		2*roundInterval)
+	if h.deps.reach.unreached(h.clk.now(), roundInterval) {
+		t.Errorf("a loop in a held Syncup* still waits for an answer")
+	}
+	close(release)
+
+	// No agent at the address: every round fails at its open, and the
+	// record goes unreached all the same.
+	h = newRevHarness(t)
+	h.deps.reach = &agentReach{}
+	h.defaultConf()
+	h.seedDnConf(testAddr, &pb.DnConf{DnId: testDnId})
+	h.startDn(testAddr, 1)
+	h.advanceUntil("the record unreached at a dead address", roundInterval,
+		func() bool {
+			return h.deps.reach.unreached(h.clk.now(), 2*roundInterval)
+		})
+	// The cluster's conf goes missing: the loop idles and asks nothing, so
+	// it waits for no answer and the worker is no longer unreached.
+	h.deps.conf.mu.Lock()
+	delete(h.deps.conf.entries, testCid)
+	h.deps.conf.mu.Unlock()
+	h.advanceUntil("the idle loop waits for nothing", roundInterval,
+		func() bool {
+			return !h.deps.reach.unreached(h.clk.now(), 2*roundInterval)
+		})
+}
