@@ -4624,3 +4624,49 @@ func TestReactionFailoverPassesOverAnUnknownStandby(t *testing.T) {
 		h.wantSkipped(reactionFailover, reasonNoCandidate)
 	})
 }
+
+// TestReactionFailoverPassesOverAStandbyThatReachesNoLeg pins AR5's election:
+// a standby whose reports read ERROR on every leg of some group is passed
+// over and handed to the op to pass over too while another candidate
+// stands; where every candidate is marked, the election takes them as
+// before; and a marked standby that also refuses names the refusal.
+func TestReactionFailoverPassesOverAStandbyThatReachesNoLeg(t *testing.T) {
+	t.Run("another standby", func(t *testing.T) {
+		state := reactFixture(t)
+		state.Conf.CntlrIdList = append(state.Conf.CntlrIdList, reactCntlrC)
+		state.Cntlrs[reactCntlrC] = &pb.Cntlr{AddrPort: reactCnC}
+		h := newReactHarness(t, state)
+		h.state.Cntlrs[reactCntlrA].Disabled = true
+		h.w.verdicts.noteNoLeg(reactCntlrB, true)
+		h.pass()
+		calls := h.wantOps("failover")
+		if calls[0].newId != reactCntlrC ||
+			!slices.Equal(calls[0].passed, []uint64{reactCntlrB}) {
+			t.Fatalf("failover to %d passing over %v, want %d passing "+
+				"over [%d]", calls[0].newId, calls[0].passed, reactCntlrC,
+				reactCntlrB)
+		}
+	})
+	t.Run("every candidate marked", func(t *testing.T) {
+		// As when a disk node of a pool with no redundancy is down: the
+		// election takes the marked standbys as before.
+		h := newReactHarness(t, reactFixture(t))
+		h.state.Cntlrs[reactCntlrA].Disabled = true
+		h.w.verdicts.noteNoLeg(reactCntlrB, true)
+		h.pass()
+		calls := h.wantOps("failover")
+		if calls[0].newId != reactCntlrB || len(calls[0].passed) != 0 {
+			t.Fatalf("failover to %d passing over %v, want %d passing "+
+				"over none", calls[0].newId, calls[0].passed, reactCntlrB)
+		}
+	})
+	t.Run("marked and refusing", func(t *testing.T) {
+		h := newReactHarness(t, reactFixture(t))
+		h.state.Cntlrs[reactCntlrA].Disabled = true
+		h.w.verdicts.noteNoLeg(reactCntlrB, true)
+		h.w.verdicts.noteRefusing(reactCntlrB, true)
+		h.pass()
+		h.wantOps()
+		h.wantSkipped(reactionFailover, reasonCandidateRefuses)
+	})
+}

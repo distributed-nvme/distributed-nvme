@@ -1460,6 +1460,10 @@ enum StatusKind {
     STATUS_KIND_WORKER = 13;
     // The rows a pool's cap left out: how many, and where to read them.
     STATUS_KIND_MORE = 14;
+    // An enabled standby with no health epoch whose latest report reads
+    // RES_STATUS_ERROR on every leg of a group: the failover passes over it
+    // (dnv-worker.md AR5). Appended, never renumbered.
+    STATUS_KIND_STANDBY = 15;
 }
 
 // StatusRow is one thing the status read finds wrong (architecture.md,

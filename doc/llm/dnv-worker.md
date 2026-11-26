@@ -782,7 +782,8 @@ list; the flip, which reads the repair's key alone, and
   among all such cntlrs but the ones the caller passes over
   (`FailoverPassingOver`; `Failover` passes over none): the worker hands
   it the standbys whose agents refuse their own `SyncupCntlr` (AR5, HL9),
-  those whose latest answer was unknown object (AR5, RW5) and those whose
+  those whose latest answer was unknown object (AR5, RW5), those whose
+  latest report reads `ERROR` on every leg of some group (AR5) and those whose
   report says their sweep left a stack (AR5, `cnagent.md` CN35), which no
   STM can see. It flips both `primary` booleans, sets the
   new cntlr's `settling` and clears the old one's (HL2), writes the
@@ -3006,7 +3007,13 @@ The rules are the same for every kind of record:
   probe of `architecture.md`, Group on-leg layout: meta region, data region,
   health block; repairs' new legs included) — a standby's leg row, and a
   disabled primary's, which runs the standby shape (`cnagent.md` CN9), is
-  logged, never recorded — and cleared when the primary reports the row
+  logged, never recorded, save that an enabled standby whose reports read
+  `ERROR` on every leg of some group, two in a row at its plan's revision
+  (a migrating leg counting for nothing), is marked for AR5's election and
+  logged `standby reaches no leg` at Warn when that set of groups changes,
+  and `standby reaches its legs again` at Info when it empties; a report of
+  the cntlr as a primary or as a disabled cntlr clears the mark with no
+  record — and cleared when the primary reports the row
   `RES_STATUS_OK`. The rows count only from a reply at the revision of the
   plan the cntlr's child drives, the test the settle makes: a promoted
   cntlr's reply at the revision before still describes a standby. RW18's
@@ -4038,7 +4045,8 @@ starting round within the hold ends and
 which outlives the cntlr's child (RW23 says what a restarted child adds
 to it), and it marks the cntlrs and the sides HL8 holds, the cntlrs
 whose agent refuses a `SyncupCntlr` (HL9), the cntlrs whose latest answer
-was unknown object (RW5, AR5) and the standbys whose latest
+was unknown object (RW5, AR5), the standbys whose latest report reads
+`ERROR` on every leg of some group (AR5) and the standbys whose latest
 report, of a round or of a `Syncup*`, says that their sweep left a stack
 (`CntlrInfo.stack_left`, AR5), which each report of the cntlr's child sets
 or clears and a report while the plan is a primary's clears. A
@@ -4092,14 +4100,24 @@ smallest `cntlr_id` among those with `primary` false, `disabled` false and
 `err_epoch` zero whose agent does not refuse its own `SyncupCntlr` (HL9),
 whose latest answer, of a round or of a `Syncup*`, is not unknown object
 (RW5: its node does not know it, so a promotion could build nothing),
+whose reports do not read `RES_STATUS_ERROR` on every leg of some group
+(`model.UnreachedGroups`, two reports in a row at its plan's revision, HL2:
+it reaches nothing of that group, so a promotion could build nothing of
+it; a migrating leg, with two sides, does not count, as its row reads
+`ERROR` while either side has no live path, nor does an error on one leg of
+a group, as with one disk node down every standby of a RAID1 pool reads
+such a row and can still serve) while another candidate stands — where
+every candidate is so marked, as when a disk node of a pool with no
+redundancy is down, the election takes them as before —,
 and whose latest report does not say that its sweep left a stack of the
 cntlr (`CntlrInfo.stack_left`, `cnagent.md` CN35), since a promotion would
 serve nothing until the removal goes through, and which moves no health
 epoch;
-none means `reaction skipped` (`no candidate`) and the
+none means `reaction skipped` (`no candidate`, naming the standbys passed
+over) and the
 pass continues (AR2); else `model.FailoverPassingOver` of the old primary
 and the candidate, handed the standbys passed over for their refusal,
-their unknown object or their stack, so the election it re-validates
+their unknown object, their unreached group or their stack, so the election it re-validates
 inside its STM passes over them as well (MD6),
 unless one of the three refusals below holds it, the first two only an
 enabled primary. The first is
@@ -4194,8 +4212,9 @@ does (AR7, Known limits):
 * **The candidates refuse.** Every cntlr with `primary` false, `disabled`
   false and `err_epoch` zero has an agent that refuses its own
   `SyncupCntlr` with an invalid conf or a failed save (HL9), a latest
-  answer of unknown object (RW5) or a report that says its sweep left a
-  stack (CN35), and at least one refuses, so none is a candidate:
+  answer of unknown object (RW5), a report that reads `ERROR` on every leg
+  of some group, or a report that says its sweep left a stack (CN35), and
+  at least one refuses, so none is a candidate:
   `reaction skipped` (`candidate_refuses`, with `old_cntlr_id` and, as
   `new_cntlr_id`, the smallest refusing one). Where none refuses, the pass
   logs `no candidate`. A
@@ -4226,7 +4245,7 @@ cntlr with no refusal mark and no unknown mark elects it. The first two read a r
 third the memo of a refusal (AR10), none of which an STM sees, so
 `model.Failover` does not re-validate them, nor AR10's verdict, which no
 STM sees either; it takes the standbys the pass passes over for a refusal,
-an unknown object or a left stack on the worker's word, and re-validates the election among the rest. The second
+an unknown object, an unreached group or a left stack on the worker's word, and re-validates the election among the rest. The second
 rests on the coordinator's record of the last failover it applied, one of
 the records of its own a pass decides by (AR7's second refusal rests on
 the last replacement's): why the role moved is kept in no etcd record. A coordinator
@@ -4401,8 +4420,8 @@ AR7. When a cntlr has `err_epoch` set, `now` minus it at least
 or it is the primary and
 **no failover candidate exists** (AR5 found none — the sole-cntlr SP,
 every other cntlr unhealthy or disabled, or every healthy, enabled one
-refusing its syncups, HL9, answering unknown object, RW5, or reporting a
-left stack, `cnagent.md` CN35):
+refusing its syncups, HL9, answering unknown object, RW5, reaching no leg
+of some group, AR5, or reporting a left stack, `cnagent.md` CN35):
 the candidates are
 `FindCnCandidatesAntiAffine` with the SP footprint (the sum of `ext_cnt` over
 all groups of its slices), a candidate count of `cn_batch_size`, a black list
@@ -4423,7 +4442,7 @@ sole-primary variant, `disabled` false, `err_epoch` zero (HL2: a primary
 replacement is created settling, as a promoted primary is, and AR5 judges it
 by the settling threshold until it reports its stack built and clean as
 primary). The op is handed the standbys AR5 passes over for their refusal,
-their unknown object or their left stack as well
+their unknown object, their unreached group or their left stack as well
 (`ReplaceCntlrPassingOver`), so its test for a failover candidate
 passes over them as AR5's election does (MD6). The old CN is black-listed even when the node itself is healthy: its
 cntlr is what failed. None means `reaction skipped` (`no candidate`), and
@@ -5893,7 +5912,10 @@ count of the sides it did not wait for as their latest check round got no
 answer (`unanswered_cnt`), and the wait in milliseconds, the round's cost
 in the failover's pause; a round a demotion ends logs none (RW24); `sp
 fence-last write failed` a write of the groups' fence-last legs into their
-records that failed, with the count of groups and the error (RW24).
+records that failed, with the count of groups and the error (RW24);
+`standby reaches no leg` at Warn a standby whose report reads `ERROR` on
+every leg of the groups it names, once per change of that set, and
+`standby reaches its legs again` at Info its end (HL2, AR5).
 
 **Bitmap pushes.** `bitmap pushed` every push that got a reply, with the
 agent's code (BM3); `bitmap push failed` a push that got none — the chunk

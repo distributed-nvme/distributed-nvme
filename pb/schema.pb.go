@@ -601,6 +601,10 @@ const (
 	StatusKind_STATUS_KIND_WORKER StatusKind = 13
 	// The rows a pool's cap left out: how many, and where to read them.
 	StatusKind_STATUS_KIND_MORE StatusKind = 14
+	// An enabled standby with no health epoch whose latest report reads
+	// RES_STATUS_ERROR on every leg of a group: the failover passes over it
+	// (dnv-worker.md AR5). Appended, never renumbered.
+	StatusKind_STATUS_KIND_STANDBY StatusKind = 15
 )
 
 // Enum value maps for StatusKind.
@@ -621,6 +625,7 @@ var (
 		12: "STATUS_KIND_TORN",
 		13: "STATUS_KIND_WORKER",
 		14: "STATUS_KIND_MORE",
+		15: "STATUS_KIND_STANDBY",
 	}
 	StatusKind_value = map[string]int32{
 		"STATUS_KIND_NONE":        0,
@@ -638,6 +643,7 @@ var (
 		"STATUS_KIND_TORN":        12,
 		"STATUS_KIND_WORKER":      13,
 		"STATUS_KIND_MORE":        14,
+		"STATUS_KIND_STANDBY":     15,
 	}
 )
 
@@ -22667,7 +22673,7 @@ const file_pb_schema_proto_rawDesc = "" +
 	"\x17CAPACITY_LIMIT_DN_COUNT\x10\x03\x12\x1f\n" +
 	"\x1bCAPACITY_LIMIT_DN_LOCATIONS\x10\x04\x12\x1b\n" +
 	"\x17CAPACITY_LIMIT_DN_SPACE\x10\x05\x12\x1c\n" +
-	"\x18CAPACITY_LIMIT_CN_BUDGET\x10\x06*\xec\x02\n" +
+	"\x18CAPACITY_LIMIT_CN_BUDGET\x10\x06*\x85\x03\n" +
 	"\n" +
 	"StatusKind\x12\x14\n" +
 	"\x10STATUS_KIND_NONE\x10\x00\x12\x1b\n" +
@@ -22685,7 +22691,8 @@ const file_pb_schema_proto_rawDesc = "" +
 	"\x11STATUS_KIND_CLONE\x10\v\x12\x14\n" +
 	"\x10STATUS_KIND_TORN\x10\f\x12\x16\n" +
 	"\x12STATUS_KIND_WORKER\x10\r\x12\x14\n" +
-	"\x10STATUS_KIND_MORE\x10\x0e*\x99\x02\n" +
+	"\x10STATUS_KIND_MORE\x10\x0e\x12\x17\n" +
+	"\x13STATUS_KIND_STANDBY\x10\x0f*\x99\x02\n" +
 	"\x0eRestoreVerdict\x12\x1f\n" +
 	"\x1bRESTORE_VERDICT_UNSPECIFIED\x10\x00\x12\x18\n" +
 	"\x14RESTORE_VERDICT_SAME\x10\x01\x12\x19\n" +

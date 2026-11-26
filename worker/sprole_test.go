@@ -8510,3 +8510,91 @@ func TestObserveMarksAnUnknownCntlr(t *testing.T) {
 		t.Fatalf("an accepted answer kept the mark")
 	}
 }
+
+// TestObserveMarksAStandbyThatReachesNoLeg pins the memo AR5's election reads
+// and its records: two reports in a row of an enabled standby, at its
+// plan's revision, that read ERROR on every leg of group 110 mark the cntlr
+// and log one Warn record naming the group, while one report alone, or a
+// report at another revision, marks nothing; a report with no such group
+// clears the mark with one Info record; a migrating leg's ERROR counts for
+// nothing; and a disabled standby or a primary is never marked.
+func TestObserveMarksAStandbyThatReachesNoLeg(t *testing.T) {
+	ctx := context.Background()
+	logs := captureLogs(t)
+	d := newTestDeps(
+		testConfig(common.WorkerRoleSp), newFakeStore(), newFakeClock(),
+	)
+	d.health = &fakeHealthWriter{}
+	w := spTestWorker(d)
+	w.verdicts = newVerdictMemo()
+	marked := func(id uint64) bool {
+		w.verdicts.mu.Lock()
+		defer w.verdicts.mu.Unlock()
+		return w.verdicts.noLeg[id]
+	}
+	errRow := &pb.ResInfo{Status: pb.ResStatus_RES_STATUS_ERROR}
+	okRow := &pb.ResInfo{Status: pb.ResStatus_RES_STATUS_OK}
+	plans := spTestWorker(nil).buildPlan(ctx, spFixture()).cntlrs
+	standby := newCntlrDriver(w, nil, plans[spCntlrStandby])
+	reply := &replyState{revision: testSpRev, infoPresent: true,
+		fromRound: true}
+	cut := &pb.CntlrInfo{LegIdToLeg: map[uint64]*pb.ResInfo{
+		spLegB: errRow,
+		// The migrating leg reads ERROR beside group 101's other leg: a
+		// two-sided leg counts for nothing.
+		spLegMigr: errRow, spLegD: errRow,
+	}}
+	standby.storeInfo(cut, 0)
+	standby.observe(ctx, reply)
+	if marked(spCntlrStandby) {
+		t.Fatalf("one report marked the standby")
+	}
+	standby.observe(ctx, &replyState{revision: testSpRev - 1,
+		infoPresent: true, fromRound: true})
+	if marked(spCntlrStandby) {
+		t.Fatalf("a report at another revision counted")
+	}
+	standby.observe(ctx, reply)
+	if !marked(spCntlrStandby) {
+		t.Fatalf("two reports that reach no leg of group 110 did not " +
+			"mark the standby")
+	}
+	standby.observe(ctx, reply)
+	recs := logs.withMsg(msgSpStandbyNoLeg)
+	if len(recs) != 1 {
+		t.Fatalf("%d %q records for one standing set, want 1", len(recs),
+			msgSpStandbyNoLeg)
+	}
+	if ids := fmt.Sprint(recs[0]["grp_ids"]); ids != "[110]" {
+		t.Fatalf("the record names groups %s, want [110]", ids)
+	}
+	back := &pb.CntlrInfo{LegIdToLeg: map[uint64]*pb.ResInfo{
+		spLegB: okRow, spLegMigr: errRow, spLegD: errRow,
+	}}
+	standby.storeInfo(back, 0)
+	standby.observe(ctx, reply)
+	if marked(spCntlrStandby) {
+		t.Fatalf("a report that reaches every group kept the mark")
+	}
+	if n := len(logs.withMsg(msgSpStandbyLegsBack)); n != 1 {
+		t.Fatalf("%d %q records, want 1", n, msgSpStandbyLegsBack)
+	}
+
+	disabledState := spFixture()
+	disabledState.Cntlrs[spCntlrStandby].Disabled = true
+	disabled := newCntlrDriver(w, nil,
+		spTestWorker(nil).buildPlan(ctx, disabledState).cntlrs[spCntlrStandby])
+	disabled.storeInfo(cut, 0)
+	disabled.observe(ctx, reply)
+	disabled.observe(ctx, reply)
+	if marked(spCntlrStandby) {
+		t.Fatalf("a disabled standby was marked")
+	}
+	primary := newCntlrDriver(w, nil, plans[spCntlrPrimary])
+	primary.storeInfo(cut, 0)
+	primary.observe(ctx, reply)
+	primary.observe(ctx, reply)
+	if marked(spCntlrPrimary) {
+		t.Fatalf("a primary's reports marked the cntlr")
+	}
+}

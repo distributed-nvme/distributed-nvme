@@ -98,8 +98,9 @@ through viper (Components: invocation reference):
   check that the volume's namespaces are parked, `GetThinDeviceBm` for
   that read (Bitmap reads), `GetCntlrInfo` and `InspectGrp` behind
   `InspectGroup`, `GetCntlrInfo` behind `CreateRepair`'s read of the
-  bad leg's row (Repairs), `GetCntlrInfo` of each pool's primary and
-  `GetSideInfo` of a migration's destination behind `GetClusterStatus`
+  bad leg's row (Repairs), `GetCntlrInfo` of each pool's primary and of
+  each enabled standby with no health epoch, and `GetSideInfo` of a
+  migration's destination behind `GetClusterStatus`
   (Clusters), and `GetCnStore` behind `CheckControllerNodeRestore`, the
   restore check (Controller nodes). The worker never calls `Get*Info`: it
   watches through
@@ -2687,7 +2688,7 @@ this is a heavy read meant for an occasional poll, not a hot path.
 
 **GetClusterStatus** — the status read: what is wrong in a cluster, a page
 of pools at a time, computed at the read from etcd and the latest reports
-of the pools' primaries. It stores nothing and writes nothing; a pool's
+of the pools' primaries and of their candidate standbys. It stores nothing and writes nothing; a pool's
 detail is the inspects'.
 Errors: `INVALID_ARGUMENT` on a bad `count` or token, before the cluster
 read; `NOT_FOUND` cluster; `ABORTED` for a failed read of the cluster's
@@ -2708,10 +2709,11 @@ a node whose revision key is absent, which no worker drives; and a node
 record that does not decode. Each pool
 of the page is loaded as the sp worker loads it, in a snapshot of its own
 (`dnv-worker.md` MD3), and its primary's latest report is read with one
-`GetCntlrInfo`, beside a `GetSideInfo` of each migration's destination past
-its cutover; no standby and no other side is called, so a standby's and a
-side's trouble shows by their health epochs, and their inspects give the
-rest. A pool's rows are:
+`GetCntlrInfo`, beside one of each enabled standby with no health epoch,
+the failover's candidates, and a `GetSideInfo` of each migration's
+destination past its cutover; no other standby and no other side is
+called, so their trouble shows by their health epochs, and their inspects
+give the rest. A pool's rows are:
 
 * a lost record: a key the pool's lists name that etcd does not hold, a
   node record a side or a cntlr names, or the pool's revision key, absent,
@@ -2818,12 +2820,17 @@ rest. A pool's rows are:
   last step reads, the repair its group names or a retired leg its group
   lists (`dnv-worker.md` CLD9, MD6), which that record's lost-record row
   names while the clone's row says nothing of the wait;
-* a torn thin device (Thin devices).
+* a torn thin device (Thin devices);
+* a candidate standby whose latest report reads `RES_STATUS_ERROR` on every
+  leg of a group of its slices or of a clone not being deleted, one row per
+  such group (`model.UnreachedGroups`), which the failover passes over
+  while another candidate stands (`dnv-worker.md` AR5); a standby whose
+  call fails gives no row.
 
 A pool's rows are ordered by what they say — lost records, the report,
 the pool, its thin pools' space, their error rows and grows, its cntlrs'
 health, its legs, its groups, its repairs, migrations and clones, its other
-report rows, its torn devices — so that a leg's row comes before every
+report rows, its torn devices, its standbys that reach no leg of a group — so that a leg's row comes before every
 group's, and a node's fault shows by the legs it holds before the groups
 they touch; then oldest first. At most
 `MaxStatusRowPerSp` rows of a pool are listed, then one row that counts the
@@ -2848,8 +2855,8 @@ in flight lists itself while it runs: a pool just made, or a cntlr just
 made its primary, whose agent holds no state or observation of it yet, a
 primary just disabled until its failover, a migration whose cutover is
 pending, an open repair, and a pool or a clone being deleted until its
-drain ends. A standby just made lists nothing, since the read asks no
-standby. Reason: computed at the read, with no status key, nothing can go
+drain ends. A standby just made lists nothing, as its agent holds no
+report of it yet. Reason: computed at the read, with no status key, nothing can go
 stale and no write path gains a write; it lists what an operator acts on;
 and the cap keeps a page within `GrpcMaxMsgSize` (Known limits).
 

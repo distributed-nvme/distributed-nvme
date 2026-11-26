@@ -428,6 +428,7 @@ func (r *statusRead) readPool(ctx context.Context, name string) statusPool {
 		state:    state,
 		cc:       r.cc,
 		readTime: r.readTime,
+		standbys: map[uint64]*statusReport{},
 		dst:      map[string]*statusSideReply{},
 		dnRoom: func(extCnt uint64, legs int) (bool, error) {
 			return r.dnRoom(ctx, extCnt, legs)
@@ -441,6 +442,22 @@ func (r *statusRead) readPool(ctx context.Context, name string) statusPool {
 		go func() {
 			defer wg.Done()
 			in.report = r.callPrimary(ctx, state, in.primaryId, in.primary)
+		}()
+	}
+	var standbyMu sync.Mutex
+	for _, cntlrId := range state.Conf.GetCntlrIdList() {
+		cntlr, ok := state.Cntlrs[cntlrId]
+		if !ok || cntlr.GetPrimary() || cntlr.GetDisabled() ||
+			cntlr.GetErrEpoch() != 0 {
+			continue
+		}
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			got := r.callPrimary(ctx, state, cntlrId, cntlr)
+			standbyMu.Lock()
+			in.standbys[cntlrId] = got
+			standbyMu.Unlock()
 		}()
 	}
 	var dstMu sync.Mutex
@@ -507,8 +524,8 @@ type statusReport struct {
 	noNode bool
 }
 
-// callPrimary reads the primary's latest report: GetCntlrInfo, without the
-// counters, through the address gate.
+// callPrimary reads a cntlr's latest report, the primary's or a candidate
+// standby's: GetCntlrInfo, without the counters, through the address gate.
 func (r *statusRead) callPrimary(
 	ctx context.Context,
 	state *model.SpState,
@@ -655,7 +672,8 @@ func (r *statusRead) dnRoom(
 // whose call names an address another pool's call is on waits for that
 // call's end, skips the address if it failed, and calls itself, at once
 // with the others, once it answered. So a node that hangs costs one budget
-// per read, however many pools it holds a primary or a migration of.
+// per read, however many pools it holds a primary, a candidate standby or a
+// migration of.
 type statusGate struct {
 	mu    sync.Mutex
 	first map[string]*statusCall
@@ -720,8 +738,11 @@ type statusInput struct {
 	primaryId uint64
 	primary   *pb.Cntlr
 	report    *statusReport
-	dst       map[string]*statusSideReply
-	dnRoom    func(extCnt uint64, legs int) (bool, error)
+	// standbys are the reports of the pool's enabled standbys with no
+	// health epoch, the failover's candidates, by cntlr id (standbyRows).
+	standbys map[uint64]*statusReport
+	dst      map[string]*statusSideReply
+	dnRoom   func(extCnt uint64, legs int) (bool, error)
 	// ended says whether the read's own deadline has ended the pool's
 	// work (readPools), for a read whose error then is the read's, not
 	// the store's or an agent's.
@@ -756,6 +777,7 @@ const (
 	rankClone
 	rankOtherRow
 	rankTorn
+	rankStandby
 )
 
 // statusRow is a row with its rank, before the order and the cap.
@@ -785,6 +807,7 @@ func statusPoolRows(in *statusInput) []statusRow {
 	if info != nil {
 		b.errorRows(info)
 	}
+	b.standbyRows()
 	return b.rows
 }
 
@@ -1913,6 +1936,46 @@ func (b *statusBuilder) tornRows() {
 			Text:    "torn: its slices hold its data from different points in time; delete it and create it again",
 			ObjName: state.TdNames[idx],
 		})
+	}
+}
+
+// standbyRows are the candidate standbys whose latest report reads ERROR on
+// every leg of a group (model.UnreachedGroups), one row per such group: the
+// failover passes over them (dnv-worker.md AR5). A standby whose call
+// failed gives no row; its health epoch shows it once the worker reads it
+// so.
+func (b *statusBuilder) standbyRows() {
+	state := b.in.state
+	var groups []*pb.Group
+	for _, sliceId := range state.Conf.GetSliceIdList() {
+		if slice, ok := state.Slices[sliceId]; ok {
+			groups = append(groups,
+				model.PoolGroups([]*pb.Slice{slice}, nil)...)
+		}
+	}
+	for _, cloneName := range state.Conf.GetCloneNameList() {
+		// A clone being deleted is left out, as the worker leaves it out of
+		// a cntlr's request.
+		if clone, ok := state.Clones[cloneName]; ok && !clone.GetDeleting() {
+			groups = append(groups,
+				model.PoolGroups(nil, []*pb.Clone{clone})...)
+		}
+	}
+	for _, cntlrId := range sortedIds(b.in.standbys) {
+		rep := b.in.standbys[cntlrId]
+		if rep == nil || rep.err != nil || rep.reply == nil {
+			continue
+		}
+		for _, grpId := range model.UnreachedGroups(
+			rep.reply.GetCntlrInfo(), groups) {
+			b.add(rankStandby, &pb.StatusRow{
+				Kind:    pb.StatusKind_STATUS_KIND_STANDBY,
+				Object:  cntlrObject(cntlrId, state.Cntlrs[cntlrId]),
+				Text:    fmt.Sprintf("reaches no leg of group %d: the failover passes over it", grpId),
+				CntlrId: cntlrId,
+				GrpId:   grpId,
+			})
+		}
 	}
 }
 

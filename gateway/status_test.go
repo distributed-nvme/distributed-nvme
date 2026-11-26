@@ -2030,3 +2030,50 @@ func TestStatusSubsystemHostCutPending(t *testing.T) {
 	}
 	stWantAge(t, rows[0], 30*time.Second)
 }
+
+// TestStatusStandbyThatReachesNoLeg pins the status read's standby row
+// (architecture.md, Clusters, GetClusterStatus): it asks each enabled
+// standby with no health epoch for its latest report, and lists one row of
+// STATUS_KIND_STANDBY per group every leg of which reads ERROR there; an
+// error on one leg of a group gives none, and a standby with a health epoch
+// is not asked.
+func TestStatusStandbyThatReachesNoLeg(t *testing.T) {
+	const standbyId, sickId = stCntlr + 1, stCntlr + 2
+	env := newStEnv(t)
+	cn, _ := env.addCn("cn")
+	cn2, fake2 := env.addCn("cn2")
+	cn3, fake3 := env.addCn("cn3")
+	errRow := &pb.ResInfo{Status: pb.ResStatus_RES_STATUS_ERROR}
+	fake2.setInfo(nil, nil, nil, &pb.CntlrInfo{
+		LegIdToLeg: map[uint64]*pb.ResInfo{4: errRow, 6: errRow,
+			stLeg: errRow, stLeg2: stOkRow()},
+	})
+	fake3.setInfo(nil, nil, nil, &pb.CntlrInfo{
+		LegIdToLeg: map[uint64]*pb.ResInfo{4: errRow, 6: errRow},
+	})
+	p := env.newPool("p0", cn, stDns(env))
+	p.conf.CntlrIdList = append(p.conf.CntlrIdList, standbyId, sickId)
+	p.cntlrs[standbyId] = &pb.Cntlr{AddrPort: cn2, NvmeTrConf: testTrConf(cn2)}
+	p.cntlrs[sickId] = &pb.Cntlr{AddrPort: cn3, NvmeTrConf: testTrConf(cn3),
+		ErrEpoch: 1}
+	env.put(p)
+	var got []*pb.StatusRow
+	for _, row := range stRowsOf(env.status(0, ""), "p0") {
+		if row.GetKind() == pb.StatusKind_STATUS_KIND_STANDBY {
+			got = append(got, row)
+		}
+	}
+	if len(got) != 1 || got[0].GetCntlrId() != standbyId ||
+		got[0].GetGrpId() != stMetaGrp {
+		t.Fatalf("standby rows %v, want one of cntlr %d for group %d", got,
+			standbyId, stMetaGrp)
+	}
+	if want := fmt.Sprintf("cntlr %d (standby, cn %s)", standbyId, cn2); got[0].GetObject() != want ||
+		!strings.Contains(got[0].GetText(), "reaches no leg of group") {
+		t.Errorf("the row reads %q: %q, want %q and its text", got[0].GetObject(),
+			got[0].GetText(), want)
+	}
+	if n := fake3.callCount("GetCntlrInfo"); n != 0 {
+		t.Errorf("a standby with a health epoch was asked %d times", n)
+	}
+}

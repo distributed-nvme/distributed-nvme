@@ -74,6 +74,12 @@ const (
 	// msgSpStandbyLegRow is HL2's "a standby's leg row is logged, never
 	// recorded".
 	msgSpStandbyLegRow = "standby leg row"
+	// msgSpStandbyNoLeg is a standby whose report reads ERROR on every leg of
+	// some group (model.UnreachedGroups), logged at Warn when that set of
+	// groups changes: the failover passes over it (AR5). msgSpStandbyLegsBack
+	// is the end of it, at Info.
+	msgSpStandbyNoLeg    = "standby reaches no leg"
+	msgSpStandbyLegsBack = "standby reaches its legs again"
 	// msgSpSubObjectMissing names the keys MD3 reported missing that the
 	// fan-out drives past: node records, which RW14 leaves to its endpoint
 	// rule, and any record of a latched SP. A live SP's missing listed record
@@ -4676,6 +4682,11 @@ type cntlrDriver struct {
 	// legLogged remembers the last standby leg row logged per leg, so HL2's
 	// "logged, never recorded" does not repeat one row every round.
 	legLogged map[uint64]pb.ResStatus
+	// noLegLogged is the last set of groups logNoLeg logged the standby as
+	// reaching no leg of, so a standing set logs once, and noLegRun the
+	// reports in a row that read some such group (noteNoLeg).
+	noLegLogged []uint64
+	noLegRun    int
 	// synced is the last revision a report handed the coordinator, so a
 	// standing reply does not report every round (RW22).
 	synced uint64
@@ -5010,6 +5021,9 @@ func (d *cntlrDriver) observe(ctx context.Context, r *replyState) {
 	// AR5: a standby's report that its sweep left a stack takes it out of
 	// the failover's candidates; it moves no health epoch.
 	d.memo.noteStackLeft(d.cntlrId, !plan.primary && info.GetStackLeft())
+	// AR5: a standby whose reports read ERROR on every leg of some group is
+	// passed over; it moves no health epoch.
+	d.noteNoLeg(ctx, r, plan, info)
 	obs, res := cntlrObservation(r.code, info)
 	refusing := d.refusing(r, plan)
 	if refusing {
@@ -5218,6 +5232,76 @@ func (d *cntlrDriver) legRows(info *pb.CntlrInfo) []legRow {
 		rows = append(rows, legRow{legId: legId, obs: obs, resName: res})
 	}
 	return rows
+}
+
+// planGroups are the groups of a cntlr's request: its slices' meta and data
+// groups and its clones' clone meta groups.
+func planGroups(plan *cntlrPlan) []*pb.Group {
+	req := plan.req
+	keys := slices.Sorted(maps.Keys(req.GetIdToSlice()))
+	list := make([]*pb.Slice, 0, len(keys))
+	for _, key := range keys {
+		list = append(list, req.GetIdToSlice()[key])
+	}
+	return model.PoolGroups(list, req.GetCloneList())
+}
+
+// noteNoLeg reads, from a report of an enabled standby at its plan's
+// revision, the groups of which it reaches no leg (model.UnreachedGroups),
+// and marks the cntlr for AR5 once two such reports in a row read some: one
+// report can read so for a moment, as in a sysfs walk that did not answer
+// or while a disk node rewrites a path. A report at another revision
+// changes nothing; a report with no such group, and any report while the
+// plan is a primary's or a disabled cntlr's, clears the mark, the latter
+// with no record.
+func (d *cntlrDriver) noteNoLeg(
+	ctx context.Context,
+	r *replyState,
+	plan *cntlrPlan,
+	info *pb.CntlrInfo,
+) {
+	if plan.primary || plan.req.GetCntlr().GetDisabled() {
+		d.noLegRun = 0
+		d.noLegLogged = nil
+		d.memo.noteNoLeg(d.cntlrId, false)
+		return
+	}
+	if r.revision != plan.req.GetRevision() {
+		return
+	}
+	grpIds := model.UnreachedGroups(info, planGroups(plan))
+	if len(grpIds) == 0 {
+		d.noLegRun = 0
+	} else {
+		d.noLegRun++
+	}
+	if len(grpIds) > 0 && d.noLegRun < 2 {
+		return
+	}
+	d.memo.noteNoLeg(d.cntlrId, len(grpIds) > 0)
+	d.logNoLeg(ctx, grpIds)
+}
+
+// logNoLeg logs a standby's groups of which it reaches no leg when that set
+// changes (msgSpStandbyNoLeg), and its end (msgSpStandbyLegsBack).
+func (d *cntlrDriver) logNoLeg(ctx context.Context, grpIds []uint64) {
+	if slices.Equal(grpIds, d.noLegLogged) {
+		return
+	}
+	was := d.noLegLogged
+	d.noLegLogged = slices.Clone(grpIds)
+	attrs := []any{
+		slog.Uint64("cluster_id", d.cid),
+		slog.Uint64("sp_id", d.spId),
+		slog.Uint64("cntlr_id", d.cntlrId),
+	}
+	if len(grpIds) == 0 {
+		slog.InfoContext(ctx, msgSpStandbyLegsBack,
+			append(attrs, slog.Any("grp_ids", was))...)
+		return
+	}
+	slog.WarnContext(ctx, msgSpStandbyNoLeg,
+		append(attrs, slog.Any("grp_ids", grpIds))...)
 }
 
 // logStandbyLegRows is HL2's "a standby's leg row is logged, never recorded":

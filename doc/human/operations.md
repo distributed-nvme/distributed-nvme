@@ -159,8 +159,8 @@ The sections, by subject:
 
 Words: the **status read** is `dnvctl cluster get-status`, one read of the
 gateway that lists what is wrong in a cluster, a page of storage pools at
-a time; it reads etcd and the latest report of each pool's primary, and it
-changes nothing. A **page token** is the text the read prints after
+a time; it reads etcd and the latest report of each pool's primary and of
+each enabled standby with no health epoch, and it changes nothing. A **page token** is the text the read prints after
 `--page-token` when pools are left to read; the next run with it reads the
 next page. A **repair** is the record of one replacement of a bad leg of a
 group with a new leg: the worker makes one for each leg repair, and an
@@ -193,8 +193,8 @@ How to read it:
    replaces the cntlr of a pool with one cntlr, until its agent reports on
    it (`report/unknown`), a primary just disabled until its failover, a
    migration whose cutover is pending, and a pool or a clone being
-   deleted until its drain ends. A new standby lists nothing, since the
-   read asks only the primaries. A repair lists itself until it ends.
+   deleted until its drain ends. A new standby lists nothing until its
+   agent reports on it. A repair lists itself until it ends.
 4. `--json` prints the same page as one JSON document, with each object's
    ids as fields, for a script.
 
@@ -263,6 +263,11 @@ status and the reason of the row it shows follow where it has them:
   wait for it.
 - `torn`: a thin device whose slices hold its data from different points
   in time.
+- `standby`: an enabled standby with no health epoch whose latest report
+  reads error on every leg of a group: it reaches none of that group's
+  disk nodes, and a failover passes over it while another standby can
+  take the role. Look at the paths between its controller node and those
+  disk nodes.
 - `worker`: no worker of a role (dn, cn or sp) has its record in etcd,
   the record a running worker writes again every few seconds; or one
   worker has not written its record for twice the default time between
@@ -302,8 +307,9 @@ not go away while the node answers its inspect: ask for help before any
 write to that pool.
 
 What the read does not show: a standby's or a side's own trouble before the
-worker sets its health epoch, since the read asks only the primaries and a
-migration's new side; why the worker does not react: a failover of an
+worker sets its health epoch, since the read asks only the primaries, the
+standbys that could take the role, of which it shows only that one reaches
+no leg of a group, and a migration's new side; why the worker does not react: a failover of an
 unhealthy primary with no enabled standby to take the role, a leg repair the
 worker cannot create, for want of a disk node with room or of a healthy leg,
 and a cntlr replacement that finds no controller node show only as a
@@ -6199,7 +6205,9 @@ What dnv does alone:
   unhealthy, with its health epoch as old as the pool's
   `primary_unhealthy`, 4 seconds at the default, is failed over to the
   pool's enabled cntlr with no health epoch whose agent does not refuse
-  the worker's syncups, the one with the smallest id. When the agent of
+  the worker's syncups, the one with the smallest id; it passes over a
+  standby that reaches no leg of some group (a `standby` line of the status
+  read) while another one can take the role. When the agent of
   each enabled standby with no health epoch refuses the worker's syncups,
   no failover comes, and the worker logs `reaction skipped` with the
   reason `candidate_refuses`. The worker holds an agent as refusing from
@@ -8893,7 +8901,9 @@ primary at its next pass over the pool, with no event threshold to wait
 out; it makes such a pass every check interval, 2 seconds at the default.
 It takes, of the other cntlrs that are enabled and have no health epoch,
 the one with the smallest id, and passes over one whose agent refuses its
-syncups. It does not ask whether the hosts reach that cntlr. It
+syncups, and one that reaches no leg of some group (a `standby` line of
+the status read) while another can take the role. It does not ask whether
+the hosts reach that cntlr. It
 first gives the old primary its demotion and waits up to three seconds for
 it to report the demotion done; then the disk nodes fence the old primary,
 and the new primary builds its devices. Until it reports them built,

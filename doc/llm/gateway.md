@@ -28,8 +28,9 @@ hydration checks of `DeleteClone` and `FinishMigration`, behind
 `ForceStartGroup`'s check of the group's array, behind `CreateRepair`'s
 read of the bad leg's row and behind `GetThinDeviceBitmap`'s check of the
 parks, the `GetThinDeviceBm` bitmap read, the `InspectGrp` read behind
-`InspectGroup`, the primaries' `GetCntlrInfo` and the migration
-destinations' `GetSideInfo` behind the status read, `GetClusterStatus`,
+`InspectGroup`, the primaries' and the candidate standbys'
+`GetCntlrInfo` and the migration destinations' `GetSideInfo` behind the
+status read, `GetClusterStatus`,
 and the `GetCnStore` read behind the restore check,
 `CheckControllerNodeRestore` (Agent calls). It is one of the three
 co-located control-plane processes — gateway, worker, cdc — that any number
@@ -824,8 +825,10 @@ so its lost records are the ones the worker meets (`dnv-worker.md` MD3); a
 pool whose `SpConf` went since the page's range is passed over, and one
 whose load fails gives one row of status UNKNOWN. A deleting pool gives one
 row and is called for nothing. Then the pool's calls run at once: the
-primary's `GetCntlrInfo`, without the block counters, and each migration
-destination's `GetSideInfo` past its cutover. After them, one point read of
+primary's `GetCntlrInfo`, without the block counters, the same of each
+enabled standby with no health epoch, the failover's candidates, whose
+report gives the standby rows (`architecture.md`, Clusters), and
+each migration destination's `GetSideInfo` past its cutover. After them, one point read of
 the pool's id-to-name record (`model.SpNameKey`), which no list names and so
 `LoadSp` does not report missing, gives its lost-record row; it is not made
 when the calls have used up the pool's time. The rows are computed from the
@@ -1998,7 +2001,7 @@ The complete call matrix:
 | `CreateRepair`, when the pool has a primary | `GetCntlrInfo` | between the snapshot and the op, every round |
 | `InspectGroup` | `GetCntlrInfo`, then `InspectGrp` | after the snapshot |
 | `GetThinDeviceBitmap` | `GetCntlrInfo`, when a namespace exports the td, then `GetThinDeviceBm` | after the STM |
-| `GetClusterStatus` | `GetCntlrInfo` of each pool's primary, and `GetSideInfo` of each migration's destination past its cutover | after each pool's snapshot |
+| `GetClusterStatus` | `GetCntlrInfo` of each pool's primary and of each enabled standby with no health epoch, and `GetSideInfo` of each migration's destination past its cutover | after each pool's snapshot |
 | `CheckControllerNodeRestore` | `GetCnStore` | after the first snapshot, before the per-pool reads |
 
 No other `service Gateway` RPC leaves etcd — the matrix is complete.
