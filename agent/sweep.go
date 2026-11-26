@@ -127,3 +127,9 @@ func (r *SweepResult) Reply() *pb.AgentReply {
 	sort.Strings(r.leftovers)
 	return LeftoverReply(r.leftovers, r.failures)
 }
+
+// Leftovers are the objects the pass found present and unwanted, each as
+// "<kind>:<name>" (Add).
+func (r *SweepResult) Leftovers() []string {
+	return append([]string(nil), r.leftovers...)
+}

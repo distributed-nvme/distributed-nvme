@@ -1234,6 +1234,11 @@ type verdictMemo struct {
 	// SyncupCntlr with an invalid conf or a failed save (HL9): AR5 does not
 	// fail a primary over onto one.
 	refusing map[uint64]bool
+	// stackLeft holds the standbys whose latest report says that their
+	// sweep left a stack of the cntlr's (CntlrInfo.stack_left): AR5 does not
+	// fail a primary over onto one (cnagent.md CN35). It moves no health
+	// epoch.
+	stackLeft map[uint64]bool
 	// sidesStarting holds the sides whose latest round answered that their
 	// disk node's agent is starting, within the start hold (HL8): no side
 	// clock of AR6 or AR8 counts for them. A verdict on the side, or the end
@@ -1251,8 +1256,24 @@ func newVerdictMemo() *verdictMemo {
 		starting: make(map[uint64]bool),
 		refusing: make(map[uint64]bool),
 
+		stackLeft:     make(map[uint64]bool),
 		sidesStarting: make(map[sideKey]bool),
 	}
+}
+
+// noteStackLeft records whether a standby's latest report says that its
+// sweep left a stack of the cntlr's (CntlrInfo.stack_left; AR5).
+func (m *verdictMemo) noteStackLeft(cntlrId uint64, left bool) {
+	if m == nil {
+		return
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if left {
+		m.stackLeft[cntlrId] = true
+		return
+	}
+	delete(m.stackLeft, cntlrId)
 }
 
 // noteRefusing records whether a cntlr's agent refuses its driven revision's
@@ -1394,6 +1415,9 @@ type judgedSet struct {
 	// refusing are the cntlrs whose agent refuses their driven revision's
 	// SyncupCntlr (HL9).
 	refusing map[uint64]bool
+	// stackLeft are the standbys whose latest report says their sweep left
+	// a stack of the cntlr's (verdictMemo.stackLeft).
+	stackLeft map[uint64]bool
 	// sidesStarting are the sides held while their disk node's agent starts
 	// (HL8).
 	sidesStarting map[sideKey]bool
@@ -1422,6 +1446,7 @@ func (m *verdictMemo) snapshot(state *model.SpState) judgedSet {
 		starting: make(map[uint64]bool),
 		refusing: make(map[uint64]bool),
 
+		stackLeft:     make(map[uint64]bool),
 		sidesStarting: make(map[sideKey]bool),
 	}
 	if m == nil {
@@ -1457,6 +1482,13 @@ func (m *verdictMemo) snapshot(state *model.SpState) judgedSet {
 			continue
 		}
 		out.refusing[cntlrId] = true
+	}
+	for cntlrId := range m.stackLeft {
+		if _, ok := state.Cntlrs[cntlrId]; !ok {
+			delete(m.stackLeft, cntlrId)
+			continue
+		}
+		out.stackLeft[cntlrId] = true
 	}
 	for legId := range m.legs {
 		if _, ok := legs[legId]; !ok {
@@ -1512,8 +1544,9 @@ type spPass struct {
 	// failoverCand is AR5's election, computed once because AR7's
 	// sole-primary variant is defined as "AR5 found none". 0 = none.
 	// refusingCand is the smallest standby passed over because its agent
-	// refuses its own SyncupCntlr (HL9), 0 = none, and passedOver all of
-	// them, which the ops' own checks pass over too.
+	// refuses its own SyncupCntlr (HL9), 0 = none, and passedOver every
+	// standby passed over, for such a refusal or for a report that its
+	// sweep left a stack (CN35), which the ops' own checks pass over too.
 	failoverCand uint64
 	refusingCand uint64
 	passedOver   []uint64
@@ -1820,6 +1853,16 @@ func (w *spWorker) newPass(state *model.SpState, cc *pb.ClusterConf) *spPass {
 			p.primaryId, p.primary = cntlrId, cntlr
 		}
 		if !failoverEligible(cntlr) {
+			continue
+		}
+		if p.judged.stackLeft[cntlrId] && !p.judged.refusing[cntlrId] {
+			// CN35: a standby whose report says its sweep left a stack of
+			// the cntlr would serve nothing as the primary until a removal
+			// that failed goes through, so it is no candidate; the election
+			// in model.Failover and the candidate test of
+			// model.ReplaceCntlr pass over it too (passedOver). It names no
+			// refusal: its agent refuses nothing.
+			p.passedOver = append(p.passedOver, cntlrId)
 			continue
 		}
 		if p.judged.refusing[cntlrId] {

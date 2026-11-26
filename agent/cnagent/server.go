@@ -276,6 +276,16 @@ type cntlrState struct {
 	// lock, as tornTds is.
 	wcStale map[uint64]wcMark
 
+	// stackTerm is the term the cntlr's primary stack was built under, zero
+	// for none or for a stack built under no term (CN35; saveStackTerm),
+	// kept in the local store and loaded at the start. It is read and
+	// written under this cntlr's object lock or the node write lock, as
+	// tornTds is.
+	stackTerm uint64
+	// stackTermSaved says the file holds stackTerm (saveStackTerm); true
+	// for a cntlr loaded with its file or with none and no term.
+	stackTermSaved bool
+
 	// fenced is the cntlr's fence flag (CN34): set by the fence watch as it
 	// moves the namespaces for the fence it read, and by a converge that
 	// reads the fence itself (fenceAtPlan); dropped when the watch reads a
@@ -454,6 +464,8 @@ func newCntlrState(req *pb.SyncupCntlrRequest) *cntlrState {
 		mdChecks:     make(map[uint64]mdCheckRun),
 		probers:      make(map[uint64]*legProber),
 		cutters:      make(map[uint64]*pathWatcher),
+		// No term and no file: in step until a save.
+		stackTermSaved: true,
 	}
 	st.storeReq(req)
 	return st

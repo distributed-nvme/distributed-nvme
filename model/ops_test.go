@@ -2070,6 +2070,15 @@ func TestFailover(t *testing.T) {
 		t.Errorf("the old primary's demoted_revision: got %d, want %d", got,
 			revBefore+1)
 	}
+	// cnagent.md CN35: the new primary's term is the failover's revision,
+	// and the old one's goes.
+	if got := env.cntlr(opsCntlrB).GetPrimaryRevision(); got != revBefore+1 {
+		t.Errorf("new primary's primary_revision: got %d, want %d", got,
+			revBefore+1)
+	}
+	if got := env.cntlr(opsCntlrA).GetPrimaryRevision(); got != 0 {
+		t.Errorf("old primary's primary_revision: got %d, want 0", got)
+	}
 	if got := env.cntlr(opsCntlrB).GetDemotedRevision(); got != 0 {
 		t.Errorf("the new primary's demoted_revision: got %d, want 0", got)
 	}
@@ -3195,6 +3204,7 @@ func TestReplaceCntlrSolePrimary(t *testing.T) {
 	mustPut(env.t, env.cli, SpConfKey(env.cid, opsSpName), conf)
 	env.setCntlrErr(opsCntlrA, 1000)
 	now := uint64(1000 + common.DefaultCntlrUnhealthy)
+	revBefore := env.spRev()
 	newId, err := ReplaceCntlr(
 		env.ctx, env.cli, env.cid, opsShard, opsSpId, opsSpName,
 		opsCntlrA, env.cnCand(opsCnC), nil, true, now,
@@ -3205,6 +3215,10 @@ func TestReplaceCntlrSolePrimary(t *testing.T) {
 	fresh := env.cntlr(newId)
 	if !fresh.GetPrimary() {
 		t.Errorf("the replacement of a sole primary must be primary")
+	}
+	// cnagent.md CN35: a primary replacement's term is its own revision.
+	if got := fresh.GetPrimaryRevision(); got != revBefore+1 {
+		t.Errorf("primary_revision: got %d, want %d", got, revBefore+1)
 	}
 	if !fresh.GetSettling() {
 		t.Errorf("a primary replacement must be settling (HL2)")

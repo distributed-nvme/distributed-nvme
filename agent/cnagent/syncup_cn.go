@@ -47,7 +47,8 @@ func (s *CnAgentServer) Reconcile(ctx context.Context) error {
 	// write, and a probe file whose removal a probe did not get to goes too:
 	// nothing reads it, and it holds room the store may need (CN28).
 	files, err := s.store.List(ctx, agent.StoreKindCn, agent.StoreKindCntlr,
-		agent.StoreKindCloneBm, agent.StoreKindCnProbe, agent.StoreKindTorn)
+		agent.StoreKindCloneBm, agent.StoreKindCnProbe, agent.StoreKindTorn,
+		agent.StoreKindTerm)
 	if err != nil {
 		return err
 	}
@@ -177,6 +178,8 @@ func (s *CnAgentServer) Reconcile(ctx context.Context) error {
 		}
 	}
 	s.loadTornMarks(ctx, files[agent.StoreKindTorn], unreadParent,
+		unreadCntlr)
+	s.loadStackTerms(ctx, files[agent.StoreKindTerm], unreadParent,
 		unreadCntlr)
 
 	cnInfos := make(map[string]*pb.CnInfo)
@@ -480,7 +483,9 @@ func (s *CnAgentServer) dropCntlrState(
 	paths = append(paths, s.allChunkPathsOf(st,
 		req.GetClusterId(), req.GetCnId(), ptr.GetSpId())...)
 	paths = append(paths, s.nf.LocalTornPath(req.GetClusterId(),
-		req.GetCnId(), ptr.GetSpId(), ptr.GetCntlrId()))
+		req.GetCnId(), ptr.GetSpId(), ptr.GetCntlrId()),
+		s.nf.LocalStackTermPath(req.GetClusterId(), req.GetCnId(),
+			ptr.GetSpId(), ptr.GetCntlrId()))
 	if err := s.store.Remove(ctx, paths...); err != nil {
 		slog.ErrorContext(ctx, "removing cntlr state files failed",
 			slog.String("error", err.Error()))

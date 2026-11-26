@@ -100,6 +100,7 @@ const (
 	localStorKindDnProbe = "probe-dn"
 	localStorKindCnProbe = "probe-cn"
 	localStorKindTorn    = "torn"
+	localStorKindTerm    = "term"
 )
 
 type NameFmt struct {
@@ -750,6 +751,27 @@ func (nf *NameFmt) LocalCntlrPath(
 		"%s/%s-%016x-%016x-%016x-%016x",
 		nf.localStorPrefix,
 		localStorKindCntlr,
+		clusterId,
+		cnId,
+		spId,
+		cntlrId,
+	)
+}
+
+// LocalStackTermPath names the file of the term one cntlr's primary stack
+// was built under in a cn agent's local store (cnagent.md CN35), which the
+// agent writes when it builds under a new term and removes once a standby's
+// sweep left nothing.
+func (nf *NameFmt) LocalStackTermPath(
+	clusterId uint64,
+	cnId uint64,
+	spId uint64,
+	cntlrId uint64,
+) string {
+	return fmt.Sprintf(
+		"%s/%s-%016x-%016x-%016x-%016x",
+		nf.localStorPrefix,
+		localStorKindTerm,
 		clusterId,
 		cnId,
 		spId,

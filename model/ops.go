@@ -1810,8 +1810,9 @@ func Failover(
 }
 
 // FailoverPassingOver is Failover whose election passes over the cntlrs of
-// passed: the standbys whose agents refuse their own SyncupCntlr, which the
-// worker alone knows of from their replies (dnv-worker.md HL9, AR5).
+// passed: the standbys whose agents refuse their own SyncupCntlr, or whose
+// reports say their sweep left a stack of the cntlr, which the worker alone
+// knows of from their replies (dnv-worker.md HL9, AR5; cnagent.md CN35).
 func FailoverPassingOver(
 	ctx context.Context,
 	cli *etcdutil.Client,
@@ -1895,9 +1896,13 @@ func FailoverPassingOver(
 		old.Primary = false
 		old.Settling = false
 		old.DemotedRevision = revision
+		old.PrimaryRevision = 0
 		fresh.Primary = true
 		fresh.Settling = true
 		fresh.DemotedRevision = 0
+		// The new primary's term (cnagent.md CN35): its cn agent builds
+		// under it, and tears down what an earlier term left first.
+		fresh.PrimaryRevision = revision
 		s.Put(oldKey, old)
 		s.Put(newKey, fresh)
 		// The listing rule ([D18]) in the same transaction: an old primary
@@ -2568,8 +2573,9 @@ func ReplaceCntlr(
 // ReplaceCntlrPassingOver is ReplaceCntlr whose test for a failover
 // candidate passes over the cntlrs of passed, as FailoverPassingOver's
 // election does: a primary whose only healthy standbys refuse their own
-// SyncupCntlr has no candidate, so its replacement may go on (dnv-worker.md
-// HL9, AR7).
+// SyncupCntlr, or say their sweep left a stack of the cntlr, has no
+// candidate, so its replacement may go on (dnv-worker.md HL9, AR7;
+// cnagent.md CN35).
 func ReplaceCntlrPassingOver(
 	ctx context.Context,
 	cli *etcdutil.Client,
@@ -2683,7 +2689,7 @@ func ReplaceCntlrPassingOver(
 		}
 		// A primary replacement is created settling, as Failover's new
 		// primary is (HL2).
-		s.Put(CntlrKey(cid, spId, newId), &pb.Cntlr{
+		replacement := &pb.Cntlr{
 			AddrPort:   newCn.AddrPort,
 			NvmeTrConf: cn.GetNvmeTrConf(),
 			CntlidSlot: old.GetCntlidSlot(),
@@ -2691,7 +2697,8 @@ func ReplaceCntlrPassingOver(
 			Disabled:   false,
 			ErrEpoch:   0,
 			Settling:   asPrimary,
-		})
+		}
+		s.Put(CntlrKey(cid, spId, newId), replacement)
 		newCnConf := proto.Clone(cn).(*pb.CnConf)
 		newCnConf.CntlrPtrList = append(
 			newCnConf.CntlrPtrList,
@@ -2710,7 +2717,17 @@ func ReplaceCntlrPassingOver(
 			return err
 		}
 		s.Put(SpConfKey(cid, spName), conf)
-		return BumpSpRev(s, opReplaceCntlr, shard, cid, spId)
+		revision, err := bumpSpRevTo(s, opReplaceCntlr, shard, cid, spId)
+		if err != nil {
+			return err
+		}
+		if asPrimary {
+			// A primary replacement's term (cnagent.md CN35): its node
+			// may still hold a stack an earlier cntlr of the pool left.
+			replacement.PrimaryRevision = revision
+			s.Put(CntlrKey(cid, spId, newId), replacement)
+		}
+		return nil
 	})
 	if err != nil {
 		return 0, err

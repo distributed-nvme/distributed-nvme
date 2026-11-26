@@ -4404,3 +4404,39 @@ func TestReactionFailoverPassesOverARefusingStandby(t *testing.T) {
 			reactCntlrB)
 	}
 }
+
+// TestReactionFailoverPassesOverAStandbyThatLeftAStack pins AR5's election
+// with CN35: the smaller standby's report says its sweep left a stack of
+// the cntlr, so a promotion would serve nothing until the removal goes
+// through, and the failover of the disabled primary goes to the next
+// healthy standby and hands the op the first one to pass over.
+func TestReactionFailoverPassesOverAStandbyThatLeftAStack(t *testing.T) {
+	state := reactFixture(t)
+	state.Conf.CntlrIdList = append(state.Conf.CntlrIdList, reactCntlrC)
+	state.Cntlrs[reactCntlrC] = &pb.Cntlr{AddrPort: reactCnC}
+	h := newReactHarness(t, state)
+	h.state.Cntlrs[reactCntlrA].Disabled = true
+	h.w.verdicts.noteStackLeft(reactCntlrB, true)
+	h.pass()
+	calls := h.wantOps("failover")
+	if calls[0].oldId != reactCntlrA || calls[0].newId != reactCntlrC {
+		t.Fatalf("failover %d -> %d, want %d -> %d", calls[0].oldId,
+			calls[0].newId, reactCntlrA, reactCntlrC)
+	}
+	if !slices.Equal(calls[0].passed, []uint64{reactCntlrB}) {
+		t.Fatalf("the failover passed over %v, want [%d]", calls[0].passed,
+			reactCntlrB)
+	}
+}
+
+// TestReactionAStandbyThatLeftAStackIsNoRefusal: when the only standby is
+// passed over for the stack its sweep left, AR5 has no candidate, and names
+// no refusal: its agent refuses nothing (cnagent.md CN35).
+func TestReactionAStandbyThatLeftAStackIsNoRefusal(t *testing.T) {
+	h := newReactHarness(t, reactFixture(t))
+	h.state.Cntlrs[reactCntlrA].Disabled = true
+	h.w.verdicts.noteStackLeft(reactCntlrB, true)
+	h.pass()
+	h.wantOps()
+	h.wantSkipped(reactionFailover, reasonNoCandidate)
+}

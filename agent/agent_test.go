@@ -628,7 +628,7 @@ func TestStoreKindsArePrefixFree(t *testing.T) {
 	kinds := []string{
 		StoreKindDn, StoreKindSide, StoreKindMigrBm, StoreKindDnProbe,
 		StoreKindCn, StoreKindCntlr, StoreKindCloneBm, StoreKindCnProbe,
-		StoreKindTorn,
+		StoreKindTorn, StoreKindTerm,
 	}
 	for _, a := range kinds {
 		for _, b := range kinds {

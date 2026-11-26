@@ -358,6 +358,15 @@ always means the SP's `DmPoolConf.data_block_size`.
   revision, once its demotion hold for the cntlr ends (`dnv-worker.md`
   RW22), or by a failover that makes the cntlr the primary again. The
   worker's alone: the cntlr's request leaves it out.
+* **primary_revision** — `Cntlr.primary_revision`: the revision of the
+  failover that made the cntlr the primary, its **term**, written by that
+  failover's transaction, which sets the old primary's to zero, or the
+  revision of the replacement that created it as the primary, written by
+  that replacement's transaction; zero for a standby and for a primary
+  neither made, a pool's first primary and any record an older build
+  wrote, and zero means no term (Upgrade in lockstep). A cn agent builds a
+  primary's stack under one term, and removes what an earlier term left
+  before it builds under another (`cnagent.md` CN35).
 
 Ownership hierarchy (etcd side):
 
@@ -1340,6 +1349,7 @@ and {bm_idx} are both rendered with `BmIdxFmt`.
 | `LocalDnProbePath` | {prefix}/probe-dn-{cluster}-{dn} | the probe a dn agent's read saves while its store's disk refuses writes (`dnagent.md` DN18); never loaded |
 | `LocalCnProbePath` | {prefix}/probe-cn-{cluster}-{cn} | the probe a cn agent's read saves while its store's disk refuses writes (`cnagent.md` CN28); never loaded |
 | `LocalTornPath` | {prefix}/torn-{cluster}-{cn}-{sp}-{cntlr} | a cntlr's torn marks (`TornMarks`, `cnagent.md` CN14), saved while the cntlr holds one and removed once it holds none |
+| `LocalStackTermPath` | {prefix}/term-{cluster}-{cn}-{sp}-{cntlr} | the term a cntlr's primary stack was built under (`StackTerm`, `cnagent.md` CN35), saved when a primary builds under a new term and removed once a standby's sweep left nothing |
 | `LocalCloneBmPath` | {prefix}/clone-bm-{cluster}-{cn}-{sp}-{clone}-{src_slice_idx}-{bm_idx} | one received `PushCloneBitmapRequest` chunk (Bitmap push protocol); a clone chunk is addressed by the PAIR, so the name carries two index segments where the migration name carries one |
 
 ## etcd data model
@@ -5205,8 +5215,9 @@ its pad bits in the middle of the chunk and shift every later bit. So
   `LocalCnPath`, `SyncupCntlrRequest` at `LocalCntlrPath` — plus one file
   per received bitmap chunk at `LocalMigrBmPath` or `LocalCloneBmPath`
   (Agent local-store paths, Bitmap push protocol) and, on a cn, a cntlr's
-  torn marks at `LocalTornPath` while it holds one, which the startup
-  reconcile loads (`cnagent.md` CN14). While the store's disk refuses
+  torn marks at `LocalTornPath` while it holds one and the term its stack
+  was built under at `LocalStackTermPath` while it keeps one, which the
+  startup reconcile loads (`cnagent.md` CN14, CN35). While the store's disk refuses
   writes, a node's read also saves a probe file at `LocalDnProbePath` or
   `LocalCnProbePath`, which nothing loads (`dnagent.md` DN18). Every write
   goes to a temp file in the same dir, fsync, rename, fsync the dir (until
@@ -5223,7 +5234,7 @@ its pad bits in the middle of the chunk and shift every later bit. So
   each side's and each cntlr's current request is an atomic pointer, so
   another object's pass reads it whole beside the converge that replaces it;
   a node's request is replaced only under the node write lock. On start the
-  agent loads every other request, chunk and torn marks file of its role's
+  agent loads every other request, chunk, torn marks and term file of its role's
   kinds under its prefix and reconciles the system to it (full idempotent
   re-apply; for a clone, Clone metadata durability), its gRPC listener
   already open and the agent answering that it is starting until that
@@ -6689,7 +6700,8 @@ revision):
 
 The failover's own transaction writes its revision into the old primary's
 `demoted_revision`, which the sp role's demotion hold reads (sp role), and
-marks the new primary settling; until it
+into the new primary's `primary_revision`, its term (`cnagent.md` CN35),
+and marks the new primary settling; until it
 has reported its stack built and clean as primary, a failover of it for
 being unhealthy waits `cntlr_unhealthy` instead of `primary_unhealthy`
 when that is the longer, unless it is disabled (`dnv-worker.md` HL2, AR5).
@@ -8293,7 +8305,13 @@ or a code (`dnv-worker.md` RW4) (Controller nodes,
 CheckControllerNodeRestore). A `Cntlr` that
 carries no `demoted_revision` names no demotion that waits for its hold,
 which is how the build that wrote it stood after any worker restart
-(`dnv-worker.md` RW22). A group that carries no `array_made` reads as one
+(`dnv-worker.md` RW22). A `Cntlr` that carries no `primary_revision` has
+no term, and its cn agent never tears its stack down for a term
+(`cnagent.md` CN35): a primary that served before the upgrade keeps its
+stack, as the build that wrote it did, until its next failover or
+replacement gives a primary a term; a `CntlrInfo` with no `stack_left`
+says the sweep left no stack, and a cn agent's store with no term file
+keeps no term. A group that carries no `array_made` reads as one
 whose array has not run until the sp worker sets the flag at the group's
 first OK row (`dnv-worker.md` AR15); until then its primary may create an
 array over legs that read no superblock, as the build that wrote it could.
@@ -10881,6 +10899,24 @@ document and only pointed to here.
   are reset, each thin device a restore loses on the pools it sees and
   whether a new volume of its pool can take its thin id again (Controller
   nodes, CheckControllerNodeRestore).
+* **A restore can make an old term match again.** A term is a pool
+  revision (`primary_revision`, Cntlrs), and a restore takes the pool's
+  revision back to the backup's, so the failovers after it write terms
+  that ones before it wrote. The restore's steps delete every agent's local
+  files (`operations.md`, Restore etcd from a backup), with them every kept
+  term, so a primary of the restored state removes a stack that does not
+  serve before it builds, and keeps one whose namespaces still serve
+  (`cnagent.md` CN35). Two cases keep a stack of an earlier term, with the
+  stale metadata CN35 is about. A primary of the backup that a failover
+  after it demoted while its agent was down, until the restore deleted its
+  files, still serves its old stack, which it keeps. An agent that keeps
+  its files keeps its terms too: once the pool's revision climbs back past
+  them, a failover can write a term that agent kept for a stack of an
+  earlier term. In both, the pool loses the other primary's writes since.
+  In the first, the restore check reads the pool
+  `RESTORE_VERDICT_MAY_BREAK` on the other primary's node, whose agent
+  holds the role the backup does not give it (Controller nodes,
+  CheckControllerNodeRestore).
 * **One cntlid slot can serve most subsystems of a kernel.** nvmet draws
   every controller id from one id space per kernel, a subsystem's range
   being bounds inside it (cntlid slots), every new side but a migration

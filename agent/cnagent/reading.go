@@ -137,7 +137,17 @@ func (s *CnAgentServer) readCntlr(
 	rd := s.takeReading(ctx)
 	plan.rd, plan.walk, plan.mdWalks = rd, rd.walk, rd.mdWalks()
 	info, putBack, noCtrl := s.probeCntlr(ctx, st, plan)
-	return info, s.sweepCntlr(ctx, st, plan, false, info, putBack, noCtrl)
+	res := s.sweepCntlr(ctx, st, plan, false, info, putBack, noCtrl)
+	s.noteStandbySweep(ctx, st, plan, info, res, false)
+	if termMismatch(st, plan) {
+		// CN35: the converge's term step would act on it.
+		err := termFailure(st, plan)
+		slog.InfoContext(ctx, "the stack's term is not the role's",
+			slog.String("cntlr", termWhat(plan)),
+			slog.String("details", err.Error()))
+		res.Fail(termWhat(plan), err)
+	}
+	return info, res
 }
 
 // dmDevAnswer is one own `dmsetup info` of a name: the device, nil when it is

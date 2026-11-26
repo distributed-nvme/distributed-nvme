@@ -625,22 +625,26 @@ retired leg taken back that joins its array with old data (section 10).
   any crash of a primary.
   State: fix later; no fix that costs little is known. Read from the kernel's code;
   not seen in the lab, whose cuts take every leg at the same moment.
-- **An old primary can serve again from a thin pool it did not remove.**
-  Silent. A demotion makes the old primary remove its arrays and thin
-  pools. The removal can stop part way, as when a listing does not answer
-  or a command runs into its time limit. The agent then reports a leftover,
-  and the worker counts that answer as healthy, so the old primary can
-  become the primary again at a later failover. The primary builds an
-  array or a thin pool only where none is there, and keeps one it finds.
-  dm-thin keeps a pool's records in memory and does not read them from the
-  legs again while the pool's device exists. So when the role comes back
-  before a later sweep removes that thin pool, the old primary serves from
-  records that miss what the other primary wrote in between. A block
-  written then reads as zeros, and the old primary's next commit writes
-  its old records over the newer ones: the blocks written in between are
-  gone, and a block can be given out twice. No error shows, except for a
-  volume made in between that the worker had already recorded as created.
-  State: fix decided. Read from dnv's code; not seen in the lab.
+- **An old primary can keep a thin pool from before a failover in a few
+  rare cases.** Silent. Each failover gives the new primary a number, the
+  pool's revision at that failover. The cn agent keeps, in its local files,
+  the number under which it built its arrays and thin pools. A primary
+  that gets another number removes them before it builds, so it does not
+  serve from a thin pool that misses what another primary wrote. Three
+  cases still keep such a thin pool. First, the agent keeps no number for
+  the cntlr, because it lost the file or because the cntlr is new on its
+  node, and the namespaces of the pool still serve on that node: the agent
+  then keeps the pool as its own. An old thin pool serves so only when
+  both moves of its namespaces out of service failed, the one of the
+  demotion and the one the old primary makes once it notices the fence,
+  or, for a new cntlr, when the removal of an earlier cntlr of the pool on
+  that node stopped before it moved them.
+  Second, a restore of etcd after a failover, where the old primary's agent
+  was down from that failover until the restore deleted its local files.
+  Third, a restore in which an agent keeps its local files. In each case
+  the thin pool's records miss the other primary's writes: a block written
+  then reads as zeros, and the next commit writes the old records over the
+  newer ones. State: fix later. Read from dnv's code; not seen in the lab.
 - **A leg's device can be built over the wrong connection.** Silent. The primary
   puts a device over each leg it connects. It reads the device number of
   the leg's connection by the kernel's name for that connection, after a
@@ -2418,7 +2422,17 @@ failover's among them.
   its groups in the converge of a later syncup, which the worker sends
   once a check round made after that change names the groups: up to about
   two intervals more, 4 seconds at the default, plus the time of that
-  check round's read and of one more build. State: accepted. Fix later,
+  check round's read and of one more build. Before it builds, the new
+  primary also lists its node's arrays and devices, to find any part of
+  an array or a thin pool of the pool left from an earlier time as the
+  primary. The worker does not choose a standby whose report names such a
+  part, but it can miss one: after the worker restarts or another worker
+  takes the pool, until that standby reports again, and on a node a cntlr
+  replacement chose that held a cntlr of the pool before. The new primary
+  then removes the part first, which adds the removal's time. While the
+  removal fails, the pool serves nothing; the worker moves the role on
+  once the new primary's threshold ends, the longer of the primary and the
+  cntlr thresholds, 600 seconds at the default. State: accepted. Fix later,
   large: a standby that pre-assembles its arrays.
 - **Hosts still on the old primary's path see IO errors from the fence.**
   The worker hands the old primary its demotion first and holds the sides

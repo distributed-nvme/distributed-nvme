@@ -427,9 +427,10 @@ object, persisted at the point SH5 gives (or the refused one after it whose
 save failed only at the directory sync, SH5), and one file per received
 `Push*BitmapRequest` chunk, all written via `OsClient.WriteProto` (atomic
 replace) at the `Local*Path` locations and read back via `ReadProto`. On a
-cn, a cntlr's torn marks file (`cnagent.md` CN14) is saved the same way,
-through the same save, outside the gates: its saves and removals follow
-the marks, not a request. The
+cn, a cntlr's torn marks file (`cnagent.md` CN14) and its term file
+(`cnagent.md` CN35) are saved the same way, through the same save, outside
+the gates: their saves and removals follow the marks and the kept term,
+not a request. The
 probe file of DN18 is written the same way while the store refuses writes,
 and never read. Both calls, `WriteProto` and `ReadProto`, run on a ctx
 carrying the SH15 soft timeout, as the store's listing and `rm` do (SH6,
@@ -523,8 +524,8 @@ fails in any other way is SH3's fatal case. It filters every name the
 listing returns, a folder's as a file's, by the role's
 `Local*Path` kind prefixes (`StoreKindDn`, `StoreKindSide`,
 `StoreKindMigrBm` and `StoreKindDnProbe` for the dn; `StoreKindCn`,
-`StoreKindCntlr`, `StoreKindCloneBm`, `StoreKindCnProbe` and
-`StoreKindTorn` for the cn); the
+`StoreKindCntlr`, `StoreKindCloneBm`, `StoreKindCnProbe`, `StoreKindTorn`
+and `StoreKindTerm` for the cn); the
 probe file of DN18 is never loaded: the enumeration deletes it, and its temp
 files with the others, before anything is loaded, since nothing reads it and
 it holds room the store may need; a failed delete is logged, and the next
@@ -556,8 +557,8 @@ nothing, so it is safe beside any save.
 
 SH7. When an object's pointer leaves its parent's list, its state is dropped
 **at that moment** and nothing of it is removed from the node yet: its
-request file and its bitmap-chunk files (on a cn, its torn marks file too,
-`cnagent.md` CN14) are deleted with one `rm -f` under
+request file and its bitmap-chunk files (on a cn, its torn marks file and its term
+file too, `cnagent.md` CN14, CN35) are deleted with one `rm -f` under
 the same bound as SH6's listing, its memory entry and object lock go, and its
 goroutines are stopped. The resources are found afterwards **by name**, by
 the sweep that runs later in the same pass (DN6), so no file has to be kept
@@ -1498,7 +1499,7 @@ while a read takes longer than that, and the observations of sides and
 cntlrs with no fault would go too old (`dnv-worker.md` HL7).
 
 While the store's latest save failed, of a request, a chunk or, on a cn, a
-torn marks file, whatever its object (`Store.SaveFailing`, SH4), a syncup
+torn marks file or a term file, whatever its object (`Store.SaveFailing`, SH4), a syncup
 that marks its object as it arrives marks that object alone and cancels no
 read, its own object's included, whatever its revision: a node-level syncup
 marks no node. It then waits for its locks behind the reads that hold them,

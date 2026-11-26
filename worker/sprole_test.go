@@ -8328,3 +8328,45 @@ func TestCntlrInfoRevision(t *testing.T) {
 	want("an older round left unchanged",
 		rows(pb.ResStatus_RES_STATUS_MISSING), 8)
 }
+
+// TestObserveMarksAStandbyThatLeftAStack pins the memo AR5's election reads
+// (cnagent.md CN35): a standby's report that its sweep left a stack marks
+// the cntlr, the next report that says nothing is left clears the mark, and
+// a report while the plan is a primary's clears it whatever it says.
+func TestObserveMarksAStandbyThatLeftAStack(t *testing.T) {
+	ctx := context.Background()
+	captureLogs(t)
+	d := newTestDeps(
+		testConfig(common.WorkerRoleSp), newFakeStore(), newFakeClock(),
+	)
+	d.health = &fakeHealthWriter{}
+	w := spTestWorker(d)
+	w.verdicts = newVerdictMemo()
+	marked := func() bool {
+		w.verdicts.mu.Lock()
+		defer w.verdicts.mu.Unlock()
+		return w.verdicts.stackLeft[spCntlrPrimary]
+	}
+	reply := &replyState{revision: 7, infoPresent: true, fromRound: true}
+
+	standby := newCntlrDriver(w, nil, settlePlan(false, false))
+	standby.storeInfo(&pb.CntlrInfo{StackLeft: true}, 0)
+	standby.observe(ctx, reply)
+	if !marked() {
+		t.Fatalf("a standby's report of a left stack did not mark it")
+	}
+	standby.storeInfo(&pb.CntlrInfo{}, 0)
+	standby.observe(ctx, reply)
+	if marked() {
+		t.Fatalf("a standby's report with no stack left kept the mark")
+	}
+
+	standby.storeInfo(&pb.CntlrInfo{StackLeft: true}, 0)
+	standby.observe(ctx, reply)
+	primary := newCntlrDriver(w, nil, settlePlan(true, false))
+	primary.storeInfo(&pb.CntlrInfo{StackLeft: true}, 0)
+	primary.observe(ctx, reply)
+	if marked() {
+		t.Fatalf("a primary's report kept the mark of a left stack")
+	}
+}

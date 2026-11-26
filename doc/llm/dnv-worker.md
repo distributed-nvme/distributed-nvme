@@ -780,11 +780,14 @@ list; the flip, which reads the repair's key alone, and
   not `disabled`, has `err_epoch` zero **and** has the smallest `cntlr_id`
   among all such cntlrs but the ones the caller passes over
   (`FailoverPassingOver`; `Failover` passes over none): the worker hands
-  it the standbys whose agents refuse their own `SyncupCntlr` (AR5, HL9),
-  which no STM can see. It flips both `primary` booleans, sets the new
-  cntlr's `settling` and clears the old one's (HL2), writes the revision
-  its own bump writes into the old cntlr's `demoted_revision` and clears the
-  new one's (RW22), rewrites the SP's
+  it the standbys whose agents refuse their own `SyncupCntlr` (AR5, HL9)
+  and those whose report says their sweep left a stack (AR5, `cnagent.md`
+  CN35), which no STM can see. It flips both `primary` booleans, sets the
+  new cntlr's `settling` and clears the old one's (HL2), writes the
+  revision its own bump writes into the old cntlr's `demoted_revision` and
+  clears the new one's (RW22), writes the same revision into the new
+  cntlr's `primary_revision`, its term, and zeroes the old one's
+  (`cnagent.md` CN35), rewrites the SP's
   `CdcEntry` records as `SetCntlrErrEpoch` does — which takes an enabled old
   primary with an `err_epoch` out of them, until its next clean round lists
   it again as a standby (HL2), while a disabled one left them with its
@@ -861,8 +864,9 @@ list; the flip, which reads the repair's key alone, and
   a cntlr of this SP, its capacity key unchanged. It deletes the old `Cntlr`
   (its CN, if the record still exists: pointer out, footprint back,
   capacity, `CnRev`); creates the new `Cntlr` with the old one's
-  `cntlid_slot`, `primary` as requested, `disabled` false and `settling` equal
-  to `primary` (HL2), its `cntlr_id` the next id (new CN: pointer in,
+  `cntlid_slot`, `primary` as requested, `disabled` false, `settling` equal
+  to `primary` (HL2) and, when primary, its own bump's revision as its
+  `primary_revision`, its term (`cnagent.md` CN35), its `cntlr_id` the next id (new CN: pointer in,
   footprint out, capacity, `CnRev`); rewrites the SP's `CdcEntry` records as
   `SetCntlrErrEpoch` does, which drops the old cntlr and lists the new one;
   the `SpConf`; one `SpRev` bump for both halves. It reads no clone: a clone
@@ -3945,8 +3949,11 @@ that neither sets nor clears changes nothing; for a cntlr it also counts
 the run of unhealthy verdicts from rounds, which a clean answer or a
 starting round within the hold ends and
 which outlives the cntlr's child (RW23 says what a restarted child adds
-to it), and it marks the cntlrs and the sides HL8 holds and the cntlrs
-whose agent refuses a `SyncupCntlr` (HL9). A
+to it), and it marks the cntlrs and the sides HL8 holds, the cntlrs
+whose agent refuses a `SyncupCntlr` (HL9) and the standbys whose latest
+report, of a round or of a `Syncup*`, says that their sweep left a stack
+(`CntlrInfo.stack_left`, AR5), which each report of the cntlr's child sets
+or clears and a report while the plan is a primary's clears. A
 verdict counts whether or not its monitor writes, so one that
 finds the record set already — re-seeded from another observer's epoch,
 say (HL3) — counts though it is no transition. The memo lives with the
@@ -3985,12 +3992,16 @@ verdicts on it unhealthy for two of its counted rounds in a row (AR10),
 and HL8 does not hold it: the
 candidate is the cntlr with the
 smallest `cntlr_id` among those with `primary` false, `disabled` false and
-`err_epoch` zero whose agent does not refuse its own `SyncupCntlr` (HL9);
+`err_epoch` zero whose agent does not refuse its own `SyncupCntlr` (HL9)
+and whose latest report does not say that its sweep left a stack of the
+cntlr (`CntlrInfo.stack_left`, `cnagent.md` CN35), since a promotion would
+serve nothing until the removal goes through, and which moves no health
+epoch;
 none means `reaction skipped` (`no candidate`) and the
 pass continues (AR2); else `model.FailoverPassingOver` of the old primary
-and the candidate, handed the standbys passed over for their refusal, so
-the election it re-validates inside its STM passes over them as well
-(MD6),
+and the candidate, handed the standbys passed over for their refusal or
+their stack, so the election it re-validates inside its STM passes over
+them as well (MD6),
 unless one of the three refusals below holds it, the first two only an
 enabled primary. The first is
 judged ahead of the candidate, and where there is none it logs in place
@@ -4083,10 +4094,13 @@ does (AR7, Known limits):
   unreachable, whose rows the worker marks `UNKNOWN` — is refused nothing.
 * **The candidates refuse.** Every cntlr with `primary` false, `disabled`
   false and `err_epoch` zero has an agent that refuses its own
-  `SyncupCntlr` with an invalid conf or a failed save (HL9), so none is a
-  candidate: `reaction skipped` (`candidate_refuses`, with `old_cntlr_id`
-  and, as `new_cntlr_id`, the smallest of them). Such a cntlr would
-  refuse the promotion's syncup as well, so the role stays where it is,
+  `SyncupCntlr` with an invalid conf or a failed save (HL9), or a report
+  that says its sweep left a stack (CN35), and at least one refuses, so
+  none is a candidate: `reaction skipped` (`candidate_refuses`, with
+  `old_cntlr_id` and, as `new_cntlr_id`, the smallest refusing one). Where
+  none refuses and each left a stack, the pass logs `no candidate`. A
+  refusing cntlr would refuse the promotion's syncup as well, so the role
+  stays where it is,
   and the pass goes on (AR2) to AR7, whose sole-primary variant reads the
   primary as one with no candidate and replaces it once it has been
   unhealthy for `cntlr_unhealthy`, the replacement's own candidate test
@@ -4111,8 +4125,8 @@ not refuse, or adds a cntlr: a pass that finds such a standby or the new
 cntlr with no refusal mark elects it. The first two read a report and the
 third the memo of a refusal (AR10), none of which an STM sees, so
 `model.Failover` does not re-validate them, nor AR10's verdict, which no
-STM sees either; it takes the refusing standbys the pass passes over on the
-worker's word, and re-validates the election among the rest. The second
+STM sees either; it takes the standbys the pass passes over for a refusal
+or a left stack on the worker's word, and re-validates the election among the rest. The second
 rests on the coordinator's record of the last failover it applied, one of
 the two records of its own a pass decides by (AR7's second refusal rests on
 the other): why the role moved is kept in no etcd record. A coordinator
@@ -4286,7 +4300,8 @@ AR7. When a cntlr has `err_epoch` set, `now` minus it at least
 or it is the primary and
 **no failover candidate exists** (AR5 found none — the sole-cntlr SP,
 every other cntlr unhealthy or disabled, or every healthy, enabled one
-refusing its syncups, HL9): the candidates are
+refusing its syncups, HL9, or reporting a left stack, `cnagent.md` CN35):
+the candidates are
 `FindCnCandidatesAntiAffine` with the SP footprint (the sum of `ext_cnt` over
 all groups of its slices), a candidate count of `cn_batch_size`, a black list
 of the old cntlr's `addr_port`, the SP's other cntlrs' endpoints as the SP's
@@ -4306,7 +4321,7 @@ sole-primary variant, `disabled` false, `err_epoch` zero (HL2: a primary
 replacement is created settling, as a promoted primary is, and AR5 judges it
 by the settling threshold until it reports its stack built and clean as
 primary). The op is handed the standbys AR5 passes over for their refusal
-as well (`ReplaceCntlrPassingOver`), so its test for a failover candidate
+or their left stack as well (`ReplaceCntlrPassingOver`), so its test for a failover candidate
 passes over them as AR5's election does (MD6). The old CN is black-listed even when the node itself is healthy: its
 cntlr is what failed. None means `reaction skipped` (`no candidate`), and
 the pass goes on to AR8 (AR2) without trying the next due cntlr, whose scan
@@ -4384,7 +4399,8 @@ row (`cnagent.md` CN14), so its `ERROR` rows are its own.
 
 * **The cntlrs all refuse.** The primary's own agent refuses its
   `SyncupCntlr` (HL9), and every healthy, enabled standby's refuses its
-  own, which left AR5 no candidate: `reaction skipped`
+  own or reports a left stack (`cnagent.md` CN35), at least one refusing,
+  which left AR5 no candidate: `reaction skipped`
   (`candidate_refuses`, with `old_cntlr_id` and, as `new_cntlr_id`, the
   smallest refusing standby; the kind, `replace_cntlr`, tells the record
   from AR5's). A refusal every cntlr shares moves no role. The rule

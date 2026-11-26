@@ -744,6 +744,12 @@ message CntlrInfo {
     // never renumbered.
     map<uint64, RepairInfo> rep_id_to_repair_info = 19;
     map<uint64, GrpInfo> grp_id_to_grp_info = 20;
+    // A standby's: its sweep left an md array, a thin pool, a thin volume, a
+    // raid0 or a pool concat of the cntlr, so a promotion would serve
+    // nothing until the removal goes through. Not a row, so it moves no
+    // health epoch; the failover passes over such a standby (cnagent.md
+    // CN35; dnv-worker.md AR5). Appended, never renumbered.
+    bool stack_left = 21;
 }
 
 // One clone bitmap chunk's address: the source slice the chunk describes and
@@ -981,6 +987,15 @@ message Cntlr {
     // the cntlr the primary again clears it too. The worker's alone: the
     // cntlr's request leaves it out. Appended, never renumbered.
     uint64 demoted_revision = 8;
+    // The pool revision of the failover that made this cntlr the primary,
+    // written in the failover's own transaction (model.Failover), or of the
+    // replacement that created it as the primary (model.ReplaceCntlr), and
+    // zero for a standby and for a primary neither made, as a pool's first
+    // primary and every record an older build wrote: its term, zero meaning
+    // none. A cn agent builds a primary's stack under one term only, and
+    // tears down what an earlier term left before it builds under another
+    // (cnagent.md CN35). Appended, never renumbered.
+    uint64 primary_revision = 9;
 }
 
 // {dnv_prefix} slice {cluster_id} {sp_id} {slice_id}
@@ -2936,6 +2951,15 @@ message TornMarks {
     uint64 cn_id = 2;
     CntlrPointer cntlr_pointer = 3;
     repeated uint64 td_id_list = 4;
+}
+
+// The term a cn agent built a cntlr's primary stack under, Cntlr's
+// primary_revision, in its local store (cnagent.md CN35).
+message StackTerm {
+    uint64 cluster_id = 1;
+    uint64 cn_id = 2;
+    CntlrPointer cntlr_pointer = 3;
+    uint64 primary_revision = 4;
 }
 
 message PushCloneBitmapRequest {

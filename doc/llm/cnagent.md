@@ -279,7 +279,8 @@ walk a cntlr's converge or read takes and the lookups in it (the walk's code
 is the one both agents share, `dnagent.md` SH20), and the wrappers;
 `healthcheck.go` the CN11 probers and their `LegProbeIO` (direct syscalls,
 never the `OsClient`); `wcache.go` CN15's write cache loop device and CN10's
-write cache of a leg's path; `fence.go` CN34's fence watch;
+write cache of a leg's path; `fence.go` CN34's fence watch; `term.go`
+CN35's term of a primary's stack;
 `nvmetconn.go` CN33's cut of a removed host's
 nvmet connection, its read, the list step and whether a subsystem is
 safe, and the move of an unsafe subsystem's namespaces; `md.go` the mdadm wrapper, the sysfs reads of the
@@ -324,14 +325,15 @@ mirrors nothing: in each cntlr's state the prober and path-watcher
 registries; in each CN's and each cntlr's state its observation slot, which
 holds its latest observation and its running background read (`dnagent.md`
 SH28, SH29); the converge marks (`dnagent.md` SH30); and the CN10
-disconnect registry, all in memory only, never persisted. Five more fields
+disconnect registry, all in memory only, never persisted. Seven more fields
 of a cntlr's state sit outside that mutex, touched only under the cntlr's
 object lock or the node write lock: the marks of CN14's activation sweep
-(`pendingSweep`), CN14's torn marks (`tornTds`), the one of these the local
-store also holds (CN14), CN12's acted marks (`forcedStarts`), CN12's md
-checks (`mdChecks`) and `reqFromRpc`, which says whether the request this
-process holds counts as delivered (CN8, CN12, CN14); the rest are in memory
-only. Each state's request is an atomic pointer, stored and loaded without
+(`pendingSweep`), CN14's torn marks (`tornTds`), CN35's kept term
+(`stackTerm`) and whether its file holds it (`stackTermSaved`), CN12's
+acted marks (`forcedStarts`), CN12's md checks (`mdChecks`) and
+`reqFromRpc`, which says whether the request this process holds counts as
+delivered (CN8, CN12, CN14); the torn marks and the kept term are the ones
+the local store also holds (CN14, CN35), and the rest are in memory only. Each state's request is an atomic pointer, stored and loaded without
 that mutex: other cntlrs' passes and the
 node-level verdict read every cntlr's request holding none of its object
 lock, and a request is never modified once stored. The tracker has its own
@@ -383,11 +385,12 @@ converge or a read and leaves no object lock entry behind a drop.
 
 ### Startup reconcile
 
-CN2. Enumerate the store (`dnagent.md` SH6) for the cn's five store kinds —
+CN2. Enumerate the store (`dnagent.md` SH6) for the cn's six store kinds —
 `StoreKindCn`, the CN request file; `StoreKindCntlr`, the cntlr request
 file; `StoreKindCloneBm`, the clone bitmap chunk file; `StoreKindCnProbe`,
 the probe file of CN28, which the enumeration deletes and never loads;
-`StoreKindTorn`, a cntlr's torn marks file of CN14 — and
+`StoreKindTorn`, a cntlr's torn marks file of CN14; `StoreKindTerm`, the
+term a cntlr's stack was built under, of CN35 — and
 load every CN and cntlr request into memory first, saving the cntlr files
 skipped with their CN (below). Then reload every chunk into the owning
 cntlr's `CloneChunkSet` (`dnagent.md` SH21), keyed by the `(src_slice_idx,
@@ -422,7 +425,14 @@ cntlr comes out of the file's content, `TornMarks`, never out of its name.
 Such a file follows the chunk files' rules below for an owner that is not
 loaded: deleted as an orphan, or skipped while a CN or cntlr file that did
 not load may name its cntlr. A torn marks file that does not decode is
-logged and left; the drop of its cntlr deletes it by name (CN7).
+logged and left; the drop of its cntlr deletes it by name (CN7). Then load
+every term file into its cntlr's kept term (CN35); the cntlr comes out of
+the file's content, `StackTerm`, never out of its name. Such a file
+follows the torn marks file's rules for an owner that is not loaded:
+deleted as an orphan, or skipped while a CN or cntlr file that did not
+load may name its cntlr. A term file that does not decode is logged and
+left, and its cntlr keeps no term (CN35); the drop of its cntlr deletes it
+by name (CN7).
 
 A decoded chunk file whose cntlr is not among the loaded cntlr
 requests, or whose `clone_id` is absent from that cntlr's stored
@@ -593,7 +603,7 @@ not in memory and keeps its file (CN2). A pointer in the request without
 local state needs nothing
 yet — resources come with its first `SyncupCntlr`; the accepted request
 the agent holds for the CN is what makes the pointer known (CN8). A local
-cntlr whose pointer left the list is forgotten: its cntlr file, chunk files and torn marks file are deleted, its
+cntlr whose pointer left the list is forgotten: its cntlr file, chunk files, torn marks file and term file are deleted, its
 leg probers, its path watchers (CN10) and its running read are cancelled, its memory entry and object lock are dropped
 (`dnagent.md` SH7) — and nothing of its is removed from the node by this
 step. The diff also drops the object lock entry of every pointer that
@@ -4189,6 +4199,72 @@ every other leg of the primary has no live path, makes the primary read
 fenced until that disk node's syncup: a pause of its hosts, which the
 watch's next read of an optimized path and the read that names the groups
 end.
+
+CN35. The term of a primary's stack (`term.go`). A demotion's sweep can
+stop part way, as when a listing does not answer or a command runs into
+its time limit, and leave an md array, a thin pool, a thin volume, a raid0
+or a pool concat of the cntlr. dm-thin reads a pool's metadata from its
+legs only when the pool device is made, and the build keeps an array or a
+pool it finds; so an old primary that got the role back while such a pool
+stood would serve from mappings that miss every block the other primary
+wrote in between, reading zeros there, and its next commit would write its
+old metadata over the newer. The stack's device names carry the pool and
+the node, not the cntlr, so a cntlr made on a node that held an earlier
+cntlr of the same pool can find such a pool too. Each term of a primary has
+a number, the cntlr record's `primary_revision` (`architecture.md`,
+Cntlrs), written by the failover that makes the cntlr the primary and by a
+replacement made as the primary, and the agent keeps the number its stack
+was built under in the local store (`LocalStackTermPath`, a `StackTerm`;
+`cntlrState.stackTerm`), loaded at its start (CN2).
+
+A primary converge whose request carries a term the kept one is not, none
+included (`termMismatch`), first reads what the node holds of a primary
+stack of the pool (`termStep`, `stackThere`): a device-mapper device of the
+pool of a stack kind (the pool concats, the pool, the thin volumes, the
+raid0s and a RedundNone group's linear) or an md array of one of its
+groups.
+
+1. Nothing there: nothing is left to remove, and the converge saves the
+   new term and goes on as any primary converge. A failover onto a clean
+   standby, the usual case, so costs one listing of the node's devices and
+   arrays more.
+2. A piece there, no term kept, and a namespace of the cntlr in the
+   optimized group: the stack serves, so it is the one this role's primary
+   built and lost its term file with (a lost store disk, whose stack is
+   re-adopted probe-first, CN21; a term file that does not load; or a
+   cntlr file that does not load, whose cntlr comes back by the re-send
+   with no term). The converge takes it as it stands under the request's
+   term, logged at Warn, and saves the term. A demotion's sweep moves the
+   namespaces to the inaccessible group before it removes anything, and
+   the fence watch (CN34) does on a fenced primary, so a stale stack reads
+   served here only when both moves failed, or, for a cntlr new on its
+   node, when the node-level sweep of an earlier cntlr of the pool there
+   left its stack and namespaces as they stood (`scope.md`).
+3. Any other piece there, and a read that does not answer: the converge
+   runs its first sweep with the plan of a standby (`standbyPlanOf`). The
+   sweep removes what a standby does not hold, parks the namespace devices
+   on their dm-errors and moves the namespaces to the inaccessible group.
+   Only when that sweep is clean does the agent save the new term and
+   build as the primary, in the same pass, from the legs, as a new primary
+   does. A sweep that is not clean ends the pass with the standby's shape
+   built and nothing served, logged at Warn: the report holds an `ERROR`
+   row for each slice's pool naming both terms (`termLeftRows`), so the
+   primary reads unhealthy and settling, and the failover can move the
+   role to a clean standby (`dnv-worker.md` HL2, AR5); the sweep's
+   leftovers make the code.
+
+While the kept term is not the request's, a cntlr's read names the cntlr,
+so the worker sends the syncup again until the converge has taken the
+term. A request with no term, a pool's first primary or a record an older
+build wrote, never tears down: a primary that served before an upgrade
+keeps serving and removes nothing. A save of the term that fails is logged
+and keeps the term in memory with the file marked unsaved; each later
+primary converge under that term saves it again until it lands
+(`saveTermAgain`). A standby converge whose sweep is clean forgets the
+term and removes the file. A standby's converge and read say in its report
+whether its sweep left a piece of a primary stack (`CntlrInfo.stack_left`,
+a field and no row, so it moves no health epoch), by which the worker
+passes over it in a failover's election (`dnv-worker.md` AR5).
 
 CN18. Clones (`clone.go`; primary only; `architecture.md`, Clones;
 `sp_level` below `SP_LEVEL_NO_CLONE`). Per `clone_list` entry, in order:

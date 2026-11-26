@@ -1603,6 +1603,11 @@ func cntlrRowFields(t *testing.T) []cntlrRowField {
 			})
 			continue
 		}
+		if fd.Name() == "stack_left" {
+			// A field, not a row: no health rule reads it (cnagent.md
+			// CN35); the failover's election does (AR5).
+			continue
+		}
 		if !uint64Map(fd) {
 			t.Fatalf("CntlrInfo.%s is not a map of rows: teach this test",
 				fd.Name())

@@ -19,9 +19,9 @@ import (
 
 // Local-store file-name kind prefixes (architecture.md,
 // Agent local-store paths). The dn role owns the dn, side, migration chunk
-// and dn probe kinds, the cn role the cn, cntlr, clone chunk, cn probe and
-// torn mark kinds (SH6). No kind is a prefix of another, so a listing by kind
-// never takes one kind's file for another's.
+// and dn probe kinds, the cn role the cn, cntlr, clone chunk, cn probe,
+// torn mark and term kinds (SH6). No kind is a prefix of another, so a
+// listing by kind never takes one kind's file for another's.
 const (
 	StoreKindDn      = "dn-"
 	StoreKindSide    = "side-"
@@ -32,15 +32,16 @@ const (
 	StoreKindCloneBm = "clone-bm-"
 	StoreKindCnProbe = "probe-cn-"
 	StoreKindTorn    = "torn-"
+	StoreKindTerm    = "term-"
 )
 
 // Store is the agent's local store (SH4-SH7): per object, the last
 // Syncup*Request saved for it, plus one file per received Push*Bitmap chunk
-// and, on a cn, a cntlr's torn marks, all under the --local-store prefix;
-// Save says when each is saved. Writes go through OsClient.WriteProto
-// (atomic replace); reads through ReadProto. It keeps two states over every
-// save, SaveFailing and Refusal, and while the second holds a node's read
-// saves a probe file through Probe (DN18).
+// and, on a cn, a cntlr's torn marks and its stack's term, all under the
+// --local-store prefix; Save says when each is saved. Writes go through
+// OsClient.WriteProto (atomic replace); reads through ReadProto. It keeps
+// two states over every save, SaveFailing and Refusal, and while the second
+// holds a node's read saves a probe file through Probe (DN18).
 type Store struct {
 	oc     common.OsClient
 	prefix string

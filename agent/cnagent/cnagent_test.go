@@ -213,8 +213,10 @@ type reqOpts struct {
 	// on purpose, which the cntlr's verdict names (CN30).
 	leftoverOk bool
 	disabled   bool
-	level      pb.SpLevel
-	raid1      bool
+	// term is the cntlr record's primary_revision (CN35).
+	term  uint64
+	level pb.SpLevel
+	raid1 bool
 	// suspended is the stored Namespace.suspended flag.
 	suspended bool
 	tds       []*pb.ThinDevice
@@ -447,11 +449,12 @@ func cntlrReq(o reqOpts) *pb.SyncupCntlrRequest {
 		},
 		SpLevel: o.level,
 		Cntlr: &pb.Cntlr{
-			AddrPort:   testIp + ":29529",
-			NvmeTrConf: testTrConf(),
-			CntlidSlot: 0,
-			Primary:    o.primary,
-			Disabled:   o.disabled,
+			AddrPort:        testIp + ":29529",
+			NvmeTrConf:      testTrConf(),
+			CntlidSlot:      0,
+			Primary:         o.primary,
+			Disabled:        o.disabled,
+			PrimaryRevision: o.term,
 		},
 		IdToSlice:      idToSlice,
 		TdList:         tds,

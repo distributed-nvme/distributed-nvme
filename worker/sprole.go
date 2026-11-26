@@ -4764,6 +4764,9 @@ func (d *cntlrDriver) observe(ctx context.Context, r *replyState) {
 	plan := d.current()
 	d.noteRefusal(r, plan)
 	info := d.info()
+	// AR5: a standby's report that its sweep left a stack takes it out of
+	// the failover's candidates; it moves no health epoch.
+	d.memo.noteStackLeft(d.cntlrId, !plan.primary && info.GetStackLeft())
 	obs, res := cntlrObservation(r.code, info)
 	refusing := d.refusing(r, plan)
 	if refusing {

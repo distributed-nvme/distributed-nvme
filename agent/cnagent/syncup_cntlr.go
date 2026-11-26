@@ -303,7 +303,32 @@ func (s *CnAgentServer) convergeCntlr(
 	// CN10: the pass's NVMe walk, the sweep's list of connections and where
 	// the build's lookups find their entries until the build marks it stale.
 	plan.walk = s.newPassWalk(ctx)
+	// CN35: a primary under a term its stack was not built under sweeps as
+	// a standby first, which removes an earlier term's stack, and builds as
+	// the primary only once that sweep is clean, saving the new term first;
+	// a sweep that is not clean serves nothing in this pass but the
+	// standby's shape, and its leftovers bring the re-send.
+	s.saveTermAgain(ctx, st, plan)
+	if termMismatch(st, plan) {
+		if s.termStep(ctx, st, plan) == termTearDown {
+			standby := standbyPlanOf(s.nf, plan)
+			sweep := s.sweepCntlr(ctx, st, standby, true, nil, nil, nil)
+			if !sweep.Clean() {
+				slog.WarnContext(ctx, msgTermTeardownLeft,
+					slog.Uint64("stack_term", st.stackTerm),
+					slog.Uint64("term", plan.cntlr.GetPrimaryRevision()))
+				s.build(ctx, st, standby, info, budget)
+				termLeftRows(st, plan, info)
+				cntlrRowVerdict(standby, info,
+					s.snapsLackingADevice(ctx, standby), false, sweep)
+				sweep.Log(ctx, s.cntlrIdAttrs(plan)...)
+				return info, sweep
+			}
+		}
+		s.saveStackTerm(ctx, st, plan.cntlr.GetPrimaryRevision())
+	}
 	sweep := s.sweepCntlr(ctx, st, plan, true, nil, nil, nil)
+	s.noteStandbySweep(ctx, st, plan, info, sweep, true)
 	if !plan.wantAny {
 		// SP_LEVEL_DISABLE: the sweep's wanted set is empty, so every
 		// cntlr-scoped object has just gone, but the store file and the
