@@ -8419,3 +8419,60 @@ func TestObserveMarksAStandbyThatLeftAStack(t *testing.T) {
 		t.Fatalf("a primary's report kept the mark of a left stack")
 	}
 }
+
+// TestObserveMarksAnAcceptedSyncupErrorReply pins what begins AR10's
+// uncounted stretch: an accepted Syncup* reply with an ERROR row marks the
+// cntlr, a counted round with one clears the mark, and a refused reply
+// marks nothing.
+func TestObserveMarksAnAcceptedSyncupErrorReply(t *testing.T) {
+	ctx := context.Background()
+	captureLogs(t)
+	d := newTestDeps(
+		testConfig(common.WorkerRoleSp), newFakeStore(), newFakeClock(),
+	)
+	d.health = &fakeHealthWriter{}
+	w := spTestWorker(d)
+	w.verdicts = newVerdictMemo()
+	marked := func() bool {
+		w.verdicts.mu.Lock()
+		defer w.verdicts.mu.Unlock()
+		return w.verdicts.syncupSick[spCntlrPrimary]
+	}
+	errInfo := &pb.CntlrInfo{SsIdToSubsystem: map[uint64]*pb.ResInfo{
+		600: {Status: pb.ResStatus_RES_STATUS_ERROR, Details: "not linked"},
+	}}
+	driver := newCntlrDriver(w, nil, settlePlan(true, false))
+	driver.storeInfo(errInfo, 0)
+	driver.setStreamInfo(errInfo)
+	driver.observe(ctx, &replyState{revision: 7, infoPresent: true})
+	if !marked() {
+		t.Fatalf("an accepted Syncup* reply with an ERROR row did not mark " +
+			"the cntlr")
+	}
+	driver.observe(ctx, &replyState{revision: 7, infoPresent: true,
+		fromRound: true, newObs: true})
+	if marked() {
+		t.Fatalf("a counted round kept the mark")
+	}
+	// A leftover code is accepted: the re-sent converge's usual answer.
+	driver.observe(ctx, &replyState{revision: 7, infoPresent: true,
+		code: common.ReplyCodeLeftover})
+	if !marked() {
+		t.Fatalf("an accepted leftover reply with an ERROR row did not mark " +
+			"the cntlr")
+	}
+	clean := &pb.CntlrInfo{}
+	driver.storeInfo(clean, 0)
+	driver.setStreamInfo(clean)
+	driver.observe(ctx, &replyState{revision: 7, infoPresent: true})
+	if marked() {
+		t.Fatalf("a clean Syncup* reply kept the mark")
+	}
+	driver.storeInfo(errInfo, 0)
+	driver.setStreamInfo(errInfo)
+	driver.observe(ctx, &replyState{revision: 7, infoPresent: true,
+		code: common.ReplyCodeInvalidConf})
+	if marked() {
+		t.Fatalf("a refused reply marked the cntlr")
+	}
+}

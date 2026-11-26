@@ -3732,10 +3732,11 @@ with the revision of the observation it reports (`architecture.md`,
 Live-state reporting), the latest report each migration destination
 side's child holds, whose dm-clone row AR8 reads before it finishes a bad
 leg's migration, `now` (unix seconds),
-the two records kept from an earlier pass that a pass decides by — the
+the records kept from an earlier pass that a pass decides by — the
 coordinator's records of the last failover it applied (AR5's second
 refusal) and of the last replacement of a primary it applied (AR7's second
-refusal) — and a copy of AR10's memo of the coordinator's own verdicts.
+refusal), and its uncounted stretches (AR10) — and a copy of AR10's memo
+of the coordinator's own verdicts.
 An idle pass reads no node record; a step that is about to allocate or
 needs a node's record reads them, once a pass, at the revision of the
 pass's load (`LoadNodesAt`): AR6's CN budget check, its withdrawal once a
@@ -3979,7 +3980,24 @@ earlier of them (HL8); a `Syncup*` reply with an `ERROR` row neither starts
 that run nor adds to it, and neither does a round that answers from an
 observation already seen and not too old (RW23), nor one that answers
 from an observation no round asked for and not too old, which gives no
-verdict at all (HL7). A starting round within the hold also holds the
+verdict at all (HL7). The trigger has a second way: this coordinator's
+reaction pass has read the primary's latest verdict unhealthy, with an
+accepted `Syncup*` reply with an `ERROR` row and no counted round of it
+and no clean verdict of either kind between, for `cntlr_unhealthy` — its
+**uncounted stretch**, which the pass begins at the first pass that reads
+it so, by the coordinator's clock, and keeps in memory, the memo counting
+every counted round and every clean verdict so that one between two passes
+ends it; the next such reply after the break begins a new one. Only such a
+reply begins it: a missed round is a counted round, and a refused reply
+gives no verdict (HL1), so a missed round followed by refusals is a run of
+one. A stretch also needs `failoverRun` passes after its first, so that a
+pool whose `cntlr_unhealthy` is short still takes as many looks as the
+run; a start of the agent (HL8) ends it, as the verdicts before it are the
+old process's. A primary whose converge keeps failing one part of its
+stack is such a primary: each round answers from the observation of the
+converge the previous round's re-sent `Syncup*` ran, which its loop has
+seen (RW23), so no round counts, while the `Syncup*` replies keep its
+latest verdict unhealthy. A starting round within the hold also holds the
 cntlr from AR5's threshold trigger and from AR7 until HL8's hold ends. A
 round counts by its
 own report: the info its reply carried or, when the reply leaves it out as
@@ -4019,7 +4037,15 @@ rounds: epochs are whole seconds and the next verdict can come late, so one
 missed round could otherwise reach it. A `Syncup*` reply is left out of
 the run because the converge of a grow or of a promotion that waits for a
 member reports its groups `ERROR` though the next primary would wait the
-same. The cost: after a restart or a handoff a reaction
+same. The second way measures from this coordinator's own reads and not
+from the stored `err_epoch`, which can be an earlier owner's: a fresh
+coordinator's one missed round on an old epoch fires nothing, and its
+stretch begins at its own first pass that reads the verdict, so a worker
+restart or a handoff starts the wait again. It also counts `Syncup*`
+replies, which the run leaves out: a converge of a grow, or of a promotion,
+that waits for a member longer than `cntlr_unhealthy` moves the role, as
+a primary that cannot build for that long should. The
+cost: after a restart or a handoff a reaction
 waits for this coordinator's first verdict on its object. A missed round
 gives one at once; otherwise it comes from a `Syncup*` reply that the
 first answered round brings, or from the first round that answers from an
@@ -4033,8 +4059,9 @@ primary's next converge (Known limits).
 AR5. When the primary cntlr is `disabled`, or has `err_epoch` set, `now`
 minus it at least `primary_unhealthy` — `cntlr_unhealthy`, when that is the
 longer, while it is **settling** (HL2) — and this coordinator's own
-verdicts on it unhealthy for two of its counted rounds in a row (AR10),
-and HL8 does not hold it: the
+verdicts on it unhealthy for two of its counted rounds in a row, or for
+its uncounted stretch of `cntlr_unhealthy` (AR10), and HL8 does not hold
+it: the
 candidate is the cntlr with the
 smallest `cntlr_id` among those with `primary` false, `disabled` false and
 `err_epoch` zero whose agent does not refuse its own `SyncupCntlr` (HL9)
@@ -4173,11 +4200,12 @@ third the memo of a refusal (AR10), none of which an STM sees, so
 STM sees either; it takes the standbys the pass passes over for a refusal
 or a left stack on the worker's word, and re-validates the election among the rest. The second
 rests on the coordinator's record of the last failover it applied, one of
-the two records of its own a pass decides by (AR7's second refusal rests on
-the other): why the role moved is kept in no etcd record. A coordinator
+the records of its own a pass decides by (AR7's second refusal rests on
+the last replacement's): why the role moved is kept in no etcd record. A coordinator
 without it — restarted, handed the shard, or the other owner of an overlap
 (VW7) — can fail over once more once its own verdicts read the primary
-unhealthy for two of its counted rounds in a row (AR10), which records it
+unhealthy for two of its counted rounds in a row, or for its uncounted
+stretch (AR10), which records it
 again.
 
 ### Thin-pool auto-grow
@@ -7195,21 +7223,24 @@ caught.
   cancels the read the round starts (`dnagent.md` SH30), so no round
   answers from a read while those saves succeed. The cn agent runs no
   background converge of a cntlr (`cnagent.md` CN10), so a primary's
-  failover on its threshold waits until the leftover clears unless its
+  failover on its two-round run waits until the leftover clears unless its
   rounds miss, answer from an observation too old or answer from reads
-  while the agent's saves fail (end of this item). The dn agent's one background converge, its fence
+  while the agent's saves fail (end of this item), and otherwise comes by
+  its uncounted stretch of `cntlr_unhealthy` (AR10). The dn agent's one background converge, its fence
   timer, converges a side (`dnagent.md` DN12), so a DN's count compare
   (RW13) waits until the leftover clears,
   unless the agent's saves fail (end of this item). A `Syncup*` reply's
-  observation counts for nothing because a converge's rows can read unhealthy while it
+  observation counts for nothing in the run because a converge's rows can read unhealthy while it
   waits for a member (AR10); the case needs a leftover that lasts and an
   unhealthy primary at once. A row of the primary's own build that its
   converge keeps failing to cure is such a leftover, since the converge's
   reply and the read both name it (`cnagent.md` CN30) — an export step, an
   ns-dev reload or an ANA move that configfs or dm keeps refusing, a
   dm-clone create the kernel refuses for good — so while the refusal lasts
-  and the primary's health epoch has aged its threshold, its failover
-  waits for missed rounds or for the operator's disable (AR5). A condition
+  the primary's failover waits for missed rounds, for its uncounted
+  stretch to reach `cntlr_unhealthy`, or for the operator's disable (AR5,
+  AR10): its hosts wait that long, where the primary's threshold alone
+  would have moved the role sooner. A condition
   only a read names, which the converge keeps failing on, brings a re-send
   on every other round at most (RW4 step 5), so one read in each cycle
   ends and its report counts (`cnagent.md`, Known limits). A leftover of a disk node or a controller
@@ -7383,7 +7414,8 @@ caught.
   coordinator's record of the last failover it applied: a coordinator after a
   restart or a shard handoff, or the other owner of an overlap (VW7), has
   none, and once its own verdicts read the primary unhealthy for two of its
-  counted rounds in a row (AR10) it can fail over once more before it has.
+  counted rounds in a row, or for its uncounted stretch (AR10), it can fail
+  over once more before it has.
   It compares rows, not causes: a new primary whose own fault fails only
   rows the old primary failed on is held as well, for as long as that fault
   lasts or until an operator

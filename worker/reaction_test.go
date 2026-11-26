@@ -1063,6 +1063,9 @@ func roundVerdict(memo *verdictMemo, cntlrId uint64, unhealthy bool) {
 // syncupVerdict notes a Syncup* reply's verdict on a cntlr, which counts for
 // the latest verdict and, when clean, ends the run, but never adds to it.
 func syncupVerdict(memo *verdictMemo, cntlrId uint64, unhealthy bool) {
+	if unhealthy {
+		memo.noteSyncupSick(cntlrId)
+	}
 	memo.noteCntlr(cntlrId, unhealthy)
 }
 
@@ -4439,4 +4442,152 @@ func TestReactionAStandbyThatLeftAStackIsNoRefusal(t *testing.T) {
 	h.pass()
 	h.wantOps()
 	h.wantSkipped(reactionFailover, reasonNoCandidate)
+}
+
+// TestReactionAPrimaryWhoseBuildKeepsFailingFailsOver pins AR5's second way
+// to its threshold trigger (AR10): a primary judged unhealthy by its
+// Syncup* replies alone, as one whose converge keeps failing an export,
+// whose rounds answer from observations already seen and so never count,
+// fails over once this coordinator has judged it so, with no counted
+// round, for cntlr_unhealthy, and not before; a counted round in between
+// starts the stretch again, and a missed round with no accepted Syncup*
+// error reply after it begins none.
+func TestReactionAPrimaryWhoseBuildKeepsFailingFailsOver(t *testing.T) {
+	newHarness := func(t *testing.T) *reactHarness {
+		h := newReactHarness(t, reactFixture(t))
+		h.judgeStored = false
+		h.state.Cntlrs[reactCntlrA].ErrEpoch = h.now()
+		return h
+	}
+	advance := func(h *reactHarness, seconds uint64) {
+		h.clk.advance(time.Duration(seconds) * time.Second)
+	}
+
+	t.Run("fails over at the cntlr threshold", func(t *testing.T) {
+		h := newHarness(t)
+		syncupVerdict(h.w.verdicts, reactCntlrA, true)
+		h.pass()
+		h.wantOps()
+		advance(h, common.DefaultCntlrUnhealthy-1)
+		syncupVerdict(h.w.verdicts, reactCntlrA, true)
+		h.pass()
+		h.wantOps()
+		advance(h, 1)
+		h.pass()
+		calls := h.wantOps("failover")
+		if calls[0].oldId != reactCntlrA || calls[0].newId != reactCntlrB {
+			t.Fatalf("failover %d -> %d", calls[0].oldId, calls[0].newId)
+		}
+	})
+
+	t.Run("a counted round starts the stretch again", func(t *testing.T) {
+		h := newHarness(t)
+		syncupVerdict(h.w.verdicts, reactCntlrA, true)
+		h.pass()
+		advance(h, common.DefaultCntlrUnhealthy-10)
+		// A counted round, then the re-sent Syncup*'s reply: the stretch
+		// begins again at this pass.
+		roundVerdict(h.w.verdicts, reactCntlrA, true)
+		syncupVerdict(h.w.verdicts, reactCntlrA, true)
+		h.pass()
+		h.wantOps()
+		advance(h, 10)
+		h.pass()
+		h.wantOps()
+		advance(h, common.DefaultCntlrUnhealthy-10)
+		h.pass()
+		h.wantOps("failover")
+	})
+
+	t.Run("a missed round with no Syncup* reply after it is no stretch",
+		func(t *testing.T) {
+			h := newHarness(t)
+			roundVerdict(h.w.verdicts, reactCntlrA, true)
+			h.pass()
+			advance(h, common.DefaultCntlrUnhealthy)
+			h.pass()
+			h.wantOps()
+		})
+
+	t.Run("the stretch needs the run's count of passes", func(t *testing.T) {
+		h := newHarness(t)
+		syncupVerdict(h.w.verdicts, reactCntlrA, true)
+		h.pass()
+		advance(h, common.DefaultCntlrUnhealthy)
+		h.pass()
+		h.wantOps()
+		h.pass()
+		h.wantOps("failover")
+	})
+
+	t.Run("an agent start ends the stretch", func(t *testing.T) {
+		h := newHarness(t)
+		syncupVerdict(h.w.verdicts, reactCntlrA, true)
+		h.pass()
+		advance(h, common.DefaultCntlrUnhealthy-10)
+		h.w.verdicts.noteStarting(reactCntlrA)
+		h.w.verdicts.noteStartEnded(reactCntlrA)
+		h.pass()
+		advance(h, 10)
+		h.pass()
+		h.pass()
+		h.wantOps()
+	})
+
+	t.Run("an old epoch alone is no stretch", func(t *testing.T) {
+		h := newReactHarness(t, reactFixture(t))
+		h.judgeStored = false
+		h.state.Cntlrs[reactCntlrA].ErrEpoch = h.ago(3600)
+		syncupVerdict(h.w.verdicts, reactCntlrA, true)
+		h.pass()
+		h.wantOps()
+	})
+
+	t.Run("a clean verdict ends the stretch", func(t *testing.T) {
+		h := newHarness(t)
+		syncupVerdict(h.w.verdicts, reactCntlrA, true)
+		h.pass()
+		advance(h, common.DefaultCntlrUnhealthy-10)
+		// A clean verdict and an unhealthy one between two passes: the pass
+		// reads the latest unhealthy, and the clean one still ends the
+		// stretch.
+		syncupVerdict(h.w.verdicts, reactCntlrA, false)
+		syncupVerdict(h.w.verdicts, reactCntlrA, true)
+		h.pass()
+		advance(h, 10)
+		h.pass()
+		h.wantOps()
+	})
+}
+
+// TestReactionABuildFailingOnEveryCntlrMovesTheRoleOnce: the same export
+// fails on the new primary too, from the same rows; the role does not come
+// back to the cntlr it left while the new primary fails on those rows alone
+// (AR5's same-error refusal), so no failover loop follows.
+func TestReactionABuildFailingOnEveryCntlrMovesTheRoleOnce(t *testing.T) {
+	rows := &pb.CntlrInfo{SsIdToSubsystem: map[uint64]*pb.ResInfo{
+		600: resErr("ss", "not linked to the port"),
+	}}
+	h := newReactHarness(t, reactFixture(t))
+	h.judgeStored = false
+	h.state.Cntlrs[reactCntlrA].ErrEpoch = h.now()
+	h.setPrimaryInfo(reactCntlrA, rows)
+	syncupVerdict(h.w.verdicts, reactCntlrA, true)
+	h.pass()
+	h.clk.advance(time.Duration(common.DefaultCntlrUnhealthy) * time.Second)
+	h.pass()
+	h.pass()
+	h.wantOps("failover")
+	a, b := h.state.Cntlrs[reactCntlrA], h.state.Cntlrs[reactCntlrB]
+	a.Primary, a.ErrEpoch = false, 0
+	b.Primary, b.Settling, b.ErrEpoch = true, true, h.now()
+	h.setPrimaryInfo(reactCntlrB, rows)
+	syncupVerdict(h.w.verdicts, reactCntlrA, false)
+	syncupVerdict(h.w.verdicts, reactCntlrB, true)
+	h.pass()
+	h.clk.advance(time.Duration(common.DefaultCntlrUnhealthy) * time.Second)
+	h.pass()
+	h.pass()
+	h.wantOps("failover")
+	h.wantSkipped(reactionFailover, reasonSameError)
 }

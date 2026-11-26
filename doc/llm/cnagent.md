@@ -7264,8 +7264,9 @@ stores instead is CN23's.
   from the last syncup's observation, which is not new: a primary in that
   state gets no counted round toward its failover (`dnv-worker.md` AR10),
   and the failover on the primary threshold (`dnv-worker.md` AR5) waits for
-  missed rounds or for the operator's disable (`dnv-worker.md`, Known
-  limits). A name only a read gives that stands because the converge keeps
+  missed rounds, for the worker's uncounted stretch of `cntlr_unhealthy`
+  (`dnv-worker.md` AR10), or for the operator's disable (`dnv-worker.md`,
+  Known limits). A name only a read gives that stands because the converge keeps
   failing where the read's test passes — a clone meta group whose member
   reconciliation md refuses (CN30), a forced start's or a re-assembly's
   stop that a process outside md's holders listing blocks, an absent array

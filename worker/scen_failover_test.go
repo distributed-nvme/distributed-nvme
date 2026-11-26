@@ -1775,3 +1775,45 @@ func TestFailoverDemotionWithTheLeftoverCodeEndsTheFirstWait(t *testing.T) {
 	})
 	c.waitConverged(t)
 }
+
+// TestABuildThatKeepsFailingFailsTheRoleOver pins AR5's second way (AR10) on
+// the whole worker: the primary's converge keeps failing one part of its
+// stack, every reply answered with a leftover (the reply_code lever) and
+// the part's ERROR row, and each re-send cancels the read the round before
+// it started (the read leftover lever plays dnagent.md SH30), so every
+// round answers from an
+// observation its loop has seen and none counts. The primary fails over once
+// the worker has read it so for cntlr_unhealthy, and not at the primary
+// threshold.
+func TestABuildThatKeepsFailingFailsTheRoleOver(t *testing.T) {
+	t.Parallel()
+	const primaryTh, cntlrTh = 2, 8
+	h := newWorkerHarness(t, harnessOpts{})
+	c := h.plantStd(t, func(s *stdSpec) {
+		s.threshold = &pb.EventThreshold{
+			PrimaryUnhealthy: primaryTh,
+			CntlrUnhealthy:   cntlrTh,
+			SideUnhealthy:    1,
+			LegUnhealthy:     2,
+		}
+	})
+	w := h.startWorker(t, "w1")
+	h.waitOwnsAll(t, w)
+	c.waitConverged(t)
+	agent, key := c.cntlrAgent(t, 1)
+	failedAt := time.Now()
+	foLever(t, agent, key, func(o *agentfake.Object) {
+		o.ReadLeftover = 1000
+		o.ReplyCode = common.ReplyCodeLeftover
+		foSetRow(o, foDataGrpRow(),
+			foStatusRow(pb.ResStatus_RES_STATUS_ERROR, true))
+	})
+	applied := foWaitFailover(t, h, w, 1, 2, 60*time.Second)
+	took := applied.at.Sub(failedAt)
+	t.Logf("the failover came %v after the build began to fail", took)
+	if took < (cntlrTh-1)*time.Second {
+		t.Errorf("the failover came %v after the build began to fail, before "+
+			"cntlr_unhealthy %ds: the primary threshold alone moved the role",
+			took, cntlrTh)
+	}
+}

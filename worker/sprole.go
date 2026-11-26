@@ -5059,6 +5059,12 @@ func (d *cntlrDriver) observe(ctx context.Context, r *replyState) {
 		own, _ := cntlrObservation(r.code, d.roundInfo())
 		d.memo.noteRound(d.cntlrId, own != healthClean || refusing)
 	}
+	if !r.fromRound && accepted(r.code) && obs == healthErrorRow {
+		// AR10: an accepted Syncup* reply with an ERROR row is what begins
+		// an uncounted stretch, as a converge that keeps failing one part
+		// of the stack gives at each re-send.
+		d.memo.noteSyncupSick(d.cntlrId)
+	}
 	if d.health.observeSettle(ctx, obs, res, canSettle) {
 		slog.InfoContext(ctx, msgCntlrSettled,
 			slog.String("role", common.WorkerRoleSp),

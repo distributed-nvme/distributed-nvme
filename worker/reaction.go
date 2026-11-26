@@ -3,7 +3,7 @@
 // two steps of the pass that follow every repair, its stage moves (AR11) and
 // the retire timer (AR12), and the clear of a forced-start mark (AR13).
 //
-// A pass is stateless by construction, but for two records: it starts from a
+// A pass is stateless by construction, but for a few records: it starts from a
 // fresh model.LoadSpWithoutNodes snapshot (the node records read later, by
 // the steps that need them: passNodes), the in-memory CntlrInfo the PRIMARY cntlr's
 // child last reported and a copy of AR10's memo of this coordinator's own
@@ -11,8 +11,10 @@
 // forgets everything again — everything but AR5's record of the last failover
 // it applied (failoverMemo) and AR7's of the last replacement of a primary
 // (replaceMemo), which say why the role moved or the primary was replaced,
-// facts no etcd record keeps, and AR6's notes of the passes that first read
-// a pool past its mark (timeGrows), which only time a grow.
+// facts no etcd record keeps, AR10's uncounted stretches (noteStretches),
+// which time a primary judged unhealthy with no counted round, and AR6's
+// notes of the passes that first read a pool past its mark (timeGrows),
+// which only time a grow.
 // Two owners overlapping on one SP therefore cannot apply an action twice —
 // every action is a model op that re-validates its own preconditions inside
 // its STM (MD6/MD7), and the loser gets model.ErrPrecondition back, except
@@ -1107,9 +1109,11 @@ func (o *modelReactionOps) finishCloneDelete(
 
 // reactor is the sp coordinator's reaction half (AR1-AR17): the model
 // surface, plus the three memos that exist only to keep the log honest and
-// the two records AR5 and AR7 decide by. Apart from AR10's memo of the coordinator's own
-// verdicts (verdictMemo), which gates every threshold reaction, no other
-// decision is taken from a memo — AR6's pending rule and AR8's repair rules
+// the records AR5 and AR7 decide by: the last failover, the last
+// replacement and the uncounted stretches (AR10). Apart from AR10's memo of
+// the coordinator's own verdicts (verdictMemo), which gates every threshold
+// reaction, no other decision is taken from a memo — AR6's pending rule and
+// AR8's repair rules
 // are reconstructed from etcd and the primary's report on every pass (AR6,
 // AR8).
 type reactor struct {
@@ -1138,6 +1142,69 @@ type reactor struct {
 	// carries no time and its grow is not timed.
 	grows       map[growKey]growWatch
 	growsLooked bool
+	// stretches is, per cntlr, the pass that first read its latest verdict
+	// unhealthy with no counted round and no clean verdict since, and the
+	// memo's count of those breaks then (noteStretches); AR5's second way to
+	// its threshold trigger reads it (uncountedFor). It lives in memory only,
+	// so a restart or a handoff starts every stretch again.
+	stretches map[uint64]uncountedStretch
+}
+
+// uncountedStretch is one cntlr's stretch of unhealthy verdicts with no
+// counted round: when a pass first read it, by the coordinator's clock, the
+// memo's breaks count of the cntlr then, and how many later passes have read
+// it going on.
+type uncountedStretch struct {
+	since  uint64
+	breaks uint64
+	passes int
+}
+
+// noteStretches reads, for every cntlr of the pass's snapshot, whether its
+// stretch goes on: the latest verdict unhealthy, an accepted Syncup* reply
+// with an ERROR row since the last break, and no counted round or clean
+// verdict since the stretch began (the memo's breaks count unchanged). A
+// cntlr whose latest verdict is clean, that no such reply read since its
+// last break, or that left the pool, has none; a break starts a new one at
+// the next pass that finds such a reply after it.
+func (r *reactor) noteStretches(p *spPass) {
+	if r.stretches == nil {
+		r.stretches = make(map[uint64]uncountedStretch)
+	}
+	sick := func(cntlrId uint64) bool {
+		return p.judged.cntlrs[cntlrId] && p.judged.syncupSick[cntlrId]
+	}
+	for cntlrId := range r.stretches {
+		if _, ok := p.state.Cntlrs[cntlrId]; !ok || !sick(cntlrId) {
+			delete(r.stretches, cntlrId)
+		}
+	}
+	for cntlrId := range p.state.Cntlrs {
+		if !sick(cntlrId) {
+			continue
+		}
+		breaks := p.judged.breaks[cntlrId]
+		if s, ok := r.stretches[cntlrId]; ok && s.breaks == breaks {
+			s.passes++
+			r.stretches[cntlrId] = s
+			continue
+		}
+		r.stretches[cntlrId] = uncountedStretch{since: p.now, breaks: breaks}
+	}
+}
+
+// uncountedFor is AR5's second way to its threshold trigger (AR10): this
+// coordinator has read the cntlr's latest verdict unhealthy, with no
+// counted round of it and no clean verdict, for cntlr_unhealthy and over
+// failoverRun passes after the first, so that a pool with a short
+// cntlr_unhealthy still needs as many looks as the run. A primary whose
+// converge keeps failing answers each round from an observation its loop
+// has seen (RW23), so no round counts toward failoverRun, and its verdicts
+// come from the re-sent Syncup* replies.
+func (r *reactor) uncountedFor(p *spPass, cntlrId uint64) bool {
+	s, ok := r.stretches[cntlrId]
+	return ok && s.passes >= failoverRun &&
+		reached(p.now, s.since, p.th.GetCntlrUnhealthy())
 }
 
 // growKey names one kind of one slice's pool: its data or its metadata.
@@ -1185,13 +1252,14 @@ func (w *spWorker) reactor() *reactor {
 
 // failoverRun is the run of unhealthy health verdicts in a row, from the
 // primary's Check* rounds alone, that AR5's threshold trigger needs besides
-// its threshold (AR10): one round missed or slow, followed by a clean answer
-// of either kind, fails no primary over, while a primary that answers no
-// round, or answers every round from an observation too old (HL7), gives its
-// second such verdict one round later. A round that answers from an
-// observation its child's loop has already seen adds nothing (RW23), nor
-// does one that answers from an observation that ended before the loop's
-// first round after a pause (HL7).
+// its threshold (AR10), unless the primary's uncounted stretch has lasted
+// cntlr_unhealthy (uncountedFor), which also needs this many passes: one
+// round missed or slow, followed by a clean answer of either kind, fails no
+// primary over, while a primary that answers no round, or answers every
+// round from an observation too old (HL7), gives its second such verdict one
+// round later. A round that answers from an observation its child's loop
+// has already seen adds nothing (RW23), nor does one that answers from an
+// observation that ended before the loop's first round after a pause (HL7).
 const failoverRun = 2
 
 // verdictMemo is AR10's memo: the objects of the SP — cntlrs, legs and sides
@@ -1221,9 +1289,19 @@ type verdictMemo struct {
 	// old child counted or saw ended before that round, so it gives no
 	// verdict until it is too old, when a round on it counts as a missed
 	// round does, by its age (HL7).
-	runs  map[uint64]int
-	legs  map[uint64]bool
-	sides map[sideKey]bool
+	runs map[uint64]int
+	// breaks counts, for each cntlr, its counted rounds, clean or not, and
+	// its clean verdicts of either kind: what ends a stretch of unhealthy
+	// verdicts with no counted round (reactor.noteStretches).
+	breaks map[uint64]uint64
+	// syncupSick holds the cntlrs an accepted Syncup* reply with an ERROR row
+	// has read unhealthy since their last break: only such a reply begins
+	// an uncounted stretch, as a converge that keeps failing gives one at
+	// each re-send, while a missed round is a counted round and a refused
+	// reply gives no verdict.
+	syncupSick map[uint64]bool
+	legs       map[uint64]bool
+	sides      map[sideKey]bool
 	// starting holds the cntlrs whose latest round answered that their
 	// agent is starting, within the start hold (HL8): AR5 fails none of them
 	// over and AR7 replaces none. Any verdict on it, a round's, a missed
@@ -1249,16 +1327,29 @@ type verdictMemo struct {
 // newVerdictMemo builds an empty memo.
 func newVerdictMemo() *verdictMemo {
 	return &verdictMemo{
-		cntlrs:   make(map[uint64]bool),
-		runs:     make(map[uint64]int),
-		legs:     make(map[uint64]bool),
-		sides:    make(map[sideKey]bool),
-		starting: make(map[uint64]bool),
-		refusing: make(map[uint64]bool),
+		cntlrs:     make(map[uint64]bool),
+		runs:       make(map[uint64]int),
+		breaks:     make(map[uint64]uint64),
+		syncupSick: make(map[uint64]bool),
+		legs:       make(map[uint64]bool),
+		sides:      make(map[sideKey]bool),
+		starting:   make(map[uint64]bool),
+		refusing:   make(map[uint64]bool),
 
 		stackLeft:     make(map[uint64]bool),
 		sidesStarting: make(map[sideKey]bool),
 	}
+}
+
+// noteSyncupSick records that an accepted Syncup* reply with an ERROR row
+// read the cntlr unhealthy (AR10's uncounted stretch).
+func (m *verdictMemo) noteSyncupSick(cntlrId uint64) {
+	if m == nil {
+		return
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.syncupSick[cntlrId] = true
 }
 
 // noteStackLeft records whether a standby's latest report says that its
@@ -1301,6 +1392,10 @@ func (m *verdictMemo) noteStarting(cntlrId uint64) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	delete(m.runs, cntlrId)
+	// A start of the agent ends the cntlr's uncounted stretch too: the
+	// verdicts before it are the old process's (AR10).
+	delete(m.syncupSick, cntlrId)
+	m.breaks[cntlrId]++
 	m.starting[cntlrId] = true
 }
 
@@ -1337,6 +1432,8 @@ func (m *verdictMemo) noteCntlr(cntlrId uint64, unhealthy bool) {
 	delete(m.starting, cntlrId)
 	if !unhealthy {
 		delete(m.runs, cntlrId)
+		delete(m.syncupSick, cntlrId)
+		m.breaks[cntlrId]++
 	}
 }
 
@@ -1353,6 +1450,8 @@ func (m *verdictMemo) noteRound(cntlrId uint64, unhealthy bool) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	delete(m.starting, cntlrId)
+	delete(m.syncupSick, cntlrId)
+	m.breaks[cntlrId]++
 	if unhealthy {
 		m.runs[cntlrId]++
 		return
@@ -1408,8 +1507,13 @@ func noteVerdict[K comparable](set map[K]bool, key K, unhealthy bool) {
 type judgedSet struct {
 	cntlrs map[uint64]bool
 	runs   map[uint64]int
-	legs   map[uint64]bool
-	sides  map[sideKey]bool
+	// breaks is the memo's count of each cntlr's counted rounds and clean
+	// verdicts (verdictMemo.breaks), and syncupSick the cntlrs an accepted
+	// Syncup* reply with an ERROR row read unhealthy since their last break.
+	breaks     map[uint64]uint64
+	syncupSick map[uint64]bool
+	legs       map[uint64]bool
+	sides      map[sideKey]bool
 	// starting are the cntlrs held while their agent starts (HL8).
 	starting map[uint64]bool
 	// refusing are the cntlrs whose agent refuses their driven revision's
@@ -1439,12 +1543,14 @@ func sideClockReached(p *spPass, key sideKey, side *pb.Side) bool {
 // never reused within an SP, so such an entry could only grow the memo.
 func (m *verdictMemo) snapshot(state *model.SpState) judgedSet {
 	out := judgedSet{
-		cntlrs:   make(map[uint64]bool),
-		runs:     make(map[uint64]int),
-		legs:     make(map[uint64]bool),
-		sides:    make(map[sideKey]bool),
-		starting: make(map[uint64]bool),
-		refusing: make(map[uint64]bool),
+		cntlrs:     make(map[uint64]bool),
+		runs:       make(map[uint64]int),
+		breaks:     make(map[uint64]uint64),
+		syncupSick: make(map[uint64]bool),
+		legs:       make(map[uint64]bool),
+		sides:      make(map[sideKey]bool),
+		starting:   make(map[uint64]bool),
+		refusing:   make(map[uint64]bool),
 
 		stackLeft:     make(map[uint64]bool),
 		sidesStarting: make(map[sideKey]bool),
@@ -1468,6 +1574,20 @@ func (m *verdictMemo) snapshot(state *model.SpState) judgedSet {
 			continue
 		}
 		out.runs[cntlrId] = run
+	}
+	for cntlrId, n := range m.breaks {
+		if _, ok := state.Cntlrs[cntlrId]; !ok {
+			delete(m.breaks, cntlrId)
+			continue
+		}
+		out.breaks[cntlrId] = n
+	}
+	for cntlrId := range m.syncupSick {
+		if _, ok := state.Cntlrs[cntlrId]; !ok {
+			delete(m.syncupSick, cntlrId)
+			continue
+		}
+		out.syncupSick[cntlrId] = true
 	}
 	for cntlrId := range m.starting {
 		if _, ok := state.Cntlrs[cntlrId]; !ok {
@@ -1667,6 +1787,9 @@ func (w *spWorker) reactionPass(ctx context.Context) {
 		return
 	}
 	p := w.newPass(state, cc)
+	// AR5: each pass, whatever it goes on to do, reads every cntlr's
+	// stretch of unhealthy verdicts with no counted round (uncountedFor).
+	w.reactor().noteStretches(p)
 	if state.Conf.GetDeleting() {
 		// SPD6: `deleting` is no AR3 suppression. A LATCHED SP runs exactly
 		// one drain step and nothing else — regardless of sp_level
@@ -2001,11 +2124,13 @@ func (w *spWorker) tryFailover(ctx context.Context, p *spPass) bool {
 	}
 	if !p.primary.GetDisabled() {
 		// AR10: the threshold fires only on a primary this coordinator has
-		// judged unhealthy itself, on failoverRun of its rounds in a row;
-		// the disabled trigger needs no verdict.
+		// judged unhealthy itself, on failoverRun of its rounds in a row, or
+		// with no counted round for cntlr_unhealthy (uncountedFor); the
+		// disabled trigger needs no verdict.
 		if !reached(p.now, p.primary.GetErrEpoch(), threshold) ||
 			!p.judged.cntlrs[p.primaryId] ||
-			p.judged.runs[p.primaryId] < failoverRun ||
+			(p.judged.runs[p.primaryId] < failoverRun &&
+				!w.reactor().uncountedFor(p, p.primaryId)) ||
 			p.judged.starting[p.primaryId] {
 			return false
 		}

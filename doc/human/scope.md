@@ -1259,27 +1259,36 @@ Measured times are in [the introduction](introduction.md#status-and-limits).
   needs no bcache-tools, and a node without the package, or without its
   udev rule, does not have the bcache case. Not seen in the lab.
 - **A clone build that keeps failing may start no failover.** Some ways of
-  failing mark the primary unhealthy and others do not. The clone's
-  namespaces stay inaccessible and the host waits, with no time limit,
-  until the cause goes or an operator disables the cntlr, steps the level
-  down or deletes the clone. State: fix later. Not seen in the lab.
+  failing mark the primary unhealthy and others do not. A way that marks it
+  moves the role after the cntlr threshold, as the next entry says. For a
+  way that does not, the clone's namespaces stay inaccessible and the host
+  waits, with no time limit, until the cause goes or an operator disables
+  the cntlr, steps the level down or deletes the clone. State: fix later. Not seen in the lab.
 - **A part a converge keeps failing to build holds the primary's
-  failover.** Some parts of a cntlr's stack are named both by the
+  failover for the cntlr threshold.** Some parts of a cntlr's stack are named both by the
   converge's own answer and by every check round while they are missing or
   wrong: an export, a namespace's device, an ANA change, the device a
   cntlr puts over a leg, a clone's dm-clone. When the kernel keeps
   refusing to build such a part, the worker sends the cntlr's syncup again
   on every check round, and the agent converges the cntlr one interval
   after another. Every check round then answers with the last converge's
-  report, which the worker does not count toward a failover. So a primary
-  whose rows read error this way is failed over at its threshold only once
-  its check rounds fail to answer in time, or once an operator disables
-  it. A side on a disk node loops the same way, as a migration's new side
+  report, which the worker does not count toward a failover. So the worker
+  fails such a primary over only once it has read the primary as unhealthy
+  for the cntlr threshold, 600 seconds at the default, with no counted
+  check round in that time, instead of after the primary threshold; its
+  hosts wait that long, and a restart of the worker, or another worker
+  taking the pool over, starts that wait again. A pool with one cntlr gets
+  a cntlr replacement once the primary's health epoch has lasted the cntlr
+  threshold. Where the same part fails on every cntlr, the role does not
+  come back to the cntlr it left while the new primary fails on the same
+  error, as long as that worker runs: in a pool of two cntlrs it moves
+  once.
+  A side on a disk node loops the same way, as a migration's new side
   does when it cannot connect to the old side after the cutover. The loop
   runs one converge of the cntlr or side at a time, with one interval
-  between two, and the node's other cntlrs and sides go on. State: fix
-  decided for a primary whose rows read error this way; accepted for a
-  side on a disk node. Not seen in the lab.
+  between two, and the node's other cntlrs and sides go on. State:
+  accepted for the wait of the cntlr threshold and for a side on a disk
+  node. Not seen in the lab.
 - **A host's connection that does not end takes the subsystem's volumes off
   that controller node.** Where the cn agent ends connections (section 5.4),
   each converge ends the connections of hosts that are off a subsystem's
@@ -1955,8 +1964,10 @@ Measured times are in [the introduction](introduction.md#status-and-limits).
   built there, and nothing removes the old kernel subsystem, since its NQN
   is wanted. When the delete and the create reach a cntlr as one change,
   an old namespace can stay under a number that the new list also uses, and
-  the hosts get IO errors on a path that reads as serving. The loop does
-  not count toward a failover. State: fix decided. Until then: delete the
+  the hosts get IO errors on a path that reads as serving. On the primary,
+  the loop counts toward a failover only once the worker has read it as
+  unhealthy for the cntlr threshold, 600 seconds at the default (section
+  6.1); on a standby, it never does. State: fix decided. Until then: delete the
   subsystem's namespaces and then the subsystem again (`dnvctl ns delete`,
   `dnvctl ss delete`); wait until, as root on each controller node of the
   pool, `ls /sys/kernel/config/nvmet/subsystems/` no longer lists its NQN;
