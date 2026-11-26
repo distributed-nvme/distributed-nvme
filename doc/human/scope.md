@@ -2023,8 +2023,10 @@ Measured times are in [the introduction](introduction.md#status-and-limits).
   one. Read from dnv's code; not seen in the lab.
 - **An array create cut short leaves a new group down on every cntlr.**
   mdadm writes the legs' superblocks one after the other when it creates
-  an array, and the primary stops a command after 3 seconds. A slow leg
-  can make the create pass that limit between the two writes: one leg then
+  an array, and the primary stops an array create after 15 seconds,
+  longer than the 3 seconds it gives most commands, which makes this rare.
+  A slow leg can still make the create pass that limit between the two
+  writes: one leg then
   has a superblock that counts both legs, and the other has none. Every
   later try, the build on a new primary after a failover included, starts
   the array from the one leg, and mdadm refuses. A new pool, a group that
@@ -2509,22 +2511,20 @@ failover's among them.
   busy with a converge of the cntlr just then waits for it to end. State:
   accepted for these cases. Read from dnv's code and the kernel's; the
   reads of zeros are not seen in the lab.
-- **A failover while the disk nodes are still opening a pool's paths can
+- **A failover while the disk nodes are still opening a pool's paths could
   leave the pool unbuilt.** When the new primary builds while the disk nodes
   are still opening its paths, it starts a group's RAID1 array only once both
-  copies are reachable, and on a busy controller node that start can take
-  longer than the 3 seconds the node's agent gives any command, which then
-  stops it. Stopped after it has taken in one copy and before the array has
-  started, the array stays inactive with that copy, and nothing starts it
-  again: the pool serves nothing. By dnv's rules the worker then
-  fails the pool over to its standby once the error has lasted the cntlr
-  threshold, 600 seconds at the default. The run that met it had raised that
-  threshold to 1800 seconds and gave up its wait after 1200 seconds, so no run
-  has reached that failover. The e2e suite's many-pools case saw it once, in
-  one of three builds of 64 pools at once, on a pool that had finished
-  building and then failed over twice while the other pools still built, the
-  second time while the disk nodes were still opening its paths. State: fix
-  decided.
+  copies are reachable, and on a busy controller node that start took
+  longer than the 3 seconds the node's agent gave it, which then stopped
+  it. Stopped after it had taken in one copy and before the array started,
+  the array stayed inactive with that copy, and nothing started it again,
+  until the worker failed the pool over once the error had lasted the cntlr
+  threshold, 600 seconds at the default. The e2e suite's many-pools case saw
+  it once, in one of three builds of 64 pools at once. Now an array's start
+  gets 15 seconds; one still stopped leaves an inactive array that the same
+  pass stops, and the next check round names it, so the worker's next
+  request starts it from both copies, a few seconds later. State: fixed.
+  Unit tests of the controller node agent.
 - **Creating many volumes at once can fail over volumes that are already
   built.** A controller node that builds many new primaries at once can
   answer the worker's check rounds of the primaries it has finished with

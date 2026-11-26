@@ -7,6 +7,7 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/distributed-nvme/distributed-nvme/agent"
 	"github.com/distributed-nvme/distributed-nvme/common"
@@ -255,6 +256,14 @@ func TestForcedStartFromANamedLeg(t *testing.T) {
 	}
 	assertForcedRecord(t, logs, testDataLeg2, mdUpdateUuid, testDataLeg)
 	f.assertNewIdentity(t, oldUuid)
+	// The forced run is an array build, under its longer bound (SH15).
+	f.node.mu.Lock()
+	forcedLimit := f.node.cmdLimits["--force"]
+	f.node.mu.Unlock()
+	if forcedLimit <= common.CmdSoftTimeout*time.Second {
+		t.Errorf("the forced assembly ran under %v, want the build's "+
+			"bound", forcedLimit)
+	}
 
 	f.node.Reset()
 	info = f.syncup(t, withMark(noRepairReq(5), testDataLeg2))

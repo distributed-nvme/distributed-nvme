@@ -701,7 +701,8 @@ lock of the hierarchy (SH25, SH28).
 
 SH13. Lock order is node then object, never nested object locks. Probing
 under a lock is acceptable: every OS command is bounded by
-`CmdSoftTimeout`/`CmdHardTimeout` (SH15) except a child in an
+`CmdSoftTimeout`/`CmdHardTimeout` (SH15), the cn's array builds by
+`MdBuildTimeout` in place of the first (SH15), except a child in an
 uninterruptible kernel wait (SH15) — which is why the cn sweep's
 `nvme disconnect` runs off the locks (`cnagent.md` CN10) — and an in-process
 `OsClient` listing, modification-time read, device-number read, file or
@@ -882,7 +883,14 @@ the count of chunks it sent, passes its pass's ctx on unchanged too: the
 `OsClient` bounds its wait for a slot, and waits for each discard it sends
 as long as the kernel takes (`osclient.md`, DiscardRanges), so a deadline
 would only cut the list between chunks, which the pass's chunk count
-already bounds. The cn's md wrapper passes its caller's ctx on unchanged to
+already bounds. The cn's md wrapper runs an array's `--create` and
+`--assemble`, the forced one's included, under `MdBuildTimeout` in place
+of `CmdSoftTimeout` (`agent.Cmd.RunOkFor`), the hard stop following as for
+every command: on a node that builds many arrays at once an assembly
+outlasts the soft timeout, and a stop once md holds a member leaves the
+array inactive (`cnagent.md` CN12); the node check's md replay runs its
+create and assembly through the same wrapper, under the same bound. It
+passes its caller's ctx on unchanged to
 its in-process calls as well — the superblock reads of `Md.ReadMember` and
 the md sysfs writes of `Md.SetSyncAction` and `Md.SetSyncMin` (`cnagent.md`
 CN12) — where a deadline would bound only the wait before the syscall

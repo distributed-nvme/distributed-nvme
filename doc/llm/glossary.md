@@ -92,7 +92,7 @@ The vocabulary of dnv in alphabetical order, one entry per term, with synonyms s
 
 **cntlr replacement** — The sp worker's reaction that deletes a cntlr unhealthy past its threshold and creates one on a fresh controller node with the same cntlid slot, primary only when the old one was primary and had no failover candidate. It moves the pool's footprint from the old node to the new one in one transaction (see `dnv-worker.md` AR7, MD6).
 
-**command timeouts, soft timeout, hard timeout** — The two bounds on every OS command an agent runs (`CmdSoftTimeout`, `CmdHardTimeout`): SIGTERM at the soft timeout and SIGKILL at the hard one, after which the command did not answer. Neither bounds a child in an uninterruptible kernel wait, which returns only when the kernel does (see `architecture.md`, Common validation).
+**command timeouts, soft timeout, hard timeout** — The two bounds on every OS command an agent runs (`CmdSoftTimeout`, `CmdHardTimeout`): SIGTERM at the soft timeout and SIGKILL at the hard one, after which the command did not answer; a cn array build's soft timeout is `MdBuildTimeout` (see `dnagent.md` SH15). Neither bounds a child in an uninterruptible kernel wait, which returns only when the kernel does (see `architecture.md`, Common validation).
 
 **concat** — The multi-target dm-linear that joins a slice's group devices end to end in list order, one over its meta groups (`CnPoolMetaName`) and one over its data groups (`CnPoolDataName`), on which the slice's thin pool sits: a grow appends a target and reloads the pool, and the provisioning deferral truncates a concat to its list's longest leading run of effective groups, never dropping a group out of the middle (see `cnagent.md` CN9, CN13).
 

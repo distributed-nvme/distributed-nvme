@@ -249,19 +249,16 @@ func TestAFailedLinearGroupBuildIsNamedAndResent(t *testing.T) {
 	}
 }
 
-// TestAnArrayStateThePassLeavesAloneIsNotNamed bounds the names: an array
-// that does not run, and two arrays that both hold legs of the group, are
-// states only an operator ends, so no read names the group, and the worker
-// re-sends nothing for it.
+// TestAnArrayStateThePassLeavesAloneIsNotNamed bounds the names: two arrays
+// that both hold legs of the group are a state only an operator ends, so no
+// read names the group, and the worker re-sends nothing for it. An array
+// that is inactive is assembled again (TestAnInactiveArrayIsAssembledAgain).
 func TestAnArrayStateThePassLeavesAloneIsNotNamed(t *testing.T) {
 	for _, tc := range []struct {
 		name string
 		arm  func(f *repFix)
 		want string
 	}{
-		{"an array that does not run", func(f *repFix) {
-			f.node.setArrayState(f.mdDev, "inactive")
-		}, "inactive"},
 		{"two arrays that both hold legs of the group", func(f *repFix) {
 			f.node.mu.Lock()
 			name := f.node.arrays[f.mdDev].name

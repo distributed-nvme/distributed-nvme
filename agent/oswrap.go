@@ -192,6 +192,25 @@ func (c *Cmd) RunOk(ctx context.Context, name string, args ...string) error {
 	return c.runOk(ctx, name, args...)
 }
 
+// RunOkFor is RunOk under limit in place of the soft timeout, for a command
+// a role knows can take longer on a busy node (the cn role's array create
+// and assembly, common.MdBuildTimeout); the hard stop follows as for every
+// command (SH15).
+func (c *Cmd) RunOkFor(
+	ctx context.Context,
+	limit time.Duration,
+	name string,
+	args ...string,
+) error {
+	cctx, cancel := context.WithTimeout(ctx, limit)
+	defer cancel()
+	stdout, stderr, exitCode, err := c.oc.RunCommand(cctx, name, args, "")
+	if err != nil {
+		return cmdError(name, args, stdout, stderr, exitCode, err)
+	}
+	return nil
+}
+
 // CmdError is the error of a command that failed (DN19 error capture): its
 // text is the command line and the tool's own output, word for word, so the
 // details of an ERROR row read what the tool said. It also carries the exit

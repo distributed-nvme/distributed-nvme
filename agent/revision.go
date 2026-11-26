@@ -71,8 +71,9 @@ func OkReply() *pb.AgentReply {
 // answer. Three conditions arrive among the
 // leftovers instead: on a cntlr, an md member that the cntlr's background
 // read names as one its converge would fail early, put back or add, under
-// LeftoverKindMdMember, a broken array its converge would assemble
-// again, under LeftoverKindMdBroken, and an absent array its converge's
+// LeftoverKindMdMember, a broken or inactive array its converge would
+// assemble again, under LeftoverKindMdBroken, and an absent array its
+// converge's
 // assembly would start, under LeftoverKindMdAbsent (cnagent.md CN30). Only
 // a read's verdict names these conditions, save two of the dn's: the
 // unconfirmed disk identity, which the converge's own code names too,

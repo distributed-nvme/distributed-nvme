@@ -2314,14 +2314,14 @@ stage logs the median of those fsyncs.
   flips names the group's absent array, or under `--redund none` its
   `RedundNone` dm-linear (`cnagent.md` CN12, CN30), which adds the rounds
   until that read and one more converge, each converge growing with the
-  slice count (`cnagent.md`, Known limits). Where the cn agent's soft
-  timeout ends that converge's assembly of a RAID1 group after mdadm has
-  added a member and before it has started the array, the group's array
-  stays inactive, which no
-  read names absent, so no re-send builds it and the case fails at its wait
-  for the new primary's build (`architecture.md`, Known limits, A promotion
-  that outruns its sides can leave a group's array inactive). The case bounds
-  that wait only by the build's own and logs how long the write took.
+  slice count (`cnagent.md`, Known limits). Where that converge's assembly
+  of a RAID1 group is stopped after mdadm has added a member and before it
+  has started the array, which its longer bound (`common.MdBuildTimeout`)
+  makes rare, the same converge stops the inactive array and a later read
+  names it, which adds another round and converge (`architecture.md`, Known
+  limits, A promotion that outruns its sides can leave a group's array
+  inactive). The case bounds that wait only by the build's own and logs
+  how long the write took.
 * **The outage takes etcd away, nothing else, and only once.** The gateway,
   the worker and the cdc run through it, so a program that starts while etcd
   is down (`cdc.md` CM4) is not exercised, nor a fault that waits for a

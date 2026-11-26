@@ -2454,7 +2454,9 @@ harmless. A migration destination takes its run before it zeroes
   (`model.ResolveStartHoldSeconds`), so such a cluster keeps a hold; the
   stored-conf validator refuses only a value above `MaxStartHoldSeconds`.
 * `CmdSoftTimeout` and `CmdHardTimeout` bound the shell commands an agent
-  runs, a child blocked in an uninterruptible kernel wait aside. A command
+  runs, a child blocked in an uninterruptible kernel wait aside, and a cn
+  array build runs under `MdBuildTimeout` in place of the first
+  (`dnagent.md` SH15). A command
   they end did not answer: its resource reports `RES_STATUS_ERROR` with
   the command's output in `details`, cut to the row text cap (Live-state
   reporting), never an absence (`dnagent.md` SH15).
@@ -4987,8 +4989,9 @@ no group of the pool's slices or clones; `FAILED_PRECONDITION` when the
 group's clone is being deleted. The call takes the pool at every
 `sp_level`, since an operator sets the flag at a level where reactions stop
 before lowering it, and at those levels the flag stops nothing but the
-primary's re-assembly of a broken array of the group (`cnagent.md` CN12,
-The re-assembly) and a check the primary runs for a request that stands
+primary's re-assembly of a broken or inactive array of the group, and its
+stop of an array a failed assembly left (`cnagent.md` CN12, The
+re-assembly), and a check the primary runs for a request that stands
 from before the level step (`cnagent.md` CN12, The md check). No finish,
 cancel or other step clears the flag, only this call: while it stands the
 worker creates no repair of the group, however long the operator leaves it.
@@ -4996,8 +4999,9 @@ Action: STM: set the group's `operator_in_charge` to the request's value; a
 group that already holds that value is answered OK with no write, a token
 the request carried still being checked first (`gateway.md` GW6). The write
 bumps `SpRev`. Reason: the primary reads the flag: while it stands, the
-primary leaves a broken array of the group as it is instead of assembling
-it again (`cnagent.md` CN12, The re-assembly) and starts no md check of
+primary leaves a broken or inactive array of the group as it is instead
+of assembling it again, and stops no array a failed assembly left
+(`cnagent.md` CN12, The re-assembly), and starts no md check of
 the group, stopping one it runs, so the flag must reach the
 cntlrs in the group's record; the sp worker reads every record afresh at
 the start of each pass (`dnv-worker.md` AR1) and sees it there too. A token
@@ -10679,14 +10683,13 @@ document and only pointed to here.
   (`dnagent.md` SH15) ends an assembly before mdadm has added a member; but
   where the timeout ends one after mdadm has added a member and before mdadm
   has started the array, md holds the array inactive with the members
-  added. An inactive array is left as it is and
-  reported as the group's error (`cnagent.md` CN12), which sets the
-  primary's error epoch (`dnv-worker.md` HL2), and no read names it
-  absent, so the worker re-sends nothing. The pool then has no thin pool
-  on its primary until, by the rules, the worker fails it over to its
-  healthy standby once that error has lasted the cntlr threshold, a
-  settling primary's threshold (`dnv-worker.md` AR5); no run has waited
-  that long. Seen in one of three runs of the e2e suite's many-pools case
+  added. The same converge reads the array again and stops it when every
+  member is a leg wrapper of this pool, and a read names an inactive array
+  whose kept members all carry a superblock, so the worker's re-send
+  assembles it from both legs (`cnagent.md` CN12, The re-assembly; CN30).
+  An array build runs under `MdBuildTimeout`, not the soft timeout, so the
+  stop is rare; it still costs a round and a converge. Seen in one of
+  three runs of the e2e suite's many-pools case
   at 64 pools, on a pool that failed over twice while the pools built: on
   its second new primary, while the disk nodes were still opening paths,
   the agent's records show the promotion's assembly of the data group from

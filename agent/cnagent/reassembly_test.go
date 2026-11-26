@@ -2,11 +2,14 @@ package cnagent
 
 import (
 	"fmt"
+	"maps"
 	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/distributed-nvme/distributed-nvme/agent"
+	"github.com/distributed-nvme/distributed-nvme/common"
 	"github.com/distributed-nvme/distributed-nvme/pb"
 )
 
@@ -390,4 +393,158 @@ func TestABrokenArrayWithATakenBackLeg(t *testing.T) {
 				row)
 		}
 	}
+}
+
+// TestAnInactiveArrayIsAssembledAgain: an array assembled in part and not
+// started, as an assembly cut short leaves it, is named by the read and
+// stopped and assembled again from both legs by the converge, as a broken
+// one is (CN12, The re-assembly; CN30).
+func TestAnInactiveArrayIsAssembledAgain(t *testing.T) {
+	f := newRepFix(t, allLegs...)
+	f.syncup(t, quietLevel(3))
+	f.node.setArrayState(f.mdDev, mdStateInactive)
+	node := f.node.mdNode(f.mdDev)
+	_, reply := f.read(t, 3)
+	if reply.GetCode() != 4 ||
+		!strings.Contains(reply.GetDetails(), "md_broken:"+node) {
+		t.Errorf("the read's verdict: code %d (%s), want md_broken:%s",
+			reply.GetCode(), reply.GetDetails(), node)
+	}
+	f.node.Reset()
+	info := f.syncup(t, quietLevel(4))
+	assertOrder(t, f.node, "cmd mdadm --stop "+node,
+		"cmd mdadm --assemble "+f.mdDev)
+	assertOk(t, info.GetGrpIdToMdRaid()[testDataGrp], "grp data")
+	if got := f.members(); !slices.Equal(got,
+		slices.Sorted(slices.Values([]string{f.leg1, f.leg2}))) {
+		t.Errorf("the array holds %v, want both legs", got)
+	}
+}
+
+// TestACutShortAssemblyIsStoppedAndAssembledAgain: an assembly the soft
+// timeout stops once md took one member leaves the array inactive; the same
+// converge reads it again and stops it, the group's row naming the failed
+// assembly, and the next converge assembles it from both legs (CN12).
+func TestACutShortAssemblyIsStoppedAndAssembledAgain(t *testing.T) {
+	f, _ := brokenIdle(t)
+	f.node.mu.Lock()
+	f.node.failCmd["mdadm --assemble "+f.mdDev] = "mdadm: assembly failed"
+	f.node.mu.Unlock()
+	f.syncup(t, quietLevel(4))
+	f.node.mu.Lock()
+	delete(f.node.failCmd, "mdadm --assemble "+f.mdDev)
+	f.node.cutShortAssemblies = 1
+	f.node.mu.Unlock()
+	f.node.Reset()
+	info := f.syncup(t, quietLevel(5))
+	if row := info.GetGrpIdToMdRaid()[testDataGrp]; row.GetStatus() !=
+		pb.ResStatus_RES_STATUS_ERROR {
+		t.Fatalf("the group's row after the cut-short assembly: %v", row)
+	}
+	stops := f.node.callsMatching("cmd mdadm --stop ")
+	if len(stops) != 1 {
+		t.Fatalf("stops after the cut-short assembly %v, want the "+
+			"inactive array stopped once", stops)
+	}
+	assertOrder(t, f.node, "cmd mdadm --assemble "+f.mdDev,
+		"cmd mdadm --stop ")
+	f.node.Reset()
+	info = f.syncup(t, quietLevel(6))
+	assertOk(t, info.GetGrpIdToMdRaid()[testDataGrp], "grp data")
+	if got := f.members(); !slices.Equal(got,
+		slices.Sorted(slices.Values([]string{f.leg1, f.leg2}))) {
+		t.Errorf("the array holds %v, want both legs", got)
+	}
+}
+
+// TestAnArrayBuildRunsUnderTheLongerBound: an array's create, and its
+// assembly, run under common.MdBuildTimeout, not the soft timeout that
+// bounds every other command, such as the stop (CN12).
+func TestAnArrayBuildRunsUnderTheLongerBound(t *testing.T) {
+	f := newRepFix(t, allLegs...)
+	f.syncup(t, quietLevel(3))
+	f.node.setArrayState(f.mdDev, mdStateInactive)
+	f.syncup(t, quietLevel(4))
+	f.node.mu.Lock()
+	limits := maps.Clone(f.node.cmdLimits)
+	f.node.mu.Unlock()
+	soft := common.CmdSoftTimeout * time.Second
+	for _, action := range []string{"--create", "--assemble"} {
+		if limits[action] <= soft {
+			t.Errorf("mdadm %s ran under %v, want the longer bound %v",
+				action, limits[action], common.MdBuildTimeout*time.Second)
+		}
+	}
+	if stop, ok := limits["--stop"]; !ok || stop > soft {
+		t.Errorf("mdadm --stop ran under %v (seen %t), want the soft "+
+			"timeout", stop, ok)
+	}
+}
+
+// TestAnInactiveArrayWithAMemberWithNoSuperblock: an inactive array whose
+// other leg carries no superblock is assembled again from the leg that
+// carries one, and the other is added after, as a broken one is (CN12).
+func TestAnInactiveArrayWithAMemberWithNoSuperblock(t *testing.T) {
+	f := newRepFix(t, allLegs...)
+	f.syncup(t, quietLevel(3))
+	f.node.setArrayState(f.mdDev, mdStateInactive)
+	node := f.node.mdNode(f.mdDev)
+	f.node.mu.Lock()
+	f.node.superblocks[f.leg2] = false
+	f.node.mu.Unlock()
+	f.node.Reset()
+	info := f.syncup(t, quietLevel(4))
+	assertOrder(t, f.node, "cmd mdadm --stop "+node,
+		"cmd mdadm --assemble "+f.mdDev, f.add(f.leg2))
+	assertOk(t, info.GetGrpIdToMdRaid()[testDataGrp], "grp data")
+}
+
+// TestACutShortReassemblyIsStopped: the re-assembly of a broken array whose
+// assembly the bound stops once md took one member leaves the array
+// inactive; the same pass stops it, and the next converge assembles it from
+// both legs (CN12).
+func TestACutShortReassemblyIsStopped(t *testing.T) {
+	f, node := brokenIdle(t)
+	f.node.mu.Lock()
+	f.node.cutShortAssemblies = 1
+	f.node.mu.Unlock()
+	f.node.Reset()
+	info := f.syncup(t, quietLevel(4))
+	if row := info.GetGrpIdToMdRaid()[testDataGrp]; row.GetStatus() !=
+		pb.ResStatus_RES_STATUS_ERROR {
+		t.Fatalf("the group's row after the cut-short assembly: %v", row)
+	}
+	if stops := f.node.callsMatching("cmd mdadm --stop "); len(stops) != 2 {
+		t.Fatalf("stops %v, want the broken array's and the inactive "+
+			"array's", stops)
+	}
+	assertOrder(t, f.node, "cmd mdadm --stop "+node,
+		"cmd mdadm --assemble "+f.mdDev)
+	f.node.Reset()
+	info = f.syncup(t, quietLevel(5))
+	assertOk(t, info.GetGrpIdToMdRaid()[testDataGrp], "grp data")
+	if got := f.members(); !slices.Equal(got,
+		slices.Sorted(slices.Values([]string{f.leg1, f.leg2}))) {
+		t.Errorf("the array holds %v, want both legs", got)
+	}
+}
+
+// TestACutShortAssemblyStopsNothingWhileTheOperatorIsInCharge: with the
+// group's operator_in_charge flag set, the pass stops no array its failed
+// assembly left, as it re-assembles none (CN12).
+func TestACutShortAssemblyStopsNothingWhileTheOperatorIsInCharge(t *testing.T) {
+	f, _ := brokenIdle(t)
+	f.node.mu.Lock()
+	f.node.failCmd["mdadm --assemble "+f.mdDev] = "mdadm: assembly failed"
+	f.node.mu.Unlock()
+	f.syncup(t, quietLevel(4))
+	f.node.mu.Lock()
+	delete(f.node.failCmd, "mdadm --assemble "+f.mdDev)
+	f.node.cutShortAssemblies = 1
+	f.node.mu.Unlock()
+	f.node.Reset()
+	req := quietLevel(5)
+	dataGrpOf(req).OperatorInCharge = true
+	f.syncup(t, req)
+	assertNoCall(t, f.node, "cmd mdadm --stop")
 }

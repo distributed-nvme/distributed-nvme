@@ -31,8 +31,9 @@ import (
 // worker re-sends the SyncupCntlr whose converge fails it early for its dead
 // leg, puts the member back, adds it to an array that lacks it, or removes a
 // repair's member md holds without a place; LeftoverKindMdBroken names, by
-// its node, a broken md array of a wanted group that the converge would stop
-// and assemble again (cnagent.md CN12, The re-assembly; CN30);
+// its node, a broken or inactive md array of a wanted group that the
+// converge would stop and assemble again (cnagent.md CN12, The
+// re-assembly; CN30);
 // LeftoverKindMdAbsent names, by the group's row name, the absent md array
 // of a wanted group that the converge's assembly would start (cnagent.md
 // CN12, CN30).
@@ -84,8 +85,9 @@ func (r *SweepResult) Clean() bool {
 
 // Add records one object of kind that is present and unwanted, or, under
 // LeftoverKindMdMember, an md member the converge would fail early, put
-// back, add or remove for a repair, under LeftoverKindMdBroken, a broken
-// array the converge would assemble again, or, under LeftoverKindMdAbsent,
+// back, add or remove for a repair, under LeftoverKindMdBroken, a broken or
+// inactive array the converge would assemble again, or, under
+// LeftoverKindMdAbsent,
 // an absent array the converge would start.
 func (r *SweepResult) Add(kind string, name string) {
 	r.leftovers = append(r.leftovers, kind+":"+name)

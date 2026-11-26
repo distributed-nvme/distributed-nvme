@@ -363,6 +363,12 @@ const (
 
 	CmdSoftTimeout = 3
 	CmdHardTimeout = 5
+	// MdBuildTimeout bounds a cn agent's mdadm --create and --assemble of a
+	// group's array in place of CmdSoftTimeout, the hard stop following
+	// CmdHardTimeout-CmdSoftTimeout later as for every command: on a node
+	// that builds many arrays at once an assembly took longer than 3
+	// seconds, and the stop left the array inactive (cnagent.md CN12).
+	MdBuildTimeout = 15
 
 	// The clone pair has no defaults: a clone's DmCloneConf is stored as sent
 	// and forwarded to the cn agent untouched, so a zero there leaves the

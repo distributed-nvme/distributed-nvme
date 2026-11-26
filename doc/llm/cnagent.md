@@ -2635,8 +2635,8 @@ dm-clone (CN18).
   holders listing shows (Known limits). Reason for the stop's name: step
   1, above.
 
-  **The re-assembly.** A group's array that reads broken, with no
-  forced-start mark in the group's record and the group's
+  **The re-assembly.** A group's array that reads broken or inactive, with
+  no forced-start mark in the group's record and the group's
   `operator_in_charge` flag clear, is stopped and assembled again by the
   assembly above, in the same pass, once nothing speaks against it: the
   array holds no member that is not a leg wrapper of this pool (the
@@ -2684,9 +2684,17 @@ dm-clone (CN18).
   absent array once a stop went through (CN30). A reading that is not
   clear is named by nothing, and the read's verdict brings the converge
   once it is.
-  An array that reads inactive, as a refused assembly leaves it, is not
-  re-assembled: the same assembly would be refused again. An Info record
-  ("broken array assembled again") names the group, the node stopped and
+  An array that reads inactive is re-assembled as a broken one is: an
+  assembly stopped after md added a member leaves one. An assembly that
+  fails in a pass is followed by a read of the array in the same pass:
+  one that does not run is stopped when every member is a leg wrapper of
+  this pool, so that the next assembly finds the legs free (the forced
+  start's own clean-up, above), and one that runs after all is the
+  group's array, while the group's `operator_in_charge` flag is clear.
+  Every `--create` and `--assemble` runs under `MdBuildTimeout` in place of
+  the soft timeout (`dnagent.md` SH15): on a node that builds many arrays at
+  once an assembly outlasted the soft timeout. An Info record
+  ("array assembled again") names the group, the node stopped and
   the node started, once the assembled array is there: the agent mended the
   group alone (`log.md` R6).
 
@@ -2781,13 +2789,15 @@ soft timeout, never started, ctx cancelled: `agent.Reported` is false) is
 an error and must never read as absent. A `--create` that is killed between
 its members' superblock
 writes — mdadm writes them one after the other, and a slow write to one
-leg's side can outlast the soft timeout — leaves one leg with a superblock
+leg's side can outlast the bound of an array build (`MdBuildTimeout`), a
+longer one than the soft timeout, which makes it rarer — leaves one leg
+with a superblock
 that counts both legs as working and the other with none: the next
 converge takes case 2 from that one leg, without `--run`, and mdadm
-refuses to start a lone leg whose superblock counts another leg, which can
-leave an inactive array that every later converge of this cntlr reads as
-the group's error and leaves as it is (above), while a cntlr promoted after
-it meets the same refusal from the same lone leg. Only an operator's forced
+refuses to start a lone leg whose superblock counts another leg, leaving
+no array (`cnagent_integtest.md`, Lab facts), while a cntlr promoted after
+it meets the same refusal from the same lone leg; an inactive array the
+create killed partway left is stopped in the same pass (above). Only an operator's forced
 start from the leg that carries the superblock recovers the group; the
 group is new — a slice group of a new pool, a group `GrowSlice` appends, or
 a clone meta group with no dm-clone over it yet — so no data is lost.
@@ -6601,9 +6611,10 @@ that array as it is, so a name would bring a `SyncupCntlr` on every
 round for a converge that refuses again; the first read that finds the
 guard let go names the group's members again.
 
-A cntlr's read-only verdict also names each broken array its converge
-would assemble again (CN12, The re-assembly), under a kind of its own
-(`agent.LeftoverKindMdBroken`) by the array's node: one that reads broken,
+A cntlr's read-only verdict also names each broken or inactive array its
+converge would assemble again (CN12, The re-assembly), under a kind of its
+own (`agent.LeftoverKindMdBroken`) by the array's node: one that reads
+broken or inactive,
 with no forced-start mark in its group's record and the group's
 `operator_in_charge` flag clear, that no device holds open and whose
 members' reading is clear, each member's leg read as serving as above.
@@ -7415,13 +7426,12 @@ stores instead is CN23's.
   the read, grow with the slice count. No worker that drives the pool, as
   in a handoff between owners, means no re-send: the stack waits for the
   next owner's first round (next). An assembly of a RAID1 group that the
-  soft timeout (`dnagent.md` SH15) ends after mdadm has added a member and
-  before it has started the array builds no stack at all: md holds the
-  array inactive with the members added, which this agent leaves as it is
-  (CN12) and no
-  read names absent, so no re-send comes, and the pause lasts until the
-  worker fails the pool over (`architecture.md`, Known limits, A promotion
-  that outruns its sides can leave a group's array inactive).
+  bound of an array build (`MdBuildTimeout`) ends after mdadm has added a
+  member and before it has started the array builds no stack in that
+  pass: md holds the array inactive with the members added, which the same
+  pass stops and a read names (CN12, CN30), so the pause lasts another
+  round and converge (`architecture.md`, Known limits, A promotion that
+  outruns its sides can leave a group's array inactive).
 * The cn agent converges only in a `SyncupCntlr` and in the startup
   reconcile (CN10, No converge in the background), so while no worker
   drives the pool — a handoff between owners (`dnv-worker.md` VW7) — a

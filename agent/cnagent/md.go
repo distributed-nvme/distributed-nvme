@@ -10,6 +10,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/distributed-nvme/distributed-nvme/agent"
 	"github.com/distributed-nvme/distributed-nvme/common"
@@ -529,7 +530,7 @@ func (m *Md) Walk(ctx context.Context) (*MdWalk, error) {
 // The calls of CN12's forced start can start from a walk that holds an
 // unanswered node: forcedStartPass's after its stop of an array that does
 // not run, since the Detail before it matched that array and a match never
-// asks about the other nodes; forcedStartLeft's after a failed forced
+// asks about the other nodes; assemblyLeft's after a failed forced
 // assembly, the second of which starts from a walk the first may have
 // marked; and startedArray's after a forced start, which forcedStartPass
 // makes and which can follow those. Dropping an unanswered node that
@@ -1000,7 +1001,7 @@ func (d *MdDetail) foreignErr() error {
 // is not: a member that is not a dm device (foreignErr), or a dm device of
 // somebody else, such as a co-hosted dn agent's export device in an array
 // udev assembled. CN12's forced start stops a group's array only when this
-// is nil (forcedStartPass, forcedStartLeft).
+// is nil (forcedStartPass, assemblyLeft).
 func (d *MdDetail) strangerErr(clusterId, cnId, spId uint64) error {
 	if d.Foreign {
 		return d.foreignErr()
@@ -1129,7 +1130,11 @@ func (m *Md) Create(
 	for i := len(members); i < conf.RaidDevices; i++ {
 		args = append(args, "missing")
 	}
-	return m.cmd.RunOk(ctx, "mdadm", args...)
+	// A create writes each member's superblock in turn, and a stop between
+	// two leaves one leg with a record that counts both: it runs under the
+	// longer bound of an array build (CN12).
+	return m.cmd.RunOkFor(ctx, common.MdBuildTimeout*time.Second, "mdadm",
+		args...)
 }
 
 // Assemble starts an existing array from the members that carry a superblock.
@@ -1145,7 +1150,10 @@ func (m *Md) Assemble(
 ) error {
 	args := mdFormatArgs([]string{"--assemble", devPath},
 		append([]string{"--name", arrayName}, members...)...)
-	return m.cmd.RunOk(ctx, "mdadm", args...)
+	// The longer bound of an array build (CN12): an assembly stopped once
+	// md holds a member leaves the array inactive.
+	return m.cmd.RunOkFor(ctx, common.MdBuildTimeout*time.Second, "mdadm",
+		args...)
 }
 
 // The superblock updates of CN12's forced assembly (AssembleForced), one per
@@ -1175,9 +1183,11 @@ func (m *Md) AssembleForced(
 	member string,
 	update string,
 ) error {
-	return m.cmd.RunOk(ctx, "mdadm", mdFormatArgs(
-		[]string{"--assemble", devPath}, "--name", arrayName, "--run",
-		"--force", "--update="+update, member)...)
+	// The longer bound of an array build (CN12, SH15): the run writes its
+	// superblock update before md starts the array.
+	return m.cmd.RunOkFor(ctx, common.MdBuildTimeout*time.Second, "mdadm",
+		mdFormatArgs([]string{"--assemble", devPath}, "--name", arrayName,
+			"--run", "--force", "--update="+update, member)...)
 }
 
 func (m *Md) Add(ctx context.Context, devPath, member string) error {
@@ -1292,6 +1302,23 @@ func (s *CnAgentServer) ensureGroup(
 		err = s.assembleGroup(ctx, gp, available)
 		if err == nil {
 			detail, err = s.startedArray(ctx, gp, walk)
+			break
+		}
+		// CN12: an assembly that failed can leave the array inactive,
+		// holding a member, as one the bound stopped once md took it; the
+		// pass reads the array again and stops one that does not run when
+		// every member is this pool's, so the next assembly finds the legs
+		// free, while the operator is not in charge of the group. One that
+		// runs after all is the group's array. The stop runs even when the
+		// syncup's deadline cancelled the pass.
+		if gp.grp.GetOperatorInCharge() {
+			break
+		}
+		if started, leftErr := s.assemblyLeft(context.WithoutCancel(ctx),
+			plan, gp, walk); leftErr != nil {
+			err = fmt.Errorf("%w; %w", err, leftErr)
+		} else if started {
+			detail, err = s.startedArray(ctx, gp, walk)
 		}
 	}
 	if err == nil {
@@ -1373,9 +1400,10 @@ func (s *CnAgentServer) startedArray(
 // member reconciliation is for a running mirror, and an --add, --fail or
 // --remove on an array that has not started could only change which members
 // an operator's start would find. Its state is the group's error. Only the
-// stop of CN12's forced start, while the group's mark stands, and the stop
-// of CN12's re-assembly of a broken array (reassemblePass) act on such an
-// array, both before this test (ensureGroup).
+// stop of CN12's forced start, while the group's mark stands, the stop of
+// CN12's re-assembly of a broken or inactive array (reassemblePass) and the
+// stop of what a failed assembly left (assemblyLeft) act on such an array,
+// all before this test (ensureGroup).
 func runningArrayErr(detail *MdDetail) error {
 	if detail.Foreign {
 		return detail.foreignErr()
@@ -1953,24 +1981,30 @@ func (s *CnAgentServer) forcedStartPass(
 
 // mdStateBroken is the array_state of an array md has marked broken, which
 // refuses every write: every member has failed under IO, or the last one md
-// held in sync (CN29).
-const mdStateBroken = "broken"
+// held in sync (CN29). mdStateInactive is that of an array assembled in part
+// and not started, as an assembly stopped once md held a member leaves it.
+const (
+	mdStateBroken   = "broken"
+	mdStateInactive = "inactive"
+)
 
 // reassembles reports whether ensureGroup's pass tries CN12's re-assembly of
-// the group's array: it reads broken, holds no member that is not a dm
+// the group's array: it reads broken or inactive, holds no member that is not
+// a dm
 // device, the group's record carries no forced-start mark, and the operator
 // has not taken the group over (Group.operator_in_charge). A mark acts in the
 // re-assembly's place; one held from a request that does not count as
 // delivered, which the pass does not act on (dropForcedStartMarks), holds it
 // too, since the operator's choice of a leg may still stand.
 func reassembles(gp *grpPlan, detail *MdDetail) bool {
-	return detail.Exists && detail.State == mdStateBroken &&
+	return detail.Exists &&
+		(detail.State == mdStateBroken || detail.State == mdStateInactive) &&
 		!detail.Foreign && gp.grp.GetForcedStart() == nil &&
 		!gp.grp.GetOperatorInCharge()
 }
 
 // reassemblyRefusal is "" when CN12's re-assembly may stop the group's
-// broken array and assemble it again, and otherwise why not, the converge's
+// broken or inactive array and assemble it again, and otherwise why not, the converge's
 // (reassemblePass) and the read's (probeCntlr) alike: the array holds a
 // member that is no leg wrapper of this pool, which the sweep's rule leaves
 // alone (MdDetail.strangerErr); a device holds the array open (Md.Holders),
@@ -2065,8 +2099,8 @@ func brokenLeftError(detail *MdDetail, why string) error {
 		detail.Dev, detail.State, why)
 }
 
-// reassemblePass is ensureGroup's part for a group whose array reads broken
-// with no forced-start mark and no operator in charge (reassembles; cnagent.md
+// reassemblePass is ensureGroup's part for a group whose array reads broken or
+// inactive with no forced-start mark and no operator in charge (reassembles; cnagent.md
 // CN12, The re-assembly): once reassemblyRefusal finds nothing against it, the
 // array is stopped (stopGroupArray) and assembled again by CN12's assembly
 // (assembleGroup), whose plain assemble starts it from the members md holds
@@ -2111,7 +2145,16 @@ func (s *CnAgentServer) reassemblePass(
 			found.State)
 	}
 	if err := s.assembleGroup(ctx, gp, available); err != nil {
-		return nil, err
+		// As ensureGroup's plain assembly: an inactive array the failed
+		// assembly left is stopped, and one that runs after all is kept.
+		started, leftErr := s.assemblyLeft(context.WithoutCancel(ctx), plan,
+			gp, walk)
+		if leftErr != nil {
+			return nil, fmt.Errorf("%w; %w", err, leftErr)
+		}
+		if !started {
+			return nil, err
+		}
 	}
 	found, err = s.startedArray(ctx, gp, walk)
 	if err != nil {
@@ -2126,9 +2169,9 @@ func (s *CnAgentServer) reassemblePass(
 
 // msgReassembly is the Info record of CN12's re-assembly, made once the
 // array it assembled again is there, at Info since the agent mended the
-// group alone (log.md R6): it names the group, the broken
+// group alone (log.md R6): it names the group, the broken or inactive
 // array's node it stopped and the node the assembly started.
-const msgReassembly = "broken array assembled again"
+const msgReassembly = "array assembled again"
 
 // errArrayNameInUse is the create's refusal while an array that holds none of
 // the group's legs runs under the group's name (assembleGroup). Only an
@@ -2662,7 +2705,7 @@ func olderNamedLeg(
 // the array starts from the named leg alone (AssembleForced) under a new
 // identity (mdUpdateUuid), and update is the superblock update, or the two,
 // of the runs that started it. When that run fails, the same pass reads what
-// it left (forcedStartLeft): an array that does not run is stopped, and one
+// it left (assemblyLeft): an array that does not run is stopped, and one
 // that runs, which a run killed at the soft timeout can have started in the
 // kernel, is taken as started.
 //
@@ -2699,7 +2742,7 @@ func (s *CnAgentServer) forcedAssemble(
 		named.path, mdUpdateUuid)
 	started := first == nil
 	if !started {
-		started, err = s.forcedStartLeft(ctx, plan, gp, walk)
+		started, err = s.assemblyLeft(ctx, plan, gp, walk)
 		if err != nil {
 			return "", fmt.Errorf("%w; %w", first, err)
 		}
@@ -2729,7 +2772,7 @@ func (s *CnAgentServer) forcedAssemble(
 	if second == nil {
 		return update, nil
 	}
-	started, err = s.forcedStartLeft(ctx, plan, gp, walk)
+	started, err = s.assemblyLeft(ctx, plan, gp, walk)
 	if err != nil {
 		return "", fmt.Errorf("%w; %w", second, err)
 	}
@@ -2782,15 +2825,17 @@ func errForcedStartWaits(lp *legPlan) error {
 		lp.legId)
 }
 
-// forcedStartLeft is what a forced assembly that failed left of the group's
-// array (forcedAssemble): started reports an array that runs, and one that
-// does not run — a failed assembly can leave an inactive array holding the
-// named leg — is stopped, so that the next assembly finds the leg free. An array holding a member that is not a dm device
+// assemblyLeft is what an assembly that failed left of the group's array, a
+// forced one's (forcedAssemble) or a plain one's (ensureGroup): started
+// reports an array that runs, and one that does not run — a failed assembly
+// can leave an inactive array holding a leg, as one the soft timeout
+// stopped once md took it — is stopped, so that the next assembly finds the
+// leg free. An array holding a member that is not a dm device
 // is the group's error whether it runs or not, as in ensureGroup, and one
 // that does not run is stopped only when the sweep would call it ours: one
 // that holds any other member is the group's error, and nothing stops it
 // (MdDetail.strangerErr).
-func (s *CnAgentServer) forcedStartLeft(
+func (s *CnAgentServer) assemblyLeft(
 	ctx context.Context,
 	plan *cntlrPlan,
 	gp *grpPlan,
@@ -3949,12 +3994,12 @@ func (s *CnAgentServer) probeGroup(
 }
 
 // brokenArray is found, a group's array as a read's md walk matched it
-// (probeGroup), when it reads broken and holds no member that is not a dm
-// device, for the verdict's re-assembly name (reassemblyNamed); nil
+// (probeGroup), when it reads broken or inactive and holds no member that is
+// not a dm device, for the verdict's re-assembly name (reassemblyNamed); nil
 // otherwise.
 func brokenArray(found *MdDetail) *MdDetail {
 	if found == nil || !found.Exists || found.Foreign ||
-		found.State != mdStateBroken {
+		(found.State != mdStateBroken && found.State != mdStateInactive) {
 		return nil
 	}
 	return found

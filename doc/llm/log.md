@@ -433,7 +433,8 @@ logs for the same thing.
   "kind:name" entries joined by a space; `kind` is one of the
   `LeftoverKind*` labels of `agent/sweep.go`, and a cntlr's read-only
   verdict lists there, each under a kind of its own, the md members, the
-  broken arrays and the absent arrays `cnagent.md` CN30 names) and
+  broken or inactive arrays and the absent arrays `cnagent.md` CN30 names)
+  and
   `failures`: the steps that could not prove the scope clean — an
   enumeration that did not answer, a record the pass could not free, or, on
   the dn, a disk whose identity is not confirmed or a side with bytes still
@@ -479,7 +480,8 @@ calls do NOT remove is in both logs at every re-send, which is exactly
 what distinguishes it from one the next pass removed. A leftover that only a
 background read's verdict names, and that the `Syncup*` it brings does not
 report — an md member that syncup's converge fails early, puts back, adds
-or removes for a repair, a broken array it assembles again or an absent
+or removes for a repair, a broken or inactive array it assembles again or
+an absent
 array its assembly starts (`cnagent.md` CN12, CN30), a failure a cntlr's
 verdict names only on a read, such as a forced start, an md check, an
 uncreated snapshot or a source entry with no controller (`cnagent.md`

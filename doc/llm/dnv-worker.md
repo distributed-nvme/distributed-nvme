@@ -2371,12 +2371,12 @@ order mitigates three races and is no correctness dependency
 `SyncupCntlr` outrunning the sides' ANA flips, which leaves the new
 primary's groups to the converge of the `SyncupCntlr` this worker
 re-sends once the cntlr's read names a group's absent array or a
-`RedundNone` group's dm-linear (`cnagent.md` CN10, CN30; RW4), but for a RAID1
-group whose assembly in that converge the agent's soft timeout ends after
-mdadm has added a member and before it has started the array, which leaves the
-array inactive, which no read names absent (`architecture.md`, Known limits, A
-promotion that outruns its sides can leave a group's array inactive), and a
-cntlr's connect to a new side outrunning that side's export (both `cnagent.md`
+`RedundNone` group's dm-linear (`cnagent.md` CN10, CN30; RW4), a RAID1
+group whose assembly in that converge was stopped after mdadm had added a
+member and before it started the array included: the same converge stops
+that inactive array, and the read names it (`architecture.md`, Known
+limits, A promotion that outruns its sides can leave a group's array
+inactive); and a cntlr's connect to a new side outrunning that side's export (both `cnagent.md`
 CN10); and a leg removal's `nvme disconnect` on a CN overlapping the disk
 node's unlink of that side's export, which can leave the disconnect waiting
 out the kernel's admin timeout. That unlink comes from the dn role's

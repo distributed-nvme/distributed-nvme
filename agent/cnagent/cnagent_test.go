@@ -3210,7 +3210,9 @@ func TestGroupBesideAnUnansweredArray(t *testing.T) {
 // rebuild reads in mdadm's own words
 // with sysfs's progress. An array that is not running (inactive here, the
 // other states in TestGroupProbeArrayStates) reads ERROR with its state as
-// details, and a converge leaves it alone.
+// details, and a converge leaves it alone while a device holds it open, as
+// the fake's pool concat does here, which the re-assembly refuses to stop
+// (CN12); TestAnInactiveArrayIsAssembledAgain has one nothing holds.
 func TestGroupProbeIsSysfsOnly(t *testing.T) {
 	srv, node := newTestServer(t)
 	syncupBoth(t, srv, reqOpts{
@@ -3275,7 +3277,8 @@ func TestGroupProbeIsSysfsOnly(t *testing.T) {
 			info.GetStatus(), info.GetDetails())
 	}
 	// Not one mdadm command: no --add, --fail or --remove against the
-	// array, no assembly, and no probe of it either.
+	// array, no stop or assembly while it is held, and no probe of it
+	// either.
 	assertNoCall(t, node, "cmd mdadm")
 }
 

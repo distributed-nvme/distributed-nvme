@@ -183,8 +183,17 @@ type fakeNode struct {
 	// success with the superblock left in place, as a write that never
 	// reached the leg leaves it: only the agent's own read back tells
 	// (cnagent.md CN12, the forced start).
-	zeroNoEffect      map[string]bool
-	refusedLeaves     bool
+	zeroNoEffect  map[string]bool
+	refusedLeaves bool
+	// cutShortAssemblies is how many of the next plain assemblies are
+	// stopped once md took their first member, as the soft timeout stops a
+	// slow one: each leaves an inactive array holding that member and
+	// fails.
+	cutShortAssemblies int
+	// cmdLimits is, per mdadm action a call named (--create, --assemble,
+	// --stop, and --force for a forced assembly), the largest time its
+	// context left it when it began: the bound the agent ran it under.
+	cmdLimits         map[string]time.Duration
 	refusedLeavesAlso []string
 	// stopDeleting makes a successful `mdadm --stop` leave the array's
 	// /sys/block entry and its md/ directory, with no member in it and an
@@ -1398,6 +1407,18 @@ func (f *fakeNode) runCommand(
 
 	f.mu.Lock()
 	f.record("%s", line)
+	if deadline, ok := ctx.Deadline(); ok && name == "mdadm" {
+		for _, action := range []string{"--create", "--assemble", "--stop",
+			"--force"} {
+			if contains(args, action) {
+				if f.cmdLimits == nil {
+					f.cmdLimits = make(map[string]time.Duration)
+				}
+				f.cmdLimits[action] = max(f.cmdLimits[action],
+					time.Until(deadline))
+			}
+		}
+	}
 	if f.traceOf != nil {
 		tid, _ := common.TraceIdFromCtx(ctx)
 		f.traceOf[line] = tid
@@ -3243,6 +3264,12 @@ func (f *fakeNode) mdAssemble(args []string) (string, int) {
 	// or not.
 	if len(members) == 1 && f.sbFacts[members[0]].recovery != "" {
 		f.dispatchStderr = "mdadm: Not enough devices to start the array."
+		return "", 1
+	}
+	if f.cutShortAssemblies > 0 && !contains(args, "--run") {
+		f.cutShortAssemblies--
+		f.leaveInactive(dev, name, members[0])
+		f.dispatchStderr = "signal: terminated"
 		return "", 1
 	}
 	// Without --run, mdadm starts the array only from enough members
