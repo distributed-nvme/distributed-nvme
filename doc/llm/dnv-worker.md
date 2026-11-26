@@ -3878,8 +3878,9 @@ joined to the next create (MD6). A
 end the pass. The pass continues
 past: AR5's no-failover-candidate (AR7's sole-primary variant is defined as
 "AR5 found none" and would otherwise be unreachable); AR5's `shared_state`
-and `same_error`, which can hold for as long as the error does — an
-operator's intervention, for a lost thin id or a pool's needs_check — and
+and `same_error`, the first of which can hold for as long as the error
+does — an operator's intervention, for a lost thin id or a pool's
+needs_check — and the second for `cntlr_unhealthy` at most — and
 its `candidate_refuses`, for as long as the standbys' refusals do (HL9),
 a no-candidate case as well; AR6's `grow_pending`,
 `data_covered`, `grp_list_full`, `meta_ladder_cap`, `no_data_group` and the
@@ -3889,7 +3890,8 @@ with room than the group has legs (each can hold indefinitely — a grow
 deferred on the CN, a ceiling of `architecture.md`, GrowSlice, a full
 cluster — and must not disable AR7 and AR8 for the duration); AR7's
 `shared_state`, `same_error` and `candidate_refuses`, which can hold as
-long as AR5's and move the scan to the next cntlr, and its scan that finds no CN, which moves the
+long as AR5's, AR7's `same_error` with no bound, and move the scan to the
+next cntlr, and its scan that finds no CN, which moves the
 pass on to AR8; AR8's refusal of a drive step by its op, which
 holds that repair's group and moves the walk to the next repair, and its
 cancel's wait on `grp_row_stale` (`repair_cancel`), which does the same;
@@ -4205,10 +4207,20 @@ does (AR7, Known limits):
   do not name — a lost thin id a background read reports, whose probe
   carries no reason, among them (HL2) — does not send the role back to the
   cntlr it last left while the new primary fails no row the old one did
-  not: in an SP of two cntlrs it moves the role once, and in a larger one
-  it can first move it on to a cntlr that has not held it. An `err_epoch` set later is a new
+  not until the hold ends (below): in an SP of two cntlrs it moves the role
+  once, and back once, and in a larger one it can first move it on to a
+  cntlr that has not held it. An `err_epoch` set later is a new
   error, judged as any, and a report with no `ERROR` row — a primary read
   unreachable, whose rows the worker marks `UNKNOWN` — is refused nothing.
+  The hold ends once it has stood for `cntlr_unhealthy`, counted by the
+  coordinator's clock from the first pass at which it held for the
+  failover it records: the role then moves as for any, back to the old
+  primary when it is the candidate, and that failover records its own rows
+  with a hold that has no end. So a fault of the new primary's own keeps the
+  pool on it for one `cntlr_unhealthy` past the pass that would otherwise
+  fail it over, and a fault both share moves the role back once, not every
+  `cntlr_unhealthy`. AR7's twin for a replacement of the primary has no
+  such bound.
 * **The candidates refuse.** Every cntlr with `primary` false, `disabled`
   false and `err_epoch` zero has an agent that refuses its own
   `SyncupCntlr` with an invalid conf or a failed save (HL9), a latest
@@ -7471,18 +7483,20 @@ caught.
   observation; a background read's probe reads the absent volume `MISSING`
   with no reason (HL2), so a primary whose latest report is a read's is
   failed over, and the second refusal then keeps the role from
-  going back to it for as long as the new primary fails only on rows it failed
-  on (AR5) — in an SP of two cntlrs, one failover in all, and one more each
-  time a new primary also fails a row of its own; in a larger one the role can
-  first move on to a cntlr that has not held it. That refusal rests on the
+  going back to it while the new primary fails only on rows it failed on,
+  until that hold has stood for `cntlr_unhealthy`, and then the role goes
+  back once, whose failover holds with no end (AR5) — in an SP of two
+  cntlrs, two failovers in all, and one more each time a new primary also
+  fails a row of its own; in a larger one the role can first move on to a
+  cntlr that has not held it. That refusal rests on the
   coordinator's record of the last failover it applied: a coordinator after a
   restart or a shard handoff, or the other owner of an overlap (VW7), has
   none, and once its own verdicts read the primary unhealthy for two of its
   counted rounds in a row, or for its uncounted stretch (AR10), it can fail
   over once more before it has.
   It compares rows, not causes: a new primary whose own fault fails only
-  rows the old primary failed on is held as well, for as long as that fault
-  lasts or until an operator
+  rows the old primary failed on is held as well, for `cntlr_unhealthy`
+  from the hold's first pass at most, or until an operator
   moves the role, every pass logging why. AR7's sole-primary variant takes the
   twins of both refusals, judged on the same report (AR7). The first holds the
   primary of an SP with no failover candidate only while the report the
@@ -7691,7 +7705,9 @@ caught.
   pool — AR5's `reaction skipped` with `no candidate`, say, for as long as a
   primary due for failover has no eligible candidate, or `shared_state`,
   `same_error` or `candidate_refuses` for as long as the error or the
-  refusal that holds one lasts —, cntlr
+  refusal that holds one lasts, AR5's `same_error` until its hold has stood
+  for `cntlr_unhealthy` unless its failover was itself released by that
+  bound —, cntlr
   replacement's once per cntlr — AR7's `shared_state`, `same_error` or
   `candidate_refuses` once
   the primary it holds is due for replacement, beside AR5's, or alone while

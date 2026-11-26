@@ -1283,8 +1283,9 @@ Measured times are in [the introduction](introduction.md#status-and-limits).
   a cntlr replacement once the primary's health epoch has lasted the cntlr
   threshold. Where the same part fails on every cntlr, the role does not
   come back to the cntlr it left while the new primary fails on the same
-  error, as long as that worker runs: in a pool of two cntlrs it moves
-  once.
+  error, until that hold has stood for the cntlr threshold; then it comes
+  back once and stays: in a pool of two cntlrs it moves twice in all, as
+  long as that worker runs.
   A side on a disk node loops the same way, as a migration's new side
   does when it cannot connect to the old side after the cutover. The loop
   runs one converge of the cntlr or side at a time, with one interval
@@ -1816,8 +1817,9 @@ Measured times are in [the introduction](introduction.md#status-and-limits).
   fix later.
 - **A primary that never reports its stack built waits for the longer
   threshold.** It is failed over or replaced only after the longer of the
-  primary and the cntlr thresholds, 600 seconds at the defaults, unless the
-  "same error" rule below keeps it longer. The pool stays on it that long.
+  primary and the cntlr thresholds, 600 seconds at the defaults; a
+  failover waits one cntlr threshold more when the "same error" rule below
+  holds it, and a replacement waits as long as that rule holds. The pool stays on it that long.
   Disabling the primary ends it sooner. State: accepted, by design.
 - **The "same error" rule can keep a pool on a primary that cannot
   serve.** After a failover the worker remembers the error rows of the old
@@ -1825,16 +1827,21 @@ Measured times are in [the introduction](introduction.md#status-and-limits).
   threshold and all its error rows are among the remembered ones, the
   worker does not give the role back to the old primary: the rule keeps
   the role from moving back and forth over one fault the two share. It
-  compares the rows' names, not their causes, and has no time limit while
-  that worker runs; a restart of the worker, or a move of the pool to
-  another worker, ends it. A cntlr replacement of the primary follows the
-  same rule: a new primary whose error rows are all among those of the
-  cntlr it replaced is not replaced again. So a new primary with a fault of
-  its own can be kept for as long as that fault lasts, though the old
-  primary could serve again. State: fix decided. Until then, disable the
-  primary that is kept: the rule does not apply to a disabled primary,
-  so the failover follows at once where an enabled standby with no health
-  epoch is left. Read from dnv's code; not seen in the lab.
+  compares the rows' names, not their causes. For a failover it ends once
+  it has held for the cntlr threshold, 600 seconds at the default: the
+  role goes back once, and that move holds with no end, so a fault both
+  share moves the role twice in all in a pool of two cntlrs. A restart of
+  the worker, or a move of the pool to another worker, ends it too. So a
+  new primary with a fault of its own is kept for one cntlr threshold
+  more, though the old primary could serve again. State: accepted for the
+  failover. To end it sooner, disable the primary that is kept: the rule
+  does not apply to a disabled primary, so the failover follows at once
+  where an enabled standby with no health epoch is left. A cntlr
+  replacement of the primary follows the same rule with no end: a new
+  primary whose error rows are all among those of the cntlr it replaced is
+  not replaced again, and in a pool of one cntlr a disable gives no way out,
+  as a disabled cntlr is never replaced. State: fix later for the
+  replacement. Read from dnv's code; not seen in the lab.
 - **A controller node's agent that takes longer than the start hold to
   rebuild fails over its primaries.** After a restart the agent answers
   each check round with "starting", an answer that says it is still

@@ -2273,10 +2273,15 @@ func (w *spWorker) tryFailover(ctx context.Context, p *spPass) bool {
 		slog.Uint64("old_cntlr_id", p.primaryId),
 		slog.Uint64("new_cntlr_id", p.failoverCand),
 	}
-	if !p.primary.GetDisabled() && w.reactor().errorFollowedRole(p) {
-		// AR5's second refusal, and the pass goes on (AR2).
-		w.reactionSkipped(ctx, reactionFailover, reasonSameError, ids...)
-		return false
+	released := false
+	if !p.primary.GetDisabled() {
+		hold, bound := w.reactor().errorFollowedRole(p)
+		if hold {
+			// AR5's second refusal, and the pass goes on (AR2).
+			w.reactionSkipped(ctx, reactionFailover, reasonSameError, ids...)
+			return false
+		}
+		released = bound
 	}
 	err := w.reactor().ops.failover(
 		ctx, w.cid, w.shard, w.spId, w.desired.handle,
@@ -2289,6 +2294,10 @@ func (w *spWorker) tryFailover(ctx context.Context, p *spPass) bool {
 	w.reactor().lastFailover = &failoverMemo{
 		lost:      p.primaryId,
 		errorMemo: newErrorMemo(p.now, p.info),
+		// A failover the bound released records a hold with no end, so a
+		// fault both cntlrs share moves the role back once, not every
+		// cntlr_unhealthy (errorFollowedRole).
+		unbounded: released,
 	}
 	w.reactionApplied(ctx, reactionFailover, ids...)
 	return true
@@ -2345,6 +2354,12 @@ func (m *errorMemo) followed(
 type failoverMemo struct {
 	lost uint64
 	errorMemo
+	// heldSince is the pass's now at which the refusal first held for this
+	// failover, zero before (errorFollowedRole): the hold ends once it has
+	// stood for cntlr_unhealthy, unless unbounded, which a failover the
+	// bound released records.
+	heldSince uint64
+	unbounded bool
 }
 
 // errorFollowedRole is AR5's second refusal. The last failover took the role
@@ -2356,19 +2371,38 @@ type failoverMemo struct {
 // an error they do not name — a background read's report of a lost thin id,
 // which carries no reason (sharedStateOf), among them — from sending the
 // role back to the cntlr it last left while the new primary fails no row the
-// old one did not: in an SP of two cntlrs it moves the role once, and in a
+// old one did not until the hold ends: in an SP of two cntlrs it moves the
+// role once and back once, and in a
 // larger one it can first move it on to a cntlr that has not held it. A
 // report with any other ERROR row is taken for a fault of the primary's own,
 // and an err_epoch set later for a new error: the role moves as for any, and
-// that failover records the report's rows in turn. The record goes with the
+// that failover records the report's rows in turn. The hold ends once it has
+// stood for cntlr_unhealthy, counted from the first pass it held at for this
+// failover, and it reports bound when that end released it: a fault of the
+// new primary's own then no longer keeps the pool on it with no end. The
+// failover so released records a hold with no end, so a fault both cntlrs
+// share moves the role back once — two failovers in all in a pool of two
+// cntlrs — and not every cntlr_unhealthy. The record goes with the
 // coordinator: after a restart or a handoff, one failover more records it
 // again.
-func (r *reactor) errorFollowedRole(p *spPass) bool {
+func (r *reactor) errorFollowedRole(p *spPass) (hold, bound bool) {
 	m := r.lastFailover
 	if m == nil || m.lost != p.failoverCand {
-		return false
+		return false, false
 	}
-	return m.followed(p.primary.GetErrEpoch(), p.info, p.th)
+	if !m.followed(p.primary.GetErrEpoch(), p.info, p.th) {
+		return false, false
+	}
+	if m.unbounded {
+		return true, false
+	}
+	if m.heldSince == 0 {
+		m.heldSince = p.now
+	}
+	if reached(p.now, m.heldSince, p.th.GetCntlrUnhealthy()) {
+		return false, true
+	}
+	return true, false
 }
 
 // rowSet is a list of rows as a set.

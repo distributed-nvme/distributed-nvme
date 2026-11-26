@@ -2087,7 +2087,9 @@ func TestReactionSharedStateErrorIsNotATrigger(t *testing.T) {
 // same rows, and the role is not handed back to the cntlr that lost it while
 // the primary fails only on rows that cntlr failed on, from an error set
 // within cntlr_unhealthy of that failover: the error is presumed to have
-// followed the role. The role moves on anything else — rows the old primary
+// followed the role, until the hold has stood for cntlr_unhealthy
+// (TestReactionTheSameErrorHoldEndsAtTheCntlrThreshold). The role moves on
+// anything else — rows the old primary
 // did not fail on, beside its rows or instead of them, a report with no ERROR
 // row, a later error — and to another candidate, and at once when the
 // primary is disabled; a hand-back over rows of the primary's own records
@@ -2156,7 +2158,9 @@ func TestReactionRoleNotHandedBackOverTheSameError(t *testing.T) {
 
 	// The same rows and one of the new primary's own: the role goes back, and
 	// that failover's record refuses the next hand-back over the lost td's
-	// rows alone, so the role moves twice and then stays.
+	// rows alone, so the role moves twice and then holds, for
+	// cntlr_unhealthy, as TestReactionTheSameErrorHoldEndsAtTheCntlrThreshold
+	// pins.
 	t.Run("the same rows and an own one", func(t *testing.T) {
 		rows := lostStackInfo(false)
 		rows.SsIdToSubsystem[600] = resErr("ss", "not linked to the port")
@@ -4563,7 +4567,9 @@ func TestReactionAPrimaryWhoseBuildKeepsFailingFailsOver(t *testing.T) {
 // TestReactionABuildFailingOnEveryCntlrMovesTheRoleOnce: the same export
 // fails on the new primary too, from the same rows; the role does not come
 // back to the cntlr it left while the new primary fails on those rows alone
-// (AR5's same-error refusal), so no failover loop follows.
+// (AR5's same-error refusal), until that hold has stood for cntlr_unhealthy;
+// the role then comes back once at most, so no failover loop follows
+// (TestReactionTheSameErrorHoldEndsAtTheCntlrThreshold).
 func TestReactionABuildFailingOnEveryCntlrMovesTheRoleOnce(t *testing.T) {
 	rows := &pb.CntlrInfo{SsIdToSubsystem: map[uint64]*pb.ResInfo{
 		600: resErr("ss", "not linked to the port"),
@@ -4669,4 +4675,73 @@ func TestReactionFailoverPassesOverAStandbyThatReachesNoLeg(t *testing.T) {
 		h.wantOps()
 		h.wantSkipped(reactionFailover, reasonCandidateRefuses)
 	})
+}
+
+// TestReactionTheSameErrorHoldEndsAtTheCntlrThreshold pins AR5's second
+// refusal's bound: the hold that keeps the role from going back to the
+// cntlr the last failover took it from, while the new primary fails only on
+// rows the old one failed on, stands from its first pass — here a while past
+// the new primary's threshold — until it has stood for cntlr_unhealthy, and
+// the role then goes back to the healthy old primary; that failover records
+// a hold with no end, so a fault both share moves the role back once only.
+func TestReactionTheSameErrorHoldEndsAtTheCntlrThreshold(t *testing.T) {
+	const late = 100
+	h := newReactHarness(t, sharedStateFixture(t))
+	h.state.Cntlrs[reactCntlrA].ErrEpoch = h.ago(
+		common.DefaultPrimaryUnhealthy)
+	h.setPrimaryInfo(reactCntlrA, lostStackInfo(false))
+	h.pass()
+	h.wantOps("failover")
+	a, b := h.state.Cntlrs[reactCntlrA], h.state.Cntlrs[reactCntlrB]
+	a.Primary, a.ErrEpoch = false, 0
+	b.Primary, b.Settling, b.ErrEpoch = true, true, h.now()
+	h.setPrimaryInfo(reactCntlrB, lostStackInfo(false))
+	advance := func(seconds uint64) {
+		h.clk.advance(time.Duration(seconds) * time.Second)
+	}
+	skips := func() int {
+		n := 0
+		for _, rec := range h.logs.withMsg(msgReactionSkipped) {
+			if rec["reason"] == "same_error" {
+				n++
+			}
+		}
+		return n
+	}
+
+	// The hold's first pass comes late past the threshold; counted from
+	// there, it still stands one second short of cntlr_unhealthy.
+	advance(common.DefaultCntlrUnhealthy + late)
+	h.pass()
+	h.wantOps("failover")
+	if skips() != 1 {
+		t.Fatalf("%d same_error records at the hold's first pass, want 1",
+			skips())
+	}
+	advance(common.DefaultCntlrUnhealthy - 1)
+	h.pass()
+	h.wantOps("failover")
+	advance(1)
+	h.pass()
+	calls := h.wantOps("failover", "failover")
+	if calls[1].oldId != reactCntlrB || calls[1].newId != reactCntlrA {
+		t.Fatalf("failover %d -> %d, want %d -> %d back once the hold "+
+			"stood for cntlr_unhealthy", calls[1].oldId, calls[1].newId,
+			reactCntlrB, reactCntlrA)
+	}
+
+	// The fault follows the role back: that failover's hold has no end.
+	a.Primary, a.Settling, a.ErrEpoch = true, true, h.now()
+	b.Primary, b.Settling, b.ErrEpoch = false, false, 0
+	h.setPrimaryInfo(reactCntlrA, lostStackInfo(false))
+	held := skips()
+	advance(common.DefaultCntlrUnhealthy)
+	h.pass()
+	advance(3 * common.DefaultCntlrUnhealthy)
+	h.pass()
+	h.wantOps("failover", "failover")
+	if skips() != held+2 {
+		t.Fatalf("%d same_error records after the move back, want %d",
+			skips(), held+2)
+	}
 }
