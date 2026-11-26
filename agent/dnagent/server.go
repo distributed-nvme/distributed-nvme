@@ -127,8 +127,10 @@ type DnAgentServer struct {
 	// says Prepare set it.
 	rootCtx context.Context
 	rootSet bool
-	// startup is the agent's startup state (SH33).
+	// startup is the agent's startup state (SH33), and bootId the kernel's
+	// boot id Prepare read, which the startup pass saves as it ends.
 	startup agent.Startup
+	bootId  string
 }
 
 // WaitBackground joins the dn background goroutines enrolled in bg — the DN9

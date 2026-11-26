@@ -338,6 +338,9 @@ func (d *dnDriver) compareCounts(ctx context.Context, r *replyState) {
 // starting is HL8's starting round: no verdict on the node's record.
 func (d *dnDriver) starting(ctx context.Context) {}
 
+// holdsRebootedStart: a disk node's start holds it after a reboot too (HL8).
+func (d *dnDriver) holdsRebootedStart() bool { return true }
+
 // startEnded holds nothing for the node's record (HL8).
 func (d *dnDriver) startEnded(ctx context.Context) {}
 

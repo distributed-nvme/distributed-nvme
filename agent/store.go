@@ -64,6 +64,60 @@ type storeRefusal struct {
 	size int
 }
 
+// The store files in which each role keeps the kernel's boot id of its last
+// start that ended (ReadBoot, SaveBoot, dnagent.md SH33). Each role's
+// startup listing names its own, so that a temp file a save left is removed.
+const (
+	StoreFileBootDn = "boot-dn"
+	StoreFileBootCn = "boot-cn"
+)
+
+// BootIdPath is the kernel's boot id, new at each boot of the machine.
+const BootIdPath = "/proc/sys/kernel/random/boot_id"
+
+// ReadBoot reads the kernel's boot id and the one the store file name holds
+// from the agent's last start that ended, and reports whether they differ:
+// the agent starts after a boot of its machine that no start of it has seen
+// end (SH33). It returns the boot id SaveBoot is to save once this start
+// ends, empty when the file holds it already or it could not be read. A boot
+// id it cannot read, and a file that is absent, as at the first start of an
+// agent, or that does not load, report no reboot: the worker then holds the
+// node's failover as for a restart, the old behaviour. It saves nothing, so a
+// start that dies before its end, and every restart after it until one
+// ends, still reports the reboot, the kernel's devices not built yet.
+func (s *Store) ReadBoot(ctx context.Context, name string) (string, bool, error) {
+	cctx, cancel := cmdCtx(ctx)
+	defer cancel()
+	raw, err := s.oc.ReadFile(cctx, BootIdPath)
+	if err != nil {
+		return "", false, err
+	}
+	bootId := strings.TrimSpace(raw)
+	if bootId == "" {
+		return "", false, fmt.Errorf("%s is empty", BootIdPath)
+	}
+	saved := &wrapperspb.StringValue{}
+	if err := s.oc.ReadProto(cctx, s.prefix+"/"+name, saved); err != nil {
+		return bootId, false, nil
+	}
+	if saved.GetValue() == bootId {
+		return "", false, nil
+	}
+	return bootId, saved.GetValue() != "", nil
+}
+
+// SaveBoot saves bootId, which ReadBoot returned, in the store file name; an
+// empty one saves nothing. It runs once the startup pass has ended (SH33).
+func (s *Store) SaveBoot(ctx context.Context, name, bootId string) error {
+	if bootId == "" {
+		return nil
+	}
+	cctx, cancel := cmdCtx(ctx)
+	defer cancel()
+	return s.oc.WriteProto(cctx, s.prefix+"/"+name,
+		&wrapperspb.StringValue{Value: bootId})
+}
+
 func NewStore(oc common.OsClient, localStorPrefix string) *Store {
 	if localStorPrefix == "" {
 		localStorPrefix = common.DefaultLocalStorPrefix

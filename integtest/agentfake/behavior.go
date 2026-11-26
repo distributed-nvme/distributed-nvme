@@ -166,6 +166,11 @@ type Object struct {
 	// startup pass still runs does (dnagent.md SH33). The start stays the
 	// agent's once the lever is cleared.
 	Starting time.Time
+	// Rebooted marks the start a Starting lever gives as one after a reboot
+	// of the agent's machine: every reply's stamp then says so
+	// (agent_rebooted, dnagent.md SH33), and keeps saying it once the
+	// lever is cleared, as the start does.
+	Rebooted bool
 	// SyncupCode forces agent_reply.code on the object's Syncup* replies
 	// alone and suppresses their apply; its rounds and info reads answer
 	// from what the object last applied, as a real agent whose gate or
@@ -464,6 +469,7 @@ func (a *Agent) SetBehavior(b *Behavior) error {
 		if ob != nil && !ob.Starting.IsZero() {
 			// As Update: the Starting lever's start becomes the agent's.
 			a.started = ob.Starting
+			a.rebooted = ob.Rebooted
 		}
 	}
 	a.notifyLocked()
@@ -493,6 +499,7 @@ func (a *Agent) Update(key string, fn func(*Object)) error {
 		// One process, one start (dnagent.md SH33): the Starting lever's
 		// start is the agent's, and stays so after the lever is cleared.
 		a.started = ob.Starting
+		a.rebooted = ob.Rebooted
 	}
 	if a.beh.Objects == nil {
 		a.beh.Objects = make(map[string]*Object)

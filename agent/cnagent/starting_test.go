@@ -73,7 +73,7 @@ func TestAStartingAgentAnswersStarting(t *testing.T) {
 		codes.Unavailable {
 		t.Fatalf("a thin device bitmap read: %v, want Unavailable", err)
 	}
-	if calls := node.Calls(); len(calls) != 0 {
+	if calls := node.Calls(); startCalls(node) != 0 {
 		t.Fatalf("a starting agent touched the node before its pass: %v",
 			calls)
 	}

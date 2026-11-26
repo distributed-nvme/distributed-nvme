@@ -1328,6 +1328,11 @@ type verdictMemo struct {
 	// round's or a Syncup*'s, and the end of the hold (noteStartEnded) drop
 	// it.
 	starting map[uint64]bool
+	// serving holds the cntlrs whose latest verdict was clean, with no start
+	// noted since: what tells a reboot of one node from a cold start of
+	// every node (anotherServes, HL8). Unlike cntlrs it keeps the clean
+	// ones, since there an absent entry also means no verdict yet.
+	serving map[uint64]bool
 	// refusing holds the cntlrs whose agent refuses their driven revision's
 	// SyncupCntlr with an invalid conf or a failed save (HL9): AR5 does not
 	// fail a primary over onto one.
@@ -1355,6 +1360,7 @@ type verdictMemo struct {
 // newVerdictMemo builds an empty memo.
 func newVerdictMemo() *verdictMemo {
 	return &verdictMemo{
+		serving:    make(map[uint64]bool),
 		cntlrs:     make(map[uint64]bool),
 		runs:       make(map[uint64]int),
 		breaks:     make(map[uint64]uint64),
@@ -1457,6 +1463,28 @@ func (m *verdictMemo) noteStarting(cntlrId uint64) {
 	delete(m.syncupSick, cntlrId)
 	m.breaks[cntlrId]++
 	m.starting[cntlrId] = true
+	delete(m.serving, cntlrId)
+}
+
+// anotherServes says whether a cntlr other than cntlrId has a clean latest
+// verdict and no start held, and is none the memo knows a failover passes
+// over: one whose agent refuses its syncups, does not know it, reaches no
+// leg of some group or keeps a stack it was told to leave (AR5). A pool
+// where one has is not in a cold start of every node (HL8,
+// holdsRebootedStart). A disabled cntlr the memo cannot tell, so it counts.
+func (m *verdictMemo) anotherServes(cntlrId uint64) bool {
+	if m == nil {
+		return false
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	for id := range m.serving {
+		if id != cntlrId && !m.refusing[id] && !m.unknown[id] &&
+			!m.noLeg[id] && !m.stackLeft[id] {
+			return true
+		}
+	}
+	return false
 }
 
 // noteStartEnded ends a cntlr's hold of HL8: the round after the one that
@@ -1490,6 +1518,13 @@ func (m *verdictMemo) noteCntlr(cntlrId uint64, unhealthy bool) {
 	defer m.mu.Unlock()
 	noteVerdict(m.cntlrs, cntlrId, unhealthy)
 	delete(m.starting, cntlrId)
+	if m.serving != nil {
+		if unhealthy {
+			delete(m.serving, cntlrId)
+		} else {
+			m.serving[cntlrId] = true
+		}
+	}
 	if !unhealthy {
 		delete(m.runs, cntlrId)
 		delete(m.syncupSick, cntlrId)
@@ -1669,6 +1704,11 @@ func (m *verdictMemo) snapshot(state *model.SpState) judgedSet {
 			continue
 		}
 		out.refusing[cntlrId] = true
+	}
+	for cntlrId := range m.serving {
+		if _, ok := state.Cntlrs[cntlrId]; !ok {
+			delete(m.serving, cntlrId)
+		}
 	}
 	for cntlrId := range m.stackLeft {
 		if _, ok := state.Cntlrs[cntlrId]; !ok {

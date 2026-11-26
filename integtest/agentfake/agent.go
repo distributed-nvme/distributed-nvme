@@ -221,8 +221,10 @@ type Agent struct {
 	cfg Config
 	// started is the agent start time every reply's stamp carries
 	// (dnagent.md SH33): the fake's creation, or the latest start a Starting
-	// lever gave, which stays after the lever is cleared.
-	started time.Time
+	// lever gave, which stays after the lever is cleared; rebooted is
+	// whether that start was one after a reboot (Object.Rebooted).
+	started  time.Time
+	rebooted bool
 
 	mu         sync.Mutex
 	state      map[string]*objectState

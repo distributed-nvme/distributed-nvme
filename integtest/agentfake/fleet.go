@@ -246,9 +246,11 @@ func (a *Agent) Start(store Store) error {
 	// A new process has a new start (dnagent.md SH33), unless a Starting
 	// lever names it.
 	a.started = time.Now().Round(0)
+	a.rebooted = false
 	for _, ob := range a.beh.Objects {
 		if ob != nil && ob.Starting.After(a.started) {
 			a.started = ob.Starting
+			a.rebooted = ob.Rebooted
 		}
 	}
 	a.restartStoreLocked(context.Background(), store)

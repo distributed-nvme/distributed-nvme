@@ -14,11 +14,14 @@ import (
 
 // Prepare hands the server the process's ctx and begins its startup state,
 // before agent.Serve opens the gRPC listener (SH33): every RPC goroutine
-// then reads the rootCtx Reconcile keeps.
+// then reads the rootCtx Reconcile keeps, and every reply says whether the
+// agent started after a reboot of its machine.
 func (s *DnAgentServer) Prepare(ctx context.Context) {
 	s.rootCtx = ctx
 	s.rootSet = true
-	s.startup.Begin(s.now())
+	rebooted, bootId := agent.SeeBoot(ctx, s.store, agent.StoreFileBootDn)
+	s.bootId = bootId
+	s.startup.Begin(s.now(), rebooted)
 }
 
 // ResTracker keys of the node-level resources.
@@ -53,7 +56,7 @@ func (s *DnAgentServer) Reconcile(ctx context.Context) error {
 	// write, and a probe file whose removal a probe did not get to goes too:
 	// nothing reads it, and it holds room the store may need (DN18).
 	files, err := s.store.List(ctx, agent.StoreKindDn, agent.StoreKindSide,
-		agent.StoreKindMigrBm, agent.StoreKindDnProbe)
+		agent.StoreKindMigrBm, agent.StoreKindDnProbe, agent.StoreFileBootDn)
 	if err != nil {
 		return err
 	}
@@ -280,6 +283,9 @@ func (s *DnAgentServer) Reconcile(ctx context.Context) error {
 		}
 		s.applyMigrBitmaps(ctx, st, extentSize)
 	}
+	// SH33: the boot this start began under is saved only now, so a start
+	// that dies before here leaves the next one to report the reboot too.
+	agent.KeepBoot(ctx, s.store, agent.StoreFileBootDn, s.bootId)
 	s.startup.End()
 	return nil
 }

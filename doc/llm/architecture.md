@@ -1357,6 +1357,8 @@ and {bm_idx} are both rendered with `BmIdxFmt`.
 | `LocalCntlrPath` | {prefix}/cntlr-{cluster}-{cn}-{sp}-{cntlr} | the last accepted `SyncupCntlrRequest`, or a newer refused one |
 | `LocalMigrBmPath` | {prefix}/migr-bm-{cluster}-{dn}-{sp}-{migr}-{bm_idx} | one received `PushMigrBitmapRequest` chunk (Bitmap push protocol) |
 | `LocalDnProbePath` | {prefix}/probe-dn-{cluster}-{dn} | the probe a dn agent's read saves while its store's disk refuses writes (`dnagent.md` DN18); never loaded |
+| `StoreFileBootDn` | {prefix}/boot-dn | the kernel's boot id at the dn agent's last start, a wrapped string (`dnagent.md` SH33) |
+| `StoreFileBootCn` | {prefix}/boot-cn | the kernel's boot id at the cn agent's last start, a wrapped string (`dnagent.md` SH33) |
 | `LocalCnProbePath` | {prefix}/probe-cn-{cluster}-{cn} | the probe a cn agent's read saves while its store's disk refuses writes (`cnagent.md` CN28); never loaded |
 | `LocalTornPath` | {prefix}/torn-{cluster}-{cn}-{sp}-{cntlr} | a cntlr's torn marks (`TornMarks`, `cnagent.md` CN14), saved while the cntlr holds one and removed once it holds none |
 | `LocalStackTermPath` | {prefix}/term-{cluster}-{cn}-{sp}-{cntlr} | the term a cntlr's primary stack was built under (`StackTerm`, `cnagent.md` CN35), saved when a primary builds under a new term and removed once a standby's sweep left nothing |
@@ -5785,7 +5787,9 @@ DN16): their `agent_reply`, `revision` and `*Info` are
 the observation's, and their `obs_stamp` gives its time and trace id, the
 agent's clock as it answers and the start of a converge of the object in
 flight. Every stamp also gives the time the agent started, by the node's
-clock, and while the agent's startup reconcile runs every round and info
+clock, and whether that start came after a reboot of its machine
+(`agent_rebooted`, `dnagent.md` SH33), and while the agent's startup
+reconcile runs every round and info
 read answers `ReplyCodeStarting` with no observation (`dnagent.md` SH33),
 by which the worker holds its verdict for a bounded time
 (`dnv-worker.md` HL8). A round or an info read of an object the agent does not hold

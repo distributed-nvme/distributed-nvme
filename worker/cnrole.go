@@ -171,6 +171,10 @@ func (d *cnDriver) observe(ctx context.Context, r *replyState) {
 // starting is HL8's starting round: no verdict on the node's record.
 func (d *cnDriver) starting(ctx context.Context) {}
 
+// holdsRebootedStart: a controller node's start holds its own record after
+// a reboot too; its cntlrs decide for themselves (HL8).
+func (d *cnDriver) holdsRebootedStart() bool { return true }
+
 // startEnded holds nothing for the node's record (HL8).
 func (d *cnDriver) startEnded(ctx context.Context) {}
 

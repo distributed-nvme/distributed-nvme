@@ -92,6 +92,7 @@ func (a *Agent) obsStamp(obs time.Time, traceId string, answer time.Time) *pb.Ob
 	stamp := &pb.ObsStamp{
 		AnswerTime:     agent.Timestamp(answer),
 		AgentStartTime: agent.Timestamp(a.started),
+		AgentRebooted:  a.rebooted,
 	}
 	if !obs.IsZero() {
 		stamp.ObsTime = agent.Timestamp(obs)
@@ -134,6 +135,7 @@ func (a *Agent) readLocked(
 			stamp: &pb.ObsStamp{
 				AnswerTime:     agent.Timestamp(now),
 				AgentStartTime: agent.Timestamp(ob.Starting),
+				AgentRebooted:  ob.Rebooted,
 			},
 			noObs: true,
 		}
@@ -298,6 +300,7 @@ func (a *Agent) startingStampLocked(key string) (*pb.ObsStamp, bool) {
 	return &pb.ObsStamp{
 		AnswerTime:     agent.Timestamp(time.Now().Round(0)),
 		AgentStartTime: agent.Timestamp(ob.Starting),
+		AgentRebooted:  ob.Rebooted,
 	}, true
 }
 

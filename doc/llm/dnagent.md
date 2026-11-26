@@ -277,7 +277,25 @@ Unavailable, its reply carrying no code (an inspect call's `GetDnInfo` or
 `GetCntlrInfo` is an info read, and answers `ReplyCodeStarting`): none of
 them takes a lock, touches the node or starts a read (SH29). Every reply's
 stamp carries the start time (`ObsStamp.agent_start_time`), by the node's
-clock, during the start and after it. A round or an info read reads whether
+clock, during the start and after it. Before it marks the start, the
+prepare step reads the kernel's boot id (`BootIdPath`) and compares it with
+the one its role's store file (`StoreFileBootDn`, `StoreFileBootCn`) holds
+from its last start that ended: when they differ, the agent starts after a
+reboot of its machine, and every reply's stamp says so
+(`ObsStamp.agent_rebooted`) for as long as the process runs. These two
+reads are the only touch of the node before the startup reconcile. A boot
+id it cannot read, and a file that is absent or does not load, as at the
+first start of an agent, say no reboot. It logs `agent boot seen` with the
+answer, at Warn with the error when the boot id could not be read. The new
+id is saved only as the startup reconcile ends, so a start that dies
+before its end, and every restart after it until one ends, still reports
+the reboot, the kernel's devices not built yet; a save that fails logs
+`agent boot id save failed` at Warn, and the next start compares with the
+older id again. The startup listing names the role's file, so a temp file
+a save left is removed (SH6). After a reboot the kernel's devices are gone, so the hold the
+worker gives a restarted agent's serving stack keeps nothing, and the
+worker fails the node's primaries over at their usual time while another
+cntlr of their pool serves (`dnv-worker.md` HL8). A round or an info read reads whether
 the agent is starting before it reads the object's observation, and the
 reconcile ends the start only after it has stored its last observation, so
 one that finds the start ended answers from every observation the reconcile
@@ -377,7 +395,8 @@ elapsed (DN12 rule 1), save the restarts Known limits names.
 Before `Serve`, the role's `RunE` logs the start record, `agent node
 versions` (CM4). `Serve` in `agent/agent.go` is the shared lifecycle: it mints the startup
 trace id, derives the run ctx, hands it to the role server's prepare step,
-which keeps it as `rootCtx` and marks the agent starting (SH33), listens,
+which keeps it as `rootCtx`, looks at the machine's boot and marks the
+agent starting (SH33), listens,
 builds the gRPC server with the message limit, a handshake bound of
 `AgentHandshakeTimeout` and the two server interceptors, registers the
 role's service, serves and logs `agent serving`, then runs the role's

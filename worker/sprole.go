@@ -4533,6 +4533,9 @@ func (d *sideDriver) send(ctx context.Context, rep spReport) {
 	}
 }
 
+// holdsRebootedStart: a side's start holds it after a reboot too (HL8).
+func (d *sideDriver) holdsRebootedStart() bool { return true }
+
 // starting is HL8's starting round: no verdict on the side, and AR10's memo
 // holds the side from the side clocks of AR6 and AR8 until a verdict on it
 // or the end of the hold (startEnded).
@@ -5355,6 +5358,14 @@ func (d *cntlrDriver) starting(ctx context.Context) {
 // startEnded ends the cntlr's hold of HL8.
 func (d *cntlrDriver) startEnded(ctx context.Context) {
 	d.memo.noteStartEnded(d.cntlrId)
+}
+
+// holdsRebootedStart is HL8's rule for a cntlr whose agent started after a
+// reboot: it is held only while no other cntlr of the pool serves, as in a
+// cold start of every node after a power loss, where the hold keeps the
+// roles in place; otherwise its starting rounds are missed rounds.
+func (d *cntlrDriver) holdsRebootedStart() bool {
+	return !d.memo.anotherServes(d.cntlrId)
 }
 
 // unreachable folds a broken stream, a missed reply or a reply whose

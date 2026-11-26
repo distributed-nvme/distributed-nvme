@@ -29,6 +29,11 @@ var errStaleObservation = errors.New("observation too old")
 // or answer time to measure by, or with an answer before the series' start.
 var errStartingPastHold = errors.New("agent starting past its hold")
 
+// errStartingAfterReboot is the error of a starting round whose agent started
+// after a reboot of its machine while its object is not held for it (HL8,
+// holdsRebootedStart): a missed round, as a node that is down gives.
+var errStartingAfterReboot = errors.New("agent starting after a reboot")
+
 // errUnknownPastHold fails a round of a side or a cntlr whose agent has
 // answered "unknown object" for the cluster's start hold or longer, by the
 // worker's clock, with no other answer of a round between (HL2): the node
@@ -90,8 +95,10 @@ type replyState struct {
 	// agentStart is when the agent process began to serve (dnagent.md
 	// SH33), zero when the reply carries none: the start HL8 measures a
 	// start series' hold from, and whose change on a round's reply shows
-	// the agent's restart (seeAgentStart).
-	agentStart time.Time
+	// the agent's restart (seeAgentStart). agentRebooted is whether that
+	// start came after a reboot of the agent's machine (HL8).
+	agentStart    time.Time
+	agentRebooted bool
 	// saveTime is when the agent saved the request a Syncup* reply answers
 	// to its local store, zero on a round's reply and on a Syncup* reply
 	// that refuses the request (architecture.md, Live-state reporting).
@@ -122,6 +129,7 @@ func newReplyState(
 		convergeStart: pbTime(stamp.GetConvergeStart()),
 		obsTraceId:    stamp.GetObsTraceId(),
 		agentStart:    pbTime(stamp.GetAgentStartTime()),
+		agentRebooted: stamp.GetAgentRebooted(),
 		saveTime:      pbTime(saveTime),
 	}
 }
@@ -223,6 +231,10 @@ type objDriver interface {
 	// ended the agent's start, a move to another endpoint, an idle and a
 	// refused conf reach it (HL8).
 	startEnded(ctx context.Context)
+	// holdsRebootedStart says whether a start of the agent after a reboot of
+	// its machine holds the object as a restart's start does (HL8): every
+	// object's does but a cntlr's whose pool has another cntlr that serves.
+	holdsRebootedStart() bool
 }
 
 // roundPeriod turns a stored health-check interval into the round period
@@ -773,6 +785,18 @@ func (w *revWorker) startingRound(
 		held >= hold {
 		slog.InfoContext(ctx, "check round failed", append(w.idAttrs(),
 			slog.String("error", errStartingPastHold.Error()),
+			slog.Int64("starting_ms", held.Milliseconds()))...)
+		w.fail(ctx)
+		return
+	}
+	if reply.agentRebooted && !w.driver.holdsRebootedStart() {
+		// HL8: after a reboot the kernel's devices are gone, so the hold
+		// that keeps a restarted agent's serving stack in place has nothing
+		// to keep, and another cntlr of the pool serves, so this is no cold
+		// start of every node: the round is a missed round, and a failover
+		// comes at its usual time.
+		slog.InfoContext(ctx, "check round failed", append(w.idAttrs(),
+			slog.String("error", errStartingAfterReboot.Error()),
 			slog.Int64("starting_ms", held.Milliseconds()))...)
 		w.fail(ctx)
 		return

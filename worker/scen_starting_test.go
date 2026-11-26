@@ -73,6 +73,92 @@ func TestStartingPastTheHoldIsAMissedRound(t *testing.T) {
 	foWaitFailover(t, h, w, 1, 2, 30*time.Second)
 }
 
+// TestRebootedPrimaryIsFailedOver pins HL8's rule for a reboot: a primary
+// whose agent answers that it is starting after a reboot of its machine,
+// within the start hold, while the pool's standby serves, misses its rounds,
+// so it is failed over at the primary threshold as one that answers nothing.
+func TestRebootedPrimaryIsFailedOver(t *testing.T) {
+	t.Parallel()
+	h := newWorkerHarness(t, harnessOpts{})
+	hold := uint32(60)
+	c := h.plantStd(t, func(s *stdSpec) { s.startHold = &hold })
+	w := h.startWorker(t, "w1")
+	h.waitOwnsAll(t, w)
+	c.waitConverged(t)
+	agent, key := c.cntlrAgent(t, 1)
+	rebooted := func(o *agentfake.Object) {
+		o.Starting = time.Now()
+		o.Rebooted = true
+	}
+	foLever(t, agent, key, rebooted)
+	foLever(t, agent, agentfake.CnKey, rebooted)
+	h.waitRecord(t, 10*time.Second, w, recRoundFailed,
+		func(rec logRecord) bool {
+			id, ok := cntlrIdOf(rec)
+			return ok && id == 1 &&
+				rec.str("error") == errStartingAfterReboot.Error()
+		})
+	foWaitFailover(t, h, w, 1, 2, 30*time.Second)
+}
+
+// TestRebootedPoolWithNoServingStandbyIsHeld pins HL8's cold start: when the
+// standby's node went down first and then the agents of both cntlrs answer
+// that they are starting after a reboot, as every node does after a power
+// loss, no cntlr serves, so the primary is held as after a restart: no
+// health epoch and no failover within the start hold.
+func TestRebootedPoolWithNoServingStandbyIsHeld(t *testing.T) {
+	t.Parallel()
+	h := newWorkerHarness(t, harnessOpts{})
+	hold := uint32(60)
+	// Two controller nodes: with a third, a replacement of the standby
+	// while the primary still serves could bring a cntlr that serves.
+	c := h.plantStd(t, func(s *stdSpec) {
+		s.startHold = &hold
+		s.cnCnt = 2
+	})
+	w := h.startWorker(t, "w1")
+	h.waitOwnsAll(t, w)
+	c.waitConverged(t)
+	// The standby's node is down first, as at a power loss, so its cntlr
+	// serves no more when the nodes come back.
+	agent2, key2 := c.cntlrAgent(t, 2)
+	foLever(t, agent2, key2, func(o *agentfake.Object) { o.Hang = true })
+	h.waitRecord(t, 10*time.Second, w, recRoundFailed,
+		func(rec logRecord) bool {
+			id, ok := cntlrIdOf(rec)
+			return ok && id == 2
+		})
+	start := time.Now()
+	rebooted := func(o *agentfake.Object) {
+		o.Hang = false
+		o.Starting = start
+		o.Rebooted = true
+	}
+	for _, cntlrId := range []uint64{2, 1} {
+		agent, key := c.cntlrAgent(t, cntlrId)
+		foLever(t, agent, key, rebooted)
+		foLever(t, agent, agentfake.CnKey, rebooted)
+	}
+	h.waitRecord(t, 10*time.Second, w, msgAgentStarting,
+		func(rec logRecord) bool { return rec.num("cn_id") == 1 })
+	// Twice the primary threshold and the rounds a failover needs.
+	time.Sleep(5 * time.Second)
+	if n := len(foReactions(h, w, reactionFailover)); n != 0 {
+		t.Fatalf("%d failovers in a cold start of every node", n)
+	}
+	if epoch := c.cntlr(t, 1).GetErrEpoch(); epoch != 0 {
+		t.Fatalf("the primary got a health epoch %d in a cold start", epoch)
+	}
+	if n := h.countRecs(w, recRoundFailed, func(rec logRecord) bool {
+		id, ok := cntlrIdOf(rec)
+		return ok && id == 1 &&
+			rec.str("error") == errStartingAfterReboot.Error()
+	}); n != 0 {
+		t.Fatalf("%d of the primary's rounds missed for the reboot in a "+
+			"cold start", n)
+	}
+}
+
 // TestRestartedAgentIsHeldPastItsDowntime pins HL8 on a restart: the rounds
 // an agent's downtime misses start its cntlr's err_epoch and fill the run a
 // failover needs (AR10), and the starting answers that follow hold the cntlr

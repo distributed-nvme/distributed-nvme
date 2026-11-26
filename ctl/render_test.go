@@ -200,6 +200,7 @@ var renderCases = []renderCase{
 		},
 		want: `{"applied_revision":"9","cntlr_info":null,"io_stats":null,` +
 			`"obs_age":"1.500500s","obs_stamp":{` +
+			`"agent_rebooted":false,` +
 			`"agent_start_time":null,` +
 			`"answer_time":"2026-01-02T03:04:06.500506Z",` +
 			`"converge_start":null,` +

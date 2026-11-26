@@ -31,10 +31,11 @@
 # step 4): every migration there puts a leg's second side on a sibling
 # instance, so make no migration on it.
 #
-# The kit enables nothing. "systemctl start dnv-agent-dn@<name>" starts one
-# instance; "systemctl enable dnv-agent-dn@<name>" also starts it at boot,
-# once the modules are loaded, configfs is mounted and the network is up. A
-# disk node holds no primary, so its start at boot delays no failover. The
+# The kit enables nothing, and advises to enable this unit:
+# "systemctl start dnv-agent-dn@<name>" starts one instance; "systemctl
+# enable dnv-agent-dn@<name>" also starts it at boot, once the modules are
+# loaded, configfs is mounted and the network is up. A disk node holds no
+# primary, so its start at boot delays no failover. The
 # cost of leaving it off: after a reboot the instance stays stopped until you
 # start it. In a pool with RAID1, once its sides have been unhealthy for the
 # pool's side_unhealthy, 600 seconds at the default, the worker repairs each

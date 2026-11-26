@@ -4,6 +4,10 @@ import (
 	"context"
 	"testing"
 
+	"google.golang.org/protobuf/proto"
+	"google.golang.org/protobuf/types/known/wrapperspb"
+
+	"github.com/distributed-nvme/distributed-nvme/agent"
 	"github.com/distributed-nvme/distributed-nvme/common"
 	"github.com/distributed-nvme/distributed-nvme/pb"
 )
@@ -60,7 +64,7 @@ func TestAStartingAgentAnswersStarting(t *testing.T) {
 	push, _ := srv.PushMigrBitmap(ctx, &pb.PushMigrBitmapRequest{
 		ClusterId: testCluster, DnId: testDn, SidePointer: sidePtr(testSide)})
 	wantStarting("a push", push.GetAgentReply(), nil)
-	if calls := node.Calls(); len(calls) != 0 {
+	if calls := node.Calls(); startCalls(node) != 0 {
 		t.Fatalf("a starting agent touched the node before its pass: %v",
 			calls)
 	}
@@ -132,5 +136,55 @@ func TestAStartingAgentHoldsAKnownSide(t *testing.T) {
 	}
 	if !begun {
 		t.Fatal("a round after the start began no read")
+	}
+}
+
+// TestARebootedAgentSaysSoAndSavesTheBootAtItsEnd pins SH33's boot check on
+// the dn agent: Prepare, under a boot id other than the one its store file
+// holds, stamps every reply as after a reboot; the file keeps the old id
+// until the startup pass ends, which saves the new one.
+func TestARebootedAgentSaysSoAndSavesTheBootAtItsEnd(t *testing.T) {
+	node := newFakeNode()
+	bootFile := common.DefaultLocalStorPrefix + "/" + agent.StoreFileBootDn
+	node.files[agent.BootIdPath] = "new-boot\n"
+	old, err := proto.Marshal(&wrapperspb.StringValue{Value: "old-boot"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	node.protos[bootFile] = old
+	nf := common.NewNameFmt(common.DefaultLocalStorPrefix)
+	srv := NewDnAgentServer(node.osClient(), nf,
+		common.DefaultLocalStorPrefix, testDisk, testTrConf(),
+		common.NvmetPortId, 0)
+	srv.roundReads = false
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(func() {
+		cancel()
+		srv.WaitBackground()
+	})
+	srv.Prepare(ctx)
+	round, _ := srv.checkDnRound(ctx, &pb.CheckDnRequest{
+		ClusterId: testCluster, DnId: testDn, Revision: 2}, nil)
+	if !round.GetObsStamp().GetAgentRebooted() {
+		t.Fatalf("a round of a rebooted agent: stamp %v, want the reboot",
+			round.GetObsStamp())
+	}
+	saved := func() string {
+		node.mu.Lock()
+		defer node.mu.Unlock()
+		v := &wrapperspb.StringValue{}
+		_ = proto.Unmarshal(node.protos[bootFile], v)
+		return v.GetValue()
+	}
+	if got := saved(); got != "old-boot" {
+		t.Fatalf("the boot file holds %q before the start ended, want the "+
+			"old id", got)
+	}
+	if err := srv.Reconcile(ctx); err != nil {
+		t.Fatalf("Reconcile: %v", err)
+	}
+	if got := saved(); got != "new-boot" {
+		t.Fatalf("the boot file holds %q after the start, want the new id",
+			got)
 	}
 }

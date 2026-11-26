@@ -4909,3 +4909,48 @@ func TestReactionHeldWhileNoAgentAnswers(t *testing.T) {
 	h.pass()
 	h.wantOps("failover", "failover")
 }
+
+// TestVerdictMemoAnotherServes pins the memo's serving set (HL8): a cntlr
+// serves once its latest verdict is clean, and no more after an unhealthy
+// verdict or a noted start; a cntlr never counts for itself; the set drops
+// a cntlr its pool no longer lists.
+func TestVerdictMemoAnotherServes(t *testing.T) {
+	m := newVerdictMemo()
+	if m.anotherServes(1) {
+		t.Fatalf("an empty memo has a serving cntlr")
+	}
+	m.noteCntlr(2, false)
+	if !m.anotherServes(1) || m.anotherServes(2) {
+		t.Fatalf("a clean cntlr 2: serves for 1 %v, for itself %v; want "+
+			"true, false", m.anotherServes(1), m.anotherServes(2))
+	}
+	m.noteStarting(2)
+	if m.anotherServes(1) {
+		t.Fatalf("a starting cntlr still serves")
+	}
+	m.noteCntlr(2, false)
+	m.noteCntlr(2, true)
+	if m.anotherServes(1) {
+		t.Fatalf("an unhealthy cntlr still serves")
+	}
+	m.noteCntlr(2, false)
+	m.noteRefusing(2, true)
+	if m.anotherServes(1) {
+		t.Fatalf("a cntlr whose agent refuses its syncups serves")
+	}
+	m.noteRefusing(2, false)
+	m.noteNoLeg(2, true)
+	if m.anotherServes(1) {
+		t.Fatalf("a cntlr that reaches no leg serves")
+	}
+	m.noteNoLeg(2, false)
+	m.noteCntlr(3, false)
+	m.snapshot(&model.SpState{Cntlrs: map[uint64]*pb.Cntlr{1: {}, 2: {}}})
+	if !m.anotherServes(1) {
+		t.Fatalf("cntlr 2, clean again, does not serve")
+	}
+	m.snapshot(&model.SpState{Cntlrs: map[uint64]*pb.Cntlr{1: {}}})
+	if m.anotherServes(1) {
+		t.Fatalf("a cntlr the pool no longer lists still serves")
+	}
+}

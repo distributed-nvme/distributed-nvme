@@ -1862,14 +1862,21 @@ Measured times are in [the introduction](introduction.md#status-and-limits).
   primary can also lose a write it was told was done, in the cases
   section 5.1 lists.
 - **A reboot that the worker first sees as an agent that answers
-  "starting" delays the failover.** The worker cannot tell an agent that
-  restarted on a running kernel, whose devices still serve, from the agent
-  of a controller node that rebooted, whose devices are gone. When the
-  agent of a rebooted controller node answers "starting" before the
-  failover has begun, as after a fast reboot or when a worker has just
-  taken over the pool, each primary on the node keeps its role for up to
-  the start hold while its hosts' IO waits. State: fix decided. Not seen
-  in the lab.
+  "starting" delays the failover only where the agent cannot tell.** An
+  agent keeps the kernel's boot id in its local files and tells a reboot
+  of its machine from a restart of the agent alone. After a reboot, each
+  primary on the node fails over at the usual time while another cntlr of
+  its pool serves, though the agent, started at boot, already answers
+  "starting". In a cold start of every node, as after a power loss, no
+  cntlr serves, and the start hold keeps the roles in place until the
+  first other cntlr of the pool ends its own start and serves; from then
+  on a primary still starting fails over at the usual time. The first
+  start after an upgrade, and a start after the agent's local files were
+  lost, have no boot id to compare: a reboot then looks like a restart,
+  and each primary on the node keeps its role for up to the start hold
+  while its hosts' IO waits. State: fixed. Unit tests of the agent and of
+  the worker, and the worker suite's fake agents; a fast reboot on the
+  lab comes with the checks of this change's part.
 - **A machine that holds a pool's primary and a leg of a group stops the
   group when it stops.** A new pool keeps its legs out of the location of
   its first primary while another location has room, and a node's location

@@ -865,8 +865,14 @@ type ObsStamp struct {
 	// (dnv-worker.md HL8).
 	// Appended, never renumbered.
 	AgentStartTime *timestamppb.Timestamp `protobuf:"bytes,5,opt,name=agent_start_time,json=agentStartTime,proto3" json:"agent_start_time,omitempty"`
-	unknownFields  protoimpl.UnknownFields
-	sizeCache      protoimpl.SizeCache
+	// The agent process started after a boot of its machine that its last
+	// start did not see: the kernel's boot id differs from the one its local
+	// store saved (dnagent.md SH33). The worker then holds no failover for
+	// the node while another cntlr of the pool serves (dnv-worker.md HL8).
+	// Appended, never renumbered.
+	AgentRebooted bool `protobuf:"varint,6,opt,name=agent_rebooted,json=agentRebooted,proto3" json:"agent_rebooted,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
 }
 
 func (x *ObsStamp) Reset() {
@@ -932,6 +938,13 @@ func (x *ObsStamp) GetAgentStartTime() *timestamppb.Timestamp {
 		return x.AgentStartTime
 	}
 	return nil
+}
+
+func (x *ObsStamp) GetAgentRebooted() bool {
+	if x != nil {
+		return x.AgentRebooted
+	}
+	return false
 }
 
 // BlockStat is one block device's counters as the kernel's sysfs "stat"
@@ -20852,7 +20865,7 @@ const file_pb_schema_proto_rawDesc = "" +
 	"\n" +
 	"AgentReply\x12\x12\n" +
 	"\x04code\x18\x01 \x01(\rR\x04code\x12\x18\n" +
-	"\adetails\x18\x02 \x01(\tR\adetails\"\xa9\x02\n" +
+	"\adetails\x18\x02 \x01(\tR\adetails\"\xd0\x02\n" +
 	"\bObsStamp\x125\n" +
 	"\bobs_time\x18\x01 \x01(\v2\x1a.google.protobuf.TimestampR\aobsTime\x12 \n" +
 	"\fobs_trace_id\x18\x02 \x01(\tR\n" +
@@ -20860,7 +20873,8 @@ const file_pb_schema_proto_rawDesc = "" +
 	"\vanswer_time\x18\x03 \x01(\v2\x1a.google.protobuf.TimestampR\n" +
 	"answerTime\x12A\n" +
 	"\x0econverge_start\x18\x04 \x01(\v2\x1a.google.protobuf.TimestampR\rconvergeStart\x12D\n" +
-	"\x10agent_start_time\x18\x05 \x01(\v2\x1a.google.protobuf.TimestampR\x0eagentStartTime\"\xdd\x04\n" +
+	"\x10agent_start_time\x18\x05 \x01(\v2\x1a.google.protobuf.TimestampR\x0eagentStartTime\x12%\n" +
+	"\x0eagent_rebooted\x18\x06 \x01(\bR\ragentRebooted\"\xdd\x04\n" +
 	"\tBlockStat\x12\x19\n" +
 	"\bread_ios\x18\x01 \x01(\x04R\areadIos\x12\x1f\n" +
 	"\vread_merges\x18\x02 \x01(\x04R\n" +

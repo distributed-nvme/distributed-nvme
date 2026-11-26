@@ -2058,10 +2058,16 @@ Safe steps, as root on the machine:
     then sends the agent its desired state again.
 11. Run the node check with each agent's settings ([Check a node before it
     joins](#check-a-node-before-it-joins)), and fix every `FAIL`.
-12. Start the agents: `sudo systemctl start dnv-agent-dn@<name>` and
-    `sudo systemctl start dnv-agent-cn`. Each agent logs the record
+12. Start the agents, and enable them so that they start at boot too:
+    `sudo systemctl enable --now dnv-agent-dn@<name>` and
+    `sudo systemctl enable --now dnv-agent-cn`. Each agent logs the record
     `agent started` once its startup pass, its rebuild of its local files,
-    has ended. `sudo systemctl enable` a unit to start it at boot too.
+    has ended. An agent tells a reboot of its machine from a restart of the
+    agent alone, so after a reboot the worker fails each primary on the
+    node over at the usual time, while another cntlr of its pool serves,
+    though the agent comes back at once; the first start after an upgrade,
+    and one after the agent's local files were lost, cannot tell, and are
+    held as a restart.
 13. Create the nodes once their agents run:
     `dnvctl dn create --addr <ip:port> --tr-addr <ip> --tr-svc-id <port>`,
     and `dnvctl cn create` with the same flags. `--addr` is the agent's
@@ -5554,8 +5560,9 @@ How to read it:
      table (below).
    - `obs_stamp.obs_time` is when the reading ended, and `obs_age` the
      reading's age when the agent answered. `obs_stamp.converge_start` is
-     set while a converge runs, and `obs_stamp.agent_start_time` is when the
-     agent started.
+     set while a converge runs, `obs_stamp.agent_start_time` is when the
+     agent started, and `obs_stamp.agent_rebooted` is true when that start
+     came after a reboot of its machine.
    - `disk_io_stats`, on a disk node, is the disk's counters, read at the
      call ([A slow leg](#a-slow-leg)).
 2. An agent that is still starting answers with `applied_revision` 0, no

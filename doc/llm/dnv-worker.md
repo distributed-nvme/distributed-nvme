@@ -3544,6 +3544,29 @@ each new loop during such a run — a worker restart, a handoff, a restarted
 child — and each idle or refused conf (RW9) can hold it up to one more
 start hold (Known limits).
 
+A cntlr whose agent answers that it is starting after a reboot of its
+machine (`ObsStamp.agent_rebooted`, `dnagent.md` SH33) is not held while
+another cntlr of its pool serves: another cntlr whose latest verdict by
+this coordinator is clean, with no start of its agent noted since, and
+that AR10's memo does not mark as one a failover passes over (refusing its
+syncups, unknown, reaching no leg of some group, or with a stack left; a
+disabled one the memo cannot tell, and counts). Its starting round within the hold is then a missed round (`check
+round failed`, its error naming the reboot), so its health epoch is set and
+its run of unhealthy rounds grows, and AR5 fails a primary over at the
+usual time, as for a node that is down. With no such cntlr, as in a cold
+start of every node after a power loss, where every agent comes up after a
+reboot and the standbys are down or starting, the cntlr is held as after a
+restart, and the hold keeps the roles in place for as long as no other
+cntlr serves: the first other cntlr whose start ends and that answers
+clean ends the hold, and the cntlr's next starting rounds are missed
+rounds. A rebooted standby is not held either while another cntlr serves,
+so its health epoch is set and it leaves the cdc's answer while it starts,
+its exports being gone. A disk node's and a controller node's own records
+and the sides are held after a reboot as after a restart. Reason: after a reboot the kernel's devices are gone, so
+the hold that keeps a restarted agent's serving stack in place has nothing
+to keep while the hosts' IO waits, and with the start at boot a fast
+reboot brings the agent back before the failover would have begun.
+
 HL9. **A primary that refuses its syncups.** When the agent refuses a
 `SyncupCntlr` with `ReplyCodeInvalidConf` or `ReplyCodeSaveFailed` — the
 agent knows the cntlr and will not apply the request — the cntlr child
@@ -4111,14 +4134,15 @@ starting within the start hold begins.
 AR5's threshold trigger needs more than the latest verdict: the primary's
 last two verdicts from check rounds — a round with no reply in time,
 whose observation is too old (HL7) or whose agent answers that it is
-starting past the start hold (HL8), which counts on every such round, or a
+starting past the start hold, or within it after a reboot while HL8 holds
+it not, which counts on every such round, or a
 reply with an `ERROR` row, or one HL9 reads unhealthy, that answers from
 an observation new to the
 loop of the cntlr's child (RW23) and that a round asked for (HL7) — must
 both be unhealthy,
 with no clean answer, of a round or of a `Syncup*`, and no round whose
-agent answers that it is starting within the start hold, since the
-earlier of them (HL8); a `Syncup*` reply with an `ERROR` row neither starts
+agent answers that it is starting within the start hold and that HL8
+holds, since the earlier of them (HL8); a `Syncup*` reply with an `ERROR` row neither starts
 that run nor adds to it, and neither does a round that answers from an
 observation already seen and not too old (RW23), nor one that answers
 from an observation no round asked for and not too old, which gives no
@@ -4155,7 +4179,8 @@ the run of unhealthy verdicts from rounds, which a clean answer or a
 starting round within the hold ends and
 which outlives the cntlr's child (RW23 says what a restarted child adds
 to it), and it marks the cntlrs and the sides HL8 holds, the cntlrs
-whose agent refuses a `SyncupCntlr` (HL9), the cntlrs whose latest answer
+whose latest verdict is clean with no start noted since, which HL8 reads
+for a reboot, the cntlrs whose agent refuses a `SyncupCntlr` (HL9), the cntlrs whose latest answer
 was unknown object (RW5, AR5), the standbys whose latest report reads
 `ERROR` on every leg of some group (AR5) and the standbys whose latest
 report, of a round or of a `Syncup*`, says that their sweep left a stack
@@ -7444,16 +7469,21 @@ caught.
   answer: a node's own syncup makes it known, and a node whose store refuses
   that save — a new node, or one restarted on empty files — answers unknown
   object with no verdict and no end, its record keeping no health epoch.
-* **A reboot that the worker first sees as a starting agent holds its
-  failover up to the start hold.** The start time tells the worker how
-  long the agent has been starting, not whether the node's kernel kept
-  what the agent built: when a controller node reboots and its agent
-  answers starting before AR5 has failed its primaries over — a fast
-  reset, or a coordinator newly handed the pool whose first rounds find
-  the agent starting — each of those primaries keeps the role for up to
-  the hold while its stack is gone and its hosts' IO waits (HL8). A
-  restart over a live kernel, which the hold is for, and a reboot answer
-  alike.
+* **A reboot the agent cannot tell, or one in a pool with no other
+  serving cntlr, holds its failover up to the start hold.** An agent tells
+  a reboot from a restart by the boot id its local files saved at its last
+  start (`dnagent.md` SH33), and HL8 then holds no cntlr of a pool where
+  another cntlr serves. The first start after an upgrade, and a start after
+  the local files were lost, have no saved boot id, so a reboot then
+  answers as a restart does; and in a pool whose other cntlrs do not serve
+  at the moment, as in a cold start, or one whose coordinator was just
+  handed the pool and has judged none of them yet, the cntlr is held too.
+  Each such primary keeps the role for up to the hold while its stack is
+  gone and its hosts' IO waits (HL8). The other way round, an agent whose
+  save of the new boot id fails at the end of its start (its store's disk
+  refusing writes, say) compares with the older id at every later start
+  of the same boot, so a plain restart then reads as a reboot, and a
+  primary on that node is not held while another cntlr serves.
 * **While a leftover keeps every round re-sending, a round's own report
   counts in a run only when a background converge made it, unless the
   agent's saves fail.** While the agent's saves succeed, each such round

@@ -1326,7 +1326,7 @@ func (sh crashShape) restartAndJudge(
 ) crashOutcome {
 	t.Helper()
 	suspended := crashAnySuspended(node)
-	before := len(node.Calls())
+	before := startCalls(node)
 	next := startCrashInc(node, clock, sh.fenceWait)
 	defer next.end(t)
 	round, _ := next.srv.checkDnRound(traced("starting-round"),
@@ -1341,7 +1341,7 @@ func (sh crashShape) restartAndJudge(
 			round.GetAgentReply().GetCode(),
 			syncup.GetAgentReply().GetCode())}
 	}
-	if after := len(node.Calls()); after != before {
+	if after := startCalls(node); after != before {
 		return crashOutcome{failure: fmt.Sprintf("the starting agent made "+
 			"%d calls before its startup pass", after-before)}
 	}
@@ -1753,4 +1753,20 @@ func TestACrashAtEveryStepOfTheStartupPass(t *testing.T) {
 			tally.report(t, sh.name, start)
 		})
 	}
+}
+
+// startCalls counts node's calls but the boot check's reads, which Prepare
+// makes before the agent answers anything (SH33): what a starting agent's
+// answers may not add to.
+func startCalls(node *fakeNode) int {
+	n := 0
+	for _, line := range node.Calls() {
+		if strings.Contains(line, agent.BootIdPath) ||
+			strings.Contains(line, "/"+agent.StoreFileBootDn) ||
+			strings.Contains(line, "/"+agent.StoreFileBootCn) {
+			continue
+		}
+		n++
+	}
+	return n
 }

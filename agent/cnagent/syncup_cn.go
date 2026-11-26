@@ -12,11 +12,14 @@ import (
 
 // Prepare hands the server the process's ctx and begins its startup state,
 // before agent.Serve opens the gRPC listener (dnagent.md SH33): every RPC
-// goroutine then reads the rootCtx Reconcile keeps.
+// goroutine then reads the rootCtx Reconcile keeps, and every reply says
+// whether the agent started after a reboot of its machine.
 func (s *CnAgentServer) Prepare(ctx context.Context) {
 	s.rootCtx = ctx
 	s.rootSet = true
-	s.startup.Begin(s.now())
+	rebooted, bootId := agent.SeeBoot(ctx, s.store, agent.StoreFileBootCn)
+	s.bootId = bootId
+	s.startup.Begin(s.now(), rebooted)
 }
 
 // Reconcile is the SH1 startup pass (CN2): load the local store — while a
@@ -48,7 +51,7 @@ func (s *CnAgentServer) Reconcile(ctx context.Context) error {
 	// nothing reads it, and it holds room the store may need (CN28).
 	files, err := s.store.List(ctx, agent.StoreKindCn, agent.StoreKindCntlr,
 		agent.StoreKindCloneBm, agent.StoreKindCnProbe, agent.StoreKindTorn,
-		agent.StoreKindTerm)
+		agent.StoreKindTerm, agent.StoreFileBootCn)
 	if err != nil {
 		return err
 	}
@@ -222,6 +225,9 @@ func (s *CnAgentServer) Reconcile(ctx context.Context) error {
 		s.storeCntlrObs(ctx, st, st.loadReq().GetRevision(), info,
 			sweep.Reply())
 	}
+	// SH33: the boot this start began under is saved only now, so a start
+	// that dies before here leaves the next one to report the reboot too.
+	agent.KeepBoot(ctx, s.store, agent.StoreFileBootCn, s.bootId)
 	s.startup.End()
 	return nil
 }

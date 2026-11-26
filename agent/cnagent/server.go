@@ -107,8 +107,11 @@ type CnAgentServer struct {
 	// cancels them. rootSet says Prepare set it.
 	rootCtx context.Context
 	rootSet bool
-	// startup is the agent's startup state (dnagent.md SH33).
+	// startup is the agent's startup state (dnagent.md SH33), and bootId
+	// the kernel's boot id Prepare read, which the startup pass saves as it
+	// ends.
 	startup agent.Startup
+	bootId  string
 
 	// probeInterval / probeStall are fields rather than constants, and now
 	// and sleep — like probeIO above — are overridable, so tests can drive

@@ -30,6 +30,12 @@ message ObsStamp {
     // (dnv-worker.md HL8).
     // Appended, never renumbered.
     google.protobuf.Timestamp agent_start_time = 5;
+    // The agent process started after a boot of its machine that its last
+    // start did not see: the kernel's boot id differs from the one its local
+    // store saved (dnagent.md SH33). The worker then holds no failover for
+    // the node while another cntlr of the pool serves (dnv-worker.md HL8).
+    // Appended, never renumbered.
+    bool agent_rebooted = 6;
 }
 
 // BlockStat is one block device's counters as the kernel's sysfs "stat"
