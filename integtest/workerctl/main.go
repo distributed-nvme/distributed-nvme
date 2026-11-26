@@ -1161,10 +1161,12 @@ func cmdPing(g *globals, args []string) {
 // SPD13/CLD11 budgets a suite may want to size a case against, and
 // MaxSliceCntPerSp is the slice ceiling — CreateClone's src_slice_cnt bound —
 // that the gateway suite creates a clone at, which is why that suite must
-// read it rather than type it. The next six are the timers a suite sizes
+// read it rather than type it. The next seven are the timers a suite sizes
 // its waits by: the default check interval a cluster created without one
 // stores, the default primary threshold a pool created without one reads,
-// the demotion hold's wait (dnv-worker.md RW22), the start hold a cluster
+// the demotion hold's wait (dnv-worker.md RW22), the bound of the fence
+// round after it in check intervals (dnv-worker.md RW24), which the e2e
+// suite's cutoff case adds to its waits on the fence writer, the start hold a cluster
 // created without one reads (dnv-worker.md HL8), which the e2e suite's react
 // restart step bounds its wait by, the age at which the
 // retire timer deletes a retired leg (dnv-worker.md AR12), which the worker

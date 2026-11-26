@@ -482,10 +482,10 @@ three prefixes `ThinDevicePrefix`, `RepairPrefix` and `RetiredLegPrefix`
 retired legs at it, since a pool holds a thin device per volume, and up to
 one repair and `MaxRetiredLegPerGrp` retired legs per group, too many for a
 point read each within the load's one budget (EU5): with a point read per
-volume, a load of 1024 volumes costs 1024 round trips, which passes the
-budget once one read takes about 10 milliseconds, while the range costs
-one, a load of tens of milliseconds at such round trips
-(`TestMeasurePoolLoad`, run by hand, measures both); and a snapshot
+volume, a load of a pool of the most volumes (`MaxTdCntPerSp`) costs a
+round trip per volume, which passes the budget once one read takes that
+budget over that count, while the range costs one (`TestMeasurePoolLoad`,
+run by hand, times the range's load and one point read); and a snapshot
 pinned to the same
 revision (`SnapshotAtRev`, EU4) reads the node records last, because the
 repairs' new legs and the retired legs name nodes too. The fields: `Rev`,
@@ -1392,11 +1392,11 @@ or its first watch events. A failed put is logged by the `etcd put` record,
 and a role whose tries all fail is tried again at the next tick. Reason: a
 member that hangs, its machine gone with no TCP reset or its process
 stopped, holds a put for `DefaultEtcdOpTimeout` (EU5) until the client's
-keepalive closes its connection (EU1); at the default vote timers the lab
-saw a worker fence after one tick waited it out and the next failed at the
-keepalive's close (the three-member mode's etcd_defaults, Integration test
-plan), and with the put's own limit and the tries a tick costs a few
-seconds. The
+keepalive closes its connection (EU1), and at the default vote timers a
+tick that waited it out and a next that failed at the keepalive's close
+would together pass VW8 (a)'s limit; with the put's own limit and the
+tries a tick costs a few seconds, and no worker fences (the three-member
+mode's etcd_defaults, Integration test plan). The
 loop records `lastOkPut`: the start of the last tick whose puts **all**
 succeeded, one per role, the first puts at start included (VW8 (a)).
 
@@ -1571,8 +1571,9 @@ every heartbeat tick and on every own-key watch event:
 * (e) it reaches etcd but no agent, while another worker is a live member:
   the rounds it has asked agents, in any role, have gone unanswered by
   every agent for `AgentsUnreachedSeconds`, or for twice the longest round
-  interval of its loops that wait for no answer if that is longer (their
-  agents answered them last and may be silent that long with no cut), with
+  interval of its loops that wait for no answer if that is longer (such a
+  loop, between its rounds, idle or in a `Syncup*`, can hear nothing from
+  its agent that long with no cut), with
   no answer of a round or a `Syncup*` between, while one of its loops
   still waits for an answer; and
   in every role it is an effective member of, and in one at least, another
@@ -1886,8 +1887,9 @@ side, say, which is normal since the roles are independent (VW10), for a
 while: a side's or a cntlr's rounds answered unknown object for their
 bound — the cluster's start hold, never less than `ObsMaxAgeIntervals`
 intervals — by the worker's clock from the first such answer of a round
-with no other answer of a round, and no pause of the loop (a move, an
-idle, a refused conf), between, are missed rounds from then on (HL2),
+with no other answer of a round between, save a round too old (HL7),
+which leaves the count as it is, and no pause of the loop (a move, an
+idle, a refused conf) between, are missed rounds from then on (HL2),
 logged `check round failed` with that cause, while the re-sync goes on,
 so the object becomes known as soon as its node's syncup lands. A node
 that never takes that syncup, as one whose local store refuses writes,
@@ -3400,8 +3402,9 @@ devices (RW19), the settle (HL2), AR5's marks of a standby and the log of
 its leg rows all read it; a `Syncup*` reply with no report, a refused one
 or an unknown object's, leaves AR5's marks of a left stack and of the legs
 as they are, while a round's reply always counts as a report, of the info
-its stream last carried, and AR5's unknown-object mark follows every
-reply's answer (RW5). The side's
+its stream last carried, and AR5's unknown-object mark follows the answer
+of every reply the cntlr's child judges (RW5): a starting answer, a round
+too old and one no round asked for leave it as it is. The side's
 provisioned flip (RW18), its cutover wait and its clone-ready gate, and
 the coordinator's snapshot of a cntlr's info (AR1) still read the latest
 known info. A round's reply with neither info nor error is a
@@ -4432,7 +4435,8 @@ not follow the discovery log keeps that path (`architecture.md`, Host
 view). The hold lasts until a refusal ends, or until an operator enables
 the primary again, enables a standby with no `err_epoch` whose agent does
 not refuse, or adds a cntlr: a pass that finds such a standby or the new
-cntlr with no refusal mark and no unknown mark elects it. The first two read a report and the
+cntlr with no refusal mark, no unknown mark and no left-stack mark elects
+it. The first two read a report and the
 third the memo of a refusal (AR10), none of which an STM sees, so
 `model.Failover` does not re-validate them, nor AR10's verdict, which no
 STM sees either; it takes the standbys the pass passes over for a refusal,
@@ -6507,12 +6511,12 @@ measurement, not an assertion:
   says of a heartbeat that lands again over a leader election. A stop
   under one vote interval fails at most one tick of a worker, and that
   tick's puts end within the timeout (EU5), so it stays under VW8 (a)'s
-  limit. At the suite's own vote interval the case does not hold: on the
-  lab server a leader stopped for 2 seconds fenced a worker in 3 of 6 runs,
-  and stops of 4 seconds or more fenced every worker, for a heartbeat put
-  the stopped leader held (Known limits); the case's interval, sized by
-  `DefaultEtcdOpTimeout`, is an upper bound, since a heartbeat put ends
-  within its own shorter bound (VW2);
+  limit. At the suite's own vote interval two slow ticks in a row can
+  reach that limit, as at any short `--vote-interval` (Known limits, One
+  etcd member that stops answering can fence every worker at a short vote
+  interval); the case's interval, sized by `DefaultEtcdOpTimeout`, is an
+  upper bound, since a heartbeat put ends within its own shorter bound
+  (VW2);
 * etcd_follower — the member that serves the most watch streams, made a
   follower first, stopped for 30 seconds at the suite's vote interval, its
   raft term unchanged over the stop: a heartbeat put the stopped member
@@ -7105,7 +7109,7 @@ caught.
   keys sees the gap between two landings. With the default timers this
   cannot happen, since a tick's puts end within the vote interval (the
   tries of VW2) and two ticks fit inside the limit; with a
-  `--vote-interval` of 4 seconds or less, the two tries every put gets can
+  `--vote-interval` short enough that the two tries every put gets can
   outlast the interval, and puts that land but take most of them, tick
   after tick, can reach the limit, and the worker fences and rejoins
   though none of its keys was seen dead. The other way round, an etcd
@@ -7137,7 +7141,7 @@ caught.
   heartbeat tick, and fences again: the sit-outs double from the fence
   threshold to eight times it (VW8 (e)), and each return leaves
   those pools undriven for about `AgentsUnreachedSeconds` plus the leave's
-  grace window and the ownership changes' gaps (VW7), about a minute. When
+  grace window and the ownership changes' gaps (VW7). When
   every worker is cut off, one at least keeps the pools, its reactions
   held, but two that judge in the same tick both fence; and when a
   returning worker's join commits, the one that kept the pools has a live

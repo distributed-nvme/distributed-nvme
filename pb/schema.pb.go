@@ -4906,8 +4906,9 @@ type Cntlr struct {
 	// zero for a standby and for a primary neither made, as a pool's first
 	// primary and every record an older build wrote: its term, zero meaning
 	// none. A cn agent builds a primary's stack under one term only, and
-	// tears down what an earlier term left before it builds under another
-	// (cnagent.md CN35). Appended, never renumbered.
+	// tears down what an earlier term left before it builds under another,
+	// save a stack whose namespaces serve while it keeps no term (cnagent.md
+	// CN35). Appended, never renumbered.
 	PrimaryRevision uint64 `protobuf:"varint,9,opt,name=primary_revision,json=primaryRevision,proto3" json:"primary_revision,omitempty"`
 	unknownFields   protoimpl.UnknownFields
 	sizeCache       protoimpl.SizeCache

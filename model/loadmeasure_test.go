@@ -97,9 +97,9 @@ func (p *delayProxy) pipe(src, dst net.Conn) {
 	_ = dst.Close()
 }
 
-// TestMeasurePoolLoad is the measurement of the multi wave plan's wave 2,
-// change 13: the sp worker's load of a pool (LoadSpWithoutNodes, its pass's
-// load, dnv-worker.md AR1) with 1024 volumes, through a proxy that adds a
+// TestMeasurePoolLoad measures the sp worker's load of a pool
+// (LoadSpWithoutNodes, its pass's load, dnv-worker.md AR1) with 1024
+// volumes, through a proxy that adds a
 // round trip of 0, 2, 5, 10 and 20 milliseconds to every etcd request, as a
 // slow network to etcd does, and logs the load's time and that of one point
 // read through the same proxy. The load's snapshot, its point reads

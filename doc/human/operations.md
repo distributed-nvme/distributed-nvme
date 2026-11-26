@@ -1154,8 +1154,9 @@ or for a clone's group `dnvctl clone get --name <clone>`, shows the group
 with `array_made` false: the worker never saw its array run.
 
 What happened: mdadm writes the legs' superblocks one after the other when
-it creates an array, and the primary stops a command after 3 seconds. A
-slow leg made the create pass that limit between the two writes. Every
+it creates an array, and the primary stops an array create after 15
+seconds. A slow leg made the create pass that limit between the two
+writes. Every
 later try, on this primary or on a new one, starts the array from the one
 leg with a superblock, and mdadm refuses, since that superblock counts
 both legs.

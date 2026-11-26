@@ -3208,9 +3208,12 @@ func (s *CnAgentServer) reportChain(chain *cnChain, res *agent.SweepResult) {
 }
 
 // sweepCn is the node-level pass: everything of an sp whose pointer has left
-// this CN's list, plus the objects no sp can be read off at all. It runs
-// under the node write lock, so no cntlr converge, no read and no push
-// runs beside it — which is what makes judging an UNOWNED object safe. A
+// this CN's list, plus the objects no sp can be read off at all. A removing
+// pass (remove) runs under the node write lock, so no cntlr converge, no
+// read and no push runs beside it — which is what makes judging an UNOWNED
+// object safe; the read-only verdict, of a CN's read (refreshCn) or of a
+// SyncupCn that only adds cntlrs (syncupCnAdds), runs under the node read
+// lock and removes nothing. A
 // disconnect it sets going (startDisconnect) can land after the lock is
 // released; the connect steps' registry check (disconnectInFlight) keeps a
 // converge from adopting that connection meanwhile.

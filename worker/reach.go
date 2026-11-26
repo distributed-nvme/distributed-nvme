@@ -151,9 +151,9 @@ func (r *agentReach) reset() {
 }
 
 // spanLocked is, under r.mu, twice the longest round interval of the loops
-// that wait for no answer: such a loop's agent answered it last and answers
-// each round, so it may be silent that long with no cut. A loop that waits
-// is no such sign and stretches nothing.
+// that wait for no answer: such a loop, between its rounds, idle or in a
+// Syncup*, can hear nothing from its agent that long with no cut. A loop
+// that waits is no such sign and stretches nothing.
 func (r *agentReach) spanLocked() time.Duration {
 	var span time.Duration
 	for slot := range r.loops {

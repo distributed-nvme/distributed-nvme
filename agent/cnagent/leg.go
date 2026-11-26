@@ -1227,8 +1227,9 @@ func (s *CnAgentServer) legInfo(
 // (`change`, `persistent-loss`, garbage); a transient bad read during a
 // cutover's ana_grpid rewrites shows in the log alone, since a standby's leg
 // row is logged and never recorded (dnv-worker.md HL2), save that two
-// reports in a row with every leg of a group so take the standby out of the
-// failover's candidates (dnv-worker.md AR5); a persistent one shows there
+// reports in a row with every leg of a group so, no group of a migrating
+// leg among them, pass the standby over in the failover while another
+// candidate stands (dnv-worker.md AR5); a persistent one shows there
 // too, and in the primary's leg row (CN11) once the worker makes this
 // standby the primary.
 // A leg whose side_list holds two sides is

@@ -38,8 +38,8 @@ var errStartingAfterReboot = errors.New("agent starting after a reboot")
 // errUnknownPastHold fails a round of a side or a cntlr whose agent has
 // answered "unknown object" past RW5's bound, the cluster's start hold and
 // never less than ObsMaxAgeIntervals intervals, by the worker's clock, with
-// no other answer of a judged round between (HL2, unknownPastHold): the node
-// never came to know the object.
+// no other answer of a round between, save rounds too old (HL2,
+// unknownPastHold): the node never came to know the object.
 var errUnknownPastHold = errors.New("object unknown to its agent past the start hold")
 
 // errRoundAborted ends a round that a desired change overtook (RW6). The
@@ -649,9 +649,9 @@ func (w *revWorker) round(cc *pb.ClusterConf, interval time.Duration) {
 // it is no verdict, as a new object's node may not have taken the syncup
 // that lists it yet (RW5); past that bound, it is a missed round for the
 // object's health, logged as a failed round, and it reports true. Any other
-// answer of a round it judges, a pause of the loop (a move, an idle, a
-// refused conf) and a new loop start the count again; a round too old, or
-// a starting one, ends before it (staleRound) and leaves the count as it
+// answer of a round, a starting one included (round), a pause of the loop
+// (a move, an idle, a refused conf) and a new loop start the count again;
+// a round too old ends before it (staleRound) and leaves the count as it
 // is. The dn and cn roles' loops never
 // judge it: a node that does not know itself is made known by its own
 // syncup, and one whose store refuses that save stays unjudged (Known

@@ -353,7 +353,7 @@ func (s *CnAgentServer) convergeNsDev(
 			}
 		} else if np.td != nil && np.backingName == np.td.errorName &&
 			s.wcacheStale(ctx, np.devName, devNo) {
-			// CN15: an ns-dev loaded over its td's dm-error while the
+			// CN16: an ns-dev loaded over its td's dm-error while the
 			// dm-error reported no write cache, as an older agent built it,
 			// takes the dm-error's write cache only from a load of its own;
 			// the same table again moves no data, so the CN33 fence lets it

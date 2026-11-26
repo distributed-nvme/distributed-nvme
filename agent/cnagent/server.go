@@ -299,8 +299,9 @@ type cntlrState struct {
 	// fenced is the cntlr's fence flag (CN34): set by the fence watch as it
 	// moves the namespaces for the fence it read, and by a converge that
 	// reads the fence itself (fenceAfterLegs); dropped when the watch reads a
-	// leg path optimized and when the cntlr leaves the primary role
-	// (keepFenceWatch). Every plan of the cntlr reads it once (applyFence).
+	// leg path optimized and when a converge's plan gives the watch no leg:
+	// the cntlr leaves the primary role, its level builds no leg, or every
+	// leg it builds provisions (keepFenceWatch, fenceInputs). Every plan of the cntlr reads it once (applyFence).
 	// Atomic: the watch drops it holding no lock.
 	fenced atomic.Bool
 }

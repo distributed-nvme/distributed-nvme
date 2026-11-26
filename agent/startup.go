@@ -12,7 +12,7 @@ import (
 
 // Startup is an agent's startup state (dnagent.md SH33): the time its
 // process began to serve and whether it began after a boot of its machine
-// that its last start did not see, which every reply's stamp carries, and
+// that no start of it has seen end, which every reply's stamp carries, and
 // whether its startup pass still runs. A server built without Begin, as a test that
 // calls Reconcile itself builds it, is never starting. It is safe for use by
 // every RPC goroutine and the startup pass at once.
@@ -24,7 +24,7 @@ type Startup struct {
 }
 
 // Begin marks the agent starting from at, after a reboot when rebooted
-// (Store.SeeBoot), before its gRPC listener opens (Serve).
+// (SeeBoot), before its gRPC listener opens (Serve).
 func (s *Startup) Begin(at time.Time, rebooted bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()

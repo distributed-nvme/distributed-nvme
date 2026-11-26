@@ -331,7 +331,8 @@ object lock or the node write lock: the marks of CN14's activation sweep
 (`pendingSweep`), CN14's torn marks (`tornTds`), CN35's kept term
 (`stackTerm`) and whether its file holds it (`stackTermSaved`), CN12's
 acted marks (`forcedStarts`), CN12's md checks (`mdChecks`), CN10's marks
-of a leg path whose write cache reads stale (`wcStale`) and
+of a leg whose path's write cache reads stale or that it watches for a
+live path not optimized (`wcStale`) and
 `reqFromRpc`, which says whether the request this process holds counts as
 delivered (CN8, CN12, CN14); the torn marks and the kept term are the ones
 the local store also holds (CN14, CN35), and the rest are in memory only. Each state's request is an atomic pointer, stored and loaded without
@@ -2727,7 +2728,7 @@ dm-clone (CN18).
   group's array, while the group's `operator_in_charge` flag is clear.
   Every `--create` and `--assemble` runs under `MdBuildTimeout` in place of
   the soft timeout (`dnagent.md` SH15): on a node that builds many arrays at
-  once an assembly outlasted the soft timeout. An Info record
+  once an assembly can outlast the soft timeout. An Info record
   ("array assembled again") names the group, the node stopped and
   the node started, once the assembled array is there: the agent mended the
   group alone (`log.md` R6).
@@ -3588,7 +3589,10 @@ keeps the device last found, and a loop device the make put there that
 does not read as wanted is detached again. A look or a make that fails is
 logged at Warn and not tried again before `common.CnWcacheRetry`, and the
 dm-error then gets `agent.ErrorTable`; so is a two-target table whose load
-fails, the dm-error resumed on the table it had. A read neither looks nor
+fails, and a writable dm-error that had the one-target table is resumed on
+it, while a failed create leaves none in that pass and a failed reload over
+any other table, or over a read-only device, leaves it suspended for the
+next pass (`Dm.Reload` fails closed). A read neither looks nor
 makes. While the agent has no loop device either table is the one wanted;
 once it has one, a converge loads an older agent's one-target table again
 into the two-target one, and a read reads such a table OK with
@@ -4212,8 +4216,9 @@ must meet a node that has already read its fence. A migration's gap moves
 a path to inaccessible, not to the standby group. Each converge of a
 primary that builds legs keeps one watch of the cntlr (`keepFenceWatch`),
 made anew when the plan's legs, their sides or its namespaces change and
-ended when the cntlr is no primary or is dropped, with its fence flag
-dropped. One loop of the agent's (`fenceWatchLoop`) reads every watch each
+ended, with its fence flag dropped, when the cntlr is dropped or its plan
+builds no leg it watches: it is no primary, its level builds no leg, or
+every leg it builds still provisions (`fenceInputs`). One loop of the agent's (`fenceWatchLoop`) reads every watch each
 `common.CnFenceCheckInterval` over one NVMe walk of the node, and a watch's
 read stops at the first optimized live path, so a serving primary costs
 one leg lookup a tick. A lookup or an address read that did not answer
@@ -4247,8 +4252,8 @@ converge also reads the fence itself, from the lookups of its leg step,
 before its build moves any namespace (`fenceAfterLegs`): a cntlr that has
 served and reads it gets the flag. Reason: an agent that restarts after
 its watch moved the namespaces forgets the flag, and its startup converge
-would move them back before a watch reads anything. A leg path read optimized drops the flag, and so does the end of
-the primary role. Nothing of this runs while the agent is stopped. A disk
+would move them back before a watch reads anything. A leg path read
+optimized drops the flag, and so does the end of the watch (above). Nothing of this runs while the agent is stopped. A disk
 node that, from older local files, serves the primary as a standby while
 every other leg of the primary has no live path, makes the primary read
 fenced until that disk node's syncup: a pause of its hosts, which the

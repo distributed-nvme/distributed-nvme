@@ -316,8 +316,8 @@ func loadRanged(
 	}
 	// The thin devices are ranged too, in one read where a Get each would
 	// cost a pool of 1024 volumes as many round trips under the snapshot's
-	// one budget (EU5): once one read takes about 10 ms, that load passes
-	// the budget (TestMeasurePoolLoad).
+	// one budget (EU5): once one read takes that budget over the count of
+	// volumes, that load passes it (TestMeasurePoolLoad times one read).
 	tds, err := ranged(ThinDevicePrefix(cid, spId))
 	if err != nil {
 		return err

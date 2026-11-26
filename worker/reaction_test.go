@@ -4667,8 +4667,9 @@ func TestReactionFailoverPassesOverAnUnknownStandby(t *testing.T) {
 // TestReactionFailoverPassesOverAStandbyThatReachesNoLeg pins AR5's election:
 // a standby whose reports read ERROR on every leg of some group is passed
 // over and handed to the op to pass over too while another candidate
-// stands; where every candidate is marked, the election takes them as
-// before; and a marked standby that also refuses names the refusal.
+// stands; where every candidate is marked, the election takes the
+// smallest of them; and a marked standby that also refuses names the
+// refusal.
 func TestReactionFailoverPassesOverAStandbyThatReachesNoLeg(t *testing.T) {
 	t.Run("another standby", func(t *testing.T) {
 		state := reactFixture(t)

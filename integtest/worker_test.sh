@@ -6759,13 +6759,11 @@ case_etcd_follower() {
 case_etcd_defaults() {
 	CASE=etcd_defaults
 	stage 1 "the member that serves the most watch streams, a follower, stopped for ${ETCD_DEFAULTS_STOP}s at the default vote timers: no worker fences"
-	# The measurement of the multi wave plan's wave 2, change 12: case
-	# etcd_follower's stop at the default vote timers (the worker's own
+	# Case etcd_follower's stop at the default vote timers (the worker's own
 	# defaults, read from the build), for two fence thresholds. A heartbeat
 	# put the stopped member holds ends at its own bound and is sent again,
-	# usually to another member (dnv-worker.md VW2); before that bound, one
-	# tick waited out the etcd operation timeout and the next failed at the
-	# keepalive's close, and two of three workers fenced.
+	# usually to another member (dnv-worker.md VW2), so no tick waits out
+	# the etcd operation timeout and no worker fences.
 	local follower lead base puts0 w
 	follower=$(busiest_member)
 	move_leader_off "$follower"

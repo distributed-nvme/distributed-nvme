@@ -6823,11 +6823,12 @@ new primary's optimized flip releases it once its stack is built
 (new_primary step 1) makes the pause longer by the rounds until a read
 that starts after the flips names the group, and by the converge of the
 `SyncupCntlr` the worker re-sends on that name (`cnagent.md` CN10, CN30;
-`cnagent.md`, Known limits), or, where the soft timeout ends that
-converge's assembly of a RAID1 group after mdadm has added a member and
-before it has started the array, leaves that array inactive and the pool
-unbuilt (Known limits, A promotion that outruns its sides can leave a group's
-array inactive), and never turns it into IO errors: the new primary builds its
+`cnagent.md`, Known limits), and by one more round and converge where the
+assembly's time limit ends that converge's assembly of a RAID1 group after
+mdadm has added a member and before it has started the array, leaving
+that array inactive until the same converge stops it and the worker's
+re-send assembles it (Known limits, A promotion that outruns its sides can
+leave a group's array inactive), and never turns it into IO errors: the new primary builds its
 groups only over available legs, so no stack it builds reaches a side that
 still exports dm-error to it (`cnagent.md` CN12), and it moves no namespace to
 optimized over the dm-error, except at the levels that remove the thin pools
@@ -10000,7 +10001,11 @@ document and only pointed to here.
   commit, about once a second, which a new primary that dies first never
   makes. The same holds for a path a host read from an agent whose
   dm-error has one target, until the host rescans the controller or
-  connects again (`operations.md`, Upgrade dnv). A primary's leg path that
+  connects again: an older build's (`operations.md`, Upgrade dnv), and
+  one of this build that could not make its write cache loop device, which
+  loads the one-target table and does not try again before
+  `CnWcacheRetry` (`cnagent.md` CN15); the later reload to the two-target
+  table does not make the host read again. A primary's leg path that
   reads "write through" over a target that reports a write cache is
   scanned again in the primary's converge; until the scan takes, its leg
   reads error and the primary's flushes stop at that path. Read in the
@@ -10679,7 +10684,8 @@ document and only pointed to here.
   and it holds back the retire timer of its group meanwhile
   (`dnv-worker.md` AR12). A side threshold set shorter would repair healthy
   legs while pools build. The controller node has no such limit for its cntlrs:
-  a `SyncupCn` that only adds cntlrs holds off no read (`cnagent.md` CN7),
+  a `SyncupCn` that only adds cntlrs holds off no read of a cntlr built
+  already (`cnagent.md` CN7),
   and that case's build fails no pool over (`e2e_integtest.md`, The cases).
   A Kubernetes cluster makes this shape when it creates many volumes at
   once (`csi.md`, Known limits).
@@ -10694,10 +10700,12 @@ document and only pointed to here.
   `MdBuildTimeout` (`dnagent.md` SH15), ends an assembly before mdadm has
   added a member; but where that limit ends one after mdadm has added a
   member and before mdadm has started the array, md holds the array
-  inactive with the members added. The same converge reads the array again and stops it when every
-  member is a leg wrapper of this pool, and a read names an inactive array
-  whose kept members all carry a superblock, so the worker's re-send
-  assembles it from both legs (`cnagent.md` CN12, The re-assembly; CN30).
+  inactive with the members added. The same converge reads the array
+  again and stops it when every member is a leg wrapper of this pool, and
+  the next read names the absent array, or an inactive one the converge
+  could not stop when at least one of its members carries a superblock,
+  so the worker's re-send assembles it from both legs (`cnagent.md` CN12,
+  The re-assembly; CN30).
   That limit is longer than the soft timeout, so the stop is rare; it
   still costs a round and a converge. Seen once in the
   e2e suite's many-pools case at 64 pools, on a pool failed over twice in
