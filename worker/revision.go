@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"google.golang.org/grpc"
+	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/types/known/timestamppb"
 
 	"github.com/distributed-nvme/distributed-nvme/common"
@@ -103,6 +104,9 @@ type replyState struct {
 	// to its local store, zero on a round's reply and on a Syncup* reply
 	// that refuses the request (architecture.md, Live-state reporting).
 	saveTime time.Time
+	// info is the *Info the reply itself carried, nil when it carried none:
+	// a side's and a cntlr's driver judge the reply by it (ownInfo, HL5).
+	info proto.Message
 	// newObs reports whether a round's observation is later than every one
 	// the loop has seen for the object (RW23). The loop sets it, on a
 	// round's reply only, so a Syncup* reply's observation never counts.

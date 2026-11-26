@@ -3858,6 +3858,12 @@ type sideDriver struct {
 	mu       sync.Mutex
 	next     *sidePlan
 	lastInfo *pb.SideInfo
+	// streamInfo is the SideInfo the open CheckSide stream last carried:
+	// what a round's reply that leaves its info out as unchanged repeats,
+	// where lastInfo may hold a Syncup*'s since; nil until the stream's
+	// first info. A reply's health verdict judges by its own report
+	// (ownInfo, HL5).
+	streamInfo *pb.SideInfo
 	// awaiting is whether the latest SideInfo, as the loop last observed
 	// it, shows a migration dst side that waits for the cutover
 	// (sideAwaitsCutover). The loop writes it; the coordinator reads it for
@@ -3906,6 +3912,35 @@ func (d *sideDriver) info() *pb.SideInfo {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	return d.lastInfo
+}
+
+// setStreamInfo remembers the SideInfo the open Check stream last carried,
+// nil for a new stream.
+func (d *sideDriver) setStreamInfo(info *pb.SideInfo) {
+	d.mu.Lock()
+	d.streamInfo = info
+	d.mu.Unlock()
+}
+
+// ownInfo is the SideInfo reply r itself reports, as cntlrDriver.ownInfo
+// says: the info the reply carried, or, for a round's reply that left it out
+// as unchanged, what its stream last carried; nil for a Syncup* reply that
+// carried none.
+func (d *sideDriver) ownInfo(r *replyState) *pb.SideInfo {
+	if info, ok := r.info.(*pb.SideInfo); ok && info != nil {
+		return info
+	}
+	if r.infoPresent {
+		// A reply that carried info but no pointer to it, as a unit test
+		// builds after storeInfo; fold always keeps the pointer.
+		return d.info()
+	}
+	if r.fromRound {
+		d.mu.Lock()
+		defer d.mu.Unlock()
+		return d.streamInfo
+	}
+	return nil
 }
 
 // setAwaiting records what the latest SideInfo says of the cutover;
@@ -4088,6 +4123,9 @@ func (d *sideDriver) openStream(
 	if err != nil {
 		return nil, fmt.Errorf("check side stream: %w", err)
 	}
+	// A new stream has carried nothing yet: the agent's first reply on it
+	// carries the info, unchanged or not.
+	d.setStreamInfo(nil)
 	return &sideCheckStream{driver: d, stream: stream}, nil
 }
 
@@ -4417,7 +4455,11 @@ func (d *sideDriver) pushMigrPieces(
 // offer (BM7).
 func (d *sideDriver) observe(ctx context.Context, r *replyState) {
 	info := d.info()
-	obs, res := sideObservation(r.code, info)
+	// HL5: the verdict judges the reply by its own report, never by
+	// info(), the latest known info a round's unchanged reply would read
+	// there: this worker's own Syncup* rows, which a later read replaced at
+	// the agent.
+	obs, res := sideObservation(r.code, d.ownInfo(r))
 	d.health.observe(ctx, obs, res)
 	plan := d.current()
 	d.reportProvisioned(ctx, r, plan)
@@ -4582,7 +4624,11 @@ func (d *sideDriver) fold(
 	if info != nil {
 		d.storeInfo(info)
 	}
-	return newReplyState(agentReply, revision, info != nil, stamp, saveTime)
+	r := newReplyState(agentReply, revision, info != nil, stamp, saveTime)
+	if info != nil {
+		r.info = info
+	}
+	return r
 }
 
 // sideCheckStream adapts the generated CheckSide stream to checkStream (RW17).
@@ -4608,6 +4654,9 @@ func (s *sideCheckStream) recv() (*replyState, error) {
 	reply, err := s.stream.Recv()
 	if err != nil {
 		return nil, fmt.Errorf("check side recv: %w", err)
+	}
+	if info := reply.GetSideInfo(); info != nil {
+		s.driver.setStreamInfo(info)
 	}
 	return s.driver.fold(
 		reply.GetAgentReply(), reply.GetRevision(), reply.GetSideInfo(),
@@ -4669,11 +4718,6 @@ type cntlrDriver struct {
 	// where lastInfo may hold a Syncup*'s since. AR10's run judges a round
 	// by it; nil until the stream's first info.
 	streamInfo *pb.CntlrInfo
-	// syncupInfo is the CntlrInfo the last SyncupCntlr reply carried, nil
-	// when it carried none: that reply's own report, where lastInfo may hold
-	// a round's that the stream's pump folded meanwhile (ownInfo). Only the
-	// loop goroutine touches it.
-	syncupInfo *pb.CntlrInfo
 	// memo is the coordinator's own-verdict memo, and cntlrId this cntlr's
 	// key in it (AR10).
 	memo    *verdictMemo
@@ -4833,17 +4877,25 @@ func (d *cntlrDriver) roundInfo() *pb.CntlrInfo {
 	return d.streamInfo
 }
 
-// ownInfo is the CntlrInfo reply r itself reports: for a round, what its
-// stream last carried (roundInfo), the reply's own info or the unchanged one
-// it left out; for a Syncup*, the info its reply carried, or nil. It is never
-// info(), which may mix the two kinds: a round's reply that leaves its info
-// out as unchanged would read a Syncup*'s older info there, from before a
-// failover, say.
+// ownInfo is the CntlrInfo reply r itself reports: the info the reply
+// carried, or, for a round's reply that left it out as unchanged, what its
+// stream last carried (roundInfo); nil for a Syncup* reply that carried
+// none. It is never info(), which may mix the two kinds: a round's reply
+// that leaves its info out as unchanged would read a Syncup*'s older info
+// there, from before a failover, say, or rows a later read replaced.
 func (d *cntlrDriver) ownInfo(r *replyState) *pb.CntlrInfo {
+	if info, ok := r.info.(*pb.CntlrInfo); ok && info != nil {
+		return info
+	}
+	if r.infoPresent {
+		// A reply that carried info but no pointer to it, as a unit test
+		// builds after storeInfo; fold always keeps the pointer.
+		return d.info()
+	}
 	if r.fromRound {
 		return d.roundInfo()
 	}
-	return d.syncupInfo
+	return nil
 }
 
 // infoSnapshot returns a COPY of the cntlr's latest info, taken under the
@@ -4951,7 +5003,6 @@ func (d *cntlrDriver) syncup(
 	if err != nil {
 		return nil, fmt.Errorf("syncup cntlr: %w", err)
 	}
-	d.syncupInfo = reply.GetCntlrInfo()
 	state := d.fold(
 		reply.GetAgentReply(), reply.GetRevision(), reply.GetCntlrInfo(),
 		reply.GetObsStamp(), reply.GetSaveTime(),
@@ -5020,13 +5071,23 @@ func (d *cntlrDriver) observe(ctx context.Context, r *replyState) {
 	// HL2, AR5: a cntlr whose latest answer is "unknown object" is one its
 	// node does not know, which the failover passes over.
 	d.memo.noteUnknown(d.cntlrId, r.code == common.ReplyCodeUnknownObject)
-	info := d.info()
-	// AR5: a standby's report that its sweep left a stack takes it out of
-	// the failover's candidates; it moves no health epoch.
-	d.memo.noteStackLeft(d.cntlrId, !plan.primary && info.GetStackLeft())
-	// AR5: a standby whose reports read ERROR on every leg of some group is
-	// passed over; it moves no health epoch.
-	d.noteNoLeg(ctx, r, plan, info)
+	// HL5: the reply is judged by its own report (ownInfo), never by
+	// info(), the latest known info a round's unchanged reply would read
+	// there: this worker's own Syncup* rows, which a later read — one
+	// another worker's round started, say — replaced at the agent.
+	info := d.ownInfo(r)
+	// A reply that carries no report — a refused Syncup*, or an unknown
+	// object's — says nothing of the stack or the legs, so it leaves AR5's
+	// marks of a standby as they are.
+	reported := info != nil || r.fromRound
+	if reported {
+		// AR5: a standby's report that its sweep left a stack takes it out
+		// of the failover's candidates; it moves no health epoch.
+		d.memo.noteStackLeft(d.cntlrId, !plan.primary && info.GetStackLeft())
+		// AR5: a standby whose reports read ERROR on every leg of some
+		// group is passed over; it moves no health epoch.
+		d.noteNoLeg(ctx, r, plan, info)
+	}
 	obs, res := cntlrObservation(r.code, info)
 	refusing := d.refusing(r, plan)
 	if refusing {
@@ -5122,7 +5183,7 @@ func (d *cntlrDriver) observe(ctx context.Context, r *replyState) {
 		rep.legRows = d.legRows(info)
 		rep.paths = newPathReport(r.revision, d.ownInfo(r))
 		rep.fenceViews = fenceViewsOf(info)
-	} else if !plan.effectivePrimary() {
+	} else if !plan.effectivePrimary() && reported {
 		d.logStandbyLegRows(ctx, info, plan.cntlrId)
 	}
 	if r.revision > d.synced {
@@ -5407,7 +5468,11 @@ func (d *cntlrDriver) fold(
 	if info != nil {
 		d.storeInfo(info, revision)
 	}
-	return newReplyState(agentReply, revision, info != nil, stamp, saveTime)
+	r := newReplyState(agentReply, revision, info != nil, stamp, saveTime)
+	if info != nil {
+		r.info = info
+	}
+	return r
 }
 
 // cntlrCheckStream adapts the generated CheckCntlr stream to checkStream

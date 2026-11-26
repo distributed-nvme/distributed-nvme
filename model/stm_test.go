@@ -348,12 +348,13 @@ func TestLoadSpMissing(t *testing.T) {
 	want := []string{
 		CntlrKey(cid, fixtureSpId, 22),
 		SliceKey(cid, fixtureSpId, 31),
-		ThinDeviceKey(cid, fixtureSpId, "td0"),
-		ThinDeviceKey(cid, fixtureSpId, "td1"),
 		SubsystemKey(cid, fixtureSpId, fixtureNqn),
 		CloneKey(cid, fixtureSpId, "clone0"),
 		TransferKey(cid, fixtureSpId, "xfer0"),
 		MigrationKey(cid, fixtureSpId, "migr0"),
+		// The thin devices are ranged after the snapshot's reads (MD3).
+		ThinDeviceKey(cid, fixtureSpId, "td0"),
+		ThinDeviceKey(cid, fixtureSpId, "td1"),
 		RepairKey(cid, fixtureSpId, "rep0"),
 		RetiredLegKey(cid, fixtureSpId, 56),
 		CnConfKey(cid, fixtureCnAddrA),
@@ -671,7 +672,7 @@ func TestLoadSpReadsRepairsAndRetiredLegs(t *testing.T) {
 }
 
 // TestLoadRepairsReadsAtTheSnapshotsRevision pins the revision of the two
-// ranges (MD3): loadRepairs reads at SpState.Rev, not at the latest
+// ranges (MD3): loadRanged reads at SpState.Rev, not at the latest
 // revision, so a repair rewritten and a retired leg deleted after the
 // snapshot still load as the snapshot held them, with nothing missing.
 func TestLoadRepairsReadsAtTheSnapshotsRevision(t *testing.T) {
@@ -710,8 +711,8 @@ func TestLoadRepairsReadsAtTheSnapshotsRevision(t *testing.T) {
 	again := newSpState()
 	again.Conf = state.Conf
 	again.Rev = state.Rev
-	if err := loadRepairs(ctx, cli, cid, again); err != nil {
-		t.Fatalf("loadRepairs at the snapshot's revision: %v", err)
+	if err := loadRanged(ctx, cli, cid, again); err != nil {
+		t.Fatalf("loadRanged at the snapshot's revision: %v", err)
 	}
 	if !proto.Equal(again.Repairs["rep0"], rep) {
 		t.Errorf("Repairs[rep0] = %v, want the snapshot's %v",

@@ -2587,18 +2587,23 @@ failover's among them.
   end. State: accepted: the one loop is what
   keeps two syncups of one object apart. Read from dnv's code; not seen in
   the lab.
-- **A pool of many volumes on a slow etcd can get no reaction.** The worker
-  reads a pool from etcd under one time budget of 10 seconds, with one read
-  for each volume. A pool of 1024 volumes on a slow etcd can pass that
-  budget every time, and then gets no reaction. State: fix decided: first
-  a measurement against a slowed etcd, then, if the load passes its budget,
-  one range read for all the volumes. Read from dnv's code; not seen in
-  the lab.
-- **A healthy leg can get a health epoch from rows a later read
-  replaced.** The worker can judge a side or a cntlr by the rows of a
-  syncup's answer after a later read of the agent replaced them. It needs
-  two workers on one pool, as for a few seconds at a change of the pool's
-  owner. State: fix decided. Read from dnv's code; not seen in the lab.
+- **A pool of many volumes on a slow etcd took long to load.** The worker
+  reads a pool from etcd under one time budget of 10 seconds. With one
+  read for each volume, a pool of 1024 volumes took 3.6 seconds where one
+  read to etcd took 3.3 milliseconds, 7.7 seconds where it took 7.3, and
+  passed the budget where it took 12.5, so such a pool got no reaction.
+  The volumes are now read with one range read: the same load takes 73
+  milliseconds where one read takes 7.3, and 0.23 seconds where it takes
+  22.5. State: fixed. Measured with a test that slows every request to
+  etcd through a proxy; not seen in the lab.
+- **A healthy leg could get a health epoch from rows a later read
+  replaced.** The worker judged a side or a cntlr by the latest rows it
+  knew, which a syncup's answer could hold after a later read of the agent
+  replaced them, as when two workers drive one pool for a few seconds at a
+  change of the pool's owner. A check round is now judged by the rows its
+  own stream last carried, which the agent says it still holds, and a
+  syncup's answer by its own rows. State: fixed. Unit tests of the worker;
+  not seen in the lab.
 - **Reactions read a state the primary reported a while ago.** The
   primary's last answer is at most one interval old, and the state it
   reports can be up to three intervals older still: at most four

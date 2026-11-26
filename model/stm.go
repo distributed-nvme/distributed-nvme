@@ -210,9 +210,10 @@ func cntlrAddrs(conf *pb.SpConf, cntlrs map[uint64]*pb.Cntlr) []string {
 
 // loadSpConf reads the SpConf and every sub-object it lists by a key of its
 // own into a fresh SpState. It is the first part of the MD3 snapshot; the
-// repairs, the retired legs and the bitmap indexes are not part of it,
-// because an STM cannot range, and the node records follow the repairs and
-// the retired legs, whose sides name nodes too (loadNodes).
+// thin devices, the repairs, the retired legs and the bitmap indexes are not
+// part of it, because an STM cannot range and a pool's volumes are too many
+// for a read each, and the node records follow the repairs and the retired
+// legs, whose sides name nodes too (loadNodes).
 func loadSpConf(
 	s etcdutil.STM,
 	cid uint64,
@@ -248,18 +249,6 @@ func loadSpConf(
 			continue
 		}
 		state.Slices[sliceId] = slice
-	}
-	for _, tdName := range conf.GetTdNameList() {
-		key := ThinDeviceKey(cid, spId, tdName)
-		td := &pb.ThinDevice{}
-		if !s.Get(key, td) {
-			state.miss(key)
-			continue
-		}
-		// Tds and TdNames stay index-aligned: a missing td contributes to
-		// neither.
-		state.Tds = append(state.Tds, td)
-		state.TdNames = append(state.TdNames, tdName)
 	}
 	for _, nqn := range conf.GetNqnList() {
 		key := SubsystemKey(cid, spId, nqn)
@@ -300,13 +289,14 @@ func loadSpConf(
 	return state, nil
 }
 
-// loadRepairs reads every repair and every retired leg of the SP by one range
-// of each prefix at the snapshot's revision (MD3) and keeps the records the
-// SpConf lists, in Conf.repair_name_list and Conf.retired_leg_id_list order;
-// a listed key the range did not find lands in Missing, in that order. A
-// key under the prefixes that no list names is not kept: no writer leaves
-// one, and nothing could reach it.
-func loadRepairs(
+// loadRanged reads every thin device, every repair and every retired leg of
+// the SP by one range of each prefix at the snapshot's revision (MD3) and
+// keeps the records the SpConf lists, in Conf.td_name_list,
+// Conf.repair_name_list and Conf.retired_leg_id_list order; a listed key the
+// range did not find lands in Missing, in that order. A key under the
+// prefixes that no list names is not kept: no writer leaves one, and nothing
+// could reach it.
+func loadRanged(
 	ctx context.Context,
 	cli *etcdutil.Client,
 	cid uint64,
@@ -323,6 +313,29 @@ func loadRepairs(
 			byKey[kv.Key] = kv
 		}
 		return byKey, nil
+	}
+	// The thin devices are ranged too, in one read where a Get each would
+	// cost a pool of 1024 volumes as many round trips under the snapshot's
+	// one budget (EU5): at a round trip of 5 ms that load passed the budget.
+	tds, err := ranged(ThinDevicePrefix(cid, spId))
+	if err != nil {
+		return err
+	}
+	for _, tdName := range state.Conf.GetTdNameList() {
+		key := ThinDeviceKey(cid, spId, tdName)
+		kv, ok := tds[key]
+		if !ok {
+			state.miss(key)
+			continue
+		}
+		td := &pb.ThinDevice{}
+		if err := cli.Decode(ctx, kv, td); err != nil {
+			return err
+		}
+		// Tds and TdNames stay index-aligned: a missing td contributes to
+		// neither.
+		state.Tds = append(state.Tds, td)
+		state.TdNames = append(state.TdNames, tdName)
 	}
 	repairs, err := ranged(RepairPrefix(cid, spId))
 	if err != nil {
@@ -363,7 +376,7 @@ func loadRepairs(
 
 // loadNodesAt reads the node records of the SP into state (loadNodes) in a
 // snapshot pinned to SpState.Rev, the revision of the load's first snapshot
-// (MD3), as loadRepairs pins its two ranges.
+// (MD3), as loadRanged pins its ranges.
 func loadNodesAt(
 	ctx context.Context,
 	cli *etcdutil.Client,
@@ -444,11 +457,12 @@ func loadBmIdx(
 //
 // Everything is read at ONE store revision, so the SpConf and every
 // sub-object it lists can never disagree. An etcdutil snapshot reads the
-// SpConf and every sub-object it lists by a key of its own and fixes the
-// revision (SpState.Rev). The repairs and the retired legs are then one range
-// of each prefix pinned to that revision: a pool holds up to one repair and
-// common.MaxRetiredLegPerGrp retired legs per group, too many for a point
-// read each in the load's time budget. The node records follow in a snapshot
+// SpConf and every sub-object it lists by a key of its own but the thin
+// devices, and fixes the revision (SpState.Rev). The thin devices, the
+// repairs and the retired legs are then one range of each prefix pinned to
+// that revision: a pool holds a thin device per volume, and up to one
+// repair and common.MaxRetiredLegPerGrp retired legs per group, too many for
+// a point read each in the load's time budget. The node records follow in a snapshot
 // pinned to the same revision, since the repairs' new legs and the retired
 // legs name nodes too. The bitmap indexes are last, one keys-only scan per
 // clone pinned the same way: an STM cannot range, and MD3 accepts the split
@@ -515,7 +529,7 @@ func loadSp(
 		return nil, err
 	}
 	state.Rev = rev
-	if err := loadRepairs(ctx, cli, cid, state); err != nil {
+	if err := loadRanged(ctx, cli, cid, state); err != nil {
 		return nil, err
 	}
 	if nodes {

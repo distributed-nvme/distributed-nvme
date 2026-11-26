@@ -948,12 +948,15 @@ func TestCntlrRunCountsRoundsOnly(t *testing.T) {
 		syncup(clean())
 		want("a clean Syncup reply after a round's ERROR row", 0, false)
 
+		// HL5: a round that leaves its info out as unchanged is judged by
+		// what its stream last carried, never by the Syncup*'s rows a later
+		// read may have replaced.
 		round(clean())
 		syncup(failed())
 		round(nil)
 		round(nil)
 		want("rounds repeating a clean stream after a Syncup's ERROR row",
-			0, true)
+			0, false)
 		round(failed())
 		round(nil)
 		want("rounds repeating a stream's ERROR row", 2, true)
@@ -983,15 +986,15 @@ func TestCntlrRunCountsRoundsOnly(t *testing.T) {
 		round(nil)
 		want("a new observation after it", 1, true)
 
-		// A round's own clean report ends the run even while the latest
-		// known state is a Syncup*'s ERROR row, which keeps the verdict
-		// unhealthy.
+		// A round's own clean report ends the run, and the verdict, judged
+		// by that report too (HL5), is clean, though a Syncup*'s ERROR row
+		// came between.
 		round(clean())
 		driver.unreachable(ctx)
 		syncup(failed())
 		round(nil)
 		want("a round repeating a clean stream after a missed round and a "+
-			"Syncup's ERROR row", 0, true)
+			"Syncup's ERROR row", 0, false)
 	})
 
 	// loop starts a coordinator whose primary's agent answers every round one
@@ -8412,6 +8415,12 @@ func TestObserveMarksAStandbyThatLeftAStack(t *testing.T) {
 
 	standby.storeInfo(&pb.CntlrInfo{StackLeft: true}, 0)
 	standby.observe(ctx, reply)
+	// A refused Syncup* carries no report, so it leaves the mark (HL5).
+	standby.observe(ctx, &replyState{revision: 6,
+		code: common.ReplyCodeStaleRevision})
+	if !marked() {
+		t.Fatalf("a refused Syncup* with no report cleared the mark")
+	}
 	primary := newCntlrDriver(w, nil, settlePlan(true, false))
 	primary.storeInfo(&pb.CntlrInfo{StackLeft: true}, 0)
 	primary.observe(ctx, reply)
@@ -8596,5 +8605,162 @@ func TestObserveMarksAStandbyThatReachesNoLeg(t *testing.T) {
 	primary.observe(ctx, reply)
 	if marked(spCntlrPrimary) {
 		t.Fatalf("a primary's reports marked the cntlr")
+	}
+}
+
+// TestARoundIsJudgedByItsStreamsRows pins HL5's judgement of a round by its
+// own report: after this worker's SyncupCntlr reply stores ERROR rows that a
+// later read replaced at the agent, as one another worker's round started
+// does at a change of owner, a round that leaves its info out as
+// unchanged is judged by the clean rows its stream last carried, so the
+// cntlr's health clears and the leg rows the coordinator gets read OK, not
+// the Syncup*'s ERROR.
+func TestARoundIsJudgedByItsStreamsRows(t *testing.T) {
+	ctx := context.Background()
+	captureLogs(t)
+	d := newTestDeps(
+		testConfig(common.WorkerRoleSp), newFakeStore(), newFakeClock(),
+	)
+	hw := &fakeHealthWriter{}
+	d.health = hw
+	w := spTestWorker(d)
+	w.verdicts = newVerdictMemo()
+	w.reportCh = make(chan spReport, 8)
+	driver := newCntlrDriver(w, nil, settlePlan(true, false))
+	legInfo := func(status pb.ResStatus) *pb.CntlrInfo {
+		return &pb.CntlrInfo{
+			GrpIdToMdRaid: map[uint64]*pb.ResInfo{
+				1: {ResName: "md", Status: status},
+			},
+			LegIdToLeg: map[uint64]*pb.ResInfo{
+				41: {ResName: "leg", Status: status},
+			},
+		}
+	}
+	accepted := &pb.AgentReply{}
+	clean := legInfo(pb.ResStatus_RES_STATUS_OK)
+	driver.setStreamInfo(clean)
+	r := driver.fold(accepted, 7, clean, testStamp(), nil)
+	r.fromRound = true
+	driver.observe(ctx, r)
+
+	stale := legInfo(pb.ResStatus_RES_STATUS_ERROR)
+	syncup := driver.fold(accepted, 7, stale, testStamp(), nil)
+	driver.observe(ctx, syncup)
+	if writes := hw.all(); len(writes) == 0 ||
+		writes[len(writes)-1].epoch == 0 {
+		t.Fatalf("writes %v, want the Syncup's ERROR row set", writes)
+	}
+
+	round := driver.fold(accepted, 7, nil, testStamp(), nil)
+	round.fromRound = true
+	driver.observe(ctx, round)
+	writes := hw.all()
+	if last := writes[len(writes)-1]; last.epoch != 0 {
+		t.Fatalf("writes %v, want the unchanged round to clear", writes)
+	}
+	var rep spReport
+	for len(w.reportCh) > 0 {
+		rep = <-w.reportCh
+	}
+	if len(rep.legRows) != 1 || rep.legRows[0].obs != healthClean {
+		t.Fatalf("the unchanged round's leg rows %+v, want leg 41 clean",
+			rep.legRows)
+	}
+}
+
+// TestASideRoundIsJudgedByItsStreamsRows is TestARoundIsJudgedByItsStreamsRows
+// for a side: after a SyncupSide reply stores an ERROR row the agent no
+// longer holds, a round that leaves its info out as unchanged is judged by
+// the clean row its stream last carried, so the side's health clears.
+func TestASideRoundIsJudgedByItsStreamsRows(t *testing.T) {
+	ctx := context.Background()
+	captureLogs(t)
+	d := newTestDeps(
+		testConfig(common.WorkerRoleSp), newFakeStore(), newFakeClock(),
+	)
+	hw := &fakeHealthWriter{}
+	d.health = hw
+	w := spTestWorker(d)
+	w.verdicts = newVerdictMemo()
+	plan := spTestWorker(nil).buildPlan(ctx, cutoverFixture(true)).
+		sides[spDstKey]
+	driver := newSideDriver(w, nil, plan)
+	sideInfo := func(status pb.ResStatus) *pb.SideInfo {
+		return &pb.SideInfo{SideDevInfo: &pb.ResInfo{ResName: "side",
+			Status: status}}
+	}
+	accepted := &pb.AgentReply{}
+	clean := sideInfo(pb.ResStatus_RES_STATUS_OK)
+	driver.setStreamInfo(clean)
+	r := driver.fold(accepted, testSpRev, clean, testStamp(), nil)
+	r.fromRound = true
+	driver.observe(ctx, r)
+	syncup := driver.fold(accepted, testSpRev,
+		sideInfo(pb.ResStatus_RES_STATUS_ERROR), testStamp(), nil)
+	driver.observe(ctx, syncup)
+	if writes := hw.all(); len(writes) == 0 ||
+		writes[len(writes)-1].epoch == 0 {
+		t.Fatalf("writes %v, want the Syncup's ERROR row set", writes)
+	}
+	round := driver.fold(accepted, testSpRev, nil, testStamp(), nil)
+	round.fromRound = true
+	driver.observe(ctx, round)
+	if writes := hw.all(); writes[len(writes)-1].epoch != 0 {
+		t.Fatalf("writes %v, want the unchanged round to clear", writes)
+	}
+}
+
+// fakeSideRecv is a CheckSide stream that answers Recv from replies, in
+// order; the test calls nothing else of it.
+type fakeSideRecv struct {
+	grpc.ClientStream
+	replies []*pb.CheckSideReply
+}
+
+func (f *fakeSideRecv) Send(*pb.CheckSideRequest) error { return nil }
+
+func (f *fakeSideRecv) Recv() (*pb.CheckSideReply, error) {
+	reply := f.replies[0]
+	f.replies = f.replies[1:]
+	return reply, nil
+}
+
+// TestSideStreamRemembersWhatItCarried pins the side's stream info (HL5): a
+// CheckSide reply with info is what the stream last carried, and one that
+// leaves it out keeps it, so the round is judged by it.
+func TestSideStreamRemembersWhatItCarried(t *testing.T) {
+	captureLogs(t)
+	d := newTestDeps(
+		testConfig(common.WorkerRoleSp), newFakeStore(), newFakeClock(),
+	)
+	d.health = &fakeHealthWriter{}
+	w := spTestWorker(d)
+	w.verdicts = newVerdictMemo()
+	plan := spTestWorker(nil).buildPlan(context.Background(),
+		cutoverFixture(true)).sides[spDstKey]
+	driver := newSideDriver(w, nil, plan)
+	clean := &pb.SideInfo{SideDevInfo: &pb.ResInfo{ResName: "side",
+		Status: pb.ResStatus_RES_STATUS_OK}}
+	stream := &sideCheckStream{driver: driver, stream: &fakeSideRecv{
+		replies: []*pb.CheckSideReply{
+			{AgentReply: &pb.AgentReply{}, Revision: testSpRev,
+				SideInfo: clean},
+			{AgentReply: &pb.AgentReply{}, Revision: testSpRev},
+		},
+	}}
+	if _, err := stream.recv(); err != nil {
+		t.Fatal(err)
+	}
+	driver.storeInfo(&pb.SideInfo{SideDevInfo: &pb.ResInfo{ResName: "side",
+		Status: pb.ResStatus_RES_STATUS_ERROR}})
+	r, err := stream.recv()
+	if err != nil {
+		t.Fatal(err)
+	}
+	r.fromRound = true
+	if got := driver.ownInfo(r); got != clean {
+		t.Fatalf("an unchanged round's own info %v, want the stream's %v",
+			got, clean)
 	}
 }

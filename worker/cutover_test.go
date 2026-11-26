@@ -449,7 +449,6 @@ func TestCntlrPathReportIsTheReplysOwn(t *testing.T) {
 		driver.setStreamInfo(pathInfo())
 		stale := pathInfo(spSideDst)
 		driver.storeInfo(stale, 0)
-		driver.syncupInfo = stale
 		got := paths(t, driver, w, &replyState{revision: 7, fromRound: true})
 		if got == nil || got.live(spSideDst) {
 			t.Fatalf("path report = %+v, want the stream's, with no live "+
@@ -462,7 +461,6 @@ func TestCntlrPathReportIsTheReplysOwn(t *testing.T) {
 		info := pathInfo(spSideDst)
 		driver.storeInfo(info, 0)
 		driver.setStreamInfo(info)
-		driver.syncupInfo = nil
 		if got := paths(t, driver, w, &replyState{revision: 7}); got != nil {
 			t.Fatalf("path report = %+v, want none", got)
 		}
@@ -473,8 +471,8 @@ func TestCntlrPathReportIsTheReplysOwn(t *testing.T) {
 		driver.setStreamInfo(pathInfo())
 		info := pathInfo(spSideDst)
 		driver.storeInfo(info, 0)
-		driver.syncupInfo = info
-		got := paths(t, driver, w, &replyState{revision: 7, infoPresent: true})
+		got := paths(t, driver, w, &replyState{revision: 7, infoPresent: true,
+			info: info})
 		if !got.live(spSideDst) {
 			t.Fatalf("path report = %+v, want the dst side live", got)
 		}

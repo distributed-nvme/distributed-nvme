@@ -926,8 +926,9 @@ func (c *Client) RangeKeysAtRev(
 
 // RangeAtRev is Range pinned to one store revision (EU2): the keys under
 // prefix with their values, in ascending key order. It exists for
-// model.LoadSp (MD3), which reads an SP's repairs and retired legs by one
-// prefix each at the revision its snapshot was read at, and an STM cannot
+// model.LoadSp (MD3), which reads an SP's thin devices, repairs and retired
+// legs by one prefix each at the revision its snapshot was read at, and an
+// STM cannot
 // range. A compacted rev is an error, as for RangeKeysAtRev. Same "etcd
 // range" record as Range; each value is logged as its caller decodes it.
 func (c *Client) RangeAtRev(
@@ -1081,7 +1082,7 @@ func (c *Client) SnapshotRev(
 // (EU4): every read of f is served at rev, the first one included, so a load
 // split around a scan an STM cannot perform reads one store state in all its
 // parts. model.LoadSp reads its node records this way, after the scans of
-// its repairs and retired legs (MD3). A compacted rev is an error, as for
+// its thin devices, repairs and retired legs (MD3). A compacted rev is an error, as for
 // RangeKeysAtRev; f runs exactly once, as for SnapshotRev.
 func (c *Client) SnapshotAtRev(
 	ctx context.Context,

@@ -228,7 +228,8 @@ served at the revision the SP snapshot was read at; a revision the store has
 compacted away is an error, never silently served from a newer one.
 `RangeAtRev` is `Range` pinned to one store revision the same way, a
 compacted revision being an error as well, for MD3's ranges of a pool's
-repairs and retired legs: it returns each key with its value and logs the
+thin devices, repairs and retired legs: it returns each key with its value
+and logs the
 one `etcd range` record, each value being logged as its caller decodes it.
 `Decode` unmarshals one scanned value and logs it as an `etcd get` with
 `found` true, so at the debug log level every value a caller actually reads
@@ -475,11 +476,17 @@ and is skipped by MD3's loader.
 MD3. **SP snapshot.** `LoadSp` reads everything the sp role fans out or
 reacts on, at **one** store revision, into an `SpState`. One `SnapshotRev`
 (EU4) reads the `SpConf` and every sub-object it lists under a key of its
-own, and fixes that revision; one range of each of the two prefixes
-`RepairPrefix` and `RetiredLegPrefix` (`RangeAtRev`, EU2) then reads the
-repairs and the retired legs at it, since a pool holds up to one repair and
-`MaxRetiredLegPerGrp` retired legs per group, too many for a point read each
-within the load's one budget (EU5); and a snapshot pinned to the same
+own but the thin devices, and fixes that revision; one range of each of the
+three prefixes `ThinDevicePrefix`, `RepairPrefix` and `RetiredLegPrefix`
+(`RangeAtRev`, EU2) then reads the thin devices, the repairs and the
+retired legs at it, since a pool holds a thin device per volume, and up to
+one repair and `MaxRetiredLegPerGrp` retired legs per group, too many for a
+point read each within the load's one budget (EU5): with a point read per
+volume, a load of 1024 volumes took 3.6 seconds where one read took 3.3
+milliseconds, 7.7 seconds at 7.3, and passed the budget at 12.5, where with
+the range the load takes 40, 73 and 129 milliseconds
+(`TestMeasurePoolLoad`, run by hand); and a snapshot
+pinned to the same
 revision (`SnapshotAtRev`, EU4) reads the node records last, because the
 repairs' new legs and the retired legs name nodes too. The fields: `Rev`,
 the store revision of the snapshot; `SpRevision`, the SP's `SpRev` revision
@@ -500,8 +507,8 @@ order; and `CnByAddr`, the `CnConf` of every cntlr's. A missing `SpConf`
 returns `ErrNotFound` (the SP is being deleted; the rev key's delete
 follows). A key the load looks for and does not find is reported in
 `Missing`, in the order the load reads it — the sub-objects the `SpConf`
-lists that it reads by point reads, then its repairs and retired legs,
-which it ranges, then the node records — and
+lists that it reads by point reads, then its thin devices, repairs and
+retired legs, which it ranges, then the node records — and
 the load still succeeds. The caller decides: on a live SP a missing record
 that a list of the `SpConf` names stops the sp role's fan-out and the rest
 of its pass after the gates until it is back (RW14, AR1); past a node record, which no list names, and past
@@ -1754,7 +1761,9 @@ worker just handed the shard decides its re-syncs exactly as one that has
 driven the object for an hour, and no failure can be forgotten by a flag
 something cleared. Seven things the loop's replies leave do outlive them, and
 none is such a record: `lastInfo`, because a `show_info` false reply omits
-an unchanged `*Info` and health is evaluated on the latest known one (HL5);
+an unchanged `*Info`, and a dn's and a cn's health is evaluated on the
+latest known one (HL5), with a side's and a cntlr's stream info, which a
+round that leaves its info out repeats and is judged by;
 the health state, a cache of the record: the last health verdict WRITTEN,
 re-seeded from the record by the loads HL3 names — which is exactly what
 HL3's transitions-only rule has to compare the next health verdict
@@ -3377,11 +3386,25 @@ too, so the next round opens a new one, which fails within about the
 connect bound and gives the health result.
 
 HL5. `show_info` false streams carry an `*Info` only when something
-changed; the worker evaluates health on the latest known info, and a reply
-with neither info nor error is a clean round when the observation it
-answers from is not too old and is one a round asked for (HL7), and the
-latest known info holds no `ERROR` row (HL1); with no known info at all it
-is clean.
+changed. A side's and a cntlr's reply is judged by its own report: the
+info it carried, or, for a round's reply that leaves it out as unchanged,
+the info its stream last carried, which the agent says it still holds;
+never by the latest known info, which may hold this worker's own
+`Syncup*` rows that a later read replaced at the agent — one another
+worker's round started, as for a few seconds at a change of owner (VW7),
+or one of the agent's own. The health verdict, the leg rows and the fence
+views a primary's reply reports (HL2, RW24), the created and torn thin
+devices (RW19), the settle (HL2), AR5's marks of a standby and the log of
+its leg rows all read it; a reply with no report, a refused `Syncup*` or
+an unknown object's, leaves AR5's marks as they are. The side's
+provisioned flip (RW18), its cutover wait and its clone-ready gate, and
+the coordinator's snapshot of a cntlr's info (AR1) still read the latest
+known info. A round's reply with neither info nor error is a
+clean round when the observation it answers from is not too old and is
+one a round asked for (HL7), and its own report holds no `ERROR` row
+(HL1); with no report at all it is clean. A dn's and a cn's node records
+are still judged by the latest known info, a `Syncup*`'s included (Known
+limits).
 
 HL6. **No cross-role health writes.** The sp role's health bookkeeping —
 this section's `err_epoch` writers — never touches `DnConf` or `CnConf`
@@ -7088,6 +7111,16 @@ caught.
   threshold has passed. The measure is never
   shorter than the widest gap a peer can see (VW8 (a)); how the fence
   falls against the peers' commit of it dead is CM3's.
+
+* **A node record can still be judged by rows a later read replaced.**
+  HL5 judges a side's and a cntlr's reply by its own report, but a dn's
+  and a cn's loop judge the node by the latest known info, so while two
+  workers drive a node's shard, for a few seconds at a change of owner
+  (VW7), a round that leaves its info out as unchanged can be judged by
+  this worker's own `Syncup*` rows that a read the other owner's round
+  started replaced at the agent, and the node
+  can get a health epoch, which stays until a later reply carries the
+  node's info again.
 
 * **A worker cut off from the agents gives its pools up only beside a
   live peer, and takes them back while the cut lasts.** A worker alone

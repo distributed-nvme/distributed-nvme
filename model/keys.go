@@ -335,7 +335,7 @@ func ThinDeviceKey(cid uint64, spId uint64, tdName string) string {
 
 // ThinDevicePrefix is the prefix of every thin device of an SP, which the
 // gateway's restore check ranges in one read (architecture.md, Controller
-// nodes, CheckControllerNodeRestore).
+// nodes, CheckControllerNodeRestore), and so does the SP load (MD3).
 func ThinDevicePrefix(cid uint64, spId uint64) string {
 	return prefixOf(
 		common.DnvPrefix, kindThinDevice, idField(cid), idField(spId),
