@@ -664,7 +664,7 @@ The vocabulary of dnv in alphabetical order, one entry per term, with synonyms s
 
 **trace id** — The identifier that joins the log records of one operation across processes (`trace_id`): minted at an entry point, carried in the context, moved between context and gRPC metadata by the interceptors, and sent in the request of every check round, which runs under an id of its own. The background read a round starts runs under the round's id, and mints one only when the round carries none, and a reply's stamp names the trace id of the converge or read that made the observation it answers from (see `grpc.md` T3, T4).
 
-**transfer, xfer** — `Transfer`, the source side of a copy: the primary exports the raid0 of a local namespace's thin device over a transfer subsystem (`XferNqn`) admitting the hosts its record lists, the destination cntlrs' host NQNs, while auto-suspend parks the origin namespace; a finalizing delete leaves it parked.
+**transfer, xfer** — `Transfer`, the source side of a copy: the primary exports the raid0 of a local namespace's thin device over a transfer subsystem (`XferNqn`) admitting the hosts its record lists, the destination cntlrs' host NQNs, with a namespace identity of its own made from the cluster, pool and transfer ids (the origin's for a record made before `own_identity`), while auto-suspend parks the origin namespace; a finalizing delete leaves it parked.
 
 **transport conf** — `NvmeTrConf`, the transport type, address family, address and service id of an NVMe-oF port. The one a node is created with is the address other nodes and hosts dial to reach that node's port, and it may differ from the transport flags its agent builds the port from (see `architecture.md`, Components: invocation reference).
 

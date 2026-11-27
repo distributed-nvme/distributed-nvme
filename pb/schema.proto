@@ -1167,6 +1167,17 @@ message Transfer {
     uint32 ori_ns_idx = 3;
     repeated string allowed_hosts = 4;
     bool auto_suspend = 5;
+    // Set by CreateTransfer on every transfer it makes, and never changed.
+    // With it the transfer's namespace carries a uuid and an nguid made
+    // from the cluster, pool and transfer ids (common.XferNsIdentity), not
+    // the origin's: a Linux host refuses a namespace whose uuid or nguid
+    // another subsystem of the machine holds, as a host of the volume that
+    // is also a controller node of the destination pool holds the
+    // origin's. A record without it, one made before the field, keeps the
+    // origin's identity, so a transfer that runs keeps its identity across
+    // an upgrade (architecture.md, Transfers; cnagent.md CN17). Appended,
+    // never renumbered.
+    bool own_identity = 6;
 }
 
 // {dnv_prefix} migration {cluster_id} {sp_id} {migr_name}

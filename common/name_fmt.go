@@ -658,6 +658,24 @@ func DnNsIdentity(clusterId, spId, legId uint64) (uuid string, nguid string) {
 	return uuid, nguid
 }
 
+// XferNsIdentity derives the namespace identity a transfer with
+// own_identity exports (architecture.md, Transfers; cnagent.md CN17): 16
+// bytes of sha256("dnv-xfer-ns:{cluster:%016x}:{sp:%016x}:{xfer:%016x}"),
+// rendered as an RFC-4122-shaped uuid string and a 32-hex-digit nguid, as
+// DnNsIdentity renders a leg's. Every cntlr of the source pool derives the
+// same, and neither the uuid nor the nguid is the origin namespace's, which
+// a host of the volume holds: a Linux host refuses a namespace whose uuid or
+// nguid another subsystem of the machine holds.
+func XferNsIdentity(clusterId, spId, xferId uint64) (uuid string, nguid string) {
+	sum := sha256.Sum256([]byte(fmt.Sprintf(
+		"dnv-xfer-ns:%016x:%016x:%016x", clusterId, spId, xferId,
+	)))
+	nguid = hex.EncodeToString(sum[:16])
+	uuid = fmt.Sprintf("%s-%s-%s-%s-%s",
+		nguid[0:8], nguid[8:12], nguid[12:16], nguid[16:20], nguid[20:32])
+	return uuid, nguid
+}
+
 // CnWcacheFile names the file of a cn agent's write cache loop device
 // (cnagent.md CN15), in CnWcacheDir: the dm prefix and a hash of the agent's
 // local store folder, which no two agents of one machine share.

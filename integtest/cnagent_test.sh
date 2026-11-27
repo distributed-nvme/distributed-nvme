@@ -1138,8 +1138,10 @@ req_subsys() { # ssid allowed_hosts_json ns_json…
 		"$(d16 "$ss")" "$(hex16 "$ss")" "$hosts" "$(join_json "$@")"
 }
 
+# req_xfer renders one Transfer with own_identity set, as CreateTransfer
+# sets it on every new transfer (cnagent.md CN17).
 req_xfer() { # xferid ori_nqn ori_ns_idx allowed_hosts_json auto_suspend
-	printf '{"xfer_id": "%s", "ori_nqn": "%s", "ori_ns_idx": %s, "allowed_hosts": %s, "auto_suspend": %s}' \
+	printf '{"xfer_id": "%s", "ori_nqn": "%s", "ori_ns_idx": %s, "allowed_hosts": %s, "auto_suspend": %s, "own_identity": true}' \
 		"$(d16 "$1")" "$2" "$3" "$4" "$5"
 }
 
@@ -12418,6 +12420,14 @@ case_clone_xfer() {
 	make_pattern "$hv" "$WORK/pattern-c.bin" 32
 	want=$(sha_range "$hv" "$WORK/pattern-c.bin" 32)
 	write_range "$hv" "$WORK/pattern-c.bin" "$dev" 32
+	# The destination's machine is one of the volume's hosts too: vm2 holds
+	# the origin's namespace, its uuid and its nguid, before CN2's clone
+	# connects to the transfer. A Linux host refuses a namespace whose uuid
+	# or nguid another subsystem of the machine holds, so the clone finds
+	# its source only because the transfer exports an identity of its own
+	# (cnagent.md CN17).
+	host_connect 2 1 "$nqn"
+	helper 2 "wait_dev '$dev' 20" || die "no device node $dev on vm2"
 
 	stage sp2 "stage 1: sp2 comes up with the identical namespace, suspended"
 	dn_pointers 2 "$sp2:$S_MLEG:$S_MSIDE" "$sp2:$S_DLEG:$S_DSIDE"
@@ -13519,6 +13529,7 @@ case_clone_xfer() {
 
 	stage teardown "empty cntlr lists, then empty side lists"
 	host_disconnect "$hv" "$nqn"
+	host_disconnect 2 "$nqn"
 	cn_drop 1
 	cn_drop 2
 	dn_drop 1

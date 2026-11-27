@@ -4400,16 +4400,27 @@ yet filled and marked them copied, so it is aborted and done again;
 `INVALID_ARGUMENT` for the NQN rules of Common validation on
 `ori_nqn`, the dnv-namespace one included, and for the host-NQN rules on
 `allowed_hosts`, where callers put the destination cntlrs' `CnHostNqn`s.
-Action: STM: `xfer_id` from `next_id`, write the `Transfer`, append the
-name to `xfer_name_list`, bump `SpRev`; reply `xfer_id`. Every cntlr
+Action: STM: `xfer_id` from `next_id`, write the `Transfer` with
+`own_identity` set, append the name to `xfer_name_list`, bump `SpRev`;
+reply `xfer_id`. Every cntlr
 creates the xfer stack (`cnagent.md` CN17), a disabled cntlr in the
 standby shape: the primary builds `CnXferFinalName`, a dm-linear on the
 origin td's raid0, and exports it as subsystem `XferNqn` on the CN's port
-— nsid `ori_ns_idx`, the origin namespace's `dev_nguid` and `dev_uuid`,
-`allowed_hosts` from the record, verbatim — an empty list admits no host
+— nsid `ori_ns_idx`, the nguid and uuid of `common.XferNsIdentity`,
+made from the cluster, pool and transfer ids (the origin namespace's
+`dev_nguid` and `dev_uuid` for a record without `own_identity`, one made
+before the field), `allowed_hosts` from the record, verbatim — an empty list admits no host
 (Primary cntlr) —, the cntlid bounds of `Cntlr.cntlid_slot`; the standbys
 and a disabled cntlr export the same subsystem backed by a dm-error
 `CnXferFinalName`, with ANA inaccessible (fig. `100Transfer`, right half).
+Reason for an identity of its own: a Linux host refuses, over fabrics, a
+namespace whose uuid or nguid another subsystem of the machine holds (the
+NVMe host core's check of duplicate ids), so on a machine that is a host of the
+volume and a controller node of the destination pool the clone would find
+no source; every cntlr derives the same identity, so a destination that
+connects through several of them still sees one device ([D2]), and a
+record made before the field keeps the origin's identity, so a transfer
+that runs keeps it across an upgrade.
 Iff `auto_suspend`, the origin namespace is effectively suspended on every
 cntlr (the effective suspend of `cnagent.md` CN16): each cntlr, the
 primary included, parks the namespace's `CnNsDevName` on its td's dm-error

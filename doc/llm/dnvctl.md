@@ -348,8 +348,9 @@ these exceptions:
 * `sp create`'s `redund_conf` is a oneof whose arm one flag, `--redund`,
   picks (`sp` — `ctl/sp.go`);
 * the repeated `src_tr_conf` of `clone create` and `clone set-tr` is filled
-  by one prefixed set of transport flags with one element, or with none when
-  all four are emptied (`clone` — `ctl/clone.go`);
+  by one prefixed set of transport flags, one element per item of the
+  longer of `--src-tr-addr` and `--src-tr-svc-id`, or with none when all
+  four are emptied (`clone` — `ctl/clone.go`);
 * the members no flag reaches are never sent: `cluster create`'s
   `qos_ratio`, `bdev_conf`, `alloc_conf`, `health_check_conf` and the four
   bin shifts of `dn_bin_conf` (`cluster` — `ctl/cluster.go`), and
@@ -408,7 +409,10 @@ variable must not send zero, which `repair create` reads as a fresh leg.
 `--slots`, `--ids` and `--bad-legs` are comma-separated numeric lists;
 `--hosts` and the selector flags are comma-separated string lists;
 `--override` is a comma-separated list of words (`group` —
-`ctl/group.go`). An empty list flag is the empty list. Any other value is
+`ctl/group.go`); `--src-tr-addr` and `--src-tr-svc-id` of the clone group
+are comma-separated string lists that pair into the entries of one list,
+their own rule (`clone` — `ctl/clone.go`). An empty list flag is the
+empty list, but for those two. Any other value is
 split at each comma: a string list sends every item as typed, spaces and
 empty items included, and a numeric list trims each item and parses it by
 the rule above, so an empty item is a usage error. No item is dropped,
@@ -709,8 +713,16 @@ unlike the flag updates `gateway.md` GW6 makes a no-op.
 
 ### `clone` — `ctl/clone.go`
 
-`clone create` and `clone set-tr` send the source transport as a one-element
-`src_tr_conf`, and as an empty list — never a default transport — when all
+`clone create` and `clone set-tr` send several `src_tr_conf` entries:
+`--src-tr-addr` and `--src-tr-svc-id` take comma-separated lists, one
+entry per item of the longer list, entry i taking the i-th address and
+the i-th port; a list of one item goes to every entry, so one port serves
+every address, and a longer list shorter than the other leaves the
+missing items empty, which the gateway refuses, as dnvctl sends no value
+nobody typed; `--src-tr-type` and `--src-adr-fam` go to every entry. A clone given every
+cntlr of its source pool reads on after the pool's failover, as the
+destination connects to each (`cnagent.md` CN18). Nothing is refused
+(CT8). They send an empty list — never a default transport — when all
 four `src-` transport flags are emptied, so the gateway's refusal of an
 empty list stays reachable from the CLI (`cloneSrcTrConfList`).
 `clone create` forwards `--src-slices`, `--src-stripe` and `--src-block` as

@@ -148,17 +148,31 @@ func (s *CnAgentServer) xferSubsysConf(
 	}
 }
 
+// xferNsConf is the transfer's namespace (CN17). A transfer whose record
+// carries own_identity, as CreateTransfer sets on every new one, exports the
+// uuid and the nguid made from the cluster, pool and transfer ids
+// (common.XferNsIdentity): a Linux host refuses a namespace whose uuid or
+// nguid another subsystem of the machine holds, as a host of the volume
+// that is also a controller node of the destination pool holds the
+// origin's. One without it, made before the field, keeps the origin's, so
+// a transfer that runs keeps its identity across an upgrade. Every cntlr
+// derives the same either way ([D2]).
 func (s *CnAgentServer) xferNsConf(
 	plan *cntlrPlan,
 	xp *xferPlan,
 	anaGrpId int,
 ) agent.NsConf {
+	uuid, nguid := xp.ori.ns.GetDevUuid(), xp.ori.ns.GetDevNguid()
+	if xp.xfer.GetOwnIdentity() {
+		uuid, nguid = common.XferNsIdentity(plan.clusterId, plan.spId,
+			xp.xferId)
+	}
 	return agent.NsConf{
 		Nqn:        xp.nqn,
 		Nsid:       int(xp.xfer.GetOriNsIdx()),
 		DevicePath: s.nf.DmPath(xp.finalName),
-		Uuid:       xp.ori.ns.GetDevUuid(),
-		Nguid:      xp.ori.ns.GetDevNguid(),
+		Uuid:       uuid,
+		Nguid:      nguid,
 		AnaGrpId:   anaGrpId,
 	}
 }

@@ -11,8 +11,10 @@ package ctl
 
 import (
 	"context"
+	"strings"
 
 	"github.com/spf13/cobra"
+	"github.com/spf13/pflag"
 	"google.golang.org/protobuf/proto"
 
 	"github.com/distributed-nvme/distributed-nvme/pb"
@@ -34,18 +36,57 @@ func registerClone(root *cobra.Command) {
 // carry it, CreateClone and UpdateCloneTrConf. It is prefixed with the group
 // name so it cannot collide with a sibling file's helper (dnvctl.md, Files).
 //
-// The list is a one-element list of the `src-` transport when trConfOf returns
-// a conf, and an EMPTY list — never nil — when all four parts were given as
-// empty strings. That distinction is the point: the gateway's "src_tr_conf
-// must not be empty" refusal (gateway/validate.go's validateTrConfList) has to
+// --src-tr-addr and --src-tr-svc-id are comma-separated lists, so a clone
+// can name every cntlr of its source pool and read on after the pool's
+// failover: one entry per item of the longer list, entry i taking the i-th
+// address and the i-th port; a list of one item goes to every entry, so one
+// port serves every address, and a longer list shorter than the other leaves
+// the missing items empty, which the gateway refuses, as dnvctl invents no
+// value the operator did not type; --src-tr-type and --src-adr-fam go to
+// every entry. Nothing is refused here (CT8): every parsed value is sent.
+//
+// The list is EMPTY — never nil — when all four parts were given as empty
+// strings. That distinction is the point: the gateway's "src_tr_conf must
+// not be empty" refusal (gateway/validate.go's validateTrConfList) has to
 // stay reachable from the CLI, which it would not be if dnvctl substituted a
 // default transport for the operator's deliberate blank.
 func cloneSrcTrConfList() []*pb.NvmeTrConf {
-	conf := trConfOf("src-")
-	if conf == nil {
+	if trConfOf("src-") == nil {
 		return []*pb.NvmeTrConf{}
 	}
-	return []*pb.NvmeTrConf{conf}
+	addrs := strings.Split(strOf("src-tr-addr"), ",")
+	svcIds := strings.Split(strOf("src-tr-svc-id"), ",")
+	at := func(list []string, i int) string {
+		switch {
+		case len(list) == 1:
+			return list[0]
+		case i < len(list):
+			return list[i]
+		}
+		return ""
+	}
+	out := make([]*pb.NvmeTrConf, 0, max(len(addrs), len(svcIds)))
+	for i := range max(len(addrs), len(svcIds)) {
+		out = append(out, &pb.NvmeTrConf{
+			TrType:  strOf("src-tr-type"),
+			AdrFam:  strOf("src-adr-fam"),
+			TrAddr:  at(addrs, i),
+			TrSvcId: at(svcIds, i),
+		})
+	}
+	return out
+}
+
+// cloneSrcTrFlags adds the four `src-` transport flags, whose address and
+// port take comma-separated lists (cloneSrcTrConfList).
+func cloneSrcTrFlags(flags *pflag.FlagSet) {
+	trConfFlags(flags, "src-")
+	flags.Lookup("src-tr-addr").Usage = "comma-separated NvmeTrConf.tr_addr " +
+		"list, paired with the ports; one src_tr_conf per item of the " +
+		"longer list"
+	flags.Lookup("src-tr-svc-id").Usage = "comma-separated " +
+		"NvmeTrConf.tr_svc_id list, paired with the addresses; one port " +
+		"serves every address"
 }
 
 // cloneCreateCmd is CreateClone.
@@ -100,7 +141,7 @@ func cloneCreateCmd() *cobra.Command {
 	flags.Uint32("src-slices", 0, "src_slice_cnt, the source SP's slice count")
 	flags.Uint64("src-stripe", 0, "src_stripe_size in bytes")
 	flags.Uint64("src-block", 0, "src_block_size in bytes")
-	trConfFlags(flags, "src-")
+	cloneSrcTrFlags(flags)
 	flags.Bool("auto-resume", false,
 		"auto_resume — let the destination's namespaces serve through the "+
 			"dm-clone while the copy runs, even while stored suspended "+
@@ -190,7 +231,7 @@ func cloneSetTrCmd() *cobra.Command {
 		})
 	flags := cmd.Flags()
 	flags.String("name", "", "clone_name")
-	trConfFlags(flags, "src-")
+	cloneSrcTrFlags(flags)
 	return cmd
 }
 

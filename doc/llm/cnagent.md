@@ -4081,8 +4081,13 @@ transfer — every cntlr exports the same identity so the destination clone
 sees one multipath device), "attr_cntlid_min" and "attr_cntlid_max" from
 `Cntlr.cntlid_slot`, `allowed_hosts` from the record and the cut of each
 nvmet connection whose host is off it (CN33); one namespace whose
-nsid is `ori_ns_idx`, with the origin namespace's "uuid" and "nguid" and
-the transfer device as its "device_path"; ANA optimized on the primary,
+nsid is `ori_ns_idx`, with the transfer device as its "device_path" and,
+for a record that carries `own_identity`, as `CreateTransfer` sets on
+every new transfer, the "uuid" and "nguid" of `common.XferNsIdentity`,
+made from the cluster, pool and transfer ids; a record without it, made
+before the field, keeps the origin namespace's, so a transfer that runs
+keeps its identity across an upgrade (the reason is `architecture.md`,
+Transfers); ANA optimized on the primary,
 inaccessible on standbys (below). The origin namespace's own retirement is
 CN16's effective-suspend rule. A cntlr that keeps the transfer device but
 stops serving it — demoted to standby, or at a level from

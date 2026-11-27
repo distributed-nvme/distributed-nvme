@@ -441,9 +441,9 @@ SLOTS=0,1
 # leg_unhealthy <= side_unhealthy after the defaults are resolved. Nothing caps
 # them from above: ResolveEventThreshold's own comment (model/ops.go) says "No
 # upper bound applies: architecture.md, Common validation, only requires each
-# value to be >= 1". Copy step 7's one failover is the disable it makes
-# itself, which waits out no threshold (dnv-worker.md AR5), so these long
-# values do not hold it back.
+# value to be >= 1". Copy step 7's two failovers, the case pool's and its
+# source pool's, are the disables it makes itself, which wait out no
+# threshold (dnv-worker.md AR5), so these long values do not hold them back.
 THR_QUIET_PRIMARY=1800
 THR_QUIET_CNTLR=1800
 THR_QUIET_SIDE=1800
@@ -1041,6 +1041,11 @@ on_exit() {
 			log ""
 			log "--- taking the copy case's throttle off cn$COPY_FO_THROTTLE_CN"
 			helper_cn "$COPY_FO_THROTTLE_CN" unthrottle >&2 || true
+		fi
+		if [ "${COPY_FO_THROTTLE_CN2:--1}" -ge 0 ]; then
+			log ""
+			log "--- taking the copy case's throttle off cn$COPY_FO_THROTTLE_CN2"
+			helper_cn "$COPY_FO_THROTTLE_CN2" unthrottle >&2 || true
 		fi
 		if [ "${COPY_MIGR_THROTTLE_DN:--1}" -ge 0 ]; then
 			log ""
@@ -2474,6 +2479,20 @@ xfer_nqn() { # <sp_id> <xfer_id>
 	require_cluster_id
 	printf '%s:4:%s:%s:%s' "$NQN_PREFIX" "$(hex16 "$CLUSTER_ID")" \
 		"$(hex16 "$1")" "$(hex16 "$2")"
+}
+
+# xfer_ns_uuid mirrors common.XferNsIdentity (common/name_fmt.go): the uuid
+# of a transfer's namespace, 16 bytes of
+# sha256("dnv-xfer-ns:{cluster}:{sp}:{xfer}"), each id %016x, rendered
+# 8-4-4-4-12. CreateTransfer sets own_identity on every new transfer, so its
+# namespace carries this uuid and not the origin's (cnagent.md CN17).
+xfer_ns_uuid() { # <sp_id> <xfer_id>
+	local h
+	require_cluster_id
+	h=$(printf 'dnv-xfer-ns:%s:%s:%s' "$(hex16 "$CLUSTER_ID")" \
+		"$(hex16 "$1")" "$(hex16 "$2")" | sha256sum | cut -c1-32)
+	printf '%s-%s-%s-%s-%s' "${h:0:8}" "${h:8:4}" "${h:12:4}" \
+		"${h:16:4}" "${h:20:12}"
 }
 
 # host_id mirrors common.NvmeHostId (common/name_fmt.go):
@@ -16714,10 +16733,10 @@ case_ops() {
 #     reached directly and is never advertised through a CdcEntry"). host1
 #     therefore connects DIRECTLY to the primary cntlr's transport with
 #     `-n $XNQN`, through the helper's `connect` verb.
-#     host1 and not host0 consumes it for a second reason worth writing down:
-#     CN17 gives the transfer's namespace the ORIGIN namespace's `uuid` and
-#     `nguid`, so $XNQN's ns 1 and $SS0's ns 1 are two namespaces of two
-#     subsystems carrying one identity. They are never put on one kernel here.
+#     host1 and not host0 consumes it, though CN17 gives a new transfer's
+#     namespace an identity of its own (xfer_ns_uuid), so that $XNQN's ns 1
+#     and $SS0's ns 1 could share a kernel: host0's path to the origin is
+#     parked, and a second path would only add a parked device to wait out.
 #
 # ===========================================================================
 # THE SAME-SP SOURCE AND ITS FALLBACK, WHICH IS A REAL BRANCH AND NOT A COMMENT
@@ -16911,10 +16930,12 @@ WAIT_HYDRATE_STALL=90
 
 # --- state this case fills --------------------------------------------------
 
-# The transfer and its computed subsystem NQN (XferNqn (common/name_fmt.go)
-# carries cluster, sp and xfer, in that order).
+# The transfer, its computed subsystem NQN (XferNqn (common/name_fmt.go)
+# carries cluster, sp and xfer, in that order) and its namespace's uuid
+# (xfer_ns_uuid).
 XFER0_ID=""
 XNQN=""
+XUUID=""
 
 # The clone, its destination thin device and the namespace that exports it.
 CLONE0_ID=""
@@ -16954,13 +16975,19 @@ COPY_SRC_SP=""
 COPY_SRC_TD=""
 
 # The second pool, the flag that decides whether it must be torn down, and
-# the --cn guest index its one cntlr runs on.
+# the --cn guest index its first cntlr runs on; the SRC2_ set is copy step
+# 7's standby of it (copy_src_standby), empty while it has none.
 COPY_SRC_SP_BUILT=0
 SRC_SP_ID=""
 SRC_CNTLR_ID=""
 SRC_TRADDR=""
 SRC_TRSVCID=""
 SRC_CN=-1
+SRC2_CNTLR_ID=""
+SRC2_TRADDR=""
+SRC2_TRSVCID=""
+SRC2_ADDR=""
+SRC2_CN=-1
 
 # Scratch for the hydration predicate. COPY_SRC_FAULT is the whole protocol
 # between copy_clone_progress and copy_clone_build: empty means "hydrated",
@@ -17068,8 +17095,9 @@ COPY_GRP0='.slice_list[0].data_grp_list[0]'
 # takes whatever that size: the throttle's rate is the size over it
 # (copy_failover), so at 8 MiB, eight regions of one DATA_BLOCK_SIZE block,
 # a region takes five seconds or more. COPY_FO_THROTTLE_CN is the --cn guest
-# the throttle is on, -1 while none is: on_exit takes it off even when a run
-# fails (E2E6).
+# the throttle is on, -1 while none is, and COPY_FO_THROTTLE_CN2 the one of
+# the source pool's standby, slowed for the source's failover: on_exit takes
+# both off even when a run fails (E2E6).
 CLONE_FO=k1
 TD_FO=c1
 CLONE_FO_ID=""
@@ -17077,6 +17105,7 @@ TD_FO_ID=""
 COPY_FO_MIN_MIB=8
 COPY_FO_SECS=40
 COPY_FO_THROTTLE_CN=-1
+COPY_FO_THROTTLE_CN2=-1
 
 # What the step's predicates hand it: the count copy_fo_count read last, as
 # <hydrated> and <total>, the clock of the clone's creation and of the first
@@ -18450,24 +18479,26 @@ copy_transfer() {
 	# ANA first, device second (the rule in host_dev_present's comment): a
 	# namespace whose only path has never been usable gets no head disk at all.
 	#
-	# The uuid is $UUID1 and that is not a copy-paste error: CN17 gives the
-	# transfer's namespace the ORIGIN namespace's uuid and nguid, so host1
-	# resolves it under the same by-id name host0 uses for $SS0's ns 1. The
-	# two are on different kernels, which is constraint (b)'s second reason.
-	host_wait_ana 1 "$XNQN" "$PRIMARY_TRADDR" "$UUID1" optimized
-	wait_dev 1 "$UUID1"
+	# The uuid is the transfer's own, never $UUID1: CN17 gives a new
+	# transfer's namespace a uuid and an nguid made from the cluster, pool and
+	# transfer ids (xfer_ns_uuid), as a machine that holds the origin as a
+	# host refuses a namespace with the origin's ids under another subsystem.
+	XUUID=$(xfer_ns_uuid "$SP_ID" "$XFER0_ID")
+	assert_ne "$XUUID" "$UUID1" "the transfer's namespace uuid is its own"
+	host_wait_ana 1 "$XNQN" "$PRIMARY_TRADDR" "$XUUID" optimized
+	wait_dev 1 "$XUUID"
 	assert_eq "$(host_path_state 1 "$XNQN" "$PRIMARY_TRADDR")" live \
 		"host1's path to the transfer on cn$PRIMARY_CN"
 
 	# host1 IO is legal here and host0's is not: host1 holds exactly one
 	# namespace, the transfer's, and it is optimized. Nothing of host1's is
 	# parked, so the `sync` inside host_sha_is has nothing wedged to flush.
-	dev=$(host_dev "$UUID1")
+	dev=$(host_dev "$XUUID")
 	host_wait_sha 1 "$dev" "$BASELINE_MIB" "$SHA0" "$WAIT_HOST" \
 		"host1 to read SHA0 through the transfer's namespace on $dev"
 	# And block by block: the clone's stamp host0 wrote over the origin's
 	# first half reads back through the transfer with fio's verify.
-	host_stamp verify 1 "$UUID1" "$COPY_CSTAMP_BYTES" \
+	host_stamp verify 1 "$XUUID" "$COPY_CSTAMP_BYTES" \
 		"the clone's stamp read back through the transfer's namespace"
 	log "  the transfer exports $TD0's raid0: host1 reads its first" \
 		"$BASELINE_MIB MiB as SHA0 holds them after host0's stamp, and the stamp block by block"
@@ -18508,11 +18539,15 @@ copy_src_self() {
 # COPY_SRC_SHA is the digest the destination is held to in place of SHA0;
 # and as copy step 7's source, which a failover of sp0 does not move, with a
 # pattern over its first COPY_FO_MIN_MIB MiB, where the destination is held
-# to the digest of the whole source instead.
-# SRC_CN is the --cn guest it lands on.
-copy_src_sp_build() { # [<td size> <pattern MiB> <what>]
+# to the digest of the whole source instead; with [standby] the pool gets a
+# second cntlr, a standby on sp0's primary's CN (copy_src_standby), which
+# step 7 fails the source over to in the middle of its copy.
+# SRC_CN is the --cn guest its primary lands on.
+copy_src_sp_build() { # [<td size> <pattern MiB> <what> [standby]]
 	local size=${1:-$TD0_SIZE} mib=${2:-$BASELINE_MIB}
 	local what=${3:-the fallback} cnv addr dev pat unit srcss srcns
+	local slots=0
+	[ "${4:-}" != standby ] || slots=0,1
 	cnv=$IDLE_CN
 	if [ "$cnv" -lt 0 ]; then
 		# Every CN already carries a cntlr of sp0. The STANDBY's CN is still
@@ -18551,7 +18586,7 @@ copy_src_sp_build() { # [<td size> <pattern MiB> <what>]
 	# shellcheck disable=SC2086
 	ctl_timeout 120 ctl_ok --sp "$SP_SRC" sp create \
 		--cntlr-cnt 1 --slice-cnt 1 --init-ext-cnt "$INIT_EXT_CNT" \
-		--slots 0 --redund none --stripe-size "$STRIPE_SIZE" \
+		--slots "$slots" --redund none --stripe-size "$STRIPE_SIZE" \
 		--cn-white "$addr" $THR
 	SRC_SP_ID=$(jq_of "$CTL_OUT" '.sp_id')
 	case "$SRC_SP_ID" in
@@ -18637,13 +18672,14 @@ copy_src_sp_build() { # [<td size> <pattern MiB> <what>]
 	wait_ns_exported "$SRC_CNTLR_ID" \
 		"$SS_SRC ns 1 on $SRC_TRADDR:$SRC_TRSVCID" \
 		"$srcss" "$srcns" "$SP_SRC"
+	[ "${4:-}" != standby ] || copy_src_standby "$srcss" "$srcns"
 
 	# A DIRECT connect, not `connect-all`: the cdc advertises $SS0 to host1 as
 	# well (setup allowed both hosts), so the discovery log would also connect
 	# host1 to $SS0, which no other step of this suite gives host1 a path to.
-	# For the fallback it would do worse: $SS0's ns 1 carries $UUID1, the
-	# same identity the transfer's namespace host1 holds then, and both would
-	# land on one kernel. At step 7 host1 has let go of the transfer.
+	# For the fallback it would do worse: it would connect host1 to $SS0's
+	# ns 1, the origin, which the transfer has parked, a path that only
+	# waits. At step 7 host1 has let go of the transfer.
 	host_connect 1 "$SRC_TRADDR" "$SRC_TRSVCID" "$SS_SRC"
 	host_wait_ana 1 "$SS_SRC" "$SRC_TRADDR" "$UUID3" optimized
 	wait_dev 1 "$UUID3"
@@ -18682,8 +18718,53 @@ copy_src_released() { # <v…>
 		j=$(cn_subsys_json "$v") || return 1
 		[ "$(path_field "$j" "$SS_SRC" "$SRC_TRADDR" "$SRC_TRSVCID" Name)" = none ] ||
 			return 1
+		# copy step 7's source pool has a second cntlr (copy_src_standby).
+		[ -z "${SRC2_TRADDR:-}" ] ||
+			[ "$(path_field "$j" "$SS_SRC" "$SRC2_TRADDR" "$SRC2_TRSVCID" Name)" = none ] ||
+			return 1
 	done
 	return 0
+}
+
+# copy_src_standby <ss_id> <ns_id> gives the second pool a standby cntlr, in
+# cntlid slot 1, on cn$PRIMARY_CN, sp0's primary at the time, so copy step 7
+# can fail the source pool over in the middle of its copy, its new primary
+# on another machine than sp0's new primary. CreateCntlr makes a standby,
+# which exports the source subsystem on its own address with its namespace
+# inaccessible (cnagent.md CN9); a clone given both addresses reads through
+# whichever serves (cnagent.md CN18). It sets SRC2_CN, SRC2_TRADDR and
+# SRC2_TRSVCID, and SRC2_ADDR, the cntlr's addr_port.
+copy_src_standby() { # <ss_id> <ns_id>
+	local entry
+	SRC2_CN=$PRIMARY_CN
+	SRC2_ADDR=$(cn_addr "$SRC2_CN")
+	ctl_ok --sp "$SP_SRC" cntlr create --slot 1 --cn-white "$SRC2_ADDR"
+	SRC2_CNTLR_ID=$(jq_of "$CTL_OUT" '.cntlr_id')
+	case "$SRC2_CNTLR_ID" in
+	'' | *[!0-9]* | 0) die "$SP_SRC cntlr create returned cntlr_id '$SRC2_CNTLR_ID'" ;;
+	esac
+	ctl_ok --sp "$SP_SRC" sp get
+	entry="[.cntlr_list[] | select(.addr_port == \"$SRC2_ADDR\")][0]"
+	assert_field "$CTL_OUT" "$entry.primary // false" false \
+		"the second pool's new cntlr on cn$SRC2_CN is a standby"
+	SRC2_TRADDR=$(jq_of "$CTL_OUT" "$entry.nvme_tr_conf.tr_addr")
+	SRC2_TRSVCID=$(jq_of "$CTL_OUT" "$entry.nvme_tr_conf.tr_svc_id")
+	case "$SRC2_TRADDR$SRC2_TRSVCID" in
+	'' | *null*) die "$SP_SRC's standby on cn$SRC2_CN carries no nvme_tr_conf" ;;
+	esac
+	wait_ns_exported "$SRC2_CNTLR_ID" \
+		"$SS_SRC ns 1 on the standby $SRC2_TRADDR:$SRC2_TRSVCID" \
+		"$1" "$2" "$SP_SRC" "$WAIT_BUILD"
+	log "  copy: $SP_SRC's standby cntlr $SRC2_CNTLR_ID on cn$SRC2_CN" \
+		"exports $SS_SRC on $SRC2_TRADDR:$SRC2_TRSVCID"
+}
+
+# copy_src_primary_at <addr_port> holds once the second pool's cntlr at
+# <addr_port> is its primary.
+copy_src_primary_at() { # <addr_port>
+	ctl_try --sp "$SP_SRC" sp get || return 1
+	[ "$(jq_of "$CTL_OUT" \
+		"[.cntlr_list[] | select(.addr_port == \"$1\")][0].primary // false")" = true ]
 }
 
 # copy_src_sp_teardown removes everything copy_src_sp_build made. It runs only
@@ -22013,7 +22094,8 @@ copy_reuse() {
 #      the worker has latched and drained the whole copy itself, and the whole destination's
 #      digest, read once the clone is gone, is the whole source's, which
 #      host1 read through the source's device before the clone.
-# The worker's log then holds exactly one more failover, the old primary
+# The worker's log then holds exactly two more failovers, the case pool's and
+# its source pool's, the old primary
 # comes back as a standby once it is enabled again, both cntlrs are listed
 # again, host0 still reads SHA0, and host0's stamped writer, run on a volume
 # of its own from just before the disable, has lost no write
@@ -22105,8 +22187,9 @@ copy_fo_served() {
 }
 
 copy_failover() {
-	stage 07 "a clone's copy, slowed, survives a failover of its primary in its middle"
+	stage 07 "a clone's copy, slowed, survives a failover of its primary in its middle, then one of its source pool"
 	local size mib regions min rate out dev old_id old_cn new_id new_cn new_traddr
+	local src_pre
 	local fo_before unsynced_before pre new_hyd wsect bound low t_dis t_moved
 	local dst
 	local t_new t_opt pat src_sha prov
@@ -22140,7 +22223,7 @@ copy_failover() {
 
 	pat=$COPY_FO_MIN_MIB
 	[ "$pat" -le "$mib" ] || pat=$mib
-	copy_src_sp_build "$size" "$pat" "copy step 7's"
+	copy_src_sp_build "$size" "$pat" "copy step 7's" standby
 	# The whole source, the pattern and the zeros after it, read through its
 	# own device; the destination is held to this digest once the copy ends.
 	dev=$(host_dev "$UUID3")
@@ -22199,7 +22282,8 @@ copy_failover() {
 		--src-slices "$COPY_SRC_SLICES" --src-stripe "$COPY_SRC_STRIPE" \
 		--src-block "$COPY_SRC_BLOCK" \
 		--src-tr-type tcp --src-adr-fam ipv4 \
-		--src-tr-addr "$SRC_TRADDR" --src-tr-svc-id "$SRC_TRSVCID" \
+		--src-tr-addr "$SRC_TRADDR,$SRC2_TRADDR" \
+		--src-tr-svc-id "$SRC_TRSVCID,$SRC2_TRSVCID" \
 		--auto-resume --hyd-threshold 1 --hyd-batch 1
 	COPY_FO_T0=$(copy_fo_now_ms)
 	CLONE_FO_ID=$(jq_of "$CTL_OUT" '.clone_id')
@@ -22210,9 +22294,10 @@ copy_failover() {
 	assert_field "$CTL_OUT" '.clone.meta_grp.leg_list | length' "$LEGS" \
 		"the clone's clone meta group has the pool's $LEGS leg(s)"
 	assert_jq "$CTL_OUT" \
-		"(.clone.src_tr_conf_list | length) == 1
-		 and .clone.src_tr_conf_list[0].tr_addr == \"$SRC_TRADDR\"" \
-		"the clone's one source transport is the second pool's cntlr"
+		"(.clone.src_tr_conf_list | length) == 2
+		 and .clone.src_tr_conf_list[0].tr_addr == \"$SRC_TRADDR\"
+		 and .clone.src_tr_conf_list[1].tr_addr == \"$SRC2_TRADDR\"" \
+		"the clone's two source transports are the second pool's two cntlrs, in the order typed"
 
 	# The host's wait at the clone's creation.
 	COPY_FO_T_PROV=0
@@ -22312,6 +22397,51 @@ copy_failover() {
 	dst=$(helper_cn "$new_cn" clone_dst_dev) ||
 		die "cn$new_cn: the new primary's dm-clone names no destination device"
 
+	# THE SOURCE POOL'S FAILOVER, with the copy still slowed by the bucket on
+	# the source's first primary. The clone names both of the source pool's
+	# cntlrs (dnvctl clone create's address list), so once the standby takes
+	# the source's role the destination reads through it, and the copy goes
+	# on (cnagent.md CN18; architecture.md, Clones). Its new primary is on
+	# cn$SRC2_CN, sp0's old primary, another machine than sp0's new primary.
+	# The standby's bucket is a quarter of the first's, so the copy, about a
+	# region every ${COPY_FO_SECS}/8 s before, crawls once the reads move,
+	# and the waits for the role and for the old path cannot let it end and
+	# the worker drain the clone before the count below is read.
+	COPY_FO_THROTTLE_CN2=$SRC2_CN
+	out=$(helper_cn "$SRC2_CN" throttle_from "$SRC2_TRADDR" "$SRC2_TRSVCID" \
+		"$new_traddr" "$((rate / 4))kbit") ||
+		die "cn$SRC2_CN: the throttle_from verb could not be run"
+	case "$out" in
+	"throttled "*) ;;
+	*) die "cn$SRC2_CN: slowing the standby source's port to $((rate / 4))kbit: $out" ;;
+	esac
+	ctl_ok --sp "$SP_SRC" cntlr set-enabled --id "$SRC_CNTLR_ID" \
+		--enabled=false
+	wait_until "$WAIT_PROVISION" \
+		"AR5 to give $SP_SRC's role to its standby cntlr $SRC2_CNTLR_ID on cn$SRC2_CN" \
+		copy_src_primary_at "$SRC2_ADDR"
+	# The count before is read only once the new primary's path to the old
+	# source primary reads inaccessible, so every region counted after it
+	# came through the source's new primary.
+	cn_wait_ana "$new_cn" "$SS_SRC" "$SRC_TRADDR" "$SRC_TRSVCID" \
+		inaccessible "$WAIT_PROVISION"
+	COPY_HYD_SIG=""
+	copy_fo_count "$new_id" "$CLONE_FO_ID" 0 ||
+		die "clone $CLONE_FO's count on the new primary could not be read" \
+			"once the source pool failed over: its copy ended and the worker" \
+			"drained it, or its dm-clone does not serve"
+	src_pre=$COPY_FO_HYD
+	[ "$src_pre" -lt "$regions" ] ||
+		die "clone $CLONE_FO copied all $regions regions before its reads" \
+			"moved to the source pool's new primary: the buckets did not" \
+			"hold the copy back"
+	COPY_HYD_SIG=""
+	wait_until "$WAIT_HYDRATE" \
+		"clone $CLONE_FO to copy past $src_pre of its $regions regions through $SP_SRC's new primary" \
+		copy_fo_count "$new_id" "$CLONE_FO_ID" "$((src_pre + 1))"
+	log "  the source pool failed over with the copy at $src_pre/$regions;" \
+		"the copy went on to $COPY_FO_HYD/$regions through cn$SRC2_CN"
+
 	# The copy at full speed, to its end on the new primary.
 	out=$(helper_cn "$SRC_CN" unthrottle) ||
 		die "cn$SRC_CN: the unthrottle verb could not be run"
@@ -22319,6 +22449,12 @@ copy_failover() {
 	assert_eq "$(helper_cn "$SRC_CN" throttle_rules)" "" \
 		"no throttle left on cn$SRC_CN"
 	COPY_FO_THROTTLE_CN=-1
+	out=$(helper_cn "$SRC2_CN" unthrottle) ||
+		die "cn$SRC2_CN: the unthrottle verb could not be run"
+	assert_eq "$out" unthrottled "cn$SRC2_CN: the throttle taken off"
+	assert_eq "$(helper_cn "$SRC2_CN" throttle_rules)" "" \
+		"no throttle left on cn$SRC2_CN"
+	COPY_FO_THROTTLE_CN2=-1
 	COPY_SRC_START=$SECONDS
 	COPY_HYD_MARK=$SECONDS
 	COPY_HYD_SIG=""
@@ -22397,8 +22533,8 @@ copy_failover() {
 		"both cntlrs of $SP to be in its discovery records again"
 	assert_eq "$PRIMARY_CNTLR_ID" "$new_id" \
 		"the new primary keeps the role once the old one is enabled"
-	assert_eq "$(worker_failover_cnt)" "$((fo_before + 1))" \
-		"one failover: the disable's; the enable moved no role"
+	assert_eq "$(worker_failover_cnt)" "$((fo_before + 2))" \
+		"two failovers, the disable's of $SP and the source pool's; the enable moved no role"
 	host_wait_ana 0 "$SS0" "$new_traddr" "$UUID1" optimized
 	check_sha0 "after a failover in the middle of a clone's copy"
 	host_swrite_alive "after the failover and the old primary's return"

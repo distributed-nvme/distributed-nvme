@@ -5522,12 +5522,23 @@ func (x *CloneBitmap) GetBitmap() []byte {
 
 // {dnv_prefix} transfer {cluster_id} {sp_id} {xfer_name}
 type Transfer struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	XferId        uint64                 `protobuf:"varint,1,opt,name=xfer_id,json=xferId,proto3" json:"xfer_id,omitempty"`
-	OriNqn        string                 `protobuf:"bytes,2,opt,name=ori_nqn,json=oriNqn,proto3" json:"ori_nqn,omitempty"`
-	OriNsIdx      uint32                 `protobuf:"varint,3,opt,name=ori_ns_idx,json=oriNsIdx,proto3" json:"ori_ns_idx,omitempty"`
-	AllowedHosts  []string               `protobuf:"bytes,4,rep,name=allowed_hosts,json=allowedHosts,proto3" json:"allowed_hosts,omitempty"`
-	AutoSuspend   bool                   `protobuf:"varint,5,opt,name=auto_suspend,json=autoSuspend,proto3" json:"auto_suspend,omitempty"`
+	state        protoimpl.MessageState `protogen:"open.v1"`
+	XferId       uint64                 `protobuf:"varint,1,opt,name=xfer_id,json=xferId,proto3" json:"xfer_id,omitempty"`
+	OriNqn       string                 `protobuf:"bytes,2,opt,name=ori_nqn,json=oriNqn,proto3" json:"ori_nqn,omitempty"`
+	OriNsIdx     uint32                 `protobuf:"varint,3,opt,name=ori_ns_idx,json=oriNsIdx,proto3" json:"ori_ns_idx,omitempty"`
+	AllowedHosts []string               `protobuf:"bytes,4,rep,name=allowed_hosts,json=allowedHosts,proto3" json:"allowed_hosts,omitempty"`
+	AutoSuspend  bool                   `protobuf:"varint,5,opt,name=auto_suspend,json=autoSuspend,proto3" json:"auto_suspend,omitempty"`
+	// Set by CreateTransfer on every transfer it makes, and never changed.
+	// With it the transfer's namespace carries a uuid and an nguid made
+	// from the cluster, pool and transfer ids (common.XferNsIdentity), not
+	// the origin's: a Linux host refuses a namespace whose uuid or nguid
+	// another subsystem of the machine holds, as a host of the volume that
+	// is also a controller node of the destination pool holds the
+	// origin's. A record without it, one made before the field, keeps the
+	// origin's identity, so a transfer that runs keeps its identity across
+	// an upgrade (architecture.md, Transfers; cnagent.md CN17). Appended,
+	// never renumbered.
+	OwnIdentity   bool `protobuf:"varint,6,opt,name=own_identity,json=ownIdentity,proto3" json:"own_identity,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -5593,6 +5604,13 @@ func (x *Transfer) GetAllowedHosts() []string {
 func (x *Transfer) GetAutoSuspend() bool {
 	if x != nil {
 		return x.AutoSuspend
+	}
+	return false
+}
+
+func (x *Transfer) GetOwnIdentity() bool {
+	if x != nil {
+		return x.OwnIdentity
 	}
 	return false
 }
@@ -21506,14 +21524,15 @@ const file_pb_schema_proto_rawDesc = "" +
 	"\bmeta_grp\x18\x0e \x01(\v2\x06.GroupR\ametaGrpJ\x04\b\v\x10\fJ\x04\b\r\x10\x0eR\x06bm_cntR\n" +
 	"meta_units\"%\n" +
 	"\vCloneBitmap\x12\x16\n" +
-	"\x06bitmap\x18\x01 \x01(\fR\x06bitmap\"\xa2\x01\n" +
+	"\x06bitmap\x18\x01 \x01(\fR\x06bitmap\"\xc5\x01\n" +
 	"\bTransfer\x12\x17\n" +
 	"\axfer_id\x18\x01 \x01(\x04R\x06xferId\x12\x17\n" +
 	"\aori_nqn\x18\x02 \x01(\tR\x06oriNqn\x12\x1c\n" +
 	"\n" +
 	"ori_ns_idx\x18\x03 \x01(\rR\boriNsIdx\x12#\n" +
 	"\rallowed_hosts\x18\x04 \x03(\tR\fallowedHosts\x12!\n" +
-	"\fauto_suspend\x18\x05 \x01(\bR\vautoSuspend\"\xec\x01\n" +
+	"\fauto_suspend\x18\x05 \x01(\bR\vautoSuspend\x12!\n" +
+	"\fown_identity\x18\x06 \x01(\bR\vownIdentity\"\xec\x01\n" +
 	"\tMigration\x12\x17\n" +
 	"\amigr_id\x18\x01 \x01(\x04R\x06migrId\x12\x1e\n" +
 	"\vsrc_side_id\x18\x02 \x01(\x04R\tsrcSideId\x12\x1e\n" +

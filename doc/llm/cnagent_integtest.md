@@ -1126,6 +1126,11 @@ old pattern.
 **clone_xfer** proves `architecture.md`, Transfer + clone = cross-SP live
 migration, and Clone metadata durability, between pools on different nodes
 exporting one NQN and namespace identity from disjoint cntlid slots. The
+destination's machine is one of the volume's hosts too: it connects to the
+origin as a host before its clone connects to the transfer, and the clone
+still finds its source, as the transfer exports an identity of its own
+(`cnagent.md` CN17), where a Linux host refuses a namespace whose ids
+another subsystem of the machine holds. The
 stored-suspended destination and the transfer's origin are parked, live on the
 td's dm-error with the origin's ANA moved first, so an open fails at once and
 nothing is dm-suspended (`cnagent.md` CN9's ANA pre-step before its park

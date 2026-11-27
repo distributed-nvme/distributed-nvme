@@ -2012,28 +2012,17 @@ Measured times are in [the introduction](introduction.md#status-and-limits).
   leg with the superblock. Fix later: the primary finishes such a create by
   itself, once it can tell that md never changed that one superblock. Read
   from dnv's code; not seen in the lab.
-- **A volume moved to another pool stops on a machine that is both one of
-  its hosts and a controller node of the destination pool.** A transfer
-  exports the volume under its own NQN with the uuid of the volume's
-  namespace, and a Linux host refuses a second namespace with a uuid it
-  already holds under another NQN. Such a machine holds both, so the clone
-  finds no source namespace there and the device that copies it is never
-  built: the volume's namespace in the source pool is set aside, serving
-  no IO, and the destination does not serve, so every host of the volume
-  waits. State: fix decided. Until then, move no volume into a
-  pool with a cntlr on a machine that is one of the volume's hosts, as
-  check 2 of [the operations
-  doc](operations.md#move-a-volume-to-another-pool) says. Read
-  from the kernel's code; not seen in the lab.
-- **A clone reads its source through one address.** `dnvctl clone create`
-  sends one address of the source, though every cntlr of the source pool
-  exports the transfer and the gateway takes several addresses. After a
-  failover of the source pool the clone cannot read: hosts wait, or get
-  errors on regions not yet copied, until an operator points the clone at
-  the new primary with `dnvctl clone set-tr`. State: fix decided.
-  Procedure written: [the operations
-  doc](operations.md#move-a-volume-to-another-pool), step 13. Read from
-  dnv's code; not seen in the lab.
+- **A clone's new build waits while one of its source addresses does not
+  answer.** When the destination's primary builds the device that copies a
+  clone anew, after a failover of the destination pool or a reboot of its
+  controller node, it connects to every source address the clone holds and
+  builds the device only once each has a controller. An address whose
+  controller node is down, as a source cntlr's that died or was replaced,
+  then holds the build, and every host of the volume waits. State: fix
+  later. Until then, give the clone the addresses that answer with
+  `dnvctl clone set-tr`, as step 13 of [the operations
+  doc](operations.md#move-a-volume-to-another-pool) says. Read from dnv's
+  code; not seen in the lab.
 - **A corrupt cdc entry withdraws its subsystem from hosts.** A cdc entry
   is the record in etcd that the cdc serves for one subsystem. Only a hand
   edit or a bug corrupts it. State: accepted.
@@ -2111,7 +2100,7 @@ known today" below says what three of the longer procedures rest on.
 | Create, snapshot and delete a volume | `dnvctl td create`, with `--ori` for a snapshot; `dnvctl td delete` | the tutorials, for the create and the delete; the operations doc, [Snapshots](operations.md#snapshots) | done; procedure written for snapshots, which the e2e suite makes and waits for until they are recorded as created |
 | Export a volume to hosts; change its hosts | `dnvctl ss create`, `dnvctl ns create`, `dnvctl ss set-hosts`; a host taken off the list loses its connection where the controller node's cn agent ends connections (section 5.4) | the tutorials, for the export; the operations doc, [Change a volume's hosts](operations.md#change-a-volumes-hosts) | done |
 | Park a namespace | `dnvctl ns set-suspended`, `dnvctl ns set-dev` | the operations doc, [Park a namespace](operations.md#park-a-namespace) | procedure written; the e2e suite parks a namespace, resumes it, and points it at another volume, at a snapshot and back |
-| Move a volume to another pool | `dnvctl xfer create` on the source; `dnvctl clone create`, `clone append-bm` on the destination | the introduction explains the flow; the operations doc, [Move a volume to another pool](operations.md#move-a-volume-to-another-pool), gives the whole flow, and A pool made before the block bound the order of the moves out of a pool | procedure written. The e2e suite runs a transfer and a clone within one pool, into a namespace of another identity; the move into another pool under the same identity is not tested. |
+| Move a volume to another pool | `dnvctl xfer create` on the source; `dnvctl clone create`, `clone append-bm` on the destination | the introduction explains the flow; the operations doc, [Move a volume to another pool](operations.md#move-a-volume-to-another-pool), gives the whole flow, and A pool made before the block bound the order of the moves out of a pool | procedure written. The e2e suite runs a transfer and a clone within one pool, into a namespace of another identity, and a clone that reads on after a failover of its source pool; the cn agent suite moves a volume to another pool under the same identity, with a host on the destination's machine, driving the agents alone; the whole move through the gateway into another pool is not tested. |
 | Clone from a source outside this cluster | `dnvctl clone create`, `clone set-tr` | the introduction explains the flow; the operations doc, [Clone from another cluster](operations.md#clone-from-another-cluster) | procedure written; not tested from another cluster or from a target that is not dnv. The e2e suite clones a plain namespace of a second pool of the same cluster, with no transfer. |
 | Read a volume's written blocks | `dnvctl td get-bm` | the operations doc, [Read a volume's written blocks](operations.md#read-a-volumes-written-blocks) | procedure written; the e2e suite reads the list of a parked volume and of a snapshot. Reads in windows through `dnvctl` are not tested. |
 | Grow a volume | none | — | not yet |

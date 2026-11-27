@@ -69,7 +69,9 @@ md has not flushed and no cut of a whole group:
   copy hands the copy to the new primary, which loads the metadata the
   clone's clone meta group holds on disk nodes: it goes on from at least the
   count read before the failover, copies at most what that count left, and
-  ends with a destination equal to the whole source.
+  ends with a destination equal to the whole source. A failover of the
+  source pool then, the clone given both of its cntlrs' addresses, leaves
+  the copy going on through the source's new primary.
 * **The four reactions fire on real faults** (`dnv-worker.md` AR5 to AR8), on
   a pool of at most `REACT_SLICE_CAP` slices (Topology and parameters): a
   planned restart of the primary's cn agent moves nothing, as the agent
@@ -330,8 +332,9 @@ operator, so that the worker's own repair cannot race an operator's create
 of that repair with no threshold, so copy holds that repair off the leg's
 group with the group's `operator_in_charge` flag instead (The cases, copy).
 Under the quiet set a failover or a repair the case did not ask for is a
-finding about the lab, and copy's one failover is the disable it makes itself,
-which waits out no threshold (`dnv-worker.md` AR5). react builds under the
+finding about the lab, and copy's two failovers, of its pool and of its
+source pool, are the disables it makes itself,
+which wait out no threshold (`dnv-worker.md` AR5). react builds under the
 short reacting set, as cntlr replacement and leg repair wait out thresholds whose defaults lie
 beyond any wait the suite could afford (`dnv-worker.md` AR7, AR8). cutoff
 builds under the cutoff set, as its failover must come within seconds of the
@@ -579,8 +582,8 @@ are direct by necessity: to the transfer, which has no `CdcEntry`; to the
 copy case's second pool, the fallback's source and the source of the
 failover in the middle of a copy, where discovery would also connect host1
 to the case's own subsystem, which no other step gives host1 a path to,
-and for the fallback would bring in a namespace whose uuid host1 already
-holds; and the cutoff case's fence writer on host1, first to the old
+and for the fallback would bring in the parked origin, a path that only
+waits; and the cutoff case's fence writer on host1, first to the old
 primary's transport alone and then to the new primary's, where discovery
 would connect both cntlrs and the writer must hold the old primary's path
 alone. After
@@ -754,9 +757,11 @@ half at one. The device's second half stays as setup left it: never written
 at two slices or more, and at one slice setup's pattern, which there fills
 the whole device, so that at one slice no part of the device is left
 unwritten and the digest covers all of it. A transfer, auto-suspended, parks
-the origin namespace and carries its identity, so host1, the only host
-connected to it, reads the origin through it (`architecture.md`, Transfers;
-`cnagent.md` CN17), the digest and the fio stamp with fio's verify. Before the clone is created the origin's bitmap is read,
+the origin namespace and carries an identity of its own, made from the
+cluster, pool and transfer ids, which the case computes and checks is not
+the origin's, and host1, the only host connected to it, reads the origin
+through it under that identity (`architecture.md`, Transfers; `cnagent.md`
+CN17), the digest and the fio stamp with fio's verify. Before the clone is created the origin's bitmap is read,
 slice by slice, once the primary reports the origin parked, a wait the case
 polls, for every source slice one destination region spans, and right after
 the create those bitmaps are appended as the clone's chunks, one per slice,
@@ -1022,9 +1027,9 @@ operator's creates (`dnv-worker.md` AR8), and the retire timer deletes only
 an old retired leg (`dnv-worker.md` AR12), so the worker only moves the
 repairs' stages and every other step is the operator's. A second clone's
 copy survives a failover of the primary in its middle (`architecture.md`,
-Clone metadata durability): its source is a second pool's, on a controller
-node with no cntlr of the case's pool, so that the failover moves the clone
-and not its source, and of one slice with the case's pool's stripe, so that
+Clone metadata durability): its source is a second pool's, its primary on a
+controller node with no cntlr of the case's pool, so that the failover moves
+the clone and not its source, and of one slice with the case's pool's stripe, so that
 the optimal IO size the clone's dm-clone reports stays within
 `MaxNvmeTcpCmdBytes` at every slice count (`architecture.md`, Clones);
 host0's IO sizes for the destination are read within that bound while it
@@ -1036,6 +1041,10 @@ bucket on the source's controller node, kept to the source's address and
 port, slows what the source sends to a rate at which the copy takes about
 the same time at every slice count, one region in flight, since a copy of a
 few MiB over the lab's network would otherwise end in well under a second.
+The second pool has a second cntlr, a standby on the controller node of the
+case's primary at the time, and the clone is created with both cntlrs'
+addresses, which `clone get` lists in the order typed (`dnvctl.md`,
+`clone` — `ctl/clone.go`; `cnagent.md` CN18).
 On a node without the dm rule of `deploy/udev/`, which the suite installs,
 over the slowed source a device-mapper command after which udev reads the
 dm-clone, its create or the resume of a namespace device above it, can
@@ -1057,7 +1066,12 @@ host0's stamped writer running on a volume of its own from just before the
 disable to after the old primary's return, through a failover while the old
 primary serves, and losing no write (Known limits); the
 new primary's first count must be at least the last count read on the old
-one and leave a region to copy; with the bucket gone and the copy whole, the
+one and leave a region to copy. With the bucket still on and a region left,
+the second pool's standby port gets a bucket of its own and the second
+pool's primary is disabled: once its standby is the second pool's primary,
+the copy must go on past its count before, through the source's new
+primary, on another machine than the case's new primary
+(`dnv-worker.md` AR5). With both buckets gone and the copy whole, the
 new primary's destination raid0, which its promotion created, must have had
 at most the regions the old primary's last count left written into it, where
 a dm-clone over new metadata would copy every region again, and at least the
@@ -1067,7 +1081,7 @@ served, since the worker latches a whole copy and the drain removes the
 dm-clone (`dnv-worker.md` CLD13); the clone's unforced delete must be
 accepted, or answer `NOT_FOUND` once the worker has drained the clone, and
 the whole destination must read the whole source's digest, which host1 read
-before the clone. The worker logs that one failover, the old primary returns
+before the clone. The worker logs those two failovers, the old primary returns
 as a standby once enabled, both cntlrs are listed again, and host0 still
 reads its data. A controller node keeps its connection to the source after
 the clone has gone until its node-level sweep, which a read of the node that
@@ -2188,10 +2202,10 @@ stage logs the median of those fsyncs.
   accepts reaches the clone only through the worker's push
   (`dnv-worker.md` BM2), so a copy whole before that push lets the clone
   skip nothing either, which no step checks or logs (The cases, copy).
-* **The copy case's failover moves the clone, never its source.** The
-  source is a second pool's, on a controller node outside the case's pool,
-  so a failover of a pool whose own transfer is the source, which moves the
-  source with the clone, is not exercised.
+* **The copy case's failovers move the clone or its source, never both.**
+  The source is a second pool's, failed over on its own, so a failover of a
+  pool whose own transfer is the source, which moves the source with the
+  clone, is not exercised.
 * **A standby's namespaces are inaccessible, never non-optimized**
   (`cnagent.md` CN16), so a host holds one usable path per namespace, and ANA
   path selection across two usable controllers is not exercised.

@@ -7,6 +7,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/distributed-nvme/distributed-nvme/agent"
 	"github.com/distributed-nvme/distributed-nvme/common"
 	"github.com/distributed-nvme/distributed-nvme/pb"
 )
@@ -1269,6 +1270,59 @@ func TestAFailedReadOnlyClearFailsTheDevicesStep(t *testing.T) {
 			}
 			assertRowVerdict(t, rowRound(t, srv, 2).GetAgentReply(),
 				"the read after the re-send")
+		})
+	}
+}
+
+// TestATransferWithItsOwnIdentityExportsTheIdsIdentity is CN17's identity
+// of a transfer's namespace: a transfer whose record carries own_identity,
+// as CreateTransfer sets on every new one, exports the uuid and the nguid
+// of common.XferNsIdentity, made from the cluster, pool and transfer ids,
+// neither of which is the origin's, so a machine that holds the origin as a
+// host takes the transfer's namespace too; a transfer without the flag, one
+// made before it, keeps the origin's identity, so a transfer that runs keeps
+// it across an upgrade (architecture.md, Transfers).
+func TestATransferWithItsOwnIdentityExportsTheIdsIdentity(t *testing.T) {
+	ownUuid, ownNguid := common.XferNsIdentity(testCluster, testSp, testXfer)
+	dashed := func(hexed string) string {
+		return fmt.Sprintf("%s-%s-%s-%s-%s", hexed[0:8], hexed[8:12],
+			hexed[12:16], hexed[16:20], hexed[20:32])
+	}
+	for _, tc := range []struct {
+		name      string
+		own       bool
+		uuid, ngd string
+	}{
+		{"a new transfer", true, ownUuid, dashed(ownNguid)},
+		{"a transfer from before the flag", false, testUuid,
+			dashed(testNguid)},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			srv, node := newTestServer(t)
+			xfers := []*pb.Transfer{{XferId: testXfer, OriNqn: testNqn,
+				OriNsIdx: 1, OwnIdentity: tc.own}}
+			syncupBoth(t, srv, reqOpts{revision: 2, primary: true,
+				xfers: xfers})
+			xferNqn := srv.nf.XferNqn(testCluster, testSp, testXfer)
+			nsPath := agent.NvmetRoot + "/subsystems/" + xferNqn +
+				"/namespaces/1"
+			node.mu.Lock()
+			uuid := strings.TrimSpace(node.files[nsPath+"/device_uuid"])
+			nguid := strings.TrimSpace(node.files[nsPath+"/device_nguid"])
+			node.mu.Unlock()
+			if uuid != tc.uuid || nguid != tc.ngd {
+				t.Fatalf("the transfer's namespace reads uuid %q and nguid "+
+					"%q, want %q and %q", uuid, nguid, tc.uuid, tc.ngd)
+			}
+			// A re-converge finds it as wanted and rewrites nothing.
+			node.Reset()
+			if _, err := srv.SyncupCntlr(context.Background(),
+				cntlrReq(reqOpts{revision: 3, primary: true,
+					xfers: xfers})); err != nil {
+				t.Fatalf("re-converge: %v", err)
+			}
+			assertNoCall(t, node, "write "+nsPath+"/device_uuid")
+			assertNoCall(t, node, "write "+nsPath+"/device_nguid")
 		})
 	}
 }

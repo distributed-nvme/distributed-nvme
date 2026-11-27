@@ -445,3 +445,36 @@ func TestCnMdArrayNameGlob(t *testing.T) {
 		}
 	}
 }
+
+// TestXferNsIdentity: a transfer's own namespace identity is deterministic
+// in the cluster, pool and transfer ids, shaped as DnNsIdentity's, distinct
+// for another transfer, pool or cluster, and never a leg's of the same ids.
+func TestXferNsIdentity(t *testing.T) {
+	uuid, nguid := XferNsIdentity(0xebada5168620c5fe, 0x11, 0x15)
+	again, againNguid := XferNsIdentity(0xebada5168620c5fe, 0x11, 0x15)
+	if uuid != again || nguid != againNguid {
+		t.Fatal("XferNsIdentity is not deterministic")
+	}
+	sum := sha256.Sum256([]byte(fmt.Sprintf(
+		"dnv-xfer-ns:%016x:%016x:%016x", uint64(0xebada5168620c5fe),
+		uint64(0x11), uint64(0x15))))
+	if want := hex.EncodeToString(sum[:16]); nguid != want {
+		t.Errorf("nguid = %q, want %q", nguid, want)
+	}
+	if want := fmt.Sprintf("%s-%s-%s-%s-%s", nguid[0:8], nguid[8:12],
+		nguid[12:16], nguid[16:20], nguid[20:32]); uuid != want {
+		t.Errorf("uuid = %q, want %q", uuid, want)
+	}
+	for _, ids := range [][3]uint64{
+		{0xebada5168620c5fe, 0x11, 0x16},
+		{0xebada5168620c5fe, 0x12, 0x15},
+		{0xebada5168620c5ff, 0x11, 0x15},
+	} {
+		if other, _ := XferNsIdentity(ids[0], ids[1], ids[2]); other == uuid {
+			t.Errorf("ids %x share the identity of the first transfer", ids)
+		}
+	}
+	if leg, _ := DnNsIdentity(0xebada5168620c5fe, 0x11, 0x15); leg == uuid {
+		t.Error("a transfer and a leg of the same ids share an identity")
+	}
+}

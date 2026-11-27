@@ -2668,7 +2668,9 @@ func volCreateTransfer(env *volEnv, name string) *pb.CreateTransferReply {
 // Transfers: the Transfer row is a
 // pointer into the SP's own subsystem table, so the origin is resolved inside
 // the transaction and stored as (ori_nqn, ori_ns_idx) verbatim, and nothing
-// touches a CdcEntry — an xfer subsystem is never discovery-advertised.
+// touches a CdcEntry — an xfer subsystem is never discovery-advertised. Every
+// new transfer carries own_identity, so its namespace exports an identity of
+// its own (cnagent.md CN17).
 func TestCreateTransferWritesRecord(t *testing.T) {
 	env := newVolEnv(t)
 	env.putSubsystem(volNqn, 501, []*pb.Namespace{{
@@ -2685,6 +2687,7 @@ func TestCreateTransferWritesRecord(t *testing.T) {
 		OriNsIdx:     1,
 		AllowedHosts: []string{volHostA},
 		AutoSuspend:  true,
+		OwnIdentity:  true,
 	}
 	got := &pb.Transfer{}
 	env.get(model.TransferKey(env.cid, volSpId, "xfer-a"), got)

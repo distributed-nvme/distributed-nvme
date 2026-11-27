@@ -4546,14 +4546,16 @@ Before you start, check five things:
    only after the transfer has parked the origin. The simple way: give the
    destination pool the source's stripe and slice count.
 2. The two pools' cntlrs: no controller node may hold a cntlr of both
-   pools, no cntlr of the destination may run on a machine that is one of
-   the volume's hosts, and their cntlid slots, the ranges of NVMe controller ids a
+   pools, and their cntlid slots, the ranges of NVMe controller ids a
    pool's exports use, must differ. `dnvctl sp get` of each pool shows
    each cntlr's `addr_port` and `cntlid_slot`. Step 1 of [A pool made
    before the block bound](#a-pool-made-before-the-block-bound) says how to
    create the destination pool so, and how to move a cntlr that breaks
-   this; give `--cn-black` there also each controller node that runs on a
-   machine of the volume's hosts.
+   this. A cntlr of the destination may run on a machine that is one of
+   the volume's hosts: the transfer exports the volume with an identity of
+   its own, which such a machine takes beside the origin's. A transfer made
+   before dnv gave transfers an identity of their own keeps the origin's:
+   on such a machine its clone finds no source.
 3. A subsystem's list of hosts and a transfer's hold at most 8 host NQNs
    each; a longer list is refused with the error code INVALID_ARGUMENT.
    The transfer's list must hold the destination pool's controller nodes.
@@ -4633,19 +4635,21 @@ Safe steps:
    `printf 'nqn.2024-01.io.dnv:4:%016x:%016x:%016x\n' <cluster_id> <sp_id>
    <xfer_id>`, with the source pool's `sp_conf.sp_id` of `dnvctl --sp
    <source> sp get`. No command prints it either.
-9. Read the address of the source pool's primary: in `dnvctl --sp <source>
-   sp get`, the entry of `cntlr_list` whose `primary` is true, the four
-   fields of its `nvme_tr_conf`: `tr_type`, `adr_fam`, `tr_addr` and
-   `tr_svc_id`.
+9. Read the addresses of the source pool's cntlrs: in `dnvctl --sp
+   <source> sp get`, each entry of `cntlr_list`, the four fields of its
+   `nvme_tr_conf`: `tr_type`, `adr_fam`, `tr_addr` and `tr_svc_id`.
 10. In the destination pool, create the clone:
     `dnvctl --sp <destination> clone create --name <clone> --dst-td <new
     volume> --src-nqn <transfer NQN> --src-idx <ns_idx> --src-slices <the
     source's slice count> --src-stripe <the source's stripe> --src-block
     <the source's data block> --src-tr-type <tr_type> --src-adr-fam
-    <adr_fam> --src-tr-addr <tr_addr> --src-tr-svc-id <tr_svc_id>
-    --auto-resume`. Type the four address flags: without them `dnvctl`
-    sends `tcp`, `ipv4`, 127.0.0.1 and 4420, so the destination's primary
-    connects to its own machine, or by the wrong address family. Type
+    <adr_fam> --src-tr-addr <tr_addr>,<tr_addr> --src-tr-svc-id
+    <tr_svc_id>,<tr_svc_id> --auto-resume`, with every cntlr's address of
+    step 9 in `--src-tr-addr` and its port, in the same order, in
+    `--src-tr-svc-id`; one port alone serves every address. Type the
+    four address flags: without them `dnvctl` sends `tcp`, `ipv4`,
+    127.0.0.1 and 4420, so the destination's primary connects to its own
+    machine, or by the wrong address family. Type
     `--auto-resume`, which is off by default: without it the
     destination's namespace stays parked until the copy is whole, and the
     hosts have no path that serves for that time. For a transfer of this
@@ -4653,7 +4657,12 @@ Safe steps:
     names and refuses, with the error code INVALID_ARGUMENT, a slice
     count, a stripe or a data block other than that pool's; the message
     names both. Nothing checks them for a transfer of another cluster.
-    The clone reads through the source's primary alone. Run
+    The clone reads through whichever of those cntlrs is the source's
+    primary, so it reads on after a failover of the source pool. A listed
+    address that does not answer, as a dead controller node's, holds a new
+    build of the clone, as after a failover of the destination pool: give
+    the clone the list without it, as step 13 says ([the scope
+    page](scope.md#53-transfers-clones-and-migrations)). Run
     `dnvctl --sp <destination> clone get --name <clone>` once now, and see
     that it shows the clone.
 11. To shorten the copy, give the clone the list of the regions the origin
@@ -4665,12 +4674,14 @@ Safe steps:
     nodes as it did to the source's. The destination's namespace serves
     them, ANA optimized, once the clone serves, and their IO goes on there.
 13. While the clone copies, read both pools' `dnvctl sp get` again from
-    time to time. If the source pool shows another primary than in step
-    9, point the clone at it:
+    time to time. If the source pool shows a cntlr at an address step 10
+    did not give the clone, as after a cntlr replacement, or a listed
+    address's controller node is down, give the clone the whole new list
+    of the cntlrs that serve:
     `dnvctl --sp <destination> clone set-tr --name <clone> --src-tr-type
-    <tr_type> --src-adr-fam <adr_fam> --src-tr-addr <tr_addr>
-    --src-tr-svc-id <tr_svc_id>`, with the four address flags as in
-    step 10. If a cntlr of the destination pool moves to a controller
+    <tr_type> --src-adr-fam <adr_fam> --src-tr-addr <tr_addr>,<tr_addr>
+    --src-tr-svc-id <tr_svc_id>,<tr_svc_id>`, with the address flags as
+    in step 10. If a cntlr of the destination pool moves to a controller
     node that the transfer's list lacks, give the transfer its new list:
     `dnvctl --sp <source> xfer set-hosts --name <transfer> --hosts <the
     whole new list>`. A cntlr replacement, which the worker makes once a
@@ -4822,16 +4833,16 @@ reason `RES_REASON_SOURCE_FAULT`. When the row in
 dm-clone: no count of hydrated regions grows, and the hosts' IO waits,
 from the park of step 7 on when no clone served before. When that row
 reads `RES_STATUS_OK` and only the row in
-`cntlr_info.clone_id_to_target` carries the reason, as after a failover
-of the source pool whose old primary's controller node is down, the
-dm-clone serves the hosts but cannot read the source: its count of
-hydrated regions stops growing, and the hosts' reads of the regions not
-yet copied, and their writes to part of such a region, fail after a short
-wait. The worker does not take either for a fault, so no failover or cntlr
-replacement comes, and nothing ends it by itself. Check the four address
-flags of step 10 against the source pool's primary as step 9 reads it
-now, and point the clone at that address with `clone set-tr`, as step 13
-says. Check that the transfer's list holds the host NQN of the controller
+`cntlr_info.clone_id_to_target` carries the reason, as when the source
+pool's primary is at an address step 10 did not give the clone, or a
+listed address's controller node is down, the dm-clone serves the hosts
+but may not read the source: its count of hydrated regions stops growing,
+and the hosts' reads of the regions not yet copied, and their writes to
+part of such a region, fail after a short wait. The worker does not take
+either for a fault, so no failover or cntlr replacement comes, and nothing
+ends it by itself. Check the address flags of step 10 against the source
+pool's cntlrs as step 9 reads them now, and give the clone the list of
+the cntlrs that are up with `clone set-tr`, as step 13 says. Check that the transfer's list holds the host NQN of the controller
 node of the destination's primary, worked out as in step 6; when it lacks
 it, give the transfer its whole list with `xfer set-hosts`, as step 13
 says. When the line stays, ask for help. While no clone has served the
@@ -4842,12 +4853,10 @@ names, and that unmount can wait or fail on the regions the clone cannot
 read: ask for help. The clone does not
 leave, and its count of hydrated regions stops growing or its row in
 `cntlr_info.clone_id_to_dm_clone` reads `RES_STATUS_ERROR`: first make the
-checks of step 13. After a failover of
-the source pool whose old primary's controller node stays up, the status
-read shows no line for the clone, both of the clone's rows read
-`RES_STATUS_OK`, and the hosts' reads of the regions not yet copied, and
-their writes to part of such a region, wait until `clone set-tr` points
-the clone at the new primary.
+checks of step 13. A clone given only the source's primary in step 10
+cannot read after a failover of the source pool: the hosts' reads of the
+regions not yet copied, and their writes to part of such a region, wait
+until `clone set-tr` gives it the new primary's address too.
 When the count still does not grow, delete nothing in the source pool,
 and ask for help.
 A cntlr of one pool shares a controller node with a cntlr of the other,
@@ -4862,11 +4871,14 @@ the list for each of those slices, `clone set-tr` with the same address
 in a run whose copy is not whole by then, the worker's end of the clone,
 and then the end of the transfer with `--force`, all within
 one pool, into a second namespace of another identity. Its stage 07 fails
-the destination's primary over while the clone lives. It passed in the lab
-on 2026-11-21 at one slice. The move into another pool under the same
-subsystem name and identity, the order of steps 3 to 5, the end of the
-transfer without `--force`, the deletes of step 16, `clone set-tr` to a new
-address after a failover of the source pool, and the abort are not tested.
+the destination's primary over while the clone lives, and then the source
+pool, the clone given both of the source's cntlrs, and the copy goes on.
+It passed in the lab on 2026-11-27 at one slice. The cn agent suite moves a
+volume into another pool under the same subsystem name and identity, the
+destination's machine one of the volume's hosts, driving the agents
+alone. The move through the gateway into another pool, the order of steps
+3 to 5, the end of the transfer without `--force`, the deletes of step
+16, `clone set-tr` to a new address, and the abort are not tested.
 For a clone that cannot read its source, the gateway's unit tests plant
 its row and read the line the gateway makes of it, the cn agent suite
 reads the reason on the rows of a clone whose source namespace is gone
@@ -6217,9 +6229,9 @@ What dnv does alone:
   Its cntlrs then serve again, those that were failed over as standbys. A
   node that comes back after: its agent removes the cntlrs it no longer
   holds.
-- Nothing points a clone at the new primary of its source pool, and
-  nothing adds a new controller node of a clone's pool to its transfer's
-  list (step 3).
+- Nothing gives a clone the address of a new cntlr of its source pool,
+  and nothing adds a new controller node of a clone's pool to its
+  transfer's list (step 3).
 - Nothing deletes the node.
 
 Safe steps:
@@ -6283,18 +6295,21 @@ Safe steps:
    to the count it had, disable one of the two new cntlrs that is not the
    primary, and delete it the same way.
 3. Once each pool of the node serves again, check its copies between
-   pools. A clone reads its source through the source pool's primary
-   alone, at the address the clone holds, and only a controller node on a
-   transfer's list may read the transfer. Neither changes by itself. Until
-   you change it, the copy stops, and a host's read of a block not yet
-   copied waits or fails. For each pool of the node:
+   pools. A clone reads its source through the addresses the clone holds,
+   whichever of them is the source pool's primary, and only a controller
+   node on a transfer's list may read the transfer. Neither changes by
+   itself. When the source's primary is at an address the clone does not
+   hold, or a held address is the dead node's, the copy can stop, and a
+   host's read of a block not yet copied waits or fails. For each pool of
+   the node:
    - If it holds a transfer, under `sp_conf.xfer_name_list` of
-     `dnvctl --sp '<pool name>' sp get`, and its primary moved, point the
-     clone that reads the transfer at the new primary:
-     `dnvctl --sp '<clone pool>' clone set-tr --name <clone> --src-tr-type <tr_type> --src-adr-fam <adr_fam> --src-tr-addr <tr_addr> --src-tr-svc-id <tr_svc_id>`,
-     with the four fields of `nvme_tr_conf` of the entry of `cntlr_list`
-     whose `primary` is true in that `sp get`. Type the four address
-     flags: without them `dnvctl` sends `tcp`, `ipv4`, 127.0.0.1 and 4420.
+     `dnvctl --sp '<pool name>' sp get`, give the clone that reads the
+     transfer the addresses of the pool's cntlrs that serve now:
+     `dnvctl --sp '<clone pool>' clone set-tr --name <clone> --src-tr-type <tr_type> --src-adr-fam <adr_fam> --src-tr-addr <tr_addr>,<tr_addr> --src-tr-svc-id <tr_svc_id>,<tr_svc_id>`,
+     with the fields of `nvme_tr_conf` of each entry of `cntlr_list` in
+     that `sp get` but the dead node's, the ports in the order of the
+     addresses. Type the address flags: without them `dnvctl` sends
+     `tcp`, `ipv4`, 127.0.0.1 and 4420.
      For a clone in another cluster, run the command there, with that
      cluster's `--cluster` and, for another etcd, the `--gateway-address`
      of its gateways ([Clone from another

@@ -267,6 +267,9 @@ func (s *Server) CreateTransfer(
 			OriNsIdx:     req.GetOriNsIdx(),
 			AllowedHosts: req.GetAllowedHosts(),
 			AutoSuspend:  req.GetAutoSuspend(),
+			// cnagent.md CN17: the transfer's namespace exports an
+			// identity of its own, never the origin's.
+			OwnIdentity: true,
 		})
 		conf.XferNameList = append(conf.GetXferNameList(), req.GetXferName())
 		if err := minter.commit(conf, opCreateTransfer); err != nil {

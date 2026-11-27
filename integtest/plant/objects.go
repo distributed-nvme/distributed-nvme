@@ -781,10 +781,13 @@ func PutXfer(
 		if err != nil {
 			return err
 		}
+		// own_identity, as CreateTransfer sets it on every new transfer
+		// (cnagent.md CN17).
 		s.Put(key, &pb.Transfer{
-			XferId:   out.Id,
-			OriNqn:   spec.OriNqn,
-			OriNsIdx: spec.OriNsIdx,
+			XferId:      out.Id,
+			OriNqn:      spec.OriNqn,
+			OriNsIdx:    spec.OriNsIdx,
+			OwnIdentity: true,
 		})
 		conf.XferNameList = append(conf.XferNameList, spec.Name)
 		s.Put(model.SpConfKey(cid, target.Name), conf)

@@ -1125,6 +1125,65 @@ func TestCloneSrcTrConfEmptyList(t *testing.T) {
 	}
 }
 
+// TestCloneSrcTrConfSeveralAddresses: `clone create` and `clone set-tr`
+// send one src_tr_conf per source address, so a clone reads through every
+// cntlr of its source pool and goes on after the pool's failover
+// (dnvctl.md, `clone` — `ctl/clone.go`). --src-tr-addr and --src-tr-svc-id
+// are comma-separated lists, the i-th address with the i-th port, one entry
+// per item of the longer list; a list of one item goes to every entry, so
+// one port serves every address, and a longer list shorter than the other
+// leaves the missing items empty, never a value nobody typed; the type and
+// the family go to every entry.
+func TestCloneSrcTrConfSeveralAddresses(t *testing.T) {
+	conf := func(addr, svc string) *pb.NvmeTrConf {
+		return &pb.NvmeTrConf{TrType: "tcp", AdrFam: "ipv4", TrAddr: addr,
+			TrSvcId: svc}
+	}
+	for _, tc := range []struct {
+		name  string
+		flags []string
+		want  []*pb.NvmeTrConf
+	}{
+		{"two addresses, one port",
+			[]string{"--src-tr-addr", "10.0.0.1,10.0.0.2",
+				"--src-tr-svc-id", "4300"},
+			[]*pb.NvmeTrConf{conf("10.0.0.1", "4300"),
+				conf("10.0.0.2", "4300")}},
+		{"two addresses, two ports",
+			[]string{"--src-tr-addr", "10.0.0.1,10.0.0.2",
+				"--src-tr-svc-id", "4300,4301"},
+			[]*pb.NvmeTrConf{conf("10.0.0.1", "4300"),
+				conf("10.0.0.2", "4301")}},
+		{"one address, two ports",
+			[]string{"--src-tr-addr", "10.0.0.1",
+				"--src-tr-svc-id", "4300,4301"},
+			[]*pb.NvmeTrConf{conf("10.0.0.1", "4300"),
+				conf("10.0.0.1", "4301")}},
+		{"three addresses, two ports",
+			[]string{"--src-tr-addr", "10.0.0.1,10.0.0.2,10.0.0.3",
+				"--src-tr-svc-id", "4300,4301"},
+			[]*pb.NvmeTrConf{conf("10.0.0.1", "4300"),
+				conf("10.0.0.2", "4301"), conf("10.0.0.3", "")}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			create := runArgv(t, "CreateClone", append([]string{"clone",
+				"create", "--name", "cl0"}, tc.flags...)...).(*pb.CreateCloneRequest)
+			setTr := runArgv(t, "UpdateCloneTrConf", append([]string{"clone",
+				"set-tr", "--name", "cl0"}, tc.flags...)...).(*pb.UpdateCloneTrConfRequest)
+			for _, got := range [][]*pb.NvmeTrConf{create.SrcTrConf,
+				setTr.SrcTrConf} {
+				if len(got) != len(tc.want) {
+					t.Fatalf("sent %d src_tr_conf entries %v, want %v",
+						len(got), got, tc.want)
+				}
+				for i := range got {
+					wantRequest(t, got[i], tc.want[i])
+				}
+			}
+		})
+	}
+}
+
 // TestSelectorNilRule covers selectorOf: both lists empty ⇒ nil, either list
 // set ⇒ a selector carrying exactly what was typed.
 func TestSelectorNilRule(t *testing.T) {

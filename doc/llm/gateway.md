@@ -1582,7 +1582,9 @@ dnv-namespace one included, resolves the origin namespace per
 `architecture.md`, Transfers, refuses an origin whose td another namespace
 of the SP lies on, walking `nqn_list` (`tdOtherNs`), and one whose td a
 clone's `dst_td_id` names, walking `clone_name_list` (`tdCloneRef`), both
-`FAILED_PRECONDITION`, mints `xfer_id` and appends to `xfer_name_list`. **DeleteTransfer** with `force` false *finalizes*: it
+`FAILED_PRECONDITION`, mints `xfer_id`, writes the record with
+`own_identity` set, so its namespace exports an identity of its own
+(`cnagent.md` CN17), and appends to `xfer_name_list`. **DeleteTransfer** with `force` false *finalizes*: it
 additionally sets `suspended` true on the origin namespace in the same STM;
 with `force` true it *aborts* (the origin untouched); both delete the
 `Transfer` and its list entry and `BumpSpRev`. **GetTransfer** is one STM
