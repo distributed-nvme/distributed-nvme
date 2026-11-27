@@ -607,9 +607,10 @@ type ssPlan struct {
 	// shared is the details of the subsystem's row while its NQN is shared:
 	// the stored request of another cntlr of this agent names it too
 	// (CnAgentServer.markShared; cnagent.md CN16, A shared NQN). Empty
-	// otherwise. While it is set the pass writes nothing under the kernel
+	// otherwise. While it is set the build writes nothing under the kernel
 	// subsystem but the ANA moves of a namespace whose device is this cntlr's
-	// own ns-dev (mayDarken, nsPlan.ownShared).
+	// own ns-dev (mayDarken, nsPlan.ownShared); the sweep removes a namespace
+	// of its own that the cntlr drops (sharedOwnNs).
 	shared string
 }
 

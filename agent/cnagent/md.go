@@ -1201,8 +1201,8 @@ func (m *Md) Add(ctx context.Context, devPath, member string) error {
 // `--add` does for a device whose superblock names a recent member. The
 // record can lack regions written while the device was away: md clears it
 // behind a copy onto another new member, so a member taken back after such
-// a copy would read in sync with old bytes there (cnagent.md CN12, the
-// take-back).
+// a copy would read in sync with old bytes there (cnagent.md CN12, The
+// take-back check).
 func (m *Md) AddFresh(ctx context.Context, devPath, member string) error {
 	return m.cmd.RunOk(ctx, "mdadm", devPath, "--add-spare", "--failfast",
 		member)

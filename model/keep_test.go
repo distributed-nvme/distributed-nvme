@@ -251,10 +251,9 @@ func TestDeleteRetiredLegRefusesAKeptLegForTheTimer(t *testing.T) {
 // repair's bad leg (keep_bad_legs); the repair's abort and cancel leave the
 // keep on that leg in the group's leg_list; a later repair of the worker's
 // of that leg finishes and retires it with keep, so the retire timer passes
-// it over. The repair record carries keep_bad_legs alone, as a record made
-// before the leg's own keep existed does; the cancel of such a record now
-// leaves the keep on the leg, which is the fix. The new leg the finish puts
-// in the bad leg's place carries no keep.
+// it over. The repair record carries keep_bad_legs alone, and its cancel
+// leaves the keep on the leg. The new leg the finish puts in the bad leg's
+// place carries no keep.
 func TestCancelRepairLeavesTheKeepOnTheLeg(t *testing.T) {
 	env := newOpsEnv(t)
 	env.putDn(opsDnE, 704, 4, opsDnFree)

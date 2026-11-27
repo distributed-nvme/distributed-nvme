@@ -2,6 +2,7 @@ package dnagent
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"sort"
@@ -333,9 +334,10 @@ func (s *DnAgentServer) startStoreTest() {
 
 // testStore is one test of the local store's disk (agent.Store.Test), under
 // a trace id of its own (SH2), at the probe path of a disk node the agent
-// holds; an agent that holds none uses its store for nothing, and tests
-// nothing. A refused write turns the store row of every later read to
-// RES_STATUS_ERROR, which marks the node (DN18). It takes no node lock: it
+// holds; an agent that holds none writes nothing to test, and tests
+// nothing. A refused write turns the store row of later reads to
+// RES_STATUS_ERROR, until a read's probe or a save holds, which marks the
+// node (DN18). It takes no node lock: it
 // touches the local store alone.
 func (s *DnAgentServer) testStore(ctx context.Context) {
 	keys := s.dnKeys()
@@ -352,13 +354,21 @@ func (s *DnAgentServer) testStore(ctx context.Context) {
 	if err := s.store.Test(attemptCtx,
 		s.nf.LocalDnProbePath(req.GetClusterId(), req.GetDnId()),
 		common.DnStoreTestSize); err != nil {
-		slog.ErrorContext(attemptCtx, msgStoreTestFailed,
+		// A test cut off by its bound or by the agent's end says nothing of
+		// the disk and the next test runs again: Info (log.md R6).
+		level := slog.LevelError
+		if errors.Is(err, context.Canceled) ||
+			errors.Is(err, context.DeadlineExceeded) {
+			level = slog.LevelInfo
+		}
+		slog.Log(attemptCtx, level, msgStoreTestFailed,
 			slog.String("error", err.Error()))
 	}
 }
 
-// msgStoreTestFailed is the Error record of a store test that failed, its
-// write or its removal of the file (testStore; log.md, The store test).
+// msgStoreTestFailed is the record of a store test that failed, its write
+// or its removal of the file: Error, or Info for one cut off (testStore;
+// log.md, The store test).
 const msgStoreTestFailed = "local store test failed"
 
 // sweepOrphanRecords is the record half of the node-level pass: it releases

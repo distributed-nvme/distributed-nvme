@@ -4632,7 +4632,8 @@ const (
 //   - a group never scheduled (next_epoch zero, no request) is stamped with
 //     a first time one interval ahead, spread over half an interval either
 //     side by its id (mdCheckSpread), so a new pool's groups do not fall
-//     due together;
+//     due together, save one the ranges test below asks for a check, which
+//     gets its time when that request ends;
 //   - when no request stands in the pool after the first part, the first
 //     group that holds a candidate for a repair for ranges with no fresh
 //     check (rangesWaitCheck, mdCheckFresh) and that a check suits

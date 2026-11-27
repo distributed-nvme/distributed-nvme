@@ -133,9 +133,12 @@ modules, as the lab's controller node VMs do; on any other pair its
 preflight fails. iptables and
 tc are left to the stages that use them, the partition stages, redund's dial
 and slow leg stages, pause's and groupcut's cuts and clone_xfer's slowed
-copy, and thin_check to thinrepair, so a VM
-without one fails in the stage that needs it rather than a run that might
-never reach one.
+copy, and the suite's own check of thin_check to thinrepair, on its second
+VM, so a VM without one fails in the stage that needs it rather than a run
+that might never reach one. The agent itself runs thin_check earlier, in
+repair's re-assembly and in groupcut's cut, on a VM the suite does not
+check for it; the node check (`dnagent.md` CM5) lists it among the cn's
+commands.
 
 ## Lab facts
 
@@ -1039,7 +1042,8 @@ write only once dm-thin sends it down. The read of the data leg's written
 blocks, started a second into the hold, then takes at least
 `THINBM_HOLD_MIN_MS`, as its drain waits for the write, and names one more
 written block than the read just before it (CN27). The rate keeps the
-drain's wait short of the agent's 3 s command limit on its suspend, as a
+drain's wait short of the agent's command limit on its suspend
+(`CmdSoftTimeout`), as a
 longer hold refuses the read. The case's metadata leg is on DN1 too, so the
 throttle slows its writes as well: on an agent without the drain the read
 met the held write in its snapshot message, which the command limit
@@ -1363,7 +1367,8 @@ keeps the superblock and changes one byte of its unused tail, which its
 checksum covers and the magic number and the flags word do not, and steps
 the level back up, playing the worker: a fresh check round, and the
 request re-sent while the round answers the leftover code. CN2 reads the
-mark, its `thin_check` refuses the superblock three times in a row, each
+mark, its `thin_check` refuses the superblock `thinCheckRefusals` times in
+a row, each
 next run started by the re-send the read's name of the pool brings once
 the pause is over, and the pool's row reads `RES_STATUS_ERROR` with
 `RES_REASON_POOL_META_DAMAGED`, the pool not loaded and the mark still set,
@@ -1378,27 +1383,6 @@ the superblock's flags word with no mark; the host reads its 8 MiB as
 written and writes again. A pool of more than one meta group, whose
 metadata no one device holds at that level, and metadata damaged past its
 superblock are not tried.
-
-**What a pass means.** Exit status zero and PASS mean every assertion held in a
-run that stops at the first failure: data checked against patterns the agents
-never see, removals proved by the nodes' own listings, every stop a case makes
-confirmed; the race a loop device usually wins, the provisioning window, is
-logged, while clone_xfer's copy, which a loop device would finish at once, is
-slowed, so its read-through window, logged too, is open when its probe reads,
-and the case fails unless the copy holds once its source goes and the wipe
-comes in the middle of it.
-
-**What the stock rules do without the rules of `deploy/udev/`** is a manual
-check the suite never runs, since it lets the system's own rules build
-arrays, volumes or bcache devices over dnv's devices on lab VMs other
-suites share: on a pair of lab VMs, after setup, the files of
-`deploy/udev/` are removed from the rules directory and udev reloaded, and
-redund's foreign stage is run with its checks of udev's records left out.
-What each stock rule then makes of each signature — an array over the data
-group's array or a leg's NVMe device, an active volume of the planted
-group, a physical volume recorded online, a bcache device — is read from
-the node; the cleanup's sweep of what the system made of the foreign
-signatures removes it.
 
 **sharednqn** proves `cnagent.md` CN16, A shared NQN, on one node: pool A,
 its S shape on DN1, and pool B, its S shape on DN2, each have a cntlr on
@@ -1430,6 +1414,27 @@ rows of the new subsystem and namespace read `RES_STATUS_OK`, the kernel
 holds the new serial and the namespace's device is the new namespace
 device; the host, connected again, reads its pattern; a check round is
 clean.
+
+**What a pass means.** Exit status zero and PASS mean every assertion held in a
+run that stops at the first failure: data checked against patterns the agents
+never see, removals proved by the nodes' own listings, every stop a case makes
+confirmed; the race a loop device usually wins, the provisioning window, is
+logged, while clone_xfer's copy, which a loop device would finish at once, is
+slowed, so its read-through window, logged too, is open when its probe reads,
+and the case fails unless the copy holds once its source goes and the wipe
+comes in the middle of it.
+
+**What the stock rules do without the rules of `deploy/udev/`** is a manual
+check the suite never runs, since it lets the system's own rules build
+arrays, volumes or bcache devices over dnv's devices on lab VMs other
+suites share: on a pair of lab VMs, after setup, the files of
+`deploy/udev/` are removed from the rules directory and udev reloaded, and
+redund's foreign stage is run with its checks of udev's records left out.
+What each stock rule then makes of each signature — an array over the data
+group's array or a leg's NVMe device, an active volume of the planted
+group, a physical volume recorded online, a bcache device — is read from
+the node; the cleanup's sweep of what the system made of the foreign
+signatures removes it.
 
 ## Teardown and cleanup
 

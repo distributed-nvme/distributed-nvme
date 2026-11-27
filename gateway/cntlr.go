@@ -172,7 +172,8 @@ func planCreateCntlr(
 		return cntlrPlan{}, mapStmErr(err)
 	}
 	// Read after the snapshot, as the locations are: a subsystem committed
-	// in another pool since is met by the cn agent's own refusal (CN16).
+	// in another pool since is met by the cn agent's own refusal
+	// (cnagent.md CN16, A shared NQN).
 	shared, err := model.SharedNqnCnAddrs(ctx, cli, plan.Cid, spId, nqns)
 	if err != nil {
 		return cntlrPlan{}, errAborted("%v", err)

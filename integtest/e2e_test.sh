@@ -16735,8 +16735,8 @@ case_ops() {
 #     `-n $XNQN`, through the helper's `connect` verb.
 #     host1 and not host0 consumes it, though CN17 gives a new transfer's
 #     namespace an identity of its own (xfer_ns_uuid), so that $XNQN's ns 1
-#     and $SS0's ns 1 could share a kernel: host0's path to the origin is
-#     parked, and a second path would only add a parked device to wait out.
+#     and $SS0's ns 1 could share a kernel: host0 already holds the parked
+#     origin, and the transfer adds nothing the case needs there.
 #
 # ===========================================================================
 # THE SAME-SP SOURCE AND ITS FALLBACK, WHICH IS A REAL BRANCH AND NOT A COMMENT
@@ -29568,9 +29568,10 @@ react_fsync_kmsg() { # <tag>
 # in turn, its write to slice 0 can come late in the cut, and the pause is
 # logged, not asserted. How the step goes on after a cut is decided by
 # react_gcut_back's read of the pool, on the primary of that moment. A cut
-# that leaves the slice's pool needs_check stops the step, as only the
-# worker's failover, whose new primary checks the metadata before it loads
-# the pool, brings it back (cnagent.md CN13, The needs-check mark), and the
+# that leaves the slice's pool needs_check stops the step, as only a load of
+# the pool, which the primary makes after it checks the metadata, brings it
+# back: a failover's, or a level step's (cnagent.md CN13, The needs-check
+# mark), and the
 # case's status check then allows that one pool row while it lasts
 # (case_status_check); a cut that leaves the
 # pool in any other state but OK stops it too, and the status check judges the
@@ -29608,8 +29609,9 @@ GCUT_WAY_POOL=""
 
 # react_gcut_back is true once host0's writer has ended and the primary
 # reports every cut group's array OK, not degraded and with no sync
-# running, or its slice's pool needs_check, which only a failover brings
-# back. The
+# running, or its slice's pool needs_check, which only a load of the pool
+# after its metadata check brings back, as a failover's or a level step's.
+# The
 # reading is logged as it changes, and its pool line kept in GCUT_POOL.
 react_gcut_back() { # <slice id> <grp ids…>
 	local slice=$1 out g st det pool sig
@@ -29905,7 +29907,7 @@ react_group_cut() {
 		*needs_check*)
 			STATUS_ALLOW_NEEDS_CHECK=$slice
 			log "  cut $i left slice 0's pool needs_check, which only a" \
-				"failover's check of the metadata cures; the step stops cutting"
+				"load after a check of the metadata cures; the step stops cutting"
 			react_gcut_way_back "$wmark" "$slice" "${grps[@]}"
 			break
 			;;
@@ -29927,7 +29929,7 @@ react_group_cut() {
 			*needs_check*)
 				STATUS_ALLOW_NEEDS_CHECK=$slice
 				log "  the pool reads needs_check on the primary it has now," \
-					"as the cut left it, until a failover's check of the metadata"
+					"as the cut left it, until a load after a check of the metadata"
 				;;
 			esac
 			break

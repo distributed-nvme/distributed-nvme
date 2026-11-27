@@ -1436,9 +1436,11 @@ ended and the primary reads the groups whole or the pool needs_check, through
 the primary of that moment, so the blocks of a cut that broke a group can be
 read through the array md broke, before any failover, and then count as failed
 reads, neither held nor lost. A cut that leaves the slice's pool needs_check
-ends the cutting, as only the worker's failover brings such a pool back, its
-new primary checking the metadata before it loads the pool (`cnagent.md`
-CN13, The needs-check mark): the stage gives the worker the primary
+ends the cutting, as only a load of the pool brings such a pool back, the
+primary checking the metadata before it loads the pool (`cnagent.md` CN13,
+The needs-check mark): a failover's new primary loads it, and so does a step
+of the level that builds no thin pool and back, or a reboot of the
+primary's node; the stage gives the worker the primary
 threshold and a minute more to make the groups whole again, logs what it
 did, and otherwise takes the pool to the level that builds no thin pool,
 where the primary's re-assembly starts the arrays again (`cnagent.md` CN12,

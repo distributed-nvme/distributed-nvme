@@ -2235,7 +2235,9 @@ dm-clone (CN18).
   md keeps every region written while the array is degraded marked in
   that bitmap, save the regions behind a copy onto another new leg, which
   md clears as that copy passes them, the reason a retired leg taken back
-  is added as a fresh member (the take-back check, below). It is not a write of "re-add" to the member's "state":
+  is added as a fresh member (the take-back check, below); a `leg_list`
+  member put back after such a copy is still re-added from the bitmap
+  (Known limits). It is not a write of "re-add" to the member's "state":
   that write is made in the agent's own process and waits on md's own
   lock, which a superblock write stuck on a member holds for as long as
   that member's IO is held; it cannot be killed and would hold the
@@ -2318,7 +2320,7 @@ dm-clone (CN18).
   one md holds is an extra, and its bad leg is a `leg_list` member like
   any other. The repair's steps, after the extras leave:
 
-  * The add. For a CREATED repair whose abort flag the request does not
+  * **The add.** For a CREATED repair whose abort flag the request does not
     carry, a new leg the array lacks is added once it is available, a
     provisioning leg never being so, while another member keeps the data:
     one md marks in sync and not faulty, of a `leg_list` leg other than
@@ -2348,7 +2350,7 @@ dm-clone (CN18).
     STARTED repair's new leg that the array lacks is added once available,
     as a `leg_list` member is, beside a copy source (above). Either add of a new leg taken from a
     retired leg passes the take-back check first (below).
-  * The put-back. A new leg md has failed and moved out of its place, of a
+  * **The put-back.** A new leg md has failed and moved out of its place, of a
     STARTED repair or of a CREATED one whose abort flag the request does
     not carry, is `--remove`d once its leg can take a member, and the add
     above adds it again under its conditions. Reason: as for a `leg_list`
@@ -2357,7 +2359,7 @@ dm-clone (CN18).
     repair's copy would never resume. For a CREATED repair whose flag is
     set it is not put back, since the abort needs md to hold nothing on
     it.
-  * The abort. For a CREATED repair whose abort flag the request carries,
+  * **The abort.** For a CREATED repair whose abort flag the request carries,
     no new leg is ever added (`architecture.md`, Repair, gives the abort
     protocol), and one md holds without a place — its "slot" none, failed
     or not — is `--remove`d, so that md holds nothing on it and the
@@ -2393,7 +2395,7 @@ dm-clone (CN18).
     stop the group's array (the reason above). md removes a member that
     holds no place with no IO to it, so the removal runs whatever the
     leg's path.
-  * The take-back check. Before the add of a new leg taken from a retired
+  * **The take-back check.** Before the add of a new leg taken from a retired
     leg — one the repair records a retired time for — and before its bad
     leg goes out, the converge compares the new leg's superblock read with that of
     the member that keeps the data (the add's test above: in sync and not
@@ -3203,7 +3205,9 @@ when a commit fails, as when every leg of a data group is lost for a few
 seconds, and opens a pool whose metadata carries the mark read-only,
 wherever it is loaded. So before the primary creates a slice's pool device
 it reads the superblock at the start of the meta concat with direct IO
-(`readThinNeedsCheck`): a block whose magic is not dm-thin's, as a fresh
+(`readThinNeedsCheck`), save where the device goes between the step's two
+reads of it, which only a removal by hand makes, and the step's second
+create loads the pool unchecked: a block whose magic is not dm-thin's, as a fresh
 pool's zeroed metadata, carries no mark, and with no mark the pool is
 created as usual. With the mark set it loads no pool and runs one
 `thin_check --clear-needs-check-flag` on the meta concat in the background
@@ -4123,9 +4127,10 @@ pools can hold a subsystem of one NQN, as the two pools of a move do
 (`architecture.md`, Subsystems, namespaces). A host-facing NQN that the
 stored request of another cntlr of this agent also names is shared
 (`markShared`), on the converge, on the read, and on the standby plan of
-an earlier term's sweep (CN35). For a shared NQN a cntlr changes nothing
-under the kernel subsystem but the ANA group of a namespace over its own
-ns-dev: no list step, so no serial, model, cntlid bounds, host links or
+an earlier term's sweep (CN35). For a shared NQN a cntlr's build changes
+nothing under the kernel subsystem but the ANA group of a namespace over
+its own ns-dev, and its sweep removes a namespace of its own that it drops
+(below): no list step, so no serial, model, cntlid bounds, host links or
 cut (CN33); no namespace object and no port link. A namespace whose
 "device_path" is this cntlr's own ns-dev, read in the pass
 (`markOwnShared`), is its own: it moves as any namespace of the cntlr, by
@@ -4197,8 +4202,9 @@ and a host connects again as to any new subsystem. A namespace that does
 not read back inaccessible, one over a dm device that reads suspended or
 does not read (`disableSafe`), whose disable would wait for IO that never
 completes, or a removal that fails, is the list step's error; the old
-subsystem then stays and is not safe in the pass, so its namespaces stay
-inaccessible. A serial write the kernel took but that reported a
+subsystem then stays and is not safe in the pass, so the pass moves its
+namespaces inaccessible, and one that does not move gets no data put
+under it (CN33). A serial write the kernel took but that reported a
 failure leaves the wanted serial live, which is a plain error. When the
 delete and the create reach the cntlr as one change, the new namespace at
 an old index has a new ns-dev, and the sweep, which runs before the build,
@@ -7239,6 +7245,18 @@ stores instead is CN23's.
 
 ## Known limits
 
+* A `leg_list` member is put back by a re-add from md's write-intent
+  bitmap (CN12, The put-back), and md clears that bitmap behind a copy
+  onto another new leg. A CREATED repair whose bad leg is dead adds its
+  new leg, and md copies onto it at once; when the new leg dies during the
+  copy, the worker aborts and cancels the repair, and the bad leg stays in
+  `leg_list`. An array built anew before that leg returns, as after a
+  failover or a reboot of the controller node, puts the leg back with a
+  plain `mdadm --add`, a re-add from the bitmap that lacks the regions the
+  copy passed: md holds the leg in sync with old bytes there, and serves
+  them. A fix needs a mark on the leg the agent can read, such as one the
+  cancel writes, so the primary adds it fresh (`scope.md` entry "The bad
+  leg of a cancelled repair can come back with old data").
 * A leg's wrapper can still map another device in a window of a few reads
   (CN10, The head is looked up again around its number): the second
   lookup proves the head's name, and the number read by it, up to that
@@ -7275,8 +7293,10 @@ stores instead is CN23's.
   removed by hand say, reads `RES_STATUS_MISSING` and is built again only
   by a converge something else brings — the next revision's or a re-send
   for another row — though dm-thin would open it on the
-  read-only pool; and the worker's shared-state class holds its stack
-  (`dnv-worker.md` HL2), so no failover rebuilds it either. Naming such
+  read-only pool, or by a failover, which the pool row's own error, the
+  cntlr's fault, brings (`dnv-worker.md` HL2), and whose new primary
+  checks the metadata and loads the pool, then builds the volume (The
+  needs-check mark). Naming such
   rows would re-send the `SyncupCntlr` on every round for a td not yet
   created there, whose `create_thin` the read-only pool refuses each time.
 * A slice's pool that an operator's `blockdev --setro` made read-only, by

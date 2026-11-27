@@ -774,10 +774,10 @@ func FlakeyErrorWritesTable(sectors uint64, dev string) string {
 
 // The remaining dm targets of architecture.md, Data-plane device stacks —
 // striped, thin-pool, thin — have no
-// builder here on purpose. dm-thin and dm-stripe print their tables back with
-// arguments of their own after the ones a load gave, as a thin-pool's
-// feature count, so the cn role compares a *prefix* of the arguments rather
-// than a whole string; it therefore builds those tables from
+// builder here on purpose. dm-thin prints its tables back with arguments of
+// its own after the ones a load gave, as a thin-pool's feature count, so the
+// cn role compares a *prefix* of those arguments rather than a whole string
+// (a striped table it compares whole); it builds those tables from
 // the same argument slice it compares against, and a second representation
 // here could only drift from it.
 

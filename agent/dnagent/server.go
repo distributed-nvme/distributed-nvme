@@ -289,8 +289,9 @@ type sideState struct {
 	// request is then the worker's own. Until then the side's own sweep
 	// removes nothing, and the side proves nothing of its pool's migrations
 	// (knownSides) (DN2): a side loaded from its file at the start converges
-	// it, and its sweep, there and in the fence timer's converge, only
-	// reports, as the file may be older than the node.
+	// it, and its sweep, there and in the fence timer's converge, runs the
+	// side's transitions and P0 and names the rest, removing no device and
+	// freeing no record, as the file may be older than the node.
 	synced atomic.Bool
 }
 

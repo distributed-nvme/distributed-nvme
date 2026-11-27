@@ -570,7 +570,7 @@ func (s *CnAgentServer) ensureLeg(
 }
 
 // legHeadNo is the number ensureLeg builds lp's wrapper over (CN10, The head
-// is looked up again): the number read by the head name view holds, taken
+// is looked up again around its number): the number read by the head name view holds, taken
 // only once a second lookup of the leg, made after that read in the pass's
 // walk, names the same head. The steps between the lookup that named the
 // head and the wrapper's — the other member's in-sync test before a cut, a

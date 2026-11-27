@@ -123,9 +123,9 @@ func migrFinishCmd() *cobra.Command {
 // --force is the only way to cancel once the cutover has started: the
 // gateway refuses it otherwise, since the destination may hold the only copy
 // of the writes since, and with it the source serves its content as of the
-// cutover. In an md-raid1 group of more than one leg the cancel marks the
-// leg to be copied again, and the primary copies it whole from a leg in
-// sync; the reply says so (copy_again), and why the writes since the cutover
+// cutover. The cancel marks the leg, and in an md-raid1 group of more than
+// one leg the primary copies it whole from a leg in sync; the reply says so
+// (copy_again), and why the writes since the cutover
 // are lost on the leg where they are (loss). The answer waits until the
 // primary uses the old side's path alone, for up to
 // common.MigrCancelWaitSeconds, so the call needs a --timeout that covers

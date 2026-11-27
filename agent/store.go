@@ -302,9 +302,9 @@ func (s *Store) SaveFailing() bool {
 }
 
 // Refusal reports whether the disk refused a save, and the latest refused
-// write's error text, a Save's or a Probe's: a Save that fails with an error
-// of the write itself, such as no space left, a read-only file system or an IO
-// error, sets it; the next Save that succeeds clears it, and so does a Probe
+// write's error text, a Save's, a Probe's or a Test's: a Save that fails
+// with an error of the write itself, such as no space left, a read-only file
+// system or an IO error, sets it; the next Save that succeeds clears it, and so does a Probe
 // that holds; a Save cut off by its ctx, cancelled or past the soft timeout,
 // leaves it as it is, since a cut-off save happens on a healthy disk too. It
 // is the node's store row (dnagent.md DN18, cnagent.md CN28): the worker marks

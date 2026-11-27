@@ -361,11 +361,13 @@ type RecopyRef struct {
 }
 
 // ClearRecopy clears the recopy mark ref names (Leg.recopy_revision) once
-// the primary's report shows the recopy done: the group's reading names the
-// mark's revision as the recopy the primary ran and holds the leg in sync
-// (dnv-worker.md AR13). It reports whether it wrote and the revision its
-// STM committed, 0 when it wrote nothing, and raises SpRev when it writes,
-// so every cntlr is handed the leg without the mark: one that stayed would
+// the primary's report shows the recopy done (dnv-worker.md AR13): for a
+// leg the primary copies again, the group's reading names the mark's
+// revision as the recopy the primary ran and holds the leg in sync; for any
+// other leg, its row reads RES_STATUS_OK with no reason. It reports whether
+// it wrote and the revision its STM committed, 0 when it wrote nothing, and
+// raises SpRev when it writes, so every cntlr is handed the leg without the
+// mark: one that stayed in an md-raid1 group of more than one leg would
 // copy the leg again at the next agent restart of the primary.
 //
 // It takes no expected revision and a pool at any level that is not being

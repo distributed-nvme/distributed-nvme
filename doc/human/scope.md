@@ -642,8 +642,8 @@ the bad leg of a cancelled repair that comes back with old data (section
   the thin pool's records miss the other primary's writes: a block written
   then reads as zeros, and the next commit writes the old records over the
   newer ones. State: fix later. Read from dnv's code; not seen in the lab.
-- **A leg's device or a clone's copy can still be built over the wrong
-  connection in a short window.** Silent. The primary puts a device over
+- **A leg's device, in a short window, or a clone's copy can still be
+  built over the wrong connection.** Silent. The primary puts a device over
   each leg it connects, by the number of the leg's connection, which it
   reads by the kernel's name for that connection. It now checks the name
   again right after it reads the number, so the long steps before are
@@ -953,10 +953,10 @@ The entries:
   is a second read, which is not built. Read from dnv's code; not seen in
   the lab.
 - **An older request can pass a disk node's revision check after a failed
-  read of its local files.** Silent. A disk node's agent works as a
-  controller node's does: at its start, when the node's own file cannot be
-  read once, it skips every side file too, and then holds no revision for
-  those sides, so any request of a side passes, an older one too. Two
+  read of its local files.** Silent. At its start, when a disk node's own
+  file cannot be read once, its agent skips every side file too, and,
+  unlike a controller node's agent, keeps no revision of them: it then
+  holds no revision for those sides, so any request of a side passes, an older one too. Two
   workers can drive one pool for a short time at a change of its owner, so
   an old owner can still send an older request. That request can name an
   older primary, the cntlr whose path the side serves, and the agent then
@@ -1170,7 +1170,9 @@ Measured times are in [the introduction](introduction.md#status-and-limits).
   drop stops a running check, and the next try starts again from the
   leg's start, so a sector on which reads fail often enough can keep the
   check from reaching it. The worker gives that check up after two days
-  and asks again one interval later. A cluster created before this
+  and asks again one interval later; for a group whose leg waits for the
+  check before it is replaced for its bad blocks, it asks again at once,
+  and the pool's other groups then get a check only once in two days. A cluster created before this
   setting existed, or with zero, has no check. A leg with slow IO reads
   ok, and every write of the group waits for it. `dnvctl cntlr inspect`
   shows how long the primary's last small test write and read of each leg

@@ -355,8 +355,6 @@ func (s *CnAgentServer) removeOldSubsys(
 	cause string,
 	nsIdxs []int,
 ) error {
-	slog.WarnContext(ctx, msgSubsysReplaced, slog.String("nqn", nqn),
-		slog.String("cause", cause))
 	for _, nsIdx := range nsIdxs {
 		if !s.moveDark(ctx, nqn, nsIdx) {
 			return fmt.Errorf("%s, and namespace %s did not move to "+
@@ -377,6 +375,8 @@ func (s *CnAgentServer) removeOldSubsys(
 		return fmt.Errorf("%s, and removing the subsystem failed: %w",
 			cause, err)
 	}
+	slog.WarnContext(ctx, msgSubsysReplaced, slog.String("nqn", nqn),
+		slog.String("cause", cause))
 	return nil
 }
 

@@ -656,7 +656,8 @@ later write failed at once. The thin pool then read
 read-only, needing a check, on its primary, and every block the host was
 told was written read back as written. A failover to a controller node
 none of whose paths to the legs the cut reached then checks the pool's
-records, clears the mark and brings the pool back writable; the cn agent
+records, clears the mark that says the pool needs a check, and brings the
+pool back writable; the cn agent
 suite showed that on 2026-11-27 with an 8-second cut and its failover.
 
 The loss of a controller node that holds many pools was measured on the lab

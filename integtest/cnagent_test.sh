@@ -625,9 +625,9 @@ on_exit() {
 		log ""
 		log "########## diagnostics (cnagent_integtest.md, Teardown and cleanup) ##########"
 		diagnostics || true
-		# clone_xfer's token bucket and redund's netem delay, which
-		# unthrottle removes alike and which a failed run does not leave in
-		# place: the next run's cleanup would remove them, but the VMs are
+		# clone_xfer's and thinbm's token buckets and redund's netem delay,
+		# which unthrottle removes alike and which a failed run does not
+		# leave in place: the next run's cleanup would remove them, but the VMs are
 		# shared, and another suite run before that would find its traffic
 		# slowed (cnagent_integtest.md, Teardown and cleanup).
 		if [ "$THROTTLED" -ne 0 ]; then
@@ -656,8 +656,8 @@ on_exit() {
 		if [ "$NCG_VM" -ne 0 ]; then
 			helper_ok "$NCG_VM" ncg_teardown >&2
 		fi
-		# smoke's host writers, for the pause writer's reason: a writer
-		# left running writes on and holds its namespace open.
+		# smoke's and thinbm's host writers, for the pause writer's reason: a
+		# writer left running writes on and holds its namespace open.
 		local hvm
 		for hvm in 1 2; do
 			if [ "${HOSTW_VMS[$hvm]}" -ne 0 ]; then

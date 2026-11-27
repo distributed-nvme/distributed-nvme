@@ -341,9 +341,11 @@ CM3). An agent whose check finds no cause logs neither.
 
 A dn agent's store test (`dnagent.md` DN18, The store test) logs, under
 the trace id of its own each test takes, one Error record `local store
-test failed` with `error` for a test whose write failed, refused or cut
-off, or whose removal of the file failed; a test that holds logs nothing
-of its own beside the `OsClient`'s records of its write and removal.
+test failed` with `error` for a test whose write was refused or whose
+removal of the file failed, and the same record at Info for a test cut
+off, by its bound or by the agent's end, which says nothing of the disk
+and which the next test runs again (R6); a test that holds logs nothing of
+its own beside the `OsClient`'s records of its write and removal.
 
 ### The cut of a removed host
 
@@ -374,9 +376,10 @@ migrating leg's path, `leg path cut` (`cnagent.md` CN10).
 
 A cn agent that removes a kernel subsystem its list step cannot make the
 cntlr's logs one Warn record `nvmet subsystem replaced` under the
-converge's trace id, with `nqn` and `cause`, the text that names why
-(`cnagent.md` CN16, A shared NQN and A subsystem made again, which say when
-the removal runs and what a failure of it does).
+converge's trace id, with `nqn` and `cause`, the text that names why, once
+the subsystem is gone; a removal that fails logs no such record, and its
+error is the step's (`cnagent.md` CN16, A shared NQN and A subsystem made
+again, which say when the removal runs and what a failure of it does).
 
 ### gRPC messages
 

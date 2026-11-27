@@ -1275,10 +1275,11 @@ unthrottle() {
 # mutations [logfile] — every mutating operation in an agent log (the restart
 # case's mutation-free re-sends, dnagent_integtest.md, Cases).
 # Probe operations (lsblk, dmsetup info/table/status, ls, and the [D13]
-# "os read block") are expected and deliberately absent from the list, exactly
-# mirroring the unit tests' readOnlyPrefixes, and so is the removal of the
-# local store's probe file, which the store test writes every interval
-# (dnagent.md DN18, The store test): local state, not the node's.
+# "os read block") are expected and deliberately absent from the list,
+# mirroring the unit tests' readOnlyPrefixes; the removal of the local
+# store's probe file, which the store test writes every interval
+# (dnagent.md DN18, The store test), is the suite's own exception: local
+# state, not the node's.
 #
 # The command and its verb are bound to variables BEFORE the verb lists: a
 # list piped into index() is the input its argument is evaluated against, so

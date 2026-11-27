@@ -345,6 +345,7 @@ A background task may additionally run a **child process**: DN9's
 `blkdiscard --zeroout` batches do, so can the converge the DN12 fence
 timer runs, so do the
 background reads, whose probes run commands (SH17),
+the dn's store test runs `rm` (DN18, The store test),
 the cn's metadata checks run `thin_check`,
 and the cn sweep's background `nvme disconnect` is one.
 Such a child must not outlive the agent — the cn sweep's background
@@ -617,7 +618,7 @@ absent and deletes it.
 SH8. Per `architecture.md`, Common agent rules, with `stored` = revision of
 the last accepted request for the object, as this process holds it (zero
 when it holds none, as for an object whose file the startup reload did not
-load), save on a cn for a cntlr whose file the reload decoded and skipped
+load), except, on a cn, for a cntlr whose file the reload decoded and skipped
 with its CN, whose revision is the cntlr's floor while the process holds
 no request of it (`cnagent.md` CN8): `GateRevision` returns nil when that
 rule lets the request be applied, and a `ReplyCodeStaleRevision` rejection
@@ -1067,9 +1068,10 @@ logical block size its `queue/` directory keeps; the cn's are `cnagent.md`
 CN28's, and CN12's superblock read and `lsblk` of the array node — the walk
 of "/sys/class/nvme-subsystem" and "/sys/class/nvme" for every nvme host fact —
 the namespace device, controller liveness and ANA state alike (SH20,
-`cnagent.md` CN12 and CN28) — configfs **reads** for nvmet, and a read of
-the disk header with O_DIRECT (`ReadBlockDirect`) for the DN's [D13]
-metadata (DN18). No LVM report is probed
+`cnagent.md` CN12 and CN28) — configfs **reads** for nvmet, and for the
+DN's [D13] metadata a read of the disk header with O_DIRECT
+(`ReadBlockDirect`), beside the buffered `ReadBlock` of the header and both
+slots that a load of the table makes when none is loaded (DN18). No LVM report is probed
 anywhere ([D14]). A partition has no `queue/`, and a `partition` file under
 the number marks one: its block size read goes on through `..`, which the
 kernel resolves in the disk's directory once it has followed the number's
@@ -2184,9 +2186,9 @@ The order over the rest of the store is: the orphan `migr-bm-*` chunks are
 skipped with its DN whose side is not loaded, and a chunk whose `migr_id`
 no longer matches that side's stored `migr_dst_conf`; then every side whose
 pointer is absent from its DN's stored `side_pointer_list` is dropped, then
-each usable DN's node-level sweep runs read-only: it names what those sides
-left behind and what else the stored list does not name, and removes no
-device and frees no record, then the remaining `side-*` files re-run the
+each usable DN's node-level sweep runs with no removal: it runs P0
+(below), names what those sides left behind and what else the stored list
+does not name, and removes no device and frees no record, then the remaining `side-*` files re-run the
 `SyncupSide` converge (DN8 to DN14) from the stored request, whose own
 sweep removes nothing either (below) — a converge that finds bytes of the
 side still to zero while the request says `provisioned` false (re)starts
@@ -2210,8 +2212,10 @@ nothing until this process accepts a `SyncupSide` of that side
 (`sideState.synced`) — in the startup converge and in the DN12 fence
 timer's converge of a side loaded from its file it names its chain. Both
 still run what removes nothing, so that no device stays suspended while
-the start waits ([D12]): the side's transitions (the fence's clear or end,
-the resume of a linear left suspended after its window) and the park step
+the start waits ([D12]): the side's transitions (`sidePreSteps`: the
+fence's clear or end, the resume of a linear left suspended after its
+window, the repoint of a wanted per-CN linear off a device the stored
+plan does not want) and the park step
 P0 of both scopes (a suspended per-CN linear the request does not name
 goes onto its dm-error, a device a cut-off reload left suspended under an
 export is resumed). A DN's removal is its `SyncupDn`'s sweep, which
@@ -2515,7 +2519,8 @@ object again.
 
 **Scope 1, node-level.** Under the node write lock, in `SyncupDn` after the
 DN converge, and in the startup reconcile after every DN has converged,
-where it reads only and removes nothing (DN2, The start removes nothing). Its
+where it runs P0 and otherwise names what it would remove, removing no
+device and freeing no record (DN2, The start removes nothing). Its
 wanted set is empty for every side that is not in any authoritative list: a
 `DnErrorName`/`DnLinearName`/`DnSideName` device whose `(sp_id, side_id)`
 appears in no synced DN's `side_pointer_list` **and** in no side whose
@@ -4436,9 +4441,11 @@ the startup reconcile stores (SH28) report what the startup sweep left, as
 it removes nothing (DN2). While the node's store disk refuses writes, the
 re-issued `Syncup*` is refused for its failed save before its converge, so
 it runs no sweep (SH5), and no syncup re-drives the leftover until a save
-holds again; no other pass removes it, as neither a background converge
-attempt (SH11) nor a restart's reconcile (DN2) removes anything of a side
-no `SyncupSide` of the process has synced (Known limits). The
+holds again. No other pass removes it but the DN12 fence timer's
+converge of a side a `SyncupSide` of the process synced, whose sweep runs
+as a syncup's: neither a background converge attempt (SH11) of a side no
+`SyncupSide` of the process has synced nor a restart's reconcile (DN2)
+removes anything (Known limits). The
 conditions only a read's verdict names re-drive on the rounds that answer a
 read's observation (DN16, SH31). While a leftover keeps every round
 re-sending, each re-sent `Syncup*` cancels the read that the round which
@@ -4473,8 +4480,10 @@ needed, and the worker never turns one into an `err_epoch`
   that fails every read reads `RES_STATUS_ERROR` here, which a buffered
   read could miss; the read cannot be cut off once it has started, and
   waits for as long as the disk holds the IO (`osclient.md`,
-  ReadBlockDirect), holding the node read lock (a `SyncupDn` of the DN then
-  waits for it) and an `OsClient` slot, but not the disk table's lock, which
+  ReadBlockDirect), holding the node read lock (a `SyncupDn` then waits for
+  it, and once one waits, so does every later call that takes the node
+  lock, a side's syncup, read or push and the fence timer's converge alike)
+  and an `OsClient` slot, but not the disk table's lock, which
   it takes only after the read. It checks magic, version, CRC, the three
   layout fields against this
   build's constants (DN5) and the `cluster_id`/`dn_id`/`extent_size`
@@ -5030,9 +5039,12 @@ else reported through `agent_reply` is still a protocol-level refusal.
   delete's. So does every re-converge a syncup at the held revision would
   bring, such as a leftover's sweep (DN17) or the start of a side's zeroing
   that nothing runs (DN16); only the converges no syncup brings still run —
-  the background converge attempts (SH11) and a restart's reconcile (DN2),
-  which remove nothing (DN2, The start removes nothing), so nothing is
-  removed for the whole fault, a restart's included.
+  the background converge attempts (SH11) and a restart's reconcile (DN2).
+  A restart's reconcile removes nothing (DN2, The start removes nothing),
+  and neither does a background converge of a side no `SyncupSide` of the
+  process has synced; the fence timer's converge of a side synced before
+  the fault still sweeps that side (DN6), the one removal that goes on
+  through the fault.
   The one background converge is the DN12 fence timer's (the cn runs none,
   `cnagent.md` CN10), so on the dn two waits last the whole fault short of
   an agent restart, whose reconcile converges each side from its held
@@ -5076,8 +5088,9 @@ else reported through `agent_reply` is still a protocol-level refusal.
   nothing is saved is offered for new cntlrs until a save is refused: the
   store row reads the saves, the probe of DN18 runs only once one was
   refused, and no save runs on a quiet node whose rounds answer code zero;
-  a disk node's store test marks the node within `DnStoreTestInterval`
-  instead, after a restart too (DN18, The store test). The first request
+  a disk node's store test marks the node within `DnStoreTestInterval` and
+  the time its next read takes to reach the worker instead, after a restart
+  too (DN18, The store test). The first request
   refused marks the node, and that one object waits on the node until the
   disk takes writes again. A store with room for small saves only can read
   OK while a larger request is refused: a smaller save that holds clears the

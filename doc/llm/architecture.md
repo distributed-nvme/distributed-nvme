@@ -6708,7 +6708,8 @@ The four reactions:
   `CreateRepair` — for a slice's group repaired for its bad-block ranges,
   only once a check of the group that md ran to its end with the other leg
   clean has ended within a bound, which the worker asks for when there is
-  none (`dnv-worker.md` AR8, AR16) — while the group's array runs, another leg of the group is
+  none, unless the cluster's md check interval is zero (`dnv-worker.md`
+  AR8, AR16) — while the group's array runs, another leg of the group is
   healthy and held in sync, the group has no repair, no forced-start mark
   stands on it (Repair, Forced start) and its `operator_in_charge` flag is
   clear (Repairs), since the operator is acting on the group then. The

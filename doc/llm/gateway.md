@@ -104,7 +104,9 @@ checks of `DeleteClone` and `FinishMigration`, behind `ForceStartGroup`'s
 check of the group's array, behind `CreateRepair`'s read of the bad leg's
 row and behind `GetThinDeviceBitmap`'s check of the parks, the
 `GetThinDeviceBm` bitmap read, the `GetCntlrInfo` and `InspectGrp` behind
-`InspectGroup`, and the `GetCnStore` behind `CheckControllerNodeRestore` —
+`InspectGroup`, the `GetCntlrInfo` behind a forced `CancelMigration`'s
+reads of the primary's report after a cutover, and the `GetCnStore` behind
+`CheckControllerNodeRestore` —
 applied as a timeout around each dial and its calls (AG2), so
 `InspectGroup`'s two calls share one budget. It equals
 `DefaultEtcdOpTimeout`, so a hung agent and a hung etcd bound an RPC alike.
@@ -1982,6 +1984,10 @@ also refuses a reply with a non-zero code.
 `CreateRepair`'s read of the bad leg's row maps no failure at all: an agent
 that does not answer leaves the answer the leg's record gives, so a dead
 leg's repair never waits on a silent primary (`architecture.md`, Repairs).
+Nor do a forced `CancelMigration`'s reads of the primary's report after a
+cutover: the read before its write leaves the reply's `loss` text saying
+that the report did not answer, and the wait after the write tries again
+a second later, up to its bound (`CancelMigration`).
 The agent-side `AgentReply.code` convention does not apply to `Get*Size`,
 `Get*Info` or `Get*Bm` beyond what their replies define: `ForceStartGroup`'s
 check reads the group's row whatever the reply's code, as `CreateRepair`
@@ -2005,12 +2011,14 @@ what keeps such a two-phase RPC exactly as safe as a one-STM RPC. A
 GW6 is presence-based, so an interleaved mutation it did not observe stays
 invisible to it. That is the
 AG4 half of the token-less cost `architecture.md`, Revision keys and the
-sync fan-out, accepts. The node deletes, `DeleteClone` and
-`FinishMigration` are the exception: their agent call proves a fact of one
-object, so their deciding STM compares the ids it read, a node's cluster
-id, node id and revision, a clone's id, a pool's and a migration's ids,
-with the planning snapshot's whatever the token, and answers `ABORTED`
-when one moved (Disk nodes; the call matrix below).
+sync fan-out, accepts. The node deletes, `DeleteClone`, `FinishMigration`
+and `CancelMigration` are the exception: their agent call proves a fact of
+one object, so their deciding STM compares the ids it read, a node's
+cluster id, node id and revision, a clone's id, a pool's and a migration's
+ids, and for `CancelMigration` the migration's id and whether its cutover
+is pending, with the planning snapshot's whatever the token, and answers
+`ABORTED` when one moved (Disk nodes; `CancelMigration`; the call matrix
+below).
 
 The complete call matrix:
 
@@ -2029,6 +2037,7 @@ The complete call matrix:
 | `FinishMigration` with `force` false | `GetSideInfo` | between the STMs |
 | `ForceStartGroup` without `cancel` | `GetCntlrInfo` | between the STMs |
 | `CreateRepair`, when the pool has a primary | `GetCntlrInfo` | between the snapshot and the op, every round |
+| `CancelMigration` with `force`, after the cutover | `GetCntlrInfo` | between the snapshot and the STM when the pool has a primary, then after the STM once a second until the primary's report shows the old side alone, up to the wait's bound |
 | `InspectGroup` | `GetCntlrInfo`, then `InspectGrp` | after the snapshot |
 | `GetThinDeviceBitmap` | `GetCntlrInfo`, when a namespace exports the td, then `GetThinDeviceBm` | after the STM |
 | `GetClusterStatus` | `GetCntlrInfo` of each pool's primary and of each enabled standby with no health epoch, and `GetSideInfo` of each migration's destination past its cutover | after each pool's snapshot |

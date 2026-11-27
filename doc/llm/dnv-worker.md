@@ -120,13 +120,15 @@ recommends, which etcd notes when it starts, and a unit test commits each
 against a real etcd started with it;
 `MaxFlipCreatedPerTxn`, the most candidates one created-flip transaction
 carries (RW19); and the three role names `WorkerRoleDn`, `WorkerRoleCn` and
-`WorkerRoleSp`. Two constants of this document's sit outside that region:
+`WorkerRoleSp`. Three constants of this document's sit outside that region:
 `ObsMaxAgeIntervals`, after the health-check intervals it counts in and the
 md check and start hold defaults, how
 many of an object's intervals the observation a round's reply answers from
-may be old before the round is a missed one (HL7); and
+may be old before the round is a missed one (HL7);
 `MdCheckRequestBound`, after the md check and start hold defaults, how
-long a check request may stand before the pass ends it unfinished (AR16).
+long a check request may stand before the pass ends it unfinished (AR16);
+and `MdCheckDoneFresh`, beside it, how long a check that ended counts for
+AR8's repair of a leg for md's bad-block ranges.
 The start hold's default and bound, `DefaultStartHoldSeconds` and
 `MaxStartHoldSeconds`, are bounds of a cluster setting
 (`architecture.md`, Common validation) that HL8 reads.
@@ -617,13 +619,13 @@ timer runs (AR12); `LatchClone`, the latch `DeleteClone` stages, which
 this worker's `LatchCopiedClone` stages in a transaction of its own
 (CLD13); and `EndMigrationIn`, the write the gateway's `CancelMigration`
 and `FinishMigration` stage, which this worker's ops of those names stage
-in theirs (AR8) — each a body staged into its caller's transaction, not an
-op, so it takes no expected revision, the gateway checking the token itself
-(`gateway.md` GW6); save `ForceStartGroup`, the body of the gateway's call
-of that name, which this worker never runs: its clear of the mark that op
-writes is `ClearForcedStart` (AR13), and of the recopy mark
-`EndMigrationIn` writes for the gateway's forced cancel `ClearRecopy`
-(AR13); and save `SetGrpOperatorInCharge`, the
+in theirs (AR8), and whose recopy mark for the gateway's forced cancel the
+worker clears with `ClearRecopy` (AR13) — each a body staged into its
+caller's transaction, not an op, so it takes no expected revision, the
+gateway checking the token itself (`gateway.md` GW6); save
+`ForceStartGroup`, the body of the gateway's call of that name, which this
+worker never runs: its clear of the mark that op writes is
+`ClearForcedStart` (AR13); and save `SetGrpOperatorInCharge`, the
 body of `UpdateGroupOperatorInCharge`, which it never runs either: its pass
 reads the flag that op writes (AR8); and save `SetRetiredLegKeep`, the body
 of `UpdateRetiredLegKeep`, which it never runs either: its retire timer and
@@ -4001,11 +4003,12 @@ The steps of a live SP's pass run in this order: the re-seed of the health
 memos (HL3), the clone drain's steps (CLD7), the four gates, AR11's stage
 moves, AR14's record of refused member adds, AR17's record of repairs
 that wait, AR6's timing of a grow, AR15's flag that a group's array has
-run, AR13's forced-start clear and CLD13's latch of a whole copy at every
-`sp_level`, AR3's suppression, AR12's retire timer, AR16's md check
+run, AR13's forced-start clear and recopy clear and CLD13's latch of a
+whole copy at every `sp_level`, AR3's suppression, AR12's retire timer, AR16's md check
 schedule, and the reactions in AR2's priority. A latched SP runs its drain
 step behind the cluster-conf gate and neither the two steps of a repair,
-the records, the timing of a grow, the flag, the forced-start clear nor
+the records, the timing of a grow, the flag, the forced-start clear, the
+recopy clear nor
 AR16's schedule (SPD6); it holds no clone
 to latch, its `clone_name_list` being empty.
 
@@ -4060,6 +4063,9 @@ next cntlr, and its scan that finds no CN, which moves the
 pass on to AR8; AR8's refusal of a drive step by its op, which
 holds that repair's group and moves the walk to the next repair, and its
 cancel's wait on `grp_row_stale` (`repair_cancel`), which does the same;
+AR8's hold of a finish at the retired-leg bound (`repair_finish`, with a
+`grp_row_` reason, `grp_leg_bad_blocks` or `grp_every_leg_bad_blocks`),
+which holds that repair alone and moves the walk to the next repair;
 AR8's `migration_copy_not_whole` and a refusal of a bad leg's migration end
 by its op, which hold that leg alone and move the scan on; and
 AR8's `leg_has_two_sides`, `grp_operator_in_charge`, whether the pass's
@@ -4120,9 +4126,9 @@ above `SP_LEVEL_NO_THINPOOL` (the disaster-recovery levels of
 `architecture.md`, SpLevel, the levels where reactions stop), and neither
 do AR12's retire timer and AR16's md check schedule; AR11's stage moves run at every level, since a
 move only follows the primary's report and an operator may need to finish
-a repair there, and so does AR13's forced-start clear, since a
-clear only follows the primary's report too and the operator force-starts
-a group at the levels where reactions stop. Leg repair's drive step is a
+a repair there, and so do AR13's forced-start clear and recopy clear,
+since a clear only follows the primary's report too and the operator
+force-starts a group at the levels where reactions stop. Leg repair's drive step is a
 reaction, so the
 operator drives the worker's repairs there with the gateway's calls (AR8).
 An SP with `deleting` true is not suppressed
@@ -5149,8 +5155,12 @@ read from the last leg in sync, and md would mark the array broken and the
 region bad on the new leg too, though the bad leg holds it; a check ended
 within the bound is the proof that the legs the group held then read
 whole, and a group whose repair waits on something else asks for a new
-check at most once in that time, so its asks do not starve the SP's other
-groups. The proof does not cover a leg that joined the group after that
+check at most once in that time while its checks end, so its asks do not
+starve the SP's other groups. A group whose check never reaches its end
+is asked for one again from the pass after its request's bound, ahead of
+every due group (AR16, step 3), so while that lasts the SP's other groups
+get a check only in the pass that ends such a request, one in each
+`MdCheckRequestBound`. The proof does not cover a leg that joined the group after that
 check, as a repair's new leg, which md's copy wrote and no check read back;
 nothing clears `done_epoch` when the group's legs change, so such a leg can
 be the clean leg of a repair within the bound (`scope.md`). A clone meta
@@ -5341,14 +5351,17 @@ other than the repair's bad leg, a leg the new leg copies from, whose
 ranges md copies onto the new leg; ranges on the new leg alone hold
 nothing, since the legs it copied from still hold those regions;
 `reaction skipped` logs the reason, `grp_every_leg_bad_blocks` when the
-new leg carries ranges too. A leg with ranges beside a clean leg is
-replaced by leg repair for its ranges (AR8, A leg with bad-block ranges),
-which ends the hold; over a region every leg records as bad, md drops a
-range only at a later write over it that works, so the operator ends the
-hold: the retire timer's by deleting the retired leg (`DeleteRetiredLeg`)
-once its copy is taken or known not needed, or by keeping it
-(`UpdateRetiredLegKeep`), and the finish's by deleting a retired leg, which
-brings the group under the bound; until then the held repair stays
+new leg carries ranges too. For the retire timer's hold, a leg with
+ranges beside a clean leg is replaced by leg repair for its ranges (AR8,
+A leg with bad-block ranges), which ends the hold; the finish's group
+already holds its repair, so no such repair is made for it
+(`grp_has_repair`), and its hold ends only when md drops the range at a
+later write over it that works, or by the operator. Over a region every
+leg records as bad, md drops a range only at such a write too, so the
+operator ends the hold: the retire timer's by deleting the retired leg
+(`DeleteRetiredLeg`) once its copy is taken or known not needed, or by
+keeping it (`UpdateRetiredLegKeep`), and the finish's by deleting a
+retired leg, which brings the group under the bound; until then the held repair stays
 STARTED, the group's one repair.
 Reasons: the retired leg's data exists twice elsewhere only while the group
 is whole, so a group waiting for its legs, through a repair or until md
@@ -5465,9 +5478,9 @@ show done or a ref the op skips, `recopy kept` with `clone_deleting` or the
 op's error, and `recopy cleared` naming the group, the leg, the mark's
 revision, the primary, its report's revision and the revision the op's own
 STM committed. Reason: a mark that stayed would copy the leg again at the
-primary's next agent restart, and while it stands each pass looks the leg
-up. A leg that leaves its group, as a repair's retired bad leg, takes its
-mark with it. The clear is no reaction and not the pass's one action
+primary's next agent restart, and while it stands the primary looks the leg
+up in each of its passes. A leg that leaves its group, as a repair's
+retired bad leg, loses its mark, as a retired leg carries none. The clear is no reaction and not the pass's one action
 (AR2).
 
 AR14. **Member add refusals.** For a live SP, right after AR11's stage
@@ -5533,7 +5546,8 @@ step 1 records:
    aside) has the request withdrawn and its time kept, so it is asked for
    again once it suits, and the primary stops a check it started for it;
 2. a group never scheduled — no `next_epoch` and no request — gets its
-   first time: half an interval ahead of now plus a share of one interval
+   first time, save one that step 3's first test asks for a check, which
+   gets its time when that request ends (step 1): half an interval ahead of now plus a share of one interval
    drawn from the group's id, so a new pool's groups spread over half an
    interval to one and a half, and a worker that takes the pool over draws
    the same;

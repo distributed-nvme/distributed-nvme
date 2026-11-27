@@ -811,9 +811,10 @@ func (s *Server) FinishMigration(
 // and DN6).
 //
 // A forced cancel after the cutover does more (architecture.md,
-// Migrations, The forced cancel). Its write marks the leg to be copied
-// again in an md-raid1 group of more than one leg (model.EndMigrationIn),
-// as the old side then serves the leg's content as of the cutover. Before
+// Migrations, The forced cancel). Its write marks the leg
+// (model.EndMigrationIn), as the old side then serves the leg's content as
+// of the cutover; in an md-raid1 group of more than one leg the primary
+// also copies the leg again from a leg in sync. Before
 // the write, outside any transaction, it reads the primary's report for
 // the group's legs in sync (cancelLegsInSync), which only words the
 // answer's loss (cancelLoss). After the write it waits until the primary

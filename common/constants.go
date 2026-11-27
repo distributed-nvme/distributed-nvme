@@ -82,7 +82,7 @@ const (
 	// its end (MdCheck.done_epoch) counts for the sp worker's repair of a
 	// leg for md's bad-block ranges (dnv-worker.md AR8): two days, the
 	// bound on a request, so a group whose repair waits on something else
-	// asks for a new check at most once that long.
+	// asks for a new check at most once that long while its checks end.
 	MdCheckDoneFresh = 2 * 24 * 3600
 	// ObsMaxAgeIntervals is how many of an object's health-check intervals
 	// the observation a round's reply answers from may be old before the
