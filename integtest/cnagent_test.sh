@@ -6528,6 +6528,23 @@ bitmap_hex() { # cnidx subcommand args…
 	printf '%s' "${out%%$'\n'*}"
 }
 
+# assert_td_bm_refused runs GetThinDeviceBm, which the agent must refuse
+# while the named ns-dev maps the volume (cnagent.md CN26): a
+# FailedPrecondition that names the device.
+assert_td_bm_refused() { # cnidx nsdev label get-td-bm-args…
+	local cn=$1 nsdev=$2 label=$3 out
+	shift 3
+	if out=$(cnctl "$cn" get-td-bm "$@" 2>&1); then
+		die "$label: the read of the volume's written blocks was answered" \
+			"while $nsdev maps the volume: $out"
+	fi
+	case "$out" in
+	*FailedPrecondition*"$nsdev"*) ;;
+	*) die "$label: the read was refused for another cause: $out" ;;
+	esac
+	log "$label: the read was refused: ${out##*desc = }"
+}
+
 assert_no_residue() { # sp
 	local idx got
 	for idx in 1 2; do
@@ -11324,7 +11341,20 @@ case_thinbm() {
 		write_range "$hv" "$WORK/pattern-b-$blk.bin" "$dev" 1 "$blk"
 	done
 
-	stage tdbm "GetThinDeviceBm: 1 = unmapped, LSB-first (architecture.md, raid0 bitmap math)"
+	stage tdbm "GetThinDeviceBm: refused while the namespace serves (CN26); once it is parked, 1 = unmapped, LSB-first (architecture.md, raid0 bitmap math)"
+	local orinsdev snapnsdev
+	orinsdev=$(cn_dm_name c6 "$cn" "$sp" "$S_NS")
+	snapnsdev=$(cn_dm_name c6 "$cn" "$sp" "$B_NS2")
+	assert_td_bm_refused "$cn" "$orinsdev" "thinbm" --sp "$sp" \
+		--cntlr "$cntlr" --td "$S_TD" --slice-idx 0 --start-block 0 \
+		--block-cnt 0
+	req_set "$req" ".nqn_to_subsystem[\"$nqn\"].ns_list[0].suspended = true"
+	bump_cn_rev "$cn"
+	cntlrrev=${CNREV[$cn]}
+	out=$(cn_syncup_cntlr "$cn" "$req")
+	assert_map_ok "$out" ns_id_to_namespace "$S_NS" "thinbm park"
+	assert_parked "$cn" "$orinsdev" "$(cn_dm_name c5 "$cn" "$sp" "$S_TD")" \
+		"thinbm: the origin parked for the read"
 	got=$(bitmap_hex "$cn" get-td-bm --sp "$sp" --cntlr "$cntlr" --td "$S_TD" \
 		--slice-idx 0 --start-block 0 --block-cnt 0)
 	assert_eq "$got" 1effffffffffffff "thinbm td bitmap"
@@ -11345,6 +11375,12 @@ case_thinbm() {
 	got=$(bitmap_hex "$cn" get-td-bm --sp "$sp" --cntlr "$cntlr" --td "$S_TD" \
 		--slice-idx 0 --start-block 4 --block-cnt 8)
 	assert_eq "$got" f1 "thinbm paged td bitmap"
+	req_set "$req" ".nqn_to_subsystem[\"$nqn\"].ns_list[0].suspended = false"
+	bump_cn_rev "$cn"
+	cntlrrev=${CNREV[$cn]}
+	out=$(cn_syncup_cntlr "$cn" "$req")
+	assert_map_ok "$out" ns_id_to_namespace "$S_NS" "thinbm unpark"
+	host_wait_ana "$hv" "$nqn" "$cn" optimized 20
 
 	stage snapshot "create_snap needs a quiesced origin (CN14)"
 	# The origin is re-sent with created = true: the gateway refuses a
@@ -11410,12 +11446,33 @@ case_thinbm() {
 	drop_caches "$hv"
 	assert_eq "$(helper "$hv" "zero_probe '$snapdev' 9 1")" zeros \
 		"thinbm snapshot block 9 after the origin write"
+	# The reads of both volumes' written blocks need both namespaces
+	# parked (cnagent.md CN26); the snapshot's stays parked from here, and
+	# the origin's serves again for the held write below.
+	assert_td_bm_refused "$cn" "$snapnsdev" "thinbm snapshot" --sp "$sp" \
+		--cntlr "$cntlr" --td "$B_TD2" --slice-idx 0 --start-block 0 \
+		--block-cnt 0
+	req_set "$req" ".nqn_to_subsystem[\"$nqn\"].ns_list[0].suspended = true
+		| .nqn_to_subsystem[\"$snapnqn\"].ns_list[0].suspended = true"
+	bump_cn_rev "$cn"
+	cntlrrev=${CNREV[$cn]}
+	out=$(cn_syncup_cntlr "$cn" "$req")
+	assert_parked "$cn" "$orinsdev" "$(cn_dm_name c5 "$cn" "$sp" "$S_TD")" \
+		"thinbm: the origin parked for the reads"
+	assert_parked "$cn" "$snapnsdev" "$(cn_dm_name c5 "$cn" "$sp" "$B_TD2")" \
+		"thinbm: the snapshot parked for the reads"
 	got=$(bitmap_hex "$cn" get-td-bm --sp "$sp" --cntlr "$cntlr" --td "$B_TD2" \
 		--slice-idx 0 --start-block 0 --block-cnt 0)
 	assert_eq "$got" 1effffffffffffff "thinbm snapshot bitmap unchanged"
 	got=$(bitmap_hex "$cn" get-td-bm --sp "$sp" --cntlr "$cntlr" --td "$S_TD" \
 		--slice-idx 0 --start-block 0 --block-cnt 0)
 	assert_eq "$got" 1efdffffffffffff "thinbm origin bitmap gained block 9"
+	req_set "$req" ".nqn_to_subsystem[\"$nqn\"].ns_list[0].suspended = false"
+	bump_cn_rev "$cn"
+	cntlrrev=${CNREV[$cn]}
+	out=$(cn_syncup_cntlr "$cn" "$req")
+	assert_map_ok "$out" ns_id_to_namespace "$S_NS" "thinbm unpark"
+	host_wait_ana "$hv" "$nqn" "$cn" optimized 20
 
 	stage heldwrite "a write dm-thin holds while it zeroes a new block: the leg's read waits for it (CN27)"
 	# The slice's one data leg is on DN1. With CN1's writes to DN1
@@ -11483,8 +11540,11 @@ case_thinbm() {
 	# re-attach the existing volumes with a bare `dmsetup create` — no
 	# create_thin, no create_snap, nothing to quiesce — and the mappings must
 	# come back intact. This is the only place a real dm-thin pool proves
-	# that a bare create on an existing id works.
-	req_set "$req" '.td_list |= map(.created = true)'
+	# that a bare create on an existing id works. Both namespaces come back
+	# parked, as the reads of the volumes' written blocks below need
+	# (cnagent.md CN26).
+	req_set "$req" '.td_list |= map(.created = true)
+		| .nqn_to_subsystem[].ns_list[].suspended = true'
 	bump_cn_rev "$cn"
 	cntlrrev=${CNREV[$cn]}
 	out=$(cn_syncup_cntlr "$cn" "$req")
@@ -12358,12 +12418,6 @@ case_clone_xfer() {
 	make_pattern "$hv" "$WORK/pattern-c.bin" 32
 	want=$(sha_range "$hv" "$WORK/pattern-c.bin" 32)
 	write_range "$hv" "$WORK/pattern-c.bin" "$dev" 32
-	# The production bitmap source (architecture.md, Bitmap reads): the suite
-	# pushes exactly what it
-	# read. The second 32 MiB was never written, so the skip range is real.
-	got=$(bitmap_hex 1 get-td-bm --sp "$sp1" --cntlr "$cntlr" --td "$S_TD" \
-		--slice-idx 0 --start-block 0 --block-cnt 0)
-	assert_eq "$got" 00000000ffffffff "clone_xfer sp1 td bitmap"
 
 	stage sp2 "stage 1: sp2 comes up with the identical namespace, suspended"
 	dn_pointers 2 "$sp2:$S_MLEG:$S_MSIDE" "$sp2:$S_DLEG:$S_DSIDE"
@@ -12412,6 +12466,13 @@ case_clone_xfer() {
 	# opens it gets EIO at once instead of wedging in D state ([D12]).
 	assert_parked 1 "$nsdev1" "$err1" "clone_xfer: the transfer origin"
 	assert_opens_eio 1 "$nsdev1" "clone_xfer: the transfer origin"
+	# The production bitmap source (architecture.md, Bitmap reads), read
+	# once the origin is parked, as the read needs (cnagent.md CN26): the
+	# suite pushes exactly what it read. The second 32 MiB was never
+	# written, so the skip range is real.
+	got=$(bitmap_hex 1 get-td-bm --sp "$sp1" --cntlr "$cntlr" --td "$S_TD" \
+		--slice-idx 0 --start-block 0 --block-cnt 0)
+	assert_eq "$got" 00000000ffffffff "clone_xfer sp1 td bitmap"
 	# The ordering rule of architecture.md, [D12], on
 	# hardware: the ANA move to `inaccessible` is
 	# written before the ns-dev is touched, which is why the park needs no
@@ -13419,10 +13480,22 @@ case_clone_xfer() {
 	assert_eq "$(helper "$hv" "zero_probe '$dev' 32 32")" zeros \
 		"clone_xfer second 32 MiB"
 	# The differential proof: dm-clone copies regions unconditionally, so only
-	# the skip leaves the second half unmapped.
+	# the skip leaves the second half unmapped. The read needs the
+	# namespace parked (cnagent.md CN26), which it is around the read.
+	req_set "$req2" ".nqn_to_subsystem[\"$nqn\"].ns_list[0].suspended = true"
+	bump_cn_rev 2
+	rev2=${CNREV[2]}
+	out=$(cn_syncup_cntlr 2 "$req2")
+	assert_parked 2 "$nsdev2" "$err2" "clone_xfer: sp2 parked for the read"
 	got=$(bitmap_hex 2 get-td-bm --sp "$sp2" --cntlr "$cntlr" --td "$S_TD" \
 		--slice-idx 0 --start-block 0 --block-cnt 0)
 	assert_eq "$got" 00000000ffffffff "clone_xfer: blocks 32..63 never copied"
+	req_set "$req2" ".nqn_to_subsystem[\"$nqn\"].ns_list[0].suspended = false"
+	bump_cn_rev 2
+	rev2=${CNREV[2]}
+	out=$(cn_syncup_cntlr 2 "$req2")
+	assert_map_ok "$out" ns_id_to_namespace "$S_NS" "clone_xfer sp2 unpark"
+	host_wait_ana "$hv" "$nqn" 2 optimized 20
 	make_pattern "$hv" "$WORK/probe-c.bin" 1
 	want=$(sha_range "$hv" "$WORK/probe-c.bin" 1)
 	# The positive control of stage 7's bound: the probe's MiB, written

@@ -5763,6 +5763,27 @@ reply is the bit count rounded up to whole bytes, and every trailing pad
 bit is zero. `agent/bitmap.go` states that convention for the whole
 agent (`dnagent.md` SH22); the reply itself is built by `agent/cnagent/thinbm.go`'s
 own bit helpers, which is also where the inversion above happens.
+Before the snapshot, the read is refused with FAILED_PRECONDITION, naming
+the device, while a namespace device of the cntlr's pool on this node maps
+the volume: a device whose name parses as an ns-dev of the pool, of any
+namespace id, and whose live table names, as an argument of any target,
+the volume's raid0 or a device whose own table names the raid0, as a
+clone's dm-clone does with its destination. Such a device passes its
+namespace's IO to the volume until the converge takes it away, a deleted
+namespace's or one pointed at another volume among them, which no request
+names any more and which only the node's own tables show. A parked ns-dev
+maps the volume's dm-error and is no refusal; one at the read-only level
+takes no write and is refused all the same, as the gateway asks for every
+namespace parked; a transfer device is no ns-dev and is not checked
+(`architecture.md`, Known limits). One listing of the node's tables, then
+one of its devices, give the answer, so a device of the first is in the
+second unless it went in between. An unsure answer refuses the read too,
+as it must not read as "nothing serves": a listing that may lack a device,
+a raid0 or a device over it with no device number, and a raid0 in the
+tables and gone from the devices. A listing that fails ends the RPC with
+an Internal status naming it. A volume with no raid0 on the node has
+nothing over it. The read holds the cntlr's lock (CN1), so no converge of
+the cntlr runs between this check and the snapshot.
 
 CN27. `GetLegBm`: locate the leg's group and slice in the stored
 `id_to_slice`. A meta-group leg replies all-zero (nothing skippable): the

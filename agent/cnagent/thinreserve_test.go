@@ -42,7 +42,7 @@ func TestAReserveThatDidNotAnswerIsReleased(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			srv, node := newTestServer(t)
-			syncupBoth(t, srv, reqOpts{revision: 2, primary: true})
+			syncupBoth(t, srv, reqOpts{revision: 2, primary: true, suspended: true})
 			scriptDump(srv, node, caseBDump)
 			pool := poolName(srv)
 			reserve := "dmsetup message " + pool + " 0 reserve_metadata_snap"

@@ -4899,8 +4899,12 @@ Safe steps:
 1. The volume must not take writes: the gateway refuses the read with the
    error code FAILED_PRECONDITION while a namespace on the volume is not
    parked in the stored state, or while the primary does not report it
-   parked. A transfer made with `--auto-suspend` counts as a park. A volume
-   no namespace exports, such as a snapshot, is read at once.
+   parked. A transfer made with `--auto-suspend` counts as a park. The
+   primary's agent refuses it too, and the gateway answers ABORTED, while
+   a device on the primary's node still passes a namespace's IO to the
+   volume, as it does for a namespace just deleted or pointed at another
+   volume until the primary has applied that change. A volume no
+   namespace exports, such as a snapshot, is read at once.
 2. For each slice of the source pool, from 0 to its slice count less one:
    `dnvctl --sp <source> td get-bm --name <origin> --slice-idx <slice>`. It
    prints `{"bitmap_hex": "<hex>", "byte_cnt": <bytes>, "slice_idx":
@@ -4948,11 +4952,20 @@ refusal that says a namespace is not parked on the primary, or that the
 namespaces are not proven parked, comes while the primary's report still
 lags the park, or while the primary's controller node does not answer:
 read again a few seconds later, and ask for help when it lasts a minute.
+A refusal with the error code ABORTED that says a namespace device still
+maps the volume names the device on the primary's node that still passes
+a namespace's IO to the volume: it comes while the primary has not yet
+applied a namespace's park, delete or move. One that says a device listing
+may lack a device, or that a device has no device number, comes while the
+node's devices change under the read. Read again a few seconds later, and
+ask for help when it lasts a minute.
 
 Tested: the e2e suite's ops case reads a snapshot's list at once and is
 refused for the origin while its namespace serves; its copy case reads the
 list of a parked origin, and gives one part of it, for each slice that one
-region of the destination spans. The gateway
+region of the destination spans. The cn agent suite shows the agent
+refuse the read while a device on its node passes a namespace's IO to the
+volume, and answer it once the namespace is parked. The gateway
 suite gives parts in windows with `--offset` through its own test driver,
 over fake agents. Windows through `dnvctl` are not tested.
 

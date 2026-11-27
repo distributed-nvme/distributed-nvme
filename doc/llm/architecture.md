@@ -5218,7 +5218,14 @@ caller reads again, and a park the desired state has since lifted was
 refused already in the STM. A transfer's own export is not checked: a
 host its `allowed_hosts` admit can still write the origin through it
 (Known limits). Then it calls the agent's
-`GetThinDeviceBm`, which computes from a
+`GetThinDeviceBm`. The agent refuses the read while a namespace device
+of the pool on its node still maps the volume, straight or through a
+clone's dm-clone, and the gateway answers that refusal `ABORTED`: a
+namespace just deleted, or pointed at another volume, is gone from etcd
+while the primary serves it until its next converge, so the gateway's
+check cannot see it, and for a volume with no namespace in etcd the
+gateway reads no report at all (`cnagent.md` CN26). Otherwise the agent
+computes from a
 dm-thin metadata snapshot of that slice's pool the mapping bitmap of the
 td's thin volume in that slice (`cnagent.md` CN25, CN26): bit k, for block
 `start_block` plus k of `block_size` bytes, is **1 iff the block is
@@ -9891,8 +9898,9 @@ document and only pointed to here.
   subsystem to the hosts its `allowed_hosts` name (Transfers), meant to be
   the destination pool's controller nodes, whose dm-clone only reads it. A
   host listed there by mistake can write the volume after the source
-  bitmap was read, as the gateway checks the pool's namespaces and not the
-  transfer's own export (Bitmap reads), and the clone then serves zeros
+  bitmap was read, as the gateway and the agent check the pool's
+  namespaces and not the transfer's own export (Bitmap reads), and the
+  clone then serves zeros
   where that host wrote a block the bitmap marked never written, and the
   old bytes where it wrote a region the copy had already read. Nothing
   checks what `allowed_hosts` name.

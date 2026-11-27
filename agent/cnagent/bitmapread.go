@@ -2,10 +2,12 @@ package cnagent
 
 import (
 	"context"
+	"sort"
 
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 
+	"github.com/distributed-nvme/distributed-nvme/common"
 	"github.com/distributed-nvme/distributed-nvme/pb"
 )
 
@@ -14,7 +16,8 @@ import (
 // leg (dnv-worker.md BM7) — from a dm-thin metadata snapshot (CN25-CN27). They carry no AgentReply, so every failure —
 // unknown cntlr, non-primary role, a missing pool, a failing command — ends
 // the RPC with an Internal status naming the step (architecture.md, Common
-// agent rules). A pool whose
+// agent rules), but CN26's refusals, an unsure answer among them, which are
+// FailedPrecondition. A pool whose
 // metadata outgrows what thin_dump emits inside CmdSoftTimeout fails the RPC
 // and the caller falls back to a full copy: a bitmap read when
 // architecture.md, Clones or Migration, says is an optimization, never a
@@ -92,6 +95,11 @@ func (s *CnAgentServer) GetThinDeviceBm(
 		return nil, err
 	}
 
+	// CN26: no read while a namespace device of the node still maps the
+	// volume, as its namespace's IO still reaches it.
+	if err := s.volumeServed(ctx, plan, tp); err != nil {
+		return nil, err
+	}
 	sb, err := s.dumpThinMetadata(ctx, sp)
 	if err != nil {
 		return nil, status.Errorf(codes.Internal,
@@ -104,6 +112,103 @@ func (s *CnAgentServer) GetThinDeviceBm(
 	return &pb.GetThinDeviceBmReply{
 		Bitmap: thinDeviceBitmap(extents, start, count),
 	}, nil
+}
+
+// volumeServed is CN26's refusal of a volume's bitmap read while a
+// namespace device of the cntlr's pool on this node maps the volume: a
+// device whose name parses as an ns-dev of the pool (any namespace id) and
+// whose live table names, as an argument of any target, the volume's raid0
+// or a device whose own table names the raid0, as a clone's dm-clone does
+// with its destination. Such a device passes its namespace's IO to the
+// volume until the converge takes it away, a deleted namespace's or one
+// pointed at another volume among them, which no request names any more; a
+// parked one maps the volume's dm-error and is no refusal. One at the
+// read-only level takes no write and is refused all the same, as the
+// gateway asks for every namespace parked. The tables are listed first and
+// the devices second, so a device of the table listing is in the device
+// listing unless it went in between; a listing that may lack a device, a
+// raid0 or a device over it with no number, and a raid0 in the tables and
+// gone from the devices are unsure answers and refuse the read, never
+// reading as "nothing serves". A volume with no raid0 on the node has
+// nothing over it. Every refusal is FailedPrecondition; a listing that
+// fails is Internal, naming the step.
+func (s *CnAgentServer) volumeServed(
+	ctx context.Context,
+	plan *cntlrPlan,
+	tp *tdPlan,
+) error {
+	refuse := func(format string, args ...any) error {
+		return status.Errorf(codes.FailedPrecondition,
+			"volume %d: "+format, append([]any{tp.tdId}, args...)...)
+	}
+	tables, err := s.dm.ListTables(ctx)
+	if err != nil {
+		return status.Errorf(codes.Internal,
+			"listing the node's dm tables (CN26): %v", err)
+	}
+	devs, err := s.dm.ListInfo(ctx)
+	if err != nil {
+		return status.Errorf(codes.Internal,
+			"listing the node's dm devices (CN26): %v", err)
+	}
+	if tables.Partial || devs.Partial {
+		return refuse("a device listing may lack a device; read again")
+	}
+	raid0 := devs.Devs[tp.raid0Name]
+	if raid0 == nil {
+		if _, listed := tables.Tables[tp.raid0Name]; listed {
+			return refuse("raid0 %s went during the listings; read again",
+				tp.raid0Name)
+		}
+		return nil
+	}
+	if raid0.DevNo == "" {
+		return refuse("raid0 %s has no device number; read again",
+			tp.raid0Name)
+	}
+	maps := func(targets []common.DmTarget, devNos map[string]bool) bool {
+		for _, target := range targets {
+			for _, arg := range target.Args {
+				if devNos[arg] {
+					return true
+				}
+			}
+		}
+		return false
+	}
+	raid0Only := map[string]bool{raid0.DevNo: true}
+	over := map[string]bool{raid0.DevNo: true}
+	names := make([]string, 0, len(tables.Tables))
+	for name := range tables.Tables {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	for _, name := range names {
+		if !maps(tables.Tables[name], raid0Only) {
+			continue
+		}
+		info := devs.Devs[name]
+		if info == nil || info.DevNo == "" {
+			return refuse("device %s maps raid0 %s and has no device "+
+				"number; read again", name, tp.raid0Name)
+		}
+		over[info.DevNo] = true
+	}
+	for _, name := range names {
+		dn, ok := common.ParseDmName(name)
+		if !ok || dn.Kind != common.DmKindCnNsDev ||
+			dn.ClusterId != plan.clusterId || dn.NodeId != plan.cnId ||
+			len(dn.Ids) == 0 || dn.Ids[0] != plan.spId {
+			continue
+		}
+		if maps(tables.Tables[name], over) {
+			return refuse("namespace device %s still maps raid0 %s, so "+
+				"its namespace's IO still reaches the volume; read again "+
+				"once the primary's converge has taken it away or parked it",
+				name, tp.raid0Name)
+		}
+	}
+	return nil
 }
 
 func (s *CnAgentServer) GetLegBm(

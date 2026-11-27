@@ -157,12 +157,13 @@ can skip the blocks a volume never wrote. For a migration the worker
 reads the leg's list of written blocks itself, once the old side takes no
 more writes, and hands it to the new side in pieces of a fixed size. For a
 clone the caller reads the source volume's list and hands it over in
-pieces; the gateway answers the read only while every namespace on the
-volume that etcd holds is set aside on the primary, that is, ANA
-inaccessible with its device serving no IO (section 5.3 has a namespace
-that etcd no longer holds), and only in pieces that each cover a multiple of
-eight blocks but the last, so that they join end to end; and dnvctl
-always sends a piece's position.
+pieces; the read is answered only while every namespace on the volume is
+set aside on the primary, that is, ANA inaccessible with its device
+serving no IO: the gateway checks the namespaces etcd holds, and the
+primary's agent checks the devices of its own node, which also shows a
+namespace just deleted or pointed at another volume. The pieces each cover
+a multiple of eight blocks but the last, so that they join end to end; and
+dnvctl always sends a piece's position.
 
 - **A host a transfer lets in can write the source while a clone copies
   it.** A transfer exports the source volume to the hosts you list, meant
@@ -741,19 +742,6 @@ The entries:
 
 ### 5.3 Transfers, clones and migrations
 
-- **A volume's written blocks can be read while a namespace that etcd no
-  longer holds still serves it.** Silent. `dnvctl td get-bm` reads a
-  volume's list of written blocks, and the gateway answers only while
-  every namespace on the volume is set aside on the primary. It takes
-  those namespaces from etcd. A namespace just deleted, or pointed at
-  another volume, is gone from etcd while the primary still serves it
-  until its next converge, and for a volume with no namespace in etcd the
-  gateway asks the primary nothing. A host can then still write the volume
-  after the list was read. A block first written then is marked never
-  written, and a clone that uses the list reads zeros there. The window is
-  the usual delay before the primary applies a change, and longer while
-  the worker is slow or down. State: fix decided. Read from dnv's code;
-  not seen in the lab.
 - **A host's discard can make a migration skip a block.** Silent. A
   discard is a host's message that a range of a volume holds no data any
   more, as `fstrim` sends. The thin pool passes a host's discard down to

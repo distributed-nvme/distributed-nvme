@@ -1918,7 +1918,9 @@ gateway call: the worker reads it from the agent (`dnv-worker.md` BM7).
   (`architecture.md`, Bitmap reads). Then
   `GetThinDeviceBm` with the cluster id, `cn_id`,
   `sp_id`, `cntlr_id`, `td_id`, `slice_idx`, `start_block` and `block_cnt`
-  (a zero `block_cnt` reads to the end); a failure is `ABORTED`. Reply the
+  (a zero `block_cnt` reads to the end); a failure is `ABORTED`, the
+  agent's refusal while a namespace device of its node still maps the
+  volume among them (`cnagent.md` CN26). Reply the
   bitmap **verbatim** — the wire convention is produced by the agent, and
   the gateway never touches bits (GW14).
 

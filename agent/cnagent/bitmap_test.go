@@ -9,6 +9,9 @@ import (
 	"strings"
 	"testing"
 
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
+
 	"github.com/distributed-nvme/distributed-nvme/common"
 	"github.com/distributed-nvme/distributed-nvme/pb"
 )
@@ -86,7 +89,7 @@ func legBm(
 
 func TestThinDeviceBitmap(t *testing.T) {
 	srv, node := newTestServer(t)
-	syncupBoth(t, srv, reqOpts{revision: 2, primary: true})
+	syncupBoth(t, srv, reqOpts{revision: 2, primary: true, suspended: true})
 	scriptDump(srv, node, caseBDump)
 
 	// Bit k = 1 iff virtual block start+k is unmapped — the single wire
@@ -125,7 +128,7 @@ func TestThinDeviceBitmap(t *testing.T) {
 // until some later reserve on the pool meets it, which may never come.
 func TestThinDumpGoesThroughAFile(t *testing.T) {
 	srv, node := newTestServer(t)
-	syncupBoth(t, srv, reqOpts{revision: 2, primary: true})
+	syncupBoth(t, srv, reqOpts{revision: 2, primary: true, suspended: true})
 	scriptDump(srv, node, caseBDump)
 
 	node.Reset()
@@ -223,7 +226,7 @@ func TestThinDumpGoesThroughAFile(t *testing.T) {
 // it.
 func TestThinDumpDirIsPrivate(t *testing.T) {
 	srv, node := newTestServer(t)
-	syncupBoth(t, srv, reqOpts{revision: 2, primary: true})
+	syncupBoth(t, srv, reqOpts{revision: 2, primary: true, suspended: true})
 	scriptDump(srv, node, caseBDump)
 	dir := "/run/dnv-thin-dump"
 	pool := poolName(srv)
@@ -275,7 +278,7 @@ func TestThinDeviceBitmapSharedSubtree(t *testing.T) {
 		{TdId: testTd, DevId: 1, Size: testTdSize, Created: true},
 		{TdId: testSnapTd, DevId: 2, OriId: 1, Size: testTdSize},
 	}
-	syncupBoth(t, srv, reqOpts{revision: 2, primary: true, tds: tds})
+	syncupBoth(t, srv, reqOpts{revision: 2, primary: true, suspended: true, tds: tds})
 	scriptDump(srv, node, caseBSharedDump)
 
 	if got := tdBm(t, srv, 0, 0); got != "1effffffffffffff" {
@@ -328,7 +331,7 @@ func TestBitmapReadRejectsNonPrimary(t *testing.T) {
 // all-ones bitmap — "skip the whole volume".
 func TestBitmapReadMissingDevice(t *testing.T) {
 	srv, node := newTestServer(t)
-	syncupBoth(t, srv, reqOpts{revision: 2, primary: true})
+	syncupBoth(t, srv, reqOpts{revision: 2, primary: true, suspended: true})
 	scriptDump(srv, node, `<superblock uuid="" time="0" transaction="0" `+
 		`version="2" data_block_size="2048" nr_data_blocks="0">
 </superblock>
@@ -337,8 +340,203 @@ func TestBitmapReadMissingDevice(t *testing.T) {
 		&pb.GetThinDeviceBmRequest{
 			ClusterId: testCluster, CnId: testCn, SpId: testSp,
 			CntlrId: testCntlr, TdId: testTd, SliceIdx: 0,
-		}); err == nil {
-		t.Fatalf("a dump without the device must fail the RPC")
+		}); status.Code(err) != codes.Internal {
+		t.Fatalf("GetThinDeviceBm = %v, want the dump's Internal error", err)
+	}
+}
+
+// TestThinDeviceBitmapRefusedWhileANamespaceServes is CN26's refusal: the
+// read of a volume's written blocks is refused, before any snapshot is
+// reserved, while a namespace device of the cntlr's pool on the node maps
+// the volume, straight over its raid0 or over a device whose table names
+// the raid0, as a clone's dm-clone does with its destination in its second
+// argument, and one of a namespace the request no longer names as well. It
+// is answered once the namespace is parked on the volume's dm-error, or
+// once no such device is left. A device over the raid0 that is no
+// namespace device, a transfer device of the pool among them, and a
+// namespace device of another pool, are no refusal. An unsure answer is
+// one: a listing that may lack a device, a raid0 with no device number,
+// or a device over the raid0 with none; and a listing that does not answer
+// is Internal.
+func TestThinDeviceBitmapRefusedWhileANamespaceServes(t *testing.T) {
+	read := func(srv *CnAgentServer) error {
+		_, err := srv.GetThinDeviceBm(context.Background(),
+			&pb.GetThinDeviceBmRequest{
+				ClusterId: testCluster, CnId: testCn, SpId: testSp,
+				CntlrId: testCntlr, TdId: testTd, SliceIdx: 0,
+			})
+		return err
+	}
+	refused := func(t *testing.T, srv *CnAgentServer, node *fakeNode,
+		want string) {
+		t.Helper()
+		node.Reset()
+		err := read(srv)
+		if status.Code(err) != codes.FailedPrecondition ||
+			!strings.Contains(err.Error(), want) {
+			t.Fatalf("GetThinDeviceBm = %v, want FailedPrecondition "+
+				"naming %q", err, want)
+		}
+		assertNoCall(t, node, "reserve_metadata_snap")
+	}
+	answered := func(t *testing.T, srv *CnAgentServer, node *fakeNode) {
+		t.Helper()
+		node.Reset()
+		if err := read(srv); err != nil {
+			t.Fatalf("GetThinDeviceBm = %v, want an answer", err)
+		}
+	}
+	// strayNsDev is the name of the pool's ns-dev of namespace nsId, which
+	// the request does not hold.
+	strayNsDev := func(srv *CnAgentServer, spId, nsId uint64) string {
+		return srv.nf.CnNsDevName(testCluster, testCn, spId, nsId)
+	}
+
+	t.Run("the request's namespace, serving and then parked",
+		func(t *testing.T) {
+			srv, node := newTestServer(t)
+			syncupBoth(t, srv, reqOpts{revision: 2, primary: true})
+			scriptDump(srv, node, caseBDump)
+			refused(t, srv, node, nsDevName(srv, testNs))
+			if _, err := srv.SyncupCntlr(context.Background(),
+				cntlrReq(reqOpts{revision: 3, primary: true,
+					suspended: true})); err != nil {
+				t.Fatalf("park: %v", err)
+			}
+			answered(t, srv, node)
+		})
+
+	for _, tc := range []struct {
+		name   string
+		plant  func(node *fakeNode, srv *CnAgentServer, raid0No string) string
+		refuse bool
+	}{
+		{"an ns-dev the request no longer names, over the raid0",
+			func(node *fakeNode, srv *CnAgentServer, raid0No string) string {
+				name := strayNsDev(srv, testSp, 0x77)
+				plantDm(node, name, "0 2048 linear "+raid0No+" 0")
+				return name
+			}, true},
+		{"an ns-dev over a dm-clone whose destination is the raid0",
+			func(node *fakeNode, srv *CnAgentServer, raid0No string) string {
+				cloneNo := plantDm(node, "a-clone",
+					"0 2048 clone 8:0 "+raid0No+" 8:16 8")
+				name := strayNsDev(srv, testSp, 0x78)
+				plantDm(node, name, "0 2048 linear "+cloneNo+" 0")
+				return name
+			}, true},
+		{"an ns-dev under dm-flakey over the raid0",
+			func(node *fakeNode, srv *CnAgentServer, raid0No string) string {
+				name := strayNsDev(srv, testSp, 0x79)
+				plantDm(node, name, "0 2048 flakey "+raid0No+
+					" 0 0 1 1 error_writes")
+				return name
+			}, true},
+		{"a device of the pool over the raid0 that is no ns-dev",
+			func(node *fakeNode, srv *CnAgentServer, raid0No string) string {
+				plantDm(node, srv.nf.CnXferFinalName(testCluster, testCn,
+					testSp, 0x7b), "0 2048 linear "+raid0No+" 0")
+				plantDm(node, "not-dnv", "0 2048 linear "+raid0No+" 0")
+				return ""
+			}, false},
+		{"an ns-dev of another pool over the raid0",
+			func(node *fakeNode, srv *CnAgentServer, raid0No string) string {
+				plantDm(node, strayNsDev(srv, testSp+1, 0x7a),
+					"0 2048 linear "+raid0No+" 0")
+				return ""
+			}, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			srv, node := newTestServer(t)
+			syncupBoth(t, srv, reqOpts{revision: 2, primary: true,
+				suspended: true})
+			scriptDump(srv, node, caseBDump)
+			raid0No := node.devNo["/dev/mapper/"+raid0Name(srv, testTd)]
+			if raid0No == "" {
+				t.Fatalf("precondition: no raid0")
+			}
+			answered(t, srv, node)
+			name := tc.plant(node, srv, raid0No)
+			if !tc.refuse {
+				answered(t, srv, node)
+				return
+			}
+			refused(t, srv, node, name)
+			node.mu.Lock()
+			delete(node.dms, name)
+			node.mu.Unlock()
+			answered(t, srv, node)
+		})
+	}
+
+	// The unsure answers refuse the read, and a listing that fails is
+	// Internal; each case starts parked, where the read is answered.
+	for _, tc := range []struct {
+		name  string
+		setup func(t *testing.T, srv *CnAgentServer, node *fakeNode)
+		code  codes.Code
+		want  string
+	}{
+		{"a table listing that may lack a device",
+			func(t *testing.T, srv *CnAgentServer, node *fakeNode) {
+				plantDm(node, "unrelated", "0 2048 linear 8:0 0")
+				node.mu.Lock()
+				node.tableOmit["unrelated"] = true
+				node.mu.Unlock()
+			}, codes.FailedPrecondition, "may lack"},
+		{"a device listing that may lack a device",
+			func(t *testing.T, srv *CnAgentServer, node *fakeNode) {
+				plantDm(node, "unrelated", "0 2048 linear 8:0 0")
+				node.mu.Lock()
+				node.infoOmit["unrelated"] = true
+				node.mu.Unlock()
+			}, codes.FailedPrecondition, "may lack"},
+		{"a raid0 with no device number",
+			func(t *testing.T, srv *CnAgentServer, node *fakeNode) {
+				node.mu.Lock()
+				delete(node.devNo, "/dev/mapper/"+raid0Name(srv, testTd))
+				node.mu.Unlock()
+			}, codes.FailedPrecondition, "no device number"},
+		{"a dm-clone over the raid0 with no device number, an ns-dev over it",
+			func(t *testing.T, srv *CnAgentServer, node *fakeNode) {
+				raid0No := node.devNo["/dev/mapper/"+raid0Name(srv, testTd)]
+				cloneNo := plantDm(node, "a-clone",
+					"0 2048 clone 8:0 "+raid0No+" 8:16 8")
+				plantDm(node, strayNsDev(srv, testSp, 0x7c),
+					"0 2048 linear "+cloneNo+" 0")
+				node.mu.Lock()
+				delete(node.devNo, "/dev/mapper/a-clone")
+				node.mu.Unlock()
+			}, codes.FailedPrecondition, "a-clone maps raid0"},
+		{"a table listing that does not answer",
+			func(t *testing.T, srv *CnAgentServer, node *fakeNode) {
+				node.mu.Lock()
+				node.killCmdNoEffect["dmsetup table --concise"] = true
+				node.mu.Unlock()
+			}, codes.Internal, "dm tables"},
+		{"a device listing that does not answer",
+			func(t *testing.T, srv *CnAgentServer, node *fakeNode) {
+				node.mu.Lock()
+				node.killCmdNoEffect["-o name,major,minor,attr"] = true
+				node.mu.Unlock()
+			}, codes.Internal, "dm devices"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			srv, node := newTestServer(t)
+			syncupBoth(t, srv, reqOpts{revision: 2, primary: true,
+				suspended: true})
+			scriptDump(srv, node, caseBDump)
+			answered(t, srv, node)
+			tc.setup(t, srv, node)
+			node.Reset()
+			err := read(srv)
+			if status.Code(err) != tc.code ||
+				!strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("GetThinDeviceBm = %v, want %v naming %q", err,
+					tc.code, tc.want)
+			}
+			assertNoCall(t, node, "reserve_metadata_snap")
+		})
 	}
 }
 
@@ -346,7 +544,7 @@ func TestBitmapReadMissingDevice(t *testing.T) {
 // is released and re-taken (CN25).
 func TestReserveRetriesOnceWhenHeld(t *testing.T) {
 	srv, node := newTestServer(t)
-	syncupBoth(t, srv, reqOpts{revision: 2, primary: true})
+	syncupBoth(t, srv, reqOpts{revision: 2, primary: true, suspended: true})
 	scriptDump(srv, node, caseBDump)
 	node.dms[poolName(srv)].heldRoot = true
 
@@ -383,7 +581,7 @@ func TestReserveRetryReadsTheErrno(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			srv, node := newTestServer(t)
-			syncupBoth(t, srv, reqOpts{revision: 2, primary: true})
+			syncupBoth(t, srv, reqOpts{revision: 2, primary: true, suspended: true})
 			scriptDump(srv, node, caseBDump)
 			pool := poolName(srv)
 

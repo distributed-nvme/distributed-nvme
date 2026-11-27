@@ -1024,7 +1024,11 @@ states OK.
 
 **thinbm** proves the bitmap reads exact over known writes, a meta leg all zero
 (`cnagent.md` CN25 to CN27; `architecture.md`, raid0 bitmap math), and the
-snapshot: sent with the only `td_list` the gateway can produce, origin created
+snapshot. A read of a volume's written blocks is refused, naming the
+namespace's device, while that device maps the volume, and is answered
+once the namespace is parked (CN26): the origin's and the snapshot's
+namespaces are parked around their reads, and come back parked in the
+rebuild below. The snapshot, sent with the only `td_list` the gateway can produce, origin created
 and snapshot not (`architecture.md`, Thin devices), its message sits inside the
 origin's quiesce (`cnagent.md` CN14) and it holds the origin's blocks, no later
 write. With CN1's writes to DN1 throttled to `THINBM_HOLD_RATE`, the host
@@ -1225,7 +1229,10 @@ the stage's trace id (`cnagent.md` CN10), the order read from them all. The
 half the source wrote reads back intact through the destination, which then
 takes a write, while the half it never wrote stays unmapped and zero there, the
 destination starting empty (`architecture.md`, [D3]); and at teardown both CNs
-pass smoke's per-CN check.
+pass smoke's per-CN check. Each read of a volume's written blocks, the
+source's that the suite pushes and the destination's that shows the skip,
+comes while the volume's namespace is parked, by the transfer and by a park
+around the read, as the read needs (`cnagent.md` CN26).
 
 **restart** proves persistence and an idempotent reconcile (`cnagent.md` CN2;
 `dnagent.md` SH1, SH4 to SH6): both cn agents restart over untouched kernel
