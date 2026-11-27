@@ -287,7 +287,13 @@ func (s *CnAgentServer) stepSubsysList(
 	budget *agent.WaitBudget,
 	conf agent.SubsysConf,
 ) listStep {
-	step := listStep{err: s.nvmet.EnsureSubsystem(ctx, conf)}
+	oldStays, err := s.ensureSubsysAnew(ctx, conf)
+	step := listStep{err: err}
+	if oldStays {
+		// An old kernel subsystem that could not go is not safe, whatever
+		// hosts it admits: its namespaces are not the ones the pass builds.
+		return step
+	}
 	if step.err != nil && !s.admitsOnlyDesired(ctx, conf) {
 		return step
 	}
@@ -295,6 +301,87 @@ func (s *CnAgentServer) stepSubsysList(
 	step.safe = step.cut.held
 	return step
 }
+
+// ensureSubsysAnew is the list step's EnsureSubsystem, which builds the
+// subsystem anew when nvmet refuses its serial over another live one
+// (agent.SerialFrozenError; CN16, A subsystem made again): the kernel
+// subsystem is then an older one of the NQN, made by a subsystem record
+// deleted since, which a host has identified. removeOldSubsys moves its
+// namespaces inaccessible and removes it, and EnsureSubsystem builds it
+// again in the same pass; the namespaces and the port link of the new
+// subsystem are built by the pass as usual. A removal that fails is the
+// step's error, and oldStays says the old subsystem stays, which makes the
+// subsystem not safe in the pass. Reason: nvmet takes no new serial on a
+// subsystem a host has identified, so without the removal the subsystem
+// would never be built again; and an old namespace left under it may stand
+// over a device the sweep parked, which no ANA move may make serve.
+func (s *CnAgentServer) ensureSubsysAnew(
+	ctx context.Context,
+	conf agent.SubsysConf,
+) (oldStays bool, err error) {
+	err = s.nvmet.EnsureSubsystem(ctx, conf)
+	var frozen *agent.SerialFrozenError
+	if !errors.As(err, &frozen) {
+		return false, err
+	}
+	nsIdxs, _, lerr := s.nvmet.ListNamespaces(ctx, conf.Nqn)
+	if lerr != nil {
+		return true, fmt.Errorf("%v, and listing its namespaces failed: %w",
+			err, lerr)
+	}
+	if rerr := s.removeOldSubsys(ctx, conf.Nqn, err.Error(),
+		nsIdxs); rerr != nil {
+		return true, rerr
+	}
+	return false, s.nvmet.EnsureSubsystem(ctx, conf)
+}
+
+// removeOldSubsys removes a kernel subsystem the list step cannot make this
+// cntlr's (CN16): one over another pool's ns-dev (replaceForeignSubsys) or
+// one whose serial nvmet no longer takes (ensureSubsysAnew). Every
+// namespace of nsIdxs, the ones the kernel lists, moves inaccessible and
+// reads back so (moveDark), then the subsystem goes (Nvmet.RemoveSubsystem:
+// port link, namespaces, host links, the directory), which ends its hosts'
+// connections. A Warn record `nvmet subsystem replaced` names the NQN and
+// the cause (log.md, A subsystem replaced). A namespace that does not read
+// back inaccessible, one over a dm device that reads suspended or does not
+// read (disableSafe), or a removal that fails, is the error, and the
+// subsystem stays. Reason: the move first makes a host queue rather than
+// read errors; the removal's disable of a namespace waits, unkillable, for
+// its requests in flight, which a suspended device never completes.
+func (s *CnAgentServer) removeOldSubsys(
+	ctx context.Context,
+	nqn string,
+	cause string,
+	nsIdxs []int,
+) error {
+	slog.WarnContext(ctx, msgSubsysReplaced, slog.String("nqn", nqn),
+		slog.String("cause", cause))
+	for _, nsIdx := range nsIdxs {
+		if !s.moveDark(ctx, nqn, nsIdx) {
+			return fmt.Errorf("%s, and namespace %s did not move to "+
+				"inaccessible, so the subsystem stays", cause,
+				nsResName(nqn, nsIdx))
+		}
+		path, ok, err := s.nvmet.NsDevicePath(ctx, nqn, nsIdx)
+		if err == nil && ok {
+			err = s.disableSafe(ctx, path)
+		}
+		if err != nil {
+			return fmt.Errorf("%s, and namespace %s cannot be disabled, "+
+				"so the subsystem stays: %w", cause, nsResName(nqn, nsIdx),
+				err)
+		}
+	}
+	if err := s.nvmet.RemoveSubsystem(ctx, s.port.PortId, nqn); err != nil {
+		return fmt.Errorf("%s, and removing the subsystem failed: %w",
+			cause, err)
+	}
+	return nil
+}
+
+// msgSubsysReplaced is the Warn record of removeOldSubsys.
+const msgSubsysReplaced = "nvmet subsystem replaced"
 
 // admitsOnlyDesired reports whether a strict read finds the kernel admitting
 // no host to the subsystem off its desired list (Nvmet.AdmitsOnly); a read

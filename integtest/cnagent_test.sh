@@ -300,7 +300,7 @@ GCUT_REPORTS=()
 GCUT_FO=""
 
 CASES=(nodecheck smoke redund repair teardown thinbm torn discard isolation
-	clone_xfer restart pause groupcut thinrepair sharednqn)
+	clone_xfer restart pause groupcut thinrepair sharednqn ssagain)
 
 # ---------------------------------------------------------------------------
 # Logging, assertions, failure handling
@@ -14841,6 +14841,96 @@ case_sharednqn() {
 	cn_drop "$cn"
 	dn_drop 1
 	dn_drop 2
+}
+
+# case_ssagain proves cnagent.md CN16, A subsystem made again, on one node:
+# pool A, its S shape on DN1, builds a subsystem on CN1, and the host
+# connects and writes a pattern through it, so nvmet takes no new serial for
+# it. The subsystem is then deleted and created again under its NQN, both
+# reaching the cntlr as one change: a new ss_id and serial, and a new
+# namespace at the same index over the same volume. The converge replaces
+# the kernel subsystem (its record names the NQN), the new serial and the
+# new namespace device are live, and the host, once connected again, reads
+# its pattern.
+case_ssagain() {
+	CASE=ssagain
+	DIAG_CNTLRS=()
+	SIDE_PROVISIONED=()
+	local sp=0x463 cntlr=0x1 cn=1 hv=2 ss2=0x2a ns2=0x2b
+	local nqn="$NQN_IT_PREFIX:ag:vol1"
+	local uuid=77777777-7777-4777-8777-777777777777
+	local req="$WORK/req-ssagain.json" out dev want rev rec
+	local subsys="/sys/kernel/config/nvmet/subsystems/$nqn"
+	diag_cntlr "$cn" "$sp" "$cntlr"
+	dev=$(host_dev "$uuid")
+
+	stage dn "the S shape on DN1 for CN1"
+	dn_pointers 1 "$sp:$S_MLEG:$S_MSIDE" "$sp:$S_DLEG:$S_DSIDE"
+	dn_side 1 "$sp" "$S_MLEG" "$S_MSIDE" 1 "$NONE_MGRP_ZERO_BYTES" \
+		"${CNID[$cn]}"
+	dn_side 1 "$sp" "$S_DLEG" "$S_DSIDE" 2 "$NONE_DGRP_ZERO_BYTES" \
+		"${CNID[$cn]}"
+
+	stage build "the subsystem on CN1; the host connects and writes through it"
+	bump_cn_sync "$cn"
+	out=$(cnctl "$cn" syncup-cn --revision "${CNREV[$cn]}" --cntlr "$sp:$cntlr")
+	assert_cn_info_ok "$out" "ssagain syncup-cn"
+	req_none "$req" "$cn" 1 "$sp" "$cntlr" 0 "$nqn" "$uuid" false
+	bump_cn_rev "$cn"
+	out=$(cn_syncup_cntlr "$cn" "$req")
+	assert_map_ok "$out" ss_id_to_subsystem "$S_SS" "ssagain build"
+	assert_map_ok "$out" ns_id_to_namespace "$S_NS" "ssagain build"
+	host_connect "$hv" "$cn" "$nqn"
+	helper "$hv" "wait_dev '$dev' 20" || die "no device node $dev on vm$hv"
+	host_wait_ana "$hv" "$nqn" "$cn" optimized 20
+	make_pattern "$hv" "$WORK/pattern-ag.bin" 4
+	want=$(sha_range "$hv" "$WORK/pattern-ag.bin" 4)
+	write_range "$hv" "$WORK/pattern-ag.bin" "$dev" 4
+	assert_eq "$(sshv "$cn" "cat $subsys/attr_serial" | tr -d ' ')" \
+		"$(hex16 "$S_SS")" "ssagain: the first serial"
+
+	stage again "the subsystem deleted and created again under its NQN: the converge replaces the kernel subsystem"
+	req_set "$req" ".nqn_to_subsystem[\"$nqn\"].ss_id = \"$(d16 "$ss2")\"
+		| .nqn_to_subsystem[\"$nqn\"].serial = \"$(hex16 "$ss2")\"
+		| .nqn_to_subsystem[\"$nqn\"].ns_list[0].ns_id = \"$(d16 "$ns2")\""
+	bump_cn_rev "$cn"
+	rev=${CNREV[$cn]}
+	# The sweep may name the old namespace device leftover until its
+	# removal holds (cnagent.md CN21), so the request is re-sent until a
+	# check round is clean.
+	cn_syncup_cntlr "$cn" "$req" --expect-code 4 >/dev/null 2>&1 || true
+	resync_until_clean "$cn" "$sp" "$cntlr" "$rev" "$req" 30 "ssagain resync"
+	out=$(cn_syncup_cntlr "$cn" "$req")
+	assert_map_ok "$out" ss_id_to_subsystem "$ss2" "ssagain again"
+	assert_map_ok "$out" ns_id_to_namespace "$ns2" "ssagain again"
+	assert_eq "$(sshv "$cn" "cat $subsys/attr_serial" | tr -d ' ')" \
+		"$(hex16 "$ss2")" "ssagain: the serial of the subsystem made again"
+	assert_eq "$(sshv "$cn" "cat $subsys/namespaces/1/device_path" | tr -d ' ')" \
+		"/dev/mapper/$(cn_dm_name c6 "$cn" "$sp" "$ns2")" \
+		"ssagain: the namespace's device is the new namespace's"
+	rec=$(helper "$cn" "cn_msg it-ssagain-again 'nvmet subsystem replaced'") ||
+		die "ssagain: reading the cn agent's log failed"
+	case "$rec" in
+	*"\"nqn\":\"$nqn\""*) ;;
+	*) die "ssagain: no record 'nvmet subsystem replaced' for $nqn: '$rec'" ;;
+	esac
+
+	stage host "the host connects again and reads its pattern"
+	host_disconnect "$hv" "$nqn"
+	host_connect "$hv" "$cn" "$nqn"
+	helper "$hv" "wait_dev '$dev' 20" || die "no device node $dev on vm$hv"
+	host_wait_ana "$hv" "$nqn" "$cn" optimized 20
+	drop_caches "$hv"
+	assert_eq "$(sha_range "$hv" "$dev" 4 0)" "$want" \
+		"ssagain: the host reads its pattern through the subsystem made again"
+
+	stage check "converge check round"
+	converge_check "$cn" "$sp" "$cntlr" "$rev"
+
+	stage teardown "empty cntlr lists, then empty side lists"
+	host_disconnect "$hv" "$nqn"
+	cn_drop "$cn"
+	dn_drop 1
 }
 
 case_thinrepair() {

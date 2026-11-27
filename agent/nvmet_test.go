@@ -51,6 +51,12 @@ type fakeConfigfs struct {
 	// unwritable makes every write of one path fail EIO: a write that did
 	// not go through, as when the soft timeout cuts it off.
 	unwritable string
+	// takenButFails makes every write of one path store its data and then
+	// fail: a write the kernel took before the soft timeout cut it off.
+	takenButFails string
+	// readFailsAfterWrite makes every read of one path fail EIO once a
+	// write of it was tried.
+	readFailsAfterWrite string
 	// listErr answers a listing of one path with an error that is not
 	// fs.ErrNotExist: context.DeadlineExceeded for one the soft timeout cut
 	// off, an I/O error for one that failed. Only a directory the tree does
@@ -315,6 +321,14 @@ func (c *fakeConfigfs) osClient() *common.FakeOsClient {
 				return &iofs.PathError{Op: "write", Path: path,
 					Err: syscall.EIO}
 			}
+			if path == c.readFailsAfterWrite {
+				c.readErr[path] = syscall.EIO
+			}
+			if path == c.takenButFails {
+				c.files[path] = data
+				return &iofs.PathError{Op: "write", Path: path,
+					Err: context.DeadlineExceeded}
+			}
 			if c.discovered && (strings.HasSuffix(path, "/attr_serial") ||
 				strings.HasSuffix(path, "/attr_model")) {
 				return &iofs.PathError{Op: "write", Path: path,
@@ -461,6 +475,69 @@ func TestEnsureSubsystemClosesBeforeAnythingThatCanStopIt(t *testing.T) {
 				"0" {
 				t.Errorf("the stopped converge left attr_allow_any_host "+
 					"at %q, want 0", got)
+			}
+		})
+	}
+}
+
+// TestEnsureSubsystemNamesAFrozenSerial: a serial write nvmet refuses, as it
+// does once a host has identified the subsystem, over a live serial other
+// than the wanted one is a *SerialFrozenError naming both serials
+// (cnagent.md CN16, A subsystem made again); a live serial that matches is
+// not written at all, a refused model write over a matching serial is a
+// plain error, and so is a serial write the kernel took but that reported a
+// failure, the live serial then the wanted one, and a refusal whose strict
+// read of the live serial fails.
+func TestEnsureSubsystemNamesAFrozenSerial(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		serial    string
+		model     string
+		taken     bool
+		readFails bool
+		frozen    bool
+		ok        bool
+	}{
+		{"another serial", "000000000000000b", "dnv", false, false, true,
+			false},
+		{"the same serial", "000000000000000a", "dnv", false, false, false,
+			true},
+		{"the same serial, another model", "000000000000000a", "other",
+			false, false, false, false},
+		{"a serial write taken but failed", "000000000000000b", "dnv",
+			true, false, false, false},
+		{"the serial's read after the refusal fails", "000000000000000b",
+			"dnv", false, true, false, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			conf := admissionConfs(admissionHostA)["identity"]
+			cfs := newFakeConfigfs()
+			cfs.openSubsys(conf.Nqn)
+			nvmet := NewNvmet(cfs.osClient())
+			subsysPath := nvmet.SubsysPath(conf.Nqn)
+			cfs.files[subsysPath+"/attr_serial"] = tc.serial + "\n"
+			cfs.files[subsysPath+"/attr_model"] = tc.model
+			cfs.discovered = !tc.taken
+			if tc.taken {
+				cfs.takenButFails = subsysPath + "/attr_serial"
+			}
+			if tc.readFails {
+				cfs.readFailsAfterWrite = subsysPath + "/attr_serial"
+			}
+			err := nvmet.EnsureSubsystem(context.Background(), conf)
+			var frozen *SerialFrozenError
+			if got := errors.As(err, &frozen); got != tc.frozen {
+				t.Fatalf("EnsureSubsystem = %v, a frozen serial %v, want %v",
+					err, got, tc.frozen)
+			}
+			if (err == nil) != tc.ok {
+				t.Fatalf("EnsureSubsystem = %v, want success %v", err, tc.ok)
+			}
+			if tc.frozen && (frozen.Live != tc.serial ||
+				frozen.Want != conf.Serial || frozen.Nqn != conf.Nqn ||
+				!errors.Is(err, syscall.EINVAL)) {
+				t.Fatalf("the refusal is %+v, want live %q, wanted %q, "+
+					"wrapping EINVAL", frozen, tc.serial, conf.Serial)
 			}
 		})
 	}

@@ -3,7 +3,6 @@ package cnagent
 import (
 	"context"
 	"fmt"
-	"log/slog"
 	"sort"
 	"strings"
 
@@ -201,15 +200,13 @@ func (s *CnAgentServer) foreignNs(
 
 // replaceForeignSubsys removes the kernel subsystem of ssp's NQN before its
 // list step when a namespace under it stands over another pool's ns-dev
-// (foreignNs; CN16, A shared NQN): every namespace moves inaccessible and
-// reads back so, then the subsystem goes (Nvmet.RemoveSubsystem), and the
-// list step builds it again as this cntlr's. Reason: the other pool's
-// serial, hosts and namespaces are not this pool's, the kernel refuses a new
-// serial once a host has discovered the subsystem, and a list step that
-// wrote this pool's hosts first would let them reach the other pool's
-// volume. A namespace that does not read back inaccessible, or a read or a
-// removal that fails, is the error the subsystem's row reads, and the pass
-// leaves the subsystem as it is.
+// (foreignNs; CN16, A shared NQN), by removeOldSubsys, so the list step
+// builds it again as this cntlr's. Reason: the other pool's serial, hosts
+// and namespaces are not this pool's, the kernel refuses a new serial once
+// a host has discovered the subsystem, and a list step that wrote this
+// pool's hosts first would let them reach the other pool's volume. A read
+// that does not answer, or a removal removeOldSubsys refuses, is the error
+// the subsystem's row reads, and the pass leaves the subsystem as it is.
 func (s *CnAgentServer) replaceForeignSubsys(
 	ctx context.Context,
 	plan *cntlrPlan,
@@ -222,21 +219,7 @@ func (s *CnAgentServer) replaceForeignSubsys(
 	if foreign == "" {
 		return nil
 	}
-	slog.WarnContext(ctx, "replacing a subsystem another pool built",
-		slog.String("nqn", ssp.nqn), slog.String("found", foreign))
-	for _, nsIdx := range nsIdxs {
-		if !s.moveDark(ctx, ssp.nqn, nsIdx) {
-			return fmt.Errorf("%s, and namespace %s did not move to "+
-				"inaccessible, so the subsystem stays", foreign,
-				nsResName(ssp.nqn, nsIdx))
-		}
-	}
-	if err := s.nvmet.RemoveSubsystem(
-		ctx, s.port.PortId, ssp.nqn); err != nil {
-		return fmt.Errorf("%s, and removing the subsystem failed: %w",
-			foreign, err)
-	}
-	return nil
+	return s.removeOldSubsys(ctx, ssp.nqn, foreign, nsIdxs)
 }
 
 // sharedOwnNs are the namespaces under the kernel subsystem of a host-facing
@@ -263,16 +246,28 @@ func (s *CnAgentServer) sharedOwnNs(
 	}
 	var out []cnNsRef
 	for _, nsIdx := range nsIdxs {
-		path, ok, err := s.nvmet.NsDevicePath(ctx, nqn, nsIdx)
-		if err != nil {
-			res.Fail(fmt.Sprintf("nvmet %s ns %d device_path", nqn, nsIdx),
-				err)
-			continue
-		}
-		name := strings.TrimPrefix(strings.TrimSpace(path), "/dev/mapper/")
-		if ok && unwanted[name] {
+		if s.nsOverUnwanted(ctx, nqn, nsIdx, unwanted, res) {
 			out = append(out, cnNsRef{nqn: nqn, nsid: nsIdx})
 		}
 	}
 	return out
+}
+
+// nsOverUnwanted says whether the kernel namespace nsIdx of nqn stands over
+// an ns-dev the sweep's chain removes (unwanted), read strictly. A read
+// that does not answer is a failure of the pass, and says no.
+func (s *CnAgentServer) nsOverUnwanted(
+	ctx context.Context,
+	nqn string,
+	nsIdx int,
+	unwanted map[string]bool,
+	res *agent.SweepResult,
+) bool {
+	path, ok, err := s.nvmet.NsDevicePath(ctx, nqn, nsIdx)
+	if err != nil {
+		res.Fail(fmt.Sprintf("nvmet %s ns %d device_path", nqn, nsIdx), err)
+		return false
+	}
+	name := strings.TrimPrefix(strings.TrimSpace(path), "/dev/mapper/")
+	return ok && unwanted[name]
 }

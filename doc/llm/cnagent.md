@@ -4102,15 +4102,15 @@ cannot make the read's missing port. The sweep attributes a shared NQN to
 no pool (`nvmetOwner`; CN21), so no cntlr removes or changes the
 subsystem, its links or its hosts, or another pool's namespaces; under a
 host-facing subsystem that is shared, or that another pool of the node
-holds, a pool's sweep removes, inaccessible first and before its park,
-each namespace over an ns-dev of its own pool that its chain removes
-(`sharedOwnNs`), so that no park leaves it over dm-error and L2 can remove
-the ns-dev. Once a single cntlr names the NQN it builds the subsystem
+holds, a pool's sweep moves each namespace over an ns-dev of its own pool
+that its chain removes inaccessible before its park (P0), and its L1 then
+removes the namespace (`sharedOwnNs`), so that no park leaves it serving
+over dm-error and L2 can remove the ns-dev. Once a single cntlr names the NQN it builds the subsystem
 again; when a namespace under the kernel subsystem still stands over an
 ns-dev of another pool of this node — the builder's request went with no
 sweep after it, as across a restart — its converge first moves every
 namespace of it inaccessible and removes the subsystem, then builds its
-own (`replaceForeignSubsys`); a namespace that does not read back
+own (`replaceForeignSubsys`, `removeOldSubsys`); a namespace that does not read back
 inaccessible, or a removal that fails, is the subsystem row's error, and
 the subsystem stays and is not safe in the pass; a read reads such a
 subsystem `RES_STATUS_ERROR` naming the other pool's ns-dev
@@ -4129,6 +4129,35 @@ namespace under the NQN loses nothing and is not moved for it; the other
 pool's serial, hosts and namespaces are not the new builder's, and the
 kernel refuses a new serial once a host has discovered the subsystem, so
 the subsystem is built anew rather than changed.
+
+**A subsystem made again.** An operator can delete a subsystem and create
+it again under its NQN; the new record has a new `ss_id` and so a new
+serial ([D2]), and nvmet takes no new serial once a host has identified
+the kernel subsystem. The list step's `EnsureSubsystem` then fails with
+`agent.SerialFrozenError`: the serial write was refused and a strict read
+finds a live serial other than the wanted one, so the kernel subsystem is
+an older one of the NQN. The list step (`ensureSubsysAnew`) then moves
+every namespace the kernel lists under it inaccessible and reads each back
+so, removes the subsystem (`removeOldSubsys`: port link, namespaces, host
+links, the directory; a Warn record `nvmet subsystem replaced`, `log.md`,
+A subsystem replaced) and builds it again in the same pass; the
+namespaces and the port link of the new subsystem are built by the pass
+as usual. The removal ends the hosts' connections to the old subsystem,
+and a host connects again as to any new subsystem. A namespace that does
+not read back inaccessible, one over a dm device that reads suspended or
+does not read (`disableSafe`), whose disable would wait for IO that never
+completes, or a removal that fails, is the list step's error; the old
+subsystem then stays and is not safe in the pass, so its namespaces stay
+inaccessible. A serial write the kernel took but that reported a
+failure leaves the wanted serial live, which is a plain error. When the
+delete and the create reach the cntlr as one change, the new namespace at
+an old index has a new ns-dev, and the sweep, which runs before the build,
+moves the old namespace inaccessible before its park puts the old ns-dev on
+dm-error (P0), and its L1 then takes the namespace out (CN21). Reason:
+without the removal the subsystem would never be built again on that node;
+the move first makes a host queue rather than read errors; a namespace
+left optimized over the parked ns-dev would serve IO errors on a path that
+reads as serving.
 
 CN17. Transfers (`xfer.go`; both roles; `architecture.md`, Transfers).
 Per `xfer_list` entry: resolve the origin namespace by `ori_nqn` and
@@ -5426,11 +5455,18 @@ is what the chain stops on.
 **Layers, strictly top-down.** Within one sp's chain:
 
 L1. nvmet. Each unwanted namespace under a surviving subsystem attributed
-to the sp (above), which P0 has moved `AnaGrpIdInaccessible` (a host still
+to the sp (above) — one whose index the request no longer names, and one
+whose index it names but whose "device_path" is an ns-dev of the sp that
+L2 removes, as a namespace deleted and made again at its index, which the
+build then makes again over its new ns-dev (CN16, A subsystem made again) —
+which P0 has moved `AnaGrpIdInaccessible` (a host still
 holding a path is told to stop using it rather than losing it under IO), is
 removed — by this layer alone: the build phase's `ensureSubsystem` converges
 the wanted namespaces and removes none, so a pass whose enumeration did
-not answer removes none either; then the unwanted subsystems whole (port
+not answer removes none either, but for the list step's removal of a whole
+kernel subsystem it cannot make the cntlr's (`removeOldSubsys`; CN16, A
+shared NQN and A subsystem made again), which reads its own listing; then
+the unwanted subsystems whole (port
 link, namespace disable, namespace rmdir, allowed-hosts unlink, subsystem
 rmdir). First because nvmet must release the dm devices below before
 anything can remove them.

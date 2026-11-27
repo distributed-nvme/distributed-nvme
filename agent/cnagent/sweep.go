@@ -847,31 +847,28 @@ func (s *CnAgentServer) buildChain(
 		}
 	}
 
-	var unwantedNsDevs map[string]bool
+	unwantedNsDevs := make(map[string]bool, len(chain.nsDevs))
+	for _, name := range chain.nsDevs {
+		unwantedNsDevs[name] = true
+	}
 	for _, nqn := range actual.nvmetSubsys {
 		attr := actual.nvmetOwner[nqn]
 		thisSp := attr.ours && !attr.unowned && attr.spId == spId
 		otherSp := attr.ours && !attr.unowned && attr.spId != spId ||
 			!attr.ours && s.nqnShared(nqn)
-		if !thisSp && otherSp && len(chain.nsDevs) > 0 &&
-			!common.IsDnvNqn(nqn) {
-			// A host-facing subsystem that is shared, or another pool's of
-			// this node, can still hold a namespace a cntlr of this pool
-			// built over its ns-dev while the NQN was shared: one over an
-			// ns-dev the chain removes goes first, inaccessible first, so
-			// no park leaves it over dm-error and L2 can remove the ns-dev
-			// (CN16, A shared NQN).
-			if unwantedNsDevs == nil {
-				unwantedNsDevs = make(map[string]bool, len(chain.nsDevs))
-				for _, name := range chain.nsDevs {
-					unwantedNsDevs[name] = true
-				}
-			}
-			chain.nvmetNs = append(chain.nvmetNs,
-				s.sharedOwnNs(ctx, nqn, unwantedNsDevs, res)...)
-			continue
-		}
+		hostFacing := !common.IsDnvNqn(nqn)
 		if !thisSp {
+			if otherSp && hostFacing && len(unwantedNsDevs) > 0 {
+				// A host-facing subsystem that is shared, or another
+				// pool's of this node, can still hold a namespace a cntlr
+				// of this pool built over its ns-dev while the NQN was
+				// shared: one over an ns-dev the chain removes moves
+				// inaccessible before the park (unwantedNsAna) and L1
+				// removes it, so no park leaves it serving over dm-error
+				// and L2 can remove the ns-dev (CN16, A shared NQN).
+				chain.nvmetNs = append(chain.nvmetNs,
+					s.sharedOwnNs(ctx, nqn, unwantedNsDevs, res)...)
+			}
 			continue
 		}
 		if _, keep := wanted.nvmetSs[nqn]; !keep {
@@ -888,7 +885,15 @@ func (s *CnAgentServer) buildChain(
 			continue
 		}
 		for _, nsid := range nsids {
-			if _, keep := wanted.nvmetNs[nqn][nsid]; keep {
+			if _, keep := wanted.nvmetNs[nqn][nsid]; keep &&
+				!(hostFacing && len(unwantedNsDevs) > 0 &&
+					s.nsOverUnwanted(ctx, nqn, nsid, unwantedNsDevs, res)) {
+				// A wanted index stays, but one over an ns-dev the chain
+				// removes: a namespace deleted and made again at its index,
+				// as under a subsystem made again (CN16), whose old ns-dev
+				// the park would put on dm-error under it while it may
+				// serve; it moves inaccessible before the park, L1 removes
+				// it, and the build makes it again over its new ns-dev.
 				continue
 			}
 			chain.nvmetNs = append(chain.nvmetNs, cnNsRef{nqn: nqn, nsid: nsid})

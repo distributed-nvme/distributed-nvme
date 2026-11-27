@@ -393,7 +393,31 @@ func (n *Nvmet) SubsysExists(
 	return n.dirExists(ctx, n.SubsysPath(nqn))
 }
 
-// EnsureSubsystem converges one subsystem and its allowed-hosts links.
+// SerialFrozenError is EnsureSubsystem's refusal of a serial nvmet no longer
+// takes: the write of "attr_serial" failed and a strict read finds a live
+// serial other than the wanted one. nvmet refuses every serial write once a
+// host has identified the subsystem (EINVAL), and a live serial other than
+// the wanted one means the kernel subsystem is an older one of the same NQN,
+// as each subsystem create mints a new id and so a new serial
+// (architecture.md [D2]); the cn agent then builds the subsystem anew
+// (cnagent.md CN16, A subsystem made again).
+type SerialFrozenError struct {
+	Nqn  string
+	Live string
+	Want string
+	Err  error
+}
+
+func (e *SerialFrozenError) Error() string {
+	return fmt.Sprintf("subsystem %s keeps serial %q, and nvmet refuses "+
+		"serial %q: %v", e.Nqn, e.Live, e.Want, e.Err)
+}
+
+func (e *SerialFrozenError) Unwrap() error { return e.Err }
+
+// EnsureSubsystem converges one subsystem and its allowed-hosts links. A
+// serial write nvmet refuses over a live serial other than the wanted one
+// is a *SerialFrozenError.
 func (n *Nvmet) EnsureSubsystem(
 	ctx context.Context,
 	conf SubsysConf,
@@ -427,8 +451,15 @@ func (n *Nvmet) EnsureSubsystem(
 	}
 	// The rest of attrs(): closeSubsys has written its first entry.
 	for _, attr := range conf.attrs()[1:] {
-		if _, err := n.ensureAttr(
-			ctx, subsysPath+"/"+attr[0], attr[1]); err != nil {
+		path := subsysPath + "/" + attr[0]
+		if _, err := n.ensureAttr(ctx, path, attr[1]); err != nil {
+			if attr[0] == "attr_serial" {
+				live, ok, rerr := n.readAttrStrict(ctx, path)
+				if rerr == nil && ok && live != strings.TrimSpace(attr[1]) {
+					return &SerialFrozenError{Nqn: conf.Nqn, Live: live,
+						Want: attr[1], Err: err}
+				}
+			}
 			return err
 		}
 	}

@@ -50,7 +50,7 @@ a host left on the list writes on, and on a primary and a standby at once
 leftover, an accepted request reporting residue (`cnagent.md` CN20). The
 cases run in a fixed order, fail-fast — nodecheck, smoke, redund, repair,
 teardown, thinbm, torn, discard, isolation, clone_xfer, restart, pause,
-groupcut, thinrepair, sharednqn — nodecheck
+groupcut, thinrepair, sharednqn, ssagain — nodecheck
 building no pool and each other case under pool ids of its own, and each
 leaving nothing of its pools, a teardown per case and per stage that also
 keeps the run inside a DN's data area, which the cases together would
@@ -1417,6 +1417,19 @@ pool A's cntlr leaves first: the node's sweep, re-sent until clean, takes
 pool A's namespace out of the subsystem and removes its namespace device,
 and pool B's converge builds its own namespace, its device pool B's
 namespace device, a check round of pool B clean.
+
+**ssagain** proves `cnagent.md` CN16, A subsystem made again, on one node:
+pool A, its S shape on DN1, builds a subsystem on CN1, the host connects
+and writes a 4 MiB pattern through it, so nvmet takes no new serial for it.
+The request then carries the subsystem deleted and created again under its
+NQN as one change: a new `ss_id` and serial, and a new namespace at the
+same index over the same volume. The converge, re-sent until a check
+round is clean, replaces the kernel subsystem, its record
+`nvmet subsystem replaced` naming the NQN under the stage's trace id; the
+rows of the new subsystem and namespace read `RES_STATUS_OK`, the kernel
+holds the new serial and the namespace's device is the new namespace
+device; the host, connected again, reads its pattern; a check round is
+clean.
 
 ## Teardown and cleanup
 

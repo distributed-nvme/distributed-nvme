@@ -1957,25 +1957,6 @@ Measured times are in [the introduction](introduction.md#status-and-limits).
   of every leg on that node for a cut of the control network alone, while
   the data path is fine. Fix decided for a full store disk. Read from dnv's
   code; not seen in the lab.
-- **A subsystem made again under its NQN is never built on a controller
-  node that still holds the old one.** An operator deletes a subsystem and
-  creates it again with the same NQN, and the new one has a new serial
-  number. The kernel takes a new serial number only until a host has read
-  the subsystem, so a controller node that still holds the old kernel
-  subsystem, as when its agent missed the delete, cannot write the new
-  one. The step fails at every converge, no namespace of the subsystem is
-  built there, and nothing removes the old kernel subsystem, since its NQN
-  is wanted. When the delete and the create reach a cntlr as one change,
-  an old namespace can stay under a number that the new list also uses, and
-  the hosts get IO errors on a path that reads as serving. On the primary,
-  the loop counts toward a failover only once the worker has read it as
-  unhealthy for the cntlr threshold, 600 seconds at the default (section
-  6.1); on a standby, it never does. State: fix decided. Until then: delete the
-  subsystem's namespaces and then the subsystem again (`dnvctl ns delete`,
-  `dnvctl ss delete`); wait until, as root on each controller node of the
-  pool, `ls /sys/kernel/config/nvmet/subsystems/` no longer lists its NQN;
-  then create the subsystem and its namespaces again. Or reboot the
-  controller node. Read from dnv's code; not seen in the lab.
 - **A repair that has not started can block a forced start.** The worker
   creates a repair for a dead leg, and the group's other leg dies too
   before the new leg is in the array. When the first leg comes back with

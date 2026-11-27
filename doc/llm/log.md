@@ -362,6 +362,14 @@ count, when the pass's budget, or the end of the converge's own context
 cut held, since the next converge cuts again (R6). The names are apart from the cut of a
 migrating leg's path, `leg path cut` (`cnagent.md` CN10).
 
+### A subsystem replaced
+
+A cn agent that removes a kernel subsystem its list step cannot make the
+cntlr's logs one Warn record `nvmet subsystem replaced` under the
+converge's trace id, with `nqn` and `cause`, the text that names why
+(`cnagent.md` CN16, A shared NQN and A subsystem made again, which say when
+the removal runs and what a failure of it does).
+
 ### gRPC messages
 
 Every request and reply message of the dnv-internal services (`Gateway`,

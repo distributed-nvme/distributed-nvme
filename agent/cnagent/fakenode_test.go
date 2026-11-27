@@ -356,6 +356,11 @@ type fakeNode struct {
 	// with the given error text, and changes nothing — a configfs store
 	// handler that answered no.
 	failWriteAlways map[string]string
+	// frozenSerial holds the configfs directories of subsystems a host has
+	// identified: a write of their "attr_serial" is refused EINVAL, as nvmet
+	// refuses it then, until the directory's rmdir (cnagent.md CN16, A
+	// subsystem made again).
+	frozenSerial map[string]bool
 	// gate blocks a command until the channel is closed (lock tests). It, and
 	// hardGate and cancelCmd below, also match an mtime read by its line
 	// (readMtime); hardGate also matches a superblock read by its line
@@ -625,6 +630,7 @@ func newFakeNode() *fakeNode {
 		killRead:              make(map[string]bool),
 		killReadAlways:        make(map[string]bool),
 		failWriteAlways:       make(map[string]string),
+		frozenSerial:          make(map[string]bool),
 
 		gate:      make(map[string]chan struct{}),
 		hardGate:  make(map[string]chan struct{}),
@@ -1195,6 +1201,10 @@ func (f *fakeNode) writeFileDirect(
 		if strings.Contains(path+"="+data, key) {
 			return errors.New(refusal)
 		}
+	}
+	if dir, ok := strings.CutSuffix(path, "/attr_serial"); ok &&
+		f.frozenSerial[dir] {
+		return &fs.PathError{Op: "write", Path: path, Err: syscall.EINVAL}
 	}
 	if strings.HasPrefix(path, agent.NvmetDebugRoot+"/") {
 		return f.writeConnState(path, data)
@@ -2003,6 +2013,7 @@ func (f *fakeNode) cmdRmdir(args []string) (string, int) {
 		}
 	}
 	delete(f.dirs, path)
+	delete(f.frozenSerial, path)
 	return "", 0
 }
 
