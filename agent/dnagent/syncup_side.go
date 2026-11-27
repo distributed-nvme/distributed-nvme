@@ -494,9 +494,14 @@ func (s *DnAgentServer) ensureSideDev(
 		info.SideDevInfo = t.Err(resKeySideDev, name, err.Error())
 		return sideDevFailed, nil
 	}
-	rec, ok, err := s.meta.LookupSide(ctx, plan.spId, plan.sideId)
+	// The confirmed lookup: on a disk this node has not confirmed as the
+	// side's disk node's own, a record with the side's ids is the lookup's
+	// refusal, and its counts reach no reply (DN5, DN9).
+	rec, ok, err := s.meta.LookupConfirmedSide(ctx, plan.clusterId,
+		plan.dnId, plan.spId, plan.sideId)
 	if err != nil {
-		// An unreadable or corrupt disk is an error, never "absent".
+		// An unreadable, corrupt or unconfirmed disk is an error, never
+		// "absent".
 		info.SideDevInfo = t.Err(resKeySideDev, name, err.Error())
 		return sideDevFailed, nil
 	}
@@ -507,12 +512,14 @@ func (s *DnAgentServer) ensureSideDev(
 		return sideDevFailed, nil
 	}
 	if ok {
-		// The record exists, so it — not the request — is what the counters
-		// report from here on, including on the failure paths below: AllocSide
-		// can still refuse (a DN9 mismatch of the extent count or of the
-		// length to zero, or a disk this agent may not mutate) and those
-		// replies must carry the disk's numbers, not a request value the agent
-		// can prove wrong (DN9). They are overwritten with the identical
+		// The record exists on a confirmed disk, so it — not the request — is
+		// what the counters report from here on, including on the failure
+		// paths below: AllocSide can still refuse (a DN9 mismatch of the
+		// extent count or of the length to zero, a load that fails, or a
+		// table a header check dropped meanwhile that reloads as another
+		// node's) and those replies carry this node's numbers from the
+		// confirmed look, not a request value the agent can prove wrong
+		// (DN9). They are overwritten with the identical
 		// values once AllocSide hands the record back.
 		info.ZeroedBytes = sideZeroedBytes(rec)
 		info.ZeroBytes = sideZeroBytes(rec)

@@ -753,8 +753,10 @@ func (d *DiskMeta) ProbeHeader(
 	return d.describeLocked(), nil
 }
 
-// LookupSide / LookupCloneMeta return the live record. A load failure is
-// reported as an error and never collapsed into "absent" — a probe must be
+// LookupSide / LookupCloneMeta return the live record, whoever's disk it is;
+// no path of the agent hands a side's record out through LookupSide, which
+// reads its counts through LookupConfirmedSide (DN5). A load failure is
+// reported as an error and never collapsed into "absent" — a caller must be
 // able to tell an unreadable disk from a side that was never allocated.
 // Records are never mutated in place — every mutator saves a clone — so a
 // returned pointer is safe to read but goes stale after the next write;
@@ -781,10 +783,12 @@ func (d *DiskMeta) LookupSide(
 // node has confirmed (confirmedForLocked), and one the table holds on a disk it
 // has not is an error, exactly as AllocSide's hand-out is. A table that holds
 // no such record answers "absent", whoever's disk it is: there is nothing to
-// hand out. DN9's zeroing loop reads its batches through it, so a header that
-// turns into another node's under a running loop stops the batches instead
-// of zeroing from that node's count; the side verdict reads it to judge
-// whether zeroing should be running at all.
+// hand out. The side converge's first look at the record and the side probe
+// read the counts they report through it, so another node's record fills no
+// count the worker's flip reads; DN9's zeroing loop reads its batches through
+// it, so a header that turns into another node's under a running loop stops
+// the batches instead of zeroing from that node's count; the side verdict
+// reads it to judge whether zeroing should be running at all.
 func (d *DiskMeta) LookupConfirmedSide(
 	ctx context.Context,
 	clusterId uint64,
@@ -939,8 +943,8 @@ func runTotal(rec *pb.DnDiskTable_SideRecord) uint64 {
 // stored count is the zeroing loop's cursor.
 //
 // The helpers are free functions on the record rather than DiskMeta methods so
-// the converge, the probe and the zeroing loop can all work off one LookupSide
-// snapshot without re-taking d.mu.
+// the converge, the probe and the zeroing loop can all work off one
+// LookupConfirmedSide snapshot without re-taking d.mu.
 // ---------------------------------------------------------------------------
 
 // sideZeroBytes is the record's length to zero, fixed at allocation —

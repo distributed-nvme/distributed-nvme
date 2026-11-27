@@ -172,9 +172,14 @@ func (s *DnAgentServer) probeSideDev(
 		info.SideDevInfo = t.Err(resKeySideDev, name, err.Error())
 		return sideDevFailed, nil
 	}
-	rec, ok, err := s.meta.LookupSide(ctx, plan.spId, plan.sideId)
+	// The confirmed lookup, as the converge's (ensureSideDev): the counts
+	// come only from a disk this node has confirmed as the side's disk
+	// node's own (DN5, DN18).
+	rec, ok, err := s.meta.LookupConfirmedSide(ctx, plan.clusterId,
+		plan.dnId, plan.spId, plan.sideId)
 	if err != nil {
-		// An unreadable or corrupt disk is an error, never "absent".
+		// An unreadable, corrupt or unconfirmed disk is an error, never
+		// "absent".
 		info.SideDevInfo = t.Err(resKeySideDev, name, err.Error())
 		return sideDevFailed, nil
 	}
@@ -203,10 +208,9 @@ func (s *DnAgentServer) probeSideDev(
 	// request — the disk is authoritative ([D13]).
 	zeroed, zero := sideZeroedBytes(rec), sideZeroBytes(rec)
 	info.ZeroedBytes, info.ZeroBytes = zeroed, zero
-	// A record that disagrees with the request, or one on a disk not
-	// confirmed, reads ERROR with the refusal, as the converge's AllocSide
-	// refuses it (DN9), whatever its device reads; the counters above are
-	// the record's all the same.
+	// A record that disagrees with the request reads ERROR with the
+	// refusal, as the converge's AllocSide refuses it (DN9), whatever its
+	// device reads; the counters above are the record's all the same.
 	if refusal := s.meta.SideAllocRefusal(ctx, plan.clusterId, plan.dnId,
 		plan.spId, plan.sideId, plan.conf.GetExtCnt(),
 		plan.conf.GetZeroBytes()); refusal != nil {

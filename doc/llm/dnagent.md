@@ -2444,17 +2444,19 @@ probe-first (SH16), building `DnInfo` as it goes:
   disk as foreign, a meta row in error, which marks it unhealthy in its
   cluster (`dnv-worker.md` HL1). While no read has answered, the DN6
   record step says so and the verdict is not clean, which re-drives this
-  converge. Lookups that only report do not pass the check — the side
-  converge's first look at the record, which fills the counters, and the
-  DN18 side probe (`LookupSide`) — so on another node's disk a record whose
-  ids collide still fills `zeroed_bytes`/`zero_bytes`, in a side
-  converge's reply beside its foreign-disk refusal and in every probe of
-  the side. The guard has to live at that layer rather than in the caller,
-  because a failed DN converge does not stop the side converges that follow
-  (DN19) — without it, a node pointed at another node's disk would report
-  `meta_info` as `RES_STATUS_ERROR` and then allocate extents in that
-  disk's volume table, or build its devices over the records that table
-  holds, anyway.
+  converge. The side converge's first look at the record, which fills the
+  counters, and the DN18 side probe pass the check too
+  (`LookupConfirmedSide`), so on another node's disk a record whose ids
+  collide is the lookup's refusal, the side device row's error, and fills
+  neither count: `zeroed_bytes` stays zero and `zero_bytes` the request's
+  (DN9), so the worker's flip (`dnv-worker.md` RW18) never runs on another
+  node's record; a table that holds no such record answers "absent"
+  whoever's disk it is. The guard has to live at that layer rather
+  than in the caller, because a failed DN converge does not stop the side
+  converges that follow (DN19) — without it, a node pointed at another
+  node's disk would report `meta_info` as `RES_STATUS_ERROR` and then
+  allocate extents in that disk's volume table, or build its devices over
+  the records that table holds, anyway.
 * the disk counts of DN18, beside an OK meta row and before DN6's pointer
   diff and sweep, so the reply to a `SyncupDn` that drops a pointer still
   counts that side's record and says the side records do not match the
@@ -3286,8 +3288,10 @@ disk cannot hold (`dnv-worker.md` HL2, AR8).
   every background read (DN14, DN16, DN18) of a side DN8's gate admits, so
   every info of such a side carries them.
   `zero_bytes` comes from the record, or from `side_conf.zero_bytes` while
-  there is no record yet — so "no record" reads zero of the request's
-  length, never equal counts. Equality is what the worker's flip rule
+  there is no record yet, or while the record is on a disk this node has
+  not confirmed as the side's disk node's own (DN5), whose record fills
+  neither count — so "no record" reads zero of the request's length, never
+  equal counts. Equality is what the worker's flip rule
   watches (`dnv-worker.md` RW18), guarded by a non-zero length, which also
   keeps the empty `SideInfo` of a side DN8's gate refuses from reading as
   done.
@@ -4546,8 +4550,10 @@ needed, and the worker never turns one into an `err_epoch`
   run ⇒ `RES_STATUS_PROVISIONING` with the converge's wait details (DN13),
   any other refusal it establishes ⇒ `RES_STATUS_ERROR` with the refusal; a
   failed write of the run, which only the converge meets, does not show
-  here. The same record read fills `SideInfo.zeroed_bytes`/`zero_bytes` in
-  every background read of the side. A side whose stored request DN8's
+  here. The same record read, which hands out a record only from a disk
+  this node has confirmed as the side's disk node's own (DN5), fills
+  `SideInfo.zeroed_bytes`/`zero_bytes` in every background read of the
+  side. A side whose stored request DN8's
   side conf gate refuses is not probed at all: the probe writes that gate's
   Error record and answers an empty `SideInfo`.
 * `cn_id_to_dm_error` and `cn_id_to_dm_linear` per cn, named `DnErrorName`

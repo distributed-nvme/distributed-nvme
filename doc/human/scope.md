@@ -927,12 +927,6 @@ The entries:
   id, and its data is gone. It needs an agent restart, one failed read and
   an older request at once. State: fix decided. Read from dnv's code; not
   seen in the lab.
-- **A side can be marked provisioned from the counts of a foreign disk.**
-  A disk node's agent fills its counts of the zeroing from the disk's own
-  record of which extents each side holds, before it has confirmed that
-  record as its own, and the worker marks a side provisioned on
-  those counts alone. It needs a disk of another cluster under the agent's
-  path. State: fix decided. Read from dnv's code; not seen in the lab.
 - **Making the old primary the primary again right after a failed fence
   lands its held writes late.** A fence that suspends the old primary's
   path and then fails to load the error target leaves that path suspended
