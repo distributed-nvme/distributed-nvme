@@ -1415,14 +1415,17 @@ func TestNodeSweepCostIsLinearInOwnExports(t *testing.T) {
 // exist", and a side whose parent does not exist is a side that left its
 // parent's list — which is how a conf fault turns into a teardown of live
 // data. The control below is the other half: with a usable extent size the
-// very same node IS swept, so this test cannot pass by never sweeping.
+// very same node IS swept, so this test cannot pass by never sweeping —
+// not by its startup pass, which removes nothing whatever the conf (DN2),
+// but by the first SyncupDn that process accepts.
 func TestDnDeferredParentConfSkipsSweep(t *testing.T) {
 	nf := common.NewNameFmt(common.DefaultLocalStorPrefix)
 	objs := objectsOf(sidePtr(testSide))
 
 	// build leaves a node holding one converged side whose pointer is no
 	// longer in the dn file: a restart of this node with a usable extent size
-	// sweeps the side away, and with an unusable one must not.
+	// sweeps the side away at its first SyncupDn, and with an unusable one
+	// must not touch it.
 	build := func(t *testing.T, extentSize uint64) *fakeNode {
 		t.Helper()
 		ctx := context.Background()
@@ -1446,9 +1449,26 @@ func TestDnDeferredParentConfSkipsSweep(t *testing.T) {
 		return node
 	}
 
+	// startRound is the disk node's round from the startup pass's own
+	// observation: the read-only sweep's verdict, which names the side's
+	// devices only where the conf lets the sweep run at all.
+	startRound := func(srv *DnAgentServer) *pb.CheckDnReply {
+		t.Helper()
+		reply, _ := srv.checkDnRound(traced("start-round"),
+			&pb.CheckDnRequest{ClusterId: testCluster, DnId: testDn,
+				Revision: 2}, nil)
+		return reply
+	}
+	side := nf.DnSideName(testCluster, testDn, testSp, testSide)
+
 	t.Run("unusable extent size", func(t *testing.T) {
 		node := build(t, 0)
 		srv := startTestServer(t, node)
+		// The start's verdict is empty: nothing of the refused dn is named.
+		if details := startRound(srv).GetAgentReply().GetDetails(); strings.
+			Contains(details, side) {
+			t.Errorf("a refused dn conf's start named %s: %q", side, details)
+		}
 		// Not one removal, of any kind, anywhere on the node.
 		for _, banned := range []string{
 			"cmd dmsetup remove", "cmd nvme disconnect", "cmd rmdir",
@@ -1467,6 +1487,23 @@ func TestDnDeferredParentConfSkipsSweep(t *testing.T) {
 	t.Run("usable extent size (control)", func(t *testing.T) {
 		node := build(t, testExtentSize)
 		srv := startTestServer(t, node)
+		// The start removes nothing (DN2), but names the side's devices ...
+		if details := startRound(srv).GetAgentReply().GetDetails(); !strings.
+			Contains(details, side) {
+			t.Errorf("the control's start did not name %s: %q", side, details)
+		}
+		objs.assertAllKept(t, node)
+		if _, ok, _ := srv.meta.LookupSide(
+			context.Background(), testSp, testSide); !ok {
+			t.Fatal("the startup pass freed the side's extents")
+		}
+		// ... and the first SyncupDn of the process sweeps.
+		req := dnReq(2)
+		req.ExtentSize = testExtentSize
+		if reply, err := srv.SyncupDn(context.Background(),
+			req); err != nil || reply.GetAgentReply().GetCode() != 0 {
+			t.Fatalf("SyncupDn: %v, %v", reply.GetAgentReply(), err)
+		}
 		objs.assertAllGone(t, node)
 		if _, ok, _ := srv.meta.LookupSide(
 			context.Background(), testSp, testSide); ok {

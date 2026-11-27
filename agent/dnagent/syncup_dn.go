@@ -216,9 +216,10 @@ func (s *DnAgentServer) Reconcile(ctx context.Context) error {
 	}
 	// A side whose pointer has left its parent's list is FORGOTTEN here —
 	// file, chunks, memory entry, object lock and goroutines — without any
-	// attempt to remove its resources. The node-level sweep below finds them
-	// by name, which a teardown that deletes the same state after a
-	// best-effort removal pass cannot: when every step of that pass only
+	// attempt to remove its resources. The node-level sweep below names them,
+	// and a SyncupDn's sweep finds them by name and removes them, which a
+	// teardown that deletes the same state after a best-effort removal pass
+	// cannot: when every step of that pass only
 	// logs its failure, nothing enumerates the object again. A missing DN
 	// reads as a list that names no side — unless a dn-* file did not load,
 	// and then its sides never got this far (unreadParent).
@@ -237,8 +238,13 @@ func (s *DnAgentServer) Reconcile(ctx context.Context) error {
 		// unusable converges nothing and sweeps nothing. A conf fault must
 		// not destroy resources. Its observation carries the empty verdict
 		// dnVerdict gives such a DN.
+		// The stored list may be older than the node: the start reports
+		// what it does not name and removes nothing (DN2). Removal waits for
+		// a SyncupDn, whose sweep carries the worker's own list; the report
+		// is the observation's code, which brings that SyncupDn when
+		// anything is named (dnv-worker.md RW4).
 		if agent.ValidateExtentSize(st.req.Load().GetExtentSize()) == nil {
-			sweep = s.sweepDn(ctx, st, true, nil)
+			sweep = s.sweepDn(ctx, st, sweepStart, nil)
 		}
 		storeObs(s, ctx, &st.obs, dnInfos[key], sweep.Reply(),
 			st.req.Load().GetRevision())
@@ -447,7 +453,10 @@ func (s *DnAgentServer) stopZeroingOf(
 // knownSides returns every side this node may still host: the union of every
 // synced DN's authoritative side_pointer_list and every side with local
 // state. haveState is the subset whose SyncupSideRequest the agent actually
-// holds. ok is false when no DN has been synced or reloaded at all.
+// holds from a SyncupSide of this process (sideState.synced): a side loaded
+// from its file may hold a request older than the node, whose claims prove
+// nothing (DN2), so it counts as known by its pointer alone. ok is false
+// when no DN has been synced or reloaded at all.
 func (s *DnAgentServer) knownSides() (
 	map[[2]uint64]struct{}, map[[2]uint64]struct{}, bool,
 ) {
@@ -467,7 +476,9 @@ func (s *DnAgentServer) knownSides() (
 		ptr := st.req.Load().GetSidePointer()
 		key := [2]uint64{ptr.GetSpId(), ptr.GetSideId()}
 		known[key] = struct{}{}
-		haveState[key] = struct{}{}
+		if st.synced.Load() {
+			haveState[key] = struct{}{}
+		}
 	}
 	return known, haveState, true
 }
@@ -497,7 +508,8 @@ func (s *DnAgentServer) claimedMigrs() map[[2]uint64]struct{} {
 }
 
 // spFullyKnown reports whether every side of one sp that this node may host
-// is a side whose local state the agent holds.
+// is a side whose request the agent holds from a SyncupSide of this process
+// (knownSides).
 func (s *DnAgentServer) spFullyKnown(
 	spId uint64,
 	known map[[2]uint64]struct{},
@@ -616,7 +628,7 @@ func (s *DnAgentServer) syncupDn(
 	// this request, which a restart converges and the worker wants anyway.
 	// Were the request converged over a failed save, a side it adds would be
 	// built and its SyncupSide accepted, and the next Reconcile, reading the
-	// older list, would sweep that live side and free its extents.
+	// older list, would drop that live side's state (DN2).
 	path := s.nf.LocalDnPath(req.GetClusterId(), req.GetDnId())
 	if err := s.store.Save(ctx, path, req); err != nil {
 		slog.ErrorContext(ctx, "persisting dn state failed",
@@ -639,7 +651,7 @@ func (s *DnAgentServer) syncupDn(
 
 	info := s.convergeDn(ctx, st)
 	s.dropRemovedSides(ctx, prev, req)
-	sweep := s.sweepDn(ctx, st, true, nil)
+	sweep := s.sweepDn(ctx, st, sweepRemove, nil)
 	reply := sweep.Reply()
 
 	// The observation is the reply's info and code. Its disk counts are

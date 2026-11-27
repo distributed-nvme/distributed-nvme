@@ -5023,6 +5023,54 @@ case_restart() {
 		--extent-size "$EXTENT_SIZE" --side "$sp:$leg:$srcside" \
 		--expect-code 1 >/dev/null
 
+	stage older "dn1's agent started on an older copy of its node file removes nothing of the side made since"
+	# dnagent.md DN2, The start removes nothing: the node file that lists
+	# the first side alone is copied aside, a second side is made on dn1,
+	# and the agent starts again on the older copy. The newer side's device
+	# and record stay, its round names its device, and the worker's list
+	# keeps it.
+	local dnfile older newleg=0x2 newside=0x13 newdev
+	dnfile="$WORK/store/dn-$(hex16 "$CLUSTER")-$(hex16 "${DNID[1]}")"
+	older="$WORK/dn-file.older"
+	sshv 1 "cp $dnfile $older"
+	bump_dn_rev 1
+	out=$(ctl 1 syncup-dn --revision "${REV[1]}" --extent-size "$EXTENT_SIZE" \
+		--side "$sp:$leg:$srcside" --side "$sp:$newleg:$newside")
+	assert_dn_info_ok "$out" "restart older: dn1 with the new side"
+	bump_rev 1
+	provrev=${REV[1]}
+	bump_rev 1
+	sync_side_2phase 1 "$provrev" "${REV[1]}" "$sp" "$newleg" "$newside" \
+		--ext-cnt 1 --zero-bytes "$DATA_ZERO_BYTES" \
+		--cntlid-slot 0 --primary-cn "$cn" --sp-level readwrite
+	newdev=$(dn_side_name "$CLUSTER" "${DNID[1]}" "$sp" "$newside")
+	sshv 1 "pkill -x dnv-agent; for i in 1 2 3 4 5 6 7 8 9 10; do pgrep -x dnv-agent >/dev/null || break; sleep 0.5; done; pgrep -x dnv-agent >/dev/null && echo STILL_RUNNING || echo stopped"
+	sshv 1 "cp $older $dnfile && rm -f $older"
+	start_agent 1
+	out=$(ctl 1 get-dn-size --wait 20)
+	assert_eq "$(jq_of "$out" .size)" "$DATA_SIZE" "restart older: dn1 size"
+	assert_eq "$(sshv 1 "dmsetup info $newdev >/dev/null 2>&1 && echo present || echo absent")" \
+		present "restart older: the newer side's device after the start"
+	out=$(ctl 1 check-dn --fresh --revision "${DNREV[1]}" --expect-code 4)
+	case "$(jq_of "$out" '.agent_reply.details // ""')" in
+	*"$newdev"*) ;;
+	*) die "restart older: dn1's round does not name $newdev: $out" ;;
+	esac
+	out=$(ctl 1 syncup-dn --revision "${DNREV[1]}" --extent-size "$EXTENT_SIZE" \
+		--side "$sp:$leg:$srcside" --side "$sp:$newleg:$newside")
+	assert_dn_info_ok "$out" "restart older: the worker's list"
+	assert_eq "$(sshv 1 "dmsetup info $newdev >/dev/null 2>&1 && echo present || echo absent")" \
+		present "restart older: the newer side's device after the worker's list"
+	# The side's own file went with the older list, which named no such
+	# side; its syncup adopts its device and record.
+	out=$(ctl 1 syncup-side --revision "${REV[1]}" \
+		--sp "$sp" --leg "$newleg" --side "$newside" \
+		--ext-cnt 1 --zero-bytes "$DATA_ZERO_BYTES" \
+		--cntlid-slot 0 --primary-cn "$cn" --sp-level readwrite \
+		--provisioned=true)
+	assert_ok "$out" ".side_info.side_dev_info.status" \
+		"restart older: the newer side adopted"
+
 	stage teardown "disconnect, empty both side lists, check the residue"
 	cn_disconnect "$cnvm" "$sp" "$leg" "$cn"
 	for idx in 1 2; do

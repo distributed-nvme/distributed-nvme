@@ -895,23 +895,26 @@ The entries:
   such a pool stopped before any worker starts, since the check is the
   only record of who served, and says when it may start again. Not seen
   in the lab.
-- **A disk node's agent that starts on older local files removes the sides
-  made since.** At its start a disk node's agent builds again from its
-  local files, and also removes what they do not name and frees its
-  extents, before the worker can send it anything. Nothing checks that the
-  files are as new as the node. They are older when a system disk is put
-  back from a backup or a snapshot while the data disk stays, when old
-  files are copied into the folder, or when a mount that was missing at one
-  start is back at the next. Every side made after the files' time is then
-  removed, and its extents are free for the next side: in a pool without
-  RAID the group's data is lost, and in a RAID1 pool the group loses a leg,
-  or both legs when both machines went back to one backup. An older file of
-  a side also makes the agent build that side as the file has it until the
-  worker's first request. Local files that are missing are safe: the
-  worker then sends every object again. State: fix decided. Until then,
-  never put an agent's local files back from an older copy: delete them
-  instead, as [the operations doc](operations.md#prepare-a-node) says. Read
-  from dnv's code; not seen in the lab.
+- **A disk node's agent that starts on older local files builds old sides
+  until the worker's first round.** At its start a disk node's agent
+  builds again from its local files, before the worker can send it
+  anything. Nothing checks that the files are as new as the node. They are
+  older when a system disk is put back from a backup or a snapshot while
+  the data disk stays, when old files are copied into the folder, or when
+  a mount that was missing at one start is back at the next. The start
+  removes nothing and frees no extent: what the files do not name waits
+  for the worker's requests, which come at its first round, as the files'
+  revisions differ from the ones it wants. But an older file of a side
+  makes the agent build that side as the file has it until then, for
+  example with the controller nodes of its time. Local files that are
+  missing are safe: the worker then sends every object again. State:
+  accepted: a start that changed no device an older file would change
+  would touch every step of the side's build, and the window ends at the
+  worker's first round, though that round waits while the control plane
+  is down.
+  Never put an agent's local files back from an older copy: delete them
+  instead, as [the operations doc](operations.md#prepare-a-node) says.
+  Read from dnv's code; not seen in the lab.
 - **An older request can pass a controller node's revision check after a
   failed read of its local files.** Silent. A controller node's agent
   refuses a request whose revision is lower than the one it holds. At its

@@ -76,6 +76,7 @@ func (s *DnAgentServer) syncupSide(
 		st = newSideState(req)
 	}
 	st.req.Store(req)
+	st.synced.Store(true)
 	s.putSide(key, st)
 
 	info, sweep := s.convergeSide(ctx, st, extentSize, connectBudget)
@@ -290,7 +291,10 @@ func (s *DnAgentServer) convergeSideSteps(
 	defer st.tracker.Bind(ctx)()
 
 	// What to remove is derived by subtracting the desired state from what
-	// the node actually holds, never from memory of a past converge.
+	// the node actually holds, never from memory of a past converge. A side
+	// whose request is still its stored file's, no SyncupSide of this
+	// process accepted, removes nothing and reports what it would remove
+	// (sideState.synced; sweepSide; DN2).
 	sweep := s.sweepSide(ctx, st, plan, true, nil)
 
 	state, metaWait := s.ensureSideDev(ctx, st, plan, info)

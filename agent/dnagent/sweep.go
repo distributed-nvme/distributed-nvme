@@ -881,6 +881,28 @@ func (s *DnAgentServer) sweepSide(
 	claims := s.collectClaims(plan.clusterId, plan.dnId)
 	wanted := sideWanted(plan)
 	chain := s.buildSideChain(ctx, plan, actual, claims, wanted, spKnown, res)
+	if !st.synced.Load() && s.migrHeldBack(ctx, actual, claims, plan.spId) {
+		// The pool's migration objects that no held side claims wait for
+		// every side of the pool to be synced (spFullyKnown): this side's
+		// round names its wait, so the worker sends its SyncupSide (DN2).
+		res.Fail(fmt.Sprintf("side %d of sp %d", plan.sideId, plan.spId),
+			errSideAwaitsSyncup)
+	}
+	if remove && !st.synced.Load() {
+		// A converge of a side whose request is still its stored file's —
+		// the startup pass, or the fence timer's converge before the side's
+		// first SyncupSide of this process (sideState.synced) — removes
+		// nothing, as the file may be older than the node: it runs the
+		// transitions and P0, which remove nothing, and reports the chain
+		// (DN2).
+		s.sidePreSteps(ctx, st, plan, actual, wanted)
+		if actual.dmListed {
+			s.retireSuspended(ctx, chain)
+			s.releaseStacks(ctx, chain, actual)
+		}
+		reportChain(chain, res)
+		return res
+	}
 	if !remove {
 		reportChain(chain, res)
 		if verdict {
@@ -902,6 +924,68 @@ func (s *DnAgentServer) sweepSide(
 	s.runChain(ctx, chain, actual, res, s.cloneMetaGate(identified))
 	st.tracker.Keep(sideResKeys(plan))
 	return res
+}
+
+// sweepMode is what a node-level sweep may do (DN2, DN6): sweepRead names
+// the chain and changes nothing (a background read); sweepStart is the
+// startup pass, which also runs P0, which removes nothing, and names the
+// chain; sweepRemove removes it (a SyncupDn).
+type sweepMode int
+
+const (
+	sweepRead sweepMode = iota
+	sweepStart
+	sweepRemove
+)
+
+// errSideAwaitsSyncup is the failure an unsynced side's pass names while its
+// pool's migration objects wait for it (migrHeldBack; DN2).
+var errSideAwaitsSyncup = errors.New("waits for its first SyncupSide of " +
+	"this process: the migration objects of its pool that no held side " +
+	"claims wait for every side of the pool to be synced")
+
+// migrHeldBack says whether the node holds a migration object of the pool
+// spId that no held side claims: a d2, d3 or d5 device, or a clone-metadata
+// record. Such an object is neither removed nor named while a side of the
+// pool is not synced (spFullyKnown), so an unsynced side names its own wait
+// instead. A record read that does not answer says no; the device test
+// stands alone.
+func (s *DnAgentServer) migrHeldBack(
+	ctx context.Context,
+	actual *dnActual,
+	claims *sideClaims,
+	spId uint64,
+) bool {
+	for _, dn := range actual.ours {
+		if dn.SpId() != spId {
+			continue
+		}
+		pair := [2]uint64{dn.Ids[0], dn.Ids[1]}
+		switch dn.Kind {
+		case common.DmKindDnMigrFinal, common.DmKindDnMigrMeta:
+			if _, held := claims.migrDst[pair]; !held {
+				return true
+			}
+		case common.DmKindDnMigrSrc:
+			if _, held := claims.migrSrcDm[pair]; !held {
+				return true
+			}
+		}
+	}
+	recs, err := s.meta.CloneMetaRecords(ctx)
+	if err != nil {
+		return false
+	}
+	claimed := s.claimedMigrs()
+	for _, rec := range recs {
+		if rec.GetSpId() != spId {
+			continue
+		}
+		if _, held := claimed[[2]uint64{spId, rec.GetMigrId()}]; !held {
+			return true
+		}
+	}
+	return false
 }
 
 // cloneMetaGate is the proof a clone-metadata slot must pass before its
@@ -1545,9 +1629,10 @@ func (s *DnAgentServer) dmMapsUnwanted(
 func (s *DnAgentServer) sweepDn(
 	ctx context.Context,
 	st *dnState,
-	remove bool,
+	mode sweepMode,
 	redrive []agent.BaseRedrive,
 ) *agent.SweepResult {
+	remove := mode == sweepRemove
 	res := &agent.SweepResult{}
 	for _, piece := range redrive {
 		res.Fail(piece.What, piece.Err)
@@ -1806,6 +1891,14 @@ func (s *DnAgentServer) sweepDn(
 	sort.Strings(chain.srcConns)
 
 	if !remove {
+		if mode == sweepStart && actual.dmListed {
+			// P0 removes nothing: a suspended per-CN linear the stored list
+			// does not name goes onto its dm-error, and a device a cut-off
+			// reload left suspended under an export is resumed, so no device
+			// stays suspended while the start waits for the worker ([D12]).
+			s.retireSuspended(ctx, chain)
+			s.releaseStacks(ctx, chain, actual)
+		}
 		reportChain(chain, res)
 		s.sweepOrphanRecords(ctx, res, false, unsettled)
 		res.Log(ctx,
@@ -1862,7 +1955,7 @@ func (s *DnAgentServer) dnVerdict(
 	if agent.ValidateExtentSize(st.req.Load().GetExtentSize()) != nil {
 		return &agent.SweepResult{}
 	}
-	return s.sweepDn(ctx, st, false, redrive)
+	return s.sweepDn(ctx, st, sweepRead, redrive)
 }
 
 // sideVerdict is the side-level comparison the side's background read takes

@@ -537,8 +537,8 @@ save, the request before it would stay on disk, and the next startup
 reconcile would converge that older request and undo what the newer one
 did: on a dn, a side the newer `SyncupDn` added, whose own `SyncupSide`
 had then been accepted and built, would be missing from the older side
-list, so the restart would drop that live side and its sweep free the
-side's extents (DN2, DN6).
+list, so the restart would forget that live side and converge the rest
+from the older files until the worker's syncups came (DN2, DN6).
 
 SH6. Enumeration on startup: one listing of the prefix through
 `OsClient.ReadDir`, in the agent's own process, on a ctx carrying the SH15
@@ -2173,9 +2173,11 @@ The order over the rest of the store is: the orphan `migr-bm-*` chunks are
 skipped with its DN whose side is not loaded, and a chunk whose `migr_id`
 no longer matches that side's stored `migr_dst_conf`; then every side whose
 pointer is absent from its DN's stored `side_pointer_list` is dropped, then
-each usable DN's node-level sweep removes what those sides left behind by
-name, then the remaining `side-*` files re-run the `SyncupSide` converge
-(DN8 to DN14) from the stored request — a converge that finds bytes of the
+each usable DN's node-level sweep runs read-only: it names what those sides
+left behind and what else the stored list does not name, and removes no
+device and frees no record, then the remaining `side-*` files re-run the
+`SyncupSide` converge (DN8 to DN14) from the stored request, whose own
+sweep removes nothing either (below) — a converge that finds bytes of the
 side still to zero while the request says `provisioned` false (re)starts
 that side's DN9 zeroing goroutine, which is how provisioning resumes after
 a restart (on a migration destination, only once it holds its run in the
@@ -2185,7 +2187,47 @@ it, DN13); one under `provisioned` true takes the count as complete and
 writes it to its end, zeroing nothing (DN9, row 5); and one whose stored
 length to zero DN8's side conf gate refuses converges and sweeps nothing of
 that side. Then every chunk that was kept is re-applied (SH21 to SH23);
-that step deletes nothing. The chunks an older build left for a migration
+that step deletes nothing.
+
+**The start removes nothing.** The local files may be older than the
+node: a system disk put back from a backup while the data disk stays, old
+files copied into the folder, a mount missing at one start and back at the
+next. So the startup pass removes no device and frees no record, at the
+node's level or at a side's: the node-level sweep of each DN names what the
+stored list does not name, and a side's own sweep (DN6's Scope 2) removes
+nothing until this process accepts a `SyncupSide` of that side
+(`sideState.synced`) — in the startup converge and in the DN12 fence
+timer's converge of a side loaded from its file it names its chain. Both
+still run what removes nothing, so that no device stays suspended while
+the start waits ([D12]): the side's transitions (the fence's clear or end,
+the resume of a linear left suspended after its window) and the park step
+P0 of both scopes (a suspended per-CN linear the request does not name
+goes onto its dm-error, a device a cut-off reload left suspended under an
+export is resumed). A DN's removal is its `SyncupDn`'s sweep, which
+carries the worker's list; a side's is the sweep of its converges from its
+first `SyncupSide` of the process on, whose request is the worker's. A
+side loaded from its file is no proof of its pool's migrations: until its
+`SyncupSide`, the side counts as known by its pointer alone (`knownSides`),
+so the migration objects of its pool and their clone-metadata records,
+which wait for every side of the pool to be held (`spFullyKnown`), are
+neither removed nor named by any sweep, a `SyncupDn`'s included; the side's
+own pass then names its wait while the node holds such an object or record
+of its pool that no held side claims (`migrHeldBack`), which brings its
+`SyncupSide`. What the start names is in the observations' codes, and the
+revision of a file older than the worker's differs from the one it wants,
+so the worker's first round sends the `Syncup*` (`dnv-worker.md` RW4); a
+clean start stays clean. Reason: removal by an older list frees the
+extents of every side made since, which in a pool without RAID loses the
+group's data; an older side file's claims would let the first `SyncupDn`
+tear down a live migration and free its clone-metadata run, which the
+side's own syncup would then take afresh and copy over newer writes. One
+hazard stays (`scope.md` entry "A disk node's agent that starts on older
+local files builds old sides until the worker's first round"): an older
+file of a side still
+makes the start build that side as the file has it, until the worker's
+first round sends its request, which waits while the control plane is
+down; the operations document's rule is the guard (never put an agent's
+local files back from an older copy). The chunks an older build left for a migration
 under way at the upgrade are loaded and re-applied like any other, at the
 places that build gave them; the first piece of the worker's that this
 agent saves, one that is not byte for byte the chunk it holds at that
@@ -2448,7 +2490,8 @@ every step of that pass only logs its failure, nothing ever enumerates the
 object again.
 
 **Scope 1, node-level.** Under the node write lock, in `SyncupDn` after the
-DN converge and in the startup reconcile after every DN has converged. Its
+DN converge, and in the startup reconcile after every DN has converged,
+where it reads only and removes nothing (DN2, The start removes nothing). Its
 wanted set is empty for every side that is not in any authoritative list: a
 `DnErrorName`/`DnLinearName`/`DnSideName` device whose `(sp_id, side_id)`
 appears in no synced DN's `side_pointer_list` **and** in no side whose
@@ -2494,7 +2537,10 @@ synced or reloaded at all nothing is authoritative and the sweep does
 nothing.
 
 **Scope 2, side-level.** Inside `convergeSide` and ahead of its build phase
-(`SyncupSide`), under whatever DN1 locks that caller holds (SH10/SH11). Its
+(`SyncupSide`), under whatever DN1 locks that caller holds (SH10/SH11); in a
+converge of a side whose request is still its stored file's, no
+`SyncupSide` of this process accepted, it runs its transitions and names
+its chain, and removes nothing (DN2, The start removes nothing). Its
 wanted set is exactly what the build phase would ensure for this side's
 plan were DN9's gate open, with the source deferral of `architecture.md`,
 Migration, already applied: `DnSideName` at every level (DN11), the per-CN
@@ -2907,7 +2953,9 @@ SH15's rule is a rule.
 rather than over the devices the enumeration found, closes the crash window
 between a removal and its table update (`sweepOrphanRecords`). It runs on
 every node-level pass — after the pointer drop in `SyncupDn`, and after the
-DNs converge in the startup reconcile. It removes **no** device: the layers
+DNs converge in the startup reconcile, where it frees nothing and names
+what it would free (DN2, The start removes nothing). It removes **no**
+device: the layers
 do that, in the order the kernel needs and stopping the descent where
 something above will not go, and a removal issued from here would jump that
 order. What is left for this step is the record, and the only record it
@@ -4358,12 +4406,13 @@ worker-driven: while leftovers exist, a read's verdict and a converge's
 sweep both name them, so the rounds reply `ReplyCodeLeftover`, the worker
 re-issues the `Syncup*` that owns them (`dnv-worker.md` RW4), and the sweep
 inside it tries again — including after a restart, where the observations
-the startup reconcile stores (SH28) report what the startup sweep could not
-remove. While the node's store disk refuses writes, the re-issued `Syncup*`
-is refused for its failed save before its converge, so it runs no sweep
-(SH5), and no syncup re-drives the leftover until a save holds again;
-meanwhile only a converge no syncup brings, a background converge attempt
-(SH11) or a restart's reconcile (DN2), can sweep it (Known limits). The
+the startup reconcile stores (SH28) report what the startup sweep left, as
+it removes nothing (DN2). While the node's store disk refuses writes, the
+re-issued `Syncup*` is refused for its failed save before its converge, so
+it runs no sweep (SH5), and no syncup re-drives the leftover until a save
+holds again; no other pass removes it, as neither a background converge
+attempt (SH11) nor a restart's reconcile (DN2) removes anything of a side
+no `SyncupSide` of the process has synced (Known limits). The
 conditions only a read's verdict names re-drive on the rounds that answer a
 read's observation (DN16, SH31). While a leftover keeps every round
 re-sending, each re-sent `Syncup*` cancels the read that the round which
@@ -4928,7 +4977,9 @@ else reported through `agent_reply` is still a protocol-level refusal.
   delete's. So does every re-converge a syncup at the held revision would
   bring, such as a leftover's sweep (DN17) or the start of a side's zeroing
   that nothing runs (DN16); only the converges no syncup brings still run —
-  the background converge attempts (SH11) and a restart's reconcile (DN2).
+  the background converge attempts (SH11) and a restart's reconcile (DN2),
+  which remove nothing (DN2, The start removes nothing), so nothing is
+  removed for the whole fault, a restart's included.
   The one background converge is the DN12 fence timer's (the cn runs none,
   `cnagent.md` CN10), so on the dn two waits last the whole fault short of
   an agent restart, whose reconcile converges each side from its held

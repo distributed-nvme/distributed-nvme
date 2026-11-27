@@ -399,6 +399,12 @@ times and trace id and so differ by nature; the chunk is still applied (SH21);
 unchanged re-sends leave the new log free of any mutating command or block or
 configfs write (SH16, SH17, DN5, DN9); and a revision below the one those
 re-sends stored is refused as stale in a normal reply (SH8, SH9, DN4).
+Then one node's node file is copied aside, a second side is made there,
+and that agent starts again on the older copy, which lists the first side
+alone (DN2, The start removes nothing): the newer side's device is still
+there, a fresh round names it with the leftover code, the worker's list at
+the current revision keeps it, and the side's syncup, its file gone with the
+older list, adopts it.
 
 **loglevel** proves at the default log level what a log holds (`log.md` R6,
 R9, R13; `grpc.md` L6): one node's agent restarts with no `--log-level`; a

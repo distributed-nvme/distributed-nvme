@@ -886,6 +886,16 @@ var (
 	crashRequestSave = regexp.MustCompile(`^writeproto \S*/(dn|side)-`)
 	crashPieceSave   = regexp.MustCompile(`^writeproto \S*/migr-bm-`)
 	crashLinearHold  = regexp.MustCompile(`^cmd dmsetup suspend (\S*-d1-\S*)$`)
+	// crashRemoval is a call of a sweep's removal: a port link, an nvmet
+	// directory, a dm device. A host link's unlink is left out, as a build
+	// that changes a host list makes it too.
+	crashRemoval = regexp.MustCompile(
+		`^cmd rm -f ` + agent.NvmetRoot + `/ports/|^cmd rmdir ` +
+			agent.NvmetRoot + `/|^cmd dmsetup remove `)
+	// crashSideDevRemoval is the removal of a side device, after which the
+	// sweep frees the side's record (a write of the disk's table).
+	crashSideDevRemoval = regexp.MustCompile(`^cmd dmsetup remove \S*-d[45]-`)
+	crashTableWrite     = regexp.MustCompile(`^writeblock `)
 )
 
 // crashResendExpected names why a cut may leave the worker something to
@@ -896,7 +906,15 @@ var (
 // calls, lines, ran.
 func crashResendExpected(lines []string, ran int) string {
 	done := lines[:min(ran, len(lines))]
-	for _, line := range lines[len(done):] {
+	// A table write counts as a record's free only after the removal of the
+	// device the record backs.
+	freeFrom := slices.IndexFunc(lines, crashSideDevRemoval.MatchString)
+	freesRecord := freeFrom >= 0
+	for i, line := range lines[len(done):] {
+		if freesRecord && len(done)+i < freeFrom &&
+			crashTableWrite.MatchString(line) {
+			continue
+		}
 		switch {
 		case crashRequestSave.MatchString(line):
 			return "the cut fell before the request's save, so the next " +
@@ -904,6 +922,11 @@ func crashResendExpected(lines []string, ran int) string {
 		case crashPieceSave.MatchString(line):
 			return "the cut fell before the piece's save, so it waits " +
 				"for the next push (DN15)"
+		case crashRemoval.MatchString(line),
+			freesRecord && crashTableWrite.MatchString(line):
+			return "the cut fell before a removal, and the next agent's " +
+				"startup pass removes nothing but names it, so the " +
+				"worker's syncup removes it (DN2)"
 		}
 	}
 	for i, line := range done {

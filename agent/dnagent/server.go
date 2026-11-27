@@ -274,6 +274,13 @@ type sideState struct {
 	// no later converge of this process opens it again over linears phase 2
 	// has already retired. A restart forgets it (DN12's known limit).
 	fenceEnded bool
+	// synced says this process accepted a SyncupSide for the side, whose
+	// request is then the worker's own. Until then the side's own sweep
+	// removes nothing, and the side proves nothing of its pool's migrations
+	// (knownSides) (DN2): a side loaded from its file at the start converges
+	// it, and its sweep, there and in the fence timer's converge, only
+	// reports, as the file may be older than the node.
+	synced atomic.Bool
 }
 
 // NewDnAgentServer builds the dn role server. oc is the process's single

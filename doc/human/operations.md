@@ -2016,10 +2016,10 @@ Safe steps, as root on the machine:
     `cntlr-`, `clone-bm-`, `probe-cn-` or `torn-` for the controller node
     agent, as a file of its own. Never put an agent's local files back from
     an older copy, as from a backup or a snapshot of the system disk: a disk
-    node's agent that starts on older files removes every side made since
-    their time, with its data ([the scope
-    page](scope.md#55-records-and-tools)). Delete them instead; the worker
-    then sends the agent its desired state again.
+    node's agent that starts on older files removes nothing, but it builds
+    each side as the older file has it until the worker's first round
+    ([the scope page](scope.md#55-records-and-tools)). Delete them instead;
+    the worker then sends the agent its desired state again.
 11. Run the node check with each agent's settings ([Check a node before it
     joins](#check-a-node-before-it-joins)), and fix every `FAIL`.
 12. Start the agents, and enable them so that they start at boot too:
@@ -6906,9 +6906,9 @@ Safe steps:
 6. For each agent: stop it, copy its local files aside, delete them, and
    start it again. The copy is the last record of what the node was told
    before the restore. Never put the copy back, nor local files from any
-   other older copy: a disk node's agent that starts on older files removes
-   every side made since their time, with its data ([the scope
-   page](scope.md#55-records-and-tools)).
+   other older copy: a disk node's agent that starts on older files builds
+   each side as the older file has it until the worker's first round ([the
+   scope page](scope.md#55-records-and-tools)).
 7. First set each subsystem's list to exactly the hosts that use it now.
    `dnvctl ss list` shows each list. On each host, `nvme list-subsys` shows
    the subsystems it is connected to, and
