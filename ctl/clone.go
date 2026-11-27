@@ -40,9 +40,9 @@ func registerClone(root *cobra.Command) {
 // can name every cntlr of its source pool and read on after the pool's
 // failover: one entry per item of the longer list, entry i taking the i-th
 // address and the i-th port; a list of one item goes to every entry, so one
-// port serves every address, and a longer list shorter than the other leaves
-// the missing items empty, which the gateway refuses, as dnvctl invents no
-// value the operator did not type; --src-tr-type and --src-adr-fam go to
+// port serves every address, and a list of two or more items that is
+// shorter than the other leaves the missing items empty, which the gateway
+// refuses, as dnvctl fills in no missing item of a list; --src-tr-type and --src-adr-fam go to
 // every entry. Nothing is refused here (CT8): every parsed value is sent.
 //
 // The list is EMPTY — never nil — when all four parts were given as empty

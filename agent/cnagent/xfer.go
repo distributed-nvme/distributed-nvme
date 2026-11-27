@@ -154,8 +154,8 @@ func (s *CnAgentServer) xferSubsysConf(
 // (common.XferNsIdentity): a Linux host refuses a namespace whose uuid or
 // nguid another subsystem of the machine holds, as a host of the volume
 // that is also a controller node of the destination pool holds the
-// origin's. One without it, made before the field, keeps the origin's, so
-// a transfer that runs keeps its identity across an upgrade. Every cntlr
+// origin's. One without it keeps the origin's, so a transfer that runs
+// keeps its identity across an upgrade. Every cntlr
 // derives the same either way ([D2]).
 func (s *CnAgentServer) xferNsConf(
 	plan *cntlrPlan,

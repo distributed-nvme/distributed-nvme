@@ -1363,7 +1363,9 @@ are those of `architecture.md`, Subsystems, namespaces.
   validate) and absent; the shared-NQN check (`sharedNqnCheck`): the names
   of the cluster's other pools that hold the NQN from one range of the pool
   records before the STM (`sharingPoolNames`), two or more of them
-  `FAILED_PRECONDITION` there, and in the STM the one pool's record again,
+  `FAILED_PRECONDITION` there — ahead of the pool's lookup and the token
+  check, so a stale token or an unknown pool gets that answer first, an
+  exception to GW6's first read — and in the STM the one pool's record again,
   the NQN it still holds `FAILED_PRECONDITION` naming it without
   `share_nqn`, and with it a CN of a cntlr of both pools
   `FAILED_PRECONDITION` naming the CN (`architecture.md`, Subsystems,
@@ -1988,7 +1990,8 @@ Nor do a forced `CancelMigration`'s reads of the primary's report after a
 cutover: for a leg to be copied again, a read before its write that does
 not answer, or a pool with no primary to ask, leaves the reply's `loss`
 text saying that the report did not answer, and the wait after the write
-tries again a second later, up to its bound (`CancelMigration`).
+tries again a second later, up to its bound, where the call answers
+`DEADLINE_EXCEEDED`, the cancel committed (`CancelMigration`).
 The agent-side `AgentReply.code` convention does not apply to `Get*Size`,
 `Get*Info` or `Get*Bm` beyond what their replies define: `ForceStartGroup`'s
 check reads the group's row whatever the reply's code, as `CreateRepair`
@@ -2040,7 +2043,7 @@ The complete call matrix:
 | `FinishMigration` with `force` false | `GetSideInfo` | between the STMs |
 | `ForceStartGroup` without `cancel` | `GetCntlrInfo` | between the STMs |
 | `CreateRepair`, when the pool has a primary | `GetCntlrInfo` | between the snapshot and the op, every round |
-| `CancelMigration` with `force`, after the cutover | `GetCntlrInfo` | between the snapshot and the STM when the pool has a primary, then after the STM once a second until the primary's report shows the old side alone, up to the wait's bound |
+| `CancelMigration` with `force`, after the cutover | `GetCntlrInfo` | between the snapshot and the STM when the pool has a primary, then after the STM once a second until the primary's report shows the old side alone and, for a leg copied again, names the recopy, up to the wait's bound |
 | `InspectGroup` | `GetCntlrInfo`, then `InspectGrp` | after the snapshot |
 | `GetThinDeviceBitmap` | `GetCntlrInfo`, when a namespace exports the td, then `GetThinDeviceBm` | after the STM |
 | `GetClusterStatus` | `GetCntlrInfo` of each pool's primary and of each enabled standby with no health epoch, and `GetSideInfo` of each migration's destination past its cutover | after each pool's snapshot |

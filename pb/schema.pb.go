@@ -13953,8 +13953,9 @@ type CancelMigrationReply struct {
 	// A forced cancel after the cutover: true when it marked the leg to be
 	// copied again (Leg.recopy_revision), and, non-empty, why the writes
 	// since the cutover are lost on the leg, or may be: a group that is not
-	// md-raid1, a primary's report that holds no other leg of the group in
-	// sync, or a report that did not answer (architecture.md, Migrations).
+	// md-raid1 or has one leg, a primary's report that holds no other leg of
+	// the group in sync, a report that did not answer, or a pool with no
+	// primary (architecture.md, Migrations).
 	// Appended, never renumbered.
 	CopyAgain     bool   `protobuf:"varint,2,opt,name=copy_again,json=copyAgain,proto3" json:"copy_again,omitempty"`
 	Loss          string `protobuf:"bytes,3,opt,name=loss,proto3" json:"loss,omitempty"`

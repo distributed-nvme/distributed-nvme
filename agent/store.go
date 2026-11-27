@@ -390,8 +390,8 @@ func (s *Store) Probe(ctx context.Context, path string) error {
 }
 
 // Test is a dn agent's test of its store disk (dnagent.md DN18), which its
-// store test loop runs at a fixed interval: while no refusal holds — Probe
-// writes on every read then — it writes the probe file at path, the write a
+// store test loop runs at a fixed interval: while no refusal holds (while
+// one holds, Probe writes on every read), it writes the probe file at path, the write a
 // Save makes (a temp file, its fsync, the rename and the directory's fsync,
 // under the same bound) of size random bytes, and removes it. A write the
 // disk refuses is a refusal as a Save's is (Refusal, Row), so the node's

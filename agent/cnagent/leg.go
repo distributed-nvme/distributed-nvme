@@ -573,9 +573,9 @@ func (s *CnAgentServer) ensureLeg(
 // is looked up again around its number): the number read by the head name view holds, taken
 // only once a second lookup of the leg, made after that read in the pass's
 // walk, names the same head. The steps between the lookup that named the
-// head and the wrapper's — the other member's in-sync test before a cut, a
-// dead path's disconnect, a primary's reads of its stale paths when no
-// rescan goes through — can take seconds, and a head's name holds its subsystem's number, which the
+// head and the wrapper's — a dead path's disconnect, a primary's reads of
+// its stale paths when no rescan goes through or the lookup after one fails
+// — can take seconds, and a head's name holds its subsystem's number, which the
 // kernel frees with the leg's subsystem and gives to the next new
 // controller: another cntlr's converge, which runs beside this one, or a
 // dn agent on the machine can connect one meanwhile, and a number read by

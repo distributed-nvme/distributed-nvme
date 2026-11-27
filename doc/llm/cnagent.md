@@ -1096,13 +1096,10 @@ name its last lookup of the leg found, and takes it only once one more
 lookup of the leg, in the pass's walk and made after that read, finds
 the same head (`legHeadNo`). A head that changed, or that lookup failing,
 fails the leg for the pass, and the wrapper is left as it is. Reason: the
-steps between the lookup and the wrapper's — the in-sync test of the other
-member before a cut, whose read of the array in sysfs can wait seconds
-behind a dead leg (`Md.Detail`; The cut of a migrating leg's path, below),
-when no cut follows it and so no lookup, the disconnect of a dead path
+steps between the lookup and the wrapper's — the disconnect of a dead path
 (below), and a primary's reads of its stale paths when no rescan of them
-goes through and so no lookup follows (The write cache of a leg's path,
-below) — can take seconds. A head's name holds its
+goes through, or the lookup after one fails, and so the view stays the
+older one (The write cache of a leg's path, below) — can take seconds. A head's name holds its
 subsystem's number ("nvme<subsystem>n<head>"), the number of the
 subsystem's first controller, which the kernel frees with the subsystem
 and gives to the next new controller; one that starts a new subsystem,
@@ -2237,8 +2234,8 @@ dm-clone (CN18).
   that bitmap, save the regions behind a copy onto another new leg, which
   md clears as that copy passes them, the reason a retired leg taken back
   is added as a fresh member (the take-back check, below); a `leg_list`
-  member put back after such a copy is still re-added from the bitmap
-  (Known limits). It is not a write of "re-add" to the member's "state":
+  member put back after such a copy can still be re-added from the bitmap,
+  as when the array was built anew since (Known limits). It is not a write of "re-add" to the member's "state":
   that write is made in the agent's own process and waits on md's own
   lock, which a superblock write stuck on a member holds for as long as
   that member's IO is held; it cannot be killed and would hold the
@@ -2282,7 +2279,9 @@ dm-clone (CN18).
   does not keep is never named itself. Nothing remembers the failure.
 
   The cn agent runs mdadm --zero-superblock only in the forced start
-  (below), which an operator's call asks for. Otherwise a leg leaves an
+  (below) and in the recopy (The recopy, below), each of which an
+  operator's call asks for, the recopy a forced migration cancel's.
+  Otherwise a leg leaves an
   array only as a repair's bad leg, which the finish keeps as a retired
   leg and an abort leaves in `leg_list`; as a repair's new
   leg taken from a retired leg, which a cancel gives back as that retired
@@ -3260,9 +3259,10 @@ pool. Reason: a refusal can also come from a cause of the moment that
 `thin_check` does not name, which a later run does not meet, and the
 damaged reason stops every failover for the pool.
 
-The runs live in this incarnation's memory (`cntlrState.thinChecks`), as a
-disk node's zeroing does (`dnagent.md` DN9): an agent restart checks again
-from the next converge that finds the mark. A pass that builds no pool for
+The runs live in this incarnation's memory (`cntlrState.thinChecks`), and,
+unlike a disk node's zeroing (`dnagent.md` DN9), nothing of a run is
+saved: an agent restart checks again from the start, at the next converge
+that finds the mark. A pass that builds no pool for
 a slice, as a demotion's, a level below the pools, a request that no longer
 lists the slice or a cntlr the agent drops, stops the slice's run, waits
 for it to end and forgets it (`keepThinChecks`), before the pass's sweep, so
@@ -4233,9 +4233,9 @@ nvmet connection whose host is off it (CN33); one namespace whose
 nsid is `ori_ns_idx`, with the transfer device as its "device_path" and,
 for a record that carries `own_identity`, as `CreateTransfer` sets on
 every new transfer, the "uuid" and "nguid" of `common.XferNsIdentity`,
-made from the cluster, pool and transfer ids; a record without it, made
-before the field, keeps the origin namespace's, so a transfer that runs
-keeps its identity across an upgrade (the reason is `architecture.md`,
+made from the cluster, pool and transfer ids; a record without it keeps
+the origin namespace's, so a transfer that runs keeps its identity across
+an upgrade (the reason is `architecture.md`,
 Transfers); ANA optimized on the primary,
 inaccessible on standbys (below). The origin namespace's own retirement is
 CN16's effective-suspend rule. A cntlr that keeps the transfer device but
@@ -6210,7 +6210,11 @@ reads wait on a member's disk node as the others do, and they are taken
 only for a group with no array running, on members that serve; and, on a primary, the md walk and
 array read of CN10's cut test (`otherMemberInSync`), taken afresh for each
 leg whose paths `pathsToCut` names, its answer deciding whether the
-verdict names them.
+verdict names them; and the reads CN28's list above adds, the superblock
+reads of the new legs of a repair whose abort waits with no array and the
+direct read of a slice's metadata superblock for the needs-check mark, and,
+for a shared NQN, the "device_path" read of each namespace under the
+kernel subsystem (`ownNs`, `foreignNs`; CN16, A shared NQN).
 
 **Device numbers.** A dm table names each device it maps by its number.
 The number the agent writes into a table, or checks a live table

@@ -779,8 +779,9 @@ func (d *DiskMeta) ProbeHeader(
 }
 
 // LookupSide / LookupCloneMeta return the live record, whoever's disk it is;
-// no path of the agent hands a side's record out through LookupSide, which
-// reads its counts through LookupConfirmedSide (DN5). A load failure is
+// no path of the agent hands a side's record out through LookupSide: the
+// converge, the probe and the zeroing loop read the record through
+// LookupConfirmedSide (DN5). A load failure is
 // reported as an error and never collapsed into "absent" — a caller must be
 // able to tell an unreadable disk from a side that was never allocated.
 // Records are never mutated in place — every mutator saves a clone — so a

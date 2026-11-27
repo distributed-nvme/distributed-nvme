@@ -904,13 +904,15 @@ The entries:
   in the lab.
 - **A disk changed under a running disk node's agent can be read from
   the page cache.** When the device under a disk node agent's disk path
-  changes while a side holds it open — a device-mapper table swapped to
+  changes while a side holds it open — a device-mapper device pointed at
   another device, or the disk written through another device node — the
-  agent's check round reads the new header past the page cache and
-  reports the node in error, so it takes no new side; but the agent then
-  reads its table again through the page cache, which can still hold the
-  old disk's header and table, and its sides' converges can use and save
-  that old table on the new disk. It needs an operator's step outside
+  agent's check round reads the new disk's header block, where dnv records
+  which node the disk belongs to, past the page cache, and reports the
+  node in error, so it takes no new side; but the agent then reads the
+  disk's own record of which extents each side holds again through the
+  page cache, which can still hold the old disk's header and record, and
+  its sides' converges can use that old record and save it on the new
+  disk. It needs an operator's step outside
   dnv. State: fix later. Read from dnv's code; not seen in the lab.
 - **A disk node's agent that starts on older local files builds old sides
   until the worker's first round.** At its start a disk node's agent

@@ -715,13 +715,13 @@ unlike the flag updates `gateway.md` GW6 makes a no-op.
 
 ### `clone` — `ctl/clone.go`
 
-`clone create` and `clone set-tr` send several `src_tr_conf` entries:
+`clone create` and `clone set-tr` send one or more `src_tr_conf` entries:
 `--src-tr-addr` and `--src-tr-svc-id` take comma-separated lists, one
 entry per item of the longer list, entry i taking the i-th address and
 the i-th port; a list of one item goes to every entry, so one port serves
-every address, and a longer list shorter than the other leaves the
-missing items empty, which the gateway refuses, as dnvctl sends no value
-nobody typed; `--src-tr-type` and `--src-adr-fam` go to every entry. A clone given every
+every address, and a list of two or more items that is shorter than the
+other leaves the missing items empty, which the gateway refuses, as dnvctl
+fills in no missing item of a list; `--src-tr-type` and `--src-adr-fam` go to every entry. A clone given every
 cntlr of its source pool reads on after the pool's failover, as the
 destination connects to each (`cnagent.md` CN18). Nothing is refused
 (CT8). They send an empty list — never a default transport — when all
@@ -792,8 +792,8 @@ the old side then serves its content as of the cutover, in an md-raid1
 group of more than one leg the primary copies the leg again from a leg in
 sync, and the reply prints `copy_again` and `loss`, which says where the
 writes since the cutover are lost (`architecture.md`, Migrations, The
-forced cancel). The call answers once the primary uses the old side alone,
-which takes up to `MigrCancelWaitSeconds`, so it needs a `--timeout` above
+forced cancel). The call answers once the primary uses the old side alone
+and, for a leg copied again, reports the recopy begun, which takes up to `MigrCancelWaitSeconds`, so it needs a `--timeout` above
 that, as the flag's help says.
 `migr get` prints the record
 as stored, its `cutover_pending` included (CT4), which tells whether a

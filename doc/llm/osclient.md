@@ -463,7 +463,7 @@ the method set is exactly the following, each taking the caller's ctx:
 The raw-device metadata path of `architecture.md`, [D13]: the dn agent reads
 and writes its own on-disk format (header block, A/B volume-table slots,
 dm-clone metadata slots) directly on the `--disk` device through these two
-methods, but its check round's read of the header, which goes through
+methods, all but its check round's read of the header, which goes through
 ReadBlockDirect (`dnagent.md` DN18).
 
 * Each checks the ctx error after acquiring the semaphore, exactly like the

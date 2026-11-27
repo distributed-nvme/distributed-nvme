@@ -133,12 +133,11 @@ modules, as the lab's controller node VMs do; on any other pair its
 preflight fails. iptables and
 tc are left to the stages that use them, the partition stages, redund's dial
 and slow leg stages, pause's and groupcut's cuts and clone_xfer's slowed
-copy, and the suite's own check of thin_check to thinrepair, on its second
-VM, so a VM without one fails in the stage that needs it rather than a run
-that might never reach one. The agent itself runs thin_check earlier, in
-groupcut's cut on CN1, which the suite never checks for it, and in repair's
-re-assembly on CN2, before thinrepair checks it; the node check (`dnagent.md` CM5) lists it among the cn's
-commands.
+copy, so a VM without one fails in the stage that needs it rather than a
+run that might never reach one. thin_check, which the agent runs in
+repair's re-assembly, groupcut's cut and thinrepair, fails a VM without it
+in the nodecheck case, whose node check (`dnagent.md` CM5) lists it among
+the cn's commands, and thinrepair checks it again on its second VM.
 
 ## Lab facts
 
@@ -1322,15 +1321,15 @@ suite's small metadata can end before the next read, or in a later read;
 it reads CN1 until the pool's row reads OK, for at most
 `GCUT_CHECK_WAIT`, and re-sends CN1's request only when a read answers the
 leftover code, as the worker does, the read naming the absent pool once
-the check has passed. The default run is one cut of 3 s,
+the check has passed. The default run is a cut of `GCUT_GATE_SECS`,
 which passes only if a write was held for about the cut's length, so the
 rule held a leg path the writes need (a rule aimed at another port fails
 it), no write failed, writes came back on CN2, every acknowledged block
 reads back and the pool reads writable with no needs_check flag; the gate
 names every check that fails, but reads the held write only where no write
 failed, as a failed write shows the rule held a leg path too, and a block
-rewritten behind the read back, a gate cut of `GCUT_GATE_SECS` and a
-wait for writes back of no time (`GCUT_BACK_SECS`) each fail it; then one
+rewritten behind the read back, a `GCUT_GATE_SECS` set long enough to
+break md and a `GCUT_BACK_SECS` set to no time each fail it; and then one
 cut of `GCUT_CHECK_SECS`, which passes only if no write came back on
 CN2, the failover ran, CN1's pool row read PROVISIONING with the check's
 details and then the pool read writable with no needs_check, the host's new write through CN1

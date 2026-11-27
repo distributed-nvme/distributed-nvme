@@ -162,7 +162,7 @@ type sideClaims struct {
 // built before a restart that lost the local store has no claim here until
 // that side's request comes back, and a side loaded from its file may claim
 // less than the node holds, which is why both scopes judge a migration
-// object only once every side of its sp this node may host is held,
+// object only once every side of its sp this node may host is synced,
 // accepted by a SyncupSide of this process (sideState.synced). Both read
 // that set (knownSides) before the claims: a side stored in between is then
 // either still missing from it, which keeps the gate shut, or visible here.
@@ -994,7 +994,7 @@ func (s *DnAgentServer) migrHeldBack(
 
 // cloneMetaGate is the proof a clone-metadata slot must pass before its
 // record is released: no side claims the migration, and every side of that sp
-// which this node may host is held, accepted by a SyncupSide of this process
+// which this node may host is synced, accepted by a SyncupSide of this process
 // (sideState.synced).
 // The slot lives in the [D13] on-disk table, so releasing one early is a
 // table-level mistake, not a local one. Without the second half a side
@@ -1688,7 +1688,7 @@ func (s *DnAgentServer) sweepDn(
 	// side's own SyncupSide — "no held side claims it" proves nothing: that
 	// side may be the one playing the migration, and taking a source's d2
 	// and :3: export strands the destination's dm-clone. Such an object is
-	// neither removed nor named until every side of its sp in `known` is held,
+	// neither removed nor named until every side of its sp in `known` is synced,
 	// accepted by a SyncupSide of this process — the proof the clone-metadata
 	// record waits for too (cloneMetaGate), and the one the side-level pass
 	// waits for (buildSideChain) — and the wait ends by itself: a side with

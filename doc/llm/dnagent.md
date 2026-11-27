@@ -2186,8 +2186,8 @@ The order over the rest of the store is: the orphan `migr-bm-*` chunks are
 skipped with its DN whose side is not loaded, and a chunk whose `migr_id`
 no longer matches that side's stored `migr_dst_conf`; then every side whose
 pointer is absent from its DN's stored `side_pointer_list` is dropped, then
-each usable DN's node-level sweep runs with no removal: it runs P0
-(below), names what those sides left behind and what else the stored list
+each usable DN's node-level sweep runs with no removal: it runs P0 (DN6,
+The layers), names what those sides left behind and what else the stored list
 does not name, and removes no device and frees no record, then the remaining `side-*` files re-run the
 `SyncupSide` converge (DN8 to DN14) from the stored request, whose own
 sweep removes nothing either (below) — a converge that finds bytes of the
@@ -2224,15 +2224,15 @@ first `SyncupSide` of the process on, whose request is the worker's. A
 side loaded from its file is no proof of its pool's migrations: until its
 `SyncupSide`, the side counts as known by its pointer alone (`knownSides`),
 so the migration objects of its pool and their clone-metadata records,
-which wait for every side of the pool to be held (`spFullyKnown`), are
+which wait for every side of the pool to be synced (`spFullyKnown`), are
 neither removed nor named by any sweep, a `SyncupDn`'s included; the side's
 own pass then names its wait while the node holds a migration device
 (`DnMigrSrcName`, or a destination's dm-clone or its clone-metadata
-wrapper) or a clone-metadata record of its pool that no loaded side claims
-(`migrHeldBack`), which brings its `SyncupSide`. A source export or a
-destination's source connection left alone names no wait, so it stays
-until a `SyncupSide` of the pool's sides comes for another reason
-(Known limits). What the start names is in the observations' codes, and the
+wrapper) or a clone-metadata record of its pool that no held side claims
+(`migrHeldBack`), which brings its `SyncupSide`. A migration source export
+whose side's stored level wants the source's device but no export
+(`SP_LEVEL_NO_SIDE` and up) names no wait, so it stays until a `SyncupSide`
+of the pool's sides comes for another reason (Known limits). What the start names is in the observations' codes, and the
 revision of a file older than the worker's differs from the one it wants,
 so the worker's first round sends the `Syncup*` (`dnv-worker.md` RW4); a
 clean start stays clean. Reason: removal by an older list frees the
@@ -2460,8 +2460,12 @@ probe-first (SH16), building `DnInfo` as it goes:
   that share one folder of local files — serves each side only from a disk
   whose header names the side's own disk node, whichever of the two
   converged last, and the disk node the header does not name reads its
-  disk as foreign, a meta row in error, which marks it unhealthy in its
-  cluster (`dnv-worker.md` HL1). While no read has answered, the DN6
+  disk as foreign, a meta row in error. For an address made a disk node of
+  a second cluster, that row reaches the second cluster's worker and marks
+  the node unhealthy there (`dnv-worker.md` HL1); for two agents that share
+  a folder, the agent holds the other disk node from its file alone, and
+  that disk node's worker reaches the other agent, so this row reaches no
+  worker. While no read has answered, the DN6
   record step says so and the verdict is not clean, which re-drives this
   converge. The side converge's first look at the record, which fills the
   counters, and the DN18 side probe pass the check too
@@ -2533,7 +2537,7 @@ load is on disk but held by none until its `SyncupSide`) goes — save a
 `DnSideName` device while the sweep cannot settle every export of its sp and
 no side of the sp anchors it (An sp waits for its exports, below) — together
 with the migration objects no held side claims (once every side of their sp
-this node may host is held, below) and the exports this agent can attribute
+this node may host is synced, below) and the exports this agent can attribute
 to itself that name no side it must keep — a `SideToCnNqn` export carries no
 dn id, so it is attributed before it is judged (below), or the sweep would
 take a sibling agent's. It judges only the `SideToCnNqn` exports of an sp
@@ -2545,13 +2549,13 @@ it can own none of an sp it has nothing of. It never touches a side that
 that lost `--local-store` but kept its disk must rebuild those sides from
 their records, and sweeping them would free the extents and send the next
 `SyncupSide` through the provisioning protocol again, zeroing live data.
-Nor, while such a side is not held — its file absent or unreadable, or
+Nor, while such a side is not synced — its file absent or unreadable, or
 loaded from its file and not yet synced by a `SyncupSide` of this process
 (`sideState.synced`, DN2) — does it judge a migration object of that side's
 sp: the migration objects follow the known-with-state rule of the
 `CloneMetaRecord` (the record rule, below). Each names `(sp_id, migr_id)`
-and no side, and the claim rule reads the loaded sides' requests only, so
-while any side of its sp is not held, "no loaded side claims it" proves
+and no side, and the claim rule reads the held sides' requests only, so
+while any side of its sp is not synced, "no held side claims it" proves
 nothing — that side may be the one playing the migration. Judging them anyway, in the `SyncupDn` that brings a
 lost store's pointer list back, would take a source's `DnMigrSrcName` and
 its `MigrSrcNqn` export out from under the destination's dm-clone, whose
@@ -2562,9 +2566,9 @@ and the wait ends by itself: a side with no file loaded answers its Check
 round `ReplyCodeUnknownObject` until its `SyncupSide` stores the request, and
 that rejection is what brings the `SyncupSide` (`dnv-worker.md` RW4); a side
 loaded from its file names its own wait while the node holds a migration
-device or a clone-metadata record of its pool that no loaded side claims
+device or a clone-metadata record of its pool that no held side claims
 (`migrHeldBack`, DN2), so its rounds answer the leftover code, which brings
-it; once every side of the sp this node may host is held, the next pass
+it; once every side of the sp this node may host is synced, the next pass
 judges the object by the claim rule again. A destination's source connection waits with its
 dm-clone, not only behind L3's stop rule: with the clone out of the chain,
 L3 would find no clone of its own to fail on and disconnect the source under
@@ -2813,7 +2817,8 @@ can go to another migration meanwhile.
 **The layers.** Each scope removes its unwanted objects in one order,
 top-down. Every position is a dependency, not a preference.
 
-*Before the first layer*, every suspended per-CN dm-linear the pass is
+*Before the first layer* (the dn sweep's P0), every suspended per-CN
+dm-linear the pass is
 about to remove, or whose export it is about to remove — wanted or not — is
 put on its dm-error and resumed: DN12's phase 2, brought forward. A
 dm-error that is gone is built first, or the step would fail on every pass.
@@ -2975,7 +2980,7 @@ re-allocate them and zero live data away (`provisioned` false) or, at
 ("record missing", DN9) — both outcomes lose the data. A `CloneMetaRecord`
 is an orphan only when no held side claims its `(sp_id, migr_id)` (a
 claim no level gates, above) **and**
-every side of that `sp_id` this node may host is held, accepted by a
+every side of that `sp_id` this node may host is synced, accepted by a
 `SyncupSide` of this process (`sideState.synced`, DN2) — otherwise a side it has not heard from yet could
 still own the slot, and freeing it would strand an in-flight migration
 whose hydration is supposed to resume from disk (`architecture.md`,
@@ -3115,7 +3120,7 @@ their dm-errors when after it (Known limits). The `SyncupDn` that brought
 the list back left the side's devices and the exports attributed to it in
 place (DN6's Scope 1), and the migration objects of its sp as well: both of
 DN6's scopes judge a migration object only once every side of its sp this
-node may host is held, so neither that pass nor the first `SyncupSide` of
+node may host is synced, so neither that pass nor the first `SyncupSide` of
 another listed side of the same sp takes a migration source's
 `DnMigrSrcName` and `MigrSrcNqn` export, or a destination's dm-clone,
 wrapper and source connection, from under a live migration before the
@@ -4748,14 +4753,16 @@ else reported through `agent_reply` is still a protocol-level refusal.
 
 ## Known limits
 
-* A migration source export or a destination's source connection that a
-  side loaded from its file at the start does not claim is held back with
-  its pool's migration objects until every side of the pool is synced (DN2,
-  Scope 1), but names no wait: the side's own pass names one only for a
-  migration device or a clone-metadata record (`migrHeldBack`). Left alone,
-  as after a failed disconnect, it stays until a `SyncupSide` of the
-  pool's sides comes for another reason, such as a new revision, while the
-  side's rounds read clean.
+* A migration source export is held back with its pool's migration
+  objects until every side of the pool is synced (DN2; DN6, Scope 1), but
+  names no wait of its own: the side's own pass names one only for a
+  migration device or a clone-metadata record (`migrHeldBack`), and a
+  source export always has its unclaimed source device beside it but where
+  its side's stored level wants that device and no export
+  (`SP_LEVEL_NO_SIDE` and up). Such an export stays until a `SyncupSide` of
+  the pool's sides comes for another reason, such as a new revision, while
+  the side's rounds read clean. A destination's source connection always
+  has its unclaimed wrapper beside it, which names the wait.
 * The migration destination's connect to the migration source export
   (DN13) takes no connect place and dials nothing first, as the cn agent's
   connects do (`cnagent.md` CN10). A source disk node whose machine is down

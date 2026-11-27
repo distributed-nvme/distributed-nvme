@@ -36,7 +36,8 @@ const (
 // dn-* file does not load, no side or chunk whose DN is not loaded is loaded
 // or deleted, and while a side-* file does not load, neither is a chunk whose
 // side is not loaded but whose loaded DN still names that side — converge
-// every loaded DN, tear down sides whose pointer left their DN's list,
+// every loaded DN, forget sides whose pointer left their DN's list (their
+// resources are named, not removed),
 // converge the rest, then re-apply every bitmap chunk it loaded. Each DN's
 // observation is stored once its node-level sweep has run, and each side's
 // once its converge has (SH28); a side the pass skips gets none. It runs

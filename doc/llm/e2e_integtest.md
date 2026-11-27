@@ -758,8 +758,8 @@ at two slices or more, and at one slice setup's pattern, which there fills
 the whole device, so that at one slice no part of the device is left
 unwritten and the digest covers all of it. A transfer, auto-suspended, parks
 the origin namespace and carries an identity of its own, made from the
-cluster, pool and transfer ids, which the case computes and checks is not
-the origin's, and host1, the only host connected to it, reads the origin
+cluster, pool and transfer ids, whose uuid the case computes and checks is
+not the origin's, and host1, the only host connected to it, reads the origin
 through it under that identity (`architecture.md`, Transfers; `cnagent.md`
 CN17), the digest and the fio stamp with fio's verify. Before the clone is created the origin's bitmap is read,
 slice by slice, once the primary reports the origin parked, a wait the case
@@ -868,12 +868,11 @@ region from being copied, and a fault in the pieces would pass with it
 While the leg has two sides the primary's pool of slice 0 must read
 `no_discard_passdown` in its row, and a host's discard must stop there
 (`cnagent.md` CN13; `architecture.md`, Migration, Host discards stop at
-the pool): host0 saves, overwrites and then discards one pool block of
-every slice of the volume, `SLICE_CNT` blocks at the place three times
-that far in, which dm-striped hands each slice's thin device as its whole
-block 3, and writes the saved bytes back after, so the volume's digest
-holds; the primary's thin device of slice 0 must count at least one block
-of discard sectors, else the discard never reached the pool and the check
+the pool): host0 saves, overwrites and then discards one whole pool block
+of every slice of the volume, and writes the saved bytes back after, so
+the volume's digest holds; the primary's thin device of slice 0 must count
+at least one block of discard sectors and map at least one block less,
+else the discard never reached the pool or freed no block and the check
 proves nothing, and the new side's dm-clone must count not one more. Once
 the migration has finished the pool must read `discard_passdown` again,
 which also shows that the lab's legs take discards, so the word during the

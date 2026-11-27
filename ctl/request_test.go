@@ -1132,8 +1132,9 @@ func TestCloneSrcTrConfEmptyList(t *testing.T) {
 // (dnvctl.md, `clone` — `ctl/clone.go`). --src-tr-addr and --src-tr-svc-id
 // are comma-separated lists, the i-th address with the i-th port, one entry
 // per item of the longer list; a list of one item goes to every entry, so
-// one port serves every address, and a longer list shorter than the other
-// leaves the missing items empty, never a value nobody typed; the type and
+// one port serves every address, and a list of two or more items that is
+// shorter than the other leaves the missing items empty, never a filled-in
+// item; the type and
 // the family go to every entry.
 func TestCloneSrcTrConfSeveralAddresses(t *testing.T) {
 	conf := func(addr, svc string) *pb.NvmeTrConf {

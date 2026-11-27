@@ -21,12 +21,13 @@ import (
 // so by the split rule of dnagent.md, Scope and placement, this wrapper is
 // role code.
 //
-// The agent runs `mdadm --zero-superblock` only in CN12's forced start, which
-// an operator's call asks for: it zeroes every other member the forced start
-// keeps (forcedStartLegs) but the open repair's bad leg, each one that carries
-// a superblock, before the array starts from the named leg alone, so that
-// each of them is added back later
-// as a fresh member, which md copies whole, and is no candidate of a later
+// The agent runs `mdadm --zero-superblock` only in CN12's forced start and in
+// its recopy, each of which an operator's call asks for. The recopy, which a
+// forced migration cancel asks for, zeroes the marked leg's superblock before
+// it adds the leg fresh (recopyLegs). The forced start zeroes every other
+// member it keeps (forcedStartLegs) but the open repair's bad leg, each one
+// that carries a superblock, before the array starts from the named leg
+// alone, so that each of them is added back later as a fresh member, which md copies whole, and is no candidate of a later
 // assembly, where its superblock of the array's old identity would have
 // mdadm refuse the assembly. Otherwise a leg leaves an array only as a
 // repair's bad leg,

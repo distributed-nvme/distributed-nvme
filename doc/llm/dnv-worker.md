@@ -3937,8 +3937,11 @@ of the coordinator's own verdicts.
 An idle pass reads no node record; a step that is about to allocate or
 needs a node's record reads them, once a pass, at the revision of the
 pass's load (`LoadNodesAt`): AR6's CN budget check, its withdrawal once a
-side qualifies, and AR7's and AR8's locations. A failed read is that step's
-failed reaction, which ends the pass (AR2). The
+side qualifies, and AR7's and AR8's locations. AR7 also reads, after the
+load and at the current revision, the CNs of the other pools that share an
+NQN with the SP (`model.SharedNqnCnAddrs`), which every pool record and the
+sharing pools' cntlr records give. A failed read is that step's failed
+reaction, which ends the pass (AR2). The
 snapshot re-seeds the SP's health memos first, ahead of every gate below
 (HL3); it seeds nothing into AR10's memo, because a stored epoch is no
 verdict of this coordinator's. The primary is the one the snapshot names,
@@ -4127,8 +4130,9 @@ above `SP_LEVEL_NO_THINPOOL` (the disaster-recovery levels of
 do AR12's retire timer and AR16's md check schedule; AR11's stage moves run at every level, since a
 move only follows the primary's report and an operator may need to finish
 a repair there, and so do AR13's forced-start clear and recopy clear,
-since a clear only follows the primary's report too and the operator
-force-starts a group at the levels where reactions stop. Leg repair's drive step is a
+since a clear only follows the primary's report too, and the operator
+force-starts a group, or cancels a migration with force, at the levels
+where reactions stop. Leg repair's drive step is a
 reaction, so the
 operator drives the worker's repairs there with the gateway's calls (AR8).
 An SP with `deleting` true is not suppressed
@@ -4654,8 +4658,9 @@ the candidates are
 `FindCnCandidatesAntiAffine` with the SP footprint (the sum of `ext_cnt` over
 all groups of its slices), a candidate count of `cn_batch_size`, a black list
 of the old cntlr's `addr_port` and of the CNs of the cntlrs of every other
-pool of the cluster that holds a subsystem of an NQN the pool holds
-(`sharedNqnCnAddrs`, `model.SharedNqnCnAddrs`; `architecture.md`, Finding
+pool of the cluster that holds a subsystem of an NQN the pool holds, read
+after the load at the current revision (`sharedNqnCnAddrs`,
+`model.SharedNqnCnAddrs`; AR1; `architecture.md`, Finding
 CN candidates; `cnagent.md` CN16, A shared NQN), the SP's other cntlrs'
 endpoints as the SP's CN endpoints and those CNs' locations excluded — the locations out of the
 node records the pass reads at the revision of its load (AR1, MD3; a CN
@@ -5147,7 +5152,8 @@ stands in the snapshot while the reading names it done
 is clean in the current reading, as the candidate's own test asks.
 Otherwise the leg logs `md_check_waits`, the scan moves on, and AR16 asks
 for the group's check when no request stands in the SP and a check suits
-the group (AR16, step 3). The joined
+the group, one such group at a time, the first in order first (AR16,
+step 3). The joined
 cancel and create waits the same way, its cancel running alone. Reason:
 the primary takes the bad leg out of the array before it adds the new leg
 (`cnagent.md` CN12), so the group runs on the clean leg alone during the
@@ -5397,7 +5403,7 @@ failure logs `retired leg kept` with its reason, the op's own for a
 refusal (MD7), and ends the step as well. A delete logs `retired leg
 deleted`.
 
-AR13. **Forced-start clear.** For a live SP, right after AR15's flag
+AR13. **Forced-start clear and recopy clear.** For a live SP, right after AR15's flag
 and before AR3's suppression — so at every `sp_level` — the pass
 walks the SP's groups, the slices' in `slice_id_list` order, meta groups
 before data groups, then the clone meta groups in `clone_name_list` order,
@@ -6274,7 +6280,10 @@ R6) — no failover can happen (`no candidate` and AR5's three refusals),
 nothing is left to allocate or the pool cannot grow (a grow's ceilings, a
 CN budget too short, no id left), a group with no copy or no other healthy
 leg has a bad leg (AR8, AR9), or a repair holds its finish while every retired
-leg of its group carries keep (AR8) —
+leg of its group carries keep (AR8) — save the bad-block holds of the retire
+timer and the finish (`grp_leg_bad_blocks`, `grp_every_leg_bad_blocks`,
+AR12), at Info, since md can drop a range by itself at a later write over
+it that works; the finish's hold comes before the keep's own Warn reason —
 and with the op's name as `op` when a `model` op refused it
 (`ErrPrecondition`, MD7): one reason can come from the pass's own check or
 from the op, and only the op's refusal always ends the pass, save a refusal
@@ -6333,8 +6342,9 @@ kept` a write whose call failed, with its error, or with its reason and
 `op` when the op refused it (AR15); `md checks scheduled` a write of the md
 check schedule whose call wrote, naming the groups the pass planned to
 end or withdraw a request of, to stamp and to ask for, the primary and its
-report's revision, with how many edits the op applied and the revision its
-own STM committed, and `md checks kept` a
+report's revision, whether the request is one for a repair for bad-block
+ranges, with how many edits the op applied and the revision its own STM
+committed, and `md checks kept` a
 write whose call failed, with its error, or with its reason and `op` when
 the op refused it (AR16); `clone latched` a
 latch of

@@ -4651,7 +4651,8 @@ says what the cancel cost: `copy_again`, from the write, when the primary
 is to copy the leg again, and `loss`, a text, where the writes since the
 cutover are lost on the leg, or may be: a pool that keeps one leg per
 group, a primary's report, read before the write outside the transaction,
-that holds no other leg of the group in sync, or one that did not answer.
+that holds no other leg of the group in sync, one that did not answer, or
+a pool with no primary to ask.
 That report only words the reply; the transaction decides. Third, after
 the write it waits until the primary uses the old side's path alone: until
 the primary's report, at or past the cancel's revision, reads the leg's
@@ -5948,7 +5949,8 @@ repair's bad leg with no health epoch (Repairs, A leg of another identity);
 `RES_REASON_POOL_FAILED`, which `cnagent.md` CN13 sets on an `ERROR` pool
 row whose status line carries needs_check, or `Fail` or `Error` in place of
 its numbers; `RES_REASON_POOL_META_DAMAGED`, which `cnagent.md` CN13 sets on
-the `ERROR` pool row of a slice whose metadata its `thin_check` refused, and
+the `ERROR` pool row of a slice whose metadata its `thin_check` refused in
+`thinCheckRefusals` runs in a row, and
 `dnv-worker.md` HL2 reads; `RES_REASON_SHARED_NQN`, which `cnagent.md` CN16
 sets on the `PENDING` or `ERROR` subsystem row of a shared NQN, which no
 health rule reads and to whose `PENDING` row the gateway's status read
@@ -6154,9 +6156,12 @@ only while no write can reach it and no copy is in flight on it
 (`agent.ApplySkipRanges`). A host's discard has no such guard on a clone:
 a clone's dm-clone takes it while the clone serves (`scope.md` entry "A
 host's discard during a clone's copy can undo a later write"). A
-migration's dm-clone never takes one: the primary's thin pool keeps the
-hosts' discards from the legs while a leg has two sides (Migration, Host
-discards stop at the pool).
+migration's dm-clone takes none once the primary's pool has reloaded: the
+primary's thin pool keeps the hosts' discards from the legs while a leg has
+two sides, and the cutover waits for it (Migration, Host discards stop at
+the pool); a migration record with no `cutover_pending`, which an older
+build wrote, cuts over at the provisioned flip with no such wait (Upgrade
+in lockstep), so a host's discard can reach its new side until the reload.
 The agent stops the background copy when it runs and waits, for a short
 bound, until the status shows no copy in flight, going on when the bound
 passes: this wait holds no IO back and keeps the pause that follows short.
@@ -6750,7 +6755,8 @@ only once its group misses no leg, has no health epoch and carries no md
 bad-block range on a leg, which it takes for the leg's data held twice
 elsewhere (`dnv-worker.md` AR12), and the finish of a worker's repair at
 the retired-leg bound gives back only a copy older than the newest one its
-group keeps, under the same hold on ranges (Repairs); neither takes a
+group keeps, while md records no bad-block range on a leg the new leg
+copies from (Repairs); neither takes a
 retired leg that carries `keep` (Retired legs).
 
 ## Procedures
