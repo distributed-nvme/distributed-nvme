@@ -232,6 +232,13 @@ message Leg {
     uint32 leg_idx = 2;
     repeated Side side_list = 3;
     uint64 err_epoch = 4;
+    // Keep the leg once a finish retires it: FinishRepair makes it a retired
+    // leg with keep set. CancelRepair sets it on the bad legs of a repair
+    // that carries keep_bad_legs, so the keep a forced start gave a bad leg
+    // stays with the leg when its repair is cancelled, and a later repair's
+    // finish, a worker's included, retires it kept (architecture.md, Retired
+    // legs). No agent reads it. Appended, never renumbered.
+    bool keep = 5;
 }
 
 message Group {

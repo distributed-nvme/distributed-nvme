@@ -1553,17 +1553,14 @@ Measured times are in [the introduction](introduction.md#status-and-limits).
   and loses the writes made since. The gateway asks for that flag only
   when the primary's report names the leg's identity as undecided: while
   the primary's agent is still starting, it takes a leg that has a health
-  epoch without the flag, and once that repair finishes the worker may
-  delete the old leg when it is old enough. The worker's own repair is a
-  second way: the forced start's keep flag for that leg, which keeps the
-  worker from deleting a retired leg, lives on the open
-  repair's record, so the cancel of the repair drops it. When the leg
-  later gets a health epoch, as when its disk node is down for a while,
-  the worker replaces it with a repair of its own, whose finish retires the
-  leg without the keep flag, and the worker deletes it seven days later,
-  though it may hold newer data than the array. Keep it with `dnvctl
-  retired-leg keep --leg <leg id>` once it is retired; the state of that
-  delete is fix decided.
+  epoch without the flag. The forced start's keep flag for that leg, which
+  keeps the worker from deleting a retired leg, stays with the leg when the
+  repair is cancelled: whichever repair later replaces the leg, the
+  operator's or the worker's own once the leg gets a health epoch, retires
+  it kept, and the worker does not delete it. A cancel made before the
+  upgrade to this release left no flag on the leg, so such a leg can still
+  be retired without it: keep it with `dnvctl retired-leg keep --leg <leg
+  id>` once it is retired.
   State: procedure written,
   [a leg of another identity that the primary does not add](operations.md#a-leg-of-another-identity-that-the-primary-does-not-add),
   not run on real agents. Not seen in the lab.

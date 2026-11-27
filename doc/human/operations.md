@@ -1136,6 +1136,11 @@ Safe steps:
 - A group holds at most two retired legs. When both are kept, the worker's
   next repair of the group cannot finish until you clear a flag or delete
   a leg.
+- When a repair whose bad leg the mark kept is cancelled, that leg stays
+  in the group with the flag, and any later repair that replaces it
+  retires it kept. The flag stays until then, even when a later forced
+  start wiped the leg: clear it on the retired leg once you know its copy
+  is not needed.
 
 Steps that can lose data: `dnvctl retired-leg keep --leg <leg id> --clear`
 lets the worker delete the leg once it is old enough. It can go sooner:

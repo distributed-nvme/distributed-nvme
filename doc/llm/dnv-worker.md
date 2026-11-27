@@ -967,7 +967,7 @@ list; the flip, which reads the repair's key alone, and
   `RetiredLeg` under its own leg id — its side as it is, which keeps its
   pointer and its extents on its DN, the group's id, its `leg_idx`, the
   repair's parent, `now` as its `retired_epoch` and `keep` when the repair
-  carries `keep_bad_legs` —, listed in the group's
+  carries `keep_bad_legs` or the bad leg carries `keep` —, listed in the group's
   and the pool's `retired_leg_id_list`; the bad leg's own `err_epoch` goes
   with it. The `Repair` key and its list entry go, the group's `rep_name`
   is cleared, and so is the group's forced-start mark when it names the
@@ -997,7 +997,8 @@ list; the flip, which reads the repair's key alone, and
   a retired leg goes back as that `RetiredLeg`, with the `retired_epoch`,
   the `keep` and the `partial` mark the repair kept, its own `leg_idx`, its
   side as it is now and the
-  repair's parent, listed again in both lists; a fresh new leg's side goes
+  repair's parent, listed again in both lists; a repair that carries
+  `keep_bad_legs` leaves `keep` on each bad leg in `leg_list`; a fresh new leg's side goes
   back to its DN as `DrainSpSlice` gives a popped group's back: per
   DISTINCT DN the group's `ext_cnt` back, pointer out, capacity, one
   `DnRev` bump, a DN whose record is gone skipped. The `Repair` key and its

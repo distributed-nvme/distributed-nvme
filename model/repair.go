@@ -3,6 +3,7 @@ package model
 import (
 	"context"
 	"errors"
+	"slices"
 
 	"google.golang.org/protobuf/proto"
 
@@ -983,8 +984,10 @@ type FinishRepairResult struct {
 // the group's id, its leg_idx, the parent, now as its retired_epoch, and
 // keep when the repair carries keep_bad_legs, which a forced start of the
 // group sets (ForceStartGroup), as CreateRepair does for an operator's
-// repair whose bad leg it took for an identity reason (createRepairIn); the
-// bad leg's own err_epoch goes with the leg. The Repair key and its list
+// repair whose bad leg it took for an identity reason (createRepairIn), or
+// when the bad leg carries keep itself (Leg.keep), which the cancel of such
+// a repair left on it (CancelRepair); the bad leg's own err_epoch goes with
+// the leg. The Repair key and its list
 // entry go, the group's rep_name is cleared, the retired leg joins the
 // group's and the pool's lists, and SpRev is bumped. A forced-start mark of
 // the group that names the bad leg goes too, since the finish retires the
@@ -1099,7 +1102,7 @@ func FinishRepair(
 			RetiredEpoch: now,
 			SliceId:      rep.GetSliceId(),
 			CloneName:    rep.GetCloneName(),
-			Keep:         rep.GetKeepBadLegs(),
+			Keep:         rep.GetKeepBadLegs() || bad.GetKeep(),
 		})
 		grp.RetiredLegIdList = append(grp.RetiredLegIdList, badLegId)
 		grp.RepName = ""
@@ -1179,9 +1182,11 @@ func oldestRetiredLeg(
 // as it is now and the repair's parent,
 // listed again in the group's and the pool's lists. A fresh new leg's sides
 // give their disk nodes back the group's ext_cnt and their pointers, through
-// the DN ledger the drains use, with each node's capacity key and DnRev. The
-// Repair key and its list entry go, the group's rep_name is cleared and
-// SpRev is bumped.
+// the DN ledger the drains use, with each node's capacity key and DnRev. A
+// repair that carries keep_bad_legs leaves keep on each of its bad legs,
+// which stay in the group's leg_list (Leg.keep), so a later finish that
+// retires such a leg retires it kept. The Repair key and its list entry go,
+// the group's rep_name is cleared and SpRev is bumped.
 //
 // cc is the cluster's stored conf, gated at the top of the STM as the drains
 // gate it, for the bins of the capacity keys the release maintains.
@@ -1274,6 +1279,16 @@ func cancelRepairIn(
 				grp.RetiredLegIdList, leg.GetLegId())
 			conf.RetiredLegIdList = append(
 				conf.RetiredLegIdList, leg.GetLegId())
+		}
+		// The keep a forced start or CreateRepair gave the bad legs
+		// (keep_bad_legs) stays with each leg, which stays in the group,
+		// so a later repair's finish, a worker's too, retires it kept.
+		if rep.GetKeepBadLegs() {
+			for _, leg := range grp.GetLegList() {
+				if slices.Contains(rep.GetBadLegIdList(), leg.GetLegId()) {
+					leg.Keep = true
+				}
+			}
 		}
 		grp.RepName = ""
 		holder.put(s)

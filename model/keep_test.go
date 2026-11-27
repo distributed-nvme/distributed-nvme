@@ -245,3 +245,68 @@ func TestDeleteRetiredLegRefusesAKeptLegForTheTimer(t *testing.T) {
 		t.Errorf("the operator's delete left the kept leg")
 	}
 }
+
+// TestCancelRepairLeavesTheKeepOnTheLeg pins the keep carried with the leg
+// (architecture.md, Retired legs): a forced start keeps the group's open
+// repair's bad leg (keep_bad_legs); the repair's abort and cancel leave the
+// keep on that leg in the group's leg_list; a later repair of the worker's
+// of that leg finishes and retires it with keep, so the retire timer passes
+// it over. The repair record carries keep_bad_legs alone, as a record made
+// before the leg's own keep existed does; the cancel of such a record now
+// leaves the keep on the leg, which is the fix. The new leg the finish puts
+// in the bad leg's place carries no keep.
+func TestCancelRepairLeavesTheKeepOnTheLeg(t *testing.T) {
+	env := newOpsEnv(t)
+	env.putDn(opsDnE, 704, 4, opsDnFree)
+	repId, _ := env.createRepair(func() RepairNewLeg {
+		return env.freshLeg(opsDnE)
+	})
+	env.mustForceStart(opsDataGrpId, opsDataLegA)
+	env.toStage(opsRepName, repId, pb.RepStage_REP_STAGE_ABORTED)
+	if _, err := CancelRepair(env.ctx, env.cli, env.cid, opsShard,
+		opsSpId, opsSpName, noExpectRev, opsRepName, env.cc); err != nil {
+		t.Fatalf("CancelRepair: %v", err)
+	}
+	if !findLeg(env.slice(), opsDataLegB).GetKeep() {
+		t.Fatalf("the cancel dropped the bad leg's keep")
+	}
+	if findLeg(env.slice(), opsDataLegA).GetKeep() {
+		t.Fatalf("the cancel kept a leg that was no bad leg")
+	}
+	if _, err := env.forceStart(opsDataGrpId, 0, true); err != nil {
+		t.Fatalf("the mark's cancel: %v", err)
+	}
+	env.startWorkerRepair()
+	if _, err := FinishRepair(env.ctx, env.cli, env.cid, opsShard, opsSpId,
+		opsSpName, noExpectRev, opsWorkerRepName, opsFinishNow,
+		env.cc); err != nil {
+		t.Fatalf("FinishRepair: %v", err)
+	}
+	if !env.retired(opsDataLegB).GetKeep() {
+		t.Fatalf("the worker's finish retired the kept leg without keep")
+	}
+	for _, leg := range findGroup(env.slice(), opsDataGrpId).GetLegList() {
+		if leg.GetKeep() {
+			t.Fatalf("leg %d in the group carries keep after the finish",
+				leg.GetLegId())
+		}
+	}
+}
+
+// TestCancelRepairWithNoKeepLeavesNone: the cancel of a repair that carries
+// no keep_bad_legs leaves no keep on its bad leg.
+func TestCancelRepairWithNoKeepLeavesNone(t *testing.T) {
+	env := newOpsEnv(t)
+	env.putDn(opsDnE, 704, 4, opsDnFree)
+	repId, _ := env.createRepair(func() RepairNewLeg {
+		return env.freshLeg(opsDnE)
+	})
+	env.toStage(opsRepName, repId, pb.RepStage_REP_STAGE_ABORTED)
+	if _, err := CancelRepair(env.ctx, env.cli, env.cid, opsShard,
+		opsSpId, opsSpName, noExpectRev, opsRepName, env.cc); err != nil {
+		t.Fatalf("CancelRepair: %v", err)
+	}
+	if findLeg(env.slice(), opsDataLegB).GetKeep() {
+		t.Fatalf("a cancel with no keep_bad_legs kept the bad leg")
+	}
+}

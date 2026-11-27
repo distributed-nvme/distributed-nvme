@@ -4839,7 +4839,9 @@ the group's id, its `leg_idx`, the repair's parent, the time as its
 `retired_epoch` and `keep` when the repair carries `keep_bad_legs`, which a
 forced start of the group sets (Repair, Forced start), and so does an
 operator's create of a repair whose bad leg it takes for an identity
-reason (A leg of another identity, above), and lists it in the
+reason (A leg of another identity, above), or when the bad leg carries
+`keep`, which the cancel of an earlier such repair left on it
+(CancelRepair), and lists it in the
 group's and the pool's
 `retired_leg_id_list`; deletes the `Repair` and its `repair_name_list`
 entry; clears the group's `rep_name`, and its forced-start mark when the
@@ -4890,7 +4892,10 @@ though md may have written on it, which `partial` then says, and a forced
 start may have zeroed its superblock, while it was the repair's new leg
 (Repair); a fresh new leg's
 side gives its DN the group's `ext_cnt` and
-its pointer back, with the DN's capacity key and `DnRev`; the `Repair` and
+its pointer back, with the DN's capacity key and `DnRev`; a repair that
+carries `keep_bad_legs` leaves `keep` on each of its bad legs, which stay
+in the group's `leg_list` (`Leg.keep`), so a later finish that retires
+such a leg retires it kept (Retired legs); the `Repair` and
 its list entry go, the group's `rep_name` is cleared, and `SpRev` is
 bumped. Reply `rep_id`.
 
@@ -5111,7 +5116,13 @@ after a start from another leg any of them can hold newer data than the
 restored array; the finish of an operator's repair whose bad leg
 `CreateRepair` took for an identity reason sets it too, since such a leg
 can hold data the array lacks, the newer copy of two identities included
-(Repairs, A leg of another identity); and an operator sets or clears it with
+(Repairs, A leg of another identity); a cancel of either repair, which
+carries `keep_bad_legs`, leaves the keep on each bad leg, which stays in
+the group's `leg_list` (`Leg.keep`), and a later finish of any repair that
+retires that leg, a worker's included, sets it on the retired leg, so no
+cancel drops it, while nothing clears a leg's keep before the leg retires:
+a keep that is no longer needed, as after a later forced start wiped the
+leg, is cleared on the retired leg; and an operator sets or clears it with
 `UpdateRetiredLegKeep`; only the operator's delete, a take-back or a
 drain ends such a leg. It is no leg: no migration moves it
 (Migrations) and the leg bitmap read does not find it (Bitmap reads). A group holds at most `MaxRetiredLegPerGrp` of them: a retired
@@ -6647,12 +6658,8 @@ only once its group misses no leg, has no health epoch and carries no md
 bad-block range on a leg, which it takes for the leg's data held twice
 elsewhere (`dnv-worker.md` AR12), and the finish of a worker's repair at
 the retired-leg bound gives back only a copy older than the newest one its
-group keeps, under the same hold on ranges (Repairs); the newer data of a
-leg a forced start left out whose keep a cancel dropped is held nowhere
-else, and the timer does not look for it (`scope.md` entry "After a forced
-start, a leg of the old identity can keep the group down");
-neither takes a leg
-that carries `keep` (Retired legs).
+group keeps, under the same hold on ranges (Repairs); neither takes a
+retired leg that carries `keep` (Retired legs).
 
 ## Procedures
 
@@ -7453,7 +7460,8 @@ The same write keeps the group's other copies: it sets `keep` on every
 retired leg the group lists, on each new leg the group's repair took back
 from a retired leg, which that repair's cancel then gives back kept, and
 `keep_bad_legs` on the repair while it is open, whose finish then retires
-its bad legs with `keep` (Retired legs). Reason: after
+its bad legs with `keep` and whose cancel leaves `keep` on each of them
+(Retired legs). Reason: after
 a start from another leg, each of them can hold newer data than the
 restored array, which only the operator can judge, so neither the retire
 timer nor the give-back at the bound takes one; the operator clears the

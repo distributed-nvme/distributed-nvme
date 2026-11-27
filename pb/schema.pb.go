@@ -2364,11 +2364,18 @@ func (x *Side) GetProvisioned() bool {
 }
 
 type Leg struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	LegId         uint64                 `protobuf:"varint,1,opt,name=leg_id,json=legId,proto3" json:"leg_id,omitempty"`
-	LegIdx        uint32                 `protobuf:"varint,2,opt,name=leg_idx,json=legIdx,proto3" json:"leg_idx,omitempty"`
-	SideList      []*Side                `protobuf:"bytes,3,rep,name=side_list,json=sideList,proto3" json:"side_list,omitempty"`
-	ErrEpoch      uint64                 `protobuf:"varint,4,opt,name=err_epoch,json=errEpoch,proto3" json:"err_epoch,omitempty"`
+	state    protoimpl.MessageState `protogen:"open.v1"`
+	LegId    uint64                 `protobuf:"varint,1,opt,name=leg_id,json=legId,proto3" json:"leg_id,omitempty"`
+	LegIdx   uint32                 `protobuf:"varint,2,opt,name=leg_idx,json=legIdx,proto3" json:"leg_idx,omitempty"`
+	SideList []*Side                `protobuf:"bytes,3,rep,name=side_list,json=sideList,proto3" json:"side_list,omitempty"`
+	ErrEpoch uint64                 `protobuf:"varint,4,opt,name=err_epoch,json=errEpoch,proto3" json:"err_epoch,omitempty"`
+	// Keep the leg once a finish retires it: FinishRepair makes it a retired
+	// leg with keep set. CancelRepair sets it on the bad legs of a repair
+	// that carries keep_bad_legs, so the keep a forced start gave a bad leg
+	// stays with the leg when its repair is cancelled, and a later repair's
+	// finish, a worker's included, retires it kept (architecture.md, Retired
+	// legs). No agent reads it. Appended, never renumbered.
+	Keep          bool `protobuf:"varint,5,opt,name=keep,proto3" json:"keep,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -2429,6 +2436,13 @@ func (x *Leg) GetErrEpoch() uint64 {
 		return x.ErrEpoch
 	}
 	return 0
+}
+
+func (x *Leg) GetKeep() bool {
+	if x != nil {
+		return x.Keep
+	}
+	return false
 }
 
 type Group struct {
@@ -21009,12 +21023,13 @@ const file_pb_schema_proto_rawDesc = "" +
 	"\fnvme_tr_conf\x18\x04 \x01(\v2\v.NvmeTrConfR\n" +
 	"nvmeTrConf\x12\x1b\n" +
 	"\terr_epoch\x18\x05 \x01(\x04R\berrEpoch\x12 \n" +
-	"\vprovisioned\x18\x06 \x01(\bR\vprovisioned\"v\n" +
+	"\vprovisioned\x18\x06 \x01(\bR\vprovisioned\"\x8a\x01\n" +
 	"\x03Leg\x12\x15\n" +
 	"\x06leg_id\x18\x01 \x01(\x04R\x05legId\x12\x17\n" +
 	"\aleg_idx\x18\x02 \x01(\rR\x06legIdx\x12\"\n" +
 	"\tside_list\x18\x03 \x03(\v2\x05.SideR\bsideList\x12\x1b\n" +
-	"\terr_epoch\x18\x04 \x01(\x04R\berrEpoch\"\xe7\x03\n" +
+	"\terr_epoch\x18\x04 \x01(\x04R\berrEpoch\x12\x12\n" +
+	"\x04keep\x18\x05 \x01(\bR\x04keep\"\xe7\x03\n" +
 	"\x05Group\x12\x15\n" +
 	"\x06grp_id\x18\x01 \x01(\x04R\x05grpId\x12\x17\n" +
 	"\aext_cnt\x18\x02 \x01(\x04R\x06extCnt\x12\x1f\n" +
