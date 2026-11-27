@@ -316,6 +316,13 @@ message MdCheck {
     // (CntlrInfo.GrpInfo.md_check_done_epoch; cnagent.md CN12). Zero when
     // no check is asked for.
     uint64 request_epoch = 2;
+    // The time the sp worker ended the group's last request that the
+    // primary's reading named done, in Unix seconds: md read every member
+    // to the end then. Zero while no request has ended so. The sp worker's
+    // repair of a leg for md's bad-block ranges waits for a check that
+    // ended so within common.MdCheckDoneFresh (dnv-worker.md AR8, AR16).
+    // Appended, never renumbered.
+    uint64 done_epoch = 3;
 }
 
 // The mark of a forced start (Group.forced_start): the leg the primary

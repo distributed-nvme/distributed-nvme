@@ -81,3 +81,37 @@ func TestUpdateMdChecks(t *testing.T) {
 			applied, err)
 	}
 }
+
+// TestUpdateMdChecksKeepsTheDoneTime: the write stores done_epoch, the time
+// the sp worker ended a request the primary reported done (dnv-worker.md
+// AR16), and an edit whose from-schedule differs from the stored one in
+// done_epoch alone writes nothing, so two owners cannot both record an end.
+func TestUpdateMdChecksKeepsTheDoneTime(t *testing.T) {
+	env := newOpsEnv(t)
+	data := GrpRef{Parent: opsSliceParent, GrpId: opsDataGrpId}
+	request := &pb.MdCheck{NextEpoch: 1000, RequestEpoch: 2000}
+	ended := &pb.MdCheck{NextEpoch: 5000, DoneEpoch: 3000}
+	for _, edit := range [][]MdCheckEdit{
+		{{Ref: data, From: nil, To: request}},
+		{{Ref: data, From: request, To: ended}},
+	} {
+		if applied, _, err := UpdateMdChecks(env.ctx, env.cli, env.cid,
+			opsShard, opsSpId, opsSpName, edit); err != nil || applied != 1 {
+			t.Fatalf("edit %v: applied %d, err %v; want 1", edit, applied,
+				err)
+		}
+	}
+	got := findGroup(env.slice(), opsDataGrpId).GetMdCheck()
+	if got.GetDoneEpoch() != 3000 || !SameMdCheck(got, ended) {
+		t.Fatalf("the schedule %v, want %v", got, ended)
+	}
+	stale := &pb.MdCheck{NextEpoch: 5000}
+	store := env.storeRev()
+	applied, _, err := UpdateMdChecks(env.ctx, env.cli, env.cid, opsShard,
+		opsSpId, opsSpName, []MdCheckEdit{{Ref: data, From: stale,
+			To: &pb.MdCheck{NextEpoch: 5000, RequestEpoch: 6000}}})
+	if err != nil || applied != 0 || env.storeRev() != store {
+		t.Fatalf("an edit from a schedule without the done time: applied "+
+			"%d, err %v; want no write", applied, err)
+	}
+}

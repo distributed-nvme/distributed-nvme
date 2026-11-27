@@ -166,9 +166,11 @@ cutover clears: `CreateMigration` writes it set (`architecture.md`,
 Migrations), and nothing but the cutover changes it after that; a record
 that lacks the field decodes false, a cutover that has started
 (`architecture.md`, Upgrade in lockstep). `Group.md_check` (`MdCheck`) is
-AR16's schedule of the group's md check: the time of its next check and
-the standing request, which the sp worker alone writes; a record that
-lacks it reads as a group never scheduled (AR16). Nothing else in the
+AR16's schedule of the group's md check: the time of its next check, the
+standing request and the time the last request the primary ran to its
+end was ended (`done_epoch`, which AR8 reads), which the sp worker alone
+writes; a record that lacks it reads as a group never scheduled, and one
+that lacks `done_epoch` as a group with no check ended so (AR16). Nothing else in the
 schema is this document's; in particular `Cntlr.demoted_revision`, which
 RW22's demotion hold reads and clears, is `architecture.md`'s
 (Terminology and object model), and `Migration` carries no other field of this
@@ -4040,7 +4042,7 @@ AR8's `leg_has_two_sides`, `grp_operator_in_charge`, whether the pass's
 own check or the create's op finds it, `grp_forced_start`, its gate on the
 group's row (`grp_row_error`, `grp_row_missing`, `grp_row_unknown`,
 `grp_row_provisioning`, `grp_row_pending`, `grp_row_absent` and
-`grp_row_stale`), `no_healthy_leg`, `grp_has_repair` and a create's scan
+`grp_row_stale`), `no_healthy_leg`, `md_check_waits`, `grp_has_repair` and a create's scan
 that finds no DN, which move the scan to the next candidate leg — a group whose `operator_in_charge` flag is
 set waits until the operator clears it; a group with a forced-start mark
 waits until the mark goes in one of the ways AR8 names, a try-to-abort of
@@ -5098,7 +5100,34 @@ has no ranges (a clean leg); the candidate takes conditions 2 to 9 as any
 other, save that a leg of two sides keeps its migration and logs
 `leg_has_two_sides` (A bad leg with two sides), and the create tells `CreateRepair` that it repairs the leg for its
 ranges, which waives the op's refusal of a bad leg with no health epoch
-under the worker's name alone (MD6). A leg with ranges and no clean leg
+under the worker's name alone (MD6). Before that create, on a slice's
+group with no repair, while the cluster's md check interval is not zero,
+the candidate waits for a fresh md check of the group: one that the
+primary ran to its end and that ended within `MdCheckDoneFresh`, by the
+time AR16 records as the group's `md_check.done_epoch` when it ends a
+request the primary's reading names done, or one whose request still
+stands in the snapshot while the reading names it done
+(`md_check_done_epoch`; `cnagent.md` CN12, The md check); the other leg
+is clean in the current reading, as the candidate's own test asks.
+Otherwise the leg logs `md_check_waits`, the scan moves on, and AR16 asks
+for the group's check when no request stands in the SP. The joined
+cancel and create waits the same way, its cancel running alone. Reason:
+the primary takes the bad leg out of the array before it adds the new leg
+(`cnagent.md` CN12), so the group runs on the clean leg alone during the
+whole copy; a sector of that leg that no check has read would then be
+read from the last leg in sync, and md would mark the array broken and the
+region bad on the new leg too, though the bad leg holds it; a check ended
+within the bound is the proof that the legs the group held then read
+whole, and a group whose repair waits on something else asks for a new
+check at most once in that time, so its asks do not starve the SP's other
+groups. The proof does not cover a leg that joined the group after that
+check, as a repair's new leg, which md's copy wrote and no check read back;
+nothing clears `done_epoch` when the group's legs change, so such a leg can
+be the clean leg of a repair within the bound (`scope.md`). A clone meta
+group gets no md check (AR16), so its candidate does not wait; while the
+interval is zero no check runs, so no candidate waits either; and a group
+that cannot run a check to its end within `MdCheckRequestBound` never
+gets its repair for ranges (`scope.md`). A leg with ranges and no clean leg
 beside it is no candidate, and nothing is logged: a copy would put the same
 ranges on the new leg, and the lost regions cannot come back. The
 try-to-abort's "bad leg healthy" trigger spares a repair whose bad leg the
@@ -5408,13 +5437,15 @@ timer — so only where reactions run (AR3), since a check needs the arrays
 running — the pass edits the md check schedule (`Group.md_check`) of the
 groups of its slices, in `slice_id_list` order, meta groups before data
 groups, in one `model.UpdateMdChecks`, which raises `SpRev` once when it
-applies an edit:
+applies an edit; every edit keeps the group's `done_epoch` but the one
+step 1 records:
 
 1. a group whose request (`request_epoch`) the current primary's latest
    reading names done (`md_check_done_epoch`; `cnagent.md` CN12, The md
    check), or whose request has stood `MdCheckRequestBound` or longer, has
    the request ended and its next time (`next_epoch`) set one interval
-   ahead of now; any other group whose request stands while it no longer
+   ahead of now, and the end of a done request records now as the group's
+   `done_epoch`, which AR8's repair for bad-block ranges reads; any other group whose request stands while it no longer
    suits a check by its record (step 3's test, its row and its reading
    aside) has the request withdrawn and its time kept, so it is asked for
    again once it suits, and the primary stops a check it started for it;
@@ -5423,9 +5454,12 @@ applies an edit:
    drawn from the group's id, so a new pool's groups spread over half an
    interval to one and a half, and a worker that takes the pool over draws
    the same;
-3. while no request stands in the pool after step 1, the group whose time is
+3. while no request stands in the pool after step 1, the first group that
+   holds a candidate for a repair for bad-block ranges beside a clean leg,
+   with no fresh check (AR8, A leg with bad-block ranges), and that a check
+   suits is asked for one, whatever its time; failing that, the group whose time is
    the earliest of those at or before now that a check suits is asked for
-   one: its request is now. A check suits a group with more than one leg,
+   one: its request is now, its time kept. A check suits a group with more than one leg,
    none of them with two sides, no repair, no forced-start mark and no
    operator-in-charge flag, whose row in the primary's latest report reads
    `RES_STATUS_OK` and whose reading says whole.
@@ -5437,7 +5471,8 @@ owners of the SP (VW7) never both end a check, and never have two requests
 standing (MD6). A write that applies an edit logs `md checks
 scheduled` with the groups the pass planned to end or withdraw a request
 of, to stamp and to ask for, an edit the op skipped named too, the
-primary, the revision of its report, how many edits the op applied and
+primary, the revision of its report, whether the request is one for a
+repair for bad-block ranges, how many edits the op applied and
 the revision its STM committed; a write that fails logs `md checks kept` with its
 reason, and the next pass tries again. Reasons: md's check reads every
 member of the array and rewrites a sector one member could not read from

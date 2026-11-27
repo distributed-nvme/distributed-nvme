@@ -53,7 +53,7 @@ func TestSkipLevel(t *testing.T) {
 		"migration_copy_not_whole", "data_covered", "no_data_group",
 		"candidate changed", "stale revision", "retired leg carries keep",
 		"clone_deleting", "abort_flag_clear", "grp_not_found",
-		"grp_not_whole", "grp_leg_unhealthy", "cutover started",
+		"grp_not_whole", "grp_leg_unhealthy", "cutover started", "md_check_waits",
 		"cutover pending", "migration gone", "repair exists",
 		"repair not found", "retired leg not found", "retired leg list full",
 		"sp level suppresses reactions", "sp level builds no group array",

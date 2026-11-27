@@ -78,6 +78,12 @@ const (
 	// (dnv-worker.md AR16), in seconds: two days, far more than md takes to
 	// read a group at its own minimum speed.
 	MdCheckRequestBound = 2 * 24 * 3600
+	// MdCheckDoneFresh is how long, in seconds, a check the primary ran to
+	// its end (MdCheck.done_epoch) counts for the sp worker's repair of a
+	// leg for md's bad-block ranges (dnv-worker.md AR8): two days, the
+	// bound on a request, so a group whose repair waits on something else
+	// asks for a new check at most once that long.
+	MdCheckDoneFresh = 2 * 24 * 3600
 	// ObsMaxAgeIntervals is how many of an object's health-check intervals
 	// the observation a round's reply answers from may be old before the
 	// worker counts the round as a missed one (dnv-worker.md HL7).

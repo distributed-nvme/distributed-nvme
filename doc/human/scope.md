@@ -1173,7 +1173,8 @@ Measured times are in [the introduction](introduction.md#status-and-limits).
   one leg cannot read with the data of the other leg. A rewrite that works
   heals the sector, and the drops end. A rewrite that fails makes md record
   a bad block on the leg, and leg repair then moves the leg, copying from
-  another leg of the group that has no bad block; where every leg has one,
+  another leg of the group that has no bad block, once a check of the group
+  has run to its end with that leg clean; where every leg has one,
   nothing moves, and a region recorded on every leg is lost from the
   group's legs. A retired leg that left the group before can still hold
   that region, but the worker deletes a retired leg seven days after it
@@ -1475,7 +1476,8 @@ Measured times are in [the introduction](introduction.md#status-and-limits).
   names the bad blocks again, or when the leg's health fails. It needs md
   to refuse an add, which is rare, and nothing is lost. State: accepted.
   Calling the repair off is the safe outcome: the old leg comes back, and
-  a new repair follows once a report names its bad blocks again. A worker that went on with the repair once md no
+  a new repair follows once a report names its bad blocks again and a
+  check of the group has run to its end within the last two days. A worker that went on with the repair once md no
   longer holds the old leg would leave the group on one copy, with no end,
   after a refused add. Fix later, the real fix: md's replace step, in which
   the primary adds the new leg before the old leg leaves the array, so that
@@ -1483,21 +1485,29 @@ Measured times are in [the introduction](introduction.md#status-and-limits).
   group runs on its other leg alone during the whole copy, and a bad sector
   there then breaks the array, while with the old leg still in place md
   can read such a sector from it. Not seen in the lab.
-- **Leg repair for bad blocks takes the leg out before the other leg is
-  known to be whole.** md's check finds a sector of one leg that it cannot
-  read or write again, and records it in that leg's bad-block list. The
-  worker then repairs that leg at once, since the other leg shows no bad
-  block so far. The repair stops the running check, so the check never
-  read the rest of the other leg, and the primary takes the leg with bad
-  blocks out of the array before it adds the new leg: the group runs on
-  the other leg alone during the whole copy. A bad sector there is then
-  read from the last leg in sync: md marks the array broken, host writes
-  fail, the primary is failed over, and the sector is recorded as bad on
-  that leg and on the new leg, though the leg taken out holds it. Two legs
-  with bad sectors in different places are something RAID1 survives; the
-  repair turns them into a lost region and an outage. The leg taken out
-  keeps its data as a retired leg until it is deleted. State: fix decided.
-  Read from dnv's code and the kernel's; not seen in the lab.
+- **Leg repair for bad blocks can take the leg out before the other leg
+  is known to be whole.** md records a sector of one leg that it cannot
+  read or write again in that leg's bad-block list, and leg repair then
+  moves that leg. The primary takes the leg with bad blocks out of the
+  array before it adds the new leg, so the group runs on the other leg
+  alone during the whole copy, and a bad sector there that no check has
+  read is then read from the last leg in sync: md marks the array broken,
+  writes fail, and the sector is recorded as bad on the new leg too, though
+  the leg taken out holds it. For a group of a slice, the worker repairs
+  the leg only once md's check of the group has run to its end, with the
+  other leg clean, within the last two days; it asks for that check when
+  there is none, and a group whose check cannot run to its end within the
+  two days the worker allows a check never gets this repair. A leg that
+  joined the group after that check, as a repair's new leg, was written by
+  md's copy and not read back, yet it can be the clean leg within those
+  two days. Two cases remain. A clone meta group gets no md check, so the worker repairs such
+  a leg at once; this is rare, since md's check is the main way a leg
+  gains bad blocks, and a failed read of normal IO drops the leg instead.
+  And with the cluster's check interval at zero no check runs, and the
+  worker repairs at once too. State: fix later for a clone meta group:
+  the md check would have to cover clone meta groups; accepted with the
+  check off, which is the operator's choice. Read from dnv's code and the
+  kernel's; not seen in the lab.
 - **A repair whose new leg the primary never reports stays open while
   the primary role cannot move.** It blocks every other repair of the
   group. This happens only while the primary does not apply the syncup

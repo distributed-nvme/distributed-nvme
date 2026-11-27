@@ -100,6 +100,7 @@ func UpdateMdChecks(
 			grp.MdCheck = &pb.MdCheck{
 				NextEpoch:    edit.To.GetNextEpoch(),
 				RequestEpoch: edit.To.GetRequestEpoch(),
+				DoneEpoch:    edit.To.GetDoneEpoch(),
 			}
 			applied++
 			if !containsHolder(changed, holder) {
@@ -125,5 +126,6 @@ func UpdateMdChecks(
 // one reading as the zero schedule.
 func SameMdCheck(a, b *pb.MdCheck) bool {
 	return a.GetNextEpoch() == b.GetNextEpoch() &&
-		a.GetRequestEpoch() == b.GetRequestEpoch()
+		a.GetRequestEpoch() == b.GetRequestEpoch() &&
+		a.GetDoneEpoch() == b.GetDoneEpoch()
 }

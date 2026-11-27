@@ -234,3 +234,38 @@ func TestMdCheckWithdrawsARequestOnAGroupThatStopsSuiting(t *testing.T) {
 			"time kept", edits)
 	}
 }
+
+// TestMdCheckKeepsTheDoneTime pins that every AR16 edit but the end of a
+// done request keeps the group's done_epoch, which AR8 reads: the end of a
+// request past its bound, and the withdrawal of a request on a group that
+// stops suiting a check.
+func TestMdCheckKeepsTheDoneTime(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		grp  func(h *reactHarness)
+	}{
+		{"past the bound", func(h *reactHarness) {
+			h.dataGrp().MdCheck = &pb.MdCheck{NextEpoch: h.ago(1),
+				RequestEpoch: h.ago(common.MdCheckRequestBound),
+				DoneEpoch:    h.ago(7)}
+		}},
+		{"withdrawn", func(h *reactHarness) {
+			h.dataGrp().MdCheck = &pb.MdCheck{NextEpoch: h.ago(1),
+				RequestEpoch: h.ago(50), DoneEpoch: h.ago(7)}
+			h.dataGrp().RepName = "r"
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			h := mdCheckHarness(t, 30)
+			h.metaGrp().MdCheck = &pb.MdCheck{NextEpoch: h.now() + 1000}
+			tc.grp(h)
+			h.pass()
+			edit := editOf(mdEdits(t, h), reactDataGrp)
+			if edit == nil || edit.To.GetRequestEpoch() != 0 ||
+				edit.To.GetDoneEpoch() != h.ago(7) {
+				t.Fatalf("edit %+v, want the request ended, done_epoch kept",
+					edit)
+			}
+		})
+	}
+}

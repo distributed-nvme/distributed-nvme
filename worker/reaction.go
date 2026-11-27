@@ -136,6 +136,12 @@ const (
 	// by the current primary's latest report, so leg repair creates no
 	// repair for the group.
 	reasonNoHealthyLeg = "no_healthy_leg"
+	// reasonMdCheckWaits is AR8's wait of a repair for md's bad-block
+	// ranges on a slice group's md check: the group has no fresh check that
+	// md ran to its end (mdCheckFresh), so the other leg is not known to
+	// read whole; the pass asks for a check when none stands (AR16), and the
+	// create waits for its end.
+	reasonMdCheckWaits = "md_check_waits"
 	// The grp_row_ reasons are AR8's gate on the create of a repair, which
 	// the retire timer reads as well (AR12): the group's row in the
 	// primary's latest report (grp_id_to_md_raid) does not read
@@ -3502,7 +3508,8 @@ func dstCopyWhole(w *spWorker, leg *pb.Leg, migr *pb.Migration) bool {
 
 // repairHold is AR8's per-candidate conditions after the redundancy, in their
 // order: a leg with two sides, the operator-in-charge flag, a forced-start
-// mark, the gate on the group's row and the healthy-leg test; it returns the
+// mark, the gate on the group's row, the healthy-leg test and, for a group
+// with no repair, the wait on the md check (mdCheckWaits); it returns the
 // reason the first that holds logs and the attributes it adds, "" when none
 // holds. tryLegRepair logs it and moves the scan on; the joined cancel and
 // create of a worker's aborted repair (nextTarget) asks it too, and the
@@ -3559,7 +3566,62 @@ func repairHold(p *spPass, target *repairTarget) (string, []slog.Attr) {
 		// repairable.
 		return reasonNoHealthyLeg, nil
 	}
+	if target.grp.GetRepName() == "" && mdCheckWaits(p, target) {
+		// AR8's wait on the md check. A group that has a repair logs that
+		// hold instead (tryLegRepair), and the joined create asks this
+		// test itself (nextTarget). The hold is THIS group's (AR2).
+		return reasonMdCheckWaits, nil
+	}
 	return "", nil
+}
+
+// mdCheckWaits is AR8's wait on the md check for a repair of a slice
+// group's leg for md's bad-block ranges: the primary takes the bad leg out
+// of the array before it adds the new leg, so the group runs on the other
+// leg alone during the whole copy, and a sector of that leg no check has
+// read would then be lost, its region marked bad on the new leg too, and
+// the array broken. So the create waits until a check of the group that the
+// primary ran to its end is fresh (mdCheckFresh), the other leg clean in
+// the current reading (the candidate's own test), and the pass asks for one
+// when none is (scheduleMdChecks, AR16). A clone meta group gets no md
+// check, so its repair does not wait; and while the cluster's check
+// interval is zero no check runs, and the repair does not wait either.
+func mdCheckWaits(p *spPass, target *repairTarget) bool {
+	return target.ranges && target.clone == nil &&
+		p.cc.GetMdCheckConf().GetIntervalDays() != 0 &&
+		!mdCheckFresh(p, target.grp)
+}
+
+// mdCheckFresh reports whether the group's last check that the primary ran
+// to its end ended within common.MdCheckDoneFresh, by the time the schedule
+// recorded when it ended the request (MdCheck.done_epoch), or stands in the
+// snapshot with the current primary's latest reading naming it done
+// (md_check_done_epoch; cnagent.md CN12, The md check), which this pass's
+// schedule ends and records.
+func mdCheckFresh(p *spPass, grp *pb.Group) bool {
+	mc := grp.GetMdCheck()
+	if req := mc.GetRequestEpoch(); req != 0 &&
+		p.info.GetGrpIdToGrpInfo()[grp.GetGrpId()].
+			GetMdCheckDoneEpoch() == req {
+		return true
+	}
+	done := mc.GetDoneEpoch()
+	return done != 0 && p.now < done+common.MdCheckDoneFresh
+}
+
+// rangesWaitCheck reports whether a leg of the group's leg_list carries md
+// bad-block ranges, while another leg is clean of them (legRanges,
+// otherLegClean) and the leg is not due for repair on AR8's own triggers:
+// AR8's candidate for a repair for its ranges, which waits for a fresh md
+// check of the group (mdCheckWaits), so AR16 asks for one.
+func rangesWaitCheck(p *spPass, grp *pb.Group) bool {
+	for _, leg := range grp.GetLegList() {
+		if !legNeedsRepair(p, leg) && legRanges(p, grp, leg.GetLegId()) &&
+			otherLegClean(p, grp, leg.GetLegId()) {
+			return true
+		}
+	}
+	return false
 }
 
 // repairCandidates is AR8's trigger scan over BOTH group lists of every slice
@@ -4211,10 +4273,14 @@ func nextTarget(p *spPass, rep *pb.Repair) (*repairTarget, []string, string) {
 			return nil, nil, ""
 		}
 	}
-	switch reason, _ := repairHold(p, target); reason {
-	case "":
+	switch reason, _ := repairHold(p, target); {
+	case reason == "" && mdCheckWaits(p, target):
+		// AR8's wait on the md check holds the joined create too; the
+		// cancel runs alone.
+		return nil, nil, ""
+	case reason == "":
 		return target, avoid, ""
-	case reasonGrpRowStale:
+	case reason == reasonGrpRowStale:
 		return nil, nil, reason
 	default:
 		return nil, nil, ""
@@ -4479,16 +4545,22 @@ const (
 //   - a group whose request the primary's reading names done
 //     (md_check_done_epoch), or that has stood MdCheckRequestBound or
 //     longer, has the request ended and its next check set one interval
-//     ahead;
+//     ahead; an end for a done request also records its time as the
+//     group's done_epoch, which AR8's repair for md's bad-block ranges reads
+//     (mdCheckFresh);
 //   - a group never scheduled (next_epoch zero, no request) is stamped with
 //     a first time one interval ahead, spread over half an interval either
 //     side by its id (mdCheckSpread), so a new pool's groups do not fall
 //     due together;
-//   - when no request stands in the pool after the first part, the due
-//     group of the earliest time that a check suits (mdCheckSuits) is asked
-//     for one: request_epoch is now.
+//   - when no request stands in the pool after the first part, the first
+//     group that holds a candidate for a repair for ranges with no fresh
+//     check (rangesWaitCheck, mdCheckFresh) and that a check suits
+//     (mdCheckSuits) is asked for one at once, whatever its time; failing
+//     that, the due group of the earliest time that a check suits:
+//     request_epoch is now, the group's time kept.
 //
-// It runs only for an md-raid1 pool of a cluster whose setting is not zero.
+// Every edit keeps the group's done_epoch but the end of a done request. It
+// runs only for an md-raid1 pool of a cluster whose setting is not zero.
 // Each edit carries the schedule the snapshot read, so a second owner's
 // write over the same read applies nothing (MD6).
 func (w *spWorker) scheduleMdChecks(ctx context.Context, p *spPass) {
@@ -4504,7 +4576,7 @@ func (w *spWorker) scheduleMdChecks(ctx context.Context, p *spPass) {
 		ref  model.GrpRef
 		from *pb.MdCheck
 	}
-	var due *dueGrp
+	var due, ranges *dueGrp
 	for _, sliceId := range p.state.Conf.GetSliceIdList() {
 		slice, ok := p.state.Slices[sliceId]
 		if !ok {
@@ -4519,10 +4591,16 @@ func (w *spWorker) scheduleMdChecks(ctx context.Context, p *spPass) {
 				done := p.info.GetGrpIdToGrpInfo()[grp.GetGrpId()].
 					GetMdCheckDoneEpoch() == mc.GetRequestEpoch()
 				switch {
-				case done || p.now >= mc.GetRequestEpoch()+
+				case done:
+					edits = append(edits, model.MdCheckEdit{Ref: ref,
+						From: mc, To: &pb.MdCheck{NextEpoch: p.now + interval,
+							DoneEpoch: p.now}})
+					ended = append(ended, grp.GetGrpId())
+				case p.now >= mc.GetRequestEpoch()+
 					common.MdCheckRequestBound:
 					edits = append(edits, model.MdCheckEdit{Ref: ref,
-						From: mc, To: &pb.MdCheck{NextEpoch: p.now + interval}})
+						From: mc, To: &pb.MdCheck{NextEpoch: p.now + interval,
+							DoneEpoch: mc.GetDoneEpoch()}})
 					ended = append(ended, grp.GetGrpId())
 				case !mdCheckShapeSuits(grp):
 					// The group stopped suiting a check while its request
@@ -4530,15 +4608,22 @@ func (w *spWorker) scheduleMdChecks(ctx context.Context, p *spPass) {
 					// group is asked for again once it suits; the primary
 					// stops a check it started for it.
 					edits = append(edits, model.MdCheckEdit{Ref: ref,
-						From: mc, To: &pb.MdCheck{NextEpoch: mc.GetNextEpoch()}})
+						From: mc, To: &pb.MdCheck{NextEpoch: mc.GetNextEpoch(),
+							DoneEpoch: mc.GetDoneEpoch()}})
 					ended = append(ended, grp.GetGrpId())
 				default:
 					standing = true
 				}
+			case rangesWaitCheck(p, grp) && !mdCheckFresh(p, grp) &&
+				w.mdCheckSuits(p, grp):
+				if ranges == nil {
+					ranges = &dueGrp{ref: ref, from: mc}
+				}
 			case mc.GetNextEpoch() == 0:
 				edits = append(edits, model.MdCheckEdit{Ref: ref, From: mc,
 					To: &pb.MdCheck{NextEpoch: p.now +
-						mdCheckSpread(grp.GetGrpId(), interval)}})
+						mdCheckSpread(grp.GetGrpId(), interval),
+						DoneEpoch: mc.GetDoneEpoch()}})
 				stamped = append(stamped, grp.GetGrpId())
 			case mc.GetNextEpoch() <= p.now && w.mdCheckSuits(p, grp) &&
 				(due == nil || mc.GetNextEpoch() < due.from.GetNextEpoch()):
@@ -4547,10 +4632,13 @@ func (w *spWorker) scheduleMdChecks(ctx context.Context, p *spPass) {
 		}
 	}
 	requested := uint64(0)
+	if ranges != nil {
+		due = ranges
+	}
 	if !standing && due != nil {
 		edits = append(edits, model.MdCheckEdit{Ref: due.ref, From: due.from,
 			To: &pb.MdCheck{NextEpoch: due.from.GetNextEpoch(),
-				RequestEpoch: p.now}})
+				RequestEpoch: p.now, DoneEpoch: due.from.GetDoneEpoch()}})
 		requested = due.ref.GrpId
 	}
 	if len(edits) == 0 {
@@ -4560,6 +4648,7 @@ func (w *spWorker) scheduleMdChecks(ctx context.Context, p *spPass) {
 		slog.Any("ended_grp_ids", ended),
 		slog.Any("stamped_grp_ids", stamped),
 		slog.Uint64("requested_grp_id", requested),
+		slog.Bool("for_bad_blocks", requested != 0 && ranges != nil),
 		slog.Uint64("cntlr_id", p.primaryId),
 		slog.Uint64("report_revision", p.infoRev),
 	}

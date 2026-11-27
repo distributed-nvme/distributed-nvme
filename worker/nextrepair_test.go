@@ -13,8 +13,8 @@ import (
 // TestLegRepairCancelJoinsTheNextCreate pins AR8's joined cancel and
 // create: the cancel of a worker's ABORTED repair whose new leg is due on a
 // repair clock, while its bad leg still needs a repair — on its clocks or
-// for md's bad-block ranges — creates the group's next repair in the same
-// transaction, the scan black-listing that new leg's disk node; with no new
+// for md's bad-block ranges once the group's md check is done — creates the
+// group's next repair in the same transaction, the scan black-listing that new leg's disk node; with no new
 // leg due — a young health epoch included — a bad leg that came back,
 // another leg due, a hold of the create other than a stale report, no disk
 // node left, or a refusal of the create other than a changed candidate, the
@@ -74,11 +74,26 @@ func TestLegRepairCancelJoinsTheNextCreate(t *testing.T) {
 		rep.NewLegList[0].ErrEpoch = h.ago(common.DefaultLegUnhealthy)
 		h.legOf(reactDataLegA).ErrEpoch = 0
 		setRanges(h, reactDataLegA)
+		checkDone(h)
 		h.pass()
 		calls := h.wantOps("cancel_and_create_repair")
 		if calls[0].badLegId != reactDataLegA || !calls[0].badBlocks {
 			t.Fatalf("joined call %+v, want leg A for its ranges", calls[0])
 		}
+	})
+	// A repair for the bad leg's ranges waits for the group's md check
+	// (dnv-worker.md AR8, A leg with bad-block ranges), so with no done
+	// check the cancel runs alone.
+	t.Run("the bad leg's ranges, no done check", func(t *testing.T) {
+		h, rep := build(t)
+		cc := reactClusterConf()
+		cc.MdCheckConf = &pb.MdCheckConf{IntervalDays: 30}
+		setCachedConf(h.deps, testCid, cc)
+		rep.NewLegList[0].ErrEpoch = h.ago(common.DefaultLegUnhealthy)
+		h.legOf(reactDataLegA).ErrEpoch = 0
+		setRanges(h, reactDataLegA)
+		h.pass()
+		h.wantOps("cancel_repair")
 	})
 	// A second worker's repair, STARTED, after the aborted one in
 	// repair_name_list: the drive step finishes it only when the walk goes

@@ -2635,7 +2635,14 @@ type MdCheck struct {
 	// time it asked; the primary runs md's check for it and reports it done
 	// (CntlrInfo.GrpInfo.md_check_done_epoch; cnagent.md CN12). Zero when
 	// no check is asked for.
-	RequestEpoch  uint64 `protobuf:"varint,2,opt,name=request_epoch,json=requestEpoch,proto3" json:"request_epoch,omitempty"`
+	RequestEpoch uint64 `protobuf:"varint,2,opt,name=request_epoch,json=requestEpoch,proto3" json:"request_epoch,omitempty"`
+	// The time the sp worker ended the group's last request that the
+	// primary's reading named done, in Unix seconds: md read every member
+	// to the end then. Zero while no request has ended so. The sp worker's
+	// repair of a leg for md's bad-block ranges waits for a check that
+	// ended so within common.MdCheckDoneFresh (dnv-worker.md AR8, AR16).
+	// Appended, never renumbered.
+	DoneEpoch     uint64 `protobuf:"varint,3,opt,name=done_epoch,json=doneEpoch,proto3" json:"done_epoch,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -2680,6 +2687,13 @@ func (x *MdCheck) GetNextEpoch() uint64 {
 func (x *MdCheck) GetRequestEpoch() uint64 {
 	if x != nil {
 		return x.RequestEpoch
+	}
+	return 0
+}
+
+func (x *MdCheck) GetDoneEpoch() uint64 {
+	if x != nil {
+		return x.DoneEpoch
 	}
 	return 0
 }
@@ -21019,11 +21033,13 @@ const file_pb_schema_proto_rawDesc = "" +
 	"\bmd_check\x18\f \x01(\v2\b.MdCheckR\amdCheck\x12\x1d\n" +
 	"\n" +
 	"grow_epoch\x18\r \x01(\x04R\tgrowEpoch\x12)\n" +
-	"\x11fence_last_leg_id\x18\x0e \x01(\x04R\x0efenceLastLegIdJ\x04\b\x06\x10\aR\x0espare_leg_list\"M\n" +
+	"\x11fence_last_leg_id\x18\x0e \x01(\x04R\x0efenceLastLegIdJ\x04\b\x06\x10\aR\x0espare_leg_list\"l\n" +
 	"\aMdCheck\x12\x1d\n" +
 	"\n" +
 	"next_epoch\x18\x01 \x01(\x04R\tnextEpoch\x12#\n" +
-	"\rrequest_epoch\x18\x02 \x01(\x04R\frequestEpoch\"\x91\x01\n" +
+	"\rrequest_epoch\x18\x02 \x01(\x04R\frequestEpoch\x12\x1d\n" +
+	"\n" +
+	"done_epoch\x18\x03 \x01(\x04R\tdoneEpoch\"\x91\x01\n" +
 	"\vForcedStart\x12\x15\n" +
 	"\x06leg_id\x18\x01 \x01(\x04R\x05legId\x12\x1a\n" +
 	"\brevision\x18\x02 \x01(\x04R\brevision\x12\x14\n" +
